@@ -40,9 +40,7 @@ pub fn push_input_event(event: CompositorInputEvent) {
 /// Get all pending input events from the queue
 pub fn pop_all_input_events() -> Vec<CompositorInputEvent> {
     let mut queue = INPUT_EVENT_QUEUE.lock();
-    let events = queue.clone();
-    queue.clear();
-    events
+    core::mem::take(&mut *queue)
 }
 
 /// Event types

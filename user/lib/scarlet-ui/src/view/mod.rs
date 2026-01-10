@@ -15,5 +15,10 @@ mod window;
 
 pub use traits::{View, ViewBox, Size, IntoViewBox};
 pub use containers::{HStack, StackAlignment, VStack, ZStack, Padding, Center};
-pub use controls::{Label, Button, Spacer, RectView};
+pub use controls::{
+    // Basic views
+    Label, Text, Button, Spacer, RectView,
+    // Reactive controls (all use Binding<T>)
+    ReactiveLabel, TextField, CheckBox, Slider, ProgressBar, Toggle,
+};
 pub use window::Window;

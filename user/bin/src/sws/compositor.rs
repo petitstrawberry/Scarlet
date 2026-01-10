@@ -22,7 +22,7 @@ const LOG_RENDER_VALIDATION: bool = false;
 
 // Feature flag: Enable dirty rect optimization (false = always full redraw)
 // Disable this if you suspect partial redraw is causing rendering artifacts
-const ENABLE_DIRTY_RECT: bool = false;
+const ENABLE_DIRTY_RECT: bool = true;
 
 /// Compositor - the main window server with proper layer compositing
 pub struct Compositor {
@@ -37,6 +37,7 @@ pub struct Compositor {
     backbuffer: Vec<u8>,
     backbuffer_stride: u32,
     full_redraw_needed: bool,
+    pending_damage: Option<(i32, i32, u32, u32)>,
     event_counter: u64,
     left_button_down: bool,
     move_drag: Option<MoveDragState>,
@@ -132,6 +133,7 @@ impl Compositor {
             backbuffer,
             backbuffer_stride,
             full_redraw_needed: true,
+            pending_damage: None,
             event_counter: 0,
             left_button_down: false,
             move_drag: None,
@@ -459,18 +461,103 @@ impl Compositor {
         }
     }
 
+    fn clamp_rect_to_screen(&self, rect: (i32, i32, u32, u32)) -> Option<(i32, i32, u32, u32)> {
+        let (x, y, w, h) = rect;
+        if w == 0 || h == 0 {
+            return None;
+        }
+
+        let sx0 = x.max(0).min(self.screen_width as i32);
+        let sy0 = y.max(0).min(self.screen_height as i32);
+        let sx1 = (x.saturating_add(w as i32))
+            .max(0)
+            .min(self.screen_width as i32);
+        let sy1 = (y.saturating_add(h as i32))
+            .max(0)
+            .min(self.screen_height as i32);
+
+        let cw = (sx1 - sx0).max(0) as u32;
+        let ch = (sy1 - sy0).max(0) as u32;
+        if cw == 0 || ch == 0 {
+            None
+        } else {
+            Some((sx0, sy0, cw, ch))
+        }
+    }
+
+    fn add_pending_damage(&mut self, rect: (i32, i32, u32, u32)) {
+        if !ENABLE_DIRTY_RECT {
+            self.full_redraw_needed = true;
+            return;
+        }
+
+        let Some((sx0, sy0, w, h)) = self.clamp_rect_to_screen(rect) else {
+            return;
+        };
+
+        self.pending_damage = match self.pending_damage {
+            None => Some((sx0, sy0, w, h)),
+            Some((px, py, pw, ph)) => {
+                let px1 = (px as i64).saturating_add(pw as i64);
+                let py1 = (py as i64).saturating_add(ph as i64);
+                let nx1 = (sx0 as i64).saturating_add(w as i64);
+                let ny1 = (sy0 as i64).saturating_add(h as i64);
+                let x0 = core::cmp::min(px as i64, sx0 as i64);
+                let y0 = core::cmp::min(py as i64, sy0 as i64);
+                let x1 = core::cmp::max(px1, nx1);
+                let y1 = core::cmp::max(py1, ny1);
+                let uw = (x1 - x0).max(0) as u32;
+                let uh = (y1 - y0).max(0) as u32;
+                Some((x0 as i32, y0 as i32, uw, uh))
+            }
+        };
+    }
+
     /// Composite all layers directly to VRAM (or framebuffer as fallback)
     fn composite_and_present(&mut self) -> Result<(), &'static str> {
+        fn union_rect(
+            a: Option<(i32, i32, u32, u32)>,
+            b: Option<(i32, i32, u32, u32)>,
+        ) -> Option<(i32, i32, u32, u32)> {
+            match (a, b) {
+                (None, None) => None,
+                (Some(r), None) | (None, Some(r)) => Some(r),
+                (Some((ax, ay, aw, ah)), Some((bx, by, bw, bh))) => {
+                    if aw == 0 || ah == 0 {
+                        return Some((bx, by, bw, bh));
+                    }
+                    if bw == 0 || bh == 0 {
+                        return Some((ax, ay, aw, ah));
+                    }
+
+                    let ax1 = (ax as i64).saturating_add(aw as i64);
+                    let ay1 = (ay as i64).saturating_add(ah as i64);
+                    let bx1 = (bx as i64).saturating_add(bw as i64);
+                    let by1 = (by as i64).saturating_add(bh as i64);
+
+                    let x0 = core::cmp::min(ax as i64, bx as i64);
+                    let y0 = core::cmp::min(ay as i64, by as i64);
+                    let x1 = core::cmp::max(ax1, bx1);
+                    let y1 = core::cmp::max(ay1, by1);
+                    let w = (x1 - x0).max(0) as u32;
+                    let h = (y1 - y0).max(0) as u32;
+                    Some((x0 as i32, y0 as i32, w, h))
+                }
+            }
+        }
+
         let dirty = if !ENABLE_DIRTY_RECT {
             // Force full redraw when dirty rect optimization is disabled
             None
         } else if self.full_redraw_needed {
             None
-        } else if self.cursor.needs_redraw() {
-            Some(self.cursor.get_dirty_region())
         } else {
-            // For now, window/IPC-driven changes trigger full redraw.
-            None
+            let cursor_dirty = if self.cursor.needs_redraw() {
+                Some(self.cursor.get_dirty_region())
+            } else {
+                None
+            };
+            union_rect(self.pending_damage, cursor_dirty)
         };
 
         // Always use framebuffer API for presentation.
@@ -483,6 +570,7 @@ impl Compositor {
             .map_err(|_| "Failed to flush framebuffer")?;
 
         self.full_redraw_needed = false;
+        self.pending_damage = None;
         Ok(())
     }
 
@@ -1060,10 +1148,11 @@ impl Compositor {
             let ipc_events = self.ipc_server.process_messages()?;
             if !ipc_events.is_empty() {
                 println!("[Compositor] Processing {} IPC events", ipc_events.len());
-                needs_redraw = true;
             }
             for event in ipc_events {
-                self.handle_ipc_event(event)?;
+                if self.handle_ipc_event(event)? {
+                    needs_redraw = true;
+                }
             }
 
             // Process input events from global queue (non-blocking)
@@ -1077,7 +1166,11 @@ impl Compositor {
             }
 
             // Re-composite and present if needed
-            if needs_redraw || self.full_redraw_needed {
+            if needs_redraw
+                || self.full_redraw_needed
+                || self.pending_damage.is_some()
+                || self.cursor.needs_redraw()
+            {
                 if self.full_redraw_needed {
                     println!("[Compositor] Full redraw triggered");
                 }
@@ -1110,6 +1203,7 @@ impl Compositor {
 
                 if self.left_button_down {
                     if let Some(mut state) = self.resize_drag {
+                        let old_outline = self.resize_outline;
                         let delta_x = self.cursor.x - state.grab_cursor_x;
                         let delta_y = self.cursor.y - state.grab_cursor_y;
 
@@ -1132,7 +1226,12 @@ impl Compositor {
                             self.resize_outline = Some((window.x, window.y, new_w, new_h));
                         }
 
-                        self.full_redraw_needed = true;
+                        if let Some(r) = old_outline {
+                            self.add_pending_damage(r);
+                        }
+                        if let Some(r) = self.resize_outline {
+                            self.add_pending_damage(r);
+                        }
                         // While resizing, compositor grabs the pointer.
                         return Ok(true);
                     }
@@ -1142,10 +1241,21 @@ impl Compositor {
                 // converting cursor coordinates into window-local space.
                 if self.left_button_down {
                     if let Some(state) = self.move_drag {
+                        let old_rect = self
+                            .window_manager
+                            .get_window(state.window_id)
+                            .map(|w| (w.x, w.y, w.width, w.height));
                         let new_x = state.start_window_x + (self.cursor.x - state.grab_cursor_x);
                         let new_y = state.start_window_y + (self.cursor.y - state.grab_cursor_y);
                         self.window_manager
                             .set_window_position(state.window_id, new_x, new_y);
+
+                        if let Some(r) = old_rect {
+                            self.add_pending_damage(r);
+                        }
+                        if let Some(w) = self.window_manager.get_window(state.window_id) {
+                            self.add_pending_damage((w.x, w.y, w.width, w.height));
+                        }
 
                         // While moving a window, the compositor "grabs" the pointer.
                         // Avoid routing mouse moves to the currently focused client.
@@ -1168,6 +1278,7 @@ impl Compositor {
 
                 if self.left_button_down {
                     if let Some(mut state) = self.resize_drag {
+                        let old_outline = self.resize_outline;
                         let delta_x = self.cursor.x - state.grab_cursor_x;
                         let delta_y = self.cursor.y - state.grab_cursor_y;
 
@@ -1190,17 +1301,33 @@ impl Compositor {
                             self.resize_outline = Some((window.x, window.y, new_w, new_h));
                         }
 
-                        self.full_redraw_needed = true;
+                        if let Some(r) = old_outline {
+                            self.add_pending_damage(r);
+                        }
+                        if let Some(r) = self.resize_outline {
+                            self.add_pending_damage(r);
+                        }
                         return Ok(true);
                     }
                 }
 
                 if self.left_button_down {
                     if let Some(state) = self.move_drag {
+                        let old_rect = self
+                            .window_manager
+                            .get_window(state.window_id)
+                            .map(|w| (w.x, w.y, w.width, w.height));
                         let new_x = state.start_window_x + (self.cursor.x - state.grab_cursor_x);
                         let new_y = state.start_window_y + (self.cursor.y - state.grab_cursor_y);
                         self.window_manager
                             .set_window_position(state.window_id, new_x, new_y);
+
+                        if let Some(r) = old_rect {
+                            self.add_pending_damage(r);
+                        }
+                        if let Some(w) = self.window_manager.get_window(state.window_id) {
+                            self.add_pending_damage((w.x, w.y, w.width, w.height));
+                        }
 
                         // While moving a window, the compositor "grabs" the pointer.
                         // Avoid routing mouse moves to the currently focused client.
@@ -1222,15 +1349,17 @@ impl Compositor {
                     self.left_button_down = pressed;
                     if !pressed {
                         // Always exit move mode on left button release.
-                        if self.move_drag.is_some() {
-                            self.move_drag = None;
-                            self.full_redraw_needed = true;
+                        if self.move_drag.take().is_some() {
+                            // No special redraw needed: the last drag motion already queued damage.
                         }
 
                         // Finalize resize on left button release.
                         if let Some(state) = self.resize_drag.take() {
+                            let old_outline = self.resize_outline;
                             self.resize_outline = None;
-                            self.full_redraw_needed = true;
+                            if let Some(r) = old_outline {
+                                self.add_pending_damage(r);
+                            }
 
                             // Ask client to resize once (outline-only during drag).
                             let (width, height) = self.window_manager.clamp_size_for_window(
@@ -1320,7 +1449,10 @@ impl Compositor {
     }
 
     /// Handle IPC events from clients
-    fn handle_ipc_event(&mut self, event: IpcEvent) -> Result<(), &'static str> {
+    ///
+    /// Returns `Ok(true)` if an immediate redraw is required (e.g., window created/destroyed).
+    /// Returns `Ok(false)` if only damage was accumulated (redraw via `pending_damage`).
+    fn handle_ipc_event(&mut self, event: IpcEvent) -> Result<bool, &'static str> {
         match event {
             IpcEvent::CreateWindow {
                 client_id,
@@ -1393,12 +1525,52 @@ impl Compositor {
                 damage_width,
                 damage_height,
             } => {
+                if damage_width == 0 || damage_height == 0 {
+                    // Ignore empty damage to avoid pointless redraws and potential edge-case bugs.
+                    println!(
+                        "[Compositor] Window #{} buffer updated with empty damage: ({},{}) {}x{} (ignored)",
+                        window_id, damage_x, damage_y, damage_width, damage_height
+                    );
+                    return Ok(false);
+                }
+
+                let (win_x, win_y) = match self.window_manager.get_window(window_id) {
+                    Some(w) => (w.x, w.y),
+                    None => {
+                        println!(
+                            "[Compositor] Window #{} buffer updated but window not found (ignored)",
+                            window_id
+                        );
+                        return Ok(false);
+                    }
+                };
+
+                // Convert window-local damage -> screen-space rect and clamp to screen.
+                let rx0 = win_x.saturating_add(damage_x);
+                let ry0 = win_y.saturating_add(damage_y);
+                let rx1 = rx0.saturating_add(damage_width as i32);
+                let ry1 = ry0.saturating_add(damage_height as i32);
+
+                let sx0 = rx0.max(0).min(self.screen_width as i32);
+                let sy0 = ry0.max(0).min(self.screen_height as i32);
+                let sx1 = rx1.max(0).min(self.screen_width as i32);
+                let sy1 = ry1.max(0).min(self.screen_height as i32);
+                let w = (sx1 - sx0).max(0) as u32;
+                let h = (sy1 - sy0).max(0) as u32;
+                if w == 0 || h == 0 {
+                    println!(
+                        "[Compositor] Window #{} buffer updated but damage out of bounds: ({},{}) {}x{} (ignored)",
+                        window_id, damage_x, damage_y, damage_width, damage_height
+                    );
+                    return Ok(false);
+                }
+
                 println!(
-                    "[Compositor] Window #{} buffer updated: ({},{}) {}x{} - triggering redraw",
-                    window_id, damage_x, damage_y, damage_width, damage_height
+                    "[Compositor] Window #{} buffer updated: ({},{}) {}x{} -> screen ({},{}) {}x{}",
+                    window_id, damage_x, damage_y, damage_width, damage_height, sx0, sy0, w, h
                 );
-                // Force redraw to display client's updated content
-                self.full_redraw_needed = true;
+
+                self.add_pending_damage((sx0, sy0, w, h));
             }
             IpcEvent::RequestMove { window_id } => {
                 println!("[Compositor] Window #{} requested move", window_id);
@@ -1406,7 +1578,7 @@ impl Compositor {
                 let (start_window_x, start_window_y) =
                     match self.window_manager.get_window(window_id) {
                         Some(w) => (w.x, w.y),
-                        None => return Ok(()),
+                        None => return Ok(false),
                     };
 
                 // Bring the window to front for the drag (focus is handled by click routing).
@@ -1425,8 +1597,17 @@ impl Compositor {
                     "[Compositor] Moving window #{} to ({}, {})",
                     window_id, x, y
                 );
+                let old_rect = self
+                    .window_manager
+                    .get_window(window_id)
+                    .map(|w| (w.x, w.y, w.width, w.height));
                 self.window_manager.set_window_position(window_id, x, y);
-                self.full_redraw_needed = true;
+                if let Some(r) = old_rect {
+                    self.add_pending_damage(r);
+                }
+                if let Some(w) = self.window_manager.get_window(window_id) {
+                    self.add_pending_damage((w.x, w.y, w.width, w.height));
+                }
             }
             IpcEvent::SetWindowParent {
                 window_id,
@@ -1495,6 +1676,10 @@ impl Compositor {
                     "[Compositor] Resizing window #{} to {}x{} (shm_mapped=0x{:x?})",
                     window_id, width, height, shm_mapped_addr
                 );
+                let old_rect = self
+                    .window_manager
+                    .get_window(window_id)
+                    .map(|w| (w.x, w.y, w.width, w.height));
                 if let Some(shm) = shm {
                     if self.window_manager.resize_window_with_shm(
                         window_id,
@@ -1504,11 +1689,16 @@ impl Compositor {
                         shm_mapped_addr,
                         shm_size,
                     ) {
-                        self.full_redraw_needed = true;
+                        if let Some(r) = old_rect {
+                            self.add_pending_damage(r);
+                        }
+                        if let Some(w) = self.window_manager.get_window(window_id) {
+                            self.add_pending_damage((w.x, w.y, w.width, w.height));
+                        }
                     }
                 }
             }
         }
-        Ok(())
+        Ok(false)
     }
 }

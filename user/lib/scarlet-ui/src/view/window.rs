@@ -9,11 +9,13 @@ use scarlet_std::vec::Vec;
 use sws_client::WindowSizeLimits;
 
 /// Title bar height in pixels
-const TITLEBAR_HEIGHT: u32 = 28;
+const TITLEBAR_HEIGHT: u32 = 32;
 /// Close button size
-const CLOSE_BUTTON_SIZE: u32 = 16;
+const CLOSE_BUTTON_SIZE: u32 = 18;
 /// Close button margin from edge
-const CLOSE_BUTTON_MARGIN: u32 = 6;
+const CLOSE_BUTTON_MARGIN: u32 = 8;
+/// Window corner radius
+const WINDOW_CORNER_RADIUS: u32 = 0;
 
 /// Window - a root view with decorations (title bar, border)
 ///
@@ -170,9 +172,9 @@ impl Window {
 
     /// Get close button rect
     fn close_button_rect(&self) -> Rect {
-        let x = (self.width - CLOSE_BUTTON_SIZE - CLOSE_BUTTON_MARGIN) as i32;
-        let y = CLOSE_BUTTON_MARGIN as i32;
-        Rect::new(x, y, CLOSE_BUTTON_SIZE, CLOSE_BUTTON_SIZE)
+        let seg_w = (CLOSE_BUTTON_SIZE + CLOSE_BUTTON_MARGIN * 2).min(self.width);
+        let x = (self.width - seg_w) as i32;
+        Rect::new(x, 0, seg_w, TITLEBAR_HEIGHT)
     }
 
     /// Get title bar rect
@@ -182,38 +184,99 @@ impl Window {
 
     /// Draw the title bar
     fn draw_titlebar(&self, canvas: &mut Canvas) {
-        // Title bar background
-        canvas.fill_rect(0, 0, self.width, TITLEBAR_HEIGHT, Color::rgb(60, 60, 60));
+        // Title bar with gradient effect and rounded top corners
+        // Light (white-based) titlebar (no gradient)
+        let base_color = Color::rgb(235, 235, 238);
+        
+        let r = WINDOW_CORNER_RADIUS;
+
+        let close_rect = self.close_button_rect();
+        let close_x0 = close_rect.x.max(0) as u32;
+        let close_color = if self.close_button_pressed {
+            Color::rgb(190, 190, 194)
+        } else if self.close_button_hovered {
+            Color::rgb(210, 210, 214)
+        } else {
+            base_color
+        };
+        
+        for y in 0..TITLEBAR_HEIGHT {
+            let color = base_color;
+            let color_close = close_color;
+            
+            // For top rows, apply corner rounding
+            if y < r {
+                let dy = (r - y) as i32;
+                for x in 0..self.width {
+                    // Check if inside rounded corners
+                    let in_left = x < r;
+                    let in_right = x >= self.width - r;
+                    
+                    let mut skip = false;
+                    if in_left {
+                        let dx = (r - x) as i32;
+                        if dx * dx + dy * dy > (r * r) as i32 {
+                            skip = true;
+                        }
+                    }
+                    if in_right {
+                        let dx = (x - (self.width - r)) as i32;
+                        if dx * dx + dy * dy > (r * r) as i32 {
+                            skip = true;
+                        }
+                    }
+                    
+                    if !skip {
+                        let c = if x >= close_x0 { color_close } else { color };
+                        canvas.put_pixel(x as i32, y as i32, c);
+                    }
+                }
+            } else {
+                canvas.fill_rect(0, y as i32, close_x0, 1, color);
+                canvas.fill_rect(close_rect.x, y as i32, self.width.saturating_sub(close_x0), 1, color_close);
+            }
+        }
 
         // Title text
         let title_str = core::str::from_utf8(&self.title[..self.title_len]).unwrap_or("");
-        canvas.draw_text(10, 8, title_str, Color::WHITE);
+        canvas.draw_text(10, 9, title_str, Color::rgb(20, 20, 24));
 
-        // Close button
-        let close_rect = self.close_button_rect();
-        let close_color = if self.close_button_pressed {
-            Color::rgb(200, 60, 60)
-        } else if self.close_button_hovered {
-            Color::rgb(230, 80, 80)
-        } else {
-            Color::rgb(180, 180, 180)
-        };
-        canvas.fill_rect(close_rect.x, close_rect.y, close_rect.width, close_rect.height, close_color);
+        // X mark on close segment
+        let cx = close_rect.x + close_rect.width as i32 / 2;
+        let cy = close_rect.y + close_rect.height as i32 / 2;
+        let size: i32 = 10;
+        let half = size / 2;
+        let x0 = cx - half;
+        let x1 = cx + half - 1;
+        let y0 = cy - half;
+        let y1 = cy + half - 1;
 
-        // X mark on close button
-        for i in 0..CLOSE_BUTTON_SIZE {
-            canvas.put_pixel(close_rect.x + i as i32, close_rect.y + i as i32, Color::BLACK);
-            canvas.put_pixel(
-                close_rect.x + i as i32,
-                close_rect.y + (CLOSE_BUTTON_SIZE - 1 - i) as i32,
-                Color::BLACK,
-            );
-        }
+        // Double-stroke for better visibility (2px)
+        let x_color = Color::rgb(30, 30, 34);
+        canvas.draw_line(x0, y0, x1, y1, x_color);
+        canvas.draw_line(x1, y0, x0, y1, x_color);
     }
 
     /// Draw the border
     fn draw_border(&self, canvas: &mut Canvas) {
-        canvas.draw_rect(0, 0, self.width, self.height, Color::rgb(80, 80, 80));
+        // Modern border with subtle shadow effect (no rounded corners)
+        let border_color = Color::rgb(100, 100, 105);
+        if self.width == 0 || self.height == 0 {
+            return;
+        }
+
+        canvas.draw_rect(0, 0, self.width, self.height, border_color);
+
+        // Inner highlight for depth
+        if self.width > 2 && self.height > 2 {
+            canvas.draw_rect(
+                1,
+                1,
+                self.width.saturating_sub(2),
+                self.height.saturating_sub(2),
+                Color::rgb(90, 90, 95),
+            );
+        }
     }
 }
 
@@ -235,7 +298,7 @@ impl View for Window {
     }
 
     fn draw(&self, canvas: &mut Canvas, frame: Rect) {
-        // Fill background
+        // Fill background (no rounded corners)
         canvas.fill_rect(frame.x, frame.y, frame.width, frame.height, self.background);
         
         // Draw content
@@ -374,5 +437,9 @@ impl View for Window {
 
     fn set_needs_draw(&mut self) {
         self.needs_redraw = true;
+    }
+
+    fn clear_needs_draw(&mut self) {
+        self.needs_redraw = false;
     }
 }

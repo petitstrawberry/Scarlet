@@ -67,6 +67,10 @@ pub struct Application {
     last_mouse: Point,
     layout_debug: bool,
 
+    // Mouse capture: while the left button is down, keep routing pointer
+    // move/up events to the surface where the press started.
+    mouse_capture_surface_id: Option<u32>,
+
     terminate_after_last_window_closed: bool,
     delegate: Option<Box<dyn ApplicationDelegate>>,
 
@@ -130,6 +134,8 @@ impl Application {
             last_mouse: Point::ZERO,
             layout_debug: false,
 
+            mouse_capture_surface_id: None,
+
             // AppKit default is to keep the app running with no windows.
             terminate_after_last_window_closed: false,
             delegate: None,
@@ -172,6 +178,54 @@ impl Application {
         ApplicationHandle {
             command_queue: self.command_queue.clone(),
         }
+    }
+
+    /// Collect dirty rects from subviews that need redraw
+    fn collect_dirty_rects(view: &dyn View, parent_frame: Rect, rects: &mut Vec<Rect>) {
+        view.visit_children(&mut |child, rel| {
+            let child_frame = Rect::new(
+                parent_frame.x + rel.x,
+                parent_frame.y + rel.y,
+                rel.width,
+                rel.height,
+            );
+            if child.needs_draw() {
+                rects.push(child_frame);
+            }
+            // Always recurse to find all dirty children
+            Self::collect_dirty_rects(child, child_frame, rects);
+            false
+        });
+    }
+
+    /// Union multiple rects into a bounding box
+    fn union_rects(rects: &[Rect]) -> Option<Rect> {
+        if rects.is_empty() {
+            return None;
+        }
+        let mut min_x = i32::MAX;
+        let mut min_y = i32::MAX;
+        let mut max_x = i32::MIN;
+        let mut max_y = i32::MIN;
+        for r in rects {
+            min_x = min_x.min(r.x);
+            min_y = min_y.min(r.y);
+            max_x = max_x.max(r.x + r.width as i32);
+            max_y = max_y.max(r.y + r.height as i32);
+        }
+        if max_x <= min_x || max_y <= min_y {
+            return None;
+        }
+        Some(Rect::new(min_x, min_y, (max_x - min_x) as u32, (max_y - min_y) as u32))
+    }
+
+    /// Recursively clear needs_draw flags on all views
+    fn clear_all_needs_draw(view: &mut dyn View, _frame: Rect) {
+        view.clear_needs_draw();
+        view.visit_children_mut(&mut |child, _rel| {
+            Self::clear_all_needs_draw(child, _rel);
+            false
+        });
     }
 
     /// Enable or disable layout bounds visualization.
@@ -263,15 +317,29 @@ impl Application {
     /// This method never returns. It handles all events, layout,
     /// and drawing automatically.
     pub fn run(&mut self) -> ! {
+        let mut last_time_ms = 0u64;
+
+        // Scratch buffers to avoid per-frame heap allocations.
+        let mut scratch_surface_ids: Vec<u32> = Vec::new();
+        let mut scratch_move_surface_ids: Vec<u32> = Vec::new();
+        let mut scratch_dirty_rects: Vec<Rect> = Vec::new();
+        
         loop {
+            // Get current time in milliseconds (approximate)
+            let current_time_ms = last_time_ms + 16; // Approximate 60 FPS
+            last_time_ms = current_time_ms;
+            
+            // Process timers
+            crate::timer::process_timers(current_time_ms);
+            
+            // Process main thread queue
+            crate::timer::process_main_thread_queue();
+            
             // 1. Dispatch socket I/O
             let _ = self.connection.dispatch();
 
-            // 2. Drain all pending events without O(n^2) shifting
-            let events: Vec<SwsEvent> = self.connection.drain_events();
-
-            // 3. Process drained events
-            for sws_event in events.iter().copied() {
+            // 2. Process all pending events without allocating a Vec.
+            while let Some(sws_event) = self.connection.poll_event() {
                 self.handle_sws_event(sws_event);
             }
 
@@ -287,42 +355,31 @@ impl Application {
             // 4. Handle close requests (send DESTROY_WINDOW to SWS)
             // Window is dropped when removed from self.windows, but the protocol-level
             // destroy must be sent explicitly via sws-client.
-            let mut close_surface_ids: Vec<u32> = Vec::new();
+            scratch_surface_ids.clear();
             for managed in &self.windows {
                 if managed.window.is_close_requested() {
-                    close_surface_ids.push(managed.surface_id);
+                    scratch_surface_ids.push(managed.surface_id);
                 }
             }
-            for surface_id in close_surface_ids {
+            for surface_id in scratch_surface_ids.drain(..) {
                 // If the surface is already gone (e.g. server-side destroyed), ignore.
-                let _ = self.connection.destroy_surface(surface_id);
-            }
-
-            // 4b. Handle move requests (send REQUEST_MOVE_WINDOW to SWS)
-            let mut move_surface_ids: Vec<u32> = Vec::new();
-            for i in 0..self.windows.len() {
-                if self.windows[i].window.take_move_requested() {
-                    move_surface_ids.push(self.windows[i].surface_id);
-                }
-            }
-            for surface_id in move_surface_ids {
-                let _ = self.connection.request_move_window(surface_id);
-            }
-
-            // 5. Drop closed windows (and destroy their surfaces)
-            let mut closed_surface_ids: Vec<u32> = Vec::new();
-            for w in &self.windows {
-                if w.window.is_close_requested() {
-                    closed_surface_ids.push(w.surface_id);
-                }
-            }
-            for surface_id in closed_surface_ids {
                 let _ = self.connection.destroy_surface(surface_id);
                 if self.popup_surface_id == Some(surface_id) {
                     self.popup_surface_id = None;
                 }
             }
             self.windows.retain(|w| !w.window.is_close_requested());
+
+            // 4b. Handle move requests (send REQUEST_MOVE_WINDOW to SWS)
+            scratch_move_surface_ids.clear();
+            for i in 0..self.windows.len() {
+                if self.windows[i].window.take_move_requested() {
+                    scratch_move_surface_ids.push(self.windows[i].surface_id);
+                }
+            }
+            for surface_id in scratch_move_surface_ids.drain(..) {
+                let _ = self.connection.request_move_window(surface_id);
+            }
 
             if self.windows.is_empty() && self.should_terminate_after_last_window_closed() {
                 self.terminate();
@@ -335,27 +392,75 @@ impl Application {
                 let size = Size::new(managed.window.width(), managed.window.height());
                 managed.window.layout(size);
                 
+                let width = managed.window.width();
+                let height = managed.window.height();
+                let full_frame = Rect::new(0, 0, width, height);
+                
+                // Check if window itself needs full redraw
                 if managed.window.needs_draw() {
-                    // Draw directly into surface SHM buffer
-                    let width = managed.window.width();
-                    let height = managed.window.height();
-                    let frame = Rect::new(0, 0, width, height);
-
+                    // Full redraw
                     if let Some(surface) = self.connection.surface_mut(managed.surface_id) {
                         let mut canvas = Canvas::new(surface.buffer_mut(), width, height);
-                        managed.window.draw(&mut canvas, frame);
+                        managed.window.draw(&mut canvas, full_frame);
                         if self.layout_debug {
-                            Self::draw_layout_debug(&managed.window, &mut canvas, frame, 0);
+                            Self::draw_layout_debug(&managed.window, &mut canvas, full_frame, 0);
                         }
-                        managed.window.clear_needs_draw();
-                        let _ = self.connection.commit(managed.surface_id);
+                    }
+                    Self::clear_all_needs_draw(&mut managed.window, full_frame);
+                    let _ = self.connection.commit(managed.surface_id);
+                    did_draw = true;
+                } else {
+                    // Collect dirty rects from subviews
+                    scratch_dirty_rects.clear();
+                    Self::collect_dirty_rects(&managed.window, full_frame, &mut scratch_dirty_rects);
+                    
+                    if !scratch_dirty_rects.is_empty() {
+                        // Redraw the whole window (since we can't easily do partial view draws)
+                        // but only commit the dirty region
+                        if let Some(surface) = self.connection.surface_mut(managed.surface_id) {
+                            let mut canvas = Canvas::new(surface.buffer_mut(), width, height);
+                            managed.window.draw(&mut canvas, full_frame);
+                            if self.layout_debug {
+                                Self::draw_layout_debug(&managed.window, &mut canvas, full_frame, 0);
+                            }
+                        }
+                        Self::clear_all_needs_draw(&mut managed.window, full_frame);
+                        
+                        // Commit only the dirty region
+                        if let Some(dirty_rect) = Self::union_rects(&scratch_dirty_rects) {
+                            // Clamp damage to the surface bounds and never send empty regions.
+                            let x0 = dirty_rect.x.max(0);
+                            let y0 = dirty_rect.y.max(0);
+                            let x1 = (dirty_rect.x.saturating_add(dirty_rect.width as i32))
+                                .min(width as i32);
+                            let y1 = (dirty_rect.y.saturating_add(dirty_rect.height as i32))
+                                .min(height as i32);
+
+                            if x1 > x0 && y1 > y0 {
+                                let _ = self.connection.commit_region(
+                                    managed.surface_id,
+                                    x0 as u32,
+                                    y0 as u32,
+                                    (x1 - x0) as u32,
+                                    (y1 - y0) as u32,
+                                );
+                            }
+                        }
                         did_draw = true;
                     }
                 }
             }
 
-            // 7. Avoid a busy loop when idle.
-            if events.is_empty() && !did_draw {
+            // 7. Frame rate limiting: cap at ~60fps to reduce flicker and CPU usage.
+            // Always sleep at least 1ms to yield CPU, and ensure minimum 16ms between frames.
+            if did_draw {
+                // We drew this frame, sleep briefly to cap frame rate
+                let _ = scarlet_std::thread::sleep(Duration::from_millis(8));
+            } else if !self.connection.has_events() {
+                // No events and no draw, sleep longer
+                let _ = scarlet_std::thread::sleep(Duration::from_millis(16));
+            } else {
+                // Events pending, yield briefly
                 let _ = scarlet_std::thread::sleep(Duration::from_millis(1));
             }
         }
@@ -437,17 +542,58 @@ impl Application {
         match sws_event {
             SwsEvent::Input(input) => {
                 if let Some(event) = self.convert_input(&input) {
+                    // Determine which surface should receive this event.
+                    // While captured, keep routing move/up to the capture surface.
+                    let is_left_move_or_up_under_capture = matches!(
+                        event.kind,
+                        crate::event::EventKind::MouseMove
+                            | crate::event::EventKind::MouseUp {
+                                button: MouseButton::Left
+                            }
+                    );
+
+                    let target_surface_id = if is_left_move_or_up_under_capture {
+                        self.mouse_capture_surface_id.unwrap_or(input.surface_id)
+                    } else {
+                        input.surface_id
+                    };
+
+                    // Start capture on left mouse down.
+                    if matches!(
+                        event.kind,
+                        crate::event::EventKind::MouseDown {
+                            button: MouseButton::Left
+                        }
+                    ) {
+                        self.mouse_capture_surface_id = Some(input.surface_id);
+                    }
+
                     if let Some(index) = self
                         .windows
                         .iter()
-                        .position(|w| w.surface_id == input.surface_id)
+                        .position(|w| w.surface_id == target_surface_id)
                     {
                         let (width, height) = {
                             let window = &self.windows[index].window;
                             (window.width(), window.height())
                         };
                         let frame = Rect::new(0, 0, width, height);
-                        Self::dispatch_event_to_view(&mut self.windows[index].window, event, frame);
+
+                        // While captured, ignore hit-test containment so dragging controls
+                        // still receive move/up events even when the cursor leaves bounds.
+                        let route_all = self.mouse_capture_surface_id == Some(target_surface_id)
+                            && is_left_move_or_up_under_capture;
+                        Self::dispatch_event_to_view(&mut self.windows[index].window, event, frame, route_all);
+                    }
+
+                    // End capture on left mouse up.
+                    if matches!(
+                        event.kind,
+                        crate::event::EventKind::MouseUp {
+                            button: MouseButton::Left
+                        }
+                    ) {
+                        self.mouse_capture_surface_id = None;
                     }
                 }
             }
@@ -539,25 +685,21 @@ impl Application {
     }
 
     /// Dispatch event to a view using capture/bubble phases
-    fn dispatch_event_to_view(view: &mut dyn View, mut event: Event, frame: Rect) {
+    fn dispatch_event_to_view(view: &mut dyn View, mut event: Event, frame: Rect, route_all: bool) {
         // Phase 1: CAPTURE (root → target)
         if view.on_event_capture(&mut event, frame) {
-            view.set_needs_draw();
             return;
         }
         if event.is_stopped() {
-            view.set_needs_draw();
             return;
         }
         
         // Phase 2: BUBBLE (target → root)
-        if Self::dispatch_bubble(view, &mut event, frame) || event.is_stopped() {
-            view.set_needs_draw();
-        }
+        let _ = Self::dispatch_bubble(view, &mut event, frame, route_all);
     }
 
     /// Dispatch event in bubble phase recursively
-    fn dispatch_bubble(view: &mut dyn View, event: &mut Event, frame: Rect) -> bool {
+    fn dispatch_bubble(view: &mut dyn View, event: &mut Event, frame: Rect, route_all: bool) -> bool {
         // First dispatch to children
         let mut consumed = false;
         view.visit_children_mut(&mut |child, child_frame| {
@@ -572,8 +714,8 @@ impl Application {
                 child_frame.height,
             );
 
-            if abs.contains(event.x(), event.y()) {
-                if Self::dispatch_bubble(child, event, abs) {
+            if route_all || abs.contains(event.x(), event.y()) {
+                if Self::dispatch_bubble(child, event, abs, route_all) {
                     consumed = true;
                     return true;
                 }
@@ -591,6 +733,12 @@ impl Application {
         }
         
         // Then handle on this view
-        view.on_event(event, frame)
+        let handled = view.on_event(event, frame);
+        if handled || event.is_stopped() {
+            // Mark only the view that actually handled the event as dirty.
+            // This keeps compositor damage regions small.
+            view.set_needs_draw();
+        }
+        handled
     }
 }

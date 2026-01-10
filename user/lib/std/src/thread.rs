@@ -1,5 +1,5 @@
 use crate::boxed::Box;
-use crate::syscall::{Syscall, syscall1, syscall3, syscall4};
+use crate::syscall::{Syscall, syscall1, syscall4};
 use crate::task::{CloneFlags, CloneFlagsDef};
 use crate::vec::Vec;
 use core::time::Duration;
@@ -64,20 +64,22 @@ fn spawn_impl<F>(f: F, _name: Option<&'static str>) -> Result<JoinHandle, &'stat
 where
     F: FnOnce() + Send + 'static,
 {
-    // Wrap the closure in a type-erased wrapper
-    let wrapper: Box<dyn FnOnce()> = Box::new(f);
-    let closure_ptr = Box::into_raw(wrapper) as *mut () as usize;
+    // Keep the allocation type consistent with the typed trampoline.
+    // Using a trait object here and reconstructing it as `Box<F>` is UB.
+    let closure: Box<F> = Box::new(f);
+    let closure_ptr = Box::into_raw(closure) as usize;
 
-    // Allocate thread stack (256KB - reasonable size for embedded system)
-    // Use vec![0; SIZE] to ensure memory is actually allocated via sbrk
+    // Allocate thread stack (256KB - reasonable size for embedded system).
+    // Keep this as `u8` so we don't require high-alignment allocations from the allocator.
     const STACK_SIZE: usize = 256 * 1024;
-    let stack = crate::vec![0u8; STACK_SIZE];
-    let stack_ptr = stack.as_ptr() as *mut u8;
-    let stack_base = stack_ptr as usize;
+    const STACK_ALIGN: usize = 16;
+    let stack: Vec<u8> = crate::vec![0u8; STACK_SIZE];
+    let stack_base = stack.as_ptr() as usize;
     let stack_end = stack_base + STACK_SIZE;
 
-    // Stack grows downward, so set SP to top of stack minus 16 bytes
-    let stack_top = (stack_end - 16) & !0xF;
+    // Stack grows downward, so set SP to top of stack minus 16 bytes.
+    // Keep it 16-byte aligned (AArch64/RISC-V ABI friendly).
+    let stack_top = (stack_end - 16) & !(STACK_ALIGN - 1);
 
     // Leak stack (child thread will use it, freed on thread exit)
     core::mem::forget(stack);
@@ -94,7 +96,7 @@ where
         Syscall::Clone,
         flags.get_raw() as usize,
         stack_top,
-        thread_typed_trampoline::<F> as usize,
+        thread_typed_trampoline::<F> as *const () as usize,
         closure_ptr,
     );
 

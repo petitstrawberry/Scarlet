@@ -413,6 +413,112 @@ impl<'a> Canvas<'a> {
         }
     }
 
+    /// Draw a horizontal 1px line.
+    pub fn draw_hline(&mut self, x: i32, y: i32, width: u32, color: Color) {
+        self.fill_rect(x, y, width, 1, color);
+    }
+
+    /// Draw a vertical 1px line.
+    pub fn draw_vline(&mut self, x: i32, y: i32, height: u32, color: Color) {
+        self.fill_rect(x, y, 1, height, color);
+    }
+
+    /// Draw a 1px line segment from `(x0, y0)` to `(x1, y1)` (inclusive).
+    ///
+    /// Uses an integer Bresenham rasterization.
+    pub fn draw_line(&mut self, mut x0: i32, mut y0: i32, x1: i32, y1: i32, color: Color) {
+        let dx = (x1 - x0).abs();
+        let sx = if x0 < x1 { 1 } else { -1 };
+        let dy = -(y1 - y0).abs();
+        let sy = if y0 < y1 { 1 } else { -1 };
+
+        let mut err = dx + dy;
+        loop {
+            self.put_pixel(x0, y0, color);
+            if x0 == x1 && y0 == y1 {
+                break;
+            }
+            let e2 = err * 2;
+            if e2 >= dy {
+                err += dy;
+                x0 += sx;
+            }
+            if e2 <= dx {
+                err += dx;
+                y0 += sy;
+            }
+        }
+    }
+
+    /// Draw a 1px circle outline centered at `(cx, cy)`.
+    ///
+    /// Uses the midpoint circle algorithm.
+    pub fn draw_circle(&mut self, cx: i32, cy: i32, radius: u32, color: Color) {
+        let r = radius as i32;
+        if r <= 0 {
+            self.put_pixel(cx, cy, color);
+            return;
+        }
+
+        let mut x = 0;
+        let mut y = r;
+        let mut d = 1 - r;
+
+        while x <= y {
+            self.put_pixel(cx + x, cy + y, color);
+            self.put_pixel(cx - x, cy + y, color);
+            self.put_pixel(cx + x, cy - y, color);
+            self.put_pixel(cx - x, cy - y, color);
+
+            self.put_pixel(cx + y, cy + x, color);
+            self.put_pixel(cx - y, cy + x, color);
+            self.put_pixel(cx + y, cy - x, color);
+            self.put_pixel(cx - y, cy - x, color);
+
+            x += 1;
+            if d < 0 {
+                d += 2 * x + 1;
+            } else {
+                y -= 1;
+                d += 2 * (x - y) + 1;
+            }
+        }
+    }
+
+    /// Fill a circle centered at `(cx, cy)`.
+    ///
+    /// Uses the midpoint circle algorithm and draws horizontal spans.
+    pub fn fill_circle(&mut self, cx: i32, cy: i32, radius: u32, color: Color) {
+        let r = radius as i32;
+        if r <= 0 {
+            self.put_pixel(cx, cy, color);
+            return;
+        }
+
+        let mut x = 0;
+        let mut y = r;
+        let mut d = 1 - r;
+
+        while x <= y {
+            // Spans across symmetric scanlines.
+            let w1 = (2 * x + 1).max(0) as u32;
+            let w2 = (2 * y + 1).max(0) as u32;
+
+            self.draw_hline(cx - x, cy + y, w1, color);
+            self.draw_hline(cx - x, cy - y, w1, color);
+            self.draw_hline(cx - y, cy + x, w2, color);
+            self.draw_hline(cx - y, cy - x, w2, color);
+
+            x += 1;
+            if d < 0 {
+                d += 2 * x + 1;
+            } else {
+                y -= 1;
+                d += 2 * (x - y) + 1;
+            }
+        }
+    }
+
     /// Draw a Rect outline
     pub fn stroke(&mut self, rect: Rect, color: Color) {
         self.draw_rect(rect.x, rect.y, rect.width, rect.height, color);
@@ -470,6 +576,91 @@ impl<'a> Canvas<'a> {
             }
 
             caret_x += scaled.h_advance(glyph_id);
+        }
+    }
+
+    /// Draw a rounded rectangle
+    pub fn fill_rounded_rect(&mut self, x: i32, y: i32, width: u32, height: u32, radius: u32, color: Color) {
+        let radius = radius.min(width / 2).min(height / 2);
+        
+        // Fill center rectangle
+        if width > radius * 2 {
+            self.fill_rect(x + radius as i32, y, width - radius * 2, height, color);
+        }
+        
+        // Fill left and right vertical strips
+        if height > radius * 2 {
+            self.fill_rect(x, y + radius as i32, radius, height - radius * 2, color);
+            self.fill_rect(x + (width - radius) as i32, y + radius as i32, radius, height - radius * 2, color);
+        }
+        
+        // Draw rounded corners
+        let r_sq = (radius * radius) as i32;
+        for dy in 0..radius {
+            for dx in 0..radius {
+                let dist_sq = (dx * dx + dy * dy) as i32;
+                if dist_sq <= r_sq {
+                    // Top-left
+                    self.put_pixel(x + (radius - dx - 1) as i32, y + (radius - dy - 1) as i32, color);
+                    // Top-right
+                    self.put_pixel(x + (width - radius + dx) as i32, y + (radius - dy - 1) as i32, color);
+                    // Bottom-left
+                    self.put_pixel(x + (radius - dx - 1) as i32, y + (height - radius + dy) as i32, color);
+                    // Bottom-right
+                    self.put_pixel(x + (width - radius + dx) as i32, y + (height - radius + dy) as i32, color);
+                }
+            }
+        }
+    }
+
+    /// Draw a rounded rectangle outline
+    pub fn draw_rounded_rect(&mut self, x: i32, y: i32, width: u32, height: u32, radius: u32, color: Color) {
+        let radius = radius.min(width / 2).min(height / 2);
+        
+        // Draw straight edges
+        // Top
+        for dx in radius..(width - radius) {
+            self.put_pixel(x + dx as i32, y, color);
+            self.put_pixel(x + dx as i32, y + height as i32 - 1, color);
+        }
+        // Sides
+        for dy in radius..(height - radius) {
+            self.put_pixel(x, y + dy as i32, color);
+            self.put_pixel(x + width as i32 - 1, y + dy as i32, color);
+        }
+        
+        // Draw rounded corners (circle approximation)
+        let r_sq = (radius * radius) as i32;
+        let inner_r_sq = ((radius - 1) * (radius - 1)) as i32;
+        
+        for dy in 0..radius {
+            for dx in 0..radius {
+                let dist_sq = (dx * dx + dy * dy) as i32;
+                if dist_sq <= r_sq && dist_sq >= inner_r_sq {
+                    // Top-left
+                    self.put_pixel(x + (radius - dx - 1) as i32, y + (radius - dy - 1) as i32, color);
+                    // Top-right
+                    self.put_pixel(x + (width - radius + dx) as i32, y + (radius - dy - 1) as i32, color);
+                    // Bottom-left
+                    self.put_pixel(x + (radius - dx - 1) as i32, y + (height - radius + dy) as i32, color);
+                    // Bottom-right
+                    self.put_pixel(x + (width - radius + dx) as i32, y + (height - radius + dy) as i32, color);
+                }
+            }
+        }
+    }
+
+    /// Draw a rounded rectangle outline with specified stroke width
+    pub fn stroke_rounded_rect(&mut self, x: i32, y: i32, width: u32, height: u32, radius: u32, stroke_width: u32, color: Color) {
+        // Draw multiple outlines for stroke width
+        for i in 0..stroke_width {
+            let inset = i as i32;
+            let w = width.saturating_sub(i * 2);
+            let h = height.saturating_sub(i * 2);
+            let r = radius.saturating_sub(i);
+            if w > 0 && h > 0 {
+                self.draw_rounded_rect(x + inset, y + inset, w, h, r, color);
+            }
         }
     }
 }

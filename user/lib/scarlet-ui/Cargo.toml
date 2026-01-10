@@ -11,4 +11,5 @@ path = "src/lib.rs"
 sws-client = { path = "../sws-client" }
 scarlet_std = { path = "../std" }
 ab_glyph = { version = "0.2", default-features = false, features = ["libm"] }
+scarlet-ui-macros = { path = "../scarlet-ui-macros" }
 
