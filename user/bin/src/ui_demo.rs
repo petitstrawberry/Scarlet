@@ -36,7 +36,7 @@ pub extern "C" fn main() -> i32 {
     let handle = app.handle();
 
     // Debug: visualize view layout bounds
-    app.set_layout_debug(true);
+    // app.set_layout_debug(true);
 
     // Build the UI using View composition
     let popup_handle = handle.clone();
