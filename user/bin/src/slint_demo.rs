@@ -14,7 +14,7 @@ slint::include_modules!();
 #[unsafe(no_mangle)]
 pub extern "C" fn main() -> i32 {
     println!("[slint_demo] Starting Slint application on Scarlet");
-    
+
     // Initialize the Slint-Scarlet backend
     match slint_scarlet::init() {
         Ok(_) => println!("[slint_demo] Slint backend initialized"),
@@ -23,7 +23,7 @@ pub extern "C" fn main() -> i32 {
             return 1;
         }
     }
-    
+
     // Create the main window
     println!("[slint_demo] Creating MainWindow...");
     let window = match MainWindow::new() {
@@ -38,9 +38,9 @@ pub extern "C" fn main() -> i32 {
     window.on_click_me(|| {
         println!("[slint_demo] Click Me pressed");
     });
-    
+
     println!("[slint_demo] Window created, starting event loop");
-    
+
     // Run the application
     match window.run() {
         Ok(_) => {

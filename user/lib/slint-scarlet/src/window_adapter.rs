@@ -35,7 +35,7 @@ impl ScarletWindowAdapter {
         let renderer = renderer::SoftwareRenderer::new();
         
         // Use Rc::new_cyclic to handle the circular reference between Window and WindowAdapter
-        Ok(Rc::new_cyclic(|weak: &Weak<Self>| {
+        let adapter = Rc::new_cyclic(|weak: &Weak<Self>| {
             let window = slint::Window::new(weak.clone());
             
             Self {
@@ -44,7 +44,17 @@ impl ScarletWindowAdapter {
                 size: RefCell::new(size),
                 renderer: RefCell::new(renderer),
             }
-        }))
+        });
+
+        // Inform Slint about the initial scale factor and size so hit-testing works.
+        adapter.window.dispatch_event(slint::platform::WindowEvent::ScaleFactorChanged {
+            scale_factor: 1.0,
+        });
+        adapter.window.dispatch_event(slint::platform::WindowEvent::Resized {
+            size: slint::LogicalSize::new(width as f32, height as f32),
+        });
+
+        Ok(adapter)
     }
 
     /// Get the surface id for rendering
