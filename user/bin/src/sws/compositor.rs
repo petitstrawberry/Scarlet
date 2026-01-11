@@ -872,7 +872,11 @@ impl Compositor {
             return;
         }
 
+        // Check if window has transparency (opacity < 1.0)
+        let has_transparency = window.opacity < 1.0;
+
         // Copy BGRA pixels from the window buffer into the screen buffer.
+        // Apply alpha blending if window has transparency.
         for sy in y0..y1 {
             let wy = (sy - win_y0) as u32;
             let screen_row_off = (sy as u32).saturating_mul(stride as u32) as usize;
@@ -885,8 +889,35 @@ impl Compositor {
                 if window_offset + 4 <= window_buffer.len()
                     && screen_offset + 4 <= screen_buffer.len()
                 {
-                    screen_buffer[screen_offset..screen_offset + 4]
-                        .copy_from_slice(&window_buffer[window_offset..window_offset + 4]);
+                    if has_transparency {
+                        // Alpha blending: BGRA format
+                        let src_b = window_buffer[window_offset] as u32;
+                        let src_g = window_buffer[window_offset + 1] as u32;
+                        let src_r = window_buffer[window_offset + 2] as u32;
+                        let src_a = window_buffer[window_offset + 3] as u32;
+
+                        // Apply window opacity to pixel alpha
+                        let effective_alpha = ((src_a as f32 * window.opacity) as u32).min(255);
+
+                        let dst_b = screen_buffer[screen_offset] as u32;
+                        let dst_g = screen_buffer[screen_offset + 1] as u32;
+                        let dst_r = screen_buffer[screen_offset + 2] as u32;
+
+                        // Alpha blending formula: dst = src * alpha + dst * (1 - alpha)
+                        let inv_alpha = 255 - effective_alpha;
+                        let out_b = ((src_b * effective_alpha + dst_b * inv_alpha) / 255) as u8;
+                        let out_g = ((src_g * effective_alpha + dst_g * inv_alpha) / 255) as u8;
+                        let out_r = ((src_r * effective_alpha + dst_r * inv_alpha) / 255) as u8;
+
+                        screen_buffer[screen_offset] = out_b;
+                        screen_buffer[screen_offset + 1] = out_g;
+                        screen_buffer[screen_offset + 2] = out_r;
+                        screen_buffer[screen_offset + 3] = 255; // Output is always opaque
+                    } else {
+                        // No transparency: direct copy
+                        screen_buffer[screen_offset..screen_offset + 4]
+                            .copy_from_slice(&window_buffer[window_offset..window_offset + 4]);
+                    }
                 }
             }
         }
@@ -1085,7 +1116,7 @@ impl Compositor {
 
             // Change focus and bring to front
             self.window_manager.set_focus(win_id);
-            self.window_manager.raise_to_top(win_id);
+            self.window_manager.raise_to_top_with_type(win_id);
 
             // Need full redraw when Z-order changes
             self.full_redraw_needed = true;
@@ -1388,7 +1419,7 @@ impl Compositor {
                         .window_at_point(self.cursor.x, self.cursor.y)
                     {
                         self.window_manager.set_focus(win_id);
-                        self.window_manager.raise_to_top(win_id);
+                        self.window_manager.raise_to_top_with_type(win_id);
                         self.full_redraw_needed = true;
 
                         // Start interactive resize if we're near the bottom/right edge.
@@ -1582,7 +1613,7 @@ impl Compositor {
                     };
 
                 // Bring the window to front for the drag (focus is handled by click routing).
-                self.window_manager.raise_to_top(window_id);
+                self.window_manager.raise_to_top_with_type(window_id);
 
                 self.move_drag = Some(MoveDragState {
                     window_id,
@@ -1625,7 +1656,7 @@ impl Compositor {
 
                 if self.window_manager.set_window_parent(window_id, parent) {
                     // Keep transient children above their parent by raising the group.
-                    self.window_manager.raise_to_top(window_id);
+                    self.window_manager.raise_to_top_with_type(window_id);
                     self.full_redraw_needed = true;
                 }
             }
@@ -1640,7 +1671,7 @@ impl Compositor {
                 {
                     // If raise policy is enabled, re-raise the group.
                     if (flags & sws_protocol::transient_flags::RAISE_WITH_PARENT) != 0 {
-                        self.window_manager.raise_to_top(window_id);
+                        self.window_manager.raise_to_top_with_type(window_id);
                     }
                     self.full_redraw_needed = true;
                 }
@@ -1695,6 +1726,91 @@ impl Compositor {
                         if let Some(w) = self.window_manager.get_window(window_id) {
                             self.add_pending_damage((w.x, w.y, w.width, w.height));
                         }
+                    }
+                }
+            }
+            IpcEvent::MinimizeWindow { window_id } => {
+                println!("[Compositor] Minimizing window #{}", window_id);
+                let old_rect = self
+                    .window_manager
+                    .get_window(window_id)
+                    .map(|w| (w.x, w.y, w.width, w.height));
+                if self.window_manager.minimize_window(window_id) {
+                    if let Some(r) = old_rect {
+                        self.add_pending_damage(r);
+                    }
+                    self.full_redraw_needed = true;
+                }
+            }
+            IpcEvent::MaximizeWindow { window_id } => {
+                println!("[Compositor] Maximizing window #{}", window_id);
+                let old_rect = self
+                    .window_manager
+                    .get_window(window_id)
+                    .map(|w| (w.x, w.y, w.width, w.height));
+                if self.window_manager.maximize_window(
+                    window_id,
+                    self.screen_width,
+                    self.screen_height,
+                ) {
+                    if let Some(r) = old_rect {
+                        self.add_pending_damage(r);
+                    }
+                    if let Some(w) = self.window_manager.get_window(window_id) {
+                        self.add_pending_damage((w.x, w.y, w.width, w.height));
+                    }
+                    self.full_redraw_needed = true;
+                }
+            }
+            IpcEvent::RestoreWindow { window_id } => {
+                println!("[Compositor] Restoring window #{}", window_id);
+                let old_rect = self
+                    .window_manager
+                    .get_window(window_id)
+                    .map(|w| (w.x, w.y, w.width, w.height));
+                if self.window_manager.restore_window(window_id) {
+                    if let Some(r) = old_rect {
+                        self.add_pending_damage(r);
+                    }
+                    if let Some(w) = self.window_manager.get_window(window_id) {
+                        self.add_pending_damage((w.x, w.y, w.width, w.height));
+                    }
+                    self.full_redraw_needed = true;
+                }
+            }
+            IpcEvent::SetWindowType {
+                window_id,
+                window_type,
+            } => {
+                println!(
+                    "[Compositor] Setting window #{} type to {}",
+                    window_id, window_type
+                );
+                let wtype = match window_type {
+                    0 => super::window::WindowType::Normal,
+                    1 => super::window::WindowType::AlwaysOnTop,
+                    2 => super::window::WindowType::Taskbar,
+                    3 => super::window::WindowType::Desktop,
+                    _ => {
+                        println!("[Compositor] Invalid window type {}, ignoring", window_type);
+                        return Ok(false);
+                    }
+                };
+                if self.window_manager.set_window_type(window_id, wtype) {
+                    // Re-raise to update Z-order based on window type
+                    self.window_manager.raise_to_top_with_type(window_id);
+                    self.full_redraw_needed = true;
+                }
+            }
+            IpcEvent::SetWindowOpacity { window_id, opacity } => {
+                println!(
+                    "[Compositor] Setting window #{} opacity to {}",
+                    window_id, opacity
+                );
+                let opacity_f = (opacity as f32) / 255.0;
+                if self.window_manager.set_window_opacity(window_id, opacity_f) {
+                    if let Some(w) = self.window_manager.get_window(window_id) {
+                        self.add_pending_damage((w.x, w.y, w.width, w.height));
                     }
                 }
             }

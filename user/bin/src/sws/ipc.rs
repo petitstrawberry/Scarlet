@@ -903,6 +903,47 @@ fn client_thread_main(client_id: usize, mut socket: Socket) {
                     }
                 }
             }
+            Ok(ClientMessageRef::MinimizeWindow { window_id }) => {
+                println!(
+                    "[ClientThread {}] MinimizeWindow: window_id={}",
+                    client_id, window_id
+                );
+                push_ipc_event(IpcEvent::MinimizeWindow { window_id });
+            }
+            Ok(ClientMessageRef::MaximizeWindow { window_id }) => {
+                println!(
+                    "[ClientThread {}] MaximizeWindow: window_id={}",
+                    client_id, window_id
+                );
+                push_ipc_event(IpcEvent::MaximizeWindow { window_id });
+            }
+            Ok(ClientMessageRef::RestoreWindow { window_id }) => {
+                println!(
+                    "[ClientThread {}] RestoreWindow: window_id={}",
+                    client_id, window_id
+                );
+                push_ipc_event(IpcEvent::RestoreWindow { window_id });
+            }
+            Ok(ClientMessageRef::SetWindowType {
+                window_id,
+                window_type,
+            }) => {
+                println!(
+                    "[ClientThread {}] SetWindowType: window_id={} type={}",
+                    client_id, window_id, window_type
+                );
+                push_ipc_event(IpcEvent::SetWindowType {
+                    window_id,
+                    window_type,
+                });
+            }
+            Ok(ClientMessageRef::SetWindowOpacity { window_id, opacity }) => {
+                println!(
+                    "[ClientThread {}] SetWindowOpacity: window_id={} opacity={}",
+                    client_id, window_id, opacity
+                );
+                push_ipc_event(IpcEvent::SetWindowOpacity { window_id, opacity });
+            }
             Ok(_) => {
                 // Ignore other messages for now
             }
@@ -992,4 +1033,19 @@ pub enum IpcEvent {
         /// Size of the SHM mapping in bytes.
         shm_size: usize,
     },
+
+    /// Minimize a window
+    MinimizeWindow { window_id: u32 },
+
+    /// Maximize a window
+    MaximizeWindow { window_id: u32 },
+
+    /// Restore a window from minimized or maximized state
+    RestoreWindow { window_id: u32 },
+
+    /// Set window type for Z-order management
+    SetWindowType { window_id: u32, window_type: u32 },
+
+    /// Set window opacity
+    SetWindowOpacity { window_id: u32, opacity: u8 },
 }
