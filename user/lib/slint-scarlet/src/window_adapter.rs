@@ -1,15 +1,15 @@
 //! Window adapter implementation for Scarlet OS
 
-use slint::platform::{WindowAdapter, PointerEventButton, software_renderer as renderer};
-use slint::{PhysicalSize, LogicalPosition};
+use slint::platform::{software_renderer as renderer, WindowAdapter};
+use slint::PhysicalSize;
 use std::rc::{Rc, Weak};
 use std::cell::RefCell;
-use sws_client::{Connection, Surface};
+use sws_client::Connection;
 
 /// Window adapter for Scarlet OS
 pub struct ScarletWindowAdapter {
     window: slint::Window,
-    surface: RefCell<Surface>,
+    surface_id: u32,
     size: RefCell<PhysicalSize>,
     // Store renderer to implement the Renderer trait
     renderer: RefCell<renderer::SoftwareRenderer>,
@@ -23,7 +23,7 @@ impl ScarletWindowAdapter {
         let height = 600;
         
         // Create a surface (window) through SWS
-        let surface = connection
+        let surface_id = connection
             .create_surface(width, height)
             .map_err(|e| slint::platform::PlatformError::Other(
                 std::format!("Failed to create surface: {:?}", e).into()
@@ -40,16 +40,16 @@ impl ScarletWindowAdapter {
             
             Self {
                 window,
-                surface: RefCell::new(surface),
+                surface_id,
                 size: RefCell::new(size),
                 renderer: RefCell::new(renderer),
             }
         }))
     }
-    
-    /// Get the surface for rendering
-    pub fn surface(&self) -> &RefCell<Surface> {
-        &self.surface
+
+    /// Get the surface id for rendering
+    pub fn surface_id(&self) -> u32 {
+        self.surface_id
     }
     
     /// Get the renderer

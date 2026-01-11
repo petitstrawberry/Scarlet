@@ -3,7 +3,9 @@
 use std::rc::Rc;
 use std::vec::Vec;
 use slint::platform::PlatformError;
-use sws_client::{Connection, Event as SwsEvent};
+use slint::platform::WindowAdapter;
+use slint::platform::software_renderer::PremultipliedRgbaColor;
+use sws_client::Connection;
 use crate::window_adapter::ScarletWindowAdapter;
 
 /// Event loop that processes SWS events and dispatches them to windows
@@ -32,7 +34,7 @@ impl EventLoop {
                 Ok(_) => {
                     // Process events for all windows
                     for window in &self.windows {
-                        self.process_window_events(window);
+                        self.process_window_events(connection, window);
                     }
                 }
                 Err(e) => {
@@ -52,32 +54,43 @@ impl EventLoop {
     }
     
     /// Process events for a specific window
-    fn process_window_events(&self, window: &Rc<ScarletWindowAdapter>) {
+    fn process_window_events(&self, connection: &mut Connection, window: &Rc<ScarletWindowAdapter>) {
         // Render the window if needed
-        self.render_window(window);
+        self.render_window(connection, window);
     }
     
     /// Render a window
-    fn render_window(&self, window: &Rc<ScarletWindowAdapter>) {
+    fn render_window(&self, connection: &mut Connection, window: &Rc<ScarletWindowAdapter>) {
         let renderer = window.renderer_ref();
-        let surface = window.surface();
-        
-        // Get the surface buffer and render into it
-        let mut surf = surface.borrow_mut();
-        
+
+        let surface_id = window.surface_id();
+        let _size = window.size();
+
         // Render using Slint's software renderer
-        surf.with_buffer(|buffer| {
-            let size = window.size();
-            
-            // Create a pixel buffer for the renderer
-            // The SWS buffer is in BGRA format
-            let mut renderer_borrowed = renderer.borrow_mut();
-            
-            // Render to buffer
-            renderer_borrowed.render(buffer, size.width as usize);
-        });
-        
+        if let Some(surf) = connection.surface_mut(surface_id) {
+            let renderer_borrowed = renderer.borrow_mut();
+            surf.with_buffer(|buffer, width, height| {
+                let pixel_count = (width as usize) * (height as usize);
+                let mut pixels = std::vec![PremultipliedRgbaColor::default(); pixel_count];
+
+                renderer_borrowed.render(&mut pixels[..], width as usize);
+
+                // Convert RGBA (premultiplied) pixels into SWS BGRA byte buffer.
+                // Note: channel order is BGRA on the wire.
+                for (i, px) in pixels.iter().enumerate() {
+                    let rgba: [u8; 4] = unsafe { core::mem::transmute(*px) };
+                    let dst = i * 4;
+                    if dst + 3 < buffer.len() {
+                        buffer[dst] = rgba[2];
+                        buffer[dst + 1] = rgba[1];
+                        buffer[dst + 2] = rgba[0];
+                        buffer[dst + 3] = rgba[3];
+                    }
+                }
+            });
+        }
+
         // Commit the changes to the window server
-        let _ = surf.commit();
+        let _ = connection.commit(surface_id);
     }
 }

@@ -9,50 +9,7 @@ extern crate scarlet_std as std;
 
 use std::println;
 
-// We'll use the slint! macro to embed UI
-slint::slint! {
-    export component MainWindow inherits Window {
-        width: 600px;
-        height: 400px;
-        
-        VerticalBox {
-            padding: 20px;
-            spacing: 16px;
-            
-            Text {
-                text: "Hello from Slint on Scarlet!";
-                font-size: 28px;
-                horizontal-alignment: center;
-            }
-            
-            Text {
-                text: "This is a real Slint application";
-                font-size: 14px;
-                horizontal-alignment: center;
-            }
-            
-            Rectangle {
-                height: 2px;
-                background: #cccccc;
-            }
-            
-            HorizontalBox {
-                spacing: 12px;
-                
-                Button {
-                    text: "Click Me!";
-                    clicked => {
-                        debug("Button clicked from Slint!");
-                    }
-                }
-                
-                Button {
-                    text: "Another Button";
-                }
-            }
-        }
-    }
-}
+slint::include_modules!();
 
 #[unsafe(no_mangle)]
 pub extern "C" fn main() -> i32 {
@@ -68,6 +25,7 @@ pub extern "C" fn main() -> i32 {
     }
     
     // Create the main window
+    println!("[slint_demo] Creating MainWindow...");
     let window = match MainWindow::new() {
         Ok(w) => w,
         Err(e) => {
@@ -75,6 +33,11 @@ pub extern "C" fn main() -> i32 {
             return 1;
         }
     };
+    println!("[slint_demo] MainWindow created");
+
+    window.on_click_me(|| {
+        println!("[slint_demo] Click Me pressed");
+    });
     
     println!("[slint_demo] Window created, starting event loop");
     
