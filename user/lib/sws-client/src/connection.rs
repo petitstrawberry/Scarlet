@@ -458,7 +458,7 @@ impl Connection {
         .map_err(|_| Error::SendFailed)
     }
 
-    /// Set per-window opacity (0-255).
+    /// Set per-window opacity (0 = fully transparent, 255 = fully opaque).
     pub fn set_window_opacity(&mut self, surface_id: u32, opacity: u8) -> Result<(), Error> {
         if self.surfaces.get(&surface_id).is_none() {
             return Err(Error::SurfaceNotFound);
