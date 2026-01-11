@@ -117,10 +117,11 @@ impl ConfigParser {
     /// Remove surrounding quotes from a string
     fn unquote(s: &str) -> String {
         let s = s.trim();
-        if (s.starts_with('"') && s.ends_with('"')) || (s.starts_with('\'') && s.ends_with('\'')) {
-            if s.len() >= 2 {
-                return s[1..s.len() - 1].to_string();
-            }
+        if ((s.starts_with('"') && s.ends_with('"'))
+            || (s.starts_with('\'') && s.ends_with('\'')))
+            && s.len() >= 2
+        {
+            return s[1..s.len() - 1].to_string();
         }
         s.to_string()
     }
@@ -143,7 +144,7 @@ fn launch_service(service: &Service) -> Result<i32, &'static str> {
             }
 
             let path = parts[0];
-            let argv: Vec<&str> = parts.iter().copied().collect();
+            let argv: Vec<&str> = parts.to_vec();
             let envp: Vec<&str> = Vec::new();
 
             if std::task::execve(path, &argv, &envp) != 0 {
