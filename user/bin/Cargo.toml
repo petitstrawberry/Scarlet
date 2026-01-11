@@ -80,6 +80,10 @@ test = false
 name = "ui_demo"
 path = "src/ui_demo.rs"
 
+[[bin]]
+name = "stemd"
+path = "src/stemd.rs"
+
 [dependencies]
 scarlet_std = { path = "../lib/std", features = ["alloc_debug"] }
 framebuffer = { path = "../lib/framebuffer" }
