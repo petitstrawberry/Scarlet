@@ -21,12 +21,14 @@ mod registry;
 mod shm;
 mod surface;
 mod xdg_shell;
+mod input;
 
 use protocol::{WaylandArg, WaylandMessage, MessageHeader};
 use registry::Registry;
 use shm::ShmManager;
 use surface::SurfaceManager;
 use xdg_shell::XdgShellManager;
+use input::InputManager;
 use std::collections::BTreeMap;
 use std::io::{Read, Write};
 use std::println;
@@ -54,6 +56,8 @@ struct WaylandBridge {
     xdg_shell_manager: XdgShellManager,
     /// Shared memory manager
     shm_manager: ShmManager,
+    /// Input manager
+    input_manager: InputManager,
     /// Connection to SWS server
     sws_connection: Option<Socket>,
     /// Extension ID assigned by SWS
@@ -95,6 +99,7 @@ impl WaylandBridge {
             surface_manager: SurfaceManager::new(),
             xdg_shell_manager: XdgShellManager::new(),
             shm_manager: ShmManager::new(),
+            input_manager: InputManager::new(),
             sws_connection: None,
             extension_id: None,
             next_object_id: 2,
@@ -346,6 +351,9 @@ impl WaylandBridge {
             "wl_shm" => self.handle_shm_message(opcode, payload),
             "wl_shm_pool" => self.handle_shm_pool_message(object_id, opcode, payload),
             "wl_buffer" => self.handle_buffer_message(object_id, opcode, payload),
+            "wl_seat" => self.handle_seat_message(object_id, opcode, payload),
+            "wl_pointer" => self.handle_pointer_message(object_id, opcode, payload),
+            "wl_keyboard" => self.handle_keyboard_message(object_id, opcode, payload),
             "xdg_wm_base" => self.handle_xdg_wm_base_message(opcode, payload),
             "xdg_surface" => self.handle_xdg_surface_message(object_id, opcode, payload),
             "xdg_toplevel" => self.handle_xdg_toplevel_message(object_id, opcode, payload),
@@ -663,6 +671,61 @@ impl WaylandBridge {
                 }
             }
         }
+    }
+    
+    /// Handle wl_seat messages
+    fn handle_seat_message(&mut self, seat_id: u32, opcode: u16, payload: &[u8]) -> Result<Option<WaylandMessage>, &'static str> {
+        match opcode {
+            input::seat_request::GET_POINTER => {
+                println!("[Bridge] wl_seat.get_pointer");
+                if payload.len() >= 4 {
+                    let pointer_id = u32::from_ne_bytes([payload[0], payload[1], payload[2], payload[3]]);
+                    println!("[Bridge] Pointer ID: {}", pointer_id);
+                    self.objects.insert(pointer_id, String::from("wl_pointer"));
+                    self.input_manager.create_pointer(pointer_id, seat_id);
+                }
+                Ok(None)
+            }
+            input::seat_request::GET_KEYBOARD => {
+                println!("[Bridge] wl_seat.get_keyboard");
+                if payload.len() >= 4 {
+                    let keyboard_id = u32::from_ne_bytes([payload[0], payload[1], payload[2], payload[3]]);
+                    println!("[Bridge] Keyboard ID: {}", keyboard_id);
+                    self.objects.insert(keyboard_id, String::from("wl_keyboard"));
+                    self.input_manager.create_keyboard(keyboard_id, seat_id);
+                    
+                    // Send keymap event (empty for now)
+                    let mut msg = WaylandMessage::new(keyboard_id, input::keyboard_event::KEYMAP);
+                    msg.add_arg(WaylandArg::Uint(1)); // XKB_V1 format
+                    msg.add_arg(WaylandArg::Fd(0)); // FD (placeholder)
+                    msg.add_arg(WaylandArg::Uint(0)); // size
+                    return Ok(Some(msg));
+                }
+                Ok(None)
+            }
+            input::seat_request::RELEASE => {
+                println!("[Bridge] wl_seat.release");
+                Ok(None)
+            }
+            _ => {
+                println!("[Bridge] Unknown wl_seat opcode: {}", opcode);
+                Ok(None)
+            }
+        }
+    }
+    
+    /// Handle wl_pointer messages
+    fn handle_pointer_message(&mut self, _pointer_id: u32, opcode: u16, _payload: &[u8]) -> Result<Option<WaylandMessage>, &'static str> {
+        println!("[Bridge] wl_pointer opcode: {}", opcode);
+        // Pointer events are sent from SWS, not received from client
+        Ok(None)
+    }
+    
+    /// Handle wl_keyboard messages
+    fn handle_keyboard_message(&mut self, _keyboard_id: u32, opcode: u16, _payload: &[u8]) -> Result<Option<WaylandMessage>, &'static str> {
+        println!("[Bridge] wl_keyboard opcode: {}", opcode);
+        // Keyboard events are sent from SWS, not received from client
+        Ok(None)
     }
 }
 
