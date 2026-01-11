@@ -80,6 +80,10 @@ test = false
 name = "ui_demo"
 path = "src/ui_demo.rs"
 
+[[bin]]
+name = "wayland_bridge"
+path = "src/wayland_bridge/main.rs"
+
 [dependencies]
 scarlet_std = { path = "../lib/std", features = ["alloc_debug"] }
 framebuffer = { path = "../lib/framebuffer" }
