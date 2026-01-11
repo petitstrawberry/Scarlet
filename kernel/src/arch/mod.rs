@@ -46,6 +46,12 @@ pub fn configure_user_entry(trapframe: &mut Trapframe, options: UserEntryOptions
     }
 }
 
+pub mod user_context;
+
+pub use user_context::{
+    init_from_fdt as init_user_context_from_fdt, user_fpu_enabled, user_vector_enabled,
+};
+
 #[cfg(target_arch = "riscv64")]
 pub mod riscv64;
 #[cfg(target_arch = "riscv64")]

@@ -5,6 +5,9 @@ use super::super::vcpu::Vcpu;
 /// RISC-V uses FS dirty tracking, so we only save when needed.
 #[inline]
 pub fn kernel_switch_out_user_fpu(vcpu: &mut Vcpu) {
+    if !crate::arch::user_fpu_enabled() {
+        return;
+    }
     if super::is_fpu_dirty() {
         vcpu.fpu_used = true;
         super::enable_fpu();
@@ -20,6 +23,9 @@ pub fn kernel_switch_out_user_fpu(vcpu: &mut Vcpu) {
 /// a consistent state.
 #[inline]
 pub fn kernel_switch_in_user_fpu(vcpu: &mut Vcpu) {
+    if !crate::arch::user_fpu_enabled() {
+        return;
+    }
     if vcpu.fpu_used {
         super::enable_fpu();
         unsafe { vcpu.fpu.restore() };
@@ -34,6 +40,9 @@ pub fn kernel_switch_in_user_fpu(vcpu: &mut Vcpu) {
 /// another task must overwrite the live vregs.
 #[inline]
 pub fn kernel_switch_out_user_vector(cpu_id: usize, task_id: usize, vcpu: &mut Vcpu) {
+    if !crate::arch::user_vector_enabled() {
+        return;
+    }
     if super::is_vector_dirty() {
         vcpu.vector_used = true;
 

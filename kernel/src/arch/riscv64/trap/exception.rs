@@ -46,6 +46,9 @@ pub fn arch_exception_handler(trapframe: &mut Trapframe, cause: usize) {
                 .get_current_task(get_cpu().get_cpuid())
                 .unwrap();
 
+            let user_fpu_allowed = crate::arch::user_fpu_enabled();
+            let user_vec_allowed = crate::arch::user_vector_enabled();
+
             // Read stval (may contain the faulting instruction word; can also be 0).
             let mut inst: usize;
             let sstatus: usize;
@@ -113,7 +116,7 @@ pub fn arch_exception_handler(trapframe: &mut Trapframe, cause: usize) {
             // Handle lazy enable without relying purely on instruction decoding.
             // This avoids panicking if stval is 0 or if we cannot classify the instruction.
             #[cfg(feature = "user-vector")]
-            if vs_off && is_vector_insn {
+            if user_vec_allowed && vs_off && is_vector_insn {
                 task.vcpu.vector_used = true;
                 crate::arch::riscv64::fpu::enable_vector();
                 if task.vcpu.vector.is_none() {
@@ -127,7 +130,7 @@ pub fn arch_exception_handler(trapframe: &mut Trapframe, cause: usize) {
             }
 
             #[cfg(feature = "user-fpu")]
-            if fs_off && is_fpu_insn {
+            if user_fpu_allowed && fs_off && is_fpu_insn {
                 task.vcpu.fpu_used = true;
                 crate::arch::riscv64::fpu::enable_fpu();
                 unsafe { task.vcpu.fpu.restore() };
@@ -138,7 +141,7 @@ pub fn arch_exception_handler(trapframe: &mut Trapframe, cause: usize) {
             // Fallback: if the relevant extension is disabled, enable it and restore a
             // safe initial context (prevents leaking previous task state).
             #[cfg(feature = "user-fpu")]
-            if fs_off {
+            if user_fpu_allowed && fs_off {
                 task.vcpu.fpu_used = true;
                 crate::arch::riscv64::fpu::enable_fpu();
                 unsafe { task.vcpu.fpu.restore() };
@@ -147,7 +150,7 @@ pub fn arch_exception_handler(trapframe: &mut Trapframe, cause: usize) {
             }
 
             #[cfg(feature = "user-vector")]
-            if vs_off {
+            if user_vec_allowed && vs_off {
                 task.vcpu.vector_used = true;
                 crate::arch::riscv64::fpu::enable_vector();
                 if task.vcpu.vector.is_none() {

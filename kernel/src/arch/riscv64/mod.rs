@@ -139,26 +139,11 @@ pub fn configure_user_entry(_trapframe: &mut Trapframe, options: crate::arch::Us
 
     let task = unsafe { &mut *current_task_ptr };
 
-    #[cfg(feature = "user-fpu")]
-    {
-        if !task.vcpu.fpu_used {
-            crate::arch::riscv64::fpu::disable_fpu();
-        }
-    }
-    #[cfg(not(feature = "user-fpu"))]
-    {
+    if !crate::arch::user_fpu_enabled() || !task.vcpu.fpu_used {
         crate::arch::riscv64::fpu::disable_fpu();
     }
 
-    #[cfg(feature = "user-vector")]
-    {
-        if !task.vcpu.vector_used {
-            crate::arch::riscv64::fpu::disable_vector();
-            return;
-        }
-    }
-    #[cfg(not(feature = "user-vector"))]
-    {
+    if !crate::arch::user_vector_enabled() || !task.vcpu.vector_used {
         crate::arch::riscv64::fpu::disable_vector();
         return;
     }

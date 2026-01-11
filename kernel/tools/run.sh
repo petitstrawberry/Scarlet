@@ -77,7 +77,6 @@ TEMP_OUTPUT=$(mktemp)
 # Run QEMU and capture output
 qemu-system-riscv64 \
     -machine virt \
-    -cpu rv64,v=true,vlen=256 \
     -bios default \
     -m 4G \
     -nographic \

@@ -5,6 +5,9 @@ use super::super::vcpu::Vcpu;
 /// On AArch64, user FP/SIMD shares the same register file (V0-V31).
 #[inline]
 pub fn kernel_switch_out_user_fpu(vcpu: &mut Vcpu) {
+    if !crate::arch::user_fpu_enabled() {
+        return;
+    }
     if vcpu.fpu_used {
         unsafe { vcpu.fpu.save() };
     }
@@ -13,6 +16,9 @@ pub fn kernel_switch_out_user_fpu(vcpu: &mut Vcpu) {
 /// Restore user FPU/SIMD context when resuming a task in the kernel.
 #[inline]
 pub fn kernel_switch_in_user_fpu(vcpu: &mut Vcpu) {
+    if !crate::arch::user_fpu_enabled() {
+        return;
+    }
     if vcpu.fpu_used {
         unsafe { vcpu.fpu.restore() };
     }

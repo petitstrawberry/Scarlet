@@ -141,8 +141,7 @@ pub fn arch_exception_handler(trapframe: &mut Trapframe, trap_kind: usize) {
         // User tried to execute FP/SIMD while EL0 access is trapped.
         // Enable access for this task and restore its context, then retry.
         ExceptionClass::FpSimdAccess => {
-            #[cfg(feature = "user-fpu")]
-            {
+            if crate::arch::user_fpu_enabled() {
                 let cpu_id = get_cpu().get_cpuid();
                 let task = get_scheduler().get_current_task(cpu_id).unwrap();
                 task.vcpu.fpu_used = true;
@@ -153,11 +152,8 @@ pub fn arch_exception_handler(trapframe: &mut Trapframe, trap_kind: usize) {
                 return;
             }
 
-            #[cfg(not(feature = "user-fpu"))]
-            {
-                print_trap_info(trapframe, esr);
-                panic!("FP/SIMD is disabled by build config");
-            }
+            print_trap_info(trapframe, esr);
+            panic!("FP/SIMD is disabled by build config or DTB");
         }
 
         // SVC from AArch64 user mode (syscall)
