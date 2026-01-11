@@ -684,7 +684,6 @@ tty = "/dev/tty0"
     loop {
         let (pid, status) = waitpid(-1, 0);
         if pid < 0 {
-            thread::sleep(core::time::Duration::from_millis(100));
             continue;
         }
         println!("stemd: Reaped child PID={} status={}", pid, status);
