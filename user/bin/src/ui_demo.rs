@@ -15,7 +15,7 @@ extern crate scarlet_std as std;
 use core::time::Duration;
 use scarlet_ui::{
     Application, Button, Center, CheckBox, Color, HStack, Label, Padding, ProgressBar, RectView,
-    Slider, Spacer, State, Text, TextField, Timer, Toggle, VStack, ViewModifier, Window, label,
+    Slider, Spacer, State, Text, TextField, Timer, Toggle, VStack, Window, label,
 };
 use std::{format, println, string::String};
 
@@ -253,9 +253,12 @@ pub extern "C" fn main() -> i32 {
                     .child(Center::new(
                         HStack::new()
                             .spacing(12)
-                            .child(Button::new("Popup", move || {
-                                popup_handle.request_popup();
-                            }))
+                            .child({
+                                let handle = popup_handle.clone();
+                                Button::new("Popup", move || {
+                                    handle.request_popup();
+                                })
+                            })
                             .child(Button::new(label!("Info (count={})", counter.clone()), {
                                 let counter = counter.clone();
                                 move || {

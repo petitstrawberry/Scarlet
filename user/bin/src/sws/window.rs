@@ -752,6 +752,15 @@ impl WindowManager {
     /// Maximize a window to screen dimensions
     pub fn maximize_window(&mut self, id: WindowId, screen_width: u32, screen_height: u32) -> bool {
         if let Some(w) = self.get_window_mut(id) {
+            // Policy: windows with an explicit max size are not maximizable.
+            // (max_* != 0 means "set")
+            if w.size_limits.max_width != 0 || w.size_limits.max_height != 0 {
+                println!(
+                    "[WindowManager] Window #{} is not maximizable (max size limits set)",
+                    id
+                );
+                return false;
+            }
             if !w.maximized {
                 // Save current geometry for restore
                 w.saved_geometry = Some((w.x, w.y, w.width, w.height));

@@ -1724,7 +1724,8 @@ impl Compositor {
                             self.add_pending_damage(r);
                         }
                         if let Some(w) = self.window_manager.get_window(window_id) {
-                            self.add_pending_damage((w.x, w.y, w.width, w.height));
+                            let rect = (w.x, w.y, w.width, w.height);
+                            self.add_pending_damage(rect);
                         }
                     }
                 }
@@ -1757,7 +1758,17 @@ impl Compositor {
                         self.add_pending_damage(r);
                     }
                     if let Some(w) = self.window_manager.get_window(window_id) {
-                        self.add_pending_damage((w.x, w.y, w.width, w.height));
+                        let (x, y, width, height) = (w.x, w.y, w.width, w.height);
+                        self.add_pending_damage((x, y, width, height));
+
+                        // Ask the client to resize its buffer to match the new geometry.
+                        let payload =
+                            sws_protocol::payload_window_configure(window_id, width, height);
+                        super::ipc::send_message_to_window(
+                            window_id,
+                            sws_protocol::server_msg::WINDOW_CONFIGURE,
+                            payload.to_vec(),
+                        );
                     }
                     self.full_redraw_needed = true;
                 }
@@ -1773,7 +1784,23 @@ impl Compositor {
                         self.add_pending_damage(r);
                     }
                     if let Some(w) = self.window_manager.get_window(window_id) {
-                        self.add_pending_damage((w.x, w.y, w.width, w.height));
+                        let (x, y, width, height) = (w.x, w.y, w.width, w.height);
+                        self.add_pending_damage((x, y, width, height));
+
+                        // If geometry changed (e.g. restored from maximized), ask the client
+                        // to resize its buffer.
+                        if let Some((_ox, _oy, ow, oh)) = old_rect {
+                            if ow != width || oh != height {
+                                let payload = sws_protocol::payload_window_configure(
+                                    window_id, width, height,
+                                );
+                                super::ipc::send_message_to_window(
+                                    window_id,
+                                    sws_protocol::server_msg::WINDOW_CONFIGURE,
+                                    payload.to_vec(),
+                                );
+                            }
+                        }
                     }
                     self.full_redraw_needed = true;
                 }

@@ -386,6 +386,78 @@ impl Connection {
         .map_err(|_| Error::SendFailed)
     }
 
+    /// Minimize a window (hide it; buffer size remains unchanged).
+    pub fn minimize_window(&mut self, surface_id: u32) -> Result<(), Error> {
+        if self.surfaces.get(&surface_id).is_none() {
+            return Err(Error::SurfaceNotFound);
+        }
+        let payload = protocol::payload_minimize_window(surface_id);
+        write_frame(
+            &mut self.socket,
+            protocol::client_msg::MINIMIZE_WINDOW,
+            &payload,
+        )
+        .map_err(|_| Error::SendFailed)
+    }
+
+    /// Maximize a window.
+    ///
+    /// The server may respond with `WINDOW_CONFIGURE` to request a buffer resize.
+    pub fn maximize_window(&mut self, surface_id: u32) -> Result<(), Error> {
+        if self.surfaces.get(&surface_id).is_none() {
+            return Err(Error::SurfaceNotFound);
+        }
+        let payload = protocol::payload_maximize_window(surface_id);
+        write_frame(
+            &mut self.socket,
+            protocol::client_msg::MAXIMIZE_WINDOW,
+            &payload,
+        )
+        .map_err(|_| Error::SendFailed)
+    }
+
+    /// Restore a window from minimized or maximized state.
+    pub fn restore_window(&mut self, surface_id: u32) -> Result<(), Error> {
+        if self.surfaces.get(&surface_id).is_none() {
+            return Err(Error::SurfaceNotFound);
+        }
+        let payload = protocol::payload_restore_window(surface_id);
+        write_frame(
+            &mut self.socket,
+            protocol::client_msg::RESTORE_WINDOW,
+            &payload,
+        )
+        .map_err(|_| Error::SendFailed)
+    }
+
+    /// Set window type for Z-order management.
+    pub fn set_window_type(&mut self, surface_id: u32, window_type: u32) -> Result<(), Error> {
+        if self.surfaces.get(&surface_id).is_none() {
+            return Err(Error::SurfaceNotFound);
+        }
+        let payload = protocol::payload_set_window_type(surface_id, window_type);
+        write_frame(
+            &mut self.socket,
+            protocol::client_msg::SET_WINDOW_TYPE,
+            &payload,
+        )
+        .map_err(|_| Error::SendFailed)
+    }
+
+    /// Set per-window opacity (0-255).
+    pub fn set_window_opacity(&mut self, surface_id: u32, opacity: u8) -> Result<(), Error> {
+        if self.surfaces.get(&surface_id).is_none() {
+            return Err(Error::SurfaceNotFound);
+        }
+        let payload = protocol::payload_set_window_opacity(surface_id, opacity);
+        write_frame(
+            &mut self.socket,
+            protocol::client_msg::SET_WINDOW_OPACITY,
+            &payload,
+        )
+        .map_err(|_| Error::SendFailed)
+    }
+
     /// Resize a surface.
     ///
     /// This is a synchronous request: it waits for `WINDOW_RESIZED` and a new SHM handle,

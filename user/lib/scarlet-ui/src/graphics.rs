@@ -353,7 +353,8 @@ impl<'a> Canvas<'a> {
         let b = self.buffer[offset];
         let g = self.buffer[offset + 1];
         let r = self.buffer[offset + 2];
-        Color::rgb(r, g, b)
+        let a = self.buffer[offset + 3];
+        Color::rgba(r, g, b, a)
     }
 
     fn put_pixel_alpha(&mut self, x: i32, y: i32, color: Color, alpha: f32) {
@@ -364,12 +365,29 @@ impl<'a> Canvas<'a> {
             self.put_pixel(x, y, color);
             return;
         }
+        // Source-over blend in *straight alpha*.
+        // This keeps the buffer's alpha meaningful so the compositor can
+        // correctly blend the final window surface.
         let dst = self.get_pixel(x, y);
-        let inv = 1.0 - alpha;
-        let r = (dst.r as f32 * inv + color.r as f32 * alpha) as u8;
-        let g = (dst.g as f32 * inv + color.g as f32 * alpha) as u8;
-        let b = (dst.b as f32 * inv + color.b as f32 * alpha) as u8;
-        self.put_pixel(x, y, Color::rgb(r, g, b));
+
+        let src_a = (alpha * (color.a as f32 / 255.0)).clamp(0.0, 1.0);
+        let dst_a = (dst.a as f32 / 255.0).clamp(0.0, 1.0);
+        let out_a = src_a + dst_a * (1.0 - src_a);
+
+        if out_a <= 0.0 {
+            self.put_pixel(x, y, Color::rgba(0, 0, 0, 0));
+            return;
+        }
+
+        let out_r = ((color.r as f32 * src_a + dst.r as f32 * dst_a * (1.0 - src_a)) / out_a)
+            .clamp(0.0, 255.0) as u8;
+        let out_g = ((color.g as f32 * src_a + dst.g as f32 * dst_a * (1.0 - src_a)) / out_a)
+            .clamp(0.0, 255.0) as u8;
+        let out_b = ((color.b as f32 * src_a + dst.b as f32 * dst_a * (1.0 - src_a)) / out_a)
+            .clamp(0.0, 255.0) as u8;
+        let out_a_u8 = (out_a * 255.0).clamp(0.0, 255.0) as u8;
+
+        self.put_pixel(x, y, Color::rgba(out_r, out_g, out_b, out_a_u8));
     }
 
     /// Fill a rectangle with a solid color
