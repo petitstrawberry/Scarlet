@@ -36,6 +36,11 @@ pub mod client_msg {
     pub const SET_WINDOW_TRANSIENT_FLAGS: u32 = 8;
     pub const RESIZE_WINDOW: u32 = 9;
     pub const SET_WINDOW_SIZE_LIMITS: u32 = 16;
+    pub const MINIMIZE_WINDOW: u32 = 17;
+    pub const MAXIMIZE_WINDOW: u32 = 18;
+    pub const RESTORE_WINDOW: u32 = 19;
+    pub const SET_WINDOW_TYPE: u32 = 20;
+    pub const SET_WINDOW_OPACITY: u32 = 21;
 }
 
 /// Message type IDs (server -> client).
@@ -56,6 +61,18 @@ pub mod transient_flags {
     pub const FOLLOW_PARENT_MOVE: u32 = 1 << 0;
     /// If set, raising the parent raises the child group.
     pub const RAISE_WITH_PARENT: u32 = 1 << 1;
+}
+
+/// Window type constants for Z-order management
+pub mod window_types {
+    /// Normal application window (default)
+    pub const NORMAL: u32 = 0;
+    /// Window that always stays on top
+    pub const ALWAYS_ON_TOP: u32 = 1;
+    /// Taskbar or panel window
+    pub const TASKBAR: u32 = 2;
+    /// Desktop background window
+    pub const DESKTOP: u32 = 3;
 }
 
 /// Message header.
@@ -176,6 +193,34 @@ pub enum ClientMessageRef<'a> {
         min_height: u32,
         max_width: u32,
         max_height: u32,
+    },
+
+    /// Minimize a window (hide but keep in window list)
+    MinimizeWindow {
+        window_id: u32,
+    },
+
+    /// Maximize a window to screen dimensions
+    MaximizeWindow {
+        window_id: u32,
+    },
+
+    /// Restore a window from minimized or maximized state
+    RestoreWindow {
+        window_id: u32,
+    },
+
+    /// Set window type for Z-order management
+    /// Type: 0 = Normal, 1 = AlwaysOnTop, 2 = Taskbar, 3 = Desktop
+    SetWindowType {
+        window_id: u32,
+        window_type: u32,
+    },
+
+    /// Set window opacity (0-255, where 255 is fully opaque)
+    SetWindowOpacity {
+        window_id: u32,
+        opacity: u8,
     },
 }
 
@@ -338,6 +383,46 @@ pub fn parse_client_message<'a>(
                 max_width,
                 max_height,
             })
+        }
+        client_msg::MINIMIZE_WINDOW => {
+            if payload.len() != 4 {
+                return Err(ProtocolError::MalformedPayload);
+            }
+            let window_id = u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
+            Ok(ClientMessageRef::MinimizeWindow { window_id })
+        }
+        client_msg::MAXIMIZE_WINDOW => {
+            if payload.len() != 4 {
+                return Err(ProtocolError::MalformedPayload);
+            }
+            let window_id = u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
+            Ok(ClientMessageRef::MaximizeWindow { window_id })
+        }
+        client_msg::RESTORE_WINDOW => {
+            if payload.len() != 4 {
+                return Err(ProtocolError::MalformedPayload);
+            }
+            let window_id = u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
+            Ok(ClientMessageRef::RestoreWindow { window_id })
+        }
+        client_msg::SET_WINDOW_TYPE => {
+            if payload.len() != 8 {
+                return Err(ProtocolError::MalformedPayload);
+            }
+            let window_id = u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
+            let window_type = u32::from_le_bytes([payload[4], payload[5], payload[6], payload[7]]);
+            Ok(ClientMessageRef::SetWindowType {
+                window_id,
+                window_type,
+            })
+        }
+        client_msg::SET_WINDOW_OPACITY => {
+            if payload.len() != 5 {
+                return Err(ProtocolError::MalformedPayload);
+            }
+            let window_id = u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
+            let opacity = payload[4];
+            Ok(ClientMessageRef::SetWindowOpacity { window_id, opacity })
         }
         _ => Err(ProtocolError::UnknownMessageType),
     }
@@ -590,4 +675,35 @@ pub fn payload_input_event(
 /// Build payload for server->client `ERROR`.
 pub fn payload_error(code: u32) -> [u8; 4] {
     code.to_le_bytes()
+}
+
+/// Build payload for client->server `MINIMIZE_WINDOW`.
+pub fn payload_minimize_window(window_id: u32) -> [u8; 4] {
+    window_id.to_le_bytes()
+}
+
+/// Build payload for client->server `MAXIMIZE_WINDOW`.
+pub fn payload_maximize_window(window_id: u32) -> [u8; 4] {
+    window_id.to_le_bytes()
+}
+
+/// Build payload for client->server `RESTORE_WINDOW`.
+pub fn payload_restore_window(window_id: u32) -> [u8; 4] {
+    window_id.to_le_bytes()
+}
+
+/// Build payload for client->server `SET_WINDOW_TYPE`.
+pub fn payload_set_window_type(window_id: u32, window_type: u32) -> [u8; 8] {
+    let mut payload = [0u8; 8];
+    payload[0..4].copy_from_slice(&window_id.to_le_bytes());
+    payload[4..8].copy_from_slice(&window_type.to_le_bytes());
+    payload
+}
+
+/// Build payload for client->server `SET_WINDOW_OPACITY`.
+pub fn payload_set_window_opacity(window_id: u32, opacity: u8) -> [u8; 5] {
+    let mut payload = [0u8; 5];
+    payload[0..4].copy_from_slice(&window_id.to_le_bytes());
+    payload[4] = opacity;
+    payload
 }

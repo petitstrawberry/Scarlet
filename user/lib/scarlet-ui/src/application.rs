@@ -31,11 +31,16 @@ pub trait ApplicationDelegate {
 struct ManagedWindow {
     window: Window,
     surface_id: u32,
+    is_maximized: bool,
 }
 
 impl ManagedWindow {
     fn new(window: Window, surface_id: u32) -> Self {
-        Self { window, surface_id }
+        Self {
+            window,
+            surface_id,
+            is_maximized: false,
+        }
     }
 }
 
@@ -90,6 +95,16 @@ impl ApplicationHandle {
         self.command_queue.lock().push(AppCommand::CreatePopup);
     }
 
+    pub fn request_transparent_popup(&self) {
+        self.command_queue
+            .lock()
+            .push(AppCommand::CreateTransparentPopup);
+    }
+
+    pub fn create_extra_window(&self) {
+        self.command_queue.lock().push(AppCommand::CreateExtraWindow);
+    }
+
     pub fn toggle_popup_follow_parent_move(&self) {
         self.command_queue
             .lock()
@@ -104,6 +119,8 @@ impl ApplicationHandle {
 #[derive(Clone, Copy)]
 enum AppCommand {
     CreatePopup,
+    CreateTransparentPopup,
+    CreateExtraWindow,
     TogglePopupFollowParentMove,
     ToggleMainResize,
 }
@@ -322,6 +339,8 @@ impl Application {
         // Scratch buffers to avoid per-frame heap allocations.
         let mut scratch_surface_ids: Vec<u32> = Vec::new();
         let mut scratch_move_surface_ids: Vec<u32> = Vec::new();
+        let mut scratch_minimize_surface_ids: Vec<u32> = Vec::new();
+        let mut scratch_maximize_surface_ids: Vec<u32> = Vec::new();
         let mut scratch_dirty_rects: Vec<Rect> = Vec::new();
         
         loop {
@@ -379,6 +398,43 @@ impl Application {
             }
             for surface_id in scratch_move_surface_ids.drain(..) {
                 let _ = self.connection.request_move_window(surface_id);
+            }
+
+            // 4c. Handle minimize requests (hide only; keep buffer size).
+            scratch_minimize_surface_ids.clear();
+            for i in 0..self.windows.len() {
+                if self.windows[i].window.take_minimize_requested() {
+                    scratch_minimize_surface_ids.push(self.windows[i].surface_id);
+                }
+            }
+            for surface_id in scratch_minimize_surface_ids.drain(..) {
+                let _ = self.connection.minimize_window(surface_id);
+            }
+
+            // 4d. Handle maximize toggle requests.
+            scratch_maximize_surface_ids.clear();
+            for i in 0..self.windows.len() {
+                if self.windows[i].window.take_maximize_toggle_requested() {
+                    scratch_maximize_surface_ids.push(self.windows[i].surface_id);
+                }
+            }
+            for surface_id in scratch_maximize_surface_ids.drain(..) {
+                if let Some(index) = self.windows.iter().position(|w| w.surface_id == surface_id)
+                {
+                    // Default: maximizable unless a max size is explicitly set.
+                    if !self.windows[index].window.can_maximize() {
+                        continue;
+                    }
+
+                    let res = if self.windows[index].is_maximized {
+                        self.connection.restore_window(surface_id)
+                    } else {
+                        self.connection.maximize_window(surface_id)
+                    };
+                    if res.is_ok() {
+                        self.windows[index].is_maximized = !self.windows[index].is_maximized;
+                    }
+                }
             }
 
             if self.windows.is_empty() && self.should_terminate_after_last_window_closed() {
@@ -478,19 +534,45 @@ impl Application {
 
                 let main_surface_id = self.windows[0].surface_id;
 
+                let popup_handle = ApplicationHandle {
+                    command_queue: self.command_queue.clone(),
+                };
+
                 // Create a small popup window.
                 let popup_window = Window::new("Popup", 240, 140)
                     .background(Color::WHITE)
                     .content(
-                        crate::view::Padding::new(crate::view::Label::new("Popup")
-                            .color(Color::TEXT))
-                            .all(10),
+                        crate::view::Padding::new(
+                            crate::view::VStack::new()
+                                .spacing(10)
+                                .child(
+                                    crate::view::Label::new("Popup (always on top)")
+                                        .color(Color::TEXT),
+                                )
+                                .child({
+                                    let handle = popup_handle.clone();
+                                    crate::view::Button::new("New Window", move || {
+                                        handle.create_extra_window();
+                                    })
+                                }),
+                        )
+                        .all(10),
                     );
 
                 let popup_surface_id = match self.add_window_inner(popup_window) {
                     Ok(id) => id,
                     Err(_) => return,
                 };
+
+                // Transparent popup by default.
+                let _ = self.connection.set_window_opacity(popup_surface_id, 160);
+
+                // Keep popups above normal windows.
+                // (Use literal to avoid depending on sws_protocol from scarlet-ui.)
+                const WINDOW_TYPE_ALWAYS_ON_TOP: u32 = 1;
+                let _ = self
+                    .connection
+                    .set_window_type(popup_surface_id, WINDOW_TYPE_ALWAYS_ON_TOP);
 
                 let _ = self
                     .connection
@@ -506,6 +588,76 @@ impl Application {
                     .set_window_transient_flags(popup_surface_id, flags);
 
                 self.popup_surface_id = Some(popup_surface_id);
+            }
+            AppCommand::CreateTransparentPopup => {
+                if let Some(popup_surface_id) = self.popup_surface_id {
+                    let _ = self.connection.set_window_opacity(popup_surface_id, 160);
+                    const WINDOW_TYPE_ALWAYS_ON_TOP: u32 = 1;
+                    let _ = self
+                        .connection
+                        .set_window_type(popup_surface_id, WINDOW_TYPE_ALWAYS_ON_TOP);
+                    return;
+                }
+                if self.windows.is_empty() {
+                    return;
+                }
+
+                let main_surface_id = self.windows[0].surface_id;
+
+                let popup_window = Window::new("Popup", 240, 140)
+                    .background(Color::WHITE)
+                    .content(
+                        crate::view::Padding::new(crate::view::Label::new("Transparent Popup")
+                            .color(Color::TEXT))
+                            .all(10),
+                    );
+
+                let popup_surface_id = match self.add_window_inner(popup_window) {
+                    Ok(id) => id,
+                    Err(_) => return,
+                };
+
+                // Transparent popup.
+                let _ = self.connection.set_window_opacity(popup_surface_id, 160);
+                let _ = self
+                    .connection
+                    .set_window_parent(popup_surface_id, Some(main_surface_id));
+
+                let flags = (if self.popup_follow_parent_move {
+                    sws_client::TransientFlags::FOLLOW_PARENT_MOVE
+                } else {
+                    sws_client::TransientFlags::NONE
+                }) | sws_client::TransientFlags::RAISE_WITH_PARENT;
+                let _ = self
+                    .connection
+                    .set_window_transient_flags(popup_surface_id, flags);
+
+                // Keep popups above normal windows.
+                // (Use literal to avoid depending on sws_protocol from scarlet-ui.)
+                const WINDOW_TYPE_ALWAYS_ON_TOP: u32 = 1;
+                let _ = self
+                    .connection
+                    .set_window_type(popup_surface_id, WINDOW_TYPE_ALWAYS_ON_TOP);
+
+                self.popup_surface_id = Some(popup_surface_id);
+            }
+            AppCommand::CreateExtraWindow => {
+                // Create an additional window to exercise minimize/maximize from titlebar.
+                let count = self.windows.len() as u32;
+                let title = {
+                    use scarlet_std::string::ToString;
+                    "Extra Window ".to_string() + &count.to_string()
+                };
+                let w = Window::new(&title, 360, 240)
+                    .background(Color::WHITE)
+                    .content(
+                        crate::view::Padding::new(crate::view::Label::new(
+                            "Use titlebar: hide / maximize / close",
+                        )
+                        .color(Color::TEXT))
+                        .all(10),
+                    );
+                let _ = self.add_window_inner(w);
             }
             AppCommand::TogglePopupFollowParentMove => {
                 self.popup_follow_parent_move = !self.popup_follow_parent_move;

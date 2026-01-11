@@ -59,6 +59,25 @@ impl WindowSizeLimits {
     }
 }
 
+/// Window type for Z-order management
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WindowType {
+    /// Normal application window
+    Normal,
+    /// Always stays on top of normal windows
+    AlwaysOnTop,
+    /// Taskbar window (stays above desktop, below normal)
+    Taskbar,
+    /// Desktop background window (bottom layer)
+    Desktop,
+}
+
+impl Default for WindowType {
+    fn default() -> Self {
+        WindowType::Normal
+    }
+}
+
 /// Window properties
 #[derive(Debug)]
 pub struct Window {
@@ -87,6 +106,16 @@ pub struct Window {
     pub shm_mapped_addr: Option<usize>,
     /// Size of the SHM mapping in bytes (0 when not SHM-backed).
     pub shm_size: usize,
+    /// Window type for Z-order management
+    pub window_type: WindowType,
+    /// Whether the window is minimized
+    pub minimized: bool,
+    /// Whether the window is maximized
+    pub maximized: bool,
+    /// Saved position and size before maximize (for restore)
+    pub saved_geometry: Option<(i32, i32, u32, u32)>,
+    /// Window opacity (0.0 = fully transparent, 1.0 = fully opaque)
+    pub opacity: f32,
 }
 
 #[allow(dead_code)]
@@ -109,6 +138,11 @@ impl Window {
             shm: None,
             shm_mapped_addr: None,
             shm_size: 0,
+            window_type: WindowType::default(),
+            minimized: false,
+            maximized: false,
+            saved_geometry: None,
+            opacity: 1.0,
         }
     }
 
@@ -134,6 +168,11 @@ impl Window {
             shm: None,
             shm_mapped_addr: None,
             shm_size: 0,
+            window_type: WindowType::default(),
+            minimized: false,
+            maximized: false,
+            saved_geometry: None,
+            opacity: 1.0,
         }
     }
 
@@ -185,6 +224,11 @@ impl Window {
             shm: Some(shm),
             shm_mapped_addr: Some(mapped_addr),
             shm_size: buffer_size,
+            window_type: WindowType::default(),
+            minimized: false,
+            maximized: false,
+            saved_geometry: None,
+            opacity: 1.0,
         })
     }
 
@@ -350,6 +394,11 @@ impl WindowManager {
             shm: Some(shm),
             shm_mapped_addr,
             shm_size,
+            window_type: WindowType::default(),
+            minimized: false,
+            maximized: false,
+            saved_geometry: None,
+            opacity: 1.0,
         };
         self.windows.push(window);
 
@@ -686,5 +735,189 @@ impl WindowManager {
         } else {
             false
         }
+    }
+
+    /// Minimize a window (hide from display but keep in window list)
+    pub fn minimize_window(&mut self, id: WindowId) -> bool {
+        if let Some(w) = self.get_window_mut(id) {
+            w.minimized = true;
+            w.visible = false;
+            println!("[WindowManager] Window #{} minimized", id);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Maximize a window to screen dimensions
+    pub fn maximize_window(&mut self, id: WindowId, screen_width: u32, screen_height: u32) -> bool {
+        if let Some(w) = self.get_window_mut(id) {
+            // Policy: windows with an explicit max size are not maximizable.
+            // (max_* != 0 means "set")
+            if w.size_limits.max_width != 0 || w.size_limits.max_height != 0 {
+                println!(
+                    "[WindowManager] Window #{} is not maximizable (max size limits set)",
+                    id
+                );
+                return false;
+            }
+            if !w.maximized {
+                // Save current geometry for restore
+                w.saved_geometry = Some((w.x, w.y, w.width, w.height));
+                w.x = 0;
+                w.y = 0;
+                w.width = screen_width;
+                w.height = screen_height;
+                w.maximized = true;
+                println!(
+                    "[WindowManager] Window #{} maximized to {}x{}",
+                    id, screen_width, screen_height
+                );
+                true
+            } else {
+                false
+            }
+        } else {
+            false
+        }
+    }
+
+    /// Restore a window from minimized or maximized state
+    pub fn restore_window(&mut self, id: WindowId) -> bool {
+        if let Some(w) = self.get_window_mut(id) {
+            if w.minimized {
+                w.minimized = false;
+                w.visible = true;
+                println!("[WindowManager] Window #{} restored from minimized", id);
+                return true;
+            }
+            if w.maximized {
+                if let Some((x, y, width, height)) = w.saved_geometry {
+                    w.x = x;
+                    w.y = y;
+                    w.width = width;
+                    w.height = height;
+                    w.maximized = false;
+                    w.saved_geometry = None;
+                    println!("[WindowManager] Window #{} restored from maximized", id);
+                    return true;
+                }
+            }
+            false
+        } else {
+            false
+        }
+    }
+
+    /// Set window type for Z-order management
+    pub fn set_window_type(&mut self, id: WindowId, window_type: WindowType) -> bool {
+        if let Some(w) = self.get_window_mut(id) {
+            w.window_type = window_type;
+            println!(
+                "[WindowManager] Window #{} type set to {:?}",
+                id, window_type
+            );
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Set window opacity (0.0 = transparent, 1.0 = opaque)
+    pub fn set_window_opacity(&mut self, id: WindowId, opacity: f32) -> bool {
+        if let Some(w) = self.get_window_mut(id) {
+            w.opacity = opacity.max(0.0).min(1.0);
+            println!(
+                "[WindowManager] Window #{} opacity set to {}",
+                id, w.opacity
+            );
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Raise window to top, respecting window types
+    /// Desktop < Normal < Taskbar < AlwaysOnTop
+    pub fn raise_to_top_with_type(&mut self, id: WindowId) {
+        let window_type = match self.get_window(id) {
+            Some(w) => w.window_type,
+            None => return,
+        };
+
+        let root = self.top_level_ancestor(id);
+        println!(
+            "[WindowManager] Raising window #{} (root #{}) with type {:?} to top",
+            id, root, window_type
+        );
+
+        // Collect the transient group (root + descendants)
+        let mut group_ids: Vec<WindowId> = Vec::new();
+        self.collect_descendants_for_raise(root, &mut group_ids);
+        group_ids.insert(0, root);
+
+        // Rebuild Z-order respecting window types
+        let old = core::mem::take(&mut self.windows);
+        let mut desktop: Vec<Window> = Vec::new();
+        let mut normal: Vec<Window> = Vec::new();
+        let mut taskbar: Vec<Window> = Vec::new();
+        let mut always_on_top: Vec<Window> = Vec::new();
+        let mut group: Vec<Window> = Vec::new();
+
+        for w in old {
+            if group_ids.iter().any(|gid| *gid == w.id) {
+                group.push(w);
+            } else {
+                match w.window_type {
+                    WindowType::Desktop => desktop.push(w),
+                    WindowType::Normal => normal.push(w),
+                    WindowType::Taskbar => taskbar.push(w),
+                    WindowType::AlwaysOnTop => always_on_top.push(w),
+                }
+            }
+        }
+
+        // Ensure root is below its descendants within the group
+        if let Some(pos) = group.iter().position(|w| w.id == root) {
+            let root_w = group.remove(pos);
+            group.insert(0, root_w);
+        }
+
+        // Reconstruct in proper Z-order: desktop -> normal -> group (if normal type) -> taskbar -> always_on_top
+        self.windows = desktop;
+
+        match window_type {
+            WindowType::Desktop => {
+                self.windows.extend(group);
+                self.windows.extend(normal);
+                self.windows.extend(taskbar);
+                self.windows.extend(always_on_top);
+            }
+            WindowType::Normal => {
+                self.windows.extend(normal);
+                self.windows.extend(group);
+                self.windows.extend(taskbar);
+                self.windows.extend(always_on_top);
+            }
+            WindowType::Taskbar => {
+                self.windows.extend(normal);
+                self.windows.extend(taskbar);
+                self.windows.extend(group);
+                self.windows.extend(always_on_top);
+            }
+            WindowType::AlwaysOnTop => {
+                self.windows.extend(normal);
+                self.windows.extend(taskbar);
+                self.windows.extend(always_on_top);
+                self.windows.extend(group);
+            }
+        }
+
+        // Print current Z-order
+        print!("[WindowManager] Current Z-order (bottom to top): ");
+        for w in &self.windows {
+            print!("#{} ", w.id);
+        }
+        println!();
     }
 }
