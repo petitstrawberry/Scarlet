@@ -140,10 +140,7 @@ pub extern "C" fn main() -> i32 {
                                                     .font_size(14)
                                             )
                                             .child(
-                                                Slider::new(slider_value.clone(), 0.0, 1.0)
-                                                    .on_change(|_value| {
-                                                        // Slider value is automatically updated via State
-                                                    })
+                                                Slider::new(0.0, 1.0, slider_value.clone())
                                             )
                                             .child(
                                                 Label::new(format!("{:.2}", slider_value.get()))
@@ -157,15 +154,9 @@ pub extern "C" fn main() -> i32 {
                                             .spacing(8)
                                             .child(
                                                 CheckBox::new("Enable Feature", feature_enabled.clone())
-                                                    .on_toggle(|_checked| {
-                                                        // State is automatically updated
-                                                    })
                                             )
                                             .child(
                                                 Toggle::new(switch_state.clone())
-                                                    .on_toggle(|_enabled| {
-                                                        // State is automatically updated
-                                                    })
                                             )
                                     )
                             )
@@ -195,7 +186,7 @@ pub extern "C" fn main() -> i32 {
                                     .font_size(18)
                             )
                             .child(
-                                TextField::new(text_input.clone(), "Enter text here...")
+                                TextField::new("Enter text here...", text_input.clone())
                                     .text_color(Color::rgb(40, 40, 60))
                                     .background(Color::WHITE)
                             )
@@ -238,6 +229,4 @@ pub extern "C" fn main() -> i32 {
     println!("[slint_style_demo] Window created, starting event loop");
 
     app.run(); // Never returns
-
-    0
 }

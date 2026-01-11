@@ -1,0 +1,24 @@
+[package]
+name = "slint-scarlet"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+name = "slint_scarlet"
+path = "src/lib.rs"
+
+[dependencies]
+scarlet_std = { path = "../std" }
+sws-client = { path = "../sws-client" }
+sws_protocol = { path = "../sws_protocol" }
+
+# Slint with no_std support
+slint = { version = "1.14", default-features = false, features = [
+    "unsafe-single-threaded",
+    "renderer-software",
+    "libm",
+    "compat-1-2"
+] }
+
+[build-dependencies]
+slint-build = "1.14"
