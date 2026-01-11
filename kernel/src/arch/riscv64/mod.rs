@@ -19,6 +19,7 @@ pub mod boot;
 pub mod context;
 pub mod earlycon;
 pub mod fdt;
+pub mod fpu;
 pub mod instruction;
 pub mod interrupt;
 pub mod kernel;
@@ -281,6 +282,9 @@ fn trap_init(riscv: &mut Riscv64) {
         in(reg) scratch_addr,
         );
     }
+
+    // Enable FPU for user-space and kernel access
+    fpu::enable_fpu();
 
     // early_println!("Trap stack area    : {:#x} - {:#x}", trap_stack - stack_size, trap_stack - 1);
     // early_println!("Trap stack size    : {:#x}", stack_size);

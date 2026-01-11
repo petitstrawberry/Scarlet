@@ -11,6 +11,7 @@ use crate::task::Task;
 pub mod boot;
 pub mod context;
 pub mod earlycon;
+pub mod fpu;
 pub mod instruction;
 pub mod interrupt;
 pub mod kernel;
@@ -359,6 +360,9 @@ fn trap_init(aarch64: &mut Aarch64) {
             in(reg) scratch_addr,
         );
     }
+
+    // Enable FPU/SIMD for user-space and kernel access
+    fpu::enable_fpu();
 
     // Default to kernel vector while executing in EL1.
     set_trapvector(get_kernel_trapvector_paddr());

@@ -62,3 +62,10 @@ pub use riscv64::context::KernelContext;
 
 #[cfg(target_arch = "aarch64")]
 pub use aarch64::context::KernelContext;
+
+// Re-export FPU context and functions for architecture-independent use
+#[cfg(target_arch = "riscv64")]
+pub use riscv64::fpu;
+
+#[cfg(target_arch = "aarch64")]
+pub use aarch64::fpu;

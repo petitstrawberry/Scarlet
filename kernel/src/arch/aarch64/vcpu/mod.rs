@@ -5,6 +5,7 @@
 use crate::arch::Trapframe;
 
 use super::IntRegisters;
+use super::fpu::FpuContext;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Mode {
@@ -15,6 +16,8 @@ pub enum Mode {
 #[derive(Debug, Clone)]
 pub struct Vcpu {
     pub iregs: IntRegisters,
+    /// Floating-point and SIMD register context (NEON)
+    pub fpu: FpuContext,
     pub sp: u64,
     pc: u64,
     spsr: u64,
@@ -32,6 +35,7 @@ impl Vcpu {
         };
         Vcpu {
             iregs: IntRegisters::new(),
+            fpu: FpuContext::new(),
             sp: 0,
             pc: initial_pc,
             spsr: 0,
@@ -78,9 +82,10 @@ impl Vcpu {
     /// Clone the entire VCPU state to another VCPU
     ///
     /// This copies all registers, including general-purpose registers,
-    /// SP, PC, SPSR, and thread-local storage registers.
+    /// FPU/SIMD context, SP, PC, SPSR, and thread-local storage registers.
     pub fn clone_to(&self, other: &mut Vcpu) {
         other.iregs = self.iregs;
+        other.fpu = self.fpu.clone();
         other.sp = self.sp;
         other.pc = self.pc;
         other.spsr = self.spsr;

@@ -511,7 +511,8 @@ impl Scheduler {
     /// Perform kernel context switch between tasks
     ///
     /// This function handles the low-level kernel context switching between
-    /// the current task and the next selected task.
+    /// the current task and the next selected task. It also saves/restores
+    /// FPU/SIMD context for user-space tasks.
     ///
     /// # Arguments
     /// * `cpu_id` - The CPU ID
@@ -523,20 +524,40 @@ impl Scheduler {
             // Find tasks in all queues (ready, blocked, zombie)
             let mut from_ctx_ptr: *mut crate::arch::KernelContext = core::ptr::null_mut();
             let mut to_ctx_ptr: *const crate::arch::KernelContext = core::ptr::null();
+            let mut from_fpu_ptr: *mut crate::arch::fpu::FpuContext = core::ptr::null_mut();
+            let mut to_fpu_ptr: *const crate::arch::fpu::FpuContext = core::ptr::null();
 
             if let Some(from_task) = self.task_pool.get_task(from_task_id) {
-                from_ctx_ptr = &mut from_task.kernel_context
+                from_ctx_ptr = &mut from_task.kernel_context;
+                from_fpu_ptr = &mut from_task.vcpu.fpu;
             }
             if let Some(to_task) = self.task_pool.get_task(to_task_id) {
-                to_ctx_ptr = &to_task.kernel_context
+                to_ctx_ptr = &to_task.kernel_context;
+                to_fpu_ptr = &to_task.vcpu.fpu;
             }
 
             if !from_ctx_ptr.is_null() && !to_ctx_ptr.is_null() {
+                // Save current FPU state before context switch
+                if !from_fpu_ptr.is_null() {
+                    unsafe {
+                        (*from_fpu_ptr).save();
+                    }
+                }
+
                 // Perform kernel context switch
                 unsafe {
                     crate::arch::switch::switch_to(from_ctx_ptr, to_ctx_ptr);
                 }
+
                 // Execution resumes here when this task is rescheduled
+                // Restore FPU state after returning from context switch
+                // Note: We need to restore from the current task's FPU context
+                // which is the task we switched FROM (now switched back TO)
+                if !from_fpu_ptr.is_null() {
+                    unsafe {
+                        (*from_fpu_ptr).restore();
+                    }
+                }
             } else {
                 // crate::println!("[SCHED] ERROR: Context pointers not found - from: {:p}, to: {:p}", from_ctx_ptr, to_ctx_ptr);
             }
