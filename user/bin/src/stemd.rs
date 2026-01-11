@@ -193,8 +193,7 @@ impl ConfigParser {
     /// Remove surrounding quotes from a string
     fn unquote(s: &str) -> String {
         let s = s.trim();
-        if ((s.starts_with('"') && s.ends_with('"'))
-            || (s.starts_with('\'') && s.ends_with('\'')))
+        if ((s.starts_with('"') && s.ends_with('"')) || (s.starts_with('\'') && s.ends_with('\'')))
             && s.len() >= 2
         {
             return s[1..s.len() - 1].to_string();
@@ -386,9 +385,7 @@ fn resolve_dependencies(services: &[Service]) -> Vec<Service> {
         remaining.sort_by(|&a, &b| {
             let sa = &services[a];
             let sb = &services[b];
-            sa.order
-                .cmp(&sb.order)
-                .then_with(|| sa.name.cmp(&sb.name))
+            sa.order.cmp(&sb.order).then_with(|| sa.name.cmp(&sb.name))
         });
 
         for idx in remaining {
@@ -506,10 +503,7 @@ fn read_config_dir(dir_path: &str) -> Result<String, &'static str> {
     // Try to list directory entries
     match list_directory(dir_path) {
         Ok(entries) => {
-            println!(
-                "stemd: Reading configuration from directory: {}",
-                dir_path
-            );
+            println!("stemd: Reading configuration from directory: {}", dir_path);
 
             // Filter and sort .toml files
             let mut toml_files = Vec::new();
@@ -679,7 +673,6 @@ tty = "/dev/tty0"
     // Spawn IPC thread
     println!("stemd: Starting IPC thread");
     let _ipc_handle = thread::spawn(ipc_thread);
-
 
     loop {
         let (pid, status) = waitpid(-1, 0);
