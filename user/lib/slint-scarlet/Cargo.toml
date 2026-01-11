@@ -9,6 +9,7 @@ path = "src/lib.rs"
 
 [dependencies]
 scarlet_std = { path = "../std" }
+scarlet-ui = { path = "../scarlet-ui" }
 sws-client = { path = "../sws-client" }
 sws_protocol = { path = "../sws_protocol" }
 

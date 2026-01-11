@@ -3672,6 +3672,7 @@ dependencies = [
 name = "slint-scarlet"
 version = "0.1.0"
 dependencies = [
+ "scarlet-ui",
  "scarlet_std",
  "slint",
  "slint-build",

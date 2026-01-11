@@ -2,7 +2,13 @@
 
 ## Overview
 
-This document describes the architectural design and implementation plan for integrating Slint UI library with the Scarlet Window Server (SWS). The goal is to enable Slint applications to run on Scarlet OS while using ScarletUI for window decorations and Slint for content rendering.
+This document describes the architectural design and current implementation status of integrating the Slint UI library with the Scarlet Window Server (SWS).
+
+The goal is to enable Slint applications to run on Scarlet OS by providing a Slint platform backend that:
+
+- Renders Slint's software renderer output into SWS shared memory buffers.
+- Translates SWS input events into Slint `WindowEvent`s.
+- Optionally reserves a small client-side title bar region (CSD-like) and translates coordinates accordingly.
 
 ## Architecture
 
@@ -105,6 +111,15 @@ Two possible approaches:
 - Slint renders into a content region within the window
 - More complex but provides consistent look with other Scarlet apps
 
+#### Option C: ScarletUI Decorations + Slint Content (Current)
+
+- The `slint-scarlet` backend reuses ScarletUI's `Window` decoration logic to draw the title bar + border.
+- Slint renders only into the content area below the title bar.
+- Pointer input coordinates are translated ($y \leftarrow y - h_{titlebar}$) before dispatching to Slint.
+- Title bar interactions are handled by ScarletUI (hover/pressed, buttons).
+    - Drag requests compositor-level interactive move.
+    - Minimize/maximize/close are forwarded to SWS window control requests.
+
 ```
 ┌─────────────────────────────────────────────────────┐
 │  ScarletUI Title Bar        [_] [□] [×]  ← ScarletUI│
@@ -127,16 +142,13 @@ Two possible approaches:
    - Size: `width * height * bytes_per_pixel`
    - Format: BGRA8888 (matches SWS default)
 
-2. **Rendering Pipeline**:
+2. **Rendering Pipeline (current)**:
    ```
-   Slint Render → Software Renderer Buffer → Copy to SHM → Commit to SWS
+    Slint Render (SoftwareRenderer) → CPU pixel buffer → Copy/convert to SWS SHM → Commit to SWS
    ```
 
-3. **Double Buffering**:
-   - Maintain two buffers (front and back)
-   - Slint renders to back buffer
-   - Swap buffers on commit
-   - Prevents tearing
+3. **Double Buffering (future)**:
+    The current implementation commits directly to the SWS buffer. If tearing becomes an issue, introducing a front/back buffer scheme (or server-provided double buffering) is a likely next step.
 
 ### Buffer Format Considerations
 
@@ -159,10 +171,9 @@ Hardware Input → Kernel → Window Server → SWS Client → EventMapper → S
 ### Event Types to Map
 
 1. **Mouse Events**:
-   - Movement (relative and absolute)
-   - Button press/release
-   - Wheel/scroll events
-   - Coordinate transformation for decorations
+    - Absolute movement: `EV_ABS/ABS_X`, `EV_ABS/ABS_Y`, flushed on `EV_SYN`
+    - Button press/release: `EV_KEY/BTN_LEFT` ($value \ne 0$ press, $value = 0$ release)
+    - Coordinate transformation when the optional title bar is enabled
 
 2. **Keyboard Events**:
    - Key press/release
@@ -183,6 +194,8 @@ fn transform_coordinates(event_x: i32, event_y: i32, titlebar_height: u32) -> (i
     (event_x, event_y - titlebar_height as i32)
 }
 ```
+
+In the current implementation (ScarletUI decorations), events that are handled by ScarletUI in the title bar region are not forwarded to Slint; instead they trigger the corresponding SWS window control requests.
 
 ## Implementation Challenges
 
@@ -234,23 +247,23 @@ Slint resources (fonts, images) must be:
 
 ### Phase 2: Minimal Working Implementation
 
-- [ ] Implement actual rendering to SWS buffer
-- [ ] Handle window creation and destruction
-- [ ] Basic event mapping (mouse, keyboard)
-- [ ] Simple test application
+- [x] Implement rendering to SWS shared memory buffer
+- [x] Handle window creation and destruction
+- [x] Basic mouse event mapping (absolute pointer + left button)
+- [x] Simple test application (`slint_demo`)
 
 ### Phase 3: Event Handling
 
-- [ ] Complete event mapper implementation
-- [ ] Coordinate transformation for decorations
+- [ ] Complete event mapper implementation (wheel, multi-button, etc.)
+- [x] Coordinate transformation for an optional title bar region
 - [ ] Focus management
 - [ ] Keyboard input handling
 
 ### Phase 4: Window Decorations
 
-- [ ] Integrate ScarletUI title bar
-- [ ] Embed Slint content in decorated window
-- [ ] Handle resize with decorations
+- [x] Integrate ScarletUI title bar + border (decorations)
+- [x] Embed Slint content below a title bar region
+- [x] Handle resize with title bar enabled (content size = surface size - title bar height)
 - [ ] Window controls (close, minimize, maximize)
 
 ### Phase 5: Optimization
@@ -302,6 +315,9 @@ slint::slint! {
 pub extern "C" fn main() -> i32 {
     // Initialize Slint-Scarlet backend
     slint_scarlet::init().expect("Failed to initialize Slint backend");
+
+    // Optional: enable/disable the built-in client-side title bar
+    // slint_scarlet::set_use_csd_titlebar(true);
     
     // Create and show window
     let window = MainWindow::new().unwrap();
@@ -346,5 +362,5 @@ For immediate needs, enhancing ScarletUI directly may be more practical and main
 
 - [Slint MCU Documentation](https://docs.slint.dev/latest/docs/rust/slint/docs/mcu/)
 - [Slint Platform Trait](https://docs.slint.dev/latest/docs/rust/slint/platform/trait.Platform)
-- [Scarlet Window Server Protocol](../../docs/sws_ipc_protocol.md)
-- [ScarletUI Framework Design](../../docs/scarlet_ui_framework.md)
+- [Scarlet Window Server Protocol](sws_ipc_protocol.md)
+- [ScarletUI Framework Design](scarlet_ui_framework.md)

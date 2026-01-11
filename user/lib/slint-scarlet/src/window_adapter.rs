@@ -5,22 +5,36 @@ use slint::PhysicalSize;
 use std::rc::{Rc, Weak};
 use std::cell::RefCell;
 use sws_client::Connection;
+use crate::use_csd_titlebar;
+use scarlet_ui::Window as UiWindow;
+use core::sync::atomic::{AtomicBool, Ordering};
 
 /// Window adapter for Scarlet OS
 pub struct ScarletWindowAdapter {
     window: slint::Window,
     surface_id: u32,
+    /// The size reported to Slint (client/content area).
     size: RefCell<PhysicalSize>,
+    /// The actual surface size allocated in SWS (may include decorations).
+    surface_size: RefCell<PhysicalSize>,
     // Store renderer to implement the Renderer trait
     renderer: RefCell<renderer::SoftwareRenderer>,
+
+    redraw_requested: AtomicBool,
 }
 
 impl ScarletWindowAdapter {
     /// Create a new window adapter
     pub fn new(connection: &mut Connection) -> Result<Rc<Self>, slint::platform::PlatformError> {
         // Default window size
-        let width = 800;
-        let height = 600;
+        let width: u32 = 800;
+        let height: u32 = 600;
+
+        let content_height = if use_csd_titlebar() {
+            height.saturating_sub(UiWindow::titlebar_height())
+        } else {
+            height
+        };
         
         // Create a surface (window) through SWS
         let surface_id = connection
@@ -29,7 +43,8 @@ impl ScarletWindowAdapter {
                 std::format!("Failed to create surface: {:?}", e).into()
             ))?;
         
-        let size = PhysicalSize::new(width, height);
+        let size = PhysicalSize::new(width, content_height);
+        let surface_size = PhysicalSize::new(width, height);
         
         // Create software renderer
         let renderer = renderer::SoftwareRenderer::new();
@@ -42,7 +57,9 @@ impl ScarletWindowAdapter {
                 window,
                 surface_id,
                 size: RefCell::new(size),
+                surface_size: RefCell::new(surface_size),
                 renderer: RefCell::new(renderer),
+                redraw_requested: AtomicBool::new(true),
             }
         });
 
@@ -51,7 +68,7 @@ impl ScarletWindowAdapter {
             scale_factor: 1.0,
         });
         adapter.window.dispatch_event(slint::platform::WindowEvent::Resized {
-            size: slint::LogicalSize::new(width as f32, height as f32),
+            size: slint::LogicalSize::new(width as f32, content_height as f32),
         });
 
         Ok(adapter)
@@ -60,6 +77,23 @@ impl ScarletWindowAdapter {
     /// Get the surface id for rendering
     pub fn surface_id(&self) -> u32 {
         self.surface_id
+    }
+
+    pub fn surface_size(&self) -> PhysicalSize {
+        *self.surface_size.borrow()
+    }
+
+    pub fn set_surface_size(&self, size: PhysicalSize) {
+        *self.surface_size.borrow_mut() = size;
+    }
+
+    pub fn set_content_size(&self, size: PhysicalSize) {
+        *self.size.borrow_mut() = size;
+        self.redraw_requested.store(true, Ordering::Relaxed);
+    }
+
+    pub fn take_redraw_requested(&self) -> bool {
+        self.redraw_requested.swap(false, Ordering::Relaxed)
     }
     
     /// Get the renderer
@@ -90,7 +124,6 @@ impl WindowAdapter for ScarletWindowAdapter {
     }
 
     fn request_redraw(&self) {
-        // Mark that we need to redraw
-        // The actual rendering will happen in the event loop
+        self.redraw_requested.store(true, Ordering::Relaxed);
     }
 }

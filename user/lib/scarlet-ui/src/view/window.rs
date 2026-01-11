@@ -68,6 +68,11 @@ pub struct Window {
 }
 
 impl Window {
+    /// Title bar height in pixels.
+    pub fn titlebar_height() -> u32 {
+        TITLEBAR_HEIGHT
+    }
+
     /// Create a new window
     pub fn new(title: &str, width: u32, height: u32) -> Self {
         let mut title_buf = [0u8; 64];
@@ -172,6 +177,25 @@ impl Window {
             self.width,
             self.height.saturating_sub(TITLEBAR_HEIGHT),
         )
+    }
+
+    /// Draw window decorations (title bar + border).
+    ///
+    /// This is useful when a different system renders the window content but
+    /// wants to reuse ScarletUI's native decorations.
+    pub fn draw_decorations(&self, canvas: &mut Canvas) {
+        self.draw_titlebar(canvas);
+        self.draw_border(canvas);
+    }
+
+    /// Draw only the title bar.
+    pub fn draw_titlebar_only(&self, canvas: &mut Canvas) {
+        self.draw_titlebar(canvas);
+    }
+
+    /// Draw only the border.
+    pub fn draw_border_only(&self, canvas: &mut Canvas) {
+        self.draw_border(canvas);
     }
 
     /// Check if close was requested
