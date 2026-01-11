@@ -343,28 +343,98 @@ fn read_config(path: &str) -> Result<String, &'static str> {
     Ok(content)
 }
 
+/// Read all configuration files from a directory
+fn read_config_dir(dir_path: &str) -> Result<String, &'static str> {
+    use std::fs::list_directory;
+
+    let mut combined_content = String::new();
+
+    // Try to list directory entries
+    match list_directory(dir_path) {
+        Ok(entries) => {
+            println!(
+                "stemd: Reading configuration from directory: {}",
+                dir_path
+            );
+
+            // Filter and sort .toml files
+            let mut toml_files = Vec::new();
+            for entry in entries {
+                if entry.name == "." || entry.name == ".." {
+                    continue;
+                }
+
+                // Only process .toml files
+                if entry.is_file() && entry.name.ends_with(".toml") {
+                    toml_files.push(entry.name.clone());
+                }
+            }
+
+            // Sort files for consistent ordering
+            toml_files.sort();
+
+            if toml_files.is_empty() {
+                println!("stemd: No .toml files found in {}", dir_path);
+                return Err("No configuration files found in directory");
+            }
+
+            // Read each file and combine content
+            for filename in toml_files {
+                let file_path = std::format!("{}/{}", dir_path, filename);
+                println!("stemd:   Loading {}", file_path);
+
+                match read_config(&file_path) {
+                    Ok(content) => {
+                        combined_content.push_str(&content);
+                        combined_content.push('\n'); // Add newline between files
+                    }
+                    Err(e) => {
+                        println!("stemd:   Warning: Failed to read {}: {}", file_path, e);
+                        // Continue with other files
+                    }
+                }
+            }
+
+            if combined_content.is_empty() {
+                return Err("All configuration files failed to load");
+            }
+
+            Ok(combined_content)
+        }
+        Err(_) => Err("Failed to read configuration directory"),
+    }
+}
+
 #[unsafe(no_mangle)]
 fn main() -> i32 {
     println!("stemd: Stem Daemon starting...");
     println!("stemd: PID={}", std::task::getpid());
 
-    // Read configuration file
-    let config_path = "/etc/stemd.toml";
-    println!("stemd: Reading configuration from {}", config_path);
-
-    let config_content = match read_config(config_path) {
+    // Read configuration from directory
+    let config_dir = "/etc/stemd.d";
+    
+    let config_content = match read_config_dir(config_dir) {
         Ok(content) => content,
         Err(e) => {
-            println!("stemd: {}", e);
-            println!("stemd: Using default configuration");
-            // Default configuration with login service
-            String::from(
-                r#"
+            println!("stemd: Failed to read from {}: {}", config_dir, e);
+            println!("stemd: Trying fallback configuration file /etc/stemd.toml");
+            
+            // Fallback to single file
+            match read_config("/etc/stemd.toml") {
+                Ok(content) => content,
+                Err(e2) => {
+                    println!("stemd: {}", e2);
+                    println!("stemd: Using default configuration");
+                    // Default configuration with login service
+                    String::from(
+                        r#"
 [service.login]
 exec = "/system/scarlet/bin/login"
 depends = []
 "#,
-            )
+                    )
+                }
+            }
         }
     };
 

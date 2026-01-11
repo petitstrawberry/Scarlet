@@ -28,10 +28,13 @@ stemd consists of three main components:
 
 ## Configuration File Format
 
-stemd uses a TOML-based configuration file located at `/etc/stemd.toml`.
+stemd reads TOML-based configuration files from the `/etc/stemd.d/` directory. All `.toml` files in this directory are loaded and processed in alphabetical order. If the directory doesn't exist or contains no configuration files, stemd falls back to reading `/etc/stemd.toml`.
 
 ### Example Configuration
 
+Create configuration files in `/etc/stemd.d/`:
+
+**`/etc/stemd.d/00-login.toml`:**
 ```toml
 # Stem Daemon Configuration File
 # Services are launched in dependency order
@@ -39,7 +42,10 @@ stemd uses a TOML-based configuration file located at `/etc/stemd.toml`.
 [service.login]
 exec = "/system/scarlet/bin/login"
 depends = []
+```
 
+**`/etc/stemd.d/10-services.toml`:**
+```toml
 [service.window_server]
 exec = "/system/scarlet/bin/sws"
 depends = []
@@ -55,6 +61,12 @@ Each service is defined as a TOML section with the format `[service.name]`:
 
 - `exec` (required): Full path to the executable to launch
 - `depends` (optional): Array of service names that must start before this service
+
+### Configuration Loading Order
+
+1. **Primary**: Reads all `.toml` files from `/etc/stemd.d/` in alphabetical order
+2. **Fallback**: If directory doesn't exist or is empty, reads `/etc/stemd.toml`
+3. **Default**: If both fail, uses built-in configuration with login service
 
 ## Integration with init
 
@@ -131,7 +143,8 @@ Potential improvements for stemd:
 ## Source Code
 
 - Implementation: `user/bin/src/stemd.rs`
-- Default config: `mkfs/initramfs/etc/stemd.toml`
+- Configuration directory: `mkfs/initramfs/etc/stemd.d/`
+- Default config: `mkfs/initramfs/etc/stemd.d/00-login.toml`
 - Init integration: `user/bin/src/init.rs`
 
 ## Related Documentation
