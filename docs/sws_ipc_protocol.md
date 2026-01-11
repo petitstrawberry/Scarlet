@@ -243,8 +243,9 @@ Semantics:
 	- `ALWAYS_ON_TOP = 1`: Always stays above normal windows
 	- `TASKBAR = 2`: Taskbar/panel window
 	- `DESKTOP = 3`: Desktop background window
-- Z-order hierarchy (bottom to top): Desktop → Normal → Taskbar → AlwaysOnTop
-- Within each type, windows maintain relative order based on focus and raise operations.
+- Default Z-order grouping (bottom to top): Desktop → Normal → Taskbar → AlwaysOnTop.
+- The effective Z-order is dynamically adjusted by the window server when windows are raised (see `raise_to_top_with_type` in the implementation); depending on which type is raised, windows of other types may end up above or below it.
+- Within each type, windows generally maintain relative order, except when explicitly changed by focus and raise operations.
 
 #### `SET_WINDOW_OPACITY` (type = 21)
 
