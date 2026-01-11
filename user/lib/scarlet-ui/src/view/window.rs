@@ -14,6 +14,8 @@ const TITLEBAR_HEIGHT: u32 = 32;
 const CLOSE_BUTTON_SIZE: u32 = 18;
 /// Close button margin from edge
 const CLOSE_BUTTON_MARGIN: u32 = 8;
+/// Titlebar control buttons: hide (minimize), maximize, close
+const TITLEBAR_CONTROL_COUNT: u32 = 3;
 /// Window corner radius
 const WINDOW_CORNER_RADIUS: u32 = 0;
 
@@ -52,11 +54,25 @@ pub struct Window {
     close_button_hovered: bool,
     close_button_pressed: bool,
     close_requested: bool,
+
+    minimize_button_hovered: bool,
+    minimize_button_pressed: bool,
+    minimize_requested: bool,
+
+    maximize_button_hovered: bool,
+    maximize_button_pressed: bool,
+    maximize_toggle_requested: bool,
+
     move_requested: bool,
     needs_redraw: bool,
 }
 
 impl Window {
+    /// Title bar height in pixels.
+    pub fn titlebar_height() -> u32 {
+        TITLEBAR_HEIGHT
+    }
+
     /// Create a new window
     pub fn new(title: &str, width: u32, height: u32) -> Self {
         let mut title_buf = [0u8; 64];
@@ -76,6 +92,15 @@ impl Window {
             close_button_hovered: false,
             close_button_pressed: false,
             close_requested: false,
+
+            minimize_button_hovered: false,
+            minimize_button_pressed: false,
+            minimize_requested: false,
+
+            maximize_button_hovered: false,
+            maximize_button_pressed: false,
+            maximize_toggle_requested: false,
+
             move_requested: false,
             needs_redraw: true,
         }
@@ -154,9 +179,44 @@ impl Window {
         )
     }
 
+    /// Draw window decorations (title bar + border).
+    ///
+    /// This is useful when a different system renders the window content but
+    /// wants to reuse ScarletUI's native decorations.
+    pub fn draw_decorations(&self, canvas: &mut Canvas) {
+        self.draw_titlebar(canvas);
+        self.draw_border(canvas);
+    }
+
+    /// Draw only the title bar.
+    pub fn draw_titlebar_only(&self, canvas: &mut Canvas) {
+        self.draw_titlebar(canvas);
+    }
+
+    /// Draw only the border.
+    pub fn draw_border_only(&self, canvas: &mut Canvas) {
+        self.draw_border(canvas);
+    }
+
     /// Check if close was requested
     pub fn is_close_requested(&self) -> bool {
         self.close_requested
+    }
+
+    pub fn take_minimize_requested(&mut self) -> bool {
+        let v = self.minimize_requested;
+        self.minimize_requested = false;
+        v
+    }
+
+    pub fn take_maximize_toggle_requested(&mut self) -> bool {
+        let v = self.maximize_toggle_requested;
+        self.maximize_toggle_requested = false;
+        v
+    }
+
+    pub fn can_maximize(&self) -> bool {
+        self.size_limits.max_width == 0 && self.size_limits.max_height == 0
     }
 
     pub fn take_move_requested(&mut self) -> bool {
@@ -172,8 +232,36 @@ impl Window {
 
     /// Get close button rect
     fn close_button_rect(&self) -> Rect {
-        let seg_w = (CLOSE_BUTTON_SIZE + CLOSE_BUTTON_MARGIN * 2).min(self.width);
-        let x = (self.width - seg_w) as i32;
+        self.control_button_rect(0)
+    }
+
+    fn maximize_button_rect(&self) -> Rect {
+        self.control_button_rect(1)
+    }
+
+    fn minimize_button_rect(&self) -> Rect {
+        self.control_button_rect(2)
+    }
+
+    /// Get control button rects.
+    ///
+    /// `index_from_right`: 0=close, 1=maximize, 2=minimize.
+    fn control_button_rect(&self, index_from_right: u32) -> Rect {
+        // Don't draw control buttons if window is too narrow (avoids negative positioning)
+        if self.width < TITLEBAR_CONTROL_COUNT {
+            return Rect::new(0, 0, 0, 0);
+        }
+        
+        let base_seg_w = CLOSE_BUTTON_SIZE + CLOSE_BUTTON_MARGIN * 2;
+        let seg_w = if self.width >= base_seg_w * TITLEBAR_CONTROL_COUNT {
+            base_seg_w
+        } else {
+            // Ensure 3 segments always fit (even if tiny).
+            (self.width / TITLEBAR_CONTROL_COUNT).max(1)
+        };
+        let total_w = seg_w.saturating_mul(TITLEBAR_CONTROL_COUNT).min(self.width);
+        let right_x0 = (self.width - total_w) as i32;
+        let x = right_x0 + (total_w as i32) - (seg_w as i32) * (index_from_right as i32 + 1);
         Rect::new(x, 0, seg_w, TITLEBAR_HEIGHT)
     }
 
@@ -191,7 +279,9 @@ impl Window {
         let r = WINDOW_CORNER_RADIUS;
 
         let close_rect = self.close_button_rect();
-        let close_x0 = close_rect.x.max(0) as u32;
+        let maximize_rect = self.maximize_button_rect();
+        let minimize_rect = self.minimize_button_rect();
+
         let close_color = if self.close_button_pressed {
             Color::rgb(190, 190, 194)
         } else if self.close_button_hovered {
@@ -199,11 +289,28 @@ impl Window {
         } else {
             base_color
         };
+
+        let maximize_color = if !self.can_maximize() {
+            Color::rgb(225, 225, 228)
+        } else if self.maximize_button_pressed {
+            Color::rgb(190, 190, 194)
+        } else if self.maximize_button_hovered {
+            Color::rgb(210, 210, 214)
+        } else {
+            base_color
+        };
+
+        let minimize_color = if self.minimize_button_pressed {
+            Color::rgb(190, 190, 194)
+        } else if self.minimize_button_hovered {
+            Color::rgb(210, 210, 214)
+        } else {
+            base_color
+        };
         
         for y in 0..TITLEBAR_HEIGHT {
             let color = base_color;
-            let color_close = close_color;
-            
+
             // For top rows, apply corner rounding
             if y < r {
                 let dy = (r - y) as i32;
@@ -211,7 +318,7 @@ impl Window {
                     // Check if inside rounded corners
                     let in_left = x < r;
                     let in_right = x >= self.width - r;
-                    
+
                     let mut skip = false;
                     if in_left {
                         let dx = (r - x) as i32;
@@ -225,15 +332,26 @@ impl Window {
                             skip = true;
                         }
                     }
-                    
+
                     if !skip {
-                        let c = if x >= close_x0 { color_close } else { color };
+                        let xi = x as i32;
+                        let c = if close_rect.contains(xi, y as i32) {
+                            close_color
+                        } else if maximize_rect.contains(xi, y as i32) {
+                            maximize_color
+                        } else if minimize_rect.contains(xi, y as i32) {
+                            minimize_color
+                        } else {
+                            color
+                        };
                         canvas.put_pixel(x as i32, y as i32, c);
                     }
                 }
             } else {
-                canvas.fill_rect(0, y as i32, close_x0, 1, color);
-                canvas.fill_rect(close_rect.x, y as i32, self.width.saturating_sub(close_x0), 1, color_close);
+                canvas.fill_rect(0, y as i32, self.width, 1, color);
+                canvas.fill_rect(close_rect.x, y as i32, close_rect.width, 1, close_color);
+                canvas.fill_rect(maximize_rect.x, y as i32, maximize_rect.width, 1, maximize_color);
+                canvas.fill_rect(minimize_rect.x, y as i32, minimize_rect.width, 1, minimize_color);
             }
         }
 
@@ -241,7 +359,7 @@ impl Window {
         let title_str = core::str::from_utf8(&self.title[..self.title_len]).unwrap_or("");
         canvas.draw_text(10, 9, title_str, Color::rgb(20, 20, 24));
 
-        // X mark on close segment
+        // Icons on control segments
         let cx = close_rect.x + close_rect.width as i32 / 2;
         let cy = close_rect.y + close_rect.height as i32 / 2;
         let size: i32 = 10;
@@ -255,6 +373,22 @@ impl Window {
         let x_color = Color::rgb(30, 30, 34);
         canvas.draw_line(x0, y0, x1, y1, x_color);
         canvas.draw_line(x1, y0, x0, y1, x_color);
+
+        // Maximize: draw a square outline
+        let mx = maximize_rect.x + maximize_rect.width as i32 / 2;
+        let my = maximize_rect.y + maximize_rect.height as i32 / 2;
+        let msize: i32 = 10;
+        let mhalf = msize / 2;
+        let mx0 = mx - mhalf;
+        let my0 = my - mhalf;
+        canvas.draw_rect(mx0, my0, msize as u32, msize as u32, x_color);
+
+        // Minimize (hide): draw a horizontal line
+        let nx = minimize_rect.x + minimize_rect.width as i32 / 2;
+        let ny = minimize_rect.y + minimize_rect.height as i32 / 2 + 3;
+        let nsize: i32 = 12;
+        let nhalf = nsize / 2;
+        canvas.draw_line(nx - nhalf, ny, nx + nhalf, ny, x_color);
     }
 
     /// Draw the border
@@ -330,6 +464,21 @@ impl View for Window {
                     if was_hovered != self.close_button_hovered {
                         self.needs_redraw = true;
                     }
+
+                    let maximize_rect = self.maximize_button_rect();
+                    let was_hovered = self.maximize_button_hovered;
+                    self.maximize_button_hovered = maximize_rect.contains(event.x(), event.y());
+                    if was_hovered != self.maximize_button_hovered {
+                        self.needs_redraw = true;
+                    }
+
+                    let minimize_rect = self.minimize_button_rect();
+                    let was_hovered = self.minimize_button_hovered;
+                    self.minimize_button_hovered = minimize_rect.contains(event.x(), event.y());
+                    if was_hovered != self.minimize_button_hovered {
+                        self.needs_redraw = true;
+                    }
+
                     // Don't consume - let event continue for other title bar interactions
                     false
                 }
@@ -340,9 +489,28 @@ impl View for Window {
                         self.needs_redraw = true;
                         true // Consume
                     } else {
-                        // Titlebar drag: request compositor-level move.
-                        self.move_requested = true;
-                        true
+                        let maximize_rect = self.maximize_button_rect();
+                        if maximize_rect.contains(event.x(), event.y()) {
+                            if self.can_maximize() {
+                                self.maximize_button_pressed = true;
+                                self.needs_redraw = true;
+                                true
+                            } else {
+                                // Disabled state: don't consume, allow drag.
+                                false
+                            }
+                        } else {
+                            let minimize_rect = self.minimize_button_rect();
+                            if minimize_rect.contains(event.x(), event.y()) {
+                                self.minimize_button_pressed = true;
+                                self.needs_redraw = true;
+                                true
+                            } else {
+                                // Titlebar drag: request compositor-level move.
+                                self.move_requested = true;
+                                true
+                            }
+                        }
                     }
                 }
                 EventKind::MouseUp { button: MouseButton::Left } => {
@@ -354,6 +522,22 @@ impl View for Window {
                         }
                         self.needs_redraw = true;
                         true // Consume
+                    } else if self.maximize_button_pressed {
+                        self.maximize_button_pressed = false;
+                        let maximize_rect = self.maximize_button_rect();
+                        if maximize_rect.contains(event.x(), event.y()) {
+                            self.maximize_toggle_requested = true;
+                        }
+                        self.needs_redraw = true;
+                        true
+                    } else if self.minimize_button_pressed {
+                        self.minimize_button_pressed = false;
+                        let minimize_rect = self.minimize_button_rect();
+                        if minimize_rect.contains(event.x(), event.y()) {
+                            self.minimize_requested = true;
+                        }
+                        self.needs_redraw = true;
+                        true
                     } else {
                         false
                     }
@@ -364,6 +548,14 @@ impl View for Window {
             // Not in title bar - reset close button hover
             if self.close_button_hovered {
                 self.close_button_hovered = false;
+                self.needs_redraw = true;
+            }
+            if self.maximize_button_hovered {
+                self.maximize_button_hovered = false;
+                self.needs_redraw = true;
+            }
+            if self.minimize_button_hovered {
+                self.minimize_button_hovered = false;
                 self.needs_redraw = true;
             }
             false
