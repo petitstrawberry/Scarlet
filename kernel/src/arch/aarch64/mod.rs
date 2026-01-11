@@ -11,6 +11,7 @@ use crate::task::Task;
 pub mod boot;
 pub mod context;
 pub mod earlycon;
+pub mod fpu;
 pub mod instruction;
 pub mod interrupt;
 pub mod kernel;
@@ -360,6 +361,10 @@ fn trap_init(aarch64: &mut Aarch64) {
         );
     }
 
+    // Allow EL1 to use FP/SIMD (for save/restore), but trap EL0 by default.
+    // Tasks that actually use FP/SIMD will enable EL0 access on-demand.
+    fpu::set_user_fpu_enabled(false);
+
     // Default to kernel vector while executing in EL1.
     set_trapvector(get_kernel_trapvector_paddr());
 }
@@ -392,6 +397,19 @@ pub fn configure_user_entry(trapframe: &mut Trapframe, options: crate::arch::Use
         UserReturnIrqPolicy::Disable => {
             trapframe.spsr |= DAIF_I;
         }
+    }
+
+    // Configure EL0 FP/SIMD access for the next user return.
+    // DTB-driven runtime gating complements the build-time feature.
+    if crate::arch::user_fpu_enabled() {
+        let cpu_id = crate::arch::get_current_cpu_id();
+        if let Some(task) = crate::sched::scheduler::get_scheduler().get_current_task(cpu_id) {
+            crate::arch::fpu::set_user_fpu_enabled(task.vcpu.fpu_used);
+        } else {
+            crate::arch::fpu::set_user_fpu_enabled(false);
+        }
+    } else {
+        crate::arch::fpu::set_user_fpu_enabled(false);
     }
 }
 

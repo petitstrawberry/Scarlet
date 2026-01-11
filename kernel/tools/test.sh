@@ -117,6 +117,7 @@ else
     # Normal test mode
     qemu-system-riscv64 \
         -machine virt \
+        -cpu rv64,v=true,vlen=256 \
         -bios default \
         -m 4G \
         -nographic \

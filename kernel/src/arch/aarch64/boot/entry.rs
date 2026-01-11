@@ -342,6 +342,9 @@ pub extern "C" fn arch_start_kernel(core_id: usize, dtb_ptr: usize) {
     // Create BootInfo with relocated FDT address
     let bootinfo = create_bootinfo_from_fdt(core_id, relocated_fdt_area.start);
 
+    // Decide whether user-mode FPU/Vector handling is enabled based on DTB.
+    crate::arch::init_user_context_from_fdt();
+
     // Some accelerators (e.g. HVF) can fault on exclusive accesses while the
     // MMU is disabled (memory treated as Device). The kernel allocator and
     // many locks rely on exclusives, so enable a minimal identity mapping

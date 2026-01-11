@@ -79,6 +79,9 @@ pub extern "C" fn arch_start_kernel(hartid: usize, fdt_ptr: usize) {
     // Create BootInfo with relocated FDT address
     let bootinfo = create_bootinfo_from_fdt(hartid, relocated_fdt_area.start);
 
+    // Decide whether user-mode FPU/Vector handling is enabled based on DTB.
+    crate::arch::init_user_context_from_fdt();
+
     crate::early_println!("Hart {}: Initializing core....", hartid);
     // Get raw Riscv64 struct
     let riscv: &mut Riscv64 = unsafe { transmute(&CPUS[hartid] as *const _ as usize) };

@@ -7,6 +7,9 @@
 use crate::arch::Trapframe;
 
 use super::IntRegisters;
+use super::fpu::{FpuContext, VectorContext};
+
+use alloc::boxed::Box;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Mode {
@@ -17,6 +20,14 @@ pub enum Mode {
 #[derive(Debug, Clone)]
 pub struct Vcpu {
     pub iregs: IntRegisters,
+    /// Floating-point register context (F/D extensions)
+    pub fpu: FpuContext,
+    /// Whether this task has ever used the FPU (F/D).
+    pub fpu_used: bool,
+    /// Vector register context (V extension)
+    pub vector: Option<Box<VectorContext>>,
+    /// Whether this task has ever used the Vector extension (V).
+    pub vector_used: bool,
     pc: u64,
     asid: usize,
     mode: Mode,
@@ -26,6 +37,10 @@ impl Vcpu {
     pub fn new(mode: Mode) -> Self {
         Vcpu {
             iregs: IntRegisters::new(),
+            fpu: FpuContext::new(),
+            fpu_used: false,
+            vector: None,
+            vector_used: false,
             pc: 0,
             asid: 0,
             mode,
@@ -66,9 +81,14 @@ impl Vcpu {
 
     /// Clone the entire VCPU state to another VCPU
     ///
-    /// This copies all registers including general-purpose registers and PC.
+    /// This copies all registers including general-purpose registers, FPU context,
+    /// Vector context, and PC.
     pub fn clone_to(&self, other: &mut Vcpu) {
         other.iregs = self.iregs;
+        other.fpu = self.fpu.clone();
+        other.fpu_used = self.fpu_used;
+        other.vector = self.vector.clone();
+        other.vector_used = self.vector_used;
         other.pc = self.pc;
     }
 

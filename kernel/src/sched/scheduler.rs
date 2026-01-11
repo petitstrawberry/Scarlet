@@ -511,24 +511,37 @@ impl Scheduler {
     /// Perform kernel context switch between tasks
     ///
     /// This function handles the low-level kernel context switching between
-    /// the current task and the next selected task.
+    /// the current task and the next selected task. It also saves/restores
+    /// FPU/SIMD/Vector context for user-space tasks.
     ///
     /// # Arguments
     /// * `cpu_id` - The CPU ID
     /// * `from_task_id` - Current task ID
     /// * `to_task_id` - Next task ID
-    fn kernel_context_switch(&mut self, _cpu_id: usize, from_task_id: usize, to_task_id: usize) {
+    fn kernel_context_switch(&mut self, cpu_id: usize, from_task_id: usize, to_task_id: usize) {
         // crate::println!("[SCHED] CPU{}: Switching kernel context from Task {} to Task {}", cpu_id, from_task_id, to_task_id);
         if from_task_id != to_task_id {
             // Find tasks in all queues (ready, blocked, zombie)
             let mut from_ctx_ptr: *mut crate::arch::KernelContext = core::ptr::null_mut();
             let mut to_ctx_ptr: *const crate::arch::KernelContext = core::ptr::null();
 
-            if let Some(from_task) = self.task_pool.get_task(from_task_id) {
-                from_ctx_ptr = &mut from_task.kernel_context
-            }
-            if let Some(to_task) = self.task_pool.get_task(to_task_id) {
-                to_ctx_ptr = &to_task.kernel_context
+            {
+                if let Some(from_task) = self.task_pool.get_task(from_task_id) {
+                    from_ctx_ptr = &mut from_task.kernel_context;
+
+                    #[cfg(feature = "user-fpu")]
+                    crate::arch::fpu::kernel_switch_out_user_fpu(&mut from_task.vcpu);
+
+                    #[cfg(feature = "user-vector")]
+                    crate::arch::fpu::kernel_switch_out_user_vector(
+                        cpu_id,
+                        from_task_id,
+                        &mut from_task.vcpu,
+                    );
+                }
+                if let Some(to_task) = self.task_pool.get_task(to_task_id) {
+                    to_ctx_ptr = &to_task.kernel_context;
+                }
             }
 
             if !from_ctx_ptr.is_null() && !to_ctx_ptr.is_null() {
@@ -536,7 +549,12 @@ impl Scheduler {
                 unsafe {
                     crate::arch::switch::switch_to(from_ctx_ptr, to_ctx_ptr);
                 }
+
                 // Execution resumes here when this task is rescheduled
+                if let Some(from_task) = self.task_pool.get_task(from_task_id) {
+                    #[cfg(feature = "user-fpu")]
+                    crate::arch::fpu::kernel_switch_in_user_fpu(&mut from_task.vcpu);
+                }
             } else {
                 // crate::println!("[SCHED] ERROR: Context pointers not found - from: {:p}, to: {:p}", from_ctx_ptr, to_ctx_ptr);
             }

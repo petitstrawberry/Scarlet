@@ -19,6 +19,10 @@ runner = "tools/run_aarch64.sh"
 # For normal runs, use run_aarch64.sh
 # For tests, use test_aarch64.sh (this will be overridden by CARGO_TARGET_AARCH64_UNKNOWN_NONE_ELF_RUNNER for tests)
 runner = "tools/run_aarch64.sh"
+rustflags = [
+	"-C", "no-vectorize-loops",
+	"-C", "no-vectorize-slp",
+]
 
 [build]
 target = "targets/riscv64gc-unknown-none-elf.json"
