@@ -80,9 +80,23 @@ test = false
 name = "ui_demo"
 path = "src/ui_demo.rs"
 
+[[bin]]
+name = "slint_demo"
+path = "src/slint_demo.rs"
+
 [dependencies]
 scarlet_std = { path = "../lib/std", features = ["alloc_debug"] }
 framebuffer = { path = "../lib/framebuffer" }
 sws_protocol = { path = "../lib/sws_protocol" }
 sws-client = { path = "../lib/sws-client" }
 scarlet-ui = { path = "../lib/scarlet-ui" }
+slint-scarlet = { path = "../lib/slint-scarlet" }
+slint = { version = "1.14", default-features = false, features = [
+    "unsafe-single-threaded",
+    "renderer-software",
+    "libm",
+    "compat-1-2"
+] }
+
+[build-dependencies]
+slint-build = "1.14"

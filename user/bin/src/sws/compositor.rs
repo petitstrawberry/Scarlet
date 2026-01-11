@@ -1177,9 +1177,9 @@ impl Compositor {
 
             // Process IPC events from global queue (non-blocking)
             let ipc_events = self.ipc_server.process_messages()?;
-            if !ipc_events.is_empty() {
-                println!("[Compositor] Processing {} IPC events", ipc_events.len());
-            }
+            // if !ipc_events.is_empty() {
+            //     println!("[Compositor] Processing {} IPC events", ipc_events.len());
+            // }
             for event in ipc_events {
                 if self.handle_ipc_event(event)? {
                     needs_redraw = true;
@@ -1596,10 +1596,10 @@ impl Compositor {
                     return Ok(false);
                 }
 
-                println!(
-                    "[Compositor] Window #{} buffer updated: ({},{}) {}x{} -> screen ({},{}) {}x{}",
-                    window_id, damage_x, damage_y, damage_width, damage_height, sx0, sy0, w, h
-                );
+                // println!(
+                //     "[Compositor] Window #{} buffer updated: ({},{}) {}x{} -> screen ({},{}) {}x{}",
+                //     window_id, damage_x, damage_y, damage_width, damage_height, sx0, sy0, w, h
+                // );
 
                 self.add_pending_damage((sx0, sy0, w, h));
             }

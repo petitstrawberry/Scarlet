@@ -577,10 +577,10 @@ fn client_thread_main(client_id: usize, mut socket: Socket) {
 
         let (msg_type, payload) = match frame_reader.poll(&mut socket) {
             Ok(Some(v)) => {
-                println!(
-                    "[ClientThread {}] Loop #{}: read_frame SUCCESS (msg_type={})",
-                    client_id, loop_count, v.0
-                );
+                // println!(
+                //     "[ClientThread {}] Loop #{}: read_frame SUCCESS (msg_type={})",
+                //     client_id, loop_count, v.0
+                // );
                 v
             }
             Ok(None) => {
