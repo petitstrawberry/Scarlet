@@ -366,7 +366,7 @@ fn read_config_dir(dir_path: &str) -> Result<String, &'static str> {
 
                 // Only process .toml files
                 if entry.is_file() && entry.name.ends_with(".toml") {
-                    toml_files.push(entry.name.clone());
+                    toml_files.push(entry.name);
                 }
             }
 
@@ -380,7 +380,8 @@ fn read_config_dir(dir_path: &str) -> Result<String, &'static str> {
 
             // Read each file and combine content
             for filename in toml_files {
-                let file_path = std::format!("{}/{}", dir_path, filename);
+                use std::format;
+                let file_path = format!("{}/{}", dir_path, filename);
                 println!("stemd:   Loading {}", file_path);
 
                 match read_config(&file_path) {
