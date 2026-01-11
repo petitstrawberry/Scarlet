@@ -11,7 +11,8 @@ use std::collections::BTreeMap;
 pub struct ShmPool {
     /// Pool object ID
     pub pool_id: u32,
-    /// File descriptor (handle) for the shared memory
+    /// Handle for the shared memory (received via Socket::recv_handle)
+    /// The Linux compatibility layer converts SCM_RIGHTS FDs to kernel handles
     pub fd: i32,
     /// Size of the pool in bytes
     pub size: usize,

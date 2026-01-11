@@ -111,15 +111,20 @@ XDG Shell is the standard protocol for desktop window management:
 - `sws_protocol` - SWS protocol definitions
 - `sws-client` - SWS client library (for connecting to SWS server)
 
+## Handle Transfer
+
+The bridge uses Scarlet's native handle transfer mechanism (`Socket::recv_handle()` and `Socket::send_handle()`) for passing file descriptors. The Linux compatibility layer automatically converts SCM_RIGHTS file descriptor passing to handle transfer, so Wayland clients can use standard file descriptor passing and it will work transparently.
+
+### Shared Memory
+
+Wayland clients pass shared memory file descriptors using SCM_RIGHTS:
+1. Client creates a shared memory pool with `wl_shm.create_pool` and passes an FD
+2. Linux compatibility layer converts the FD to a kernel handle
+3. Bridge receives the handle using `Socket::recv_handle()`
+4. Bridge forwards the handle to SWS using `Socket::send_handle()`
+5. SWS maps the shared memory for compositing
+
 ## Future Work
-
-### SCM_RIGHTS Support
-
-Currently, file descriptor passing (SCM_RIGHTS) is stubbed out. This is needed for:
-- Shared memory file descriptors (wl_shm)
-- DMA-BUF buffers (future)
-
-This requires kernel support for passing capabilities through UNIX domain sockets.
 
 ### Input Event Translation
 

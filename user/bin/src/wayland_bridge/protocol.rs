@@ -143,7 +143,7 @@ impl WaylandArg {
                 // size (4 bytes) + data + padding
                 4 + ((a.len() + 3) & !3) as u32
             }
-            WaylandArg::Fd(_) => 0, // FDs are passed via ancillary data
+            WaylandArg::Fd(_) => 0, // FDs are passed via handle transfer (Socket::recv_handle/send_handle)
         }
     }
 
@@ -175,7 +175,8 @@ impl WaylandArg {
                 }
             }
             WaylandArg::Fd(_) => {
-                // FDs are passed via ancillary data (SCM_RIGHTS)
+                // FDs are passed via handle transfer (Socket::recv_handle/send_handle)
+                // The Linux compatibility layer converts SCM_RIGHTS to handle transfer
                 // Nothing to encode in the message body
             }
         }

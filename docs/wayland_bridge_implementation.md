@@ -114,15 +114,17 @@ Required implementation:
 **Location**: Multiple files
 
 Required implementation:
-- SCM_RIGHTS file descriptor passing (kernel prerequisite)
-  - Wayland clients pass SHM FDs via UNIX socket
-  - Bridge receives FD and forwards to SWS
-- SHM handle translation:
+- Handle transfer for shared memory:
+  - Wayland clients pass SHM FDs via SCM_RIGHTS (standard Wayland protocol)
+  - Linux compatibility layer converts SCM_RIGHTS to handle transfer automatically
+  - Bridge receives handles using `Socket::recv_handle()`
+  - Bridge forwards handles to SWS using `Socket::send_handle()`
+- SHM handle mapping:
   - Map Wayland wl_shm_pool to SWS shared memory
   - Translate buffer offsets and formats
   - Share memory between Wayland client and SWS compositor
 
-Current status: Structure in place, but FD passing not implemented (requires kernel support)
+Current status: Structure in place, handle transfer APIs available via Socket
 
 ### 4. Input Event Translation
 
@@ -205,7 +207,7 @@ Required tests:
    - Basic input event routing
 
 2. **Medium Priority** (Required for real applications):
-   - Shared memory integration (requires kernel support)
+   - Shared memory integration (handle transfer APIs available)
    - wl_seat protocol for proper input handling
    - wl_output for display information
 
@@ -248,7 +250,7 @@ The immediate next steps to make the bridge functional:
 
 Once basic functionality works, add:
 - Proper input event translation
-- Shared memory integration (when kernel support is ready)
+- Complete shared memory integration with handle forwarding
 - Additional Wayland protocols as needed
 
 ## Conclusion

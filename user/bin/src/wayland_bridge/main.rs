@@ -303,11 +303,13 @@ impl WaylandBridge {
                 println!("[Bridge] wl_shm.create_pool");
                 if payload.len() >= 12 {
                     let pool_id = u32::from_ne_bytes([payload[0], payload[1], payload[2], payload[3]]);
-                    // FD would be passed via SCM_RIGHTS (not yet implemented)
+                    // Note: FD is passed via handle transfer (Socket::recv_handle)
+                    // The Linux compatibility layer converts SCM_RIGHTS to handle transfer
                     let size = i32::from_ne_bytes([payload[8], payload[9], payload[10], payload[11]]);
                     println!("[Bridge] Created pool ID: {} size: {}", pool_id, size);
                     self.objects.insert(pool_id, String::from("wl_shm_pool"));
-                    self.shm_manager.create_pool(pool_id, -1, size); // FD placeholder
+                    // TODO: Receive handle using Socket::recv_handle() and store it
+                    self.shm_manager.create_pool(pool_id, -1, size); // FD will be received separately
                 }
                 Ok(None)
             }
