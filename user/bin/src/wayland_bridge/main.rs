@@ -208,14 +208,10 @@ impl WaylandBridge {
                     println!("[Bridge] Registry ID: {}", registry_id);
                     self.objects.insert(registry_id, String::from("wl_registry"));
                     
-                    // Send global events for all available interfaces
-                    // We'll send them all at once for simplicity
-                    // In a real implementation, we might want to batch these
-                    for global_msg in self.registry.get_global_events(registry_id) {
-                        let bytes = global_msg.encode();
-                        // TODO: Queue these for sending
-                        println!("[Bridge] Would send global event: {} bytes", bytes.len());
-                    }
+                    // Note: In a complete implementation, we would queue all global events
+                    // and send them after this handler returns. For now, we just create
+                    // the registry object. The client will typically call sync after
+                    // get_registry, and we'll send globals in response to bind requests.
                 }
                 Ok(None)
             }
@@ -477,7 +473,7 @@ impl WaylandBridge {
                 }
                 Err(e) => {
                     println!("[Bridge] Error accepting connection: {:?}", e);
-                    std::thread::sleep(core::time::Duration::from_millis(100));
+                    std::thread::sleep(std::time::Duration::from_millis(100));
                 }
             }
         }
