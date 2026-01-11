@@ -295,16 +295,24 @@ impl TransparentExecutor {
     /// Current implementation manually resolves relative paths, but this should
     /// be handled by VFS layer for consistency and better error handling.
     fn open_file(path: &str, task: &Task) -> ExecutorResult<crate::object::KernelObject> {
-        if let Some(vfs) = task.get_vfs() {
-            let absolute_path = vfs.resolve_path_to_absolute(path);
+        // If the task does not have an isolated VFS namespace, fall back to the global VFS.
+        // This matches the documented Task behavior: `vfs: None` means using the global
+        // filesystem namespace.
+        let vfs = task
+            .get_vfs()
+            .cloned()
+            .unwrap_or_else(get_global_vfs_manager);
 
-            match vfs.open(&absolute_path, 0) {
-                // O_RDONLY
-                Ok(obj) => Ok(obj),
-                Err(e) => Err(ExecutorError::ResourceAllocationFailed),
-            }
-        } else {
-            Err(ExecutorError::ResourceAllocationFailed)
+        let absolute_path = vfs.resolve_path_to_absolute(path);
+
+        // O_RDONLY
+        match vfs.open(&absolute_path, 0) {
+            Ok(obj) => Ok(obj),
+            Err(e) => Err(ExecutorError::ExecutionFailed(alloc::format!(
+                "Failed to open '{}': {}",
+                absolute_path,
+                e.message
+            ))),
         }
     }
 
