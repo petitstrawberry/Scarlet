@@ -1,5 +1,6 @@
 use core::arch::asm;
 use core::mem::transmute;
+use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use instruction::sbi::sbi_system_reset;
 use trap::kernel::_kernel_trap_entry;
 use trap::kernel::arch_kernel_trap_handler;
@@ -38,6 +39,44 @@ use crate::vm::vmem::MemoryArea;
 
 pub type Arch = Riscv64;
 
+/// Per-hart ownership of the live Vector register file.
+///
+/// When a task that used the V extension is rescheduled on the same hart, we can
+/// skip restoring vregs if it still owns the live state. This removes a very
+/// expensive per-timeslice illegal-instruction trap for vector-heavy workloads.
+const NO_VECTOR_OWNER: usize = usize::MAX;
+static VECTOR_OWNER: [AtomicUsize; NUM_OF_CPUS] =
+    [const { AtomicUsize::new(NO_VECTOR_OWNER) }; NUM_OF_CPUS];
+
+/// Whether the live vector register file contains state that is newer than the
+/// saved per-task context of `VECTOR_OWNER`.
+///
+/// This is needed because we sometimes keep vregs live across timeslices while
+/// forcing sstatus.VS to Clean/Off to avoid mis-attributing Dirtiness to another
+/// task.
+static VECTOR_OWNER_DIRTY: [AtomicBool; NUM_OF_CPUS] =
+    [const { AtomicBool::new(false) }; NUM_OF_CPUS];
+
+#[inline]
+pub(crate) fn get_vector_owner(cpu_id: usize) -> usize {
+    VECTOR_OWNER[cpu_id].load(Ordering::Relaxed)
+}
+
+#[inline]
+pub(crate) fn set_vector_owner(cpu_id: usize, owner: usize) {
+    VECTOR_OWNER[cpu_id].store(owner, Ordering::Relaxed)
+}
+
+#[inline]
+pub(crate) fn get_vector_owner_dirty(cpu_id: usize) -> bool {
+    VECTOR_OWNER_DIRTY[cpu_id].load(Ordering::Relaxed)
+}
+
+#[inline]
+pub(crate) fn set_vector_owner_dirty(cpu_id: usize, dirty: bool) {
+    VECTOR_OWNER_DIRTY[cpu_id].store(dirty, Ordering::Relaxed)
+}
+
 /// Apply user-entry options for the upcoming `sret`.
 ///
 /// This does not enable interrupts in the kernel immediately; it only controls the
@@ -61,6 +100,110 @@ pub fn configure_user_entry(_trapframe: &mut Trapframe, options: crate::arch::Us
             sstatus &= !SPIE;
             asm!("csrw sstatus, {0}", in(reg) sstatus);
         },
+    }
+
+    // Lazy FPU/Vector: trap on first use.
+    // If the task has never used FPU/Vector, keep them disabled for user mode.
+    // When an illegal-instruction trap is raised by a FP/Vector instruction,
+    // the trap handler will mark the task as used and re-enable the extension.
+    let cpu_id = crate::arch::get_cpu().get_cpuid();
+    let (current_task_ptr, current_task_id, owner_task_ptr, owner_id, owner_dirty) = {
+        let sched = crate::sched::scheduler::get_scheduler();
+        let Some(current_task_id) = sched.get_current_task_id(cpu_id) else {
+            return;
+        };
+        let Some(current_task_ptr) = sched
+            .get_task_by_id(current_task_id)
+            .map(|t| t as *mut Task)
+        else {
+            return;
+        };
+
+        let owner_id = get_vector_owner(cpu_id);
+        let owner_dirty = get_vector_owner_dirty(cpu_id);
+        let owner_task_ptr =
+            if owner_dirty && owner_id != NO_VECTOR_OWNER && owner_id != current_task_id {
+                sched.get_task_by_id(owner_id).map(|t| t as *mut Task)
+            } else {
+                None
+            };
+
+        (
+            current_task_ptr,
+            current_task_id,
+            owner_task_ptr,
+            owner_id,
+            owner_dirty,
+        )
+    };
+
+    let task = unsafe { &mut *current_task_ptr };
+
+    #[cfg(feature = "user-fpu")]
+    {
+        if !task.vcpu.fpu_used {
+            crate::arch::riscv64::fpu::disable_fpu();
+        }
+    }
+    #[cfg(not(feature = "user-fpu"))]
+    {
+        crate::arch::riscv64::fpu::disable_fpu();
+    }
+
+    #[cfg(feature = "user-vector")]
+    {
+        if !task.vcpu.vector_used {
+            crate::arch::riscv64::fpu::disable_vector();
+            return;
+        }
+    }
+    #[cfg(not(feature = "user-vector"))]
+    {
+        crate::arch::riscv64::fpu::disable_vector();
+        return;
+    }
+
+    // Ensure the task has a backing context (allocated lazily).
+    if task.vcpu.vector.is_none() {
+        task.vcpu.vector = Some(alloc::boxed::Box::new(
+            crate::arch::riscv64::fpu::VectorContext::new(),
+        ));
+    }
+
+    // If another task currently owns the live vregs and its live state hasn't
+    // been saved, save it now before we clobber vregs with our restore.
+    if owner_dirty && owner_id != NO_VECTOR_OWNER && owner_id != current_task_id {
+        if let Some(owner_ptr) = owner_task_ptr {
+            let owner_task = unsafe { &mut *owner_ptr };
+            if owner_task.vcpu.vector.is_none() {
+                owner_task.vcpu.vector = Some(alloc::boxed::Box::new(
+                    crate::arch::riscv64::fpu::VectorContext::new(),
+                ));
+                owner_task.vcpu.vector_used = true;
+            }
+            crate::arch::riscv64::fpu::enable_vector();
+            unsafe { owner_task.vcpu.vector.as_mut().unwrap().save() };
+            crate::arch::riscv64::fpu::mark_vector_clean();
+            set_vector_owner_dirty(cpu_id, false);
+        } else {
+            // Owner task disappeared; drop the dirty flag to avoid repeated work.
+            set_vector_owner_dirty(cpu_id, false);
+        }
+    }
+
+    // Vector hot-path:
+    // - Restore only when ownership changed on this hart.
+    // - Otherwise just re-enable access without a full restore.
+    if owner_id != current_task_id {
+        crate::arch::riscv64::fpu::enable_vector();
+        unsafe { task.vcpu.vector.as_ref().unwrap().restore() };
+        crate::arch::riscv64::fpu::mark_vector_clean();
+        set_vector_owner(cpu_id, current_task_id);
+        set_vector_owner_dirty(cpu_id, false);
+    } else if !crate::arch::riscv64::fpu::is_vector_enabled() {
+        crate::arch::riscv64::fpu::enable_vector();
+        crate::arch::riscv64::fpu::mark_vector_clean();
+        // Preserve owner-dirty: if we kept live unsaved state, it stays dirty.
     }
 }
 
@@ -285,6 +428,9 @@ fn trap_init(riscv: &mut Riscv64) {
 
     // Enable FPU for user-space and kernel access
     fpu::enable_fpu();
+
+    // Enable Vector extension for user-space and kernel access
+    fpu::enable_vector();
 
     // early_println!("Trap stack area    : {:#x} - {:#x}", trap_stack - stack_size, trap_stack - 1);
     // early_println!("Trap stack size    : {:#x}", stack_size);

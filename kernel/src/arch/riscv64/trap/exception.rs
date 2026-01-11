@@ -40,6 +40,132 @@ fn log_fatal_page_fault_context(
 
 pub fn arch_exception_handler(trapframe: &mut Trapframe, cause: usize) {
     match cause {
+        /* Illegal instruction (used for lazy FP/Vector enable) */
+        2 => {
+            let task = get_scheduler()
+                .get_current_task(get_cpu().get_cpuid())
+                .unwrap();
+
+            // Read stval (may contain the faulting instruction word; can also be 0).
+            let mut inst: usize;
+            let sstatus: usize;
+            unsafe {
+                asm!(
+                    "csrr {0}, stval",
+                    "csrr {1}, sstatus",
+                    out(reg) inst,
+                    out(reg) sstatus,
+                );
+            }
+
+            // If stval doesn't contain the instruction, try to fetch it from the task's
+            // mapped user code via the VM translation.
+            if inst == 0 {
+                if let Some(paddr) = task.vm_manager.translate_vaddr(trapframe.epc as usize) {
+                    inst = crate::arch::instruction::Instruction::fetch(paddr).raw as usize;
+                }
+            }
+
+            // Helpers for determining whether we should treat this as a lazy enable trap.
+            let fs_off = (sstatus & 0x6000) == 0;
+            let vs_off = (sstatus & 0x600) == 0;
+
+            let raw32 = inst as u32;
+            let is_32bit = (raw32 & 0b11) == 0b11;
+
+            // Vector instructions are always 32-bit.
+            let is_vector_insn = if is_32bit {
+                let opcode = raw32 & 0x7f;
+                if opcode == 0x57 {
+                    true
+                } else if opcode == 0x73 {
+                    // SYSTEM/CSR access: treat v* CSRs as vector-related.
+                    let csr = (raw32 >> 20) & 0xfff;
+                    // vstart..vcsr, vl..vlenb
+                    (csr >= 0x008 && csr <= 0x00a) || (csr >= 0xc20 && csr <= 0xc22)
+                } else {
+                    false
+                }
+            } else {
+                false
+            };
+
+            let is_fpu_insn = if is_32bit {
+                let opcode = raw32 & 0x7f;
+                let funct3 = (raw32 >> 12) & 0x7;
+                match opcode {
+                    // FP arithmetic and conversion ops.
+                    0x53 | 0x43 | 0x47 | 0x4b | 0x4f => true,
+                    // FP loads/stores.
+                    0x07 | 0x27 => matches!(funct3, 0b010 | 0b011 | 0b100),
+                    _ => false,
+                }
+            } else {
+                // Minimal support for common compressed FP loads/stores.
+                let raw16 = (raw32 & 0xffff) as u16;
+                let quadrant = raw16 & 0b11;
+                let funct3 = (raw16 >> 13) & 0x7;
+
+                // C.FLD/C.FSD (quadrant 0), C.FLDSP/C.FSDSP (quadrant 2)
+                (quadrant == 0b00 || quadrant == 0b10) && matches!(funct3, 0b001 | 0b101)
+            };
+
+            // Handle lazy enable without relying purely on instruction decoding.
+            // This avoids panicking if stval is 0 or if we cannot classify the instruction.
+            #[cfg(feature = "user-vector")]
+            if vs_off && is_vector_insn {
+                task.vcpu.vector_used = true;
+                crate::arch::riscv64::fpu::enable_vector();
+                if task.vcpu.vector.is_none() {
+                    task.vcpu.vector = Some(alloc::boxed::Box::new(
+                        crate::arch::riscv64::fpu::VectorContext::new(),
+                    ));
+                }
+                unsafe { task.vcpu.vector.as_ref().unwrap().restore() };
+                crate::arch::riscv64::fpu::mark_vector_clean();
+                return;
+            }
+
+            #[cfg(feature = "user-fpu")]
+            if fs_off && is_fpu_insn {
+                task.vcpu.fpu_used = true;
+                crate::arch::riscv64::fpu::enable_fpu();
+                unsafe { task.vcpu.fpu.restore() };
+                crate::arch::riscv64::fpu::mark_fpu_clean();
+                return;
+            }
+
+            // Fallback: if the relevant extension is disabled, enable it and restore a
+            // safe initial context (prevents leaking previous task state).
+            #[cfg(feature = "user-fpu")]
+            if fs_off {
+                task.vcpu.fpu_used = true;
+                crate::arch::riscv64::fpu::enable_fpu();
+                unsafe { task.vcpu.fpu.restore() };
+                crate::arch::riscv64::fpu::mark_fpu_clean();
+                return;
+            }
+
+            #[cfg(feature = "user-vector")]
+            if vs_off {
+                task.vcpu.vector_used = true;
+                crate::arch::riscv64::fpu::enable_vector();
+                if task.vcpu.vector.is_none() {
+                    task.vcpu.vector = Some(alloc::boxed::Box::new(
+                        crate::arch::riscv64::fpu::VectorContext::new(),
+                    ));
+                }
+                unsafe { task.vcpu.vector.as_ref().unwrap().restore() };
+                crate::arch::riscv64::fpu::mark_vector_clean();
+                return;
+            }
+
+            print_traplog(trapframe);
+            panic!(
+                "Unhandled illegal instruction: inst={:#x} epc={:#x}",
+                raw32, trapframe.epc
+            );
+        }
         /* Environment call from U-mode */
         8 => {
             /* Execute SystemCall */

@@ -66,6 +66,8 @@ fn get_sctlr_el1() -> u64 {
 #[repr(u8)]
 pub enum ExceptionClass {
     Unknown = 0x00,
+    /// Trapped FP/SIMD access (typically because CPACR_EL1.FPEN traps EL0).
+    FpSimdAccess = 0x07,
     SvcAarch64 = 0x15,
     InstructionAbortLowerEl = 0x20,
     InstructionAbortSameEl = 0x21,
@@ -79,6 +81,7 @@ impl From<u64> for ExceptionClass {
         let ec = ((val >> 26) & 0x3f) as u8;
         match ec {
             0x00 => ExceptionClass::Unknown,
+            0x07 => ExceptionClass::FpSimdAccess,
             0x15 => ExceptionClass::SvcAarch64,
             0x20 => ExceptionClass::InstructionAbortLowerEl,
             0x21 => ExceptionClass::InstructionAbortSameEl,
@@ -135,6 +138,28 @@ pub fn arch_exception_handler(trapframe: &mut Trapframe, trap_kind: usize) {
     // );
 
     match ec {
+        // User tried to execute FP/SIMD while EL0 access is trapped.
+        // Enable access for this task and restore its context, then retry.
+        ExceptionClass::FpSimdAccess => {
+            #[cfg(feature = "user-fpu")]
+            {
+                let cpu_id = get_cpu().get_cpuid();
+                let task = get_scheduler().get_current_task(cpu_id).unwrap();
+                task.vcpu.fpu_used = true;
+                crate::arch::fpu::set_user_fpu_enabled(true);
+                unsafe {
+                    task.vcpu.fpu.restore();
+                }
+                return;
+            }
+
+            #[cfg(not(feature = "user-fpu"))]
+            {
+                print_trap_info(trapframe, esr);
+                panic!("FP/SIMD is disabled by build config");
+            }
+        }
+
         // SVC from AArch64 user mode (syscall)
         ExceptionClass::SvcAarch64 => {
             // Minimal syscall trace for debugging AArch64 SVC path.

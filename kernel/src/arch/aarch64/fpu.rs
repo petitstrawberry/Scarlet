@@ -7,6 +7,12 @@
 
 use core::arch::asm;
 
+mod fpu_switch;
+
+pub use fpu_switch::{
+    kernel_switch_in_user_fpu, kernel_switch_out_user_fpu, kernel_switch_out_user_vector,
+};
+
 /// FPU/SIMD context for AArch64 (NEON)
 ///
 /// Contains all vector registers and the floating-point control/status registers.
@@ -44,6 +50,7 @@ impl FpuContext {
     pub unsafe fn save(&mut self) {
         let ptr = self.v.as_mut_ptr() as *mut u8;
         asm!(
+            ".arch armv8-a+fp+simd",
             // Save all 32 vector registers using STP for Q registers
             "stp q0, q1, [{0}, #0*32]",
             "stp q2, q3, [{0}, #1*32]",
@@ -68,6 +75,7 @@ impl FpuContext {
         let fpcr: u64;
         let fpsr: u64;
         asm!(
+            ".arch armv8-a+fp+simd",
             "mrs {0}, fpcr",
             "mrs {1}, fpsr",
             out(reg) fpcr,
@@ -87,6 +95,7 @@ impl FpuContext {
     pub unsafe fn restore(&self) {
         // Restore FPCR and FPSR first
         asm!(
+            ".arch armv8-a+fp+simd",
             "msr fpcr, {0}",
             "msr fpsr, {1}",
             in(reg) self.fpcr,
@@ -95,6 +104,7 @@ impl FpuContext {
         );
         let ptr = self.v.as_ptr() as *const u8;
         asm!(
+            ".arch armv8-a+fp+simd",
             // Restore all 32 vector registers using LDP for Q registers
             "ldp q0, q1, [{0}, #0*32]",
             "ldp q2, q3, [{0}, #1*32]",
@@ -146,6 +156,45 @@ pub fn enable_fpu() {
             options(nomem, nostack),
         );
         cpacr |= CPACR_EL1_FPEN_FULL;
+        asm!(
+            "msr cpacr_el1, {0}",
+            "isb",
+            in(reg) cpacr,
+            options(nomem, nostack),
+        );
+    }
+}
+
+/// Configure whether EL0 (user mode) may use FP/SIMD.
+///
+/// We keep EL1 access enabled so the kernel can always save/restore contexts.
+///
+/// CPACR_EL1.FPEN meanings:
+/// - 0b00/0b10: trap EL0 and EL1
+/// - 0b01:     trap EL0 only (EL1 allowed)
+/// - 0b11:     no trapping (EL0+EL1 allowed)
+#[inline]
+pub fn set_user_fpu_enabled(enabled: bool) {
+    const FPEN_SHIFT: u64 = 20;
+    const FPEN_MASK: u64 = 0b11 << FPEN_SHIFT;
+    const FPEN_TRAP_EL0_ONLY: u64 = 0b01 << FPEN_SHIFT;
+    const FPEN_FULL: u64 = 0b11 << FPEN_SHIFT;
+
+    let desired = if enabled {
+        FPEN_FULL
+    } else {
+        FPEN_TRAP_EL0_ONLY
+    };
+
+    unsafe {
+        let mut cpacr: u64;
+        asm!(
+            "mrs {0}, cpacr_el1",
+            out(reg) cpacr,
+            options(nomem, nostack),
+        );
+        cpacr &= !FPEN_MASK;
+        cpacr |= desired;
         asm!(
             "msr cpacr_el1, {0}",
             "isb",
