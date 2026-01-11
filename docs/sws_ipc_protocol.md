@@ -135,6 +135,131 @@ Semantics:
 	- Move the child together when the parent is interactively moved.
 - Parent relationships are a compositor policy; clients must not assume focus changes.
 
+#### `SET_WINDOW_TRANSIENT_FLAGS` (type = 8)
+
+Payload (8 bytes):
+
+| Offset | Size | Field       | Type |
+|--------|------|-------------|------|
+| 0      | 4    | `window_id` | u32  |
+| 4      | 4    | `flags`     | u32  |
+
+Semantics:
+
+- Configure transient behavior flags for a window (bitset).
+- Flags from `sws_protocol::transient_flags`:
+	- `FOLLOW_PARENT_MOVE = 0x01`: Child moves with parent during interactive moves.
+	- `RAISE_WITH_PARENT = 0x02`: Raising parent raises the child group.
+
+#### `RESIZE_WINDOW` (type = 9)
+
+Payload (12 bytes):
+
+| Offset | Size | Field       | Type |
+|--------|------|-------------|------|
+| 0      | 4    | `window_id` | u32  |
+| 4      | 4    | `width`     | u32  |
+| 8      | 4    | `height`    | u32  |
+
+Semantics:
+
+- Request a window buffer resize.
+- The server allocates a new shared-memory buffer and responds with `WINDOW_RESIZED` + new SHM handle.
+
+#### `SET_WINDOW_SIZE_LIMITS` (type = 16)
+
+Payload (20 bytes):
+
+| Offset | Size | Field        | Type | Notes |
+|--------|------|--------------|------|-------|
+| 0      | 4    | `window_id`  | u32  | |
+| 4      | 4    | `min_width`  | u32  | 0 = no minimum |
+| 8      | 4    | `min_height` | u32  | 0 = no minimum |
+| 12     | 4    | `max_width`  | u32  | 0 = no maximum |
+| 16     | 4    | `max_height` | u32  | 0 = no maximum |
+
+Semantics:
+
+- Set minimum and maximum size constraints for a window (in pixels).
+- Used by the compositor during interactive resize operations.
+
+#### `MINIMIZE_WINDOW` (type = 17)
+
+Payload (4 bytes):
+
+| Offset | Size | Field       | Type |
+|--------|------|-------------|------|
+| 0      | 4    | `window_id` | u32  |
+
+Semantics:
+
+- Hide the window from display but keep it in the window list.
+- The window's `visible` flag is set to false.
+- The window can be restored with `RESTORE_WINDOW`.
+
+#### `MAXIMIZE_WINDOW` (type = 18)
+
+Payload (4 bytes):
+
+| Offset | Size | Field       | Type |
+|--------|------|-------------|------|
+| 0      | 4    | `window_id` | u32  |
+
+Semantics:
+
+- Expand the window to fill the entire screen.
+- The compositor saves the current position and size for restoration.
+- The window can be restored with `RESTORE_WINDOW`.
+
+#### `RESTORE_WINDOW` (type = 19)
+
+Payload (4 bytes):
+
+| Offset | Size | Field       | Type |
+|--------|------|-------------|------|
+| 0      | 4    | `window_id` | u32  |
+
+Semantics:
+
+- Restore a minimized window (makes it visible) or a maximized window (restores saved geometry).
+- If the window is neither minimized nor maximized, this message has no effect.
+
+#### `SET_WINDOW_TYPE` (type = 20)
+
+Payload (8 bytes):
+
+| Offset | Size | Field        | Type |
+|--------|------|--------------|------|
+| 0      | 4    | `window_id`  | u32  |
+| 4      | 4    | `window_type`| u32  |
+
+Semantics:
+
+- Set the window type for Z-order management.
+- Window type constants from `sws_protocol::window_types`:
+	- `NORMAL = 0`: Standard application window (default)
+	- `ALWAYS_ON_TOP = 1`: Always stays above normal windows
+	- `TASKBAR = 2`: Taskbar/panel window
+	- `DESKTOP = 3`: Desktop background window
+- Z-order hierarchy (bottom to top): Desktop → Normal → Taskbar → AlwaysOnTop
+- Within each type, windows maintain relative order based on focus and raise operations.
+
+#### `SET_WINDOW_OPACITY` (type = 21)
+
+Payload (5 bytes):
+
+| Offset | Size | Field       | Type | Notes |
+|--------|------|-------------|------|-------|
+| 0      | 4    | `window_id` | u32  | |
+| 4      | 1    | `opacity`   | u8   | 0 = fully transparent, 255 = fully opaque |
+
+Semantics:
+
+- Set per-window opacity for alpha blending.
+- The compositor applies alpha blending: `output = (src × alpha + dst × (255 - alpha)) / 255`
+- Windows with `opacity = 255` skip blending for performance.
+- The effective alpha is `pixel_alpha × (opacity / 255)`.
+
 ### Server → Client
 
 #### `WINDOW_CREATED` (type = 10)
@@ -168,6 +293,39 @@ Payload (16 bytes):
 #### `ERROR` (type = 13)
 
 Payload (at least 4 bytes): `code: u32`
+
+#### `WINDOW_RESIZED` (type = 14)
+
+Payload (20 bytes):
+
+| Offset | Size | Field       | Type | Notes |
+|--------|------|-------------|------|-------|
+| 0      | 4    | `window_id` | u32  | |
+| 4      | 8    | `shm_size`  | u64  | Size (bytes) of the new shared-memory buffer |
+| 12     | 4    | `width`     | u32  | New window width |
+| 16     | 4    | `height`    | u32  | New window height |
+
+Semantics:
+
+- Sent in response to `RESIZE_WINDOW`.
+- The server provides the new buffer dimensions and size.
+- After `WINDOW_RESIZED`, the server sends the new shared-memory handle out-of-band.
+
+#### `WINDOW_CONFIGURE` (type = 15)
+
+Payload (12 bytes):
+
+| Offset | Size | Field       | Type |
+|--------|------|-------------|------|
+| 0      | 4    | `window_id` | u32  |
+| 4      | 4    | `width`     | u32  |
+| 8      | 4    | `height`    | u32  |
+
+Semantics:
+
+- Compositor requests the client to resize to the given dimensions.
+- This does not include a new SHM handle; clients should respond by issuing a `RESIZE_WINDOW` request.
+- Typically sent after interactive resize operations.
 
 ## Compatibility and Versioning
 
