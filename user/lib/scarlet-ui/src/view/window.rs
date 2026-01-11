@@ -223,6 +223,11 @@ impl Window {
     ///
     /// `index_from_right`: 0=close, 1=maximize, 2=minimize.
     fn control_button_rect(&self, index_from_right: u32) -> Rect {
+        // Don't draw control buttons if window is too narrow (avoids negative positioning)
+        if self.width < TITLEBAR_CONTROL_COUNT {
+            return Rect::new(0, 0, 0, 0);
+        }
+        
         let base_seg_w = CLOSE_BUTTON_SIZE + CLOSE_BUTTON_MARGIN * 2;
         let seg_w = if self.width >= base_seg_w * TITLEBAR_CONTROL_COUNT {
             base_seg_w
