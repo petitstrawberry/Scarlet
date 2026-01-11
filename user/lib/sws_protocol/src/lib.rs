@@ -236,6 +236,30 @@ pub enum ClientMessageRef<'a> {
         window_id: u32,
         opacity: u8,
     },
+
+    // Extension API messages (100+)
+    
+    /// Register as an extension server
+    RegisterExtension {
+        extension_name: &'a [u8],
+    },
+
+    /// Create a window on behalf of an external client (extension-only)
+    ExtensionCreateWindow {
+        external_client_id: u32,
+        width: u32,
+        height: u32,
+    },
+
+    /// Update buffer on behalf of an external client (extension-only)
+    ExtensionUpdateBuffer {
+        external_client_id: u32,
+        window_id: u32,
+        x: i32,
+        y: i32,
+        width: u32,
+        height: u32,
+    },
 }
 
 /// Server->client messages.
@@ -275,6 +299,23 @@ pub enum ServerMessage {
     },
     Error {
         code: u32,
+    },
+    
+    // Extension API messages (100+)
+    
+    /// Extension registration successful
+    ExtensionRegistered {
+        extension_id: u32,
+    },
+    
+    /// Input event for extension-managed window
+    ExtensionInputEvent {
+        external_client_id: u32,
+        window_id: u32,
+        time: u64,
+        type_: u16,
+        code: u16,
+        value: i32,
     },
 }
 
@@ -438,6 +479,49 @@ pub fn parse_client_message<'a>(
             let opacity = payload[4];
             Ok(ClientMessageRef::SetWindowOpacity { window_id, opacity })
         }
+        client_msg::REGISTER_EXTENSION => {
+            if payload.len() < 4 {
+                return Err(ProtocolError::MalformedPayload);
+            }
+            let name_len = u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]) as usize;
+            if payload.len() != 4 + name_len {
+                return Err(ProtocolError::MalformedPayload);
+            }
+            let extension_name = &payload[4..4 + name_len];
+            Ok(ClientMessageRef::RegisterExtension { extension_name })
+        }
+        client_msg::EXTENSION_CREATE_WINDOW => {
+            if payload.len() != 12 {
+                return Err(ProtocolError::MalformedPayload);
+            }
+            let external_client_id = u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
+            let width = u32::from_le_bytes([payload[4], payload[5], payload[6], payload[7]]);
+            let height = u32::from_le_bytes([payload[8], payload[9], payload[10], payload[11]]);
+            Ok(ClientMessageRef::ExtensionCreateWindow {
+                external_client_id,
+                width,
+                height,
+            })
+        }
+        client_msg::EXTENSION_UPDATE_BUFFER => {
+            if payload.len() != 24 {
+                return Err(ProtocolError::MalformedPayload);
+            }
+            let external_client_id = u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
+            let window_id = u32::from_le_bytes([payload[4], payload[5], payload[6], payload[7]]);
+            let x = i32::from_le_bytes([payload[8], payload[9], payload[10], payload[11]]);
+            let y = i32::from_le_bytes([payload[12], payload[13], payload[14], payload[15]]);
+            let width = u32::from_le_bytes([payload[16], payload[17], payload[18], payload[19]]);
+            let height = u32::from_le_bytes([payload[20], payload[21], payload[22], payload[23]]);
+            Ok(ClientMessageRef::ExtensionUpdateBuffer {
+                external_client_id,
+                window_id,
+                x,
+                y,
+                width,
+                height,
+            })
+        }
         _ => Err(ProtocolError::UnknownMessageType),
     }
 }
@@ -541,6 +625,41 @@ pub fn parse_server_message(msg_type: u32, payload: &[u8]) -> Result<ServerMessa
             }
             let code = u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
             Ok(ServerMessage::Error { code })
+        }
+        server_msg::EXTENSION_REGISTERED => {
+            if payload.len() != 4 {
+                return Err(ProtocolError::MalformedPayload);
+            }
+            let extension_id = u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
+            Ok(ServerMessage::ExtensionRegistered { extension_id })
+        }
+        server_msg::EXTENSION_INPUT_EVENT => {
+            if payload.len() != 24 {
+                return Err(ProtocolError::MalformedPayload);
+            }
+            let external_client_id = u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
+            let window_id = u32::from_le_bytes([payload[4], payload[5], payload[6], payload[7]]);
+            let time = u64::from_le_bytes([
+                payload[8],
+                payload[9],
+                payload[10],
+                payload[11],
+                payload[12],
+                payload[13],
+                payload[14],
+                payload[15],
+            ]);
+            let type_ = u16::from_le_bytes([payload[16], payload[17]]);
+            let code = u16::from_le_bytes([payload[18], payload[19]]);
+            let value = i32::from_le_bytes([payload[20], payload[21], payload[22], payload[23]]);
+            Ok(ServerMessage::ExtensionInputEvent {
+                external_client_id,
+                window_id,
+                time,
+                type_,
+                code,
+                value,
+            })
         }
         _ => Err(ProtocolError::UnknownMessageType),
     }
