@@ -168,33 +168,60 @@ fn launch_service(service: &Service) -> Result<i32, &'static str> {
 fn resolve_dependencies(services: &[Service]) -> Vec<Service> {
     let mut sorted = Vec::new();
     let mut visited = Vec::new();
+    let mut in_progress = Vec::new();
 
     fn visit(
         service_name: &str,
         services: &[Service],
         sorted: &mut Vec<Service>,
         visited: &mut Vec<String>,
-    ) {
+        in_progress: &mut Vec<String>,
+    ) -> bool {
+        // If already fully processed, skip
         if visited.contains(&service_name.to_string()) {
-            return;
+            return true;
         }
 
-        visited.push(service_name.to_string());
+        // Detect circular dependency
+        if in_progress.contains(&service_name.to_string()) {
+            println!(
+                "stemd: Warning: Circular dependency detected involving service: {}",
+                service_name
+            );
+            return false;
+        }
+
+        in_progress.push(service_name.to_string());
 
         // Find the service
         if let Some(service) = services.iter().find(|s| s.name == service_name) {
             // Visit dependencies first
             for dep in &service.depends {
-                visit(dep, services, sorted, visited);
+                if !visit(dep, services, sorted, visited, in_progress) {
+                    println!(
+                        "stemd: Warning: Skipping service {} due to dependency issues",
+                        service_name
+                    );
+                    in_progress.pop();
+                    return false;
+                }
             }
+
+            // Remove from in-progress and mark as visited
+            in_progress.pop();
+            visited.push(service_name.to_string());
 
             // Add this service
             sorted.push(service.clone());
+            return true;
         }
+
+        in_progress.pop();
+        false
     }
 
     for service in services {
-        visit(&service.name, services, &mut sorted, &mut visited);
+        visit(&service.name, services, &mut sorted, &mut visited, &mut in_progress);
     }
 
     sorted
@@ -207,9 +234,11 @@ fn wait_thread() {
         let (pid, status) = waitpid(-1, 0);
         if pid > 0 {
             println!("stemd: Reaped process PID={}, status={}", pid, status);
+            // Don't sleep, immediately try to reap next process
+        } else {
+            // No children to reap, sleep briefly to avoid busy-waiting
+            thread::sleep(core::time::Duration::from_millis(100));
         }
-        // Sleep briefly to avoid busy-waiting
-        thread::sleep(core::time::Duration::from_millis(100));
     }
 }
 
@@ -255,17 +284,26 @@ fn ipc_thread() {
                 let mut buffer = [0u8; 256];
                 match stream.read(&mut buffer) {
                     Ok(n) if n > 0 => {
-                        let cmd = core::str::from_utf8(&buffer[..n]).unwrap_or("");
-                        println!("stemd: Received command: {}", cmd.trim());
+                        // Try to parse command as UTF-8
+                        match core::str::from_utf8(&buffer[..n]) {
+                            Ok(cmd) => {
+                                println!("stemd: Received command: {}", cmd.trim());
 
-                        // Process command (simplified)
-                        let response = match cmd.trim() {
-                            "status" => "stemd is running\n",
-                            "help" => "Commands: status, help\n",
-                            _ => "Unknown command\n",
-                        };
+                                // Process command (simplified)
+                                let response = match cmd.trim() {
+                                    "status" => "stemd is running\n",
+                                    "help" => "Commands: status, help\n",
+                                    _ => "Unknown command\n",
+                                };
 
-                        let _ = stream.write(response.as_bytes());
+                                let _ = stream.write(response.as_bytes());
+                            }
+                            Err(_) => {
+                                let error_msg = "Error: Invalid UTF-8 in command\n";
+                                let _ = stream.write(error_msg.as_bytes());
+                                println!("stemd: Received invalid UTF-8 command");
+                            }
+                        }
                     }
                     _ => {}
                 }
@@ -288,8 +326,10 @@ fn read_config(path: &str) -> Result<String, &'static str> {
         match file.read(&mut buffer) {
             Ok(0) => break, // EOF
             Ok(n) => {
-                if let Ok(s) = core::str::from_utf8(&buffer[..n]) {
-                    content.push_str(s);
+                // Ensure UTF-8 validity, otherwise fail
+                match core::str::from_utf8(&buffer[..n]) {
+                    Ok(s) => content.push_str(s),
+                    Err(_) => return Err("Config file contains invalid UTF-8"),
                 }
             }
             Err(_) => return Err("Failed to read config file"),
