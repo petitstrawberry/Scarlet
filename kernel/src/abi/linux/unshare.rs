@@ -7,14 +7,13 @@
 //!
 //! Current implementation supports:
 //! - CLONE_NEWNS: Mount namespace isolation (using VFS separation)
-//! - CLONE_NEWPID: PID namespace isolation (using Task namespace)
+//! - CLONE_NEWPID: PID namespace isolation (using Task namespace) - Note: requires architecture-specific support
 //! - Stub support for other namespace types
 
 use alloc::sync::Arc;
 use crate::{
-    abi::AbiModule,
     arch::Trapframe,
-    task::{mytask, namespace::TaskNamespace},
+    task::mytask,
 };
 
 /// Unshare flags (from Linux clone flags)
@@ -38,60 +37,31 @@ pub const CLONE_NEWCGROUP: usize = 0x02000000;  // Cgroup namespace
 /// # Implementation Details
 ///
 /// Currently implements:
-/// - CLONE_NEWPID: Creates a new task namespace for PID isolation
 /// - CLONE_NEWNS: Creates a new VFS for mount namespace isolation
 /// - Other flags: Accepted but stubbed (return success without action)
 ///
-/// Future tasks can be spawned in the new namespace, but the calling
-/// task itself continues to use its original IDs in the parent namespace.
-///
-/// # Note on Generic Implementation
-///
-/// This function cannot directly modify the ABI module's namespace field
-/// because it operates on a trait object. Architecture-specific wrappers
-/// should handle namespace updates if needed, or the ABI implementation
-/// should provide a method to update the namespace.
-pub fn sys_unshare<E>(_abi: &mut E, trapframe: &mut Trapframe) -> usize
-where
-    E: AbiModule + ?Sized,
-{
+/// Note: CLONE_NEWPID namespace isolation requires architecture-specific handling
+/// because it needs to update the ABI module's namespace field. Architecture-specific
+/// syscall handlers should implement this if needed.
+pub fn sys_unshare(_abi: &mut dyn crate::abi::AbiModule, trapframe: &mut Trapframe) -> usize {
+    use crate::abi::linux::riscv64::errno::{EPERM, to_result};
+    
     let task = match mytask() {
         Some(t) => t,
-        None => return usize::MAX - 1, // -EPERM
+        None => return to_result(EPERM),
     };
 
     let flags = trapframe.get_arg(0);
 
     trapframe.increment_pc_next(task);
 
-    // Handle PID namespace isolation
-    // Note: Since we're working with a trait object, we cannot directly update
-    // the ABI's namespace field. The calling architecture-specific code should
-    // handle this if namespace updates are needed at the ABI level.
-    if (flags & CLONE_NEWPID) != 0 {
-        // Create a new child namespace for PID isolation
-        let current_namespace = _abi.get_task_namespace();
-        let _new_namespace = TaskNamespace::new_child(
-            current_namespace,
-            alloc::format!("pid-ns-{}", task.get_id()),
-        );
-        
-        // Note: The ABI module should implement a way to update its namespace
-        // if it maintains one. For now, we acknowledge the request but cannot
-        // directly update the namespace field through the trait.
-        // Architecture-specific implementations can override this function
-        // to provide full namespace switching.
-    }
-
     // Handle mount namespace isolation
     if (flags & CLONE_NEWNS) != 0 {
         // Create a new VFS instance for mount namespace isolation
-        // This uses the existing VFS separation feature
         let new_vfs = crate::fs::VfsManager::new();
         task.vfs = Some(Arc::new(new_vfs));
         
         // Setup basic filesystem structure in the new mount namespace
-        // This is a minimal setup; more complete initialization may be needed
         if let Some(vfs) = &task.vfs {
             // Create basic directories
             let _ = vfs.create_dir("/dev");
@@ -101,39 +71,10 @@ where
         }
     }
 
-    // Handle UTS namespace (hostname/domainname) - stub
-    if (flags & CLONE_NEWUTS) != 0 {
-        // Stub: Accept but don't implement
-        // In a full implementation, this would create a new UTS namespace
-        // allowing independent hostname/domainname settings
-    }
-
-    // Handle IPC namespace - stub
-    if (flags & CLONE_NEWIPC) != 0 {
-        // Stub: Accept but don't implement
-        // In a full implementation, this would create a new IPC namespace
-        // for System V IPC objects
-    }
-
-    // Handle user namespace - stub
-    if (flags & CLONE_NEWUSER) != 0 {
-        // Stub: Accept but don't implement
-        // In a full implementation, this would create a new user namespace
-        // for UID/GID isolation
-    }
-
-    // Handle network namespace - stub
-    if (flags & CLONE_NEWNET) != 0 {
-        // Stub: Accept but don't implement
-        // In a full implementation, this would create a new network namespace
-        // for network isolation
-    }
-
-    // Handle cgroup namespace - stub
-    if (flags & CLONE_NEWCGROUP) != 0 {
-        // Stub: Accept but don't implement
-        // In a full implementation, this would create a new cgroup namespace
-    }
+    // Note: CLONE_NEWPID and other namespace types are handled as stubs
+    // Architecture-specific implementations can provide full support by
+    // implementing their own sys_unshare that calls this function and
+    // additionally handles namespace updates
 
     // Success
     0
@@ -159,13 +100,12 @@ where
 ///
 /// For now, applications that attempt to use setns will receive
 /// a "function not implemented" error.
-pub fn sys_setns<E>(_abi: &mut E, trapframe: &mut Trapframe) -> usize
-where
-    E: AbiModule + ?Sized,
-{
+pub fn sys_setns(_abi: &mut dyn crate::abi::AbiModule, trapframe: &mut Trapframe) -> usize {
+    use crate::abi::linux::riscv64::errno::{EPERM, ENOSYS, to_result};
+    
     let task = match mytask() {
         Some(t) => t,
-        None => return usize::MAX - 1, // -EPERM
+        None => return to_result(EPERM),
     };
 
     let _fd = trapframe.get_arg(0);
@@ -178,7 +118,7 @@ where
     // 1. Validate fd refers to a namespace file
     // 2. Check nstype matches the namespace type (if non-zero)
     // 3. Join the target namespace
-    usize::MAX - 38 // -ENOSYS
+    to_result(ENOSYS)
 }
 
 #[cfg(test)]

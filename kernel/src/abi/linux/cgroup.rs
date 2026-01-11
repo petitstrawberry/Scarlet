@@ -8,7 +8,6 @@
 //! with stub resource controllers for CPU, memory, etc.
 
 use crate::{
-    abi::AbiModule,
     arch::Trapframe,
     task::mytask,
 };
@@ -102,19 +101,18 @@ pub fn move_task_to_cgroup(_task_id: usize, _cgroup_path: &str) -> Result<(), &'
 /// This is a placeholder syscall handler for cgroup-related operations
 /// that might be added in the future. Currently returns ENOSYS.
 #[allow(dead_code)]
-pub fn sys_cgroup_ops<E>(_abi: &mut E, trapframe: &mut Trapframe) -> usize
-where
-    E: AbiModule + ?Sized,
-{
+pub fn sys_cgroup_ops(_abi: &mut dyn crate::abi::AbiModule, trapframe: &mut Trapframe) -> usize {
+    use crate::abi::linux::riscv64::errno::{EPERM, ENOSYS, to_result};
+    
     let task = match mytask() {
         Some(t) => t,
-        None => return usize::MAX - 1, // -EPERM
+        None => return to_result(EPERM),
     };
 
     trapframe.increment_pc_next(task);
 
     // Stub: Operation not implemented
-    usize::MAX - 38 // -ENOSYS
+    to_result(ENOSYS)
 }
 
 #[cfg(test)]

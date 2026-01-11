@@ -1,7 +1,7 @@
 #[macro_use]
 mod macros;
 mod cgroup;
-mod errno;
+pub mod errno;
 mod fs;
 mod futex;
 mod mm;
