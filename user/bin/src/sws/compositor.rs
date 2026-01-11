@@ -1786,11 +1786,12 @@ impl Compositor {
                     "[Compositor] Setting window #{} type to {}",
                     window_id, window_type
                 );
+                use sws_protocol::window_types;
                 let wtype = match window_type {
-                    0 => super::window::WindowType::Normal,
-                    1 => super::window::WindowType::AlwaysOnTop,
-                    2 => super::window::WindowType::Taskbar,
-                    3 => super::window::WindowType::Desktop,
+                    window_types::NORMAL => super::window::WindowType::Normal,
+                    window_types::ALWAYS_ON_TOP => super::window::WindowType::AlwaysOnTop,
+                    window_types::TASKBAR => super::window::WindowType::Taskbar,
+                    window_types::DESKTOP => super::window::WindowType::Desktop,
                     _ => {
                         println!("[Compositor] Invalid window type {}, ignoring", window_type);
                         return Ok(false);

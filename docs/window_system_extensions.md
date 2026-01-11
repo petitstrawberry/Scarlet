@@ -61,12 +61,24 @@ Windows can be assigned different types that control their Z-order behavior.
 
 ### Window Types
 
+The protocol defines four window types as constants:
+
+```rust
+// From sws_protocol::window_types
+pub const NORMAL: u32 = 0;        // Standard application windows
+pub const ALWAYS_ON_TOP: u32 = 1; // Always stays above normal windows
+pub const TASKBAR: u32 = 2;       // Taskbar/panel windows
+pub const DESKTOP: u32 = 3;       // Desktop background windows
+```
+
+These map to the compositor's `WindowType` enum:
+
 ```rust
 pub enum WindowType {
-    Normal,      // Standard application windows (ID: 0)
-    AlwaysOnTop, // Always stays above normal windows (ID: 1)
-    Taskbar,     // Taskbar/panel windows (ID: 2)
-    Desktop,     // Desktop background windows (ID: 3)
+    Normal,      // ID: 0 - Standard application windows
+    AlwaysOnTop, // ID: 1 - Always stays above normal windows
+    Taskbar,     // ID: 2 - Taskbar/panel windows
+    Desktop,     // ID: 3 - Desktop background windows
 }
 ```
 
@@ -84,19 +96,23 @@ Within each type, windows maintain their relative order based on focus and raise
 
 - **SET_WINDOW_TYPE** (ID: 20)
   - Payload: `window_id: u32`, `window_type: u32` (8 bytes)
-  - Sets the window type (0=Normal, 1=AlwaysOnTop, 2=Taskbar, 3=Desktop)
+  - Sets the window type using constants from `sws_protocol::window_types`:
+    - `NORMAL = 0`: Standard application window
+    - `ALWAYS_ON_TOP = 1`: Always stays on top
+    - `TASKBAR = 2`: Taskbar/panel window
+    - `DESKTOP = 3`: Desktop background
 
 ### Usage Example
 
 ```rust
-use sws_protocol::{client_msg, payload_set_window_type};
+use sws_protocol::{client_msg, payload_set_window_type, window_types};
 
 // Set window to always stay on top
-let payload = payload_set_window_type(window_id, 1); // 1 = AlwaysOnTop
+let payload = payload_set_window_type(window_id, window_types::ALWAYS_ON_TOP);
 send_message(client_msg::SET_WINDOW_TYPE, &payload);
 
 // Set window as desktop background
-let payload = payload_set_window_type(window_id, 3); // 3 = Desktop
+let payload = payload_set_window_type(window_id, window_types::DESKTOP);
 send_message(client_msg::SET_WINDOW_TYPE, &payload);
 ```
 

@@ -63,6 +63,18 @@ pub mod transient_flags {
     pub const RAISE_WITH_PARENT: u32 = 1 << 1;
 }
 
+/// Window type constants for Z-order management
+pub mod window_types {
+    /// Normal application window (default)
+    pub const NORMAL: u32 = 0;
+    /// Window that always stays on top
+    pub const ALWAYS_ON_TOP: u32 = 1;
+    /// Taskbar or panel window
+    pub const TASKBAR: u32 = 2;
+    /// Desktop background window
+    pub const DESKTOP: u32 = 3;
+}
+
 /// Message header.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
