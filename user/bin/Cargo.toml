@@ -81,10 +81,6 @@ name = "ui_demo"
 path = "src/ui_demo.rs"
 
 [[bin]]
-name = "slint_style_demo"
-path = "src/slint_style_demo.rs"
-
-[[bin]]
 name = "slint_demo"
 path = "src/slint_demo.rs"
 
