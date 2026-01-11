@@ -163,8 +163,9 @@ Payload (12 bytes):
 
 Semantics:
 
-- Request a window buffer resize.
-- The server allocates a new shared-memory buffer and responds with `WINDOW_RESIZED` + new SHM handle.
+- Request a window buffer resize for a window owned by the calling client.
+- The server **must** validate that `window_id` belongs to the requesting client and **must reject** the request if the window is not owned by that client.
+- For valid requests, the server allocates a new shared-memory buffer and responds with `WINDOW_RESIZED` + new SHM handle.
 
 #### `SET_WINDOW_SIZE_LIMITS` (type = 16)
 
