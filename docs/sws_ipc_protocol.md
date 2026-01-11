@@ -210,6 +210,7 @@ Semantics:
 - Expand the window to fill the entire screen.
 - The compositor saves the current position and size for restoration.
 - The window can be restored with `RESTORE_WINDOW`.
+- Windows that specify explicit maximum size limits (i.e. `max_width` or `max_height` is non-zero) are **not** maximized; clients SHOULD NOT send `MAXIMIZE_WINDOW` for such windows and MUST be prepared for the request to be ignored.
 
 #### `RESTORE_WINDOW` (type = 19)
 
