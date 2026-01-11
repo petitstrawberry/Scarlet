@@ -82,6 +82,9 @@ impl ConfigParser {
                             }
                             "depends" => {
                                 // Parse comma-separated dependencies
+                                // Note: Supports both quoted strings and array-like syntax
+                                // E.g., depends = "service1, service2" or depends = ["service1", "service2"]
+                                let value = value.trim_start_matches('[').trim_end_matches(']');
                                 for dep in value.split(',') {
                                     let dep = Self::unquote(dep.trim());
                                     if !dep.is_empty() {
@@ -280,7 +283,8 @@ fn ipc_thread() {
                     Err(_) => continue,
                 };
 
-                // Read command
+                // Read command (max 256 bytes)
+                // Note: Commands longer than 256 bytes will be truncated
                 let mut buffer = [0u8; 256];
                 match stream.read(&mut buffer) {
                     Ok(n) if n > 0 => {
