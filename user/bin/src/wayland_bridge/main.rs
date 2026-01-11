@@ -18,11 +18,15 @@ extern crate scarlet_std as std;
 
 mod protocol;
 mod registry;
+mod shm;
 mod surface;
+mod xdg_shell;
 
 use protocol::{WaylandArg, WaylandMessage, MessageHeader};
 use registry::Registry;
+use shm::ShmManager;
 use surface::SurfaceManager;
+use xdg_shell::XdgShellManager;
 use std::collections::BTreeMap;
 use std::io::{Read, Write};
 use std::println;
@@ -38,6 +42,10 @@ struct WaylandBridge {
     registry: Registry,
     /// Surface manager
     surface_manager: SurfaceManager,
+    /// XDG Shell manager
+    xdg_shell_manager: XdgShellManager,
+    /// Shared memory manager
+    shm_manager: ShmManager,
     /// Connection to SWS server
     sws_connection: Option<Socket>,
     /// Next object ID to allocate
@@ -73,6 +81,8 @@ impl WaylandBridge {
             server_socket,
             registry: Registry::new(),
             surface_manager: SurfaceManager::new(),
+            xdg_shell_manager: XdgShellManager::new(),
+            shm_manager: ShmManager::new(),
             sws_connection: None,
             next_object_id: 2,
             objects,
@@ -159,6 +169,12 @@ impl WaylandBridge {
             "wl_registry" => self.handle_registry_message(object_id, opcode, payload),
             "wl_compositor" => self.handle_compositor_message(opcode, payload),
             "wl_surface" => self.handle_surface_message(object_id, opcode, payload),
+            "wl_shm" => self.handle_shm_message(opcode, payload),
+            "wl_shm_pool" => self.handle_shm_pool_message(object_id, opcode, payload),
+            "wl_buffer" => self.handle_buffer_message(object_id, opcode, payload),
+            "xdg_wm_base" => self.handle_xdg_wm_base_message(opcode, payload),
+            "xdg_surface" => self.handle_xdg_surface_message(object_id, opcode, payload),
+            "xdg_toplevel" => self.handle_xdg_toplevel_message(object_id, opcode, payload),
             _ => {
                 println!("[Bridge] Unhandled interface: {}", interface);
                 Ok(None)
@@ -283,6 +299,167 @@ impl WaylandBridge {
             }
         }
     }
+
+    /// Handle wl_shm messages
+    fn handle_shm_message(&mut self, opcode: u16, payload: &[u8]) -> Result<Option<WaylandMessage>, &'static str> {
+        match opcode {
+            shm::shm_request::CREATE_POOL => {
+                println!("[Bridge] wl_shm.create_pool");
+                if payload.len() >= 12 {
+                    let pool_id = u32::from_ne_bytes([payload[0], payload[1], payload[2], payload[3]]);
+                    // FD would be passed via SCM_RIGHTS (not yet implemented)
+                    let size = i32::from_ne_bytes([payload[8], payload[9], payload[10], payload[11]]);
+                    println!("[Bridge] Created pool ID: {} size: {}", pool_id, size);
+                    self.objects.insert(pool_id, String::from("wl_shm_pool"));
+                    self.shm_manager.create_pool(pool_id, -1, size); // FD placeholder
+                }
+                Ok(None)
+            }
+            _ => {
+                println!("[Bridge] Unknown wl_shm opcode: {}", opcode);
+                Ok(None)
+            }
+        }
+    }
+
+    /// Handle wl_shm_pool messages
+    fn handle_shm_pool_message(&mut self, pool_id: u32, opcode: u16, payload: &[u8]) -> Result<Option<WaylandMessage>, &'static str> {
+        match opcode {
+            shm::shm_pool_request::CREATE_BUFFER => {
+                println!("[Bridge] wl_shm_pool.create_buffer");
+                if payload.len() >= 24 {
+                    let buffer_id = u32::from_ne_bytes([payload[0], payload[1], payload[2], payload[3]]);
+                    let offset = i32::from_ne_bytes([payload[4], payload[5], payload[6], payload[7]]);
+                    let width = i32::from_ne_bytes([payload[8], payload[9], payload[10], payload[11]]);
+                    let height = i32::from_ne_bytes([payload[12], payload[13], payload[14], payload[15]]);
+                    let stride = i32::from_ne_bytes([payload[16], payload[17], payload[18], payload[19]]);
+                    let format = u32::from_ne_bytes([payload[20], payload[21], payload[22], payload[23]]);
+                    
+                    println!("[Bridge] Buffer: {}x{} stride:{} format:{}", width, height, stride, format);
+                    self.objects.insert(buffer_id, String::from("wl_buffer"));
+                    self.shm_manager.create_buffer(buffer_id, pool_id, offset, width, height, stride, format)?;
+                }
+                Ok(None)
+            }
+            shm::shm_pool_request::DESTROY => {
+                println!("[Bridge] wl_shm_pool.destroy");
+                self.shm_manager.destroy_pool(pool_id);
+                Ok(None)
+            }
+            shm::shm_pool_request::RESIZE => {
+                println!("[Bridge] wl_shm_pool.resize");
+                if payload.len() >= 4 {
+                    let new_size = i32::from_ne_bytes([payload[0], payload[1], payload[2], payload[3]]);
+                    self.shm_manager.resize_pool(pool_id, new_size)?;
+                }
+                Ok(None)
+            }
+            _ => {
+                println!("[Bridge] Unknown wl_shm_pool opcode: {}", opcode);
+                Ok(None)
+            }
+        }
+    }
+
+    /// Handle wl_buffer messages
+    fn handle_buffer_message(&mut self, buffer_id: u32, opcode: u16, _payload: &[u8]) -> Result<Option<WaylandMessage>, &'static str> {
+        match opcode {
+            shm::buffer_request::DESTROY => {
+                println!("[Bridge] wl_buffer.destroy");
+                self.shm_manager.destroy_buffer(buffer_id);
+                Ok(None)
+            }
+            _ => {
+                println!("[Bridge] Unknown wl_buffer opcode: {}", opcode);
+                Ok(None)
+            }
+        }
+    }
+
+    /// Handle xdg_wm_base messages
+    fn handle_xdg_wm_base_message(&mut self, opcode: u16, payload: &[u8]) -> Result<Option<WaylandMessage>, &'static str> {
+        match opcode {
+            xdg_shell::wm_base_request::GET_XDG_SURFACE => {
+                println!("[Bridge] xdg_wm_base.get_xdg_surface");
+                if payload.len() >= 8 {
+                    let xdg_surface_id = u32::from_ne_bytes([payload[0], payload[1], payload[2], payload[3]]);
+                    let wl_surface_id = u32::from_ne_bytes([payload[4], payload[5], payload[6], payload[7]]);
+                    println!("[Bridge] XDG surface ID: {} for wl_surface: {}", xdg_surface_id, wl_surface_id);
+                    self.objects.insert(xdg_surface_id, String::from("xdg_surface"));
+                    self.xdg_shell_manager.create_xdg_surface(xdg_surface_id, wl_surface_id);
+                }
+                Ok(None)
+            }
+            xdg_shell::wm_base_request::PONG => {
+                println!("[Bridge] xdg_wm_base.pong");
+                Ok(None)
+            }
+            _ => {
+                println!("[Bridge] Unknown xdg_wm_base opcode: {}", opcode);
+                Ok(None)
+            }
+        }
+    }
+
+    /// Handle xdg_surface messages
+    fn handle_xdg_surface_message(&mut self, xdg_surface_id: u32, opcode: u16, payload: &[u8]) -> Result<Option<WaylandMessage>, &'static str> {
+        match opcode {
+            xdg_shell::xdg_surface_request::GET_TOPLEVEL => {
+                println!("[Bridge] xdg_surface.get_toplevel");
+                if payload.len() >= 4 {
+                    let xdg_toplevel_id = u32::from_ne_bytes([payload[0], payload[1], payload[2], payload[3]]);
+                    println!("[Bridge] XDG toplevel ID: {}", xdg_toplevel_id);
+                    self.objects.insert(xdg_toplevel_id, String::from("xdg_toplevel"));
+                    self.xdg_shell_manager.create_toplevel(xdg_surface_id, xdg_toplevel_id)?;
+                    
+                    // Set surface role to toplevel
+                    if let Some(xdg_surface) = self.xdg_shell_manager.get_xdg_surface(xdg_surface_id) {
+                        let wl_surface_id = xdg_surface.wl_surface_id;
+                        if let Some(surface) = self.surface_manager.get_surface_mut(wl_surface_id) {
+                            surface.set_role(surface::SurfaceRole::XdgToplevel);
+                        }
+                    }
+                }
+                Ok(None)
+            }
+            xdg_shell::xdg_surface_request::ACK_CONFIGURE => {
+                println!("[Bridge] xdg_surface.ack_configure");
+                Ok(None)
+            }
+            _ => {
+                println!("[Bridge] Unknown xdg_surface opcode: {}", opcode);
+                Ok(None)
+            }
+        }
+    }
+
+    /// Handle xdg_toplevel messages
+    fn handle_xdg_toplevel_message(&mut self, _xdg_toplevel_id: u32, opcode: u16, _payload: &[u8]) -> Result<Option<WaylandMessage>, &'static str> {
+        match opcode {
+            xdg_shell::xdg_toplevel_request::SET_TITLE => {
+                println!("[Bridge] xdg_toplevel.set_title");
+                // Parse title from payload (string format)
+                Ok(None)
+            }
+            xdg_shell::xdg_toplevel_request::SET_APP_ID => {
+                println!("[Bridge] xdg_toplevel.set_app_id");
+                Ok(None)
+            }
+            xdg_shell::xdg_toplevel_request::MOVE => {
+                println!("[Bridge] xdg_toplevel.move");
+                Ok(None)
+            }
+            xdg_shell::xdg_toplevel_request::RESIZE => {
+                println!("[Bridge] xdg_toplevel.resize");
+                Ok(None)
+            }
+            _ => {
+                println!("[Bridge] Unknown xdg_toplevel opcode: {}", opcode);
+                Ok(None)
+            }
+        }
+    }
+
 
     /// Run the bridge server
     fn run(&mut self) -> Result<(), &'static str> {
