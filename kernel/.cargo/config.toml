@@ -1,5 +1,5 @@
 [profile.dev]
-opt-level = 3
+opt-level = 0
 
 [profile.test]
 opt-level = 3
