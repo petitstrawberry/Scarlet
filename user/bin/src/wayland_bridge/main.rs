@@ -33,6 +33,14 @@ use std::println;
 use std::socket::Socket;
 use std::string::String;
 use std::vec::Vec;
+use sws_protocol as protocol_sws;
+
+/// Mapping of Wayland surface ID to SWS window ID
+#[derive(Debug, Clone, Copy)]
+struct SurfaceWindowMapping {
+    wl_surface_id: u32,
+    sws_window_id: u32,
+}
 
 /// Wayland Bridge Server
 struct WaylandBridge {
@@ -48,10 +56,14 @@ struct WaylandBridge {
     shm_manager: ShmManager,
     /// Connection to SWS server
     sws_connection: Option<Socket>,
+    /// Extension ID assigned by SWS
+    extension_id: Option<u32>,
     /// Next object ID to allocate
     next_object_id: u32,
     /// Map of object ID -> interface name
     objects: BTreeMap<u32, String>,
+    /// Map of Wayland surface ID -> SWS window ID
+    surface_to_window: BTreeMap<u32, u32>,
 }
 
 impl WaylandBridge {
@@ -84,9 +96,64 @@ impl WaylandBridge {
             xdg_shell_manager: XdgShellManager::new(),
             shm_manager: ShmManager::new(),
             sws_connection: None,
+            extension_id: None,
             next_object_id: 2,
             objects,
+            surface_to_window: BTreeMap::new(),
         })
+    }
+    
+    /// Connect to SWS server and register as extension
+    fn connect_to_sws(&mut self) -> Result<(), &'static str> {
+        println!("[Bridge] Connecting to SWS at /tmp/sws.sock");
+        
+        let sws_socket = Socket::new()
+            .map_err(|_| "Failed to create SWS socket")?;
+        
+        sws_socket.connect("/tmp/sws.sock")
+            .map_err(|_| "Failed to connect to SWS")?;
+        
+        println!("[Bridge] Connected to SWS, registering as extension");
+        
+        // Send REGISTER_EXTENSION message
+        let extension_name = b"wayland_bridge";
+        let payload = protocol_sws::payload_register_extension(extension_name);
+        let header = protocol_sws::MessageHeader {
+            msg_type: protocol_sws::client_msg::REGISTER_EXTENSION,
+            payload_size: payload.len() as u32,
+        };
+        
+        let mut msg_bytes = Vec::new();
+        msg_bytes.extend_from_slice(&header.to_le_bytes());
+        msg_bytes.extend_from_slice(&payload);
+        
+        let mut sws_socket_mut = sws_socket;
+        sws_socket_mut.write(&msg_bytes)
+            .map_err(|_| "Failed to send REGISTER_EXTENSION")?;
+        
+        // Read response
+        let mut response_buf = [0u8; 1024];
+        let n = sws_socket_mut.read(&mut response_buf)
+            .map_err(|_| "Failed to read EXTENSION_REGISTERED response")?;
+        
+        if n >= 12 {
+            let mut header_bytes = [0u8; 8];
+            header_bytes.copy_from_slice(&response_buf[0..8]);
+            let resp_header = protocol_sws::MessageHeader::from_le_bytes(header_bytes);
+            if resp_header.msg_type == protocol_sws::server_msg::EXTENSION_REGISTERED {
+                let extension_id = u32::from_le_bytes([
+                    response_buf[8],
+                    response_buf[9],
+                    response_buf[10],
+                    response_buf[11],
+                ]);
+                self.extension_id = Some(extension_id);
+                println!("[Bridge] Registered as extension with ID: {}", extension_id);
+            }
+        }
+        
+        self.sws_connection = Some(sws_socket_mut);
+        Ok(())
     }
 
     /// Allocate a new object ID
@@ -95,6 +162,113 @@ impl WaylandBridge {
         self.next_object_id += 1;
         self.objects.insert(id, String::from(interface));
         id
+    }
+    
+    /// Create an SWS window for a Wayland surface
+    fn create_sws_window_for_surface(&mut self, wl_surface_id: u32) -> Result<(), &'static str> {
+        // Check if already mapped
+        if self.surface_to_window.contains_key(&wl_surface_id) {
+            return Ok(());
+        }
+        
+        let sws_conn = self.sws_connection.as_mut()
+            .ok_or("Not connected to SWS")?;
+        
+        // Default size for now (800x600)
+        let width = 800u32;
+        let height = 600u32;
+        
+        println!("[Bridge] Creating SWS window for surface {} ({}x{})", wl_surface_id, width, height);
+        
+        // Send EXTENSION_CREATE_WINDOW message
+        let payload = protocol_sws::payload_extension_create_window(wl_surface_id, width, height);
+        let header = protocol_sws::MessageHeader {
+            msg_type: protocol_sws::client_msg::EXTENSION_CREATE_WINDOW,
+            payload_size: payload.len() as u32,
+        };
+        
+        let mut msg_bytes = Vec::new();
+        msg_bytes.extend_from_slice(&header.to_le_bytes());
+        msg_bytes.extend_from_slice(&payload);
+        
+        sws_conn.write(&msg_bytes)
+            .map_err(|_| "Failed to send EXTENSION_CREATE_WINDOW")?;
+        
+        // Read WINDOW_CREATED response
+        let mut response_buf = [0u8; 1024];
+        let n = sws_conn.read(&mut response_buf)
+            .map_err(|_| "Failed to read WINDOW_CREATED response")?;
+        
+        if n >= 20 {
+            let mut header_bytes = [0u8; 8];
+            header_bytes.copy_from_slice(&response_buf[0..8]);
+            let resp_header = protocol_sws::MessageHeader::from_le_bytes(header_bytes);
+            if resp_header.msg_type == protocol_sws::server_msg::WINDOW_CREATED {
+                let window_id = u32::from_le_bytes([
+                    response_buf[8],
+                    response_buf[9],
+                    response_buf[10],
+                    response_buf[11],
+                ]);
+                
+                println!("[Bridge] SWS window created: {} for surface {}", window_id, wl_surface_id);
+                self.surface_to_window.insert(wl_surface_id, window_id);
+                
+                // Receive SHM handle
+                if let Ok(shm_handle) = sws_conn.recv_handle() {
+                    println!("[Bridge] Received SHM handle for window {}", window_id);
+                    // Store handle if needed
+                }
+            }
+        }
+        
+        Ok(())
+    }
+    
+    /// Update SWS window buffer when surface commits
+    fn update_sws_window(&mut self, wl_surface_id: u32) -> Result<(), &'static str> {
+        let window_id = self.surface_to_window.get(&wl_surface_id)
+            .ok_or("Surface not mapped to window")?;
+        
+        let sws_conn = self.sws_connection.as_mut()
+            .ok_or("Not connected to SWS")?;
+        
+        // Get damage from surface
+        let surface = self.surface_manager.get_surface(wl_surface_id)
+            .ok_or("Surface not found")?;
+        
+        // Use full surface damage for simplicity (or first damage rect if available)
+        let (x, y, width, height) = if let Some(&(dx, dy, dw, dh)) = surface.damage.first() {
+            (dx, dy, dw as u32, dh as u32)
+        } else {
+            (0, 0, surface.width, surface.height)
+        };
+        
+        println!("[Bridge] Updating SWS window {} with damage [{},{} {}x{}]", 
+                 window_id, x, y, width, height);
+        
+        // Send EXTENSION_UPDATE_BUFFER message
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&wl_surface_id.to_le_bytes());
+        payload.extend_from_slice(&window_id.to_le_bytes());
+        payload.extend_from_slice(&x.to_le_bytes());
+        payload.extend_from_slice(&y.to_le_bytes());
+        payload.extend_from_slice(&width.to_le_bytes());
+        payload.extend_from_slice(&height.to_le_bytes());
+        
+        let header = protocol_sws::MessageHeader {
+            msg_type: protocol_sws::client_msg::EXTENSION_UPDATE_BUFFER,
+            payload_size: payload.len() as u32,
+        };
+        
+        let mut msg_bytes = Vec::new();
+        msg_bytes.extend_from_slice(&header.to_le_bytes());
+        msg_bytes.extend_from_slice(&payload);
+        
+        sws_conn.write(&msg_bytes)
+            .map_err(|_| "Failed to send EXTENSION_UPDATE_BUFFER")?;
+        
+        Ok(())
     }
 
     /// Handle a client connection
@@ -286,6 +460,13 @@ impl WaylandBridge {
                 println!("[Bridge] wl_surface.commit on surface {}", surface_id);
                 if let Some(surface) = self.surface_manager.get_surface_mut(surface_id) {
                     surface.commit();
+                    
+                    // If surface has a role and is mapped to SWS window, update it
+                    if surface.role.is_some() {
+                        if let Err(e) = self.update_sws_window(surface_id) {
+                            println!("[Bridge] Failed to update SWS window: {}", e);
+                        }
+                    }
                 }
                 Ok(None)
             }
@@ -416,6 +597,9 @@ impl WaylandBridge {
                         if let Some(surface) = self.surface_manager.get_surface_mut(wl_surface_id) {
                             surface.set_role(surface::SurfaceRole::XdgToplevel);
                         }
+                        
+                        // Create SWS window for this surface
+                        self.create_sws_window_for_surface(wl_surface_id)?;
                     }
                 }
                 Ok(None)
@@ -498,6 +682,15 @@ fn main() -> i32 {
     };
 
     println!("[Bridge] Listening on {}", socket_path);
+    
+    // Connect to SWS and register as extension
+    if let Err(e) = bridge.connect_to_sws() {
+        println!("[Bridge] Failed to connect to SWS: {}", e);
+        println!("[Bridge] Make sure SWS is running at /tmp/sws.sock");
+        return 1;
+    }
+    
+    println!("[Bridge] Connected to SWS successfully");
     println!("[Bridge] Clients can connect with WAYLAND_DISPLAY=wayland-0");
 
     if let Err(e) = bridge.run() {

@@ -944,6 +944,124 @@ fn client_thread_main(client_id: usize, mut socket: Socket) {
                 );
                 push_ipc_event(IpcEvent::SetWindowOpacity { window_id, opacity });
             }
+            Ok(ClientMessageRef::RegisterExtension { extension_name }) => {
+                println!(
+                    "[ClientThread {}] RegisterExtension: name={:?}",
+                    client_id,
+                    std::string::String::from_utf8_lossy(extension_name)
+                );
+                
+                // Allocate extension ID
+                let extension_id = next_window_id; // Reuse window ID counter for simplicity
+                next_window_id = next_window_id.saturating_add(1);
+                
+                let name = std::string::String::from_utf8_lossy(extension_name).into_owned();
+                push_ipc_event(IpcEvent::ExtensionRegistered {
+                    client_id,
+                    extension_id,
+                    extension_name: name,
+                });
+                
+                // Send ExtensionRegistered response
+                let payload = protocol::payload_extension_registered(extension_id);
+                if let Err(e) = write_frame(&mut socket, protocol::server_msg::EXTENSION_REGISTERED, &payload) {
+                    println!("[ClientThread {}] Failed to send ExtensionRegistered: {:?}", client_id, e);
+                }
+            }
+            Ok(ClientMessageRef::ExtensionCreateWindow {
+                external_client_id,
+                width,
+                height,
+            }) => {
+                println!(
+                    "[ClientThread {}] ExtensionCreateWindow: external_client_id={} {}x{}",
+                    client_id, external_client_id, width, height
+                );
+                
+                // Calculate buffer size
+                let buffer_size = (width as u64)
+                    .saturating_mul(height as u64)
+                    .saturating_mul(4);
+                
+                let window_id = next_window_id;
+                next_window_id = next_window_id.saturating_add(1);
+                
+                // Create shared memory for this window
+                match SharedMemory::create(buffer_size as usize, permissions::READ_WRITE) {
+                    Ok(shm) => {
+                        let shm_mapped_addr = match shm.as_handle().as_memory_mapping() {
+                            Ok(mapper) => {
+                                match mapper.mmap(
+                                    0,
+                                    buffer_size as usize,
+                                    permissions::READ_WRITE,
+                                    mmap_flags::SHARED,
+                                    0,
+                                ) {
+                                    Ok(addr) => {
+                                        // Zero-initialize
+                                        unsafe {
+                                            let ptr = addr as *mut u8;
+                                            for i in 0..buffer_size as usize {
+                                                *ptr.add(i) = 0;
+                                            }
+                                        }
+                                        Some(addr)
+                                    }
+                                    Err(_) => None,
+                                }
+                            }
+                            Err(_) => None,
+                        };
+                        
+                        // Reply with window created
+                        send_window_created(&mut socket, window_id, buffer_size);
+                        
+                        // Send SHM handle
+                        if let Err(e) = socket.send_handle(shm.as_handle()) {
+                            println!("[ClientThread {}] Failed to send SHM handle: {:?}", client_id, e);
+                        }
+                        
+                        // TODO: Map extension_id to client_id for routing
+                        register_window(window_id, client_id);
+                        
+                        push_ipc_event(IpcEvent::ExtensionCreateWindow {
+                            extension_id: client_id as u32, // Use client_id as extension_id for now
+                            external_client_id,
+                            window_id,
+                            width,
+                            height,
+                            shm: Some(shm),
+                            shm_mapped_addr,
+                            shm_size: buffer_size as usize,
+                        });
+                    }
+                    Err(e) => {
+                        println!("[ClientThread {}] Failed to create SHM: {:?}", client_id, e);
+                    }
+                }
+            }
+            Ok(ClientMessageRef::ExtensionUpdateBuffer {
+                external_client_id,
+                window_id,
+                x,
+                y,
+                width,
+                height,
+            }) => {
+                println!(
+                    "[ClientThread {}] ExtensionUpdateBuffer: external_client_id={} window_id={} damage=[{},{} {}x{}]",
+                    client_id, external_client_id, window_id, x, y, width, height
+                );
+                push_ipc_event(IpcEvent::ExtensionUpdateBuffer {
+                    external_client_id,
+                    window_id,
+                    damage_x: x,
+                    damage_y: y,
+                    damage_width: width,
+                    damage_height: height,
+                });
+            }
             Ok(_) => {
                 // Ignore other messages for now
             }
@@ -1048,4 +1166,35 @@ pub enum IpcEvent {
 
     /// Set window opacity
     SetWindowOpacity { window_id: u32, opacity: u8 },
+    
+    // Extension API events
+    
+    /// Extension registered
+    ExtensionRegistered {
+        client_id: usize,
+        extension_id: u32,
+        extension_name: std::string::String,
+    },
+    
+    /// Extension created a window for external client
+    ExtensionCreateWindow {
+        extension_id: u32,
+        external_client_id: u32,
+        window_id: u32,
+        width: u32,
+        height: u32,
+        shm: Option<SharedMemory>,
+        shm_mapped_addr: Option<usize>,
+        shm_size: usize,
+    },
+    
+    /// Extension updated buffer for external client
+    ExtensionUpdateBuffer {
+        external_client_id: u32,
+        window_id: u32,
+        damage_x: i32,
+        damage_y: i32,
+        damage_width: u32,
+        damage_height: u32,
+    },
 }

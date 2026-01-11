@@ -1842,6 +1842,55 @@ impl Compositor {
                     }
                 }
             }
+            IpcEvent::ExtensionRegistered { client_id, extension_id, extension_name } => {
+                println!("[Compositor] IPC: ExtensionRegistered client={} ext_id={} name={}", 
+                         client_id, extension_id, extension_name);
+                // Extension is now registered and can create windows
+            }
+            IpcEvent::ExtensionCreateWindow {
+                extension_id,
+                external_client_id,
+                window_id,
+                width,
+                height,
+                shm,
+                shm_mapped_addr,
+                shm_size,
+            } => {
+                println!("[Compositor] IPC: ExtensionCreateWindow ext_id={} ext_client={} window={} {}x{}", 
+                         extension_id, external_client_id, window_id, width, height);
+                
+                // Register this window with the window manager
+                self.window_manager.register_window(
+                    window_id,
+                    width,
+                    height,
+                    shm,
+                    shm_mapped_addr,
+                    shm_size,
+                );
+                
+                // Set default position
+                self.window_manager.set_window_position(window_id, 100, 100);
+                
+                self.full_redraw_needed = true;
+            }
+            IpcEvent::ExtensionUpdateBuffer {
+                external_client_id,
+                window_id,
+                damage_x,
+                damage_y,
+                damage_width,
+                damage_height,
+            } => {
+                println!("[Compositor] IPC: ExtensionUpdateBuffer ext_client={} window={} damage=[{},{} {}x{}]",
+                         external_client_id, window_id, damage_x, damage_y, damage_width, damage_height);
+                
+                // Mark window as damaged and trigger redraw
+                if let Some(w) = self.window_manager.get_window(window_id) {
+                    self.add_pending_damage((w.x + damage_x, w.y + damage_y, damage_width, damage_height));
+                }
+            }
         }
         Ok(false)
     }
