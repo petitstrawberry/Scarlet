@@ -1860,20 +1860,29 @@ impl Compositor {
                 println!("[Compositor] IPC: ExtensionCreateWindow ext_id={} ext_client={} window={} {}x{}", 
                          extension_id, external_client_id, window_id, width, height);
                 
-                // Register this window with the window manager
-                self.window_manager.register_window(
-                    window_id,
-                    width,
-                    height,
-                    shm,
-                    shm_mapped_addr,
-                    shm_size,
-                );
-                
-                // Set default position
-                self.window_manager.set_window_position(window_id, 100, 100);
-                
-                self.full_redraw_needed = true;
+                // Create window using window manager
+                if let Some(shm_handle) = shm {
+                    match self.window_manager.create_window_with_shm_from_event(
+                        window_id,
+                        100, // x position
+                        100, // y position
+                        width,
+                        height,
+                        shm_handle,
+                        shm_mapped_addr,
+                        shm_size,
+                    ) {
+                        Ok(wid) => {
+                            println!("[Compositor] Created extension window: {}", wid);
+                            self.full_redraw_needed = true;
+                        }
+                        Err(e) => {
+                            println!("[Compositor] Failed to create extension window: {}", e);
+                        }
+                    }
+                } else {
+                    println!("[Compositor] ExtensionCreateWindow: no SHM provided");
+                }
             }
             IpcEvent::ExtensionUpdateBuffer {
                 external_client_id,
