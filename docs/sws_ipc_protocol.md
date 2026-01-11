@@ -263,6 +263,63 @@ Semantics:
 - Windows with `opacity = 255` skip blending for performance.
 - The effective alpha is `pixel_alpha × (opacity / 255)`.
 
+#### `REGISTER_EXTENSION` (type = 100)
+
+**Extension API**: This message is part of the SWS Extension API.
+
+Payload (variable):
+
+| Offset | Size | Field                | Type  | Notes |
+|--------|------|----------------------|-------|-------|
+| 0      | 4    | `extension_name_len` | u32   | Length of extension name in bytes |
+| 4      | N    | `extension_name`     | bytes | UTF-8 extension identifier (e.g., "wayland_bridge") |
+
+Semantics:
+
+- Registers the calling client as an extension server.
+- Extension servers can create windows on behalf of external clients (e.g., Wayland clients).
+- Extension servers receive special input event notifications.
+- The server responds with `EXTENSION_REGISTERED` containing an assigned extension ID.
+
+#### `EXTENSION_CREATE_WINDOW` (type = 101)
+
+**Extension API**: This message is part of the SWS Extension API and can only be sent by registered extensions.
+
+Payload (12 bytes):
+
+| Offset | Size | Field                | Type | Notes |
+|--------|------|----------------------|------|-------|
+| 0      | 4    | `external_client_id` | u32  | Identifier for the external client |
+| 4      | 4    | `width`              | u32  | Window width in pixels |
+| 8      | 4    | `height`             | u32  | Window height in pixels |
+
+Semantics:
+
+- Creates a window associated with an external client.
+- The `external_client_id` is an opaque identifier chosen by the extension.
+- Input events for this window are delivered to the extension via `EXTENSION_INPUT_EVENT`.
+- The server responds with `WINDOW_CREATED` + SHM handle as usual.
+
+#### `EXTENSION_UPDATE_BUFFER` (type = 102)
+
+**Extension API**: This message is part of the SWS Extension API and can only be sent by registered extensions.
+
+Payload (24 bytes):
+
+| Offset | Size | Field                | Type | Notes |
+|--------|------|----------------------|------|-------|
+| 0      | 4    | `external_client_id` | u32  | Identifier for the external client |
+| 4      | 4    | `window_id`          | u32  | Window ID |
+| 8      | 4    | `x`                  | i32  | Damage rectangle X |
+| 12     | 4    | `y`                  | i32  | Damage rectangle Y |
+| 16     | 4    | `width`              | u32  | Damage rectangle width |
+| 20     | 4    | `height`             | u32  | Damage rectangle height |
+
+Semantics:
+
+- Updates the buffer for a window created via `EXTENSION_CREATE_WINDOW`.
+- Similar to `UPDATE_BUFFER` but includes the external client ID.
+
 ### Server → Client
 
 #### `WINDOW_CREATED` (type = 10)
@@ -330,8 +387,77 @@ Semantics:
 - This does not include a new SHM handle; clients should respond by issuing a `RESIZE_WINDOW` request.
 - Typically sent after interactive resize operations.
 
-## Compatibility and Versioning
+#### `EXTENSION_REGISTERED` (type = 100)
+
+**Extension API**: This message is part of the SWS Extension API.
+
+Payload (4 bytes):
+
+| Offset | Size | Field          | Type |
+|--------|------|----------------|------|
+| 0      | 4    | `extension_id` | u32  |
+
+Semantics:
+
+- Sent in response to `REGISTER_EXTENSION`.
+- Confirms successful extension registration.
+- The `extension_id` is a unique identifier for this extension instance.
+
+#### `EXTENSION_INPUT_EVENT` (type = 101)
+
+**Extension API**: This message is part of the SWS Extension API.
+
+Payload (24 bytes):
+
+| Offset | Size | Field                | Type | Notes |
+|--------|------|----------------------|------|-------|
+| 0      | 4    | `external_client_id` | u32  | External client identifier |
+| 4      | 4    | `window_id`          | u32  | Window ID |
+| 8      | 8    | `time`               | u64  | Event timestamp |
+| 16     | 2    | `type_`              | u16  | Event type |
+| 18     | 2    | `code`               | u16  | Event code |
+| 20     | 4    | `value`              | i32  | Event value |
+
+Semantics:
+
+- Forwards input events for windows created by an extension.
+- Similar to `INPUT_EVENT` but includes the external client ID.
+- Allows the extension to route events to the appropriate external client.
+
+## Extension API
+
+The Extension API allows specialized bridge servers (like the Wayland bridge) to create and manage windows on behalf of external clients.
 
 - The protocol currently has no explicit version field. Changes to message layouts should be made carefully.
 - Prefer adding new message types over changing existing payload formats.
 - When changing payload formats is unavoidable, introduce a new message type ID and keep the old one for compatibility.
+
+### Use Cases
+
+- **Wayland Bridge**: Translates Wayland protocol to SWS, creating SWS windows for Wayland clients.
+- **X11 Bridge**: (Future) Translates X11 protocol to SWS.
+- **VNC Server**: (Future) Exports SWS display over network.
+
+### Registration Flow
+
+1. Extension connects to SWS via normal socket connection
+2. Extension sends `REGISTER_EXTENSION` with its name (e.g., "wayland_bridge")
+3. SWS responds with `EXTENSION_REGISTERED` containing an extension ID
+4. Extension can now use `EXTENSION_CREATE_WINDOW` and receive `EXTENSION_INPUT_EVENT`
+
+### Window Management
+
+Extensions create windows using `EXTENSION_CREATE_WINDOW` instead of `CREATE_WINDOW`. The key difference is:
+
+- `CREATE_WINDOW`: Window belongs to the calling client
+- `EXTENSION_CREATE_WINDOW`: Window belongs to an external client (identified by `external_client_id`)
+
+Input events for extension-created windows are delivered via `EXTENSION_INPUT_EVENT` instead of `INPUT_EVENT`, allowing the extension to route them to the correct external client.
+
+### Security Considerations
+
+- Extensions have elevated privileges (can create windows for any external client ID)
+- In a production system, extension registration should be restricted to trusted processes
+- Currently, any client can register as an extension (no authentication)
+
+## Compatibility and Versioning

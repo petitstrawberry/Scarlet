@@ -41,6 +41,14 @@ pub mod client_msg {
     pub const RESTORE_WINDOW: u32 = 19;
     pub const SET_WINDOW_TYPE: u32 = 20;
     pub const SET_WINDOW_OPACITY: u32 = 21;
+    
+    // Extension API messages (100+)
+    /// Register as an extension server (e.g., Wayland bridge)
+    pub const REGISTER_EXTENSION: u32 = 100;
+    /// Create a window on behalf of another client (extension-only)
+    pub const EXTENSION_CREATE_WINDOW: u32 = 101;
+    /// Update buffer on behalf of another client (extension-only)
+    pub const EXTENSION_UPDATE_BUFFER: u32 = 102;
 }
 
 /// Message type IDs (server -> client).
@@ -51,6 +59,12 @@ pub mod server_msg {
     pub const ERROR: u32 = 13;
     pub const WINDOW_RESIZED: u32 = 14;
     pub const WINDOW_CONFIGURE: u32 = 15;
+    
+    // Extension API messages (100+)
+    /// Confirmation that extension registration succeeded
+    pub const EXTENSION_REGISTERED: u32 = 100;
+    /// Forward input event to extension (for extension clients)
+    pub const EXTENSION_INPUT_EVENT: u32 = 101;
 }
 
 /// Flags for transient (parent/child) window behavior.
@@ -706,4 +720,46 @@ pub fn payload_set_window_opacity(window_id: u32, opacity: u8) -> [u8; 5] {
     payload[0..4].copy_from_slice(&window_id.to_le_bytes());
     payload[4] = opacity;
     payload
+}
+
+/// Build payload for client->server `REGISTER_EXTENSION`.
+///
+/// Registers a client as an extension server (e.g., Wayland bridge).
+/// Extension servers can create windows on behalf of other clients.
+///
+/// Payload (variable):
+/// - extension_name_len: u32 (length of extension name)
+/// - extension_name: bytes (UTF-8 string)
+pub fn payload_register_extension(extension_name: &[u8]) -> Vec<u8> {
+    let mut out = Vec::new();
+    out.extend_from_slice(&(extension_name.len() as u32).to_le_bytes());
+    out.extend_from_slice(extension_name);
+    out
+}
+
+/// Build payload for client->server `EXTENSION_CREATE_WINDOW`.
+///
+/// Extension servers use this to create windows that will be associated
+/// with external clients (e.g., Wayland clients).
+///
+/// Payload (12 bytes):
+/// - external_client_id: u32 (identifier for the external client)
+/// - width: u32
+/// - height: u32
+pub fn payload_extension_create_window(external_client_id: u32, width: u32, height: u32) -> [u8; 12] {
+    let mut payload = [0u8; 12];
+    payload[0..4].copy_from_slice(&external_client_id.to_le_bytes());
+    payload[4..8].copy_from_slice(&width.to_le_bytes());
+    payload[8..12].copy_from_slice(&height.to_le_bytes());
+    payload
+}
+
+/// Build payload for server->client `EXTENSION_REGISTERED`.
+///
+/// Confirms successful extension registration.
+///
+/// Payload (4 bytes):
+/// - extension_id: u32 (assigned extension ID)
+pub fn payload_extension_registered(extension_id: u32) -> [u8; 4] {
+    extension_id.to_le_bytes()
 }
