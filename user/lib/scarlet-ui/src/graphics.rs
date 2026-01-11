@@ -368,6 +368,12 @@ impl<'a> Canvas<'a> {
         // Source-over blend in *straight alpha*.
         // This keeps the buffer's alpha meaningful so the compositor can
         // correctly blend the final window surface.
+        //
+        // Note: Uses floating-point arithmetic for accurate source-over compositing.
+        // Unlike the compositor's simpler per-window opacity blending (which outputs
+        // opaque pixels), this preserves the alpha channel in the window buffer,
+        // allowing for proper multi-layer transparency when the compositor later
+        // blends this window onto the screen.
         let dst = self.get_pixel(x, y);
 
         let src_a = (alpha * (color.a as f32 / 255.0)).clamp(0.0, 1.0);
