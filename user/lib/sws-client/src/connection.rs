@@ -430,7 +430,21 @@ impl Connection {
         .map_err(|_| Error::SendFailed)
     }
 
-    /// Set window type for Z-order management.
+    /// Set the window type used for Z-order management.
+    ///
+    /// The `window_type` argument selects one of the window type constants defined
+    /// by the SWS protocol:
+    ///
+    /// - `NORMAL = 0`: Standard application window.
+    /// - `ALWAYS_ON_TOP = 1`: Stays above `NORMAL` and `TASKBAR` windows.
+    /// - `TASKBAR = 2`: Taskbar or dock-style window, above `DESKTOP` but
+    ///   below `ALWAYS_ON_TOP`.
+    /// - `DESKTOP = 3`: Desktop background window, at the bottom of the
+    ///   stacking order.
+    ///
+    /// Higher-priority types (for example `ALWAYS_ON_TOP`) are kept above
+    /// lower-priority types in the global Z-order. See
+    /// [`sws_protocol::window_types`] for the available constants.
     pub fn set_window_type(&mut self, surface_id: u32, window_type: u32) -> Result<(), Error> {
         if self.surfaces.get(&surface_id).is_none() {
             return Err(Error::SurfaceNotFound);
