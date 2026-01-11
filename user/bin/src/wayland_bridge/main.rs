@@ -727,6 +727,93 @@ impl WaylandBridge {
         // Keyboard events are sent from SWS, not received from client
         Ok(None)
     }
+    
+    /// Process input events from SWS and forward to Wayland clients
+    /// This should be called periodically or in a separate thread
+    fn process_sws_input_events(&mut self) -> Result<Vec<WaylandMessage>, &'static str> {
+        let mut messages = Vec::new();
+        
+        let sws_conn = match self.sws_connection.as_mut() {
+            Some(conn) => conn,
+            None => return Ok(messages),
+        };
+        
+        // Try to read input events from SWS (non-blocking would be better)
+        let mut buf = [0u8; 1024];
+        match sws_conn.read(&mut buf) {
+            Ok(n) if n >= 8 => {
+                let mut header_bytes = [0u8; 8];
+                header_bytes.copy_from_slice(&buf[0..8]);
+                let header = protocol_sws::MessageHeader::from_le_bytes(header_bytes);
+                
+                if header.msg_type == protocol_sws::server_msg::EXTENSION_INPUT_EVENT && n >= 32 {
+                    // Parse EXTENSION_INPUT_EVENT
+                    let external_client_id = u32::from_le_bytes([buf[8], buf[9], buf[10], buf[11]]);
+                    let window_id = u32::from_le_bytes([buf[12], buf[13], buf[14], buf[15]]);
+                    let time = u64::from_le_bytes([
+                        buf[16], buf[17], buf[18], buf[19],
+                        buf[20], buf[21], buf[22], buf[23],
+                    ]);
+                    let type_ = u16::from_le_bytes([buf[24], buf[25]]);
+                    let code = u16::from_le_bytes([buf[26], buf[27]]);
+                    let value = i32::from_le_bytes([buf[28], buf[29], buf[30], buf[31]]);
+                    
+                    println!("[Bridge] Received input event: ext_client={} win={} type={} code={} value={}", 
+                             external_client_id, window_id, type_, code, value);
+                    
+                    // Find surface for this window (external_client_id is surface_id)
+                    // For simplicity, send to all input devices
+                    // In production, track which surface has focus
+                    
+                    // Convert SWS event to Wayland input events
+                    // Type 1 = keyboard, Type 2 = mouse
+                    if type_ == 1 {
+                        // Keyboard event - forward to all wl_keyboard objects
+                        for (id, interface) in &self.objects {
+                            if interface == "wl_keyboard" {
+                                let mut msg = WaylandMessage::new(*id, input::keyboard_event::KEY);
+                                msg.add_arg(WaylandArg::Uint(0)); // serial
+                                msg.add_arg(WaylandArg::Uint(time as u32));
+                                msg.add_arg(WaylandArg::Uint(code as u32));
+                                msg.add_arg(WaylandArg::Uint(value as u32)); // state
+                                messages.push(msg);
+                            }
+                        }
+                    } else if type_ == 2 {
+                        // Mouse event - forward to all wl_pointer objects
+                        for (id, interface) in &self.objects {
+                            if interface == "wl_pointer" {
+                                if code == 0 {
+                                    // Motion event
+                                    let mut msg = WaylandMessage::new(*id, input::pointer_event::MOTION);
+                                    msg.add_arg(WaylandArg::Uint(time as u32));
+                                    msg.add_arg(WaylandArg::Int(value)); // x (simplified)
+                                    msg.add_arg(WaylandArg::Int(value)); // y (simplified)
+                                    messages.push(msg);
+                                } else {
+                                    // Button event
+                                    let mut msg = WaylandMessage::new(*id, input::pointer_event::BUTTON);
+                                    msg.add_arg(WaylandArg::Uint(0)); // serial
+                                    msg.add_arg(WaylandArg::Uint(time as u32));
+                                    msg.add_arg(WaylandArg::Uint(code as u32));
+                                    msg.add_arg(WaylandArg::Uint(value as u32)); // state
+                                    messages.push(msg);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            Ok(_) => {
+                // No data or incomplete message
+            }
+            Err(_) => {
+                // Would block or error - this is expected for non-blocking I/O
+            }
+        }
+        
+        Ok(messages)
+    }
 }
 
 #[unsafe(no_mangle)]
