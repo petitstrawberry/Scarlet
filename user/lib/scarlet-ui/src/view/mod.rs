@@ -21,4 +21,4 @@ pub use controls::{
     // Reactive controls (all use Binding<T>)
     ReactiveLabel, TextField, CheckBox, Slider, ProgressBar, Toggle,
 };
-pub use window::Window;
+pub use window::{Window, WindowKind};

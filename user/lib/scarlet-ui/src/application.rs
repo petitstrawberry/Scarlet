@@ -302,9 +302,14 @@ impl Application {
                 .set_window_size_limits(surface_id, size_limits)
                 .map_err(|_| "Failed to set window size limits")?;
         }
+        let window_type = window.get_window_type().to_protocol_value();
         
         // Create managed window
         let mut managed = ManagedWindow::new(window, surface_id);
+
+        self.connection
+            .set_window_type(surface_id, window_type)
+            .map_err(|_| "Failed to set window type")?;
         
         // Initial layout
         managed.window.layout(Size::new(width, height));

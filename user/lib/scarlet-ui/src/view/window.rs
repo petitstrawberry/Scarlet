@@ -19,6 +19,31 @@ const TITLEBAR_CONTROL_COUNT: u32 = 3;
 /// Window corner radius
 const WINDOW_CORNER_RADIUS: u32 = 0;
 
+/// Window type for compositor Z-order management.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WindowKind {
+    /// Standard application window.
+    Normal,
+    /// Always stays above normal/taskbar windows.
+    AlwaysOnTop,
+    /// Taskbar or panel surface.
+    Taskbar,
+    /// Desktop/background surface (lowest layer).
+    Desktop,
+}
+
+impl WindowKind {
+    /// Numeric value expected by the SWS protocol.
+    pub const fn to_protocol_value(self) -> u32 {
+        match self {
+            WindowKind::Normal => 0,
+            WindowKind::AlwaysOnTop => 1,
+            WindowKind::Taskbar => 2,
+            WindowKind::Desktop => 3,
+        }
+    }
+}
+
 /// Window - a root view with decorations (title bar, border)
 ///
 /// Window is the top-level View in a view hierarchy. It manages:
@@ -49,6 +74,7 @@ pub struct Window {
     content_size: Size,
 
     size_limits: WindowSizeLimits,
+    window_type: WindowKind,
     
     // State
     close_button_hovered: bool,
@@ -89,6 +115,7 @@ impl Window {
             content: None,
             content_size: Size::ZERO,
             size_limits: WindowSizeLimits::NONE,
+            window_type: WindowKind::Normal,
             close_button_hovered: false,
             close_button_pressed: false,
             close_requested: false,
@@ -129,6 +156,17 @@ impl Window {
     /// Get configured size limits.
     pub fn get_size_limits(&self) -> WindowSizeLimits {
         self.size_limits
+    }
+
+    /// Set the window type used by the compositor for stacking.
+    pub fn window_type(mut self, kind: WindowKind) -> Self {
+        self.window_type = kind;
+        self
+    }
+
+    /// Get the requested window type.
+    pub fn get_window_type(&self) -> WindowKind {
+        self.window_type
     }
 
     /// Set background color (builder pattern)

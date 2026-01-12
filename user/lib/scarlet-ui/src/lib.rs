@@ -137,8 +137,8 @@ pub use ab_glyph::{FontRef, InvalidFont};
 // View system re-exports
 pub use view::{
     View, Size, ViewBox, IntoViewBox,
-    Window,
-    VStack, HStack, ZStack, Padding, Center,
+    Window, WindowKind,
+    VStack, HStack, ZStack, Padding, Center, StackAlignment,
     // Basic views
     Label, Text, Button, Spacer, RectView,
     // Reactive controls (all use Binding<T> or State<T>)

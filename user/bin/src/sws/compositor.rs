@@ -114,7 +114,8 @@ impl Compositor {
         // Keep prev position consistent to avoid an oversized first dirty region.
         cursor.mark_drawn();
 
-        let bg_color = [100, 100, 100, 255]; // Gray background
+        // Slightly desaturated charcoal background to better fit desktop surfaces.
+        let bg_color = [24, 28, 36, 255];
 
         let backbuffer_stride = screen_width * bytes_per_pixel;
         let buffer_size = (screen_width * screen_height * bytes_per_pixel) as usize;
@@ -235,40 +236,9 @@ impl Compositor {
     pub fn init_display(&mut self) -> Result<(), &'static str> {
         println!("[Compositor] Initializing display...");
 
-        // Create multiple test windows with buffers
-        let win1 = self.window_manager.create_window(50, 50, 400, 250);
-        if let Some(window) = self.window_manager.get_window_mut(win1) {
-            window.set_title("Window 1");
-            // Fill with red gradient
-            if let Some(ref mut buffer) = window.buffer {
-                Self::fill_buffer_gradient(buffer, 400, 250, [200, 50, 50, 255]);
-            }
-        }
+        println!("[Compositor] No debug windows created (clean desktop startup)");
 
-        let win2 = self.window_manager.create_window(150, 120, 350, 200);
-        if let Some(window) = self.window_manager.get_window_mut(win2) {
-            window.set_title("Window 2");
-            // Fill with green gradient
-            if let Some(ref mut buffer) = window.buffer {
-                Self::fill_buffer_gradient(buffer, 350, 200, [50, 200, 50, 255]);
-            }
-        }
-
-        let win3 = self.window_manager.create_window(250, 180, 300, 180);
-        if let Some(window) = self.window_manager.get_window_mut(win3) {
-            window.set_title("Window 3");
-            // Fill with blue gradient
-            if let Some(ref mut buffer) = window.buffer {
-                Self::fill_buffer_gradient(buffer, 300, 180, [50, 50, 200, 255]);
-            }
-        }
-
-        // Focus the last created window
-        self.window_manager.set_focus(win3);
-
-        println!("[Compositor] Created 3 test windows with content");
-
-        self.dump_memory_layout("after init_display windows");
+        self.dump_memory_layout("after init_display (empty)");
 
         // Initial full composite
         self.full_redraw_needed = true;
@@ -444,6 +414,7 @@ impl Compositor {
     }
 
     /// Fill buffer with gradient (for testing, static method)
+    #[allow(dead_code)]
     fn fill_buffer_gradient(buffer: &mut [u8], width: u32, height: u32, base_color: [u8; 4]) {
         for y in 0..height {
             for x in 0..width {
@@ -585,15 +556,22 @@ impl Compositor {
             return;
         }
 
-        // Pick coordinates that avoid the default cursor position (center) AND
-        // avoid being fully covered by a client window at (0,0) size 400x300.
+        // Pick coordinates that avoid the default cursor position (center) and
+        // sample both corners and the center for sanity.
         let mut samples: Vec<(u32, u32, &'static str)> = Vec::new();
         samples.push((0, 0, "bg top-left"));
         samples.push((10, 10, "bg near top-left"));
-        samples.push((420, 60, "inside win1 (outside client 0,0-400x300)"));
-        samples.push((460, 130, "inside win2 (outside client 0,0-400x300)"));
-        samples.push((420, 190, "overlap win2/win3 (expect top-most)"));
-        samples.push((900, 700, "bg bottom-right"));
+        samples.push((self.screen_width / 2, self.screen_height / 2, "bg center"));
+        samples.push((
+            self.screen_width.saturating_sub(20),
+            self.screen_height / 2,
+            "bg mid-right",
+        ));
+        samples.push((
+            self.screen_width.saturating_sub(20),
+            self.screen_height.saturating_sub(20),
+            "bg bottom-right",
+        ));
 
         // For incremental redraw, also validate a point inside the dirty region.
         if let Some((dx, dy, dw, dh)) = dirty {

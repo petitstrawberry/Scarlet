@@ -88,6 +88,10 @@ path = "src/stemd.rs"
 name = "slint_demo"
 path = "src/slint_demo.rs"
 
+[[bin]]
+name = "scarlet_desktop"
+path = "src/scarlet_desktop/main.rs"
+
 [dependencies]
 scarlet_std = { path = "../lib/std", features = ["alloc_debug"] }
 framebuffer = { path = "../lib/framebuffer" }
