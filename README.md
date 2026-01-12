@@ -98,6 +98,7 @@ This interoperability is possible because all ABIs share the same underlying ker
 
 - **Multi-ABI Support**: Transparent execution of binaries from different operating systems
 - **Runtime Delegation**: Execute binaries via userland runtimes (Wasm, emulators, etc.) - [Details](docs/runtime-delegation.md)
+- **Service Management**: Stem daemon (stemd) provides systemd-like service management with dependency resolution - [Details](docs/stemd.md)
 - **Container Runtime**: Complete filesystem isolation with namespace support
 - **Dynamic Linking**: Native dynamic linker support for shared libraries and position-independent executables
 - **Advanced VFS**: Modern virtual filesystem with ext2, FAT32, overlay, bind mount, and device file support
