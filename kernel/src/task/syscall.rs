@@ -470,6 +470,25 @@ pub fn sys_sleep(trapframe: &mut Trapframe) -> usize {
     0
 }
 
+/// Yield execution to the scheduler
+///
+/// This is a cooperative scheduling primitive similar to `sched_yield(2)`.
+/// The calling task remains runnable, but allows another ready task to run.
+///
+/// # Returns
+/// * `0` on success
+pub fn sys_yield(trapframe: &mut Trapframe) -> usize {
+    let task = mytask().unwrap();
+
+    // Increment PC before yielding to avoid re-executing the syscall on resume
+    trapframe.increment_pc_next(task);
+
+    // Yield CPU to scheduler - returns when this task is scheduled again
+    get_scheduler().schedule(trapframe);
+
+    0
+}
+
 /// Register an ABI zone for a specific memory range
 ///
 /// # Arguments

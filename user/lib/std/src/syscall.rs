@@ -19,6 +19,8 @@ pub enum Syscall {
 
     Sleep = 20,
 
+    Yield = 21,
+
     // ABI Zone Management
     RegisterAbiZone = 90,
     UnregisterAbiZone = 91,

@@ -11,7 +11,7 @@
 
 extern crate scarlet_std as std;
 
-use core::sync::atomic::fence;
+use core::{arch::{asm}, hint::spin_loop, sync::atomic::fence};
 use std::{
     fs::File,
     handle::Handle,
@@ -673,6 +673,13 @@ tty = "/dev/tty0"
     // Spawn IPC thread
     println!("stemd: Starting IPC thread");
     let _ipc_handle = thread::spawn(ipc_thread);
+
+    let _idle = thread::spawn(|| {
+        loop {
+            scarlet_std::thread::yield_now();
+            spin_loop();
+        }
+    });
 
     loop {
         let (pid, status) = waitpid(-1, 0);
