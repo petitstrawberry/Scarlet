@@ -108,7 +108,7 @@ impl WaylandMessage {
     /// Encode message to bytes
     pub fn encode(&self) -> Vec<u8> {
         let mut bytes = Vec::new();
-        
+
         // Calculate total size
         let mut size = 8u32; // Header size
         for arg in &self.args {
@@ -132,8 +132,11 @@ impl WaylandArg {
     /// Get the encoded size of this argument (with padding)
     fn encoded_size(&self) -> u32 {
         match self {
-            WaylandArg::Int(_) | WaylandArg::Uint(_) | WaylandArg::Fixed(_) 
-            | WaylandArg::Object(_) | WaylandArg::NewId(_) => 4,
+            WaylandArg::Int(_)
+            | WaylandArg::Uint(_)
+            | WaylandArg::Fixed(_)
+            | WaylandArg::Object(_)
+            | WaylandArg::NewId(_) => 4,
             WaylandArg::String(s) => {
                 // size (4 bytes) + string (including null) + padding
                 let len = s.len() + 1; // +1 for null terminator
@@ -200,7 +203,7 @@ pub fn parse_message(data: &[u8]) -> Option<WaylandMessage> {
 
     // For now, we don't parse arguments - that requires knowing the message signature
     // which depends on the interface and opcode. We'll add that incrementally.
-    
+
     Some(WaylandMessage {
         header,
         args: Vec::new(),

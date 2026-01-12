@@ -416,13 +416,18 @@ fn accept_thread_main(server_socket: Socket) {
     println!("[AcceptThread] stack marker addr: 0x{:x}", sp_hint);
 
     let mut client_id_counter: usize = 0;
+    let mut poll_count: u64 = 0;
 
     loop {
-        // Accept new client (blocking)
-        println!(
-            "[AcceptThread] Calling accept() on handle {}...",
-            server_socket.as_raw()
-        );
+        // Kernel accept() currently returns WouldBlock when no connections are
+        // pending, so we poll with a short sleep to avoid busy looping.
+        poll_count = poll_count.wrapping_add(1);
+        if poll_count % 100 == 1 {
+            println!(
+                "[AcceptThread] Polling accept() on handle {}...",
+                server_socket.as_raw()
+            );
+        }
         match server_socket.accept() {
             Ok(client_socket) => {
                 let client_id = client_id_counter;
@@ -439,17 +444,18 @@ fn accept_thread_main(server_socket: Socket) {
                     client_thread_main(client_id, client_socket);
                 });
             }
-            Err(e) => {
-                println!("[AcceptThread] Accept failed: {:?}", e);
-                // TODO: Kernel accept() should block instead of returning WouldBlock
-                // For now, break on error to avoid busy loop
-                println!("[AcceptThread] Exiting due to accept error");
-                break;
+            Err(std::socket::SocketError::WouldBlock) => {
+                thread::sleep(core::time::Duration::from_millis(10));
+                continue;
+            }
+            Err(_) => {
+                // At the moment `Socket::accept()` maps all failures to `WouldBlock`,
+                // but keep this arm for forward compatibility.
+                thread::sleep(core::time::Duration::from_millis(10));
+                continue;
             }
         }
     }
-
-    println!("[AcceptThread] Thread exiting");
 }
 
 /// Client thread main function
@@ -950,22 +956,29 @@ fn client_thread_main(client_id: usize, mut socket: Socket) {
                     client_id,
                     std::string::String::from_utf8_lossy(extension_name)
                 );
-                
+
                 // Allocate extension ID
                 let extension_id = next_window_id; // Reuse window ID counter for simplicity
                 next_window_id = next_window_id.saturating_add(1);
-                
+
                 let name = std::string::String::from_utf8_lossy(extension_name).into_owned();
                 push_ipc_event(IpcEvent::ExtensionRegistered {
                     client_id,
                     extension_id,
                     extension_name: name,
                 });
-                
+
                 // Send ExtensionRegistered response
                 let payload = protocol::payload_extension_registered(extension_id);
-                if let Err(e) = write_frame(&mut socket, protocol::server_msg::EXTENSION_REGISTERED, &payload) {
-                    println!("[ClientThread {}] Failed to send ExtensionRegistered: {:?}", client_id, e);
+                if let Err(e) = write_frame(
+                    &mut socket,
+                    protocol::server_msg::EXTENSION_REGISTERED,
+                    &payload,
+                ) {
+                    println!(
+                        "[ClientThread {}] Failed to send ExtensionRegistered: {:?}",
+                        client_id, e
+                    );
                 }
             }
             Ok(ClientMessageRef::ExtensionCreateWindow {
@@ -977,15 +990,15 @@ fn client_thread_main(client_id: usize, mut socket: Socket) {
                     "[ClientThread {}] ExtensionCreateWindow: external_client_id={} {}x{}",
                     client_id, external_client_id, width, height
                 );
-                
+
                 // Calculate buffer size
                 let buffer_size = (width as u64)
                     .saturating_mul(height as u64)
                     .saturating_mul(4);
-                
+
                 let window_id = next_window_id;
                 next_window_id = next_window_id.saturating_add(1);
-                
+
                 // Create shared memory for this window
                 match SharedMemory::create(buffer_size as usize, permissions::READ_WRITE) {
                     Ok(shm) => {
@@ -1013,18 +1026,21 @@ fn client_thread_main(client_id: usize, mut socket: Socket) {
                             }
                             Err(_) => None,
                         };
-                        
+
                         // Reply with window created
                         send_window_created(&mut socket, window_id, buffer_size);
-                        
+
                         // Send SHM handle
                         if let Err(e) = socket.send_handle(shm.as_handle()) {
-                            println!("[ClientThread {}] Failed to send SHM handle: {:?}", client_id, e);
+                            println!(
+                                "[ClientThread {}] Failed to send SHM handle: {:?}",
+                                client_id, e
+                            );
                         }
-                        
+
                         // TODO: Map extension_id to client_id for routing
                         register_window(window_id, client_id);
-                        
+
                         push_ipc_event(IpcEvent::ExtensionCreateWindow {
                             extension_id: client_id as u32, // Use client_id as extension_id for now
                             external_client_id,
@@ -1166,16 +1182,15 @@ pub enum IpcEvent {
 
     /// Set window opacity
     SetWindowOpacity { window_id: u32, opacity: u8 },
-    
+
     // Extension API events
-    
     /// Extension registered
     ExtensionRegistered {
         client_id: usize,
         extension_id: u32,
         extension_name: std::string::String,
     },
-    
+
     /// Extension created a window for external client
     ExtensionCreateWindow {
         extension_id: u32,
@@ -1187,7 +1202,7 @@ pub enum IpcEvent {
         shm_mapped_addr: Option<usize>,
         shm_size: usize,
     },
-    
+
     /// Extension updated buffer for external client
     ExtensionUpdateBuffer {
         external_client_id: u32,

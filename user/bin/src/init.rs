@@ -79,7 +79,7 @@ fn setup_new_root() -> bool {
     }
 
     // Try mounting tmpfs on the new /tmp. Non-fatal if it fails.
-    match mount("tmpfs", "/mnt/newroot/tmp", "tmpfs", 0, Some("size=16M")) {
+    match mount("tmpfs", "/mnt/newroot/tmp", "tmpfs", 0, Some("size=32M")) {
         Ok(_) => println!("init: tmpfs mounted at /mnt/newroot/tmp"),
         Err(_) => println!("init: Warning: Failed to mount tmpfs at /mnt/newroot/tmp"),
     }

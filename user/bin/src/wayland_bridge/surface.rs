@@ -87,7 +87,8 @@ impl SurfaceManager {
 
     /// Create a new surface
     pub fn create_surface(&mut self, wl_surface_id: u32) {
-        self.surfaces.insert(wl_surface_id, Surface::new(wl_surface_id));
+        self.surfaces
+            .insert(wl_surface_id, Surface::new(wl_surface_id));
     }
 
     /// Get a surface by ID

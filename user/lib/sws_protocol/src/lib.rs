@@ -41,7 +41,7 @@ pub mod client_msg {
     pub const RESTORE_WINDOW: u32 = 19;
     pub const SET_WINDOW_TYPE: u32 = 20;
     pub const SET_WINDOW_OPACITY: u32 = 21;
-    
+
     // Extension API messages (100+)
     /// Register as an extension server (e.g., Wayland bridge)
     pub const REGISTER_EXTENSION: u32 = 100;
@@ -59,7 +59,7 @@ pub mod server_msg {
     pub const ERROR: u32 = 13;
     pub const WINDOW_RESIZED: u32 = 14;
     pub const WINDOW_CONFIGURE: u32 = 15;
-    
+
     // Extension API messages (100+)
     /// Confirmation that extension registration succeeded
     pub const EXTENSION_REGISTERED: u32 = 100;
@@ -238,7 +238,6 @@ pub enum ClientMessageRef<'a> {
     },
 
     // Extension API messages (100+)
-    
     /// Register as an extension server
     RegisterExtension {
         extension_name: &'a [u8],
@@ -300,14 +299,13 @@ pub enum ServerMessage {
     Error {
         code: u32,
     },
-    
+
     // Extension API messages (100+)
-    
     /// Extension registration successful
     ExtensionRegistered {
         extension_id: u32,
     },
-    
+
     /// Input event for extension-managed window
     ExtensionInputEvent {
         external_client_id: u32,
@@ -483,7 +481,8 @@ pub fn parse_client_message<'a>(
             if payload.len() < 4 {
                 return Err(ProtocolError::MalformedPayload);
             }
-            let name_len = u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]) as usize;
+            let name_len =
+                u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]) as usize;
             if payload.len() != 4 + name_len {
                 return Err(ProtocolError::MalformedPayload);
             }
@@ -494,7 +493,8 @@ pub fn parse_client_message<'a>(
             if payload.len() != 12 {
                 return Err(ProtocolError::MalformedPayload);
             }
-            let external_client_id = u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
+            let external_client_id =
+                u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
             let width = u32::from_le_bytes([payload[4], payload[5], payload[6], payload[7]]);
             let height = u32::from_le_bytes([payload[8], payload[9], payload[10], payload[11]]);
             Ok(ClientMessageRef::ExtensionCreateWindow {
@@ -507,7 +507,8 @@ pub fn parse_client_message<'a>(
             if payload.len() != 24 {
                 return Err(ProtocolError::MalformedPayload);
             }
-            let external_client_id = u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
+            let external_client_id =
+                u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
             let window_id = u32::from_le_bytes([payload[4], payload[5], payload[6], payload[7]]);
             let x = i32::from_le_bytes([payload[8], payload[9], payload[10], payload[11]]);
             let y = i32::from_le_bytes([payload[12], payload[13], payload[14], payload[15]]);
@@ -637,7 +638,8 @@ pub fn parse_server_message(msg_type: u32, payload: &[u8]) -> Result<ServerMessa
             if payload.len() != 24 {
                 return Err(ProtocolError::MalformedPayload);
             }
-            let external_client_id = u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
+            let external_client_id =
+                u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
             let window_id = u32::from_le_bytes([payload[4], payload[5], payload[6], payload[7]]);
             let time = u64::from_le_bytes([
                 payload[8],
@@ -865,7 +867,11 @@ pub fn payload_register_extension(extension_name: &[u8]) -> Vec<u8> {
 /// - external_client_id: u32 (identifier for the external client)
 /// - width: u32
 /// - height: u32
-pub fn payload_extension_create_window(external_client_id: u32, width: u32, height: u32) -> [u8; 12] {
+pub fn payload_extension_create_window(
+    external_client_id: u32,
+    width: u32,
+    height: u32,
+) -> [u8; 12] {
     let mut payload = [0u8; 12];
     payload[0..4].copy_from_slice(&external_client_id.to_le_bytes());
     payload[4..8].copy_from_slice(&width.to_le_bytes());

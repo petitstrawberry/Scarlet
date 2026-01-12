@@ -39,7 +39,7 @@ impl InputManager {
             keyboards: BTreeMap::new(),
         }
     }
-    
+
     pub fn create_seat(&mut self, seat_id: u32, name: &'static str) {
         let seat = Seat {
             seat_id,
@@ -48,11 +48,11 @@ impl InputManager {
         };
         self.seats.insert(seat_id, seat);
     }
-    
+
     pub fn get_seat(&self, seat_id: u32) -> Option<&Seat> {
         self.seats.get(&seat_id)
     }
-    
+
     pub fn create_pointer(&mut self, pointer_id: u32, seat_id: u32) {
         let pointer = Pointer {
             pointer_id,
@@ -60,7 +60,7 @@ impl InputManager {
         };
         self.pointers.insert(pointer_id, pointer);
     }
-    
+
     pub fn create_keyboard(&mut self, keyboard_id: u32, seat_id: u32) {
         let keyboard = Keyboard {
             keyboard_id,

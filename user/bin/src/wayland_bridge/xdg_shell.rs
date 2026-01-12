@@ -82,7 +82,11 @@ impl XdgShellManager {
     }
 
     /// Create a toplevel for an XDG surface
-    pub fn create_toplevel(&mut self, xdg_surface_id: u32, xdg_toplevel_id: u32) -> Result<(), &'static str> {
+    pub fn create_toplevel(
+        &mut self,
+        xdg_surface_id: u32,
+        xdg_toplevel_id: u32,
+    ) -> Result<(), &'static str> {
         let surface = self
             .surfaces
             .get_mut(&xdg_surface_id)

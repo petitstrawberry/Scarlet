@@ -1842,9 +1842,15 @@ impl Compositor {
                     }
                 }
             }
-            IpcEvent::ExtensionRegistered { client_id, extension_id, extension_name } => {
-                println!("[Compositor] IPC: ExtensionRegistered client={} ext_id={} name={}", 
-                         client_id, extension_id, extension_name);
+            IpcEvent::ExtensionRegistered {
+                client_id,
+                extension_id,
+                extension_name,
+            } => {
+                println!(
+                    "[Compositor] IPC: ExtensionRegistered client={} ext_id={} name={}",
+                    client_id, extension_id, extension_name
+                );
                 // Extension is now registered and can create windows
             }
             IpcEvent::ExtensionCreateWindow {
@@ -1857,9 +1863,11 @@ impl Compositor {
                 shm_mapped_addr,
                 shm_size,
             } => {
-                println!("[Compositor] IPC: ExtensionCreateWindow ext_id={} ext_client={} window={} {}x{}", 
-                         extension_id, external_client_id, window_id, width, height);
-                
+                println!(
+                    "[Compositor] IPC: ExtensionCreateWindow ext_id={} ext_client={} window={} {}x{}",
+                    extension_id, external_client_id, window_id, width, height
+                );
+
                 // Create window using window manager
                 if let Some(shm_handle) = shm {
                     match self.window_manager.create_window_with_shm_from_event(
@@ -1892,12 +1900,19 @@ impl Compositor {
                 damage_width,
                 damage_height,
             } => {
-                println!("[Compositor] IPC: ExtensionUpdateBuffer ext_client={} window={} damage=[{},{} {}x{}]",
-                         external_client_id, window_id, damage_x, damage_y, damage_width, damage_height);
-                
+                println!(
+                    "[Compositor] IPC: ExtensionUpdateBuffer ext_client={} window={} damage=[{},{} {}x{}]",
+                    external_client_id, window_id, damage_x, damage_y, damage_width, damage_height
+                );
+
                 // Mark window as damaged and trigger redraw
                 if let Some(w) = self.window_manager.get_window(window_id) {
-                    self.add_pending_damage((w.x + damage_x, w.y + damage_y, damage_width, damage_height));
+                    self.add_pending_damage((
+                        w.x + damage_x,
+                        w.y + damage_y,
+                        damage_width,
+                        damage_height,
+                    ));
                 }
             }
         }
