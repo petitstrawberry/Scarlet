@@ -11,7 +11,7 @@
 
 extern crate scarlet_std as std;
 
-use core::{arch::{asm}, hint::spin_loop, sync::atomic::fence};
+use core::{arch::asm, hint::spin_loop, sync::atomic::fence};
 use std::{
     fs::File,
     handle::Handle,

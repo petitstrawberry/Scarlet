@@ -6,7 +6,7 @@ use std::ipc::{SharedMemory, permissions};
 use std::println;
 use std::socket::Socket;
 use std::sync::Mutex;
-use std::thread;
+use std::thread::{self, sleep, yield_now};
 use std::vec::Vec;
 use sws_protocol as protocol;
 use sws_protocol::ClientMessageRef;
@@ -172,7 +172,14 @@ fn write_all(socket: &mut Socket, buf: &[u8]) -> Result<(), FrameIoError> {
         match socket.write(&buf[written..]) {
             Ok(0) => return Err(FrameIoError::Disconnected),
             Ok(n) => written += n,
-            Err(_) => return Err(FrameIoError::Io),
+            Err(e) => {
+                if e.kind() == std::io::ErrorKind::WouldBlock {
+                    // Non-blocking socket; give the scheduler a chance and retry.
+                    sleep(core::time::Duration::from_millis(1));
+                    continue;
+                }
+                return Err(FrameIoError::Io);
+            }
         }
     }
     Ok(())
@@ -490,7 +497,7 @@ fn client_thread_main(client_id: usize, mut socket: Socket) {
 
     println!("[ClientThread {}] Entering main loop", client_id);
 
-    loop {
+    'main: loop {
         loop_count += 1;
         let _should_log = loop_count % 100 == 0; // Log every 100 iterations (more frequent)
 
@@ -506,9 +513,9 @@ fn client_thread_main(client_id: usize, mut socket: Socket) {
                         "[ClientThread {}] Failed to send server message to window {}: {:?}",
                         client_id, window_id, e
                     );
-                } else {
-                    has_events = true;
+                    break 'main;
                 }
+                has_events = true;
             }
 
             let events = pop_pending_input_events(window_id);
@@ -537,6 +544,7 @@ fn client_thread_main(client_id: usize, mut socket: Socket) {
                             "[ClientThread {}] Failed to send input event to window {}: {:?}",
                             client_id, window_id, e
                         );
+                        break 'main;
                     } else {
                         // println!(
                         //     "[ClientThread {}] Sent event: type={} code={} value={}",
@@ -585,6 +593,8 @@ fn client_thread_main(client_id: usize, mut socket: Socket) {
             }
             Ok(None) => {
                 // No complete frame available yet; keep looping so we can deliver input events.
+                // Yield to avoid a tight busy loop when idle.
+                yield_now();
                 continue;
             }
             Err(FrameIoError::Disconnected) => {
@@ -954,6 +964,19 @@ fn client_thread_main(client_id: usize, mut socket: Socket) {
                 );
             }
         }
+        // sleep(std::time::Duration::from_millis(16));
+        yield_now();
+    }
+
+    // Cleanup: ensure per-window routing queues don't leak when the client disappears.
+    // Also notify the compositor so orphaned windows don't stick around.
+    for window_id in managed_windows.drain(..) {
+        unregister_window(window_id);
+        window_size_limits.remove(&window_id);
+        push_ipc_event(IpcEvent::DestroyWindow {
+            client_id,
+            window_id,
+        });
     }
 
     println!("[ClientThread {}] Exiting", client_id);

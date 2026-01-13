@@ -194,6 +194,8 @@ pub extern "C" fn main() -> i32 {
         }
     };
 
+    app.set_terminate_after_last_window_closed(true);
+
     // Lightweight telemetry states to keep the desktop feeling alive.
     let uptime_seconds = State::new(0u32);
     let load = State::new(32u8);
