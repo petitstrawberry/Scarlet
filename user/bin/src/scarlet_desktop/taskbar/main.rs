@@ -27,7 +27,7 @@ fn launch_overview() {
     match fork() {
         0 => {
             let candidates = [
-                "/system/scarlet/bin",
+                "/bin",
                 "/scarlet/system/scarlet/bin",
                 "/old_root/system/scarlet/bin",
             ];

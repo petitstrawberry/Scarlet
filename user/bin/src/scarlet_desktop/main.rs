@@ -15,7 +15,7 @@ fn spawn_component(name: &str, args: &[&str]) -> i32 {
     match fork() {
         0 => {
             let candidates = [
-                "/system/scarlet/bin",
+                "/bin",
                 "/scarlet/system/scarlet/bin",
                 "/old_root/system/scarlet/bin",
             ];

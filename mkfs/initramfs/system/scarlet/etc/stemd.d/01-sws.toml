@@ -3,3 +3,7 @@
 
 [service.sws]
 exec = "/bin/sws"
+
+[service.scarlet-desktop]
+exec = "/bin/scarlet_desktop"
+dependencies = ["sws"]
