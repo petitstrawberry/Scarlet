@@ -107,17 +107,31 @@ impl Waker {
     /// The calling code can then continue execution, typically to re-check the
     /// condition that caused the wait.
     pub fn wait(&self, task_id: usize, trapframe: &mut Trapframe) {
-        // Add task to wait queue first
-        {
-            let mut queue = self.wait_queue.lock();
-            queue.push_back(task_id);
-        }
+        // IMPORTANT: Set task state to Blocked BEFORE adding to wait queue.
+        // This prevents a race condition where wake_one() is called between
+        // adding to wait queue and setting state, causing the wake to be lost.
+        //
+        // With this ordering:
+        // 1. Task state is set to Blocked
+        // 2. Memory barrier ensures visibility
+        // 3. Task is added to wait queue
+        // 4. If wake_one() runs now, it will find task in Blocked state and set it to Running
+        // 5. schedule() will see the task as Running and not block it
 
-        // Set task state to Blocked like dev branch behavior
+        // Set task state to Blocked first
         if let Some(task) = get_scheduler().get_task_by_id(task_id) {
             task.set_state(TaskState::Blocked(self.block_type));
         } else {
             panic!("[WAKER] Task ID {} not found in scheduler", task_id);
+        }
+
+        // Memory barrier to ensure state is visible before adding to wait queue
+        core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
+
+        // Add task to wait queue
+        {
+            let mut queue = self.wait_queue.lock();
+            queue.push_back(task_id);
         }
 
         // Yield CPU to scheduler - returns when woken

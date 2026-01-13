@@ -420,6 +420,11 @@ impl Scheduler {
     /// # Returns
     /// true if the task was found and moved, false otherwise
     pub fn wake_task(&mut self, task_id: usize) -> bool {
+        // Memory barrier to ensure we see the latest task state.
+        // This pairs with the fence in Waker::wait() to prevent the race condition
+        // where a wake is processed before the task state is visible as Blocked.
+        core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
+
         // Search for the task in blocked queues
         for cpu_id in 0..self.blocked_queue.len() {
             if let Some(pos) = self.blocked_queue[cpu_id]

@@ -80,7 +80,9 @@ pub fn tick(trapframe: &mut Trapframe) {
     let timer = get_kernel_timer();
     timer.set_interval_us(cpu_id, TICK_INTERVAL_US);
     timer.start(cpu_id);
-    let now = TICK_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
+    // Use Release ordering to ensure all previous memory operations are visible
+    // before the tick count is updated. This pairs with Acquire in get_tick().
+    let now = TICK_COUNT.fetch_add(1, Ordering::Release) + 1;
     check_software_timers(now);
     // Call scheduler tick handler to manage time slices
     let scheduler = get_scheduler();
@@ -90,7 +92,9 @@ pub fn tick(trapframe: &mut Trapframe) {
 
 /// Get the current tick count (monotonic, since boot)
 pub fn get_tick() -> u64 {
-    TICK_COUNT.load(Ordering::Relaxed)
+    // Use Acquire ordering to ensure we see all memory operations that happened
+    // before the tick was incremented. This pairs with Release in tick().
+    TICK_COUNT.load(Ordering::Acquire)
 }
 
 pub fn get_time_ns() -> u64 {
