@@ -122,12 +122,18 @@ impl Waker {
             panic!("[WAKER] Task ID {} not found in scheduler", task_id);
         }
 
+        // Memory barrier to ensure state change is visible before queue operation
+        core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
+
         // Now add task to wait queue - at this point task is already Blocked
         // Even if wake_one() is called immediately, wake_task() will work correctly
         {
             let mut queue = self.wait_queue.lock();
             queue.push_back(task_id);
         }
+
+        // Memory barrier to ensure queue addition is visible before yielding
+        core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
 
         // Yield CPU to scheduler - returns when woken
         get_scheduler().schedule(trapframe);

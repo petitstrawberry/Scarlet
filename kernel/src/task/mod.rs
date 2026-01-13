@@ -1346,6 +1346,8 @@ impl Task {
                 if let Some(task) = get_scheduler().get_task_by_id(self.task_id) {
                     let handler: Arc<dyn TimerHandler> = self.clone();
                     task.remove_software_timer_handler(&handler);
+                    // Memory barrier to ensure state change is visible
+                    core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
                     // crate::println!("Task {} woke up after {} ticks", self.task_id, get_tick() - self.start_tick);
                     let waker = get_waitpid_waker(self.task_id);
                     waker.wake_all();
@@ -1361,6 +1363,8 @@ impl Task {
         add_timer(wake_tick, &handler, 0);
 
         self.add_software_timer_handler(handler);
+        // Memory barrier to ensure timer handler registration is visible
+        core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
         let waker = get_waitpid_waker(self.id);
         waker.wait(self.get_id(), trapframe);
     }

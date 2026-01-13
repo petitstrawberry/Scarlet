@@ -185,10 +185,23 @@ impl StreamOps for PipeEndpoint {
                         // CRITICAL: Drop lock before wait() to avoid deadlock
                         let task_id = task.get_id();
                         let trapframe = task.get_trapframe();
+
+                        // Memory barrier BEFORE lock release to ensure all writes are visible
+                        core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
+
                         drop(state);
+
+                        // Memory barrier AFTER lock release to ensure lock release is visible
+                        core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
+
+                        // Memory barrier BEFORE wait() to ensure wait() sees correct state
+                        core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
 
                         // Call wait() without holding any locks
                         self.data.read_waker.wait(task_id, trapframe);
+
+                        // Memory barrier AFTER wait() to ensure subsequent operations are visible
+                        core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
 
                         // Loop back to retry read after waking up
                         continue;
@@ -244,10 +257,23 @@ impl StreamOps for PipeEndpoint {
                     // CRITICAL: Drop lock before wait() to avoid deadlock
                     let task_id = task.get_id();
                     let trapframe = task.get_trapframe();
+
+                    // Memory barrier BEFORE lock release to ensure all writes are visible
+                    core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
+
                     drop(state);
+
+                    // Memory barrier AFTER lock release to ensure lock release is visible
+                    core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
+
+                    // Memory barrier BEFORE wait() to ensure wait() sees correct state
+                    core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
 
                     // Call wait() without holding any locks
                     self.data.write_waker.wait(task_id, trapframe);
+
+                    // Memory barrier AFTER wait() to ensure subsequent operations are visible
+                    core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
 
                     // Loop back to retry write after waking up
                     continue;
@@ -541,31 +567,43 @@ impl Selectable for UnidirectionalPipe {
         use crate::task::mytask;
         // Prefer read wait if requested; otherwise write wait; except is ignored.
         if interest.read && self.endpoint.can_read {
-            let should_wait = {
+            let should_block = {
                 let st = self.endpoint.data.state.lock();
                 st.buffer.is_empty() && st.writer_count > 0
             }; // Lock released here
 
-            if should_wait {
+            if should_block {
                 if let Some(task) = mytask() {
+                    // Memory barrier BEFORE wait() to ensure wait() sees correct state
+                    core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
+
                     // CRITICAL: Call wait() without holding any locks
                     self.endpoint.data.read_waker.wait(task.get_id(), trapframe);
+
+                    // Memory barrier AFTER wait() to ensure subsequent operations are visible
+                    core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
                 }
             }
         } else if interest.write && self.endpoint.can_write {
-            let should_wait = {
+            let should_block = {
                 let st = self.endpoint.data.state.lock();
                 let space = st.max_size.saturating_sub(st.buffer.len());
                 space == 0 && st.reader_count > 0
             }; // Lock released here
 
-            if should_wait {
+            if should_block {
                 if let Some(task) = mytask() {
+                    // Memory barrier BEFORE wait() to ensure wait() sees correct state
+                    core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
+
                     // CRITICAL: Call wait() without holding any locks
                     self.endpoint
                         .data
                         .write_waker
                         .wait(task.get_id(), trapframe);
+
+                    // Memory barrier AFTER wait() to ensure subsequent operations are visible
+                    core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
                 }
             }
         }

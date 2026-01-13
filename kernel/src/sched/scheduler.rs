@@ -432,6 +432,8 @@ impl Scheduler {
                 // Get task from TaskPool and set state to Running
                 if let Some(task) = self.task_pool.get_task(task_id) {
                     task.state = TaskState::Running;
+                    // Memory barrier to ensure state change is visible
+                    core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
                     // Move to ready queue
                     self.ready_queue[cpu_id].push_back(task_id);
                     return true;
@@ -445,9 +447,26 @@ impl Scheduler {
         if let Some(task) = self.task_pool.get_task(task_id) {
             if let TaskState::Blocked(_) = task.state {
                 task.state = TaskState::Running;
-                // Do not enqueue here to avoid duplicating entries: the task is
-                // still present in the ready_queue (or is current) and will be
-                // handled as Running by the scheduler.
+                // Memory barrier to ensure state change is visible
+                core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
+                // CRITICAL FIX: Check if task is in ready_queue, add if not
+                // This prevents tasks from being permanently unscheduled
+                let cpu_id = if let Some(current_id) = self.current_task_id[0] {
+                    if current_id == task_id {
+                        0 // Current task, no need to enqueue
+                    } else {
+                        // Find which CPU's ready_queue should contain this task
+                        // For simplicity, use CPU 0 (can be improved for multi-CPU)
+                        0
+                    }
+                } else {
+                    0 // Default to CPU 0
+                };
+                
+                // Only add if not already in ready_queue to avoid duplicates
+                if !self.ready_queue[cpu_id].contains(&task_id) {
+                    self.ready_queue[cpu_id].push_back(task_id);
+                }
                 return true;
             }
         }

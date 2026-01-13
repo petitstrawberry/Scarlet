@@ -286,7 +286,7 @@ impl LocalSocket {
             peer_addr: RwLock::new(Some(peer_addr.clone())),
             read_buffer: RwLock::new(local_read_buffer.clone()),
             peer_read_buffer: RwLock::new(Some(peer_read_buffer.clone())),
-            peer_socket: RwLock::new(None), // Set later
+            peer_socket: RwLock::new(None),
             backlog: RwLock::new(Vec::new()),
             max_backlog: RwLock::new(0),
             accept_waker: Waker::new_interruptible("socket_accept"),
@@ -307,7 +307,7 @@ impl LocalSocket {
             peer_addr: RwLock::new(Some(local_addr)),
             read_buffer: RwLock::new(peer_read_buffer.clone()),
             peer_read_buffer: RwLock::new(Some(local_read_buffer.clone())),
-            peer_socket: RwLock::new(None), // Set later
+            peer_socket: RwLock::new(None),
             backlog: RwLock::new(Vec::new()),
             max_backlog: RwLock::new(0),
             accept_waker: Waker::new_interruptible("socket_accept"),
@@ -341,30 +341,44 @@ impl LocalSocket {
 
         loop {
             // Verify socket is connected
-            if *self.state.read() != SocketState::Connected {
-                return Err(IpcError::InvalidState);
+            {
+                let state = self.state.read();
+                if *state != SocketState::Connected {
+                    return Err(IpcError::InvalidState);
+                }
             }
 
             // Fast path: handle already queued
-            if let Some(obj) = self.handle_queue.write().pop_front() {
-                return Ok(obj);
+            {
+                let mut queue = self.handle_queue.write();
+                if let Some(obj) = queue.pop_front() {
+                    return Ok(obj);
+                }
             }
 
             // If peer has shut down (or been dropped), don't block forever.
             // We reuse the same conditions as read_blocking() uses for EOF.
-            if let Some(peer_weak) = self.peer_socket.read().as_ref() {
-                if let Some(peer) = peer_weak.upgrade() {
-                    if *peer.state.read() == SocketState::Closed {
+            {
+                let peer_weak_opt = self.peer_socket.read();
+                if let Some(peer_weak) = peer_weak_opt.as_ref() {
+                    if let Some(peer) = peer_weak.upgrade() {
+                        let peer_state = peer.state.read();
+                        if *peer_state == SocketState::Closed {
+                            return Err(IpcError::PeerClosed);
+                        }
+                    } else {
                         return Err(IpcError::PeerClosed);
                     }
-                } else {
-                    return Err(IpcError::PeerClosed);
                 }
             }
 
             // If peer performed shutdown(), our read buffer is marked closed.
-            if *self.read_buffer.read().closed.read() {
-                return Err(IpcError::PeerClosed);
+            {
+                let read_buf = self.read_buffer.read();
+                let closed = read_buf.closed.read();
+                if *closed {
+                    return Err(IpcError::PeerClosed);
+                }
             }
 
             // No handle available, block the task
