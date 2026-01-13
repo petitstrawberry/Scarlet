@@ -3,16 +3,20 @@
 //! Provides a dock/taskbar surface as a regular SWS client.
 //!
 //! - Window type: TASKBAR
-//! - Resizes to `screen_width x BAR_HEIGHT`
-//! - Positions itself at the bottom of the screen
+//! - Reads configuration from /etc/scarlet-desktop.d/
+//! - Resizes to configured height
+//! - Positions itself based on configured position (top/bottom)
+//! - Sends workarea notification to SWS
 //! - Clicking the left button launches `scarlet_desktop_overview`
-
+//!
 #![no_std]
 #![no_main]
 
+extern crate scarlet_desktop_config;
 extern crate scarlet_std as std;
 
 use core::time::Duration;
+use scarlet_desktop_config::{TaskbarConfig, TaskbarPosition};
 use scarlet_ui::Color;
 use scarlet_ui::graphics::{Canvas, measure_text_sized};
 use std::task::{EXECVE_FORCE_ABI_REBUILD, execve_with_flags, exit, fork};
@@ -21,7 +25,9 @@ use std::{format, println};
 use sws_client::{Connection, Event, InputEvent};
 use sws_protocol::window_types;
 
-const BAR_HEIGHT: u32 = 40;
+fn load_config() -> TaskbarConfig {
+    scarlet_desktop_config::load_desktop_config().taskbar
+}
 
 fn launch_overview() {
     match fork() {
@@ -182,6 +188,10 @@ fn draw_taskbar(
 pub extern "C" fn main() -> i32 {
     println!("[scarlet_desktop_taskbar] starting");
 
+    let config = load_config();
+    let bar_height: u32 = config.height.unwrap_or(40).max(1);
+    let position: TaskbarPosition = config.position.unwrap_or(TaskbarPosition::Bottom);
+
     let mut conn = match Connection::connect("/tmp/sws.sock") {
         Ok(c) => c,
         Err(_) => {
@@ -190,7 +200,7 @@ pub extern "C" fn main() -> i32 {
         }
     };
 
-    let surface_id = match conn.create_surface(320, BAR_HEIGHT) {
+    let surface_id = match conn.create_surface(320, bar_height) {
         Ok(id) => id,
         Err(_) => {
             println!("[scarlet_desktop_taskbar] Failed to create surface");
@@ -227,9 +237,9 @@ pub extern "C" fn main() -> i32 {
         let start_label = "Overview";
         let (tw, th) = measure_text_sized(start_label, 18.0);
         let button_w = tw.saturating_add(24);
-        let button_h = th.saturating_add(12).min(BAR_HEIGHT);
+        let button_h = th.saturating_add(12).min(bar_height);
         let button_x = 8i32;
-        let button_y = ((BAR_HEIGHT as i32).saturating_sub(button_h as i32) / 2).max(0);
+        let button_y = ((bar_height as i32).saturating_sub(button_h as i32) / 2).max(0);
         let start_rect = (button_x, button_y, button_w, button_h);
 
         while let Some(ev) = conn.poll_event() {
@@ -255,8 +265,11 @@ pub extern "C" fn main() -> i32 {
                     screen_w = width;
                     screen_h = height;
 
-                    if conn.resize_window(surface_id, screen_w, BAR_HEIGHT).is_ok() {
-                        let y = screen_h.saturating_sub(BAR_HEIGHT) as i32;
+                    if conn.resize_window(surface_id, screen_w, bar_height).is_ok() {
+                        let y = match position {
+                            TaskbarPosition::Top => 0,
+                            TaskbarPosition::Bottom => screen_h.saturating_sub(bar_height) as i32,
+                        };
                         let _ = conn.move_window(surface_id, 0, y);
                         needs_redraw = true;
                     }

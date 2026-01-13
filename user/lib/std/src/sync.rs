@@ -29,7 +29,7 @@ impl<T> Mutex<T> {
     }
 
     /// Lock the mutex and return a guard
-    pub fn lock(&self) -> MutexGuard<T> {
+    pub fn lock(&self) -> MutexGuard<'_, T> {
         // Spin until we acquire the lock
         while self
             .locked
@@ -45,7 +45,7 @@ impl<T> Mutex<T> {
     }
 
     /// Try to lock the mutex without blocking
-    pub fn try_lock(&self) -> Option<MutexGuard<T>> {
+    pub fn try_lock(&self) -> Option<MutexGuard<'_, T>> {
         if self
             .locked
             .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)

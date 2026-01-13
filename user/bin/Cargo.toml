@@ -111,6 +111,7 @@ sws_protocol = { path = "../lib/sws_protocol" }
 sws-client = { path = "../lib/sws-client" }
 scarlet-ui = { path = "../lib/scarlet-ui" }
 slint-scarlet = { path = "../lib/slint-scarlet" }
+scarlet-desktop-config = { path = "../lib/scarlet-desktop-config" }
 slint = { version = "1.14", default-features = false, features = [
     "unsafe-single-threaded",
     "renderer-software",

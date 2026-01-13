@@ -6,16 +6,14 @@ use crate::{env, syscall::Syscall, task::exit};
 #[unsafe(export_name = "_entry")]
 #[unsafe(naked)]
 pub extern "C" fn _entry() {
-    unsafe {
-        naked_asm!(
-            "
-        .option norvc
-        .option norelax
-        .align 8
-                j       _start
-        ",
-        );
-    }
+    naked_asm!(
+        "
+    .option norvc
+    .option norelax
+    .align 8
+            j       _start
+    ",
+    );
 }
 
 unsafe extern "Rust" {
