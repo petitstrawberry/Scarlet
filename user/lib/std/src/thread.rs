@@ -1,5 +1,5 @@
 use crate::boxed::Box;
-use crate::syscall::{Syscall, syscall1, syscall4};
+use crate::syscall::{Syscall, syscall0, syscall1, syscall4};
 use crate::task::{CloneFlags, CloneFlagsDef};
 use crate::vec::Vec;
 use core::time::Duration;
@@ -8,6 +8,11 @@ use core::time::Duration;
 pub fn sleep(dur: Duration) -> i32 {
     let nanosecs = dur.as_nanos() as usize;
     syscall1(Syscall::Sleep, nanosecs) as i32
+}
+
+/// Yield execution to the scheduler.
+pub fn yield_now() {
+    let _ = syscall0(Syscall::Yield);
 }
 
 /// Thread builder (simplified)

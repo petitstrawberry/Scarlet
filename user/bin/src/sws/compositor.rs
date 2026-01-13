@@ -6,6 +6,7 @@ use super::ipc::{IpcEvent, IpcServer};
 use super::window::WindowManager;
 use framebuffer::Framebuffer;
 use std::println;
+use std::thread::yield_now;
 use std::vec::Vec;
 use sws_protocol;
 
@@ -1189,7 +1190,8 @@ impl Compositor {
 
             // Sleep briefly to limit frame rate and reduce CPU usage
             // 16ms = ~60fps, adjust as needed
-            std::thread::sleep(core::time::Duration::from_millis(16));
+            // std::thread::sleep(core::time::Duration::from_millis(16));
+            yield_now();
 
             // Periodically print Z-order (every 100 redraws)
             if self.event_counter % 100 == 0 && self.event_counter > 0 {
