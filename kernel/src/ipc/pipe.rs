@@ -75,7 +75,7 @@ impl From<StreamError> for PipeError {
     }
 }
 
-/// Internal shared state of a pipe
+/// Internal shared state of a pipe (data only, no wakers)
 struct PipeState {
     /// Ring buffer for pipe data
     buffer: VecDeque<u8>,
@@ -87,23 +87,32 @@ struct PipeState {
     writer_count: usize,
     /// Whether the pipe has been closed
     closed: bool,
-    /// Waker for tasks waiting to read from this pipe
+}
+
+/// Shared pipe data including both state and wakers
+/// Wakers are kept outside the Mutex to avoid deadlock when calling wait()
+struct SharedPipeData {
+    /// Main pipe state (protected by mutex)
+    state: Mutex<PipeState>,
+    /// Waker for tasks waiting to read (outside mutex to avoid deadlock)
     read_waker: Waker,
-    /// Waker for tasks waiting to write to this pipe
+    /// Waker for tasks waiting to write (outside mutex to avoid deadlock)
     write_waker: Waker,
 }
 
-impl PipeState {
-    fn new(buffer_size: usize) -> Self {
-        Self {
-            buffer: VecDeque::with_capacity(buffer_size),
-            max_size: buffer_size,
-            reader_count: 0,
-            writer_count: 0,
-            closed: false,
+impl SharedPipeData {
+    fn new(buffer_size: usize) -> Arc<Self> {
+        Arc::new(Self {
+            state: Mutex::new(PipeState {
+                buffer: VecDeque::with_capacity(buffer_size),
+                max_size: buffer_size,
+                reader_count: 0,
+                writer_count: 0,
+                closed: false,
+            }),
             read_waker: Waker::new_interruptible("pipe_read"),
             write_waker: Waker::new_interruptible("pipe_write"),
-        }
+        })
     }
 }
 
@@ -112,8 +121,8 @@ impl PipeState {
 /// This represents the basic building block for all pipe types.
 /// It can be configured for read-only, write-only, or bidirectional access.
 pub struct PipeEndpoint {
-    /// Shared pipe state
-    state: Arc<Mutex<PipeState>>,
+    /// Shared pipe data (state + wakers)
+    data: Arc<SharedPipeData>,
     /// Whether this endpoint can read
     can_read: bool,
     /// Whether this endpoint can write
@@ -126,10 +135,10 @@ pub struct PipeEndpoint {
 
 impl PipeEndpoint {
     /// Create a new pipe endpoint with specified capabilities
-    fn new(state: Arc<Mutex<PipeState>>, can_read: bool, can_write: bool, id: String) -> Self {
+    fn new(data: Arc<SharedPipeData>, can_read: bool, can_write: bool, id: String) -> Self {
         // Register this endpoint in the state
         {
-            let mut pipe_state = state.lock();
+            let mut pipe_state = data.state.lock();
             if can_read {
                 pipe_state.reader_count += 1;
             }
@@ -139,7 +148,7 @@ impl PipeEndpoint {
         }
 
         Self {
-            state,
+            data,
             can_read,
             can_write,
             id,
@@ -154,46 +163,57 @@ impl StreamOps for PipeEndpoint {
             return Err(StreamError::NotSupported);
         }
 
-        let mut state = self.state.lock();
+        loop {
+            let mut state = self.data.state.lock();
 
-        if state.closed {
-            return Err(StreamError::Closed);
-        }
+            if state.closed {
+                return Err(StreamError::Closed);
+            }
 
-        if state.buffer.is_empty() {
-            if state.writer_count == 0 {
-                // No writers left, return EOF
-                return Ok(0);
-            } else {
-                // Writers exist but no data available - block until data becomes available
-                // Block the current task using the pipe read waker
-                use crate::task::mytask;
-                if let Some(task) = mytask() {
-                    if self.nonblocking.load(core::sync::atomic::Ordering::Relaxed) {
+            if state.buffer.is_empty() {
+                if state.writer_count == 0 {
+                    // No writers left, return EOF
+                    return Ok(0);
+                } else {
+                    // Writers exist but no data available - block until data becomes available
+                    // Block the current task using the pipe read waker
+                    use crate::task::mytask;
+                    if let Some(task) = mytask() {
+                        if self.nonblocking.load(core::sync::atomic::Ordering::Relaxed) {
+                            return Err(StreamError::WouldBlock);
+                        }
+                        // CRITICAL: Drop lock before wait() to avoid deadlock
+                        let task_id = task.get_id();
+                        let trapframe = task.get_trapframe();
+                        drop(state);
+
+                        // Call wait() without holding any locks
+                        self.data.read_waker.wait(task_id, trapframe);
+
+                        // Loop back to retry read after waking up
+                        continue;
+                    } else {
+                        // No current task context, return WouldBlock for non-blocking fallback
                         return Err(StreamError::WouldBlock);
                     }
-                    state.read_waker.wait(task.get_id(), task.get_trapframe());
-
-                    // After waking up, retry the read operation
-                    return self.read(buffer);
-                } else {
-                    // No current task context, return WouldBlock for non-blocking fallback
-                    return Err(StreamError::WouldBlock);
                 }
             }
-        }
 
-        let bytes_to_read = buffer.len().min(state.buffer.len());
-        for i in 0..bytes_to_read {
-            buffer[i] = state.buffer.pop_front().unwrap();
-        }
+            let bytes_to_read = buffer.len().min(state.buffer.len());
+            for i in 0..bytes_to_read {
+                buffer[i] = state.buffer.pop_front().unwrap();
+            }
 
-        // Data was consumed, wake up any waiting writers
-        if bytes_to_read > 0 {
-            state.write_waker.wake_all();
-        }
+            // Release lock before waking writers
+            drop(state);
 
-        Ok(bytes_to_read)
+            // Data was consumed, wake up any waiting writers
+            if bytes_to_read > 0 {
+                self.data.write_waker.wake_all();
+            }
+
+            return Ok(bytes_to_read);
+        }
     }
 
     fn write(&self, buffer: &[u8]) -> Result<usize, StreamError> {
@@ -201,58 +221,69 @@ impl StreamOps for PipeEndpoint {
             return Err(StreamError::NotSupported);
         }
 
-        let mut state = self.state.lock();
+        loop {
+            let mut state = self.data.state.lock();
 
-        if state.closed {
-            return Err(StreamError::Closed);
-        }
+            if state.closed {
+                return Err(StreamError::Closed);
+            }
 
-        if state.reader_count == 0 {
-            return Err(StreamError::BrokenPipe);
-        }
+            if state.reader_count == 0 {
+                return Err(StreamError::BrokenPipe);
+            }
 
-        let available_space = state.max_size - state.buffer.len();
-        if available_space == 0 {
-            // No space available - block until space becomes available
-            // Block the current task using the pipe write waker
-            use crate::task::mytask;
-            if let Some(task) = mytask() {
-                if self.nonblocking.load(core::sync::atomic::Ordering::Relaxed) {
+            let available_space = state.max_size - state.buffer.len();
+            if available_space == 0 {
+                // No space available - block until space becomes available
+                // Block the current task using the pipe write waker
+                use crate::task::mytask;
+                if let Some(task) = mytask() {
+                    if self.nonblocking.load(core::sync::atomic::Ordering::Relaxed) {
+                        return Err(StreamError::WouldBlock);
+                    }
+                    // CRITICAL: Drop lock before wait() to avoid deadlock
+                    let task_id = task.get_id();
+                    let trapframe = task.get_trapframe();
+                    drop(state);
+
+                    // Call wait() without holding any locks
+                    self.data.write_waker.wait(task_id, trapframe);
+
+                    // Loop back to retry write after waking up
+                    continue;
+                } else {
+                    // No current task context, return WouldBlock for non-blocking fallback
                     return Err(StreamError::WouldBlock);
                 }
-                state.write_waker.wait(task.get_id(), task.get_trapframe());
-
-                // After waking up, retry the write operation
-                return self.write(buffer);
-            } else {
-                // No current task context, return WouldBlock for non-blocking fallback
-                return Err(StreamError::WouldBlock);
             }
-        }
 
-        let bytes_to_write = buffer.len().min(available_space);
-        for &byte in &buffer[..bytes_to_write] {
-            state.buffer.push_back(byte);
-        }
+            let bytes_to_write = buffer.len().min(available_space);
+            for &byte in &buffer[..bytes_to_write] {
+                state.buffer.push_back(byte);
+            }
 
-        // Data was written, wake up any waiting readers
-        if bytes_to_write > 0 {
-            state.read_waker.wake_all();
-        }
+            // Release lock before waking readers
+            drop(state);
 
-        Ok(bytes_to_write)
+            // Data was written, wake up any waiting readers
+            if bytes_to_write > 0 {
+                self.data.read_waker.wake_all();
+            }
+
+            return Ok(bytes_to_write);
+        }
     }
 }
 
 impl StreamIpcOps for PipeEndpoint {
     fn is_connected(&self) -> bool {
-        let state = self.state.lock();
+        let state = self.data.state.lock();
         !state.closed && (state.reader_count > 0 || state.writer_count > 0)
     }
 
     fn peer_count(&self) -> usize {
         // This is a generic implementation - specific pipe types may override this
-        let state = self.state.lock();
+        let state = self.data.state.lock();
 
         match (self.can_read, self.can_write) {
             (true, false) => state.writer_count, // Reader: count writers
@@ -288,22 +319,22 @@ impl CloneOps for PipeEndpoint {
 
 impl PipeObject for PipeEndpoint {
     fn has_readers(&self) -> bool {
-        let state = self.state.lock();
+        let state = self.data.state.lock();
         state.reader_count > 0
     }
 
     fn has_writers(&self) -> bool {
-        let state = self.state.lock();
+        let state = self.data.state.lock();
         state.writer_count > 0
     }
 
     fn buffer_size(&self) -> usize {
-        let state = self.state.lock();
+        let state = self.data.state.lock();
         state.max_size
     }
 
     fn available_bytes(&self) -> usize {
-        let state = self.state.lock();
+        let state = self.data.state.lock();
         state.buffer.len()
     }
 
@@ -318,7 +349,7 @@ impl PipeObject for PipeEndpoint {
 
 impl Drop for PipeEndpoint {
     fn drop(&mut self) {
-        let mut state = self.state.lock();
+        let mut state = self.data.state.lock();
 
         if self.can_read {
             state.reader_count = state.reader_count.saturating_sub(1);
@@ -337,7 +368,7 @@ impl Drop for PipeEndpoint {
 impl Clone for PipeEndpoint {
     fn clone(&self) -> Self {
         let new_pipe = Self {
-            state: self.state.clone(),
+            data: self.data.clone(),
             can_read: self.can_read,
             can_write: self.can_write,
             id: format!("{}_clone", self.id),
@@ -348,7 +379,7 @@ impl Clone for PipeEndpoint {
 
         // Increment reference counts
         {
-            let mut state = self.state.lock();
+            let mut state = self.data.state.lock();
             if self.can_read {
                 state.reader_count += 1;
             }
@@ -369,14 +400,14 @@ pub struct UnidirectionalPipe {
 impl UnidirectionalPipe {
     /// Create a new pipe pair (read_end, write_end) as KernelObjects
     pub fn create_pair(buffer_size: usize) -> (KernelObject, KernelObject) {
-        let state = Arc::new(Mutex::new(PipeState::new(buffer_size)));
+        let data = SharedPipeData::new(buffer_size);
 
         let read_end = Self {
-            endpoint: PipeEndpoint::new(state.clone(), true, false, "unidirectional_read".into()),
+            endpoint: PipeEndpoint::new(data.clone(), true, false, "unidirectional_read".into()),
         };
 
         let write_end = Self {
-            endpoint: PipeEndpoint::new(state.clone(), false, true, "unidirectional_write".into()),
+            endpoint: PipeEndpoint::new(data.clone(), false, true, "unidirectional_write".into()),
         };
 
         // Wrap in KernelObjects
@@ -389,14 +420,14 @@ impl UnidirectionalPipe {
     /// Create a new pipe pair for internal testing (returns raw pipes)
     #[cfg(test)]
     pub fn create_pair_raw(buffer_size: usize) -> (Self, Self) {
-        let state = Arc::new(Mutex::new(PipeState::new(buffer_size)));
+        let data = SharedPipeData::new(buffer_size);
 
         let read_end = Self {
-            endpoint: PipeEndpoint::new(state.clone(), true, false, "unidirectional_read".into()),
+            endpoint: PipeEndpoint::new(data.clone(), true, false, "unidirectional_read".into()),
         };
 
         let write_end = Self {
-            endpoint: PipeEndpoint::new(state.clone(), false, true, "unidirectional_write".into()),
+            endpoint: PipeEndpoint::new(data.clone(), false, true, "unidirectional_write".into()),
         };
 
         (read_end, write_end)
@@ -421,7 +452,7 @@ impl StreamIpcOps for UnidirectionalPipe {
 
     fn peer_count(&self) -> usize {
         // Unidirectional pipe specific peer_count implementation
-        let state = self.endpoint.state.lock();
+        let state = self.endpoint.data.state.lock();
 
         match (self.endpoint.can_read, self.endpoint.can_write) {
             (true, false) => state.writer_count, // Reader: count writers
@@ -485,7 +516,7 @@ impl Selectable for UnidirectionalPipe {
     fn current_ready(&self, interest: ReadyInterest) -> ReadySet {
         let mut set = ReadySet::none();
         // Inspect internal state once
-        let st = self.endpoint.state.lock();
+        let st = self.endpoint.data.state.lock();
         if interest.read && self.endpoint.can_read {
             // Readable if buffer has data or writers are gone (EOF)
             set.read = !st.buffer.is_empty() || st.writer_count == 0;
@@ -508,27 +539,36 @@ impl Selectable for UnidirectionalPipe {
         _timeout_ticks: Option<u64>,
     ) -> SelectWaitOutcome {
         use crate::task::mytask;
-        let mut waited = false;
         // Prefer read wait if requested; otherwise write wait; except is ignored.
         if interest.read && self.endpoint.can_read {
-            let st = self.endpoint.state.lock();
-            if st.buffer.is_empty() && st.writer_count > 0 {
+            let should_wait = {
+                let st = self.endpoint.data.state.lock();
+                st.buffer.is_empty() && st.writer_count > 0
+            }; // Lock released here
+
+            if should_wait {
                 if let Some(task) = mytask() {
-                    st.read_waker.wait(task.get_id(), trapframe);
-                    waited = true;
+                    // CRITICAL: Call wait() without holding any locks
+                    self.endpoint.data.read_waker.wait(task.get_id(), trapframe);
                 }
             }
         } else if interest.write && self.endpoint.can_write {
-            let st = self.endpoint.state.lock();
-            let space = st.max_size.saturating_sub(st.buffer.len());
-            if space == 0 && st.reader_count > 0 {
+            let should_wait = {
+                let st = self.endpoint.data.state.lock();
+                let space = st.max_size.saturating_sub(st.buffer.len());
+                space == 0 && st.reader_count > 0
+            }; // Lock released here
+
+            if should_wait {
                 if let Some(task) = mytask() {
-                    st.write_waker.wait(task.get_id(), trapframe);
-                    waited = true;
+                    // CRITICAL: Call wait() without holding any locks
+                    self.endpoint
+                        .data
+                        .write_waker
+                        .wait(task.get_id(), trapframe);
                 }
             }
         }
-        let _ = waited;
         SelectWaitOutcome::Ready
     }
 

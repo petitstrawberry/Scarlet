@@ -5,9 +5,9 @@ use super::input::{CompositorInputEvent, InputManager, key_codes};
 use super::ipc::{IpcEvent, IpcServer};
 use super::window::WindowManager;
 use framebuffer::Framebuffer;
+use std::println;
 use std::thread::yield_now;
 use std::vec::Vec;
-use std::{println, thread};
 use sws_protocol;
 
 // NOTE: The compositor intentionally does NOT manage a manual VRAM mmap mapping.
