@@ -218,17 +218,7 @@ impl Scheduler {
                     }
                     // If no tasks are ready, create an idle task
                     None => {
-                        let mut kernel_task = new_kernel_task("idle".to_string(), 0, || {
-                            // Idle loop
-                            loop {
-                                // Wait for an interrupt to wake up
-                                enable_external_interrupts();
-                                idle();
-                            }
-                        });
-                        kernel_task.init();
-                        // Add idle task to the ready queue
-                        self.add_task(kernel_task, cpu_id);
+                        panic!("At least one task must be scheduled");
                     }
                 }
             } else {
