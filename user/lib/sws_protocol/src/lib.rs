@@ -41,6 +41,7 @@ pub mod client_msg {
     pub const RESTORE_WINDOW: u32 = 19;
     pub const SET_WINDOW_TYPE: u32 = 20;
     pub const SET_WINDOW_OPACITY: u32 = 21;
+    pub const SET_WORKAREA: u32 = 22;
 }
 
 /// Message type IDs (server -> client).
@@ -221,6 +222,17 @@ pub enum ClientMessageRef<'a> {
     SetWindowOpacity {
         window_id: u32,
         opacity: u8,
+    },
+
+    /// Set the workarea (usable screen area) for the window manager
+    ///
+    /// This is typically sent by the taskbar to inform the window manager
+    /// about the area where normal windows should be placed.
+    SetWorkarea {
+        x: i32,
+        y: i32,
+        width: u32,
+        height: u32,
     },
 }
 
@@ -423,6 +435,16 @@ pub fn parse_client_message<'a>(
             let window_id = u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
             let opacity = payload[4];
             Ok(ClientMessageRef::SetWindowOpacity { window_id, opacity })
+        }
+        client_msg::SET_WORKAREA => {
+            if payload.len() != 16 {
+                return Err(ProtocolError::MalformedPayload);
+            }
+            let x = i32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
+            let y = i32::from_le_bytes([payload[4], payload[5], payload[6], payload[7]]);
+            let width = u32::from_le_bytes([payload[8], payload[9], payload[10], payload[11]]);
+            let height = u32::from_le_bytes([payload[12], payload[13], payload[14], payload[15]]);
+            Ok(ClientMessageRef::SetWorkarea { x, y, width, height })
         }
         _ => Err(ProtocolError::UnknownMessageType),
     }
@@ -705,5 +727,15 @@ pub fn payload_set_window_opacity(window_id: u32, opacity: u8) -> [u8; 5] {
     let mut payload = [0u8; 5];
     payload[0..4].copy_from_slice(&window_id.to_le_bytes());
     payload[4] = opacity;
+    payload
+}
+
+/// Build payload for client->server `SET_WORKAREA`.
+pub fn payload_set_workarea(x: i32, y: i32, width: u32, height: u32) -> [u8; 16] {
+    let mut payload = [0u8; 16];
+    payload[0..4].copy_from_slice(&x.to_le_bytes());
+    payload[4..8].copy_from_slice(&y.to_le_bytes());
+    payload[8..12].copy_from_slice(&width.to_le_bytes());
+    payload[12..16].copy_from_slice(&height.to_le_bytes());
     payload
 }

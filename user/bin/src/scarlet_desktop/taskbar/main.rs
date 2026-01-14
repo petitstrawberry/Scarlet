@@ -22,7 +22,7 @@ use scarlet_ui::graphics::{Canvas, measure_text_sized};
 use std::task::{EXECVE_FORCE_ABI_REBUILD, execve_with_flags, exit, fork};
 use std::thread;
 use std::{format, println};
-use sws_client::{Connection, Event, InputEvent};
+use sws_client::{Connection, Event, InputEvent, WindowSizeLimits};
 use sws_protocol::window_types;
 
 fn load_config() -> TaskbarConfig {
@@ -122,6 +122,7 @@ fn draw_taskbar(
     seconds: u32,
     left_down: bool,
     pressed_in_start: bool,
+    position: TaskbarPosition,
 ) {
     let Some(surface) = conn.surface_mut(surface_id) else {
         return;
@@ -146,12 +147,26 @@ fn draw_taskbar(
     let clock_x = (w as i32).saturating_sub(cw as i32).saturating_sub(12);
     let clock_y = ((h as i32).saturating_sub(ch as i32) / 2).max(0);
 
+    // Design differences for top vs bottom
+    let (bg_color, border_color, border_pos) = match position {
+        TaskbarPosition::Top => (
+            Color::rgb(22, 26, 34),
+            Color::rgb(60, 68, 88),
+            h.saturating_sub(1) as i32,
+        ),
+        TaskbarPosition::Bottom => (
+            Color::rgb(22, 26, 34),
+            Color::rgb(60, 68, 88),
+            0,
+        ),
+    };
+
     surface.with_buffer(|buf, width, height| {
         let mut canvas = Canvas::new(buf, width, height);
 
         // Bar background.
-        canvas.fill_rect(0, 0, w, h, Color::rgb(22, 26, 34));
-        canvas.draw_hline(0, 0, w, Color::rgb(60, 68, 88));
+        canvas.fill_rect(0, 0, w, h, bg_color);
+        canvas.draw_hline(0, border_pos, w, border_color);
 
         // Start button.
         let base = Color::rgb(46, 52, 66);
@@ -190,7 +205,7 @@ pub extern "C" fn main() -> i32 {
 
     let config = load_config();
     let bar_height: u32 = config.height.unwrap_or(40).max(1);
-    let position: TaskbarPosition = config.position.unwrap_or(TaskbarPosition::Bottom);
+    let position: TaskbarPosition = config.position.unwrap_or(TaskbarPosition::Top);
 
     let mut conn = match Connection::connect("/tmp/sws.sock") {
         Ok(c) => c,
@@ -210,12 +225,28 @@ pub extern "C" fn main() -> i32 {
 
     let _ = conn.set_window_type(surface_id, window_types::TASKBAR);
 
+    // Disable resizing by setting fixed size limits
+    // Note: Initial limits will be updated after SurfaceConfigure
+    let _ = conn.set_window_size_limits(
+        surface_id,
+        WindowSizeLimits {
+            min_width: 320,
+            min_height: bar_height,
+            max_width: 320,
+            max_height: bar_height,
+        },
+    );
+
     // Ask the server for the screen size; we'll convert the configure size into
     // a docked bar size.
     let _ = conn.maximize_window(surface_id);
 
     let mut screen_w: u32 = 320;
     let mut screen_h: u32 = 240;
+    let mut actual_screen_w: u32 = 320;
+    
+    // Initialize actual_screen_w
+    actual_screen_w = 320;
 
     let mut cursor_x: i32 = 0;
     let mut cursor_y: i32 = 0;
@@ -226,7 +257,7 @@ pub extern "C" fn main() -> i32 {
     let mut tick_ms: u32 = 0;
 
     // Initial draw.
-    draw_taskbar(&mut conn, surface_id, seconds, left_down, pressed_in_start);
+    draw_taskbar(&mut conn, surface_id, seconds, left_down, pressed_in_start, position);
 
     loop {
         let _ = conn.dispatch();
@@ -262,15 +293,32 @@ pub extern "C" fn main() -> i32 {
                     height,
                 } if sid == surface_id => {
                     // Treat configure width/height as screen dimensions.
-                    screen_w = width;
                     screen_h = height;
+                    actual_screen_w = width;
 
-                    if conn.resize_window(surface_id, screen_w, bar_height).is_ok() {
+                    if conn.resize_window(surface_id, actual_screen_w, bar_height).is_ok() {
                         let y = match position {
                             TaskbarPosition::Top => 0,
                             TaskbarPosition::Bottom => screen_h.saturating_sub(bar_height) as i32,
                         };
                         let _ = conn.move_window(surface_id, 0, y);
+
+                        // Send workarea notification
+                        let workarea_y = match position {
+                            TaskbarPosition::Top => bar_height as i32,
+                            TaskbarPosition::Bottom => 0,
+                        };
+                        let workarea_width = actual_screen_w;
+                        let workarea_height = match position {
+                            TaskbarPosition::Top => screen_h.saturating_sub(bar_height),
+                            TaskbarPosition::Bottom => screen_h.saturating_sub(bar_height),
+                        };
+                        let _ = conn.set_workarea(0, workarea_y, workarea_width, workarea_height);
+                        println!(
+                            "[scarlet_desktop_taskbar] Workarea: x=0, y={}, width={}, height={}",
+                            workarea_y, workarea_width, workarea_height
+                        );
+
                         needs_redraw = true;
                     }
                 }
@@ -291,7 +339,7 @@ pub extern "C" fn main() -> i32 {
         }
 
         if needs_redraw {
-            draw_taskbar(&mut conn, surface_id, seconds, left_down, pressed_in_start);
+            draw_taskbar(&mut conn, surface_id, seconds, left_down, pressed_in_start, position);
         }
 
         thread::sleep(Duration::from_millis(16));

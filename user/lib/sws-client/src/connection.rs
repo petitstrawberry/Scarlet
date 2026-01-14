@@ -472,6 +472,20 @@ impl Connection {
         .map_err(|_| Error::SendFailed)
     }
 
+    /// Set the workarea (usable screen area) for the window manager.
+    ///
+    /// This informs the window manager about the area where normal windows
+    /// should be placed, typically excluding the area occupied by the taskbar.
+    pub fn set_workarea(&mut self, x: i32, y: i32, width: u32, height: u32) -> Result<(), Error> {
+        let payload = protocol::payload_set_workarea(x, y, width, height);
+        write_frame(
+            &mut self.socket,
+            protocol::client_msg::SET_WORKAREA,
+            &payload,
+        )
+        .map_err(|_| Error::SendFailed)
+    }
+
     /// Resize a surface.
     ///
     /// This is a synchronous request: it waits for `WINDOW_RESIZED` and a new SHM handle,

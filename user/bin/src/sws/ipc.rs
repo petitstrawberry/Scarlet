@@ -954,6 +954,13 @@ fn client_thread_main(client_id: usize, mut socket: Socket) {
                 );
                 push_ipc_event(IpcEvent::SetWindowOpacity { window_id, opacity });
             }
+            Ok(ClientMessageRef::SetWorkarea { x, y, width, height }) => {
+                println!(
+                    "[ClientThread {}] SetWorkarea: x={}, y={}, width={}, height={}",
+                    client_id, x, y, width, height
+                );
+                push_ipc_event(IpcEvent::SetWorkarea { x, y, width, height });
+            }
             Ok(_) => {
                 // Ignore other messages for now
             }
@@ -1071,4 +1078,12 @@ pub enum IpcEvent {
 
     /// Set window opacity
     SetWindowOpacity { window_id: u32, opacity: u8 },
+
+    /// Set the workarea (usable screen area) for the window manager
+    SetWorkarea {
+        x: i32,
+        y: i32,
+        width: u32,
+        height: u32,
+    },
 }

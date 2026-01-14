@@ -44,6 +44,7 @@ pub struct Compositor {
     move_drag: Option<MoveDragState>,
     resize_drag: Option<ResizeDragState>,
     resize_outline: Option<(i32, i32, u32, u32)>,
+    workarea: Option<(i32, i32, u32, u32)>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -141,6 +142,7 @@ impl Compositor {
             move_drag: None,
             resize_drag: None,
             resize_outline: None,
+            workarea: None,
         })
     }
 
@@ -1729,11 +1731,47 @@ impl Compositor {
                     .window_manager
                     .get_window(window_id)
                     .map(|w| (w.x, w.y, w.width, w.height));
+                
+                // Use workarea for Normal windows only
+                let (max_w, max_h, max_x, max_y) = if let Some(window) = self.window_manager.get_window(window_id) {
+                    if window.window_type == super::window::WindowType::Normal {
+                        match self.workarea {
+                            Some((wx, wy, ww, wh)) => {
+                                // Maximize within workarea
+                                let padding = 10i32;
+                                let max_w = ww.saturating_sub(padding as u32 * 2).max(1);
+                                let max_h = wh.saturating_sub(padding as u32 * 2).max(1);
+                                let max_x = wx + padding;
+                                let max_y = wy + padding;
+                                println!(
+                                    "[Compositor] Maximizing Normal window #{} within workarea: ({}, {}) {}x{}",
+                                    window_id, max_x, max_y, max_w, max_h
+                                );
+                                (max_w, max_h, Some(max_x), Some(max_y))
+                            }
+                            None => (self.screen_width, self.screen_height, None, None)
+                        }
+                    } else {
+                        (self.screen_width, self.screen_height, None, None)
+                    }
+                } else {
+                    (self.screen_width, self.screen_height, None, None)
+                };
+                
                 if self.window_manager.maximize_window(
                     window_id,
-                    self.screen_width,
-                    self.screen_height,
+                    max_w,
+                    max_h,
                 ) {
+                    // Set position for Normal windows within workarea
+                    if let (Some(max_x), Some(max_y)) = (max_x, max_y) {
+                        if let Some(window) = self.window_manager.get_window(window_id) {
+                            if window.window_type == super::window::WindowType::Normal {
+                                self.window_manager.set_window_position(window_id, max_x, max_y);
+                            }
+                        }
+                    }
+                    
                     if let Some(r) = old_rect {
                         self.add_pending_damage(r);
                     }
@@ -1805,6 +1843,23 @@ impl Compositor {
                     }
                 };
                 if self.window_manager.set_window_type(window_id, wtype) {
+                    // For Normal windows, adjust position to workarea if available
+                    if wtype == super::window::WindowType::Normal {
+                        if let Some(window) = self.window_manager.get_window(window_id) {
+                            let (default_x, default_y) = self.window_manager.calculate_default_position(
+                                window.width,
+                                window.height,
+                            );
+                            // Only adjust if window is at default position (0,0)
+                            if window.x == 0 && window.y == 0 {
+                                println!(
+                                    "[Compositor] Adjusting Normal window #{} position to workarea: ({}, {})",
+                                    window_id, default_x, default_y
+                                );
+                                self.window_manager.set_window_position(window_id, default_x, default_y);
+                            }
+                        }
+                    }
                     // Re-raise to update Z-order based on window type
                     self.window_manager.raise_to_top_with_type(window_id);
                     self.full_redraw_needed = true;
@@ -1821,6 +1876,21 @@ impl Compositor {
                         self.add_pending_damage((w.x, w.y, w.width, w.height));
                     }
                 }
+            }
+            IpcEvent::SetWorkarea {
+                x,
+                y,
+                width,
+                height,
+            } => {
+                println!(
+                    "[Compositor] Workarea set: x={}, y={}, width={}, height={}",
+                    x, y, width, height
+                );
+                self.workarea = Some((x, y, width, height));
+                // Notify window manager about workarea change
+                self.window_manager.set_workarea(x, y, width, height);
+                self.full_redraw_needed = true;
             }
         }
         Ok(false)

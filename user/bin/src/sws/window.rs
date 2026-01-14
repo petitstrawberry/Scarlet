@@ -273,6 +273,7 @@ pub struct WindowManager {
     windows: Vec<Window>,
     next_window_id: WindowId,
     focused_window: Option<WindowId>,
+    workarea: Option<(i32, i32, u32, u32)>,
 }
 
 impl WindowManager {
@@ -282,6 +283,7 @@ impl WindowManager {
             windows: Vec::new(),
             next_window_id: 1,
             focused_window: None,
+            workarea: None,
         }
     }
 
@@ -919,5 +921,40 @@ impl WindowManager {
             print!("#{} ", w.id);
         }
         println!();
+    }
+
+    /// Set workarea for window positioning
+    pub fn set_workarea(&mut self, x: i32, y: i32, width: u32, height: u32) {
+        self.workarea = Some((x, y, width, height));
+        println!(
+            "[WindowManager] Workarea set: x={}, y={}, width={}, height={}",
+            x, y, width, height
+        );
+    }
+
+    /// Calculate default position for a window within workarea
+    pub fn calculate_default_position(&self, width: u32, height: u32) -> (i32, i32) {
+        match self.workarea {
+            Some((wx, wy, ww, wh)) => {
+                // Place window within workarea with padding
+                let padding = 20i32;
+                let max_x = wx + ww as i32 - width as i32 - padding;
+                let max_y = wy + wh as i32 - height as i32 - padding;
+                let x = wx + padding;
+                let y = wy + padding;
+                let x = x.min(max_x).max(wx + padding);
+                let y = y.min(max_y).max(wy + padding);
+                println!(
+                    "[WindowManager] Calculated default position: ({}, {}) within workarea",
+                    x, y
+                );
+                (x, y)
+            }
+            None => {
+                // Fallback to screen center
+                println!("[WindowManager] No workarea, using default position (100, 100)");
+                (100, 100)
+            }
+        }
     }
 }
