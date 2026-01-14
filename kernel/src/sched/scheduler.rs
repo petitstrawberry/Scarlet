@@ -15,8 +15,7 @@ extern crate alloc;
 
 use core::panic;
 
-use alloc::{boxed::Box, collections::vec_deque::VecDeque, string::ToString, vec::Vec};
-use hashbrown::HashMap;
+use alloc::{collections::vec_deque::VecDeque, string::ToString};
 
 use crate::print;
 use crate::println;
@@ -43,64 +42,174 @@ use crate::task::Task;
 ///       This would also eliminate the fixed-size limitation.
 const MAX_TASKS: usize = 1024;
 
-struct TaskPool {
-    // Fixed-length slice on heap
-    tasks: Box<[Option<Task>]>,
-    id_to_index: HashMap<usize, usize>,
-    free_indices: Vec<usize>,
-    next_free_index: usize,
+/// Global task pool storing all tasks
+/// Each task is directly indexed by its task ID (task_id == index)
+/// This allows safe direct array access without HashMap lookups
+///
+/// The tasks array is protected by a Mutex to ensure thread-safe access
+/// in multi-core scenarios. The mutex is only held during task add/remove
+/// operations, not during context switching.
+///
+/// Task IDs are recycled when tasks are removed to avoid ID exhaustion.
+static TASK_POOL: spin::Once<TaskPool> = spin::Once::new();
+
+/// Get the global task pool (public for task allocation)
+pub fn get_task_pool() -> &'static TaskPool {
+    TASK_POOL.get().expect("Task pool not initialized")
+}
+
+pub struct TaskPool {
+    // Fixed-length array storing tasks directly indexed by task ID
+    // Mutex protects against concurrent add/remove operations
+    // The lock is NOT held during context switching
+    tasks: spin::Mutex<[Option<Task>; MAX_TASKS]>,
+
+    // Free list of recyclable task IDs
+    // IDs are added here when tasks are removed
+    free_ids: spin::Mutex<VecDeque<usize>>,
+
+    // Next ID to allocate when free list is empty
+    // Atomic is sufficient for lock-free allocation
+    next_id: core::sync::atomic::AtomicUsize,
 }
 
 impl TaskPool {
     fn new() -> Self {
-        // Create fixed-length slice on heap
-        let tasks: Box<[Option<Task>]> = (0..MAX_TASKS)
-            .map(|_| None)
-            .collect::<Vec<_>>()
-            .into_boxed_slice();
+        // Initialize fixed-size array with all None
+        // SAFETY: We initialize all elements to None before calling assume_init
+        let mut tasks: core::mem::MaybeUninit<[Option<Task>; MAX_TASKS]> =
+            unsafe { core::mem::MaybeUninit::uninit() };
+
+        // Initialize each element to None
+        // SAFETY: We write to each element before assume_init
+        for i in 0..MAX_TASKS {
+            unsafe {
+                // Get pointer to the i-th element
+                let elem_ptr = tasks.as_mut_ptr().cast::<Option<Task>>().add(i);
+                elem_ptr.write(None);
+            }
+        }
+
+        // SAFETY: All elements are now initialized
+        let tasks: [Option<Task>; MAX_TASKS] = unsafe { tasks.assume_init() };
 
         TaskPool {
-            tasks,
-            id_to_index: HashMap::new(),
-            free_indices: Vec::new(),
-            next_free_index: 0,
+            tasks: spin::Mutex::new(tasks),
+            free_ids: spin::Mutex::new(VecDeque::new()),
+            next_id: core::sync::atomic::AtomicUsize::new(0),
         }
     }
 
-    fn add_task(&mut self, task: Task) -> Result<(), &'static str> {
+    /// Allocate a new task ID
+    /// Tries to reuse freed IDs first, then allocates new ones sequentially
+    /// Uses atomic operations for lock-free allocation
+    pub fn allocate_id(&self) -> Option<usize> {
+        // Try to reuse freed IDs first
+        {
+            let mut free_ids = self.free_ids.lock();
+            if let Some(id) = free_ids.pop_front() {
+                return Some(id);
+            }
+        }
+
+        // Allocate new ID using atomic fetch_add
+        let id = self
+            .next_id
+            .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        if id >= MAX_TASKS {
+            // Rollback on overflow
+            self.next_id
+                .fetch_sub(1, core::sync::atomic::Ordering::Relaxed);
+            None
+        } else {
+            Some(id)
+        }
+    }
+
+    /// Add a task to the pool
+    /// The task's ID determines its index in the array
+    fn add_task(&self, task: Task) -> Result<(), &'static str> {
         let task_id = task.get_id();
 
-        // Find available index
-        let index = if let Some(free_idx) = self.free_indices.pop() {
-            free_idx
-        } else if self.next_free_index < self.tasks.len() {
-            let idx = self.next_free_index;
-            self.next_free_index += 1;
-            idx
-        } else {
-            return Err("Task pool full");
-        };
+        if task_id >= MAX_TASKS {
+            return Err("Task ID out of bounds");
+        }
 
-        self.tasks[index] = Some(task);
-        self.id_to_index.insert(task_id, index);
+        let mut tasks = self.tasks.lock();
+
+        if tasks[task_id].is_some() {
+            return Err("Task ID slot already occupied");
+        }
+
+        tasks[task_id] = Some(task);
         Ok(())
     }
 
-    fn get_task(&mut self, task_id: usize) -> Option<&mut Task> {
-        let index = *self.id_to_index.get(&task_id)?;
-        self.tasks.get_mut(index)?.as_mut()
+    /// Get a task reference by ID
+    /// Returns a static reference using raw pointer for lifetime extension
+    ///
+    /// # Safety
+    /// The returned reference is valid as long as the task is not removed.
+    /// In single-core scenarios, this is always safe during context switching.
+    pub fn get_task(task_id: usize) -> Option<&'static Task> {
+        if task_id >= MAX_TASKS {
+            return None;
+        }
+
+        let pool = get_task_pool();
+        let tasks = pool.tasks.lock();
+
+        // Convert reference to raw pointer, then to &'static
+        // SAFETY: The task will remain valid as long as it's not removed
+        // In context switching scenarios, we never remove the currently running task
+        tasks[task_id].as_ref().map(|task| {
+            let ptr = task as *const Task;
+            unsafe { &*ptr }
+        })
     }
 
-    fn remove_task(&mut self, task_id: usize) -> Option<Task> {
-        let index = self.id_to_index.remove(&task_id)?;
-        let task = self.tasks[index].take()?;
-        self.free_indices.push(index);
+    /// Get a mutable task reference by ID
+    /// Returns a static mutable reference using raw pointer for lifetime extension
+    ///
+    /// # Safety
+    /// Same as get_task, but returns mutable reference
+    pub fn get_task_mut(task_id: usize) -> Option<&'static mut Task> {
+        if task_id >= MAX_TASKS {
+            return None;
+        }
+
+        let pool = get_task_pool();
+        let mut tasks = pool.tasks.lock();
+
+        tasks[task_id].as_mut().map(|task| {
+            let ptr = task as *mut Task;
+            unsafe { &mut *ptr }
+        })
+    }
+
+    fn remove_task(&self, task_id: usize) -> Option<Task> {
+        if task_id >= MAX_TASKS {
+            return None;
+        }
+
+        let mut tasks = self.tasks.lock();
+        let task = tasks[task_id].take()?;
+
+        // Add ID to free list for reuse
+        let mut free_ids = self.free_ids.lock();
+        free_ids.push_back(task_id);
+
         Some(task)
     }
 
     #[allow(dead_code)]
     fn contains_task(&self, task_id: usize) -> bool {
-        self.id_to_index.contains_key(&task_id)
+        if task_id >= MAX_TASKS {
+            return false;
+        }
+
+        let tasks = self.tasks.lock();
+        tasks[task_id].is_some()
     }
 }
 
@@ -119,8 +228,6 @@ pub fn get_scheduler() -> &'static mut Scheduler {
 }
 
 pub struct Scheduler {
-    /// Task pool storing all tasks in fixed positions
-    task_pool: TaskPool,
     /// Queue for ready-to-run task IDs
     ready_queue: [VecDeque<usize>; NUM_OF_CPUS],
     /// Queue for blocked task IDs (waiting for I/O, etc.)
@@ -133,7 +240,6 @@ pub struct Scheduler {
 impl Scheduler {
     pub fn new() -> Self {
         Scheduler {
-            task_pool: TaskPool::new(),
             ready_queue: [const { VecDeque::new() }; NUM_OF_CPUS],
             blocked_queue: [const { VecDeque::new() }; NUM_OF_CPUS],
             zombie_queue: [const { VecDeque::new() }; NUM_OF_CPUS],
@@ -143,8 +249,8 @@ impl Scheduler {
 
     pub fn add_task(&mut self, task: Task, cpu_id: usize) {
         let task_id = task.get_id();
-        // Add task to the task pool
-        if let Err(e) = self.task_pool.add_task(task) {
+        // Add task to the global task pool
+        if let Err(e) = get_task_pool().add_task(task) {
             panic!("Failed to add task {}: {}", task_id, e);
         }
         // Add task state info to ready queue
@@ -254,7 +360,7 @@ impl Scheduler {
                                 continue;
                             }
                             TaskState::Terminated => {
-                                self.task_pool.remove_task(task_id);
+                                get_task_pool().remove_task(task_id);
                                 continue;
                             }
                             TaskState::Blocked(_) => {
@@ -286,7 +392,7 @@ impl Scheduler {
     pub fn on_tick(&mut self, cpu_id: usize, trapframe: &mut Trapframe) {
         // crate::early_println!("[SCHED] CPU{}: on_tick called", cpu_id);
         if let Some(task_id) = self.get_current_task_id(cpu_id) {
-            if let Some(task) = self.task_pool.get_task(task_id) {
+            if let Some(task) = TaskPool::get_task_mut(task_id) {
                 if task.time_slice > 0 {
                     task.time_slice -= 1;
                 }
@@ -387,7 +493,7 @@ impl Scheduler {
 
     pub fn get_current_task(&mut self, cpu_id: usize) -> Option<&mut Task> {
         match self.current_task_id[cpu_id] {
-            Some(task_id) => self.task_pool.get_task(task_id),
+            Some(task_id) => TaskPool::get_task_mut(task_id),
             None => None,
         }
     }
@@ -407,7 +513,7 @@ impl Scheduler {
     /// # Returns
     /// A mutable reference to the task if found, or None otherwise.
     pub fn get_task_by_id(&mut self, task_id: usize) -> Option<&mut Task> {
-        self.task_pool.get_task(task_id)
+        TaskPool::get_task_mut(task_id)
     }
 
     /// Move a task from blocked queue to ready queue when it's woken up
@@ -430,7 +536,7 @@ impl Scheduler {
                 self.blocked_queue[cpu_id].remove(pos);
 
                 // Get task from TaskPool and set state to Running
-                if let Some(task) = self.task_pool.get_task(task_id) {
+                if let Some(task) = TaskPool::get_task_mut(task_id) {
                     task.state = TaskState::Running;
                     // Move to ready queue
                     self.ready_queue[cpu_id].push_back(task_id);
@@ -442,7 +548,7 @@ impl Scheduler {
         // a task marking itself Blocked and the scheduler moving it to the
         // blocked_queue. In that case, ensure the task state is set back to
         // Running so that the scheduler does not park it.
-        if let Some(task) = self.task_pool.get_task(task_id) {
+        if let Some(task) = TaskPool::get_task_mut(task_id) {
             if let TaskState::Blocked(_) = task.state {
                 task.state = TaskState::Running;
                 // Do not enqueue here to avoid duplicating entries: the task is
@@ -475,7 +581,7 @@ impl Scheduler {
         }
 
         // Remove from task pool (this frees all task resources)
-        if let Some(_task) = self.task_pool.remove_task(task_id) {
+        if let Some(_task) = get_task_pool().remove_task(task_id) {
             crate::println!("[Scheduler] Cleaned up zombie task {}", task_id);
         }
     }
@@ -526,7 +632,7 @@ impl Scheduler {
             let mut to_ctx_ptr: *const crate::arch::KernelContext = core::ptr::null();
 
             {
-                if let Some(from_task) = self.task_pool.get_task(from_task_id) {
+                if let Some(from_task) = TaskPool::get_task_mut(from_task_id) {
                     from_ctx_ptr = &mut from_task.kernel_context;
 
                     #[cfg(feature = "user-fpu")]
@@ -539,7 +645,7 @@ impl Scheduler {
                         &mut from_task.vcpu,
                     );
                 }
-                if let Some(to_task) = self.task_pool.get_task(to_task_id) {
+                if let Some(to_task) = TaskPool::get_task_mut(to_task_id) {
                     to_ctx_ptr = &to_task.kernel_context;
                 }
             }
@@ -551,7 +657,7 @@ impl Scheduler {
                 }
 
                 // Execution resumes here when this task is rescheduled
-                if let Some(from_task) = self.task_pool.get_task(from_task_id) {
+                if let Some(from_task) = TaskPool::get_task_mut(from_task_id) {
                     #[cfg(feature = "user-fpu")]
                     crate::arch::fpu::kernel_switch_in_user_fpu(&mut from_task.vcpu);
                 }

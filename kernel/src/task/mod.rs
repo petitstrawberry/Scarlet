@@ -47,6 +47,9 @@ use spin::Once;
 /// Global registry of task-specific wakers for waitpid
 static WAITPID_WAKERS: Once<Mutex<BTreeMap<usize, Waker>>> = Once::new();
 
+/// Note: TASK_ID has been moved to TaskPool::next_id for better ID management
+/// including recycling of freed task IDs. Use TaskPool::allocate_id() instead.
+
 /// Global registry of parent task wakers for waitpid(-1) operations
 /// Each parent task has a waker that gets triggered when any of its children exit
 static PARENT_WAITPID_WAKERS: Once<Mutex<BTreeMap<usize, Waker>>> = Once::new();
@@ -350,8 +353,6 @@ impl Default for CloneFlags {
     }
 }
 
-static TASK_ID: Mutex<usize> = Mutex::new(1);
-
 impl Task {
     /// Create a new task with the root namespace.
     ///
@@ -387,10 +388,10 @@ impl Task {
         task_type: TaskType,
         ns: Arc<namespace::TaskNamespace>,
     ) -> Self {
-        let mut taskid = TASK_ID.lock();
-        let global_id = *taskid;
-        *taskid += 1;
-        drop(taskid);
+        // Allocate task ID using the global task pool
+        let global_id = crate::sched::scheduler::get_task_pool()
+            .allocate_id()
+            .expect("Task pool exhausted - cannot create more tasks");
 
         let namespace_id = ns.allocate_task_id_for(global_id);
 
