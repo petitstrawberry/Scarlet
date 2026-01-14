@@ -5,11 +5,31 @@
 //! queues for different task states to improve efficiency:
 //!
 //! - `ready_queue`: Tasks that are ready to run
-//! - `blocked_queue`: Tasks waiting for I/O or other events  
+//! - `blocked_queue`: Tasks waiting for I/O or other events
 //! - `zombie_queue`: Finished tasks waiting to be cleaned up
 //!
 //! This separation avoids unnecessary iteration over blocked/zombie tasks
 //! during normal scheduling operations.
+//!
+//! # TaskPool Safety
+//!
+//! The global `TaskPool` stores tasks in a fixed-size array indexed by task_id.
+//! This design avoids HashMap-related issues and provides stable memory locations:
+//!
+//! - **Fixed Array**: `tasks[task_id]` ensures stable addresses (no reallocation)
+//! - **Direct Indexing**: task_id == index for O(1) access without hash lookup
+//! - **ID Recycling**: Free list reuses task IDs to avoid exhaustion
+//!
+//! The pool provides `get_task()` and `get_task_mut()` which return `&'static`
+//! references using raw pointers. This is **unsafe but practical** because:
+//!
+//! 1. Tasks are stored at fixed addresses (task_id == index)
+//! 2. The scheduler never removes running tasks
+//! 3. Single-core execution prevents concurrent access
+//! 4. Context switches never invalidate the current task's reference
+//!
+//! **IMPORTANT**: Never access `TaskPool::tasks` directly. Always use the
+//! provided methods which document and enforce safety invariants.
 
 extern crate alloc;
 
@@ -58,10 +78,34 @@ pub fn get_task_pool() -> &'static TaskPool {
     TASK_POOL.get().expect("Task pool not initialized")
 }
 
+/// Global task pool storing all tasks in a fixed-size array
+///
+/// # Safety
+///
+/// This struct provides unsafe access to tasks through `get_task()` and `get_task_mut()`
+/// which return `&'static` references without holding locks. This is safe because:
+///
+/// 1. **Fixed Array Memory**: Tasks are stored in a fixed array indexed by task_id.
+///    Unlike HashMap, the memory location never changes due to reallocation.
+///
+/// 2. **Scheduler Control**: The scheduler controls all task removal and ensures
+///    that the currently running task is never removed during context switches.
+///
+/// 3. **Single-Core Execution**: Current implementation is single-core, preventing
+///    concurrent access during context switches.
+///
+/// **IMPORTANT**: Do NOT directly access the `tasks` array. Always use:
+/// - `TaskPool::get_task()` for immutable references
+/// - `TaskPool::get_task_mut()` for mutable references
+/// - `Scheduler::get_task_by_id()` which is the preferred public API
+///
+/// Direct array access could violate safety assumptions and cause undefined behavior.
 pub struct TaskPool {
     // Fixed-length array storing tasks directly indexed by task ID
     // Mutex protects against concurrent add/remove operations
     // The lock is NOT held during context switching
+    //
+    // ⚠️ DO NOT ACCESS DIRECTLY - Use get_task() or get_task_mut() methods
     tasks: spin::Mutex<[Option<Task>; MAX_TASKS]>,
 
     // Free list of recyclable task IDs
@@ -149,8 +193,18 @@ impl TaskPool {
     /// Returns a static reference using raw pointer for lifetime extension
     ///
     /// # Safety
-    /// The returned reference is valid as long as the task is not removed.
-    /// In single-core scenarios, this is always safe during context switching.
+    ///
+    /// This function is safe to use under the following conditions:
+    /// - The task must not be removed while the returned reference is in use
+    /// - In context switching scenarios, the currently running task is never removed
+    /// - Single-core execution ensures no concurrent removal during context switch
+    ///
+    /// The returned reference points to a fixed location in the TaskPool array
+    /// (task_id == index), so unlike HashMap-based approaches, the address is
+    /// stable and will never change due to reallocation.
+    ///
+    /// **Important**: Do NOT directly access `TaskPool::tasks` array.
+    /// Always use this method or `get_task_mut()` to ensure proper safety.
     pub fn get_task(task_id: usize) -> Option<&'static Task> {
         if task_id >= MAX_TASKS {
             return None;
@@ -160,8 +214,10 @@ impl TaskPool {
         let tasks = pool.tasks.lock();
 
         // Convert reference to raw pointer, then to &'static
-        // SAFETY: The task will remain valid as long as it's not removed
-        // In context switching scenarios, we never remove the currently running task
+        // SAFETY: The task will remain valid as long as it's not removed.
+        // - Tasks are stored in a fixed array, indexed by task_id (stable address)
+        // - The currently running task is never removed during context switching
+        // - Single-core execution prevents concurrent removal during use
         tasks[task_id].as_ref().map(|task| {
             let ptr = task as *const Task;
             unsafe { &*ptr }
@@ -172,7 +228,25 @@ impl TaskPool {
     /// Returns a static mutable reference using raw pointer for lifetime extension
     ///
     /// # Safety
-    /// Same as get_task, but returns mutable reference
+    ///
+    /// This function is safe to use under the following conditions:
+    /// - The task must not be removed while the returned reference is in use
+    /// - In context switching scenarios, the currently running task is never removed
+    /// - Single-core execution ensures no concurrent access during context switch
+    ///
+    /// The returned reference points to a fixed location in the TaskPool array
+    /// (task_id == index), so unlike HashMap-based approaches, the address is
+    /// stable and will never change due to reallocation.
+    ///
+    /// **Important**: Do NOT directly access `TaskPool::tasks` array.
+    /// Always use this method or `get_task()` to ensure proper safety.
+    ///
+    /// # Note
+    /// This is inherently unsafe because it returns `&'static mut` without holding
+    /// the lock. However, in practice it's safe because:
+    /// - Fixed array indexing guarantees stable memory location
+    /// - The scheduler ensures exclusive access during context switches
+    /// - Single-core execution prevents concurrent mutable access
     pub fn get_task_mut(task_id: usize) -> Option<&'static mut Task> {
         if task_id >= MAX_TASKS {
             return None;
@@ -181,12 +255,30 @@ impl TaskPool {
         let pool = get_task_pool();
         let mut tasks = pool.tasks.lock();
 
+        // SAFETY: Same rationale as get_task(), but returns mutable reference.
+        // The scheduler ensures exclusive access during context switches,
+        // and the fixed array provides stable memory location.
         tasks[task_id].as_mut().map(|task| {
             let ptr = task as *mut Task;
             unsafe { &mut *ptr }
         })
     }
 
+    /// Remove a task from the pool
+    ///
+    /// # Safety
+    ///
+    /// **CRITICAL**: This method invalidates all `&'static` references returned by
+    /// `get_task()` and `get_task_mut()` for this task_id. The scheduler must ensure:
+    ///
+    /// 1. The task being removed is NOT currently running on any CPU
+    /// 2. No context switch is in progress for this task
+    /// 3. No references to this task are held elsewhere
+    ///
+    /// The scheduler enforces this by:
+    /// - Only removing tasks from zombie_queue (already exited)
+    /// - Never removing the currently running task
+    /// - Ensuring the task is not in ready/blocked queues before removal
     fn remove_task(&self, task_id: usize) -> Option<Task> {
         if task_id >= MAX_TASKS {
             return None;
