@@ -463,6 +463,7 @@ impl WindowManager {
     }
 
     /// Focus a window
+    /// If the window is hidden/minimized, it will be shown before focusing
     pub fn focus_window(&mut self, id: WindowId) {
         println!("[WindowManager] Focusing window #{}", id);
         // Unfocus all windows
@@ -472,6 +473,15 @@ impl WindowManager {
 
         // Focus the specified window
         if let Some(window) = self.get_window_mut(id) {
+            // Show the window if it's hidden/minimized
+            if window.minimized || !window.visible {
+                window.minimized = false;
+                window.visible = true;
+                println!(
+                    "[WindowManager] Window #{} shown (was minimized/hidden)",
+                    id
+                );
+            }
             window.focused = true;
             self.focused_window = Some(id);
         }

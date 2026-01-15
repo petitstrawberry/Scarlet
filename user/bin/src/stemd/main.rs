@@ -334,21 +334,21 @@ fn focus_window_by_app_id(app_id: &str) -> Result<(), &'static str> {
             window.window_id, window.app_id, window.title, window.visible
         );
 
-        // First try exact app_id match
-        if window.app_id == app_id && window.visible {
+        // First try exact app_id match (include hidden/minimized windows)
+        if window.app_id == app_id {
             println!(
-                "stemd: Found matching window #{} by app_id",
-                window.window_id
+                "stemd: Found matching window #{} by app_id (visible={})",
+                window.window_id, window.visible
             );
             return focus_window_id(&mut conn, window.window_id);
         }
 
-        // Fallback to title matching for backwards compatibility
+        // Fallback to title matching for backwards compatibility (include hidden/minimized windows)
         for search_term in &search_terms {
-            if window.title.contains(search_term) && window.visible {
+            if window.title.contains(search_term) {
                 println!(
-                    "stemd: Found matching window #{} by title",
-                    window.window_id
+                    "stemd: Found matching window #{} by title (visible={})",
+                    window.window_id, window.visible
                 );
                 return focus_window_id(&mut conn, window.window_id);
             }

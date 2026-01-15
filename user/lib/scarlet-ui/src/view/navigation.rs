@@ -277,7 +277,7 @@ impl View for NavigationView {
             available.height,
         );
 
-        // Build and layout content
+        // Build and layout content (no padding - content pages handle their own padding)
         let content_available = Size::new(content_width, available.height);
         let mut content = self.build_content();
         let _ = content.layout(content_available);
@@ -326,15 +326,17 @@ impl View for NavigationView {
             current_y += ITEM_HEIGHT as i32 + 2;
         }
 
-        // Draw content with padding
-        const CONTENT_PADDING: u32 = 24;
-        let content = self.build_content();
+        // Draw content (no padding - content pages handle their own padding)
+        let mut content = self.build_content();
         let content_frame = Rect::new(
-            frame.x + self.sidebar_frame.width as i32 + CONTENT_PADDING as i32,
-            frame.y + CONTENT_PADDING as i32,
-            self.content_frame.width.saturating_sub(CONTENT_PADDING * 2),
-            self.content_frame.height.saturating_sub(CONTENT_PADDING * 2),
+            frame.x + self.sidebar_frame.width as i32,
+            frame.y,
+            self.content_frame.width,
+            self.content_frame.height,
         );
+        // Layout content before drawing (CRITICAL: without this, cached_sizes are ZERO!)
+        let content_size = Size::new(self.content_frame.width, self.content_frame.height);
+        let _ = content.layout(content_size);
         content.draw(canvas, content_frame);
     }
 
@@ -346,21 +348,20 @@ impl View for NavigationView {
             }
         }
 
-        // Forward to content with padding (same as draw)
-        const CONTENT_PADDING: u32 = 24;
+        // Forward to content (no padding - content pages handle their own padding)
         let content_frame = Rect::new(
-            frame.x + self.sidebar_frame.width as i32 + CONTENT_PADDING as i32,
-            frame.y + CONTENT_PADDING as i32,
-            self.content_frame.width.saturating_sub(CONTENT_PADDING * 2),
-            self.content_frame.height.saturating_sub(CONTENT_PADDING * 2),
+            frame.x + self.sidebar_frame.width as i32,
+            frame.y,
+            self.content_frame.width,
+            self.content_frame.height,
         );
 
-        if content_frame.contains(event.x(), event.y()) {
-            let mut content = self.build_content();
-            return content.on_event(event, content_frame);
-        }
-
-        false
+        // Always forward events to content (needed for hover state updates)
+        let mut content = self.build_content();
+        // Layout content before handling events (CRITICAL: without this, cached_sizes are ZERO!)
+        let content_size = Size::new(self.content_frame.width, self.content_frame.height);
+        let _ = content.layout(content_size);
+        content.on_event(event, content_frame)
     }
 
     // Note: children() and children_mut() return empty because content is dynamically built
@@ -370,6 +371,36 @@ impl View for NavigationView {
 
     fn children_mut(&mut self) -> Vec<(&mut dyn View, Rect)> {
         vec![]
+    }
+
+    fn visit_children(&self, visitor: &mut dyn FnMut(&dyn View, Rect) -> bool) {
+        // Build content for the visitor (e.g., for debug rendering)
+        let mut content = self.build_content();
+        let content_frame = Rect::new(
+            self.sidebar_frame.width as i32,
+            0,
+            self.content_frame.width,
+            self.content_frame.height,
+        );
+        // Layout content before visiting (to ensure cached_sizes are set)
+        let content_size = Size::new(self.content_frame.width, self.content_frame.height);
+        let _ = content.layout(content_size);
+        let _ = visitor(content.as_ref() as &dyn View, content_frame);
+    }
+
+    fn visit_children_mut(&mut self, visitor: &mut dyn FnMut(&mut dyn View, Rect) -> bool) {
+        // Build content for the visitor
+        let mut content = self.build_content();
+        let content_frame = Rect::new(
+            self.sidebar_frame.width as i32,
+            0,
+            self.content_frame.width,
+            self.content_frame.height,
+        );
+        // Layout content before visiting
+        let content_size = Size::new(self.content_frame.width, self.content_frame.height);
+        let _ = content.layout(content_size);
+        let _ = visitor(content.as_mut() as &mut dyn View, content_frame);
     }
 
     fn needs_draw(&self) -> bool {

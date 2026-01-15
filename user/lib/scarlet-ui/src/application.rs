@@ -159,8 +159,8 @@ impl Application {
 
             mouse_capture_surface_id: None,
 
-            // AppKit default is to keep the app running with no windows.
-            terminate_after_last_window_closed: false,
+            // Default: terminate when main window closes (can be disabled via set_terminate_after_last_window_closed(false))
+            terminate_after_last_window_closed: true,
             delegate: None,
 
             command_queue: Arc::new(Mutex::new(Vec::new())),
@@ -174,7 +174,7 @@ impl Application {
 
     /// Configure whether the application terminates when the last window is closed.
     ///
-    /// Default: `false` (AppKit-like behavior).
+    /// Default: `true`. Set to `false` to keep app running after all windows are closed.
     pub fn set_terminate_after_last_window_closed(&mut self, enabled: bool) {
         self.terminate_after_last_window_closed = enabled;
     }
@@ -203,7 +203,7 @@ impl Application {
     /// let window = Window::new("My Window", 800, 600);
     /// app.add_window(window);
     /// ```
-    pub fn app_id(mut self, app_id: &str) -> Self {
+    pub fn app_id(&mut self, app_id: &str) -> &mut Self {
         self.app_id = Some(app_id.to_string());
         self
     }
@@ -281,11 +281,12 @@ impl Application {
     ///
     /// When enabled, the framework draws rectangle outlines for the allocated
     /// frames of each view after the normal draw pass.
-    pub fn set_layout_debug(&mut self, enabled: bool) {
+    pub fn set_layout_debug(&mut self, enabled: bool) -> &mut Self {
         self.layout_debug = enabled;
         for w in &mut self.windows {
             w.window.set_needs_draw();
         }
+        self
     }
 
     fn debug_color(depth: u32) -> Color {
@@ -337,9 +338,15 @@ impl Application {
                 .map_err(|_| "Failed to set window size limits")?;
         }
         let window_type = window.get_window_type().to_protocol_value();
-        
+
         // Create managed window
-        let mut managed = ManagedWindow::new(window, surface_id);
+        // If this is the first window and it's not explicitly marked as non-main, make it the main window
+        let is_first = self.windows.is_empty();
+        let mut managed = if is_first && !window.is_main_window() {
+            ManagedWindow::new(window.main_window(), surface_id)
+        } else {
+            ManagedWindow::new(window, surface_id)
+        };
 
         self.connection
             .set_window_type(surface_id, window_type)
