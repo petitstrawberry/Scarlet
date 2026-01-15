@@ -5,14 +5,16 @@
 //! - Launches services in dependency order
 //! - Reaps child processes using waitpid(-1, 0)
 //! - Provides an IPC interface via LocalSocket for control commands
+//! - Supports .desktop files for application definitions
 
 #![no_std]
 #![no_main]
 
 extern crate scarlet_std as std;
 
-use core::{arch::asm, hint::spin_loop, sync::atomic::fence};
+use core::{hint::spin_loop, sync::atomic::fence};
 use std::{
+    format,
     fs::File,
     handle::Handle,
     println,
@@ -22,6 +24,14 @@ use std::{
     thread,
     vec::Vec,
 };
+use sws_client::Connection;
+
+// Import protocol and desktop modules
+mod protocol;
+mod desktop;
+
+use protocol::cmd;
+use desktop::{load_desktop_files, lookup_app};
 
 fn try_attach_stdio_to_path(path: &str) {
     // Best-effort: rebind stdio handles (0/1/2) to the given path.
@@ -73,6 +83,19 @@ struct Service {
     tty: Option<String>,
     order: i32,
 }
+
+/// Running application tracking
+#[derive(Debug, Clone)]
+struct RunningApp {
+    app_id: String,
+    pid: i32,
+    exec_path: String,
+}
+
+// Global tracking for running applications
+// In a no_std environment without proper synchronization, we use unsafe static
+// This is accessed by both the IPC thread and main thread
+static mut RUNNING_APPS: Vec<RunningApp> = Vec::new();
 
 /// Simple TOML parser for service configuration
 struct ConfigParser {
@@ -226,6 +249,141 @@ impl ConfigParser {
         }
 
         Some(if neg { acc.saturating_neg() } else { acc })
+    }
+}
+
+/// Add a running app to the tracking list
+fn add_running_app(app_id: String, pid: i32, exec_path: String) {
+    unsafe {
+        RUNNING_APPS.push(RunningApp {
+            app_id,
+            pid,
+            exec_path,
+        });
+    }
+}
+
+/// Remove a running app from the tracking list by PID
+fn remove_running_app_by_pid(pid: i32) -> bool {
+    unsafe {
+        if let Some(pos) = RUNNING_APPS.iter().position(|app| app.pid == pid) {
+            RUNNING_APPS.remove(pos);
+            return true;
+        }
+    }
+    false
+}
+
+/// Find a running app by app_id
+fn find_running_app(app_id: &str) -> Option<RunningApp> {
+    unsafe {
+        RUNNING_APPS
+            .iter()
+            .find(|app| app.app_id == app_id)
+            .cloned()
+    }
+}
+
+/// Focus a window by app_id
+/// This queries SWS for the window list and tries to find a window matching the app_id
+fn focus_window_by_app_id(app_id: &str) -> Result<(), &'static str> {
+    // Try to connect to SWS
+    let mut conn = Connection::connect_default().map_err(|_| "Failed to connect to SWS")?;
+
+    // Get the list of windows
+    let windows = conn.get_window_list().map_err(|_| "Failed to get window list")?;
+
+    // Look for a window whose title starts with or contains the app_id
+    // This is a heuristic - in the future, windows should have an explicit app_id property
+    for window in windows {
+        if window.title.contains(app_id) && window.visible {
+            // Restore the window if minimized
+            if window.minimized {
+                let _ = conn.restore_window(window.window_id);
+            }
+            // TODO: There's no explicit "focus" command in SWS yet
+            // For now, we've restored minimized windows
+            // Future: add FOCUS_WINDOW message to SWS protocol
+            return Ok(());
+        }
+    }
+
+    // No matching window found
+    Err("No window found for app_id")
+}
+
+/// Launch an application or focus an existing window
+/// If exec_path is empty, look up the app from the registry
+fn launch_or_focus(app_id: &str, exec_path: Option<&str>) -> Result<(), &'static str> {
+    // Check if app is already running
+    if let Some(app) = find_running_app(app_id) {
+        // App is running, try to focus its window
+        println!("stemd: App '{}' is already running (PID={}), focusing window", app_id, app.pid);
+
+        if let Err(e) = focus_window_by_app_id(app_id) {
+            println!("stemd: Failed to focus window: {}", e);
+            // Even if focusing fails, don't launch a new instance
+            return Err(e);
+        }
+        return Ok(());
+    }
+
+    // App is not running, determine exec_path
+    let exec_path = match exec_path {
+        Some(path) if !path.is_empty() => path.to_string(),
+        _ => {
+            // Look up from registry
+            match lookup_app(app_id) {
+                Some(entry) => {
+                    println!("stemd: Looked up '{}' from registry: exec={}", app_id, entry.exec);
+                    entry.exec
+                }
+                None => {
+                    println!("stemd: App '{}' not found in registry", app_id);
+                    return Err("App not found in registry and no exec_path provided");
+                }
+            }
+        }
+    };
+
+    // App is not running, launch it
+    println!("stemd: Launching app '{}' with exec: {}", app_id, exec_path);
+
+    let pid = fork();
+    match pid {
+        0 => {
+            // Child process
+            try_attach_stdio_to_null();
+
+            fence(core::sync::atomic::Ordering::SeqCst);
+
+            // Parse the exec command
+            let parts: Vec<&str> = exec_path.split_whitespace().collect();
+            if parts.is_empty() {
+                println!("stemd: Invalid exec command");
+                exit(-1);
+            }
+
+            let path = parts[0];
+            let argv: Vec<&str> = parts.to_vec();
+            let envp: Vec<&str> = Vec::new();
+
+            if std::task::execve(path, &argv, &envp) != 0 {
+                println!("stemd: Failed to execve {}", path);
+                exit(-1);
+            }
+            unreachable!();
+        }
+        -1 => {
+            println!("stemd: Failed to fork for app: {}", app_id);
+            Err("Fork failed")
+        }
+        pid => {
+            // Parent process - track the launched app
+            add_running_app(app_id.to_string(), pid, exec_path.to_string());
+            println!("stemd: App '{}' launched with PID: {}", app_id, pid);
+            Ok(())
+        }
     }
 }
 
@@ -427,36 +585,115 @@ fn ipc_thread() {
     loop {
         match server.accept() {
             Ok(client) => {
-                println!("stemd: IPC client connected");
-
                 let stream = match client.as_stream() {
                     Ok(s) => s,
                     Err(_) => continue,
                 };
 
-                // Read command (max 256 bytes)
-                // Note: Commands longer than 256 bytes will be truncated
-                let mut buffer = [0u8; 256];
+                // Read command (larger buffer for binary commands)
+                let mut buffer = [0u8; 1024];
                 match stream.read(&mut buffer) {
                     Ok(n) if n > 0 => {
-                        // Try to parse command as UTF-8
-                        match core::str::from_utf8(&buffer[..n]) {
-                            Ok(cmd) => {
-                                println!("stemd: Received command: {}", cmd.trim());
+                        // Check if this is a binary command (LAUNCH_OR_FOCUS)
+                        if buffer[0] == cmd::LAUNCH_OR_FOCUS {
+                            // Parse LAUNCH_OR_FOCUS command
+                            // Format: cmd(1) + app_id_len(4) + app_id + exec_path_len(4) + exec_path
+                            if n >= 9 {
+                                let app_id_len = u32::from_le_bytes([
+                                    buffer[1],
+                                    buffer[2],
+                                    buffer[3],
+                                    buffer[4],
+                                ]) as usize;
 
-                                // Process command (simplified)
-                                let response = match cmd.trim() {
-                                    "status" => "stemd is running\n",
-                                    "help" => "Commands: status, help\n",
-                                    _ => "Unknown command\n",
-                                };
+                                let exec_path_offset = 5 + app_id_len;
+                                if n > exec_path_offset + 4 {
+                                    let exec_path_len = u32::from_le_bytes([
+                                        buffer[exec_path_offset],
+                                        buffer[exec_path_offset + 1],
+                                        buffer[exec_path_offset + 2],
+                                        buffer[exec_path_offset + 3],
+                                    ]) as usize;
 
-                                let _ = stream.write(response.as_bytes());
-                            }
-                            Err(_) => {
-                                let error_msg = "Error: Invalid UTF-8 in command\n";
+                                    let total_len = exec_path_offset + 4 + exec_path_len;
+                                    if n >= total_len {
+                                        let app_id = core::str::from_utf8(&buffer[5..5 + app_id_len]);
+                                        let exec_path = core::str::from_utf8(
+                                            &buffer[exec_path_offset + 4..exec_path_offset + 4 + exec_path_len],
+                                        );
+
+                                        match (app_id, exec_path) {
+                                            (Ok(app_id), Ok(exec_path)) => {
+                                                println!(
+                                                    "stemd: LAUNCH_OR_FOCUS app_id={} exec={}",
+                                                    app_id, exec_path
+                                                );
+
+                                                let exec_path_arg = if exec_path.is_empty() {
+                                                    None
+                                                } else {
+                                                    Some(exec_path)
+                                                };
+
+                                                let response = match launch_or_focus(app_id, exec_path_arg) {
+                                                    Ok(()) => {
+                                                        "OK: Launched or focused\n".as_bytes()
+                                                    }
+                                                    Err(e) => {
+                                                        // Build error message as byte array directly
+                                                        let error_prefix = "ERROR: ";
+                                                        let error_suffix = "\n";
+                                                        let mut error_msg = Vec::new();
+                                                        error_msg.extend_from_slice(error_prefix.as_bytes());
+                                                        error_msg.extend_from_slice(e.as_bytes());
+                                                        error_msg.extend_from_slice(error_suffix.as_bytes());
+                                                        // Note: This is a temporary solution - the Vec will be dropped
+                                                        // but we're returning a slice. For IPC, we should handle this differently.
+                                                        // For now, use a static error message.
+                                                        "ERROR: Failed to launch or focus\n".as_bytes()
+                                                    }
+                                                };
+
+                                                let _ = stream.write(response);
+                                            }
+                                            _ => {
+                                                let error_msg =
+                                                    "ERROR: Invalid UTF-8 in parameters\n";
+                                                let _ = stream.write(error_msg.as_bytes());
+                                            }
+                                        }
+                                    } else {
+                                        let error_msg = "ERROR: Incomplete command\n";
+                                        let _ = stream.write(error_msg.as_bytes());
+                                    }
+                                } else {
+                                    let error_msg = "ERROR: Incomplete command\n";
+                                    let _ = stream.write(error_msg.as_bytes());
+                                }
+                            } else {
+                                let error_msg = "ERROR: Malformed LAUNCH_OR_FOCUS command\n";
                                 let _ = stream.write(error_msg.as_bytes());
-                                println!("stemd: Received invalid UTF-8 command");
+                            }
+                        } else {
+                            // Try to parse command as UTF-8 text
+                            match core::str::from_utf8(&buffer[..n]) {
+                                Ok(cmd) => {
+                                    println!("stemd: Received command: {}", cmd.trim());
+
+                                    // Process command (simplified)
+                                    let response = match cmd.trim() {
+                                        "status" => "stemd is running\n",
+                                        "help" => "Commands: status, help, launch_or_focus\n",
+                                        _ => "Unknown command\n",
+                                    };
+
+                                    let _ = stream.write(response.as_bytes());
+                                }
+                                Err(_) => {
+                                    let error_msg = "Error: Invalid UTF-8 in command\n";
+                                    let _ = stream.write(error_msg.as_bytes());
+                                    println!("stemd: Received invalid UTF-8 command");
+                                }
                             }
                         }
                     }
@@ -583,8 +820,17 @@ fn main() -> i32 {
     // Read configuration.
     // Note: current filesystem layout copies userland under `/system/scarlet`,
     // so configs may live under `/system/scarlet/etc` instead of `/etc`.
-    let config_dirs = ["/etc/stemd.d", "/system/scarlet/etc/stemd.d"];
-    let config_files = ["/etc/stemd.toml", "/system/scarlet/etc/stemd.toml"];
+    // Directory structure:
+    //   /etc/stemd.d/services/*.toml  - Service definitions
+    //   /etc/stemd.d/apps/*.desktop   - Application definitions
+    let config_dirs = [
+        "/etc/stemd.d/services",
+        "/system/scarlet/etc/stemd.d/services",
+    ];
+    let config_files = [
+        "/etc/stemd.d/services.toml",
+        "/system/scarlet/etc/stemd.d/services.toml",
+    ];
 
     let mut config_content: Option<String> = None;
 
@@ -669,6 +915,33 @@ tty = "/dev/tty0"
     }
 
     println!("stemd: All services launched");
+
+    // Load .desktop files for application definitions
+    println!("stemd: Loading application definitions...");
+    // Unified directory structure: /etc/stemd.d/apps/*.desktop
+    let desktop_dirs = [
+        "/etc/stemd.d/apps",
+        "/system/scarlet/etc/stemd.d/apps",
+    ];
+    let mut total_apps = 0;
+    for dir in &desktop_dirs {
+        match load_desktop_files(dir) {
+            Ok(count) => {
+                if count > 0 {
+                    println!("stemd: Loaded {} applications from {}", count, dir);
+                    total_apps += count;
+                }
+            }
+            Err(_) => {
+                // Directory doesn't exist or couldn't be read, continue
+            }
+        }
+    }
+    if total_apps > 0 {
+        println!("stemd: Total {} applications loaded", total_apps);
+    } else {
+        println!("stemd: No application definitions found");
+    }
 
     // Spawn IPC thread
     println!("stemd: Starting IPC thread");

@@ -1,0 +1,6 @@
+[Desktop Entry]
+Name=Settings
+Exec=/bin/scarlet_desktop_settings
+Icon=preferences-system
+Type=Application
+Terminal=false

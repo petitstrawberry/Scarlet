@@ -45,6 +45,7 @@ pub mod client_msg {
     pub const SET_WORKAREA: u32 = 22;
     pub const SET_WINDOW_RESIZABLE: u32 = 23;
     pub const GET_WINDOW_LIST: u32 = 24;
+    pub const LAUNCH_OR_FOCUS: u32 = 25;
 }
 
 /// Message type IDs (server -> client).
@@ -251,6 +252,15 @@ pub enum ClientMessageRef<'a> {
 
     /// Get list of all windows
     GetWindowList {},
+
+    /// Launch an application or focus an existing window
+    ///
+    /// If a window with the given app_id already exists, focus it.
+    /// Otherwise, launch the specified application.
+    LaunchOrFocus {
+        app_id: &'a [u8],
+        exec_path: &'a [u8],
+    },
 }
 
 /// Server->client messages.
@@ -498,6 +508,23 @@ pub fn parse_client_message<'a>(
                 return Err(ProtocolError::MalformedPayload);
             }
             Ok(ClientMessageRef::GetWindowList {})
+        }
+        client_msg::LAUNCH_OR_FOCUS => {
+            // Payload: app_id_len (u32) + app_id_bytes + exec_path_len (u32) + exec_path_bytes
+            if payload.len() < 8 {
+                return Err(ProtocolError::MalformedPayload);
+            }
+            let app_id_len = u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]) as usize;
+            let exec_path_len = u32::from_le_bytes([payload[4], payload[5], payload[6], payload[7]]) as usize;
+
+            if payload.len() != 8 + app_id_len + exec_path_len {
+                return Err(ProtocolError::MalformedPayload);
+            }
+
+            let app_id = &payload[8..8 + app_id_len];
+            let exec_path = &payload[8 + app_id_len..8 + app_id_len + exec_path_len];
+
+            Ok(ClientMessageRef::LaunchOrFocus { app_id, exec_path })
         }
         _ => Err(ProtocolError::UnknownMessageType),
     }
@@ -951,3 +978,20 @@ pub fn parse_window_list_payload(payload: &[u8]) -> Result<Vec<WindowListEntry>,
 
     Ok(windows)
 }
+
+/// Build payload for client->server `LAUNCH_OR_FOCUS`.
+///
+/// Payload format:
+/// - app_id_len (u32)
+/// - app_id_bytes (variable)
+/// - exec_path_len (u32)
+/// - exec_path_bytes (variable)
+pub fn payload_launch_or_focus(app_id: &[u8], exec_path: &[u8]) -> Vec<u8> {
+    let mut payload = Vec::new();
+    payload.extend_from_slice(&(app_id.len() as u32).to_le_bytes());
+    payload.extend_from_slice(app_id);
+    payload.extend_from_slice(&(exec_path.len() as u32).to_le_bytes());
+    payload.extend_from_slice(exec_path);
+    payload
+}
+

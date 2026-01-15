@@ -726,8 +726,10 @@ pub extern "C" fn main() -> i32 {
                     // Handle dropdown input
                     if input.type_ == 0x01 && input.code == 0x110 && input.value == 0 {
                         // Mouse up on dropdown - check for item clicks
+                        let mut clicked_item = false;
                         for item in &dropdown.items {
                             if item.contains(cursor_x, cursor_y, dropdown.x, dropdown.width) {
+                                clicked_item = true;
                                 match &item.item_type {
                                     DropdownItemType::Window { window_id } => {
                                         println!(
@@ -744,14 +746,15 @@ pub extern "C" fn main() -> i32 {
                                         }
                                     },
                                 }
-                                // Close dropdown after selection
-                                if let Some(old_id) = dropdown.surface_id {
-                                    let _ = conn.destroy_surface(old_id);
-                                }
-                                dropdown.close();
                                 break;
                             }
                         }
+
+                        // Close dropdown after any click (item or outside)
+                        if let Some(old_id) = dropdown.surface_id {
+                            let _ = conn.destroy_surface(old_id);
+                        }
+                        dropdown.close();
                     }
                 }
                 Event::SurfaceConfigure {
