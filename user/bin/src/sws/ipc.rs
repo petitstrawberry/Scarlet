@@ -971,6 +971,50 @@ fn client_thread_main(client_id: usize, mut socket: Socket) {
                     height,
                 });
             }
+            Ok(ClientMessageRef::SetWindowResizable {
+                window_id,
+                resizable,
+            }) => {
+                println!(
+                    "[ClientThread {}] SetWindowResizable: window_id={} resizable={}",
+                    client_id, window_id, resizable
+                );
+                push_ipc_event(IpcEvent::SetWindowResizable {
+                    window_id,
+                    resizable,
+                });
+            }
+            Ok(ClientMessageRef::GetScreenSize {}) => {
+                println!(
+                    "[ClientThread {}] GetScreenSize: requesting screen size",
+                    client_id
+                );
+                // Send response directly with default screen size
+                // TODO: Get actual screen size from compositor
+                let screen_width = 1024; // Default fallback
+                let screen_height = 768;
+                let payload = protocol::payload_screen_size(screen_width, screen_height);
+                if let Err(e) =
+                    write_frame(&mut socket, protocol::server_msg::SCREEN_SIZE, &payload)
+                {
+                    println!(
+                        "[ClientThread {}] Failed to send SCREEN_SIZE response: {:?}",
+                        client_id, e
+                    );
+                } else {
+                    println!(
+                        "[ClientThread {}] Sent SCREEN_SIZE: {}x{}",
+                        client_id, screen_width, screen_height
+                    );
+                }
+            }
+            Ok(ClientMessageRef::GetWindowList {}) => {
+                println!(
+                    "[ClientThread {}] GetWindowList: requesting window list",
+                    client_id
+                );
+                push_ipc_event(IpcEvent::GetWindowList { client_id });
+            }
             Ok(_) => {
                 // Ignore other messages for now
             }
@@ -1096,4 +1140,13 @@ pub enum IpcEvent {
         width: u32,
         height: u32,
     },
+
+    /// Set whether a window can be resized by the user via interactive resize
+    SetWindowResizable { window_id: u32, resizable: bool },
+
+    /// Get the screen size
+    GetScreenSize { client_id: usize },
+
+    /// Get list of all windows
+    GetWindowList { client_id: usize },
 }

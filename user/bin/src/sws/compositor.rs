@@ -2,7 +2,7 @@
 
 use super::cursor::Cursor;
 use super::input::{CompositorInputEvent, InputManager, key_codes};
-use super::ipc::{IpcEvent, IpcServer};
+use super::ipc::{IpcEvent, IpcServer, send_message_to_window};
 use super::window::WindowManager;
 use framebuffer::Framebuffer;
 use std::println;
@@ -1409,7 +1409,8 @@ impl Compositor {
                             if let Some((wx, wy)) = self.cursor_position_in_window(window) {
                                 let near_right = wx >= window.width as i32 - RESIZE_GRIP_PX;
                                 let near_bottom = wy >= window.height as i32 - RESIZE_GRIP_PX;
-                                if near_right || near_bottom {
+                                // Only allow resize if window is marked as resizable
+                                if (near_right || near_bottom) && window.resizable {
                                     self.move_drag = None;
                                     self.resize_drag = Some(ResizeDragState {
                                         window_id: win_id,
@@ -1890,6 +1891,85 @@ impl Compositor {
                 // Notify window manager about workarea change
                 self.window_manager.set_workarea(x, y, width, height);
                 self.full_redraw_needed = true;
+            }
+            IpcEvent::SetWindowResizable {
+                window_id,
+                resizable,
+            } => {
+                println!(
+                    "[Compositor] Setting window #{} resizable to {}",
+                    window_id, resizable
+                );
+                if self
+                    .window_manager
+                    .set_window_resizable(window_id, resizable)
+                {
+                    // No redraw needed, just state change
+                }
+            }
+            IpcEvent::GetScreenSize { client_id } => {
+                println!(
+                    "[Compositor] GetScreenSize request from client {}",
+                    client_id
+                );
+                let width = self.screen_width;
+                let height = self.screen_height;
+                // Send SCREEN_SIZE response to the client
+                // Use the first window (if any) to send the response
+                if let Some(first_window_id) = self.window_manager.get_first_window_id() {
+                    let payload = sws_protocol::payload_screen_size(width, height);
+                    let _ = send_message_to_window(
+                        first_window_id,
+                        sws_protocol::server_msg::SCREEN_SIZE,
+                        payload.to_vec(),
+                    );
+                    println!(
+                        "[Compositor] Sent SCREEN_SIZE: {}x{} to client {} (via window {})",
+                        width, height, client_id, first_window_id
+                    );
+                }
+            }
+            IpcEvent::GetWindowList { client_id } => {
+                println!(
+                    "[Compositor] GetWindowList request from client {}",
+                    client_id
+                );
+                // Get window list from window manager
+                let windows = self.window_manager.get_window_list();
+
+                // Convert to WindowListEntry and use protocol library serialization
+                let entries: std::vec::Vec<sws_protocol::WindowListEntry> = windows
+                    .into_iter()
+                    .map(
+                        |(window_id, title, window_type, visible, focused, minimized)| {
+                            sws_protocol::WindowListEntry {
+                                window_id,
+                                title,
+                                window_type,
+                                visible,
+                                focused,
+                                minimized,
+                            }
+                        },
+                    )
+                    .collect();
+
+                let payload = sws_protocol::payload_window_list(&entries);
+
+                // Send WINDOW_LIST response to the client
+                if let Some(first_window_id) = self.window_manager.get_first_window_id() {
+                    let _ = send_message_to_window(
+                        first_window_id,
+                        sws_protocol::server_msg::WINDOW_LIST,
+                        payload,
+                    );
+                    println!(
+                        "[Compositor] Sent WINDOW_LIST: {} windows to client {} (via window {})",
+                        entries.len(),
+                        client_id,
+                        first_window_id
+                    );
+                }
             }
         }
         Ok(false)

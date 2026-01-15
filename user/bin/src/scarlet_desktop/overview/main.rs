@@ -494,7 +494,7 @@ pub extern "C" fn main() -> i32 {
     let window = Window::new("Scarlet Desktop", 1260, 780)
         .min_size(960, 620)
         .background(page_bg)
-        .window_type(WindowKind::Desktop)
+        .window_type(WindowKind::Normal)
         .content(
             Padding::new(
                 VStack::new()

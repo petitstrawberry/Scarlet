@@ -35,6 +35,7 @@ pub mod client_msg {
     pub const SET_WINDOW_PARENT: u32 = 7;
     pub const SET_WINDOW_TRANSIENT_FLAGS: u32 = 8;
     pub const RESIZE_WINDOW: u32 = 9;
+    pub const GET_SCREEN_SIZE: u32 = 10;
     pub const SET_WINDOW_SIZE_LIMITS: u32 = 16;
     pub const MINIMIZE_WINDOW: u32 = 17;
     pub const MAXIMIZE_WINDOW: u32 = 18;
@@ -42,6 +43,8 @@ pub mod client_msg {
     pub const SET_WINDOW_TYPE: u32 = 20;
     pub const SET_WINDOW_OPACITY: u32 = 21;
     pub const SET_WORKAREA: u32 = 22;
+    pub const SET_WINDOW_RESIZABLE: u32 = 23;
+    pub const GET_WINDOW_LIST: u32 = 24;
 }
 
 /// Message type IDs (server -> client).
@@ -52,6 +55,8 @@ pub mod server_msg {
     pub const ERROR: u32 = 13;
     pub const WINDOW_RESIZED: u32 = 14;
     pub const WINDOW_CONFIGURE: u32 = 15;
+    pub const SCREEN_SIZE: u32 = 16;
+    pub const WINDOW_LIST: u32 = 17;
 }
 
 /// Flags for transient (parent/child) window behavior.
@@ -234,6 +239,18 @@ pub enum ClientMessageRef<'a> {
         width: u32,
         height: u32,
     },
+
+    /// Set whether a window can be resized by the user via interactive resize
+    SetWindowResizable {
+        window_id: u32,
+        resizable: bool,
+    },
+
+    /// Get the screen size
+    GetScreenSize {},
+
+    /// Get list of all windows
+    GetWindowList {},
 }
 
 /// Server->client messages.
@@ -271,6 +288,14 @@ pub enum ServerMessage {
         code: u16,
         value: i32,
     },
+    /// Response to GET_SCREEN_SIZE request
+    ScreenSize {
+        width: u32,
+        height: u32,
+    },
+    /// Response to GET_WINDOW_LIST request
+    /// Contains a serialized list of windows
+    WindowList,
     Error {
         code: u32,
     },
@@ -451,6 +476,29 @@ pub fn parse_client_message<'a>(
                 height,
             })
         }
+        client_msg::SET_WINDOW_RESIZABLE => {
+            if payload.len() != 8 {
+                return Err(ProtocolError::MalformedPayload);
+            }
+            let window_id = u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
+            let resizable = payload[4] != 0;
+            Ok(ClientMessageRef::SetWindowResizable {
+                window_id,
+                resizable,
+            })
+        }
+        client_msg::GET_SCREEN_SIZE => {
+            if !payload.is_empty() {
+                return Err(ProtocolError::MalformedPayload);
+            }
+            Ok(ClientMessageRef::GetScreenSize {})
+        }
+        client_msg::GET_WINDOW_LIST => {
+            if !payload.is_empty() {
+                return Err(ProtocolError::MalformedPayload);
+            }
+            Ok(ClientMessageRef::GetWindowList {})
+        }
         _ => Err(ProtocolError::UnknownMessageType),
     }
 }
@@ -547,6 +595,21 @@ pub fn parse_server_message(msg_type: u32, payload: &[u8]) -> Result<ServerMessa
                 code,
                 value,
             })
+        }
+        server_msg::SCREEN_SIZE => {
+            if payload.len() != 8 {
+                return Err(ProtocolError::MalformedPayload);
+            }
+            let width = u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
+            let height = u32::from_le_bytes([payload[4], payload[5], payload[6], payload[7]]);
+            Ok(ServerMessage::ScreenSize { width, height })
+        }
+        server_msg::WINDOW_LIST => {
+            // Window list payload is variable length, just validate it's not empty
+            if payload.is_empty() {
+                return Err(ProtocolError::MalformedPayload);
+            }
+            Ok(ServerMessage::WindowList)
         }
         server_msg::ERROR => {
             if payload.len() < 4 {
@@ -743,4 +806,148 @@ pub fn payload_set_workarea(x: i32, y: i32, width: u32, height: u32) -> [u8; 16]
     payload[8..12].copy_from_slice(&width.to_le_bytes());
     payload[12..16].copy_from_slice(&height.to_le_bytes());
     payload
+}
+
+/// Build payload for client->server `SET_WINDOW_RESIZABLE`.
+pub fn payload_set_window_resizable(window_id: u32, resizable: bool) -> [u8; 8] {
+    let mut payload = [0u8; 8];
+    payload[0..4].copy_from_slice(&window_id.to_le_bytes());
+    payload[4] = if resizable { 1 } else { 0 };
+    payload
+}
+
+/// Build payload for server->client `SCREEN_SIZE`.
+pub fn payload_screen_size(width: u32, height: u32) -> [u8; 8] {
+    let mut payload = [0u8; 8];
+    payload[0..4].copy_from_slice(&width.to_le_bytes());
+    payload[4..8].copy_from_slice(&height.to_le_bytes());
+    payload
+}
+
+/// Window list entry for WINDOW_LIST message
+#[derive(Debug, Clone)]
+pub struct WindowListEntry {
+    pub window_id: u32,
+    pub title: std::string::String,
+    pub window_type: u32,
+    pub visible: bool,
+    pub focused: bool,
+    pub minimized: bool,
+}
+
+/// Build payload for server->client `WINDOW_LIST`.
+///
+/// Serializes a list of windows into the wire format:
+/// - count (u32)
+/// - For each window:
+///   - window_id (u32)
+///   - title_length (u32)
+///   - title_bytes (variable)
+///   - window_type (u32)
+///   - flags (3 bytes: visible, focused, minimized) + 1 byte padding
+pub fn payload_window_list(windows: &[WindowListEntry]) -> Vec<u8> {
+    let mut payload = Vec::new();
+
+    // Window count
+    payload.extend_from_slice(&(windows.len() as u32).to_le_bytes());
+
+    for entry in windows {
+        // Window ID
+        payload.extend_from_slice(&entry.window_id.to_le_bytes());
+
+        // Title length and title
+        let title_bytes = entry.title.as_bytes();
+        payload.extend_from_slice(&(title_bytes.len() as u32).to_le_bytes());
+        payload.extend_from_slice(title_bytes);
+
+        // Window type
+        payload.extend_from_slice(&entry.window_type.to_le_bytes());
+
+        // Flags
+        payload.push(if entry.visible { 1 } else { 0 });
+        payload.push(if entry.focused { 1 } else { 0 });
+        payload.push(if entry.minimized { 1 } else { 0 });
+        payload.push(0); // padding
+    }
+
+    payload
+}
+
+/// Parse WINDOW_LIST payload into a list of window entries.
+///
+/// See `payload_window_list` for the wire format.
+pub fn parse_window_list_payload(payload: &[u8]) -> Result<Vec<WindowListEntry>, ProtocolError> {
+    if payload.len() < 4 {
+        return Err(ProtocolError::MalformedPayload);
+    }
+
+    let count = u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]) as usize;
+    let mut windows = Vec::new();
+    let mut offset = 4;
+
+    for _ in 0..count {
+        // Window ID (4 bytes)
+        if offset + 4 > payload.len() {
+            return Err(ProtocolError::MalformedPayload);
+        }
+        let window_id = u32::from_le_bytes([
+            payload[offset],
+            payload[offset + 1],
+            payload[offset + 2],
+            payload[offset + 3],
+        ]);
+        offset += 4;
+
+        // Title length (4 bytes)
+        if offset + 4 > payload.len() {
+            return Err(ProtocolError::MalformedPayload);
+        }
+        let title_len = u32::from_le_bytes([
+            payload[offset],
+            payload[offset + 1],
+            payload[offset + 2],
+            payload[offset + 3],
+        ]) as usize;
+        offset += 4;
+
+        // Title bytes
+        if offset + title_len > payload.len() {
+            return Err(ProtocolError::MalformedPayload);
+        }
+        let title =
+            std::string::String::from_utf8_lossy(&payload[offset..offset + title_len]).into_owned();
+        offset += title_len;
+
+        // Window type (4 bytes)
+        if offset + 4 > payload.len() {
+            return Err(ProtocolError::MalformedPayload);
+        }
+        let window_type = u32::from_le_bytes([
+            payload[offset],
+            payload[offset + 1],
+            payload[offset + 2],
+            payload[offset + 3],
+        ]);
+        offset += 4;
+
+        // Flags (4 bytes: visible, focused, minimized, padding)
+        if offset + 4 > payload.len() {
+            return Err(ProtocolError::MalformedPayload);
+        }
+        let visible = payload[offset] != 0;
+        let focused = payload[offset + 1] != 0;
+        let minimized = payload[offset + 2] != 0;
+        offset += 4;
+
+        windows.push(WindowListEntry {
+            window_id,
+            title,
+            window_type,
+            visible,
+            focused,
+            minimized,
+        });
+    }
+
+    Ok(windows)
 }

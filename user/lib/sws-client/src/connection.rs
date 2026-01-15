@@ -8,8 +8,20 @@ use crate::WindowSizeLimits;
 use scarlet_std::collections::BTreeMap;
 use scarlet_std::ipc::SharedMemory;
 use scarlet_std::socket::Socket;
+use scarlet_std::string::String;
 use scarlet_std::vec::Vec;
 use sws_protocol::{self as protocol, ServerMessage};
+
+/// Window list entry
+#[derive(Debug, Clone)]
+pub struct WindowListEntry {
+    pub window_id: u32,
+    pub title: String,
+    pub window_type: u32,
+    pub visible: bool,
+    pub focused: bool,
+    pub minimized: bool,
+}
 
 fn read_exact(socket: &mut Socket, buf: &mut [u8]) -> Result<(), Error> {
     use scarlet_std::io::Read;
@@ -486,6 +498,20 @@ impl Connection {
         .map_err(|_| Error::SendFailed)
     }
 
+    /// Set whether a window can be resized by the user via interactive resize.
+    pub fn set_window_resizable(&mut self, surface_id: u32, resizable: bool) -> Result<(), Error> {
+        if self.surfaces.get(&surface_id).is_none() {
+            return Err(Error::SurfaceNotFound);
+        }
+        let payload = protocol::payload_set_window_resizable(surface_id, resizable);
+        write_frame(
+            &mut self.socket,
+            protocol::client_msg::SET_WINDOW_RESIZABLE,
+            &payload,
+        )
+        .map_err(|_| Error::SendFailed)
+    }
+
     /// Resize a surface.
     ///
     /// This is a synchronous request: it waits for `WINDOW_RESIZED` and a new SHM handle,
@@ -652,6 +678,88 @@ impl Connection {
             self.pending_events.clear();
             self.pending_head = 0;
             v
+        }
+    }
+
+    /// Get the screen size.
+    ///
+    /// This is a synchronous request: it blocks until the server responds with SCREEN_SIZE.
+    pub fn get_screen_size(&mut self) -> Result<(u32, u32), Error> {
+        // Send GET_SCREEN_SIZE request (no payload)
+        write_frame(&mut self.socket, protocol::client_msg::GET_SCREEN_SIZE, &[])
+            .map_err(|_| Error::SendFailed)?;
+
+        // Switch to blocking mode for synchronous response
+        self.socket
+            .set_nonblocking(false)
+            .map_err(|_| Error::SocketConfig)?;
+
+        // Wait for SCREEN_SIZE response
+        let msg_type =
+            read_frame_into(&mut self.socket, &mut self.read_payload).map_err(|_| Error::ReceiveFailed)?;
+        let response = protocol::parse_server_message(msg_type, &self.read_payload)
+            .map_err(|_| Error::InvalidResponse)?;
+
+        match response {
+            ServerMessage::ScreenSize { width, height } => {
+                // Restore non-blocking mode
+                let _ = self.socket.set_nonblocking(true);
+                Ok((width, height))
+            }
+            _ => {
+                // Restore non-blocking mode
+                let _ = self.socket.set_nonblocking(true);
+                Err(Error::InvalidResponse)
+            }
+        }
+    }
+
+    /// Get the list of all windows.
+    ///
+    /// This is a synchronous request: it blocks until the server responds with WINDOW_LIST.
+    pub fn get_window_list(&mut self) -> Result<Vec<WindowListEntry>, Error> {
+        // Send GET_WINDOW_LIST request (no payload)
+        write_frame(&mut self.socket, protocol::client_msg::GET_WINDOW_LIST, &[])
+            .map_err(|_| Error::SendFailed)?;
+
+        // Switch to blocking mode for synchronous response
+        self.socket
+            .set_nonblocking(false)
+            .map_err(|_| Error::SocketConfig)?;
+
+        // Wait for WINDOW_LIST response
+        let msg_type =
+            read_frame_into(&mut self.socket, &mut self.read_payload).map_err(|_| Error::ReceiveFailed)?;
+        let response = protocol::parse_server_message(msg_type, &self.read_payload)
+            .map_err(|_| Error::InvalidResponse)?;
+
+        match response {
+            ServerMessage::WindowList => {
+                // Use protocol library's parser
+                let windows = protocol::parse_window_list_payload(&self.read_payload)
+                    .map_err(|_| Error::InvalidResponse)?;
+
+                // Restore non-blocking mode
+                let _ = self.socket.set_nonblocking(true);
+
+                // Convert protocol::WindowListEntry to sws_client::WindowListEntry
+                Ok(windows
+                    .into_iter()
+                    .map(|w| WindowListEntry {
+                        window_id: w.window_id,
+                        title: w.title,
+                        window_type: w.window_type,
+                        visible: w.visible,
+                        focused: w.focused,
+                        minimized: w.minimized,
+                    })
+                    .collect())
+            }
+            _ => {
+                // Restore non-blocking mode
+                let _ = self.socket.set_nonblocking(true);
+                Err(Error::InvalidResponse)
+            }
         }
     }
 

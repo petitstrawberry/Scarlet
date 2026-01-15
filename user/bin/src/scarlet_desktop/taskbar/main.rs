@@ -1,13 +1,13 @@
-//! Scarlet Desktop Taskbar.
+//! Scarlet Desktop Menu Bar.
 //!
-//! Provides a dock/taskbar surface as a regular SWS client.
+//! Provides a macOS-style menu bar as a regular SWS client.
 //!
 //! - Window type: TASKBAR
-//! - Reads configuration from /etc/scarlet-desktop.d/
-//! - Resizes to configured height
-//! - Positions itself based on configured position (top/bottom)
+//! - Height: 28px (optimized for menu bar usage)
+//! - Positions at top of screen
+//! - Left side: Application menus
+//! - Right side: System status (clock, CPU, memory)
 //! - Sends workarea notification to SWS
-//! - Clicking the left button launches `scarlet_desktop_overview`
 //!
 #![no_std]
 #![no_main]
@@ -19,48 +19,113 @@ use core::time::Duration;
 use scarlet_desktop_config::{TaskbarConfig, TaskbarPosition};
 use scarlet_ui::Color;
 use scarlet_ui::graphics::{Canvas, measure_text_sized};
-use std::task::{EXECVE_FORCE_ABI_REBUILD, execve_with_flags, exit, fork};
+use std::string::String;
 use std::thread;
+use std::vec::Vec;
 use std::{format, println};
 use sws_client::{Connection, Event, InputEvent, WindowSizeLimits};
 use sws_protocol::window_types;
 
-fn load_config() -> TaskbarConfig {
-    scarlet_desktop_config::load_desktop_config().taskbar
+/// Dropdown menu state
+struct DropdownState {
+    surface_id: Option<u32>,
+    x: i32,
+    y: i32,
+    width: u32,
+    height: u32,
+    menu_index: Option<usize>,
+    items: Vec<DropdownItem>,
 }
 
-fn launch_overview() {
-    match fork() {
-        0 => {
-            let candidates = [
-                "/bin",
-                "/scarlet/system/scarlet/bin",
-                "/old_root/system/scarlet/bin",
-            ];
-
-            for base in &candidates {
-                let mut path = std::string::String::new();
-                path.push_str(base);
-                path.push('/');
-                path.push_str("scarlet_desktop_overview");
-
-                let argv0 = path.as_str();
-                let argv = [argv0];
-
-                let rc = execve_with_flags(argv0, &argv, &[], EXECVE_FORCE_ABI_REBUILD);
-                if rc == 0 {
-                    break;
-                }
-            }
-
-            println!("[scarlet_desktop_taskbar] Failed to exec overview");
-            exit(127);
+impl DropdownState {
+    fn new() -> Self {
+        Self {
+            surface_id: None,
+            x: 0,
+            y: 0,
+            width: 200,
+            height: 0,
+            menu_index: None,
+            items: Vec::new(),
         }
-        -1 => {
-            println!("[scarlet_desktop_taskbar] fork failed for overview");
-        }
-        _pid => {}
     }
+
+    fn is_open(&self) -> bool {
+        self.surface_id.is_some()
+    }
+
+    fn contains(&self, x: i32, y: i32) -> bool {
+        if !self.is_open() {
+            return false;
+        }
+        x >= self.x
+            && x < self.x + self.width as i32
+            && y >= self.y
+            && y < self.y + self.height as i32
+    }
+
+    fn close(&mut self) {
+        self.surface_id = None;
+        self.menu_index = None;
+        self.items.clear();
+    }
+}
+
+/// Dropdown menu item
+struct DropdownItem {
+    label: String,
+    window_id: u32,
+    y: i32,
+    height: u32,
+}
+
+impl DropdownItem {
+    fn contains(&self, x: i32, y: i32, dropdown_x: i32, dropdown_width: u32) -> bool {
+        x >= dropdown_x
+            && x < dropdown_x + dropdown_width as i32
+            && y >= self.y
+            && y < self.y + self.height as i32
+    }
+}
+
+/// Menu bar item (left side)
+struct MenuItem {
+    label: &'static str,
+    x: i32,
+    y: i32,
+    width: u32,
+    height: u32,
+}
+
+impl MenuItem {
+    fn contains(&self, x: i32, y: i32) -> bool {
+        x >= self.x
+            && x < self.x + self.width as i32
+            && y >= self.y
+            && y < self.y + self.height as i32
+    }
+}
+
+/// System status item (right side)
+struct StatusItem {
+    label: String,
+    x: i32,
+    y: i32,
+    width: u32,
+    height: u32,
+}
+
+impl StatusItem {
+    fn contains(&self, x: i32, y: i32) -> bool {
+        x >= self.x
+            && x < self.x + self.width as i32
+            && y >= self.y
+            && y < self.y + self.height as i32
+    }
+}
+
+fn load_config() -> TaskbarConfig {
+    scarlet_desktop_config::load_desktop_config().taskbar
 }
 
 fn handle_input(
@@ -68,10 +133,9 @@ fn handle_input(
     cursor_x: &mut i32,
     cursor_y: &mut i32,
     left_down: &mut bool,
-    pressed_in_start: &mut bool,
-    start_rect: (i32, i32, u32, u32),
+    pressed_items: &mut Vec<usize>,
+    menu_items: &[MenuItem],
 ) -> bool {
-    // Return true if UI state changed and a redraw is needed.
     match ev.type_ {
         0x03 => {
             // EV_ABS
@@ -87,25 +151,31 @@ fn handle_input(
             // BTN_LEFT = 0x110
             if ev.code == 0x110 {
                 if ev.value != 0 {
+                    // Mouse down
                     *left_down = true;
-                    let (x, y, w, h) = start_rect;
-                    let inside = *cursor_x >= x
-                        && *cursor_x < x + w as i32
-                        && *cursor_y >= y
-                        && *cursor_y < y + h as i32;
-                    *pressed_in_start = inside;
+                    pressed_items.clear();
+                    for (i, item) in menu_items.iter().enumerate() {
+                        if item.contains(*cursor_x, *cursor_y) {
+                            pressed_items.push(i);
+                        }
+                    }
                     true
                 } else {
+                    // Mouse up
                     *left_down = false;
-                    let (x, y, w, h) = start_rect;
-                    let inside = *cursor_x >= x
-                        && *cursor_x < x + w as i32
-                        && *cursor_y >= y
-                        && *cursor_y < y + h as i32;
-                    if *pressed_in_start && inside {
-                        launch_overview();
+                    let clicked = pressed_items.clone();
+                    pressed_items.clear();
+
+                    // Check if mouse is still over the same items
+                    for &idx in &clicked {
+                        if idx < menu_items.len() && menu_items[idx].contains(*cursor_x, *cursor_y)
+                        {
+                            // Menu item clicked
+                            let label = menu_items[idx].label;
+                            println!("[menu_bar] Menu clicked: {}", label);
+                            return true;
+                        }
                     }
-                    *pressed_in_start = false;
                     true
                 }
             } else {
@@ -116,13 +186,15 @@ fn handle_input(
     }
 }
 
-fn draw_taskbar(
+fn draw_menu_bar(
     conn: &mut Connection,
     surface_id: u32,
     seconds: u32,
-    left_down: bool,
-    pressed_in_start: bool,
-    position: TaskbarPosition,
+    cpu_usage: u8,
+    memory_usage: u8,
+    pressed_items: &[usize],
+    menu_items: &[MenuItem],
+    status_items: &[StatusItem],
 ) {
     let Some(surface) = conn.surface_mut(surface_id) else {
         return;
@@ -131,65 +203,191 @@ fn draw_taskbar(
     let w = surface.width();
     let h = surface.height();
 
-    let start_label = "Overview";
-    let font_size = 18.0;
-    let (tw, th) = measure_text_sized(start_label, font_size);
-
-    let pad_x = 14i32;
-    let pad_y = 10i32;
-    let button_w = tw.saturating_add(24);
-    let button_h = th.saturating_add(12).min(h);
-    let button_x = 8i32;
-    let button_y = ((h as i32).saturating_sub(button_h as i32) / 2).max(0);
-
-    let clock_text = format!("uptime {}s", seconds);
-    let (cw, ch) = measure_text_sized(&clock_text, 16.0);
-    let clock_x = (w as i32).saturating_sub(cw as i32).saturating_sub(12);
-    let clock_y = ((h as i32).saturating_sub(ch as i32) / 2).max(0);
-
-    // Design differences for top vs bottom
-    let (bg_color, border_color, border_pos) = match position {
-        TaskbarPosition::Top => (
-            Color::rgb(22, 26, 34),
-            Color::rgb(60, 68, 88),
-            h.saturating_sub(1) as i32,
-        ),
-        TaskbarPosition::Bottom => (Color::rgb(22, 26, 34), Color::rgb(60, 68, 88), 0),
-    };
+    // macOS-inspired colors
+    let bg_color = Color::rgb(30, 30, 30);
+    let text_color = Color::rgb(230, 230, 230);
+    let text_dim = Color::rgb(160, 160, 160);
+    let border_color = Color::rgb(50, 50, 50);
+    let hover_bg = Color::rgb(60, 60, 60);
+    let active_bg = Color::rgb(80, 80, 80);
 
     surface.with_buffer(|buf, width, height| {
         let mut canvas = Canvas::new(buf, width, height);
 
-        // Bar background.
+        // Bar background
         canvas.fill_rect(0, 0, w, h, bg_color);
-        canvas.draw_hline(0, border_pos, w, border_color);
+        canvas.draw_hline(0, (h - 1) as i32, w, border_color);
 
-        // Start button.
-        let base = Color::rgb(46, 52, 66);
-        let active = Color::rgb(240, 96, 72);
-        let btn_color = if pressed_in_start && left_down {
-            active
+        // Draw menu items (left side)
+        let font_size = 13.0;
+        for (i, item) in menu_items.iter().enumerate() {
+            let is_pressed = pressed_items.contains(&i);
+
+            // Draw hover/active background
+            if is_pressed {
+                canvas.fill_rect(
+                    item.x,
+                    item.y + 1,
+                    item.width,
+                    item.height.saturating_sub(2),
+                    active_bg,
+                );
+            }
+
+            // Draw text
+            let text_x = item.x + 8;
+            let text_y = item.y + ((item.height as i32 - 16) / 2).max(0);
+            canvas.draw_text_sized(text_x, text_y, item.label, text_color, font_size);
+        }
+
+        // Draw status items (right side)
+        for item in status_items {
+            // Draw text
+            let text_x = item.x + 6;
+            let text_y = item.y + ((item.height as i32 - 16) / 2).max(0);
+            canvas.draw_text_sized(text_x, text_y, &item.label, text_dim, font_size);
+        }
+    });
+
+    let _ = conn.commit(surface_id);
+}
+
+/// Show window list dropdown menu
+fn show_window_list_dropdown(
+    conn: &mut Connection,
+    dropdown: &mut DropdownState,
+    menu_item: &MenuItem,
+    menu_index: usize,
+) {
+    println!("[menu_bar] Showing window list dropdown");
+
+    // Close any existing dropdown
+    if let Some(old_id) = dropdown.surface_id {
+        let _ = conn.destroy_surface(old_id);
+    }
+
+    // Fetch window list
+    let windows = match conn.get_window_list() {
+        Ok(w) => w,
+        Err(e) => {
+            println!("[menu_bar] Failed to get window list: {:?}", e);
+            return;
+        }
+    };
+
+    if windows.is_empty() {
+        println!("[menu_bar] No windows to show");
+        return;
+    }
+
+    // Calculate dropdown size
+    const ITEM_HEIGHT: u32 = 28;
+    const MAX_HEIGHT: u32 = 400;
+    const DROPDOWN_WIDTH: u32 = 250;
+
+    let item_count = windows.len().min(15); // Max 15 items visible
+    let dropdown_height = (item_count as u32) * ITEM_HEIGHT + 4; // +4 for border
+
+    // Create dropdown surface (AlwaysOnTop for popup)
+    let surface_id = match conn.create_surface(DROPDOWN_WIDTH, dropdown_height) {
+        Ok(id) => id,
+        Err(_) => {
+            println!("[menu_bar] Failed to create dropdown surface");
+            return;
+        }
+    };
+
+    let _ = conn.set_window_type(surface_id, window_types::ALWAYS_ON_TOP);
+
+    // Position below the menu item
+    let x = menu_item.x;
+    let y = menu_item.height as i32; // Below menu bar
+    let _ = conn.move_window(surface_id, x, y);
+
+    // Build dropdown items
+    dropdown.items.clear();
+    let mut current_y = 2i32; // Start with 2px top padding
+
+    for window in &windows {
+        let label = if window.title.is_empty() {
+            String::from("Untitled")
         } else {
-            base
+            window.title.clone()
         };
 
-        canvas.fill_rounded_rect(button_x, button_y, button_w, button_h, 10, btn_color);
-        canvas.draw_text_sized(
-            button_x + pad_x,
-            button_y + pad_y,
-            start_label,
-            Color::rgb(238, 242, 249),
-            font_size,
-        );
+        dropdown.items.push(DropdownItem {
+            label,
+            window_id: window.window_id,
+            y: current_y,
+            height: ITEM_HEIGHT,
+        });
 
-        // Clock (right-aligned).
-        canvas.draw_text_sized(
-            clock_x,
-            clock_y + 12,
-            &clock_text,
-            Color::rgb(175, 186, 208),
-            16.0,
-        );
+        current_y += ITEM_HEIGHT as i32;
+    }
+
+    // Update dropdown state
+    dropdown.surface_id = Some(surface_id);
+    dropdown.x = x;
+    dropdown.y = y;
+    dropdown.width = DROPDOWN_WIDTH;
+    dropdown.height = dropdown_height;
+    dropdown.menu_index = Some(menu_index);
+
+    // Draw dropdown
+    draw_dropdown(conn, surface_id, dropdown);
+
+    println!(
+        "[menu_bar] Dropdown shown: {} windows at ({}, {})",
+        windows.len(),
+        x,
+        y
+    );
+}
+
+/// Draw dropdown menu
+fn draw_dropdown(conn: &mut Connection, surface_id: u32, dropdown: &DropdownState) {
+    let Some(surface) = conn.surface_mut(surface_id) else {
+        return;
+    };
+
+    let w = surface.width();
+    let h = surface.height();
+
+    surface.with_buffer(|buf, width, height| {
+        let mut canvas = Canvas::new(buf, width, height);
+
+        // Background
+        let bg_color = Color::rgb(40, 40, 40);
+        let border_color = Color::rgb(70, 70, 70);
+        let text_color = Color::rgb(220, 220, 220);
+        let hover_color = Color::rgb(70, 130, 180); // Steel blue
+        let separator_color = Color::rgb(60, 60, 60);
+
+        canvas.fill_rect(0, 0, width, height, bg_color);
+
+        // Draw border
+        canvas.draw_rect(0, 0, width, height, border_color);
+
+        // Draw items
+        const FONT_SIZE: f32 = 13.0;
+        for item in &dropdown.items {
+            // Item background (hover effect would go here)
+            canvas.fill_rect(2, item.y, width - 4, item.height, Color::rgb(45, 45, 45));
+
+            // Draw text
+            let text_x = 8;
+            let text_y = item.y + ((item.height as i32 - 16) / 2).max(0);
+            canvas.draw_text_sized(text_x, text_y, &item.label, text_color, FONT_SIZE);
+
+            // Draw separator
+            canvas.draw_line(
+                2,
+                item.y + item.height as i32,
+                (width - 2) as i32,
+                item.y + item.height as i32,
+                separator_color,
+            );
+        }
     });
 
     let _ = conn.commit(surface_id);
@@ -197,97 +395,239 @@ fn draw_taskbar(
 
 #[unsafe(no_mangle)]
 pub extern "C" fn main() -> i32 {
-    println!("[scarlet_desktop_taskbar] starting");
+    println!("[menu_bar] Starting Scarlet Desktop Menu Bar");
 
     let config = load_config();
-    let bar_height: u32 = config.height.unwrap_or(40).max(1);
-    let position: TaskbarPosition = config.position.unwrap_or(TaskbarPosition::Top);
+
+    // Use 28px height for menu bar (macOS-inspired)
+    let bar_height: u32 = 28;
+    let position: TaskbarPosition = TaskbarPosition::Top; // Always top for menu bar
 
     let mut conn = match Connection::connect("/tmp/sws.sock") {
         Ok(c) => c,
         Err(_) => {
-            println!("[scarlet_desktop_taskbar] Failed to connect to SWS");
+            println!("[menu_bar] Failed to connect to SWS");
             return 1;
         }
     };
 
-    let surface_id = match conn.create_surface(320, bar_height) {
+    // Create a dummy surface first (needed for SCREEN_SIZE response routing)
+    let dummy_surface_id = match conn.create_surface(16, 16) {
         Ok(id) => id,
         Err(_) => {
-            println!("[scarlet_desktop_taskbar] Failed to create surface");
+            println!("[menu_bar] Failed to create dummy surface");
+            return 1;
+        }
+    };
+
+    // Get screen size first
+    let (screen_width, screen_height) = match conn.get_screen_size() {
+        Ok(size) => {
+            println!("[menu_bar] Screen size: {}x{}", size.0, size.1);
+            size
+        }
+        Err(_) => {
+            println!("[menu_bar] Failed to get screen size, using defaults");
+            (1920, 1080)
+        }
+    };
+
+    // Destroy dummy surface
+    let _ = conn.destroy_surface(dummy_surface_id);
+
+    // Create surface with full screen width and 28px height
+    let surface_id = match conn.create_surface(screen_width, bar_height) {
+        Ok(id) => id,
+        Err(_) => {
+            println!("[menu_bar] Failed to create surface");
             return 1;
         }
     };
 
     let _ = conn.set_window_type(surface_id, window_types::TASKBAR);
 
-    // Disable resizing by setting fixed size limits
-    // Note: Initial limits will be updated after SurfaceConfigure
+    // Disable interactive resize
+    let _ = conn.set_window_resizable(surface_id, false);
+
+    // Set window size limits
     let _ = conn.set_window_size_limits(
         surface_id,
         WindowSizeLimits {
-            min_width: 320,
+            min_width: screen_width,
             min_height: bar_height,
-            max_width: 320,
+            max_width: screen_width,
             max_height: bar_height,
         },
     );
 
-    // Ask the server for the screen size; we'll convert the configure size into
-    // a docked bar size.
-    let _ = conn.maximize_window(surface_id);
+    // Position at top
+    let _ = conn.move_window(surface_id, 0, 0);
 
-    let mut screen_w: u32 = 320;
-    let mut screen_h: u32 = 240;
-    let mut actual_screen_w: u32 = 320;
-
-    // Initialize actual_screen_w
-    actual_screen_w = 320;
+    // Send workarea notification (exclude menu bar from top)
+    let workarea_y = bar_height as i32;
+    let workarea_width = screen_width;
+    let workarea_height = screen_height.saturating_sub(bar_height);
+    let _ = conn.set_workarea(0, workarea_y, workarea_width, workarea_height);
+    println!(
+        "[menu_bar] Workarea: x=0, y={}, width={}, height={}",
+        workarea_y, workarea_width, workarea_height
+    );
 
     let mut cursor_x: i32 = 0;
     let mut cursor_y: i32 = 0;
     let mut left_down: bool = false;
-    let mut pressed_in_start: bool = false;
+    let mut pressed_items: Vec<usize> = Vec::new();
+    let mut dropdown = DropdownState::new();
 
     let mut seconds: u32 = 0;
     let mut tick_ms: u32 = 0;
 
-    // Initial draw.
-    draw_taskbar(
+    // Simulated system stats (placeholder for real data)
+    let mut cpu_usage: u8 = 15;
+    let mut memory_usage: u8 = 42;
+
+    // Define menu items (left side)
+    let mut menu_items: Vec<MenuItem> = Vec::new();
+    let menus = ["Scarlet", "File", "Edit", "View", "Window", "Help"];
+    let mut x_offset = 0i32;
+
+    for label in &menus {
+        let (tw, _) = measure_text_sized(label, 13.0);
+        let width = tw.saturating_add(16).min(100); // Add padding, cap at 100px
+        menu_items.push(MenuItem {
+            label,
+            x: x_offset,
+            y: 0,
+            width,
+            height: bar_height,
+        });
+        x_offset += width as i32;
+    }
+
+    // Define status items (right side)
+    let mut status_items: Vec<StatusItem> = Vec::new();
+    let mut x_offset_right = screen_width as i32;
+
+    // Clock
+    let clock_text = format!("00:00");
+    let (cw, _) = measure_text_sized(&clock_text, 13.0);
+    let clock_width = cw.saturating_add(12);
+    x_offset_right -= clock_width as i32;
+    status_items.push(StatusItem {
+        label: String::from("uptime 0s"),
+        x: x_offset_right,
+        y: 0,
+        width: clock_width,
+        height: bar_height,
+    });
+
+    // CPU usage
+    let cpu_text = format!("CPU {}%", cpu_usage);
+    let (cpu_w, _) = measure_text_sized(&cpu_text, 13.0);
+    let cpu_width = cpu_w.saturating_add(12);
+    x_offset_right -= cpu_width as i32;
+    status_items.push(StatusItem {
+        label: String::from("CPU 15%"),
+        x: x_offset_right,
+        y: 0,
+        width: cpu_width,
+        height: bar_height,
+    });
+
+    // Memory usage
+    let mem_text = format!("Mem {}%", memory_usage);
+    let (mem_w, _) = measure_text_sized(&mem_text, 13.0);
+    let mem_width = mem_w.saturating_add(12);
+    x_offset_right -= mem_width as i32;
+    status_items.push(StatusItem {
+        label: String::from("Mem 42%"),
+        x: x_offset_right,
+        y: 0,
+        width: mem_width,
+        height: bar_height,
+    });
+
+    // Initial draw
+    draw_menu_bar(
         &mut conn,
         surface_id,
         seconds,
-        left_down,
-        pressed_in_start,
-        position,
+        cpu_usage,
+        memory_usage,
+        &pressed_items,
+        &menu_items,
+        &status_items,
     );
 
     loop {
         let _ = conn.dispatch();
         let mut needs_redraw = false;
-
-        // Start button rect depends on current surface size.
-        // Compute it from the same sizing logic used in draw_taskbar.
-        let start_label = "Overview";
-        let (tw, th) = measure_text_sized(start_label, 18.0);
-        let button_w = tw.saturating_add(24);
-        let button_h = th.saturating_add(12).min(bar_height);
-        let button_x = 8i32;
-        let button_y = ((bar_height as i32).saturating_sub(button_h as i32) / 2).max(0);
-        let start_rect = (button_x, button_y, button_w, button_h);
+        let mut menu_clicked: Option<usize> = None;
 
         while let Some(ev) = conn.poll_event() {
             match ev {
                 Event::Input(input) if input.surface_id == surface_id => {
+                    // Check if menu was clicked (only on mouse up)
+                    if input.type_ == 0x01 && input.code == 0x110 && input.value == 0 {
+                        // Mouse up - check if menu item was clicked
+                        for (i, item) in menu_items.iter().enumerate() {
+                            if item.contains(cursor_x, cursor_y) && !pressed_items.is_empty() {
+                                menu_clicked = Some(i);
+                                break;
+                            }
+                        }
+                    }
+
+                    // Handle menu bar input
                     if handle_input(
                         input,
                         &mut cursor_x,
                         &mut cursor_y,
                         &mut left_down,
-                        &mut pressed_in_start,
-                        start_rect,
+                        &mut pressed_items,
+                        &menu_items,
                     ) {
                         needs_redraw = true;
+                    }
+
+                    // Close dropdown if clicking outside it
+                    if dropdown.is_open()
+                        && input.type_ == 0x01
+                        && input.code == 0x110
+                        && input.value == 0
+                    {
+                        // Check if click is outside both menu bar and dropdown
+                        let on_menu_bar = cursor_y < bar_height as i32;
+                        let on_dropdown = dropdown.contains(cursor_x, cursor_y);
+
+                        if !on_menu_bar && !on_dropdown {
+                            println!("[menu_bar] Closing dropdown (clicked outside)");
+                            if let Some(old_id) = dropdown.surface_id {
+                                let _ = conn.destroy_surface(old_id);
+                            }
+                            dropdown.close();
+                        }
+                    }
+                }
+                Event::Input(input) if dropdown.surface_id == Some(input.surface_id) => {
+                    // Handle dropdown input
+                    if input.type_ == 0x01 && input.code == 0x110 && input.value == 0 {
+                        // Mouse up on dropdown - check for item clicks
+                        for item in &dropdown.items {
+                            if item.contains(cursor_x, cursor_y, dropdown.x, dropdown.width) {
+                                println!(
+                                    "[menu_bar] Window selected: {} (id={})",
+                                    item.label, item.window_id
+                                );
+                                // TODO: Focus/restore the window
+                                // For now, just close the dropdown
+                                if let Some(old_id) = dropdown.surface_id {
+                                    let _ = conn.destroy_surface(old_id);
+                                }
+                                dropdown.close();
+                                break;
+                            }
+                        }
                     }
                 }
                 Event::SurfaceConfigure {
@@ -295,63 +635,71 @@ pub extern "C" fn main() -> i32 {
                     width,
                     height,
                 } if sid == surface_id => {
-                    // Treat configure width/height as screen dimensions.
-                    screen_h = height;
-                    actual_screen_w = width;
-
-                    if conn
-                        .resize_window(surface_id, actual_screen_w, bar_height)
-                        .is_ok()
-                    {
-                        let y = match position {
-                            TaskbarPosition::Top => 0,
-                            TaskbarPosition::Bottom => screen_h.saturating_sub(bar_height) as i32,
-                        };
-                        let _ = conn.move_window(surface_id, 0, y);
-
-                        // Send workarea notification
-                        let workarea_y = match position {
-                            TaskbarPosition::Top => bar_height as i32,
-                            TaskbarPosition::Bottom => 0,
-                        };
-                        let workarea_width = actual_screen_w;
-                        let workarea_height = match position {
-                            TaskbarPosition::Top => screen_h.saturating_sub(bar_height),
-                            TaskbarPosition::Bottom => screen_h.saturating_sub(bar_height),
-                        };
-                        let _ = conn.set_workarea(0, workarea_y, workarea_width, workarea_height);
-                        println!(
-                            "[scarlet_desktop_taskbar] Workarea: x=0, y={}, width={}, height={}",
-                            workarea_y, workarea_width, workarea_height
-                        );
-
-                        needs_redraw = true;
-                    }
+                    println!("[menu_bar] SurfaceConfigure: {}x{}", width, height);
                 }
                 Event::SurfaceDestroyed { surface_id: sid } if sid == surface_id => {
-                    println!("[scarlet_desktop_taskbar] destroyed");
+                    println!("[menu_bar] Menu bar destroyed");
+                    // Also close dropdown if open
+                    if let Some(old_id) = dropdown.surface_id {
+                        let _ = conn.destroy_surface(old_id);
+                    }
                     return 0;
+                }
+                Event::SurfaceDestroyed { surface_id: sid } if dropdown.surface_id == Some(sid) => {
+                    println!("[menu_bar] Dropdown destroyed externally");
+                    dropdown.close();
                 }
                 _ => {}
             }
         }
 
-        // Simple uptime clock.
+        // Handle menu click after event processing
+        if let Some(menu_idx) = menu_clicked {
+            let label = menu_items[menu_idx].label;
+            println!("[menu_bar] Menu clicked: {}", label);
+
+            // Show window list dropdown for "Window" menu (index 4)
+            if label == "Window" {
+                show_window_list_dropdown(
+                    &mut conn,
+                    &mut dropdown,
+                    &menu_items[menu_idx],
+                    menu_idx,
+                );
+            }
+        }
+
+        // Update clock and system stats
         tick_ms = tick_ms.saturating_add(16);
         if tick_ms >= 1000 {
             tick_ms = 0;
             seconds = seconds.saturating_add(1);
+
+            // Update clock text
+            let mins = (seconds / 60) % 60;
+            let secs = seconds % 60;
+            status_items[2].label = format!("uptime {:02}:{:02}", mins, secs);
+
+            // Simulate CPU/memory changes
+            cpu_usage = (cpu_usage.wrapping_add(7) % 85) + 10;
+            memory_usage = (memory_usage.wrapping_add(3) % 70) + 25;
+
+            status_items[1].label = format!("CPU {}%", cpu_usage);
+            status_items[0].label = format!("Mem {}%", memory_usage);
+
             needs_redraw = true;
         }
 
         if needs_redraw {
-            draw_taskbar(
+            draw_menu_bar(
                 &mut conn,
                 surface_id,
                 seconds,
-                left_down,
-                pressed_in_start,
-                position,
+                cpu_usage,
+                memory_usage,
+                &pressed_items,
+                &menu_items,
+                &status_items,
             );
         }
 

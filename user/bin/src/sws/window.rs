@@ -2,6 +2,7 @@
 
 use std::handle::capability::memory_mapping::flags as mmap_flags;
 use std::ipc::{SharedMemory, permissions};
+use std::string::String;
 use std::vec::Vec;
 use std::{print, println};
 use sws_protocol;
@@ -116,6 +117,8 @@ pub struct Window {
     pub saved_geometry: Option<(i32, i32, u32, u32)>,
     /// Window opacity (0.0 = fully transparent, 1.0 = fully opaque)
     pub opacity: f32,
+    /// Whether the window can be resized by the user via interactive resize
+    pub resizable: bool,
 }
 
 #[allow(dead_code)]
@@ -143,6 +146,7 @@ impl Window {
             maximized: false,
             saved_geometry: None,
             opacity: 1.0,
+            resizable: true, // Default to resizable
         }
     }
 
@@ -173,6 +177,7 @@ impl Window {
             maximized: false,
             saved_geometry: None,
             opacity: 1.0,
+            resizable: true, // Default to resizable
         }
     }
 
@@ -229,6 +234,7 @@ impl Window {
             maximized: false,
             saved_geometry: None,
             opacity: 1.0,
+            resizable: true, // Default to resizable
         })
     }
 
@@ -401,6 +407,7 @@ impl WindowManager {
             maximized: false,
             saved_geometry: None,
             opacity: 1.0,
+            resizable: true, // Default to resizable
         };
         self.windows.push(window);
 
@@ -815,9 +822,19 @@ impl WindowManager {
     pub fn set_window_type(&mut self, id: WindowId, window_type: WindowType) -> bool {
         if let Some(w) = self.get_window_mut(id) {
             w.window_type = window_type;
+            // Set default resizable behavior based on window type
+            // Taskbar and Desktop windows should not be resizable by default
+            match window_type {
+                WindowType::Taskbar | WindowType::Desktop => {
+                    w.resizable = false;
+                }
+                WindowType::Normal | WindowType::AlwaysOnTop => {
+                    w.resizable = true;
+                }
+            }
             println!(
-                "[WindowManager] Window #{} type set to {:?}",
-                id, window_type
+                "[WindowManager] Window #{} type set to {:?}, resizable={}",
+                id, window_type, w.resizable
             );
             true
         } else {
@@ -832,6 +849,20 @@ impl WindowManager {
             println!(
                 "[WindowManager] Window #{} opacity set to {}",
                 id, w.opacity
+            );
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Set whether a window can be resized by the user via interactive resize
+    pub fn set_window_resizable(&mut self, id: WindowId, resizable: bool) -> bool {
+        if let Some(w) = self.get_window_mut(id) {
+            w.resizable = resizable;
+            println!(
+                "[WindowManager] Window #{} resizable set to {}",
+                id, resizable
             );
             true
         } else {
@@ -936,14 +967,9 @@ impl WindowManager {
     pub fn calculate_default_position(&self, width: u32, height: u32) -> (i32, i32) {
         match self.workarea {
             Some((wx, wy, ww, wh)) => {
-                // Place window within workarea with padding
-                let padding = 20i32;
-                let max_x = wx + ww as i32 - width as i32 - padding;
-                let max_y = wy + wh as i32 - height as i32 - padding;
-                let x = wx + padding;
-                let y = wy + padding;
-                let x = x.min(max_x).max(wx + padding);
-                let y = y.min(max_y).max(wy + padding);
+                // Place window at workarea origin without padding
+                let x = wx;
+                let y = wy;
                 println!(
                     "[WindowManager] Calculated default position: ({}, {}) within workarea",
                     x, y
@@ -956,5 +982,39 @@ impl WindowManager {
                 (100, 100)
             }
         }
+    }
+
+    /// Get the first window ID (for sending messages to the first client)
+    pub fn get_first_window_id(&self) -> Option<u32> {
+        self.windows.first().map(|w| w.id)
+    }
+
+    /// Get window list for menu bar display
+    /// Returns vector of (window_id, title, window_type, visible, focused, minimized)
+    pub fn get_window_list(&self) -> Vec<(u32, String, u32, bool, bool, bool)> {
+        let mut result = Vec::new();
+        for w in &self.windows {
+            // Skip taskbar/desktop windows from the list
+            if matches!(w.window_type, WindowType::Taskbar | WindowType::Desktop) {
+                continue;
+            }
+
+            let title = w
+                .title
+                .as_ref()
+                .and_then(|bytes| core::str::from_utf8(bytes).ok())
+                .unwrap_or("Untitled");
+            let title = String::from(title);
+
+            let window_type = match w.window_type {
+                WindowType::Normal => 0,
+                WindowType::AlwaysOnTop => 1,
+                WindowType::Taskbar => 2,
+                WindowType::Desktop => 3,
+            };
+
+            result.push((w.id, title, window_type, w.visible, w.focused, w.minimized));
+        }
+        result
     }
 }
