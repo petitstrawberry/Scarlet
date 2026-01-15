@@ -516,7 +516,6 @@ pub fn sys_clone(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize 
 
     let ret = match parent_task.clone_task(cflags) {
         Ok(mut child_task) => {
-            let child_id = child_task.get_id();
             child_task.vcpu.iregs.reg[10] = 0; // a0 = 0 in child
             // If child_stack is provided, set child's user SP
             if child_stack != 0 {
@@ -528,6 +527,22 @@ pub fn sys_clone(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize 
             if (flags & CLONE_SETTLS) != 0 {
                 child_task.vcpu.iregs.reg[4] = tls; // x4 = tp
             }
+
+            let scheduler = get_scheduler();
+            let cpu_id = get_cpu().get_cpuid();
+            let parent_id = parent_task.get_id();
+
+            // Add child and get allocated ID
+            let child_id = scheduler.add_task(child_task, cpu_id);
+
+            // Establish parent-child relationship now that both have valid IDs
+            if let Some(child) = scheduler.get_task_by_id(child_id) {
+                child.set_parent_id(parent_id);
+            }
+            if let Some(parent) = scheduler.get_task_by_id(parent_id) {
+                parent.add_child(child_id);
+            }
+
             // Do not modify user pthread list; musl manages linkage. No safety-net writes.
             // Handle parent TID store when CLONE_PARENT_SETTID is requested
             if (flags & CLONE_PARENT_SETTID) != 0 && !parent_tid_ptr.is_null() {
@@ -543,7 +558,9 @@ pub fn sys_clone(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize 
             // IMPORTANT: Only write child TID when CLONE_CHILD_SETTID is set.
             // For CLONE_CHILD_CLEARTID, the pointer is a futex lock to clear on exit.
             if (flags & CLONE_CHILD_SETTID) != 0 && !child_tid_ptr.is_null() {
-                if let Some(paddr) = child_task
+                if let Some(paddr) = get_scheduler()
+                    .get_task_by_id(child_id)
+                    .unwrap()
                     .vm_manager
                     .translate_vaddr(child_tid_ptr as usize)
                 {
@@ -552,10 +569,6 @@ pub fn sys_clone(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize 
                     }
                 }
             }
-            // No kernel-side TLS scanning/resolution. Linux simply sets tp from tls;
-            // user-space (libc) owns pthread/TLS layout and synchronization.
-            // Now that we're done using child_task by reference, enqueue it.
-            get_scheduler().add_task(child_task, get_cpu().get_cpuid());
             child_id
         }
         Err(_) => usize::MAX,

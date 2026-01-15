@@ -457,6 +457,10 @@ impl Task {
     }
 
     pub fn get_id(&self) -> usize {
+        assert!(
+            self.id != 0,
+            "Task ID is 0 - task may not have been added to scheduler yet"
+        );
         self.id
     }
 
@@ -478,6 +482,10 @@ impl Task {
     /// # Returns
     /// The namespace-local task ID
     pub fn get_namespace_id(&self) -> usize {
+        assert!(
+            self.namespace_id != 0,
+            "Task namespace_id is 0 - task may not have been added to scheduler yet"
+        );
         self.namespace_id
     }
 
@@ -1248,9 +1256,11 @@ impl Task {
         // Set the state to Ready
         child.state = self.state;
 
-        // Set parent-child relationship
-        child.set_parent_id(self.id);
-        self.add_child(child.get_id());
+        // NOTE: Parent-child relationship will be established AFTER add_task()
+        // when the child has a valid ID. The caller is responsible for calling:
+        //   child.set_parent_id(self.id);
+        //   self.add_child(child.get_id());
+        // after adding the child to the scheduler.
 
         Ok(child)
     }
@@ -1724,23 +1734,47 @@ mod tests {
 
     #[test_case]
     fn test_task_parent_child_relationship() {
+        // Reset scheduler state before test
+        let scheduler = crate::sched::scheduler::get_scheduler();
+        scheduler.reset();
+
         let mut parent_task = super::new_user_task("ParentTask".to_string(), 0);
         parent_task.init();
 
         let mut child_task = super::new_user_task("ChildTask".to_string(), 0);
         child_task.init();
 
-        // Set parent-child relationship
-        child_task.set_parent_id(parent_task.get_id());
-        parent_task.add_child(child_task.get_id());
+        // Add tasks to scheduler to allocate IDs
+        let parent_id = scheduler.add_task(parent_task, 0);
+        let child_id = scheduler.add_task(child_task, 0);
+
+        // Set parent-child relationship using allocated IDs
+        // We need to do this sequentially due to borrow checker
+        {
+            let child_task = scheduler.get_task_by_id(child_id).unwrap();
+            child_task.set_parent_id(parent_id);
+        }
+        {
+            let parent_task = scheduler.get_task_by_id(parent_id).unwrap();
+            parent_task.add_child(child_id);
+        }
 
         // Verify parent-child relationship
-        assert_eq!(child_task.get_parent_id(), Some(parent_task.get_id()));
-        assert!(parent_task.get_children().contains(&child_task.get_id()));
+        {
+            let child_task = scheduler.get_task_by_id(child_id).unwrap();
+            assert_eq!(child_task.get_parent_id(), Some(parent_id));
+        }
+        {
+            let parent_task = scheduler.get_task_by_id(parent_id).unwrap();
+            assert!(parent_task.get_children().contains(&child_id));
+        }
 
         // Remove child and verify
-        assert!(parent_task.remove_child(child_task.get_id()));
-        assert!(!parent_task.get_children().contains(&child_task.get_id()));
+        {
+            let parent_task = scheduler.get_task_by_id(parent_id).unwrap();
+            assert!(parent_task.remove_child(child_id));
+            assert!(!parent_task.get_children().contains(&child_id));
+        }
     }
 
     #[test_case]
@@ -1761,6 +1795,10 @@ mod tests {
 
     #[test_case]
     fn test_clone_task_memory_copy() {
+        // Reset scheduler state before test
+        let scheduler = crate::sched::scheduler::get_scheduler();
+        scheduler.reset();
+
         let mut parent_task = super::new_user_task("ParentTask".to_string(), 0);
         parent_task.init();
 
@@ -1768,6 +1806,12 @@ mod tests {
         let vaddr = 0x1000;
         let num_pages = 2;
         let mmap = parent_task.allocate_data_pages(vaddr, num_pages).unwrap();
+
+        // Save the physical address and permissions before adding to scheduler
+        let parent_paddr = mmap.pmarea.start;
+        let parent_vaddr_start = mmap.vmarea.start;
+        let parent_vaddr_end = mmap.vmarea.end;
+        let parent_perms = mmap.permissions;
 
         // Write test data to parent's memory
         let test_data: [u8; 8] = [0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC, 0xDE, 0xF0];
@@ -1778,7 +1822,6 @@ mod tests {
 
         // Get parent memory map count before cloning
         let parent_memmap_count = parent_task.vm_manager.memmap_len();
-        let parent_id = parent_task.get_id();
 
         // Clone the parent task
         let child_task = parent_task.clone_task(CloneFlags::default()).unwrap();
@@ -1799,19 +1842,76 @@ mod tests {
             child_memmap_count, parent_memmap_count
         );
 
-        // Verify parent-child relationship was established
-        assert_eq!(child_task.get_parent_id(), Some(parent_id));
-        assert!(parent_task.get_children().contains(&child_task.get_id()));
+        // Save values that will be needed after add_task
+        let parent_pc = parent_task.vcpu.get_pc();
+        let parent_entry = parent_task.entry;
+        let parent_state = parent_task.state;
+        let child_pc = child_task.vcpu.get_pc();
+        let child_entry = child_task.entry;
+        let child_state = child_task.state;
+        let child_managed_pages_len = child_task.managed_pages.len();
+
+        // Add both tasks to scheduler to establish parent-child relationship
+        let scheduler = crate::sched::scheduler::get_scheduler();
+        let parent_id = scheduler.add_task(parent_task, 0);
+        let child_id = scheduler.add_task(child_task, 0);
+
+        // Establish parent-child relationship
+        {
+            let child = scheduler.get_task_by_id(child_id).unwrap();
+            child.set_parent_id(parent_id);
+        }
+        {
+            let parent = scheduler.get_task_by_id(parent_id).unwrap();
+            parent.add_child(child_id);
+        }
+
+        // Verify parent-child relationship was established (in separate scopes)
+        {
+            let child = scheduler.get_task_by_id(child_id).unwrap();
+            assert_eq!(child.get_parent_id(), Some(parent_id));
+        }
+        {
+            let parent = scheduler.get_task_by_id(parent_id).unwrap();
+            assert!(parent.get_children().contains(&child_id));
+        }
+
+        // Get references for further verification (in separate scopes)
+        let child_stack_size = {
+            let child = scheduler.get_task_by_id(child_id).unwrap();
+            child.stack_size
+        };
+        let child_data_size = {
+            let child = scheduler.get_task_by_id(child_id).unwrap();
+            child.data_size
+        };
+        let child_text_size = {
+            let child = scheduler.get_task_by_id(child_id).unwrap();
+            child.text_size
+        };
+        let parent_stack_size = {
+            let parent = scheduler.get_task_by_id(parent_id).unwrap();
+            parent.stack_size
+        };
+        let parent_data_size = {
+            let parent = scheduler.get_task_by_id(parent_id).unwrap();
+            parent.data_size
+        };
+        let parent_text_size = {
+            let parent = scheduler.get_task_by_id(parent_id).unwrap();
+            parent.text_size
+        };
 
         // Verify memory sizes were copied
-        assert_eq!(child_task.stack_size, parent_task.stack_size);
-        assert_eq!(child_task.data_size, parent_task.data_size);
-        assert_eq!(child_task.text_size, parent_task.text_size);
+        assert_eq!(child_stack_size, parent_stack_size);
+        assert_eq!(child_data_size, parent_data_size);
+        assert_eq!(child_text_size, parent_text_size);
 
         // Find the corresponding memory map in child that matches our test allocation
         let child_mmap = {
             let mut found = None;
-            child_task.vm_manager.with_memmaps(|mm| {
+            let child = scheduler.get_task_by_id(child_id).unwrap();
+            child.vm_manager.with_memmaps(|mm| {
                 for m in mm.values() {
                     if m.vmarea.start == vaddr
                         && m.vmarea.end == vaddr + num_pages * crate::environment::PAGE_SIZE - 1
@@ -1824,30 +1924,14 @@ mod tests {
             found.expect("Test memory map not found in child task")
         };
 
-        // Verify that our specific memory region exists in both parent and child
-        let parent_test_mmap = {
-            let mut found = None;
-            parent_task.vm_manager.with_memmaps(|mm| {
-                for m in mm.values() {
-                    if m.vmarea.start == vaddr
-                        && m.vmarea.end == vaddr + num_pages * crate::environment::PAGE_SIZE - 1
-                    {
-                        found = Some(m.clone());
-                        break;
-                    }
-                }
-            });
-            found.expect("Test memory map not found in parent task")
-        };
-
         // Verify the virtual memory ranges match
-        assert_eq!(child_mmap.vmarea.start, parent_test_mmap.vmarea.start);
-        assert_eq!(child_mmap.vmarea.end, parent_test_mmap.vmarea.end);
-        assert_eq!(child_mmap.permissions, parent_test_mmap.permissions);
+        assert_eq!(child_mmap.vmarea.start, parent_vaddr_start);
+        assert_eq!(child_mmap.vmarea.end, parent_vaddr_end);
+        assert_eq!(child_mmap.permissions, parent_perms);
 
         // Verify the data was copied correctly
         unsafe {
-            let parent_ptr = mmap.pmarea.start as *const u8;
+            let parent_ptr = parent_paddr as *const u8;
             let child_ptr = child_mmap.pmarea.start as *const u8;
 
             // Check that physical addresses are different (separate memory)
@@ -1881,23 +1965,27 @@ mod tests {
         }
 
         // Verify register states were copied
-        assert_eq!(child_task.vcpu.get_pc(), parent_task.vcpu.get_pc());
+        assert_eq!(child_pc, parent_pc);
 
         // Verify entry point was copied
-        assert_eq!(child_task.entry, parent_task.entry);
+        assert_eq!(child_entry, parent_entry);
 
         // Verify state was copied
-        assert_eq!(child_task.state, parent_task.state);
+        assert_eq!(child_state, parent_state);
 
         // Verify that both tasks have the correct number of managed pages
         assert!(
-            child_task.managed_pages.len() >= num_pages,
+            child_managed_pages_len >= num_pages,
             "Child should have at least the test pages in managed pages"
         );
     }
 
     #[test_case]
     fn test_clone_task_stack_copy() {
+        // Reset scheduler state before test
+        let scheduler = crate::sched::scheduler::get_scheduler();
+        scheduler.reset();
+
         let mut parent_task = super::new_user_task("ParentWithStack".to_string(), 0);
         parent_task.init();
 
@@ -2006,6 +2094,10 @@ mod tests {
 
     #[test_case]
     fn test_clone_task_shared_memory() {
+        // Reset scheduler state before test
+        let scheduler = crate::sched::scheduler::get_scheduler();
+        scheduler.reset();
+
         use crate::environment::PAGE_SIZE;
         use crate::mem::page::allocate_raw_pages;
         use crate::vm::vmem::{MemoryArea, VirtualMemoryMap, VirtualMemoryPermission};
@@ -2118,6 +2210,10 @@ mod tests {
 
     #[test_case]
     fn test_clone_task_with_clone_vm_shares_address_space() {
+        // Reset scheduler state before test
+        let scheduler = crate::sched::scheduler::get_scheduler();
+        scheduler.reset();
+
         use crate::environment::PAGE_SIZE;
 
         let mut parent = super::new_user_task("ParentCloneVm".to_string(), 0);
@@ -2159,6 +2255,10 @@ mod tests {
 
     #[test_case]
     fn test_task_namespace_creation() {
+        // Reset scheduler state before test
+        let scheduler = crate::sched::scheduler::get_scheduler();
+        scheduler.reset();
+
         use super::namespace;
 
         // Create task in root namespace
@@ -2166,13 +2266,23 @@ mod tests {
         assert_eq!(task.get_namespace().get_name(), "root");
         assert!(task.get_namespace().is_root());
 
+        // Add task to scheduler to allocate namespace ID
+        let task_id = scheduler.add_task(task, 0);
+
         // Verify namespace-local ID was allocated
-        let ns_id = task.get_namespace_id();
+        let ns_id = scheduler
+            .get_task_by_id(task_id)
+            .unwrap()
+            .get_namespace_id();
         assert!(ns_id >= 1); // Should start from 1
     }
 
     #[test_case]
     fn test_task_namespace_inheritance() {
+        // Reset scheduler state before test
+        let scheduler = crate::sched::scheduler::get_scheduler();
+        scheduler.reset();
+
         use super::namespace;
 
         let mut parent = super::new_user_task("Parent".to_string(), 0);
@@ -2187,12 +2297,29 @@ mod tests {
             child.get_namespace().get_id()
         );
 
+        // Add both to scheduler to allocate namespace IDs
+        let scheduler = crate::sched::scheduler::get_scheduler();
+        let parent_id = scheduler.add_task(parent, 0);
+        let child_id = scheduler.add_task(child, 0);
+
         // But should have different namespace-local IDs
-        assert_ne!(parent.get_namespace_id(), child.get_namespace_id());
+        let parent_ns_id = scheduler
+            .get_task_by_id(parent_id)
+            .unwrap()
+            .get_namespace_id();
+        let child_ns_id = scheduler
+            .get_task_by_id(child_id)
+            .unwrap()
+            .get_namespace_id();
+        assert_ne!(parent_ns_id, child_ns_id);
     }
 
     #[test_case]
     fn test_task_namespace_id_allocation() {
+        // Reset scheduler state before test
+        let scheduler = crate::sched::scheduler::get_scheduler();
+        scheduler.reset();
+
         use super::namespace;
 
         // Create custom namespace
@@ -2202,34 +2329,48 @@ mod tests {
         );
 
         // Create multiple tasks in the same namespace
-        let task1 = super::Task::new_with_namespace(
+        let mut task1 = super::Task::new_with_namespace(
             "Task1".to_string(),
             0,
             super::TaskType::User,
             custom_ns.clone(),
         );
-        let task2 = super::Task::new_with_namespace(
+        let mut task2 = super::Task::new_with_namespace(
             "Task2".to_string(),
             0,
             super::TaskType::User,
             custom_ns.clone(),
         );
-        let task3 = super::Task::new_with_namespace(
+        let mut task3 = super::Task::new_with_namespace(
             "Task3".to_string(),
             0,
             super::TaskType::User,
             custom_ns.clone(),
         );
 
+        // Initialize tasks before adding to scheduler
+        task1.init();
+        task2.init();
+        task3.init();
+
+        // Add tasks to scheduler to allocate IDs
+        let scheduler = crate::sched::scheduler::get_scheduler();
+        let id1 = scheduler.add_task(task1, 0);
+        let id2 = scheduler.add_task(task2, 0);
+        let id3 = scheduler.add_task(task3, 0);
+
         // All should have sequential namespace-local IDs
-        assert_eq!(task1.get_namespace_id(), 1);
-        assert_eq!(task2.get_namespace_id(), 2);
-        assert_eq!(task3.get_namespace_id(), 3);
+        let ns_id1 = scheduler.get_task_by_id(id1).unwrap().get_namespace_id();
+        let ns_id2 = scheduler.get_task_by_id(id2).unwrap().get_namespace_id();
+        let ns_id3 = scheduler.get_task_by_id(id3).unwrap().get_namespace_id();
+        assert_eq!(ns_id1, 1);
+        assert_eq!(ns_id2, 2);
+        assert_eq!(ns_id3, 3);
 
         // All should have different global IDs
-        assert_ne!(task1.get_id(), task2.get_id());
-        assert_ne!(task2.get_id(), task3.get_id());
-        assert_ne!(task1.get_id(), task3.get_id());
+        assert_ne!(id1, id2);
+        assert_ne!(id2, id3);
+        assert_ne!(id1, id3);
     }
 
     #[test_case]
@@ -2257,31 +2398,78 @@ mod tests {
 
     #[test_case]
     fn test_all_abis_share_root_namespace_by_default() {
+        // Reset scheduler state before test
+        let scheduler = crate::sched::scheduler::get_scheduler();
+        scheduler.reset();
+
         use super::namespace;
+        use alloc::vec::Vec;
 
         // Create tasks using default Task::new (which uses root namespace)
-        let task1 = super::new_user_task("Task1".to_string(), 0);
-        let task2 = super::new_user_task("Task2".to_string(), 0);
-        let task3 = super::new_user_task("Task3".to_string(), 0);
+        let mut task1 = super::new_user_task("Task1".to_string(), 0);
+        let mut task2 = super::new_user_task("Task2".to_string(), 0);
+        let mut task3 = super::new_user_task("Task3".to_string(), 0);
 
-        // All tasks should be in root namespace
-        assert_eq!(task1.get_namespace().get_name(), "root");
-        assert_eq!(task2.get_namespace().get_name(), "root");
-        assert_eq!(task3.get_namespace().get_name(), "root");
+        // Initialize tasks before adding to scheduler
+        task1.init();
+        task2.init();
+        task3.init();
 
-        // All should share the same namespace instance
-        assert_eq!(
-            task1.get_namespace().get_id(),
-            task2.get_namespace().get_id()
-        );
-        assert_eq!(
-            task2.get_namespace().get_id(),
-            task3.get_namespace().get_id()
-        );
+        // Add tasks to scheduler to allocate namespace IDs
+        let id1 = scheduler.add_task(task1, 0);
+        let id2 = scheduler.add_task(task2, 0);
+        let id3 = scheduler.add_task(task3, 0);
 
-        // Namespace-local IDs should be sequential in the shared namespace
-        // (though exact values depend on test execution order)
-        assert_ne!(task1.get_namespace_id(), task2.get_namespace_id());
-        assert_ne!(task2.get_namespace_id(), task3.get_namespace_id());
+        // Verify all tasks have valid IDs after being added to scheduler
+        assert_ne!(id1, 0, "Task ID should be non-zero after add_task");
+        assert_ne!(id2, 0, "Task ID should be non-zero after add_task");
+        assert_ne!(id3, 0, "Task ID should be non-zero after add_task");
+
+        // Get namespace IDs to verify (in separate scopes to avoid borrow issues)
+        let ns_id1 = scheduler.get_task_by_id(id1).unwrap().get_namespace_id();
+        assert_ne!(ns_id1, 0, "Namespace ID should be non-zero after add_task");
+
+        let ns_id2 = scheduler.get_task_by_id(id2).unwrap().get_namespace_id();
+        assert_ne!(ns_id2, 0, "Namespace ID should be non-zero after add_task");
+
+        let ns_id3 = scheduler.get_task_by_id(id3).unwrap().get_namespace_id();
+        assert_ne!(ns_id3, 0, "Namespace ID should be non-zero after add_task");
+
+        // Verify namespace IDs are unique
+        assert_ne!(ns_id1, ns_id2, "Namespace IDs should be unique");
+        assert_ne!(ns_id2, ns_id3, "Namespace IDs should be unique");
+
+        // Verify all tasks are in root namespace (in separate scopes)
+        {
+            let task1 = scheduler.get_task_by_id(id1).unwrap();
+            assert_eq!(task1.get_namespace().get_name(), "root");
+        }
+        {
+            let task2 = scheduler.get_task_by_id(id2).unwrap();
+            assert_eq!(task2.get_namespace().get_name(), "root");
+        }
+        {
+            let task3 = scheduler.get_task_by_id(id3).unwrap();
+            assert_eq!(task3.get_namespace().get_name(), "root");
+        }
+
+        // Verify all tasks share the same namespace instance
+        let ns1_id = scheduler
+            .get_task_by_id(id1)
+            .unwrap()
+            .get_namespace()
+            .get_id();
+        let ns2_id = scheduler
+            .get_task_by_id(id2)
+            .unwrap()
+            .get_namespace()
+            .get_id();
+        let ns3_id = scheduler
+            .get_task_by_id(id3)
+            .unwrap()
+            .get_namespace()
+            .get_id();
+        assert_eq!(ns1_id, ns2_id, "All tasks should share root namespace");
+        assert_eq!(ns2_id, ns3_id, "All tasks should share root namespace");
     }
 }
