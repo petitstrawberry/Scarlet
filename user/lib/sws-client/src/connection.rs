@@ -17,6 +17,7 @@ use sws_protocol::{self as protocol, ServerMessage};
 #[derive(Debug, Clone)]
 pub struct WindowListEntry {
     pub window_id: u32,
+    pub app_id: String,
     pub title: String,
     pub window_type: u32,
     pub visible: bool,
@@ -152,9 +153,9 @@ impl Connection {
     ///
     /// This sends a CreateWindow request and waits for the response.
     /// The returned Surface can be drawn to immediately.
-    pub fn create_surface(&mut self, width: u32, height: u32) -> Result<u32, Error> {
+    pub fn create_surface(&mut self, app_id: &str, width: u32, height: u32) -> Result<u32, Error> {
         // Send CreateWindow request
-        let payload = protocol::payload_create_window(width, height);
+        let payload = protocol::payload_create_window(app_id.as_bytes(), width, height);
         write_frame(
             &mut self.socket,
             protocol::client_msg::CREATE_WINDOW,
@@ -453,11 +454,31 @@ impl Connection {
     }
 
     /// Focus and raise a window to the top of the Z-order.
+    ///
+    /// This only works for surfaces created by this client connection.
+    /// For focusing windows created by other clients, use `focus_window_any`.
     pub fn focus_window(&mut self, surface_id: u32) -> Result<(), Error> {
         if self.surfaces.get(&surface_id).is_none() {
             return Err(Error::SurfaceNotFound);
         }
         let payload = protocol::payload_focus_window(surface_id);
+        write_frame(
+            &mut self.socket,
+            protocol::client_msg::FOCUS_WINDOW,
+            &payload,
+        )
+        .map_err(|_| Error::SendFailed)
+    }
+
+    /// Focus and raise any window (including those created by other clients).
+    ///
+    /// Unlike `focus_window`, this does not check if the surface exists locally.
+    /// This is useful for system services like stemd that need to focus windows
+    /// created by other applications.
+    ///
+    /// The server will return an error if the window_id does not exist.
+    pub fn focus_window_any(&mut self, window_id: u32) -> Result<(), Error> {
+        let payload = protocol::payload_focus_window(window_id);
         write_frame(
             &mut self.socket,
             protocol::client_msg::FOCUS_WINDOW,
@@ -788,6 +809,7 @@ impl Connection {
                     .into_iter()
                     .map(|w| WindowListEntry {
                         window_id: w.window_id,
+                        app_id: w.app_id,
                         title: w.title,
                         window_type: w.window_type,
                         visible: w.visible,

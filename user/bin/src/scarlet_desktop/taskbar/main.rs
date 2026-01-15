@@ -12,10 +12,12 @@
 #![no_std]
 #![no_main]
 
+extern crate alloc;
 extern crate scarlet_desktop_config;
 extern crate scarlet_std as std;
 
 use core::time::Duration;
+use sbus_client;
 use scarlet_desktop_config::{TaskbarConfig, TaskbarPosition};
 use scarlet_ui::Color;
 use scarlet_ui::graphics::{Canvas, measure_text_sized};
@@ -178,84 +180,50 @@ fn spawn_application(path: &str, args: &[&str]) -> bool {
     }
 }
 
-/// Launch or focus an application via stemd
-/// Sends LAUNCH_OR_FOCUS IPC command to stemd
+/// Launch or focus an application via sbus
+/// Calls stemd's LaunchOrFocus method through the sbus
 fn launch_or_focus_app(app_id: &str) -> bool {
-    use std::socket::Socket;
-    use std::io::{Read, Write};
+    use alloc::string::ToString;
+    use sbus::Argument;
 
-    println!("[menu_bar] Launching app via stemd: {}", app_id);
+    println!("[menu_bar] Launching app via sbus: {}", app_id);
 
-    // Connect to stemd IPC socket
-    let mut socket = match Socket::new() {
-        Ok(s) => s,
+    // Connect to sbus
+    let mut conn = match sbus_client::Connection::connect() {
+        Ok(c) => c,
         Err(e) => {
-            println!("[menu_bar] Failed to create socket: {:?}", e);
+            println!("[menu_bar] Failed to connect to sbus: {:?}", e);
             return false;
         }
     };
 
-    if let Err(e) = socket.connect("/tmp/stemd.sock") {
-        println!("[menu_bar] Failed to connect to stemd: {:?}", e);
-        return false;
-    }
+    // Call stemd's LaunchOrFocus method
+    let mut args = Vec::new();
+    args.push(Argument::String(app_id.to_string()));
 
-    // Set non-blocking mode to avoid hanging if stemd doesn't respond
-    if let Err(e) = socket.set_nonblocking(true) {
-        println!("[menu_bar] Failed to set non-blocking mode: {:?}", e);
-        // Continue anyway - will use timeout with sleep
-    }
-
-    // Build LAUNCH_OR_FOCUS command
-    // Format: cmd(1) + app_id_len(4) + app_id + exec_path_len(4) + exec_path
-    // exec_path is empty (0), so stemd will look up from .desktop files
-    let mut payload = Vec::new();
-    payload.push(stemd_protocol::LAUNCH_OR_FOCUS);
-    payload.extend_from_slice(&(app_id.len() as u32).to_le_bytes());
-    payload.extend_from_slice(app_id.as_bytes());
-    payload.extend_from_slice(&0u32.to_le_bytes()); // empty exec_path
-
-    // Send command
-    if let Err(e) = socket.write(&payload) {
-        println!("[menu_bar] Failed to send command: {:?}", e);
-        return false;
-    }
-
-    if let Err(e) = socket.flush() {
-        println!("[menu_bar] Failed to flush socket: {:?}", e);
-        return false;
-    }
-
-    // Read response with timeout
-    let mut response = [0u8; 256];
-    let max_attempts = 50; // 50 * 10ms = 500ms timeout
-
-    for attempt in 0..max_attempts {
-        match socket.read(&mut response) {
-            Ok(n) if n > 0 => {
-                if let Ok(resp) = core::str::from_utf8(&response[..n]) {
-                    println!("[menu_bar] stemd response: {}", resp.trim());
-                    return resp.starts_with("OK");
+    match conn.call_method(
+        "org.scarlet-os.stemd", // destination
+        "/org/scarlet/stemd",   // path
+        "org.scarlet-os.stemd", // interface
+        "LaunchOrFocus",        // method
+        args,
+    ) {
+        Ok(result) => {
+            if !result.is_empty() {
+                if let Argument::String(ref s) = result[0] {
+                    let success = s.starts_with("OK");
+                    println!("[menu_bar] sbus response: {}", s);
+                    return success;
                 }
-                return false;
             }
-            Ok(_) => {
-                // EOF - connection closed
-                println!("[menu_bar] stemd closed connection");
-                return false;
-            }
-            Err(_) => {
-                // WouldBlock is expected in non-blocking mode
-                // Sleep a bit to avoid busy-waiting
-                use std::thread;
-                use std::time::Duration;
-                let _ = thread::sleep(Duration::from_millis(10));
-            }
+            println!("[menu_bar] sbus returned empty or unexpected result");
+            false
+        }
+        Err(e) => {
+            println!("[menu_bar] Failed to call LaunchOrFocus: {:?}", e);
+            false
         }
     }
-
-    println!("[menu_bar] Timeout waiting for stemd response");
-    false
 }
 
 fn handle_input(
@@ -419,7 +387,11 @@ fn show_window_list_dropdown(
     let dropdown_height = (item_count as u32) * ITEM_HEIGHT + 4; // +4 for border
 
     // Create dropdown surface (AlwaysOnTop for popup)
-    let surface_id = match conn.create_surface(DROPDOWN_WIDTH, dropdown_height) {
+    let surface_id = match conn.create_surface(
+        "org.scarlet-os.desktop.taskbar",
+        DROPDOWN_WIDTH,
+        dropdown_height,
+    ) {
         Ok(id) => id,
         Err(_) => {
             println!("[menu_bar] Failed to create dropdown surface");
@@ -498,7 +470,11 @@ fn show_app_menu_dropdown(
     let dropdown_height = NUM_ITEMS as u32 * ITEM_HEIGHT + 4;
 
     // Create dropdown surface (AlwaysOnTop for popup)
-    let surface_id = match conn.create_surface(DROPDOWN_WIDTH, dropdown_height) {
+    let surface_id = match conn.create_surface(
+        "org.scarlet-os.desktop.taskbar",
+        DROPDOWN_WIDTH,
+        dropdown_height,
+    ) {
         Ok(id) => id,
         Err(_) => {
             println!("[menu_bar] Failed to create dropdown surface");
@@ -610,7 +586,7 @@ pub extern "C" fn main() -> i32 {
     };
 
     // Create a dummy surface first (needed for SCREEN_SIZE response routing)
-    let dummy_surface_id = match conn.create_surface(16, 16) {
+    let dummy_surface_id = match conn.create_surface("org.scarlet-os.desktop.taskbar", 16, 16) {
         Ok(id) => id,
         Err(_) => {
             println!("[menu_bar] Failed to create dummy surface");
@@ -634,13 +610,14 @@ pub extern "C" fn main() -> i32 {
     let _ = conn.destroy_surface(dummy_surface_id);
 
     // Create surface with full screen width and 28px height
-    let surface_id = match conn.create_surface(screen_width, bar_height) {
-        Ok(id) => id,
-        Err(_) => {
-            println!("[menu_bar] Failed to create surface");
-            return 1;
-        }
-    };
+    let surface_id =
+        match conn.create_surface("org.scarlet-os.desktop.taskbar", screen_width, bar_height) {
+            Ok(id) => id,
+            Err(_) => {
+                println!("[menu_bar] Failed to create surface");
+                return 1;
+            }
+        };
 
     let _ = conn.set_window_type(surface_id, window_types::TASKBAR);
 
@@ -798,9 +775,17 @@ pub extern "C" fn main() -> i32 {
                         let on_menu_bar = cursor_y < bar_height as i32;
                         let on_dropdown = dropdown.contains(cursor_x, cursor_y);
 
-                        println!("[menu_bar] Click at ({}, {}): on_menu_bar={}, on_dropdown={}, dropdown_bounds=({},{},{},{})",
-                            cursor_x, cursor_y, on_menu_bar, on_dropdown,
-                            dropdown.x, dropdown.y, dropdown.width, dropdown.height);
+                        println!(
+                            "[menu_bar] Click at ({}, {}): on_menu_bar={}, on_dropdown={}, dropdown_bounds=({},{},{},{})",
+                            cursor_x,
+                            cursor_y,
+                            on_menu_bar,
+                            on_dropdown,
+                            dropdown.x,
+                            dropdown.y,
+                            dropdown.width,
+                            dropdown.height
+                        );
 
                         if !on_menu_bar && !on_dropdown {
                             println!("[menu_bar] Closing dropdown (clicked outside)");
@@ -813,6 +798,10 @@ pub extern "C" fn main() -> i32 {
                 }
                 Event::Input(input) if dropdown.surface_id == Some(input.surface_id) => {
                     // Handle dropdown input
+                    println!(
+                        "[menu_bar] Dropdown input: type={} code={} value={} cursor=({},{})",
+                        input.type_, input.code, input.value, cursor_x, cursor_y
+                    );
                     if input.type_ == 0x01 && input.code == 0x110 && input.value == 0 {
                         // Mouse up on dropdown - check for item clicks
                         let mut close_dropdown = true;
@@ -820,7 +809,20 @@ pub extern "C" fn main() -> i32 {
 
                         // First pass: check what action to take
                         for item in &dropdown.items {
-                            if item.contains(cursor_x, cursor_y, dropdown.x, dropdown.width) {
+                            let contains =
+                                item.contains(cursor_x, cursor_y, dropdown.x, dropdown.width);
+                            println!(
+                                "[menu_bar] Checking item '{}': contains={}, item_pos=({},{} {}x{}) cursor=({},{})",
+                                item.label,
+                                contains,
+                                dropdown.x,
+                                dropdown.y + item.y,
+                                dropdown.width,
+                                item.height,
+                                cursor_x,
+                                cursor_y
+                            );
+                            if contains {
                                 match &item.item_type {
                                     DropdownItemType::Window { window_id } => {
                                         println!(
@@ -851,7 +853,7 @@ pub extern "C" fn main() -> i32 {
 
                         // Handle launch after dropdown is closed
                         if handle_launch_settings {
-                            launch_or_focus_app("scarlet-desktop.settings");
+                            launch_or_focus_app("org.scarlet-os.desktop.settings");
                         }
                     }
                 }

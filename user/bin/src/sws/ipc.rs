@@ -311,7 +311,9 @@ pub fn send_message_to_client(client_id: usize, msg_type: u32, payload: Vec<u8>)
         None => {
             println!(
                 "[IpcServer] Sending message to client {} (msg_type={}, payload_len={})",
-                client_id, msg_type, payload.len()
+                client_id,
+                msg_type,
+                payload.len()
             );
             let mut frames = Vec::new();
             frames.push(PendingServerFrame { msg_type, payload });
@@ -554,7 +556,9 @@ fn client_thread_main(client_id: usize, mut socket: Socket) {
         for frame in client_responses {
             println!(
                 "[ClientThread {}] Sending client response (msg_type={}, payload_len={})",
-                client_id, frame.msg_type, frame.payload.len()
+                client_id,
+                frame.msg_type,
+                frame.payload.len()
             );
             if let Err(e) = write_frame(&mut socket, frame.msg_type, &frame.payload) {
                 println!(
@@ -670,7 +674,11 @@ fn client_thread_main(client_id: usize, mut socket: Socket) {
         };
 
         match protocol::parse_client_message(msg_type, &payload) {
-            Ok(ClientMessageRef::CreateWindow { width, height }) => {
+            Ok(ClientMessageRef::CreateWindow {
+                app_id,
+                width,
+                height,
+            }) => {
                 // Calculate buffer size
                 let buffer_size = (width as u64)
                     .saturating_mul(height as u64)
@@ -783,6 +791,7 @@ fn client_thread_main(client_id: usize, mut socket: Socket) {
                         // Notify compositor to create window entry with SHM ownership
                         push_ipc_event(IpcEvent::CreateWindow {
                             client_id,
+                            app_id: app_id.to_vec(),
                             window_id,
                             width,
                             height,
@@ -1135,6 +1144,7 @@ pub enum IpcEvent {
     /// Client requested to create a window
     CreateWindow {
         client_id: usize,
+        app_id: Vec<u8>,
         window_id: u32,
         width: u32,
         height: u32,

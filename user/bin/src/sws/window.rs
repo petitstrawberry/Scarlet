@@ -83,6 +83,8 @@ impl Default for WindowType {
 #[derive(Debug)]
 pub struct Window {
     pub id: WindowId,
+    /// Application identifier (e.g., "org.scarlet-os.desktop.settings")
+    pub app_id: Option<Vec<u8>>,
     /// Optional logical parent window (transient relationship).
     ///
     /// When set, the compositor may keep this window stacked above its parent and
@@ -127,6 +129,7 @@ impl Window {
     pub fn new(id: WindowId, x: i32, y: i32, width: u32, height: u32) -> Self {
         Self {
             id,
+            app_id: None,
             parent: None,
             transient_flags: 0,
             x,
@@ -158,6 +161,7 @@ impl Window {
 
         Self {
             id,
+            app_id: None,
             parent: None,
             transient_flags: 0,
             x,
@@ -215,6 +219,7 @@ impl Window {
 
         Ok(Self {
             id,
+            app_id: None,
             parent: None,
             transient_flags: 0,
             x,
@@ -388,6 +393,7 @@ impl WindowManager {
 
         let window = Window {
             id,
+            app_id: None, // Will be set from IPC CREATE_WINDOW message
             parent: None,
             transient_flags: 0,
             x,
@@ -995,14 +1001,21 @@ impl WindowManager {
     }
 
     /// Get window list for menu bar display
-    /// Returns vector of (window_id, title, window_type, visible, focused, minimized)
-    pub fn get_window_list(&self) -> Vec<(u32, String, u32, bool, bool, bool)> {
+    /// Returns vector of (window_id, app_id, title, window_type, visible, focused, minimized)
+    pub fn get_window_list(&self) -> Vec<(u32, String, String, u32, bool, bool, bool)> {
         let mut result = Vec::new();
         for w in &self.windows {
             // Skip taskbar/desktop windows from the list
             if matches!(w.window_type, WindowType::Taskbar | WindowType::Desktop) {
                 continue;
             }
+
+            let app_id = w
+                .app_id
+                .as_ref()
+                .and_then(|bytes| core::str::from_utf8(bytes).ok())
+                .unwrap_or("");
+            let app_id = String::from(app_id);
 
             let title = w
                 .title
@@ -1018,7 +1031,15 @@ impl WindowManager {
                 WindowType::Desktop => 3,
             };
 
-            result.push((w.id, title, window_type, w.visible, w.focused, w.minimized));
+            result.push((
+                w.id,
+                app_id,
+                title,
+                window_type,
+                w.visible,
+                w.focused,
+                w.minimized,
+            ));
         }
         result
     }

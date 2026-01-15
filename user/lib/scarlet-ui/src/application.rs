@@ -6,6 +6,7 @@ use crate::graphics::{Canvas, Rect, Point};
 use crate::Color;
 use scarlet_std::boxed::Box;
 use scarlet_std::vec::Vec;
+use scarlet_std::string::{String, ToString};
 use sws_client::{Connection, Event as SwsEvent, InputEvent};
 use std::sync::{Arc, Mutex};
 use core::time::Duration;
@@ -55,7 +56,9 @@ impl ManagedWindow {
 /// ```no_run
 /// use scarlet_ui::{Application, Window, VStack, Label, Button};
 ///
-/// let mut app = Application::new().expect("Failed to connect");
+/// let mut app = Application::new()
+///     .app_id("org.example.myapp")
+///     .expect("Failed to connect");
 ///
 /// let window = Window::new("Demo", 400, 300)
 ///     .content(VStack::new()
@@ -83,6 +86,9 @@ pub struct Application {
     popup_surface_id: Option<u32>,
     popup_follow_parent_move: bool,
     main_resized_large: bool,
+
+    /// Default application ID for windows created through this Application
+    app_id: Option<String>,
 }
 
 #[derive(Clone)]
@@ -161,6 +167,8 @@ impl Application {
             popup_surface_id: None,
             popup_follow_parent_move: false,
             main_resized_large: false,
+
+            app_id: None,
         })
     }
 
@@ -174,6 +182,30 @@ impl Application {
     /// Install an application delegate for lifecycle decisions.
     pub fn set_delegate<D: ApplicationDelegate + 'static>(&mut self, delegate: D) {
         self.delegate = Some(Box::new(delegate));
+    }
+
+    /// Set the default application ID for windows created through this Application.
+    ///
+    /// This allows you to set app_id once at the Application level instead of
+    /// specifying it for each Window. Individual windows can still override this
+    /// by calling `.app_id()` on the Window builder.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use scarlet_ui::{Application, Window};
+    ///
+    /// let mut app = Application::new()
+    ///     .app_id("org.example.myapp")
+    ///     .expect("Failed to connect");
+    ///
+    /// // Window will inherit "org.example.myapp" from Application
+    /// let window = Window::new("My Window", 800, 600);
+    /// app.add_window(window);
+    /// ```
+    pub fn app_id(mut self, app_id: &str) -> Self {
+        self.app_id = Some(app_id.to_string());
+        self
     }
 
     fn should_terminate_after_last_window_closed(&mut self) -> bool {
@@ -290,11 +322,13 @@ impl Application {
         let height = window.height();
 
         let size_limits = window.get_size_limits();
-        
+
         // Create surface
+        // Use window's app_id if set, otherwise fall back to Application's app_id
+        let app_id = window.get_app_id().or_else(|| self.app_id.as_deref()).unwrap_or("");
         let surface_id = self
             .connection
-            .create_surface(width, height)
+            .create_surface(app_id, width, height)
             .map_err(|_| "Failed to create surface")?;
 
         if size_limits != sws_client::WindowSizeLimits::NONE {

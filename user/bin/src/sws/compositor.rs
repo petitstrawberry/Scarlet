@@ -2,7 +2,7 @@
 
 use super::cursor::Cursor;
 use super::input::{CompositorInputEvent, InputManager, key_codes};
-use super::ipc::{IpcEvent, IpcServer, send_message_to_window, send_message_to_client};
+use super::ipc::{IpcEvent, IpcServer, send_message_to_client, send_message_to_window};
 use super::window::WindowManager;
 use framebuffer::Framebuffer;
 use std::println;
@@ -1192,18 +1192,18 @@ impl Compositor {
 
             // Sleep briefly to limit frame rate and reduce CPU usage
             // 16ms = ~60fps, adjust as needed
-            // std::thread::sleep(core::time::Duration::from_millis(16));
-            yield_now();
+            std::thread::sleep(core::time::Duration::from_millis(16));
+            // yield_now();
 
             // Periodically print Z-order (every 100 redraws)
-            if self.event_counter % 100 == 0 && self.event_counter > 0 {
-                use std::print;
-                print!("[Compositor] Z-order check #{}: ", self.event_counter);
-                for window in self.window_manager.get_windows() {
-                    print!("#{}{} ", window.id, if window.focused { "(F)" } else { "" });
-                }
-                println!();
-            }
+            // if self.event_counter % 100 == 0 && self.event_counter > 0 {
+            //     use std::print;
+            //     print!("[Compositor] Z-order check #{}: ", self.event_counter);
+            //     for window in self.window_manager.get_windows() {
+            //         print!("#{}{} ", window.id, if window.focused { "(F)" } else { "" });
+            //     }
+            //     println!();
+            // }
         }
     }
 
@@ -1470,6 +1470,7 @@ impl Compositor {
         match event {
             IpcEvent::CreateWindow {
                 client_id,
+                app_id,
                 window_id,
                 width,
                 height,
@@ -1502,6 +1503,10 @@ impl Compositor {
                     ) {
                         Ok(_) => {
                             println!("[Compositor] Window #{} with SHM created", window_id);
+                            // Set app_id on the newly created window
+                            if let Some(window) = self.window_manager.get_window_mut(window_id) {
+                                window.app_id = Some(app_id);
+                            }
                         }
                         Err(e) => {
                             println!("[Compositor] Failed to create SHM window: {}", e);
@@ -1960,9 +1965,10 @@ impl Compositor {
                 let entries: std::vec::Vec<sws_protocol::WindowListEntry> = windows
                     .into_iter()
                     .map(
-                        |(window_id, title, window_type, visible, focused, minimized)| {
+                        |(window_id, app_id, title, window_type, visible, focused, minimized)| {
                             sws_protocol::WindowListEntry {
                                 window_id,
+                                app_id,
                                 title,
                                 window_type,
                                 visible,
@@ -1977,11 +1983,7 @@ impl Compositor {
 
                 // Send WINDOW_LIST response directly to the client (not via window)
                 // This works for clients with or without windows (like stemd)
-                send_message_to_client(
-                    client_id,
-                    sws_protocol::server_msg::WINDOW_LIST,
-                    payload,
-                );
+                send_message_to_client(client_id, sws_protocol::server_msg::WINDOW_LIST, payload);
                 println!(
                     "[Compositor] Sent WINDOW_LIST: {} windows to client {}",
                     entries.len(),

@@ -91,6 +91,10 @@ name = "stemd"
 path = "src/stemd/main.rs"
 
 [[bin]]
+name = "sbusd"
+path = "src/sbusd/main.rs"
+
+[[bin]]
 name = "slint_demo"
 path = "src/slint_demo.rs"
 
@@ -122,6 +126,8 @@ sws-client = { path = "../lib/sws-client" }
 scarlet-ui = { path = "../lib/scarlet-ui" }
 slint-scarlet = { path = "../lib/slint-scarlet" }
 scarlet-desktop-config = { path = "../lib/scarlet-desktop-config" }
+sbus = { path = "../lib/sbus" }
+sbus-client = { path = "../lib/sbus-client" }
 slint = { version = "1.14", default-features = false, features = [
     "unsafe-single-threaded",
     "renderer-software",

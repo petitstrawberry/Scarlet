@@ -14,8 +14,8 @@
 //! Terminal=false
 //! ```
 
-use std::fs::File;
 use std::format;
+use std::fs::File;
 use std::fs::list_directory;
 use std::println;
 use std::string::{String, ToString};
@@ -124,20 +124,20 @@ static APP_REGISTRY: Mutex<Vec<DesktopEntry>> = Mutex::new(Vec::new());
 /// Add an application to the registry
 pub fn register_app(entry: DesktopEntry) {
     let mut registry = APP_REGISTRY.lock();
-        // Remove existing entry with same app_id
-        registry.retain(|e| e.app_id != entry.app_id);
-        registry.push(entry);
+    // Remove existing entry with same app_id
+    registry.retain(|e| e.app_id != entry.app_id);
+    registry.push(entry);
 }
 
 /// Look up an application by app_id
 pub fn lookup_app(app_id: &str) -> Option<DesktopEntry> {
     println!("stemd: lookup_app called for app_id={}", app_id);
     let registry = APP_REGISTRY.lock();
-    let result = registry
-        .iter()
-        .find(|e| e.app_id == app_id)
-        .cloned();
-    println!("stemd: lookup_app returning {:?}", result.as_ref().map(|e| e.name.as_str()));
+    let result = registry.iter().find(|e| e.app_id == app_id).cloned();
+    println!(
+        "stemd: lookup_app returning {:?}",
+        result.as_ref().map(|e| e.name.as_str())
+    );
     result
 }
 

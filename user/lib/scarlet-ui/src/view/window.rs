@@ -7,6 +7,8 @@ use crate::Color;
 use scarlet_std::boxed::Box;
 use scarlet_std::vec::Vec;
 use sws_client::WindowSizeLimits;
+use scarlet_std::string::String;
+use scarlet_std::string::ToString;
 
 /// Title bar height in pixels
 const TITLEBAR_HEIGHT: u32 = 32;
@@ -67,6 +69,7 @@ impl WindowKind {
 pub struct Window {
     title: [u8; 64],
     title_len: usize,
+    app_id: Option<String>,
     width: u32,
     height: u32,
     background: Color,
@@ -115,6 +118,7 @@ impl Window {
         Self {
             title: title_buf,
             title_len: len,
+            app_id: None,
             width,
             height,
             background: Color::rgb(40, 40, 40),
@@ -152,6 +156,12 @@ impl Window {
         self.is_main_window
     }
 
+    /// Set the application identifier for this window
+    pub fn app_id(mut self, app_id: &str) -> Self {
+        self.app_id = Some(app_id.to_string());
+        self
+    }
+
     /// Set minimum window size in pixels.
     pub fn min_size(mut self, width: u32, height: u32) -> Self {
         self.size_limits.min_width = width;
@@ -175,6 +185,11 @@ impl Window {
     /// Get configured size limits.
     pub fn get_size_limits(&self) -> WindowSizeLimits {
         self.size_limits
+    }
+
+    /// Get the application identifier.
+    pub fn get_app_id(&self) -> Option<&str> {
+        self.app_id.as_deref()
     }
 
     /// Set the window type used by the compositor for stacking.

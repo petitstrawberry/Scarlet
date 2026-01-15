@@ -24,7 +24,7 @@ pub extern "C" fn main() -> i32 {
     println!("[ui_demo] Starting ScarletUI Reactive Demo");
 
     let mut app = match Application::new() {
-        Ok(a) => a,
+        Ok(a) => a.app_id("org.scarlet.ui_demo"),
         Err(e) => {
             println!("[ui_demo] Failed to create application: {}", e);
             return 1;

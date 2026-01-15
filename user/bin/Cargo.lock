@@ -3429,6 +3429,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "sbus"
+version = "0.1.0"
+dependencies = [
+ "scarlet_std",
+]
+
+[[package]]
+name = "sbus-client"
+version = "0.1.0"
+dependencies = [
+ "sbus",
+ "scarlet_std",
+]
+
+[[package]]
 name = "scarlet-desktop-config"
 version = "0.1.0"
 dependencies = [
@@ -4233,6 +4248,8 @@ name = "userprogram"
 version = "0.15.0"
 dependencies = [
  "framebuffer",
+ "sbus",
+ "sbus-client",
  "scarlet-desktop-config",
  "scarlet-ui",
  "scarlet_std",

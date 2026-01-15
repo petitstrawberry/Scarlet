@@ -4,5 +4,4 @@
 [service.login]
 exec = "/bin/login"
 depends = []
-after = ["sws"]
 tty = "/dev/tty0"

@@ -139,6 +139,7 @@ pub fn encode_frame(msg_type: u32, payload: &[u8]) -> Vec<u8> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ClientMessageRef<'a> {
     CreateWindow {
+        app_id: &'a [u8],
         width: u32,
         height: u32,
     },
@@ -324,12 +325,34 @@ pub fn parse_client_message<'a>(
 ) -> Result<ClientMessageRef<'a>, ProtocolError> {
     match msg_type {
         client_msg::CREATE_WINDOW => {
-            if payload.len() != 8 {
+            // Payload: app_id_len (u32) + app_id_bytes + width (u32) + height (u32)
+            if payload.len() < 12 {
                 return Err(ProtocolError::MalformedPayload);
             }
-            let width = u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
-            let height = u32::from_le_bytes([payload[4], payload[5], payload[6], payload[7]]);
-            Ok(ClientMessageRef::CreateWindow { width, height })
+            let app_id_len =
+                u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]) as usize;
+            if payload.len() != 12 + app_id_len {
+                return Err(ProtocolError::MalformedPayload);
+            }
+            let app_id = &payload[4..4 + app_id_len];
+            let offset = 4 + app_id_len;
+            let width = u32::from_le_bytes([
+                payload[offset],
+                payload[offset + 1],
+                payload[offset + 2],
+                payload[offset + 3],
+            ]);
+            let height = u32::from_le_bytes([
+                payload[offset + 4],
+                payload[offset + 5],
+                payload[offset + 6],
+                payload[offset + 7],
+            ]);
+            Ok(ClientMessageRef::CreateWindow {
+                app_id,
+                width,
+                height,
+            })
         }
         client_msg::DESTROY_WINDOW => {
             if payload.len() != 4 {
@@ -520,8 +543,10 @@ pub fn parse_client_message<'a>(
             if payload.len() < 8 {
                 return Err(ProtocolError::MalformedPayload);
             }
-            let app_id_len = u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]) as usize;
-            let exec_path_len = u32::from_le_bytes([payload[4], payload[5], payload[6], payload[7]]) as usize;
+            let app_id_len =
+                u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]) as usize;
+            let exec_path_len =
+                u32::from_le_bytes([payload[4], payload[5], payload[6], payload[7]]) as usize;
 
             if payload.len() != 8 + app_id_len + exec_path_len {
                 return Err(ProtocolError::MalformedPayload);
@@ -664,10 +689,18 @@ pub fn parse_server_message(msg_type: u32, payload: &[u8]) -> Result<ServerMessa
 }
 
 /// Build payload for client->server `CREATE_WINDOW`.
-pub fn payload_create_window(width: u32, height: u32) -> [u8; 8] {
-    let mut payload = [0u8; 8];
-    payload[0..4].copy_from_slice(&width.to_le_bytes());
-    payload[4..8].copy_from_slice(&height.to_le_bytes());
+///
+/// Payload format:
+/// - app_id_len (u32)
+/// - app_id_bytes (variable)
+/// - width (u32)
+/// - height (u32)
+pub fn payload_create_window(app_id: &[u8], width: u32, height: u32) -> Vec<u8> {
+    let mut payload = Vec::new();
+    payload.extend_from_slice(&(app_id.len() as u32).to_le_bytes());
+    payload.extend_from_slice(app_id);
+    payload.extend_from_slice(&width.to_le_bytes());
+    payload.extend_from_slice(&height.to_le_bytes());
     payload
 }
 
@@ -869,6 +902,7 @@ pub fn payload_screen_size(width: u32, height: u32) -> [u8; 8] {
 #[derive(Debug, Clone)]
 pub struct WindowListEntry {
     pub window_id: u32,
+    pub app_id: std::string::String,
     pub title: std::string::String,
     pub window_type: u32,
     pub visible: bool,
@@ -882,6 +916,8 @@ pub struct WindowListEntry {
 /// - count (u32)
 /// - For each window:
 ///   - window_id (u32)
+///   - app_id_length (u32)
+///   - app_id_bytes (variable)
 ///   - title_length (u32)
 ///   - title_bytes (variable)
 ///   - window_type (u32)
@@ -895,6 +931,11 @@ pub fn payload_window_list(windows: &[WindowListEntry]) -> Vec<u8> {
     for entry in windows {
         // Window ID
         payload.extend_from_slice(&entry.window_id.to_le_bytes());
+
+        // App ID length and app_id
+        let app_id_bytes = entry.app_id.as_bytes();
+        payload.extend_from_slice(&(app_id_bytes.len() as u32).to_le_bytes());
+        payload.extend_from_slice(app_id_bytes);
 
         // Title length and title
         let title_bytes = entry.title.as_bytes();
@@ -939,6 +980,26 @@ pub fn parse_window_list_payload(payload: &[u8]) -> Result<Vec<WindowListEntry>,
         ]);
         offset += 4;
 
+        // App ID length (4 bytes)
+        if offset + 4 > payload.len() {
+            return Err(ProtocolError::MalformedPayload);
+        }
+        let app_id_len = u32::from_le_bytes([
+            payload[offset],
+            payload[offset + 1],
+            payload[offset + 2],
+            payload[offset + 3],
+        ]) as usize;
+        offset += 4;
+
+        // App ID bytes
+        if offset + app_id_len > payload.len() {
+            return Err(ProtocolError::MalformedPayload);
+        }
+        let app_id = std::string::String::from_utf8_lossy(&payload[offset..offset + app_id_len])
+            .into_owned();
+        offset += app_id_len;
+
         // Title length (4 bytes)
         if offset + 4 > payload.len() {
             return Err(ProtocolError::MalformedPayload);
@@ -982,6 +1043,7 @@ pub fn parse_window_list_payload(payload: &[u8]) -> Result<Vec<WindowListEntry>,
 
         windows.push(WindowListEntry {
             window_id,
+            app_id,
             title,
             window_type,
             visible,
@@ -1013,4 +1075,3 @@ pub fn payload_launch_or_focus(app_id: &[u8], exec_path: &[u8]) -> Vec<u8> {
 pub fn payload_focus_window(window_id: u32) -> Vec<u8> {
     window_id.to_le_bytes().to_vec()
 }
-

@@ -13,6 +13,7 @@
 extern crate scarlet_std as std;
 
 use core::{hint::spin_loop, sync::atomic::fence};
+use sbus_client as sbus;
 use std::{
     fs::File,
     handle::Handle,
@@ -21,18 +22,17 @@ use std::{
     string::{String, ToString},
     sync::Mutex,
     task::{exit, fork, waitpid},
-    thread,
-    vec,
+    thread, vec,
     vec::Vec,
 };
 use sws_client::Connection;
 
 // Import protocol and desktop modules
-mod protocol;
 mod desktop;
+mod protocol;
 
-use protocol::cmd;
 use desktop::{load_desktop_files, lookup_app};
+use protocol::cmd;
 
 fn try_attach_stdio_to_path(path: &str) {
     // Best-effort: rebind stdio handles (0/1/2) to the given path.
@@ -96,6 +96,10 @@ struct RunningApp {
 // Global tracking for running applications
 // Thread-safe using Mutex (static, not mutable)
 static RUNNING_APPS: Mutex<Vec<RunningApp>> = Mutex::new(Vec::new());
+
+// Global sbus connection for receiving method calls
+// Wrapped in Option to handle initialization
+static SBUS_CONNECTION: Mutex<Option<sbus::Connection>> = Mutex::new(None);
 
 /// Simple TOML parser for service configuration
 struct ConfigParser {
@@ -275,10 +279,7 @@ fn remove_running_app_by_pid(pid: i32) -> bool {
 /// Find a running app by app_id
 fn find_running_app(app_id: &str) -> Option<RunningApp> {
     let apps = RUNNING_APPS.lock();
-    apps
-        .iter()
-        .find(|app| app.app_id == app_id)
-        .cloned()
+    apps.iter().find(|app| app.app_id == app_id).cloned()
 }
 
 /// Focus a window by app_id
@@ -288,7 +289,10 @@ fn focus_window_by_app_id(app_id: &str) -> Result<(), &'static str> {
 
     // Look up the app to get its name for matching
     let search_terms = if let Some(entry) = lookup_app(app_id) {
-        println!("stemd: Looking for window with title containing: {}", entry.name);
+        println!(
+            "stemd: Looking for window with title containing: {}",
+            entry.name
+        );
         vec![entry.name.clone(), app_id.to_string()]
     } else {
         println!("stemd: App not in registry, using app_id directly");
@@ -323,23 +327,30 @@ fn focus_window_by_app_id(app_id: &str) -> Result<(), &'static str> {
 
     println!("stemd: Checking {} windows for match", windows.len());
 
-    // Look for a window whose title contains the app name or app_id
+    // Look for a window whose app_id or title matches
     for window in &windows {
-        println!("stemd: Window #{} title='{}' visible={}", window.window_id, window.title, window.visible);
+        println!(
+            "stemd: Window #{} app_id='{}' title='{}' visible={}",
+            window.window_id, window.app_id, window.title, window.visible
+        );
+
+        // First try exact app_id match
+        if window.app_id == app_id && window.visible {
+            println!(
+                "stemd: Found matching window #{} by app_id",
+                window.window_id
+            );
+            return focus_window_id(&mut conn, window.window_id);
+        }
+
+        // Fallback to title matching for backwards compatibility
         for search_term in &search_terms {
             if window.title.contains(search_term) && window.visible {
-                println!("stemd: Found matching window #{}", window.window_id);
-
-                // Focus the window (this also restores if minimized)
-                println!("stemd: Focusing window #{}", window.window_id);
-                match conn.focus_window(window.window_id) {
-                    Ok(()) => println!("stemd: Successfully focused window #{}", window.window_id),
-                    Err(e) => {
-                        println!("stemd: Failed to focus window: {:?}", e);
-                        return Err("Failed to focus window");
-                    }
-                }
-                return Ok(());
+                println!(
+                    "stemd: Found matching window #{} by title",
+                    window.window_id
+                );
+                return focus_window_id(&mut conn, window.window_id);
             }
         }
     }
@@ -349,10 +360,29 @@ fn focus_window_by_app_id(app_id: &str) -> Result<(), &'static str> {
     Err("No window found for app_id")
 }
 
+/// Focus a window by ID
+fn focus_window_id(conn: &mut sws_client::Connection, window_id: u32) -> Result<(), &'static str> {
+    // Focus the window (this also restores if minimized)
+    println!("stemd: Focusing window #{}", window_id);
+    match conn.focus_window_any(window_id) {
+        Ok(()) => {
+            println!("stemd: Successfully focused window #{}", window_id);
+            Ok(())
+        }
+        Err(e) => {
+            println!("stemd: Failed to focus window: {:?}", e);
+            Err("Failed to focus window")
+        }
+    }
+}
+
 /// Launch an application or focus an existing window
 /// If exec_path is empty, look up the app from the registry
 fn launch_or_focus(app_id: &str, exec_path: Option<&str>) -> Result<(), &'static str> {
-    println!("stemd: launch_or_focus called with app_id={}, exec_path={:?}", app_id, exec_path);
+    println!(
+        "stemd: launch_or_focus called with app_id={}, exec_path={:?}",
+        app_id, exec_path
+    );
 
     // First, look up exec_path from registry if needed (before holding RUNNING_APPS lock)
     // This avoids potential lock ordering issues
@@ -379,7 +409,10 @@ fn launch_or_focus(app_id: &str, exec_path: Option<&str>) -> Result<(), &'static
     println!("stemd: Checking if app is already running...");
     if let Some(app) = find_running_app(app_id) {
         // App is running, try to focus its window
-        println!("stemd: App '{}' is already running (PID={}), focusing window", app_id, app.pid);
+        println!(
+            "stemd: App '{}' is already running (PID={}), focusing window",
+            app_id, app.pid
+        );
 
         if let Err(e) = focus_window_by_app_id(app_id) {
             println!("stemd: Failed to focus window: {}", e);
@@ -401,7 +434,10 @@ fn launch_or_focus(app_id: &str, exec_path: Option<&str>) -> Result<(), &'static
         }
     };
 
-    println!("stemd: Looked up '{}' from registry: exec={}", app_id, exec_path);
+    println!(
+        "stemd: Looked up '{}' from registry: exec={}",
+        app_id, exec_path
+    );
 
     // App is not running, launch it
     println!("stemd: Launching app '{}' with exec: {}", app_id, exec_path);
@@ -440,6 +476,63 @@ fn launch_or_focus(app_id: &str, exec_path: Option<&str>) -> Result<(), &'static
             add_running_app(app_id.to_string(), pid, exec_path.to_string());
             println!("stemd: App '{}' launched with PID: {}", app_id, pid);
             Ok(())
+        }
+    }
+}
+
+/// Launch an application by app_id (looks up from .desktop registry)
+/// Returns the PID of the launched process
+fn launch_app_by_id(app_id: &str) -> Result<i32, &'static str> {
+    println!("stemd: launch_app_by_id called with app_id={}", app_id);
+
+    // Look up exec_path from registry
+    println!("stemd: Looking up {} from .desktop files...", app_id);
+    let exec_path = match lookup_app(app_id) {
+        Some(entry) => {
+            println!("stemd: Found app: {} -> {}", entry.name, entry.exec);
+            entry.exec
+        }
+        None => {
+            println!("stemd: App '{}' not found in registry", app_id);
+            return Err("App not found in registry");
+        }
+    };
+
+    // Fork and execute
+    let pid = fork();
+    match pid {
+        0 => {
+            // Child process
+            try_attach_stdio_to_null();
+
+            fence(core::sync::atomic::Ordering::SeqCst);
+
+            // Parse the exec command
+            let parts: Vec<&str> = exec_path.split_whitespace().collect();
+            if parts.is_empty() {
+                println!("stemd: Invalid exec command");
+                exit(-1);
+            }
+
+            let path = parts[0];
+            let argv: Vec<&str> = parts.to_vec();
+            let envp: Vec<&str> = Vec::new();
+
+            if std::task::execve(path, &argv, &envp) != 0 {
+                println!("stemd: Failed to execve {}", path);
+                exit(-1);
+            }
+            unreachable!();
+        }
+        -1 => {
+            println!("stemd: Failed to fork for app: {}", app_id);
+            Err("Fork failed")
+        }
+        pid => {
+            // Parent process - track the launched app
+            add_running_app(app_id.to_string(), pid, exec_path.to_string());
+            println!("stemd: App '{}' launched with PID: {}", app_id, pid);
+            Ok(pid)
         }
     }
 }
@@ -657,10 +750,7 @@ fn ipc_thread() {
                             // Format: cmd(1) + app_id_len(4) + app_id + exec_path_len(4) + exec_path
                             if n >= 9 {
                                 let app_id_len = u32::from_le_bytes([
-                                    buffer[1],
-                                    buffer[2],
-                                    buffer[3],
-                                    buffer[4],
+                                    buffer[1], buffer[2], buffer[3], buffer[4],
                                 ]) as usize;
 
                                 let exec_path_offset = 5 + app_id_len;
@@ -670,13 +760,16 @@ fn ipc_thread() {
                                         buffer[exec_path_offset + 1],
                                         buffer[exec_path_offset + 2],
                                         buffer[exec_path_offset + 3],
-                                    ]) as usize;
+                                    ])
+                                        as usize;
 
                                     let total_len = exec_path_offset + 4 + exec_path_len;
                                     if n >= total_len {
-                                        let app_id = core::str::from_utf8(&buffer[5..5 + app_id_len]);
+                                        let app_id =
+                                            core::str::from_utf8(&buffer[5..5 + app_id_len]);
                                         let exec_path = core::str::from_utf8(
-                                            &buffer[exec_path_offset + 4..exec_path_offset + 4 + exec_path_len],
+                                            &buffer[exec_path_offset + 4
+                                                ..exec_path_offset + 4 + exec_path_len],
                                         );
 
                                         match (app_id, exec_path) {
@@ -692,24 +785,31 @@ fn ipc_thread() {
                                                     Some(exec_path)
                                                 };
 
-                                                let response = match launch_or_focus(app_id, exec_path_arg) {
-                                                    Ok(()) => {
-                                                        "OK: Launched or focused\n".as_bytes()
-                                                    }
-                                                    Err(e) => {
-                                                        // Build error message as byte array directly
-                                                        let error_prefix = "ERROR: ";
-                                                        let error_suffix = "\n";
-                                                        let mut error_msg = Vec::new();
-                                                        error_msg.extend_from_slice(error_prefix.as_bytes());
-                                                        error_msg.extend_from_slice(e.as_bytes());
-                                                        error_msg.extend_from_slice(error_suffix.as_bytes());
-                                                        // Note: This is a temporary solution - the Vec will be dropped
-                                                        // but we're returning a slice. For IPC, we should handle this differently.
-                                                        // For now, use a static error message.
-                                                        "ERROR: Failed to launch or focus\n".as_bytes()
-                                                    }
-                                                };
+                                                let response =
+                                                    match launch_or_focus(app_id, exec_path_arg) {
+                                                        Ok(()) => {
+                                                            "OK: Launched or focused\n".as_bytes()
+                                                        }
+                                                        Err(e) => {
+                                                            // Build error message as byte array directly
+                                                            let error_prefix = "ERROR: ";
+                                                            let error_suffix = "\n";
+                                                            let mut error_msg = Vec::new();
+                                                            error_msg.extend_from_slice(
+                                                                error_prefix.as_bytes(),
+                                                            );
+                                                            error_msg
+                                                                .extend_from_slice(e.as_bytes());
+                                                            error_msg.extend_from_slice(
+                                                                error_suffix.as_bytes(),
+                                                            );
+                                                            // Note: This is a temporary solution - the Vec will be dropped
+                                                            // but we're returning a slice. For IPC, we should handle this differently.
+                                                            // For now, use a static error message.
+                                                            "ERROR: Failed to launch or focus\n"
+                                                                .as_bytes()
+                                                        }
+                                                    };
 
                                                 let _ = stream.write(response);
                                             }
@@ -848,6 +948,282 @@ fn read_config_dir(dir_path: &str) -> Result<String, &'static str> {
     }
 }
 
+/// sbus handler thread: receive and process method calls from sbus
+fn sbus_handler_thread() {
+    println!("stemd: sbus handler thread started");
+
+    loop {
+        // Get the sbus connection
+        let mut conn_guard = SBUS_CONNECTION.lock();
+        let conn_result = match conn_guard.as_mut() {
+            Some(conn) => conn.receive_message(),
+            None => {
+                drop(conn_guard);
+                println!("stemd: sbus connection not available, waiting...");
+                std::thread::sleep(core::time::Duration::from_millis(100));
+                continue;
+            }
+        };
+
+        match conn_result {
+            Ok(msg) => {
+                // Handle the message
+                if let Err(e) = handle_sbus_message(conn_guard, msg) {
+                    println!("stemd: Error handling sbus message: {:?}", e);
+                }
+            }
+            Err(e) => {
+                println!("stemd: Error receiving message from sbus: {:?}", e);
+                std::thread::sleep(core::time::Duration::from_millis(100));
+            }
+        }
+    }
+}
+
+/// Handle an incoming sbus message
+fn handle_sbus_message(
+    mut conn_guard: std::sync::MutexGuard<'_, Option<sbus::Connection>>,
+    msg: sbus::Message,
+) -> Result<(), &'static str> {
+    use sbus::Argument;
+    use sbus::Message;
+
+    match msg {
+        Message::CallMethod {
+            destination,
+            path,
+            interface,
+            method,
+            args,
+        } => {
+            println!(
+                "[sbus] CallMethod: dest={} path={} interface={} method={}",
+                destination, path, interface, method
+            );
+
+            // Get the serial from the message
+            // For now, we don't have access to the serial number in the parsed message
+            // We'll use 0 as a placeholder
+            let serial = 0u32;
+
+            // Handle the method call
+            match method.as_str() {
+                "LaunchOrFocus" => {
+                    println!("[sbus] Handling LaunchOrFocus method");
+
+                    // Extract app_id from arguments
+                    if args.is_empty() {
+                        println!("[sbus] LaunchOrFocus: missing app_id argument");
+                        if let Some(conn) = conn_guard.as_mut() {
+                            let result: core::result::Result<(), sbus::Error> = conn
+                                .send_method_error(
+                                    serial,
+                                    "org.scarlet-os.stemd.InvalidArgs",
+                                    "Missing app_id argument",
+                                );
+                            let _ = result;
+                        }
+                        return Ok(());
+                    }
+
+                    let app_id = match &args[0] {
+                        Argument::String(s) => s,
+                        _ => {
+                            println!("[sbus] LaunchOrFocus: invalid argument type");
+                            if let Some(conn) = conn_guard.as_mut() {
+                                let result: core::result::Result<(), sbus::Error> = conn
+                                    .send_method_error(
+                                        serial,
+                                        "org.scarlet-os.stemd.InvalidArgs",
+                                        "Invalid argument type",
+                                    );
+                                let _ = result;
+                            }
+                            return Ok(());
+                        }
+                    };
+
+                    println!("[sbus] LaunchOrFocus: app_id={}", app_id);
+
+                    // Check if the app is already running
+                    if let Some(running_app) = find_running_app(app_id) {
+                        println!(
+                            "[sbus] App {} is already running (PID={}), focusing",
+                            app_id, running_app.pid
+                        );
+                        // Focus the existing window
+                        match focus_window_by_app_id(app_id) {
+                            Ok(_) => {
+                                println!("[sbus] Successfully focused window for {}", app_id);
+                                if let Some(conn) = conn_guard.as_mut() {
+                                    let result: core::result::Result<(), sbus::Error> = conn
+                                        .send_method_return(
+                                            serial,
+                                            vec![Argument::String("Focused".to_string())],
+                                        );
+                                    let _ = result;
+                                }
+                            }
+                            Err(e) => {
+                                println!("[sbus] Failed to focus window: {}", e);
+                                // Check if the process is still alive
+                                let pid = running_app.pid;
+                                let wait_result = waitpid(pid, 1); // WNOHANG = non-blocking
+
+                                if wait_result.0 > 0 {
+                                    // Process has exited (waitpid reaped the zombie)
+                                    println!(
+                                        "[sbus] Process {} has exited (status={}), removing stale entry",
+                                        pid, wait_result.1
+                                    );
+                                    remove_running_app_by_pid(pid);
+
+                                    println!("[sbus] Launching new instance of {}", app_id);
+                                    match launch_app_by_id(app_id) {
+                                        Ok(new_pid) => {
+                                            println!(
+                                                "[sbus] Successfully launched {} (PID={})",
+                                                app_id, new_pid
+                                            );
+                                            if let Some(conn) = conn_guard.as_mut() {
+                                                let result: core::result::Result<(), sbus::Error> =
+                                                    conn.send_method_return(
+                                                        serial,
+                                                        vec![Argument::String(
+                                                            "Launched".to_string(),
+                                                        )],
+                                                    );
+                                                let _ = result;
+                                            }
+                                        }
+                                        Err(launch_err) => {
+                                            println!("[sbus] Failed to launch app: {}", launch_err);
+                                            if let Some(conn) = conn_guard.as_mut() {
+                                                let result: core::result::Result<(), sbus::Error> =
+                                                    conn.send_method_error(
+                                                        serial,
+                                                        "org.scarlet-os.stemd.LaunchFailed",
+                                                        launch_err,
+                                                    );
+                                                let _ = result;
+                                            }
+                                        }
+                                    }
+                                } else if wait_result.0 < 0 {
+                                    // Process doesn't exist (waitpid error)
+                                    println!(
+                                        "[sbus] Process {} doesn't exist, removing stale entry",
+                                        pid
+                                    );
+                                    remove_running_app_by_pid(pid);
+
+                                    println!("[sbus] Launching new instance of {}", app_id);
+                                    match launch_app_by_id(app_id) {
+                                        Ok(new_pid) => {
+                                            println!(
+                                                "[sbus] Successfully launched {} (PID={})",
+                                                app_id, new_pid
+                                            );
+                                            if let Some(conn) = conn_guard.as_mut() {
+                                                let result: core::result::Result<(), sbus::Error> =
+                                                    conn.send_method_return(
+                                                        serial,
+                                                        vec![Argument::String(
+                                                            "Launched".to_string(),
+                                                        )],
+                                                    );
+                                                let _ = result;
+                                            }
+                                        }
+                                        Err(launch_err) => {
+                                            println!("[sbus] Failed to launch app: {}", launch_err);
+                                            if let Some(conn) = conn_guard.as_mut() {
+                                                let result: core::result::Result<(), sbus::Error> =
+                                                    conn.send_method_error(
+                                                        serial,
+                                                        "org.scarlet-os.stemd.LaunchFailed",
+                                                        launch_err,
+                                                    );
+                                                let _ = result;
+                                            }
+                                        }
+                                    }
+                                } else {
+                                    // wait_result.0 == 0: Process is still alive (WNOHANG returned 0)
+                                    println!(
+                                        "[sbus] Process {} is still alive, window not ready yet",
+                                        pid
+                                    );
+                                    if let Some(conn) = conn_guard.as_mut() {
+                                        let result: core::result::Result<(), sbus::Error> = conn
+                                            .send_method_error(
+                                                serial,
+                                                "org.scarlet-os.stemd.WindowNotReady",
+                                                "Application is running but window not ready yet",
+                                            );
+                                        let _ = result;
+                                    }
+                                }
+                            }
+                        }
+                    } else {
+                        println!("[sbus] App {} is not running, launching", app_id);
+                        // Launch the application
+                        match launch_app_by_id(app_id) {
+                            Ok(pid) => {
+                                println!("[sbus] Successfully launched {} (PID={})", app_id, pid);
+                                if let Some(conn) = conn_guard.as_mut() {
+                                    let result: core::result::Result<(), sbus::Error> = conn
+                                        .send_method_return(
+                                            serial,
+                                            vec![Argument::String("Launched".to_string())],
+                                        );
+                                    let _ = result;
+                                }
+                            }
+                            Err(e) => {
+                                println!("[sbus] Failed to launch app: {}", e);
+                                if let Some(conn) = conn_guard.as_mut() {
+                                    let result: core::result::Result<(), sbus::Error> = conn
+                                        .send_method_error(
+                                            serial,
+                                            "org.scarlet-os.stemd.LaunchFailed",
+                                            e,
+                                        );
+                                    let _ = result;
+                                }
+                            }
+                        }
+                    }
+
+                    Ok(())
+                }
+                _ => {
+                    println!("[sbus] Unknown method: {}", method);
+                    if let Some(conn) = conn_guard.as_mut() {
+                        let mut error_msg = String::new();
+                        error_msg.push_str("Unknown method: ");
+                        error_msg.push_str(&method);
+                        let _ = conn.send_method_error(
+                            serial,
+                            "org.scarlet-os.stemd.UnknownMethod",
+                            &error_msg,
+                        );
+                    }
+                    Ok(())
+                }
+            }
+        }
+        _ => {
+            println!(
+                "[sbus] Received unhandled message type: {:?}",
+                msg.msg_type()
+            );
+            Ok(())
+        }
+    }
+}
+
 #[unsafe(no_mangle)]
 fn main() -> i32 {
     println!("stemd: Stem Daemon starting...");
@@ -952,10 +1328,96 @@ tty = "/dev/tty0"
     let launch_order = resolve_dependencies(&services);
     println!("stemd: Launch order resolved");
 
-    // Launch services.
+    // Check if stemd itself is defined as a service
+    let stemd_service = services.iter().find(|s| s.name == "stemd");
+
+    // Phase 1: Initialize stemd's dependencies (e.g., sbusd)
+    if let Some(service) = stemd_service {
+        println!("stemd: Initializing dependencies for stemd...");
+        for dep_name in &service.depends {
+            println!("stemd: Launching dependency: {}", dep_name);
+
+            // Find the dependency service and launch it
+            if let Some(dep_service) = services.iter().find(|s| s.name == *dep_name) {
+                if let Err(e) = launch_service(dep_service) {
+                    println!("stemd: Failed to launch dependency {}: {}", dep_name, e);
+                } else {
+                    println!("stemd: Successfully launched dependency: {}", dep_name);
+                }
+                fence(core::sync::atomic::Ordering::SeqCst);
+            }
+        }
+    }
+
+    // Start idle thread early so sbusd can run
+    println!("stemd: Starting idle thread");
+    let _idle = thread::spawn(|| {
+        loop {
+            scarlet_std::thread::yield_now();
+            spin_loop();
+        }
+    });
+
+    // Phase 2: Register with sbus (now that sbusd should be running)
+    println!("stemd: Registering with sbus...");
+    let mut registered = false;
+    for attempt in 0..20 {
+        // Give CPU time to sbusd to start up
+        for _ in 0..10 {
+            std::thread::yield_now();
+        }
+
+        match sbus::Connection::connect() {
+            Ok(mut conn) => {
+                match conn.register_service("org.scarlet-os.stemd") {
+                    Ok(_) => {
+                        println!(
+                            "stemd: Successfully registered with sbus as org.scarlet-os.stemd"
+                        );
+
+                        // Store the connection globally for method handling
+                        {
+                            let mut sbus_conn = SBUS_CONNECTION.lock();
+                            *sbus_conn = Some(conn);
+                        }
+
+                        registered = true;
+                        break;
+                    }
+                    Err(e) => {
+                        println!(
+                            "stemd: Attempt {}: Failed to register with sbus: {:?}",
+                            attempt + 1,
+                            e
+                        );
+                    }
+                }
+            }
+            Err(e) => {
+                println!(
+                    "stemd: Attempt {}: Failed to connect to sbus: {:?}",
+                    attempt + 1,
+                    e
+                );
+            }
+        }
+    }
+
+    if !registered {
+        println!("stemd: Could not register with sbus after 10 attempts");
+        println!("stemd: Continuing without sbus registration");
+    }
+
+    // Phase 3: Launch other services (excluding stemd itself)
     println!("stemd: Launching services...");
 
     for service in &launch_order {
+        // Skip stemd itself (we're already running!)
+        if service.name == "stemd" {
+            println!("stemd: Skipping stemd (already running as PID 1)");
+            continue;
+        }
+
         // Avoid stealing an interactive TTY when stemd is started manually from a shell.
         // TTY-bound services (like login/getty equivalents) should normally be started by init.
         if !started_by_init && service.tty.is_some() {
@@ -965,6 +1427,18 @@ tty = "/dev/tty0"
             );
             continue;
         }
+
+        // Skip services that were already launched as dependencies
+        if let Some(stemd_svc) = &stemd_service {
+            if stemd_svc.depends.contains(&service.name) {
+                println!(
+                    "stemd: Skipping {} (already launched as dependency)",
+                    service.name
+                );
+                continue;
+            }
+        }
+
         if let Err(e) = launch_service(service) {
             println!("stemd: Failed to launch service {}: {}", service.name, e);
         }
@@ -976,10 +1450,7 @@ tty = "/dev/tty0"
     // Load .desktop files for application definitions
     println!("stemd: Loading application definitions...");
     // Unified directory structure: /etc/stemd.d/apps/*.desktop
-    let desktop_dirs = [
-        "/etc/stemd.d/apps",
-        "/system/scarlet/etc/stemd.d/apps",
-    ];
+    let desktop_dirs = ["/etc/stemd.d/apps", "/system/scarlet/etc/stemd.d/apps"];
     let mut total_apps = 0;
     for dir in &desktop_dirs {
         match load_desktop_files(dir) {
@@ -1004,12 +1475,11 @@ tty = "/dev/tty0"
     println!("stemd: Starting IPC thread");
     let _ipc_handle = thread::spawn(ipc_thread);
 
-    let _idle = thread::spawn(|| {
-        loop {
-            scarlet_std::thread::yield_now();
-            spin_loop();
-        }
-    });
+    // Spawn sbus handler thread if we registered with sbus
+    if registered {
+        println!("stemd: Starting sbus handler thread");
+        let _sbus_handle = thread::spawn(sbus_handler_thread);
+    }
 
     loop {
         let (pid, status) = waitpid(-1, 0);

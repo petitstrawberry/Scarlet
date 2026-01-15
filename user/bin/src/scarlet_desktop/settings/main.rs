@@ -367,7 +367,7 @@ pub extern "C" fn main() -> i32 {
     println!("[settings] Starting Scarlet Desktop Settings");
 
     let mut app = match Application::new() {
-        Ok(app) => app,
+        Ok(app) => app.app_id("org.scarlet-os.desktop.settings"),
         Err(e) => {
             println!("[settings] Failed to connect to SWS: {}", e);
             return 1;
@@ -398,7 +398,7 @@ pub extern "C" fn main() -> i32 {
     };
 
     // Settings window with NavigationView
-    let window = Window::new("Scarlet Settings", 900, 600)
+    let window = Window::new("Settings", 900, 600)
         .min_size(800, 500)
         .background(Color::rgb(30, 30, 30))
         .window_type(WindowKind::Normal)
