@@ -902,27 +902,27 @@ impl Selectable for LocalSocket {
     }
 
     fn set_nonblocking(&self, enabled: bool) {
-        crate::println!(
-            "[LocalSocket::set_nonblocking] self={:p} enabled={}",
-            self as *const _,
-            enabled
-        );
+        // crate::println!(
+        //     "[LocalSocket::set_nonblocking] self={:p} enabled={}",
+        //     self as *const _,
+        //     enabled
+        // );
         *self.nonblocking.write() = enabled;
         let verify = *self.nonblocking.read();
-        crate::println!(
-            "[LocalSocket::set_nonblocking] self={:p} after write, read back={}",
-            self as *const _,
-            verify
-        );
+        // crate::println!(
+        //     "[LocalSocket::set_nonblocking] self={:p} after write, read back={}",
+        //     self as *const _,
+        //     verify
+        // );
     }
 
     fn is_nonblocking(&self) -> bool {
         let value = *self.nonblocking.read();
-        crate::println!(
-            "[LocalSocket::is_nonblocking] self={:p} returning={}",
-            self as *const _,
-            value
-        );
+        // crate::println!(
+        //     "[LocalSocket::is_nonblocking] self={:p} returning={}",
+        //     self as *const _,
+        //     value
+        // );
         value
     }
 }
@@ -933,22 +933,22 @@ const SOCKET_CMD_GET_NONBLOCKING: u32 = 2;
 
 impl ControlOps for LocalSocket {
     fn control(&self, command: u32, arg: usize) -> Result<i32, &'static str> {
-        crate::println!("[LocalSocket::control] command={} arg={}", command, arg);
+        // crate::println!("[LocalSocket::control] command={} arg={}", command, arg);
         match command {
             SOCKET_CMD_SET_NONBLOCKING => {
                 let enabled = arg != 0;
-                crate::println!("[LocalSocket::control] Setting nonblocking={}", enabled);
+                // crate::println!("[LocalSocket::control] Setting nonblocking={}", enabled);
                 self.set_nonblocking(enabled);
                 let verify = self.is_nonblocking();
-                crate::println!("[LocalSocket::control] Verified nonblocking={}", verify);
+                // crate::println!("[LocalSocket::control] Verified nonblocking={}", verify);
                 Ok(0)
             }
             SOCKET_CMD_GET_NONBLOCKING => {
                 let is_nonblocking = self.is_nonblocking();
-                crate::println!(
-                    "[LocalSocket::control] Getting nonblocking={}",
-                    is_nonblocking
-                );
+                // crate::println!(
+                // "[LocalSocket::control] Getting nonblocking={}",
+                // is_nonblocking
+                // );
                 Ok(if is_nonblocking { 1 } else { 0 })
             }
             _ => {
