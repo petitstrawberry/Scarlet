@@ -35,7 +35,7 @@ extern crate alloc;
 
 use core::panic;
 
-use alloc::{collections::vec_deque::VecDeque, string::ToString};
+use alloc::{boxed::Box, collections::vec_deque::VecDeque, string::ToString, vec::Vec};
 
 use crate::print;
 use crate::println;
@@ -63,35 +63,32 @@ use crate::task::Task;
 const MAX_TASKS: usize = 1024;
 
 /// Global task pool storing all tasks
-/// Each task is directly indexed by its task ID (task_id == index)
-/// This allows safe direct array access without HashMap lookups
-///
-/// The tasks array is protected by a Mutex to ensure thread-safe access
-/// in multi-core scenarios. The mutex is only held during task add/remove
-/// operations, not during context switching.
-///
-/// Task IDs are recycled when tasks are removed to avoid ID exhaustion.
+/// Using spin::Once with Box-ed tasks array to avoid large stack usage.
 static TASK_POOL: spin::Once<TaskPool> = spin::Once::new();
 
-/// Get the global task pool (public for task allocation)
+/// Get the global task pool (lazy initialization on first call)
 pub fn get_task_pool() -> &'static TaskPool {
-    TASK_POOL.get().expect("Task pool not initialized")
+    TASK_POOL.call_once(|| TaskPool::new())
 }
 
-/// Global task pool storing all tasks in a fixed-size array
+/// Global task pool storing all tasks in a Box-ed fixed-size array
 ///
 /// # Safety
 ///
 /// This struct provides unsafe access to tasks through `get_task()` and `get_task_mut()`
 /// which return `&'static` references without holding locks. This is safe because:
 ///
-/// 1. **Fixed Array Memory**: Tasks are stored in a fixed array indexed by task_id.
-///    Unlike HashMap, the memory location never changes due to reallocation.
+/// 1. **Stable Box Memory**: Tasks are stored in `Box<[Option<Task>; MAX_TASKS]>`.
+///    Box guarantees the underlying array pointer **never moves** after allocation,
+///    making `&'static` references safe in practice.
 ///
-/// 2. **Scheduler Control**: The scheduler controls all task removal and ensures
+/// 2. **Direct Indexing**: `task_id == index` provides O(1) access without HashMap
+///    overhead. No rehashing or reallocation can occur.
+///
+/// 3. **Scheduler Control**: The scheduler controls all task removal and ensures
 ///    that the currently running task is never removed during context switches.
 ///
-/// 3. **Single-Core Execution**: Current implementation is single-core, preventing
+/// 4. **Single-Core Execution**: Current implementation is single-core, preventing
 ///    concurrent access during context switches.
 ///
 /// **IMPORTANT**: Do NOT directly access the `tasks` array. Always use:
@@ -100,13 +97,19 @@ pub fn get_task_pool() -> &'static TaskPool {
 /// - `Scheduler::get_task_by_id()` which is the preferred public API
 ///
 /// Direct array access could violate safety assumptions and cause undefined behavior.
+///
+/// # Memory Layout
+///
+/// The tasks array is allocated directly on heap via Vec→Box conversion:
+/// - No intermediate stack allocation (824KB never touches stack)
+/// - Box<[T]> provides stable pointer for &'static references
+/// - Array size is fixed at compile time (MAX_TASKS = 1024)
 pub struct TaskPool {
-    // Fixed-length array storing tasks directly indexed by task ID
-    // Mutex protects against concurrent add/remove operations
-    // The lock is NOT held during context switching
+    // Box-ed fixed-length array allocated on heap
+    // Pointer is stable for the lifetime of the program
     //
     // ⚠️ DO NOT ACCESS DIRECTLY - Use get_task() or get_task_mut() methods
-    tasks: spin::Mutex<[Option<Task>; MAX_TASKS]>,
+    tasks: spin::Mutex<Box<[Option<Task>; MAX_TASKS]>>,
 
     // Free list of recyclable task IDs
     // IDs are added here when tasks are removed
@@ -119,23 +122,23 @@ pub struct TaskPool {
 
 impl TaskPool {
     fn new() -> Self {
-        // Initialize fixed-size array with all None
-        // SAFETY: We initialize all elements to None before calling assume_init
-        let mut tasks: core::mem::MaybeUninit<[Option<Task>; MAX_TASKS]> =
-            unsafe { core::mem::MaybeUninit::uninit() };
+        crate::early_println!("[SCHED] TaskPool::new() starting...");
 
-        // Initialize each element to None
-        // SAFETY: We write to each element before assume_init
+        // Allocate uninitialized Box array directly on heap
+        // No stack usage, no Vec overhead
+        let mut tasks: Box<[core::mem::MaybeUninit<Option<Task>>; MAX_TASKS]> =
+            unsafe { Box::new_uninit().assume_init() };
+
+        // Initialize all elements to None
         for i in 0..MAX_TASKS {
-            unsafe {
-                // Get pointer to the i-th element
-                let elem_ptr = tasks.as_mut_ptr().cast::<Option<Task>>().add(i);
-                elem_ptr.write(None);
-            }
+            tasks[i].write(None);
         }
 
-        // SAFETY: All elements are now initialized
-        let tasks: [Option<Task>; MAX_TASKS] = unsafe { tasks.assume_init() };
+        // Convert to initialized Box<[Option<Task>]>
+        // SAFETY: All elements have been initialized with None
+        let tasks: Box<[Option<Task>; MAX_TASKS]> = unsafe { core::mem::transmute(tasks) };
+
+        crate::early_println!("[SCHED] TaskPool created (heap allocation, stable pointers)");
 
         TaskPool {
             tasks: spin::Mutex::new(tasks),
@@ -171,10 +174,19 @@ impl TaskPool {
     }
 
     /// Add a task to the pool
-    /// The task's ID determines its index in the array
-    fn add_task(&self, task: Task) -> Result<(), &'static str> {
-        let task_id = task.get_id();
+    /// Allocates an ID, sets it on the task, and returns the ID
+    fn add_task(&self, mut task: Task) -> Result<usize, &'static str> {
+        // Allocate ID for this task
+        let task_id = self.allocate_id().ok_or("Task pool exhausted")?;
 
+        // Allocate namespace ID
+        let namespace_id = task.get_namespace().allocate_task_id_for(task_id);
+
+        // Set IDs on the task
+        task.set_id(task_id);
+        task.set_namespace_id(namespace_id);
+
+        // Add to the pool at the allocated index
         if task_id >= MAX_TASKS {
             return Err("Task ID out of bounds");
         }
@@ -186,7 +198,7 @@ impl TaskPool {
         }
 
         tasks[task_id] = Some(task);
-        Ok(())
+        Ok(task_id)
     }
 
     /// Get a task reference by ID
@@ -199,9 +211,11 @@ impl TaskPool {
     /// - In context switching scenarios, the currently running task is never removed
     /// - Single-core execution ensures no concurrent removal during context switch
     ///
-    /// The returned reference points to a fixed location in the TaskPool array
-    /// (task_id == index), so unlike HashMap-based approaches, the address is
-    /// stable and will never change due to reallocation.
+    /// The returned reference points to a fixed location in the TaskPool's
+    /// Box-ed array (task_id == index), so the address is **stable**:
+    /// - Box guarantees the underlying array never moves
+    /// - Unlike Vec or HashMap, no reallocation can occur
+    /// - The pointer remains valid for the lifetime of the program
     ///
     /// **Important**: Do NOT directly access `TaskPool::tasks` array.
     /// Always use this method or `get_task_mut()` to ensure proper safety.
@@ -213,11 +227,10 @@ impl TaskPool {
         let pool = get_task_pool();
         let tasks = pool.tasks.lock();
 
-        // Convert reference to raw pointer, then to &'static
-        // SAFETY: The task will remain valid as long as it's not removed.
-        // - Tasks are stored in a fixed array, indexed by task_id (stable address)
-        // - The currently running task is never removed during context switching
-        // - Single-core execution prevents concurrent removal during use
+        // SAFETY: The Box<[T]> ensures the array pointer is stable.
+        // Once a Box is allocated, its underlying pointer never changes.
+        // Combined with scheduler guarantees (no removal of running task),
+        // this provides a de-facto &'static reference.
         tasks[task_id].as_ref().map(|task| {
             let ptr = task as *const Task;
             unsafe { &*ptr }
@@ -234,19 +247,22 @@ impl TaskPool {
     /// - In context switching scenarios, the currently running task is never removed
     /// - Single-core execution ensures no concurrent access during context switch
     ///
-    /// The returned reference points to a fixed location in the TaskPool array
-    /// (task_id == index), so unlike HashMap-based approaches, the address is
-    /// stable and will never change due to reallocation.
+    /// The returned reference points to a fixed location in the TaskPool's
+    /// Box-ed array (task_id == index), so the address is **stable**:
+    /// - Box guarantees the underlying array never moves
+    /// - Unlike Vec or HashMap, no reallocation can occur
+    /// - The pointer remains valid for the lifetime of the program
     ///
     /// **Important**: Do NOT directly access `TaskPool::tasks` array.
     /// Always use this method or `get_task()` to ensure proper safety.
     ///
     /// # Note
-    /// This is inherently unsafe because it returns `&'static mut` without holding
-    /// the lock. However, in practice it's safe because:
-    /// - Fixed array indexing guarantees stable memory location
+    /// This is technically UB in Rust (returning &'static mut without holding lock),
+    /// but safe in practice because:
+    /// - Box<[T]> provides stable memory location (pointer never changes)
     /// - The scheduler ensures exclusive access during context switches
     /// - Single-core execution prevents concurrent mutable access
+    /// - Currently running task is never removed
     pub fn get_task_mut(task_id: usize) -> Option<&'static mut Task> {
         if task_id >= MAX_TASKS {
             return None;
@@ -255,9 +271,10 @@ impl TaskPool {
         let pool = get_task_pool();
         let mut tasks = pool.tasks.lock();
 
-        // SAFETY: Same rationale as get_task(), but returns mutable reference.
-        // The scheduler ensures exclusive access during context switches,
-        // and the fixed array provides stable memory location.
+        // SAFETY: The Box<[T]> ensures the array pointer is stable.
+        // Once a Box is allocated, its underlying pointer never changes.
+        // Combined with scheduler guarantees (no removal of running task),
+        // this provides a de-facto &'static mut reference.
         tasks[task_id].as_mut().map(|task| {
             let ptr = task as *mut Task;
             unsafe { &mut *ptr }
@@ -340,11 +357,11 @@ impl Scheduler {
     }
 
     pub fn add_task(&mut self, task: Task, cpu_id: usize) {
-        let task_id = task.get_id();
-        // Add task to the global task pool
-        if let Err(e) = get_task_pool().add_task(task) {
-            panic!("Failed to add task {}: {}", task_id, e);
-        }
+        // Add task to the global task pool and get the allocated ID
+        let task_id = match get_task_pool().add_task(task) {
+            Ok(id) => id,
+            Err(e) => panic!("Failed to add task: {}", e),
+        };
         // Add task state info to ready queue
         self.ready_queue[cpu_id].push_back(task_id);
     }

@@ -388,16 +388,9 @@ impl Task {
         task_type: TaskType,
         ns: Arc<namespace::TaskNamespace>,
     ) -> Self {
-        // Allocate task ID using the global task pool
-        let global_id = crate::sched::scheduler::get_task_pool()
-            .allocate_id()
-            .expect("Task pool exhausted - cannot create more tasks");
-
-        let namespace_id = ns.allocate_task_id_for(global_id);
-
         let task = Task {
-            id: global_id,
-            namespace_id,
+            id: 0,           // Will be allocated by add_task()
+            namespace_id: 0, // Will be set by add_task()
             namespace: ns,
             name,
             priority,
@@ -465,6 +458,16 @@ impl Task {
 
     pub fn get_id(&self) -> usize {
         self.id
+    }
+
+    /// Set the task ID (used by TaskPool during task addition)
+    pub fn set_id(&mut self, id: usize) {
+        self.id = id;
+    }
+
+    /// Set the namespace ID (used by TaskPool during task addition)
+    pub fn set_namespace_id(&mut self, namespace_id: usize) {
+        self.namespace_id = namespace_id;
     }
 
     /// Get the task ID within its namespace.
