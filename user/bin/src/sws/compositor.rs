@@ -1459,6 +1459,26 @@ impl Compositor {
 
                 Ok(true)
             }
+            CompositorInputEvent::Keyboard { code, pressed } => {
+                // Route keyboard events to focused window
+                if let Some(focused_id) = self.window_manager.get_focused_window_id() {
+                    super::ipc::send_input_to_window(
+                        focused_id,
+                        0,
+                        super::input::event_types::EV_KEY,
+                        code,
+                        if pressed { 1 } else { 0 },
+                    );
+                    super::ipc::send_input_to_window(
+                        focused_id,
+                        0,
+                        super::input::event_types::EV_SYN,
+                        0,
+                        0,
+                    );
+                }
+                Ok(false) // Keyboard events don't trigger redraws
+            }
         }
     }
 
