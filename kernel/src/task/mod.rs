@@ -47,6 +47,9 @@ use spin::Once;
 /// Global registry of task-specific wakers for waitpid
 static WAITPID_WAKERS: Once<Mutex<BTreeMap<usize, Waker>>> = Once::new();
 
+/// Note: TASK_ID has been moved to TaskPool::next_id for better ID management
+/// including recycling of freed task IDs. Use TaskPool::allocate_id() instead.
+
 /// Global registry of parent task wakers for waitpid(-1) operations
 /// Each parent task has a waker that gets triggered when any of its children exit
 static PARENT_WAITPID_WAKERS: Once<Mutex<BTreeMap<usize, Waker>>> = Once::new();
@@ -350,8 +353,6 @@ impl Default for CloneFlags {
     }
 }
 
-static TASK_ID: Mutex<usize> = Mutex::new(1);
-
 impl Task {
     /// Create a new task with the root namespace.
     ///
@@ -387,16 +388,9 @@ impl Task {
         task_type: TaskType,
         ns: Arc<namespace::TaskNamespace>,
     ) -> Self {
-        let mut taskid = TASK_ID.lock();
-        let global_id = *taskid;
-        *taskid += 1;
-        drop(taskid);
-
-        let namespace_id = ns.allocate_task_id_for(global_id);
-
         let task = Task {
-            id: global_id,
-            namespace_id,
+            id: 0,           // Will be allocated by add_task()
+            namespace_id: 0, // Will be set by add_task()
             namespace: ns,
             name,
             priority,
@@ -464,6 +458,16 @@ impl Task {
 
     pub fn get_id(&self) -> usize {
         self.id
+    }
+
+    /// Set the task ID (used by TaskPool during task addition)
+    pub fn set_id(&mut self, id: usize) {
+        self.id = id;
+    }
+
+    /// Set the namespace ID (used by TaskPool during task addition)
+    pub fn set_namespace_id(&mut self, namespace_id: usize) {
+        self.namespace_id = namespace_id;
     }
 
     /// Get the task ID within its namespace.
