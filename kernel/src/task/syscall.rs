@@ -119,9 +119,6 @@ pub fn sys_clone(trapframe: &mut Trapframe) -> usize {
     /* Clone the task */
     match parent_task.clone_task(clone_flags) {
         Ok(mut child_task) => {
-            // Kernel internals use global task IDs, but syscalls should expose namespace-local IDs.
-            let child_global_id = child_task.get_id();
-            let child_ns_pid = child_task.get_namespace_id();
             // crate::println!("[CLONE] Successfully created child task {}, state: {:?}, PC: 0x{:x}",
             //     child_id, child_task.get_state(), child_task.vcpu.get_pc());
             child_task.vcpu.iregs.set_return_value(0); /* Set the return value to 0 in the child task */
@@ -141,10 +138,29 @@ pub fn sys_clone(trapframe: &mut Trapframe) -> usize {
                 child_task.vcpu.iregs.set_arg(0, child_arg);
             }
 
-            get_scheduler().add_task(child_task, get_cpu().get_cpuid());
+            let scheduler = get_scheduler();
+            let cpu_id = get_cpu().get_cpuid();
+            let parent_id = parent_task.get_id();
+
+            // Add child to scheduler and get the allocated ID
+            let child_id = scheduler.add_task(child_task, cpu_id);
             // crate::println!("[CLONE] Child task {} added to scheduler", child_id);
+
+            // Establish parent-child relationship now that both have valid IDs
+            if let Some(child) = scheduler.get_task_by_id(child_id) {
+                child.set_parent_id(parent_id);
+            }
+            if let Some(parent) = scheduler.get_task_by_id(parent_id) {
+                parent.add_child(child_id);
+            }
+
+            // Get the child's namespace-local PID (after add_task has set the IDs)
+            let child_ns_pid = scheduler
+                .get_task_by_id(child_id)
+                .map(|t| t.get_namespace_id())
+                .unwrap_or(0);
+
             /* Return the child task PID (namespace-local) to the parent task */
-            let _ = child_global_id;
             child_ns_pid
         }
         Err(_) => {

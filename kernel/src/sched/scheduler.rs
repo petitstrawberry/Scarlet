@@ -143,7 +143,7 @@ impl TaskPool {
         TaskPool {
             tasks: spin::Mutex::new(tasks),
             free_ids: spin::Mutex::new(VecDeque::new()),
-            next_id: core::sync::atomic::AtomicUsize::new(0),
+            next_id: core::sync::atomic::AtomicUsize::new(1), // Start from 1, ID 0 is invalid
         }
     }
 
@@ -179,14 +179,7 @@ impl TaskPool {
         // Allocate ID for this task
         let task_id = self.allocate_id().ok_or("Task pool exhausted")?;
 
-        // Allocate namespace ID
-        let namespace_id = task.get_namespace().allocate_task_id_for(task_id);
-
-        // Set IDs on the task
-        task.set_id(task_id);
-        task.set_namespace_id(namespace_id);
-
-        // Add to the pool at the allocated index
+        // Add to the pool at the allocated index BEFORE registering namespace mapping
         if task_id >= MAX_TASKS {
             return Err("Task ID out of bounds");
         }
@@ -196,6 +189,13 @@ impl TaskPool {
         if tasks[task_id].is_some() {
             return Err("Task ID slot already occupied");
         }
+
+        // Allocate namespace ID AFTER checking slot availability
+        let namespace_id = task.get_namespace().allocate_task_id_for(task_id);
+
+        // Set IDs on the task
+        task.set_id(task_id);
+        task.set_namespace_id(namespace_id);
 
         tasks[task_id] = Some(task);
         Ok(task_id)
@@ -320,6 +320,34 @@ impl TaskPool {
         let tasks = self.tasks.lock();
         tasks[task_id].is_some()
     }
+
+    /// Reset the task pool to initial state (test-only)
+    ///
+    /// Clears all tasks, resets ID allocation, and clears free list.
+    /// This should ONLY be called in tests to clean up state between test cases.
+    ///
+    /// # Safety
+    ///
+    /// This function INVALIDATES all existing `&'static` references to tasks.
+    /// It must ONLY be called when:
+    /// - No tasks are currently running
+    /// - No task references are held elsewhere
+    /// - Called from test code only
+    #[cfg(test)]
+    pub fn reset(&self) {
+        // Clear all task slots
+        let mut tasks = self.tasks.lock();
+        for i in 0..MAX_TASKS {
+            tasks[i] = None;
+        }
+        drop(tasks);
+
+        // Reset ID allocation to start from 1
+        self.next_id.store(1, core::sync::atomic::Ordering::Relaxed);
+
+        // Clear free list
+        self.free_ids.lock().clear();
+    }
 }
 
 static mut SCHEDULER: Option<Scheduler> = None;
@@ -356,7 +384,7 @@ impl Scheduler {
         }
     }
 
-    pub fn add_task(&mut self, task: Task, cpu_id: usize) {
+    pub fn add_task(&mut self, task: Task, cpu_id: usize) -> usize {
         // Add task to the global task pool and get the allocated ID
         let task_id = match get_task_pool().add_task(task) {
             Ok(id) => id,
@@ -364,6 +392,7 @@ impl Scheduler {
         };
         // Add task state info to ready queue
         self.ready_queue[cpu_id].push_back(task_id);
+        task_id
     }
 
     /// Determines the next task to run and returns current and next task IDs
@@ -379,6 +408,27 @@ impl Scheduler {
     fn run(&mut self, cpu: &Arch) -> (Option<usize>, Option<usize>) {
         let cpu_id = cpu.get_cpuid();
         let old_current_task_id = self.current_task_id[cpu_id];
+
+        // IMPORTANT: If there's a current running task, re-queue it BEFORE scheduling
+        // This ensures it's available as a fallback if no other tasks are ready
+        if let Some(current_id) = old_current_task_id {
+            // Check if current task is still in ready_queue (it shouldn't be if it's running)
+            if !self.ready_queue[cpu_id].iter().any(|&id| id == current_id) {
+                // Current task is not in ready_queue (it's running), add it back
+                // Only add if the task is in a valid state to be scheduled
+                if let Some(task) = self.get_task_by_id(current_id) {
+                    match task.state {
+                        TaskState::Ready | TaskState::Running => {
+                            self.ready_queue[cpu_id].push_back(current_id);
+                        }
+                        _ => {
+                            // Task is in Zombie, Terminated, Blocked, or NotInitialized state
+                            // Don't re-queue it
+                        }
+                    }
+                }
+            }
+        }
 
         // Continue trying to find a suitable task to run
         loop {
@@ -667,7 +717,7 @@ impl Scheduler {
                 } else {
                     0 // Default to CPU 0
                 };
-                
+
                 // Only add if not already in ready_queue to avoid duplicates
                 if !self.ready_queue[cpu_id].contains(&task_id) {
                     self.ready_queue[cpu_id].push_back(task_id);
@@ -828,6 +878,24 @@ impl Scheduler {
         // crate::early_println!("[SCHED]   after  Trapframe {:#x?}", cpu.get_trapframe());
 
         // Note: User context (VCPU) will be restored in schedule() after run() returns
+    }
+
+    /// Reset the scheduler to initial state (test-only)
+    ///
+    /// Clears all queues, resets current task IDs, and resets the task pool.
+    /// This should ONLY be called in tests to clean up state between test cases.
+    #[cfg(test)]
+    pub fn reset(&mut self) {
+        // Clear all queues
+        for cpu_id in 0..NUM_OF_CPUS {
+            self.ready_queue[cpu_id].clear();
+            self.blocked_queue[cpu_id].clear();
+            self.zombie_queue[cpu_id].clear();
+            self.current_task_id[cpu_id] = None;
+        }
+
+        // Reset the task pool
+        get_task_pool().reset();
     }
 }
 

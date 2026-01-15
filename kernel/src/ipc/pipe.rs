@@ -684,7 +684,7 @@ mod tests {
 
         // Debug: Check internal state
         {
-            let state = read_end.endpoint.state.lock();
+            let state = read_end.endpoint.data.state.lock();
             assert_eq!(state.reader_count, 1);
             assert_eq!(state.writer_count, 1);
         }
@@ -694,7 +694,7 @@ mod tests {
 
         // Debug: Check internal state after clone
         {
-            let state = read_end.endpoint.state.lock();
+            let state = read_end.endpoint.data.state.lock();
             assert_eq!(state.reader_count, 2); // Should be 2 after clone
             assert_eq!(state.writer_count, 1); // Should remain 1
         }
@@ -708,7 +708,7 @@ mod tests {
 
         // Debug: Check internal state after write clone
         {
-            let state = read_end.endpoint.state.lock();
+            let state = read_end.endpoint.data.state.lock();
             assert_eq!(state.reader_count, 2); // Still 2 readers
             assert_eq!(state.writer_count, 2); // Now 2 writers
         }

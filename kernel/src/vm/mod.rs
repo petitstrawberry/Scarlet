@@ -345,8 +345,7 @@ pub fn setup_trampoline_for_task_kstack_window(task: &mut Task) -> Result<(), &'
 
     #[cfg(any(debug_assertions, test))]
     crate::early_println!(
-        "Mapped kernel stack window for Task {}: slot {} {:#x} - {:#x}",
-        task.get_id(),
+        "Mapped kernel stack window for Task (allocating): slot {} {:#x} - {:#x}",
         slot_idx,
         base,
         base + KERNEL_KSTACK_SLOT_SIZE - 1
