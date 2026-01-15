@@ -143,6 +143,8 @@ pub use view::{
     Label, Text, Button, Spacer, RectView,
     // Reactive controls (all use Binding<T> or State<T>)
     ReactiveLabel, TextField, CheckBox, Slider, ProgressBar, Toggle,
+    // Navigation
+    NavigationView, NavigationItem,
 };
 
 /// Create a reactive `Text` view with `format!`-style syntax.

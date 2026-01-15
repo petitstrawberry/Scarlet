@@ -3,6 +3,12 @@ name = "userprogram"
 version = "0.15.0"
 edition = "2024"
 
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"
+
 [[bin]]
 name = "init"
 path = "src/init.rs"

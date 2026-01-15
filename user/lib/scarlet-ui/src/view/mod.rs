@@ -11,6 +11,7 @@
 mod traits;
 mod containers;
 mod controls;
+mod navigation;
 mod window;
 
 pub use traits::{View, ViewBox, Size, IntoViewBox};
@@ -21,4 +22,5 @@ pub use controls::{
     // Reactive controls (all use Binding<T>)
     ReactiveLabel, TextField, CheckBox, Slider, ProgressBar, Toggle,
 };
+pub use navigation::{NavigationView, NavigationItem};
 pub use window::{Window, WindowKind};

@@ -71,10 +71,22 @@ impl DropdownState {
     }
 }
 
+/// Dropdown menu item type
+enum DropdownItemType {
+    Window { window_id: u32 },
+    Action { action: DropdownAction },
+}
+
+/// Dropdown menu action
+enum DropdownAction {
+    LaunchSettings,
+    // Add more actions here as needed
+}
+
 /// Dropdown menu item
 struct DropdownItem {
     label: String,
-    window_id: u32,
+    item_type: DropdownItemType,
     y: i32,
     height: u32,
 }
@@ -126,6 +138,39 @@ impl StatusItem {
 
 fn load_config() -> TaskbarConfig {
     scarlet_desktop_config::load_desktop_config().taskbar
+}
+
+/// Spawn an application process
+fn spawn_application(path: &str, args: &[&str]) -> bool {
+    use std::task;
+
+    println!("[menu_bar] Spawning: {} {:?}", path, args);
+
+    match unsafe { task::fork() } {
+        0 => {
+            // Child process - exec the application
+            let mut argv: Vec<&str> = Vec::new();
+            argv.push(path);
+            for arg in args {
+                argv.push(arg);
+            }
+            let envp: &[&str] = &[];
+
+            let _ = task::execve(path, &argv, envp);
+            // If exec fails, exit child
+            task::exit(1);
+        }
+        pid if pid > 0 => {
+            // Parent process - child spawned successfully
+            println!("[menu_bar] Spawned process with PID: {}", pid);
+            true
+        }
+        _ => {
+            // Fork failed
+            println!("[menu_bar] Failed to fork for application spawn");
+            false
+        }
+    }
 }
 
 fn handle_input(
@@ -317,7 +362,9 @@ fn show_window_list_dropdown(
 
         dropdown.items.push(DropdownItem {
             label,
-            window_id: window.window_id,
+            item_type: DropdownItemType::Window {
+                window_id: window.window_id,
+            },
             y: current_y,
             height: ITEM_HEIGHT,
         });
@@ -342,6 +389,72 @@ fn show_window_list_dropdown(
         x,
         y
     );
+}
+
+/// Show application menu dropdown (Scarlet menu with Settings, etc.)
+fn show_app_menu_dropdown(
+    conn: &mut Connection,
+    dropdown: &mut DropdownState,
+    menu_item: &MenuItem,
+    menu_index: usize,
+) {
+    println!("[menu_bar] Showing app menu dropdown");
+
+    // Close any existing dropdown
+    if let Some(old_id) = dropdown.surface_id {
+        let _ = conn.destroy_surface(old_id);
+    }
+
+    // Calculate dropdown size
+    const ITEM_HEIGHT: u32 = 28;
+    const DROPDOWN_WIDTH: u32 = 200;
+    const NUM_ITEMS: usize = 1; // Only "Settings" for now
+
+    let dropdown_height = NUM_ITEMS as u32 * ITEM_HEIGHT + 4;
+
+    // Create dropdown surface (AlwaysOnTop for popup)
+    let surface_id = match conn.create_surface(DROPDOWN_WIDTH, dropdown_height) {
+        Ok(id) => id,
+        Err(_) => {
+            println!("[menu_bar] Failed to create dropdown surface");
+            return;
+        }
+    };
+
+    let _ = conn.set_window_type(surface_id, window_types::ALWAYS_ON_TOP);
+
+    // Position below the menu item
+    let x = menu_item.x;
+    let y = menu_item.height as i32; // Below menu bar
+    let _ = conn.move_window(surface_id, x, y);
+
+    // Build dropdown items
+    dropdown.items.clear();
+    let mut current_y = 2i32; // Start with 2px top padding
+
+    // Add Settings item
+    dropdown.items.push(DropdownItem {
+        label: String::from("Settings..."),
+        item_type: DropdownItemType::Action {
+            action: DropdownAction::LaunchSettings,
+        },
+        y: current_y,
+        height: ITEM_HEIGHT,
+    });
+    current_y += ITEM_HEIGHT as i32;
+
+    // Update dropdown state
+    dropdown.surface_id = Some(surface_id);
+    dropdown.x = x;
+    dropdown.y = y;
+    dropdown.width = DROPDOWN_WIDTH;
+    dropdown.height = dropdown_height;
+    dropdown.menu_index = Some(menu_index);
+
+    // Draw dropdown
+    draw_dropdown(conn, surface_id, dropdown);
+
+    println!("[menu_bar] App menu dropdown shown at ({}, {})", x, y);
 }
 
 /// Draw dropdown menu
@@ -615,12 +728,28 @@ pub extern "C" fn main() -> i32 {
                         // Mouse up on dropdown - check for item clicks
                         for item in &dropdown.items {
                             if item.contains(cursor_x, cursor_y, dropdown.x, dropdown.width) {
-                                println!(
-                                    "[menu_bar] Window selected: {} (id={})",
-                                    item.label, item.window_id
-                                );
-                                // TODO: Focus/restore the window
-                                // For now, just close the dropdown
+                                match &item.item_type {
+                                    DropdownItemType::Window { window_id } => {
+                                        println!(
+                                            "[menu_bar] Window selected: {} (id={})",
+                                            item.label, window_id
+                                        );
+                                        // Restore/focus the window
+                                        let _ = conn.restore_window(*window_id);
+                                    }
+                                    DropdownItemType::Action { action } => {
+                                        match action {
+                                            DropdownAction::LaunchSettings => {
+                                                println!("[menu_bar] Launching Settings");
+                                                spawn_application(
+                                                    "/system/scarlet/bin/scarlet_desktop_settings",
+                                                    &[],
+                                                );
+                                            }
+                                        }
+                                    }
+                                }
+                                // Close dropdown after selection
                                 if let Some(old_id) = dropdown.surface_id {
                                     let _ = conn.destroy_surface(old_id);
                                 }
@@ -658,8 +787,17 @@ pub extern "C" fn main() -> i32 {
             let label = menu_items[menu_idx].label;
             println!("[menu_bar] Menu clicked: {}", label);
 
+            // Show app menu dropdown for "Scarlet" menu (index 0)
+            if label == "Scarlet" {
+                show_app_menu_dropdown(
+                    &mut conn,
+                    &mut dropdown,
+                    &menu_items[menu_idx],
+                    menu_idx,
+                );
+            }
             // Show window list dropdown for "Window" menu (index 4)
-            if label == "Window" {
+            else if label == "Window" {
                 show_window_list_dropdown(
                     &mut conn,
                     &mut dropdown,
