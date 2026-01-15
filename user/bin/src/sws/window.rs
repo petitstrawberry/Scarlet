@@ -818,6 +818,11 @@ impl WindowManager {
         }
     }
 
+    /// Check if a window is minimized
+    pub fn is_minimized(&self, id: WindowId) -> bool {
+        self.get_window(id).map(|w| w.minimized).unwrap_or(false)
+    }
+
     /// Set window type for Z-order management
     pub fn set_window_type(&mut self, id: WindowId, window_type: WindowType) -> bool {
         if let Some(w) = self.get_window_mut(id) {

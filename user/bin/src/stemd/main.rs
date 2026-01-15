@@ -14,14 +14,15 @@ extern crate scarlet_std as std;
 
 use core::{hint::spin_loop, sync::atomic::fence};
 use std::{
-    format,
     fs::File,
     handle::Handle,
     println,
     socket::Socket,
     string::{String, ToString},
+    sync::Mutex,
     task::{exit, fork, waitpid},
     thread,
+    vec,
     vec::Vec,
 };
 use sws_client::Connection;
@@ -93,9 +94,8 @@ struct RunningApp {
 }
 
 // Global tracking for running applications
-// In a no_std environment without proper synchronization, we use unsafe static
-// This is accessed by both the IPC thread and main thread
-static mut RUNNING_APPS: Vec<RunningApp> = Vec::new();
+// Thread-safe using Mutex (static, not mutable)
+static RUNNING_APPS: Mutex<Vec<RunningApp>> = Mutex::new(Vec::new());
 
 /// Simple TOML parser for service configuration
 struct ConfigParser {
@@ -254,68 +254,129 @@ impl ConfigParser {
 
 /// Add a running app to the tracking list
 fn add_running_app(app_id: String, pid: i32, exec_path: String) {
-    unsafe {
-        RUNNING_APPS.push(RunningApp {
-            app_id,
-            pid,
-            exec_path,
-        });
-    }
+    let mut apps = RUNNING_APPS.lock();
+    apps.push(RunningApp {
+        app_id,
+        pid,
+        exec_path,
+    });
 }
 
 /// Remove a running app from the tracking list by PID
 fn remove_running_app_by_pid(pid: i32) -> bool {
-    unsafe {
-        if let Some(pos) = RUNNING_APPS.iter().position(|app| app.pid == pid) {
-            RUNNING_APPS.remove(pos);
-            return true;
-        }
+    let mut apps = RUNNING_APPS.lock();
+    if let Some(pos) = apps.iter().position(|app| app.pid == pid) {
+        apps.remove(pos);
+        return true;
     }
     false
 }
 
 /// Find a running app by app_id
 fn find_running_app(app_id: &str) -> Option<RunningApp> {
-    unsafe {
-        RUNNING_APPS
-            .iter()
-            .find(|app| app.app_id == app_id)
-            .cloned()
-    }
+    let apps = RUNNING_APPS.lock();
+    apps
+        .iter()
+        .find(|app| app.app_id == app_id)
+        .cloned()
 }
 
 /// Focus a window by app_id
 /// This queries SWS for the window list and tries to find a window matching the app_id
 fn focus_window_by_app_id(app_id: &str) -> Result<(), &'static str> {
+    println!("stemd: focus_window_by_app_id START for app_id={}", app_id);
+
+    // Look up the app to get its name for matching
+    let search_terms = if let Some(entry) = lookup_app(app_id) {
+        println!("stemd: Looking for window with title containing: {}", entry.name);
+        vec![entry.name.clone(), app_id.to_string()]
+    } else {
+        println!("stemd: App not in registry, using app_id directly");
+        vec![app_id.to_string()]
+    };
+
     // Try to connect to SWS
-    let mut conn = Connection::connect_default().map_err(|_| "Failed to connect to SWS")?;
+    println!("stemd: Connecting to SWS...");
+    let mut conn = match Connection::connect_default() {
+        Ok(c) => {
+            println!("stemd: Successfully connected to SWS");
+            c
+        }
+        Err(e) => {
+            println!("stemd: Failed to connect to SWS: {:?}", e);
+            return Err("Failed to connect to SWS");
+        }
+    };
 
     // Get the list of windows
-    let windows = conn.get_window_list().map_err(|_| "Failed to get window list")?;
+    println!("stemd: Calling get_window_list()...");
+    let windows = match conn.get_window_list() {
+        Ok(w) => {
+            println!("stemd: get_window_list() returned {} windows", w.len());
+            w
+        }
+        Err(e) => {
+            println!("stemd: Failed to get window list: {:?}", e);
+            return Err("Failed to get window list");
+        }
+    };
 
-    // Look for a window whose title starts with or contains the app_id
-    // This is a heuristic - in the future, windows should have an explicit app_id property
-    for window in windows {
-        if window.title.contains(app_id) && window.visible {
-            // Restore the window if minimized
-            if window.minimized {
-                let _ = conn.restore_window(window.window_id);
+    println!("stemd: Checking {} windows for match", windows.len());
+
+    // Look for a window whose title contains the app name or app_id
+    for window in &windows {
+        println!("stemd: Window #{} title='{}' visible={}", window.window_id, window.title, window.visible);
+        for search_term in &search_terms {
+            if window.title.contains(search_term) && window.visible {
+                println!("stemd: Found matching window #{}", window.window_id);
+
+                // Focus the window (this also restores if minimized)
+                println!("stemd: Focusing window #{}", window.window_id);
+                match conn.focus_window(window.window_id) {
+                    Ok(()) => println!("stemd: Successfully focused window #{}", window.window_id),
+                    Err(e) => {
+                        println!("stemd: Failed to focus window: {:?}", e);
+                        return Err("Failed to focus window");
+                    }
+                }
+                return Ok(());
             }
-            // TODO: There's no explicit "focus" command in SWS yet
-            // For now, we've restored minimized windows
-            // Future: add FOCUS_WINDOW message to SWS protocol
-            return Ok(());
         }
     }
 
     // No matching window found
+    println!("stemd: No matching window found for app_id={}", app_id);
     Err("No window found for app_id")
 }
 
 /// Launch an application or focus an existing window
 /// If exec_path is empty, look up the app from the registry
 fn launch_or_focus(app_id: &str, exec_path: Option<&str>) -> Result<(), &'static str> {
-    // Check if app is already running
+    println!("stemd: launch_or_focus called with app_id={}, exec_path={:?}", app_id, exec_path);
+
+    // First, look up exec_path from registry if needed (before holding RUNNING_APPS lock)
+    // This avoids potential lock ordering issues
+    println!("stemd: Looking up app in registry...");
+    let exec_path_resolved = match exec_path {
+        Some(path) if !path.is_empty() => {
+            println!("stemd: Using provided exec_path: {}", path);
+            Some(path.to_string())
+        }
+        _ => {
+            println!("stemd: Looking up {} from .desktop files...", app_id);
+            let result = lookup_app(app_id).map(|entry| {
+                println!("stemd: Found app: {} -> {}", entry.name, entry.exec);
+                entry.exec
+            });
+            if result.is_none() {
+                println!("stemd: App not found in registry");
+            }
+            result
+        }
+    };
+
+    // Now check if app is already running (acquire RUNNING_APPS lock separately)
+    println!("stemd: Checking if app is already running...");
     if let Some(app) = find_running_app(app_id) {
         // App is running, try to focus its window
         println!("stemd: App '{}' is already running (PID={}), focusing window", app_id, app.pid);
@@ -325,26 +386,22 @@ fn launch_or_focus(app_id: &str, exec_path: Option<&str>) -> Result<(), &'static
             // Even if focusing fails, don't launch a new instance
             return Err(e);
         }
+        println!("stemd: Successfully focused window");
         return Ok(());
     }
 
+    println!("stemd: App is not running, preparing to launch...");
+
     // App is not running, determine exec_path
-    let exec_path = match exec_path {
-        Some(path) if !path.is_empty() => path.to_string(),
-        _ => {
-            // Look up from registry
-            match lookup_app(app_id) {
-                Some(entry) => {
-                    println!("stemd: Looked up '{}' from registry: exec={}", app_id, entry.exec);
-                    entry.exec
-                }
-                None => {
-                    println!("stemd: App '{}' not found in registry", app_id);
-                    return Err("App not found in registry and no exec_path provided");
-                }
-            }
+    let exec_path = match exec_path_resolved {
+        Some(path) => path,
+        None => {
+            println!("stemd: App '{}' not found in registry", app_id);
+            return Err("App not found in registry and no exec_path provided");
         }
     };
+
+    println!("stemd: Looked up '{}' from registry: exec={}", app_id, exec_path);
 
     // App is not running, launch it
     println!("stemd: Launching app '{}' with exec: {}", app_id, exec_path);
@@ -607,7 +664,7 @@ fn ipc_thread() {
                                 ]) as usize;
 
                                 let exec_path_offset = 5 + app_id_len;
-                                if n > exec_path_offset + 4 {
+                                if n >= exec_path_offset + 4 {
                                     let exec_path_len = u32::from_le_bytes([
                                         buffer[exec_path_offset],
                                         buffer[exec_path_offset + 1],

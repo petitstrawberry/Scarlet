@@ -26,6 +26,11 @@ use std::{format, println};
 use sws_client::{Connection, Event, InputEvent, WindowSizeLimits};
 use sws_protocol::window_types;
 
+/// stemd IPC protocol constants
+mod stemd_protocol {
+    pub const LAUNCH_OR_FOCUS: u8 = 0x01;
+}
+
 /// Dropdown menu state
 struct DropdownState {
     surface_id: Option<u32>,
@@ -171,6 +176,86 @@ fn spawn_application(path: &str, args: &[&str]) -> bool {
             false
         }
     }
+}
+
+/// Launch or focus an application via stemd
+/// Sends LAUNCH_OR_FOCUS IPC command to stemd
+fn launch_or_focus_app(app_id: &str) -> bool {
+    use std::socket::Socket;
+    use std::io::{Read, Write};
+
+    println!("[menu_bar] Launching app via stemd: {}", app_id);
+
+    // Connect to stemd IPC socket
+    let mut socket = match Socket::new() {
+        Ok(s) => s,
+        Err(e) => {
+            println!("[menu_bar] Failed to create socket: {:?}", e);
+            return false;
+        }
+    };
+
+    if let Err(e) = socket.connect("/tmp/stemd.sock") {
+        println!("[menu_bar] Failed to connect to stemd: {:?}", e);
+        return false;
+    }
+
+    // Set non-blocking mode to avoid hanging if stemd doesn't respond
+    if let Err(e) = socket.set_nonblocking(true) {
+        println!("[menu_bar] Failed to set non-blocking mode: {:?}", e);
+        // Continue anyway - will use timeout with sleep
+    }
+
+    // Build LAUNCH_OR_FOCUS command
+    // Format: cmd(1) + app_id_len(4) + app_id + exec_path_len(4) + exec_path
+    // exec_path is empty (0), so stemd will look up from .desktop files
+    let mut payload = Vec::new();
+    payload.push(stemd_protocol::LAUNCH_OR_FOCUS);
+    payload.extend_from_slice(&(app_id.len() as u32).to_le_bytes());
+    payload.extend_from_slice(app_id.as_bytes());
+    payload.extend_from_slice(&0u32.to_le_bytes()); // empty exec_path
+
+    // Send command
+    if let Err(e) = socket.write(&payload) {
+        println!("[menu_bar] Failed to send command: {:?}", e);
+        return false;
+    }
+
+    if let Err(e) = socket.flush() {
+        println!("[menu_bar] Failed to flush socket: {:?}", e);
+        return false;
+    }
+
+    // Read response with timeout
+    let mut response = [0u8; 256];
+    let max_attempts = 50; // 50 * 10ms = 500ms timeout
+
+    for attempt in 0..max_attempts {
+        match socket.read(&mut response) {
+            Ok(n) if n > 0 => {
+                if let Ok(resp) = core::str::from_utf8(&response[..n]) {
+                    println!("[menu_bar] stemd response: {}", resp.trim());
+                    return resp.starts_with("OK");
+                }
+                return false;
+            }
+            Ok(_) => {
+                // EOF - connection closed
+                println!("[menu_bar] stemd closed connection");
+                return false;
+            }
+            Err(_) => {
+                // WouldBlock is expected in non-blocking mode
+                // Sleep a bit to avoid busy-waiting
+                use std::thread;
+                use std::time::Duration;
+                let _ = thread::sleep(Duration::from_millis(10));
+            }
+        }
+    }
+
+    println!("[menu_bar] Timeout waiting for stemd response");
+    false
 }
 
 fn handle_input(
@@ -713,6 +798,10 @@ pub extern "C" fn main() -> i32 {
                         let on_menu_bar = cursor_y < bar_height as i32;
                         let on_dropdown = dropdown.contains(cursor_x, cursor_y);
 
+                        println!("[menu_bar] Click at ({}, {}): on_menu_bar={}, on_dropdown={}, dropdown_bounds=({},{},{},{})",
+                            cursor_x, cursor_y, on_menu_bar, on_dropdown,
+                            dropdown.x, dropdown.y, dropdown.width, dropdown.height);
+
                         if !on_menu_bar && !on_dropdown {
                             println!("[menu_bar] Closing dropdown (clicked outside)");
                             if let Some(old_id) = dropdown.surface_id {
@@ -726,10 +815,12 @@ pub extern "C" fn main() -> i32 {
                     // Handle dropdown input
                     if input.type_ == 0x01 && input.code == 0x110 && input.value == 0 {
                         // Mouse up on dropdown - check for item clicks
-                        let mut clicked_item = false;
+                        let mut close_dropdown = true;
+                        let mut handle_launch_settings = false;
+
+                        // First pass: check what action to take
                         for item in &dropdown.items {
                             if item.contains(cursor_x, cursor_y, dropdown.x, dropdown.width) {
-                                clicked_item = true;
                                 match &item.item_type {
                                     DropdownItemType::Window { window_id } => {
                                         println!(
@@ -741,8 +832,8 @@ pub extern "C" fn main() -> i32 {
                                     }
                                     DropdownItemType::Action { action } => match action {
                                         DropdownAction::LaunchSettings => {
-                                            println!("[menu_bar] Launching Settings");
-                                            spawn_application("/bin/scarlet_desktop_settings", &[]);
+                                            println!("[menu_bar] Launching Settings via stemd");
+                                            handle_launch_settings = true;
                                         }
                                     },
                                 }
@@ -750,11 +841,18 @@ pub extern "C" fn main() -> i32 {
                             }
                         }
 
-                        // Close dropdown after any click (item or outside)
-                        if let Some(old_id) = dropdown.surface_id {
-                            let _ = conn.destroy_surface(old_id);
+                        // Close dropdown before blocking operation
+                        if close_dropdown {
+                            if let Some(old_id) = dropdown.surface_id {
+                                let _ = conn.destroy_surface(old_id);
+                            }
+                            dropdown.close();
                         }
-                        dropdown.close();
+
+                        // Handle launch after dropdown is closed
+                        if handle_launch_settings {
+                            launch_or_focus_app("scarlet-desktop.settings");
+                        }
                     }
                 }
                 Event::SurfaceConfigure {

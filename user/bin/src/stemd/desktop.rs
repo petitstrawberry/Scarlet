@@ -19,6 +19,7 @@ use std::format;
 use std::fs::list_directory;
 use std::println;
 use std::string::{String, ToString};
+use std::sync::Mutex;
 use std::vec::Vec;
 
 /// Application definition from .desktop file
@@ -117,23 +118,27 @@ impl DesktopParser {
 }
 
 // Global application registry
-// Maps app_id to DesktopEntry
-static mut APP_REGISTRY: Vec<DesktopEntry> = Vec::new();
+// Thread-safe using Mutex
+static APP_REGISTRY: Mutex<Vec<DesktopEntry>> = Mutex::new(Vec::new());
 
 /// Add an application to the registry
 pub fn register_app(entry: DesktopEntry) {
-    unsafe {
+    let mut registry = APP_REGISTRY.lock();
         // Remove existing entry with same app_id
-        APP_REGISTRY.retain(|e| e.app_id != entry.app_id);
-        APP_REGISTRY.push(entry);
-    }
+        registry.retain(|e| e.app_id != entry.app_id);
+        registry.push(entry);
 }
 
 /// Look up an application by app_id
 pub fn lookup_app(app_id: &str) -> Option<DesktopEntry> {
-    unsafe {
-        APP_REGISTRY.iter().find(|e| e.app_id == app_id).cloned()
-    }
+    println!("stemd: lookup_app called for app_id={}", app_id);
+    let registry = APP_REGISTRY.lock();
+    let result = registry
+        .iter()
+        .find(|e| e.app_id == app_id)
+        .cloned();
+    println!("stemd: lookup_app returning {:?}", result.as_ref().map(|e| e.name.as_str()));
+    result
 }
 
 /// Load all .desktop files from a directory

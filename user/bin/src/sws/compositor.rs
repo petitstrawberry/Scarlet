@@ -2,7 +2,7 @@
 
 use super::cursor::Cursor;
 use super::input::{CompositorInputEvent, InputManager, key_codes};
-use super::ipc::{IpcEvent, IpcServer, send_message_to_window};
+use super::ipc::{IpcEvent, IpcServer, send_message_to_window, send_message_to_client};
 use super::window::WindowManager;
 use framebuffer::Framebuffer;
 use std::println;
@@ -1823,6 +1823,25 @@ impl Compositor {
                     self.full_redraw_needed = true;
                 }
             }
+            IpcEvent::FocusWindow { window_id } => {
+                println!("[Compositor] Focusing window #{}", window_id);
+                // Restore if minimized
+                if self.window_manager.is_minimized(window_id) {
+                    let old_rect = self
+                        .window_manager
+                        .get_window(window_id)
+                        .map(|w| (w.x, w.y, w.width, w.height));
+                    if self.window_manager.restore_window(window_id) {
+                        if let Some(r) = old_rect {
+                            self.add_pending_damage(r);
+                        }
+                    }
+                }
+                // Focus and raise the window
+                self.window_manager.focus_window(window_id);
+                self.window_manager.raise_to_top(window_id);
+                self.full_redraw_needed = true;
+            }
             IpcEvent::SetWindowType {
                 window_id,
                 window_type,
@@ -1956,20 +1975,18 @@ impl Compositor {
 
                 let payload = sws_protocol::payload_window_list(&entries);
 
-                // Send WINDOW_LIST response to the client
-                if let Some(first_window_id) = self.window_manager.get_first_window_id() {
-                    let _ = send_message_to_window(
-                        first_window_id,
-                        sws_protocol::server_msg::WINDOW_LIST,
-                        payload,
-                    );
-                    println!(
-                        "[Compositor] Sent WINDOW_LIST: {} windows to client {} (via window {})",
-                        entries.len(),
-                        client_id,
-                        first_window_id
-                    );
-                }
+                // Send WINDOW_LIST response directly to the client (not via window)
+                // This works for clients with or without windows (like stemd)
+                send_message_to_client(
+                    client_id,
+                    sws_protocol::server_msg::WINDOW_LIST,
+                    payload,
+                );
+                println!(
+                    "[Compositor] Sent WINDOW_LIST: {} windows to client {}",
+                    entries.len(),
+                    client_id
+                );
             }
         }
         Ok(false)

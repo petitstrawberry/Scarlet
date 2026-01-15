@@ -228,6 +228,11 @@ pub struct PendingServerFrame {
 static PENDING_SERVER_FRAMES: Mutex<BTreeMap<u32, Vec<PendingServerFrame>>> =
     Mutex::new(BTreeMap::new());
 
+/// Pending server->client responses for specific clients (by client_id)
+/// This is used for responses to clients that don't have windows (like stemd)
+static PENDING_CLIENT_RESPONSES: Mutex<BTreeMap<usize, Vec<PendingServerFrame>>> =
+    Mutex::new(BTreeMap::new());
+
 /// Add an event to the global queue
 pub fn push_ipc_event(event: IpcEvent) {
     let mut queue = EVENT_QUEUE.lock();
@@ -297,6 +302,24 @@ pub fn send_message_to_window(window_id: u32, msg_type: u32, payload: Vec<u8>) {
     }
 }
 
+/// Queue a server->client protocol message for a specific client (by client_id).
+/// This is used for responses to clients that don't have windows (like stemd).
+pub fn send_message_to_client(client_id: usize, msg_type: u32, payload: Vec<u8>) {
+    let mut pending = PENDING_CLIENT_RESPONSES.lock();
+    match pending.get_mut(&client_id) {
+        Some(frames) => frames.push(PendingServerFrame { msg_type, payload }),
+        None => {
+            println!(
+                "[IpcServer] Sending message to client {} (msg_type={}, payload_len={})",
+                client_id, msg_type, payload.len()
+            );
+            let mut frames = Vec::new();
+            frames.push(PendingServerFrame { msg_type, payload });
+            pending.insert(client_id, frames);
+        }
+    }
+}
+
 fn pop_pending_server_frames(window_id: u32) -> Vec<PendingServerFrame> {
     let mut pending = PENDING_SERVER_FRAMES.lock();
     if let Some(frames) = pending.get_mut(&window_id) {
@@ -319,6 +342,26 @@ fn pop_pending_input_events(window_id: u32) -> Vec<PendingInputEvent> {
             Vec::new() // Already empty, no reallocation needed
         } else {
             core::mem::take(events)
+        }
+    } else {
+        Vec::new()
+    }
+}
+
+/// Pop pending server responses for a specific client (by client_id)
+fn pop_pending_client_responses(client_id: usize) -> Vec<PendingServerFrame> {
+    let mut pending = PENDING_CLIENT_RESPONSES.lock();
+    if let Some(frames) = pending.get_mut(&client_id) {
+        if frames.is_empty() {
+            Vec::new()
+        } else {
+            let frames = core::mem::take(frames);
+            println!(
+                "[IpcServer] Popping {} pending responses for client {}",
+                frames.len(),
+                client_id
+            );
+            frames
         }
     } else {
         Vec::new()
@@ -504,6 +547,25 @@ fn client_thread_main(client_id: usize, mut socket: Socket) {
         // Send any pending input events for this client's windows
         let mut has_events = false;
         let mut _total_events = 0;
+
+        // First, check for pending responses addressed directly to this client
+        // (for clients that don't have windows, like stemd)
+        let client_responses = pop_pending_client_responses(client_id);
+        for frame in client_responses {
+            println!(
+                "[ClientThread {}] Sending client response (msg_type={}, payload_len={})",
+                client_id, frame.msg_type, frame.payload.len()
+            );
+            if let Err(e) = write_frame(&mut socket, frame.msg_type, &frame.payload) {
+                println!(
+                    "[ClientThread {}] Failed to send client response: {:?}",
+                    client_id, e
+                );
+                break 'main;
+            }
+            has_events = true;
+        }
+
         for &window_id in &managed_windows {
             // Send queued server->client control messages for this window.
             let frames = pop_pending_server_frames(window_id);
@@ -934,6 +996,13 @@ fn client_thread_main(client_id: usize, mut socket: Socket) {
                 );
                 push_ipc_event(IpcEvent::RestoreWindow { window_id });
             }
+            Ok(ClientMessageRef::FocusWindow { window_id }) => {
+                println!(
+                    "[ClientThread {}] FocusWindow: window_id={}",
+                    client_id, window_id
+                );
+                push_ipc_event(IpcEvent::FocusWindow { window_id });
+            }
             Ok(ClientMessageRef::SetWindowType {
                 window_id,
                 window_type,
@@ -1126,6 +1195,9 @@ pub enum IpcEvent {
 
     /// Restore a window from minimized or maximized state
     RestoreWindow { window_id: u32 },
+
+    /// Focus and raise a window
+    FocusWindow { window_id: u32 },
 
     /// Set window type for Z-order management
     SetWindowType { window_id: u32, window_type: u32 },

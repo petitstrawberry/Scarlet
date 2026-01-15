@@ -46,6 +46,7 @@ pub mod client_msg {
     pub const SET_WINDOW_RESIZABLE: u32 = 23;
     pub const GET_WINDOW_LIST: u32 = 24;
     pub const LAUNCH_OR_FOCUS: u32 = 25;
+    pub const FOCUS_WINDOW: u32 = 26;
 }
 
 /// Message type IDs (server -> client).
@@ -260,6 +261,11 @@ pub enum ClientMessageRef<'a> {
     LaunchOrFocus {
         app_id: &'a [u8],
         exec_path: &'a [u8],
+    },
+
+    /// Focus and raise a specific window.
+    FocusWindow {
+        window_id: u32,
     },
 }
 
@@ -525,6 +531,14 @@ pub fn parse_client_message<'a>(
             let exec_path = &payload[8 + app_id_len..8 + app_id_len + exec_path_len];
 
             Ok(ClientMessageRef::LaunchOrFocus { app_id, exec_path })
+        }
+        client_msg::FOCUS_WINDOW => {
+            // Payload: window_id (u32)
+            if payload.len() != 4 {
+                return Err(ProtocolError::MalformedPayload);
+            }
+            let window_id = u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
+            Ok(ClientMessageRef::FocusWindow { window_id })
         }
         _ => Err(ProtocolError::UnknownMessageType),
     }
@@ -993,5 +1007,10 @@ pub fn payload_launch_or_focus(app_id: &[u8], exec_path: &[u8]) -> Vec<u8> {
     payload.extend_from_slice(&(exec_path.len() as u32).to_le_bytes());
     payload.extend_from_slice(exec_path);
     payload
+}
+
+/// Build payload for client->server `FOCUS_WINDOW`.
+pub fn payload_focus_window(window_id: u32) -> Vec<u8> {
+    window_id.to_le_bytes().to_vec()
 }
 

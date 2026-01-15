@@ -7,6 +7,7 @@ use crate::TransientFlags;
 use crate::WindowSizeLimits;
 use scarlet_std::collections::BTreeMap;
 use scarlet_std::ipc::SharedMemory;
+use scarlet_std::println;
 use scarlet_std::socket::Socket;
 use scarlet_std::string::String;
 use scarlet_std::vec::Vec;
@@ -29,9 +30,17 @@ fn read_exact(socket: &mut Socket, buf: &mut [u8]) -> Result<(), Error> {
     let mut filled = 0;
     while filled < buf.len() {
         match socket.read(&mut buf[filled..]) {
-            Ok(0) => return Err(Error::Disconnected),
-            Ok(n) => filled += n,
+            Ok(0) => {
+                println!("[sws-client] read_exact: EOF (connection closed)");
+                return Err(Error::Disconnected);
+            }
+            Ok(n) => {
+                filled += n;
+            }
             Err(e) => {
+                if e.kind() != scarlet_std::io::ErrorKind::WouldBlock {
+                    println!("[sws-client] read_exact: error (not WouldBlock): {:?}", e);
+                }
                 if e.kind() == scarlet_std::io::ErrorKind::WouldBlock {
                     return Err(Error::WouldBlock);
                 }
@@ -66,6 +75,7 @@ fn write_all(socket: &mut Socket, buf: &[u8]) -> Result<(), Error> {
 fn read_frame_into(socket: &mut Socket, payload: &mut Vec<u8>) -> Result<u32, Error> {
     let mut header_bytes = [0u8; protocol::MessageHeader::SIZE];
     read_exact(socket, &mut header_bytes)?;
+
     let header = protocol::MessageHeader::from_le_bytes(header_bytes);
 
     let payload_len = header.payload_size as usize;
@@ -442,6 +452,20 @@ impl Connection {
         .map_err(|_| Error::SendFailed)
     }
 
+    /// Focus and raise a window to the top of the Z-order.
+    pub fn focus_window(&mut self, surface_id: u32) -> Result<(), Error> {
+        if self.surfaces.get(&surface_id).is_none() {
+            return Err(Error::SurfaceNotFound);
+        }
+        let payload = protocol::payload_focus_window(surface_id);
+        write_frame(
+            &mut self.socket,
+            protocol::client_msg::FOCUS_WINDOW,
+            &payload,
+        )
+        .map_err(|_| Error::SendFailed)
+    }
+
     /// Set the window type used for Z-order management.
     ///
     /// The `window_type` argument selects one of the window type constants defined
@@ -718,18 +742,35 @@ impl Connection {
     ///
     /// This is a synchronous request: it blocks until the server responds with WINDOW_LIST.
     pub fn get_window_list(&mut self) -> Result<Vec<WindowListEntry>, Error> {
+        println!("[sws-client] get_window_list: socket_handle={}, sending GET_WINDOW_LIST request",
+            self.socket.as_raw());
+
         // Send GET_WINDOW_LIST request (no payload)
         write_frame(&mut self.socket, protocol::client_msg::GET_WINDOW_LIST, &[])
             .map_err(|_| Error::SendFailed)?;
+
+        println!("[sws-client] get_window_list: socket_handle={}, request sent, switching to blocking mode",
+            self.socket.as_raw());
 
         // Switch to blocking mode for synchronous response
         self.socket
             .set_nonblocking(false)
             .map_err(|_| Error::SocketConfig)?;
 
+        // Verify blocking mode was actually set
+        let is_nonblocking = self.socket.is_nonblocking().unwrap_or(false);
+        println!("[sws-client] get_window_list: socket_handle={}, verified is_nonblocking={}",
+            self.socket.as_raw(), is_nonblocking);
+
+        println!("[sws-client] get_window_list: socket_handle={}, waiting for response...",
+            self.socket.as_raw());
+
         // Wait for WINDOW_LIST response
         let msg_type =
             read_frame_into(&mut self.socket, &mut self.read_payload).map_err(|_| Error::ReceiveFailed)?;
+
+        println!("[sws-client] get_window_list: socket_handle={}, received msg_type={}",
+            self.socket.as_raw(), msg_type);
         let response = protocol::parse_server_message(msg_type, &self.read_payload)
             .map_err(|_| Error::InvalidResponse)?;
 
