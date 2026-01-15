@@ -1731,9 +1731,11 @@ impl Compositor {
                     .window_manager
                     .get_window(window_id)
                     .map(|w| (w.x, w.y, w.width, w.height));
-                
+
                 // Use workarea for Normal windows only
-                let (max_w, max_h, max_x, max_y) = if let Some(window) = self.window_manager.get_window(window_id) {
+                let (max_w, max_h, max_x, max_y) = if let Some(window) =
+                    self.window_manager.get_window(window_id)
+                {
                     if window.window_type == super::window::WindowType::Normal {
                         match self.workarea {
                             Some((wx, wy, ww, wh)) => {
@@ -1749,7 +1751,7 @@ impl Compositor {
                                 );
                                 (max_w, max_h, Some(max_x), Some(max_y))
                             }
-                            None => (self.screen_width, self.screen_height, None, None)
+                            None => (self.screen_width, self.screen_height, None, None),
                         }
                     } else {
                         (self.screen_width, self.screen_height, None, None)
@@ -1757,21 +1759,18 @@ impl Compositor {
                 } else {
                     (self.screen_width, self.screen_height, None, None)
                 };
-                
-                if self.window_manager.maximize_window(
-                    window_id,
-                    max_w,
-                    max_h,
-                ) {
+
+                if self.window_manager.maximize_window(window_id, max_w, max_h) {
                     // Set position for Normal windows within workarea
                     if let (Some(max_x), Some(max_y)) = (max_x, max_y) {
                         if let Some(window) = self.window_manager.get_window(window_id) {
                             if window.window_type == super::window::WindowType::Normal {
-                                self.window_manager.set_window_position(window_id, max_x, max_y);
+                                self.window_manager
+                                    .set_window_position(window_id, max_x, max_y);
                             }
                         }
                     }
-                    
+
                     if let Some(r) = old_rect {
                         self.add_pending_damage(r);
                     }
@@ -1846,17 +1845,17 @@ impl Compositor {
                     // For Normal windows, adjust position to workarea if available
                     if wtype == super::window::WindowType::Normal {
                         if let Some(window) = self.window_manager.get_window(window_id) {
-                            let (default_x, default_y) = self.window_manager.calculate_default_position(
-                                window.width,
-                                window.height,
-                            );
+                            let (default_x, default_y) = self
+                                .window_manager
+                                .calculate_default_position(window.width, window.height);
                             // Only adjust if window is at default position (0,0)
                             if window.x == 0 && window.y == 0 {
                                 println!(
                                     "[Compositor] Adjusting Normal window #{} position to workarea: ({}, {})",
                                     window_id, default_x, default_y
                                 );
-                                self.window_manager.set_window_position(window_id, default_x, default_y);
+                                self.window_manager
+                                    .set_window_position(window_id, default_x, default_y);
                             }
                         }
                     }

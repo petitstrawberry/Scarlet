@@ -444,7 +444,12 @@ pub fn parse_client_message<'a>(
             let y = i32::from_le_bytes([payload[4], payload[5], payload[6], payload[7]]);
             let width = u32::from_le_bytes([payload[8], payload[9], payload[10], payload[11]]);
             let height = u32::from_le_bytes([payload[12], payload[13], payload[14], payload[15]]);
-            Ok(ClientMessageRef::SetWorkarea { x, y, width, height })
+            Ok(ClientMessageRef::SetWorkarea {
+                x,
+                y,
+                width,
+                height,
+            })
         }
         _ => Err(ProtocolError::UnknownMessageType),
     }

@@ -205,7 +205,8 @@ pub fn read_config(path: &str) -> Result<String, &'static str> {
         if n == 0 {
             break;
         }
-        let chunk = core::str::from_utf8(&buf[..n]).map_err(|_| "Config file is not valid UTF-8")?;
+        let chunk =
+            core::str::from_utf8(&buf[..n]).map_err(|_| "Config file is not valid UTF-8")?;
         content.push_str(chunk);
     }
 

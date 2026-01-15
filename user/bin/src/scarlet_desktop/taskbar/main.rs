@@ -154,11 +154,7 @@ fn draw_taskbar(
             Color::rgb(60, 68, 88),
             h.saturating_sub(1) as i32,
         ),
-        TaskbarPosition::Bottom => (
-            Color::rgb(22, 26, 34),
-            Color::rgb(60, 68, 88),
-            0,
-        ),
+        TaskbarPosition::Bottom => (Color::rgb(22, 26, 34), Color::rgb(60, 68, 88), 0),
     };
 
     surface.with_buffer(|buf, width, height| {
@@ -244,7 +240,7 @@ pub extern "C" fn main() -> i32 {
     let mut screen_w: u32 = 320;
     let mut screen_h: u32 = 240;
     let mut actual_screen_w: u32 = 320;
-    
+
     // Initialize actual_screen_w
     actual_screen_w = 320;
 
@@ -257,7 +253,14 @@ pub extern "C" fn main() -> i32 {
     let mut tick_ms: u32 = 0;
 
     // Initial draw.
-    draw_taskbar(&mut conn, surface_id, seconds, left_down, pressed_in_start, position);
+    draw_taskbar(
+        &mut conn,
+        surface_id,
+        seconds,
+        left_down,
+        pressed_in_start,
+        position,
+    );
 
     loop {
         let _ = conn.dispatch();
@@ -296,7 +299,10 @@ pub extern "C" fn main() -> i32 {
                     screen_h = height;
                     actual_screen_w = width;
 
-                    if conn.resize_window(surface_id, actual_screen_w, bar_height).is_ok() {
+                    if conn
+                        .resize_window(surface_id, actual_screen_w, bar_height)
+                        .is_ok()
+                    {
                         let y = match position {
                             TaskbarPosition::Top => 0,
                             TaskbarPosition::Bottom => screen_h.saturating_sub(bar_height) as i32,
@@ -339,7 +345,14 @@ pub extern "C" fn main() -> i32 {
         }
 
         if needs_redraw {
-            draw_taskbar(&mut conn, surface_id, seconds, left_down, pressed_in_start, position);
+            draw_taskbar(
+                &mut conn,
+                surface_id,
+                seconds,
+                left_down,
+                pressed_in_start,
+                position,
+            );
         }
 
         thread::sleep(Duration::from_millis(16));
