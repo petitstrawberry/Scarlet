@@ -14,7 +14,7 @@ mod controls;
 mod navigation;
 mod window;
 
-pub use traits::{View, ViewBox, Size, IntoViewBox};
+pub use traits::{View, ViewBox, Size, IntoViewBox, Focus, Hoverable};
 pub use containers::{HStack, StackAlignment, VStack, ZStack, Padding, Center};
 pub use controls::{
     // Basic views

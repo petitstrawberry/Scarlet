@@ -2,7 +2,7 @@
 //!
 //! All controls support two-way binding via `Binding<T>` for reactive updates.
 
-use super::traits::{View, Size};
+use super::traits::{View, Size, Focus, Hoverable};
 use crate::graphics::{measure_text_sized, Canvas, Rect};
 use crate::Color;
 use crate::event::{Event, EventKind, MouseButton};
@@ -434,22 +434,17 @@ impl<F: FnMut() + 'static> View for Button<F> {
 
     fn on_event(&mut self, event: &mut Event, frame: Rect) -> bool {
         match event.kind {
-            EventKind::MouseMove => {
-                let was_hovered = self.is_hovered;
-                self.is_hovered = frame.contains(event.x(), event.y());
-                if was_hovered != self.is_hovered {
-                    self.needs_redraw = true;
-                    true
-                } else {
-                    false
-                }
-            }
             EventKind::MouseDown { button: MouseButton::Left } => {
                 if frame.contains(event.x(), event.y()) {
                     self.is_pressed = true;
                     self.needs_redraw = true;
                     true
                 } else {
+                    // Click outside clears pressed state
+                    if self.is_pressed {
+                        self.is_pressed = false;
+                        self.needs_redraw = true;
+                    }
                     false
                 }
             }
@@ -466,6 +461,17 @@ impl<F: FnMut() + 'static> View for Button<F> {
                 }
             }
             _ => false,
+        }
+    }
+
+    fn update_hover_state(&mut self, mouse_in_frame: bool) -> bool {
+        let was_hovered = self.is_hovered;
+        self.is_hovered = mouse_in_frame;
+        if was_hovered != self.is_hovered {
+            self.needs_redraw = true;
+            true
+        } else {
+            false
         }
     }
 
@@ -523,6 +529,12 @@ impl<F: FnMut() + 'static> View for Button<F> {
 
     fn clear_needs_draw(&mut self) {
         self.needs_redraw = false;
+    }
+}
+
+impl<F: FnMut() + 'static> Hoverable for Button<F> {
+    fn is_hovered(&self) -> bool {
+        self.is_hovered
     }
 }
 
@@ -823,7 +835,20 @@ impl View for TextField {
             EventKind::MouseDown { button: MouseButton::Left } => {
                 let was_focused = self.is_focused;
                 self.is_focused = frame.contains(event.x(), event.y());
+                if was_focused != self.is_focused {
+                    self.refresh_handle.mark_dirty();
+                }
                 was_focused != self.is_focused
+            }
+            EventKind::Blur => {
+                let was_focused = self.is_focused;
+                self.is_focused = false;
+                if was_focused {
+                    self.refresh_handle.mark_dirty();
+                    true
+                } else {
+                    false
+                }
             }
             _ => false,
         }
@@ -839,6 +864,30 @@ impl View for TextField {
 
     fn clear_needs_draw(&mut self) {
         self.refresh_handle.take_dirty();
+    }
+}
+
+impl Focus for TextField {
+    fn on_focus_gain(&mut self) -> bool {
+        let was_focused = self.is_focused;
+        self.is_focused = true;
+        if !was_focused {
+            self.refresh_handle.mark_dirty();
+        }
+        !was_focused
+    }
+
+    fn on_focus_loss(&mut self) -> bool {
+        let was_focused = self.is_focused;
+        self.is_focused = false;
+        if was_focused {
+            self.refresh_handle.mark_dirty();
+        }
+        was_focused
+    }
+
+    fn is_focused(&self) -> bool {
+        self.is_focused
     }
 }
 

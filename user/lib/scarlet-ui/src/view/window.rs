@@ -75,7 +75,13 @@ pub struct Window {
 
     size_limits: WindowSizeLimits,
     window_type: WindowKind,
-    
+
+    // Window properties
+    is_main_window: bool,
+
+    // Focus management
+    focused_frame: Option<(Rect, bool)>, // (frame, was_focusable)
+
     // State
     close_button_hovered: bool,
     close_button_pressed: bool,
@@ -116,6 +122,8 @@ impl Window {
             content_size: Size::ZERO,
             size_limits: WindowSizeLimits::NONE,
             window_type: WindowKind::Normal,
+            is_main_window: false,
+            focused_frame: None,
             close_button_hovered: false,
             close_button_pressed: false,
             close_requested: false,
@@ -131,6 +139,17 @@ impl Window {
             move_requested: false,
             needs_redraw: true,
         }
+    }
+
+    /// Mark this as the main window (closing it terminates the app)
+    pub fn main_window(mut self) -> Self {
+        self.is_main_window = true;
+        self
+    }
+
+    /// Check if this is the main window
+    pub fn is_main_window(&self) -> bool {
+        self.is_main_window
     }
 
     /// Set minimum window size in pixels.
@@ -596,6 +615,28 @@ impl View for Window {
                 self.minimize_button_hovered = false;
                 self.needs_redraw = true;
             }
+
+            // Handle focus management for MouseDown events
+            if matches!(event.kind, EventKind::MouseDown { button: MouseButton::Left }) {
+                // If we have a focused frame and click is outside it, send blur
+                if let Some((focused_rect, _)) = self.focused_frame {
+                    if !focused_rect.contains(event.x(), event.y()) {
+                        // Send blur to all children (they'll handle it if they have focus)
+                        let mut blur_event = Event::new(EventKind::Blur, event.position);
+                        if let Some(ref mut content) = self.content {
+                            let content_frame = Rect::new(
+                                0,
+                                TITLEBAR_HEIGHT as i32,
+                                self.content_size.width,
+                                self.content_size.height,
+                            );
+                            let _ = content.on_event(&mut blur_event, content_frame);
+                        }
+                        self.focused_frame = None;
+                    }
+                }
+            }
+
             false
         }
     }

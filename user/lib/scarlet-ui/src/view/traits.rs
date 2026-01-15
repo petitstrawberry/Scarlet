@@ -20,6 +20,40 @@ impl Size {
     pub const ZERO: Size = Size::new(0, 0);
 }
 
+/// Trait for views that can receive and manage focus
+///
+/// Views like TextField implement this to handle focus gain/loss.
+pub trait Focus {
+    /// Called when the view gains focus
+    fn on_focus_gain(&mut self) -> bool {
+        false
+    }
+
+    /// Called when the view loses focus
+    fn on_focus_loss(&mut self) -> bool {
+        false
+    }
+
+    /// Check if this view currently has focus
+    fn is_focused(&self) -> bool {
+        false
+    }
+}
+
+/// Trait for views that track hover state
+///
+/// Views like Button implement this for visual feedback.
+///
+/// This is separate from `View::update_hover_state` - views implement
+/// this trait to advertise hover capability, and the framework calls
+/// `update_hover_state` automatically on MouseMove.
+pub trait Hoverable {
+    /// Check if mouse is currently over the view
+    fn is_hovered(&self) -> bool {
+        false
+    }
+}
+
 /// The core trait for all UI components
 ///
 /// Views form a tree structure where each view can contain child views.
@@ -144,6 +178,17 @@ pub trait View {
     /// Clear the needs_draw flag after drawing
     fn clear_needs_draw(&mut self) {
         // Default: no-op
+    }
+
+    /// Update hover state based on mouse position
+    ///
+    /// Called by the framework during MouseMove events to update hover state.
+    /// Returns `true` if the hover state changed.
+    ///
+    /// Default implementation does nothing. Views that track hover state
+    /// (like Button) should override this to update their internal state.
+    fn update_hover_state(&mut self, _mouse_in_frame: bool) -> bool {
+        false
     }
 }
 

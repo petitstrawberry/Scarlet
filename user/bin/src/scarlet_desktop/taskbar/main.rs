@@ -737,17 +737,12 @@ pub extern "C" fn main() -> i32 {
                                         // Restore/focus the window
                                         let _ = conn.restore_window(*window_id);
                                     }
-                                    DropdownItemType::Action { action } => {
-                                        match action {
-                                            DropdownAction::LaunchSettings => {
-                                                println!("[menu_bar] Launching Settings");
-                                                spawn_application(
-                                                    "/system/scarlet/bin/scarlet_desktop_settings",
-                                                    &[],
-                                                );
-                                            }
+                                    DropdownItemType::Action { action } => match action {
+                                        DropdownAction::LaunchSettings => {
+                                            println!("[menu_bar] Launching Settings");
+                                            spawn_application("/bin/scarlet_desktop_settings", &[]);
                                         }
-                                    }
+                                    },
                                 }
                                 // Close dropdown after selection
                                 if let Some(old_id) = dropdown.surface_id {
@@ -789,12 +784,7 @@ pub extern "C" fn main() -> i32 {
 
             // Show app menu dropdown for "Scarlet" menu (index 0)
             if label == "Scarlet" {
-                show_app_menu_dropdown(
-                    &mut conn,
-                    &mut dropdown,
-                    &menu_items[menu_idx],
-                    menu_idx,
-                );
+                show_app_menu_dropdown(&mut conn, &mut dropdown, &menu_items[menu_idx], menu_idx);
             }
             // Show window list dropdown for "Window" menu (index 4)
             else if label == "Window" {

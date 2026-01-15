@@ -11,8 +11,8 @@ extern crate scarlet_std as std;
 
 use scarlet_desktop_config::{DesktopConfig, TaskbarPosition};
 use scarlet_ui::{
-    Application, Button, Color, HStack, Label, NavigationItem, NavigationView,
-    RectView, Spacer, StackAlignment, State, VStack, Window, WindowKind,
+    Application, Button, Color, HStack, Label, NavigationItem, NavigationView, RectView, Spacer,
+    StackAlignment, State, VStack, Window, WindowKind,
 };
 use std::{boxed::Box, format, println, string::String, vec::Vec};
 

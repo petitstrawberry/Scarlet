@@ -380,6 +380,12 @@ impl Application {
             // Window is dropped when removed from self.windows, but the protocol-level
             // destroy must be sent explicitly via sws-client.
             scratch_surface_ids.clear();
+
+            // Check if any main window is being closed
+            let main_window_being_closed = self.windows.iter().any(|w| {
+                w.window.is_close_requested() && w.window.is_main_window()
+            });
+
             for managed in &self.windows {
                 if managed.window.is_close_requested() {
                     scratch_surface_ids.push(managed.surface_id);
@@ -393,6 +399,13 @@ impl Application {
                 }
             }
             self.windows.retain(|w| !w.window.is_close_requested());
+
+            // Terminate if main window was closed or all windows closed with delegate approval
+            if main_window_being_closed
+                || (self.windows.is_empty() && self.should_terminate_after_last_window_closed())
+            {
+                self.terminate();
+            }
 
             // 4b. Handle move requests (send REQUEST_MOVE_WINDOW to SWS)
             scratch_move_surface_ids.clear();
@@ -857,6 +870,11 @@ impl Application {
 
     /// Dispatch event in bubble phase recursively
     fn dispatch_bubble(view: &mut dyn View, event: &mut Event, frame: Rect, route_all: bool) -> bool {
+        // For MouseMove, generate MouseEnter/MouseLeave events first
+        if matches!(event.kind, crate::event::EventKind::MouseMove) {
+            Self::dispatch_hover_updates(view, event, frame);
+        }
+
         // First dispatch to children
         let mut consumed = false;
         view.visit_children_mut(&mut |child, child_frame| {
@@ -888,7 +906,7 @@ impl Application {
         if consumed {
             return true;
         }
-        
+
         // Then handle on this view
         let handled = view.on_event(event, frame);
         if handled || event.is_stopped() {
@@ -897,5 +915,28 @@ impl Application {
             view.set_needs_draw();
         }
         handled
+    }
+
+    /// Generate MouseEnter/MouseLeave events for views whose hover state changed
+    fn dispatch_hover_updates(view: &mut dyn View, event: &Event, frame: Rect) {
+        let mouse_in_frame = frame.contains(event.x(), event.y());
+
+        // Update hover state for this view
+        if view.update_hover_state(mouse_in_frame) {
+            // Hover state changed, mark as dirty
+            view.set_needs_draw();
+        }
+
+        // Recursively process children
+        view.visit_children_mut(&mut |child, child_frame| {
+            let abs = Rect::new(
+                frame.x + child_frame.x,
+                frame.y + child_frame.y,
+                child_frame.width,
+                child_frame.height,
+            );
+            Self::dispatch_hover_updates(child, event, abs);
+            false
+        });
     }
 }
