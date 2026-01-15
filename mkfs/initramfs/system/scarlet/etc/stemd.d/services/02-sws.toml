@@ -7,4 +7,4 @@ depends = ["sbusd"]
 
 [service.scarlet-desktop]
 exec = "/bin/scarlet_desktop"
-dependencies = ["sws"]
+depends = ["sws"]
