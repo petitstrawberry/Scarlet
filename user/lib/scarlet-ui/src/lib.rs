@@ -113,6 +113,7 @@ extern crate scarlet_std as std;
 
 mod application;
 pub mod color;
+pub mod design;
 pub mod event;
 pub mod graphics;
 pub mod menu;
