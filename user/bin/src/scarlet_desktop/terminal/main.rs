@@ -10,9 +10,7 @@
 
 extern crate scarlet_std as std;
 
-use scarlet_ui::{
-    Application, Color, Label, Padding, State, VStack, Window, WindowKind,
-};
+use scarlet_ui::{Application, Color, Label, Padding, State, VStack, Window, WindowKind};
 use std::println;
 
 /// Terminal state
@@ -38,7 +36,7 @@ impl TerminalState {
                  1. Add libc dependency to Cargo.toml\n\
                  2. Or implement syscall wrappers for RISC-V\n\
                  3. Uncomment PTY code in main.rs\n\n\
-                 Press Ctrl+C to exit.\n"
+                 Press Ctrl+C to exit.\n",
             ),
             command: scarlet_std::string::String::new(),
         }
@@ -68,13 +66,15 @@ impl TerminalState {
                 self.output.push_str("\n");
             }
             "date" => {
-                self.output.push_str("Current date/time: [Time implementation needed]\n");
+                self.output
+                    .push_str("Current date/time: [Time implementation needed]\n");
             }
             "" => {}
             _ => {
                 self.output.push_str("Command not found: ");
                 self.output.push_str(cmd);
-                self.output.push_str("\nType 'help' for available commands.\n");
+                self.output
+                    .push_str("\nType 'help' for available commands.\n");
             }
         }
     }
@@ -114,7 +114,7 @@ pub extern "C" fn main() -> i32 {
                     Padding::new(
                         Label::new(terminal_state.map(|s| s.output.clone()))
                             .color(Color::rgb(0, 255, 0))
-                            .font_size(13)
+                            .font_size(13),
                     )
                     .all(8),
                 )
@@ -131,10 +131,10 @@ pub extern "C" fn main() -> i32 {
                             }
                         }))
                         .color(Color::rgb(0, 200, 0))
-                        .font_size(14)
+                        .font_size(14),
                     )
                     .all(8),
-                )
+                ),
         );
 
     // Simulate some initial terminal output

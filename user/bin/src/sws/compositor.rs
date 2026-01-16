@@ -1106,7 +1106,10 @@ impl Compositor {
                 // Need full redraw when Z-order changes
                 self.full_redraw_needed = true;
             } else {
-                println!("[Compositor] Window #{} does not accept focus (global UI element)", win_id);
+                println!(
+                    "[Compositor] Window #{} does not accept focus (global UI element)",
+                    win_id
+                );
                 // Still raise to top to maintain proper Z-order for that window type
                 self.window_manager.raise_to_top_with_type(win_id);
                 self.full_redraw_needed = true;
@@ -1123,7 +1126,10 @@ impl Compositor {
             let title_bytes = window.title.as_deref().unwrap_or(b"");
 
             let payload = sws_protocol::payload_focus_changed(window_id, app_id_bytes, title_bytes);
-            super::ipc::broadcast_message_to_all_clients(sws_protocol::server_msg::FOCUS_CHANGED, payload);
+            super::ipc::broadcast_message_to_all_clients(
+                sws_protocol::server_msg::FOCUS_CHANGED,
+                payload,
+            );
 
             println!(
                 "[Compositor] Broadcast focus change: window_id={}, app_id_len={}, title_len={}",
@@ -1132,7 +1138,10 @@ impl Compositor {
                 title_bytes.len()
             );
         } else {
-            println!("[Compositor] Warning: Failed to broadcast focus change for non-existent window #{}", window_id);
+            println!(
+                "[Compositor] Warning: Failed to broadcast focus change for non-existent window #{}",
+                window_id
+            );
         }
     }
 
@@ -1440,7 +1449,10 @@ impl Compositor {
 
                             self.full_redraw_needed = true;
                         } else {
-                            println!("[Compositor] Window #{} does not accept focus (global UI element)", win_id);
+                            println!(
+                                "[Compositor] Window #{} does not accept focus (global UI element)",
+                                win_id
+                            );
                             // Still raise to top to maintain proper Z-order for that window type
                             self.window_manager.raise_to_top_with_type(win_id);
                             self.full_redraw_needed = true;

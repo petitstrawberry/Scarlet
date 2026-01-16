@@ -15,8 +15,8 @@ extern crate scarlet_std as std;
 use core::{hint::spin_loop, sync::atomic::fence};
 use sbus_client as sbus;
 use std::{
-    fs::File,
     format,
+    fs::File,
     handle::Handle,
     println,
     socket::Socket,
@@ -567,10 +567,7 @@ fn get_app_menu_titles(app_id: &str) -> Vec<String> {
             String::from("Help"),
         ]);
     } else if app_id.contains("clock") {
-        menus.extend(vec![
-            String::from("View"),
-            String::from("Help"),
-        ]);
+        menus.extend(vec![String::from("View"), String::from("Help")]);
     } else {
         // Generic menus for unknown apps
         menus.extend(vec![
@@ -1312,14 +1309,17 @@ fn handle_sbus_message(
                     // Return array of strings: "app_id|name"
                     for app in &apps {
                         let entry = lookup_app(&app.app_id);
-                        let name = entry.as_ref().map(|e| e.name.as_str()).unwrap_or(&app.app_id);
+                        let name = entry
+                            .as_ref()
+                            .map(|e| e.name.as_str())
+                            .unwrap_or(&app.app_id);
                         let display_name = format!("{}|{}", app.app_id, name);
                         result_args.push(Argument::String(display_name));
                     }
 
                     if let Some(conn) = conn_guard.as_mut() {
-                        let result: core::result::Result<(), sbus::Error> = conn
-                            .send_method_return(serial, result_args);
+                        let result: core::result::Result<(), sbus::Error> =
+                            conn.send_method_return(serial, result_args);
                         let _ = result;
                     }
                     Ok(())
@@ -1357,10 +1357,13 @@ fn handle_sbus_message(
                     Ok(())
                 }
                 "GetAppMenus" => {
-                    println!("[sbus] Handling GetAppMenus method for app: {}", args.get(0).map_or("", |a| match a {
-                        sbus::Argument::String(s) => s.as_str(),
-                        _ => "",
-                    }));
+                    println!(
+                        "[sbus] Handling GetAppMenus method for app: {}",
+                        args.get(0).map_or("", |a| match a {
+                            sbus::Argument::String(s) => s.as_str(),
+                            _ => "",
+                        })
+                    );
 
                     // Extract app_id from arguments
                     let app_id = if !args.is_empty() {
@@ -1382,11 +1385,8 @@ fn handle_sbus_message(
                     let menus_string = menu_titles.join("|");
 
                     if let Some(conn) = conn_guard.as_mut() {
-                        let result: core::result::Result<(), sbus::Error> = conn
-                            .send_method_return(
-                                serial,
-                                vec![Argument::String(menus_string)],
-                            );
+                        let result: core::result::Result<(), sbus::Error> =
+                            conn.send_method_return(serial, vec![Argument::String(menus_string)]);
                         let _ = result;
                     }
                     Ok(())

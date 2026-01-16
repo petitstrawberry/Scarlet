@@ -2,10 +2,10 @@
 
 use super::traits::{View, ViewBox, Size};
 use crate::graphics::{Canvas, Rect};
-use crate::event::Event;
+use crate::event::{Event, EventKind};
 use scarlet_std::boxed::Box;
 use scarlet_std::vec::Vec;
-use scarlet_std::vec;
+use scarlet_std::println;
 
 /// Cross-axis alignment for stacks.
 ///
@@ -146,7 +146,7 @@ impl View for VStack {
     fn on_event(&mut self, event: &mut Event, frame: Rect) -> bool {
         let mut y = frame.y;
 
-        for (child, cached_size) in &mut self.children {
+        for (i, (child, cached_size)) in self.children.iter_mut().enumerate() {
             let extra = frame.width.saturating_sub(cached_size.width) as i32;
             let dx = match self.alignment {
                 StackAlignment::Start => 0,
@@ -155,6 +155,10 @@ impl View for VStack {
             };
             let child_frame = Rect::new(frame.x + dx, y, cached_size.width, cached_size.height);
             if child_frame.contains(event.x(), event.y()) {
+                // Only log non-MouseMove events
+                // if !matches!(event.kind, EventKind::MouseMove) {
+                //     println!("[VStack] dispatching to child {} (event={:?})", i, event.kind);
+                // }
                 if child.on_event(event, child_frame) {
                     return true;
                 }
@@ -366,7 +370,7 @@ impl View for HStack {
     fn on_event(&mut self, event: &mut Event, frame: Rect) -> bool {
         let mut x = frame.x;
 
-        for (child, cached_size) in &mut self.children {
+        for (i, (child, cached_size)) in self.children.iter_mut().enumerate() {
             let extra = frame.height.saturating_sub(cached_size.height) as i32;
             let dy = match self.alignment {
                 StackAlignment::Start => 0,
@@ -375,6 +379,10 @@ impl View for HStack {
             };
             let child_frame = Rect::new(x, frame.y + dy, cached_size.width, cached_size.height);
             if child_frame.contains(event.x(), event.y()) {
+                // Only log non-MouseMove events
+                // if !matches!(event.kind, EventKind::MouseMove) {
+                //     println!("[HStack] dispatching to child {} (event={:?})", i, event.kind);
+                // }
                 if child.on_event(event, child_frame) {
                     return true;
                 }

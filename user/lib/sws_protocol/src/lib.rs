@@ -692,7 +692,8 @@ pub fn parse_server_message(msg_type: u32, payload: &[u8]) -> Result<ServerMessa
                 return Err(ProtocolError::MalformedPayload);
             }
             let window_id = u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
-            let app_id_len = u32::from_le_bytes([payload[4], payload[5], payload[6], payload[7]]) as usize;
+            let app_id_len =
+                u32::from_le_bytes([payload[4], payload[5], payload[6], payload[7]]) as usize;
 
             if payload.len() < 8 + app_id_len + 4 {
                 return Err(ProtocolError::MalformedPayload);
@@ -717,7 +718,8 @@ pub fn parse_server_message(msg_type: u32, payload: &[u8]) -> Result<ServerMessa
 
             let mut title = [0u8; 256];
             if title_len > 0 {
-                title[..title_len].copy_from_slice(&payload[title_offset + 4..title_offset + 4 + title_len]);
+                title[..title_len]
+                    .copy_from_slice(&payload[title_offset + 4..title_offset + 4 + title_len]);
             }
 
             Ok(ServerMessage::FocusChanged {

@@ -1,13 +1,6 @@
 //! Scarlet Notepad
 //!
 //! Text editor application for Scarlet Desktop
-//!
-//! Features:
-//! - New, Open, Save file operations
-//! - Line and column tracking
-//! - Character and line count
-//! - Clean, modern UI
-//! - Status bar with feedback
 
 #![no_std]
 #![no_main]
@@ -15,10 +8,20 @@
 extern crate scarlet_std as std;
 
 use scarlet_ui::{
-    Application, Button, Color, HStack, Label, Padding, RectView, Spacer,
-    State, StackAlignment, TextField, Text, VStack, Window, WindowKind,
+    Application, Button, Color, HStack, Label, Padding, RectView, Spacer, StackAlignment, State,
+    Text, TextField, VStack, ViewModifier, Window, WindowKind,
 };
 use std::{format, fs, println, string::String};
+
+/// Color palette for modern notepad
+const BG: Color = Color::rgb(248, 250, 252);
+const SURFACE: Color = Color::rgb(255, 255, 255);
+const SURFACE_VAR: Color = Color::rgb(241, 245, 249);
+const BORDER: Color = Color::rgb(226, 232, 240);
+const PRIMARY: Color = Color::rgb(59, 130, 246);
+const TEXT_MAIN: Color = Color::rgb(15, 23, 42);
+const TEXT_SUB: Color = Color::rgb(100, 116, 139);
+const TEXT_MUTE: Color = Color::rgb(148, 163, 184);
 
 /// Calculate line and column from text and cursor position
 fn calculate_line_column(text: &str, cursor_pos: usize) -> (usize, usize) {
@@ -40,28 +43,18 @@ fn calculate_line_column(text: &str, cursor_pos: usize) -> (usize, usize) {
     (line, column)
 }
 
-/// Create a separator line with modern color
+/// Create a separator line
 fn separator() -> RectView {
-    RectView::new(Color::rgb(50, 50, 55)).height(1)
+    RectView::new(BORDER).height(1)
 }
 
 /// Create a menu button with consistent styling
-fn menu_button(
-    label: &str,
-    on_click: impl FnMut() + 'static,
-) -> Button<impl FnMut() + 'static> {
+fn menu_button(label: &str, on_click: impl FnMut() + 'static) -> Button<impl FnMut() + 'static> {
     Button::new(label, on_click)
-        .background(Color::rgb(70, 70, 75))
-        .text_color(Color::rgb(230, 230, 235))
-        .corner_radius(4)
+        .background(SURFACE_VAR)
+        .text_color(TEXT_MAIN)
+        .corner_radius(6)
         .padding(6)
-}
-
-/// Create a styled menu label
-fn menu_label(text: &str) -> Label {
-    Label::new(text)
-        .color(Color::rgb(160, 160, 165))
-        .font_size(13)
 }
 
 /// Read file content helper
@@ -73,9 +66,8 @@ fn read_file_content(path: &str) -> String {
 
             loop {
                 match file.read(&mut buffer) {
-                    Ok(0) => break, // EOF
+                    Ok(0) => break,
                     Ok(n) => {
-                        // Convert bytes to string (assuming UTF-8)
                         for i in 0..n {
                             content.push(buffer[i] as char);
                         }
@@ -92,12 +84,10 @@ fn read_file_content(path: &str) -> String {
 /// Write file content helper
 fn write_file_content(path: &str, content: &str) -> bool {
     match fs::File::create(path) {
-        Ok(mut file) => {
-            match file.write_all(content.as_bytes()) {
-                Ok(()) => true,
-                Err(_) => false,
-            }
-        }
+        Ok(mut file) => match file.write_all(content.as_bytes()) {
+            Ok(()) => true,
+            Err(_) => false,
+        },
         Err(_) => false,
     }
 }
@@ -106,12 +96,10 @@ fn write_file_content(path: &str, content: &str) -> bool {
 pub extern "C" fn main() -> i32 {
     println!("[notepad] Starting Scarlet Notepad");
 
-    // Application state
     let text_content = State::new(String::new());
     let current_file = State::new(String::from("Untitled"));
     let status_message = State::new(String::from("Ready - New document"));
 
-    // File operations state clones
     let text_content_new = text_content.clone();
     let current_file_new = current_file.clone();
     let status_new = status_message.clone();
@@ -135,10 +123,9 @@ pub extern "C" fn main() -> i32 {
         }
     };
 
-    // Create notepad window
-    let window = Window::new("Scarlet Notepad", 900, 650)
-        .min_size(500, 400)
-        .background(Color::rgb(28, 28, 32))
+    let window = Window::new("Scarlet Notepad", 950, 680)
+        .min_size(550, 450)
+        .background(BG)
         .window_type(WindowKind::Normal)
         .main_window()
         .content(
@@ -149,24 +136,19 @@ pub extern "C" fn main() -> i32 {
                 .child(
                     Padding::new(
                         HStack::new()
-                            .spacing(6)
+                            .spacing(8)
                             .alignment(StackAlignment::Center)
-                            .child(menu_label("File"))
+                            .child(Label::new("File").color(TEXT_SUB).font_size(13))
                             .child(menu_button("New", move || {
-                                // New: Clear content and reset filename
                                 text_content_new.set(String::new());
                                 current_file_new.set(String::from("Untitled"));
                                 status_new.set(String::from("New document created"));
                                 println!("[notepad] New document");
                             }))
                             .child(menu_button("Open", move || {
-                                // Open: Read from default path
                                 let path = "/home/user/document.txt";
                                 let content = read_file_content(path);
-                                if !content.is_empty() || {
-                                    // Check if file exists and is empty
-                                    fs::File::open(path).is_ok()
-                                } {
+                                if !content.is_empty() || { fs::File::open(path).is_ok() } {
                                     text_content_open.set(content);
                                     current_file_open.set(String::from(path));
                                     status_open.set(format!("Opened: {}", path));
@@ -177,7 +159,6 @@ pub extern "C" fn main() -> i32 {
                                 }
                             }))
                             .child(menu_button("Save", move || {
-                                // Save: Write to default path
                                 let current = current_file_save.get();
                                 let path = if current == "Untitled" {
                                     "/home/user/document.txt"
@@ -196,52 +177,51 @@ pub extern "C" fn main() -> i32 {
                             }))
                             .child(Spacer::new())
                             .child(
-                                Label::new("Shortcuts: New | Open | Save")
-                                    .color(Color::rgb(100, 100, 105))
+                                Label::new("Ctrl+N: New | Ctrl+O: Open | Ctrl+S: Save")
+                                    .color(TEXT_MUTE)
                                     .font_size(11),
                             )
                             .child(Spacer::new().min_length(16)),
                     )
-                    .all(8),
+                    .all(12),
                 )
                 // Separator
                 .child(separator())
                 // File info bar
                 .child({
                     let current_file_clone = current_file.clone();
-                    let current_file_clonea = current_file_clone.clone();
+                    let current_file_display = current_file_clone.clone();
                     Padding::new(
                         HStack::new()
                             .spacing(12)
                             .alignment(StackAlignment::Center)
+                            .child(Label::new("File:").color(TEXT_SUB).font_size(12))
                             .child(
-                                Text::new(move || {
-                                    format!("File: {}", current_file_clone.get())
-                                })
-                                .color(Color::rgb(100, 170, 255))
-                                .font_size(12)
-                                .watch(current_file_clonea),
+                                Text::new(move || format!("{}", current_file_clone.get()))
+                                    .color(PRIMARY)
+                                    .font_size(12)
+                                    .watch(current_file_display),
                             )
                             .child(Spacer::new()),
                     )
-                    .horizontal(12)
-                    .vertical(6)
+                    .horizontal(16)
+                    .vertical(8)
                 })
                 // Text editing area
                 .child(
                     Padding::new(
                         TextField::new("", text_content.clone())
                             .action(move |_text| {
-                                // Text action - could auto-save or show modified status
+                                // Text action
                             })
-                            .background(Color::rgb(38, 38, 42))
-                            .text_color(Color::rgb(230, 230, 235))
-                            .border_color(Color::rgb(70, 70, 75))
-                            .focused_border_color(Color::rgb(100, 150, 255))
-                            .padding(12)
-                            .corner_radius(6),
+                            .text_color(TEXT_MAIN)
+                            .background(SURFACE)
+                            .border_color(BORDER)
+                            .focused_border_color(PRIMARY)
+                            .padding(16)
+                            .corner_radius(8),
                     )
-                    .all(12),
+                    .all(16),
                 )
                 .child(Spacer::new())
                 // Status bar separator
@@ -249,54 +229,51 @@ pub extern "C" fn main() -> i32 {
                 // Status bar
                 .child({
                     let text_content_clone1 = text_content.clone();
-                    let text_content_clone1a = text_content_clone1.clone();
+                    let text_content_watch1 = text_content_clone1.clone();
                     let text_content_clone2 = text_content.clone();
-                    let text_content_clone2a = text_content_clone2.clone();
+                    let text_content_watch2 = text_content_clone2.clone();
                     let status_msg_clone = status_message.clone();
-                    let status_msg_clonea = status_msg_clone.clone();
+                    let status_msg_watch = status_msg_clone.clone();
 
                     Padding::new(
                         HStack::new()
                             .spacing(16)
                             .alignment(StackAlignment::Center)
+                            .child(Label::new("Line:").color(TEXT_MUTE).font_size(11))
                             .child(
                                 Text::new(move || {
                                     let text = text_content_clone1.get();
                                     let cursor_pos = text.len();
-                                    let (line, column) = calculate_line_column(&text, cursor_pos);
-                                    format!("Ln {}, Col {}", line, column)
+                                    let (line, _) = calculate_line_column(&text, cursor_pos);
+                                    format!("{}", line)
                                 })
-                                .color(Color::rgb(140, 140, 145))
-                                .font_size(12)
-                                .watch(text_content_clone1a),
+                                .color(TEXT_SUB)
+                                .font_size(11)
+                                .watch(text_content_watch1),
                             )
+                            .child(Label::new("Column:").color(TEXT_MUTE).font_size(11))
                             .child(
                                 Text::new(move || {
                                     let text = text_content_clone2.get();
-                                    let lines = text.lines().count();
-                                    let chars = text.len();
-                                    format!("{} lines, {} chars", lines, chars)
+                                    let cursor_pos = text.len();
+                                    let (_, column) = calculate_line_column(&text, cursor_pos);
+                                    format!("{}", column)
                                 })
-                                .color(Color::rgb(140, 140, 145))
-                                .font_size(12)
-                                .watch(text_content_clone2a),
+                                .color(TEXT_SUB)
+                                .font_size(11)
+                                .watch(text_content_watch2),
                             )
                             .child(Spacer::new())
                             .child(
                                 Text::new(move || format!("{}", status_msg_clone.get()))
-                                    .color(Color::rgb(100, 180, 100))
-                                    .font_size(12)
-                                    .watch(status_msg_clonea),
+                                    .color(PRIMARY)
+                                    .font_size(11)
+                                    .watch(status_msg_watch),
                             )
                             .child(Spacer::new().min_length(16))
-                            .child(
-                                Label::new("UTF-8")
-                                    .color(Color::rgb(120, 120, 125))
-                                    .font_size(12),
-                            ),
+                            .child(Label::new("UTF-8").color(TEXT_MUTE).font_size(11)),
                     )
-                    .horizontal(12)
-                    .vertical(6)
+                    .all(12)
                 }),
         );
 
@@ -306,6 +283,5 @@ pub extern "C" fn main() -> i32 {
     }
 
     println!("[notepad] Running notepad app");
-    println!("[notepad] File operations: New, Open (/home/user/document.txt), Save");
     app.run();
 }

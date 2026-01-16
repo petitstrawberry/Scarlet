@@ -26,8 +26,8 @@ use std::thread;
 use std::vec;
 use std::vec::Vec;
 use std::{format, println};
-use sws_client::{Connection, InputEvent, WindowSizeLimits};
 use sws_client::event::Event as SwsEvent;
+use sws_client::{Connection, InputEvent, WindowSizeLimits};
 use sws_protocol::window_types;
 
 /// stemd IPC protocol constants
@@ -214,7 +214,9 @@ fn launch_or_focus_app(app_id: &str) -> bool {
         Ok(result) => {
             if !result.is_empty() {
                 if let Argument::String(ref s) = result[0] {
-                    let success = s.starts_with("OK") || s.starts_with("Focused") || s.starts_with("Launched");
+                    let success = s.starts_with("OK")
+                        || s.starts_with("Focused")
+                        || s.starts_with("Launched");
                     println!("[menu_bar] sbus response: {}", s);
                     return success;
                 }
@@ -470,7 +472,10 @@ fn query_app_menus_from_stemd(app_id: &str) -> Result<Vec<String>, &'static str>
                     }
                 }
             }
-            println!("[menu_bar] Got {} menu titles from stemd", menu_titles.len());
+            println!(
+                "[menu_bar] Got {} menu titles from stemd",
+                menu_titles.len()
+            );
             Ok(menu_titles)
         }
         Err(e) => {
@@ -673,7 +678,9 @@ fn show_window_list_dropdown(
         dropdown.items.push(DropdownItem {
             label,
             item_type: DropdownItemType::Action {
-                action: DropdownAction::FocusApp { app_id: app_id.clone() },
+                action: DropdownAction::FocusApp {
+                    app_id: app_id.clone(),
+                },
             },
             y: current_y,
             height: ITEM_HEIGHT,
@@ -1064,7 +1071,10 @@ pub extern "C" fn main() -> i32 {
         while let Some(ev) = conn.poll_event() {
             match ev {
                 SwsEvent::FocusChanged { app_id, title, .. } => {
-                    println!("[menu_bar] Focus changed event: app_id={}, title={}", app_id, title);
+                    println!(
+                        "[menu_bar] Focus changed event: app_id={}, title={}",
+                        app_id, title
+                    );
                     // Update active app based on focus change
                     let new_active_app = Some((app_id.clone(), title.clone()));
                     if active_app != new_active_app {
@@ -1213,7 +1223,9 @@ pub extern "C" fn main() -> i32 {
                     }
                     return 0;
                 }
-                SwsEvent::SurfaceDestroyed { surface_id: sid } if dropdown.surface_id == Some(sid) => {
+                SwsEvent::SurfaceDestroyed { surface_id: sid }
+                    if dropdown.surface_id == Some(sid) =>
+                {
                     println!("[menu_bar] Dropdown destroyed externally");
                     dropdown.close();
                 }

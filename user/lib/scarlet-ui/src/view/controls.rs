@@ -10,6 +10,7 @@ use crate::state::{State, Binding, ViewRefreshHandle};
 use scarlet_std::string::String;
 use scarlet_std::sync::Arc;
 use scarlet_std::vec::Vec;
+use scarlet_std::println;
 use super::traits::ViewBox;
 use scarlet_std::boxed::Box;
 
@@ -91,6 +92,8 @@ pub struct Text {
     last_update_frame: u32,
     /// Minimum frames between updates (0 = no throttling)
     throttle_frames: u32,
+    /// Whether the text has changed and needs to be redrawn
+    needs_redraw: bool,
 }
 
 impl Text {
@@ -109,6 +112,7 @@ impl Text {
             frame_counter: 0,
             last_update_frame: 0,
             throttle_frames: 0,
+            needs_redraw: false,
         }
     }
 
@@ -130,6 +134,7 @@ impl Text {
             frame_counter: 0,
             last_update_frame: 0,
             throttle_frames: 0,
+            needs_redraw: false,
         }
     }
 
@@ -162,13 +167,14 @@ impl Text {
 impl View for Text {
     fn layout(&mut self, _available: Size) -> Size {
         self.frame_counter = self.frame_counter.wrapping_add(1);
-        
+
         if self.refresh_handle.take_dirty() {
             // Check throttling
             let frames_since_update = self.frame_counter.wrapping_sub(self.last_update_frame);
             if self.throttle_frames == 0 || frames_since_update >= self.throttle_frames {
                 self.cached_text = (self.formatter)();
                 self.last_update_frame = self.frame_counter;
+                self.needs_redraw = true;
             } else {
                 // Re-mark as dirty to update later
                 self.refresh_handle.mark_dirty();
@@ -189,7 +195,7 @@ impl View for Text {
     }
 
     fn needs_draw(&self) -> bool {
-        self.refresh_handle.is_dirty()
+        self.needs_redraw
     }
 
     fn set_needs_draw(&mut self) {
@@ -197,7 +203,7 @@ impl View for Text {
     }
 
     fn clear_needs_draw(&mut self) {
-        self.refresh_handle.take_dirty();
+        self.needs_redraw = false;
     }
 }
 
@@ -436,6 +442,7 @@ impl<F: FnMut() + 'static> View for Button<F> {
         match event.kind {
             EventKind::MouseDown { button: MouseButton::Left } => {
                 if frame.contains(event.x(), event.y()) {
+                    // println!("[Button] MouseDown: is_pressed={}->true", self.is_pressed);
                     self.is_pressed = true;
                     self.needs_redraw = true;
                     true
@@ -447,14 +454,18 @@ impl<F: FnMut() + 'static> View for Button<F> {
                 // Click is registered if MouseDown was on this button (is_pressed == true)
                 // AND MouseUp is also within the button bounds
                 if self.is_pressed {
+                    let in_frame = frame.contains(event.x(), event.y());
+                    // println!("[Button] MouseUp: is_pressed=true->false, in_frame={}", in_frame);
                     self.is_pressed = false;
                     self.needs_redraw = true;
-                    if frame.contains(event.x(), event.y()) {
+                    if in_frame {
+                        // println!("[Button] Calling click handler");
                         (self.on_click)();
                         return true;
                     }
                     true
                 } else {
+                    // println!("[Button] MouseUp: is_pressed=false (ignoring)");
                     false
                 }
             }

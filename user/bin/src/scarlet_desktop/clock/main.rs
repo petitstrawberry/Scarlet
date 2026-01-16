@@ -18,11 +18,11 @@ extern crate scarlet_std as std;
 
 use core::f32::consts::PI;
 use core::time::Duration;
-use scarlet_ui::graphics::{Canvas, measure_text_sized};
 use scarlet_ui::Color;
+use scarlet_ui::graphics::{Canvas, measure_text_sized};
 use std::thread;
-use std::{format, println};
 use std::vec::Vec;
+use std::{format, println};
 use sws_client::{Connection, Event, WindowSizeLimits};
 use sws_protocol::window_types;
 
@@ -250,14 +250,21 @@ fn draw_hands(
     let minute_angle = (minutes as f32 * 6.0 + seconds as f32 * 0.1 - 90.0) * PI / 180.0;
 
     // Second hand: smooth animation with milliseconds
-    let second_angle =
-        (seconds as f32 * 6.0 + milliseconds as f32 * 0.006 - 90.0) * PI / 180.0;
+    let second_angle = (seconds as f32 * 6.0 + milliseconds as f32 * 0.006 - 90.0) * PI / 180.0;
 
     // Draw hour hand (thicker, shorter)
     let hour_length = radius as f32 * 0.5;
     let hour_x = center_x as f32 + hour_length * hour_angle.cos();
     let hour_y = center_y as f32 + hour_length * hour_angle.sin();
-    draw_thick_line(canvas, center_x, center_y, hour_x as i32, hour_y as i32, 6, hour_color);
+    draw_thick_line(
+        canvas,
+        center_x,
+        center_y,
+        hour_x as i32,
+        hour_y as i32,
+        6,
+        hour_color,
+    );
 
     // Draw minute hand (thinner, longer)
     let minute_length = radius as f32 * 0.75;
@@ -337,11 +344,7 @@ fn draw_thick_line(
         .map(|p| p.1.floor() as i32)
         .min()
         .unwrap_or(0);
-    let max_y = corners
-        .iter()
-        .map(|p| p.1.ceil() as i32)
-        .max()
-        .unwrap_or(0);
+    let max_y = corners.iter().map(|p| p.1.ceil() as i32).max().unwrap_or(0);
 
     for y in min_y..=max_y {
         let mut intersections = Vec::new();
@@ -350,9 +353,7 @@ fn draw_thick_line(
             let p1 = corners[i];
             let p2 = corners[(i + 1) % 4];
 
-            if (p1.1 <= y as f32 && p2.1 > y as f32)
-                || (p2.1 <= y as f32 && p1.1 > y as f32)
-            {
+            if (p1.1 <= y as f32 && p2.1 > y as f32) || (p2.1 <= y as f32 && p1.1 > y as f32) {
                 let t = (y as f32 - p1.1) / (p2.1 - p1.1);
                 let x = p1.0 + t * (p2.0 - p1.0);
                 intersections.push(x);
@@ -372,7 +373,14 @@ fn draw_thick_line(
 }
 
 /// Draw digital clock display
-fn draw_digital_clock(canvas: &mut Canvas, width: u32, height: u32, hours: u32, minutes: u32, seconds: u32) {
+fn draw_digital_clock(
+    canvas: &mut Canvas,
+    width: u32,
+    height: u32,
+    hours: u32,
+    minutes: u32,
+    seconds: u32,
+) {
     let bg_color = Color::rgb(24, 24, 28);
     let text_color = Color::rgb(230, 230, 235);
     let accent_color = Color::rgb(255, 80, 80);
@@ -441,13 +449,7 @@ fn draw_clock(app: &ClockApp, conn: &mut Connection) {
                 let (text_w, _) = measure_text_sized(mode_text, 12.0);
                 let text_x = ((w as i32 - text_w as i32) / 2).max(0);
                 let text_y = (h as i32 - 20).max(0);
-                canvas.draw_text_sized(
-                    text_x,
-                    text_y,
-                    mode_text,
-                    Color::rgb(120, 120, 130),
-                    12.0,
-                );
+                canvas.draw_text_sized(text_x, text_y, mode_text, Color::rgb(120, 120, 130), 12.0);
             }
             DisplayMode::Digital => {
                 // Calculate time components (12-hour format)
@@ -459,14 +461,7 @@ fn draw_clock(app: &ClockApp, conn: &mut Connection) {
                 // Use 12-hour display (add 12 if it's 0 for midnight)
                 let display_hours = if hours == 0 { 12 } else { hours };
 
-                draw_digital_clock(
-                    &mut canvas,
-                    w,
-                    h,
-                    display_hours,
-                    minutes,
-                    seconds,
-                );
+                draw_digital_clock(&mut canvas, w, h, display_hours, minutes, seconds);
             }
         }
     });
@@ -559,10 +554,7 @@ pub extern "C" fn main() -> i32 {
                                 {
                                     app.toggle_mode();
                                     needs_redraw = true;
-                                    println!(
-                                        "[clock] Toggled mode to {:?}",
-                                        app.display_mode
-                                    );
+                                    println!("[clock] Toggled mode to {:?}", app.display_mode);
                                 }
                             }
                         }

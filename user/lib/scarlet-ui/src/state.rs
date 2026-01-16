@@ -29,6 +29,7 @@
 use scarlet_std::sync::Mutex;
 use scarlet_std::vec::Vec;
 use scarlet_std::boxed::Box;
+use scarlet_std::println;
 use core::ops::Deref;
 use core::fmt;
 use core::sync::atomic::{AtomicBool, Ordering};
@@ -130,6 +131,7 @@ impl<T> StateInner<T> {
         // Clean up dropped handles
         {
             let mut view_handles = self.view_handles.lock();
+            // let view_count_before = view_handles.len();
             view_handles.retain(|weak| {
                 if let Some(strong) = weak.upgrade() {
                     strong.store(true, Ordering::SeqCst);
@@ -138,6 +140,9 @@ impl<T> StateInner<T> {
                     false
                 }
             });
+            // let view_count_after = view_handles.len();
+            // println!("[State] notify_observers: {} view handles marked dirty (retained {} from {})",
+            //          view_count_after, view_count_after, view_count_before);
         }
 
         // Call callbacks under their own lock
