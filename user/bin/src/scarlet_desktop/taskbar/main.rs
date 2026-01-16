@@ -21,11 +21,13 @@ use sbus_client;
 use scarlet_desktop_config::{TaskbarConfig, TaskbarPosition};
 use scarlet_ui::Color;
 use scarlet_ui::graphics::{Canvas, measure_text_sized};
-use std::string::String;
+use std::string::{String, ToString};
 use std::thread;
+use std::vec;
 use std::vec::Vec;
 use std::{format, println};
-use sws_client::{Connection, Event, InputEvent, WindowSizeLimits};
+use sws_client::{Connection, InputEvent, WindowSizeLimits};
+use sws_client::event::Event as SwsEvent;
 use sws_protocol::window_types;
 
 /// stemd IPC protocol constants
@@ -87,6 +89,7 @@ enum DropdownItemType {
 /// Dropdown menu action
 enum DropdownAction {
     LaunchSettings,
+    FocusApp { app_id: String },
     // Add more actions here as needed
 }
 
@@ -109,7 +112,7 @@ impl DropdownItem {
 
 /// Menu bar item (left side)
 struct MenuItem {
-    label: &'static str,
+    label: String,
     x: i32,
     y: i32,
     width: u32,
@@ -211,7 +214,7 @@ fn launch_or_focus_app(app_id: &str) -> bool {
         Ok(result) => {
             if !result.is_empty() {
                 if let Argument::String(ref s) = result[0] {
-                    let success = s.starts_with("OK");
+                    let success = s.starts_with("OK") || s.starts_with("Focused") || s.starts_with("Launched");
                     println!("[menu_bar] sbus response: {}", s);
                     return success;
                 }
@@ -222,6 +225,257 @@ fn launch_or_focus_app(app_id: &str) -> bool {
         Err(e) => {
             println!("[menu_bar] Failed to call LaunchOrFocus: {:?}", e);
             false
+        }
+    }
+}
+
+/// Query running applications from stemd
+/// Returns a list of (app_id, app_name) tuples
+fn get_running_apps_from_stemd() -> Result<Vec<(String, String)>, &'static str> {
+    use alloc::string::ToString;
+    use sbus::Argument;
+
+    println!("[menu_bar] Querying running apps from stemd");
+
+    // Connect to sbus
+    let mut conn = match sbus_client::Connection::connect() {
+        Ok(c) => c,
+        Err(e) => {
+            println!("[menu_bar] Failed to connect to sbus: {:?}", e);
+            return Err("Failed to connect to sbus");
+        }
+    };
+
+    // Call stemd's GetRunningApps method (no arguments)
+    let args = Vec::new();
+
+    match conn.call_method(
+        "org.scarlet-os.stemd",
+        "/org/scarlet/stemd",
+        "org.scarlet-os.stemd",
+        "GetRunningApps",
+        args,
+    ) {
+        Ok(result) => {
+            let mut apps = Vec::new();
+            for arg in result.iter() {
+                if let Argument::String(s) = arg {
+                    // Parse "app_id|name" format
+                    if let Some(pipe_pos) = s.find('|') {
+                        let app_id = s[..pipe_pos].to_string();
+                        let app_name = s[pipe_pos + 1..].to_string();
+                        apps.push((app_id, app_name));
+                    } else {
+                        // Fallback: use the whole string as both app_id and name
+                        apps.push((s.clone(), s.clone()));
+                    }
+                }
+            }
+            println!("[menu_bar] Got {} running apps from stemd", apps.len());
+            Ok(apps)
+        }
+        Err(e) => {
+            println!("[menu_bar] Failed to call GetRunningApps: {:?}", e);
+            Err("Failed to call GetRunningApps")
+        }
+    }
+}
+
+/// Query the currently active app from stemd
+/// Returns (app_id, app_name) or None if no app is focused
+fn get_active_app_from_stemd() -> Option<(String, String)> {
+    use alloc::string::ToString;
+    use sbus::Argument;
+
+    // Connect to sbus
+    let mut conn = match sbus_client::Connection::connect() {
+        Ok(c) => c,
+        Err(e) => {
+            // Silent failure - don't log on every poll
+            return None;
+        }
+    };
+
+    // Call stemd's GetActiveApp method (no arguments)
+    let args = Vec::new();
+
+    match conn.call_method(
+        "org.scarlet-os.stemd",
+        "/org/scarlet/stemd",
+        "org.scarlet-os.stemd",
+        "GetActiveApp",
+        args,
+    ) {
+        Ok(result) => {
+            if !result.is_empty() {
+                if let Argument::String(s) = &result[0] {
+                    if s.is_empty() {
+                        return None;
+                    }
+                    // Parse "app_id|name" format
+                    if let Some(pipe_pos) = s.find('|') {
+                        let app_id = s[..pipe_pos].to_string();
+                        let app_name = s[pipe_pos + 1..].to_string();
+                        return Some((app_id, app_name));
+                    }
+                }
+            }
+            None
+        }
+        Err(e) => {
+            // Silent failure - don't log on every poll
+            None
+        }
+    }
+}
+
+/// Build menu items based on the active application
+/// When an app is focused, show app name + app-specific menus
+/// When no app is focused, show default Scarlet menus
+fn build_menu_items(active_app: &Option<(String, String)>, bar_height: u32) -> Vec<MenuItem> {
+    let mut menu_items = Vec::new();
+    let mut x_offset = 0i32;
+
+    match active_app {
+        Some((_app_id, app_name)) => {
+            // App is focused: show app name followed by app-specific menus
+            // Try to get app-specific menus from stemd
+            let menus = get_app_menus(&_app_id, app_name);
+
+            for label in &menus {
+                let (tw, _) = measure_text_sized(&label, 13.0);
+                let width = tw.saturating_add(16).min(100);
+                menu_items.push(MenuItem {
+                    label: label.clone(),
+                    x: x_offset,
+                    y: 0,
+                    width,
+                    height: bar_height,
+                });
+                x_offset += width as i32;
+            }
+        }
+        None => {
+            // No app focused: show default Scarlet menus
+            let menus = ["Scarlet", "File", "Edit", "View", "Window", "Help"];
+
+            for &label in &menus {
+                let (tw, _) = measure_text_sized(label, 13.0);
+                let width = tw.saturating_add(16).min(100);
+                menu_items.push(MenuItem {
+                    label: String::from(label),
+                    x: x_offset,
+                    y: 0,
+                    width,
+                    height: bar_height,
+                });
+                x_offset += width as i32;
+            }
+        }
+    }
+
+    menu_items
+}
+
+/// Get menu titles for an app
+/// Returns app name menu + app-specific menus if available, or generic menus
+fn get_app_menus(app_id: &str, app_name: &str) -> Vec<String> {
+    // Try to query app-specific menus from stemd via sbus
+    match query_app_menus_from_stemd(app_id) {
+        Ok(menu_titles) => {
+            if !menu_titles.is_empty() {
+                return menu_titles;
+            }
+        }
+        Err(e) => {
+            println!("[menu_bar] Failed to query menus from stemd: {:?}", e);
+        }
+    }
+
+    // Fallback to generic menus based on app type
+    let mut menus = vec![app_name.to_string()];
+
+    // Add app-specific menus based on app_id
+    if app_id.contains("notepad") || app_id.contains("text") {
+        menus.extend(vec![
+            String::from("File"),
+            String::from("Edit"),
+            String::from("View"),
+            String::from("Help"),
+        ]);
+    } else if app_id.contains("terminal") {
+        menus.extend(vec![
+            String::from("Shell"),
+            String::from("Edit"),
+            String::from("View"),
+            String::from("Help"),
+        ]);
+    } else if app_id.contains("filer") {
+        menus.extend(vec![
+            String::from("File"),
+            String::from("View"),
+            String::from("Go"),
+            String::from("Help"),
+        ]);
+    } else {
+        // Generic menus
+        menus.extend(vec![
+            String::from("File"),
+            String::from("Edit"),
+            String::from("View"),
+            String::from("Window"),
+            String::from("Help"),
+        ]);
+    }
+
+    menus
+}
+
+/// Query app menu titles from stemd via sbus
+fn query_app_menus_from_stemd(app_id: &str) -> Result<Vec<String>, &'static str> {
+    use alloc::string::ToString;
+    use sbus::Argument;
+
+    println!("[menu_bar] Querying menus from stemd for app: {}", app_id);
+
+    // Connect to sbus
+    let mut conn = match sbus_client::Connection::connect() {
+        Ok(c) => c,
+        Err(e) => {
+            println!("[menu_bar] Failed to connect to sbus: {:?}", e);
+            return Err("Failed to connect to sbus");
+        }
+    };
+
+    // Call stemd's GetAppMenus method
+    let mut args = Vec::new();
+    args.push(Argument::String(app_id.to_string()));
+
+    match conn.call_method(
+        "org.scarlet-os.stemd",
+        "/org/scarlet/stemd",
+        "org.scarlet-os.stemd",
+        "GetAppMenus",
+        args,
+    ) {
+        Ok(result) => {
+            let mut menu_titles = Vec::new();
+            for arg in result.iter() {
+                if let Argument::String(s) = arg {
+                    // Parse format: "menu1|menu2|menu3"
+                    if !s.is_empty() {
+                        for title in s.split('|') {
+                            menu_titles.push(title.to_string());
+                        }
+                    }
+                }
+            }
+            println!("[menu_bar] Got {} menu titles from stemd", menu_titles.len());
+            Ok(menu_titles)
+        }
+        Err(e) => {
+            println!("[menu_bar] Failed to call GetAppMenus: {:?}", e);
+            Err("Failed to call GetAppMenus")
         }
     }
 }
@@ -269,7 +523,7 @@ fn handle_input(
                         if idx < menu_items.len() && menu_items[idx].contains(*cursor_x, *cursor_y)
                         {
                             // Menu item clicked
-                            let label = menu_items[idx].label;
+                            let label = &menu_items[idx].label;
                             println!("[menu_bar] Menu clicked: {}", label);
                             return true;
                         }
@@ -335,7 +589,7 @@ fn draw_menu_bar(
             // Draw text
             let text_x = item.x + 8;
             let text_y = item.y + ((item.height as i32 - 16) / 2).max(0);
-            canvas.draw_text_sized(text_x, text_y, item.label, text_color, font_size);
+            canvas.draw_text_sized(text_x, text_y, &item.label, text_color, font_size);
         }
 
         // Draw status items (right side)
@@ -351,6 +605,7 @@ fn draw_menu_bar(
 }
 
 /// Show window list dropdown menu
+/// Shows running applications from stemd, grouped by app_id
 fn show_window_list_dropdown(
     conn: &mut Connection,
     dropdown: &mut DropdownState,
@@ -364,26 +619,27 @@ fn show_window_list_dropdown(
         let _ = conn.destroy_surface(old_id);
     }
 
-    // Fetch window list
-    let windows = match conn.get_window_list() {
-        Ok(w) => w,
+    // Query running apps from stemd
+    let running_apps = match get_running_apps_from_stemd() {
+        Ok(apps) => apps,
         Err(e) => {
-            println!("[menu_bar] Failed to get window list: {:?}", e);
+            println!("[menu_bar] Failed to get running apps from stemd: {:?}", e);
+            // Fallback to SWS window list
+            show_legacy_window_list(conn, dropdown, menu_item, menu_index);
             return;
         }
     };
 
-    if windows.is_empty() {
-        println!("[menu_bar] No windows to show");
+    if running_apps.is_empty() {
+        println!("[menu_bar] No running apps to show");
         return;
     }
 
     // Calculate dropdown size
     const ITEM_HEIGHT: u32 = 28;
-    const MAX_HEIGHT: u32 = 400;
     const DROPDOWN_WIDTH: u32 = 250;
 
-    let item_count = windows.len().min(15); // Max 15 items visible
+    let item_count = running_apps.len().min(15); // Max 15 items visible
     let dropdown_height = (item_count as u32) * ITEM_HEIGHT + 4; // +4 for border
 
     // Create dropdown surface (AlwaysOnTop for popup)
@@ -406,21 +662,18 @@ fn show_window_list_dropdown(
     let y = menu_item.height as i32; // Below menu bar
     let _ = conn.move_window(surface_id, x, y);
 
-    // Build dropdown items
+    // Build dropdown items from running apps
     dropdown.items.clear();
     let mut current_y = 2i32; // Start with 2px top padding
 
-    for window in &windows {
-        let label = if window.title.is_empty() {
-            String::from("Untitled")
-        } else {
-            window.title.clone()
-        };
+    for (app_id, app_name) in &running_apps {
+        // Use the app name from the registry
+        let label = app_name.clone();
 
         dropdown.items.push(DropdownItem {
             label,
-            item_type: DropdownItemType::Window {
-                window_id: window.window_id,
+            item_type: DropdownItemType::Action {
+                action: DropdownAction::FocusApp { app_id: app_id.clone() },
             },
             y: current_y,
             height: ITEM_HEIGHT,
@@ -441,11 +694,92 @@ fn show_window_list_dropdown(
     draw_dropdown(conn, surface_id, dropdown);
 
     println!(
-        "[menu_bar] Dropdown shown: {} windows at ({}, {})",
-        windows.len(),
+        "[menu_bar] Dropdown shown: {} running apps at ({}, {})",
+        running_apps.len(),
         x,
         y
     );
+}
+
+/// Legacy fallback: show window list directly from SWS
+fn show_legacy_window_list(
+    conn: &mut Connection,
+    dropdown: &mut DropdownState,
+    menu_item: &MenuItem,
+    menu_index: usize,
+) {
+    println!("[menu_bar] Using legacy window list from SWS");
+
+    // Fetch window list
+    let windows = match conn.get_window_list() {
+        Ok(w) => w,
+        Err(e) => {
+            println!("[menu_bar] Failed to get window list: {:?}", e);
+            return;
+        }
+    };
+
+    if windows.is_empty() {
+        println!("[menu_bar] No windows to show");
+        return;
+    }
+
+    // Calculate dropdown size
+    const ITEM_HEIGHT: u32 = 28;
+    const DROPDOWN_WIDTH: u32 = 250;
+
+    let item_count = windows.len().min(15);
+    let dropdown_height = (item_count as u32) * ITEM_HEIGHT + 4;
+
+    // Create dropdown surface
+    let surface_id = match conn.create_surface(
+        "org.scarlet-os.desktop.taskbar",
+        DROPDOWN_WIDTH,
+        dropdown_height,
+    ) {
+        Ok(id) => id,
+        Err(_) => {
+            println!("[menu_bar] Failed to create dropdown surface");
+            return;
+        }
+    };
+
+    let _ = conn.set_window_type(surface_id, window_types::ALWAYS_ON_TOP);
+    let x = menu_item.x;
+    let y = menu_item.height as i32;
+    let _ = conn.move_window(surface_id, x, y);
+
+    // Build dropdown items
+    dropdown.items.clear();
+    let mut current_y = 2i32;
+
+    for window in &windows {
+        let label = if window.title.is_empty() {
+            String::from("Untitled")
+        } else {
+            window.title.clone()
+        };
+
+        dropdown.items.push(DropdownItem {
+            label,
+            item_type: DropdownItemType::Window {
+                window_id: window.window_id,
+            },
+            y: current_y,
+            height: ITEM_HEIGHT,
+        });
+
+        current_y += ITEM_HEIGHT as i32;
+    }
+
+    dropdown.surface_id = Some(surface_id);
+    dropdown.x = x;
+    dropdown.y = y;
+    dropdown.width = DROPDOWN_WIDTH;
+    dropdown.height = dropdown_height;
+    dropdown.menu_index = Some(menu_index);
+
+    draw_dropdown(conn, surface_id, dropdown);
 }
 
 /// Show application menu dropdown (Scarlet menu with Settings, etc.)
@@ -661,23 +995,11 @@ pub extern "C" fn main() -> i32 {
     let mut cpu_usage: u8 = 15;
     let mut memory_usage: u8 = 42;
 
-    // Define menu items (left side)
-    let mut menu_items: Vec<MenuItem> = Vec::new();
-    let menus = ["Scarlet", "File", "Edit", "View", "Window", "Help"];
-    let mut x_offset = 0i32;
+    // Track active app for menu switching (updated via FocusChanged events)
+    let mut active_app: Option<(String, String)> = None;
 
-    for label in &menus {
-        let (tw, _) = measure_text_sized(label, 13.0);
-        let width = tw.saturating_add(16).min(100); // Add padding, cap at 100px
-        menu_items.push(MenuItem {
-            label,
-            x: x_offset,
-            y: 0,
-            width,
-            height: bar_height,
-        });
-        x_offset += width as i32;
-    }
+    // Define initial menu items (will be updated dynamically)
+    let mut menu_items: Vec<MenuItem> = build_menu_items(&active_app, bar_height);
 
     // Define status items (right side)
     let mut status_items: Vec<StatusItem> = Vec::new();
@@ -741,7 +1063,18 @@ pub extern "C" fn main() -> i32 {
 
         while let Some(ev) = conn.poll_event() {
             match ev {
-                Event::Input(input) if input.surface_id == surface_id => {
+                SwsEvent::FocusChanged { app_id, title, .. } => {
+                    println!("[menu_bar] Focus changed event: app_id={}, title={}", app_id, title);
+                    // Update active app based on focus change
+                    let new_active_app = Some((app_id.clone(), title.clone()));
+                    if active_app != new_active_app {
+                        println!("[menu_bar] Active app changed from focus event, updating menus");
+                        active_app = new_active_app;
+                        menu_items = build_menu_items(&active_app, bar_height);
+                        needs_redraw = true;
+                    }
+                }
+                SwsEvent::Input(input) if input.surface_id == surface_id => {
                     // Check if menu was clicked (only on mouse up)
                     if input.type_ == 0x01 && input.code == 0x110 && input.value == 0 {
                         // Mouse up - check if menu item was clicked
@@ -796,7 +1129,7 @@ pub extern "C" fn main() -> i32 {
                         }
                     }
                 }
-                Event::Input(input) if dropdown.surface_id == Some(input.surface_id) => {
+                SwsEvent::Input(input) if dropdown.surface_id == Some(input.surface_id) => {
                     // Handle dropdown input
                     println!(
                         "[menu_bar] Dropdown input: type={} code={} value={} cursor=({},{})",
@@ -806,6 +1139,7 @@ pub extern "C" fn main() -> i32 {
                         // Mouse up on dropdown - check for item clicks
                         let mut close_dropdown = true;
                         let mut handle_launch_settings = false;
+                        let mut focus_app_id: Option<String> = None;
 
                         // First pass: check what action to take
                         for item in &dropdown.items {
@@ -837,6 +1171,10 @@ pub extern "C" fn main() -> i32 {
                                             println!("[menu_bar] Launching Settings via stemd");
                                             handle_launch_settings = true;
                                         }
+                                        DropdownAction::FocusApp { app_id } => {
+                                            println!("[menu_bar] Focusing app: {}", app_id);
+                                            focus_app_id = Some(app_id.clone());
+                                        }
                                     },
                                 }
                                 break;
@@ -851,20 +1189,23 @@ pub extern "C" fn main() -> i32 {
                             dropdown.close();
                         }
 
-                        // Handle launch after dropdown is closed
+                        // Handle actions after dropdown is closed
                         if handle_launch_settings {
                             launch_or_focus_app("org.scarlet-os.desktop.settings");
                         }
+                        if let Some(app_id) = focus_app_id {
+                            launch_or_focus_app(&app_id);
+                        }
                     }
                 }
-                Event::SurfaceConfigure {
+                SwsEvent::SurfaceConfigure {
                     surface_id: sid,
                     width,
                     height,
                 } if sid == surface_id => {
                     println!("[menu_bar] SurfaceConfigure: {}x{}", width, height);
                 }
-                Event::SurfaceDestroyed { surface_id: sid } if sid == surface_id => {
+                SwsEvent::SurfaceDestroyed { surface_id: sid } if sid == surface_id => {
                     println!("[menu_bar] Menu bar destroyed");
                     // Also close dropdown if open
                     if let Some(old_id) = dropdown.surface_id {
@@ -872,7 +1213,7 @@ pub extern "C" fn main() -> i32 {
                     }
                     return 0;
                 }
-                Event::SurfaceDestroyed { surface_id: sid } if dropdown.surface_id == Some(sid) => {
+                SwsEvent::SurfaceDestroyed { surface_id: sid } if dropdown.surface_id == Some(sid) => {
                     println!("[menu_bar] Dropdown destroyed externally");
                     dropdown.close();
                 }
@@ -882,7 +1223,7 @@ pub extern "C" fn main() -> i32 {
 
         // Handle menu click after event processing
         if let Some(menu_idx) = menu_clicked {
-            let label = menu_items[menu_idx].label;
+            let label = &menu_items[menu_idx].label;
             println!("[menu_bar] Menu clicked: {}", label);
 
             // Show app menu dropdown for "Scarlet" menu (index 0)
@@ -920,6 +1261,8 @@ pub extern "C" fn main() -> i32 {
 
             needs_redraw = true;
         }
+
+        // Note: Active app is now updated via FocusChanged events instead of polling
 
         if needs_redraw {
             draw_menu_bar(

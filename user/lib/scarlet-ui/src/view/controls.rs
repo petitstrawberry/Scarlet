@@ -440,20 +440,18 @@ impl<F: FnMut() + 'static> View for Button<F> {
                     self.needs_redraw = true;
                     true
                 } else {
-                    // Click outside clears pressed state
-                    if self.is_pressed {
-                        self.is_pressed = false;
-                        self.needs_redraw = true;
-                    }
                     false
                 }
             }
             EventKind::MouseUp { button: MouseButton::Left } => {
+                // Click is registered if MouseDown was on this button (is_pressed == true)
+                // AND MouseUp is also within the button bounds
                 if self.is_pressed {
                     self.is_pressed = false;
                     self.needs_redraw = true;
                     if frame.contains(event.x(), event.y()) {
                         (self.on_click)();
+                        return true;
                     }
                     true
                 } else {
@@ -535,6 +533,407 @@ impl<F: FnMut() + 'static> View for Button<F> {
 impl<F: FnMut() + 'static> Hoverable for Button<F> {
     fn is_hovered(&self) -> bool {
         self.is_hovered
+    }
+}
+
+/// TextField - text input control with two-way binding
+///
+/// # Example
+///
+/// ```no_run
+/// use scarlet_ui::{State, TextField};
+///
+/// let text = State::new(String::from(""));
+///
+/// // State can be passed directly (no .binding() needed)
+/// TextField::new("Enter text...", text)
+/// ```
+pub struct TextField {
+    binding: Binding<String>,
+    placeholder: String,
+    is_focused: bool,
+    cursor_pos: usize,
+    text_color: Color,
+    background: Color,
+    border_color: Color,
+    focused_border_color: Color,
+    corner_radius: u32,
+    padding: u32,
+    refresh_handle: ViewRefreshHandle,
+    cached_text: String,
+    on_action: Option<Box<dyn FnMut(&str)>>,
+}
+
+impl TextField {
+    pub fn new(placeholder: impl Into<String>, binding: impl Into<Binding<String>>) -> Self {
+        let binding = binding.into();
+        let cached_text = binding.get();
+        let cursor_pos = cached_text.len();
+        Self {
+            binding,
+            placeholder: placeholder.into(),
+            is_focused: false,
+            cursor_pos,
+            text_color: Color::BLACK,
+            background: Color::WHITE,
+            border_color: Color::rgb(180, 180, 180),
+            focused_border_color: Color::rgb(100, 150, 255),
+            corner_radius: 4,
+            padding: 8,
+            refresh_handle: ViewRefreshHandle::new(),
+            cached_text,
+            on_action: None,
+        }
+    }
+
+    /// Set text color
+    pub fn text_color(mut self, color: Color) -> Self {
+        self.text_color = color;
+        self
+    }
+
+    /// Set background color
+    pub fn background(mut self, color: Color) -> Self {
+        self.background = color;
+        self
+    }
+
+    /// Set border color
+    pub fn border_color(mut self, color: Color) -> Self {
+        self.border_color = color;
+        self
+    }
+
+    /// Set focused border color
+    pub fn focused_border_color(mut self, color: Color) -> Self {
+        self.focused_border_color = color;
+        self
+    }
+
+    /// Set corner radius
+    pub fn corner_radius(mut self, radius: u32) -> Self {
+        self.corner_radius = radius;
+        self
+    }
+
+    /// Set action callback that is invoked when Enter is pressed
+    pub fn action<F: FnMut(&str) + 'static>(mut self, callback: F) -> Self {
+        self.on_action = Some(Box::new(callback));
+        self
+    }
+
+    /// Set padding
+    pub fn padding(mut self, padding: u32) -> Self {
+        self.padding = padding;
+        self
+    }
+
+    /// Handle character input
+    fn handle_char_input(&mut self, c: char) -> bool {
+        if c.is_control() {
+            return false;
+        }
+
+        // Update binding
+        let mut text = self.binding.get();
+        if self.cursor_pos < text.len() {
+            text.insert(self.cursor_pos, c);
+        } else {
+            text.push(c);
+        }
+        self.cursor_pos += 1;
+        self.binding.set(text);
+        self.refresh_handle.mark_dirty();
+        true
+    }
+
+    /// Handle backspace
+    fn handle_backspace(&mut self) -> bool {
+        if self.cursor_pos > 0 {
+            let mut text = self.binding.get();
+            self.cursor_pos -= 1;
+            text.remove(self.cursor_pos);
+            self.binding.set(text);
+            self.refresh_handle.mark_dirty();
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Handle delete key
+    fn handle_delete(&mut self) -> bool {
+        let mut text = self.binding.get();
+        if self.cursor_pos < text.len() {
+            text.remove(self.cursor_pos);
+            self.binding.set(text);
+            self.refresh_handle.mark_dirty();
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Handle arrow keys
+    fn handle_arrow(&mut self, direction: ArrowDirection) -> bool {
+        match direction {
+            ArrowDirection::Left => {
+                if self.cursor_pos > 0 {
+                    self.cursor_pos -= 1;
+                    true
+                } else {
+                    false
+                }
+            }
+            ArrowDirection::Right => {
+                let max_len = self.binding.get().len();
+                if self.cursor_pos < max_len {
+                    self.cursor_pos += 1;
+                    true
+                } else {
+                    false
+                }
+            }
+            ArrowDirection::Home => {
+                if self.cursor_pos != 0 {
+                    self.cursor_pos = 0;
+                    true
+                } else {
+                    false
+                }
+            }
+            ArrowDirection::End => {
+                let new_pos = self.binding.get().len();
+                if self.cursor_pos != new_pos {
+                    self.cursor_pos = new_pos;
+                    true
+                } else {
+                    false
+                }
+            }
+        }
+    }
+
+    fn sync_from_binding(&mut self) {
+        let new_text = self.binding.get();
+        if new_text != self.cached_text {
+            self.cached_text = new_text;
+            self.cursor_pos = self.cursor_pos.min(self.cached_text.len());
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum ArrowDirection {
+    Left,
+    Right,
+    Home,
+    End,
+}
+
+// Linux key codes for keyboard handling
+mod key_codes {
+    pub const KEY_ENTER: u16 = 28;
+    pub const KEY_KPENTER: u16 = 96;
+    pub const KEY_BACKSPACE: u16 = 14;
+    pub const KEY_DELETE: u16 = 111;
+    pub const KEY_LEFT: u16 = 105;
+    pub const KEY_RIGHT: u16 = 106;
+    pub const KEY_HOME: u16 = 102;
+    pub const KEY_END: u16 = 107;
+}
+
+impl View for TextField {
+    fn layout(&mut self, available: Size) -> Size {
+        if self.refresh_handle.take_dirty() {
+            self.sync_from_binding();
+        }
+
+        // If the parent provides a width constraint, respect it.
+        // When `available.width == 0`, treat it as "unconstrained" and use a
+        // reasonable intrinsic width.
+        let width = if available.width == 0 { 150 } else { available.width };
+        Size::new(width, 32)
+    }
+
+    fn flex_factor(&self) -> u32 {
+        // Make TextField consume remaining space in HStack/VStack.
+        1
+    }
+
+    fn draw(&self, canvas: &mut Canvas, frame: Rect) {
+        // Background with rounded corners
+        canvas.fill_rounded_rect(frame.x, frame.y, frame.width, frame.height, self.corner_radius, self.background);
+
+        // Border (thicker if focused)
+        let border_color = if self.is_focused {
+            self.focused_border_color
+        } else {
+            self.border_color
+        };
+
+        let border_width = if self.is_focused { 2 } else { 1 };
+        for i in 0..border_width {
+            canvas.draw_rect(
+                frame.x + i as i32,
+                frame.y + i as i32,
+                frame.width - i * 2,
+                frame.height - i * 2,
+                border_color,
+            );
+        }
+
+        // Display text (or placeholder if empty)
+        let display_text = if self.cached_text.is_empty() {
+            &self.placeholder
+        } else {
+            &self.cached_text
+        };
+
+        let text_color = if self.cached_text.is_empty() {
+            Color::rgb(150, 150, 150)
+        } else {
+            self.text_color
+        };
+
+        // Draw text with padding
+        canvas.draw_text(
+            frame.x + self.padding as i32,
+            frame.y + (frame.height as i32 - 16) / 2,
+            display_text,
+            text_color,
+        );
+
+        // Draw caret if focused
+        if self.is_focused {
+            let before_cursor = &self.cached_text[..self.cursor_pos.min(self.cached_text.len())];
+            let (text_width, _) = crate::graphics::measure_text_sized(before_cursor, 16.0);
+            let caret_x = frame.x as i32 + self.padding as i32 + text_width as i32;
+            let caret_y = frame.y + 6;
+
+            canvas.fill_rect(caret_x, caret_y, 2, frame.height as u32 - 12, Color::BLACK);
+        }
+    }
+
+    fn on_event(&mut self, event: &mut Event, frame: Rect) -> bool {
+        match event.kind {
+            EventKind::Focus => {
+                self.on_focus_gain();
+                true
+            }
+            EventKind::Blur => {
+                self.on_focus_loss();
+                true
+            }
+            EventKind::MouseMove => {
+                false
+            }
+            EventKind::MouseDown { button: MouseButton::Left } => {
+                // Focus handling is done by parent
+                false
+            }
+            EventKind::KeyDown { code } => {
+                if !self.is_focused {
+                    return false;
+                }
+
+                match code {
+                    key_codes::KEY_ENTER | key_codes::KEY_KPENTER => {
+                        // Invoke action callback if set
+                        if let Some(ref mut callback) = self.on_action {
+                            let text = self.binding.get();
+                            callback(&text);
+                        }
+                        true
+                    }
+                    key_codes::KEY_BACKSPACE => {
+                        self.handle_backspace()
+                    }
+                    key_codes::KEY_DELETE => {
+                        self.handle_delete()
+                    }
+                    key_codes::KEY_LEFT => {
+                        self.handle_arrow(ArrowDirection::Left)
+                    }
+                    key_codes::KEY_RIGHT => {
+                        self.handle_arrow(ArrowDirection::Right)
+                    }
+                    key_codes::KEY_HOME => {
+                        self.handle_arrow(ArrowDirection::Home)
+                    }
+                    key_codes::KEY_END => {
+                        self.handle_arrow(ArrowDirection::End)
+                    }
+                    _ => {
+                        // Basic character mapping
+                        let c = self.key_code_to_char(code);
+                        if let Some(ch) = c {
+                            self.handle_char_input(ch)
+                        } else {
+                            false
+                        }
+                    }
+                }
+            }
+            _ => false,
+        }
+    }
+
+    fn needs_draw(&self) -> bool {
+        self.refresh_handle.is_dirty()
+    }
+
+    fn set_needs_draw(&mut self) {
+        self.refresh_handle.mark_dirty();
+    }
+
+    fn clear_needs_draw(&mut self) {
+        self.refresh_handle.take_dirty();
+    }
+}
+
+impl Focus for TextField {
+    fn on_focus_gain(&mut self) -> bool {
+        let was_focused = self.is_focused;
+        self.is_focused = true;
+        if !was_focused {
+            self.refresh_handle.mark_dirty();
+        }
+        !was_focused
+    }
+
+    fn on_focus_loss(&mut self) -> bool {
+        let was_focused = self.is_focused;
+        self.is_focused = false;
+        if was_focused {
+            self.refresh_handle.mark_dirty();
+        }
+        was_focused
+    }
+}
+
+impl TextField {
+    /// Convert Linux key code to character (basic ASCII mapping)
+    fn key_code_to_char(&self, code: u16) -> Option<char> {
+        match code {
+            2..=11 => Some(char::from_u32((code - 2 + b'1' as u16) as u32)?),
+            16 => Some('q'), 17 => Some('w'), 18 => Some('e'), 19 => Some('r'),
+            20 => Some('t'), 21 => Some('y'), 22 => Some('u'), 23 => Some('i'),
+            24 => Some('o'), 25 => Some('p'),
+            30 => Some('a'), 31 => Some('s'), 32 => Some('d'), 33 => Some('f'),
+            34 => Some('g'), 35 => Some('h'), 36 => Some('j'), 37 => Some('k'),
+            38 => Some('l'),
+            44 => Some('z'), 45 => Some('x'), 46 => Some('c'), 47 => Some('v'),
+            48 => Some('b'), 49 => Some('n'), 50 => Some('m'),
+            57 => Some(' '), // Space
+            _ => None,
+        }
+    }
+}
+
+impl Hoverable for TextField {
+    fn is_hovered(&self) -> bool {
+        false
     }
 }
 
@@ -670,224 +1069,6 @@ impl View for RectView {
                 }
             }
         }
-    }
-}
-
-// ============================================================================
-// Bound Controls - Controls that work with Binding<T>
-// The old non-bound versions are removed. Use State::new() + .binding() pattern.
-// ============================================================================
-
-/// TextField - text input control with two-way binding
-///
-/// # Example
-///
-/// ```no_run
-/// use scarlet_ui::{State, TextField};
-///
-/// let text = State::new(String::from(""));
-///
-/// // State can be passed directly (no .binding() needed)
-/// TextField::new("Enter text...", text)
-/// ```
-pub struct TextField {
-    binding: Binding<String>,
-    placeholder: String,
-    is_focused: bool,
-    cursor_pos: usize,
-    text_color: Color,
-    background: Color,
-    border_color: Color,
-    corner_radius: u32,
-    padding: u32,
-    refresh_handle: ViewRefreshHandle,
-    cached_text: String,
-}
-
-impl TextField {
-    pub fn new(placeholder: impl Into<String>, binding: impl Into<Binding<String>>) -> Self {
-        let binding = binding.into();
-        let cached_text = binding.get();
-        let cursor_pos = cached_text.len();
-        Self {
-            binding,
-            placeholder: placeholder.into(),
-            is_focused: false,
-            cursor_pos,
-            text_color: Color::BLACK,
-            background: Color::WHITE,
-            border_color: Color::rgb(180, 180, 180),
-            corner_radius: 4,
-            padding: 8,
-            refresh_handle: ViewRefreshHandle::new(),
-            cached_text,
-        }
-    }
-
-    /// Set text color
-    pub fn text_color(mut self, color: Color) -> Self {
-        self.text_color = color;
-        self
-    }
-
-    /// Set background color
-    pub fn background(mut self, color: Color) -> Self {
-        self.background = color;
-        self
-    }
-
-    /// Set border color
-    pub fn border_color(mut self, color: Color) -> Self {
-        self.border_color = color;
-        self
-    }
-
-    /// Set corner radius
-    pub fn corner_radius(mut self, radius: u32) -> Self {
-        self.corner_radius = radius;
-        self
-    }
-
-    fn sync_from_binding(&mut self) {
-        let new_text = self.binding.get();
-        if new_text != self.cached_text {
-            self.cached_text = new_text;
-            self.cursor_pos = self.cursor_pos.min(self.cached_text.len());
-        }
-    }
-}
-
-impl View for TextField {
-    fn layout(&mut self, available: Size) -> Size {
-        if self.refresh_handle.take_dirty() {
-            self.sync_from_binding();
-        }
-
-        // If the parent provides a width constraint, respect it.
-        // When `available.width == 0`, treat it as "unconstrained" and use a
-        // reasonable intrinsic width.
-        let width = if available.width == 0 { 150 } else { available.width };
-        Size::new(width, 32)
-    }
-
-    fn flex_factor(&self) -> u32 {
-        // Make TextField consume remaining space in HStack/VStack.
-        1
-    }
-
-    fn draw(&self, canvas: &mut Canvas, frame: Rect) {
-        // Background with rounded corners
-        canvas.fill_rounded_rect(frame.x, frame.y, frame.width, frame.height, self.corner_radius, self.background);
-        
-        // Border (thicker if focused)
-        let border_color = if self.is_focused {
-            Color::rgb(100, 150, 255)
-        } else {
-            self.border_color
-        };
-        canvas.draw_rounded_rect(frame.x, frame.y, frame.width, frame.height, self.corner_radius, border_color);
-        if self.is_focused {
-            canvas.draw_rounded_rect(frame.x + 1, frame.y + 1, frame.width - 2, frame.height - 2, self.corner_radius.saturating_sub(1), border_color);
-        }
-
-        // Text or placeholder
-        let display_text = if self.cached_text.is_empty() {
-            &self.placeholder
-        } else {
-            &self.cached_text
-        };
-        
-        let text_color = if self.cached_text.is_empty() {
-            Color::rgb(150, 150, 150)
-        } else {
-            self.text_color
-        };
-
-        if !display_text.is_empty() {
-            canvas.draw_text(
-                frame.x + self.padding as i32,
-                frame.y + self.padding as i32,
-                display_text,
-                text_color,
-            );
-        }
-        
-        // Draw cursor if focused
-        if self.is_focused {
-            let cursor_text = if self.cursor_pos <= self.cached_text.len() {
-                &self.cached_text[..self.cursor_pos]
-            } else {
-                &self.cached_text
-            };
-            let (cursor_x, _) = measure_text_sized(cursor_text, 16.0);
-            canvas.fill_rect(
-                frame.x + self.padding as i32 + cursor_x as i32,
-                frame.y + self.padding as i32,
-                2,
-                16,
-                self.text_color,
-            );
-        }
-    }
-
-    fn on_event(&mut self, event: &mut Event, frame: Rect) -> bool {
-        match event.kind {
-            EventKind::MouseDown { button: MouseButton::Left } => {
-                let was_focused = self.is_focused;
-                self.is_focused = frame.contains(event.x(), event.y());
-                if was_focused != self.is_focused {
-                    self.refresh_handle.mark_dirty();
-                }
-                was_focused != self.is_focused
-            }
-            EventKind::Blur => {
-                let was_focused = self.is_focused;
-                self.is_focused = false;
-                if was_focused {
-                    self.refresh_handle.mark_dirty();
-                    true
-                } else {
-                    false
-                }
-            }
-            _ => false,
-        }
-    }
-
-    fn needs_draw(&self) -> bool {
-        self.refresh_handle.is_dirty()
-    }
-
-    fn set_needs_draw(&mut self) {
-        self.refresh_handle.mark_dirty();
-    }
-
-    fn clear_needs_draw(&mut self) {
-        self.refresh_handle.take_dirty();
-    }
-}
-
-impl Focus for TextField {
-    fn on_focus_gain(&mut self) -> bool {
-        let was_focused = self.is_focused;
-        self.is_focused = true;
-        if !was_focused {
-            self.refresh_handle.mark_dirty();
-        }
-        !was_focused
-    }
-
-    fn on_focus_loss(&mut self) -> bool {
-        let was_focused = self.is_focused;
-        self.is_focused = false;
-        if was_focused {
-            self.refresh_handle.mark_dirty();
-        }
-        was_focused
-    }
-
-    fn is_focused(&self) -> bool {
-        self.is_focused
     }
 }
 
@@ -1475,5 +1656,318 @@ impl View for Toggle {
 
     fn clear_needs_draw(&mut self) {
         self.refresh_handle.take_dirty();
+    }
+}
+
+impl Hoverable for Toggle {
+    fn is_hovered(&self) -> bool {
+        false
+    }
+}
+
+/// Selection mode for ListView
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum SelectionMode {
+    /// Only one item can be selected at a time
+    Single,
+    /// Multiple items can be selected
+    Multiple,
+}
+
+/// ListView - displays a list of items with selection support
+///
+/// # Example
+///
+/// ```no_run
+/// use scarlet_ui::{State, ListView};
+///
+/// let items = State::new(vec!["Item 1".to_string(), "Item 2".to_string()]);
+/// let selected = State::new(0usize);
+///
+/// ListView::new(items, selected)
+///     .background(Color::rgb(50, 50, 50))
+///     .selection_color(Color::rgb(60, 120, 200))
+/// ```
+pub struct ListView {
+    items: State<Vec<String>>,
+    selected: Binding<usize>,
+    selection_mode: SelectionMode,
+    background: Color,
+    selection_color: Color,
+    text_color: Color,
+    hover_color: Color,
+    item_height: u32,
+    corner_radius: u32,
+    padding: u32,
+    font_size: u32,
+    refresh_handle: ViewRefreshHandle,
+    is_hovered: bool,
+    hovered_index: Option<usize>,
+    needs_redraw: bool,
+    /// Callback when selection changes
+    on_selection_change: Option<Box<dyn FnMut(usize) + 'static>>,
+}
+
+impl ListView {
+    pub fn new(items: State<Vec<String>>, selected: State<usize>) -> Self {
+        let refresh_handle = ViewRefreshHandle::new();
+        items.subscribe_view(&refresh_handle);
+        selected.subscribe_view(&refresh_handle);
+
+        Self {
+            items,
+            selected: selected.into(),
+            selection_mode: SelectionMode::Single,
+            background: Color::rgb(50, 50, 50),
+            selection_color: Color::rgb(60, 120, 200),
+            text_color: Color::WHITE,
+            hover_color: Color::rgb(70, 70, 70),
+            item_height: 32,
+            corner_radius: 4,
+            padding: 8,
+            font_size: 14,
+            refresh_handle,
+            is_hovered: false,
+            hovered_index: None,
+            needs_redraw: false,
+            on_selection_change: None,
+        }
+    }
+
+    /// Set selection mode (single or multiple)
+    pub fn selection_mode(mut self, mode: SelectionMode) -> Self {
+        self.selection_mode = mode;
+        self
+    }
+
+    /// Set background color
+    pub fn background(mut self, color: Color) -> Self {
+        self.background = color;
+        self
+    }
+
+    /// Set selection color
+    pub fn selection_color(mut self, color: Color) -> Self {
+        self.selection_color = color;
+        self
+    }
+
+    /// Set text color
+    pub fn text_color(mut self, color: Color) -> Self {
+        self.text_color = color;
+        self
+    }
+
+    /// Set hover color
+    pub fn hover_color(mut self, color: Color) -> Self {
+        self.hover_color = color;
+        self
+    }
+
+    /// Set item height
+    pub fn item_height(mut self, height: u32) -> Self {
+        self.item_height = height;
+        self
+    }
+
+    /// Set corner radius
+    pub fn corner_radius(mut self, radius: u32) -> Self {
+        self.corner_radius = radius;
+        self
+    }
+
+    /// Set padding
+    pub fn padding(mut self, padding: u32) -> Self {
+        self.padding = padding;
+        self
+    }
+
+    /// Set font size
+    pub fn font_size(mut self, size: u32) -> Self {
+        self.font_size = size;
+        self
+    }
+
+    /// Set callback for selection changes
+    pub fn on_selection_change<F: FnMut(usize) + 'static>(mut self, callback: F) -> Self {
+        self.on_selection_change = Some(Box::new(callback));
+        self
+    }
+
+    /// Get the number of items
+    pub fn len(&self) -> usize {
+        self.items.with(|items| items.len())
+    }
+
+    /// Check if the list is empty
+    pub fn is_empty(&self) -> bool {
+        self.items.with(|items| items.is_empty())
+    }
+
+    fn get_item_at(&self, y: i32, frame: Rect) -> Option<usize> {
+        if y < frame.y || y >= frame.y + frame.height as i32 {
+            return None;
+        }
+
+        let relative_y = y - frame.y;
+        let index = (relative_y as usize) / (self.item_height as usize);
+
+        if index < self.len() {
+            Some(index)
+        } else {
+            None
+        }
+    }
+}
+
+impl View for ListView {
+    fn layout(&mut self, available: Size) -> Size {
+        // Check for state changes
+        if self.refresh_handle.take_dirty() {
+            self.needs_redraw = true;
+        }
+
+        // Calculate height based on number of items
+        let total_height = self.len() as u32 * self.item_height + self.padding * 2;
+
+        Size::new(
+            available.width,
+            total_height.max(available.height),
+        )
+    }
+
+    fn flex_factor(&self) -> u32 {
+        1
+    }
+
+    fn draw(&self, canvas: &mut Canvas, frame: Rect) {
+        // Draw background with rounded corners
+        canvas.fill_rounded_rect(frame.x, frame.y, frame.width, frame.height, self.corner_radius, self.background);
+
+        // Draw border
+        canvas.draw_rounded_rect(frame.x, frame.y, frame.width, frame.height, self.corner_radius, Color::rgb(100, 100, 100));
+
+        let current_selected = self.selected.get();
+
+        // Draw each item
+        self.items.with(|items| {
+            for (i, item) in items.iter().enumerate() {
+                let item_y = frame.y + self.padding as i32 + i as i32 * self.item_height as i32;
+                let item_rect = Rect::new(
+                    frame.x + self.padding as i32,
+                    item_y,
+                    frame.width - self.padding * 2,
+                    self.item_height,
+                );
+
+                // Draw selection or hover background
+                if i == current_selected {
+                    canvas.fill_rounded_rect(
+                        item_rect.x,
+                        item_rect.y,
+                        item_rect.width,
+                        item_rect.height,
+                        self.corner_radius,
+                        self.selection_color,
+                    );
+                } else if self.hovered_index == Some(i) {
+                    canvas.fill_rounded_rect(
+                        item_rect.x,
+                        item_rect.y,
+                        item_rect.width,
+                        item_rect.height,
+                        self.corner_radius,
+                        self.hover_color,
+                    );
+                }
+
+                // Draw item text
+                let text_y = item_y + (self.item_height as i32 - self.font_size as i32) / 2;
+                canvas.draw_text_sized(
+                    item_rect.x + 8,
+                    text_y,
+                    item,
+                    self.text_color,
+                    self.font_size as f32,
+                );
+            }
+        });
+    }
+
+    fn on_event(&mut self, event: &mut Event, frame: Rect) -> bool {
+        match event.kind {
+            EventKind::MouseMove => {
+                let item_index = self.get_item_at(event.y(), frame);
+                let hover_changed = if item_index != self.hovered_index {
+                    self.hovered_index = item_index;
+                    self.needs_redraw = true;
+                    true
+                } else {
+                    false
+                };
+
+                // Update overall hover state
+                let was_hovered = self.is_hovered;
+                self.is_hovered = frame.contains(event.x(), event.y());
+                if was_hovered != self.is_hovered {
+                    self.needs_redraw = true;
+                    true
+                } else {
+                    hover_changed
+                }
+            }
+            EventKind::MouseDown { button: MouseButton::Left } => {
+                if frame.contains(event.x(), event.y()) {
+                    if let Some(index) = self.get_item_at(event.y(), frame) {
+                        if index < self.len() {
+                            // Update selection
+                            self.selected.set(index);
+                            self.needs_redraw = true;
+                            self.refresh_handle.mark_dirty();
+
+                            // Call callback if set
+                            if let Some(ref mut callback) = self.on_selection_change {
+                                callback(index);
+                            }
+
+                            return true;
+                        }
+                    }
+                }
+                false
+            }
+            _ => false,
+        }
+    }
+
+    fn update_hover_state(&mut self, mouse_in_frame: bool) -> bool {
+        let was_hovered = self.is_hovered;
+        self.is_hovered = mouse_in_frame;
+        if was_hovered != self.is_hovered {
+            self.needs_redraw = true;
+            true
+        } else {
+            false
+        }
+    }
+
+    fn needs_draw(&self) -> bool {
+        self.needs_redraw || self.refresh_handle.is_dirty()
+    }
+
+    fn set_needs_draw(&mut self) {
+        self.needs_redraw = true;
+        self.refresh_handle.mark_dirty();
+    }
+
+    fn clear_needs_draw(&mut self) {
+        self.needs_redraw = false;
+        self.refresh_handle.take_dirty();
+    }
+}
+
+impl Hoverable for ListView {
+    fn is_hovered(&self) -> bool {
+        self.is_hovered
     }
 }

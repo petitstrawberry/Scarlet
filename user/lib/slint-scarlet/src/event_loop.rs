@@ -153,6 +153,10 @@ impl EventLoop {
             SwsEvent::Error { code: _ } => {
                 // For now, ignore.
             }
+            SwsEvent::FocusChanged { .. } => {
+                // Focus changed event - currently unused in slint-scarlet
+                // Could be used to update window focus state in the future
+            }
         }
 
         Ok(())

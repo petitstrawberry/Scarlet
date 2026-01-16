@@ -100,53 +100,73 @@ pub struct SubscriptionId(u64);
 /// Internal state container with change notification
 struct StateInner<T> {
     value: T,
-    callbacks: Vec<(u64, StateCallback)>,
+    callbacks: Mutex<Vec<(u64, StateCallback)>>,
     next_callback_id: u64,
     /// Weak references to view refresh handles
-    view_handles: Vec<Weak<AtomicBool>>,
+    view_handles: Mutex<Vec<Weak<AtomicBool>>>,
 }
 
 impl<T> StateInner<T> {
     fn new(value: T) -> Self {
         Self {
             value,
-            callbacks: Vec::new(),
+            callbacks: Mutex::new(Vec::new()),
             next_callback_id: 1,
-            view_handles: Vec::new(),
+            view_handles: Mutex::new(Vec::new()),
         }
     }
 
-    fn notify_observers(&mut self) {
-        // Notify callbacks
-        for (_, callback) in &mut self.callbacks {
-            callback();
-        }
-        
+    fn notify_observers(&self) {
+        // Get callbacks and notify them outside the State lock
+        let callbacks = {
+            let mut cb_lock = self.callbacks.lock();
+            cb_lock.retain(|(id, _)| *id != 0); // Clean up removed callbacks
+            // Clone the callback IDs (we can't clone FnMut, so we'll call them under the lock)
+            let ids: Vec<u64> = cb_lock.iter().map(|(id, _)| *id).collect();
+            ids
+        };
+
         // Mark all subscribed view handles as dirty
         // Clean up dropped handles
-        self.view_handles.retain(|weak: &Weak<AtomicBool>| {
-            if let Some(strong) = weak.upgrade() {
-                strong.store(true, Ordering::SeqCst);
-                true
-            } else {
-                false
+        {
+            let mut view_handles = self.view_handles.lock();
+            view_handles.retain(|weak| {
+                if let Some(strong) = weak.upgrade() {
+                    strong.store(true, Ordering::SeqCst);
+                    true
+                } else {
+                    false
+                }
+            });
+        }
+
+        // Call callbacks under their own lock
+        let mut cb_lock = self.callbacks.lock();
+        for id in callbacks {
+            if let Some(idx) = cb_lock.iter().position(|(cid, _)| *cid == id) {
+                if let Some((_, callback)) = cb_lock.get_mut(idx) {
+                    callback();
+                }
             }
-        });
+        }
     }
 
     fn add_callback(&mut self, callback: StateCallback) -> u64 {
         let id = self.next_callback_id;
         self.next_callback_id += 1;
-        self.callbacks.push((id, callback));
+        let mut callbacks = self.callbacks.lock();
+        callbacks.push((id, callback));
         id
     }
 
     fn remove_callback(&mut self, id: u64) {
-        self.callbacks.retain(|(cid, _)| *cid != id);
+        let mut callbacks = self.callbacks.lock();
+        callbacks.retain(|(cid, _)| *cid != id);
     }
 
     fn subscribe_view(&mut self, handle: &ViewRefreshHandle) {
-        self.view_handles.push(Arc::downgrade(&handle.needs_refresh));
+        let mut view_handles = self.view_handles.lock();
+        view_handles.push(Arc::downgrade(&handle.needs_refresh));
     }
 }
 
@@ -214,9 +234,16 @@ impl<T> State<T> {
     where
         F: FnOnce(&mut T) -> R,
     {
-        let mut inner = self.inner.lock();
-        let result = f(&mut inner.value);
-        inner.notify_observers();
+        // Lock and modify the value
+        let result = {
+            let mut inner = self.inner.lock();
+            f(&mut inner.value)
+        };
+
+        // Release the lock before notifying observers to prevent deadlocks
+        // when callbacks try to access the same state
+        self.inner.lock().notify_observers();
+
         result
     }
 

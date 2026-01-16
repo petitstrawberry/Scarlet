@@ -682,6 +682,23 @@ impl Connection {
                                 self.pending_events.push(Event::Error { code });
                                 count += 1;
                             }
+                            ServerMessage::FocusChanged {
+                                window_id,
+                                app_id,
+                                app_id_len,
+                                title,
+                                title_len,
+                            } => {
+                                // Convert fixed-size buffers to String
+                                let app_id_str = String::from_utf8_lossy(&app_id[..app_id_len as usize]).into_owned();
+                                let title_str = String::from_utf8_lossy(&title[..title_len as usize]).into_owned();
+                                self.pending_events.push(Event::FocusChanged {
+                                    window_id,
+                                    app_id: app_id_str,
+                                    title: title_str,
+                                });
+                                count += 1;
+                            }
                             _ => {}
                         }
                     }
@@ -703,7 +720,7 @@ impl Connection {
             return None;
         }
 
-        let ev = self.pending_events[self.pending_head];
+        let ev = self.pending_events[self.pending_head].clone();
         self.pending_head += 1;
 
         if self.pending_head >= self.pending_events.len() {
@@ -763,35 +780,19 @@ impl Connection {
     ///
     /// This is a synchronous request: it blocks until the server responds with WINDOW_LIST.
     pub fn get_window_list(&mut self) -> Result<Vec<WindowListEntry>, Error> {
-        println!("[sws-client] get_window_list: socket_handle={}, sending GET_WINDOW_LIST request",
-            self.socket.as_raw());
-
         // Send GET_WINDOW_LIST request (no payload)
         write_frame(&mut self.socket, protocol::client_msg::GET_WINDOW_LIST, &[])
             .map_err(|_| Error::SendFailed)?;
-
-        println!("[sws-client] get_window_list: socket_handle={}, request sent, switching to blocking mode",
-            self.socket.as_raw());
 
         // Switch to blocking mode for synchronous response
         self.socket
             .set_nonblocking(false)
             .map_err(|_| Error::SocketConfig)?;
 
-        // Verify blocking mode was actually set
-        let is_nonblocking = self.socket.is_nonblocking().unwrap_or(false);
-        println!("[sws-client] get_window_list: socket_handle={}, verified is_nonblocking={}",
-            self.socket.as_raw(), is_nonblocking);
-
-        println!("[sws-client] get_window_list: socket_handle={}, waiting for response...",
-            self.socket.as_raw());
-
         // Wait for WINDOW_LIST response
         let msg_type =
             read_frame_into(&mut self.socket, &mut self.read_payload).map_err(|_| Error::ReceiveFailed)?;
 
-        println!("[sws-client] get_window_list: socket_handle={}, received msg_type={}",
-            self.socket.as_raw(), msg_type);
         let response = protocol::parse_server_message(msg_type, &self.read_payload)
             .map_err(|_| Error::InvalidResponse)?;
 

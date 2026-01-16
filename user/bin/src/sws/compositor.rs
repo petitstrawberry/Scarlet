@@ -1095,15 +1095,45 @@ impl Compositor {
         if let Some(win_id) = self.window_manager.window_at_point(click_x, click_y) {
             println!("[Compositor] Clicked on window #{}", win_id);
 
-            // Change focus and bring to front
-            self.window_manager.set_focus(win_id);
-            self.window_manager.raise_to_top_with_type(win_id);
+            // Only change focus if the window accepts focus
+            // Taskbar and Desktop windows are global UI elements that don't steal focus
+            if self.window_manager.window_accepts_focus(win_id) {
+                self.window_manager.set_focus(win_id);
 
-            // Need full redraw when Z-order changes
-            self.full_redraw_needed = true;
+                // Broadcast focus change event to all clients
+                self.broadcast_focus_change(win_id);
+
+                // Need full redraw when Z-order changes
+                self.full_redraw_needed = true;
+            } else {
+                println!("[Compositor] Window #{} does not accept focus (global UI element)", win_id);
+                // Still raise to top to maintain proper Z-order for that window type
+                self.window_manager.raise_to_top_with_type(win_id);
+                self.full_redraw_needed = true;
+            }
         }
 
         Ok(())
+    }
+
+    /// Broadcast focus change event to all connected clients
+    fn broadcast_focus_change(&self, window_id: u32) {
+        if let Some(window) = self.window_manager.get_window(window_id) {
+            let app_id_bytes = window.app_id.as_deref().unwrap_or(b"");
+            let title_bytes = window.title.as_deref().unwrap_or(b"");
+
+            let payload = sws_protocol::payload_focus_changed(window_id, app_id_bytes, title_bytes);
+            super::ipc::broadcast_message_to_all_clients(sws_protocol::server_msg::FOCUS_CHANGED, payload);
+
+            println!(
+                "[Compositor] Broadcast focus change: window_id={}, app_id_len={}, title_len={}",
+                window_id,
+                app_id_bytes.len(),
+                title_bytes.len()
+            );
+        } else {
+            println!("[Compositor] Warning: Failed to broadcast focus change for non-existent window #{}", window_id);
+        }
     }
 
     /// Check if cursor is within the bounds of a window
@@ -1400,9 +1430,21 @@ impl Compositor {
                         .window_manager
                         .window_at_point(self.cursor.x, self.cursor.y)
                     {
-                        self.window_manager.set_focus(win_id);
-                        self.window_manager.raise_to_top_with_type(win_id);
-                        self.full_redraw_needed = true;
+                        // Only change focus if the window accepts focus
+                        // Taskbar and Desktop windows are global UI elements that don't steal focus
+                        if self.window_manager.window_accepts_focus(win_id) {
+                            self.window_manager.set_focus(win_id);
+
+                            // Broadcast focus change event to all clients
+                            self.broadcast_focus_change(win_id);
+
+                            self.full_redraw_needed = true;
+                        } else {
+                            println!("[Compositor] Window #{} does not accept focus (global UI element)", win_id);
+                            // Still raise to top to maintain proper Z-order for that window type
+                            self.window_manager.raise_to_top_with_type(win_id);
+                            self.full_redraw_needed = true;
+                        }
 
                         // Start interactive resize if we're near the bottom/right edge.
                         if let Some(window) = self.window_manager.get_window(win_id) {
@@ -1865,6 +1907,10 @@ impl Compositor {
                 // Focus and raise the window
                 self.window_manager.focus_window(window_id);
                 self.window_manager.raise_to_top(window_id);
+
+                // Broadcast focus change event to all clients
+                self.broadcast_focus_change(window_id);
+
                 self.full_redraw_needed = true;
             }
             IpcEvent::SetWindowType {

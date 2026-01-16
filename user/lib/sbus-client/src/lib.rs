@@ -186,53 +186,42 @@ impl Connection {
         let mut buffer = [0u8; 4096];
         let mut read_buffer = Vec::new();
 
-        std::println!("[wait_for_response] Starting to wait for response...");
-
         // Read header
         while read_buffer.len() < 16 {
             match self.socket.read(&mut buffer) {
                 Ok(0) => {
-                    std::println!("[wait_for_response] Read returned 0 (connection closed)");
                     return Err(Error::IoError);
                 }
                 Ok(n) => {
-                    std::println!("[wait_for_response] Read {} bytes", n);
                     read_buffer.extend_from_slice(&buffer[..n]);
                 }
-                Err(e) => {
-                    std::println!("[wait_for_response] Read error: {:?}", e);
+                Err(_e) => {
                     continue;
                 }
             }
         }
 
-        std::println!("[wait_for_response] Header received, parsing...");
         let mut header_bytes = [0u8; 16];
         header_bytes.copy_from_slice(&read_buffer[0..16]);
         let header = MessageHeader::from_le_bytes(header_bytes);
 
         let total_len = 16 + header.payload_length as usize;
-        std::println!("[wait_for_response] Total message length: {} bytes", total_len);
 
         // Read remaining payload
         while read_buffer.len() < total_len {
             match self.socket.read(&mut buffer) {
                 Ok(0) => {
-                    std::println!("[wait_for_response] Payload read returned 0 (connection closed)");
                     return Err(Error::IoError);
                 }
                 Ok(n) => {
-                    std::println!("[wait_for_response] Payload read {} bytes", n);
                     read_buffer.extend_from_slice(&buffer[..n]);
                 }
-                Err(e) => {
-                    std::println!("[wait_for_response] Payload read error: {:?}", e);
+                Err(_e) => {
                     continue;
                 }
             }
         }
 
-        std::println!("[wait_for_response] Complete message received, parsing...");
         sbus::from_bytes(read_buffer).map_err(|_| Error::ProtocolError("Failed to parse message"))
     }
 

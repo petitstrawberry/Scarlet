@@ -1,0 +1,6 @@
+[Desktop Entry]
+Name=Clock
+Exec=/bin/scarlet_desktop_clock
+Icon=clock
+Type=Application
+Terminal=false

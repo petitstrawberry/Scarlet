@@ -16,6 +16,7 @@ use core::{hint::spin_loop, sync::atomic::fence};
 use sbus_client as sbus;
 use std::{
     fs::File,
+    format,
     handle::Handle,
     println,
     socket::Socket,
@@ -478,6 +479,110 @@ fn launch_or_focus(app_id: &str, exec_path: Option<&str>) -> Result<(), &'static
             Ok(())
         }
     }
+}
+
+/// Get a list of all running applications
+fn get_running_apps_list() -> Vec<RunningApp> {
+    let apps = RUNNING_APPS.lock();
+    apps.clone()
+}
+
+/// Get the app_id of the currently focused window
+fn get_focused_window_app_id() -> Option<String> {
+    // Try to connect to SWS
+    let mut conn = match Connection::connect_default() {
+        Ok(c) => c,
+        Err(e) => {
+            // Silent failure - don't log on every poll
+            return None;
+        }
+    };
+
+    // Get the list of windows
+    let windows = match conn.get_window_list() {
+        Ok(w) => w,
+        Err(e) => {
+            // Silent failure - don't log on every poll
+            return None;
+        }
+    };
+
+    // Find the focused window
+    for window in &windows {
+        if window.focused {
+            return Some(window.app_id.clone());
+        }
+    }
+
+    None
+}
+
+/// Get menu titles for an application
+/// Returns a list of menu titles (e.g., ["Notepad", "File", "Edit", "View", "Help"])
+fn get_app_menu_titles(app_id: &str) -> Vec<String> {
+    // Look up the app to get its name
+    let app_name = if let Some(entry) = lookup_app(app_id) {
+        entry.name
+    } else {
+        // Fallback: use app_id as name
+        app_id.to_string()
+    };
+
+    // Build menu list based on app type
+    let mut menus = vec![app_name];
+
+    // Add app-specific menus based on app_id
+    if app_id.contains("notepad") || app_id.contains("text") || app_id.contains("editor") {
+        menus.extend(vec![
+            String::from("File"),
+            String::from("Edit"),
+            String::from("View"),
+            String::from("Help"),
+        ]);
+    } else if app_id.contains("terminal") {
+        menus.extend(vec![
+            String::from("Shell"),
+            String::from("Edit"),
+            String::from("View"),
+            String::from("Help"),
+        ]);
+    } else if app_id.contains("filer") || app_id.contains("file") {
+        menus.extend(vec![
+            String::from("File"),
+            String::from("Edit"),
+            String::from("View"),
+            String::from("Go"),
+            String::from("Help"),
+        ]);
+    } else if app_id.contains("settings") || app_id.contains("config") {
+        menus.extend(vec![
+            String::from("Edit"),
+            String::from("View"),
+            String::from("Help"),
+        ]);
+    } else if app_id.contains("launcher") {
+        menus.extend(vec![
+            String::from("File"),
+            String::from("View"),
+            String::from("Help"),
+        ]);
+    } else if app_id.contains("clock") {
+        menus.extend(vec![
+            String::from("View"),
+            String::from("Help"),
+        ]);
+    } else {
+        // Generic menus for unknown apps
+        menus.extend(vec![
+            String::from("File"),
+            String::from("Edit"),
+            String::from("View"),
+            String::from("Window"),
+            String::from("Help"),
+        ]);
+    }
+
+    menus
 }
 
 /// Launch an application by app_id (looks up from .desktop registry)
@@ -1196,6 +1301,94 @@ fn handle_sbus_message(
                         }
                     }
 
+                    Ok(())
+                }
+                "GetRunningApps" => {
+                    println!("[sbus] Handling GetRunningApps method");
+
+                    let apps = get_running_apps_list();
+                    let mut result_args = Vec::new();
+
+                    // Return array of strings: "app_id|name"
+                    for app in &apps {
+                        let entry = lookup_app(&app.app_id);
+                        let name = entry.as_ref().map(|e| e.name.as_str()).unwrap_or(&app.app_id);
+                        let display_name = format!("{}|{}", app.app_id, name);
+                        result_args.push(Argument::String(display_name));
+                    }
+
+                    if let Some(conn) = conn_guard.as_mut() {
+                        let result: core::result::Result<(), sbus::Error> = conn
+                            .send_method_return(serial, result_args);
+                        let _ = result;
+                    }
+                    Ok(())
+                }
+                "GetActiveApp" => {
+                    // Query SWS for the focused window
+                    match get_focused_window_app_id() {
+                        Some(app_id) => {
+                            // Look up the app name
+                            let entry = lookup_app(&app_id);
+                            let name = entry.as_ref().map(|e| e.name.as_str()).unwrap_or(&app_id);
+                            let display_name = format!("{}|{}", app_id, name);
+
+                            if let Some(conn) = conn_guard.as_mut() {
+                                let result: core::result::Result<(), sbus::Error> = conn
+                                    .send_method_return(
+                                        serial,
+                                        vec![Argument::String(display_name)],
+                                    );
+                                let _ = result;
+                            }
+                        }
+                        None => {
+                            // No focused window
+                            if let Some(conn) = conn_guard.as_mut() {
+                                let result: core::result::Result<(), sbus::Error> = conn
+                                    .send_method_return(
+                                        serial,
+                                        vec![Argument::String(String::new())],
+                                    );
+                                let _ = result;
+                            }
+                        }
+                    }
+                    Ok(())
+                }
+                "GetAppMenus" => {
+                    println!("[sbus] Handling GetAppMenus method for app: {}", args.get(0).map_or("", |a| match a {
+                        sbus::Argument::String(s) => s.as_str(),
+                        _ => "",
+                    }));
+
+                    // Extract app_id from arguments
+                    let app_id = if !args.is_empty() {
+                        match &args[0] {
+                            Argument::String(s) => Some(s.clone()),
+                            _ => None,
+                        }
+                    } else {
+                        None
+                    };
+
+                    let menu_titles = if let Some(app_id) = app_id {
+                        get_app_menu_titles(&app_id)
+                    } else {
+                        Vec::new()
+                    };
+
+                    // Return pipe-separated menu titles: "menu1|menu2|menu3"
+                    let menus_string = menu_titles.join("|");
+
+                    if let Some(conn) = conn_guard.as_mut() {
+                        let result: core::result::Result<(), sbus::Error> = conn
+                            .send_method_return(
+                                serial,
+                                vec![Argument::String(menus_string)],
+                            );
+                        let _ = result;
+                    }
                     Ok(())
                 }
                 _ => {

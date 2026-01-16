@@ -15,12 +15,14 @@ mod navigation;
 mod window;
 
 pub use traits::{View, ViewBox, Size, IntoViewBox, Focus, Hoverable};
-pub use containers::{HStack, StackAlignment, VStack, ZStack, Padding, Center};
+pub use containers::{HStack, StackAlignment, VStack, ZStack, Padding, Center, ScrollView};
 pub use controls::{
     // Basic views
     Label, Text, Button, Spacer, RectView,
     // Reactive controls (all use Binding<T>)
     ReactiveLabel, TextField, CheckBox, Slider, ProgressBar, Toggle,
+    // List controls
+    ListView, SelectionMode,
 };
 pub use navigation::{NavigationView, NavigationItem};
 pub use window::{Window, WindowKind};

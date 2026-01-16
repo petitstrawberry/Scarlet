@@ -16,7 +16,7 @@ pub struct InputEvent {
 }
 
 /// Events from the SWS server
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Event {
     /// Input event (keyboard, mouse, etc.)
     Input(InputEvent),
@@ -31,6 +31,12 @@ pub enum Event {
     },
     /// Window was destroyed by server
     SurfaceDestroyed { surface_id: u32 },
+    /// Focus changed to a different window
+    FocusChanged {
+        window_id: u32,
+        app_id: std::string::String,
+        title: std::string::String,
+    },
     /// Error from server
     Error { code: u32 },
 }

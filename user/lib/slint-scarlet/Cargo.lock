@@ -3,6 +3,26 @@
 version = 4
 
 [[package]]
+name = "ab_glyph"
+version = "0.2.32"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "01c0457472c38ea5bd1c3b5ada5e368271cb550be7a4ca4a0b4634e9913f6cc2"
+dependencies = [
+ "ab_glyph_rasterizer",
+ "libm",
+ "owned_ttf_parser",
+]
+
+[[package]]
+name = "ab_glyph_rasterizer"
+version = "0.1.10"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "366ffbaa4442f4684d91e2cd7c5ea7c4ed8add41959a31447066e279e432b618"
+dependencies = [
+ "libm",
+]
+
+[[package]]
 name = "adler2"
 version = "2.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2824,6 +2844,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "owned_ttf_parser"
+version = "0.25.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "36820e9051aca1014ddc75770aab4d68bc1e9e632f0f5627c4086bc216fb583b"
+dependencies = [
+ "ttf-parser 0.25.1",
+]
+
+[[package]]
 name = "parking"
 version = "2.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3393,6 +3422,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "scarlet-ui"
+version = "0.1.0"
+dependencies = [
+ "ab_glyph",
+ "scarlet-ui-macros",
+ "scarlet_std",
+ "sws-client",
+]
+
+[[package]]
+name = "scarlet-ui-macros"
+version = "0.1.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
+]
+
+[[package]]
 name = "scarlet_std"
 version = "0.15.0"
 dependencies = [
@@ -3617,6 +3665,7 @@ dependencies = [
 name = "slint-scarlet"
 version = "0.1.0"
 dependencies = [
+ "scarlet-ui",
  "scarlet_std",
  "slint",
  "slint-build",

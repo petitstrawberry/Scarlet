@@ -4,6 +4,7 @@ use crate::view::{Window, View, Size};
 use crate::event::{Event, MouseButton};
 use crate::graphics::{Canvas, Rect, Point};
 use crate::Color;
+use crate::menu::ApplicationMenu;
 use scarlet_std::boxed::Box;
 use scarlet_std::vec::Vec;
 use scarlet_std::string::{String, ToString};
@@ -89,6 +90,9 @@ pub struct Application {
 
     /// Default application ID for windows created through this Application
     app_id: Option<String>,
+
+    /// Application menu (for menu bar integration)
+    application_menu: Option<ApplicationMenu>,
 }
 
 #[derive(Clone)]
@@ -169,6 +173,8 @@ impl Application {
             main_resized_large: false,
 
             app_id: None,
+
+            application_menu: None,
         })
     }
 
@@ -206,6 +212,41 @@ impl Application {
     pub fn app_id(&mut self, app_id: &str) -> &mut Self {
         self.app_id = Some(app_id.to_string());
         self
+    }
+
+    /// Set the application menu for menu bar integration.
+    ///
+    /// This registers the application's menu structure with the system,
+    /// allowing the taskbar to display app-specific menus when this app is focused.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use scarlet_ui::{Application, Menu, MenuItem, ApplicationMenu};
+    ///
+    /// let mut app = Application::new()
+    ///     .expect("Failed to connect");
+    ///
+    /// let menu = ApplicationMenu::new()
+    ///     .menu(Menu::new("MyApp")
+    ///         .item(MenuItem::action("About MyApp"))
+    ///         .item(MenuItem::action("Preferences..."))
+    ///         .separator()
+    ///         .item(MenuItem::action("Quit")))
+    ///     .menu(Menu::new("File")
+    ///         .item(MenuItem::action("New").shortcut("Cmd+N"))
+    ///         .item(MenuItem::action("Open").shortcut("Cmd+O")));
+    ///
+    /// app.set_application_menu(menu);
+    /// ```
+    pub fn set_application_menu(&mut self, menu: ApplicationMenu) -> &mut Self {
+        self.application_menu = Some(menu);
+        self
+    }
+
+    /// Get the application menu if set
+    pub fn get_application_menu(&self) -> Option<&ApplicationMenu> {
+        self.application_menu.as_ref()
     }
 
     fn should_terminate_after_last_window_closed(&mut self) -> bool {
@@ -844,6 +885,10 @@ impl Application {
             }
             SwsEvent::Error { code: _ } => {
                 // Handle error
+            }
+            SwsEvent::FocusChanged { .. } => {
+                // Focus changed event - currently unused in scarlet-ui
+                // Could be used to update window decorations or focus state
             }
         }
     }

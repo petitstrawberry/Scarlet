@@ -15,9 +15,9 @@ extern crate scarlet_std as std;
 use core::time::Duration;
 use scarlet_ui::{
     Application, Button, Center, CheckBox, Color, HStack, Label, Padding, ProgressBar, RectView,
-    Slider, Spacer, State, Text, TextField, Timer, Toggle, VStack, Window, label,
+    ScrollView, Slider, Spacer, State, Text, TextField, Timer, Toggle, VStack, Window, label,
 };
-use std::{format, println, string::String};
+use std::{format, println};
 
 #[unsafe(no_mangle)]
 pub extern "C" fn main() -> i32 {
@@ -43,12 +43,12 @@ pub extern "C" fn main() -> i32 {
 
     let counter = State::new(0i32);
     let progress = State::new(0.0f32);
-    let text_input = State::new(String::new());
     let feature_a = State::new(true);
     let feature_b = State::new(false);
     let slider_value = State::new(0.5f32);
     let toggle1 = State::new(true);
     let toggle2 = State::new(false);
+    let text_input = State::new(scarlet_std::string::String::new());
 
     // Timer - auto-increment progress (100ms intervals)
     let progress_t = progress.clone();
@@ -164,7 +164,11 @@ pub extern "C" fn main() -> i32 {
                                 .child(Label::new("TextField:").color(Color::TEXT).font_size(14)
                                 )
                                 .child(
-                                    TextField::new("Type here...", text_input.clone()).corner_radius(6),
+                                    TextField::new("Type here...", text_input)
+                                        .action(|text| {
+                                            println!("[ui_demo] Text entered: {}", text);
+                                        })
+                                        .corner_radius(6),
                                 )
                             )
                             .child(

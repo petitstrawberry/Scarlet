@@ -492,6 +492,26 @@ impl WindowManager {
         self.focus_window(id);
     }
 
+    /// Check if a window type should accept keyboard focus
+    /// Taskbar and Desktop windows are global UI elements that don't participate in normal focus management
+    pub fn window_type_accepts_focus(window_type: WindowType) -> bool {
+        match window_type {
+            WindowType::Normal => true,
+            WindowType::AlwaysOnTop => true,
+            WindowType::Taskbar => false,
+            WindowType::Desktop => false,
+        }
+    }
+
+    /// Check if a window should accept focus
+    pub fn window_accepts_focus(&self, id: WindowId) -> bool {
+        if let Some(window) = self.get_window(id) {
+            Self::window_type_accepts_focus(window.window_type)
+        } else {
+            false
+        }
+    }
+
     /// Raise window to top (bring to front in Z-order)
     pub fn raise_to_top(&mut self, id: WindowId) {
         let root = self.top_level_ancestor(id);

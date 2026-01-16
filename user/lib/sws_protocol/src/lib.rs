@@ -59,6 +59,7 @@ pub mod server_msg {
     pub const WINDOW_CONFIGURE: u32 = 15;
     pub const SCREEN_SIZE: u32 = 16;
     pub const WINDOW_LIST: u32 = 17;
+    pub const FOCUS_CHANGED: u32 = 18;
 }
 
 /// Flags for transient (parent/child) window behavior.
@@ -313,6 +314,14 @@ pub enum ServerMessage {
     /// Response to GET_WINDOW_LIST request
     /// Contains a serialized list of windows
     WindowList,
+    /// Focus changed to a different window
+    FocusChanged {
+        window_id: u32,
+        app_id: [u8; 128], // Fixed-size buffer for app_id
+        app_id_len: u32,
+        title: [u8; 256], // Fixed-size buffer for window title
+        title_len: u32,
+    },
     Error {
         code: u32,
     },
@@ -676,6 +685,48 @@ pub fn parse_server_message(msg_type: u32, payload: &[u8]) -> Result<ServerMessa
                 return Err(ProtocolError::MalformedPayload);
             }
             Ok(ServerMessage::WindowList)
+        }
+        server_msg::FOCUS_CHANGED => {
+            // Payload: window_id (u32) + app_id_len (u32) + app_id (variable, max 128) + title_len (u32) + title (variable, max 256)
+            if payload.len() < 8 {
+                return Err(ProtocolError::MalformedPayload);
+            }
+            let window_id = u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
+            let app_id_len = u32::from_le_bytes([payload[4], payload[5], payload[6], payload[7]]) as usize;
+
+            if payload.len() < 8 + app_id_len + 4 {
+                return Err(ProtocolError::MalformedPayload);
+            }
+
+            let mut app_id = [0u8; 128];
+            if app_id_len > 0 {
+                app_id[..app_id_len].copy_from_slice(&payload[8..8 + app_id_len]);
+            }
+
+            let title_offset = 8 + app_id_len;
+            let title_len = u32::from_le_bytes([
+                payload[title_offset],
+                payload[title_offset + 1],
+                payload[title_offset + 2],
+                payload[title_offset + 3],
+            ]) as usize;
+
+            if payload.len() < title_offset + 4 + title_len {
+                return Err(ProtocolError::MalformedPayload);
+            }
+
+            let mut title = [0u8; 256];
+            if title_len > 0 {
+                title[..title_len].copy_from_slice(&payload[title_offset + 4..title_offset + 4 + title_len]);
+            }
+
+            Ok(ServerMessage::FocusChanged {
+                window_id,
+                app_id,
+                app_id_len: app_id_len as u32,
+                title,
+                title_len: title_len as u32,
+            })
         }
         server_msg::ERROR => {
             if payload.len() < 4 {
@@ -1074,4 +1125,27 @@ pub fn payload_launch_or_focus(app_id: &[u8], exec_path: &[u8]) -> Vec<u8> {
 /// Build payload for client->server `FOCUS_WINDOW`.
 pub fn payload_focus_window(window_id: u32) -> Vec<u8> {
     window_id.to_le_bytes().to_vec()
+}
+
+/// Build payload for server->client `FOCUS_CHANGED`.
+///
+/// Payload format:
+/// - window_id (u32)
+/// - app_id_len (u32)
+/// - app_id_bytes (variable, max 128)
+/// - title_len (u32)
+/// - title_bytes (variable, max 256)
+pub fn payload_focus_changed(window_id: u32, app_id: &[u8], title: &[u8]) -> Vec<u8> {
+    let mut payload = Vec::new();
+    payload.extend_from_slice(&window_id.to_le_bytes());
+
+    let app_id_len = app_id.len().min(128);
+    payload.extend_from_slice(&(app_id_len as u32).to_le_bytes());
+    payload.extend_from_slice(&app_id[..app_id_len]);
+
+    let title_len = title.len().min(256);
+    payload.extend_from_slice(&(title_len as u32).to_le_bytes());
+    payload.extend_from_slice(&title[..title_len]);
+
+    payload
 }

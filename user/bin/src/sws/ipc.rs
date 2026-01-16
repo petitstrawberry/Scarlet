@@ -322,6 +322,27 @@ pub fn send_message_to_client(client_id: usize, msg_type: u32, payload: Vec<u8>)
     }
 }
 
+/// Broadcast a server->client protocol message to all connected clients.
+/// This is used for events like focus changes that all clients should be aware of.
+pub fn broadcast_message_to_all_clients(msg_type: u32, payload: Vec<u8>) {
+    let mut pending = PENDING_CLIENT_RESPONSES.lock();
+    let client_ids: Vec<usize> = pending.keys().copied().collect();
+    drop(pending);
+
+    println!(
+        "[IpcServer] Broadcasting message to {} clients (msg_type={}, payload_len={})",
+        client_ids.len(),
+        msg_type,
+        payload.len()
+    );
+
+    for client_id in client_ids {
+        // Clone the payload for each client
+        let payload_clone = payload.clone();
+        send_message_to_client(client_id, msg_type, payload_clone);
+    }
+}
+
 fn pop_pending_server_frames(window_id: u32) -> Vec<PendingServerFrame> {
     let mut pending = PENDING_SERVER_FRAMES.lock();
     if let Some(frames) = pending.get_mut(&window_id) {

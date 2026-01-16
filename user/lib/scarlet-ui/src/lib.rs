@@ -115,6 +115,7 @@ mod application;
 pub mod color;
 pub mod event;
 pub mod graphics;
+pub mod menu;
 pub mod modifiers;
 pub mod state;
 pub mod timer;
@@ -125,6 +126,7 @@ pub use application::{Application, ApplicationDelegate, ApplicationHandle};
 pub use color::Color;
 pub use event::{Event, EventKind, EventType, MouseButton};
 pub use graphics::{set_default_font, Canvas, Point, Rect};
+pub use menu::{Menu, MenuItem, MenuItemType, ApplicationMenu, default_scarlet_menu};
 pub use state::{State, Binding, Observable, Computed, ViewRefreshHandle, SubscriptionId};
 pub use timer::{Timer, schedule_on_main_thread};
 
@@ -139,10 +141,13 @@ pub use view::{
     View, Size, ViewBox, IntoViewBox,
     Window, WindowKind,
     VStack, HStack, ZStack, Padding, Center, StackAlignment,
+    ScrollView,
     // Basic views
     Label, Text, Button, Spacer, RectView,
     // Reactive controls (all use Binding<T> or State<T>)
     ReactiveLabel, TextField, CheckBox, Slider, ProgressBar, Toggle,
+    // List controls
+    ListView, SelectionMode,
     // Navigation
     NavigationView, NavigationItem,
 };

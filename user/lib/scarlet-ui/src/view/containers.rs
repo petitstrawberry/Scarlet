@@ -5,6 +5,7 @@ use crate::graphics::{Canvas, Rect};
 use crate::event::Event;
 use scarlet_std::boxed::Box;
 use scarlet_std::vec::Vec;
+use scarlet_std::vec;
 
 /// Cross-axis alignment for stacks.
 ///
@@ -718,3 +719,526 @@ impl View for Center {
         let _ = visitor(self.child.as_mut() as &mut dyn View, child_frame);
     }
 }
+
+/// ScrollView - scrollable container for content larger than available space
+///
+/// Provides both vertical and horizontal scrolling with optional scrollbars.
+/// Supports mouse wheel scrolling and drag-to-scroll on scrollbars.
+pub struct ScrollView {
+    child: ViewBox,
+    scroll_offset_x: i32,
+    scroll_offset_y: i32,
+    cached_size: Size,
+    child_size: Size,
+    shows_vertical_scrollbar: bool,
+    shows_horizontal_scrollbar: bool,
+    scrollbar_width: u32,
+    scrollbar_color: crate::Color,
+    scrollbar_track_color: crate::Color,
+    needs_redraw: bool,
+    // Drag state for scrollbar thumb dragging
+    dragging_vertical_thumb: bool,
+    dragging_horizontal_thumb: bool,
+    drag_start_y: i32,
+    drag_start_x: i32,
+    drag_start_scroll_y: i32,
+    drag_start_scroll_x: i32,
+    // Scroll speed multiplier for mouse wheel
+    wheel_scroll_speed: i32,
+}
+
+impl ScrollView {
+    /// Create a new scroll view
+    pub fn new<V: View + 'static>(child: V) -> Self {
+        Self {
+            child: Box::new(child),
+            scroll_offset_x: 0,
+            scroll_offset_y: 0,
+            cached_size: Size::ZERO,
+            child_size: Size::ZERO,
+            shows_vertical_scrollbar: true,
+            shows_horizontal_scrollbar: false,
+            scrollbar_width: 12,
+            scrollbar_color: crate::Color::rgb(140, 140, 140),
+            scrollbar_track_color: crate::Color::rgb(70, 70, 70),
+            needs_redraw: true,
+            dragging_vertical_thumb: false,
+            dragging_horizontal_thumb: false,
+            drag_start_y: 0,
+            drag_start_x: 0,
+            drag_start_scroll_y: 0,
+            drag_start_scroll_x: 0,
+            wheel_scroll_speed: 30,
+        }
+    }
+
+    /// Set whether to show vertical scrollbar
+    pub fn shows_vertical_scrollbar(mut self, shows: bool) -> Self {
+        self.shows_vertical_scrollbar = shows;
+        self
+    }
+
+    /// Set whether to show horizontal scrollbar
+    pub fn shows_horizontal_scrollbar(mut self, shows: bool) -> Self {
+        self.shows_horizontal_scrollbar = shows;
+        self
+    }
+
+    /// Set scrollbar width (applies to both scrollbars)
+    pub fn scrollbar_width(mut self, width: u32) -> Self {
+        self.scrollbar_width = width;
+        self
+    }
+
+    /// Set scrollbar color (applies to both scrollbars)
+    pub fn scrollbar_color(mut self, color: crate::Color) -> Self {
+        self.scrollbar_color = color;
+        self
+    }
+
+    /// Set scrollbar track color (applies to both scrollbars)
+    pub fn scrollbar_track_color(mut self, color: crate::Color) -> Self {
+        self.scrollbar_track_color = color;
+        self
+    }
+
+    /// Set mouse wheel scroll speed (pixels per wheel tick)
+    pub fn wheel_scroll_speed(mut self, speed: i32) -> Self {
+        self.wheel_scroll_speed = speed.abs().max(1);
+        self
+    }
+
+    /// Get current vertical scroll offset
+    pub fn scroll_offset_y(&self) -> i32 {
+        self.scroll_offset_y
+    }
+
+    /// Get current horizontal scroll offset
+    pub fn scroll_offset_x(&self) -> i32 {
+        self.scroll_offset_x
+    }
+
+    /// Set vertical scroll offset (clamped to valid range)
+    pub fn set_scroll_offset_y(&mut self, offset: i32) {
+        let max_offset = (self.child_size.height as i32 - self.cached_size.height as i32).max(0);
+        let new_offset = offset.clamp(0, max_offset);
+        if new_offset != self.scroll_offset_y {
+            self.scroll_offset_y = new_offset;
+            self.needs_redraw = true;
+        }
+    }
+
+    /// Set horizontal scroll offset (clamped to valid range)
+    pub fn set_scroll_offset_x(&mut self, offset: i32) {
+        let max_offset = (self.child_size.width as i32 - self.cached_size.width as i32).max(0);
+        let new_offset = offset.clamp(0, max_offset);
+        if new_offset != self.scroll_offset_x {
+            self.scroll_offset_x = new_offset;
+            self.needs_redraw = true;
+        }
+    }
+
+    /// Scroll vertically by delta (positive = down, negative = up)
+    pub fn scroll_by_y(&mut self, delta: i32) {
+        self.set_scroll_offset_y(self.scroll_offset_y + delta);
+    }
+
+    /// Scroll horizontally by delta (positive = right, negative = left)
+    pub fn scroll_by_x(&mut self, delta: i32) {
+        self.set_scroll_offset_x(self.scroll_offset_x + delta);
+    }
+
+    /// Calculate vertical scrollbar thumb size and position
+    fn vertical_scrollbar_thumb(&self) -> Option<(u32, i32)> {
+        if !self.shows_vertical_scrollbar || self.child_size.height <= self.cached_size.height {
+            return None;
+        }
+
+        let track_height = self.cached_size.height;
+        let thumb_height = ((self.cached_size.height as f32 / self.child_size.height as f32)
+            * track_height as f32) as u32;
+        let thumb_height = thumb_height.max(20); // Minimum thumb size
+
+        let max_scroll = self.child_size.height as i32 - self.cached_size.height as i32;
+        let thumb_y = if max_scroll > 0 {
+            ((self.scroll_offset_y as f32 / max_scroll as f32)
+                * (track_height - thumb_height) as f32) as i32
+        } else {
+            0
+        };
+
+        Some((thumb_height, thumb_y))
+    }
+
+    /// Calculate horizontal scrollbar thumb size and position
+    fn horizontal_scrollbar_thumb(&self) -> Option<(u32, i32)> {
+        if !self.shows_horizontal_scrollbar || self.child_size.width <= self.cached_size.width {
+            return None;
+        }
+
+        let track_width = self.cached_size.width;
+        let thumb_width = ((self.cached_size.width as f32 / self.child_size.width as f32)
+            * track_width as f32) as u32;
+        let thumb_width = thumb_width.max(20); // Minimum thumb size
+
+        let max_scroll = self.child_size.width as i32 - self.cached_size.width as i32;
+        let thumb_x = if max_scroll > 0 {
+            ((self.scroll_offset_x as f32 / max_scroll as f32)
+                * (track_width - thumb_width) as f32) as i32
+        } else {
+            0
+        };
+
+        Some((thumb_width, thumb_x))
+    }
+
+    /// Check if a point is on the vertical scrollbar thumb
+    fn is_on_vertical_thumb(&self, frame: Rect, y: i32) -> bool {
+        if let Some((thumb_height, thumb_y)) = self.vertical_scrollbar_thumb() {
+            let scrollbar_x = frame.x + frame.width as i32 - self.scrollbar_width as i32;
+            let thumb_rect = crate::graphics::Rect::new(
+                scrollbar_x,
+                frame.y + thumb_y,
+                self.scrollbar_width,
+                thumb_height,
+            );
+            thumb_rect.contains(frame.x + frame.width as i32 - self.scrollbar_width as i32 / 2, y)
+        } else {
+            false
+        }
+    }
+
+    /// Check if a point is on the horizontal scrollbar thumb
+    fn is_on_horizontal_thumb(&self, frame: Rect, x: i32) -> bool {
+        if let Some((thumb_width, thumb_x)) = self.horizontal_scrollbar_thumb() {
+            let scrollbar_y = frame.y + frame.height as i32 - self.scrollbar_width as i32;
+            let thumb_rect = crate::graphics::Rect::new(
+                frame.x + thumb_x,
+                scrollbar_y,
+                thumb_width,
+                self.scrollbar_width,
+            );
+            thumb_rect.contains(x, scrollbar_y + self.scrollbar_width as i32 / 2)
+        } else {
+            false
+        }
+    }
+
+    /// Check if a point is on the vertical scrollbar track
+    fn is_on_vertical_track(&self, frame: Rect, x: i32, _y: i32) -> bool {
+        if !self.shows_vertical_scrollbar {
+            return false;
+        }
+        let scrollbar_x = frame.x + frame.width as i32 - self.scrollbar_width as i32;
+        x >= scrollbar_x && x < scrollbar_x + self.scrollbar_width as i32
+    }
+
+    /// Check if a point is on the horizontal scrollbar track
+    fn is_on_horizontal_track(&self, frame: Rect, _x: i32, y: i32) -> bool {
+        if !self.shows_horizontal_scrollbar {
+            return false;
+        }
+        let scrollbar_y = frame.y + frame.height as i32 - self.scrollbar_width as i32;
+        y >= scrollbar_y && y < scrollbar_y + self.scrollbar_width as i32
+    }
+}
+
+impl View for ScrollView {
+    fn layout(&mut self, available: Size) -> Size {
+        // Layout child with unconstrained size to measure its natural size
+        let child_available = Size::new(u32::MAX, u32::MAX);
+        self.child_size = self.child.layout(child_available);
+
+        // ScrollView takes all available space
+        // Content can be larger (scrollable) or smaller (centered)
+        self.cached_size = available;
+        available
+    }
+
+    fn flex_factor(&self) -> u32 {
+        1 // ScrollView should expand to fill available space
+    }
+
+    fn draw(&self, canvas: &mut Canvas, frame: Rect) {
+        // Note: Clipping not yet available in Canvas, draw without clipping
+        // TODO: Add clipping support to Canvas for proper scroll behavior
+
+        // Calculate content size (subtract scrollbar space if visible)
+        let content_width = if self.shows_vertical_scrollbar
+            && self.child_size.height > self.cached_size.height {
+            self.cached_size.width.saturating_sub(self.scrollbar_width)
+        } else {
+            self.cached_size.width
+        };
+
+        let content_height = if self.shows_horizontal_scrollbar
+            && self.child_size.width > self.cached_size.width {
+            self.cached_size.height.saturating_sub(self.scrollbar_width)
+        } else {
+            self.cached_size.height
+        };
+
+        // Draw child with scroll offset
+        let child_frame = Rect::new(
+            frame.x - self.scroll_offset_x,
+            frame.y - self.scroll_offset_y,
+            self.child_size.width,
+            self.child_size.height,
+        );
+        self.child.draw(canvas, child_frame);
+
+        // Draw vertical scrollbar if needed
+        if let Some((thumb_height, thumb_y)) = self.vertical_scrollbar_thumb() {
+            let scrollbar_x = frame.x + frame.width as i32 - self.scrollbar_width as i32;
+            let scrollbar_y = frame.y;
+            let scrollbar_height = content_height;
+
+            // Draw scrollbar track
+            canvas.fill_rect(
+                scrollbar_x,
+                scrollbar_y,
+                self.scrollbar_width,
+                scrollbar_height,
+                self.scrollbar_track_color,
+            );
+
+            // Draw scrollbar thumb
+            canvas.fill_rect(
+                scrollbar_x,
+                scrollbar_y + thumb_y,
+                self.scrollbar_width,
+                thumb_height,
+                self.scrollbar_color,
+            );
+        }
+
+        // Draw horizontal scrollbar if needed
+        if let Some((thumb_width, thumb_x)) = self.horizontal_scrollbar_thumb() {
+            let scrollbar_x = frame.x;
+            let scrollbar_y = frame.y + frame.height as i32 - self.scrollbar_width as i32;
+            let scrollbar_width = content_width;
+
+            // Draw scrollbar track
+            canvas.fill_rect(
+                scrollbar_x,
+                scrollbar_y,
+                scrollbar_width,
+                self.scrollbar_width,
+                self.scrollbar_track_color,
+            );
+
+            // Draw scrollbar thumb
+            canvas.fill_rect(
+                scrollbar_x + thumb_x,
+                scrollbar_y,
+                thumb_width,
+                self.scrollbar_width,
+                self.scrollbar_color,
+            );
+        }
+    }
+
+    fn on_event(&mut self, event: &mut Event, frame: Rect) -> bool {
+        let x = event.x();
+        let y = event.y();
+
+        match event.kind {
+            crate::event::EventKind::MouseWheel { delta_x, delta_y } => {
+                // Handle mouse wheel scrolling
+                let handled = if delta_y != 0 && self.child_size.height > self.cached_size.height {
+                    let scroll_delta = (delta_y * self.wheel_scroll_speed / 120).abs();
+                    // Positive delta_y means scrolling down (wheel moved away from user)
+                    if delta_y > 0 {
+                        self.scroll_by_y(scroll_delta);
+                    } else {
+                        self.scroll_by_y(-scroll_delta);
+                    }
+                    true
+                } else if delta_x != 0 && self.child_size.width > self.cached_size.width {
+                    let scroll_delta = (delta_x * self.wheel_scroll_speed / 120).abs();
+                    if delta_x > 0 {
+                        self.scroll_by_x(scroll_delta);
+                    } else {
+                        self.scroll_by_x(-scroll_delta);
+                    }
+                    true
+                } else {
+                    false
+                };
+
+                if handled {
+                    event.stop_propagation();
+                }
+                handled
+            }
+
+            crate::event::EventKind::MouseDown { button: crate::event::MouseButton::Left } => {
+                // Check if clicking on vertical scrollbar thumb
+                if self.is_on_vertical_thumb(frame, y) {
+                    self.dragging_vertical_thumb = true;
+                    self.drag_start_y = y;
+                    self.drag_start_scroll_y = self.scroll_offset_y;
+                    event.stop_propagation();
+                    return true;
+                }
+
+                // Check if clicking on horizontal scrollbar thumb
+                if self.is_on_horizontal_thumb(frame, x) {
+                    self.dragging_horizontal_thumb = true;
+                    self.drag_start_x = x;
+                    self.drag_start_scroll_x = self.scroll_offset_x;
+                    event.stop_propagation();
+                    return true;
+                }
+
+                // Check if clicking on vertical scrollbar track (jump to position)
+                if self.is_on_vertical_track(frame, x, y) {
+                    if let Some((thumb_height, _)) = self.vertical_scrollbar_thumb() {
+                        let track_height = self.cached_size.height;
+                        let click_y = y - frame.y;
+                        let max_scroll = self.child_size.height as i32 - self.cached_size.height as i32;
+
+                        if max_scroll > 0 {
+                            // Calculate new scroll position based on click location
+                            let new_scroll = ((click_y - thumb_height as i32 / 2) as f32
+                                / (track_height - thumb_height) as f32
+                                * max_scroll as f32) as i32;
+                            self.set_scroll_offset_y(new_scroll);
+                            event.stop_propagation();
+                            return true;
+                        }
+                    }
+                }
+
+                // Check if clicking on horizontal scrollbar track (jump to position)
+                if self.is_on_horizontal_track(frame, x, y) {
+                    if let Some((thumb_width, _)) = self.horizontal_scrollbar_thumb() {
+                        let track_width = self.cached_size.width;
+                        let click_x = x - frame.x;
+                        let max_scroll = self.child_size.width as i32 - self.cached_size.width as i32;
+
+                        if max_scroll > 0 {
+                            let new_scroll = ((click_x - thumb_width as i32 / 2) as f32
+                                / (track_width - thumb_width) as f32
+                                * max_scroll as f32) as i32;
+                            self.set_scroll_offset_x(new_scroll);
+                            event.stop_propagation();
+                            return true;
+                        }
+                    }
+                }
+
+                // Forward to child with adjusted coordinates
+                let mut adjusted_event = crate::event::Event::new(
+                    event.kind,
+                    crate::graphics::Point::new(x + self.scroll_offset_x, y + self.scroll_offset_y),
+                );
+                self.child.on_event(&mut adjusted_event, frame)
+            }
+
+            crate::event::EventKind::MouseUp { button: crate::event::MouseButton::Left } => {
+                // End dragging
+                if self.dragging_vertical_thumb || self.dragging_horizontal_thumb {
+                    self.dragging_vertical_thumb = false;
+                    self.dragging_horizontal_thumb = false;
+                    event.stop_propagation();
+                    return true;
+                }
+
+                // Forward to child with adjusted coordinates
+                let mut adjusted_event = crate::event::Event::new(
+                    event.kind,
+                    crate::graphics::Point::new(x + self.scroll_offset_x, y + self.scroll_offset_y),
+                );
+                self.child.on_event(&mut adjusted_event, frame)
+            }
+
+            crate::event::EventKind::MouseMove => {
+                // Handle dragging
+                if self.dragging_vertical_thumb {
+                    let delta_y = y - self.drag_start_y;
+                    if let Some((thumb_height, _)) = self.vertical_scrollbar_thumb() {
+                        let track_height = self.cached_size.height;
+                        let max_scroll = self.child_size.height as i32 - self.cached_size.height as i32;
+
+                        if max_scroll > 0 && track_height > thumb_height {
+                            let scroll_delta = (delta_y as f32 / (track_height - thumb_height) as f32
+                                * max_scroll as f32) as i32;
+                            self.set_scroll_offset_y(self.drag_start_scroll_y + scroll_delta);
+                            event.stop_propagation();
+                            return true;
+                        }
+                    }
+                }
+
+                if self.dragging_horizontal_thumb {
+                    let delta_x = x - self.drag_start_x;
+                    if let Some((thumb_width, _)) = self.horizontal_scrollbar_thumb() {
+                        let track_width = self.cached_size.width;
+                        let max_scroll = self.child_size.width as i32 - self.cached_size.width as i32;
+
+                        if max_scroll > 0 && track_width > thumb_width {
+                            let scroll_delta = (delta_x as f32 / (track_width - thumb_width) as f32
+                                * max_scroll as f32) as i32;
+                            self.set_scroll_offset_x(self.drag_start_scroll_x + scroll_delta);
+                            event.stop_propagation();
+                            return true;
+                        }
+                    }
+                }
+
+                // Forward to child with adjusted coordinates
+                let mut adjusted_event = crate::event::Event::new(
+                    event.kind,
+                    crate::graphics::Point::new(x + self.scroll_offset_x, y + self.scroll_offset_y),
+                );
+                self.child.on_event(&mut adjusted_event, frame)
+            }
+
+            _ => {
+                // Forward other events to child with adjusted coordinates
+                let mut adjusted_event = crate::event::Event::new(
+                    event.kind,
+                    crate::graphics::Point::new(x + self.scroll_offset_x, y + self.scroll_offset_y),
+                );
+                self.child.on_event(&mut adjusted_event, frame)
+            }
+        }
+    }
+
+    fn children(&self) -> Vec<(&dyn View, Rect)> {
+        let mut v = Vec::new();
+        v.push((self.child.as_ref() as &dyn View, Rect::new(0, 0, self.child_size.width, self.child_size.height)));
+        v
+    }
+
+    fn children_mut(&mut self) -> Vec<(&mut dyn View, Rect)> {
+        let mut v = Vec::new();
+        v.push((self.child.as_mut() as &mut dyn View, Rect::new(0, 0, self.child_size.width, self.child_size.height)));
+        v
+    }
+
+    fn visit_children(&self, visitor: &mut dyn FnMut(&dyn View, Rect) -> bool) {
+        let child_frame = Rect::new(0, 0, self.child_size.width, self.child_size.height);
+        let _ = visitor(self.child.as_ref() as &dyn View, child_frame);
+    }
+
+    fn visit_children_mut(&mut self, visitor: &mut dyn FnMut(&mut dyn View, Rect) -> bool) {
+        let child_frame = Rect::new(0, 0, self.child_size.width, self.child_size.height);
+        let _ = visitor(self.child.as_mut() as &mut dyn View, child_frame);
+    }
+
+    fn needs_draw(&self) -> bool {
+        self.needs_redraw || self.child.needs_draw()
+    }
+
+    fn set_needs_draw(&mut self) {
+        self.needs_redraw = true;
+    }
+
+    fn clear_needs_draw(&mut self) {
+        self.needs_redraw = false;
+        self.child.clear_needs_draw();
+    }
+}
+
