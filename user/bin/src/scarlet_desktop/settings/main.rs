@@ -12,9 +12,11 @@ extern crate scarlet_std as std;
 use scarlet_desktop_config::{DesktopConfig, TaskbarPosition};
 use scarlet_ui::{
     Application, Button, Color, HStack, Label, NavigationItem, NavigationView, Padding, RectView,
-    Spacer, StackAlignment, State, VStack, Window, WindowKind,
+    Spacer, StackAlignment, State, VStack, Window, WindowKind, design,
 };
 use std::{boxed::Box, format, println, string::String, vec::Vec};
+
+use design::Palette;
 
 fn rgb_to_string(rgb: [u8; 3]) -> String {
     format!("#{:02x}{:02x}{:02x}", rgb[0], rgb[1], rgb[2])
@@ -33,14 +35,12 @@ fn position_to_string(pos: &TaskbarPosition) -> &'static str {
 
 /// Build the Display & Theme page content
 fn build_display_page(config: &DesktopConfig) -> Box<dyn scarlet_ui::View> {
-    let text_color = Color::rgb(224, 224, 224);
-    let text_dim = Color::rgb(136, 136, 136);
-    let accent_color = Color::rgb(0, 122, 255);
+    let palette = Palette::current();
 
     // Extract theme colors
     let bg_color = config.theme.background.unwrap_or([18, 22, 30]);
     let taskbar_color = config.theme.taskbar.unwrap_or([30, 30, 30]);
-    let text_color_rgb = config.theme.text.unwrap_or([224, 224, 224]);
+    let text_color_rgb = config.theme.text.unwrap_or([30, 30, 30]);
     let highlight_color = config.theme.highlight.unwrap_or([0, 122, 255]);
 
     // Extract taskbar settings
@@ -54,12 +54,12 @@ fn build_display_page(config: &DesktopConfig) -> Box<dyn scarlet_ui::View> {
                 .alignment(StackAlignment::Start)
                 .child(
                     Label::new("Display & Theme")
-                        .color(text_color)
+                        .color(palette.text_main)
                         .font_size(28),
                 )
                 .child(
                     Label::new("Customize the appearance of Scarlet Desktop")
-                        .color(text_dim)
+                        .color(palette.text_sub)
                         .font_size(15),
                 )
                 // Theme Colors section
@@ -67,7 +67,11 @@ fn build_display_page(config: &DesktopConfig) -> Box<dyn scarlet_ui::View> {
                     VStack::new()
                         .spacing(12)
                         .alignment(StackAlignment::Start)
-                        .child(Label::new("Theme Colors").color(text_color).font_size(18))
+                        .child(
+                            Label::new("Theme Colors")
+                                .color(palette.text_main)
+                                .font_size(18),
+                        )
                         .child(
                             // Background color
                             HStack::new()
@@ -85,12 +89,12 @@ fn build_display_page(config: &DesktopConfig) -> Box<dyn scarlet_ui::View> {
                                         .alignment(StackAlignment::Start)
                                         .child(
                                             Label::new("Background")
-                                                .color(text_color)
+                                                .color(palette.text_main)
                                                 .font_size(14),
                                         )
                                         .child(
                                             Label::new(&rgb_to_string(bg_color))
-                                                .color(text_dim)
+                                                .color(palette.text_sub)
                                                 .font_size(13),
                                         ),
                                 )
@@ -112,11 +116,13 @@ fn build_display_page(config: &DesktopConfig) -> Box<dyn scarlet_ui::View> {
                                         .spacing(2)
                                         .alignment(StackAlignment::Start)
                                         .child(
-                                            Label::new("Taskbar").color(text_color).font_size(14),
+                                            Label::new("Taskbar")
+                                                .color(palette.text_main)
+                                                .font_size(14),
                                         )
                                         .child(
                                             Label::new(&rgb_to_string(taskbar_color))
-                                                .color(text_dim)
+                                                .color(palette.text_sub)
                                                 .font_size(13),
                                         ),
                                 )
@@ -137,10 +143,14 @@ fn build_display_page(config: &DesktopConfig) -> Box<dyn scarlet_ui::View> {
                                     VStack::new()
                                         .spacing(2)
                                         .alignment(StackAlignment::Start)
-                                        .child(Label::new("Text").color(text_color).font_size(14))
+                                        .child(
+                                            Label::new("Text")
+                                                .color(palette.text_main)
+                                                .font_size(14),
+                                        )
                                         .child(
                                             Label::new(&rgb_to_string(text_color_rgb))
-                                                .color(text_dim)
+                                                .color(palette.text_sub)
                                                 .font_size(13),
                                         ),
                                 )
@@ -162,11 +172,13 @@ fn build_display_page(config: &DesktopConfig) -> Box<dyn scarlet_ui::View> {
                                         .spacing(2)
                                         .alignment(StackAlignment::Start)
                                         .child(
-                                            Label::new("Highlight").color(text_color).font_size(14),
+                                            Label::new("Highlight")
+                                                .color(palette.text_main)
+                                                .font_size(14),
                                         )
                                         .child(
                                             Label::new(&rgb_to_string(highlight_color))
-                                                .color(text_dim)
+                                                .color(palette.text_sub)
                                                 .font_size(13),
                                         ),
                                 )
@@ -180,7 +192,7 @@ fn build_display_page(config: &DesktopConfig) -> Box<dyn scarlet_ui::View> {
                         .alignment(StackAlignment::Start)
                         .child(
                             Label::new("Taskbar Settings")
-                                .color(text_color)
+                                .color(palette.text_main)
                                 .font_size(18),
                         )
                         .child(
@@ -191,10 +203,14 @@ fn build_display_page(config: &DesktopConfig) -> Box<dyn scarlet_ui::View> {
                                     VStack::new()
                                         .spacing(2)
                                         .alignment(StackAlignment::Start)
-                                        .child(Label::new("Position").color(text_dim).font_size(13))
+                                        .child(
+                                            Label::new("Position")
+                                                .color(palette.text_sub)
+                                                .font_size(13),
+                                        )
                                         .child(
                                             Label::new(position_to_string(&taskbar_position))
-                                                .color(text_color)
+                                                .color(palette.text_main)
                                                 .font_size(16),
                                         ),
                                 )
@@ -202,10 +218,14 @@ fn build_display_page(config: &DesktopConfig) -> Box<dyn scarlet_ui::View> {
                                     VStack::new()
                                         .spacing(2)
                                         .alignment(StackAlignment::Start)
-                                        .child(Label::new("Height").color(text_dim).font_size(13))
+                                        .child(
+                                            Label::new("Height")
+                                                .color(palette.text_sub)
+                                                .font_size(13),
+                                        )
                                         .child(
                                             Label::new(&format!("{} px", taskbar_height))
-                                                .color(text_color)
+                                                .color(palette.text_main)
                                                 .font_size(16),
                                         ),
                                 )
@@ -218,10 +238,19 @@ fn build_display_page(config: &DesktopConfig) -> Box<dyn scarlet_ui::View> {
                         .spacing(12)
                         .alignment(StackAlignment::Start)
                         .child(
+                            Button::new("Toggle Theme", || {
+                                design::toggle_theme();
+                                println!("[settings] Theme toggled");
+                            })
+                            .background(palette.hover)
+                            .text_color(palette.text_main)
+                            .corner_radius(8),
+                        )
+                        .child(
                             Button::new("Apply Changes", || {
                                 println!("[settings] Apply changes (stub)");
                             })
-                            .background(accent_color)
+                            .background(palette.primary)
                             .text_color(Color::WHITE)
                             .corner_radius(8),
                         )
@@ -242,10 +271,7 @@ fn build_display_page(config: &DesktopConfig) -> Box<dyn scarlet_ui::View> {
 
 /// Build the Menu Bar page content
 fn build_menubar_page(config: &DesktopConfig) -> Box<dyn scarlet_ui::View> {
-    let text_color = Color::rgb(224, 224, 224);
-    let text_dim = Color::rgb(136, 136, 136);
-    let accent_color = Color::rgb(0, 122, 255);
-
+    let palette = Palette::current();
     let taskbar_height = config.taskbar.height.unwrap_or(28);
     let taskbar_position = config.taskbar.position.unwrap_or(TaskbarPosition::Top);
 
@@ -254,10 +280,14 @@ fn build_menubar_page(config: &DesktopConfig) -> Box<dyn scarlet_ui::View> {
             VStack::new()
                 .spacing(24)
                 .alignment(StackAlignment::Start)
-                .child(Label::new("Menu Bar").color(text_color).font_size(28))
+                .child(
+                    Label::new("Menu Bar")
+                        .color(palette.text_main)
+                        .font_size(28),
+                )
                 .child(
                     Label::new("Configure the menu bar behavior and appearance")
-                        .color(text_dim)
+                        .color(palette.text_sub)
                         .font_size(15),
                 )
                 .child(
@@ -266,7 +296,7 @@ fn build_menubar_page(config: &DesktopConfig) -> Box<dyn scarlet_ui::View> {
                         .alignment(StackAlignment::Start)
                         .child(
                             Label::new("Menu Bar Settings")
-                                .color(text_color)
+                                .color(palette.text_main)
                                 .font_size(18),
                         )
                         .child(
@@ -277,10 +307,14 @@ fn build_menubar_page(config: &DesktopConfig) -> Box<dyn scarlet_ui::View> {
                                     VStack::new()
                                         .spacing(2)
                                         .alignment(StackAlignment::Start)
-                                        .child(Label::new("Position").color(text_dim).font_size(13))
+                                        .child(
+                                            Label::new("Position")
+                                                .color(palette.text_sub)
+                                                .font_size(13),
+                                        )
                                         .child(
                                             Label::new(position_to_string(&taskbar_position))
-                                                .color(text_color)
+                                                .color(palette.text_main)
                                                 .font_size(16),
                                         ),
                                 )
@@ -288,10 +322,14 @@ fn build_menubar_page(config: &DesktopConfig) -> Box<dyn scarlet_ui::View> {
                                     VStack::new()
                                         .spacing(2)
                                         .alignment(StackAlignment::Start)
-                                        .child(Label::new("Height").color(text_dim).font_size(13))
+                                        .child(
+                                            Label::new("Height")
+                                                .color(palette.text_sub)
+                                                .font_size(13),
+                                        )
                                         .child(
                                             Label::new(&format!("{} px", taskbar_height))
-                                                .color(text_color)
+                                                .color(palette.text_main)
                                                 .font_size(16),
                                         ),
                                 )
@@ -306,7 +344,7 @@ fn build_menubar_page(config: &DesktopConfig) -> Box<dyn scarlet_ui::View> {
                             Button::new("Apply Changes", || {
                                 println!("[settings] Apply menu bar changes (stub)");
                             })
-                            .background(accent_color)
+                            .background(palette.primary)
                             .text_color(Color::WHITE)
                             .corner_radius(8),
                         )
@@ -327,18 +365,17 @@ fn build_menubar_page(config: &DesktopConfig) -> Box<dyn scarlet_ui::View> {
 
 /// Build the System page content
 fn build_system_page() -> Box<dyn scarlet_ui::View> {
-    let text_color = Color::rgb(224, 224, 224);
-    let text_dim = Color::rgb(136, 136, 136);
+    let palette = Palette::current();
 
     Box::new(
         Padding::new(
             VStack::new()
                 .spacing(24)
                 .alignment(StackAlignment::Start)
-                .child(Label::new("System").color(text_color).font_size(28))
+                .child(Label::new("System").color(palette.text_main).font_size(28))
                 .child(
                     Label::new("System information and settings")
-                        .color(text_dim)
+                        .color(palette.text_sub)
                         .font_size(15),
                 )
                 .child(
@@ -347,7 +384,7 @@ fn build_system_page() -> Box<dyn scarlet_ui::View> {
                         .alignment(StackAlignment::Start)
                         .child(
                             Label::new("Scarlet Desktop")
-                                .color(text_color)
+                                .color(palette.text_main)
                                 .font_size(18),
                         )
                         .child(
@@ -358,17 +395,29 @@ fn build_system_page() -> Box<dyn scarlet_ui::View> {
                                     VStack::new()
                                         .spacing(2)
                                         .alignment(StackAlignment::Start)
-                                        .child(Label::new("Version").color(text_dim).font_size(13))
-                                        .child(Label::new("0.1.0").color(text_color).font_size(16)),
+                                        .child(
+                                            Label::new("Version")
+                                                .color(palette.text_sub)
+                                                .font_size(13),
+                                        )
+                                        .child(
+                                            Label::new("0.1.0")
+                                                .color(palette.text_main)
+                                                .font_size(16),
+                                        ),
                                 )
                                 .child(
                                     VStack::new()
                                         .spacing(2)
                                         .alignment(StackAlignment::Start)
-                                        .child(Label::new("Build").color(text_dim).font_size(13))
+                                        .child(
+                                            Label::new("Build")
+                                                .color(palette.text_sub)
+                                                .font_size(13),
+                                        )
                                         .child(
                                             Label::new("2025.01.15")
-                                                .color(text_color)
+                                                .color(palette.text_main)
                                                 .font_size(16),
                                         ),
                                 )
@@ -420,9 +469,10 @@ pub extern "C" fn main() -> i32 {
     };
 
     // Settings window with NavigationView
+    let palette = Palette::current();
     let window = Window::new("Settings", 900, 600)
         .min_size(800, 500)
-        .background(Color::rgb(30, 30, 30))
+        .background(palette.bg)
         .window_type(WindowKind::Normal)
         .main_window()
         .content(

@@ -88,16 +88,19 @@ impl NavigationView {
     pub fn new(selected_id: State<String>) -> Self {
         selected_id.subscribe_view(&ViewRefreshHandle::new());
 
+        use crate::design::palette::*;
+
         Self {
             selected_id,
             items: Vec::new(),
             content_builder: Box::new(|_| Box::new(EmptyPage) as ViewBox),
             sidebar_width: 200,
-            sidebar_bg: Color::rgb(37, 37, 37),
-            selected_bg: Color::rgb(58, 58, 58),
-            text_color: Color::rgb(224, 224, 224),
-            text_dim: Color::rgb(136, 136, 136),
-            accent_color: Color::rgb(0, 122, 255),
+            // macOS light theme using design palette
+            sidebar_bg: SIDEBAR_BG,
+            selected_bg: PRIMARY,
+            text_color: TEXT_MAIN,
+            text_dim: TEXT_SUB,
+            accent_color: PRIMARY,
             cached_size: Size::ZERO,
             sidebar_frame: Rect::new(0, 0, 0, 0),
             content_frame: Rect::new(0, 0, 0, 0),
@@ -213,32 +216,12 @@ impl NavigationView {
         width: u32,
         height: u32,
         is_selected: bool,
+        palette: &crate::design::Palette,
     ) {
-        // Draw background
-        let bg = if is_selected {
-            self.selected_bg
-        } else {
-            Color::TRANSPARENT
-        };
-        if bg != Color::TRANSPARENT {
-            canvas.fill_rect(x, y, width, height, bg);
-        }
-
-        // Draw selection indicator
-        if is_selected {
-            canvas.fill_rect(
-                x,
-                y + 2,
-                4,
-                height.saturating_sub(4),
-                self.accent_color,
-            );
-        }
-
         let text_y = y + (height as i32 - 16) / 2;
 
-        // Calculate starting X position for text
-        let mut text_x = if is_selected { x + 12 } else { x + 8 };
+        // Fixed starting X position for text
+        let mut text_x = x + 8;
 
         // Draw icon if present
         if let Some(icon) = item.icon {
@@ -247,7 +230,7 @@ impl NavigationView {
                 x + 8,
                 text_y,
                 &icon_str,
-                self.text_color,
+                palette.text_main,
                 14.0,
             );
             // Move text_x to after the icon (icon width ~16px + 4px spacing)
@@ -260,12 +243,23 @@ impl NavigationView {
             text_y,
             &item.label,
             if is_selected {
-                self.text_color
+                palette.primary // Use accent color for selected text
             } else {
-                self.text_dim
+                palette.text_sub
             },
             14.0,
         );
+
+        // Draw underline for selected item
+        if is_selected {
+            canvas.fill_rect(
+                x,
+                y + height as i32 - 2,
+                width,
+                2,
+                palette.primary,
+            );
+        }
     }
 
     /// Handle click on sidebar
@@ -331,13 +325,16 @@ impl View for NavigationView {
     }
 
     fn draw(&self, canvas: &mut Canvas, frame: Rect) {
+        // Get current palette for theme-aware colors
+        let palette = crate::design::Palette::current();
+
         // Draw sidebar background
         canvas.fill_rect(
             frame.x,
             frame.y,
             self.sidebar_frame.width,
             self.sidebar_frame.height,
-            self.sidebar_bg,
+            palette.sidebar_bg,
         );
 
         // Draw sidebar header
@@ -346,7 +343,7 @@ impl View for NavigationView {
             frame.x + 16,
             frame.y + 16,
             header_text,
-            self.text_color,
+            palette.text_main,
             20.0,
         );
 
@@ -366,6 +363,7 @@ impl View for NavigationView {
                 self.sidebar_frame.width,
                 ITEM_HEIGHT,
                 is_selected,
+                palette,
             );
             current_y += ITEM_HEIGHT as i32 + 2;
         }
@@ -387,11 +385,11 @@ impl View for NavigationView {
 
     fn on_event(&mut self, event: &mut Event, frame: Rect) -> bool {
         // Check for sidebar clicks (mouse up on left button)
-        if matches!(event.kind, crate::event::EventKind::MouseUp { button: crate::event::MouseButton::Left }) {
-            if self.handle_sidebar_click(event.x() - frame.x, event.y() - frame.y) {
-                return true;
-            }
-        }
+        let sidebar_handled = if matches!(event.kind, crate::event::EventKind::MouseUp { button: crate::event::MouseButton::Left }) {
+            self.handle_sidebar_click(event.x() - frame.x, event.y() - frame.y)
+        } else {
+            false
+        };
 
         // Extract frame dimensions before mutable borrow
         let content_width = self.content_frame.width;
@@ -411,7 +409,9 @@ impl View for NavigationView {
         // Layout content before handling events (CRITICAL: without this, cached_sizes are ZERO!)
         let content_size = Size::new(content_width, content_height);
         let _ = content.layout(content_size);
-        content.on_event(event, content_frame)
+        let content_handled = content.on_event(event, content_frame);
+
+        sidebar_handled || content_handled
     }
 
     // Note: children() and children_mut() return empty because content is dynamically built

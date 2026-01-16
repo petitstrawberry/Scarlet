@@ -10,19 +10,11 @@ extern crate scarlet_std as std;
 
 use scarlet_ui::{
     Application, Color, Event, EventKind, Label, Padding, RectView, Size, Spacer, StackAlignment,
-    State, TextField, VStack, View, ViewRefreshHandle, Window,
+    State, TextField, VStack, View, ViewRefreshHandle, Window, design,
 };
 use std::{format, println, string::String, string::ToString, vec::Vec};
 
-/// Color palette for modern launcher
-const BG: Color = Color::rgb(248, 250, 252);
-const SURFACE: Color = Color::rgb(255, 255, 255);
-const SURFACE_VAR: Color = Color::rgb(241, 245, 249);
-const BORDER: Color = Color::rgb(226, 232, 240);
-const PRIMARY: Color = Color::rgb(59, 130, 246);
-const TEXT_MAIN: Color = Color::rgb(15, 23, 42);
-const TEXT_SUB: Color = Color::rgb(100, 116, 139);
-const TEXT_MUTE: Color = Color::rgb(148, 163, 184);
+use design::Palette;
 
 /// Desktop entry file information
 #[derive(Debug, Clone)]
@@ -424,6 +416,7 @@ impl View for AppListView {
     fn draw(&self, canvas: &mut scarlet_ui::Canvas, frame: scarlet_ui::Rect) {
         use scarlet_ui::graphics::measure_text_sized;
 
+        let palette = Palette::current();
         let item_height = 52;
         let y = frame.y + 8;
 
@@ -437,7 +430,7 @@ impl View for AppListView {
                 text_x,
                 y + item_height as i32 / 2 - h as i32 / 2,
                 text,
-                TEXT_MUTE,
+                palette.text_mute,
                 15.0,
             );
             return;
@@ -447,21 +440,41 @@ impl View for AppListView {
             let item_y = y + i as i32 * item_height;
 
             // Draw background card
-            canvas.fill_rounded_rect(frame.x + 16, item_y, frame.width - 32, 44, 8, SURFACE);
+            canvas.fill_rounded_rect(
+                frame.x + 16,
+                item_y,
+                frame.width - 32,
+                44,
+                8,
+                palette.surface,
+            );
 
             // Draw border
-            canvas.draw_rounded_rect(frame.x + 16, item_y, frame.width - 32, 44, 8, BORDER);
+            canvas.draw_rounded_rect(
+                frame.x + 16,
+                item_y,
+                frame.width - 32,
+                44,
+                8,
+                palette.border,
+            );
 
             // Draw icon
             let icon = entry.get_icon_emoji();
-            canvas.draw_text_sized(frame.x + 28, item_y + 10, icon, TEXT_MAIN, 20.0);
+            canvas.draw_text_sized(frame.x + 28, item_y + 10, icon, palette.text_main, 20.0);
 
             // Draw app name
-            canvas.draw_text_sized(frame.x + 56, item_y + 6, &entry.name, TEXT_MAIN, 16.0);
+            canvas.draw_text_sized(
+                frame.x + 56,
+                item_y + 6,
+                &entry.name,
+                palette.text_main,
+                16.0,
+            );
 
             // Draw category
             let category = entry.get_display_category();
-            canvas.draw_text_sized(frame.x + 56, item_y + 26, category, TEXT_MUTE, 12.0);
+            canvas.draw_text_sized(frame.x + 56, item_y + 26, category, palette.text_mute, 12.0);
         }
     }
 
@@ -557,7 +570,8 @@ pub extern "C" fn main() -> i32 {
     let window_width = 700;
     let window_height = 550;
 
-    let window = Window::new("Applications", window_width, window_height).background(BG);
+    let palette = Palette::current();
+    let window = Window::new("Applications", window_width, window_height).background(palette.bg);
 
     let app_list = AppListView::new(filtered_entries.clone());
 
@@ -569,27 +583,31 @@ pub extern "C" fn main() -> i32 {
                 VStack::new()
                     .spacing(16)
                     .alignment(StackAlignment::Center)
-                    .child(Label::new("Applications").color(TEXT_MAIN).font_size(28))
+                    .child(
+                        Label::new("Applications")
+                            .color(palette.text_main)
+                            .font_size(28),
+                    )
                     .child(
                         TextField::new("Search applications...", search_query.clone())
-                            .background(SURFACE)
-                            .text_color(TEXT_MAIN)
-                            .border_color(BORDER)
-                            .focused_border_color(PRIMARY)
+                            .background(palette.surface)
+                            .text_color(palette.text_main)
+                            .border_color(palette.border)
+                            .focused_border_color(palette.primary)
                             .corner_radius(8)
                             .padding(12),
                     ),
             )
             .all(24),
         )
-        .child(RectView::new(BORDER).height(1))
+        .child(RectView::new(palette.border).height(1))
         .child(Padding::new(app_list).vertical(8).horizontal(0))
         .child(Spacer::new())
-        .child(RectView::new(BORDER).height(1))
+        .child(RectView::new(palette.border).height(1))
         .child(
             Padding::new(
                 Label::new("Type to search • Click to launch")
-                    .color(TEXT_MUTE)
+                    .color(palette.text_mute)
                     .font_size(12),
             )
             .all(16),

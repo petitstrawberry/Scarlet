@@ -8,20 +8,12 @@
 extern crate scarlet_std as std;
 
 use scarlet_ui::{
-    Application, Button, Color, HStack, Label, Padding, RectView, Spacer, StackAlignment, State,
-    Text, TextField, VStack, ViewModifier, Window, WindowKind,
+    Application, Button, HStack, Label, Padding, RectView, Spacer, StackAlignment, State, Text,
+    TextField, VStack, Window, WindowKind, design,
 };
 use std::{format, fs, println, string::String};
 
-/// Color palette for modern notepad
-const BG: Color = Color::rgb(248, 250, 252);
-const SURFACE: Color = Color::rgb(255, 255, 255);
-const SURFACE_VAR: Color = Color::rgb(241, 245, 249);
-const BORDER: Color = Color::rgb(226, 232, 240);
-const PRIMARY: Color = Color::rgb(59, 130, 246);
-const TEXT_MAIN: Color = Color::rgb(15, 23, 42);
-const TEXT_SUB: Color = Color::rgb(100, 116, 139);
-const TEXT_MUTE: Color = Color::rgb(148, 163, 184);
+use design::Palette;
 
 /// Calculate line and column from text and cursor position
 fn calculate_line_column(text: &str, cursor_pos: usize) -> (usize, usize) {
@@ -45,14 +37,14 @@ fn calculate_line_column(text: &str, cursor_pos: usize) -> (usize, usize) {
 
 /// Create a separator line
 fn separator() -> RectView {
-    RectView::new(BORDER).height(1)
+    RectView::new(Palette::current().separator).height(1)
 }
 
 /// Create a menu button with consistent styling
 fn menu_button(label: &str, on_click: impl FnMut() + 'static) -> Button<impl FnMut() + 'static> {
     Button::new(label, on_click)
-        .background(SURFACE_VAR)
-        .text_color(TEXT_MAIN)
+        .background(Palette::current().sidebar_bg)
+        .text_color(Palette::current().text_main)
         .corner_radius(6)
         .padding(6)
 }
@@ -125,7 +117,7 @@ pub extern "C" fn main() -> i32 {
 
     let window = Window::new("Scarlet Notepad", 950, 680)
         .min_size(550, 450)
-        .background(BG)
+        .background(Palette::current().bg)
         .window_type(WindowKind::Normal)
         .main_window()
         .content(
@@ -138,7 +130,11 @@ pub extern "C" fn main() -> i32 {
                         HStack::new()
                             .spacing(8)
                             .alignment(StackAlignment::Center)
-                            .child(Label::new("File").color(TEXT_SUB).font_size(13))
+                            .child(
+                                Label::new("File")
+                                    .color(Palette::current().text_sub)
+                                    .font_size(13),
+                            )
                             .child(menu_button("New", move || {
                                 text_content_new.set(String::new());
                                 current_file_new.set(String::from("Untitled"));
@@ -178,7 +174,7 @@ pub extern "C" fn main() -> i32 {
                             .child(Spacer::new())
                             .child(
                                 Label::new("Ctrl+N: New | Ctrl+O: Open | Ctrl+S: Save")
-                                    .color(TEXT_MUTE)
+                                    .color(Palette::current().text_mute)
                                     .font_size(11),
                             )
                             .child(Spacer::new().min_length(16)),
@@ -195,10 +191,14 @@ pub extern "C" fn main() -> i32 {
                         HStack::new()
                             .spacing(12)
                             .alignment(StackAlignment::Center)
-                            .child(Label::new("File:").color(TEXT_SUB).font_size(12))
+                            .child(
+                                Label::new("File:")
+                                    .color(Palette::current().text_sub)
+                                    .font_size(12),
+                            )
                             .child(
                                 Text::new(move || format!("{}", current_file_clone.get()))
-                                    .color(PRIMARY)
+                                    .color(Palette::current().primary)
                                     .font_size(12)
                                     .watch(current_file_display),
                             )
@@ -214,10 +214,10 @@ pub extern "C" fn main() -> i32 {
                             .action(move |_text| {
                                 // Text action
                             })
-                            .text_color(TEXT_MAIN)
-                            .background(SURFACE)
-                            .border_color(BORDER)
-                            .focused_border_color(PRIMARY)
+                            .text_color(Palette::current().text_main)
+                            .background(Palette::current().surface)
+                            .border_color(Palette::current().border)
+                            .focused_border_color(Palette::current().primary)
                             .padding(16)
                             .corner_radius(8),
                     )
@@ -239,7 +239,11 @@ pub extern "C" fn main() -> i32 {
                         HStack::new()
                             .spacing(16)
                             .alignment(StackAlignment::Center)
-                            .child(Label::new("Line:").color(TEXT_MUTE).font_size(11))
+                            .child(
+                                Label::new("Line:")
+                                    .color(Palette::current().text_mute)
+                                    .font_size(11),
+                            )
                             .child(
                                 Text::new(move || {
                                     let text = text_content_clone1.get();
@@ -247,11 +251,15 @@ pub extern "C" fn main() -> i32 {
                                     let (line, _) = calculate_line_column(&text, cursor_pos);
                                     format!("{}", line)
                                 })
-                                .color(TEXT_SUB)
+                                .color(Palette::current().text_sub)
                                 .font_size(11)
                                 .watch(text_content_watch1),
                             )
-                            .child(Label::new("Column:").color(TEXT_MUTE).font_size(11))
+                            .child(
+                                Label::new("Column:")
+                                    .color(Palette::current().text_mute)
+                                    .font_size(11),
+                            )
                             .child(
                                 Text::new(move || {
                                     let text = text_content_clone2.get();
@@ -259,19 +267,23 @@ pub extern "C" fn main() -> i32 {
                                     let (_, column) = calculate_line_column(&text, cursor_pos);
                                     format!("{}", column)
                                 })
-                                .color(TEXT_SUB)
+                                .color(Palette::current().text_sub)
                                 .font_size(11)
                                 .watch(text_content_watch2),
                             )
                             .child(Spacer::new())
                             .child(
                                 Text::new(move || format!("{}", status_msg_clone.get()))
-                                    .color(PRIMARY)
+                                    .color(Palette::current().primary)
                                     .font_size(11)
                                     .watch(status_msg_watch),
                             )
                             .child(Spacer::new().min_length(16))
-                            .child(Label::new("UTF-8").color(TEXT_MUTE).font_size(11)),
+                            .child(
+                                Label::new("UTF-8")
+                                    .color(Palette::current().text_mute)
+                                    .font_size(11),
+                            ),
                     )
                     .all(12)
                 }),

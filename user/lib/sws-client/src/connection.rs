@@ -153,9 +153,9 @@ impl Connection {
     ///
     /// This sends a CreateWindow request and waits for the response.
     /// The returned Surface can be drawn to immediately.
-    pub fn create_surface(&mut self, app_id: &str, width: u32, height: u32) -> Result<u32, Error> {
+    pub fn create_surface(&mut self, app_id: &str, app_name: &str, menu_titles: &str, width: u32, height: u32) -> Result<u32, Error> {
         // Send CreateWindow request
-        let payload = protocol::payload_create_window(app_id.as_bytes(), width, height);
+        let payload = protocol::payload_create_window(app_id.as_bytes(), app_name.as_bytes(), menu_titles.as_bytes(), width, height);
         write_frame(
             &mut self.socket,
             protocol::client_msg::CREATE_WINDOW,
@@ -686,16 +686,24 @@ impl Connection {
                                 window_id,
                                 app_id,
                                 app_id_len,
+                                app_name,
+                                app_name_len,
                                 title,
                                 title_len,
+                                menu_titles,
+                                menu_titles_len,
                             } => {
                                 // Convert fixed-size buffers to String
                                 let app_id_str = String::from_utf8_lossy(&app_id[..app_id_len as usize]).into_owned();
+                                let app_name_str = String::from_utf8_lossy(&app_name[..app_name_len as usize]).into_owned();
                                 let title_str = String::from_utf8_lossy(&title[..title_len as usize]).into_owned();
+                                let menu_titles_str = String::from_utf8_lossy(&menu_titles[..menu_titles_len as usize]).into_owned();
                                 self.pending_events.push(Event::FocusChanged {
                                     window_id,
                                     app_id: app_id_str,
+                                    app_name: app_name_str,
                                     title: title_str,
+                                    menu_titles: menu_titles_str,
                                 });
                                 count += 1;
                             }

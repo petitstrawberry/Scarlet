@@ -1125,17 +1125,30 @@ impl Compositor {
             let app_id_bytes = window.app_id.as_deref().unwrap_or(b"");
             let title_bytes = window.title.as_deref().unwrap_or(b"");
 
-            let payload = sws_protocol::payload_focus_changed(window_id, app_id_bytes, title_bytes);
+            // Get app_name and menu_titles from AppSession
+            let (app_name, menu_titles) = super::ipc::get_app_session_info(window_id);
+            let app_name_bytes = app_name.as_bytes();
+            let menu_titles_bytes = menu_titles.as_bytes();
+
+            let payload = sws_protocol::payload_focus_changed(
+                window_id,
+                app_id_bytes,
+                app_name_bytes,
+                title_bytes,
+                menu_titles_bytes,
+            );
             super::ipc::broadcast_message_to_all_clients(
                 sws_protocol::server_msg::FOCUS_CHANGED,
                 payload,
             );
 
             println!(
-                "[Compositor] Broadcast focus change: window_id={}, app_id_len={}, title_len={}",
+                "[Compositor] Broadcast focus change: window_id={}, app_id_len={}, app_name_len={}, title_len={}, menu_titles_len={}",
                 window_id,
                 app_id_bytes.len(),
-                title_bytes.len()
+                app_name_bytes.len(),
+                title_bytes.len(),
+                menu_titles_bytes.len()
             );
         } else {
             println!(

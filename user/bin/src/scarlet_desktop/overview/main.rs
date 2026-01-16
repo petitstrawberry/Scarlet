@@ -15,7 +15,7 @@ use scarlet_ui::event::Event;
 use scarlet_ui::graphics::{Canvas, Rect};
 use scarlet_ui::{
     Application, Button, Color, HStack, Label, Padding, RectView, Size, Spacer, StackAlignment,
-    State, Text, Timer, VStack, View, ViewBox, Window, WindowKind,
+    State, Text, Timer, VStack, View, ViewBox, Window, WindowKind, design::Palette,
 };
 use std::{format, println};
 
@@ -32,9 +32,10 @@ struct Card {
 
 impl Card {
     fn new<V: View + 'static>(body: V) -> Self {
+        let palette = Palette::current();
         Self {
             body: Box::new(body),
-            background: Color::rgb(30, 34, 44),
+            background: palette.surface,
             border_color: None,
             border_width: 0,
             corner_radius: 12,
@@ -224,12 +225,13 @@ pub extern "C" fn main() -> i32 {
         }
     });
 
+    let palette = Palette::current();
     let accent = Color::rgb(240, 96, 72);
     let cyan = Color::rgb(54, 176, 168);
     let lilac = Color::rgb(120, 126, 196);
-    let card_border = Color::rgb(60, 68, 88);
-    let page_bg = Color::rgb(18, 22, 30);
-    let text_dim = Color::rgb(175, 186, 208);
+    let card_border = palette.border;
+    let page_bg = palette.bg;
+    let text_dim = palette.text_sub;
 
     let hero = Card::new(
         VStack::new()
@@ -237,7 +239,7 @@ pub extern "C" fn main() -> i32 {
             .alignment(StackAlignment::Start)
             .child(
                 Label::new("Scarlet Desktop")
-                    .color(Color::rgb(238, 242, 249))
+                    .color(palette.text_main)
                     .font_size(36),
             )
             .child(
@@ -262,7 +264,7 @@ pub extern "C" fn main() -> i32 {
                             println!("[scarlet_desktop] Action: show overview (stub)");
                         })
                         .background(cyan)
-                        .text_color(Color::rgb(14, 36, 42))
+                        .text_color(palette.text_inverted)
                         .corner_radius(10),
                     )
                     .child(
@@ -295,7 +297,7 @@ pub extern "C" fn main() -> i32 {
                                     }
                                 })
                                 .watch(uptime_seconds.clone())
-                                .color(Color::WHITE)
+                                .color(palette.text_main)
                                 .font_size(14),
                             )
                             .child(
@@ -306,7 +308,7 @@ pub extern "C" fn main() -> i32 {
                     ),
             ),
     )
-    .background(Color::rgb(30, 36, 48))
+    .background(palette.surface)
     .border(1, card_border)
     .corner_radius(14)
     .padding(20);
@@ -320,7 +322,11 @@ pub extern "C" fn main() -> i32 {
                     .spacing(8)
                     .alignment(StackAlignment::Center)
                     .child(RectView::new(cyan).width(10).height(22).corner_radius(4))
-                    .child(Label::new("System pulse").color(Color::WHITE).font_size(18)),
+                    .child(
+                        Label::new("System pulse")
+                            .color(palette.text_main)
+                            .font_size(18),
+                    ),
             )
             .child(
                 Label::new("Ambient health and faux metrics")
@@ -337,7 +343,7 @@ pub extern "C" fn main() -> i32 {
                             move || format!("Load envelope {:>2}%", load.get())
                         })
                         .watch(load.clone())
-                        .color(Color::rgb(222, 232, 240))
+                        .color(palette.text_main)
                         .font_size(16),
                     )
                     .child(
@@ -351,7 +357,7 @@ pub extern "C" fn main() -> i32 {
                             }
                         })
                         .watch(memory.clone())
-                        .color(Color::rgb(222, 232, 240))
+                        .color(palette.text_main)
                         .font_size(16),
                     )
                     .child(
@@ -376,7 +382,11 @@ pub extern "C" fn main() -> i32 {
                     .spacing(8)
                     .alignment(StackAlignment::Center)
                     .child(RectView::new(lilac).width(10).height(22).corner_radius(4))
-                    .child(Label::new("Workspaces").color(Color::WHITE).font_size(18)),
+                    .child(
+                        Label::new("Workspaces")
+                            .color(palette.text_main)
+                            .font_size(18),
+                    ),
             )
             .child(
                 Label::new("Arrange focus without leaving the home screen")
@@ -389,17 +399,17 @@ pub extern "C" fn main() -> i32 {
                     .alignment(StackAlignment::Start)
                     .child(
                         Label::new("• Build & logs  — anchored left")
-                            .color(Color::WHITE)
+                            .color(palette.text_main)
                             .font_size(15),
                     )
                     .child(
                         Label::new("• Docs & notes — center column")
-                            .color(Color::WHITE)
+                            .color(palette.text_main)
                             .font_size(15),
                     )
                     .child(
                         Label::new("• Experiments  — floating stack")
-                            .color(Color::WHITE)
+                            .color(palette.text_main)
                             .font_size(15),
                     ),
             )
@@ -411,16 +421,16 @@ pub extern "C" fn main() -> i32 {
                         Button::new("Pin", || {
                             println!("[scarlet_desktop] Action: pin workspace (stub)");
                         })
-                        .background(Color::rgb(60, 80, 110))
-                        .text_color(Color::WHITE)
+                        .background(palette.hover)
+                        .text_color(palette.text_inverted)
                         .corner_radius(8),
                     )
                     .child(
                         Button::new("Detach", || {
                             println!("[scarlet_desktop] Action: detach workspace (stub)");
                         })
-                        .background(Color::rgb(70, 96, 82))
-                        .text_color(Color::WHITE)
+                        .background(palette.info)
+                        .text_color(palette.text_inverted)
                         .corner_radius(8),
                     ),
             ),
@@ -438,7 +448,7 @@ pub extern "C" fn main() -> i32 {
                     .child(RectView::new(accent).width(10).height(22).corner_radius(4))
                     .child(
                         Label::new("Sessions & links")
-                            .color(Color::WHITE)
+                            .color(palette.text_main)
                             .font_size(18),
                     ),
             )
@@ -453,17 +463,17 @@ pub extern "C" fn main() -> i32 {
                     .alignment(StackAlignment::Start)
                     .child(
                         Label::new("Shell: attached • interactive")
-                            .color(Color::WHITE)
+                            .color(palette.text_main)
                             .font_size(15),
                     )
                     .child(
                         Label::new("Desktop: ready • window server live")
-                            .color(Color::WHITE)
+                            .color(palette.text_main)
                             .font_size(15),
                     )
                     .child(
                         Label::new("Network: loopback + vsock bridge")
-                            .color(Color::WHITE)
+                            .color(palette.text_main)
                             .font_size(15),
                     ),
             )
@@ -475,16 +485,16 @@ pub extern "C" fn main() -> i32 {
                         Button::new("Snapshot", || {
                             println!("[scarlet_desktop] Action: snapshot state (stub)");
                         })
-                        .background(Color::rgb(66, 68, 88))
-                        .text_color(Color::WHITE)
+                        .background(palette.warning)
+                        .text_color(palette.text_inverted)
                         .corner_radius(8),
                     )
                     .child(
                         Button::new("Re-link", || {
                             println!("[scarlet_desktop] Action: re-link network (stub)");
                         })
-                        .background(Color::rgb(90, 78, 70))
-                        .text_color(Color::WHITE)
+                        .background(palette.error)
+                        .text_color(palette.text_inverted)
                         .corner_radius(8),
                     ),
             ),
@@ -517,24 +527,24 @@ pub extern "C" fn main() -> i32 {
                                 Button::new("Log out", || {
                                     println!("[scarlet_desktop] Action: log out (stub)");
                                 })
-                                .background(Color::rgb(76, 92, 118))
-                                .text_color(Color::WHITE)
+                                .background(palette.hover)
+                                .text_color(palette.text_inverted)
                                 .corner_radius(10),
                             )
                             .child(
                                 Button::new("Sleep", || {
                                     println!("[scarlet_desktop] Action: sleep (stub)");
                                 })
-                                .background(Color::rgb(96, 76, 92))
-                                .text_color(Color::WHITE)
+                                .background(palette.primary)
+                                .text_color(palette.text_inverted)
                                 .corner_radius(10),
                             )
                             .child(
                                 Button::new("Diagnostics", || {
                                     println!("[scarlet_desktop] Action: diagnostics (stub)");
                                 })
-                                .background(Color::rgb(74, 96, 76))
-                                .text_color(Color::WHITE)
+                                .background(palette.success)
+                                .text_color(palette.text_inverted)
                                 .corner_radius(10),
                             )
                             .child(Spacer::new()),

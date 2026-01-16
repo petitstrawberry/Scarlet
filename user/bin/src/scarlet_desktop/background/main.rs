@@ -8,8 +8,8 @@
 extern crate scarlet_std as std;
 
 use core::time::Duration;
-use scarlet_ui::Color;
 use scarlet_ui::graphics::Canvas;
+use scarlet_ui::{Color, design::Palette};
 use std::println;
 use std::thread;
 use sws_client::{Connection, Event};
@@ -26,8 +26,9 @@ fn draw_background(conn: &mut Connection, surface_id: u32) {
         let mut canvas = Canvas::new(buf, width, height);
 
         // Simple vertical gradient.
-        let top = Color::rgb(18, 22, 30);
-        let bottom = Color::rgb(30, 34, 44);
+        let palette = Palette::current();
+        let top = palette.bg;
+        let bottom = palette.surface;
 
         if h == 0 {
             return;
@@ -42,7 +43,7 @@ fn draw_background(conn: &mut Connection, surface_id: u32) {
         }
 
         // Subtle diagonal accent lines.
-        let accent = Color::rgb(54, 176, 168);
+        let accent = palette.info;
         let mut x = 0i32;
         while x < w as i32 + h as i32 {
             canvas.draw_line(x, 0, x - h as i32, h as i32 - 1, accent.with_alpha(28));
@@ -66,7 +67,13 @@ pub extern "C" fn main() -> i32 {
     };
 
     // Start with a tiny surface; we'll be configured to screen size after maximize.
-    let surface_id = match conn.create_surface("org.scarlet-os.desktop.background", 16, 16) {
+    let surface_id = match conn.create_surface(
+        "org.scarlet-os.desktop.background",
+        "Background",
+        "",
+        16,
+        16,
+    ) {
         Ok(id) => id,
         Err(_) => {
             println!("[scarlet_desktop_background] Failed to create surface");

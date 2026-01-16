@@ -19,7 +19,7 @@ extern crate scarlet_std as std;
 use core::time::Duration;
 use sbus_client;
 use scarlet_desktop_config::{TaskbarConfig, TaskbarPosition};
-use scarlet_ui::Color;
+use scarlet_ui::{Color, design};
 use scarlet_ui::graphics::{Canvas, measure_text_sized};
 use std::string::{String, ToString};
 use std::thread;
@@ -29,6 +29,8 @@ use std::{format, println};
 use sws_client::event::Event as SwsEvent;
 use sws_client::{Connection, InputEvent, WindowSizeLimits};
 use sws_protocol::window_types;
+
+use design::Palette;
 
 /// stemd IPC protocol constants
 mod stemd_protocol {
@@ -332,17 +334,44 @@ fn get_active_app_from_stemd() -> Option<(String, String)> {
 }
 
 /// Build menu items based on the active application
-/// When an app is focused, show app name + app-specific menus
-/// When no app is focused, show default Scarlet menus
-fn build_menu_items(active_app: &Option<(String, String)>, bar_height: u32) -> Vec<MenuItem> {
+/// - First menu is always "Scarlet" (fixed)
+/// - When an app is focused, show app name + app-specific menus after Scarlet
+/// - When no app is focused, show only Scarlet
+fn build_menu_items(active_app: &Option<(String, String, String, String)>, bar_height: u32) -> Vec<MenuItem> {
     let mut menu_items = Vec::new();
     let mut x_offset = 0i32;
 
+    // Always add Scarlet menu as the first item (fixed)
+    let (tw, _) = measure_text_sized("Scarlet", 13.0);
+    let width = tw.saturating_add(16).min(100);
+    menu_items.push(MenuItem {
+        label: String::from("Scarlet"),
+        x: x_offset,
+        y: 0,
+        width,
+        height: bar_height,
+    });
+    x_offset += width as i32;
+
     match active_app {
-        Some((_app_id, app_name)) => {
+        Some((_app_id, app_name, _title, menu_titles)) => {
             // App is focused: show app name followed by app-specific menus
-            // Try to get app-specific menus from stemd
-            let menus = get_app_menus(&_app_id, app_name);
+            // Parse menu_titles from the event (format: "menu1|menu2|menu3")
+            let menus = parse_menu_titles(menu_titles);
+
+            // Add app name as a menu item
+            if !app_name.is_empty() {
+                let (tw, _) = measure_text_sized(&app_name, 13.0);
+                let width = tw.saturating_add(16).min(100);
+                menu_items.push(MenuItem {
+                    label: app_name.clone(),
+                    x: x_offset,
+                    y: 0,
+                    width,
+                    height: bar_height,
+                });
+                x_offset += width as i32;
+            }
 
             for label in &menus {
                 let (tw, _) = measure_text_sized(&label, 13.0);
@@ -358,82 +387,26 @@ fn build_menu_items(active_app: &Option<(String, String)>, bar_height: u32) -> V
             }
         }
         None => {
-            // No app focused: show default Scarlet menus
-            let menus = ["Scarlet", "File", "Edit", "View", "Window", "Help"];
-
-            for &label in &menus {
-                let (tw, _) = measure_text_sized(label, 13.0);
-                let width = tw.saturating_add(16).min(100);
-                menu_items.push(MenuItem {
-                    label: String::from(label),
-                    x: x_offset,
-                    y: 0,
-                    width,
-                    height: bar_height,
-                });
-                x_offset += width as i32;
-            }
+            // No app focused: only Scarlet menu is shown
         }
     }
 
     menu_items
 }
 
-/// Get menu titles for an app
-/// Returns app name menu + app-specific menus if available, or generic menus
-fn get_app_menus(app_id: &str, app_name: &str) -> Vec<String> {
-    // Try to query app-specific menus from stemd via sbus
-    match query_app_menus_from_stemd(app_id) {
-        Ok(menu_titles) => {
-            if !menu_titles.is_empty() {
-                return menu_titles;
-            }
-        }
-        Err(e) => {
-            println!("[menu_bar] Failed to query menus from stemd: {:?}", e);
-        }
+/// Parse menu titles from the format "menu1|menu2|menu3"
+fn parse_menu_titles(menu_titles: &str) -> Vec<String> {
+    if menu_titles.is_empty() {
+        return Vec::new();
     }
-
-    // Fallback to generic menus based on app type
-    let mut menus = vec![app_name.to_string()];
-
-    // Add app-specific menus based on app_id
-    if app_id.contains("notepad") || app_id.contains("text") {
-        menus.extend(vec![
-            String::from("File"),
-            String::from("Edit"),
-            String::from("View"),
-            String::from("Help"),
-        ]);
-    } else if app_id.contains("terminal") {
-        menus.extend(vec![
-            String::from("Shell"),
-            String::from("Edit"),
-            String::from("View"),
-            String::from("Help"),
-        ]);
-    } else if app_id.contains("filer") {
-        menus.extend(vec![
-            String::from("File"),
-            String::from("View"),
-            String::from("Go"),
-            String::from("Help"),
-        ]);
-    } else {
-        // Generic menus
-        menus.extend(vec![
-            String::from("File"),
-            String::from("Edit"),
-            String::from("View"),
-            String::from("Window"),
-            String::from("Help"),
-        ]);
-    }
-
-    menus
+    menu_titles
+        .split('|')
+        .map(|s| s.to_string())
+        .collect()
 }
 
 /// Query app menu titles from stemd via sbus
+/// NOTE: This function is deprecated and should be removed once all apps use menu registration
 fn query_app_menus_from_stemd(app_id: &str) -> Result<Vec<String>, &'static str> {
     use alloc::string::ToString;
     use sbus::Argument;
@@ -491,17 +464,37 @@ fn handle_input(
     cursor_y: &mut i32,
     left_down: &mut bool,
     pressed_items: &mut Vec<usize>,
+    hovered_items: &mut Vec<usize>,
     menu_items: &[MenuItem],
 ) -> bool {
     match ev.type_ {
         0x03 => {
-            // EV_ABS
+            // EV_ABS - cursor movement
             match ev.code {
-                0x00 => *cursor_x = ev.value, // ABS_X
-                0x01 => *cursor_y = ev.value, // ABS_Y
-                _ => {}
+                0x00 => {
+                    *cursor_x = ev.value; // ABS_X
+                    // Update hovered items
+                    hovered_items.clear();
+                    for (i, item) in menu_items.iter().enumerate() {
+                        if item.contains(*cursor_x, *cursor_y) {
+                            hovered_items.push(i);
+                        }
+                    }
+                    true // Redraw on hover change
+                }
+                0x01 => {
+                    *cursor_y = ev.value; // ABS_Y
+                    // Update hovered items
+                    hovered_items.clear();
+                    for (i, item) in menu_items.iter().enumerate() {
+                        if item.contains(*cursor_x, *cursor_y) {
+                            hovered_items.push(i);
+                        }
+                    }
+                    true // Redraw on hover change
+                }
+                _ => false,
             }
-            false
         }
         0x01 => {
             // EV_KEY
@@ -550,6 +543,7 @@ fn draw_menu_bar(
     cpu_usage: u8,
     memory_usage: u8,
     pressed_items: &[usize],
+    hovered_items: &[usize],
     menu_items: &[MenuItem],
     status_items: &[StatusItem],
 ) {
@@ -560,13 +554,14 @@ fn draw_menu_bar(
     let w = surface.width();
     let h = surface.height();
 
-    // macOS-inspired colors
-    let bg_color = Color::rgb(30, 30, 30);
-    let text_color = Color::rgb(230, 230, 230);
-    let text_dim = Color::rgb(160, 160, 160);
-    let border_color = Color::rgb(50, 50, 50);
-    let hover_bg = Color::rgb(60, 60, 60);
-    let active_bg = Color::rgb(80, 80, 80);
+    // Use dynamic palette
+    let palette = Palette::current();
+    let bg_color = palette.sidebar_bg;
+    let text_color = palette.text_main;
+    let text_dim = palette.text_sub;
+    let border_color = palette.border;
+    let hover_bg = palette.hover;
+    let active_bg = palette.primary;
 
     surface.with_buffer(|buf, width, height| {
         let mut canvas = Canvas::new(buf, width, height);
@@ -579,6 +574,7 @@ fn draw_menu_bar(
         let font_size = 13.0;
         for (i, item) in menu_items.iter().enumerate() {
             let is_pressed = pressed_items.contains(&i);
+            let is_hovered = hovered_items.contains(&i);
 
             // Draw hover/active background
             if is_pressed {
@@ -589,12 +585,26 @@ fn draw_menu_bar(
                     item.height.saturating_sub(2),
                     active_bg,
                 );
+            } else if is_hovered {
+                canvas.fill_rect(
+                    item.x,
+                    item.y + 1,
+                    item.width,
+                    item.height.saturating_sub(2),
+                    hover_bg,
+                );
             }
 
-            // Draw text
+            // Draw text or icon
             let text_x = item.x + 8;
             let text_y = item.y + ((item.height as i32 - 16) / 2).max(0);
-            canvas.draw_text_sized(text_x, text_y, &item.label, text_color, font_size);
+
+            // First menu item (Scarlet) - draw as icon-like text
+            if i == 0 {
+                canvas.draw_text_sized(text_x, text_y, &item.label, text_color, font_size);
+            } else {
+                canvas.draw_text_sized(text_x, text_y, &item.label, text_color, font_size);
+            }
         }
 
         // Draw status items (right side)
@@ -650,6 +660,8 @@ fn show_window_list_dropdown(
     // Create dropdown surface (AlwaysOnTop for popup)
     let surface_id = match conn.create_surface(
         "org.scarlet-os.desktop.taskbar",
+        "Taskbar",
+        "",
         DROPDOWN_WIDTH,
         dropdown_height,
     ) {
@@ -741,6 +753,8 @@ fn show_legacy_window_list(
     // Create dropdown surface
     let surface_id = match conn.create_surface(
         "org.scarlet-os.desktop.taskbar",
+        "Taskbar",
+        "",
         DROPDOWN_WIDTH,
         dropdown_height,
     ) {
@@ -789,30 +803,35 @@ fn show_legacy_window_list(
     draw_dropdown(conn, surface_id, dropdown);
 }
 
-/// Show application menu dropdown (Scarlet menu with Settings, etc.)
+/// Show application menu dropdown
+/// Displays different menu items based on the menu label
 fn show_app_menu_dropdown(
     conn: &mut Connection,
     dropdown: &mut DropdownState,
     menu_item: &MenuItem,
     menu_index: usize,
 ) {
-    println!("[menu_bar] Showing app menu dropdown");
+    println!("[menu_bar] Showing app menu dropdown: {}", menu_item.label);
 
     // Close any existing dropdown
     if let Some(old_id) = dropdown.surface_id {
         let _ = conn.destroy_surface(old_id);
     }
 
-    // Calculate dropdown size
+    // Calculate dropdown size based on menu items
     const ITEM_HEIGHT: u32 = 28;
     const DROPDOWN_WIDTH: u32 = 200;
-    const NUM_ITEMS: usize = 1; // Only "Settings" for now
 
-    let dropdown_height = NUM_ITEMS as u32 * ITEM_HEIGHT + 4;
+    // Determine menu items based on label
+    let menu_items = get_menu_items_for_label(&menu_item.label);
+    let num_items = menu_items.len();
+    let dropdown_height = num_items as u32 * ITEM_HEIGHT + 4;
 
     // Create dropdown surface (AlwaysOnTop for popup)
     let surface_id = match conn.create_surface(
         "org.scarlet-os.desktop.taskbar",
+        "Taskbar",
+        "",
         DROPDOWN_WIDTH,
         dropdown_height,
     ) {
@@ -834,16 +853,15 @@ fn show_app_menu_dropdown(
     dropdown.items.clear();
     let mut current_y = 2i32; // Start with 2px top padding
 
-    // Add Settings item
-    dropdown.items.push(DropdownItem {
-        label: String::from("Settings..."),
-        item_type: DropdownItemType::Action {
-            action: DropdownAction::LaunchSettings,
-        },
-        y: current_y,
-        height: ITEM_HEIGHT,
-    });
-    current_y += ITEM_HEIGHT as i32;
+    for (label, action) in menu_items {
+        dropdown.items.push(DropdownItem {
+            label,
+            item_type: DropdownItemType::Action { action },
+            y: current_y,
+            height: ITEM_HEIGHT,
+        });
+        current_y += ITEM_HEIGHT as i32;
+    }
 
     // Update dropdown state
     dropdown.surface_id = Some(surface_id);
@@ -855,8 +873,52 @@ fn show_app_menu_dropdown(
 
     // Draw dropdown
     draw_dropdown(conn, surface_id, dropdown);
+}
 
-    println!("[menu_bar] App menu dropdown shown at ({}, {})", x, y);
+/// Get menu items for a given menu label
+fn get_menu_items_for_label(label: &str) -> Vec<(String, DropdownAction)> {
+    match label {
+        "Scarlet" => vec![
+            (String::from("Settings..."), DropdownAction::LaunchSettings),
+            (String::from("About Scarlet"), DropdownAction::LaunchSettings),
+        ],
+        "File" => vec![
+            (String::from("New"), DropdownAction::LaunchSettings),
+            (String::from("Open"), DropdownAction::LaunchSettings),
+            (String::from("-"), DropdownAction::LaunchSettings),
+            (String::from("Save"), DropdownAction::LaunchSettings),
+            (String::from("Save As..."), DropdownAction::LaunchSettings),
+        ],
+        "Edit" => vec![
+            (String::from("Cut"), DropdownAction::LaunchSettings),
+            (String::from("Copy"), DropdownAction::LaunchSettings),
+            (String::from("Paste"), DropdownAction::LaunchSettings),
+            (String::from("-"), DropdownAction::LaunchSettings),
+            (String::from("Select All"), DropdownAction::LaunchSettings),
+        ],
+        "View" => vec![
+            (String::from("Zoom In"), DropdownAction::LaunchSettings),
+            (String::from("Zoom Out"), DropdownAction::LaunchSettings),
+            (String::from("-"), DropdownAction::LaunchSettings),
+            (String::from("Full Screen"), DropdownAction::LaunchSettings),
+        ],
+        "Window" => vec![
+            (String::from("Minimize"), DropdownAction::LaunchSettings),
+            (String::from("Maximize"), DropdownAction::LaunchSettings),
+            (String::from("-"), DropdownAction::LaunchSettings),
+            (String::from("Close"), DropdownAction::LaunchSettings),
+        ],
+        "Help" => vec![
+            (String::from("Documentation"), DropdownAction::LaunchSettings),
+            (String::from("-"), DropdownAction::LaunchSettings),
+            (String::from("About"), DropdownAction::LaunchSettings),
+        ],
+        _ => vec![
+            // Default: show placeholder items
+            (String::from("Item 1"), DropdownAction::LaunchSettings),
+            (String::from("Item 2"), DropdownAction::LaunchSettings),
+        ],
+    }
 }
 
 /// Draw dropdown menu
@@ -871,12 +933,13 @@ fn draw_dropdown(conn: &mut Connection, surface_id: u32, dropdown: &DropdownStat
     surface.with_buffer(|buf, width, height| {
         let mut canvas = Canvas::new(buf, width, height);
 
-        // Background
-        let bg_color = Color::rgb(40, 40, 40);
-        let border_color = Color::rgb(70, 70, 70);
-        let text_color = Color::rgb(220, 220, 220);
-        let hover_color = Color::rgb(70, 130, 180); // Steel blue
-        let separator_color = Color::rgb(60, 60, 60);
+        // Use dynamic palette for dropdown
+        let palette = Palette::current();
+        let bg_color = palette.surface;
+        let border_color = palette.border;
+        let text_color = palette.text_main;
+        let hover_color = palette.primary;
+        let separator_color = palette.separator;
 
         canvas.fill_rect(0, 0, width, height, bg_color);
 
@@ -886,22 +949,19 @@ fn draw_dropdown(conn: &mut Connection, surface_id: u32, dropdown: &DropdownStat
         // Draw items
         const FONT_SIZE: f32 = 13.0;
         for item in &dropdown.items {
-            // Item background (hover effect would go here)
-            canvas.fill_rect(2, item.y, width - 4, item.height, Color::rgb(45, 45, 45));
+            if item.label == "-" {
+                // Separator line
+                let sep_y = item.y + item.height as i32 / 2;
+                canvas.draw_line(4, sep_y, (width - 4) as i32, sep_y, separator_color);
+            } else {
+                // Item background (hover effect would go here)
+                canvas.fill_rect(2, item.y, width - 4, item.height, palette.hover);
 
-            // Draw text
-            let text_x = 8;
-            let text_y = item.y + ((item.height as i32 - 16) / 2).max(0);
-            canvas.draw_text_sized(text_x, text_y, &item.label, text_color, FONT_SIZE);
-
-            // Draw separator
-            canvas.draw_line(
-                2,
-                item.y + item.height as i32,
-                (width - 2) as i32,
-                item.y + item.height as i32,
-                separator_color,
-            );
+                // Draw text
+                let text_x = 8;
+                let text_y = item.y + ((item.height as i32 - 16) / 2).max(0);
+                canvas.draw_text_sized(text_x, text_y, &item.label, text_color, FONT_SIZE);
+            }
         }
     });
 
@@ -927,7 +987,7 @@ pub extern "C" fn main() -> i32 {
     };
 
     // Create a dummy surface first (needed for SCREEN_SIZE response routing)
-    let dummy_surface_id = match conn.create_surface("org.scarlet-os.desktop.taskbar", 16, 16) {
+    let dummy_surface_id = match conn.create_surface("org.scarlet-os.desktop.taskbar", "Taskbar", "", 16, 16) {
         Ok(id) => id,
         Err(_) => {
             println!("[menu_bar] Failed to create dummy surface");
@@ -952,7 +1012,7 @@ pub extern "C" fn main() -> i32 {
 
     // Create surface with full screen width and 28px height
     let surface_id =
-        match conn.create_surface("org.scarlet-os.desktop.taskbar", screen_width, bar_height) {
+        match conn.create_surface("org.scarlet-os.desktop.taskbar", "Taskbar", "", screen_width, bar_height) {
             Ok(id) => id,
             Err(_) => {
                 println!("[menu_bar] Failed to create surface");
@@ -993,6 +1053,7 @@ pub extern "C" fn main() -> i32 {
     let mut cursor_y: i32 = 0;
     let mut left_down: bool = false;
     let mut pressed_items: Vec<usize> = Vec::new();
+    let mut hovered_items: Vec<usize> = Vec::new();
     let mut dropdown = DropdownState::new();
 
     let mut seconds: u32 = 0;
@@ -1003,7 +1064,8 @@ pub extern "C" fn main() -> i32 {
     let mut memory_usage: u8 = 42;
 
     // Track active app for menu switching (updated via FocusChanged events)
-    let mut active_app: Option<(String, String)> = None;
+    // Format: (app_id, app_name, title, menu_titles)
+    let mut active_app: Option<(String, String, String, String)> = None;
 
     // Define initial menu items (will be updated dynamically)
     let mut menu_items: Vec<MenuItem> = build_menu_items(&active_app, bar_height);
@@ -1059,6 +1121,7 @@ pub extern "C" fn main() -> i32 {
         cpu_usage,
         memory_usage,
         &pressed_items,
+        &hovered_items,
         &menu_items,
         &status_items,
     );
@@ -1070,19 +1133,22 @@ pub extern "C" fn main() -> i32 {
 
         while let Some(ev) = conn.poll_event() {
             match ev {
-                SwsEvent::FocusChanged { app_id, title, .. } => {
+                SwsEvent::FocusChanged {
+                    window_id: _,
+                    app_id,
+                    app_name,
+                    title,
+                    menu_titles,
+                } => {
                     println!(
-                        "[menu_bar] Focus changed event: app_id={}, title={}",
-                        app_id, title
+                        "[menu_bar] Focus changed event: app_id={}, app_name={}, title={}, menu_titles={}",
+                        app_id, app_name, title, menu_titles
                     );
                     // Update active app based on focus change
-                    let new_active_app = Some((app_id.clone(), title.clone()));
-                    if active_app != new_active_app {
-                        println!("[menu_bar] Active app changed from focus event, updating menus");
-                        active_app = new_active_app;
-                        menu_items = build_menu_items(&active_app, bar_height);
-                        needs_redraw = true;
-                    }
+                    // Store (app_id, app_name, title, menu_titles) for menu building
+                    active_app = Some((app_id.clone(), app_name.clone(), title.clone(), menu_titles.clone()));
+                    menu_items = build_menu_items(&active_app, bar_height);
+                    needs_redraw = true;
                 }
                 SwsEvent::Input(input) if input.surface_id == surface_id => {
                     // Check if menu was clicked (only on mouse up)
@@ -1103,6 +1169,7 @@ pub extern "C" fn main() -> i32 {
                         &mut cursor_y,
                         &mut left_down,
                         &mut pressed_items,
+                        &mut hovered_items,
                         &menu_items,
                     ) {
                         needs_redraw = true;
@@ -1167,6 +1234,10 @@ pub extern "C" fn main() -> i32 {
                                 cursor_y
                             );
                             if contains {
+                                // Skip separators
+                                if item.label == "-" {
+                                    break;
+                                }
                                 match &item.item_type {
                                     DropdownItemType::Window { window_id } => {
                                         println!(
@@ -1238,18 +1309,13 @@ pub extern "C" fn main() -> i32 {
             let label = &menu_items[menu_idx].label;
             println!("[menu_bar] Menu clicked: {}", label);
 
-            // Show app menu dropdown for "Scarlet" menu (index 0)
+            // Show dropdown based on menu type
             if label == "Scarlet" {
+                // Show system menu dropdown (Settings, etc.)
                 show_app_menu_dropdown(&mut conn, &mut dropdown, &menu_items[menu_idx], menu_idx);
-            }
-            // Show window list dropdown for "Window" menu (index 4)
-            else if label == "Window" {
-                show_window_list_dropdown(
-                    &mut conn,
-                    &mut dropdown,
-                    &menu_items[menu_idx],
-                    menu_idx,
-                );
+            } else {
+                // Show app-specific menu dropdown
+                show_app_menu_dropdown(&mut conn, &mut dropdown, &menu_items[menu_idx], menu_idx);
             }
         }
 
@@ -1284,6 +1350,7 @@ pub extern "C" fn main() -> i32 {
                 cpu_usage,
                 memory_usage,
                 &pressed_items,
+                &hovered_items,
                 &menu_items,
                 &status_items,
             );

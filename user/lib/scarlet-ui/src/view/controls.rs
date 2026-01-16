@@ -413,14 +413,17 @@ impl<F: FnMut() + 'static> View for Button<F> {
     }
 
     fn draw(&self, canvas: &mut Canvas, frame: Rect) {
+        // Get current palette for theme-aware colors
+        let palette = crate::design::Palette::current();
+
         // Draw background with rounded corners
         canvas.fill_rounded_rect(frame.x, frame.y, frame.width, frame.height, self.corner_radius, self.current_background());
 
-        // Draw border with rounded corners
+        // Draw border with rounded corners - use palette for theme-aware colors
         let border_color = if self.is_hovered {
-            Color::rgb(150, 150, 150)
+            palette.border
         } else {
-            Color::rgb(100, 100, 100)
+            palette.separator
         };
         canvas.draw_rounded_rect(frame.x, frame.y, frame.width, frame.height, self.corner_radius, border_color);
 
@@ -773,12 +776,15 @@ impl View for TextField {
     }
 
     fn draw(&self, canvas: &mut Canvas, frame: Rect) {
+        // Get current palette for theme-aware colors
+        let palette = crate::design::Palette::current();
+
         // Background with rounded corners
         canvas.fill_rounded_rect(frame.x, frame.y, frame.width, frame.height, self.corner_radius, self.background);
 
-        // Border (thicker if focused)
+        // Border (thicker if focused) - use palette border for theme-aware color
         let border_color = if self.is_focused {
-            self.focused_border_color
+            palette.focus_ring
         } else {
             self.border_color
         };
@@ -802,7 +808,7 @@ impl View for TextField {
         };
 
         let text_color = if self.cached_text.is_empty() {
-            Color::rgb(150, 150, 150)
+            palette.text_mute
         } else {
             self.text_color
         };
@@ -815,14 +821,14 @@ impl View for TextField {
             text_color,
         );
 
-        // Draw caret if focused
+        // Draw caret if focused - use palette primary for visibility
         if self.is_focused {
             let before_cursor = &self.cached_text[..self.cursor_pos.min(self.cached_text.len())];
             let (text_width, _) = crate::graphics::measure_text_sized(before_cursor, 16.0);
             let caret_x = frame.x as i32 + self.padding as i32 + text_width as i32;
             let caret_y = frame.y + 6;
 
-            canvas.fill_rect(caret_x, caret_y, 2, frame.height as u32 - 12, Color::BLACK);
+            canvas.fill_rect(caret_x, caret_y, 2, frame.height as u32 - 12, palette.primary);
         }
     }
 
@@ -1725,18 +1731,21 @@ impl ListView {
         items.subscribe_view(&refresh_handle);
         selected.subscribe_view(&refresh_handle);
 
+        use crate::design::palette::*;
+
         Self {
             items,
             selected: selected.into(),
             selection_mode: SelectionMode::Single,
-            background: Color::rgb(50, 50, 50),
-            selection_color: Color::rgb(60, 120, 200),
-            text_color: Color::WHITE,
-            hover_color: Color::rgb(70, 70, 70),
+            // macOS-inspired light theme using design palette
+            background: SIDEBAR_BG,
+            selection_color: PRIMARY,
+            text_color: TEXT_MAIN,
+            hover_color: Color::rgba(0, 0, 0, 30),
             item_height: 32,
-            corner_radius: 4,
+            corner_radius: 6,
             padding: 8,
-            font_size: 14,
+            font_size: 13,
             refresh_handle,
             is_hovered: false,
             hovered_index: None,
@@ -1839,7 +1848,7 @@ impl View for ListView {
         }
 
         // Calculate height based on number of items
-        let total_height = self.len() as u32 * self.item_height + self.padding * 2;
+        let total_height = self.len() as u32 * self.item_height;
 
         Size::new(
             available.width,
@@ -1852,53 +1861,54 @@ impl View for ListView {
     }
 
     fn draw(&self, canvas: &mut Canvas, frame: Rect) {
-        // Draw background with rounded corners
-        canvas.fill_rounded_rect(frame.x, frame.y, frame.width, frame.height, self.corner_radius, self.background);
+        // Get current palette for theme-aware colors
+        let palette = crate::design::Palette::current();
 
-        // Draw border
-        canvas.draw_rounded_rect(frame.x, frame.y, frame.width, frame.height, self.corner_radius, Color::rgb(100, 100, 100));
+        // Fill background with solid color
+        canvas.fill_rect(frame.x, frame.y, frame.width, frame.height, self.background);
 
         let current_selected = self.selected.get();
 
         // Draw each item
         self.items.with(|items| {
             for (i, item) in items.iter().enumerate() {
-                let item_y = frame.y + self.padding as i32 + i as i32 * self.item_height as i32;
-                let item_rect = Rect::new(
-                    frame.x + self.padding as i32,
-                    item_y,
-                    frame.width - self.padding * 2,
-                    self.item_height,
-                );
+                let item_y = frame.y + i as i32 * self.item_height as i32;
+                let item_x = frame.x + self.padding as i32;
 
-                // Draw selection or hover background
+                // Draw selection background (use palette primary for theme-aware color)
                 if i == current_selected {
-                    canvas.fill_rounded_rect(
-                        item_rect.x,
-                        item_rect.y,
-                        item_rect.width,
-                        item_rect.height,
-                        self.corner_radius,
-                        self.selection_color,
+                    canvas.fill_rect(
+                        item_x,
+                        item_y,
+                        frame.width - (self.padding as u32 * 2),
+                        self.item_height,
+                        palette.primary,
                     );
                 } else if self.hovered_index == Some(i) {
-                    canvas.fill_rounded_rect(
-                        item_rect.x,
-                        item_rect.y,
-                        item_rect.width,
-                        item_rect.height,
-                        self.corner_radius,
-                        self.hover_color,
+                    canvas.fill_rect(
+                        item_x,
+                        item_y,
+                        frame.width - (self.padding as u32 * 2),
+                        self.item_height,
+                        palette.hover,
                     );
                 }
 
-                // Draw item text
+                // Draw text
                 let text_y = item_y + (self.item_height as i32 - self.font_size as i32) / 2;
+
+                // White text on selection, normal otherwise
+                let text_color = if i == current_selected {
+                    palette.text_inverted
+                } else {
+                    self.text_color
+                };
+
                 canvas.draw_text_sized(
-                    item_rect.x + 8,
+                    item_x,
                     text_y,
                     item,
-                    self.text_color,
+                    text_color,
                     self.font_size as f32,
                 );
             }

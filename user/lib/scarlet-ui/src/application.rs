@@ -368,9 +368,12 @@ impl Application {
         // Create surface
         // Use window's app_id if set, otherwise fall back to Application's app_id
         let app_id = window.get_app_id().or_else(|| self.app_id.as_deref()).unwrap_or("");
+        // For now, use app_id as app_name and empty menu_titles (can be extended later)
+        let app_name = app_id;
+        let menu_titles = "";
         let surface_id = self
             .connection
-            .create_surface(app_id, width, height)
+            .create_surface(app_id, app_name, menu_titles, width, height)
             .map_err(|_| "Failed to create surface")?;
 
         if size_limits != sws_client::WindowSizeLimits::NONE {

@@ -519,6 +519,11 @@ fn get_focused_window_app_id() -> Option<String> {
 
 /// Get menu titles for an application
 /// Returns a list of menu titles (e.g., ["Notepad", "File", "Edit", "View", "Help"])
+///
+/// DEPRECATED: This functionality is now handled by SWS.
+/// Applications register their menus when creating surfaces via SWS.
+/// The TaskBar receives menu information through FOCUS_CHANGED events.
+/// This function is kept for backward compatibility but should not be used.
 fn get_app_menu_titles(app_id: &str) -> Vec<String> {
     // Look up the app to get its name
     let app_name = if let Some(entry) = lookup_app(app_id) {
@@ -1357,6 +1362,10 @@ fn handle_sbus_message(
                     Ok(())
                 }
                 "GetAppMenus" => {
+                    // DEPRECATED: This method is obsolete. Menu information is now managed by SWS.
+                    // Applications register menus via create_surface() in SWS.
+                    // TaskBar receives menu info through FOCUS_CHANGED events.
+                    // This handler is kept for backward compatibility only.
                     println!(
                         "[sbus] Handling GetAppMenus method for app: {}",
                         args.get(0).map_or("", |a| match a {

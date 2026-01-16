@@ -10,7 +10,9 @@
 
 extern crate scarlet_std as std;
 
-use scarlet_ui::{Application, Color, Label, Padding, State, VStack, Window, WindowKind};
+use scarlet_ui::{
+    Application, Color, Label, Padding, State, VStack, Window, WindowKind, design::Palette,
+};
 use std::println;
 
 /// Terminal state
@@ -100,10 +102,13 @@ pub extern "C" fn main() -> i32 {
     // Create terminal state clone for input handling
     let state_for_input = terminal_state.clone();
 
+    // Get current palette
+    let palette = Palette::current();
+
     // Create terminal window
     let window = Window::new("Terminal", 800, 600)
         .min_size(600, 400)
-        .background(Color::rgb(20, 20, 20))
+        .background(palette.surface)
         .window_type(WindowKind::Normal)
         .main_window()
         .content(
@@ -113,7 +118,7 @@ pub extern "C" fn main() -> i32 {
                     // Output display area
                     Padding::new(
                         Label::new(terminal_state.map(|s| s.output.clone()))
-                            .color(Color::rgb(0, 255, 0))
+                            .color(palette.success)
                             .font_size(13),
                     )
                     .all(8),
@@ -130,7 +135,7 @@ pub extern "C" fn main() -> i32 {
                                 scarlet_std::string::String::from("$")
                             }
                         }))
-                        .color(Color::rgb(0, 200, 0))
+                        .color(palette.success)
                         .font_size(14),
                     )
                     .all(8),

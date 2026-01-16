@@ -15,7 +15,7 @@ extern crate scarlet_std as std;
 use core::time::Duration;
 use scarlet_ui::{
     Application, Button, Center, CheckBox, Color, HStack, Label, Padding, ProgressBar, RectView,
-    ScrollView, Slider, Spacer, State, Text, TextField, Timer, Toggle, VStack, Window, label,
+    Slider, Spacer, State, Text, TextField, Timer, Toggle, VStack, Window, label,
 };
 use std::{format, println};
 

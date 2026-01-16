@@ -18,8 +18,8 @@ extern crate scarlet_std as std;
 
 use core::f32::consts::PI;
 use core::time::Duration;
-use scarlet_ui::Color;
 use scarlet_ui::graphics::{Canvas, measure_text_sized};
+use scarlet_ui::{Color, design::Palette};
 use std::thread;
 use std::vec::Vec;
 use std::{format, println};
@@ -171,11 +171,12 @@ impl ClockApp {
 
 /// Draw the analog clock face
 fn draw_clock_face(canvas: &mut Canvas, center_x: i32, center_y: i32, radius: u32) {
-    let bg_color = Color::rgb(24, 24, 28);
-    let face_color = Color::rgb(32, 32, 38);
-    let border_color = Color::rgb(60, 60, 70);
-    let tick_color = Color::rgb(200, 200, 210);
-    let tick_dim = Color::rgb(120, 120, 130);
+    let palette = Palette::current();
+    let bg_color = palette.bg;
+    let face_color = palette.surface;
+    let border_color = palette.border;
+    let tick_color = palette.text_main;
+    let tick_dim = palette.text_sub;
 
     // Draw outer circle background
     canvas.fill_circle(center_x, center_y, radius + 8, bg_color);
@@ -238,9 +239,10 @@ fn draw_hands(
     milliseconds: u32,
 ) {
     // Hand colors
-    let hour_color = Color::rgb(230, 230, 235);
-    let minute_color = Color::rgb(200, 200, 210);
-    let second_color = Color::rgb(255, 80, 80);
+    let palette = Palette::current();
+    let hour_color = palette.text_main;
+    let minute_color = palette.text_sub;
+    let second_color = palette.error;
 
     // Calculate angles (in radians, -90 to start at 12 o'clock)
     // Hour hand: moves based on hours + minutes + seconds
@@ -295,7 +297,7 @@ fn draw_hands(
     );
 
     // Draw center cap (covers the hand origins)
-    canvas.fill_circle(center_x, center_y, 8, Color::rgb(40, 40, 48));
+    canvas.fill_circle(center_x, center_y, 8, palette.elevated);
     canvas.fill_circle(center_x, center_y, 6, second_color);
 }
 
@@ -381,9 +383,10 @@ fn draw_digital_clock(
     minutes: u32,
     seconds: u32,
 ) {
-    let bg_color = Color::rgb(24, 24, 28);
-    let text_color = Color::rgb(230, 230, 235);
-    let accent_color = Color::rgb(255, 80, 80);
+    let palette = Palette::current();
+    let bg_color = palette.bg;
+    let text_color = palette.text_main;
+    let accent_color = palette.error;
 
     // Fill background
     canvas.fill_rect(0, 0, width, height, bg_color);
@@ -449,7 +452,8 @@ fn draw_clock(app: &ClockApp, conn: &mut Connection) {
                 let (text_w, _) = measure_text_sized(mode_text, 12.0);
                 let text_x = ((w as i32 - text_w as i32) / 2).max(0);
                 let text_y = (h as i32 - 20).max(0);
-                canvas.draw_text_sized(text_x, text_y, mode_text, Color::rgb(120, 120, 130), 12.0);
+                let palette = Palette::current();
+                canvas.draw_text_sized(text_x, text_y, mode_text, palette.text_mute, 12.0);
             }
             DisplayMode::Digital => {
                 // Calculate time components (12-hour format)
@@ -487,13 +491,14 @@ pub extern "C" fn main() -> i32 {
     let height = 450u32;
 
     // Create surface
-    let surface_id = match conn.create_surface("org.scarlet-os.desktop.clock", width, height) {
-        Ok(id) => id,
-        Err(_) => {
-            println!("[clock] Failed to create surface");
-            return 1;
-        }
-    };
+    let surface_id =
+        match conn.create_surface("org.scarlet-os.desktop.clock", "Clock", "", width, height) {
+            Ok(id) => id,
+            Err(_) => {
+                println!("[clock] Failed to create surface");
+                return 1;
+            }
+        };
 
     // Set window type to NORMAL (resizable application window)
     let _ = conn.set_window_type(surface_id, window_types::NORMAL);

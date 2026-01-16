@@ -35,7 +35,9 @@ pub enum Event {
     FocusChanged {
         window_id: u32,
         app_id: std::string::String,
+        app_name: std::string::String,
         title: std::string::String,
+        menu_titles: std::string::String,
     },
     /// Error from server
     Error { code: u32 },

@@ -38,7 +38,7 @@ impl ScarletWindowAdapter {
         
         // Create a surface (window) through SWS
         let surface_id = connection
-            .create_surface("slint-app", width, height)
+            .create_surface("slint-app", "Slint App", "", width, height)
             .map_err(|e| slint::platform::PlatformError::Other(
                 std::format!("Failed to create surface: {:?}", e).into()
             ))?;

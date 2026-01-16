@@ -5,11 +5,27 @@ use std::handle::capability::memory_mapping::flags as mmap_flags;
 use std::ipc::{SharedMemory, permissions};
 use std::println;
 use std::socket::Socket;
+use std::string::{String, ToString};
 use std::sync::Mutex;
 use std::thread::{self, sleep, yield_now};
 use std::vec::Vec;
 use sws_protocol as protocol;
 use sws_protocol::ClientMessageRef;
+
+/// Application session information
+#[derive(Debug, Clone)]
+struct AppSession {
+    window_id: u32,
+    app_id: String,
+    app_name: String,
+    menu_titles: String, // Format: "menu1|menu2|menu3"
+}
+
+/// Active application sessions (window_id -> AppSession)
+static APP_SESSIONS: Mutex<BTreeMap<u32, AppSession>> = Mutex::new(BTreeMap::new());
+
+/// Currently focused window ID
+static FOCUSED_WINDOW_ID: Mutex<Option<u32>> = Mutex::new(None);
 
 #[derive(Debug, Clone, Copy, Default)]
 struct WindowSizeLimits {
@@ -340,6 +356,17 @@ pub fn broadcast_message_to_all_clients(msg_type: u32, payload: Vec<u8>) {
         // Clone the payload for each client
         let payload_clone = payload.clone();
         send_message_to_client(client_id, msg_type, payload_clone);
+    }
+}
+
+/// Get application session information for a window.
+/// Returns (app_name, menu_titles) if the session exists.
+pub fn get_app_session_info(window_id: u32) -> (String, String) {
+    let sessions = APP_SESSIONS.lock();
+    if let Some(session) = sessions.get(&window_id) {
+        (session.app_name.clone(), session.menu_titles.clone())
+    } else {
+        (String::new(), String::new())
     }
 }
 
@@ -697,9 +724,16 @@ fn client_thread_main(client_id: usize, mut socket: Socket) {
         match protocol::parse_client_message(msg_type, &payload) {
             Ok(ClientMessageRef::CreateWindow {
                 app_id,
+                app_name,
+                menu_titles,
                 width,
                 height,
             }) => {
+                // Convert &[u8] to String
+                let app_id_str = String::from_utf8_lossy(app_id).into_owned();
+                let app_name_str = String::from_utf8_lossy(app_name).into_owned();
+                let menu_titles_str = String::from_utf8_lossy(menu_titles).into_owned();
+
                 // Calculate buffer size
                 let buffer_size = (width as u64)
                     .saturating_mul(height as u64)
@@ -708,10 +742,22 @@ fn client_thread_main(client_id: usize, mut socket: Socket) {
                 let window_id = next_window_id;
                 next_window_id = next_window_id.saturating_add(1);
 
+                // Create AppSession
+                let session = AppSession {
+                    window_id,
+                    app_id: app_id_str.clone(),
+                    app_name: app_name_str.clone(),
+                    menu_titles: menu_titles_str.clone(),
+                };
+                {
+                    let mut sessions = APP_SESSIONS.lock();
+                    sessions.insert(window_id, session);
+                }
+
                 // Create shared memory region for this window
                 println!(
-                    "[ClientThread {}] Creating SHM for window {} ({}x{} = {} bytes)",
-                    client_id, window_id, width, height, buffer_size
+                    "[ClientThread {}] Creating SHM for window {} ({}x{} = {} bytes) [app={}, name={}]",
+                    client_id, window_id, width, height, buffer_size, app_id_str, app_name_str
                 );
 
                 match SharedMemory::create(buffer_size as usize, permissions::READ_WRITE) {
@@ -838,6 +884,12 @@ fn client_thread_main(client_id: usize, mut socket: Socket) {
                 unregister_window(window_id);
 
                 window_size_limits.remove(&window_id);
+
+                // Remove AppSession
+                {
+                    let mut sessions = APP_SESSIONS.lock();
+                    sessions.remove(&window_id);
+                }
 
                 // Remove from managed windows
                 managed_windows.retain(|&id| id != window_id);
