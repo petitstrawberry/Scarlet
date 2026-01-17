@@ -48,6 +48,7 @@ pub mod client_msg {
     pub const LAUNCH_OR_FOCUS: u32 = 25;
     pub const FOCUS_WINDOW: u32 = 26;
     pub const GET_ACTIVE_APP: u32 = 27; // Get active app info for TaskBar
+    pub const SET_WINDOW_HAS_ALPHA_CONTENT: u32 = 28; // Set whether window content has alpha channel
 }
 
 /// Message type IDs (server -> client).
@@ -276,6 +277,15 @@ pub enum ClientMessageRef<'a> {
 
     /// Get active application information (for TaskBar)
     GetActiveApp {},
+
+    /// Set whether window content contains alpha channel (semi-transparent pixels)
+    ///
+    /// This is separate from window.opacity - this controls whether pixel alpha
+    /// values in the window buffer should be respected during composition.
+    SetWindowHasAlphaContent {
+        window_id: u32,
+        has_alpha: bool,
+    },
 }
 
 /// Server->client messages.
@@ -632,6 +642,15 @@ pub fn parse_client_message<'a>(
                 return Err(ProtocolError::MalformedPayload);
             }
             Ok(ClientMessageRef::GetActiveApp {})
+        }
+        client_msg::SET_WINDOW_HAS_ALPHA_CONTENT => {
+            // Payload: window_id (u32) + has_alpha (u8, 0 = false, 1 = true)
+            if payload.len() != 5 {
+                return Err(ProtocolError::MalformedPayload);
+            }
+            let window_id = u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
+            let has_alpha = payload[4] != 0;
+            Ok(ClientMessageRef::SetWindowHasAlphaContent { window_id, has_alpha })
         }
         _ => Err(ProtocolError::UnknownMessageType),
     }
@@ -1346,5 +1365,13 @@ pub fn payload_focus_changed(
     payload.extend_from_slice(&(menu_titles_len as u32).to_le_bytes());
     payload.extend_from_slice(&menu_titles[..menu_titles_len]);
 
+    payload
+}
+
+/// Build payload for client->server `SET_WINDOW_HAS_ALPHA_CONTENT`.
+pub fn payload_set_window_has_alpha_content(window_id: u32, has_alpha: bool) -> [u8; 5] {
+    let mut payload = [0u8; 5];
+    payload[0..4].copy_from_slice(&window_id.to_le_bytes());
+    payload[4] = if has_alpha { 1 } else { 0 };
     payload
 }

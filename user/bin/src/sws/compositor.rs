@@ -6,7 +6,6 @@ use super::ipc::{IpcEvent, IpcServer, send_message_to_client, send_message_to_wi
 use super::window::WindowManager;
 use framebuffer::Framebuffer;
 use std::println;
-use std::thread::yield_now;
 use std::vec::Vec;
 use sws_protocol;
 
@@ -853,24 +852,45 @@ impl Compositor {
             return;
         }
 
-        // Check if window has transparency (opacity < 1.0)
-        let has_transparency = window.opacity < 1.0;
+        // Check if window has transparency (opacity < 1.0 or content has alpha channel)
+        // - window.opacity < 1.0: window-level transparency (fade in/out, etc.)
+        // - window.has_alpha_content: pixel-level transparency (semi-transparent UI elements)
+        let has_transparency = window.opacity < 1.0 || window.has_alpha_content;
 
-        // Copy BGRA pixels from the window buffer into the screen buffer.
-        // Apply alpha blending if window has transparency.
-        for sy in y0..y1 {
-            let wy = (sy - win_y0) as u32;
-            let screen_row_off = (sy as u32).saturating_mul(stride as u32) as usize;
-            for sx in x0..x1 {
-                let wx = (sx - win_x0) as u32;
-                let window_offset = ((wy * window.width + wx) * 4) as usize;
-                let screen_offset =
-                    screen_row_off + (sx as u32).saturating_mul(bytes_per_pixel) as usize;
+        // Fast path for opaque windows: copy row by row
+        if !has_transparency {
+            let row_width = ((x1 - x0) * 4) as usize;
+            for sy in y0..y1 {
+                let wy = (sy - win_y0) as u32;
+                let screen_row_off = (sy as u32 * stride) as usize;
+                let window_row_off = (wy * window.width * 4) as usize;
 
-                if window_offset + 4 <= window_buffer.len()
-                    && screen_offset + 4 <= screen_buffer.len()
-                {
-                    if has_transparency {
+                for sx in x0..x1 {
+                    let wx = (sx - win_x0) as u32;
+                    let window_offset = window_row_off + (wx * 4) as usize;
+                    let screen_offset = screen_row_off + (sx as u32 * bytes_per_pixel) as usize;
+
+                    if window_offset + 4 <= window_buffer.len()
+                        && screen_offset + 4 <= screen_buffer.len()
+                    {
+                        screen_buffer[screen_offset..screen_offset + 4]
+                            .copy_from_slice(&window_buffer[window_offset..window_offset + 4]);
+                    }
+                }
+            }
+        } else {
+            // Slow path for transparent windows: per-pixel alpha blending
+            for sy in y0..y1 {
+                let wy = (sy - win_y0) as u32;
+                let screen_row_off = (sy as u32 * stride) as usize;
+                for sx in x0..x1 {
+                    let wx = (sx - win_x0) as u32;
+                    let window_offset = ((wy * window.width + wx) * 4) as usize;
+                    let screen_offset = screen_row_off + (sx as u32 * bytes_per_pixel) as usize;
+
+                    if window_offset + 4 <= window_buffer.len()
+                        && screen_offset + 4 <= screen_buffer.len()
+                    {
                         // Alpha blending: BGRA format
                         let src_b = window_buffer[window_offset] as u32;
                         let src_g = window_buffer[window_offset + 1] as u32;
@@ -894,10 +914,6 @@ impl Compositor {
                         screen_buffer[screen_offset + 1] = out_g;
                         screen_buffer[screen_offset + 2] = out_r;
                         screen_buffer[screen_offset + 3] = 255; // Output is always opaque
-                    } else {
-                        // No transparency: direct copy
-                        screen_buffer[screen_offset..screen_offset + 4]
-                            .copy_from_slice(&window_buffer[window_offset..window_offset + 4]);
                     }
                 }
             }
@@ -920,40 +936,36 @@ impl Compositor {
             [180, 180, 180, 255]
         };
 
-        for y in 0..window.height {
-            for x in 0..window.width {
-                let screen_x = window.x + x as i32;
-                let screen_y = window.y + y as i32;
+        // Pre-calculate visible area to reduce per-pixel checks
+        let win_x0 = window.x.max(0);
+        let win_y0 = window.y.max(0);
+        let win_x1 = (window.x + window.width as i32).min(screen_width as i32);
+        let win_y1 = (window.y + window.height as i32).min(screen_height as i32);
 
-                // Screen bounds check
-                if screen_x < 0
-                    || screen_x >= screen_width as i32
-                    || screen_y < 0
-                    || screen_y >= screen_height as i32
-                {
-                    continue;
-                }
+        let (x0, y0, x1, y1) = if let Some((clip_x, clip_y, clip_w, clip_h)) = clip_rect {
+            let clip_x1 = clip_x.saturating_add(clip_w as i32);
+            let clip_y1 = clip_y.saturating_add(clip_h as i32);
+            (
+                win_x0.max(clip_x),
+                win_y0.max(clip_y),
+                win_x1.min(clip_x1),
+                win_y1.min(clip_y1),
+            )
+        } else {
+            (win_x0, win_y0, win_x1, win_y1)
+        };
 
-                // Clip rect check
-                if let Some((clip_x, clip_y, clip_w, clip_h)) = clip_rect {
-                    if screen_x < clip_x
-                        || screen_x >= clip_x + clip_w as i32
-                        || screen_y < clip_y
-                        || screen_y >= clip_y + clip_h as i32
-                    {
-                        continue;
-                    }
-                }
+        if x1 <= x0 || y1 <= y0 {
+            return;
+        }
 
-                let offset =
-                    ((screen_y as u32 * stride) + (screen_x as u32 * bytes_per_pixel)) as usize;
-
-                // Fill with window color (no borders)
+        // Process row by row for better cache locality
+        for sy in y0..y1 {
+            let screen_row_off = (sy as u32 * stride + x0 as u32 * bytes_per_pixel) as usize;
+            for sx in x0..x1 {
+                let offset = screen_row_off + (sx as u32 * bytes_per_pixel) as usize;
                 if offset + 4 <= buffer.len() {
-                    buffer[offset] = window_color[0];
-                    buffer[offset + 1] = window_color[1];
-                    buffer[offset + 2] = window_color[2];
-                    buffer[offset + 3] = window_color[3];
+                    buffer[offset..offset + 4].copy_from_slice(&window_color);
                 }
             }
         }
@@ -997,12 +1009,18 @@ impl Compositor {
             let backbuffer = &mut self.backbuffer;
 
             // Layer 1: Fill background (only within dirty region).
-            for yy in 0..h {
-                let sy = (y0 as u32).saturating_add(yy);
-                let row_off = (sy as usize)
-                    .saturating_mul(stride as usize)
-                    .saturating_add((x0 as usize).saturating_mul(self.bytes_per_pixel as usize));
-                let row_len = (w as usize).saturating_mul(self.bytes_per_pixel as usize);
+            // Pre-calculate values outside the loop
+            let x0_usize = x0 as usize;
+            let y0_u32 = y0 as u32;
+            let w_usize = w as usize;
+            let h_usize = h as usize;
+            let stride_usize = stride as usize;
+            let bytes_per_pixel_usize = self.bytes_per_pixel as usize;
+            let row_len = w_usize.saturating_mul(bytes_per_pixel_usize);
+
+            for yy in 0..h_usize {
+                let sy = y0_u32.saturating_add(yy as u32);
+                let row_off = sy as usize * stride_usize + x0_usize * bytes_per_pixel_usize;
                 if row_off.saturating_add(row_len) > backbuffer_len {
                     continue;
                 }
@@ -1098,6 +1116,10 @@ impl Compositor {
             // Only change focus if the window accepts focus
             // Taskbar and Desktop windows are global UI elements that don't steal focus
             if self.window_manager.window_accepts_focus(win_id) {
+                // Raise window to top (with type-based Z-order) before focusing
+                self.window_manager.raise_to_top_with_type(win_id);
+
+                // Set focus
                 self.window_manager.set_focus(win_id);
 
                 // Broadcast focus change event to all clients
@@ -1929,14 +1951,30 @@ impl Compositor {
                         }
                     }
                 }
+
+                // Get the currently focused window before changing focus
+                let old_focused_rect = self
+                    .window_manager
+                    .get_focused_window_id()
+                    .and_then(|id| self.window_manager.get_window(id))
+                    .map(|w| (w.x, w.y, w.width, w.height));
+
                 // Focus and raise the window
                 self.window_manager.focus_window(window_id);
-                self.window_manager.raise_to_top(window_id);
+                self.window_manager.raise_to_top_with_type(window_id);
+
+                // Mark old focused window area as dirty (to redraw titlebar without focus)
+                if let Some(r) = old_focused_rect {
+                    self.add_pending_damage(r);
+                }
+
+                // Mark newly focused window area as dirty (to redraw titlebar with focus)
+                if let Some(w) = self.window_manager.get_window(window_id) {
+                    self.add_pending_damage((w.x, w.y, w.width, w.height));
+                }
 
                 // Broadcast focus change event to all clients
                 self.broadcast_focus_change(window_id);
-
-                self.full_redraw_needed = true;
             }
             IpcEvent::SetWindowType {
                 window_id,
@@ -1987,6 +2025,20 @@ impl Compositor {
                 );
                 let opacity_f = (opacity as f32) / 255.0;
                 if self.window_manager.set_window_opacity(window_id, opacity_f) {
+                    if let Some(w) = self.window_manager.get_window(window_id) {
+                        self.add_pending_damage((w.x, w.y, w.width, w.height));
+                    }
+                }
+            }
+            IpcEvent::SetWindowHasAlphaContent { window_id, has_alpha } => {
+                println!(
+                    "[Compositor] Setting window #{} has_alpha_content to {}",
+                    window_id, has_alpha
+                );
+                if self
+                    .window_manager
+                    .set_window_has_alpha_content(window_id, has_alpha)
+                {
                     if let Some(w) = self.window_manager.get_window(window_id) {
                         self.add_pending_damage((w.x, w.y, w.width, w.height));
                     }

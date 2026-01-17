@@ -529,6 +529,30 @@ impl Connection {
         .map_err(|_| Error::SendFailed)
     }
 
+    /// Set whether window content contains alpha channel (semi-transparent pixels).
+    ///
+    /// This is separate from window opacity - this controls whether pixel alpha
+    /// values in the window buffer should be respected during composition.
+    ///
+    /// - false: Window content is fully opaque, use fast copy path (default)
+    /// - true: Window content has semi-transparent pixels, use alpha blending
+    pub fn set_window_has_alpha_content(
+        &mut self,
+        surface_id: u32,
+        has_alpha: bool,
+    ) -> Result<(), Error> {
+        if self.surfaces.get(&surface_id).is_none() {
+            return Err(Error::SurfaceNotFound);
+        }
+        let payload = protocol::payload_set_window_has_alpha_content(surface_id, has_alpha);
+        write_frame(
+            &mut self.socket,
+            protocol::client_msg::SET_WINDOW_HAS_ALPHA_CONTENT,
+            &payload,
+        )
+        .map_err(|_| Error::SendFailed)
+    }
+
     /// Set the workarea (usable screen area) for the window manager.
     ///
     /// This informs the window manager about the area where normal windows

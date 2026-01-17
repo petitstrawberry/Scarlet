@@ -1105,6 +1105,13 @@ fn client_thread_main(client_id: usize, mut socket: Socket) {
                 );
                 push_ipc_event(IpcEvent::SetWindowOpacity { window_id, opacity });
             }
+            Ok(ClientMessageRef::SetWindowHasAlphaContent { window_id, has_alpha }) => {
+                println!(
+                    "[ClientThread {}] SetWindowHasAlphaContent: window_id={} has_alpha={}",
+                    client_id, window_id, has_alpha
+                );
+                push_ipc_event(IpcEvent::SetWindowHasAlphaContent { window_id, has_alpha });
+            }
             Ok(ClientMessageRef::SetWorkarea {
                 x,
                 y,
@@ -1287,6 +1294,9 @@ pub enum IpcEvent {
 
     /// Set window opacity
     SetWindowOpacity { window_id: u32, opacity: u8 },
+
+    /// Set whether window content contains alpha channel
+    SetWindowHasAlphaContent { window_id: u32, has_alpha: bool },
 
     /// Set the workarea (usable screen area) for the window manager
     SetWorkarea {

@@ -29,7 +29,6 @@
 use scarlet_std::sync::Mutex;
 use scarlet_std::vec::Vec;
 use scarlet_std::boxed::Box;
-use scarlet_std::println;
 use core::ops::Deref;
 use core::fmt;
 use core::sync::atomic::{AtomicBool, Ordering};
@@ -39,11 +38,6 @@ extern crate alloc;
 use alloc::sync::{Arc, Weak};
 
 /// Global view refresh coordinator
-/// 
-/// This tracks which views need to be refreshed when state changes.
-/// Views register themselves with their associated state, and when
-/// state changes, only the registered views are marked for redraw.
-static VIEW_REFRESH_QUEUE: Mutex<Vec<ViewRefreshHandle>> = Mutex::new(Vec::new());
 
 /// Handle to request a view refresh
 #[derive(Clone)]
@@ -118,32 +112,37 @@ impl<T> StateInner<T> {
     }
 
     fn notify_observers(&self) {
-        // Get callbacks and notify them outside the State lock
+        // Early return if no view handles to notify
+        let view_count = {
+            let handles = self.view_handles.lock();
+            handles.len()
+        };
+        if view_count == 0 {
+            // Still need to call callbacks even if no view handles
+        } else {
+            // Mark all subscribed view handles as dirty, cleaning up dropped ones
+            {
+                let mut view_handles = self.view_handles.lock();
+                view_handles.retain(|weak| {
+                    if let Some(strong) = weak.upgrade() {
+                        strong.store(true, Ordering::SeqCst);
+                        true
+                    } else {
+                        false
+                    }
+                });
+            }
+        }
+
+        // Get callbacks - pre-allocate to avoid reallocation
         let callbacks = {
             let mut cb_lock = self.callbacks.lock();
             cb_lock.retain(|(id, _)| *id != 0); // Clean up removed callbacks
-            // Clone the callback IDs (we can't clone FnMut, so we'll call them under the lock)
-            let ids: Vec<u64> = cb_lock.iter().map(|(id, _)| *id).collect();
+            let cb_count = cb_lock.len();
+            let mut ids = Vec::with_capacity(cb_count);
+            ids.extend(cb_lock.iter().map(|(id, _)| *id));
             ids
         };
-
-        // Mark all subscribed view handles as dirty
-        // Clean up dropped handles
-        {
-            let mut view_handles = self.view_handles.lock();
-            // let view_count_before = view_handles.len();
-            view_handles.retain(|weak| {
-                if let Some(strong) = weak.upgrade() {
-                    strong.store(true, Ordering::SeqCst);
-                    true
-                } else {
-                    false
-                }
-            });
-            // let view_count_after = view_handles.len();
-            // println!("[State] notify_observers: {} view handles marked dirty (retained {} from {})",
-            //          view_count_after, view_count_after, view_count_before);
-        }
 
         // Call callbacks under their own lock
         let mut cb_lock = self.callbacks.lock();
@@ -255,6 +254,28 @@ impl<T> State<T> {
     /// Set a new value and notify observers
     pub fn set(&self, value: T) {
         self.update(|v| *v = value);
+    }
+
+    /// Set a new value and notify observers only if value changed
+    ///
+    /// This is more efficient than `set()` for types that implement `PartialEq`,
+    /// as it avoids unnecessary view refreshes when the value hasn't changed.
+    pub fn set_optimized(&self, value: T)
+    where
+        T: PartialEq,
+    {
+        let should_notify = {
+            let mut inner = self.inner.lock();
+            let changed = inner.value != value;
+            if changed {
+                inner.value = value;
+            }
+            changed
+        };
+
+        if should_notify {
+            self.inner.lock().notify_observers();
+        }
     }
 
     /// Register a callback to be called when the state changes
@@ -599,16 +620,3 @@ impl<T: Clone> Observable<T> for State<T> {
     }
 }
 
-// ============================================================================
-// Process view refresh queue
-// ============================================================================
-
-/// Check if there are any pending view refreshes
-pub fn has_pending_refreshes() -> bool {
-    !VIEW_REFRESH_QUEUE.lock().is_empty()
-}
-
-/// Get and clear all pending refresh handles
-pub fn take_pending_refreshes() -> Vec<ViewRefreshHandle> {
-    core::mem::take(&mut *VIEW_REFRESH_QUEUE.lock())
-}

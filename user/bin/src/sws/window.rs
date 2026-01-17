@@ -121,6 +121,14 @@ pub struct Window {
     pub opacity: f32,
     /// Whether the window can be resized by the user via interactive resize
     pub resizable: bool,
+    /// Whether the window content contains alpha channel (semi-transparent pixels)
+    ///
+    /// This is separate from window.opacity - this controls whether pixel alpha
+    /// values in the window buffer should be respected during composition.
+    ///
+    /// - false: Window content is fully opaque, use fast copy path (default)
+    /// - true: Window content has semi-transparent pixels, use alpha blending
+    pub has_alpha_content: bool,
 }
 
 #[allow(dead_code)]
@@ -150,6 +158,7 @@ impl Window {
             saved_geometry: None,
             opacity: 1.0,
             resizable: true, // Default to resizable
+            has_alpha_content: false, // Default to opaque content
         }
     }
 
@@ -182,6 +191,7 @@ impl Window {
             saved_geometry: None,
             opacity: 1.0,
             resizable: true, // Default to resizable
+            has_alpha_content: false, // Default to opaque content
         }
     }
 
@@ -240,6 +250,7 @@ impl Window {
             saved_geometry: None,
             opacity: 1.0,
             resizable: true, // Default to resizable
+            has_alpha_content: false, // Default to opaque content
         })
     }
 
@@ -414,6 +425,7 @@ impl WindowManager {
             saved_geometry: None,
             opacity: 1.0,
             resizable: true, // Default to resizable
+            has_alpha_content: false, // Default to opaque content
         };
         self.windows.push(window);
 
@@ -550,7 +562,7 @@ impl WindowManager {
         // Print current Z-order
         print!("[WindowManager] Current Z-order (bottom to top): ");
         for w in &self.windows {
-            print!("#{} ", w.id);
+            print!("#{}({:?}) ", w.id, w.window_type);
         }
         println!();
     }
@@ -911,6 +923,23 @@ impl WindowManager {
         }
     }
 
+    /// Set whether window content contains alpha channel (semi-transparent pixels)
+    ///
+    /// This is separate from window.opacity - this controls whether pixel alpha
+    /// values in the window buffer should be respected during composition.
+    pub fn set_window_has_alpha_content(&mut self, id: WindowId, has_alpha: bool) -> bool {
+        if let Some(w) = self.get_window_mut(id) {
+            w.has_alpha_content = has_alpha;
+            println!(
+                "[WindowManager] Window #{} has_alpha_content set to {}",
+                id, has_alpha
+            );
+            true
+        } else {
+            false
+        }
+    }
+
     /// Raise window to top, respecting window types
     /// Desktop < Normal < Taskbar < AlwaysOnTop
     pub fn raise_to_top_with_type(&mut self, id: WindowId) {
@@ -990,7 +1019,7 @@ impl WindowManager {
         // Print current Z-order
         print!("[WindowManager] Current Z-order (bottom to top): ");
         for w in &self.windows {
-            print!("#{} ", w.id);
+            print!("#{}({:?}) ", w.id, w.window_type);
         }
         println!();
     }
