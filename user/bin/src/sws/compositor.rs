@@ -859,15 +859,12 @@ impl Compositor {
 
         // Fast path for opaque windows: copy row by row
         if !has_transparency {
-            let row_width = ((x1 - x0) * 4) as usize;
             for sy in y0..y1 {
                 let wy = (sy - win_y0) as u32;
                 let screen_row_off = (sy as u32 * stride) as usize;
-                let window_row_off = (wy * window.width * 4) as usize;
-
                 for sx in x0..x1 {
                     let wx = (sx - win_x0) as u32;
-                    let window_offset = window_row_off + (wx * 4) as usize;
+                    let window_offset = ((wy * window.width + wx) * 4) as usize;
                     let screen_offset = screen_row_off + (sx as u32 * bytes_per_pixel) as usize;
 
                     if window_offset + 4 <= window_buffer.len()
