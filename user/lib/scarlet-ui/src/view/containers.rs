@@ -753,6 +753,16 @@ pub struct ScrollView {
     drag_start_scroll_x: i32,
     // Scroll speed multiplier for mouse wheel
     wheel_scroll_speed: i32,
+    // Cached scrollbar calculations
+    cached_vertical_thumb: Option<(u32, i32)>,
+    cached_max_scroll_y: i32,
+    cached_vertical_track_height: u32,
+    cached_horizontal_thumb: Option<(u32, i32)>,
+    cached_max_scroll_x: i32,
+    cached_horizontal_track_width: u32,
+    cached_content_width: u32,
+    cached_content_height: u32,
+    cache_valid: bool,
 }
 
 impl ScrollView {
@@ -777,6 +787,15 @@ impl ScrollView {
             drag_start_scroll_y: 0,
             drag_start_scroll_x: 0,
             wheel_scroll_speed: 30,
+            cached_vertical_thumb: None,
+            cached_max_scroll_y: 0,
+            cached_vertical_track_height: 0,
+            cached_horizontal_thumb: None,
+            cached_max_scroll_x: 0,
+            cached_horizontal_track_width: 0,
+            cached_content_width: 0,
+            cached_content_height: 0,
+            cache_valid: false,
         }
     }
 
@@ -816,6 +835,85 @@ impl ScrollView {
         self
     }
 
+    /// Invalidate cached scrollbar calculations
+    fn invalidate_cache(&mut self) {
+        self.cache_valid = false;
+    }
+
+    /// Recalculate cached scrollbar values
+    fn recalculate_cache(&mut self) {
+        if self.cache_valid {
+            return;
+        }
+
+        // Calculate max scroll values
+        self.cached_max_scroll_y = (self.child_size.height as i32 - self.cached_size.height as i32).max(0);
+        self.cached_max_scroll_x = (self.child_size.width as i32 - self.cached_size.width as i32).max(0);
+
+        // Calculate content dimensions (subtract scrollbar space if visible)
+        self.cached_content_width = if self.shows_vertical_scrollbar
+            && self.child_size.height > self.cached_size.height {
+            self.cached_size.width.saturating_sub(self.scrollbar_width)
+        } else {
+            self.cached_size.width
+        };
+
+        self.cached_content_height = if self.shows_horizontal_scrollbar
+            && self.child_size.width > self.cached_size.width {
+            self.cached_size.height.saturating_sub(self.scrollbar_width)
+        } else {
+            self.cached_size.height
+        };
+
+        // Calculate vertical scrollbar thumb
+        self.cached_vertical_thumb = if self.shows_vertical_scrollbar
+            && self.child_size.height > self.cached_size.height {
+
+            let track_height = self.cached_content_height;
+            let thumb_height = ((self.cached_size.height as f32 / self.child_size.height as f32)
+                * track_height as f32) as u32;
+            let thumb_height = thumb_height.max(20); // Minimum thumb size
+
+            let thumb_y = if self.cached_max_scroll_y > 0 {
+                ((self.scroll_offset_y as f32 / self.cached_max_scroll_y as f32)
+                    * (track_height - thumb_height) as f32) as i32
+            } else {
+                0
+            };
+
+            self.cached_vertical_track_height = track_height;
+            Some((thumb_height, thumb_y))
+        } else {
+            self.cached_vertical_track_height = self.cached_content_height;
+            None
+        };
+
+        // Calculate horizontal scrollbar thumb
+        self.cached_horizontal_thumb = if self.shows_horizontal_scrollbar
+            && self.child_size.width > self.cached_size.width {
+
+            let track_width = self.cached_content_width;
+            let thumb_width = ((self.cached_size.width as f32 / self.child_size.width as f32)
+                * track_width as f32) as u32;
+            let thumb_width = thumb_width.max(20); // Minimum thumb size
+
+            let thumb_x = if self.cached_max_scroll_x > 0 {
+                ((self.scroll_offset_x as f32 / self.cached_max_scroll_x as f32)
+                    * (track_width - thumb_width) as f32) as i32
+            } else {
+                0
+            };
+
+            self.cached_horizontal_track_width = track_width;
+            Some((thumb_width, thumb_x))
+        } else {
+            self.cached_horizontal_track_width = self.cached_content_width;
+            None
+        };
+
+        self.cache_valid = true;
+    }
+
     /// Get current vertical scroll offset
     pub fn scroll_offset_y(&self) -> i32 {
         self.scroll_offset_y
@@ -828,21 +926,23 @@ impl ScrollView {
 
     /// Set vertical scroll offset (clamped to valid range)
     pub fn set_scroll_offset_y(&mut self, offset: i32) {
-        let max_offset = (self.child_size.height as i32 - self.cached_size.height as i32).max(0);
-        let new_offset = offset.clamp(0, max_offset);
+        self.recalculate_cache();
+        let new_offset = offset.clamp(0, self.cached_max_scroll_y);
         if new_offset != self.scroll_offset_y {
             self.scroll_offset_y = new_offset;
             self.needs_redraw = true;
+            self.invalidate_cache();
         }
     }
 
     /// Set horizontal scroll offset (clamped to valid range)
     pub fn set_scroll_offset_x(&mut self, offset: i32) {
-        let max_offset = (self.child_size.width as i32 - self.cached_size.width as i32).max(0);
-        let new_offset = offset.clamp(0, max_offset);
+        self.recalculate_cache();
+        let new_offset = offset.clamp(0, self.cached_max_scroll_x);
         if new_offset != self.scroll_offset_x {
             self.scroll_offset_x = new_offset;
             self.needs_redraw = true;
+            self.invalidate_cache();
         }
     }
 
@@ -856,48 +956,14 @@ impl ScrollView {
         self.set_scroll_offset_x(self.scroll_offset_x + delta);
     }
 
-    /// Calculate vertical scrollbar thumb size and position
+    /// Get vertical scrollbar thumb size and position (cached)
     fn vertical_scrollbar_thumb(&self) -> Option<(u32, i32)> {
-        if !self.shows_vertical_scrollbar || self.child_size.height <= self.cached_size.height {
-            return None;
-        }
-
-        let track_height = self.cached_size.height;
-        let thumb_height = ((self.cached_size.height as f32 / self.child_size.height as f32)
-            * track_height as f32) as u32;
-        let thumb_height = thumb_height.max(20); // Minimum thumb size
-
-        let max_scroll = self.child_size.height as i32 - self.cached_size.height as i32;
-        let thumb_y = if max_scroll > 0 {
-            ((self.scroll_offset_y as f32 / max_scroll as f32)
-                * (track_height - thumb_height) as f32) as i32
-        } else {
-            0
-        };
-
-        Some((thumb_height, thumb_y))
+        self.cached_vertical_thumb
     }
 
-    /// Calculate horizontal scrollbar thumb size and position
+    /// Get horizontal scrollbar thumb size and position (cached)
     fn horizontal_scrollbar_thumb(&self) -> Option<(u32, i32)> {
-        if !self.shows_horizontal_scrollbar || self.child_size.width <= self.cached_size.width {
-            return None;
-        }
-
-        let track_width = self.cached_size.width;
-        let thumb_width = ((self.cached_size.width as f32 / self.child_size.width as f32)
-            * track_width as f32) as u32;
-        let thumb_width = thumb_width.max(20); // Minimum thumb size
-
-        let max_scroll = self.child_size.width as i32 - self.cached_size.width as i32;
-        let thumb_x = if max_scroll > 0 {
-            ((self.scroll_offset_x as f32 / max_scroll as f32)
-                * (track_width - thumb_width) as f32) as i32
-        } else {
-            0
-        };
-
-        Some((thumb_width, thumb_x))
+        self.cached_horizontal_thumb
     }
 
     /// Check if a point is on the vertical scrollbar thumb
@@ -960,6 +1026,10 @@ impl View for ScrollView {
         // ScrollView takes all available space
         // Content can be larger (scrollable) or smaller (centered)
         self.cached_size = available;
+
+        // Invalidate cache since sizes changed
+        self.invalidate_cache();
+
         available
     }
 
@@ -971,21 +1041,6 @@ impl View for ScrollView {
         // Note: Clipping not yet available in Canvas, draw without clipping
         // TODO: Add clipping support to Canvas for proper scroll behavior
 
-        // Calculate content size (subtract scrollbar space if visible)
-        let content_width = if self.shows_vertical_scrollbar
-            && self.child_size.height > self.cached_size.height {
-            self.cached_size.width.saturating_sub(self.scrollbar_width)
-        } else {
-            self.cached_size.width
-        };
-
-        let content_height = if self.shows_horizontal_scrollbar
-            && self.child_size.width > self.cached_size.width {
-            self.cached_size.height.saturating_sub(self.scrollbar_width)
-        } else {
-            self.cached_size.height
-        };
-
         // Draw child with scroll offset
         let child_frame = Rect::new(
             frame.x - self.scroll_offset_x,
@@ -996,10 +1051,10 @@ impl View for ScrollView {
         self.child.draw(canvas, child_frame);
 
         // Draw vertical scrollbar if needed
-        if let Some((thumb_height, thumb_y)) = self.vertical_scrollbar_thumb() {
+        if let Some((thumb_height, thumb_y)) = self.cached_vertical_thumb {
             let scrollbar_x = frame.x + frame.width as i32 - self.scrollbar_width as i32;
             let scrollbar_y = frame.y;
-            let scrollbar_height = content_height;
+            let scrollbar_height = self.cached_content_height;
 
             // Draw scrollbar track
             canvas.fill_rect(
@@ -1021,10 +1076,10 @@ impl View for ScrollView {
         }
 
         // Draw horizontal scrollbar if needed
-        if let Some((thumb_width, thumb_x)) = self.horizontal_scrollbar_thumb() {
+        if let Some((thumb_width, thumb_x)) = self.cached_horizontal_thumb {
             let scrollbar_x = frame.x;
             let scrollbar_y = frame.y + frame.height as i32 - self.scrollbar_width as i32;
-            let scrollbar_width = content_width;
+            let scrollbar_width = self.cached_content_width;
 
             // Draw scrollbar track
             canvas.fill_rect(
@@ -1101,16 +1156,14 @@ impl View for ScrollView {
 
                 // Check if clicking on vertical scrollbar track (jump to position)
                 if self.is_on_vertical_track(frame, x, y) {
-                    if let Some((thumb_height, _)) = self.vertical_scrollbar_thumb() {
-                        let track_height = self.cached_size.height;
+                    if let Some((thumb_height, _)) = self.cached_vertical_thumb {
                         let click_y = y - frame.y;
-                        let max_scroll = self.child_size.height as i32 - self.cached_size.height as i32;
 
-                        if max_scroll > 0 {
+                        if self.cached_max_scroll_y > 0 {
                             // Calculate new scroll position based on click location
                             let new_scroll = ((click_y - thumb_height as i32 / 2) as f32
-                                / (track_height - thumb_height) as f32
-                                * max_scroll as f32) as i32;
+                                / (self.cached_vertical_track_height - thumb_height) as f32
+                                * self.cached_max_scroll_y as f32) as i32;
                             self.set_scroll_offset_y(new_scroll);
                             event.stop_propagation();
                             return true;
@@ -1120,15 +1173,13 @@ impl View for ScrollView {
 
                 // Check if clicking on horizontal scrollbar track (jump to position)
                 if self.is_on_horizontal_track(frame, x, y) {
-                    if let Some((thumb_width, _)) = self.horizontal_scrollbar_thumb() {
-                        let track_width = self.cached_size.width;
+                    if let Some((thumb_width, _)) = self.cached_horizontal_thumb {
                         let click_x = x - frame.x;
-                        let max_scroll = self.child_size.width as i32 - self.cached_size.width as i32;
 
-                        if max_scroll > 0 {
+                        if self.cached_max_scroll_x > 0 {
                             let new_scroll = ((click_x - thumb_width as i32 / 2) as f32
-                                / (track_width - thumb_width) as f32
-                                * max_scroll as f32) as i32;
+                                / (self.cached_horizontal_track_width - thumb_width) as f32
+                                * self.cached_max_scroll_x as f32) as i32;
                             self.set_scroll_offset_x(new_scroll);
                             event.stop_propagation();
                             return true;
@@ -1165,13 +1216,12 @@ impl View for ScrollView {
                 // Handle dragging
                 if self.dragging_vertical_thumb {
                     let delta_y = y - self.drag_start_y;
-                    if let Some((thumb_height, _)) = self.vertical_scrollbar_thumb() {
-                        let track_height = self.cached_size.height;
-                        let max_scroll = self.child_size.height as i32 - self.cached_size.height as i32;
-
-                        if max_scroll > 0 && track_height > thumb_height {
-                            let scroll_delta = (delta_y as f32 / (track_height - thumb_height) as f32
-                                * max_scroll as f32) as i32;
+                    if let Some((thumb_height, _)) = self.cached_vertical_thumb {
+                        if self.cached_max_scroll_y > 0
+                            && self.cached_vertical_track_height > thumb_height {
+                            let scroll_delta = (delta_y as f32
+                                / (self.cached_vertical_track_height - thumb_height) as f32
+                                * self.cached_max_scroll_y as f32) as i32;
                             self.set_scroll_offset_y(self.drag_start_scroll_y + scroll_delta);
                             event.stop_propagation();
                             return true;
@@ -1181,13 +1231,12 @@ impl View for ScrollView {
 
                 if self.dragging_horizontal_thumb {
                     let delta_x = x - self.drag_start_x;
-                    if let Some((thumb_width, _)) = self.horizontal_scrollbar_thumb() {
-                        let track_width = self.cached_size.width;
-                        let max_scroll = self.child_size.width as i32 - self.cached_size.width as i32;
-
-                        if max_scroll > 0 && track_width > thumb_width {
-                            let scroll_delta = (delta_x as f32 / (track_width - thumb_width) as f32
-                                * max_scroll as f32) as i32;
+                    if let Some((thumb_width, _)) = self.cached_horizontal_thumb {
+                        if self.cached_max_scroll_x > 0
+                            && self.cached_horizontal_track_width > thumb_width {
+                            let scroll_delta = (delta_x as f32
+                                / (self.cached_horizontal_track_width - thumb_width) as f32
+                                * self.cached_max_scroll_x as f32) as i32;
                             self.set_scroll_offset_x(self.drag_start_scroll_x + scroll_delta);
                             event.stop_propagation();
                             return true;
