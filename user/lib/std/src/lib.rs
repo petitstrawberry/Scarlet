@@ -83,7 +83,6 @@ mod alloc_exports {
 
     pub use alloc::borrow;
     pub use alloc::boxed;
-    pub use alloc::collections;
     pub use alloc::fmt;
     pub use alloc::format;
     pub use alloc::rc;
