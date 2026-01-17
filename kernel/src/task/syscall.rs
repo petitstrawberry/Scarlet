@@ -505,6 +505,31 @@ pub fn sys_yield(trapframe: &mut Trapframe) -> usize {
     0
 }
 
+/// Exit all tasks in the thread group
+///
+/// This system call terminates all tasks with the same TGID (thread group).
+/// It is similar to Linux's exit_group system call and is the proper way
+/// for multi-threaded processes to exit.
+///
+/// # Arguments
+/// * `trapframe.arg(0)` - Exit status code
+///
+/// # Returns
+/// This function does not return on success (all tasks are terminated).
+/// Returns `usize::MAX` (-1) on error.
+///
+/// # Behavior
+/// - Terminates all tasks with the same TGID as the caller
+/// - The calling task is set to Zombie/Terminated
+/// - Other tasks in the group are forcefully terminated
+pub fn sys_exit_group(trapframe: &mut Trapframe) -> usize {
+    let task = mytask().unwrap();
+    task.vcpu.store(trapframe);
+    let exit_code = trapframe.get_arg(0) as i32;
+    task.exit_group(exit_code);
+    usize::MAX // -1 (If exit_group is successful, this will not be reached)
+}
+
 /// Register an ABI zone for a specific memory range
 ///
 /// # Arguments

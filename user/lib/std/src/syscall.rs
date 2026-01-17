@@ -21,6 +21,8 @@ pub enum Syscall {
 
     Yield = 21,
 
+    ExitGroup = 23, // Exit all tasks in thread group
+
     // ABI Zone Management
     RegisterAbiZone = 90,
     UnregisterAbiZone = 91,

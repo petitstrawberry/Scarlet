@@ -249,6 +249,12 @@ pub struct Task {
     parent_id: Option<usize>, /* Parent task ID */
     children: Vec<usize>,     /* List of child task IDs */
     exit_status: Option<i32>, /* Exit code (for monitoring child task termination) */
+    /// Thread Group ID (TGID)
+    ///
+    /// Tasks created with CLONE_VM flag share the same TGID as their parent.
+    /// This identifies the thread group (process) for exit_group semantics.
+    /// For standalone tasks (no CLONE_VM), TGID equals the task ID.
+    tgid: usize,
 
     /// Default ABI for this task. Determined from ELF OSABI etc.
     /// Wrapped in Option to allow temporary take() during callbacks
@@ -313,6 +319,7 @@ pub enum CloneFlagsDef {
     Vm = 0b00000001,    // Clone the VM
     Fs = 0b00000010,    // Clone the filesystem
     Files = 0b00000100, // Clone the file descriptors
+    Thread = 0b00001000, // Join thread group (share TGID) - Linux CLONE_THREAD semantics
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -414,6 +421,7 @@ impl Task {
             parent_id: None,
             children: Vec::new(),
             exit_status: None,
+            tgid: 0, // Will be set to id when task is added to scheduler
             default_abi: Some(Box::new(ScarletAbi::default())), // Default ABI
             abi_zones: BTreeMap::new(),
             vfs: None,
@@ -467,6 +475,11 @@ impl Task {
     /// Set the task ID (used by TaskPool during task addition)
     pub fn set_id(&mut self, id: usize) {
         self.id = id;
+        // For new tasks, initialize TGID to equal ID (thread group leader)
+        // This will be overridden in clone_task for CLONE_VM threads
+        if self.tgid == 0 {
+            self.tgid = id;
+        }
     }
 
     /// Set the namespace ID (used by TaskPool during task addition)
@@ -513,6 +526,29 @@ impl Task {
         self.namespace = ns;
         // Allocate a new namespace-local ID (and register translation mapping)
         self.namespace_id = self.namespace.allocate_task_id_for(self.id);
+    }
+
+    /// Get the Thread Group ID (TGID)
+    ///
+    /// The TGID identifies the thread group (process). For tasks created with
+    /// CLONE_VM (threads), all threads in the group share the same TGID.
+    /// For standalone tasks (no CLONE_VM), TGID equals the task ID.
+    ///
+    /// # Returns
+    /// The thread group ID
+    pub fn get_tgid(&self) -> usize {
+        self.tgid
+    }
+
+    /// Set the Thread Group ID (TGID)
+    ///
+    /// This is used internally when cloning tasks with CLONE_VM to make
+    /// the child thread share the parent's thread group.
+    ///
+    /// # Arguments
+    /// * `tgid` - New thread group ID
+    pub fn set_tgid(&mut self, tgid: usize) {
+        self.tgid = tgid;
     }
 
     /// Set the task state
@@ -1262,6 +1298,14 @@ impl Task {
         //   self.add_child(child.get_id());
         // after adding the child to the scheduler.
 
+        // Set TGID: if CLONE_THREAD, share parent's TGID (join thread group)
+        // Otherwise, child becomes a new thread group leader (TGID will be set to its own ID)
+        // This matches Linux CLONE_THREAD semantics
+        if flags.is_set(CloneFlagsDef::Thread) {
+            // Thread: share parent's TGID (join existing thread group)
+            child.tgid = self.tgid;
+        } // else: new process, TGID will be set to child's ID in set_id()
+
         Ok(child)
     }
 
@@ -1309,6 +1353,59 @@ impl Task {
         if let Some(current_task) = mytask() {
             get_scheduler().schedule(current_task.get_trapframe());
         }
+    }
+
+    /// Exit all tasks in the thread group
+    ///
+    /// This terminates all tasks with the same TGID (thread group).
+    /// This is similar to Linux's exit_group system call.
+    ///
+    /// # Arguments
+    /// * `status` - The exit status for all tasks in the group
+    ///
+    /// # Behavior
+    /// - Terminates all tasks with the same TGID
+    /// - The calling task is set to Zombie/Terminated
+    /// - Other tasks in the group are forcefully terminated
+    pub fn exit_group(&mut self, status: i32) {
+        let tgid = self.tgid;
+        let my_id = self.id;
+
+        // Get all task IDs in the system
+        let scheduler = get_scheduler();
+        let all_task_ids = scheduler.get_all_task_ids();
+
+        // Terminate all tasks with the same TGID (except self)
+        for task_id in all_task_ids {
+            if task_id == my_id {
+                continue; // Skip self
+            }
+
+            if let Some(task) = scheduler.get_task_by_id(task_id) {
+                if task.get_tgid() == tgid {
+                    // Terminate this thread group member
+                    crate::println!(
+                        "[exit_group] Task {} terminating sibling task {} (TGD={})",
+                        my_id,
+                        task_id,
+                        tgid
+                    );
+                    // Set state to Terminated directly (bypass normal exit)
+                    // Use unsafe to modify state through immutable reference
+                    // This is safe because we're in a termination context
+                    let task_ptr = task as *const Task as *mut Task;
+                    unsafe {
+                        (*task_ptr).state = TaskState::Terminated;
+                        (*task_ptr).exit_status = Some(status);
+                        // Close handles to prevent resource leaks
+                        (*task_ptr).handle_table.close_all();
+                    }
+                }
+            }
+        }
+
+        // Now exit the current task normally
+        self.exit(status);
     }
 
     /// Wait for a child task to exit and collect its status

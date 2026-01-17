@@ -89,11 +89,12 @@ where
     // Leak stack (child thread will use it, freed on thread exit)
     core::mem::forget(stack);
 
-    // Set up clone flags for thread creation (share VM, FS, Files)
+    // Set up clone flags for thread creation (share VM, FS, Files, Thread group)
     let mut flags = CloneFlags::new();
-    flags.set(CloneFlagsDef::Vm);
-    flags.set(CloneFlagsDef::Fs);
-    flags.set(CloneFlagsDef::Files);
+    flags.set(CloneFlagsDef::Thread); // Join parent's thread group (share TGID)
+    flags.set(CloneFlagsDef::Vm);     // Share address space
+    flags.set(CloneFlagsDef::Fs);     // Share filesystem context
+    flags.set(CloneFlagsDef::Files);  // Share file descriptors
 
     // Use a typed trampoline that knows about F
     // Clone with: flags, stack, trampoline function, closure pointer

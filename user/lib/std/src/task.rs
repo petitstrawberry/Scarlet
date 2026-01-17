@@ -10,6 +10,7 @@ pub enum CloneFlagsDef {
     Vm = 0b00000001,    // Clone the VM
     Fs = 0b00000010,    // Clone the filesystem
     Files = 0b00000100, // Clone the file descriptors
+    Thread = 0b00001000, // Join thread group (share TGID) - Linux CLONE_THREAD semantics
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -76,13 +77,97 @@ pub fn fork() -> i32 {
     clone(clone_flags)
 }
 
-/// Exits the current process.
+/// Exits the current process (all threads).
+///
+/// This function terminates the entire process, including all threads.
+/// This matches the behavior of Rust's `std::process::exit()` and is the
+/// standard way to exit a multi-threaded program.
 ///
 /// # Arguments
 /// * `code` - Exit code
+///
+/// # Behavior
+/// - Terminates all tasks with the same TGID (entire process)
+/// - This is the equivalent of calling `exit_group()`
+/// - All threads in the process are terminated
+///
+/// # Example
+/// ```rust
+/// use std::task;
+/// use std::thread;
+///
+/// thread::spawn(|| {
+///     loop {} // This thread will be terminated
+/// });
+///
+/// task::exit(0); // Terminates entire process
+/// ```
 pub fn exit(code: i32) -> ! {
-    syscall1(Syscall::Exit, code as usize);
+    syscall1(Syscall::ExitGroup, code as usize);
     unreachable!("exit syscall should not return");
+}
+
+/// Exits only the current thread.
+///
+/// This function terminates only the calling thread, not the entire process.
+/// Other threads in the process continue running. Use `exit()` to terminate
+/// the entire process.
+///
+/// # Arguments
+/// * `code` - Exit code (only meaningful if this is the last thread)
+///
+/// # Behavior
+/// - Terminates only the calling thread
+/// - Other threads in the process continue running
+/// - If this is the last thread in the process, the process exits
+///
+/// # Example
+/// ```rust
+/// use std::task;
+/// use std::thread;
+///
+/// thread::spawn(|| {
+///     task::exit_thread(0); // Only this thread exits
+/// });
+///
+/// // Main thread continues running
+/// loop {}
+/// ```
+pub fn exit_thread(code: i32) -> ! {
+    syscall1(Syscall::Exit, code as usize);
+    unreachable!("exit_thread syscall should not return");
+}
+
+/// Exits all tasks in the current thread group
+///
+/// This function terminates all threads (tasks) in the current process/thread group.
+/// This is similar to the Linux exit_group system call and is the proper way
+/// for multi-threaded processes to exit.
+///
+/// # Arguments
+/// * `code` - Exit status code for all threads in the group
+///
+/// # Behavior
+/// - Terminates all tasks with the same TGID as the caller
+/// - The calling task and all sibling threads are terminated
+/// - This function does not return on success
+///
+/// # Example
+/// ```rust
+/// use std::task;
+/// use std::thread;
+///
+/// thread::spawn(|| {
+///     // This thread will be terminated when main calls exit_group
+///     loop {}
+/// });
+///
+/// // This will terminate both main and the spawned thread
+/// task::exit_group(0);
+/// ```
+pub fn exit_group(code: i32) -> ! {
+    syscall1(Syscall::ExitGroup, code as usize);
+    unreachable!("exit_group syscall should not return");
 }
 
 /// Returns the current process ID.

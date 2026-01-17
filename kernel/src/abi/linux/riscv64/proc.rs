@@ -513,6 +513,9 @@ pub fn sys_clone(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize 
     if (flags & CLONE_FILES) != 0 {
         cflags.set(crate::task::CloneFlagsDef::Files);
     }
+    if (flags & CLONE_THREAD) != 0 {
+        cflags.set(crate::task::CloneFlagsDef::Thread);
+    }
 
     let ret = match parent_task.clone_task(cflags) {
         Ok(mut child_task) => {
