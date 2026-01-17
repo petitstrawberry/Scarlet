@@ -4,7 +4,8 @@
 //! command line arguments and environment variables in a no_std environment.
 
 use crate::string::ToString;
-use crate::{collections::BTreeMap, string::String, vec::Vec};
+use crate::{string::String, vec::Vec};
+use crate::alloc_exports::collections::BTreeMap;
 use core::sync::atomic::{AtomicBool, Ordering};
 
 static INITIALIZED: AtomicBool = AtomicBool::new(false);

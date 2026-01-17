@@ -3473,6 +3473,7 @@ dependencies = [
 name = "scarlet_std"
 version = "0.15.0"
 dependencies = [
+ "hashbrown 0.15.5",
  "spin",
  "talc",
 ]
