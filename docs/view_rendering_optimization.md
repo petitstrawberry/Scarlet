@@ -70,14 +70,102 @@ While Scarlet currently has small UIs, this will become a bottleneck for complex
 
 ## Architecture
 
+### The `#[view]` Procedural Macro
+
+All views use the `#[view]` attribute to automatically generate boilerplate code:
+
+```rust
+#[view]
+struct Button {
+    text: String,
+}
+```
+
+**Automatically generates:**
+
+1. **View ID field** - Unique identifier for dirty tracking
+2. **Children field** - All views can have children
+3. **Trait implementations** - `View`, `Into<ViewRef>`
+4. **Builder methods** - `child()`, `id()`, `children()`
+
+```rust
+// Expanded code
+struct Button {
+    __view_id: ViewId,           // Auto-generated
+    __children: Vec<ViewRef>,    // Auto-generated
+    text: String,
+}
+
+impl Button {
+    // Auto-generated builder method
+    fn child(mut self, child: impl Into<ViewRef>) -> Self {
+        self.__children.push(child.into());
+        self
+    }
+}
+
+impl View for Button {
+    fn id(&self) -> ViewId {
+        self.__view_id
+    }
+
+    fn children(&self) -> Vec<ViewRef> {
+        self.__children.clone()
+    }
+
+    // Other View methods...
+}
+
+impl Into<ViewRef> for Button {
+    fn into(self) -> ViewRef {
+        Rc::new(RefCell::new(self))
+    }
+}
+```
+
+**Key design decisions:**
+- **All views can have children** - Unified API, no separate "Container" trait
+- **Conversion happens at `.child()` call** - Views are created as raw types, converted when added
+- **Unique IDs assigned at creation** - `ViewId::new()` called in constructor
+
 ### Data Structures
 
 ```rust
+use std::rc::Rc;
+use std::cell::RefCell;
+use std::sync::Mutex;
+
 pub struct Application {
     connection: Connection,
-    windows: Vec<ManagedWindow>,
+    windows: Vec<ViewRef>,  // Windows managed as ViewRef
     dirty_views: HashSet<ViewId>,  // Only dirty view IDs
+    view_registry: HashMap<ViewId, ViewRef>,  // ID to ViewRef mapping
 }
+
+impl Application {
+    // Private constructor
+    fn new() -> Self {
+        // ...
+    }
+
+    // Initialize singleton (call once at startup)
+    pub fn initialize() {
+        // Creates or returns singleton instance
+        Self::instance();
+    }
+
+    // Singleton instance
+    fn instance() -> &'static Mutex<Self> {
+        // ...
+    }
+
+    // Called by views to mark themselves as dirty
+    pub fn mark_dirty(view_id: ViewId) {
+        Self::instance().lock().dirty_views.insert(view_id);
+    }
+}
+
+type ViewRef = Rc<RefCell<dyn View>>;
 
 trait View {
     // Layout: calculate and cache frame
@@ -94,10 +182,14 @@ trait View {
 
     // Event handling
     fn on_event(&mut self, event: &mut Event, frame: Rect) -> bool;
+
+    // Access children
+    fn children(&self) -> Vec<ViewRef>;
 }
 
 struct VStack {
-    children: Vec<(ViewBox, Size)>,
+    __view_id: ViewId,
+    __children: Vec<ViewRef>,  // Children managed as ViewRef
     cached_frame: Rect,  // Cached window-relative coordinates
     cached_size: Size,
 }
@@ -109,21 +201,23 @@ struct VStack {
 impl VStack {
     fn layout(&mut self, origin: Point, available: Size) -> Size {
         let mut y = origin.y;
+        let mut max_width = 0;
 
-        for (child, size) in &mut self.children {
+        for child in &self.children {
             let child_origin = Point::new(origin.x, y);
-            *size = child.layout(child_origin, /* available */);
+            let size = child.borrow_mut().layout(child_origin, available);
             y += size.height;
+            max_width = max_width.max(size.width);
         }
 
         // Cache own frame in window coordinates
         self.cached_frame = Rect::new(
             origin.x,
             origin.y,
-            total_width,
-            total_height
+            max_width,
+            y - origin.y
         );
-        self.cached_size = Size::new(total_width, total_height);
+        self.cached_size = Size::new(max_width, y - origin.y);
 
         self.cached_size
     }
@@ -133,8 +227,8 @@ impl VStack {
     }
 
     fn draw(&self, canvas: &mut Canvas) {
-        for (child, _) in &self.children {
-            child.draw(canvas);  // Child knows its own frame
+        for child in &self.children {
+            child.borrow().draw(canvas);  // Child knows its own frame
         }
     }
 }
@@ -142,18 +236,165 @@ impl VStack {
 
 ## Complete Flow
 
-### Initialization
+### View Creation and Registration
 
 ```
-1. Window creation → surface creation
-2. Initial layout:
-   window.layout(Point(0, 0), Size(width, height))
-     ↓
-   Each view caches its frame:
-   - VStack: cached_frame = (0, 32, 400, 268)
-   - Button: cached_frame = (10, 62, 380, 40)
-   - Label:  cached_frame = (10, 32, 380, 20)
+1. Define views with #[view] attribute
+   ↓
+2. Create view hierarchy (raw types)
+   ↓
+3. Add to Application (converts to ViewRef and registers)
+   ↓
+4. Initial layout (caches frames)
 ```
+
+#### Step 1: Define Views
+
+```rust
+#[view]
+struct Button {
+    text: String,
+    is_pressed: bool,
+}
+
+impl Button {
+    fn new(text: impl Into<String>) -> Self {
+        Self {
+            __view_id: ViewId::new(),  // Auto-generated
+            __children: Vec::new(),     // Auto-generated
+            text: text.into(),
+            is_pressed: false,
+        }
+    }
+
+    fn on_click(mut self, handler: impl Fn() + 'static) -> Self {
+        // Store handler
+        self
+    }
+}
+```
+
+#### Step 2: Build View Hierarchy
+
+```rust
+// All views are raw types at this point
+let button = Button::new("Click")
+    .on_click(|| println!("clicked"));
+
+let label = Label::new("Counter: 0");
+
+let stack = VStack::new()
+    .child(label)          // label → ViewRef converted here
+    .child(button);        // button → ViewRef converted here
+
+// stack: VStack (raw type)
+// stack.__children: [ViewRef(label), ViewRef(button)]
+```
+
+**Key point**: `.child()` converts the argument to `ViewRef` using `Into<ViewRef>`:
+```rust
+impl VStack {
+    fn child(mut self, child: impl Into<ViewRef>) -> Self {
+        self.__children.push(child.into());  // Conversion happens here
+        self
+    }
+}
+```
+
+#### Step 3: Register with Application
+
+```rust
+let window = Window::new("My App", 400, 300)
+    .content(stack);  // stack is still raw type
+
+// add_window converts entire tree to ViewRef and registers
+Application::add_window(window)?;
+```
+
+```rust
+impl Application {
+    fn add_window(window: Window) -> Result<()> {
+        let mut app = Self::instance().lock();
+
+        // Convert root window to ViewRef
+        let window_ref: ViewRef = Rc::new(RefCell::new(window));
+
+        // Register entire tree recursively
+        Self::register_views_recursive(&window_ref);
+
+        app.windows.push(window_ref);
+        Ok(())
+    }
+
+    fn register_views_recursive(view: &ViewRef) {
+        let mut app = Self::instance().lock();
+
+        // Register this view
+        let id = view.borrow().id();
+        app.view_registry.insert(id, view.clone());
+
+        // Recursively register all children
+        for child in view.borrow().children() {
+            Self::register_views_recursive(&child);
+        }
+    }
+}
+```
+
+**After registration:**
+```rust
+Application::instance().lock().view_registry = {
+    window_id -> ViewRef(Window),
+    stack_id -> ViewRef(VStack),
+    label_id -> ViewRef(Label),
+    button_id -> ViewRef(Button),
+}
+```
+
+#### Step 4: Initial Layout
+
+```rust
+// add_window calls layout
+fn add_window(window: Window) -> Result<()> {
+    let mut app = Self::instance().lock();
+    let window_ref = Rc::new(RefCell::new(window));
+    drop(app);  // Release lock before layout
+
+    Self::register_views_recursive(&window_ref);
+
+    // Initial layout to cache frames
+    let size = Size::new(400, 300);
+    window_ref.borrow_mut().layout(Point::new(0, 0), size);
+
+    let mut app = Self::instance().lock();
+    app.windows.push(window_ref);
+    Ok(())
+}
+```
+
+**After layout:**
+```
+Window:   cached_frame = (0, 0, 400, 300)
+  └─ VStack: cached_frame = (0, 32, 400, 268)
+       ├─ Label:  cached_frame = (10, 32, 380, 20)
+       └─ Button: cached_frame = (10, 62, 380, 40)
+```
+
+### Type Conversion Summary
+
+| Stage | Type | Example |
+|-------|------|---------|
+| **Definition** | Raw struct | `Button { ... }` |
+| **Construction** | Raw type | `Button::new("Click")` → `Button` |
+| **`.child()` call** | Parent raw, child → ViewRef | `VStack.child(button)` |
+| **`add_window()`** | Entire tree → ViewRef | `Rc<RefCell<Window>>` |
+| **In registry** | ViewRef | `HashMap<ViewId, ViewRef>` |
+
+**Key insight**: Views are created and manipulated as raw types. Conversion to `ViewRef` only happens:
+1. When adding via `.child()`
+2. When registering with Application
+
+This keeps the API ergonomic (no `Rc<RefCell<>>` noise) while enabling efficient dirty tracking.
 
 ### Event Loop
 
@@ -166,44 +407,98 @@ impl VStack {
    - Convert to InputEvent
    ↓
 3. dispatch_event_to_view()
-   ```rust
-   fn dispatch_event_to_view(view: &mut dyn View, mut event: Event, frame: Rect) {
-       // Find target view using cached frames
-       for (child, child_frame) in view.children() {
-           if child_frame.contains(event.x(), event.y()) {
-               dispatch_event_to_view(child, event, child_frame);
-           }
-       }
-
-       // Bubble phase
-       if view.on_event(&mut event, frame) {
-           view.set_needs_draw();  // Add to dirty set
-           dirty_set.insert(view.id());
-       }
-   }
-   ```
+   - Find target view using cached frames
+   - Call view.on_event()
+   - If event handled, view pushes its ViewId to dirty_views
    ↓
 4. Draw phase
-   ```rust
-   // Iterate dirty set - O(dirty views) not O(all views)!
-   for view_id in &self.dirty_views {
-       if let Some(view) = self.get_view_mut(*view_id) {
-           let frame = view.cached_frame();  // Instant lookup
-
-           canvas.push_clip(frame);
-           view.draw(&mut canvas);  // No frame parameter
-           canvas.pop_clip();
-       }
-   }
-   self.dirty_views.clear();
-   ```
+   - Iterate dirty_views (HashSet<ViewId>)
+   - For each ViewId, lookup ViewRef from view_registry
+   - Draw each view using cached_frame
+   - Clear dirty_views
    ↓
 5. Commit dirty region
-   ```rust
-   let dirty_rect = union_all_frames();  // Union of cached frames
-   connection.commit_region(surface_id, dirty_rect);
-   ```
+   - Union all cached frames of dirty views
+   - Commit to SWS
 ```
+
+#### Detailed Event Dispatch
+
+```rust
+fn dispatch_event_to_view(view: &ViewRef, mut event: Event, frame: Rect) {
+    // Find target using cached frames
+    let target = view.borrow().children().iter().find(|child| {
+        child.borrow().cached_frame().contains(event.x(), event.y())
+    });
+
+    // Recurse to children first
+    if let Some(child) = target {
+        let child_frame = child.borrow().cached_frame();
+        Self::dispatch_event_to_view(child, event, child_frame);
+    }
+
+    // Handle event on this view
+    view.borrow_mut().on_event(&mut event, frame);
+    // View calls Application::mark_dirty() internally if needed
+}
+```
+
+**Note**: `Application` is a singleton. Views can call `Application::mark_dirty(view_id)` directly to request redraw.
+
+#### View-Side Event Handling
+
+```rust
+impl Button {
+    fn on_event(&mut self, event: &mut Event, frame: Rect) -> bool {
+        match event.kind {
+            EventKind::MouseDown { button: MouseButton::Left } if frame.contains(event.x(), event.y()) => {
+                self.is_pressed = true;
+                Application::mark_dirty(self.__view_id);  // Request redraw
+                true
+            }
+            EventKind::MouseUp { button: MouseButton::Left } => {
+                if self.is_pressed {
+                    self.is_pressed = false;
+                    Application::mark_dirty(self.__view_id);  // Request redraw
+                    true
+                }
+            }
+            _ => false,
+        }
+    }
+}
+```
+
+**Key point**: Views call `Application::mark_dirty(self.__view_id)` whenever their state changes and they need redraw.
+
+#### Draw Phase
+
+```rust
+fn draw_frame(&mut self) {
+    for window in &self.windows {
+        let surface = self.connection.surface_mut(window.borrow().surface_id());
+        let mut canvas = Canvas::new(surface.buffer_mut(), width, height);
+
+        // Iterate dirty views - O(dirty views), not O(all views)!
+        for view_id in &self.dirty_views {
+            // Lookup ViewRef from registry - O(1)
+            if let Some(view) = self.view_registry.get(view_id) {
+                let frame = view.borrow().cached_frame();  // Cached frame
+                canvas.push_clip(frame);
+                view.borrow().draw(&mut canvas);
+                canvas.pop_clip();
+            }
+        }
+
+        self.dirty_views.clear();  // Clear for next frame
+    }
+}
+```
+
+**Key optimization**:
+- **No tree traversal** - Uses `view_registry` HashMap for O(1) lookup
+- **O(dirty views)** - Only iterates views that actually changed
+- **Cached frames** - No frame recalculation needed
 
 ### Layout Changes
 
@@ -220,30 +515,7 @@ impl VStack {
 
 ### Scroll/State Changes
 
-```
-1. ScrollView scrolls
-   ↓
-2. Update child view frames
-   ```rust
-   fn set_scroll_offset_y(&mut self, offset: i32) {
-       self.scroll_offset_y = offset;
-
-       // Update child frames with scroll offset
-       let mut y = -offset;
-       for (child, size) in &mut self.children {
-           child.layout_relative(Point::new(0, y));
-           y += size.height;
-       }
-
-       self.needs_redraw = true;
-       dirty_set.insert(self.id());
-       // Mark children dirty too
-       for child in &self.children {
-           dirty_set.insert(child.id());
-       }
-   }
-   ```
-```
+**TODO**: To be designed
 
 ## Coordinate System
 
@@ -268,12 +540,23 @@ impl VStack {
 
 ## Implementation Checklist
 
-### Phase 1: Core Changes
+### Phase 1: ViewRef Migration
 
-- [ ] Add `ViewId` trait to `View`
-- [ ] Add `cached_frame()` method to `View` trait
-- [ ] Add `id()` method to `View` trait
+- [ ] Add `ViewId` type with auto-increment
+- [ ] Add `type ViewRef = Rc<RefCell<dyn View>>`
+- [ ] Implement Application as singleton with `instance()` method
+- [ ] Add `view_registry: HashMap<ViewId, ViewRef>` to `Application`
 - [ ] Add `dirty_views: HashSet<ViewId>` to `Application`
+- [ ] Add `mark_dirty(view_id)` static method to Application
+- [ ] Add `id()` method to `View` trait
+- [ ] Add `children()` method to `View` trait
+- [ ] Implement `register_views_recursive()` in `Application` (uses instance())
+
+### Phase 2: Frame Caching
+
+- [ ] Add `cached_frame()` method to `View` trait
+- [ ] Update `layout()` signature to accept `origin: Point`
+- [ ] Store `cached_frame` in all view implementations
 - [ ] Implement frame caching in `Window`
 - [ ] Implement frame caching in `VStack`
 - [ ] Implement frame caching in `HStack`
@@ -281,26 +564,20 @@ impl VStack {
 - [ ] Implement frame caching in `ScrollView`
 - [ ] Implement frame caching in control views (Button, Label, etc.)
 
-### Phase 2: Layout Changes
-
-- [ ] Update `layout()` signature to accept `origin: Point`
-- [ ] Store `cached_frame` in all view implementations
-- [ ] Update container layouts to pass origin to children
-- [ ] Update `Window::layout()` to start at `Point(0, 0)`
-
 ### Phase 3: Draw Changes
 
 - [ ] Remove `frame: Rect` parameter from `draw()` signature
 - [ ] Update all `draw()` implementations to use `self.cached_frame()`
 - [ ] Add canvas clipping in `Application::draw()` phase
 
-### Phase 4: Dirty Set Management
+### Phase 4: Dirty Management
 
-- [ ] Implement `set_needs_draw()` to add to `dirty_views`
-- [ ] Replace `needs_draw()` checks with `dirty_views` iteration
-- [ ] Update event dispatch to use dirty set
-- [ ] Remove `collect_dirty_rects()` traversal
-- [ ] Implement dirty region union from cached frames
+- [ ] Implement Application as singleton with `instance()` method
+- [ ] Add `mark_dirty(view_id)` static method to Application
+- [ ] Add `dirty_views: HashSet<ViewId>` to Application
+- [ ] Update View::on_event() implementations to call `Application::mark_dirty()`
+- [ ] Update draw phase to iterate dirty_views and lookup ViewRef from view_registry
+- [ ] Implement canvas clipping in draw phase
 
 ### Phase 5: Testing
 
@@ -333,10 +610,47 @@ Improvement: 2000x reduction for sparse updates
 
 ## Migration Strategy
 
+### Application Singleton Migration
+
+**Before** (current code):
+```rust
+fn main() {
+    let mut app = Application::new();
+
+    let window = Window::new("My App", 400, 300);
+    app.add_window(window).unwrap();
+
+    app.run();
+}
+```
+
+**After** (with singleton):
+```rust
+fn main() {
+    // Initialize singleton (first call creates instance)
+    Application::initialize();
+
+    let window = Window::new("My App", 400, 300);
+    Application::add_window(window).unwrap();
+
+    Application::run();
+}
+```
+
+**Migration steps**:
+1. Add `initialize()` method that creates singleton instance
+2. Change `Application::new()` to `Application::initialize()` in main()
+3. Update `app.add_window()` to `Application::add_window()`
+4. Update `app.run()` to `Application::run()`
+5. Make `new()` private
+
+### View Migration
+
 1. **Backward compatibility**: Keep old `draw(canvas, frame)` temporarily during migration
 2. **Incremental updates**: Migrate one view type at a time
-3. **Testing**: Use existing apps as integration tests
-4. **Performance**: Benchmark before/after each major change
+3. **#[view] macro**: Add `#[view]` attribute to each view struct
+4. **Testing**: Use existing apps as integration tests
+5. **Performance**: Benchmark before/after each major change
 
 ## Related Documents
 
