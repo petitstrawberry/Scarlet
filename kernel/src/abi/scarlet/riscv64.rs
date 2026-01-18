@@ -557,12 +557,16 @@ impl AbiModule for ScarletAbi {
         self.on_task_exit(task);
     }
 
-    fn as_any(&self) -> &dyn core::any::Any {
-        self
+    fn set_tls_pointer(&mut self, ptr: usize) {
+        self.tls_pointer = Some(ptr);
     }
 
-    fn as_any_mut(&mut self) -> &mut dyn core::any::Any {
-        self
+    fn get_tls_pointer(&self) -> Option<usize> {
+        self.tls_pointer
+    }
+
+    fn set_clear_child_tid(&mut self, ptr: usize) {
+        self.clear_child_tid_ptr = Some(ptr);
     }
 }
 

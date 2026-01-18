@@ -7,10 +7,11 @@ pub const EXECVE_FORCE_ABI_REBUILD: usize = 0x1; // Force ABI environment recons
 
 #[repr(u64)]
 pub enum CloneFlagsDef {
-    Vm = 0b00000001,    // Clone the VM
-    Fs = 0b00000010,    // Clone the filesystem
-    Files = 0b00000100, // Clone the file descriptors
+    Vm = 0b00000001,     // Clone the VM
+    Fs = 0b00000010,     // Clone the filesystem
+    Files = 0b00000100,  // Clone the file descriptors
     Thread = 0b00001000, // Join thread group (share TGID) - Linux CLONE_THREAD semantics
+    SetTls = 0b00010000, // Set TLS pointer for cloned task
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -63,7 +64,7 @@ impl Default for CloneFlags {
 /// - In the child process: 0
 /// - On error: -1
 pub fn clone(flags: CloneFlags) -> i32 {
-    syscall4(Syscall::Clone, flags.get_raw() as usize, 0, 0, 0) as i32
+    syscall5(Syscall::Clone, flags.get_raw() as usize, 0, 0, 0, 0) as i32
 }
 
 /// Fork the current process.

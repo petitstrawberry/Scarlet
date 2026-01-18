@@ -1,5 +1,5 @@
 use crate::boxed::Box;
-use crate::syscall::{Syscall, syscall0, syscall1, syscall4};
+use crate::syscall::{Syscall, syscall0, syscall1, syscall5};
 use crate::task::{CloneFlags, CloneFlagsDef};
 use crate::vec::Vec;
 use core::time::Duration;
@@ -113,27 +113,38 @@ where
     // Leak stack (child thread will use it, freed on thread exit)
     core::mem::forget(stack);
 
+    // Allocate TLS (Thread Local Storage) for the new thread
+    // For now, we allocate a simple TLS area. In a full implementation,
+    // this would include thread-local variables, errno, etc.
+    const TLS_SIZE: usize = 64; // Reserve space for TLS variables
+    let tls_box: Box<[u8; TLS_SIZE]> = crate::boxed::Box::new([0u8; TLS_SIZE]);
+    let tls_ptr = Box::into_raw(tls_box) as usize;
+
     // Set up clone flags for thread creation (share VM, FS, Files, Thread group)
     let mut flags = CloneFlags::new();
     flags.set(CloneFlagsDef::Thread); // Join parent's thread group (share TGID)
-    flags.set(CloneFlagsDef::Vm);     // Share address space
-    flags.set(CloneFlagsDef::Fs);     // Share filesystem context
-    flags.set(CloneFlagsDef::Files);  // Share file descriptors
+    flags.set(CloneFlagsDef::SetTls); // Set TLS pointer for new thread
+    flags.set(CloneFlagsDef::Vm); // Share address space
+    flags.set(CloneFlagsDef::Fs); // Share filesystem context
+    flags.set(CloneFlagsDef::Files); // Share file descriptors
 
     // Use a typed trampoline that knows about F
-    // Clone with: flags, stack, trampoline function, closure pointer
-    let result = syscall4(
+    // Clone with: flags, stack, trampoline function, closure pointer, TLS pointer
+    let result = syscall5(
         Syscall::Clone,
         flags.get_raw() as usize,
         stack_top,
         thread_typed_trampoline::<F> as *const () as usize,
         closure_ptr,
+        tls_ptr, // TLS pointer as 5th argument
     );
 
     if result == usize::MAX {
         // Failed to create thread
         unsafe {
             let _ = Box::from_raw(closure_ptr as *mut F);
+            // Reconstruct and drop TLS to free it
+            let _ = Box::from_raw(tls_ptr as *mut [u8; TLS_SIZE]);
             // TODO: free stack
         }
         return Err("Failed to create thread");
