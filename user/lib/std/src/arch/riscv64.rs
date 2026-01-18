@@ -181,3 +181,42 @@ pub fn arch_syscall6(
     }
     ret
 }
+
+/// Get the current thread's TLS (Thread Local Storage) pointer
+///
+/// This reads the tp register (x4) directly without a syscall for performance.
+/// The tp register is set by the kernel during thread creation and is part
+/// of the task's context.
+///
+/// # Returns
+/// The current TLS base pointer, or 0 if not set
+#[inline]
+pub fn arch_tls_pointer() -> usize {
+    let tp;
+    unsafe {
+        asm!(
+            "mv {}, tp",
+            out(reg) tp,
+            options(nostack, pure, readonly)
+        );
+    }
+    tp
+}
+
+/// Set the current thread's TLS pointer
+///
+/// This function performs a syscall to set the TLS pointer in the kernel.
+/// Direct register writes are not recommended as the kernel needs to
+/// maintain ABI state synchronization.
+///
+/// # Arguments
+/// * `ptr` - The new TLS base pointer
+///
+/// # Note
+/// This is typically only called during thread initialization. For most
+/// use cases, you should use the TLS pointer set by the kernel during
+/// thread creation.
+pub fn arch_set_tls_pointer(ptr: usize) {
+    // Use syscall to set TLS pointer (kernel needs to update ABI state)
+    crate::syscall::syscall1(crate::syscall::Syscall::SetTls, ptr);
+}

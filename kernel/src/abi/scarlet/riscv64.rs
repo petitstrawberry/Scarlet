@@ -30,8 +30,58 @@ use crate::{
 
 use crate::abi::AbiModule;
 
-#[derive(Default, Copy, Clone)]
-pub struct ScarletAbi;
+#[derive(Clone, Copy)]
+pub struct ScarletAbi {
+    /// TLS (Thread Local Storage) pointer for this task
+    pub tls_pointer: Option<usize>,
+    /// clear_child_tid pointer for thread exit notification (Linux-compatible)
+    pub clear_child_tid_ptr: Option<usize>,
+}
+
+impl Default for ScarletAbi {
+    fn default() -> Self {
+        Self {
+            tls_pointer: None,
+            clear_child_tid_ptr: None,
+        }
+    }
+}
+
+impl ScarletAbi {
+    /// Get the TLS pointer for this task
+    pub fn tls_pointer(&self) -> Option<usize> {
+        self.tls_pointer
+    }
+
+    /// Set the TLS pointer for this task
+    pub fn set_tls_pointer(&mut self, ptr: usize) {
+        self.tls_pointer = Some(ptr);
+    }
+
+    /// Clear the TLS pointer for this task
+    pub fn clear_tls_pointer(&mut self) {
+        self.tls_pointer = None;
+    }
+
+    /// Set the clear_child_tid pointer for thread exit notification
+    pub fn set_clear_child_tid(&mut self, ptr: usize) {
+        self.clear_child_tid_ptr = Some(ptr);
+    }
+
+    /// Handle task exit with TLS cleanup (Linux-compatible)
+    pub fn on_task_exit(&mut self, task: &mut crate::task::Task) {
+        // Linux-compatible behavior: write 0 to clear_child_tid and futex wake
+        if let Some(ptr) = self.clear_child_tid_ptr {
+            if let Some(paddr) = task.vm_manager.translate_vaddr(ptr) {
+                unsafe {
+                    *(paddr as *mut i32) = 0;
+                }
+            }
+            // Note: Futex wake for clear_child_tid is handled by the Linux ABI's
+            // on_task_exit implementation. For Scarlet Native, we just clear the value.
+        }
+    }
+}
 
 impl AbiModule for ScarletAbi {
     fn name() -> &'static str {
@@ -500,6 +550,19 @@ impl AbiModule for ScarletAbi {
                 return Err("Failed to bind mount native Scarlet root to /scarlet for Scarlet");
             }
         }
+    }
+
+    fn on_task_exit(&mut self, task: &mut crate::task::Task) {
+        // Delegate to the implementation method
+        self.on_task_exit(task);
+    }
+
+    fn as_any(&self) -> &dyn core::any::Any {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn core::any::Any {
+        self
     }
 }
 

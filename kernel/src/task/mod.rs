@@ -320,6 +320,7 @@ pub enum CloneFlagsDef {
     Fs = 0b00000010,    // Clone the filesystem
     Files = 0b00000100, // Clone the file descriptors
     Thread = 0b00001000, // Join thread group (share TGID) - Linux CLONE_THREAD semantics
+    SetTls = 0b000010000, // Set TLS pointer for cloned task
 }
 
 #[derive(Debug, Clone, Copy)]
