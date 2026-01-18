@@ -307,9 +307,9 @@ pub struct ManagedPage {
 }
 
 pub enum CloneFlagsDef {
-    Vm = 0b00000001,    // Clone the VM
-    Fs = 0b00000010,    // Clone the filesystem
-    Files = 0b00000100, // Clone the file descriptors
+    Vm = 0b00000001,     // Clone the VM
+    Fs = 0b00000010,     // Clone the filesystem
+    Files = 0b00000100,  // Clone the file descriptors
     SetTls = 0b00001000, // Set TLS pointer for cloned task
 }
 

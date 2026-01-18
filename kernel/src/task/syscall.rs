@@ -26,7 +26,9 @@ use crate::library::std::string::{
 
 use crate::arch::{Trapframe, get_cpu};
 use crate::sched::scheduler::get_scheduler;
-use crate::task::{CloneFlags, CloneFlagsDef, WaitError, get_parent_waitpid_waker, get_waitpid_waker};
+use crate::task::{
+    CloneFlags, CloneFlagsDef, WaitError, get_parent_waitpid_waker, get_waitpid_waker,
+};
 use crate::timer::ns_to_ticks;
 
 const MAX_ARG_COUNT: usize = 256; // Maximum number of arguments for execve
@@ -146,15 +148,34 @@ pub fn sys_clone(trapframe: &mut Trapframe) -> usize {
             if clone_flags.is_set(CloneFlagsDef::SetTls) {
                 // Set TLS pointer in task's ABI state
                 if let Some(abi) = child_task.default_abi.as_mut() {
-                    // Try to downcast to ScarletAbi
-                    use crate::abi::scarlet::riscv64::ScarletAbi;
-                    if let Some(scarlet_abi) = abi.as_any_mut().downcast_mut::<ScarletAbi>() {
+                    // Try to downcast to ScarletAbi (works for both RISC-V and AArch64)
+                    #[cfg(target_arch = "riscv64")]
+                    if let Some(scarlet_abi) =
+                        abi.as_any_mut()
+                            .downcast_mut::<crate::abi::scarlet::riscv64::ScarletAbi>()
+                    {
+                        scarlet_abi.set_tls_pointer(tls_ptr);
+                    }
+                    #[cfg(target_arch = "aarch64")]
+                    if let Some(scarlet_abi) =
+                        abi.as_any_mut()
+                            .downcast_mut::<crate::abi::scarlet::aarch64::ScarletAbi>()
+                    {
                         scarlet_abi.set_tls_pointer(tls_ptr);
                     }
                 }
 
-                // Set tp register (x4) for RISC-V TLS
-                child_task.vcpu.iregs.set_tp(tls_ptr);
+                // Set architecture-specific TLS register
+                #[cfg(target_arch = "riscv64")]
+                {
+                    // RISC-V: set tp register (x4)
+                    child_task.vcpu.iregs.set_tp(tls_ptr);
+                }
+                #[cfg(target_arch = "aarch64")]
+                {
+                    // AArch64: set TPIDR_EL0 system register
+                    child_task.vcpu.set_tpidr_el0(tls_ptr as u64);
+                }
             }
 
             get_scheduler().add_task(child_task, get_cpu().get_cpuid());
@@ -176,14 +197,33 @@ pub fn sys_set_tls(trapframe: &mut Trapframe) -> usize {
 
     // Update ABI state
     if let Some(abi) = task.default_abi.as_mut() {
-        use crate::abi::scarlet::riscv64::ScarletAbi;
-        if let Some(scarlet_abi) = abi.as_any_mut().downcast_mut::<ScarletAbi>() {
+        #[cfg(target_arch = "riscv64")]
+        if let Some(scarlet_abi) = abi
+            .as_any_mut()
+            .downcast_mut::<crate::abi::scarlet::riscv64::ScarletAbi>()
+        {
+            scarlet_abi.set_tls_pointer(tls_ptr);
+        }
+        #[cfg(target_arch = "aarch64")]
+        if let Some(scarlet_abi) = abi
+            .as_any_mut()
+            .downcast_mut::<crate::abi::scarlet::aarch64::ScarletAbi>()
+        {
             scarlet_abi.set_tls_pointer(tls_ptr);
         }
     }
 
-    // Set tp register directly
-    task.vcpu.iregs.set_tp(tls_ptr);
+    // Set architecture-specific TLS register
+    #[cfg(target_arch = "riscv64")]
+    {
+        // RISC-V: set tp register (x4)
+        task.vcpu.iregs.set_tp(tls_ptr);
+    }
+    #[cfg(target_arch = "aarch64")]
+    {
+        // AArch64: set TPIDR_EL0 system register
+        task.vcpu.set_tpidr_el0(tls_ptr as u64);
+    }
 
     trapframe.increment_pc_next(task);
     0 // Success
@@ -195,10 +235,26 @@ pub fn sys_get_tls(trapframe: &mut Trapframe) -> usize {
 
     // Get TLS pointer from ABI state
     let tls_ptr = if let Some(abi) = task.default_abi.as_ref() {
-        use crate::abi::scarlet::riscv64::ScarletAbi;
-        if let Some(scarlet_abi) = abi.as_any().downcast_ref::<ScarletAbi>() {
+        #[cfg(target_arch = "riscv64")]
+        if let Some(scarlet_abi) = abi
+            .as_any()
+            .downcast_ref::<crate::abi::scarlet::riscv64::ScarletAbi>()
+        {
             scarlet_abi.tls_pointer().unwrap_or(0)
         } else {
+            0
+        }
+        #[cfg(target_arch = "aarch64")]
+        if let Some(scarlet_abi) = abi
+            .as_any()
+            .downcast_ref::<crate::abi::scarlet::aarch64::ScarletAbi>()
+        {
+            scarlet_abi.tls_pointer().unwrap_or(0)
+        } else {
+            0
+        }
+        #[cfg(not(any(target_arch = "riscv64", target_arch = "aarch64")))]
+        {
             0
         }
     } else {
@@ -216,8 +272,18 @@ pub fn sys_set_tid_address(trapframe: &mut Trapframe) -> usize {
 
     // Update ABI state
     if let Some(abi) = task.default_abi.as_mut() {
-        use crate::abi::scarlet::riscv64::ScarletAbi;
-        if let Some(scarlet_abi) = abi.as_any_mut().downcast_mut::<ScarletAbi>() {
+        #[cfg(target_arch = "riscv64")]
+        if let Some(scarlet_abi) = abi
+            .as_any_mut()
+            .downcast_mut::<crate::abi::scarlet::riscv64::ScarletAbi>()
+        {
+            scarlet_abi.set_clear_child_tid(tid_ptr);
+        }
+        #[cfg(target_arch = "aarch64")]
+        if let Some(scarlet_abi) = abi
+            .as_any_mut()
+            .downcast_mut::<crate::abi::scarlet::aarch64::ScarletAbi>()
+        {
             scarlet_abi.set_clear_child_tid(tid_ptr);
         }
     }
