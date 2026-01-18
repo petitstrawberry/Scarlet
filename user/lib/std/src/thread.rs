@@ -241,6 +241,16 @@ pub struct LocalKey<T> {
     _phantom: core::marker::PhantomData<T>,
 }
 
+// SAFETY: `LocalKey<T>` is `Sync` for all `T` because accessing thread-local
+// storage through `LocalKey` is thread-safe: each thread has its own copy of
+// the TLS value, and `LocalKey` is just a handle to access that storage.
+// The `offset` and `align` fields are constant and can be safely shared.
+unsafe impl<T> Sync for LocalKey<T> {}
+
+// SAFETY: `LocalKey<T>` is `Send` for all `T` because it only contains constant
+// data (`offset` and `align`) and can be safely moved between threads.
+unsafe impl<T> Send for LocalKey<T> {}
+
 impl<T> LocalKey<T> {
     /// Create a new LocalKey with the given offset and alignment
     #[inline]
@@ -290,7 +300,7 @@ impl<T> LocalKey<T> {
     /// # Panics
     ///
     /// Panics if the TLS pointer is not set for the current thread.
-    pub fn with<F, R>(self, f: F) -> R
+    pub fn with<F, R>(&self, f: F) -> R
     where
         T: 'static,
         F: FnOnce(&T) -> R,
@@ -316,7 +326,7 @@ impl<T> LocalKey<T> {
     /// Execute a closure with mutable access to this thread-local value
     ///
     /// This function provides safe mutable access to thread-local storage.
-    pub fn with_mut<F, R>(self, f: F) -> R
+    pub fn with_mut<F, R>(&self, f: F) -> R
     where
         T: 'static,
         F: FnOnce(&mut T) -> R,
@@ -342,7 +352,7 @@ impl<T> LocalKey<T> {
     ///
     /// Returns `None` if TLS is not initialized, otherwise returns the
     /// result of the closure.
-    pub fn try_with<F, R>(self, f: F) -> Option<R>
+    pub fn try_with<F, R>(&self, f: F) -> Option<R>
     where
         T: 'static,
         F: FnOnce(&T) -> R,
@@ -360,7 +370,7 @@ impl<T> LocalKey<T> {
     ///
     /// Returns `None` if TLS is not initialized, otherwise returns the
     /// result of the closure.
-    pub fn try_with_mut<F, R>(self, f: F) -> Option<R>
+    pub fn try_with_mut<F, R>(&self, f: F) -> Option<R>
     where
         T: 'static,
         F: FnOnce(&mut T) -> R,
@@ -413,28 +423,52 @@ pub const __TLS_ALIGN: usize = 8;
 /// ```
 #[macro_export]
 macro_rules! thread_local {
-    // Internal state: current offset, next index, and items
-    (@state $tls_size:expr, $index:expr,) => {};
-
-    // Process all items and generate LocalKey declarations
-    (@state $tls_size:expr, $index:expr, $(#[$attr:meta])* $vis:vis static $name:ident: $ty:ty = $init:expr; $($rest:tt)*) => {
+    // Entry point - with attributes, single item
+    ($(#[$attr:meta])+ $vis:vis static $name:ident: $ty:ty = $init:expr;) => {
         #[allow(non_upper_case_globals)]
-        #[$attr]
+        #[$(#[$attr])*]
         $vis static $name: $crate::thread::LocalKey<$ty> = {
-            // Calculate offset based on variable name hash
             const __TLS_NAME__: &[u8] = stringify!($name).as_bytes();
             const __TLS_OFFSET__: usize = $crate::thread::__tls_offset_from_hash(__TLS_NAME__);
             const __TLS_ALIGN__: usize = $crate::thread::__TLS_ALIGN;
-
-            $crate::thread::LocalKey::new(__TLS_OFFSET__, __TLS_ALIGN)
+            $crate::thread::LocalKey::new(__TLS_OFFSET__, __TLS_ALIGN__)
         };
-
-        $crate::thread_local!(@state $tls_size + 8, $index + 1, $($rest)*);
     };
 
-    // Entry point: parse all items and calculate offsets
-    ($(#[$attr:meta])* $vis:vis static $name:ident: $ty:ty = $init:expr; $($rest:tt)*) => {
-        $crate::thread_local!(@state 0, 0, $(#[$attr])* $vis static $name: $ty = $init; $($rest)*);
+    // Entry point - without attributes, single item
+    ($vis:vis static $name:ident: $ty:ty = $init:expr;) => {
+        #[allow(non_upper_case_globals)]
+        $vis static $name: $crate::thread::LocalKey<$ty> = {
+            const __TLS_NAME__: &[u8] = stringify!($name).as_bytes();
+            const __TLS_OFFSET__: usize = $crate::thread::__tls_offset_from_hash(__TLS_NAME__);
+            const __TLS_ALIGN__: usize = $crate::thread::__TLS_ALIGN;
+            $crate::thread::LocalKey::new(__TLS_OFFSET__, __TLS_ALIGN__)
+        };
+    };
+
+    // Entry point - with attributes, multiple items
+    ($(#[$attr:meta])+ $vis:vis static $name:ident: $ty:ty = $init:expr; $($rest:tt)*) => {
+        #[allow(non_upper_case_globals)]
+        #[$(#[$attr])*]
+        $vis static $name: $crate::thread::LocalKey<$ty> = {
+            const __TLS_NAME__: &[u8] = stringify!($name).as_bytes();
+            const __TLS_OFFSET__: usize = $crate::thread::__tls_offset_from_hash(__TLS_NAME__);
+            const __TLS_ALIGN__: usize = $crate::thread::__TLS_ALIGN;
+            $crate::thread::LocalKey::new(__TLS_OFFSET__, __TLS_ALIGN__)
+        };
+        $crate::thread_local!($($rest)*);
+    };
+
+    // Entry point - without attributes, multiple items
+    ($vis:vis static $name:ident: $ty:ty = $init:expr; $($rest:tt)*) => {
+        #[allow(non_upper_case_globals)]
+        $vis static $name: $crate::thread::LocalKey<$ty> = {
+            const __TLS_NAME__: &[u8] = stringify!($name).as_bytes();
+            const __TLS_OFFSET__: usize = $crate::thread::__tls_offset_from_hash(__TLS_NAME__);
+            const __TLS_ALIGN__: usize = $crate::thread::__TLS_ALIGN;
+            $crate::thread::LocalKey::new(__TLS_OFFSET__, __TLS_ALIGN__)
+        };
+        $crate::thread_local!($($rest)*);
     };
 }
 
