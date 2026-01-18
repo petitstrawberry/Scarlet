@@ -2,6 +2,7 @@
 
 use super::traits::{View, ViewBox, Size};
 use super::node::{ViewId, DirtyNotifier};
+use super::buffer::ViewBuffer;
 use crate::graphics::{Canvas, Rect};
 use crate::event::Event;
 use crate::color::Color;
@@ -12,6 +13,7 @@ use scarlet_std::vec;
 use scarlet_std::string::String;
 use scarlet_std::format;
 use core::cell::UnsafeCell;
+use core::option::Option;
 
 /// Navigation item for NavigationView sidebar
 #[derive(Clone)]
@@ -79,6 +81,7 @@ pub struct NavigationView {
     sidebar_frame: Rect,
     content_frame: Rect,
     needs_redraw: bool,
+    needs_registry_rebuild: bool,  // Page changed, need to rebuild registry
     // Content cache to preserve state (hover, press, etc.)
     // Using UnsafeCell for interior mutability in draw() which takes &self
     cached_page_id: String,
@@ -87,6 +90,8 @@ pub struct NavigationView {
     view_id: Option<ViewId>,
     /// Dirty notifier for buffer management
     dirty_notifier: Option<DirtyNotifier>,
+    /// Buffer for sidebar and content rendering
+    buffer: Option<ViewBuffer>,
 }
 
 impl NavigationView {
@@ -110,10 +115,12 @@ impl NavigationView {
             sidebar_frame: Rect::new(0, 0, 0, 0),
             content_frame: Rect::new(0, 0, 0, 0),
             needs_redraw: true,
+            needs_registry_rebuild: false,
             cached_page_id: String::new(),
             cached_content: UnsafeCell::new(None),
             view_id: None,
             dirty_notifier: None,
+            buffer: None,
         }
     }
 
@@ -286,14 +293,36 @@ impl NavigationView {
         for item in &self.items {
             if relative_y >= current_y && relative_y < current_y + ITEM_HEIGHT as i32 {
                 // Item clicked
-                self.selected_id.set(item.id.clone());
-                self.needs_redraw = true;
+                let old_id = self.selected_id.get();
+                if old_id != item.id {
+                    // Page is actually changing
+                    self.selected_id.set(item.id.clone());
+                    self.needs_redraw = true;
+                    self.needs_registry_rebuild = true;  // Request registry rebuild
+
+                    // Clear content cache so new page will be built
+                    unsafe {
+                        *self.cached_content.get() = None;
+                    }
+
+                    scarlet_std::println!("[NavigationView] Page changed: {} -> {}, clearing cache", old_id, item.id);
+                }
                 return true;
             }
             current_y += ITEM_HEIGHT as i32 + 2;
         }
 
         false
+    }
+
+    /// Check if registry needs to be rebuilt (page changed)
+    pub fn needs_registry_rebuild(&self) -> bool {
+        self.needs_registry_rebuild
+    }
+
+    /// Clear the registry rebuild flag
+    pub fn clear_registry_rebuild(&mut self) {
+        self.needs_registry_rebuild = false;
     }
 }
 
@@ -492,5 +521,45 @@ impl View for NavigationView {
 
     fn set_dirty_notifier(&mut self, notifier: DirtyNotifier) {
         self.dirty_notifier = Some(notifier);
+    }
+
+    fn buffer(&self) -> Option<&ViewBuffer> {
+        self.buffer.as_ref()
+    }
+
+    fn buffer_mut(&mut self) -> Option<&mut ViewBuffer> {
+        self.buffer.as_mut()
+    }
+
+    fn ensure_buffer(&mut self, width: u32, height: u32) -> Option<&mut ViewBuffer> {
+        if self.buffer.is_none() || self.buffer.as_ref().map(|b| (b.width(), b.height())) != Some((width, height)) {
+            self.buffer = Some(ViewBuffer::new(width, height));
+        }
+        self.buffer.as_mut()
+    }
+
+    fn draw_to_buffer(&mut self) {
+        if let Some(buffer) = self.buffer_mut() {
+            // Clear buffer
+            buffer.clear();
+
+            let width = buffer.width();
+            let height = buffer.height();
+            let data = buffer.data_mut();
+            let data_ptr = data.as_mut_ptr();
+            let len = data.len();
+
+            // Clear buffer
+            for i in 0..len {
+                unsafe {
+                    *data_ptr.add(i) = 0;
+                }
+            }
+
+            // Create canvas and draw
+            let mut canvas = Canvas::new(unsafe { core::slice::from_raw_parts_mut(data_ptr, len) }, width, height);
+            let frame = Rect::new(0, 0, width, height);
+            self.draw(&mut canvas, frame);
+        }
     }
 }

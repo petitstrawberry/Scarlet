@@ -4,6 +4,7 @@
 
 use super::traits::{View, Size, Focus, Hoverable};
 use super::node::{ViewId, DirtyNotifier};
+use super::buffer::ViewBuffer;
 use crate::graphics::{measure_text_sized, Canvas, Rect};
 use crate::Color;
 use crate::event::{Event, EventKind, MouseButton};
@@ -21,6 +22,7 @@ pub struct Label {
     color: Color,
     font_size: u32,
     needs_redraw: bool,
+    buffer: Option<ViewBuffer>,
     view_id: Option<ViewId>,
     dirty_notifier: Option<DirtyNotifier>,
 }
@@ -32,6 +34,7 @@ impl Label {
             color: Color::WHITE,
             font_size: 16,
             needs_redraw: false,
+            buffer: None,
             view_id: None,
             dirty_notifier: None,
         }
@@ -54,12 +57,11 @@ impl Label {
         self.text = text.into();
         self.needs_redraw = true;
 
+        // Draw to buffer
+        self.draw_to_buffer();
+
         // Notify window
-        if let Some(id) = self.view_id {
-            if let Some(ref notifier) = self.dirty_notifier {
-                notifier.mark_dirty(id);
-            }
-        }
+        self.notify_dirty_label();
     }
 }
 
@@ -71,6 +73,43 @@ impl View for Label {
 
     fn draw(&self, canvas: &mut Canvas, frame: Rect) {
         canvas.draw_text_sized(frame.x, frame.y, &self.text, self.color, self.font_size as f32);
+    }
+
+    fn buffer(&self) -> Option<&ViewBuffer> {
+        self.buffer.as_ref()
+    }
+
+    fn buffer_mut(&mut self) -> Option<&mut ViewBuffer> {
+        self.buffer.as_mut()
+    }
+
+    fn ensure_buffer(&mut self, width: u32, height: u32) -> Option<&mut ViewBuffer> {
+        if self.buffer.is_none() || self.buffer.as_ref().map(|b| (b.width(), b.height())) != Some((width, height)) {
+            self.buffer = Some(ViewBuffer::new(width, height));
+        }
+        self.buffer.as_mut()
+    }
+
+    fn draw_to_buffer(&mut self) {
+        if let Some(buffer) = self.buffer_mut() {
+            let width = buffer.width();
+            let height = buffer.height();
+            let data = buffer.data_mut();
+            let data_ptr = data.as_mut_ptr();
+            let len = data.len();
+
+            // Clear buffer
+            for i in 0..len {
+                unsafe {
+                    *data_ptr.add(i) = 0;
+                }
+            }
+
+            // Create canvas and draw
+            let mut canvas = Canvas::new(unsafe { core::slice::from_raw_parts_mut(data_ptr, len) }, width, height);
+            let frame = Rect::new(0, 0, width, height);
+            self.draw(&mut canvas, frame);
+        }
     }
 
     fn needs_draw(&self) -> bool {
@@ -118,6 +157,8 @@ pub struct Text {
     throttle_frames: u32,
     /// Whether the text has changed and needs to be redrawn
     needs_redraw: bool,
+    /// View buffer for rendering
+    buffer: Option<ViewBuffer>,
     /// View ID for buffer management
     view_id: Option<ViewId>,
     /// Dirty notifier for buffer management
@@ -141,6 +182,7 @@ impl Text {
             last_update_frame: 0,
             throttle_frames: 0,
             needs_redraw: false,
+            buffer: None,
             view_id: None,
             dirty_notifier: None,
         }
@@ -165,6 +207,7 @@ impl Text {
             last_update_frame: 0,
             throttle_frames: 0,
             needs_redraw: false,
+            buffer: None,
             view_id: None,
             dirty_notifier: None,
         }
@@ -208,6 +251,9 @@ impl View for Text {
                 self.last_update_frame = self.frame_counter;
                 self.needs_redraw = true;
 
+                // Draw to buffer
+                self.draw_to_buffer();
+
                 // Notify window
                 if let Some(id) = self.view_id {
                     if let Some(ref notifier) = self.dirty_notifier {
@@ -231,6 +277,43 @@ impl View for Text {
             self.color,
             self.font_size as f32,
         );
+    }
+
+    fn buffer(&self) -> Option<&ViewBuffer> {
+        self.buffer.as_ref()
+    }
+
+    fn buffer_mut(&mut self) -> Option<&mut ViewBuffer> {
+        self.buffer.as_mut()
+    }
+
+    fn ensure_buffer(&mut self, width: u32, height: u32) -> Option<&mut ViewBuffer> {
+        if self.buffer.is_none() || self.buffer.as_ref().map(|b| (b.width(), b.height())) != Some((width, height)) {
+            self.buffer = Some(ViewBuffer::new(width, height));
+        }
+        self.buffer.as_mut()
+    }
+
+    fn draw_to_buffer(&mut self) {
+        if let Some(buffer) = self.buffer_mut() {
+            let width = buffer.width();
+            let height = buffer.height();
+            let data = buffer.data_mut();
+            let data_ptr = data.as_mut_ptr();
+            let len = data.len();
+
+            // Clear buffer
+            for i in 0..len {
+                unsafe {
+                    *data_ptr.add(i) = 0;
+                }
+            }
+
+            // Create canvas and draw
+            let mut canvas = Canvas::new(unsafe { core::slice::from_raw_parts_mut(data_ptr, len) }, width, height);
+            let frame = Rect::new(0, 0, width, height);
+            self.draw(&mut canvas, frame);
+        }
     }
 
     fn needs_draw(&self) -> bool {
@@ -281,6 +364,7 @@ pub struct ReactiveLabel<T: Clone + 'static> {
     font_size: u32,
     refresh_handle: ViewRefreshHandle,
     cached_text: String,
+    buffer: Option<ViewBuffer>,
     /// View ID for buffer management
     view_id: Option<ViewId>,
     /// Dirty notifier for buffer management
@@ -308,6 +392,7 @@ impl<T: Clone + 'static> ReactiveLabel<T> {
             font_size: 16,
             refresh_handle,
             cached_text,
+            buffer: None,
             view_id: None,
             dirty_notifier: None,
         }
@@ -331,16 +416,22 @@ impl<T: Clone + 'static> ReactiveLabel<T> {
 }
 
 impl<T: Clone + 'static> View for ReactiveLabel<T> {
-    fn layout(&mut self, _available: Size) -> Size {
+    fn layout(&mut self, available: Size) -> Size {
         // Check if state changed and update text
         if self.refresh_handle.take_dirty() {
             self.update_text();
+            scarlet_std::println!("[ReactiveLabel] State changed, redrawing buffer: view_id={:?}", self.view_id);
+
+            // Draw to buffer
+            self.draw_to_buffer();
 
             // Notify window
             if let Some(id) = self.view_id {
                 if let Some(ref notifier) = self.dirty_notifier {
                     notifier.mark_dirty(id);
                 }
+            } else {
+                scarlet_std::println!("[ReactiveLabel] WARNING: NO view_id!");
             }
         }
         let (w, h) = measure_text_sized(&self.cached_text, self.font_size as f32);
@@ -349,6 +440,43 @@ impl<T: Clone + 'static> View for ReactiveLabel<T> {
 
     fn draw(&self, canvas: &mut Canvas, frame: Rect) {
         canvas.draw_text_sized(frame.x, frame.y, &self.cached_text, self.color, self.font_size as f32);
+    }
+
+    fn buffer(&self) -> Option<&ViewBuffer> {
+        self.buffer.as_ref()
+    }
+
+    fn buffer_mut(&mut self) -> Option<&mut ViewBuffer> {
+        self.buffer.as_mut()
+    }
+
+    fn ensure_buffer(&mut self, width: u32, height: u32) -> Option<&mut ViewBuffer> {
+        if self.buffer.is_none() || self.buffer.as_ref().map(|b| (b.width(), b.height())) != Some((width, height)) {
+            self.buffer = Some(ViewBuffer::new(width, height));
+        }
+        self.buffer.as_mut()
+    }
+
+    fn draw_to_buffer(&mut self) {
+        if let Some(buffer) = self.buffer_mut() {
+            let width = buffer.width();
+            let height = buffer.height();
+            let data = buffer.data_mut();
+            let data_ptr = data.as_mut_ptr();
+            let len = data.len();
+
+            // Clear buffer
+            for i in 0..len {
+                unsafe {
+                    *data_ptr.add(i) = 0;
+                }
+            }
+
+            // Create canvas and draw
+            let mut canvas = Canvas::new(unsafe { core::slice::from_raw_parts_mut(data_ptr, len) }, width, height);
+            let frame = Rect::new(0, 0, width, height);
+            self.draw(&mut canvas, frame);
+        }
     }
 
     fn needs_draw(&self) -> bool {
@@ -411,6 +539,8 @@ pub struct Button<F: FnMut() + 'static> {
     is_pressed: bool,
     label_size: Size,
     needs_redraw: bool,
+    /// View buffer for rendering
+    buffer: Option<ViewBuffer>,
     /// View ID for buffer management
     view_id: Option<ViewId>,
     /// Dirty notifier for buffer management
@@ -430,6 +560,7 @@ impl<F: FnMut() + 'static> Button<F> {
             is_pressed: false,
             label_size: Size::ZERO,
             needs_redraw: false,
+            buffer: None,
             view_id: None,
             dirty_notifier: None,
         }
@@ -479,6 +610,15 @@ impl<F: FnMut() + 'static> Button<F> {
 }
 
 impl<F: FnMut() + 'static> View for Button<F> {
+    fn ensure_buffer(&mut self, width: u32, height: u32) -> Option<&mut ViewBuffer> {
+        scarlet_std::println!("[Button::ensure_buffer] width={}, height={}, current_buffer={}", width, height, self.buffer.is_some());
+        if self.buffer.is_none() || self.buffer.as_ref().map(|b| (b.width(), b.height())) != Some((width, height)) {
+            self.buffer = Some(ViewBuffer::new(width, height));
+            scarlet_std::println!("[Button::ensure_buffer] Created new buffer");
+        }
+        self.buffer.as_mut()
+    }
+
     fn layout(&mut self, _available: Size) -> Size {
         let inner_available = Size::new(u32::MAX, u32::MAX);
         self.label_size = match &mut self.label {
@@ -509,21 +649,12 @@ impl<F: FnMut() + 'static> View for Button<F> {
         };
         canvas.draw_rounded_rect(frame.x, frame.y, frame.width, frame.height, self.corner_radius, border_color);
 
-        // Draw label
-        let label_x = frame.x + self.padding as i32;
-        let label_y = frame.y + self.padding as i32;
-        match &self.label {
-            ButtonLabel::Text(text) => {
-                canvas.draw_text(label_x, label_y, text, self.text_color);
-            }
-            ButtonLabel::View(v) => {
-                let label_frame = Rect::new(label_x, label_y, self.label_size.width, self.label_size.height);
-                v.draw(canvas, label_frame);
-            }
-        }
+        // NOTE: Children are NOT drawn here - Window will compose their buffers separately
+        // This is the key change from the old architecture
     }
 
     fn on_event(&mut self, event: &mut Event, frame: Rect) -> bool {
+        scarlet_std::println!("[Button] on_event: kind={:?}, frame=({},{},{},{}), event=({},{})", event.kind, frame.x, frame.y, frame.width, frame.height, event.x(), event.y());
         match event.kind {
             EventKind::MouseDown { button: MouseButton::Left } => {
                 if frame.contains(event.x(), event.y()) {
@@ -639,14 +770,89 @@ impl<F: FnMut() + 'static> View for Button<F> {
     fn set_dirty_notifier(&mut self, notifier: DirtyNotifier) {
         self.dirty_notifier = Some(notifier);
     }
+
+    fn buffer(&self) -> Option<&ViewBuffer> {
+        self.buffer.as_ref()
+    }
+
+    fn buffer_mut(&mut self) -> Option<&mut ViewBuffer> {
+        self.buffer.as_mut()
+    }
+
+    fn draw_to_buffer(&mut self) {
+        if let Some(buffer) = self.buffer_mut() {
+            let width = buffer.width();
+            let height = buffer.height();
+            let data = buffer.data_mut();
+            let data_ptr = data.as_mut_ptr();
+            let len = data.len();
+
+            // Clear buffer
+            for i in 0..len {
+                unsafe {
+                    *data_ptr.add(i) = 0;
+                }
+            }
+
+            // Create canvas and draw
+            let mut canvas = Canvas::new(unsafe { core::slice::from_raw_parts_mut(data_ptr, len) }, width, height);
+            let frame = Rect::new(0, 0, width, height);
+            self.draw(&mut canvas, frame);
+        }
+    }
 }
 
 impl<F: FnMut() + 'static> Button<F> {
     fn notify_dirty(&mut self) {
         if let Some(id) = self.view_id {
+            scarlet_std::println!("[Button] notify_dirty: view_id={}, is_hovered={}", id, self.is_hovered);
+            // Draw to buffer
+            self.draw_to_buffer();
             if let Some(ref notifier) = self.dirty_notifier {
                 notifier.mark_dirty(id);
             }
+        } else {
+            scarlet_std::println!("[Button] notify_dirty: NO view_id!");
+        }
+    }
+
+    fn draw_to_buffer(&mut self) {
+        scarlet_std::println!("[Button::draw_to_buffer] ENTERED");
+        if let Some(buffer) = self.buffer_mut() {
+            scarlet_std::println!("[Button::draw_to_buffer] buffer size={}x{}", buffer.width(), buffer.height());
+            let width = buffer.width();
+            let height = buffer.height();
+            let data = buffer.data_mut();
+            let data_ptr = data.as_mut_ptr();
+            let len = data.len();
+
+            // Clear buffer
+            for i in 0..len {
+                unsafe {
+                    *data_ptr.add(i) = 0;
+                }
+            }
+
+            // Create canvas and draw
+            let mut canvas = Canvas::new(unsafe { core::slice::from_raw_parts_mut(data_ptr, len) }, width, height);
+            let frame = Rect::new(0, 0, width, height);
+            self.draw(&mut canvas, frame);
+            scarlet_std::println!("[Button::draw_to_buffer] draw completed");
+        } else {
+            scarlet_std::println!("[Button::draw_to_buffer] NO BUFFER!");
+        }
+    }
+}
+
+impl Label {
+    fn notify_dirty_label(&mut self) {
+        if let Some(id) = self.view_id {
+            scarlet_std::println!("[Label] notify_dirty: view_id={}", id);
+            if let Some(ref notifier) = self.dirty_notifier {
+                notifier.mark_dirty(id);
+            }
+        } else {
+            scarlet_std::println!("[Label] notify_dirty: NO view_id!");
         }
     }
 }
@@ -683,6 +889,8 @@ pub struct TextField {
     refresh_handle: ViewRefreshHandle,
     cached_text: String,
     on_action: Option<Box<dyn FnMut(&str)>>,
+    /// View buffer for rendering
+    buffer: Option<ViewBuffer>,
     /// View ID for buffer management
     view_id: Option<ViewId>,
     /// Dirty notifier for buffer management
@@ -708,6 +916,7 @@ impl TextField {
             refresh_handle: ViewRefreshHandle::new(),
             cached_text,
             on_action: None,
+            buffer: None,
             view_id: None,
             dirty_notifier: None,
         }
@@ -851,6 +1060,8 @@ impl TextField {
 
     fn notify_dirty(&mut self) {
         if let Some(id) = self.view_id {
+            // Draw to buffer
+            self.draw_to_buffer();
             if let Some(ref notifier) = self.dirty_notifier {
                 notifier.mark_dirty(id);
             }
@@ -1040,6 +1251,43 @@ impl View for TextField {
     fn set_dirty_notifier(&mut self, notifier: DirtyNotifier) {
         self.dirty_notifier = Some(notifier);
     }
+
+    fn buffer(&self) -> Option<&ViewBuffer> {
+        self.buffer.as_ref()
+    }
+
+    fn buffer_mut(&mut self) -> Option<&mut ViewBuffer> {
+        self.buffer.as_mut()
+    }
+
+    fn ensure_buffer(&mut self, width: u32, height: u32) -> Option<&mut ViewBuffer> {
+        if self.buffer.is_none() || self.buffer.as_ref().map(|b| (b.width(), b.height())) != Some((width, height)) {
+            self.buffer = Some(ViewBuffer::new(width, height));
+        }
+        self.buffer.as_mut()
+    }
+
+    fn draw_to_buffer(&mut self) {
+        if let Some(buffer) = self.buffer_mut() {
+            let width = buffer.width();
+            let height = buffer.height();
+            let data = buffer.data_mut();
+            let data_ptr = data.as_mut_ptr();
+            let len = data.len();
+
+            // Clear buffer
+            for i in 0..len {
+                unsafe {
+                    *data_ptr.add(i) = 0;
+                }
+            }
+
+            // Create canvas and draw
+            let mut canvas = Canvas::new(unsafe { core::slice::from_raw_parts_mut(data_ptr, len) }, width, height);
+            let frame = Rect::new(0, 0, width, height);
+            self.draw(&mut canvas, frame);
+        }
+    }
 }
 
 impl Focus for TextField {
@@ -1048,6 +1296,7 @@ impl Focus for TextField {
         self.is_focused = true;
         if !was_focused {
             self.refresh_handle.mark_dirty();
+            self.draw_to_buffer();
             self.notify_dirty();
         }
         !was_focused
@@ -1058,6 +1307,7 @@ impl Focus for TextField {
         self.is_focused = false;
         if was_focused {
             self.refresh_handle.mark_dirty();
+            self.draw_to_buffer();
             self.notify_dirty();
         }
         was_focused
@@ -1163,6 +1413,8 @@ pub struct RectView {
     corner_radius: u32,
     border_width: u32,
     border_color: Option<Color>,
+    /// View buffer for rendering
+    buffer: Option<ViewBuffer>,
     /// View ID for buffer management
     view_id: Option<ViewId>,
     /// Dirty notifier for buffer management
@@ -1178,6 +1430,7 @@ impl RectView {
             corner_radius: 0,
             border_width: 0,
             border_color: None,
+            buffer: None,
             view_id: None,
             dirty_notifier: None,
         }
@@ -1260,6 +1513,43 @@ impl View for RectView {
     fn set_dirty_notifier(&mut self, notifier: DirtyNotifier) {
         self.dirty_notifier = Some(notifier);
     }
+
+    fn buffer(&self) -> Option<&ViewBuffer> {
+        self.buffer.as_ref()
+    }
+
+    fn buffer_mut(&mut self) -> Option<&mut ViewBuffer> {
+        self.buffer.as_mut()
+    }
+
+    fn ensure_buffer(&mut self, width: u32, height: u32) -> Option<&mut ViewBuffer> {
+        if self.buffer.is_none() || self.buffer.as_ref().map(|b| (b.width(), b.height())) != Some((width, height)) {
+            self.buffer = Some(ViewBuffer::new(width, height));
+        }
+        self.buffer.as_mut()
+    }
+
+    fn draw_to_buffer(&mut self) {
+        if let Some(buffer) = self.buffer_mut() {
+            let width = buffer.width();
+            let height = buffer.height();
+            let data = buffer.data_mut();
+            let data_ptr = data.as_mut_ptr();
+            let len = data.len();
+
+            // Clear buffer
+            for i in 0..len {
+                unsafe {
+                    *data_ptr.add(i) = 0;
+                }
+            }
+
+            // Create canvas and draw
+            let mut canvas = Canvas::new(unsafe { core::slice::from_raw_parts_mut(data_ptr, len) }, width, height);
+            let frame = Rect::new(0, 0, width, height);
+            self.draw(&mut canvas, frame);
+        }
+    }
 }
 
 /// CheckBox - boolean toggle control with two-way binding
@@ -1281,6 +1571,8 @@ pub struct CheckBox {
     label_color: Color,
     corner_radius: u32,
     refresh_handle: ViewRefreshHandle,
+    /// View buffer for rendering
+    buffer: Option<ViewBuffer>,
     /// View ID for buffer management
     view_id: Option<ViewId>,
     /// Dirty notifier for buffer management
@@ -1296,6 +1588,7 @@ impl CheckBox {
             label_color: Color::BLACK,
             corner_radius: 3,
             refresh_handle: ViewRefreshHandle::new(),
+            buffer: None,
             view_id: None,
             dirty_notifier: None,
         }
@@ -1405,11 +1698,50 @@ impl View for CheckBox {
     fn set_dirty_notifier(&mut self, notifier: DirtyNotifier) {
         self.dirty_notifier = Some(notifier);
     }
+
+    fn buffer(&self) -> Option<&ViewBuffer> {
+        self.buffer.as_ref()
+    }
+
+    fn buffer_mut(&mut self) -> Option<&mut ViewBuffer> {
+        self.buffer.as_mut()
+    }
+
+    fn ensure_buffer(&mut self, width: u32, height: u32) -> Option<&mut ViewBuffer> {
+        if self.buffer.is_none() || self.buffer.as_ref().map(|b| (b.width(), b.height())) != Some((width, height)) {
+            self.buffer = Some(ViewBuffer::new(width, height));
+        }
+        self.buffer.as_mut()
+    }
+
+    fn draw_to_buffer(&mut self) {
+        if let Some(buffer) = self.buffer_mut() {
+            let width = buffer.width();
+            let height = buffer.height();
+            let data = buffer.data_mut();
+            let data_ptr = data.as_mut_ptr();
+            let len = data.len();
+
+            // Clear buffer
+            for i in 0..len {
+                unsafe {
+                    *data_ptr.add(i) = 0;
+                }
+            }
+
+            // Create canvas and draw
+            let mut canvas = Canvas::new(unsafe { core::slice::from_raw_parts_mut(data_ptr, len) }, width, height);
+            let frame = Rect::new(0, 0, width, height);
+            self.draw(&mut canvas, frame);
+        }
+    }
 }
 
 impl CheckBox {
     fn notify_dirty(&mut self) {
         if let Some(id) = self.view_id {
+            // Draw to buffer
+            self.draw_to_buffer();
             if let Some(ref notifier) = self.dirty_notifier {
                 notifier.mark_dirty(id);
             }
@@ -1443,6 +1775,8 @@ pub struct Slider {
     /// Frame counter for throttling
     frame_counter: u32,
     refresh_handle: ViewRefreshHandle,
+    /// View buffer for rendering
+    buffer: Option<ViewBuffer>,
     /// View ID for buffer management
     view_id: Option<ViewId>,
     /// Dirty notifier for buffer management
@@ -1462,6 +1796,7 @@ impl Slider {
             last_commit_frame: 0,
             frame_counter: 0,
             refresh_handle: ViewRefreshHandle::new(),
+            buffer: None,
             view_id: None,
             dirty_notifier: None,
         }
@@ -1484,27 +1819,31 @@ impl Slider {
         let track_start = frame.x + thumb_radius;
         let track_end = frame.x + frame.width as i32 - thumb_radius;
         let track_width = (track_end - track_start) as f32;
-        
+
         if track_width > 0.0 {
             let position = (mouse_x - track_start).max(0).min(track_width as i32) as f32;
             let ratio = position / track_width;
             let new_value = self.min + ratio * (self.max - self.min);
             let clamped = new_value.clamp(self.min, self.max);
-            
+
             // Check if value actually changed (with small threshold to avoid noise)
             let old_value = self.pending_value.unwrap_or_else(|| self.binding.get());
             let value_changed = (clamped - old_value).abs() > 0.001;
-            
+
             if value_changed {
                 // Store pending value instead of immediately committing
                 self.pending_value = Some(clamped);
-                
+
+                // Draw to buffer immediately for responsive UI
+                self.draw_to_buffer();
+                self.notify_dirty();
+
                 // Throttle: only commit every 5 frames during drag to reduce flicker
                 self.frame_counter = self.frame_counter.wrapping_add(1);
                 if self.frame_counter.wrapping_sub(self.last_commit_frame) >= 5 {
                     self.commit_pending_value();
                 }
-                
+
                 // Mark dirty only when value actually changed
                 self.refresh_handle.mark_dirty();
             }
@@ -1622,6 +1961,43 @@ impl View for Slider {
     fn set_dirty_notifier(&mut self, notifier: DirtyNotifier) {
         self.dirty_notifier = Some(notifier);
     }
+
+    fn buffer(&self) -> Option<&ViewBuffer> {
+        self.buffer.as_ref()
+    }
+
+    fn buffer_mut(&mut self) -> Option<&mut ViewBuffer> {
+        self.buffer.as_mut()
+    }
+
+    fn ensure_buffer(&mut self, width: u32, height: u32) -> Option<&mut ViewBuffer> {
+        if self.buffer.is_none() || self.buffer.as_ref().map(|b| (b.width(), b.height())) != Some((width, height)) {
+            self.buffer = Some(ViewBuffer::new(width, height));
+        }
+        self.buffer.as_mut()
+    }
+
+    fn draw_to_buffer(&mut self) {
+        if let Some(buffer) = self.buffer_mut() {
+            let width = buffer.width();
+            let height = buffer.height();
+            let data = buffer.data_mut();
+            let data_ptr = data.as_mut_ptr();
+            let len = data.len();
+
+            // Clear buffer
+            for i in 0..len {
+                unsafe {
+                    *data_ptr.add(i) = 0;
+                }
+            }
+
+            // Create canvas and draw
+            let mut canvas = Canvas::new(unsafe { core::slice::from_raw_parts_mut(data_ptr, len) }, width, height);
+            let frame = Rect::new(0, 0, width, height);
+            self.draw(&mut canvas, frame);
+        }
+    }
 }
 
 impl Slider {
@@ -1659,6 +2035,8 @@ pub struct ProgressBar {
     display_value: f32,
     /// Whether animation is enabled
     animate: bool,
+    /// View buffer for rendering
+    buffer: Option<ViewBuffer>,
     /// View ID for buffer management
     view_id: Option<ViewId>,
     /// Dirty notifier for buffer management
@@ -1680,6 +2058,7 @@ impl ProgressBar {
             display_value: initial,
             // Disable animation by default to prevent flicker
             animate: false,
+            buffer: None,
             view_id: None,
             dirty_notifier: None,
         }
@@ -1749,6 +2128,8 @@ impl View for ProgressBar {
 
         // Notify if state changed
         if needs_update {
+            // Draw to buffer
+            self.draw_to_buffer();
             self.notify_dirty();
         }
 
@@ -1794,6 +2175,43 @@ impl View for ProgressBar {
     fn set_dirty_notifier(&mut self, notifier: DirtyNotifier) {
         self.dirty_notifier = Some(notifier);
     }
+
+    fn buffer(&self) -> Option<&ViewBuffer> {
+        self.buffer.as_ref()
+    }
+
+    fn buffer_mut(&mut self) -> Option<&mut ViewBuffer> {
+        self.buffer.as_mut()
+    }
+
+    fn ensure_buffer(&mut self, width: u32, height: u32) -> Option<&mut ViewBuffer> {
+        if self.buffer.is_none() || self.buffer.as_ref().map(|b| (b.width(), b.height())) != Some((width, height)) {
+            self.buffer = Some(ViewBuffer::new(width, height));
+        }
+        self.buffer.as_mut()
+    }
+
+    fn draw_to_buffer(&mut self) {
+        if let Some(buffer) = self.buffer_mut() {
+            let width = buffer.width();
+            let height = buffer.height();
+            let data = buffer.data_mut();
+            let data_ptr = data.as_mut_ptr();
+            let len = data.len();
+
+            // Clear buffer
+            for i in 0..len {
+                unsafe {
+                    *data_ptr.add(i) = 0;
+                }
+            }
+
+            // Create canvas and draw
+            let mut canvas = Canvas::new(unsafe { core::slice::from_raw_parts_mut(data_ptr, len) }, width, height);
+            let frame = Rect::new(0, 0, width, height);
+            self.draw(&mut canvas, frame);
+        }
+    }
 }
 
 impl ProgressBar {
@@ -1825,6 +2243,8 @@ pub struct Toggle {
     thumb_color: Color,
     is_hovered: bool,
     refresh_handle: ViewRefreshHandle,
+    /// View buffer for rendering
+    buffer: Option<ViewBuffer>,
     /// View ID for buffer management
     view_id: Option<ViewId>,
     /// Dirty notifier for buffer management
@@ -1840,6 +2260,7 @@ impl Toggle {
             thumb_color: Color::WHITE,
             is_hovered: false,
             refresh_handle: ViewRefreshHandle::new(),
+            buffer: None,
             view_id: None,
             dirty_notifier: None,
         }
@@ -1962,11 +2383,50 @@ impl View for Toggle {
     fn set_dirty_notifier(&mut self, notifier: DirtyNotifier) {
         self.dirty_notifier = Some(notifier);
     }
+
+    fn buffer(&self) -> Option<&ViewBuffer> {
+        self.buffer.as_ref()
+    }
+
+    fn buffer_mut(&mut self) -> Option<&mut ViewBuffer> {
+        self.buffer.as_mut()
+    }
+
+    fn ensure_buffer(&mut self, width: u32, height: u32) -> Option<&mut ViewBuffer> {
+        if self.buffer.is_none() || self.buffer.as_ref().map(|b| (b.width(), b.height())) != Some((width, height)) {
+            self.buffer = Some(ViewBuffer::new(width, height));
+        }
+        self.buffer.as_mut()
+    }
+
+    fn draw_to_buffer(&mut self) {
+        if let Some(buffer) = self.buffer_mut() {
+            let width = buffer.width();
+            let height = buffer.height();
+            let data = buffer.data_mut();
+            let data_ptr = data.as_mut_ptr();
+            let len = data.len();
+
+            // Clear buffer
+            for i in 0..len {
+                unsafe {
+                    *data_ptr.add(i) = 0;
+                }
+            }
+
+            // Create canvas and draw
+            let mut canvas = Canvas::new(unsafe { core::slice::from_raw_parts_mut(data_ptr, len) }, width, height);
+            let frame = Rect::new(0, 0, width, height);
+            self.draw(&mut canvas, frame);
+        }
+    }
 }
 
 impl Toggle {
     fn notify_dirty(&mut self) {
         if let Some(id) = self.view_id {
+            // Draw to buffer
+            self.draw_to_buffer();
             if let Some(ref notifier) = self.dirty_notifier {
                 notifier.mark_dirty(id);
             }
@@ -2021,6 +2481,8 @@ pub struct ListView {
     needs_redraw: bool,
     /// Callback when selection changes
     on_selection_change: Option<Box<dyn FnMut(usize) + 'static>>,
+    /// View buffer for rendering
+    buffer: Option<ViewBuffer>,
     /// View ID for buffer management
     view_id: Option<ViewId>,
     /// Dirty notifier for buffer management
@@ -2053,6 +2515,7 @@ impl ListView {
             hovered_index: None,
             needs_redraw: false,
             on_selection_change: None,
+            buffer: None,
             view_id: None,
             dirty_notifier: None,
         }
@@ -2306,11 +2769,50 @@ impl View for ListView {
     fn set_dirty_notifier(&mut self, notifier: DirtyNotifier) {
         self.dirty_notifier = Some(notifier);
     }
+
+    fn buffer(&self) -> Option<&ViewBuffer> {
+        self.buffer.as_ref()
+    }
+
+    fn buffer_mut(&mut self) -> Option<&mut ViewBuffer> {
+        self.buffer.as_mut()
+    }
+
+    fn ensure_buffer(&mut self, width: u32, height: u32) -> Option<&mut ViewBuffer> {
+        if self.buffer.is_none() || self.buffer.as_ref().map(|b| (b.width(), b.height())) != Some((width, height)) {
+            self.buffer = Some(ViewBuffer::new(width, height));
+        }
+        self.buffer.as_mut()
+    }
+
+    fn draw_to_buffer(&mut self) {
+        if let Some(buffer) = self.buffer_mut() {
+            let width = buffer.width();
+            let height = buffer.height();
+            let data = buffer.data_mut();
+            let data_ptr = data.as_mut_ptr();
+            let len = data.len();
+
+            // Clear buffer
+            for i in 0..len {
+                unsafe {
+                    *data_ptr.add(i) = 0;
+                }
+            }
+
+            // Create canvas and draw
+            let mut canvas = Canvas::new(unsafe { core::slice::from_raw_parts_mut(data_ptr, len) }, width, height);
+            let frame = Rect::new(0, 0, width, height);
+            self.draw(&mut canvas, frame);
+        }
+    }
 }
 
 impl ListView {
     fn notify_dirty(&mut self) {
         if let Some(id) = self.view_id {
+            // Draw to buffer
+            self.draw_to_buffer();
             if let Some(ref notifier) = self.dirty_notifier {
                 notifier.mark_dirty(id);
             }

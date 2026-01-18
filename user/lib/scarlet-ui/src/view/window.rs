@@ -1,7 +1,7 @@
 //! Window view - the root view with decorations
 
 use super::traits::{View, ViewBox, Size};
-use super::node::{ViewRegistry, ViewId, ViewBuffer, ViewNode, DirtyNotifier};
+use super::node::{ViewRegistry, ViewId, ViewNode, DirtyNotifier};
 use crate::graphics::{Canvas, Rect};
 use crate::event::{Event, EventKind, MouseButton};
 use crate::Color;
@@ -227,6 +227,7 @@ impl Window {
     /// Set content view (builder pattern)
     pub fn content<V: View + 'static>(mut self, view: V) -> Self {
         self.content = Some(Box::new(view));
+        // Note: Can't build registry here yet - need layout() first for proper frames
         self
     }
 
@@ -501,33 +502,55 @@ impl Window {
     }
 
     /// Build view registry by walking the tree
+    /// Two-pass approach:
+    /// 1. Collect all views and assign IDs in registry
+    /// 2. Assign IDs and notifiers to views using the registry
+    /// NOTE: Only builds if registry is empty (idempotent)
     pub fn build_view_registry(&mut self) {
+        // Already built, skip
+        if !self.view_registry.is_empty() {
+            scarlet_std::println!("[build_view_registry] Already built, skipping ({} views)", self.view_registry.len());
+            return;
+        }
+
+        scarlet_std::println!("[build_view_registry] Building view registry...");
         self.view_registry.clear();
 
-        let frame = Rect::new(0, TITLEBAR_HEIGHT as i32, self.width, self.height - TITLEBAR_HEIGHT);
-        let notifier = self.dirty_notifier.clone();
+        // Take content temporarily to avoid borrow conflicts
+        let content = self.content.take();
 
-        // Take content to avoid borrow issues
-        if let Some(mut content) = self.content.take() {
-            self.register_view_recursive(content.as_mut(), frame, 0, &notifier);
-            // Return content
-            self.content = Some(content);
+        if let Some(mut c) = content {
+            let content_frame = Rect::new(0, TITLEBAR_HEIGHT as i32, self.width, self.height - TITLEBAR_HEIGHT);
+
+            // Pass 1: Collect all views into registry (no parent for root content)
+            self.collect_views_recursive(c.as_ref(), content_frame, 0, None);
+
+            // Pass 2: Assign IDs and notifiers to views
+            let notifier = self.dirty_notifier.clone();
+            self.assign_view_ids_recursive(c.as_mut(), content_frame, &notifier);
+
+            // Put content back
+            self.content = Some(c);
         }
     }
 
-    fn register_view_recursive(
-        &mut self,
-        view: &mut dyn View,
-        frame: Rect,
-        z_order: u32,
-        notifier: &DirtyNotifier,
-    ) -> ViewId {
+    /// Pass 1: Collect all views into registry with their frames and z-order
+    fn collect_views_recursive(&mut self, view: &dyn View, frame: Rect, z_order: u32, parent_id: Option<ViewId>) {
+        // Register this view in the registry
         let id = self.view_registry.register(frame, z_order);
-        view.set_view_id(id);
-        view.set_dirty_notifier(notifier.clone());
 
+        scarlet_std::println!("[collect_views] Registered view_id={} at ({}, {}) size={}x{}, parent={:?}", id, frame.x, frame.y, frame.width, frame.height, parent_id);
+
+        // Set parent ID if this view has a parent
+        if let Some(pid) = parent_id {
+            if let Some(node) = self.view_registry.get_node_mut(id) {
+                node.parent_id = Some(pid);
+            }
+        }
+
+        // Recurse to children
         let mut next_z = z_order;
-        view.visit_children_mut(&mut |child, child_frame| {
+        view.visit_children(&mut |child, child_frame| {
             let abs_frame = Rect::new(
                 frame.x + child_frame.x,
                 frame.y + child_frame.y,
@@ -535,92 +558,271 @@ impl Window {
                 child_frame.height,
             );
             next_z += 1;
-            self.register_view_recursive(child, abs_frame, next_z, notifier);
+            self.collect_views_recursive(child, abs_frame, next_z, Some(id));
             false
         });
+    }
 
-        id
+    /// Pass 2: Assign IDs and notifiers to views by matching frames with registry
+    fn assign_view_ids_recursive(&mut self, view: &mut dyn View, frame: Rect, notifier: &DirtyNotifier) {
+        // Find the node in registry that matches this frame
+        let id = self.view_registry.find_id_by_frame(frame);
+
+        if let Some(view_id) = id {
+            scarlet_std::println!("[assign_view_ids] Assigning view_id={} to frame at ({}, {})", view_id, frame.x, frame.y);
+            view.set_view_id(view_id);
+            view.set_dirty_notifier(notifier.clone());
+        } else {
+            scarlet_std::println!("[assign_view_ids] WARNING: No ID found for frame at ({}, {}", frame.x, frame.y);
+        }
+
+        // Recurse to children
+        view.visit_children_mut(&mut |child, child_frame| {
+            let abs_frame = Rect::new(
+                frame.x + child_frame.x,
+                frame.y + child_frame.y,
+                child_frame.width,
+                child_frame.height,
+            );
+            self.assign_view_ids_recursive(child, abs_frame, notifier);
+            false
+        });
     }
 
     /// Compose view buffers to window canvas
+    /// Simple recursive search - stops early when target is found
     pub fn compose_buffers(&mut self, canvas: &mut Canvas) {
         // Process dirty notifications from views
-        for id in self.dirty_notifier.take_dirty() {
-            self.view_registry.mark_dirty(id);
+        let notified_ids = self.dirty_notifier.take_dirty();
+
+        for id in &notified_ids {
+            scarlet_std::println!("[compose_buffers] Notified dirty: {}", id);
+            self.view_registry.mark_dirty(*id);
         }
 
         let content_frame = Rect::new(0, TITLEBAR_HEIGHT as i32, self.width, self.height - TITLEBAR_HEIGHT);
 
-        // Take content for drawing
+        // Get dirty view IDs
+        let dirty_ids: Vec<_> = self.view_registry.get_dirty_ids().iter().cloned().collect();
+        scarlet_std::println!("[compose_buffers] Total dirty views: {}", dirty_ids.len());
+
+        if dirty_ids.is_empty() {
+            scarlet_std::println!("[compose_buffers] No dirty views, skipping\n");
+            return;
+        }
+
+        // Take content for traversal
         let content = self.content.take();
 
-        // Redraw dirty views directly to their buffers
-        let dirty_ids: Vec<_> = self.view_registry.get_dirty_ids().iter().cloned().collect();
-        for id in dirty_ids {
-            if let Some(node) = self.view_registry.get_node_mut(id) {
-                let target_frame = node.frame;
-                let buffer = node.ensure_buffer();
-                let width = buffer.width();
-                let height = buffer.height();
-                let mut buffer_canvas = Canvas::new(buffer.data_mut(), width, height);
-                if let Some(ref c) = content {
-                    // Call standalone function to avoid borrow issues
-                    draw_view_to_buffer_impl(c.as_ref(), content_frame, &mut buffer_canvas, target_frame);
+        // Find all views that need to be composited (dirty views + overlapping views)
+        let mut compose_ids = dirty_ids.clone();
+
+        for dirty_id in &dirty_ids {
+            if let Some(dirty_node) = self.view_registry.get_node(*dirty_id) {
+                // Find all views that overlap this dirty view
+                for node in self.view_registry.iter() {
+                    if node.id != *dirty_id && node.frame.intersects(dirty_node.frame) {
+                        if !compose_ids.contains(&node.id) {
+                            scarlet_std::println!("[compose_buffers] View {} overlaps dirty view {}", node.id, dirty_id);
+                            compose_ids.push(node.id);
+                        }
+                    }
                 }
+            }
+        }
+
+        // Sort by z-order and collect nodes
+        let mut compose_nodes: Vec<_> = compose_ids.iter()
+            .filter_map(|id| self.view_registry.get_node(*id))
+            .collect();
+        compose_nodes.sort_by_key(|n| n.z_order);
+
+        scarlet_std::println!("[compose_buffers] Composing {} views", compose_nodes.len());
+
+        // Compose each view's buffer by traversing the tree
+        if let Some(ref c) = content {
+            for node in &compose_nodes {
+                self.compose_view_by_id_recursive(c.as_ref(), content_frame, canvas, node, &dirty_ids);
             }
         }
 
         // Return content
         self.content = content;
 
-        // Sort by z-order and compose all buffers
-        let mut nodes: Vec<_> = self.view_registry.iter().collect();
-        nodes.sort_by_key(|n| n.z_order);
-
-        for node in nodes {
-            if let Some(ref buffer) = node.buffer {
-                self.compose_buffer_to_canvas(canvas, buffer, node.frame);
-            }
-        }
-
         self.view_registry.clear_dirty();
+        scarlet_std::println!("[compose_buffers] Done\n");
     }
 
-    fn draw_view_to_buffer(
+    /// Recursively find view by ID and compose its buffer
+    /// Stops early when the target view is found (O(D) where D is tree depth)
+    fn compose_view_by_id_recursive(
         &self,
         view: &dyn View,
         view_frame: Rect,
-        buffer_canvas: &mut Canvas,
-        target_frame: Rect,
-    ) {
-        draw_view_to_buffer_impl(view, view_frame, buffer_canvas, target_frame);
+        canvas: &mut Canvas,
+        target_node: &ViewNode,
+        dirty_ids: &[ViewId],
+    ) -> bool {
+        // Check if this view matches the target ID
+        if let Some(view_id) = view.view_id() {
+            if view_id == target_node.id {
+                // Found it - compose the buffer
+                self.compose_view_buffer(view, view_frame, canvas, target_node, dirty_ids);
+                return true; // Stop recursion
+            }
+        }
+
+        // Recurse to children
+        let mut found = false;
+        view.visit_children(&mut |child, child_frame| {
+            if found {
+                return true; // Already found, stop searching
+            }
+            let abs_frame = Rect::new(
+                view_frame.x + child_frame.x,
+                view_frame.y + child_frame.y,
+                child_frame.width,
+                child_frame.height,
+            );
+            found = self.compose_view_by_id_recursive(child, abs_frame, canvas, target_node, dirty_ids);
+            found
+        });
+        found
     }
 
-    fn compose_buffer_to_canvas(&self, canvas: &mut Canvas, buffer: &ViewBuffer, frame: Rect) {
-        // Copy buffer pixels to canvas at frame position
-        let data = buffer.data();
-        for y in 0..buffer.height() {
-            for x in 0..buffer.width() {
-                let src_offset = ((y * buffer.width() + x) * 4) as usize;
-                let dst_x = frame.x + x as i32;
-                let dst_y = frame.y + y as i32;
+    /// Compose a single view's buffer to canvas
+    fn compose_view_buffer(
+        &self,
+        view: &dyn View,
+        view_frame: Rect,
+        canvas: &mut Canvas,
+        target_node: &ViewNode,
+        dirty_ids: &[ViewId],
+    ) {
+        let view_id = target_node.id;
+        scarlet_std::println!("[compose_view_buffer] Composing view {} at ({}, {})", view_id, view_frame.x, view_frame.y);
 
-                // Bounds check
-                if dst_x >= 0 && dst_x < frame.x + frame.width as i32
-                    && dst_y >= 0 && dst_y < frame.y + frame.height as i32
-                {
-                    let b = data[src_offset];
-                    let g = data[src_offset + 1];
-                    let r = data[src_offset + 2];
-                    let a = data[src_offset + 3];
+        if let Some(buffer) = view.buffer() {
+            // Clear background for dirty views
+            if dirty_ids.contains(&view_id) {
+                scarlet_std::println!("[compose_view_buffer] Clearing and composing view {} (dirty)", view_id);
+                canvas.fill_rect(
+                    view_frame.x,
+                    view_frame.y,
+                    view_frame.width,
+                    view_frame.height,
+                    self.background,
+                );
+            } else {
+                scarlet_std::println!("[compose_view_buffer] Composing view {} (overlapping)", view_id);
+            }
 
-                    // Simple alpha blend
+            // Compose buffer to canvas
+            for y in 0..buffer.height() {
+                for x in 0..buffer.width() {
+                    let src_offset = ((y * buffer.width() + x) * 4) as usize;
+                    let dst_x = view_frame.x + x as i32;
+                    let dst_y = view_frame.y + y as i32;
+
+                    let b = buffer.data()[src_offset];
+                    let g = buffer.data()[src_offset + 1];
+                    let r = buffer.data()[src_offset + 2];
+                    let a = buffer.data()[src_offset + 3];
+
                     if a > 0 {
-                        canvas.put_pixel_alpha(dst_x, dst_y, Color::rgba(r, g, b, a), a as f32 / 255.0);
+                        canvas.put_pixel_alpha(dst_x, dst_y, crate::Color::rgba(r, g, b, a), a as f32 / 255.0);
                     }
                 }
             }
         }
+    }
+
+    /// Get the number of views in the registry
+    pub fn view_registry_len(&self) -> usize {
+        self.view_registry.len()
+    }
+
+    /// Compose all view buffers to canvas (for first frame)
+    /// Initialize buffers and compose in one pass
+    pub fn compose_all_buffers(&mut self, canvas: &mut Canvas) {
+        let content_frame = Rect::new(0, TITLEBAR_HEIGHT as i32, self.width, self.height - TITLEBAR_HEIGHT);
+
+        // Collect node info to avoid borrow checker issues
+        let nodes_copy: Vec<_> = self.view_registry.iter()
+            .map(|n| (n.id, n.frame, n.z_order, n.parent_id))
+            .collect();
+
+        let mut sorted_indices: Vec<_> = (0..nodes_copy.len()).collect();
+        sorted_indices.sort_by_key(|&i| nodes_copy[i].2);
+
+        scarlet_std::println!("[compose_all_buffers] CALLED! Initializing and composing {} views", nodes_copy.len());
+
+        // For each node, find the view and compose its buffer
+        let mut content = self.content.take();
+        if let Some(ref mut c) = content {
+            for &idx in &sorted_indices {
+                let (id, frame, z_order, parent_id) = nodes_copy[idx];
+                let temp_node = ViewNode::new(id, frame, z_order);
+                scarlet_std::println!("[compose_all_buffers] Processing view {} at ({}, {})", id, frame.x, frame.y);
+                if let Some(pid) = parent_id {
+                    let temp_node = temp_node.with_parent(pid);
+                    self.ensure_and_compose_view_recursive(c.as_mut(), content_frame, canvas, &temp_node);
+                } else {
+                    self.ensure_and_compose_view_recursive(c.as_mut(), content_frame, canvas, &temp_node);
+                }
+            }
+        }
+        self.content = content;
+
+        scarlet_std::println!("[compose_all_buffers] Done\n");
+    }
+
+    /// Find view by ID, ensure buffer, draw to buffer, then compose
+    fn ensure_and_compose_view_recursive(
+        &mut self,
+        view: &mut dyn View,
+        view_frame: Rect,
+        canvas: &mut Canvas,
+        target_node: &ViewNode,
+    ) -> bool {
+        // Check if this view matches the target ID
+        if let Some(view_id) = view.view_id() {
+            if view_id == target_node.id {
+                scarlet_std::println!("[ensure_and_compose] Found view {} at ({}, {})", view_id, view_frame.x, view_frame.y);
+                // Found it - ensure buffer, draw, then compose
+                let width = view_frame.width;
+                let height = view_frame.height;
+
+                // Only process if this view has a buffer
+                if let Some(_buffer) = view.ensure_buffer(width, height) {
+                    view.draw_to_buffer();
+
+                    // Now compose (using immutable view)
+                    let view_immutable: &dyn View = &*view;
+                    self.compose_view_buffer(view_immutable, view_frame, canvas, target_node, &[]);
+                } else {
+                    scarlet_std::println!("[ensure_and_compose] View {} has no buffer (container), skipping", view_id);
+                }
+                return true; // Stop recursion
+            }
+        }
+
+        // Recurse to children
+        let mut found = false;
+        view.visit_children_mut(&mut |child, child_frame| {
+            if found {
+                return true; // Already found, stop searching
+            }
+            let abs_frame = Rect::new(
+                view_frame.x + child_frame.x,
+                view_frame.y + child_frame.y,
+                child_frame.width,
+                child_frame.height,
+            );
+            found = self.ensure_and_compose_view_recursive(child, abs_frame, canvas, target_node);
+            found
+        });
+        found
     }
 }
 
@@ -628,7 +830,7 @@ impl View for Window {
     fn layout(&mut self, _available: Size) -> Size {
         // Window takes the size it was created with
         let size = Size::new(self.width, self.height);
-        
+
         // Layout content in content area
         if let Some(ref mut content) = self.content {
             let content_available = Size::new(
@@ -637,7 +839,10 @@ impl View for Window {
             );
             self.content_size = content.layout(content_available);
         }
-        
+
+        // NOTE: build_view_registry() is called by application.rs on first frame
+        // to avoid rebuilding it every time layout() is called
+
         size
     }
 
@@ -866,36 +1071,4 @@ impl View for Window {
     fn clear_needs_draw(&mut self) {
         self.needs_redraw = false;
     }
-}
-
-/// Standalone helper function to avoid borrow checker issues
-fn draw_view_to_buffer_impl(
-    view: &dyn View,
-    view_frame: Rect,
-    buffer_canvas: &mut Canvas,
-    target_frame: Rect,
-) {
-    // Check if this view matches the target
-    if view_frame == target_frame {
-        // Draw to buffer (offset to 0,0)
-        let local_frame = Rect::new(0, 0, view_frame.width, view_frame.height);
-        view.draw(buffer_canvas, local_frame);
-        return;
-    }
-
-    // Recurse to children
-    view.visit_children(&mut |child, child_frame| {
-        let abs_frame = Rect::new(
-            view_frame.x + child_frame.x,
-            view_frame.y + child_frame.y,
-            child_frame.width,
-            child_frame.height,
-        );
-
-        // Clip to target frame
-        if abs_frame.intersects(target_frame) {
-            draw_view_to_buffer_impl(child, abs_frame, buffer_canvas, target_frame);
-        }
-        false
-    });
 }

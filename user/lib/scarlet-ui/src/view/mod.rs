@@ -9,6 +9,7 @@
 //! like `VStack` and `HStack`. `Window` is the root view with decorations.
 
 mod traits;
+mod buffer;
 mod node;
 mod containers;
 mod controls;
@@ -16,7 +17,8 @@ mod navigation;
 mod window;
 
 pub use traits::{View, ViewBox, Size, IntoViewBox, Focus, Hoverable};
-pub use node::{ViewId, ViewBuffer, ViewNode, ViewRegistry, DirtyNotifier};
+pub use buffer::ViewBuffer;
+pub use node::{ViewId, ViewNode, ViewRegistry, DirtyNotifier};
 pub use containers::{HStack, StackAlignment, VStack, ZStack, Padding, Center, ScrollView};
 pub use controls::{
     // Basic views

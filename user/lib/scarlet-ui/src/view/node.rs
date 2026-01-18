@@ -1,7 +1,7 @@
 //! View node registry for buffer management
 //!
-//! Each View can have its own buffer for efficient partial updates.
 //! Window maintains a flat registry of all views for O(1) dirty tracking.
+//! Each View manages its own buffer (see buffer.rs).
 
 use scarlet_std::vec::Vec;
 use scarlet_std::sync::{Arc, Mutex};
@@ -36,80 +36,28 @@ pub type ViewId = u64;
 /// Z-order for composition (higher values drawn on top)
 pub type ZOrder = u32;
 
-/// Per-view backbuffer (BGRA format, 4 bytes per pixel)
-pub struct ViewBuffer {
-    data: Vec<u8>,
-    width: u32,
-    height: u32,
-}
-
-impl ViewBuffer {
-    pub fn new(width: u32, height: u32) -> Self {
-        let size = (width * height * 4) as usize;
-        let mut data = Vec::new();
-        data.resize(size, 0);
-        Self { data, width, height }
-    }
-
-    pub fn resize_if_needed(&mut self, width: u32, height: u32) -> bool {
-        if width != self.width || height != self.height {
-            let size = (width * height * 4) as usize;
-            self.data.resize(size, 0);
-            self.width = width;
-            self.height = height;
-            true
-        } else {
-            false
-        }
-    }
-
-    pub fn data_mut(&mut self) -> &mut [u8] {
-        &mut self.data
-    }
-
-    pub fn data(&self) -> &[u8] {
-        &self.data
-    }
-
-    pub fn width(&self) -> u32 {
-        self.width
-    }
-
-    pub fn height(&self) -> u32 {
-        self.height
-    }
-}
-
 /// A node in the flat view registry
+/// Note: Each View manages its own buffer (see super::buffer::ViewBuffer)
 pub struct ViewNode {
     pub id: ViewId,
+    pub parent_id: Option<ViewId>,  // Parent view ID (for propagating dirty state)
     pub frame: Rect,
     pub z_order: ZOrder,
-    pub buffer: Option<ViewBuffer>,
-    pub buffer_valid: bool,
 }
 
 impl ViewNode {
     pub fn new(id: ViewId, frame: Rect, z_order: ZOrder) -> Self {
         Self {
             id,
+            parent_id: None,
             frame,
             z_order,
-            buffer: None,
-            buffer_valid: false,
         }
     }
 
-    pub fn ensure_buffer(&mut self) -> &mut ViewBuffer {
-        if self.buffer.is_none() || !self.buffer_valid {
-            self.buffer = Some(ViewBuffer::new(self.frame.width, self.frame.height));
-            self.buffer_valid = true;
-        }
-        self.buffer.as_mut().unwrap()
-    }
-
-    pub fn invalidate_buffer(&mut self) {
-        self.buffer_valid = false;
+    pub fn with_parent(mut self, parent_id: ViewId) -> Self {
+        self.parent_id = Some(parent_id);
+        self
     }
 }
 
@@ -175,5 +123,10 @@ impl ViewRegistry {
 
     pub fn is_empty(&self) -> bool {
         self.nodes.is_empty()
+    }
+
+    /// Find view ID by frame position (for second-pass ID assignment)
+    pub fn find_id_by_frame(&self, frame: Rect) -> Option<ViewId> {
+        self.nodes.iter().find(|n| n.frame == frame).map(|n| n.id)
     }
 }

@@ -3,6 +3,7 @@
 use crate::graphics::{Canvas, Rect};
 use crate::event::Event;
 use crate::view::node::{ViewId, DirtyNotifier};
+use crate::view::buffer::ViewBuffer;
 use scarlet_std::boxed::Box;
 use scarlet_std::vec::Vec;
 
@@ -190,6 +191,56 @@ pub trait View {
     /// (like Button) should override this to update their internal state.
     fn update_hover_state(&mut self, _mouse_in_frame: bool) -> bool {
         false
+    }
+
+    /// Get this view's buffer (immutable)
+    ///
+    /// Returns None if the view doesn't have a buffer yet.
+    fn buffer(&self) -> Option<&ViewBuffer> {
+        None
+    }
+
+    /// Get this view's buffer (mutable)
+    ///
+    /// Returns None if the view doesn't have a buffer yet.
+    fn buffer_mut(&mut self) -> Option<&mut ViewBuffer> {
+        None
+    }
+
+    /// Ensure the view has a buffer, creating it if needed
+    ///
+    /// Returns Some(buffer) if the view has a buffer, None otherwise.
+    /// Container views that don't need buffers return None.
+    fn ensure_buffer(&mut self, width: u32, height: u32) -> Option<&mut ViewBuffer> {
+        // Default implementation: return None (containers don't have buffers)
+        // Views with buffers should override this to handle buffer creation/resizing
+        self.buffer_mut()
+    }
+
+    /// Draw the view to its own buffer
+    ///
+    /// This is called by the framework to render the view.
+    /// Default implementation calls the old draw() method.
+    fn draw_to_buffer(&mut self) {
+        if let Some(buffer) = self.buffer_mut() {
+            let width = buffer.width();
+            let height = buffer.height();
+            let data = buffer.data_mut();
+            let data_ptr = data.as_mut_ptr();
+            let len = data.len();
+
+            // Clear buffer
+            for i in 0..len {
+                unsafe {
+                    *data_ptr.add(i) = 0;
+                }
+            }
+
+            // Create canvas and draw
+            let mut canvas = Canvas::new(unsafe { core::slice::from_raw_parts_mut(data_ptr, len) }, width, height);
+            let frame = Rect::new(0, 0, width, height);
+            self.draw(&mut canvas, frame);
+        }
     }
 
     /// Get this view's registry ID

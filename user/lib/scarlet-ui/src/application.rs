@@ -347,25 +347,12 @@ impl Application {
         self.connection
             .set_window_type(surface_id, window_type)
             .map_err(|_| "Failed to set window type")?;
-        
+
         // Initial layout
         managed.window.layout(Size::new(width, height));
-        
-        // Initial draw directly into the surface SHM buffer
-        {
-            let frame = Rect::new(0, 0, width, height);
-            if let Some(surface) = self.connection.surface_mut(surface_id) {
-                let mut canvas = Canvas::new(surface.buffer_mut(), width, height);
-                managed.window.draw(&mut canvas, frame);
-                if self.layout_debug {
-                    Self::draw_layout_debug(&managed.window, &mut canvas, frame, 0);
-                }
-                managed.window.clear_needs_draw();
-            }
-        }
 
-        // Commit to display
-        self.connection.commit(surface_id).map_err(|_| "Failed to commit")?;
+        // Note: No initial draw here - the first frame of the event loop will handle drawing
+        // using the buffer system (build_view_registry + compose_all_buffers)
         
         self.windows.push(managed);
         Ok(surface_id)
@@ -499,27 +486,36 @@ impl Application {
             let mut did_draw = false;
             for i in 0..self.windows.len() {
                 let managed = &mut self.windows[i];
+
+                // Check if this is the first frame (registry is empty) - MUST CHECK BEFORE layout!
+                let is_first_frame = managed.window.view_registry_len() == 0;
+
                 let size = Size::new(managed.window.width(), managed.window.height());
                 managed.window.layout(size);
 
-                // Build view registry (first time or after layout changes)
-                managed.window.build_view_registry();
+                // Build view registry ONLY on first frame (not every frame!)
+                if is_first_frame {
+                    managed.window.build_view_registry();
+                }
 
                 let width = managed.window.width();
                 let height = managed.window.height();
                 let full_frame = Rect::new(0, 0, width, height);
 
-                // Compose buffers
+                // Draw
                 if let Some(surface) = self.connection.surface_mut(managed.surface_id) {
                     let mut canvas = Canvas::new(surface.buffer_mut(), width, height);
 
-                    // Draw background
-                    canvas.fill_rect(0, 0, width, height, managed.window.get_background());
+                    if is_first_frame {
+                        // First frame: clear entire surface and compose all buffers
+                        canvas.fill_rect(0, 0, width, height, managed.window.get_background());
+                        managed.window.compose_all_buffers(&mut canvas);
+                    } else {
+                        // Subsequent frames: only compose dirty buffers (don't clear)
+                        managed.window.compose_buffers(&mut canvas);
+                    }
 
-                    // Compose view buffers
-                    managed.window.compose_buffers(&mut canvas);
-
-                    // Draw decorations
+                    // Draw decorations (titlebar, border) - these change due to hover/click
                     managed.window.draw_titlebar(&mut canvas);
                     managed.window.draw_border(&mut canvas);
 
