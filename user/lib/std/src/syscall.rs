@@ -19,6 +19,11 @@ pub enum Syscall {
 
     Sleep = 20,
 
+    // TLS (Thread Local Storage) Management
+    SetTls = 30,
+    GetTls = 31,
+    SetTidAddress = 32,
+
     // ABI Zone Management
     RegisterAbiZone = 90,
     UnregisterAbiZone = 91,
