@@ -393,6 +393,12 @@ pub trait AbiModule: Send + Sync + 'static {
         // Default implementation: ignore events
         Ok(())
     }
+
+    /// Downcast to `Any` for runtime type checking
+    fn as_any(&self) -> &dyn core::any::Any;
+
+    /// Downcast to mutable `Any` for runtime type checking
+    fn as_any_mut(&mut self) -> &mut dyn core::any::Any;
 }
 
 /// ABI registry.

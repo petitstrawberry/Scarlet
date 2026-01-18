@@ -36,4 +36,14 @@ impl IntRegisters {
         // RISC-V syscall arguments: a0-a7 (x10-x17)
         if index < 8 { self.reg[index + 10] } else { 0 }
     }
+
+    /// Get thread pointer (tp/x4) for TLS
+    pub fn get_tp(&self) -> usize {
+        self.reg[4]
+    }
+
+    /// Set thread pointer (tp/x4) for TLS
+    pub fn set_tp(&mut self, value: usize) {
+        self.reg[4] = value;
+    }
 }

@@ -26,7 +26,7 @@ use crate::library::std::string::{
 
 use crate::arch::{Trapframe, get_cpu};
 use crate::sched::scheduler::get_scheduler;
-use crate::task::{CloneFlags, WaitError, get_parent_waitpid_waker, get_waitpid_waker};
+use crate::task::{CloneFlags, CloneFlagsDef, WaitError, get_parent_waitpid_waker, get_waitpid_waker};
 use crate::timer::ns_to_ticks;
 
 const MAX_ARG_COUNT: usize = 256; // Maximum number of arguments for execve
@@ -113,6 +113,7 @@ pub fn sys_clone(trapframe: &mut Trapframe) -> usize {
     let child_stack = trapframe.get_arg(1); // Second argument: child stack pointer
     let child_fn = trapframe.get_arg(2); // Third argument: function pointer (trampoline)
     let child_arg = trapframe.get_arg(3); // Fourth argument: argument to pass to function (closure pointer)
+    let tls_ptr = trapframe.get_arg(4); // Fifth argument: TLS pointer
 
     // crate::println!("[CLONE] Parent task {} cloning with flags: 0x{:x}", parent_task.get_id(), clone_flags.get_raw());
 
@@ -141,6 +142,21 @@ pub fn sys_clone(trapframe: &mut Trapframe) -> usize {
                 child_task.vcpu.iregs.set_arg(0, child_arg);
             }
 
+            // Handle SetTls flag: set TLS pointer and tp register
+            if clone_flags.is_set(CloneFlagsDef::SetTls) {
+                // Set TLS pointer in task's ABI state
+                if let Some(abi) = child_task.default_abi.as_mut() {
+                    // Try to downcast to ScarletAbi
+                    use crate::abi::scarlet::riscv64::ScarletAbi;
+                    if let Some(scarlet_abi) = abi.as_any_mut().downcast_mut::<ScarletAbi>() {
+                        scarlet_abi.set_tls_pointer(tls_ptr);
+                    }
+                }
+
+                // Set tp register (x4) for RISC-V TLS
+                child_task.vcpu.iregs.set_tp(tls_ptr);
+            }
+
             get_scheduler().add_task(child_task, get_cpu().get_cpuid());
             // crate::println!("[CLONE] Child task {} added to scheduler", child_id);
             /* Return the child task PID (namespace-local) to the parent task */
@@ -151,6 +167,63 @@ pub fn sys_clone(trapframe: &mut Trapframe) -> usize {
             usize::MAX /* Return -1 on error */
         }
     }
+}
+
+/// Set the TLS pointer for the current task
+pub fn sys_set_tls(trapframe: &mut Trapframe) -> usize {
+    let task = mytask().unwrap();
+    let tls_ptr = trapframe.get_arg(0);
+
+    // Update ABI state
+    if let Some(abi) = task.default_abi.as_mut() {
+        use crate::abi::scarlet::riscv64::ScarletAbi;
+        if let Some(scarlet_abi) = abi.as_any_mut().downcast_mut::<ScarletAbi>() {
+            scarlet_abi.set_tls_pointer(tls_ptr);
+        }
+    }
+
+    // Set tp register directly
+    task.vcpu.iregs.set_tp(tls_ptr);
+
+    trapframe.increment_pc_next(task);
+    0 // Success
+}
+
+/// Get the TLS pointer for the current task
+pub fn sys_get_tls(trapframe: &mut Trapframe) -> usize {
+    let task = mytask().unwrap();
+
+    // Get TLS pointer from ABI state
+    let tls_ptr = if let Some(abi) = task.default_abi.as_ref() {
+        use crate::abi::scarlet::riscv64::ScarletAbi;
+        if let Some(scarlet_abi) = abi.as_any().downcast_ref::<ScarletAbi>() {
+            scarlet_abi.tls_pointer().unwrap_or(0)
+        } else {
+            0
+        }
+    } else {
+        0
+    };
+
+    trapframe.increment_pc_next(task);
+    tls_ptr // Return TLS pointer
+}
+
+/// Set the clear_child_tid pointer for thread exit notification
+pub fn sys_set_tid_address(trapframe: &mut Trapframe) -> usize {
+    let task = mytask().unwrap();
+    let tid_ptr = trapframe.get_arg(0);
+
+    // Update ABI state
+    if let Some(abi) = task.default_abi.as_mut() {
+        use crate::abi::scarlet::riscv64::ScarletAbi;
+        if let Some(scarlet_abi) = abi.as_any_mut().downcast_mut::<ScarletAbi>() {
+            scarlet_abi.set_clear_child_tid(tid_ptr);
+        }
+    }
+
+    trapframe.increment_pc_next(task);
+    task.get_namespace_id() // Return current TID (Linux-compatible)
 }
 
 pub fn sys_execve(trapframe: &mut Trapframe) -> usize {
