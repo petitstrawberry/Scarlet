@@ -1,132 +1,294 @@
-//! View node registry for buffer management
+//! View node structure
 //!
-//! Window maintains a flat registry of all views for O(1) dirty tracking.
-//! Each View manages its own buffer (see buffer.rs).
+//! This module provides ViewNode, which combines a view with its
+//! layout information and dirty flags. ViewNodes form the view tree.
 
-use scarlet_std::vec::Vec;
-use scarlet_std::sync::{Arc, Mutex};
-use std::collections::HashSet;
-use crate::graphics::Rect;
+extern crate alloc;
+use alloc::boxed::Box;
 
-/// ViewからWindowへのdirty通知
-#[derive(Clone)]
-pub struct DirtyNotifier {
-    dirty_ids: Arc<Mutex<Vec<ViewId>>>,
-}
+use crate::layout::Size;
+use crate::view::dirty::DirtyFlags;
+use crate::view::id::ViewId;
+use crate::view::traits::View;
+use crate::view::tracker::RenderTracker;
+use scarlet_std::fmt;
 
-impl DirtyNotifier {
-    pub fn new() -> Self {
-        Self {
-            dirty_ids: Arc::new(Mutex::new(Vec::new())),
-        }
-    }
-
-    pub fn mark_dirty(&self, id: ViewId) {
-        self.dirty_ids.lock().push(id);
-    }
-
-    pub fn take_dirty(&self) -> Vec<ViewId> {
-        core::mem::take(&mut self.dirty_ids.lock())
-    }
-}
-
-/// Unique identifier for a view
-pub type ViewId = u64;
-
-/// Z-order for composition (higher values drawn on top)
-pub type ZOrder = u32;
-
-/// A node in the flat view registry
-/// Note: Each View manages its own buffer (see super::buffer::ViewBuffer)
+/// A node in the view tree
+///
+/// ViewNode combines:
+/// - A boxed View trait object
+/// - Parent-child relationships
+/// - Cached layout information
+/// - Dirty flags for incremental updates
+///
+/// ViewNodes form a tree structure that represents the UI hierarchy.
 pub struct ViewNode {
+    /// Unique identifier for this view
     pub id: ViewId,
-    pub parent_id: Option<ViewId>,  // Parent view ID (for propagating dirty state)
-    pub frame: Rect,
-    pub z_order: ZOrder,
+    /// The view trait object
+    pub view: Box<dyn View>,
+    /// Parent view ID (None for root)
+    pub parent: Option<ViewId>,
+    /// Child view IDs
+    pub children: scarlet_std::vec::Vec<ViewId>,
+    /// Cached size from last layout
+    pub cached_size: Size,
+    /// Cached frame (position and size) from last layout
+    pub cached_frame: Option<crate::graphics::Rect>,
+    /// Layout constraints from last layout
+    pub layout_constraints: Option<crate::layout::LayoutConstraints>,
+    /// Dirty flags (what needs updating)
+    pub dirty_flags: DirtyFlags,
+    /// Last data version observed (for change detection)
+    pub last_data_version: Option<u64>,
 }
 
 impl ViewNode {
-    pub fn new(id: ViewId, frame: Rect, z_order: ZOrder) -> Self {
+    /// Create a new ViewNode
+    pub fn new(view: Box<dyn View>) -> Self {
+        let id = view.id();
         Self {
             id,
-            parent_id: None,
-            frame,
-            z_order,
+            view,
+            parent: None,
+            children: scarlet_std::vec::Vec::new(),
+            cached_size: Size::ZERO,
+            cached_frame: None,
+            layout_constraints: None,
+            dirty_flags: DirtyFlags::new(),
+            last_data_version: None,
         }
     }
 
-    pub fn with_parent(mut self, parent_id: ViewId) -> Self {
-        self.parent_id = Some(parent_id);
-        self
+    /// Create a new ViewNode with an explicit parent
+    pub fn with_parent(view: Box<dyn View>, parent: ViewId) -> Self {
+        let mut node = Self::new(view);
+        node.parent = Some(parent);
+        node
     }
-}
 
-/// Flat registry of all views in a window
-pub struct ViewRegistry {
-    nodes: Vec<ViewNode>,
-    dirty_ids: HashSet<ViewId>,
-    next_id: ViewId,
-}
+    /// Mark this view as dirty
+    ///
+    /// Sets the specified dirty flags. If paint is dirty, this also
+    /// propagates to the parent (since the parent may need to composite
+    /// the child's changes).
+    pub fn mark_dirty(&mut self, flags: DirtyFlags) {
+        self.dirty_flags.set(flags);
+    }
 
-impl ViewRegistry {
-    pub fn new() -> Self {
-        Self {
-            nodes: Vec::new(),
-            dirty_ids: HashSet::new(),
-            next_id: 1,
+    /// Mark this view as dirty and notify RenderTracker
+    ///
+    /// This is the AppKit-style notification method. It sets local dirty flags
+    /// AND immediately notifies the RenderTracker, eliminating the need for
+    /// recursive tree traversal during render cycles.
+    ///
+    /// # Arguments
+    ///
+    /// * `tracker` - The RenderTracker to notify
+    /// * `flags` - The dirty flags to set
+    pub fn mark_dirty_with_tracker(&mut self, tracker: &mut RenderTracker, flags: DirtyFlags) {
+        // Set local flags first
+        self.dirty_flags.set(flags);
+
+        // Notify tracker immediately (O(1) operation)
+        if flags.is_layout_dirty() {
+            tracker.mark_dirty_layout(self.id);
+        }
+        if flags.is_paint_dirty() {
+            tracker.mark_dirty_paint(self.id);
         }
     }
 
-    pub fn register(&mut self, frame: Rect, z_order: ZOrder) -> ViewId {
-        let id = self.next_id;
-        self.next_id = self.next_id.wrapping_add(1);
-        self.nodes.push(ViewNode::new(id, frame, z_order));
-        id
+    /// Clear dirty flags
+    pub fn clear_dirty(&mut self, flags: DirtyFlags) {
+        self.dirty_flags.clear(flags);
     }
 
-    pub fn mark_dirty(&mut self, id: ViewId) {
-        self.dirty_ids.insert(id);
+    /// Clear all dirty flags
+    pub fn clear_all_dirty(&mut self) {
+        self.dirty_flags.clear_all();
     }
 
-    pub fn get_dirty_ids(&self) -> &HashSet<ViewId> {
-        &self.dirty_ids
+    /// Check if layout is dirty
+    pub fn needs_layout(&self) -> bool {
+        self.dirty_flags.is_layout_dirty()
     }
 
-    pub fn clear_dirty(&mut self) {
-        self.dirty_ids.clear();
+    /// Check if paint is dirty
+    pub fn needs_paint(&self) -> bool {
+        self.dirty_flags.is_paint_dirty()
     }
 
-    pub fn get_node_mut(&mut self, id: ViewId) -> Option<&mut ViewNode> {
-        self.nodes.iter_mut().find(|n| n.id == id)
+    /// Check if this view needs any update
+    pub fn is_dirty(&self) -> bool {
+        self.dirty_flags.is_dirty()
     }
 
-    pub fn get_node(&self, id: ViewId) -> Option<&ViewNode> {
-        self.nodes.iter().find(|n| n.id == id)
+    /// Add a child view ID
+    pub fn add_child(&mut self, child_id: ViewId) {
+        self.children.push(child_id);
+        self.mark_dirty(DirtyFlags::CHILDREN);
     }
 
-    pub fn iter(&self) -> impl Iterator<Item = &ViewNode> {
-        self.nodes.iter()
+    /// Remove a child view ID
+    pub fn remove_child(&mut self, child_id: ViewId) -> bool {
+        if let Some(pos) = self.children.iter().position(|&id| id == child_id) {
+            self.children.remove(pos);
+            self.mark_dirty(DirtyFlags::CHILDREN);
+            true
+        } else {
+            false
+        }
     }
 
-    pub fn iter_mut(&mut self) -> impl Iterator<Item = &mut ViewNode> {
-        self.nodes.iter_mut()
+    /// Get the frame for this view
+    ///
+    /// Returns the frame if it has been set during layout.
+    pub fn frame(&self) -> Option<crate::graphics::Rect> {
+        self.cached_frame
     }
 
-    pub fn clear(&mut self) {
-        self.nodes.clear();
-        self.dirty_ids.clear();
+    /// Set the frame for this view
+    pub fn set_frame(&mut self, frame: crate::graphics::Rect) {
+        self.cached_frame = Some(frame);
     }
 
-    pub fn len(&self) -> usize {
-        self.nodes.len()
+    /// Get the size for this view
+    ///
+    /// Returns the cached size from the last layout pass.
+    pub fn size(&self) -> Size {
+        self.cached_size
     }
 
-    pub fn is_empty(&self) -> bool {
-        self.nodes.is_empty()
+    /// Set the size for this view
+    pub fn set_size(&mut self, size: Size) {
+        self.cached_size = size;
     }
 
-    /// Find view ID by frame position (for second-pass ID assignment)
-    pub fn find_id_by_frame(&self, frame: Rect) -> Option<ViewId> {
-        self.nodes.iter().find(|n| n.frame == frame).map(|n| n.id)
+    /// Check if data has changed since last observation
+    ///
+    /// Returns true if the current data version is different from
+    /// the last observed version.
+    pub fn has_data_changed(&self, current_version: u64) -> bool {
+        match self.last_data_version {
+            Some(last) => last != current_version,
+            None => true,
+        }
+    }
+
+    /// Update the last observed data version
+    pub fn update_data_version(&mut self, version: u64) {
+        self.last_data_version = Some(version);
+    }
+}
+
+impl fmt::Debug for ViewNode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ViewNode")
+            .field("id", &self.id)
+            .field("parent", &self.parent)
+            .field("children", &self.children)
+            .field("cached_size", &self.cached_size)
+            .field("cached_frame", &self.cached_frame)
+            .field("dirty_flags", &self.dirty_flags)
+            .field("last_data_version", &self.last_data_version)
+            .finish()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::context::{LayoutCtx, PaintCtx, UpdateCtx};
+    use crate::event::Event;
+    use crate::layout::LayoutConstraints;
+
+    struct TestView {
+        id: ViewId,
+    }
+
+    impl View for TestView {
+        fn id(&self) -> ViewId {
+            self.id
+        }
+
+        fn layout(&mut self, _ctx: &mut LayoutCtx, _constraints: LayoutConstraints) -> Size {
+            Size::new(100, 100)
+        }
+
+        fn draw(&self, _ctx: &mut PaintCtx, _frame: crate::graphics::Rect) {
+            // Do nothing for test
+        }
+
+        fn event(&mut self, _ctx: &mut crate::context::EventCtx, _event: &Event) -> crate::context::ControlFlow {
+            crate::context::ControlFlow::Continue
+        }
+
+        fn update(&mut self, _ctx: &mut UpdateCtx) {
+            // Do nothing for test
+        }
+    }
+
+    #[test]
+    fn test_view_node_new() {
+        let view = Box::new(TestView { id: ViewId::new() });
+        let node = ViewNode::new(view);
+        assert_eq!(node.children.len(), 0);
+        assert!(!node.is_dirty());
+    }
+
+    #[test]
+    fn test_view_node_dirty() {
+        let view = Box::new(TestView { id: ViewId::new() });
+        let mut node = ViewNode::new(view);
+
+        node.mark_dirty(DirtyFlags::LAYOUT);
+        assert!(node.needs_layout());
+        assert!(!node.needs_paint());
+
+        node.mark_dirty(DirtyFlags::PAINT);
+        assert!(node.needs_paint());
+
+        node.clear_all_dirty();
+        assert!(!node.is_dirty());
+    }
+
+    #[test]
+    fn test_view_node_children() {
+        let view = Box::new(TestView { id: ViewId::new() });
+        let mut node = ViewNode::new(view);
+
+        let child_id = ViewId::new();
+        node.add_child(child_id);
+
+        assert_eq!(node.children.len(), 1);
+        assert!(node.children.contains(&child_id));
+
+        assert!(node.remove_child(child_id));
+        assert_eq!(node.children.len(), 0);
+    }
+
+    #[test]
+    fn test_view_node_frame() {
+        let view = Box::new(TestView { id: ViewId::new() });
+        let mut node = ViewNode::new(view);
+
+        let frame = crate::graphics::Rect::new(10, 20, 100, 200);
+        node.set_frame(frame);
+
+        assert_eq!(node.frame(), Some(frame));
+    }
+
+    #[test]
+    fn test_view_node_data_version() {
+        let view = Box::new(TestView { id: ViewId::new() });
+        let mut node = ViewNode::new(view);
+
+        // Initially no version, so data has "changed"
+        assert!(node.has_data_changed(1));
+
+        node.update_data_version(1);
+        assert!(!node.has_data_changed(1));
+        assert!(node.has_data_changed(2));
     }
 }

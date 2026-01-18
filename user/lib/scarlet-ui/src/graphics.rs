@@ -391,13 +391,6 @@ impl Rect {
     pub fn contains_point(&self, point: Point) -> bool {
         self.contains(point.x, point.y)
     }
-
-    pub fn intersects(&self, other: Rect) -> bool {
-        self.x < other.x + other.width as i32
-            && self.x + self.width as i32 > other.x
-            && self.y < other.y + other.height as i32
-            && self.y + self.height as i32 > other.y
-    }
 }
 
 /// Canvas for drawing operations
@@ -445,7 +438,7 @@ impl<'a> Canvas<'a> {
         Color::rgba(r, g, b, a)
     }
 
-    pub fn put_pixel_alpha(&mut self, x: i32, y: i32, color: Color, alpha: f32) {
+    fn put_pixel_alpha(&mut self, x: i32, y: i32, color: Color, alpha: f32) {
         if alpha <= 0.0 {
             return;
         }
