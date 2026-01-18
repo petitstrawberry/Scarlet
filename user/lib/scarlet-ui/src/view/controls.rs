@@ -649,8 +649,17 @@ impl<F: FnMut() + 'static> View for Button<F> {
         };
         canvas.draw_rounded_rect(frame.x, frame.y, frame.width, frame.height, self.corner_radius, border_color);
 
-        // NOTE: Children are NOT drawn here - Window will compose their buffers separately
-        // This is the key change from the old architecture
+        // Draw text label (if it's a Text label, not a View label)
+        if let ButtonLabel::Text(ref text) = self.label {
+            canvas.draw_text_sized(
+                frame.x + self.padding as i32,
+                frame.y + self.padding as i32,
+                text,
+                self.text_color,
+                16.0,
+            );
+        }
+        // Note: ButtonLabel::View children are composed separately by the Window
     }
 
     fn on_event(&mut self, event: &mut Event, frame: Rect) -> bool {

@@ -105,6 +105,7 @@ pub struct Window {
     // View registry for buffer management
     view_registry: ViewRegistry,
     dirty_notifier: DirtyNotifier,
+    needs_full_compose: bool,  // Size changed, need to recompose all buffers
 }
 
 impl Window {
@@ -152,6 +153,7 @@ impl Window {
 
             view_registry: ViewRegistry::new(),
             dirty_notifier,
+            needs_full_compose: true,  // First frame needs full compose
         }
     }
 
@@ -505,15 +507,10 @@ impl Window {
     /// Two-pass approach:
     /// 1. Collect all views and assign IDs in registry
     /// 2. Assign IDs and notifiers to views using the registry
-    /// NOTE: Only builds if registry is empty (idempotent)
+    /// Build or rebuild the view registry
+    /// Always rebuilds to handle size changes
     pub fn build_view_registry(&mut self) {
-        // Already built, skip
-        if !self.view_registry.is_empty() {
-            scarlet_std::println!("[build_view_registry] Already built, skipping ({} views)", self.view_registry.len());
-            return;
-        }
-
-        scarlet_std::println!("[build_view_registry] Building view registry...");
+        scarlet_std::println!("[build_view_registry] Building/rebuilding view registry...");
         self.view_registry.clear();
 
         // Take content temporarily to avoid borrow conflicts
@@ -740,6 +737,21 @@ impl Window {
     /// Get the number of views in the registry
     pub fn view_registry_len(&self) -> usize {
         self.view_registry.len()
+    }
+
+    /// Check if full composition is needed (size changed)
+    pub fn needs_full_compose(&self) -> bool {
+        self.needs_full_compose
+    }
+
+    /// Set that full composition is needed
+    pub fn set_needs_full_compose(&mut self) {
+        self.needs_full_compose = true;
+    }
+
+    /// Clear the full composition flag
+    pub fn clear_needs_full_compose(&mut self) {
+        self.needs_full_compose = false;
     }
 
     /// Compose all view buffers to canvas (for first frame)

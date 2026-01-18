@@ -501,15 +501,17 @@ impl Application {
                 let width = managed.window.width();
                 let height = managed.window.height();
                 let full_frame = Rect::new(0, 0, width, height);
+                let needs_full_compose = managed.window.needs_full_compose();
 
                 // Draw
                 if let Some(surface) = self.connection.surface_mut(managed.surface_id) {
                     let mut canvas = Canvas::new(surface.buffer_mut(), width, height);
 
-                    if is_first_frame {
-                        // First frame: clear entire surface and compose all buffers
+                    if is_first_frame || needs_full_compose {
+                        // First frame or size changed: clear entire surface and compose all buffers
                         canvas.fill_rect(0, 0, width, height, managed.window.get_background());
                         managed.window.compose_all_buffers(&mut canvas);
+                        managed.window.clear_needs_full_compose();
                     } else {
                         // Subsequent frames: only compose dirty buffers (don't clear)
                         managed.window.compose_buffers(&mut canvas);
@@ -793,14 +795,31 @@ impl Application {
                 {
                     if self.connection.resize_window(surface_id, width, height).is_ok() {
                         // The server may clamp the requested size; use the post-resize surface size.
-                        if let Some(surface) = self.connection.surface(surface_id) {
+                        let actual_width = if let Some(surface) = self.connection.surface(surface_id) {
                             self.windows[index]
                                 .window
                                 .set_size(surface.width(), surface.height());
+                            surface.width()
                         } else {
                             self.windows[index].window.set_size(width, height);
-                        }
-                        self.windows[index].window.set_needs_draw();
+                            width
+                        };
+
+                        let actual_height = if let Some(surface) = self.connection.surface(surface_id) {
+                            surface.height()
+                        } else {
+                            height
+                        };
+
+                        // Re-layout to update all view frames and registry
+                        let size = Size::new(actual_width, actual_height);
+                        self.windows[index].window.layout(size);
+
+                        // Rebuild registry with updated frames
+                        self.windows[index].window.build_view_registry();
+
+                        // Mark that full composition is needed (size changed)
+                        self.windows[index].window.set_needs_full_compose();
                     }
                 }
             }
