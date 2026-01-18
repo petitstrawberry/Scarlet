@@ -5,13 +5,27 @@ use crate::vec::Vec;
 use core::time::Duration;
 
 /// Get the current thread's TLS base pointer
+///
+/// This reads the architecture-specific TLS register directly without a syscall:
+/// - RISC-V: Reads the tp register (x4)
+/// - AArch64: Reads the TPIDR_EL0 system register
+///
+/// The TLS register is set by the kernel during thread creation and is part
+/// of the task's context, so reading it directly is safe and fast.
+#[inline]
 pub fn tls_pointer() -> usize {
-    crate::syscall::syscall1(Syscall::GetTls, 0)
+    crate::arch::arch_tls_pointer()
 }
 
 /// Set the current thread's TLS base pointer
+///
+/// This performs a syscall to set the TLS pointer in the kernel.
+/// Direct register writes are not recommended as the kernel needs to
+/// maintain ABI state synchronization.
+///
+/// This is typically only called during thread initialization.
 pub fn set_tls_pointer(ptr: usize) {
-    crate::syscall::syscall1(Syscall::SetTls, ptr);
+    crate::arch::arch_set_tls_pointer(ptr);
 }
 
 /// Thread sleep
