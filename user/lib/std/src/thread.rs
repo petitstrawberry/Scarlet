@@ -2,7 +2,14 @@ use crate::boxed::Box;
 use crate::syscall::{Syscall, syscall0, syscall1, syscall5};
 use crate::task::{CloneFlags, CloneFlagsDef};
 use crate::vec::Vec;
+use core::sync::atomic::{AtomicUsize, Ordering};
 use core::time::Duration;
+
+/// Main thread TLS area
+///
+/// This is the TLS area for the main thread. It is initialized
+/// when `init_main_thread_tls` is called.
+static MAIN_THREAD_TLS: AtomicUsize = AtomicUsize::new(0);
 
 /// Get the current thread's TLS base pointer
 ///
@@ -10,11 +17,48 @@ use core::time::Duration;
 /// - RISC-V: Reads the tp register (x4)
 /// - AArch64: Reads the TPIDR_EL0 system register
 ///
+/// For the main thread, if the TLS register is 0, this returns the main thread
+/// TLS area that was allocated via `init_main_thread_tls`.
+///
 /// The TLS register is set by the kernel during thread creation and is part
 /// of the task's context, so reading it directly is safe and fast.
 #[inline]
 pub fn tls_pointer() -> usize {
-    crate::arch::arch_tls_pointer()
+    let ptr = crate::arch::arch_tls_pointer();
+    if ptr == 0 {
+        // Check if we have main thread TLS initialized
+        let main_tls = MAIN_THREAD_TLS.load(Ordering::Acquire);
+        if main_tls != 0 {
+            main_tls
+        } else {
+            0
+        }
+    } else {
+        ptr
+    }
+}
+
+/// Initialize TLS for the main thread
+///
+/// This function allocates a TLS area for the main thread and sets it up
+/// for use with `thread_local!` variables. This must be called before
+/// any `thread_local!` variables are accessed.
+///
+/// # Safety
+///
+/// This function should only be called once, typically at program startup.
+pub unsafe fn init_main_thread_tls() {
+    if MAIN_THREAD_TLS.load(Ordering::Acquire) != 0 {
+        return; // Already initialized
+    }
+
+    // Allocate TLS area for main thread (same size as spawned threads)
+    const TLS_SIZE: usize = 1024; // Enough room for multiple TLS variables
+    let tls_box: Box<[u8; TLS_SIZE]> = crate::boxed::Box::new([0u8; TLS_SIZE]);
+    let tls_ptr = Box::into_raw(tls_box) as usize;
+
+    // Store the TLS pointer
+    MAIN_THREAD_TLS.store(tls_ptr, Ordering::Release);
 }
 
 /// Set the current thread's TLS base pointer
@@ -116,7 +160,7 @@ where
     // Allocate TLS (Thread Local Storage) for the new thread
     // For now, we allocate a simple TLS area. In a full implementation,
     // this would include thread-local variables, errno, etc.
-    const TLS_SIZE: usize = 64; // Reserve space for TLS variables
+    const TLS_SIZE: usize = 1024; // Reserve space for TLS variables
     let tls_box: Box<[u8; TLS_SIZE]> = crate::boxed::Box::new([0u8; TLS_SIZE]);
     let tls_ptr = Box::into_raw(tls_box) as usize;
 
@@ -144,7 +188,7 @@ where
         unsafe {
             let _ = Box::from_raw(closure_ptr as *mut F);
             // Reconstruct and drop TLS to free it
-            let _ = Box::from_raw(tls_ptr as *mut [u8; TLS_SIZE]);
+            let _ = Box::from_raw(tls_ptr as *mut [u8; 1024]);
             // TODO: free stack
         }
         return Err("Failed to create thread");
@@ -176,17 +220,36 @@ where
 ///
 /// This type represents a key for thread-local storage. Each key
 /// can be associated with a value that is unique to each thread.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct LocalKey {
+///
+/// # Example
+///
+/// ```rust
+/// thread_local! {
+///     static FOO: Cell<i32> = Cell::new(5);
+/// }
+///
+/// FOO.with(|value| {
+///     value.set(10);
+/// });
+/// ```
+#[derive(Debug, Clone, Copy)]
+pub struct LocalKey<T> {
     /// Offset into the TLS segment
     offset: usize,
+    /// Alignment requirement for the value
+    align: usize,
+    _phantom: core::marker::PhantomData<T>,
 }
 
-impl LocalKey {
-    /// Create a new LocalKey with the given offset
+impl<T> LocalKey<T> {
+    /// Create a new LocalKey with the given offset and alignment
     #[inline]
-    pub const fn new(offset: usize) -> Self {
-        Self { offset }
+    pub const fn new(offset: usize, align: usize) -> Self {
+        Self {
+            offset,
+            align,
+            _phantom: core::marker::PhantomData,
+        }
     }
 
     /// Get the offset into the TLS segment
@@ -194,7 +257,141 @@ impl LocalKey {
     pub const fn offset(self) -> usize {
         self.offset
     }
+
+    /// Initialize this thread-local value with the given initializer
+    ///
+    /// This function should be called once per thread to initialize the value.
+    /// Subsequent calls will have no effect if the value is already initialized.
+    ///
+    /// # Safety
+    ///
+    /// This function should only be called once per thread for each LocalKey.
+    /// The caller must ensure the TLS area is large enough for this value.
+    pub unsafe fn initialize(self, value: T)
+    where
+        T: 'static,
+    {
+        let tls_base = tls_pointer();
+        if tls_base == 0 {
+            panic!("TLS not initialized for this thread");
+        }
+
+        let ptr = (tls_base + self.offset) as *mut T;
+        unsafe {
+            ptr.write(value);
+        }
+    }
+
+    /// Execute a closure with access to this thread-local value
+    ///
+    /// This function provides safe access to thread-local storage by
+    /// executing the provided closure with a reference to the value.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the TLS pointer is not set for the current thread.
+    pub fn with<F, R>(self, f: F) -> R
+    where
+        T: 'static,
+        F: FnOnce(&T) -> R,
+    {
+        let tls_base = tls_pointer();
+        if tls_base == 0 {
+            panic!("TLS not initialized for this thread");
+        }
+
+        let ptr = (tls_base + self.offset) as *const T;
+        unsafe {
+            // Ensure alignment is correct
+            let aligned_ptr = ptr as usize;
+            assert_eq!(
+                aligned_ptr % self.align,
+                0,
+                "TLS value is not properly aligned"
+            );
+            f(&*ptr)
+        }
+    }
+
+    /// Execute a closure with mutable access to this thread-local value
+    ///
+    /// This function provides safe mutable access to thread-local storage.
+    pub fn with_mut<F, R>(self, f: F) -> R
+    where
+        T: 'static,
+        F: FnOnce(&mut T) -> R,
+    {
+        let tls_base = tls_pointer();
+        if tls_base == 0 {
+            panic!("TLS not initialized for this thread");
+        }
+
+        let ptr = (tls_base + self.offset) as *mut T;
+        unsafe {
+            let aligned_ptr = ptr as usize;
+            assert_eq!(
+                aligned_ptr % self.align,
+                0,
+                "TLS value is not properly aligned"
+            );
+            f(&mut *ptr)
+        }
+    }
+
+    /// Try to execute a closure with access to this thread-local value
+    ///
+    /// Returns `None` if TLS is not initialized, otherwise returns the
+    /// result of the closure.
+    pub fn try_with<F, R>(self, f: F) -> Option<R>
+    where
+        T: 'static,
+        F: FnOnce(&T) -> R,
+    {
+        let tls_base = tls_pointer();
+        if tls_base == 0 {
+            return None;
+        }
+
+        let ptr = (tls_base + self.offset) as *const T;
+        unsafe { Some(f(&*ptr)) }
+    }
+
+    /// Try to execute a closure with mutable access to this thread-local value
+    ///
+    /// Returns `None` if TLS is not initialized, otherwise returns the
+    /// result of the closure.
+    pub fn try_with_mut<F, R>(self, f: F) -> Option<R>
+    where
+        T: 'static,
+        F: FnOnce(&mut T) -> R,
+    {
+        let tls_base = tls_pointer();
+        if tls_base == 0 {
+            return None;
+        }
+
+        let ptr = (tls_base + self.offset) as *mut T;
+        unsafe { Some(f(&mut *ptr)) }
+    }
 }
+
+// Helper for calculating offset from identifier hash
+#[doc(hidden)]
+#[inline]
+pub const fn __tls_offset_from_hash(name: &[u8]) -> usize {
+    let mut hash: usize = 5381;
+    let mut i = 0;
+    while i < name.len() {
+        hash = hash.wrapping_mul(33).wrapping_add(name[i] as usize);
+        i += 1;
+    }
+    // Map hash to offset with 8-byte alignment (each slot is 8 bytes minimum)
+    (hash % 1024) & !7
+}
+
+// Counter for TLS offset allocation (used internally by thread_local! macro)
+#[doc(hidden)]
+pub const __TLS_ALIGN: usize = 8;
 
 /// Thread local storage variable
 ///
@@ -207,133 +404,37 @@ impl LocalKey {
 /// ```rust
 /// thread_local! {
 ///     static FOO: Cell<i32> = Cell::new(5);
-///     static BAR: &str = "hello";
+///     static BAR: RefCell<String> = RefCell::new(String::new());
 /// }
+///
+/// FOO.with(|value| {
+///     value.set(10);
+/// });
 /// ```
 #[macro_export]
 macro_rules! thread_local {
-    // Static with initialization expression
-    (@$cnt:vis $name:ident: $ty:ty = $init:expr) => {
-        #[inline]
-        fn $name() -> $ty {
-            // Get the TLS base pointer
-            let tls_base = $crate::thread::tls_pointer();
+    // Internal state: current offset, next index, and items
+    (@state $tls_size:expr, $index:expr,) => {};
 
-            // Calculate the address of this thread-local variable
-            // For now, we use a simple scheme where each TLS variable gets a fixed offset
-            // In a real implementation, you'd have a more sophisticated TLS layout
-            const OFFSET: usize = 0; // Placeholder - would be calculated properly
+    // Process all items and generate LocalKey declarations
+    (@state $tls_size:expr, $index:expr, $(#[$attr:meta])* $vis:vis static $name:ident: $ty:ty = $init:expr; $($rest:tt)*) => {
+        #[allow(non_upper_case_globals)]
+        #[$attr]
+        $vis static $name: $crate::thread::LocalKey<$ty> = {
+            // Calculate offset based on variable name hash
+            const __TLS_NAME__: &[u8] = stringify!($name).as_bytes();
+            const __TLS_OFFSET__: usize = $crate::thread::__tls_offset_from_hash(__TLS_NAME__);
+            const __TLS_ALIGN__: usize = $crate::thread::__TLS_ALIGN;
 
-            unsafe {
-                let ptr = (tls_base + OFFSET) as *mut $ty;
+            $crate::thread::LocalKey::new(__TLS_OFFSET__, __TLS_ALIGN)
+        };
 
-                // Initialize if not already initialized
-                // This is a simplified version - real TLS needs more sophisticated logic
-                if (*ptr as *const u8 as usize) == 0 {
-                    *ptr = $init;
-                }
-
-                &*ptr
-            }
-        }
+        $crate::thread_local!(@state $tls_size + 8, $index + 1, $($rest)*);
     };
 
-    // Multiple items
+    // Entry point: parse all items and calculate offsets
     ($(#[$attr:meta])* $vis:vis static $name:ident: $ty:ty = $init:expr; $($rest:tt)*) => {
-        $crate::thread_local! {
-            @#[$attr] $name: $ty = $init
-        }
-        $crate::thread_local!($($rest)*);
-    };
-
-    // Single item
-    ($(#[$attr:meta])* $vis:vis static $name:ident: $ty:ty = $init:expr) => {
-        $crate::thread_local! {
-            @#[$attr] $name: $ty = $init
-        }
+        $crate::thread_local!(@state 0, 0, $(#[$attr])* $vis static $name: $ty = $init; $($rest)*);
     };
 }
 
-// Internal macro for calculating TLS offsets
-#[doc(hidden)]
-#[macro_export]
-macro_rules! __tls_offset {
-    ($name:ident) => {{
-        // Use a simple hash of the identifier to generate an offset
-        // In a real implementation, this would be done at link time
-        const OFFSET: usize = 0; // Placeholder - would be calculated properly
-        OFFSET
-    }};
-}
-
-// Provide a simpler implementation using sys_set_tls
-// This is a basic version that works with the kernel's TLS support
-
-/// Basic thread-local storage implementation
-///
-/// This is a simplified TLS implementation that works with Scarlet's
-/// kernel TLS support. For each thread, the kernel maintains a TLS pointer
-/// that can be set via the SetTls syscall.
-pub mod local {
-    use super::tls_pointer;
-
-    /// A thread-local variable using the kernel's TLS support
-    ///
-    /// This is a simplified implementation that stores a single pointer
-    /// in the kernel's TLS area. For more complex TLS needs, use the
-    /// thread_local! macro instead.
-    #[repr(transparent)]
-    pub struct LocalVariable<T> {
-        _phantom: core::marker::PhantomData<T>,
-    }
-
-    impl<T: 'static> LocalVariable<T> {
-        /// Create a new thread-local variable
-        pub const fn new() -> Self {
-            Self {
-                _phantom: core::marker::PhantomData,
-            }
-        }
-
-        /// Get the value of this thread-local variable
-        ///
-        /// This implementation uses a simple approach where the TLS pointer
-        /// points directly to the value. For production use, you'd want
-        /// a more sophisticated TLS layout.
-        #[inline]
-        pub fn get(&self) -> Option<T>
-        where
-            T: Copy,
-        {
-            let tls_ptr = tls_pointer();
-            if tls_ptr == 0 {
-                None
-            } else {
-                unsafe { Some(*(tls_ptr as *const T)) }
-            }
-        }
-
-        /// Set the value of this thread-local variable
-        #[inline]
-        pub fn set(&self, value: T)
-        where
-            T: Copy,
-        {
-            let tls_ptr = tls_pointer();
-            if tls_ptr != 0 {
-                unsafe {
-                    *(tls_ptr as *mut T) = value;
-                }
-            }
-        }
-    }
-
-    impl<T: 'static> Default for LocalVariable<T> {
-        fn default() -> Self {
-            Self::new()
-        }
-    }
-
-    unsafe impl<T: Send> Send for LocalVariable<T> {}
-    unsafe impl<T: Sync> Sync for LocalVariable<T> {}
-}
