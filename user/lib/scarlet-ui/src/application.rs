@@ -270,54 +270,6 @@ impl Application {
         }
     }
 
-    /// Collect dirty rects from subviews that need redraw
-    fn collect_dirty_rects(view: &dyn View, parent_frame: Rect, rects: &mut Vec<Rect>) {
-        view.visit_children(&mut |child, rel| {
-            let child_frame = Rect::new(
-                parent_frame.x + rel.x,
-                parent_frame.y + rel.y,
-                rel.width,
-                rel.height,
-            );
-            if child.needs_draw() {
-                rects.push(child_frame);
-            }
-            // Always recurse to find all dirty children
-            Self::collect_dirty_rects(child, child_frame, rects);
-            false
-        });
-    }
-
-    /// Union multiple rects into a bounding box
-    fn union_rects(rects: &[Rect]) -> Option<Rect> {
-        if rects.is_empty() {
-            return None;
-        }
-        let mut min_x = i32::MAX;
-        let mut min_y = i32::MAX;
-        let mut max_x = i32::MIN;
-        let mut max_y = i32::MIN;
-        for r in rects {
-            min_x = min_x.min(r.x);
-            min_y = min_y.min(r.y);
-            max_x = max_x.max(r.x + r.width as i32);
-            max_y = max_y.max(r.y + r.height as i32);
-        }
-        if max_x <= min_x || max_y <= min_y {
-            return None;
-        }
-        Some(Rect::new(min_x, min_y, (max_x - min_x) as u32, (max_y - min_y) as u32))
-    }
-
-    /// Recursively clear needs_draw flags on all views
-    fn clear_all_needs_draw(view: &mut dyn View, _frame: Rect) {
-        view.clear_needs_draw();
-        view.visit_children_mut(&mut |child, _rel| {
-            Self::clear_all_needs_draw(child, _rel);
-            false
-        });
-    }
-
     /// Enable or disable layout bounds visualization.
     ///
     /// When enabled, the framework draws rectangle outlines for the allocated
@@ -431,8 +383,7 @@ impl Application {
         let mut scratch_move_surface_ids: Vec<u32> = Vec::new();
         let mut scratch_minimize_surface_ids: Vec<u32> = Vec::new();
         let mut scratch_maximize_surface_ids: Vec<u32> = Vec::new();
-        let mut scratch_dirty_rects: Vec<Rect> = Vec::new();
-        
+
         loop {
             // Get current time in milliseconds (approximate)
             let current_time_ms = last_time_ms + 16; // Approximate 60 FPS
@@ -550,64 +501,35 @@ impl Application {
                 let managed = &mut self.windows[i];
                 let size = Size::new(managed.window.width(), managed.window.height());
                 managed.window.layout(size);
-                
+
+                // Build view registry (first time or after layout changes)
+                managed.window.build_view_registry();
+
                 let width = managed.window.width();
                 let height = managed.window.height();
                 let full_frame = Rect::new(0, 0, width, height);
-                
-                // Check if window itself needs full redraw
-                if managed.window.needs_draw() {
-                    // Full redraw
-                    if let Some(surface) = self.connection.surface_mut(managed.surface_id) {
-                        let mut canvas = Canvas::new(surface.buffer_mut(), width, height);
-                        managed.window.draw(&mut canvas, full_frame);
-                        if self.layout_debug {
-                            Self::draw_layout_debug(&managed.window, &mut canvas, full_frame, 0);
-                        }
-                    }
-                    Self::clear_all_needs_draw(&mut managed.window, full_frame);
-                    let _ = self.connection.commit(managed.surface_id);
-                    did_draw = true;
-                } else {
-                    // Collect dirty rects from subviews
-                    scratch_dirty_rects.clear();
-                    Self::collect_dirty_rects(&managed.window, full_frame, &mut scratch_dirty_rects);
-                    
-                    if !scratch_dirty_rects.is_empty() {
-                        // Redraw the whole window (since we can't easily do partial view draws)
-                        // but only commit the dirty region
-                        if let Some(surface) = self.connection.surface_mut(managed.surface_id) {
-                            let mut canvas = Canvas::new(surface.buffer_mut(), width, height);
-                            managed.window.draw(&mut canvas, full_frame);
-                            if self.layout_debug {
-                                Self::draw_layout_debug(&managed.window, &mut canvas, full_frame, 0);
-                            }
-                        }
-                        Self::clear_all_needs_draw(&mut managed.window, full_frame);
-                        
-                        // Commit only the dirty region
-                        if let Some(dirty_rect) = Self::union_rects(&scratch_dirty_rects) {
-                            // Clamp damage to the surface bounds and never send empty regions.
-                            let x0 = dirty_rect.x.max(0);
-                            let y0 = dirty_rect.y.max(0);
-                            let x1 = (dirty_rect.x.saturating_add(dirty_rect.width as i32))
-                                .min(width as i32);
-                            let y1 = (dirty_rect.y.saturating_add(dirty_rect.height as i32))
-                                .min(height as i32);
 
-                            if x1 > x0 && y1 > y0 {
-                                let _ = self.connection.commit_region(
-                                    managed.surface_id,
-                                    x0 as u32,
-                                    y0 as u32,
-                                    (x1 - x0) as u32,
-                                    (y1 - y0) as u32,
-                                );
-                            }
-                        }
-                        did_draw = true;
+                // Compose buffers
+                if let Some(surface) = self.connection.surface_mut(managed.surface_id) {
+                    let mut canvas = Canvas::new(surface.buffer_mut(), width, height);
+
+                    // Draw background
+                    canvas.fill_rect(0, 0, width, height, managed.window.get_background());
+
+                    // Compose view buffers
+                    managed.window.compose_buffers(&mut canvas);
+
+                    // Draw decorations
+                    managed.window.draw_titlebar(&mut canvas);
+                    managed.window.draw_border(&mut canvas);
+
+                    if self.layout_debug {
+                        Self::draw_layout_debug(&managed.window, &mut canvas, full_frame, 0);
                     }
                 }
+
+                let _ = self.connection.commit(managed.surface_id);
+                did_draw = true;
             }
 
             // 7. Frame rate limiting: cap at ~60fps to reduce flicker and CPU usage.

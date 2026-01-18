@@ -1,6 +1,7 @@
 //! Navigation views - sidebar navigation with dynamic content
 
 use super::traits::{View, ViewBox, Size};
+use super::node::{ViewId, DirtyNotifier};
 use crate::graphics::{Canvas, Rect};
 use crate::event::Event;
 use crate::color::Color;
@@ -82,6 +83,10 @@ pub struct NavigationView {
     // Using UnsafeCell for interior mutability in draw() which takes &self
     cached_page_id: String,
     cached_content: UnsafeCell<Option<ViewBox>>,
+    /// View ID for buffer management
+    view_id: Option<ViewId>,
+    /// Dirty notifier for buffer management
+    dirty_notifier: Option<DirtyNotifier>,
 }
 
 impl NavigationView {
@@ -107,6 +112,8 @@ impl NavigationView {
             needs_redraw: true,
             cached_page_id: String::new(),
             cached_content: UnsafeCell::new(None),
+            view_id: None,
+            dirty_notifier: None,
         }
     }
 
@@ -473,5 +480,17 @@ impl View for NavigationView {
 
     fn clear_needs_draw(&mut self) {
         self.needs_redraw = false;
+    }
+
+    fn view_id(&self) -> Option<ViewId> {
+        self.view_id
+    }
+
+    fn set_view_id(&mut self, id: ViewId) {
+        self.view_id = Some(id);
+    }
+
+    fn set_dirty_notifier(&mut self, notifier: DirtyNotifier) {
+        self.dirty_notifier = Some(notifier);
     }
 }

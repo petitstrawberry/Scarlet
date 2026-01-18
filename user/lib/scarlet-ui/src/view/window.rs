@@ -1,6 +1,7 @@
 //! Window view - the root view with decorations
 
 use super::traits::{View, ViewBox, Size};
+use super::node::{ViewRegistry, ViewId, ViewBuffer, ViewNode, DirtyNotifier};
 use crate::graphics::{Canvas, Rect};
 use crate::event::{Event, EventKind, MouseButton};
 use crate::Color;
@@ -100,6 +101,10 @@ pub struct Window {
 
     move_requested: bool,
     needs_redraw: bool,
+
+    // View registry for buffer management
+    view_registry: ViewRegistry,
+    dirty_notifier: DirtyNotifier,
 }
 
 impl Window {
@@ -114,7 +119,9 @@ impl Window {
         let bytes = title.as_bytes();
         let len = bytes.len().min(64);
         title_buf[..len].copy_from_slice(&bytes[..len]);
-        
+
+        let dirty_notifier = DirtyNotifier::new();
+
         Self {
             title: title_buf,
             title_len: len,
@@ -142,6 +149,9 @@ impl Window {
 
             move_requested: false,
             needs_redraw: true,
+
+            view_registry: ViewRegistry::new(),
+            dirty_notifier,
         }
     }
 
@@ -207,6 +217,11 @@ impl Window {
     pub fn background(mut self, color: Color) -> Self {
         self.background = color;
         self
+    }
+
+    /// Get background color
+    pub fn get_background(&self) -> Color {
+        self.background
     }
 
     /// Set content view (builder pattern)
@@ -343,7 +358,7 @@ impl Window {
     }
 
     /// Draw the title bar
-    fn draw_titlebar(&self, canvas: &mut Canvas) {
+    pub fn draw_titlebar(&self, canvas: &mut Canvas) {
         // Title bar with gradient effect and rounded top corners
         // Light (white-based) titlebar (no gradient)
         let base_color = Color::rgb(235, 235, 238);
@@ -464,7 +479,7 @@ impl Window {
     }
 
     /// Draw the border
-    fn draw_border(&self, canvas: &mut Canvas) {
+    pub fn draw_border(&self, canvas: &mut Canvas) {
         // Modern border with subtle shadow effect (no rounded corners)
         let border_color = Color::rgb(100, 100, 105);
         if self.width == 0 || self.height == 0 {
@@ -482,6 +497,129 @@ impl Window {
                 self.height.saturating_sub(2),
                 Color::rgb(90, 90, 95),
             );
+        }
+    }
+
+    /// Build view registry by walking the tree
+    pub fn build_view_registry(&mut self) {
+        self.view_registry.clear();
+
+        let frame = Rect::new(0, TITLEBAR_HEIGHT as i32, self.width, self.height - TITLEBAR_HEIGHT);
+        let notifier = self.dirty_notifier.clone();
+
+        // Take content to avoid borrow issues
+        if let Some(mut content) = self.content.take() {
+            self.register_view_recursive(content.as_mut(), frame, 0, &notifier);
+            // Return content
+            self.content = Some(content);
+        }
+    }
+
+    fn register_view_recursive(
+        &mut self,
+        view: &mut dyn View,
+        frame: Rect,
+        z_order: u32,
+        notifier: &DirtyNotifier,
+    ) -> ViewId {
+        let id = self.view_registry.register(frame, z_order);
+        view.set_view_id(id);
+        view.set_dirty_notifier(notifier.clone());
+
+        let mut next_z = z_order;
+        view.visit_children_mut(&mut |child, child_frame| {
+            let abs_frame = Rect::new(
+                frame.x + child_frame.x,
+                frame.y + child_frame.y,
+                child_frame.width,
+                child_frame.height,
+            );
+            next_z += 1;
+            self.register_view_recursive(child, abs_frame, next_z, notifier);
+            false
+        });
+
+        id
+    }
+
+    /// Compose view buffers to window canvas
+    pub fn compose_buffers(&mut self, canvas: &mut Canvas) {
+        // Process dirty notifications from views
+        for id in self.dirty_notifier.take_dirty() {
+            self.view_registry.mark_dirty(id);
+        }
+
+        let content_frame = Rect::new(0, TITLEBAR_HEIGHT as i32, self.width, self.height - TITLEBAR_HEIGHT);
+
+        // Take content for drawing
+        let content = self.content.take();
+
+        // Redraw dirty views directly to their buffers
+        let dirty_ids: Vec<_> = self.view_registry.get_dirty_ids().iter().cloned().collect();
+        for id in dirty_ids {
+            if let Some(node) = self.view_registry.get_node_mut(id) {
+                let target_frame = node.frame;
+                let buffer = node.ensure_buffer();
+                let width = buffer.width();
+                let height = buffer.height();
+                let mut buffer_canvas = Canvas::new(buffer.data_mut(), width, height);
+                if let Some(ref c) = content {
+                    // Call standalone function to avoid borrow issues
+                    draw_view_to_buffer_impl(c.as_ref(), content_frame, &mut buffer_canvas, target_frame);
+                }
+            }
+        }
+
+        // Return content
+        self.content = content;
+
+        // Sort by z-order and compose all buffers
+        let mut nodes: Vec<_> = self.view_registry.iter().collect();
+        nodes.sort_by_key(|n| n.z_order);
+
+        for node in nodes {
+            if let Some(ref buffer) = node.buffer {
+                self.compose_buffer_to_canvas(canvas, buffer, node.frame);
+            }
+        }
+
+        self.view_registry.clear_dirty();
+    }
+
+    fn draw_view_to_buffer(
+        &self,
+        view: &dyn View,
+        view_frame: Rect,
+        buffer_canvas: &mut Canvas,
+        target_frame: Rect,
+    ) {
+        draw_view_to_buffer_impl(view, view_frame, buffer_canvas, target_frame);
+    }
+
+    fn compose_buffer_to_canvas(&self, canvas: &mut Canvas, buffer: &ViewBuffer, frame: Rect) {
+        // Copy buffer pixels to canvas at frame position
+        let data = buffer.data();
+        for y in 0..buffer.height() {
+            for x in 0..buffer.width() {
+                let src_offset = ((y * buffer.width() + x) * 4) as usize;
+                let dst_x = frame.x + x as i32;
+                let dst_y = frame.y + y as i32;
+
+                // Bounds check
+                if dst_x >= 0 && dst_x < frame.x + frame.width as i32
+                    && dst_y >= 0 && dst_y < frame.y + frame.height as i32
+                {
+                    let b = data[src_offset];
+                    let g = data[src_offset + 1];
+                    let r = data[src_offset + 2];
+                    let a = data[src_offset + 3];
+
+                    // Simple alpha blend
+                    if a > 0 {
+                        canvas.put_pixel_alpha(dst_x, dst_y, Color::rgba(r, g, b, a), a as f32 / 255.0);
+                    }
+                }
+            }
         }
     }
 }
@@ -728,4 +866,36 @@ impl View for Window {
     fn clear_needs_draw(&mut self) {
         self.needs_redraw = false;
     }
+}
+
+/// Standalone helper function to avoid borrow checker issues
+fn draw_view_to_buffer_impl(
+    view: &dyn View,
+    view_frame: Rect,
+    buffer_canvas: &mut Canvas,
+    target_frame: Rect,
+) {
+    // Check if this view matches the target
+    if view_frame == target_frame {
+        // Draw to buffer (offset to 0,0)
+        let local_frame = Rect::new(0, 0, view_frame.width, view_frame.height);
+        view.draw(buffer_canvas, local_frame);
+        return;
+    }
+
+    // Recurse to children
+    view.visit_children(&mut |child, child_frame| {
+        let abs_frame = Rect::new(
+            view_frame.x + child_frame.x,
+            view_frame.y + child_frame.y,
+            child_frame.width,
+            child_frame.height,
+        );
+
+        // Clip to target frame
+        if abs_frame.intersects(target_frame) {
+            draw_view_to_buffer_impl(child, abs_frame, buffer_canvas, target_frame);
+        }
+        false
+    });
 }

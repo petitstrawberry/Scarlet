@@ -2,6 +2,7 @@
 
 use crate::graphics::{Canvas, Rect};
 use crate::event::Event;
+use crate::view::node::{ViewId, DirtyNotifier};
 use scarlet_std::boxed::Box;
 use scarlet_std::vec::Vec;
 
@@ -190,6 +191,17 @@ pub trait View {
     fn update_hover_state(&mut self, _mouse_in_frame: bool) -> bool {
         false
     }
+
+    /// Get this view's registry ID
+    fn view_id(&self) -> Option<ViewId> {
+        None
+    }
+
+    /// Set this view's registry ID
+    fn set_view_id(&mut self, _id: ViewId) {}
+
+    /// Set dirty notifier for communication with Window
+    fn set_dirty_notifier(&mut self, _notifier: DirtyNotifier) {}
 }
 
 /// Type-erased boxed View for dynamic dispatch

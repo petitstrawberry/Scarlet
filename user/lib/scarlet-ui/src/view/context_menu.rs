@@ -4,6 +4,7 @@
 //! (typically where the user right-clicked) and contains a list of actions.
 
 use super::traits::{View, Size};
+use super::node::{ViewId, DirtyNotifier};
 use crate::graphics::{Canvas, Rect};
 use crate::{Color};
 use crate::event::{Event, EventKind, MouseButton};
@@ -76,6 +77,10 @@ pub struct ContextMenu {
     hover_color: Color,
     separator_color: Color,
     cached_size: Size,
+    /// View ID for buffer management
+    view_id: Option<ViewId>,
+    /// Dirty notifier for buffer management
+    dirty_notifier: Option<DirtyNotifier>,
 }
 
 impl ContextMenu {
@@ -94,6 +99,8 @@ impl ContextMenu {
             hover_color: Color::rgb(0, 122, 255),
             separator_color: Color::rgb(80, 80, 80),
             cached_size: Size::ZERO,
+            view_id: None,
+            dirty_notifier: None,
         }
     }
 
@@ -330,5 +337,17 @@ impl View for ContextMenu {
 
     fn clear_needs_draw(&mut self) {
         // No-op for context menu
+    }
+
+    fn view_id(&self) -> Option<ViewId> {
+        self.view_id
+    }
+
+    fn set_view_id(&mut self, id: ViewId) {
+        self.view_id = Some(id);
+    }
+
+    fn set_dirty_notifier(&mut self, notifier: DirtyNotifier) {
+        self.dirty_notifier = Some(notifier);
     }
 }

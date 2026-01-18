@@ -1,11 +1,11 @@
 //! Container views for layout
 
 use super::traits::{View, ViewBox, Size};
+use super::node::{ViewId, DirtyNotifier};
 use crate::graphics::{Canvas, Rect};
 use crate::event::{Event, EventKind};
 use scarlet_std::boxed::Box;
 use scarlet_std::vec::Vec;
-use scarlet_std::println;
 
 /// Cross-axis alignment for stacks.
 ///
@@ -25,6 +25,10 @@ pub struct VStack {
     spacing: u32,
     alignment: StackAlignment,
     cached_size: Size,
+    /// View ID for buffer management
+    view_id: Option<ViewId>,
+    /// Dirty notifier for buffer management
+    dirty_notifier: Option<DirtyNotifier>,
 }
 
 impl VStack {
@@ -34,6 +38,8 @@ impl VStack {
             spacing: 8,
             alignment: StackAlignment::Center,
             cached_size: Size::ZERO,
+            view_id: None,
+            dirty_notifier: None,
         }
     }
 
@@ -242,6 +248,18 @@ impl View for VStack {
             y += cached_size.height as i32 + spacing as i32;
         }
     }
+
+    fn view_id(&self) -> Option<ViewId> {
+        self.view_id
+    }
+
+    fn set_view_id(&mut self, id: ViewId) {
+        self.view_id = Some(id);
+    }
+
+    fn set_dirty_notifier(&mut self, notifier: DirtyNotifier) {
+        self.dirty_notifier = Some(notifier);
+    }
 }
 
 /// Horizontal stack - arranges children left to right
@@ -250,6 +268,10 @@ pub struct HStack {
     spacing: u32,
     alignment: StackAlignment,
     cached_size: Size,
+    /// View ID for buffer management
+    view_id: Option<ViewId>,
+    /// Dirty notifier for buffer management
+    dirty_notifier: Option<DirtyNotifier>,
 }
 
 impl HStack {
@@ -259,6 +281,8 @@ impl HStack {
             spacing: 8,
             alignment: StackAlignment::Center,
             cached_size: Size::ZERO,
+            view_id: None,
+            dirty_notifier: None,
         }
     }
 
@@ -466,17 +490,35 @@ impl View for HStack {
             x += cached_size.width as i32 + spacing as i32;
         }
     }
+
+    fn view_id(&self) -> Option<ViewId> {
+        self.view_id
+    }
+
+    fn set_view_id(&mut self, id: ViewId) {
+        self.view_id = Some(id);
+    }
+
+    fn set_dirty_notifier(&mut self, notifier: DirtyNotifier) {
+        self.dirty_notifier = Some(notifier);
+    }
 }
 
 /// ZStack - overlays children on top of each other
 pub struct ZStack {
     children: Vec<(ViewBox, Size)>,
+    /// View ID for buffer management
+    view_id: Option<ViewId>,
+    /// Dirty notifier for buffer management
+    dirty_notifier: Option<DirtyNotifier>,
 }
 
 impl ZStack {
     pub fn new() -> Self {
         Self {
             children: Vec::new(),
+            view_id: None,
+            dirty_notifier: None,
         }
     }
 
@@ -531,6 +573,18 @@ impl View for ZStack {
         }
         false
     }
+
+    fn view_id(&self) -> Option<ViewId> {
+        self.view_id
+    }
+
+    fn set_view_id(&mut self, id: ViewId) {
+        self.view_id = Some(id);
+    }
+
+    fn set_dirty_notifier(&mut self, notifier: DirtyNotifier) {
+        self.dirty_notifier = Some(notifier);
+    }
 }
 
 /// Padding wrapper - adds space around a child
@@ -541,6 +595,10 @@ pub struct Padding {
     bottom: u32,
     left: u32,
     cached_size: Size,
+    /// View ID for buffer management
+    view_id: Option<ViewId>,
+    /// Dirty notifier for buffer management
+    dirty_notifier: Option<DirtyNotifier>,
 }
 
 impl Padding {
@@ -552,6 +610,8 @@ impl Padding {
             bottom: 0,
             left: 0,
             cached_size: Size::ZERO,
+            view_id: None,
+            dirty_notifier: None,
         }
     }
 
@@ -662,12 +722,28 @@ impl View for Padding {
         );
         let _ = visitor(self.child.as_mut() as &mut dyn View, child_frame);
     }
+
+    fn view_id(&self) -> Option<ViewId> {
+        self.view_id
+    }
+
+    fn set_view_id(&mut self, id: ViewId) {
+        self.view_id = Some(id);
+    }
+
+    fn set_dirty_notifier(&mut self, notifier: DirtyNotifier) {
+        self.dirty_notifier = Some(notifier);
+    }
 }
 
 /// Center wrapper - centers child in available space
 pub struct Center {
     child: ViewBox,
     cached_size: Size,
+    /// View ID for buffer management
+    view_id: Option<ViewId>,
+    /// Dirty notifier for buffer management
+    dirty_notifier: Option<DirtyNotifier>,
 }
 
 impl Center {
@@ -675,6 +751,8 @@ impl Center {
         Self {
             child: Box::new(child),
             cached_size: Size::ZERO,
+            view_id: None,
+            dirty_notifier: None,
         }
     }
 }
@@ -726,6 +804,18 @@ impl View for Center {
         let child_frame = Rect::new(0, 0, self.cached_size.width, self.cached_size.height);
         let _ = visitor(self.child.as_mut() as &mut dyn View, child_frame);
     }
+
+    fn view_id(&self) -> Option<ViewId> {
+        self.view_id
+    }
+
+    fn set_view_id(&mut self, id: ViewId) {
+        self.view_id = Some(id);
+    }
+
+    fn set_dirty_notifier(&mut self, notifier: DirtyNotifier) {
+        self.dirty_notifier = Some(notifier);
+    }
 }
 
 /// ScrollView - scrollable container for content larger than available space
@@ -763,6 +853,10 @@ pub struct ScrollView {
     cached_content_width: u32,
     cached_content_height: u32,
     cache_valid: bool,
+    /// View ID for buffer management
+    view_id: Option<ViewId>,
+    /// Dirty notifier for buffer management
+    dirty_notifier: Option<DirtyNotifier>,
 }
 
 impl ScrollView {
@@ -774,6 +868,8 @@ impl ScrollView {
             scroll_offset_y: 0,
             cached_size: Size::ZERO,
             child_size: Size::ZERO,
+            view_id: None,
+            dirty_notifier: None,
             shows_vertical_scrollbar: true,
             shows_horizontal_scrollbar: false,
             scrollbar_width: 12,
@@ -1296,6 +1392,18 @@ impl View for ScrollView {
     fn clear_needs_draw(&mut self) {
         self.needs_redraw = false;
         self.child.clear_needs_draw();
+    }
+
+    fn view_id(&self) -> Option<ViewId> {
+        self.view_id
+    }
+
+    fn set_view_id(&mut self, id: ViewId) {
+        self.view_id = Some(id);
+    }
+
+    fn set_dirty_notifier(&mut self, notifier: DirtyNotifier) {
+        self.dirty_notifier = Some(notifier);
     }
 }
 

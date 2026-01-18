@@ -3,6 +3,7 @@
 //! All controls support two-way binding via `Binding<T>` for reactive updates.
 
 use super::traits::{View, Size, Focus, Hoverable};
+use super::node::{ViewId, DirtyNotifier};
 use crate::graphics::{measure_text_sized, Canvas, Rect};
 use crate::Color;
 use crate::event::{Event, EventKind, MouseButton};
@@ -20,6 +21,8 @@ pub struct Label {
     color: Color,
     font_size: u32,
     needs_redraw: bool,
+    view_id: Option<ViewId>,
+    dirty_notifier: Option<DirtyNotifier>,
 }
 
 impl Label {
@@ -29,6 +32,8 @@ impl Label {
             color: Color::WHITE,
             font_size: 16,
             needs_redraw: false,
+            view_id: None,
+            dirty_notifier: None,
         }
     }
 
@@ -48,6 +53,13 @@ impl Label {
     pub fn set_text(&mut self, text: impl Into<String>) {
         self.text = text.into();
         self.needs_redraw = true;
+
+        // Notify window
+        if let Some(id) = self.view_id {
+            if let Some(ref notifier) = self.dirty_notifier {
+                notifier.mark_dirty(id);
+            }
+        }
     }
 }
 
@@ -72,6 +84,18 @@ impl View for Label {
     fn clear_needs_draw(&mut self) {
         self.needs_redraw = false;
     }
+
+    fn view_id(&self) -> Option<ViewId> {
+        self.view_id
+    }
+
+    fn set_view_id(&mut self, id: ViewId) {
+        self.view_id = Some(id);
+    }
+
+    fn set_dirty_notifier(&mut self, notifier: DirtyNotifier) {
+        self.dirty_notifier = Some(notifier);
+    }
 }
 
 /// Reactive text view (SwiftUI-like `Text`)
@@ -94,6 +118,10 @@ pub struct Text {
     throttle_frames: u32,
     /// Whether the text has changed and needs to be redrawn
     needs_redraw: bool,
+    /// View ID for buffer management
+    view_id: Option<ViewId>,
+    /// Dirty notifier for buffer management
+    dirty_notifier: Option<DirtyNotifier>,
 }
 
 impl Text {
@@ -113,6 +141,8 @@ impl Text {
             last_update_frame: 0,
             throttle_frames: 0,
             needs_redraw: false,
+            view_id: None,
+            dirty_notifier: None,
         }
     }
 
@@ -135,6 +165,8 @@ impl Text {
             last_update_frame: 0,
             throttle_frames: 0,
             needs_redraw: false,
+            view_id: None,
+            dirty_notifier: None,
         }
     }
 
@@ -175,6 +207,13 @@ impl View for Text {
                 self.cached_text = (self.formatter)();
                 self.last_update_frame = self.frame_counter;
                 self.needs_redraw = true;
+
+                // Notify window
+                if let Some(id) = self.view_id {
+                    if let Some(ref notifier) = self.dirty_notifier {
+                        notifier.mark_dirty(id);
+                    }
+                }
             } else {
                 // Re-mark as dirty to update later
                 self.refresh_handle.mark_dirty();
@@ -205,6 +244,18 @@ impl View for Text {
     fn clear_needs_draw(&mut self) {
         self.needs_redraw = false;
     }
+
+    fn view_id(&self) -> Option<ViewId> {
+        self.view_id
+    }
+
+    fn set_view_id(&mut self, id: ViewId) {
+        self.view_id = Some(id);
+    }
+
+    fn set_dirty_notifier(&mut self, notifier: DirtyNotifier) {
+        self.dirty_notifier = Some(notifier);
+    }
 }
 
 /// Reactive label that automatically updates when state changes
@@ -230,6 +281,10 @@ pub struct ReactiveLabel<T: Clone + 'static> {
     font_size: u32,
     refresh_handle: ViewRefreshHandle,
     cached_text: String,
+    /// View ID for buffer management
+    view_id: Option<ViewId>,
+    /// Dirty notifier for buffer management
+    dirty_notifier: Option<DirtyNotifier>,
 }
 
 impl<T: Clone + 'static> ReactiveLabel<T> {
@@ -242,10 +297,10 @@ impl<T: Clone + 'static> ReactiveLabel<T> {
     {
         let refresh_handle = ViewRefreshHandle::new();
         state.subscribe_view(&refresh_handle);
-        
+
         // Get initial text
         let cached_text = state.with(|v| formatter(v));
-        
+
         Self {
             state,
             formatter: Arc::new(formatter),
@@ -253,6 +308,8 @@ impl<T: Clone + 'static> ReactiveLabel<T> {
             font_size: 16,
             refresh_handle,
             cached_text,
+            view_id: None,
+            dirty_notifier: None,
         }
     }
 
@@ -278,6 +335,13 @@ impl<T: Clone + 'static> View for ReactiveLabel<T> {
         // Check if state changed and update text
         if self.refresh_handle.take_dirty() {
             self.update_text();
+
+            // Notify window
+            if let Some(id) = self.view_id {
+                if let Some(ref notifier) = self.dirty_notifier {
+                    notifier.mark_dirty(id);
+                }
+            }
         }
         let (w, h) = measure_text_sized(&self.cached_text, self.font_size as f32);
         Size::new(w, h)
@@ -297,6 +361,18 @@ impl<T: Clone + 'static> View for ReactiveLabel<T> {
 
     fn clear_needs_draw(&mut self) {
         self.refresh_handle.take_dirty();
+    }
+
+    fn view_id(&self) -> Option<ViewId> {
+        self.view_id
+    }
+
+    fn set_view_id(&mut self, id: ViewId) {
+        self.view_id = Some(id);
+    }
+
+    fn set_dirty_notifier(&mut self, notifier: DirtyNotifier) {
+        self.dirty_notifier = Some(notifier);
     }
 }
 
@@ -335,6 +411,10 @@ pub struct Button<F: FnMut() + 'static> {
     is_pressed: bool,
     label_size: Size,
     needs_redraw: bool,
+    /// View ID for buffer management
+    view_id: Option<ViewId>,
+    /// Dirty notifier for buffer management
+    dirty_notifier: Option<DirtyNotifier>,
 }
 
 impl<F: FnMut() + 'static> Button<F> {
@@ -350,6 +430,8 @@ impl<F: FnMut() + 'static> Button<F> {
             is_pressed: false,
             label_size: Size::ZERO,
             needs_redraw: false,
+            view_id: None,
+            dirty_notifier: None,
         }
     }
 
@@ -448,6 +530,7 @@ impl<F: FnMut() + 'static> View for Button<F> {
                     // println!("[Button] MouseDown: is_pressed={}->true", self.is_pressed);
                     self.is_pressed = true;
                     self.needs_redraw = true;
+                    self.notify_dirty();
                     true
                 } else {
                     false
@@ -461,6 +544,7 @@ impl<F: FnMut() + 'static> View for Button<F> {
                     // println!("[Button] MouseUp: is_pressed=true->false, in_frame={}", in_frame);
                     self.is_pressed = false;
                     self.needs_redraw = true;
+                    self.notify_dirty();
                     if in_frame {
                         // println!("[Button] Calling click handler");
                         (self.on_click)();
@@ -481,6 +565,7 @@ impl<F: FnMut() + 'static> View for Button<F> {
         self.is_hovered = mouse_in_frame;
         if was_hovered != self.is_hovered {
             self.needs_redraw = true;
+            self.notify_dirty();
             true
         } else {
             false
@@ -542,6 +627,28 @@ impl<F: FnMut() + 'static> View for Button<F> {
     fn clear_needs_draw(&mut self) {
         self.needs_redraw = false;
     }
+
+    fn view_id(&self) -> Option<ViewId> {
+        self.view_id
+    }
+
+    fn set_view_id(&mut self, id: ViewId) {
+        self.view_id = Some(id);
+    }
+
+    fn set_dirty_notifier(&mut self, notifier: DirtyNotifier) {
+        self.dirty_notifier = Some(notifier);
+    }
+}
+
+impl<F: FnMut() + 'static> Button<F> {
+    fn notify_dirty(&mut self) {
+        if let Some(id) = self.view_id {
+            if let Some(ref notifier) = self.dirty_notifier {
+                notifier.mark_dirty(id);
+            }
+        }
+    }
 }
 
 impl<F: FnMut() + 'static> Hoverable for Button<F> {
@@ -576,6 +683,10 @@ pub struct TextField {
     refresh_handle: ViewRefreshHandle,
     cached_text: String,
     on_action: Option<Box<dyn FnMut(&str)>>,
+    /// View ID for buffer management
+    view_id: Option<ViewId>,
+    /// Dirty notifier for buffer management
+    dirty_notifier: Option<DirtyNotifier>,
 }
 
 impl TextField {
@@ -597,6 +708,8 @@ impl TextField {
             refresh_handle: ViewRefreshHandle::new(),
             cached_text,
             on_action: None,
+            view_id: None,
+            dirty_notifier: None,
         }
     }
 
@@ -733,6 +846,14 @@ impl TextField {
         if new_text != self.cached_text {
             self.cached_text = new_text;
             self.cursor_pos = self.cursor_pos.min(self.cached_text.len());
+        }
+    }
+
+    fn notify_dirty(&mut self) {
+        if let Some(id) = self.view_id {
+            if let Some(ref notifier) = self.dirty_notifier {
+                notifier.mark_dirty(id);
+            }
         }
     }
 }
@@ -907,6 +1028,18 @@ impl View for TextField {
     fn clear_needs_draw(&mut self) {
         self.refresh_handle.take_dirty();
     }
+
+    fn view_id(&self) -> Option<ViewId> {
+        self.view_id
+    }
+
+    fn set_view_id(&mut self, id: ViewId) {
+        self.view_id = Some(id);
+    }
+
+    fn set_dirty_notifier(&mut self, notifier: DirtyNotifier) {
+        self.dirty_notifier = Some(notifier);
+    }
 }
 
 impl Focus for TextField {
@@ -915,6 +1048,7 @@ impl Focus for TextField {
         self.is_focused = true;
         if !was_focused {
             self.refresh_handle.mark_dirty();
+            self.notify_dirty();
         }
         !was_focused
     }
@@ -924,6 +1058,7 @@ impl Focus for TextField {
         self.is_focused = false;
         if was_focused {
             self.refresh_handle.mark_dirty();
+            self.notify_dirty();
         }
         was_focused
     }
@@ -957,11 +1092,19 @@ impl Hoverable for TextField {
 /// Flexible spacer - takes up available space
 pub struct Spacer {
     min_length: u32,
+    /// View ID for buffer management
+    view_id: Option<ViewId>,
+    /// Dirty notifier for buffer management
+    dirty_notifier: Option<DirtyNotifier>,
 }
 
 impl Spacer {
     pub fn new() -> Self {
-        Self { min_length: 0 }
+        Self {
+            min_length: 0,
+            view_id: None,
+            dirty_notifier: None,
+        }
     }
 
     /// Set minimum length
@@ -998,6 +1141,18 @@ impl View for Spacer {
     fn draw(&self, _canvas: &mut Canvas, _frame: Rect) {
         // Spacer is invisible
     }
+
+    fn view_id(&self) -> Option<ViewId> {
+        self.view_id
+    }
+
+    fn set_view_id(&mut self, id: ViewId) {
+        self.view_id = Some(id);
+    }
+
+    fn set_dirty_notifier(&mut self, notifier: DirtyNotifier) {
+        self.dirty_notifier = Some(notifier);
+    }
 }
 
 /// Rectangle view with optional rounded corners
@@ -1008,6 +1163,10 @@ pub struct RectView {
     corner_radius: u32,
     border_width: u32,
     border_color: Option<Color>,
+    /// View ID for buffer management
+    view_id: Option<ViewId>,
+    /// Dirty notifier for buffer management
+    dirty_notifier: Option<DirtyNotifier>,
 }
 
 impl RectView {
@@ -1019,6 +1178,8 @@ impl RectView {
             corner_radius: 0,
             border_width: 0,
             border_color: None,
+            view_id: None,
+            dirty_notifier: None,
         }
     }
 
@@ -1087,6 +1248,18 @@ impl View for RectView {
             }
         }
     }
+
+    fn view_id(&self) -> Option<ViewId> {
+        self.view_id
+    }
+
+    fn set_view_id(&mut self, id: ViewId) {
+        self.view_id = Some(id);
+    }
+
+    fn set_dirty_notifier(&mut self, notifier: DirtyNotifier) {
+        self.dirty_notifier = Some(notifier);
+    }
 }
 
 /// CheckBox - boolean toggle control with two-way binding
@@ -1108,6 +1281,10 @@ pub struct CheckBox {
     label_color: Color,
     corner_radius: u32,
     refresh_handle: ViewRefreshHandle,
+    /// View ID for buffer management
+    view_id: Option<ViewId>,
+    /// Dirty notifier for buffer management
+    dirty_notifier: Option<DirtyNotifier>,
 }
 
 impl CheckBox {
@@ -1119,6 +1296,8 @@ impl CheckBox {
             label_color: Color::BLACK,
             corner_radius: 3,
             refresh_handle: ViewRefreshHandle::new(),
+            view_id: None,
+            dirty_notifier: None,
         }
     }
 
@@ -1193,6 +1372,7 @@ impl View for CheckBox {
                 if frame.contains(event.x(), event.y()) {
                     let current = self.binding.get();
                     self.binding.set(!current);
+                    self.notify_dirty();
                     true
                 } else {
                     false
@@ -1212,6 +1392,28 @@ impl View for CheckBox {
 
     fn clear_needs_draw(&mut self) {
         self.refresh_handle.take_dirty();
+    }
+
+    fn view_id(&self) -> Option<ViewId> {
+        self.view_id
+    }
+
+    fn set_view_id(&mut self, id: ViewId) {
+        self.view_id = Some(id);
+    }
+
+    fn set_dirty_notifier(&mut self, notifier: DirtyNotifier) {
+        self.dirty_notifier = Some(notifier);
+    }
+}
+
+impl CheckBox {
+    fn notify_dirty(&mut self) {
+        if let Some(id) = self.view_id {
+            if let Some(ref notifier) = self.dirty_notifier {
+                notifier.mark_dirty(id);
+            }
+        }
     }
 }
 
@@ -1241,6 +1443,10 @@ pub struct Slider {
     /// Frame counter for throttling
     frame_counter: u32,
     refresh_handle: ViewRefreshHandle,
+    /// View ID for buffer management
+    view_id: Option<ViewId>,
+    /// Dirty notifier for buffer management
+    dirty_notifier: Option<DirtyNotifier>,
 }
 
 impl Slider {
@@ -1256,6 +1462,8 @@ impl Slider {
             last_commit_frame: 0,
             frame_counter: 0,
             refresh_handle: ViewRefreshHandle::new(),
+            view_id: None,
+            dirty_notifier: None,
         }
     }
 
@@ -1307,6 +1515,7 @@ impl Slider {
         if let Some(value) = self.pending_value.take() {
             self.binding.set(value);
             self.last_commit_frame = self.frame_counter;
+            self.notify_dirty();
         }
     }
 }
@@ -1401,6 +1610,28 @@ impl View for Slider {
     fn clear_needs_draw(&mut self) {
         self.refresh_handle.take_dirty();
     }
+
+    fn view_id(&self) -> Option<ViewId> {
+        self.view_id
+    }
+
+    fn set_view_id(&mut self, id: ViewId) {
+        self.view_id = Some(id);
+    }
+
+    fn set_dirty_notifier(&mut self, notifier: DirtyNotifier) {
+        self.dirty_notifier = Some(notifier);
+    }
+}
+
+impl Slider {
+    fn notify_dirty(&mut self) {
+        if let Some(id) = self.view_id {
+            if let Some(ref notifier) = self.dirty_notifier {
+                notifier.mark_dirty(id);
+            }
+        }
+    }
 }
 
 /// ProgressBar - progress indicator with reactive state
@@ -1428,6 +1659,10 @@ pub struct ProgressBar {
     display_value: f32,
     /// Whether animation is enabled
     animate: bool,
+    /// View ID for buffer management
+    view_id: Option<ViewId>,
+    /// Dirty notifier for buffer management
+    dirty_notifier: Option<DirtyNotifier>,
 }
 
 impl ProgressBar {
@@ -1445,6 +1680,8 @@ impl ProgressBar {
             display_value: initial,
             // Disable animation by default to prevent flicker
             animate: false,
+            view_id: None,
+            dirty_notifier: None,
         }
     }
     
@@ -1489,9 +1726,11 @@ impl ProgressBar {
 
 impl View for ProgressBar {
     fn layout(&mut self, available: Size) -> Size {
+        let needs_update = self.refresh_handle.take_dirty();
+
         // Update display value with interpolation
         let target = self.state.get().clamp(0.0, 1.0);
-        
+
         if self.animate {
             // Lerp towards target (smooth animation)
             let diff = target - self.display_value;
@@ -1507,22 +1746,27 @@ impl View for ProgressBar {
         } else {
             self.display_value = target;
         }
-        
+
+        // Notify if state changed
+        if needs_update {
+            self.notify_dirty();
+        }
+
         Size::new(available.width.max(100), self.height)
     }
 
     fn draw(&self, canvas: &mut Canvas, frame: Rect) {
         let progress = self.display_value;
-        
+
         // Draw track with rounded corners
         canvas.fill_rounded_rect(frame.x, frame.y, frame.width, frame.height, self.corner_radius, self.track_color);
-        
+
         // Draw filled portion with rounded corners
         let fill_width = (frame.width as f32 * progress) as u32;
         if fill_width > 0 {
             canvas.fill_rounded_rect(frame.x, frame.y, fill_width, frame.height, self.corner_radius, self.fill_color);
         }
-        
+
         // Draw border
         canvas.draw_rounded_rect(frame.x, frame.y, frame.width, frame.height, self.corner_radius, Color::rgb(180, 180, 180));
     }
@@ -1537,6 +1781,28 @@ impl View for ProgressBar {
 
     fn clear_needs_draw(&mut self) {
         self.refresh_handle.take_dirty();
+    }
+
+    fn view_id(&self) -> Option<ViewId> {
+        self.view_id
+    }
+
+    fn set_view_id(&mut self, id: ViewId) {
+        self.view_id = Some(id);
+    }
+
+    fn set_dirty_notifier(&mut self, notifier: DirtyNotifier) {
+        self.dirty_notifier = Some(notifier);
+    }
+}
+
+impl ProgressBar {
+    fn notify_dirty(&mut self) {
+        if let Some(id) = self.view_id {
+            if let Some(ref notifier) = self.dirty_notifier {
+                notifier.mark_dirty(id);
+            }
+        }
     }
 }
 
@@ -1559,6 +1825,10 @@ pub struct Toggle {
     thumb_color: Color,
     is_hovered: bool,
     refresh_handle: ViewRefreshHandle,
+    /// View ID for buffer management
+    view_id: Option<ViewId>,
+    /// Dirty notifier for buffer management
+    dirty_notifier: Option<DirtyNotifier>,
 }
 
 impl Toggle {
@@ -1570,6 +1840,8 @@ impl Toggle {
             thumb_color: Color::WHITE,
             is_hovered: false,
             refresh_handle: ViewRefreshHandle::new(),
+            view_id: None,
+            dirty_notifier: None,
         }
     }
 
@@ -1648,12 +1920,16 @@ impl View for Toggle {
             EventKind::MouseMove => {
                 let was_hovered = self.is_hovered;
                 self.is_hovered = frame.contains(event.x(), event.y());
+                if was_hovered != self.is_hovered {
+                    self.notify_dirty();
+                }
                 was_hovered != self.is_hovered
             }
             EventKind::MouseDown { button: MouseButton::Left } => {
                 if frame.contains(event.x(), event.y()) {
                     let current = self.binding.get();
                     self.binding.set(!current);
+                    self.notify_dirty();
                     true
                 } else {
                     false
@@ -1673,6 +1949,28 @@ impl View for Toggle {
 
     fn clear_needs_draw(&mut self) {
         self.refresh_handle.take_dirty();
+    }
+
+    fn view_id(&self) -> Option<ViewId> {
+        self.view_id
+    }
+
+    fn set_view_id(&mut self, id: ViewId) {
+        self.view_id = Some(id);
+    }
+
+    fn set_dirty_notifier(&mut self, notifier: DirtyNotifier) {
+        self.dirty_notifier = Some(notifier);
+    }
+}
+
+impl Toggle {
+    fn notify_dirty(&mut self) {
+        if let Some(id) = self.view_id {
+            if let Some(ref notifier) = self.dirty_notifier {
+                notifier.mark_dirty(id);
+            }
+        }
     }
 }
 
@@ -1723,6 +2021,10 @@ pub struct ListView {
     needs_redraw: bool,
     /// Callback when selection changes
     on_selection_change: Option<Box<dyn FnMut(usize) + 'static>>,
+    /// View ID for buffer management
+    view_id: Option<ViewId>,
+    /// Dirty notifier for buffer management
+    dirty_notifier: Option<DirtyNotifier>,
 }
 
 impl ListView {
@@ -1751,6 +2053,8 @@ impl ListView {
             hovered_index: None,
             needs_redraw: false,
             on_selection_change: None,
+            view_id: None,
+            dirty_notifier: None,
         }
     }
 
@@ -1845,6 +2149,7 @@ impl View for ListView {
         // Check for state changes
         if self.refresh_handle.take_dirty() {
             self.needs_redraw = true;
+            self.notify_dirty();
         }
 
         // Calculate height based on number of items
@@ -1922,6 +2227,7 @@ impl View for ListView {
                 let hover_changed = if item_index != self.hovered_index {
                     self.hovered_index = item_index;
                     self.needs_redraw = true;
+                    self.notify_dirty();
                     true
                 } else {
                     false
@@ -1932,6 +2238,7 @@ impl View for ListView {
                 self.is_hovered = frame.contains(event.x(), event.y());
                 if was_hovered != self.is_hovered {
                     self.needs_redraw = true;
+                    self.notify_dirty();
                     true
                 } else {
                     hover_changed
@@ -1945,6 +2252,7 @@ impl View for ListView {
                             self.selected.set(index);
                             self.needs_redraw = true;
                             self.refresh_handle.mark_dirty();
+                            self.notify_dirty();
 
                             // Call callback if set
                             if let Some(ref mut callback) = self.on_selection_change {
@@ -1966,6 +2274,7 @@ impl View for ListView {
         self.is_hovered = mouse_in_frame;
         if was_hovered != self.is_hovered {
             self.needs_redraw = true;
+            self.notify_dirty();
             true
         } else {
             false
@@ -1984,6 +2293,28 @@ impl View for ListView {
     fn clear_needs_draw(&mut self) {
         self.needs_redraw = false;
         self.refresh_handle.take_dirty();
+    }
+
+    fn view_id(&self) -> Option<ViewId> {
+        self.view_id
+    }
+
+    fn set_view_id(&mut self, id: ViewId) {
+        self.view_id = Some(id);
+    }
+
+    fn set_dirty_notifier(&mut self, notifier: DirtyNotifier) {
+        self.dirty_notifier = Some(notifier);
+    }
+}
+
+impl ListView {
+    fn notify_dirty(&mut self) {
+        if let Some(id) = self.view_id {
+            if let Some(ref notifier) = self.dirty_notifier {
+                notifier.mark_dirty(id);
+            }
+        }
     }
 }
 
