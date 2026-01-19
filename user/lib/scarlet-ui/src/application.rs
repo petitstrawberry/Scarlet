@@ -259,8 +259,31 @@ impl Application {
     fn render(&mut self) {
         // Take dirty views from RenderTracker
         // DataContext now marks views dirty directly in the global tracker
-        let dirty_layout = self.tracker.take_dirty_layout();
-        let dirty_paint = self.tracker.take_dirty_paint();
+        let mut dirty_layout = self.tracker.take_dirty_layout();
+        let mut dirty_paint = self.tracker.take_dirty_paint();
+
+        // For non-Window dirty views, find their parent Window and mark it dirty too
+        // This ensures that when a child view (e.g., Text bound to DataContext) changes,
+        // the entire Window gets redrawn
+        for dirty_view_id in dirty_paint.iter().chain(dirty_layout.iter()) {
+            // Check if this dirty view is a Window
+            let is_window = self.windows.iter().any(|w| w.window.id() == *dirty_view_id);
+
+            if !is_window {
+                // This is a child view, mark all windows as dirty for now
+                // TODO: Optimize by tracking which window contains this view
+                for managed in &self.windows {
+                    self.tracker.mark_dirty_paint(managed.window.id());
+                }
+                break; // All windows are now dirty, no need to check further
+            }
+        }
+
+        // Add newly marked windows to dirty sets
+        let additional_layout = self.tracker.take_dirty_layout();
+        let additional_paint = self.tracker.take_dirty_paint();
+        dirty_layout.extend(additional_layout);
+        dirty_paint.extend(additional_paint);
 
         // Layout pass
         for managed in &mut self.windows {
