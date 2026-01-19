@@ -1,27 +1,177 @@
-//! UI Demo - ScarletUI Reactive State Demo
+//! UI Demo - ScarletUI Modern Architecture Demo
 //!
 //! This demo showcases:
-//! - Reactive State<T> with automatic UI updates
-//! - Direct State passing (no .binding() needed)
-//! - Timer-based automatic updates
-//! - ReactiveLabel for auto-updating text
-//! - Rounded corners on all controls
+//! - New View/RenderObject architecture
+//! - Declarative UI composition
+//! - Method chaining for View configuration
+//! - Navigation controls (ScrollView, TabView, NavigationView)
 
 #![no_std]
 #![no_main]
 
-extern crate scarlet_std as std;
+extern crate alloc;
 
-use core::time::Duration;
 use scarlet_ui::{
-    Application, Button, Center, CheckBox, Color, HStack, Label, Padding, ProgressBar, RectView,
-    Slider, Spacer, State, Text, TextField, Timer, Toggle, VStack, Window, label,
+    Application, Window, WindowBuilder,
+    VStack, HStack,
+    Text, Button, Toggle, Slider, TextField,
+    ScrollView, TabView, NavigationView,
+    Local, View, ViewExt,
+    Color,
 };
-use std::{format, println};
+use alloc::{string::String, format, boxed::Box, sync::Arc};
+use scarlet_std::println;
+
+/// Demo view - Shows various UI components
+struct DemoView {
+    id: scarlet_ui::ViewId,
+    counter: Local<i32>,
+}
+
+impl DemoView {
+    fn new() -> Self {
+        Self {
+            id: scarlet_ui::ViewId::new(),
+            counter: Local::new(0),
+        }
+    }
+
+    fn build(&self) -> impl View {
+        VStack::new()
+            .spacing(16)
+            // Header
+            .child(
+                Text::new("ScarletUI Modern Architecture Demo")
+                    .font_size(28)
+            )
+            .child(
+                Text::new("View/RenderObject separation with SwiftUI-style API")
+                    .font_size(14)
+            )
+            .child(
+                Text::new("Counter: 0")
+                    .font_size(24)
+            )
+            .child(
+                HStack::new()
+                    .spacing(10)
+                    .child(
+                        Button::new("Decrement")
+                            .padding(10)
+                    )
+                    .child(
+                        Button::new("Increment")
+                            .padding(10)
+                    )
+            )
+            .child(
+                Toggle::new(true)
+            )
+            .child(
+                Slider::new(0.0, 100.0)
+                    .value(50.0)
+            )
+            .child(
+                TextField::new()
+            )
+            .child(
+                Button::new("Open TabView Demo")
+                    .action(|| {
+                        println!("[ui_demo] TabView demo requested");
+                    })
+                    .padding(10)
+            )
+            .child(
+                Button::new("Open NavigationView Demo")
+                    .action(|| {
+                        println!("[ui_demo] NavigationView demo requested");
+                    })
+                    .padding(10)
+            )
+    }
+}
+
+impl scarlet_ui::view::render::RenderObject for DemoView {
+    fn id(&self) -> scarlet_ui::ViewId {
+        self.id
+    }
+
+    fn as_any(&self) -> &dyn core::any::Any {
+        self
+    }
+
+    fn layout(&mut self, ctx: &mut scarlet_ui::LayoutCtx, constraints: scarlet_ui::LayoutConstraints) -> scarlet_ui::Size {
+        // Default size
+        let size = scarlet_ui::Size::new(600, 700);
+        size
+    }
+
+    fn draw(&self, ctx: &mut scarlet_ui::PaintCtx, frame: scarlet_ui::graphics::Rect) {
+        // Draw the body
+        let body = self.build();
+        body.draw(ctx, frame);
+    }
+
+    fn event(&mut self, ctx: &mut scarlet_ui::EventCtx, event: &scarlet_ui::Event) -> scarlet_ui::ControlFlow {
+        self.build().event(ctx, event)
+    }
+
+    fn update(&mut self, ctx: &mut scarlet_ui::UpdateCtx) {
+        self.build().update(ctx)
+    }
+}
+
+impl View for DemoView {}
+
+/// TabView demo
+struct TabViewDemo;
+
+impl TabViewDemo {
+    fn build() -> impl View {
+        TabView::new()
+            .tab("Home", Box::new(
+                Text::new("Home Content")
+                    .font_size(24)
+            ))
+            .tab("Settings", Box::new(
+                VStack::new()
+                    .spacing(10)
+                    .child(Text::new("Settings").font_size(24))
+                    .child(Toggle::new(true))
+            ))
+            .tab("About", Box::new(
+                Text::new("About ScarletUI")
+                    .font_size(24)
+            ))
+    }
+}
+
+/// NavigationView demo
+struct NavigationViewDemo;
+
+impl NavigationViewDemo {
+    fn build() -> impl View {
+        NavigationView::with_title(
+            "Root",
+            Box::new(
+                VStack::new()
+                    .spacing(16)
+                    .child(Text::new("Root View").font_size(24))
+                    .child(
+                        Button::new("Go to Detail")
+                            .action(|| {
+                                println!("[ui_demo] Navigate to detail");
+                            })
+                            .padding(10)
+                    )
+            )
+        )
+    }
+}
 
 #[unsafe(no_mangle)]
 pub extern "C" fn main() -> i32 {
-    println!("[ui_demo] Starting ScarletUI Reactive Demo");
+    println!("[ui_demo] Starting ScarletUI Modern Architecture Demo");
 
     let mut app = match Application::new() {
         Ok(mut a) => {
@@ -34,257 +184,73 @@ pub extern "C" fn main() -> i32 {
         }
     };
 
-    app.set_terminate_after_last_window_closed(true);
-    let handle = app.handle();
+    // Create main window
+    let demo_view = DemoView::new();
 
-    // ========================================================================
-    // Reactive State - UI auto-updates when values change
-    // ========================================================================
-
-    let counter = State::new(0i32);
-    let progress = State::new(0.0f32);
-    let feature_a = State::new(true);
-    let feature_b = State::new(false);
-    let slider_value = State::new(0.5f32);
-    let toggle1 = State::new(true);
-    let toggle2 = State::new(false);
-    let text_input = State::new(scarlet_std::string::String::new());
-
-    // Timer - auto-increment progress (100ms intervals)
-    let progress_t = progress.clone();
-    let counter_t = counter.clone();
-    Timer::periodic(Duration::from_millis(100), move || {
-        let p = progress_t.get() + 0.01;
-        if p >= 1.0 {
-            progress_t.set(0.0);
-            counter_t.update(|c| *c += 1);
-        } else {
-            progress_t.set(p);
-        }
-    });
-
-    // Button callbacks
-    let counter_reset = counter.clone();
-    let counter_inc = counter.clone();
-    let progress_reset = progress.clone();
-    let popup_handle = handle.clone();
-
-    // ========================================================================
-    // Build UI - State passed directly to controls (no .binding())
-    // ========================================================================
-
-    let window = Window::new("ScarletUI Reactive Demo", 650, 720)
-        .min_size(650, 720)
-        .background(Color::rgb(245, 245, 250))
-        .content(
-            Padding::new(
-                VStack::new()
-                    .spacing(16)
-                    // Header
-                    .child(
-                        Label::new("ScarletUI Reactive Gallery")
-                            .color(Color::rgb(40, 40, 50))
-                            .font_size(40),
-                    )
-                    .child(
-                        Label::new("ScarletUIの世界からこんにちは！ This demo showcases reactive State<T> usage.")
-                            .color(Color::GRAY)
-                            .font_size(20),
-                    )
-                    .child(Spacer::new().min_length(8))
-                    // Counter - ReactiveLabel auto-updates
-                    .child(
-                        VStack::new()
-                            .spacing(8)
-                            .child(
-                                HStack::new()
-                                    .spacing(8)
-                                    .child(
-                                        VStack::new()
-                                            .spacing(8)
-                                            .child(
-                                                Label::new("Reactive Counter:")
-                                                    .color(Color::TEXT)
-                                                    .font_size(14),
-                                            )
-                                            .child(
-                                                label!("Count: {}", counter.clone())
-                                                    .color(Color::rgb(50, 150, 255))
-                                                    .font_size(24),
-                                            )
-                                    )
-                                    .child(Button::new("Reset", move || {
-                                        counter_reset.set(0);
-                                    }))
-                                    .child(Button::new("+1", move || {
-                                        counter_inc.update(|c| *c += 1);
-                                    })),
-                            )
-                    )
-                    // Progress - auto-updates via timer
-                    .child(
-                        VStack::new()
-                            .spacing(8)
-                            .child(
-                                Label::new("Auto Progress:")
-                                    .color(Color::TEXT)
-                                    .font_size(14),
-                            )
-                            .child(
-                                ProgressBar::new(progress.clone())
-                                    .fill_color(Color::rgb(50, 200, 100))
-                                    .corner_radius(8)
-                                    .height(20),
-                            )
-                            .child(
-                                HStack::new()
-                                    .spacing(8)
-                                    .child(
-                                        Text::new({
-                                            let progress = progress.clone();
-                                            move || format!("{:.0}%", progress.get() * 100.0)
-                                        })
-                                        .watch(progress.clone())
-                                        .color(Color::GRAY)
-                                        .font_size(12),
-                                    )
-                                    .child(Spacer::new())
-                                    .child(Button::new("Reset", move || {
-                                        progress_reset.set(0.0);
-                                    })),
-                            ),
-                    )
-                    .child(
-                        // TextField - State passed directly
-                        HStack::new()
-                            .spacing(16)
-                            .child(
-                                VStack::new()
-                                    .spacing(8)
-                                .child(Label::new("TextField:").color(Color::TEXT).font_size(14)
-                                )
-                                .child(
-                                    TextField::new("Type here...", text_input)
-                                        .action(|text| {
-                                            println!("[ui_demo] Text entered: {}", text);
-                                        })
-                                        .corner_radius(6),
-                                )
-                            )
-                            .child(
-                            // CheckBox - State passed directly
-                            VStack::new()
-                                .spacing(8)
-                                .child(Label::new("CheckBox:").color(Color::TEXT).font_size(14))
-                                .child(
-                                    HStack::new()
-                                        .spacing(16)
-                                        .child(CheckBox::new("Feature A", feature_a.clone()))
-                                        .child(CheckBox::new("Feature B", feature_b.clone())),
-                                ),
-                            )
-                            // Toggle - State passed directly
-                            .child(
-                                VStack::new()
-                                    .spacing(8)
-                                    .child(Label::new("Toggle:").color(Color::TEXT).font_size(14))
-                                    .child(
-                                        HStack::new()
-                                            .spacing(16)
-                                            .child(Toggle::new(toggle1.clone()))
-                                            .child(Toggle::new(toggle2.clone())),
-                                    ),
-                            )
-                    )
-                    // Slider - State passed directly
-                    .child(
-                        VStack::new()
-                            .spacing(8)
-                            .child(Label::new("Slider:").color(Color::TEXT).font_size(14))
-                            .child(Slider::new(0.0, 1.0, slider_value.clone()))
-                            .child(
-                                Text::new({
-                                    let slider_value = slider_value.clone();
-                                    move || format!("Value: {:.2}", slider_value.get())
-                                })
-                                .watch(slider_value.clone())
-                                .color(Color::GRAY)
-                                .font_size(12),
-                            ),
-                    )
-                    // RectViews with corner_radius
-                    .child(
-                        VStack::new()
-                            .spacing(8)
-                            .child(
-                                Label::new("Rounded Corners:")
-                                    .color(Color::TEXT)
-                                    .font_size(14),
-                            )
-                            .child(
-                                HStack::new()
-                                    .spacing(12)
-                                    .child(Spacer::new())
-                                    .child(
-                                        RectView::new(Color::rgb(255, 100, 100))
-                                            .width(60)
-                                            .height(60)
-                                            .corner_radius(12)
-                                            .border(2, Color::rgb(200, 50, 50)),
-                                    )
-                                    .child(
-                                        RectView::new(Color::rgb(100, 255, 100))
-                                            .width(60)
-                                            .height(60)
-                                            .corner_radius(12)
-                                            .border(2, Color::rgb(50, 200, 50)),
-                                    )
-                                    .child(
-                                        RectView::new(Color::rgb(100, 100, 255))
-                                            .width(60)
-                                            .height(60)
-                                            .corner_radius(12)
-                                            .border(2, Color::rgb(50, 50, 200)),
-                                    )
-                                    .child(
-                                        RectView::new(Color::rgb(255, 200, 50))
-                                            .width(60)
-                                            .height(60)
-                                            .corner_radius(30),
-                                    )
-                                    .child(Spacer::new()),
-                            ),
-                    )
-                    .child(Spacer::new())
-                    // Buttons
-                    .child(Center::new(
-                        HStack::new()
-                            .spacing(12)
-                            .child({
-                                let handle = popup_handle.clone();
-                                Button::new("Popup", move || {
-                                    handle.request_popup();
-                                })
-                            })
-                            .child(Button::new(label!("Info (count={})", counter.clone()), {
-                                let counter = counter.clone();
-                                move || {
-                                    println!(
-                                        "[ui_demo] All controls use State<T> directly! count={}",
-                                        counter.get()
-                                    );
-                                }
-                            })),
-                    )),
-            )
-            .all(20),
+    // Build the UI tree
+    let ui_content = VStack::new()
+        .spacing(16)
+        .child(
+            Text::new("ScarletUI Modern Architecture Demo")
+                .font_size(28)
+        )
+        .child(
+            Text::new("View/RenderObject separation with SwiftUI-style API")
+                .font_size(14)
+        )
+        .child(
+            Text::new("Counter: 0")
+                .font_size(24)
+        )
+        .child(
+            HStack::new()
+                .spacing(10)
+                .child(
+                    Button::new("Decrement")
+                        .padding(10)
+                )
+                .child(
+                    Button::new("Increment")
+                        .padding(10)
+                )
+        )
+        .child(
+            Toggle::new(true)
+        )
+        .child(
+            Slider::new(0.0, 100.0)
+                .value(50.0)
+        )
+        .child(
+            TextField::new()
+        )
+        .child(
+            Button::new("Open TabView Demo")
+                .action(|| {
+                    println!("[ui_demo] TabView demo requested");
+                })
+                .padding(10)
+        )
+        .child(
+            Button::new("Open NavigationView Demo")
+                .action(|| {
+                    println!("[ui_demo] NavigationView demo requested");
+                })
+                .padding(10)
         );
+
+    let window = Window::builder()
+        .title("ScarletUI Modern Architecture Demo")
+        .size(650, 720)
+        .min_size(400, 500)
+        .build()
+        .content(ui_content);
 
     if let Err(e) = app.add_window(window) {
         println!("[ui_demo] Failed to add window: {}", e);
         return 1;
     }
-    println!("[ui_demo] Window created");
 
+    println!("[ui_demo] Running application...");
     app.run();
 }

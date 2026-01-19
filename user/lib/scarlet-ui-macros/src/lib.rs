@@ -730,6 +730,7 @@ pub fn bindable(_attr: TokenStream, item: TokenStream) -> TokenStream {
         // Generate bind method
         bind_methods.push(quote::quote! {
             #vis fn #bind_method_name(mut self, data: &alloc::sync::Arc<DataContext<#field_type>>) -> Self {
+                use crate::view::render::RenderObject;
                 self.#field_name = data.get();
                 data.subscribe(self.id());
                 self.#data_field_name = Some(alloc::sync::Arc::clone(data));

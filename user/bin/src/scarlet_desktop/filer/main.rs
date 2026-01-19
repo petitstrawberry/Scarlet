@@ -5,92 +5,75 @@
 #![no_std]
 #![no_main]
 
-extern crate scarlet_std as std;
+extern crate alloc;
 
 use scarlet_ui::{
-    Application, Color, HStack, Label, Spacer, StackAlignment, State, VStack, ViewModifier, Window,
-    WindowKind, design,
+    Application, Window, WindowBuilder,
+    VStack, HStack, Spacer,
+    Text,
+    View, ViewExt,
 };
-use std::{println, string::String, vec};
-
-use design::Palette;
+use alloc::string::String;
+use scarlet_std::println;
 
 #[unsafe(no_mangle)]
 pub extern "C" fn main() -> i32 {
     println!("[filer] Starting file manager");
 
     let mut app = match Application::new() {
-        Ok(mut app) => {
-            app.app_id("org.scarlet-os.desktop.filer");
-            app
+        Ok(mut a) => {
+            a.app_id("org.scarlet-os.desktop.filer");
+            a
         }
         Err(e) => {
-            println!("[filer] Failed to connect to SWS: {}", e);
+            println!("[filer] Failed to create application: {}", e);
             return 1;
         }
     };
 
-    // File list data
-    let files = State::new(vec![
-        String::from("Documents"),
-        String::from("Downloads"),
-        String::from("Pictures"),
-        String::from("Music"),
-        String::from("Videos"),
-    ]);
-
-    let selected = State::new(0usize);
-
     // Content area
-    let content = VStack::new()
+    let ui_content = VStack::new()
         .spacing(16)
-        .alignment(StackAlignment::Start)
         // Title
         .child(
-            Label::new("File Manager")
-                .color(Palette::current().text_main)
-                .font_size(18),
+            Text::new("File Manager")
+                .font_size(18)
         )
         // Sidebar area
         .child(
             HStack::new()
                 .spacing(16)
-                .alignment(StackAlignment::Start)
                 .child(
                     VStack::new()
                         .spacing(8)
-                        .alignment(StackAlignment::Start)
                         .child(
-                            Label::new("Folders")
-                                .color(Palette::current().text_sub)
-                                .font_size(12),
+                            Text::new("Folders")
+                                .font_size(12)
                         )
                         .child(
-                            Label::new("  Home")
-                                .color(Palette::current().primary)
-                                .font_size(13),
+                            Text::new("  Home")
+                                .font_size(13)
                         )
                         .child(
-                            Label::new("  Desktop")
-                                .color(Palette::current().text_main)
-                                .font_size(13),
+                            Text::new("  Desktop")
+                                .font_size(13)
                         )
                         .child(
-                            Label::new("  Documents")
-                                .color(Palette::current().text_main)
-                                .font_size(13),
+                            Text::new("  Documents")
+                                .font_size(13)
                         ),
                 )
-                .child(Spacer::new()),
-        )
-        .background_color(Palette::current().bg)
-        .padding(20);
+                .child(Spacer::new())
+                .background(scarlet_ui::Color::rgb(30, 30, 30))
+                .padding(20)
+        );
 
-    let window = Window::new("Filer", 800, 500)
-        .window_type(WindowKind::Normal)
-        .main_window()
+    let window = Window::builder()
+        .title("Filer")
+        .size(800, 500)
         .min_size(600, 400)
-        .content(content);
+        .build()
+        .content(ui_content);
 
     if let Err(e) = app.add_window(window) {
         println!("[filer] Failed to add window: {}", e);

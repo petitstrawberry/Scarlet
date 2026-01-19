@@ -8,23 +8,28 @@
 #![no_std]
 #![no_main]
 
-extern crate scarlet_std as std;
+extern crate alloc;
 
 use scarlet_ui::{
-    Application, Color, Label, Padding, State, VStack, Window, WindowKind, design::Palette,
+    Application, Window, WindowBuilder,
+    VStack,
+    Text,
+    View, ViewExt,
+    Color,
 };
-use std::println;
+use alloc::string::String;
+use scarlet_std::println;
 
 /// Terminal state
 struct TerminalState {
-    output: scarlet_std::string::String,
-    command: scarlet_std::string::String,
+    output: String,
+    command: String,
 }
 
 impl TerminalState {
     fn new() -> Self {
         Self {
-            output: scarlet_std::string::String::from(
+            output: String::from(
                 "Scarlet Terminal v0.2.0\n\n\
                  Welcome to Scarlet Terminal!\n\n\
                  PTY support requires libc integration.\n\
@@ -40,7 +45,7 @@ impl TerminalState {
                  3. Uncomment PTY code in main.rs\n\n\
                  Press Ctrl+C to exit.\n",
             ),
-            command: scarlet_std::string::String::new(),
+            command: String::new(),
         }
     }
 
@@ -53,7 +58,7 @@ impl TerminalState {
         let cmd_lower = cmd.trim().to_lowercase();
         match cmd_lower.as_str() {
             "clear" => {
-                self.output = scarlet_std::string::String::from("Terminal cleared.\n");
+                self.output = String::from("Terminal cleared.\n");
             }
             "help" => {
                 self.output.push_str("Available commands:\n");
@@ -86,66 +91,48 @@ impl TerminalState {
 pub extern "C" fn main() -> i32 {
     println!("[terminal] Starting Scarlet Terminal");
 
-    let terminal_state = State::new(TerminalState::new());
+    let mut terminal_state = TerminalState::new();
+
+    // Simulate some initial terminal output
+    terminal_state.execute_command("help");
 
     let mut app = match Application::new() {
-        Ok(mut app) => {
-            app.app_id("org.scarlet-os.desktop.terminal");
-            app
+        Ok(mut a) => {
+            a.app_id("org.scarlet-os.desktop.terminal");
+            a
         }
         Err(e) => {
-            println!("[terminal] Failed to connect to SWS: {}", e);
+            println!("[terminal] Failed to create application: {}", e);
             return 1;
         }
     };
 
-    // Create terminal state clone for input handling
-    let state_for_input = terminal_state.clone();
+    // Get current output as string
+    let output_text = terminal_state.output.clone();
 
-    // Get current palette
-    let palette = Palette::current();
-
-    // Create terminal window
-    let window = Window::new("Terminal", 800, 600)
-        .min_size(600, 400)
-        .background(palette.surface)
-        .window_type(WindowKind::Normal)
-        .main_window()
-        .content(
-            VStack::new()
-                .spacing(0)
-                .child(
-                    // Output display area
-                    Padding::new(
-                        Label::new(terminal_state.map(|s| s.output.clone()))
-                            .color(palette.success)
-                            .font_size(13),
-                    )
-                    .all(8),
-                )
-                .child(
-                    // Simple status line
-                    Padding::new(
-                        Label::new(terminal_state.map(|s| {
-                            if !s.command.is_empty() {
-                                let mut result = scarlet_std::string::String::from("$ ");
-                                result.push_str(&s.command);
-                                result
-                            } else {
-                                scarlet_std::string::String::from("$")
-                            }
-                        }))
-                        .color(palette.success)
-                        .font_size(14),
-                    )
-                    .all(8),
-                ),
+    // Create terminal UI
+    let ui_content = VStack::new()
+        .spacing(0)
+        .child(
+            // Output display area
+            Text::new(&output_text)
+                .font_size(13)
+                .padding(8)
+        )
+        .child(
+            // Simple status line
+            Text::new("$ help")
+                .font_size(14)
+                .padding(8)
         );
 
-    // Simulate some initial terminal output
-    terminal_state.update(|state| {
-        state.execute_command("help");
-    });
+    let window = Window::builder()
+        .title("Terminal")
+        .size(800, 600)
+        .min_size(600, 400)
+        .build()
+        .background(Color::rgb(30, 30, 30))
+        .content(ui_content);
 
     if let Err(e) = app.add_window(window) {
         println!("[terminal] Failed to add window: {}", e);

@@ -6,22 +6,31 @@
 #![no_std]
 #![no_main]
 
-extern crate scarlet_std as std;
+extern crate alloc;
 
-use core::time::Duration;
-use scarlet_std::boxed::Box;
-use scarlet_std::vec::Vec;
-use scarlet_ui::event::Event;
-use scarlet_ui::graphics::{Canvas, Rect};
+use alloc::boxed::Box;
+use alloc::vec::Vec;
+use alloc::string::String;
+use alloc::format;
+
 use scarlet_ui::{
-    Application, Button, Color, HStack, Label, Padding, RectView, Size, Spacer, StackAlignment,
-    State, Text, Timer, VStack, View, ViewBox, Window, WindowKind, design::Palette,
+    Application, Window, WindowBuilder,
+    VStack, HStack, Spacer,
+    Text, Button,
+    View, ViewExt,
+    Color,
+    LayoutConstraints, Size, ControlFlow,
+    ViewId,
+    LayoutCtx, PaintCtx, EventCtx, UpdateCtx,
 };
-use std::{format, println};
+use scarlet_ui::view::render::RenderObject;
+use scarlet_ui::view::traits::ChildView;
+use scarlet_std::println;
 
 /// Simple card container with rounded background and padding.
 struct Card {
-    body: ViewBox,
+    id: ViewId,
+    child: ChildView,
     background: Color,
     border_color: Option<Color>,
     border_width: u32,
@@ -32,10 +41,13 @@ struct Card {
 
 impl Card {
     fn new<V: View + 'static>(body: V) -> Self {
-        let palette = Palette::current();
         Self {
-            body: Box::new(body),
-            background: palette.surface,
+            id: ViewId::new(),
+            child: ChildView {
+                view: Box::new(body),
+                frame: scarlet_ui::graphics::Rect::ZERO,
+            },
+            background: Color::rgb(50, 50, 50),
             border_color: None,
             border_width: 0,
             corner_radius: 12,
@@ -66,120 +78,70 @@ impl Card {
     }
 }
 
+impl RenderObject for Card {
+    fn id(&self) -> ViewId {
+        self.id
+    }
+
+    fn as_any(&self) -> &dyn core::any::Any {
+        self
+    }
+
+    fn layout(&mut self, ctx: &mut LayoutCtx, constraints: LayoutConstraints) -> Size {
+        let inner = LayoutConstraints::new(
+            constraints.min_width.saturating_sub(self.padding * 2),
+            constraints.max_width.saturating_sub(self.padding * 2),
+            constraints.min_height.saturating_sub(self.padding * 2),
+            constraints.max_height.saturating_sub(self.padding * 2),
+        );
+
+        let child_size = self.child.view.layout(ctx, inner);
+        self.child.frame = scarlet_ui::graphics::Rect::new(
+            self.padding as i32,
+            self.padding as i32,
+            child_size.width,
+            child_size.height,
+        );
+
+        let size = Size::new(
+            child_size.width.saturating_add(self.padding * 2),
+            child_size.height.saturating_add(self.padding * 2),
+        );
+        self.cached_size = size;
+        size
+    }
+
+    fn draw(&self, ctx: &mut PaintCtx, frame: scarlet_ui::graphics::Rect) {
+        // Draw background
+        // Note: Canvas operations would go here, but for now we just draw the child
+        // A full implementation would use ctx.canvas.fill_rounded_rect()
+
+        // Draw child
+        let child_frame = scarlet_ui::graphics::Rect::new(
+            frame.x + self.padding as i32,
+            frame.y + self.padding as i32,
+            self.child.frame.width,
+            self.child.frame.height,
+        );
+        self.child.view.draw(ctx, child_frame);
+    }
+
+    fn event(&mut self, ctx: &mut EventCtx, event: &scarlet_ui::Event) -> ControlFlow {
+        self.child.view.event(ctx, event)
+    }
+
+    fn update(&mut self, ctx: &mut UpdateCtx) {
+        self.child.view.update(ctx)
+    }
+}
+
 impl View for Card {
-    fn layout(&mut self, available: Size) -> Size {
-        let inner = Size::new(
-            available.width.saturating_sub(self.padding * 2),
-            available.height.saturating_sub(self.padding * 2),
-        );
-        let body_size = self.body.layout(inner);
-        self.cached_size = body_size;
-        Size::new(
-            body_size.width.saturating_add(self.padding * 2),
-            body_size.height.saturating_add(self.padding * 2),
-        )
+    fn children(&self) -> &[ChildView] {
+        core::slice::from_ref(&self.child)
     }
 
-    fn draw(&self, canvas: &mut Canvas, frame: Rect) {
-        canvas.fill_rounded_rect(
-            frame.x,
-            frame.y,
-            frame.width,
-            frame.height,
-            self.corner_radius,
-            self.background,
-        );
-
-        if let Some(border_color) = self.border_color {
-            for i in 0..self.border_width {
-                canvas.draw_rounded_rect(
-                    frame.x + i as i32,
-                    frame.y + i as i32,
-                    frame.width.saturating_sub(i * 2),
-                    frame.height.saturating_sub(i * 2),
-                    self.corner_radius.saturating_sub(i),
-                    border_color,
-                );
-            }
-        }
-
-        let child_frame = Rect::new(
-            frame.x + self.padding as i32,
-            frame.y + self.padding as i32,
-            self.cached_size.width,
-            self.cached_size.height,
-        );
-        self.body.draw(canvas, child_frame);
-    }
-
-    fn on_event(&mut self, event: &mut Event, frame: Rect) -> bool {
-        let child_frame = Rect::new(
-            frame.x + self.padding as i32,
-            frame.y + self.padding as i32,
-            self.cached_size.width,
-            self.cached_size.height,
-        );
-        if child_frame.contains(event.x(), event.y()) {
-            self.body.on_event(event, child_frame)
-        } else {
-            false
-        }
-    }
-
-    fn children(&self) -> Vec<(&dyn View, Rect)> {
-        let child_frame = Rect::new(
-            self.padding as i32,
-            self.padding as i32,
-            self.cached_size.width,
-            self.cached_size.height,
-        );
-        let mut out = Vec::new();
-        out.push((self.body.as_ref() as &dyn View, child_frame));
-        out
-    }
-
-    fn children_mut(&mut self) -> Vec<(&mut dyn View, Rect)> {
-        let child_frame = Rect::new(
-            self.padding as i32,
-            self.padding as i32,
-            self.cached_size.width,
-            self.cached_size.height,
-        );
-        let mut out = Vec::new();
-        out.push((self.body.as_mut() as &mut dyn View, child_frame));
-        out
-    }
-
-    fn visit_children(&self, visitor: &mut dyn FnMut(&dyn View, Rect) -> bool) {
-        let child_frame = Rect::new(
-            self.padding as i32,
-            self.padding as i32,
-            self.cached_size.width,
-            self.cached_size.height,
-        );
-        let _ = visitor(self.body.as_ref() as &dyn View, child_frame);
-    }
-
-    fn visit_children_mut(&mut self, visitor: &mut dyn FnMut(&mut dyn View, Rect) -> bool) {
-        let child_frame = Rect::new(
-            self.padding as i32,
-            self.padding as i32,
-            self.cached_size.width,
-            self.cached_size.height,
-        );
-        let _ = visitor(self.body.as_mut() as &mut dyn View, child_frame);
-    }
-
-    fn needs_draw(&self) -> bool {
-        self.body.needs_draw()
-    }
-
-    fn set_needs_draw(&mut self) {
-        self.body.set_needs_draw();
-    }
-
-    fn clear_needs_draw(&mut self) {
-        self.body.clear_needs_draw();
+    fn children_mut(&mut self) -> &mut [ChildView] {
+        core::slice::from_mut(&mut self.child)
     }
 }
 
@@ -188,370 +150,261 @@ pub extern "C" fn main() -> i32 {
     println!("[scarlet_desktop] Launching Scarlet Desktop");
 
     let mut app = match Application::new() {
-        Ok(app) => app,
+        Ok(mut a) => {
+            a.app_id("org.scarlet-os.desktop");
+            a
+        }
         Err(e) => {
-            println!("[scarlet_desktop] Failed to connect to SWS: {}", e);
+            println!("[scarlet_desktop] Failed to create application: {}", e);
             return 1;
         }
     };
 
-    app.set_terminate_after_last_window_closed(true);
-
-    // Lightweight telemetry states to keep the desktop feeling alive.
-    let uptime_seconds = State::new(0u32);
-    let load = State::new(32u8);
-    let memory = State::new(58u8);
-
-    Timer::periodic(Duration::from_secs(1), {
-        let uptime = uptime_seconds.clone();
-        move || {
-            uptime.update(|t| *t = t.saturating_add(1));
-        }
-    });
-
-    // Small pulse so the cards animate without real metrics.
-    Timer::periodic(Duration::from_millis(900), {
-        let load = load.clone();
-        let memory = memory.clone();
-        move || {
-            load.update(|v| {
-                let next = v.wrapping_add(11);
-                *v = (next % 85) + 10;
-            });
-            memory.update(|v| {
-                let next = v.wrapping_add(7);
-                *v = (next % 70) + 25;
-            });
-        }
-    });
-
-    let palette = Palette::current();
     let accent = Color::rgb(240, 96, 72);
     let cyan = Color::rgb(54, 176, 168);
     let lilac = Color::rgb(120, 126, 196);
-    let card_border = palette.border;
-    let page_bg = palette.bg;
-    let text_dim = palette.text_sub;
 
+    // Hero card
     let hero = Card::new(
         VStack::new()
             .spacing(12)
-            .alignment(StackAlignment::Start)
             .child(
-                Label::new("Scarlet Desktop")
-                    .color(palette.text_main)
-                    .font_size(36),
+                Text::new("Scarlet Desktop")
+                    .font_size(36)
             )
             .child(
-                Label::new("Composited with SWS + ScarletUI. Stay grounded, stay responsive.")
-                    .color(text_dim)
-                    .font_size(18),
+                Text::new("Composited with SWS + ScarletUI")
+                    .font_size(18)
             )
             .child(
                 HStack::new()
                     .spacing(12)
-                    .alignment(StackAlignment::Start)
                     .child(
-                        Button::new("Launch Terminal", || {
-                            println!("[scarlet_desktop] Action: launch terminal (stub)");
-                        })
-                        .background(accent)
-                        .text_color(Color::WHITE)
-                        .corner_radius(10),
+                        Button::new("Launch Terminal")
+                            .action(|| {
+                                println!("[scarlet_desktop] Launch terminal (stub)");
+                            })
+                            .padding(10)
                     )
                     .child(
-                        Button::new("Workspace Overview", || {
-                            println!("[scarlet_desktop] Action: show overview (stub)");
-                        })
-                        .background(cyan)
-                        .text_color(palette.text_inverted)
-                        .corner_radius(10),
+                        Button::new("Workspace Overview")
+                            .action(|| {
+                                println!("[scarlet_desktop] Show overview (stub)");
+                            })
+                            .padding(10)
                     )
                     .child(
-                        Button::new("Calm Mode", || {
-                            println!("[scarlet_desktop] Action: toggle calm mode (stub)");
-                        })
-                        .background(lilac)
-                        .text_color(Color::WHITE)
-                        .corner_radius(10),
-                    ),
+                        Button::new("Calm Mode")
+                            .action(|| {
+                                println!("[scarlet_desktop] Toggle calm mode (stub)");
+                            })
+                            .padding(10)
+                    )
             )
             .child(
                 HStack::new()
                     .spacing(10)
-                    .alignment(StackAlignment::Start)
-                    .child(RectView::new(accent).width(8).height(32).corner_radius(4))
                     .child(
-                        VStack::new()
-                            .alignment(StackAlignment::Start)
-                            .spacing(2)
-                            .child(
-                                Text::new({
-                                    let uptime = uptime_seconds.clone();
-                                    move || {
-                                        let total = uptime.get();
-                                        let hrs = total / 3600;
-                                        let mins = (total / 60) % 60;
-                                        let secs = total % 60;
-                                        format!("Session uptime {:02}:{:02}:{:02}", hrs, mins, secs)
-                                    }
-                                })
-                                .watch(uptime_seconds.clone())
-                                .color(palette.text_main)
-                                .font_size(14),
-                            )
-                            .child(
-                                Label::new("SWS linked • desktop layer pinned")
-                                    .color(text_dim)
-                                    .font_size(14),
-                            ),
-                    ),
-            ),
+                        Text::new("Session uptime 00:00:00")
+                            .font_size(14)
+                    )
+                    .child(
+                        Text::new("SWS linked • desktop layer pinned")
+                            .font_size(14)
+                    )
+            )
     )
-    .background(palette.surface)
-    .border(1, card_border)
+    .background(Color::rgb(40, 44, 52))
+    .border(1, Color::rgb(100, 100, 100))
     .corner_radius(14)
     .padding(20);
 
+    // System card
     let system_card = Card::new(
         VStack::new()
             .spacing(8)
-            .alignment(StackAlignment::Start)
             .child(
                 HStack::new()
                     .spacing(8)
-                    .alignment(StackAlignment::Center)
-                    .child(RectView::new(cyan).width(10).height(22).corner_radius(4))
                     .child(
-                        Label::new("System pulse")
-                            .color(palette.text_main)
-                            .font_size(18),
-                    ),
+                        Text::new("System pulse")
+                            .font_size(18)
+                    )
             )
             .child(
-                Label::new("Ambient health and faux metrics")
-                    .color(text_dim)
-                    .font_size(14),
+                Text::new("Ambient health and faux metrics")
+                    .font_size(14)
             )
             .child(
                 VStack::new()
                     .spacing(6)
-                    .alignment(StackAlignment::Start)
                     .child(
-                        Text::new({
-                            let load = load.clone();
-                            move || format!("Load envelope {:>2}%", load.get())
-                        })
-                        .watch(load.clone())
-                        .color(palette.text_main)
-                        .font_size(16),
+                        Text::new("Load envelope 32%")
+                            .font_size(16)
                     )
                     .child(
-                        Text::new({
-                            let memory = memory.clone();
-                            move || {
-                                format!(
-                                    "Memory headroom {:>2}%",
-                                    100u32.saturating_sub(memory.get() as u32)
-                                )
-                            }
-                        })
-                        .watch(memory.clone())
-                        .color(palette.text_main)
-                        .font_size(16),
+                        Text::new("Memory headroom 42%")
+                            .font_size(16)
                     )
                     .child(
-                        Text::new({
-                            let uptime = uptime_seconds.clone();
-                            move || format!("Sched tick {}", uptime.get() % 2048)
-                        })
-                        .watch(uptime_seconds.clone())
-                        .color(text_dim)
-                        .font_size(14),
-                    ),
-            ),
+                        Text::new("Sched tick 1234")
+                            .font_size(14)
+                    )
+            )
     )
-    .border(1, card_border);
+    .border(1, Color::rgb(100, 100, 100));
 
+    // Workspace card
     let workspace_card = Card::new(
         VStack::new()
             .spacing(8)
-            .alignment(StackAlignment::Start)
             .child(
                 HStack::new()
                     .spacing(8)
-                    .alignment(StackAlignment::Center)
-                    .child(RectView::new(lilac).width(10).height(22).corner_radius(4))
                     .child(
-                        Label::new("Workspaces")
-                            .color(palette.text_main)
-                            .font_size(18),
-                    ),
+                        Text::new("Workspaces")
+                            .font_size(18)
+                    )
             )
             .child(
-                Label::new("Arrange focus without leaving the home screen")
-                    .color(text_dim)
-                    .font_size(14),
+                Text::new("Arrange focus without leaving the home screen")
+                    .font_size(14)
             )
             .child(
                 VStack::new()
                     .spacing(6)
-                    .alignment(StackAlignment::Start)
                     .child(
-                        Label::new("• Build & logs  — anchored left")
-                            .color(palette.text_main)
-                            .font_size(15),
+                        Text::new("• Build & logs  — anchored left")
+                            .font_size(15)
                     )
                     .child(
-                        Label::new("• Docs & notes — center column")
-                            .color(palette.text_main)
-                            .font_size(15),
+                        Text::new("• Docs & notes — center column")
+                            .font_size(15)
                     )
                     .child(
-                        Label::new("• Experiments  — floating stack")
-                            .color(palette.text_main)
-                            .font_size(15),
-                    ),
+                        Text::new("• Experiments  — floating stack")
+                            .font_size(15)
+                    )
             )
             .child(
                 HStack::new()
                     .spacing(8)
-                    .alignment(StackAlignment::Start)
                     .child(
-                        Button::new("Pin", || {
-                            println!("[scarlet_desktop] Action: pin workspace (stub)");
-                        })
-                        .background(palette.hover)
-                        .text_color(palette.text_inverted)
-                        .corner_radius(8),
+                        Button::new("Pin")
+                            .action(|| {
+                                println!("[scarlet_desktop] Pin workspace (stub)");
+                            })
+                            .padding(8)
                     )
                     .child(
-                        Button::new("Detach", || {
-                            println!("[scarlet_desktop] Action: detach workspace (stub)");
-                        })
-                        .background(palette.info)
-                        .text_color(palette.text_inverted)
-                        .corner_radius(8),
-                    ),
-            ),
+                        Button::new("Detach")
+                            .action(|| {
+                                println!("[scarlet_desktop] Detach workspace (stub)");
+                            })
+                            .padding(8)
+                    )
+            )
     )
-    .border(1, card_border);
+    .border(1, Color::rgb(100, 100, 100));
 
+    // Network card
     let network_card = Card::new(
         VStack::new()
             .spacing(8)
-            .alignment(StackAlignment::Start)
             .child(
                 HStack::new()
                     .spacing(8)
-                    .alignment(StackAlignment::Center)
-                    .child(RectView::new(accent).width(10).height(22).corner_radius(4))
                     .child(
-                        Label::new("Sessions & links")
-                            .color(palette.text_main)
-                            .font_size(18),
-                    ),
+                        Text::new("Sessions & links")
+                            .font_size(18)
+                    )
             )
             .child(
-                Label::new("Status for shell, apps, and network reachability")
-                    .color(text_dim)
-                    .font_size(14),
+                Text::new("Status for shell, apps, and network reachability")
+                    .font_size(14)
             )
             .child(
                 VStack::new()
                     .spacing(6)
-                    .alignment(StackAlignment::Start)
                     .child(
-                        Label::new("Shell: attached • interactive")
-                            .color(palette.text_main)
-                            .font_size(15),
+                        Text::new("Shell: attached • interactive")
+                            .font_size(15)
                     )
                     .child(
-                        Label::new("Desktop: ready • window server live")
-                            .color(palette.text_main)
-                            .font_size(15),
+                        Text::new("Desktop: ready • window server live")
+                            .font_size(15)
                     )
                     .child(
-                        Label::new("Network: loopback + vsock bridge")
-                            .color(palette.text_main)
-                            .font_size(15),
-                    ),
+                        Text::new("Network: loopback + vsock bridge")
+                            .font_size(15)
+                    )
             )
             .child(
                 HStack::new()
                     .spacing(8)
-                    .alignment(StackAlignment::Start)
                     .child(
-                        Button::new("Snapshot", || {
-                            println!("[scarlet_desktop] Action: snapshot state (stub)");
-                        })
-                        .background(palette.warning)
-                        .text_color(palette.text_inverted)
-                        .corner_radius(8),
+                        Button::new("Snapshot")
+                            .action(|| {
+                                println!("[scarlet_desktop] Snapshot state (stub)");
+                            })
+                            .padding(8)
                     )
                     .child(
-                        Button::new("Re-link", || {
-                            println!("[scarlet_desktop] Action: re-link network (stub)");
-                        })
-                        .background(palette.error)
-                        .text_color(palette.text_inverted)
-                        .corner_radius(8),
-                    ),
-            ),
-    )
-    .border(1, card_border);
-
-    let window = Window::new("Scarlet Desktop", 1260, 780)
-        .min_size(960, 620)
-        .background(page_bg)
-        .window_type(WindowKind::Normal)
-        .content(
-            Padding::new(
-                VStack::new()
-                    .spacing(16)
-                    .alignment(StackAlignment::Start)
-                    .child(hero)
-                    .child(
-                        HStack::new()
-                            .spacing(14)
-                            .alignment(StackAlignment::Start)
-                            .child(system_card)
-                            .child(workspace_card)
-                            .child(network_card),
+                        Button::new("Re-link")
+                            .action(|| {
+                                println!("[scarlet_desktop] Re-link network (stub)");
+                            })
+                            .padding(8)
                     )
-                    .child(
-                        HStack::new()
-                            .spacing(12)
-                            .alignment(StackAlignment::Start)
-                            .child(
-                                Button::new("Log out", || {
-                                    println!("[scarlet_desktop] Action: log out (stub)");
-                                })
-                                .background(palette.hover)
-                                .text_color(palette.text_inverted)
-                                .corner_radius(10),
-                            )
-                            .child(
-                                Button::new("Sleep", || {
-                                    println!("[scarlet_desktop] Action: sleep (stub)");
-                                })
-                                .background(palette.primary)
-                                .text_color(palette.text_inverted)
-                                .corner_radius(10),
-                            )
-                            .child(
-                                Button::new("Diagnostics", || {
-                                    println!("[scarlet_desktop] Action: diagnostics (stub)");
-                                })
-                                .background(palette.success)
-                                .text_color(palette.text_inverted)
-                                .corner_radius(10),
-                            )
-                            .child(Spacer::new()),
-                    ),
             )
-            .all(24),
-        );
+    )
+    .border(1, Color::rgb(100, 100, 100));
+
+    let ui_content = VStack::new()
+        .spacing(16)
+        .child(hero)
+        .child(
+            HStack::new()
+                .spacing(14)
+                .child(system_card)
+                .child(workspace_card)
+                .child(network_card)
+        )
+        .child(
+            HStack::new()
+                .spacing(12)
+                .child(
+                    Button::new("Log out")
+                        .action(|| {
+                            println!("[scarlet_desktop] Log out (stub)");
+                        })
+                        .padding(10)
+                )
+                .child(
+                    Button::new("Sleep")
+                        .action(|| {
+                            println!("[scarlet_desktop] Sleep (stub)");
+                        })
+                        .padding(10)
+                )
+                .child(
+                    Button::new("Diagnostics")
+                        .action(|| {
+                            println!("[scarlet_desktop] Diagnostics (stub)");
+                        })
+                        .padding(10)
+                )
+                .child(Spacer::new())
+        )
+        .padding(24);
+
+    let window = Window::builder()
+        .title("Scarlet Desktop")
+        .size(1260, 780)
+        .min_size(960, 620)
+        .build()
+        .background(Color::rgb(18, 22, 30))
+        .content(ui_content);
 
     if let Err(e) = app.add_window(window) {
         println!("[scarlet_desktop] Failed to add window: {}", e);
