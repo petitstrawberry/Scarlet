@@ -47,18 +47,21 @@ impl TextField {
 
     /// Create a text field with placeholder text
     pub fn with_placeholder(placeholder: impl Into<String>) -> Self {
-        let mut tf = Self::new();
-        tf.placeholder = placeholder.into();
-        tf
+        Self {
+            placeholder: placeholder.into(),
+            ..Self::new()
+        }
     }
 
     /// Create a text field with initial text
     pub fn with_text(text: impl Into<String>) -> Self {
         let text = text.into();
-        let mut tf = Self::new();
-        tf.text = text.clone();
-        tf.cursor_pos = text.len();
-        tf
+        let len = text.len();
+        Self {
+            text,
+            cursor_pos: len,
+            ..Self::new()
+        }
     }
 
     /// Get the current text

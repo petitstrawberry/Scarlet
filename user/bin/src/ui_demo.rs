@@ -136,7 +136,7 @@ pub extern "C" fn main() -> i32 {
     };
 
     // Create main window
-    let demo_view = DemoView::new();
+    let _demo_view = DemoView::new();
 
     // Build the UI tree
     let ui_content = VStack::new()

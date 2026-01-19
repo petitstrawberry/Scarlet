@@ -48,9 +48,13 @@ impl Slider {
 
     /// Create a slider with an initial value
     pub fn with_value(minimum: f32, maximum: f32, value: f32) -> Self {
-        let mut slider = Self::new(minimum, maximum);
-        slider.set_value(value);
-        slider
+        let clamped = value.clamp(minimum, maximum);
+        Self {
+            value: clamped,
+            minimum,
+            maximum,
+            ..Default::default()
+        }
     }
 
     /// Get the current value

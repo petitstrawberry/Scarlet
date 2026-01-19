@@ -57,9 +57,11 @@ impl Toggle {
 
     /// Create a toggle with a label
     pub fn with_label(is_on: bool, label: impl Into<String>) -> Self {
-        let mut toggle = Self::new(is_on);
-        toggle.label = Some(label.into());
-        toggle
+        Self {
+            is_on,
+            label: Some(label.into()),
+            ..Default::default()
+        }
     }
 
     /// Get the toggle state
