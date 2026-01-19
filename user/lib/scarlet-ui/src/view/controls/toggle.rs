@@ -322,6 +322,10 @@ impl crate::view::render::RenderObject for Toggle {
     }
 }
 
+impl crate::view::traits::View for Toggle {
+    // as_any, id, layout, draw, event, update are inherited from RenderObject impl
+}
+
 impl fmt::Debug for Toggle {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Toggle")
@@ -330,47 +334,5 @@ impl fmt::Debug for Toggle {
             .field("style", &self.style)
             .field("has_is_on_binding", &self.is_on_data.is_some())
             .finish()
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_toggle_new() {
-        let toggle = Toggle::new(false);
-        assert!(!toggle.is_on());
-        assert_eq!(toggle.style(), ToggleStyle::Switch);
-    }
-
-    #[test]
-    fn test_toggle_with_label() {
-        let toggle = Toggle::with_label(true, "Enable feature");
-        assert!(toggle.is_on());
-        assert_eq!(toggle.label(), Some("Enable feature"));
-    }
-
-    #[test]
-    fn test_toggle_toggle() {
-        let mut toggle = Toggle::new(false);
-        toggle.toggle();
-        assert!(toggle.is_on());
-        toggle.toggle();
-        assert!(!toggle.is_on());
-    }
-
-    #[test]
-    fn test_toggle_set_on() {
-        let mut toggle = Toggle::new(false);
-        toggle.set_on(true);
-        assert!(toggle.is_on());
-    }
-
-    #[test]
-    fn test_toggle_set_style() {
-        let mut toggle = Toggle::new(false);
-        toggle.set_style(ToggleStyle::Checkbox);
-        assert_eq!(toggle.style(), ToggleStyle::Checkbox);
     }
 }

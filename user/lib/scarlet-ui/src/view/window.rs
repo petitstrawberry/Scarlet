@@ -15,6 +15,7 @@ use crate::event::Event;
 use crate::graphics::Rect;
 use crate::layout::{LayoutConstraints, Size};
 use crate::view::id::ViewId;
+use crate::view::View;
 use crate::view::render::RenderObject;
 use crate::view::Spacer;
 use crate::{Button, Color, HStack, Text};
@@ -82,9 +83,9 @@ pub struct Window {
     // Window state
     state: WindowState,
 
-    // Child render objects
-    titlebar: Option<Box<dyn RenderObject>>,
-    content: Option<Box<dyn RenderObject>>,
+    // Child views (user-facing)
+    titlebar: Option<Box<dyn View>>,
+    content: Option<Box<dyn View>>,
 
     // Child frames
     titlebar_frame: Rect,
@@ -195,7 +196,7 @@ impl Window {
         self
     }
 
-    pub fn content<V: RenderObject + 'static>(mut self, view: V) -> Self {
+    pub fn content<V: View + 'static>(mut self, view: V) -> Self {
         self.content = Some(Box::new(view));
         self
     }
@@ -419,4 +420,12 @@ impl crate::view::render::RenderObject for Window {
             content.update(ctx);
         }
     }
+}
+
+impl crate::view::traits::View for Window {
+    fn body(&self) -> Option<&dyn crate::view::traits::View> {
+        None
+    }
+
+    // as_any, id, layout, draw, event, update are inherited from RenderObject impl
 }

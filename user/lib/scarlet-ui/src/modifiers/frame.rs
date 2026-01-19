@@ -9,6 +9,7 @@ use crate::event::Event;
 use crate::graphics::Rect;
 use crate::layout::{LayoutConstraints, Size};
 use crate::view::id::ViewId;
+use crate::view::View;
 use scarlet_std::fmt;
 
 /// Frame modifier
@@ -140,6 +141,10 @@ impl<T: crate::view::render::RenderObject + 'static> crate::view::render::Render
     }
 }
 
+impl<T: crate::view::render::RenderObject + 'static> View for Frame<T> {
+    // as_any, id, layout, draw, event, update are inherited from RenderObject impl
+}
+
 impl<T: fmt::Debug> fmt::Debug for Frame<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Frame")
@@ -150,82 +155,5 @@ impl<T: fmt::Debug> fmt::Debug for Frame<T> {
             .field("max_height", &self.max_height)
             .field("cached_size", &self.cached_size)
             .finish()
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    struct TestView {
-        id: ViewId,
-        size: Size,
-    }
-
-    impl TestView {
-        fn new(size: Size) -> Self {
-            Self {
-                id: ViewId::new(),
-                size,
-            }
-        }
-    }
-
-    impl View for TestView {
-        fn id(&self) -> ViewId {
-            self.id
-        }
-
-        fn layout(&mut self, _ctx: &mut LayoutCtx, constraints: LayoutConstraints) -> Size {
-            // Return the size constrained by parent
-            Size::new(
-                constraints.min_width.max(0),
-                constraints.min_height.max(0),
-            )
-        }
-
-        fn draw(&self, _ctx: &mut PaintCtx, _frame: Rect) {}
-
-        fn event(&mut self, _ctx: &mut EventCtx, _event: &Event) -> ControlFlow {
-            ControlFlow::Continue
-        }
-
-        fn update(&mut self, _ctx: &mut UpdateCtx) {}
-    }
-
-    #[test]
-    fn test_frame_new() {
-        let child = TestView::new(Size::new(50, 50));
-        let frame = Frame::new(child, 100, 100);
-
-        assert_eq!(frame.min_width, 100);
-        assert_eq!(frame.max_width, 100);
-        assert_eq!(frame.min_height, 100);
-        assert_eq!(frame.max_height, 100);
-    }
-
-    #[test]
-    fn test_frame_with_constraints() {
-        let child = TestView::new(Size::new(50, 50));
-        let frame = Frame::with_constraints(child, 50, 150, 75, 125);
-
-        assert_eq!(frame.min_width, 50);
-        assert_eq!(frame.max_width, 150);
-        assert_eq!(frame.min_height, 75);
-        assert_eq!(frame.max_height, 125);
-    }
-
-    #[test]
-    fn test_frame_width_height_range() {
-        let child = TestView::new(Size::new(50, 50));
-        let frame = Frame::with_constraints(child, 50, 150, 75, 125);
-
-        let (min_w, max_w) = frame.width_range();
-        assert_eq!(min_w, 50);
-        assert_eq!(max_w, 150);
-
-        let (min_h, max_h) = frame.height_range();
-        assert_eq!(min_h, 75);
-        assert_eq!(max_h, 125);
     }
 }

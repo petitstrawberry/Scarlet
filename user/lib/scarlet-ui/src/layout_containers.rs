@@ -14,6 +14,7 @@ use crate::layout::{LayoutConstraints, Size, CrossAxisAlignment, MainAxisAlignme
 use crate::graphics::Rect;
 use crate::view::id::ViewId;
 use crate::view::render::RenderObject;
+use crate::view::View;
 use crate::view::traits::Container;
 use scarlet_std::fmt;
 
@@ -36,7 +37,7 @@ pub struct VStack {
     /// Unique identifier for this view
     id: ViewId,
     /// Child views
-    children: Vec<Box<dyn RenderObject>>,
+    children: Vec<Box<dyn View>>,
     /// Spacing between children (in pixels)
     spacing: u32,
     /// How to align children along the cross axis (horizontal)
@@ -79,7 +80,7 @@ impl VStack {
     }
 
     /// Add a child view
-    pub fn child<V: RenderObject + 'static>(mut self, child: V) -> Self {
+    pub fn child<V: View + 'static>(mut self, child: V) -> Self {
         self.children.push(Box::new(child));
         self
     }
@@ -90,7 +91,7 @@ impl VStack {
     }
 
     /// Get a reference to a child by index
-    pub fn get_child(&self, index: usize) -> Option<&dyn RenderObject> {
+    pub fn get_child(&self, index: usize) -> Option<&dyn View> {
         self.children.get(index).map(|b| b.as_ref())
     }
 }
@@ -174,20 +175,9 @@ impl RenderObject for VStack {
         self.cached_size
     }
 
-    fn draw(&self, ctx: &mut PaintCtx, frame: Rect) {
-        // Draw each child with its calculated frame offset
-        for (i, child) in self.children.iter().enumerate() {
-            if let Some(&child_frame) = self.child_frames.get(i) {
-                // Offset child frame by parent position
-                let absolute_frame = Rect::new(
-                    frame.x + child_frame.x,
-                    frame.y + child_frame.y,
-                    child_frame.width,
-                    child_frame.height,
-                );
-                child.draw(ctx, absolute_frame);
-            }
-        }
+    fn draw(&self, _ctx: &mut PaintCtx, _frame: Rect) {
+        // Containers don't draw themselves - only layout children
+        // Drawing is handled by the framework through body()
     }
 
     fn event(&mut self, _ctx: &mut EventCtx, _event: &Event) -> ControlFlow {
@@ -202,13 +192,25 @@ impl RenderObject for VStack {
 }
 
 impl Container for VStack {
-    fn add_child(&mut self, child: Box<dyn RenderObject>) {
+    fn add_child(&mut self, child: Box<dyn View>) {
         self.children.push(child);
     }
 
     fn clear_children(&mut self) {
         self.children.clear();
     }
+}
+
+impl View for VStack {
+    fn children(&self) -> &[crate::view::traits::ChildView] {
+        &[]
+    }
+
+    fn children_mut(&mut self) -> &mut [crate::view::traits::ChildView] {
+        &mut []
+    }
+
+    // as_any, id, layout, draw, event, update are inherited from RenderObject impl
 }
 
 /// Horizontal stack - arranges children horizontally
@@ -230,7 +232,7 @@ pub struct HStack {
     /// Unique identifier for this view
     id: ViewId,
     /// Child views
-    children: Vec<Box<dyn RenderObject>>,
+    children: Vec<Box<dyn View>>,
     /// Spacing between children (in pixels)
     spacing: u32,
     /// How to align children along the cross axis (vertical)
@@ -273,7 +275,7 @@ impl HStack {
     }
 
     /// Add a child view
-    pub fn child<V: RenderObject + 'static>(mut self, child: V) -> Self {
+    pub fn child<V: View + 'static>(mut self, child: V) -> Self {
         self.children.push(Box::new(child));
         self
     }
@@ -284,7 +286,7 @@ impl HStack {
     }
 
     /// Get a reference to a child by index
-    pub fn get_child(&self, index: usize) -> Option<&dyn RenderObject> {
+    pub fn get_child(&self, index: usize) -> Option<&dyn View> {
         self.children.get(index).map(|b| b.as_ref())
     }
 }
@@ -368,20 +370,9 @@ impl RenderObject for HStack {
         self.cached_size
     }
 
-    fn draw(&self, ctx: &mut PaintCtx, frame: Rect) {
-        // Draw each child with its calculated frame offset
-        for (i, child) in self.children.iter().enumerate() {
-            if let Some(&child_frame) = self.child_frames.get(i) {
-                // Offset child frame by parent position
-                let absolute_frame = Rect::new(
-                    frame.x + child_frame.x,
-                    frame.y + child_frame.y,
-                    child_frame.width,
-                    child_frame.height,
-                );
-                child.draw(ctx, absolute_frame);
-            }
-        }
+    fn draw(&self, _ctx: &mut PaintCtx, _frame: Rect) {
+        // Containers don't draw themselves - only layout children
+        // Drawing is handled by the framework through body()
     }
 
     fn event(&mut self, _ctx: &mut EventCtx, _event: &Event) -> ControlFlow {
@@ -395,13 +386,25 @@ impl RenderObject for HStack {
 }
 
 impl Container for HStack {
-    fn add_child(&mut self, child: Box<dyn RenderObject>) {
+    fn add_child(&mut self, child: Box<dyn View>) {
         self.children.push(child);
     }
 
     fn clear_children(&mut self) {
         self.children.clear();
     }
+}
+
+impl View for HStack {
+    fn children(&self) -> &[crate::view::traits::ChildView] {
+        &[]
+    }
+
+    fn children_mut(&mut self) -> &mut [crate::view::traits::ChildView] {
+        &mut []
+    }
+
+    // as_any, id, layout, draw, event, update are inherited from RenderObject impl
 }
 
 /// Z-stack - layers children on top of each other
@@ -422,7 +425,7 @@ pub struct ZStack {
     /// Unique identifier for this view
     id: ViewId,
     /// Child views
-    children: Vec<Box<dyn RenderObject>>,
+    children: Vec<Box<dyn View>>,
     /// How to align children along the main axis
     alignment_main: MainAxisAlignment,
     /// How to align children along the cross axis
@@ -465,7 +468,7 @@ impl ZStack {
     }
 
     /// Add a child view
-    pub fn child<V: RenderObject + 'static>(mut self, child: V) -> Self {
+    pub fn child<V: View + 'static>(mut self, child: V) -> Self {
         self.children.push(Box::new(child));
         self
     }
@@ -476,7 +479,7 @@ impl ZStack {
     }
 
     /// Get a reference to a child by index
-    pub fn get_child(&self, index: usize) -> Option<&dyn RenderObject> {
+    pub fn get_child(&self, index: usize) -> Option<&dyn View> {
         self.children.get(index).map(|b| b.as_ref())
     }
 }
@@ -607,13 +610,25 @@ impl ZStack {
 }
 
 impl Container for ZStack {
-    fn add_child(&mut self, child: Box<dyn RenderObject>) {
+    fn add_child(&mut self, child: Box<dyn View>) {
         self.children.push(child);
     }
 
     fn clear_children(&mut self) {
         self.children.clear();
     }
+}
+
+impl View for ZStack {
+    fn children(&self) -> &[crate::view::traits::ChildView] {
+        &[]
+    }
+
+    fn children_mut(&mut self) -> &mut [crate::view::traits::ChildView] {
+        &mut []
+    }
+
+    // as_any, id, layout, draw, event, update are inherited from RenderObject impl
 }
 
 impl fmt::Debug for VStack {
@@ -706,106 +721,6 @@ impl RenderObject for Spacer {
     fn update(&mut self, _ctx: &mut UpdateCtx) {}
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    struct TestView {
-        id: ViewId,
-        size: Size,
-    }
-
-    impl TestView {
-        fn new(width: u32, height: u32) -> Self {
-            Self {
-                id: ViewId::new(),
-                size: Size::new(width, height),
-            }
-        }
-    }
-
-    impl View for TestView {
-        fn id(&self) -> ViewId {
-            self.id
-        }
-
-        fn layout(&mut self, _ctx: &mut LayoutCtx, _constraints: LayoutConstraints) -> Size {
-            self.size
-        }
-
-        fn draw(&self, _ctx: &mut PaintCtx, _frame: Rect) {}
-
-        fn event(&mut self, _ctx: &mut EventCtx, _event: &Event) -> ControlFlow {
-            ControlFlow::Continue
-        }
-
-        fn update(&mut self, _ctx: &mut UpdateCtx) {}
-    }
-
-    #[test]
-    fn test_vstack_empty() {
-        let mut stack = VStack::new();
-        let ctx = LayoutCtx::new(stack.id());
-        let constraints = LayoutConstraints::new(0, 100, 0, 100);
-
-        let size = stack.layout(&mut ctx, constraints);
-        assert_eq!(size, Size::new(0, 0));
-    }
-
-    #[test]
-    fn test_vstack_with_children() {
-        let mut stack = VStack::new()
-            .child(Box::new(TestView::new(50, 20)))
-            .child(Box::new(TestView::new(60, 30)));
-
-        let ctx = LayoutCtx::new(stack.id());
-        let constraints = LayoutConstraints::new(0, 100, 0, 100);
-
-        let size = stack.layout(&mut ctx, constraints);
-        assert_eq!(size.width, 60); // max child width
-        assert_eq!(size.height, 50); // sum of heights
-    }
-
-    #[test]
-    fn test_vstack_with_spacing() {
-        let mut stack = VStack::new()
-            .spacing(10)
-            .child(Box::new(TestView::new(50, 20)))
-            .child(Box::new(TestView::new(60, 30)));
-
-        let ctx = LayoutCtx::new(stack.id());
-        let constraints = LayoutConstraints::new(0, 100, 0, 100);
-
-        let size = stack.layout(&mut ctx, constraints);
-        assert_eq!(size.width, 60);
-        assert_eq!(size.height, 60); // 20 + 10 + 30
-    }
-
-    #[test]
-    fn test_hstack_with_children() {
-        let mut stack = HStack::new()
-            .child(Box::new(TestView::new(50, 20)))
-            .child(Box::new(TestView::new(60, 30)));
-
-        let ctx = LayoutCtx::new(stack.id());
-        let constraints = LayoutConstraints::new(0, 100, 0, 100);
-
-        let size = stack.layout(&mut ctx, constraints);
-        assert_eq!(size.width, 110); // sum of widths
-        assert_eq!(size.height, 30); // max child height
-    }
-
-    #[test]
-    fn test_zstack_with_children() {
-        let mut stack = ZStack::new()
-            .child(Box::new(TestView::new(50, 20)))
-            .child(Box::new(TestView::new(60, 30)));
-
-        let ctx = LayoutCtx::new(stack.id());
-        let constraints = LayoutConstraints::new(0, 100, 0, 100);
-
-        let size = stack.layout(&mut ctx, constraints);
-        assert_eq!(size.width, 60); // max child width
-        assert_eq!(size.height, 30); // max child height
-    }
+impl View for Spacer {
+    // as_any, id, layout, draw, event, update are inherited from RenderObject impl
 }

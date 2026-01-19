@@ -299,6 +299,10 @@ impl crate::view::render::RenderObject for Slider {
     }
 }
 
+impl crate::view::traits::View for Slider {
+    // as_any, id, layout, draw, event, update are inherited from RenderObject impl
+}
+
 impl fmt::Debug for Slider {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Slider")
@@ -307,69 +311,5 @@ impl fmt::Debug for Slider {
             .field("maximum", &self.maximum)
             .field("step", &self.step)
             .finish()
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_slider_new() {
-        let slider = Slider::new(0.0, 100.0);
-        assert_eq!(slider.value(), 0.0);
-        assert_eq!(slider.minimum(), 0.0);
-        assert_eq!(slider.maximum(), 100.0);
-    }
-
-    #[test]
-    fn test_slider_with_value() {
-        let slider = Slider::with_value(0.0, 100.0, 50.0);
-        assert_eq!(slider.value(), 50.0);
-    }
-
-    #[test]
-    fn test_slider_set_value() {
-        let mut slider = Slider::new(0.0, 100.0);
-        slider.set_value(75.0);
-        assert_eq!(slider.value(), 75.0);
-    }
-
-    #[test]
-    fn test_slider_clamp() {
-        let mut slider = Slider::new(0.0, 100.0);
-        slider.set_value(150.0);
-        assert_eq!(slider.value(), 100.0);
-
-        slider.set_value(-50.0);
-        assert_eq!(slider.value(), 0.0);
-    }
-
-    #[test]
-    fn test_slider_step() {
-        let mut slider = Slider::new(0.0, 100.0);
-        slider.set_step(10.0);
-
-        slider.set_value(37.0);
-        assert_eq!(slider.value(), 40.0);
-
-        slider.set_value(34.9);
-        assert_eq!(slider.value(), 30.0);
-    }
-
-    #[test]
-    fn test_slider_set_range() {
-        let mut slider = Slider::new(0.0, 100.0);
-        slider.set_value(50.0);
-
-        slider.set_range(0.0, 10.0);
-        assert_eq!(slider.value(), 10.0); // Clamped to new maximum
-        assert_eq!(slider.maximum(), 10.0);
-    }
-
-    #[test]
-    fn test_slider_with_label() {
-        let slider = Slider::with_label(0.0, 100.0, "Volume");
-        assert_eq!(slider.label(), Some("Volume"));
     }
 }

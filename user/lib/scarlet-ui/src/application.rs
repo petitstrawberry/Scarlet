@@ -333,6 +333,7 @@ impl Application {
         let mut paint_ctx = PaintCtx::new(&mut canvas, window.id());
         let frame = Rect::new(0, 0, width, height);
 
+        // Window's RenderObject impl handles drawing content
         window.draw(&mut paint_ctx, frame);
 
         // Commit to SWS

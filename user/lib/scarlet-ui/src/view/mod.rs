@@ -28,6 +28,7 @@ pub use buffer::ViewBuffer;
 pub use pool::BufferPool;
 pub use boundary::RepaintBoundary;
 pub use render::RenderObject;
+pub use traits::View;
 pub use window::{Window, WindowBuilder, WindowKind, WindowState};
 
 // Re-export layout containers (for convenience)

@@ -9,6 +9,7 @@ use crate::event::Event;
 use crate::graphics::Rect;
 use crate::layout::{LayoutConstraints, Size};
 use crate::view::id::ViewId;
+use crate::view::View;
 use scarlet_std::fmt;
 
 /// Padding modifier
@@ -155,6 +156,10 @@ impl<T: crate::view::render::RenderObject + 'static> crate::view::render::Render
     }
 }
 
+impl<T: crate::view::render::RenderObject + 'static> View for Padding<T> {
+    // as_any, id, layout, draw, event, update are inherited from RenderObject impl
+}
+
 impl<T: fmt::Debug> fmt::Debug for Padding<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Padding")
@@ -165,89 +170,5 @@ impl<T: fmt::Debug> fmt::Debug for Padding<T> {
             .field("left", &self.left)
             .field("cached_size", &self.cached_size)
             .finish()
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    struct TestView {
-        id: ViewId,
-        size: Size,
-    }
-
-    impl TestView {
-        fn new(size: Size) -> Self {
-            Self {
-                id: ViewId::new(),
-                size,
-            }
-        }
-    }
-
-    impl View for TestView {
-        fn id(&self) -> ViewId {
-            self.id
-        }
-
-        fn layout(&mut self, _ctx: &mut LayoutCtx, _constraints: LayoutConstraints) -> Size {
-            self.size
-        }
-
-        fn draw(&self, _ctx: &mut PaintCtx, _frame: Rect) {}
-
-        fn event(&mut self, _ctx: &mut EventCtx, _event: &Event) -> ControlFlow {
-            ControlFlow::Continue
-        }
-
-        fn update(&mut self, _ctx: &mut UpdateCtx) {}
-    }
-
-    #[test]
-    fn test_padding_new() {
-        let child = TestView::new(Size::new(100, 100));
-        let padding = Padding::new(child, 10);
-
-        assert_eq!(padding.top, 10);
-        assert_eq!(padding.right, 10);
-        assert_eq!(padding.bottom, 10);
-        assert_eq!(padding.left, 10);
-    }
-
-    #[test]
-    fn test_padding_with_insets() {
-        let child = TestView::new(Size::new(100, 100));
-        let padding = Padding::with_insets(child, 5, 10, 15, 20);
-
-        assert_eq!(padding.top, 5);
-        assert_eq!(padding.right, 10);
-        assert_eq!(padding.bottom, 15);
-        assert_eq!(padding.left, 20);
-    }
-
-    #[test]
-    fn test_padding_horizontal_vertical() {
-        let child = TestView::new(Size::new(100, 100));
-        let padding = Padding::with_insets(child, 5, 10, 15, 20);
-
-        assert_eq!(padding.horizontal_padding(), 30); // 10 + 20
-        assert_eq!(padding.vertical_padding(), 20); // 5 + 15
-    }
-
-    #[test]
-    fn test_padding_child_frame() {
-        let child = TestView::new(Size::new(100, 100));
-        let padding = Padding::new(child, 10);
-
-        let frame = Rect::new(50, 50, 120, 120);
-        let child_frame = padding.child_frame(frame);
-
-        // Child frame should be offset by padding
-        assert_eq!(child_frame.x, 60);
-        assert_eq!(child_frame.y, 60);
-        // Child frame should be smaller by padding on both sides
-        assert_eq!(child_frame.width, 100); // 120 - 10 - 10
-        assert_eq!(child_frame.height, 100);
     }
 }

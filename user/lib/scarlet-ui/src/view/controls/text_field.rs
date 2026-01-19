@@ -279,6 +279,10 @@ impl crate::view::render::RenderObject for TextField {
     }
 }
 
+impl crate::view::traits::View for TextField {
+    // as_any, id, layout, draw, event, update are inherited from RenderObject impl
+}
+
 impl fmt::Debug for TextField {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("TextField")

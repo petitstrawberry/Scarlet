@@ -221,6 +221,10 @@ impl crate::view::render::RenderObject for Button {
     }
 }
 
+impl crate::view::traits::View for Button {
+    // as_any, id, layout, draw, event, update are inherited from RenderObject impl
+}
+
 impl fmt::Debug for Button {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Button")

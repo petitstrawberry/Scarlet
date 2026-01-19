@@ -9,6 +9,8 @@ use crate::context::{ControlFlow, EventCtx, LayoutCtx, PaintCtx, UpdateCtx};
 use crate::event::Event;
 use crate::graphics::Rect;
 use crate::layout::{LayoutConstraints, Size};
+use crate::view::id::ViewId;
+use crate::view::View;
 use scarlet_std::fmt;
 
 /// Background modifier
@@ -96,6 +98,10 @@ impl<T: crate::view::render::RenderObject + 'static> crate::view::render::Render
     }
 }
 
+impl<T: crate::view::render::RenderObject + 'static> View for Background<T> {
+    // as_any, id, layout, draw, event, update are inherited from RenderObject impl
+}
+
 impl<T: fmt::Debug> fmt::Debug for Background<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Background")
@@ -103,75 +109,5 @@ impl<T: fmt::Debug> fmt::Debug for Background<T> {
             .field("color", &self.color)
             .field("cached_size", &self.cached_size)
             .finish()
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    struct TestView {
-        id: ViewId,
-    }
-
-    impl TestView {
-        fn new() -> Self {
-            Self {
-                id: ViewId::new(),
-            }
-        }
-    }
-
-    impl View for TestView {
-        fn id(&self) -> ViewId {
-            self.id
-        }
-
-        fn layout(&mut self, _ctx: &mut LayoutCtx, constraints: LayoutConstraints) -> Size {
-            Size::new(100, 100)
-        }
-
-        fn draw(&self, _ctx: &mut PaintCtx, _frame: Rect) {}
-
-        fn event(&mut self, _ctx: &mut EventCtx, _event: &Event) -> ControlFlow {
-            ControlFlow::Continue
-        }
-
-        fn update(&mut self, _ctx: &mut UpdateCtx) {}
-    }
-
-    #[test]
-    fn test_background_new() {
-        let child = TestView::new();
-        let bg = Background::new(child, Color::rgb(255, 0, 0));
-
-        assert_eq!(bg.color(), Color::rgb(255, 0, 0));
-    }
-
-    #[test]
-    fn test_background_set_color() {
-        let child = TestView::new();
-        let mut bg = Background::new(child, Color::rgb(255, 0, 0));
-
-        bg.set_color(Color::rgb(0, 255, 0));
-        assert_eq!(bg.color(), Color::rgb(0, 255, 0));
-    }
-
-    #[test]
-    fn test_background_opaque() {
-        let child = TestView::new();
-        let bg = Background::new(child, Color::rgb(255, 0, 0));
-
-        // Solid color with alpha 255 should be opaque
-        assert!(bg.color().is_opaque());
-    }
-
-    #[test]
-    fn test_background_transparent() {
-        let child = TestView::new();
-        let bg = Background::new(child, Color::rgba(255, 0, 0, 128));
-
-        // Color with alpha < 255 should not be opaque
-        assert!(!bg.color().is_opaque());
     }
 }

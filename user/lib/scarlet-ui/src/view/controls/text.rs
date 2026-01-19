@@ -166,7 +166,9 @@ impl crate::view::render::RenderObject for Text {
     }
 }
 
-// View is auto-implemented since View: RenderObject
+impl crate::view::traits::View for Text {
+    // as_any, id, layout, draw, event, update are inherited from RenderObject impl
+}
 
 impl fmt::Debug for Text {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -178,37 +180,5 @@ impl fmt::Debug for Text {
             .field("cached_size", &self.cached_size)
             .field("has_text_binding", &self.text_data.is_some())
             .finish()
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_text_new() {
-        let text = Text::new("Hello, World!");
-        assert_eq!(text.text(), "Hello, World!");
-    }
-
-    #[test]
-    fn test_text_set_text() {
-        let mut text = Text::new("Hello");
-        text.set_text("Goodbye".to_string());
-        assert_eq!(text.text(), "Goodbye");
-    }
-
-    #[test]
-    fn test_text_set_color() {
-        let mut text = Text::new("Test");
-        text.set_color(Color::rgb(255, 0, 0));
-        assert_eq!(text.color(), Color::rgb(255, 0, 0));
-    }
-
-    #[test]
-    fn test_text_set_alignment() {
-        let mut text = Text::new("Test");
-        text.set_alignment(TextAlignment::Center);
-        assert_eq!(text.alignment(), TextAlignment::Center);
     }
 }

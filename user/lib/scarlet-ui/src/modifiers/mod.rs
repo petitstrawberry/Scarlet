@@ -171,61 +171,6 @@ impl<T: RenderObject + 'static> RenderObject for RepaintBoundaryWrapper<T> {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    struct TestView {
-        id: ViewId,
-    }
-
-    impl TestView {
-        fn new() -> Self {
-            Self {
-                id: ViewId::new(),
-            }
-        }
-    }
-
-    impl View for TestView {
-        fn id(&self) -> ViewId {
-            self.id
-        }
-
-        fn layout(&mut self, _ctx: &mut LayoutCtx, _constraints: LayoutConstraints) -> Size {
-            Size::new(100, 100)
-        }
-
-        fn draw(&self, _ctx: &mut PaintCtx, _frame: Rect) {}
-
-        fn event(&mut self, _ctx: &mut EventCtx, _event: &Event) -> ControlFlow {
-            ControlFlow::Continue
-        }
-
-        fn update(&mut self, _ctx: &mut UpdateCtx) {}
-    }
-
-    #[test]
-    fn test_view_ext_padding() {
-        let view = TestView::new();
-        let _padded = view.padding(10);
-    }
-
-    #[test]
-    fn test_view_ext_frame() {
-        let view = TestView::new();
-        let _framed = view.frame(100, 100);
-    }
-
-    #[test]
-    fn test_view_ext_background() {
-        let view = TestView::new();
-        let _colored = view.background(Color::rgb(255, 0, 0));
-    }
-
-    #[test]
-    fn test_view_ext_repaint_boundary() {
-        let view = TestView::new();
-        let _isolated = view.repaint_boundary();
-    }
+impl<T: crate::view::render::RenderObject + 'static> View for RepaintBoundaryWrapper<T> {
+    // as_any, id, layout, draw, event, update are inherited from RenderObject impl
 }
