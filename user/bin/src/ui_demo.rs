@@ -15,7 +15,6 @@ use scarlet_ui::{
     Application, Window, WindowBuilder,
     VStack, HStack,
     Text, Button, Toggle, Slider, TextField,
-    ScrollView, TabView, NavigationView,
     Local, View, ViewExt,
     Color,
 };
@@ -121,54 +120,6 @@ impl scarlet_ui::view::render::RenderObject for DemoView {
     }
 }
 
-impl View for DemoView {}
-
-/// TabView demo
-struct TabViewDemo;
-
-impl TabViewDemo {
-    fn build() -> impl View {
-        TabView::new()
-            .tab("Home", Box::new(
-                Text::new("Home Content")
-                    .font_size(24)
-            ))
-            .tab("Settings", Box::new(
-                VStack::new()
-                    .spacing(10)
-                    .child(Text::new("Settings").font_size(24))
-                    .child(Toggle::new(true))
-            ))
-            .tab("About", Box::new(
-                Text::new("About ScarletUI")
-                    .font_size(24)
-            ))
-    }
-}
-
-/// NavigationView demo
-struct NavigationViewDemo;
-
-impl NavigationViewDemo {
-    fn build() -> impl View {
-        NavigationView::with_title(
-            "Root",
-            Box::new(
-                VStack::new()
-                    .spacing(16)
-                    .child(Text::new("Root View").font_size(24))
-                    .child(
-                        Button::new("Go to Detail")
-                            .action(|| {
-                                println!("[ui_demo] Navigate to detail");
-                            })
-                            .padding(10)
-                    )
-            )
-        )
-    }
-}
-
 #[unsafe(no_mangle)]
 pub extern "C" fn main() -> i32 {
     println!("[ui_demo] Starting ScarletUI Modern Architecture Demo");
@@ -223,20 +174,6 @@ pub extern "C" fn main() -> i32 {
         )
         .child(
             TextField::new()
-        )
-        .child(
-            Button::new("Open TabView Demo")
-                .action(|| {
-                    println!("[ui_demo] TabView demo requested");
-                })
-                .padding(10)
-        )
-        .child(
-            Button::new("Open NavigationView Demo")
-                .action(|| {
-                    println!("[ui_demo] NavigationView demo requested");
-                })
-                .padding(10)
         );
 
     let window = Window::builder()

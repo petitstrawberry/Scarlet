@@ -5,14 +5,6 @@
 //! drawing the background behind them. This is an important optimization.
 
 use crate::color::Color;
-use crate::view::traits::Opaque;
-
-/// Solid color rectangle is always opaque if alpha is 255
-impl Opaque for Color {
-    fn is_opaque(&self) -> bool {
-        self.a == 255
-    }
-}
 
 /// Helper for determining if a color is opaque
 pub fn color_is_opaque(color: &Color) -> bool {

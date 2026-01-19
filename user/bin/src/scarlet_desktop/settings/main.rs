@@ -12,7 +12,7 @@ use scarlet_desktop_config::{DesktopConfig, TaskbarPosition};
 use scarlet_ui::{
     Application, Window, WindowBuilder,
     VStack, HStack, Spacer,
-    Text, Button, TabView,
+    Text, Button,
     View, ViewExt,
     Color,
 };
@@ -266,11 +266,28 @@ pub extern "C" fn main() -> i32 {
         )
         .padding(24);
 
-    // Build the UI with TabView
-    let ui_content = TabView::new()
-        .tab("Display & Theme", Box::new(display_tab))
-        .tab("Menu Bar", Box::new(menubar_tab))
-        .tab("System", Box::new(system_tab));
+    // Build the UI with VStack (TabView to be implemented)
+    let ui_content = VStack::new()
+        .spacing(16)
+        .child(
+            Text::new("Settings")
+                .font_size(24)
+        )
+        .child(
+            Text::new("Display & Theme")
+                .font_size(18)
+        )
+        .child(display_tab)
+        .child(
+            Text::new("Menu Bar")
+                .font_size(18)
+        )
+        .child(menubar_tab)
+        .child(
+            Text::new("System")
+                .font_size(18)
+        )
+        .child(system_tab);
 
     let window = Window::builder()
         .title("Settings")

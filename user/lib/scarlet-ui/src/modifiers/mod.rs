@@ -17,6 +17,7 @@ use crate::layout::{LayoutConstraints, Size};
 use crate::view::id::ViewId;
 use crate::view::traits::View;
 use crate::view::boundary::RepaintBoundary;
+use crate::view::render::RenderObject;
 use crate::color::Color;
 
 pub use padding::Padding;
@@ -25,9 +26,9 @@ pub use background::Background;
 
 /// Extension trait providing SwiftUI-style view modifiers
 ///
-/// This trait is implemented for all types that implement View,
+/// This trait is implemented for all types that implement RenderObject,
 /// providing a fluent API for view modification.
-pub trait ViewExt: View + Sized where Self: 'static {
+pub trait ViewExt: RenderObject + Sized where Self: 'static {
     /// Add padding to this view
     ///
     /// # Example
@@ -118,15 +119,15 @@ pub trait ViewExt: View + Sized where Self: 'static {
     }
 }
 
-impl<T: View + 'static> ViewExt for T {}
+impl<T: RenderObject + 'static> ViewExt for T {}
 
-/// Wrapper for RepaintBoundary that implements View
-pub struct RepaintBoundaryWrapper<T: View> {
+/// Wrapper for RepaintBoundary that implements RenderObject
+pub struct RepaintBoundaryWrapper<T: RenderObject> {
     inner: RepaintBoundary,
     _phantom: core::marker::PhantomData<T>,
 }
 
-impl<T: View + 'static> RepaintBoundaryWrapper<T> {
+impl<T: RenderObject + 'static> RepaintBoundaryWrapper<T> {
     pub fn new(child: T) -> Self {
         let inner = RepaintBoundary::new(Box::new(child));
         Self {
@@ -144,7 +145,7 @@ impl<T: View + 'static> RepaintBoundaryWrapper<T> {
     }
 }
 
-impl<T: View + 'static> View for RepaintBoundaryWrapper<T> {
+impl<T: RenderObject + 'static> RenderObject for RepaintBoundaryWrapper<T> {
     fn id(&self) -> ViewId {
         self.inner.id()
     }

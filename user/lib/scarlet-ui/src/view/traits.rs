@@ -1,157 +1,50 @@
 //! Core View trait and related types
 //!
-//! This module defines the View trait, which is the foundation of the view system.
-//! Views participate in layout, drawing, and event handling.
+//! This module defines the View trait, which is a marker trait for views.
+//! The actual rendering implementation is in the RenderObject trait.
 
 extern crate alloc;
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 use core::any::Any;
 
-use crate::context::{ControlFlow, EventCtx, LayoutCtx, PaintCtx, UpdateCtx};
-use crate::event::Event;
-use crate::layout::{LayoutConstraints, Size};
+use crate::context::UpdateCtx;
+use crate::layout::Size;
 use crate::view::id::ViewId;
+use crate::view::render::RenderObject;
 
-/// Core trait for all views
+/// View marker trait
 ///
-/// The View trait defines the interface that all UI components must implement.
-/// Views participate in three main phases:
+/// This is a marker trait that all views implement. The actual rendering
+/// implementation is in the RenderObject trait.
 ///
-/// 1. **Event handling** (`event`): Respond to user input
-/// 2. **Layout** (`layout`): Calculate size and position
-/// 3. **Drawing** (`draw`): Render the view
+/// # Design
 ///
-/// This design is inspired by Druid's Widget trait and provides a clean
-/// separation of concerns.
+/// - **View**: Marker trait for declarative UI structure
+///   - `children()`, `children_mut()` - Child view structure
+///   - Property setters (`action()`, `text()`, `color()` etc.)
 ///
-/// # Lifecycle
+/// - **RenderObject**: Actual rendering implementation
+///   - `layout()` - Size calculation
+///   - `draw()` - Drawing
+///   - `event()` - System event handling
+///   - `update()` - Periodic updates
 ///
-/// Views are created, participate in layout/draw cycles, and are eventually
-/// dropped. The framework manages the view lifecycle.
+/// # Blanket Implementation
 ///
-/// # Example
+/// All types that implement RenderObject automatically get View implementation:
 ///
 /// ```ignore
-/// struct MyView {
-///     id: ViewId,
-///     text: &'static str,
-/// }
-///
-/// impl MyView {
-///     fn new(text: &'static str) -> Self {
-///         Self {
-///             id: ViewId::new(),
-///             text,
-///         }
-///     }
-/// }
-///
-/// impl View for MyView {
-///     fn id(&self) -> ViewId {
-///         self.id
-///     }
-///
-///     fn layout(&mut self, ctx: &mut LayoutCtx, constraints: LayoutConstraints) -> Size {
-///         // Return the size this view wants to be
-///         Size::new(100, 20)
-///     }
-///
-///     fn draw(&self, ctx: &mut PaintCtx, frame: crate::graphics::Rect) {
-///         // Draw the view
-///         // ctx.canvas.draw_text(frame.x, frame.y, self.text, Color::BLACK);
-///     }
-///
-///     fn event(&mut self, ctx: &mut EventCtx, event: &Event) -> ControlFlow {
-///         // Handle events
-///         ControlFlow::Continue
-///     }
-///
-///     fn update(&mut self, ctx: &mut UpdateCtx) {
-///         // Called when observed data changes
-///     }
-/// }
+/// impl<T> View for T where T: RenderObject {}
 /// ```
-pub trait View {
-    /// Get the unique identifier for this view
-    ///
-    /// Each view instance must have a unique ViewId that is assigned
-    /// when the view is created and never changes.
-    fn id(&self) -> ViewId;
-
-    /// Get `Any` reference for downcasting
-    ///
-    /// This allows checking the concrete type of a `dyn View` at runtime.
-    fn as_any(&self) -> &dyn Any;
-
-    /// Calculate the desired size given constraints
-    ///
-    /// This is called during the layout phase. The view should return
-    /// the size it wants to be, constrained by the given constraints.
-    ///
-    /// The framework may call this multiple times with different constraints
-    /// during a single layout pass, so views should cache calculations
-    /// when possible.
-    ///
-    /// # Arguments
-    ///
-    /// * `ctx` - Layout context for utilities and information
-    /// * `constraints` - Size constraints (min/max width and height)
-    ///
-    /// # Returns
-    ///
-    /// The size this view wants to be, constrained by `constraints`.
-    fn layout(&mut self, ctx: &mut LayoutCtx, constraints: LayoutConstraints) -> Size;
-
-    /// Draw the view within the given frame
-    ///
-    /// This is called during the paint phase. The view should render itself
-    /// into the provided canvas.
-    ///
-    /// # Arguments
-    ///
-    /// * `ctx` - Paint context with canvas and drawing utilities
-    /// * `frame` - The rectangle this view should draw within
-    fn draw(&self, ctx: &mut PaintCtx, frame: crate::graphics::Rect);
-
-    /// Handle an event
-    ///
-    /// This is called during the event phase. The view should handle the
-    /// event if it's relevant, and return whether it consumed the event.
-    ///
-    /// # Arguments
-    ///
-    /// * `ctx` - Event context for requesting layout/paint
-    /// * `event` - The event to handle
-    ///
-    /// # Returns
-    ///
-    /// - `ControlFlow::Continue` - Continue propagating the event
-    /// - `ControlFlow::Stop` - Stop propagation (event was consumed)
-    fn event(&mut self, ctx: &mut EventCtx, event: &Event) -> ControlFlow {
-        ControlFlow::Continue
-    }
-
-    /// Update the view when observed data changes
-    ///
-    /// This is called when data that this view observes has changed.
-    /// Views can use this to update their internal state or request redraws.
-    ///
-    /// # Arguments
-    ///
-    /// * `ctx` - Update context for requesting layout/paint
-    fn update(&mut self, ctx: &mut UpdateCtx) {
-        let _ = ctx;
-        // Default: do nothing
-    }
-
+pub trait View: RenderObject {
     /// Get child views (for containers)
     ///
     /// Container views should override this to return their children.
     /// Leaf views should return an empty slice (default).
     ///
     /// This is used for event propagation and layout.
-    fn children(&self) -> &[ViewChild] {
+    fn children(&self) -> &[ChildView] {
         &[]
     }
 
@@ -159,25 +52,28 @@ pub trait View {
     ///
     /// Container views should override this to return mutable references
     /// to their children. Leaf views should return an empty slice (default).
-    fn children_mut(&mut self) -> &mut [ViewChild] {
+    fn children_mut(&mut self) -> &mut [ChildView] {
         &mut []
     }
 }
+
+/// Blanket implementation: all RenderObjects are Views
+impl<T> View for T where T: RenderObject {}
 
 /// A child view with its frame
 ///
 /// This is used by container views to track their children and their
 /// positions within the container.
-pub struct ViewChild {
-    /// The child view
-    pub view: Box<dyn View>,
+pub struct ChildView {
+    /// The child view (render object)
+    pub view: Box<dyn RenderObject>,
     /// The frame (position and size) allocated to this child
     pub frame: crate::graphics::Rect,
 }
 
-impl ViewChild {
-    /// Create a new ViewChild
-    pub fn new(view: Box<dyn View>, frame: crate::graphics::Rect) -> Self {
+impl ChildView {
+    /// Create a new ChildView
+    pub fn new(view: Box<dyn RenderObject>, frame: crate::graphics::Rect) -> Self {
         Self { view, frame }
     }
 }
@@ -191,7 +87,7 @@ pub trait Container: View {
     /// Add a child view
     ///
     /// The container is responsible for positioning the child appropriately.
-    fn add_child(&mut self, child: Box<dyn View>);
+    fn add_child(&mut self, child: Box<dyn RenderObject>);
 
     /// Remove all children
     fn clear_children(&mut self);
@@ -199,85 +95,17 @@ pub trait Container: View {
 
 /// Marker trait for views that are opaque
 ///
-/// Opaque views draw an opaque background, which allows the framework
-/// to skip drawing the background behind them. This is an important
-/// optimization for performance.
+/// Opaque views are guaranteed to draw every pixel within their frame,
+/// allowing the framework to skip drawing views behind them.
+pub trait Opaque: View {}
+
+/// Marker trait for views that have a stable identity
 ///
-/// # Example
-///
-/// A solid color rectangle is opaque:
-/// ```ignore
-/// impl Opaque for ColorRect {
-///     fn is_opaque(&self) -> bool {
-///         self.color.a == 255 // Fully opaque
-///     }
-/// }
-/// ```
-pub trait Opaque {
-    /// Check if this view is opaque
-    ///
-    /// Returns `true` if the view draws an opaque background (no transparency).
-    fn is_opaque(&self) -> bool;
-}
-
-/// Marker trait for views that form a repaint boundary
-///
-/// Repaint boundaries are views that should be isolated into their own
-/// rendering layer. This is useful for:
-/// - Animated content (isolates redraws to just the animating part)
-/// - Frequent updates (prevents redrawing the entire screen)
-///
-/// Views that implement this trait will be allocated their own buffer
-/// and will be composited into their parent.
-pub trait RepaintBoundary {
-    /// Check if this view should form a repaint boundary
-    ///
-    /// Returns `true` if this view should have its own buffer.
-    fn is_repaint_boundary(&self) -> bool;
-}
-
-/// Marker trait for views that form a layout boundary
-///
-/// Layout boundaries prevent layout changes from propagating beyond
-/// this view. This is useful for performance when:
-/// - A view's children change size frequently
-/// - The parent doesn't need to know about child size changes
-pub trait LayoutBoundary {
-    /// Check if this view should form a layout boundary
-    ///
-    /// Returns `true` if layout changes shouldn't propagate past this view.
-    fn is_layout_boundary(&self) -> bool;
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    struct TestView {
-        id: ViewId,
-    }
-
-    impl View for TestView {
-        fn id(&self) -> ViewId {
-            self.id
-        }
-
-        fn as_any(&self) -> &dyn Any {
-            self
-        }
-
-        fn layout(&mut self, _ctx: &mut LayoutCtx, _constraints: LayoutConstraints) -> Size {
-            Size::new(100, 100)
-        }
-
-        fn draw(&self, _ctx: &mut PaintCtx, _frame: crate::graphics::Rect) {
-            // Do nothing for test
-        }
-    }
-
-    #[test]
-    fn test_view_id() {
-        let view = TestView { id: ViewId::new() };
-        let _id = view.id();
+/// Views implementing this trait maintain their identity across
+/// rebuilds, allowing the framework to preserve state.
+pub trait Identifiable: View {
+    /// Get the stable identifier for this view
+    fn stable_id(&self) -> Option<ViewId> {
+        None
     }
 }

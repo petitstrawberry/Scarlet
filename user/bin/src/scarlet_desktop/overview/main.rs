@@ -135,16 +135,6 @@ impl RenderObject for Card {
     }
 }
 
-impl View for Card {
-    fn children(&self) -> &[ChildView] {
-        core::slice::from_ref(&self.child)
-    }
-
-    fn children_mut(&mut self) -> &mut [ChildView] {
-        core::slice::from_mut(&mut self.child)
-    }
-}
-
 #[unsafe(no_mangle)]
 pub extern "C" fn main() -> i32 {
     println!("[scarlet_desktop] Launching Scarlet Desktop");

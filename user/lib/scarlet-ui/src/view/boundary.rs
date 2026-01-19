@@ -16,7 +16,7 @@ use crate::event::Event;
 use crate::graphics::Rect;
 use crate::layout::{LayoutConstraints, Size};
 use crate::view::id::ViewId;
-use crate::view::traits::View;
+use crate::view::render::RenderObject;
 use crate::view::buffer::ViewBuffer;
 use scarlet_std::fmt;
 
@@ -29,7 +29,7 @@ pub struct RepaintBoundary {
     /// Unique identifier for this view
     id: ViewId,
     /// Child view
-    child: Box<dyn View>,
+    child: Box<dyn RenderObject>,
     /// Buffer for isolated rendering
     buffer: Option<ViewBuffer>,
     /// Whether this view is opaque (optimization hint)
@@ -44,7 +44,7 @@ pub struct RepaintBoundary {
 
 impl RepaintBoundary {
     /// Create a new repaint boundary
-    pub fn new(child: Box<dyn View>) -> Self {
+    pub fn new(child: Box<dyn RenderObject>) -> Self {
         let id = ViewId::new();
         Self {
             id,
@@ -71,12 +71,12 @@ impl RepaintBoundary {
     }
 
     /// Get the child view
-    pub fn child(&self) -> &dyn View {
+    pub fn child(&self) -> &dyn RenderObject {
         self.child.as_ref()
     }
 
     /// Get mutable access to the child view
-    pub fn child_mut(&mut self) -> &mut dyn View {
+    pub fn child_mut(&mut self) -> &mut dyn RenderObject {
         self.child.as_mut()
     }
 
@@ -121,7 +121,7 @@ impl RepaintBoundary {
     }
 }
 
-impl View for RepaintBoundary {
+impl crate::view::render::RenderObject for RepaintBoundary {
     fn id(&self) -> ViewId {
         self.id
     }
@@ -199,7 +199,7 @@ mod tests {
         }
     }
 
-    impl View for TestView {
+    impl RenderObject for TestView {
         fn id(&self) -> ViewId {
             self.id
         }

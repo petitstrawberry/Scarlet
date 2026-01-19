@@ -30,6 +30,7 @@ pub struct Button {
     pressed_color: Color,
     is_hovered: bool,
     is_pressed: bool,
+    padding: u32,
     cached_size: Size,
 }
 
@@ -46,6 +47,7 @@ impl Button {
             pressed_color: Color::BUTTON_PRESSED,
             is_hovered: false,
             is_pressed: false,
+            padding: 10,
             cached_size: Size::ZERO,
         }
     }
@@ -70,6 +72,18 @@ impl Button {
         self.background_color = normal;
         self.hover_color = hover;
         self.pressed_color = pressed;
+    }
+
+    /// Set the button padding (chainable)
+    pub fn padding(mut self, padding: u32) -> Self {
+        self.padding = padding;
+        self
+    }
+
+    /// Set the button action (chainable)
+    pub fn action(mut self, action: impl Fn() + 'static) -> Self {
+        self.action = Some(Arc::new(action));
+        self
     }
 
     /// Get whether the button is currently hovered
@@ -128,7 +142,7 @@ impl Button {
     }
 }
 
-impl View for Button {
+impl crate::view::render::RenderObject for Button {
     fn id(&self) -> ViewId {
         self.id
     }
@@ -139,7 +153,7 @@ impl View for Button {
 
     fn layout(&mut self, ctx: &mut LayoutCtx, constraints: LayoutConstraints) -> Size {
         // Add padding for button appearance
-        let padding = 10;
+        let padding = self.padding;
         let min_width = constraints.min_width.saturating_add(padding * 2);
         let min_height = constraints.min_height.saturating_add(padding * 2);
 
@@ -160,10 +174,11 @@ impl View for Button {
 
     fn draw(&self, ctx: &mut PaintCtx, frame: Rect) {
         // Draw button background
-        // TODO: Implement actual background drawing
+        let bg_color = self.current_color();
+        ctx.canvas.fill_rect(frame.x, frame.y, frame.width, frame.height, bg_color);
 
         // Draw label centered in button
-        let padding = 10;
+        let padding = self.padding;
         let label_frame = Rect::new(
             frame.x + padding as i32,
             frame.y + padding as i32,
@@ -193,6 +208,7 @@ impl fmt::Debug for Button {
             .field("label", &self.label.text())
             .field("is_hovered", &self.is_hovered)
             .field("is_pressed", &self.is_pressed)
+            .field("padding", &self.padding)
             .field("cached_size", &self.cached_size)
             .finish()
     }

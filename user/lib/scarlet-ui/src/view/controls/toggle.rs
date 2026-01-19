@@ -4,7 +4,6 @@
 
 extern crate alloc;
 use alloc::string::String;
-use alloc::sync::Arc;
 
 use crate::context::{ControlFlow, EventCtx, LayoutCtx, PaintCtx, UpdateCtx};
 use crate::event::{Event, EventKind, MouseButton};
@@ -13,7 +12,7 @@ use crate::layout::{LayoutConstraints, Size};
 use crate::view::id::ViewId;
 use crate::view::traits::View;
 use crate::color::Color;
-use crate::DataContext;
+use crate::state::data::DataContext;
 use scarlet_ui_macros::bindable;
 use scarlet_std::fmt;
 
@@ -38,7 +37,7 @@ pub struct Toggle {
     id: ViewId,
     #[bind]
     is_on: bool,
-    label: Option<Arc<String>>,
+    label: Option<String>,
     style: ToggleStyle,
     on_color: Color,
     off_color: Color,
@@ -57,7 +56,7 @@ impl Toggle {
     }
 
     /// Create a toggle with a label
-    pub fn with_label(is_on: bool, label: impl Into<Arc<String>>) -> Self {
+    pub fn with_label(is_on: bool, label: impl Into<String>) -> Self {
         let mut toggle = Self::new(is_on);
         toggle.label = Some(label.into());
         toggle
@@ -92,7 +91,7 @@ impl Toggle {
     }
 
     /// Set the label
-    pub fn set_label(&mut self, label: impl Into<Arc<String>>) {
+    pub fn set_label(&mut self, label: impl Into<String>) {
         self.label = Some(label.into());
     }
 
@@ -153,7 +152,7 @@ impl Toggle {
     }
 }
 
-impl View for Toggle {
+impl crate::view::render::RenderObject for Toggle {
     fn id(&self) -> ViewId {
         self.id
     }

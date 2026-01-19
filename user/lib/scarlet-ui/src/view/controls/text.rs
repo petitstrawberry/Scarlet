@@ -66,7 +66,7 @@ impl Text {
     }
 
     /// Get the text color
-    pub fn color(&self) -> Color {
+    pub fn get_color(&self) -> Color {
         self.color
     }
 
@@ -78,6 +78,18 @@ impl Text {
     /// Get the text alignment
     pub fn alignment(&self) -> TextAlignment {
         self.alignment
+    }
+
+    /// Set the font size (chainable builder method)
+    pub fn font_size(mut self, size: u32) -> Self {
+        self.font.size = size;
+        self
+    }
+
+    /// Set the text color (chainable builder method)
+    pub fn color(mut self, color: Color) -> Self {
+        self.color = color;
+        self
     }
 
     /// Calculate text size
@@ -119,7 +131,7 @@ impl Text {
     }
 }
 
-impl View for Text {
+impl crate::view::render::RenderObject for Text {
     fn id(&self) -> ViewId {
         self.id
     }
@@ -150,6 +162,8 @@ impl View for Text {
         // Text doesn't need periodic updates
     }
 }
+
+// View is auto-implemented since View: RenderObject
 
 impl fmt::Debug for Text {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {

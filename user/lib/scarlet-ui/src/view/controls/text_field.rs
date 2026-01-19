@@ -4,7 +4,6 @@
 
 extern crate alloc;
 use alloc::string::String;
-use alloc::sync::Arc;
 
 use crate::context::{ControlFlow, EventCtx, LayoutCtx, PaintCtx, UpdateCtx};
 use crate::event::{Event, EventKind, MouseButton};
@@ -13,9 +12,8 @@ use crate::layout::{LayoutConstraints, Size};
 use crate::view::id::ViewId;
 use crate::view::traits::View;
 use crate::color::Color;
-use crate::DataContext;
+use crate::state::data::DataContext;
 use scarlet_ui_macros::bindable;
-use crate::view::controls::text::Text;
 use scarlet_std::fmt;
 
 /// Text field view
@@ -24,7 +22,7 @@ pub struct TextField {
     id: ViewId,
     #[bind]
     text: String,
-    placeholder: Arc<String>,
+    placeholder: String,
     font_size: u32,
     text_color: Color,
     placeholder_color: Color,
@@ -42,7 +40,7 @@ impl TextField {
     }
 
     /// Create a text field with placeholder text
-    pub fn with_placeholder(placeholder: impl Into<Arc<String>>) -> Self {
+    pub fn with_placeholder(placeholder: impl Into<String>) -> Self {
         let mut tf = Self::new();
         tf.placeholder = placeholder.into();
         tf
@@ -72,13 +70,19 @@ impl TextField {
     }
 
     /// Get the placeholder text
-    pub fn placeholder(&self) -> &str {
+    pub fn get_placeholder(&self) -> &str {
         &self.placeholder
     }
 
     /// Set the placeholder text
-    pub fn set_placeholder(&mut self, placeholder: impl Into<Arc<String>>) {
+    pub fn set_placeholder(&mut self, placeholder: impl Into<String>) {
         self.placeholder = placeholder.into();
+    }
+
+    /// Set the placeholder text (chainable)
+    pub fn placeholder(mut self, placeholder: impl Into<String>) -> Self {
+        self.placeholder = placeholder.into();
+        self
     }
 
     /// Get whether the field is focused
@@ -154,7 +158,7 @@ impl TextField {
     }
 }
 
-impl View for TextField {
+impl crate::view::render::RenderObject for TextField {
     fn id(&self) -> ViewId {
         self.id
     }

@@ -9,8 +9,6 @@ use crate::context::{ControlFlow, EventCtx, LayoutCtx, PaintCtx, UpdateCtx};
 use crate::event::Event;
 use crate::graphics::Rect;
 use crate::layout::{LayoutConstraints, Size};
-use crate::view::id::ViewId;
-use crate::view::traits::View;
 use scarlet_std::fmt;
 
 /// Background modifier
@@ -62,8 +60,8 @@ impl<T> Background<T> {
     }
 }
 
-impl<T: View + 'static> View for Background<T> {
-    fn id(&self) -> ViewId {
+impl<T: crate::view::render::RenderObject + 'static> crate::view::render::RenderObject for Background<T> {
+    fn id(&self) -> crate::view::id::ViewId {
         self.child.id()
     }
 

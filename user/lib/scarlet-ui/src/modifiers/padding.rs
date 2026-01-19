@@ -9,7 +9,6 @@ use crate::event::Event;
 use crate::graphics::Rect;
 use crate::layout::{LayoutConstraints, Size};
 use crate::view::id::ViewId;
-use crate::view::traits::View;
 use scarlet_std::fmt;
 
 /// Padding modifier
@@ -94,7 +93,7 @@ impl<T> Padding<T> {
     }
 }
 
-impl<T: View + 'static> View for Padding<T> {
+impl<T: crate::view::render::RenderObject + 'static> crate::view::render::RenderObject for Padding<T> {
     fn id(&self) -> ViewId {
         self.child.id()
     }

@@ -9,7 +9,6 @@ use crate::event::Event;
 use crate::graphics::Rect;
 use crate::layout::{LayoutConstraints, Size};
 use crate::view::id::ViewId;
-use crate::view::traits::View;
 use scarlet_std::fmt;
 
 /// Frame modifier
@@ -90,7 +89,7 @@ impl<T> Frame<T> {
     }
 }
 
-impl<T: View + 'static> View for Frame<T> {
+impl<T: crate::view::render::RenderObject + 'static> crate::view::render::RenderObject for Frame<T> {
     fn id(&self) -> ViewId {
         self.child.id()
     }

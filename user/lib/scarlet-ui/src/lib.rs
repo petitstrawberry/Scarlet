@@ -96,11 +96,12 @@ pub use view::{
     BufferPool,
     RepaintBoundary,
     Window,
+    WindowBuilder,
     WindowKind,
     WindowState,
 };
 pub use view::node::ViewNode;
-pub use view::traits::{View, ViewChild, Container, Opaque, RepaintBoundary as RepaintBoundaryTrait, LayoutBoundary};
+pub use view::traits::{View, ChildView, Container, Opaque, Identifiable};
 
 // Re-export controls
 pub use view::controls::{

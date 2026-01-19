@@ -9,7 +9,7 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use alloc::string::{String, ToString};
 
-use crate::{View, ViewRegistry, RenderTracker, view::Window};
+use crate::{View, ViewRegistry, RenderTracker, view::Window, view::render::RenderObject};
 use crate::event::{Event, EventKind, MouseButton};
 use crate::graphics::{Canvas, Point, Rect};
 use crate::layout::{LayoutConstraints, Size};

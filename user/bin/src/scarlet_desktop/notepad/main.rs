@@ -167,8 +167,6 @@ impl scarlet_ui::view::render::RenderObject for NotepadView {
     }
 }
 
-impl View for NotepadView {}
-
 #[unsafe(no_mangle)]
 pub extern "C" fn main() -> i32 {
     println!("[notepad] Starting Scarlet Desktop Notepad");

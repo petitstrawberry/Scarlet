@@ -13,7 +13,8 @@ use crate::event::Event;
 use crate::layout::{LayoutConstraints, Size, CrossAxisAlignment, MainAxisAlignment};
 use crate::graphics::Rect;
 use crate::view::id::ViewId;
-use crate::view::traits::{View, Container};
+use crate::view::render::RenderObject;
+use crate::view::traits::Container;
 use scarlet_std::fmt;
 
 /// Vertical stack - arranges children vertically
@@ -35,7 +36,7 @@ pub struct VStack {
     /// Unique identifier for this view
     id: ViewId,
     /// Child views
-    children: Vec<Box<dyn View>>,
+    children: Vec<Box<dyn RenderObject>>,
     /// Spacing between children (in pixels)
     spacing: u32,
     /// How to align children along the cross axis (horizontal)
@@ -78,7 +79,7 @@ impl VStack {
     }
 
     /// Add a child view
-    pub fn child<V: View + 'static>(mut self, child: V) -> Self {
+    pub fn child<V: RenderObject + 'static>(mut self, child: V) -> Self {
         self.children.push(Box::new(child));
         self
     }
@@ -89,7 +90,7 @@ impl VStack {
     }
 
     /// Get a reference to a child by index
-    pub fn get_child(&self, index: usize) -> Option<&dyn View> {
+    pub fn get_child(&self, index: usize) -> Option<&dyn RenderObject> {
         self.children.get(index).map(|b| b.as_ref())
     }
 }
@@ -100,7 +101,7 @@ impl Default for VStack {
     }
 }
 
-impl View for VStack {
+impl RenderObject for VStack {
     fn id(&self) -> ViewId {
         self.id
     }
@@ -195,7 +196,7 @@ impl View for VStack {
 }
 
 impl Container for VStack {
-    fn add_child(&mut self, child: Box<dyn View>) {
+    fn add_child(&mut self, child: Box<dyn RenderObject>) {
         self.children.push(child);
     }
 
@@ -223,7 +224,7 @@ pub struct HStack {
     /// Unique identifier for this view
     id: ViewId,
     /// Child views
-    children: Vec<Box<dyn View>>,
+    children: Vec<Box<dyn RenderObject>>,
     /// Spacing between children (in pixels)
     spacing: u32,
     /// How to align children along the cross axis (vertical)
@@ -266,7 +267,7 @@ impl HStack {
     }
 
     /// Add a child view
-    pub fn child<V: View + 'static>(mut self, child: V) -> Self {
+    pub fn child<V: RenderObject + 'static>(mut self, child: V) -> Self {
         self.children.push(Box::new(child));
         self
     }
@@ -277,7 +278,7 @@ impl HStack {
     }
 
     /// Get a reference to a child by index
-    pub fn get_child(&self, index: usize) -> Option<&dyn View> {
+    pub fn get_child(&self, index: usize) -> Option<&dyn RenderObject> {
         self.children.get(index).map(|b| b.as_ref())
     }
 }
@@ -288,7 +289,7 @@ impl Default for HStack {
     }
 }
 
-impl View for HStack {
+impl RenderObject for HStack {
     fn id(&self) -> ViewId {
         self.id
     }
@@ -382,7 +383,7 @@ impl View for HStack {
 }
 
 impl Container for HStack {
-    fn add_child(&mut self, child: Box<dyn View>) {
+    fn add_child(&mut self, child: Box<dyn RenderObject>) {
         self.children.push(child);
     }
 
@@ -409,7 +410,7 @@ pub struct ZStack {
     /// Unique identifier for this view
     id: ViewId,
     /// Child views
-    children: Vec<Box<dyn View>>,
+    children: Vec<Box<dyn RenderObject>>,
     /// How to align children along the main axis
     alignment_main: MainAxisAlignment,
     /// How to align children along the cross axis
@@ -452,7 +453,7 @@ impl ZStack {
     }
 
     /// Add a child view
-    pub fn child<V: View + 'static>(mut self, child: V) -> Self {
+    pub fn child<V: RenderObject + 'static>(mut self, child: V) -> Self {
         self.children.push(Box::new(child));
         self
     }
@@ -463,7 +464,7 @@ impl ZStack {
     }
 
     /// Get a reference to a child by index
-    pub fn get_child(&self, index: usize) -> Option<&dyn View> {
+    pub fn get_child(&self, index: usize) -> Option<&dyn RenderObject> {
         self.children.get(index).map(|b| b.as_ref())
     }
 }
@@ -474,7 +475,7 @@ impl Default for ZStack {
     }
 }
 
-impl View for ZStack {
+impl RenderObject for ZStack {
     fn id(&self) -> ViewId {
         self.id
     }
@@ -589,7 +590,7 @@ impl ZStack {
 }
 
 impl Container for ZStack {
-    fn add_child(&mut self, child: Box<dyn View>) {
+    fn add_child(&mut self, child: Box<dyn RenderObject>) {
         self.children.push(child);
     }
 
@@ -663,7 +664,7 @@ impl Default for Spacer {
     }
 }
 
-impl View for Spacer {
+impl RenderObject for Spacer {
     fn id(&self) -> ViewId {
         self.id
     }

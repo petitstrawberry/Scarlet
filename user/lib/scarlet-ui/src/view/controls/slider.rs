@@ -4,7 +4,6 @@
 
 extern crate alloc;
 use alloc::string::String;
-use alloc::sync::Arc;
 
 use crate::context::{ControlFlow, EventCtx, LayoutCtx, PaintCtx, UpdateCtx};
 use crate::event::{Event, EventKind, MouseButton};
@@ -13,7 +12,7 @@ use crate::layout::{LayoutConstraints, Size};
 use crate::view::id::ViewId;
 use crate::view::traits::View;
 use crate::color::Color;
-use crate::DataContext;
+use crate::state::data::DataContext;
 use scarlet_ui_macros::bindable;
 use scarlet_std::fmt;
 
@@ -26,7 +25,7 @@ pub struct Slider {
     minimum: f32,
     maximum: f32,
     step: Option<f32>,
-    label: Option<Arc<String>>,
+    label: Option<String>,
     track_color: Color,
     fill_color: Color,
     thumb_color: Color,
@@ -55,7 +54,7 @@ impl Slider {
     }
 
     /// Get the current value
-    pub fn value(&self) -> f32 {
+    pub fn get_value(&self) -> f32 {
         self.value
     }
 
@@ -72,6 +71,12 @@ impl Slider {
         }
 
         self.value = value;
+    }
+
+    /// Set the value (chainable)
+    pub fn value(mut self, value: f32) -> Self {
+        self.set_value(value);
+        self
     }
 
     /// Get the minimum value
@@ -92,6 +97,22 @@ impl Slider {
         self.set_value(self.value); // Clamp current value
     }
 
+    /// Set the minimum value (chainable)
+    pub fn min(mut self, minimum: f32) -> Self {
+        assert!(minimum < self.maximum, "Minimum must be less than maximum");
+        self.minimum = minimum;
+        self.set_value(self.value); // Clamp current value
+        self
+    }
+
+    /// Set the maximum value (chainable)
+    pub fn max(mut self, maximum: f32) -> Self {
+        assert!(self.minimum < maximum, "Maximum must be greater than minimum");
+        self.maximum = maximum;
+        self.set_value(self.value); // Clamp current value
+        self
+    }
+
     /// Set the step size
     pub fn set_step(&mut self, step: f32) {
         assert!(step > 0.0, "Step must be positive");
@@ -109,7 +130,7 @@ impl Slider {
     }
 
     /// Set the label
-    pub fn set_label(&mut self, label: impl Into<Arc<String>>) {
+    pub fn set_label(&mut self, label: impl Into<String>) {
         self.label = Some(label.into());
     }
 
@@ -192,7 +213,7 @@ impl Slider {
     }
 }
 
-impl View for Slider {
+impl crate::view::render::RenderObject for Slider {
     fn id(&self) -> ViewId {
         self.id
     }

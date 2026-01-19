@@ -15,7 +15,7 @@ use crate::event::Event;
 use crate::graphics::Rect;
 use crate::layout::{LayoutConstraints, Size};
 use crate::view::id::ViewId;
-use crate::view::traits::{View, ViewChild};
+use crate::view::render::RenderObject;
 use crate::view::Spacer;
 use crate::{Button, Color, HStack, Text};
 use sws_client::WindowSizeLimits;
@@ -62,7 +62,7 @@ pub enum WindowState {
 /// │   ├── Button(minimize)
 /// │   ├── Button(maximize)
 /// │   └── Button(close)
-/// └── content (user View)
+/// └── content (user RenderObject)
 /// ```
 pub struct Window {
     // View identification
@@ -82,16 +82,13 @@ pub struct Window {
     // Window state
     state: WindowState,
 
-    // Child views
-    titlebar: Option<Box<dyn View>>,
-    content: Option<Box<dyn View>>,
+    // Child render objects
+    titlebar: Option<Box<dyn RenderObject>>,
+    content: Option<Box<dyn RenderObject>>,
 
-    // Child frames (for children() method)
+    // Child frames
     titlebar_frame: Rect,
     content_frame: Rect,
-
-    // Cached children (for View trait)
-    cached_children: Vec<ViewChild>,
 
     // Window lifecycle flags
     close_requested: bool,
@@ -119,7 +116,6 @@ impl Window {
             content: None,
             titlebar_frame,
             content_frame,
-            cached_children: Vec::new(),
             close_requested: false,
         }
         .build_titlebar()
@@ -199,7 +195,7 @@ impl Window {
         self
     }
 
-    pub fn content<V: View + 'static>(mut self, view: V) -> Self {
+    pub fn content<V: RenderObject + 'static>(mut self, view: V) -> Self {
         self.content = Some(Box::new(view));
         self
     }
@@ -231,9 +227,109 @@ impl Window {
     pub fn build_view_registry(&mut self) {
         // TODO: Implement registry building
     }
+
+    /// Create a builder for Window
+    pub fn builder() -> WindowBuilder {
+        WindowBuilder::new()
+    }
 }
 
-impl View for Window {
+/// Builder for Window
+pub struct WindowBuilder {
+    title: Option<String>,
+    app_id: Option<String>,
+    width: u32,
+    height: u32,
+    min_width: u32,
+    min_height: u32,
+    max_width: u32,
+    max_height: u32,
+    window_type: WindowKind,
+    is_main_window: bool,
+}
+
+impl WindowBuilder {
+    pub fn new() -> Self {
+        Self {
+            title: None,
+            app_id: None,
+            width: 800,
+            height: 600,
+            min_width: 0,
+            min_height: 0,
+            max_width: u32::MAX,
+            max_height: u32::MAX,
+            window_type: WindowKind::Normal,
+            is_main_window: false,
+        }
+    }
+
+    pub fn title(mut self, title: &str) -> Self {
+        self.title = Some(title.to_string());
+        self
+    }
+
+    pub fn app_id(mut self, id: &str) -> Self {
+        self.app_id = Some(id.to_string());
+        self
+    }
+
+    pub fn size(mut self, width: u32, height: u32) -> Self {
+        self.width = width;
+        self.height = height;
+        self
+    }
+
+    pub fn min_size(mut self, width: u32, height: u32) -> Self {
+        self.min_width = width;
+        self.min_height = height;
+        self
+    }
+
+    pub fn max_size(mut self, width: u32, height: u32) -> Self {
+        self.max_width = width;
+        self.max_height = height;
+        self
+    }
+
+    pub fn window_type(mut self, kind: WindowKind) -> Self {
+        self.window_type = kind;
+        self
+    }
+
+    pub fn main_window(mut self) -> Self {
+        self.is_main_window = true;
+        self
+    }
+
+    pub fn build(mut self) -> Window {
+        let title = self.title.unwrap_or_else(|| String::from("Window"));
+
+        let mut window = Window::new(&title, self.width, self.height);
+
+        if let Some(app_id) = self.app_id {
+            window = window.app_id(&app_id);
+        }
+
+        window = window.min_size(self.min_width, self.min_height);
+        window = window.max_size(self.max_width, self.max_height);
+        window = window.window_type(self.window_type);
+
+        if self.is_main_window {
+            window = window.main_window();
+        }
+
+        window
+    }
+}
+
+impl Default for WindowBuilder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl crate::view::render::RenderObject for Window {
     fn id(&self) -> ViewId {
         self.id
     }
@@ -247,9 +343,6 @@ impl View for Window {
         self.titlebar_frame = Rect::new(0, 0, self.width, TITLEBAR_HEIGHT);
         self.content_frame = Rect::new(0, TITLEBAR_HEIGHT as i32, self.width, self.height - TITLEBAR_HEIGHT);
 
-        // Clear cached children
-        self.cached_children.clear();
-
         // Layout titlebar at the top
         if let Some(ref mut titlebar) = self.titlebar {
             let titlebar_constraints = LayoutConstraints::new(
@@ -259,12 +352,6 @@ impl View for Window {
                 TITLEBAR_HEIGHT,
             );
             titlebar.layout(ctx, titlebar_constraints);
-            self.cached_children.push(ViewChild::new(
-                // Note: We can't clone the Box<dyn View>, so we create a placeholder
-                // The actual child is stored in titlebar field
-                Box::new(crate::view::Spacer::new()),
-                self.titlebar_frame,
-            ));
         }
 
         // Layout content below titlebar
@@ -276,10 +363,6 @@ impl View for Window {
                 self.content_frame.height,
             );
             content.layout(ctx, content_constraints);
-            self.cached_children.push(ViewChild::new(
-                Box::new(crate::view::Spacer::new()),
-                self.content_frame,
-            ));
         }
 
         Size::new(self.width, self.height)
@@ -335,13 +418,5 @@ impl View for Window {
         if let Some(ref mut content) = self.content {
             content.update(ctx);
         }
-    }
-
-    fn children(&self) -> &[ViewChild] {
-        &self.cached_children
-    }
-
-    fn children_mut(&mut self) -> &mut [ViewChild] {
-        &mut self.cached_children
     }
 }

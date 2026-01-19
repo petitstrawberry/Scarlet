@@ -14,6 +14,7 @@ pub mod boundary;
 pub mod opaque;
 pub mod controls;
 
+pub mod render;
 pub mod traits;
 pub mod node;
 pub mod window;
@@ -26,7 +27,8 @@ pub use tracker::RenderTracker;
 pub use buffer::ViewBuffer;
 pub use pool::BufferPool;
 pub use boundary::RepaintBoundary;
-pub use window::{Window, WindowKind, WindowState};
+pub use render::RenderObject;
+pub use window::{Window, WindowBuilder, WindowKind, WindowState};
 
 // Re-export layout containers (for convenience)
 pub use crate::layout_containers::Spacer;

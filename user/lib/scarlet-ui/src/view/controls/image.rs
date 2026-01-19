@@ -167,7 +167,7 @@ impl Default for Image {
     }
 }
 
-impl View for Image {
+impl crate::view::render::RenderObject for Image {
     fn id(&self) -> ViewId {
         self.id
     }
