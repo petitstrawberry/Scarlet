@@ -13,14 +13,16 @@ use crate::layout::{LayoutConstraints, Size};
 use crate::view::id::ViewId;
 use crate::view::traits::View;
 use crate::color::Color;
-use crate::state::DataContext;
+use crate::DataContext;
+use scarlet_ui_macros::bindable;
 use scarlet_std::fmt;
 
 /// Slider view
+#[bindable]
 pub struct Slider {
     id: ViewId,
+    #[bind]
     value: f32,
-    data: Option<Arc<DataContext<f32>>>,
     minimum: f32,
     maximum: f32,
     step: Option<f32>,
@@ -38,17 +40,10 @@ impl Slider {
         assert!(minimum < maximum, "Minimum must be less than maximum");
 
         Self {
-            id: ViewId::new(),
             value: minimum,
             minimum,
             maximum,
-            step: None,
-            label: None,
-            track_color: Color::LIGHT_GRAY,
-            fill_color: Color::PRIMARY,
-            thumb_color: Color::WHITE,
-            is_dragging: false,
-            cached_size: Size::ZERO,
+            ..Default::default()
         }
     }
 
@@ -153,8 +148,12 @@ impl Slider {
             EventKind::MouseDown { button, .. } => {
                 if *button == MouseButton::Left {
                     self.is_dragging = true;
-                    // Update value from position (use event.position.x)
-                    self.set_value(self.value_from_position(event.position.x, self.cached_size.width));
+                    let new_value = self.value_from_position(event.position.x, self.cached_size.width);
+                    self.set_value(new_value);
+                    // Update bound DataContext
+                    if let Some(ref data) = self.value_data {
+                        data.set(new_value);
+                    }
                     return true;
                 }
                 false
@@ -168,7 +167,12 @@ impl Slider {
             }
             EventKind::MouseMove => {
                 if self.is_dragging {
-                    self.set_value(self.value_from_position(event.position.x, self.cached_size.width));
+                    let new_value = self.value_from_position(event.position.x, self.cached_size.width);
+                    self.set_value(new_value);
+                    // Update bound DataContext
+                    if let Some(ref data) = self.value_data {
+                        data.set(new_value);
+                    }
                     return true;
                 }
                 false

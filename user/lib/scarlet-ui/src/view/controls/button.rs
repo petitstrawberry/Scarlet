@@ -35,8 +35,8 @@ pub struct Button {
 
 impl Button {
     /// Create a new button with a label
-    pub fn new(label: impl Into<Arc<String>>) -> Self {
-        let label = Text::new(label);
+    pub fn new(label: impl AsRef<str>) -> Self {
+        let label = Text::new(label.as_ref());
         Self {
             id: ViewId::new(),
             label,
@@ -61,8 +61,8 @@ impl Button {
     }
 
     /// Set the label text
-    pub fn set_label(&mut self, label: impl Into<Arc<String>>) {
-        self.label.set_text(label);
+    pub fn set_label(&mut self, label: impl AsRef<str>) {
+        self.label.set_text(label.as_ref());
     }
 
     /// Set the background colors for different states
@@ -210,7 +210,7 @@ mod tests {
     #[test]
     fn test_button_set_label() {
         let mut button = Button::new("Click");
-        button.set_label(Arc::new("Press Me".into()));
+        button.set_label("Press Me");
         assert_eq!(button.label(), "Press Me");
     }
 

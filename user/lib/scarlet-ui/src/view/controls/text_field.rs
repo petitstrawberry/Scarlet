@@ -13,13 +13,17 @@ use crate::layout::{LayoutConstraints, Size};
 use crate::view::id::ViewId;
 use crate::view::traits::View;
 use crate::color::Color;
+use crate::DataContext;
+use scarlet_ui_macros::bindable;
 use crate::view::controls::text::Text;
 use scarlet_std::fmt;
 
 /// Text field view
+#[bindable]
 pub struct TextField {
     id: ViewId,
-    text: Arc<String>,
+    #[bind]
+    text: String,
     placeholder: Arc<String>,
     font_size: u32,
     text_color: Color,
@@ -34,19 +38,7 @@ pub struct TextField {
 impl TextField {
     /// Create a new text field
     pub fn new() -> Self {
-        Self {
-            id: ViewId::new(),
-            text: Arc::new(String::new()),
-            placeholder: Arc::new(String::new()),
-            font_size: 14,
-            text_color: Color::TEXT,
-            placeholder_color: Color::GRAY,
-            background_color: Color::WHITE,
-            border_color: Color::BORDER,
-            is_focused: false,
-            cursor_position: 0,
-            cached_size: Size::ZERO,
-        }
+        Self::default()
     }
 
     /// Create a text field with placeholder text
@@ -57,7 +49,7 @@ impl TextField {
     }
 
     /// Create a text field with initial text
-    pub fn with_text(text: impl Into<Arc<String>>) -> Self {
+    pub fn with_text(text: impl Into<String>) -> Self {
         let text = text.into();
         let mut tf = Self::new();
         tf.text = text.clone();
@@ -71,8 +63,12 @@ impl TextField {
     }
 
     /// Set the text
-    pub fn set_text(&mut self, text: impl Into<Arc<String>>) {
-        self.text = text.into();
+    pub fn set_text(&mut self, text: String) {
+        self.text = text;
+        // Update bound DataContext if present
+        if let Some(ref data) = self.text_data {
+            data.set(self.text.clone());
+        }
     }
 
     /// Get the placeholder text
@@ -105,18 +101,22 @@ impl TextField {
                 match code {
                     0x0E => { // Backspace
                         if self.cursor_position > 0 {
-                            let mut text = (*self.text).clone();
-                            text.remove(self.cursor_position - 1);
-                            self.text = Arc::new(text);
+                            self.text.remove(self.cursor_position - 1);
                             self.cursor_position -= 1;
+                            // Update bound DataContext
+                            if let Some(ref data) = self.text_data {
+                                data.set(self.text.clone());
+                            }
                             return true;
                         }
                     }
                     0x04 => { // Delete (simplified)
                         if self.cursor_position < self.text.len() {
-                            let mut text = (*self.text).clone();
-                            text.remove(self.cursor_position);
-                            self.text = Arc::new(text);
+                            self.text.remove(self.cursor_position);
+                            // Update bound DataContext
+                            if let Some(ref data) = self.text_data {
+                                data.set(self.text.clone());
+                            }
                             return true;
                         }
                     }
@@ -151,12 +151,6 @@ impl TextField {
     fn calculate_height(&self) -> u32 {
         // Height based on font size + padding
         self.font_size * 12 / 10 + 10 // Line height + padding
-    }
-}
-
-impl Default for TextField {
-    fn default() -> Self {
-        Self::new()
     }
 }
 
@@ -213,10 +207,11 @@ impl View for TextField {
 impl fmt::Debug for TextField {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("TextField")
-            .field("text", &self.text.as_str())
+            .field("text", &self.text)
             .field("placeholder", &self.placeholder.as_str())
             .field("is_focused", &self.is_focused)
             .field("cursor_position", &self.cursor_position)
+            .field("has_text_binding", &self.text_data.is_some())
             .finish()
     }
 }
@@ -248,7 +243,7 @@ mod tests {
     #[test]
     fn test_text_field_set_text() {
         let mut tf = TextField::new();
-        tf.set_text(Arc::new("New text".into()));
+        tf.set_text("New text".to_string());
         assert_eq!(tf.text(), "New text");
     }
 

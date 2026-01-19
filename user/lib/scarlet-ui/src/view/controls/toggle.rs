@@ -13,7 +13,8 @@ use crate::layout::{LayoutConstraints, Size};
 use crate::view::id::ViewId;
 use crate::view::traits::View;
 use crate::color::Color;
-use crate::state::DataContext;
+use crate::DataContext;
+use scarlet_ui_macros::bindable;
 use scarlet_std::fmt;
 
 /// Toggle style
@@ -32,10 +33,11 @@ impl Default for ToggleStyle {
 }
 
 /// Toggle view
+#[bindable]
 pub struct Toggle {
     id: ViewId,
+    #[bind]
     is_on: bool,
-    data: Option<Arc<DataContext<bool>>>,
     label: Option<Arc<String>>,
     style: ToggleStyle,
     on_color: Color,
@@ -49,16 +51,8 @@ impl Toggle {
     /// Create a new toggle
     pub fn new(is_on: bool) -> Self {
         Self {
-            id: ViewId::new(),
             is_on,
-            data: None,
-            label: None,
-            style: ToggleStyle::default(),
-            on_color: Color::SUCCESS,
-            off_color: Color::GRAY,
-            is_hovered: false,
-            is_pressed: false,
-            cached_size: Size::ZERO,
+            ..Default::default()
         }
     }
 
@@ -67,16 +61,6 @@ impl Toggle {
         let mut toggle = Self::new(is_on);
         toggle.label = Some(label.into());
         toggle
-    }
-
-    /// Bind this toggle to a DataContext<bool>
-    ///
-    /// The toggle will read its initial state from the data context,
-    /// and update the data context when toggled.
-    pub fn bind(mut self, data: &Arc<DataContext<bool>>) -> Self {
-        self.is_on = data.get();
-        self.data = Some(Arc::clone(data));
-        self
     }
 
     /// Get the toggle state
@@ -88,7 +72,7 @@ impl Toggle {
     pub fn set_on(&mut self, is_on: bool) {
         self.is_on = is_on;
         // Update the bound data context if present
-        if let Some(ref data) = self.data {
+        if let Some(ref data) = self.is_on_data {
             data.set(is_on);
         }
     }
@@ -97,7 +81,7 @@ impl Toggle {
     pub fn toggle(&mut self) {
         self.is_on = !self.is_on;
         // Update the bound data context if present
-        if let Some(ref data) = self.data {
+        if let Some(ref data) = self.is_on_data {
             data.set(self.is_on);
         }
     }
@@ -221,6 +205,7 @@ impl fmt::Debug for Toggle {
             .field("is_on", &self.is_on)
             .field("label", &self.label)
             .field("style", &self.style)
+            .field("has_is_on_binding", &self.is_on_data.is_some())
             .finish()
     }
 }

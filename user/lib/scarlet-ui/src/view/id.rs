@@ -40,6 +40,12 @@ impl ViewId {
     }
 }
 
+impl Default for ViewId {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Alternative ID generator using Mutex (if AtomicU64 is not available)
 pub struct ViewIdGenerator {
     next_id: Mutex<u64>,

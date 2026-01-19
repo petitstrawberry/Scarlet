@@ -5,6 +5,7 @@
 extern crate alloc;
 use alloc::string::String;
 use alloc::sync::Arc;
+use alloc::boxed::Box;
 
 use crate::context::{ControlFlow, EventCtx, LayoutCtx, PaintCtx, UpdateCtx};
 use crate::event::Event;
@@ -13,13 +14,17 @@ use crate::layout::{LayoutConstraints, Size};
 use crate::view::id::ViewId;
 use crate::view::traits::View;
 use crate::color::Color;
+use crate::DataContext;
+use scarlet_ui_macros::bindable;
 use crate::view::controls::{FontConfig, TextAlignment};
 use scarlet_std::fmt;
 
 /// Text view for displaying text
+#[bindable]
 pub struct Text {
     id: ViewId,
-    text: Arc<String>,
+    #[bind]
+    text: String,
     font: FontConfig,
     color: Color,
     alignment: TextAlignment,
@@ -28,19 +33,15 @@ pub struct Text {
 
 impl Text {
     /// Create a new text view
-    pub fn new(text: impl Into<Arc<String>>) -> Self {
+    pub fn new(text: impl Into<String>) -> Self {
         Self {
-            id: ViewId::new(),
             text: text.into(),
-            font: FontConfig::default(),
-            color: Color::BLACK,
-            alignment: TextAlignment::default(),
-            cached_size: Size::ZERO,
+            ..Default::default()
         }
     }
 
     /// Set the text content
-    pub fn set_text(&mut self, text: impl Into<Arc<String>>) {
+    pub fn set_text(&mut self, text: impl Into<String>) {
         self.text = text.into();
     }
 
@@ -149,11 +150,12 @@ impl View for Text {
 impl fmt::Debug for Text {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Text")
-            .field("text", &self.text.as_str())
+            .field("text", &self.text)
             .field("font", &self.font)
             .field("color", &self.color)
             .field("alignment", &self.alignment)
             .field("cached_size", &self.cached_size)
+            .field("has_text_binding", &self.text_data.is_some())
             .finish()
     }
 }
@@ -171,7 +173,7 @@ mod tests {
     #[test]
     fn test_text_set_text() {
         let mut text = Text::new("Hello");
-        text.set_text(Arc::new("Goodbye".into()));
+        text.set_text("Goodbye".to_string());
         assert_eq!(text.text(), "Goodbye");
     }
 

@@ -121,7 +121,7 @@ pub use application::{Application, ApplicationDelegate, ApplicationHandle};
 pub use scarlet_ui_macros::{View as DeriveView, state, binding, view, view_builder, view_builder as view_builder_macro};
 
 // Observable macros
-pub use scarlet_ui_macros::{observable, published};
+pub use scarlet_ui_macros::{observable, published, bindable};
 
 // Vector font support (existing)
 pub use ab_glyph::{FontRef, InvalidFont};

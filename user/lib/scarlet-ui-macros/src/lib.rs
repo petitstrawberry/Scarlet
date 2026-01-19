@@ -447,15 +447,9 @@ pub fn observable(_attr: TokenStream, item: TokenStream) -> TokenStream {
 
     // Collect published field information
     let mut published_fields = Vec::new();
-    let mut new_fields = Vec::new();
 
-    // First, add the notifier field
-    new_fields.push(quote! {
-        #vis notifier: ::scarlet_ui::ObservableNotifier
-    });
-
-    for field in fields.iter_mut() {
-        let field_name = &field.ident;
+    for field in fields.iter() {
+        let field_name = field.ident.as_ref().expect("named field");
         let field_type = &field.ty;
         let field_vis = &field.vis;
 
@@ -465,37 +459,97 @@ pub fn observable(_attr: TokenStream, item: TokenStream) -> TokenStream {
             .iter()
             .any(|attr| attr.path().is_ident("published"));
 
-        // Remove the #[published] attribute
-        field.attrs.retain(|attr| !attr.path().is_ident("published"));
-
-        new_fields.push(quote! {
-            #field_vis #field_name: #field_type
-        });
-
         if is_published {
             published_fields.push((field_name.clone(), field_type.clone(), field_vis.clone()));
         }
     }
 
-    // Generate setter methods for published fields
-    let setters: Vec<_> = published_fields
-        .iter()
-        .map(|(name, ty, vis)| {
-            quote! {
-                #vis fn #name(&mut self, value: #ty) {
-                    self.#name = value;
-                    self.notifier.notify();
-                }
+    // Add data fields for published fields
+    for (field_name, field_type, field_vis) in &published_fields {
+        let data_field_name = Ident::new(
+            &format!("_{}_data", field_name),
+            proc_macro2::Span::call_site()
+        );
+        fields.push(syn::Field {
+            attrs: vec![],
+            vis: field_vis.clone(),
+            ident: Some(data_field_name),
+            colon_token: Some(syn::token::Colon::default()),
+            ty: syn::Type::Verbatim(quote::quote! {
+                alloc::sync::Arc<DataContext<#field_type>>
+            }),
+            mutability: syn::FieldMutability::None,
+        });
+    }
+
+    // Make fields mutable again
+    let _fields = match &mut input.data {
+        Data::Struct(DataStruct {
+            fields: Fields::Named(fields),
+            ..
+        }) => &mut fields.named,
+        _ => unreachable!(),
+    };
+
+    // Generate getter and setter methods
+    let mut getter_methods = Vec::new();
+    let mut setter_methods = Vec::new();
+
+    for (field_name, field_type, _field_vis) in &published_fields {
+        let data_field_name = Ident::new(
+            &format!("_{}_data", field_name),
+            proc_macro2::Span::call_site()
+        );
+        let getter_name = Ident::new(
+            &format!("_{}", field_name),
+            proc_macro2::Span::call_site()
+        );
+
+        // Generate getter method (_field_name)
+        getter_methods.push(quote::quote! {
+            #vis fn #getter_name(&self) -> alloc::sync::Arc<DataContext<#field_type>> {
+                alloc::sync::Arc::clone(&self.#data_field_name)
             }
-        })
-        .collect();
+        });
+
+        // Generate setter method (field_name)
+        setter_methods.push(quote::quote! {
+            #vis fn #field_name(&mut self, value: #field_type) {
+                self.#field_name = value.clone();
+                self.#data_field_name.set(value);
+                self.notifier.notify();
+            }
+        });
+    }
+
+    // Generate field initialization for data fields
+    let data_field_inits: Vec<_> = published_fields.iter().map(|(field_name, _field_type, _vis)| {
+        let data_field_name = Ident::new(
+            &format!("_{}_data", field_name),
+            proc_macro2::Span::call_site()
+        );
+        quote::quote! {
+            #data_field_name: alloc::sync::Arc::new(DataContext::new(Default::default()))
+        }
+    }).collect();
 
     // Generate the expanded struct
-    let expanded = quote! {
+    let expanded = quote::quote! {
         #input
 
         impl #struct_name {
-            #(#setters)*
+            /// Create a new instance with default values
+            #vis fn new() -> Self {
+                Self {
+                    notifier: ::scarlet_ui::ObservableNotifier::new(),
+                    #(#data_field_inits,)*
+                    ..Default::default()
+                }
+            }
+
+            #(#getter_methods)*
+
+            #(#setter_methods)*
         }
 
         impl ::scarlet_ui::Observable for #struct_name {
@@ -539,4 +593,174 @@ pub fn observable(_attr: TokenStream, item: TokenStream) -> TokenStream {
 pub fn published(_attr: TokenStream, item: TokenStream) -> TokenStream {
     // Pass through - processing is handled by #[observable]
     item
+}
+
+/// Attribute macro for generating bind methods for View controls
+///
+/// This attribute automatically adds data binding support to control structs.
+/// It:
+/// - Adds `{field}_data: Option<Arc<DataContext<T>>>` fields for each `#[bind]` field
+/// - Generates `bind_{field}(data: &Arc<DataContext<T>>) -> Self` methods
+/// - Automatically subscribes to the DataContext using `self.id()`
+///
+/// # Example
+///
+/// ```rust
+/// use scarlet_ui::bindable;
+///
+/// #[bindable]
+/// struct TextField {
+///     #[bind]
+///     text: String,
+///     #[bind]
+///     is_valid: bool,
+///     placeholder: String,
+/// }
+/// ```
+///
+/// This expands to:
+/// ```ignore
+/// struct TextField {
+///     text: String,
+///     is_valid: bool,
+///     placeholder: String,
+///     // Auto-generated fields:
+///     text_data: Option<Arc<DataContext<String>>>,
+///     is_valid_data: Option<Arc<DataContext<bool>>>,
+/// }
+///
+/// impl TextField {
+///     pub fn bind_text(mut self, data: &Arc<DataContext<String>>) -> Self {
+///         self.text = data.get();
+///         data.subscribe(self.id());
+///         self.text_data = Some(Arc::clone(data));
+///         self
+///     }
+///
+///     pub fn bind_is_valid(mut self, data: &Arc<DataContext<bool>>) -> Self {
+///         self.is_valid = data.get();
+///         data.subscribe(self.id());
+///         self.is_valid_data = Some(Arc::clone(data));
+///         self
+///     }
+/// }
+/// ```
+#[proc_macro_attribute]
+pub fn bindable(_attr: TokenStream, item: TokenStream) -> TokenStream {
+    let mut input = parse_macro_input!(item as DeriveInput);
+    let struct_name = &input.ident;
+    let vis = &input.vis;
+
+    // Get the fields
+    let fields = match &mut input.data {
+        Data::Struct(DataStruct {
+            fields: Fields::Named(fields),
+            ..
+        }) => &mut fields.named,
+        _ => {
+            return quote::quote! {
+                compile_error!("#[bindable] only supports structs with named fields");
+            }
+            .into();
+        }
+    };
+
+    // Collect #[bind] fields and original field info
+    let mut bind_fields = Vec::new();
+    let mut original_field_names = Vec::new();
+    let mut original_field_types = Vec::new();
+
+    for field in fields.iter() {
+        let field_name = field.ident.as_ref().expect("named field");
+        let field_type = &field.ty;
+        original_field_names.push(field_name.clone());
+        original_field_types.push(field_type.clone());
+
+        // Check if this field has #[bind] attribute
+        if field.attrs.iter().any(|attr| attr.path().is_ident("bind")) {
+            bind_fields.push((field_name.clone(), field_type.clone()));
+        }
+    }
+
+    // Remove #[bind] attributes from fields
+    for field in fields.iter_mut() {
+        field.attrs.retain(|attr| !attr.path().is_ident("bind"));
+    }
+
+    // Generate bind methods and collect data field info
+    let mut bind_methods = Vec::new();
+    let mut data_field_names = Vec::new();
+
+    for (field_name, field_type) in &bind_fields {
+        let data_field_name = Ident::new(
+            &format!("{}_data", field_name),
+            proc_macro2::Span::call_site()
+        );
+        let bind_method_name = Ident::new(
+            &format!("bind_{}", field_name),
+            proc_macro2::Span::call_site()
+        );
+
+        data_field_names.push(data_field_name.clone());
+
+        // Add data field to struct
+        fields.push(syn::Field {
+            attrs: vec![],
+            vis: vis.clone(),
+            ident: Some(data_field_name.clone()),
+            colon_token: Some(syn::token::Colon::default()),
+            ty: syn::Type::Verbatim(quote::quote! {
+                Option<alloc::sync::Arc<DataContext<#field_type>>>
+            }),
+            mutability: syn::FieldMutability::None,
+        });
+
+        // Generate bind method
+        bind_methods.push(quote::quote! {
+            #vis fn #bind_method_name(mut self, data: &alloc::sync::Arc<DataContext<#field_type>>) -> Self {
+                self.#field_name = data.get();
+                data.subscribe(self.id());
+                self.#data_field_name = Some(alloc::sync::Arc::clone(data));
+                self
+            }
+        });
+    }
+
+    // Generate field initialization for Default impl
+    let field_defaults: Vec<TokenStream2> = original_field_names.iter()
+        .zip(original_field_types.iter())
+        .map(|(name, ty)| {
+            quote::quote! {
+                #name: <#ty as ::core::default::Default>::default()
+            }
+        })
+        .collect();
+
+    let data_field_defaults: Vec<TokenStream2> = data_field_names.iter()
+        .map(|name| {
+            quote::quote! {
+                #name: ::core::default::Default::default()
+            }
+        })
+        .collect();
+
+    // Generate the expanded code with Default implementation
+    let expanded = quote::quote! {
+        #input
+
+        impl #struct_name {
+            #(#bind_methods)*
+        }
+
+        impl ::core::default::Default for #struct_name {
+            fn default() -> Self {
+                Self {
+                    #(#field_defaults,)*
+                    #(#data_field_defaults,)*
+                }
+            }
+        }
+    };
+
+    TokenStream::from(expanded)
 }
