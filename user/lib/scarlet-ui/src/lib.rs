@@ -117,7 +117,7 @@ pub use graphics::{Canvas, Point, Rect};
 pub use modifiers::{ViewExt, Padding, Frame, Background};
 
 // Proc macro re-exports (existing)
-pub use scarlet_ui_macros::{View as DeriveView, state, binding, view_builder};
+pub use scarlet_ui_macros::{View as DeriveView, state, binding, view, view_builder, view_builder as view_builder_macro};
 
 // Vector font support (existing)
 pub use ab_glyph::{FontRef, InvalidFont};

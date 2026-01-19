@@ -2,21 +2,22 @@
 //!
 //! This crate provides SwiftUI-style declarative macros for building UIs.
 //!
-//! # view_builder! Macro
+//! # view! Macro
 //!
-//! The `view_builder!` macro enables declarative, SwiftUI-style view construction:
+//! The `view!` macro enables declarative, SwiftUI-style view construction:
 //!
 //! ```rust
-//! use scarlet_ui::view_builder;
+//! use scarlet_ui::view;
 //!
-//! let view = view_builder! {
+//! let view = view! {
 //!     VStack(spacing: 16) {
-//!         Label("Hello, World!")
-//!             .font_size(24)
-//!             .color(Color::WHITE)
-//!         
-//!         Button("Click me", || println!("Clicked!"))
-//!             .background(Color::BLUE)
+//!         Text("Hello, World!")
+//!             .set_font(FontConfig { size: 24, ..Default::default() })
+//!             .set_color(Color::WHITE)
+//!
+//!         Button("Click me")
+//!             .set_action(Arc::new(|| println!("Clicked!")))
+//!             .set_colors(Color::BUTTON_NORMAL, Color::BUTTON_HOVER, Color::BUTTON_PRESSED)
 //!     }
 //! };
 //! ```
@@ -198,11 +199,11 @@ impl ViewExpr {
                         quote! { .child(#child_code) }
                     })
                     .collect();
-                
+
                 let named_arg_tokens: Vec<_> = args.iter()
                     .map(|(n, v)| quote! { .#n(#v) })
                     .collect();
-                
+
                 quote! {
                     #name::new()
                         #(#named_arg_tokens)*
@@ -222,7 +223,7 @@ impl ViewExpr {
                         }
                     })
                     .collect();
-                
+
                 quote! {
                     #base_tokens #(#method_tokens)*
                 }
@@ -297,6 +298,30 @@ pub fn view_builder(input: TokenStream) -> TokenStream {
     quote! {
         VStack::new() #(#child_tokens)*
     }.into()
+}
+
+/// Macro for building view hierarchies declaratively (alias for view_builder!)
+///
+/// # Example
+///
+/// ```rust
+/// use scarlet_ui::view;
+///
+/// let view = view! {
+///     VStack(spacing: 16) {
+///         Text("Hello")
+///             .set_color(Color::BLACK)
+///
+///         HStack(spacing: 8) {
+///             Button("OK")
+///             Button("Cancel")
+///         }
+///     }
+/// };
+/// ```
+#[proc_macro]
+pub fn view(input: TokenStream) -> TokenStream {
+    view_builder(input)
 }
 
 /// Attribute macro for reactive state properties

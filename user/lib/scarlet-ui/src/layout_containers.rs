@@ -78,8 +78,8 @@ impl VStack {
     }
 
     /// Add a child view
-    pub fn child(mut self, child: Box<dyn View>) -> Self {
-        self.children.push(child);
+    pub fn child<V: View + 'static>(mut self, child: V) -> Self {
+        self.children.push(Box::new(child));
         self
     }
 
@@ -262,8 +262,8 @@ impl HStack {
     }
 
     /// Add a child view
-    pub fn child(mut self, child: Box<dyn View>) -> Self {
-        self.children.push(child);
+    pub fn child<V: View + 'static>(mut self, child: V) -> Self {
+        self.children.push(Box::new(child));
         self
     }
 
@@ -444,8 +444,8 @@ impl ZStack {
     }
 
     /// Add a child view
-    pub fn child(mut self, child: Box<dyn View>) -> Self {
-        self.children.push(child);
+    pub fn child<V: View + 'static>(mut self, child: V) -> Self {
+        self.children.push(Box::new(child));
         self
     }
 
