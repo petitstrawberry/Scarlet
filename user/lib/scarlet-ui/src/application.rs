@@ -134,6 +134,8 @@ impl Application {
             height,
         ).map_err(|_| "Failed to create window")?;
 
+        let window_id = window.id();
+
         self.windows.push(ManagedWindow {
             window,
             surface_id,
@@ -141,6 +143,10 @@ impl Application {
             x: 100,
             y: 100,
         });
+
+        // Mark the new window as dirty so it gets rendered
+        self.tracker.mark_dirty_layout(window_id);
+        self.tracker.mark_dirty_paint(window_id);
 
         Ok(())
     }
