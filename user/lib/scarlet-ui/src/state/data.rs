@@ -386,3 +386,24 @@ mod tests {
         assert_eq!(data.inner, 43);
     }
 }
+
+/// Create a DataContext with a single value (like SwiftUI's @State)
+///
+/// # Example
+///
+/// ```ignore
+/// fn build_ui() {
+///     let enabled = bindable!(false);
+///     let volume = bindable!(50.0);
+///     let app = bindable!(AppState::new());
+///
+///     let toggle = Toggle::bind(&enabled);
+///     let slider = Slider::bind(&volume, 0.0, 100.0);
+/// }
+/// ```
+#[macro_export]
+macro_rules! bindable {
+    ($value:expr) => {
+        DataContext::new($value)
+    };
+}

@@ -95,9 +95,14 @@ pub trait View {
 
 ```rust
 pub struct DataContext<T> {
-    value: T,
-    observers: Vec<ObserverInfo>,
+    inner: Arc<Mutex<DataContextInner<T>>>,
+}
+
+struct DataContextInner<T> {
+    data: T,
     version: u64,
+    observers: HashMap<ViewId, ObserverInfo>,
+    dirty_views: HashSet<ViewId>,
 }
 
 impl<T> DataContext<T> {
@@ -105,15 +110,17 @@ impl<T> DataContext<T> {
     pub fn new(value: T) -> Self;
 
     /// 読み取りアクセス
-    pub fn get(&self) -> &T;
+    pub fn get(&self) -> T
+    where
+        T: Clone;
 
     /// 書き込みアクセス（自動無効化）
-    pub fn mutate<F, R>(&mut self, f: F) -> R
+    pub fn modify<F, R>(&self, f: F) -> R
     where
         F: FnOnce(&mut T) -> R;
 
     /// 監視者を追加
-    pub fn observe(&mut self, view_id: ViewId) -> Observable;
+    pub fn subscribe(&self, view_id: ViewId) -> u64;
 }
 ```
 
@@ -127,15 +134,42 @@ struct AppState {
 }
 
 // データコンテキストの作成
-let mut data = DataContext::new(AppState {
+let data = DataContext::new(AppState {
     count: 0,
     text: String::from("Hello"),
 });
 
-// データの変更は自動的にビューを無効化
-data.mutate(|state| {
+// 読み取り
+let count = data.get().count;
+
+// 書き込み（自動無効化）
+data.modify(|state| {
     state.count += 1;  // 自動で再描画リクエスト
 });
+```
+
+#### bindable! マクロ
+
+SwiftUIの `@State` のような簡潔な構文で状態を作成：
+
+```rust
+use scarlet_ui::bindable;
+
+fn build_ui() {
+    // プリミティブ値
+    let enabled = bindable!(false);
+    let volume = bindable!(50.0);
+
+    // 構造体
+    let state = bindable!(AppState {
+        count: 0,
+        text: String::from("Hello"),
+    });
+
+    // UIにバインド
+    let toggle = Toggle::bind(&enabled);
+    let slider = Slider::bind(&volume, 0.0, 100.0);
+}
 ```
 
 ### 3. 制約ベースレイアウト
@@ -664,6 +698,126 @@ let complex_ui = view! {
 - **テーマ**: ダークモード、カスタムテーマ
 - **国際化**: RTL対応、複数言語
 - **アクセシビリティ**: スクリーンリーダー、キーボードナビゲーション
+
+---
+
+## リアクティブプログラミング
+
+ScarletUIは**完全にリアクティブなデータフロー**をサポートしています。複数のViewが同じ状態を監視し、変更時に自動的に更新されます。
+
+### Two-Way Data Binding
+
+UIコントロールと `DataContext` の双方向バインディング：
+
+```rust
+use scarlet_ui::*;
+
+fn build_ui() {
+    // bindable! マクロで状態を作成
+    let enabled = bindable!(false);
+    let volume = bindable!(50.0);
+
+    // UIコントロールをバインド
+    let toggle = Toggle::bind(&enabled);
+    let slider = Slider::bind(&volume, 0.0, 100.0);
+
+    // 値を表示
+    let enabled_text = Text::bind(&enabled, |e| if *e { "ON" } else { "OFF" });
+    let volume_text = Text::bind(&volume, |v| format!("Volume: {}", v));
+}
+```
+
+**データフロー:**
+
+```
+ユーザーがToggleをクリック
+    ↓
+ToggleがDataContext<bool>を更新
+    ↓
+全observer（Textなど）が自動的に再描画
+```
+
+### 構造体とのバインディング
+
+複雑な状態は構造体で管理し、Lensを使って個別フィールドにアクセス：
+
+```rust
+struct AudioState {
+    volume: f32,
+    bass: f32,
+    treble: f32,
+}
+
+fn build_audio_ui() {
+    let state = bindable!(AudioState {
+        volume: 50.0,
+        bass: 30.0,
+        treble: 70.0,
+    });
+
+    // Lensでvolumeフィールドにフォーカス
+    let volume_lens = FnLens::new(
+        |s: &AudioState| &s.volume,
+        |s: &mut AudioState| &mut s.volume
+    );
+
+    // 子DataContextを作成
+    let volume_data = state.child(volume_lens);
+
+    // UIにバインド
+    VStack::new()
+        .spacing(16)
+        .child(Text::bind(&volume_data, |v| format!("Volume: {}", *v)))
+        .child(Slider::bind(&volume_data, 0.0, 100.0));
+}
+```
+
+### 複数Viewの連携
+
+```rust
+struct CounterState {
+    count: i32,
+}
+
+fn build_counter() {
+    let state = bindable!(CounterState { count: 0 });
+
+    VStack::new()
+        .spacing(16)
+        .child(Text::bind(&state, |s| format!("Count: {}", s.count)))
+        .child(
+            Button::new("Increment")
+                .set_action(Arc::new(|| {
+                    state.modify(|s| s.count += 1);
+                }))
+        )
+        .child(
+            Button::new("Decrement")
+                .set_action(Arc::new(|| {
+                    state.modify(|s| s.count -= 1);
+                }))
+        );
+}
+```
+
+### パフォーマンス特性
+
+リアクティブシステムはO(1)で動作：
+
+```rust
+// データ変更時
+state.modify(|s| {
+    s.count += 1;
+    // ↓ 自動的に全observerに通知（HashSetでO(1)）
+});
+```
+
+**特徴:**
+- **O(1)通知** - HashSet-based dirty tracking
+- **双方向バインディング** - UIコントロールが自動的にデータを更新
+- **自動伝播** - データ変更時に全observerが自動更新
+- **部分再描画** - 変更したViewのみ再描画
+- **Lens対応** - 構造体のサブフィールドにフォーカス可能
 
 ---
 

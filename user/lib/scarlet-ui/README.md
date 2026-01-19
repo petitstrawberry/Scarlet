@@ -133,7 +133,18 @@ let image = Image::with_data(ImageData::new(data, width, height))
 ```rust
 let field = TextField::new()
     .set_placeholder("Enter text...")
-    .set_text(Arc::new("Hello".into()));
+    .set_text("Hello");
+```
+
+#### TextField (with data binding)
+```rust
+let text_data = bindable!(String::from("Hello"));
+
+// TextField automatically updates text_data
+let field = TextField::bind(&text_data);
+
+// Other views can observe the same data
+let display = Text::bind(&text_data, |s| format!("Text: {}", s));
 ```
 
 #### Toggle
@@ -152,15 +163,17 @@ let slider = Slider::with_value(0.0, 100.0, 50.0)
 
 ### State Management
 
+ScarletUI provides reactive state management with `DataContext<T>`:
+
 ```rust
-use scarlet_ui::{DataContext, Observable};
+use scarlet_ui::DataContext;
 
 struct AppState {
     count: i32,
     text: String,
 }
 
-let mut data = DataContext::new(AppState {
+let data = DataContext::new(AppState {
     count: 0,
     text: String::from("Hello"),
 });
@@ -168,59 +181,163 @@ let mut data = DataContext::new(AppState {
 // Read
 let count = data.get().count;
 
-// Write (auto-invalidation)
-data.mutate(|state| {
+// Modify (auto-invalidation)
+data.modify(|state| {
     state.count += 1;  // Triggers repaint
 });
+```
 
-// Observe changes
-let observable = data.observe(view_id);
+#### bindable! Macro (SwiftUI-style @State)
+
+Create reactive state variables with minimal syntax:
+
+```rust
+use scarlet_ui::bindable;
+
+fn build_ui() {
+    let enabled = bindable!(false);
+    let volume = bindable!(50.0);
+
+    // Bind UI controls
+    let toggle = Toggle::bind(&enabled);
+    let slider = Slider::bind(&volume, 0.0, 100.0);
+}
+```
+
+This is equivalent to SwiftUI's `@State` property wrapper.
+
+### Two-Way Data Binding
+
+UI controls can bind to `DataContext` for automatic synchronization:
+
+```rust
+use scarlet_ui::*;
+
+// Create state with bindable! macro
+let enabled = bindable!(false);
+let volume = bindable!(50.0);
+
+// Bind controls to state
+let toggle = Toggle::bind(&enabled);
+let slider = Slider::bind(&volume, 0.0, 100.0);
+
+// Display current values
+let enabled_text = Text::bind(&enabled, |e| if *e { "ON" } else { "OFF" });
+let volume_text = Text::bind(&volume, |v| format!("Volume: {}", v));
+```
+
+**Data Flow:**
+```
+User clicks Toggle
+    ↓
+Toggle updates DataContext<bool>
+    ↓
+Text automatically redraws with new value
+```
+
+#### Binding with Structs
+
+For complex state, use structs with Lenses:
+
+```rust
+use scarlet_ui::*;
+
+struct AudioState {
+    volume: f32,
+    bass: f32,
+    treble: f32,
+}
+
+let state = bindable!(AudioState {
+    volume: 50.0,
+    bass: 30.0,
+    treble: 70.0,
+});
+
+// Create lenses for each field
+let volume_lens = FnLens::new(
+    |s: &AudioState| &s.volume,
+    |s: &mut AudioState| &mut s.volume
+);
+
+// Create child DataContext for volume
+let volume_data = state.child(volume_lens);
+
+// Bind to child
+let slider = Slider::bind(&volume_data, 0.0, 100.0);
+let display = Text::bind(&volume_data, |v| format!("Volume: {}", v));
 ```
 
 ## Example Application
 
+### Counter with Data Binding
+
 ```rust
 use scarlet_ui::*;
-use alloc::sync::Arc;
-use alloc::string::String;
 
-struct CounterView {
-    id: ViewId,
-    count: Arc<std::sync::Mutex<i32>>,
+fn build_counter() -> impl View {
+    let count = bindable!(0i32);
+
+    VStack::new()
+        .spacing(16)
+        .alignment(CrossAxisAlignment::Center)
+        .child(Text::bind(&count, |c| format!("Count: {}", c)))
+        .child(
+            Button::new("Increment")
+                .set_action(Arc::new(|| {
+                    count.modify(|c| *c += 1);
+                }))
+        )
+}
+```
+
+### Audio Settings UI
+
+```rust
+use scarlet_ui::*;
+
+struct AudioState {
+    volume: f32,
+    bass: f32,
+    treble: f32,
 }
 
-impl CounterView {
-    fn new() -> Self {
-        Self {
-            id: ViewId::new(),
-            count: Arc::new(std::sync::Mutex::new(0)),
-        }
-    }
+fn build_audio_ui() -> impl View {
+    let state = bindable!(AudioState {
+        volume: 50.0,
+        bass: 30.0,
+        treble: 70.0,
+    });
+
+    VStack::new()
+        .spacing(16)
+        .child(Text::new("Audio Settings"))
+        .child(build_slider(&state, "Volume", |s| &mut s.volume, 0.0, 100.0))
+        .child(build_slider(&state, "Bass", |s| &mut s.bass, 0.0, 100.0))
+        .child(build_slider(&state, "Treble", |s| &mut s.treble, 0.0, 100.0))
 }
 
-impl View for CounterView {
-    fn id(&self) -> ViewId { self.id }
+fn build_slider<F>(
+    state: &DataContext<AudioState>,
+    label: &str,
+    lens_fn: F,
+    min: f32,
+    max: f32,
+) -> VStack
+where
+    F: Fn(&mut AudioState) -> &mut f32 + 'static + Copy,
+{
+    let lens = FnLens::new(
+        |s: &AudioState| lens_fn(s),
+        |s: &mut AudioState| lens_fn(s)
+    );
 
-    fn layout(&mut self, _ctx: &mut LayoutCtx, constraints: LayoutConstraints) -> Size {
-        Size::new(200, 100)
-    }
+    let child_data = state.child(lens);
 
-    fn draw(&self, _ctx: &mut PaintCtx, _frame: Rect) {
-        // Draw implementation
-    }
-
-    fn event(&mut self, ctx: &mut EventCtx, event: &Event) -> ControlFlow {
-        match &event.kind {
-            EventKind::MouseDown { button, .. } if *button == MouseButton::Left => {
-                *self.count.lock().unwrap() += 1;
-                ctx.request_paint();
-            }
-            _ => {}
-        }
-        ControlFlow::Continue
-    }
-
-    fn update(&mut self, _ctx: &mut UpdateCtx) {}
+    VStack::new()
+        .spacing(8)
+        .child(Text::bind(&child_data, |v| format!("{}: {}", label, *v)))
+        .child(Slider::bind(&child_data, min, max))
 }
 ```
 
