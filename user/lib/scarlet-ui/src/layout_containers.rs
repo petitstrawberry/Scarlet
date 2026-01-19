@@ -174,14 +174,20 @@ impl RenderObject for VStack {
         self.cached_size
     }
 
-    fn draw(&self, _ctx: &mut PaintCtx, _frame: Rect) {
-        // In a full implementation, we would:
-        // 1. Get the ViewRegistry to access child views
-        // 2. For each child, offset its frame by our frame position
-        // 3. Call child.draw() with the offset frame
-
-        // For now, child frames are stored in self.child_frames
-        // The actual drawing will be done by the framework using the ViewRegistry
+    fn draw(&self, ctx: &mut PaintCtx, frame: Rect) {
+        // Draw each child with its calculated frame offset
+        for (i, child) in self.children.iter().enumerate() {
+            if let Some(&child_frame) = self.child_frames.get(i) {
+                // Offset child frame by parent position
+                let absolute_frame = Rect::new(
+                    frame.x + child_frame.x,
+                    frame.y + child_frame.y,
+                    child_frame.width,
+                    child_frame.height,
+                );
+                child.draw(ctx, absolute_frame);
+            }
+        }
     }
 
     fn event(&mut self, _ctx: &mut EventCtx, _event: &Event) -> ControlFlow {
@@ -362,14 +368,20 @@ impl RenderObject for HStack {
         self.cached_size
     }
 
-    fn draw(&self, _ctx: &mut PaintCtx, _frame: Rect) {
-        // In a full implementation, we would:
-        // 1. Get the ViewRegistry to access child views
-        // 2. For each child, offset its frame by our frame position
-        // 3. Call child.draw() with the offset frame
-
-        // For now, child frames are stored in self.child_frames
-        // The actual drawing will be done by the framework using the ViewRegistry
+    fn draw(&self, ctx: &mut PaintCtx, frame: Rect) {
+        // Draw each child with its calculated frame offset
+        for (i, child) in self.children.iter().enumerate() {
+            if let Some(&child_frame) = self.child_frames.get(i) {
+                // Offset child frame by parent position
+                let absolute_frame = Rect::new(
+                    frame.x + child_frame.x,
+                    frame.y + child_frame.y,
+                    child_frame.width,
+                    child_frame.height,
+                );
+                child.draw(ctx, absolute_frame);
+            }
+        }
     }
 
     fn event(&mut self, _ctx: &mut EventCtx, _event: &Event) -> ControlFlow {
@@ -540,16 +552,21 @@ impl RenderObject for ZStack {
         self.cached_size
     }
 
-    fn draw(&self, _ctx: &mut PaintCtx, _frame: Rect) {
-
-        // In a full implementation, we would:
-        // 1. Get the ViewRegistry to access child views
-        // 2. For each child, offset its frame by our frame position
-        // 3. Call child.draw() with the offset frame
+    fn draw(&self, ctx: &mut PaintCtx, frame: Rect) {
+        // Draw each child with its calculated frame offset
         // Drawing order matters - last child is on top
-
-        // For now, child frames are stored in self.child_frames
-        // The actual drawing will be done by the framework using the ViewRegistry
+        for (i, child) in self.children.iter().enumerate() {
+            if let Some(&child_frame) = self.child_frames.get(i) {
+                // Offset child frame by parent position
+                let absolute_frame = Rect::new(
+                    frame.x + child_frame.x,
+                    frame.y + child_frame.y,
+                    child_frame.width,
+                    child_frame.height,
+                );
+                child.draw(ctx, absolute_frame);
+            }
+        }
     }
 
     fn event(&mut self, _ctx: &mut EventCtx, _event: &Event) -> ControlFlow {

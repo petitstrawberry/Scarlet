@@ -183,11 +183,129 @@ impl crate::view::render::RenderObject for Toggle {
     }
 
     fn draw(&self, ctx: &mut PaintCtx, frame: Rect) {
-        // TODO: Implement actual toggle rendering
-        let _ = (ctx, frame);
+        match self.style {
+            ToggleStyle::Switch => {
+                // iOS-style switch
+                let switch_width = 51;
+                let switch_height = 31;
+                let thumb_radius = 13;
+                let corner_radius = 15;
 
-        // Draw switch or checkbox based on style
+                // Background (on/off color)
+                let bg_color = if self.is_on { self.on_color } else { self.off_color };
+                ctx.canvas.fill_rounded_rect(
+                    frame.x,
+                    frame.y + (frame.height as i32 - switch_height as i32) / 2,
+                    switch_width,
+                    switch_height,
+                    corner_radius,
+                    bg_color,
+                );
+
+                // Thumb position
+                let thumb_x = if self.is_on {
+                    frame.x + switch_width as i32 - thumb_radius as i32 - 3
+                } else {
+                    frame.x + thumb_radius as i32 + 3
+                };
+                let thumb_y = frame.y + frame.height as i32 / 2;
+
+                // Draw thumb (circle)
+                ctx.canvas.fill_circle(thumb_x, thumb_y, thumb_radius, Color::WHITE);
+            }
+            ToggleStyle::Checkbox => {
+                // Traditional checkbox
+                let box_size = 20;
+                let box_y = frame.y + (frame.height as i32 - box_size as i32) / 2;
+                let corner_radius = 3;
+
+                // Background with rounded corners
+                ctx.canvas.fill_rounded_rect(
+                    frame.x,
+                    box_y,
+                    box_size,
+                    box_size,
+                    corner_radius,
+                    Color::WHITE,
+                );
+
+                // Border
+                ctx.canvas.draw_rounded_rect(
+                    frame.x,
+                    box_y,
+                    box_size,
+                    box_size,
+                    corner_radius,
+                    Color::rgb(180, 180, 180),
+                );
+
+                // Check mark if checked (3px thick)
+                if self.is_on {
+                    let check_color = self.on_color;
+
+                    // Draw checkmark as two lines
+                    // Line 1: from top-left to center
+                    ctx.canvas.draw_line(
+                        frame.x + 4,
+                        box_y + 10,
+                        frame.x + 8,
+                        box_y + 14,
+                        check_color,
+                    );
+                    ctx.canvas.draw_line(
+                        frame.x + 4,
+                        box_y + 9,
+                        frame.x + 8,
+                        box_y + 13,
+                        check_color,
+                    );
+                    ctx.canvas.draw_line(
+                        frame.x + 4,
+                        box_y + 11,
+                        frame.x + 8,
+                        box_y + 15,
+                        check_color,
+                    );
+
+                    // Line 2: from center to bottom-right
+                    ctx.canvas.draw_line(
+                        frame.x + 8,
+                        box_y + 14,
+                        frame.x + 16,
+                        box_y + 6,
+                        check_color,
+                    );
+                    ctx.canvas.draw_line(
+                        frame.x + 8,
+                        box_y + 13,
+                        frame.x + 16,
+                        box_y + 5,
+                        check_color,
+                    );
+                    ctx.canvas.draw_line(
+                        frame.x + 8,
+                        box_y + 15,
+                        frame.x + 16,
+                        box_y + 7,
+                        check_color,
+                    );
+                }
+            }
+        }
+
         // Draw label if present
+        if let Some(ref label) = self.label {
+            let label_x = frame.x + match self.style {
+                ToggleStyle::Switch => 51 + 8,
+                ToggleStyle::Checkbox => 20 + 8,
+            };
+            ctx.canvas.draw_text(
+                label_x,
+                frame.y + (frame.height as i32 - 16) / 2,
+                label,
+                Color::rgb(200, 200, 200),
+            );
+        }
     }
 
     fn event(&mut self, ctx: &mut EventCtx, event: &Event) -> ControlFlow {

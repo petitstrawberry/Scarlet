@@ -147,11 +147,14 @@ impl crate::view::render::RenderObject for Text {
     }
 
     fn draw(&self, ctx: &mut PaintCtx, frame: Rect) {
-        // TODO: Implement actual text rendering with ab_glyph
-        let _ = (ctx, frame);
-
-        // For now, just store the rendering info
-        // Actual rendering will be done by the canvas
+        // Draw text using canvas
+        ctx.canvas.draw_text_sized(
+            frame.x,
+            frame.y,
+            &self.text,
+            self.color,
+            self.font.size as f32,
+        );
     }
 
     fn event(&mut self, _ctx: &mut EventCtx, _event: &Event) -> ControlFlow {

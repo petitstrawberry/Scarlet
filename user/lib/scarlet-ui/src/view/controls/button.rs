@@ -28,6 +28,7 @@ pub struct Button {
     background_color: Color,
     hover_color: Color,
     pressed_color: Color,
+    corner_radius: u32,
     is_hovered: bool,
     is_pressed: bool,
     padding: u32,
@@ -45,6 +46,7 @@ impl Button {
             background_color: Color::BUTTON_NORMAL,
             hover_color: Color::BUTTON_HOVER,
             pressed_color: Color::BUTTON_PRESSED,
+            corner_radius: 4,
             is_hovered: false,
             is_pressed: false,
             padding: 10,
@@ -173,9 +175,26 @@ impl crate::view::render::RenderObject for Button {
     }
 
     fn draw(&self, ctx: &mut PaintCtx, frame: Rect) {
-        // Draw button background
+        // Draw button background with rounded corners
         let bg_color = self.current_color();
-        ctx.canvas.fill_rect(frame.x, frame.y, frame.width, frame.height, bg_color);
+        ctx.canvas.fill_rounded_rect(
+            frame.x,
+            frame.y,
+            frame.width,
+            frame.height,
+            self.corner_radius,
+            bg_color,
+        );
+
+        // Draw border with rounded corners
+        ctx.canvas.draw_rounded_rect(
+            frame.x,
+            frame.y,
+            frame.width,
+            frame.height,
+            self.corner_radius,
+            Color::rgb(100, 100, 100),
+        );
 
         // Draw label centered in button
         let padding = self.padding;

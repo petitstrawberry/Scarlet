@@ -244,13 +244,43 @@ impl crate::view::render::RenderObject for Slider {
     }
 
     fn draw(&self, ctx: &mut PaintCtx, frame: Rect) {
-        // TODO: Implement actual slider rendering
-        let _ = (ctx, frame);
+        let value = self.value.clamp(self.minimum, self.maximum);
+        let track_height = 4;
+        let thumb_radius: u32 = 8;
+        let track_y = frame.y + (frame.height as i32 - track_height as i32) / 2;
 
-        // Draw track
-        // Draw filled portion based on value
-        // Draw thumb at appropriate position
+        // Draw track with rounded ends
+        ctx.canvas.fill_rounded_rect(
+            frame.x + thumb_radius as i32,
+            track_y,
+            frame.width.saturating_sub(thumb_radius * 2),
+            track_height,
+            track_height / 2,
+            self.track_color,
+        );
+
+        // Calculate thumb position
+        let track_width = frame.width as f32 - thumb_radius as f32 * 2.0;
+        let ratio = if self.maximum > self.minimum {
+            (value - self.minimum) / (self.maximum - self.minimum)
+        } else {
+            0.0
+        };
+        let thumb_x = frame.x + thumb_radius as i32 + (track_width * ratio) as i32;
+        let thumb_y = frame.y + frame.height as i32 / 2;
+
+        // Draw thumb (circle) using fill_circle
+        ctx.canvas.fill_circle(thumb_x, thumb_y, thumb_radius, self.thumb_color);
+
         // Draw label if present
+        if let Some(ref label) = self.label {
+            ctx.canvas.draw_text(
+                frame.x,
+                frame.y - 16,
+                label,
+                Color::rgb(200, 200, 200),
+            );
+        }
     }
 
     fn event(&mut self, ctx: &mut EventCtx, event: &Event) -> ControlFlow {

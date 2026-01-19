@@ -28,15 +28,21 @@ pub struct TextField {
     placeholder_color: Color,
     background_color: Color,
     border_color: Color,
+    corner_radius: u32,
+    padding: u32,
     is_focused: bool,
-    cursor_position: usize,
+    cursor_pos: usize,
     cached_size: Size,
 }
 
 impl TextField {
     /// Create a new text field
     pub fn new() -> Self {
-        Self::default()
+        Self {
+            corner_radius: 4,
+            padding: 8,
+            ..Self::default()
+        }
     }
 
     /// Create a text field with placeholder text
@@ -51,7 +57,7 @@ impl TextField {
         let text = text.into();
         let mut tf = Self::new();
         tf.text = text.clone();
-        tf.cursor_position = text.len();
+        tf.cursor_pos = text.len();
         tf
     }
 
@@ -104,9 +110,9 @@ impl TextField {
                 // For now, just note that we received a key event
                 match code {
                     0x0E => { // Backspace
-                        if self.cursor_position > 0 {
-                            self.text.remove(self.cursor_position - 1);
-                            self.cursor_position -= 1;
+                        if self.cursor_pos > 0 {
+                            self.text.remove(self.cursor_pos - 1);
+                            self.cursor_pos -= 1;
                             // Update bound DataContext
                             if let Some(ref data) = self.text_data {
                                 data.set(self.text.clone());
@@ -115,8 +121,8 @@ impl TextField {
                         }
                     }
                     0x04 => { // Delete (simplified)
-                        if self.cursor_position < self.text.len() {
-                            self.text.remove(self.cursor_position);
+                        if self.cursor_pos < self.text.len() {
+                            self.text.remove(self.cursor_pos);
                             // Update bound DataContext
                             if let Some(ref data) = self.text_data {
                                 data.set(self.text.clone());
@@ -188,13 +194,71 @@ impl crate::view::render::RenderObject for TextField {
     }
 
     fn draw(&self, ctx: &mut PaintCtx, frame: Rect) {
-        // TODO: Implement actual text field rendering
-        let _ = (ctx, frame);
+        // Background with rounded corners
+        ctx.canvas.fill_rounded_rect(
+            frame.x,
+            frame.y,
+            frame.width,
+            frame.height,
+            self.corner_radius,
+            self.background_color,
+        );
 
-        // Draw background
-        // Draw border (thicker if focused)
-        // Draw text or placeholder
-        // Draw cursor if focused
+        // Border (thicker if focused)
+        let border_color = if self.is_focused {
+            self.border_color
+        } else {
+            Color::rgb(180, 180, 180)
+        };
+
+        let border_width = if self.is_focused { 2 } else { 1 };
+        for i in 0..border_width {
+            ctx.canvas.draw_rounded_rect(
+                frame.x + i as i32,
+                frame.y + i as i32,
+                frame.width.saturating_sub(i * 2),
+                frame.height.saturating_sub(i * 2),
+                self.corner_radius.saturating_sub(i),
+                border_color,
+            );
+        }
+
+        // Display text (or placeholder if empty)
+        let display_text = if self.text.is_empty() {
+            &self.placeholder
+        } else {
+            &self.text
+        };
+
+        let text_color = if self.text.is_empty() {
+            self.placeholder_color
+        } else {
+            self.text_color
+        };
+
+        // Draw text with padding
+        ctx.canvas.draw_text(
+            frame.x + self.padding as i32,
+            frame.y + (frame.height as i32 - 16) / 2,
+            display_text,
+            text_color,
+        );
+
+        // Draw caret if focused
+        if self.is_focused {
+            let before_cursor = &self.text[..self.cursor_pos.min(self.text.len())];
+            let (text_width, _) = crate::graphics::measure_text_sized(before_cursor, 16.0);
+            let caret_x = frame.x as i32 + self.padding as i32 + text_width as i32;
+            let caret_y = frame.y + 6;
+
+            ctx.canvas.fill_rect(
+                caret_x,
+                caret_y,
+                2,
+                frame.height.saturating_sub(12),
+                Color::rgb(50, 150, 255),
+            );
+        }
     }
 
     fn event(&mut self, ctx: &mut EventCtx, event: &Event) -> ControlFlow {
@@ -218,7 +282,7 @@ impl fmt::Debug for TextField {
             .field("text", &self.text)
             .field("placeholder", &self.placeholder.as_str())
             .field("is_focused", &self.is_focused)
-            .field("cursor_position", &self.cursor_position)
+            .field("cursor_pos", &self.cursor_pos)
             .field("has_text_binding", &self.text_data.is_some())
             .finish()
     }
@@ -239,7 +303,7 @@ mod tests {
     fn test_text_field_with_text() {
         let tf = TextField::with_text("Hello");
         assert_eq!(tf.text(), "Hello");
-        assert_eq!(tf.cursor_position, 5);
+        assert_eq!(tf.cursor_pos, 5);
     }
 
     #[test]
