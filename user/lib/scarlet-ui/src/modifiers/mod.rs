@@ -149,6 +149,10 @@ impl<T: View + 'static> View for RepaintBoundaryWrapper<T> {
         self.inner.id()
     }
 
+    fn as_any(&self) -> &dyn core::any::Any {
+        self
+    }
+
     fn layout(&mut self, ctx: &mut LayoutCtx, constraints: LayoutConstraints) -> Size {
         self.inner.layout(ctx, constraints)
     }

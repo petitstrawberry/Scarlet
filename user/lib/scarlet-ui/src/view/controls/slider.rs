@@ -197,6 +197,10 @@ impl View for Slider {
         self.id
     }
 
+    fn as_any(&self) -> &dyn core::any::Any {
+        self
+    }
+
     fn layout(&mut self, _ctx: &mut LayoutCtx, constraints: LayoutConstraints) -> Size {
         let slider_size = self.calculate_size();
 

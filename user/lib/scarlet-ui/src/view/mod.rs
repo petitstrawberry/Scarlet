@@ -21,7 +21,7 @@ pub mod window;
 // Re-exports
 pub use id::ViewId;
 pub use dirty::DirtyFlags;
-pub use registry::{ViewRegistry, ViewNodeEntry};
+pub use registry::{ViewRegistry, ViewEntry};
 pub use tracker::RenderTracker;
 pub use buffer::ViewBuffer;
 pub use pool::BufferPool;

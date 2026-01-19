@@ -5,6 +5,8 @@
 
 extern crate alloc;
 use alloc::boxed::Box;
+use alloc::vec::Vec;
+use core::any::Any;
 
 use crate::context::{ControlFlow, EventCtx, LayoutCtx, PaintCtx, UpdateCtx};
 use crate::event::Event;
@@ -76,6 +78,11 @@ pub trait View {
     /// Each view instance must have a unique ViewId that is assigned
     /// when the view is created and never changes.
     fn id(&self) -> ViewId;
+
+    /// Get `Any` reference for downcasting
+    ///
+    /// This allows checking the concrete type of a `dyn View` at runtime.
+    fn as_any(&self) -> &dyn Any;
 
     /// Calculate the desired size given constraints
     ///
@@ -253,6 +260,10 @@ mod tests {
     impl View for TestView {
         fn id(&self) -> ViewId {
             self.id
+        }
+
+        fn as_any(&self) -> &dyn Any {
+            self
         }
 
         fn layout(&mut self, _ctx: &mut LayoutCtx, _constraints: LayoutConstraints) -> Size {

@@ -14,6 +14,7 @@ use alloc::vec::Vec;
 use scarlet_std::sync::Mutex;
 use scarlet_std::collections::HashSet;
 use crate::view::id::ViewId;
+use crate::view::tracker::global_tracker;
 
 /// Shared data context reference
 ///
@@ -54,8 +55,6 @@ struct DataInner<T> {
     version: u64,
     /// Views that are observing this data (subscribeしたView)
     observers: HashSet<ViewId>,
-    /// Views that are marked dirty (need redraw)
-    dirty_views: HashSet<ViewId>,
 }
 
 impl<T> DataContext<T> {
@@ -66,7 +65,6 @@ impl<T> DataContext<T> {
                 data,
                 version: 0,
                 observers: HashSet::new(),
-                dirty_views: HashSet::new(),
             })),
         }
     }
@@ -96,16 +94,24 @@ impl<T> DataContext<T> {
     where
         T: PartialEq,
     {
-        let mut inner = self.inner.lock();
-        if inner.data != data {
-            inner.data = data;
-            inner.version = inner.version.wrapping_add(1);
+        let observers = {
+            let mut inner = self.inner.lock();
+            if inner.data != data {
+                inner.data = data;
+                inner.version = inner.version.wrapping_add(1);
 
-            // Mark all observers as dirty (SwiftUI-style automatic invalidation)
-            let observers: Vec<ViewId> = inner.observers.iter().copied().collect();
-            for view_id in observers {
-                inner.dirty_views.insert(view_id);
+                // Mark all observers as dirty (SwiftUI-style automatic invalidation)
+                inner.observers.iter().copied().collect::<Vec<_>>()
+            } else {
+                return;
             }
+        };
+
+        // Mark observers dirty in the global RenderTracker
+        // (must be done outside the lock to avoid deadlock with global tracker)
+        let tracker = global_tracker();
+        for view_id in observers {
+            tracker.mark_dirty_paint(view_id);
         }
     }
 
@@ -114,14 +120,21 @@ impl<T> DataContext<T> {
     where
         F: FnOnce(&mut T) -> U,
     {
-        let mut inner = self.inner.lock();
-        let result = f(&mut inner.data);
-        inner.version = inner.version.wrapping_add(1);
+        let (result, observers) = {
+            let mut inner = self.inner.lock();
+            let result = f(&mut inner.data);
+            inner.version = inner.version.wrapping_add(1);
 
-        // Mark all observers as dirty
-        let observers: Vec<ViewId> = inner.observers.iter().copied().collect();
+            // Collect observers to mark dirty
+            let observers = inner.observers.iter().copied().collect::<Vec<_>>();
+            (result, observers)
+        };
+
+        // Mark observers dirty in the global RenderTracker
+        // (must be done outside the lock to avoid deadlock with global tracker)
+        let tracker = global_tracker();
         for view_id in observers {
-            inner.dirty_views.insert(view_id);
+            tracker.mark_dirty_paint(view_id);
         }
 
         result
@@ -145,29 +158,7 @@ impl<T> DataContext<T> {
     pub fn unsubscribe(&self, view_id: ViewId) {
         let mut inner = self.inner.lock();
         inner.observers.remove(&view_id);
-        inner.dirty_views.remove(&view_id);
-    }
-
-    /// Get all dirty views (views that need redraw)
-    ///
-    /// Called by the Application render loop.
-    pub fn take_dirty_views(&self) -> HashSet<ViewId> {
-        let mut inner = self.inner.lock();
-        let dirty = core::mem::take(&mut inner.dirty_views);
-        dirty
-    }
-
-    /// Check if a specific view is dirty
-    pub fn is_dirty(&self, view_id: ViewId) -> bool {
-        self.inner.lock().dirty_views.contains(&view_id)
-    }
-
-    /// Clear dirty flag for a specific view
-    ///
-    /// Called after the view is redrawn.
-    pub fn clear_dirty(&self, view_id: ViewId) {
-        let mut inner = self.inner.lock();
-        inner.dirty_views.remove(&view_id);
+        // Note: dirty flag is managed by global RenderTracker now
     }
 
     /// Get the number of observers
@@ -227,31 +218,10 @@ mod tests {
         // Change data
         ctx.set(100);
 
-        // View should be marked dirty
-        assert!(ctx.is_dirty(view_id));
-    }
-
-    #[test]
-    fn test_take_dirty_views() {
-        let ctx = DataContext::new(42);
-        let view1 = ViewId::new();
-        let view2 = ViewId::new();
-
-        ctx.subscribe(view1);
-        ctx.subscribe(view2);
-
-        // Change data
-        ctx.set(100);
-
-        // Both views should be dirty
-        let dirty = ctx.take_dirty_views();
-        assert_eq!(dirty.len(), 2);
-        assert!(dirty.contains(&view1));
-        assert!(dirty.contains(&view2));
-
-        // After take_dirty, should be empty
-        assert!(!ctx.is_dirty(view1));
-        assert!(!ctx.is_dirty(view2));
+        // View should be marked dirty in the global tracker
+        let tracker = global_tracker();
+        let dirty = tracker.take_dirty_paint();
+        assert!(dirty.contains(&view_id));
     }
 
     #[test]
@@ -267,20 +237,9 @@ mod tests {
 
         // Change data - view should NOT be marked dirty
         ctx.set(100);
-        assert!(!ctx.is_dirty(view_id));
-    }
 
-    #[test]
-    fn test_clear_dirty() {
-        let ctx = DataContext::new(42);
-        let view_id = ViewId::new();
-
-        ctx.subscribe(view_id);
-        ctx.set(100);
-
-        assert!(ctx.is_dirty(view_id));
-
-        ctx.clear_dirty(view_id);
-        assert!(!ctx.is_dirty(view_id));
+        let tracker = global_tracker();
+        let dirty = tracker.take_dirty_paint();
+        assert!(!dirty.contains(&view_id));
     }
 }

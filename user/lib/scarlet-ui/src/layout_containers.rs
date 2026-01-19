@@ -105,6 +105,10 @@ impl View for VStack {
         self.id
     }
 
+    fn as_any(&self) -> &dyn core::any::Any {
+        self
+    }
+
     fn layout(&mut self, ctx: &mut LayoutCtx, constraints: LayoutConstraints) -> Size {
         self.constraints = Some(constraints);
         self.child_frames.clear();
@@ -289,6 +293,10 @@ impl View for HStack {
         self.id
     }
 
+    fn as_any(&self) -> &dyn core::any::Any {
+        self
+    }
+
     fn layout(&mut self, ctx: &mut LayoutCtx, constraints: LayoutConstraints) -> Size {
         self.constraints = Some(constraints);
         self.child_frames.clear();
@@ -469,6 +477,10 @@ impl Default for ZStack {
 impl View for ZStack {
     fn id(&self) -> ViewId {
         self.id
+    }
+
+    fn as_any(&self) -> &dyn core::any::Any {
+        self
     }
 
     fn layout(&mut self, ctx: &mut LayoutCtx, constraints: LayoutConstraints) -> Size {
@@ -654,6 +666,10 @@ impl Default for Spacer {
 impl View for Spacer {
     fn id(&self) -> ViewId {
         self.id
+    }
+
+    fn as_any(&self) -> &dyn core::any::Any {
+        self
     }
 
     fn layout(&mut self, _ctx: &mut LayoutCtx, constraints: LayoutConstraints) -> Size {

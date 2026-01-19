@@ -159,6 +159,10 @@ impl View for TextField {
         self.id
     }
 
+    fn as_any(&self) -> &dyn core::any::Any {
+        self
+    }
+
     fn layout(&mut self, _ctx: &mut LayoutCtx, constraints: LayoutConstraints) -> Size {
         let height = self.calculate_height();
 

@@ -3,19 +3,25 @@
 //! Application manages the event loop, window lifecycle, and integrates with
 //! the new View architecture (ViewRegistry, RenderTracker, BufferPool).
 
+extern crate alloc;
+use alloc::boxed::Box;
+use alloc::sync::Arc;
+use alloc::vec::Vec;
+use alloc::string::{String, ToString};
+
 use crate::{View, ViewRegistry, RenderTracker, view::Window};
 use crate::event::{Event, EventKind, MouseButton};
 use crate::graphics::{Canvas, Point, Rect};
 use crate::layout::{LayoutConstraints, Size};
 use crate::context::{EventCtx, LayoutCtx, PaintCtx};
 use crate::view::BufferPool;
+use crate::view::id::ViewId;
 use crate::composition::Compositor;
 use sws_client::{Connection, Event as SwsEvent, InputEvent};
-use scarlet_std::boxed::Box;
-use scarlet_std::vec::Vec;
-use scarlet_std::string::{String, ToString};
-use std::sync::{Arc, Mutex};
+use scarlet_std::sync::Mutex;
 use core::time::Duration;
+use scarlet_std::thread;
+use scarlet_std::task;
 
 /// Application delegate for lifecycle decisions
 pub trait ApplicationDelegate {
@@ -159,7 +165,7 @@ impl Application {
             }
 
             // Frame rate limiting (~60 FPS)
-            std::thread::sleep(Duration::from_millis(16));
+            thread::sleep(Duration::from_millis(16));
         }
     }
 
@@ -251,7 +257,8 @@ impl Application {
     }
 
     fn render(&mut self) {
-        // Take dirty views
+        // Take dirty views from RenderTracker
+        // DataContext now marks views dirty directly in the global tracker
         let dirty_layout = self.tracker.take_dirty_layout();
         let dirty_paint = self.tracker.take_dirty_paint();
 
@@ -323,7 +330,7 @@ impl Application {
         if let Some(ref mut delegate) = self.delegate {
             delegate.application_will_terminate();
         }
-        std::task::exit(0);
+        task::exit(0);
     }
 }
 

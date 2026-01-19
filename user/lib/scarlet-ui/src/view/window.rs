@@ -8,6 +8,7 @@ use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::string::ToString;
 use alloc::sync::Arc;
+use alloc::vec::Vec;
 
 use crate::context::{ControlFlow, EventCtx, LayoutCtx, PaintCtx, UpdateCtx};
 use crate::event::Event;
@@ -85,8 +86,12 @@ pub struct Window {
     titlebar: Option<Box<dyn View>>,
     content: Option<Box<dyn View>>,
 
-    // Content frame (calculated during layout)
+    // Child frames (for children() method)
+    titlebar_frame: Rect,
     content_frame: Rect,
+
+    // Cached children (for View trait)
+    cached_children: Vec<ViewChild>,
 
     // Window lifecycle flags
     close_requested: bool,
@@ -95,7 +100,12 @@ pub struct Window {
 impl Window {
     pub fn new(title: &str, width: u32, height: u32) -> Self {
         let id = ViewId::new();
-        let window = Self {
+
+        // Initial frames
+        let titlebar_frame = Rect::new(0, 0, width, TITLEBAR_HEIGHT);
+        let content_frame = Rect::new(0, TITLEBAR_HEIGHT as i32, width, height - TITLEBAR_HEIGHT);
+
+        Self {
             id,
             title: title.to_string(),
             app_id: None,
@@ -107,12 +117,12 @@ impl Window {
             state: WindowState::Normal,
             titlebar: None,
             content: None,
-            content_frame: Rect::new(0, TITLEBAR_HEIGHT as i32, width, height - TITLEBAR_HEIGHT),
+            titlebar_frame,
+            content_frame,
+            cached_children: Vec::new(),
             close_requested: false,
-        };
-
-        // Build titlebar using ScarletUI controls
-        window.build_titlebar()
+        }
+        .build_titlebar()
     }
 
     fn build_titlebar(mut self) -> Self {
@@ -120,33 +130,35 @@ impl Window {
 
         // Create titlebar: HStack { Text(title), Spacer, Button(minimize), Button(maximize), Button(close) }
         let mut titlebar = HStack::new()
-            .spacing(8)
-            .child({
-                let mut text = Text::new(title);
-                text.set_color(Color::WHITE);
-                text
-            })
-            .child(Spacer::new());
+            .spacing(8);
+
+        // Title text
+        let mut title_text = Text::new(title);
+        title_text.set_color(Color::WHITE);
+        titlebar = titlebar.child(title_text);
+
+        titlebar = titlebar.child(Spacer::new());
 
         // Minimize button
-        let mut minimize_btn = Button::new(String::from("−"));
+        let mut minimize_btn = Button::new("−");
         minimize_btn.set_action(Arc::new(|| {
             // TODO: Trigger minimize
         }));
 
         // Maximize button
-        let mut maximize_btn = Button::new(String::from("□"));
+        let mut maximize_btn = Button::new("□");
         maximize_btn.set_action(Arc::new(|| {
             // TODO: Trigger maximize
         }));
 
         // Close button
-        let mut close_btn = Button::new(String::from("×"));
+        let mut close_btn = Button::new("×");
         close_btn.set_action(Arc::new(|| {
             // TODO: Trigger close
         }));
 
-        titlebar = titlebar.child(minimize_btn)
+        titlebar = titlebar
+            .child(minimize_btn)
             .child(maximize_btn)
             .child(close_btn);
 
@@ -207,6 +219,7 @@ impl Window {
     pub fn set_size(&mut self, w: u32, h: u32) {
         self.width = w;
         self.height = h;
+        self.titlebar_frame = Rect::new(0, 0, w, TITLEBAR_HEIGHT);
         self.content_frame = Rect::new(0, TITLEBAR_HEIGHT as i32, w, h - TITLEBAR_HEIGHT);
     }
 
@@ -225,7 +238,18 @@ impl View for Window {
         self.id
     }
 
+    fn as_any(&self) -> &dyn core::any::Any {
+        self
+    }
+
     fn layout(&mut self, ctx: &mut LayoutCtx, _constraints: LayoutConstraints) -> Size {
+        // Update frames
+        self.titlebar_frame = Rect::new(0, 0, self.width, TITLEBAR_HEIGHT);
+        self.content_frame = Rect::new(0, TITLEBAR_HEIGHT as i32, self.width, self.height - TITLEBAR_HEIGHT);
+
+        // Clear cached children
+        self.cached_children.clear();
+
         // Layout titlebar at the top
         if let Some(ref mut titlebar) = self.titlebar {
             let titlebar_constraints = LayoutConstraints::new(
@@ -235,18 +259,27 @@ impl View for Window {
                 TITLEBAR_HEIGHT,
             );
             titlebar.layout(ctx, titlebar_constraints);
+            self.cached_children.push(ViewChild::new(
+                // Note: We can't clone the Box<dyn View>, so we create a placeholder
+                // The actual child is stored in titlebar field
+                Box::new(crate::view::Spacer::new()),
+                self.titlebar_frame,
+            ));
         }
 
         // Layout content below titlebar
-        let content_frame = self.content_frame();
         if let Some(ref mut content) = self.content {
             let content_constraints = LayoutConstraints::new(
-                content_frame.width,
-                content_frame.width,
-                content_frame.height,
-                content_frame.height,
+                self.content_frame.width,
+                self.content_frame.width,
+                self.content_frame.height,
+                self.content_frame.height,
             );
             content.layout(ctx, content_constraints);
+            self.cached_children.push(ViewChild::new(
+                Box::new(crate::view::Spacer::new()),
+                self.content_frame,
+            ));
         }
 
         Size::new(self.width, self.height)
@@ -275,15 +308,15 @@ impl View for Window {
     }
 
     fn event(&mut self, ctx: &mut EventCtx, event: &Event) -> ControlFlow {
-        // Forward event to children
+        // Forward event to titlebar
         if let Some(ref mut titlebar) = self.titlebar {
-            let _titlebar_frame = Rect::new(0, 0, self.width, TITLEBAR_HEIGHT);
             let mut title_ctx = EventCtx::new(titlebar.id(), event, ctx.tracker());
             if titlebar.event(&mut title_ctx, event) == ControlFlow::Stop {
                 return ControlFlow::Stop;
             }
         }
 
+        // Forward event to content
         if let Some(ref mut content) = self.content {
             let mut content_ctx = EventCtx::new(content.id(), event, ctx.tracker());
             if content.event(&mut content_ctx, event) == ControlFlow::Stop {
@@ -305,10 +338,10 @@ impl View for Window {
     }
 
     fn children(&self) -> &[ViewChild] {
-        &[]
+        &self.cached_children
     }
 
     fn children_mut(&mut self) -> &mut [ViewChild] {
-        &mut []
+        &mut self.cached_children
     }
 }

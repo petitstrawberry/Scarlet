@@ -133,6 +133,10 @@ impl View for Button {
         self.id
     }
 
+    fn as_any(&self) -> &dyn core::any::Any {
+        self
+    }
+
     fn layout(&mut self, ctx: &mut LayoutCtx, constraints: LayoutConstraints) -> Size {
         // Add padding for button appearance
         let padding = 10;

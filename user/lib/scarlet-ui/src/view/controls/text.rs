@@ -124,6 +124,10 @@ impl View for Text {
         self.id
     }
 
+    fn as_any(&self) -> &dyn core::any::Any {
+        self
+    }
+
     fn layout(&mut self, _ctx: &mut LayoutCtx, constraints: LayoutConstraints) -> Size {
         let size = self.calculate_text_size(constraints);
         self.cached_size = size;

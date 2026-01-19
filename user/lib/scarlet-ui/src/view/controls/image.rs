@@ -172,6 +172,10 @@ impl View for Image {
         self.id
     }
 
+    fn as_any(&self) -> &dyn core::any::Any {
+        self
+    }
+
     fn layout(&mut self, _ctx: &mut LayoutCtx, constraints: LayoutConstraints) -> Size {
         if let Some(image_data) = &self.image_data {
             let image_size = image_data.size();

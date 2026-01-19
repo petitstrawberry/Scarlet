@@ -8,18 +8,55 @@
 //! - **No recursion**: Views notify directly, no tree traversal
 //! - **O(1) notification**: Each dirty notification is O(1)
 //! - **Aggregated**: Render cycle just iterates over dirty view IDs
+//! - **Global instance**: Single tracker shared across the application
 //!
 //! # Architecture
 //!
 //! ```
-//! ViewNode ──mark_dirty()──> RenderTracker
-//! DataContext ──modify()────> RenderTracker
-//! EventCtx ──request()──────> RenderTracker
+//! ViewNode ──mark_dirty()──> RenderTracker (global)
+//! DataContext ──modify()────> RenderTracker (global)
+//! EventCtx ──request()──────> RenderTracker (global)
+//! ```
+//!
+//! # Example
+//!
+//! ```ignore
+//! // Get the global tracker
+//! let tracker = global_tracker();
+//!
+//! // Mark a view as dirty
+//! tracker.mark_dirty_paint(view_id);
+//!
+//! // In the render cycle
+//! let dirty_paint = tracker.take_dirty_paint();
 //! ```
 
 use crate::view::id::ViewId;
 use scarlet_std::collections::HashSet;
 use scarlet_std::fmt;
+use scarlet_std::sync::{Arc, Mutex, OnceLock};
+
+/// Global render tracker
+///
+/// This is lazily initialized on first access.
+static GLOBAL_TRACKER: OnceLock<Arc<RenderTracker>> = OnceLock::new();
+
+/// Get the global render tracker
+///
+/// This returns a reference to the global RenderTracker instance.
+/// All components should use this tracker for dirty view management.
+///
+/// # Example
+///
+/// ```ignore
+/// let tracker = global_tracker();
+/// tracker.mark_dirty_paint(view_id);
+/// ```
+pub fn global_tracker() -> &'static Arc<RenderTracker> {
+    GLOBAL_TRACKER.get_or_init(|| {
+        Arc::new(RenderTracker::new())
+    })
+}
 
 /// Render tracker for aggregating dirty views
 ///
@@ -27,33 +64,20 @@ use scarlet_std::fmt;
 /// Views notify the tracker directly when they become dirty, eliminating
 /// the need for recursive tree traversal.
 ///
-/// # Example
-///
-/// ```ignore
-/// let mut tracker = RenderTracker::new();
-///
-/// // View marks itself as dirty
-/// tracker.mark_dirty_layout(view_id);
-///
-/// // Render cycle consumes dirty views
-/// let dirty_layout = tracker.take_dirty_layout();
-/// for id in dirty_layout {
-///     // layout only dirty views
-/// }
-/// ```
+/// This uses interior mutability to allow shared access via Arc.
 pub struct RenderTracker {
     /// Views that need layout recalculation
-    dirty_layout: HashSet<ViewId>,
+    dirty_layout: Arc<Mutex<HashSet<ViewId>>>,
     /// Views that need repaint
-    dirty_paint: HashSet<ViewId>,
+    dirty_paint: Arc<Mutex<HashSet<ViewId>>>,
 }
 
 impl RenderTracker {
     /// Create a new empty tracker
     pub fn new() -> Self {
         Self {
-            dirty_layout: HashSet::new(),
-            dirty_paint: HashSet::new(),
+            dirty_layout: Arc::new(Mutex::new(HashSet::new())),
+            dirty_paint: Arc::new(Mutex::new(HashSet::new())),
         }
     }
 
@@ -61,21 +85,21 @@ impl RenderTracker {
     ///
     /// This is called when a view's size constraints change or
     /// when it explicitly requests layout.
-    pub fn mark_dirty_layout(&mut self, view_id: ViewId) {
-        self.dirty_layout.insert(view_id);
+    pub fn mark_dirty_layout(&self, view_id: ViewId) {
+        self.dirty_layout.lock().insert(view_id);
     }
 
     /// Mark a view as needing paint
     ///
     /// This is called when a view's appearance changes but size doesn't.
-    pub fn mark_dirty_paint(&mut self, view_id: ViewId) {
-        self.dirty_paint.insert(view_id);
+    pub fn mark_dirty_paint(&self, view_id: ViewId) {
+        self.dirty_paint.lock().insert(view_id);
     }
 
     /// Mark a view as needing both layout and paint
     ///
     /// Convenience method for marking both dirty flags.
-    pub fn mark_dirty(&mut self, view_id: ViewId) {
+    pub fn mark_dirty(&self, view_id: ViewId) {
         self.mark_dirty_layout(view_id);
         self.mark_dirty_paint(view_id);
     }
@@ -83,9 +107,9 @@ impl RenderTracker {
     /// Clear dirty flags for a specific view
     ///
     /// Called after a view has been updated.
-    pub fn clear_dirty(&mut self, view_id: ViewId) {
-        self.dirty_layout.remove(&view_id);
-        self.dirty_paint.remove(&view_id);
+    pub fn clear_dirty(&self, view_id: ViewId) {
+        self.dirty_layout.lock().remove(&view_id);
+        self.dirty_paint.lock().remove(&view_id);
     }
 
     /// Take all views needing layout
@@ -96,8 +120,8 @@ impl RenderTracker {
     /// # Returns
     ///
     /// The set of view IDs that need layout. The tracker's dirty_layout set is cleared.
-    pub fn take_dirty_layout(&mut self) -> HashSet<ViewId> {
-        core::mem::take(&mut self.dirty_layout)
+    pub fn take_dirty_layout(&self) -> HashSet<ViewId> {
+        core::mem::take(&mut *self.dirty_layout.lock())
     }
 
     /// Take all views needing paint
@@ -108,18 +132,18 @@ impl RenderTracker {
     /// # Returns
     ///
     /// The set of view IDs that need paint. The tracker's dirty_paint set is cleared.
-    pub fn take_dirty_paint(&mut self) -> HashSet<ViewId> {
-        core::mem::take(&mut self.dirty_paint)
+    pub fn take_dirty_paint(&self) -> HashSet<ViewId> {
+        core::mem::take(&mut *self.dirty_paint.lock())
     }
 
     /// Check if any views need layout
     pub fn needs_layout(&self) -> bool {
-        !self.dirty_layout.is_empty()
+        !self.dirty_layout.lock().is_empty()
     }
 
     /// Check if any views need paint
     pub fn needs_paint(&self) -> bool {
-        !self.dirty_paint.is_empty()
+        !self.dirty_paint.lock().is_empty()
     }
 
     /// Check if the tracker has any dirty views
@@ -129,30 +153,30 @@ impl RenderTracker {
 
     /// Get the number of views needing layout
     pub fn dirty_layout_count(&self) -> usize {
-        self.dirty_layout.len()
+        self.dirty_layout.lock().len()
     }
 
     /// Get the number of views needing paint
     pub fn dirty_paint_count(&self) -> usize {
-        self.dirty_paint.len()
+        self.dirty_paint.lock().len()
     }
 
     /// Clear all dirty flags
     ///
     /// Called after render cycle completes.
-    pub fn clear_all(&mut self) {
-        self.dirty_layout.clear();
-        self.dirty_paint.clear();
+    pub fn clear_all(&self) {
+        self.dirty_layout.lock().clear();
+        self.dirty_paint.lock().clear();
     }
 
     /// Mark multiple views as needing layout
-    pub fn mark_dirty_layout_many(&mut self, view_ids: impl IntoIterator<Item = ViewId>) {
-        self.dirty_layout.extend(view_ids);
+    pub fn mark_dirty_layout_many(&self, view_ids: impl IntoIterator<Item = ViewId>) {
+        self.dirty_layout.lock().extend(view_ids);
     }
 
     /// Mark multiple views as needing paint
-    pub fn mark_dirty_paint_many(&mut self, view_ids: impl IntoIterator<Item = ViewId>) {
-        self.dirty_paint.extend(view_ids);
+    pub fn mark_dirty_paint_many(&self, view_ids: impl IntoIterator<Item = ViewId>) {
+        self.dirty_paint.lock().extend(view_ids);
     }
 }
 

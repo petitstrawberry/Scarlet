@@ -90,9 +90,13 @@ impl<T> Frame<T> {
     }
 }
 
-impl<T: View> View for Frame<T> {
+impl<T: View + 'static> View for Frame<T> {
     fn id(&self) -> ViewId {
         self.child.id()
+    }
+
+    fn as_any(&self) -> &dyn core::any::Any {
+        self
     }
 
     fn layout(&mut self, ctx: &mut LayoutCtx, constraints: LayoutConstraints) -> Size {

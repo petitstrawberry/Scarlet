@@ -62,9 +62,13 @@ impl<T> Background<T> {
     }
 }
 
-impl<T: View> View for Background<T> {
+impl<T: View + 'static> View for Background<T> {
     fn id(&self) -> ViewId {
         self.child.id()
+    }
+
+    fn as_any(&self) -> &dyn core::any::Any {
+        self
     }
 
     fn layout(&mut self, ctx: &mut LayoutCtx, constraints: LayoutConstraints) -> Size {
