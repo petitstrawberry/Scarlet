@@ -16,6 +16,7 @@ pub mod controls;
 
 pub mod traits;
 pub mod node;
+pub mod window;
 
 // Re-exports
 pub use id::ViewId;
@@ -25,3 +26,7 @@ pub use tracker::RenderTracker;
 pub use buffer::ViewBuffer;
 pub use pool::BufferPool;
 pub use boundary::RepaintBoundary;
+pub use window::{Window, WindowKind, WindowState};
+
+// Re-export layout containers (for convenience)
+pub use crate::layout_containers::Spacer;

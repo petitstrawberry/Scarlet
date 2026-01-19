@@ -13,12 +13,14 @@ use crate::layout::{LayoutConstraints, Size};
 use crate::view::id::ViewId;
 use crate::view::traits::View;
 use crate::color::Color;
+use crate::state::DataContext;
 use scarlet_std::fmt;
 
 /// Slider view
 pub struct Slider {
     id: ViewId,
     value: f32,
+    data: Option<Arc<DataContext<f32>>>,
     minimum: f32,
     maximum: f32,
     step: Option<f32>,

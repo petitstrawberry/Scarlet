@@ -27,13 +27,16 @@ use proc_macro2::TokenStream as TokenStream2;
 use quote::quote;
 use syn::{
     parse::{Parse, ParseStream},
-    parse_macro_input, 
-    DeriveInput, 
-    Expr, 
-    Ident, 
-    Result, 
+    parse_macro_input,
+    Data,
+    DataStruct,
+    DeriveInput,
+    Expr,
+    Fields,
+    Ident,
+    Result,
     Token,
-    braced, 
+    braced,
     parenthesized,
     punctuated::Punctuated,
 };
@@ -358,5 +361,182 @@ pub fn state(_attr: TokenStream, item: TokenStream) -> TokenStream {
 #[proc_macro_attribute]
 pub fn binding(_attr: TokenStream, item: TokenStream) -> TokenStream {
     // For now, pass through unchanged
+    item
+}
+
+/// Attribute macro for creating observable types
+///
+/// This attribute implements the Observable trait for a struct.
+/// Applied to a struct, it:
+/// - Adds a `notifier: ObservableNotifier` field
+/// - Generates setter methods for each `#[published]` field
+/// - Implements the `Observable` trait
+///
+/// # Example
+///
+/// ```rust
+/// use scarlet_ui::observable;
+///
+/// #[observable]
+/// struct UserSettings {
+///     #[published]
+///     username: String,
+///
+///     #[published]
+///     is_premium: bool,
+///
+///     count: u32,  // Not published, no automatic notification
+/// }
+/// ```
+///
+/// This expands to:
+/// ```ignore
+/// struct UserSettings {
+///     notifier: ObservableNotifier,
+///     username: String,
+///     is_premium: bool,
+///     count: u32,
+/// }
+///
+/// impl UserSettings {
+///     fn set_username(&mut self, username: String) {
+///         self.username = username;
+///         self.notifier.notify();
+///     }
+///
+///     fn set_is_premium(&mut self, is_premium: bool) {
+///         self.is_premium = is_premium;
+///         self.notifier.notify();
+///     }
+/// }
+///
+/// impl Observable for UserSettings {
+///     type SubscriptionId = usize;
+///     fn subscribe(&self, observer: Box<dyn Fn() + Send + Sync>) -> Self::SubscriptionId {
+///         self.notifier.subscribe(observer)
+///     }
+///     fn unsubscribe(&self, id: Self::SubscriptionId) {
+///         self.notifier.unsubscribe(id)
+///     }
+///     fn notify(&self) {
+///         self.notifier.notify()
+///     }
+/// }
+/// ```
+#[proc_macro_attribute]
+pub fn observable(_attr: TokenStream, item: TokenStream) -> TokenStream {
+    let mut input = parse_macro_input!(item as DeriveInput);
+
+    // Process the struct
+    let struct_name = &input.ident;
+    let vis = &input.vis;
+
+    // Get the fields and extract published ones
+    let fields = match &mut input.data {
+        Data::Struct(DataStruct {
+            fields: Fields::Named(fields),
+            ..
+        }) => &mut fields.named,
+        _ => {
+            return quote::quote! {
+                compile_error!("#[observable] only supports structs with named fields");
+            }
+            .into();
+        }
+    };
+
+    // Collect published field information
+    let mut published_fields = Vec::new();
+    let mut new_fields = Vec::new();
+
+    // First, add the notifier field
+    new_fields.push(quote! {
+        #vis notifier: ::scarlet_ui::ObservableNotifier
+    });
+
+    for field in fields.iter_mut() {
+        let field_name = &field.ident;
+        let field_type = &field.ty;
+        let field_vis = &field.vis;
+
+        // Check if this field has #[published] attribute
+        let is_published = field
+            .attrs
+            .iter()
+            .any(|attr| attr.path().is_ident("published"));
+
+        // Remove the #[published] attribute
+        field.attrs.retain(|attr| !attr.path().is_ident("published"));
+
+        new_fields.push(quote! {
+            #field_vis #field_name: #field_type
+        });
+
+        if is_published {
+            published_fields.push((field_name.clone(), field_type.clone(), field_vis.clone()));
+        }
+    }
+
+    // Generate setter methods for published fields
+    let setters: Vec<_> = published_fields
+        .iter()
+        .map(|(name, ty, vis)| {
+            quote! {
+                #vis fn #name(&mut self, value: #ty) {
+                    self.#name = value;
+                    self.notifier.notify();
+                }
+            }
+        })
+        .collect();
+
+    // Generate the expanded struct
+    let expanded = quote! {
+        #input
+
+        impl #struct_name {
+            #(#setters)*
+        }
+
+        impl ::scarlet_ui::Observable for #struct_name {
+            type SubscriptionId = usize;
+
+            fn subscribe(&self, observer: Box<dyn Fn() + Send + Sync>) -> Self::SubscriptionId {
+                self.notifier.subscribe(observer)
+            }
+
+            fn unsubscribe(&self, id: Self::SubscriptionId) {
+                self.notifier.unsubscribe(id)
+            }
+
+            fn notify(&self) {
+                self.notifier.notify()
+            }
+        }
+    };
+
+    TokenStream::from(expanded)
+}
+
+/// Field attribute for marking fields as published
+///
+/// This attribute marks a field in an `#[observable]` struct as published.
+/// A setter method will be generated that automatically notifies observers
+/// when the field changes.
+///
+/// # Example
+///
+/// ```rust
+/// #[observable]
+/// struct Settings {
+///     #[published]
+///     username: String,  // Will have set_username() method
+///
+///     count: u32,        // No setter, no auto-notify
+/// }
+/// ```
+#[proc_macro_attribute]
+pub fn published(_attr: TokenStream, item: TokenStream) -> TokenStream {
+    // Pass through - processing is handled by #[observable]
     item
 }

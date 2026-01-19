@@ -1,228 +1,296 @@
-//! Observable wrapper for reactive data
+//! Observable trait for reference types
 //!
-//! This module provides Observable<T>, which wraps a DataContext<T>
-//! and provides a more ergonomic API for reactive state management.
+//! This module provides the Observable trait and related types for
+//! implementing observable reference types (equivalent to SwiftUI's ObservableObject).
 //!
-//! # Key Concepts
+//! # Example
 //!
-//! - **Observable wrapper**: Combines DataContext with ViewId tracking
-//! - **Ergonomic API**: Simpler interface for common operations
-//! - **View integration**: Designed to work seamlessly with View trait
+//! ```ignore
+//! #[observable]
+//! struct UserModel {
+//!     #[published]
+//!     name: String,
+//!     #[published]
+//!     age: u32,
+//! }
+//!
+//! struct ProfileView {
+//!     @StateObject private var settings = UserSettings()
+//!     @ObservedObject var app_config: AppConfig
+//! }
+//! ```
 
-use crate::view::id::ViewId;
-use crate::view::tracker::RenderTracker;
-use crate::state::data::DataContext;
+extern crate alloc;
+use alloc::boxed::Box;
+use alloc::vec::Vec;
+use alloc::sync::Arc;
+use scarlet_std::sync::Mutex;
 
-/// Observable wrapper around DataContext
+/// Observable trait for reference types
 ///
-/// Observable<T> provides a simpler API for working with reactive data.
-/// It combines a DataContext with ViewId subscription tracking.
+/// Types implementing this trait can notify subscribers when they change.
+/// This is equivalent to Swift's ObservableObject protocol.
 ///
 /// # Example
 ///
 /// ```ignore
-/// let observable = Observable::new(42);
-/// let view_id = ViewId::new();
+/// struct UserModel {
+///     notifier: ObservableNotifier,
+///     name: String,
+///     age: u32,
+/// }
 ///
-/// // Subscribe to changes
-/// observable.subscribe(view_id);
+/// impl UserModel {
+///     fn set_name(&mut self, name: String) {
+///         self.name = name;
+///         self.notifier.notify();  // Notify subscribers
+///     }
+/// }
 ///
-/// // Modify data (automatically notifies subscribers)
-/// observable.modify(|v| *v += 1);
+/// impl Observable for UserModel {
+///     type SubscriptionId = usize;
+///
+///     fn subscribe(&self, observer: Box<dyn Fn() + Send + Sync>) -> Self::SubscriptionId {
+///         self.notifier.subscribe(observer)
+///     }
+///
+///     fn unsubscribe(&self, id: Self::SubscriptionId) {
+///         self.notifier.unsubscribe(id)
+///     }
+/// }
 /// ```
-pub struct Observable<T> {
-    /// The underlying data context
-    data: DataContext<T>,
-    /// The ViewId that owns this observable (for auto-subscription)
-    owner: Option<ViewId>,
+pub trait Observable {
+    /// Unique identifier for a subscription
+    type SubscriptionId: Clone;
+
+    /// Subscribe to changes
+    ///
+    /// Returns a subscription ID that can be used to unsubscribe later.
+    fn subscribe(&self, observer: Box<dyn Fn() + Send + Sync>) -> Self::SubscriptionId;
+
+    /// Unsubscribe from changes
+    fn unsubscribe(&self, id: Self::SubscriptionId);
+
+    /// Notify all subscribers of a change
+    fn notify(&self);
 }
 
-impl<T> Observable<T> {
-    /// Create a new observable with an initial value
-    pub fn new(data: T) -> Self {
+/// Subscription notifier for implementing Observable
+///
+/// This helper type can be embedded in your struct to implement
+/// change notification.
+///
+/// # Example
+///
+/// ```ignore
+/// struct MyModel {
+///     notifier: ObservableNotifier,
+///     value: i32,
+/// }
+///
+/// impl MyModel {
+///     fn set_value(&mut self, value: i32) {
+///         self.value = value;
+///         self.notifier.notify();
+///     }
+/// }
+///
+/// impl Observable for MyModel {
+///     type SubscriptionId = usize;
+///
+///     fn subscribe(&self, observer: Box<dyn Fn() + Send + Sync>) -> Self::SubscriptionId {
+///         self.notifier.subscribe(observer)
+///     }
+///
+///     fn unsubscribe(&self, id: Self::SubscriptionId) {
+///         self.notifier.unsubscribe(id)
+///     }
+///
+///     fn notify(&self) {
+///         self.notifier.notify()
+///     }
+/// }
+/// ```
+pub struct ObservableNotifier {
+    observers: Arc<Mutex<Vec<Box<dyn Fn() + Send + Sync>>>>,
+    next_id: Arc<Mutex<usize>>,
+}
+
+impl ObservableNotifier {
+    /// Create a new notifier
+    pub fn new() -> Self {
         Self {
-            data: DataContext::new(data),
-            owner: None,
+            observers: Arc::new(Mutex::new(Vec::new())),
+            next_id: Arc::new(Mutex::new(0)),
         }
     }
 
-    /// Create a new observable with an owner ViewId
+    /// Subscribe to changes
     ///
-    /// The owner will be automatically subscribed to changes.
-    pub fn with_owner(data: T, owner: ViewId) -> Self {
-        let observable = Self {
-            data: DataContext::new(data),
-            owner: Some(owner),
-        };
-        observable
+    /// Returns a subscription ID.
+    pub fn subscribe(&self, observer: Box<dyn Fn() + Send + Sync>) -> usize {
+        let mut next_id = self.next_id.lock();
+        let id = *next_id;
+        *next_id += 1;
+
+        let mut observers = self.observers.lock();
+        observers.push(observer);
+
+        id
     }
 
-    /// Get an immutable reference to the data
-    ///
-    /// This is a read-only operation that doesn't mark views as dirty.
-    pub fn get(&self) -> T
-    where
-        T: Clone,
-    {
-        self.data.get()
+    /// Unsubscribe (no-op in simple implementation)
+    pub fn unsubscribe(&self, _id: usize) {
+        // Simple implementation: observers are never removed
+        // A full implementation would track (id, index) mappings
     }
 
-    /// Read the data with a closure (more efficient than cloning)
-    pub fn read<U, F>(&self, f: F) -> U
-    where
-        F: FnOnce(&T) -> U,
-    {
-        self.data.read(f)
-    }
-
-    /// Modify the data and notify observers
-    ///
-    /// This will:
-    /// 1. Apply the modification function to the data
-    /// 2. Increment the version
-    /// 3. Mark all observing views as dirty
-    /// 4. Return the result from the modification function
-    ///
-    /// Note: This does NOT notify the RenderTracker. Use `modify_with_tracker`
-    /// for automatic render tracker integration.
-    pub fn modify<U, F>(&self, f: F) -> U
-    where
-        F: FnOnce(&mut T) -> U,
-    {
-        self.data.modify(f)
-    }
-
-    /// Modify the data and notify RenderTracker
-    ///
-    /// This is the recommended method for modifying data in a view.
-    /// It modifies the data AND immediately notifies the RenderTracker.
-    ///
-    /// # Arguments
-    ///
-    /// * `tracker` - The RenderTracker to notify
-    /// * `f` - The modification function
-    pub fn modify_with_tracker<U, F>(&self, tracker: &mut RenderTracker, f: F) -> U
-    where
-        F: FnOnce(&mut T) -> U,
-    {
-        self.data.modify_with_tracker(tracker, f)
-    }
-
-    /// Set a new value (replaces the entire data)
-    ///
-    /// Note: This does NOT notify the RenderTracker. Use `set_with_tracker`
-    /// for automatic render tracker integration.
-    pub fn set(&self, data: T)
-    where
-        T: PartialEq,
-    {
-        self.data.set(data)
-    }
-
-    /// Set a new value and notify RenderTracker
-    ///
-    /// This is the recommended method for setting data in a view.
-    ///
-    /// # Arguments
-    ///
-    /// * `tracker` - The RenderTracker to notify
-    /// * `data` - The new data value
-    pub fn set_with_tracker(&self, tracker: &mut RenderTracker, data: T)
-    where
-        T: PartialEq,
-    {
-        self.data.set_with_tracker(tracker, data)
-    }
-
-    /// Get the current data version
-    pub fn version(&self) -> u64 {
-        self.data.version()
-    }
-
-    /// Subscribe a view to observe this data
-    ///
-    /// Returns the initial data version that this view should use.
-    pub fn subscribe(&self, view_id: ViewId) -> u64 {
-        self.data.subscribe(view_id)
-    }
-
-    /// Unsubscribe a view from this data
-    pub fn unsubscribe(&self, view_id: ViewId) {
-        self.data.unsubscribe(view_id)
-    }
-
-    /// Check if a view needs an update
-    ///
-    /// This compares the view's last seen version with the current version.
-    pub fn needs_update(&self, view_id: ViewId, last_version: u64) -> bool {
-        self.data.needs_update(view_id, last_version)
-    }
-
-    /// Get the set of dirty views
-    pub fn dirty_views(&self) -> scarlet_std::vec::Vec<ViewId> {
-        self.data.dirty_views()
-    }
-
-    /// Clear the dirty flag for a specific view
-    pub fn clear_dirty(&self, view_id: ViewId) {
-        self.data.clear_dirty(view_id)
-    }
-
-    /// Mark a view as dirty (needs redraw)
-    pub fn mark_dirty(&self, view_id: ViewId) {
-        self.data.mark_dirty(view_id)
-    }
-
-    /// Get the underlying DataContext
-    pub fn data_context(&self) -> &DataContext<T> {
-        &self.data
-    }
-
-    /// Get the owner ViewId
-    pub fn owner(&self) -> Option<ViewId> {
-        self.owner
-    }
-
-    /// Set the owner ViewId
-    pub fn set_owner(&mut self, owner: ViewId) {
-        self.owner = Some(owner);
-        self.data.subscribe(owner);
-    }
-}
-
-impl<T: Clone> Clone for Observable<T> {
-    fn clone(&self) -> Self {
-        Self {
-            data: self.data.clone(),
-            owner: self.owner,
+    /// Notify all subscribers
+    pub fn notify(&self) {
+        let observers = self.observers.lock();
+        for observer in observers.iter() {
+            observer();
         }
     }
 }
 
-/// Builder for creating Observable with configured options
-pub struct ObservableBuilder<T> {
-    data: T,
-    owner: Option<ViewId>,
+impl Default for ObservableNotifier {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
-impl<T> ObservableBuilder<T> {
-    /// Create a new builder with an initial value
-    pub fn new(data: T) -> Self {
-        Self {
-            data,
-            owner: None,
-        }
+/// View-owned reference type (equivalent to SwiftUI's @StateObject)
+///
+/// `StateObject<T>` is used for reference types (implementing `Observable`)
+/// that are owned by a View. The View creates the object and is responsible
+/// for its lifetime.
+///
+/// # Type Parameters
+///
+/// * `T` - The observable reference type
+///
+/// # Example
+///
+/// ```ignore
+/// struct AppView {
+///     model: StateObject<UserModel>,
+/// }
+///
+/// impl AppView {
+///     fn new() -> Self {
+///         Self {
+///             model: StateObject::new(UserModel::new()),
+///         }
+///     }
+///
+///     fn build(&self) -> impl View {
+///         // Use the model
+///     }
+/// }
+/// ```
+pub struct StateObject<T: Observable> {
+    inner: T,
+}
+
+impl<T: Observable> StateObject<T> {
+    /// Create a new state object
+    pub fn new(value: T) -> Self {
+        Self { inner: value }
     }
 
-    /// Set the owner ViewId
-    pub fn owner(mut self, owner: ViewId) -> Self {
-        self.owner = Some(owner);
-        self
+    /// Get a reference to the inner object
+    pub fn get(&self) -> &T {
+        &self.inner
     }
 
-    /// Build the Observable
-    pub fn build(self) -> Observable<T> {
-        Observable::with_owner(self.data, self.owner.expect("owner must be set"))
+    /// Get a mutable reference to the inner object
+    ///
+    /// After modifying, call `notify()` on the object to trigger updates.
+    pub fn get_mut(&mut self) -> &mut T {
+        &mut self.inner
+    }
+
+    /// Subscribe to changes in this object
+    pub fn subscribe(&self, observer: Box<dyn Fn() + Send + Sync>) -> T::SubscriptionId {
+        self.inner.subscribe(observer)
+    }
+
+    /// Unsubscribe from changes
+    pub fn unsubscribe(&self, id: T::SubscriptionId) {
+        self.inner.unsubscribe(id)
+    }
+}
+
+impl<T: Observable> core::ops::Deref for StateObject<T> {
+    type Target = T;
+
+    fn deref(&self) -> &Self::Target {
+        &self.inner
+    }
+}
+
+impl<T: Observable> core::ops::DerefMut for StateObject<T> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.inner
+    }
+}
+
+/// Observation of parent's reference type (equivalent to SwiftUI's @ObservedObject)
+///
+/// `Observed<'a, T>` provides a read-only reference to a parent's observable object.
+/// It can be safely passed to child views.
+///
+/// # Example
+///
+/// ```ignore
+/// struct ChildView {
+///     // Observed reference to parent's model
+///     model: Observed<UserModel>,
+/// }
+///
+/// impl ChildView {
+///     fn new(model: Observed<UserModel>) -> Self {
+///         Self { model }
+///     }
+///
+///     fn build(&self) -> impl View {
+///         // Observe changes in model
+///     }
+/// }
+/// ```
+#[derive(Clone, Copy)]
+pub struct Observed<'a, T: Observable> {
+    inner: &'a T,
+}
+
+impl<'a, T: Observable> Observed<'a, T> {
+    /// Create a new observed reference
+    pub fn new(inner: &'a T) -> Self {
+        Self { inner }
+    }
+
+    /// Get a reference to the inner object
+    pub fn get(&self) -> &T {
+        self.inner
+    }
+
+    /// Subscribe to changes
+    pub fn subscribe(&self, observer: Box<dyn Fn() + Send + Sync>) -> T::SubscriptionId {
+        self.inner.subscribe(observer)
+    }
+
+    /// Unsubscribe from changes
+    pub fn unsubscribe(&self, id: T::SubscriptionId) {
+        self.inner.unsubscribe(id)
+    }
+}
+
+impl<'a, T: Observable> core::ops::Deref for Observed<'a, T> {
+    type Target = T;
+
+    fn deref(&self) -> &Self::Target {
+        self.inner
     }
 }
 
@@ -230,90 +298,111 @@ impl<T> ObservableBuilder<T> {
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_observable_new() {
-        let obs = Observable::new(42);
-        assert_eq!(obs.get(), 42);
-        assert_eq!(obs.version(), 0);
+    // Test model implementing Observable
+    struct TestModel {
+        notifier: ObservableNotifier,
+        value: i32,
+    }
+
+    impl TestModel {
+        fn new(value: i32) -> Self {
+            Self {
+                notifier: ObservableNotifier::new(),
+                value,
+            }
+        }
+
+        fn set_value(&mut self, value: i32) {
+            self.value = value;
+            self.notifier.notify();
+        }
+
+        fn get_value(&self) -> i32 {
+            self.value
+        }
+    }
+
+    impl Observable for TestModel {
+        type SubscriptionId = usize;
+
+        fn subscribe(&self, observer: Box<dyn Fn() + Send + Sync>) -> Self::SubscriptionId {
+            self.notifier.subscribe(observer)
+        }
+
+        fn unsubscribe(&self, id: Self::SubscriptionId) {
+            self.notifier.unsubscribe(id)
+        }
+
+        fn notify(&self) {
+            self.notifier.notify()
+        }
     }
 
     #[test]
-    fn test_observable_modify() {
-        let obs = Observable::new(42);
-        obs.modify(|v| *v += 1);
-        assert_eq!(obs.get(), 43);
-        assert_eq!(obs.version(), 1);
+    fn test_observable_notifier() {
+        let notifier = ObservableNotifier::new();
+
+        let call_count = Arc::new(Mutex::new(0));
+        let call_count_clone = call_count.clone();
+
+        notifier.subscribe(Box::new(move || {
+            *call_count_clone.lock() += 1;
+        }));
+
+        notifier.notify();
+        assert_eq!(*call_count.lock(), 1);
+
+        notifier.notify();
+        assert_eq!(*call_count.lock(), 2);
     }
 
     #[test]
-    fn test_observable_with_owner() {
-        let view_id = ViewId::new();
-        let obs = Observable::with_owner(42, view_id);
+    fn test_state_object() {
+        let model = StateObject::new(TestModel::new(42));
+        assert_eq!(model.get_value(), 42);
 
-        assert_eq!(obs.owner(), Some(view_id));
-        assert_eq!(obs.get(), 42);
+        model.get_mut().set_value(100);
+        assert_eq!(model.get_value(), 100);
     }
 
     #[test]
-    fn test_observable_subscribe() {
-        let obs = Observable::new(42);
-        let view_id = ViewId::new();
+    fn test_observed() {
+        let model = TestModel::new(42);
+        let observed = Observed::new(&model);
 
-        let initial_version = obs.subscribe(view_id);
-        assert_eq!(initial_version, 0);
+        assert_eq!(observed.get_value(), 42);
 
-        obs.modify(|v| *v += 1);
+        // Can subscribe to changes
+        let call_count = Arc::new(Mutex::new(0));
+        let call_count_clone = call_count.clone();
 
-        let dirty = obs.dirty_views();
-        assert!(dirty.contains(&view_id));
+        observed.subscribe(Box::new(move || {
+            *call_count_clone.lock() += 1;
+        }));
+
+        // Modify the original model
+        // Note: This would require interior mutability in a real scenario
+        // For this test, we just verify the subscription API works
     }
 
     #[test]
-    fn test_observable_modify_with_tracker() {
-        let obs = Observable::new(42);
-        let view_id = ViewId::new();
-        let mut tracker = RenderTracker::new();
+    fn test_state_object_deref() {
+        let model = StateObject::new(TestModel::new(42));
 
-        obs.subscribe(view_id);
-        obs.modify_with_tracker(&mut tracker, |v| *v += 1);
+        // Deref allows accessing methods directly
+        assert_eq!(model.get_value(), 42);
 
-        assert_eq!(obs.get(), 43);
-        assert!(tracker.needs_paint());
-        let dirty_paint = tracker.take_dirty_paint();
-        assert!(dirty_paint.contains(&view_id));
+        // DerefMut allows modifying
+        model.get_mut().set_value(100);
+        assert_eq!(model.get_value(), 100);
     }
 
     #[test]
-    fn test_observable_set() {
-        let obs = Observable::new(42);
-        obs.set(100);
-        assert_eq!(obs.get(), 100);
-    }
+    fn test_observed_deref() {
+        let model = TestModel::new(42);
+        let observed = Observed::new(&model);
 
-    #[test]
-    fn test_observable_set_no_change() {
-        let obs = Observable::new(42);
-        obs.set(42); // Same value
-        assert_eq!(obs.version(), 0); // Version should not change
-    }
-
-    #[test]
-    fn test_observable_builder() {
-        let view_id = ViewId::new();
-        let obs = ObservableBuilder::new(42)
-            .owner(view_id)
-            .build();
-
-        assert_eq!(obs.get(), 42);
-        assert_eq!(obs.owner(), Some(view_id));
-    }
-
-    #[test]
-    fn test_observable_read() {
-        let obs = Observable::new(42);
-        let result = obs.read(|v| *v * 2);
-        assert_eq!(result, 84);
-        // Version should not change on read
-        assert_eq!(obs.version(), 0);
+        // Deref allows accessing methods directly
+        assert_eq!(observed.get_value(), 42);
     }
 }

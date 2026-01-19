@@ -59,11 +59,12 @@ extern crate scarlet_std as std;
 pub mod context;
 pub mod layout;
 pub mod layout_containers;
+pub mod application;
 
 // Re-export core types
 pub use context::{ControlFlow, EventCtx, LayoutCtx, PaintCtx, UpdateCtx};
 pub use layout::{Layout, LayoutConstraints, Size, CrossAxisAlignment, MainAxisAlignment};
-pub use layout_containers::{VStack, HStack, ZStack};
+pub use layout_containers::{VStack, HStack, ZStack, Spacer};
 
 // Graphics and events (existing - to be integrated)
 pub mod color;
@@ -82,8 +83,7 @@ pub mod state;
 pub mod view;
 
 // Re-export state types
-pub use state::data::{DataContext, Lens};
-pub use state::observable::Observable;
+pub use state::{DataContext, Local, Observable, ObservableNotifier, StateObject, Observed};
 
 // Re-export view types
 pub use view::{
@@ -94,6 +94,9 @@ pub use view::{
     ViewBuffer,
     BufferPool,
     RepaintBoundary,
+    Window,
+    WindowKind,
+    WindowState,
 };
 pub use view::node::ViewNode;
 pub use view::traits::{View, ViewChild, Container, Opaque, RepaintBoundary as RepaintBoundaryTrait, LayoutBoundary};
@@ -106,18 +109,19 @@ pub use view::controls::{
     ToggleStyle,
 };
 
-// Legacy support (to be removed)
-pub use state::State;
-
 // Re-export commonly used types
 pub use color::Color;
 pub use composition::{Compositor, CompositorLayer, CompositorError};
 pub use event::{Event, EventKind, MouseButton};
 pub use graphics::{Canvas, Point, Rect};
 pub use modifiers::{ViewExt, Padding, Frame, Background};
+pub use application::{Application, ApplicationDelegate, ApplicationHandle};
 
 // Proc macro re-exports (existing)
 pub use scarlet_ui_macros::{View as DeriveView, state, binding, view, view_builder, view_builder as view_builder_macro};
+
+// Observable macros
+pub use scarlet_ui_macros::{observable, published};
 
 // Vector font support (existing)
 pub use ab_glyph::{FontRef, InvalidFont};

@@ -619,6 +619,59 @@ impl fmt::Debug for ZStack {
     }
 }
 
+/// Spacer - Expands to fill available space
+///
+/// Spacer is a special View that takes up as much space as possible
+/// in the layout direction of its container. In HStack, it expands
+/// horizontally; in VStack, it expands vertically.
+///
+/// # Example
+///
+/// ```ignore
+/// HStack::new()
+///     .child(Text::new("Left"))
+///     .child(Spacer::new())  // Pushes everything to the right
+///     .child(Text::new("Right"))
+/// ```
+pub struct Spacer {
+    id: ViewId,
+}
+
+impl Spacer {
+    pub fn new() -> Self {
+        Self {
+            id: ViewId::new(),
+        }
+    }
+}
+
+impl Default for Spacer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl View for Spacer {
+    fn id(&self) -> ViewId {
+        self.id
+    }
+
+    fn layout(&mut self, _ctx: &mut LayoutCtx, constraints: LayoutConstraints) -> Size {
+        // Spacer takes all available space
+        Size::new(constraints.max_width, constraints.max_height)
+    }
+
+    fn draw(&self, _ctx: &mut PaintCtx, _frame: Rect) {
+        // Spacer doesn't draw anything
+    }
+
+    fn event(&mut self, _ctx: &mut EventCtx, _event: &Event) -> ControlFlow {
+        ControlFlow::Continue
+    }
+
+    fn update(&mut self, _ctx: &mut UpdateCtx) {}
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

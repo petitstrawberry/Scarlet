@@ -13,6 +13,7 @@ use crate::layout::{LayoutConstraints, Size};
 use crate::view::id::ViewId;
 use crate::view::traits::View;
 use crate::color::Color;
+use crate::state::DataContext;
 use scarlet_std::fmt;
 
 /// Toggle style
@@ -34,6 +35,7 @@ impl Default for ToggleStyle {
 pub struct Toggle {
     id: ViewId,
     is_on: bool,
+    data: Option<Arc<DataContext<bool>>>,
     label: Option<Arc<String>>,
     style: ToggleStyle,
     on_color: Color,
@@ -49,6 +51,7 @@ impl Toggle {
         Self {
             id: ViewId::new(),
             is_on,
+            data: None,
             label: None,
             style: ToggleStyle::default(),
             on_color: Color::SUCCESS,
@@ -66,6 +69,16 @@ impl Toggle {
         toggle
     }
 
+    /// Bind this toggle to a DataContext<bool>
+    ///
+    /// The toggle will read its initial state from the data context,
+    /// and update the data context when toggled.
+    pub fn bind(mut self, data: &Arc<DataContext<bool>>) -> Self {
+        self.is_on = data.get();
+        self.data = Some(Arc::clone(data));
+        self
+    }
+
     /// Get the toggle state
     pub fn is_on(&self) -> bool {
         self.is_on
@@ -74,11 +87,19 @@ impl Toggle {
     /// Set the toggle state
     pub fn set_on(&mut self, is_on: bool) {
         self.is_on = is_on;
+        // Update the bound data context if present
+        if let Some(ref data) = self.data {
+            data.set(is_on);
+        }
     }
 
     /// Toggle the state
     pub fn toggle(&mut self) {
         self.is_on = !self.is_on;
+        // Update the bound data context if present
+        if let Some(ref data) = self.data {
+            data.set(self.is_on);
+        }
     }
 
     /// Get the label
