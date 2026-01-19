@@ -464,6 +464,18 @@ pub fn observable(_attr: TokenStream, item: TokenStream) -> TokenStream {
         }
     }
 
+    // Add notifier field at the beginning
+    fields.insert(0, syn::Field {
+        attrs: vec![],
+        vis: vis.clone(),
+        ident: Some(Ident::new("notifier", proc_macro2::Span::call_site())),
+        colon_token: Some(syn::token::Colon::default()),
+        ty: syn::Type::Verbatim(quote::quote! {
+            ::scarlet_ui::ObservableNotifier
+        }),
+        mutability: syn::FieldMutability::None,
+    });
+
     // Add data fields for published fields
     for (field_name, field_type, field_vis) in &published_fields {
         let data_field_name = Ident::new(
@@ -529,7 +541,7 @@ pub fn observable(_attr: TokenStream, item: TokenStream) -> TokenStream {
             proc_macro2::Span::call_site()
         );
         quote::quote! {
-            #data_field_name: alloc::sync::Arc::new(DataContext::new(Default::default()))
+            #data_field_name: ::alloc::sync::Arc::new(DataContext::new(Default::default()))
         }
     }).collect();
 

@@ -405,4 +405,90 @@ mod tests {
         // Deref allows accessing methods directly
         assert_eq!(observed.get_value(), 42);
     }
+
+    // Test #[observable] macro
+    #[cfg(all(test, feature = "macro-test"))]
+    mod macro_tests {
+        use super::*;
+        use scarlet_ui_macros::{observable, published};
+
+        #[observable]
+        struct TestUserSettings {
+            #[published]
+            username: String,
+
+            #[published]
+            is_premium: bool,
+
+            #[published]
+            login_count: u32,
+
+            internal_id: u32,
+        }
+
+        impl Default for TestUserSettings {
+            fn default() -> Self {
+                Self {
+                    username: String::from("test"),
+                    is_premium: false,
+                    login_count: 0,
+                    internal_id: 999,
+                }
+            }
+        }
+
+        #[test]
+        fn test_observable_macro() {
+            // Test creating with new()
+            let settings = TestUserSettings::new();
+            assert_eq!(settings._username().get(), String::from("test"));
+            assert_eq!(settings._is_premium().get(), false);
+            assert_eq!(settings._login_count().get(), 0);
+        }
+
+        #[test]
+        fn test_observable_macro_getters() {
+            let settings = TestUserSettings::new();
+
+            // Test underscore getters return DataContext
+            let username_data = settings._username();
+            assert_eq!(username_data.get(), String::from("test"));
+
+            let is_premium_data = settings._is_premium();
+            assert_eq!(is_premium_data.get(), false);
+        }
+
+        #[test]
+        fn test_observable_macro_setters() {
+            let mut settings = TestUserSettings::new();
+
+            // Test setter updates both field and DataContext
+            settings.username(String::from("alice"));
+            assert_eq!(settings._username().get(), String::from("alice"));
+
+            settings.is_premium(true);
+            assert_eq!(settings._is_premium().get(), true);
+
+            settings.login_count(42);
+            assert_eq!(settings._login_count().get(), 42);
+        }
+
+        #[test]
+        fn test_observable_macro_notifications() {
+            let settings = TestUserSettings::new();
+
+            let call_count = Arc::new(Mutex::new(0));
+            let call_count_clone = call_count.clone();
+
+            settings.subscribe(Box::new(move || {
+                *call_count_clone.lock().unwrap() += 1;
+            }));
+
+            settings.username(String::from("bob"));
+            assert_eq!(*call_count.lock(), 1);
+
+            settings.is_premium(false);
+            assert_eq!(*call_count.lock(), 2);
+        }
+    }
 }

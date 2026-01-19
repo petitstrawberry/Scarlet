@@ -15,6 +15,18 @@ use scarlet_std::sync::Mutex;
 use scarlet_std::collections::HashSet;
 use crate::view::id::ViewId;
 
+/// Shared data context reference
+///
+/// Type alias for `Arc<DataContext<T>>` to reduce verbosity.
+///
+/// # Example
+///
+/// ```ignore
+/// let enabled: SharedData<bool> = Arc::new(DataContext::new(false));
+/// let toggle = Toggle::new("Enable").bind(&enabled);
+/// ```
+pub type SharedData<T> = Arc<DataContext<T>>;
+
 /// Data context for managing reactive state
 ///
 /// DataContext<T> stores a value and automatically invalidates views when it changes.

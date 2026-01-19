@@ -84,6 +84,7 @@ pub mod view;
 
 // Re-export state types
 pub use state::{DataContext, Local, Observable, ObservableNotifier, StateObject, Observed};
+pub use state::data::SharedData;
 
 // Re-export view types
 pub use view::{
