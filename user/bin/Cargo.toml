@@ -138,6 +138,10 @@ path = "src/scarlet_desktop/launcher/main.rs"
 name = "scarlet_desktop_clock"
 path = "src/scarlet_desktop/clock/main.rs"
 
+[[bin]]
+name = "scarlet-ui-counter"
+path = "src/scarlet-ui-examples/counter.rs"
+
 [dependencies]
 scarlet_std = { path = "../lib/std", features = ["alloc_debug"] }
 framebuffer = { path = "../lib/framebuffer" }

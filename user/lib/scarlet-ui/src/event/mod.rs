@@ -12,6 +12,12 @@ pub enum Event {
     Focus(bool),
 }
 
+impl Event {
+    pub fn is_keyboard(&self) -> bool {
+        matches!(self, Event::Key(_))
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct MouseEvent {
     pub position: Point,

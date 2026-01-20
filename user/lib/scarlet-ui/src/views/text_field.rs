@@ -2,6 +2,7 @@ use crate::buffer::Buffer;
 use crate::dirty::DirtyFlags;
 use crate::event::{Event, EventContext, EventPhase, HitResult};
 use crate::geometry::{Point, Rect, Size};
+use crate::graphics::{draw_text, measure_text};
 use crate::layout::LayoutConstraints;
 use crate::node_id::NodeId;
 use crate::state::State;
@@ -210,8 +211,48 @@ impl RenderNode for TextFieldRenderNode {
             .unwrap()
             .fill_rect(border_rect, border_color);
 
-        // TODO: Render text content
-        // For now, just show placeholder background
+        // Draw text content
+        let text = self.view.text.get();
+        let buffer = self.buffer.as_mut().unwrap();
+        let padding = 4.0;
+
+        // Draw background for text area
+        let text_area = Rect::new(
+            Point::new(padding, padding),
+            Size::new(
+                self.frame.size.width - 2.0 * padding,
+                self.frame.size.height - 2.0 * padding,
+            ),
+        );
+        buffer.fill_rect(text_area, [0, 0, 0, 255]);
+
+        // Draw text using graphics module
+        let data = buffer.as_mut_slice();
+        let text_to_draw: String = text.chars().take(self.interaction_state.cursor_pos).collect();
+
+        draw_text(
+            data,
+            buffer.width(),
+            buffer.height(),
+            &text_to_draw,
+            (padding + 2.0) as i32,
+            (padding + 2.0) as i32,
+            14.0,
+            [255, 255, 255, 255],
+        );
+
+        // Measure text for cursor position
+        let (text_width, _) = measure_text(&text_to_draw, 14.0);
+        let cursor_x = padding + 2.0 + text_width as f32;
+
+        // Draw cursor
+        if self.interaction_state.focused {
+            let cursor_rect = Rect::new(
+                Point::new(cursor_x, padding + 2.0),
+                Size::new(2.0, 14.0),
+            );
+            buffer.fill_rect(cursor_rect, [255, 255, 255, 255]);
+        }
 
         self.clear_dirty();
     }
@@ -245,8 +286,54 @@ impl RenderNode for TextFieldRenderNode {
                 }
             }
             Event::Key(key) if ctx.phase == EventPhase::Target && self.interaction_state.focused => {
-                // TODO: Handle keyboard input
-                // For now, placeholder implementation
+                use crate::event::KeyEvent;
+                match key {
+                    KeyEvent::Char(c) if c.is_ascii_graphic() => {
+                        self.insert_char(c);
+                    }
+                    KeyEvent::Backspace => {
+                        self.delete_char();
+                    }
+                    KeyEvent::Enter => {
+                        // Submit text (could trigger callback in future)
+                        self.interaction_state.focused = false;
+                        self.mark_dirty(DirtyFlags::PAINT);
+                    }
+                    KeyEvent::Escape => {
+                        self.interaction_state.focused = false;
+                        self.mark_dirty(DirtyFlags::PAINT);
+                    }
+                    KeyEvent::Left => {
+                        if self.interaction_state.cursor_pos > 0 {
+                            self.interaction_state.cursor_pos -= 1;
+                            self.mark_dirty(DirtyFlags::PAINT);
+                        }
+                    }
+                    KeyEvent::Right => {
+                        let text_len = self.view.text.get().len();
+                        if self.interaction_state.cursor_pos < text_len {
+                            self.interaction_state.cursor_pos += 1;
+                            self.mark_dirty(DirtyFlags::PAINT);
+                        }
+                    }
+                    KeyEvent::Home => {
+                        self.interaction_state.cursor_pos = 0;
+                        self.mark_dirty(DirtyFlags::PAINT);
+                    }
+                    KeyEvent::End => {
+                        self.interaction_state.cursor_pos = self.view.text.get().len();
+                        self.mark_dirty(DirtyFlags::PAINT);
+                    }
+                    KeyEvent::Delete => {
+                        let mut text = self.view.text.get();
+                        if self.interaction_state.cursor_pos < text.len() {
+                            text.remove(self.interaction_state.cursor_pos);
+                            self.view.text.set(text);
+                            self.mark_dirty(DirtyFlags::PAINT);
+                        }
+                    }
+                    _ => {}
+                }
             }
             _ => {}
         }

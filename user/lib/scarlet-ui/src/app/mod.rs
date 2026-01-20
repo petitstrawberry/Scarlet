@@ -94,22 +94,49 @@ impl<A: App> Application<A> {
     }
 
     fn relayout_dirty(&mut self) {
-        // Re-layout from dirty roots
-        // TODO: Implement cascade
-        if let Some(ref mut node) = self.root_node {
-            if node.is_dirty() {
+        // Re-layout from dirty roots (cascade down)
+        if let Some(ref mut root) = self.root_node {
+            if root.is_dirty() {
+                // Root is dirty, relayout everything
                 let window_size = Size::new(800.0, 600.0);
-                node.layout(LayoutConstraints::tight(window_size));
+                root.layout(LayoutConstraints::tight(window_size));
+            } else {
+                // Check children for dirty nodes
+                self.relayout_dirty_recursive(root);
+            }
+        }
+    }
+
+    fn relayout_dirty_recursive(&mut self, node: &mut dyn RenderNode) {
+        // Check all children
+        for i in 0..node.children().len() {
+            if let Some(child) = node.children_mut().get_mut(i) {
+                if child.is_dirty() {
+                    // Re-layout this child with its current frame constraints
+                    let constraints = LayoutConstraints::tight(child.frame().size);
+                    child.layout(constraints);
+                }
+                // Recurse into grandchildren
+                self.relayout_dirty_recursive(child.as_mut());
             }
         }
     }
 
     fn render_dirty(&mut self) {
-        // Render only dirty subtrees
-        if let Some(ref mut node) = self.root_node {
-            if node.is_dirty() {
-                node.render();
-            }
+        // Render only dirty subtrees (cascade down)
+        if let Some(ref mut root) = self.root_node {
+            self.render_dirty_recursive(root);
+        }
+    }
+
+    fn render_dirty_recursive(&mut self, node: &mut dyn RenderNode) {
+        if node.is_dirty() {
+            node.render();
+        }
+
+        // Recurse into children
+        for child in node.children_mut().iter_mut() {
+            self.render_dirty_recursive(child.as_mut());
         }
     }
 }
@@ -202,8 +229,9 @@ impl SurfaceBridge {
                 None
             }
             SwsEvent::FocusChanged { .. } => {
-                // TODO: Handle focus events
-                None
+                // Focus changed - we're only interested if we gained focus
+                // For now, assume we always get focus events for our surface
+                Some(Event::Focus(true))
             }
             SwsEvent::Error { .. } => {
                 None
@@ -299,10 +327,75 @@ impl SurfaceBridge {
                         }
                     }
                     _ => {
-                        // Keyboard event - TODO: implement proper key mapping
-                        // Only send events on press (value != 0)
+                        // Keyboard event - map key codes to KeyEvent
                         if input.value != 0 {
-                            Some(Event::Key(KeyEvent::Char(input.value as u8 as char)))
+                            use sws_client::key_code;
+                            let key_event = match input.code {
+                                key_code::KEY_ESC => Some(KeyEvent::Escape),
+                                key_code::KEY_ENTER => Some(KeyEvent::Enter),
+                                key_code::KEY_BACKSPACE => Some(KeyEvent::Backspace),
+                                key_code::KEY_TAB => Some(KeyEvent::Tab),
+                                key_code::KEY_DELETE => Some(KeyEvent::Delete),
+                                key_code::KEY_HOME => Some(KeyEvent::Home),
+                                key_code::KEY_END => Some(KeyEvent::End),
+                                key_code::KEY_PAGEUP => Some(KeyEvent::PageUp),
+                                key_code::KEY_PAGEDOWN => Some(KeyEvent::PageDown),
+                                key_code::KEY_UP => Some(KeyEvent::Up),
+                                key_code::KEY_DOWN => Some(KeyEvent::Down),
+                                key_code::KEY_LEFT => Some(KeyEvent::Left),
+                                key_code::KEY_RIGHT => Some(KeyEvent::Right),
+                                // Printable characters
+                                key_code::KEY_SPACE => Some(KeyEvent::Char(' ')),
+                                key_code::KEY_1 => Some(KeyEvent::Char('1')),
+                                key_code::KEY_2 => Some(KeyEvent::Char('2')),
+                                key_code::KEY_3 => Some(KeyEvent::Char('3')),
+                                key_code::KEY_4 => Some(KeyEvent::Char('4')),
+                                key_code::KEY_5 => Some(KeyEvent::Char('5')),
+                                key_code::KEY_6 => Some(KeyEvent::Char('6')),
+                                key_code::KEY_7 => Some(KeyEvent::Char('7')),
+                                key_code::KEY_8 => Some(KeyEvent::Char('8')),
+                                key_code::KEY_9 => Some(KeyEvent::Char('9')),
+                                key_code::KEY_0 => Some(KeyEvent::Char('0')),
+                                key_code::KEY_Q => Some(KeyEvent::Char('q')),
+                                key_code::KEY_W => Some(KeyEvent::Char('w')),
+                                key_code::KEY_E => Some(KeyEvent::Char('e')),
+                                key_code::KEY_R => Some(KeyEvent::Char('r')),
+                                key_code::KEY_T => Some(KeyEvent::Char('t')),
+                                key_code::KEY_Y => Some(KeyEvent::Char('y')),
+                                key_code::KEY_U => Some(KeyEvent::Char('u')),
+                                key_code::KEY_I => Some(KeyEvent::Char('i')),
+                                key_code::KEY_O => Some(KeyEvent::Char('o')),
+                                key_code::KEY_P => Some(KeyEvent::Char('p')),
+                                key_code::KEY_A => Some(KeyEvent::Char('a')),
+                                key_code::KEY_S => Some(KeyEvent::Char('s')),
+                                key_code::KEY_D => Some(KeyEvent::Char('d')),
+                                key_code::KEY_F => Some(KeyEvent::Char('f')),
+                                key_code::KEY_G => Some(KeyEvent::Char('g')),
+                                key_code::KEY_H => Some(KeyEvent::Char('h')),
+                                key_code::KEY_J => Some(KeyEvent::Char('j')),
+                                key_code::KEY_K => Some(KeyEvent::Char('k')),
+                                key_code::KEY_L => Some(KeyEvent::Char('l')),
+                                key_code::KEY_Z => Some(KeyEvent::Char('z')),
+                                key_code::KEY_X => Some(KeyEvent::Char('x')),
+                                key_code::KEY_C => Some(KeyEvent::Char('c')),
+                                key_code::KEY_V => Some(KeyEvent::Char('v')),
+                                key_code::KEY_B => Some(KeyEvent::Char('b')),
+                                key_code::KEY_N => Some(KeyEvent::Char('n')),
+                                key_code::KEY_M => Some(KeyEvent::Char('m')),
+                                key_code::KEY_COMMA => Some(KeyEvent::Char(',')),
+                                key_code::KEY_DOT => Some(KeyEvent::Char('.')),
+                                key_code::KEY_SLASH => Some(KeyEvent::Char('/')),
+                                key_code::KEY_SEMICOLON => Some(KeyEvent::Char(';')),
+                                key_code::KEY_APOSTROPHE => Some(KeyEvent::Char('\'')),
+                                key_code::KEY_LEFTBRACE => Some(KeyEvent::Char('[')),
+                                key_code::KEY_RIGHTBRACE => Some(KeyEvent::Char(']')),
+                                key_code::KEY_BACKSLASH => Some(KeyEvent::Char('\\')),
+                                key_code::KEY_MINUS => Some(KeyEvent::Char('-')),
+                                key_code::KEY_EQUAL => Some(KeyEvent::Char('=')),
+                                _ => None,
+                            };
+
+                            key_event.map(|k| Event::Key(k))
                         } else {
                             None
                         }

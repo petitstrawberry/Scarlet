@@ -7,6 +7,7 @@ mod containers;
 mod dirty;
 mod event;
 mod geometry;
+mod graphics;
 mod layout;
 mod node_id;
 mod state;

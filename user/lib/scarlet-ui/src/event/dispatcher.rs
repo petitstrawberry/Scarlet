@@ -14,20 +14,55 @@ impl<'a> EventDispatcher<'a> {
     }
 
     pub fn dispatch(&mut self, event: &Event) {
-        // Find target via hit test
-        let target_id = match self.find_target(event) {
-            Some(id) => id,
-            None => return, // No target, ignore event
+        // For keyboard events, we don't have a position to hit test
+        // Send events to all nodes, they'll check if they should handle it
+        if event.is_keyboard() {
+            self.dispatch_keyboard(event);
+        } else {
+            // Mouse events - find target via hit test
+            let target_id = match self.find_target(event) {
+                Some(id) => id,
+                None => return, // No target, ignore event
+            };
+
+            // Phase 1: Capture (root → target)
+            self.capture_phase(event, target_id);
+
+            // Phase 2: Target
+            self.target_phase(event, target_id);
+
+            // Phase 3: Bubble (target → root)
+            self.bubble_phase(event, target_id);
+        }
+    }
+
+    fn dispatch_keyboard(&mut self, event: &Event) {
+        // For keyboard events, do capture/bubble on root
+        let root_id = self.root.id();
+
+        // Capture phase
+        let mut ctx = EventContext {
+            phase: EventPhase::Capture,
+            stop_propagation: false,
+            stop_immediate: false,
         };
+        self.root.handle_event(event, &mut ctx);
 
-        // Phase 1: Capture (root → target)
-        self.capture_phase(event, target_id);
+        if ctx.stop_propagation {
+            return;
+        }
 
-        // Phase 2: Target
-        self.target_phase(event, target_id);
+        // Target phase - send to root (focused nodes will handle)
+        ctx.phase = EventPhase::Target;
+        self.root.handle_event(event, &mut ctx);
 
-        // Phase 3: Bubble (target → root)
-        self.bubble_phase(event, target_id);
+        if ctx.stop_propagation {
+            return;
+        }
+
+        // Bubble phase
+        ctx.phase = EventPhase::Bubble;
+        self.root.handle_event(event, &mut ctx);
     }
 
     fn find_target(&self, event: &Event) -> Option<NodeId> {

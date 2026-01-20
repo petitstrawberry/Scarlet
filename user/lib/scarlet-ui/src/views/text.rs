@@ -2,6 +2,7 @@ use crate::buffer::Buffer;
 use crate::dirty::DirtyFlags;
 use crate::event::{Event, EventContext, HitResult};
 use crate::geometry::{Point, Rect, Size};
+use crate::graphics::{draw_text, measure_text};
 use crate::layout::LayoutConstraints;
 use crate::node_id::NodeId;
 use crate::traits::{RenderNode, UpdateResult, View};
@@ -75,11 +76,8 @@ impl TextRenderNode {
     }
 
     fn estimated_size(&self) -> Size {
-        // TODO: Use proper font metrics
-        // For now, estimate based on character count
-        let width = self.view.content.len() as f32 * self.view.size * 0.6;
-        let height = self.view.size;
-        Size::new(width, height)
+        let (width, height) = measure_text(&self.view.content, self.view.size);
+        Size::new(width as f32, height as f32)
     }
 }
 
@@ -143,9 +141,22 @@ impl RenderNode for TextRenderNode {
         }
 
         self.buffer = Some(Buffer::new(self.frame.size));
-        // TODO: Render actual text with font
-        // For now, just clear the buffer
-        self.buffer.as_mut().unwrap().clear();
+
+        // Use graphics module to draw text
+        let buffer = self.buffer.as_mut().unwrap();
+        let data = buffer.as_mut_slice();
+
+        draw_text(
+            data,
+            buffer.width(),
+            buffer.height(),
+            &self.view.content,
+            0,
+            0,
+            self.view.size,
+            self.view.color,
+        );
+
         self.clear_dirty();
     }
 
