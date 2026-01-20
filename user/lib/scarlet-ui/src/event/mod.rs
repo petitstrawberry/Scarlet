@@ -20,7 +20,25 @@ pub struct MouseEvent {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub struct MouseButtons;
+pub struct MouseButtons(pub u8);
+
+impl MouseButtons {
+    pub const LEFT: Self = Self(0x01);
+    pub const RIGHT: Self = Self(0x02);
+    pub const MIDDLE: Self = Self(0x04);
+
+    pub fn is_left_pressed(&self) -> bool {
+        self.0 & 0x01 != 0
+    }
+
+    pub fn is_right_pressed(&self) -> bool {
+        self.0 & 0x02 != 0
+    }
+
+    pub fn is_middle_pressed(&self) -> bool {
+        self.0 & 0x04 != 0
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum MouseEventKind {
@@ -32,7 +50,20 @@ pub enum MouseEventKind {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KeyEvent {
-    // TODO: Implement
+    Char(char),
+    Enter,
+    Backspace,
+    Escape,
+    Tab,
+    Delete,
+    Home,
+    End,
+    PageUp,
+    PageDown,
+    Up,
+    Down,
+    Left,
+    Right,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]

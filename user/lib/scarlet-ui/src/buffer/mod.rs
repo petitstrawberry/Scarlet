@@ -48,6 +48,10 @@ impl Buffer {
         &mut self.data
     }
 
+    pub fn data(&self) -> &[u8] {
+        &self.data
+    }
+
     /// Fill a rectangle with a solid color in LOCAL coordinates
     pub fn fill_rect(&mut self, rect: Rect, color: [u8; 4]) {
         let x_start = libm::ceilf(rect.origin.x) as usize;
