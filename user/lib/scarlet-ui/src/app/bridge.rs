@@ -61,7 +61,7 @@ impl SurfaceBridge {
     pub fn present(&mut self, node: &mut dyn crate::traits::RenderNode) -> Result<(), &'static str> {
         use crate::buffer::Buffer;
 
-        // Get root buffer and convert RGBA to BGRA
+        // Get root buffer and copy to surface (both are BGRA)
         if let Some(buffer) = node.get_buffer() {
             let surface = self.connection
                 .surface_mut(self.surface_id)
@@ -70,16 +70,9 @@ impl SurfaceBridge {
             let src_data = buffer.data();
             let dst_data = surface.buffer_mut();
 
-            // Copy RGBA to BGRA (swap R and B channels)
-            let src_len = src_data.len().min(dst_data.len());
-            for i in (0..src_len).step_by(4) {
-                if i + 3 < src_len {
-                    dst_data[i] = src_data[i + 2];     // B <- R
-                    dst_data[i + 1] = src_data[i + 1]; // G <- G
-                    dst_data[i + 2] = src_data[i];     // R <- B
-                    dst_data[i + 3] = src_data[i + 3]; // A <- A
-                }
-            }
+            // Direct copy (no conversion needed, both are BGRA)
+            let copy_len = src_data.len().min(dst_data.len());
+            dst_data[..copy_len].copy_from_slice(&src_data[..copy_len]);
 
             // Commit to server
             self.connection

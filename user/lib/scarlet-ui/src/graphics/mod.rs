@@ -265,14 +265,14 @@ pub fn measure_text(text: &str, font_size_px: f32) -> (u32, u32) {
 /// Draw text to a buffer slice
 ///
 /// # Arguments
-/// * `buffer` - Mutable slice of RGBA pixel data
+/// * `buffer` - Mutable slice of BGRA pixel data
 /// * `buffer_width` - Width of the buffer in pixels
 /// * `buffer_height` - Height of the buffer in pixels
 /// * `text` - Text to draw
 /// * `x` - X position
 /// * `y` - Y position
 /// * `font_size` - Font size in pixels
-/// * `color` - RGBA color
+/// * `color` - BGRA color
 pub fn draw_text(
     buffer: &mut [u8],
     buffer_width: usize,
@@ -329,17 +329,17 @@ pub fn draw_text(
 
                             let buf_idx = ((gy + dy) * buffer_width + (gx + dx)) * 4;
                             if buf_idx + 3 < buffer.len() {
-                                // Alpha blending
+                                // Alpha blending (color is BGRA)
                                 let alpha = alpha as u32;
                                 let inv_alpha = 255 - alpha;
 
-                                buffer[buf_idx + 0] =
+                                buffer[buf_idx + 0] = // B
                                     ((buffer[buf_idx + 0] as u32 * inv_alpha + color[0] as u32 * alpha) / 255) as u8;
-                                buffer[buf_idx + 1] =
+                                buffer[buf_idx + 1] = // G
                                     ((buffer[buf_idx + 1] as u32 * inv_alpha + color[1] as u32 * alpha) / 255) as u8;
-                                buffer[buf_idx + 2] =
+                                buffer[buf_idx + 2] = // R
                                     ((buffer[buf_idx + 2] as u32 * inv_alpha + color[2] as u32 * alpha) / 255) as u8;
-                                buffer[buf_idx + 3] =
+                                buffer[buf_idx + 3] = // A
                                     ((buffer[buf_idx + 3] as u32 * inv_alpha + color[3] as u32 * alpha) / 255) as u8;
                             }
                         }

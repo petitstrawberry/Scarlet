@@ -38,19 +38,41 @@ impl<A: App> Application<A> {
     }
 
     pub fn run(mut self) -> Result<(), &'static str> {
+        use std::println;
+
+        println!("[scarlet-ui] Application::run() starting");
+
         // Build initial tree
         let root_view = self.app.build();
+        println!("[scarlet-ui] root_view built");
         self.root_node = Some(root_view.build());
         self.root_view = Some(root_view);
+
+        println!("[scarlet-ui] root_node built: {:?}", self.root_node.as_ref().map(|n| n.type_name()));
 
         // Initial layout and render
         let window_size = UiSize { width: 800.0, height: 600.0 };
         let constraints = crate::layout::LayoutConstraints::tight(window_size);
+
+        println!("[scarlet-ui] calling layout()");
         self.root_node
             .as_mut()
             .unwrap()
             .layout(constraints);
+        println!("[scarlet-ui] layout() complete, frame: {:?}", self.root_node.as_ref().map(|n| n.frame()));
+
+        println!("[scarlet-ui] calling render()");
         self.root_node.as_mut().unwrap().render();
+        println!("[scarlet-ui] render() complete");
+
+        println!("[scarlet-ui] buffer: {:?}", self.root_node.as_ref().and_then(|n| n.get_buffer()).map(|b| (b.width(), b.height())));
+
+        // Present initial state to screen
+        println!("[scarlet-ui] calling present()");
+        if let Some(ref mut node) = self.root_node {
+            self.bridge.present(node.as_mut())?;
+        }
+        println!("[scarlet-ui] present() complete");
 
         // Main event loop
         loop {

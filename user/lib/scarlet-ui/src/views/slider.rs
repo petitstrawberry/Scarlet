@@ -6,6 +6,7 @@ use crate::layout::LayoutConstraints;
 use crate::node_id::NodeId;
 use crate::state::State;
 use crate::traits::{RenderNode, UpdateResult, View};
+use crate::geometry::Color;
 use std::any::Any;
 
 #[derive(Clone)]
@@ -209,7 +210,7 @@ impl RenderNode for SliderRenderNode {
         self.buffer
             .as_mut()
             .unwrap()
-            .fill_rect(track_rect, [80, 80, 80, 255]);
+            .fill_rect(track_rect, Color::rgb(80, 80, 80).as_bgra());
 
         // Draw thumb
         let thumb_x = self.position_for_value(current_value);
@@ -223,15 +224,15 @@ impl RenderNode for SliderRenderNode {
         );
 
         let thumb_color = if self.interaction_state.dragging || self.interaction_state.hovered {
-            [120, 150, 255, 255]
+            Color::rgb(120, 150, 255)
         } else {
-            [100, 120, 200, 255]
+            Color::rgb(100, 120, 200)
         };
 
         self.buffer
             .as_mut()
             .unwrap()
-            .fill_rect(thumb_rect, thumb_color);
+            .fill_rect(thumb_rect, thumb_color.as_bgra());
 
         self.clear_dirty();
     }

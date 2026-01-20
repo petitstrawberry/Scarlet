@@ -6,6 +6,7 @@ use crate::layout::LayoutConstraints;
 use crate::node_id::NodeId;
 use crate::traits::{RenderNode, UpdateResult, View};
 use crate::views::text::Text;
+use crate::geometry::Color;
 use std::any::Any;
 use std::sync::Arc;
 
@@ -18,17 +19,17 @@ pub struct Button {
 
 #[derive(Clone, Copy, PartialEq)]
 pub struct ButtonColors {
-    pub normal: [u8; 4],
-    pub hovered: [u8; 4],
-    pub pressed: [u8; 4],
+    pub normal: Color,
+    pub hovered: Color,
+    pub pressed: Color,
 }
 
 impl Default for ButtonColors {
     fn default() -> Self {
         Self {
-            normal: [100, 100, 100, 255],
-            hovered: [120, 120, 120, 255],
-            pressed: [80, 80, 80, 255],
+            normal: Color::rgb(100, 100, 100),
+            hovered: Color::rgb(120, 120, 120),
+            pressed: Color::rgb(80, 80, 80),
         }
     }
 }
@@ -189,36 +190,36 @@ impl RenderNode for ButtonRenderNode {
         self.buffer
             .as_mut()
             .unwrap()
-            .fill_rect(self.frame, color);
+            .fill_rect(self.frame, color.as_bgra());
 
         // Draw focus indicator (border)
         if self.interaction_state.focused {
-            let border_color = [255, 255, 255, 255];
+            let border_color = Color::rgb(255, 255, 255);
             let border_width = 2.0;
 
             // Top border
             self.buffer.as_mut().unwrap().fill_rect(Rect::new(
                 Point::new(0.0, 0.0),
                 Size::new(self.frame.size.width, border_width),
-            ), border_color);
+            ), border_color.as_bgra());
 
             // Bottom border
             self.buffer.as_mut().unwrap().fill_rect(Rect::new(
                 Point::new(0.0, self.frame.size.height - border_width),
                 Size::new(self.frame.size.width, border_width),
-            ), border_color);
+            ), border_color.as_bgra());
 
             // Left border
             self.buffer.as_mut().unwrap().fill_rect(Rect::new(
                 Point::new(0.0, 0.0),
                 Size::new(border_width, self.frame.size.height),
-            ), border_color);
+            ), border_color.as_bgra());
 
             // Right border
             self.buffer.as_mut().unwrap().fill_rect(Rect::new(
                 Point::new(self.frame.size.width - border_width, 0.0),
                 Size::new(border_width, self.frame.size.height),
-            ), border_color);
+            ), border_color.as_bgra());
         }
 
         // Render label centered

@@ -280,7 +280,12 @@ impl RenderNode for VStackRenderNode {
         // Calculate total size
         let max_width = constraints.max.width;
         let total_height = min_total.min(available_for_children) + total_spacing;
-        Size::new(max_width, total_height)
+        let size = Size::new(max_width, total_height);
+
+        // Set frame
+        self.frame = Rect::new(Point::ZERO, size);
+
+        size
     }
 
     fn set_frame(&mut self, frame: Rect) {

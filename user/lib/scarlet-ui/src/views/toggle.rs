@@ -6,25 +6,26 @@ use crate::layout::LayoutConstraints;
 use crate::node_id::NodeId;
 use crate::state::State;
 use crate::traits::{RenderNode, UpdateResult, View};
+use crate::geometry::Color;
 use std::any::Any;
 
 #[derive(Clone)]
 pub struct Toggle {
     pub is_on: State<bool>,
-    pub on_color: [u8; 4],
-    pub off_color: [u8; 4],
+    pub on_color: Color,
+    pub off_color: Color,
 }
 
 impl Toggle {
     pub fn new(is_on: State<bool>) -> Self {
         Self {
             is_on,
-            on_color: [0, 200, 0, 255],
-            off_color: [200, 0, 0, 255],
+            on_color: Color::rgb(0, 200, 0),
+            off_color: Color::rgb(200, 0, 0),
         }
     }
 
-    pub fn colors(mut self, on_color: [u8; 4], off_color: [u8; 4]) -> Self {
+    pub fn colors(mut self, on_color: Color, off_color: Color) -> Self {
         self.on_color = on_color;
         self.off_color = off_color;
         self
@@ -168,7 +169,7 @@ impl RenderNode for ToggleRenderNode {
         self.buffer
             .as_mut()
             .unwrap()
-            .fill_rect(self.frame, color);
+            .fill_rect(self.frame, color.as_bgra());
 
         // Draw toggle indicator (circle)
         let padding = 2.0;
@@ -187,7 +188,7 @@ impl RenderNode for ToggleRenderNode {
         self.buffer
             .as_mut()
             .unwrap()
-            .fill_rect(indicator_rect, [255, 255, 255, 255]);
+            .fill_rect(indicator_rect, Color::rgb(255, 255, 255).as_bgra());
 
         self.clear_dirty();
     }

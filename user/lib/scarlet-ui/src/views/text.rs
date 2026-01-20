@@ -6,13 +6,14 @@ use crate::graphics::{draw_text, measure_text};
 use crate::layout::LayoutConstraints;
 use crate::node_id::NodeId;
 use crate::traits::{RenderNode, UpdateResult, View};
+use crate::geometry::Color;
 use std::any::Any;
 use std::string::String;
 
 #[derive(Clone, PartialEq)]
 pub struct Text {
     pub content: String,
-    pub color: [u8; 4],
+    pub color: Color,
     pub size: f32,
 }
 
@@ -20,12 +21,12 @@ impl Text {
     pub fn new(content: &str) -> Self {
         Self {
             content: String::from(content),
-            color: [255, 255, 255, 255],
+            color: Color::rgb(255, 255, 255),
             size: 16.0,
         }
     }
 
-    pub fn color(mut self, color: [u8; 4]) -> Self {
+    pub fn color(mut self, color: Color) -> Self {
         self.color = color;
         self
     }
@@ -119,10 +120,15 @@ impl RenderNode for TextRenderNode {
 
     fn layout(&mut self, constraints: LayoutConstraints) -> Size {
         let estimated = self.estimated_size();
+        std::println!("[Text::layout] estimated: {:?}", estimated);
+        std::println!("[Text::layout] constraints: {:?} {:?}", constraints.min, constraints.max);
+
         let size = Size::new(
             estimated.width.clamp(constraints.min.width, constraints.max.width),
             estimated.height.clamp(constraints.min.height, constraints.max.height),
         );
+        std::println!("[Text::layout] final size: {:?}", size);
+
         self.frame = Rect::new(Point::ZERO, size);
         size
     }
@@ -156,7 +162,7 @@ impl RenderNode for TextRenderNode {
             0,
             0,
             self.view.size,
-            self.view.color,
+            self.view.color.as_bgra(),
         );
 
         self.clear_dirty();

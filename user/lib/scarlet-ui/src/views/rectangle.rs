@@ -5,23 +5,24 @@ use crate::geometry::{Point, Rect, Size};
 use crate::layout::LayoutConstraints;
 use crate::node_id::NodeId;
 use crate::traits::{RenderNode, UpdateResult, View};
+use crate::geometry::Color;
 use std::any::Any;
 
 #[derive(Clone, PartialEq)]
 pub struct Rectangle {
-    pub color: [u8; 4],
-    pub hover_color: Option<[u8; 4]>,
+    pub color: Color,
+    pub hover_color: Option<Color>,
 }
 
 impl Rectangle {
-    pub fn new(color: [u8; 4]) -> Self {
+    pub fn new(color: Color) -> Self {
         Self {
             color,
             hover_color: None,
         }
     }
 
-    pub fn hover_color(mut self, color: [u8; 4]) -> Self {
+    pub fn hover_color(mut self, color: Color) -> Self {
         self.hover_color = Some(color);
         self
     }
@@ -141,7 +142,7 @@ impl RenderNode for RectangleRenderNode {
         self.buffer
             .as_mut()
             .unwrap()
-            .fill_rect(self.frame, color);
+            .fill_rect(self.frame, color.as_bgra());
         self.clear_dirty();
     }
 

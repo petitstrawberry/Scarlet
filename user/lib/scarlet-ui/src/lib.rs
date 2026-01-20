@@ -19,7 +19,7 @@ mod app;
 pub use buffer::Buffer;
 pub use dirty::DirtyFlags;
 pub use event::{Event, EventContext, EventDispatcher, EventPhase, HitResult, KeyEvent, MouseEvent, MouseEventKind};
-pub use geometry::{Point, Rect, Size};
+pub use geometry::{Color, Point, Rect, Size};
 pub use layout::{Alignment, LayoutConstraints};
 pub use node_id::NodeId;
 pub use containers::{HStack, VStack, ZStack};
@@ -36,6 +36,7 @@ pub mod prelude {
     pub use crate::app::{App, Application};
     pub use crate::containers::{HStack, VStack, ZStack};
     pub use crate::event::{Event, EventContext, EventPhase};
+    pub use crate::geometry::Color;
     pub use crate::layout::{Alignment, LayoutConstraints};
     pub use crate::state::{State, SubscriptionId};
     pub use crate::traits::{RenderNode, View};

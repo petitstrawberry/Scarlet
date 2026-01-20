@@ -3,7 +3,7 @@ use crate::geometry::{Rect, Size};
 
 #[derive(Clone)]
 pub struct Buffer {
-    data: Vec<u8>, // RGBA
+    data: Vec<u8>, // BGRA (matches framebuffer format)
     size: Size,
     stride: usize,
 }
@@ -14,7 +14,7 @@ impl Buffer {
     pub fn new(size: Size) -> Self {
         let width = libm::ceilf(size.width) as usize;
         let height = libm::ceilf(size.height) as usize;
-        let stride = width * 4; // RGBA
+        let stride = width * 4; // BGRA
         let data = std::vec![0; stride * height];
 
         Self {
@@ -53,6 +53,7 @@ impl Buffer {
     }
 
     /// Fill a rectangle with a solid color in LOCAL coordinates
+    /// color: [u8; 4] should be in BGRA format
     pub fn fill_rect(&mut self, rect: Rect, color: [u8; 4]) {
         let x_start = libm::ceilf(rect.origin.x) as usize;
         let y_start = libm::ceilf(rect.origin.y) as usize;
@@ -69,9 +70,9 @@ impl Buffer {
             let offset = y * self.stride + x_start * 4;
             for x in x_start..x_end {
                 let i = offset + (x - x_start) * 4;
-                self.data[i] = color[0]; // R
+                self.data[i] = color[0]; // B
                 self.data[i + 1] = color[1]; // G
-                self.data[i + 2] = color[2]; // B
+                self.data[i + 2] = color[2]; // R
                 self.data[i + 3] = color[3]; // A
             }
         }
