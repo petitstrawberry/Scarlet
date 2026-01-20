@@ -351,4 +351,21 @@ impl RenderNode for TextFieldRenderNode {
     fn clear_dirty(&mut self) {
         self.dirty_flags = DirtyFlags::empty();
     }
+
+    fn is_focusable(&self) -> bool {
+        true
+    }
+
+    fn request_focus(&mut self) -> bool {
+        self.interaction_state.focused = true;
+        self.mark_dirty(DirtyFlags::PAINT);
+        true
+    }
+
+    fn lose_focus(&mut self) {
+        if self.interaction_state.focused {
+            self.interaction_state.focused = false;
+            self.mark_dirty(DirtyFlags::PAINT);
+        }
+    }
 }

@@ -81,6 +81,7 @@ impl View for Button {
 struct ButtonInteractionState {
     hovered: bool,
     pressed: bool,
+    focused: bool,
 }
 
 pub struct ButtonRenderNode {
@@ -190,6 +191,36 @@ impl RenderNode for ButtonRenderNode {
             .unwrap()
             .fill_rect(self.frame, color);
 
+        // Draw focus indicator (border)
+        if self.interaction_state.focused {
+            let border_color = [255, 255, 255, 255];
+            let border_width = 2.0;
+
+            // Top border
+            self.buffer.as_mut().unwrap().fill_rect(Rect::new(
+                Point::new(0.0, 0.0),
+                Size::new(self.frame.size.width, border_width),
+            ), border_color);
+
+            // Bottom border
+            self.buffer.as_mut().unwrap().fill_rect(Rect::new(
+                Point::new(0.0, self.frame.size.height - border_width),
+                Size::new(self.frame.size.width, border_width),
+            ), border_color);
+
+            // Left border
+            self.buffer.as_mut().unwrap().fill_rect(Rect::new(
+                Point::new(0.0, 0.0),
+                Size::new(border_width, self.frame.size.height),
+            ), border_color);
+
+            // Right border
+            self.buffer.as_mut().unwrap().fill_rect(Rect::new(
+                Point::new(self.frame.size.width - border_width, 0.0),
+                Size::new(border_width, self.frame.size.height),
+            ), border_color);
+        }
+
         // Render label centered
         let padding = 8.0;
         let label_frame = Rect::new(
@@ -235,6 +266,7 @@ impl RenderNode for ButtonRenderNode {
                     MouseEventKind::Press => {
                         if self.interaction_state.hovered {
                             self.interaction_state.pressed = true;
+                            self.interaction_state.focused = true;
                             self.mark_dirty(DirtyFlags::PAINT);
                         }
                     }
@@ -262,5 +294,22 @@ impl RenderNode for ButtonRenderNode {
 
     fn clear_dirty(&mut self) {
         self.dirty_flags = DirtyFlags::empty();
+    }
+
+    fn is_focusable(&self) -> bool {
+        true
+    }
+
+    fn request_focus(&mut self) -> bool {
+        self.interaction_state.focused = true;
+        self.mark_dirty(DirtyFlags::PAINT);
+        true
+    }
+
+    fn lose_focus(&mut self) {
+        if self.interaction_state.focused {
+            self.interaction_state.focused = false;
+            self.mark_dirty(DirtyFlags::PAINT);
+        }
     }
 }

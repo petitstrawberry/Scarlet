@@ -2,8 +2,10 @@ use crate::geometry::Point;
 use crate::node_id::NodeId;
 
 mod dispatcher;
+mod focus;
 
 pub use dispatcher::EventDispatcher;
+pub use focus::FocusManager;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Event {

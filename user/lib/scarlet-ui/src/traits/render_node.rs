@@ -69,6 +69,17 @@ pub trait RenderNode {
     fn hit_test(&self, point: Point) -> HitResult;
     fn handle_event(&mut self, event: &Event, ctx: &mut EventContext);
 
+    // Focus
+    fn is_focusable(&self) -> bool {
+        false
+    }
+
+    fn request_focus(&mut self) -> bool {
+        false
+    }
+
+    fn lose_focus(&mut self) {}
+
     // Dirty tracking
     fn mark_dirty(&mut self, flags: DirtyFlags);
     fn is_dirty(&self) -> bool;

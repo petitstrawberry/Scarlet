@@ -329,18 +329,9 @@ impl RenderNode for VStackRenderNode {
         HitResult::Passthrough
     }
 
-    fn handle_event(&mut self, event: &Event, ctx: &mut EventContext) {
-        // For keyboard events, propagate to children
-        // Children will check if they're focused and handle the event
-        if event.is_keyboard() {
-            for child in self.children.iter_mut() {
-                child.handle_event(event, ctx);
-                if ctx.stop_propagation || ctx.stop_immediate {
-                    break;
-                }
-            }
-        }
-        // Mouse events are routed directly to target by dispatcher
+    fn handle_event(&mut self, _event: &Event, _ctx: &mut EventContext) {
+        // Events are routed by the dispatcher through Capture/Target/Bubble phases
+        // Containers don't redistribute events - dispatcher handles routing
     }
 
     fn mark_dirty(&mut self, flags: DirtyFlags) {

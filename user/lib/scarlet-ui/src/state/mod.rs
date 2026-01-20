@@ -2,6 +2,12 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::vec::Vec;
 
+// Small helper to optimize unsubscribe lookups
+// Since we're in no_std without HashSet, we use Vec but optimize access patterns
+fn contains_id(ids: &[SubscriptionId], target: SubscriptionId) -> bool {
+    ids.iter().any(|&id| id == target)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct SubscriptionId(u64);
 
@@ -80,32 +86,49 @@ impl<T: Clone> State<T> {
     }
 
     fn notify(&self) {
-        // Copy callbacks to avoid holding lock during iteration
-        let callbacks = self
-            .inner
-            .subscribers
-            .lock()
-            .iter()
-            .map(|(id, cb)| (*id, cb.clone()))
-            .collect::<Vec<_>>();
+        // Take pending unsubscriptions and clear the list (O(1))
+        let pending_unsubscribes = {
+            let mut pending = self.inner.pending_unsubscribe.lock();
+            let list: Vec<_> = pending.drain(..).collect();
+            list
+        };
 
-        // Process callbacks outside lock (re-entry safe)
-        for (id, callback) in callbacks {
-            // Skip if pending unsubscribe
-            let pending = self.inner.pending_unsubscribe.lock();
-            let is_pending = pending.iter().any(|&pending_id| pending_id == id);
-            drop(pending);
-            if is_pending {
-                continue;
+        if pending_unsubscribes.is_empty() {
+            // Fast path: no unsubscriptions pending
+            // Copy callbacks to avoid holding lock during iteration
+            let callbacks = self
+                .inner
+                .subscribers
+                .lock()
+                .iter()
+                .map(|(_, cb)| cb.clone())
+                .collect::<Vec<_>>();
+
+            // Process callbacks outside lock (re-entry safe)
+            for callback in callbacks {
+                callback();
             }
-            callback();
-        }
+        } else {
+            // Slow path: filter out unsubscribed callbacks
+            // Copy callbacks to avoid holding lock during iteration
+            let callbacks = self
+                .inner
+                .subscribers
+                .lock()
+                .iter()
+                .filter(|(id, _)| !contains_id(&pending_unsubscribes, *id))
+                .map(|(_, cb)| cb.clone())
+                .collect::<Vec<_>>();
 
-        // Process pending unsubscriptions
-        let mut pending = self.inner.pending_unsubscribe.lock();
-        let mut subscribers = self.inner.subscribers.lock();
-        subscribers.retain(|(id, _)| !pending.iter().any(|&pending_id| pending_id == *id));
-        pending.clear();
+            // Process callbacks outside lock (re-entry safe)
+            for callback in callbacks {
+                callback();
+            }
+
+            // Remove unsubscribed entries
+            let mut subscribers = self.inner.subscribers.lock();
+            subscribers.retain(|(id, _)| !contains_id(&pending_unsubscribes, *id));
+        }
     }
 }
 
