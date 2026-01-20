@@ -7,6 +7,7 @@ use crate::layout::LayoutConstraints;
 use crate::node_id::NodeId;
 use crate::state::State;
 use crate::traits::{RenderNode, UpdateResult, View};
+use crate::theme::with_theme;
 use std::any::Any;
 use std::string::String;
 
@@ -186,30 +187,35 @@ impl RenderNode for TextFieldRenderNode {
 
         self.buffer = Some(Buffer::new(self.frame.size));
 
-        // Draw background
-        let bg_color = if self.interaction_state.focused {
-            [60, 60, 60, 255]
-        } else {
-            [50, 50, 50, 255]
-        };
+        // Draw background with theme colors
+        use crate::geometry::Color;
+        let bg_color = with_theme(|theme| {
+            if self.interaction_state.focused {
+                theme.button_background_hovered
+            } else {
+                theme.button_background
+            }
+        });
 
         self.buffer
             .as_mut()
             .unwrap()
-            .fill_rect(self.frame, bg_color);
+            .fill_rect(self.frame, bg_color.as_bgra());
 
         // Draw border
-        let border_color = if self.interaction_state.focused {
-            [100, 150, 255, 255]
-        } else {
-            [100, 100, 100, 255]
-        };
+        let border_color = with_theme(|theme| {
+            if self.interaction_state.focused {
+                Color::rgb(100, 150, 255) // Bright blue for focus
+            } else {
+                theme.button_border
+            }
+        });
 
         let border_rect = Rect::new(Point::ZERO, self.frame.size);
         self.buffer
             .as_mut()
             .unwrap()
-            .fill_rect(border_rect, border_color);
+            .fill_rect(border_rect, border_color.as_bgra());
 
         // Draw text content
         let text = self.view.text.get();
@@ -217,6 +223,7 @@ impl RenderNode for TextFieldRenderNode {
         let padding = 4.0;
 
         // Draw background for text area
+        let text_area_bg = with_theme(|theme| theme.background_primary);
         let text_area = Rect::new(
             Point::new(padding, padding),
             Size::new(
@@ -224,9 +231,10 @@ impl RenderNode for TextFieldRenderNode {
                 self.frame.size.height - 2.0 * padding,
             ),
         );
-        buffer.fill_rect(text_area, [0, 0, 0, 255]);
+        buffer.fill_rect(text_area, text_area_bg.as_bgra());
 
         // Draw text using graphics module
+        let text_color = with_theme(|theme| theme.text_primary);
         let width = buffer.width();
         let height = buffer.height();
         let data = buffer.as_mut_slice();
@@ -240,7 +248,7 @@ impl RenderNode for TextFieldRenderNode {
             (padding + 2.0) as i32,
             (padding + 2.0) as i32,
             14.0,
-            [255, 255, 255, 255],
+            text_color.as_bgra(),
         );
 
         // Measure text for cursor position
@@ -253,7 +261,7 @@ impl RenderNode for TextFieldRenderNode {
                 Point::new(cursor_x, padding + 2.0),
                 Size::new(2.0, 14.0),
             );
-            buffer.fill_rect(cursor_rect, [255, 255, 255, 255]);
+            buffer.fill_rect(cursor_rect, text_color.as_bgra());
         }
 
         self.clear_dirty();

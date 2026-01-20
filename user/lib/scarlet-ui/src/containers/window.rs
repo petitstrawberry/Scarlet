@@ -6,6 +6,7 @@ use crate::event::{Event, EventContext, EventPhase, HitResult, MouseEventKind};
 use crate::geometry::{Point, Rect, Size};
 use crate::layout::LayoutConstraints;
 use crate::node_id::NodeId;
+use crate::theme::with_theme;
 use crate::traits::{RenderNode, UpdateResult, View};
 use std::any::Any;
 use std::boxed::Box;
@@ -34,7 +35,8 @@ impl Window {
     }
 
     pub const TITLEBAR_HEIGHT: f32 = 32.0;
-    pub const CLOSE_BUTTON_SIZE: f32 = 24.0;
+    pub const BUTTON_SIZE: f32 = 32.0;
+    pub const BUTTON_SPACING: f32 = 0.0;
 }
 
 impl View for Window {
@@ -68,6 +70,8 @@ pub struct WindowRenderNode {
     buffer: Option<Buffer>,
     frame: Rect,
     dirty_flags: DirtyFlags,
+    minimize_button_hovered: bool,
+    maximize_button_hovered: bool,
     close_button_hovered: bool,
 }
 
@@ -88,19 +92,35 @@ impl WindowRenderNode {
             buffer: None,
             frame: Rect::ZERO,
             dirty_flags: DirtyFlags::PAINT | DirtyFlags::LAYOUT,
+            minimize_button_hovered: false,
+            maximize_button_hovered: false,
             close_button_hovered: false,
         };
         println!("[window] WindowRenderNode created");
         node
     }
 
-    fn get_close_button_rect(&self) -> Rect {
+    fn get_minimize_button_rect(&self) -> Rect {
+        let x = self.frame.size.width - Window::BUTTON_SIZE * 3.0;
         Rect::new(
-            Point::new(
-                self.frame.size.width - Window::TITLEBAR_HEIGHT - 4.0,
-                4.0,
-            ),
-            Size::new(Window::CLOSE_BUTTON_SIZE, Window::CLOSE_BUTTON_SIZE),
+            Point::new(x, 0.0),
+            Size::new(Window::BUTTON_SIZE, Window::BUTTON_SIZE),
+        )
+    }
+
+    fn get_maximize_button_rect(&self) -> Rect {
+        let x = self.frame.size.width - Window::BUTTON_SIZE * 2.0;
+        Rect::new(
+            Point::new(x, 0.0),
+            Size::new(Window::BUTTON_SIZE, Window::BUTTON_SIZE),
+        )
+    }
+
+    fn get_close_button_rect(&self) -> Rect {
+        let x = self.frame.size.width - Window::BUTTON_SIZE;
+        Rect::new(
+            Point::new(x, 0.0),
+            Size::new(Window::BUTTON_SIZE, Window::BUTTON_SIZE),
         )
     }
 }
@@ -209,74 +229,32 @@ impl RenderNode for WindowRenderNode {
         self.buffer = Some(Buffer::new(self.frame.size));
 
         if self.decorated {
-            // Draw window background
-            let bg_color = Color::rgb(40, 40, 40);
+            // Draw window background using theme
+            let bg_color = with_theme(|theme| theme.window_background);
             self.buffer
                 .as_mut()
                 .unwrap()
                 .fill_rect(self.frame, bg_color.as_bgra());
 
-            // Draw titlebar with gradient effect (top to bottom)
+            // Draw titlebar using theme - flat, no gradient
             let titlebar_rect = Rect::new(
                 Point::new(0.0, 0.0),
                 Size::new(self.frame.size.width, Window::TITLEBAR_HEIGHT),
             );
-
-            // Create a subtle gradient from darker (top) to lighter (bottom)
-            let titlebar_top = Color::rgb(45, 45, 55);
-            let titlebar_bottom = Color::rgb(55, 55, 65);
-
-            // Draw gradient by interpolating colors
-            if let Some(buf) = self.buffer.as_mut() {
-                let width = buf.width() as usize;
-                let height = Window::TITLEBAR_HEIGHT as usize;
-
-                for y in 0..height {
-                    let t = y as f32 / height as f32;
-                    let r = (titlebar_top.as_bgra()[2] as f32 * (1.0 - t) + titlebar_bottom.as_bgra()[2] as f32 * t) as u8;
-                    let g = (titlebar_top.as_bgra()[1] as f32 * (1.0 - t) + titlebar_bottom.as_bgra()[1] as f32 * t) as u8;
-                    let b = (titlebar_top.as_bgra()[0] as f32 * (1.0 - t) + titlebar_bottom.as_bgra()[0] as f32 * t) as u8;
-                    let color = Color::rgb(r, g, b).as_bgra();
-
-                    for x in 0..width {
-                        let idx = (y * width + x) * 4;
-                        buf.as_mut_slice()[idx..idx + 4].copy_from_slice(&color);
-                    }
-                }
-            }
-
-            // Draw titlebar bottom border
-            let border_color = Color::rgb(80, 80, 90);
-            let border_rect = Rect::new(
-                Point::new(0.0, Window::TITLEBAR_HEIGHT - 1.0),
-                Size::new(self.frame.size.width, 1.0),
-            );
+            let titlebar_color = with_theme(|theme| theme.titlebar_background);
             self.buffer
                 .as_mut()
                 .unwrap()
-                .fill_rect(border_rect, border_color.as_bgra());
+                .fill_rect(titlebar_rect, titlebar_color.as_bgra());
 
-            // Draw title text with shadow effect
+            // Draw title text using theme (no shadow)
             use crate::graphics::draw_text;
             if let Some(buf) = self.buffer.as_mut() {
                 let width = buf.width();
                 let height = buf.height();
 
-                // Draw shadow first (offset and darker)
-                let shadow_color = Color::rgb(20, 20, 20);
-                draw_text(
-                    buf.as_mut_slice(),
-                    width,
-                    height,
-                    &self.title,
-                    9,  // x padding with offset
-                    9,  // y padding with offset
-                    13.0, // font size
-                    shadow_color.as_bgra(),
-                );
-
-                // Draw main text
-                let title_color = Color::TITLEBAR_TEXT;
+                // Simple text, no shadow
+                let title_color = with_theme(|theme| theme.titlebar_text);
                 draw_text(
                     buf.as_mut_slice(),
                     width,
@@ -289,82 +267,86 @@ impl RenderNode for WindowRenderNode {
                 );
             }
 
-            // Draw close button with rounded appearance and hover effect
-            let close_button_rect = self.get_close_button_rect();
+            // Draw window control buttons (1px lines, properly centered)
+            let icon_color = with_theme(|theme| theme.titlebar_text).as_bgra();
 
-            // Close button background with state-based styling
-            let close_button_color = if self.close_button_hovered {
-                Color::rgb(200, 60, 60)  // Brighter red on hover
-            } else {
-                Color::rgb(140, 45, 45)  // Muted red normally
-            };
-
-            self.buffer
-                .as_mut()
-                .unwrap()
-                .fill_rect(close_button_rect, close_button_color.as_bgra());
-
-            // Draw close button border
-            let border_color = if self.close_button_hovered {
-                Color::rgb(220, 80, 80)
-            } else {
-                Color::rgb(160, 55, 55)
-            };
-            let border_width = 1.0;
-
-            // Top border
-            self.buffer.as_mut().unwrap().fill_rect(Rect::new(
-                Point::new(close_button_rect.origin.x, close_button_rect.origin.y),
-                Size::new(close_button_rect.size.width, border_width),
-            ), border_color.as_bgra());
-
-            // Bottom border
-            self.buffer.as_mut().unwrap().fill_rect(Rect::new(
-                Point::new(close_button_rect.origin.x, close_button_rect.origin.y + close_button_rect.size.height - border_width),
-                Size::new(close_button_rect.size.width, border_width),
-            ), border_color.as_bgra());
-
-            // Left border
-            self.buffer.as_mut().unwrap().fill_rect(Rect::new(
-                Point::new(close_button_rect.origin.x, close_button_rect.origin.y),
-                Size::new(border_width, close_button_rect.size.height),
-            ), border_color.as_bgra());
-
-            // Right border
-            self.buffer.as_mut().unwrap().fill_rect(Rect::new(
-                Point::new(close_button_rect.origin.x + close_button_rect.size.width - border_width, close_button_rect.origin.y),
-                Size::new(border_width, close_button_rect.size.height),
-            ), border_color.as_bgra());
-
-            // Draw X icon with better anti-aliased look
-            let x_color = Color::WHITE.as_bgra();
-            let cx = close_button_rect.origin.x + Window::CLOSE_BUTTON_SIZE / 2.0;
-            let cy = close_button_rect.origin.y + Window::CLOSE_BUTTON_SIZE / 2.0;
-            let size = 6.0;
-            let x_size = 2.0;
-
-            // Draw X line 1: top-left to bottom-right
-            for i in 0..6 {
-                let offset = i as f32;
-                let x1 = cx - size / 2.0 + offset;
-                let y1 = cy - size / 2.0 + offset;
-                let pixel_rect = Rect::new(Point::new(x1, y1), Size::new(x_size, x_size));
-                self.buffer
-                    .as_mut()
-                    .unwrap()
-                    .fill_rect(pixel_rect, x_color);
+            // Minimize button
+            let minimize_rect = self.get_minimize_button_rect();
+            if self.minimize_button_hovered {
+                let hover_bg = with_theme(|theme| theme.close_button_background_hovered);
+                self.buffer.as_mut().unwrap().fill_rect(minimize_rect, hover_bg.as_bgra());
             }
+            // Minimize icon: horizontal line (1px thick, centered)
+            let min_cx = minimize_rect.origin.x + Window::BUTTON_SIZE / 2.0;
+            let min_cy = minimize_rect.origin.y + Window::BUTTON_SIZE / 2.0;
+            let line_width = 10.0;
+            self.buffer.as_mut().unwrap().fill_rect(Rect::new(
+                Point::new(min_cx - line_width / 2.0, min_cy - 0.5),
+                Size::new(line_width, 1.0),
+            ), icon_color);
 
-            // Draw X line 2: bottom-left to top-right
-            for i in 0..6 {
+            // Maximize button
+            let maximize_rect = self.get_maximize_button_rect();
+            if self.maximize_button_hovered {
+                let hover_bg = with_theme(|theme| theme.close_button_background_hovered);
+                self.buffer.as_mut().unwrap().fill_rect(maximize_rect, hover_bg.as_bgra());
+            }
+            // Maximize icon: square outline (1px thick, centered)
+            let max_cx = maximize_rect.origin.x + Window::BUTTON_SIZE / 2.0;
+            let max_cy = maximize_rect.origin.y + Window::BUTTON_SIZE / 2.0;
+            let box_size = 10.0;
+            let box_half = box_size / 2.0;
+            // Top
+            self.buffer.as_mut().unwrap().fill_rect(Rect::new(
+                Point::new(max_cx - box_half, max_cy - box_half),
+                Size::new(box_size, 1.0),
+            ), icon_color);
+            // Bottom
+            self.buffer.as_mut().unwrap().fill_rect(Rect::new(
+                Point::new(max_cx - box_half, max_cy + box_half - 1.0),
+                Size::new(box_size, 1.0),
+            ), icon_color);
+            // Left
+            self.buffer.as_mut().unwrap().fill_rect(Rect::new(
+                Point::new(max_cx - box_half, max_cy - box_half),
+                Size::new(1.0, box_size),
+            ), icon_color);
+            // Right
+            self.buffer.as_mut().unwrap().fill_rect(Rect::new(
+                Point::new(max_cx + box_half - 1.0, max_cy - box_half),
+                Size::new(1.0, box_size),
+            ), icon_color);
+
+            // Close button
+            let close_rect = self.get_close_button_rect();
+            if self.close_button_hovered {
+                let hover_bg = with_theme(|theme| theme.close_button_background_hovered);
+                self.buffer.as_mut().unwrap().fill_rect(close_rect, hover_bg.as_bgra());
+            }
+            // Close icon: X (1px thick, centered)
+            let close_cx = close_rect.origin.x + Window::BUTTON_SIZE / 2.0;
+            let close_cy = close_rect.origin.y + Window::BUTTON_SIZE / 2.0;
+            let x_size = 8.0;
+            let x_half = x_size / 2.0;
+            // Diagonal line 1: top-left to bottom-right
+            for i in 0..8 {
                 let offset = i as f32;
-                let x2 = cx + size / 2.0 - offset;
-                let y2 = cy - size / 2.0 + offset;
-                let pixel_rect = Rect::new(Point::new(x2, y2), Size::new(x_size, x_size));
-                self.buffer
-                    .as_mut()
-                    .unwrap()
-                    .fill_rect(pixel_rect, x_color);
+                let x = close_cx - x_half + offset;
+                let y = close_cy - x_half + offset;
+                self.buffer.as_mut().unwrap().fill_rect(Rect::new(
+                    Point::new(x, y),
+                    Size::new(1.0, 1.0),
+                ), icon_color);
+            }
+            // Diagonal line 2: bottom-left to top-right
+            for i in 0..8 {
+                let offset = i as f32;
+                let x = close_cx + x_half - offset;
+                let y = close_cy - x_half + offset;
+                self.buffer.as_mut().unwrap().fill_rect(Rect::new(
+                    Point::new(x, y),
+                    Size::new(1.0, 1.0),
+                ), icon_color);
             }
         }
 
@@ -388,10 +370,13 @@ impl RenderNode for WindowRenderNode {
     }
 
     fn hit_test(&self, point: Point) -> HitResult {
-        // Check close button first if decorated
+        // Check titlebar buttons first if decorated
         if self.decorated {
+            let minimize_rect = self.get_minimize_button_rect();
+            let maximize_rect = self.get_maximize_button_rect();
             let close_button_rect = self.get_close_button_rect();
-            if close_button_rect.contains(point) {
+
+            if minimize_rect.contains(point) || maximize_rect.contains(point) || close_button_rect.contains(point) {
                 return HitResult::Handled(self.id);
             }
         }
@@ -419,22 +404,41 @@ impl RenderNode for WindowRenderNode {
 
         match event {
             Event::Mouse(e) => {
+                let minimize_rect = self.get_minimize_button_rect();
+                let maximize_rect = self.get_maximize_button_rect();
                 let close_button_rect = self.get_close_button_rect();
 
                 match ctx.phase {
                     EventPhase::Target => {
                         match e.kind {
                             MouseEventKind::Move => {
-                                let was_hovered = self.close_button_hovered;
+                                let was_min_hovered = self.minimize_button_hovered;
+                                let was_max_hovered = self.maximize_button_hovered;
+                                let was_close_hovered = self.close_button_hovered;
+
+                                self.minimize_button_hovered = minimize_rect.contains(e.position);
+                                self.maximize_button_hovered = maximize_rect.contains(e.position);
                                 self.close_button_hovered = close_button_rect.contains(e.position);
-                                if was_hovered != self.close_button_hovered {
+
+                                if was_min_hovered != self.minimize_button_hovered
+                                    || was_max_hovered != self.maximize_button_hovered
+                                    || was_close_hovered != self.close_button_hovered
+                                {
                                     self.mark_dirty(DirtyFlags::PAINT);
                                 }
                             }
-                            MouseEventKind::Release => {
-                                if close_button_rect.contains(e.position) {
-                                    // TODO: Trigger close action
-                                    self.mark_dirty(DirtyFlags::PAINT);
+                            MouseEventKind::Press => {
+                                if e.buttons.is_left_pressed() {
+                                    if close_button_rect.contains(e.position) {
+                                        // Close button clicked - TODO: trigger close
+                                        println!("[window] Close button clicked");
+                                    } else if minimize_rect.contains(e.position) {
+                                        // Minimize button clicked - TODO: trigger minimize
+                                        println!("[window] Minimize button clicked");
+                                    } else if maximize_rect.contains(e.position) {
+                                        // Maximize button clicked - TODO: trigger maximize
+                                        println!("[window] Maximize button clicked");
+                                    }
                                 }
                             }
                             _ => {}
@@ -446,7 +450,6 @@ impl RenderNode for WindowRenderNode {
             _ => {}
         }
     }
-
     fn mark_dirty(&mut self, flags: DirtyFlags) {
         self.dirty_flags |= flags;
     }

@@ -7,6 +7,7 @@ use crate::node_id::NodeId;
 use crate::state::State;
 use crate::traits::{RenderNode, UpdateResult, View};
 use crate::geometry::Color;
+use crate::theme::with_theme;
 use std::any::Any;
 
 #[derive(Clone)]
@@ -207,10 +208,11 @@ impl RenderNode for SliderRenderNode {
             Size::new(self.frame.size.width - track_padding * 2.0, track_height),
         );
 
+        let track_color = with_theme(|theme| theme.background_secondary);
         self.buffer
             .as_mut()
             .unwrap()
-            .fill_rect(track_rect, Color::rgb(80, 80, 80).as_bgra());
+            .fill_rect(track_rect, track_color.as_bgra());
 
         // Draw thumb
         let thumb_x = self.position_for_value(current_value);
@@ -223,10 +225,11 @@ impl RenderNode for SliderRenderNode {
             Size::new(thumb_size, thumb_size),
         );
 
+        // Use theme-based colors for thumb with hover state
         let thumb_color = if self.interaction_state.dragging || self.interaction_state.hovered {
-            Color::rgb(120, 150, 255)
+            with_theme(|theme| theme.button_background_hovered)
         } else {
-            Color::rgb(100, 120, 200)
+            with_theme(|theme| theme.button_background)
         };
 
         self.buffer

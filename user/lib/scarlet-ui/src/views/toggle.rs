@@ -7,6 +7,7 @@ use crate::node_id::NodeId;
 use crate::state::State;
 use crate::traits::{RenderNode, UpdateResult, View};
 use crate::geometry::Color;
+use crate::theme::with_theme;
 use std::any::Any;
 
 #[derive(Clone)]
@@ -18,10 +19,15 @@ pub struct Toggle {
 
 impl Toggle {
     pub fn new(is_on: State<bool>) -> Self {
+        // Use theme colors as defaults
+        let (on_color, off_color) = with_theme(|theme| {
+            (Color::rgb(0, 200, 0), Color::rgb(200, 0, 0)) // Keep default green/red as fallback
+        });
+
         Self {
             is_on,
-            on_color: Color::rgb(0, 200, 0),
-            off_color: Color::rgb(200, 0, 0),
+            on_color,
+            off_color,
         }
     }
 

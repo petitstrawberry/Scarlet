@@ -11,6 +11,7 @@ mod graphics;
 mod layout;
 mod node_id;
 mod state;
+mod theme;
 mod traits;
 mod views;
 
@@ -24,6 +25,7 @@ pub use layout::{Alignment, LayoutConstraints};
 pub use node_id::NodeId;
 pub use containers::{HStack, VStack, Window, ZStack};
 pub use state::{State, SubscriptionId};
+pub use theme::{ColorScheme, Theme, get_theme, set_theme, with_theme, init as init_theme};
 pub use traits::{RenderNode, UpdateResult, View};
 pub use views::{Button, ButtonColors, Image, Rectangle, Slider, Spacer, Text, TextField, Toggle};
 pub use app::{App, Application};
@@ -39,6 +41,7 @@ pub mod prelude {
     pub use crate::geometry::Color;
     pub use crate::layout::{Alignment, LayoutConstraints};
     pub use crate::state::{State, SubscriptionId};
+    pub use crate::theme::{ColorScheme, Theme, get_theme, set_theme, with_theme};
     pub use crate::traits::{RenderNode, View};
     pub use crate::views::{Button, Image, Rectangle, Slider, Spacer, Text, TextField, Toggle};
     pub use crate::{NodeId, Point, Rect, Size};

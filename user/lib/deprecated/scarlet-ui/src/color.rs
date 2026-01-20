@@ -65,9 +65,3 @@ impl Color {
     pub const WARNING: Color = Color::rgb(255, 149, 0);
     pub const DANGER: Color = Color::rgb(255, 59, 48);
 }
-
-impl Default for Color {
-    fn default() -> Self {
-        Self::BLACK
-    }
-}

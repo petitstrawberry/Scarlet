@@ -45,84 +45,6 @@ const GLYPH_CACHE_CAP: usize = 256;
 static GLYPH_CACHE: std::sync::Mutex<GlyphCacheState> =
     std::sync::Mutex::new(GlyphCacheState::new());
 
-// Text measurement cache
-#[derive(Clone, Copy, PartialEq, Eq)]
-struct TextMetricsKey {
-    text_len: usize,
-    text_hash: u64,
-    font_size: u32,  // Store as integer to avoid f32 hashing issues
-}
-
-impl TextMetricsKey {
-    fn from_text(text: &str, font_size: f32) -> Self {
-        // Use a simple hash of the text content
-        let mut hash = 0u64;
-        for b in text.bytes() {
-            hash = hash.wrapping_mul(31).wrapping_add(b as u64);
-        }
-        Self {
-            text_len: text.len(),
-            text_hash: hash,
-            font_size: font_size.to_bits() as u32,
-        }
-    }
-}
-
-struct TextMetricsEntry {
-    key: TextMetricsKey,
-    value: (u32, u32),
-}
-
-struct TextMetricsCache {
-    entries: Vec<TextMetricsEntry>,
-    max_entries: usize,
-}
-
-impl TextMetricsCache {
-    const fn new(max_entries: usize) -> Self {
-        Self {
-            entries: Vec::new(),
-            max_entries,
-        }
-    }
-
-    fn get_or_compute<F>(&mut self, text: &str, font_size: f32, compute: F) -> (u32, u32)
-    where
-        F: FnOnce() -> (u32, u32),
-    {
-        // First try to find existing entry
-        let key = TextMetricsKey::from_text(text, font_size);
-        for entry in &self.entries {
-            if entry.key == key {
-                return entry.value;
-            }
-        }
-
-        // Compute the value
-        let result = compute();
-
-        // Simple eviction when cache is full
-        if self.entries.len() >= self.max_entries {
-            // Remove first quarter of entries (simple FIFO-style)
-            let remove_count = self.max_entries / 4;
-            if remove_count > 0 {
-                self.entries.drain(0..remove_count.min(self.entries.len()));
-            }
-        }
-
-        self.entries.push(TextMetricsEntry {
-            key,
-            value: result,
-        });
-        result
-    }
-}
-
-const TEXT_METRICS_CACHE_CAP: usize = 128;
-
-static TEXT_METRICS_CACHE: std::sync::Mutex<TextMetricsCache> =
-    std::sync::Mutex::new(TextMetricsCache::new(TEXT_METRICS_CACHE_CAP));
-
 #[inline]
 fn floor_i32(v: f32) -> i32 {
     let i = v as i32;
@@ -299,51 +221,48 @@ fn default_font() -> Option<FontRef<'static>> {
 /// Returns `(width, height)` in pixels for a single-line text layout.
 /// If the default font is not available, falls back to a rough estimate.
 pub fn measure_text_sized(text: &str, font_size_px: f32) -> (u32, u32) {
-    TEXT_METRICS_CACHE.lock().get_or_compute(text, font_size_px, || {
-        // Original measurement logic
-        if let Some(font) = default_font() {
-            let scale = PxScale::from(font_size_px);
-            let scaled = font.as_scaled(scale);
+    if let Some(font) = default_font() {
+        let scale = PxScale::from(font_size_px);
+        let scaled = font.as_scaled(scale);
 
-            let mut max_line_w: f32 = 0.0;
-            let mut line_w: f32 = 0.0;
-            let mut lines: u32 = 1;
+        let mut max_line_w: f32 = 0.0;
+        let mut line_w: f32 = 0.0;
+        let mut lines: u32 = 1;
 
-            for ch in text.chars() {
-                if ch == '\n' {
-                    if line_w > max_line_w {
-                        max_line_w = line_w;
-                    }
-                    line_w = 0.0;
-                    lines = lines.saturating_add(1);
-                    continue;
+        for ch in text.chars() {
+            if ch == '\n' {
+                if line_w > max_line_w {
+                    max_line_w = line_w;
                 }
-                let glyph_id = scaled.glyph_id(ch);
-                line_w += scaled.h_advance(glyph_id);
+                line_w = 0.0;
+                lines = lines.saturating_add(1);
+                continue;
             }
-
-            if line_w > max_line_w {
-                max_line_w = line_w;
-            }
-
-            let line_h = scaled.height() + scaled.line_gap();
-            let total_h = if lines <= 1 {
-                scaled.height()
-            } else {
-                scaled.height() + (lines.saturating_sub(1) as f32) * line_h
-            };
-
-            let w = ceil_i32(max_line_w).max(0) as u32;
-            let h = ceil_i32(total_h).max(0) as u32;
-            (w, h)
-        } else {
-            let fs = font_size_px.max(1.0);
-            let char_w = ceil_i32(fs * 0.60).max(1) as u32;
-            let w = (text.chars().count() as u32).saturating_mul(char_w);
-            let h = ceil_i32(fs).max(1) as u32;
-            (w, h)
+            let glyph_id = scaled.glyph_id(ch);
+            line_w += scaled.h_advance(glyph_id);
         }
-    })
+
+        if line_w > max_line_w {
+            max_line_w = line_w;
+        }
+
+        let line_h = scaled.height() + scaled.line_gap();
+        let total_h = if lines <= 1 {
+            scaled.height()
+        } else {
+            scaled.height() + (lines.saturating_sub(1) as f32) * line_h
+        };
+
+        let w = ceil_i32(max_line_w).max(0) as u32;
+        let h = ceil_i32(total_h).max(0) as u32;
+        (w, h)
+    } else {
+        let fs = font_size_px.max(1.0);
+        let char_w = ceil_i32(fs * 0.60).max(1) as u32;
+        let w = (text.chars().count() as u32).saturating_mul(char_w);
+        let h = ceil_i32(fs).max(1) as u32;
+        (w, h)
+    }
 }
 
 /// 2D point
@@ -372,8 +291,6 @@ pub struct Rect {
 }
 
 impl Rect {
-    pub const ZERO: Self = Self { x: 0, y: 0, width: 0, height: 0 };
-
     pub const fn new(x: i32, y: i32, width: u32, height: u32) -> Self {
         Self {
             x,

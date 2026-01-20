@@ -7,10 +7,6 @@ edition = "2024"
 name = "scarlet_ui"
 path = "src/lib.rs"
 
-[[example]]
-name = "observable_example"
-path = "examples/observable_example.rs"
-
 [dependencies]
 sws-client = { path = "../sws-client" }
 scarlet_std = { path = "../std" }

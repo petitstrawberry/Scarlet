@@ -7,6 +7,7 @@ use crate::node_id::NodeId;
 use crate::traits::{RenderNode, UpdateResult, View};
 use crate::views::text::Text;
 use crate::geometry::Color;
+use crate::theme::with_theme;
 use std::any::Any;
 use std::sync::Arc;
 use std::println;
@@ -27,11 +28,12 @@ pub struct ButtonColors {
 
 impl Default for ButtonColors {
     fn default() -> Self {
-        Self {
-            normal: Color::rgb(100, 100, 100),
-            hovered: Color::rgb(120, 120, 120),
-            pressed: Color::rgb(80, 80, 80),
-        }
+        // Use theme colors as defaults with fallback colors
+        with_theme(|theme| Self {
+            normal: theme.button_background,
+            hovered: theme.button_background_hovered,
+            pressed: theme.button_background_pressed,
+        })
     }
 }
 
@@ -155,18 +157,29 @@ impl RenderNode for ButtonRenderNode {
     }
 
     fn layout(&mut self, constraints: LayoutConstraints) -> Size {
-        // Layout label first
-        let label_size = self.label_node.layout(constraints);
+        // Button has intrinsic size based on label content
+        // Layout label with loose constraints to get its intrinsic size
+        let label_constraints = LayoutConstraints::loose(Size::new(
+            constraints.max.width,
+            constraints.max.height,
+        ));
+        let label_size = self.label_node.layout(label_constraints);
         println!("[button] ButtonRenderNode::layout() label_size: {:?}", label_size);
 
-        // Button is slightly larger than label
+        // Button is slightly larger than label (intrinsic size)
         let padding = 8.0;
-        let size = Size::new(
+        let intrinsic_size = Size::new(
             label_size.width + padding * 2.0,
             label_size.height + padding * 2.0,
         );
 
-        println!("[button] ButtonRenderNode::layout() final size: {:?}", size);
+        // Clamp to constraints (don't exceed available space, but don't grow)
+        let size = Size::new(
+            intrinsic_size.width.clamp(constraints.min.width, constraints.max.width),
+            intrinsic_size.height.clamp(constraints.min.height, constraints.max.height),
+        );
+
+        println!("[button] ButtonRenderNode::layout() intrinsic_size: {:?}, final size: {:?}", intrinsic_size, size);
         self.frame = Rect::new(Point::ZERO, size);
         size
     }

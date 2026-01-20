@@ -1,381 +1,310 @@
 # Scarlet UI
 
-A modern, data-first UI framework for Scarlet OS inspired by Druid, Flutter, and AppKit.
+A modern UI toolkit for Scarlet OS with SwiftUI-inspired APIs and reactive state management.
 
-## Architecture
+## Features
 
-ScarletUI follows a **data-first MVC architecture** with unidirectional data flow:
+### Core View System
 
-- **Data-first**: All state flows through `DataContext<T>`
-- **Unidirectional**: Data flows down, events flow up
-- **Phase-separated**: Event → Layout → Draw → Compose → Present
-- **Incremental**: Only redraw what changes (dirty tracking)
+- **Declarative view composition**: Build UIs by composing views hierarchically
+- **Automatic layout**: Views handle their own layout within constraints
+- **Event handling**: Two-phase event system (capture and bubble)
+- **Window management**: Built-in window decorations with modern design
 
-See [docs/architecture.md](docs/architecture.md) for detailed architecture documentation.
+### Reactive State Management
 
-## Core Features
-
-### View System
-
-All UI components implement the `View` trait:
+Scarlet UI provides SwiftUI-style reactive state management for automatic view updates:
 
 ```rust
-pub trait View {
-    fn id(&self) -> ViewId;
-    fn layout(&mut self, ctx: &mut LayoutCtx, constraints: LayoutConstraints) -> Size;
-    fn draw(&self, ctx: &mut PaintCtx, frame: Rect);
-    fn event(&mut self, ctx: &mut EventCtx, event: &Event) -> ControlFlow;
-    fn update(&mut self, ctx: &mut UpdateCtx);
+use scarlet_ui::{State, Label, Button, VStack};
+
+let counter = State::new(0);
+let counter_clone = counter.clone();
+
+VStack::new()
+    .child(Label::new(format!("Count: {}", counter.get())))
+    .child(Button::new("Increment", move || {
+        counter_clone.set(counter_clone.get() + 1);
+    }))
+```
+
+#### State<T>
+
+Reactive state that triggers view updates when modified:
+
+```rust
+let state = State::new(42);
+state.set(100);  // Updates all observers
+println!("{}", state.get());  // Prints: 100
+```
+
+#### Binding<T>
+
+Two-way binding for connecting state to UI controls:
+
+```rust
+let text = State::new(String::from(""));
+let binding = text.binding();
+
+TextField::new("Enter text...")
+    .bind(binding)  // TextField can read and write
+```
+
+### Timer Support
+
+Schedule periodic or one-shot updates:
+
+```rust
+use scarlet_ui::Timer;
+use core::time::Duration;
+
+// Periodic timer
+let timer = Timer::periodic(Duration::from_secs(1), || {
+    println!("Tick!");
+});
+
+// One-shot timer
+Timer::once(Duration::from_millis(500), || {
+    println!("Delayed action");
+});
+
+// Cancel timer
+timer.cancel();
+```
+
+### Thread-Safe UI Updates
+
+Update UI from background threads:
+
+```rust
+use scarlet_ui::{schedule_on_main_thread, State};
+
+let counter = State::new(0);
+
+// From a background thread:
+std::thread::spawn(move || {
+    // Do background work...
+    schedule_on_main_thread(move || {
+        // This runs on the main UI thread
+        counter.set(counter.get() + 1);
+    });
+});
+```
+
+### Declarative Macros
+
+Use proc macros for cleaner UI code:
+
+```rust
+use scarlet_ui::{DeriveView, state, binding};
+
+#[derive(DeriveView)]
+struct CounterView {
+    #[state]
+    count: i32,
 }
 ```
 
 ### Layout Containers
 
-The `child()` method automatically handles `Box::new()` - no need to wrap views!
+- **VStack**: Vertical stack layout
+- **HStack**: Horizontal stack layout
+- **ZStack**: Overlay layout (z-order)
+- **Padding**: Add padding around views
+- **Center**: Center views within available space
+- **Spacer**: Flexible spacing in stacks
+
+### Control Widgets
+
+#### Label
+Display text with customizable color and font size:
 
 ```rust
-use scarlet_ui::{VStack, HStack, ZStack};
-
-// Vertical stack
-let vstack = VStack::new()
-    .spacing(10)
-    .alignment(CrossAxisAlignment::Center)
-    .child(Text::new("Title"))
-    .child(Text::new("Subtitle"))
-    .child(Button::new("Click Me"));
-
-// Horizontal stack
-let hstack = HStack::new()
-    .spacing(15)
-    .alignment(MainAxisAlignment::Center)
-    .child(Button::new("OK"))
-    .child(Button::new("Cancel"));
-
-// ZStack for overlay
-let zstack = ZStack::new()
-    .child(Image::new("bg.png"))
-    .child(Text::new("Overlay"));
-```
-
-#### Using view! macro (SwiftUI-style)
-
-```rust
-use scarlet_ui::view;
-
-let ui = view! {
-    VStack(spacing: 16) {
-        Text("Title")
-        HStack(spacing: 10) {
-            Button("OK")
-            Button("Cancel")
-        }
-    }
-};
-```
-
-The `view!` macro:
-- Automatically wraps children in `Box` for you
-- Supports named parameters: `VStack(spacing: 10)`
-- Supports method chaining: `Text("Hello").set_color(Color::BLACK)`
-- Handles nested containers naturally
-
-### View Modifiers (SwiftUI-style)
-
-Apply transformations using method chaining:
-
-```rust
-let styled = Text::new("Hello")
-    .padding(10)
-    .frame(200, 50)
-    .background(Color::rgb(240, 240, 240))
-    .repaint_boundary();
-```
-
-Available modifiers:
-- `padding(u32)` - Add padding
-- `padding_insets(top, right, bottom, left)` - Add different padding per edge
-- `frame(width, height)` - Set fixed size
-- `frame_constraints(min_w, max_w, min_h, max_h)` - Set size constraints
-- `background(Color)` - Set background color
-- `repaint_boundary()` - Isolate repaints
-- `repaint_boundary_opaque()` - Isolate with opaque hint
-
-### Available Controls
-
-#### Text
-```rust
-let text = Text::new("Hello, World!")
-    .set_font(FontConfig { size: 24, ..Default::default() })
-    .set_color(Color::BLACK)
-    .set_alignment(TextAlignment::Center);
+Label::new("Hello, World!")
+    .color(Color::BLACK)
+    .font_size(24)
 ```
 
 #### Button
-```rust
-let button = Button::new("Click Me")
-    .set_action(Arc::new(|| {
-        println!("Clicked!");
-    }))
-    .set_colors(
-        Color::BUTTON_NORMAL,
-        Color::BUTTON_HOVER,
-        Color::BUTTON_PRESSED
-    );
-```
+Interactive button with click handler:
 
-#### Image
 ```rust
-let image = Image::with_data(ImageData::new(data, width, height))
-    .set_scaling(ImageScaling::Fit);
+Button::new("Click Me", || {
+    println!("Button clicked!");
+})
+.background(Color::BLUE)
+.text_color(Color::WHITE)
 ```
 
 #### TextField
+Text input control with placeholder:
+
 ```rust
-let field = TextField::new()
-    .set_placeholder("Enter text...")
-    .set_text("Hello");
+TextField::new("Enter text...")
+    .text_color(Color::BLACK)
+    .background(Color::WHITE)
 ```
 
-#### TextField (with data binding)
+#### CheckBox
+Boolean toggle with label:
+
 ```rust
-let text_data = bindable!(String::from("Hello"));
-
-// TextField automatically updates text_data
-let field = TextField::bind(&text_data);
-
-// Other views can observe the same data
-let display = Text::bind(&text_data, |s| format!("Text: {}", s));
-```
-
-#### Toggle
-```rust
-let toggle = Toggle::with_label(true, "Enable feature")
-    .set_style(ToggleStyle::Switch);
-// or ToggleStyle::Checkbox
+CheckBox::new("Enable feature", true)
+    .on_toggle(|checked| {
+        println!("Checked: {}", checked);
+    })
 ```
 
 #### Slider
-```rust
-let slider = Slider::with_value(0.0, 100.0, 50.0)
-    .set_step(1.0)
-    .set_label("Volume");
-```
-
-### State Management
-
-ScarletUI provides reactive state management with `DataContext<T>`:
+Value selection with range:
 
 ```rust
-use scarlet_ui::DataContext;
-
-struct AppState {
-    count: i32,
-    text: String,
-}
-
-let data = DataContext::new(AppState {
-    count: 0,
-    text: String::from("Hello"),
-});
-
-// Read
-let count = data.get().count;
-
-// Modify (auto-invalidation)
-data.modify(|state| {
-    state.count += 1;  // Triggers repaint
-});
+Slider::new(0.5, 0.0, 1.0)
+    .on_change(|value| {
+        println!("Value: {}", value);
+    })
 ```
 
-#### bindable! Macro (SwiftUI-style @State)
-
-Create reactive state variables with minimal syntax:
+#### ProgressBar
+Progress indicator:
 
 ```rust
-use scarlet_ui::bindable;
-
-fn build_ui() {
-    let enabled = bindable!(false);
-    let volume = bindable!(50.0);
-
-    // Bind UI controls
-    let toggle = Toggle::bind(&enabled);
-    let slider = Slider::bind(&volume, 0.0, 100.0);
-}
+ProgressBar::new(0.75)
+    .fill_color(Color::BLUE)
+    .height(20)
 ```
 
-This is equivalent to SwiftUI's `@State` property wrapper.
-
-### Two-Way Data Binding
-
-UI controls can bind to `DataContext` for automatic synchronization:
+#### Toggle
+Switch-style boolean control:
 
 ```rust
-use scarlet_ui::*;
-
-// Create state with bindable! macro
-let enabled = bindable!(false);
-let volume = bindable!(50.0);
-
-// Bind controls to state
-let toggle = Toggle::bind(&enabled);
-let slider = Slider::bind(&volume, 0.0, 100.0);
-
-// Display current values
-let enabled_text = Text::bind(&enabled, |e| if *e { "ON" } else { "OFF" });
-let volume_text = Text::bind(&volume, |v| format!("Volume: {}", v));
+Toggle::new(true)
+    .on_toggle(|enabled| {
+        println!("Enabled: {}", enabled);
+    })
 ```
 
-**Data Flow:**
-```
-User clicks Toggle
-    ↓
-Toggle updates DataContext<bool>
-    ↓
-Text automatically redraws with new value
-```
+### View Modifiers
 
-#### Binding with Structs
-
-For complex state, use structs with Lenses:
+Apply styles using method chaining:
 
 ```rust
-use scarlet_ui::*;
-
-struct AudioState {
-    volume: f32,
-    bass: f32,
-    treble: f32,
-}
-
-let state = bindable!(AudioState {
-    volume: 50.0,
-    bass: 30.0,
-    treble: 70.0,
-});
-
-// Create lenses for each field
-let volume_lens = FnLens::new(
-    |s: &AudioState| &s.volume,
-    |s: &mut AudioState| &mut s.volume
-);
-
-// Create child DataContext for volume
-let volume_data = state.child(volume_lens);
-
-// Bind to child
-let slider = Slider::bind(&volume_data, 0.0, 100.0);
-let display = Text::bind(&volume_data, |v| format!("Volume: {}", v));
+view
+    .corner_radius(8)
+    .border(2, Color::GRAY)
+    .background_color(Color::WHITE)
 ```
 
-## Example Application
+Available modifiers:
+- `corner_radius(radius)` - Add rounded corners
+- `border(width, color)` - Add border
+- `background_color(color)` - Set background color
 
-### Counter with Data Binding
+### Modern Window Design
+
+Windows feature:
+- Gradient title bar
+- Modern close button with hover effects
+- Customizable background
+- Size constraints support
 
 ```rust
-use scarlet_ui::*;
-
-fn build_counter() -> impl View {
-    let count = bindable!(0i32);
-
-    VStack::new()
-        .spacing(16)
-        .alignment(CrossAxisAlignment::Center)
-        .child(Text::bind(&count, |c| format!("Count: {}", c)))
-        .child(
-            Button::new("Increment")
-                .set_action(Arc::new(|| {
-                    count.modify(|c| *c += 1);
-                }))
-        )
-}
+Window::new("My App", 600, 400)
+    .min_size(400, 300)
+    .max_size(1024, 768)
+    .background(Color::WHITE)
+    .content(/* your views */)
 ```
 
-### Audio Settings UI
+## Example Application with Reactive State
 
 ```rust
-use scarlet_ui::*;
+#![no_std]
+#![no_main]
 
-struct AudioState {
-    volume: f32,
-    bass: f32,
-    treble: f32,
-}
+extern crate scarlet_std as std;
 
-fn build_audio_ui() -> impl View {
-    let state = bindable!(AudioState {
-        volume: 50.0,
-        bass: 30.0,
-        treble: 70.0,
+use scarlet_ui::{
+    Application, Window, VStack, HStack, Label, Button, 
+    CheckBox, Slider, Padding, Color, ViewModifier,
+    State, Timer,
+};
+use core::time::Duration;
+
+#[unsafe(no_mangle)]
+pub extern "C" fn main() -> i32 {
+    let mut app = Application::new().expect("Failed to connect");
+    
+    // Reactive state
+    let counter = State::new(0);
+    let enabled = State::new(true);
+    
+    // Timer to auto-increment
+    let counter_clone = counter.clone();
+    Timer::periodic(Duration::from_secs(1), move || {
+        counter_clone.set(counter_clone.get() + 1);
     });
-
-    VStack::new()
-        .spacing(16)
-        .child(Text::new("Audio Settings"))
-        .child(build_slider(&state, "Volume", |s| &mut s.volume, 0.0, 100.0))
-        .child(build_slider(&state, "Bass", |s| &mut s.bass, 0.0, 100.0))
-        .child(build_slider(&state, "Treble", |s| &mut s.treble, 0.0, 100.0))
-}
-
-fn build_slider<F>(
-    state: &DataContext<AudioState>,
-    label: &str,
-    lens_fn: F,
-    min: f32,
-    max: f32,
-) -> VStack
-where
-    F: Fn(&mut AudioState) -> &mut f32 + 'static + Copy,
-{
-    let lens = FnLens::new(
-        |s: &AudioState| lens_fn(s),
-        |s: &mut AudioState| lens_fn(s)
-    );
-
-    let child_data = state.child(lens);
-
-    VStack::new()
-        .spacing(8)
-        .child(Text::bind(&child_data, |v| format!("{}: {}", label, *v)))
-        .child(Slider::bind(&child_data, min, max))
+    
+    let window = Window::new("Reactive Demo", 600, 400)
+        .background(Color::rgb(245, 245, 250))
+        .content(
+            Padding::new(
+                VStack::new()
+                    .spacing(16)
+                    .child(Label::new(format!("Counter: {}", counter.get())).font_size(32))
+                    .child(CheckBox::new("Auto-increment", enabled.get())
+                        .on_toggle(move |checked| {
+                            enabled.set(checked);
+                        })
+                    )
+                    .child(Slider::new(0.5, 0.0, 1.0))
+                    .child(HStack::new()
+                        .child(Button::new("Reset", move || {
+                            counter.set(0);
+                        }))
+                        .child(Button::new("Increment", move || {
+                            counter.set(counter.get() + 1);
+                        }))
+                    )
+            ).all(20)
+        );
+    
+    app.add_window(window).unwrap();
+    app.run(); // Never returns
 }
 ```
+
+## Design Philosophy
+
+Scarlet UI is inspired by SwiftUI and follows these principles:
+
+1. **Declarative**: Describe what you want, not how to build it
+2. **Composable**: Build complex UIs from simple components
+3. **Reactive**: State changes automatically update views
+4. **Type-safe**: Leverage Rust's type system for correctness
+5. **Efficient**: Minimal allocations, `no_std` compatible
 
 ## Building
 
 Scarlet UI requires:
 - Rust nightly with `no_std` support
 - `rust-src` component for cross-compilation
+- Vector font file at `/fonts/Mplus1-Regular.ttf` in the system
 
-Build with:
+Build with cargo-make:
 
 ```bash
-cargo build --target riscv64gc-unknown-none-elf
+cargo make build-userlib-debug-riscv64
 ```
 
 ## Testing
 
+Run tests with:
+
 ```bash
-cargo test
+cargo make test-riscv64  # For RISC-V
+cargo make test-aarch64  # For AArch64
 ```
-
-## Design Philosophy
-
-Scarlet UI follows these principles:
-
-1. **Data-first**: State is the single source of truth
-2. **Composable**: Build complex UIs from simple components
-3. **Efficient**: O(1) operations, incremental updates, repaint boundaries
-4. **Predictable**: Unidirectional flow, phase-separated pipeline
-5. **Type-safe**: Leverage Rust's type system
-
-## Performance Features
-
-- **O(1) dirty tracking** via HashSet
-- **Repaint boundaries** for isolating updates
-- **Buffer pooling** with grow-only strategy
-- **Constraint-based layout** for responsive UIs
-- **Minimal reallocations** with efficient event handling
 
 ## License
 

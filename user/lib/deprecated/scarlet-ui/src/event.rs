@@ -43,8 +43,6 @@ pub enum EventKind {
     MouseEnter,
     /// Mouse left view bounds
     MouseLeave,
-    /// Mouse wheel scrolled (delta_x, delta_y)
-    MouseWheel { delta_x: i32, delta_y: i32 },
     /// Key pressed
     KeyDown { code: u16 },
     /// Key released
@@ -99,11 +97,6 @@ impl Event {
     /// Create a key up event
     pub fn key_up(code: u16) -> Self {
         Self::new(EventKind::KeyUp { code }, Point::ZERO)
-    }
-
-    /// Create a mouse wheel event
-    pub fn mouse_wheel(x: i32, y: i32, delta_x: i32, delta_y: i32) -> Self {
-        Self::new(EventKind::MouseWheel { delta_x, delta_y }, Point::new(x, y))
     }
 
     /// Stop event propagation

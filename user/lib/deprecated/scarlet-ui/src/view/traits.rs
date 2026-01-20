@@ -1,81 +1,162 @@
 //! Core View trait and related types
 
-extern crate alloc;
-use alloc::boxed::Box;
-use alloc::vec::Vec;
+use crate::graphics::{Canvas, Rect};
+use crate::event::Event;
+use scarlet_std::boxed::Box;
+use scarlet_std::vec::Vec;
 
-use crate::view::render::RenderObject;
-use crate::view::id::ViewId;
-
-/// View trait - main UI abstraction
-///
-/// View extends RenderObject. Provides structure (body, children)
-/// while inheriting behavior (layout, draw, event, update) from RenderObject.
-pub trait View: RenderObject {
-    // ===== Structure =====
-
-    /// Body content - child view definition
-    fn body(&self) -> Option<&dyn View> {
-        None
-    }
-
-    /// Get child views (for containers)
-    fn children(&self) -> &[ChildView] {
-        &[]
-    }
-
-    /// Get mutable child views (for containers)
-    fn children_mut(&mut self) -> &mut [ChildView] {
-        &mut []
-    }
+/// Size constraints for layout
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Size {
+    pub width: u32,
+    pub height: u32,
 }
 
-/// A child view with its frame
-///
-/// This is used by container views to track their children and their
-/// positions within the container.
-pub struct ChildView {
-    /// The child view
-    pub view: Box<dyn View>,
-    /// The frame (position and size) allocated to this child
-    pub frame: crate::graphics::Rect,
-}
-
-impl ChildView {
-    /// Create a new ChildView
-    pub fn new(view: Box<dyn View>, frame: crate::graphics::Rect) -> Self {
-        Self { view, frame }
+impl Size {
+    pub const fn new(width: u32, height: u32) -> Self {
+        Self { width, height }
     }
+
+    pub const ZERO: Size = Size::new(0, 0);
 }
 
-/// Marker trait for views that can contain other views
+/// The core trait for all UI components
 ///
-/// Container views should implement this trait to advertise that they
-/// have children. This allows the framework to optimize event handling
-/// and layout.
-pub trait Container: View {
-    /// Add a child view
+/// Views form a tree structure where each view can contain child views.
+/// The framework handles layout, drawing, and event dispatch automatically.
+///
+/// # Event Propagation
+///
+/// Events follow a two-phase model:
+/// 1. **Capture phase**: `on_event_capture()` called from root to target
+/// 2. **Bubble phase**: `on_event()` called from target to root
+///
+/// # Lifecycle
+///
+/// 1. `layout()` - Called to determine size and position
+/// 2. `draw()` - Called to render the view
+/// 3. `on_event_capture()` / `on_event()` - Called during event dispatch
+///
+/// # Example
+///
+/// ```no_run
+/// use scarlet_ui::{View, Canvas, Rect, Size, Event, Color};
+///
+/// struct MyView {
+///     text: &'static str,
+/// }
+///
+/// impl View for MyView {
+///     fn layout(&mut self, available: Size) -> Size {
+///         Size::new(100, 20) // Fixed size
+///     }
+///
+///     fn draw(&self, canvas: &mut Canvas, frame: Rect) {
+///         canvas.draw_text(frame.x, frame.y, self.text, Color::BLACK);
+///     }
+/// }
+/// ```
+pub trait View {
+    /// Calculate the desired size given available space
     ///
-    /// The container is responsible for positioning the child appropriately.
-    fn add_child(&mut self, child: Box<dyn View>);
+    /// Returns the size this view wants to be.
+    fn layout(&mut self, available: Size) -> Size;
 
-    /// Remove all children
-    fn clear_children(&mut self);
+    /// Draw the view within the given frame
+    ///
+    /// The frame is the actual rectangle allocated by the parent.
+    fn draw(&self, canvas: &mut Canvas, frame: Rect);
+
+    /// Called during capture phase (root → target)
+    ///
+    /// Return `true` to stop propagation and consume the event.
+    /// This is useful for parent views that want to intercept events
+    /// before they reach children.
+    fn on_event_capture(&mut self, _event: &mut Event, _frame: Rect) -> bool {
+        false
+    }
+
+    /// Called during bubble phase (target → root)
+    ///
+    /// Return `true` to stop propagation and consume the event.
+    /// This is the primary event handling method for most views.
+    fn on_event(&mut self, _event: &mut Event, _frame: Rect) -> bool {
+        false
+    }
+
+    /// Get child views with their frames for hit-testing
+    ///
+    /// Returns an empty slice by default (leaf views).
+    /// Container views should override this to return their children.
+    fn children(&self) -> Vec<(&dyn View, Rect)> {
+        Vec::new()
+    }
+
+    /// Get mutable child views with their frames
+    fn children_mut(&mut self) -> Vec<(&mut dyn View, Rect)> {
+        Vec::new()
+    }
+
+    /// Visit children without allocating.
+    ///
+    /// The visitor returns `true` to stop iteration early.
+    ///
+    /// Containers should override this to avoid per-call allocations.
+    fn visit_children(&self, visitor: &mut dyn FnMut(&dyn View, Rect) -> bool) {
+        for (child, frame) in self.children() {
+            if visitor(child, frame) {
+                break;
+            }
+        }
+    }
+
+    /// Visit mutable children without allocating.
+    ///
+    /// The visitor returns `true` to stop iteration early.
+    ///
+    /// Containers should override this to avoid per-call allocations.
+    fn visit_children_mut(&mut self, visitor: &mut dyn FnMut(&mut dyn View, Rect) -> bool) {
+        for (child, frame) in self.children_mut() {
+            if visitor(child, frame) {
+                break;
+            }
+        }
+    }
+
+    /// Flex factor for main-axis space distribution in stacks.
+    ///
+    /// - `0` (default): the view is laid out at its natural size.
+    /// - `>0`: the view participates in distributing remaining space in `VStack`/`HStack`.
+    fn flex_factor(&self) -> u32 {
+        0
+    }
+
+    /// Check if this view needs to be redrawn
+    fn needs_draw(&self) -> bool {
+        false
+    }
+
+    /// Mark this view as needing redraw
+    fn set_needs_draw(&mut self) {
+        // Default: no-op (views can track their own dirty state)
+    }
+
+    /// Clear the needs_draw flag after drawing
+    fn clear_needs_draw(&mut self) {
+        // Default: no-op
+    }
 }
 
-/// Marker trait for views that are opaque
-///
-/// Opaque views are guaranteed to draw every pixel within their frame,
-/// allowing the framework to skip drawing views behind them.
-pub trait Opaque: View {}
+/// Type-erased boxed View for dynamic dispatch
+pub type ViewBox = Box<dyn View>;
 
-/// Marker trait for views that have a stable identity
-///
-/// Views implementing this trait maintain their identity across
-/// rebuilds, allowing the framework to preserve state.
-pub trait Identifiable: View {
-    /// Get the stable identifier for this view
-    fn stable_id(&self) -> Option<ViewId> {
-        None
+/// Extension trait for converting views into boxes
+pub trait IntoViewBox {
+    fn into_view_box(self) -> ViewBox;
+}
+
+impl<V: View + 'static> IntoViewBox for V {
+    fn into_view_box(self) -> ViewBox {
+        Box::new(self)
     }
 }

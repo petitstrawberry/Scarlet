@@ -236,14 +236,17 @@ impl RenderNode for VStackRenderNode {
         let total_spacing = self.spacing * (n - 1) as f32;
         let available_for_children = available_height - total_spacing;
 
-        // Pass 1: Measure minimum requirements (loose constraints)
+        // Pass 1: Measure intrinsic sizes with loose constraints
         let loose_constraints = LayoutConstraints::loose(constraints.max);
-        let min_heights: Vec<f32> = self
+        let mut intrinsic_sizes: Vec<Size> = self
             .children
             .iter_mut()
-            .map(|c| c.layout(loose_constraints).height)
+            .map(|c| c.layout(loose_constraints))
             .collect();
 
+        // Calculate intrinsic width (max of children's widths)
+        let intrinsic_width: f32 = intrinsic_sizes.iter().map(|s| s.width).fold(0.0, |a, b| a.max(b));
+        let min_heights: Vec<f32> = intrinsic_sizes.iter().map(|s| s.height).collect();
         let min_total: f32 = min_heights.iter().sum();
 
         // Pass 2: Distribute remaining space or clamp
@@ -257,8 +260,8 @@ impl RenderNode for VStackRenderNode {
             };
 
             for (i, child) in self.children.iter_mut().enumerate() {
-                // Ensure width is set to the available width
-                let child_width = constraints.max.width;
+                // Width is limited to child's intrinsic width (don't stretch)
+                let child_width = intrinsic_sizes[i].width;
                 let child_constraints = LayoutConstraints {
                     min: Size::new(child_width, min_heights[i]),
                     max: Size::new(
@@ -277,8 +280,8 @@ impl RenderNode for VStackRenderNode {
                     1.0 / n as f32
                 };
                 let child_height = (available_for_children * ratio).min(min_heights[i]);
-                // Use tight constraints for width to ensure it's set correctly
-                let child_width = constraints.max.width;
+                // Width is limited to child's intrinsic width (don't stretch)
+                let child_width = intrinsic_sizes[i].width;
                 let child_constraints = LayoutConstraints {
                     min: Size::new(child_width, 0.0),
                     max: Size::new(child_width, child_height),
@@ -288,9 +291,10 @@ impl RenderNode for VStackRenderNode {
         }
 
         // Calculate total size
-        let max_width = constraints.max.width;
+        // Width is intrinsic (content-driven), height is constrained
+        let width = intrinsic_width.clamp(constraints.min.width, constraints.max.width);
         let total_height = min_total.min(available_for_children) + total_spacing;
-        let size = Size::new(max_width, total_height);
+        let size = Size::new(width, total_height);
 
         // Set frame
         self.frame = Rect::new(Point::ZERO, size);
@@ -317,8 +321,18 @@ impl RenderNode for VStackRenderNode {
         let mut y_offset = 0.0;
         for (i, child) in self.children.iter_mut().enumerate() {
             let child_size = child.frame().size;
+
+            // Calculate x offset based on alignment
+            let x_offset = match self.alignment {
+                Alignment::Start => 0.0,
+                Alignment::Center => (self.frame.size.width - child_size.width) / 2.0,
+                Alignment::End => self.frame.size.width - child_size.width,
+                Alignment::Stretch => 0.0,  // Already stretched by layout
+            };
+
+            println!("[vstack] child[{}] alignment x_offset: {}", i, x_offset);
             println!("[vstack] child[{}] size before set_frame: {:?}", i, child_size);
-            child.set_frame(Rect::new(Point::new(0.0, y_offset), child_size));
+            child.set_frame(Rect::new(Point::new(x_offset, y_offset), child_size));
             println!("[vstack] child[{}] frame after set_frame: {:?}", i, child.frame());
             child.render();
 
