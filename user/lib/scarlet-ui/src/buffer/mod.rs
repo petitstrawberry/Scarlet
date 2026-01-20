@@ -79,6 +79,7 @@ impl Buffer {
     }
 
     /// Blit from another buffer at the specified position in LOCAL coordinates
+    /// Performs alpha blending for transparent pixels
     pub fn blit_from(&mut self, src: &Buffer, dest_rect: Rect) {
         let src_width = src.width();
         let src_height = src.height();
@@ -100,10 +101,34 @@ impl Buffer {
             .min(self.height() - dest_y);
 
         for y in 0..copy_height {
-            let src_offset = y * src.stride;
-            let dest_offset = (dest_y + y) * self.stride + dest_x * 4;
-            let row = &src.data[src_offset..src_offset + copy_width * 4];
-            self.data[dest_offset..dest_offset + copy_width * 4].copy_from_slice(row);
+            for x in 0..copy_width {
+                let src_offset = y * src.stride + x * 4;
+                let dest_offset = (dest_y + y) * self.stride + (dest_x + x) * 4;
+
+                let src_b = src.data[src_offset];
+                let src_g = src.data[src_offset + 1];
+                let src_r = src.data[src_offset + 2];
+                let src_a = src.data[src_offset + 3];
+
+                // Alpha blending
+                if src_a == 255 {
+                    // Opaque: copy directly
+                    self.data[dest_offset] = src_b;
+                    self.data[dest_offset + 1] = src_g;
+                    self.data[dest_offset + 2] = src_r;
+                    self.data[dest_offset + 3] = src_a;
+                } else if src_a > 0 {
+                    // Semi-transparent: blend with destination
+                    let alpha = src_a as f32 / 255.0;
+                    let inv_alpha = 1.0 - alpha;
+
+                    self.data[dest_offset] = (src_b as f32 * alpha + self.data[dest_offset] as f32 * inv_alpha) as u8;
+                    self.data[dest_offset + 1] = (src_g as f32 * alpha + self.data[dest_offset + 1] as f32 * inv_alpha) as u8;
+                    self.data[dest_offset + 2] = (src_r as f32 * alpha + self.data[dest_offset + 2] as f32 * inv_alpha) as u8;
+                    self.data[dest_offset + 3] = (src_a as f32 * alpha + self.data[dest_offset + 3] as f32 * inv_alpha) as u8;
+                }
+                // If alpha == 0, keep destination pixel unchanged
+            }
         }
     }
 
