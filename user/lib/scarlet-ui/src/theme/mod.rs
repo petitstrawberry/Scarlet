@@ -64,31 +64,31 @@ impl Theme {
         Self {
             scheme: ColorScheme::Light,
 
-            // Window colors - white
+            // Window colors - based on deprecated
             window_background: Color::rgb(255, 255, 255),
-            window_border: Color::rgb(200, 200, 200),
+            window_border: Color::rgb(100, 100, 105),
 
-            // Titlebar colors - light gray
-            titlebar_background: Color::rgb(240, 240, 240),
-            titlebar_background_end: Color::rgb(240, 240, 240),
-            titlebar_text: Color::rgb(40, 40, 40),
-            titlebar_border: Color::rgb(200, 200, 200),
+            // Titlebar colors - based on deprecated
+            titlebar_background: Color::rgb(235, 235, 238),
+            titlebar_background_end: Color::rgb(235, 235, 238),
+            titlebar_text: Color::rgb(20, 20, 24),
+            titlebar_border: Color::rgb(100, 100, 105),
 
             // Button colors - gray
-            button_background: Color::rgb(225, 225, 225),
-            button_background_hovered: Color::rgb(210, 210, 210),
-            button_background_pressed: Color::rgb(180, 180, 180),
-            button_text: Color::rgb(40, 40, 40),
+            button_background: Color::rgb(235, 235, 238),
+            button_background_hovered: Color::rgb(210, 210, 214),
+            button_background_pressed: Color::rgb(190, 190, 194),
+            button_text: Color::rgb(20, 20, 24),
             button_border: Color::rgb(180, 180, 180),
 
             // Close button - gray, more visible hover
-            close_button_background: Color::rgb(200, 200, 200),
-            close_button_background_hovered: Color::rgb(220, 220, 220),
-            close_button_border: Color::rgb(200, 200, 200),
-            close_button_border_hovered: Color::rgb(180, 180, 180),
+            close_button_background: Color::rgb(235, 235, 238),
+            close_button_background_hovered: Color::rgb(210, 210, 214),
+            close_button_border: Color::rgb(235, 235, 238),
+            close_button_border_hovered: Color::rgb(210, 210, 214),
 
             // Text colors
-            text_primary: Color::rgb(40, 40, 40),
+            text_primary: Color::rgb(20, 20, 24),
             text_secondary: Color::rgb(120, 120, 120),
 
             // Background colors

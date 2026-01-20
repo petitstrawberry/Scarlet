@@ -35,8 +35,8 @@ impl Window {
     }
 
     pub const TITLEBAR_HEIGHT: f32 = 32.0;
-    pub const BUTTON_SIZE: f32 = 32.0;
-    pub const BUTTON_SPACING: f32 = 0.0;
+    pub const CLOSE_BUTTON_SIZE: f32 = 18.0;
+    pub const CLOSE_BUTTON_MARGIN: f32 = 8.0;
 }
 
 impl View for Window {
@@ -100,27 +100,36 @@ impl WindowRenderNode {
         node
     }
 
-    fn get_minimize_button_rect(&self) -> Rect {
-        let x = self.frame.size.width - Window::BUTTON_SIZE * 3.0;
+    fn get_close_button_rect(&self) -> Rect {
+        let seg_w = Window::CLOSE_BUTTON_SIZE + Window::CLOSE_BUTTON_MARGIN * 2.0;
+        let total_w = seg_w * 3.0;
+        let right_x = self.frame.size.width - total_w;
+        let x = right_x + seg_w * 2.0;  // Close is rightmost (index 0)
         Rect::new(
             Point::new(x, 0.0),
-            Size::new(Window::BUTTON_SIZE, Window::BUTTON_SIZE),
+            Size::new(seg_w, Window::TITLEBAR_HEIGHT),
         )
     }
 
     fn get_maximize_button_rect(&self) -> Rect {
-        let x = self.frame.size.width - Window::BUTTON_SIZE * 2.0;
+        let seg_w = Window::CLOSE_BUTTON_SIZE + Window::CLOSE_BUTTON_MARGIN * 2.0;
+        let total_w = seg_w * 3.0;
+        let right_x = self.frame.size.width - total_w;
+        let x = right_x + seg_w;  // Maximize is middle (index 1)
         Rect::new(
             Point::new(x, 0.0),
-            Size::new(Window::BUTTON_SIZE, Window::BUTTON_SIZE),
+            Size::new(seg_w, Window::TITLEBAR_HEIGHT),
         )
     }
 
-    fn get_close_button_rect(&self) -> Rect {
-        let x = self.frame.size.width - Window::BUTTON_SIZE;
+    fn get_minimize_button_rect(&self) -> Rect {
+        let seg_w = Window::CLOSE_BUTTON_SIZE + Window::CLOSE_BUTTON_MARGIN * 2.0;
+        let total_w = seg_w * 3.0;
+        let right_x = self.frame.size.width - total_w;
+        let x = right_x;  // Minimize is leftmost (index 2)
         Rect::new(
             Point::new(x, 0.0),
-            Size::new(Window::BUTTON_SIZE, Window::BUTTON_SIZE),
+            Size::new(seg_w, Window::TITLEBAR_HEIGHT),
         )
     }
 }
@@ -253,101 +262,116 @@ impl RenderNode for WindowRenderNode {
                 let width = buf.width();
                 let height = buf.height();
 
-                // Simple text, no shadow
+                // Title text at (10, 9) like deprecated
                 let title_color = with_theme(|theme| theme.titlebar_text);
                 draw_text(
                     buf.as_mut_slice(),
                     width,
                     height,
                     &self.title,
-                    8,  // x padding
-                    8,  // y padding
+                    10,  // x position (deprecated)
+                    9,   // y position (deprecated)
                     13.0, // font size
                     title_color.as_bgra(),
                 );
             }
 
-            // Draw window control buttons (1px lines, properly centered)
-            let icon_color = with_theme(|theme| theme.titlebar_text).as_bgra();
-
-            // Minimize button
-            let minimize_rect = self.get_minimize_button_rect();
-            if self.minimize_button_hovered {
-                let hover_bg = with_theme(|theme| theme.close_button_background_hovered);
-                self.buffer.as_mut().unwrap().fill_rect(minimize_rect, hover_bg.as_bgra());
-            }
-            // Minimize icon: horizontal line (1px thick, centered)
-            let min_cx = minimize_rect.origin.x + Window::BUTTON_SIZE / 2.0;
-            let min_cy = minimize_rect.origin.y + Window::BUTTON_SIZE / 2.0;
-            let line_width = 10.0;
-            self.buffer.as_mut().unwrap().fill_rect(Rect::new(
-                Point::new(min_cx - line_width / 2.0, min_cy - 0.5),
-                Size::new(line_width, 1.0),
-            ), icon_color);
-
-            // Maximize button
+            // Draw window control buttons (deprecated style)
+            let close_rect = self.get_close_button_rect();
             let maximize_rect = self.get_maximize_button_rect();
-            if self.maximize_button_hovered {
-                let hover_bg = with_theme(|theme| theme.close_button_background_hovered);
-                self.buffer.as_mut().unwrap().fill_rect(maximize_rect, hover_bg.as_bgra());
+            let minimize_rect = self.get_minimize_button_rect();
+
+            let close_color = if self.close_button_hovered {
+                with_theme(|theme| theme.button_background_hovered)
+            } else {
+                with_theme(|theme| theme.button_background)
+            };
+
+            let maximize_color = if self.maximize_button_hovered {
+                with_theme(|theme| theme.button_background_hovered)
+            } else {
+                with_theme(|theme| theme.button_background)
+            };
+
+            let minimize_color = if self.minimize_button_hovered {
+                with_theme(|theme| theme.button_background_hovered)
+            } else {
+                with_theme(|theme| theme.button_background)
+            };
+
+            // Draw button backgrounds
+            self.buffer.as_mut().unwrap().fill_rect(close_rect, close_color.as_bgra());
+            self.buffer.as_mut().unwrap().fill_rect(maximize_rect, maximize_color.as_bgra());
+            self.buffer.as_mut().unwrap().fill_rect(minimize_rect, minimize_color.as_bgra());
+
+            // Draw icons (deprecated style: rgb(30, 30, 34))
+            let icon_color = Color::rgb(30, 30, 34).as_bgra();
+            let icon_size: i32 = 10;
+            let icon_half = icon_size / 2;
+
+            // Close button: X icon
+            let cx = close_rect.origin.x as i32 + close_rect.size.width as i32 / 2;
+            let cy = close_rect.origin.y as i32 + close_rect.size.height as i32 / 2;
+            let x0 = cx - icon_half;
+            let x1 = cx + icon_half - 1;
+            let y0 = cy - icon_half;
+            let y1 = cy + icon_half - 1;
+
+            // Draw X line 1 (diagonal)
+            for i in 0..10 {
+                let offset = i;
+                self.buffer.as_mut().unwrap().fill_rect(Rect::new(
+                    Point::new((x0 + offset) as f32, (y0 + offset) as f32),
+                    Size::new(1.0, 1.0),
+                ), icon_color);
             }
-            // Maximize icon: square outline (1px thick, centered)
-            let max_cx = maximize_rect.origin.x + Window::BUTTON_SIZE / 2.0;
-            let max_cy = maximize_rect.origin.y + Window::BUTTON_SIZE / 2.0;
-            let box_size = 10.0;
-            let box_half = box_size / 2.0;
+            // Draw X line 2 (diagonal)
+            for i in 0..10 {
+                let offset = i;
+                self.buffer.as_mut().unwrap().fill_rect(Rect::new(
+                    Point::new((x1 - offset) as f32, (y0 + offset) as f32),
+                    Size::new(1.0, 1.0),
+                ), icon_color);
+            }
+
+            // Maximize button: square outline
+            let mx = maximize_rect.origin.x as i32 + maximize_rect.size.width as i32 / 2;
+            let my = maximize_rect.origin.y as i32 + maximize_rect.size.height as i32 / 2;
+            let mx0 = mx - icon_half;
+            let my0 = my - icon_half;
+            let msize = 10;
+
             // Top
             self.buffer.as_mut().unwrap().fill_rect(Rect::new(
-                Point::new(max_cx - box_half, max_cy - box_half),
-                Size::new(box_size, 1.0),
+                Point::new(mx0 as f32, my0 as f32),
+                Size::new(msize as f32, 1.0),
             ), icon_color);
             // Bottom
             self.buffer.as_mut().unwrap().fill_rect(Rect::new(
-                Point::new(max_cx - box_half, max_cy + box_half - 1.0),
-                Size::new(box_size, 1.0),
+                Point::new(mx0 as f32, (my0 + msize - 1) as f32),
+                Size::new(msize as f32, 1.0),
             ), icon_color);
             // Left
             self.buffer.as_mut().unwrap().fill_rect(Rect::new(
-                Point::new(max_cx - box_half, max_cy - box_half),
-                Size::new(1.0, box_size),
+                Point::new(mx0 as f32, my0 as f32),
+                Size::new(1.0, msize as f32),
             ), icon_color);
             // Right
             self.buffer.as_mut().unwrap().fill_rect(Rect::new(
-                Point::new(max_cx + box_half - 1.0, max_cy - box_half),
-                Size::new(1.0, box_size),
+                Point::new((mx0 + msize - 1) as f32, my0 as f32),
+                Size::new(1.0, msize as f32),
             ), icon_color);
 
-            // Close button
-            let close_rect = self.get_close_button_rect();
-            if self.close_button_hovered {
-                let hover_bg = with_theme(|theme| theme.close_button_background_hovered);
-                self.buffer.as_mut().unwrap().fill_rect(close_rect, hover_bg.as_bgra());
-            }
-            // Close icon: X (1px thick, centered)
-            let close_cx = close_rect.origin.x + Window::BUTTON_SIZE / 2.0;
-            let close_cy = close_rect.origin.y + Window::BUTTON_SIZE / 2.0;
-            let x_size = 8.0;
-            let x_half = x_size / 2.0;
-            // Diagonal line 1: top-left to bottom-right
-            for i in 0..8 {
-                let offset = i as f32;
-                let x = close_cx - x_half + offset;
-                let y = close_cy - x_half + offset;
-                self.buffer.as_mut().unwrap().fill_rect(Rect::new(
-                    Point::new(x, y),
-                    Size::new(1.0, 1.0),
-                ), icon_color);
-            }
-            // Diagonal line 2: bottom-left to top-right
-            for i in 0..8 {
-                let offset = i as f32;
-                let x = close_cx + x_half - offset;
-                let y = close_cy - x_half + offset;
-                self.buffer.as_mut().unwrap().fill_rect(Rect::new(
-                    Point::new(x, y),
-                    Size::new(1.0, 1.0),
-                ), icon_color);
-            }
+            // Minimize button: horizontal line
+            let nx = minimize_rect.origin.x as i32 + minimize_rect.size.width as i32 / 2;
+            let ny = minimize_rect.origin.y as i32 + minimize_rect.size.height as i32 / 2 + 3;
+            let nsize = 12;
+            let nhalf = nsize / 2;
+
+            self.buffer.as_mut().unwrap().fill_rect(Rect::new(
+                Point::new((nx - nhalf) as f32, ny as f32),
+                Size::new(nsize as f32, 1.0),
+            ), icon_color);
         }
 
         // Render child

@@ -40,6 +40,9 @@ impl<A: App> Application<A> {
     pub fn run(mut self) -> Result<(), &'static str> {
         use std::println;
 
+        // Initialize theme automatically
+        crate::theme::init();
+
         println!("[scarlet-ui] Application::run() starting");
 
         // Build initial tree
