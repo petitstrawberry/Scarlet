@@ -12,6 +12,7 @@ sws-client = { path = "../sws-client" }
 sws_protocol = { path = "../sws_protocol" }
 framebuffer = { path = "../framebuffer" }
 libm = "0.2"
+scarlet-ui-macros = { path = "../scarlet-ui-macros" }
 
 [dependencies.ab_glyph]
 version = "0.2"

@@ -162,7 +162,7 @@ impl RenderNode for VStackRenderNode {
 
         // Pass 1: Measure minimum requirements (loose constraints)
         let loose_constraints = LayoutConstraints::loose(constraints.max);
-        let mut min_heights: Vec<f32> = self
+        let min_heights: Vec<f32> = self
             .children
             .iter_mut()
             .map(|c| c.layout(loose_constraints).height)
