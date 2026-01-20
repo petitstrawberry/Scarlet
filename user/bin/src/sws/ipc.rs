@@ -1105,12 +1105,18 @@ fn client_thread_main(client_id: usize, mut socket: Socket) {
                 );
                 push_ipc_event(IpcEvent::SetWindowOpacity { window_id, opacity });
             }
-            Ok(ClientMessageRef::SetWindowHasAlphaContent { window_id, has_alpha }) => {
+            Ok(ClientMessageRef::SetWindowHasAlphaContent {
+                window_id,
+                has_alpha,
+            }) => {
                 println!(
                     "[ClientThread {}] SetWindowHasAlphaContent: window_id={} has_alpha={}",
                     client_id, window_id, has_alpha
                 );
-                push_ipc_event(IpcEvent::SetWindowHasAlphaContent { window_id, has_alpha });
+                push_ipc_event(IpcEvent::SetWindowHasAlphaContent {
+                    window_id,
+                    has_alpha,
+                });
             }
             Ok(ClientMessageRef::SetWorkarea {
                 x,

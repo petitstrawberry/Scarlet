@@ -19,8 +19,8 @@ extern crate scarlet_std as std;
 use core::time::Duration;
 use sbus_client;
 use scarlet_desktop_config::{TaskbarConfig, TaskbarPosition};
-use scarlet_ui::{Color, design};
 use scarlet_ui::graphics::{Canvas, measure_text_sized};
+use scarlet_ui::{Color, design};
 use std::string::{String, ToString};
 use std::thread;
 use std::vec;
@@ -337,7 +337,10 @@ fn get_active_app_from_stemd() -> Option<(String, String)> {
 /// - First menu is always "Scarlet" (fixed)
 /// - When an app is focused, show app name + app-specific menus after Scarlet
 /// - When no app is focused, show only Scarlet
-fn build_menu_items(active_app: &Option<(String, String, String, String)>, bar_height: u32) -> Vec<MenuItem> {
+fn build_menu_items(
+    active_app: &Option<(String, String, String, String)>,
+    bar_height: u32,
+) -> Vec<MenuItem> {
     let mut menu_items = Vec::new();
     let mut x_offset = 0i32;
 
@@ -399,10 +402,7 @@ fn parse_menu_titles(menu_titles: &str) -> Vec<String> {
     if menu_titles.is_empty() {
         return Vec::new();
     }
-    menu_titles
-        .split('|')
-        .map(|s| s.to_string())
-        .collect()
+    menu_titles.split('|').map(|s| s.to_string()).collect()
 }
 
 /// Query app menu titles from stemd via sbus
@@ -880,7 +880,10 @@ fn get_menu_items_for_label(label: &str) -> Vec<(String, DropdownAction)> {
     match label {
         "Scarlet" => vec![
             (String::from("Settings..."), DropdownAction::LaunchSettings),
-            (String::from("About Scarlet"), DropdownAction::LaunchSettings),
+            (
+                String::from("About Scarlet"),
+                DropdownAction::LaunchSettings,
+            ),
         ],
         "File" => vec![
             (String::from("New"), DropdownAction::LaunchSettings),
@@ -909,7 +912,10 @@ fn get_menu_items_for_label(label: &str) -> Vec<(String, DropdownAction)> {
             (String::from("Close"), DropdownAction::LaunchSettings),
         ],
         "Help" => vec![
-            (String::from("Documentation"), DropdownAction::LaunchSettings),
+            (
+                String::from("Documentation"),
+                DropdownAction::LaunchSettings,
+            ),
             (String::from("-"), DropdownAction::LaunchSettings),
             (String::from("About"), DropdownAction::LaunchSettings),
         ],
@@ -987,13 +993,14 @@ pub extern "C" fn main() -> i32 {
     };
 
     // Create a dummy surface first (needed for SCREEN_SIZE response routing)
-    let dummy_surface_id = match conn.create_surface("org.scarlet-os.desktop.taskbar", "Taskbar", "", 16, 16) {
-        Ok(id) => id,
-        Err(_) => {
-            println!("[menu_bar] Failed to create dummy surface");
-            return 1;
-        }
-    };
+    let dummy_surface_id =
+        match conn.create_surface("org.scarlet-os.desktop.taskbar", "Taskbar", "", 16, 16) {
+            Ok(id) => id,
+            Err(_) => {
+                println!("[menu_bar] Failed to create dummy surface");
+                return 1;
+            }
+        };
 
     // Get screen size first
     let (screen_width, screen_height) = match conn.get_screen_size() {
@@ -1011,14 +1018,19 @@ pub extern "C" fn main() -> i32 {
     let _ = conn.destroy_surface(dummy_surface_id);
 
     // Create surface with full screen width and 28px height
-    let surface_id =
-        match conn.create_surface("org.scarlet-os.desktop.taskbar", "Taskbar", "", screen_width, bar_height) {
-            Ok(id) => id,
-            Err(_) => {
-                println!("[menu_bar] Failed to create surface");
-                return 1;
-            }
-        };
+    let surface_id = match conn.create_surface(
+        "org.scarlet-os.desktop.taskbar",
+        "Taskbar",
+        "",
+        screen_width,
+        bar_height,
+    ) {
+        Ok(id) => id,
+        Err(_) => {
+            println!("[menu_bar] Failed to create surface");
+            return 1;
+        }
+    };
 
     let _ = conn.set_window_type(surface_id, window_types::TASKBAR);
 
@@ -1146,7 +1158,12 @@ pub extern "C" fn main() -> i32 {
                     );
                     // Update active app based on focus change
                     // Store (app_id, app_name, title, menu_titles) for menu building
-                    active_app = Some((app_id.clone(), app_name.clone(), title.clone(), menu_titles.clone()));
+                    active_app = Some((
+                        app_id.clone(),
+                        app_name.clone(),
+                        title.clone(),
+                        menu_titles.clone(),
+                    ));
                     menu_items = build_menu_items(&active_app, bar_height);
                     needs_redraw = true;
                 }

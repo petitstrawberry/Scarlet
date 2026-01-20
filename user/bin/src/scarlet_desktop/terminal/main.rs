@@ -10,15 +10,9 @@
 
 extern crate alloc;
 
-use scarlet_ui::{
-    Application, Window, WindowBuilder,
-    VStack,
-    Text,
-    View, ViewExt,
-    Color,
-};
 use alloc::string::String;
 use scarlet_std::println;
+use scarlet_ui::{Application, Color, Text, VStack, View, ViewExt, Window, WindowBuilder};
 
 /// Terminal state
 struct TerminalState {
@@ -115,15 +109,11 @@ pub extern "C" fn main() -> i32 {
         .spacing(0)
         .child(
             // Output display area
-            Text::new(&output_text)
-                .font_size(13)
-                .padding(8)
+            Text::new(&output_text).font_size(13).padding(8),
         )
         .child(
             // Simple status line
-            Text::new("$ help")
-                .font_size(14)
-                .padding(8)
+            Text::new("$ help").font_size(14).padding(8),
         );
 
     let window = Window::builder()

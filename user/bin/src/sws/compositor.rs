@@ -2027,7 +2027,10 @@ impl Compositor {
                     }
                 }
             }
-            IpcEvent::SetWindowHasAlphaContent { window_id, has_alpha } => {
+            IpcEvent::SetWindowHasAlphaContent {
+                window_id,
+                has_alpha,
+            } => {
                 println!(
                     "[Compositor] Setting window #{} has_alpha_content to {}",
                     window_id, has_alpha

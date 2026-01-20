@@ -650,7 +650,10 @@ pub fn parse_client_message<'a>(
             }
             let window_id = u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
             let has_alpha = payload[4] != 0;
-            Ok(ClientMessageRef::SetWindowHasAlphaContent { window_id, has_alpha })
+            Ok(ClientMessageRef::SetWindowHasAlphaContent {
+                window_id,
+                has_alpha,
+            })
         }
         _ => Err(ProtocolError::UnknownMessageType),
     }

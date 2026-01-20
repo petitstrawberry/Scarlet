@@ -8,14 +8,12 @@
 
 extern crate alloc;
 
-use scarlet_ui::{
-    Application, Window, WindowBuilder,
-    VStack, HStack, Spacer,
-    Text, TextField, Button,
-    View, ViewExt,
-};
-use alloc::{string::String, string::ToString, vec, vec::Vec, boxed::Box};
+use alloc::{boxed::Box, string::String, string::ToString, vec, vec::Vec};
 use scarlet_std::println;
+use scarlet_ui::{
+    Application, Button, HStack, Spacer, Text, TextField, VStack, View, ViewExt, Window,
+    WindowBuilder,
+};
 
 /// Desktop entry file information
 #[derive(Debug, Clone)]
@@ -280,21 +278,12 @@ pub extern "C" fn main() -> i32 {
         let entry_clone = entry.clone();
         let entry_item = HStack::new()
             .spacing(16)
-            .child(
-                Text::new(entry.get_icon_emoji())
-                    .font_size(20)
-            )
+            .child(Text::new(entry.get_icon_emoji()).font_size(20))
             .child(
                 VStack::new()
                     .spacing(2)
-                    .child(
-                        Text::new(&entry.name)
-                            .font_size(16)
-                    )
-                    .child(
-                        Text::new(entry.get_display_category())
-                            .font_size(12)
-                    )
+                    .child(Text::new(&entry.name).font_size(16))
+                    .child(Text::new(entry.get_display_category()).font_size(12)),
             )
             .child(Spacer::new())
             .background(scarlet_ui::Color::rgb(50, 50, 50))
@@ -307,33 +296,30 @@ pub extern "C" fn main() -> i32 {
         .child(
             VStack::new()
                 .spacing(16)
-                .child(
-                    Text::new("Applications")
-                        .font_size(28)
-                )
+                .child(Text::new("Applications").font_size(28))
                 .child(
                     TextField::new()
                         .placeholder("Search applications...")
-                        .padding(12)
+                        .padding(12),
                 )
-                .padding(24)
+                .padding(24),
         )
         .child(
             HStack::new()
                 .background(scarlet_ui::Color::rgb(200, 200, 200))
-                .frame(1, 1)
+                .frame(1, 1),
         )
         .child(app_list_ui.padding(8))
         .child(Spacer::new())
         .child(
             HStack::new()
                 .background(scarlet_ui::Color::rgb(200, 200, 200))
-                .frame(1, 1)
+                .frame(1, 1),
         )
         .child(
             Text::new("Type to search • Click to launch")
                 .font_size(12)
-                .padding(16)
+                .padding(16),
         );
 
     let window = Window::builder()

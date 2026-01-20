@@ -7,16 +7,12 @@
 
 extern crate alloc;
 
-use scarlet_ui::{
-    Application, Window, WindowBuilder,
-    VStack, HStack, Spacer,
-    Text, TextField, Button,
-    View, ViewExt,
-    Color,
-    LayoutConstraints, Size, ControlFlow,
-};
-use alloc::{string::String, format, boxed::Box, sync::Arc};
+use alloc::{boxed::Box, format, string::String, sync::Arc};
 use scarlet_std::println;
+use scarlet_ui::{
+    Application, Button, Color, ControlFlow, HStack, LayoutConstraints, Size, Spacer, Text,
+    TextField, VStack, View, ViewExt, Window, WindowBuilder,
+};
 
 /// Notepad view
 struct NotepadView {
@@ -37,105 +33,75 @@ impl NotepadView {
             .child(
                 HStack::new()
                     .spacing(8)
-                    .child(
-                        Text::new("File")
-                            .font_size(13)
-                    )
+                    .child(Text::new("File").font_size(13))
                     .child(
                         Button::new("New")
                             .action(|| {
                                 println!("[notepad] New document");
                             })
-                            .padding(6)
+                            .padding(6),
                     )
                     .child(
                         Button::new("Open")
                             .action(|| {
                                 println!("[notepad] Open file");
                             })
-                            .padding(6)
+                            .padding(6),
                     )
                     .child(
                         Button::new("Save")
                             .action(|| {
                                 println!("[notepad] Save file");
                             })
-                            .padding(6)
+                            .padding(6),
                     )
                     .child(Spacer::new())
-                    .child(
-                        Text::new("Ctrl+N: New | Ctrl+O: Open | Ctrl+S: Save")
-                            .font_size(11)
-                    )
+                    .child(Text::new("Ctrl+N: New | Ctrl+O: Open | Ctrl+S: Save").font_size(11))
                     .child(Spacer::new())
-                    .padding(12)
+                    .padding(12),
             )
             // Separator (using background color for now)
             .child(
                 HStack::new()
                     .background(Color::rgb(200, 200, 200))
-                    .frame(1, 1)
+                    .frame(1, 1),
             )
             // File info bar
             .child(
                 HStack::new()
                     .spacing(12)
-                    .child(
-                        Text::new("File:")
-                            .font_size(12)
-                    )
-                    .child(
-                        Text::new("Untitled")
-                            .font_size(12)
-                    )
+                    .child(Text::new("File:").font_size(12))
+                    .child(Text::new("Untitled").font_size(12))
                     .child(Spacer::new())
                     .padding(16)
-                    .padding(8)
+                    .padding(8),
             )
             // Text editing area
             .child(
                 TextField::new()
                     .placeholder("Type your text here...")
-                    .padding(16)
+                    .padding(16),
             )
             .child(Spacer::new())
             // Status bar separator
             .child(
                 HStack::new()
                     .background(Color::rgb(200, 200, 200))
-                    .frame(1, 1)
+                    .frame(1, 1),
             )
             // Status bar
             .child(
                 HStack::new()
                     .spacing(16)
-                    .child(
-                        Text::new("Line:")
-                            .font_size(11)
-                    )
-                    .child(
-                        Text::new("1")
-                            .font_size(11)
-                    )
-                    .child(
-                        Text::new("Column:")
-                            .font_size(11)
-                    )
-                    .child(
-                        Text::new("1")
-                            .font_size(11)
-                    )
+                    .child(Text::new("Line:").font_size(11))
+                    .child(Text::new("1").font_size(11))
+                    .child(Text::new("Column:").font_size(11))
+                    .child(Text::new("1").font_size(11))
                     .child(Spacer::new())
-                    .child(
-                        Text::new("Ready - New document")
-                            .font_size(11)
-                    )
+                    .child(Text::new("Ready - New document").font_size(11))
                     .child(Spacer::new())
-                    .child(
-                        Text::new("UTF-8")
-                            .font_size(11)
-                    )
-                    .padding(12)
+                    .child(Text::new("UTF-8").font_size(11))
+                    .padding(12),
             )
     }
 }
@@ -149,7 +115,11 @@ impl scarlet_ui::view::render::RenderObject for NotepadView {
         self
     }
 
-    fn layout(&mut self, _ctx: &mut scarlet_ui::LayoutCtx, _constraints: scarlet_ui::LayoutConstraints) -> scarlet_ui::Size {
+    fn layout(
+        &mut self,
+        _ctx: &mut scarlet_ui::LayoutCtx,
+        _constraints: scarlet_ui::LayoutConstraints,
+    ) -> scarlet_ui::Size {
         Size::new(950, 680)
     }
 
@@ -158,7 +128,11 @@ impl scarlet_ui::view::render::RenderObject for NotepadView {
         body.draw(ctx, frame);
     }
 
-    fn event(&mut self, ctx: &mut scarlet_ui::EventCtx, event: &scarlet_ui::Event) -> scarlet_ui::ControlFlow {
+    fn event(
+        &mut self,
+        ctx: &mut scarlet_ui::EventCtx,
+        event: &scarlet_ui::Event,
+    ) -> scarlet_ui::ControlFlow {
         self.build().event(ctx, event)
     }
 
@@ -189,105 +163,75 @@ pub extern "C" fn main() -> i32 {
         .child(
             HStack::new()
                 .spacing(8)
-                .child(
-                    Text::new("File")
-                        .font_size(13)
-                )
+                .child(Text::new("File").font_size(13))
                 .child(
                     Button::new("New")
                         .action(|| {
                             println!("[notepad] New document");
                         })
-                        .padding(6)
+                        .padding(6),
                 )
                 .child(
                     Button::new("Open")
                         .action(|| {
                             println!("[notepad] Open file");
                         })
-                        .padding(6)
+                        .padding(6),
                 )
                 .child(
                     Button::new("Save")
                         .action(|| {
                             println!("[notepad] Save file");
                         })
-                        .padding(6)
+                        .padding(6),
                 )
                 .child(Spacer::new())
-                .child(
-                    Text::new("Ctrl+N: New | Ctrl+O: Open | Ctrl+S: Save")
-                        .font_size(11)
-                )
+                .child(Text::new("Ctrl+N: New | Ctrl+O: Open | Ctrl+S: Save").font_size(11))
                 .child(Spacer::new())
-                .padding(12)
+                .padding(12),
         )
         // Separator
         .child(
             HStack::new()
                 .background(Color::rgb(200, 200, 200))
-                .frame(1, 1)
+                .frame(1, 1),
         )
         // File info bar
         .child(
             HStack::new()
                 .spacing(12)
-                .child(
-                    Text::new("File:")
-                        .font_size(12)
-                )
-                .child(
-                    Text::new("Untitled")
-                        .font_size(12)
-                )
+                .child(Text::new("File:").font_size(12))
+                .child(Text::new("Untitled").font_size(12))
                 .child(Spacer::new())
                 .padding(16)
-                .padding(8)
+                .padding(8),
         )
         // Text editing area
         .child(
             TextField::new()
                 .placeholder("Type your text here...")
-                .padding(16)
+                .padding(16),
         )
         .child(Spacer::new())
         // Status bar separator
         .child(
             HStack::new()
                 .background(Color::rgb(200, 200, 200))
-                .frame(1, 1)
+                .frame(1, 1),
         )
         // Status bar
         .child(
             HStack::new()
                 .spacing(16)
-                .child(
-                    Text::new("Line:")
-                        .font_size(11)
-                )
-                .child(
-                    Text::new("1")
-                        .font_size(11)
-                )
-                .child(
-                    Text::new("Column:")
-                        .font_size(11)
-                )
-                .child(
-                    Text::new("1")
-                        .font_size(11)
-                )
+                .child(Text::new("Line:").font_size(11))
+                .child(Text::new("1").font_size(11))
+                .child(Text::new("Column:").font_size(11))
+                .child(Text::new("1").font_size(11))
                 .child(Spacer::new())
-                .child(
-                    Text::new("Ready - New document")
-                        .font_size(11)
-                )
+                .child(Text::new("Ready - New document").font_size(11))
                 .child(Spacer::new())
-                .child(
-                    Text::new("UTF-8")
-                        .font_size(11)
-                )
-                .padding(12)
+                .child(Text::new("UTF-8").font_size(11))
+                .padding(12),
         );
 
     let window = Window::builder()

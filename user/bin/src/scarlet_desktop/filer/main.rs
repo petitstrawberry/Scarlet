@@ -7,14 +7,9 @@
 
 extern crate alloc;
 
-use scarlet_ui::{
-    Application, Window, WindowBuilder,
-    VStack, HStack, Spacer,
-    Text,
-    View, ViewExt,
-};
 use alloc::string::String;
 use scarlet_std::println;
+use scarlet_ui::{Application, HStack, Spacer, Text, VStack, View, ViewExt, Window, WindowBuilder};
 
 #[unsafe(no_mangle)]
 pub extern "C" fn main() -> i32 {
@@ -35,10 +30,7 @@ pub extern "C" fn main() -> i32 {
     let ui_content = VStack::new()
         .spacing(16)
         // Title
-        .child(
-            Text::new("File Manager")
-                .font_size(18)
-        )
+        .child(Text::new("File Manager").font_size(18))
         // Sidebar area
         .child(
             HStack::new()
@@ -46,26 +38,14 @@ pub extern "C" fn main() -> i32 {
                 .child(
                     VStack::new()
                         .spacing(8)
-                        .child(
-                            Text::new("Folders")
-                                .font_size(12)
-                        )
-                        .child(
-                            Text::new("  Home")
-                                .font_size(13)
-                        )
-                        .child(
-                            Text::new("  Desktop")
-                                .font_size(13)
-                        )
-                        .child(
-                            Text::new("  Documents")
-                                .font_size(13)
-                        ),
+                        .child(Text::new("Folders").font_size(12))
+                        .child(Text::new("  Home").font_size(13))
+                        .child(Text::new("  Desktop").font_size(13))
+                        .child(Text::new("  Documents").font_size(13)),
                 )
                 .child(Spacer::new())
                 .background(scarlet_ui::Color::rgb(30, 30, 30))
-                .padding(20)
+                .padding(20),
         );
 
     let window = Window::builder()

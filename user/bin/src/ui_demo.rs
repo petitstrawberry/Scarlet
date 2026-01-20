@@ -11,15 +11,12 @@
 
 extern crate alloc;
 
-use scarlet_ui::{
-    Application, Window, WindowBuilder,
-    VStack, HStack,
-    Text, Button, Toggle, Slider, TextField,
-    Local, View, ViewExt,
-    Color,
-};
-use alloc::{string::String, format, boxed::Box, sync::Arc};
+use alloc::{boxed::Box, format, string::String, sync::Arc};
 use scarlet_std::println;
+use scarlet_ui::{
+    Application, Button, Color, HStack, Local, Slider, Text, TextField, Toggle, VStack, View,
+    ViewExt, Window, WindowBuilder,
+};
 
 /// Demo view - Shows various UI components
 struct DemoView {
@@ -39,53 +36,31 @@ impl DemoView {
         VStack::new()
             .spacing(16)
             // Header
-            .child(
-                Text::new("ScarletUI Modern Architecture Demo")
-                    .font_size(28)
-            )
-            .child(
-                Text::new("View/RenderObject separation with SwiftUI-style API")
-                    .font_size(14)
-            )
-            .child(
-                Text::new("Counter: 0")
-                    .font_size(24)
-            )
+            .child(Text::new("ScarletUI Modern Architecture Demo").font_size(28))
+            .child(Text::new("View/RenderObject separation with SwiftUI-style API").font_size(14))
+            .child(Text::new("Counter: 0").font_size(24))
             .child(
                 HStack::new()
                     .spacing(10)
-                    .child(
-                        Button::new("Decrement")
-                            .padding(10)
-                    )
-                    .child(
-                        Button::new("Increment")
-                            .padding(10)
-                    )
+                    .child(Button::new("Decrement").padding(10))
+                    .child(Button::new("Increment").padding(10)),
             )
-            .child(
-                Toggle::new(true)
-            )
-            .child(
-                Slider::new(0.0, 100.0)
-                    .value(50.0)
-            )
-            .child(
-                TextField::new()
-            )
+            .child(Toggle::new(true))
+            .child(Slider::new(0.0, 100.0).value(50.0))
+            .child(TextField::new())
             .child(
                 Button::new("Open TabView Demo")
                     .action(|| {
                         println!("[ui_demo] TabView demo requested");
                     })
-                    .padding(10)
+                    .padding(10),
             )
             .child(
                 Button::new("Open NavigationView Demo")
                     .action(|| {
                         println!("[ui_demo] NavigationView demo requested");
                     })
-                    .padding(10)
+                    .padding(10),
             )
     }
 }
@@ -99,7 +74,11 @@ impl scarlet_ui::view::render::RenderObject for DemoView {
         self
     }
 
-    fn layout(&mut self, ctx: &mut scarlet_ui::LayoutCtx, constraints: scarlet_ui::LayoutConstraints) -> scarlet_ui::Size {
+    fn layout(
+        &mut self,
+        ctx: &mut scarlet_ui::LayoutCtx,
+        constraints: scarlet_ui::LayoutConstraints,
+    ) -> scarlet_ui::Size {
         // Default size
         let size = scarlet_ui::Size::new(600, 700);
         size
@@ -111,7 +90,11 @@ impl scarlet_ui::view::render::RenderObject for DemoView {
         body.draw(ctx, frame);
     }
 
-    fn event(&mut self, ctx: &mut scarlet_ui::EventCtx, event: &scarlet_ui::Event) -> scarlet_ui::ControlFlow {
+    fn event(
+        &mut self,
+        ctx: &mut scarlet_ui::EventCtx,
+        event: &scarlet_ui::Event,
+    ) -> scarlet_ui::ControlFlow {
         self.build().event(ctx, event)
     }
 
@@ -141,40 +124,18 @@ pub extern "C" fn main() -> i32 {
     // Build the UI tree
     let ui_content = VStack::new()
         .spacing(16)
-        .child(
-            Text::new("ScarletUI Modern Architecture Demo")
-                .font_size(28)
-        )
-        .child(
-            Text::new("View/RenderObject separation with SwiftUI-style API")
-                .font_size(14)
-        )
-        .child(
-            Text::new("Counter: 0")
-                .font_size(24)
-        )
+        .child(Text::new("ScarletUI Modern Architecture Demo").font_size(28))
+        .child(Text::new("View/RenderObject separation with SwiftUI-style API").font_size(14))
+        .child(Text::new("Counter: 0").font_size(24))
         .child(
             HStack::new()
                 .spacing(10)
-                .child(
-                    Button::new("Decrement")
-                        .padding(10)
-                )
-                .child(
-                    Button::new("Increment")
-                        .padding(10)
-                )
+                .child(Button::new("Decrement").padding(10))
+                .child(Button::new("Increment").padding(10)),
         )
-        .child(
-            Toggle::new(true)
-        )
-        .child(
-            Slider::new(0.0, 100.0)
-                .value(50.0)
-        )
-        .child(
-            TextField::new()
-        );
+        .child(Toggle::new(true))
+        .child(Slider::new(0.0, 100.0).value(50.0))
+        .child(TextField::new());
 
     let window = Window::builder()
         .title("ScarletUI Modern Architecture Demo")

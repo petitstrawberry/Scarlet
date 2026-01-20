@@ -9,23 +9,17 @@
 extern crate alloc;
 
 use alloc::boxed::Box;
-use alloc::vec::Vec;
-use alloc::string::String;
 use alloc::format;
+use alloc::string::String;
+use alloc::vec::Vec;
 
-use scarlet_ui::{
-    Application, Window, WindowBuilder,
-    VStack, HStack, Spacer,
-    Text, Button,
-    View, ViewExt,
-    Color,
-    LayoutConstraints, Size, ControlFlow,
-    ViewId,
-    LayoutCtx, PaintCtx, EventCtx, UpdateCtx,
-};
+use scarlet_std::println;
 use scarlet_ui::view::render::RenderObject;
 use scarlet_ui::view::traits::ChildView;
-use scarlet_std::println;
+use scarlet_ui::{
+    Application, Button, Color, ControlFlow, EventCtx, HStack, LayoutConstraints, LayoutCtx,
+    PaintCtx, Size, Spacer, Text, UpdateCtx, VStack, View, ViewExt, ViewId, Window, WindowBuilder,
+};
 
 /// Simple card container with rounded background and padding.
 struct Card {
@@ -170,14 +164,8 @@ pub extern "C" fn main() -> i32 {
     let hero = Card::new(
         VStack::new()
             .spacing(12)
-            .child(
-                Text::new("Scarlet Desktop")
-                    .font_size(36)
-            )
-            .child(
-                Text::new("Composited with SWS + ScarletUI")
-                    .font_size(18)
-            )
+            .child(Text::new("Scarlet Desktop").font_size(36))
+            .child(Text::new("Composited with SWS + ScarletUI").font_size(18))
             .child(
                 HStack::new()
                     .spacing(12)
@@ -186,35 +174,29 @@ pub extern "C" fn main() -> i32 {
                             .action(|| {
                                 println!("[scarlet_desktop] Launch terminal (stub)");
                             })
-                            .padding(10)
+                            .padding(10),
                     )
                     .child(
                         Button::new("Workspace Overview")
                             .action(|| {
                                 println!("[scarlet_desktop] Show overview (stub)");
                             })
-                            .padding(10)
+                            .padding(10),
                     )
                     .child(
                         Button::new("Calm Mode")
                             .action(|| {
                                 println!("[scarlet_desktop] Toggle calm mode (stub)");
                             })
-                            .padding(10)
-                    )
+                            .padding(10),
+                    ),
             )
             .child(
                 HStack::new()
                     .spacing(10)
-                    .child(
-                        Text::new("Session uptime 00:00:00")
-                            .font_size(14)
-                    )
-                    .child(
-                        Text::new("SWS linked • desktop layer pinned")
-                            .font_size(14)
-                    )
-            )
+                    .child(Text::new("Session uptime 00:00:00").font_size(14))
+                    .child(Text::new("SWS linked • desktop layer pinned").font_size(14)),
+            ),
     )
     .background(Color::rgb(40, 44, 52))
     .border(1, Color::rgb(100, 100, 100))
@@ -228,31 +210,16 @@ pub extern "C" fn main() -> i32 {
             .child(
                 HStack::new()
                     .spacing(8)
-                    .child(
-                        Text::new("System pulse")
-                            .font_size(18)
-                    )
+                    .child(Text::new("System pulse").font_size(18)),
             )
-            .child(
-                Text::new("Ambient health and faux metrics")
-                    .font_size(14)
-            )
+            .child(Text::new("Ambient health and faux metrics").font_size(14))
             .child(
                 VStack::new()
                     .spacing(6)
-                    .child(
-                        Text::new("Load envelope 32%")
-                            .font_size(16)
-                    )
-                    .child(
-                        Text::new("Memory headroom 42%")
-                            .font_size(16)
-                    )
-                    .child(
-                        Text::new("Sched tick 1234")
-                            .font_size(14)
-                    )
-            )
+                    .child(Text::new("Load envelope 32%").font_size(16))
+                    .child(Text::new("Memory headroom 42%").font_size(16))
+                    .child(Text::new("Sched tick 1234").font_size(14)),
+            ),
     )
     .border(1, Color::rgb(100, 100, 100));
 
@@ -263,30 +230,15 @@ pub extern "C" fn main() -> i32 {
             .child(
                 HStack::new()
                     .spacing(8)
-                    .child(
-                        Text::new("Workspaces")
-                            .font_size(18)
-                    )
+                    .child(Text::new("Workspaces").font_size(18)),
             )
-            .child(
-                Text::new("Arrange focus without leaving the home screen")
-                    .font_size(14)
-            )
+            .child(Text::new("Arrange focus without leaving the home screen").font_size(14))
             .child(
                 VStack::new()
                     .spacing(6)
-                    .child(
-                        Text::new("• Build & logs  — anchored left")
-                            .font_size(15)
-                    )
-                    .child(
-                        Text::new("• Docs & notes — center column")
-                            .font_size(15)
-                    )
-                    .child(
-                        Text::new("• Experiments  — floating stack")
-                            .font_size(15)
-                    )
+                    .child(Text::new("• Build & logs  — anchored left").font_size(15))
+                    .child(Text::new("• Docs & notes — center column").font_size(15))
+                    .child(Text::new("• Experiments  — floating stack").font_size(15)),
             )
             .child(
                 HStack::new()
@@ -296,16 +248,16 @@ pub extern "C" fn main() -> i32 {
                             .action(|| {
                                 println!("[scarlet_desktop] Pin workspace (stub)");
                             })
-                            .padding(8)
+                            .padding(8),
                     )
                     .child(
                         Button::new("Detach")
                             .action(|| {
                                 println!("[scarlet_desktop] Detach workspace (stub)");
                             })
-                            .padding(8)
-                    )
-            )
+                            .padding(8),
+                    ),
+            ),
     )
     .border(1, Color::rgb(100, 100, 100));
 
@@ -316,30 +268,15 @@ pub extern "C" fn main() -> i32 {
             .child(
                 HStack::new()
                     .spacing(8)
-                    .child(
-                        Text::new("Sessions & links")
-                            .font_size(18)
-                    )
+                    .child(Text::new("Sessions & links").font_size(18)),
             )
-            .child(
-                Text::new("Status for shell, apps, and network reachability")
-                    .font_size(14)
-            )
+            .child(Text::new("Status for shell, apps, and network reachability").font_size(14))
             .child(
                 VStack::new()
                     .spacing(6)
-                    .child(
-                        Text::new("Shell: attached • interactive")
-                            .font_size(15)
-                    )
-                    .child(
-                        Text::new("Desktop: ready • window server live")
-                            .font_size(15)
-                    )
-                    .child(
-                        Text::new("Network: loopback + vsock bridge")
-                            .font_size(15)
-                    )
+                    .child(Text::new("Shell: attached • interactive").font_size(15))
+                    .child(Text::new("Desktop: ready • window server live").font_size(15))
+                    .child(Text::new("Network: loopback + vsock bridge").font_size(15)),
             )
             .child(
                 HStack::new()
@@ -349,16 +286,16 @@ pub extern "C" fn main() -> i32 {
                             .action(|| {
                                 println!("[scarlet_desktop] Snapshot state (stub)");
                             })
-                            .padding(8)
+                            .padding(8),
                     )
                     .child(
                         Button::new("Re-link")
                             .action(|| {
                                 println!("[scarlet_desktop] Re-link network (stub)");
                             })
-                            .padding(8)
-                    )
-            )
+                            .padding(8),
+                    ),
+            ),
     )
     .border(1, Color::rgb(100, 100, 100));
 
@@ -370,7 +307,7 @@ pub extern "C" fn main() -> i32 {
                 .spacing(14)
                 .child(system_card)
                 .child(workspace_card)
-                .child(network_card)
+                .child(network_card),
         )
         .child(
             HStack::new()
@@ -380,23 +317,23 @@ pub extern "C" fn main() -> i32 {
                         .action(|| {
                             println!("[scarlet_desktop] Log out (stub)");
                         })
-                        .padding(10)
+                        .padding(10),
                 )
                 .child(
                     Button::new("Sleep")
                         .action(|| {
                             println!("[scarlet_desktop] Sleep (stub)");
                         })
-                        .padding(10)
+                        .padding(10),
                 )
                 .child(
                     Button::new("Diagnostics")
                         .action(|| {
                             println!("[scarlet_desktop] Diagnostics (stub)");
                         })
-                        .padding(10)
+                        .padding(10),
                 )
-                .child(Spacer::new())
+                .child(Spacer::new()),
         )
         .padding(24);
 
