@@ -10,6 +10,13 @@ use core::sync::atomic::{AtomicBool, Ordering};
 extern crate alloc;
 pub use alloc::sync::Arc;
 
+// reexport other sync primitives if needed
+mod export {
+    pub use core::sync::*;
+}
+
+pub use export::*;
+
 /// Simple spin-lock based Mutex
 pub struct Mutex<T> {
     locked: AtomicBool,
