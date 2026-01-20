@@ -1,6 +1,6 @@
 #![no_std]
 
-extern crate scarlet_std as std;
+pub extern crate scarlet_std as std;
 
 mod buffer;
 mod containers;
@@ -32,9 +32,12 @@ extern crate scarlet_ui_macros;
 pub use scarlet_ui_macros::{view, View, vstack};
 
 pub mod prelude {
+    pub use crate::app::{App, Application};
     pub use crate::event::{Event, EventContext, EventPhase};
     pub use crate::layout::{Alignment, LayoutConstraints};
     pub use crate::state::{State, SubscriptionId};
     pub use crate::traits::{RenderNode, View};
+    pub use crate::views::{Button, Rectangle, Slider, Spacer, Text, TextField, Toggle};
     pub use crate::{NodeId, Point, Rect, Size};
+    pub use scarlet_ui_macros::{vstack, View};
 }

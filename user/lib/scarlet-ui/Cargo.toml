@@ -6,6 +6,12 @@ edition = "2024"
 [lib]
 path = "src/lib.rs"
 
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"
+
 [dependencies]
 scarlet_std = { path = "../std" }
 sws-client = { path = "../sws-client" }

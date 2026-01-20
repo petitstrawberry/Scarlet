@@ -1,9 +1,11 @@
 use proc_macro::TokenStream;
 use quote::quote;
-use syn::{parse_macro_input, DeriveInput};
+use syn::{parse_macro_input, DeriveInput, parse::Parse, Token};
+use syn::parse::{ParseStream, Result};
+use syn::punctuated::Punctuated;
 
 /// Derive macro for View trait
-/// Automatically implements View for structs
+/// Automatically implements View for structs with body() method
 #[proc_macro_derive(View)]
 pub fn derive_view(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
@@ -20,8 +22,7 @@ pub fn derive_view(input: TokenStream) -> TokenStream {
             }
 
             fn build(&self) -> ::scarlet_ui::std::boxed::Box<dyn ::scarlet_ui::RenderNode> {
-                // Users should implement this method
-                ::scarlet_ui::std::panic!("View::build() not implemented for {}. Use #[view] attribute macro instead.", ::scarlet_ui::std::any::type_name::<Self>());
+                self.body().build()
             }
 
             fn as_any(&self) -> &dyn ::scarlet_ui::std::any::Any {
@@ -54,17 +55,61 @@ pub fn view(_attrs: TokenStream, input: TokenStream) -> TokenStream {
     TokenStream::from(expanded)
 }
 
-/// Macro for VStack - simplified version
+struct VStackInput {
+    children: Vec<syn::Expr>,
+}
+
+impl Parse for VStackInput {
+    fn parse(input: ParseStream) -> Result<Self> {
+        let mut children = Vec::new();
+
+        while !input.is_empty() {
+            let child = input.parse::<syn::Expr>()?;
+            children.push(child);
+
+            // Try to parse comma, but don't require it at the end
+            if input.is_empty() {
+                break;
+            }
+
+            if input.peek(Token![,]) {
+                input.parse::<Token![,]>()?;
+
+                // Check if this was a trailing comma
+                if input.is_empty() {
+                    break;
+                }
+            }
+        }
+
+        Ok(VStackInput { children })
+    }
+}
+
+/// Macro for VStack
 /// Example:
 /// ```rust
 /// let stack = scarlet_ui::vstack! {
-///     ::scarlet_ui::VStack::new()
+///     Text::new("Hello"),
+///     Button::new("Click")
 /// };
 /// ```
 #[proc_macro]
-pub fn vstack(_input: TokenStream) -> TokenStream {
-    let expanded = quote! {
-        ::scarlet_ui::VStack::new()
+pub fn vstack(input: TokenStream) -> TokenStream {
+    let parsed = parse_macro_input!(input as VStackInput);
+
+    let children: Vec<proc_macro2::TokenStream> = parsed.children
+        .into_iter()
+        .map(|expr| quote::quote!(#expr))
+        .collect();
+
+    let expanded = match children.len() {
+        0 => return quote! {
+            ::scarlet_ui::std::compile_error!("vstack! requires at least 2 children")
+        }.into(),
+        _ => quote! {
+            ::scarlet_ui::VStack::new((#(#children),*))
+        },
     };
 
     TokenStream::from(expanded)

@@ -5,18 +5,88 @@ use crate::geometry::{Point, Rect, Size};
 use crate::layout::{Alignment, LayoutConstraints};
 use crate::node_id::NodeId;
 use crate::traits::{RenderNode, UpdateResult, View};
+use std::any::TypeId;
 use std::boxed::Box;
+use std::vec;
 use std::vec::Vec;
 
+/// Trait to convert tuple of Views into Vec of RenderNodes
+pub trait IntoRenderNodes {
+    fn into_nodes(self) -> Vec<Box<dyn RenderNode>>;
+}
+
+// Implement View for tuples
+macro_rules! impl_view_for_tuple {
+    ($($idx:tt: $ty:ident),*) => {
+        impl<$($ty: View + Clone),*> View for ($($ty),*) {
+            fn type_id(&self) -> TypeId {
+                TypeId::of::<Self>()
+            }
+
+            fn type_name(&self) -> &'static str {
+                "TupleView"
+            }
+
+            fn build(&self) -> Box<dyn RenderNode> {
+                // Build tuple view by creating a placeholder
+                // This shouldn't be called directly, use VStack instead
+                let mut nodes = Vec::new();
+                $(nodes.push(self.$idx.clone().build());)*
+                // For now, create a dummy VStack
+                Box::new(VStackRenderNode::new(nodes, 0.0, Alignment::Center))
+            }
+
+            fn as_any(&self) -> &dyn std::any::Any {
+                self
+            }
+        }
+    }
+}
+
+impl_view_for_tuple!(0: A, 1: B);
+impl_view_for_tuple!(0: A, 1: B, 2: C);
+impl_view_for_tuple!(0: A, 1: B, 2: C, 3: D);
+impl_view_for_tuple!(0: A, 1: B, 2: C, 3: D, 4: E);
+impl_view_for_tuple!(0: A, 1: B, 2: C, 3: D, 4: E, 5: F);
+impl_view_for_tuple!(0: A, 1: B, 2: C, 3: D, 4: E, 5: F, 6: G);
+impl_view_for_tuple!(0: A, 1: B, 2: C, 3: D, 4: E, 5: F, 6: G, 7: H);
+impl_view_for_tuple!(0: A, 1: B, 2: C, 3: D, 4: E, 5: F, 6: G, 7: H, 8: I);
+impl_view_for_tuple!(0: A, 1: B, 2: C, 3: D, 4: E, 5: F, 6: G, 7: H, 8: I, 9: J);
+
+// Implement for tuples up to 10 elements
+macro_rules! impl_into_nodes {
+    ($($idx:tt: $ty:ident),*) => {
+        impl<$($ty: View + Clone),*> IntoRenderNodes for ($($ty),*) {
+            fn into_nodes(self) -> Vec<Box<dyn RenderNode>> {
+                let mut nodes = Vec::new();
+                $(nodes.push(self.$idx.build());)*
+                nodes
+            }
+        }
+    }
+}
+
+impl_into_nodes!(0: A, 1: B);
+impl_into_nodes!(0: A, 1: B, 2: C);
+impl_into_nodes!(0: A, 1: B, 2: C, 3: D);
+impl_into_nodes!(0: A, 1: B, 2: C, 3: D, 4: E);
+impl_into_nodes!(0: A, 1: B, 2: C, 3: D, 4: E, 5: F);
+impl_into_nodes!(0: A, 1: B, 2: C, 3: D, 4: E, 5: F, 6: G);
+impl_into_nodes!(0: A, 1: B, 2: C, 3: D, 4: E, 5: F, 6: G, 7: H);
+impl_into_nodes!(0: A, 1: B, 2: C, 3: D, 4: E, 5: F, 6: G, 7: H, 8: I);
+impl_into_nodes!(0: A, 1: B, 2: C, 3: D, 4: E, 5: F, 6: G, 7: H, 8: I, 9: J);
+
 #[derive(Clone)]
-pub struct VStack {
+pub struct VStack<V: View + Clone> {
+    pub children: V,
     pub spacing: f32,
     pub alignment: Alignment,
 }
 
-impl VStack {
-    pub fn new() -> Self {
+impl<V: View + Clone> VStack<V> {
+    pub fn new(children: V) -> Self {
         Self {
+            children,
             spacing: 0.0,
             alignment: Alignment::Center,
         }
@@ -33,15 +103,15 @@ impl VStack {
     }
 }
 
-impl Default for VStack {
+impl<V: View + Clone + Default> Default for VStack<V> {
     fn default() -> Self {
-        Self::new()
+        Self::new(V::default())
     }
 }
 
-impl View for VStack {
-    fn type_id(&self) -> std::any::TypeId {
-        std::any::TypeId::of::<Self>()
+impl<V: View + Clone + IntoRenderNodes> View for VStack<V> {
+    fn type_id(&self) -> TypeId {
+        TypeId::of::<Self>()
     }
 
     fn type_name(&self) -> &'static str {
@@ -49,10 +119,10 @@ impl View for VStack {
     }
 
     fn build(&self) -> Box<dyn RenderNode> {
-        // Note: This is a simplified version that creates empty VStack
-        // In real implementation, you'd want to pass children during construction
+        let children = self.children.clone().into_nodes();
+
         Box::new(VStackRenderNode::new(
-            Vec::new(),
+            children,
             self.spacing,
             self.alignment,
         ))
