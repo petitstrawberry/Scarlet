@@ -111,34 +111,6 @@ name = "scarlet_desktop_taskbar"
 path = "src/scarlet_desktop/taskbar/main.rs"
 
 [[bin]]
-name = "scarlet_desktop_overview"
-path = "src/scarlet_desktop/overview/main.rs"
-
-[[bin]]
-name = "scarlet_desktop_settings"
-path = "src/scarlet_desktop/settings/main.rs"
-
-[[bin]]
-name = "scarlet_desktop_terminal"
-path = "src/scarlet_desktop/terminal/main.rs"
-
-[[bin]]
-name = "scarlet_desktop_notepad"
-path = "src/scarlet_desktop/notepad/main.rs"
-
-[[bin]]
-name = "scarlet_desktop_filer"
-path = "src/scarlet_desktop/filer/main.rs"
-
-[[bin]]
-name = "scarlet_desktop_launcher"
-path = "src/scarlet_desktop/launcher/main.rs"
-
-[[bin]]
-name = "scarlet_desktop_clock"
-path = "src/scarlet_desktop/clock/main.rs"
-
-[[bin]]
 name = "scarlet-ui-counter"
 path = "src/scarlet-ui-examples/counter.rs"
 
