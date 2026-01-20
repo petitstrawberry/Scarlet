@@ -1,7 +1,38 @@
 use crate::node_id::NodeId;
 use crate::traits::RenderNode;
+use std::vec::Vec;
 
-/// Manages focus state for the UI tree
+/// Manages focus state for the UI tree.
+///
+/// ## Focus State Synchronization
+///
+/// The focus system has two parts that must be kept in sync:
+/// 1. **FocusManager.focused**: The canonical source of which node has focus
+/// 2. **RenderNode.interaction_state.focused**: Each node's local focus state
+///
+/// When focus changes, BOTH must be updated:
+/// - Call `FocusManager::set_focus()` to update the manager
+/// - Call `node.request_focus()` on the new focused node
+/// - Call `node.lose_focus()` on the old focused node
+///
+/// ## Focus Change Protocol
+///
+/// To change focus safely:
+/// ```rust
+/// let old_focus = focus_manager.focused();
+/// let new_focus = some_node_id;
+///
+/// // Step 1: Update manager
+/// focus_manager.set_focus(new_focus);
+///
+/// // Step 2: Update node states
+/// if let Some(old_id) = old_focus {
+///     if old_id != new_focus {
+///         get_node_mut(old_id)?.lose_focus();
+///     }
+/// }
+/// get_node_mut(new_focus)?.request_focus();
+/// ```
 pub struct FocusManager {
     focused: Option<NodeId>,
     focus_chain: Vec<NodeId>,
@@ -15,19 +46,28 @@ impl FocusManager {
         }
     }
 
-    /// Get the currently focused node
+    /// Get the currently focused node (canonical source)
     pub fn focused(&self) -> Option<NodeId> {
         self.focused
     }
 
-    /// Set focus to a specific node
+    /// Set focus to a specific node.
+    ///
+    /// **Important**: After calling this, you must also:
+    /// - Call `request_focus()` on the new focused node
+    /// - Call `lose_focus()` on the old focused node
+    ///
+    /// See module-level documentation for the full protocol.
     pub fn set_focus(&mut self, node_id: NodeId) {
         if self.focused != Some(node_id) {
             self.focused = Some(node_id);
         }
     }
 
-    /// Clear focus (no node has focus)
+    /// Clear focus (no node has focus).
+    ///
+    /// **Important**: After calling this, you must call
+    /// `lose_focus()` on the previously focused node.
     pub fn clear_focus(&mut self) {
         self.focused = None;
     }

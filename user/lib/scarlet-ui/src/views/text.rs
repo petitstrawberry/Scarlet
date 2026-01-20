@@ -144,12 +144,14 @@ impl RenderNode for TextRenderNode {
 
         // Use graphics module to draw text
         let buffer = self.buffer.as_mut().unwrap();
+        let width = buffer.width();
+        let height = buffer.height();
         let data = buffer.as_mut_slice();
 
         draw_text(
             data,
-            buffer.width(),
-            buffer.height(),
+            width,
+            height,
             &self.view.content,
             0,
             0,

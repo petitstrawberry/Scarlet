@@ -113,21 +113,23 @@ impl<A: App> Application<A> {
         // Re-layout from dirty roots (cascade down)
         if let Some(ref mut root) = self.root_node {
             if root.is_dirty() {
-                // Root is dirty, relayout everything with current window size
+                // Root is dirty (includes window resize), relayout everything
+                // Uses current window size from bridge (updated by SurfaceConfigure events)
                 let window_size = UiSize {
                     width: self.bridge.width as f32,
                     height: self.bridge.height as f32,
                 };
                 let constraints = crate::layout::LayoutConstraints::tight(window_size);
                 root.layout(constraints);
+                // Root's layout() will recursively layout children with proper constraints
             } else {
-                // Check children for dirty nodes
-                self.relayout_dirty_recursive(root);
+                // Only children are dirty (not a resize), relayout with existing frames
+                Self::relayout_dirty_recursive(root.as_mut());
             }
         }
     }
 
-    fn relayout_dirty_recursive(&mut self, node: &mut dyn RenderNode) {
+    fn relayout_dirty_recursive(node: &mut dyn RenderNode) {
         // Check all children
         for i in 0..node.children().len() {
             if let Some(child) = node.children_mut().get_mut(i) {
@@ -147,7 +149,7 @@ impl<A: App> Application<A> {
                     child.layout(constraints);
                 }
                 // Recurse into grandchildren
-                self.relayout_dirty_recursive(child.as_mut());
+                Self::relayout_dirty_recursive(child.as_mut());
             }
         }
     }
@@ -155,18 +157,18 @@ impl<A: App> Application<A> {
     fn render_dirty(&mut self) {
         // Render only dirty subtrees (cascade down)
         if let Some(ref mut root) = self.root_node {
-            self.render_dirty_recursive(root);
+            Self::render_dirty_recursive(root.as_mut());
         }
     }
 
-    fn render_dirty_recursive(&mut self, node: &mut dyn RenderNode) {
+    fn render_dirty_recursive(node: &mut dyn RenderNode) {
         if node.is_dirty() {
             node.render();
         }
 
         // Recurse into children
         for child in node.children_mut().iter_mut() {
-            self.render_dirty_recursive(child.as_mut());
+            Self::render_dirty_recursive(child.as_mut());
         }
     }
 }

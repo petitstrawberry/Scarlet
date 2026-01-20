@@ -227,13 +227,15 @@ impl RenderNode for TextFieldRenderNode {
         buffer.fill_rect(text_area, [0, 0, 0, 255]);
 
         // Draw text using graphics module
+        let width = buffer.width();
+        let height = buffer.height();
         let data = buffer.as_mut_slice();
         let text_to_draw: String = text.chars().take(self.interaction_state.cursor_pos).collect();
 
         draw_text(
             data,
-            buffer.width(),
-            buffer.height(),
+            width,
+            height,
             &text_to_draw,
             (padding + 2.0) as i32,
             (padding + 2.0) as i32,
@@ -289,7 +291,7 @@ impl RenderNode for TextFieldRenderNode {
                 use crate::event::KeyEvent;
                 match key {
                     KeyEvent::Char(c) if c.is_ascii_graphic() => {
-                        self.insert_char(c);
+                        self.insert_char(*c);
                     }
                     KeyEvent::Backspace => {
                         self.delete_char();

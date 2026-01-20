@@ -4,7 +4,11 @@
 
 use crate::geometry::{Point, Rect, Size};
 use ab_glyph::{point, Font, FontRef, Glyph, PxScale, PxScaleFont, ScaleFont};
+use std::boxed::Box;
+use std::io::Read;
+use std::println;
 use std::sync::Mutex;
+use std::vec;
 use std::vec::Vec;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -284,7 +288,7 @@ pub fn draw_text(
         let scaled = font.as_scaled(scale);
 
         // Vertical adjustment for baseline
-        y += scaled.ascent().ceil() as i32;
+        y += ceil_i32(scaled.ascent());
 
         for ch in text.chars() {
             if let Some((origin_x, origin_y, width, height, mask_ptr)) =
@@ -295,7 +299,7 @@ pub fn draw_text(
 
                 // Clip to buffer bounds
                 if gx < 0 || gy < 0 {
-                    x += scaled.h_advance(scaled.glyph_id(ch)).ceil() as i32;
+                    x += ceil_i32(scaled.h_advance(scaled.glyph_id(ch)));
                     continue;
                 }
 
@@ -306,7 +310,7 @@ pub fn draw_text(
 
                 // Check bounds
                 if gx >= buffer_width || gy >= buffer_height {
-                    x += scaled.h_advance(scaled.glyph_id(ch)).ceil() as i32;
+                    x += ceil_i32(scaled.h_advance(scaled.glyph_id(ch)));
                     continue;
                 }
 
@@ -342,7 +346,7 @@ pub fn draw_text(
                     }
                 }
 
-                x += scaled.h_advance(scaled.glyph_id(ch)).ceil() as i32;
+                x += ceil_i32(scaled.h_advance(scaled.glyph_id(ch)));
             }
         }
     }

@@ -83,7 +83,6 @@ pub mod key_code {
     pub const KEY_9: u16 = 0x0a;
     pub const KEY_0: u16 = 0x0b;
     pub const KEY_ENTER: u16 = 0x1c;
-    pub const KEY_ESC: u16 = 0x01;
     pub const KEY_BACKSPACE: u16 = 0x0e;
     pub const KEY_TAB: u16 = 0x0f;
     pub const KEY_SPACE: u16 = 0x39;

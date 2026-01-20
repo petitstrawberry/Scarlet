@@ -17,17 +17,26 @@ pub trait IntoRenderNodes {
 
 // Macro to implement IntoRenderNodes for tuples of various sizes
 macro_rules! impl_into_nodes {
-    ($($idx:tt: $ty:ident),*) => {
-        impl<$($ty: View + Clone),*> IntoRenderNodes for ($($ty),*) {
+    ($idx:tt: $ty:ident) => {
+        impl<$ty: View + Clone> IntoRenderNodes for ($ty,) {
+            fn into_nodes(self) -> Vec<Box<dyn RenderNode>> {
+                let mut nodes = Vec::new();
+                nodes.push(self.$idx.build());
+                nodes
+            }
+        }
+    };
+    ($($idx:tt: $ty:ident),+) => {
+        impl<$($ty: View + Clone),+> IntoRenderNodes for ($($ty,)+) {
             fn into_nodes(self) -> Vec<Box<dyn RenderNode>> {
                 let mut nodes = Vec::new();
                 $(
                     nodes.push(self.$idx.build());
-                )*
+                )+
                 nodes
             }
         }
-    }
+    };
 }
 
 // Implement for tuples of size 1-16
@@ -131,8 +140,13 @@ impl RenderNode for ZStackRenderNode {
         self.children.iter().find(|c| c.id() == id).map(|c| c.as_ref())
     }
 
-    fn get_child_mut(&mut self, id: NodeId) -> Option<&mut dyn RenderNode> {
-        self.children.iter_mut().find(|c| c.id() == id).map(|c| c.as_mut())
+    fn get_child_mut(&mut self, id: NodeId) -> Option<&mut (dyn RenderNode + '_)> {
+        for child in self.children.iter_mut() {
+            if child.id() == id {
+                return Some(child.as_mut());
+            }
+        }
+        None
     }
 
     fn type_id(&self) -> std::any::TypeId {

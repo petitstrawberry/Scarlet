@@ -266,7 +266,8 @@ impl RenderNode for ButtonRenderNode {
                     MouseEventKind::Press => {
                         if self.interaction_state.hovered {
                             self.interaction_state.pressed = true;
-                            self.interaction_state.focused = true;
+                            // Note: Don't set focused directly here
+                            // Focus is managed by FocusManager via request_focus()/lose_focus()
                             self.mark_dirty(DirtyFlags::PAINT);
                         }
                     }

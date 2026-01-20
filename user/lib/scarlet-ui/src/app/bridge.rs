@@ -14,7 +14,7 @@ pub struct SurfaceBridge {
     surface_id: u32,
     pub width: u32,
     pub height: u32,
-    mouse_pos: sws_client::Point,
+    mouse_pos: Point,
     mouse_buttons: u8,
     resize_pending: bool,
 }
@@ -33,7 +33,7 @@ impl SurfaceBridge {
             surface_id,
             width,
             height,
-            mouse_pos: sws_client::Point::ZERO,
+            mouse_pos: Point::ZERO,
             mouse_buttons: 0,
             resize_pending: false,
         })
@@ -137,10 +137,10 @@ impl SurfaceBridge {
                 // Absolute position (mouse)
                 match input.code {
                     ABS_X => {
-                        self.mouse_pos.x = input.value as i32;
+                        self.mouse_pos.x = input.value as f32;
                     }
                     ABS_Y => {
-                        self.mouse_pos.y = input.value as i32;
+                        self.mouse_pos.y = input.value as f32;
                     }
                     _ => return None,
                 }
@@ -148,8 +148,8 @@ impl SurfaceBridge {
                 // Generate mouse move event
                 Some(Event::Mouse(MouseEvent {
                     position: Point {
-                        x: self.mouse_pos.x as f32,
-                        y: self.mouse_pos.y as f32,
+                        x: self.mouse_pos.x,
+                        y: self.mouse_pos.y,
                     },
                     buttons: MouseButtons(self.mouse_buttons),
                     kind: MouseEventKind::Move,
@@ -172,8 +172,8 @@ impl SurfaceBridge {
                             self.mouse_buttons |= button.0;
                             Some(Event::Mouse(MouseEvent {
                                 position: Point {
-                                    x: self.mouse_pos.x as f32,
-                                    y: self.mouse_pos.y as f32,
+                                    x: self.mouse_pos.x,
+                                    y: self.mouse_pos.y,
                                 },
                                 buttons: MouseButtons(self.mouse_buttons),
                                 kind: MouseEventKind::Press,
@@ -183,8 +183,8 @@ impl SurfaceBridge {
                             self.mouse_buttons &= !button.0;
                             Some(Event::Mouse(MouseEvent {
                                 position: Point {
-                                    x: self.mouse_pos.x as f32,
-                                    y: self.mouse_pos.y as f32,
+                                    x: self.mouse_pos.x,
+                                    y: self.mouse_pos.y,
                                 },
                                 buttons: MouseButtons(self.mouse_buttons),
                                 kind: MouseEventKind::Release,
@@ -251,7 +251,7 @@ impl SurfaceBridge {
                                 _ => None,
                             };
 
-                            key_event.map(KeyEvent::from)
+                            key_event.map(Event::Key)
                         } else {
                             None
                         }
@@ -262,10 +262,10 @@ impl SurfaceBridge {
                 // Relative movement (mouse)
                 match input.code {
                     REL_X => {
-                        self.mouse_pos.x += input.value as i32;
+                        self.mouse_pos.x += input.value as f32;
                     }
                     REL_Y => {
-                        self.mouse_pos.y += input.value as i32;
+                        self.mouse_pos.y += input.value as f32;
                     }
                     _ => return None,
                 }
@@ -273,8 +273,8 @@ impl SurfaceBridge {
                 // Generate mouse move event
                 Some(Event::Mouse(MouseEvent {
                     position: Point {
-                        x: self.mouse_pos.x as f32,
-                        y: self.mouse_pos.y as f32,
+                        x: self.mouse_pos.x,
+                        y: self.mouse_pos.y,
                     },
                     buttons: MouseButtons(self.mouse_buttons),
                     kind: MouseEventKind::Move,

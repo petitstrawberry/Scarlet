@@ -24,25 +24,44 @@ impl<'a> EventDispatcher<'a> {
                 None => return, // No target, ignore event
             };
 
-            // Phase 1: Capture (root → target)
-            self.capture_phase(event, target_id);
+            // Build path once (root → target)
+            let path = self.build_path_to_target(target_id);
 
-            // Phase 2: Target
-            self.target_phase(event, target_id);
+            // Use a single context across phases so stop_propagation works like DOM.
+            let mut ctx = EventContext {
+                phase: EventPhase::Capture,
+                stop_propagation: false,
+                stop_immediate: false,
+            };
+
+            // Phase 1: Capture (root → target)
+            self.capture_phase(event, &path, &mut ctx);
+            if ctx.stop_propagation || ctx.stop_immediate {
+                return;
+            }
+
+            // Phase 2: Target (target only)
+            self.target_phase(event, &path, target_id, &mut ctx);
+            if ctx.stop_propagation || ctx.stop_immediate {
+                return;
+            }
 
             // Phase 3: Bubble (target → root)
-            self.bubble_phase(event, target_id);
+            self.bubble_phase(event, &path, &mut ctx);
         }
     }
 
     fn dispatch_keyboard(&mut self, event: &Event) {
-        // Check for Tab key to move focus
+        // Tab key: move focus
         if let Event::Key(KeyEvent::Tab) = event {
+            // Save old focus BEFORE focus_next() updates it
+            let old_focus_id = self.focus_manager.focused();
+
             if let Some(new_focus) = self.focus_manager.focus_next(self.root) {
-                // Notify old focus to lose focus
-                if let Some(old_focus_id) = self.focus_manager.focused() {
-                    if old_focus_id != new_focus {
-                        if let Some(node) = self.get_node_mut(old_focus_id) {
+                // Notify old focus to lose focus (if different from new)
+                if let Some(old_id) = old_focus_id {
+                    if old_id != new_focus {
+                        if let Some(node) = self.get_node_mut(old_id) {
                             node.lose_focus();
                         }
                     }
@@ -56,7 +75,8 @@ impl<'a> EventDispatcher<'a> {
             return;
         }
 
-        // Get focused node
+        // Other keyboard events: only send to focused node
+        // If no node has focus, keyboard events are ignored (this is intentional)
         let focused_id = match self.focus_manager.focused() {
             Some(id) => id,
             None => return, // No focus, ignore keyboard event
@@ -72,34 +92,24 @@ impl<'a> EventDispatcher<'a> {
             stop_immediate: false,
         };
 
-        for node_id in &path {
-            if let Some(node) = self.get_node_mut_via_path(&path, *node_id) {
-                node.handle_event(event, &mut ctx);
-                if ctx.stop_propagation || ctx.stop_immediate {
-                    return;
-                }
-            }
+        // Walk path once from root to focused node
+        self.walk_path(&path, event, &mut ctx, /*forward=*/true);
+        if ctx.stop_propagation || ctx.stop_immediate {
+            return;
         }
 
         // Target phase (focused node only)
         ctx.phase = EventPhase::Target;
         if let Some(node) = self.get_node_mut_via_path(&path, focused_id) {
             node.handle_event(event, &mut ctx);
-            if ctx.stop_propagation {
+            if ctx.stop_propagation || ctx.stop_immediate {
                 return;
             }
         }
 
         // Bubble phase (focused node → root)
         ctx.phase = EventPhase::Bubble;
-        for node_id in path.iter().rev() {
-            if let Some(node) = self.get_node_mut_via_path(&path, *node_id) {
-                node.handle_event(event, &mut ctx);
-                if ctx.stop_propagation {
-                    return;
-                }
-            }
-        }
+        self.walk_path_reverse(&path, event, &mut ctx);
     }
 
     fn find_target(&self, event: &Event) -> Option<NodeId> {
@@ -124,58 +134,119 @@ impl<'a> EventDispatcher<'a> {
         }
     }
 
-    fn capture_phase(&mut self, event: &Event, target_id: NodeId) {
-        let path = self.build_path_to_target(target_id);
+    fn capture_phase(&mut self, event: &Event, path: &[NodeId], ctx: &mut EventContext) {
+        ctx.phase = EventPhase::Capture;
 
-        let mut ctx = EventContext {
-            phase: EventPhase::Capture,
-            stop_propagation: false,
-            stop_immediate: false,
-        };
-
-        // Path is root → target, iterate in order
-        for node_id in &path {
-            if let Some(node) = self.get_node_mut_via_path(&path, *node_id) {
-                node.handle_event(event, &mut ctx);
-                if ctx.stop_propagation || ctx.stop_immediate {
-                    break;
-                }
-            }
-        }
+        // Walk path once from root to target, calling handle_event on each node
+        // This is O(depth) instead of O(depth^2)
+        self.walk_path(path, event, ctx, /*forward=*/true);
     }
 
-    fn target_phase(&mut self, event: &Event, target_id: NodeId) {
-        let path = self.build_path_to_target(target_id);
-
-        let mut ctx = EventContext {
-            phase: EventPhase::Target,
-            stop_propagation: false,
-            stop_immediate: false,
-        };
+    fn target_phase(&mut self, event: &Event, path: &[NodeId], target_id: NodeId, ctx: &mut EventContext) {
+        ctx.phase = EventPhase::Target;
 
         // Target is last element in path
-        if let Some(node) = self.get_node_mut_via_path(&path, target_id) {
-            node.handle_event(event, &mut ctx);
+        if let Some(node) = self.get_node_mut_via_path(path, target_id) {
+            node.handle_event(event, ctx);
         }
     }
 
-    fn bubble_phase(&mut self, event: &Event, target_id: NodeId) {
-        let path = self.build_path_to_target(target_id);
+    fn bubble_phase(&mut self, event: &Event, path: &[NodeId], ctx: &mut EventContext) {
+        ctx.phase = EventPhase::Bubble;
 
-        let mut ctx = EventContext {
-            phase: EventPhase::Bubble,
-            stop_propagation: false,
-            stop_immediate: false,
-        };
+        // Walk path once from target to root (reverse order)
+        // This is O(depth) instead of O(depth^2)
+        self.walk_path_reverse(path, event, ctx);
+    }
 
-        // Path is root → target, reverse for bubble
-        for node_id in path.iter().rev() {
-            if let Some(node) = self.get_node_mut_via_path(&path, *node_id) {
-                node.handle_event(event, &mut ctx);
-                if ctx.stop_propagation {
-                    break;
+    /// Walk the path once from root to target, calling handle_event on each node.
+    /// This is O(depth) instead of calling get_node_mut_via_path for each node (O(depth^2)).
+    fn walk_path(&mut self, path: &[NodeId], event: &Event, ctx: &mut EventContext, _forward: bool) {
+        if path.is_empty() {
+            return;
+        }
+
+        // Start from root (path[0])
+        // Reborrow `self.root` so we don't move it out of `self`.
+        let mut current_node: &mut dyn RenderNode = &mut *self.root;
+
+        // Call handle_event on root first
+        current_node.handle_event(event, ctx);
+        if ctx.stop_propagation || ctx.stop_immediate {
+            return;
+        }
+
+        // Iterate through path[1..] to get to target
+        // path[0] is root, path[1] is first child, etc.
+        for i in 1..path.len() {
+            let child_id = path[i];
+
+            // Get child node
+            match current_node.get_child_mut(child_id) {
+                Some(child) => {
+                    // Call handle_event on this child
+                    child.handle_event(event, ctx);
+                    if ctx.stop_propagation || ctx.stop_immediate {
+                        return;
+                    }
+                    // Move to child for next iteration
+                    current_node = child;
                 }
+                None => return,
             }
+        }
+    }
+
+    /// Walk the path once from target to root (reverse), calling handle_event on each node.
+    /// Uses recursive post-order traversal to avoid multiple mutable borrows.
+    /// This is O(depth) - descends to target, then calls handle_event on way back.
+    fn walk_path_reverse(&mut self, path: &[NodeId], event: &Event, ctx: &mut EventContext) {
+        if path.is_empty() {
+            return;
+        }
+
+        fn walk_path_reverse_recursive(
+            parent: &mut dyn RenderNode,
+            path: &[NodeId],
+            index: usize,
+            event: &Event,
+            ctx: &mut EventContext,
+        ) {
+            if index >= path.len() {
+                // Reached past target (leaf), start bubbling back
+                return;
+            }
+
+            let child_id = path[index];
+            let child = match parent.get_child_mut(child_id) {
+                Some(c) => c,
+                None => return,
+            };
+
+            // First, recurse deeper (descent to target)
+            walk_path_reverse_recursive(child, path, index + 1, event, ctx);
+
+            // After returning from recursion, check if propagation was stopped
+            // If stopped in deeper nodes, don't call handle_event on this node
+            if ctx.stop_propagation || ctx.stop_immediate {
+                return;
+            }
+
+            // Handle event on this child (post-order)
+            // This processes nodes in reverse: target first, then parents on way back
+            child.handle_event(event, ctx);
+        }
+
+        // Start recursive descent from root
+        // path[0] is root, path[1] is first child, etc.
+        // For bubble phase, we need to process in reverse: target → ... → child1 → root
+        // Note: Root IS processed in bubble phase (DOM standard behavior)
+        let root: &mut dyn RenderNode = &mut *self.root;
+        walk_path_reverse_recursive(root, path, 1, event, ctx);
+
+        // After processing all descendants, handle root (last in bubble phase)
+        if !(ctx.stop_propagation || ctx.stop_immediate) {
+            root.handle_event(event, ctx);
         }
     }
 
@@ -215,26 +286,25 @@ impl<'a> EventDispatcher<'a> {
     }
 
     fn get_node_mut_via_prefix(&mut self, path: &[NodeId]) -> Option<&mut dyn RenderNode> {
-        // Safe traversal without unsafe: use recursive helper that properly
-        // hands over mutable references at each level
+        // path is [root, child1, child2, ..., target]
+        // Start traversal from root, but skip matching root itself
         fn traverse<'a>(node: &'a mut dyn RenderNode, path: &[NodeId], index: usize) -> Option<&'a mut dyn RenderNode> {
             if index >= path.len() {
                 return Some(node);
             }
 
-            let target_id = path[index];
-
-            // If current node matches, skip to next
-            if node.id() == target_id {
-                return traverse(node, path, index + 1);
-            }
-
-            // Get child and continue traversal
-            let child = node.get_child_mut(target_id)?;
+            // path[index] is the next node to traverse to
+            let child_id = path[index];
+            let child = node.get_child_mut(child_id)?;
             traverse(child, path, index + 1)
         }
 
-        traverse(self.root, path, 0)
+        if path.is_empty() {
+            return Some(self.root);
+        }
+
+        // path[0] is root, so start from path[1]
+        traverse(self.root, path, 1)
     }
 }
 
