@@ -1,7 +1,7 @@
-use crate::event::{Event, EventContext, EventPhase, HitResult, MouseEvent};
+use crate::event::{Event, EventContext, EventPhase, HitResult};
 use crate::geometry::Point;
 use crate::node_id::NodeId;
-use crate::traits::render_node::RenderNode;
+use crate::traits::RenderNode;
 use std::vec::Vec;
 
 pub struct EventDispatcher<'a> {
@@ -135,14 +135,23 @@ impl<'a> EventDispatcher<'a> {
     }
 
     fn get_node_mut_via_prefix(&mut self, path: &[NodeId]) -> Option<&mut dyn RenderNode> {
-        let mut current = self.root;
+        // Use raw pointer to avoid self-borrow issues
+        // This is safe because we're extending the lifetime of the mutable borrow
+        // but ensuring we only return a reference that doesn't alias with anything
+        let mut current = self.root as *mut dyn RenderNode;
+
         for id in path {
-            if current.id() == *id {
+            let node_ref = unsafe { &mut *current };
+            if node_ref.id() == *id {
                 continue;
             }
-            current = current.get_child_mut(*id)?;
+            match node_ref.get_child_mut(*id) {
+                Some(child) => current = child as *mut dyn RenderNode,
+                None => return None,
+            }
         }
-        Some(current)
+
+        Some(unsafe { &mut *current })
     }
 }
 

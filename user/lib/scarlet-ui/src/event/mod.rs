@@ -1,6 +1,10 @@
 use crate::geometry::Point;
 use crate::node_id::NodeId;
 
+mod dispatcher;
+
+pub use dispatcher::EventDispatcher;
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum Event {
     Mouse(MouseEvent),

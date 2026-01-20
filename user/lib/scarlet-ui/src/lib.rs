@@ -3,6 +3,7 @@
 extern crate scarlet_std as std;
 
 mod buffer;
+mod containers;
 mod dirty;
 mod event;
 mod geometry;
@@ -10,15 +11,18 @@ mod layout;
 mod node_id;
 mod state;
 mod traits;
+mod views;
 
 pub use buffer::Buffer;
 pub use dirty::DirtyFlags;
-pub use event::{Event, EventContext, EventPhase, HitResult, KeyEvent, MouseEvent, MouseEventKind};
+pub use event::{Event, EventContext, EventDispatcher, EventPhase, HitResult, KeyEvent, MouseEvent, MouseEventKind};
 pub use geometry::{Point, Rect, Size};
 pub use layout::{Alignment, LayoutConstraints};
 pub use node_id::NodeId;
+pub use containers::VStack;
 pub use state::{State, SubscriptionId};
 pub use traits::{RenderNode, UpdateResult, View};
+pub use views::{Rectangle, Spacer, Text};
 
 pub mod prelude {
     pub use crate::event::{Event, EventContext, EventPhase};
