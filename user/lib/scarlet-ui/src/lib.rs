@@ -22,23 +22,24 @@ pub use event::{Event, EventContext, EventDispatcher, EventPhase, HitResult, Key
 pub use geometry::{Point, Rect, Size};
 pub use layout::{Alignment, LayoutConstraints};
 pub use node_id::NodeId;
-pub use containers::VStack;
+pub use containers::{HStack, VStack, ZStack};
 pub use state::{State, SubscriptionId};
 pub use traits::{RenderNode, UpdateResult, View};
-pub use views::{Button, ButtonColors, Rectangle, Slider, Spacer, Text, TextField, Toggle};
+pub use views::{Button, ButtonColors, Image, Rectangle, Slider, Spacer, Text, TextField, Toggle};
 pub use app::{App, Application};
 
 // Re-export macros
 extern crate scarlet_ui_macros;
-pub use scarlet_ui_macros::{view, View, vstack};
+pub use scarlet_ui_macros::{hstack, view, View, vstack, zstack};
 
 pub mod prelude {
     pub use crate::app::{App, Application};
+    pub use crate::containers::{HStack, VStack, ZStack};
     pub use crate::event::{Event, EventContext, EventPhase};
     pub use crate::layout::{Alignment, LayoutConstraints};
     pub use crate::state::{State, SubscriptionId};
     pub use crate::traits::{RenderNode, View};
-    pub use crate::views::{Button, Rectangle, Slider, Spacer, Text, TextField, Toggle};
+    pub use crate::views::{Button, Image, Rectangle, Slider, Spacer, Text, TextField, Toggle};
     pub use crate::{NodeId, Point, Rect, Size};
-    pub use scarlet_ui_macros::{vstack, View};
+    pub use scarlet_ui_macros::{hstack, vstack, View, zstack};
 }

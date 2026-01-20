@@ -2,7 +2,6 @@ use proc_macro::TokenStream;
 use quote::quote;
 use syn::{parse_macro_input, DeriveInput, parse::Parse, Token};
 use syn::parse::{ParseStream, Result};
-use syn::punctuated::Punctuated;
 
 /// Derive macro for View trait
 /// Automatically implements View for structs with body() method
@@ -115,21 +114,45 @@ pub fn vstack(input: TokenStream) -> TokenStream {
     TokenStream::from(expanded)
 }
 
-/// Macro for HStack - placeholder
+/// Macro for HStack
 #[proc_macro]
-pub fn hstack(_input: TokenStream) -> TokenStream {
-    let expanded = quote! {
-        ::scarlet_ui::std::compile_error!("HStack not yet implemented")
+pub fn hstack(input: TokenStream) -> TokenStream {
+    let parsed = parse_macro_input!(input as VStackInput);
+
+    let children: Vec<proc_macro2::TokenStream> = parsed.children
+        .into_iter()
+        .map(|expr| quote::quote!(#expr))
+        .collect();
+
+    let expanded = match children.len() {
+        0 => return quote! {
+            ::scarlet_ui::std::compile_error!("hstack! requires at least 2 children")
+        }.into(),
+        _ => quote! {
+            ::scarlet_ui::HStack::new((#(#children),*))
+        },
     };
 
     TokenStream::from(expanded)
 }
 
-/// Macro for ZStack - placeholder
+/// Macro for ZStack
 #[proc_macro]
-pub fn zstack(_input: TokenStream) -> TokenStream {
-    let expanded = quote! {
-        ::scarlet_ui::std::compile_error!("ZStack not yet implemented")
+pub fn zstack(input: TokenStream) -> TokenStream {
+    let parsed = parse_macro_input!(input as VStackInput);
+
+    let children: Vec<proc_macro2::TokenStream> = parsed.children
+        .into_iter()
+        .map(|expr| quote::quote!(#expr))
+        .collect();
+
+    let expanded = match children.len() {
+        0 => return quote! {
+            ::scarlet_ui::std::compile_error!("zstack! requires at least 1 child")
+        }.into(),
+        _ => quote! {
+            ::scarlet_ui::ZStack::new((#(#children),*))
+        },
     };
 
     TokenStream::from(expanded)
