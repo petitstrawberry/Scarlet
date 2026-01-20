@@ -3,7 +3,9 @@
 
 extern crate scarlet_std;
 
-use scarlet_std::format;
+use core::result;
+
+use scarlet_std::{format, println};
 use scarlet_ui::prelude::*;
 
 struct CounterApp {
@@ -29,31 +31,36 @@ impl CounterView {
     fn body(&self) -> impl View {
         let count = self.count.clone();
 
-        vstack! {
-            Text::new(format!("Count: {}", self.count.get()).as_str()),
-            Button::new("Increment")
-                .on_click(move || {
-                    count.update(|c| *c += 1);
-                }),
-        }
-        .spacing(20.0)
-        .alignment(Alignment::Center)
+        Window::new("Counter",
+            vstack! {
+                Text::new(format!("Count: {}", self.count.get()).as_str()),
+                Button::new("Increment")
+                    .on_click(move || {
+                        count.update(|c| *c += 1);
+                    }),
+            }
+            .spacing(20.0)
+            .alignment(Alignment::Center)
+        )
+        .decorated(true)
     }
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn main() {
+    println!("[counter] Starting CounterApp");
     let app = CounterApp {
         count: State::new(0),
     };
 
     match Application::new(app) {
         Ok(app) => {
-            let _ = app.run();
+            let result = app.run();
+            println!("[counter] Application exited with result: {:?}", result);
         }
         Err(e) => {
             // In no_std, we can't easily print errors
-            let _ = e;
+            println!("[counter] Application error: {}", e);
         }
     }
 }

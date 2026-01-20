@@ -9,6 +9,7 @@ use crate::traits::{RenderNode, UpdateResult, View};
 use crate::geometry::Color;
 use std::any::Any;
 use std::string::String;
+use std::println;
 
 #[derive(Clone, PartialEq)]
 pub struct Text {
@@ -19,6 +20,7 @@ pub struct Text {
 
 impl Text {
     pub fn new(content: &str) -> Self {
+        println!("[text] Text::new() called with content: {}", content);
         Self {
             content: String::from(content),
             color: Color::rgb(255, 255, 255),
@@ -47,6 +49,7 @@ impl View for Text {
     }
 
     fn build(&self) -> std::boxed::Box<dyn RenderNode> {
+        println!("[text] Text::build() called");
         std::boxed::Box::new(TextRenderNode::new(self.clone()))
     }
 
@@ -109,8 +112,18 @@ impl RenderNode for TextRenderNode {
             .downcast_ref::<Text>()
             .map(|new_text| {
                 if self.view != *new_text {
+                    // Check if size changed
+                    let old_size = self.estimated_size();
                     self.view = new_text.clone();
-                    Some(UpdateResult::Changed(DirtyFlags::PAINT))
+                    let new_size = self.estimated_size();
+
+                    if old_size != new_size {
+                        // Size changed, need layout
+                        Some(UpdateResult::Changed(DirtyFlags::PAINT | DirtyFlags::LAYOUT))
+                    } else {
+                        // Only content changed, just repaint
+                        Some(UpdateResult::Changed(DirtyFlags::PAINT))
+                    }
                 } else {
                     Some(UpdateResult::Unchanged)
                 }
@@ -128,6 +141,7 @@ impl RenderNode for TextRenderNode {
             estimated.height.clamp(constraints.min.height, constraints.max.height),
         );
         std::println!("[Text::layout] final size: {:?}", size);
+        std::println!("[Text::layout] content: '{}', font_size: {}", self.view.content, self.view.size);
 
         self.frame = Rect::new(Point::ZERO, size);
         size
@@ -146,6 +160,7 @@ impl RenderNode for TextRenderNode {
             return;
         }
 
+        std::println!("[Text::render] creating buffer with size: {:?}", self.frame.size);
         self.buffer = Some(Buffer::new(self.frame.size));
 
         // Use graphics module to draw text
@@ -153,6 +168,8 @@ impl RenderNode for TextRenderNode {
         let width = buffer.width();
         let height = buffer.height();
         let data = buffer.as_mut_slice();
+
+        std::println!("[Text::render] drawing text '{}' at {}x{}", &self.view.content, width, height);
 
         draw_text(
             data,
@@ -165,6 +182,7 @@ impl RenderNode for TextRenderNode {
             self.view.color.as_bgra(),
         );
 
+        std::println!("[Text::render] done rendering '{}'", &self.view.content);
         self.clear_dirty();
     }
 

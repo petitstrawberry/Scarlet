@@ -37,8 +37,11 @@ impl Color {
     pub const BLUE: Color = Color { b: 255, g: 0, r: 0, a: 255 };
     pub const GRAY: Color = Color { b: 128, g: 128, r: 128, a: 255 };
 
-    /// Light gray background (from design system)
-    pub const WINDOW_BG: Color = Color { b: 247, g: 242, r: 242, a: 255 };
+    // UI colors from design system
+    pub const WINDOW_BG: Color = Color { b: 247, g: 242, r: 242, a: 255 }; // Light gray background
+    pub const TITLEBAR: Color = Color { b: 210, g: 125, r: 45, a: 255 }; // Blue titlebar
+    pub const TITLEBAR_TEXT: Color = Color { b: 255, g: 255, r: 255, a: 255 }; // White text
+    pub const CLOSE_BUTTON: Color = Color { b: 48, g: 59, r: 255, a: 255 }; // Red close button
 }
 
 impl Default for Color {

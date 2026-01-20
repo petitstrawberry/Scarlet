@@ -9,6 +9,7 @@ use std::any::TypeId;
 use std::boxed::Box;
 use std::vec;
 use std::vec::Vec;
+use std::println;
 
 /// Trait to convert tuple of Views into Vec of RenderNodes
 pub trait IntoRenderNodes {
@@ -85,6 +86,7 @@ pub struct VStack<V: View + Clone> {
 
 impl<V: View + Clone> VStack<V> {
     pub fn new(children: V) -> Self {
+        println!("[vstack] VStack::new() called");
         Self {
             children,
             spacing: 0.0,
@@ -93,11 +95,13 @@ impl<V: View + Clone> VStack<V> {
     }
 
     pub fn spacing(mut self, spacing: f32) -> Self {
+        println!("[vstack] VStack::spacing({}) called", spacing);
         self.spacing = spacing;
         self
     }
 
     pub fn alignment(mut self, alignment: Alignment) -> Self {
+        println!("[vstack] VStack::alignment() called");
         self.alignment = alignment;
         self
     }
@@ -119,7 +123,9 @@ impl<V: View + Clone + IntoRenderNodes> View for VStack<V> {
     }
 
     fn build(&self) -> Box<dyn RenderNode> {
+        println!("[vstack] VStack::build() called");
         let children = self.children.clone().into_nodes();
+        println!("[vstack] into_nodes() returned {} children", children.len());
 
         Box::new(VStackRenderNode::new(
             children,
@@ -251,10 +257,12 @@ impl RenderNode for VStackRenderNode {
             };
 
             for (i, child) in self.children.iter_mut().enumerate() {
+                // Ensure width is set to the available width
+                let child_width = constraints.max.width;
                 let child_constraints = LayoutConstraints {
-                    min: Size::new(constraints.min.width, min_heights[i]),
+                    min: Size::new(child_width, min_heights[i]),
                     max: Size::new(
-                        constraints.max.width,
+                        child_width,
                         min_heights[i] + per_child,
                     ),
                 };
@@ -269,10 +277,12 @@ impl RenderNode for VStackRenderNode {
                     1.0 / n as f32
                 };
                 let child_height = (available_for_children * ratio).min(min_heights[i]);
-                let child_constraints = LayoutConstraints::tight(Size::new(
-                    constraints.max.width,
-                    child_height,
-                ));
+                // Use tight constraints for width to ensure it's set correctly
+                let child_width = constraints.max.width;
+                let child_constraints = LayoutConstraints {
+                    min: Size::new(child_width, 0.0),
+                    max: Size::new(child_width, child_height),
+                };
                 child.layout(child_constraints);
             }
         }
@@ -301,20 +311,29 @@ impl RenderNode for VStackRenderNode {
             return;
         }
 
+        println!("[vstack] VStackRenderNode::render() frame.size: {:?}", self.frame.size);
         self.buffer = Some(Buffer::new(self.frame.size));
 
         let mut y_offset = 0.0;
-        for child in &mut self.children {
-            child.set_frame(Rect::new(Point::new(0.0, y_offset), child.frame().size));
+        for (i, child) in self.children.iter_mut().enumerate() {
+            let child_size = child.frame().size;
+            println!("[vstack] child[{}] size before set_frame: {:?}", i, child_size);
+            child.set_frame(Rect::new(Point::new(0.0, y_offset), child_size));
+            println!("[vstack] child[{}] frame after set_frame: {:?}", i, child.frame());
             child.render();
 
             if let Some(child_buffer) = child.get_buffer() {
+                println!("[vstack] child[{}] buffer size: {:?}", i, child_buffer.size());
+                println!("[vstack] blitting child[{}] at frame: {:?}", i, child.frame());
                 self.buffer.as_mut().unwrap().blit_from(child_buffer, child.frame());
+            } else {
+                println!("[vstack] WARNING: child[{}] has no buffer!", i);
             }
 
             y_offset += child.frame().size.height + self.spacing;
         }
 
+        println!("[vstack] VStackRenderNode::render() done");
         self.clear_dirty();
     }
 

@@ -156,19 +156,18 @@ impl<A: App> Application<A> {
         for i in 0..node.children().len() {
             if let Some(child) = node.children_mut().get_mut(i) {
                 if child.is_dirty() {
-                    // Re-layout this child with its current frame constraints
-                    let frame = child.frame();
-                    let size = UiSize {
-                        width: frame.size.width,
-                        height: frame.size.height
-                    };
-                    // Explicitly create constraints to avoid type inference issues
+                    // Re-layout this child:
+                    // First, measure with loose constraints to get natural size
                     use crate::layout::LayoutConstraints;
-                    let constraints = LayoutConstraints {
-                        min: size,
-                        max: size,
-                    };
-                    child.layout(constraints);
+                    use crate::geometry::Size;
+
+                    let frame = child.frame();
+                    let loose = LayoutConstraints::loose(frame.size);
+                    let natural_size = child.layout(loose);
+
+                    // Then, layout with tight constraints using the natural size
+                    let tight = LayoutConstraints::tight(natural_size);
+                    child.layout(tight);
                 }
                 // Recurse into grandchildren
                 Self::relayout_dirty_recursive(child.as_mut());

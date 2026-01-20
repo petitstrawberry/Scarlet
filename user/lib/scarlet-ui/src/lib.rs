@@ -22,7 +22,7 @@ pub use event::{Event, EventContext, EventDispatcher, EventPhase, HitResult, Key
 pub use geometry::{Color, Point, Rect, Size};
 pub use layout::{Alignment, LayoutConstraints};
 pub use node_id::NodeId;
-pub use containers::{HStack, VStack, ZStack};
+pub use containers::{HStack, VStack, Window, ZStack};
 pub use state::{State, SubscriptionId};
 pub use traits::{RenderNode, UpdateResult, View};
 pub use views::{Button, ButtonColors, Image, Rectangle, Slider, Spacer, Text, TextField, Toggle};
@@ -34,7 +34,7 @@ pub use scarlet_ui_macros::{hstack, view, View, vstack, zstack};
 
 pub mod prelude {
     pub use crate::app::{App, Application};
-    pub use crate::containers::{HStack, VStack, ZStack};
+    pub use crate::containers::{HStack, VStack, Window, ZStack};
     pub use crate::event::{Event, EventContext, EventPhase};
     pub use crate::geometry::Color;
     pub use crate::layout::{Alignment, LayoutConstraints};
