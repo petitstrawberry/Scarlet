@@ -414,14 +414,13 @@ impl<A: App> Application<A> {
                     if self.app.on_request_close() {
                         std::println!("[app] on_request_close() returned true, proceeding with close");
                         let _ = self.bridge.close_window();
-                        // Exit immediately after closing - don't wait for SurfaceDestroyed event
-                        // The event may not arrive if the window server destroys the surface
-                        std::println!("[app] Exiting application after close");
-                        return true;  // Signal to exit event loop
+                        // The SurfaceDestroyed event will arrive and trigger exit via check_surface_destroyed()
+                        std::println!("[app] Waiting for SurfaceDestroyed event");
                     } else {
                         std::println!("[app] on_request_close() returned false, canceling close");
                     }
-                    return false;
+                    // Don't return true - wait for SurfaceDestroyed event instead
+                    return false;  // Keep running (will exit when SurfaceDestroyed arrives)
                 }
 
                 // Handle move request

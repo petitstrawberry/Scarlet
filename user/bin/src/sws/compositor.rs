@@ -1638,6 +1638,15 @@ impl Compositor {
                     "[Compositor] Client {} destroying window #{}",
                     client_id, window_id
                 );
+
+                // Send WINDOW_DESTROYED event to client before closing
+                let payload = sws_protocol::payload_window_destroyed(window_id);
+                send_message_to_client(client_id, sws_protocol::server_msg::WINDOW_DESTROYED, payload.to_vec());
+                println!(
+                    "[Compositor] Sent WINDOW_DESTROYED for window #{} to client {}",
+                    window_id, client_id
+                );
+
                 self.window_manager.close_window(window_id);
                 self.full_redraw_needed = true;
 
