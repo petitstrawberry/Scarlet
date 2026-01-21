@@ -13,6 +13,13 @@ pub trait App {
     type ViewType: View;
 
     fn build(&self) -> Self::ViewType;
+
+    /// Called when window close is requested (e.g., close button clicked).
+    /// Return true to allow the close, false to cancel it.
+    /// This is called before the window is actually destroyed.
+    fn on_request_close(&mut self) -> bool {
+        true  // Default: allow close
+    }
 }
 
 /// Main application structure
@@ -121,6 +128,12 @@ impl<A: App> Application<A> {
                 // Dispatcher ends here, borrow released
             }
 
+            // 2.4. Check for Window requests (move, minimize, maximize, close)
+            if self.handle_window_requests() {
+                // Application requested exit (e.g., window closed)
+                break Ok(());
+            }
+
             // 2.5. Check for window resize
             if self.bridge.check_resize_pending() {
                 // Mark root as dirty to trigger full relayout
@@ -129,7 +142,13 @@ impl<A: App> Application<A> {
                 }
             }
 
-            // 2.6. Check for state changes and rebuild view if needed
+            // 2.6. Check if window was destroyed
+            if self.bridge.check_surface_destroyed() {
+                std::println!("[app] Window destroyed, exiting application");
+                break Ok(());  // Exit the event loop
+            }
+
+            // 2.7. Check for state changes and rebuild view if needed
             if self.rebuild_requested.load(std::sync::atomic::Ordering::Relaxed) {
                 println!("[app] Rebuild requested, rebuilding view");
                 self.rebuild_requested.store(false, std::sync::atomic::Ordering::Relaxed);
@@ -368,5 +387,66 @@ impl<A: App> Application<A> {
                 Self::collect_frames_recursive(child.as_ref(), frames, depth + 1, child_offset);
             }
         }
+    }
+
+    fn handle_window_requests(&mut self) -> bool {
+        use crate::containers::window::WindowRenderNode;
+
+        // Handle requests for root Window node (if it's a Window)
+        let root_ptr = match self.root_node.as_mut() {
+            Some(r) => r.as_mut() as *mut dyn RenderNode,
+            None => return false,
+        };
+
+        unsafe {
+            let root_node = &mut *root_ptr;
+
+            // Check if this node is a Window with pending requests
+            if root_node.type_name() == "Window" {
+                let window_node = &mut *(root_node as *mut dyn RenderNode as *mut WindowRenderNode);
+
+                // Handle close first (with hook)
+                if window_node.request_close {
+                    window_node.request_close = false;
+                    std::println!("[app] Window close requested, calling on_request_close() hook");
+
+                    // Call user's hook - if it returns false, cancel the close
+                    if self.app.on_request_close() {
+                        std::println!("[app] on_request_close() returned true, proceeding with close");
+                        let _ = self.bridge.close_window();
+                        // Exit immediately after closing - don't wait for SurfaceDestroyed event
+                        // The event may not arrive if the window server destroys the surface
+                        std::println!("[app] Exiting application after close");
+                        return true;  // Signal to exit event loop
+                    } else {
+                        std::println!("[app] on_request_close() returned false, canceling close");
+                    }
+                    return false;
+                }
+
+                // Handle move request
+                if window_node.request_move {
+                    window_node.request_move = false;
+                    std::println!("[app] Starting window move");
+                    let _ = self.bridge.request_move_window();
+                }
+
+                // Handle minimize
+                if window_node.request_minimize {
+                    window_node.request_minimize = false;
+                    std::println!("[app] Minimizing window");
+                    let _ = self.bridge.minimize_window();
+                }
+
+                // Handle maximize
+                if window_node.request_maximize {
+                    window_node.request_maximize = false;
+                    std::println!("[app] Maximizing window");
+                    let _ = self.bridge.maximize_window();
+                }
+            }
+        }
+
+        false
     }
 }

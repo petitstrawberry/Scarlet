@@ -73,6 +73,14 @@ pub struct WindowRenderNode {
     minimize_button_hovered: bool,
     maximize_button_hovered: bool,
     close_button_hovered: bool,
+    // Titlebar drag state
+    pub is_dragging_titlebar: bool,
+    drag_start_position: Point,
+    // Button click requests (for Application to handle)
+    pub request_minimize: bool,
+    pub request_maximize: bool,
+    pub request_close: bool,
+    pub request_move: bool,
 }
 
 impl WindowRenderNode {
@@ -95,6 +103,12 @@ impl WindowRenderNode {
             minimize_button_hovered: false,
             maximize_button_hovered: false,
             close_button_hovered: false,
+            is_dragging_titlebar: false,
+            drag_start_position: Point::ZERO,
+            request_minimize: false,
+            request_maximize: false,
+            request_close: false,
+            request_move: false,
         };
         println!("[window] WindowRenderNode created");
         node
@@ -130,6 +144,13 @@ impl WindowRenderNode {
         Rect::new(
             Point::new(x, 0.0),
             Size::new(seg_w, Window::TITLEBAR_HEIGHT),
+        )
+    }
+
+    fn get_titlebar_rect(&self) -> Rect {
+        Rect::new(
+            Point::ZERO,
+            Size::new(self.frame.size.width, Window::TITLEBAR_HEIGHT),
         )
     }
 }
@@ -473,6 +494,7 @@ impl RenderNode for WindowRenderNode {
                 let minimize_rect = self.get_minimize_button_rect();
                 let maximize_rect = self.get_maximize_button_rect();
                 let close_button_rect = self.get_close_button_rect();
+                let titlebar_rect = self.get_titlebar_rect();
 
                 match ctx.phase {
                     EventPhase::Target => {
@@ -492,19 +514,37 @@ impl RenderNode for WindowRenderNode {
                                 {
                                     self.mark_dirty(DirtyFlags::PAINT);
                                 }
+
+                                // Handle dragging
+                                if self.is_dragging_titlebar && e.buttons.is_left_pressed() {
+                                    // Drag in progress - request will be handled by Application
+                                    // via checking self.is_dragging_titlebar flag
+                                }
                             }
                             MouseEventKind::Press => {
                                 if e.buttons.is_left_pressed() {
                                     if close_button_rect.contains(e.position) {
-                                        // Close button clicked - TODO: trigger close
                                         println!("[window] Close button clicked");
+                                        self.request_close = true;
                                     } else if minimize_rect.contains(e.position) {
-                                        // Minimize button clicked - TODO: trigger minimize
                                         println!("[window] Minimize button clicked");
+                                        self.request_minimize = true;
                                     } else if maximize_rect.contains(e.position) {
-                                        // Maximize button clicked - TODO: trigger maximize
                                         println!("[window] Maximize button clicked");
+                                        self.request_maximize = true;
+                                    } else if titlebar_rect.contains(e.position) {
+                                        // Clicked on titlebar (not buttons) - start drag
+                                        println!("[window] Titlebar clicked at {:?}", e.position);
+                                        self.is_dragging_titlebar = true;
+                                        self.drag_start_position = e.position;
+                                        self.request_move = true;
                                     }
+                                }
+                            }
+                            MouseEventKind::Release => {
+                                if self.is_dragging_titlebar {
+                                    println!("[window] Titlebar drag released");
+                                    self.is_dragging_titlebar = false;
                                 }
                             }
                             _ => {}

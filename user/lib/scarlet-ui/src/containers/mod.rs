@@ -1,6 +1,6 @@
 mod hstack;
 mod vstack;
-mod window;
+pub mod window;
 mod zstack;
 
 pub use hstack::HStack;

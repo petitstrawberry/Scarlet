@@ -14,9 +14,10 @@ pub struct SurfaceBridge {
     surface_id: u32,
     pub width: u32,
     pub height: u32,
-    mouse_pos: Point,
+    pub mouse_pos: Point,
     mouse_buttons: u8,
     resize_pending: bool,
+    surface_destroyed: bool,
 }
 
 impl SurfaceBridge {
@@ -36,6 +37,7 @@ impl SurfaceBridge {
             mouse_pos: Point::ZERO,
             mouse_buttons: 0,
             resize_pending: false,
+            surface_destroyed: false,
         })
     }
 
@@ -95,6 +97,49 @@ impl SurfaceBridge {
         result
     }
 
+    /// Check if the surface was destroyed since the last check.
+    /// This consumes and resets the flag.
+    pub fn check_surface_destroyed(&mut self) -> bool {
+        let result = self.surface_destroyed;
+        self.surface_destroyed = false;
+        result
+    }
+
+    /// Request to start interactive window move (drag titlebar)
+    pub fn request_move_window(&mut self) -> Result<(), &'static str> {
+        self.connection
+            .request_move_window(self.surface_id)
+            .map_err(|_| "Failed to request window move")
+    }
+
+    /// Move window to absolute position
+    pub fn move_window(&mut self, x: i32, y: i32) -> Result<(), &'static str> {
+        self.connection
+            .move_window(self.surface_id, x, y)
+            .map_err(|_| "Failed to move window")
+    }
+
+    /// Minimize window
+    pub fn minimize_window(&mut self) -> Result<(), &'static str> {
+        self.connection
+            .minimize_window(self.surface_id)
+            .map_err(|_| "Failed to minimize window")
+    }
+
+    /// Maximize window
+    pub fn maximize_window(&mut self) -> Result<(), &'static str> {
+        self.connection
+            .maximize_window(self.surface_id)
+            .map_err(|_| "Failed to maximize window")
+    }
+
+    /// Close/destroy window
+    pub fn close_window(&mut self) -> Result<(), &'static str> {
+        self.connection
+            .destroy_surface(self.surface_id)
+            .map_err(|_| "Failed to close window")
+    }
+
     fn convert_event(&mut self, sws_event: SwsEvent) -> Option<Event> {
         match sws_event {
             SwsEvent::Input(input) => self.convert_input_event(input),
@@ -106,6 +151,7 @@ impl SurfaceBridge {
             }
             SwsEvent::SurfaceDestroyed { .. } => {
                 // Window was closed
+                self.surface_destroyed = true;
                 None
             }
             SwsEvent::FocusChanged { .. } => {
