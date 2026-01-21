@@ -365,6 +365,10 @@ impl RenderNode for VStackRenderNode {
         self.buffer.as_ref()
     }
 
+    fn get_buffer_mut(&mut self) -> Option<&mut Buffer> {
+        self.buffer.as_mut()
+    }
+
     fn hit_test(&self, point: Point) -> HitResult {
         // println!("[vstack] hit_test: point={:?}, frame={:?}, children={}", point, self.frame, self.children.len());
 

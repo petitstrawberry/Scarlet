@@ -87,4 +87,5 @@ pub trait RenderNode {
 
     // Buffer
     fn get_buffer(&self) -> Option<&BufferRef>;
+    fn get_buffer_mut(&mut self) -> Option<&mut BufferRef>;
 }

@@ -244,6 +244,10 @@ impl RenderNode for SliderRenderNode {
         self.buffer.as_ref()
     }
 
+    fn get_buffer_mut(&mut self) -> Option<&mut Buffer> {
+        self.buffer.as_mut()
+    }
+
     fn hit_test(&self, point: Point) -> HitResult {
         // Check against local frame (origin at 0,0) since point is in local coordinates
         let local_frame = Rect::new(Point::ZERO, self.frame.size);

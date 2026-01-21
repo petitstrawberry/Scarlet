@@ -337,6 +337,10 @@ impl RenderNode for ImageRenderNode {
         self.buffer.as_ref()
     }
 
+    fn get_buffer_mut(&mut self) -> Option<&mut Buffer> {
+        self.buffer.as_mut()
+    }
+
     fn hit_test(&self, point: Point) -> HitResult {
         if self.frame.contains(point) {
             HitResult::Handled(self.id)

@@ -3,9 +3,10 @@ mod bridge;
 pub use bridge::SurfaceBridge;
 
 use crate::event::{Event, EventDispatcher, FocusManager, HoverManager, PressedManager};
-use crate::geometry::Size as UiSize;
+use crate::geometry::{Color, Size as UiSize};
 use crate::traits::{RenderNode, View};
 use std::boxed::Box;
+use std::vec::Vec;
 
 /// App trait that users implement
 pub trait App {
@@ -24,6 +25,8 @@ pub struct Application<A: App> {
     hover_manager: HoverManager,
     pressed_manager: PressedManager,
     rebuild_requested: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// Show debug colored borders around each View frame
+    pub debug_frames: bool,
 }
 
 impl<A: App> Application<A> {
@@ -42,6 +45,7 @@ impl<A: App> Application<A> {
             hover_manager: HoverManager::new(),
             pressed_manager: PressedManager::new(),
             rebuild_requested,
+            debug_frames: false,
         })
     }
 
@@ -84,6 +88,13 @@ impl<A: App> Application<A> {
         println!("[scarlet-ui] render() complete");
 
         println!("[scarlet-ui] buffer: {:?}", self.root_node.as_ref().and_then(|n| n.get_buffer()).map(|b| (b.width(), b.height())));
+
+        // Draw debug frames if enabled (initial render)
+        if self.debug_frames {
+            if let Some(ref mut node) = self.root_node {
+                Self::draw_debug_frames_static(node.as_mut());
+            }
+        }
 
         // Present initial state to screen
         println!("[scarlet-ui] calling present()");
@@ -143,6 +154,18 @@ impl<A: App> Application<A> {
                 let constraints = crate::layout::LayoutConstraints::tight(window_size);
                 self.root_node.as_mut().unwrap().layout(constraints);
                 self.root_node.as_mut().unwrap().render();
+
+                // Draw debug frames if enabled (after rebuild)
+                if self.debug_frames {
+                    if let Some(ref mut node) = self.root_node {
+                        Self::draw_debug_frames_static(node.as_mut());
+                    }
+                }
+
+                // Present immediately after rebuild
+                if let Some(ref mut node) = self.root_node {
+                    self.bridge.present(node.as_mut())?;
+                }
             }
 
             // 3. Check for dirty nodes
@@ -152,6 +175,13 @@ impl<A: App> Application<A> {
 
                 // 5. Render dirty nodes
                 self.render_dirty();
+
+                // 5.5. Draw debug frames if enabled
+                if self.debug_frames {
+                    if let Some(ref mut node) = self.root_node {
+                        Self::draw_debug_frames_static(node.as_mut());
+                    }
+                }
 
                 // 6. Present to screen
                 if let Some(ref mut node) = self.root_node {
@@ -255,5 +285,123 @@ impl<A: App> Application<A> {
         }
 
         false
+    }
+
+    fn draw_debug_frames(&mut self, root: &mut dyn RenderNode) {
+        use crate::geometry::{Point, Rect, Size};
+
+        // Collect all frames with their depth
+        let mut frames: Vec<(Rect, usize)> = Vec::new();
+        Self::collect_frames_recursive(root, &mut frames, 0);
+
+        // Get root buffer to draw on
+        let buffer = match root.get_buffer_mut() {
+            Some(b) => b,
+            None => return,
+        };
+
+        // Draw borders for all collected frames
+        let border_width = 1.0_f32;
+        for (frame, depth) in frames.iter() {
+            // Use color based on depth (cycle through colors)
+            let border_color = match depth % 6 {
+                0 => Color::RED,
+                1 => Color::GREEN,
+                2 => Color::BLUE,
+                3 => Color::rgb(255, 255, 0),  // Yellow
+                4 => Color::rgb(255, 0, 255),  // Magenta
+                _ => Color::rgb(0, 255, 255),  // Cyan
+            };
+
+            // Draw borders on all four sides
+            // Top
+            buffer.fill_rect(Rect::new(
+                Point::new(frame.origin.x, frame.origin.y),
+                Size::new(frame.size.width, border_width),
+            ), border_color.as_bgra());
+
+            // Bottom
+            buffer.fill_rect(Rect::new(
+                Point::new(frame.origin.x, frame.origin.y + frame.size.height - border_width),
+                Size::new(frame.size.width, border_width),
+            ), border_color.as_bgra());
+
+            // Left
+            buffer.fill_rect(Rect::new(
+                Point::new(frame.origin.x, frame.origin.y),
+                Size::new(border_width, frame.size.height),
+            ), border_color.as_bgra());
+
+            // Right
+            buffer.fill_rect(Rect::new(
+                Point::new(frame.origin.x + frame.size.width - border_width, frame.origin.y),
+                Size::new(border_width, frame.size.height),
+            ), border_color.as_bgra());
+        }
+    }
+
+    fn draw_debug_frames_static(root: &mut dyn RenderNode) {
+        use crate::geometry::{Point, Rect, Size};
+
+        // Collect all frames with their depth
+        let mut frames: Vec<(Rect, usize)> = Vec::new();
+        Self::collect_frames_recursive(root, &mut frames, 0);
+
+        // Get root buffer to draw on
+        let buffer = match root.get_buffer_mut() {
+            Some(b) => b,
+            None => return,
+        };
+
+        // Draw borders for all collected frames
+        let border_width = 1.0_f32;
+        for (frame, depth) in frames.iter() {
+            // Use color based on depth (cycle through colors)
+            let border_color = match depth % 6 {
+                0 => Color::RED,
+                1 => Color::GREEN,
+                2 => Color::BLUE,
+                3 => Color::rgb(255, 255, 0),  // Yellow
+                4 => Color::rgb(255, 0, 255),  // Magenta
+                _ => Color::rgb(0, 255, 255),  // Cyan
+            };
+
+            // Draw borders on all four sides
+            // Top
+            buffer.fill_rect(Rect::new(
+                Point::new(frame.origin.x, frame.origin.y),
+                Size::new(frame.size.width, border_width),
+            ), border_color.as_bgra());
+
+            // Bottom
+            buffer.fill_rect(Rect::new(
+                Point::new(frame.origin.x, frame.origin.y + frame.size.height - border_width),
+                Size::new(frame.size.width, border_width),
+            ), border_color.as_bgra());
+
+            // Left
+            buffer.fill_rect(Rect::new(
+                Point::new(frame.origin.x, frame.origin.y),
+                Size::new(border_width, frame.size.height),
+            ), border_color.as_bgra());
+
+            // Right
+            buffer.fill_rect(Rect::new(
+                Point::new(frame.origin.x + frame.size.width - border_width, frame.origin.y),
+                Size::new(border_width, frame.size.height),
+            ), border_color.as_bgra());
+        }
+    }
+
+    fn collect_frames_recursive(node: &dyn RenderNode, frames: &mut Vec<(crate::geometry::Rect, usize)>, depth: usize) {
+        let frame = node.frame();
+        if frame.size.width > 0.0 && frame.size.height > 0.0 {
+            frames.push((frame, depth));
+        }
+
+        // Recurse into children
+        for child in node.children().iter() {
+            Self::collect_frames_recursive(child.as_ref(), frames, depth + 1);
+        }
     }
 }

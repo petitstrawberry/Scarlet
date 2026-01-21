@@ -291,6 +291,10 @@ impl RenderNode for HStackRenderNode {
         self.buffer.as_ref()
     }
 
+    fn get_buffer_mut(&mut self) -> Option<&mut Buffer> {
+        self.buffer.as_mut()
+    }
+
     fn hit_test(&self, point: Point) -> HitResult {
         // Check children in reverse order (z-order)
         for child in self.children.iter().rev() {

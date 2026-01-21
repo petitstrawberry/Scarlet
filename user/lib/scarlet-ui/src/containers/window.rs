@@ -431,6 +431,10 @@ impl RenderNode for WindowRenderNode {
         self.buffer.as_ref()
     }
 
+    fn get_buffer_mut(&mut self) -> Option<&mut Buffer> {
+        self.buffer.as_mut()
+    }
+
     fn hit_test(&self, point: Point) -> HitResult {
         // Check titlebar buttons first if decorated
         if self.decorated {

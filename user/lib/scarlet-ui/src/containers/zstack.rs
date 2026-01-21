@@ -220,6 +220,10 @@ impl RenderNode for ZStackRenderNode {
         self.buffer.as_ref()
     }
 
+    fn get_buffer_mut(&mut self) -> Option<&mut Buffer> {
+        self.buffer.as_mut()
+    }
+
     fn hit_test(&self, point: Point) -> HitResult {
         // Check children from front to back (reverse order)
         // All children are at Point::ZERO in ZStack

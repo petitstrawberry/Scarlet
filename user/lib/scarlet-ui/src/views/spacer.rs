@@ -110,9 +110,10 @@ impl RenderNode for SpacerRenderNode {
     }
 
     fn layout(&mut self, constraints: LayoutConstraints) -> Size {
+        // Spacer expands to fill all available space (like SwiftUI)
         let size = Size::new(
-            self.view.min_width.max(constraints.min.width),
-            self.view.min_height.max(constraints.min.height),
+            self.view.min_width.max(constraints.min.width).max(constraints.max.width),
+            self.view.min_height.max(constraints.min.height).max(constraints.max.height),
         );
         self.frame = Rect::new(Point::ZERO, size);
         size
@@ -131,6 +132,10 @@ impl RenderNode for SpacerRenderNode {
     }
 
     fn get_buffer(&self) -> Option<&crate::buffer::Buffer> {
+        None
+    }
+
+    fn get_buffer_mut(&mut self) -> Option<&mut crate::buffer::Buffer> {
         None
     }
 

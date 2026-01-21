@@ -32,6 +32,7 @@ impl CounterView {
 
         vstack! {
             Text::new(format!("Count: {}", self.count.get()).as_str()),
+            Spacer::new(),
             Button::new("Increment")
                 .on_click(move || {
                     count.update(|c| *c += 1);
@@ -49,7 +50,9 @@ pub extern "C" fn main() {
     };
 
     match Application::new(app) {
-        Ok(app) => {
+        Ok(mut app) => {
+            // Enable debug frame visualization to see View boundaries
+            app.debug_frames = true;
             let _ = app.run();
         }
         Err(e) => {
