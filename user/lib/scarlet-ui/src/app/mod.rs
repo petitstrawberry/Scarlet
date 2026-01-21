@@ -232,22 +232,16 @@ impl<A: App> Application<A> {
     }
 
     fn relayout_dirty(&mut self) {
-        // Re-layout from dirty roots (cascade down)
+        // Just mark dirty for now - actual layout will happen during render
+        // This prevents clear_dirty() from being called before render
         if let Some(ref mut root) = self.root_node {
-            if root.is_dirty() {
-                // Root is dirty (includes window resize), relayout everything
-                // Uses current window size from bridge (updated by SurfaceConfigure events)
-                let window_size = UiSize {
-                    width: self.bridge.width as f32,
-                    height: self.bridge.height as f32,
-                };
-                let constraints = crate::layout::LayoutConstraints::tight(window_size);
-                root.layout(constraints);
-                // Root's layout() will recursively layout children with proper constraints
-            } else {
-                // Only children are dirty (not a resize), relayout with existing frames
-                Self::relayout_dirty_recursive(root.as_mut());
-            }
+            // Update window frame size from bridge (marks dirty if size changed)
+            let current_size = crate::geometry::Size {
+                width: self.bridge.width as f32,
+                height: self.bridge.height as f32,
+            };
+            let new_frame = crate::geometry::Rect::new(crate::geometry::Point::ZERO, current_size);
+            root.set_frame(new_frame);
         }
     }
 

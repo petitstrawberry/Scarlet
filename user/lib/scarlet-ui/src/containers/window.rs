@@ -250,7 +250,14 @@ impl RenderNode for WindowRenderNode {
     }
 
     fn set_frame(&mut self, frame: Rect) {
+        let old_size = self.frame.size;
         self.frame = frame;
+
+        // If size changed, trigger layout and repaint
+        if old_size != frame.size {
+            self.mark_dirty(DirtyFlags::LAYOUT | DirtyFlags::PAINT);
+            println!("[window] Window size changed: {:?} -> {:?}, marking dirty", old_size, frame.size);
+        }
     }
 
     fn frame(&self) -> Rect {
@@ -261,6 +268,14 @@ impl RenderNode for WindowRenderNode {
         // NOTE: Don't check is_dirty() here!
         // Parent may call render() on us when children are dirty (even if we're not)
         // We need to blit children's buffers even if we're not dirty ourselves
+
+        // However, if LAYOUT flag is set, we need to relayout
+        if self.dirty_flags.contains(DirtyFlags::LAYOUT) {
+            println!("[window] Relayouting due to LAYOUT dirty flag");
+            // Relayout with current frame size
+            let constraints = LayoutConstraints::tight(self.frame.size);
+            self.layout(constraints);
+        }
 
         use crate::geometry::Color;
 

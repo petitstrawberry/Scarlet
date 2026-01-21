@@ -143,10 +143,25 @@ impl SurfaceBridge {
     fn convert_event(&mut self, sws_event: SwsEvent) -> Option<Event> {
         match sws_event {
             SwsEvent::Input(input) => self.convert_input_event(input),
-            SwsEvent::SurfaceConfigure { width, height, .. } => {
-                self.width = width;
-                self.height = height;
-                self.resize_pending = true;  // Mark that resize occurred
+            SwsEvent::SurfaceConfigure { surface_id, width, height, .. } => {
+                std::println!("[bridge] SurfaceConfigure: surface={}, size={}x{}", surface_id, width, height);
+
+                // Request new SHM buffer from SWS for the resized surface
+                match self.connection.resize_window(surface_id, width, height) {
+                    Ok(()) => {
+                        std::println!("[bridge] Successfully resized surface {} to {}x{}", surface_id, width, height);
+                        self.width = width;
+                        self.height = height;
+                        self.resize_pending = true;
+                    }
+                    Err(e) => {
+                        std::println!("[bridge] Failed to resize surface: {:?}", e);
+                        // Still update dimensions so UI doesn't break completely
+                        self.width = width;
+                        self.height = height;
+                        self.resize_pending = true;
+                    }
+                }
                 None  // Configure events don't generate ScarletUI events
             }
             SwsEvent::SurfaceDestroyed { .. } => {
