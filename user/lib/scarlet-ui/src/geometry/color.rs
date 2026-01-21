@@ -7,10 +7,10 @@
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Color {
     // Internal BGRA representation (matches framebuffer format)
-    b: u8,
-    g: u8,
-    r: u8,
-    a: u8,
+    pub b: u8,
+    pub g: u8,
+    pub r: u8,
+    pub a: u8,
 }
 
 impl Color {
@@ -27,6 +27,11 @@ impl Color {
     /// Get as BGRA array (internal representation)
     pub fn as_bgra(&self) -> [u8; 4] {
         [self.b, self.g, self.r, self.a]
+    }
+
+    /// Create a new color with the specified alpha value
+    pub fn with_alpha(&self, alpha: u8) -> Self {
+        Self { b: self.b, g: self.g, r: self.r, a: alpha }
     }
 
     // Common colors

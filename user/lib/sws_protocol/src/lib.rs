@@ -148,6 +148,7 @@ pub enum ClientMessageRef<'a> {
         menu_titles: &'a [u8], // Format: "menu1|menu2|menu3"
         width: u32,
         height: u32,
+        window_type: u32, // Window type (0=Normal, 1=AlwaysOnTop, 2=Taskbar, 3=Desktop)
     },
     DestroyWindow {
         window_id: u32,
@@ -365,7 +366,7 @@ pub fn parse_client_message<'a>(
     match msg_type {
         client_msg::CREATE_WINDOW => {
             // Payload: app_id_len (u32) + app_id_bytes + app_name_len (u32) + app_name_bytes
-            //          + menu_titles_len (u32) + menu_titles_bytes + width (u32) + height (u32)
+            //          + menu_titles_len (u32) + menu_titles_bytes + width (u32) + height (u32) + window_type (u32)
             if payload.len() < 12 {
                 return Err(ProtocolError::MalformedPayload);
             }
@@ -397,7 +398,7 @@ pub fn parse_client_message<'a>(
             ]) as usize;
             offset += 4 + menu_titles_len;
 
-            if payload.len() != offset + 8 {
+            if payload.len() != offset + 12 {
                 return Err(ProtocolError::MalformedPayload);
             }
 
@@ -417,12 +418,19 @@ pub fn parse_client_message<'a>(
                 payload[offset + 6],
                 payload[offset + 7],
             ]);
+            let window_type = u32::from_le_bytes([
+                payload[offset + 8],
+                payload[offset + 9],
+                payload[offset + 10],
+                payload[offset + 11],
+            ]);
             Ok(ClientMessageRef::CreateWindow {
                 app_id,
                 app_name,
                 menu_titles,
                 width,
                 height,
+                window_type,
             })
         }
         client_msg::DESTROY_WINDOW => {
@@ -939,12 +947,14 @@ pub fn parse_server_message(msg_type: u32, payload: &[u8]) -> Result<ServerMessa
 /// - menu_titles_bytes (variable, format: "menu1|menu2|menu3")
 /// - width (u32)
 /// - height (u32)
+/// - window_type (u32)
 pub fn payload_create_window(
     app_id: &[u8],
     app_name: &[u8],
     menu_titles: &[u8],
     width: u32,
     height: u32,
+    window_type: u32,
 ) -> Vec<u8> {
     let mut payload = Vec::new();
     payload.extend_from_slice(&(app_id.len() as u32).to_le_bytes());
@@ -955,6 +965,7 @@ pub fn payload_create_window(
     payload.extend_from_slice(menu_titles);
     payload.extend_from_slice(&width.to_le_bytes());
     payload.extend_from_slice(&height.to_le_bytes());
+    payload.extend_from_slice(&window_type.to_le_bytes());
     payload
 }
 

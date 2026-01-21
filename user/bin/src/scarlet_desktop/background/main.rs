@@ -8,8 +8,7 @@
 extern crate scarlet_std as std;
 
 use core::time::Duration;
-use scarlet_ui::graphics::Canvas;
-use scarlet_ui::{Color, design::Palette};
+use scarlet_ui::{Color, theme};
 use std::println;
 use std::thread;
 use sws_client::{Connection, Event};
@@ -23,30 +22,54 @@ fn draw_background(conn: &mut Connection, surface_id: u32) {
     let w = surface.width();
     let h = surface.height();
     surface.with_buffer(|buf, width, height| {
-        let mut canvas = Canvas::new(buf, width, height);
-
-        // Simple vertical gradient.
-        let palette = Palette::current();
-        let top = palette.bg;
-        let bottom = palette.surface;
+        // Simple vertical gradient using theme colors
+        let theme = theme::get_theme();
+        let top = Color::rgb(40, 40, 50);  // Dark blue-gray
+        let bottom = Color::rgb(20, 20, 30);  // Darker blue-gray
 
         if h == 0 {
             return;
         }
 
+        // Draw gradient
         for y in 0..h {
             let t = (y as u32).saturating_mul(255) / (h.saturating_sub(1).max(1));
             let r = (top.r as u32 * (255 - t) + bottom.r as u32 * t) / 255;
             let g = (top.g as u32 * (255 - t) + bottom.g as u32 * t) / 255;
             let b = (top.b as u32 * (255 - t) + bottom.b as u32 * t) / 255;
-            canvas.fill_rect(0, y as i32, w, 1, Color::rgb(r as u8, g as u8, b as u8));
+            let color = Color::rgb(r as u8, g as u8, b as u8);
+            let bgra = color.as_bgra();
+
+            for x in 0..w {
+                let idx = ((y as usize) * width as usize + (x as usize)) * 4;
+                if idx + 3 < buf.len() {
+                    buf[idx] = bgra[0];
+                    buf[idx + 1] = bgra[1];
+                    buf[idx + 2] = bgra[2];
+                    buf[idx + 3] = bgra[3];
+                }
+            }
         }
 
-        // Subtle diagonal accent lines.
-        let accent = palette.info;
+        // Subtle diagonal accent lines
+        let accent = Color::rgb(100, 120, 140).with_alpha(28);
+        let bgra = accent.as_bgra();
         let mut x = 0i32;
         while x < w as i32 + h as i32 {
-            canvas.draw_line(x, 0, x - h as i32, h as i32 - 1, accent.with_alpha(28));
+            // Draw diagonal line from (x, 0) to (x-h, h-1)
+            for i in 0..h as i32 {
+                let px = x - i;
+                let py = i;
+                if px >= 0 && px < w as i32 && py >= 0 && py < h as i32 {
+                    let idx = (py as usize * width as usize + px as usize) * 4;
+                    if idx + 3 < buf.len() {
+                        buf[idx] = bgra[0];
+                        buf[idx + 1] = bgra[1];
+                        buf[idx + 2] = bgra[2];
+                        buf[idx + 3] = bgra[3];
+                    }
+                }
+            }
             x += 64;
         }
     });
@@ -67,12 +90,13 @@ pub extern "C" fn main() -> i32 {
     };
 
     // Start with a tiny surface; we'll be configured to screen size after maximize.
-    let surface_id = match conn.create_surface(
+    let surface_id = match conn.create_surface_with_type(
         "org.scarlet-os.desktop.background",
         "Background",
         "",
         16,
         16,
+        window_types::DESKTOP,
     ) {
         Ok(id) => id,
         Err(_) => {
@@ -81,7 +105,6 @@ pub extern "C" fn main() -> i32 {
         }
     };
 
-    let _ = conn.set_window_type(surface_id, window_types::DESKTOP);
     let _ = conn.move_window(surface_id, 0, 0);
     let _ = conn.maximize_window(surface_id);
 

@@ -7,11 +7,11 @@ mod containers;
 mod dirty;
 mod event;
 mod geometry;
-mod graphics;
+pub mod graphics;
 mod layout;
 mod node_id;
 mod state;
-mod theme;
+pub mod theme;
 mod traits;
 mod views;
 
