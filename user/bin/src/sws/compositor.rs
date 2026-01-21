@@ -1594,14 +1594,33 @@ impl Compositor {
 
                 // Calculate initial position based on window type
                 let (x, y) = if window_type == window_types::NORMAL {
-                    // Normal windows: position in workarea
-                    match self.workarea {
-                        Some((wx, wy, _, _)) => {
-                            println!("[Compositor] Positioning Normal window in workarea: ({}, {})", wx, wy);
-                            (wx, wy)
+                    // Normal windows: cascade from focused window or position in workarea
+                    const OFFSET: i32 = 20;
+
+                    // Check if there's a focused Normal window
+                    let focused_pos = self.window_manager.get_focused_window_id()
+                        .and_then(|id| self.window_manager.get_window(id))
+                        .filter(|w| matches!(w.window_type, super::window::WindowType::Normal))
+                        .map(|w| (w.x, w.y));
+
+                    match (focused_pos, self.workarea) {
+                        (Some((fx, fy)), _) => {
+                            // Cascade from focused window
+                            let x = fx + OFFSET;
+                            let y = fy + OFFSET;
+                            println!("[Compositor] Cascading Normal window from focused window at ({}, {}): ({}, {})", fx, fy, x, y);
+                            (x, y)
                         }
-                        None => {
-                            println!("[Compositor] No workarea, using (0, 0)");
+                        (None, Some((wx, wy, ww, wh))) => {
+                            // No focused Normal window: position in workarea with padding
+                            const PADDING: i32 = 20;
+                            let x = wx + PADDING;
+                            let y = wy + PADDING;
+                            println!("[Compositor] No focused Normal window, positioning in workarea with padding: ({}, {})", x, y);
+                            (x, y)
+                        }
+                        (None, None) => {
+                            println!("[Compositor] No workarea and no focused window, using (0, 0)");
                             (0, 0)
                         }
                     }
