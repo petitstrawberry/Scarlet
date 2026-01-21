@@ -133,6 +133,13 @@ impl SurfaceBridge {
             .map_err(|_| "Failed to maximize window")
     }
 
+    /// Restore window (unmaximize or unminimize)
+    pub fn restore_window(&mut self) -> Result<(), &'static str> {
+        self.connection
+            .restore_window(self.surface_id)
+            .map_err(|_| "Failed to restore window")
+    }
+
     /// Close/destroy window
     pub fn close_window(&mut self) -> Result<(), &'static str> {
         self.connection

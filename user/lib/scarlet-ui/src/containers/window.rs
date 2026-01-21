@@ -76,9 +76,12 @@ pub struct WindowRenderNode {
     // Titlebar drag state
     pub is_dragging_titlebar: bool,
     drag_start_position: Point,
+    // Maximize state tracking
+    pub is_maximized: bool,
     // Button click requests (for Application to handle)
     pub request_minimize: bool,
     pub request_maximize: bool,
+    pub request_restore: bool,
     pub request_close: bool,
     pub request_move: bool,
 }
@@ -105,8 +108,10 @@ impl WindowRenderNode {
             close_button_hovered: false,
             is_dragging_titlebar: false,
             drag_start_position: Point::ZERO,
+            is_maximized: false,
             request_minimize: false,
             request_maximize: false,
+            request_restore: false,
             request_close: false,
             request_move: false,
         };
@@ -545,8 +550,14 @@ impl RenderNode for WindowRenderNode {
                                         println!("[window] Minimize button clicked");
                                         self.request_minimize = true;
                                     } else if maximize_rect.contains(e.position) {
-                                        println!("[window] Maximize button clicked");
-                                        self.request_maximize = true;
+                                        // Toggle maximize/restore
+                                        if self.is_maximized {
+                                            println!("[window] Restore button clicked (window is maximized)");
+                                            self.request_restore = true;
+                                        } else {
+                                            println!("[window] Maximize button clicked (window is not maximized)");
+                                            self.request_maximize = true;
+                                        }
                                     } else if titlebar_rect.contains(e.position) {
                                         // Clicked on titlebar (not buttons) - start drag
                                         println!("[window] Titlebar clicked at {:?}", e.position);

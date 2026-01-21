@@ -435,7 +435,18 @@ impl<A: App> Application<A> {
                 if window_node.request_maximize {
                     window_node.request_maximize = false;
                     std::println!("[app] Maximizing window");
-                    let _ = self.bridge.maximize_window();
+                    if self.bridge.maximize_window().is_ok() {
+                        window_node.is_maximized = true;
+                    }
+                }
+
+                // Handle restore (unmaximize or unminimize)
+                if window_node.request_restore {
+                    window_node.request_restore = false;
+                    std::println!("[app] Restoring window");
+                    if self.bridge.restore_window().is_ok() {
+                        window_node.is_maximized = false;
+                    }
                 }
             }
         }
