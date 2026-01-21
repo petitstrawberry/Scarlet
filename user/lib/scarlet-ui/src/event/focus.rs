@@ -47,6 +47,48 @@ impl Default for HoverManager {
     }
 }
 
+/// Manages pressed state for the UI tree.
+///
+/// Tracks which node is currently pressed (mouse button down) and ensures
+/// proper release behavior even when mouse is released outside the node.
+pub struct PressedManager {
+    pressed: Option<NodeId>,
+}
+
+impl PressedManager {
+    pub fn new() -> Self {
+        Self {
+            pressed: None,
+        }
+    }
+
+    /// Get the currently pressed node
+    pub fn pressed(&self) -> Option<NodeId> {
+        self.pressed
+    }
+
+    /// Set pressed node (called on mouse button down)
+    pub fn set_pressed(&mut self, node_id: NodeId) {
+        self.pressed = Some(node_id);
+    }
+
+    /// Clear pressed state (called on mouse button up)
+    pub fn clear_pressed(&mut self) {
+        self.pressed = None;
+    }
+
+    /// Check if a specific node is pressed
+    pub fn is_pressed(&self, node_id: NodeId) -> bool {
+        self.pressed == Some(node_id)
+    }
+}
+
+impl Default for PressedManager {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Manages focus state for the UI tree.
 ///
 /// ## Focus State Synchronization

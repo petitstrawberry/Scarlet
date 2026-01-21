@@ -9,6 +9,7 @@ pub struct EventDispatcher<'a> {
     root: &'a mut dyn RenderNode,
     focus_manager: &'a mut crate::event::FocusManager,
     hover_manager: &'a mut crate::event::HoverManager,
+    pressed_manager: &'a mut crate::event::PressedManager,
 }
 
 impl<'a> EventDispatcher<'a> {
@@ -16,8 +17,9 @@ impl<'a> EventDispatcher<'a> {
         root: &'a mut dyn RenderNode,
         focus_manager: &'a mut crate::event::FocusManager,
         hover_manager: &'a mut crate::event::HoverManager,
+        pressed_manager: &'a mut crate::event::PressedManager,
     ) -> Self {
-        Self { root, focus_manager, hover_manager }
+        Self { root, focus_manager, hover_manager, pressed_manager }
     }
 
     pub fn dispatch(&mut self, event: &Event) {
@@ -26,8 +28,33 @@ impl<'a> EventDispatcher<'a> {
             // println!("[dispatcher] Keyboard event, dispatching");
             self.dispatch_keyboard(event);
         } else {
-            // Mouse events - check hover state changes for Move events
+            // Track press/release for proper behavior
             if let Event::Mouse(mouse_event) = event {
+                if mouse_event.kind == MouseEventKind::Press {
+                    if let Some(target) = self.find_target(event) {
+                        self.pressed_manager.set_pressed(target);
+                    }
+                } else if mouse_event.kind == MouseEventKind::Release {
+                    // Notify pressed node about release (even if released outside)
+                    if let Some(pressed_id) = self.pressed_manager.pressed() {
+                        let current_target = self.find_target(event);
+
+                        // If released outside pressed node, send release to pressed node first
+                        if current_target != Some(pressed_id) {
+                            let path = self.build_path_to_target(pressed_id);
+                            let release_event = Event::Mouse(crate::event::MouseEvent {
+                                position: mouse_event.position,
+                                buttons: mouse_event.buttons,
+                                kind: MouseEventKind::Release,
+                            });
+                            let mut ctx = EventContext::default();
+                            self.target_phase(&release_event, &path, pressed_id, &mut ctx);
+                        }
+                    }
+                    self.pressed_manager.clear_pressed();
+                }
+
+                // Mouse move for hover tracking
                 if mouse_event.kind == MouseEventKind::Move {
                     self.dispatch_mouse_move_with_hover(mouse_event);
                     return;

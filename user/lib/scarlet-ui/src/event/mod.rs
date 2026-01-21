@@ -5,7 +5,7 @@ mod dispatcher;
 mod focus;
 
 pub use dispatcher::EventDispatcher;
-pub use focus::{FocusManager, HoverManager};
+pub use focus::{FocusManager, HoverManager, PressedManager};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Event {

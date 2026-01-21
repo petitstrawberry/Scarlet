@@ -2,7 +2,7 @@ mod bridge;
 
 pub use bridge::SurfaceBridge;
 
-use crate::event::{Event, EventDispatcher, FocusManager, HoverManager};
+use crate::event::{Event, EventDispatcher, FocusManager, HoverManager, PressedManager};
 use crate::geometry::Size as UiSize;
 use crate::traits::{RenderNode, View};
 use std::boxed::Box;
@@ -22,6 +22,7 @@ pub struct Application<A: App> {
     root_node: Option<Box<dyn RenderNode>>,
     focus_manager: FocusManager,
     hover_manager: HoverManager,
+    pressed_manager: PressedManager,
     rebuild_requested: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
@@ -39,6 +40,7 @@ impl<A: App> Application<A> {
             root_node: None,
             focus_manager: FocusManager::new(),
             hover_manager: HoverManager::new(),
+            pressed_manager: PressedManager::new(),
             rebuild_requested,
         })
     }
@@ -100,7 +102,8 @@ impl<A: App> Application<A> {
                         EventDispatcher::new(
                             self.root_node.as_mut().unwrap().as_mut(),
                             &mut self.focus_manager,
-                            &mut self.hover_manager
+                            &mut self.hover_manager,
+                            &mut self.pressed_manager
                         );
                     dispatcher.dispatch(&event);
                 }
