@@ -78,9 +78,9 @@ impl Theme {
             titlebar_button_background_hovered: Color::rgb(210, 210, 214),
             titlebar_button_icon: Color::rgb(30, 30, 34),
 
-            // Button colors - gray with more obvious hover
+            // Button colors
             button_background: Color::rgb(235, 235, 238),
-            button_background_hovered: Color::rgb(180, 200, 240),  // Bluish for hover
+            button_background_hovered: Color::rgb(220, 220, 224),
             button_background_pressed: Color::rgb(190, 190, 194),
             button_text: Color::rgb(20, 20, 24),
             button_border: Color::rgb(180, 180, 180),
@@ -115,9 +115,9 @@ impl Theme {
             titlebar_button_background_hovered: Color::rgb(70, 70, 80),
             titlebar_button_icon: Color::rgb(220, 220, 220),
 
-            // Button colors - gray with more obvious hover
+            // Button colors
             button_background: Color::rgb(70, 70, 70),
-            button_background_hovered: Color::rgb(90, 120, 160),  // Bluish for hover
+            button_background_hovered: Color::rgb(85, 85, 85),
             button_background_pressed: Color::rgb(100, 100, 100),
             button_text: Color::rgb(220, 220, 220),
             button_border: Color::rgb(90, 90, 90),
