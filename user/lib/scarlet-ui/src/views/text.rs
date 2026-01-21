@@ -192,7 +192,9 @@ impl RenderNode for TextRenderNode {
     }
 
     fn hit_test(&self, point: Point) -> HitResult {
-        if self.frame.contains(point) {
+        // Check against local frame (origin at 0,0) since point is in local coordinates
+        let local_frame = Rect::new(Point::ZERO, self.frame.size);
+        if local_frame.contains(point) {
             HitResult::Handled(self.id)
         } else {
             HitResult::Passthrough

@@ -5,7 +5,7 @@ mod dispatcher;
 mod focus;
 
 pub use dispatcher::EventDispatcher;
-pub use focus::FocusManager;
+pub use focus::{FocusManager, HoverManager};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Event {
@@ -20,7 +20,7 @@ impl Event {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct MouseEvent {
     pub position: Point,
     pub buttons: MouseButtons,
@@ -53,6 +53,8 @@ pub enum MouseEventKind {
     Press,
     Release,
     Move,
+    Leave,  // Mouse left the node's bounds
+    Enter,  // Mouse entered the node's bounds
     Scroll { delta: Point },
 }
 

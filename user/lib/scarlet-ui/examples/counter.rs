@@ -4,6 +4,7 @@
 extern crate scarlet_std;
 
 use scarlet_std::format;
+use scarlet_std::println;
 use scarlet_ui::prelude::*;
 
 struct CounterApp {

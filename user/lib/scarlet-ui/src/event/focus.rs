@@ -2,6 +2,51 @@ use crate::node_id::NodeId;
 use crate::traits::RenderNode;
 use std::vec::Vec;
 
+/// Manages hover state for the UI tree.
+///
+/// Tracks which node is currently hovered and sends MouseLeave/MouseEnter events
+/// when the hover target changes.
+pub struct HoverManager {
+    hovered: Option<NodeId>,
+}
+
+impl HoverManager {
+    pub fn new() -> Self {
+        Self {
+            hovered: None,
+        }
+    }
+
+    /// Get the currently hovered node
+    pub fn hovered(&self) -> Option<NodeId> {
+        self.hovered
+    }
+
+    /// Update hover state when mouse moves
+    ///
+    /// Returns (old_hovered, new_hovered) if changed, None otherwise
+    pub fn update_hover(&mut self, new_target: Option<NodeId>) -> Option<(Option<NodeId>, Option<NodeId>)> {
+        if self.hovered != new_target {
+            let old = self.hovered;
+            self.hovered = new_target;
+            Some((old, new_target))
+        } else {
+            None
+        }
+    }
+
+    /// Set hovered node directly (for testing or manual control)
+    pub fn set_hovered(&mut self, node_id: Option<NodeId>) {
+        self.hovered = node_id;
+    }
+}
+
+impl Default for HoverManager {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Manages focus state for the UI tree.
 ///
 /// ## Focus State Synchronization

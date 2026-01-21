@@ -39,7 +39,7 @@ impl Default for ButtonColors {
 
 impl Button {
     pub fn new(text: &str) -> Self {
-        println!("[button] Button::new() called with text: {}", text);
+        // println!("[button] Button::new() called with text: {}", text);
         Self {
             label: Text::new(text),
             action: None,
@@ -48,7 +48,7 @@ impl Button {
     }
 
     pub fn on_click(mut self, callback: impl Fn() + Send + Sync + 'static) -> Self {
-        println!("[button] Button::on_click() called");
+        // println!("[button] Button::on_click() called");
         self.action = Some(Arc::new(callback));
         self
     }
@@ -59,8 +59,14 @@ impl Button {
     }
 
     fn handle_click(&self) {
+        // println!("[button] handle_click() called, action exists: {}", self.action.is_some());
         if let Some(ref action) = self.action {
+            // println!("[button] Executing action callback");
+            // println!("[button] About to call action()");
             action();
+            // println!("[button] action() returned");
+        } else {
+            // println!("[button] No action callback!");
         }
     }
 }
@@ -75,7 +81,7 @@ impl View for Button {
     }
 
     fn build(&self) -> std::boxed::Box<dyn RenderNode> {
-        println!("[button] Button::build() called");
+        // println!("[button] Button::build() called");
         std::boxed::Box::new(ButtonRenderNode::new(self.clone()))
     }
 
@@ -158,16 +164,13 @@ impl RenderNode for ButtonRenderNode {
 
     fn layout(&mut self, constraints: LayoutConstraints) -> Size {
         // Button has intrinsic size based on label content
-        // Layout label with loose constraints to get its intrinsic size
-        let label_constraints = LayoutConstraints::loose(Size::new(
-            constraints.max.width,
-            constraints.max.height,
-        ));
+        // Layout label with truly loose constraints to get its actual intrinsic size
+        let label_constraints = LayoutConstraints::loose(Size::new(f32::MAX, f32::MAX));
         let label_size = self.label_node.layout(label_constraints);
-        println!("[button] ButtonRenderNode::layout() label_size: {:?}", label_size);
+        // println!("[button] ButtonRenderNode::layout() label_size: {:?}", label_size);
 
         // Button is slightly larger than label (intrinsic size)
-        let padding = 8.0;
+        let padding = 12.0;
         let intrinsic_size = Size::new(
             label_size.width + padding * 2.0,
             label_size.height + padding * 2.0,
@@ -179,8 +182,14 @@ impl RenderNode for ButtonRenderNode {
             intrinsic_size.height.clamp(constraints.min.height, constraints.max.height),
         );
 
-        println!("[button] ButtonRenderNode::layout() intrinsic_size: {:?}, final size: {:?}", intrinsic_size, size);
-        self.frame = Rect::new(Point::ZERO, size);
+        // NOTE: Don't re-layout the label with tight constraints!
+        // Keep label at its intrinsic size, let it be clipped during rendering if button is smaller
+        // This ensures text is not cut off
+
+        // println!("[button] ButtonRenderNode::layout() intrinsic_size: {:?}, final size: {:?}", intrinsic_size, size);
+        // Update frame.size but NOT frame.origin (parent controls origin)
+        self.frame.size = size;
+        // println!("[button] ButtonRenderNode::layout() updated frame.size to {:?}", self.frame.size);
         size
     }
 
@@ -198,62 +207,95 @@ impl RenderNode for ButtonRenderNode {
         }
 
         let color = if self.interaction_state.pressed {
+            // println!("[button] render: using PRESSED color");
             self.view.colors.pressed
         } else if self.interaction_state.hovered {
+            // println!("[button] render: using HOVERED color");
             self.view.colors.hovered
         } else {
+            // println!("[button] render: using NORMAL color");
             self.view.colors.normal
         };
 
-        println!("[button] ButtonRenderNode::render() creating buffer with size: {:?}", self.frame.size);
+        // println!("[button] ButtonRenderNode::render() creating buffer with size: {:?}", self.frame.size);
         self.buffer = Some(Buffer::new(self.frame.size));
         self.buffer
             .as_mut()
             .unwrap()
-            .fill_rect(self.frame, color.as_bgra());
+            .fill_rect(Rect::new(Point::ZERO, self.frame.size), color.as_bgra());
 
-        // Draw focus indicator (border)
+        // Draw border (always visible, using theme)
+        let border_color = with_theme(|theme| theme.button_border);
+        let border_width = 1.0;
+
+        // Top border
+        self.buffer.as_mut().unwrap().fill_rect(Rect::new(
+            Point::new(0.0, 0.0),
+            Size::new(self.frame.size.width, border_width),
+        ), border_color.as_bgra());
+
+        // Bottom border
+        self.buffer.as_mut().unwrap().fill_rect(Rect::new(
+            Point::new(0.0, self.frame.size.height - border_width),
+            Size::new(self.frame.size.width, border_width),
+        ), border_color.as_bgra());
+
+        // Left border
+        self.buffer.as_mut().unwrap().fill_rect(Rect::new(
+            Point::new(0.0, 0.0),
+            Size::new(border_width, self.frame.size.height),
+        ), border_color.as_bgra());
+
+        // Right border
+        self.buffer.as_mut().unwrap().fill_rect(Rect::new(
+            Point::new(self.frame.size.width - border_width, 0.0),
+            Size::new(border_width, self.frame.size.height),
+        ), border_color.as_bgra());
+
+        // Draw focus indicator (additional border when focused)
         if self.interaction_state.focused {
-            let border_color = Color::rgb(255, 255, 255);
-            let border_width = 2.0;
+            let focus_color = Color::rgb(0, 120, 215); // Blue focus ring
+            let focus_width = 2.0;
 
-            // Top border
+            // Inner focus border
             self.buffer.as_mut().unwrap().fill_rect(Rect::new(
-                Point::new(0.0, 0.0),
-                Size::new(self.frame.size.width, border_width),
-            ), border_color.as_bgra());
+                Point::new(1.0, 1.0),
+                Size::new(self.frame.size.width - 2.0, focus_width),
+            ), focus_color.as_bgra());
 
-            // Bottom border
             self.buffer.as_mut().unwrap().fill_rect(Rect::new(
-                Point::new(0.0, self.frame.size.height - border_width),
-                Size::new(self.frame.size.width, border_width),
-            ), border_color.as_bgra());
+                Point::new(1.0, self.frame.size.height - 1.0 - focus_width),
+                Size::new(self.frame.size.width - 2.0, focus_width),
+            ), focus_color.as_bgra());
 
-            // Left border
             self.buffer.as_mut().unwrap().fill_rect(Rect::new(
-                Point::new(0.0, 0.0),
-                Size::new(border_width, self.frame.size.height),
-            ), border_color.as_bgra());
+                Point::new(1.0, 1.0),
+                Size::new(focus_width, self.frame.size.height - 2.0),
+            ), focus_color.as_bgra());
 
-            // Right border
             self.buffer.as_mut().unwrap().fill_rect(Rect::new(
-                Point::new(self.frame.size.width - border_width, 0.0),
-                Size::new(border_width, self.frame.size.height),
-            ), border_color.as_bgra());
+                Point::new(self.frame.size.width - 1.0 - focus_width, 1.0),
+                Size::new(focus_width, self.frame.size.height - 2.0),
+            ), focus_color.as_bgra());
         }
 
         // Render label centered
-        let padding = 8.0;
+        let padding = 12.0;
+
+        // Label was already laid out in layout() with correct size
+        let label_size = self.label_node.frame().size;
+
+        // Center label in button
         let label_frame = Rect::new(
             Point::new(padding, padding),
-            self.label_node.frame().size,
+            label_size,
         );
-        println!("[button] ButtonRenderNode::render() label_frame: {:?}", label_frame);
+        // println!("[button] ButtonRenderNode::render() label_frame: {:?}", label_frame);
         self.label_node.set_frame(label_frame);
         self.label_node.render();
 
         if let Some(label_buffer) = self.label_node.get_buffer() {
-            println!("[button] ButtonRenderNode::render() blitting label buffer");
+            // println!("[button] ButtonRenderNode::render() blitting label buffer");
             self.buffer
                 .as_mut()
                 .unwrap()
@@ -268,7 +310,11 @@ impl RenderNode for ButtonRenderNode {
     }
 
     fn hit_test(&self, point: Point) -> HitResult {
-        if self.frame.contains(point) {
+        // Check against local frame (origin at 0,0) since point is in local coordinates
+        let local_frame = Rect::new(Point::ZERO, self.frame.size);
+        // println!("[button] hit_test: point={:?}, local_frame={:?} (Button local coords), contains={}",
+        //     point, local_frame, local_frame.contains(point));
+        if local_frame.contains(point) {
             HitResult::Handled(self.id)
         } else {
             HitResult::Passthrough
@@ -276,27 +322,53 @@ impl RenderNode for ButtonRenderNode {
     }
 
     fn handle_event(&mut self, event: &Event, ctx: &mut EventContext) {
+        // println!("[button] handle_event: phase={:?}, event={:?}", ctx.phase, event);
         match event {
-            Event::Mouse(e) if ctx.phase == EventPhase::Target => {
-                match e.kind {
-                    MouseEventKind::Move => {
-                        let was_hovered = self.interaction_state.hovered;
-                        self.interaction_state.hovered = self.frame.contains(e.position);
-                        if was_hovered != self.interaction_state.hovered {
-                            self.mark_dirty(DirtyFlags::PAINT);
-                        }
+            Event::Mouse(e) => {
+                // Handle hover state changes (Leave/Enter) in all phases
+                if e.kind == MouseEventKind::Leave {
+                    // println!("[button] Mouse Leave! was_hovered={}", self.interaction_state.hovered);
+                    if self.interaction_state.hovered {
+                        self.interaction_state.hovered = false;
+                        self.mark_dirty(DirtyFlags::PAINT);
                     }
+                    return;  // Leave is handled, don't process further
+                }
+
+                if e.kind == MouseEventKind::Enter {
+                    // println!("[button] Mouse Enter! was_hovered={}", self.interaction_state.hovered);
+                    if !self.interaction_state.hovered {
+                        self.interaction_state.hovered = true;
+                        self.mark_dirty(DirtyFlags::PAINT);
+                    }
+                    return;  // Enter is handled, don't process further
+                }
+
+                // Only handle other mouse events in Target phase (clicks, etc.)
+                if ctx.phase != EventPhase::Target {
+                    return;
+                }
+
+                // Use local frame for bounds checking (point is in local coordinates)
+                let local_frame = Rect::new(Point::ZERO, self.frame.size);
+                // println!("[button] Mouse event at {:?}, local_frame={:?}, contains={}", e.position, local_frame, local_frame.contains(e.position));
+                match e.kind {
                     MouseEventKind::Press => {
                         if self.interaction_state.hovered {
                             self.interaction_state.pressed = true;
+                            // println!("[button] Pressed!");
                             // Note: Don't set focused directly here
                             // Focus is managed by FocusManager via request_focus()/lose_focus()
                             self.mark_dirty(DirtyFlags::PAINT);
                         }
                     }
                     MouseEventKind::Release => {
+                        println!("[button] Release: pressed={}, hovered={}", self.interaction_state.pressed, self.interaction_state.hovered);
                         if self.interaction_state.pressed && self.interaction_state.hovered {
+                            println!("[button] Clicked! Executing callback");
                             self.view.handle_click();
+                        } else {
+                            println!("[button] Release ignored: not clicked (pressed={}, hovered={})", self.interaction_state.pressed, self.interaction_state.hovered);
                         }
                         self.interaction_state.pressed = false;
                         self.mark_dirty(DirtyFlags::PAINT);
@@ -309,11 +381,17 @@ impl RenderNode for ButtonRenderNode {
     }
 
     fn mark_dirty(&mut self, flags: DirtyFlags) {
+        // println!("[button] mark_dirty({:?}), dirty_flags was: {:?}", flags, self.dirty_flags);
         self.dirty_flags |= flags;
+        // println!("[button] mark_dirty() done, dirty_flags now: {:?}", self.dirty_flags);
     }
 
     fn is_dirty(&self) -> bool {
-        !self.dirty_flags.is_empty()
+        let dirty = !self.dirty_flags.is_empty();
+        // if dirty {
+        //     println!("[button] is_dirty() = TRUE, dirty_flags: {:?}", self.dirty_flags);
+        // }
+        dirty
     }
 
     fn clear_dirty(&mut self) {

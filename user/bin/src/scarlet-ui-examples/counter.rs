@@ -33,7 +33,7 @@ impl CounterView {
 
         Window::new("Counter",
             vstack! {
-                Text::new(format!("Count: {}", self.count.get()).as_str()),
+                Text::new(format!("Count: {}", self.count.get()).as_str()).size(36.0),
                 Button::new("Increment")
                     .on_click(move || {
                         count.update(|c| *c += 1);

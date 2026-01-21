@@ -2,7 +2,7 @@ mod bridge;
 
 pub use bridge::SurfaceBridge;
 
-use crate::event::{Event, EventDispatcher, FocusManager};
+use crate::event::{Event, EventDispatcher, FocusManager, HoverManager};
 use crate::geometry::Size as UiSize;
 use crate::traits::{RenderNode, View};
 use std::boxed::Box;
@@ -21,6 +21,8 @@ pub struct Application<A: App> {
     root_view: Option<A::ViewType>,
     root_node: Option<Box<dyn RenderNode>>,
     focus_manager: FocusManager,
+    hover_manager: HoverManager,
+    rebuild_requested: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl<A: App> Application<A> {
@@ -28,17 +30,21 @@ impl<A: App> Application<A> {
         // Create actual SurfaceBridge
         let bridge = SurfaceBridge::new("com.example.app", "ScarletUI App", "", 800, 600)?;
 
+        let rebuild_requested = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+
         Ok(Self {
             app,
             bridge,
             root_view: None,
             root_node: None,
             focus_manager: FocusManager::new(),
+            hover_manager: HoverManager::new(),
+            rebuild_requested,
         })
     }
 
     pub fn run(mut self) -> Result<(), &'static str> {
-        use std::println;
+        use std::println;  // For logging in no_std environment
 
         // Initialize theme automatically
         crate::theme::init();
@@ -50,6 +56,13 @@ impl<A: App> Application<A> {
         println!("[scarlet-ui] root_view built");
         self.root_node = Some(root_view.build());
         self.root_view = Some(root_view);
+
+        // Subscribe to state changes for automatic rebuilding
+        let rebuild_flag = self.rebuild_requested.clone();
+        self.root_view.as_ref().unwrap().subscribe_states(std::sync::Arc::new(move || {
+            println!("[app] State changed, requesting rebuild");
+            rebuild_flag.store(true, std::sync::atomic::Ordering::Relaxed);
+        }));
 
         println!("[scarlet-ui] root_node built: {:?}", self.root_node.as_ref().map(|n| n.type_name()));
 
@@ -86,7 +99,8 @@ impl<A: App> Application<A> {
                     let mut dispatcher =
                         EventDispatcher::new(
                             self.root_node.as_mut().unwrap().as_mut(),
-                            &mut self.focus_manager
+                            &mut self.focus_manager,
+                            &mut self.hover_manager
                         );
                     dispatcher.dispatch(&event);
                 }
@@ -99,6 +113,33 @@ impl<A: App> Application<A> {
                 if let Some(ref mut root) = self.root_node {
                     root.mark_dirty(crate::dirty::DirtyFlags::LAYOUT);
                 }
+            }
+
+            // 2.6. Check for state changes and rebuild view if needed
+            if self.rebuild_requested.load(std::sync::atomic::Ordering::Relaxed) {
+                println!("[app] Rebuild requested, rebuilding view");
+                self.rebuild_requested.store(false, std::sync::atomic::Ordering::Relaxed);
+
+                // Rebuild view
+                let new_view = self.app.build();
+                self.root_view = Some(new_view);
+                self.root_node = Some(self.root_view.as_ref().unwrap().build());
+
+                // Re-subscribe to states
+                let rebuild_flag = self.rebuild_requested.clone();
+                self.root_view.as_ref().unwrap().subscribe_states(std::sync::Arc::new(move || {
+                    println!("[app] State changed, requesting rebuild");
+                    rebuild_flag.store(true, std::sync::atomic::Ordering::Relaxed);
+                }));
+
+                // Trigger full layout and render
+                let window_size = UiSize {
+                    width: self.bridge.width as f32,
+                    height: self.bridge.height as f32,
+                };
+                let constraints = crate::layout::LayoutConstraints::tight(window_size);
+                self.root_node.as_mut().unwrap().layout(constraints);
+                self.root_node.as_mut().unwrap().render();
             }
 
             // 3. Check for dirty nodes
@@ -119,7 +160,11 @@ impl<A: App> Application<A> {
 
     fn has_dirty_nodes(&self) -> bool {
         // Walk tree checking is_dirty()
-        self.root_node.as_ref().map(|n| self.check_dirty_recursive(n.as_ref())).unwrap_or(false)
+        let dirty = self.root_node.as_ref().map(|n| self.check_dirty_recursive(n.as_ref())).unwrap_or(false);
+        if dirty {
+            std::println!("[app] has_dirty_nodes() = TRUE");
+        }
+        dirty
     }
 
     fn check_dirty_recursive(&self, node: &dyn RenderNode) -> bool {
@@ -179,20 +224,33 @@ impl<A: App> Application<A> {
     }
 
     fn render_dirty(&mut self) {
-        // Render only dirty subtrees (cascade down)
+        // Render dirty subtrees (post-order: children first, then parents)
+        std::println!("[app] render_dirty() called");
         if let Some(ref mut root) = self.root_node {
             Self::render_dirty_recursive(root.as_mut());
         }
     }
 
-    fn render_dirty_recursive(node: &mut dyn RenderNode) {
-        if node.is_dirty() {
-            node.render();
+    fn render_dirty_recursive(node: &mut dyn RenderNode) -> bool {
+        // Returns true if this node or any descendant is dirty
+
+        // First, recurse into children (post-order)
+        let mut has_dirty_child = false;
+        for child in node.children_mut().iter_mut() {
+            if Self::render_dirty_recursive(child.as_mut()) {
+                has_dirty_child = true;
+            }
         }
 
-        // Recurse into children
-        for child in node.children_mut().iter_mut() {
-            Self::render_dirty_recursive(child.as_mut());
+        // Then render self if dirty or has dirty child
+        let node_is_dirty = node.is_dirty();
+        if node_is_dirty || has_dirty_child {
+            std::println!("[app]   rendering node: {} (self_dirty={}, has_dirty_child={})",
+                node.type_name(), node_is_dirty, has_dirty_child);
+            node.render();
+            return true;  // This node was rendered (dirty or dirty descendant)
         }
+
+        false
     }
 }

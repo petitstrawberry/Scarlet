@@ -245,7 +245,9 @@ impl RenderNode for SliderRenderNode {
     }
 
     fn hit_test(&self, point: Point) -> HitResult {
-        if self.frame.contains(point) {
+        // Check against local frame (origin at 0,0) since point is in local coordinates
+        let local_frame = Rect::new(Point::ZERO, self.frame.size);
+        if local_frame.contains(point) {
             HitResult::Handled(self.id)
         } else {
             HitResult::Passthrough
@@ -255,10 +257,12 @@ impl RenderNode for SliderRenderNode {
     fn handle_event(&mut self, event: &Event, ctx: &mut EventContext) {
         match event {
             Event::Mouse(e) if ctx.phase == EventPhase::Target => {
+                // Use local frame for bounds checking (point is in local coordinates)
+                let local_frame = Rect::new(Point::ZERO, self.frame.size);
                 match e.kind {
                     MouseEventKind::Move => {
                         let was_hovered = self.interaction_state.hovered;
-                        self.interaction_state.hovered = self.frame.contains(e.position);
+                        self.interaction_state.hovered = local_frame.contains(e.position);
 
                         if self.interaction_state.dragging {
                             let new_value =

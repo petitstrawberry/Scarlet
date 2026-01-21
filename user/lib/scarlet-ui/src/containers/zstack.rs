@@ -167,16 +167,21 @@ impl RenderNode for ZStackRenderNode {
             return Size::ZERO;
         }
 
+        let size = Size::new(
+            constraints.max.width,
+            constraints.max.height,
+        );
+
         // All children get the same size (the max available)
         for child in &mut self.children {
             child.layout(constraints);
+            // Set child frame to Point::ZERO for consistency with VStack/HStack
+            let child_size = child.frame().size;
+            child.set_frame(Rect::new(Point::ZERO, child_size));
         }
 
-        // Size is determined by constraints
-        Size::new(
-            constraints.max.width,
-            constraints.max.height,
-        )
+        self.frame = Rect::new(Point::ZERO, size);
+        size
     }
 
     fn set_frame(&mut self, frame: Rect) {
@@ -188,20 +193,21 @@ impl RenderNode for ZStackRenderNode {
     }
 
     fn render(&mut self) {
-        if !self.is_dirty() {
-            return;
-        }
+        // NOTE: Don't check is_dirty() here!
+        // Parent may call render() on us when children are dirty (even if we're not)
+        // We need to blit children's buffers even if we're not dirty ourselves
 
         // Create buffer and composite children from back to front
         let mut buffer = Buffer::new(self.frame.size);
 
         for child in &mut self.children {
-            // All children are positioned at origin
-            child.set_frame(Rect::new(Point::ZERO, self.frame.size));
+            // Don't modify child.frame - it's already Point::ZERO from layout()
             child.render();
 
             if let Some(child_buffer) = child.get_buffer() {
-                buffer.blit_from(child_buffer, child.frame());
+                // Blit child at Point::ZERO (all children in ZStack are at origin)
+                let blit_rect = Rect::new(Point::ZERO, child.frame().size);
+                buffer.blit_from(child_buffer, blit_rect);
             }
         }
 
@@ -216,9 +222,10 @@ impl RenderNode for ZStackRenderNode {
 
     fn hit_test(&self, point: Point) -> HitResult {
         // Check children from front to back (reverse order)
+        // All children are at Point::ZERO in ZStack
         for child in self.children.iter().rev() {
-            let local_point = point - child.frame().origin;
-            match child.hit_test(local_point) {
+            // Child is at origin, so local_point is the same as point
+            match child.hit_test(point) {
                 HitResult::Handled(id) => return HitResult::Handled(id),
                 HitResult::Stop => return HitResult::Stop,
                 HitResult::Passthrough => continue,

@@ -15,4 +15,8 @@ pub trait View: 'static {
     fn build(&self) -> std::boxed::Box<dyn RenderNode>;
 
     fn as_any(&self) -> &dyn std::any::Any;
+
+    /// Subscribe to state changes for automatic view rebuilding
+    /// Default: no states to watch
+    fn subscribe_states(&self, _callback: std::sync::Arc<dyn Fn() + Send + Sync>) {}
 }

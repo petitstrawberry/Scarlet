@@ -7,9 +7,7 @@ use crate::node_id::NodeId;
 use crate::traits::{RenderNode, UpdateResult, View};
 use std::any::TypeId;
 use std::boxed::Box;
-use std::vec;
 use std::vec::Vec;
-use std::println;
 
 /// Trait to convert tuple of Views into Vec of RenderNodes
 pub trait IntoRenderNodes {
@@ -86,7 +84,7 @@ pub struct VStack<V: View + Clone> {
 
 impl<V: View + Clone> VStack<V> {
     pub fn new(children: V) -> Self {
-        println!("[vstack] VStack::new() called");
+        // println!("[vstack] VStack::new() called");
         Self {
             children,
             spacing: 0.0,
@@ -95,13 +93,13 @@ impl<V: View + Clone> VStack<V> {
     }
 
     pub fn spacing(mut self, spacing: f32) -> Self {
-        println!("[vstack] VStack::spacing({}) called", spacing);
+        // println!("[vstack] VStack::spacing({}) called", spacing);
         self.spacing = spacing;
         self
     }
 
     pub fn alignment(mut self, alignment: Alignment) -> Self {
-        println!("[vstack] VStack::alignment() called");
+        // println!("[vstack] VStack::alignment() called");
         self.alignment = alignment;
         self
     }
@@ -123,9 +121,9 @@ impl<V: View + Clone + IntoRenderNodes> View for VStack<V> {
     }
 
     fn build(&self) -> Box<dyn RenderNode> {
-        println!("[vstack] VStack::build() called");
+        // println!("[vstack] VStack::build() called");
         let children = self.children.clone().into_nodes();
-        println!("[vstack] into_nodes() returned {} children", children.len());
+        // println!("[vstack] into_nodes() returned {} children", children.len());
 
         Box::new(VStackRenderNode::new(
             children,
@@ -227,6 +225,7 @@ impl RenderNode for VStackRenderNode {
     }
 
     fn layout(&mut self, constraints: LayoutConstraints) -> Size {
+        // println!("[vstack] layout() called, constraints={:?}, children.len()={}", constraints, self.children.len());
         let n = self.children.len();
         if n == 0 {
             return Size::ZERO;
@@ -299,6 +298,32 @@ impl RenderNode for VStackRenderNode {
         // Set frame
         self.frame = Rect::new(Point::ZERO, size);
 
+        // Set frames for children with actual positions (alignment + offset)
+        // IMPORTANT: Use the FINAL sizes after Pass 2 layout
+        let mut y_offset = 0.0;
+        for (i, child) in self.children.iter_mut().enumerate() {
+            // Get the size AFTER Pass 2 layout (not intrinsic_sizes)
+            let child_size = child.frame().size;
+
+            // Calculate x offset based on alignment
+            let x_offset = match self.alignment {
+                Alignment::Start => 0.0,
+                Alignment::Center => (self.frame.size.width - child_size.width) / 2.0,
+                Alignment::End => self.frame.size.width - child_size.width,
+                Alignment::Stretch => 0.0,  // Already stretched by layout
+            };
+
+            // Set child frame at actual position
+            let child_frame = Rect::new(Point::new(x_offset, y_offset), child_size);
+            child.set_frame(child_frame);
+            // println!("[vstack] layout: set child[{}] {} frame to {:?}", i, child.type_name(), child_frame);
+            y_offset += child_size.height + self.spacing;
+        }
+
+        // println!("[vstack] layout() done, self.frame={:?}", self.frame);
+        // for (i, child) in self.children.iter().enumerate() {
+        //     println!("[vstack]   child[{}] {} frame={:?}", i, child.type_name(), child.frame());
+        // }
         size
     }
 
@@ -311,43 +336,28 @@ impl RenderNode for VStackRenderNode {
     }
 
     fn render(&mut self) {
-        if !self.is_dirty() {
-            return;
-        }
+        // NOTE: Don't check is_dirty() here!
+        // Parent may call render() on us when children are dirty (even if we're not)
+        // We need to blit children's buffers even if we're not dirty ourselves
 
-        println!("[vstack] VStackRenderNode::render() frame.size: {:?}", self.frame.size);
+        // println!("[vstack] render() called, self.frame={:?}", self.frame);
         self.buffer = Some(Buffer::new(self.frame.size));
 
-        let mut y_offset = 0.0;
         for (i, child) in self.children.iter_mut().enumerate() {
-            let child_size = child.frame().size;
-
-            // Calculate x offset based on alignment
-            let x_offset = match self.alignment {
-                Alignment::Start => 0.0,
-                Alignment::Center => (self.frame.size.width - child_size.width) / 2.0,
-                Alignment::End => self.frame.size.width - child_size.width,
-                Alignment::Stretch => 0.0,  // Already stretched by layout
-            };
-
-            println!("[vstack] child[{}] alignment x_offset: {}", i, x_offset);
-            println!("[vstack] child[{}] size before set_frame: {:?}", i, child_size);
-            child.set_frame(Rect::new(Point::new(x_offset, y_offset), child_size));
-            println!("[vstack] child[{}] frame after set_frame: {:?}", i, child.frame());
+            // child.frame() already has correct origin from layout()
+            // println!("[vstack] child[{}] frame: {:?}", i, child.frame());
             child.render();
 
             if let Some(child_buffer) = child.get_buffer() {
-                println!("[vstack] child[{}] buffer size: {:?}", i, child_buffer.size());
-                println!("[vstack] blitting child[{}] at frame: {:?}", i, child.frame());
+                // println!("[vstack] child[{}] buffer size: {:?}", i, child_buffer.size());
+                // Blit at child's frame position
                 self.buffer.as_mut().unwrap().blit_from(child_buffer, child.frame());
             } else {
-                println!("[vstack] WARNING: child[{}] has no buffer!", i);
+                // println!("[vstack] WARNING: child[{}] has no buffer!", i);
             }
-
-            y_offset += child.frame().size.height + self.spacing;
         }
 
-        println!("[vstack] VStackRenderNode::render() done");
+        // println!("[vstack] render() done");
         self.clear_dirty();
     }
 
@@ -356,14 +366,42 @@ impl RenderNode for VStackRenderNode {
     }
 
     fn hit_test(&self, point: Point) -> HitResult {
-        for child in self.children.iter().rev() {
-            let local_point = point - child.frame().origin;
-            match child.hit_test(local_point) {
-                HitResult::Handled(id) => return HitResult::Handled(id),
-                HitResult::Stop => return HitResult::Stop,
-                HitResult::Passthrough => continue,
+        // println!("[vstack] hit_test: point={:?}, frame={:?}, children={}", point, self.frame, self.children.len());
+
+        // Check children in reverse order (z-order)
+        for (i, child) in self.children.iter().rev().enumerate() {
+            let child_index = self.children.len() - 1 - i;  // Actual index in children Vec
+            let child_frame = child.frame();
+
+            // println!("[vstack] hit_test: child[{}] type={}, frame={:?}",
+            //     child_index, child.type_name(), child_frame);
+
+            // child_frame.origin is already set correctly by layout()
+            let in_bounds = child_frame.contains(point);
+
+            // println!("[vstack] hit_test: child[{}] in_bounds={}", child_index, in_bounds);
+
+            if in_bounds {
+                // Transform to child-local coordinates
+                let local_point = point - child_frame.origin;
+                match child.hit_test(local_point) {
+                    HitResult::Handled(id) => {
+                        // println!("[vstack] hit_test: child[{}] Handled by id={:?}", child_index, id);
+                        return HitResult::Handled(id);
+                    }
+                    HitResult::Stop => {
+                        // println!("[vstack] hit_test: child[{}] Stop", child_index);
+                        return HitResult::Stop;
+                    }
+                    HitResult::Passthrough => {
+                        // println!("[vstack] hit_test: child[{}] Passthrough", child_index);
+                        continue;
+                    }
+                }
             }
         }
+
+        // println!("[vstack] hit_test: all children passed through, returning Passthrough");
         HitResult::Passthrough
     }
 

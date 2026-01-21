@@ -5,10 +5,14 @@ use syn::parse::{ParseStream, Result};
 
 /// Derive macro for View trait
 /// Automatically implements View for structs with body() method
+/// Also auto-subscribes to State<T> fields
 #[proc_macro_derive(View)]
 pub fn derive_view(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
     let name = &input.ident;
+
+    // Extract State<T> field names
+    let state_fields = extract_state_fields(&input.data);
 
     let expanded = quote! {
         impl ::scarlet_ui::View for #name {
@@ -27,10 +31,36 @@ pub fn derive_view(input: TokenStream) -> TokenStream {
             fn as_any(&self) -> &dyn ::scarlet_ui::std::any::Any {
                 self
             }
+
+            fn subscribe_states(&self, callback: ::scarlet_ui::std::sync::Arc<dyn Fn() + ::scarlet_ui::std::marker::Send + ::scarlet_ui::std::marker::Sync>) {
+                #(self.#state_fields.subscribe(callback.clone());)*
+            }
         }
     };
 
     TokenStream::from(expanded)
+}
+
+/// Extract State<T> fields from struct
+fn extract_state_fields(data: &syn::Data) -> Vec<proc_macro2::Ident> {
+    let mut state_fields = Vec::new();
+
+    if let syn::Data::Struct(data_struct) = data {
+        for field in &data_struct.fields {
+            if let Some(ident) = &field.ident {
+                if let syn::Type::Path(type_path) = &field.ty {
+                    // Check if type is State<T> (scarlet_ui::state::State or crate::state::State)
+                    if let Some(segment) = type_path.path.segments.last() {
+                        if segment.ident == "State" {
+                            state_fields.push(ident.clone());
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    state_fields
 }
 
 /// Attribute macro for View structs

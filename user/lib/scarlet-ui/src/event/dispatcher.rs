@@ -1,23 +1,39 @@
-use crate::event::{Event, EventContext, EventPhase, HitResult, KeyEvent};
+use crate::event::{Event, EventContext, EventPhase, HitResult, KeyEvent, MouseEventKind};
 use crate::geometry::Point;
 use crate::node_id::NodeId;
 use crate::traits::RenderNode;
 use std::vec::Vec;
+use std::println;
 
 pub struct EventDispatcher<'a> {
     root: &'a mut dyn RenderNode,
     focus_manager: &'a mut crate::event::FocusManager,
+    hover_manager: &'a mut crate::event::HoverManager,
 }
 
 impl<'a> EventDispatcher<'a> {
-    pub fn new(root: &'a mut dyn RenderNode, focus_manager: &'a mut crate::event::FocusManager) -> Self {
-        Self { root, focus_manager }
+    pub fn new(
+        root: &'a mut dyn RenderNode,
+        focus_manager: &'a mut crate::event::FocusManager,
+        hover_manager: &'a mut crate::event::HoverManager,
+    ) -> Self {
+        Self { root, focus_manager, hover_manager }
     }
 
     pub fn dispatch(&mut self, event: &Event) {
+        // println!("[dispatcher] dispatch()");
         if event.is_keyboard() {
+            // println!("[dispatcher] Keyboard event, dispatching");
             self.dispatch_keyboard(event);
         } else {
+            // Mouse events - check hover state changes for Move events
+            if let Event::Mouse(mouse_event) = event {
+                if mouse_event.kind == MouseEventKind::Move {
+                    self.dispatch_mouse_move_with_hover(mouse_event);
+                    return;
+                }
+            }
+
             // Mouse events - find target via hit test
             let target_id = match self.find_target(event) {
                 Some(id) => id,
@@ -26,6 +42,7 @@ impl<'a> EventDispatcher<'a> {
 
             // Build path once (root → target)
             let path = self.build_path_to_target(target_id);
+            // println!("[dispatcher] Path: {:?}", path);
 
             // Use a single context across phases so stop_propagation works like DOM.
             let mut ctx = EventContext {
@@ -35,20 +52,87 @@ impl<'a> EventDispatcher<'a> {
             };
 
             // Phase 1: Capture (root → target)
+            // println!("[dispatcher] === Capture phase ===");
             self.capture_phase(event, &path, &mut ctx);
             if ctx.stop_propagation || ctx.stop_immediate {
+                // println!("[dispatcher] Stopped after capture");
                 return;
             }
 
             // Phase 2: Target (target only)
+            // println!("[dispatcher] === Target phase ===");
             self.target_phase(event, &path, target_id, &mut ctx);
             if ctx.stop_propagation || ctx.stop_immediate {
+                // println!("[dispatcher] Stopped after target");
                 return;
             }
 
             // Phase 3: Bubble (target → root)
+            // println!("[dispatcher] === Bubble phase ===");
             self.bubble_phase(event, &path, &mut ctx);
         }
+    }
+
+    fn dispatch_mouse_move_with_hover(&mut self, mouse_event: &crate::event::MouseEvent) {
+        use crate::event::MouseEvent;
+
+        // Check if hover target changed
+        let new_target = self.find_target_for_mouse(mouse_event);
+        let old_target = self.hover_manager.hovered();
+
+        if old_target == new_target {
+            // No change, dispatch normally
+            if let Some(target_id) = new_target {
+                let path = self.build_path_to_target(target_id);
+                let event = Event::Mouse(mouse_event.clone());
+                let mut ctx = EventContext::default();
+
+                self.capture_phase(&event, &path, &mut ctx);
+                self.target_phase(&event, &path, target_id, &mut ctx);
+                self.bubble_phase(&event, &path, &mut ctx);
+            }
+            return;
+        }
+
+        // Hover target changed - send Leave to old, Enter to new
+        std::println!("[dispatcher] Hover changed: {:?} -> {:?}", old_target, new_target);
+
+        // Send Leave to old target
+        if let Some(old_id) = old_target {
+            let path = self.build_path_to_target(old_id);
+            let leave_event = Event::Mouse(MouseEvent {
+                position: mouse_event.position,
+                buttons: mouse_event.buttons,
+                kind: MouseEventKind::Leave,
+            });
+            let mut ctx = EventContext::default();
+
+            self.capture_phase(&leave_event, &path, &mut ctx);
+            self.target_phase(&leave_event, &path, old_id, &mut ctx);
+            self.bubble_phase(&leave_event, &path, &mut ctx);
+        }
+
+        // Send Enter to new target
+        if let Some(new_id) = new_target {
+            let path = self.build_path_to_target(new_id);
+            let enter_event = Event::Mouse(MouseEvent {
+                position: mouse_event.position,
+                buttons: mouse_event.buttons,
+                kind: MouseEventKind::Enter,
+            });
+            let mut ctx = EventContext::default();
+
+            self.capture_phase(&enter_event, &path, &mut ctx);
+            self.target_phase(&enter_event, &path, new_id, &mut ctx);
+            self.bubble_phase(&enter_event, &path, &mut ctx);
+        }
+
+        // Update hover manager
+        self.hover_manager.set_hovered(new_target);
+    }
+
+    fn find_target_for_mouse(&self, mouse_event: &crate::event::MouseEvent) -> Option<NodeId> {
+        self.hit_test_recursive(self.root, mouse_event.position)
     }
 
     fn dispatch_keyboard(&mut self, event: &Event) {
@@ -93,7 +177,7 @@ impl<'a> EventDispatcher<'a> {
         };
 
         // Walk path once from root to focused node
-        self.walk_path(&path, event, &mut ctx, /*forward=*/true);
+        self.walk_path_with_transform(event, &path, &mut ctx, /*forward=*/true);
         if ctx.stop_propagation || ctx.stop_immediate {
             return;
         }
@@ -109,7 +193,7 @@ impl<'a> EventDispatcher<'a> {
 
         // Bubble phase (focused node → root)
         ctx.phase = EventPhase::Bubble;
-        self.walk_path_reverse(&path, event, &mut ctx);
+        self.walk_path_reverse_with_transform(event, &path, &mut ctx);
     }
 
     fn find_target(&self, event: &Event) -> Option<NodeId> {
@@ -118,19 +202,34 @@ impl<'a> EventDispatcher<'a> {
     }
 
     fn hit_test_recursive(&self, node: &dyn RenderNode, point: Point) -> Option<NodeId> {
+        // println!("[dispatcher] hit_test_recursive: node={}, point={:?}, node.frame={:?}",
+        //     node.type_name(), point, node.frame());
+
         // Check children first (reverse for z-order)
         for child in node.children().iter().rev() {
             let local_point = point - child.frame().origin;
+            // println!("[dispatcher]   → checking child={}, child.frame={:?}, local_point={:?} (parent_point - child.origin)",
+            //     child.type_name(), child.frame(), local_point);
             if let Some(id) = self.hit_test_recursive(child.as_ref(), local_point) {
                 return Some(id);
             }
         }
 
         // Check self
+        // println!("[dispatcher]   → checking self.hit_test({:?})", point);
         match node.hit_test(point) {
-            HitResult::Handled(id) => Some(id),
-            HitResult::Passthrough => None,
-            HitResult::Stop => Some(node.id()),
+            HitResult::Handled(id) => {
+                // println!("[dispatcher]   → Handled by id={:?}", id);
+                Some(id)
+            }
+            HitResult::Passthrough => {
+                // println!("[dispatcher]   → Passthrough");
+                None
+            }
+            HitResult::Stop => {
+                // println!("[dispatcher]   → Stop");
+                Some(node.id())
+            }
         }
     }
 
@@ -139,15 +238,73 @@ impl<'a> EventDispatcher<'a> {
 
         // Walk path once from root to target, calling handle_event on each node
         // This is O(depth) instead of O(depth^2)
-        self.walk_path(path, event, ctx, /*forward=*/true);
+        self.walk_path_with_transform(event, path, ctx, /*forward=*/true);
     }
 
     fn target_phase(&mut self, event: &Event, path: &[NodeId], target_id: NodeId, ctx: &mut EventContext) {
         ctx.phase = EventPhase::Target;
 
-        // Target is last element in path
+        // Calculate absolute position of target node
+        if let Some(absolute_frame) = self.calculate_absolute_frame(path, target_id) {
+            // Transform event position to local coordinates
+            if let Some(local_event) = self.transform_event_to_local(event, absolute_frame) {
+                if let Some(node) = self.get_node_mut_via_path(path, target_id) {
+                    node.handle_event(&local_event, ctx);
+                }
+                return;
+            }
+        }
+
+        // Fallback: use original event
         if let Some(node) = self.get_node_mut_via_path(path, target_id) {
             node.handle_event(event, ctx);
+        }
+    }
+
+    fn calculate_absolute_frame(&self, path: &[NodeId], target_id: NodeId) -> Option<crate::geometry::Rect> {
+        use crate::geometry::{Point, Rect};
+
+        let mut current_node: &dyn RenderNode = self.root;
+        let mut abs_x = 0.0;
+        let mut abs_y = 0.0;
+
+        // Start from root (path[0])
+        abs_x += current_node.frame().origin.x;
+        abs_y += current_node.frame().origin.y;
+
+        // Navigate to target
+        for i in 1..path.len() {
+            let child_id = path[i];
+            match current_node.get_child(child_id) {
+                Some(child) => {
+                    abs_x += child.frame().origin.x;
+                    abs_y += child.frame().origin.y;
+                    if child.id() == target_id {
+                        return Some(Rect::new(Point::new(abs_x, abs_y), child.frame().size));
+                    }
+                    current_node = child;
+                }
+                None => return None,
+            }
+        }
+
+        None
+    }
+
+    fn transform_event_to_local(&self, event: &Event, absolute_frame: crate::geometry::Rect) -> Option<Event> {
+        match event {
+            Event::Mouse(mouse_event) => {
+                let local_position = crate::geometry::Point::new(
+                    mouse_event.position.x - absolute_frame.origin.x,
+                    mouse_event.position.y - absolute_frame.origin.y,
+                );
+                Some(Event::Mouse(crate::event::MouseEvent {
+                    position: local_position,
+                    buttons: mouse_event.buttons,
+                    kind: mouse_event.kind,
+                }))
+            }
+            _ => Some(event.clone()),
         }
     }
 
@@ -156,22 +313,45 @@ impl<'a> EventDispatcher<'a> {
 
         // Walk path once from target to root (reverse order)
         // This is O(depth) instead of O(depth^2)
-        self.walk_path_reverse(path, event, ctx);
+        self.walk_path_reverse_with_transform(event, path, ctx);
     }
 
     /// Walk the path once from root to target, calling handle_event on each node.
     /// This is O(depth) instead of calling get_node_mut_via_path for each node (O(depth^2)).
-    fn walk_path(&mut self, path: &[NodeId], event: &Event, ctx: &mut EventContext, _forward: bool) {
+    /// Transforms event coordinates to each node's local coordinate system.
+    fn walk_path_with_transform(&mut self, event: &Event, path: &[NodeId], ctx: &mut EventContext, _forward: bool) {
         if path.is_empty() {
             return;
         }
+
+        // Track accumulated position from root
+        let mut abs_x = 0.0;
+        let mut abs_y = 0.0;
 
         // Start from root (path[0])
         // Reborrow `self.root` so we don't move it out of `self`.
         let mut current_node: &mut dyn RenderNode = &mut *self.root;
 
-        // Call handle_event on root first
-        current_node.handle_event(event, ctx);
+        // Add root's frame origin
+        abs_x += current_node.frame().origin.x;
+        abs_y += current_node.frame().origin.y;
+
+        // Transform event to root's local coordinates and call handle_event (inline to avoid borrow issues)
+        let local_event = match event {
+            Event::Mouse(mouse_event) => {
+                let local_position = crate::geometry::Point::new(
+                    mouse_event.position.x - abs_x,
+                    mouse_event.position.y - abs_y,
+                );
+                Event::Mouse(crate::event::MouseEvent {
+                    position: local_position,
+                    buttons: mouse_event.buttons,
+                    kind: mouse_event.kind,
+                })
+            }
+            _ => event.clone(),
+        };
+        current_node.handle_event(&local_event, ctx);
         if ctx.stop_propagation || ctx.stop_immediate {
             return;
         }
@@ -184,8 +364,28 @@ impl<'a> EventDispatcher<'a> {
             // Get child node
             match current_node.get_child_mut(child_id) {
                 Some(child) => {
+                    // Add child's frame origin to accumulated position
+                    abs_x += child.frame().origin.x;
+                    abs_y += child.frame().origin.y;
+
+                    // Transform event to this child's local coordinates (inline to avoid borrow issues)
+                    let local_event = match event {
+                        Event::Mouse(mouse_event) => {
+                            let local_position = crate::geometry::Point::new(
+                                mouse_event.position.x - abs_x,
+                                mouse_event.position.y - abs_y,
+                            );
+                            Event::Mouse(crate::event::MouseEvent {
+                                position: local_position,
+                                buttons: mouse_event.buttons,
+                                kind: mouse_event.kind,
+                            })
+                        }
+                        _ => event.clone(),
+                    };
+
                     // Call handle_event on this child
-                    child.handle_event(event, ctx);
+                    child.handle_event(&local_event, ctx);
                     if ctx.stop_propagation || ctx.stop_immediate {
                         return;
                     }
@@ -197,56 +397,117 @@ impl<'a> EventDispatcher<'a> {
         }
     }
 
+    /// Transform event by subtracting accumulated position from mouse position
+    fn transform_event_to_local_coords(&self, event: &Event, abs_x: f32, abs_y: f32) -> Event {
+        match event {
+            Event::Mouse(mouse_event) => {
+                let local_position = crate::geometry::Point::new(
+                    mouse_event.position.x - abs_x,
+                    mouse_event.position.y - abs_y,
+                );
+                Event::Mouse(crate::event::MouseEvent {
+                    position: local_position,
+                    buttons: mouse_event.buttons,
+                    kind: mouse_event.kind,
+                })
+            }
+            _ => event.clone(),
+        }
+    }
+
     /// Walk the path once from target to root (reverse), calling handle_event on each node.
-    /// Uses recursive post-order traversal to avoid multiple mutable borrows.
-    /// This is O(depth) - descends to target, then calls handle_event on way back.
-    fn walk_path_reverse(&mut self, path: &[NodeId], event: &Event, ctx: &mut EventContext) {
+    /// Uses iterative approach with position tracking for coordinate transformation.
+    /// This is O(depth) - calculates absolute positions, then processes in reverse.
+    fn walk_path_reverse_with_transform(&mut self, event: &Event, path: &[NodeId], ctx: &mut EventContext) {
         if path.is_empty() {
             return;
         }
 
-        fn walk_path_reverse_recursive(
-            parent: &mut dyn RenderNode,
-            path: &[NodeId],
-            index: usize,
-            event: &Event,
-            ctx: &mut EventContext,
-        ) {
-            if index >= path.len() {
-                // Reached past target (leaf), start bubbling back
-                return;
-            }
+        // First pass: calculate absolute positions for all nodes in path
+        let mut abs_positions: Vec<(f32, f32)> = Vec::with_capacity(path.len());
+        let mut abs_x = 0.0;
+        let mut abs_y = 0.0;
 
-            let child_id = path[index];
-            let child = match parent.get_child_mut(child_id) {
-                Some(c) => c,
+        // Start from root (path[0])
+        let mut current_node: &dyn RenderNode = self.root;
+        abs_x += current_node.frame().origin.x;
+        abs_y += current_node.frame().origin.y;
+        abs_positions.push((abs_x, abs_y));
+
+        // Navigate to target, accumulating positions
+        for i in 1..path.len() {
+            let child_id = path[i];
+            match current_node.get_child(child_id) {
+                Some(child) => {
+                    abs_x += child.frame().origin.x;
+                    abs_y += child.frame().origin.y;
+                    abs_positions.push((abs_x, abs_y));
+                    current_node = child;
+                }
                 None => return,
-            };
-
-            // First, recurse deeper (descent to target)
-            walk_path_reverse_recursive(child, path, index + 1, event, ctx);
-
-            // After returning from recursion, check if propagation was stopped
-            // If stopped in deeper nodes, don't call handle_event on this node
-            if ctx.stop_propagation || ctx.stop_immediate {
-                return;
             }
-
-            // Handle event on this child (post-order)
-            // This processes nodes in reverse: target first, then parents on way back
-            child.handle_event(event, ctx);
         }
 
-        // Start recursive descent from root
-        // path[0] is root, path[1] is first child, etc.
-        // For bubble phase, we need to process in reverse: target → ... → child1 → root
-        // Note: Root IS processed in bubble phase (DOM standard behavior)
-        let root: &mut dyn RenderNode = &mut *self.root;
-        walk_path_reverse_recursive(root, path, 1, event, ctx);
+        // Second pass: process nodes in reverse order (target → ... → root)
+        // We need to get mutable references, so we traverse again
+        let mut current_node: &mut dyn RenderNode = &mut *self.root;
 
-        // After processing all descendants, handle root (last in bubble phase)
+        // Process all nodes except root in reverse order
+        for i in (1..path.len()).rev() {
+            let child_id = path[i];
+
+            match current_node.get_child_mut(child_id) {
+                Some(child) => {
+                    // Get absolute position for this node
+                    let (node_abs_x, node_abs_y) = abs_positions[i];
+
+                    // Transform event to this node's local coordinates (inline to avoid borrow issues)
+                    let local_event = match event {
+                        Event::Mouse(mouse_event) => {
+                            let local_position = crate::geometry::Point::new(
+                                mouse_event.position.x - node_abs_x,
+                                mouse_event.position.y - node_abs_y,
+                            );
+                            Event::Mouse(crate::event::MouseEvent {
+                                position: local_position,
+                                buttons: mouse_event.buttons,
+                                kind: mouse_event.kind,
+                            })
+                        }
+                        _ => event.clone(),
+                    };
+
+                    // Call handle_event
+                    child.handle_event(&local_event, ctx);
+                    if ctx.stop_propagation || ctx.stop_immediate {
+                        return;
+                    }
+
+                    // Move to child for next iteration
+                    current_node = child;
+                }
+                None => return,
+            }
+        }
+
+        // Process root last (if not stopped)
         if !(ctx.stop_propagation || ctx.stop_immediate) {
-            root.handle_event(event, ctx);
+            let (root_abs_x, root_abs_y) = abs_positions[0];
+            let local_event = match event {
+                Event::Mouse(mouse_event) => {
+                    let local_position = crate::geometry::Point::new(
+                        mouse_event.position.x - root_abs_x,
+                        mouse_event.position.y - root_abs_y,
+                    );
+                    Event::Mouse(crate::event::MouseEvent {
+                        position: local_position,
+                        buttons: mouse_event.buttons,
+                        kind: mouse_event.kind,
+                    })
+                }
+                _ => event.clone(),
+            };
+            current_node.handle_event(&local_event, ctx);
         }
     }
 
@@ -254,28 +515,50 @@ impl<'a> EventDispatcher<'a> {
         let mut path = Vec::new();
         let mut current_id = Some(target_id);
 
+        // println!("[dispatcher] build_path_to_target: starting from target_id={:?}", target_id);
+
         while let Some(id) = current_id {
             path.push(id);
-            current_id = self.get_node(id).and_then(|n| n.parent());
+            match self.get_node(id) {
+                Some(node) => {
+                    // println!("[dispatcher] build_path_to_target: id={:?}, type_name={}, parent={:?}", id, node.type_name(), node.parent());
+                    current_id = node.parent();
+                }
+                None => {
+                    // println!("[dispatcher] build_path_to_target: id={:?} NOT FOUND in tree", id);
+                    current_id = None;
+                }
+            }
         }
 
         path.reverse(); // Root → target
+        // println!("[dispatcher] build_path_to_target: final path={:?}", path);
         path
     }
 
     fn get_node(&self, id: NodeId) -> Option<&dyn RenderNode> {
-        if self.root.id() == id {
-            Some(self.root)
-        } else {
-            self.root.get_child(id)
+        // Direct traversal using parent pointers
+        fn find<'a>(node: &'a dyn RenderNode, target_id: NodeId) -> Option<&'a dyn RenderNode> {
+            if node.id() == target_id {
+                return Some(node);
+            }
+            for child in node.children() {
+                if let Some(found) = find(child.as_ref(), target_id) {
+                    return Some(found);
+                }
+            }
+            None
         }
+        find(self.root, id)
     }
 
     fn get_node_mut(&mut self, id: NodeId) -> Option<&mut dyn RenderNode> {
-        if self.root.id() == id {
-            Some(self.root)
+        // Build path first, then navigate using path-based approach
+        let path = self.build_path_to_target(id);
+        if path.is_empty() {
+            None
         } else {
-            self.root.get_child_mut(id)
+            self.get_node_mut_via_path(&path, id)
         }
     }
 

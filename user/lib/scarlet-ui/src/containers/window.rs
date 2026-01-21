@@ -155,12 +155,20 @@ impl RenderNode for WindowRenderNode {
         std::slice::from_mut(&mut self.child)
     }
 
-    fn get_child(&self, _id: NodeId) -> Option<&dyn RenderNode> {
-        Some(self.child.as_ref())
+    fn get_child(&self, id: NodeId) -> Option<&dyn RenderNode> {
+        if self.child.id() == id {
+            Some(self.child.as_ref())
+        } else {
+            None
+        }
     }
 
-    fn get_child_mut(&mut self, _id: NodeId) -> Option<&mut (dyn RenderNode + '_)> {
-        Some(self.child.as_mut())
+    fn get_child_mut(&mut self, id: NodeId) -> Option<&mut (dyn RenderNode + '_)> {
+        if self.child.id() == id {
+            Some(self.child.as_mut())
+        } else {
+            None
+        }
     }
 
     fn type_id(&self) -> std::any::TypeId {
@@ -229,9 +237,9 @@ impl RenderNode for WindowRenderNode {
     }
 
     fn render(&mut self) {
-        if !self.is_dirty() {
-            return;
-        }
+        // NOTE: Don't check is_dirty() here!
+        // Parent may call render() on us when children are dirty (even if we're not)
+        // We need to blit children's buffers even if we're not dirty ourselves
 
         use crate::geometry::Color;
 
@@ -282,21 +290,21 @@ impl RenderNode for WindowRenderNode {
             let minimize_rect = self.get_minimize_button_rect();
 
             let close_color = if self.close_button_hovered {
-                with_theme(|theme| theme.button_background_hovered)
+                with_theme(|theme| theme.titlebar_button_background_hovered)
             } else {
-                with_theme(|theme| theme.button_background)
+                with_theme(|theme| theme.titlebar_button_background)
             };
 
             let maximize_color = if self.maximize_button_hovered {
-                with_theme(|theme| theme.button_background_hovered)
+                with_theme(|theme| theme.titlebar_button_background_hovered)
             } else {
-                with_theme(|theme| theme.button_background)
+                with_theme(|theme| theme.titlebar_button_background)
             };
 
             let minimize_color = if self.minimize_button_hovered {
-                with_theme(|theme| theme.button_background_hovered)
+                with_theme(|theme| theme.titlebar_button_background_hovered)
             } else {
-                with_theme(|theme| theme.button_background)
+                with_theme(|theme| theme.titlebar_button_background)
             };
 
             // Draw button backgrounds
@@ -304,8 +312,8 @@ impl RenderNode for WindowRenderNode {
             self.buffer.as_mut().unwrap().fill_rect(maximize_rect, maximize_color.as_bgra());
             self.buffer.as_mut().unwrap().fill_rect(minimize_rect, minimize_color.as_bgra());
 
-            // Draw icons (deprecated style: rgb(30, 30, 34))
-            let icon_color = Color::rgb(30, 30, 34).as_bgra();
+            // Draw icons (deprecated style: using theme)
+            let icon_color = with_theme(|theme| theme.titlebar_button_icon).as_bgra();
             let icon_size: i32 = 10;
             let icon_half = icon_size / 2;
 
@@ -384,6 +392,36 @@ impl RenderNode for WindowRenderNode {
                 .as_mut()
                 .unwrap()
                 .blit_from(child_buffer, child_frame);
+        }
+
+        // Draw window border (deprecated style)
+        if self.decorated {
+            let border_color = with_theme(|theme| theme.window_border);
+            let border_width = 1.0;
+
+            // Left border
+            self.buffer.as_mut().unwrap().fill_rect(Rect::new(
+                Point::new(0.0, 0.0),
+                Size::new(border_width, self.frame.size.height),
+            ), border_color.as_bgra());
+
+            // Right border
+            self.buffer.as_mut().unwrap().fill_rect(Rect::new(
+                Point::new(self.frame.size.width - border_width, 0.0),
+                Size::new(border_width, self.frame.size.height),
+            ), border_color.as_bgra());
+
+            // Top border
+            self.buffer.as_mut().unwrap().fill_rect(Rect::new(
+                Point::new(0.0, 0.0),
+                Size::new(self.frame.size.width, border_width),
+            ), border_color.as_bgra());
+
+            // Bottom border
+            self.buffer.as_mut().unwrap().fill_rect(Rect::new(
+                Point::new(0.0, self.frame.size.height - border_width),
+                Size::new(self.frame.size.width, border_width),
+            ), border_color.as_bgra());
         }
 
         self.clear_dirty();

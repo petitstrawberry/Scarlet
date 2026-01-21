@@ -232,7 +232,28 @@ impl RenderNode for HStackRenderNode {
         // Calculate total size
         let max_height = constraints.max.height;
         let total_width = min_total.min(available_for_children) + total_spacing;
-        Size::new(total_width, max_height)
+        let size = Size::new(total_width, max_height);
+
+        // Set frames for children with actual positions (alignment + offset)
+        let mut x_offset = 0.0;
+        for child in self.children.iter_mut() {
+            let child_size = child.frame().size;
+
+            // Calculate y offset based on alignment
+            let y_offset = match self.alignment {
+                Alignment::Start => 0.0,
+                Alignment::Center => (max_height - child_size.height) / 2.0,
+                Alignment::End => max_height - child_size.height,
+                Alignment::Stretch => 0.0,  // Already stretched by layout
+            };
+
+            // Set child frame at actual position
+            child.set_frame(Rect::new(Point::new(x_offset, y_offset), child_size));
+            x_offset += child_size.width + self.spacing;
+        }
+
+        self.frame = Rect::new(Point::ZERO, size);
+        size
     }
 
     fn set_frame(&mut self, frame: Rect) {
@@ -244,24 +265,21 @@ impl RenderNode for HStackRenderNode {
     }
 
     fn render(&mut self) {
-        if !self.is_dirty() {
-            return;
-        }
+        // NOTE: Don't check is_dirty() here!
+        // Parent may call render() on us when children are dirty (even if we're not)
+        // We need to blit children's buffers even if we're not dirty ourselves
 
         // Create buffer and composite children
         let mut buffer = Buffer::new(self.frame.size);
 
-        let mut x_offset = 0.0;
         for child in &mut self.children {
-            let child_size = child.frame().size;
-            child.set_frame(Rect::new(Point::new(x_offset, 0.0), child_size));
+            // child.frame() already has correct origin from layout()
             child.render();
 
             if let Some(child_buffer) = child.get_buffer() {
+                // Blit at child's frame position
                 buffer.blit_from(child_buffer, child.frame());
             }
-
-            x_offset += child_size.width + self.spacing;
         }
 
         self.buffer = Some(buffer);
@@ -274,12 +292,21 @@ impl RenderNode for HStackRenderNode {
     }
 
     fn hit_test(&self, point: Point) -> HitResult {
+        // Check children in reverse order (z-order)
         for child in self.children.iter().rev() {
-            let local_point = point - child.frame().origin;
-            match child.hit_test(local_point) {
-                HitResult::Handled(id) => return HitResult::Handled(id),
-                HitResult::Stop => return HitResult::Stop,
-                HitResult::Passthrough => continue,
+            let child_frame = child.frame();
+
+            // child_frame.origin is already set correctly by layout()
+            let in_bounds = child_frame.contains(point);
+
+            if in_bounds {
+                // Transform to child-local coordinates
+                let local_point = point - child_frame.origin;
+                match child.hit_test(local_point) {
+                    HitResult::Handled(id) => return HitResult::Handled(id),
+                    HitResult::Stop => return HitResult::Stop,
+                    HitResult::Passthrough => continue,
+                }
             }
         }
         HitResult::Passthrough

@@ -28,18 +28,17 @@ pub struct Theme {
     pub titlebar_text: Color,
     pub titlebar_border: Color,
 
+    // Titlebar control button colors (minimize, maximize, close)
+    pub titlebar_button_background: Color,
+    pub titlebar_button_background_hovered: Color,
+    pub titlebar_button_icon: Color,
+
     // Button colors
     pub button_background: Color,
     pub button_background_hovered: Color,
     pub button_background_pressed: Color,
     pub button_text: Color,
     pub button_border: Color,
-
-    // Close button
-    pub close_button_background: Color,
-    pub close_button_background_hovered: Color,
-    pub close_button_border: Color,
-    pub close_button_border_hovered: Color,
 
     // Text colors
     pub text_primary: Color,
@@ -74,18 +73,17 @@ impl Theme {
             titlebar_text: Color::rgb(20, 20, 24),
             titlebar_border: Color::rgb(100, 100, 105),
 
-            // Button colors - gray
+            // Titlebar control button colors - deprecated style
+            titlebar_button_background: Color::rgb(235, 235, 238),
+            titlebar_button_background_hovered: Color::rgb(210, 210, 214),
+            titlebar_button_icon: Color::rgb(30, 30, 34),
+
+            // Button colors - gray with more obvious hover
             button_background: Color::rgb(235, 235, 238),
-            button_background_hovered: Color::rgb(210, 210, 214),
+            button_background_hovered: Color::rgb(180, 200, 240),  // Bluish for hover
             button_background_pressed: Color::rgb(190, 190, 194),
             button_text: Color::rgb(20, 20, 24),
             button_border: Color::rgb(180, 180, 180),
-
-            // Close button - gray, more visible hover
-            close_button_background: Color::rgb(235, 235, 238),
-            close_button_background_hovered: Color::rgb(210, 210, 214),
-            close_button_border: Color::rgb(235, 235, 238),
-            close_button_border_hovered: Color::rgb(210, 210, 214),
 
             // Text colors
             text_primary: Color::rgb(20, 20, 24),
@@ -112,18 +110,17 @@ impl Theme {
             titlebar_text: Color::rgb(220, 220, 220),
             titlebar_border: Color::rgb(70, 70, 70),
 
-            // Button colors - gray
+            // Titlebar control button colors
+            titlebar_button_background: Color::rgb(50, 50, 60),
+            titlebar_button_background_hovered: Color::rgb(70, 70, 80),
+            titlebar_button_icon: Color::rgb(220, 220, 220),
+
+            // Button colors - gray with more obvious hover
             button_background: Color::rgb(70, 70, 70),
-            button_background_hovered: Color::rgb(85, 85, 85),
+            button_background_hovered: Color::rgb(90, 120, 160),  // Bluish for hover
             button_background_pressed: Color::rgb(100, 100, 100),
             button_text: Color::rgb(220, 220, 220),
             button_border: Color::rgb(90, 90, 90),
-
-            // Close button - gray, more visible hover
-            close_button_background: Color::rgb(70, 70, 70),
-            close_button_background_hovered: Color::rgb(90, 90, 100),
-            close_button_border: Color::rgb(70, 70, 70),
-            close_button_border_hovered: Color::rgb(85, 85, 85),
 
             // Text colors
             text_primary: Color::rgb(220, 220, 220),

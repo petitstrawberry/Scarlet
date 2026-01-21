@@ -64,10 +64,12 @@ impl<T: Clone> State<T> {
     where
         F: FnOnce(&mut T),
     {
+        // println!("[State::update] Called");
         let mut guard = self.inner.value.lock();
         f(&mut guard);
         drop(guard);
         self.inner.version.fetch_add(1, Ordering::Relaxed);
+        // println!("[State::update] Notifying {} subscribers", self.inner.subscribers.lock().len());
         self.notify();
     }
 
@@ -75,9 +77,9 @@ impl<T: Clone> State<T> {
         self.inner.version.load(Ordering::Relaxed)
     }
 
-    pub fn subscribe(&self, callback: std::boxed::Box<dyn Fn() + Send + Sync>) -> SubscriptionId {
+    pub fn subscribe(&self, callback: std::sync::Arc<dyn Fn() + Send + Sync>) -> SubscriptionId {
         let id = SubscriptionId::new();
-        self.inner.subscribers.lock().push((id, Arc::from(callback)));
+        self.inner.subscribers.lock().push((id, callback));
         id
     }
 
