@@ -11,10 +11,10 @@ use crate::traits::view::View;
 pub enum UpdateResult {
     Unchanged,
     Changed(DirtyFlags),
-    Replaced(Box<dyn RenderNode>),
+    Replaced(Box<dyn RenderObject>),
 }
 
-pub trait RenderNode {
+pub trait RenderObject {
     // Identity
     fn id(&self) -> NodeId;
 
@@ -22,15 +22,15 @@ pub trait RenderNode {
     fn parent(&self) -> Option<NodeId>;
     fn set_parent(&mut self, parent: NodeId);
 
-    fn children(&self) -> &[Box<dyn RenderNode>] {
+    fn children(&self) -> &[Box<dyn RenderObject>] {
         &[]
     }
 
-    fn get_child(&self, id: NodeId) -> Option<&dyn RenderNode> {
+    fn get_child(&self, id: NodeId) -> Option<&dyn RenderObject> {
         self.children().iter().find(|c| c.id() == id).map(|c| c.as_ref())
     }
 
-    fn get_child_mut(&mut self, id: NodeId) -> Option<&mut (dyn RenderNode + '_)> {
+    fn get_child_mut(&mut self, id: NodeId) -> Option<&mut (dyn RenderObject + '_)> {
         for child in self.children_mut().iter_mut() {
             if child.id() == id {
                 return Some(child.as_mut());
@@ -40,7 +40,7 @@ pub trait RenderNode {
     }
 
     // Helper for default implementations
-    fn children_mut(&mut self) -> &mut [Box<dyn RenderNode>] {
+    fn children_mut(&mut self) -> &mut [Box<dyn RenderObject>] {
         &mut []
     }
 

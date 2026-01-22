@@ -4,7 +4,7 @@ use crate::event::{Event, EventContext, HitResult};
 use crate::geometry::{Point, Rect, Size};
 use crate::layout::LayoutConstraints;
 use crate::node_id::NodeId;
-use crate::traits::{RenderNode, UpdateResult, View};
+use crate::traits::{RenderObject, UpdateResult, View};
 use std::any::Any;
 use std::io::Read;
 use std::string::String;
@@ -193,8 +193,8 @@ impl View for Image {
         "Image"
     }
 
-    fn build(&self) -> std::boxed::Box<dyn RenderNode> {
-        std::boxed::Box::new(ImageRenderNode::new(self.clone()))
+    fn build(&self) -> std::boxed::Box<dyn RenderObject> {
+        std::boxed::Box::new(ImageRenderObject::new(self.clone()))
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -202,7 +202,7 @@ impl View for Image {
     }
 }
 
-pub struct ImageRenderNode {
+pub struct ImageRenderObject {
     id: NodeId,
     parent: Option<NodeId>,
     view: Image,
@@ -211,7 +211,7 @@ pub struct ImageRenderNode {
     dirty_flags: DirtyFlags,
 }
 
-impl ImageRenderNode {
+impl ImageRenderObject {
     pub fn new(view: Image) -> Self {
         Self {
             id: NodeId::new(),
@@ -242,7 +242,7 @@ impl ImageRenderNode {
     }
 }
 
-impl RenderNode for ImageRenderNode {
+impl RenderObject for ImageRenderObject {
     fn id(&self) -> NodeId {
         self.id
     }

@@ -4,21 +4,26 @@ use crate::event::{Event, EventContext, HitResult};
 use crate::geometry::{Point, Rect, Size};
 use crate::layout::{Alignment, LayoutConstraints};
 use crate::node_id::NodeId;
-use crate::traits::{RenderNode, UpdateResult, View};
+use crate::traits::{RenderObject, UpdateResult, View};
 use std::any::Any;
 use std::boxed::Box;
 use std::vec::Vec;
 
-/// Trait to convert tuples into RenderNodes
-pub trait IntoRenderNodes {
-    fn into_nodes(self) -> Vec<Box<dyn RenderNode>>;
+/// Trait to convert tuples into child Views
+pub trait IntoChildViews {
+    fn into_views(self) -> Vec<Box<dyn View>>;
 }
 
-// Macro to implement IntoRenderNodes for tuples of various sizes
-macro_rules! impl_into_nodes {
+/// Trait to convert tuples into RenderObjects
+pub trait IntoRenderObjects {
+    fn into_nodes(self) -> Vec<Box<dyn RenderObject>>;
+}
+
+// Macro to implement IntoRenderObjects for tuples of various sizes
+macro_rules! impl_into_objects {
     ($idx:tt: $ty:ident) => {
-        impl<$ty: View + Clone> IntoRenderNodes for ($ty,) {
-            fn into_nodes(self) -> Vec<Box<dyn RenderNode>> {
+        impl<$ty: View + Clone> IntoRenderObjects for ($ty,) {
+            fn into_nodes(self) -> Vec<Box<dyn RenderObject>> {
                 let mut nodes = Vec::new();
                 nodes.push(self.$idx.build());
                 nodes
@@ -26,8 +31,8 @@ macro_rules! impl_into_nodes {
         }
     };
     ($($idx:tt: $ty:ident),+) => {
-        impl<$($ty: View + Clone),+> IntoRenderNodes for ($($ty,)+) {
-            fn into_nodes(self) -> Vec<Box<dyn RenderNode>> {
+        impl<$($ty: View + Clone),+> IntoRenderObjects for ($($ty,)+) {
+            fn into_nodes(self) -> Vec<Box<dyn RenderObject>> {
                 let mut nodes = Vec::new();
                 $(
                     nodes.push(self.$idx.build());
@@ -39,31 +44,73 @@ macro_rules! impl_into_nodes {
 }
 
 // Implement for tuples of size 1-16
-impl_into_nodes!(0: A);
-impl_into_nodes!(0: A, 1: B);
-impl_into_nodes!(0: A, 1: B, 2: C);
-impl_into_nodes!(0: A, 1: B, 2: C, 3: D);
-impl_into_nodes!(0: A, 1: B, 2: C, 3: D, 4: E);
-impl_into_nodes!(0: A, 1: B, 2: C, 3: D, 4: E, 5: F);
-impl_into_nodes!(0: A, 1: B, 2: C, 3: D, 4: E, 5: F, 6: G);
-impl_into_nodes!(0: A, 1: B, 2: C, 3: D, 4: E, 5: F, 6: G, 7: H);
-impl_into_nodes!(0: A, 1: B, 2: C, 3: D, 4: E, 5: F, 6: G, 7: H, 8: I);
-impl_into_nodes!(0: A, 1: B, 2: C, 3: D, 4: E, 5: F, 6: G, 7: H, 8: I, 9: J);
-impl_into_nodes!(0: A, 1: B, 2: C, 3: D, 4: E, 5: F, 6: G, 7: H, 8: I, 9: J, 10: K);
-impl_into_nodes!(0: A, 1: B, 2: C, 3: D, 4: E, 5: F, 6: G, 7: H, 8: I, 9: J, 10: K, 11: L);
-impl_into_nodes!(0: A, 1: B, 2: C, 3: D, 4: E, 5: F, 6: G, 7: H, 8: I, 9: J, 10: K, 11: L, 12: M);
-impl_into_nodes!(0: A, 1: B, 2: C, 3: D, 4: E, 5: F, 6: G, 7: H, 8: I, 9: J, 10: K, 11: L, 12: M, 13: N);
-impl_into_nodes!(0: A, 1: B, 2: C, 3: D, 4: E, 5: F, 6: G, 7: H, 8: I, 9: J, 10: K, 11: L, 12: M, 13: N, 14: O);
-impl_into_nodes!(0: A, 1: B, 2: C, 3: D, 4: E, 5: F, 6: G, 7: H, 8: I, 9: J, 10: K, 11: L, 12: M, 13: N, 14: O, 15: P);
+impl_into_objects!(0: A);
+impl_into_objects!(0: A, 1: B);
+impl_into_objects!(0: A, 1: B, 2: C);
+impl_into_objects!(0: A, 1: B, 2: C, 3: D);
+impl_into_objects!(0: A, 1: B, 2: C, 3: D, 4: E);
+impl_into_objects!(0: A, 1: B, 2: C, 3: D, 4: E, 5: F);
+impl_into_objects!(0: A, 1: B, 2: C, 3: D, 4: E, 5: F, 6: G);
+impl_into_objects!(0: A, 1: B, 2: C, 3: D, 4: E, 5: F, 6: G, 7: H);
+impl_into_objects!(0: A, 1: B, 2: C, 3: D, 4: E, 5: F, 6: G, 7: H, 8: I);
+impl_into_objects!(0: A, 1: B, 2: C, 3: D, 4: E, 5: F, 6: G, 7: H, 8: I, 9: J);
+impl_into_objects!(0: A, 1: B, 2: C, 3: D, 4: E, 5: F, 6: G, 7: H, 8: I, 9: J, 10: K);
+impl_into_objects!(0: A, 1: B, 2: C, 3: D, 4: E, 5: F, 6: G, 7: H, 8: I, 9: J, 10: K, 11: L);
+impl_into_objects!(0: A, 1: B, 2: C, 3: D, 4: E, 5: F, 6: G, 7: H, 8: I, 9: J, 10: K, 11: L, 12: M);
+impl_into_objects!(0: A, 1: B, 2: C, 3: D, 4: E, 5: F, 6: G, 7: H, 8: I, 9: J, 10: K, 11: L, 12: M, 13: N);
+impl_into_objects!(0: A, 1: B, 2: C, 3: D, 4: E, 5: F, 6: G, 7: H, 8: I, 9: J, 10: K, 11: L, 12: M, 13: N, 14: O);
+impl_into_objects!(0: A, 1: B, 2: C, 3: D, 4: E, 5: F, 6: G, 7: H, 8: I, 9: J, 10: K, 11: L, 12: M, 13: N, 14: O, 15: P);
+
+// Macro to implement IntoChildViews for tuples of various sizes
+macro_rules! impl_into_child_views {
+    ($idx:tt: $ty:ident) => {
+        impl<$ty: View + Clone> IntoChildViews for ($ty,) {
+            fn into_views(self) -> Vec<Box<dyn View>> {
+                let mut views: Vec<Box<dyn View>> = Vec::new();
+                views.push(Box::new(self.$idx) as Box<dyn View>);
+                views
+            }
+        }
+    };
+    ($($idx:tt: $ty:ident),+) => {
+        impl<$($ty: View + Clone),+> IntoChildViews for ($($ty,)+) {
+            fn into_views(self) -> Vec<Box<dyn View>> {
+                let mut views: Vec<Box<dyn View>> = Vec::new();
+                $(
+                    views.push(Box::new(self.$idx) as Box<dyn View>);
+                )+
+                views
+            }
+        }
+    };
+}
+
+// Implement for tuples of size 1-16
+impl_into_child_views!(0: A);
+impl_into_child_views!(0: A, 1: B);
+impl_into_child_views!(0: A, 1: B, 2: C);
+impl_into_child_views!(0: A, 1: B, 2: C, 3: D);
+impl_into_child_views!(0: A, 1: B, 2: C, 3: D, 4: E);
+impl_into_child_views!(0: A, 1: B, 2: C, 3: D, 4: E, 5: F);
+impl_into_child_views!(0: A, 1: B, 2: C, 3: D, 4: E, 5: F, 6: G);
+impl_into_child_views!(0: A, 1: B, 2: C, 3: D, 4: E, 5: F, 6: G, 7: H);
+impl_into_child_views!(0: A, 1: B, 2: C, 3: D, 4: E, 5: F, 6: G, 7: H, 8: I);
+impl_into_child_views!(0: A, 1: B, 2: C, 3: D, 4: E, 5: F, 6: G, 7: H, 8: I, 9: J);
+impl_into_child_views!(0: A, 1: B, 2: C, 3: D, 4: E, 5: F, 6: G, 7: H, 8: I, 9: J, 10: K);
+impl_into_child_views!(0: A, 1: B, 2: C, 3: D, 4: E, 5: F, 6: G, 7: H, 8: I, 9: J, 10: K, 11: L);
+impl_into_child_views!(0: A, 1: B, 2: C, 3: D, 4: E, 5: F, 6: G, 7: H, 8: I, 9: J, 10: K, 11: L, 12: M);
+impl_into_child_views!(0: A, 1: B, 2: C, 3: D, 4: E, 5: F, 6: G, 7: H, 8: I, 9: J, 10: K, 11: L, 12: M, 13: N);
+impl_into_child_views!(0: A, 1: B, 2: C, 3: D, 4: E, 5: F, 6: G, 7: H, 8: I, 9: J, 10: K, 11: L, 12: M, 13: N, 14: O);
+impl_into_child_views!(0: A, 1: B, 2: C, 3: D, 4: E, 5: F, 6: G, 7: H, 8: I, 9: J, 10: K, 11: L, 12: M, 13: N, 14: O, 15: P);
 
 #[derive(Clone)]
-pub struct HStack<V: View + Clone + IntoRenderNodes> {
+pub struct HStack<V: View + Clone + IntoRenderObjects + IntoChildViews> {
     pub children: V,
     pub spacing: f32,
     pub alignment: Alignment,
 }
 
-impl<V: View + Clone + IntoRenderNodes> HStack<V> {
+impl<V: View + Clone + IntoRenderObjects + IntoChildViews> HStack<V> {
     pub fn new(children: V) -> Self {
         Self {
             children,
@@ -83,7 +130,7 @@ impl<V: View + Clone + IntoRenderNodes> HStack<V> {
     }
 }
 
-impl<V: View + Clone + IntoRenderNodes> View for HStack<V> {
+impl<V: View + Clone + IntoRenderObjects + IntoChildViews> View for HStack<V> {
     fn type_id(&self) -> std::any::TypeId {
         std::any::TypeId::of::<Self>()
     }
@@ -92,19 +139,23 @@ impl<V: View + Clone + IntoRenderNodes> View for HStack<V> {
         "HStack"
     }
 
-    fn build(&self) -> Box<dyn RenderNode> {
-        Box::new(HStackRenderNode::new(self.children.clone().into_nodes(), self.spacing))
+    fn build(&self) -> Box<dyn RenderObject> {
+        Box::new(HStackRenderObject::new(self.children.clone().into_nodes(), self.spacing))
     }
 
     fn as_any(&self) -> &dyn Any {
         self
     }
+
+    fn children(&self) -> Vec<Box<dyn View>> {
+        self.children.clone().into_views()
+    }
 }
 
-pub struct HStackRenderNode {
+pub struct HStackRenderObject {
     id: NodeId,
     parent: Option<NodeId>,
-    children: Vec<Box<dyn RenderNode>>,
+    children: Vec<Box<dyn RenderObject>>,
     spacing: f32,
     alignment: Alignment,
     buffer: Option<Buffer>,
@@ -112,8 +163,8 @@ pub struct HStackRenderNode {
     dirty_flags: DirtyFlags,
 }
 
-impl HStackRenderNode {
-    pub fn new(mut children: Vec<Box<dyn RenderNode>>, spacing: f32) -> Self {
+impl HStackRenderObject {
+    pub fn new(mut children: Vec<Box<dyn RenderObject>>, spacing: f32) -> Self {
         let id = NodeId::new();
 
         // Set parent for each child
@@ -134,7 +185,7 @@ impl HStackRenderNode {
     }
 }
 
-impl RenderNode for HStackRenderNode {
+impl RenderObject for HStackRenderObject {
     fn id(&self) -> NodeId {
         self.id
     }
@@ -147,19 +198,19 @@ impl RenderNode for HStackRenderNode {
         self.parent = Some(parent);
     }
 
-    fn children(&self) -> &[Box<dyn RenderNode>] {
+    fn children(&self) -> &[Box<dyn RenderObject>] {
         &self.children
     }
 
-    fn children_mut(&mut self) -> &mut [Box<dyn RenderNode>] {
+    fn children_mut(&mut self) -> &mut [Box<dyn RenderObject>] {
         &mut self.children
     }
 
-    fn get_child(&self, id: NodeId) -> Option<&dyn RenderNode> {
+    fn get_child(&self, id: NodeId) -> Option<&dyn RenderObject> {
         self.children.iter().find(|c| c.id() == id).map(|c| c.as_ref())
     }
 
-    fn get_child_mut(&mut self, id: NodeId) -> Option<&mut (dyn RenderNode + '_)> {
+    fn get_child_mut(&mut self, id: NodeId) -> Option<&mut (dyn RenderObject + '_)> {
         for child in self.children.iter_mut() {
             if child.id() == id {
                 return Some(child.as_mut());
@@ -169,7 +220,7 @@ impl RenderNode for HStackRenderNode {
     }
 
     fn type_id(&self) -> std::any::TypeId {
-        std::any::TypeId::of::<HStackRenderNode>()
+        std::any::TypeId::of::<HStackRenderObject>()
     }
 
     fn type_name(&self) -> &'static str {

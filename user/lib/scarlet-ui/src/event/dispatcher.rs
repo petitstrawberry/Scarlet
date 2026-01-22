@@ -1,12 +1,12 @@
 use crate::event::{Event, EventContext, EventPhase, HitResult, KeyEvent, MouseEventKind};
 use crate::geometry::Point;
 use crate::node_id::NodeId;
-use crate::traits::RenderNode;
+use crate::traits::RenderObject;
 use std::vec::Vec;
 use std::println;
 
 pub struct EventDispatcher<'a> {
-    root: &'a mut dyn RenderNode,
+    root: &'a mut dyn RenderObject,
     focus_manager: &'a mut crate::event::FocusManager,
     hover_manager: &'a mut crate::event::HoverManager,
     pressed_manager: &'a mut crate::event::PressedManager,
@@ -14,7 +14,7 @@ pub struct EventDispatcher<'a> {
 
 impl<'a> EventDispatcher<'a> {
     pub fn new(
-        root: &'a mut dyn RenderNode,
+        root: &'a mut dyn RenderObject,
         focus_manager: &'a mut crate::event::FocusManager,
         hover_manager: &'a mut crate::event::HoverManager,
         pressed_manager: &'a mut crate::event::PressedManager,
@@ -228,7 +228,7 @@ impl<'a> EventDispatcher<'a> {
         self.hit_test_recursive(self.root, position)
     }
 
-    fn hit_test_recursive(&self, node: &dyn RenderNode, point: Point) -> Option<NodeId> {
+    fn hit_test_recursive(&self, node: &dyn RenderObject, point: Point) -> Option<NodeId> {
         // println!("[dispatcher] hit_test_recursive: node={}, point={:?}, node.frame={:?}",
         //     node.type_name(), point, node.frame());
 
@@ -291,7 +291,7 @@ impl<'a> EventDispatcher<'a> {
     fn calculate_absolute_frame(&self, path: &[NodeId], target_id: NodeId) -> Option<crate::geometry::Rect> {
         use crate::geometry::{Point, Rect};
 
-        let mut current_node: &dyn RenderNode = self.root;
+        let mut current_node: &dyn RenderObject = self.root;
         let mut abs_x = 0.0;
         let mut abs_y = 0.0;
 
@@ -357,7 +357,7 @@ impl<'a> EventDispatcher<'a> {
 
         // Start from root (path[0])
         // Reborrow `self.root` so we don't move it out of `self`.
-        let mut current_node: &mut dyn RenderNode = &mut *self.root;
+        let mut current_node: &mut dyn RenderObject = &mut *self.root;
 
         // Add root's frame origin
         abs_x += current_node.frame().origin.x;
@@ -456,7 +456,7 @@ impl<'a> EventDispatcher<'a> {
         let mut abs_y = 0.0;
 
         // Start from root (path[0])
-        let mut current_node: &dyn RenderNode = self.root;
+        let mut current_node: &dyn RenderObject = self.root;
         abs_x += current_node.frame().origin.x;
         abs_y += current_node.frame().origin.y;
         abs_positions.push((abs_x, abs_y));
@@ -477,7 +477,7 @@ impl<'a> EventDispatcher<'a> {
 
         // Second pass: process nodes in reverse order (target → ... → root)
         // We need to get mutable references, so we traverse again
-        let mut current_node: &mut dyn RenderNode = &mut *self.root;
+        let mut current_node: &mut dyn RenderObject = &mut *self.root;
 
         // Process all nodes except root in reverse order
         for i in (1..path.len()).rev() {
@@ -563,9 +563,9 @@ impl<'a> EventDispatcher<'a> {
         path
     }
 
-    fn get_node(&self, id: NodeId) -> Option<&dyn RenderNode> {
+    fn get_node(&self, id: NodeId) -> Option<&dyn RenderObject> {
         // Direct traversal using parent pointers
-        fn find<'a>(node: &'a dyn RenderNode, target_id: NodeId) -> Option<&'a dyn RenderNode> {
+        fn find<'a>(node: &'a dyn RenderObject, target_id: NodeId) -> Option<&'a dyn RenderObject> {
             if node.id() == target_id {
                 return Some(node);
             }
@@ -579,7 +579,7 @@ impl<'a> EventDispatcher<'a> {
         find(self.root, id)
     }
 
-    fn get_node_mut(&mut self, id: NodeId) -> Option<&mut dyn RenderNode> {
+    fn get_node_mut(&mut self, id: NodeId) -> Option<&mut dyn RenderObject> {
         // Build path first, then navigate using path-based approach
         let path = self.build_path_to_target(id);
         if path.is_empty() {
@@ -589,16 +589,16 @@ impl<'a> EventDispatcher<'a> {
         }
     }
 
-    fn get_node_mut_via_path(&mut self, path: &[NodeId], target: NodeId) -> Option<&mut dyn RenderNode> {
+    fn get_node_mut_via_path(&mut self, path: &[NodeId], target: NodeId) -> Option<&mut dyn RenderObject> {
         let prefix_end = path.iter().position(|&id| id == target)? + 1;
         let prefix = &path[..prefix_end];
         self.get_node_mut_via_prefix(prefix)
     }
 
-    fn get_node_mut_via_prefix(&mut self, path: &[NodeId]) -> Option<&mut dyn RenderNode> {
+    fn get_node_mut_via_prefix(&mut self, path: &[NodeId]) -> Option<&mut dyn RenderObject> {
         // path is [root, child1, child2, ..., target]
         // Start traversal from root, but skip matching root itself
-        fn traverse<'a>(node: &'a mut dyn RenderNode, path: &[NodeId], index: usize) -> Option<&'a mut dyn RenderNode> {
+        fn traverse<'a>(node: &'a mut dyn RenderObject, path: &[NodeId], index: usize) -> Option<&'a mut dyn RenderObject> {
             if index >= path.len() {
                 return Some(node);
             }

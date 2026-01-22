@@ -5,7 +5,7 @@ use crate::geometry::{Point, Rect, Size};
 use crate::layout::LayoutConstraints;
 use crate::node_id::NodeId;
 use crate::state::State;
-use crate::traits::{RenderNode, UpdateResult, View};
+use crate::traits::{RenderObject, UpdateResult, View};
 use crate::geometry::Color;
 use crate::theme::with_theme;
 use std::any::Any;
@@ -47,8 +47,8 @@ impl View for Toggle {
         "Toggle"
     }
 
-    fn build(&self) -> std::boxed::Box<dyn RenderNode> {
-        std::boxed::Box::new(ToggleRenderNode::new(self.clone()))
+    fn build(&self) -> std::boxed::Box<dyn RenderObject> {
+        std::boxed::Box::new(ToggleRenderObject::new(self.clone()))
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -62,7 +62,7 @@ struct ToggleInteractionState {
     pressed: bool,
 }
 
-pub struct ToggleRenderNode {
+pub struct ToggleRenderObject {
     id: NodeId,
     parent: Option<NodeId>,
     view: Toggle,
@@ -73,7 +73,7 @@ pub struct ToggleRenderNode {
     last_known_state: bool,
 }
 
-impl ToggleRenderNode {
+impl ToggleRenderObject {
     pub fn new(view: Toggle) -> Self {
         let last_known_state = view.is_on.get();
 
@@ -90,7 +90,7 @@ impl ToggleRenderNode {
     }
 }
 
-impl RenderNode for ToggleRenderNode {
+impl RenderObject for ToggleRenderObject {
     fn id(&self) -> NodeId {
         self.id
     }
@@ -103,7 +103,7 @@ impl RenderNode for ToggleRenderNode {
         self.parent = Some(parent);
     }
 
-    fn children(&self) -> &[std::boxed::Box<dyn RenderNode>] {
+    fn children(&self) -> &[std::boxed::Box<dyn RenderObject>] {
         &[]
     }
 

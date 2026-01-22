@@ -1,4 +1,6 @@
-use crate::traits::render_node::RenderNode;
+use crate::traits::render_object::RenderObject;
+use std::boxed::Box;
+use std::vec::Vec;
 
 // View trait is dyn-compatible (object-safe)
 // Concrete View types should implement Clone separately
@@ -12,9 +14,15 @@ pub trait View: 'static {
 
     fn type_name(&self) -> &'static str;
 
-    fn build(&self) -> std::boxed::Box<dyn RenderNode>;
+    fn build(&self) -> Box<dyn RenderObject>;
 
     fn as_any(&self) -> &dyn std::any::Any;
+
+    /// Get child views for this view
+    /// Default: no children (leaf view)
+    fn children(&self) -> Vec<Box<dyn View>> {
+        Vec::new()
+    }
 
     /// Subscribe to state changes for automatic view rebuilding
     /// Default: no states to watch

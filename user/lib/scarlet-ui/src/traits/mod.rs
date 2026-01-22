@@ -1,5 +1,7 @@
-mod render_node;
+pub mod element;
+mod render_object;
 mod view;
 
-pub use render_node::{RenderNode, UpdateResult};
+pub use element::{Element, ElementId, ElementUpdateResult, GenericElement};
+pub use render_object::{RenderObject, UpdateResult};
 pub use view::View;

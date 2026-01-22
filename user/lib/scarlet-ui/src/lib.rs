@@ -3,6 +3,7 @@
 pub extern crate scarlet_std as std;
 
 mod buffer;
+mod compositor;
 mod containers;
 mod dirty;
 mod event;
@@ -10,6 +11,8 @@ mod geometry;
 pub mod graphics;
 mod layout;
 mod node_id;
+mod pipeline;
+mod reconciliation;
 mod state;
 pub mod theme;
 mod traits;
@@ -26,7 +29,10 @@ pub use node_id::NodeId;
 pub use containers::{HStack, VStack, Window, ZStack};
 pub use state::{State, SubscriptionId};
 pub use theme::{ColorScheme, Theme, get_theme, set_theme, with_theme, init as init_theme};
-pub use traits::{RenderNode, UpdateResult, View};
+pub use pipeline::PipelineOwner;
+pub use reconciliation::ElementTree;
+pub use compositor::{SceneBuilder, Layer};
+pub use traits::{Element, ElementId, ElementUpdateResult, GenericElement, RenderObject, UpdateResult, View};
 pub use views::{Button, ButtonColors, Frame, Image, Padding, Rectangle, Slider, Text, TextField, Toggle, ViewExt};
 pub use views::spacer::Spacer;  // Export as marker type (not a View)
 pub use app::{App, Application};
@@ -43,7 +49,7 @@ pub mod prelude {
     pub use crate::layout::{Alignment, LayoutConstraints};
     pub use crate::state::{State, SubscriptionId};
     pub use crate::theme::{ColorScheme, Theme, get_theme, set_theme, with_theme};
-    pub use crate::traits::{RenderNode, View};
+    pub use crate::traits::{RenderObject, View};
     pub use crate::views::{Button, Frame, Image, Padding, Rectangle, Slider, Spacer, Text, TextField, Toggle, ViewExt};
     pub use crate::{NodeId, Point, Rect, Size};
     pub use scarlet_ui_macros::{hstack, vstack, View, zstack};

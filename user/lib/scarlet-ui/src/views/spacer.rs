@@ -3,7 +3,7 @@ use crate::event::{Event, EventContext, HitResult};
 use crate::geometry::{Point, Rect, Size};
 use crate::layout::LayoutConstraints;
 use crate::node_id::NodeId;
-use crate::traits::{RenderNode, UpdateResult, View};
+use crate::traits::{RenderObject, UpdateResult, View};
 use std::any::Any;
 
 /// Spacer - Takes up available space in layouts
@@ -41,8 +41,8 @@ impl View for Spacer {
         "Spacer"
     }
 
-    fn build(&self) -> std::boxed::Box<dyn RenderNode> {
-        std::boxed::Box::new(SpacerRenderNode::new(*self))
+    fn build(&self) -> std::boxed::Box<dyn RenderObject> {
+        std::boxed::Box::new(SpacerRenderObject::new(*self))
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -50,14 +50,14 @@ impl View for Spacer {
     }
 }
 
-pub struct SpacerRenderNode {
+pub struct SpacerRenderObject {
     id: NodeId,
     parent: Option<NodeId>,
     view: Spacer,
     frame: Rect,
 }
 
-impl SpacerRenderNode {
+impl SpacerRenderObject {
     pub fn new(view: Spacer) -> Self {
         Self {
             id: NodeId::new(),
@@ -68,7 +68,7 @@ impl SpacerRenderNode {
     }
 }
 
-impl RenderNode for SpacerRenderNode {
+impl RenderObject for SpacerRenderObject {
     fn id(&self) -> NodeId {
         self.id
     }

@@ -4,7 +4,7 @@ use crate::event::{Event, EventContext, HitResult};
 use crate::geometry::{Point, Rect, Size};
 use crate::layout::{Alignment, LayoutConstraints};
 use crate::node_id::NodeId;
-use crate::traits::{RenderNode, UpdateResult, View};
+use crate::traits::{RenderObject, UpdateResult, View};
 use std::any::Any;
 
 /// Frame modifier - controls size constraints of child view
@@ -70,8 +70,8 @@ impl<V: View + Clone> View for Frame<V> {
         "Frame"
     }
 
-    fn build(&self) -> std::boxed::Box<dyn RenderNode> {
-        std::boxed::Box::new(FrameRenderNode::new(self.clone()))
+    fn build(&self) -> std::boxed::Box<dyn RenderObject> {
+        std::boxed::Box::new(FrameRenderObject::new(self.clone()))
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -79,10 +79,10 @@ impl<V: View + Clone> View for Frame<V> {
     }
 }
 
-pub struct FrameRenderNode {
+pub struct FrameRenderObject {
     id: NodeId,
     parent: Option<NodeId>,
-    child: std::boxed::Box<dyn RenderNode>,
+    child: std::boxed::Box<dyn RenderObject>,
     width: Option<f32>,
     height: Option<f32>,
     max_width: Option<f32>,
@@ -93,7 +93,7 @@ pub struct FrameRenderNode {
     dirty_flags: DirtyFlags,
 }
 
-impl FrameRenderNode {
+impl FrameRenderObject {
     pub fn new(view: Frame<impl View + Clone>) -> Self {
         let child = view.child.build();
         let id = NodeId::new();
@@ -117,7 +117,7 @@ impl FrameRenderNode {
     }
 }
 
-impl RenderNode for FrameRenderNode {
+impl RenderObject for FrameRenderObject {
     fn id(&self) -> NodeId {
         self.id
     }
@@ -130,15 +130,15 @@ impl RenderNode for FrameRenderNode {
         self.parent = Some(parent);
     }
 
-    fn children(&self) -> &[std::boxed::Box<dyn RenderNode>] {
+    fn children(&self) -> &[std::boxed::Box<dyn RenderObject>] {
         std::slice::from_ref(&self.child)
     }
 
-    fn children_mut(&mut self) -> &mut [std::boxed::Box<dyn RenderNode>] {
+    fn children_mut(&mut self) -> &mut [std::boxed::Box<dyn RenderObject>] {
         std::slice::from_mut(&mut self.child)
     }
 
-    fn get_child(&self, id: NodeId) -> Option<&dyn RenderNode> {
+    fn get_child(&self, id: NodeId) -> Option<&dyn RenderObject> {
         if self.child.id() == id {
             Some(self.child.as_ref())
         } else {
@@ -146,7 +146,7 @@ impl RenderNode for FrameRenderNode {
         }
     }
 
-    fn get_child_mut(&mut self, id: NodeId) -> Option<&mut (dyn RenderNode + '_)> {
+    fn get_child_mut(&mut self, id: NodeId) -> Option<&mut (dyn RenderObject + '_)> {
         if self.child.id() == id {
             Some(self.child.as_mut())
         } else {
@@ -155,7 +155,7 @@ impl RenderNode for FrameRenderNode {
     }
 
     fn type_id(&self) -> std::any::TypeId {
-        std::any::TypeId::of::<FrameRenderNode>()
+        std::any::TypeId::of::<FrameRenderObject>()
     }
 
     fn type_name(&self) -> &'static str {
@@ -321,8 +321,8 @@ impl<V: View + Clone> View for Padding<V> {
         "Padding"
     }
 
-    fn build(&self) -> std::boxed::Box<dyn RenderNode> {
-        std::boxed::Box::new(PaddingRenderNode::new(self.clone()))
+    fn build(&self) -> std::boxed::Box<dyn RenderObject> {
+        std::boxed::Box::new(PaddingRenderObject::new(self.clone()))
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -330,10 +330,10 @@ impl<V: View + Clone> View for Padding<V> {
     }
 }
 
-pub struct PaddingRenderNode {
+pub struct PaddingRenderObject {
     id: NodeId,
     parent: Option<NodeId>,
-    child: std::boxed::Box<dyn RenderNode>,
+    child: std::boxed::Box<dyn RenderObject>,
     top: f32,
     bottom: f32,
     leading: f32,
@@ -343,7 +343,7 @@ pub struct PaddingRenderNode {
     dirty_flags: DirtyFlags,
 }
 
-impl PaddingRenderNode {
+impl PaddingRenderObject {
     pub fn new(view: Padding<impl View + Clone>) -> Self {
         let child = view.child.build();
         let id = NodeId::new();
@@ -366,7 +366,7 @@ impl PaddingRenderNode {
     }
 }
 
-impl RenderNode for PaddingRenderNode {
+impl RenderObject for PaddingRenderObject {
     fn id(&self) -> NodeId {
         self.id
     }
@@ -379,15 +379,15 @@ impl RenderNode for PaddingRenderNode {
         self.parent = Some(parent);
     }
 
-    fn children(&self) -> &[std::boxed::Box<dyn RenderNode>] {
+    fn children(&self) -> &[std::boxed::Box<dyn RenderObject>] {
         std::slice::from_ref(&self.child)
     }
 
-    fn children_mut(&mut self) -> &mut [std::boxed::Box<dyn RenderNode>] {
+    fn children_mut(&mut self) -> &mut [std::boxed::Box<dyn RenderObject>] {
         std::slice::from_mut(&mut self.child)
     }
 
-    fn get_child(&self, id: NodeId) -> Option<&dyn RenderNode> {
+    fn get_child(&self, id: NodeId) -> Option<&dyn RenderObject> {
         if self.child.id() == id {
             Some(self.child.as_ref())
         } else {
@@ -395,7 +395,7 @@ impl RenderNode for PaddingRenderNode {
         }
     }
 
-    fn get_child_mut(&mut self, id: NodeId) -> Option<&mut (dyn RenderNode + '_)> {
+    fn get_child_mut(&mut self, id: NodeId) -> Option<&mut (dyn RenderObject + '_)> {
         if self.child.id() == id {
             Some(self.child.as_mut())
         } else {
@@ -404,7 +404,7 @@ impl RenderNode for PaddingRenderNode {
     }
 
     fn type_id(&self) -> std::any::TypeId {
-        std::any::TypeId::of::<PaddingRenderNode>()
+        std::any::TypeId::of::<PaddingRenderObject>()
     }
 
     fn type_name(&self) -> &'static str {

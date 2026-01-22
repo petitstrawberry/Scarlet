@@ -6,7 +6,7 @@ use crate::graphics::{draw_text, measure_text};
 use crate::layout::LayoutConstraints;
 use crate::node_id::NodeId;
 use crate::state::State;
-use crate::traits::{RenderNode, UpdateResult, View};
+use crate::traits::{RenderObject, UpdateResult, View};
 use crate::theme::with_theme;
 use std::any::Any;
 use std::string::String;
@@ -47,8 +47,8 @@ impl View for TextField {
         "TextField"
     }
 
-    fn build(&self) -> std::boxed::Box<dyn RenderNode> {
-        std::boxed::Box::new(TextFieldRenderNode::new(self.clone()))
+    fn build(&self) -> std::boxed::Box<dyn RenderObject> {
+        std::boxed::Box::new(TextFieldRenderObject::new(self.clone()))
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -62,7 +62,7 @@ struct TextFieldInteractionState {
     cursor_pos: usize,
 }
 
-pub struct TextFieldRenderNode {
+pub struct TextFieldRenderObject {
     id: NodeId,
     parent: Option<NodeId>,
     view: TextField,
@@ -73,7 +73,7 @@ pub struct TextFieldRenderNode {
     last_known_text: String,
 }
 
-impl TextFieldRenderNode {
+impl TextFieldRenderObject {
     pub fn new(view: TextField) -> Self {
         let last_known_text = view.text.get();
 
@@ -112,7 +112,7 @@ impl TextFieldRenderNode {
     }
 }
 
-impl RenderNode for TextFieldRenderNode {
+impl RenderObject for TextFieldRenderObject {
     fn id(&self) -> NodeId {
         self.id
     }
@@ -125,7 +125,7 @@ impl RenderNode for TextFieldRenderNode {
         self.parent = Some(parent);
     }
 
-    fn children(&self) -> &[std::boxed::Box<dyn RenderNode>] {
+    fn children(&self) -> &[std::boxed::Box<dyn RenderObject>] {
         &[]
     }
 

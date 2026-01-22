@@ -5,7 +5,7 @@ use crate::geometry::{Point, Rect, Size};
 use crate::layout::LayoutConstraints;
 use crate::node_id::NodeId;
 use crate::state::State;
-use crate::traits::{RenderNode, UpdateResult, View};
+use crate::traits::{RenderObject, UpdateResult, View};
 use crate::geometry::Color;
 use crate::theme::with_theme;
 use std::any::Any;
@@ -49,8 +49,8 @@ impl View for Slider {
         "Slider"
     }
 
-    fn build(&self) -> std::boxed::Box<dyn RenderNode> {
-        std::boxed::Box::new(SliderRenderNode::new(self.clone()))
+    fn build(&self) -> std::boxed::Box<dyn RenderObject> {
+        std::boxed::Box::new(SliderRenderObject::new(self.clone()))
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -66,7 +66,7 @@ struct SliderInteractionState {
     drag_start_value: f32,
 }
 
-pub struct SliderRenderNode {
+pub struct SliderRenderObject {
     id: NodeId,
     parent: Option<NodeId>,
     view: Slider,
@@ -77,7 +77,7 @@ pub struct SliderRenderNode {
     last_known_value: f32,
 }
 
-impl SliderRenderNode {
+impl SliderRenderObject {
     pub fn new(view: Slider) -> Self {
         let last_known_value = view.value.get();
 
@@ -125,7 +125,7 @@ impl SliderRenderNode {
     }
 }
 
-impl RenderNode for SliderRenderNode {
+impl RenderObject for SliderRenderObject {
     fn id(&self) -> NodeId {
         self.id
     }
@@ -138,7 +138,7 @@ impl RenderNode for SliderRenderNode {
         self.parent = Some(parent);
     }
 
-    fn children(&self) -> &[std::boxed::Box<dyn RenderNode>] {
+    fn children(&self) -> &[std::boxed::Box<dyn RenderObject>] {
         &[]
     }
 

@@ -24,7 +24,7 @@ pub fn derive_view(input: TokenStream) -> TokenStream {
                 ::scarlet_ui::std::any::type_name::<Self>()
             }
 
-            fn build(&self) -> ::scarlet_ui::std::boxed::Box<dyn ::scarlet_ui::RenderNode> {
+            fn build(&self) -> ::scarlet_ui::std::boxed::Box<dyn ::scarlet_ui::RenderObject> {
                 self.body().build()
             }
 

@@ -4,14 +4,19 @@ use crate::event::{Event, EventContext, HitResult};
 use crate::geometry::{Point, Rect, Size};
 use crate::layout::{Alignment, LayoutConstraints};
 use crate::node_id::NodeId;
-use crate::traits::{RenderNode, UpdateResult, View};
+use crate::traits::{RenderObject, UpdateResult, View};
 use std::any::TypeId;
 use std::boxed::Box;
 use std::vec::Vec;
 
-/// Trait to convert tuple of Views into Vec of RenderNodes
-pub trait IntoRenderNodes {
-    fn into_nodes(self) -> Vec<Box<dyn RenderNode>>;
+/// Trait to convert tuples into child Views
+pub trait IntoChildViews {
+    fn into_views(self) -> Vec<Box<dyn View>>;
+}
+
+/// Trait to convert tuple of Views into Vec of RenderObjects
+pub trait IntoRenderObjects {
+    fn into_nodes(self) -> Vec<Box<dyn RenderObject>>;
 }
 
 // Implement View for tuples
@@ -26,13 +31,13 @@ macro_rules! impl_view_for_tuple {
                 "TupleView"
             }
 
-            fn build(&self) -> Box<dyn RenderNode> {
+            fn build(&self) -> Box<dyn RenderObject> {
                 // Build tuple view by creating a placeholder
                 // This shouldn't be called directly, use VStack instead
                 let mut nodes = Vec::new();
                 $(nodes.push(self.$idx.clone().build());)*
                 // For now, create a dummy VStack
-                Box::new(VStackRenderNode::new(nodes, 0.0, Alignment::Center))
+                Box::new(VStackRenderObject::new(nodes, 0.0, Alignment::Center))
             }
 
             fn as_any(&self) -> &dyn std::any::Any {
@@ -55,8 +60,8 @@ impl_view_for_tuple!(0: A, 1: B, 2: C, 3: D, 4: E, 5: F, 6: G, 7: H, 8: I, 9: J)
 // Implement for tuples up to 10 elements
 macro_rules! impl_into_nodes {
     ($($idx:tt: $ty:ident),*) => {
-        impl<$($ty: View + Clone),*> IntoRenderNodes for ($($ty),*) {
-            fn into_nodes(self) -> Vec<Box<dyn RenderNode>> {
+        impl<$($ty: View + Clone),*> IntoRenderObjects for ($($ty),*) {
+            fn into_nodes(self) -> Vec<Box<dyn RenderObject>> {
                 let mut nodes = Vec::new();
                 $(nodes.push(self.$idx.build());)*
                 nodes
@@ -75,14 +80,39 @@ impl_into_nodes!(0: A, 1: B, 2: C, 3: D, 4: E, 5: F, 6: G, 7: H);
 impl_into_nodes!(0: A, 1: B, 2: C, 3: D, 4: E, 5: F, 6: G, 7: H, 8: I);
 impl_into_nodes!(0: A, 1: B, 2: C, 3: D, 4: E, 5: F, 6: G, 7: H, 8: I, 9: J);
 
+// Macro to implement IntoChildViews for tuples of various sizes
+macro_rules! impl_into_child_views {
+    ($($idx:tt: $ty:ident),*) => {
+        impl<$($ty: View + Clone),*> IntoChildViews for ($($ty),*) {
+            fn into_views(self) -> Vec<Box<dyn View>> {
+                let mut views: Vec<Box<dyn View>> = Vec::new();
+                $(
+                    views.push(Box::new(self.$idx) as Box<dyn View>);
+                )*
+                views
+            }
+        }
+    };
+}
+
+impl_into_child_views!(0: A, 1: B);
+impl_into_child_views!(0: A, 1: B, 2: C);
+impl_into_child_views!(0: A, 1: B, 2: C, 3: D);
+impl_into_child_views!(0: A, 1: B, 2: C, 3: D, 4: E);
+impl_into_child_views!(0: A, 1: B, 2: C, 3: D, 4: E, 5: F);
+impl_into_child_views!(0: A, 1: B, 2: C, 3: D, 4: E, 5: F, 6: G);
+impl_into_child_views!(0: A, 1: B, 2: C, 3: D, 4: E, 5: F, 6: G, 7: H);
+impl_into_child_views!(0: A, 1: B, 2: C, 3: D, 4: E, 5: F, 6: G, 7: H, 8: I);
+impl_into_child_views!(0: A, 1: B, 2: C, 3: D, 4: E, 5: F, 6: G, 7: H, 8: I, 9: J);
+
 #[derive(Clone)]
-pub struct VStack<V: View + Clone> {
+pub struct VStack<V: View + Clone + IntoChildViews> {
     pub children: V,
     pub spacing: f32,
     pub alignment: Alignment,
 }
 
-impl<V: View + Clone> VStack<V> {
+impl<V: View + Clone + IntoChildViews> VStack<V> {
     pub fn new(children: V) -> Self {
         // println!("[vstack] VStack::new() called");
         Self {
@@ -105,13 +135,13 @@ impl<V: View + Clone> VStack<V> {
     }
 }
 
-impl<V: View + Clone + Default> Default for VStack<V> {
+impl<V: View + Clone + Default + IntoChildViews> Default for VStack<V> {
     fn default() -> Self {
         Self::new(V::default())
     }
 }
 
-impl<V: View + Clone + IntoRenderNodes> View for VStack<V> {
+impl<V: View + Clone + IntoRenderObjects + IntoChildViews> View for VStack<V> {
     fn type_id(&self) -> TypeId {
         TypeId::of::<Self>()
     }
@@ -120,12 +150,12 @@ impl<V: View + Clone + IntoRenderNodes> View for VStack<V> {
         "VStack"
     }
 
-    fn build(&self) -> Box<dyn RenderNode> {
+    fn build(&self) -> Box<dyn RenderObject> {
         // println!("[vstack] VStack::build() called");
         let children = self.children.clone().into_nodes();
         // println!("[vstack] into_nodes() returned {} children", children.len());
 
-        Box::new(VStackRenderNode::new(
+        Box::new(VStackRenderObject::new(
             children,
             self.spacing,
             self.alignment,
@@ -135,12 +165,16 @@ impl<V: View + Clone + IntoRenderNodes> View for VStack<V> {
     fn as_any(&self) -> &dyn std::any::Any {
         self
     }
+
+    fn children(&self) -> Vec<Box<dyn View>> {
+        self.children.clone().into_views()
+    }
 }
 
-pub struct VStackRenderNode {
+pub struct VStackRenderObject {
     id: NodeId,
     parent: Option<NodeId>,
-    children: Vec<Box<dyn RenderNode>>,
+    children: Vec<Box<dyn RenderObject>>,
     spacing: f32,
     alignment: Alignment,
     buffer: Option<Buffer>,
@@ -148,8 +182,8 @@ pub struct VStackRenderNode {
     dirty_flags: DirtyFlags,
 }
 
-impl VStackRenderNode {
-    pub fn new(mut children: Vec<Box<dyn RenderNode>>, spacing: f32, alignment: Alignment) -> Self {
+impl VStackRenderObject {
+    pub fn new(mut children: Vec<Box<dyn RenderObject>>, spacing: f32, alignment: Alignment) -> Self {
         let id = NodeId::new();
 
         // Set parent for each child
@@ -174,7 +208,7 @@ impl VStackRenderNode {
     }
 }
 
-impl RenderNode for VStackRenderNode {
+impl RenderObject for VStackRenderObject {
     fn id(&self) -> NodeId {
         self.id
     }
@@ -187,21 +221,21 @@ impl RenderNode for VStackRenderNode {
         self.parent = Some(parent);
     }
 
-    fn children(&self) -> &[Box<dyn RenderNode>] {
+    fn children(&self) -> &[Box<dyn RenderObject>] {
         &self.children
     }
 
-    fn children_mut(&mut self) -> &mut [Box<dyn RenderNode>] {
+    fn children_mut(&mut self) -> &mut [Box<dyn RenderObject>] {
         &mut self.children
     }
 
-    fn get_child(&self, id: NodeId) -> Option<&dyn RenderNode> {
+    fn get_child(&self, id: NodeId) -> Option<&dyn RenderObject> {
         self.get_child_index(id)
             .and_then(|i| self.children.get(i))
             .map(|b| b.as_ref())
     }
 
-    fn get_child_mut(&mut self, id: NodeId) -> Option<&mut (dyn RenderNode + '_)> {
+    fn get_child_mut(&mut self, id: NodeId) -> Option<&mut (dyn RenderObject + '_)> {
         let index = self.get_child_index(id)?;
         for (i, child) in self.children_mut().iter_mut().enumerate() {
             if i == index {
@@ -212,7 +246,7 @@ impl RenderNode for VStackRenderNode {
     }
 
     fn type_id(&self) -> std::any::TypeId {
-        std::any::TypeId::of::<VStackRenderNode>()
+        std::any::TypeId::of::<VStackRenderObject>()
     }
 
     fn type_name(&self) -> &'static str {

@@ -1,5 +1,5 @@
 use crate::node_id::NodeId;
-use crate::traits::RenderNode;
+use crate::traits::RenderObject;
 use std::vec::Vec;
 
 /// Manages hover state for the UI tree.
@@ -95,7 +95,7 @@ impl Default for PressedManager {
 ///
 /// The focus system has two parts that must be kept in sync:
 /// 1. **FocusManager.focused**: The canonical source of which node has focus
-/// 2. **RenderNode.interaction_state.focused**: Each node's local focus state
+/// 2. **RenderObject.interaction_state.focused**: Each node's local focus state
 ///
 /// When focus changes, BOTH must be updated:
 /// - Call `FocusManager::set_focus()` to update the manager
@@ -160,7 +160,7 @@ impl FocusManager {
     }
 
     /// Move focus to next focusable node
-    pub fn focus_next(&mut self, root: &dyn RenderNode) -> Option<NodeId> {
+    pub fn focus_next(&mut self, root: &dyn RenderObject) -> Option<NodeId> {
         self.build_focus_chain(root);
 
         if self.focus_chain.is_empty() {
@@ -178,7 +178,7 @@ impl FocusManager {
     }
 
     /// Move focus to previous focusable node
-    pub fn focus_prev(&mut self, root: &dyn RenderNode) -> Option<NodeId> {
+    pub fn focus_prev(&mut self, root: &dyn RenderObject) -> Option<NodeId> {
         self.build_focus_chain(root);
 
         if self.focus_chain.is_empty() {
@@ -200,13 +200,13 @@ impl FocusManager {
     }
 
     /// Build the focus chain (order of focusable nodes)
-    fn build_focus_chain(&mut self, root: &dyn RenderNode) {
+    fn build_focus_chain(&mut self, root: &dyn RenderObject) {
         self.focus_chain.clear();
         self.collect_focusable(root);
     }
 
     /// Recursively collect focusable nodes
-    fn collect_focusable(&mut self, node: &dyn RenderNode) {
+    fn collect_focusable(&mut self, node: &dyn RenderObject) {
         if node.is_focusable() {
             self.focus_chain.push(node.id());
         }

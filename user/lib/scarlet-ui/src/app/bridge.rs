@@ -60,7 +60,7 @@ impl SurfaceBridge {
         }
     }
 
-    pub fn present(&mut self, node: &mut dyn crate::traits::RenderNode) -> Result<(), &'static str> {
+    pub fn present(&mut self, node: &mut dyn crate::traits::RenderObject) -> Result<(), &'static str> {
         use crate::buffer::Buffer;
 
         // Get root buffer and copy to surface (both are BGRA)
@@ -85,7 +85,7 @@ impl SurfaceBridge {
         Ok(())
     }
 
-    pub fn set_root(&mut self, _node: &mut dyn crate::traits::RenderNode) {
+    pub fn set_root(&mut self, _node: &mut dyn crate::traits::RenderObject) {
         // Nothing to do here, root is managed by Application
     }
 

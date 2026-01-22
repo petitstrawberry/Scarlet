@@ -7,7 +7,7 @@ use crate::geometry::{Point, Rect, Size};
 use crate::layout::LayoutConstraints;
 use crate::node_id::NodeId;
 use crate::theme::with_theme;
-use crate::traits::{RenderNode, UpdateResult, View};
+use crate::traits::{RenderObject, UpdateResult, View};
 use std::any::Any;
 use std::boxed::Box;
 use std::println;
@@ -48,12 +48,12 @@ impl View for Window {
         "Window"
     }
 
-    fn build(&self) -> std::boxed::Box<dyn RenderNode> {
+    fn build(&self) -> std::boxed::Box<dyn RenderObject> {
         println!("[window] Window::build() called, title: {}, decorated: {}", self.title, self.decorated);
         // Window doesn't need Clone - we consume it here
         let child = self.child.build();
         println!("[window] child built");
-        std::boxed::Box::new(WindowRenderNode::new(self, child))
+        std::boxed::Box::new(WindowRenderObject::new(self, child))
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -61,12 +61,12 @@ impl View for Window {
     }
 }
 
-pub struct WindowRenderNode {
+pub struct WindowRenderObject {
     id: NodeId,
     parent: Option<NodeId>,
     title: std::string::String,
     decorated: bool,
-    child: Box<dyn RenderNode>,
+    child: Box<dyn RenderObject>,
     buffer: Option<Buffer>,
     frame: Rect,
     dirty_flags: DirtyFlags,
@@ -86,9 +86,9 @@ pub struct WindowRenderNode {
     pub request_move: bool,
 }
 
-impl WindowRenderNode {
-    pub fn new(view: &Window, child: Box<dyn RenderNode>) -> Self {
-        println!("[window] WindowRenderNode::new() called");
+impl WindowRenderObject {
+    pub fn new(view: &Window, child: Box<dyn RenderObject>) -> Self {
+        println!("[window] WindowRenderObject::new() called");
         // Set parent for child
         let id = NodeId::new();
         let mut child_owned = child;
@@ -115,7 +115,7 @@ impl WindowRenderNode {
             request_close: false,
             request_move: false,
         };
-        println!("[window] WindowRenderNode created");
+        println!("[window] WindowRenderObject created");
         node
     }
 
@@ -160,7 +160,7 @@ impl WindowRenderNode {
     }
 }
 
-impl RenderNode for WindowRenderNode {
+impl RenderObject for WindowRenderObject {
     fn id(&self) -> NodeId {
         self.id
     }
@@ -173,15 +173,15 @@ impl RenderNode for WindowRenderNode {
         self.parent = Some(parent);
     }
 
-    fn children(&self) -> &[Box<dyn RenderNode>] {
+    fn children(&self) -> &[Box<dyn RenderObject>] {
         std::slice::from_ref(&self.child)
     }
 
-    fn children_mut(&mut self) -> &mut [Box<dyn RenderNode>] {
+    fn children_mut(&mut self) -> &mut [Box<dyn RenderObject>] {
         std::slice::from_mut(&mut self.child)
     }
 
-    fn get_child(&self, id: NodeId) -> Option<&dyn RenderNode> {
+    fn get_child(&self, id: NodeId) -> Option<&dyn RenderObject> {
         if self.child.id() == id {
             Some(self.child.as_ref())
         } else {
@@ -189,7 +189,7 @@ impl RenderNode for WindowRenderNode {
         }
     }
 
-    fn get_child_mut(&mut self, id: NodeId) -> Option<&mut (dyn RenderNode + '_)> {
+    fn get_child_mut(&mut self, id: NodeId) -> Option<&mut (dyn RenderObject + '_)> {
         if self.child.id() == id {
             Some(self.child.as_mut())
         } else {
@@ -198,7 +198,7 @@ impl RenderNode for WindowRenderNode {
     }
 
     fn type_id(&self) -> std::any::TypeId {
-        std::any::TypeId::of::<WindowRenderNode>()
+        std::any::TypeId::of::<WindowRenderObject>()
     }
 
     fn type_name(&self) -> &'static str {

@@ -4,7 +4,7 @@ use crate::event::{Event, EventContext, EventPhase, HitResult, MouseEventKind};
 use crate::geometry::{Point, Rect, Size};
 use crate::layout::LayoutConstraints;
 use crate::node_id::NodeId;
-use crate::traits::{RenderNode, UpdateResult, View};
+use crate::traits::{RenderObject, UpdateResult, View};
 use crate::views::text::Text;
 use crate::geometry::Color;
 use crate::theme::with_theme;
@@ -80,9 +80,9 @@ impl View for Button {
         "Button"
     }
 
-    fn build(&self) -> std::boxed::Box<dyn RenderNode> {
+    fn build(&self) -> std::boxed::Box<dyn RenderObject> {
         // println!("[button] Button::build() called");
-        std::boxed::Box::new(ButtonRenderNode::new(self.clone()))
+        std::boxed::Box::new(ButtonRenderObject::new(self.clone()))
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -97,18 +97,18 @@ struct ButtonInteractionState {
     focused: bool,
 }
 
-pub struct ButtonRenderNode {
+pub struct ButtonRenderObject {
     id: NodeId,
     parent: Option<NodeId>,
     view: Button,
-    label_node: std::boxed::Box<dyn RenderNode>,
+    label_node: std::boxed::Box<dyn RenderObject>,
     buffer: Option<Buffer>,
     frame: Rect,
     interaction_state: ButtonInteractionState,
     dirty_flags: DirtyFlags,
 }
 
-impl ButtonRenderNode {
+impl ButtonRenderObject {
     pub fn new(view: Button) -> Self {
         let label_node = view.label.build();
 
@@ -125,7 +125,7 @@ impl ButtonRenderNode {
     }
 }
 
-impl RenderNode for ButtonRenderNode {
+impl RenderObject for ButtonRenderObject {
     fn id(&self) -> NodeId {
         self.id
     }
@@ -138,7 +138,7 @@ impl RenderNode for ButtonRenderNode {
         self.parent = Some(parent);
     }
 
-    fn children(&self) -> &[std::boxed::Box<dyn RenderNode>] {
+    fn children(&self) -> &[std::boxed::Box<dyn RenderObject>] {
         &[]
     }
 
@@ -167,8 +167,8 @@ impl RenderNode for ButtonRenderNode {
         // Layout label with truly loose constraints to get its actual intrinsic size
         let label_constraints = LayoutConstraints::loose(Size::new(f32::MAX, f32::MAX));
         let label_size = self.label_node.layout(label_constraints);
-        println!("[button] ButtonRenderNode::layout() label_size: {:?}", label_size);
-        println!("[button] ButtonRenderNode::layout() constraints: min={:?} max={:?}", constraints.min, constraints.max);
+        println!("[button] ButtonRenderObject::layout() label_size: {:?}", label_size);
+        println!("[button] ButtonRenderObject::layout() constraints: min={:?} max={:?}", constraints.min, constraints.max);
 
         // Button is slightly larger than label (intrinsic size)
         let padding = 12.0;
@@ -187,10 +187,10 @@ impl RenderNode for ButtonRenderNode {
         // Keep label at its intrinsic size, let it be clipped during rendering if button is smaller
         // This ensures text is not cut off
 
-        println!("[button] ButtonRenderNode::layout() intrinsic_size: {:?}, final size: {:?}", intrinsic_size, size);
+        println!("[button] ButtonRenderObject::layout() intrinsic_size: {:?}, final size: {:?}", intrinsic_size, size);
         // Update frame.size but NOT frame.origin (parent controls origin)
         self.frame.size = size;
-        println!("[button] ButtonRenderNode::layout() updated frame.size to {:?}", self.frame.size);
+        println!("[button] ButtonRenderObject::layout() updated frame.size to {:?}", self.frame.size);
         size
     }
 
@@ -223,7 +223,7 @@ impl RenderNode for ButtonRenderNode {
             self.view.colors.normal
         };
 
-        // println!("[button] ButtonRenderNode::render() creating buffer with size: {:?}", self.frame.size);
+        // println!("[button] ButtonRenderObject::render() creating buffer with size: {:?}", self.frame.size);
         self.buffer = Some(Buffer::new(self.frame.size));
         self.buffer
             .as_mut()
@@ -296,12 +296,12 @@ impl RenderNode for ButtonRenderNode {
             Point::new(padding, padding),
             label_size,
         );
-        // println!("[button] ButtonRenderNode::render() label_frame: {:?}", label_frame);
+        // println!("[button] ButtonRenderObject::render() label_frame: {:?}", label_frame);
         self.label_node.set_frame(label_frame);
         self.label_node.render();
 
         if let Some(label_buffer) = self.label_node.get_buffer() {
-            // println!("[button] ButtonRenderNode::render() blitting label buffer");
+            // println!("[button] ButtonRenderObject::render() blitting label buffer");
             self.buffer
                 .as_mut()
                 .unwrap()

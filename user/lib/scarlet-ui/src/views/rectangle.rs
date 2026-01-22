@@ -4,7 +4,7 @@ use crate::event::{Event, EventContext, EventPhase, HitResult};
 use crate::geometry::{Point, Rect, Size};
 use crate::layout::LayoutConstraints;
 use crate::node_id::NodeId;
-use crate::traits::{RenderNode, UpdateResult, View};
+use crate::traits::{RenderObject, UpdateResult, View};
 use crate::geometry::Color;
 use std::any::Any;
 
@@ -37,8 +37,8 @@ impl View for Rectangle {
         "Rectangle"
     }
 
-    fn build(&self) -> std::boxed::Box<dyn RenderNode> {
-        std::boxed::Box::new(RectangleRenderNode::new(self.clone()))
+    fn build(&self) -> std::boxed::Box<dyn RenderObject> {
+        std::boxed::Box::new(RectangleRenderObject::new(self.clone()))
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -52,7 +52,7 @@ struct InteractionState {
     pressed: bool,
 }
 
-pub struct RectangleRenderNode {
+pub struct RectangleRenderObject {
     id: NodeId,
     parent: Option<NodeId>,
     view: Rectangle,
@@ -62,7 +62,7 @@ pub struct RectangleRenderNode {
     dirty_flags: DirtyFlags,
 }
 
-impl RectangleRenderNode {
+impl RectangleRenderObject {
     pub fn new(view: Rectangle) -> Self {
         Self {
             id: NodeId::new(),
@@ -76,7 +76,7 @@ impl RectangleRenderNode {
     }
 }
 
-impl RenderNode for RectangleRenderNode {
+impl RenderObject for RectangleRenderObject {
     fn id(&self) -> NodeId {
         self.id
     }

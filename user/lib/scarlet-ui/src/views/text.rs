@@ -5,7 +5,7 @@ use crate::geometry::{Point, Rect, Size};
 use crate::graphics::{draw_text, measure_text};
 use crate::layout::LayoutConstraints;
 use crate::node_id::NodeId;
-use crate::traits::{RenderNode, UpdateResult, View};
+use crate::traits::{RenderObject, UpdateResult, View};
 use crate::geometry::Color;
 use crate::theme::with_theme;
 use std::any::Any;
@@ -49,9 +49,9 @@ impl View for Text {
         "Text"
     }
 
-    fn build(&self) -> std::boxed::Box<dyn RenderNode> {
+    fn build(&self) -> std::boxed::Box<dyn RenderObject> {
         println!("[text] Text::build() called");
-        std::boxed::Box::new(TextRenderNode::new(self.clone()))
+        std::boxed::Box::new(TextRenderObject::new(self.clone()))
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -59,7 +59,7 @@ impl View for Text {
     }
 }
 
-pub struct TextRenderNode {
+pub struct TextRenderObject {
     id: NodeId,
     parent: Option<NodeId>,
     view: Text,
@@ -68,7 +68,7 @@ pub struct TextRenderNode {
     dirty_flags: DirtyFlags,
 }
 
-impl TextRenderNode {
+impl TextRenderObject {
     pub fn new(view: Text) -> Self {
         Self {
             id: NodeId::new(),
@@ -86,7 +86,7 @@ impl TextRenderNode {
     }
 }
 
-impl RenderNode for TextRenderNode {
+impl RenderObject for TextRenderObject {
     fn id(&self) -> NodeId {
         self.id
     }
