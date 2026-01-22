@@ -1,154 +1,108 @@
-//! UI Demo - ScarletUI Modern Architecture Demo
+//! UI Demo - ScarletUI Demo Application
 //!
-//! This demo showcases:
-//! - New View/RenderObject architecture
-//! - Declarative UI composition
-//! - Method chaining for View configuration
-//! - Navigation controls (ScrollView, TabView, NavigationView)
+//! Demonstrates:
+//! - State management with State<T>
+//! - View/RenderNode architecture
+//! - Common UI components (Button, Text, Slider, Toggle, TextField)
+//! - Layout containers with macros
+//! - Window with titlebar
 
 #![no_std]
 #![no_main]
 
-extern crate alloc;
+extern crate scarlet_std as std;
 
-use alloc::{boxed::Box, format, string::String, sync::Arc};
-use scarlet_std::println;
-use scarlet_ui::{
-    Application, Button, Color, HStack, Local, Slider, Text, TextField, Toggle, VStack, View,
-    ViewExt, Window, WindowBuilder,
-};
+use std::println;
+use scarlet_ui::prelude::*;
 
-/// Demo view - Shows various UI components
+/// Main application state
+struct DemoApp {
+    counter: State<i32>,
+    toggle_value: State<bool>,
+    slider_value: State<f32>,
+    text_value: State<std::string::String>,
+}
+
+impl App for DemoApp {
+    type ViewType = DemoView;
+
+    fn build(&self) -> Self::ViewType {
+        DemoView {
+            counter: self.counter.clone(),
+            toggle_value: self.toggle_value.clone(),
+            slider_value: self.slider_value.clone(),
+            text_value: self.text_value.clone(),
+        }
+    }
+}
+
+#[derive(View, Clone)]
 struct DemoView {
-    id: scarlet_ui::ViewId,
-    counter: Local<i32>,
+    counter: State<i32>,
+    toggle_value: State<bool>,
+    slider_value: State<f32>,
+    text_value: State<std::string::String>,
 }
 
 impl DemoView {
-    fn new() -> Self {
-        Self {
-            id: scarlet_ui::ViewId::new(),
-            counter: Local::new(0),
-        }
-    }
+    fn body(&self) -> impl View {
+        // Clone state for closures
+        let counter_dec = self.counter.clone();
+        let counter_inc = self.counter.clone();
+        let counter_text = self.counter.clone();
+        let toggle = self.toggle_value.clone();
+        let slider = self.slider_value.clone();
+        let text_field = self.text_value.clone();
 
-    fn build(&self) -> impl View {
-        VStack::new()
-            .spacing(16)
-            // Header
-            .child(Text::new("ScarletUI Modern Architecture Demo").font_size(28))
-            .child(Text::new("View/RenderObject separation with SwiftUI-style API").font_size(14))
-            .child(Text::new("Counter: 0").font_size(24))
-            .child(
-                HStack::new()
-                    .spacing(10)
-                    .child(Button::new("Decrement").padding(10))
-                    .child(Button::new("Increment").padding(10)),
-            )
-            .child(Toggle::new(true))
-            .child(Slider::new(0.0, 100.0).value(50.0))
-            .child(TextField::new())
-            .child(
-                Button::new("Open TabView Demo")
-                    .action(|| {
-                        println!("[ui_demo] TabView demo requested");
-                    })
-                    .padding(10),
-            )
-            .child(
-                Button::new("Open NavigationView Demo")
-                    .action(|| {
-                        println!("[ui_demo] NavigationView demo requested");
-                    })
-                    .padding(10),
-            )
-    }
-}
-
-impl scarlet_ui::view::render::RenderObject for DemoView {
-    fn id(&self) -> scarlet_ui::ViewId {
-        self.id
-    }
-
-    fn as_any(&self) -> &dyn core::any::Any {
-        self
-    }
-
-    fn layout(
-        &mut self,
-        ctx: &mut scarlet_ui::LayoutCtx,
-        constraints: scarlet_ui::LayoutConstraints,
-    ) -> scarlet_ui::Size {
-        // Default size
-        let size = scarlet_ui::Size::new(600, 700);
-        size
-    }
-
-    fn draw(&self, ctx: &mut scarlet_ui::PaintCtx, frame: scarlet_ui::graphics::Rect) {
-        // Draw the body
-        let body = self.build();
-        body.draw(ctx, frame);
-    }
-
-    fn event(
-        &mut self,
-        ctx: &mut scarlet_ui::EventCtx,
-        event: &scarlet_ui::Event,
-    ) -> scarlet_ui::ControlFlow {
-        self.build().event(ctx, event)
-    }
-
-    fn update(&mut self, ctx: &mut scarlet_ui::UpdateCtx) {
-        self.build().update(ctx)
+        Window::new("ScarletUI Demo",
+            vstack! {
+                Text::new("ScarletUI Demo").size(24.0),
+                Text::new("Interactive UI Components Demo"),
+                Text::new(std::format!("Counter: {}", counter_text.get()).as_str()),
+                hstack! {
+                    Spacer::new(),
+                    Button::new("-").on_click(move || {
+                        counter_dec.update(|c| *c -= 1);
+                        println!("[ui_demo] Counter: {}", counter_dec.get());
+                    }),
+                    Button::new("+").on_click(move || {
+                        counter_inc.update(|c| *c += 1);
+                        println!("[ui_demo] Counter: {}", counter_inc.get());
+                    }),
+                    Spacer::new(),
+                }
+                .spacing(10.0),
+                Toggle::new(toggle),
+                Slider::new(slider).range(0.0, 100.0),
+                TextField::new(text_field).placeholder("Enter text..."),
+            }
+            .spacing(16.0)
+            .alignment(Alignment::Center)
+        )
+        .decorated(true)
     }
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn main() -> i32 {
-    println!("[ui_demo] Starting ScarletUI Modern Architecture Demo");
+    println!("[ui_demo] Starting ScarletUI Demo");
 
-    let mut app = match Application::new() {
-        Ok(mut a) => {
-            a.app_id("org.scarlet.ui_demo");
-            a
+    let app = DemoApp {
+        counter: State::new(0),
+        toggle_value: State::new(true),
+        slider_value: State::new(50.0),
+        text_value: State::new(std::string::String::from("Hello, ScarletUI!")),
+    };
+
+    match Application::new(app) {
+        Ok(app) => {
+            println!("[ui_demo] Running application...");
+            let _ = app.run();
+            0
         }
         Err(e) => {
             println!("[ui_demo] Failed to create application: {}", e);
-            return 1;
+            1
         }
-    };
-
-    // Create main window
-    let _demo_view = DemoView::new();
-
-    // Build the UI tree
-    let ui_content = VStack::new()
-        .spacing(16)
-        .child(Text::new("ScarletUI Modern Architecture Demo").font_size(28))
-        .child(Text::new("View/RenderObject separation with SwiftUI-style API").font_size(14))
-        .child(Text::new("Counter: 0").font_size(24))
-        .child(
-            HStack::new()
-                .spacing(10)
-                .child(Button::new("Decrement").padding(10))
-                .child(Button::new("Increment").padding(10)),
-        )
-        .child(Toggle::new(true))
-        .child(Slider::new(0.0, 100.0).value(50.0))
-        .child(TextField::new());
-
-    let window = Window::builder()
-        .title("ScarletUI Modern Architecture Demo")
-        .size(650, 720)
-        .min_size(400, 500)
-        .build()
-        .content(ui_content);
-
-    if let Err(e) = app.add_window(window) {
-        println!("[ui_demo] Failed to add window: {}", e);
-        return 1;
     }
-
-    println!("[ui_demo] Running application...");
-    app.run();
 }

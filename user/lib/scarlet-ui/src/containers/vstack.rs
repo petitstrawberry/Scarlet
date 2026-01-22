@@ -231,78 +231,84 @@ impl RenderNode for VStackRenderNode {
             return Size::ZERO;
         }
 
-        let available_height = constraints.max.height;
+        // Clamp available height to reasonable maximum
+        const MAX_WIDTH: f32 = 65536.0;
+        const MAX_HEIGHT: f32 = 65536.0;
+        let available_height = constraints.max.height.min(MAX_HEIGHT);
+        let available_width = constraints.max.width.min(MAX_WIDTH);
+
         let total_spacing = self.spacing * (n - 1) as f32;
         let available_for_children = available_height - total_spacing;
 
         // Pass 1: Measure intrinsic sizes with loose constraints
-        let loose_constraints = LayoutConstraints::loose(constraints.max);
+        let loose_constraints = LayoutConstraints::loose(Size::new(f32::MAX, f32::MAX));
         let mut intrinsic_sizes: Vec<Size> = self
             .children
             .iter_mut()
             .map(|c| c.layout(loose_constraints))
             .collect();
 
-        // Calculate intrinsic width (max of children's widths)
-        let intrinsic_width: f32 = intrinsic_sizes.iter().map(|s| s.width).fold(0.0, |a, b| a.max(b));
-        let min_heights: Vec<f32> = intrinsic_sizes.iter().map(|s| s.height).collect();
-        let min_total: f32 = min_heights.iter().sum();
+        // Identify spacers and calculate dimensions
+        let spacer_type_id = std::any::TypeId::of::<crate::views::Spacer>();
+        let mut spacers: Vec<usize> = Vec::new();
+        let mut non_spacer_height: f32 = 0.0;
+        let mut max_width: f32 = 0.0;
 
-        // Pass 2: Distribute remaining space or clamp
-        if min_total <= available_for_children {
-            // Space available: distribute to expandable children
-            let remaining = available_for_children - min_total;
-            let per_child = if n > 0 {
-                remaining / n as f32
+        for (i, size) in intrinsic_sizes.iter().enumerate() {
+            if self.children[i].type_id() == spacer_type_id {
+                spacers.push(i);
             } else {
-                0.0
-            };
+                non_spacer_height += size.height;
+            }
+            max_width = max_width.max(size.width);
+        }
+
+        // Clamp width to available
+        max_width = max_width.min(available_width);
+
+        // Pass 2: Layout children
+        let spacer_count = spacers.len();
+        if spacer_count > 0 {
+            // Distribute remaining space to spacers
+            let remaining = (available_for_children - non_spacer_height).max(0.0);
+            let spacer_height = remaining / spacer_count as f32;
 
             for (i, child) in self.children.iter_mut().enumerate() {
-                // Width is limited to child's intrinsic width (don't stretch)
-                let child_width = intrinsic_sizes[i].width;
-                let child_constraints = LayoutConstraints {
-                    min: Size::new(child_width, min_heights[i]),
-                    max: Size::new(
-                        child_width,
-                        min_heights[i] + per_child,
-                    ),
+                let is_spacer = spacers.contains(&i);
+                let child_constraints = if is_spacer {
+                    // Spacer stretches vertically to fill space, keeps min horizontal
+                    LayoutConstraints {
+                        min: Size::new(intrinsic_sizes[i].width, spacer_height),
+                        max: Size::new(intrinsic_sizes[i].width, spacer_height),
+                    }
+                } else {
+                    // Non-spacer keeps intrinsic size
+                    LayoutConstraints::tight(intrinsic_sizes[i])
                 };
                 child.layout(child_constraints);
             }
         } else {
-            // Not enough space: clamp proportionally
+            // No spacers: all children keep intrinsic size
             for (i, child) in self.children.iter_mut().enumerate() {
-                let ratio = if min_total > 0.0 {
-                    min_heights[i] / min_total
-                } else {
-                    1.0 / n as f32
-                };
-                let child_height = (available_for_children * ratio).min(min_heights[i]);
-                // Width is limited to child's intrinsic width (don't stretch)
-                let child_width = intrinsic_sizes[i].width;
-                let child_constraints = LayoutConstraints {
-                    min: Size::new(child_width, 0.0),
-                    max: Size::new(child_width, child_height),
-                };
-                child.layout(child_constraints);
+                child.layout(LayoutConstraints::tight(intrinsic_sizes[i]));
             }
         }
 
         // Calculate total size
-        // Width is intrinsic (content-driven), height is constrained
-        let width = intrinsic_width.clamp(constraints.min.width, constraints.max.width);
-        let total_height = min_total.min(available_for_children) + total_spacing;
-        let size = Size::new(width, total_height);
+        let total_height = if spacer_count > 0 {
+            available_for_children + total_spacing
+        } else {
+            non_spacer_height.min(available_for_children) + total_spacing
+        };
+
+        let size = Size::new(max_width, total_height.min(MAX_HEIGHT));
 
         // Set frame
         self.frame = Rect::new(Point::ZERO, size);
 
         // Set frames for children with actual positions (alignment + offset)
-        // IMPORTANT: Use the FINAL sizes after Pass 2 layout
         let mut y_offset = 0.0;
         for (i, child) in self.children.iter_mut().enumerate() {
-            // Get the size AFTER Pass 2 layout (not intrinsic_sizes)
             let child_size = child.frame().size;
 
             // Calculate x offset based on alignment
@@ -310,20 +316,15 @@ impl RenderNode for VStackRenderNode {
                 Alignment::Start => 0.0,
                 Alignment::Center => (self.frame.size.width - child_size.width) / 2.0,
                 Alignment::End => self.frame.size.width - child_size.width,
-                Alignment::Stretch => 0.0,  // Already stretched by layout
+                Alignment::Stretch => 0.0,
             };
 
             // Set child frame at actual position
             let child_frame = Rect::new(Point::new(x_offset, y_offset), child_size);
             child.set_frame(child_frame);
-            // println!("[vstack] layout: set child[{}] {} frame to {:?}", i, child.type_name(), child_frame);
             y_offset += child_size.height + self.spacing;
         }
 
-        // println!("[vstack] layout() done, self.frame={:?}", self.frame);
-        // for (i, child) in self.children.iter().enumerate() {
-        //     println!("[vstack]   child[{}] {} frame={:?}", i, child.type_name(), child.frame());
-        // }
         size
     }
 

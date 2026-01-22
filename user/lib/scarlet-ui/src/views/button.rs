@@ -167,7 +167,8 @@ impl RenderNode for ButtonRenderNode {
         // Layout label with truly loose constraints to get its actual intrinsic size
         let label_constraints = LayoutConstraints::loose(Size::new(f32::MAX, f32::MAX));
         let label_size = self.label_node.layout(label_constraints);
-        // println!("[button] ButtonRenderNode::layout() label_size: {:?}", label_size);
+        println!("[button] ButtonRenderNode::layout() label_size: {:?}", label_size);
+        println!("[button] ButtonRenderNode::layout() constraints: min={:?} max={:?}", constraints.min, constraints.max);
 
         // Button is slightly larger than label (intrinsic size)
         let padding = 12.0;
@@ -186,10 +187,10 @@ impl RenderNode for ButtonRenderNode {
         // Keep label at its intrinsic size, let it be clipped during rendering if button is smaller
         // This ensures text is not cut off
 
-        // println!("[button] ButtonRenderNode::layout() intrinsic_size: {:?}, final size: {:?}", intrinsic_size, size);
+        println!("[button] ButtonRenderNode::layout() intrinsic_size: {:?}, final size: {:?}", intrinsic_size, size);
         // Update frame.size but NOT frame.origin (parent controls origin)
         self.frame.size = size;
-        // println!("[button] ButtonRenderNode::layout() updated frame.size to {:?}", self.frame.size);
+        println!("[button] ButtonRenderNode::layout() updated frame.size to {:?}", self.frame.size);
         size
     }
 
@@ -205,6 +206,11 @@ impl RenderNode for ButtonRenderNode {
         if !self.is_dirty() {
             return;
         }
+
+        println!("[button] render: self.frame.size={:}x{:}", self.frame.size.width, self.frame.size.height);
+        println!("[button] render: label_node.frame.size={:}x{:}",
+                 self.label_node.frame().size.width,
+                 self.label_node.frame().size.height);
 
         let color = if self.interaction_state.pressed {
             // println!("[button] render: using PRESSED color");

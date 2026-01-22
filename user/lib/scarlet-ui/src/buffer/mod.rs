@@ -12,14 +12,33 @@ pub type BufferRef = Buffer;
 
 impl Buffer {
     pub fn new(size: Size) -> Self {
-        let width = libm::ceilf(size.width) as usize;
-        let height = libm::ceilf(size.height) as usize;
+        // Clamp size to reasonable maximum to prevent overflow
+        // Use i32::MAX as reasonable limit (covers all practical screen sizes)
+        const MAX_DIM: f32 = 65536.0; // 64K pixels is more than enough
+        let clamped_size = Size::new(
+            size.width.clamp(0.0, MAX_DIM),
+            size.height.clamp(0.0, MAX_DIM),
+        );
+
+        let width = libm::ceilf(clamped_size.width) as usize;
+        let height = libm::ceilf(clamped_size.height) as usize;
+
+        // Ensure minimum 1x1 size
+        let width = width.max(1);
+        let height = height.max(1);
+
         let stride = width * 4; // BGRA
-        let data = std::vec![0; stride * height];
+
+        // Check for overflow in stride calculation
+        let data_len = stride.saturating_mul(height);
+        let data = std::vec![0; data_len];
+
+        std::println!("[Buffer::new] size={:?} -> clamped={:?} width={} height={} stride={} data.len()={}",
+                      size, clamped_size, width, height, stride, data.len());
 
         Self {
             data,
-            size,
+            size: clamped_size,
             stride,
         }
     }
@@ -66,14 +85,26 @@ impl Buffer {
         let y_start = y_start.clamp(0, self.height());
         let y_end = y_end.clamp(0, self.height());
 
+        // Skip if empty
+        if x_start >= x_end || y_start >= y_end {
+            return;
+        }
+
+        // Check bounds before accessing data
+        let row_width = (x_end - x_start) * 4;
         for y in y_start..y_end {
             let offset = y * self.stride + x_start * 4;
+            if offset + row_width > self.data.len() {
+                break; // Safety: avoid out-of-bounds access
+            }
             for x in x_start..x_end {
                 let i = offset + (x - x_start) * 4;
-                self.data[i] = color[0]; // B
-                self.data[i + 1] = color[1]; // G
-                self.data[i + 2] = color[2]; // R
-                self.data[i + 3] = color[3]; // A
+                if i + 4 <= self.data.len() {
+                    self.data[i] = color[0]; // B
+                    self.data[i + 1] = color[1]; // G
+                    self.data[i + 2] = color[2]; // R
+                    self.data[i + 3] = color[3]; // A
+                }
             }
         }
     }

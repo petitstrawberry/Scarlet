@@ -6,7 +6,11 @@ use crate::node_id::NodeId;
 use crate::traits::{RenderNode, UpdateResult, View};
 use std::any::Any;
 
-#[derive(Clone, PartialEq, Copy)]
+/// Spacer - Takes up available space in layouts
+///
+/// When used in HStack: expands horizontally to fill available space
+/// When used in VStack: expands vertically to fill available space
+#[derive(Clone, PartialEq, Copy, Default)]
 pub struct Spacer {
     pub min_width: f32,
     pub min_height: f32,
@@ -25,15 +29,6 @@ impl Spacer {
     pub fn min_height(mut self, height: f32) -> Self {
         self.min_height = height;
         self
-    }
-}
-
-impl Default for Spacer {
-    fn default() -> Self {
-        Self {
-            min_width: 0.0,
-            min_height: 0.0,
-        }
     }
 }
 
@@ -110,11 +105,18 @@ impl RenderNode for SpacerRenderNode {
     }
 
     fn layout(&mut self, constraints: LayoutConstraints) -> Size {
-        // Spacer expands to fill all available space (like SwiftUI)
+        // Spacer expands to fill available space (within reasonable limits)
+        // Use a reasonable maximum to prevent overflow issues
+        const MAX_SIZE: f32 = 65536.0;
+
+        let max_width = constraints.max.width.min(MAX_SIZE);
+        let max_height = constraints.max.height.min(MAX_SIZE);
+
         let size = Size::new(
-            self.view.min_width.max(constraints.min.width).max(constraints.max.width),
-            self.view.min_height.max(constraints.min.height).max(constraints.max.height),
+            self.view.min_width.max(constraints.min.width).min(max_width),
+            self.view.min_height.max(constraints.min.height).min(max_height),
         );
+
         self.frame = Rect::new(Point::ZERO, size);
         size
     }
@@ -128,7 +130,7 @@ impl RenderNode for SpacerRenderNode {
     }
 
     fn render(&mut self) {
-        // Spacer doesn't render anything
+        // Spacer doesn't render anything - no buffer created
     }
 
     fn get_buffer(&self) -> Option<&crate::buffer::Buffer> {

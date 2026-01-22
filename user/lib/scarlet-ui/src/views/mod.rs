@@ -2,7 +2,7 @@ mod button;
 mod image;
 mod rectangle;
 mod slider;
-mod spacer;
+pub mod spacer;  // Public marker type
 mod text;
 mod text_field;
 mod toggle;

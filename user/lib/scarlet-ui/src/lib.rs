@@ -27,7 +27,8 @@ pub use containers::{HStack, VStack, Window, ZStack};
 pub use state::{State, SubscriptionId};
 pub use theme::{ColorScheme, Theme, get_theme, set_theme, with_theme, init as init_theme};
 pub use traits::{RenderNode, UpdateResult, View};
-pub use views::{Button, ButtonColors, Image, Rectangle, Slider, Spacer, Text, TextField, Toggle};
+pub use views::{Button, ButtonColors, Image, Rectangle, Slider, Text, TextField, Toggle};
+pub use views::spacer::Spacer;  // Export as marker type (not a View)
 pub use app::{App, Application};
 
 // Re-export macros
