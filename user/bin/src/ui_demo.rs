@@ -77,6 +77,7 @@ impl DemoView {
             .spacing(16.0)
             .alignment(Alignment::Center)
             .frame_max()
+            .padding()
         )
         .decorated(true)
     }
