@@ -235,7 +235,8 @@ pub fn measure_text(text: &str, font_size_px: f32) -> (u32, u32) {
                 continue;
             }
             let glyph_id = scaled.glyph_id(ch);
-            line_w += scaled.h_advance(glyph_id);
+            // Apply ceil_i32 per glyph to match draw_text behavior
+            line_w += ceil_i32(scaled.h_advance(glyph_id)) as f32;
         }
 
         if line_w > max_line_w {
