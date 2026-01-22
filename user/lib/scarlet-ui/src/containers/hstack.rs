@@ -219,9 +219,6 @@ impl RenderNode for HStackRenderNode {
             max_height = max_height.max(size.height);
         }
 
-        // Clamp height to available
-        max_height = max_height.min(available_height);
-
         // Pass 2: Layout children
         let spacer_count = spacers.len();
         if spacer_count > 0 {
@@ -251,13 +248,24 @@ impl RenderNode for HStackRenderNode {
         }
 
         // Calculate total size
-        let total_width = if spacer_count > 0 {
-            available_for_children + total_spacing
+        // If constraints are tight (min == max), use that size
+        // Otherwise, use children's total size + spacing (unless spacers exist)
+        let use_full_size = (constraints.max.width - constraints.min.width).abs() < 0.5
+            && (constraints.max.height - constraints.min.height).abs() < 0.5;
+
+        let total_width = if spacer_count > 0 || use_full_size {
+            available_width
         } else {
-            non_spacer_width.min(available_for_children) + total_spacing
+            non_spacer_width + total_spacing
         };
 
-        let size = Size::new(total_width.min(MAX_WIDTH), max_height);
+        let total_height = if spacer_count > 0 || use_full_size {
+            available_height
+        } else {
+            max_height
+        };
+
+        let size = Size::new(total_width.min(MAX_WIDTH), total_height.min(MAX_HEIGHT));
 
         // Set frames for children with actual positions (alignment + offset)
         let mut x_offset = 0.0;

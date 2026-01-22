@@ -27,7 +27,7 @@ pub use containers::{HStack, VStack, Window, ZStack};
 pub use state::{State, SubscriptionId};
 pub use theme::{ColorScheme, Theme, get_theme, set_theme, with_theme, init as init_theme};
 pub use traits::{RenderNode, UpdateResult, View};
-pub use views::{Button, ButtonColors, Image, Rectangle, Slider, Text, TextField, Toggle};
+pub use views::{Button, ButtonColors, Frame, Image, Padding, Rectangle, Slider, Text, TextField, Toggle, ViewExt};
 pub use views::spacer::Spacer;  // Export as marker type (not a View)
 pub use app::{App, Application};
 
@@ -44,7 +44,7 @@ pub mod prelude {
     pub use crate::state::{State, SubscriptionId};
     pub use crate::theme::{ColorScheme, Theme, get_theme, set_theme, with_theme};
     pub use crate::traits::{RenderNode, View};
-    pub use crate::views::{Button, Image, Rectangle, Slider, Spacer, Text, TextField, Toggle};
+    pub use crate::views::{Button, Frame, Image, Padding, Rectangle, Slider, Spacer, Text, TextField, Toggle, ViewExt};
     pub use crate::{NodeId, Point, Rect, Size};
     pub use scarlet_ui_macros::{hstack, vstack, View, zstack};
 }

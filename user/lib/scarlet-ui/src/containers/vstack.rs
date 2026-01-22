@@ -263,9 +263,6 @@ impl RenderNode for VStackRenderNode {
             max_width = max_width.max(size.width);
         }
 
-        // Clamp width to available
-        max_width = max_width.min(available_width);
-
         // Pass 2: Layout children
         let spacer_count = spacers.len();
         if spacer_count > 0 {
@@ -295,20 +292,31 @@ impl RenderNode for VStackRenderNode {
         }
 
         // Calculate total size
-        let total_height = if spacer_count > 0 {
-            available_for_children + total_spacing
+        // If constraints are tight (min == max), use that size
+        // Otherwise, use children's total size + spacing (unless spacers exist)
+        let use_full_size = (constraints.max.width - constraints.min.width).abs() < 0.5
+            && (constraints.max.height - constraints.min.height).abs() < 0.5;
+
+        let total_height = if spacer_count > 0 || use_full_size {
+            available_height
         } else {
-            non_spacer_height.min(available_for_children) + total_spacing
+            non_spacer_height + total_spacing
         };
 
-        let size = Size::new(max_width, total_height.min(MAX_HEIGHT));
+        let total_width = if spacer_count > 0 || use_full_size {
+            available_width
+        } else {
+            max_width
+        };
+
+        let size = Size::new(total_width.min(MAX_WIDTH), total_height.min(MAX_HEIGHT));
 
         // Set frame
         self.frame = Rect::new(Point::ZERO, size);
 
         // Set frames for children with actual positions (alignment + offset)
         let mut y_offset = 0.0;
-        for (i, child) in self.children.iter_mut().enumerate() {
+        for child in self.children.iter_mut() {
             let child_size = child.frame().size;
 
             // Calculate x offset based on alignment

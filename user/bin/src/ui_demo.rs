@@ -60,7 +60,6 @@ impl DemoView {
                 Text::new("Interactive UI Components Demo"),
                 Text::new(std::format!("Counter: {}", counter_text.get()).as_str()),
                 hstack! {
-                    Spacer::new(),
                     Button::new("-").on_click(move || {
                         counter_dec.update(|c| *c -= 1);
                         println!("[ui_demo] Counter: {}", counter_dec.get());
@@ -69,7 +68,6 @@ impl DemoView {
                         counter_inc.update(|c| *c += 1);
                         println!("[ui_demo] Counter: {}", counter_inc.get());
                     }),
-                    Spacer::new(),
                 }
                 .spacing(10.0),
                 Toggle::new(toggle),
@@ -78,6 +76,7 @@ impl DemoView {
             }
             .spacing(16.0)
             .alignment(Alignment::Center)
+            .frame_max()
         )
         .decorated(true)
     }
@@ -95,8 +94,9 @@ pub extern "C" fn main() -> i32 {
     };
 
     match Application::new(app) {
-        Ok(app) => {
+        Ok(mut app) => {
             println!("[ui_demo] Running application...");
+            app.debug_frames = true;
             let _ = app.run();
             0
         }
