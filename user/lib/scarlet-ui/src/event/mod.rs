@@ -2,6 +2,15 @@
 
 use alloc::vec::Vec;
 
+mod dispatcher;
+mod gesture;
+
+pub use dispatcher::EventDispatcher;
+pub use gesture::{
+    Gesture, GestureRecognizer, TapGestureRecognizer, DragGestureRecognizer,
+    LongPressGestureRecognizer, GestureManager,
+};
+
 /// UI Events
 #[derive(Clone, Debug)]
 pub enum Event {

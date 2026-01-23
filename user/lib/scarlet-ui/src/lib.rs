@@ -56,6 +56,9 @@ pub mod buffer;
 pub mod compositor;
 pub mod render;
 pub mod pipeline;
+pub mod views;
+pub mod platform;
+pub mod application;
 
 // Re-exports for convenience
 pub use geometry::{Size, Point, Rect, Offset, EdgeInsets, Alignment};
@@ -64,11 +67,14 @@ pub use error::{Error, Result};
 pub use state::{State, StateId, generate_state_id, Listenable};
 pub use view::View;
 pub use element::{Element, ElementId, LayoutConstraints, ComponentElement, RenderElement, ElementTree, StateRegistry};
-pub use event::{Event, MouseEvent, KeyEvent, InputEvent, KeyCode, MouseButton};
+pub use event::{Event, MouseEvent, KeyEvent, InputEvent, KeyCode, MouseButton, EventDispatcher};
 pub use buffer::Buffer;
 pub use compositor::Compositor;
 pub use render::RenderObject;
 pub use pipeline::{PipelineOwner, RenderingPipeline, DirtyPhase};
+pub use views::Window;
+pub use platform::{PlatformWindow, SWSPlatformWindow};
+pub use application::Application;
 
 /// Prelude module for convenient imports
 pub mod prelude {
