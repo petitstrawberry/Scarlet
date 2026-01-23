@@ -586,7 +586,7 @@ struct CounterView {
 impl CounterView {
     fn new() -> Self {
         Self {
-            count: State::initial(StateId::new(0x1234)), // 一意のID
+            count: State::initial(StateId::new(0), 0), // 一意のID、初期値0
         }
     }
 }
@@ -1544,7 +1544,7 @@ struct CounterApp {
 
 impl CounterApp {
     fn body(&self) -> impl View {
-        Window::new("Counter Demo", Size::new(400.0, 500.0),
+        Window::new("Counter Demo",
             vstack! {
                 Text::new("Counter Demo")
                     .font_size(24.0)
@@ -1574,6 +1574,7 @@ impl CounterApp {
             .padding(EdgeInsets::all(20.0))
             .background(Color::WHITE)
         )
+        .size(Size::new(400.0, 500.0))
     }
 }
 
@@ -2047,45 +2048,6 @@ impl<V: View> View for Opacity<V> {
 8. Present: ウィンドウシステムに提示
 ```
 
-### パイプラインの実装
-
-```rust
-pub struct RenderingPipeline {
-    element_tree: ElementTree,
-    pipeline_owner: PipelineOwner,
-    compositor: Compositor,
-}
-
-impl RenderingPipeline {
-    pub fn new(window_size: Size) -> Self {
-        Self {
-            element_tree: ElementTree::new(),
-            pipeline_owner: PipelineOwner::new(),
-            compositor: Compositor::new(window_size),
-        }
-    }
-
-    pub fn render(&mut self) -> &Buffer {
-        // 1. Build Phase
-        self.pipeline_owner.flush_build(&mut self.element_tree);
-
-        // 2. Layout Phase
-        self.pipeline_owner.flush_layout(&mut self.element_tree);
-
-        // 3. Render Phase
-        self.pipeline_owner.flush_render(&mut self.element_tree);
-
-        // 4. Composite Phase
-        if let Some(root) = self.element_tree.root() {
-            let render_object = root.get_render_object();
-            self.compositor.composite_tree(render_object);
-        }
-
-        self.compositor.window_buffer()
-    }
-}
-```
-
 ---
 
 ## 24. RenderObject & Bufferの関係性
@@ -2133,7 +2095,7 @@ pub trait Application: View {
 
         // 2. 初期レイアウトでウィンドウサイズを決定
         let mut pipeline = RenderingPipeline::new();
-        pipeline.element_tree.set_root(root_element);
+        pipeline.set_root(root_element);
 
         // 3. 初期化
         self.init();
@@ -2205,6 +2167,11 @@ impl RenderingPipeline {
             event_dispatcher: EventDispatcher::new(),
             window_size: Size::new(800.0, 600.0),
         }
+    }
+
+    /// ルートElementを設定
+    pub fn set_root(&mut self, root_element: Box<dyn Element>) {
+        self.element_tree.set_root(root_element);
     }
 
     /// 初期レイアウトを実行し、Windowの情報を返す
@@ -2439,7 +2406,8 @@ impl<V: View> View for Window<V> {
 ```rust
 impl MyApp {
     fn body(&self) -> impl View {
-        Window::new("My Application", Size::new(1024.0, 768.0), self.content())
+        Window::new("My Application", self.content())
+            .size(Size::new(1024.0, 768.0))
             .resizable(true)
             .decorated(true)
     }
@@ -2745,7 +2713,7 @@ fn main() {
 ├─────────────────────────────────────────────────────────────────┤
 │                                                                 │
 │  1. INITIALIZATION                                              │
-│     ├─ Application::new()                                       │
+│     ├─ Application構造体の作成（struct literal）                 │
 │     ├─ PipelineOwner::new() → StateRegistry作成                  │
 │     ├─ State::initial() → RegistryにState登録                    │
 │     └─ ElementTree構築                                          │
@@ -2871,7 +2839,8 @@ impl<V: View> View for V where V: Application {
 │                                                                 │
 │  Application                                                    │
 │      │                                                         │
-│      └── body() → Window::new("Title", size, content)         │
+│      └── body() → Window::new("Title", content)                │
+│                       └── .size(Size::new(...))                  │
 │                       │                                        │
 │                       ├── ViewとしてElementに変換               │
 │                       ├── RenderObjectとしてレイアウト            │
