@@ -3,7 +3,7 @@
 use core::sync::atomic::{AtomicU32, Ordering};
 
 /// Unique identifier for Element instances
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, PartialOrd, Ord)]
 pub struct ElementId(u32);
 
 impl ElementId {
