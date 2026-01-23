@@ -12,8 +12,8 @@
 
 extern crate scarlet_std as std;
 
-use std::println;
 use scarlet_ui::prelude::*;
+use std::println;
 
 /// Main application state
 struct DemoApp {
@@ -54,7 +54,8 @@ impl DemoView {
         let slider = self.slider_value.clone();
         let text_field = self.text_value.clone();
 
-        Window::new("ScarletUI Demo",
+        Window::new(
+            "ScarletUI Demo",
             vstack! {
                 Text::new("ScarletUI Demo").size(24.0),
                 Text::new("Interactive UI Components Demo"),
@@ -77,7 +78,7 @@ impl DemoView {
             .spacing(16.0)
             .alignment(Alignment::Center)
             .frame_max()
-            .padding()
+            .padding(),
         )
         .decorated(true)
     }

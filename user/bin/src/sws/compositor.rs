@@ -1598,7 +1598,9 @@ impl Compositor {
                     const OFFSET: i32 = 20;
 
                     // Check if there's a focused Normal window
-                    let focused_pos = self.window_manager.get_focused_window_id()
+                    let focused_pos = self
+                        .window_manager
+                        .get_focused_window_id()
                         .and_then(|id| self.window_manager.get_window(id))
                         .filter(|w| matches!(w.window_type, super::window::WindowType::Normal))
                         .map(|w| (w.x, w.y));
@@ -1608,7 +1610,10 @@ impl Compositor {
                             // Cascade from focused window
                             let x = fx + OFFSET;
                             let y = fy + OFFSET;
-                            println!("[Compositor] Cascading Normal window from focused window at ({}, {}): ({}, {})", fx, fy, x, y);
+                            println!(
+                                "[Compositor] Cascading Normal window from focused window at ({}, {}): ({}, {})",
+                                fx, fy, x, y
+                            );
                             (x, y)
                         }
                         (None, Some((wx, wy, ww, wh))) => {
@@ -1616,11 +1621,16 @@ impl Compositor {
                             const PADDING: i32 = 20;
                             let x = wx + PADDING;
                             let y = wy + PADDING;
-                            println!("[Compositor] No focused Normal window, positioning in workarea with padding: ({}, {})", x, y);
+                            println!(
+                                "[Compositor] No focused Normal window, positioning in workarea with padding: ({}, {})",
+                                x, y
+                            );
                             (x, y)
                         }
                         (None, None) => {
-                            println!("[Compositor] No workarea and no focused window, using (0, 0)");
+                            println!(
+                                "[Compositor] No workarea and no focused window, using (0, 0)"
+                            );
                             (0, 0)
                         }
                     }
@@ -1656,13 +1666,18 @@ impl Compositor {
                                 // Set window type
                                 let wtype = match window_type {
                                     window_types::NORMAL => super::window::WindowType::Normal,
-                                    window_types::ALWAYS_ON_TOP => super::window::WindowType::AlwaysOnTop,
+                                    window_types::ALWAYS_ON_TOP => {
+                                        super::window::WindowType::AlwaysOnTop
+                                    }
                                     window_types::TASKBAR => super::window::WindowType::Taskbar,
                                     window_types::DESKTOP => super::window::WindowType::Desktop,
                                     _ => super::window::WindowType::Normal,
                                 };
                                 window.window_type = wtype;
-                                println!("[Compositor] Set window #{} type to {:?}", window_id, wtype);
+                                println!(
+                                    "[Compositor] Set window #{} type to {:?}",
+                                    window_id, wtype
+                                );
                             }
                         }
                         Err(e) => {
@@ -1692,7 +1707,11 @@ impl Compositor {
 
                 // Send WINDOW_DESTROYED event to client before closing
                 let payload = sws_protocol::payload_window_destroyed(window_id);
-                send_message_to_client(client_id, sws_protocol::server_msg::WINDOW_DESTROYED, payload.to_vec());
+                send_message_to_client(
+                    client_id,
+                    sws_protocol::server_msg::WINDOW_DESTROYED,
+                    payload.to_vec(),
+                );
                 println!(
                     "[Compositor] Sent WINDOW_DESTROYED for window #{} to client {}",
                     window_id, client_id

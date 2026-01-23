@@ -554,12 +554,12 @@ fn draw_menu_bar(
 
     // Use theme colors
     let theme = theme::get_theme();
-    let bg_color = Color::rgb(235, 235, 238);  // sidebar_bg
-    let text_color = Color::rgb(20, 20, 24);  // text_main
-    let text_dim = Color::rgb(120, 120, 120);  // text_sub
-    let border_color = Color::rgb(100, 100, 105);  // border
-    let hover_bg = Color::rgb(210, 210, 214);  // hover
-    let active_bg = Color::rgb(180, 180, 190);  // primary (pressed)
+    let bg_color = Color::rgb(235, 235, 238); // sidebar_bg
+    let text_color = Color::rgb(20, 20, 24); // text_main
+    let text_dim = Color::rgb(120, 120, 120); // text_sub
+    let border_color = Color::rgb(100, 100, 105); // border
+    let hover_bg = Color::rgb(210, 210, 214); // hover
+    let active_bg = Color::rgb(180, 180, 190); // primary (pressed)
 
     surface.with_buffer(|buf, width, height| {
         // Bar background
@@ -665,15 +665,7 @@ fn fill_rect(
 }
 
 /// Draw horizontal line
-fn draw_hline(
-    buf: &mut [u8],
-    width: u32,
-    height: u32,
-    x: i32,
-    y: i32,
-    w: u32,
-    color: Color,
-) {
+fn draw_hline(buf: &mut [u8], width: u32, height: u32, x: i32, y: i32, w: u32, color: Color) {
     fill_rect(buf, width, height, x, y, w, 1, color);
 }
 
@@ -998,11 +990,11 @@ fn draw_dropdown(conn: &mut Connection, surface_id: u32, dropdown: &DropdownStat
 
     surface.with_buffer(|buf, width, height| {
         // Use theme colors for dropdown
-        let bg_color = Color::rgb(255, 255, 255);  // surface
-        let border_color = Color::rgb(100, 100, 105);  // border
-        let text_color = Color::rgb(20, 20, 24);  // text_main
-        let hover_color = Color::rgb(180, 180, 190);  // primary
-        let separator_color = Color::rgb(200, 200, 200);  // separator
+        let bg_color = Color::rgb(255, 255, 255); // surface
+        let border_color = Color::rgb(100, 100, 105); // border
+        let text_color = Color::rgb(20, 20, 24); // text_main
+        let hover_color = Color::rgb(180, 180, 190); // primary
+        let separator_color = Color::rgb(200, 200, 200); // separator
 
         fill_rect(buf, width, h, 0, 0, width, h, bg_color);
 
@@ -1015,10 +1007,28 @@ fn draw_dropdown(conn: &mut Connection, surface_id: u32, dropdown: &DropdownStat
             if item.label == "-" {
                 // Separator line
                 let sep_y = item.y + item.height as i32 / 2;
-                draw_line(buf, width, h, 4, sep_y, (width - 4) as i32, sep_y, separator_color);
+                draw_line(
+                    buf,
+                    width,
+                    h,
+                    4,
+                    sep_y,
+                    (width - 4) as i32,
+                    sep_y,
+                    separator_color,
+                );
             } else {
                 // Item background (hover effect would go here)
-                fill_rect(buf, width, h, 2, item.y, width - 4, item.height, hover_color);
+                fill_rect(
+                    buf,
+                    width,
+                    h,
+                    2,
+                    item.y,
+                    width - 4,
+                    item.height,
+                    hover_color,
+                );
 
                 // Draw text
                 let text_x = 8;
@@ -1058,15 +1068,7 @@ fn draw_rect(
 }
 
 /// Draw vertical line
-fn draw_vline(
-    buf: &mut [u8],
-    width: u32,
-    height: u32,
-    x: i32,
-    y: i32,
-    h: u32,
-    color: Color,
-) {
+fn draw_vline(buf: &mut [u8], width: u32, height: u32, x: i32, y: i32, h: u32, color: Color) {
     fill_rect(buf, width, height, x, y, 1, h, color);
 }
 
@@ -1086,12 +1088,28 @@ fn draw_line(
         // Horizontal line
         let x_start = x1.min(x2);
         let x_end = x1.max(x2);
-        draw_hline(buf, width, height, x_start, y1, (x_end - x_start + 1) as u32, color);
+        draw_hline(
+            buf,
+            width,
+            height,
+            x_start,
+            y1,
+            (x_end - x_start + 1) as u32,
+            color,
+        );
     } else if x1 == x2 {
         // Vertical line
         let y_start = y1.min(y2);
         let y_end = y1.max(y2);
-        draw_vline(buf, width, height, x1, y_start, (y_end - y_start + 1) as u32, color);
+        draw_vline(
+            buf,
+            width,
+            height,
+            x1,
+            y_start,
+            (y_end - y_start + 1) as u32,
+            color,
+        );
     }
 }
 

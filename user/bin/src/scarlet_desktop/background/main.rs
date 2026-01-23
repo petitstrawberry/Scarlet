@@ -24,8 +24,8 @@ fn draw_background(conn: &mut Connection, surface_id: u32) {
     surface.with_buffer(|buf, width, height| {
         // Simple vertical gradient using theme colors
         let theme = theme::get_theme();
-        let top = Color::rgb(40, 40, 50);  // Dark blue-gray
-        let bottom = Color::rgb(20, 20, 30);  // Darker blue-gray
+        let top = Color::rgb(40, 40, 50); // Dark blue-gray
+        let bottom = Color::rgb(20, 20, 30); // Darker blue-gray
 
         if h == 0 {
             return;
