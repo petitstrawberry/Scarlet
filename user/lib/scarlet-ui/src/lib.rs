@@ -52,6 +52,9 @@ pub mod state;
 pub mod view;
 pub mod element;
 pub mod event;
+pub mod buffer;
+pub mod compositor;
+pub mod render;
 
 // Re-exports for convenience
 pub use geometry::{Size, Point, Rect, Offset, EdgeInsets, Alignment};
@@ -59,8 +62,11 @@ pub use color::Color;
 pub use error::{Error, Result};
 pub use state::{State, StateId, generate_state_id, Listenable};
 pub use view::View;
-pub use element::{Element, ElementId, LayoutConstraints};
+pub use element::{Element, ElementId, LayoutConstraints, ComponentElement, RenderElement};
 pub use event::{Event, MouseEvent, KeyEvent, InputEvent, KeyCode, MouseButton};
+pub use buffer::Buffer;
+pub use compositor::Compositor;
+pub use render::RenderObject;
 
 /// Prelude module for convenient imports
 pub mod prelude {

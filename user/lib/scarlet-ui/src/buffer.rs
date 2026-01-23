@@ -1,0 +1,189 @@
+//! Buffer - Pixel buffer management for ScarletUI
+//!
+//! Provides BGRA format pixel buffers with alpha blending support.
+
+use alloc::vec::Vec;
+use alloc::vec;
+use crate::geometry::Size;
+use crate::color::Color;
+
+/// Pixel buffer in BGRA format
+///
+/// Each pixel is stored as a u32 in BGRA byte order:
+/// - Byte 0: Blue
+/// - Byte 1: Green
+/// - Byte 2: Red
+/// - Byte 3: Alpha
+pub struct Buffer {
+    width: u32,
+    height: u32,
+    data: Vec<u32>,
+}
+
+impl Buffer {
+    /// Create a new buffer with the given size
+    pub fn new(size: Size) -> Self {
+        let width = size.width as u32;
+        let height = size.height as u32;
+        Self {
+            width,
+            height,
+            data: vec![0; (width * height) as usize],
+        }
+    }
+
+    /// Create a buffer with explicit dimensions
+    pub fn from_dimensions(width: u32, height: u32) -> Self {
+        Self {
+            width,
+            height,
+            data: vec![0; (width * height) as usize],
+        }
+    }
+
+    /// Get the buffer width
+    pub fn width(&self) -> u32 {
+        self.width
+    }
+
+    /// Get the buffer height
+    pub fn height(&self) -> u32 {
+        self.height
+    }
+
+    /// Get the buffer size
+    pub fn size(&self) -> Size {
+        Size {
+            width: self.width as f32,
+            height: self.height as f32,
+        }
+    }
+
+    /// Get the pixel data as a slice
+    pub fn as_slice(&self) -> &[u32] {
+        &self.data
+    }
+
+    /// Get the pixel data as a mutable slice
+    pub fn as_mut_slice(&mut self) -> &mut [u32] {
+        &mut self.data
+    }
+
+    /// Clear the buffer with a color
+    pub fn clear(&mut self, color: Color) {
+        let pixel = color.to_bgra();
+        for px in self.data.iter_mut() {
+            *px = pixel;
+        }
+    }
+
+    /// Composite another buffer into this buffer
+    ///
+    /// # Arguments
+    /// * `src` - Source buffer to composite
+    /// * `dst_x` - Destination X position
+    /// * `dst_y` - Destination Y position
+    /// * `opacity` - Opacity multiplier (0.0 - 1.0)
+    pub fn composite(
+        &mut self,
+        src: &Buffer,
+        dst_x: i32,
+        dst_y: i32,
+        opacity: f32,
+    ) {
+        for y in 0..src.height {
+            for x in 0..src.width {
+                let src_x = x as i32;
+                let src_y = y as i32;
+                let target_x = dst_x + src_x;
+                let target_y = dst_y + src_y;
+
+                // Check bounds
+                if target_x >= 0 && target_x < self.width as i32
+                    && target_y >= 0 && target_y < self.height as i32
+                {
+                    let src_pixel = src.data[(y * src.width + x) as usize];
+                    let dst_idx = (target_y * self.width as i32 + target_x) as usize;
+
+                    // Alpha blending
+                    self.data[dst_idx] = Self::blend_pixels(
+                        self.data[dst_idx],
+                        src_pixel,
+                        opacity,
+                    );
+                }
+            }
+        }
+    }
+
+    /// Blend two pixels with alpha
+    ///
+    /// Pixel format: BGRA (u32)
+    fn blend_pixels(dst: u32, src: u32, opacity: f32) -> u32 {
+        // Extract BGRA channels
+        let dst_b = (dst & 0xFF) as u32;
+        let dst_g = ((dst >> 8) & 0xFF) as u32;
+        let dst_r = ((dst >> 16) & 0xFF) as u32;
+        let dst_a = ((dst >> 24) & 0xFF) as u32;
+
+        let src_b = (src & 0xFF) as u32;
+        let src_g = ((src >> 8) & 0xFF) as u32;
+        let src_r = ((src >> 16) & 0xFF) as u32;
+        let src_a = ((src >> 24) & 0xFF) as u32;
+
+        // Apply opacity to source alpha
+        let src_alpha = src_a as f32 * opacity;
+
+        // Alpha blending: over operator
+        // result = src * src_alpha + dst * (1 - src_alpha) / 255
+        let inv_a = 255.0 - src_alpha;
+
+        let b = (src_b as f32 * src_alpha + dst_b as f32 * inv_a / 255.0) as u32;
+        let g = (src_g as f32 * src_alpha + dst_g as f32 * inv_a / 255.0) as u32;
+        let r = (src_r as f32 * src_alpha + dst_r as f32 * inv_a / 255.0) as u32;
+        let a_final = (dst_a as f32 + (255.0 - dst_a as f32) * src_alpha / 255.0) as u32;
+
+        // Clamp and pack
+        (b.min(255) & 0xFF)
+            | ((g.min(255) & 0xFF) << 8)
+            | ((r.min(255) & 0xFF) << 16)
+            | ((a_final.min(255) as u32 & 0xFF) << 24)
+    }
+
+    /// Set a pixel at the given position
+    ///
+    /// # Arguments
+    /// * `x` - X position
+    /// * `y` - Y position
+    /// * `pixel` - Pixel value in BGRA format
+    pub fn set_pixel(&mut self, x: u32, y: u32, pixel: u32) {
+        if x < self.width && y < self.height {
+            self.data[(y * self.width + x) as usize] = pixel;
+        }
+    }
+
+    /// Get a pixel at the given position
+    ///
+    /// Returns None if position is out of bounds
+    pub fn get_pixel(&self, x: u32, y: u32) -> Option<u32> {
+        if x < self.width && y < self.height {
+            Some(self.data[(y * self.width + x) as usize])
+        } else {
+            None
+        }
+    }
+
+    /// Fill a rectangle with a color
+    pub fn fill_rect(&mut self, x: u32, y: u32, width: u32, height: u32, color: Color) {
+        let pixel = color.to_bgra();
+        for dy in 0..height {
+            for dx in 0..width {
+                let px = x + dx;
+                let py = y + dy;
+                if px < self.width && py < self.height {
+                    self.data[(py * self.width + px) as usize] = pixel;
+                }
+            }
+        }
+    }
+}
