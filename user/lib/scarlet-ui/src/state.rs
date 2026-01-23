@@ -10,7 +10,7 @@ use core::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Mutex;
 
 /// Unique identifier for State instances
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, PartialOrd, Ord)]
 pub struct StateId(u32);
 
 impl StateId {
