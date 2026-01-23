@@ -379,37 +379,22 @@ impl RenderObject for VStackRenderObject {
     }
 
     fn render(&mut self) {
-        // NOTE: Don't check is_dirty() here!
-        // Parent may call render() on us when children are dirty (even if we're not)
-        // We need to blit children's buffers even if we're not dirty ourselves
-
-        // println!("[vstack] render() called, self.frame={:?}", self.frame);
-        self.buffer = Some(Buffer::new(self.frame.size));
-
-        for (i, child) in self.children.iter_mut().enumerate() {
-            // child.frame() already has correct origin from layout()
-            // println!("[vstack] child[{}] frame: {:?}", i, child.frame());
+        // Containers don't have their own buffer
+        // Just render children, SceneBuilder will handle compositing
+        for child in self.children.iter_mut() {
             child.render();
-
-            if let Some(child_buffer) = child.get_buffer() {
-                // println!("[vstack] child[{}] buffer size: {:?}", i, child_buffer.size());
-                // Blit at child's frame position
-                self.buffer.as_mut().unwrap().blit_from(child_buffer, child.frame());
-            } else {
-                // println!("[vstack] WARNING: child[{}] has no buffer!", i);
-            }
         }
-
-        // println!("[vstack] render() done");
         self.clear_dirty();
     }
 
     fn get_buffer(&self) -> Option<&Buffer> {
-        self.buffer.as_ref()
+        // Containers don't have their own buffer
+        None
     }
 
     fn get_buffer_mut(&mut self) -> Option<&mut Buffer> {
-        self.buffer.as_mut()
+        // Containers don't have their own buffer
+        None
     }
 
     fn hit_test(&self, point: Point) -> HitResult {

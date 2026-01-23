@@ -123,6 +123,90 @@ impl ButtonRenderObject {
             dirty_flags: DirtyFlags::PAINT | DirtyFlags::LAYOUT,
         }
     }
+
+    /// Composite the label buffer into the button's buffer at the specified position
+    fn composite_label_buffer(&mut self, src: &Buffer, dest_frame: Rect) {
+        let target = self.buffer.as_mut().unwrap();
+        let src_width = src.width();
+        let src_height = src.height();
+        let src_data = src.as_slice();
+
+        // Get target dimensions before mutable borrow
+        let target_width = target.width();
+        let target_height = target.height();
+        let target_stride = target.stride();
+
+        let dest_data = target.as_mut_slice();
+
+        let dest_x = libm::ceilf(dest_frame.origin.x) as usize;
+        let dest_y = libm::ceilf(dest_frame.origin.y) as usize;
+
+        // Clamp to buffer bounds
+        let dest_x = dest_x.clamp(0, target_width);
+        let dest_y = dest_y.clamp(0, target_height);
+
+        let copy_width = src_width.min(target_width - dest_x);
+        let copy_height = src_height.min(target_height - dest_y);
+
+        for y in 0..copy_height {
+            for x in 0..copy_width {
+                let src_offset = y * src.stride() + x * 4;
+                let dest_offset = (dest_y + y) * target_stride + (dest_x + x) * 4;
+
+                let src_b = src_data[src_offset];
+                let src_g = src_data[src_offset + 1];
+                let src_r = src_data[src_offset + 2];
+                let src_a = src_data[src_offset + 3];
+
+                // Alpha blending
+                if src_a == 255 {
+                    // Opaque: copy directly
+                    dest_data[dest_offset] = src_b;
+                    dest_data[dest_offset + 1] = src_g;
+                    dest_data[dest_offset + 2] = src_r;
+                    dest_data[dest_offset + 3] = src_a;
+                } else if src_a > 0 {
+                    // Semi-transparent: blend with destination
+                    let dst_a = dest_data[dest_offset + 3];
+
+                    if dst_a == 0 {
+                        // Destination is fully transparent, just copy source
+                        dest_data[dest_offset] = src_b;
+                        dest_data[dest_offset + 1] = src_g;
+                        dest_data[dest_offset + 2] = src_r;
+                        dest_data[dest_offset + 3] = src_a;
+                    } else {
+                        // Both have some alpha, proper over compositing
+                        let src_a_f = src_a as f32 / 255.0;
+                        let dst_a_f = dst_a as f32 / 255.0;
+
+                        // Final alpha (over operator)
+                        let out_a_f = src_a_f + dst_a_f * (1.0 - src_a_f);
+                        let out_a = (out_a_f * 255.0).min(255.0) as u8;
+
+                        // Blend colors
+                        let src_b_f = src_b as f32;
+                        let src_g_f = src_g as f32;
+                        let src_r_f = src_r as f32;
+
+                        let dst_b_f = dest_data[dest_offset] as f32;
+                        let dst_g_f = dest_data[dest_offset + 1] as f32;
+                        let dst_r_f = dest_data[dest_offset + 2] as f32;
+
+                        let out_b = (src_b_f * src_a_f + dst_b_f * dst_a_f * (1.0 - src_a_f)) / out_a_f.max(0.01);
+                        let out_g = (src_g_f * src_a_f + dst_g_f * dst_a_f * (1.0 - src_a_f)) / out_a_f.max(0.01);
+                        let out_r = (src_r_f * src_a_f + dst_r_f * dst_a_f * (1.0 - src_a_f)) / out_a_f.max(0.01);
+
+                        dest_data[dest_offset] = out_b.min(255.0) as u8;
+                        dest_data[dest_offset + 1] = out_g.min(255.0) as u8;
+                        dest_data[dest_offset + 2] = out_r.min(255.0) as u8;
+                        dest_data[dest_offset + 3] = out_a;
+                    }
+                }
+                // If src_a == 0, keep destination pixel unchanged
+            }
+        }
+    }
 }
 
 impl RenderObject for ButtonRenderObject {
@@ -300,12 +384,12 @@ impl RenderObject for ButtonRenderObject {
         self.label_node.set_frame(label_frame);
         self.label_node.render();
 
-        if let Some(label_buffer) = self.label_node.get_buffer() {
-            // println!("[button] ButtonRenderObject::render() blitting label buffer");
-            self.buffer
-                .as_mut()
-                .unwrap()
-                .blit_from(label_buffer, label_frame);
+        // Composite label buffer (get frame and buffer before any borrow)
+        let label_frame = self.label_node.frame();
+        let label_buffer = self.label_node.get_buffer().cloned();
+        if let Some(label_buffer) = label_buffer {
+            // println!("[button] ButtonRenderObject::render() compositing label buffer");
+            self.composite_label_buffer(&label_buffer, label_frame);
         }
 
         self.clear_dirty();
