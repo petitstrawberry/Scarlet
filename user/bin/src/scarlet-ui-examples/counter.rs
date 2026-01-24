@@ -8,6 +8,7 @@ use core::result;
 use scarlet_std::{format, println};
 use scarlet_ui::prelude::*;
 
+#[derive(View, Clone)]
 struct CounterApp {
     count: State<i32>,
 }
@@ -49,9 +50,7 @@ impl CounterView {
 #[unsafe(no_mangle)]
 pub extern "C" fn main() {
     println!("[counter] Starting CounterApp");
-    let app = CounterApp {
-        count: State::new(0),
-    };
+    let app = CounterApp::default();
 
     match Application::new(app) {
         Ok(app) => {

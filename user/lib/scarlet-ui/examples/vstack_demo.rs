@@ -19,15 +19,6 @@ struct CounterApp {
     count: State<i32>,
 }
 
-impl CounterApp {
-    /// Create a new counter app
-    fn new() -> Self {
-        Self {
-            count: State::initial(0),
-        }
-    }
-}
-
 impl Application for CounterApp {
     fn body(&self) -> impl View {
         let count_value = self.count.get();
@@ -54,7 +45,7 @@ impl Application for CounterApp {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn main() {
-    let app = CounterApp::new();
+    let app = CounterApp::default();
     // Run the application
     // Note: Full integration would require additional setup
     let _ = app.run();
