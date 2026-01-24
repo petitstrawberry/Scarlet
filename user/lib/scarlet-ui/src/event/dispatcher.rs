@@ -4,7 +4,6 @@
 //! the element tree with three-phase event dispatching.
 
 use alloc::vec::Vec;
-use alloc::boxed::Box;
 use crate::element::{Element, ElementId, ElementTree};
 use crate::geometry::Point;
 use crate::event::Event;
@@ -95,6 +94,12 @@ impl EventDispatcher {
             Event::Keyboard(key_event) => {
                 self.dispatch_keyboard(element_tree, key_event);
             }
+            Event::Focus(focus_event) => {
+                self.dispatch_focus(element_tree, focus_event);
+            }
+            Event::Lifecycle(lifecycle_event) => {
+                self.dispatch_lifecycle(element_tree, lifecycle_event);
+            }
             Event::Input(_) => {
                 // Raw input events are typically handled by higher layers
             }
@@ -134,20 +139,20 @@ impl EventDispatcher {
                 // to elements by ID. For now, this is a conceptual implementation.
                 let _ = element;
                 let _ = &event_wrapper;
-                // element.handle_event(&event_wrapper);
+                // element.handle_event(&event_wrapper, Phase::Capture);
             }
 
             // 2.2 Target Phase: at the target
             // Note: In a full implementation, we would get mutable reference to target
             let _ = hit.target;
-            // hit.target.handle_event(&event_wrapper);
+            // hit.target.handle_event(&event_wrapper, Phase::Target);
 
             // 2.3 Bubble Phase: target's parent → root
             for element in hit.bubble_path().skip(1) {
                 // Skip the target (already handled in target phase)
                 let _ = element;
                 let _ = &event_wrapper;
-                // element.handle_event(&event_wrapper);
+                // element.handle_event(&event_wrapper, Phase::Bubble);
             }
         }
     }
@@ -155,9 +160,27 @@ impl EventDispatcher {
     /// Dispatch a keyboard event
     fn dispatch_keyboard(&mut self, element_tree: &mut ElementTree, event: &crate::event::KeyEvent) {
         // Keyboard events typically go to the focused element
-        // For now, send to the root
+        // For now, send to the root with Target phase
         if let Some(root) = element_tree.root_mut() {
-            root.handle_event(&Event::Keyboard(event.clone()));
+            root.handle_event(&Event::Keyboard(event.clone()), Phase::Target);
+        }
+    }
+
+    /// Dispatch a focus event
+    fn dispatch_focus(&mut self, element_tree: &mut ElementTree, event: &crate::event::FocusEvent) {
+        // Focus events are sent to the element gaining or losing focus
+        // For now, send to the root with Target phase
+        if let Some(root) = element_tree.root_mut() {
+            root.handle_event(&Event::Focus(event.clone()), Phase::Target);
+        }
+    }
+
+    /// Dispatch a lifecycle event
+    fn dispatch_lifecycle(&mut self, element_tree: &mut ElementTree, event: &crate::event::LifecycleEvent) {
+        // Lifecycle events are sent to elements during mount/unmount
+        // For now, send to the root with Target phase
+        if let Some(root) = element_tree.root_mut() {
+            root.handle_event(&Event::Lifecycle(event.clone()), Phase::Target);
         }
     }
 

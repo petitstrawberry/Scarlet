@@ -196,6 +196,7 @@ impl RenderingPipeline {
     /// EventDispatcher to the target elements.
     pub fn handle_event(&mut self, _event: &crate::event::Event) -> bool {
         // Note: Event handling will be implemented in a later phase
+        // The EventDispatcher will pass the Phase parameter when dispatching
         false
     }
 }

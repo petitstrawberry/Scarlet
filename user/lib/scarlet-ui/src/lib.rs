@@ -71,7 +71,7 @@ pub use error::{Error, Result};
 pub use state::{State, StateId, SubscriptionId, generate_state_id, Listenable};
 pub use view::{View, ViewExt};
 pub use element::{Element, ElementId, LayoutConstraints, ComponentElement, RenderElement, ElementTree, ElementRenderObject, DirtyFlags};
-pub use event::{Event, MouseEvent, KeyEvent, InputEvent, KeyCode, MouseButton, EventDispatcher};
+pub use event::{Event, MouseEvent, KeyEvent, InputEvent, KeyCode, MouseButton, EventDispatcher, FocusEvent, LifecycleEvent};
 pub use buffer::Buffer;
 pub use compositor::Compositor;
 pub use render::RenderObject;
@@ -92,7 +92,7 @@ pub mod prelude {
     pub use crate::state::{State, StateId, SubscriptionId, Listenable};
     pub use crate::view::{View, ViewExt};
     pub use crate::element::{Element, ElementId, LayoutConstraints, ElementRenderObject, DirtyFlags};
-    pub use crate::event::{Event, MouseEvent, KeyEvent};
+    pub use crate::event::{Event, MouseEvent, KeyEvent, FocusEvent, LifecycleEvent};
     pub use crate::application::Application;
     pub use crate::views::{Window, Text, Button, Rectangle, Spacer, VStack, HStack, ZStack};
     pub use crate::views::modifiers::{Padding, Frame, Background};

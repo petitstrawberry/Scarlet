@@ -154,6 +154,14 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
         }
     }
 
+    fn rebuild(&mut self) -> UpdateResult {
+        // RenderElement doesn't need to rebuild since properties are
+        // updated directly through the update() method.
+        // The stored view remains the same, and changes happen through
+        // State updates triggering update() calls.
+        UpdateResult::NoChange
+    }
+
     fn layout(&mut self, constraints: LayoutConstraints) -> Size {
         self.render_object.layout(constraints)
     }
@@ -182,7 +190,7 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
         self.render_object.hit_test(local_point)
     }
 
-    fn handle_event(&mut self, _event: &crate::event::Event) -> bool {
+    fn handle_event(&mut self, _event: &crate::event::Event, _phase: crate::event::Phase) -> bool {
         // RenderObjects don't handle events by default
         false
     }

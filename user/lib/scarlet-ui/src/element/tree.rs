@@ -7,7 +7,7 @@
 use alloc::boxed::Box;
 use core::sync::atomic::{AtomicU32, Ordering};
 
-use crate::element::Element;
+use crate::element::{Element, ElementId};
 use crate::geometry::Size;
 
 /// Global counter for generating unique Element IDs
@@ -80,6 +80,28 @@ impl ElementTree {
     pub fn hit_test(&self, point: crate::geometry::Point) -> Option<&dyn Element> {
         let root = self.root.as_deref()?;
         self.hit_test_recursive(root, point)
+    }
+
+    /// Find an element by its ID
+    pub fn find_element_mut(&mut self, id: ElementId) -> Option<&mut Box<dyn Element>> {
+        // Use a helper function that doesn't take self
+        Self::find_element_recursive_helper(self.root.as_mut()?, id)
+    }
+
+    fn find_element_recursive_helper(element: &mut Box<dyn Element>, target_id: ElementId) -> Option<&mut Box<dyn Element>> {
+        // Check this element
+        if element.id() == target_id {
+            return Some(element);
+        }
+
+        // Search children
+        for child in element.children_mut().iter_mut() {
+            if let Some(found) = Self::find_element_recursive_helper(child, target_id) {
+                return Some(found);
+            }
+        }
+
+        None
     }
 
     fn hit_test_recursive<'a>(&'a self, element: &'a dyn Element, point: crate::geometry::Point) -> Option<&'a dyn Element> {

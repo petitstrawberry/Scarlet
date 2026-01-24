@@ -128,6 +128,16 @@ pub trait Element {
     /// replaced, or unchanged.
     fn update(&mut self, new_view: &dyn View) -> UpdateResult;
 
+    /// Rebuild this Element from its stored View
+    ///
+    /// Called when the Element is marked dirty due to State changes.
+    /// For ComponentElement, this recreates the child from the stored View.
+    /// For RenderElement, this returns NoChange since properties are updated directly.
+    ///
+    /// Returns UpdateResult indicating whether the Element was rebuilt,
+    /// replaced, or unchanged.
+    fn rebuild(&mut self) -> UpdateResult;
+
     /// Mount the Element into the tree
     ///
     /// Called when the Element is first added to the tree.
@@ -169,7 +179,12 @@ pub trait Element {
     /// Handle input events
     ///
     /// Returns true if the event was handled.
-    fn handle_event(&mut self, _event: &crate::event::Event) -> bool {
+    ///
+    /// The phase parameter indicates which phase of event dispatch is occurring:
+    /// - Capture: Event is traveling from root to target
+    /// - Target: Event is at the target element
+    /// - Bubble: Event is traveling from target back to root
+    fn handle_event(&mut self, _event: &crate::event::Event, _phase: crate::event::Phase) -> bool {
         false
     }
 }

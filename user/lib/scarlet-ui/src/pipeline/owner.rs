@@ -148,14 +148,13 @@ impl PipelineOwner {
         let dirty_build = core::mem::take(&mut self.dirty_build);
 
         for id in dirty_build {
-            // TODO: Implement proper rebuild logic
-            // For now, this is a placeholder
-            // In a full implementation:
-            // 1. For ComponentElement: recreate child from View
-            // 2. For RenderElement: update properties from new View
-            // Note: find_element_mut is not yet implemented in ElementTree
-            let _ = id;
-            let _ = element_tree;
+            // Find the element in the tree
+            if let Some(element) = element_tree.find_element_mut(id) {
+                // Call rebuild() on the element
+                // - ComponentElement: recreates child from stored View
+                // - RenderElement: returns NoChange (properties updated via update())
+                let _ = element.rebuild();
+            }
         }
     }
 

@@ -32,6 +32,12 @@ pub enum Event {
     /// Input event (from SWS)
     Input(InputEvent),
 
+    /// Focus event
+    Focus(FocusEvent),
+
+    /// Lifecycle event
+    Lifecycle(LifecycleEvent),
+
     /// Custom event with user data
     Custom {
         event_type: u32,
@@ -128,4 +134,28 @@ pub struct InputEvent {
     pub value: i32,
 }
 
+/// Focus events
+///
+/// Fired when an element gains or loses keyboard focus.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FocusEvent {
+    /// Element gained focus
+    Gained,
+    /// Element lost focus
+    Lost,
+}
 
+/// Lifecycle events
+///
+/// Fired during element lifecycle: mount, unmount, appear, disappear.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LifecycleEvent {
+    /// Element was mounted to the tree
+    Mount,
+    /// Element will be unmounted from the tree
+    Unmount,
+    /// Element became visible on screen
+    Appear,
+    /// Element is no longer visible on screen
+    Disappear,
+}

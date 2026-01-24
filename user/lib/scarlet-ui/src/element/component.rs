@@ -111,6 +111,26 @@ impl<V: View + Clone> Element for ComponentElement<V> {
         }
     }
 
+    fn rebuild(&mut self) -> UpdateResult {
+        // Unmount the old child
+        if let Some(ref mut child) = self.child {
+            child.unmount();
+        }
+
+        // Create new child element from the stored view
+        let new_child = self.view.create_element();
+
+        // Replace the old child with the new one
+        self.child = Some(new_child);
+
+        // Mount the new child
+        if let Some(ref mut child) = self.child {
+            child.mount();
+        }
+
+        UpdateResult::Updated
+    }
+
     fn mount(&mut self) {
         // Subscribe to all Listenables from the View
         let listenables = self.view.listenables();
@@ -187,10 +207,10 @@ impl<V: View + Clone> Element for ComponentElement<V> {
         }
     }
 
-    fn handle_event(&mut self, event: &crate::event::Event) -> bool {
+    fn handle_event(&mut self, event: &crate::event::Event, phase: crate::event::Phase) -> bool {
         // Delegate to child
         if let Some(ref mut child) = self.child {
-            child.handle_event(event)
+            child.handle_event(event, phase)
         } else {
             false
         }
