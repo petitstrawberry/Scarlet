@@ -119,6 +119,43 @@ impl ElementTree {
 
         None
     }
+
+    /// Dump the element tree structure for debugging
+    pub fn dump(&self) {
+        scarlet_std::println!("[ElementTree] Dumping element tree:");
+        if let Some(root) = self.root.as_deref() {
+            self.dump_element(root, 0);
+        } else {
+            scarlet_std::println!("  (empty)");
+        }
+        scarlet_std::println!("[ElementTree] End of tree dump");
+    }
+
+    fn dump_element(&self, element: &dyn Element, depth: usize) {
+        // Build indent string
+        let mut indent = alloc::string::String::new();
+        for _ in 0..depth {
+            indent.push_str("  ");
+        }
+
+        let type_name = element.type_name_debug();
+        let id = element.id().get();
+        let children = element.children();
+        let has_buffer = element.get_buffer().is_some();
+
+        scarlet_std::println!(
+            "{}[{}] id={} (children={}, buffer={})",
+            indent,
+            type_name,
+            id,
+            children.len(),
+            has_buffer
+        );
+
+        for child in children {
+            self.dump_element(child.as_ref(), depth + 1);
+        }
+    }
 }
 
 impl Default for ElementTree {

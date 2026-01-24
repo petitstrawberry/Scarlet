@@ -109,6 +109,20 @@ pub trait Element {
     /// Get the unique ID of this Element
     fn id(&self) -> ElementId;
 
+    /// Get the type name of this Element for debugging
+    fn type_name(&self) -> &str {
+        "Element"
+    }
+
+    /// Get detailed type information for debugging
+    ///
+    /// Returns a String with detailed type information.
+    /// Default implementation calls type_name(), but concrete types
+    /// can override to provide more detailed information.
+    fn type_name_debug(&self) -> alloc::string::String {
+        alloc::string::String::from(self.type_name())
+    }
+
     /// Get this Element as Any for downcasting
     fn as_any(&self) -> &dyn Any;
 

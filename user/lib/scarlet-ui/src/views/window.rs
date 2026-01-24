@@ -169,6 +169,10 @@ impl<V: View + Clone> Element for WindowElement<V> {
         self.id
     }
 
+    fn type_name(&self) -> &str {
+        "WindowElement"
+    }
+
     fn as_any(&self) -> &dyn Any {
         self
     }

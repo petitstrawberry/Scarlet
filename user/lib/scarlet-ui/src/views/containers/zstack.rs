@@ -58,9 +58,11 @@ impl<C: ViewTuple + Clone> Clone for ZStack<C> {
 
 impl<C: ViewTuple + Clone + 'static> View for ZStack<C> {
     fn create_element(&self) -> Box<dyn Element> {
-        Box::new(RenderElement::new(
+        let children = self.content.create_elements();
+        Box::new(RenderElement::with_children(
             self.clone(),
-            ZStackRenderObject::new(self.alignment),
+            ZStackRenderObject::new(self.alignment, children.len()),
+            children,
         ))
     }
 
@@ -84,10 +86,10 @@ pub struct ZStackRenderObject {
 
 impl ZStackRenderObject {
     /// Create a new ZStackRenderObject
-    pub fn new(alignment: crate::geometry::Alignment) -> Self {
+    pub fn new(alignment: crate::geometry::Alignment, child_count: usize) -> Self {
         Self {
             alignment,
-            child_count: 0,
+            child_count,
             size: Size::ZERO,
         }
     }

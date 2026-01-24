@@ -59,6 +59,10 @@ impl<V: View + Clone> Element for ComponentElement<V> {
         self.id
     }
 
+    fn type_name(&self) -> &str {
+        "ComponentElement"
+    }
+
     fn as_any(&self) -> &dyn Any {
         self
     }

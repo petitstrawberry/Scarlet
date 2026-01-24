@@ -74,9 +74,11 @@ impl<C: ViewTuple + Clone> Clone for HStack<C> {
 
 impl<C: ViewTuple + Clone + 'static> View for HStack<C> {
     fn create_element(&self) -> Box<dyn Element> {
-        Box::new(RenderElement::new(
+        let children = self.content.create_elements();
+        Box::new(RenderElement::with_children(
             self.clone(),
-            HStackRenderObject::new(self.spacing, self.alignment),
+            HStackRenderObject::new(self.spacing, self.alignment, children.len()),
+            children,
         ))
     }
 
@@ -102,11 +104,11 @@ pub struct HStackRenderObject {
 
 impl HStackRenderObject {
     /// Create a new HStackRenderObject
-    pub fn new(spacing: f32, alignment: crate::geometry::Alignment) -> Self {
+    pub fn new(spacing: f32, alignment: crate::geometry::Alignment, child_count: usize) -> Self {
         Self {
             spacing,
             alignment,
-            child_count: 0,
+            child_count,
             size: Size::ZERO,
             child_positions: Vec::new(),
         }

@@ -66,6 +66,9 @@ pub trait Application: View {
         // 4. Perform initial layout to determine window size and extract window properties
         let (app_id, window_title, window_size) = pipeline.layout_initial();
 
+        // Debug: Dump element tree
+        pipeline.element_tree().dump();
+
         // 5. Create platform window (default: SWS backend)
         let mut platform_window = SWSPlatformWindow::new(&app_id, &window_title, window_size)
             .map_err(|_| crate::error::Error::WindowCreationFailed)?;

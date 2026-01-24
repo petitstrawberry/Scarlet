@@ -138,6 +138,17 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
         self.id
     }
 
+    fn type_name(&self) -> &str {
+        "RenderElement"
+    }
+
+    fn type_name_debug(&self) -> alloc::string::String {
+        alloc::format!("RenderElement<{}, {}>",
+            core::any::type_name::<V>(),
+            core::any::type_name::<R>()
+        )
+    }
+
     fn as_any(&self) -> &dyn Any {
         self
     }
@@ -176,7 +187,17 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
     }
 
     fn layout(&mut self, constraints: LayoutConstraints) -> Size {
-        self.render_object.layout(constraints)
+        // Layout this element first
+        let size = self.render_object.layout(constraints);
+
+        // Layout children with loose constraints
+        // TODO: Container RenderObjects should provide proper constraints for each child
+        for child in &mut self.children {
+            let child_constraints = LayoutConstraints::loose(size.width, size.height);
+            child.layout(child_constraints);
+        }
+
+        size
     }
 
     fn position(&self) -> Point {
