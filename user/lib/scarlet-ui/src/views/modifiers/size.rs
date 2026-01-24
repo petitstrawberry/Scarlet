@@ -70,6 +70,7 @@ impl<V: View> SetSize<V> {
 impl<V: View + Clone> View for SetSize<V> {
     fn create_element(&self) -> Box<dyn Element> {
         Box::new(RenderElement::new(
+            self.clone(),
             SizeRenderObject::new(self.min_width, self.min_height, self.max_width, self.max_height),
         ))
     }

@@ -2,10 +2,15 @@
 //!
 //! PipelineOwner tracks which elements need to be rebuilt, laid out, or repainted,
 //! and orchestrates the flush of these dirty phases.
+//!
+//! PipelineOwner also owns the StateRegistry, ensuring there is only one
+//! registry per application.
 
 use alloc::collections::BTreeSet;
-use crate::element::{ElementId, ElementTree, LayoutConstraints, StateRegistry};
+use crate::element::{ElementId, ElementTree, LayoutConstraints};
 use crate::geometry::Size;
+use crate::pipeline::StateRegistry;
+use crate::state::{State, StateId};
 
 /// Dirty flags for different render phases
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
@@ -167,6 +172,29 @@ impl PipelineOwner {
     /// Check if there are any dirty paint elements
     pub fn has_dirty_paint(&self) -> bool {
         !self.dirty_paint.is_empty()
+    }
+
+    /// Register a State instance
+    ///
+    /// This is a convenience method that forwards to the StateRegistry.
+    /// Use this to register States when they are first created.
+    pub fn register_state<T: 'static + Send + Sync>(&mut self, state: State<T>) -> StateId {
+        self.state_registry.register(state)
+    }
+
+    /// Get a State from the registry by ID
+    ///
+    /// This is a convenience method that forwards to the StateRegistry.
+    /// Returns a cloned State that shares data with the original.
+    pub fn get_state<T: 'static + Clone>(&self, id: StateId) -> Option<State<T>> {
+        self.state_registry.get(id)
+    }
+
+    /// Get a State reference from the registry by ID
+    ///
+    /// This is a convenience method that forwards to the StateRegistry.
+    pub fn get_state_ref<T: 'static>(&self, id: StateId) -> Option<&State<T>> {
+        self.state_registry.get_ref(id)
     }
 }
 

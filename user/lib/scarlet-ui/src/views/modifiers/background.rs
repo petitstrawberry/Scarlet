@@ -40,6 +40,7 @@ impl<V: View> Background<V> {
 impl<V: View + Clone> View for Background<V> {
     fn create_element(&self) -> Box<dyn Element> {
         Box::new(RenderElement::new(
+            self.clone(),
             BackgroundRenderObject::new(self.color),
         ))
     }

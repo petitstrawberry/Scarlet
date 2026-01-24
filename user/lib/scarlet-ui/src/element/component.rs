@@ -4,10 +4,13 @@
 //! the element tree (mutable runtime objects).
 
 use alloc::boxed::Box;
+use alloc::sync::Arc;
+use alloc::vec::Vec;
 use core::any::Any;
 
 use crate::element::{Element, ElementId, LayoutConstraints, UpdateResult};
 use crate::geometry::{Point, Size};
+use crate::state::SubscriptionId;
 use crate::view::View;
 
 /// Element that wraps a View and manages its lifecycle
@@ -22,6 +25,7 @@ pub struct ComponentElement<V: View + Clone> {
     child: Option<Box<dyn Element>>,
     size: Size,
     position: Point,
+    subscriptions: Vec<SubscriptionId>,
 }
 
 impl<V: View + Clone> ComponentElement<V> {
@@ -35,6 +39,7 @@ impl<V: View + Clone> ComponentElement<V> {
             child: Some(child),
             size: Size::ZERO,
             position: Point::ZERO,
+            subscriptions: Vec::new(),
         }
     }
 
@@ -79,7 +84,6 @@ impl<V: View + Clone> Element for ComponentElement<V> {
     fn update(&mut self, new_view: &dyn View) -> UpdateResult {
         // Type-checking reconciliation: check if the new View is the same type
         // Use Any's type_id method to avoid ambiguity
-        use core::any::TypeId;
         if Any::type_id(new_view) != Any::type_id(&self.view) {
             // Different type - signal that this Element should be replaced
             return UpdateResult::Replaced;
@@ -112,9 +116,17 @@ impl<V: View + Clone> Element for ComponentElement<V> {
         let listenables = self.view.listenables();
 
         // For each listenable, subscribe to rebuild notifications
-        // Note: In a real implementation, we'd need a way to track and clean up these subscriptions
-        // For now, this is a placeholder for the subscription mechanism
-        let _ = listenables; // Suppress unused warning
+        // Store the subscription IDs so we can unsubscribe later
+        for listenable in listenables {
+            let element_id = self.id;
+            let callback = Arc::new(move || {
+                // TODO: Trigger rebuild for this element
+                // This will be implemented when we add the rebuild mechanism
+                let _ = element_id;
+            });
+            let subscription_id = listenable.subscribe_any(callback);
+            self.subscriptions.push(subscription_id);
+        }
 
         // Mount the child
         if let Some(ref mut child) = self.child {
@@ -127,6 +139,14 @@ impl<V: View + Clone> Element for ComponentElement<V> {
         if let Some(ref mut child) = self.child {
             child.unmount();
         }
+
+        // Unsubscribe from all Listenables
+        // Note: We need to get the listenables again to call unsubscribe
+        // In the current design, State doesn't store a back-reference to subscribers,
+        // so we need to keep track of subscriptions differently
+        // For now, we'll clear the subscription list
+        // TODO: Implement proper cleanup when we have access to State references
+        self.subscriptions.clear();
     }
 
     fn layout(&mut self, constraints: LayoutConstraints) -> Size {

@@ -104,6 +104,7 @@ impl<V: View> Frame<V> {
 impl<V: View + Clone> View for Frame<V> {
     fn create_element(&self) -> Box<dyn Element> {
         Box::new(RenderElement::new(
+            self.clone(),
             FrameRenderObject::new(self.width, self.height, self.min_width, self.min_height, self.max_width, self.max_height),
         ))
     }

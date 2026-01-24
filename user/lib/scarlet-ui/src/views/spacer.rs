@@ -63,6 +63,7 @@ impl Default for Spacer {
 impl View for Spacer {
     fn create_element(&self) -> Box<dyn Element> {
         Box::new(RenderElement::new(
+            self.clone(),
             SpacerRenderObject::new(self.min_width, self.min_height, self.expand),
         ))
     }

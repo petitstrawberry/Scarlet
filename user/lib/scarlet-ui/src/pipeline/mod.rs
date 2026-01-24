@@ -5,6 +5,8 @@
 
 mod owner;
 mod rendering;
+mod registry;
 
 pub use owner::{PipelineOwner, DirtyPhase};
 pub use rendering::RenderingPipeline;
+pub use registry::StateRegistry;

@@ -11,5 +11,5 @@ pub use id::ElementId;
 pub use element::{Element, LayoutConstraints, UpdateResult};
 pub use component::ComponentElement;
 pub use render::{RenderElement, RenderObject as ElementRenderObject};
-pub use tree::{ElementTree, StateRegistry, generate_element_id};
+pub use tree::{ElementTree, generate_element_id};
 pub use dirty::DirtyFlags;

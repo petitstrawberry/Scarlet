@@ -40,6 +40,7 @@ impl<V: View> AlignmentFrame<V> {
 impl<V: View + Clone> View for AlignmentFrame<V> {
     fn create_element(&self) -> Box<dyn Element> {
         Box::new(RenderElement::new(
+            self.clone(),
             AlignmentRenderObject::new(self.alignment),
         ))
     }

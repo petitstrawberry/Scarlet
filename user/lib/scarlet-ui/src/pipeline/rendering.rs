@@ -10,7 +10,6 @@ use crate::geometry::Size;
 use crate::compositor::Compositor;
 use crate::pipeline::PipelineOwner;
 use crate::buffer::Buffer;
-use crate::view::View;
 use crate::views::Window;
 
 /// RenderingPipeline integrates all components of the rendering system
@@ -67,12 +66,12 @@ impl RenderingPipeline {
     }
 
     /// Get the StateRegistry
-    pub fn state_registry(&self) -> &crate::element::StateRegistry {
+    pub fn state_registry(&self) -> &crate::pipeline::StateRegistry {
         self.pipeline_owner.state_registry()
     }
 
     /// Get mutable reference to the StateRegistry
-    pub fn state_registry_mut(&mut self) -> &mut crate::element::StateRegistry {
+    pub fn state_registry_mut(&mut self) -> &mut crate::pipeline::StateRegistry {
         self.pipeline_owner.state_registry_mut()
     }
 

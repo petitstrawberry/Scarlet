@@ -4,6 +4,7 @@
 //! render content (text, rectangles, images, etc.).
 
 use alloc::boxed::Box;
+use alloc::vec::Vec;
 use core::any::Any;
 
 use crate::element::{Element, ElementId, LayoutConstraints, UpdateResult};
@@ -56,21 +57,40 @@ pub trait RenderObject: Any {
 
 /// Element that wraps a RenderObject
 ///
-/// RenderElement is a leaf element that directly delegates to a RenderObject.
-pub struct RenderElement<R: RenderObject> {
+/// RenderElement holds both a View and its corresponding RenderObject,
+/// enabling reconciliation during updates.
+///
+/// # Type Parameters
+/// * `V` - The View type that created this element (must be Clone)
+/// * `R` - The RenderObject type that handles rendering
+pub struct RenderElement<V: View + Clone, R: RenderObject> {
     id: ElementId,
+    view: V,
     render_object: R,
+    children: Vec<Box<dyn Element>>,
     position: Point,
 }
 
-impl<R: RenderObject> RenderElement<R> {
-    /// Create a new RenderElement with a RenderObject
-    pub fn new(render_object: R) -> Self {
+impl<V: View + Clone, R: RenderObject> RenderElement<V, R> {
+    /// Create a new RenderElement with a View and RenderObject
+    pub fn new(view: V, render_object: R) -> Self {
         Self {
             id: ElementId::generate(),
+            view,
             render_object,
+            children: Vec::new(),
             position: Point::ZERO,
         }
+    }
+
+    /// Get the View
+    pub fn view(&self) -> &V {
+        &self.view
+    }
+
+    /// Get mutable reference to the View
+    pub fn view_mut(&mut self) -> &mut V {
+        &mut self.view
     }
 
     /// Get the RenderObject
@@ -82,9 +102,14 @@ impl<R: RenderObject> RenderElement<R> {
     pub fn render_object_mut(&mut self) -> &mut R {
         &mut self.render_object
     }
+
+    /// Add a child element
+    pub fn add_child(&mut self, child: Box<dyn Element>) {
+        self.children.push(child);
+    }
 }
 
-impl<R: RenderObject> Element for RenderElement<R> {
+impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
     fn id(&self) -> ElementId {
         self.id
     }
@@ -98,16 +123,24 @@ impl<R: RenderObject> Element for RenderElement<R> {
     }
 
     fn children(&self) -> &[Box<dyn Element>] {
-        &[]
+        &self.children
     }
 
     fn children_mut(&mut self) -> &mut [Box<dyn Element>] {
-        &mut []
+        &mut self.children
     }
 
     fn update(&mut self, new_view: &dyn View) -> UpdateResult {
-        // Delegate to the RenderObject's update method
-        self.render_object.update(new_view)
+        // Try to downcast the new_view to the same type as our stored view
+        if let Some(typed_view) = new_view.as_any().downcast_ref::<V>() {
+            // Update the stored view (clone from the reference)
+            self.view = typed_view.clone();
+            // Delegate to the RenderObject's update method
+            self.render_object.update(new_view)
+        } else {
+            // Type mismatch - need to replace
+            UpdateResult::Replaced
+        }
     }
 
     fn layout(&mut self, constraints: LayoutConstraints) -> Size {

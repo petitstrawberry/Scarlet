@@ -57,6 +57,7 @@ impl Default for Rectangle {
 impl View for Rectangle {
     fn create_element(&self) -> Box<dyn Element> {
         Box::new(RenderElement::new(
+            self.clone(),
             RectangleRenderObject::new(self.color, self.corner_radius),
         ))
     }

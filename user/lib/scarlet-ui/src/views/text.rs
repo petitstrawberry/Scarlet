@@ -61,6 +61,7 @@ impl Text {
 impl View for Text {
     fn create_element(&self) -> Box<dyn Element> {
         Box::new(RenderElement::new(
+            self.clone(),
             TextRenderObject::new(self.content.clone(), self.font_size, self.color),
         ))
     }

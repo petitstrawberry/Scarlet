@@ -72,13 +72,11 @@ impl<C: ViewTuple + Clone> Clone for VStack<C> {
     }
 }
 
-impl<C: ViewTuple + 'static> View for VStack<C> {
+impl<C: ViewTuple + Clone + 'static> View for VStack<C> {
     fn create_element(&self) -> Box<dyn Element> {
-        // Create elements from all children in the tuple
-        let children = self.content.create_elements();
-
         Box::new(RenderElement::new(
-            VStackRenderObject::new(self.spacing, self.alignment, children.len()),
+            self.clone(),
+            VStackRenderObject::new(self.spacing, self.alignment),
         ))
     }
 
@@ -104,11 +102,11 @@ pub struct VStackRenderObject {
 
 impl VStackRenderObject {
     /// Create a new VStackRenderObject
-    pub fn new(spacing: f32, alignment: crate::geometry::Alignment, child_count: usize) -> Self {
+    pub fn new(spacing: f32, alignment: crate::geometry::Alignment) -> Self {
         Self {
             spacing,
             alignment,
-            child_count,
+            child_count: 0,
             size: Size::ZERO,
             child_positions: Vec::new(),
         }

@@ -9,6 +9,7 @@ use crate::event::Event;
 use crate::platform::{PlatformWindow, SWSPlatformWindow};
 use crate::pipeline::RenderingPipeline;
 use crate::error::Result;
+use crate::state::StateId;
 
 /// Application trait - main entry point for ScarletUI apps
 ///
@@ -20,6 +21,21 @@ pub trait Application: View {
     ///
     /// This is where the application's UI is defined using Views.
     fn body(&self) -> impl View;
+
+    /// Register all State instances used by this Application
+    ///
+    /// This method is called during Application initialization to register
+    /// all State instances with the StateRegistry. The default implementation
+    /// returns an empty vector.
+    ///
+    /// # Note
+    ///
+    /// This method is provided for future enhancement when automatic State
+    /// registration via macros is implemented. Currently, States are
+    /// automatically registered when first created through the View system.
+    fn register_states(&self) -> alloc::vec::Vec<StateId> {
+        alloc::vec::Vec::new()
+    }
 
     /// Initialize the application
     ///
@@ -37,11 +53,11 @@ pub trait Application: View {
     where
         Self: Sized,
     {
-        // 1. Create root element from self
-        let root_element = self.create_element();
-
-        // 2. Set up rendering pipeline
+        // 1. Set up rendering pipeline
         let mut pipeline = RenderingPipeline::new();
+
+        // 2. Create root element from self
+        let root_element = self.create_element();
         pipeline.set_root(root_element);
 
         // 3. Initialize the application

@@ -4,7 +4,7 @@
 
 use alloc::sync::Arc;
 use alloc::boxed::Box;
-use alloc::vec::Vec;
+use alloc::collections::BTreeMap;
 use core::any::Any;
 use core::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Mutex;
@@ -34,32 +34,60 @@ pub fn generate_state_id() -> StateId {
     StateId(id)
 }
 
+/// Unique identifier for subscriptions
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, PartialOrd, Ord)]
+pub struct SubscriptionId(u32);
+
+impl SubscriptionId {
+    /// Create a new SubscriptionId from a raw value
+    pub const fn new(id: u32) -> Self {
+        Self(id)
+    }
+
+    /// Get the raw ID value
+    pub const fn get(self) -> u32 {
+        self.0
+    }
+}
+
+/// Global counter for generating unique SubscriptionIds
+static SUBSCRIPTION_ID_COUNTER: AtomicU32 = AtomicU32::new(0);
+
+/// Generate a new unique SubscriptionId
+pub fn generate_subscription_id() -> SubscriptionId {
+    let id = SUBSCRIPTION_ID_COUNTER.fetch_add(1, Ordering::SeqCst);
+    SubscriptionId(id)
+}
+
 /// Trait for types that can be subscribed to for change notifications
 pub trait Listenable: Any {
     /// Subscribe to any changes in this listenable
-    fn subscribe_any(&self, callback: Box<dyn Fn(&dyn Any) + Send + Sync>);
+    fn subscribe_any(&self, callback: Arc<dyn Fn() + Send + Sync>) -> SubscriptionId;
 }
 
 impl<T: Any> Listenable for State<T> {
-    fn subscribe_any(&self, callback: Box<dyn Fn(&dyn Any) + Send + Sync>) {
-        self.subscribe(Box::new(move |value: &T| callback(value)))
+    fn subscribe_any(&self, callback: Arc<dyn Fn() + Send + Sync>) -> SubscriptionId {
+        self.subscribe_any_impl(callback)
     }
 }
 
 /// Callback type for state change notifications
 pub type SubscriberCallback<T> = Box<dyn Fn(&T) + Send + Sync>;
 
+/// Callback type for type-erased notifications
+pub type AnyCallback = Arc<dyn Fn() + Send + Sync>;
+
 /// Inner state data shared across State clones
 struct StateInner<T> {
     value: Mutex<T>,
-    subscribers: Mutex<Vec<SubscriberCallback<T>>>,
+    subscribers: Mutex<BTreeMap<SubscriptionId, AnyCallback>>,
 }
 
 impl<T> StateInner<T> {
     fn new(value: T) -> Self {
         Self {
             value: Mutex::new(value),
-            subscribers: Mutex::new(Vec::new()),
+            subscribers: Mutex::new(BTreeMap::new()),
         }
     }
 
@@ -86,15 +114,20 @@ impl<T> StateInner<T> {
     where
         T: Clone,
     {
-        let value = self.get();
         let subscribers = self.subscribers.lock();
-        for callback in subscribers.iter() {
-            callback(&value);
+        for callback in subscribers.values() {
+            callback();
         }
     }
 
-    fn subscribe(&self, callback: SubscriberCallback<T>) {
-        self.subscribers.lock().push(callback);
+    fn subscribe_any(&self, callback: AnyCallback) -> SubscriptionId {
+        let id = generate_subscription_id();
+        self.subscribers.lock().insert(id, callback);
+        id
+    }
+
+    fn unsubscribe(&self, id: SubscriptionId) -> bool {
+        self.subscribers.lock().remove(&id).is_some()
     }
 }
 
@@ -159,9 +192,14 @@ impl<T> State<T> {
         self.inner.notify();
     }
 
-    /// Subscribe to value changes
-    pub fn subscribe(&self, callback: SubscriberCallback<T>) {
-        self.inner.subscribe(callback);
+    /// Subscribe to value changes with a type-erased callback
+    fn subscribe_any_impl(&self, callback: AnyCallback) -> SubscriptionId {
+        self.inner.subscribe_any(callback)
+    }
+
+    /// Unsubscribe a previously registered subscription
+    pub fn unsubscribe(&self, id: SubscriptionId) -> bool {
+        self.inner.unsubscribe(id)
     }
 }
 

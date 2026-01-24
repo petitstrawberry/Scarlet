@@ -48,6 +48,7 @@ impl<V: View> Padding<V> {
 impl<V: View + Clone> View for Padding<V> {
     fn create_element(&self) -> Box<dyn Element> {
         Box::new(RenderElement::new(
+            self.clone(),
             PaddingRenderObject::new(self.insets),
         ))
     }

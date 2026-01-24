@@ -66,6 +66,7 @@ impl Image {
 impl View for Image {
     fn create_element(&self) -> Box<dyn Element> {
         Box::new(RenderElement::new(
+            self.clone(),
             ImageRenderObject::new(self.source.clone(), self.fit_mode),
         ))
     }
