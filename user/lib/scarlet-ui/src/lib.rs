@@ -66,13 +66,14 @@ pub use color::Color;
 pub use error::{Error, Result};
 pub use state::{State, StateId, generate_state_id, Listenable};
 pub use view::View;
-pub use element::{Element, ElementId, LayoutConstraints, ComponentElement, RenderElement, ElementTree, StateRegistry};
+pub use element::{Element, ElementId, LayoutConstraints, ComponentElement, RenderElement, ElementTree, StateRegistry, ElementRenderObject};
 pub use event::{Event, MouseEvent, KeyEvent, InputEvent, KeyCode, MouseButton, EventDispatcher};
 pub use buffer::Buffer;
 pub use compositor::Compositor;
 pub use render::RenderObject;
 pub use pipeline::{PipelineOwner, RenderingPipeline, DirtyPhase};
-pub use views::Window;
+pub use views::{Window, Text, Button, Rectangle, Spacer, Image};
+pub use views::modifiers::{Padding, Frame, Background, SetSize, AlignmentFrame};
 pub use platform::{PlatformWindow, SWSPlatformWindow};
 pub use application::Application;
 
@@ -83,6 +84,9 @@ pub mod prelude {
     pub use crate::error::{Error, Result};
     pub use crate::state::{State, StateId, Listenable};
     pub use crate::view::View;
-    pub use crate::element::{Element, ElementId, LayoutConstraints};
+    pub use crate::element::{Element, ElementId, LayoutConstraints, ElementRenderObject};
     pub use crate::event::{Event, MouseEvent, KeyEvent};
+    pub use crate::application::Application;
+    pub use crate::views::{Window, Text, Button, Rectangle, Spacer};
+    pub use crate::views::modifiers::{Padding, Frame, Background};
 }

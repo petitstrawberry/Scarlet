@@ -8,7 +8,7 @@ mod button;
 mod rectangle;
 mod spacer;
 mod image;
-mod modifiers;
+pub mod modifiers;
 
 pub use window::Window;
 pub use text::{Text, TextRenderObject};
