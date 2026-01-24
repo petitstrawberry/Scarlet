@@ -8,6 +8,10 @@ mod button;
 mod rectangle;
 mod spacer;
 mod image;
+mod divider;
+mod toggle;
+mod slider;
+mod progress;
 pub mod modifiers;
 pub mod containers;
 
@@ -17,6 +21,10 @@ pub use button::{Button, ButtonRenderObject, ButtonCallback};
 pub use rectangle::{Rectangle, RectangleRenderObject};
 pub use spacer::{Spacer, SpacerRenderObject};
 pub use image::{Image, ImageRenderObject, ImageSource, ImageFit};
+pub use divider::{Divider, DividerRenderObject, DividerOrientation};
+pub use toggle::{Toggle, ToggleRenderObject};
+pub use slider::{Slider, SliderRenderObject};
+pub use progress::{ProgressView, ProgressViewRenderObject};
 
 // Re-export modifiers for convenience
 pub use modifiers::{

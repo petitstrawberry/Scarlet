@@ -79,6 +79,7 @@ pub use compositor::Compositor;
 pub use render::RenderObject;
 pub use pipeline::{PipelineOwner, RenderingPipeline, DirtyPhase, StateRegistry};
 pub use views::{Window, Text, Button, Rectangle, Spacer, Image, VStack, HStack, ZStack};
+pub use views::{Divider, DividerOrientation, Toggle, Slider, ProgressView};
 pub use views::modifiers::{Padding, Frame, Background, SetSize, AlignmentFrame};
 pub use platform::{PlatformWindow, SWSPlatformWindow};
 pub use application::Application;
@@ -97,7 +98,8 @@ pub mod prelude {
     pub use crate::element::{Element, ElementId, LayoutConstraints, ElementRenderObject, DirtyFlags};
     pub use crate::event::{Event, MouseEvent, KeyEvent, FocusEvent, LifecycleEvent};
     pub use crate::application::Application;
-    pub use crate::views::{Window, Text, Button, Rectangle, Spacer, VStack, HStack, ZStack};
+    pub use crate::views::{Window, Text, Button, Rectangle, Spacer, Image, VStack, HStack, ZStack};
+    pub use crate::views::{Divider, DividerOrientation, Toggle, Slider, ProgressView};
     pub use crate::views::modifiers::{Padding, Frame, Background};
 
     // Note: The View derive macro must be imported from scarlet_ui_macros:
