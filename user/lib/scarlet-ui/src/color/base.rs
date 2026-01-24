@@ -1,5 +1,29 @@
 //! Color types and utilities for ScarletUI
 
+/// Trait for types that can be converted to a color component (0.0 - 1.0)
+pub trait ColorComponent: Copy {
+    /// Convert to a color component in the range 0.0 - 1.0
+    fn into_color_component(self) -> f32;
+}
+
+impl ColorComponent for u8 {
+    fn into_color_component(self) -> f32 {
+        self as f32 / 255.0
+    }
+}
+
+impl ColorComponent for i32 {
+    fn into_color_component(self) -> f32 {
+        (self.clamp(0, 255) as f32) / 255.0
+    }
+}
+
+impl ColorComponent for f32 {
+    fn into_color_component(self) -> f32 {
+        self
+    }
+}
+
 /// RGBA color with floating-point components (0.0 - 1.0)
 #[derive(Clone, Copy, PartialEq, Debug, Default)]
 pub struct Color {
@@ -11,12 +35,24 @@ pub struct Color {
 
 impl Color {
     /// Create a new RGB color (alpha = 1.0)
-    pub const fn rgb(r: f32, g: f32, b: f32) -> Self {
+    /// Accepts u8 (0-255) or f32 (0.0-1.0) via ColorComponent trait
+    pub fn rgb<T1: ColorComponent, T2: ColorComponent, T3: ColorComponent>(r: T1, g: T2, b: T3) -> Self {
+        Self { r: r.into_color_component(), g: g.into_color_component(), b: b.into_color_component(), a: 1.0 }
+    }
+
+    /// Create a new RGB color (alpha = 1.0) - const fn version for f32 only
+    pub const fn rgb_f32(r: f32, g: f32, b: f32) -> Self {
         Self { r, g, b, a: 1.0 }
     }
 
     /// Create a new RGBA color
-    pub const fn rgba(r: f32, g: f32, b: f32, a: f32) -> Self {
+    /// Accepts u8 (0-255) or f32 (0.0-1.0) via ColorComponent trait
+    pub fn rgba<T1: ColorComponent, T2: ColorComponent, T3: ColorComponent, T4: ColorComponent>(r: T1, g: T2, b: T3, a: T4) -> Self {
+        Self { r: r.into_color_component(), g: g.into_color_component(), b: b.into_color_component(), a: a.into_color_component() }
+    }
+
+    /// Create a new RGBA color - const fn version for f32 only
+    pub const fn rgba_f32(r: f32, g: f32, b: f32, a: f32) -> Self {
         Self { r, g, b, a }
     }
 
@@ -31,31 +67,31 @@ impl Color {
     }
 
     /// Black color
-    pub const BLACK: Self = Self::rgb(0.0, 0.0, 0.0);
+    pub const BLACK: Self = Self::rgb_f32(0.0, 0.0, 0.0);
 
     /// White color
-    pub const WHITE: Self = Self::rgb(1.0, 1.0, 1.0);
+    pub const WHITE: Self = Self::rgb_f32(1.0, 1.0, 1.0);
 
     /// Red color
-    pub const RED: Self = Self::rgb(1.0, 0.0, 0.0);
+    pub const RED: Self = Self::rgb_f32(1.0, 0.0, 0.0);
 
     /// Green color
-    pub const GREEN: Self = Self::rgb(0.0, 1.0, 0.0);
+    pub const GREEN: Self = Self::rgb_f32(0.0, 1.0, 0.0);
 
     /// Blue color
-    pub const BLUE: Self = Self::rgb(0.0, 0.0, 1.0);
+    pub const BLUE: Self = Self::rgb_f32(0.0, 0.0, 1.0);
 
     /// Yellow color
-    pub const YELLOW: Self = Self::rgb(1.0, 1.0, 0.0);
+    pub const YELLOW: Self = Self::rgb_f32(1.0, 1.0, 0.0);
 
     /// Cyan color
-    pub const CYAN: Self = Self::rgb(0.0, 1.0, 1.0);
+    pub const CYAN: Self = Self::rgb_f32(0.0, 1.0, 1.0);
 
     /// Magenta color
-    pub const MAGENTA: Self = Self::rgb(1.0, 0.0, 1.0);
+    pub const MAGENTA: Self = Self::rgb_f32(1.0, 0.0, 1.0);
 
     /// Transparent color
-    pub const TRANSPARENT: Self = Self::rgba(0.0, 0.0, 0.0, 0.0);
+    pub const TRANSPARENT: Self = Self::rgba_f32(0.0, 0.0, 0.0, 0.0);
 
     /// Convert color to 32-bit BGRA format (for framebuffers)
     pub fn to_bgra(&self) -> u32 {

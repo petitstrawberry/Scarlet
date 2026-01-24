@@ -12,7 +12,7 @@ pub mod semantic;
 pub mod system;
 pub mod palette;
 
-pub use base::Color;
+pub use base::{Color, ColorComponent};
 pub use scheme::ColorScheme;
 pub use semantic::SemanticColor;
 pub use system::SystemColors;

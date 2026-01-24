@@ -347,9 +347,10 @@ impl<'a> Canvas<'a> {
 
         let offset = ((y as u32 * self.width + x as u32) * 4) as usize;
         if offset + 4 <= self.buffer.len() {
+            // Convert to BGRA and use little-endian bytes
+            // to_bgra() produces 0xAARRGGBB which becomes [BB, GG, RR, AA] in little-endian
             let bgra = color.to_bgra();
-            let bgra_bytes = bgra.to_le_bytes();
-            self.buffer[offset..offset + 4].copy_from_slice(&bgra_bytes);
+            self.buffer[offset..offset + 4].copy_from_slice(&bgra.to_le_bytes());
         }
     }
 
@@ -361,11 +362,10 @@ impl<'a> Canvas<'a> {
         if offset + 4 > self.buffer.len() {
             return Color::BLACK;
         }
-        let b = self.buffer[offset];
-        let g = self.buffer[offset + 1];
-        let r = self.buffer[offset + 2];
-        let a = self.buffer[offset + 3];
-        Color::rgba(r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0, a as f32 / 255.0)
+        // Read BGRA bytes as little-endian u32 and convert using from_bgra
+        let bgra_bytes = [self.buffer[offset], self.buffer[offset + 1],
+                          self.buffer[offset + 2], self.buffer[offset + 3]];
+        Color::from_bgra(u32::from_le_bytes(bgra_bytes))
     }
 
     fn put_pixel_alpha(&mut self, x: i32, y: i32, color: Color, alpha: f32) {
@@ -398,6 +398,8 @@ impl<'a> Canvas<'a> {
 
     /// Fill a rectangle with a solid color
     pub fn fill_rect(&mut self, x: i32, y: i32, width: u32, height: u32, color: Color) {
+        // Convert to BGRA and use little-endian bytes
+        // to_bgra() produces 0xAARRGGBB which becomes [BB, GG, RR, AA] in little-endian
         let bgra = color.to_bgra();
         let bgra_bytes = bgra.to_le_bytes();
 
