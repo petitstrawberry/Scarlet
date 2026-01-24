@@ -9,12 +9,13 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use alloc::boxed::Box;
 use alloc::format;
+use alloc::vec;
 use core::any::Any;
 
 use crate::view::View;
-use crate::element::{Element, ElementId, ElementRenderObject, LayoutConstraints, UpdateResult};
+use crate::element::{Element, ElementId, ElementRenderObject, LayoutConstraints, UpdateResult, RenderElement};
 use crate::geometry::{Size, Point, Rect};
-use crate::color::{Color, ColorPalette};
+use crate::color::Color;
 use crate::buffer::Buffer;
 use crate::event::{MouseEvent, MouseButton};
 use crate::state::Listenable;
@@ -29,25 +30,22 @@ const WINDOW_CORNER_RADIUS: f32 = 0.0;
 /// Window View - top-level window container
 ///
 /// Window provides window-level properties like title, size, and decorations.
-/// It wraps a child View and provides window decorations (titlebar, buttons, border).
-pub struct Window<V: View> {
+pub struct Window {
     app_id: String,
     title: String,
     size: Size,
-    child: V,
     resizable: bool,
     decorated: bool,
 }
 
-impl<V: View> Window<V> {
-    /// Create a new Window with a title and child
-    pub fn new(title: impl Into<String>, child: V) -> Self {
+impl Window {
+    /// Create a new Window with a title
+    pub fn new(title: impl Into<String>) -> Self {
         let title_str = title.into();
         Self {
             app_id: String::from("com.example.scarletui"),
             title: title_str,
             size: Size::new(800.0, 600.0),
-            child,
             resizable: true,
             decorated: true,
         }
@@ -102,37 +100,37 @@ impl<V: View> Window<V> {
         self.decorated
     }
 
-    /// Get the child View
-    pub fn child(&self) -> &V {
-        &self.child
-    }
-
-    /// Get mutable reference to the child View
-    pub fn child_mut(&mut self) -> &mut V {
-        &mut self.child
-    }
 }
 
-impl<V: View + Clone> Clone for Window<V> {
+impl Clone for Window {
     fn clone(&self) -> Self {
         Self {
             app_id: self.app_id.clone(),
             title: self.title.clone(),
             size: self.size,
-            child: self.child.clone(),
             resizable: self.resizable,
             decorated: self.decorated,
         }
     }
 }
 
-impl<V: View + Clone> View for Window<V> {
+impl View for Window {
     fn create_element(&self) -> Box<dyn Element> {
-        Box::new(WindowElement::new(self.clone()))
+        // Create WindowRenderObject with titlebar included
+        let render_object = WindowRenderObject::new(
+            self.title.clone(),
+            self.size,
+            self.decorated,
+        );
+
+        Box::new(RenderElement::new(
+            self.clone(),
+            render_object,
+        ))
     }
 
     fn listenables(&self) -> Vec<&dyn Listenable> {
-        self.child.listenables()
+        Vec::new()
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -140,179 +138,17 @@ impl<V: View + Clone> View for Window<V> {
     }
 }
 
-/// WindowElement - Element that includes both titlebar decorations and child content
-struct WindowElement<V: View + Clone> {
-    id: ElementId,
-    view: Window<V>,
-    render_object: WindowRenderObject,
-    child: Box<dyn Element>,
-    position: Point,
-}
-
-impl<V: View + Clone> WindowElement<V> {
-    fn new(view: Window<V>) -> Self {
-        let child_element = view.child.create_element();
-        let render_object = WindowRenderObject::new(view.title.clone(), view.size, view.decorated);
-
-        Self {
-            id: ElementId::generate(),
-            view,
-            render_object,
-            child: child_element,
-            position: Point::ZERO,
-        }
-    }
-}
-
-impl<V: View + Clone> Element for WindowElement<V> {
-    fn id(&self) -> ElementId {
-        self.id
-    }
-
-    fn type_name(&self) -> &str {
-        "WindowElement"
-    }
-
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
-    fn as_any_mut(&mut self) -> &mut dyn Any {
-        self
-    }
-
-    fn children(&self) -> &[Box<dyn Element>] {
-        core::slice::from_ref(&self.child)
-    }
-
-    fn children_mut(&mut self) -> &mut [Box<dyn Element>] {
-        // This is a bit tricky - we need to return a mutable slice
-        // but we only have one child. Use unsafe to extend lifetime.
-        unsafe {
-            core::slice::from_raw_parts_mut(&mut self.child as *mut Box<dyn Element>, 1)
-        }
-    }
-
-    fn update(&mut self, new_view: &dyn View) -> UpdateResult {
-        if let Some(window) = new_view.as_any().downcast_ref::<Window<V>>() {
-            self.view.title = window.title.clone();
-            self.view.size = window.size;
-            self.render_object.update(window);
-            UpdateResult::Updated
-        } else {
-            UpdateResult::NoChange
-        }
-    }
-
-    fn rebuild(&mut self) -> UpdateResult {
-        // Recreate child from updated view
-        let new_child = self.view.child.create_element();
-        self.child = new_child;
-        UpdateResult::Updated
-    }
-
-    fn mount(&mut self) {
-        self.child.mount();
-    }
-
-    fn unmount(&mut self) {
-        self.child.unmount();
-    }
-
-    fn layout(&mut self, constraints: LayoutConstraints) -> Size {
-        // Layout the titlebar/render_object first
-        let window_size = self.render_object.layout(constraints);
-
-        // Layout child with constraints for content area (below titlebar)
-        let content_y = if self.view.decorated {
-            TITLEBAR_HEIGHT
-        } else {
-            0.0
-        };
-
-        let content_constraints = LayoutConstraints::new(
-            0.0,
-            window_size.width,
-            0.0,
-            (window_size.height - content_y).max(0.0),
-        );
-
-        let _child_size = self.child.layout(content_constraints);
-
-        // Position child below titlebar
-        self.child.set_position(Point::new(0.0, content_y));
-
-        window_size
-    }
-
-    fn position(&self) -> Point {
-        self.position
-    }
-
-    fn set_position(&mut self, position: Point) {
-        self.position = position;
-    }
-
-    fn render(&mut self) {
-        // Render titlebar
-        self.render_object.render();
-
-        // Render child
-        self.child.render();
-    }
-
-    fn get_buffer(&self) -> Option<&Buffer> {
-        // Return titlebar buffer for compositing
-        self.render_object.get_buffer()
-    }
-
-    fn handle_event(&mut self, event: &crate::event::Event, phase: crate::event::Phase) -> bool {
-        use crate::event::Event;
-
-        match event {
-            Event::Mouse(mouse_event) => {
-                // Handle titlebar button events
-                if self.render_object.handle_mouse_event(mouse_event) {
-                    return true;
-                }
-
-                // Forward to child
-                self.child.handle_event(event, phase)
-            }
-            _ => self.child.handle_event(event, phase),
-        }
-    }
-}
-
-/// Window RenderObject - handles rendering of window decorations
+/// WindowRenderObject - renders window with titlebar and background
 ///
-/// This renders the titlebar, control buttons (close, maximize, minimize),
-/// window border, and shadow. The child content is rendered separately.
+/// This RenderObject owns a single buffer that contains:
+/// - Window background (WHITE or custom)
+/// - Titlebar with buttons (if decorated)
 pub struct WindowRenderObject {
     title: String,
     size: Size,
     decorated: bool,
     focused: bool,
-
-    // Button states
-    close_button_hovered: bool,
-    close_button_pressed: bool,
-    minimize_button_hovered: bool,
-    minimize_button_pressed: bool,
-    maximize_button_hovered: bool,
-    maximize_button_pressed: bool,
-
-    // Layout
-    titlebar_rect: Rect,
-    close_button_rect: Rect,
-    minimize_button_rect: Rect,
-    maximize_button_rect: Rect,
-    content_rect: Rect,
-
-    // Buffers
-    titlebar_buffer: Option<Buffer>,
-
-    dirty: bool,
+    buffer: Option<Buffer>,
 }
 
 impl WindowRenderObject {
@@ -322,359 +158,160 @@ impl WindowRenderObject {
             size,
             decorated,
             focused: true,
-
-            // Button states
-            close_button_hovered: false,
-            close_button_pressed: false,
-            minimize_button_hovered: false,
-            minimize_button_pressed: false,
-            maximize_button_hovered: false,
-            maximize_button_pressed: false,
-
-            // Layout
-            titlebar_rect: Rect::new(Point::new(0.0, 0.0), Size::new(0.0, 0.0)),
-            close_button_rect: Rect::new(Point::new(0.0, 0.0), Size::new(0.0, 0.0)),
-            minimize_button_rect: Rect::new(Point::new(0.0, 0.0), Size::new(0.0, 0.0)),
-            maximize_button_rect: Rect::new(Point::new(0.0, 0.0), Size::new(0.0, 0.0)),
-            content_rect: Rect::new(Point::new(0.0, 0.0), Size::new(0.0, 0.0)),
-
-            // Buffers
-            titlebar_buffer: None,
-
-            dirty: true,
+            buffer: None,
         }
     }
 
-    /// Get the content area (excluding titlebar and borders)
-    pub fn content_area(&self) -> Rect {
-        self.content_rect
+    /// Draw the window background and titlebar
+    fn draw(&mut self) {
+        let width = libm::ceilf(self.size.width) as usize;
+        let height = libm::ceilf(self.size.height) as usize;
+        let needed = width * height;
+        let title = self.title.clone();
+        let decorated = self.decorated;
+        let focused = self.focused;
+
+        // Create or resize buffer
+        if self.buffer.as_ref().map_or(true, |b| b.as_slice().len() < needed) {
+            scarlet_std::println!("[WindowRenderObject] Creating buffer: {}x{}", width, height);
+            self.buffer = Some(Buffer::from_dimensions(width as u32, height as u32));
+        }
+
+        if let Some(ref mut buffer) = self.buffer {
+            // Fill entire background with white using u32 slice
+            let bg_color = Color::WHITE;
+            let bgra = bg_color.to_bgra();
+            let slice = buffer.as_mut_slice();
+            for i in 0..(width * height) {
+                slice[i] = bgra;
+            }
+
+            // Draw titlebar if decorated (needs u8 slice for Canvas)
+            if decorated {
+                Self::draw_titlebar_static(&title, focused, buffer.data_mut(), width, height);
+            }
+        }
     }
 
-    /// Get the titlebar height
-    pub fn titlebar_height(&self) -> f32 {
-        if self.decorated {
-            TITLEBAR_HEIGHT
+    /// Draw titlebar on the buffer (static method to avoid self borrow issues)
+    fn draw_titlebar_static(title: &str, focused: bool, data: &mut [u8], width: usize, _height: usize) {
+        let titlebar_height = libm::ceilf(TITLEBAR_HEIGHT) as usize;
+
+        // Titlebar background color
+        let base_color = if focused {
+            Color::rgb(0.92, 0.92, 0.93)
         } else {
-            0.0
+            Color::rgb(0.85, 0.85, 0.86)
+        };
+        let bgra = base_color.to_bgra();
+
+        // Fill titlebar area
+        for y in 0..titlebar_height {
+            for x in 0..width {
+                let idx = (y * width + x) * 4;
+                data[idx] = (bgra & 0xFF) as u8;
+                data[idx + 1] = ((bgra >> 8) & 0xFF) as u8;
+                data[idx + 2] = ((bgra >> 16) & 0xFF) as u8;
+                data[idx + 3] = ((bgra >> 24) & 0xFF) as u8;
+            }
         }
+
+        // Draw border at bottom of titlebar
+        let border_color = Color::rgb(0.39, 0.39, 0.41);
+        let border_bgra = border_color.to_bgra();
+        for x in 0..width {
+            let idx = ((titlebar_height - 1) * width + x) * 4;
+            data[idx] = (border_bgra & 0xFF) as u8;
+            data[idx + 1] = ((border_bgra >> 8) & 0xFF) as u8;
+            data[idx + 2] = ((border_bgra >> 16) & 0xFF) as u8;
+            data[idx + 3] = ((border_bgra >> 24) & 0xFF) as u8;
+        }
+
+        // Draw title text
+        use crate::graphics::Canvas;
+        let mut canvas = Canvas::new(data, width as u32, _height as u32);
+        canvas.draw_text_sized(10, 9, title, Color::rgb(0.08, 0.08, 0.09), 13.0);
+
+        // Draw window controls (close, maximize, minimize buttons)
+        Self::draw_window_controls_static(&mut canvas, width);
+
+        scarlet_std::println!("[WindowRenderObject] Drew titlebar: {}x{}, title='{}'",
+            width, titlebar_height, title);
     }
 
-    /// Draw the titlebar with control buttons
-    fn draw_titlebar(&mut self, _palette: &ColorPalette) {
-        if !self.decorated {
-            return;
-        }
-
-        // Extract all needed state before borrowing
+    /// Draw window control buttons (static method)
+    fn draw_window_controls_static(canvas: &mut crate::graphics::Canvas, _width: usize) {
         let button_y = (TITLEBAR_HEIGHT - CLOSE_BUTTON_SIZE) / 2.0;
         let button_start_x = BUTTON_MARGIN;
+
+        // Close button
         let close_rect = Rect::new(
             Point::new(button_start_x, button_y),
             Size::new(CLOSE_BUTTON_SIZE, CLOSE_BUTTON_SIZE)
         );
+        Self::draw_button_static(canvas, &close_rect);
+
+        // Maximize button
         let maximize_x = button_start_x + CLOSE_BUTTON_SIZE + BUTTON_SPACING;
         let maximize_rect = Rect::new(
             Point::new(maximize_x, button_y),
             Size::new(CLOSE_BUTTON_SIZE, CLOSE_BUTTON_SIZE)
         );
+        Self::draw_button_static(canvas, &maximize_rect);
+
+        // Minimize button
         let minimize_x = maximize_x + CLOSE_BUTTON_SIZE + BUTTON_SPACING;
         let minimize_rect = Rect::new(
             Point::new(minimize_x, button_y),
             Size::new(CLOSE_BUTTON_SIZE, CLOSE_BUTTON_SIZE)
         );
-
-        let close_hovered = self.close_button_hovered;
-        let close_pressed = self.close_button_pressed;
-        let minimize_hovered = self.minimize_button_hovered;
-        let minimize_pressed = self.minimize_button_pressed;
-        let maximize_hovered = self.maximize_button_hovered;
-        let maximize_pressed = self.maximize_button_pressed;
-        let focused = self.focused;
-        let title = self.title.clone();
-
-        let width = libm::ceilf(self.size.width) as usize;
-        let height = libm::ceilf(TITLEBAR_HEIGHT) as usize;
-
-        // Create or resize buffer
-        let needed = (width * height * 4) as usize;
-        if self.titlebar_buffer.as_ref().map_or(true, |b| b.data().len() < needed) {
-            self.titlebar_buffer = Some(Buffer::from_dimensions(width as u32, height as u32));
-        }
-
-        if let Some(ref mut buffer) = self.titlebar_buffer {
-            // Base color from Scarlet_old
-            let base_color = if focused {
-                Color::rgb(0.92, 0.92, 0.93) // rgb(235, 235, 238)
-            } else {
-                Color::rgb(0.85, 0.85, 0.86)
-            };
-
-            // Button colors (all same color, only change on hover/press)
-            let close_color = if close_pressed {
-                Color::rgb(0.74, 0.74, 0.76) // rgb(190, 190, 194)
-            } else if close_hovered {
-                Color::rgb(0.82, 0.82, 0.84) // rgb(210, 210, 214)
-            } else {
-                base_color
-            };
-
-            let maximize_color = if maximize_pressed {
-                Color::rgb(0.74, 0.74, 0.76)
-            } else if maximize_hovered {
-                Color::rgb(0.82, 0.82, 0.84)
-            } else {
-                base_color
-            };
-
-            let minimize_color = if minimize_pressed {
-                Color::rgb(0.74, 0.74, 0.76)
-            } else if minimize_hovered {
-                Color::rgb(0.82, 0.82, 0.84)
-            } else {
-                base_color
-            };
-
-            // Fill titlebar background
-            let mut data = buffer.data_mut();
-            for y in 0..height {
-                for x in 0..width {
-                    let idx = (y * width + x) * 4;
-                    let bgra = base_color.to_bgra();
-                    // Write u32 as 4 u8 bytes (little-endian BGRA)
-                    data[idx] = (bgra & 0xFF) as u8;
-                    data[idx + 1] = ((bgra >> 8) & 0xFF) as u8;
-                    data[idx + 2] = ((bgra >> 16) & 0xFF) as u8;
-                    data[idx + 3] = ((bgra >> 24) & 0xFF) as u8;
-                }
-            }
-
-            use crate::graphics::Canvas;
-            let mut canvas = Canvas::new(&mut data, width as u32, height as u32);
-
-            // Draw buttons with their colors
-            Self::draw_button_rect(&mut canvas, &close_rect, close_color);
-            Self::draw_button_rect(&mut canvas, &maximize_rect, maximize_color);
-            Self::draw_button_rect(&mut canvas, &minimize_rect, minimize_color);
-
-            // Draw titlebar border (bottom)
-            let border_color = Color::rgb(0.39, 0.39, 0.41); // rgb(100, 100, 105)
-            for x in 0..width as i32 {
-                canvas.put_pixel(x, (height - 1) as i32, border_color);
-            }
-
-            // Draw title text (left-aligned at 10, 9 like Scarlet_old)
-            if !title.is_empty() {
-                let title_display = if title.len() > 60 {
-                    format!("{}...", &title[..57])
-                } else {
-                    title
-                };
-
-                canvas.draw_text_sized(10, 9, &title_display, Color::rgb(0.08, 0.08, 0.09), 13.0);
-            }
-
-            // Draw icons on all buttons (always visible, like Scarlet_old)
-            let icon_color = Color::rgb(0.12, 0.12, 0.13); // rgb(30, 30, 34)
-
-            // Close: X icon (double-stroke)
-            let cx = (close_rect.origin.x + CLOSE_BUTTON_SIZE / 2.0) as i32;
-            let cy = (close_rect.origin.y + CLOSE_BUTTON_SIZE / 2.0) as i32;
-            let size = 10i32;
-            let half = size / 2;
-            Self::draw_line(&mut canvas, cx - half, cy - half, cx + half - 1, cy + half - 1, icon_color);
-            Self::draw_line(&mut canvas, cx + half - 1, cy - half, cx - half, cy + half - 1, icon_color);
-
-            // Maximize: square outline
-            let mx = (maximize_rect.origin.x + CLOSE_BUTTON_SIZE / 2.0) as i32;
-            let my = (maximize_rect.origin.y + CLOSE_BUTTON_SIZE / 2.0) as i32;
-            let msize = 10i32;
-            let mhalf = msize / 2;
-            Self::draw_rect_outline(&mut canvas, mx - mhalf, my - mhalf, msize as u32, msize as u32, icon_color);
-
-            // Minimize: horizontal line
-            let nx = (minimize_rect.origin.x + CLOSE_BUTTON_SIZE / 2.0) as i32;
-            let ny = (minimize_rect.origin.y + CLOSE_BUTTON_SIZE / 2.0) as i32 + 3;
-            let nsize = 12i32;
-            let nhalf = nsize / 2;
-            Self::draw_line(&mut canvas, nx - nhalf, ny, nx + nhalf, ny, icon_color);
-
-            // Update self rects after drawing
-            self.close_button_rect = close_rect;
-            self.maximize_button_rect = maximize_rect;
-            self.minimize_button_rect = minimize_rect;
-        }
+        Self::draw_button_static(canvas, &minimize_rect);
     }
 
-    /// Draw a filled rectangle for a button
-    fn draw_button_rect(canvas: &mut crate::graphics::Canvas, rect: &Rect, color: Color) {
+    /// Draw a single button (static method)
+    fn draw_button_static(canvas: &mut crate::graphics::Canvas, rect: &Rect) {
         let x = rect.origin.x as i32;
         let y = rect.origin.y as i32;
         let w = libm::ceilf(rect.size.width) as u32;
         let h = libm::ceilf(rect.size.height) as u32;
 
+        // Button background (same as titlebar)
+        let color = Color::rgb(0.92, 0.92, 0.93);
         for dy in 0..h {
             for dx in 0..w {
                 canvas.put_pixel(x + dx as i32, y + dy as i32, color);
             }
         }
-    }
 
-    /// Draw a line (for icons)
-    fn draw_line(canvas: &mut crate::graphics::Canvas, x0: i32, y0: i32, x1: i32, y1: i32, color: Color) {
-        // Bresenham's line algorithm
-        let dx = (x1 - x0).abs();
-        let dy = (y1 - y0).abs();
-        let sx = if x0 < x1 { 1 } else { -1 };
-        let sy = if y0 < y1 { 1 } else { -1 };
-        let mut err = dx - dy;
+        // Button icon (simple circle for now)
+        let cx = x + w as i32 / 2;
+        let cy = y + h as i32 / 2;
+        let icon_color = Color::rgb(0.2, 0.2, 0.2);
 
-        let mut x = x0;
-        let mut y = y0;
-
-        loop {
-            canvas.put_pixel(x, y, color);
-            if x == x1 && y == y1 {
-                break;
-            }
-            let e2 = 2 * err;
-            if e2 > -dy {
-                err -= dy;
-                x += sx;
-            }
-            if e2 < dx {
-                err += dx;
-                y += sy;
-            }
+        // Draw X for close button
+        let size = 6i32;
+        for i in -size..=size {
+            canvas.put_pixel(cx + i, cy + i, icon_color);
+            canvas.put_pixel(cx + i, cy - i, icon_color);
         }
-    }
-
-    /// Draw a rectangle outline (for maximize icon)
-    fn draw_rect_outline(canvas: &mut crate::graphics::Canvas, x: i32, y: i32, w: u32, h: u32, color: Color) {
-        let w = w as i32;
-        let h = h as i32;
-
-        // Top and bottom
-        for i in 0..w {
-            canvas.put_pixel(x + i, y, color);
-            canvas.put_pixel(x + i, y + h - 1, color);
-        }
-        // Left and right
-        for i in 0..h {
-            canvas.put_pixel(x, y + i, color);
-            canvas.put_pixel(x + w - 1, y + i, color);
-        }
-    }
-
-    /// Calculate layout for decorations
-    fn calculate_layout(&mut self) {
-        if self.decorated {
-            // Titlebar
-            self.titlebar_rect = Rect::new(
-                Point::new(0.0, 0.0),
-                Size::new(self.size.width, TITLEBAR_HEIGHT)
-            );
-
-            // Content area (below titlebar)
-            let content_y = TITLEBAR_HEIGHT;
-            let content_height = (self.size.height - TITLEBAR_HEIGHT).max(0.0);
-            self.content_rect = Rect::new(
-                Point::new(0.0, content_y),
-                Size::new(self.size.width, content_height)
-            );
-        } else {
-            // No decorations - full window is content
-            self.content_rect = Rect::new(Point::new(0.0, 0.0), self.size);
-            self.titlebar_rect = Rect::new(Point::new(0.0, 0.0), Size::new(0.0, 0.0));
-        }
-    }
-
-    /// Update button hover states based on mouse position
-    pub fn update_hover_states(&mut self, point: Point) {
-        let in_close = self.close_button_rect.contains(point);
-        let in_minimize = self.minimize_button_rect.contains(point);
-        let in_maximize = self.maximize_button_rect.contains(point);
-
-        self.close_button_hovered = in_close;
-        self.minimize_button_hovered = in_minimize;
-        self.maximize_button_hovered = in_maximize;
-    }
-
-    /// Handle mouse events
-    pub fn handle_mouse_event(&mut self, event: &MouseEvent) -> bool {
-        match event {
-            MouseEvent::Moved { x, y } => {
-                let point = Point::new(*x as f32, *y as f32);
-                self.update_hover_states(point);
-                self.dirty = true;
-                false
-            }
-            MouseEvent::ButtonPressed { button, x, y, .. } => {
-                if *button == MouseButton::Left {
-                    let point = Point::new(*x as f32, *y as f32);
-
-                    if self.close_button_rect.contains(point) {
-                        self.close_button_pressed = true;
-                        self.dirty = true;
-                        return true;
-                    } else if self.minimize_button_rect.contains(point) {
-                        self.minimize_button_pressed = true;
-                        self.dirty = true;
-                        return true;
-                    } else if self.maximize_button_rect.contains(point) {
-                        self.maximize_button_pressed = true;
-                        self.dirty = true;
-                        return true;
-                    }
-                }
-                false
-            }
-            MouseEvent::ButtonReleased { button, .. } => {
-                if *button == MouseButton::Left {
-                    let close_clicked = self.close_button_pressed;
-                    let minimize_clicked = self.minimize_button_pressed;
-                    let maximize_clicked = self.maximize_button_pressed;
-
-                    self.close_button_pressed = false;
-                    self.minimize_button_pressed = false;
-                    self.maximize_button_pressed = false;
-                    self.dirty = true;
-
-                    close_clicked || minimize_clicked || maximize_clicked
-                } else {
-                    false
-                }
-            }
-            _ => false,
-        }
-    }
-
-    /// Set the focused state
-    pub fn set_focused(&mut self, focused: bool) {
-        if self.focused != focused {
-            self.focused = focused;
-            self.dirty = true;
-        }
-    }
-
-    /// Update from new Window view
-    pub fn update<V: View>(&mut self, window: &Window<V>) {
-        self.title = window.title.clone();
-        self.size = window.size;
-        self.dirty = true;
     }
 }
 
 impl ElementRenderObject for WindowRenderObject {
     fn layout(&mut self, constraints: LayoutConstraints) -> Size {
-        // Use the window's fixed size
-        self.size = Size::new(
-            self.size.width.max(constraints.min_width),
-            self.size.height.max(constraints.min_height)
-        );
+        let width = if constraints.max_width.is_finite() && constraints.max_width > 0.0 {
+            constraints.max_width.max(constraints.min_width)
+        } else {
+            self.size.width
+        };
 
-        self.calculate_layout();
+        let height = if constraints.max_height.is_finite() && constraints.max_height > 0.0 {
+            constraints.max_height.max(constraints.min_height)
+        } else {
+            self.size.height
+        };
 
-        // Return the size including decorations
+        self.size = Size { width, height };
         self.size
     }
 
@@ -683,12 +320,15 @@ impl ElementRenderObject for WindowRenderObject {
     }
 
     fn render(&mut self) {
-        // Re-render if dirty
-        if self.dirty {
-            let palette = ColorPalette::default();
-            self.draw_titlebar(&palette);
-            self.dirty = false;
-        }
+        scarlet_std::println!("[WindowRenderObject] render: size={}x{}, decorated={}",
+            self.size.width, self.size.height, self.decorated);
+        self.draw();
+        scarlet_std::println!("[WindowRenderObject] render: complete, buffer={}",
+            self.buffer.is_some());
+    }
+
+    fn get_buffer(&self) -> Option<&Buffer> {
+        self.buffer.as_ref()
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -700,11 +340,6 @@ impl ElementRenderObject for WindowRenderObject {
     }
 
     fn update(&mut self, _new_view: &dyn View) -> UpdateResult {
-        // Window properties don't update dynamically for now
         UpdateResult::NoChange
-    }
-
-    fn get_buffer(&self) -> Option<&Buffer> {
-        self.titlebar_buffer.as_ref()
     }
 }

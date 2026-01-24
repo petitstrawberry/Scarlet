@@ -162,26 +162,34 @@ impl ElementRenderObject for ButtonRenderObject {
     fn layout(&mut self, constraints: crate::element::LayoutConstraints) -> Size {
         let intrinsic = self.estimate_size();
 
-        let width = if constraints.max_width > 0.0 {
-            intrinsic.width.min(constraints.max_width).max(constraints.min_width)
-        } else {
-            intrinsic.width
-        };
+        scarlet_std::println!("[ButtonRenderObject] layout: label='{}' intrinsic={:?}, constraints={:?}",
+            self.label, intrinsic, constraints);
 
-        let height = if constraints.max_height > 0.0 {
-            intrinsic.height.min(constraints.max_height).max(constraints.min_height)
-        } else {
-            intrinsic.height
-        };
+        // For buttons, use the intrinsic size, but constrain within bounds
+        // Buttons should NOT expand to fill min_width/min_height
+        let mut width = intrinsic.width;
+        let mut height = intrinsic.height;
+
+        // Apply max constraints (don't exceed maximum)
+        if constraints.max_width.is_finite() && constraints.max_width > 0.0 {
+            width = width.min(constraints.max_width);
+        }
+        if constraints.max_height.is_finite() && constraints.max_height > 0.0 {
+            height = height.min(constraints.max_height);
+        }
+
+        // Don't expand to min - buttons should stay at their intrinsic size
 
         self.size = Size { width, height };
 
         // Create buffer for this button
         let w = libm::ceilf(width) as u32;
         let h = libm::ceilf(height) as u32;
-        let needed = (w * h * 4) as usize;
 
-        if self.buffer.as_ref().map_or(true, |b| b.data().len() < needed) {
+        scarlet_std::println!("[ButtonRenderObject] layout: final size={}x{}, buffer needed={} bytes",
+            w, h, w * h * 4);
+
+        if self.buffer.as_ref().map_or(true, |b| b.data().len() < w as usize * h as usize * 4) {
             self.buffer = Some(Buffer::from_dimensions(w, h));
         }
 
@@ -202,6 +210,8 @@ impl ElementRenderObject for ButtonRenderObject {
 
     fn render(&mut self) {
         // Render button to buffer
+        scarlet_std::println!("[ButtonRenderObject] render: label='{}', buffer={}",
+            self.label, self.buffer.is_some());
         if let Some(ref mut buffer) = self.buffer {
             let width = buffer.width();
             let height = buffer.height();

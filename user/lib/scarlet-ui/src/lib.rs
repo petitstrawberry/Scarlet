@@ -78,7 +78,7 @@ pub use buffer::Buffer;
 pub use compositor::Compositor;
 pub use render::RenderObject;
 pub use pipeline::{PipelineOwner, RenderingPipeline, DirtyPhase, StateRegistry};
-pub use views::{Window, WindowRenderObject, Text, Button, Rectangle, Spacer, Image, VStack, HStack, ZStack};
+pub use views::{Window, Text, Button, Rectangle, Spacer, Image, VStack, HStack, ZStack};
 pub use views::modifiers::{Padding, Frame, Background, SetSize, AlignmentFrame};
 pub use platform::{PlatformWindow, SWSPlatformWindow};
 pub use application::Application;

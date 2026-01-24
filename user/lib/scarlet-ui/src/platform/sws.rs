@@ -70,25 +70,16 @@ impl PlatformWindow for SWSPlatformWindow {
         if let Some(surface) = self.conn.surface_mut(self.surface_id) {
             // Get the shared memory buffer
             surface.with_buffer(|shm_buf, width, height| {
-                let src_data = buffer.as_slice();
-                let shm_len = width as usize * height as usize;
+                // SWS shared memory is width * height * 4 bytes (BGRA u8 array)
+                let src_data = buffer.data(); // &[u8]
+                let shm_len = (width * height * 4) as usize;
                 let dst_data = unsafe {
                     core::slice::from_raw_parts_mut(shm_buf.as_mut_ptr(), shm_len)
                 };
 
-                // Convert u32 pixels to u8 bytes (BGRA format)
-                let copy_len = src_data.len().min(shm_len / 4);
-                for i in 0..copy_len {
-                    let pixel = src_data[i];
-                    let b = (pixel & 0xFF) as u8;
-                    let g = ((pixel >> 8) & 0xFF) as u8;
-                    let r = ((pixel >> 16) & 0xFF) as u8;
-                    let a = ((pixel >> 24) & 0xFF) as u8;
-                    dst_data[i * 4] = b;
-                    dst_data[i * 4 + 1] = g;
-                    dst_data[i * 4 + 2] = r;
-                    dst_data[i * 4 + 3] = a;
-                }
+                // Copy u8 bytes directly
+                let copy_len = src_data.len().min(shm_len);
+                dst_data[..copy_len].copy_from_slice(&src_data[..copy_len]);
             });
         }
 

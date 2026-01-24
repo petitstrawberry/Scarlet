@@ -96,8 +96,13 @@ pub trait Application: View {
             }
 
             // 6.2 Render frame
-            if let Some(buffer) = pipeline.render() {
-                platform_window.present(buffer);
+            // if let Some(buffer) = pipeline.render() {
+            //     platform_window.present(buffer);
+            // }
+            if pipeline.has_dirty() {
+                if let Some(buffer) = pipeline.render() {
+                    platform_window.present(buffer);
+                }
             }
 
             // 6.3 Small sleep to prevent busy-waiting

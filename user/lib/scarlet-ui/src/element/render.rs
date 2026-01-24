@@ -190,11 +190,41 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
         // Layout this element first
         let size = self.render_object.layout(constraints);
 
-        // Layout children with loose constraints
-        // TODO: Container RenderObjects should provide proper constraints for each child
-        for child in &mut self.children {
-            let child_constraints = LayoutConstraints::loose(size.width, size.height);
-            child.layout(child_constraints);
+        // Layout children based on the RenderObject type
+        let type_name = core::any::type_name_of_val(&self.render_object);
+
+        // Check if this is a container that needs special child positioning
+        let is_vstack = type_name.contains("VStackRenderObject");
+        let is_hstack = type_name.contains("HStackRenderObject");
+
+        if is_vstack {
+            // VStack: vertical layout with spacing
+            let mut child_y_offset = 0.0;
+            for child in &mut self.children {
+                let child_constraints = LayoutConstraints::loose(size.width, size.height);
+                let child_size = child.layout(child_constraints);
+                child.set_position(crate::geometry::Point::new(0.0, child_y_offset));
+                child_y_offset += child_size.height;
+            }
+        } else if is_hstack {
+            // HStack: horizontal layout with spacing
+            let mut child_x_offset = 0.0;
+            for child in &mut self.children {
+                let child_constraints = LayoutConstraints::loose(size.width, size.height);
+                let child_size = child.layout(child_constraints);
+                child.set_position(crate::geometry::Point::new(child_x_offset, 0.0));
+                child_x_offset += child_size.width;
+            }
+        } else if self.children.is_empty() {
+            // Leaf node with no children - nothing to do
+        } else {
+            // Other containers (modifiers like Padding, Background, Frame, etc.)
+            // These typically have a single child that fills the available space
+            for child in &mut self.children {
+                let child_constraints = LayoutConstraints::tight(size.width, size.height);
+                let _ = child.layout(child_constraints);
+                child.set_position(crate::geometry::Point::ZERO);
+            }
         }
 
         size

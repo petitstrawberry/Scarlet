@@ -75,6 +75,11 @@ impl RenderingPipeline {
         self.pipeline_owner.state_registry_mut()
     }
 
+    /// Has any dirty elements?
+    pub fn has_dirty(&self) -> bool {
+        self.pipeline_owner.has_dirty()
+    }
+
     /// Extract window information from the element tree
     ///
     /// This searches the element tree for a Window View and extracts
@@ -99,16 +104,9 @@ impl RenderingPipeline {
 
     /// Recursively search for a Window View in the element tree
     fn find_window_view(&self, element: &dyn Element) -> Option<(String, String, Size)> {
-        // Try to downcast ComponentElement to check if it contains a Window
-        // Note: This is a simplified version. In a full implementation, we would need
-        // to handle different child types of Window more generically.
-        if let Some(component) = element.as_any().downcast_ref::<crate::element::ComponentElement<Window<crate::views::Rectangle>>>() {
-            let view = component.view();
-            return Some((
-                String::from(view.get_app_id()),
-                String::from(view.get_title()),
-                view.get_window_size(),
-            ));
+        // Check if this element provides window info
+        if let Some(info) = element.get_window_info() {
+            return Some(info);
         }
 
         // Check children recursively
@@ -165,39 +163,61 @@ impl RenderingPipeline {
     ///
     /// This flushes all dirty phases and renders to the window buffer.
     pub fn render(&mut self) -> Option<&Buffer> {
-        // Flush all dirty phases
+        scarlet_std::println!("[RenderingPipeline] render() starting...");
+        // Flush all dirty phases (build, layout, paint)
         self.pipeline_owner.flush(&mut self.element_tree, self.window_size);
+        scarlet_std::println!("[RenderingPipeline] flush() completed");
 
         // Collect elements for compositing (before borrowing compositor)
         let mut elements_to_composite = alloc::vec::Vec::new();
         if let Some(root) = self.element_tree.root() {
+            scarlet_std::println!("[RenderingPipeline] collecting elements for composite...");
             self.collect_elements_for_composite(root, Point::ZERO, &mut elements_to_composite);
         }
+        scarlet_std::println!("[RenderingPipeline] render(): collected {} elements for compositing",
+            elements_to_composite.len());
 
         // Composite all elements into the window buffer
         if let Some(ref mut compositor) = self.compositor {
             // Clear background
             compositor.clear(crate::color::Color::WHITE);
 
+            let mut composite_count = 0;
+            let mut buffer_count = 0;
+
             // Composite in reverse order (children first for painter's algorithm)
             for (element, origin) in elements_to_composite.into_iter().rev() {
+                composite_count += 1;
+                let type_name = element.type_name_debug();
                 if let Some(buffer) = element.get_buffer() {
+                    buffer_count += 1;
+                    scarlet_std::println!("[RenderingPipeline] Compositing #{}: {} at ({},{}), buffer={}x{}",
+                        composite_count, type_name, origin.x, origin.y, buffer.width(), buffer.height());
                     compositor.window_buffer_mut().composite(
                         buffer,
                         origin.x as i32,
                         origin.y as i32,
                         1.0,
                     );
+                } else {
+                    scarlet_std::println!("[RenderingPipeline] Skipping #{}: {} at ({},{}) - no buffer",
+                        composite_count, type_name, origin.x, origin.y);
                 }
             }
 
+            scarlet_std::println!("[RenderingPipeline] Composited {}/{} elements with buffers",
+                buffer_count, composite_count);
+
             Some(compositor.window_buffer())
         } else {
+            scarlet_std::println!("[RenderingPipeline] No compositor!");
             None
         }
     }
 
     /// Collect elements for compositing (depth-first, children first)
+    ///
+    /// Painter's algorithm: children are drawn first (in background), parent on top.
     fn collect_elements_for_composite<'a>(
         &self,
         element: &'a dyn Element,

@@ -7,6 +7,7 @@
 //! registry per application.
 
 use alloc::collections::BTreeSet;
+use alloc::boxed::Box;
 use crate::element::{ElementId, ElementTree, LayoutConstraints};
 use crate::geometry::Size;
 use crate::pipeline::StateRegistry;
@@ -181,11 +182,37 @@ impl PipelineOwner {
     fn flush_paint(&mut self, element_tree: &mut ElementTree) {
         let dirty_paint = core::mem::take(&mut self.dirty_paint);
 
+        scarlet_std::println!("[PipelineOwner] flush_paint: {} dirty elements", dirty_paint.len());
+
         for id in dirty_paint {
+            scarlet_std::println!("[PipelineOwner] flush_paint: rendering element id={}", id.get());
             // Find the element and call render()
             if let Some(element) = element_tree.find_element_mut(id) {
-                element.render();
+                // Render this element and all its descendants
+                // Containers like VStack/HStack don't have buffers, but their children do
+                Self::render_recursive(element, 0);
             }
+        }
+    }
+
+    /// Recursively render an element and all its descendants
+    fn render_recursive(element: &mut Box<dyn crate::element::Element>, depth: usize) {
+        let indent = "  ".repeat(depth);
+        let type_name = element.type_name_debug();
+        let has_buffer = element.get_buffer().is_some();
+
+        scarlet_std::println!("[PipelineOwner] {}render: {} (buffer={})", indent, type_name, has_buffer);
+
+        // Render this element
+        element.render();
+
+        // Render children (containers might not have buffers, but their children do)
+        let children = element.children();
+        scarlet_std::println!("[PipelineOwner] {}has {} children", indent, children.len());
+
+        for (i, child) in element.children_mut().iter_mut().enumerate() {
+            scarlet_std::println!("[PipelineOwner] {}child #{}: {}", indent, i, child.type_name_debug());
+            Self::render_recursive(child, depth + 1);
         }
     }
 

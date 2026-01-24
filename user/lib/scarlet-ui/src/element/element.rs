@@ -217,6 +217,14 @@ pub trait Element {
     fn handle_event(&mut self, _event: &crate::event::Event, _phase: crate::event::Phase) -> bool {
         false
     }
+
+    /// Get window information if this Element represents a Window
+    ///
+    /// Returns Some((app_id, title, size)) if this Element is a WindowElement,
+    /// None otherwise. Default implementation returns None.
+    fn get_window_info(&self) -> Option<(alloc::string::String, alloc::string::String, Size)> {
+        None
+    }
 }
 
 

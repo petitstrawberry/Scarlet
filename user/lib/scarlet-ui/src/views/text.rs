@@ -112,19 +112,27 @@ impl TextRenderObject {
 impl ElementRenderObject for TextRenderObject {
     fn layout(&mut self, constraints: LayoutConstraints) -> Size {
         // Use actual font measurement
-        let (width, height) = graphics::measure_text_sized(&self.content, self.font_size);
+        let (measured_width, measured_height) = graphics::measure_text_sized(&self.content, self.font_size);
 
-        let width = if constraints.max_width > 0.0 {
-            (width as f32).min(constraints.max_width).max(constraints.min_width)
-        } else {
-            width as f32
-        };
+        scarlet_std::println!("[TextRenderObject] layout: content='{}' measured={}x{}, constraints={:?}",
+            self.content, measured_width, measured_height, constraints);
 
-        let height = if constraints.max_height > 0.0 {
-            (height as f32).min(constraints.max_height).max(constraints.min_height)
-        } else {
-            height as f32
-        };
+        // For text, use the measured size, but constrain within bounds
+        // Text should NOT expand to fill min_width/min_height
+        let mut width = measured_width as f32;
+        let mut height = measured_height as f32;
+
+        // Apply max constraints (don't exceed maximum)
+        if constraints.max_width.is_finite() && constraints.max_width > 0.0 {
+            width = width.min(constraints.max_width);
+        }
+        if constraints.max_height.is_finite() && constraints.max_height > 0.0 {
+            height = height.min(constraints.max_height);
+        }
+
+        // Only apply min constraints if measured size is smaller
+        // But for text, we generally don't want to expand it
+        // So we'll just use the measured size even if it's smaller than min
 
         self.size = Size { width, height };
 
@@ -132,6 +140,9 @@ impl ElementRenderObject for TextRenderObject {
         let w = libm::ceilf(width) as u32;
         let h = libm::ceilf(height) as u32;
         let needed = (w * h * 4) as usize;
+
+        scarlet_std::println!("[TextRenderObject] layout: final size={}x{}, buffer needed={} bytes",
+            w, h, needed);
 
         if self.buffer.as_ref().map_or(true, |b| b.data().len() < needed) {
             self.buffer = Some(Buffer::from_dimensions(w, h));
@@ -165,6 +176,10 @@ impl ElementRenderObject for TextRenderObject {
         if let Some(ref mut buffer) = self.buffer {
             let width = buffer.width();
             let height = buffer.height();
+
+            scarlet_std::println!("[TextRenderObject] render: buffer {}x{}, data.len()={}",
+                width, height, buffer.data().len());
+
             let mut data = buffer.data_mut();
             let mut canvas = graphics::Canvas::new(&mut data, width, height);
 
@@ -173,6 +188,8 @@ impl ElementRenderObject for TextRenderObject {
 
             // Draw text
             canvas.draw_text_sized(0, 0, &self.content, self.color, self.font_size);
+        } else {
+            scarlet_std::println!("[TextRenderObject] render: NO BUFFER!");
         }
     }
 
