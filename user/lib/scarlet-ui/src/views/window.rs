@@ -12,7 +12,7 @@ use alloc::format;
 use core::any::Any;
 
 use crate::view::View;
-use crate::element::{Element, RenderElement, ElementRenderObject, LayoutConstraints, UpdateResult};
+use crate::element::{Element, ElementId, ElementRenderObject, LayoutConstraints, UpdateResult};
 use crate::geometry::{Size, Point, Rect};
 use crate::color::{Color, ColorPalette};
 use crate::buffer::Buffer;
@@ -128,10 +128,7 @@ impl<V: View + Clone> Clone for Window<V> {
 
 impl<V: View + Clone> View for Window<V> {
     fn create_element(&self) -> Box<dyn Element> {
-        Box::new(RenderElement::new(
-            self.clone(),
-            WindowRenderObject::new(self.title.clone(), self.size, self.decorated),
-        ))
+        Box::new(WindowElement::new(self.clone()))
     }
 
     fn listenables(&self) -> Vec<&dyn Listenable> {
@@ -140,6 +137,146 @@ impl<V: View + Clone> View for Window<V> {
 
     fn as_any(&self) -> &dyn Any {
         self
+    }
+}
+
+/// WindowElement - Element that includes both titlebar decorations and child content
+struct WindowElement<V: View + Clone> {
+    id: ElementId,
+    view: Window<V>,
+    render_object: WindowRenderObject,
+    child: Box<dyn Element>,
+    position: Point,
+}
+
+impl<V: View + Clone> WindowElement<V> {
+    fn new(view: Window<V>) -> Self {
+        let child_element = view.child.create_element();
+        let render_object = WindowRenderObject::new(view.title.clone(), view.size, view.decorated);
+
+        Self {
+            id: ElementId::generate(),
+            view,
+            render_object,
+            child: child_element,
+            position: Point::ZERO,
+        }
+    }
+}
+
+impl<V: View + Clone> Element for WindowElement<V> {
+    fn id(&self) -> ElementId {
+        self.id
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
+    }
+
+    fn children(&self) -> &[Box<dyn Element>] {
+        core::slice::from_ref(&self.child)
+    }
+
+    fn children_mut(&mut self) -> &mut [Box<dyn Element>] {
+        // This is a bit tricky - we need to return a mutable slice
+        // but we only have one child. Use unsafe to extend lifetime.
+        unsafe {
+            core::slice::from_raw_parts_mut(&mut self.child as *mut Box<dyn Element>, 1)
+        }
+    }
+
+    fn update(&mut self, new_view: &dyn View) -> UpdateResult {
+        if let Some(window) = new_view.as_any().downcast_ref::<Window<V>>() {
+            self.view.title = window.title.clone();
+            self.view.size = window.size;
+            self.render_object.update(window);
+            UpdateResult::Updated
+        } else {
+            UpdateResult::NoChange
+        }
+    }
+
+    fn rebuild(&mut self) -> UpdateResult {
+        // Recreate child from updated view
+        let new_child = self.view.child.create_element();
+        self.child = new_child;
+        UpdateResult::Updated
+    }
+
+    fn mount(&mut self) {
+        self.child.mount();
+    }
+
+    fn unmount(&mut self) {
+        self.child.unmount();
+    }
+
+    fn layout(&mut self, constraints: LayoutConstraints) -> Size {
+        // Layout the titlebar/render_object first
+        let window_size = self.render_object.layout(constraints);
+
+        // Layout child with constraints for content area (below titlebar)
+        let content_y = if self.view.decorated {
+            TITLEBAR_HEIGHT
+        } else {
+            0.0
+        };
+
+        let content_constraints = LayoutConstraints::new(
+            0.0,
+            window_size.width,
+            0.0,
+            (window_size.height - content_y).max(0.0),
+        );
+
+        let _child_size = self.child.layout(content_constraints);
+
+        // Position child below titlebar
+        self.child.set_position(Point::new(0.0, content_y));
+
+        window_size
+    }
+
+    fn position(&self) -> Point {
+        self.position
+    }
+
+    fn set_position(&mut self, position: Point) {
+        self.position = position;
+    }
+
+    fn render(&mut self) {
+        // Render titlebar
+        self.render_object.render();
+
+        // Render child
+        self.child.render();
+    }
+
+    fn get_buffer(&self) -> Option<&Buffer> {
+        // Return titlebar buffer for compositing
+        self.render_object.get_buffer()
+    }
+
+    fn handle_event(&mut self, event: &crate::event::Event, phase: crate::event::Phase) -> bool {
+        use crate::event::Event;
+
+        match event {
+            Event::Mouse(mouse_event) => {
+                // Handle titlebar button events
+                if self.render_object.handle_mouse_event(mouse_event) {
+                    return true;
+                }
+
+                // Forward to child
+                self.child.handle_event(event, phase)
+            }
+            _ => self.child.handle_event(event, phase),
+        }
     }
 }
 
@@ -219,7 +356,7 @@ impl WindowRenderObject {
     }
 
     /// Draw the titlebar with control buttons
-    fn draw_titlebar(&mut self, palette: &ColorPalette) {
+    fn draw_titlebar(&mut self, _palette: &ColorPalette) {
         if !self.decorated {
             return;
         }
@@ -323,8 +460,6 @@ impl WindowRenderObject {
 
             // Draw title text (left-aligned at 10, 9 like Scarlet_old)
             if !title.is_empty() {
-                use crate::graphics::measure_text_sized;
-
                 let title_display = if title.len() > 60 {
                     format!("{}...", &title[..57])
                 } else {
@@ -515,6 +650,13 @@ impl WindowRenderObject {
             self.focused = focused;
             self.dirty = true;
         }
+    }
+
+    /// Update from new Window view
+    pub fn update<V: View>(&mut self, window: &Window<V>) {
+        self.title = window.title.clone();
+        self.size = window.size;
+        self.dirty = true;
     }
 }
 
