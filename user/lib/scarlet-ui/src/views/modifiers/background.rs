@@ -106,4 +106,8 @@ impl ElementRenderObject for BackgroundRenderObject {
     fn as_any_mut(&mut self) -> &mut dyn Any {
         self
     }
+
+    fn render(&mut self) {
+        // Modifier doesn't directly render - child handles its own rendering
+    }
 }

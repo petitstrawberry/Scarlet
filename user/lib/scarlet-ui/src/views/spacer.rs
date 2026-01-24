@@ -131,4 +131,8 @@ impl ElementRenderObject for SpacerRenderObject {
     fn as_any_mut(&mut self) -> &mut dyn Any {
         self
     }
+
+    fn render(&mut self) {
+        // Spacer is invisible - no rendering needed
+    }
 }

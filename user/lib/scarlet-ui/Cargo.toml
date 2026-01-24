@@ -11,6 +11,7 @@ framebuffer = { path = "../framebuffer" }
 libm = { version = "0.2", default-features = false }
 scarlet-ui-macros = { path = "../scarlet-ui-macros" }
 bitflags = { version = "2.6", default-features = false }
+ab_glyph = { version = "0.2", default-features = false, features = ["libm"] }
 
 [dev-dependencies]
 # For additional testing

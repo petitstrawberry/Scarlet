@@ -211,4 +211,9 @@ impl ElementRenderObject for ImageRenderObject {
     fn as_any_mut(&mut self) -> &mut dyn Any {
         self
     }
+
+    fn render(&mut self) {
+        // Image rendering would composite source data here
+        // For now, placeholder images don't render anything
+    }
 }

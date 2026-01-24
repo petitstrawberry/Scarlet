@@ -9,6 +9,8 @@ use crate::view::View;
 use crate::element::{Element, RenderElement, ElementRenderObject};
 use crate::geometry::Size;
 use crate::color::Color;
+use crate::buffer::Buffer;
+use crate::graphics;
 
 /// Button click callback type
 pub type ButtonCallback = Box<dyn Fn() + 'static>;
@@ -121,29 +123,36 @@ pub struct ButtonRenderObject {
     label: String,
     background_color: Color,
     text_color: Color,
+    font_size: f32,
+    padding: f32,
     size: Size,
+    buffer: Option<Buffer>,
 }
 
 impl ButtonRenderObject {
     /// Create a new ButtonRenderObject
     pub fn new(label: String, background_color: Color, text_color: Color) -> Self {
+        let font_size = 16.0;
+        let padding = 8.0;
+
         Self {
             label,
             background_color,
             text_color,
+            font_size,
+            padding,
             size: Size::ZERO,
+            buffer: None,
         }
     }
 
     /// Estimate button size based on label
     fn estimate_size(&self) -> Size {
-        let font_size = 16.0; // Default font size
-        let char_width = font_size * 0.6;
-        let padding = 8.0;
+        let char_width = self.font_size * 0.6;
 
         let text_width = self.label.len() as f32 * char_width;
-        let width = text_width + padding * 2.0;
-        let height = font_size * 1.2 + padding * 2.0;
+        let width = text_width + self.padding * 2.0;
+        let height = self.font_size * 1.2 + self.padding * 2.0;
 
         Size { width, height }
     }
@@ -166,6 +175,16 @@ impl ElementRenderObject for ButtonRenderObject {
         };
 
         self.size = Size { width, height };
+
+        // Create buffer for this button
+        let w = libm::ceilf(width) as u32;
+        let h = libm::ceilf(height) as u32;
+        let needed = (w * h * 4) as usize;
+
+        if self.buffer.as_ref().map_or(true, |b| b.data().len() < needed) {
+            self.buffer = Some(Buffer::from_dimensions(w, h));
+        }
+
         self.size
     }
 
@@ -179,5 +198,25 @@ impl ElementRenderObject for ButtonRenderObject {
 
     fn as_any_mut(&mut self) -> &mut dyn Any {
         self
+    }
+
+    fn render(&mut self) {
+        // Render button to buffer
+        if let Some(ref mut buffer) = self.buffer {
+            let width = buffer.width();
+            let height = buffer.height();
+            let mut data = buffer.data_mut();
+            let mut canvas = graphics::Canvas::new(&mut data, width, height);
+
+            // Fill background
+            canvas.fill_rect(0, 0, width, height, self.background_color);
+
+            // Draw text centered
+            let (text_w, _text_h) = graphics::measure_text_sized(&self.label, self.font_size);
+            let x = ((width as i32) - (text_w as i32)) / 2;
+            let y = ((height as i32) - (self.font_size as i32 * 6 / 5)) / 2;
+
+            canvas.draw_text_sized(x.max(0), y.max(0), &self.label, self.text_color, self.font_size);
+        }
     }
 }

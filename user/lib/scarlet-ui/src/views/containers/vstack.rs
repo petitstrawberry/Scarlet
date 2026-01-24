@@ -168,4 +168,8 @@ impl ElementRenderObject for VStackRenderObject {
     fn as_any_mut(&mut self) -> &mut dyn Any {
         self
     }
+
+    fn render(&mut self) {
+        // Container doesn't directly render - children handle their own rendering
+    }
 }

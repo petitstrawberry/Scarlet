@@ -24,6 +24,11 @@ pub trait RenderObject: Any {
     /// Get the current size
     fn size(&self) -> Size;
 
+    /// Render to buffer
+    ///
+    /// For leaf nodes, this renders content to the buffer.
+    fn render(&mut self);
+
     /// Hit test - check if a point is within this RenderObject
     fn hit_test(&self, point: Point) -> bool {
         let bounds = Rect {

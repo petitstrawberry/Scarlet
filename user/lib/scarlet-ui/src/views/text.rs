@@ -9,6 +9,8 @@ use crate::element::{Element, RenderElement, ElementRenderObject};
 use crate::geometry::{Size, Point};
 use crate::element::LayoutConstraints;
 use crate::color::Color;
+use crate::buffer::Buffer;
+use crate::graphics;
 use alloc::boxed::Box;
 
 /// Text View - displays a string of text
@@ -81,6 +83,7 @@ pub struct TextRenderObject {
     font_size: f32,
     color: Color,
     size: Size,
+    buffer: Option<Buffer>,
 }
 
 impl TextRenderObject {
@@ -91,53 +94,49 @@ impl TextRenderObject {
             font_size,
             color,
             size: Size::ZERO,
+            buffer: None,
         }
     }
 
-    /// Estimate text size based on content and font size
-    ///
-    /// This is a simplified implementation. In a real system, this would
-    /// use font metrics to measure the actual text dimensions.
-    fn estimate_size(&self) -> Size {
-        let char_width = self.font_size * 0.6; // Approximate character width
-        let line_height = self.font_size * 1.2; // Line height
+    /// Get the buffer
+    pub fn buffer(&self) -> Option<&Buffer> {
+        self.buffer.as_ref()
+    }
 
-        // Find the longest line for width
-        let max_line_width = self
-            .content
-            .lines()
-            .map(|line| line.len() as f32 * char_width)
-            .reduce(|a, b| a.max(b))
-            .unwrap_or(0.0);
-
-        let line_count = self.content.lines().count() as f32;
-
-        Size {
-            width: max_line_width,
-            height: line_count * line_height,
-        }
+    /// Get the buffer mutably
+    pub fn buffer_mut(&mut self) -> Option<&mut Buffer> {
+        self.buffer.as_mut()
     }
 }
 
 impl ElementRenderObject for TextRenderObject {
     fn layout(&mut self, constraints: LayoutConstraints) -> Size {
-        // Calculate intrinsic size
-        let intrinsic = self.estimate_size();
+        // Use actual font measurement
+        let (width, height) = graphics::measure_text_sized(&self.content, self.font_size);
 
-        // Apply constraints
         let width = if constraints.max_width > 0.0 {
-            intrinsic.width.min(constraints.max_width).max(constraints.min_width)
+            (width as f32).min(constraints.max_width).max(constraints.min_width)
         } else {
-            intrinsic.width
+            width as f32
         };
 
         let height = if constraints.max_height > 0.0 {
-            intrinsic.height.min(constraints.max_height).max(constraints.min_height)
+            (height as f32).min(constraints.max_height).max(constraints.min_height)
         } else {
-            intrinsic.height
+            height as f32
         };
 
         self.size = Size { width, height };
+
+        // Create/update buffer for this text
+        let w = libm::ceilf(width) as u32;
+        let h = libm::ceilf(height) as u32;
+        let needed = (w * h * 4) as usize;
+
+        if self.buffer.as_ref().map_or(true, |b| b.data().len() < needed) {
+            self.buffer = Some(Buffer::from_dimensions(w, h));
+        }
+
         self.size
     }
 
@@ -159,5 +158,21 @@ impl ElementRenderObject for TextRenderObject {
 
     fn as_any_mut(&mut self) -> &mut dyn Any {
         self
+    }
+
+    fn render(&mut self) {
+        // Render text to buffer
+        if let Some(ref mut buffer) = self.buffer {
+            let width = buffer.width();
+            let height = buffer.height();
+            let mut data = buffer.data_mut();
+            let mut canvas = graphics::Canvas::new(&mut data, width, height);
+
+            // Clear with transparent
+            // canvas.fill_rect(0, 0, width, height, Color::TRANSPARENT);
+
+            // Draw text
+            canvas.draw_text_sized(0, 0, &self.content, self.color, self.font_size);
+        }
     }
 }

@@ -186,4 +186,30 @@ impl Buffer {
             }
         }
     }
+
+    /// Get the pixel data as a u8 slice (BGRA format)
+    ///
+    /// This converts the internal u32 slice to a u8 slice for compatibility
+    /// with drawing APIs that expect byte-level access.
+    pub fn data(&self) -> &[u8] {
+        unsafe {
+            core::slice::from_raw_parts(
+                self.data.as_ptr() as *const u8,
+                self.data.len() * 4,
+            )
+        }
+    }
+
+    /// Get the pixel data as a mutable u8 slice (BGRA format)
+    ///
+    /// This converts the internal u32 slice to a u8 slice for compatibility
+    /// with drawing APIs that expect byte-level access.
+    pub fn data_mut(&mut self) -> &mut [u8] {
+        unsafe {
+            core::slice::from_raw_parts_mut(
+                self.data.as_mut_ptr() as *mut u8,
+                self.data.len() * 4,
+            )
+        }
+    }
 }

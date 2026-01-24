@@ -7,6 +7,8 @@ use crate::view::View;
 use crate::element::{Element, RenderElement, ElementRenderObject};
 use crate::geometry::Size;
 use crate::color::Color;
+use crate::buffer::Buffer;
+use crate::graphics;
 use alloc::boxed::Box;
 
 /// Rectangle View - displays a filled rectangle
@@ -76,6 +78,7 @@ pub struct RectangleRenderObject {
     color: Color,
     corner_radius: f32,
     size: Size,
+    buffer: Option<Buffer>,
 }
 
 impl RectangleRenderObject {
@@ -85,6 +88,7 @@ impl RectangleRenderObject {
             color,
             corner_radius,
             size: Size::ZERO,
+            buffer: None,
         }
     }
 
@@ -115,6 +119,16 @@ impl ElementRenderObject for RectangleRenderObject {
         };
 
         self.size = Size { width, height };
+
+        // Create buffer for this rectangle
+        let w = libm::ceilf(width) as u32;
+        let h = libm::ceilf(height) as u32;
+        let needed = (w * h * 4) as usize;
+
+        if self.buffer.as_ref().map_or(true, |b| b.data().len() < needed) {
+            self.buffer = Some(Buffer::from_dimensions(w, h));
+        }
+
         self.size
     }
 
@@ -128,5 +142,18 @@ impl ElementRenderObject for RectangleRenderObject {
 
     fn as_any_mut(&mut self) -> &mut dyn Any {
         self
+    }
+
+    fn render(&mut self) {
+        // Render rectangle to buffer
+        if let Some(ref mut buffer) = self.buffer {
+            let width = buffer.width();
+            let height = buffer.height();
+            let mut data = buffer.data_mut();
+            let mut canvas = graphics::Canvas::new(&mut data, width, height);
+
+            // Fill with solid color
+            canvas.fill_rect(0, 0, width, height, self.color);
+        }
     }
 }

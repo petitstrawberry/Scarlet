@@ -63,10 +63,12 @@ pub mod views;
 pub mod platform;
 pub mod application;
 pub mod macros;
+pub mod graphics;
 
 // Re-exports for convenience
 pub use geometry::{Size, Point, Rect, Offset, EdgeInsets, Alignment};
-pub use color::Color;
+pub use color::{Color, ColorScheme, ColorPalette, SemanticColor, SystemColors};
+pub use color::system::{GrayColors, BlueColors, GreenColors, OrangeColors, PinkColors, PurpleColors, RedColors, YellowColors};
 pub use error::{Error, Result};
 pub use state::{State, StateId, SubscriptionId, generate_state_id, Listenable};
 pub use view::{View, ViewExt};
@@ -76,10 +78,11 @@ pub use buffer::Buffer;
 pub use compositor::Compositor;
 pub use render::RenderObject;
 pub use pipeline::{PipelineOwner, RenderingPipeline, DirtyPhase, StateRegistry};
-pub use views::{Window, Text, Button, Rectangle, Spacer, Image, VStack, HStack, ZStack};
+pub use views::{Window, WindowRenderObject, Text, Button, Rectangle, Spacer, Image, VStack, HStack, ZStack};
 pub use views::modifiers::{Padding, Frame, Background, SetSize, AlignmentFrame};
 pub use platform::{PlatformWindow, SWSPlatformWindow};
 pub use application::Application;
+pub use graphics::{Canvas, measure_text_sized, set_default_font};
 
 // Macros are exported at root via #[macro_export]
 // Users can use them directly: vstack! {}, hstack! {}, etc.
@@ -87,7 +90,7 @@ pub use application::Application;
 /// Prelude module for convenient imports
 pub mod prelude {
     pub use crate::geometry::*;
-    pub use crate::color::Color;
+    pub use crate::color::{Color, ColorScheme, ColorPalette, SemanticColor};
     pub use crate::error::{Error, Result};
     pub use crate::state::{State, StateId, SubscriptionId, Listenable};
     pub use crate::view::{View, ViewExt};
