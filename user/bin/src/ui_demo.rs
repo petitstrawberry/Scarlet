@@ -5,6 +5,7 @@
 #![no_std]
 #![no_main]
 
+extern crate alloc;
 extern crate scarlet_std;
 extern crate scarlet_ui_macros;
 

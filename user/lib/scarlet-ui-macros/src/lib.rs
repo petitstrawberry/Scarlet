@@ -24,6 +24,18 @@ use syn::punctuated::Punctuated;
 ///
 /// Users can implement their own `new()` method and use `Default::default()`:
 /// ```ignore
+/// #![no_std]
+///
+/// extern crate alloc;
+///
+/// #[derive(View, Clone)]
+/// struct MyApp { ... }
+/// ```
+///
+/// # Note for `#![no_std]` environments
+///
+/// In `#![no_std]` contexts, you must add `extern crate alloc;` at the crate level:
+/// ```ignore
 /// impl CounterApp {
 ///     pub fn new(custom_value: i32) -> Self {
 ///         Self {
@@ -93,10 +105,6 @@ pub fn derive_view(input: TokenStream) -> TokenStream {
 
     let expanded = quote! {
         #default_impl
-
-        // Ensure alloc is available in no_std contexts
-        #[allow(unused_extern_crates)]
-        extern crate alloc;
 
         impl ::scarlet_ui::view::View for #name {
             fn create_element(&self) -> alloc::boxed::Box<dyn ::scarlet_ui::element::Element> {
