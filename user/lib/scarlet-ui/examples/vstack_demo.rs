@@ -7,11 +7,11 @@
 
 extern crate alloc;
 extern crate scarlet_std as std;
+extern crate scarlet_ui_macros;
 
 use scarlet_ui::prelude::*;
-use scarlet_ui::geometry::Size;
 use scarlet_ui::color::Color;
-use scarlet_ui::state::{State, StateId};
+use scarlet_ui::state::State;
 
 /// Counter Application
 #[derive(View, Clone)]
@@ -23,20 +23,21 @@ impl CounterApp {
     /// Create a new counter app
     fn new() -> Self {
         Self {
-            count: State::new(StateId::new(1), 0),
+            count: State::initial(0),
         }
     }
 }
 
 impl Application for CounterApp {
     fn body(&self) -> impl View {
-        let count_text = Text::new(format!("Count: {}", self.count.get()));
+        let count_value = self.count.get();
+        let count_text = alloc::format!("Count: {}", count_value);
 
         vstack! {
             Text::new("ScarletUI Counter Demo")
                 .font_size(24.0),
             Rectangle::new().fill(Color::rgb(240, 240, 240)),
-            count_text
+            Text::new(&count_text)
                 .font_size(48.0),
             hstack! {
                 Button::new("-"),
@@ -51,23 +52,10 @@ impl Application for CounterApp {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn main() {
     let app = CounterApp::new();
     // Run the application
     // Note: Full integration would require additional setup
-    let _ = app;
-}
-
-mod std {
-    pub use core::fmt;
-    pub use core::ops;
-    pub use core::option;
-    pub use core::result;
-}
-
-fn format(args: core::fmt::Arguments<'_>) -> alloc::string::String {
-    let mut s = alloc::string::String::new();
-    core::fmt::write(&mut s, args).unwrap();
-    s
+    let _ = app.run();
 }
