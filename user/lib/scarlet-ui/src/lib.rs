@@ -96,5 +96,10 @@ pub mod prelude {
     pub use crate::application::Application;
     pub use crate::views::{Window, Text, Button, Rectangle, Spacer, VStack, HStack, ZStack};
     pub use crate::views::modifiers::{Padding, Frame, Background};
-    // Macros are available at root level, no need to import them in prelude
+
+    // Note: The View derive macro must be imported from scarlet_ui_macros:
+    // use scarlet_ui_macros::View;
+    //
+    // Declarative macros (vstack!, hstack!, zstack!) can be imported as:
+    // use scarlet_ui::{vstack, hstack, zstack};
 }

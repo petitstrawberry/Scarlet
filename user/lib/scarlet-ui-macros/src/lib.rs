@@ -65,10 +65,11 @@ pub fn derive_view(input: TokenStream) -> TokenStream {
         .zip(state_fields.iter())
         .map(|(idx, field_name)| {
             let field_ident = quote::format_ident!("{}", field_name);
+            let idx_as_u32 = *idx as u32;
             // Use State::initial for types with Default (State<T> inner type)
             quote! {
                 #field_ident: ::scarlet_ui::state::State::initial(
-                    ::scarlet_ui::state::StateId::new(#idx)
+                    ::scarlet_ui::state::StateId::new(#idx_as_u32)
                 ),
             }
         })
@@ -92,6 +93,10 @@ pub fn derive_view(input: TokenStream) -> TokenStream {
 
     let expanded = quote! {
         #default_impl
+
+        // Ensure alloc is available in no_std contexts
+        #[allow(unused_extern_crates)]
+        extern crate alloc;
 
         impl ::scarlet_ui::view::View for #name {
             fn create_element(&self) -> alloc::boxed::Box<dyn ::scarlet_ui::element::Element> {

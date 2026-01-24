@@ -4215,6 +4215,7 @@ dependencies = [
  "sbus-client",
  "scarlet-desktop-config",
  "scarlet-ui",
+ "scarlet-ui-macros",
  "scarlet_std",
  "slint",
  "slint-build",
