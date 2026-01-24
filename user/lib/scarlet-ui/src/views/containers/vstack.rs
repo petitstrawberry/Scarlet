@@ -114,6 +114,16 @@ impl VStackRenderObject {
         }
     }
 
+    /// Get spacing
+    pub fn get_spacing(&self) -> f32 {
+        self.spacing
+    }
+
+    /// Get alignment
+    pub fn get_alignment(&self) -> crate::geometry::Alignment {
+        self.alignment
+    }
+
     /// Calculate child positions
     fn calculate_positions(&mut self, child_sizes: &[Size]) {
         self.child_positions.clear();

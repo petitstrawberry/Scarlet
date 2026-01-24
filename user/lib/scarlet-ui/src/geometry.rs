@@ -385,6 +385,32 @@ impl Alignment {
             },
         }
     }
+
+    /// Apply alignment for horizontal axis (for VStack cross-axis)
+    pub fn align_x(&self, parent_width: f32, child_width: f32) -> f32 {
+        match self {
+            Alignment::Leading | Alignment::TopLeading | Alignment::BottomLeading => 0.0,
+            Alignment::Trailing | Alignment::TopTrailing | Alignment::BottomTrailing => {
+                parent_width - child_width
+            }
+            Alignment::Center | Alignment::Top | Alignment::Bottom => {
+                (parent_width - child_width) / 2.0
+            }
+        }
+    }
+
+    /// Apply alignment for vertical axis (for HStack cross-axis)
+    pub fn align_y(&self, parent_height: f32, child_height: f32) -> f32 {
+        match self {
+            Alignment::Top | Alignment::TopLeading | Alignment::TopTrailing => 0.0,
+            Alignment::Bottom | Alignment::BottomLeading | Alignment::BottomTrailing => {
+                parent_height - child_height
+            }
+            Alignment::Center | Alignment::Leading | Alignment::Trailing => {
+                (parent_height - child_height) / 2.0
+            }
+        }
+    }
 }
 
 

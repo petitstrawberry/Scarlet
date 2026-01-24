@@ -198,22 +198,54 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
         let is_hstack = type_name.contains("HStackRenderObject");
 
         if is_vstack {
-            // VStack: vertical layout with spacing
+            // VStack: vertical layout with spacing and alignment
+            // Try to get spacing and alignment from VStackRenderObject
+            let (spacing, alignment) = if let Some(vstack_ro) = self.render_object.as_any().downcast_ref::<crate::views::VStackRenderObject>() {
+                (vstack_ro.get_spacing(), vstack_ro.get_alignment())
+            } else {
+                (0.0, crate::geometry::Alignment::Center)
+            };
+
+            let child_count = self.children.len();
             let mut child_y_offset = 0.0;
-            for child in &mut self.children {
+            for (i, child) in self.children.iter_mut().enumerate() {
                 let child_constraints = LayoutConstraints::loose(size.width, size.height);
                 let child_size = child.layout(child_constraints);
-                child.set_position(crate::geometry::Point::new(0.0, child_y_offset));
+
+                // Apply alignment on x-axis (cross-axis for VStack)
+                let child_x = alignment.align_x(size.width, child_size.width);
+
+                child.set_position(crate::geometry::Point::new(child_x, child_y_offset));
                 child_y_offset += child_size.height;
+                // Add spacing after each child except the last
+                if i < child_count.saturating_sub(1) {
+                    child_y_offset += spacing;
+                }
             }
         } else if is_hstack {
-            // HStack: horizontal layout with spacing
+            // HStack: horizontal layout with spacing and alignment
+            // Try to get spacing and alignment from HStackRenderObject
+            let (spacing, alignment) = if let Some(hstack_ro) = self.render_object.as_any().downcast_ref::<crate::views::HStackRenderObject>() {
+                (hstack_ro.get_spacing(), hstack_ro.get_alignment())
+            } else {
+                (0.0, crate::geometry::Alignment::Center)
+            };
+
+            let child_count = self.children.len();
             let mut child_x_offset = 0.0;
-            for child in &mut self.children {
+            for (i, child) in self.children.iter_mut().enumerate() {
                 let child_constraints = LayoutConstraints::loose(size.width, size.height);
                 let child_size = child.layout(child_constraints);
-                child.set_position(crate::geometry::Point::new(child_x_offset, 0.0));
+
+                // Apply alignment on y-axis (cross-axis for HStack)
+                let child_y = alignment.align_y(size.height, child_size.height);
+
+                child.set_position(crate::geometry::Point::new(child_x_offset, child_y));
                 child_x_offset += child_size.width;
+                // Add spacing after each child except the last
+                if i < child_count.saturating_sub(1) {
+                    child_x_offset += spacing;
+                }
             }
         } else if self.children.is_empty() {
             // Leaf node with no children - nothing to do
