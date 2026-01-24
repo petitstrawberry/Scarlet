@@ -955,7 +955,717 @@ impl Text {
 
 ---
 
-## 11. Event Handling (イベント処理)
+## 11. System Color Palette (システムカラーパレット)
+
+SwiftUIやmacOSのような、ライト/ダークモードに対応したシステムカラーパレットです。
+
+### ColorScheme (カラースキーム)
+
+まず、ライトモードとダークモードの切り替えを定義します。
+
+```rust
+/// カラースキーム（ライト/ダークモード）
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ColorScheme {
+    /// ライトモード
+    Light,
+    /// ダークモード
+    Dark,
+}
+
+impl ColorScheme {
+    /// 現在のスキームがライトモードかどうか
+    pub fn is_light(&self) -> bool {
+        matches!(self, Self::Light)
+    }
+
+    /// 現在のスキームがダークモードかどうか
+    pub fn is_dark(&self) -> bool {
+        matches!(self, Self::Dark)
+    }
+}
+
+impl Default for ColorScheme {
+    fn default() -> Self {
+        Self::Light
+    }
+}
+```
+
+### SemanticColor (セマンティックカラー)
+
+UI要素の意味論的に定義された色です。モードに応じて自動的に切り替わります。
+
+```rust
+/// セマンティックカラー - UI要素の意味に基づく色定義
+#[derive(Clone, Copy, Debug)]
+pub struct SemanticColor {
+    // === Base Colors ===
+
+    /// 背景色
+    pub background: Color,
+
+    /// 主要な背景色（カード、ダイアログ等）
+    pub background_secondary: Color,
+
+    /// 三次背景色
+    pub background_tertiary: Color,
+
+    // === Text Colors ===
+
+    /// 主要テキスト色
+    pub text: Color,
+
+    /// 二次テキスト色（説明文等）
+    pub text_secondary: Color,
+
+    /// 三次テキスト色
+    pub text_tertiary: Color,
+
+    /// 逆転テキスト色（背景上のテキスト用）
+    pub text_inverse: Color,
+
+    // === Primary Brand Colors ===
+
+    /// プライマリーカラー（ブランドメインカラー）
+    pub primary: Color,
+
+    /// プライマリーのバリエーション（より明るい）
+    pub primary_light: Color,
+
+    /// プライマリーのバリエーション（より暗い）
+    pub primary_dark: Color,
+
+    // === Secondary Colors ===
+
+    /// セカンダリーカラー（補助的な強調）
+    pub secondary: Color,
+
+    // === Accent Colors ===
+
+    /// アクセントカラー（強調、リンク等）
+    pub accent: Color,
+
+    /// アクセントのハイライトバージョン
+    pub accent_highlight: Color,
+
+    // === Functional Colors ===
+
+    /// 成功色
+    pub success: Color,
+
+    /// エラー色
+    pub error: Color,
+
+    /// 警告色
+    pub warning: Color,
+
+    /// 情報色
+    pub info: Color,
+
+    // === Border & Divider Colors ===
+
+    /// 境界線色
+    pub border: Color,
+
+    /// 分割線色（より薄い）
+    pub divider: Color,
+
+    // === Surface Colors ===
+
+    /// サーフェス色（浮上する要素等）
+    pub surface: Color,
+
+    /// サーフェスのバリエーション
+    pub surface_variant: Color,
+
+    // === Overlay Colors ===
+
+    /// オーバーレイ背景色（モーダル等）
+    pub overlay: Color,
+
+    /// オーバーレイの影色
+    pub shadow: Color,
+
+    // === Window Colors ===
+
+    /// ウィンドウ背景色
+    pub window_background: Color,
+
+    /// ウィンドウ境界線色
+    pub window_border: Color,
+
+    /// ウィンドウタイトルバー背景色
+    pub window_titlebar_background: Color,
+
+    /// ウィンドウタイトルバーテキスト色（アクティブ）
+    pub window_titlebar_text_active: Color,
+
+    /// ウィンドウタイトルバーテキスト色（インアクティブ）
+    pub window_titlebar_text_inactive: Color,
+
+    /// ウィンドウタイトルバー境界線色
+    pub window_titlebar_border: Color,
+
+    /// ウィンドウシャドウ（浮上感を出す影）
+    pub window_shadow: Color,
+}
+
+impl SemanticColor {
+    /// ライトモード用のカラーパレットを作成
+    pub fn light() -> Self {
+        Self {
+            // Backgrounds
+            background: Color::rgb(1.0, 1.0, 1.0),           // #FFFFFF
+            background_secondary: Color::rgb(0.97, 0.97, 0.97), // #F7F7F7
+            background_tertiary: Color::rgb(0.95, 0.95, 0.95),  // #F2F2F2
+
+            // Text
+            text: Color::rgb(0.13, 0.13, 0.13),              // #222222
+            text_secondary: Color::rgb(0.45, 0.45, 0.45),       // #737373
+            text_tertiary: Color::rgb(0.60, 0.60, 0.60),        // #999999
+            text_inverse: Color::rgb(1.0, 1.0, 1.0),           // #FFFFFF
+
+            // Primary
+            primary: Color::rgb(0.0, 0.48, 1.0),              // Blue #007AFF
+            primary_light: Color::rgb(0.4, 0.75, 1.0),         // #66BFFF
+            primary_dark: Color::rgb(0.0, 0.32, 0.7),          // #0052B3
+
+            // Secondary
+            secondary: Color::rgb(0.4, 0.4, 0.4),             // Gray #666666
+
+            // Accent
+            accent: Color::rgb(0.95, 0.35, 0.15),             // Orange #F25826
+            accent_highlight: Color::rgb(1.0, 0.5, 0.3),       // #FF804D
+
+            // Functional
+            success: Color::rgb(0.2, 0.78, 0.35),             // Green #34C759
+            error: Color::rgb(1.0, 0.23, 0.19),               // Red #FF3B30
+            warning: Color::rgb(1.0, 0.58, 0.0),              // Yellow #FF9500
+            info: Color::rgb(0.0, 0.48, 1.0),                 // Blue #007AFF
+
+            // Border & Divider
+            border: Color::rgb(0.85, 0.85, 0.85),             // #D9D9D9
+            divider: Color::rgb(0.92, 0.92, 0.92),             // #EBEBEB
+
+            // Surface
+            surface: Color::rgb(1.0, 1.0, 1.0),              // #FFFFFF
+            surface_variant: Color::rgb(0.97, 0.97, 0.97),   // #F7F7F7
+
+            // Overlay
+            overlay: Color::rgba(0.0, 0.0, 0.0, 0.5),         // 50% black
+            shadow: Color::rgba(0.0, 0.0, 0.0, 0.15),         // 15% black
+
+            // Window
+            window_background: Color::rgb(1.0, 1.0, 1.0),      // #FFFFFF
+            window_border: Color::rgb(0.75, 0.75, 0.75),        // #BFBFBF
+            window_titlebar_background: Color::rgb(0.97, 0.97, 0.97), // #F7F7F7
+            window_titlebar_text_active: Color::rgb(0.13, 0.13, 0.13),     // #222222
+            window_titlebar_text_inactive: Color::rgb(0.55, 0.55, 0.55),    // #8C8C8C
+            window_titlebar_border: Color::rgb(0.85, 0.85, 0.85),         // #D9D9D9
+            window_shadow: Color::rgba(0.0, 0.0, 0.0, 0.3),      // 30% black
+        }
+    }
+
+    /// ダークモード用のカラーパレットを作成
+    pub fn dark() -> Self {
+        Self {
+            // Backgrounds
+            background: Color::rgb(0.09, 0.09, 0.09),         // #171717
+            background_secondary: Color::rgb(0.13, 0.13, 0.13), // #222222
+            background_tertiary: Color::rgb(0.18, 0.18, 0.18),  // #2E2E2E
+
+            // Text
+            text: Color::rgb(1.0, 1.0, 1.0),                 // #FFFFFF
+            text_secondary: Color::rgb(0.75, 0.75, 0.75),       // #C0C0C0
+            text_tertiary: Color::rgb(0.55, 0.55, 0.55),        // #8C8C8C
+            text_inverse: Color::rgb(0.13, 0.13, 0.13),         // #222222
+
+            // Primary
+            primary: Color::rgb(0.0, 0.65, 1.0),              // Blue #00A6FF
+            primary_light: Color::rgb(0.4, 0.82, 1.0),         // #66D1FF
+            primary_dark: Color::rgb(0.0, 0.45, 0.8),           // #0073CC
+
+            // Secondary
+            secondary: Color::rgb(0.6, 0.6, 0.6),             // Gray #999999
+
+            // Accent
+            accent: Color::rgb(1.0, 0.5, 0.3),                // Orange #FF804D
+            accent_highlight: Color::rgb(1.0, 0.65, 0.45),      // #FFA673
+
+            // Functional
+            success: Color::rgb(0.3, 0.85, 0.45),             // Green #4DDB72
+            error: Color::rgb(1.0, 0.4, 0.35),                 // Red #FF6659
+            warning: Color::rgb(1.0, 0.7, 0.15),               // Yellow #FFB326
+            info: Color::rgb(0.2, 0.7, 1.0),                  // Blue #33B3FF
+
+            // Border & Divider
+            border: Color::rgb(0.3, 0.3, 0.3),                // #4D4D4D
+            divider: Color::rgb(0.2, 0.2, 0.2),                // #333333
+
+            // Surface
+            surface: Color::rgb(0.13, 0.13, 0.13),             // #222222
+            surface_variant: Color::rgb(0.18, 0.18, 0.18),     // #2E2E2E
+
+            // Overlay
+            overlay: Color::rgba(0.0, 0.0, 0.0, 0.6),          // 60% black
+            shadow: Color::rgba(0.0, 0.0, 0.0, 0.3),            // 30% black
+
+            // Window
+            window_background: Color::rgb(0.13, 0.13, 0.13),      // #222222
+            window_border: Color::rgb(0.35, 0.35, 0.35),        // #595959
+            window_titlebar_background: Color::rgb(0.18, 0.18, 0.18), // #2E2E2E
+            window_titlebar_text_active: Color::rgb(1.0, 1.0, 1.0),        // #FFFFFF
+            window_titlebar_text_inactive: Color::rgb(0.6, 0.6, 0.6),      // #999999
+            window_titlebar_border: Color::rgb(0.3, 0.3, 0.3),           // #4D4D4D
+            window_shadow: Color::rgba(0.0, 0.0, 0.0, 0.5),      // 50% black
+        }
+    }
+
+    /// カラースキームからパレットを作成
+    pub fn from_scheme(scheme: ColorScheme) -> Self {
+        match scheme {
+            ColorScheme::Light => Self::light(),
+            ColorScheme::Dark => Self::dark(),
+        }
+    }
+}
+
+impl Default for SemanticColor {
+    fn default() -> Self {
+        Self::light()
+    }
+}
+```
+
+### SystemColors (システムカラー)
+
+macOS風のシステムカラー定義です。特定のUI部品に推奨される色です。
+
+```rust
+/// システムカラー - macOS風の定義済みカラー
+pub struct SystemColors {
+    /// Gray colors (neutral grays)
+    pub gray: GrayColors,
+
+    /// Blue colors
+    pub blue: BlueColors,
+
+    /// Green colors
+    pub green: GreenColors,
+
+    /// Orange colors
+    pub orange: OrangeColors,
+
+    /// Pink colors
+    pub pink: PinkColors,
+
+    /// Purple colors
+    pub purple: PurpleColors,
+
+    /// Red colors
+    pub red: RedColors,
+
+    /// Yellow colors
+    pub yellow: YellowColors,
+}
+
+/// グレースケールカラー
+pub struct GrayColors {
+    pub system_gray: Color,
+    pub system_gray2: Color,
+    pub system_gray3: Color,
+    pub system_gray4: Color,
+    pub system_gray5: Color,
+    pub system_gray6: Color,
+}
+
+impl GrayColors {
+    /// ライトモード用
+    pub fn light() -> Self {
+        Self {
+            system_gray: Color::rgb(0.52, 0.52, 0.52),      // #8E8E93
+            system_gray2: Color::rgb(0.48, 0.48, 0.48),     // #AEAEB2
+            system_gray3: Color::rgb(0.64, 0.64, 0.64),     // #C7C7CC
+            system_gray4: Color::rgb(0.78, 0.78, 0.78),     // #D1D1D6
+            system_gray5: Color::rgb(0.88, 0.88, 0.88),     // #E5E5EA
+            system_gray6: Color::rgb(0.95, 0.95, 0.95),     // #F2F2F7
+        }
+    }
+
+    /// ダークモード用
+    pub fn dark() -> Self {
+        Self {
+            system_gray: Color::rgb(0.55, 0.55, 0.55),      // #8E8E93
+            system_gray2: Color::rgb(0.42, 0.42, 0.42),     // #636366
+            system_gray3: Color::rgb(0.33, 0.33, 0.33),     // #48484A
+            system_gray4: Color::rgb(0.28, 0.28, 0.28),     // #3A3A3C
+            system_gray5: Color::rgb(0.22, 0.22, 0.22),     // #48484A
+            system_gray6: Color::rgb(0.18, 0.18, 0.18),     // #2C2C2E
+        }
+    }
+}
+
+/// ブルーカラー
+pub struct BlueColors {
+    pub system_blue: Color,
+}
+
+impl BlueColors {
+    pub fn light() -> Self {
+        Self {
+            system_blue: Color::rgb(0.0, 0.48, 1.0),         // #007AFF
+        }
+    }
+
+    pub fn dark() -> Self {
+        Self {
+            system_blue: Color::rgb(0.4, 0.75, 1.0),          // #66BFFF
+        }
+    }
+}
+
+/// グリーンカラー
+pub struct GreenColors {
+    pub system_green: Color,
+}
+
+impl GreenColors {
+    pub fn light() -> Self {
+        Self {
+            system_green: Color::rgb(0.2, 0.78, 0.35),        // #34C759
+        }
+    }
+
+    pub fn dark() -> Self {
+        Self {
+            system_green: Color::rgb(0.3, 0.85, 0.45),        // #4DDB72
+        }
+    }
+}
+
+// 他の色も同様に定義...
+
+impl SystemColors {
+    /// ライトモード用システムカラー
+    pub fn light() -> Self {
+        Self {
+            gray: GrayColors::light(),
+            blue: BlueColors::light(),
+            green: GreenColors::light(),
+            orange: OrangeColors::light(),
+            pink: PinkColors::light(),
+            purple: PurpleColors::light(),
+            red: RedColors::light(),
+            yellow: YellowColors::light(),
+        }
+    }
+
+    /// ダークモード用システムカラー
+    pub fn dark() -> Self {
+        Self {
+            gray: GrayColors::dark(),
+            blue: BlueColors::dark(),
+            green: GreenColors::dark(),
+            orange: OrangeColors::dark(),
+            pink: PinkColors::dark(),
+            purple: PurpleColors::dark(),
+            red: RedColors::dark(),
+            yellow: YellowColors::dark(),
+        }
+    }
+
+    /// カラースキームから作成
+    pub fn from_scheme(scheme: ColorScheme) -> Self {
+        match scheme {
+            ColorScheme::Light => Self::light(),
+            ColorScheme::Dark => Self::dark(),
+        }
+    }
+}
+```
+
+### ColorPalette API
+
+SemanticColorとSystemColorsへのアクセスを提供するAPIです。
+
+```rust
+/// カラーパレットAPI
+pub struct ColorPalette {
+    scheme: ColorScheme,
+    semantic: SemanticColor,
+    system: SystemColors,
+}
+
+impl ColorPalette {
+    /// 新しいカラーパレットを作成
+    pub fn new(scheme: ColorScheme) -> Self {
+        let semantic = SemanticColor::from_scheme(scheme);
+        let system = SystemColors::from_scheme(scheme);
+
+        Self {
+            scheme,
+            semantic,
+            system,
+        }
+    }
+
+    /// ライトモードパレット
+    pub fn light() -> Self {
+        Self::new(ColorScheme::Light)
+    }
+
+    /// ダークモードパレット
+    pub fn dark() -> Self {
+        Self::new(ColorScheme::Dark)
+    }
+
+    /// 現在のスキームを取得
+    pub fn scheme(&self) -> ColorScheme {
+        self.scheme
+    }
+
+    /// セマンティックカラーを取得
+    pub fn semantic(&self) -> &SemanticColor {
+        &self.semantic
+    }
+
+    /// システムカラーを取得
+    pub fn system(&self) -> &SystemColors {
+        &self.system
+    }
+
+    /// === Semantic Color Accessors ===
+
+    pub fn background(&self) -> Color { self.semantic.background }
+    pub fn background_secondary(&self) -> Color { self.semantic.background_secondary }
+    pub fn background_tertiary(&self) -> Color { self.semantic.background_tertiary }
+
+    pub fn text(&self) -> Color { self.semantic.text }
+    pub fn text_secondary(&self) -> Color { self.semantic.text_secondary }
+    pub fn text_tertiary(&self) -> Color { self.semantic.text_tertiary }
+
+    pub fn primary(&self) -> Color { self.semantic.primary }
+    pub fn primary_light(&self) -> Color { self.semantic.primary_light }
+    pub fn primary_dark(&self) -> Color { self.semantic.primary_dark }
+
+    pub fn secondary(&self) -> Color { self.semantic.secondary }
+
+    pub fn accent(&self) -> Color { self.semantic.accent }
+    pub fn accent_highlight(&self) -> Color { self.semantic.accent_highlight }
+
+    pub fn success(&self) -> Color { self.semantic.success }
+    pub fn error(&self) -> Color { self.semantic.error }
+    pub fn warning(&self) -> Color { self.semantic.warning }
+    pub fn info(&self) -> Color { self.semantic.info }
+
+    pub fn border(&self) -> Color { self.semantic.border }
+    pub fn divider(&self) -> Color { self.semantic.divider }
+
+    pub fn surface(&self) -> Color { self.semantic.surface }
+    pub fn surface_variant(&self) -> Color { self.semantic.surface_variant }
+
+    pub fn overlay(&self) -> Color { self.semantic.overlay }
+
+    /// === Window Color Accessors ===
+
+    pub fn window_background(&self) -> Color { self.semantic.window_background }
+    pub fn window_border(&self) -> Color { self.semantic.window_border }
+    pub fn window_titlebar_background(&self) -> Color { self.semantic.window_titlebar_background }
+    pub fn window_titlebar_text_active(&self) -> Color { self.semantic.window_titlebar_text_active }
+    pub fn window_titlebar_text_inactive(&self) -> Color { self.semantic.window_titlebar_text_inactive }
+    pub fn window_titlebar_border(&self) -> Color { self.semantic.window_titlebar_border }
+    pub fn window_shadow(&self) -> Color { self.semantic.window_shadow }
+
+    /// === System Color Accessors ===
+
+    pub fn system_gray(&self) -> Color { self.system.gray.system_gray }
+    pub fn system_gray2(&self) -> Color { self.system.gray.system_gray2 }
+    pub fn system_gray3(&self) -> Color { self.system.gray.system_gray3 }
+    pub fn system_gray4(&self) -> Color { self.system.gray.system_gray4 }
+    pub fn system_gray5(&self) -> Color { self.system.gray.system_gray5 }
+    pub fn system_gray6(&self) -> Color { self.system.gray.system_gray6 }
+
+    pub fn system_blue(&self) -> Color { self.system.blue.system_blue }
+    pub fn system_green(&self) -> Color { self.system.green.system_green }
+    pub fn system_orange(&self) -> Color { self.system.orange.system_orange }
+    pub fn system_pink(&self) -> Color { self.system.pink.system_pink }
+    pub fn system_purple(&self) -> Color { self.system.purple.system_purple }
+    pub fn system_red(&self) -> Color { self.system.red.system_red }
+    pub fn system_yellow(&self) -> Color { self.system.yellow.system_yellow }
+}
+
+impl Default for ColorPalette {
+    fn default() -> Self {
+        Self::light()
+    }
+}
+
+// From実装でスキームからの変換を簡単に
+impl From<ColorScheme> for ColorPalette {
+    fn from(scheme: ColorScheme) -> Self {
+        Self::new(scheme)
+    }
+}
+```
+
+### Environmentとの統合
+
+ColorPaletteをEnvironmentに登録して、アプリ全体で共有します。
+
+```rust
+// EnvironmentにColorSchemeを登録
+impl MyView {
+    fn body(&self) -> impl View {
+        VStack::new((
+            // 色スキームを環境に設定
+            Text::new("Themed Text")
+                .environment(ColorScheme::Dark),
+
+            Button::new("Click Me")
+                .background(ColorPalette::from(ColorScheme::Dark).primary()),
+        ))
+        .environment(ColorScheme::Light)  // デフォルトはライトモード
+    }
+}
+
+// Viewからカラーパレットを取得
+impl SomeView {
+    fn get_theme_colors(&self, env: &Environment) -> ColorPalette {
+        let scheme = env.get::<ColorScheme>()
+            .copied()
+            .unwrap_or(ColorScheme::Light);
+
+        ColorPalette::from(scheme)
+    }
+}
+```
+
+### 使用例
+
+```rust
+// 1. 直接カラーパレットを使用
+let palette = ColorPalette::dark();
+let bg_color = palette.background();
+let text_color = palette.text();
+let accent_color = palette.accent();
+
+// 2. View内でEnvironmentから取得
+impl MyView {
+    fn render(&self, env: &Environment) {
+        let scheme = env.get::<ColorScheme>()
+            .copied()
+            .unwrap_or_default();
+        let palette = ColorPalette::from(scheme);
+
+        // 色を使用してレンダリング
+        canvas.fill_rect(0, 0, width, height, palette.background());
+        canvas.draw_text(10, 10, "Hello", palette.text(), 16.0);
+    }
+}
+
+// 3. ViewExtで便利メソッド提供
+pub trait ColorPaletteExt: View {
+    /// プライマリーカラーでテキストを描画
+    fn primary_text(self, content: &str) -> Self;
+
+    /// 背景色を設定（現在のスキームから）
+    fn themed_background(self) -> Self;
+
+    /// アクセント色でボーダー
+    fn accent_border(self, width: f32) -> Self;
+}
+```
+
+### ダークモード切り替えの例
+
+```rust
+struct ThemeSwitcher {
+    is_dark: State<bool>,
+}
+
+impl ThemeSwitcher {
+    fn body(&self) -> impl View {
+        let scheme = if self.is_dark.get() {
+            ColorScheme::Dark
+        } else {
+            ColorScheme::Light
+        };
+
+        VStack::new((
+            Text::new("Theme Demo")
+                .color(ColorPalette::from(scheme).text()),
+
+            Rectangle::new()
+                .fill(ColorPalette::from(scheme).background())
+                .frame(100.0, 100.0),
+
+            Button::new("Toggle Theme")
+                .background(ColorPalette::from(scheme).accent())
+                .on_click({
+                    let is_dark = self.is_dark.clone();
+                    move || {
+                        is_dark.update(|d| *d = !*d);
+                    }
+                }),
+        ))
+        .environment(scheme)
+        .background(ColorPalette::from(scheme).background_secondary())
+    }
+}
+
+// ウィンドウスタイルの使用例
+impl StyledWindow {
+    fn body(&self) -> impl View {
+        let scheme = ColorScheme::Light;
+        let palette = ColorPalette::from(scheme);
+
+        Window::new("Styled Window", self.content())
+            .background(palette.window_background())
+            .border_color(palette.window_border())
+    }
+}
+
+// タイトルバー付きウィンドウの例
+impl TitledWindow {
+    fn render_titlebar(&self, is_active: bool) -> impl View {
+        let scheme = ColorScheme::Light;
+        let palette = ColorPalette::from(scheme);
+
+        HStack::new((
+            Text::new("Window Title")
+                .color(if is_active {
+                    palette.window_titlebar_text_active()
+                } else {
+                    palette.window_titlebar_text_inactive()
+                }),
+            Spacer::new(),
+            // Close button etc.
+        ))
+        .background(palette.window_titlebar_background())
+        .border(
+            palette.window_titlebar_border(),
+            1.0
+        )
+    }
+}
+```
+
+### カラーパレットのデザイン原則
+
+| 原則 | 説明 |
+|-----|------|
+| **コントラスト比** | テキストと背景のコントラスト比は最低4.5:1（WCAG AA） |
+| **一貫性** | 同じ役割の色は全体で一貫して使用 |
+| **階層性** | background, background_secondary, background_tertiaryで視覚的な階層を表現 |
+| **機能色** | 成功/エラー/警告/情報は明確に区別可能 |
+| **アクセシビリティ** | 色覚多様性に配慮（色だけでなく形でも区別可能） |
+| **ウィンドウ階層** | アクティブ/インアクティブウィンドウでタイトルバーの色を変化させて区別 |
+| **浮上感** | window_shadowでウィンドウが背景から浮上している視覚効果を表現 |
+
+---
+
+## 12. Event Handling (イベント処理)
 
 Flutterのイベント処理モデルをベースに、Hit Testとイベントディスパッチの仕組みを設計します。
 
