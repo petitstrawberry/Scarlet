@@ -20,7 +20,7 @@ use core::time::Duration;
 use sbus_client;
 use scarlet_desktop_config::{TaskbarConfig, TaskbarPosition};
 use scarlet_ui::graphics;
-use scarlet_ui::{Color, theme};
+use scarlet_ui::Color;
 use std::string::{String, ToString};
 use std::thread;
 use std::vec;
@@ -343,7 +343,7 @@ fn build_menu_items(
     let mut x_offset = 0i32;
 
     // Always add Scarlet menu as the first item (fixed)
-    let (tw, _) = graphics::measure_text("Scarlet", 13.0);
+    let (tw, _): (u32, u32) = graphics::measure_text_sized("Scarlet", 13.0);
     let width: u32 = tw.saturating_add(16).min(100);
     menu_items.push(MenuItem {
         label: String::from("Scarlet"),
@@ -362,7 +362,7 @@ fn build_menu_items(
 
             // Add app name as a menu item
             if !app_name.is_empty() {
-                let (tw, _) = graphics::measure_text(&app_name, 13.0);
+                let (tw, _): (u32, u32) = graphics::measure_text_sized(&app_name, 13.0);
                 let width: u32 = tw.saturating_add(16).min(100);
                 menu_items.push(MenuItem {
                     label: app_name.clone(),
@@ -375,7 +375,7 @@ fn build_menu_items(
             }
 
             for label in &menus {
-                let (tw, _) = graphics::measure_text(&label, 13.0);
+                let (tw, _): (u32, u32) = graphics::measure_text_sized(&label, 13.0);
                 let width: u32 = tw.saturating_add(16).min(100);
                 menu_items.push(MenuItem {
                     label: label.clone(),
@@ -553,13 +553,12 @@ fn draw_menu_bar(
     let h = surface.height();
 
     // Use theme colors
-    let theme = theme::get_theme();
-    let bg_color = Color::rgb(235, 235, 238); // sidebar_bg
-    let text_color = Color::rgb(20, 20, 24); // text_main
-    let text_dim = Color::rgb(120, 120, 120); // text_sub
-    let border_color = Color::rgb(100, 100, 105); // border
-    let hover_bg = Color::rgb(210, 210, 214); // hover
-    let active_bg = Color::rgb(180, 180, 190); // primary (pressed)
+    let bg_color = Color::rgb(0.922, 0.922, 0.933); // sidebar_bg
+    let text_color = Color::rgb(0.078, 0.078, 0.094); // text_main
+    let text_dim = Color::rgb(0.471, 0.471, 0.471); // text_sub
+    let border_color = Color::rgb(0.392, 0.392, 0.412); // border
+    let hover_bg = Color::rgb(0.824, 0.824, 0.839); // hover
+    let active_bg = Color::rgb(0.706, 0.706, 0.745); // primary (pressed)
 
     surface.with_buffer(|buf, width, height| {
         // Bar background
@@ -601,16 +600,7 @@ fn draw_menu_bar(
             let text_x = item.x + 8;
             let text_y = item.y + ((item.height as i32 - 16) / 2).max(0);
 
-            graphics::draw_text(
-                buf,
-                width as usize,
-                h as usize,
-                &item.label,
-                text_x,
-                text_y,
-                font_size,
-                text_color.as_bgra(),
-            );
+            draw_text_helper(buf, width, h, text_x, text_y, &item.label, text_color, font_size);
         }
 
         // Draw status items (right side)
@@ -618,16 +608,7 @@ fn draw_menu_bar(
             let text_x = item.x + 6;
             let text_y = item.y + ((item.height as i32 - 16) / 2).max(0);
 
-            graphics::draw_text(
-                buf,
-                width as usize,
-                h as usize,
-                &item.label,
-                text_x,
-                text_y,
-                font_size,
-                text_dim.as_bgra(),
-            );
+            draw_text_helper(buf, width, h, text_x, text_y, &item.label, text_dim, font_size);
         }
     });
 
@@ -645,7 +626,7 @@ fn fill_rect(
     h: u32,
     color: Color,
 ) {
-    let bgra = color.as_bgra();
+    let bgra = color.to_bgra();
     let x_start = x.max(0) as u32;
     let y_start = y.max(0) as u32;
     let x_end = (x as u32 + w).min(width);
@@ -655,10 +636,10 @@ fn fill_rect(
         for px in x_start..x_end {
             let idx = (py as usize * width as usize + px as usize) * 4;
             if idx + 3 < buf.len() {
-                buf[idx] = bgra[0];
-                buf[idx + 1] = bgra[1];
-                buf[idx + 2] = bgra[2];
-                buf[idx + 3] = bgra[3];
+                buf[idx] = (bgra & 0xFF) as u8;
+                buf[idx + 1] = ((bgra >> 8) & 0xFF) as u8;
+                buf[idx + 2] = ((bgra >> 16) & 0xFF) as u8;
+                buf[idx + 3] = ((bgra >> 24) & 0xFF) as u8;
             }
         }
     }
@@ -990,11 +971,11 @@ fn draw_dropdown(conn: &mut Connection, surface_id: u32, dropdown: &DropdownStat
 
     surface.with_buffer(|buf, width, height| {
         // Use theme colors for dropdown
-        let bg_color = Color::rgb(255, 255, 255); // surface
-        let border_color = Color::rgb(100, 100, 105); // border
-        let text_color = Color::rgb(20, 20, 24); // text_main
-        let hover_color = Color::rgb(180, 180, 190); // primary
-        let separator_color = Color::rgb(200, 200, 200); // separator
+        let bg_color = Color::rgb(1.0, 1.0, 1.0); // surface
+        let border_color = Color::rgb(0.392, 0.392, 0.412); // border
+        let text_color = Color::rgb(0.078, 0.078, 0.094); // text_main
+        let hover_color = Color::rgb(0.706, 0.706, 0.745); // primary
+        let separator_color = Color::rgb(0.784, 0.784, 0.784); // separator
 
         fill_rect(buf, width, h, 0, 0, width, h, bg_color);
 
@@ -1033,16 +1014,7 @@ fn draw_dropdown(conn: &mut Connection, surface_id: u32, dropdown: &DropdownStat
                 // Draw text
                 let text_x = 8;
                 let text_y = item.y + ((item.height as i32 - 16) / 2).max(0);
-                graphics::draw_text(
-                    buf,
-                    width as usize,
-                    h as usize,
-                    &item.label,
-                    text_x,
-                    text_y,
-                    FONT_SIZE,
-                    text_color.as_bgra(),
-                );
+                draw_text_helper(buf, width, h, text_x, text_y, &item.label, text_color, FONT_SIZE);
             }
         }
     });
@@ -1070,6 +1042,13 @@ fn draw_rect(
 /// Draw vertical line
 fn draw_vline(buf: &mut [u8], width: u32, height: u32, x: i32, y: i32, h: u32, color: Color) {
     fill_rect(buf, width, height, x, y, 1, h, color);
+}
+
+/// Helper function to draw text using Canvas
+fn draw_text_helper(buf: &mut [u8], width: u32, height: u32, x: i32, y: i32, text: &str, color: Color, font_size: f32) {
+    use scarlet_ui::graphics::Canvas;
+    let mut canvas = Canvas::new(buf, width, height);
+    canvas.draw_text_sized(x, y, text, color, font_size);
 }
 
 /// Draw line
@@ -1213,7 +1192,7 @@ pub extern "C" fn main() -> i32 {
 
     // Clock
     let clock_text = format!("00:00");
-    let (cw, _) = graphics::measure_text(&clock_text, 13.0);
+    let (cw, _): (u32, u32) = graphics::measure_text_sized(&clock_text, 13.0);
     let clock_width: u32 = cw.saturating_add(12);
     x_offset_right -= clock_width as i32;
     status_items.push(StatusItem {
@@ -1226,7 +1205,7 @@ pub extern "C" fn main() -> i32 {
 
     // CPU usage
     let cpu_text = format!("CPU {}%", cpu_usage);
-    let (cpu_w, _) = graphics::measure_text(&cpu_text, 13.0);
+    let (cpu_w, _): (u32, u32) = graphics::measure_text_sized(&cpu_text, 13.0);
     let cpu_width: u32 = cpu_w.saturating_add(12);
     x_offset_right -= cpu_width as i32;
     status_items.push(StatusItem {
@@ -1239,7 +1218,7 @@ pub extern "C" fn main() -> i32 {
 
     // Memory usage
     let mem_text = format!("Mem {}%", memory_usage);
-    let (mem_w, _) = graphics::measure_text(&mem_text, 13.0);
+    let (mem_w, _): (u32, u32) = graphics::measure_text_sized(&mem_text, 13.0);
     let mem_width: u32 = mem_w.saturating_add(12);
     x_offset_right -= mem_width as i32;
     status_items.push(StatusItem {

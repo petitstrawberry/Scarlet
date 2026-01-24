@@ -8,7 +8,7 @@
 extern crate scarlet_std as std;
 
 use core::time::Duration;
-use scarlet_ui::{Color, theme};
+use scarlet_ui::Color;
 use std::println;
 use std::thread;
 use sws_client::{Connection, Event};
@@ -22,10 +22,9 @@ fn draw_background(conn: &mut Connection, surface_id: u32) {
     let w = surface.width();
     let h = surface.height();
     surface.with_buffer(|buf, width, height| {
-        // Simple vertical gradient using theme colors
-        let theme = theme::get_theme();
-        let top = Color::rgb(40, 40, 50); // Dark blue-gray
-        let bottom = Color::rgb(20, 20, 30); // Darker blue-gray
+        // Simple vertical gradient
+        let top = Color::rgb(0.157, 0.157, 0.196); // Dark blue-gray (40/255)
+        let bottom = Color::rgb(0.078, 0.078, 0.118); // Darker blue-gray (20/255)
 
         if h == 0 {
             return;
@@ -34,26 +33,26 @@ fn draw_background(conn: &mut Connection, surface_id: u32) {
         // Draw gradient
         for y in 0..h {
             let t = (y as u32).saturating_mul(255) / (h.saturating_sub(1).max(1));
-            let r = (top.r as u32 * (255 - t) + bottom.r as u32 * t) / 255;
-            let g = (top.g as u32 * (255 - t) + bottom.g as u32 * t) / 255;
-            let b = (top.b as u32 * (255 - t) + bottom.b as u32 * t) / 255;
-            let color = Color::rgb(r as u8, g as u8, b as u8);
-            let bgra = color.as_bgra();
+            let r = (top.r * 255.0 * (255.0 - t as f32) + bottom.r * 255.0 * t as f32) / 255.0;
+            let g = (top.g * 255.0 * (255.0 - t as f32) + bottom.g * 255.0 * t as f32) / 255.0;
+            let b_val = (top.b * 255.0 * (255.0 - t as f32) + bottom.b * 255.0 * t as f32) / 255.0;
+            let color = Color::rgb(r / 255.0, g / 255.0, b_val / 255.0);
+            let bgra = color.to_bgra();
 
             for x in 0..w {
                 let idx = ((y as usize) * width as usize + (x as usize)) * 4;
                 if idx + 3 < buf.len() {
-                    buf[idx] = bgra[0];
-                    buf[idx + 1] = bgra[1];
-                    buf[idx + 2] = bgra[2];
-                    buf[idx + 3] = bgra[3];
+                    buf[idx] = (bgra & 0xFF) as u8;
+                    buf[idx + 1] = ((bgra >> 8) & 0xFF) as u8;
+                    buf[idx + 2] = ((bgra >> 16) & 0xFF) as u8;
+                    buf[idx + 3] = ((bgra >> 24) & 0xFF) as u8;
                 }
             }
         }
 
         // Subtle diagonal accent lines
-        let accent = Color::rgb(100, 120, 140).with_alpha(28);
-        let bgra = accent.as_bgra();
+        let accent = Color::rgba(0.392, 0.471, 0.549, 0.110); // RGB(100, 120, 140) with alpha 28/255
+        let bgra = accent.to_bgra();
         let mut x = 0i32;
         while x < w as i32 + h as i32 {
             // Draw diagonal line from (x, 0) to (x-h, h-1)
@@ -63,10 +62,10 @@ fn draw_background(conn: &mut Connection, surface_id: u32) {
                 if px >= 0 && px < w as i32 && py >= 0 && py < h as i32 {
                     let idx = (py as usize * width as usize + px as usize) * 4;
                     if idx + 3 < buf.len() {
-                        buf[idx] = bgra[0];
-                        buf[idx + 1] = bgra[1];
-                        buf[idx + 2] = bgra[2];
-                        buf[idx + 3] = bgra[3];
+                        buf[idx] = (bgra & 0xFF) as u8;
+                        buf[idx + 1] = ((bgra >> 8) & 0xFF) as u8;
+                        buf[idx + 2] = ((bgra >> 16) & 0xFF) as u8;
+                        buf[idx + 3] = ((bgra >> 24) & 0xFF) as u8;
                     }
                 }
             }
