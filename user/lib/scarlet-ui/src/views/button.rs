@@ -219,4 +219,8 @@ impl ElementRenderObject for ButtonRenderObject {
             canvas.draw_text_sized(x.max(0), y.max(0), &self.label, self.text_color, self.font_size);
         }
     }
+
+    fn get_buffer(&self) -> Option<&Buffer> {
+        self.buffer.as_ref()
+    }
 }

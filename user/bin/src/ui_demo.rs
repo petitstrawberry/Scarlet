@@ -30,7 +30,7 @@ impl Application for DemoApp {
         let counter_value = self.counter.get();
         let counter_text = format!("Count: {}", counter_value);
 
-        vstack! {
+        Window::new("ScarletUI Demo", vstack! {
             // === Header ===
             Text::new("ScarletUI Demo").font_size(32.0),
 
@@ -65,7 +65,9 @@ impl Application for DemoApp {
         .spacing(16.0)
         .alignment(Alignment::Center)
         .padding(20.0)
-        .background(Color::WHITE)
+        .background(Color::WHITE))
+        .app_id("com.scarlet.ui_demo")
+        .size(Size::new(800.0, 600.0))
     }
 }
 

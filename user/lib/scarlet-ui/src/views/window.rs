@@ -557,4 +557,8 @@ impl ElementRenderObject for WindowRenderObject {
         // Window properties don't update dynamically for now
         UpdateResult::NoChange
     }
+
+    fn get_buffer(&self) -> Option<&Buffer> {
+        self.titlebar_buffer.as_ref()
+    }
 }

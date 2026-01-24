@@ -175,4 +175,8 @@ impl ElementRenderObject for TextRenderObject {
             canvas.draw_text_sized(0, 0, &self.content, self.color, self.font_size);
         }
     }
+
+    fn get_buffer(&self) -> Option<&Buffer> {
+        self.buffer.as_ref()
+    }
 }

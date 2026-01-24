@@ -156,4 +156,8 @@ impl ElementRenderObject for RectangleRenderObject {
             canvas.fill_rect(0, 0, width, height, self.color);
         }
     }
+
+    fn get_buffer(&self) -> Option<&Buffer> {
+        self.buffer.as_ref()
+    }
 }

@@ -182,11 +182,10 @@ impl PipelineOwner {
         let dirty_paint = core::mem::take(&mut self.dirty_paint);
 
         for id in dirty_paint {
-            // Note: In a full implementation, we would:
-            // 1. Find the element
-            // 2. Call element.render() if it's a RenderElement
-            let _ = id;
-            let _ = element_tree;
+            // Find the element and call render()
+            if let Some(element) = element_tree.find_element_mut(id) {
+                element.render();
+            }
         }
     }
 

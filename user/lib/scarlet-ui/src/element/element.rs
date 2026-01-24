@@ -176,6 +176,22 @@ pub trait Element {
         self.bounds().contains(point)
     }
 
+    /// Render the Element to its buffer
+    ///
+    /// This is called during the paint phase to update the Element's buffer.
+    /// For RenderElement, this calls render_object.render().
+    /// For other Elements, this does nothing by default.
+    fn render(&mut self) {}
+
+    /// Get the buffer for this Element (if any)
+    ///
+    /// Returns the buffer if this Element has one to composite.
+    /// For RenderElement, this delegates to render_object.get_buffer().
+    /// For other Elements, returns None.
+    fn get_buffer(&self) -> Option<&crate::buffer::Buffer> {
+        None
+    }
+
     /// Handle input events
     ///
     /// Returns true if the event was handled.

@@ -6,7 +6,7 @@
 use alloc::boxed::Box;
 use alloc::string::String;
 use crate::element::{Element, ElementTree, LayoutConstraints};
-use crate::geometry::Size;
+use crate::geometry::{Size, Point};
 use crate::compositor::Compositor;
 use crate::pipeline::PipelineOwner;
 use crate::buffer::Buffer;
@@ -139,6 +139,11 @@ impl RenderingPipeline {
         self.compositor = Some(Compositor::new(size));
         self.window_size = size;
 
+        // Mark root as dirty for initial paint
+        if let Some(root) = self.element_tree.root() {
+            self.pipeline_owner.mark_needs_paint(root.id());
+        }
+
         (app_id, title, size)
     }
 
@@ -163,16 +168,55 @@ impl RenderingPipeline {
         // Flush all dirty phases
         self.pipeline_owner.flush(&mut self.element_tree, self.window_size);
 
-        // Composite the tree
+        // Collect elements for compositing (before borrowing compositor)
+        let mut elements_to_composite = alloc::vec::Vec::new();
+        if let Some(root) = self.element_tree.root() {
+            self.collect_elements_for_composite(root, Point::ZERO, &mut elements_to_composite);
+        }
+
+        // Composite all elements into the window buffer
         if let Some(ref mut compositor) = self.compositor {
-            // Note: In a full implementation, we would get the root RenderObject
-            // and call composite_tree. For now, we just clear the buffer.
+            // Clear background
             compositor.clear(crate::color::Color::WHITE);
+
+            // Composite in reverse order (children first for painter's algorithm)
+            for (element, origin) in elements_to_composite.into_iter().rev() {
+                if let Some(buffer) = element.get_buffer() {
+                    compositor.window_buffer_mut().composite(
+                        buffer,
+                        origin.x as i32,
+                        origin.y as i32,
+                        1.0,
+                    );
+                }
+            }
 
             Some(compositor.window_buffer())
         } else {
             None
         }
+    }
+
+    /// Collect elements for compositing (depth-first, children first)
+    fn collect_elements_for_composite<'a>(
+        &self,
+        element: &'a dyn Element,
+        origin: Point,
+        result: &mut alloc::vec::Vec<(&'a dyn Element, Point)>,
+    ) {
+        let position = element.position();
+        let absolute_origin = Point {
+            x: origin.x + position.x,
+            y: origin.y + position.y,
+        };
+
+        // Add children first (painter's algorithm)
+        for child in element.children() {
+            self.collect_elements_for_composite(child.as_ref(), absolute_origin, result);
+        }
+
+        // Add this element
+        result.push((element, absolute_origin));
     }
 
     /// Get the window buffer (if available)

@@ -29,6 +29,14 @@ pub trait RenderObject: Any {
     /// For leaf nodes, this renders content to the buffer.
     fn render(&mut self);
 
+    /// Get the buffer (for compositing)
+    ///
+    /// Returns the buffer if this RenderObject has rendered content.
+    /// Returns None for container nodes.
+    fn get_buffer(&self) -> Option<&crate::buffer::Buffer> {
+        None
+    }
+
     /// Hit test - check if a point is within this RenderObject
     fn hit_test(&self, point: Point) -> bool {
         let bounds = Rect {
@@ -193,6 +201,15 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
             y: point.y - self.position.y,
         };
         self.render_object.hit_test(local_point)
+    }
+
+    fn render(&mut self) {
+        // Delegate to RenderObject
+        self.render_object.render();
+    }
+
+    fn get_buffer(&self) -> Option<&crate::buffer::Buffer> {
+        self.render_object.get_buffer()
     }
 
     fn handle_event(&mut self, _event: &crate::event::Event, _phase: crate::event::Phase) -> bool {
