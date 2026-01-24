@@ -5,7 +5,7 @@ use alloc::vec::Vec;
 mod dispatcher;
 mod gesture;
 
-pub use dispatcher::EventDispatcher;
+pub use dispatcher::{EventDispatcher, Phase, HitResult};
 pub use gesture::{
     Gesture, GestureRecognizer, TapGestureRecognizer, DragGestureRecognizer,
     LongPressGestureRecognizer, GestureManager,

@@ -105,8 +105,8 @@ impl PipelineOwner {
         for id in dirty_build {
             // Note: In a full implementation, we would:
             // 1. Find the element by ID
-            // 2. Call element.rebuild(new_view)
-            // For now, this is a placeholder for the rebuild logic
+            // 2. Call element.update(new_view)
+            // For now, this is a placeholder for the update logic
             let _ = id;
             let _ = element_tree;
         }

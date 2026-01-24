@@ -10,6 +10,19 @@ use crate::view::View;
 
 use super::id::ElementId;
 
+/// Result of an Element update operation
+///
+/// Indicates whether the Element was updated, replaced, or unchanged
+/// after attempting to reconcile with a new View.
+pub enum UpdateResult {
+    /// Properties were updated (Element reused)
+    Updated,
+    /// Element was replaced (new Element created)
+    Replaced,
+    /// No changes detected (Element unchanged)
+    NoChange,
+}
+
 /// Layout constraints for Elements
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub struct LayoutConstraints {
@@ -108,11 +121,12 @@ pub trait Element {
     /// Get mutable child Elements
     fn children_mut(&mut self) -> &mut [Box<dyn Element>];
 
-    /// Rebuild this Element from a new View
+    /// Update this Element from a new View
     ///
     /// Called when a View changes due to State updates.
-    /// Returns true if the Element was rebuilt.
-    fn rebuild(&mut self, new_view: &dyn View) -> bool;
+    /// Returns UpdateResult indicating whether the Element was updated,
+    /// replaced, or unchanged.
+    fn update(&mut self, new_view: &dyn View) -> UpdateResult;
 
     /// Mount the Element into the tree
     ///

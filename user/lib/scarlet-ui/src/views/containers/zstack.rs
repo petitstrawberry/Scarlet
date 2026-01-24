@@ -2,33 +2,37 @@
 //!
 //! Arranges children layered on top of each other.
 
-use alloc::vec::Vec;
 use core::any::Any;
 use crate::view::View;
 use crate::element::{Element, RenderElement, ElementRenderObject};
 use crate::geometry::{Size, Point};
 use crate::element::LayoutConstraints;
 use alloc::boxed::Box;
+use super::ViewTuple;
 
 /// ZStack View - arranges children in layers
-pub struct ZStack {
-    children: Vec<Box<dyn View>>,
+///
+/// # Examples
+///
+/// ```ignore
+/// let stack = ZStack::new((
+///     Rectangle::new().fill(Color::BLUE),
+///     Text::new("Overlay"),
+/// ))
+/// .alignment(Alignment::Center);
+/// ```
+pub struct ZStack<C: ViewTuple> {
+    content: C,
     alignment: crate::geometry::Alignment,
 }
 
-impl ZStack {
-    /// Create a new ZStack
-    pub fn new() -> Self {
+impl<C: ViewTuple> ZStack<C> {
+    /// Create a new ZStack with the given content tuple
+    pub fn new(content: C) -> Self {
         Self {
-            children: Vec::new(),
+            content,
             alignment: crate::geometry::Alignment::Center,
         }
-    }
-
-    /// Add a child view
-    pub fn add_child(mut self, child: Box<dyn View>) -> Self {
-        self.children.push(child);
-        self
     }
 
     /// Set alignment for children
@@ -37,35 +41,34 @@ impl ZStack {
         self
     }
 
-    /// Get the number of children
-    pub fn child_count(&self) -> usize {
-        self.children.len()
-    }
-
     /// Get alignment
     pub fn get_alignment(&self) -> crate::geometry::Alignment {
         self.alignment
     }
 }
 
-impl Default for ZStack {
-    fn default() -> Self {
-        Self::new()
+impl<C: ViewTuple + Clone> Clone for ZStack<C> {
+    fn clone(&self) -> Self {
+        Self {
+            content: self.content.clone(),
+            alignment: self.alignment,
+        }
     }
 }
 
-impl View for ZStack {
+impl<C: ViewTuple + 'static> View for ZStack<C> {
     fn create_element(&self) -> Box<dyn Element> {
+        // Create elements from all children in the tuple
+        let children = self.content.create_elements();
+
         Box::new(RenderElement::new(
-            ZStackRenderObject::new(self.alignment, self.children.len()),
+            ZStackRenderObject::new(self.alignment, children.len()),
         ))
     }
 
     fn listenables(&self) -> alloc::vec::Vec<&dyn crate::state::Listenable> {
         let mut listenables = alloc::vec::Vec::new();
-        for child in &self.children {
-            listenables.extend(child.listenables());
-        }
+        self.content.collect_listenables(&mut listenables);
         listenables
     }
 

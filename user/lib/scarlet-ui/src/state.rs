@@ -109,16 +109,18 @@ pub struct State<T> {
 }
 
 impl<T> State<T> {
-    /// Create a new State with an initial value and auto-generated ID
-    pub fn initial(value: T) -> Self {
-        Self {
-            id: generate_state_id(),
-            inner: Arc::new(StateInner::new(value)),
-        }
-    }
-
     /// Create a new State with a specific ID and initial value
-    pub fn with_id(id: StateId, value: T) -> Self {
+    ///
+    /// This is the primary constructor for State, allowing explicit
+    /// specification of both the ID and the initial value.
+    ///
+    /// # Example
+    /// ```no_run
+    /// use scarlet_ui::{State, StateId};
+    ///
+    /// let state = State::new(StateId::new(1), 42);
+    /// ```
+    pub fn new(id: StateId, value: T) -> Self {
         Self {
             id,
             inner: Arc::new(StateInner::new(value)),
@@ -160,6 +162,27 @@ impl<T> State<T> {
     /// Subscribe to value changes
     pub fn subscribe(&self, callback: SubscriberCallback<T>) {
         self.inner.subscribe(callback);
+    }
+}
+
+impl<T: Default> State<T> {
+    /// Create a new State with a specific ID and default value
+    ///
+    /// This constructor uses `T::default()` as the initial value,
+    /// making it convenient for types that implement Default.
+    ///
+    /// # Example
+    /// ```no_run
+    /// use scarlet_ui::{State, StateId};
+    ///
+    /// let counter: State<i32> = State::initial(StateId::new(1));
+    /// assert_eq!(counter.get(), 0);
+    /// ```
+    pub fn initial(id: StateId) -> Self {
+        Self {
+            id,
+            inner: Arc::new(StateInner::new(T::default())),
+        }
     }
 }
 

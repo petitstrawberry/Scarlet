@@ -17,14 +17,10 @@
 #[macro_export]
 macro_rules! vstack {
     () => {{
-        $crate::views::VStack::new()
+        $crate::views::VStack::new(())
     }};
-    ($($view:expr),* $(,)?) => {{
-        let mut stack = $crate::views::VStack::new();
-        $(
-            stack = stack.add_child($crate::alloc::boxed::Box::new($view));
-        )*
-        stack
+    ($($view:expr),+ $(,)?) => {{
+        $crate::views::VStack::new(($($view,)+))
     }};
 }
 
@@ -43,14 +39,10 @@ macro_rules! vstack {
 #[macro_export]
 macro_rules! hstack {
     () => {{
-        $crate::views::HStack::new()
+        $crate::views::HStack::new(())
     }};
-    ($($view:expr),* $(,)?) => {{
-        let mut stack = $crate::views::HStack::new();
-        $(
-            stack = stack.add_child($crate::alloc::boxed::Box::new($view));
-        )*
-        stack
+    ($($view:expr),+ $(,)?) => {{
+        $crate::views::HStack::new(($($view,)+))
     }};
 }
 
@@ -68,14 +60,10 @@ macro_rules! hstack {
 #[macro_export]
 macro_rules! zstack {
     () => {{
-        $crate::views::ZStack::new()
+        $crate::views::ZStack::new(())
     }};
-    ($($view:expr),* $(,)?) => {{
-        let mut stack = $crate::views::ZStack::new();
-        $(
-            stack = stack.add_child($crate::alloc::boxed::Box::new($view));
-        )*
-        stack
+    ($($view:expr),+ $(,)?) => {{
+        $crate::views::ZStack::new(($($view,)+))
     }};
 }
 

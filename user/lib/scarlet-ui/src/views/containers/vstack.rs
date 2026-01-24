@@ -9,28 +9,34 @@ use crate::element::{Element, RenderElement, ElementRenderObject};
 use crate::geometry::{Size, Point};
 use crate::element::LayoutConstraints;
 use alloc::boxed::Box;
+use super::ViewTuple;
 
 /// VStack View - arranges children vertically
-pub struct VStack {
-    children: Vec<Box<dyn View>>,
+///
+/// # Examples
+///
+/// ```ignore
+/// let stack = VStack::new((
+///     Text::new("Hello"),
+///     Text::new("World"),
+/// ))
+/// .spacing(10.0)
+/// .alignment(Alignment::Center);
+/// ```
+pub struct VStack<C: ViewTuple> {
+    content: C,
     spacing: f32,
     alignment: crate::geometry::Alignment,
 }
 
-impl VStack {
-    /// Create a new VStack with default spacing
-    pub fn new() -> Self {
+impl<C: ViewTuple> VStack<C> {
+    /// Create a new VStack with the given content tuple
+    pub fn new(content: C) -> Self {
         Self {
-            children: Vec::new(),
+            content,
             spacing: 0.0,
             alignment: crate::geometry::Alignment::Center,
         }
-    }
-
-    /// Add a child view
-    pub fn add_child(mut self, child: Box<dyn View>) -> Self {
-        self.children.push(child);
-        self
     }
 
     /// Set spacing between children
@@ -45,11 +51,6 @@ impl VStack {
         self
     }
 
-    /// Get the number of children
-    pub fn child_count(&self) -> usize {
-        self.children.len()
-    }
-
     /// Get spacing
     pub fn get_spacing(&self) -> f32 {
         self.spacing
@@ -61,24 +62,29 @@ impl VStack {
     }
 }
 
-impl Default for VStack {
-    fn default() -> Self {
-        Self::new()
+impl<C: ViewTuple + Clone> Clone for VStack<C> {
+    fn clone(&self) -> Self {
+        Self {
+            content: self.content.clone(),
+            spacing: self.spacing,
+            alignment: self.alignment,
+        }
     }
 }
 
-impl View for VStack {
+impl<C: ViewTuple + 'static> View for VStack<C> {
     fn create_element(&self) -> Box<dyn Element> {
+        // Create elements from all children in the tuple
+        let children = self.content.create_elements();
+
         Box::new(RenderElement::new(
-            VStackRenderObject::new(self.spacing, self.alignment, self.children.len()),
+            VStackRenderObject::new(self.spacing, self.alignment, children.len()),
         ))
     }
 
     fn listenables(&self) -> alloc::vec::Vec<&dyn crate::state::Listenable> {
         let mut listenables = alloc::vec::Vec::new();
-        for child in &self.children {
-            listenables.extend(child.listenables());
-        }
+        self.content.collect_listenables(&mut listenables);
         listenables
     }
 

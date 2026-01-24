@@ -1,11 +1,59 @@
 //! Event Dispatcher - Routes events to target elements
 //!
 //! EventDispatcher implements hit testing and event routing through
-//! the element tree.
+//! the element tree with three-phase event dispatching.
 
-use crate::element::{Element, ElementTree};
+use alloc::vec::Vec;
+use alloc::boxed::Box;
+use crate::element::{Element, ElementId, ElementTree};
 use crate::geometry::Point;
 use crate::event::Event;
+
+/// Event dispatch phase
+///
+/// Events go through three phases:
+/// 1. Capture: From root to target's parent
+/// 2. Target: At the target element itself
+/// 3. Bubble: From target's parent back to root
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Phase {
+    /// Capture phase (root → target)
+    Capture,
+    /// Target phase (at the target)
+    Target,
+    /// Bubble phase (target → root)
+    Bubble,
+}
+
+/// Result of a hit test operation
+///
+/// Contains the target element and the path from root to target
+/// for use in three-phase event dispatching.
+pub struct HitResult<'a> {
+    /// The target element that was hit
+    pub target: &'a dyn Element,
+    /// The path from root to target (inclusive)
+    /// For capture phase, iterate from index 0 to len-1
+    /// For bubble phase, iterate from index len-1 to 0
+    pub path: Vec<&'a dyn Element>,
+}
+
+impl<'a> HitResult<'a> {
+    /// Create a new HitResult
+    pub fn new(target: &'a dyn Element, path: Vec<&'a dyn Element>) -> Self {
+        Self { target, path }
+    }
+
+    /// Get the path for the capture phase (root to target)
+    pub fn capture_path(&self) -> impl Iterator<Item = &&'a dyn Element> {
+        self.path.iter()
+    }
+
+    /// Get the path for the bubble phase (target to root)
+    pub fn bubble_path(&self) -> impl Iterator<Item = &&'a dyn Element> {
+        self.path.iter().rev()
+    }
+}
 
 /// Event Dispatcher for routing events to elements
 ///
@@ -15,7 +63,7 @@ use crate::event::Event;
 /// - Target phase (handle at target)
 /// - Bubble phase (target → root)
 pub struct EventDispatcher {
-    root_id: Option<crate::element::ElementId>,
+    root_id: Option<ElementId>,
 }
 
 impl EventDispatcher {
@@ -27,7 +75,7 @@ impl EventDispatcher {
     }
 
     /// Set the root element ID
-    pub fn set_root(&mut self, id: crate::element::ElementId) {
+    pub fn set_root(&mut self, id: ElementId) {
         self.root_id = Some(id);
     }
 
@@ -69,18 +117,38 @@ impl EventDispatcher {
         let _ = (width, height);
     }
 
-    /// Dispatch a mouse event
+    /// Dispatch a mouse event with three-phase event handling
     fn dispatch_mouse(&mut self, element_tree: &mut ElementTree, event: &crate::event::MouseEvent) {
-        // 1. Hit test to find target
+        // 1. Hit test to find target and path
         let point = self.extract_point_from_mouse(&event);
-        let target = self.hit_test(element_tree, point);
+        let hit_result = self.hit_test_with_path(element_tree, point);
 
-        // 2. Dispatch to target
-        if let Some(_target_element) = target {
-            // Forward event to the element
-            // Note: Full event forwarding will be implemented later
-            // For now, we just find the target
-            let _ = element_tree;
+        if let Some(hit) = hit_result {
+            // 2. Three-phase dispatch
+            let event_wrapper = Event::Mouse(event.clone());
+
+            // 2.1 Capture Phase: root → target (excluding target)
+            for element in hit.capture_path().take(hit.path.len().saturating_sub(1)) {
+                // Create mutable reference to element
+                // Note: In a full implementation, we would need a way to get mutable references
+                // to elements by ID. For now, this is a conceptual implementation.
+                let _ = element;
+                let _ = &event_wrapper;
+                // element.handle_event(&event_wrapper);
+            }
+
+            // 2.2 Target Phase: at the target
+            // Note: In a full implementation, we would get mutable reference to target
+            let _ = hit.target;
+            // hit.target.handle_event(&event_wrapper);
+
+            // 2.3 Bubble Phase: target's parent → root
+            for element in hit.bubble_path().skip(1) {
+                // Skip the target (already handled in target phase)
+                let _ = element;
+                let _ = &event_wrapper;
+                // element.handle_event(&event_wrapper);
+            }
         }
     }
 
@@ -96,21 +164,34 @@ impl EventDispatcher {
     /// Hit test to find the element at a point
     pub fn hit_test<'a>(&'a self, element_tree: &'a ElementTree, point: Point) -> Option<&'a dyn Element> {
         let root = element_tree.root()?;
-        self.hit_test_recursive(root, point)
+        self.hit_test_recursive(root, point).map(|(target, _)| target)
     }
 
-    /// Recursive hit test implementation
-    fn hit_test_recursive<'a>(&'a self, element: &'a dyn Element, point: Point) -> Option<&'a dyn Element> {
+    /// Hit test to find the element at a point with the path from root
+    ///
+    /// This returns a HitResult containing both the target and the full path,
+    /// which is necessary for three-phase event dispatching.
+    pub fn hit_test_with_path<'a>(&'a self, element_tree: &'a ElementTree, point: Point) -> Option<HitResult<'a>> {
+        let root = element_tree.root()?;
+        self.hit_test_recursive(root, point).map(|(target, path)| HitResult::new(target, path))
+    }
+
+    /// Recursive hit test implementation that returns target and path
+    fn hit_test_recursive<'a>(&'a self, element: &'a dyn Element, point: Point) -> Option<(&'a dyn Element, Vec<&'a dyn Element>)> {
         // Check children first (reverse order for z-index)
         for child in element.children().iter().rev() {
-            if let Some(found) = self.hit_test_recursive(child.as_ref(), point) {
-                return Some(found);
+            if let Some((found, mut path)) = self.hit_test_recursive(child.as_ref(), point) {
+                // Add this element to the path
+                path.push(element);
+                return Some((found, path));
             }
         }
 
         // Check this element
         if element.hit_test(point) {
-            return Some(element);
+            let mut path = Vec::new();
+            path.push(element);
+            return Some((element, path));
         }
 
         None

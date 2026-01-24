@@ -29,6 +29,13 @@ pub trait View: Any {
     /// Get this View as Any for downcasting
     fn as_any(&self) -> &dyn Any;
 
+    /// Get the TypeId of this View (for Reconciliation)
+    ///
+    /// This is used during reconciliation to check if two Views are of the same type.
+    fn type_id(&self) -> core::any::TypeId {
+        core::any::TypeId::of::<Self>()
+    }
+
     /// Get the type name of this View (for debugging)
     fn type_name(&self) -> &str {
         core::any::type_name::<Self>()

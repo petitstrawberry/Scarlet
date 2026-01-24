@@ -6,7 +6,7 @@
 use alloc::boxed::Box;
 use core::any::Any;
 
-use crate::element::{Element, ElementId, LayoutConstraints};
+use crate::element::{Element, ElementId, LayoutConstraints, UpdateResult};
 use crate::geometry::{Point, Rect, Size};
 use crate::view::View;
 
@@ -37,6 +37,21 @@ pub trait RenderObject: Any {
 
     /// Get as Any mut for downcasting
     fn as_any_mut(&mut self) -> &mut dyn Any;
+
+    /// Update this RenderObject from a new View
+    ///
+    /// This is called when the View has changed and the RenderObject
+    /// should update its properties to match.
+    ///
+    /// Returns UpdateResult indicating whether the RenderObject was updated,
+    /// needs replacement, or has no changes.
+    ///
+    /// Default implementation returns Replaced (requires full rebuild).
+    /// Implementations should override this to provide efficient updates.
+    fn update(&mut self, _new_view: &dyn View) -> UpdateResult {
+        // Default: cannot update, need to replace
+        UpdateResult::Replaced
+    }
 }
 
 /// Element that wraps a RenderObject
@@ -90,9 +105,9 @@ impl<R: RenderObject> Element for RenderElement<R> {
         &mut []
     }
 
-    fn rebuild(&mut self, _new_view: &dyn View) -> bool {
-        // RenderElements don't rebuild from Views (they're updated via property setters)
-        false
+    fn update(&mut self, new_view: &dyn View) -> UpdateResult {
+        // Delegate to the RenderObject's update method
+        self.render_object.update(new_view)
     }
 
     fn layout(&mut self, constraints: LayoutConstraints) -> Size {

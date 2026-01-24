@@ -7,7 +7,8 @@ use alloc::boxed::Box;
 use core::any::Any;
 use crate::buffer::Buffer;
 use crate::geometry::{Point, Rect, Size};
-use crate::element::LayoutConstraints;
+use crate::element::{ElementId, LayoutConstraints, UpdateResult, DirtyFlags};
+use crate::view::View;
 
 /// RenderObject trait for leaf and container rendering nodes
 ///
@@ -69,6 +70,32 @@ pub trait RenderObject: Any {
 
     /// Get as Any mut for downcasting
     fn as_any_mut(&mut self) -> &mut dyn Any;
+
+    // ===== Identity methods =====
+
+    /// Get the unique Element ID of this RenderObject
+    fn id(&self) -> ElementId;
+
+    /// Get the parent Element ID (if any)
+    fn parent(&self) -> Option<ElementId>;
+
+    /// Set the parent Element ID
+    fn set_parent(&mut self, parent: ElementId);
+
+    // ===== Update methods =====
+
+    /// Update this RenderObject from a new View
+    ///
+    /// This is called when the View has changed and the RenderObject
+    /// should update its properties to match.
+    ///
+    /// Returns UpdateResult indicating success, replacement needed, or failure.
+    fn update(&mut self, new_view: &dyn View) -> UpdateResult;
+
+    // ===== Dirty tracking methods =====
+
+    /// Mark this RenderObject as dirty with the given flags
+    fn mark_dirty(&mut self, flags: DirtyFlags);
 
     /// Check if this RenderObject needs re-rendering
     fn is_dirty(&self) -> bool {

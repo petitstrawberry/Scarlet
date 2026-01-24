@@ -4,11 +4,14 @@
 //! It orchestrates all phases of the rendering pipeline.
 
 use alloc::boxed::Box;
+use alloc::string::String;
 use crate::element::{Element, ElementTree, LayoutConstraints};
 use crate::geometry::Size;
 use crate::compositor::Compositor;
 use crate::pipeline::PipelineOwner;
 use crate::buffer::Buffer;
+use crate::view::View;
+use crate::views::Window;
 
 /// RenderingPipeline integrates all components of the rendering system
 ///
@@ -73,20 +76,71 @@ impl RenderingPipeline {
         self.pipeline_owner.state_registry_mut()
     }
 
+    /// Extract window information from the element tree
+    ///
+    /// This searches the element tree for a Window View and extracts
+    /// the app_id, title, and size from it.
+    ///
+    /// Returns (app_id, title, size) or defaults if no Window is found.
+    fn extract_window_info(&self) -> (String, String, Size) {
+        // Default values
+        let default_app_id = String::from("com.example.scarletui");
+        let default_title = String::from("ScarletUI Application");
+        let default_size = Size::new(800.0, 600.0);
+
+        // Try to find a Window View in the element tree
+        if let Some(root) = self.element_tree.root() {
+            if let Some(window_info) = self.find_window_view(root) {
+                return window_info;
+            }
+        }
+
+        (default_app_id, default_title, default_size)
+    }
+
+    /// Recursively search for a Window View in the element tree
+    fn find_window_view(&self, element: &dyn Element) -> Option<(String, String, Size)> {
+        // Try to downcast ComponentElement to check if it contains a Window
+        // Note: This is a simplified version. In a full implementation, we would need
+        // to handle different child types of Window more generically.
+        if let Some(component) = element.as_any().downcast_ref::<crate::element::ComponentElement<Window<crate::views::Rectangle>>>() {
+            let view = component.view();
+            return Some((
+                String::from(view.get_app_id()),
+                String::from(view.get_title()),
+                view.get_window_size(),
+            ));
+        }
+
+        // Check children recursively
+        for child in element.children() {
+            if let Some(info) = self.find_window_view(child.as_ref()) {
+                return Some(info);
+            }
+        }
+
+        None
+    }
+
     /// Perform initial layout
     ///
     /// This should be called once after setting the root element
     /// to determine the window size and create the compositor.
-    pub fn layout_initial(&mut self) -> Size {
+    ///
+    /// Returns (app_id, title, size) extracted from the Window View
+    pub fn layout_initial(&mut self) -> (String, String, Size) {
+        // Extract window info first
+        let (app_id, title, preferred_size) = self.extract_window_info();
+
         // Perform initial layout with loose constraints
-        let constraints = LayoutConstraints::loose(self.window_size.width, self.window_size.height);
+        let constraints = LayoutConstraints::loose(preferred_size.width, preferred_size.height);
         let size = self.element_tree.layout(constraints);
 
         // Create compositor with the calculated size
         self.compositor = Some(Compositor::new(size));
         self.window_size = size;
 
-        size
+        (app_id, title, size)
     }
 
     /// Set window size and resize compositor

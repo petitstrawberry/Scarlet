@@ -6,7 +6,7 @@
 use alloc::boxed::Box;
 use core::any::Any;
 
-use crate::element::{Element, ElementId, LayoutConstraints};
+use crate::element::{Element, ElementId, LayoutConstraints, UpdateResult};
 use crate::geometry::{Point, Size};
 use crate::view::View;
 
@@ -76,9 +76,20 @@ impl<V: View + Clone> Element for ComponentElement<V> {
         }
     }
 
-    fn rebuild(&mut self, new_view: &dyn View) -> bool {
-        // Try to downcast the new_view to our View type V
+    fn update(&mut self, new_view: &dyn View) -> UpdateResult {
+        // Type-checking reconciliation: check if the new View is the same type
+        // Use Any's type_id method to avoid ambiguity
+        use core::any::TypeId;
+        if Any::type_id(new_view) != Any::type_id(&self.view) {
+            // Different type - signal that this Element should be replaced
+            return UpdateResult::Replaced;
+        }
+
+        // Same type - try to downcast and update properties
         if let Some(new_typed_view) = new_view.as_any().downcast_ref::<V>() {
+            // Note: We can't use == since V may not implement PartialEq
+            // For now, we'll assume the view has changed and update it
+
             // Update our stored view
             self.view = new_typed_view.clone();
 
@@ -86,12 +97,13 @@ impl<V: View + Clone> Element for ComponentElement<V> {
             let new_child = self.view.create_element();
 
             // Replace the old child with the new one
-            // Note: We could attempt to update in place if the child types match,
-            // but for now we always replace
             self.child = Some(new_child);
-            true
+
+            UpdateResult::Updated
         } else {
-            false
+            // Should never happen since we checked type_id above
+            // but if it does, signal replacement
+            UpdateResult::Replaced
         }
     }
 

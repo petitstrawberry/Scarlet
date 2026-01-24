@@ -47,21 +47,16 @@ pub trait Application: View {
         // 3. Initialize the application
         self.init();
 
-        // 4. Perform initial layout to determine window size
-        let window_size = pipeline.layout_initial();
+        // 4. Perform initial layout to determine window size and extract window properties
+        let (app_id, window_title, window_size) = pipeline.layout_initial();
 
-        // 5. Default window properties
-        // In a full implementation, these would be extracted from the Window View
-        let app_id = "com.example.scarletui";
-        let window_title = "ScarletUI Application";
-
-        // 6. Create platform window (default: SWS backend)
-        let mut platform_window = SWSPlatformWindow::new(app_id, window_title, window_size)
+        // 5. Create platform window (default: SWS backend)
+        let mut platform_window = SWSPlatformWindow::new(&app_id, &window_title, window_size)
             .map_err(|_| crate::error::Error::WindowCreationFailed)?;
 
-        // 7. Main event loop
+        // 6. Main event loop
         loop {
-            // 7.1 Poll events
+            // 6.1 Poll events
             while let Some(event) = platform_window.poll_event() {
                 match event {
                     Event::Quit => {
@@ -81,12 +76,12 @@ pub trait Application: View {
                 }
             }
 
-            // 7.2 Render frame
+            // 6.2 Render frame
             if let Some(buffer) = pipeline.render() {
                 platform_window.present(buffer);
             }
 
-            // 7.3 Small sleep to prevent busy-waiting
+            // 6.3 Small sleep to prevent busy-waiting
             // In a real implementation, this would use proper frame timing
             std::thread::sleep(std::time::Duration::from_millis(16));
         }

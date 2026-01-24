@@ -10,6 +10,7 @@ sws_protocol = { path = "../sws_protocol" }
 framebuffer = { path = "../framebuffer" }
 libm = { version = "0.2", default-features = false }
 scarlet-ui-macros = { path = "../scarlet-ui-macros" }
+bitflags = { version = "2.6", default-features = false }
 
 [dev-dependencies]
 # For additional testing
