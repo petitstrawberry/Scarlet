@@ -9,6 +9,7 @@ mod rectangle;
 mod spacer;
 mod image;
 pub mod modifiers;
+pub mod containers;
 
 pub use window::Window;
 pub use text::{Text, TextRenderObject};
@@ -24,4 +25,11 @@ pub use modifiers::{
     Background, BackgroundRenderObject,
     SetSize, SizeRenderObject,
     AlignmentFrame, AlignmentRenderObject,
+};
+
+// Re-export containers for convenience
+pub use containers::{
+    VStack, VStackRenderObject,
+    HStack, HStackRenderObject,
+    ZStack, ZStackRenderObject,
 };

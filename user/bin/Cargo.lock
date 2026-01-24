@@ -3427,9 +3427,19 @@ version = "0.1.0"
 dependencies = [
  "framebuffer",
  "libm",
+ "scarlet-ui-macros",
  "scarlet_std",
  "sws-client",
  "sws_protocol",
+]
+
+[[package]]
+name = "scarlet-ui-macros"
+version = "0.1.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
 ]
 
 [[package]]

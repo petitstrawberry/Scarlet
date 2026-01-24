@@ -79,9 +79,19 @@ dependencies = [
  "libm",
  "proc-macro2",
  "quote",
+ "scarlet-ui-macros",
  "scarlet_std",
  "sws-client",
  "sws_protocol",
+ "syn",
+]
+
+[[package]]
+name = "scarlet-ui-macros"
+version = "0.1.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
  "syn",
 ]
 
@@ -131,6 +141,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d4d107df263a3013ef9b1879b0df87d706ff80f65a86ea879bd9c31f9b307c2a"
 dependencies = [
  "proc-macro2",
+ "quote",
  "unicode-ident",
 ]
 

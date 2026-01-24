@@ -45,6 +45,9 @@
 extern crate alloc;
 extern crate scarlet_std as std;
 
+// Import procedural macros crate (derives work automatically)
+extern crate scarlet_ui_macros;
+
 pub mod geometry;
 pub mod color;
 pub mod error;
@@ -59,6 +62,7 @@ pub mod pipeline;
 pub mod views;
 pub mod platform;
 pub mod application;
+pub mod macros;
 
 // Re-exports for convenience
 pub use geometry::{Size, Point, Rect, Offset, EdgeInsets, Alignment};
@@ -72,10 +76,13 @@ pub use buffer::Buffer;
 pub use compositor::Compositor;
 pub use render::RenderObject;
 pub use pipeline::{PipelineOwner, RenderingPipeline, DirtyPhase};
-pub use views::{Window, Text, Button, Rectangle, Spacer, Image};
+pub use views::{Window, Text, Button, Rectangle, Spacer, Image, VStack, HStack, ZStack};
 pub use views::modifiers::{Padding, Frame, Background, SetSize, AlignmentFrame};
 pub use platform::{PlatformWindow, SWSPlatformWindow};
 pub use application::Application;
+
+// Macros are exported at root via #[macro_export]
+// Users can use them directly: vstack! {}, hstack! {}, etc.
 
 /// Prelude module for convenient imports
 pub mod prelude {
@@ -87,6 +94,7 @@ pub mod prelude {
     pub use crate::element::{Element, ElementId, LayoutConstraints, ElementRenderObject};
     pub use crate::event::{Event, MouseEvent, KeyEvent};
     pub use crate::application::Application;
-    pub use crate::views::{Window, Text, Button, Rectangle, Spacer};
+    pub use crate::views::{Window, Text, Button, Rectangle, Spacer, VStack, HStack, ZStack};
     pub use crate::views::modifiers::{Padding, Frame, Background};
+    // Macros are available at root level, no need to import them in prelude
 }

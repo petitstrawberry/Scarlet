@@ -9,9 +9,10 @@ sws-client = { path = "../sws-client" }
 sws_protocol = { path = "../sws_protocol" }
 framebuffer = { path = "../framebuffer" }
 libm = { version = "0.2", default-features = false }
+scarlet-ui-macros = { path = "../scarlet-ui-macros" }
 
 [dev-dependencies]
-# For derive macros (implemented later)
+# For additional testing
 proc-macro2 = { version = "1.0", default-features = false }
 quote = { version = "1.0", default-features = false }
 syn = { version = "2.0", default-features = false, features = ["derive"] }
