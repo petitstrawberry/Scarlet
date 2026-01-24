@@ -11,7 +11,7 @@ mod image;
 pub mod modifiers;
 pub mod containers;
 
-pub use window::Window;
+pub use window::{Window, WindowRenderObject, WindowRenderElement};
 pub use text::{Text, TextRenderObject};
 pub use button::{Button, ButtonRenderObject, ButtonCallback};
 pub use rectangle::{Rectangle, RectangleRenderObject};

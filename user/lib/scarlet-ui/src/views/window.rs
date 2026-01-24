@@ -4,6 +4,7 @@
 //! - Title bar with close, maximize, minimize buttons
 //! - Window border with shadow
 //! - Proper event handling for window controls
+//! - Content area for child views
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -11,11 +12,10 @@ use alloc::boxed::Box;
 use core::any::Any;
 
 use crate::view::View;
-use crate::element::{Element, ElementId, ElementRenderObject, LayoutConstraints, UpdateResult, RenderElement};
-use crate::geometry::{Size, Point, Rect};
+use crate::element::{Element, ElementId, ElementRenderObject, LayoutConstraints, UpdateResult};
+use crate::geometry::{Size, Rect, Point};
 use crate::color::Color;
 use crate::buffer::Buffer;
-use crate::event::{MouseEvent, MouseButton};
 use crate::state::Listenable;
 
 /// Constants for window decorations (matching Scarlet_old design)
@@ -24,21 +24,24 @@ const CLOSE_BUTTON_SIZE: u32 = 18;
 const CLOSE_BUTTON_MARGIN: u32 = 8;
 const TITLEBAR_CONTROL_COUNT: u32 = 3;
 const WINDOW_CORNER_RADIUS: u32 = 0;
+const WINDOW_BORDER_WIDTH: u32 = 2; // 1 outer border + 1 inner highlight
 
 /// Window View - top-level window container
 ///
 /// Window provides window-level properties like title, size, and decorations.
-pub struct Window {
+/// The content is a single View (use VStack/HStack for multiple children).
+pub struct Window<V: View> {
     app_id: String,
     title: String,
     size: Size,
     resizable: bool,
     decorated: bool,
+    content: V,
 }
 
-impl Window {
-    /// Create a new Window with a title
-    pub fn new(title: impl Into<String>) -> Self {
+impl<V: View> Window<V> {
+    /// Create a new Window with content
+    pub fn new(title: impl Into<String>, content: V) -> Self {
         let title_str = title.into();
         Self {
             app_id: String::from("com.example.scarletui"),
@@ -46,6 +49,7 @@ impl Window {
             size: Size::new(800.0, 600.0),
             resizable: true,
             decorated: true,
+            content,
         }
     }
 
@@ -100,7 +104,7 @@ impl Window {
 
 }
 
-impl Clone for Window {
+impl<V: View + Clone> Clone for Window<V> {
     fn clone(&self) -> Self {
         Self {
             app_id: self.app_id.clone(),
@@ -108,11 +112,12 @@ impl Clone for Window {
             size: self.size,
             resizable: self.resizable,
             decorated: self.decorated,
+            content: self.content.clone(),
         }
     }
 }
 
-impl View for Window {
+impl<V: View + Clone + 'static> View for Window<V> {
     fn create_element(&self) -> Box<dyn Element> {
         // Create WindowRenderObject with titlebar included
         let render_object = WindowRenderObject::new(
@@ -121,18 +126,196 @@ impl View for Window {
             self.decorated,
         );
 
-        Box::new(RenderElement::new(
+        // Create child element from content
+        let children = alloc::vec![self.content.create_element()];
+
+        Box::new(WindowRenderElement::new(
             self.clone(),
             render_object,
+            children,
         ))
     }
 
     fn listenables(&self) -> Vec<&dyn Listenable> {
-        Vec::new()
+        self.content.listenables()
     }
 
     fn as_any(&self) -> &dyn Any {
         self
+    }
+}
+
+/// WindowRenderElement - Element for Window that handles child buffer compositing
+///
+/// This Element handles Window-specific rendering logic:
+/// - Renders window decorations (titlebar, borders)
+/// - Renders child elements
+/// - Composites child buffers below the titlebar
+pub struct WindowRenderElement<C: View + Clone> {
+    id: ElementId,
+    view: C,
+    render_object: WindowRenderObject,
+    children: Vec<Box<dyn Element>>,
+    position: Point,
+}
+
+impl<C: View + Clone> WindowRenderElement<C> {
+    /// Create a new WindowRenderElement
+    pub fn new(view: C, render_object: WindowRenderObject, children: Vec<Box<dyn Element>>) -> Self {
+        Self {
+            id: ElementId::generate(),
+            view,
+            render_object,
+            children,
+            position: Point::ZERO,
+        }
+    }
+
+    /// Get the Window view
+    pub fn view(&self) -> &C {
+        &self.view
+    }
+
+    /// Get mutable reference to the view
+    pub fn view_mut(&mut self) -> &mut C {
+        &mut self.view
+    }
+
+    /// Get the WindowRenderObject
+    pub fn render_object(&self) -> &WindowRenderObject {
+        &self.render_object
+    }
+
+    /// Get mutable reference to the WindowRenderObject
+    pub fn render_object_mut(&mut self) -> &mut WindowRenderObject {
+        &mut self.render_object
+    }
+}
+
+impl<C: View + Clone> Element for WindowRenderElement<C> {
+    fn id(&self) -> ElementId {
+        self.id
+    }
+
+    fn type_name(&self) -> &str {
+        "WindowRenderElement"
+    }
+
+    fn type_name_debug(&self) -> alloc::string::String {
+        alloc::format!("WindowRenderElement<{}>", core::any::type_name::<C>())
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
+    }
+
+    fn children(&self) -> &[Box<dyn Element>] {
+        &self.children
+    }
+
+    fn children_mut(&mut self) -> &mut [Box<dyn Element>] {
+        &mut self.children
+    }
+
+    fn update(&mut self, new_view: &dyn View) -> UpdateResult {
+        if let Some(typed_view) = new_view.as_any().downcast_ref::<C>() {
+            self.view = typed_view.clone();
+            self.render_object.update(new_view)
+        } else {
+            UpdateResult::Replaced
+        }
+    }
+
+    fn rebuild(&mut self) -> UpdateResult {
+        UpdateResult::NoChange
+    }
+
+    fn layout(&mut self, constraints: LayoutConstraints) -> Size {
+        // Layout the window
+        let size = self.render_object.layout(constraints);
+
+        // Calculate content area (inside border and below titlebar)
+        let border_width = if self.render_object.decorated {
+            WINDOW_BORDER_WIDTH as f32
+        } else {
+            0.0
+        };
+
+        let titlebar_height = if self.render_object.decorated {
+            TITLEBAR_HEIGHT as f32
+        } else {
+            0.0
+        };
+
+        // Content area: inside border (left, right, bottom), below titlebar
+        // Use ceilf to ensure we round up to avoid fractional pixels
+        let content_x = border_width;
+        let content_y = titlebar_height;
+        let content_width = libm::ceilf(size.width - border_width * 2.0).max(1.0);
+        let content_height = libm::ceilf(size.height - titlebar_height - border_width).max(1.0);
+
+        for child in &mut self.children {
+            let child_constraints = LayoutConstraints::tight(content_width, content_height);
+            let _ = child.layout(child_constraints);
+            child.set_position(Point::new(content_x, content_y));
+        }
+
+        size
+    }
+
+    fn position(&self) -> Point {
+        self.position
+    }
+
+    fn set_position(&mut self, position: Point) {
+        self.position = position;
+    }
+
+    fn bounds(&self) -> Rect {
+        Rect {
+            origin: self.position,
+            size: self.render_object.size(),
+        }
+    }
+
+    fn hit_test(&self, point: Point) -> bool {
+        let local_point = Point {
+            x: point.x - self.position.x,
+            y: point.y - self.position.y,
+        };
+        self.render_object.hit_test(local_point)
+    }
+
+    fn render(&mut self) {
+        // Render window decorations (background, titlebar, borders)
+        self.render_object.render();
+
+        // Render children and composite their buffers below the titlebar
+        let mut child_buffers: Vec<Option<&Buffer>> = Vec::new();
+        for child in &mut self.children {
+            child.render();
+            child_buffers.push(child.get_buffer());
+        }
+
+        // Composite child buffers into window buffer
+        let buffers: Vec<&Buffer> = child_buffers
+            .into_iter()
+            .filter_map(|b| b)
+            .collect();
+        self.render_object.composite_children(&buffers);
+    }
+
+    fn get_buffer(&self) -> Option<&Buffer> {
+        self.render_object.get_buffer()
+    }
+
+    fn handle_event(&mut self, _event: &crate::event::Event, _phase: crate::event::Phase) -> bool {
+        // TODO: Handle window control button events
+        false
     }
 }
 
@@ -225,6 +408,39 @@ impl WindowRenderObject {
         }
     }
 
+    /// Composite child buffers into the window buffer
+    ///
+    /// Children are rendered inside the border, below the titlebar
+    pub fn composite_children(&mut self, child_buffers: &[&Buffer]) {
+        if self.buffer.is_none() {
+            return;
+        }
+
+        let buffer = self.buffer.as_mut().unwrap();
+
+        let border_offset = if self.decorated {
+            WINDOW_BORDER_WIDTH as i32
+        } else {
+            0
+        };
+
+        let titlebar_height = if self.decorated {
+            TITLEBAR_HEIGHT as i32
+        } else {
+            0
+        };
+
+        for child_buffer in child_buffers {
+            // Composite child inside border, below titlebar
+            buffer.composite(
+                child_buffer,
+                border_offset,
+                titlebar_height,
+                1.0, // Full opacity
+            );
+        }
+    }
+
     /// Draw titlebar using Canvas API (exact Scarlet_old design)
     fn draw_titlebar_canvas(title: &str, _focused: bool, canvas: &mut crate::graphics::Canvas, width: u32, _height: u32) {
         scarlet_std::println!("[WindowRenderObject] draw_titlebar_canvas: width={}, title='{}'", width, title);
@@ -253,7 +469,7 @@ impl WindowRenderObject {
         }
 
         // Title text (exact Scarlet_old: rgb(20, 20, 24))
-        canvas.draw_text_sized(10, 9, title, Color::rgb(20u8, 20u8, 24u8), 13.0);
+        canvas.draw_text_sized(10, 7, title, Color::rgb(20u8, 20u8, 24u8), 18.0);
 
         // Draw button icons (exact Scarlet_old design)
         let icon_color = Color::rgb(30u8, 30u8, 34u8);

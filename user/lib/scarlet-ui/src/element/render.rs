@@ -255,8 +255,16 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
     }
 
     fn render(&mut self) {
-        // Delegate to RenderObject
+        // Render this element first
         self.render_object.render();
+
+        // Render children
+        for child in &mut self.children {
+            child.render();
+        }
+
+        // TODO: Composite child buffers into parent buffer if parent has a buffer
+        // This is currently handled by specialized Elements like WindowRenderElement
     }
 
     fn get_buffer(&self) -> Option<&crate::buffer::Buffer> {

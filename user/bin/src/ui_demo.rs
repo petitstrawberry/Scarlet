@@ -9,7 +9,7 @@ extern crate scarlet_std;
 extern crate scarlet_ui_macros;
 
 use scarlet_std::println;
-use scarlet_ui::prelude::*;
+use scarlet_ui::{prelude::*, vstack};
 use scarlet_ui_macros::View;
 
 #[derive(View, Clone)]
@@ -23,7 +23,16 @@ impl DemoApp {
 
 impl Application for DemoApp {
     fn body(&self) -> impl View {
-        Window::new("ScarletUI Demo")
+        Window::new("ScarletUI Demo", 
+            vstack! {
+                Rectangle::new()
+                    .fill(Color::RED)
+                    .frame_height(300.0),
+                Rectangle::new()
+                    .fill(Color::GREEN),
+                Rectangle::new()
+                    .fill(Color::BLUE)
+            })
             .app_id("com.scarlet.ui_demo")
             .size(Size::new(800.0, 600.0))
     }
