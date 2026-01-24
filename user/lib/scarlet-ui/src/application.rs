@@ -56,8 +56,8 @@ pub trait Application: View {
         // 1. Set up rendering pipeline
         let mut pipeline = RenderingPipeline::new();
 
-        // 2. Create root element from self
-        let root_element = self.create_element();
+        // 2. Create root element from body()
+        let root_element = self.body().create_element();
         pipeline.set_root(root_element);
 
         // 3. Initialize the application
