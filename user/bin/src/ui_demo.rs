@@ -1,110 +1,86 @@
 //! UI Demo - ScarletUI Demo Application
 //!
-//! Demonstrates:
+//! Comprehensive demo showcasing all ScarletUI features:
 //! - State management with State<T>
-//! - View/RenderNode architecture
-//! - Common UI components (Button, Text, Slider, Toggle, TextField)
-//! - Layout containers with macros
-//! - Window with titlebar
+//! - Button interactions
+//! - Layout containers (VStack, HStack)
+//! - View modifiers (padding, background, frame)
+//! - Color system
 
 #![no_std]
 #![no_main]
 
-extern crate scarlet_std as std;
+extern crate scarlet_std;
+extern crate scarlet_ui_macros;
 
+use scarlet_std::{format, println};
 use scarlet_ui::prelude::*;
-use std::println;
-
-/// Main application state
-struct DemoApp {
-    counter: State<i32>,
-    toggle_value: State<bool>,
-    slider_value: State<f32>,
-    text_value: State<std::string::String>,
-}
-
-impl App for DemoApp {
-    type ViewType = DemoView;
-
-    fn build(&self) -> Self::ViewType {
-        DemoView {
-            counter: self.counter.clone(),
-            toggle_value: self.toggle_value.clone(),
-            slider_value: self.slider_value.clone(),
-            text_value: self.text_value.clone(),
-        }
-    }
-}
+use scarlet_ui_macros::View;
+use scarlet_ui::{vstack, hstack};
 
 #[derive(View, Clone)]
-struct DemoView {
+struct DemoApp {
     counter: State<i32>,
-    toggle_value: State<bool>,
-    slider_value: State<f32>,
-    text_value: State<std::string::String>,
 }
 
-impl DemoView {
+impl Application for DemoApp {
     fn body(&self) -> impl View {
-        // Clone state for closures
         let counter_dec = self.counter.clone();
         let counter_inc = self.counter.clone();
-        let counter_text = self.counter.clone();
-        let toggle = self.toggle_value.clone();
-        let slider = self.slider_value.clone();
-        let text_field = self.text_value.clone();
+        let counter_value = self.counter.get();
+        let counter_text = format!("Count: {}", counter_value);
 
-        Window::new(
-            "ScarletUI Demo",
-            vstack! {
-                Text::new("ScarletUI Demo").size(24.0),
-                Text::new("Interactive UI Components Demo"),
-                Text::new(std::format!("Counter: {}", counter_text.get()).as_str()),
-                hstack! {
-                    Button::new("-").on_click(move || {
-                        counter_dec.update(|c| *c -= 1);
-                        println!("[ui_demo] Counter: {}", counter_dec.get());
-                    }),
-                    Button::new("+").on_click(move || {
-                        counter_inc.update(|c| *c += 1);
-                        println!("[ui_demo] Counter: {}", counter_inc.get());
-                    }),
-                }
-                .spacing(10.0),
-                Toggle::new(toggle),
-                Slider::new(slider).range(0.0, 100.0),
-                TextField::new(text_field).placeholder("Enter text..."),
+        vstack! {
+            // === Header ===
+            Text::new("ScarletUI Demo").font_size(32.0),
+
+            // === Counter Demo ===
+            Text::new(&counter_text).font_size(48.0),
+            hstack! {
+                Button::new("-").on_click(move || {
+                    counter_dec.update(|c| *c -= 1);
+                }),
+                Button::new("+").on_click(move || {
+                    counter_inc.update(|c| *c += 1);
+                }),
             }
-            .spacing(16.0)
-            .alignment(Alignment::Center)
-            .frame_max()
-            .padding(),
-        )
-        .decorated(true)
+            .spacing(10.0)
+            .padding(10.0)
+            .background(Color::gray(0.9)),
+
+            // === Color Palette Demo ===
+            hstack! {
+                Rectangle::new().fill(Color::RED),
+                Rectangle::new().fill(Color::GREEN),
+                Rectangle::new().fill(Color::BLUE),
+            }
+            .spacing(5.0),
+
+            // === View Modifiers Demo ===
+            Text::new("Padding & Background")
+                .padding(10.0)
+                .background(Color::YELLOW)
+                .frame(200.0, 40.0),
+        }
+        .spacing(16.0)
+        .alignment(Alignment::Center)
+        .padding(20.0)
+        .background(Color::WHITE)
     }
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn main() -> i32 {
+pub extern "C" fn main() {
     println!("[ui_demo] Starting ScarletUI Demo");
 
-    let app = DemoApp {
-        counter: State::new(0),
-        toggle_value: State::new(true),
-        slider_value: State::new(50.0),
-        text_value: State::new(std::string::String::from("Hello, ScarletUI!")),
-    };
+    let mut app = DemoApp::default();
 
-    match Application::new(app) {
-        Ok(mut app) => {
-            println!("[ui_demo] Running application...");
-            app.debug_frames = true;
-            let _ = app.run();
-            0
+    match app.run() {
+        Ok(_) => {
+            println!("[ui_demo] Application exited successfully");
         }
         Err(e) => {
-            println!("[ui_demo] Failed to create application: {}", e);
-            1
+            println!("[ui_demo] Application error: {}", e);
         }
     }
 }
