@@ -11,6 +11,41 @@ use crate::element::{ElementId, ElementTree, LayoutConstraints};
 use crate::geometry::Size;
 use crate::pipeline::StateRegistry;
 use crate::state::{State, StateId};
+use core::sync::atomic::{AtomicU32, Ordering};
+
+/// Global dirty element ID for State change callbacks
+///
+/// This allows ComponentElement callbacks to notify the PipelineOwner
+/// when State changes occur.
+///
+/// A value of 0 means "no dirty element", and any non-zero value is
+/// an ElementId that needs to be marked dirty.
+static GLOBAL_DIRTY_ID: AtomicU32 = AtomicU32::new(0);
+
+/// Mark an element as dirty for rebuild (called from ComponentElement callbacks)
+///
+/// This function is called from State change callbacks in ComponentElement
+/// to notify the PipelineOwner that an element needs to be rebuilt.
+pub fn mark_element_dirty(id: ElementId) {
+    // Store the element ID in the global atomic
+    // Note: If multiple elements are marked dirty between flushes,
+    // only the last one will be recorded. This is a simplified implementation
+    // that works for the common case of single-element updates.
+    // A full implementation would use a concurrent queue or set.
+    GLOBAL_DIRTY_ID.store(id.get(), Ordering::SeqCst);
+}
+
+/// Take the globally dirty element ID (if any)
+///
+/// Returns None if no element is marked dirty.
+pub(crate) fn take_global_dirty_id() -> Option<ElementId> {
+    let id_val = GLOBAL_DIRTY_ID.swap(0, Ordering::SeqCst);
+    if id_val != 0 {
+        Some(ElementId::new(id_val))
+    } else {
+        None
+    }
+}
 
 /// Dirty flags for different render phases
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
@@ -93,6 +128,11 @@ impl PipelineOwner {
     ///
     /// This processes build, layout, and paint in order.
     pub fn flush(&mut self, element_tree: &mut ElementTree, window_size: Size) {
+        // Collect any globally dirty elements from State change callbacks
+        if let Some(dirty_id) = take_global_dirty_id() {
+            self.mark_needs_build(dirty_id);
+        }
+
         // 1. Build Phase: Rebuild Elements whose State changed
         self.flush_build(element_tree);
 
@@ -108,10 +148,12 @@ impl PipelineOwner {
         let dirty_build = core::mem::take(&mut self.dirty_build);
 
         for id in dirty_build {
-            // Note: In a full implementation, we would:
-            // 1. Find the element by ID
-            // 2. Call element.update(new_view)
-            // For now, this is a placeholder for the update logic
+            // TODO: Implement proper rebuild logic
+            // For now, this is a placeholder
+            // In a full implementation:
+            // 1. For ComponentElement: recreate child from View
+            // 2. For RenderElement: update properties from new View
+            // Note: find_element_mut is not yet implemented in ElementTree
             let _ = id;
             let _ = element_tree;
         }

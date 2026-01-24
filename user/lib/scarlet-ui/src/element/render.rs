@@ -83,6 +83,17 @@ impl<V: View + Clone, R: RenderObject> RenderElement<V, R> {
         }
     }
 
+    /// Create a new RenderElement with a View, RenderObject, and children
+    pub fn with_children(view: V, render_object: R, children: Vec<Box<dyn Element>>) -> Self {
+        Self {
+            id: ElementId::generate(),
+            view,
+            render_object,
+            children,
+            position: Point::ZERO,
+        }
+    }
+
     /// Get the View
     pub fn view(&self) -> &V {
         &self.view

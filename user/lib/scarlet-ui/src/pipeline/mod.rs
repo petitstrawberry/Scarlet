@@ -7,6 +7,6 @@ mod owner;
 mod rendering;
 mod registry;
 
-pub use owner::{PipelineOwner, DirtyPhase};
+pub use owner::{PipelineOwner, DirtyPhase, mark_element_dirty};
 pub use rendering::RenderingPipeline;
 pub use registry::StateRegistry;

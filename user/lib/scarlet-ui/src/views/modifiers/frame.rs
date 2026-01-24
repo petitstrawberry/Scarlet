@@ -8,6 +8,7 @@ use crate::element::{Element, RenderElement, ElementRenderObject};
 use crate::geometry::{Size, Point};
 use crate::element::LayoutConstraints;
 use alloc::boxed::Box;
+use alloc::vec;
 
 /// Frame view modifier - constrains a child to a specific size
 #[derive(Clone)]
@@ -103,9 +104,10 @@ impl<V: View> Frame<V> {
 
 impl<V: View + Clone> View for Frame<V> {
     fn create_element(&self) -> Box<dyn Element> {
-        Box::new(RenderElement::new(
+        Box::new(RenderElement::with_children(
             self.clone(),
             FrameRenderObject::new(self.width, self.height, self.min_width, self.min_height, self.max_width, self.max_height),
+            vec![self.inner.create_element()],
         ))
     }
 

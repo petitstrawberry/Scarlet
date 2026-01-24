@@ -55,3 +55,123 @@ impl<V: View + Clone + 'static> ViewClone for V {
         Box::new(self.clone())
     }
 }
+
+/// ViewExt trait - SwiftUI-style view modifiers
+///
+/// This trait provides convenient methods for applying modifiers to views.
+/// It's automatically implemented for all types that implement View.
+///
+/// # Example
+///
+/// ```no_run
+/// use scarlet_ui::prelude::*;
+///
+/// let view = Text::new("Hello")
+///     .padding(10.0)
+///     .background(Color::BLUE)
+///     .frame(200.0, 50.0);
+/// ```
+pub trait ViewExt: View {
+    /// Add padding around this view
+    ///
+    /// # Arguments
+    /// * `insets` - Uniform padding value for all edges
+    fn padding(self, insets: f32) -> crate::views::Padding<Self>
+    where
+        Self: Sized,
+    {
+        crate::views::Padding::new(self, insets)
+    }
+
+    /// Add padding with custom insets
+    ///
+    /// # Arguments
+    /// * `insets` - EdgeInsets specifying different padding for each edge
+    fn padding_insets(self, insets: crate::geometry::EdgeInsets) -> crate::views::Padding<Self>
+    where
+        Self: Sized,
+    {
+        crate::views::Padding::with_insets(self, insets)
+    }
+
+    /// Add a background color behind this view
+    ///
+    /// # Arguments
+    /// * `color` - The background color
+    fn background(self, color: crate::color::Color) -> crate::views::Background<Self>
+    where
+        Self: Sized,
+    {
+        crate::views::Background::new(self, color)
+    }
+
+    /// Set a fixed frame size for this view
+    ///
+    /// # Arguments
+    /// * `width` - The fixed width
+    /// * `height` - The fixed height
+    fn frame(self, width: f32, height: f32) -> crate::views::Frame<Self>
+    where
+        Self: Sized,
+    {
+        crate::views::Frame::new(self, width, height)
+    }
+
+    /// Set a fixed width for this view
+    ///
+    /// # Arguments
+    /// * `width` - The fixed width
+    fn frame_width(self, width: f32) -> crate::views::Frame<Self>
+    where
+        Self: Sized,
+    {
+        crate::views::Frame::width(self, width)
+    }
+
+    /// Set a fixed height for this view
+    ///
+    /// # Arguments
+    /// * `height` - The fixed height
+    fn frame_height(self, height: f32) -> crate::views::Frame<Self>
+    where
+        Self: Sized,
+    {
+        crate::views::Frame::height(self, height)
+    }
+
+    /// Set size constraints for this view
+    ///
+    /// # Arguments
+    /// * `min_width` - Minimum width constraint
+    /// * `min_height` - Minimum height constraint
+    /// * `max_width` - Maximum width constraint
+    /// * `max_height` - Maximum height constraint
+    fn size_constraints(
+        self,
+        min_width: f32,
+        min_height: f32,
+        max_width: f32,
+        max_height: f32,
+    ) -> crate::views::SetSize<Self>
+    where
+        Self: Sized,
+    {
+        crate::views::SetSize::new(self, min_width, min_height, max_width, max_height)
+    }
+
+    /// Align this view within its container
+    ///
+    /// # Arguments
+    /// * `alignment` - The alignment to apply
+    fn alignment(self, alignment: crate::geometry::Alignment) -> crate::views::AlignmentFrame<Self>
+    where
+        Self: Sized,
+    {
+        crate::views::AlignmentFrame::new(self, alignment)
+    }
+}
+
+/// Blanket implementation of ViewExt for all View types
+///
+/// This makes all modifier methods available on any View implementation.
+impl<V: View> ViewExt for V {}

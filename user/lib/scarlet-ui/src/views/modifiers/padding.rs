@@ -9,6 +9,7 @@ use crate::geometry::{Size, Point};
 use crate::element::LayoutConstraints;
 use crate::geometry::EdgeInsets;
 use alloc::boxed::Box;
+use alloc::vec;
 
 /// Padding view modifier - adds space around a child view
 #[derive(Clone)]
@@ -47,9 +48,10 @@ impl<V: View> Padding<V> {
 
 impl<V: View + Clone> View for Padding<V> {
     fn create_element(&self) -> Box<dyn Element> {
-        Box::new(RenderElement::new(
+        Box::new(RenderElement::with_children(
             self.clone(),
             PaddingRenderObject::new(self.insets),
+            vec![self.inner.create_element()],
         ))
     }
 

@@ -9,6 +9,7 @@ use crate::geometry::{Size, Point};
 use crate::element::LayoutConstraints;
 use crate::geometry::Alignment;
 use alloc::boxed::Box;
+use alloc::vec;
 
 /// Alignment view modifier - controls child alignment
 #[derive(Clone)]
@@ -39,9 +40,10 @@ impl<V: View> AlignmentFrame<V> {
 
 impl<V: View + Clone> View for AlignmentFrame<V> {
     fn create_element(&self) -> Box<dyn Element> {
-        Box::new(RenderElement::new(
+        Box::new(RenderElement::with_children(
             self.clone(),
             AlignmentRenderObject::new(self.alignment),
+            vec![self.inner.create_element()],
         ))
     }
 

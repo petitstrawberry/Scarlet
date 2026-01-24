@@ -120,9 +120,9 @@ impl<V: View + Clone> Element for ComponentElement<V> {
         for listenable in listenables {
             let element_id = self.id;
             let callback = Arc::new(move || {
-                // TODO: Trigger rebuild for this element
-                // This will be implemented when we add the rebuild mechanism
-                let _ = element_id;
+                // Mark this element as dirty via the PipelineOwner's global callback
+                // This will notify PipelineOwner to schedule a rebuild
+                crate::pipeline::mark_element_dirty(element_id);
             });
             let subscription_id = listenable.subscribe_any(callback);
             self.subscriptions.push(subscription_id);

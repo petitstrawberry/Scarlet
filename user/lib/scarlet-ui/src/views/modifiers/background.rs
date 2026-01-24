@@ -9,6 +9,7 @@ use crate::geometry::{Size, Point};
 use crate::element::LayoutConstraints;
 use crate::color::Color;
 use alloc::boxed::Box;
+use alloc::vec;
 
 /// Background view modifier - adds a background color
 #[derive(Clone)]
@@ -39,9 +40,10 @@ impl<V: View> Background<V> {
 
 impl<V: View + Clone> View for Background<V> {
     fn create_element(&self) -> Box<dyn Element> {
-        Box::new(RenderElement::new(
+        Box::new(RenderElement::with_children(
             self.clone(),
             BackgroundRenderObject::new(self.color),
+            vec![self.inner.create_element()],
         ))
     }
 

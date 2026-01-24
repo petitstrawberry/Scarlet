@@ -69,7 +69,7 @@ pub use geometry::{Size, Point, Rect, Offset, EdgeInsets, Alignment};
 pub use color::Color;
 pub use error::{Error, Result};
 pub use state::{State, StateId, SubscriptionId, generate_state_id, Listenable};
-pub use view::View;
+pub use view::{View, ViewExt};
 pub use element::{Element, ElementId, LayoutConstraints, ComponentElement, RenderElement, ElementTree, ElementRenderObject, DirtyFlags};
 pub use event::{Event, MouseEvent, KeyEvent, InputEvent, KeyCode, MouseButton, EventDispatcher};
 pub use buffer::Buffer;
@@ -90,7 +90,7 @@ pub mod prelude {
     pub use crate::color::Color;
     pub use crate::error::{Error, Result};
     pub use crate::state::{State, StateId, SubscriptionId, Listenable};
-    pub use crate::view::View;
+    pub use crate::view::{View, ViewExt};
     pub use crate::element::{Element, ElementId, LayoutConstraints, ElementRenderObject, DirtyFlags};
     pub use crate::event::{Event, MouseEvent, KeyEvent};
     pub use crate::application::Application;
