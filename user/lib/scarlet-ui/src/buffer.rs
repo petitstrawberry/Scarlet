@@ -91,6 +91,11 @@ impl Buffer {
         dst_y: i32,
         opacity: f32,
     ) {
+        scarlet_std::println!("[Buffer] composite: src_size={}x{}, dst_pos=({},{}), opacity={}",
+            src.width, src.height, dst_x, dst_y, opacity);
+
+        let mut pixels_composited = 0u32;
+
         for y in 0..src.height {
             for x in 0..src.width {
                 let src_x = x as i32;
@@ -111,16 +116,19 @@ impl Buffer {
                         src_pixel,
                         opacity,
                     );
+                    pixels_composited += 1;
                 }
             }
         }
+
+        scarlet_std::println!("[Buffer] composite: {} pixels composited", pixels_composited);
     }
 
     /// Blend two pixels with alpha
     ///
-    /// Pixel format: BGRA (u32)
+    /// Pixel format: 0xAARRGGBB in memory, becomes BGRA in little-endian
     fn blend_pixels(dst: u32, src: u32, opacity: f32) -> u32 {
-        // Extract BGRA channels
+        // Extract BGRA channels (format: 0xAARRGGBB)
         let dst_b = (dst & 0xFF) as u32;
         let dst_g = ((dst >> 8) & 0xFF) as u32;
         let dst_r = ((dst >> 16) & 0xFF) as u32;
@@ -131,23 +139,33 @@ impl Buffer {
         let src_r = ((src >> 16) & 0xFF) as u32;
         let src_a = ((src >> 24) & 0xFF) as u32;
 
+        // If source is fully opaque, just copy
+        if src_a == 255 && opacity >= 1.0 {
+            return src;
+        }
+
+        // If source is fully transparent, keep destination
+        if src_a == 0 || opacity <= 0.0 {
+            return dst;
+        }
+
         // Apply opacity to source alpha
-        let src_alpha = src_a as f32 * opacity;
+        let src_alpha = (src_a as f32 * opacity).min(255.0);
 
         // Alpha blending: over operator
         // result = src * src_alpha + dst * (1 - src_alpha) / 255
         let inv_a = 255.0 - src_alpha;
 
-        let b = (src_b as f32 * src_alpha + dst_b as f32 * inv_a / 255.0) as u32;
-        let g = (src_g as f32 * src_alpha + dst_g as f32 * inv_a / 255.0) as u32;
-        let r = (src_r as f32 * src_alpha + dst_r as f32 * inv_a / 255.0) as u32;
-        let a_final = (dst_a as f32 + (255.0 - dst_a as f32) * src_alpha / 255.0) as u32;
+        let b = (src_b as f32 * src_alpha + dst_b as f32 * inv_a) / 255.0;
+        let g = (src_g as f32 * src_alpha + dst_g as f32 * inv_a) / 255.0;
+        let r = (src_r as f32 * src_alpha + dst_r as f32 * inv_a) / 255.0;
+        let a_final = (dst_a as f32 + (255.0 - dst_a as f32) * src_alpha / 255.0);
 
-        // Clamp and pack
-        (b.min(255) & 0xFF)
-            | ((g.min(255) & 0xFF) << 8)
-            | ((r.min(255) & 0xFF) << 16)
-            | ((a_final.min(255) as u32 & 0xFF) << 24)
+        // Clamp and pack as 0xAARRGGBB
+        (b.min(255.0) as u32 & 0xFF)
+            | ((g.min(255.0) as u32 & 0xFF) << 8)
+            | ((r.min(255.0) as u32 & 0xFF) << 16)
+            | ((a_final.min(255.0) as u32 & 0xFF) << 24)
     }
 
     /// Set a pixel at the given position

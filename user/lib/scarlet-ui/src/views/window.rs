@@ -8,8 +8,6 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 use alloc::boxed::Box;
-use alloc::format;
-use alloc::vec;
 use core::any::Any;
 
 use crate::view::View;
@@ -20,12 +18,12 @@ use crate::buffer::Buffer;
 use crate::event::{MouseEvent, MouseButton};
 use crate::state::Listenable;
 
-/// Constants for window decorations
-const TITLEBAR_HEIGHT: f32 = 32.0;
-const CLOSE_BUTTON_SIZE: f32 = 18.0;
-const BUTTON_MARGIN: f32 = 8.0;
-const BUTTON_SPACING: f32 = 4.0;
-const WINDOW_CORNER_RADIUS: f32 = 0.0;
+/// Constants for window decorations (matching Scarlet_old design)
+const TITLEBAR_HEIGHT: u32 = 32;
+const CLOSE_BUTTON_SIZE: u32 = 18;
+const CLOSE_BUTTON_MARGIN: u32 = 8;
+const TITLEBAR_CONTROL_COUNT: u32 = 3;
+const WINDOW_CORNER_RADIUS: u32 = 0;
 
 /// Window View - top-level window container
 ///
@@ -162,7 +160,38 @@ impl WindowRenderObject {
         }
     }
 
-    /// Draw the window background and titlebar
+    /// Get close button rect (matching Scarlet_old)
+    fn close_button_rect(&self, width: u32) -> Rect {
+        self.control_button_rect(width, 0)
+    }
+
+    fn maximize_button_rect(&self, width: u32) -> Rect {
+        self.control_button_rect(width, 1)
+    }
+
+    fn minimize_button_rect(&self, width: u32) -> Rect {
+        self.control_button_rect(width, 2)
+    }
+
+    /// Get control button rects (matching Scarlet_old)
+    fn control_button_rect(&self, width: u32, index_from_right: u32) -> Rect {
+        if width < TITLEBAR_CONTROL_COUNT {
+            return Rect::zero();
+        }
+
+        let base_seg_w = CLOSE_BUTTON_SIZE + CLOSE_BUTTON_MARGIN * 2;
+        let seg_w = if width >= base_seg_w * TITLEBAR_CONTROL_COUNT {
+            base_seg_w
+        } else {
+            (width / TITLEBAR_CONTROL_COUNT).max(1)
+        };
+        let total_w = seg_w.saturating_mul(TITLEBAR_CONTROL_COUNT).min(width);
+        let right_x0 = (width - total_w) as i32;
+        let x = right_x0 + (total_w as i32) - (seg_w as i32) * (index_from_right as i32 + 1);
+        Rect::from_xywh(x as f32, 0.0, seg_w as f32, TITLEBAR_HEIGHT as f32)
+    }
+
+    /// Draw the window background and titlebar using Canvas
     fn draw(&mut self) {
         let width = libm::ceilf(self.size.width) as usize;
         let height = libm::ceilf(self.size.height) as usize;
@@ -178,121 +207,126 @@ impl WindowRenderObject {
         }
 
         if let Some(ref mut buffer) = self.buffer {
-            // Fill entire background with white using u32 slice
-            let bg_color = Color::WHITE;
-            let bgra = bg_color.to_bgra();
-            let slice = buffer.as_mut_slice();
-            for i in 0..(width * height) {
-                slice[i] = bgra;
-            }
+            use crate::graphics::Canvas;
+            let mut canvas = Canvas::new(buffer.data_mut(), width as u32, height as u32);
 
-            // Draw titlebar if decorated (needs u8 slice for Canvas)
+            // Fill entire background with white
+            canvas.fill_rect(0, 0, width as u32, height as u32, Color::WHITE);
+
+            // Draw titlebar if decorated
             if decorated {
-                Self::draw_titlebar_static(&title, focused, buffer.data_mut(), width, height);
+                Self::draw_titlebar_canvas(&title, focused, &mut canvas, width as u32, height as u32);
+            }
+
+            // Draw border
+            if decorated {
+                Self::draw_border_canvas(&mut canvas, width as u32, height as u32);
             }
         }
     }
 
-    /// Draw titlebar on the buffer (static method to avoid self borrow issues)
-    fn draw_titlebar_static(title: &str, focused: bool, data: &mut [u8], width: usize, _height: usize) {
-        let titlebar_height = libm::ceilf(TITLEBAR_HEIGHT) as usize;
+    /// Draw titlebar using Canvas API (exact Scarlet_old design)
+    fn draw_titlebar_canvas(title: &str, _focused: bool, canvas: &mut crate::graphics::Canvas, width: u32, _height: u32) {
+        scarlet_std::println!("[WindowRenderObject] draw_titlebar_canvas: width={}, title='{}'", width, title);
 
-        // Titlebar background color
-        let base_color = if focused {
-            Color::rgb(0.92, 0.92, 0.93)
+        // Title bar base color (exact Scarlet_old: rgb(235, 235, 238))
+        let base_color = Color::rgb(235u8, 235u8, 238u8);
+
+        let close_rect = Self::control_button_rect_static(width, 0);
+        let maximize_rect = Self::control_button_rect_static(width, 1);
+        let minimize_rect = Self::control_button_rect_static(width, 2);
+
+        scarlet_std::println!("[WindowRenderObject] close_rect: origin={:?}, size={:?}", close_rect.origin, close_rect.size);
+
+        // Button colors (matching Scarlet_old: base, hover=210, pressed=190)
+        let close_color = base_color; // TODO: add hover/pressed state
+        let maximize_color = base_color; // TODO: add hover/pressed state
+        let minimize_color = base_color; // TODO: add hover/pressed state
+
+        // Draw titlebar with button colors
+        for y in 0..TITLEBAR_HEIGHT {
+            // No corner rounding (WINDOW_CORNER_RADIUS = 0)
+            canvas.fill_rect(0, y as i32, width, 1, base_color);
+            canvas.fill_rect(close_rect.origin.x as i32, y as i32, close_rect.size.width as u32, 1, close_color);
+            canvas.fill_rect(maximize_rect.origin.x as i32, y as i32, maximize_rect.size.width as u32, 1, maximize_color);
+            canvas.fill_rect(minimize_rect.origin.x as i32, y as i32, minimize_rect.size.width as u32, 1, minimize_color);
+        }
+
+        // Title text (exact Scarlet_old: rgb(20, 20, 24))
+        canvas.draw_text_sized(10, 9, title, Color::rgb(20u8, 20u8, 24u8), 13.0);
+
+        // Draw button icons (exact Scarlet_old design)
+        let icon_color = Color::rgb(30u8, 30u8, 34u8);
+
+        // Close button: X mark (double-stroke lines)
+        let cx = close_rect.origin.x + close_rect.size.width / 2.0;
+        let cy = close_rect.origin.y + close_rect.size.height / 2.0;
+        let size: i32 = 10;
+        let half = size / 2;
+        let x0 = cx as i32 - half;
+        let x1 = cx as i32 + half - 1;
+        let y0 = cy as i32 - half;
+        let y1 = cy as i32 + half - 1;
+        canvas.draw_line(x0, y0, x1, y1, icon_color);
+        canvas.draw_line(x1, y0, x0, y1, icon_color);
+
+        // Maximize button: square outline
+        let mx = maximize_rect.origin.x + maximize_rect.size.width / 2.0;
+        let my = maximize_rect.origin.y + maximize_rect.size.height / 2.0;
+        let msize: i32 = 10;
+        let mhalf = msize / 2;
+        let mx0 = mx as i32 - mhalf;
+        let my0 = my as i32 - mhalf;
+        canvas.draw_rect(mx0, my0, msize as u32, msize as u32, icon_color);
+
+        // Minimize button: horizontal line
+        let nx = minimize_rect.origin.x + minimize_rect.size.width / 2.0;
+        let ny = minimize_rect.origin.y + minimize_rect.size.height / 2.0 + 3.0;
+        let nsize: i32 = 12;
+        let nhalf = nsize / 2;
+        canvas.draw_line(nx as i32 - nhalf, ny as i32, nx as i32 + nhalf, ny as i32, icon_color);
+    }
+
+    /// Static helper for button rect calculation
+    fn control_button_rect_static(width: u32, index_from_right: u32) -> Rect {
+        if width < TITLEBAR_CONTROL_COUNT {
+            return Rect::zero();
+        }
+
+        let base_seg_w = CLOSE_BUTTON_SIZE + CLOSE_BUTTON_MARGIN * 2;
+        let seg_w = if width >= base_seg_w * TITLEBAR_CONTROL_COUNT {
+            base_seg_w
         } else {
-            Color::rgb(0.85, 0.85, 0.86)
+            (width / TITLEBAR_CONTROL_COUNT).max(1)
         };
-        let bgra = base_color.to_bgra();
-
-        // Fill titlebar area
-        for y in 0..titlebar_height {
-            for x in 0..width {
-                let idx = (y * width + x) * 4;
-                data[idx] = (bgra & 0xFF) as u8;
-                data[idx + 1] = ((bgra >> 8) & 0xFF) as u8;
-                data[idx + 2] = ((bgra >> 16) & 0xFF) as u8;
-                data[idx + 3] = ((bgra >> 24) & 0xFF) as u8;
-            }
-        }
-
-        // Draw border at bottom of titlebar
-        let border_color = Color::rgb(0.39, 0.39, 0.41);
-        let border_bgra = border_color.to_bgra();
-        for x in 0..width {
-            let idx = ((titlebar_height - 1) * width + x) * 4;
-            data[idx] = (border_bgra & 0xFF) as u8;
-            data[idx + 1] = ((border_bgra >> 8) & 0xFF) as u8;
-            data[idx + 2] = ((border_bgra >> 16) & 0xFF) as u8;
-            data[idx + 3] = ((border_bgra >> 24) & 0xFF) as u8;
-        }
-
-        // Draw title text
-        use crate::graphics::Canvas;
-        let mut canvas = Canvas::new(data, width as u32, _height as u32);
-        canvas.draw_text_sized(10, 9, title, Color::rgb(0.08, 0.08, 0.09), 13.0);
-
-        // Draw window controls (close, maximize, minimize buttons)
-        Self::draw_window_controls_static(&mut canvas, width);
-
-        scarlet_std::println!("[WindowRenderObject] Drew titlebar: {}x{}, title='{}'",
-            width, titlebar_height, title);
+        let total_w = seg_w.saturating_mul(TITLEBAR_CONTROL_COUNT).min(width);
+        let right_x0 = (width - total_w) as i32;
+        let x = right_x0 + (total_w as i32) - (seg_w as i32) * (index_from_right as i32 + 1);
+        Rect::from_xywh(x as f32, 0.0, seg_w as f32, TITLEBAR_HEIGHT as f32)
     }
 
-    /// Draw window control buttons (static method)
-    fn draw_window_controls_static(canvas: &mut crate::graphics::Canvas, _width: usize) {
-        let button_y = (TITLEBAR_HEIGHT - CLOSE_BUTTON_SIZE) / 2.0;
-        let button_start_x = BUTTON_MARGIN;
+    /// Draw window border (exact Scarlet_old design)
+    fn draw_border_canvas(canvas: &mut crate::graphics::Canvas, width: u32, height: u32) {
+        scarlet_std::println!("[WindowRenderObject] draw_border_canvas: {}x{}", width, height);
 
-        // Close button
-        let close_rect = Rect::new(
-            Point::new(button_start_x, button_y),
-            Size::new(CLOSE_BUTTON_SIZE, CLOSE_BUTTON_SIZE)
-        );
-        Self::draw_button_static(canvas, &close_rect);
-
-        // Maximize button
-        let maximize_x = button_start_x + CLOSE_BUTTON_SIZE + BUTTON_SPACING;
-        let maximize_rect = Rect::new(
-            Point::new(maximize_x, button_y),
-            Size::new(CLOSE_BUTTON_SIZE, CLOSE_BUTTON_SIZE)
-        );
-        Self::draw_button_static(canvas, &maximize_rect);
-
-        // Minimize button
-        let minimize_x = maximize_x + CLOSE_BUTTON_SIZE + BUTTON_SPACING;
-        let minimize_rect = Rect::new(
-            Point::new(minimize_x, button_y),
-            Size::new(CLOSE_BUTTON_SIZE, CLOSE_BUTTON_SIZE)
-        );
-        Self::draw_button_static(canvas, &minimize_rect);
-    }
-
-    /// Draw a single button (static method)
-    fn draw_button_static(canvas: &mut crate::graphics::Canvas, rect: &Rect) {
-        let x = rect.origin.x as i32;
-        let y = rect.origin.y as i32;
-        let w = libm::ceilf(rect.size.width) as u32;
-        let h = libm::ceilf(rect.size.height) as u32;
-
-        // Button background (same as titlebar)
-        let color = Color::rgb(0.92, 0.92, 0.93);
-        for dy in 0..h {
-            for dx in 0..w {
-                canvas.put_pixel(x + dx as i32, y + dy as i32, color);
-            }
+        // Modern border with subtle shadow effect
+        // Outer border: rgb(100, 100, 105)
+        let border_color = Color::rgb(100u8, 100u8, 105u8);
+        if width == 0 || height == 0 {
+            return;
         }
 
-        // Button icon (simple circle for now)
-        let cx = x + w as i32 / 2;
-        let cy = y + h as i32 / 2;
-        let icon_color = Color::rgb(0.2, 0.2, 0.2);
+        canvas.draw_rect(0, 0, width, height, border_color);
 
-        // Draw X for close button
-        let size = 6i32;
-        for i in -size..=size {
-            canvas.put_pixel(cx + i, cy + i, icon_color);
-            canvas.put_pixel(cx + i, cy - i, icon_color);
+        // Inner highlight for depth: rgb(90, 90, 95)
+        if width > 2 && height > 2 {
+            canvas.draw_rect(
+                1,
+                1,
+                width.saturating_sub(2),
+                height.saturating_sub(2),
+                Color::rgb(90u8, 90u8, 95u8),
+            );
         }
     }
 }

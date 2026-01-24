@@ -33,11 +33,16 @@ impl Compositor {
     ///
     /// This traverses the tree depth-first and composites all buffers.
     pub fn composite_tree(&mut self, root: &dyn RenderObject) {
+        scarlet_std::println!("[Compositor] composite_tree: window_size={:?}x{:?}",
+            self.window_buffer.width(), self.window_buffer.height());
+
         // Clear background
         self.clear(Color::WHITE);
 
         // Composite from root
         self.composite_node(root, Point::ZERO);
+
+        scarlet_std::println!("[Compositor] composite_tree: complete");
     }
 
     /// Composite a single RenderObject node
@@ -57,6 +62,9 @@ impl Compositor {
         // Composite this node's buffer if it has one
         if let Some(buffer) = node.get_buffer() {
             let opacity = node.opacity();
+            scarlet_std::println!("[Compositor] composite_node: origin={:?}, buffer_size={}x{}, opacity={}",
+                absolute_origin, buffer.width(), buffer.height(), opacity);
+
             self.window_buffer.composite(
                 buffer,
                 absolute_origin.x as i32,

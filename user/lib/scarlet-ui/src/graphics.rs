@@ -379,8 +379,9 @@ impl<'a> Canvas<'a> {
 
         let dst = self.get_pixel(x, y);
 
-        let src_a = (alpha * (color.a as f32 / 255.0)).clamp(0.0, 1.0);
-        let dst_a = (dst.a as f32 / 255.0).clamp(0.0, 1.0);
+        // color.a is already in 0.0-1.0 range, not 0-255
+        let src_a = (alpha * color.a).clamp(0.0, 1.0);
+        let dst_a = dst.a.clamp(0.0, 1.0);
         let out_a = src_a + dst_a * (1.0 - src_a);
 
         if out_a <= 0.0 {
@@ -462,6 +463,50 @@ impl<'a> Canvas<'a> {
             }
 
             caret_x += scaled.h_advance(glyph_id);
+        }
+    }
+
+    /// Draw rectangle outline (1px border)
+    pub fn draw_rect(&mut self, x: i32, y: i32, width: u32, height: u32, color: Color) {
+        if width == 0 || height == 0 {
+            return;
+        }
+
+        // Top and bottom edges
+        for dx in 0..width {
+            self.put_pixel(x + dx as i32, y, color);
+            self.put_pixel(x + dx as i32, y + height as i32 - 1, color);
+        }
+
+        // Left and right edges
+        for dy in 0..height {
+            self.put_pixel(x, y + dy as i32, color);
+            self.put_pixel(x + width as i32 - 1, y + dy as i32, color);
+        }
+    }
+
+    /// Draw line using Bresenham's algorithm
+    pub fn draw_line(&mut self, mut x0: i32, mut y0: i32, x1: i32, y1: i32, color: Color) {
+        let dx = (x1 - x0).abs();
+        let sx = if x0 < x1 { 1 } else { -1 };
+        let dy = -(y1 - y0).abs();
+        let sy = if y0 < y1 { 1 } else { -1 };
+
+        let mut err = dx + dy;
+        loop {
+            self.put_pixel(x0, y0, color);
+            if x0 == x1 && y0 == y1 {
+                break;
+            }
+            let e2 = 2 * err;
+            if e2 >= dy {
+                err += dy;
+                x0 += sx;
+            }
+            if e2 <= dx {
+                err += dx;
+                y0 += sy;
+            }
         }
     }
 }
