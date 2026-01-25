@@ -25,6 +25,7 @@ pub struct ComponentElement<V: View + Clone> {
     child: Option<Box<dyn Element>>,
     size: Size,
     position: Point,
+    last_constraints: Option<LayoutConstraints>,
     subscriptions: Vec<SubscriptionId>,
 }
 
@@ -39,6 +40,7 @@ impl<V: View + Clone> ComponentElement<V> {
             child: Some(child),
             size: Size::ZERO,
             position: Point::ZERO,
+            last_constraints: None,
             subscriptions: Vec::new(),
         }
     }
@@ -174,6 +176,7 @@ impl<V: View + Clone> Element for ComponentElement<V> {
     }
 
     fn layout(&mut self, constraints: LayoutConstraints) -> Size {
+        self.last_constraints = Some(constraints);
         // Delegate layout to the child
         if let Some(ref mut child) = self.child {
             self.size = child.layout(constraints);
@@ -181,6 +184,14 @@ impl<V: View + Clone> Element for ComponentElement<V> {
             self.size = Size::ZERO;
         }
         self.size
+    }
+
+    fn last_layout_constraints(&self) -> Option<LayoutConstraints> {
+        self.last_constraints
+    }
+
+    fn set_last_layout_constraints(&mut self, constraints: LayoutConstraints) {
+        self.last_constraints = Some(constraints);
     }
 
     fn position(&self) -> Point {

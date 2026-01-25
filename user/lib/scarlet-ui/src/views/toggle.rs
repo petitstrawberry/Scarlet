@@ -90,15 +90,20 @@ impl ToggleRenderObject {
     fn draw_toggle(&mut self) {
         let width = libm::ceilf(self.size.width) as usize;
         let height = libm::ceilf(self.size.height) as usize;
-        let needed = width * height;
+        let w = width as u32;
+        let h = height as u32;
 
         // Create or resize buffer
-        if self.buffer.as_ref().map_or(true, |b| b.as_slice().len() < needed) {
-            self.buffer = Some(Buffer::from_dimensions(width as u32, height as u32));
+        let needs_resize = self
+            .buffer
+            .as_ref()
+            .map_or(true, |b| b.width() != w || b.height() != h);
+        if needs_resize {
+            self.buffer = Some(Buffer::from_dimensions(w, h));
         }
 
         if let Some(ref mut buffer) = self.buffer {
-            let mut canvas = graphics::Canvas::new(buffer.data_mut(), width as u32, height as u32);
+            let mut canvas = graphics::Canvas::new(buffer.data_mut(), w, h);
 
             // iOS-style toggle colors
             let palette = ColorPalette::default();
@@ -109,7 +114,7 @@ impl ToggleRenderObject {
             };
 
             // Draw background (for now, just a regular rect)
-            canvas.fill_rect(0, 0, width as u32, height as u32, bg_color);
+            canvas.fill_rect(0, 0, w, h, bg_color);
 
             // Thumb position: on = right side, off = left side
             let thumb_diameter = self.size.height - 4.0; // 27px for 31px height
@@ -140,9 +145,11 @@ impl ElementRenderObject for ToggleRenderObject {
         // Create buffer
         let w = libm::ceilf(width) as u32;
         let h = libm::ceilf(height) as u32;
-        let needed = (w * h * 4) as usize;
-
-        if self.buffer.as_ref().map_or(true, |b| b.data().len() < needed) {
+        let needs_resize = self
+            .buffer
+            .as_ref()
+            .map_or(true, |b| b.width() != w || b.height() != h);
+        if needs_resize {
             self.buffer = Some(Buffer::from_dimensions(w, h));
         }
 
@@ -167,6 +174,10 @@ impl ElementRenderObject for ToggleRenderObject {
 
     fn get_buffer(&self) -> Option<&Buffer> {
         self.buffer.as_ref()
+    }
+
+    fn clear_buffer(&mut self) {
+        self.buffer = None;
     }
 
     fn update(&mut self, new_view: &dyn crate::view::View) -> crate::element::UpdateResult {

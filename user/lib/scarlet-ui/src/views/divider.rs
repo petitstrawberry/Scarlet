@@ -154,9 +154,11 @@ impl ElementRenderObject for DividerRenderObject {
                 // Create buffer
                 let w = libm::ceilf(width) as u32;
                 let h = libm::ceilf(height) as u32;
-                let needed = (w * h * 4) as usize;
-
-                if self.buffer.as_ref().map_or(true, |b| b.data().len() < needed) {
+                let needs_resize = self
+                    .buffer
+                    .as_ref()
+                    .map_or(true, |b| b.width() != w || b.height() != h);
+                if needs_resize {
                     self.buffer = Some(Buffer::from_dimensions(w, h));
                 }
             }
@@ -175,9 +177,11 @@ impl ElementRenderObject for DividerRenderObject {
                 // Create buffer
                 let w = libm::ceilf(width) as u32;
                 let h = libm::ceilf(height) as u32;
-                let needed = (w * h * 4) as usize;
-
-                if self.buffer.as_ref().map_or(true, |b| b.data().len() < needed) {
+                let needs_resize = self
+                    .buffer
+                    .as_ref()
+                    .map_or(true, |b| b.width() != w || b.height() != h);
+                if needs_resize {
                     self.buffer = Some(Buffer::from_dimensions(w, h));
                 }
             }
@@ -212,5 +216,9 @@ impl ElementRenderObject for DividerRenderObject {
 
     fn get_buffer(&self) -> Option<&Buffer> {
         self.buffer.as_ref()
+    }
+
+    fn clear_buffer(&mut self) {
+        self.buffer = None;
     }
 }

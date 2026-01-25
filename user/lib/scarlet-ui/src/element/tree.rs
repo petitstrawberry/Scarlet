@@ -5,6 +5,7 @@
 //! one registry per application.
 
 use alloc::boxed::Box;
+use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU32, Ordering};
 
 use crate::element::{Element, ElementId};
@@ -76,6 +77,17 @@ impl ElementTree {
         }
     }
 
+    /// Find the path of Element IDs from root to the target element.
+    pub fn find_path_ids(&self, target: ElementId) -> Option<Vec<ElementId>> {
+        let root = self.root.as_deref()?;
+        let mut path = Vec::new();
+        if Self::find_path_recursive(root, target, &mut path) {
+            Some(path)
+        } else {
+            None
+        }
+    }
+
     /// Perform a hit test to find the element at a point
     pub fn hit_test(&self, point: crate::geometry::Point) -> Option<&dyn Element> {
         let root = self.root.as_deref()?;
@@ -122,6 +134,22 @@ impl ElementTree {
         }
 
         None
+    }
+
+    fn find_path_recursive(element: &dyn Element, target: ElementId, path: &mut Vec<ElementId>) -> bool {
+        path.push(element.id());
+        if element.id() == target {
+            return true;
+        }
+
+        for child in element.children() {
+            if Self::find_path_recursive(child.as_ref(), target, path) {
+                return true;
+            }
+        }
+
+        path.pop();
+        false
     }
 
     /// Dump the element tree structure for debugging

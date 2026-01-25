@@ -100,8 +100,12 @@ pub trait Application: View {
                     }
                     Event::Resize { width, height } => {
                         let new_size = Size::new(width as f32, height as f32);
-                        pipeline.resize(new_size);
-                        let _ = platform_window.resize(width, height);
+                        if platform_window.resize(width, height).is_ok() {
+                            pipeline.resize(new_size);
+                            if let Some(buffer) = pipeline.render() {
+                                platform_window.present(buffer);
+                            }
+                        }
                     }
                     _ => {
                         // Other events are handled by the pipeline

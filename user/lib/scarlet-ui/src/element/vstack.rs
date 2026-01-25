@@ -17,6 +17,7 @@ pub struct VStackElement {
     alignment: Alignment,
     position: Point,
     size: Size,
+    last_constraints: Option<LayoutConstraints>,
 }
 
 impl VStackElement {
@@ -29,6 +30,7 @@ impl VStackElement {
             alignment,
             position: Point::ZERO,
             size: Size::ZERO,
+            last_constraints: None,
         }
     }
 
@@ -78,6 +80,7 @@ impl Element for VStackElement {
     }
 
     fn layout(&mut self, constraints: LayoutConstraints) -> Size {
+        self.last_constraints = Some(constraints);
         scarlet_std::println!("[VStackElement::layout] START: constraints=({:?}, {:?}) -> ({:?}, {:?})",
             constraints.min_width, constraints.min_height, constraints.max_width, constraints.max_height);
         let child_count = self.children.len();
@@ -155,6 +158,14 @@ impl Element for VStackElement {
         };
         scarlet_std::println!("[VStackElement::layout] FINAL: size={}x{}", final_width, final_height);
         self.size
+    }
+
+    fn last_layout_constraints(&self) -> Option<LayoutConstraints> {
+        self.last_constraints
+    }
+
+    fn set_last_layout_constraints(&mut self, constraints: LayoutConstraints) {
+        self.last_constraints = Some(constraints);
     }
 
     fn position(&self) -> Point {

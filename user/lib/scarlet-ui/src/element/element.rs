@@ -32,6 +32,29 @@ pub struct LayoutConstraints {
     pub max_height: f32,
 }
 
+/// Per-window size limits.
+///
+/// `None` means "unset".
+#[derive(Clone, Copy, PartialEq, Debug, Default)]
+pub struct WindowSizeLimits {
+    pub min: Option<Size>,
+    pub max: Option<Size>,
+}
+
+impl WindowSizeLimits {
+    pub fn is_empty(&self) -> bool {
+        self.min.is_none() && self.max.is_none()
+    }
+
+    pub fn to_u32_limits(self) -> (u32, u32, u32, u32) {
+        let min_width = self.min.map(|size| size.width.max(0.0) as u32).unwrap_or(0);
+        let min_height = self.min.map(|size| size.height.max(0.0) as u32).unwrap_or(0);
+        let max_width = self.max.map(|size| size.width.max(0.0) as u32).unwrap_or(0);
+        let max_height = self.max.map(|size| size.height.max(0.0) as u32).unwrap_or(0);
+        (min_width, min_height, max_width, max_height)
+    }
+}
+
 impl LayoutConstraints {
     pub const fn new(
         min_width: f32,
@@ -169,6 +192,14 @@ pub trait Element {
     /// parent_size is the available space from the parent.
     fn layout(&mut self, constraints: LayoutConstraints) -> Size;
 
+    /// Return the last layout constraints used for this element, if tracked.
+    fn last_layout_constraints(&self) -> Option<LayoutConstraints> {
+        None
+    }
+
+    /// Set the last layout constraints for this element.
+    fn set_last_layout_constraints(&mut self, _constraints: LayoutConstraints) {}
+
     /// Get the current position of this Element
     fn position(&self) -> Point {
         Point::ZERO
@@ -255,5 +286,16 @@ pub trait Element {
     fn get_window_info(&self) -> Option<(alloc::string::String, alloc::string::String, Size)> {
         None
     }
-}
 
+    /// Get per-window size limits if this element represents a Window.
+    fn get_window_size_limits(&self) -> Option<WindowSizeLimits> {
+        None
+    }
+
+    /// Drop cached buffers for this element and its descendants.
+    fn clear_buffers(&mut self) {
+        for child in self.children_mut().iter_mut() {
+            child.clear_buffers();
+        }
+    }
+}

@@ -334,4 +334,8 @@ impl ElementRenderObject for ButtonRenderObject {
     fn get_buffer(&self) -> Option<&Buffer> {
         self.buffer.as_ref()
     }
+
+    fn clear_buffer(&mut self) {
+        self.buffer = None;
+    }
 }

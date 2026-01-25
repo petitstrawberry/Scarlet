@@ -12,7 +12,7 @@ use alloc::boxed::Box;
 use core::any::Any;
 
 use crate::view::View;
-use crate::element::{Element, ElementId, ElementRenderObject, LayoutConstraints, UpdateResult};
+use crate::element::{Element, ElementId, ElementRenderObject, LayoutConstraints, UpdateResult, WindowSizeLimits};
 use crate::geometry::{Size, Rect, Point};
 use crate::color::Color;
 use crate::buffer::Buffer;
@@ -34,9 +34,16 @@ pub struct Window<V: View> {
     app_id: String,
     title: String,
     size: Size,
+    min_size: Option<Size>,
+    max_size: Option<Size>,
     resizable: bool,
     decorated: bool,
     content: V,
+}
+
+pub trait WindowViewInfo {
+    fn window_info(&self) -> (String, String, Size);
+    fn window_size_limits(&self) -> WindowSizeLimits;
 }
 
 impl<V: View> Window<V> {
@@ -47,6 +54,8 @@ impl<V: View> Window<V> {
             app_id: String::from("com.example.scarletui"),
             title: title_str,
             size: Size::new(800.0, 600.0),
+            min_size: None,
+            max_size: None,
             resizable: true,
             decorated: true,
             content,
@@ -62,6 +71,25 @@ impl<V: View> Window<V> {
     /// Set the window size
     pub fn size(mut self, size: Size) -> Self {
         self.size = size;
+        self
+    }
+
+    /// Set the minimum window size
+    pub fn min_size(mut self, size: Size) -> Self {
+        self.min_size = Some(size);
+        self
+    }
+
+    /// Set the maximum window size
+    pub fn max_size(mut self, size: Size) -> Self {
+        self.max_size = Some(size);
+        self
+    }
+
+    /// Set both minimum and maximum window sizes
+    pub fn size_limits(mut self, min: Size, max: Size) -> Self {
+        self.min_size = Some(min);
+        self.max_size = Some(max);
         self
     }
 
@@ -92,6 +120,16 @@ impl<V: View> Window<V> {
         self.size
     }
 
+    /// Get the minimum window size
+    pub fn get_min_size(&self) -> Option<Size> {
+        self.min_size
+    }
+
+    /// Get the maximum window size
+    pub fn get_max_size(&self) -> Option<Size> {
+        self.max_size
+    }
+
     /// Check if the window is resizable
     pub fn is_resizable(&self) -> bool {
         self.resizable
@@ -110,9 +148,24 @@ impl<V: View + Clone> Clone for Window<V> {
             app_id: self.app_id.clone(),
             title: self.title.clone(),
             size: self.size,
+            min_size: self.min_size,
+            max_size: self.max_size,
             resizable: self.resizable,
             decorated: self.decorated,
             content: self.content.clone(),
+        }
+    }
+}
+
+impl<V: View + Clone> WindowViewInfo for Window<V> {
+    fn window_info(&self) -> (String, String, Size) {
+        (self.app_id.clone(), self.title.clone(), self.size)
+    }
+
+    fn window_size_limits(&self) -> WindowSizeLimits {
+        WindowSizeLimits {
+            min: self.min_size,
+            max: self.max_size,
         }
     }
 }
@@ -151,7 +204,7 @@ impl<V: View + Clone + 'static> View for Window<V> {
 /// - Renders window decorations (titlebar, borders)
 /// - Renders child elements
 /// - Composites child buffers below the titlebar
-pub struct WindowRenderElement<C: View + Clone> {
+pub struct WindowRenderElement<C: View + Clone + WindowViewInfo> {
     id: ElementId,
     view: C,
     render_object: WindowRenderObject,
@@ -166,7 +219,7 @@ pub struct WindowRenderElement<C: View + Clone> {
     last_mouse_pressed: bool,
 }
 
-impl<C: View + Clone> WindowRenderElement<C> {
+impl<C: View + Clone + WindowViewInfo> WindowRenderElement<C> {
     /// Create a new WindowRenderElement
     pub fn new(view: C, render_object: WindowRenderObject, children: Vec<Box<dyn Element>>) -> Self {
         Self {
@@ -204,7 +257,7 @@ impl<C: View + Clone> WindowRenderElement<C> {
     }
 }
 
-impl<C: View + Clone> Element for WindowRenderElement<C> {
+impl<C: View + Clone + WindowViewInfo> Element for WindowRenderElement<C> {
     fn id(&self) -> ElementId {
         self.id
     }
@@ -295,6 +348,13 @@ impl<C: View + Clone> Element for WindowRenderElement<C> {
 
     fn get_buffer(&self) -> Option<&Buffer> {
         self.render_object.get_buffer()
+    }
+
+    fn clear_buffers(&mut self) {
+        self.render_object.clear_buffer();
+        for child in self.children.iter_mut() {
+            child.clear_buffers();
+        }
     }
 
     fn render_object(&self) -> Option<&dyn ElementRenderObject> {
@@ -606,7 +666,6 @@ impl WindowRenderObject {
     fn draw(&mut self) {
         let width = libm::ceilf(self.size.width) as usize;
         let height = libm::ceilf(self.size.height) as usize;
-        let needed = width * height;
         let title = self.title.clone();
         let decorated = self.decorated;
         let focused = self.focused;
@@ -617,19 +676,25 @@ impl WindowRenderObject {
         let minimize_state = self.minimize_button_state;
 
         // Create or resize buffer
-        if self.buffer.as_ref().map_or(true, |b| b.as_slice().len() < needed) {
+        let w = width as u32;
+        let h = height as u32;
+        let needs_resize = self
+            .buffer
+            .as_ref()
+            .map_or(true, |b| b.width() != w || b.height() != h);
+        if needs_resize {
             if crate::debug::is_enabled() {
                 scarlet_std::println!("[WindowRenderObject] Creating buffer: {}x{}", width, height);
             }
-            self.buffer = Some(Buffer::from_dimensions(width as u32, height as u32));
+            self.buffer = Some(Buffer::from_dimensions(w, h));
         }
 
         if let Some(ref mut buffer) = self.buffer {
             use crate::graphics::Canvas;
-            let mut canvas = Canvas::new(buffer.data_mut(), width as u32, height as u32);
+            let mut canvas = Canvas::new(buffer.data_mut(), w, h);
 
             // Fill entire background with white
-            canvas.fill_rect(0, 0, width as u32, height as u32, Color::WHITE);
+            canvas.fill_rect(0, 0, w, h, Color::WHITE);
 
             // Draw titlebar if decorated
             if decorated {
@@ -895,6 +960,10 @@ impl ElementRenderObject for WindowRenderObject {
 
     fn get_buffer(&self) -> Option<&Buffer> {
         self.buffer.as_ref()
+    }
+
+    fn clear_buffer(&mut self) {
+        self.buffer = None;
     }
 
     fn as_any(&self) -> &dyn Any {

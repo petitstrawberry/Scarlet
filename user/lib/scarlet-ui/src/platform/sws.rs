@@ -145,14 +145,24 @@ impl PlatformWindow for SWSPlatformWindow {
     }
 
     fn resize(&mut self, width: u32, height: u32) -> Result<()> {
-        // Note: sws-client doesn't have a resize_surface method
-        // Resize would need to be implemented in the protocol
-        // For now, just update our tracked size
-        self.current_size = Size {
+        if width == 0 || height == 0 {
+            return Err(crate::error::Error::InvalidSize { width, height });
+        }
+
+        let new_size = Size {
             width: width as f32,
             height: height as f32,
         };
 
+        if self.current_size == new_size {
+            return Ok(());
+        }
+
+        self.conn
+            .resize_window(self.surface_id, width, height)
+            .map_err(|_| crate::error::Error::IoError)?;
+
+        self.current_size = new_size;
         Ok(())
     }
 
@@ -327,7 +337,6 @@ impl SWSPlatformWindow {
                 height,
             } => {
                 if surface_id == self.surface_id {
-                    self.current_size = Size::new(width as f32, height as f32);
                     self.push_event(Event::Resize { width, height });
                     if debug {
                         scarlet_std::println!(

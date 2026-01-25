@@ -37,6 +37,9 @@ pub trait RenderObject: Any {
         None
     }
 
+    /// Clear any cached buffers owned by this RenderObject.
+    fn clear_buffer(&mut self) {}
+
     /// Hit test - check if a point is within this RenderObject
     fn hit_test(&self, point: Point) -> bool {
         let bounds = Rect {
@@ -106,6 +109,7 @@ pub struct RenderElement<V: View + Clone, R: RenderObject> {
     render_object: R,
     children: Vec<Box<dyn Element>>,
     position: Point,
+    last_constraints: Option<LayoutConstraints>,
 }
 
 impl<V: View + Clone, R: RenderObject> RenderElement<V, R> {
@@ -117,6 +121,7 @@ impl<V: View + Clone, R: RenderObject> RenderElement<V, R> {
             render_object,
             children: Vec::new(),
             position: Point::ZERO,
+            last_constraints: None,
         }
     }
 
@@ -128,6 +133,7 @@ impl<V: View + Clone, R: RenderObject> RenderElement<V, R> {
             render_object,
             children,
             position: Point::ZERO,
+            last_constraints: None,
         }
     }
 
@@ -221,6 +227,7 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
     }
 
     fn layout(&mut self, constraints: LayoutConstraints) -> Size {
+        self.last_constraints = Some(constraints);
         // Delegate layout to the RenderObject (which may layout children)
         let type_name = core::any::type_name_of_val(&self.render_object);
         if crate::debug::is_enabled() {
@@ -235,6 +242,14 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
         }
 
         size
+    }
+
+    fn last_layout_constraints(&self) -> Option<LayoutConstraints> {
+        self.last_constraints
+    }
+
+    fn set_last_layout_constraints(&mut self, constraints: LayoutConstraints) {
+        self.last_constraints = Some(constraints);
     }
 
     fn position(&self) -> Point {
@@ -276,6 +291,13 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
 
     fn get_buffer(&self) -> Option<&crate::buffer::Buffer> {
         self.render_object.get_buffer()
+    }
+
+    fn clear_buffers(&mut self) {
+        self.render_object.clear_buffer();
+        for child in self.children.iter_mut() {
+            child.clear_buffers();
+        }
     }
 
     fn render_object(&self) -> Option<&dyn RenderObject> {

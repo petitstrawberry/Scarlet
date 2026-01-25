@@ -92,25 +92,30 @@ impl ProgressViewRenderObject {
     fn draw_progress(&mut self) {
         let width = libm::ceilf(self.size.width) as usize;
         let height = libm::ceilf(self.size.height) as usize;
-        let needed = width * height;
+        let w = width as u32;
+        let h = height as u32;
 
         // Create or resize buffer
-        if self.buffer.as_ref().map_or(true, |b| b.as_slice().len() < needed) {
-            self.buffer = Some(Buffer::from_dimensions(width as u32, height as u32));
+        let needs_resize = self
+            .buffer
+            .as_ref()
+            .map_or(true, |b| b.width() != w || b.height() != h);
+        if needs_resize {
+            self.buffer = Some(Buffer::from_dimensions(w, h));
         }
 
         if let Some(ref mut buffer) = self.buffer {
-            let mut canvas = graphics::Canvas::new(buffer.data_mut(), width as u32, height as u32);
+            let mut canvas = graphics::Canvas::new(buffer.data_mut(), w, h);
 
             // Draw background (light gray)
             let bg_color = Color::rgb(229u8, 229u8, 234u8); // iOS gray: #E5E5EA
-            canvas.fill_rect(0, 0, width as u32, height as u32, bg_color);
+            canvas.fill_rect(0, 0, w, h, bg_color);
 
             // Draw filled portion (blue)
             let fill_color = Color::rgb(0u8, 122u8, 255u8); // iOS blue: #007AFF
             let fill_width = (self.value * width as f32) as u32;
             if fill_width > 0 {
-                canvas.fill_rect(0, 0, fill_width, height as u32, fill_color);
+                canvas.fill_rect(0, 0, fill_width, h, fill_color);
             }
         }
     }
@@ -132,9 +137,11 @@ impl ElementRenderObject for ProgressViewRenderObject {
         // Create buffer
         let w = libm::ceilf(width) as u32;
         let h = libm::ceilf(height) as u32;
-        let needed = (w * h * 4) as usize;
-
-        if self.buffer.as_ref().map_or(true, |b| b.data().len() < needed) {
+        let needs_resize = self
+            .buffer
+            .as_ref()
+            .map_or(true, |b| b.width() != w || b.height() != h);
+        if needs_resize {
             self.buffer = Some(Buffer::from_dimensions(w, h));
         }
 
@@ -159,6 +166,10 @@ impl ElementRenderObject for ProgressViewRenderObject {
 
     fn get_buffer(&self) -> Option<&Buffer> {
         self.buffer.as_ref()
+    }
+
+    fn clear_buffer(&mut self) {
+        self.buffer = None;
     }
 
     fn update(&mut self, new_view: &dyn crate::view::View) -> crate::element::UpdateResult {

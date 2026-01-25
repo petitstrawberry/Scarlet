@@ -10,7 +10,7 @@ mod vstack;
 mod hstack;
 
 pub use id::ElementId;
-pub use element::{Element, LayoutConstraints, UpdateResult};
+pub use element::{Element, LayoutConstraints, UpdateResult, WindowSizeLimits};
 pub use component::ComponentElement;
 pub use render::{RenderElement, RenderObject as ElementRenderObject};
 pub use tree::{ElementTree, generate_element_id};

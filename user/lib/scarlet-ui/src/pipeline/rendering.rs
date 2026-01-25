@@ -159,6 +159,10 @@ impl RenderingPipeline {
             compositor.resize(new_size);
         }
 
+        if let Some(root) = self.element_tree.root_mut() {
+            root.clear_buffers();
+        }
+
         // Mark entire tree for relayout
         // Note: In a full implementation, we would mark specific elements
         if let Some(root) = self.element_tree.root() {

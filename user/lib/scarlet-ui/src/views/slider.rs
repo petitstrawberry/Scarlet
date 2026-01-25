@@ -128,15 +128,20 @@ impl SliderRenderObject {
     fn draw_slider(&mut self) {
         let width = libm::ceilf(self.size.width) as usize;
         let height = libm::ceilf(self.size.height) as usize;
-        let needed = width * height;
+        let w = width as u32;
+        let h = height as u32;
 
         // Create or resize buffer
-        if self.buffer.as_ref().map_or(true, |b| b.as_slice().len() < needed) {
-            self.buffer = Some(Buffer::from_dimensions(width as u32, height as u32));
+        let needs_resize = self
+            .buffer
+            .as_ref()
+            .map_or(true, |b| b.width() != w || b.height() != h);
+        if needs_resize {
+            self.buffer = Some(Buffer::from_dimensions(w, h));
         }
 
         if let Some(ref mut buffer) = self.buffer {
-            let mut canvas = graphics::Canvas::new(buffer.data_mut(), width as u32, height as u32);
+            let mut canvas = graphics::Canvas::new(buffer.data_mut(), w, h);
 
             let center_y = (height / 2) as i32;
 
@@ -158,7 +163,7 @@ impl SliderRenderObject {
             canvas.fill_rect(
                 10, // Start 10px from left
                 track_y,
-                width as u32 - 20, // End 10px from right
+                w - 20, // End 10px from right
                 track_thickness,
                 track_color,
             );
@@ -206,9 +211,11 @@ impl ElementRenderObject for SliderRenderObject {
         // Create buffer
         let w = libm::ceilf(width) as u32;
         let h = libm::ceilf(height) as u32;
-        let needed = (w * h * 4) as usize;
-
-        if self.buffer.as_ref().map_or(true, |b| b.data().len() < needed) {
+        let needs_resize = self
+            .buffer
+            .as_ref()
+            .map_or(true, |b| b.width() != w || b.height() != h);
+        if needs_resize {
             self.buffer = Some(Buffer::from_dimensions(w, h));
         }
 
@@ -233,6 +240,10 @@ impl ElementRenderObject for SliderRenderObject {
 
     fn get_buffer(&self) -> Option<&Buffer> {
         self.buffer.as_ref()
+    }
+
+    fn clear_buffer(&mut self) {
+        self.buffer = None;
     }
 
     fn update(&mut self, new_view: &dyn crate::view::View) -> crate::element::UpdateResult {

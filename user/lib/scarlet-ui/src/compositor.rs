@@ -8,12 +8,13 @@ use crate::geometry::{Point, Rect, Size};
 use crate::color::Color;
 use crate::element::{Element, ElementId};
 use crate::render::{RenderNode, RenderTree};
-use alloc::collections::BTreeSet;
+use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::vec::Vec;
 
 /// Compositor for rendering element trees to buffers
 pub struct Compositor {
     window_buffer: Buffer,
+    last_bounds: BTreeMap<ElementId, Rect>,
 }
 
 impl Compositor {
@@ -21,6 +22,7 @@ impl Compositor {
     pub fn new(window_size: Size) -> Self {
         Self {
             window_buffer: Buffer::new(window_size),
+            last_bounds: BTreeMap::new(),
         }
     }
 
@@ -180,6 +182,14 @@ impl Compositor {
             x: origin.x + position.x,
             y: origin.y + position.y,
         };
+        let bounds = element.bounds();
+        let absolute_bounds = Rect::from_xywh(
+            absolute_origin.x,
+            absolute_origin.y,
+            bounds.size.width,
+            bounds.size.height,
+        );
+        self.last_bounds.insert(element.id(), absolute_bounds);
 
         if let Some(buffer) = element.get_buffer() {
             let opacity = 1.0;
@@ -209,6 +219,7 @@ impl Compositor {
             bounds.size.width,
             bounds.size.height,
         );
+        self.last_bounds.insert(element.id(), bounds);
 
         if !self.overlaps_any(bounds, dirty_rects) {
             return;
@@ -301,6 +312,9 @@ impl Compositor {
                 bounds.size.width,
                 bounds.size.height,
             ));
+            if let Some(old_bounds) = self.last_bounds.get(&element.id()) {
+                rects.push(*old_bounds);
+            }
         }
 
         for child in element.children() {
@@ -394,6 +408,7 @@ impl Compositor {
     /// Resize the window buffer
     pub fn resize(&mut self, new_size: Size) {
         self.window_buffer = Buffer::new(new_size);
+        self.last_bounds.clear();
     }
 
     /// Get the window buffer

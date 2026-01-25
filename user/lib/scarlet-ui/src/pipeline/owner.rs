@@ -180,23 +180,94 @@ impl PipelineOwner {
     /// Flush the layout phase
     fn flush_layout(&mut self, element_tree: &mut ElementTree, window_size: Size) {
         let dirty_layout = core::mem::take(&mut self.dirty_layout);
-        let did_layout = !dirty_layout.is_empty();
+        if dirty_layout.is_empty() {
+            return;
+        }
 
         // Create constraints from window size
         let constraints = LayoutConstraints::loose(window_size.width, window_size.height);
 
-        // Layout elements
-        // Note: In a full implementation, we would:
-        // 1. Topologically sort by dependencies
-        // 2. Layout in parent-first order
+        let root_id = match element_tree.root() {
+            Some(root) => root.id(),
+            None => return,
+        };
+
+        let mut layout_roots = BTreeSet::new();
+        let mut full_layout = false;
+
         for id in dirty_layout {
-            // Note: For now, we just layout the entire tree
-            // In a full implementation, we would layout specific elements
-            let _ = id;
-            element_tree.layout(constraints);
+            if id == root_id {
+                full_layout = true;
+                break;
+            }
+
+            let path = match element_tree.find_path_ids(id) {
+                Some(path) => path,
+                None => {
+                    full_layout = true;
+                    break;
+                }
+            };
+
+            if path.len() < 2 {
+                full_layout = true;
+                break;
+            }
+
+            let mut chosen_id = path[path.len() - 2];
+            let mut has_constraints = false;
+
+            for ancestor_id in path[..path.len() - 1].iter().rev() {
+                let constraints_opt = element_tree
+                    .find_element_mut(*ancestor_id)
+                    .and_then(|element| element.last_layout_constraints());
+                let Some(ancestor_constraints) = constraints_opt else {
+                    has_constraints = false;
+                    break;
+                };
+
+                chosen_id = *ancestor_id;
+                has_constraints = true;
+
+                if ancestor_constraints.is_tight() {
+                    break;
+                }
+            }
+
+            if !has_constraints {
+                full_layout = true;
+                break;
+            }
+
+            layout_roots.insert(chosen_id);
         }
-        if did_layout {
-            // Layout can resize buffers; ensure a full repaint so they contain fresh pixels.
+
+        if full_layout || layout_roots.is_empty() {
+            element_tree.layout(constraints);
+            if let Some(root) = element_tree.root() {
+                self.dirty_paint.insert(root.id());
+            }
+            return;
+        }
+
+        let mut fallback_full = false;
+        for id in layout_roots.iter().copied() {
+            if let Some(element) = element_tree.find_element_mut(id) {
+                if let Some(local_constraints) = element.last_layout_constraints() {
+                    element.layout(local_constraints);
+                    self.dirty_paint.insert(id);
+                } else {
+                    fallback_full = true;
+                    break;
+                }
+            } else {
+                fallback_full = true;
+                break;
+            }
+        }
+
+        if fallback_full {
+            element_tree.layout(constraints);
             if let Some(root) = element_tree.root() {
                 self.dirty_paint.insert(root.id());
             }
