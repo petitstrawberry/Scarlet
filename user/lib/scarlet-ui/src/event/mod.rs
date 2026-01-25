@@ -154,8 +154,10 @@ pub struct InputEvent {
 pub enum WindowEvent {
     /// Close button was clicked
     CloseRequested,
-    /// Maximize button was clicked (toggle maximize/restore)
+    /// Maximize button was clicked (expand to screen)
     MaximizeRequested,
+    /// Restore button was clicked (restore from maximized/minimized)
+    RestoreRequested,
     /// Minimize button was clicked
     MinimizeRequested,
     /// Titlebar was pressed to start interactive move

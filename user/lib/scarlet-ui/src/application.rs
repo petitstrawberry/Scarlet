@@ -125,6 +125,9 @@ pub trait Application: View {
                     Event::Window(crate::event::WindowEvent::MaximizeRequested) => {
                         let _ = platform_window.maximize();
                     }
+                    Event::Window(crate::event::WindowEvent::RestoreRequested) => {
+                        let _ = platform_window.restore();
+                    }
                     Event::Window(crate::event::WindowEvent::MinimizeRequested) => {
                         let _ = platform_window.minimize();
                     }

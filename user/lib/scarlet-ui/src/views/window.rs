@@ -217,6 +217,8 @@ pub struct WindowRenderElement<C: View + Clone + WindowViewInfo> {
     last_mouse_x: i32,
     last_mouse_y: i32,
     last_mouse_pressed: bool,
+    // Track maximized state for toggle
+    maximized: bool,
 }
 
 impl<C: View + Clone + WindowViewInfo> WindowRenderElement<C> {
@@ -233,6 +235,7 @@ impl<C: View + Clone + WindowViewInfo> WindowRenderElement<C> {
             last_mouse_x: -1,
             last_mouse_y: -1,
             last_mouse_pressed: false,
+            maximized: false,
         }
     }
 
@@ -508,7 +511,13 @@ impl<C: View + Clone + WindowViewInfo> Element for WindowRenderElement<C> {
                                 self.pending_window_action = Some(crate::event::WindowEvent::CloseRequested);
                             }
                             2 if released_on_maximize => {
-                                self.pending_window_action = Some(crate::event::WindowEvent::MaximizeRequested);
+                                // Toggle maximize/restore
+                                if self.maximized {
+                                    self.pending_window_action = Some(crate::event::WindowEvent::RestoreRequested);
+                                } else {
+                                    self.pending_window_action = Some(crate::event::WindowEvent::MaximizeRequested);
+                                }
+                                self.maximized = !self.maximized;
                             }
                             3 if released_on_minimize => {
                                 self.pending_window_action = Some(crate::event::WindowEvent::MinimizeRequested);
