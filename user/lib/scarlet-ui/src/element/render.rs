@@ -313,18 +313,18 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
                 match mouse_event {
                     MouseEvent::Entered { .. } => {
                         render_object.set_hovered(true);
-                        crate::pipeline::mark_element_dirty(self.id);
+                        crate::pipeline::mark_element_needs_paint(self.id);
                         return true;
                     }
                     MouseEvent::Exited { .. } => {
                         render_object.set_hovered(false);
                         render_object.set_pressed(false);
-                        crate::pipeline::mark_element_dirty(self.id);
+                        crate::pipeline::mark_element_needs_paint(self.id);
                         return true;
                     }
                     MouseEvent::ButtonPressed { button: MouseButton::Left, .. } => {
                         render_object.set_pressed(true);
-                        crate::pipeline::mark_element_dirty(self.id);
+                        crate::pipeline::mark_element_needs_paint(self.id);
                         return true;
                     }
                     MouseEvent::ButtonReleased { button: MouseButton::Left, .. } => {
@@ -332,7 +332,7 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
                             button.invoke_on_click();
                         }
                         render_object.set_pressed(false);
-                        crate::pipeline::mark_element_dirty(self.id);
+                        crate::pipeline::mark_element_needs_paint(self.id);
                         return true;
                     }
                     _ => {}

@@ -19,6 +19,7 @@ use scarlet_std::sync::Mutex;
 /// This allows ComponentElement callbacks to notify the PipelineOwner
 /// when State changes occur.
 static GLOBAL_DIRTY_IDS: Mutex<BTreeSet<ElementId>> = Mutex::new(BTreeSet::new());
+static GLOBAL_DIRTY_PAINT_IDS: Mutex<BTreeSet<ElementId>> = Mutex::new(BTreeSet::new());
 
 /// Mark an element as dirty for rebuild (called from ComponentElement callbacks)
 ///
@@ -26,6 +27,12 @@ static GLOBAL_DIRTY_IDS: Mutex<BTreeSet<ElementId>> = Mutex::new(BTreeSet::new()
 /// to notify the PipelineOwner that an element needs to be rebuilt.
 pub fn mark_element_dirty(id: ElementId) {
     let mut ids = GLOBAL_DIRTY_IDS.lock();
+    ids.insert(id);
+}
+
+/// Mark an element as needing paint only (no build/layout).
+pub fn mark_element_needs_paint(id: ElementId) {
+    let mut ids = GLOBAL_DIRTY_PAINT_IDS.lock();
     ids.insert(id);
 }
 
@@ -39,8 +46,15 @@ pub(crate) fn take_global_dirty_ids() -> alloc::vec::Vec<ElementId> {
     collected
 }
 
+pub(crate) fn take_global_dirty_paint_ids() -> alloc::vec::Vec<ElementId> {
+    let mut ids = GLOBAL_DIRTY_PAINT_IDS.lock();
+    let collected = ids.iter().copied().collect();
+    ids.clear();
+    collected
+}
+
 pub(crate) fn has_global_dirty() -> bool {
-    !GLOBAL_DIRTY_IDS.lock().is_empty()
+    !GLOBAL_DIRTY_IDS.lock().is_empty() || !GLOBAL_DIRTY_PAINT_IDS.lock().is_empty()
 }
 
 /// Dirty flags for different render phases
@@ -130,6 +144,9 @@ impl PipelineOwner {
         // Collect any globally dirty elements from State change callbacks
         for dirty_id in take_global_dirty_ids() {
             self.mark_needs_build(dirty_id);
+        }
+        for dirty_id in take_global_dirty_paint_ids() {
+            self.mark_needs_paint(dirty_id);
         }
 
         // 1. Build Phase: Rebuild Elements whose State changed
