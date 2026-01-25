@@ -39,4 +39,16 @@ pub trait PlatformWindow {
 
     /// Close the window
     fn close(&mut self) -> Result<()>;
+
+    /// Minimize the window (hide it)
+    fn minimize(&mut self) -> Result<()>;
+
+    /// Maximize the window to screen dimensions
+    fn maximize(&mut self) -> Result<()>;
+
+    /// Restore the window from minimized or maximized state
+    fn restore(&mut self) -> Result<()>;
+
+    /// Request that the window manager begins an interactive move
+    fn request_move(&mut self) -> Result<()>;
 }

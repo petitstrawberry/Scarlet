@@ -5,6 +5,7 @@
 
 use alloc::boxed::Box;
 use alloc::string::String;
+use alloc::vec::Vec;
 use crate::element::{Element, ElementTree, LayoutConstraints};
 use crate::geometry::Size;
 use crate::compositor::Compositor;
@@ -189,7 +190,8 @@ impl RenderingPipeline {
                 if crate::debug::is_enabled() {
                     scarlet_std::println!("[RenderingPipeline] RenderTree built, compositing...");
                 }
-                compositor.composite_tree(&render_tree);
+                let dirty_ids = self.pipeline_owner.last_paint_ids();
+                compositor.composite_tree_with_dirty(&render_tree, dirty_ids);
             } else {
                 if crate::debug::is_enabled() {
                     scarlet_std::println!("[RenderingPipeline] No root element to render");
@@ -226,6 +228,11 @@ impl RenderingPipeline {
     /// EventDispatcher to the target elements.
     pub fn handle_event(&mut self, _event: &crate::event::Event) -> bool {
         self.event_dispatcher.dispatch(&mut self.element_tree, _event)
+    }
+
+    /// Take emitted events from the event dispatcher
+    pub fn take_emitted_events(&mut self) -> Vec<crate::event::Event> {
+        self.event_dispatcher.take_emitted_events()
     }
 }
 

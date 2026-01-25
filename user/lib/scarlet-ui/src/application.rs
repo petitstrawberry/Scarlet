@@ -110,7 +110,28 @@ pub trait Application: View {
                 }
             }
 
-            // 6.2 Render frame
+            // 6.2 Handle emitted Window events
+            for emitted_event in pipeline.take_emitted_events() {
+                match emitted_event {
+                    Event::Window(crate::event::WindowEvent::CloseRequested) => {
+                        // Close the window and exit the application
+                        let _ = platform_window.close();
+                        return Ok(());
+                    }
+                    Event::Window(crate::event::WindowEvent::MaximizeRequested) => {
+                        let _ = platform_window.maximize();
+                    }
+                    Event::Window(crate::event::WindowEvent::MinimizeRequested) => {
+                        let _ = platform_window.minimize();
+                    }
+                    Event::Window(crate::event::WindowEvent::MoveRequested) => {
+                        let _ = platform_window.request_move();
+                    }
+                    _ => {}
+                }
+            }
+
+            // 6.3 Render frame
             // if let Some(buffer) = pipeline.render() {
             //     platform_window.present(buffer);
             // }
@@ -120,7 +141,7 @@ pub trait Application: View {
                 }
             }
 
-            // 6.3 Small sleep to prevent busy-waiting
+            // 6.4 Small sleep to prevent busy-waiting
             // In a real implementation, this would use proper frame timing
             std::thread::sleep(std::time::Duration::from_millis(16));
         }

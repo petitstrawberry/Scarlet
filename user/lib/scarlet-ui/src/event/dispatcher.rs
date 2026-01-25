@@ -5,7 +5,7 @@
 
 use alloc::vec::Vec;
 use crate::element::{Element, ElementId, ElementTree};
-use crate::geometry::Point;
+use crate::geometry::{Point, Rect};
 use crate::event::Event;
 
 /// Event dispatch phase
@@ -64,6 +64,9 @@ impl<'a> HitResult<'a> {
 pub struct EventDispatcher {
     root_id: Option<ElementId>,
     hovered_id: Option<ElementId>,
+    hovered_path: Vec<ElementId>,
+    /// Events emitted by elements during event handling
+    emitted_events: Vec<Event>,
 }
 
 impl EventDispatcher {
@@ -72,12 +75,24 @@ impl EventDispatcher {
         Self {
             root_id: None,
             hovered_id: None,
+            hovered_path: Vec::new(),
+            emitted_events: Vec::new(),
         }
     }
 
     /// Set the root element ID
     pub fn set_root(&mut self, id: ElementId) {
         self.root_id = Some(id);
+    }
+
+    /// Emit an event (called by elements during event handling)
+    pub fn emit(&mut self, event: Event) {
+        self.emitted_events.push(event);
+    }
+
+    /// Take all emitted events and clear the buffer
+    pub fn take_emitted_events(&mut self) -> Vec<Event> {
+        core::mem::take(&mut self.emitted_events)
     }
 
     /// Dispatch an event to the appropriate element
@@ -107,6 +122,9 @@ impl EventDispatcher {
             Event::Lifecycle(lifecycle_event) => {
                 self.dispatch_lifecycle(element_tree, lifecycle_event)
             }
+            Event::Window(_window_event) => {
+                false
+            }
             Event::Input(_) => {
                 // Raw input events are typically handled by higher layers
                 false
@@ -135,7 +153,12 @@ impl EventDispatcher {
     fn dispatch_mouse(&mut self, element_tree: &mut ElementTree, event: &crate::event::MouseEvent) -> bool {
         // 1. Hit test to find target and path
         let point = self.extract_point_from_mouse(&event);
-        let path = self.hit_test_with_path_ids(element_tree, point);
+        let path = if matches!(event, crate::event::MouseEvent::Moved { .. }) {
+            self.cached_path_if_inside(element_tree, point)
+                .or_else(|| self.hit_test_with_path_ids(element_tree, point))
+        } else {
+            self.hit_test_with_path_ids(element_tree, point)
+        };
 
         if let Some(path) = path {
             let target_id = *path.last().unwrap();
@@ -197,6 +220,7 @@ impl EventDispatcher {
                     }
 
                     self.hovered_id = Some(target_id);
+                    self.hovered_path = path.clone();
                 }
             }
 
@@ -208,6 +232,9 @@ impl EventDispatcher {
             for id in path.iter().take(path.len().saturating_sub(1)) {
                 if let Some(element) = element_tree.find_element_mut(*id) {
                     if element.handle_event(&event_wrapper, Phase::Capture) {
+                        if let Some(window_event) = element.take_window_action() {
+                            self.emitted_events.push(Event::Window(window_event));
+                        }
                         handled = true;
                         break;
                     }
@@ -218,6 +245,11 @@ impl EventDispatcher {
             if !handled {
                 if let Some(target) = element_tree.find_element_mut(target_id) {
                     handled = target.handle_event(&event_wrapper, Phase::Target);
+                    if handled {
+                        if let Some(window_event) = target.take_window_action() {
+                            self.emitted_events.push(Event::Window(window_event));
+                        }
+                    }
                 }
             }
 
@@ -226,6 +258,9 @@ impl EventDispatcher {
                 for id in path.iter().rev().skip(1) {
                     if let Some(element) = element_tree.find_element_mut(*id) {
                         if element.handle_event(&event_wrapper, Phase::Bubble) {
+                            if let Some(window_event) = element.take_window_action() {
+                                self.emitted_events.push(Event::Window(window_event));
+                            }
                             handled = true;
                             break;
                         }
@@ -248,6 +283,7 @@ impl EventDispatcher {
                     }
                 }
                 self.hovered_id = None;
+                self.hovered_path.clear();
             }
             false
         }
@@ -371,6 +407,42 @@ impl EventDispatcher {
             crate::event::MouseEvent::ButtonReleased { x, y, .. } => Point { x: *x as f32, y: *y as f32 },
             crate::event::MouseEvent::Wheel { .. } => Point::ZERO,
         }
+    }
+
+    fn cached_path_if_inside(
+        &mut self,
+        element_tree: &mut ElementTree,
+        point: Point,
+    ) -> Option<Vec<ElementId>> {
+        let hovered_id = self.hovered_id?;
+        let last = *self.hovered_path.last()?;
+        if last != hovered_id {
+            self.hovered_path.clear();
+            return None;
+        }
+
+        let mut absolute_origin = Point::ZERO;
+        for id in self.hovered_path.iter() {
+            let Some(element) = element_tree.find_element_mut(*id) else {
+                self.hovered_path.clear();
+                return None;
+            };
+            let pos = element.position();
+            absolute_origin.x += pos.x;
+            absolute_origin.y += pos.y;
+        }
+
+        let Some(target) = element_tree.find_element_mut(hovered_id) else {
+            self.hovered_path.clear();
+            return None;
+        };
+        let size = target.bounds().size;
+        let rect = Rect::from_xywh(absolute_origin.x, absolute_origin.y, size.width, size.height);
+        if rect.contains(point) {
+            return Some(self.hovered_path.clone());
+        }
+
+        None
     }
 }
 

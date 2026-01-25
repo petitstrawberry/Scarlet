@@ -231,6 +231,15 @@ pub trait Element {
         false
     }
 
+    /// Take window action if available
+    ///
+    /// Called after handle_event if it returned true.
+    /// Returns Some(WindowEvent) if the element wants to request a window action.
+    /// Default implementation returns None.
+    fn take_window_action(&mut self) -> Option<crate::event::WindowEvent> {
+        None
+    }
+
     /// Flex factor for space distribution in stacks
     ///
     /// - `0` (default): the element is laid out at its natural size

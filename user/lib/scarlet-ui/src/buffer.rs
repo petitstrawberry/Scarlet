@@ -77,6 +77,23 @@ impl Buffer {
         }
     }
 
+    /// Clear a rectangle with a color
+    pub fn clear_rect(&mut self, x: u32, y: u32, width: u32, height: u32, color: Color) {
+        if width == 0 || height == 0 {
+            return;
+        }
+        let pixel = color.to_bgra();
+        let x_end = (x + width).min(self.width);
+        let y_end = (y + height).min(self.height);
+        for yy in y..y_end {
+            let row_start = (yy * self.width + x) as usize;
+            let row_end = (yy * self.width + x_end) as usize;
+            for px in self.data[row_start..row_end].iter_mut() {
+                *px = pixel;
+            }
+        }
+    }
+
     /// Composite another buffer into this buffer
     ///
     /// # Arguments
@@ -125,6 +142,55 @@ impl Buffer {
 
         if crate::debug::is_enabled() {
             scarlet_std::println!("[Buffer] composite: {} pixels composited", pixels_composited);
+        }
+    }
+
+    /// Composite another buffer into this buffer with a clip rect in destination space.
+    pub fn composite_clipped(
+        &mut self,
+        src: &Buffer,
+        dst_x: i32,
+        dst_y: i32,
+        opacity: f32,
+        clip_x: i32,
+        clip_y: i32,
+        clip_w: i32,
+        clip_h: i32,
+    ) {
+        if clip_w <= 0 || clip_h <= 0 {
+            return;
+        }
+
+        let src_w = src.width as i32;
+        let src_h = src.height as i32;
+        let dst_w = self.width as i32;
+        let dst_h = self.height as i32;
+
+        let dst_left = dst_x.max(clip_x).max(0);
+        let dst_top = dst_y.max(clip_y).max(0);
+        let dst_right = (dst_x + src_w).min(clip_x + clip_w).min(dst_w);
+        let dst_bottom = (dst_y + src_h).min(clip_y + clip_h).min(dst_h);
+
+        if dst_right <= dst_left || dst_bottom <= dst_top {
+            return;
+        }
+
+        let mut pixels_composited = 0u32;
+        for target_y in dst_top..dst_bottom {
+            let src_y = target_y - dst_y;
+            let src_row = (src_y * src.width as i32) as usize;
+            let dst_row = (target_y * self.width as i32) as usize;
+            for target_x in dst_left..dst_right {
+                let src_x = target_x - dst_x;
+                let src_pixel = src.data[(src_row + src_x as usize)];
+                let dst_idx = dst_row + target_x as usize;
+                self.data[dst_idx] = Self::blend_pixels(self.data[dst_idx], src_pixel, opacity);
+                pixels_composited += 1;
+            }
+        }
+
+        if crate::debug::is_enabled() {
+            scarlet_std::println!("[Buffer] composite_clipped: {} pixels composited", pixels_composited);
         }
     }
 

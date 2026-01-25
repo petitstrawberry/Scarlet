@@ -79,6 +79,8 @@ pub struct PipelineOwner {
     dirty_layout: BTreeSet<ElementId>,
     /// Elements that need repainting
     dirty_paint: BTreeSet<ElementId>,
+    /// Elements repainted in the last flush
+    last_paint_ids: alloc::vec::Vec<ElementId>,
     /// State registry for managing State instances
     state_registry: StateRegistry,
 }
@@ -90,6 +92,7 @@ impl PipelineOwner {
             dirty_build: BTreeSet::new(),
             dirty_layout: BTreeSet::new(),
             dirty_paint: BTreeSet::new(),
+            last_paint_ids: alloc::vec::Vec::new(),
             state_registry: StateRegistry::new(),
         }
     }
@@ -203,6 +206,8 @@ impl PipelineOwner {
     /// Flush the paint phase
     fn flush_paint(&mut self, element_tree: &mut ElementTree) {
         let dirty_paint = core::mem::take(&mut self.dirty_paint);
+        self.last_paint_ids.clear();
+        self.last_paint_ids.extend(dirty_paint.iter().copied());
 
         if crate::debug::is_enabled() {
             scarlet_std::println!("[PipelineOwner] flush_paint: {} dirty elements", dirty_paint.len());
@@ -271,6 +276,11 @@ impl PipelineOwner {
     /// Check if there are any dirty paint elements
     pub fn has_dirty_paint(&self) -> bool {
         !self.dirty_paint.is_empty()
+    }
+
+    /// Get the IDs repainted in the last flush.
+    pub fn last_paint_ids(&self) -> &[ElementId] {
+        &self.last_paint_ids
     }
 
     /// Register a State instance

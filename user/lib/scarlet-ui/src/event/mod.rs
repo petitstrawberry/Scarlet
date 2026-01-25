@@ -43,6 +43,9 @@ pub enum Event {
         event_type: u32,
         data: Vec<u8>,
     },
+
+    /// Window control event (from Window titlebar buttons)
+    Window(WindowEvent),
 }
 
 /// Mouse events
@@ -142,6 +145,21 @@ pub struct InputEvent {
     pub event_type: u16,
     pub code: u16,
     pub value: i32,
+}
+
+/// Window control events
+///
+/// Fired when user interacts with window titlebar controls.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WindowEvent {
+    /// Close button was clicked
+    CloseRequested,
+    /// Maximize button was clicked (toggle maximize/restore)
+    MaximizeRequested,
+    /// Minimize button was clicked
+    MinimizeRequested,
+    /// Titlebar was dragged to move the window
+    MoveRequested,
 }
 
 /// Focus events

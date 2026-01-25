@@ -163,6 +163,26 @@ impl PlatformWindow for SWSPlatformWindow {
 
         Ok(())
     }
+
+    fn minimize(&mut self) -> Result<()> {
+        self.conn.minimize_window(self.surface_id)
+            .map_err(|_| crate::error::Error::IoError)
+    }
+
+    fn maximize(&mut self) -> Result<()> {
+        self.conn.maximize_window(self.surface_id)
+            .map_err(|_| crate::error::Error::IoError)
+    }
+
+    fn restore(&mut self) -> Result<()> {
+        self.conn.restore_window(self.surface_id)
+            .map_err(|_| crate::error::Error::IoError)
+    }
+
+    fn request_move(&mut self) -> Result<()> {
+        self.conn.request_move_window(self.surface_id)
+            .map_err(|_| crate::error::Error::IoError)
+    }
 }
 
 impl SWSPlatformWindow {

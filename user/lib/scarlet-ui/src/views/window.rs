@@ -157,6 +157,7 @@ pub struct WindowRenderElement<C: View + Clone> {
     render_object: WindowRenderObject,
     children: Vec<Box<dyn Element>>,
     position: Point,
+    pending_window_action: Option<crate::event::WindowEvent>,
 }
 
 impl<C: View + Clone> WindowRenderElement<C> {
@@ -168,6 +169,7 @@ impl<C: View + Clone> WindowRenderElement<C> {
             render_object,
             children,
             position: Point::ZERO,
+            pending_window_action: None,
         }
     }
 
@@ -293,9 +295,112 @@ impl<C: View + Clone> Element for WindowRenderElement<C> {
         Some(&mut self.render_object)
     }
 
-    fn handle_event(&mut self, _event: &crate::event::Event, _phase: crate::event::Phase) -> bool {
-        // TODO: Handle window control button events
-        false
+    fn handle_event(&mut self, event: &crate::event::Event, phase: crate::event::Phase) -> bool {
+        // Only handle mouse events in target phase
+        if phase != crate::event::Phase::Target {
+            return false;
+        }
+
+        // Only handle events on decorated windows
+        if !self.render_object.decorated {
+            return false;
+        }
+
+        let mut needs_repaint = false;
+        let mut handled = false;
+
+        match event {
+            crate::event::Event::Mouse(crate::event::MouseEvent::Moved { x, y }) => {
+                // Convert to window-local coordinates
+                let local_x = *x - self.position.x as i32;
+                let local_y = *y - self.position.y as i32;
+
+                // Update button hover states
+                self.render_object.update_button_states(local_x, local_y, self.render_object.mouse_pressed);
+                needs_repaint = true;
+            }
+            crate::event::Event::Mouse(crate::event::MouseEvent::ButtonPressed {
+                x,
+                y,
+                button: crate::event::MouseButton::Left,
+            }) => {
+                // Convert to window-local coordinates
+                let local_x = *x - self.position.x as i32;
+                let local_y = *y - self.position.y as i32;
+
+                // Update button states (pressed = true)
+                self.render_object.update_button_states(local_x, local_y, true);
+                needs_repaint = true;
+
+                // Check if click is in titlebar
+                let width = self.render_object.size.width as u32;
+                let titlebar_height = TITLEBAR_HEIGHT as i32;
+
+                if local_y >= 0 && local_y < titlebar_height {
+                    // Check close button
+                    let close_rect = self.render_object.close_button_rect(width);
+                    if close_rect.contains(crate::geometry::Point {
+                        x: local_x as f32,
+                        y: local_y as f32,
+                    }) {
+                        self.pending_window_action = Some(crate::event::WindowEvent::CloseRequested);
+                        handled = true;
+                    }
+
+                    // Check maximize button
+                    let maximize_rect = self.render_object.maximize_button_rect(width);
+                    if maximize_rect.contains(crate::geometry::Point {
+                        x: local_x as f32,
+                        y: local_y as f32,
+                    }) {
+                        self.pending_window_action = Some(crate::event::WindowEvent::MaximizeRequested);
+                        handled = true;
+                    }
+
+                    // Check minimize button
+                    let minimize_rect = self.render_object.minimize_button_rect(width);
+                    if minimize_rect.contains(crate::geometry::Point {
+                        x: local_x as f32,
+                        y: local_y as f32,
+                    }) {
+                        self.pending_window_action = Some(crate::event::WindowEvent::MinimizeRequested);
+                        handled = true;
+                    }
+
+                    // Click on titlebar (not buttons) -> request move
+                    if !handled {
+                        self.pending_window_action = Some(crate::event::WindowEvent::MoveRequested);
+                        handled = true;
+                    }
+                }
+            }
+            crate::event::Event::Mouse(crate::event::MouseEvent::ButtonReleased {
+                x,
+                y,
+                button: crate::event::MouseButton::Left,
+            }) => {
+                // Convert to window-local coordinates
+                let local_x = *x - self.position.x as i32;
+                let local_y = *y - self.position.y as i32;
+
+                // Update button states (pressed = false)
+                self.render_object.update_button_states(local_x, local_y, false);
+                needs_repaint = true;
+                handled = true;
+            }
+            _ => {}
+        }
+
+        // Mark for repaint if button states changed
+        if needs_repaint {
+            crate::pipeline::mark_element_needs_paint(self.id());
+        }
+
+        handled
+    }
+
+    fn take_window_action(&mut self) -> Option<crate::event::WindowEvent> {
+        core::mem::take(&mut self.pending_window_action)
     }
 }
 
@@ -310,6 +415,14 @@ pub struct WindowRenderObject {
     decorated: bool,
     focused: bool,
     buffer: Option<Buffer>,
+    // Button hover states (0=none, 1=hover, 2=pressed)
+    close_button_state: u8,
+    maximize_button_state: u8,
+    minimize_button_state: u8,
+    // Mouse position for hover detection
+    mouse_x: i32,
+    mouse_y: i32,
+    mouse_pressed: bool,
 }
 
 impl WindowRenderObject {
@@ -320,6 +433,12 @@ impl WindowRenderObject {
             decorated,
             focused: true,
             buffer: None,
+            close_button_state: 0,
+            maximize_button_state: 0,
+            minimize_button_state: 0,
+            mouse_x: -1,
+            mouse_y: -1,
+            mouse_pressed: false,
         }
     }
 
@@ -354,6 +473,62 @@ impl WindowRenderObject {
         Rect::from_xywh(x as f32, 0.0, seg_w as f32, TITLEBAR_HEIGHT as f32)
     }
 
+    /// Update button hover/pressed states based on mouse position
+    pub fn update_button_states(&mut self, mouse_x: i32, mouse_y: i32, mouse_pressed: bool) {
+        self.mouse_x = mouse_x;
+        self.mouse_y = mouse_y;
+        self.mouse_pressed = mouse_pressed;
+
+        if !self.decorated {
+            return;
+        }
+
+        let width = self.size.width as u32;
+
+        // Update close button state
+        let close_rect = self.close_button_rect(width);
+        self.close_button_state = if close_rect.contains(crate::geometry::Point {
+            x: mouse_x as f32,
+            y: mouse_y as f32,
+        }) {
+            if mouse_pressed { 2 } else { 1 }
+        } else {
+            0
+        };
+
+        // Update maximize button state
+        let maximize_rect = self.maximize_button_rect(width);
+        self.maximize_button_state = if maximize_rect.contains(crate::geometry::Point {
+            x: mouse_x as f32,
+            y: mouse_y as f32,
+        }) {
+            if mouse_pressed { 2 } else { 1 }
+        } else {
+            0
+        };
+
+        // Update minimize button state
+        let minimize_rect = self.minimize_button_rect(width);
+        self.minimize_button_state = if minimize_rect.contains(crate::geometry::Point {
+            x: mouse_x as f32,
+            y: mouse_y as f32,
+        }) {
+            if mouse_pressed { 2 } else { 1 }
+        } else {
+            0
+        };
+    }
+
+    /// Get button color based on state
+    fn get_button_color(state: u8) -> Color {
+        match state {
+            0 => Color::rgb(235u8, 235u8, 238u8), // normal
+            1 => Color::rgb(210u8, 210u8, 213u8), // hover
+            2 => Color::rgb(190u8, 190u8, 193u8), // pressed
+            _ => Color::rgb(235u8, 235u8, 238u8),
+        }
+    }
+
     /// Draw the window background and titlebar using Canvas
     fn draw(&mut self) {
         let width = libm::ceilf(self.size.width) as usize;
@@ -362,6 +537,11 @@ impl WindowRenderObject {
         let title = self.title.clone();
         let decorated = self.decorated;
         let focused = self.focused;
+
+        // Copy button states before borrowing buffer
+        let close_state = self.close_button_state;
+        let maximize_state = self.maximize_button_state;
+        let minimize_state = self.minimize_button_state;
 
         // Create or resize buffer
         if self.buffer.as_ref().map_or(true, |b| b.as_slice().len() < needed) {
@@ -380,7 +560,16 @@ impl WindowRenderObject {
 
             // Draw titlebar if decorated
             if decorated {
-                Self::draw_titlebar_canvas(&title, focused, &mut canvas, width as u32, height as u32);
+                Self::draw_titlebar_canvas_with_states(
+                    &title,
+                    focused,
+                    &mut canvas,
+                    width as u32,
+                    height as u32,
+                    close_state,
+                    maximize_state,
+                    minimize_state,
+                );
             }
 
             // Draw border
@@ -424,7 +613,16 @@ impl WindowRenderObject {
     }
 
     /// Draw titlebar using Canvas API (exact Scarlet_old design)
-    fn draw_titlebar_canvas(title: &str, _focused: bool, canvas: &mut crate::graphics::Canvas, width: u32, _height: u32) {
+    fn draw_titlebar_canvas_with_states(
+        title: &str,
+        _focused: bool,
+        canvas: &mut crate::graphics::Canvas,
+        width: u32,
+        _height: u32,
+        close_button_state: u8,
+        maximize_button_state: u8,
+        minimize_button_state: u8,
+    ) {
         if crate::debug::is_enabled() {
             scarlet_std::println!("[WindowRenderObject] draw_titlebar_canvas: width={}, title='{}'", width, title);
         }
@@ -440,10 +638,10 @@ impl WindowRenderObject {
             scarlet_std::println!("[WindowRenderObject] close_rect: origin={:?}, size={:?}", close_rect.origin, close_rect.size);
         }
 
-        // Button colors (matching Scarlet_old: base, hover=210, pressed=190)
-        let close_color = base_color; // TODO: add hover/pressed state
-        let maximize_color = base_color; // TODO: add hover/pressed state
-        let minimize_color = base_color; // TODO: add hover/pressed state
+        // Button colors based on hover/pressed state
+        let close_color = Self::get_button_color(close_button_state);
+        let maximize_color = Self::get_button_color(maximize_button_state);
+        let minimize_color = Self::get_button_color(minimize_button_state);
 
         // Draw titlebar with button colors
         for y in 0..TITLEBAR_HEIGHT {
