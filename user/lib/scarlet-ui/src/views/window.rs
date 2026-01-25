@@ -322,6 +322,14 @@ impl<C: View + Clone> Element for WindowRenderElement<C> {
         self.render_object.get_buffer()
     }
 
+    fn render_object(&self) -> Option<&dyn ElementRenderObject> {
+        Some(&self.render_object)
+    }
+
+    fn render_object_mut(&mut self) -> Option<&mut dyn ElementRenderObject> {
+        Some(&mut self.render_object)
+    }
+
     fn handle_event(&mut self, _event: &crate::event::Event, _phase: crate::event::Phase) -> bool {
         // TODO: Handle window control button events
         false

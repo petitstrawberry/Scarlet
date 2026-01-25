@@ -6,11 +6,11 @@
 use alloc::boxed::Box;
 use alloc::string::String;
 use crate::element::{Element, ElementTree, LayoutConstraints};
-use crate::geometry::{Size, Point};
+use crate::geometry::Size;
 use crate::compositor::Compositor;
 use crate::pipeline::PipelineOwner;
 use crate::buffer::Buffer;
-use crate::views::Window;
+use crate::render::RenderTree;
 
 /// RenderingPipeline integrates all components of the rendering system
 ///
@@ -168,75 +168,22 @@ impl RenderingPipeline {
         self.pipeline_owner.flush(&mut self.element_tree, self.window_size);
         scarlet_std::println!("[RenderingPipeline] flush() completed");
 
-        // Collect elements for compositing (before borrowing compositor)
-        let mut elements_to_composite = alloc::vec::Vec::new();
-        if let Some(root) = self.element_tree.root() {
-            scarlet_std::println!("[RenderingPipeline] collecting elements for composite...");
-            self.collect_elements_for_composite(root, Point::ZERO, &mut elements_to_composite);
-        }
-        scarlet_std::println!("[RenderingPipeline] render(): collected {} elements for compositing",
-            elements_to_composite.len());
-
         // Composite all elements into the window buffer
         if let Some(ref mut compositor) = self.compositor {
-            // Clear background
-            compositor.clear(crate::color::Color::WHITE);
-
-            let mut composite_count = 0;
-            let mut buffer_count = 0;
-
-            // Composite in reverse order (children first for painter's algorithm)
-            for (element, origin) in elements_to_composite.into_iter().rev() {
-                composite_count += 1;
-                let type_name = element.type_name_debug();
-                if let Some(buffer) = element.get_buffer() {
-                    buffer_count += 1;
-                    scarlet_std::println!("[RenderingPipeline] Compositing #{}: {} at ({},{}), buffer={}x{}",
-                        composite_count, type_name, origin.x, origin.y, buffer.width(), buffer.height());
-                    compositor.window_buffer_mut().composite(
-                        buffer,
-                        origin.x as i32,
-                        origin.y as i32,
-                        1.0,
-                    );
-                } else {
-                    scarlet_std::println!("[RenderingPipeline] Skipping #{}: {} at ({},{}) - no buffer",
-                        composite_count, type_name, origin.x, origin.y);
-                }
+            if let Some(root) = self.element_tree.root() {
+                scarlet_std::println!("[RenderingPipeline] building RenderTree...");
+                let render_tree = RenderTree::build(root);
+                scarlet_std::println!("[RenderingPipeline] RenderTree built, compositing...");
+                compositor.composite_tree(&render_tree);
+            } else {
+                scarlet_std::println!("[RenderingPipeline] No root element to render");
             }
-
-            scarlet_std::println!("[RenderingPipeline] Composited {}/{} elements with buffers",
-                buffer_count, composite_count);
 
             Some(compositor.window_buffer())
         } else {
             scarlet_std::println!("[RenderingPipeline] No compositor!");
             None
         }
-    }
-
-    /// Collect elements for compositing (depth-first, children first)
-    ///
-    /// Painter's algorithm: children are drawn first (in background), parent on top.
-    fn collect_elements_for_composite<'a>(
-        &self,
-        element: &'a dyn Element,
-        origin: Point,
-        result: &mut alloc::vec::Vec<(&'a dyn Element, Point)>,
-    ) {
-        let position = element.position();
-        let absolute_origin = Point {
-            x: origin.x + position.x,
-            y: origin.y + position.y,
-        };
-
-        // Add children first (painter's algorithm)
-        for child in element.children() {
-            self.collect_elements_for_composite(child.as_ref(), absolute_origin, result);
-        }
-
-        // Add this element
-        result.push((element, absolute_origin));
     }
 
     /// Get the window buffer (if available)

@@ -1,12 +1,12 @@
-//! Compositor - Composites RenderObject trees into window buffers
+//! Compositor - Composites RenderTree into window buffers
 //!
-//! The Compositor traverses the element tree and composites all buffers
-//! into a single window buffer.
+//! The Compositor traverses the RenderTree (derived from the Element tree)
+//! and composites all buffers into a single window buffer.
 
 use crate::buffer::Buffer;
 use crate::geometry::{Point, Size};
 use crate::color::Color;
-use crate::render::RenderObject;
+use crate::render::{RenderNode, RenderTree};
 
 /// Compositor for rendering element trees to buffers
 pub struct Compositor {
@@ -29,10 +29,10 @@ impl Compositor {
         }
     }
 
-    /// Composite a RenderObject tree into the window buffer
+    /// Composite a RenderTree into the window buffer
     ///
     /// This traverses the tree depth-first and composites all buffers.
-    pub fn composite_tree(&mut self, root: &dyn RenderObject) {
+    pub fn composite_tree(&mut self, tree: &RenderTree) {
         scarlet_std::println!("[Compositor] composite_tree: window_size={:?}x{:?}",
             self.window_buffer.width(), self.window_buffer.height());
 
@@ -40,37 +40,54 @@ impl Compositor {
         self.clear(Color::WHITE);
 
         // Composite from root
-        self.composite_node(root, Point::ZERO);
+        self.composite_node(tree.root(), Point::ZERO);
 
         scarlet_std::println!("[Compositor] composite_tree: complete");
     }
 
-    /// Composite a single RenderObject node
-    fn composite_node(&mut self, node: &dyn RenderObject, origin: Point) {
-        let frame = node.frame();
+    /// Composite a single RenderNode
+    fn composite_node(&mut self, node: &RenderNode, origin: Point) {
+        let position = node.position();
         let absolute_origin = Point {
-            x: origin.x + frame.origin.x,
-            y: origin.y + frame.origin.y,
+            x: origin.x + position.x,
+            y: origin.y + position.y,
         };
 
-        // Process children first (for proper z-ordering)
-        // Children are composited before parent (painter's algorithm)
-        for child in node.children() {
-            self.composite_node(child.as_ref(), absolute_origin);
+        let render_object = node.render_object();
+        let has_buffer = render_object.and_then(|ro| ro.get_buffer()).is_some();
+        if crate::debug::is_enabled() {
+            scarlet_std::println!(
+                "[Compositor] visiting node id={} origin=({}, {}) local=({}, {}) buffer={}",
+                node.id().get(),
+                absolute_origin.x,
+                absolute_origin.y,
+                position.x,
+                position.y,
+                has_buffer
+            );
         }
 
         // Composite this node's buffer if it has one
-        if let Some(buffer) = node.get_buffer() {
-            let opacity = node.opacity();
-            scarlet_std::println!("[Compositor] composite_node: origin={:?}, buffer_size={}x{}, opacity={}",
-                absolute_origin, buffer.width(), buffer.height(), opacity);
+        if let Some(render_object) = render_object {
+            if let Some(buffer) = render_object.get_buffer() {
+                let opacity = 1.0;
+                if crate::debug::is_enabled() {
+                    scarlet_std::println!("[Compositor] composite_node: origin={:?}, buffer_size={}x{}, opacity={}",
+                        absolute_origin, buffer.width(), buffer.height(), opacity);
+                }
 
-            self.window_buffer.composite(
-                buffer,
-                absolute_origin.x as i32,
-                absolute_origin.y as i32,
-                opacity,
-            );
+                self.window_buffer.composite(
+                    buffer,
+                    absolute_origin.x as i32,
+                    absolute_origin.y as i32,
+                    opacity,
+                );
+            }
+        }
+
+        // Composite children after parent so they appear on top
+        for child in node.children() {
+            self.composite_node(child, absolute_origin);
         }
     }
 

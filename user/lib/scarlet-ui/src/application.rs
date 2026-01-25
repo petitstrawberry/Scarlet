@@ -45,6 +45,11 @@ pub trait Application: View {
         // Default implementation: do nothing
     }
 
+    /// Enable or disable debug logging for this application
+    fn debug_logging(&self) -> bool {
+        false
+    }
+
     /// Run the application main loop
     ///
     /// This sets up the window, runs the event loop, and renders the UI.
@@ -53,6 +58,8 @@ pub trait Application: View {
     where
         Self: Sized,
     {
+        crate::debug::set_enabled(self.debug_logging());
+
         // 1. Set up rendering pipeline
         let mut pipeline = RenderingPipeline::new();
 
@@ -67,7 +74,9 @@ pub trait Application: View {
         let (app_id, window_title, window_size) = pipeline.layout_initial();
 
         // Debug: Dump element tree
-        pipeline.element_tree().dump();
+        if crate::debug::is_enabled() {
+            pipeline.element_tree().dump();
+        }
 
         // 5. Create platform window (default: SWS backend)
         let mut platform_window = SWSPlatformWindow::new(&app_id, &window_title, window_size)

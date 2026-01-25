@@ -151,6 +151,47 @@ impl FrameRenderObject {
             size: Size::ZERO,
         }
     }
+
+    /// Get the explicit width value
+    pub fn width_value(&self) -> Option<f32> {
+        self.width
+    }
+
+    /// Get the explicit height value
+    pub fn height_value(&self) -> Option<f32> {
+        self.height
+    }
+
+    /// Layout the frame using a child size
+    pub fn layout_with_child(&mut self, child_size: Size, constraints: LayoutConstraints) -> Size {
+        let min_w = self.min_width.max(constraints.min_width);
+        let max_w = self.max_width.min(constraints.max_width);
+        let min_h = self.min_height.max(constraints.min_height);
+        let max_h = self.max_height.min(constraints.max_height);
+
+        let width = if let Some(w) = self.width {
+            if w.is_finite() {
+                w
+            } else {
+                constraints.max_width
+            }
+        } else {
+            child_size.width.clamp(min_w, max_w)
+        };
+
+        let height = if let Some(h) = self.height {
+            if h.is_finite() {
+                h
+            } else {
+                constraints.max_height
+            }
+        } else {
+            child_size.height.clamp(min_h, max_h)
+        };
+
+        self.size = Size { width, height };
+        self.size
+    }
 }
 
 impl ElementRenderObject for FrameRenderObject {

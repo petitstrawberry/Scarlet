@@ -28,9 +28,9 @@ FlutterやSwiftUIの宣言的な書き心地を維持しつつ、Rust特有の�
 |          |           |        |   +--------+--------+   |
 |          |           |        |            | owns       |
 +----------|-----------+        |            v            |
-           | owns               |   +-----------------+   |
-           v                    |   |  RenderElement  |   |
-+----------------------+        |   | (Leaf Node)     |   |
+           | owns               |   +---------------------+   |
+           v                    |   | RenderObjectElement |   |
++----------------------+        |   | (Leaf Node)         |   |
 |      State<T>        |        |   +--------+--------+   |
 |    (Listenable)      |        |            | owns       |
 |    - value: T        |<-------|            v            |
@@ -46,7 +46,7 @@ FlutterやSwiftUIの宣言的な書き心地を維持しつつ、Rust特有の�
 ### Key Relationships
 
 * **View → Element**: 1対1の関係。ViewはElementの「設計図」であり、`create_element()` メソッドを通じてElementを生成します。
-* **Element → Element**: 親子関係（Tree構造）。`ComponentElement` は論理的な親となり、`RenderElement` は物理的な描画ノードとなります。
+* **Element → Element**: 親子関係（Tree構造）。`ComponentElement` は論理的な親となり、`RenderObjectElement` はRenderObjectへのブリッジとなります。
 * **State → Element**: N対Nの購読関係。Stateが更新されると、それを購読しているElementがダーティとマークされ、再ビルドがトリガーされます。
 
 ---
@@ -58,7 +58,8 @@ FlutterやSwiftUIの宣言的な書き心地を維持しつつ、Rust特有の�
 | **View** | `struct CounterView` | 不変の設計図、Factory | `State<T>` | 作成後は不変 |
 | **State** | `State<T>` | 状態の保持と通知 | `Arc<StateInner>` | 複数の所有者で共有 |
 | **Element** | `ComponentElement<V>` | Viewの構成を管理 | 子Element、購読ID | State変化で再ビルド |
-| **Element** | `RenderElement<V,R>` | RenderObjectのラッパー | RenderObject、子Element | View更新で再構成 |
+| **Element** | `RenderObjectElement<V,R>` | RenderObjectをラップし、ライフサイクルを管理 | RenderObject（1つのみ） | View更新でRenderObjectを更新 |
+| **RenderObject** | `ContainerRenderObject` | 子RenderObjectを管理 | 子RenderObjectのリスト | レイアウト時に子を配置 |
 | **RenderObject** | `TextRenderObject` | レイアウトと描画を担当 | `Buffer`（Leafのみ） | ダーティフラグで更新 |
 | **Buffer** | `Buffer` | ピクセルデータを保持 | `Vec<u32>` (BGRA) | 描画時に再生成 |
 
@@ -85,14 +86,14 @@ FlutterやSwiftUIの宣言的な書き心地を維持しつつ、Rust特有の�
 │            │ create_element()         │                             │
 │            ▼                         ▼                             │
 │  ┌──────────────────┐    ┌───────────────────────┐                 │
-│  │ComponentElement  │    │   RenderElement<V,R>  │                 │
-│  │  : Element       │    │     : Element         │                 │
-│  │                  │    │                       │                 │
-│  │  owns:           │    │  owns:                │                 │
-│  │  - View          │    │  - View               │                 │
-│  │  - child Element │    │  - RenderObject       │                 │
-│  │  - subscriptions │    │  - children Vec<>     │                 │
-│  └──────────────────┘    └───────────┬───────────┘                 │
+│  │ComponentElement  │    │RenderObjectElement<V,R>│                 │
+│  │  : Element       │    │     : Element          │                 │
+│  │                  │    │                        │                 │
+│  │  owns:           │    │  owns:                 │                 │
+│  │  - View          │    │  - View                │                 │
+│  │  - child Element │    │  - RenderObject        │                 │
+│  │  - subscriptions │    │  (1つのみ)             │                 │
+│  └──────────────────┘    └───────────┬────────────┘                 │
 │                                      │                             │
 │                                      │ owns                        │
 │                                      ▼                             │
@@ -121,6 +122,21 @@ FlutterやSwiftUIの宣言的な書き心地を維持しつつ、Rust特有の�
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
+### 2.5 RenderTree (RenderObjectツリー)
+
+ElementツリーからRenderObjectツリーを構築し、描画・合成を専用のツリーで行います。
+これにより、View/Elementの更新とRenderObjectの描画を分離できます。
+
+```
+ElementTree (Component/RenderElement)
+        |
+        v
+RenderTree (RenderNode)
+  - render_object: Option<&RenderObject>
+  - position: Point
+  - children: Vec<RenderNode>
+```
+
 ### 2.3 Ownership & Borrowing Pattern (所有権と借用のパターン)
 
 ```rust
@@ -136,18 +152,28 @@ struct ComponentElement<V: View> {
     subscriptions: Vec<SubscriptionId>,  // State購読を管理
 }
 
-struct RenderElement<V: View, R: RenderObject> {
+// RenderObjectElementはRenderObjectを1つだけ持ち、childrenは持たない
+struct RenderObjectElement<V: View, R: RenderObject> {
     view: V,                    // Viewを所有
-    render_object: R,           // RenderObjectを所有
-    children: Vec<Box<dyn Element>>,  // 子Elementを所有
+    render_object: R,           // RenderObjectを1つだけ所有
+    // childrenは持たない - RenderObjectが親子関係を管理する
 }
 
 // === RENDER OBJECT LAYER (Mutable State) ===
+
+// Leaf RenderObject（テキスト、画像など）
 struct TextRenderObject {
-    view: Text,                 // 最新のViewを保持
+    text: String,               // 表示するテキスト
     buffer: Option<Buffer>,     // 描画バッファを所有（Leafのみ）
     frame: Rect,                // レイアウト結果を保持
     dirty_flags: DirtyFlags,    // ダーティ状態を管理
+}
+
+// Container RenderObject（VStack、HStackなど）
+struct VStackRenderObject {
+    children: Vec<Box<dyn RenderObject>>,  // 子RenderObjectを管理
+    spacing: f32,              // 子の間隔
+    frame: Rect,               // レイアウト結果を保持
 }
 
 // === STATE (Shared Ownership) ===
@@ -227,7 +253,7 @@ struct State<T> {
 | トレイト | 実装する型 | 役割 | 主要メソッド |
 |--------|-----------|------|-------------|
 | `View` | 全てのView型 | FactoryとしてElementを生成 | `create_element()`, `listenables()` |
-| `Element` | Component/RenderElement | Elementツリーの共通インターフェース | `id()`, `update()`, `children()`, `mount()` |
+| `Element` | Component/RenderObjectElement | Elementツリーの共通インターフェース | `id()`, `update()`, `children()`, `mount()` |
 | `RenderObject` | レイアウト/描画担当型 | レイアウト計算と描画の実行 | `layout()`, `render()`, `hit_test()` |
 | `Listenable` | `State<T>` | 型消去された購読インターフェース | `subscribe_any()` |
 | `ViewTuple` | タプル `(A,B,...)` | 複数Viewを一括でElement化 | `create_elements()`, `collect_listenables()` |
@@ -287,7 +313,7 @@ pub trait View: 'static {
 
 ## 4. Layer Detail: The Element Layer
 
-ScarletUI 2.0の最大の特徴は、Elementを役割に応じて2種類に明確に分割した点です。これにより、単一の `GenericElement` で発生していた複雑な条件分岐 を排除します。
+ScarletUI 2.0はFlutterと同様に、**Element TreeとRenderObject Treeの2つの独立したツリー構造**を持っています。これにより、効率的な更新とレイアウトを実現します。
 
 ### A. ComponentElement (The Manager)
 
@@ -302,54 +328,135 @@ ScarletUI 2.0の最大の特徴は、Elementを役割に応じて2種類に明�
 ```rust
 pub struct ComponentElement<V: View> {
     view: V,
-    child: Option<Box<dyn Element>>, // 展開された子（1つ）
+    child: Option<Box<dyn Element>>, // 子Elementへの参照のみ
     subscriptions: Vec<SubscriptionId>,
-    // ...
+    // ★重要: RenderObjectは持たない
 }
-
 ```
 
 
+### B. RenderObjectElement (The Bridge)
 
-### B. RenderElement (The Painter)
-
-プリミティブなView（`Text`, `Rectangle`, `VStack` など）に対応します。**「実際のレイアウトと描画」** が仕事です。
+プリミティブなView（`Text`, `Rectangle`, `VStack` など）に対応します。**RenderObjectを1つだけ持ち、そのライフサイクルを管理します**。
 
 * **責務**:
-* `RenderObject` の生成と保持。
+* `RenderObject` の生成と保持（1つのみ）。
 * Viewのプロパティ変更を `RenderObject` に反映（`update`）。
+* **重要**: 子Elementは持たない。子Elementは親ComponentElementが管理する。
+* **重要**: 子RenderObjectも持たない。子RenderObjectはRenderObject同士が管理する。
 
 
 * **構造**:
 ```rust
-pub struct RenderElement<V, R> {
+pub struct RenderObjectElement<V: View, R: RenderObject> {
     view: V,
-    render_object: R,
-    children: Vec<Box<dyn Element>>, // RenderObjectが要求する子供たち
-    // ...
+    render_object: R,  // 1つのRenderObjectのみ
+    // ★子は一切持たない
 }
-
 ```
 
 
+### C. RenderObject Tree（重要）
 
-### Element Tree Structure
-
-この2つのElementが混在することで、効率的なツリーが形成されます。
+**RenderObject同士が独立した親子関係を持ちます**。Container RenderObject（VStackRenderObjectなど）が`Vec`で子RenderObjectを直接管理します。
 
 ```ascii
-[Root]
+Element Tree              RenderObject Tree
+===========               ==============
+[ComponentElement]        (なし - 管理対象なし)
   |
-[ComponentElement (MyApp)]      <-- User Logic, State Subscriber
-  |
-  +-- [ComponentElement (Counter)] <-- Local State Scope
-        |
-        +-- [RenderElement (VStack)] <-- Layout Scope
-              |
-              +-- [RenderElement (Text)] --> Draw "Count: 1"
-              |
-              +-- [RenderElement (Button)] --> Draw Rect + Interaction
+  +-- [RenderObjectElement<TextView>]
+         |                         |
+         |                         +-- [TextRenderObject] (Leaf)
+         |
+  +-- [RenderObjectElement<VStackView>]
+         |                         |
+         |                         +-- [VStackRenderObject] (Container)
+         |                                   |
+         |                                   +-- Vec: children
+         |                                   |    |
+         |                                   |    +-- [TextRenderObject]
+         |                                   |    +-- [ButtonRenderObject]
+```
 
+
+### D. RenderObjectツリーの構築アルゴリズム（重要）
+
+**「子が親を探して、自分を差し出しに行く」** というアルゴリズムでRenderObjectツリーが構築されます。
+
+#### 重要な原則
+
+1. **Elementは子のRenderObjectを持たない**: Elementはあくまで「子Element」への参照しか持たない
+2. **RenderObjectが子RenderObjectを管理する**: Container RenderObjectが`Vec<Box<dyn RenderObject>>`で子を管理
+3. **計算はRenderObjectの仕事**: Elementは一切のレイアウト計算をしない
+
+#### ツリー構築の流れ（mountフェーズ）
+
+例: `VStack { Text("Hello") }` の場合
+
+```ascii
+Step 1: VStackElementが生成される
+  └─ render_object: VStackRenderObjectを作成
+      └─ children: Vec<> (空)
+
+Step 2: TextElementが生成される
+  └─ render_object: TextRenderObjectを作成
+      └─ (まだ誰にも属していない)
+
+Step 3: TextElement.mount() が呼ばれる
+  └─ attachRenderObject() を実行
+      └─ 親Elementを遡って「RenderObjectを持つ先祖」を探す
+          └─ VStackElementを見つける
+              └─ 「私のRenderObjectを、あなたのRenderObjectに追加して」
+                  └─ VStackRenderObject.children.push(TextRenderObject)
+```
+
+#### メソッドの責務
+
+| メソッド | 呼び出し元 | 責務 |
+|---------|-----------|------|
+| `mount()` | フレームワーク | Elementをツリーに登録し、RenderObjectを構築する |
+| `attachRenderObject()` | 子Element | 親を探し、自分のRenderObjectを親のRenderObjectに登録 |
+| `insertRenderObjectChild()` | 親Element | 自分のRenderObjectに子RenderObjectを追加 |
+| `layout()` | フレームワーク | RenderObjectのlayout()を呼ぶだけ（計算しない） |
+
+#### コード例
+
+```rust
+impl<V: View + Clone, R: RenderObject> Element for RenderObjectElement<V, R> {
+    fn mount(&mut self, parent: Option<&mut dyn Element>) {
+        // 1. RenderObjectはViewから既に作成されていると仮定
+        // 2. 親を探して、自分のRenderObjectを登録
+        if let Some(parent) = parent {
+            self.attach_render_object(parent);
+        }
+    }
+
+    fn attach_render_object(&self, parent: &dyn Element) {
+        // 親Elementを遡って「RenderObjectを持つ先祖」を探す
+        let ancestor = parent.find_ancestor_render_object_element();
+
+        if let Some(ancestor) = ancestor {
+            // 「私のRenderObjectを、あなたのRenderObjectに追加してください」
+            ancestor.insert_render_object_child(
+                Box::new(self.render_object.clone()),
+                None
+            );
+        }
+    }
+
+    fn layout(&mut self, constraints: LayoutConstraints) -> Size {
+        // ★計算はしない。RenderObjectに委譲するだけ。
+        self.render_object.layout(constraints)
+    }
+}
+
+impl VStackRenderObject {
+    fn insert_render_object_child(&mut self, child: Box<dyn RenderObject>, _slot: Option<&dyn Any>) {
+        // ★ここでRenderObjectツリーが繋がる
+        self.children.push(child);
+    }
+}
 ```
 
 ---
@@ -403,7 +510,7 @@ Stateが変更されたとき、どのように画面が更新されるかのフ
 
 
 6. **Render Update**:
-* 末端の `RenderElement` が `RenderObject` の値を更新。
+* 末端の `RenderObjectElement` が `RenderObject` の値を更新。
 * `RenderObject` が `DirtyFlags::PAINT` を立て、再描画される。
 
 ---
@@ -738,15 +845,14 @@ pub struct VStack<C> {
 
 impl<C: ViewTuple + 'static> View for VStack<C> {
     fn create_element(&self) -> Box<dyn Element> {
-        // 子供たちを一括生成
-        let children = self.content.create_elements();
+        // VStack用のRenderObjectを作成
+        let render_object = VStackRenderObject::new(self.spacing, self.alignment);
 
-        // RenderElementを作って返す
-        // (RenderElementは children: Vec<Box<dyn Element>> を持つ)
-        Box::new(RenderElement::new(
+        // RenderObjectElementを作って返す
+        // ★RenderObjectElementはchildrenを持たない
+        Box::new(RenderObjectElement::new(
             self.clone(),
-            RenderVStack::new(), // RenderObjectの実体
-            children
+            render_object,
         ))
     }
 
@@ -758,7 +864,7 @@ impl<C: ViewTuple + 'static> View for VStack<C> {
         self.content.collect_listenables(&mut list);
         list
     }
-    
+
     // ...
 }
 
@@ -808,11 +914,13 @@ pub struct Padding<V: View> {
 
 impl<V: View> View for Padding<V> {
     fn create_element(&self) -> Box<dyn Element> {
-        // innerのElementを作成し、修飾を適用
-        Box::new(RenderElement::new(
+        // Padding用のRenderObjectを作成
+        let render_object = PaddingRenderObject::new(self.insets);
+
+        // RenderObjectElementを作って返す
+        Box::new(RenderObjectElement::new(
             self.clone(),
-            RenderPadding::new(self.insets),
-            vec![self.inner.create_element()],
+            render_object,
         ))
     }
 }
@@ -2307,6 +2415,168 @@ fn main() {
 
 RenderObjectは、UIの描画とレイアウトを担当する最下位のコンポーネントです。
 
+### Element Tree vs RenderObject Tree
+
+**重要**: ScarletUIはFlutterと同様に、**2つの独立したツリー構造**を持ちます。
+
+| 特徴 | Element Tree | RenderObject Tree |
+|-----|-------------|-------------------|
+| **目的** | Viewの構造を管理 | レイアウトと描画を担当 |
+| **構造** | ComponentElementとRenderObjectElementの親子関係 | RenderObject同士の親子関係 |
+| **ライフサイクル** | Stateの変更で再構築される | レイアウト/描画時に更新される |
+| **所有権** | RenderObjectElementは1つのRenderObjectを持つ | Container RenderObjectは子RenderObjectを持つ |
+
+```ascii
+Element Tree                  RenderObject Tree
+============                  ================
+[ComponentElement]            (no RenderObject)
+  |
+  +-- [RenderObjectElement<TextView>]
+  |       |                          |
+  |       | owns (1:1)               |
+  |       v                          v
+  |   [TextView] --------> [TextRenderObject] (Leaf, has buffer)
+  |
+  +-- [RenderObjectElement<VStackView>]
+          |                          |
+          | owns (1:1)               |
+          v                          v
+      [VStackView] -------> [VStackRenderObject] (Container)
+                                       |
+                                       | owns children
+                                       v
+                              +----------------+
+                              |                |
+                              v                v
+                        [TextRenderObject] [ButtonRenderObject]
+```
+
+### RenderObjectの種類
+
+#### 1. Leaf RenderObject
+テキスト、画像、ボタンなど、実際に描画を行うRenderObjectです。
+
+* **特徴**:
+* `Buffer`を所有し、ピクセルデータを保持する。
+* 子RenderObjectを持たない。
+* `layout()`で自身のサイズを計算する。
+* `render()`で自身のBufferに描画する。
+
+* **例**: `TextRenderObject`, `ImageRenderObject`, `ButtonRenderObject`
+
+#### 2. Container RenderObject
+VStack、HStack、ZStackなど、子RenderObjectをレイアウトするRenderObjectです。
+
+* **特徴**:
+* `Vec<Box<dyn RenderObject>>`で子RenderObjectを所有する。
+* 自身の`Buffer`は持たない（描画は子に委譲）。
+* `layout()`で**座標計算（x, yの決定）**を行う。
+* `performLayout()`で子の位置を配置する。
+
+* **例**: `VStackRenderObject`, `HStackRenderObject`, `ZStackRenderObject`
+
+#### Container RenderObjectの構造体定義
+
+```rust
+/// VStack用のRenderObject - 子を垂直に配置
+pub struct VStackRenderObject {
+    /// ★子RenderObjectを直接管理する（Vecベース）
+    children: Vec<Box<dyn RenderObject>>,
+
+    /// 子の間隔
+    spacing: f32,
+
+    /// 配置方法（alignmentがある場合、座標計算に使用）
+    alignment: Alignment,
+
+    /// 自身のフレーム（位置とサイズ）
+    frame: Rect,
+
+    /// ダーティフラグ
+    dirty: DirtyFlags,
+}
+
+impl VStackRenderObject {
+    /// 子RenderObjectを追加（attachRenderObjectから呼ばれる）
+    pub fn insert_render_object_child(
+        &mut self,
+        child: Box<dyn RenderObject>,
+        _slot: Option<&dyn Any>
+    ) {
+        self.children.push(child);
+        self.mark_dirty(DirtyFlags::LAYOUT);
+    }
+}
+
+impl RenderObject for VStackRenderObject {
+    fn layout(&mut self, constraints: LayoutConstraints) -> Size {
+        let mut y_offset = 0.0;
+        let mut max_width = 0.0;
+
+        // ★ここで座標計算を行う（Elementはしない）
+        for child in &mut self.children {
+            // 子に緩い制約を渡してサイズを計測
+            let child_constraints = LayoutConstraints::loose(Size::new(
+                constraints.max.width,
+                f32::MAX,
+            ));
+
+            let child_size = child.layout(child_constraints);
+
+            // ★子のフレームを配置（x, y座標の決定）
+            child.set_frame(Rect::new(
+                Point::new(0.0, y_offset),  // ★ここで座標計算！
+                child_size,
+            ));
+
+            y_offset += child_size.height + self.spacing;
+            max_width = max_width.max(child_size.width);
+        }
+
+        let total_height = y_offset - self.spacing;
+        let size = Size::new(max_width, total_height);
+
+        self.frame = Rect::new(Point::ZERO, size);
+        size
+    }
+}
+```
+
+### RenderObjectElementとRenderObjectの関係
+
+**1対1の対応**: `RenderObjectElement<V, R>`は1つの`RenderObject`を持ちます。
+
+```rust
+// ★RenderObjectElementは子を持たない
+pub struct RenderObjectElement<V: View, R: RenderObject> {
+    view: V,
+    render_object: R,  // 1つのみ
+    // ★childrenは持たない - 子RenderObjectはRenderObjectが管理する
+}
+```
+
+### 重要: Elementは計算をしない
+
+**100% RenderObjectの仕事**: 座標計算（x, yの決定）はRenderObjectの責務です。
+
+```rust
+// ★間違った実装（Elementが計算している）
+impl Element for VStackElement {
+    fn layout(&mut self, constraints: LayoutConstraints) -> Size {
+        let mut y_offset = 0.0;  // ★NG: Elementが計算している！
+        // ...
+    }
+}
+
+// ★正しい実装（RenderObjectが計算する）
+impl Element for RenderObjectElement<V, R> {
+    fn layout(&mut self, constraints: LayoutConstraints) -> Size {
+        // ★Elementは計算しない。RenderObjectに委譲するだけ。
+        self.render_object.layout(constraints)
+    }
+}
+```
+
 ### RenderObjectのライフサイクル
 
 ```ascii
@@ -2465,6 +2735,175 @@ impl RenderObject for VStackRenderObject {
     }
 }
 ```
+
+---
+
+## 20.5 MountとUpdateの仕組み
+
+ScarletUIはFlutterと同様に、**Mount（初回構築）**と**Update（更新）**の2つのフェーズでツリーを構築・更新します。
+
+### Mountフェーズ（初回構築）
+
+アプリ起動時や新しいViewが追加された時のフローです。
+
+#### ステップ1: View → Element (`createElement`)
+
+```rust
+// Viewのcreate_element()が呼ばれる
+let element = text_view.create_element();
+// -> RenderObjectElement<Text, TextRenderObject>が生成される
+```
+
+#### ステップ2: Element → RenderObject (RenderObjectElementのみ)
+
+`RenderObjectElement`の`mount()`で、`View.create_render_object()`が呼ばれます。
+
+```rust
+impl<V: View, R: RenderObject> RenderObjectElement<V, R> {
+    fn mount(&mut self, parent: Option<&mut Element>) {
+        // RenderObjectを生成
+        self.render_object = self.view.create_render_object();
+
+        // 親RenderObjectにアタッチ
+        if let Some(parent_element) = parent {
+            if let Some(parent_ro) = parent_element.render_object_mut() {
+                parent_ro.attach_render_object(self.render_object_mut());
+            }
+        }
+    }
+}
+```
+
+#### ステップ3: RenderObject Treeの構築
+
+Container RenderObjectが子RenderObjectをアタッチします。
+
+```rust
+impl VStackRenderObject {
+    fn attach_render_object(&mut self, child: Box<dyn RenderObject>) {
+        child.set_parent(self.id());
+        self.children.push(child);
+    }
+}
+```
+
+### Updateフェーズ（Reconciliation）
+
+Stateが変更された時のフローです。
+
+#### ステップ1: 新しいViewの生成
+
+`ComponentElement.rebuild()`で`view.body()`が呼ばれ、新しいViewが生成されます。
+
+```rust
+impl<V: View + Clone> ComponentElement<V> {
+    fn rebuild(&mut self) {
+        // 新しいViewを生成
+        let new_view = self.view.body();
+
+        // 子Elementを更新
+        if let Some(ref mut child) = self.child {
+            child.update(&new_view);
+        }
+    }
+}
+```
+
+#### ステップ2: Elementの更新 (`update`)
+
+新旧Viewの型を比較し、再利用するか置換するかを決定します。
+
+```rust
+impl<V: View + Clone, R: RenderObject> Element for RenderObjectElement<V, R> {
+    fn update(&mut self, new_view: &dyn View) -> UpdateResult {
+        // 型チェック
+        if new_view.type_id() != self.view.type_id() {
+            return UpdateResult::Replaced; // 型が違えば置換
+        }
+
+        // RenderObjectを更新（作り直さない）
+        self.render_object.update(new_view)
+    }
+}
+```
+
+#### ステップ3: RenderObjectの更新
+
+RenderObjectのプロパティを更新します。**RenderObjectは作り直されません**。
+
+```rust
+impl TextRenderObject {
+    fn update(&mut self, new_view: &dyn View) -> UpdateResult {
+        if let Some(text_view) = new_view.as_any().downcast_ref::<Text>() {
+            if self.text != text_view.text {
+                self.text = text_view.text.clone();
+                self.mark_dirty(DirtyFlags::PAINT); // 再描画フラグ
+            }
+            UpdateResult::Updated
+        } else {
+            UpdateResult::Replaced
+        }
+    }
+}
+```
+
+### Reconciliationの疑似コード
+
+FlutterのようなReconciliationの全体像です。
+
+```rust
+// フレームワーク内部のイメージ
+
+fn mount_element(element: &mut dyn Element, parent: Option<&mut dyn Element>) {
+    element.mount(parent);
+
+    // RenderObjectElementの場合、RenderObjectを親にアタッチ
+    if let Some(ro_element) = element.as_render_object_element_mut() {
+        if let Some(parent) = parent {
+            if let Some(parent_ro) = parent.render_object_mut() {
+                parent_ro.attach_render_object(ro_element.render_object_mut());
+            }
+        }
+    }
+
+    // 子Elementを再帰的にマウント
+    for child in element.children_mut() {
+        mount_element(child, Some(element));
+    }
+}
+
+fn update_element(element: &mut dyn Element, new_view: &dyn View) {
+    // canUpdateチェック（型とKey）
+    if !Element::can_update(element, new_view) {
+        // 型が違えば置換
+        let new_element = new_view.create_element();
+        mount_element(&mut new_element, element.parent());
+        element.replace_with(new_element);
+        return;
+    }
+
+    // 同じ型なら更新
+    match element {
+        Element::Component(comp) => {
+            // ComponentElementは再ビルド
+            comp.update(new_view);
+            comp.rebuild();
+        }
+        Element::RenderObject(ro) => {
+            // RenderObjectElementはRenderObjectを更新
+            ro.update(new_view);
+        }
+    }
+}
+```
+
+### パフォーマンス上の利点
+
+この仕組みの重要な点：
+
+1. **RenderObjectは再利用される**: `Text("Hello")` → `Text("World")` でも、RenderObjectは同じインスタンスを使い続ける
+2. **型チェックが高速**: `type_id()`と`key`の比較だけ
+3. **部分的な更新**: 変更されたRenderObjectのみ再描画される（`DirtyFlags`）
 
 ---
 
@@ -2636,12 +3075,12 @@ Window Buffer
       |
 [Compositor]
       |
-      +-- [RenderElement (VStack)]
-      |      +-- [RenderElement (Text)] --> Buffer A ─┐
-      |      +-- [RenderElement (Button)] --> Buffer B ─┼─> Composite
-      |                                                │
-      +-- [RenderElement (HStack)]                     │
-             +-- [RenderElement (Image)] --> Buffer C ─┘
+      +-- [VStackRenderObject]
+      |      +-- [TextRenderObject] --> Buffer A ─┐
+      |      +-- [ButtonRenderObject] --> Buffer B ─┼─> Composite
+      |                                           │
+      +-- [HStackRenderObject]                     │
+             +-- [ImageRenderObject] --> Buffer C ─┘
 ```
 
 ### Compositorの実装
@@ -2718,10 +3157,13 @@ impl<V: View> Opacity<V> {
 
 impl<V: View> View for Opacity<V> {
     fn create_element(&self) -> Box<dyn Element> {
-        Box::new(RenderElement::new(
+        // Opacity用のRenderObjectを作成
+        let render_object = OpacityRenderObject::new(self.value);
+
+        // RenderObjectElementを作って返す
+        Box::new(RenderObjectElement::new(
             self.clone(),
-            RenderOpacity::new(self.value),
-            vec![self.inner.create_element()],
+            render_object,
         ))
     }
 }
@@ -3098,10 +3540,13 @@ impl<V: View> Window<V> {
 
 impl<V: View> View for Window<V> {
     fn create_element(&self) -> Box<dyn Element> {
-        Box::new(RenderElement::new(
+        // Window用のRenderObjectを作成
+        let render_object = WindowRenderObject::new(self.title.clone(), self.size);
+
+        // RenderObjectElementを作って返す
+        Box::new(RenderObjectElement::new(
             self.clone(),
-            RenderWindow::new(self.title.clone(), self.size),
-            vec![self.child.create_element()],
+            render_object,
         ))
     }
 

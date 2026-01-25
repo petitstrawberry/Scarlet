@@ -206,6 +206,19 @@ pub trait Element {
         None
     }
 
+    /// Get the RenderObject for this Element (if any)
+    ///
+    /// Elements that wrap RenderObjects (e.g., RenderElement) should return
+    /// a reference here so the render tree can be built.
+    fn render_object(&self) -> Option<&dyn super::render::RenderObject> {
+        None
+    }
+
+    /// Get the RenderObject mutably for this Element (if any)
+    fn render_object_mut(&mut self) -> Option<&mut dyn super::render::RenderObject> {
+        None
+    }
+
     /// Handle input events
     ///
     /// Returns true if the event was handled.
@@ -234,5 +247,4 @@ pub trait Element {
         None
     }
 }
-
 

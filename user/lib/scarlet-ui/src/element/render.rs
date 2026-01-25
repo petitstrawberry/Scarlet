@@ -197,6 +197,42 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
     }
 
     fn layout(&mut self, constraints: LayoutConstraints) -> Size {
+        if let Some(frame) = self
+            .render_object
+            .as_any_mut()
+            .downcast_mut::<crate::views::FrameRenderObject>()
+        {
+            let (min_w, max_w) = match frame.width_value() {
+                Some(w) if w.is_finite() => (w, w),
+                Some(_) if constraints.max_width.is_finite() => (constraints.max_width, constraints.max_width),
+                Some(_) => (constraints.min_width, constraints.max_width),
+                None => (constraints.min_width, constraints.max_width),
+            };
+            let (min_h, max_h) = match frame.height_value() {
+                Some(h) if h.is_finite() => (h, h),
+                Some(_) if constraints.max_height.is_finite() => (constraints.max_height, constraints.max_height),
+                Some(_) => (constraints.min_height, constraints.max_height),
+                None => (constraints.min_height, constraints.max_height),
+            };
+
+            let child_constraints = LayoutConstraints {
+                min_width: min_w,
+                max_width: max_w,
+                min_height: min_h,
+                max_height: max_h,
+            };
+
+            let mut child_max = Size::ZERO;
+            for child in &mut self.children {
+                let child_size = child.layout(child_constraints);
+                child_max.width = child_max.width.max(child_size.width);
+                child_max.height = child_max.height.max(child_size.height);
+                child.set_position(crate::geometry::Point::ZERO);
+            }
+
+            return frame.layout_with_child(child_max, constraints);
+        }
+
         // Layout the render_object
         let type_name = core::any::type_name_of_val(&self.render_object);
         scarlet_std::println!("[RenderElement::layout] START: type_name={}, constraints=({:?}, {:?}) -> ({:?}, {:?})",
@@ -261,6 +297,14 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
 
     fn get_buffer(&self) -> Option<&crate::buffer::Buffer> {
         self.render_object.get_buffer()
+    }
+
+    fn render_object(&self) -> Option<&dyn RenderObject> {
+        Some(&self.render_object)
+    }
+
+    fn render_object_mut(&mut self) -> Option<&mut dyn RenderObject> {
+        Some(&mut self.render_object)
     }
 
     fn handle_event(&mut self, _event: &crate::event::Event, _phase: crate::event::Phase) -> bool {

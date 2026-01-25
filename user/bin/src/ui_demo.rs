@@ -35,13 +35,13 @@ impl Application for DemoApp {
                     .font_size(40.0),
                 Text::new("ScarletUIの世界からこんにちは!")
                     .font_size(24.0),
-        //         hstack! {
-        //             Text::new(format!("Toggle State: {}", if self.toggle_state.get() { "ON" } else { "OFF" }))
-        //                 .font_size(20.0),
-        //             Spacer::new(),
-        //             Toggle::new(self.toggle_state.clone())
-        //         }
-        //         .frame_width(300.0),
+                hstack! {
+                    Text::new(format!("Toggle State: {}", if self.toggle_state.get() { "ON" } else { "OFF" }))
+                        .font_size(20.0),
+                    Spacer::new(),
+                    Toggle::new(self.toggle_state.clone())
+                }
+                .frame_width(200.0),
                 Rectangle::new()
                     .fill(Color::RED)
                     .frame(300.0, 100.0),
@@ -49,8 +49,8 @@ impl Application for DemoApp {
                     .fill(Color::BLUE)
                     .frame(300.0, 100.0)
         }
-        // .frame(f32::INFINITY, f32::INFINITY)
-        .frame(400.0, 300.0)
+        .frame(f32::INFINITY, f32::INFINITY)
+        // .frame(400.0, 300.0)
         )
         .app_id("oeg.scarlet-os.ui_demo")
         .size(Size::new(800.0, 600.0))

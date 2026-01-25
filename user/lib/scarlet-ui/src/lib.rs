@@ -64,6 +64,7 @@ pub mod platform;
 pub mod application;
 pub mod macros;
 pub mod graphics;
+pub mod debug;
 
 // Re-exports for convenience
 pub use geometry::{Size, Point, Rect, Offset, EdgeInsets, Alignment};
@@ -76,7 +77,7 @@ pub use element::{Element, ElementId, LayoutConstraints, ComponentElement, Rende
 pub use event::{Event, MouseEvent, KeyEvent, InputEvent, KeyCode, MouseButton, EventDispatcher, FocusEvent, LifecycleEvent};
 pub use buffer::Buffer;
 pub use compositor::Compositor;
-pub use render::RenderObject;
+pub use render::{RenderObject, RenderTree, RenderNode};
 pub use pipeline::{PipelineOwner, RenderingPipeline, DirtyPhase, StateRegistry};
 pub use views::{Window, Text, Button, Rectangle, Spacer, Image, VStack, HStack, ZStack};
 pub use views::{Divider, DividerOrientation, Toggle, Slider, ProgressView};
