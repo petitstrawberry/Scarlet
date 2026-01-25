@@ -38,6 +38,22 @@ impl SWSPlatformWindow {
     pub fn connection_mut(&mut self) -> &mut sws::Connection {
         &mut self.conn
     }
+
+    fn push_event(&mut self, event: Event) {
+        // Coalesce consecutive mouse-move events to reduce work.
+        if let Event::Mouse(MouseEvent::Moved { .. }) = event {
+            if let Some(last) = self.pending_events.last_mut() {
+                if let Event::Mouse(MouseEvent::Moved { x, y }) = last {
+                    if let Event::Mouse(MouseEvent::Moved { x: new_x, y: new_y }) = event {
+                        *x = new_x;
+                        *y = new_y;
+                        return;
+                    }
+                }
+            }
+        }
+        self.pending_events.push(event);
+    }
 }
 
 impl PlatformWindow for SWSPlatformWindow {
@@ -178,7 +194,7 @@ impl SWSPlatformWindow {
                     }
                     (event_type::EV_SYN, _) => {
                         if self.pending_move {
-                            self.pending_events.push(Event::Mouse(MouseEvent::Moved {
+                            self.push_event(Event::Mouse(MouseEvent::Moved {
                                 x: self.pointer_x,
                                 y: self.pointer_y,
                             }));
@@ -195,7 +211,7 @@ impl SWSPlatformWindow {
                     (event_type::EV_KEY, key_code::BTN_LEFT) => {
                         let button = MouseButton::Left;
                         if input.value != 0 {
-                            self.pending_events.push(Event::Mouse(MouseEvent::ButtonPressed {
+                            self.push_event(Event::Mouse(MouseEvent::ButtonPressed {
                                 button,
                                 x: self.pointer_x,
                                 y: self.pointer_y,
@@ -208,7 +224,7 @@ impl SWSPlatformWindow {
                                 );
                             }
                         } else {
-                            self.pending_events.push(Event::Mouse(MouseEvent::ButtonReleased {
+                            self.push_event(Event::Mouse(MouseEvent::ButtonReleased {
                                 button,
                                 x: self.pointer_x,
                                 y: self.pointer_y,
@@ -225,7 +241,7 @@ impl SWSPlatformWindow {
                     (event_type::EV_KEY, key_code::BTN_RIGHT) => {
                         let button = MouseButton::Right;
                         if input.value != 0 {
-                            self.pending_events.push(Event::Mouse(MouseEvent::ButtonPressed {
+                            self.push_event(Event::Mouse(MouseEvent::ButtonPressed {
                                 button,
                                 x: self.pointer_x,
                                 y: self.pointer_y,
@@ -238,7 +254,7 @@ impl SWSPlatformWindow {
                                 );
                             }
                         } else {
-                            self.pending_events.push(Event::Mouse(MouseEvent::ButtonReleased {
+                            self.push_event(Event::Mouse(MouseEvent::ButtonReleased {
                                 button,
                                 x: self.pointer_x,
                                 y: self.pointer_y,
@@ -255,7 +271,7 @@ impl SWSPlatformWindow {
                     (event_type::EV_KEY, key_code::BTN_MIDDLE) => {
                         let button = MouseButton::Middle;
                         if input.value != 0 {
-                            self.pending_events.push(Event::Mouse(MouseEvent::ButtonPressed {
+                            self.push_event(Event::Mouse(MouseEvent::ButtonPressed {
                                 button,
                                 x: self.pointer_x,
                                 y: self.pointer_y,
@@ -268,7 +284,7 @@ impl SWSPlatformWindow {
                                 );
                             }
                         } else {
-                            self.pending_events.push(Event::Mouse(MouseEvent::ButtonReleased {
+                            self.push_event(Event::Mouse(MouseEvent::ButtonReleased {
                                 button,
                                 x: self.pointer_x,
                                 y: self.pointer_y,
@@ -292,7 +308,7 @@ impl SWSPlatformWindow {
             } => {
                 if surface_id == self.surface_id {
                     self.current_size = Size::new(width as f32, height as f32);
-                    self.pending_events.push(Event::Resize { width, height });
+                    self.push_event(Event::Resize { width, height });
                     if debug {
                         scarlet_std::println!(
                             "[SWSPlatformWindow] SurfaceConfigure: {}x{}",
@@ -304,7 +320,7 @@ impl SWSPlatformWindow {
             }
             SwsEvent::SurfaceDestroyed { surface_id } => {
                 if surface_id == self.surface_id {
-                    self.pending_events.push(Event::Quit);
+                    self.push_event(Event::Quit);
                     if debug {
                         scarlet_std::println!("[SWSPlatformWindow] SurfaceDestroyed");
                     }
