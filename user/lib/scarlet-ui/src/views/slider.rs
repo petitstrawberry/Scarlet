@@ -7,7 +7,7 @@ use core::any::Any;
 use crate::view::View;
 use crate::element::{Element, RenderElement, ElementRenderObject};
 use crate::geometry::Size;
-use crate::color::Color;
+use crate::color::{Color, ColorPalette};
 use crate::buffer::Buffer;
 use crate::graphics;
 use crate::state::State;
@@ -93,6 +93,26 @@ pub struct SliderRenderObject {
 }
 
 impl SliderRenderObject {
+    fn fill_circle(
+        canvas: &mut graphics::Canvas<'_>,
+        center_x: i32,
+        center_y: i32,
+        radius: i32,
+        color: Color,
+    ) {
+        if radius <= 0 {
+            return;
+        }
+        let r_sq = radius * radius;
+        for dy in -radius..=radius {
+            for dx in -radius..=radius {
+                if dx * dx + dy * dy <= r_sq {
+                    canvas.put_pixel(center_x + dx, center_y + dy, color);
+                }
+            }
+        }
+    }
+
     /// Create a new SliderRenderObject
     pub fn new(value: f32, min: f32, max: f32) -> Self {
         Self {
@@ -158,8 +178,13 @@ impl SliderRenderObject {
             };
             let fill_width = (normalized_value * (width as f32 - 20.0)) as u32; // 20px for thumb
 
-            // Draw track (light gray background)
-            let track_color = Color::rgb(197u8, 197u8, 199u8); // macOS gray: #C5C5C7
+            let palette = ColorPalette::default();
+            let track_color = palette.surface_variant();
+            let fill_color = palette.primary();
+            let thumb_color = palette.surface();
+            let thumb_border = palette.border();
+
+            // Draw track (background)
             canvas.fill_rect(
                 10, // Start 10px from left
                 track_y,
@@ -168,8 +193,7 @@ impl SliderRenderObject {
                 track_color,
             );
 
-            // Draw filled portion (blue)
-            let fill_color = Color::rgb(0u8, 122u8, 255u8); // iOS blue: #007AFF
+            // Draw filled portion
             if fill_width > 0 {
                 canvas.fill_rect(
                     10,
@@ -180,17 +204,16 @@ impl SliderRenderObject {
                 );
             }
 
-            // Draw thumb (white circle)
+            // Draw thumb
             let thumb_x = (10i32 + fill_width as i32);
             let thumb_diameter = 20u32;
             let thumb_y = center_y - (thumb_diameter as i32 / 2);
-
-            // Draw thumb (for now, just a square)
-            let thumb_color = Color::WHITE;
             let radius = thumb_diameter as i32 / 2;
-            let thumb_rect_x = thumb_x - radius;
-            let thumb_rect_y = thumb_y - radius;
-            canvas.fill_rect(thumb_rect_x, thumb_rect_y, thumb_diameter, thumb_diameter, thumb_color);
+            let center_x = thumb_x;
+            let center_y = thumb_y + radius;
+
+            Self::fill_circle(&mut canvas, center_x, center_y, radius, thumb_border);
+            Self::fill_circle(&mut canvas, center_x, center_y, radius - 1, thumb_color);
         }
     }
 }

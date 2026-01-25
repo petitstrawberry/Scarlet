@@ -6,7 +6,7 @@ use core::any::Any;
 use crate::view::View;
 use crate::element::{Element, RenderElement, ElementRenderObject};
 use crate::geometry::Size;
-use crate::color::Color;
+use crate::color::{Color, ColorPalette};
 use crate::buffer::Buffer;
 use crate::graphics;
 use alloc::boxed::Box;
@@ -107,12 +107,14 @@ impl ProgressViewRenderObject {
         if let Some(ref mut buffer) = self.buffer {
             let mut canvas = graphics::Canvas::new(buffer.data_mut(), w, h);
 
-            // Draw background (light gray)
-            let bg_color = Color::rgb(229u8, 229u8, 234u8); // iOS gray: #E5E5EA
+            let palette = ColorPalette::default();
+            let bg_color = palette.surface_variant();
+            let fill_color = palette.primary();
+
+            // Draw background
             canvas.fill_rect(0, 0, w, h, bg_color);
 
-            // Draw filled portion (blue)
-            let fill_color = Color::rgb(0u8, 122u8, 255u8); // iOS blue: #007AFF
+            // Draw filled portion
             let fill_width = (self.value * width as f32) as u32;
             if fill_width > 0 {
                 canvas.fill_rect(0, 0, fill_width, h, fill_color);

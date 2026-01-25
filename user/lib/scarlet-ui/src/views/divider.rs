@@ -6,7 +6,7 @@ use core::any::Any;
 use crate::view::View;
 use crate::element::{Element, RenderElement, ElementRenderObject};
 use crate::geometry::Size;
-use crate::color::Color;
+use crate::color::{Color, ColorPalette};
 use crate::buffer::Buffer;
 use crate::graphics;
 use alloc::boxed::Box;
@@ -35,9 +35,10 @@ pub struct Divider {
 impl Divider {
     /// Create a new horizontal Divider
     pub fn new() -> Self {
+        let palette = ColorPalette::default();
         Self {
             orientation: DividerOrientation::Horizontal,
-            color: Color::rgba(0u8, 0u8, 0u8, 20u8), // Semi-transparent black (20/255 alpha)
+            color: palette.divider(),
             thickness: 1.0,
         }
     }
