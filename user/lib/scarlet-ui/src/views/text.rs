@@ -111,11 +111,12 @@ impl TextRenderObject {
 
 impl ElementRenderObject for TextRenderObject {
     fn layout(&mut self, constraints: LayoutConstraints) -> Size {
+        scarlet_std::println!("[TextRenderObject::layout] START: content='{}', constraints=({:?}, {:?}) -> ({:?}, {:?})",
+            self.content, constraints.min_width, constraints.min_height, constraints.max_width, constraints.max_height);
         // Use actual font measurement
         let (measured_width, measured_height) = graphics::measure_text_sized(&self.content, self.font_size);
 
-        scarlet_std::println!("[TextRenderObject] layout: content='{}' measured={}x{}, constraints={:?}",
-            self.content, measured_width, measured_height, constraints);
+        scarlet_std::println!("[TextRenderObject::layout] measured={}x{}", measured_width, measured_height);
 
         // For text, use the measured size, but constrain within bounds
         // Text should NOT expand to fill min_width/min_height

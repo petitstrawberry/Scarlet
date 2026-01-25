@@ -155,20 +155,49 @@ impl FrameRenderObject {
 
 impl ElementRenderObject for FrameRenderObject {
     fn layout(&mut self, constraints: LayoutConstraints) -> Size {
-        // Use explicit width/height if set, otherwise use constraints
-        let width = self.width.unwrap_or_else(|| {
+        scarlet_std::println!("[FrameRenderObject::layout] START: constraints=({:?}, {:?}) -> ({:?}, {:?}), self.width={:?}, self.height={:?}",
+            constraints.min_width, constraints.min_height, constraints.max_width, constraints.max_height, self.width, self.height);
+        // Determine the size based on explicit width/height and constraints
+        let width = if let Some(w) = self.width {
+            if w.is_finite() {
+                // Explicit finite width
+                w
+            } else {
+                // INFINITY width - use parent's max_width if finite, else min_width
+                if constraints.max_width.is_finite() {
+                    constraints.max_width
+                } else {
+                    constraints.min_width.max(self.min_width)
+                }
+            }
+        } else {
+            // No explicit width - use constraints
             constraints.min_width
                 .max(self.min_width)
                 .min(constraints.max_width.min(self.max_width))
-        });
+        };
 
-        let height = self.height.unwrap_or_else(|| {
+        let height = if let Some(h) = self.height {
+            if h.is_finite() {
+                // Explicit finite height
+                h
+            } else {
+                // INFINITY height - use parent's max_height if finite, else min_height
+                if constraints.max_height.is_finite() {
+                    constraints.max_height
+                } else {
+                    constraints.min_height.max(self.min_height)
+                }
+            }
+        } else {
+            // No explicit height - use constraints
             constraints.min_height
                 .max(self.min_height)
                 .min(constraints.max_height.min(self.max_height))
-        });
+        };
 
         self.size = Size { width, height };
+        scarlet_std::println!("[FrameRenderObject::layout] FINAL: size={}x{}", width, height);
         self.size
     }
 

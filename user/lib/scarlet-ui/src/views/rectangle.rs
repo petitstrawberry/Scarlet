@@ -105,6 +105,8 @@ impl RectangleRenderObject {
 
 impl ElementRenderObject for RectangleRenderObject {
     fn layout(&mut self, constraints: crate::element::LayoutConstraints) -> Size {
+        scarlet_std::println!("[RectangleRenderObject::layout] START: constraints=({:?}, {:?}) -> ({:?}, {:?})",
+            constraints.min_width, constraints.min_height, constraints.max_width, constraints.max_height);
         // Rectangle takes the full available space, or min_size if specified
         // For inf constraints, use min_width/min_height
         let width = if constraints.max_width.is_finite() && constraints.max_width > 0.0 {
@@ -120,6 +122,7 @@ impl ElementRenderObject for RectangleRenderObject {
         };
 
         self.size = Size { width, height };
+        scarlet_std::println!("[RectangleRenderObject::layout] calculated size={}x{}", width, height);
 
         // Create buffer for this rectangle
         let w = libm::ceilf(width) as u32;

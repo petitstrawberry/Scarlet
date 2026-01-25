@@ -37,7 +37,7 @@ pub use modifiers::{
 
 // Re-export containers for convenience
 pub use containers::{
-    VStack, VStackRenderObject,
-    HStack, HStackRenderObject,
+    VStack,
+    HStack,
     ZStack, ZStackRenderObject,
 };

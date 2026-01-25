@@ -1,6 +1,6 @@
 //! Spacer View - Empty space for layout
 //!
-//! Spacer creates flexible or fixed empty space in layouts.
+//! Spacer creates flexible empty space in layouts.
 
 use core::any::Any;
 use crate::view::View;
@@ -10,47 +10,12 @@ use alloc::boxed::Box;
 
 /// Spacer View - creates empty space
 #[derive(Clone)]
-pub struct Spacer {
-    min_width: f32,
-    min_height: f32,
-    expand: bool,
-}
+pub struct Spacer;
 
 impl Spacer {
     /// Create a new Spacer that expands to fill available space
     pub fn new() -> Self {
-        Self {
-            min_width: 0.0,
-            min_height: 0.0,
-            expand: true,
-        }
-    }
-
-    /// Create a Spacer with fixed dimensions
-    pub fn fixed(width: f32, height: f32) -> Self {
-        Self {
-            min_width: width,
-            min_height: height,
-            expand: false,
-        }
-    }
-
-    /// Set the minimum width
-    pub fn min_width(mut self, width: f32) -> Self {
-        self.min_width = width;
-        self
-    }
-
-    /// Set the minimum height
-    pub fn min_height(mut self, height: f32) -> Self {
-        self.min_height = height;
-        self
-    }
-
-    /// Set whether the spacer expands to fill available space
-    pub fn expands(mut self, expand: bool) -> Self {
-        self.expand = expand;
-        self
+        Self
     }
 }
 
@@ -64,7 +29,7 @@ impl View for Spacer {
     fn create_element(&self) -> Box<dyn Element> {
         Box::new(RenderElement::new(
             self.clone(),
-            SpacerRenderObject::new(self.min_width, self.min_height, self.expand),
+            SpacerRenderObject,
         ))
     }
 
@@ -78,49 +43,23 @@ impl View for Spacer {
 }
 
 /// Spacer RenderObject - handles space allocation
-pub struct SpacerRenderObject {
-    min_width: f32,
-    min_height: f32,
-    expand: bool,
-    size: Size,
-}
-
-impl SpacerRenderObject {
-    /// Create a new SpacerRenderObject
-    pub fn new(min_width: f32, min_height: f32, expand: bool) -> Self {
-        Self {
-            min_width,
-            min_height,
-            expand,
-            size: Size::ZERO,
-        }
-    }
-}
+pub struct SpacerRenderObject;
 
 impl ElementRenderObject for SpacerRenderObject {
     fn layout(&mut self, constraints: crate::element::LayoutConstraints) -> Size {
-        let width = if self.expand && constraints.max_width > 0.0 {
-            constraints.max_width.max(self.min_width)
-        } else {
-            self.min_width.max(constraints.min_width)
-        };
-
-        let height = if self.expand && constraints.max_height > 0.0 {
-            constraints.max_height.max(self.min_height)
-        } else {
-            self.min_height.max(constraints.min_height)
-        };
-
-        self.size = Size { width, height };
-        self.size
+        // Spacer simply returns the constraints as size
+        // The parent (VStack/HStack) is responsible for providing proper constraints
+        Size {
+            width: constraints.max_width,
+            height: constraints.max_height,
+        }
     }
 
     fn size(&self) -> Size {
-        self.size
+        Size::ZERO
     }
 
     fn hit_test(&self, _point: Point) -> bool {
-        // Spacer doesn't accept hits
         false
     }
 
@@ -133,6 +72,6 @@ impl ElementRenderObject for SpacerRenderObject {
     }
 
     fn render(&mut self) {
-        // Spacer is invisible - no rendering needed
+        // Spacer is invisible
     }
 }

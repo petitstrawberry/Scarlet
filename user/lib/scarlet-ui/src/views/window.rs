@@ -235,8 +235,11 @@ impl<C: View + Clone> Element for WindowRenderElement<C> {
     }
 
     fn layout(&mut self, constraints: LayoutConstraints) -> Size {
+        scarlet_std::println!("[WindowRenderElement::layout] START: constraints=({:?}, {:?}) -> ({:?}, {:?})",
+            constraints.min_width, constraints.min_height, constraints.max_width, constraints.max_height);
         // Layout the window
         let size = self.render_object.layout(constraints);
+        scarlet_std::println!("[WindowRenderElement::layout] render_object size={}x{}", size.width, size.height);
 
         // Calculate content area (inside border and below titlebar)
         let border_width = if self.render_object.decorated {
@@ -258,9 +261,15 @@ impl<C: View + Clone> Element for WindowRenderElement<C> {
         let content_width = libm::ceilf(size.width - border_width * 2.0).max(1.0);
         let content_height = libm::ceilf(size.height - titlebar_height - border_width).max(1.0);
 
+        scarlet_std::println!("[WindowRenderElement::layout] content_area: x={}, y={}, size={}x{}",
+            content_x, content_y, content_width, content_height);
+
         for child in &mut self.children {
-            let child_constraints = LayoutConstraints::tight(content_width, content_height);
-            let _ = child.layout(child_constraints);
+            let child_constraints = LayoutConstraints::loose(content_width, content_height);
+            scarlet_std::println!("[WindowRenderElement::layout] child_constraints=({:?}, {:?}) -> ({:?}, {:?})",
+                child_constraints.min_width, child_constraints.min_height, child_constraints.max_width, child_constraints.max_height);
+            let child_size = child.layout(child_constraints);
+            scarlet_std::println!("[WindowRenderElement::layout] child size={}x{}", child_size.width, child_size.height);
             child.set_position(Point::new(content_x, content_y));
         }
 

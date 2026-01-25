@@ -16,8 +16,8 @@ mod zstack;
 #[cfg(test)]
 mod tests;
 
-pub use vstack::{VStack, VStackRenderObject};
-pub use hstack::{HStack, HStackRenderObject};
+pub use vstack::VStack;
+pub use hstack::HStack;
 pub use zstack::{ZStack, ZStackRenderObject};
 
 /// Trait for tuples of Views

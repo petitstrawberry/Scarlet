@@ -186,77 +186,37 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
         UpdateResult::NoChange
     }
 
-    fn layout(&mut self, constraints: LayoutConstraints) -> Size {
-        // Layout this element first
-        let size = self.render_object.layout(constraints);
-
-        // Layout children based on the RenderObject type
+    fn flex_factor(&self) -> u32 {
+        // Check if this is a Spacer (which should expand to fill available space)
         let type_name = core::any::type_name_of_val(&self.render_object);
-
-        // Check if this is a container that needs special child positioning
-        let is_vstack = type_name.contains("VStackRenderObject");
-        let is_hstack = type_name.contains("HStackRenderObject");
-
-        if is_vstack {
-            // VStack: vertical layout with spacing and alignment
-            // Try to get spacing and alignment from VStackRenderObject
-            let (spacing, alignment) = if let Some(vstack_ro) = self.render_object.as_any().downcast_ref::<crate::views::VStackRenderObject>() {
-                (vstack_ro.get_spacing(), vstack_ro.get_alignment())
-            } else {
-                (0.0, crate::geometry::Alignment::Center)
-            };
-
-            let child_count = self.children.len();
-            let mut child_y_offset = 0.0;
-            for (i, child) in self.children.iter_mut().enumerate() {
-                let child_constraints = LayoutConstraints::loose(size.width, size.height);
-                let child_size = child.layout(child_constraints);
-
-                // Apply alignment on x-axis (cross-axis for VStack)
-                let child_x = alignment.align_x(size.width, child_size.width);
-
-                child.set_position(crate::geometry::Point::new(child_x, child_y_offset));
-                child_y_offset += child_size.height;
-                // Add spacing after each child except the last
-                if i < child_count.saturating_sub(1) {
-                    child_y_offset += spacing;
-                }
-            }
-        } else if is_hstack {
-            // HStack: horizontal layout with spacing and alignment
-            // Try to get spacing and alignment from HStackRenderObject
-            let (spacing, alignment) = if let Some(hstack_ro) = self.render_object.as_any().downcast_ref::<crate::views::HStackRenderObject>() {
-                (hstack_ro.get_spacing(), hstack_ro.get_alignment())
-            } else {
-                (0.0, crate::geometry::Alignment::Center)
-            };
-
-            let child_count = self.children.len();
-            let mut child_x_offset = 0.0;
-            for (i, child) in self.children.iter_mut().enumerate() {
-                let child_constraints = LayoutConstraints::loose(size.width, size.height);
-                let child_size = child.layout(child_constraints);
-
-                // Apply alignment on y-axis (cross-axis for HStack)
-                let child_y = alignment.align_y(size.height, child_size.height);
-
-                child.set_position(crate::geometry::Point::new(child_x_offset, child_y));
-                child_x_offset += child_size.width;
-                // Add spacing after each child except the last
-                if i < child_count.saturating_sub(1) {
-                    child_x_offset += spacing;
-                }
-            }
-        } else if self.children.is_empty() {
-            // Leaf node with no children - nothing to do
+        if type_name.contains("SpacerRenderObject") {
+            1
         } else {
-            // Other containers (modifiers like Padding, Background, Frame, etc.)
-            // These typically have a single child that fills the available space
-            for child in &mut self.children {
-                let child_constraints = LayoutConstraints::tight(size.width, size.height);
-                let _ = child.layout(child_constraints);
-                child.set_position(crate::geometry::Point::ZERO);
-            }
+            0
+        }
+    }
+
+    fn layout(&mut self, constraints: LayoutConstraints) -> Size {
+        // Layout the render_object
+        let type_name = core::any::type_name_of_val(&self.render_object);
+        scarlet_std::println!("[RenderElement::layout] START: type_name={}, constraints=({:?}, {:?}) -> ({:?}, {:?})",
+            type_name, constraints.min_width, constraints.min_height, constraints.max_width, constraints.max_height);
+        let size = self.render_object.layout(constraints);
+        scarlet_std::println!("[RenderElement::layout] render_object returned size={}x{}", size.width, size.height);
+
+        // Layout children with tight constraints
+        // Exception: if render_object size is INF, pass parent constraints to allow children to expand
+        for child in &mut self.children {
+            let child_constraints = if size.width.is_infinite() || size.height.is_infinite() {
+                scarlet_std::println!("[RenderElement::layout] render_object has INF size, using parent constraints");
+                constraints
+            } else {
+                LayoutConstraints::tight(size.width, size.height)
+            };
+            scarlet_std::println!("[RenderElement::layout] child_constraints=({:?}, {:?}) -> ({:?}, {:?})",
+                child_constraints.min_width, child_constraints.min_height, child_constraints.max_width, child_constraints.max_height);
+            child.layout(child_constraints);
+            child.set_position(crate::geometry::Point::ZERO);
         }
 
         size

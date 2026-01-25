@@ -218,6 +218,14 @@ pub trait Element {
         false
     }
 
+    /// Flex factor for space distribution in stacks
+    ///
+    /// - `0` (default): the element is laid out at its natural size
+    /// - `>0`: the element participates in distributing remaining space in VStack/HStack
+    fn flex_factor(&self) -> u32 {
+        0
+    }
+
     /// Get window information if this Element represents a Window
     ///
     /// Returns Some((app_id, title, size)) if this Element is a WindowElement,

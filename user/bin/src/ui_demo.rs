@@ -9,9 +9,12 @@ extern crate alloc;
 extern crate scarlet_std;
 extern crate scarlet_ui_macros;
 
+use core::f32;
+
 use scarlet_std::println;
-use scarlet_ui::{prelude::*, vstack};
+use scarlet_ui::{hstack, prelude::*, vstack};
 use scarlet_ui_macros::View;
+use scarlet_std::format;
 
 #[derive(View, Clone)]
 struct DemoApp {
@@ -26,24 +29,30 @@ impl DemoApp {
 
 impl Application for DemoApp {
     fn body(&self) -> impl View {
-        Window::new("ScarletUI Demo", 
-            vstack! {
+        Window::new("ScarletUI Demo",
+        vstack! {
                 Text::new("Hello ScarletUI!")
                     .font_size(40.0),
                 Text::new("ScarletUIの世界からこんにちは!")
                     .font_size(24.0),
-                Toggle::new(self.toggle_state.clone()),
+        //         hstack! {
+        //             Text::new(format!("Toggle State: {}", if self.toggle_state.get() { "ON" } else { "OFF" }))
+        //                 .font_size(20.0),
+        //             Spacer::new(),
+        //             Toggle::new(self.toggle_state.clone())
+        //         }
+        //         .frame_width(300.0),
                 Rectangle::new()
                     .fill(Color::RED)
-                    .frame_height(300.0),
+                    .frame(300.0, 100.0),
                 Rectangle::new()
-                    .fill(Color::GREEN),
-                Rectangle::new()
-                    .fill(Color::BLUE),
-        
-            })
-            .app_id("com.scarlet.ui_demo")
-            .size(Size::new(800.0, 600.0))
+                    .fill(Color::BLUE)
+                    .frame(300.0, 100.0)
+        }
+        .frame(400.0, 300.0)
+        )
+        .app_id("oeg.scarlet-os.ui_demo")
+        .size(Size::new(800.0, 600.0))
     }
 }
 
