@@ -11,7 +11,6 @@ use crate::geometry::Size;
 use crate::compositor::Compositor;
 use crate::pipeline::PipelineOwner;
 use crate::buffer::Buffer;
-use crate::render::RenderTree;
 use crate::event::EventDispatcher;
 
 /// RenderingPipeline integrates all components of the rendering system
@@ -186,12 +185,11 @@ impl RenderingPipeline {
                 if crate::debug::is_enabled() {
                     scarlet_std::println!("[RenderingPipeline] building RenderTree...");
                 }
-                let render_tree = RenderTree::build(root);
                 if crate::debug::is_enabled() {
-                    scarlet_std::println!("[RenderingPipeline] RenderTree built, compositing...");
+                    scarlet_std::println!("[RenderingPipeline] compositing element tree...");
                 }
                 let dirty_ids = self.pipeline_owner.last_paint_ids();
-                compositor.composite_tree_with_dirty(&render_tree, dirty_ids);
+                compositor.composite_elements_with_dirty(root, dirty_ids);
             } else {
                 if crate::debug::is_enabled() {
                     scarlet_std::println!("[RenderingPipeline] No root element to render");

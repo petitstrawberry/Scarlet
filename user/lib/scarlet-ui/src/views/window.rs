@@ -158,6 +158,12 @@ pub struct WindowRenderElement<C: View + Clone> {
     children: Vec<Box<dyn Element>>,
     position: Point,
     pending_window_action: Option<crate::event::WindowEvent>,
+    // Track which button is currently pressed (0=none, 1=close, 2=maximize, 3=minimize, 4=titlebar)
+    pressed_button: u8,
+    // Track last mouse position to detect changes
+    last_mouse_x: i32,
+    last_mouse_y: i32,
+    last_mouse_pressed: bool,
 }
 
 impl<C: View + Clone> WindowRenderElement<C> {
@@ -170,6 +176,10 @@ impl<C: View + Clone> WindowRenderElement<C> {
             children,
             position: Point::ZERO,
             pending_window_action: None,
+            pressed_button: 0,
+            last_mouse_x: -1,
+            last_mouse_y: -1,
+            last_mouse_pressed: false,
         }
     }
 
@@ -311,67 +321,92 @@ impl<C: View + Clone> Element for WindowRenderElement<C> {
 
         match event {
             crate::event::Event::Mouse(crate::event::MouseEvent::Moved { x, y }) => {
-                // Convert to window-local coordinates
-                let local_x = *x - self.position.x as i32;
-                let local_y = *y - self.position.y as i32;
+                // SWS coordinates are already window-relative
+                let local_x = *x;
+                let local_y = *y;
 
-                // Update button hover states
-                self.render_object.update_button_states(local_x, local_y, self.render_object.mouse_pressed);
-                needs_repaint = true;
+                // Only update if position or pressed state changed
+                if local_x != self.last_mouse_x || local_y != self.last_mouse_y {
+                    let mouse_pressed = self.pressed_button != 0;
+
+                    // Store old states to check for changes
+                    let old_close_state = self.render_object.close_button_state;
+                    let old_maximize_state = self.render_object.maximize_button_state;
+                    let old_minimize_state = self.render_object.minimize_button_state;
+
+                    // Update button states
+                    self.render_object.update_button_states(local_x, local_y, mouse_pressed);
+
+                    // Check if any button state changed
+                    if old_close_state != self.render_object.close_button_state
+                        || old_maximize_state != self.render_object.maximize_button_state
+                        || old_minimize_state != self.render_object.minimize_button_state
+                    {
+                        needs_repaint = true;
+                    }
+
+                    self.last_mouse_x = local_x;
+                    self.last_mouse_y = local_y;
+                }
             }
             crate::event::Event::Mouse(crate::event::MouseEvent::ButtonPressed {
                 x,
                 y,
                 button: crate::event::MouseButton::Left,
             }) => {
-                // Convert to window-local coordinates
-                let local_x = *x - self.position.x as i32;
-                let local_y = *y - self.position.y as i32;
-
-                // Update button states (pressed = true)
-                self.render_object.update_button_states(local_x, local_y, true);
-                needs_repaint = true;
+                // SWS coordinates are already window-relative
+                let local_x = *x;
+                let local_y = *y;
 
                 // Check if click is in titlebar
                 let width = self.render_object.size.width as u32;
                 let titlebar_height = TITLEBAR_HEIGHT as i32;
 
                 if local_y >= 0 && local_y < titlebar_height {
-                    // Check close button
+                    // Determine which button was pressed
                     let close_rect = self.render_object.close_button_rect(width);
+                    let maximize_rect = self.render_object.maximize_button_rect(width);
+                    let minimize_rect = self.render_object.minimize_button_rect(width);
+
                     if close_rect.contains(crate::geometry::Point {
                         x: local_x as f32,
                         y: local_y as f32,
                     }) {
-                        self.pending_window_action = Some(crate::event::WindowEvent::CloseRequested);
-                        handled = true;
-                    }
-
-                    // Check maximize button
-                    let maximize_rect = self.render_object.maximize_button_rect(width);
-                    if maximize_rect.contains(crate::geometry::Point {
+                        self.pressed_button = 1; // close
+                    } else if maximize_rect.contains(crate::geometry::Point {
                         x: local_x as f32,
                         y: local_y as f32,
                     }) {
-                        self.pending_window_action = Some(crate::event::WindowEvent::MaximizeRequested);
-                        handled = true;
-                    }
-
-                    // Check minimize button
-                    let minimize_rect = self.render_object.minimize_button_rect(width);
-                    if minimize_rect.contains(crate::geometry::Point {
+                        self.pressed_button = 2; // maximize
+                    } else if minimize_rect.contains(crate::geometry::Point {
                         x: local_x as f32,
                         y: local_y as f32,
                     }) {
-                        self.pending_window_action = Some(crate::event::WindowEvent::MinimizeRequested);
-                        handled = true;
-                    }
-
-                    // Click on titlebar (not buttons) -> request move
-                    if !handled {
+                        self.pressed_button = 3; // minimize
+                    } else {
+                        // Clicked on titlebar (not buttons) - request interactive move immediately
+                        self.pressed_button = 0;
                         self.pending_window_action = Some(crate::event::WindowEvent::MoveRequested);
                         handled = true;
+
+                        // Update last mouse position
+                        self.last_mouse_x = local_x;
+                        self.last_mouse_y = local_y;
+                        self.last_mouse_pressed = true;
+
+                        // Don't update button states for titlebar clicks
+                        return handled;
                     }
+
+                    // Update button states (pressed = true)
+                    self.render_object.update_button_states(local_x, local_y, true);
+                    needs_repaint = true;
+                    handled = true;
+
+                    // Update last mouse position
+                    self.last_mouse_x = local_x;
+                    self.last_mouse_y = local_y;
+                    self.last_mouse_pressed = true;
                 }
             }
             crate::event::Event::Mouse(crate::event::MouseEvent::ButtonReleased {
@@ -379,14 +414,60 @@ impl<C: View + Clone> Element for WindowRenderElement<C> {
                 y,
                 button: crate::event::MouseButton::Left,
             }) => {
-                // Convert to window-local coordinates
-                let local_x = *x - self.position.x as i32;
-                let local_y = *y - self.position.y as i32;
+                // Only handle if we had a button pressed
+                if self.pressed_button != 0 {
+                    // SWS coordinates are already window-relative
+                    let local_x = *x;
+                    let local_y = *y;
 
-                // Update button states (pressed = false)
-                self.render_object.update_button_states(local_x, local_y, false);
-                needs_repaint = true;
-                handled = true;
+                    // Check which button we're releasing on
+                    let width = self.render_object.size.width as u32;
+                    let titlebar_height = TITLEBAR_HEIGHT as i32;
+
+                    if local_y >= 0 && local_y < titlebar_height {
+                        let close_rect = self.render_object.close_button_rect(width);
+                        let maximize_rect = self.render_object.maximize_button_rect(width);
+                        let minimize_rect = self.render_object.minimize_button_rect(width);
+
+                        let released_on_close = close_rect.contains(crate::geometry::Point {
+                            x: local_x as f32,
+                            y: local_y as f32,
+                        });
+                        let released_on_maximize = maximize_rect.contains(crate::geometry::Point {
+                            x: local_x as f32,
+                            y: local_y as f32,
+                        });
+                        let released_on_minimize = minimize_rect.contains(crate::geometry::Point {
+                            x: local_x as f32,
+                            y: local_y as f32,
+                        });
+
+                        // Only trigger action if released on the same button that was pressed
+                        match self.pressed_button {
+                            1 if released_on_close => {
+                                self.pending_window_action = Some(crate::event::WindowEvent::CloseRequested);
+                            }
+                            2 if released_on_maximize => {
+                                self.pending_window_action = Some(crate::event::WindowEvent::MaximizeRequested);
+                            }
+                            3 if released_on_minimize => {
+                                self.pending_window_action = Some(crate::event::WindowEvent::MinimizeRequested);
+                            }
+                            _ => {}
+                        }
+                    }
+
+                    // Reset pressed state
+                    self.pressed_button = 0;
+                    self.render_object.update_button_states(local_x, local_y, false);
+                    needs_repaint = true;
+
+                    // Update last mouse position
+                    self.last_mouse_x = local_x;
+                    self.last_mouse_y = local_y;
+                    self.last_mouse_pressed = false;
+                    handled = true;
+                }
             }
             _ => {}
         }
@@ -419,10 +500,6 @@ pub struct WindowRenderObject {
     close_button_state: u8,
     maximize_button_state: u8,
     minimize_button_state: u8,
-    // Mouse position for hover detection
-    mouse_x: i32,
-    mouse_y: i32,
-    mouse_pressed: bool,
 }
 
 impl WindowRenderObject {
@@ -436,9 +513,6 @@ impl WindowRenderObject {
             close_button_state: 0,
             maximize_button_state: 0,
             minimize_button_state: 0,
-            mouse_x: -1,
-            mouse_y: -1,
-            mouse_pressed: false,
         }
     }
 
@@ -475,11 +549,10 @@ impl WindowRenderObject {
 
     /// Update button hover/pressed states based on mouse position
     pub fn update_button_states(&mut self, mouse_x: i32, mouse_y: i32, mouse_pressed: bool) {
-        self.mouse_x = mouse_x;
-        self.mouse_y = mouse_y;
-        self.mouse_pressed = mouse_pressed;
-
         if !self.decorated {
+            self.close_button_state = 0;
+            self.maximize_button_state = 0;
+            self.minimize_button_state = 0;
             return;
         }
 

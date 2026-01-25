@@ -6,8 +6,8 @@
 use crate::buffer::Buffer;
 use crate::geometry::{Point, Rect, Size};
 use crate::color::Color;
+use crate::element::{Element, ElementId};
 use crate::render::{RenderNode, RenderTree};
-use crate::element::ElementId;
 use alloc::collections::BTreeSet;
 use alloc::vec::Vec;
 
@@ -50,6 +50,48 @@ impl Compositor {
         if crate::debug::is_enabled() {
             scarlet_std::println!("[Compositor] composite_tree: complete");
         }
+    }
+
+    /// Composite an Element tree into the window buffer using dirty rectangles.
+    pub fn composite_elements_with_dirty(&mut self, root: &dyn Element, dirty_ids: &[ElementId]) {
+        if dirty_ids.is_empty() {
+            self.composite_elements(root);
+            return;
+        }
+
+        let dirty_set: BTreeSet<ElementId> = dirty_ids.iter().copied().collect();
+        let mut rects = Vec::new();
+        self.collect_dirty_rects_element(root, Point::ZERO, &dirty_set, &mut rects);
+
+        if rects.is_empty() {
+            return;
+        }
+
+        self.merge_overlapping_rects(&mut rects);
+
+        let window_area = (self.window_buffer.width() as f32) * (self.window_buffer.height() as f32);
+        let dirty_area: f32 = rects.iter().map(|r| r.size.width * r.size.height).sum();
+        if dirty_area >= window_area * 0.6 {
+            self.composite_elements(root);
+            return;
+        }
+
+        for rect in rects.iter() {
+            self.clear_rect(*rect, Color::WHITE);
+        }
+
+        self.composite_element_clipped(root, Point::ZERO, &rects);
+    }
+
+    /// Composite an Element tree into the window buffer.
+    pub fn composite_elements(&mut self, root: &dyn Element) {
+        if crate::debug::is_enabled() {
+            scarlet_std::println!("[Compositor] composite_elements: window_size={:?}x{:?}",
+                self.window_buffer.width(), self.window_buffer.height());
+        }
+
+        self.clear(Color::WHITE);
+        self.composite_element(root, Point::ZERO);
     }
 
     /// Composite a RenderTree into the window buffer using dirty rectangles.
@@ -132,6 +174,70 @@ impl Compositor {
         }
     }
 
+    fn composite_element(&mut self, element: &dyn Element, origin: Point) {
+        let position = element.position();
+        let absolute_origin = Point {
+            x: origin.x + position.x,
+            y: origin.y + position.y,
+        };
+
+        if let Some(buffer) = element.get_buffer() {
+            let opacity = 1.0;
+            self.window_buffer.composite(
+                buffer,
+                absolute_origin.x as i32,
+                absolute_origin.y as i32,
+                opacity,
+            );
+        }
+
+        for child in element.children() {
+            self.composite_element(child.as_ref(), absolute_origin);
+        }
+    }
+
+    fn composite_element_clipped(&mut self, element: &dyn Element, origin: Point, dirty_rects: &[Rect]) {
+        let position = element.position();
+        let absolute_origin = Point {
+            x: origin.x + position.x,
+            y: origin.y + position.y,
+        };
+        let bounds = element.bounds();
+        let bounds = Rect::from_xywh(
+            absolute_origin.x,
+            absolute_origin.y,
+            bounds.size.width,
+            bounds.size.height,
+        );
+
+        if !self.overlaps_any(bounds, dirty_rects) {
+            return;
+        }
+
+        if let Some(buffer) = element.get_buffer() {
+            let opacity = 1.0;
+            for rect in dirty_rects.iter() {
+                if bounds.overlaps(rect) {
+                    let (x, y, w, h) = self.rect_to_i32(*rect);
+                    self.window_buffer.composite_clipped(
+                        buffer,
+                        absolute_origin.x as i32,
+                        absolute_origin.y as i32,
+                        opacity,
+                        x,
+                        y,
+                        w,
+                        h,
+                    );
+                }
+            }
+        }
+
+        for child in element.children() {
+            self.composite_element_clipped(child.as_ref(), absolute_origin, dirty_rects);
+        }
+    }
+
     fn composite_node_clipped(&mut self, node: &RenderNode, origin: Point, dirty_rects: &[Rect]) {
         let position = node.position();
         let absolute_origin = Point {
@@ -171,6 +277,34 @@ impl Compositor {
 
         for child in node.children() {
             self.composite_node_clipped(child, absolute_origin, dirty_rects);
+        }
+    }
+
+    fn collect_dirty_rects_element(
+        &self,
+        element: &dyn Element,
+        origin: Point,
+        dirty_ids: &BTreeSet<ElementId>,
+        rects: &mut Vec<Rect>,
+    ) {
+        let position = element.position();
+        let absolute_origin = Point {
+            x: origin.x + position.x,
+            y: origin.y + position.y,
+        };
+
+        if dirty_ids.contains(&element.id()) {
+            let bounds = element.bounds();
+            rects.push(Rect::from_xywh(
+                absolute_origin.x,
+                absolute_origin.y,
+                bounds.size.width,
+                bounds.size.height,
+            ));
+        }
+
+        for child in element.children() {
+            self.collect_dirty_rects_element(child.as_ref(), absolute_origin, dirty_ids, rects);
         }
     }
 

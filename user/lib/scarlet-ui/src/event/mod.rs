@@ -158,7 +158,7 @@ pub enum WindowEvent {
     MaximizeRequested,
     /// Minimize button was clicked
     MinimizeRequested,
-    /// Titlebar was dragged to move the window
+    /// Titlebar was pressed to start interactive move
     MoveRequested,
 }
 

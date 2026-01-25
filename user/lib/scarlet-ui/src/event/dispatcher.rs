@@ -421,20 +421,27 @@ impl EventDispatcher {
             return None;
         }
 
-        let mut absolute_origin = Point::ZERO;
-        for id in self.hovered_path.iter() {
-            let Some(element) = element_tree.find_element_mut(*id) else {
-                self.hovered_path.clear();
-                return None;
-            };
-            let pos = element.position();
-            absolute_origin.x += pos.x;
-            absolute_origin.y += pos.y;
+        let mut parent_origin = Point::ZERO;
+        if self.hovered_path.len() > 1 {
+            for id in self.hovered_path.iter().take(self.hovered_path.len() - 1) {
+                let Some(element) = element_tree.find_element_mut(*id) else {
+                    self.hovered_path.clear();
+                    return None;
+                };
+                let pos = element.position();
+                parent_origin.x += pos.x;
+                parent_origin.y += pos.y;
+            }
         }
 
         let Some(target) = element_tree.find_element_mut(hovered_id) else {
             self.hovered_path.clear();
             return None;
+        };
+        let target_pos = target.position();
+        let absolute_origin = Point {
+            x: parent_origin.x + target_pos.x,
+            y: parent_origin.y + target_pos.y,
         };
         let size = target.bounds().size;
         let rect = Rect::from_xywh(absolute_origin.x, absolute_origin.y, size.width, size.height);
