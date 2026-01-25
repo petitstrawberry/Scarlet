@@ -157,3 +157,115 @@ impl<V1: View, V2: View, V3: View, V4: View, V5: View, V6: View> ViewTuple for (
         collector.extend(self.5.listenables());
     }
 }
+
+// Implement ViewTuple for 7-tuple
+impl<V1: View, V2: View, V3: View, V4: View, V5: View, V6: View, V7: View> ViewTuple for (V1, V2, V3, V4, V5, V6, V7) {
+    fn create_elements(&self) -> Vec<Box<dyn Element>> {
+        vec![
+            self.0.create_element(),
+            self.1.create_element(),
+            self.2.create_element(),
+            self.3.create_element(),
+            self.4.create_element(),
+            self.5.create_element(),
+            self.6.create_element(),
+        ]
+    }
+
+    fn collect_listenables<'a>(&'a self, collector: &mut Vec<&'a dyn Listenable>) {
+        collector.extend(self.0.listenables());
+        collector.extend(self.1.listenables());
+        collector.extend(self.2.listenables());
+        collector.extend(self.3.listenables());
+        collector.extend(self.4.listenables());
+        collector.extend(self.5.listenables());
+        collector.extend(self.6.listenables());
+    }
+}
+
+// Implement ViewTuple for 8-tuple
+impl<V1: View, V2: View, V3: View, V4: View, V5: View, V6: View, V7: View, V8: View> ViewTuple for (V1, V2, V3, V4, V5, V6, V7, V8) {
+    fn create_elements(&self) -> Vec<Box<dyn Element>> {
+        vec![
+            self.0.create_element(),
+            self.1.create_element(),
+            self.2.create_element(),
+            self.3.create_element(),
+            self.4.create_element(),
+            self.5.create_element(),
+            self.6.create_element(),
+            self.7.create_element(),
+        ]
+    }
+
+    fn collect_listenables<'a>(&'a self, collector: &mut Vec<&'a dyn Listenable>) {
+        collector.extend(self.0.listenables());
+        collector.extend(self.1.listenables());
+        collector.extend(self.2.listenables());
+        collector.extend(self.3.listenables());
+        collector.extend(self.4.listenables());
+        collector.extend(self.5.listenables());
+        collector.extend(self.6.listenables());
+        collector.extend(self.7.listenables());
+    }
+}
+
+// Implement ViewTuple for 9-tuple
+impl<V1: View, V2: View, V3: View, V4: View, V5: View, V6: View, V7: View, V8: View, V9: View> ViewTuple for (V1, V2, V3, V4, V5, V6, V7, V8, V9) {
+    fn create_elements(&self) -> Vec<Box<dyn Element>> {
+        vec![
+            self.0.create_element(),
+            self.1.create_element(),
+            self.2.create_element(),
+            self.3.create_element(),
+            self.4.create_element(),
+            self.5.create_element(),
+            self.6.create_element(),
+            self.7.create_element(),
+            self.8.create_element(),
+        ]
+    }
+
+    fn collect_listenables<'a>(&'a self, collector: &mut Vec<&'a dyn Listenable>) {
+        collector.extend(self.0.listenables());
+        collector.extend(self.1.listenables());
+        collector.extend(self.2.listenables());
+        collector.extend(self.3.listenables());
+        collector.extend(self.4.listenables());
+        collector.extend(self.5.listenables());
+        collector.extend(self.6.listenables());
+        collector.extend(self.7.listenables());
+        collector.extend(self.8.listenables());
+    }
+}
+
+// Implement ViewTuple for 10-tuple
+impl<V1: View, V2: View, V3: View, V4: View, V5: View, V6: View, V7: View, V8: View, V9: View, V10: View> ViewTuple for (V1, V2, V3, V4, V5, V6, V7, V8, V9, V10) {
+    fn create_elements(&self) -> Vec<Box<dyn Element>> {
+        vec![
+            self.0.create_element(),
+            self.1.create_element(),
+            self.2.create_element(),
+            self.3.create_element(),
+            self.4.create_element(),
+            self.5.create_element(),
+            self.6.create_element(),
+            self.7.create_element(),
+            self.8.create_element(),
+            self.9.create_element(),
+        ]
+    }
+
+    fn collect_listenables<'a>(&'a self, collector: &mut Vec<&'a dyn Listenable>) {
+        collector.extend(self.0.listenables());
+        collector.extend(self.1.listenables());
+        collector.extend(self.2.listenables());
+        collector.extend(self.3.listenables());
+        collector.extend(self.4.listenables());
+        collector.extend(self.5.listenables());
+        collector.extend(self.6.listenables());
+        collector.extend(self.7.listenables());
+        collector.extend(self.8.listenables());
+        collector.extend(self.9.listenables());
+    }
+}
