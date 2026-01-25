@@ -81,8 +81,15 @@ impl Element for HStackElement {
 
     fn layout(&mut self, constraints: LayoutConstraints) -> Size {
         self.last_constraints = Some(constraints);
-        scarlet_std::println!("[HStackElement::layout] START: constraints=({:?}, {:?}) -> ({:?}, {:?})",
-            constraints.min_width, constraints.min_height, constraints.max_width, constraints.max_height);
+        if crate::debug::is_enabled() {
+            scarlet_std::println!(
+                "[HStackElement::layout] START: constraints=({:?}, {:?}) -> ({:?}, {:?})",
+                constraints.min_width,
+                constraints.min_height,
+                constraints.max_width,
+                constraints.max_height
+            );
+        }
         let child_count = self.children.len();
         let spacing_total = if child_count > 1 {
             (child_count - 1) as f32 * self.spacing
