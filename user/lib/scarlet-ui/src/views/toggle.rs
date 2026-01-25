@@ -7,7 +7,7 @@ use core::any::Any;
 use crate::view::View;
 use crate::element::{Element, RenderElement, ElementRenderObject};
 use crate::geometry::Size;
-use crate::color::Color;
+use crate::color::{Color, ColorPalette};
 use crate::buffer::Buffer;
 use crate::graphics;
 use crate::state::State;
@@ -101,10 +101,11 @@ impl ToggleRenderObject {
             let mut canvas = graphics::Canvas::new(buffer.data_mut(), width as u32, height as u32);
 
             // iOS-style toggle colors
+            let palette = ColorPalette::default();
             let bg_color = if self.is_on {
-                Color::rgb(52u8, 199u8, 89u8) // iOS green: #34C759
+                palette.green().base
             } else {
-                Color::rgb(118u8, 118u8, 128u8) // iOS gray: #767680
+                palette.gray().gray.base
             };
 
             // Draw background (for now, just a regular rect)

@@ -9,7 +9,7 @@ use core::any::Any;
 use crate::view::View;
 use crate::element::{Element, RenderElement, ElementRenderObject};
 use crate::geometry::Size;
-use crate::color::Color;
+use crate::color::{Color, ColorPalette};
 use crate::buffer::Buffer;
 use crate::graphics;
 
@@ -22,6 +22,7 @@ pub struct Button {
     label: String,
     on_click: Option<Arc<dyn Fn() + 'static>>,
     background_color: Color,
+    border_color: Color,
     text_color: Color,
     font_size: f32,
     padding: f32,
@@ -31,13 +32,15 @@ impl Button {
     /// Create a new Button with the given label
     pub fn new(label: impl Into<String>) -> Self {
         let label_str = label.into();
+        let palette = ColorPalette::default();
         Self {
             label: label_str,
             on_click: None,
-            background_color: Color::rgb(200.0, 200.0, 200.0),
-            text_color: Color::BLACK,
-            font_size: 16.0,
-            padding: 8.0,
+            background_color: palette.button_background(),
+            border_color: palette.border(),
+            text_color: palette.text_primary(),
+            font_size: 15.0,
+            padding: 10.0,
         }
     }
 
@@ -56,6 +59,12 @@ impl Button {
     /// Set the text color
     pub fn text_color(mut self, color: Color) -> Self {
         self.text_color = color;
+        self
+    }
+
+    /// Set the border color
+    pub fn border_color(mut self, color: Color) -> Self {
+        self.border_color = color;
         self
     }
 
@@ -86,6 +95,11 @@ impl Button {
         self.text_color
     }
 
+    /// Get the border color
+    pub fn get_border_color(&self) -> Color {
+        self.border_color
+    }
+
     /// Get the font size
     pub fn get_font_size(&self) -> f32 {
         self.font_size
@@ -108,7 +122,14 @@ impl View for Button {
     fn create_element(&self) -> Box<dyn Element> {
         Box::new(RenderElement::new(
             self.clone(),
-            ButtonRenderObject::new(self.label.clone(), self.background_color, self.text_color),
+            ButtonRenderObject::new(
+                self.label.clone(),
+                self.background_color,
+                self.border_color,
+                self.text_color,
+                self.font_size,
+                self.padding,
+            ),
         ))
     }
 
@@ -125,6 +146,7 @@ impl View for Button {
 pub struct ButtonRenderObject {
     label: String,
     background_color: Color,
+    border_color: Color,
     text_color: Color,
     font_size: f32,
     padding: f32,
@@ -136,13 +158,18 @@ pub struct ButtonRenderObject {
 
 impl ButtonRenderObject {
     /// Create a new ButtonRenderObject
-    pub fn new(label: String, background_color: Color, text_color: Color) -> Self {
-        let font_size = 16.0;
-        let padding = 8.0;
-
+    pub fn new(
+        label: String,
+        background_color: Color,
+        border_color: Color,
+        text_color: Color,
+        font_size: f32,
+        padding: f32,
+    ) -> Self {
         Self {
             label,
             background_color,
+            border_color,
             text_color,
             font_size,
             padding,
@@ -188,12 +215,26 @@ impl ButtonRenderObject {
 
     fn current_background(&self) -> Color {
         if self.pressed {
-            Self::shade_color(self.background_color, 0.85)
-        } else if self.hovered {
             Self::shade_color(self.background_color, 0.92)
+        } else if self.hovered {
+            Self::shade_color(self.background_color, 0.97)
         } else {
             self.background_color
         }
+    }
+
+    fn current_border(&self) -> Color {
+        if self.pressed {
+            Self::shade_color(self.border_color, 0.90)
+        } else if self.hovered {
+            Self::shade_color(self.border_color, 0.96)
+        } else {
+            self.border_color
+        }
+    }
+
+    fn highlight_color(&self, background: Color) -> Color {
+        Self::shade_color(background, 1.06)
     }
 }
 
@@ -258,6 +299,8 @@ impl ElementRenderObject for ButtonRenderObject {
                 self.label, self.buffer.is_some());
         }
         let background = self.current_background();
+        let border = self.current_border();
+        let highlight = self.highlight_color(background);
         if let Some(ref mut buffer) = self.buffer {
             let width = buffer.width();
             let height = buffer.height();
@@ -266,6 +309,14 @@ impl ElementRenderObject for ButtonRenderObject {
 
             // Fill background
             canvas.fill_rect(0, 0, width, height, background);
+
+            // Subtle top highlight for a modern surface feel
+            if !self.pressed && height > 2 {
+                canvas.draw_line(1, 1, (width as i32) - 2, 1, highlight);
+            }
+
+            // Border
+            canvas.draw_rect(0, 0, width, height, border);
 
             // Draw text centered
             let (text_w, _text_h) = graphics::measure_text_sized(&self.label, self.font_size);

@@ -39,10 +39,13 @@ impl Application for DemoApp {
                     Text::new(format!("Toggle State: {}", if self.toggle_state.get() { "ON" } else { "OFF" }))
                         .font_size(20.0),
                     Spacer::new(),
-                    Toggle::new(self.toggle_state.clone())
+                    Toggle::new(self.toggle_state.clone()),
+                    Button::new("Click Me")
+                        .on_click(|| {
+                            println!("[ui_demo] Button clicked!");
+                        }),
                 }
                 .frame_width(300.0),
-                
                 Rectangle::new()
                     .fill(Color::RED)
                     .frame(300.0, 100.0),

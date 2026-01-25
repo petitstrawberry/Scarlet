@@ -65,6 +65,8 @@ pub struct SemanticColor {
     pub surface: Color,
     /// Variant surface color
     pub surface_variant: Color,
+    /// Button background color
+    pub button_background: Color,
 
     // Overlay
     /// Overlay/backdrop color
@@ -98,10 +100,10 @@ impl SemanticColor {
             background_secondary: Color::rgb(0.97, 0.97, 0.97),
             background_tertiary: Color::rgb(0.95, 0.95, 0.97),
 
-            // Text Colors - dark gray/black
-            text: Color::rgb(0.0, 0.0, 0.0),
-            text_secondary: Color::rgb(0.31, 0.31, 0.31),
-            text_tertiary: Color::rgb(0.55, 0.55, 0.55),
+            // Text Colors - Apple label colors
+            text: Color::rgb(0, 0, 0), // label
+            text_secondary: Color::rgba(60, 60, 67, 0.6), // secondaryLabel
+            text_tertiary: Color::rgba(60, 60, 67, 0.3), // tertiaryLabel
             text_inverse: Color::rgb(1.0, 1.0, 1.0),
 
             // Primary - blue
@@ -129,6 +131,7 @@ impl SemanticColor {
             // Surface
             surface: Color::rgb(1.0, 1.0, 1.0),
             surface_variant: Color::rgb(0.95, 0.95, 0.97),
+            button_background: Color::rgb(229, 229, 234), // systemGray5
 
             // Overlay
             overlay: Color::rgba(0.0, 0.0, 0.0, 0.24),
@@ -153,10 +156,10 @@ impl SemanticColor {
             background_secondary: Color::rgb(0.18, 0.18, 0.18),
             background_tertiary: Color::rgb(0.24, 0.24, 0.24),
 
-            // Text Colors - light gray/white
-            text: Color::rgb(1.0, 1.0, 1.0),
-            text_secondary: Color::rgb(0.78, 0.78, 0.78),
-            text_tertiary: Color::rgb(0.55, 0.55, 0.55),
+            // Text Colors - Apple label colors
+            text: Color::rgb(255, 255, 255), // label
+            text_secondary: Color::rgba(235, 235, 245, 0.6), // secondaryLabel
+            text_tertiary: Color::rgba(235, 235, 245, 0.3), // tertiaryLabel
             text_inverse: Color::rgb(0.0, 0.0, 0.0),
 
             // Primary - blue (lighter variant for dark mode)
@@ -184,6 +187,7 @@ impl SemanticColor {
             // Surface
             surface: Color::rgb(0.18, 0.18, 0.18),
             surface_variant: Color::rgb(0.22, 0.22, 0.22),
+            button_background: Color::rgb(44, 44, 46), // systemGray5 (dark)
 
             // Overlay
             overlay: Color::rgba(0.0, 0.0, 0.0, 0.4),

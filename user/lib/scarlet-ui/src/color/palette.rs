@@ -59,6 +59,11 @@ impl ColorPalette {
         self.semantic.text
     }
 
+    /// Primary text color (Apple-style naming)
+    pub fn text_primary(&self) -> crate::Color {
+        self.semantic.text
+    }
+
     /// Secondary text color
     pub fn text_secondary(&self) -> crate::Color {
         self.semantic.text_secondary
@@ -142,6 +147,11 @@ impl ColorPalette {
     /// Surface variant color
     pub fn surface_variant(&self) -> crate::Color {
         self.semantic.surface_variant
+    }
+
+    /// Button background color
+    pub fn button_background(&self) -> crate::Color {
+        self.semantic.button_background
     }
 
     /// Overlay color

@@ -8,7 +8,7 @@ use crate::view::View;
 use crate::element::{Element, RenderElement, ElementRenderObject};
 use crate::geometry::{Size, Point};
 use crate::element::LayoutConstraints;
-use crate::color::Color;
+use crate::color::{Color, ColorPalette};
 use crate::buffer::Buffer;
 use crate::graphics;
 use alloc::boxed::Box;
@@ -25,10 +25,11 @@ impl Text {
     /// Create a new Text view with the given content
     pub fn new(content: impl Into<String>) -> Self {
         let content_str = content.into();
+        let palette = ColorPalette::default();
         Self {
             content: content_str,
             font_size: 16.0,
-            color: Color::BLACK,
+            color: palette.text_primary(),
         }
     }
 
