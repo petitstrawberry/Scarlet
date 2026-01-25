@@ -160,6 +160,7 @@ impl PipelineOwner {
     /// Flush the layout phase
     fn flush_layout(&mut self, element_tree: &mut ElementTree, window_size: Size) {
         let dirty_layout = core::mem::take(&mut self.dirty_layout);
+        let did_layout = !dirty_layout.is_empty();
 
         // Create constraints from window size
         let constraints = LayoutConstraints::loose(window_size.width, window_size.height);
@@ -173,6 +174,12 @@ impl PipelineOwner {
             // In a full implementation, we would layout specific elements
             let _ = id;
             element_tree.layout(constraints);
+        }
+        if did_layout {
+            // Layout can resize buffers; ensure a full repaint so they contain fresh pixels.
+            if let Some(root) = element_tree.root() {
+                self.dirty_paint.insert(root.id());
+            }
         }
     }
 

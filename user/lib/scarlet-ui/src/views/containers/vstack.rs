@@ -137,9 +137,10 @@ impl ElementRenderObject for VStackRenderObject {
         let mut fixed_total_height: f32 = 0.0;
         let mut max_width: f32 = 0.0;
         let mut flex_total: u32 = 0;
+        let mut greedy_indices: Vec<usize> = Vec::new();
         let mut child_sizes: Vec<Size> = Vec::with_capacity(children.len());
 
-        for child in children.iter_mut() {
+        for (index, child) in children.iter_mut().enumerate() {
             let flex = child.flex_factor();
             flex_total += flex;
 
@@ -147,10 +148,35 @@ impl ElementRenderObject for VStackRenderObject {
                 let child_constraints = LayoutConstraints::loose(constraints.max_width, constraints.max_height);
                 let child_size = child.layout(child_constraints);
                 child_sizes.push(child_size);
-                fixed_total_height += child_size.height;
-                max_width = max_width.max(child_size.width);
+                if constraints.max_height.is_finite()
+                    && constraints.max_height > 0.0
+                    && child_size.height + 0.5 >= constraints.max_height
+                {
+                    greedy_indices.push(index);
+                } else {
+                    fixed_total_height += child_size.height;
+                    max_width = max_width.max(child_size.width);
+                }
             } else {
                 child_sizes.push(Size::ZERO);
+            }
+        }
+
+        if flex_total == 0 && !greedy_indices.is_empty() && constraints.max_height.is_finite() && constraints.max_height > 0.0 {
+            let share = (constraints.max_height - fixed_total_height - spacing_total).max(0.0)
+                / greedy_indices.len() as f32;
+            for &index in greedy_indices.iter() {
+                let child = &mut children[index];
+                let child_constraints = LayoutConstraints {
+                    min_width: 0.0,
+                    max_width: constraints.max_width,
+                    min_height: share,
+                    max_height: share,
+                };
+                let child_size = child.layout(child_constraints);
+                child_sizes[index] = child_size;
+                fixed_total_height += child_size.height;
+                max_width = max_width.max(child_size.width);
             }
         }
 

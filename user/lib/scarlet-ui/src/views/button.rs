@@ -273,7 +273,11 @@ impl ElementRenderObject for ButtonRenderObject {
                 w, h, w * h * 4);
         }
 
-        if self.buffer.as_ref().map_or(true, |b| b.data().len() < w as usize * h as usize * 4) {
+        let needs_resize = self
+            .buffer
+            .as_ref()
+            .map_or(true, |b| b.width() != w || b.height() != h);
+        if needs_resize {
             self.buffer = Some(Buffer::from_dimensions(w, h));
         }
 

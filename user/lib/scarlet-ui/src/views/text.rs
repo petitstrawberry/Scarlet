@@ -145,14 +145,16 @@ impl ElementRenderObject for TextRenderObject {
         // Create/update buffer for this text
         let w = libm::ceilf(width) as u32;
         let h = libm::ceilf(height) as u32;
-        let needed = (w * h * 4) as usize;
-
         if crate::debug::is_enabled() {
             scarlet_std::println!("[TextRenderObject] layout: final size={}x{}, buffer needed={} bytes",
-                w, h, needed);
+                w, h, w * h * 4);
         }
 
-        if self.buffer.as_ref().map_or(true, |b| b.data().len() < needed) {
+        let needs_resize = self
+            .buffer
+            .as_ref()
+            .map_or(true, |b| b.width() != w || b.height() != h);
+        if needs_resize {
             self.buffer = Some(Buffer::from_dimensions(w, h));
         }
 

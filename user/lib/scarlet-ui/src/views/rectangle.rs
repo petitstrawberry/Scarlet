@@ -141,16 +141,22 @@ impl ElementRenderObject for RectangleRenderObject {
             // Use min constraints as fallback
             let w2 = libm::ceilf(constraints.min_width.max(1.0)) as u32;
             let h2 = libm::ceilf(constraints.min_height.max(1.0)) as u32;
-            if self.buffer.as_ref().map_or(true, |b| b.data().len() < (w2 * h2 * 4) as usize) {
+            let needs_resize = self
+                .buffer
+                .as_ref()
+                .map_or(true, |b| b.width() != w2 || b.height() != h2);
+            if needs_resize {
                 self.buffer = Some(Buffer::from_dimensions(w2, h2));
             }
             self.size = Size { width: constraints.min_width.max(1.0), height: constraints.min_height.max(1.0) };
             return self.size;
         }
 
-        let needed = (w * h * 4) as usize;
-
-        if self.buffer.as_ref().map_or(true, |b| b.data().len() < needed) {
+        let needs_resize = self
+            .buffer
+            .as_ref()
+            .map_or(true, |b| b.width() != w || b.height() != h);
+        if needs_resize {
             self.buffer = Some(Buffer::from_dimensions(w, h));
         }
 

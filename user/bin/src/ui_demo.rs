@@ -46,13 +46,25 @@ impl Application for DemoApp {
                         }),
                 }
                 .frame_width(300.0),
-                Rectangle::new()
-                    .fill(Color::RED)
-                    .frame(300.0, 100.0),
-                Spacer::new(),
-                Rectangle::new()
-                    .fill(Color::BLUE)
-                    .frame(300.0, 100.0)
+                hstack! {
+                    vstack! {
+                        Text::new("Left VStack")
+                            .font_size(18.0),
+                        Rectangle::new()
+                            .fill(Color::BLUE)
+                    }.frame_width(100.0),
+                    Rectangle::new()
+                        .fill(Color::RED),
+                    Rectangle::new()
+                        .fill(Color::GREEN),
+                    Rectangle::new()
+                        .fill(Color::BLUE)
+                        .frame_width(50.0),
+                    Rectangle::new()
+                        .fill(Color::YELLOW)
+                        .frame_width(50.0),
+                }
+                .frame(f32::INFINITY, 100.0)
         }
         .frame(f32::INFINITY, f32::INFINITY)
         // .frame(400.0, 300.0)
