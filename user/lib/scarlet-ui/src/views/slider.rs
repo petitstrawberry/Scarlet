@@ -90,6 +90,7 @@ pub struct SliderRenderObject {
     max: f32,
     size: Size,
     buffer: Option<Buffer>,
+    dragging: bool,
 }
 
 impl SliderRenderObject {
@@ -121,6 +122,7 @@ impl SliderRenderObject {
             max,
             size: Size::new(200.0, 20.0),
             buffer: None,
+            dragging: false,
         }
     }
 
@@ -132,6 +134,21 @@ impl SliderRenderObject {
     /// Set value
     pub fn set_value(&mut self, value: f32) {
         self.value = value.clamp(self.min, self.max);
+    }
+
+    pub fn is_dragging(&self) -> bool {
+        self.dragging
+    }
+
+    pub fn set_dragging(&mut self, dragging: bool) {
+        self.dragging = dragging;
+    }
+
+    pub fn value_from_local_x(&self, local_x: f32) -> f32 {
+        let width = self.size.width;
+        let track_width = (width - 20.0).max(1.0);
+        let normalized = ((local_x - 10.0) / track_width).clamp(0.0, 1.0);
+        self.min + (self.max - self.min) * normalized
     }
 
     /// Get min

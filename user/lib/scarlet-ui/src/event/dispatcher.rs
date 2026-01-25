@@ -65,6 +65,8 @@ pub struct EventDispatcher {
     root_id: Option<ElementId>,
     hovered_id: Option<ElementId>,
     hovered_path: Vec<ElementId>,
+    captured_id: Option<ElementId>,
+    captured_path: Vec<ElementId>,
     /// Events emitted by elements during event handling
     emitted_events: Vec<Event>,
 }
@@ -76,6 +78,8 @@ impl EventDispatcher {
             root_id: None,
             hovered_id: None,
             hovered_path: Vec::new(),
+            captured_id: None,
+            captured_path: Vec::new(),
             emitted_events: Vec::new(),
         }
     }
@@ -153,12 +157,32 @@ impl EventDispatcher {
     fn dispatch_mouse(&mut self, element_tree: &mut ElementTree, event: &crate::event::MouseEvent) -> bool {
         // 1. Hit test to find target and path
         let point = self.extract_point_from_mouse(&event);
-        let path = if matches!(event, crate::event::MouseEvent::Moved { .. }) {
+        let mut path = if matches!(event, crate::event::MouseEvent::Moved { .. })
+            && self.captured_id.is_none()
+        {
             self.cached_path_if_inside(element_tree, point)
                 .or_else(|| self.hit_test_with_path_ids(element_tree, point))
         } else {
             self.hit_test_with_path_ids(element_tree, point)
         };
+
+        if matches!(
+            event,
+            crate::event::MouseEvent::Moved { .. }
+                | crate::event::MouseEvent::ButtonReleased { button: crate::event::MouseButton::Left, .. }
+        ) {
+            if let Some(captured_id) = self.captured_id {
+                if !self.captured_path.is_empty() {
+                    path = Some(self.captured_path.clone());
+                } else if let Some(captured_path) = element_tree.find_path_ids(captured_id) {
+                    self.captured_path = captured_path.clone();
+                    path = Some(captured_path);
+                } else {
+                    self.captured_id = None;
+                    self.captured_path.clear();
+                }
+            }
+        }
 
         if let Some(path) = path {
             let target_id = *path.last().unwrap();
@@ -195,7 +219,9 @@ impl EventDispatcher {
             }
 
             if let crate::event::MouseEvent::Moved { x, y } = event {
-                if self.hovered_id != Some(target_id) {
+                if self.captured_id.is_some() {
+                    // Skip hover updates while dragging outside the element.
+                } else if self.hovered_id != Some(target_id) {
                     if crate::debug::is_enabled() {
                         scarlet_std::println!(
                             "[EventDispatcher] hover change: {:?} -> {:?}",
@@ -222,6 +248,11 @@ impl EventDispatcher {
                     self.hovered_id = Some(target_id);
                     self.hovered_path = path.clone();
                 }
+            }
+
+            if let crate::event::MouseEvent::ButtonPressed { button: crate::event::MouseButton::Left, .. } = event {
+                self.captured_id = Some(target_id);
+                self.captured_path = path.clone();
             }
 
             // 2. Three-phase dispatch
@@ -271,6 +302,10 @@ impl EventDispatcher {
             if crate::debug::is_enabled() {
                 scarlet_std::println!("[EventDispatcher] mouse handled={}", handled);
             }
+            if let crate::event::MouseEvent::ButtonReleased { button: crate::event::MouseButton::Left, .. } = event {
+                self.captured_id = None;
+                self.captured_path.clear();
+            }
             handled
         } else {
             if let crate::event::MouseEvent::Moved { x, y } = event {
@@ -284,6 +319,10 @@ impl EventDispatcher {
                 }
                 self.hovered_id = None;
                 self.hovered_path.clear();
+            }
+            if let crate::event::MouseEvent::ButtonReleased { button: crate::event::MouseButton::Left, .. } = event {
+                self.captured_id = None;
+                self.captured_path.clear();
             }
             false
         }
