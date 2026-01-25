@@ -11,10 +11,10 @@ extern crate scarlet_ui_macros;
 
 use core::f32;
 
+use scarlet_std::format;
 use scarlet_std::println;
 use scarlet_ui::{hstack, prelude::*, vstack};
 use scarlet_ui_macros::View;
-use scarlet_std::format;
 
 #[derive(View, Clone)]
 struct DemoApp {

@@ -19,8 +19,8 @@ extern crate scarlet_std as std;
 use core::time::Duration;
 use sbus_client;
 use scarlet_desktop_config::{TaskbarConfig, TaskbarPosition};
-use scarlet_ui::graphics;
 use scarlet_ui::Color;
+use scarlet_ui::graphics;
 use std::string::{String, ToString};
 use std::thread;
 use std::vec;
@@ -600,7 +600,16 @@ fn draw_menu_bar(
             let text_x = item.x + 8;
             let text_y = item.y + ((item.height as i32 - 16) / 2).max(0);
 
-            draw_text_helper(buf, width, h, text_x, text_y, &item.label, text_color, font_size);
+            draw_text_helper(
+                buf,
+                width,
+                h,
+                text_x,
+                text_y,
+                &item.label,
+                text_color,
+                font_size,
+            );
         }
 
         // Draw status items (right side)
@@ -608,7 +617,16 @@ fn draw_menu_bar(
             let text_x = item.x + 6;
             let text_y = item.y + ((item.height as i32 - 16) / 2).max(0);
 
-            draw_text_helper(buf, width, h, text_x, text_y, &item.label, text_dim, font_size);
+            draw_text_helper(
+                buf,
+                width,
+                h,
+                text_x,
+                text_y,
+                &item.label,
+                text_dim,
+                font_size,
+            );
         }
     });
 
@@ -1014,7 +1032,16 @@ fn draw_dropdown(conn: &mut Connection, surface_id: u32, dropdown: &DropdownStat
                 // Draw text
                 let text_x = 8;
                 let text_y = item.y + ((item.height as i32 - 16) / 2).max(0);
-                draw_text_helper(buf, width, h, text_x, text_y, &item.label, text_color, FONT_SIZE);
+                draw_text_helper(
+                    buf,
+                    width,
+                    h,
+                    text_x,
+                    text_y,
+                    &item.label,
+                    text_color,
+                    FONT_SIZE,
+                );
             }
         }
     });
@@ -1045,7 +1072,16 @@ fn draw_vline(buf: &mut [u8], width: u32, height: u32, x: i32, y: i32, h: u32, c
 }
 
 /// Helper function to draw text using Canvas
-fn draw_text_helper(buf: &mut [u8], width: u32, height: u32, x: i32, y: i32, text: &str, color: Color, font_size: f32) {
+fn draw_text_helper(
+    buf: &mut [u8],
+    width: u32,
+    height: u32,
+    x: i32,
+    y: i32,
+    text: &str,
+    color: Color,
+    font_size: f32,
+) {
     use scarlet_ui::graphics::Canvas;
     let mut canvas = Canvas::new(buf, width, height);
     canvas.draw_text_sized(x, y, text, color, font_size);
