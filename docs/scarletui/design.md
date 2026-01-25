@@ -29,7 +29,7 @@ FlutterやSwiftUIの宣言的な書き心地を維持しつつ、Rust特有の�
 |          |           |        |            | owns       |
 +----------|-----------+        |            v            |
            | owns               |   +---------------------+   |
-           v                    |   | RenderObjectElement |   |
+           v                    |   | RenderElement |   |
 +----------------------+        |   | (Leaf Node)         |   |
 |      State<T>        |        |   +--------+--------+   |
 |    (Listenable)      |        |            | owns       |
@@ -46,7 +46,7 @@ FlutterやSwiftUIの宣言的な書き心地を維持しつつ、Rust特有の�
 ### Key Relationships
 
 * **View → Element**: 1対1の関係。ViewはElementの「設計図」であり、`create_element()` メソッドを通じてElementを生成します。
-* **Element → Element**: 親子関係（Tree構造）。`ComponentElement` は論理的な親となり、`RenderObjectElement` はRenderObjectへのブリッジとなります。
+* **Element → Element**: 親子関係（Tree構造）。`ComponentElement` は論理的な親となり、`RenderElement` はRenderObjectへのブリッジとなります。
 * **State → Element**: N対Nの購読関係。Stateが更新されると、それを購読しているElementがダーティとマークされ、再ビルドがトリガーされます。
 
 ---
@@ -58,8 +58,8 @@ FlutterやSwiftUIの宣言的な書き心地を維持しつつ、Rust特有の�
 | **View** | `struct CounterView` | 不変の設計図、Factory | `State<T>` | 作成後は不変 |
 | **State** | `State<T>` | 状態の保持と通知 | `Arc<StateInner>` | 複数の所有者で共有 |
 | **Element** | `ComponentElement<V>` | Viewの構成を管理 | 子Element、購読ID | State変化で再ビルド |
-| **Element** | `RenderObjectElement<V,R>` | RenderObjectをラップし、ライフサイクルを管理 | RenderObject（1つのみ） | View更新でRenderObjectを更新 |
-| **RenderObject** | `ContainerRenderObject` | 子RenderObjectを管理 | 子RenderObjectのリスト | レイアウト時に子を配置 |
+| **Element** | `RenderElement<V,R>` | RenderObjectをラップし、ライフサイクルを管理 | RenderObject（1つのみ） | View更新でRenderObjectを更新 |
+| **RenderObject** | `ContainerRenderObject` | 子Elementのレイアウト | なし（子はElementが保持） | レイアウト時に子を配置 |
 | **RenderObject** | `TextRenderObject` | レイアウトと描画を担当 | `Buffer`（Leafのみ） | ダーティフラグで更新 |
 | **Buffer** | `Buffer` | ピクセルデータを保持 | `Vec<u32>` (BGRA) | 描画時に再生成 |
 
@@ -86,13 +86,13 @@ FlutterやSwiftUIの宣言的な書き心地を維持しつつ、Rust特有の�
 │            │ create_element()         │                             │
 │            ▼                         ▼                             │
 │  ┌──────────────────┐    ┌───────────────────────┐                 │
-│  │ComponentElement  │    │RenderObjectElement<V,R>│                 │
+│  │ComponentElement  │    │   RenderElement<V,R>  │                 │
 │  │  : Element       │    │     : Element          │                 │
 │  │                  │    │                        │                 │
 │  │  owns:           │    │  owns:                 │                 │
 │  │  - View          │    │  - View                │                 │
 │  │  - child Element │    │  - RenderObject        │                 │
-│  │  - subscriptions │    │  (1つのみ)             │                 │
+│  │  - subscriptions │    │  - children Elements   │                 │
 │  └──────────────────┘    └───────────┬────────────┘                 │
 │                                      │                             │
 │                                      │ owns                        │
@@ -122,19 +122,19 @@ FlutterやSwiftUIの宣言的な書き心地を維持しつつ、Rust特有の�
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
-### 2.5 RenderTree (RenderObjectツリー)
+### 2.5 Compositing (Elementツリー直接合成)
 
-ElementツリーからRenderObjectツリーを構築し、描画・合成を専用のツリーで行います。
-これにより、View/Elementの更新とRenderObjectの描画を分離できます。
+RenderTreeは構築せず、Elementツリーを直接走査して合成します。
+PaintフェーズでRenderObjectのバッファを更新し、合成時にElementの位置とバッファを使用します。
+dirty elementの矩形を収集し、dirty rectのみクリア＆合成します。
 
 ```
 ElementTree (Component/RenderElement)
-        |
-        v
-RenderTree (RenderNode)
-  - render_object: Option<&RenderObject>
   - position: Point
-  - children: Vec<RenderNode>
+  - bounds: Rect
+  - children: Vec<Element>
+  - buffer: Option<Buffer>
+  => direct composite + dirty rects
 ```
 
 ### 2.3 Ownership & Borrowing Pattern (所有権と借用のパターン)
@@ -152,11 +152,11 @@ struct ComponentElement<V: View> {
     subscriptions: Vec<SubscriptionId>,  // State購読を管理
 }
 
-// RenderObjectElementはRenderObjectを1つだけ持ち、childrenは持たない
-struct RenderObjectElement<V: View, R: RenderObject> {
+// RenderElementはRenderObjectを1つ持ち、childrenも保持する
+struct RenderElement<V: View, R: RenderObject> {
     view: V,                    // Viewを所有
     render_object: R,           // RenderObjectを1つだけ所有
-    // childrenは持たない - RenderObjectが親子関係を管理する
+    children: Vec<Box<dyn Element>>,  // 子Elementを管理
 }
 
 // === RENDER OBJECT LAYER (Mutable State) ===
@@ -171,7 +171,6 @@ struct TextRenderObject {
 
 // Container RenderObject（VStack、HStackなど）
 struct VStackRenderObject {
-    children: Vec<Box<dyn RenderObject>>,  // 子RenderObjectを管理
     spacing: f32,              // 子の間隔
     frame: Rect,               // レイアウト結果を保持
 }
@@ -253,8 +252,8 @@ struct State<T> {
 | トレイト | 実装する型 | 役割 | 主要メソッド |
 |--------|-----------|------|-------------|
 | `View` | 全てのView型 | FactoryとしてElementを生成 | `create_element()`, `listenables()` |
-| `Element` | Component/RenderObjectElement | Elementツリーの共通インターフェース | `id()`, `update()`, `children()`, `mount()` |
-| `RenderObject` | レイアウト/描画担当型 | レイアウト計算と描画の実行 | `layout()`, `render()`, `hit_test()` |
+| `Element` | Component/RenderElement | Elementツリーの共通インターフェース | `id()`, `update()`, `children()`, `mount()` |
+| `RenderObject` | レイアウト/描画担当型 | レイアウト計算と描画の実行 | `layout()`, `layout_with_children()`, `render()` |
 | `Listenable` | `State<T>` | 型消去された購読インターフェース | `subscribe_any()` |
 | `ViewTuple` | タプル `(A,B,...)` | 複数Viewを一括でElement化 | `create_elements()`, `collect_listenables()` |
 
@@ -313,7 +312,7 @@ pub trait View: 'static {
 
 ## 4. Layer Detail: The Element Layer
 
-ScarletUI 2.0はFlutterと同様に、**Element TreeとRenderObject Treeの2つの独立したツリー構造**を持っています。これにより、効率的な更新とレイアウトを実現します。
+ScarletUI 2.0は**Element Treeのみを保持**し、RenderObject Treeは構築しません。更新・レイアウト・合成はElementツリーを基準に行います。
 
 ### A. ComponentElement (The Manager)
 
@@ -335,126 +334,59 @@ pub struct ComponentElement<V: View> {
 ```
 
 
-### B. RenderObjectElement (The Bridge)
+### B. RenderElement (The Bridge)
 
-プリミティブなView（`Text`, `Rectangle`, `VStack` など）に対応します。**RenderObjectを1つだけ持ち、そのライフサイクルを管理します**。
+プリミティブなView（`Text`, `Rectangle`, `VStack` など）に対応します。**RenderObjectを1つ持ち、Elementの子を保持します**。
 
 * **責務**:
 * `RenderObject` の生成と保持（1つのみ）。
 * Viewのプロパティ変更を `RenderObject` に反映（`update`）。
-* **重要**: 子Elementは持たない。子Elementは親ComponentElementが管理する。
-* **重要**: 子RenderObjectも持たない。子RenderObjectはRenderObject同士が管理する。
+* `layout_with_children` を通じて子Elementのレイアウトを委譲。
+* 描画バッファの取得（`get_buffer()`）。
 
 
 * **構造**:
 ```rust
-pub struct RenderObjectElement<V: View, R: RenderObject> {
+pub struct RenderElement<V: View, R: RenderObject> {
     view: V,
-    render_object: R,  // 1つのRenderObjectのみ
-    // ★子は一切持たない
+    render_object: R,                 // 1つのRenderObjectのみ
+    children: Vec<Box<dyn Element>>,  // 子Elementを保持
 }
 ```
 
 
-### C. RenderObject Tree（重要）
+### C. Layout & Composition（重要）
 
-**RenderObject同士が独立した親子関係を持ちます**。Container RenderObject（VStackRenderObjectなど）が`Vec`で子RenderObjectを直接管理します。
+**Elementツリーのみを保持し、RenderObjectツリーは構築しません**。Container RenderObjectは`layout_with_children`経由で子Elementをレイアウトします。
+合成はElementツリーを直接走査し、dirty rectのみをクリア＆合成します。
 
 ```ascii
-Element Tree              RenderObject Tree
-===========               ==============
-[ComponentElement]        (なし - 管理対象なし)
+Element Tree (only)
+===================
+[ComponentElement]
   |
-  +-- [RenderObjectElement<TextView>]
-         |                         |
-         |                         +-- [TextRenderObject] (Leaf)
-         |
-  +-- [RenderObjectElement<VStackView>]
-         |                         |
-         |                         +-- [VStackRenderObject] (Container)
-         |                                   |
-         |                                   +-- Vec: children
-         |                                   |    |
-         |                                   |    +-- [TextRenderObject]
-         |                                   |    +-- [ButtonRenderObject]
+  +-- [RenderElement<TextView>]   -> TextRenderObject
+  |
+  +-- [RenderElement<VStackView>] -> VStackRenderObject
+        |
+        +-- children Elements
 ```
 
 
-### D. RenderObjectツリーの構築アルゴリズム（重要）
+### D. レイアウトと描画の流れ（重要）
 
-**「子が親を探して、自分を差し出しに行く」** というアルゴリズムでRenderObjectツリーが構築されます。
-
-#### 重要な原則
-
-1. **Elementは子のRenderObjectを持たない**: Elementはあくまで「子Element」への参照しか持たない
-2. **RenderObjectが子RenderObjectを管理する**: Container RenderObjectが`Vec<Box<dyn RenderObject>>`で子を管理
-3. **計算はRenderObjectの仕事**: Elementは一切のレイアウト計算をしない
-
-#### ツリー構築の流れ（mountフェーズ）
-
-例: `VStack { Text("Hello") }` の場合
-
-```ascii
-Step 1: VStackElementが生成される
-  └─ render_object: VStackRenderObjectを作成
-      └─ children: Vec<> (空)
-
-Step 2: TextElementが生成される
-  └─ render_object: TextRenderObjectを作成
-      └─ (まだ誰にも属していない)
-
-Step 3: TextElement.mount() が呼ばれる
-  └─ attachRenderObject() を実行
-      └─ 親Elementを遡って「RenderObjectを持つ先祖」を探す
-          └─ VStackElementを見つける
-              └─ 「私のRenderObjectを、あなたのRenderObjectに追加して」
-                  └─ VStackRenderObject.children.push(TextRenderObject)
-```
-
-#### メソッドの責務
-
-| メソッド | 呼び出し元 | 責務 |
-|---------|-----------|------|
-| `mount()` | フレームワーク | Elementをツリーに登録し、RenderObjectを構築する |
-| `attachRenderObject()` | 子Element | 親を探し、自分のRenderObjectを親のRenderObjectに登録 |
-| `insertRenderObjectChild()` | 親Element | 自分のRenderObjectに子RenderObjectを追加 |
-| `layout()` | フレームワーク | RenderObjectのlayout()を呼ぶだけ（計算しない） |
+* **layout**: `RenderElement::layout` が `RenderObject::layout_with_children` を呼び、子Elementの位置とサイズを決める。  
+* **paint**: dirty elementのみ `render()` を呼び、バッファを更新する。  
+* **composite**: Elementツリーを直接走査し、dirty rectの範囲だけ合成する。
 
 #### コード例
 
 ```rust
-impl<V: View + Clone, R: RenderObject> Element for RenderObjectElement<V, R> {
-    fn mount(&mut self, parent: Option<&mut dyn Element>) {
-        // 1. RenderObjectはViewから既に作成されていると仮定
-        // 2. 親を探して、自分のRenderObjectを登録
-        if let Some(parent) = parent {
-            self.attach_render_object(parent);
-        }
-    }
-
-    fn attach_render_object(&self, parent: &dyn Element) {
-        // 親Elementを遡って「RenderObjectを持つ先祖」を探す
-        let ancestor = parent.find_ancestor_render_object_element();
-
-        if let Some(ancestor) = ancestor {
-            // 「私のRenderObjectを、あなたのRenderObjectに追加してください」
-            ancestor.insert_render_object_child(
-                Box::new(self.render_object.clone()),
-                None
-            );
-        }
-    }
-
+impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
     fn layout(&mut self, constraints: LayoutConstraints) -> Size {
         // ★計算はしない。RenderObjectに委譲するだけ。
-        self.render_object.layout(constraints)
-    }
-}
-
-impl VStackRenderObject {
-    fn insert_render_object_child(&mut self, child: Box<dyn RenderObject>, _slot: Option<&dyn Any>) {
-        // ★ここでRenderObjectツリーが繋がる
-        self.children.push(child);
+        self.render_object
+            .layout_with_children(constraints, &mut self.children)
     }
 }
 ```
@@ -510,7 +442,7 @@ Stateが変更されたとき、どのように画面が更新されるかのフ
 
 
 6. **Render Update**:
-* 末端の `RenderObjectElement` が `RenderObject` の値を更新。
+* 末端の `RenderElement` が `RenderObject` の値を更新。
 * `RenderObject` が `DirtyFlags::PAINT` を立て、再描画される。
 
 ---
@@ -848,11 +780,12 @@ impl<C: ViewTuple + 'static> View for VStack<C> {
         // VStack用のRenderObjectを作成
         let render_object = VStackRenderObject::new(self.spacing, self.alignment);
 
-        // RenderObjectElementを作って返す
-        // ★RenderObjectElementはchildrenを持たない
-        Box::new(RenderObjectElement::new(
+        // RenderElementを作って返す
+        // RenderElementはchildrenを保持し、RenderObjectがlayout_with_childrenで配置する
+        Box::new(RenderElement::with_children(
             self.clone(),
             render_object,
+            self.content.create_elements(),
         ))
     }
 
@@ -917,8 +850,8 @@ impl<V: View> View for Padding<V> {
         // Padding用のRenderObjectを作成
         let render_object = PaddingRenderObject::new(self.insets);
 
-        // RenderObjectElementを作って返す
-        Box::new(RenderObjectElement::new(
+        // RenderElementを作って返す
+        Box::new(RenderElement::new(
             self.clone(),
             render_object,
         ))
@@ -2415,40 +2348,21 @@ fn main() {
 
 RenderObjectは、UIの描画とレイアウトを担当する最下位のコンポーネントです。
 
-### Element Tree vs RenderObject Tree
+### Element Tree と RenderObject
 
-**重要**: ScarletUIはFlutterと同様に、**2つの独立したツリー構造**を持ちます。
-
-| 特徴 | Element Tree | RenderObject Tree |
-|-----|-------------|-------------------|
-| **目的** | Viewの構造を管理 | レイアウトと描画を担当 |
-| **構造** | ComponentElementとRenderObjectElementの親子関係 | RenderObject同士の親子関係 |
-| **ライフサイクル** | Stateの変更で再構築される | レイアウト/描画時に更新される |
-| **所有権** | RenderObjectElementは1つのRenderObjectを持つ | Container RenderObjectは子RenderObjectを持つ |
+**重要**: ScarletUIは**Element Treeのみを保持**し、RenderObject Treeは構築しません。
+各RenderElementが1つのRenderObjectを持ち、`layout_with_children`で子Elementを配置します。
 
 ```ascii
-Element Tree                  RenderObject Tree
-============                  ================
-[ComponentElement]            (no RenderObject)
+Element Tree (only)
+===================
+[ComponentElement]
   |
-  +-- [RenderObjectElement<TextView>]
-  |       |                          |
-  |       | owns (1:1)               |
-  |       v                          v
-  |   [TextView] --------> [TextRenderObject] (Leaf, has buffer)
+  +-- [RenderElement<TextView>]   -> [TextRenderObject] (Leaf, has buffer)
   |
-  +-- [RenderObjectElement<VStackView>]
-          |                          |
-          | owns (1:1)               |
-          v                          v
-      [VStackView] -------> [VStackRenderObject] (Container)
-                                       |
-                                       | owns children
-                                       v
-                              +----------------+
-                              |                |
-                              v                v
-                        [TextRenderObject] [ButtonRenderObject]
+  +-- [RenderElement<VStackView>] -> [VStackRenderObject] (Container)
+        |
+        +-- children Elements
 ```
 
 ### RenderObjectの種類
@@ -2465,13 +2379,12 @@ Element Tree                  RenderObject Tree
 * **例**: `TextRenderObject`, `ImageRenderObject`, `ButtonRenderObject`
 
 #### 2. Container RenderObject
-VStack、HStack、ZStackなど、子RenderObjectをレイアウトするRenderObjectです。
+VStack、HStack、ZStackなど、子ElementをレイアウトするRenderObjectです。
 
 * **特徴**:
-* `Vec<Box<dyn RenderObject>>`で子RenderObjectを所有する。
+* 子Elementは`RenderElement`が保持する（RenderObjectは子を所有しない）。
 * 自身の`Buffer`は持たない（描画は子に委譲）。
-* `layout()`で**座標計算（x, yの決定）**を行う。
-* `performLayout()`で子の位置を配置する。
+* `layout_with_children()`で**座標計算（x, yの決定）**を行う。
 
 * **例**: `VStackRenderObject`, `HStackRenderObject`, `ZStackRenderObject`
 
@@ -2480,9 +2393,6 @@ VStack、HStack、ZStackなど、子RenderObjectをレイアウトするRenderOb
 ```rust
 /// VStack用のRenderObject - 子を垂直に配置
 pub struct VStackRenderObject {
-    /// ★子RenderObjectを直接管理する（Vecベース）
-    children: Vec<Box<dyn RenderObject>>,
-
     /// 子の間隔
     spacing: f32,
 
@@ -2496,25 +2406,17 @@ pub struct VStackRenderObject {
     dirty: DirtyFlags,
 }
 
-impl VStackRenderObject {
-    /// 子RenderObjectを追加（attachRenderObjectから呼ばれる）
-    pub fn insert_render_object_child(
-        &mut self,
-        child: Box<dyn RenderObject>,
-        _slot: Option<&dyn Any>
-    ) {
-        self.children.push(child);
-        self.mark_dirty(DirtyFlags::LAYOUT);
-    }
-}
-
 impl RenderObject for VStackRenderObject {
-    fn layout(&mut self, constraints: LayoutConstraints) -> Size {
+    fn layout_with_children(
+        &mut self,
+        constraints: LayoutConstraints,
+        children: &mut [Box<dyn Element>],
+    ) -> Size {
         let mut y_offset = 0.0;
         let mut max_width = 0.0;
 
         // ★ここで座標計算を行う（Elementはしない）
-        for child in &mut self.children {
+        for child in children.iter_mut() {
             // 子に緩い制約を渡してサイズを計測
             let child_constraints = LayoutConstraints::loose(Size::new(
                 constraints.max.width,
@@ -2524,6 +2426,7 @@ impl RenderObject for VStackRenderObject {
             let child_size = child.layout(child_constraints);
 
             // ★子のフレームを配置（x, y座標の決定）
+            child.set_position(Point::new(0.0, y_offset));
             child.set_frame(Rect::new(
                 Point::new(0.0, y_offset),  // ★ここで座標計算！
                 child_size,
@@ -2542,16 +2445,16 @@ impl RenderObject for VStackRenderObject {
 }
 ```
 
-### RenderObjectElementとRenderObjectの関係
+### RenderElementとRenderObjectの関係
 
-**1対1の対応**: `RenderObjectElement<V, R>`は1つの`RenderObject`を持ちます。
+**1対1の対応**: `RenderElement<V, R>`は1つの`RenderObject`を持ちます。
+加えて、Elementツリーの子を保持し、RenderObjectが`layout_with_children`で配置します。
 
 ```rust
-// ★RenderObjectElementは子を持たない
-pub struct RenderObjectElement<V: View, R: RenderObject> {
+pub struct RenderElement<V: View, R: RenderObject> {
     view: V,
-    render_object: R,  // 1つのみ
-    // ★childrenは持たない - 子RenderObjectはRenderObjectが管理する
+    render_object: R,            // 1つのみ
+    children: Vec<Box<dyn Element>>,
 }
 ```
 
@@ -2569,10 +2472,11 @@ impl Element for VStackElement {
 }
 
 // ★正しい実装（RenderObjectが計算する）
-impl Element for RenderObjectElement<V, R> {
+impl Element for RenderElement<V, R> {
     fn layout(&mut self, constraints: LayoutConstraints) -> Size {
         // ★Elementは計算しない。RenderObjectに委譲するだけ。
-        self.render_object.layout(constraints)
+        self.render_object
+            .layout_with_children(constraints, &mut self.children)
     }
 }
 ```
@@ -2592,55 +2496,43 @@ impl Element for RenderObjectElement<V, R> {
 [Composite] ← Compositorがウィンドウバッファに転送
 ```
 
-### RenderObjectトレイトの完全版
+### RenderObjectトレイトの概要
 
 ```rust
 pub trait RenderObject: Any {
-    // === Identity ===
-    fn id(&self) -> NodeId;
-    fn type_id(&self) -> TypeId;
-    fn type_name(&self) -> &'static str;
-
-    // === Tree Structure ===
-    fn parent(&self) -> Option<NodeId>;
-    fn set_parent(&mut self, parent: NodeId);
-    fn children(&self) -> &[Box<dyn RenderObject>];
-    fn children_mut(&mut self) -> &mut [Box<dyn RenderObject>];
-
-    // === Lifecycle ===
-    /// 自身と子のレイアウトを計算
+    /// 自身のレイアウト
     fn layout(&mut self, constraints: LayoutConstraints) -> Size;
 
-    /// 自身のバッファに描画
+    /// 現在のサイズ
+    fn size(&self) -> Size;
+
+    /// 自身のバッファへ描画
     fn render(&mut self);
 
-    // === Frame & Geometry ===
-    fn frame(&self) -> Rect;
-    fn set_frame(&mut self, frame: Rect);
+    /// 描画バッファ（コンテナはNone）
+    fn get_buffer(&self) -> Option<&Buffer> {
+        None
+    }
 
-    // === Buffer ===
-    /// 自身の描画バッファを返す（コンテナはNoneを返す）
-    fn get_buffer(&self) -> Option<&Buffer>;
-    fn get_buffer_mut(&mut self) -> Option<&mut Buffer>;
+    /// キャッシュバッファを破棄
+    fn clear_buffer(&mut self) {}
 
-    // === Update ===
-    /// 新しいViewで更新（Reconciliation時に呼ばれる）
+    /// ヒットテスト
+    fn hit_test(&self, point: Point) -> bool;
+
+    /// Downcast用
+    fn as_any(&self) -> &dyn Any;
+    fn as_any_mut(&mut self) -> &mut dyn Any;
+
+    /// View更新
     fn update(&mut self, new_view: &dyn View) -> UpdateResult;
-    fn try_update(&mut self, new_view: &dyn View) -> Option<UpdateResult>;
 
-    // === Event Handling ===
-    fn hit_test(&self, point: Point) -> HitResult;
-    fn handle_event(&mut self, event: &Event, ctx: &mut EventContext);
-
-    // === Focus ===
-    fn is_focusable(&self) -> bool;
-    fn request_focus(&mut self) -> bool;
-    fn lose_focus(&mut self);
-
-    // === Dirty Tracking ===
-    fn mark_dirty(&mut self, flags: DirtyFlags);
-    fn is_dirty(&self) -> bool;
-    fn clear_dirty(&mut self);
+    /// 子Element込みのレイアウト
+    fn layout_with_children(
+        &mut self,
+        constraints: LayoutConstraints,
+        children: &mut [Box<dyn Element>],
+    ) -> Size;
 }
 ```
 
@@ -2704,12 +2596,16 @@ impl RenderObject for TextRenderObject {
 
 ```rust
 impl RenderObject for VStackRenderObject {
-    fn layout(&mut self, constraints: LayoutConstraints) -> Size {
+    fn layout_with_children(
+        &mut self,
+        constraints: LayoutConstraints,
+        children: &mut [Box<dyn Element>],
+    ) -> Size {
         let mut y_offset = 0.0;
         let mut max_width = 0.0;
 
         // 子供をレイアウト
-        for child in &mut self.children {
+        for child in children.iter_mut() {
             let child_constraints = LayoutConstraints::loose(Size::new(
                 constraints.max.width,
                 f32::MAX, // 高さは制限しない
@@ -2751,38 +2647,31 @@ ScarletUIはFlutterと同様に、**Mount（初回構築）**と**Update（更�
 ```rust
 // Viewのcreate_element()が呼ばれる
 let element = text_view.create_element();
-// -> RenderObjectElement<Text, TextRenderObject>が生成される
+// -> RenderElement<Text, TextRenderObject>が生成される
 ```
 
-#### ステップ2: Element → RenderObject (RenderObjectElementのみ)
+#### ステップ2: RenderElementの生成
 
-`RenderObjectElement`の`mount()`で、`View.create_render_object()`が呼ばれます。
+`View::create_element()` で `RenderElement` が生成されます。ここでRenderObjectと子Elementをまとめて作成します。
 
 ```rust
-impl<V: View, R: RenderObject> RenderObjectElement<V, R> {
-    fn mount(&mut self, parent: Option<&mut Element>) {
-        // RenderObjectを生成
-        self.render_object = self.view.create_render_object();
-
-        // 親RenderObjectにアタッチ
-        if let Some(parent_element) = parent {
-            if let Some(parent_ro) = parent_element.render_object_mut() {
-                parent_ro.attach_render_object(self.render_object_mut());
-            }
-        }
+impl<C: ViewTuple + Clone + 'static> View for VStack<C> {
+    fn create_element(&self) -> Box<dyn Element> {
+        let render_object = VStackRenderObject::new(self.spacing, self.alignment);
+        let children = self.content.create_elements();
+        Box::new(RenderElement::with_children(self.clone(), render_object, children))
     }
 }
 ```
 
-#### ステップ3: RenderObject Treeの構築
+#### ステップ3: レイアウトと描画
 
-Container RenderObjectが子RenderObjectをアタッチします。
+RenderObject Treeは作らず、`layout_with_children` と Elementツリー走査で処理します。
 
 ```rust
-impl VStackRenderObject {
-    fn attach_render_object(&mut self, child: Box<dyn RenderObject>) {
-        child.set_parent(self.id());
-        self.children.push(child);
+impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
+    fn layout(&mut self, constraints: LayoutConstraints) -> Size {
+        self.render_object.layout_with_children(constraints, &mut self.children)
     }
 }
 ```
@@ -2814,7 +2703,7 @@ impl<V: View + Clone> ComponentElement<V> {
 新旧Viewの型を比較し、再利用するか置換するかを決定します。
 
 ```rust
-impl<V: View + Clone, R: RenderObject> Element for RenderObjectElement<V, R> {
+impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
     fn update(&mut self, new_view: &dyn View) -> UpdateResult {
         // 型チェック
         if new_view.type_id() != self.view.type_id() {
@@ -2857,15 +2746,6 @@ FlutterのようなReconciliationの全体像です。
 fn mount_element(element: &mut dyn Element, parent: Option<&mut dyn Element>) {
     element.mount(parent);
 
-    // RenderObjectElementの場合、RenderObjectを親にアタッチ
-    if let Some(ro_element) = element.as_render_object_element_mut() {
-        if let Some(parent) = parent {
-            if let Some(parent_ro) = parent.render_object_mut() {
-                parent_ro.attach_render_object(ro_element.render_object_mut());
-            }
-        }
-    }
-
     // 子Elementを再帰的にマウント
     for child in element.children_mut() {
         mount_element(child, Some(element));
@@ -2889,9 +2769,9 @@ fn update_element(element: &mut dyn Element, new_view: &dyn View) {
             comp.update(new_view);
             comp.rebuild();
         }
-        Element::RenderObject(ro) => {
-            // RenderObjectElementはRenderObjectを更新
-            ro.update(new_view);
+        Element::RenderElement(render) => {
+            // RenderElementはRenderObjectを更新
+            render.update(new_view);
         }
     }
 }
@@ -3032,10 +2912,6 @@ impl RenderObject for TextRenderObject {
     fn get_buffer(&self) -> Option<&Buffer> {
         self.buffer.as_ref()
     }
-
-    fn get_buffer_mut(&mut self) -> Option<&mut Buffer> {
-        self.buffer.as_mut()
-    }
 }
 ```
 
@@ -3043,7 +2919,6 @@ impl RenderObject for TextRenderObject {
 
 ```rust
 pub struct VStackRenderObject {
-    children: Vec<Box<dyn RenderObject>>,
     // buffer: Option<Buffer>,  ← コンテナはバッファを持たない
     frame: Rect,
 }
@@ -3051,9 +2926,7 @@ pub struct VStackRenderObject {
 impl RenderObject for VStackRenderObject {
     fn render(&mut self) {
         // 子供だけをレンダリング
-        for child in &mut self.children {
-            child.render();
-        }
+        // 子Elementの描画はElement側で呼ばれる
     }
 
     fn get_buffer(&self) -> Option<&Buffer> {
@@ -3066,7 +2939,8 @@ impl RenderObject for VStackRenderObject {
 
 ## 22. Compositor
 
-CompositorはRenderObjectツリーを巡回し、各バッファをウィンドウバッファに合成します。
+CompositorはElementツリーを巡回し、各要素のバッファをウィンドウバッファに合成します。
+dirty elementの矩形だけをクリア＆合成する最適化も行います。
 
 ```ascii
 Window Buffer
@@ -3075,12 +2949,12 @@ Window Buffer
       |
 [Compositor]
       |
-      +-- [VStackRenderObject]
-      |      +-- [TextRenderObject] --> Buffer A ─┐
-      |      +-- [ButtonRenderObject] --> Buffer B ─┼─> Composite
-      |                                           │
-      +-- [HStackRenderObject]                     │
-             +-- [ImageRenderObject] --> Buffer C ─┘
+      +-- [RenderElement<VStack>] (no buffer)
+      |      +-- [RenderElement<Text>]   -> Buffer A ─┐
+      |      +-- [RenderElement<Button>] -> Buffer B ─┼─> Composite
+      |                                               │
+      +-- [RenderElement<HStack>] (no buffer)         │
+             +-- [RenderElement<Image>] -> Buffer C ─┘
 ```
 
 ### Compositorの実装
@@ -3097,37 +2971,14 @@ impl Compositor {
         }
     }
 
-    /// RenderObjectツリーを巡回して合成
-    pub fn composite_tree(&mut self, root: &dyn RenderObject) {
-        // 背景クリア
-        self.clear(Color::WHITE);
-
-        // 深さ優先で巡回
-        self.composite_node(root, Point::ZERO);
-    }
-
-    fn composite_node(&mut self, node: &dyn RenderObject, origin: Point) {
-        let frame = node.frame();
-        let absolute_origin = origin + frame.origin;
-
-        // 子供を先に処理（後方の要素ほど手前に表示されるため、手前から）
-        for child in node.children().iter() {
-            self.composite_node(child.as_ref(), absolute_origin);
-        }
-
-        // 自身のバッファがあれば合成
-        if let Some(buffer) = node.get_buffer() {
-            self.window_buffer.composite(
-                buffer,
-                absolute_origin.x as i32,
-                absolute_origin.y as i32,
-                1.0, // opacity
-            );
-        }
+    /// Elementツリーを巡回して合成（dirty rect対応）
+    pub fn composite_elements_with_dirty(&mut self, root: &dyn Element, dirty_ids: &[ElementId]) {
+        // 背景クリアとdirty rect合成を行う
+        // (詳細は実装参照)
     }
 
     fn clear(&mut self, color: Color) {
-        let pixel = color.as_bgra();
+        let pixel = color.to_bgra();
         for px in self.window_buffer.as_mut_slice() {
             *px = pixel;
         }
@@ -3160,8 +3011,8 @@ impl<V: View> View for Opacity<V> {
         // Opacity用のRenderObjectを作成
         let render_object = OpacityRenderObject::new(self.value);
 
-        // RenderObjectElementを作って返す
-        Box::new(RenderObjectElement::new(
+        // RenderElementを作って返す
+        Box::new(RenderElement::new(
             self.clone(),
             render_object,
         ))
@@ -3284,10 +3135,10 @@ pub trait Application: View {
             }
 
             // 4.2 レンダリングパイプラインの実行
-            let window_buffer = pipeline.render();
-
-            // 4.3 画面に提示
-            platform_window.present(window_buffer);
+            if let Some(window_buffer) = pipeline.render() {
+                // 4.3 画面に提示
+                platform_window.present(window_buffer);
+            }
 
             // 4.4 フレームレート調整
             let frame_time = frame_start.elapsed();
@@ -3328,61 +3179,49 @@ impl RenderingPipeline {
 
     /// 初期レイアウトを実行し、Windowの情報を返す
     pub fn layout_initial(&mut self) -> (String, String, Size) {
-        // 1. Build Phase
-        self.pipeline_owner.flush_build(&mut self.element_tree);
+        // 1. Window Viewから情報を抽出
+        let (app_id, title, preferred_size) = self.extract_window_info();
 
-        // 2. Layout Phase
-        self.pipeline_owner.flush_layout(&mut self.element_tree, self.window_size);
+        // 2. 初回レイアウト
+        let constraints = LayoutConstraints::loose(preferred_size.width, preferred_size.height);
+        let size = self.element_tree.layout(constraints);
 
-        // 3. Window Viewから情報を抽出
-        let (app_id, title, size) = if let Some(root) = self.element_tree.root() {
-            self.extract_window_info(root)
-        } else {
-            (
-                "com.example.scarletui".to_string(),
-                "ScarletUI".to_string(),
-                Size::new(800.0, 600.0),
-            )
-        };
-
-        // 4. Compositorを作成
+        // 3. Compositorを作成
         self.compositor = Some(Compositor::new(size));
         self.window_size = size;
+
+        // 4. 初回描画を予約
+        if let Some(root) = self.element_tree.root() {
+            self.pipeline_owner.mark_needs_paint(root.id());
+        }
 
         (app_id, title, size)
     }
 
-    /// ElementTreeからWindow Viewを探し、app_id、タイトルとサイズを返す
-    fn extract_window_info(&self, root: &dyn Element) -> (String, String, Size) {
-        // ElementTreeを深さ優先で探索してWindow Viewを探す
-        if let Some(window_view) = self.find_window_view(root) {
-            // Windowからapp_id、タイトルとサイズを取得
-            let app_id = window_view.app_id();
-            let title = window_view.title();
-            let size = window_view.window_size();
-            (app_id, title, size)
-        } else {
-            // Windowがない場合はデフォルト値
-            (
-                "com.example.scarletui".to_string(),
-                "ScarletUI".to_string(),
-                Size::new(800.0, 600.0),
-            )
+    /// ElementTreeからWindow View情報を抽出
+    fn extract_window_info(&self) -> (String, String, Size) {
+        let default_app_id = "com.example.scarletui".to_string();
+        let default_title = "ScarletUI".to_string();
+        let default_size = Size::new(800.0, 600.0);
+
+        if let Some(root) = self.element_tree.root() {
+            if let Some(info) = self.find_window_view(root) {
+                return info;
+            }
         }
+
+        (default_app_id, default_title, default_size)
     }
 
     /// ElementTreeからWindow Viewを再帰的に探す
-    fn find_window_view(&self, element: &dyn Element) -> Option<&Window<dyn View>> {
-        // ElementのViewがWindowかどうかをチェック
-        // 実装はAnyによるダウンキャストで行う
-        if let Some(window) = element.as_any().downcast_ref::<Window<dyn View>>() {
-            return Some(window);
+    fn find_window_view(&self, element: &dyn Element) -> Option<(String, String, Size)> {
+        if let Some(info) = element.get_window_info() {
+            return Some(info);
         }
 
-        // 子Elementを再帰的に探索
         for child in element.children() {
-            if let Some(window) = self.find_window_view(child) {
-                return Some(window);
+            if let Some(info) = self.find_window_view(child.as_ref()) {
+                return Some(info);
             }
         }
 
@@ -3391,11 +3230,17 @@ impl RenderingPipeline {
 
     pub fn resize(&mut self, new_size: Size) {
         self.window_size = new_size;
-        self.compositor = Some(Compositor::new(new_size));
+        if let Some(ref mut compositor) = self.compositor {
+            compositor.resize(new_size);
+        }
+
+        if let Some(root) = self.element_tree.root_mut() {
+            root.clear_buffers();
+        }
 
         // 全体にレイアウト再計算を要求
-        if let Some(root) = self.element_tree.root_mut() {
-            root.mark_dirty(DirtyFlags::LAYOUT);
+        if let Some(root) = self.element_tree.root() {
+            self.pipeline_owner.mark_needs_layout(root.id());
         }
     }
 
@@ -3407,17 +3252,20 @@ impl RenderingPipeline {
         // Stateのコールバック内でComponentElementがdirtyフラグを立てる
     }
 
-    pub fn render(&mut self) -> &Buffer {
+    pub fn render(&mut self) -> Option<&Buffer> {
         // 1. Build/Layout/Paint Phase
         self.pipeline_owner.flush(&mut self.element_tree, self.window_size);
 
         // 2. 合成フェーズ
-        if let Some(root) = self.element_tree.root() {
-            let render_object = root.render_object();
-            self.compositor.as_mut().unwrap().composite_tree(render_object);
+        if let Some(ref mut compositor) = self.compositor {
+            if let Some(root) = self.element_tree.root() {
+                let dirty_ids = self.pipeline_owner.last_paint_ids();
+                compositor.composite_elements_with_dirty(root, dirty_ids);
+            }
+            return Some(compositor.window_buffer());
         }
 
-        self.compositor.as_ref().unwrap().window_buffer()
+        None
     }
 }
 ```
@@ -3450,13 +3298,87 @@ impl PipelineOwner {
 
     fn flush_layout(&mut self, element_tree: &mut ElementTree, window_size: Size) {
         let dirty_layout = std::mem::take(&mut self.dirty_layout);
+        if dirty_layout.is_empty() {
+            return;
+        }
 
-        // 依存順にソートしてレイアウト（親→子の順）
-        let sorted = self.topological_sort(element_tree, dirty_layout);
+        let constraints = LayoutConstraints::loose(window_size.width, window_size.height);
 
-        for id in sorted {
-            if let Some(element) = element_tree.get_mut(id) {
-                element.layout(element_tree, LayoutConstraints::loose(window_size));
+        let root_id = match element_tree.root() {
+            Some(root) => root.id(),
+            None => return,
+        };
+
+        // できるだけ局所レイアウトにする
+        let mut layout_roots = BTreeSet::new();
+        let mut full_layout = false;
+
+        for id in dirty_layout {
+            if id == root_id {
+                full_layout = true;
+                break;
+            }
+
+            let path = match element_tree.find_path_ids(id) {
+                Some(path) => path,
+                None => {
+                    full_layout = true;
+                    break;
+                }
+            };
+
+            let mut chosen_id = path[path.len() - 2];
+            let mut has_constraints = false;
+
+            for ancestor_id in path[..path.len() - 1].iter().rev() {
+                let constraints_opt = element_tree
+                    .find_element_mut(*ancestor_id)
+                    .and_then(|element| element.last_layout_constraints());
+                let Some(ancestor_constraints) = constraints_opt else {
+                    has_constraints = false;
+                    break;
+                };
+
+                chosen_id = *ancestor_id;
+                has_constraints = true;
+
+                if ancestor_constraints.is_tight() {
+                    break;
+                }
+            }
+
+            if !has_constraints {
+                full_layout = true;
+                break;
+            }
+
+            layout_roots.insert(chosen_id);
+        }
+
+        if full_layout || layout_roots.is_empty() {
+            element_tree.layout(constraints);
+            if let Some(root) = element_tree.root() {
+                self.dirty_paint.insert(root.id());
+            }
+            return;
+        }
+
+        let mut fallback_full = false;
+        for id in layout_roots {
+            if let Some(element) = element_tree.find_element_mut(id) {
+                if let Some(local_constraints) = element.last_layout_constraints() {
+                    element.layout(local_constraints);
+                    self.dirty_paint.insert(id);
+                } else {
+                    fallback_full = true;
+                }
+            }
+        }
+
+        if fallback_full {
+            element_tree.layout(constraints);
+            if let Some(root) = element_tree.root() {
+                self.dirty_paint.insert(root.id());
             }
         }
     }
@@ -3483,9 +3405,16 @@ pub struct Window<V: View> {
     app_id: String,
     title: String,
     size: Size,
-    child: V,
+    min_size: Option<Size>,
+    max_size: Option<Size>,
     resizable: bool,
     decorated: bool,
+    content: V,
+}
+
+pub trait WindowViewInfo {
+    fn window_info(&self) -> (String, String, Size);
+    fn window_size_limits(&self) -> WindowSizeLimits;
 }
 
 impl<V: View> Window<V> {
@@ -3494,9 +3423,11 @@ impl<V: View> Window<V> {
             app_id: "com.example.scarletui".to_string(),
             title: title.into(),
             size: Size::new(800.0, 600.0),
-            child,
+            min_size: None,
+            max_size: None,
             resizable: true,
             decorated: true,
+            content: child,
         }
     }
 
@@ -3507,6 +3438,22 @@ impl<V: View> Window<V> {
 
     pub fn size(mut self, size: Size) -> Self {
         self.size = size;
+        self
+    }
+
+    pub fn min_size(mut self, size: Size) -> Self {
+        self.min_size = Some(size);
+        self
+    }
+
+    pub fn max_size(mut self, size: Size) -> Self {
+        self.max_size = Some(size);
+        self
+    }
+
+    pub fn size_limits(mut self, min: Size, max: Size) -> Self {
+        self.min_size = Some(min);
+        self.max_size = Some(max);
         self
     }
 
@@ -3541,12 +3488,18 @@ impl<V: View> Window<V> {
 impl<V: View> View for Window<V> {
     fn create_element(&self) -> Box<dyn Element> {
         // Window用のRenderObjectを作成
-        let render_object = WindowRenderObject::new(self.title.clone(), self.size);
+        let render_object = WindowRenderObject::new(
+            self.title.clone(),
+            self.size,
+            self.decorated,
+        );
 
-        // RenderObjectElementを作って返す
-        Box::new(RenderObjectElement::new(
+        let children = alloc::vec![self.content.create_element()];
+
+        Box::new(WindowRenderElement::new(
             self.clone(),
             render_object,
+            children,
         ))
     }
 
@@ -3556,15 +3509,19 @@ impl<V: View> View for Window<V> {
 }
 ```
 
+Windowは`WindowViewInfo`を実装し、`app_id`/`title`/`size`に加えて
+最小/最大サイズの情報も提供します。
+
 ### ウィンドウの使用例
 
 ```rust
 impl MyApp {
     fn body(&self) -> impl View {
-        Window::new("My Application", self.content())
-            .size(Size::new(1024.0, 768.0))
-            .resizable(true)
-            .decorated(true)
+Window::new("My Application", self.content())
+    .size(Size::new(1024.0, 768.0))
+    .size_limits(Size::new(640.0, 480.0), Size::new(1920.0, 1080.0))
+    .resizable(true)
+    .decorated(true)
     }
 }
 ```
