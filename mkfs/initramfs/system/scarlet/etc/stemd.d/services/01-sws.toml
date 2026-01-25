@@ -1,0 +1,11 @@
+# Stem Daemon Configuration File
+# stemd registers itself as a service to manage its dependencies
+
+[service.sws]
+exec = "/bin/sws"
+order = 01
+depends = ["stemd"]
+
+[service.scarlet-desktop]
+exec = "/bin/scarlet_desktop"
+depends = ["sws"]
