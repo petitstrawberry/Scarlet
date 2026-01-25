@@ -1,9 +1,5 @@
-//! Render module - RenderObject trait and rendering system
-//!
-//! This module provides the core rendering abstraction for ScarletUI.
+//! Render module - RenderTree utilities
 
-mod object;
 mod tree;
 
-pub use object::RenderObject;
 pub use tree::{RenderNode, RenderTree};
