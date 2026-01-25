@@ -67,13 +67,13 @@ impl LayoutConstraints {
         }
     }
 
-    /// Create loose constraints (minimum to infinity)
-    pub const fn loose(min_width: f32, min_height: f32) -> Self {
+    /// Create loose constraints (0 to specified max)
+    pub const fn loose(max_width: f32, max_height: f32) -> Self {
         Self {
-            min_width,
-            max_width: f32::INFINITY,
-            min_height,
-            max_height: f32::INFINITY,
+            min_width: 0.0,
+            max_width,
+            min_height: 0.0,
+            max_height,
         }
     }
 

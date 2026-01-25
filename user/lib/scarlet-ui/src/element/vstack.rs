@@ -113,21 +113,13 @@ impl Element for VStackElement {
 
         // VStack size calculation
         // Tight constraints (min == max && min > 0 && finite): Frame explicitly set size
-        // Loose constraints with finite max: expand to parent max (for frame(inf, inf) behavior)
-        // Loose constraints with inf max but finite min: expand to parent min (available space)
-        // Loose constraints with both inf: fit to content
+        // Loose constraints: fit to content size (do NOT expand to max)
         let final_width = if constraints.min_width == constraints.max_width && constraints.min_width.is_finite() && constraints.min_width > 0.0 {
             scarlet_std::println!("[VStackElement::layout] tight width detected, using constraint max_width");
             constraints.max_width  // Frame指定サイズ
-        } else if constraints.max_width.is_finite() {
-            scarlet_std::println!("[VStackElement::layout] loose width with finite max, expanding to parent max_width");
-            constraints.max_width  // 親の最大サイズまで広げる
-        } else if constraints.min_width.is_finite() && constraints.min_width > 0.0 {
-            scarlet_std::println!("[VStackElement::layout] loose width with inf max but finite min, expanding to parent min_width");
-            constraints.min_width  // 親の利用可能なサイズまで広げる
         } else {
-            scarlet_std::println!("[VStackElement::layout] loose width with both inf, using max_width from content");
-            max_width  // コンテンツサイズ
+            scarlet_std::println!("[VStackElement::layout] loose width, using max_width from content");
+            max_width  // コンテンツサイズ（拡大しない）
         };
         let final_height = if constraints.min_height == constraints.max_height && constraints.min_height.is_finite() && constraints.min_height > 0.0 {
             scarlet_std::println!("[VStackElement::layout] tight height detected, using constraint max_height");
@@ -135,11 +127,8 @@ impl Element for VStackElement {
         } else if constraints.max_height.is_finite() {
             scarlet_std::println!("[VStackElement::layout] loose height with finite max, using min(total_height, max_height)");
             total_height.min(constraints.max_height)
-        } else if constraints.min_height.is_finite() && constraints.min_height > 0.0 {
-            scarlet_std::println!("[VStackElement::layout] loose height with inf max but finite min, expanding to parent min_height");
-            constraints.min_height  // 親の利用可能なサイズまで広げる
         } else {
-            scarlet_std::println!("[VStackElement::layout] loose height with both inf, using total_height");
+            scarlet_std::println!("[VStackElement::layout] loose height with inf max, using total_height");
             total_height
         };
 
