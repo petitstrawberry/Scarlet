@@ -66,6 +66,30 @@ pub trait RenderObject: Any {
         // Default: cannot update, need to replace
         UpdateResult::Replaced
     }
+
+    /// Layout this RenderObject and its children
+    ///
+    /// Container render objects can override this to implement custom layout
+    /// of their children (Flutter-style).
+    fn layout_with_children(
+        &mut self,
+        constraints: LayoutConstraints,
+        children: &mut [Box<dyn Element>],
+    ) -> Size {
+        let size = self.layout(constraints);
+
+        for child in children {
+            let child_constraints = if size.width.is_infinite() || size.height.is_infinite() {
+                constraints
+            } else {
+                LayoutConstraints::tight(size.width, size.height)
+            };
+            child.layout(child_constraints);
+            child.set_position(crate::geometry::Point::ZERO);
+        }
+
+        size
+    }
 }
 
 /// Element that wraps a RenderObject
@@ -197,63 +221,14 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
     }
 
     fn layout(&mut self, constraints: LayoutConstraints) -> Size {
-        if let Some(frame) = self
-            .render_object
-            .as_any_mut()
-            .downcast_mut::<crate::views::FrameRenderObject>()
-        {
-            let (min_w, max_w) = match frame.width_value() {
-                Some(w) if w.is_finite() => (w, w),
-                Some(_) if constraints.max_width.is_finite() => (constraints.max_width, constraints.max_width),
-                Some(_) => (constraints.min_width, constraints.max_width),
-                None => (constraints.min_width, constraints.max_width),
-            };
-            let (min_h, max_h) = match frame.height_value() {
-                Some(h) if h.is_finite() => (h, h),
-                Some(_) if constraints.max_height.is_finite() => (constraints.max_height, constraints.max_height),
-                Some(_) => (constraints.min_height, constraints.max_height),
-                None => (constraints.min_height, constraints.max_height),
-            };
-
-            let child_constraints = LayoutConstraints {
-                min_width: min_w,
-                max_width: max_w,
-                min_height: min_h,
-                max_height: max_h,
-            };
-
-            let mut child_max = Size::ZERO;
-            for child in &mut self.children {
-                let child_size = child.layout(child_constraints);
-                child_max.width = child_max.width.max(child_size.width);
-                child_max.height = child_max.height.max(child_size.height);
-                child.set_position(crate::geometry::Point::ZERO);
-            }
-
-            return frame.layout_with_child(child_max, constraints);
-        }
-
-        // Layout the render_object
+        // Delegate layout to the RenderObject (which may layout children)
         let type_name = core::any::type_name_of_val(&self.render_object);
         scarlet_std::println!("[RenderElement::layout] START: type_name={}, constraints=({:?}, {:?}) -> ({:?}, {:?})",
             type_name, constraints.min_width, constraints.min_height, constraints.max_width, constraints.max_height);
-        let size = self.render_object.layout(constraints);
+        let size = self
+            .render_object
+            .layout_with_children(constraints, &mut self.children);
         scarlet_std::println!("[RenderElement::layout] render_object returned size={}x{}", size.width, size.height);
-
-        // Layout children with tight constraints
-        // Exception: if render_object size is INF, pass parent constraints to allow children to expand
-        for child in &mut self.children {
-            let child_constraints = if size.width.is_infinite() || size.height.is_infinite() {
-                scarlet_std::println!("[RenderElement::layout] render_object has INF size, using parent constraints");
-                constraints
-            } else {
-                LayoutConstraints::tight(size.width, size.height)
-            };
-            scarlet_std::println!("[RenderElement::layout] child_constraints=({:?}, {:?}) -> ({:?}, {:?})",
-                child_constraints.min_width, child_constraints.min_height, child_constraints.max_width, child_constraints.max_height);
-            child.layout(child_constraints);
-            child.set_position(crate::geometry::Point::ZERO);
-        }
 
         size
     }

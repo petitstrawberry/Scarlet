@@ -242,6 +242,42 @@ impl ElementRenderObject for FrameRenderObject {
         self.size
     }
 
+    fn layout_with_children(
+        &mut self,
+        constraints: LayoutConstraints,
+        children: &mut [Box<dyn Element>],
+    ) -> Size {
+        let (min_w, max_w) = match self.width {
+            Some(w) if w.is_finite() => (w, w),
+            Some(_) if constraints.max_width.is_finite() => (constraints.max_width, constraints.max_width),
+            Some(_) => (constraints.min_width, constraints.max_width),
+            None => (constraints.min_width, constraints.max_width),
+        };
+        let (min_h, max_h) = match self.height {
+            Some(h) if h.is_finite() => (h, h),
+            Some(_) if constraints.max_height.is_finite() => (constraints.max_height, constraints.max_height),
+            Some(_) => (constraints.min_height, constraints.max_height),
+            None => (constraints.min_height, constraints.max_height),
+        };
+
+        let child_constraints = LayoutConstraints {
+            min_width: min_w,
+            max_width: max_w,
+            min_height: min_h,
+            max_height: max_h,
+        };
+
+        let mut child_max = Size::ZERO;
+        for child in children {
+            let child_size = child.layout(child_constraints);
+            child_max.width = child_max.width.max(child_size.width);
+            child_max.height = child_max.height.max(child_size.height);
+            child.set_position(Point::ZERO);
+        }
+
+        self.layout_with_child(child_max, constraints)
+    }
+
     fn size(&self) -> Size {
         self.size
     }

@@ -45,6 +45,7 @@ impl Application for DemoApp {
                 Rectangle::new()
                     .fill(Color::RED)
                     .frame(300.0, 100.0),
+                Spacer::new(),
                 Rectangle::new()
                     .fill(Color::BLUE)
                     .frame(300.0, 100.0)
