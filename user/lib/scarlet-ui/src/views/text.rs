@@ -195,8 +195,8 @@ impl ElementRenderObject for TextRenderObject {
             let mut data = buffer.data_mut();
             let mut canvas = graphics::Canvas::new(&mut data, width, height);
 
-            // Clear with transparent
-            // canvas.fill_rect(0, 0, width, height, Color::TRANSPARENT);
+            // Clear to avoid blending text on top of previous frames.
+            canvas.fill_rect(0, 0, width, height, Color::TRANSPARENT);
 
             // Draw text
             canvas.draw_text_sized(0, 0, &self.content, self.color, self.font_size);
