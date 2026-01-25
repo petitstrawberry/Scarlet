@@ -67,6 +67,7 @@ pub struct EventDispatcher {
     hovered_path: Vec<ElementId>,
     captured_id: Option<ElementId>,
     captured_path: Vec<ElementId>,
+    left_button_down: bool,
     /// Events emitted by elements during event handling
     emitted_events: Vec<Event>,
 }
@@ -80,6 +81,7 @@ impl EventDispatcher {
             hovered_path: Vec::new(),
             captured_id: None,
             captured_path: Vec::new(),
+            left_button_down: false,
             emitted_events: Vec::new(),
         }
     }
@@ -158,7 +160,7 @@ impl EventDispatcher {
         // 1. Hit test to find target and path
         let point = self.extract_point_from_mouse(&event);
         let mut path = if matches!(event, crate::event::MouseEvent::Moved { .. })
-            && self.captured_id.is_none()
+            && !(self.left_button_down && self.captured_id.is_some())
         {
             self.cached_path_if_inside(element_tree, point)
                 .or_else(|| self.hit_test_with_path_ids(element_tree, point))
@@ -166,11 +168,7 @@ impl EventDispatcher {
             self.hit_test_with_path_ids(element_tree, point)
         };
 
-        if matches!(
-            event,
-            crate::event::MouseEvent::Moved { .. }
-                | crate::event::MouseEvent::ButtonReleased { button: crate::event::MouseButton::Left, .. }
-        ) {
+        if self.left_button_down {
             if let Some(captured_id) = self.captured_id {
                 if !self.captured_path.is_empty() {
                     path = Some(self.captured_path.clone());
@@ -251,6 +249,7 @@ impl EventDispatcher {
             }
 
             if let crate::event::MouseEvent::ButtonPressed { button: crate::event::MouseButton::Left, .. } = event {
+                self.left_button_down = true;
                 self.captured_id = Some(target_id);
                 self.captured_path = path.clone();
             }
@@ -303,6 +302,7 @@ impl EventDispatcher {
                 scarlet_std::println!("[EventDispatcher] mouse handled={}", handled);
             }
             if let crate::event::MouseEvent::ButtonReleased { button: crate::event::MouseButton::Left, .. } = event {
+                self.left_button_down = false;
                 self.captured_id = None;
                 self.captured_path.clear();
             }
@@ -321,6 +321,7 @@ impl EventDispatcher {
                 self.hovered_path.clear();
             }
             if let crate::event::MouseEvent::ButtonReleased { button: crate::event::MouseButton::Left, .. } = event {
+                self.left_button_down = false;
                 self.captured_id = None;
                 self.captured_path.clear();
             }

@@ -94,6 +94,17 @@ pub struct SliderRenderObject {
 }
 
 impl SliderRenderObject {
+    fn thumb_diameter(&self) -> f32 {
+        self.size.height
+    }
+
+    fn track_metrics(&self) -> (f32, f32) {
+        let thumb_diameter = self.thumb_diameter().max(1.0);
+        let track_start = thumb_diameter / 2.0;
+        let track_width = (self.size.width - thumb_diameter).max(1.0);
+        (track_start, track_width)
+    }
+
     fn fill_circle(
         canvas: &mut graphics::Canvas<'_>,
         center_x: i32,
@@ -145,9 +156,8 @@ impl SliderRenderObject {
     }
 
     pub fn value_from_local_x(&self, local_x: f32) -> f32 {
-        let width = self.size.width;
-        let track_width = (width - 20.0).max(1.0);
-        let normalized = ((local_x - 10.0) / track_width).clamp(0.0, 1.0);
+        let (track_start, track_width) = self.track_metrics();
+        let normalized = ((local_x - track_start) / track_width).clamp(0.0, 1.0);
         self.min + (self.max - self.min) * normalized
     }
 
@@ -167,6 +177,8 @@ impl SliderRenderObject {
         let height = libm::ceilf(self.size.height) as usize;
         let w = width as u32;
         let h = height as u32;
+        let (track_start, track_width) = self.track_metrics();
+        let thumb_diameter = self.thumb_diameter().max(1.0) as u32;
 
         // Create or resize buffer
         let needs_resize = self
@@ -180,7 +192,7 @@ impl SliderRenderObject {
         if let Some(ref mut buffer) = self.buffer {
             let mut canvas = graphics::Canvas::new(buffer.data_mut(), w, h);
 
-            let center_y = (height / 2) as i32;
+            let center_y = (height as f32 / 2.0) as i32;
 
             // Track dimensions
             let track_thickness = 4u32;
@@ -193,7 +205,7 @@ impl SliderRenderObject {
             } else {
                 0.0
             };
-            let fill_width = (normalized_value * (width as f32 - 20.0)) as u32; // 20px for thumb
+            let fill_width = (normalized_value * track_width) as u32;
 
             let palette = ColorPalette::default();
             let track_color = palette.surface_variant();
@@ -203,9 +215,9 @@ impl SliderRenderObject {
 
             // Draw track (background)
             canvas.fill_rect(
-                10, // Start 10px from left
+                track_start as i32,
                 track_y,
-                w - 20, // End 10px from right
+                track_width as u32,
                 track_thickness,
                 track_color,
             );
@@ -213,7 +225,7 @@ impl SliderRenderObject {
             // Draw filled portion
             if fill_width > 0 {
                 canvas.fill_rect(
-                    10,
+                    track_start as i32,
                     track_y,
                     fill_width,
                     track_thickness,
@@ -222,8 +234,7 @@ impl SliderRenderObject {
             }
 
             // Draw thumb
-            let thumb_x = (10i32 + fill_width as i32);
-            let thumb_diameter = 20u32;
+            let thumb_x = track_start as i32 + fill_width as i32;
             let thumb_y = center_y - (thumb_diameter as i32 / 2);
             let radius = thumb_diameter as i32 / 2;
             let center_x = thumb_x;

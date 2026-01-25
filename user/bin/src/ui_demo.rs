@@ -81,7 +81,7 @@ impl Application for DemoApp {
                 .font_size(20.0),
             Slider::new(self.slider_value.clone())
                 .min(0.0)
-                .max(100.0),
+                .max(100.0)
         }
         .frame(f32::INFINITY, f32::INFINITY)
         // .frame(400.0, 300.0)
