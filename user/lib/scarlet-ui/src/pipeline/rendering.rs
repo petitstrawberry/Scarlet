@@ -11,6 +11,7 @@ use crate::compositor::Compositor;
 use crate::pipeline::PipelineOwner;
 use crate::buffer::Buffer;
 use crate::render::RenderTree;
+use crate::event::EventDispatcher;
 
 /// RenderingPipeline integrates all components of the rendering system
 ///
@@ -27,6 +28,8 @@ pub struct RenderingPipeline {
     compositor: Option<Compositor>,
     /// Current window size
     window_size: Size,
+    /// Event dispatcher
+    event_dispatcher: EventDispatcher,
 }
 
 impl RenderingPipeline {
@@ -37,12 +40,16 @@ impl RenderingPipeline {
             pipeline_owner: PipelineOwner::new(),
             compositor: None,
             window_size: Size::new(800.0, 600.0),
+            event_dispatcher: EventDispatcher::new(),
         }
     }
 
     /// Set the root Element
     pub fn set_root(&mut self, root_element: Box<dyn Element>) {
         self.element_tree.set_root(root_element);
+        if let Some(root) = self.element_tree.root() {
+            self.event_dispatcher.set_root(root.id());
+        }
     }
 
     /// Get the ElementTree
@@ -163,25 +170,37 @@ impl RenderingPipeline {
     ///
     /// This flushes all dirty phases and renders to the window buffer.
     pub fn render(&mut self) -> Option<&Buffer> {
-        scarlet_std::println!("[RenderingPipeline] render() starting...");
+        if crate::debug::is_enabled() {
+            scarlet_std::println!("[RenderingPipeline] render() starting...");
+        }
         // Flush all dirty phases (build, layout, paint)
         self.pipeline_owner.flush(&mut self.element_tree, self.window_size);
-        scarlet_std::println!("[RenderingPipeline] flush() completed");
+        if crate::debug::is_enabled() {
+            scarlet_std::println!("[RenderingPipeline] flush() completed");
+        }
 
         // Composite all elements into the window buffer
         if let Some(ref mut compositor) = self.compositor {
             if let Some(root) = self.element_tree.root() {
-                scarlet_std::println!("[RenderingPipeline] building RenderTree...");
+                if crate::debug::is_enabled() {
+                    scarlet_std::println!("[RenderingPipeline] building RenderTree...");
+                }
                 let render_tree = RenderTree::build(root);
-                scarlet_std::println!("[RenderingPipeline] RenderTree built, compositing...");
+                if crate::debug::is_enabled() {
+                    scarlet_std::println!("[RenderingPipeline] RenderTree built, compositing...");
+                }
                 compositor.composite_tree(&render_tree);
             } else {
-                scarlet_std::println!("[RenderingPipeline] No root element to render");
+                if crate::debug::is_enabled() {
+                    scarlet_std::println!("[RenderingPipeline] No root element to render");
+                }
             }
 
             Some(compositor.window_buffer())
         } else {
-            scarlet_std::println!("[RenderingPipeline] No compositor!");
+            if crate::debug::is_enabled() {
+                scarlet_std::println!("[RenderingPipeline] No compositor!");
+            }
             None
         }
     }
@@ -206,9 +225,7 @@ impl RenderingPipeline {
     /// In a full implementation, this would route events through the
     /// EventDispatcher to the target elements.
     pub fn handle_event(&mut self, _event: &crate::event::Event) -> bool {
-        // Note: Event handling will be implemented in a later phase
-        // The EventDispatcher will pass the Phase parameter when dispatching
-        false
+        self.event_dispatcher.dispatch(&mut self.element_tree, _event)
     }
 }
 

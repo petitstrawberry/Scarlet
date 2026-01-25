@@ -91,8 +91,10 @@ impl Buffer {
         dst_y: i32,
         opacity: f32,
     ) {
-        scarlet_std::println!("[Buffer] composite: src_size={}x{}, dst_pos=({},{}), opacity={}",
-            src.width, src.height, dst_x, dst_y, opacity);
+        if crate::debug::is_enabled() {
+            scarlet_std::println!("[Buffer] composite: src_size={}x{}, dst_pos=({},{}), opacity={}",
+                src.width, src.height, dst_x, dst_y, opacity);
+        }
 
         let mut pixels_composited = 0u32;
 
@@ -121,7 +123,9 @@ impl Buffer {
             }
         }
 
-        scarlet_std::println!("[Buffer] composite: {} pixels composited", pixels_composited);
+        if crate::debug::is_enabled() {
+            scarlet_std::println!("[Buffer] composite: {} pixels composited", pixels_composited);
+        }
     }
 
     /// Blend two pixels with alpha

@@ -63,6 +63,7 @@ impl<'a> HitResult<'a> {
 /// - Bubble phase (target → root)
 pub struct EventDispatcher {
     root_id: Option<ElementId>,
+    hovered_id: Option<ElementId>,
 }
 
 impl EventDispatcher {
@@ -70,6 +71,7 @@ impl EventDispatcher {
     pub fn new() -> Self {
         Self {
             root_id: None,
+            hovered_id: None,
         }
     }
 
@@ -79,32 +81,39 @@ impl EventDispatcher {
     }
 
     /// Dispatch an event to the appropriate element
-    pub fn dispatch(&mut self, element_tree: &mut ElementTree, event: &Event) {
+    pub fn dispatch(&mut self, element_tree: &mut ElementTree, event: &Event) -> bool {
+        if crate::debug::is_enabled() {
+            scarlet_std::println!("[EventDispatcher] dispatch: {:?}", event);
+        }
         match event {
             Event::Quit => {
                 // Quit event is handled at application level
                 self.handle_quit(element_tree);
+                false
             }
             Event::Resize { width, height } => {
                 self.handle_resize(element_tree, *width, *height);
+                false
             }
             Event::Mouse(mouse_event) => {
-                self.dispatch_mouse(element_tree, mouse_event);
+                self.dispatch_mouse(element_tree, mouse_event)
             }
             Event::Keyboard(key_event) => {
-                self.dispatch_keyboard(element_tree, key_event);
+                self.dispatch_keyboard(element_tree, key_event)
             }
             Event::Focus(focus_event) => {
-                self.dispatch_focus(element_tree, focus_event);
+                self.dispatch_focus(element_tree, focus_event)
             }
             Event::Lifecycle(lifecycle_event) => {
-                self.dispatch_lifecycle(element_tree, lifecycle_event);
+                self.dispatch_lifecycle(element_tree, lifecycle_event)
             }
             Event::Input(_) => {
                 // Raw input events are typically handled by higher layers
+                false
             }
             Event::Custom { .. } => {
                 // Custom events can be dispatched similarly
+                false
             }
         }
     }
@@ -123,64 +132,157 @@ impl EventDispatcher {
     }
 
     /// Dispatch a mouse event with three-phase event handling
-    fn dispatch_mouse(&mut self, element_tree: &mut ElementTree, event: &crate::event::MouseEvent) {
+    fn dispatch_mouse(&mut self, element_tree: &mut ElementTree, event: &crate::event::MouseEvent) -> bool {
         // 1. Hit test to find target and path
         let point = self.extract_point_from_mouse(&event);
-        let hit_result = self.hit_test_with_path(element_tree, point);
+        let path = self.hit_test_with_path_ids(element_tree, point);
 
-        if let Some(hit) = hit_result {
+        if let Some(path) = path {
+            let target_id = *path.last().unwrap();
+            if crate::debug::is_enabled() {
+                scarlet_std::println!(
+                    "[EventDispatcher] mouse: {:?} point=({:.1},{:.1}) target_id={:?} path_len={}",
+                    event,
+                    point.x,
+                    point.y,
+                    target_id,
+                    path.len()
+                );
+                for (index, id) in path.iter().enumerate() {
+                    if let Some(element) = element_tree.find_element_mut(*id) {
+                        let bounds = element.bounds();
+                        scarlet_std::println!(
+                            "[EventDispatcher] path[{}] id={:?} type={} bounds=({:.1},{:.1},{:.1},{:.1})",
+                            index,
+                            id,
+                            element.type_name_debug(),
+                            bounds.origin.x,
+                            bounds.origin.y,
+                            bounds.size.width,
+                            bounds.size.height
+                        );
+                    } else {
+                        scarlet_std::println!(
+                            "[EventDispatcher] path[{}] id={:?} (not found)",
+                            index,
+                            id
+                        );
+                    }
+                }
+            }
+
+            if let crate::event::MouseEvent::Moved { x, y } = event {
+                if self.hovered_id != Some(target_id) {
+                    if crate::debug::is_enabled() {
+                        scarlet_std::println!(
+                            "[EventDispatcher] hover change: {:?} -> {:?}",
+                            self.hovered_id,
+                            Some(target_id)
+                        );
+                    }
+                    if let Some(old_id) = self.hovered_id {
+                        if let Some(old_element) = element_tree.find_element_mut(old_id) {
+                            let _ = old_element.handle_event(
+                                &Event::Mouse(crate::event::MouseEvent::Exited { x: *x, y: *y }),
+                                Phase::Target,
+                            );
+                        }
+                    }
+
+                    if let Some(new_element) = element_tree.find_element_mut(target_id) {
+                        let _ = new_element.handle_event(
+                            &Event::Mouse(crate::event::MouseEvent::Entered { x: *x, y: *y }),
+                            Phase::Target,
+                        );
+                    }
+
+                    self.hovered_id = Some(target_id);
+                }
+            }
+
             // 2. Three-phase dispatch
             let event_wrapper = Event::Mouse(event.clone());
+            let mut handled = false;
 
             // 2.1 Capture Phase: root → target (excluding target)
-            for element in hit.capture_path().take(hit.path.len().saturating_sub(1)) {
-                // Create mutable reference to element
-                // Note: In a full implementation, we would need a way to get mutable references
-                // to elements by ID. For now, this is a conceptual implementation.
-                let _ = element;
-                let _ = &event_wrapper;
-                // element.handle_event(&event_wrapper, Phase::Capture);
+            for id in path.iter().take(path.len().saturating_sub(1)) {
+                if let Some(element) = element_tree.find_element_mut(*id) {
+                    if element.handle_event(&event_wrapper, Phase::Capture) {
+                        handled = true;
+                        break;
+                    }
+                }
             }
 
             // 2.2 Target Phase: at the target
-            // Note: In a full implementation, we would get mutable reference to target
-            let _ = hit.target;
-            // hit.target.handle_event(&event_wrapper, Phase::Target);
+            if !handled {
+                if let Some(target) = element_tree.find_element_mut(target_id) {
+                    handled = target.handle_event(&event_wrapper, Phase::Target);
+                }
+            }
 
             // 2.3 Bubble Phase: target's parent → root
-            for element in hit.bubble_path().skip(1) {
-                // Skip the target (already handled in target phase)
-                let _ = element;
-                let _ = &event_wrapper;
-                // element.handle_event(&event_wrapper, Phase::Bubble);
+            if !handled {
+                for id in path.iter().rev().skip(1) {
+                    if let Some(element) = element_tree.find_element_mut(*id) {
+                        if element.handle_event(&event_wrapper, Phase::Bubble) {
+                            handled = true;
+                            break;
+                        }
+                    }
+                }
             }
+
+            if crate::debug::is_enabled() {
+                scarlet_std::println!("[EventDispatcher] mouse handled={}", handled);
+            }
+            handled
+        } else {
+            if let crate::event::MouseEvent::Moved { x, y } = event {
+                if let Some(old_id) = self.hovered_id {
+                    if let Some(old_element) = element_tree.find_element_mut(old_id) {
+                        let _ = old_element.handle_event(
+                            &Event::Mouse(crate::event::MouseEvent::Exited { x: *x, y: *y }),
+                            Phase::Target,
+                        );
+                    }
+                }
+                self.hovered_id = None;
+            }
+            false
         }
     }
 
     /// Dispatch a keyboard event
-    fn dispatch_keyboard(&mut self, element_tree: &mut ElementTree, event: &crate::event::KeyEvent) {
+    fn dispatch_keyboard(&mut self, element_tree: &mut ElementTree, event: &crate::event::KeyEvent) -> bool {
         // Keyboard events typically go to the focused element
         // For now, send to the root with Target phase
         if let Some(root) = element_tree.root_mut() {
-            root.handle_event(&Event::Keyboard(event.clone()), Phase::Target);
+            root.handle_event(&Event::Keyboard(event.clone()), Phase::Target)
+        } else {
+            false
         }
     }
 
     /// Dispatch a focus event
-    fn dispatch_focus(&mut self, element_tree: &mut ElementTree, event: &crate::event::FocusEvent) {
+    fn dispatch_focus(&mut self, element_tree: &mut ElementTree, event: &crate::event::FocusEvent) -> bool {
         // Focus events are sent to the element gaining or losing focus
         // For now, send to the root with Target phase
         if let Some(root) = element_tree.root_mut() {
-            root.handle_event(&Event::Focus(event.clone()), Phase::Target);
+            root.handle_event(&Event::Focus(event.clone()), Phase::Target)
+        } else {
+            false
         }
     }
 
     /// Dispatch a lifecycle event
-    fn dispatch_lifecycle(&mut self, element_tree: &mut ElementTree, event: &crate::event::LifecycleEvent) {
+    fn dispatch_lifecycle(&mut self, element_tree: &mut ElementTree, event: &crate::event::LifecycleEvent) -> bool {
         // Lifecycle events are sent to elements during mount/unmount
         // For now, send to the root with Target phase
         if let Some(root) = element_tree.root_mut() {
-            root.handle_event(&Event::Lifecycle(event.clone()), Phase::Target);
+            root.handle_event(&Event::Lifecycle(event.clone()), Phase::Target)
+        } else {
+            false
         }
     }
 
@@ -201,9 +303,13 @@ impl EventDispatcher {
 
     /// Recursive hit test implementation that returns target and path
     fn hit_test_recursive<'a>(&'a self, element: &'a dyn Element, point: Point) -> Option<(&'a dyn Element, Vec<&'a dyn Element>)> {
+        let local_point = Point {
+            x: point.x - element.position().x,
+            y: point.y - element.position().y,
+        };
         // Check children first (reverse order for z-index)
         for child in element.children().iter().rev() {
-            if let Some((found, mut path)) = self.hit_test_recursive(child.as_ref(), point) {
+            if let Some((found, mut path)) = self.hit_test_recursive(child.as_ref(), local_point) {
                 // Add this element to the path
                 path.push(element);
                 return Some((found, path));
@@ -220,10 +326,47 @@ impl EventDispatcher {
         None
     }
 
+    /// Hit test to find the element at a point with the path of IDs from root
+    pub fn hit_test_with_path_ids(
+        &self,
+        element_tree: &ElementTree,
+        point: Point,
+    ) -> Option<Vec<ElementId>> {
+        let root = element_tree.root()?;
+        let mut path = self.hit_test_recursive_ids(root, point)?;
+        path.reverse();
+        Some(path)
+    }
+
+    fn hit_test_recursive_ids(
+        &self,
+        element: &dyn Element,
+        point: Point,
+    ) -> Option<Vec<ElementId>> {
+        let local_point = Point {
+            x: point.x - element.position().x,
+            y: point.y - element.position().y,
+        };
+        for child in element.children().iter().rev() {
+            if let Some(mut path) = self.hit_test_recursive_ids(child.as_ref(), local_point) {
+                path.push(element.id());
+                return Some(path);
+            }
+        }
+
+        if element.hit_test(point) {
+            return Some(alloc::vec![element.id()]);
+        }
+
+        None
+    }
+
     /// Extract point from a mouse event
     fn extract_point_from_mouse(&self, event: &crate::event::MouseEvent) -> Point {
         match event {
             crate::event::MouseEvent::Moved { x, y } => Point { x: *x as f32, y: *y as f32 },
+            crate::event::MouseEvent::Entered { x, y } => Point { x: *x as f32, y: *y as f32 },
+            crate::event::MouseEvent::Exited { x, y } => Point { x: *x as f32, y: *y as f32 },
             crate::event::MouseEvent::ButtonPressed { x, y, .. } => Point { x: *x as f32, y: *y as f32 },
             crate::event::MouseEvent::ButtonReleased { x, y, .. } => Point { x: *x as f32, y: *y as f32 },
             crate::event::MouseEvent::Wheel { .. } => Point::ZERO,

@@ -41,7 +41,8 @@ impl Application for DemoApp {
                     Spacer::new(),
                     Toggle::new(self.toggle_state.clone())
                 }
-                .frame_width(200.0),
+                .frame_width(300.0),
+                
                 Rectangle::new()
                     .fill(Color::RED)
                     .frame(300.0, 100.0),
@@ -55,6 +56,10 @@ impl Application for DemoApp {
         )
         .app_id("oeg.scarlet-os.ui_demo")
         .size(Size::new(800.0, 600.0))
+    }
+
+    fn debug_logging(&self) -> bool {
+        false
     }
 }
 

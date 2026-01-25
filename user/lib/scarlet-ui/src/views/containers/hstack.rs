@@ -123,8 +123,10 @@ impl ElementRenderObject for HStackRenderObject {
         constraints: LayoutConstraints,
         children: &mut [Box<dyn Element>],
     ) -> Size {
-        scarlet_std::println!("[HStackRenderObject::layout] START: constraints=({:?}, {:?}) -> ({:?}, {:?})",
-            constraints.min_width, constraints.min_height, constraints.max_width, constraints.max_height);
+        if crate::debug::is_enabled() {
+            scarlet_std::println!("[HStackRenderObject::layout] START: constraints=({:?}, {:?}) -> ({:?}, {:?})",
+                constraints.min_width, constraints.min_height, constraints.max_width, constraints.max_height);
+        }
         let child_count = children.len();
         let spacing_total = if child_count > 1 {
             (child_count - 1) as f32 * self.spacing
@@ -183,21 +185,31 @@ impl ElementRenderObject for HStackRenderObject {
         }
 
         let final_height = if constraints.min_height == constraints.max_height && constraints.min_height.is_finite() && constraints.min_height > 0.0 {
-            scarlet_std::println!("[HStackRenderObject::layout] tight height detected, using constraint max_height");
+            if crate::debug::is_enabled() {
+                scarlet_std::println!("[HStackRenderObject::layout] tight height detected, using constraint max_height");
+            }
             constraints.max_height
         } else if constraints.max_height.is_finite() {
-            scarlet_std::println!("[HStackRenderObject::layout] loose height with finite max, using min(max_height, max_height)");
+            if crate::debug::is_enabled() {
+                scarlet_std::println!("[HStackRenderObject::layout] loose height with finite max, using min(max_height, max_height)");
+            }
             max_height.min(constraints.max_height)
         } else {
-            scarlet_std::println!("[HStackRenderObject::layout] loose height, using max_height from content");
+            if crate::debug::is_enabled() {
+                scarlet_std::println!("[HStackRenderObject::layout] loose height, using max_height from content");
+            }
             max_height
         };
 
         let final_width = if constraints.min_width == constraints.max_width && constraints.min_width.is_finite() && constraints.min_width > 0.0 {
-            scarlet_std::println!("[HStackRenderObject::layout] tight width detected, using constraint max_width");
+            if crate::debug::is_enabled() {
+                scarlet_std::println!("[HStackRenderObject::layout] tight width detected, using constraint max_width");
+            }
             constraints.max_width
         } else {
-            scarlet_std::println!("[HStackRenderObject::layout] loose width, using child_x_offset from content");
+            if crate::debug::is_enabled() {
+                scarlet_std::println!("[HStackRenderObject::layout] loose width, using child_x_offset from content");
+            }
             child_x_offset.min(constraints.max_width)
         };
 
@@ -205,7 +217,9 @@ impl ElementRenderObject for HStackRenderObject {
             width: final_width,
             height: final_height,
         };
-        scarlet_std::println!("[HStackRenderObject::layout] FINAL: size={}x{}", self.size.width, self.size.height);
+        if crate::debug::is_enabled() {
+            scarlet_std::println!("[HStackRenderObject::layout] FINAL: size={}x{}", self.size.width, self.size.height);
+        }
         self.size
     }
 

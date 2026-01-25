@@ -105,8 +105,10 @@ impl RectangleRenderObject {
 
 impl ElementRenderObject for RectangleRenderObject {
     fn layout(&mut self, constraints: crate::element::LayoutConstraints) -> Size {
-        scarlet_std::println!("[RectangleRenderObject::layout] START: constraints=({:?}, {:?}) -> ({:?}, {:?})",
-            constraints.min_width, constraints.min_height, constraints.max_width, constraints.max_height);
+        if crate::debug::is_enabled() {
+            scarlet_std::println!("[RectangleRenderObject::layout] START: constraints=({:?}, {:?}) -> ({:?}, {:?})",
+                constraints.min_width, constraints.min_height, constraints.max_width, constraints.max_height);
+        }
         // Rectangle takes the full available space, or min_size if specified
         // For inf constraints, use min_width/min_height
         let width = if constraints.max_width.is_finite() && constraints.max_width > 0.0 {
@@ -122,7 +124,9 @@ impl ElementRenderObject for RectangleRenderObject {
         };
 
         self.size = Size { width, height };
-        scarlet_std::println!("[RectangleRenderObject::layout] calculated size={}x{}", width, height);
+        if crate::debug::is_enabled() {
+            scarlet_std::println!("[RectangleRenderObject::layout] calculated size={}x{}", width, height);
+        }
 
         // Create buffer for this rectangle
         let w = libm::ceilf(width) as u32;
@@ -130,8 +134,10 @@ impl ElementRenderObject for RectangleRenderObject {
 
         // Sanity check to prevent overflow
         if w > 10000 || h > 10000 {
-            scarlet_std::println!("[RectangleRenderObject] layout: WARNING calculated size {}x{} is too large, using min constraints",
-                w, h);
+            if crate::debug::is_enabled() {
+                scarlet_std::println!("[RectangleRenderObject] layout: WARNING calculated size {}x{} is too large, using min constraints",
+                    w, h);
+            }
             // Use min constraints as fallback
             let w2 = libm::ceilf(constraints.min_width.max(1.0)) as u32;
             let h2 = libm::ceilf(constraints.min_height.max(1.0)) as u32;
@@ -165,20 +171,30 @@ impl ElementRenderObject for RectangleRenderObject {
 
     fn render(&mut self) {
         // Render rectangle to buffer
-        scarlet_std::println!("[RectangleRenderObject] render START: color={:?}, buffer={}",
-            self.color, self.buffer.is_some());
+        if crate::debug::is_enabled() {
+            scarlet_std::println!("[RectangleRenderObject] render START: color={:?}, buffer={}",
+                self.color, self.buffer.is_some());
+        }
         if let Some(ref mut buffer) = self.buffer {
             let width = buffer.width();
             let height = buffer.height();
-            scarlet_std::println!("[RectangleRenderObject] buffer {}x{}", width, height);
+            if crate::debug::is_enabled() {
+                scarlet_std::println!("[RectangleRenderObject] buffer {}x{}", width, height);
+            }
             let mut data = buffer.data_mut();
-            scarlet_std::println!("[RectangleRenderObject] creating canvas...");
+            if crate::debug::is_enabled() {
+                scarlet_std::println!("[RectangleRenderObject] creating canvas...");
+            }
             let mut canvas = graphics::Canvas::new(&mut data, width, height);
-            scarlet_std::println!("[RectangleRenderObject] filling rect...");
+            if crate::debug::is_enabled() {
+                scarlet_std::println!("[RectangleRenderObject] filling rect...");
+            }
 
             // Fill with solid color
             canvas.fill_rect(0, 0, width, height, self.color);
-            scarlet_std::println!("[RectangleRenderObject] render DONE");
+            if crate::debug::is_enabled() {
+                scarlet_std::println!("[RectangleRenderObject] render DONE");
+            }
         }
     }
 

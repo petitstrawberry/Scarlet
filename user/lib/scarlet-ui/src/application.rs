@@ -10,6 +10,12 @@ use crate::platform::{PlatformWindow, SWSPlatformWindow};
 use crate::pipeline::RenderingPipeline;
 use crate::error::Result;
 use crate::state::StateId;
+use crate::state::SubscriptionId;
+use crate::element::{Element, ElementId, LayoutConstraints, UpdateResult};
+use crate::geometry::{Point, Rect};
+use alloc::boxed::Box;
+use alloc::vec::Vec;
+use core::any::Any;
 
 /// Application trait - main entry point for ScarletUI apps
 ///
@@ -56,7 +62,7 @@ pub trait Application: View {
     /// The default implementation uses SWS as the platform backend.
     fn run(&mut self) -> Result<()>
     where
-        Self: Sized,
+        Self: Sized + Clone,
     {
         crate::debug::set_enabled(self.debug_logging());
 
@@ -64,7 +70,7 @@ pub trait Application: View {
         let mut pipeline = RenderingPipeline::new();
 
         // 2. Create root element from body()
-        let root_element = self.body().create_element();
+        let root_element = Box::new(ApplicationRootElement::new(self.clone()));
         pipeline.set_root(root_element);
 
         // 3. Initialize the application
@@ -99,7 +105,7 @@ pub trait Application: View {
                     }
                     _ => {
                         // Other events are handled by the pipeline
-                        // For now, this is a no-op
+                        let _ = pipeline.handle_event(&event);
                     }
                 }
             }
@@ -117,6 +123,153 @@ pub trait Application: View {
             // 6.3 Small sleep to prevent busy-waiting
             // In a real implementation, this would use proper frame timing
             std::thread::sleep(std::time::Duration::from_millis(16));
+        }
+    }
+}
+
+struct ApplicationRootElement<A: Application + Clone> {
+    id: ElementId,
+    app: A,
+    child: Option<Box<dyn Element>>,
+    size: crate::geometry::Size,
+    position: Point,
+    subscriptions: Vec<SubscriptionId>,
+}
+
+impl<A: Application + Clone> ApplicationRootElement<A> {
+    fn new(app: A) -> Self {
+        let id = ElementId::generate();
+        let child = app.body().create_element();
+        Self {
+            id,
+            app,
+            child: Some(child),
+            size: crate::geometry::Size::ZERO,
+            position: Point::ZERO,
+            subscriptions: Vec::new(),
+        }
+    }
+}
+
+impl<A: Application + Clone + 'static> Element for ApplicationRootElement<A> {
+    fn id(&self) -> ElementId {
+        self.id
+    }
+
+    fn type_name(&self) -> &str {
+        "ApplicationRootElement"
+    }
+
+    fn type_name_debug(&self) -> alloc::string::String {
+        alloc::format!("ApplicationRootElement<{}>", core::any::type_name::<A>())
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
+    }
+
+    fn children(&self) -> &[Box<dyn Element>] {
+        match &self.child {
+            Some(child) => core::slice::from_ref(child),
+            None => &[],
+        }
+    }
+
+    fn children_mut(&mut self) -> &mut [Box<dyn Element>] {
+        match &mut self.child {
+            Some(child) => core::slice::from_mut(child),
+            None => &mut [],
+        }
+    }
+
+    fn update(&mut self, new_view: &dyn View) -> UpdateResult {
+        if let Some(app) = new_view.as_any().downcast_ref::<A>() {
+            self.app = app.clone();
+            self.child = Some(self.app.body().create_element());
+            UpdateResult::Updated
+        } else {
+            UpdateResult::Replaced
+        }
+    }
+
+    fn rebuild(&mut self) -> UpdateResult {
+        if let Some(ref mut child) = self.child {
+            child.unmount();
+        }
+        self.child = Some(self.app.body().create_element());
+        if let Some(ref mut child) = self.child {
+            child.mount();
+        }
+        UpdateResult::Updated
+    }
+
+    fn mount(&mut self) {
+        let listenables = self.app.listenables();
+        for listenable in listenables {
+            let element_id = self.id;
+            let callback = alloc::sync::Arc::new(move || {
+                crate::pipeline::mark_element_dirty(element_id);
+            });
+            let subscription_id = listenable.subscribe_any(callback);
+            self.subscriptions.push(subscription_id);
+        }
+
+        if let Some(ref mut child) = self.child {
+            child.mount();
+        }
+    }
+
+    fn unmount(&mut self) {
+        if let Some(ref mut child) = self.child {
+            child.unmount();
+        }
+        self.subscriptions.clear();
+    }
+
+    fn layout(&mut self, constraints: LayoutConstraints) -> crate::geometry::Size {
+        if let Some(ref mut child) = self.child {
+            self.size = child.layout(constraints);
+        } else {
+            self.size = crate::geometry::Size::ZERO;
+        }
+        self.size
+    }
+
+    fn position(&self) -> Point {
+        self.position
+    }
+
+    fn set_position(&mut self, position: Point) {
+        self.position = position;
+        if let Some(ref mut child) = self.child {
+            child.set_position(position);
+        }
+    }
+
+    fn bounds(&self) -> Rect {
+        Rect {
+            origin: self.position,
+            size: self.size,
+        }
+    }
+
+    fn hit_test(&self, point: Point) -> bool {
+        if let Some(ref child) = self.child {
+            child.hit_test(point)
+        } else {
+            self.bounds().contains(point)
+        }
+    }
+
+    fn handle_event(&mut self, event: &crate::event::Event, phase: crate::event::Phase) -> bool {
+        if let Some(ref mut child) = self.child {
+            child.handle_event(event, phase)
+        } else {
+            false
         }
     }
 }

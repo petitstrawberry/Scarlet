@@ -12,40 +12,35 @@ use crate::element::{ElementId, ElementTree, LayoutConstraints};
 use crate::geometry::Size;
 use crate::pipeline::StateRegistry;
 use crate::state::{State, StateId};
-use core::sync::atomic::{AtomicU32, Ordering};
+use scarlet_std::sync::Mutex;
 
-/// Global dirty element ID for State change callbacks
+/// Global dirty element IDs for State change callbacks
 ///
 /// This allows ComponentElement callbacks to notify the PipelineOwner
 /// when State changes occur.
-///
-/// A value of 0 means "no dirty element", and any non-zero value is
-/// an ElementId that needs to be marked dirty.
-static GLOBAL_DIRTY_ID: AtomicU32 = AtomicU32::new(0);
+static GLOBAL_DIRTY_IDS: Mutex<BTreeSet<ElementId>> = Mutex::new(BTreeSet::new());
 
 /// Mark an element as dirty for rebuild (called from ComponentElement callbacks)
 ///
 /// This function is called from State change callbacks in ComponentElement
 /// to notify the PipelineOwner that an element needs to be rebuilt.
 pub fn mark_element_dirty(id: ElementId) {
-    // Store the element ID in the global atomic
-    // Note: If multiple elements are marked dirty between flushes,
-    // only the last one will be recorded. This is a simplified implementation
-    // that works for the common case of single-element updates.
-    // A full implementation would use a concurrent queue or set.
-    GLOBAL_DIRTY_ID.store(id.get(), Ordering::SeqCst);
+    let mut ids = GLOBAL_DIRTY_IDS.lock();
+    ids.insert(id);
 }
 
-/// Take the globally dirty element ID (if any)
+/// Take the globally dirty element IDs (if any)
 ///
-/// Returns None if no element is marked dirty.
-pub(crate) fn take_global_dirty_id() -> Option<ElementId> {
-    let id_val = GLOBAL_DIRTY_ID.swap(0, Ordering::SeqCst);
-    if id_val != 0 {
-        Some(ElementId::new(id_val))
-    } else {
-        None
-    }
+/// Returns an empty vector if no elements are marked dirty.
+pub(crate) fn take_global_dirty_ids() -> alloc::vec::Vec<ElementId> {
+    let mut ids = GLOBAL_DIRTY_IDS.lock();
+    let collected = ids.iter().copied().collect();
+    ids.clear();
+    collected
+}
+
+pub(crate) fn has_global_dirty() -> bool {
+    !GLOBAL_DIRTY_IDS.lock().is_empty()
 }
 
 /// Dirty flags for different render phases
@@ -122,7 +117,10 @@ impl PipelineOwner {
 
     /// Check if there's any dirty work
     pub fn has_dirty(&self) -> bool {
-        !self.dirty_build.is_empty() || !self.dirty_layout.is_empty() || !self.dirty_paint.is_empty()
+        has_global_dirty()
+            || !self.dirty_build.is_empty()
+            || !self.dirty_layout.is_empty()
+            || !self.dirty_paint.is_empty()
     }
 
     /// Flush all dirty phases
@@ -130,7 +128,7 @@ impl PipelineOwner {
     /// This processes build, layout, and paint in order.
     pub fn flush(&mut self, element_tree: &mut ElementTree, window_size: Size) {
         // Collect any globally dirty elements from State change callbacks
-        if let Some(dirty_id) = take_global_dirty_id() {
+        for dirty_id in take_global_dirty_ids() {
             self.mark_needs_build(dirty_id);
         }
 
@@ -182,10 +180,14 @@ impl PipelineOwner {
     fn flush_paint(&mut self, element_tree: &mut ElementTree) {
         let dirty_paint = core::mem::take(&mut self.dirty_paint);
 
-        scarlet_std::println!("[PipelineOwner] flush_paint: {} dirty elements", dirty_paint.len());
+        if crate::debug::is_enabled() {
+            scarlet_std::println!("[PipelineOwner] flush_paint: {} dirty elements", dirty_paint.len());
+        }
 
         for id in dirty_paint {
-            scarlet_std::println!("[PipelineOwner] flush_paint: rendering element id={}", id.get());
+            if crate::debug::is_enabled() {
+                scarlet_std::println!("[PipelineOwner] flush_paint: rendering element id={}", id.get());
+            }
             // Find the element and call render()
             if let Some(element) = element_tree.find_element_mut(id) {
                 // Render this element and all its descendants
@@ -201,17 +203,23 @@ impl PipelineOwner {
         let type_name = element.type_name_debug();
         let has_buffer = element.get_buffer().is_some();
 
-        scarlet_std::println!("[PipelineOwner] {}render: {} (buffer={})", indent, type_name, has_buffer);
+        if crate::debug::is_enabled() {
+            scarlet_std::println!("[PipelineOwner] {}render: {} (buffer={})", indent, type_name, has_buffer);
+        }
 
         // Render this element
         element.render();
 
         // Render children (containers might not have buffers, but their children do)
         let children = element.children();
-        scarlet_std::println!("[PipelineOwner] {}has {} children", indent, children.len());
+        if crate::debug::is_enabled() {
+            scarlet_std::println!("[PipelineOwner] {}has {} children", indent, children.len());
+        }
 
         for (i, child) in element.children_mut().iter_mut().enumerate() {
-            scarlet_std::println!("[PipelineOwner] {}child #{}: {}", indent, i, child.type_name_debug());
+            if crate::debug::is_enabled() {
+                scarlet_std::println!("[PipelineOwner] {}child #{}: {}", indent, i, child.type_name_debug());
+            }
             Self::render_recursive(child, depth + 1);
         }
     }

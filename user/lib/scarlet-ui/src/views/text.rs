@@ -111,12 +111,16 @@ impl TextRenderObject {
 
 impl ElementRenderObject for TextRenderObject {
     fn layout(&mut self, constraints: LayoutConstraints) -> Size {
-        scarlet_std::println!("[TextRenderObject::layout] START: content='{}', constraints=({:?}, {:?}) -> ({:?}, {:?})",
-            self.content, constraints.min_width, constraints.min_height, constraints.max_width, constraints.max_height);
+        if crate::debug::is_enabled() {
+            scarlet_std::println!("[TextRenderObject::layout] START: content='{}', constraints=({:?}, {:?}) -> ({:?}, {:?})",
+                self.content, constraints.min_width, constraints.min_height, constraints.max_width, constraints.max_height);
+        }
         // Use actual font measurement
         let (measured_width, measured_height) = graphics::measure_text_sized(&self.content, self.font_size);
 
-        scarlet_std::println!("[TextRenderObject::layout] measured={}x{}", measured_width, measured_height);
+        if crate::debug::is_enabled() {
+            scarlet_std::println!("[TextRenderObject::layout] measured={}x{}", measured_width, measured_height);
+        }
 
         // For text, use the measured size, but constrain within bounds
         // Text should NOT expand to fill min_width/min_height
@@ -142,8 +146,10 @@ impl ElementRenderObject for TextRenderObject {
         let h = libm::ceilf(height) as u32;
         let needed = (w * h * 4) as usize;
 
-        scarlet_std::println!("[TextRenderObject] layout: final size={}x{}, buffer needed={} bytes",
-            w, h, needed);
+        if crate::debug::is_enabled() {
+            scarlet_std::println!("[TextRenderObject] layout: final size={}x{}, buffer needed={} bytes",
+                w, h, needed);
+        }
 
         if self.buffer.as_ref().map_or(true, |b| b.data().len() < needed) {
             self.buffer = Some(Buffer::from_dimensions(w, h));
@@ -178,8 +184,10 @@ impl ElementRenderObject for TextRenderObject {
             let width = buffer.width();
             let height = buffer.height();
 
-            scarlet_std::println!("[TextRenderObject] render: buffer {}x{}, data.len()={}",
-                width, height, buffer.data().len());
+            if crate::debug::is_enabled() {
+                scarlet_std::println!("[TextRenderObject] render: buffer {}x{}, data.len()={}",
+                    width, height, buffer.data().len());
+            }
 
             let mut data = buffer.data_mut();
             let mut canvas = graphics::Canvas::new(&mut data, width, height);
@@ -190,7 +198,9 @@ impl ElementRenderObject for TextRenderObject {
             // Draw text
             canvas.draw_text_sized(0, 0, &self.content, self.color, self.font_size);
         } else {
-            scarlet_std::println!("[TextRenderObject] render: NO BUFFER!");
+            if crate::debug::is_enabled() {
+                scarlet_std::println!("[TextRenderObject] render: NO BUFFER!");
+            }
         }
     }
 

@@ -223,12 +223,16 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
     fn layout(&mut self, constraints: LayoutConstraints) -> Size {
         // Delegate layout to the RenderObject (which may layout children)
         let type_name = core::any::type_name_of_val(&self.render_object);
-        scarlet_std::println!("[RenderElement::layout] START: type_name={}, constraints=({:?}, {:?}) -> ({:?}, {:?})",
-            type_name, constraints.min_width, constraints.min_height, constraints.max_width, constraints.max_height);
+        if crate::debug::is_enabled() {
+            scarlet_std::println!("[RenderElement::layout] START: type_name={}, constraints=({:?}, {:?}) -> ({:?}, {:?})",
+                type_name, constraints.min_width, constraints.min_height, constraints.max_width, constraints.max_height);
+        }
         let size = self
             .render_object
             .layout_with_children(constraints, &mut self.children);
-        scarlet_std::println!("[RenderElement::layout] render_object returned size={}x{}", size.width, size.height);
+        if crate::debug::is_enabled() {
+            scarlet_std::println!("[RenderElement::layout] render_object returned size={}x{}", size.width, size.height);
+        }
 
         size
     }
@@ -283,7 +287,73 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
     }
 
     fn handle_event(&mut self, _event: &crate::event::Event, _phase: crate::event::Phase) -> bool {
-        // RenderObjects don't handle events by default
+        use crate::event::{Event, MouseButton, MouseEvent, Phase};
+
+        if _phase != Phase::Target {
+            return false;
+        }
+
+        let Event::Mouse(mouse_event) = _event else {
+            return false;
+        };
+
+        if let Some(button) = self.view.as_any().downcast_ref::<crate::views::Button>() {
+            if let Some(render_object) = self
+                .render_object
+                .as_any_mut()
+                .downcast_mut::<crate::views::ButtonRenderObject>()
+            {
+                if crate::debug::is_enabled() {
+                    scarlet_std::println!(
+                        "[RenderElement] Button event id={:?}: {:?}",
+                        self.id,
+                        mouse_event
+                    );
+                }
+                match mouse_event {
+                    MouseEvent::Entered { .. } => {
+                        render_object.set_hovered(true);
+                        crate::pipeline::mark_element_dirty(self.id);
+                        return true;
+                    }
+                    MouseEvent::Exited { .. } => {
+                        render_object.set_hovered(false);
+                        render_object.set_pressed(false);
+                        crate::pipeline::mark_element_dirty(self.id);
+                        return true;
+                    }
+                    MouseEvent::ButtonPressed { button: MouseButton::Left, .. } => {
+                        render_object.set_pressed(true);
+                        crate::pipeline::mark_element_dirty(self.id);
+                        return true;
+                    }
+                    MouseEvent::ButtonReleased { button: MouseButton::Left, .. } => {
+                        if render_object.is_pressed() {
+                            button.invoke_on_click();
+                        }
+                        render_object.set_pressed(false);
+                        crate::pipeline::mark_element_dirty(self.id);
+                        return true;
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        if let Some(toggle) = self.view.as_any().downcast_ref::<crate::views::Toggle>() {
+            if let MouseEvent::ButtonReleased { button: MouseButton::Left, .. } = mouse_event {
+                if crate::debug::is_enabled() {
+                    scarlet_std::println!(
+                        "[RenderElement] Toggle click id={:?}",
+                        self.id
+                    );
+                }
+                let state = toggle.get_is_on().clone();
+                state.update(|value| *value = !*value);
+                return true;
+            }
+        }
+
         false
     }
 }

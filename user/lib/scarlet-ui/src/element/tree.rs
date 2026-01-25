@@ -105,9 +105,13 @@ impl ElementTree {
     }
 
     fn hit_test_recursive<'a>(&'a self, element: &'a dyn Element, point: crate::geometry::Point) -> Option<&'a dyn Element> {
+        let local_point = crate::geometry::Point {
+            x: point.x - element.position().x,
+            y: point.y - element.position().y,
+        };
         // Check children first (reverse order for z-index)
         for child in element.children().iter().rev() {
-            if let Some(found) = self.hit_test_recursive(child.as_ref(), point) {
+            if let Some(found) = self.hit_test_recursive(child.as_ref(), local_point) {
                 return Some(found);
             }
         }

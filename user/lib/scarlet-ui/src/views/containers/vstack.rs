@@ -123,8 +123,10 @@ impl ElementRenderObject for VStackRenderObject {
         constraints: LayoutConstraints,
         children: &mut [Box<dyn Element>],
     ) -> Size {
-        scarlet_std::println!("[VStackRenderObject::layout] START: constraints=({:?}, {:?}) -> ({:?}, {:?})",
-            constraints.min_width, constraints.min_height, constraints.max_width, constraints.max_height);
+        if crate::debug::is_enabled() {
+            scarlet_std::println!("[VStackRenderObject::layout] START: constraints=({:?}, {:?}) -> ({:?}, {:?})",
+                constraints.min_width, constraints.min_height, constraints.max_width, constraints.max_height);
+        }
         let child_count = children.len();
         let spacing_total = if child_count > 1 {
             (child_count - 1) as f32 * self.spacing
@@ -176,25 +178,37 @@ impl ElementRenderObject for VStackRenderObject {
             }
         }
 
-        scarlet_std::println!("[VStackRenderObject::layout] after measuring: total_height={}, max_width={}",
-            total_height, max_width);
+        if crate::debug::is_enabled() {
+            scarlet_std::println!("[VStackRenderObject::layout] after measuring: total_height={}, max_width={}",
+                total_height, max_width);
+        }
 
         let final_width = if constraints.min_width == constraints.max_width && constraints.min_width.is_finite() && constraints.min_width > 0.0 {
-            scarlet_std::println!("[VStackRenderObject::layout] tight width detected, using constraint max_width");
+            if crate::debug::is_enabled() {
+                scarlet_std::println!("[VStackRenderObject::layout] tight width detected, using constraint max_width");
+            }
             constraints.max_width
         } else {
-            scarlet_std::println!("[VStackRenderObject::layout] loose width, using max_width from content");
+            if crate::debug::is_enabled() {
+                scarlet_std::println!("[VStackRenderObject::layout] loose width, using max_width from content");
+            }
             max_width
         };
 
         let final_height = if constraints.min_height == constraints.max_height && constraints.min_height.is_finite() && constraints.min_height > 0.0 {
-            scarlet_std::println!("[VStackRenderObject::layout] tight height detected, using constraint max_height");
+            if crate::debug::is_enabled() {
+                scarlet_std::println!("[VStackRenderObject::layout] tight height detected, using constraint max_height");
+            }
             constraints.max_height
         } else if constraints.max_height.is_finite() {
-            scarlet_std::println!("[VStackRenderObject::layout] loose height with finite max, using min(total_height, max_height)");
+            if crate::debug::is_enabled() {
+                scarlet_std::println!("[VStackRenderObject::layout] loose height with finite max, using min(total_height, max_height)");
+            }
             total_height.min(constraints.max_height)
         } else {
-            scarlet_std::println!("[VStackRenderObject::layout] loose height with inf max, using total_height");
+            if crate::debug::is_enabled() {
+                scarlet_std::println!("[VStackRenderObject::layout] loose height with inf max, using total_height");
+            }
             total_height
         };
 
@@ -213,7 +227,9 @@ impl ElementRenderObject for VStackRenderObject {
             width: final_width,
             height: final_height,
         };
-        scarlet_std::println!("[VStackRenderObject::layout] FINAL: size={}x{}", final_width, final_height);
+        if crate::debug::is_enabled() {
+            scarlet_std::println!("[VStackRenderObject::layout] FINAL: size={}x{}", final_width, final_height);
+        }
         self.size
     }
 

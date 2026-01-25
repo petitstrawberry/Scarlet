@@ -53,6 +53,16 @@ pub enum MouseEvent {
         x: i32,
         y: i32,
     },
+    /// Mouse entered an element
+    Entered {
+        x: i32,
+        y: i32,
+    },
+    /// Mouse exited an element
+    Exited {
+        x: i32,
+        y: i32,
+    },
 
     /// Mouse button pressed
     ButtonPressed {

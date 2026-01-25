@@ -4,16 +4,23 @@
 
 use crate::geometry::Size;
 use crate::buffer::Buffer;
-use crate::event::Event;
+use crate::event::{Event, MouseButton, MouseEvent};
 use crate::error::Result;
 use crate::platform::PlatformWindow;
 use sws_client as sws;
+use sws::event::{abs_code, event_type, key_code, Event as SwsEvent};
+use alloc::vec::Vec;
 
 /// SWS platform window implementation
 pub struct SWSPlatformWindow {
     conn: sws::Connection,
     surface_id: u32,
     current_size: Size,
+    pending_events: Vec<Event>,
+    pending_head: usize,
+    pointer_x: i32,
+    pointer_y: i32,
+    pending_move: bool,
 }
 
 impl SWSPlatformWindow {
@@ -52,17 +59,41 @@ impl PlatformWindow for SWSPlatformWindow {
             conn,
             surface_id,
             current_size: size,
+            pending_events: Vec::new(),
+            pending_head: 0,
+            pointer_x: 0,
+            pointer_y: 0,
+            pending_move: false,
         })
     }
 
     fn poll_event(&mut self) -> Option<Event> {
-        // Dispatch events
+        let debug = crate::debug::is_enabled();
+        if self.pending_head >= self.pending_events.len() {
+            self.pending_events.clear();
+            self.pending_head = 0;
+        }
+
         let _ = self.conn.dispatch().ok();
 
-        // Check for events
-        // Note: Full event polling implementation will come later
-        // For now, return None to avoid blocking
-        None
+        while let Some(ev) = self.conn.poll_event() {
+            self.handle_sws_event(ev);
+        }
+
+        if self.pending_head < self.pending_events.len() {
+            let ev = self.pending_events[self.pending_head].clone();
+            self.pending_head += 1;
+            if self.pending_head >= self.pending_events.len() {
+                self.pending_events.clear();
+                self.pending_head = 0;
+            }
+            if debug {
+                scarlet_std::println!("[SWSPlatformWindow] poll_event: {:?}", ev);
+            }
+            Some(ev)
+        } else {
+            None
+        }
     }
 
     fn present(&mut self, buffer: &Buffer) {
@@ -115,5 +146,171 @@ impl PlatformWindow for SWSPlatformWindow {
             .map_err(|_| crate::error::Error::IoError)?;
 
         Ok(())
+    }
+}
+
+impl SWSPlatformWindow {
+    fn handle_sws_event(&mut self, ev: SwsEvent) {
+        let debug = crate::debug::is_enabled();
+        if debug {
+            scarlet_std::println!("[SWSPlatformWindow] sws_event: {:?}", ev);
+        }
+        match ev {
+            SwsEvent::Input(input) => {
+                if input.surface_id != self.surface_id {
+                    return;
+                }
+
+                match (input.type_, input.code) {
+                    (event_type::EV_ABS, abs_code::ABS_X) => {
+                        self.pointer_x = input.value;
+                        self.pending_move = true;
+                        if debug {
+                            scarlet_std::println!("[SWSPlatformWindow] ABS_X: {}", input.value);
+                        }
+                    }
+                    (event_type::EV_ABS, abs_code::ABS_Y) => {
+                        self.pointer_y = input.value;
+                        self.pending_move = true;
+                        if debug {
+                            scarlet_std::println!("[SWSPlatformWindow] ABS_Y: {}", input.value);
+                        }
+                    }
+                    (event_type::EV_SYN, _) => {
+                        if self.pending_move {
+                            self.pending_events.push(Event::Mouse(MouseEvent::Moved {
+                                x: self.pointer_x,
+                                y: self.pointer_y,
+                            }));
+                            if debug {
+                                scarlet_std::println!(
+                                    "[SWSPlatformWindow] MouseMoved: x={}, y={}",
+                                    self.pointer_x,
+                                    self.pointer_y
+                                );
+                            }
+                            self.pending_move = false;
+                        }
+                    }
+                    (event_type::EV_KEY, key_code::BTN_LEFT) => {
+                        let button = MouseButton::Left;
+                        if input.value != 0 {
+                            self.pending_events.push(Event::Mouse(MouseEvent::ButtonPressed {
+                                button,
+                                x: self.pointer_x,
+                                y: self.pointer_y,
+                            }));
+                            if debug {
+                                scarlet_std::println!(
+                                    "[SWSPlatformWindow] MouseDown: left x={}, y={}",
+                                    self.pointer_x,
+                                    self.pointer_y
+                                );
+                            }
+                        } else {
+                            self.pending_events.push(Event::Mouse(MouseEvent::ButtonReleased {
+                                button,
+                                x: self.pointer_x,
+                                y: self.pointer_y,
+                            }));
+                            if debug {
+                                scarlet_std::println!(
+                                    "[SWSPlatformWindow] MouseUp: left x={}, y={}",
+                                    self.pointer_x,
+                                    self.pointer_y
+                                );
+                            }
+                        }
+                    }
+                    (event_type::EV_KEY, key_code::BTN_RIGHT) => {
+                        let button = MouseButton::Right;
+                        if input.value != 0 {
+                            self.pending_events.push(Event::Mouse(MouseEvent::ButtonPressed {
+                                button,
+                                x: self.pointer_x,
+                                y: self.pointer_y,
+                            }));
+                            if debug {
+                                scarlet_std::println!(
+                                    "[SWSPlatformWindow] MouseDown: right x={}, y={}",
+                                    self.pointer_x,
+                                    self.pointer_y
+                                );
+                            }
+                        } else {
+                            self.pending_events.push(Event::Mouse(MouseEvent::ButtonReleased {
+                                button,
+                                x: self.pointer_x,
+                                y: self.pointer_y,
+                            }));
+                            if debug {
+                                scarlet_std::println!(
+                                    "[SWSPlatformWindow] MouseUp: right x={}, y={}",
+                                    self.pointer_x,
+                                    self.pointer_y
+                                );
+                            }
+                        }
+                    }
+                    (event_type::EV_KEY, key_code::BTN_MIDDLE) => {
+                        let button = MouseButton::Middle;
+                        if input.value != 0 {
+                            self.pending_events.push(Event::Mouse(MouseEvent::ButtonPressed {
+                                button,
+                                x: self.pointer_x,
+                                y: self.pointer_y,
+                            }));
+                            if debug {
+                                scarlet_std::println!(
+                                    "[SWSPlatformWindow] MouseDown: middle x={}, y={}",
+                                    self.pointer_x,
+                                    self.pointer_y
+                                );
+                            }
+                        } else {
+                            self.pending_events.push(Event::Mouse(MouseEvent::ButtonReleased {
+                                button,
+                                x: self.pointer_x,
+                                y: self.pointer_y,
+                            }));
+                            if debug {
+                                scarlet_std::println!(
+                                    "[SWSPlatformWindow] MouseUp: middle x={}, y={}",
+                                    self.pointer_x,
+                                    self.pointer_y
+                                );
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            SwsEvent::SurfaceConfigure {
+                surface_id,
+                width,
+                height,
+            } => {
+                if surface_id == self.surface_id {
+                    self.current_size = Size::new(width as f32, height as f32);
+                    self.pending_events.push(Event::Resize { width, height });
+                    if debug {
+                        scarlet_std::println!(
+                            "[SWSPlatformWindow] SurfaceConfigure: {}x{}",
+                            width,
+                            height
+                        );
+                    }
+                }
+            }
+            SwsEvent::SurfaceDestroyed { surface_id } => {
+                if surface_id == self.surface_id {
+                    self.pending_events.push(Event::Quit);
+                    if debug {
+                        scarlet_std::println!("[SWSPlatformWindow] SurfaceDestroyed");
+                    }
+                }
+            }
+            _ => {}
+        }
     }
 }

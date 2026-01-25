@@ -4,6 +4,7 @@
 
 use alloc::string::String;
 use alloc::boxed::Box;
+use alloc::sync::Arc;
 use core::any::Any;
 use crate::view::View;
 use crate::element::{Element, RenderElement, ElementRenderObject};
@@ -19,9 +20,7 @@ pub type ButtonCallback = Box<dyn Fn() + 'static>;
 #[derive(Clone)]
 pub struct Button {
     label: String,
-    // Note: on_click is not cloneable, so we use Option<()> instead
-    // The actual callback should be stored in the RenderObject or managed separately
-    on_click: Option<()>,
+    on_click: Option<Arc<dyn Fn() + 'static>>,
     background_color: Color,
     text_color: Color,
     font_size: f32,
@@ -43,11 +42,8 @@ impl Button {
     }
 
     /// Set the click callback
-    pub fn on_click(mut self, _callback: impl Fn() + 'static) -> Self {
-        // Store that we have a callback, but don't store the actual callback
-        // since it's not Clone-able. The callback handling should be done
-        // differently in a real implementation (e.g., using Rc<RefCell<dyn Fn>>)
-        self.on_click = Some(());
+    pub fn on_click(mut self, callback: impl Fn() + 'static) -> Self {
+        self.on_click = Some(Arc::new(callback));
         self
     }
 
@@ -99,6 +95,13 @@ impl Button {
     pub fn get_padding(&self) -> f32 {
         self.padding
     }
+
+    /// Invoke the click callback if present
+    pub fn invoke_on_click(&self) {
+        if let Some(callback) = self.on_click.as_ref() {
+            callback();
+        }
+    }
 }
 
 impl View for Button {
@@ -125,6 +128,8 @@ pub struct ButtonRenderObject {
     text_color: Color,
     font_size: f32,
     padding: f32,
+    hovered: bool,
+    pressed: bool,
     size: Size,
     buffer: Option<Buffer>,
 }
@@ -141,6 +146,8 @@ impl ButtonRenderObject {
             text_color,
             font_size,
             padding,
+            hovered: false,
+            pressed: false,
             size: Size::ZERO,
             buffer: None,
         }
@@ -156,14 +163,48 @@ impl ButtonRenderObject {
 
         Size { width, height }
     }
+
+    pub fn set_hovered(&mut self, hovered: bool) {
+        self.hovered = hovered;
+    }
+
+    pub fn set_pressed(&mut self, pressed: bool) {
+        self.pressed = pressed;
+    }
+
+    pub fn is_pressed(&self) -> bool {
+        self.pressed
+    }
+
+    fn shade_color(color: Color, factor: f32) -> Color {
+        let clamp = |v: f32| v.clamp(0.0, 1.0);
+        Color {
+            r: clamp(color.r * factor),
+            g: clamp(color.g * factor),
+            b: clamp(color.b * factor),
+            a: color.a,
+        }
+    }
+
+    fn current_background(&self) -> Color {
+        if self.pressed {
+            Self::shade_color(self.background_color, 0.85)
+        } else if self.hovered {
+            Self::shade_color(self.background_color, 0.92)
+        } else {
+            self.background_color
+        }
+    }
 }
 
 impl ElementRenderObject for ButtonRenderObject {
     fn layout(&mut self, constraints: crate::element::LayoutConstraints) -> Size {
         let intrinsic = self.estimate_size();
 
-        scarlet_std::println!("[ButtonRenderObject] layout: label='{}' intrinsic={:?}, constraints={:?}",
-            self.label, intrinsic, constraints);
+        if crate::debug::is_enabled() {
+            scarlet_std::println!("[ButtonRenderObject] layout: label='{}' intrinsic={:?}, constraints={:?}",
+                self.label, intrinsic, constraints);
+        }
 
         // For buttons, use the intrinsic size, but constrain within bounds
         // Buttons should NOT expand to fill min_width/min_height
@@ -186,8 +227,10 @@ impl ElementRenderObject for ButtonRenderObject {
         let w = libm::ceilf(width) as u32;
         let h = libm::ceilf(height) as u32;
 
-        scarlet_std::println!("[ButtonRenderObject] layout: final size={}x{}, buffer needed={} bytes",
-            w, h, w * h * 4);
+        if crate::debug::is_enabled() {
+            scarlet_std::println!("[ButtonRenderObject] layout: final size={}x{}, buffer needed={} bytes",
+                w, h, w * h * 4);
+        }
 
         if self.buffer.as_ref().map_or(true, |b| b.data().len() < w as usize * h as usize * 4) {
             self.buffer = Some(Buffer::from_dimensions(w, h));
@@ -210,8 +253,11 @@ impl ElementRenderObject for ButtonRenderObject {
 
     fn render(&mut self) {
         // Render button to buffer
-        scarlet_std::println!("[ButtonRenderObject] render: label='{}', buffer={}",
-            self.label, self.buffer.is_some());
+        if crate::debug::is_enabled() {
+            scarlet_std::println!("[ButtonRenderObject] render: label='{}', buffer={}",
+                self.label, self.buffer.is_some());
+        }
+        let background = self.current_background();
         if let Some(ref mut buffer) = self.buffer {
             let width = buffer.width();
             let height = buffer.height();
@@ -219,7 +265,7 @@ impl ElementRenderObject for ButtonRenderObject {
             let mut canvas = graphics::Canvas::new(&mut data, width, height);
 
             // Fill background
-            canvas.fill_rect(0, 0, width, height, self.background_color);
+            canvas.fill_rect(0, 0, width, height, background);
 
             // Draw text centered
             let (text_w, _text_h) = graphics::measure_text_sized(&self.label, self.font_size);

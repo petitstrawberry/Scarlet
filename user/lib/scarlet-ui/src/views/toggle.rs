@@ -129,7 +129,7 @@ impl ToggleRenderObject {
 }
 
 impl ElementRenderObject for ToggleRenderObject {
-    fn layout(&mut self, constraints: crate::element::LayoutConstraints) -> Size {
+    fn layout(&mut self, _constraints: crate::element::LayoutConstraints) -> Size {
         // Toggle has fixed size (51x31), ignore constraints
         let width = self.size.width;  // 51.0
         let height = self.size.height; // 31.0
