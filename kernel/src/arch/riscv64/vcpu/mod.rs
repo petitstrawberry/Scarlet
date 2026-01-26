@@ -101,4 +101,20 @@ impl Vcpu {
         trapframe.regs = self.iregs;
         trapframe.epc = self.pc;
     }
+
+    /// Get the TLS (Thread Local Storage) pointer for this task
+    ///
+    /// On RISC-V, TLS is stored in the tp register (x4).
+    #[inline]
+    pub fn get_tls_pointer(&self) -> usize {
+        self.iregs.get_tp()
+    }
+
+    /// Set the TLS (Thread Local Storage) pointer for this task
+    ///
+    /// On RISC-V, TLS is stored in the tp register (x4).
+    #[inline]
+    pub fn set_tls_pointer(&mut self, ptr: usize) {
+        self.iregs.set_tp(ptr);
+    }
 }

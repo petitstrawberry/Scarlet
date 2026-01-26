@@ -450,45 +450,45 @@ fn main() -> i32 {
 
     // std::profiler::dump_profiler_stats();
 
-    println!("init: Starting login process...");
+    println!("init: Starting stem daemon (stemd)...");
 
     match fork() {
         0 => {
-            // Child process: Execute the login program
-            // After pivot_root, try the most likely locations for login binary
-            let login_paths = [
-                "/system/scarlet/bin/login",
-                "/scarlet/system/scarlet/bin/login", // In new root (copied from initramfs)
-                "/old_root/system/scarlet/bin/login", // In old root (original initramfs)
+            // Child process: Execute stemd
+            // After pivot_root, try the most likely locations for stemd binary
+            let stemd_paths = [
+                "/system/scarlet/bin/stemd",
+                "/scarlet/system/scarlet/bin/stemd", // In new root (copied from initramfs)
+                "/old_root/system/scarlet/bin/stemd", // In old root (original initramfs)
             ];
 
-            for login_path in &login_paths {
-                println!("init: Trying to execute login at: {}", login_path);
+            for stemd_path in &stemd_paths {
+                println!("init: Trying to execute stemd at: {}", stemd_path);
 
                 // Try to open the file first to see if it exists
-                match File::open(login_path) {
+                match File::open(stemd_path) {
                     Ok(_) => {
-                        println!("init: Login binary exists at {}", login_path);
+                        println!("init: stemd binary exists at {}", stemd_path);
                     }
                     Err(_) => {
-                        println!("init: Login binary not found at {}", login_path);
+                        println!("init: stemd binary not found at {}", stemd_path);
                         continue;
                     }
                 }
 
-                if execve_with_flags(login_path, &[login_path], &[], EXECVE_FORCE_ABI_REBUILD) == 0
+                if execve_with_flags(stemd_path, &[stemd_path], &[], EXECVE_FORCE_ABI_REBUILD) == 0
                 {
                     // This should not be reached if execve succeeds
                     break;
                 } else {
                     println!(
                         "init: Failed to execve {} (binary exists but execve failed)",
-                        login_path
+                        stemd_path
                     );
                 }
             }
 
-            println!("init: All login paths failed, exiting child process");
+            println!("init: All stemd paths failed, exiting child process");
             exit(-1);
         }
         -1 => {
@@ -496,7 +496,7 @@ fn main() -> i32 {
             loop {}
         }
         pid => {
-            println!("init: Login process created, child PID: {}", pid);
+            println!("init: stemd created, child PID: {}", pid);
 
             let res = loop {
                 let res = waitpid(pid, 0);

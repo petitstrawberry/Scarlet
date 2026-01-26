@@ -26,6 +26,7 @@ pub enum CompositorInputEvent {
     MouseMove { dx: i32, dy: i32 },
     MouseButton { button: u16, pressed: bool },
     MouseAbsolute { x: i32, y: i32 },
+    Keyboard { code: u16, pressed: bool },
 }
 
 /// Global input event queue
@@ -74,6 +75,7 @@ pub mod key_codes {
 /// Input manager - handles input devices and event reading
 pub struct InputManager {
     mouse_file: File,
+    keyboard_file: Option<File>,
     /// Maximum value for tablet absolute coordinates (typically 32767)
     tablet_max: i32,
     /// Current accumulated position for absolute positioning
@@ -96,8 +98,21 @@ impl InputManager {
             }
         };
 
+        // Try to open keyboard device
+        let keyboard_file = match File::open("/dev/keyboard0") {
+            Ok(file) => {
+                println!("[InputManager] Opened keyboard device");
+                Some(file)
+            }
+            Err(_) => {
+                println!("[InputManager] Keyboard device not found, keyboard input unavailable");
+                None
+            }
+        };
+
         Ok(Self {
             mouse_file,
+            keyboard_file,
             tablet_max: 32767, // Standard virtio-tablet range
             abs_x: None,
             abs_y: None,
@@ -135,6 +150,13 @@ impl InputManager {
         thread::spawn(move || {
             input_thread_main(screen_width, screen_height);
         });
+
+        // Start keyboard thread if keyboard device is available
+        if File::open("/dev/keyboard0").is_ok() {
+            thread::spawn(move || {
+                keyboard_thread_main();
+            });
+        }
 
         println!("[InputManager] Input thread started");
         Ok(())
@@ -219,4 +241,50 @@ fn input_thread_main(screen_width: u32, screen_height: u32) {
     }
 
     println!("[InputThread] Exited");
+}
+
+/// Keyboard thread main function
+fn keyboard_thread_main() {
+    println!("[KeyboardThread] Started");
+
+    let mut keyboard_file = match File::open("/dev/keyboard0") {
+        Ok(file) => file,
+        Err(e) => {
+            println!("[KeyboardThread] Failed to open keyboard device: {:?}", e);
+            return;
+        }
+    };
+
+    loop {
+        let mut buffer = [0u8; InputEvent::SIZE];
+
+        match keyboard_file.read(&mut buffer) {
+            Ok(bytes_read) => {
+                if bytes_read != InputEvent::SIZE {
+                    continue; // No complete event available
+                }
+
+                // Parse event
+                let event = unsafe { core::ptr::read(buffer.as_ptr() as *const InputEvent) };
+
+                // Process keyboard events
+                match event.type_ {
+                    event_types::EV_KEY => {
+                        let pressed = event.value == 1 || event.value == 2; // 2 = key repeat
+                        push_input_event(CompositorInputEvent::Keyboard {
+                            code: event.code,
+                            pressed,
+                        });
+                    }
+                    _ => {}
+                }
+            }
+            Err(e) => {
+                println!("[KeyboardThread] Error reading event: {:?}", e);
+                break;
+            }
+        }
+    }
+
+    println!("[KeyboardThread] Exited");
 }

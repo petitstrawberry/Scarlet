@@ -286,7 +286,7 @@ impl LocalSocket {
             peer_addr: RwLock::new(Some(peer_addr.clone())),
             read_buffer: RwLock::new(local_read_buffer.clone()),
             peer_read_buffer: RwLock::new(Some(peer_read_buffer.clone())),
-            peer_socket: RwLock::new(None), // Set later
+            peer_socket: RwLock::new(None),
             backlog: RwLock::new(Vec::new()),
             max_backlog: RwLock::new(0),
             accept_waker: Waker::new_interruptible("socket_accept"),
@@ -307,7 +307,7 @@ impl LocalSocket {
             peer_addr: RwLock::new(Some(local_addr)),
             read_buffer: RwLock::new(peer_read_buffer.clone()),
             peer_read_buffer: RwLock::new(Some(local_read_buffer.clone())),
-            peer_socket: RwLock::new(None), // Set later
+            peer_socket: RwLock::new(None),
             backlog: RwLock::new(Vec::new()),
             max_backlog: RwLock::new(0),
             accept_waker: Waker::new_interruptible("socket_accept"),
@@ -341,30 +341,44 @@ impl LocalSocket {
 
         loop {
             // Verify socket is connected
-            if *self.state.read() != SocketState::Connected {
-                return Err(IpcError::InvalidState);
+            {
+                let state = self.state.read();
+                if *state != SocketState::Connected {
+                    return Err(IpcError::InvalidState);
+                }
             }
 
             // Fast path: handle already queued
-            if let Some(obj) = self.handle_queue.write().pop_front() {
-                return Ok(obj);
+            {
+                let mut queue = self.handle_queue.write();
+                if let Some(obj) = queue.pop_front() {
+                    return Ok(obj);
+                }
             }
 
             // If peer has shut down (or been dropped), don't block forever.
             // We reuse the same conditions as read_blocking() uses for EOF.
-            if let Some(peer_weak) = self.peer_socket.read().as_ref() {
-                if let Some(peer) = peer_weak.upgrade() {
-                    if *peer.state.read() == SocketState::Closed {
+            {
+                let peer_weak_opt = self.peer_socket.read();
+                if let Some(peer_weak) = peer_weak_opt.as_ref() {
+                    if let Some(peer) = peer_weak.upgrade() {
+                        let peer_state = peer.state.read();
+                        if *peer_state == SocketState::Closed {
+                            return Err(IpcError::PeerClosed);
+                        }
+                    } else {
                         return Err(IpcError::PeerClosed);
                     }
-                } else {
-                    return Err(IpcError::PeerClosed);
                 }
             }
 
             // If peer performed shutdown(), our read buffer is marked closed.
-            if *self.read_buffer.read().closed.read() {
-                return Err(IpcError::PeerClosed);
+            {
+                let read_buf = self.read_buffer.read();
+                let closed = read_buf.closed.read();
+                if *closed {
+                    return Err(IpcError::PeerClosed);
+                }
             }
 
             // No handle available, block the task
@@ -888,27 +902,27 @@ impl Selectable for LocalSocket {
     }
 
     fn set_nonblocking(&self, enabled: bool) {
-        crate::println!(
-            "[LocalSocket::set_nonblocking] self={:p} enabled={}",
-            self as *const _,
-            enabled
-        );
+        // crate::println!(
+        //     "[LocalSocket::set_nonblocking] self={:p} enabled={}",
+        //     self as *const _,
+        //     enabled
+        // );
         *self.nonblocking.write() = enabled;
         let verify = *self.nonblocking.read();
-        crate::println!(
-            "[LocalSocket::set_nonblocking] self={:p} after write, read back={}",
-            self as *const _,
-            verify
-        );
+        // crate::println!(
+        //     "[LocalSocket::set_nonblocking] self={:p} after write, read back={}",
+        //     self as *const _,
+        //     verify
+        // );
     }
 
     fn is_nonblocking(&self) -> bool {
         let value = *self.nonblocking.read();
-        crate::println!(
-            "[LocalSocket::is_nonblocking] self={:p} returning={}",
-            self as *const _,
-            value
-        );
+        // crate::println!(
+        //     "[LocalSocket::is_nonblocking] self={:p} returning={}",
+        //     self as *const _,
+        //     value
+        // );
         value
     }
 }
@@ -919,22 +933,22 @@ const SOCKET_CMD_GET_NONBLOCKING: u32 = 2;
 
 impl ControlOps for LocalSocket {
     fn control(&self, command: u32, arg: usize) -> Result<i32, &'static str> {
-        crate::println!("[LocalSocket::control] command={} arg={}", command, arg);
+        // crate::println!("[LocalSocket::control] command={} arg={}", command, arg);
         match command {
             SOCKET_CMD_SET_NONBLOCKING => {
                 let enabled = arg != 0;
-                crate::println!("[LocalSocket::control] Setting nonblocking={}", enabled);
+                // crate::println!("[LocalSocket::control] Setting nonblocking={}", enabled);
                 self.set_nonblocking(enabled);
                 let verify = self.is_nonblocking();
-                crate::println!("[LocalSocket::control] Verified nonblocking={}", verify);
+                // crate::println!("[LocalSocket::control] Verified nonblocking={}", verify);
                 Ok(0)
             }
             SOCKET_CMD_GET_NONBLOCKING => {
                 let is_nonblocking = self.is_nonblocking();
-                crate::println!(
-                    "[LocalSocket::control] Getting nonblocking={}",
-                    is_nonblocking
-                );
+                // crate::println!(
+                // "[LocalSocket::control] Getting nonblocking={}",
+                // is_nonblocking
+                // );
                 Ok(if is_nonblocking { 1 } else { 0 })
             }
             _ => {

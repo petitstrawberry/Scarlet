@@ -393,6 +393,30 @@ pub trait AbiModule: Send + Sync + 'static {
         // Default implementation: ignore events
         Ok(())
     }
+
+    /// Set the TLS (Thread Local Storage) pointer for this task
+    ///
+    /// Default implementation does nothing - ABIs that support TLS
+    /// should override this method.
+    fn set_tls_pointer(&mut self, _ptr: usize) {
+        // Default: do nothing
+    }
+
+    /// Get the TLS (Thread Local Storage) pointer for this task
+    ///
+    /// Default implementation returns None - ABIs that support TLS
+    /// should override this method.
+    fn get_tls_pointer(&self) -> Option<usize> {
+        None
+    }
+
+    /// Set the clear_child_tid pointer for thread exit notification
+    ///
+    /// Default implementation does nothing - ABIs that support TLS
+    /// should override this method.
+    fn set_clear_child_tid(&mut self, _ptr: usize) {
+        // Default: do nothing
+    }
 }
 
 /// ABI registry.

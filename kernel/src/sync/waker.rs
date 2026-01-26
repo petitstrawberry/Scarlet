@@ -96,7 +96,7 @@ impl Waker {
     /// # Behavior
     ///
     /// 1. Gets the current task ID
-    /// 2. Sets the task state to `Blocked(self.block_type)`
+    /// 2. Sets the task state to `Blocked(self.block_type)` FIRST
     /// 3. Adds the task ID to the wait queue
     /// 4. Calls the scheduler to yield CPU to other tasks
     /// 5. Returns when the task is woken up and rescheduled
@@ -106,19 +106,34 @@ impl Waker {
     /// This function returns when the task is woken up by another part of the system.
     /// The calling code can then continue execution, typically to re-check the
     /// condition that caused the wait.
+    ///
+    /// # Critical Section
+    ///
+    /// To prevent race conditions between wait() and wake_one()/wake_all():
+    /// 1. Set task state to Blocked BEFORE adding to queue
+    /// 2. This ensures wake_task() can safely operate even if called immediately
     pub fn wait(&self, task_id: usize, trapframe: &mut Trapframe) {
-        // Add task to wait queue first
-        {
-            let mut queue = self.wait_queue.lock();
-            queue.push_back(task_id);
-        }
-
-        // Set task state to Blocked like dev branch behavior
+        // CRITICAL: Set task state to Blocked FIRST, before adding to queue
+        // This prevents race condition where wake_one() is called after queue.push_back()
+        // but before set_state(), which would leave the task in Running state but not in queue
         if let Some(task) = get_scheduler().get_task_by_id(task_id) {
             task.set_state(TaskState::Blocked(self.block_type));
         } else {
             panic!("[WAKER] Task ID {} not found in scheduler", task_id);
         }
+
+        // Memory barrier to ensure state change is visible before queue operation
+        core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
+
+        // Now add task to wait queue - at this point task is already Blocked
+        // Even if wake_one() is called immediately, wake_task() will work correctly
+        {
+            let mut queue = self.wait_queue.lock();
+            queue.push_back(task_id);
+        }
+
+        // Memory barrier to ensure queue addition is visible before yielding
+        core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
 
         // Yield CPU to scheduler - returns when woken
         get_scheduler().schedule(trapframe);

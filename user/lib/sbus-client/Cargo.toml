@@ -1,0 +1,8 @@
+[package]
+name = "sbus-client"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+scarlet_std = { path = "../std" }
+sbus = { path = "../sbus" }

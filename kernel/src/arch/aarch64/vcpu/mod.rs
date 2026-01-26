@@ -142,4 +142,20 @@ impl Vcpu {
         trapframe.tpidr_el0 = self.tpidr_el0;
         trapframe.tpidrro_el0 = self.tpidrro_el0;
     }
+
+    /// Get the TLS (Thread Local Storage) pointer for this task
+    ///
+    /// On AArch64, TLS is stored in the TPIDR_EL0 system register.
+    #[inline]
+    pub fn get_tls_pointer(&self) -> usize {
+        self.tpidr_el0 as usize
+    }
+
+    /// Set the TLS (Thread Local Storage) pointer for this task
+    ///
+    /// On AArch64, TLS is stored in the TPIDR_EL0 system register.
+    #[inline]
+    pub fn set_tls_pointer(&mut self, ptr: usize) {
+        self.tpidr_el0 = ptr as u64;
+    }
 }

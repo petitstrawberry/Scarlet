@@ -99,9 +99,10 @@ use crate::object::handle::syscall::{
     sys_handle_set_role,
 };
 use crate::task::syscall::{
-    sys_brk, sys_clone, sys_create_namespace, sys_execve, sys_execve_abi, sys_exit, sys_getchar,
-    sys_getpid, sys_getppid, sys_putchar, sys_register_abi_zone, sys_sbrk, sys_sleep,
-    sys_unregister_abi_zone, sys_waitpid,
+    sys_brk, sys_clone, sys_create_namespace, sys_execve, sys_execve_abi, sys_exit, sys_exit_group,
+    sys_get_tls, sys_getchar, sys_getpid, sys_getppid, sys_putchar, sys_register_abi_zone,
+    sys_sbrk, sys_set_tid_address, sys_set_tls, sys_sleep, sys_unregister_abi_zone, sys_waitpid,
+    sys_yield,
 };
 
 #[macro_use]
@@ -147,6 +148,14 @@ syscall_table! {
     Getchar = 17 => sys_getchar,
 
     Sleep = 20 => sys_sleep,
+
+    Yield = 21 => sys_yield,
+
+    ExitGroup = 23 => sys_exit_group, // Exit all tasks in thread group
+    // TLS (Thread Local Storage) Management
+    SetTls = 30 => sys_set_tls,
+    GetTls = 31 => sys_get_tls,
+    SetTidAddress = 32 => sys_set_tid_address,
 
     // ABI Zone Management
     RegisterAbiZone = 90 => sys_register_abi_zone,

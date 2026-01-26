@@ -30,8 +30,22 @@ use crate::{
 
 use crate::abi::AbiModule;
 
-#[derive(Default, Copy, Clone)]
-pub struct ScarletAbi;
+#[derive(Clone, Copy)]
+pub struct ScarletAbi {
+    /// TLS (Thread Local Storage) pointer for this task
+    pub tls_pointer: Option<usize>,
+    /// clear_child_tid pointer for thread exit notification (Linux-compatible)
+    pub clear_child_tid_ptr: Option<usize>,
+}
+
+impl Default for ScarletAbi {
+    fn default() -> Self {
+        Self {
+            tls_pointer: None,
+            clear_child_tid_ptr: None,
+        }
+    }
+}
 
 impl AbiModule for ScarletAbi {
     fn name() -> &'static str {
@@ -500,9 +514,40 @@ impl AbiModule for ScarletAbi {
             }
         }
     }
+
+    fn on_task_exit(&mut self, task: &mut crate::task::Task) {
+        // Delegate to the implementation method
+        self.on_task_exit(task);
+    }
+
+    fn set_tls_pointer(&mut self, ptr: usize) {
+        self.tls_pointer = Some(ptr);
+    }
+
+    fn get_tls_pointer(&self) -> Option<usize> {
+        self.tls_pointer
+    }
+
+    fn set_clear_child_tid(&mut self, ptr: usize) {
+        self.clear_child_tid_ptr = Some(ptr);
+    }
 }
 
 impl ScarletAbi {
+    /// Handle task exit with TLS cleanup (Linux-compatible)
+    pub fn on_task_exit(&mut self, task: &mut crate::task::Task) {
+        // Linux-compatible behavior: write 0 to clear_child_tid and futex wake
+        if let Some(ptr) = self.clear_child_tid_ptr {
+            if let Some(paddr) = task.vm_manager.translate_vaddr(ptr) {
+                unsafe {
+                    *(paddr as *mut i32) = 0;
+                }
+            }
+            // Note: Futex wake for clear_child_tid is handled by the Linux ABI's
+            // on_task_exit implementation. For Scarlet Native, we just clear the value.
+        }
+    }
+
     /// Setup argc, argv, and envp on the user stack following Unix conventions
     ///
     /// Standard Unix stack layout (from high to low addresses):

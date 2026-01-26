@@ -26,7 +26,9 @@ use crate::library::std::string::{
 
 use crate::arch::{Trapframe, get_cpu};
 use crate::sched::scheduler::get_scheduler;
-use crate::task::{CloneFlags, WaitError, get_parent_waitpid_waker, get_waitpid_waker};
+use crate::task::{
+    CloneFlags, CloneFlagsDef, WaitError, get_parent_waitpid_waker, get_waitpid_waker,
+};
 use crate::timer::ns_to_ticks;
 
 const MAX_ARG_COUNT: usize = 256; // Maximum number of arguments for execve
@@ -113,15 +115,13 @@ pub fn sys_clone(trapframe: &mut Trapframe) -> usize {
     let child_stack = trapframe.get_arg(1); // Second argument: child stack pointer
     let child_fn = trapframe.get_arg(2); // Third argument: function pointer (trampoline)
     let child_arg = trapframe.get_arg(3); // Fourth argument: argument to pass to function (closure pointer)
+    let tls_ptr = trapframe.get_arg(4); // Fifth argument: TLS pointer
 
     // crate::println!("[CLONE] Parent task {} cloning with flags: 0x{:x}", parent_task.get_id(), clone_flags.get_raw());
 
     /* Clone the task */
     match parent_task.clone_task(clone_flags) {
         Ok(mut child_task) => {
-            // Kernel internals use global task IDs, but syscalls should expose namespace-local IDs.
-            let child_global_id = child_task.get_id();
-            let child_ns_pid = child_task.get_namespace_id();
             // crate::println!("[CLONE] Successfully created child task {}, state: {:?}, PC: 0x{:x}",
             //     child_id, child_task.get_state(), child_task.vcpu.get_pc());
             child_task.vcpu.iregs.set_return_value(0); /* Set the return value to 0 in the child task */
@@ -141,16 +141,92 @@ pub fn sys_clone(trapframe: &mut Trapframe) -> usize {
                 child_task.vcpu.iregs.set_arg(0, child_arg);
             }
 
-            get_scheduler().add_task(child_task, get_cpu().get_cpuid());
+            let scheduler = get_scheduler();
+            let cpu_id = get_cpu().get_cpuid();
+            let parent_id = parent_task.get_id();
+
+            // Handle SetTls flag: set TLS pointer and tp register
+            if clone_flags.is_set(CloneFlagsDef::SetTls) {
+                // Set TLS pointer in task's ABI state
+                if let Some(abi) = child_task.default_abi.as_mut() {
+                    abi.set_tls_pointer(tls_ptr);
+                }
+
+                // Set TLS pointer using architecture-specific VCPU method
+                child_task.vcpu.set_tls_pointer(tls_ptr);
+            }
+
+            // Add child to scheduler and get the allocated ID
+            let child_id = scheduler.add_task(child_task, cpu_id);
             // crate::println!("[CLONE] Child task {} added to scheduler", child_id);
+
+            // Establish parent-child relationship now that both have valid IDs
+            if let Some(child) = scheduler.get_task_by_id(child_id) {
+                child.set_parent_id(parent_id);
+            }
+            if let Some(parent) = scheduler.get_task_by_id(parent_id) {
+                parent.add_child(child_id);
+            }
+
+            // Get the child's namespace-local PID (after add_task has set the IDs)
+            let child_ns_pid = scheduler
+                .get_task_by_id(child_id)
+                .map(|t| t.get_namespace_id())
+                .unwrap_or(0);
+
             /* Return the child task PID (namespace-local) to the parent task */
-            let _ = child_global_id;
             child_ns_pid
         }
         Err(_) => {
             usize::MAX /* Return -1 on error */
         }
     }
+}
+
+/// Set the TLS pointer for the current task
+pub fn sys_set_tls(trapframe: &mut Trapframe) -> usize {
+    let task = mytask().unwrap();
+    let tls_ptr = trapframe.get_arg(0);
+
+    // Update ABI state
+    if let Some(abi) = task.default_abi.as_mut() {
+        abi.set_tls_pointer(tls_ptr);
+    }
+
+    // Set TLS pointer using architecture-specific VCPU method
+    task.vcpu.set_tls_pointer(tls_ptr);
+
+    trapframe.increment_pc_next(task);
+    0 // Success
+}
+
+/// Get the TLS pointer for the current task
+pub fn sys_get_tls(trapframe: &mut Trapframe) -> usize {
+    let task = mytask().unwrap();
+
+    // Get TLS pointer from ABI state
+    let tls_ptr = task
+        .default_abi
+        .as_ref()
+        .and_then(|abi| abi.get_tls_pointer())
+        .unwrap_or(0);
+
+    trapframe.increment_pc_next(task);
+    tls_ptr // Return TLS pointer
+}
+
+/// Set the clear_child_tid pointer for thread exit notification
+pub fn sys_set_tid_address(trapframe: &mut Trapframe) -> usize {
+    let task = mytask().unwrap();
+    let tid_ptr = trapframe.get_arg(0);
+
+    // Update ABI state
+    if let Some(abi) = task.default_abi.as_mut() {
+        abi.set_clear_child_tid(tid_ptr);
+    }
+
+    trapframe.increment_pc_next(task);
+    task.get_namespace_id() // Return current TID (Linux-compatible)
 }
 
 pub fn sys_execve(trapframe: &mut Trapframe) -> usize {
@@ -468,6 +544,50 @@ pub fn sys_sleep(trapframe: &mut Trapframe) -> usize {
 
     // Set return value to 0 for successful sleep
     0
+}
+
+/// Yield execution to the scheduler
+///
+/// This is a cooperative scheduling primitive similar to `sched_yield(2)`.
+/// The calling task remains runnable, but allows another ready task to run.
+///
+/// # Returns
+/// * `0` on success
+pub fn sys_yield(trapframe: &mut Trapframe) -> usize {
+    let task = mytask().unwrap();
+
+    // Increment PC before yielding to avoid re-executing the syscall on resume
+    trapframe.increment_pc_next(task);
+
+    // Yield CPU to scheduler - returns when this task is scheduled again
+    get_scheduler().schedule(trapframe);
+
+    0
+}
+
+/// Exit all tasks in the thread group
+///
+/// This system call terminates all tasks with the same TGID (thread group).
+/// It is similar to Linux's exit_group system call and is the proper way
+/// for multi-threaded processes to exit.
+///
+/// # Arguments
+/// * `trapframe.arg(0)` - Exit status code
+///
+/// # Returns
+/// This function does not return on success (all tasks are terminated).
+/// Returns `usize::MAX` (-1) on error.
+///
+/// # Behavior
+/// - Terminates all tasks with the same TGID as the caller
+/// - The calling task is set to Zombie/Terminated
+/// - Other tasks in the group are forcefully terminated
+pub fn sys_exit_group(trapframe: &mut Trapframe) -> usize {
+    let task = mytask().unwrap();
+    task.vcpu.store(trapframe);
+    let exit_code = trapframe.get_arg(0) as i32;
+    task.exit_group(exit_code);
+    usize::MAX // -1 (If exit_group is successful, this will not be reached)
 }
 
 /// Register an ABI zone for a specific memory range

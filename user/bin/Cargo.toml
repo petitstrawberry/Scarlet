@@ -3,6 +3,12 @@ name = "userprogram"
 version = "0.15.0"
 edition = "2024"
 
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"
+
 [[bin]]
 name = "init"
 path = "src/init.rs"
@@ -76,8 +82,36 @@ name = "socket_handle_transfer_demo"
 path = "src/socket_handle_transfer_demo.rs"
 test = false
 
+# [[bin]]
+# name = "ui_demo"
+# path = "src/ui_demo.rs"
+
 [[bin]]
-name = "ui_demo"
+name = "stemd"
+path = "src/stemd/main.rs"
+
+[[bin]]
+name = "sbusd"
+path = "src/sbusd/main.rs"
+
+# [[bin]]
+# name = "slint_demo"
+# path = "src/slint_demo.rs"
+
+[[bin]]
+name = "scarlet_desktop"
+path = "src/scarlet_desktop/main.rs"
+
+[[bin]]
+name = "scarlet_desktop_background"
+path = "src/scarlet_desktop/background/main.rs"
+
+[[bin]]
+name = "scarlet_desktop_taskbar"
+path = "src/scarlet_desktop/taskbar/main.rs"
+
+[[bin]]
+name = "ui-demo"
 path = "src/ui_demo.rs"
 
 [[bin]]
@@ -90,3 +124,17 @@ framebuffer = { path = "../lib/framebuffer" }
 sws_protocol = { path = "../lib/sws_protocol" }
 sws-client = { path = "../lib/sws-client" }
 scarlet-ui = { path = "../lib/scarlet-ui" }
+scarlet-ui-macros = { path = "../lib/scarlet-ui-macros" }
+# slint-scarlet = { path = "../lib/slint-scarlet" }
+scarlet-desktop-config = { path = "../lib/scarlet-desktop-config" }
+sbus = { path = "../lib/sbus" }
+sbus-client = { path = "../lib/sbus-client" }
+slint = { version = "1.14", default-features = false, features = [
+    "unsafe-single-threaded",
+    "renderer-software",
+    "libm",
+    "compat-1-2"
+] }
+
+[build-dependencies]
+slint-build = "1.14"

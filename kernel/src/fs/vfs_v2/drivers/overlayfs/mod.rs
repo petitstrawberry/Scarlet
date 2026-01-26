@@ -622,7 +622,7 @@ impl OverlayFS {
                             if let Ok(dest_file) = upper_fs.open(&new_node, 1) {
                                 // Write-only
                                 let _ = dest_file.seek(SeekFrom::Start(0));
-                                let mut buffer = [0u8; 4096];
+                                let mut buffer = alloc::vec![0u8; crate::environment::PAGE_SIZE];
                                 loop {
                                     match source_file.read(&mut buffer) {
                                         Ok(bytes_read) if bytes_read > 0 => {

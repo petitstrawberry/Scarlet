@@ -1,210 +1,111 @@
-//! Scarlet UI - Native UI toolkit for Scarlet OS
+//! ScarletUI 2.0 - Declarative UI Framework for Scarlet OS
 //!
-//! This library provides widgets and utilities for building graphical applications
-//! on Scarlet OS using the Scarlet Window Server (SWS).
+//! ScarletUI is a reactive UI framework inspired by Flutter and SwiftUI.
+//! It provides:
 //!
-//! # Architecture
+//! - **Declarative Views**: Describe your UI with composable Views
+//! - **State Management**: Reactive State<T> with automatic updates
+//! - **Element System**: Efficient runtime representation with reconciliation
+//! - **Layout Engine**: Constraint-based layout system
+//! - **Event Handling**: Pointer and keyboard event routing
+//! - **Platform Abstraction**: Work with SWS, SDL2, Winit, or custom backends
 //!
-//! - `sws-client`: Low-level connection and protocol handling
-//! - `scarlet-ui` (this crate): High-level UI toolkit with View-based components
-//!
-//! # Features
-//!
-//! ## Core View System
-//!
-//! - Declarative view composition
-//! - Automatic layout management
-//! - Two-phase event handling (capture and bubble)
-//! - Window decorations with modern design
-//!
-//! ## Layout Containers
-//!
-//! Build complex layouts using:
-//! - [`VStack`] - Vertical stack
-//! - [`HStack`] - Horizontal stack
-//! - [`ZStack`] - Overlay stack
-//! - [`Padding`] - Add padding
-//! - [`Center`] - Center content
-//! - [`Spacer`] - Flexible spacing
-//!
-//! ## Control Widgets
-//!
-//! - [`Label`] - Text display
-//! - [`Button`] - Interactive button
-//! - [`TextField`] - Text input
-//! - [`CheckBox`] - Boolean toggle
-//! - [`Slider`] - Value selection
-//! - [`ProgressBar`] - Progress indicator
-//! - [`Toggle`] - Switch control
-//!
-//! ## View Modifiers
-//!
-//! Apply styles using the [`ViewModifier`] trait:
-//! - `corner_radius()` - Rounded corners
-//! - `border()` - Border styling
-//! - `background_color()` - Background color
-//!
-//! # Example
+//! # Basic Usage
 //!
 //! ```no_run
-//! use scarlet_ui::{
-//!     Application, Window, VStack, HStack, Label, Button, 
-//!     CheckBox, Slider, Padding, Color, ViewModifier,
-//! };
+//! use scarlet_ui::*;
+//!
+//! #[derive(View, Clone)]
+//! struct CounterApp {
+//!     #[state]
+//!     count: State<i32>,
+//! }
+//!
+//! impl CounterApp {
+//!     fn body(&self) -> impl View {
+//!         vstack! {
+//!             Text::new("Counter"),
+//!             Button::new("Increment")
+//!                 .on_click(|_| self.count.update(|c| *c += 1)),
+//!             Text::new(&format!("Count: {}", self.count.get())),
+//!         }
+//!     }
+//! }
 //!
 //! fn main() {
-//!     let mut app = Application::new().expect("Failed to connect");
-//!
-//!     // Scarlet UI loads its default vector font from rootfs.
-//!     // Make sure `/system/scarlet/fonts/Mplus1-Regular.ttf` exists in the image.
-//!     
-//!     let window = Window::new("Demo", 600, 400)
-//!         .background(Color::rgb(245, 245, 250))
-//!         .content(
-//!             Padding::new(
-//!                 VStack::new()
-//!                     .spacing(16)
-//!                     .child(
-//!                         Label::new("Welcome to ScarletUI!")
-//!                             .color(Color::TEXT)
-//!                             .font_size(32)
-//!                     )
-//!                     .child(
-//!                         CheckBox::new("Enable feature", true)
-//!                             .on_toggle(|checked| {
-//!                                 println!("Feature enabled: {}", checked);
-//!                             })
-//!                     )
-//!                     .child(
-//!                         Slider::new(0.5, 0.0, 1.0)
-//!                             .on_change(|value| {
-//!                                 println!("Value: {:.2}", value);
-//!                             })
-//!                     )
-//!                     .child(HStack::new()
-//!                         .spacing(12)
-//!                         .child(Button::new("OK", || {
-//!                             println!("OK clicked");
-//!                         }))
-//!                         .child(Button::new("Cancel", || {
-//!                             println!("Cancel clicked");
-//!                         }))
-//!                     )
-//!             ).all(20)
-//!         );
-//!     
-//!     app.add_window(window).unwrap();
-//!     app.run(); // Framework takes over - never returns
+//!     let mut app = CounterApp {
+//!         count: State::initial(0),
+//!     };
+//!     app.run();
 //! }
 //! ```
-//!
-//! # Design Philosophy
-//!
-//! Scarlet UI follows SwiftUI-inspired design principles:
-//!
-//! 1. **Declarative** - Describe what you want, not how to build it
-//! 2. **Composable** - Build complex UIs from simple components
-//! 3. **Type-safe** - Leverage Rust's type system
-//! 4. **Efficient** - Minimal allocations, `no_std` compatible
 
 #![no_std]
 
+extern crate alloc;
 extern crate scarlet_std as std;
 
-mod application;
+// Import procedural macros crate (derives work automatically)
+extern crate scarlet_ui_macros;
+
+pub mod geometry;
 pub mod color;
-pub mod event;
-pub mod graphics;
-pub mod modifiers;
+pub mod error;
 pub mod state;
-pub mod timer;
 pub mod view;
+pub mod element;
+pub mod event;
+pub mod buffer;
+pub mod compositor;
+pub mod render;
+pub mod pipeline;
+pub mod views;
+pub mod platform;
+pub mod application;
+pub mod macros;
+pub mod graphics;
+pub mod debug;
 
-// Re-exports
-pub use application::{Application, ApplicationDelegate, ApplicationHandle};
-pub use color::Color;
-pub use event::{Event, EventKind, EventType, MouseButton};
-pub use graphics::{set_default_font, Canvas, Point, Rect};
-pub use state::{State, Binding, Observable, Computed, ViewRefreshHandle, SubscriptionId};
-pub use timer::{Timer, schedule_on_main_thread};
+// Re-exports for convenience
+pub use geometry::{Size, Point, Rect, Offset, EdgeInsets, Alignment};
+pub use color::{Color, ColorScheme, ColorPalette, SemanticColor, SystemColors};
+pub use color::system::{GrayColors, BlueColors, GreenColors, OrangeColors, PinkColors, PurpleColors, RedColors, YellowColors};
+pub use error::{Error, Result};
+pub use state::{State, StateId, SubscriptionId, generate_state_id, Listenable};
+pub use view::{View, ViewExt};
+pub use element::{Element, ElementId, LayoutConstraints, ComponentElement, RenderElement, ElementTree, ElementRenderObject, DirtyFlags};
+pub use event::{Event, MouseEvent, KeyEvent, InputEvent, KeyCode, MouseButton, EventDispatcher, FocusEvent, LifecycleEvent};
+pub use buffer::Buffer;
+pub use compositor::Compositor;
+pub use render::{RenderTree, RenderNode};
+pub use pipeline::{PipelineOwner, RenderingPipeline, DirtyPhase, StateRegistry};
+pub use views::{Window, Text, Button, Rectangle, Spacer, Image, VStack, HStack, ZStack};
+pub use views::{Divider, DividerOrientation, Toggle, Slider, ProgressView};
+pub use views::modifiers::{Padding, Frame, Background, SetSize, AlignmentFrame};
+pub use platform::{PlatformWindow, SWSPlatformWindow};
+pub use application::Application;
+pub use graphics::{Canvas, measure_text_sized, set_default_font};
 
-// Proc macro re-exports
-pub use scarlet_ui_macros::{View as DeriveView, state, binding, view_builder};
+// Macros are exported at root via #[macro_export]
+// Users can use them directly: vstack! {}, hstack! {}, etc.
 
-// Vector font support (always enabled)
-pub use ab_glyph::{FontRef, InvalidFont};
+/// Prelude module for convenient imports
+pub mod prelude {
+    pub use crate::geometry::*;
+    pub use crate::color::{Color, ColorScheme, ColorPalette, SemanticColor};
+    pub use crate::error::{Error, Result};
+    pub use crate::state::{State, StateId, SubscriptionId, Listenable};
+    pub use crate::view::{View, ViewExt};
+    pub use crate::element::{Element, ElementId, LayoutConstraints, ElementRenderObject, DirtyFlags};
+    pub use crate::event::{Event, MouseEvent, KeyEvent, FocusEvent, LifecycleEvent};
+    pub use crate::application::Application;
+    pub use crate::views::{Window, Text, Button, Rectangle, Spacer, Image, VStack, HStack, ZStack};
+    pub use crate::views::{Divider, DividerOrientation, Toggle, Slider, ProgressView};
+    pub use crate::views::modifiers::{Padding, Frame, Background};
 
-// View system re-exports
-pub use view::{
-    View, Size, ViewBox, IntoViewBox,
-    Window,
-    VStack, HStack, ZStack, Padding, Center,
-    // Basic views
-    Label, Text, Button, Spacer, RectView,
-    // Reactive controls (all use Binding<T> or State<T>)
-    ReactiveLabel, TextField, CheckBox, Slider, ProgressBar, Toggle,
-};
-
-/// Create a reactive `Text` view with `format!`-style syntax.
-///
-/// All arguments must be `State<T>` (or a type that provides `.get()` and `.subscribe_view()`).
-///
-/// Examples:
-/// ```no_run
-/// # use scarlet_ui::{State, text};
-/// let counter = State::new(1);
-/// let v = text!("Count: {}", counter);
-/// ```
-#[macro_export]
-macro_rules! text {
-    ($text:expr $(,)?) => {
-        $crate::Label::new($text)
-    };
-    ($fmt:literal, $s1:expr $(,)?) => {{
-        let handle = $crate::ViewRefreshHandle::new();
-        let s1 = $s1;
-        s1.subscribe_view(&handle);
-        $crate::Text::from_refresh_handle(handle, move || format!($fmt, s1.get()))
-    }};
-    ($fmt:literal, $s1:expr, $s2:expr $(,)?) => {{
-        let handle = $crate::ViewRefreshHandle::new();
-        let s1 = $s1;
-        let s2 = $s2;
-        s1.subscribe_view(&handle);
-        s2.subscribe_view(&handle);
-        $crate::Text::from_refresh_handle(handle, move || format!($fmt, s1.get(), s2.get()))
-    }};
-    ($fmt:literal, $s1:expr, $s2:expr, $s3:expr $(,)?) => {{
-        let handle = $crate::ViewRefreshHandle::new();
-        let s1 = $s1;
-        let s2 = $s2;
-        let s3 = $s3;
-        s1.subscribe_view(&handle);
-        s2.subscribe_view(&handle);
-        s3.subscribe_view(&handle);
-        $crate::Text::from_refresh_handle(handle, move || format!($fmt, s1.get(), s2.get(), s3.get()))
-    }};
-    ($fmt:literal, $s1:expr, $s2:expr, $s3:expr, $s4:expr $(,)?) => {{
-        let handle = $crate::ViewRefreshHandle::new();
-        let s1 = $s1;
-        let s2 = $s2;
-        let s3 = $s3;
-        let s4 = $s4;
-        s1.subscribe_view(&handle);
-        s2.subscribe_view(&handle);
-        s3.subscribe_view(&handle);
-        s4.subscribe_view(&handle);
-        $crate::Text::from_refresh_handle(handle, move || format!($fmt, s1.get(), s2.get(), s3.get(), s4.get()))
-    }};
+    // Note: The View derive macro must be imported from scarlet_ui_macros:
+    // use scarlet_ui_macros::View;
+    //
+    // Declarative macros (vstack!, hstack!, zstack!) can be imported as:
+    // use scarlet_ui::{vstack, hstack, zstack};
 }
-
-/// Alias for `text!()` to match the "Label(...)" mental model.
-#[macro_export]
-macro_rules! label {
-    ($($tt:tt)*) => {
-        $crate::text!($($tt)*)
-    };
-}
-
-// Modifier re-exports
-pub use modifiers::{ViewModifier, CornerRadius, Border, Background, RoundedBorder};
