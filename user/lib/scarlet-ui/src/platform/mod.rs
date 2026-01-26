@@ -92,4 +92,7 @@ pub trait PlatformWindow {
 
     /// Set whether the window is resizable
     fn set_resizable(&mut self, resizable: bool) -> Result<()>;
+
+    /// Update menu titles for the window (format: "menu1|menu2|menu3")
+    fn set_menu_titles(&mut self, menu_titles: &str) -> Result<()>;
 }

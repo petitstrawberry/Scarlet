@@ -49,6 +49,7 @@ pub mod client_msg {
     pub const FOCUS_WINDOW: u32 = 26;
     pub const GET_ACTIVE_APP: u32 = 27; // Get active app info for TaskBar
     pub const SET_WINDOW_HAS_ALPHA_CONTENT: u32 = 28; // Set whether window content has alpha channel
+    pub const SET_WINDOW_MENU_TITLES: u32 = 29; // Update menu titles for a window
 }
 
 /// Message type IDs (server -> client).
@@ -287,6 +288,10 @@ pub enum ClientMessageRef<'a> {
     SetWindowHasAlphaContent {
         window_id: u32,
         has_alpha: bool,
+    },
+    SetWindowMenuTitles {
+        window_id: u32,
+        menu_titles: &'a [u8], // Format: "menu1|menu2|menu3"
     },
 }
 
@@ -676,6 +681,22 @@ pub fn parse_client_message<'a>(
                 has_alpha,
             })
         }
+        client_msg::SET_WINDOW_MENU_TITLES => {
+            // Payload: window_id (u32) + menu_titles_len (u32) + menu_titles_bytes
+            if payload.len() < 8 {
+                return Err(ProtocolError::MalformedPayload);
+            }
+            let window_id = u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
+            let titles_len =
+                u32::from_le_bytes([payload[4], payload[5], payload[6], payload[7]]) as usize;
+            if payload.len() != 8 + titles_len {
+                return Err(ProtocolError::MalformedPayload);
+            }
+            Ok(ClientMessageRef::SetWindowMenuTitles {
+                window_id,
+                menu_titles: &payload[8..],
+            })
+        }
         _ => Err(ProtocolError::UnknownMessageType),
     }
 }
@@ -996,6 +1017,20 @@ pub fn payload_set_window_title(window_id: u32, title: &[u8]) -> Vec<u8> {
     out.extend_from_slice(&window_id.to_le_bytes());
     out.extend_from_slice(&(title.len() as u32).to_le_bytes());
     out.extend_from_slice(title);
+    out
+}
+
+/// Build payload for client->server `SET_WINDOW_MENU_TITLES`.
+///
+/// Payload format:
+/// - window_id (u32)
+/// - menu_titles_len (u32)
+/// - menu_titles_bytes (variable, format: "menu1|menu2|menu3")
+pub fn payload_set_window_menu_titles(window_id: u32, menu_titles: &[u8]) -> Vec<u8> {
+    let mut out = Vec::new();
+    out.extend_from_slice(&window_id.to_le_bytes());
+    out.extend_from_slice(&(menu_titles.len() as u32).to_le_bytes());
+    out.extend_from_slice(menu_titles);
     out
 }
 

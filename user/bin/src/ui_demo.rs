@@ -87,6 +87,7 @@ impl Application for DemoApp {
         // .frame(400.0, 300.0)
         )
         .app_id("oeg.scarlet-os.ui_demo")
+        .menu_titles("File|Edit|View|Help")
         .size(Size::new(800.0, 600.0))
     }
 

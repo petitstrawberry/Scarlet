@@ -77,7 +77,8 @@ pub trait Application: View {
         self.init();
 
         // 4. Perform initial layout to determine window size and extract window properties
-        let (app_id, window_title, window_size, window_type) = pipeline.layout_initial();
+        let (app_id, window_title, window_size, window_type, menu_titles) =
+            pipeline.layout_initial();
 
         // Debug: Dump element tree
         if crate::debug::is_enabled() {
@@ -93,6 +94,10 @@ pub trait Application: View {
             SWSPlatformWindow::create_with_type(&app_id, &window_title, window_size, window_type)
                 .map_err(|_| crate::error::Error::WindowCreationFailed)?
         };
+
+        if !menu_titles.is_empty() {
+            let _ = platform_window.set_menu_titles(&menu_titles);
+        }
 
         // Apply window size limits (resizable, etc.) from Window view
         if let Some(limits) = pipeline.element_tree().root().and_then(|r| r.get_window_size_limits()) {

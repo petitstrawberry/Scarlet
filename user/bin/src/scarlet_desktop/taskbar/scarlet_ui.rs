@@ -18,6 +18,7 @@ use scarlet_ui::geometry::Size;
 use scarlet_ui::{hstack, StateId};
 use scarlet_ui_macros::View;
 use std::{format, println};
+use std::string::String;
 use sws_client as sws;
 
 /// TaskBar Application
@@ -27,6 +28,7 @@ struct TaskBarApp {
     memory_usage: State<u8>,
     uptime: State<u32>,
     screen_width: State<f32>,
+    menu_line: State<String>,
 }
 
 impl TaskBarApp {
@@ -36,6 +38,7 @@ impl TaskBarApp {
             memory_usage: State::new(StateId::new(1), 42),
             uptime: State::new(StateId::new(2), 0),
             screen_width: State::new(StateId::new(3), 1920.0),
+            menu_line: State::new(StateId::new(4), String::from("Scarlet")),
         }
     }
 }
@@ -46,14 +49,15 @@ impl Application for TaskBarApp {
         let mem = self.memory_usage.get();
         let uptime = self.uptime.get();
         let screen_width = self.screen_width.get();
+        let menu_line = self.menu_line.get();
 
         let mins = (uptime / 60) % 60;
         let secs = uptime % 60;
 
         Window::new("TaskBar",
             hstack! {
-                Text::new("Scarlet")
-                    .font_size(14.0)
+                Text::new(&menu_line)
+                    .font_size(12.5)
                     .color(Color::rgb(0.110, 0.110, 0.125)),
                 Spacer::new(),
                 Text::new(&format!("Mem {}%", mem))
@@ -97,12 +101,42 @@ impl TaskBarApp {
         // CPU/Memory simulation
         let cpu = self.cpu_usage.clone();
         let mem = self.memory_usage.clone();
+        let menu_line = self.menu_line.clone();
 
         std::thread::spawn(move || {
             loop {
                 cpu.update(|c| *c = (*c + 7) % 85 + 10);
                 mem.update(|m| *m = (*m + 3) % 70 + 25);
                 std::thread::sleep(Duration::from_secs(1));
+            }
+        });
+
+        std::thread::spawn(move || {
+            let mut conn = match sws::Connection::connect("/tmp/sws.sock") {
+                Ok(conn) => conn,
+                Err(e) => {
+                    println!("[TaskBar] Failed to connect to SWS for menu updates: {:?}", e);
+                    return;
+                }
+            };
+
+            loop {
+                let _ = conn.dispatch();
+                while let Some(ev) = conn.poll_event() {
+                    if let sws::event::Event::FocusChanged { app_name, menu_titles, .. } = ev {
+                        let mut line = String::from("Scarlet");
+                        if !app_name.is_empty() {
+                            line.push_str("  ");
+                            line.push_str(&app_name);
+                        }
+                        if !menu_titles.is_empty() {
+                            line.push_str("  ");
+                            line.push_str(&menu_titles.replace('|', "  "));
+                        }
+                        menu_line.set(line);
+                    }
+                }
+                std::thread::sleep(Duration::from_millis(50));
             }
         });
 

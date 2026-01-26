@@ -303,6 +303,25 @@ impl Connection {
         .map_err(|_| Error::SendFailed)
     }
 
+    /// Update menu titles for a window (format: "menu1|menu2|menu3").
+    pub fn set_window_menu_titles(
+        &mut self,
+        surface_id: u32,
+        menu_titles: &str,
+    ) -> Result<(), Error> {
+        if self.surfaces.get(&surface_id).is_none() {
+            return Err(Error::SurfaceNotFound);
+        }
+
+        let payload = protocol::payload_set_window_menu_titles(surface_id, menu_titles.as_bytes());
+        write_frame(
+            &mut self.socket,
+            protocol::client_msg::SET_WINDOW_MENU_TITLES,
+            &payload,
+        )
+        .map_err(|_| Error::SendFailed)
+    }
+
     /// Get a reference to a surface
     pub fn surface(&self, surface_id: u32) -> Option<&Surface> {
         self.surfaces.get(&surface_id)

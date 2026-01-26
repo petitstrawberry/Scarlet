@@ -316,6 +316,12 @@ impl PlatformWindow for SWSPlatformWindow {
 
         Ok(())
     }
+
+    fn set_menu_titles(&mut self, menu_titles: &str) -> Result<()> {
+        self.conn
+            .set_window_menu_titles(self.surface_id, menu_titles)
+            .map_err(|_| crate::error::Error::IoError)
+    }
 }
 
 impl SWSPlatformWindow {

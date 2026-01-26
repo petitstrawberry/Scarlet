@@ -370,6 +370,16 @@ pub fn get_app_session_info(window_id: u32) -> (String, String) {
     }
 }
 
+pub fn set_app_session_menu_titles(window_id: u32, menu_titles: String) -> bool {
+    let mut sessions = APP_SESSIONS.lock();
+    if let Some(session) = sessions.get_mut(&window_id) {
+        session.menu_titles = menu_titles;
+        true
+    } else {
+        false
+    }
+}
+
 fn pop_pending_server_frames(window_id: u32) -> Vec<PendingServerFrame> {
     let mut pending = PENDING_SERVER_FRAMES.lock();
     if let Some(frames) = pending.get_mut(&window_id) {
@@ -1134,6 +1144,22 @@ fn client_thread_main(client_id: usize, mut socket: Socket) {
                     has_alpha,
                 });
             }
+            Ok(ClientMessageRef::SetWindowMenuTitles {
+                window_id,
+                menu_titles,
+            }) => {
+                let menu_titles_str = String::from_utf8_lossy(menu_titles).into_owned();
+                println!(
+                    "[ClientThread {}] SetWindowMenuTitles: window_id={} titles_len={}",
+                    client_id,
+                    window_id,
+                    menu_titles_str.len()
+                );
+                push_ipc_event(IpcEvent::SetWindowMenuTitles {
+                    window_id,
+                    menu_titles: menu_titles_str,
+                });
+            }
             Ok(ClientMessageRef::SetWorkarea {
                 x,
                 y,
@@ -1322,6 +1348,7 @@ pub enum IpcEvent {
 
     /// Set whether window content contains alpha channel
     SetWindowHasAlphaContent { window_id: u32, has_alpha: bool },
+    SetWindowMenuTitles { window_id: u32, menu_titles: String },
 
     /// Set the workarea (usable screen area) for the window manager
     SetWorkarea {

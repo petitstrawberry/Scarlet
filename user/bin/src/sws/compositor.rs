@@ -2107,6 +2107,21 @@ impl Compositor {
                     }
                 }
             }
+            IpcEvent::SetWindowMenuTitles {
+                window_id,
+                menu_titles,
+            } => {
+                println!(
+                    "[Compositor] Updating menu titles for window #{} (len={})",
+                    window_id,
+                    menu_titles.len()
+                );
+                if super::ipc::set_app_session_menu_titles(window_id, menu_titles) {
+                    if self.window_manager.get_focused_window_id() == Some(window_id) {
+                        self.broadcast_focus_change(window_id);
+                    }
+                }
+            }
             IpcEvent::SetWorkarea {
                 x,
                 y,

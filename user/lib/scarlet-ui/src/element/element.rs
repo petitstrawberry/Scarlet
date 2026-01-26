@@ -284,7 +284,9 @@ pub trait Element {
     ///
     /// Returns Some((app_id, title, size, window_type)) if this Element is a WindowElement,
     /// None otherwise. Default implementation returns None.
-    fn get_window_info(&self) -> Option<(alloc::string::String, alloc::string::String, Size, u32)> {
+    fn get_window_info(
+        &self,
+    ) -> Option<(alloc::string::String, alloc::string::String, Size, u32, alloc::string::String)> {
         None
     }
 
