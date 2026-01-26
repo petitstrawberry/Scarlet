@@ -136,13 +136,12 @@ impl Element for HStackElement {
                 } else {
                     remaining_width
                 };
-                // Pass tight constraints for main axis (width), 0 for cross-axis (height)
-                // Spacer won't contribute to max_height in cross-axis
+                // Pass tight constraints for main axis (width), allow available space for cross-axis (height)
                 let child_constraints = LayoutConstraints {
                     min_width: share,
                     max_width: share,
                     min_height: 0.0,
-                    max_height: 0.0,
+                    max_height: constraints.max_height,
                 };
                 let child_size = child.layout(child_constraints);
                 // Don't update max_height for flex children - they don't contribute to cross-axis size
