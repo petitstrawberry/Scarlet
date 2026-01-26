@@ -1580,14 +1580,65 @@ impl Compositor {
                 window_id,
                 width,
                 height,
+                window_type,
                 shm,
                 shm_mapped_addr,
                 shm_size,
             } => {
                 println!(
-                    "[Compositor] Client {} creating window #{} ({}x{})",
-                    client_id, window_id, width, height
+                    "[Compositor] Client {} creating window #{} ({}x{}, type={})",
+                    client_id, window_id, width, height, window_type
                 );
+
+                use sws_protocol::window_types;
+
+                // Calculate initial position based on window type
+                let (x, y) = if window_type == window_types::NORMAL {
+                    // Normal windows: cascade from focused window or position in workarea
+                    const OFFSET: i32 = 20;
+
+                    // Check if there's a focused Normal window
+                    let focused_pos = self
+                        .window_manager
+                        .get_focused_window_id()
+                        .and_then(|id| self.window_manager.get_window(id))
+                        .filter(|w| matches!(w.window_type, super::window::WindowType::Normal))
+                        .map(|w| (w.x, w.y));
+
+                    match (focused_pos, self.workarea) {
+                        (Some((fx, fy)), _) => {
+                            // Cascade from focused window
+                            let x = fx + OFFSET;
+                            let y = fy + OFFSET;
+                            println!(
+                                "[Compositor] Cascading Normal window from focused window at ({}, {}): ({}, {})",
+                                fx, fy, x, y
+                            );
+                            (x, y)
+                        }
+                        (None, Some((wx, wy, ww, wh))) => {
+                            // No focused Normal window: position in workarea with padding
+                            const PADDING: i32 = 20;
+                            let x = wx + PADDING;
+                            let y = wy + PADDING;
+                            println!(
+                                "[Compositor] No focused Normal window, positioning in workarea with padding: ({}, {})",
+                                x, y
+                            );
+                            (x, y)
+                        }
+                        (None, None) => {
+                            println!(
+                                "[Compositor] No workarea and no focused window, using (0, 0)"
+                            );
+                            (0, 0)
+                        }
+                    }
+                } else {
+                    // Non-Normal windows (Taskbar, AlwaysOnTop, Desktop): use (0, 0)
+                    println!("[Compositor] Positioning non-Normal window at (0, 0)");
+                    (0, 0)
+                };
 
                 // Check if SHM was provided (modern path)
                 if let Some(shm_obj) = shm {
@@ -1599,8 +1650,8 @@ impl Compositor {
                     // Create window with SHM ownership
                     match self.window_manager.create_window_with_shm_from_event(
                         window_id,
-                        0,
-                        0,
+                        x,
+                        y,
                         width,
                         height,
                         shm_obj,
@@ -1609,9 +1660,24 @@ impl Compositor {
                     ) {
                         Ok(_) => {
                             println!("[Compositor] Window #{} with SHM created", window_id);
-                            // Set app_id on the newly created window
+                            // Set app_id and window_type on the newly created window
                             if let Some(window) = self.window_manager.get_window_mut(window_id) {
                                 window.app_id = Some(app_id);
+                                // Set window type
+                                let wtype = match window_type {
+                                    window_types::NORMAL => super::window::WindowType::Normal,
+                                    window_types::ALWAYS_ON_TOP => {
+                                        super::window::WindowType::AlwaysOnTop
+                                    }
+                                    window_types::TASKBAR => super::window::WindowType::Taskbar,
+                                    window_types::DESKTOP => super::window::WindowType::Desktop,
+                                    _ => super::window::WindowType::Normal,
+                                };
+                                window.window_type = wtype;
+                                println!(
+                                    "[Compositor] Set window #{} type to {:?}",
+                                    window_id, wtype
+                                );
                             }
                         }
                         Err(e) => {
@@ -1622,7 +1688,7 @@ impl Compositor {
                     // Fallback: legacy Vec-backed window (for test windows)
                     println!("[Compositor] Window #{} uses legacy Vec buffer", window_id);
                     self.window_manager
-                        .create_window_with_id(window_id, 0, 0, width, height);
+                        .create_window_with_id(window_id, x, y, width, height);
                 }
 
                 // Don't trigger redraw yet - wait for client to draw and send UPDATE_BUFFER
@@ -1638,6 +1704,19 @@ impl Compositor {
                     "[Compositor] Client {} destroying window #{}",
                     client_id, window_id
                 );
+
+                // Send WINDOW_DESTROYED event to client before closing
+                let payload = sws_protocol::payload_window_destroyed(window_id);
+                send_message_to_client(
+                    client_id,
+                    sws_protocol::server_msg::WINDOW_DESTROYED,
+                    payload.to_vec(),
+                );
+                println!(
+                    "[Compositor] Sent WINDOW_DESTROYED for window #{} to client {}",
+                    window_id, client_id
+                );
+
                 self.window_manager.close_window(window_id);
                 self.full_redraw_needed = true;
 
@@ -1993,23 +2072,6 @@ impl Compositor {
                     }
                 };
                 if self.window_manager.set_window_type(window_id, wtype) {
-                    // For Normal windows, adjust position to workarea if available
-                    if wtype == super::window::WindowType::Normal {
-                        if let Some(window) = self.window_manager.get_window(window_id) {
-                            let (default_x, default_y) = self
-                                .window_manager
-                                .calculate_default_position(window.width, window.height);
-                            // Only adjust if window is at default position (0,0)
-                            if window.x == 0 && window.y == 0 {
-                                println!(
-                                    "[Compositor] Adjusting Normal window #{} position to workarea: ({}, {})",
-                                    window_id, default_x, default_y
-                                );
-                                self.window_manager
-                                    .set_window_position(window_id, default_x, default_y);
-                            }
-                        }
-                    }
                     // Re-raise to update Z-order based on window type
                     self.window_manager.raise_to_top_with_type(window_id);
                     self.full_redraw_needed = true;
@@ -2027,7 +2089,10 @@ impl Compositor {
                     }
                 }
             }
-            IpcEvent::SetWindowHasAlphaContent { window_id, has_alpha } => {
+            IpcEvent::SetWindowHasAlphaContent {
+                window_id,
+                has_alpha,
+            } => {
                 println!(
                     "[Compositor] Setting window #{} has_alpha_content to {}",
                     window_id, has_alpha

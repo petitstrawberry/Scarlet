@@ -1,311 +1,200 @@
-# Scarlet UI
+# ScarletUI 2.0
 
-A modern UI toolkit for Scarlet OS with SwiftUI-inspired APIs and reactive state management.
+A declarative UI framework for Scarlet OS, inspired by Flutter and SwiftUI.
 
-## Features
+## Overview
 
-### Core View System
+ScarletUI is a reactive UI framework built for Rust in a `no_std` environment. It provides:
 
-- **Declarative view composition**: Build UIs by composing views hierarchically
-- **Automatic layout**: Views handle their own layout within constraints
-- **Event handling**: Two-phase event system (capture and bubble)
-- **Window management**: Built-in window decorations with modern design
+- **Declarative Views**: Describe your UI with composable Views
+- **State Management**: Reactive `State<T>` with automatic updates
+- **Element System**: Efficient runtime representation with reconciliation
+- **Layout Engine**: Constraint-based layout system
+- **Event Handling**: Pointer and keyboard event routing
+- **Platform Abstraction**: Work with SWS, SDL2, Winit, or custom backends
 
-### Reactive State Management
+## Architecture
 
-Scarlet UI provides SwiftUI-style reactive state management for automatic view updates:
+ScarletUI follows a layered architecture:
 
-```rust
-use scarlet_ui::{State, Label, Button, VStack};
-
-let counter = State::new(0);
-let counter_clone = counter.clone();
-
-VStack::new()
-    .child(Label::new(format!("Count: {}", counter.get())))
-    .child(Button::new("Increment", move || {
-        counter_clone.set(counter_clone.get() + 1);
-    }))
+```
+User Code (Views)
+       ↓
+Element Tree (Runtime)
+       ↓
+Render Pipeline (Layout/Paint)
+       ↓
+Platform Window (SWS/SDL/etc.)
 ```
 
-#### State<T>
+### Key Concepts
 
-Reactive state that triggers view updates when modified:
+1. **View**: A factory that creates Elements
+2. **Element**: The runtime representation of a View
+3. **RenderObject**: Handles layout and rendering
+4. **State<T>>**: Reactive state with change notifications
+5. **Application**: Main entry point with event loop
 
-```rust
-let state = State::new(42);
-state.set(100);  // Updates all observers
-println!("{}", state.get());  // Prints: 100
-```
-
-#### Binding<T>
-
-Two-way binding for connecting state to UI controls:
+## Basic Usage
 
 ```rust
-let text = State::new(String::from(""));
-let binding = text.binding();
+use scarlet_ui::prelude::*;
 
-TextField::new("Enter text...")
-    .bind(binding)  // TextField can read and write
-```
+struct CounterApp {
+    count: State<i32>,
+}
 
-### Timer Support
+impl View for CounterApp {
+    fn create_element(&self) -> Box<dyn Element> {
+        // Create element from this view
+        Text::new(format!("Count: {}", self.count.get()))
+            .create_element()
+    }
+    // ...
+}
 
-Schedule periodic or one-shot updates:
+impl Application for CounterApp {
+    fn body(&self) -> impl View {
+        Window::new("Counter", Text::new("Hello"))
+            .size(Size::new(400.0, 300.0))
+    }
+}
 
-```rust
-use scarlet_ui::Timer;
-use core::time::Duration;
-
-// Periodic timer
-let timer = Timer::periodic(Duration::from_secs(1), || {
-    println!("Tick!");
-});
-
-// One-shot timer
-Timer::once(Duration::from_millis(500), || {
-    println!("Delayed action");
-});
-
-// Cancel timer
-timer.cancel();
-```
-
-### Thread-Safe UI Updates
-
-Update UI from background threads:
-
-```rust
-use scarlet_ui::{schedule_on_main_thread, State};
-
-let counter = State::new(0);
-
-// From a background thread:
-std::thread::spawn(move || {
-    // Do background work...
-    schedule_on_main_thread(move || {
-        // This runs on the main UI thread
-        counter.set(counter.get() + 1);
-    });
-});
-```
-
-### Declarative Macros
-
-Use proc macros for cleaner UI code:
-
-```rust
-use scarlet_ui::{DeriveView, state, binding};
-
-#[derive(DeriveView)]
-struct CounterView {
-    #[state]
-    count: i32,
+fn main() {
+    let mut app = CounterApp {
+        count: State::new(StateId::new(1), 0),
+    };
+    app.run();
 }
 ```
 
-### Layout Containers
+## Available Views
 
-- **VStack**: Vertical stack layout
-- **HStack**: Horizontal stack layout
-- **ZStack**: Overlay layout (z-order)
-- **Padding**: Add padding around views
-- **Center**: Center views within available space
-- **Spacer**: Flexible spacing in stacks
+### Primitive Views
 
-### Control Widgets
-
-#### Label
-Display text with customizable color and font size:
-
-```rust
-Label::new("Hello, World!")
-    .color(Color::BLACK)
-    .font_size(24)
-```
-
-#### Button
-Interactive button with click handler:
-
-```rust
-Button::new("Click Me", || {
-    println!("Button clicked!");
-})
-.background(Color::BLUE)
-.text_color(Color::WHITE)
-```
-
-#### TextField
-Text input control with placeholder:
-
-```rust
-TextField::new("Enter text...")
-    .text_color(Color::BLACK)
-    .background(Color::WHITE)
-```
-
-#### CheckBox
-Boolean toggle with label:
-
-```rust
-CheckBox::new("Enable feature", true)
-    .on_toggle(|checked| {
-        println!("Checked: {}", checked);
-    })
-```
-
-#### Slider
-Value selection with range:
-
-```rust
-Slider::new(0.5, 0.0, 1.0)
-    .on_change(|value| {
-        println!("Value: {}", value);
-    })
-```
-
-#### ProgressBar
-Progress indicator:
-
-```rust
-ProgressBar::new(0.75)
-    .fill_color(Color::BLUE)
-    .height(20)
-```
-
-#### Toggle
-Switch-style boolean control:
-
-```rust
-Toggle::new(true)
-    .on_toggle(|enabled| {
-        println!("Enabled: {}", enabled);
-    })
-```
+- **`Text`**: Display text with configurable font size and color
+- **`Button`**: Interactive button with click callbacks
+- **`Rectangle`**: Filled rectangle with color and corner radius
+- **`Spacer`**: Flexible or fixed empty space
+- **`Image`**: Display images from various sources
 
 ### View Modifiers
 
-Apply styles using method chaining:
+- **`Padding`**: Add padding around a view
+- **`Frame`**: Constrain a view to a specific size
+- **`Background`**: Set background color
+- **`SetSize`**: Set minimum/maximum size constraints
+- **`AlignmentFrame`**: Control alignment within available space
+
+### Layout Containers
+
+- **`Window`**: Top-level window container
+
+## Examples
+
+See the `examples/` directory for complete examples:
+
+- `counter.rs`: Simple counter application
+- `colors.rs`: Color palette demonstration
+
+## State Management
 
 ```rust
-view
-    .corner_radius(8)
-    .border(2, Color::GRAY)
-    .background_color(Color::WHITE)
+let state = State::new(StateId::new(1), 0);
+
+// Get current value
+let value = state.get();
+
+// Update value
+state.set(42);
+
+// Clone for sharing
+let state2 = state.clone(); // Both point to same underlying state
 ```
 
-Available modifiers:
-- `corner_radius(radius)` - Add rounded corners
-- `border(width, color)` - Add border
-- `background_color(color)` - Set background color
+## Event Handling
 
-### Modern Window Design
-
-Windows feature:
-- Gradient title bar
-- Modern close button with hover effects
-- Customizable background
-- Size constraints support
+ScarletUI provides an event dispatcher that routes events to the appropriate views:
 
 ```rust
-Window::new("My App", 600, 400)
-    .min_size(400, 300)
-    .max_size(1024, 768)
-    .background(Color::WHITE)
-    .content(/* your views */)
+use scarlet_ui::event::{Event, MouseEvent};
+
+// Events are dispatched through the EventDispatcher
+// Views can handle events via the handle_event method
 ```
 
-## Example Application with Reactive State
+## Gesture Recognition
+
+Built-in gesture recognizers for common interactions:
+
+- **`TapGestureRecognizer`**: Detect tap/click gestures
+- **`DragGestureRecognizer`**: Detect drag gestures
+- **`LongPressGestureRecognizer`**: Detect long press gestures
+
+## Platform Integration
+
+ScarletUI abstracts platform window operations:
 
 ```rust
-#![no_std]
-#![no_main]
+use scarlet_ui::platform::{PlatformWindow, SWSPlatformWindow};
 
-extern crate scarlet_std as std;
-
-use scarlet_ui::{
-    Application, Window, VStack, HStack, Label, Button, 
-    CheckBox, Slider, Padding, Color, ViewModifier,
-    State, Timer,
-};
-use core::time::Duration;
-
-#[unsafe(no_mangle)]
-pub extern "C" fn main() -> i32 {
-    let mut app = Application::new().expect("Failed to connect");
-    
-    // Reactive state
-    let counter = State::new(0);
-    let enabled = State::new(true);
-    
-    // Timer to auto-increment
-    let counter_clone = counter.clone();
-    Timer::periodic(Duration::from_secs(1), move || {
-        counter_clone.set(counter_clone.get() + 1);
-    });
-    
-    let window = Window::new("Reactive Demo", 600, 400)
-        .background(Color::rgb(245, 245, 250))
-        .content(
-            Padding::new(
-                VStack::new()
-                    .spacing(16)
-                    .child(Label::new(format!("Counter: {}", counter.get())).font_size(32))
-                    .child(CheckBox::new("Auto-increment", enabled.get())
-                        .on_toggle(move |checked| {
-                            enabled.set(checked);
-                        })
-                    )
-                    .child(Slider::new(0.5, 0.0, 1.0))
-                    .child(HStack::new()
-                        .child(Button::new("Reset", move || {
-                            counter.set(0);
-                        }))
-                        .child(Button::new("Increment", move || {
-                            counter.set(counter.get() + 1);
-                        }))
-                    )
-            ).all(20)
-        );
-    
-    app.add_window(window).unwrap();
-    app.run(); // Never returns
-}
+// Create platform window (SWS backend)
+let window = SWSPlatformWindow::new(
+    "com.example.app",
+    "My App",
+    Size::new(800.0, 600.0)
+)?;
 ```
 
-## Design Philosophy
+## Rendering Pipeline
 
-Scarlet UI is inspired by SwiftUI and follows these principles:
+The rendering pipeline consists of three phases:
 
-1. **Declarative**: Describe what you want, not how to build it
-2. **Composable**: Build complex UIs from simple components
-3. **Reactive**: State changes automatically update views
-4. **Type-safe**: Leverage Rust's type system for correctness
-5. **Efficient**: Minimal allocations, `no_std` compatible
-
-## Building
-
-Scarlet UI requires:
-- Rust nightly with `no_std` support
-- `rust-src` component for cross-compilation
-- Vector font file at `/fonts/Mplus1-Regular.ttf` in the system
-
-Build with cargo-make:
-
-```bash
-cargo make build-userlib-debug-riscv64
-```
+1. **Build Phase**: Update element tree based on state changes
+2. **Layout Phase**: Calculate sizes and positions
+3. **Paint Phase**: Render to buffers
+4. **Composite Phase**: Combine buffers for display
 
 ## Testing
 
-Run tests with:
+Run the test suite:
 
 ```bash
-cargo make test-riscv64  # For RISC-V
-cargo make test-aarch64  # For AArch64
+cargo test
 ```
+
+## Development Status
+
+### Completed (✅)
+- Phase 1: Core Foundations (Geometry, Color, State, View trait)
+- Phase 2: Element System (ComponentElement, RenderElement, ElementTree)
+- Phase 3: Rendering System (Buffer, Compositor, RenderObject)
+- Phase 4: Pipeline & Reconciliation (PipelineOwner, RenderingPipeline)
+- Phase 5: Primitive Views (Text, Button, Rectangle, Spacer, Image)
+- Phase 6: View Modifiers (Padding, Frame, Background, Size, Alignment)
+- Phase 7: Window System (Window View, PlatformWindow abstraction, SWS backend)
+- Phase 8: Event Handling (EventDispatcher, Gesture recognizers)
+- Phase 9: Integration & Testing (Examples, basic tests)
+
+### Future Work
+
+- Container views (VStack, HStack, ZStack)
+- View macros (`vstack!`, `hstack!`, etc.)
+- `#[derive(View)]` procedural macro
+- ForEach view for dynamic lists
+- Advanced gesture recognizers (Pinch, Rotation)
+- Animation system
+- Focus management
+- Accessibility support
 
 ## License
 
-See repository LICENSE file.
+MIT License - See LICENSE file for details
+
+## Contributing
+
+Contributions are welcome! Please read our contributing guidelines before submitting PRs.
+
+## Design Documents
+
+See `docs/scarletui/design.md` for detailed architecture documentation.

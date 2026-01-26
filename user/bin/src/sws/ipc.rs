@@ -728,6 +728,7 @@ fn client_thread_main(client_id: usize, mut socket: Socket) {
                 menu_titles,
                 width,
                 height,
+                window_type,
             }) => {
                 // Convert &[u8] to String
                 let app_id_str = String::from_utf8_lossy(app_id).into_owned();
@@ -862,6 +863,7 @@ fn client_thread_main(client_id: usize, mut socket: Socket) {
                             window_id,
                             width,
                             height,
+                            window_type,
                             shm: Some(shm),
                             shm_mapped_addr,
                             shm_size: buffer_size as usize,
@@ -1105,12 +1107,18 @@ fn client_thread_main(client_id: usize, mut socket: Socket) {
                 );
                 push_ipc_event(IpcEvent::SetWindowOpacity { window_id, opacity });
             }
-            Ok(ClientMessageRef::SetWindowHasAlphaContent { window_id, has_alpha }) => {
+            Ok(ClientMessageRef::SetWindowHasAlphaContent {
+                window_id,
+                has_alpha,
+            }) => {
                 println!(
                     "[ClientThread {}] SetWindowHasAlphaContent: window_id={} has_alpha={}",
                     client_id, window_id, has_alpha
                 );
-                push_ipc_event(IpcEvent::SetWindowHasAlphaContent { window_id, has_alpha });
+                push_ipc_event(IpcEvent::SetWindowHasAlphaContent {
+                    window_id,
+                    has_alpha,
+                });
             }
             Ok(ClientMessageRef::SetWorkarea {
                 x,
@@ -1228,6 +1236,7 @@ pub enum IpcEvent {
         window_id: u32,
         width: u32,
         height: u32,
+        window_type: u32, // Window type (0=Normal, 1=AlwaysOnTop, 2=Taskbar, 3=Desktop)
         /// Shared memory for the window buffer (server-allocated)
         shm: Option<SharedMemory>,
         shm_mapped_addr: Option<usize>,

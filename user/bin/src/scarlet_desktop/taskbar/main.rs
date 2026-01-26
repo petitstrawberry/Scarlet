@@ -19,8 +19,8 @@ extern crate scarlet_std as std;
 use core::time::Duration;
 use sbus_client;
 use scarlet_desktop_config::{TaskbarConfig, TaskbarPosition};
-use scarlet_ui::{Color, design};
-use scarlet_ui::graphics::{Canvas, measure_text_sized};
+use scarlet_ui::Color;
+use scarlet_ui::graphics;
 use std::string::{String, ToString};
 use std::thread;
 use std::vec;
@@ -29,8 +29,6 @@ use std::{format, println};
 use sws_client::event::Event as SwsEvent;
 use sws_client::{Connection, InputEvent, WindowSizeLimits};
 use sws_protocol::window_types;
-
-use design::Palette;
 
 /// stemd IPC protocol constants
 mod stemd_protocol {
@@ -337,13 +335,16 @@ fn get_active_app_from_stemd() -> Option<(String, String)> {
 /// - First menu is always "Scarlet" (fixed)
 /// - When an app is focused, show app name + app-specific menus after Scarlet
 /// - When no app is focused, show only Scarlet
-fn build_menu_items(active_app: &Option<(String, String, String, String)>, bar_height: u32) -> Vec<MenuItem> {
+fn build_menu_items(
+    active_app: &Option<(String, String, String, String)>,
+    bar_height: u32,
+) -> Vec<MenuItem> {
     let mut menu_items = Vec::new();
     let mut x_offset = 0i32;
 
     // Always add Scarlet menu as the first item (fixed)
-    let (tw, _) = measure_text_sized("Scarlet", 13.0);
-    let width = tw.saturating_add(16).min(100);
+    let (tw, _): (u32, u32) = graphics::measure_text_sized("Scarlet", 13.0);
+    let width: u32 = tw.saturating_add(16).min(100);
     menu_items.push(MenuItem {
         label: String::from("Scarlet"),
         x: x_offset,
@@ -361,8 +362,8 @@ fn build_menu_items(active_app: &Option<(String, String, String, String)>, bar_h
 
             // Add app name as a menu item
             if !app_name.is_empty() {
-                let (tw, _) = measure_text_sized(&app_name, 13.0);
-                let width = tw.saturating_add(16).min(100);
+                let (tw, _): (u32, u32) = graphics::measure_text_sized(&app_name, 13.0);
+                let width: u32 = tw.saturating_add(16).min(100);
                 menu_items.push(MenuItem {
                     label: app_name.clone(),
                     x: x_offset,
@@ -374,8 +375,8 @@ fn build_menu_items(active_app: &Option<(String, String, String, String)>, bar_h
             }
 
             for label in &menus {
-                let (tw, _) = measure_text_sized(&label, 13.0);
-                let width = tw.saturating_add(16).min(100);
+                let (tw, _): (u32, u32) = graphics::measure_text_sized(&label, 13.0);
+                let width: u32 = tw.saturating_add(16).min(100);
                 menu_items.push(MenuItem {
                     label: label.clone(),
                     x: x_offset,
@@ -399,10 +400,7 @@ fn parse_menu_titles(menu_titles: &str) -> Vec<String> {
     if menu_titles.is_empty() {
         return Vec::new();
     }
-    menu_titles
-        .split('|')
-        .map(|s| s.to_string())
-        .collect()
+    menu_titles.split('|').map(|s| s.to_string()).collect()
 }
 
 /// Query app menu titles from stemd via sbus
@@ -554,21 +552,18 @@ fn draw_menu_bar(
     let w = surface.width();
     let h = surface.height();
 
-    // Use dynamic palette
-    let palette = Palette::current();
-    let bg_color = palette.sidebar_bg;
-    let text_color = palette.text_main;
-    let text_dim = palette.text_sub;
-    let border_color = palette.border;
-    let hover_bg = palette.hover;
-    let active_bg = palette.primary;
+    // Use theme colors
+    let bg_color = Color::rgb(0.922, 0.922, 0.933); // sidebar_bg
+    let text_color = Color::rgb(0.078, 0.078, 0.094); // text_main
+    let text_dim = Color::rgb(0.471, 0.471, 0.471); // text_sub
+    let border_color = Color::rgb(0.392, 0.392, 0.412); // border
+    let hover_bg = Color::rgb(0.824, 0.824, 0.839); // hover
+    let active_bg = Color::rgb(0.706, 0.706, 0.745); // primary (pressed)
 
     surface.with_buffer(|buf, width, height| {
-        let mut canvas = Canvas::new(buf, width, height);
-
         // Bar background
-        canvas.fill_rect(0, 0, w, h, bg_color);
-        canvas.draw_hline(0, (h - 1) as i32, w, border_color);
+        fill_rect(buf, width, h, 0, 0, w, h, bg_color);
+        draw_hline(buf, width, h, 0, (h - 1) as i32, w, border_color);
 
         // Draw menu items (left side)
         let font_size = 13.0;
@@ -578,7 +573,10 @@ fn draw_menu_bar(
 
             // Draw hover/active background
             if is_pressed {
-                canvas.fill_rect(
+                fill_rect(
+                    buf,
+                    width,
+                    h,
                     item.x,
                     item.y + 1,
                     item.width,
@@ -586,7 +584,10 @@ fn draw_menu_bar(
                     active_bg,
                 );
             } else if is_hovered {
-                canvas.fill_rect(
+                fill_rect(
+                    buf,
+                    width,
+                    h,
                     item.x,
                     item.y + 1,
                     item.width,
@@ -595,28 +596,76 @@ fn draw_menu_bar(
                 );
             }
 
-            // Draw text or icon
+            // Draw text
             let text_x = item.x + 8;
             let text_y = item.y + ((item.height as i32 - 16) / 2).max(0);
 
-            // First menu item (Scarlet) - draw as icon-like text
-            if i == 0 {
-                canvas.draw_text_sized(text_x, text_y, &item.label, text_color, font_size);
-            } else {
-                canvas.draw_text_sized(text_x, text_y, &item.label, text_color, font_size);
-            }
+            draw_text_helper(
+                buf,
+                width,
+                h,
+                text_x,
+                text_y,
+                &item.label,
+                text_color,
+                font_size,
+            );
         }
 
         // Draw status items (right side)
         for item in status_items {
-            // Draw text
             let text_x = item.x + 6;
             let text_y = item.y + ((item.height as i32 - 16) / 2).max(0);
-            canvas.draw_text_sized(text_x, text_y, &item.label, text_dim, font_size);
+
+            draw_text_helper(
+                buf,
+                width,
+                h,
+                text_x,
+                text_y,
+                &item.label,
+                text_dim,
+                font_size,
+            );
         }
     });
 
     let _ = conn.commit(surface_id);
+}
+
+/// Fill a rectangle with solid color
+fn fill_rect(
+    buf: &mut [u8],
+    width: u32,
+    height: u32,
+    x: i32,
+    y: i32,
+    w: u32,
+    h: u32,
+    color: Color,
+) {
+    let bgra = color.to_bgra();
+    let x_start = x.max(0) as u32;
+    let y_start = y.max(0) as u32;
+    let x_end = (x as u32 + w).min(width);
+    let y_end = (y as u32 + h).min(height);
+
+    for py in y_start..y_end {
+        for px in x_start..x_end {
+            let idx = (py as usize * width as usize + px as usize) * 4;
+            if idx + 3 < buf.len() {
+                buf[idx] = (bgra & 0xFF) as u8;
+                buf[idx + 1] = ((bgra >> 8) & 0xFF) as u8;
+                buf[idx + 2] = ((bgra >> 16) & 0xFF) as u8;
+                buf[idx + 3] = ((bgra >> 24) & 0xFF) as u8;
+            }
+        }
+    }
+}
+
+/// Draw horizontal line
+fn draw_hline(buf: &mut [u8], width: u32, height: u32, x: i32, y: i32, w: u32, color: Color) {
+    fill_rect(buf, width, height, x, y, w, 1, color);
 }
 
 /// Show window list dropdown menu
@@ -658,12 +707,13 @@ fn show_window_list_dropdown(
     let dropdown_height = (item_count as u32) * ITEM_HEIGHT + 4; // +4 for border
 
     // Create dropdown surface (AlwaysOnTop for popup)
-    let surface_id = match conn.create_surface(
+    let surface_id = match conn.create_surface_with_type(
         "org.scarlet-os.desktop.taskbar",
         "Taskbar",
         "",
         DROPDOWN_WIDTH,
         dropdown_height,
+        window_types::ALWAYS_ON_TOP,
     ) {
         Ok(id) => id,
         Err(_) => {
@@ -828,12 +878,13 @@ fn show_app_menu_dropdown(
     let dropdown_height = num_items as u32 * ITEM_HEIGHT + 4;
 
     // Create dropdown surface (AlwaysOnTop for popup)
-    let surface_id = match conn.create_surface(
+    let surface_id = match conn.create_surface_with_type(
         "org.scarlet-os.desktop.taskbar",
         "Taskbar",
         "",
         DROPDOWN_WIDTH,
         dropdown_height,
+        window_types::ALWAYS_ON_TOP,
     ) {
         Ok(id) => id,
         Err(_) => {
@@ -880,7 +931,10 @@ fn get_menu_items_for_label(label: &str) -> Vec<(String, DropdownAction)> {
     match label {
         "Scarlet" => vec![
             (String::from("Settings..."), DropdownAction::LaunchSettings),
-            (String::from("About Scarlet"), DropdownAction::LaunchSettings),
+            (
+                String::from("About Scarlet"),
+                DropdownAction::LaunchSettings,
+            ),
         ],
         "File" => vec![
             (String::from("New"), DropdownAction::LaunchSettings),
@@ -909,7 +963,10 @@ fn get_menu_items_for_label(label: &str) -> Vec<(String, DropdownAction)> {
             (String::from("Close"), DropdownAction::LaunchSettings),
         ],
         "Help" => vec![
-            (String::from("Documentation"), DropdownAction::LaunchSettings),
+            (
+                String::from("Documentation"),
+                DropdownAction::LaunchSettings,
+            ),
             (String::from("-"), DropdownAction::LaunchSettings),
             (String::from("About"), DropdownAction::LaunchSettings),
         ],
@@ -931,20 +988,17 @@ fn draw_dropdown(conn: &mut Connection, surface_id: u32, dropdown: &DropdownStat
     let h = surface.height();
 
     surface.with_buffer(|buf, width, height| {
-        let mut canvas = Canvas::new(buf, width, height);
+        // Use theme colors for dropdown
+        let bg_color = Color::rgb(1.0, 1.0, 1.0); // surface
+        let border_color = Color::rgb(0.392, 0.392, 0.412); // border
+        let text_color = Color::rgb(0.078, 0.078, 0.094); // text_main
+        let hover_color = Color::rgb(0.706, 0.706, 0.745); // primary
+        let separator_color = Color::rgb(0.784, 0.784, 0.784); // separator
 
-        // Use dynamic palette for dropdown
-        let palette = Palette::current();
-        let bg_color = palette.surface;
-        let border_color = palette.border;
-        let text_color = palette.text_main;
-        let hover_color = palette.primary;
-        let separator_color = palette.separator;
-
-        canvas.fill_rect(0, 0, width, height, bg_color);
+        fill_rect(buf, width, h, 0, 0, width, h, bg_color);
 
         // Draw border
-        canvas.draw_rect(0, 0, width, height, border_color);
+        draw_rect(buf, width, h, 0, 0, width, h, border_color);
 
         // Draw items
         const FONT_SIZE: f32 = 13.0;
@@ -952,20 +1006,126 @@ fn draw_dropdown(conn: &mut Connection, surface_id: u32, dropdown: &DropdownStat
             if item.label == "-" {
                 // Separator line
                 let sep_y = item.y + item.height as i32 / 2;
-                canvas.draw_line(4, sep_y, (width - 4) as i32, sep_y, separator_color);
+                draw_line(
+                    buf,
+                    width,
+                    h,
+                    4,
+                    sep_y,
+                    (width - 4) as i32,
+                    sep_y,
+                    separator_color,
+                );
             } else {
                 // Item background (hover effect would go here)
-                canvas.fill_rect(2, item.y, width - 4, item.height, palette.hover);
+                fill_rect(
+                    buf,
+                    width,
+                    h,
+                    2,
+                    item.y,
+                    width - 4,
+                    item.height,
+                    hover_color,
+                );
 
                 // Draw text
                 let text_x = 8;
                 let text_y = item.y + ((item.height as i32 - 16) / 2).max(0);
-                canvas.draw_text_sized(text_x, text_y, &item.label, text_color, FONT_SIZE);
+                draw_text_helper(
+                    buf,
+                    width,
+                    h,
+                    text_x,
+                    text_y,
+                    &item.label,
+                    text_color,
+                    FONT_SIZE,
+                );
             }
         }
     });
 
     let _ = conn.commit(surface_id);
+}
+
+/// Draw rectangle outline
+fn draw_rect(
+    buf: &mut [u8],
+    width: u32,
+    height: u32,
+    x: i32,
+    y: i32,
+    w: u32,
+    h: u32,
+    color: Color,
+) {
+    draw_hline(buf, width, height, x, y, w, color);
+    draw_hline(buf, width, height, x, y + h as i32 - 1, w, color);
+    draw_vline(buf, width, height, x, y, h, color);
+    draw_vline(buf, width, height, x + w as i32 - 1, y, h, color);
+}
+
+/// Draw vertical line
+fn draw_vline(buf: &mut [u8], width: u32, height: u32, x: i32, y: i32, h: u32, color: Color) {
+    fill_rect(buf, width, height, x, y, 1, h, color);
+}
+
+/// Helper function to draw text using Canvas
+fn draw_text_helper(
+    buf: &mut [u8],
+    width: u32,
+    height: u32,
+    x: i32,
+    y: i32,
+    text: &str,
+    color: Color,
+    font_size: f32,
+) {
+    use scarlet_ui::graphics::Canvas;
+    let mut canvas = Canvas::new(buf, width, height);
+    canvas.draw_text_sized(x, y, text, color, font_size);
+}
+
+/// Draw line
+fn draw_line(
+    buf: &mut [u8],
+    width: u32,
+    height: u32,
+    x1: i32,
+    y1: i32,
+    x2: i32,
+    y2: i32,
+    color: Color,
+) {
+    // Simple Bresenham's line algorithm for horizontal/vertical lines
+    if y1 == y2 {
+        // Horizontal line
+        let x_start = x1.min(x2);
+        let x_end = x1.max(x2);
+        draw_hline(
+            buf,
+            width,
+            height,
+            x_start,
+            y1,
+            (x_end - x_start + 1) as u32,
+            color,
+        );
+    } else if x1 == x2 {
+        // Vertical line
+        let y_start = y1.min(y2);
+        let y_end = y1.max(y2);
+        draw_vline(
+            buf,
+            width,
+            height,
+            x1,
+            y_start,
+            (y_end - y_start + 1) as u32,
+            color,
+        );
+    }
 }
 
 #[unsafe(no_mangle)]
@@ -986,16 +1146,7 @@ pub extern "C" fn main() -> i32 {
         }
     };
 
-    // Create a dummy surface first (needed for SCREEN_SIZE response routing)
-    let dummy_surface_id = match conn.create_surface("org.scarlet-os.desktop.taskbar", "Taskbar", "", 16, 16) {
-        Ok(id) => id,
-        Err(_) => {
-            println!("[menu_bar] Failed to create dummy surface");
-            return 1;
-        }
-    };
-
-    // Get screen size first
+    // Get screen size first (no surface needed for SCREEN_SIZE)
     let (screen_width, screen_height) = match conn.get_screen_size() {
         Ok(size) => {
             println!("[menu_bar] Screen size: {}x{}", size.0, size.1);
@@ -1007,20 +1158,21 @@ pub extern "C" fn main() -> i32 {
         }
     };
 
-    // Destroy dummy surface
-    let _ = conn.destroy_surface(dummy_surface_id);
-
-    // Create surface with full screen width and 28px height
-    let surface_id =
-        match conn.create_surface("org.scarlet-os.desktop.taskbar", "Taskbar", "", screen_width, bar_height) {
-            Ok(id) => id,
-            Err(_) => {
-                println!("[menu_bar] Failed to create surface");
-                return 1;
-            }
-        };
-
-    let _ = conn.set_window_type(surface_id, window_types::TASKBAR);
+    // Create taskbar surface directly with TASKBAR type
+    let surface_id = match conn.create_surface_with_type(
+        "org.scarlet-os.desktop.taskbar",
+        "Taskbar",
+        "",
+        screen_width,
+        bar_height,
+        window_types::TASKBAR,
+    ) {
+        Ok(id) => id,
+        Err(_) => {
+            println!("[menu_bar] Failed to create surface");
+            return 1;
+        }
+    };
 
     // Disable interactive resize
     let _ = conn.set_window_resizable(surface_id, false);
@@ -1076,8 +1228,8 @@ pub extern "C" fn main() -> i32 {
 
     // Clock
     let clock_text = format!("00:00");
-    let (cw, _) = measure_text_sized(&clock_text, 13.0);
-    let clock_width = cw.saturating_add(12);
+    let (cw, _): (u32, u32) = graphics::measure_text_sized(&clock_text, 13.0);
+    let clock_width: u32 = cw.saturating_add(12);
     x_offset_right -= clock_width as i32;
     status_items.push(StatusItem {
         label: String::from("uptime 0s"),
@@ -1089,8 +1241,8 @@ pub extern "C" fn main() -> i32 {
 
     // CPU usage
     let cpu_text = format!("CPU {}%", cpu_usage);
-    let (cpu_w, _) = measure_text_sized(&cpu_text, 13.0);
-    let cpu_width = cpu_w.saturating_add(12);
+    let (cpu_w, _): (u32, u32) = graphics::measure_text_sized(&cpu_text, 13.0);
+    let cpu_width: u32 = cpu_w.saturating_add(12);
     x_offset_right -= cpu_width as i32;
     status_items.push(StatusItem {
         label: String::from("CPU 15%"),
@@ -1102,8 +1254,8 @@ pub extern "C" fn main() -> i32 {
 
     // Memory usage
     let mem_text = format!("Mem {}%", memory_usage);
-    let (mem_w, _) = measure_text_sized(&mem_text, 13.0);
-    let mem_width = mem_w.saturating_add(12);
+    let (mem_w, _): (u32, u32) = graphics::measure_text_sized(&mem_text, 13.0);
+    let mem_width: u32 = mem_w.saturating_add(12);
     x_offset_right -= mem_width as i32;
     status_items.push(StatusItem {
         label: String::from("Mem 42%"),
@@ -1146,7 +1298,12 @@ pub extern "C" fn main() -> i32 {
                     );
                     // Update active app based on focus change
                     // Store (app_id, app_name, title, menu_titles) for menu building
-                    active_app = Some((app_id.clone(), app_name.clone(), title.clone(), menu_titles.clone()));
+                    active_app = Some((
+                        app_id.clone(),
+                        app_name.clone(),
+                        title.clone(),
+                        menu_titles.clone(),
+                    ));
                     menu_items = build_menu_items(&active_app, bar_height);
                     needs_redraw = true;
                 }

@@ -28,11 +28,7 @@ pub fn tls_pointer() -> usize {
     if ptr == 0 {
         // Check if we have main thread TLS initialized
         let main_tls = MAIN_THREAD_TLS.load(Ordering::Acquire);
-        if main_tls != 0 {
-            main_tls
-        } else {
-            0
-        }
+        if main_tls != 0 { main_tls } else { 0 }
     } else {
         ptr
     }
@@ -471,4 +467,3 @@ macro_rules! thread_local {
         $crate::thread_local!($($rest)*);
     };
 }
-

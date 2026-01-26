@@ -65,6 +65,7 @@ mod core_exports {
     pub use core::mem;
     pub use core::ops;
     pub use core::option;
+    pub use core::panic;
     pub use core::pin;
     pub use core::ptr;
     pub use core::range;

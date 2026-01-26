@@ -157,7 +157,7 @@ impl Window {
             maximized: false,
             saved_geometry: None,
             opacity: 1.0,
-            resizable: true, // Default to resizable
+            resizable: true,          // Default to resizable
             has_alpha_content: false, // Default to opaque content
         }
     }
@@ -190,7 +190,7 @@ impl Window {
             maximized: false,
             saved_geometry: None,
             opacity: 1.0,
-            resizable: true, // Default to resizable
+            resizable: true,          // Default to resizable
             has_alpha_content: false, // Default to opaque content
         }
     }
@@ -249,7 +249,7 @@ impl Window {
             maximized: false,
             saved_geometry: None,
             opacity: 1.0,
-            resizable: true, // Default to resizable
+            resizable: true,          // Default to resizable
             has_alpha_content: false, // Default to opaque content
         })
     }
@@ -424,7 +424,7 @@ impl WindowManager {
             maximized: false,
             saved_geometry: None,
             opacity: 1.0,
-            resizable: true, // Default to resizable
+            resizable: true,          // Default to resizable
             has_alpha_content: false, // Default to opaque content
         };
         self.windows.push(window);

@@ -82,9 +82,9 @@ name = "socket_handle_transfer_demo"
 path = "src/socket_handle_transfer_demo.rs"
 test = false
 
-[[bin]]
-name = "ui_demo"
-path = "src/ui_demo.rs"
+# [[bin]]
+# name = "ui_demo"
+# path = "src/ui_demo.rs"
 
 [[bin]]
 name = "stemd"
@@ -94,9 +94,9 @@ path = "src/stemd/main.rs"
 name = "sbusd"
 path = "src/sbusd/main.rs"
 
-[[bin]]
-name = "slint_demo"
-path = "src/slint_demo.rs"
+# [[bin]]
+# name = "slint_demo"
+# path = "src/slint_demo.rs"
 
 [[bin]]
 name = "scarlet_desktop"
@@ -111,32 +111,8 @@ name = "scarlet_desktop_taskbar"
 path = "src/scarlet_desktop/taskbar/main.rs"
 
 [[bin]]
-name = "scarlet_desktop_overview"
-path = "src/scarlet_desktop/overview/main.rs"
-
-[[bin]]
-name = "scarlet_desktop_settings"
-path = "src/scarlet_desktop/settings/main.rs"
-
-[[bin]]
-name = "scarlet_desktop_terminal"
-path = "src/scarlet_desktop/terminal/main.rs"
-
-[[bin]]
-name = "scarlet_desktop_notepad"
-path = "src/scarlet_desktop/notepad/main.rs"
-
-[[bin]]
-name = "scarlet_desktop_filer"
-path = "src/scarlet_desktop/filer/main.rs"
-
-[[bin]]
-name = "scarlet_desktop_launcher"
-path = "src/scarlet_desktop/launcher/main.rs"
-
-[[bin]]
-name = "scarlet_desktop_clock"
-path = "src/scarlet_desktop/clock/main.rs"
+name = "ui-demo"
+path = "src/ui_demo.rs"
 
 [dependencies]
 scarlet_std = { path = "../lib/std", features = ["alloc_debug"] }
@@ -144,7 +120,8 @@ framebuffer = { path = "../lib/framebuffer" }
 sws_protocol = { path = "../lib/sws_protocol" }
 sws-client = { path = "../lib/sws-client" }
 scarlet-ui = { path = "../lib/scarlet-ui" }
-slint-scarlet = { path = "../lib/slint-scarlet" }
+scarlet-ui-macros = { path = "../lib/scarlet-ui-macros" }
+# slint-scarlet = { path = "../lib/slint-scarlet" }
 scarlet-desktop-config = { path = "../lib/scarlet-desktop-config" }
 sbus = { path = "../lib/sbus" }
 sbus-client = { path = "../lib/sbus-client" }

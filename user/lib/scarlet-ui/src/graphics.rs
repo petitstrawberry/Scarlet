@@ -1,21 +1,23 @@
-//! Graphics primitives and drawing utilities
+//! Graphics primitives and drawing utilities for ScarletUI
+//!
+//! Provides Canvas for drawing text, shapes, and managing glyph caches.
 
-use std::println;
+use alloc::boxed::Box;
+use alloc::vec::Vec;
 
 use ab_glyph::{point, Font, FontRef, Glyph, InvalidFont, PxScale, PxScaleFont, ScaleFont};
-use crate::Color;
 
-extern crate scarlet_std as std;
-extern crate alloc;
+use crate::color::Color;
+use scarlet_std::{println, sync::Mutex, fs::File};
 
-use alloc::{boxed::Box, vec::Vec};
-
+/// Glyph cache key
 #[derive(Clone, Copy, PartialEq, Eq)]
 struct GlyphKey {
     codepoint: u32,
     size_px: u16,
 }
 
+/// Rasterized glyph mask
 struct GlyphMask {
     key: GlyphKey,
     width: u32,
@@ -25,6 +27,7 @@ struct GlyphMask {
     mask: Box<[u8]>,
 }
 
+/// Glyph cache state
 struct GlyphCacheState {
     entries: Vec<GlyphMask>,
     next_evict: usize,
@@ -39,23 +42,20 @@ impl GlyphCacheState {
     }
 }
 
-// Keep this modest; UI text tends to reuse glyphs.
 const GLYPH_CACHE_CAP: usize = 256;
 
-static GLYPH_CACHE: std::sync::Mutex<GlyphCacheState> =
-    std::sync::Mutex::new(GlyphCacheState::new());
+static GLYPH_CACHE: Mutex<GlyphCacheState> = Mutex::new(GlyphCacheState::new());
 
-// Text measurement cache
+/// Text measurement cache key
 #[derive(Clone, Copy, PartialEq, Eq)]
 struct TextMetricsKey {
     text_len: usize,
     text_hash: u64,
-    font_size: u32,  // Store as integer to avoid f32 hashing issues
+    font_size: u32,
 }
 
 impl TextMetricsKey {
     fn from_text(text: &str, font_size: f32) -> Self {
-        // Use a simple hash of the text content
         let mut hash = 0u64;
         for b in text.bytes() {
             hash = hash.wrapping_mul(31).wrapping_add(b as u64);
@@ -90,7 +90,6 @@ impl TextMetricsCache {
     where
         F: FnOnce() -> (u32, u32),
     {
-        // First try to find existing entry
         let key = TextMetricsKey::from_text(text, font_size);
         for entry in &self.entries {
             if entry.key == key {
@@ -98,49 +97,34 @@ impl TextMetricsCache {
             }
         }
 
-        // Compute the value
         let result = compute();
 
-        // Simple eviction when cache is full
         if self.entries.len() >= self.max_entries {
-            // Remove first quarter of entries (simple FIFO-style)
             let remove_count = self.max_entries / 4;
             if remove_count > 0 {
                 self.entries.drain(0..remove_count.min(self.entries.len()));
             }
         }
 
-        self.entries.push(TextMetricsEntry {
-            key,
-            value: result,
-        });
+        self.entries.push(TextMetricsEntry { key, value: result });
         result
     }
 }
 
 const TEXT_METRICS_CACHE_CAP: usize = 128;
 
-static TEXT_METRICS_CACHE: std::sync::Mutex<TextMetricsCache> =
-    std::sync::Mutex::new(TextMetricsCache::new(TEXT_METRICS_CACHE_CAP));
+static TEXT_METRICS_CACHE: Mutex<TextMetricsCache> = Mutex::new(TextMetricsCache::new(TEXT_METRICS_CACHE_CAP));
 
 #[inline]
 fn floor_i32(v: f32) -> i32 {
     let i = v as i32;
-    if (i as f32) > v {
-        i - 1
-    } else {
-        i
-    }
+    if (i as f32) > v { i - 1 } else { i }
 }
 
 #[inline]
 fn ceil_i32(v: f32) -> i32 {
     let i = v as i32;
-    if (i as f32) < v {
-        i + 1
-    } else {
-        i
-    }
+    if (i as f32) < v { i + 1 } else { i }
 }
 
 fn glyph_cache_get_or_rasterize(
@@ -163,8 +147,6 @@ fn glyph_cache_get_or_rasterize(
         ));
     }
 
-    // Rasterize at a stable origin where the baseline is y=0.
-    // The draw path already positions each glyph at its caret baseline.
     let glyph_id = scaled.glyph_id(ch);
     let glyph: Glyph = glyph_id.with_scale_and_position(scaled.scale, point(0.0, 0.0));
     let outlined = scaled.font.outline_glyph(glyph)?;
@@ -220,7 +202,6 @@ fn glyph_cache_get_or_rasterize(
     }
 }
 
-// Rootfs-provided default font (MPLUS_FONTS, OFL-1.1).
 const DEFAULT_FONT_PATH: &str = "/fonts/Mplus1-Regular.ttf";
 
 #[derive(Clone)]
@@ -229,15 +210,12 @@ struct DefaultFontState {
     load_attempted: bool,
 }
 
-static DEFAULT_FONT: std::sync::Mutex<DefaultFontState> =
-    std::sync::Mutex::new(DefaultFontState {
-        font: None,
-        load_attempted: false,
-    });
+static DEFAULT_FONT: Mutex<DefaultFontState> = Mutex::new(DefaultFontState {
+    font: None,
+    load_attempted: false,
+});
 
-/// Set the default UI font used by [`Canvas::draw_text`] and widgets like `Label`.
-///
-/// Scarlet UI keeps the font bytes alive for the rest of the process.
+/// Set the default UI font
 pub fn set_default_font(font_bytes: &'static [u8]) -> Result<(), InvalidFont> {
     let font = FontRef::try_from_slice(font_bytes)?;
     let mut state = DEFAULT_FONT.lock();
@@ -265,10 +243,10 @@ fn load_default_font_from_rootfs_once() {
         return;
     }
 
-    let mut file = match std::fs::File::open(DEFAULT_FONT_PATH) {
+    let mut file = match File::open(DEFAULT_FONT_PATH) {
         Ok(f) => f,
         Err(e) => {
-            println!("scarlet-ui: Failed to open default font '{}': {:?}", DEFAULT_FONT_PATH, e);
+            println!("[scarlet-ui] Failed to open default font '{}': {:?}", DEFAULT_FONT_PATH, e);
             return;
         }
     };
@@ -294,13 +272,11 @@ fn default_font() -> Option<FontRef<'static>> {
     DEFAULT_FONT.lock().font.clone()
 }
 
-/// Measure text using the global default vector font.
+/// Measure text using the global default vector font
 ///
-/// Returns `(width, height)` in pixels for a single-line text layout.
-/// If the default font is not available, falls back to a rough estimate.
+/// Returns `(width, height)` in pixels
 pub fn measure_text_sized(text: &str, font_size_px: f32) -> (u32, u32) {
     TEXT_METRICS_CACHE.lock().get_or_compute(text, font_size_px, || {
-        // Original measurement logic
         if let Some(font) = default_font() {
             let scale = PxScale::from(font_size_px);
             let scaled = font.as_scaled(scale);
@@ -346,53 +322,6 @@ pub fn measure_text_sized(text: &str, font_size_px: f32) -> (u32, u32) {
     })
 }
 
-/// 2D point
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Point {
-    pub x: i32,
-    pub y: i32,
-}
-
-impl Point {
-    /// The origin point (0, 0)
-    pub const ZERO: Self = Self { x: 0, y: 0 };
-
-    pub const fn new(x: i32, y: i32) -> Self {
-        Self { x, y }
-    }
-}
-
-/// Rectangle
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Rect {
-    pub x: i32,
-    pub y: i32,
-    pub width: u32,
-    pub height: u32,
-}
-
-impl Rect {
-    pub const fn new(x: i32, y: i32, width: u32, height: u32) -> Self {
-        Self {
-            x,
-            y,
-            width,
-            height,
-        }
-    }
-
-    pub fn contains(&self, x: i32, y: i32) -> bool {
-        x >= self.x
-            && x < self.x + self.width as i32
-            && y >= self.y
-            && y < self.y + self.height as i32
-    }
-
-    pub fn contains_point(&self, point: Point) -> bool {
-        self.contains(point.x, point.y)
-    }
-}
-
 /// Canvas for drawing operations
 pub struct Canvas<'a> {
     buffer: &'a mut [u8],
@@ -418,8 +347,10 @@ impl<'a> Canvas<'a> {
 
         let offset = ((y as u32 * self.width + x as u32) * 4) as usize;
         if offset + 4 <= self.buffer.len() {
+            // Convert to BGRA and use little-endian bytes
+            // to_bgra() produces 0xAARRGGBB which becomes [BB, GG, RR, AA] in little-endian
             let bgra = color.to_bgra();
-            self.buffer[offset..offset + 4].copy_from_slice(&bgra);
+            self.buffer[offset..offset + 4].copy_from_slice(&bgra.to_le_bytes());
         }
     }
 
@@ -431,11 +362,10 @@ impl<'a> Canvas<'a> {
         if offset + 4 > self.buffer.len() {
             return Color::BLACK;
         }
-        let b = self.buffer[offset];
-        let g = self.buffer[offset + 1];
-        let r = self.buffer[offset + 2];
-        let a = self.buffer[offset + 3];
-        Color::rgba(r, g, b, a)
+        // Read BGRA bytes as little-endian u32 and convert using from_bgra
+        let bgra_bytes = [self.buffer[offset], self.buffer[offset + 1],
+                          self.buffer[offset + 2], self.buffer[offset + 3]];
+        Color::from_bgra(u32::from_le_bytes(bgra_bytes))
     }
 
     fn put_pixel_alpha(&mut self, x: i32, y: i32, color: Color, alpha: f32) {
@@ -446,40 +376,33 @@ impl<'a> Canvas<'a> {
             self.put_pixel(x, y, color);
             return;
         }
-        // Source-over blend in *straight alpha*.
-        // This keeps the buffer's alpha meaningful so the compositor can
-        // correctly blend the final window surface.
-        //
-        // Note: Uses floating-point arithmetic for accurate source-over compositing.
-        // Unlike the compositor's simpler per-window opacity blending (which outputs
-        // opaque pixels), this preserves the alpha channel in the window buffer,
-        // allowing for proper multi-layer transparency when the compositor later
-        // blends this window onto the screen.
+
         let dst = self.get_pixel(x, y);
 
-        let src_a = (alpha * (color.a as f32 / 255.0)).clamp(0.0, 1.0);
-        let dst_a = (dst.a as f32 / 255.0).clamp(0.0, 1.0);
+        // color.a is already in 0.0-1.0 range, not 0-255
+        let src_a = (alpha * color.a).clamp(0.0, 1.0);
+        let dst_a = dst.a.clamp(0.0, 1.0);
         let out_a = src_a + dst_a * (1.0 - src_a);
 
         if out_a <= 0.0 {
-            self.put_pixel(x, y, Color::rgba(0, 0, 0, 0));
+            self.put_pixel(x, y, Color::rgba(0.0, 0.0, 0.0, 0.0));
             return;
         }
 
-        let out_r = ((color.r as f32 * src_a + dst.r as f32 * dst_a * (1.0 - src_a)) / out_a)
-            .clamp(0.0, 255.0) as u8;
-        let out_g = ((color.g as f32 * src_a + dst.g as f32 * dst_a * (1.0 - src_a)) / out_a)
-            .clamp(0.0, 255.0) as u8;
-        let out_b = ((color.b as f32 * src_a + dst.b as f32 * dst_a * (1.0 - src_a)) / out_a)
-            .clamp(0.0, 255.0) as u8;
-        let out_a_u8 = (out_a * 255.0).clamp(0.0, 255.0) as u8;
+        let out_r = (color.r * src_a + dst.r * dst_a * (1.0 - src_a)) / out_a;
+        let out_g = (color.g * src_a + dst.g * dst_a * (1.0 - src_a)) / out_a;
+        let out_b = (color.b * src_a + dst.b * dst_a * (1.0 - src_a)) / out_a;
+        let out_a_f32 = out_a;
 
-        self.put_pixel(x, y, Color::rgba(out_r, out_g, out_b, out_a_u8));
+        self.put_pixel(x, y, Color::rgba(out_r, out_g, out_b, out_a_f32));
     }
 
     /// Fill a rectangle with a solid color
     pub fn fill_rect(&mut self, x: i32, y: i32, width: u32, height: u32, color: Color) {
+        // Convert to BGRA and use little-endian bytes
+        // to_bgra() produces 0xAARRGGBB which becomes [BB, GG, RR, AA] in little-endian
         let bgra = color.to_bgra();
+        let bgra_bytes = bgra.to_le_bytes();
 
         for dy in 0..height {
             for dx in 0..width {
@@ -492,156 +415,17 @@ impl<'a> Canvas<'a> {
 
                 let offset = ((py as u32 * self.width + px as u32) * 4) as usize;
                 if offset + 4 <= self.buffer.len() {
-                    self.buffer[offset..offset + 4].copy_from_slice(&bgra);
+                    self.buffer[offset..offset + 4].copy_from_slice(&bgra_bytes);
                 }
             }
         }
     }
 
-    /// Fill a Rect with a solid color
-    pub fn fill(&mut self, rect: Rect, color: Color) {
-        self.fill_rect(rect.x, rect.y, rect.width, rect.height, color);
-    }
-
-    /// Draw a rectangle outline
-    pub fn draw_rect(&mut self, x: i32, y: i32, width: u32, height: u32, color: Color) {
-        // Top and bottom edges
-        for dx in 0..width {
-            self.put_pixel(x + dx as i32, y, color);
-            self.put_pixel(x + dx as i32, y + height as i32 - 1, color);
-        }
-
-        // Left and right edges
-        for dy in 0..height {
-            self.put_pixel(x, y + dy as i32, color);
-            self.put_pixel(x + width as i32 - 1, y + dy as i32, color);
-        }
-    }
-
-    /// Draw a horizontal 1px line.
-    pub fn draw_hline(&mut self, x: i32, y: i32, width: u32, color: Color) {
-        self.fill_rect(x, y, width, 1, color);
-    }
-
-    /// Draw a vertical 1px line.
-    pub fn draw_vline(&mut self, x: i32, y: i32, height: u32, color: Color) {
-        self.fill_rect(x, y, 1, height, color);
-    }
-
-    /// Draw a 1px line segment from `(x0, y0)` to `(x1, y1)` (inclusive).
+    /// Draw text with explicit font size
     ///
-    /// Uses an integer Bresenham rasterization.
-    pub fn draw_line(&mut self, mut x0: i32, mut y0: i32, x1: i32, y1: i32, color: Color) {
-        let dx = (x1 - x0).abs();
-        let sx = if x0 < x1 { 1 } else { -1 };
-        let dy = -(y1 - y0).abs();
-        let sy = if y0 < y1 { 1 } else { -1 };
-
-        let mut err = dx + dy;
-        loop {
-            self.put_pixel(x0, y0, color);
-            if x0 == x1 && y0 == y1 {
-                break;
-            }
-            let e2 = err * 2;
-            if e2 >= dy {
-                err += dy;
-                x0 += sx;
-            }
-            if e2 <= dx {
-                err += dx;
-                y0 += sy;
-            }
-        }
-    }
-
-    /// Draw a 1px circle outline centered at `(cx, cy)`.
-    ///
-    /// Uses the midpoint circle algorithm.
-    pub fn draw_circle(&mut self, cx: i32, cy: i32, radius: u32, color: Color) {
-        let r = radius as i32;
-        if r <= 0 {
-            self.put_pixel(cx, cy, color);
-            return;
-        }
-
-        let mut x = 0;
-        let mut y = r;
-        let mut d = 1 - r;
-
-        while x <= y {
-            self.put_pixel(cx + x, cy + y, color);
-            self.put_pixel(cx - x, cy + y, color);
-            self.put_pixel(cx + x, cy - y, color);
-            self.put_pixel(cx - x, cy - y, color);
-
-            self.put_pixel(cx + y, cy + x, color);
-            self.put_pixel(cx - y, cy + x, color);
-            self.put_pixel(cx + y, cy - x, color);
-            self.put_pixel(cx - y, cy - x, color);
-
-            x += 1;
-            if d < 0 {
-                d += 2 * x + 1;
-            } else {
-                y -= 1;
-                d += 2 * (x - y) + 1;
-            }
-        }
-    }
-
-    /// Fill a circle centered at `(cx, cy)`.
-    ///
-    /// Uses the midpoint circle algorithm and draws horizontal spans.
-    pub fn fill_circle(&mut self, cx: i32, cy: i32, radius: u32, color: Color) {
-        let r = radius as i32;
-        if r <= 0 {
-            self.put_pixel(cx, cy, color);
-            return;
-        }
-
-        let mut x = 0;
-        let mut y = r;
-        let mut d = 1 - r;
-
-        while x <= y {
-            // Spans across symmetric scanlines.
-            let w1 = (2 * x + 1).max(0) as u32;
-            let w2 = (2 * y + 1).max(0) as u32;
-
-            self.draw_hline(cx - x, cy + y, w1, color);
-            self.draw_hline(cx - x, cy - y, w1, color);
-            self.draw_hline(cx - y, cy + x, w2, color);
-            self.draw_hline(cx - y, cy - x, w2, color);
-
-            x += 1;
-            if d < 0 {
-                d += 2 * x + 1;
-            } else {
-                y -= 1;
-                d += 2 * (x - y) + 1;
-            }
-        }
-    }
-
-    /// Draw a Rect outline
-    pub fn stroke(&mut self, rect: Rect, color: Color) {
-        self.draw_rect(rect.x, rect.y, rect.width, rect.height, color);
-    }
-
-    /// Draw text using the global default vector font.
-    ///
-    /// `x,y` is the **top-left** of the text line.
-    pub fn draw_text(&mut self, x: i32, y: i32, text: &str, color: Color) {
-        self.draw_text_sized(x, y, text, color, 16.0);
-    }
-
-    /// Draw text using the global default vector font with an explicit pixel size.
-    ///
-    /// `x,y` is the **top-left** of the text line.
+    /// `x,y` is the **top-left** of the text line
     pub fn draw_text_sized(&mut self, x: i32, y: i32, text: &str, color: Color, font_size_px: f32) {
         let Some(font) = default_font() else {
-            // No font configured; nothing to draw.
             return;
         };
 
@@ -649,7 +433,6 @@ impl<'a> Canvas<'a> {
         let scaled = font.as_scaled(scale);
 
         let mut caret_x = x as f32;
-        // Convert top-left y to baseline y.
         let mut caret_y = y as f32 + scaled.ascent();
 
         for ch in text.chars() {
@@ -661,7 +444,6 @@ impl<'a> Canvas<'a> {
 
             let glyph_id = scaled.glyph_id(ch);
             if let Some((ox, oy, w, h, ptr)) = glyph_cache_get_or_rasterize(&scaled, ch) {
-                // Position this glyph at the current caret baseline.
                 let base_x = caret_x as i32;
                 let base_y = caret_y as i32;
                 let mask = unsafe { core::slice::from_raw_parts(ptr, (w as usize) * (h as usize)) };
@@ -684,87 +466,46 @@ impl<'a> Canvas<'a> {
         }
     }
 
-    /// Draw a rounded rectangle
-    pub fn fill_rounded_rect(&mut self, x: i32, y: i32, width: u32, height: u32, radius: u32, color: Color) {
-        let radius = radius.min(width / 2).min(height / 2);
-        
-        // Fill center rectangle
-        if width > radius * 2 {
-            self.fill_rect(x + radius as i32, y, width - radius * 2, height, color);
+    /// Draw rectangle outline (1px border)
+    pub fn draw_rect(&mut self, x: i32, y: i32, width: u32, height: u32, color: Color) {
+        if width == 0 || height == 0 {
+            return;
         }
-        
-        // Fill left and right vertical strips
-        if height > radius * 2 {
-            self.fill_rect(x, y + radius as i32, radius, height - radius * 2, color);
-            self.fill_rect(x + (width - radius) as i32, y + radius as i32, radius, height - radius * 2, color);
-        }
-        
-        // Draw rounded corners
-        let r_sq = (radius * radius) as i32;
-        for dy in 0..radius {
-            for dx in 0..radius {
-                let dist_sq = (dx * dx + dy * dy) as i32;
-                if dist_sq <= r_sq {
-                    // Top-left
-                    self.put_pixel(x + (radius - dx - 1) as i32, y + (radius - dy - 1) as i32, color);
-                    // Top-right
-                    self.put_pixel(x + (width - radius + dx) as i32, y + (radius - dy - 1) as i32, color);
-                    // Bottom-left
-                    self.put_pixel(x + (radius - dx - 1) as i32, y + (height - radius + dy) as i32, color);
-                    // Bottom-right
-                    self.put_pixel(x + (width - radius + dx) as i32, y + (height - radius + dy) as i32, color);
-                }
-            }
-        }
-    }
 
-    /// Draw a rounded rectangle outline
-    pub fn draw_rounded_rect(&mut self, x: i32, y: i32, width: u32, height: u32, radius: u32, color: Color) {
-        let radius = radius.min(width / 2).min(height / 2);
-        
-        // Draw straight edges
-        // Top
-        for dx in radius..(width - radius) {
+        // Top and bottom edges
+        for dx in 0..width {
             self.put_pixel(x + dx as i32, y, color);
             self.put_pixel(x + dx as i32, y + height as i32 - 1, color);
         }
-        // Sides
-        for dy in radius..(height - radius) {
+
+        // Left and right edges
+        for dy in 0..height {
             self.put_pixel(x, y + dy as i32, color);
             self.put_pixel(x + width as i32 - 1, y + dy as i32, color);
         }
-        
-        // Draw rounded corners (circle approximation)
-        let r_sq = (radius * radius) as i32;
-        let inner_r_sq = ((radius - 1) * (radius - 1)) as i32;
-        
-        for dy in 0..radius {
-            for dx in 0..radius {
-                let dist_sq = (dx * dx + dy * dy) as i32;
-                if dist_sq <= r_sq && dist_sq >= inner_r_sq {
-                    // Top-left
-                    self.put_pixel(x + (radius - dx - 1) as i32, y + (radius - dy - 1) as i32, color);
-                    // Top-right
-                    self.put_pixel(x + (width - radius + dx) as i32, y + (radius - dy - 1) as i32, color);
-                    // Bottom-left
-                    self.put_pixel(x + (radius - dx - 1) as i32, y + (height - radius + dy) as i32, color);
-                    // Bottom-right
-                    self.put_pixel(x + (width - radius + dx) as i32, y + (height - radius + dy) as i32, color);
-                }
-            }
-        }
     }
 
-    /// Draw a rounded rectangle outline with specified stroke width
-    pub fn stroke_rounded_rect(&mut self, x: i32, y: i32, width: u32, height: u32, radius: u32, stroke_width: u32, color: Color) {
-        // Draw multiple outlines for stroke width
-        for i in 0..stroke_width {
-            let inset = i as i32;
-            let w = width.saturating_sub(i * 2);
-            let h = height.saturating_sub(i * 2);
-            let r = radius.saturating_sub(i);
-            if w > 0 && h > 0 {
-                self.draw_rounded_rect(x + inset, y + inset, w, h, r, color);
+    /// Draw line using Bresenham's algorithm
+    pub fn draw_line(&mut self, mut x0: i32, mut y0: i32, x1: i32, y1: i32, color: Color) {
+        let dx = (x1 - x0).abs();
+        let sx = if x0 < x1 { 1 } else { -1 };
+        let dy = -(y1 - y0).abs();
+        let sy = if y0 < y1 { 1 } else { -1 };
+
+        let mut err = dx + dy;
+        loop {
+            self.put_pixel(x0, y0, color);
+            if x0 == x1 && y0 == y1 {
+                break;
+            }
+            let e2 = 2 * err;
+            if e2 >= dy {
+                err += dy;
+                x0 += sx;
+            }
+            if e2 <= dx {
+                err += dx;
+                y0 += sy;
             }
         }
     }
