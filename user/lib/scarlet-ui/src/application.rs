@@ -90,6 +90,7 @@ pub trait Application: View {
 
         // 6. Main event loop
         loop {
+            let mut presented_this_cycle = false;
             // 6.1 Poll events
             while let Some(event) = platform_window.poll_event() {
                 match event {
@@ -104,15 +105,17 @@ pub trait Application: View {
                             pipeline.resize(new_size);
                             if let Some(buffer) = pipeline.render() {
                                 platform_window.present(buffer);
+                                presented_this_cycle = true;
                             }
                         }
                     }
                     _ => {
                         // Other events are handled by the pipeline
                         let _ = pipeline.handle_event(&event);
-                        if pipeline.has_dirty() {
+                        if !presented_this_cycle && pipeline.has_dirty() {
                             if let Some(buffer) = pipeline.render() {
                                 platform_window.present(buffer);
+                                presented_this_cycle = true;
                             }
                         }
                     }
@@ -147,7 +150,7 @@ pub trait Application: View {
             // if let Some(buffer) = pipeline.render() {
             //     platform_window.present(buffer);
             // }
-            if pipeline.has_dirty() {
+            if !presented_this_cycle && pipeline.has_dirty() {
                 if let Some(buffer) = pipeline.render() {
                     platform_window.present(buffer);
                 }
