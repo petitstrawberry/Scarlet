@@ -108,7 +108,7 @@ path = "src/scarlet_desktop/background/main.rs"
 
 [[bin]]
 name = "scarlet_desktop_taskbar"
-path = "src/scarlet_desktop/taskbar/main.rs"
+path = "src/scarlet_desktop/taskbar/scarlet_ui.rs"
 
 [[bin]]
 name = "ui-demo"

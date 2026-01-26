@@ -730,6 +730,7 @@ fn client_thread_main(client_id: usize, mut socket: Socket) {
                 width,
                 height,
                 window_type,
+                resizable,
             }) => {
                 // Convert &[u8] to String
                 let app_id_str = String::from_utf8_lossy(app_id).into_owned();
@@ -834,11 +835,7 @@ fn client_thread_main(client_id: usize, mut socket: Socket) {
                             }
                         };
 
-                        let resizable_default = !matches!(
-                            window_type,
-                            protocol::window_types::TASKBAR | protocol::window_types::DESKTOP
-                        );
-                        window_resizable.insert(window_id, resizable_default);
+                        window_resizable.insert(window_id, resizable);
 
                         // Reply to client with window created message
                         send_window_created(&mut socket, window_id, buffer_size);
@@ -871,6 +868,7 @@ fn client_thread_main(client_id: usize, mut socket: Socket) {
                             width,
                             height,
                             window_type,
+                            resizable,
                             shm: Some(shm),
                             shm_mapped_addr,
                             shm_size: buffer_size as usize,
@@ -1111,11 +1109,6 @@ fn client_thread_main(client_id: usize, mut socket: Socket) {
                     "[ClientThread {}] SetWindowType: window_id={} type={}",
                     client_id, window_id, window_type
                 );
-                let resizable_default = !matches!(
-                    window_type,
-                    protocol::window_types::TASKBAR | protocol::window_types::DESKTOP
-                );
-                window_resizable.insert(window_id, resizable_default);
                 push_ipc_event(IpcEvent::SetWindowType {
                     window_id,
                     window_type,
@@ -1259,6 +1252,7 @@ pub enum IpcEvent {
         width: u32,
         height: u32,
         window_type: u32, // Window type (0=Normal, 1=AlwaysOnTop, 2=Taskbar, 3=Desktop)
+        resizable: bool,
         /// Shared memory for the window buffer (server-allocated)
         shm: Option<SharedMemory>,
         shm_mapped_addr: Option<usize>,

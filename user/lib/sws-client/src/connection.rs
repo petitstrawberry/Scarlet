@@ -155,7 +155,7 @@ impl Connection {
     /// The returned Surface can be drawn to immediately.
     /// Default window type is NORMAL (0).
     pub fn create_surface(&mut self, app_id: &str, app_name: &str, menu_titles: &str, width: u32, height: u32) -> Result<u32, Error> {
-        self.create_surface_with_type(app_id, app_name, menu_titles, width, height, 0)
+        self.create_surface_with_type_and_resizable(app_id, app_name, menu_titles, width, height, 0, true)
     }
 
     /// Create a new surface (window) with specific window type
@@ -163,8 +163,33 @@ impl Connection {
     /// This sends a CreateWindow request and waits for the response.
     /// The returned Surface can be drawn to immediately.
     pub fn create_surface_with_type(&mut self, app_id: &str, app_name: &str, menu_titles: &str, width: u32, height: u32, window_type: u32) -> Result<u32, Error> {
+        self.create_surface_with_type_and_resizable(app_id, app_name, menu_titles, width, height, window_type, true)
+    }
+
+    /// Create a new surface (window) with specific window type and resizable flag
+    ///
+    /// This sends a CreateWindow request and waits for the response.
+    /// The returned Surface can be drawn to immediately.
+    pub fn create_surface_with_type_and_resizable(
+        &mut self,
+        app_id: &str,
+        app_name: &str,
+        menu_titles: &str,
+        width: u32,
+        height: u32,
+        window_type: u32,
+        resizable: bool,
+    ) -> Result<u32, Error> {
         // Send CreateWindow request
-        let payload = protocol::payload_create_window(app_id.as_bytes(), app_name.as_bytes(), menu_titles.as_bytes(), width, height, window_type);
+        let payload = protocol::payload_create_window(
+            app_id.as_bytes(),
+            app_name.as_bytes(),
+            menu_titles.as_bytes(),
+            width,
+            height,
+            window_type,
+            resizable,
+        );
         println!("[sws-client] Creating surface: payload size {}", payload.len());
         write_frame(
             &mut self.socket,

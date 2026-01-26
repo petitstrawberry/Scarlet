@@ -1581,6 +1581,7 @@ impl Compositor {
                 width,
                 height,
                 window_type,
+                resizable,
                 shm,
                 shm_mapped_addr,
                 shm_size,
@@ -1640,6 +1641,14 @@ impl Compositor {
                     (0, 0)
                 };
 
+                let wtype = match window_type {
+                    window_types::NORMAL => super::window::WindowType::Normal,
+                    window_types::ALWAYS_ON_TOP => super::window::WindowType::AlwaysOnTop,
+                    window_types::TASKBAR => super::window::WindowType::Taskbar,
+                    window_types::DESKTOP => super::window::WindowType::Desktop,
+                    _ => super::window::WindowType::Normal,
+                };
+
                 // Check if SHM was provided (modern path)
                 if let Some(shm_obj) = shm {
                     println!(
@@ -1660,25 +1669,6 @@ impl Compositor {
                     ) {
                         Ok(_) => {
                             println!("[Compositor] Window #{} with SHM created", window_id);
-                            // Set app_id and window_type on the newly created window
-                            if let Some(window) = self.window_manager.get_window_mut(window_id) {
-                                window.app_id = Some(app_id);
-                                // Set window type
-                                let wtype = match window_type {
-                                    window_types::NORMAL => super::window::WindowType::Normal,
-                                    window_types::ALWAYS_ON_TOP => {
-                                        super::window::WindowType::AlwaysOnTop
-                                    }
-                                    window_types::TASKBAR => super::window::WindowType::Taskbar,
-                                    window_types::DESKTOP => super::window::WindowType::Desktop,
-                                    _ => super::window::WindowType::Normal,
-                                };
-                                window.window_type = wtype;
-                                println!(
-                                    "[Compositor] Set window #{} type to {:?}",
-                                    window_id, wtype
-                                );
-                            }
                         }
                         Err(e) => {
                             println!("[Compositor] Failed to create SHM window: {}", e);
@@ -1690,6 +1680,17 @@ impl Compositor {
                     self.window_manager
                         .create_window_with_id(window_id, x, y, width, height);
                 }
+
+                if let Some(window) = self.window_manager.get_window_mut(window_id) {
+                    window.app_id = Some(app_id);
+                }
+                if self.window_manager.set_window_type(window_id, wtype) {
+                    println!(
+                        "[Compositor] Set window #{} type to {:?}",
+                        window_id, wtype
+                    );
+                }
+                self.window_manager.set_window_resizable(window_id, resizable);
 
                 // Don't trigger redraw yet - wait for client to draw and send UPDATE_BUFFER
                 // self.full_redraw_needed = true;
