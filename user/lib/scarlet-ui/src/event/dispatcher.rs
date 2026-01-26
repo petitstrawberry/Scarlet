@@ -67,6 +67,7 @@ pub struct EventDispatcher {
     hovered_path: Vec<ElementId>,
     captured_id: Option<ElementId>,
     captured_path: Vec<ElementId>,
+    captured_point: Option<Point>,
     left_button_down: bool,
     /// Events emitted by elements during event handling
     emitted_events: Vec<Event>,
@@ -81,6 +82,7 @@ impl EventDispatcher {
             hovered_path: Vec::new(),
             captured_id: None,
             captured_path: Vec::new(),
+            captured_point: None,
             left_button_down: false,
             emitted_events: Vec::new(),
         }
@@ -170,14 +172,28 @@ impl EventDispatcher {
 
         if self.left_button_down {
             if let Some(captured_id) = self.captured_id {
-                if !self.captured_path.is_empty() {
-                    path = Some(self.captured_path.clone());
-                } else if let Some(captured_path) = element_tree.find_path_ids(captured_id) {
+                if let Some(captured_path) = element_tree.find_path_ids(captured_id) {
                     self.captured_path = captured_path.clone();
                     path = Some(captured_path);
+                    self.update_captured_point_from_path(element_tree);
+                } else if let Some(captured_point) = self.captured_point {
+                    if let Some(captured_path) = self.hit_test_with_path_ids(element_tree, captured_point) {
+                        self.captured_id = captured_path.last().copied();
+                        self.captured_path = captured_path.clone();
+                        path = Some(captured_path);
+                        self.update_captured_point_from_path(element_tree);
+                    } else {
+                        self.captured_path.clear();
+                    }
                 } else {
-                    self.captured_id = None;
                     self.captured_path.clear();
+                }
+            } else if let Some(captured_point) = self.captured_point {
+                if let Some(captured_path) = self.hit_test_with_path_ids(element_tree, captured_point) {
+                    self.captured_id = captured_path.last().copied();
+                    self.captured_path = captured_path.clone();
+                    path = Some(captured_path);
+                    self.update_captured_point_from_path(element_tree);
                 }
             }
         }
@@ -252,6 +268,7 @@ impl EventDispatcher {
                 self.left_button_down = true;
                 self.captured_id = Some(target_id);
                 self.captured_path = path.clone();
+                self.captured_point = Some(point);
             }
 
             // 2. Three-phase dispatch
@@ -305,6 +322,7 @@ impl EventDispatcher {
                 self.left_button_down = false;
                 self.captured_id = None;
                 self.captured_path.clear();
+                self.captured_point = None;
             }
             handled
         } else {
@@ -324,6 +342,7 @@ impl EventDispatcher {
                 self.left_button_down = false;
                 self.captured_id = None;
                 self.captured_path.clear();
+                self.captured_point = None;
             }
             false
         }
@@ -490,6 +509,38 @@ impl EventDispatcher {
         }
 
         None
+    }
+
+    fn update_captured_point_from_path(&mut self, element_tree: &mut ElementTree) {
+        let Some(target_id) = self.captured_path.last().copied() else {
+            return;
+        };
+
+        let mut parent_origin = Point::ZERO;
+        if self.captured_path.len() > 1 {
+            for id in self.captured_path.iter().take(self.captured_path.len() - 1) {
+                let Some(element) = element_tree.find_element_mut(*id) else {
+                    return;
+                };
+                let pos = element.position();
+                parent_origin.x += pos.x;
+                parent_origin.y += pos.y;
+            }
+        }
+
+        let Some(target) = element_tree.find_element_mut(target_id) else {
+            return;
+        };
+        let target_pos = target.position();
+        let bounds = target.bounds().size;
+        let absolute_origin = Point {
+            x: parent_origin.x + target_pos.x,
+            y: parent_origin.y + target_pos.y,
+        };
+        self.captured_point = Some(Point {
+            x: absolute_origin.x + bounds.width / 2.0,
+            y: absolute_origin.y + bounds.height / 2.0,
+        });
     }
 }
 

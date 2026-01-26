@@ -382,51 +382,77 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
                 .as_any_mut()
                 .downcast_mut::<crate::views::SliderRenderObject>()
             {
+                let dragging_state = slider.get_dragging().clone();
+                if crate::debug::is_enabled() {
+                    scarlet_std::println!(
+                        "[RenderElement] Slider event id={:?}: {:?} dragging={} size=({:.1},{:.1}) pos=({:.1},{:.1})",
+                        self.id,
+                        mouse_event,
+                        render_object.is_dragging(),
+                        render_object.size().width,
+                        render_object.size().height,
+                        self.position.x,
+                        self.position.y
+                    );
+                }
                 fn update_slider_value(
                     render_object: &mut crate::views::SliderRenderObject,
                     slider: &crate::views::Slider,
                     id: ElementId,
                     position: Point,
                     x: i32,
+                    commit: bool,
                 ) -> bool {
                     let local_x = (x as f32) - position.x;
                     let new_value = render_object.value_from_local_x(local_x);
-                    let state = slider.get_value().clone();
-                    if (state.get() - new_value).abs() > 0.001 {
-                        state.set(new_value);
+                    let state_value = slider.get_value().get();
+                    if crate::debug::is_enabled() {
+                        scarlet_std::println!(
+                            "[RenderElement] Slider update: local_x={:.1} new_value={:.3} state={:.3}",
+                            local_x,
+                            new_value,
+                            state_value
+                        );
+                    }
+                    let mut changed = false;
+                    if (render_object.get_value() - new_value).abs() > 0.001 {
                         render_object.set_value(new_value);
                         crate::pipeline::mark_element_needs_paint(id);
-                        true
-                    } else {
-                        false
+                        changed = true;
                     }
+                    if commit && (state_value - new_value).abs() > 0.001 {
+                        slider.get_value().set(new_value);
+                        changed = true;
+                    }
+                    changed
                 }
 
                 match mouse_event {
                     MouseEvent::ButtonPressed { button: MouseButton::Left, x, .. } => {
                         render_object.set_dragging(true);
-                        update_slider_value(render_object, slider, self.id, self.position, *x);
+                        if !dragging_state.get() {
+                            dragging_state.set(true);
+                        }
+                        update_slider_value(render_object, slider, self.id, self.position, *x, true);
                         return true;
                     }
                     MouseEvent::Moved { x, .. } => {
                         if render_object.is_dragging() {
-                            update_slider_value(render_object, slider, self.id, self.position, *x);
+                            update_slider_value(render_object, slider, self.id, self.position, *x, true);
                             return true;
                         }
                     }
                     MouseEvent::ButtonReleased { button: MouseButton::Left, x, .. } => {
                         if render_object.is_dragging() {
-                            update_slider_value(render_object, slider, self.id, self.position, *x);
+                            update_slider_value(render_object, slider, self.id, self.position, *x, true);
                             render_object.set_dragging(false);
+                            if dragging_state.get() {
+                                dragging_state.set(false);
+                            }
                             return true;
                         }
                     }
-                    MouseEvent::Exited { .. } => {
-                        if render_object.is_dragging() {
-                            render_object.set_dragging(false);
-                            return true;
-                        }
-                    }
+                    MouseEvent::Exited { .. } => {}
                     _ => {}
                 }
             }

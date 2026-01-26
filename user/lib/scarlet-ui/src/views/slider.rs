@@ -3,6 +3,7 @@
 //! Slider is a control that allows selecting a value from a continuous range.
 
 use alloc::boxed::Box;
+use alloc::collections::BTreeMap;
 use core::any::Any;
 use crate::view::View;
 use crate::element::{Element, RenderElement, ElementRenderObject};
@@ -12,6 +13,21 @@ use crate::buffer::Buffer;
 use crate::graphics;
 use crate::state::State;
 use alloc::vec::Vec;
+use std::sync::Mutex;
+
+static SLIDER_DRAGGING_REGISTRY: Mutex<BTreeMap<crate::state::StateId, State<bool>>> =
+    Mutex::new(BTreeMap::new());
+
+fn slider_dragging_state(value_state: &State<f32>) -> State<bool> {
+    let id = value_state.id();
+    let mut registry = SLIDER_DRAGGING_REGISTRY.lock();
+    if let Some(state) = registry.get(&id) {
+        return state.clone();
+    }
+    let state: State<bool> = State::initial(crate::state::generate_state_id());
+    registry.insert(id, state.clone());
+    state
+}
 
 /// Slider View
 #[derive(Clone)]
@@ -19,15 +35,18 @@ pub struct Slider {
     value: State<f32>,
     min: f32,
     max: f32,
+    dragging: State<bool>,
 }
 
 impl Slider {
     /// Create a new Slider
     pub fn new(value: State<f32>) -> Self {
+        let dragging = slider_dragging_state(&value);
         Self {
             value,
             min: 0.0,
             max: 1.0,
+            dragging,
         }
     }
 
@@ -40,6 +59,12 @@ impl Slider {
     /// Set maximum value
     pub fn max(mut self, max: f32) -> Self {
         self.max = max;
+        self
+    }
+
+    /// Set dragging state store
+    pub fn dragging_state(mut self, dragging: State<bool>) -> Self {
+        self.dragging = dragging;
         self
     }
 
@@ -57,13 +82,18 @@ impl Slider {
     pub fn get_max(&self) -> f32 {
         self.max
     }
+
+    /// Get dragging state
+    pub fn get_dragging(&self) -> &State<bool> {
+        &self.dragging
+    }
 }
 
 impl View for Slider {
     fn create_element(&self) -> Box<dyn Element> {
         Box::new(RenderElement::new(
             self.clone(),
-            SliderRenderObject::new(self.value.get(), self.min, self.max),
+            SliderRenderObject::new(self.value.get(), self.min, self.max, self.dragging.get()),
         ))
     }
 
@@ -126,14 +156,14 @@ impl SliderRenderObject {
     }
 
     /// Create a new SliderRenderObject
-    pub fn new(value: f32, min: f32, max: f32) -> Self {
+    pub fn new(value: f32, min: f32, max: f32, dragging: bool) -> Self {
         Self {
             value: value.clamp(min, max),
             min,
             max,
             size: Size::new(200.0, 20.0),
             buffer: None,
-            dragging: false,
+            dragging,
         }
     }
 
@@ -191,6 +221,7 @@ impl SliderRenderObject {
 
         if let Some(ref mut buffer) = self.buffer {
             let mut canvas = graphics::Canvas::new(buffer.data_mut(), w, h);
+            canvas.fill_rect(0, 0, w, h, Color::rgba(0.0, 0.0, 0.0, 0.0));
 
             let center_y = (height as f32 / 2.0) as i32;
 
@@ -299,9 +330,25 @@ impl ElementRenderObject for SliderRenderObject {
 
     fn update(&mut self, new_view: &dyn crate::view::View) -> crate::element::UpdateResult {
         if let Some(slider) = new_view.as_any().downcast_ref::<Slider>() {
+            let mut changed = false;
+            let new_min = slider.min;
+            let new_max = slider.max;
+            if (self.min - new_min).abs() > 0.001 || (self.max - new_max).abs() > 0.001 {
+                self.min = new_min;
+                self.max = new_max;
+                changed = true;
+            }
             let new_value = slider.value.get().clamp(self.min, self.max);
             if (self.value - new_value).abs() > 0.001 {
                 self.value = new_value;
+                changed = true;
+            }
+            let dragging = slider.dragging.get();
+            if self.dragging != dragging {
+                self.dragging = dragging;
+                changed = true;
+            }
+            if changed {
                 crate::element::UpdateResult::Updated
             } else {
                 crate::element::UpdateResult::NoChange

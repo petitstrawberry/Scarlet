@@ -110,6 +110,11 @@ pub trait Application: View {
                     _ => {
                         // Other events are handled by the pipeline
                         let _ = pipeline.handle_event(&event);
+                        if pipeline.has_dirty() {
+                            if let Some(buffer) = pipeline.render() {
+                                platform_window.present(buffer);
+                            }
+                        }
                     }
                 }
             }
