@@ -2,7 +2,7 @@
 //!
 //! This implementation uses the sws-client library to create and manage windows.
 
-use crate::geometry::Size;
+use crate::geometry::{Point, Size};
 use crate::buffer::Buffer;
 use crate::event::{Event, MouseButton, MouseEvent};
 use crate::error::Result;
@@ -24,11 +24,6 @@ pub struct SWSPlatformWindow {
 }
 
 impl SWSPlatformWindow {
-    /// Get the surface ID
-    pub fn surface_id(&self) -> u32 {
-        self.surface_id
-    }
-
     /// Get the connection
     pub fn connection(&self) -> &sws::Connection {
         &self.conn
@@ -37,6 +32,34 @@ impl SWSPlatformWindow {
     /// Get mutable reference to the connection
     pub fn connection_mut(&mut self) -> &mut sws::Connection {
         &mut self.conn
+    }
+
+    /// Create a new platform window with a specific window type
+    pub fn create_with_type(app_id: &str, title: &str, size: Size, window_type: u32) -> Result<Self> {
+        // Connect to SWS
+        let mut conn = sws::Connection::connect("/tmp/sws.sock")
+            .map_err(|_| crate::error::Error::ConnectionFailed)?;
+
+        // Create surface with type
+        let surface_id = conn.create_surface_with_type(
+            app_id,
+            title,
+            "",
+            size.width as u32,
+            size.height as u32,
+            window_type,
+        ).map_err(|_| crate::error::Error::SurfaceCreationFailed)?;
+
+        Ok(Self {
+            conn,
+            surface_id,
+            current_size: size,
+            pending_events: Vec::new(),
+            pending_head: 0,
+            pointer_x: 0,
+            pointer_y: 0,
+            pending_move: false,
+        })
     }
 
     fn push_event(&mut self, event: Event) {
@@ -192,6 +215,106 @@ impl PlatformWindow for SWSPlatformWindow {
     fn request_move(&mut self) -> Result<()> {
         self.conn.request_move_window(self.surface_id)
             .map_err(|_| crate::error::Error::IoError)
+    }
+
+    fn create_popup(&mut self, position: Point, size: Size) -> Result<u32> {
+        // Create a popup window with ALWAYS_ON_TOP type
+        let popup_surface_id = self.conn.create_surface_with_type(
+            "org.scarlet-os.popup",
+            "Popup",
+            "",
+            size.width as u32,
+            size.height as u32,
+            sws_protocol::window_types::ALWAYS_ON_TOP,
+        ).map_err(|_| crate::error::Error::SurfaceCreationFailed)?;
+
+        // Position the popup
+        self.conn.move_window(popup_surface_id, position.x as i32, position.y as i32)
+            .map_err(|_| crate::error::Error::IoError)?;
+
+        Ok(popup_surface_id)
+    }
+
+    fn destroy_popup(&mut self, surface_id: u32) -> Result<()> {
+        self.conn.destroy_surface(surface_id)
+            .map_err(|_| crate::error::Error::IoError)
+    }
+
+    fn set_workarea(&mut self, x: i32, y: i32, width: u32, height: u32) -> Result<()> {
+        self.conn.set_workarea(x, y, width, height)
+            .map_err(|_| crate::error::Error::IoError)
+    }
+
+    fn create_window_with_type(
+        &mut self,
+        app_id: &str,
+        title: &str,
+        size: Size,
+        window_type: u32,
+    ) -> Result<Self>
+    where
+        Self: Sized,
+    {
+        let mut conn = sws::Connection::connect("/tmp/sws.sock")
+            .map_err(|_| crate::error::Error::ConnectionFailed)?;
+
+        let surface_id = conn.create_surface_with_type(
+            app_id,
+            title,
+            "",
+            size.width as u32,
+            size.height as u32,
+            window_type,
+        ).map_err(|_| crate::error::Error::SurfaceCreationFailed)?;
+
+        Ok(Self {
+            conn,
+            surface_id,
+            current_size: size,
+            pending_events: Vec::new(),
+            pending_head: 0,
+            pointer_x: 0,
+            pointer_y: 0,
+            pending_move: false,
+        })
+    }
+
+    fn move_window(&mut self, x: i32, y: i32) -> Result<()> {
+        self.conn.move_window(self.surface_id, x, y)
+            .map_err(|_| crate::error::Error::IoError)
+    }
+
+    fn set_window_type(&mut self, surface_id: u32, window_type: u32) -> Result<()> {
+        self.conn.set_window_type(surface_id, window_type)
+            .map_err(|_| crate::error::Error::IoError)
+    }
+
+    fn get_screen_size(&mut self) -> Result<(u32, u32)> {
+        self.conn.get_screen_size()
+            .map_err(|_| crate::error::Error::IoError)
+    }
+
+    fn surface_id(&self) -> u32 {
+        self.surface_id
+    }
+
+    fn set_resizable(&mut self, resizable: bool) -> Result<()> {
+        self.conn.set_window_resizable(self.surface_id, resizable)
+            .map_err(|_| crate::error::Error::IoError)?;
+
+        if resizable {
+            let _ = self.conn.set_window_size_limits(self.surface_id, sws::WindowSizeLimits::NONE);
+        } else {
+            let limits = sws::WindowSizeLimits {
+                min_width: self.current_size.width.max(0.0) as u32,
+                min_height: self.current_size.height.max(0.0) as u32,
+                max_width: self.current_size.width.max(0.0) as u32,
+                max_height: self.current_size.height.max(0.0) as u32,
+            };
+            let _ = self.conn.set_window_size_limits(self.surface_id, limits);
+        }
+
+        Ok(())
     }
 }
 

@@ -14,8 +14,10 @@ mod slider;
 mod progress;
 pub mod modifiers;
 pub mod containers;
+pub mod menu;
 
-pub use window::{Window, WindowRenderObject, WindowRenderElement};
+pub use window::{Window, WindowRenderObject, WindowRenderElement, WindowInfo};
+pub use window::window_type;
 pub use text::{Text, TextRenderObject};
 pub use button::{Button, ButtonRenderObject, ButtonCallback};
 pub use rectangle::{Rectangle, RectangleRenderObject};
@@ -25,6 +27,7 @@ pub use divider::{Divider, DividerRenderObject, DividerOrientation};
 pub use toggle::{Toggle, ToggleRenderObject};
 pub use slider::{Slider, SliderRenderObject};
 pub use progress::{ProgressView, ProgressViewRenderObject};
+pub use menu::{MenuItem, MenuBar, Menu, MenuItemContent, MenuAction};
 
 // Re-export modifiers for convenience
 pub use modifiers::{

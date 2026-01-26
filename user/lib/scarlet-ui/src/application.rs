@@ -77,7 +77,7 @@ pub trait Application: View {
         self.init();
 
         // 4. Perform initial layout to determine window size and extract window properties
-        let (app_id, window_title, window_size) = pipeline.layout_initial();
+        let (app_id, window_title, window_size, window_type) = pipeline.layout_initial();
 
         // Debug: Dump element tree
         if crate::debug::is_enabled() {
@@ -85,8 +85,21 @@ pub trait Application: View {
         }
 
         // 5. Create platform window (default: SWS backend)
-        let mut platform_window = SWSPlatformWindow::new(&app_id, &window_title, window_size)
-            .map_err(|_| crate::error::Error::WindowCreationFailed)?;
+        // Use create_with_type for special window types (TASKBAR, ALWAYS_ON_TOP)
+        let mut platform_window = if window_type == crate::views::window_type::NORMAL {
+            SWSPlatformWindow::new(&app_id, &window_title, window_size)
+                .map_err(|_| crate::error::Error::WindowCreationFailed)?
+        } else {
+            SWSPlatformWindow::create_with_type(&app_id, &window_title, window_size, window_type)
+                .map_err(|_| crate::error::Error::WindowCreationFailed)?
+        };
+
+        // Apply window size limits (resizable, etc.) from Window view
+        if let Some(limits) = pipeline.element_tree().root().and_then(|r| r.get_window_size_limits()) {
+            if !limits.resizable {
+                let _ = platform_window.set_resizable(false);
+            }
+        }
 
         // 6. Main event loop
         loop {

@@ -582,6 +582,7 @@ fn client_thread_main(client_id: usize, mut socket: Socket) {
     let mut next_window_id: u32 = 100 + (client_id as u32 * 1000);
     let mut managed_windows: Vec<u32> = Vec::new();
     let mut window_size_limits: BTreeMap<u32, WindowSizeLimits> = BTreeMap::new();
+    let mut window_resizable: BTreeMap<u32, bool> = BTreeMap::new();
 
     // Debug: loop counter for periodic logging
     let mut loop_count: u64 = 0;
@@ -833,6 +834,12 @@ fn client_thread_main(client_id: usize, mut socket: Socket) {
                             }
                         };
 
+                        let resizable_default = !matches!(
+                            window_type,
+                            protocol::window_types::TASKBAR | protocol::window_types::DESKTOP
+                        );
+                        window_resizable.insert(window_id, resizable_default);
+
                         // Reply to client with window created message
                         send_window_created(&mut socket, window_id, buffer_size);
 
@@ -886,6 +893,7 @@ fn client_thread_main(client_id: usize, mut socket: Socket) {
                 unregister_window(window_id);
 
                 window_size_limits.remove(&window_id);
+                window_resizable.remove(&window_id);
 
                 // Remove AppSession
                 {
@@ -970,6 +978,14 @@ fn client_thread_main(client_id: usize, mut socket: Socket) {
                 width,
                 height,
             }) => {
+                if !window_resizable.get(&window_id).copied().unwrap_or(true) {
+                    println!(
+                        "[ClientThread {}] ResizeWindow ignored: window_id={} {}x{} (resizable=false)",
+                        client_id, window_id, width, height
+                    );
+                    continue;
+                }
+
                 let (width, height) = match window_size_limits.get(&window_id) {
                     Some(limits) => {
                         let (w, h) = limits.clamp(width, height);
@@ -1095,6 +1111,11 @@ fn client_thread_main(client_id: usize, mut socket: Socket) {
                     "[ClientThread {}] SetWindowType: window_id={} type={}",
                     client_id, window_id, window_type
                 );
+                let resizable_default = !matches!(
+                    window_type,
+                    protocol::window_types::TASKBAR | protocol::window_types::DESKTOP
+                );
+                window_resizable.insert(window_id, resizable_default);
                 push_ipc_event(IpcEvent::SetWindowType {
                     window_id,
                     window_type,
@@ -1145,6 +1166,7 @@ fn client_thread_main(client_id: usize, mut socket: Socket) {
                     "[ClientThread {}] SetWindowResizable: window_id={} resizable={}",
                     client_id, window_id, resizable
                 );
+                window_resizable.insert(window_id, resizable);
                 push_ipc_event(IpcEvent::SetWindowResizable {
                     window_id,
                     resizable,

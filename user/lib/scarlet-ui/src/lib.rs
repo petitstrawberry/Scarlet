@@ -101,6 +101,7 @@ pub mod prelude {
     pub use crate::application::Application;
     pub use crate::views::{Window, Text, Button, Rectangle, Spacer, Image, VStack, HStack, ZStack};
     pub use crate::views::{Divider, DividerOrientation, Toggle, Slider, ProgressView};
+    pub use crate::views::{MenuItem, MenuBar, Menu, MenuItemContent, MenuAction};
     pub use crate::views::modifiers::{Padding, Frame, Background};
 
     // Note: The View derive macro must be imported from scarlet_ui_macros:
