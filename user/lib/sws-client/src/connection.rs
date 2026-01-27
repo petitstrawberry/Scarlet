@@ -374,6 +374,78 @@ impl Connection {
         Ok(surface_id)
     }
 
+    /// Create a new surface (window) with explicit focus/active policies and initial position.
+    pub fn create_surface_with_type_and_policies_at(
+        &mut self,
+        app_id: &str,
+        app_name: &str,
+        menu_titles: &str,
+        width: u32,
+        height: u32,
+        window_type: u32,
+        resizable: bool,
+        focus_on_create: bool,
+        active_on_focus: bool,
+        x: i32,
+        y: i32,
+    ) -> Result<u32, Error> {
+        let payload = protocol::payload_create_window_with_position(
+            app_id.as_bytes(),
+            app_name.as_bytes(),
+            menu_titles.as_bytes(),
+            width,
+            height,
+            window_type,
+            resizable,
+            focus_on_create,
+            active_on_focus,
+            x,
+            y,
+        );
+        println!("[sws-client] Creating surface: payload size {}", payload.len());
+        write_frame(
+            &mut self.socket,
+            protocol::client_msg::CREATE_WINDOW,
+            &payload,
+        )
+        .map_err(|_| Error::SendFailed)?;
+
+        self.socket
+            .set_nonblocking(false)
+            .map_err(|_| Error::SocketConfig)?;
+
+        let msg_type =
+            read_frame_into(&mut self.socket, &mut self.read_payload).map_err(|_| Error::ReceiveFailed)?;
+
+        let response = protocol::parse_server_message(msg_type, &self.read_payload)
+            .map_err(|_| Error::InvalidResponse)?;
+
+        let (surface_id, _shm_size) = match response {
+            ServerMessage::WindowCreated {
+                window_id,
+                shm_size,
+            } => (window_id, shm_size),
+            _ => return Err(Error::InvalidResponse),
+        };
+
+        let shm_handle = self
+            .socket
+            .recv_handle()
+            .map_err(|_| Error::ShmHandleFailed)?;
+
+        let shm =
+            SharedMemory::from_handle(shm_handle).map_err(|_| Error::ShmHandleFailed)?;
+
+        self.socket
+            .set_nonblocking(true)
+            .map_err(|_| Error::SocketConfig)?;
+
+        let surface = Surface::new(surface_id, width, height, shm)?;
+        self.surfaces.insert(surface_id, surface);
+
+        Ok(surface_id)
+    }
+
     /// Destroy a surface
     pub fn destroy_surface(&mut self, surface_id: u32) -> Result<(), Error> {
         if self.surfaces.remove(&surface_id).is_none() {

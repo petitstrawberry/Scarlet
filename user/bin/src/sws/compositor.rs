@@ -1647,6 +1647,8 @@ impl Compositor {
                 resizable,
                 focus_on_create,
                 active_on_focus,
+                initial_x,
+                initial_y,
                 shm,
                 shm_mapped_addr,
                 shm_size,
@@ -1659,7 +1661,13 @@ impl Compositor {
                 use sws_protocol::window_types;
 
                 // Calculate initial position based on window type
-                let (x, y) = if window_type == window_types::NORMAL {
+                let (x, y) = if let (Some(x), Some(y)) = (initial_x, initial_y) {
+                    println!(
+                        "[Compositor] Using requested position for window #{}: ({}, {})",
+                        window_id, x, y
+                    );
+                    (x, y)
+                } else if window_type == window_types::NORMAL {
                     // Normal windows: cascade from focused window or position in workarea
                     const OFFSET: i32 = 20;
 

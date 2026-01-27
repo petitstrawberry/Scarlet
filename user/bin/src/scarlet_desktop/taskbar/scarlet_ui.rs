@@ -153,7 +153,7 @@ const MENU_BAR_OUTER_PADDING: f32 = 8.0;
 const MENU_BAR_MAX_APP_LABEL: usize = 18;
 
 fn menu_bar_label(title: &str) -> String {
-    if title.len() <= MENU_BAR_MAX_APP_LABEL {
+    if title.chars().count() <= MENU_BAR_MAX_APP_LABEL {
         return title.to_string();
     }
     let mut shortened = String::new();
@@ -629,10 +629,12 @@ impl TaskBarApp {
                                 popup_renderer = Some(renderer);
                                 needs_render = true;
 
-                                let surface_id = match popup_surface_id {
+                                let bar_height = 40;
+                                let popup_x = menu_bar_popup_x(&menu_tree_value.items, index);
+                                let _surface_id = match popup_surface_id {
                                     Some(id) => id,
                                     None => {
-                                        match conn.create_surface_with_type_and_policies(
+                                        match conn.create_surface_with_type_and_policies_at(
                                             "org.scarlet-os.popup.menu",
                                             "Menu",
                                             "",
@@ -642,6 +644,8 @@ impl TaskBarApp {
                                             false,
                                             true,
                                             false,
+                                            popup_x as i32,
+                                            bar_height as i32,
                                         ) {
                                             Ok(id) => {
                                                 popup_surface_id = Some(id);
@@ -661,9 +665,6 @@ impl TaskBarApp {
                                         }
                                     }
                                 };
-                                let bar_height = 40;
-                                let popup_x = menu_bar_popup_x(&menu_tree_value.items, index);
-                                let _ = conn.move_window(surface_id, popup_x as i32, bar_height as i32);
                             }
                         } else {
                             if let Some(surface_id) = popup_surface_id.take() {

@@ -131,11 +131,9 @@ impl MenuItemRenderObject {
 
     /// Estimate menu item size based on label
     fn estimate_size(&self) -> Size {
-        let char_width = self.font_size * 0.6;
-
-        let text_width = self.label.len() as f32 * char_width;
-        let width = text_width + self.padding * 2.0;
-        let height = self.font_size * 1.2 + self.padding * 2.0;
+        let (text_w, text_h) = graphics::measure_text_sized(&self.label, self.font_size);
+        let width = text_w as f32 + self.padding * 2.0;
+        let height = text_h as f32 + self.padding * 2.0;
 
         Size { width, height }
     }

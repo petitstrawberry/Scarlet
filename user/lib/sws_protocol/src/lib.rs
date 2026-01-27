@@ -156,6 +156,8 @@ pub enum ClientMessageRef<'a> {
         resizable: bool,
         focus_on_create: bool,
         active_on_focus: bool,
+        initial_x: Option<i32>,
+        initial_y: Option<i32>,
     },
     DestroyWindow {
         window_id: u32,
@@ -435,6 +437,7 @@ pub fn parse_client_message<'a>(
             if payload.len() != offset + 12
                 && payload.len() != offset + 16
                 && payload.len() != offset + 24
+                && payload.len() != offset + 32
             {
                 return Err(ProtocolError::MalformedPayload);
             }
@@ -473,7 +476,7 @@ pub fn parse_client_message<'a>(
             };
             let mut focus_on_create = true;
             let mut active_on_focus = window_type == window_types::NORMAL;
-            if payload.len() == offset + 24 {
+            if payload.len() == offset + 24 || payload.len() == offset + 32 {
                 focus_on_create = u32::from_le_bytes([
                     payload[offset + 16],
                     payload[offset + 17],
@@ -487,6 +490,23 @@ pub fn parse_client_message<'a>(
                     payload[offset + 23],
                 ]) != 0;
             }
+            let (initial_x, initial_y) = if payload.len() == offset + 32 {
+                let x = i32::from_le_bytes([
+                    payload[offset + 24],
+                    payload[offset + 25],
+                    payload[offset + 26],
+                    payload[offset + 27],
+                ]);
+                let y = i32::from_le_bytes([
+                    payload[offset + 28],
+                    payload[offset + 29],
+                    payload[offset + 30],
+                    payload[offset + 31],
+                ]);
+                (Some(x), Some(y))
+            } else {
+                (None, None)
+            };
             Ok(ClientMessageRef::CreateWindow {
                 app_id,
                 app_name,
@@ -497,6 +517,8 @@ pub fn parse_client_message<'a>(
                 resizable,
                 focus_on_create,
                 active_on_focus,
+                initial_x,
+                initial_y,
             })
         }
         client_msg::DESTROY_WINDOW => {
@@ -1211,6 +1233,40 @@ pub fn payload_create_window(
     payload.extend_from_slice(&(resizable as u32).to_le_bytes());
     payload.extend_from_slice(&(focus_on_create as u32).to_le_bytes());
     payload.extend_from_slice(&(active_on_focus as u32).to_le_bytes());
+    payload
+}
+
+/// Build payload for client->server `CREATE_WINDOW` with initial position.
+///
+/// Payload format extends `payload_create_window` with:
+/// - initial_x (i32)
+/// - initial_y (i32)
+pub fn payload_create_window_with_position(
+    app_id: &[u8],
+    app_name: &[u8],
+    menu_titles: &[u8],
+    width: u32,
+    height: u32,
+    window_type: u32,
+    resizable: bool,
+    focus_on_create: bool,
+    active_on_focus: bool,
+    initial_x: i32,
+    initial_y: i32,
+) -> Vec<u8> {
+    let mut payload = payload_create_window(
+        app_id,
+        app_name,
+        menu_titles,
+        width,
+        height,
+        window_type,
+        resizable,
+        focus_on_create,
+        active_on_focus,
+    );
+    payload.extend_from_slice(&initial_x.to_le_bytes());
+    payload.extend_from_slice(&initial_y.to_le_bytes());
     payload
 }
 
