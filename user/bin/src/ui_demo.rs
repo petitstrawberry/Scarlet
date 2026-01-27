@@ -89,7 +89,7 @@ impl Application for DemoApp {
         .frame(f32::INFINITY, f32::INFINITY)
         // .frame(400.0, 300.0)
         )
-        .app_id("oeg.scarlet-os.ui_demo")
+        .app_id("org.scarlet-os.scarletui.ui-demo")
         .menu_bar(MenuBarModel::new(vec![
             MenuItemModel::new("file", "File")
                 .on_activate(Arc::new(|| {
