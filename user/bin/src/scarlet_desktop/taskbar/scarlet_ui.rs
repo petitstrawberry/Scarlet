@@ -23,6 +23,8 @@ use scarlet_ui::{MenuBarModel, MenuItemModel};
 use scarlet_ui::views::{MenuAction, MenuBar, MenuItem, MenuItemContent};
 use scarlet_ui::views::menu::MenuRenderObject;
 use scarlet_ui_macros::View;
+use serde::Deserialize;
+use serde_json_core::from_str;
 use std::{format, println};
 use std::string::{String, ToString};
 use std::vec::Vec;
@@ -97,6 +99,24 @@ struct TaskMenuItem {
 enum TaskMenuEntry {
     Item(TaskMenuItem),
     Separator,
+}
+
+#[derive(Deserialize)]
+struct MenuTreePayload {
+    items: Vec<MenuEntryPayload>,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum MenuEntryPayload {
+    Separator { separator: bool },
+    Item {
+        id: Option<String>,
+        title: Option<String>,
+        enabled: Option<bool>,
+        shortcut: Option<String>,
+        items: Option<Vec<MenuEntryPayload>>,
+    },
 }
 
 fn default_system_menu_entries() -> Vec<TaskMenuEntry> {
@@ -184,241 +204,64 @@ fn menu_height(entries: &[TaskMenuEntry], item_height: f32) -> f32 {
     total
 }
 
-enum JsonValue {
-    Null,
-    Bool(bool),
-    String(String),
-    Object(Vec<(String, JsonValue)>),
-    Array(Vec<JsonValue>),
-}
-
 fn parse_menu_tree_json(input: &str) -> Vec<TaskMenuItem> {
-    let bytes = input.as_bytes();
-    let mut idx = 0usize;
-    let Some(value) = parse_json_value(bytes, &mut idx) else {
+    let Ok((payload, _)) = from_str::<MenuTreePayload>(input) else {
         return Vec::new();
     };
-    let JsonValue::Object(root) = value else {
-        return Vec::new();
-    };
-    let Some(JsonValue::Array(items)) = object_get(&root, "items") else {
-        return Vec::new();
-    };
-    let mut out = Vec::new();
-    for item in items {
-        if let Some(entry) = parse_menu_entry(&item) {
-            if let TaskMenuEntry::Item(item) = entry {
-                out.push(item);
-            }
-        }
-    }
-    out
+    payload
+        .items
+        .into_iter()
+        .filter_map(build_menu_entry)
+        .filter_map(|entry| match entry {
+            TaskMenuEntry::Item(item) => Some(item),
+            TaskMenuEntry::Separator => None,
+        })
+        .collect()
 }
 
-fn parse_menu_entry(value: &JsonValue) -> Option<TaskMenuEntry> {
-    let JsonValue::Object(fields) = value else {
-        return None;
-    };
-    if let Some(JsonValue::Bool(true)) = object_get(fields, "separator") {
-        return Some(TaskMenuEntry::Separator);
-    }
-
-    let id = match object_get(fields, "id") {
-        Some(JsonValue::String(s)) => s.clone(),
-        _ => String::new(),
-    };
-    let title = match object_get(fields, "title") {
-        Some(JsonValue::String(s)) => s.clone(),
-        _ => String::new(),
-    };
-    if id.is_empty() && title.is_empty() {
-        return None;
-    }
-
-    let enabled = match object_get(fields, "enabled") {
-        Some(JsonValue::Bool(v)) => *v,
-        _ => true,
-    };
-    let shortcut = match object_get(fields, "shortcut") {
-        Some(JsonValue::String(s)) => Some(s.clone()),
-        _ => None,
-    };
-
-    let mut children = Vec::new();
-    if let Some(JsonValue::Array(items)) = object_get(fields, "items") {
-        for child in items {
-            if let Some(entry) = parse_menu_entry(child) {
-                children.push(entry);
-            }
-        }
-    }
-
-    let resolved_id = if id.is_empty() { title.clone() } else { id };
-    let resolved_title = if title.is_empty() { resolved_id.clone() } else { title };
-
-    Some(TaskMenuEntry::Item(TaskMenuItem {
-        id: resolved_id,
-        title: resolved_title,
-        enabled,
-        shortcut,
-        children,
-    }))
-}
-
-fn object_get<'a>(fields: &'a [(String, JsonValue)], key: &str) -> Option<&'a JsonValue> {
-    fields.iter().find(|(k, _)| k == key).map(|(_, v)| v)
-}
-
-fn parse_json_value(bytes: &[u8], idx: &mut usize) -> Option<JsonValue> {
-    skip_ws(bytes, idx);
-    if *idx >= bytes.len() {
-        return None;
-    }
-    match bytes[*idx] {
-        b'"' => {
-            let (value, next) = parse_json_string(bytes, *idx + 1)?;
-            *idx = next;
-            Some(JsonValue::String(value))
-        }
-        b'{' => parse_json_object(bytes, idx),
-        b'[' => parse_json_array(bytes, idx),
-        b't' => {
-            if bytes.get(*idx..*idx + 4)? == b"true" {
-                *idx += 4;
-                Some(JsonValue::Bool(true))
+fn build_menu_entry(entry: MenuEntryPayload) -> Option<TaskMenuEntry> {
+    match entry {
+        MenuEntryPayload::Separator { separator } => {
+            if separator {
+                Some(TaskMenuEntry::Separator)
             } else {
                 None
             }
         }
-        b'f' => {
-            if bytes.get(*idx..*idx + 5)? == b"false" {
-                *idx += 5;
-                Some(JsonValue::Bool(false))
+        MenuEntryPayload::Item {
+            id,
+            title,
+            enabled,
+            shortcut,
+            items,
+        } => {
+            let resolved_id = id.unwrap_or_default();
+            let mut resolved_title = title.unwrap_or_default();
+            if resolved_id.is_empty() && resolved_title.is_empty() {
+                return None;
+            }
+            let resolved_id = if resolved_id.is_empty() {
+                resolved_title.clone()
             } else {
-                None
+                resolved_id
+            };
+            if resolved_title.is_empty() {
+                resolved_title = resolved_id.clone();
             }
-        }
-        b'n' => {
-            if bytes.get(*idx..*idx + 4)? == b"null" {
-                *idx += 4;
-                Some(JsonValue::Null)
-            } else {
-                None
-            }
-        }
-        _ => None,
-    }
-}
-
-fn parse_json_object(bytes: &[u8], idx: &mut usize) -> Option<JsonValue> {
-    let mut fields = Vec::new();
-    *idx += 1;
-    loop {
-        skip_ws(bytes, idx);
-        if *idx >= bytes.len() {
-            return None;
-        }
-        if bytes[*idx] == b'}' {
-            *idx += 1;
-            break;
-        }
-        if bytes[*idx] != b'"' {
-            return None;
-        }
-        let (key, next) = parse_json_string(bytes, *idx + 1)?;
-        *idx = next;
-        skip_ws(bytes, idx);
-        if *idx >= bytes.len() || bytes[*idx] != b':' {
-            return None;
-        }
-        *idx += 1;
-        let value = parse_json_value(bytes, idx)?;
-        fields.push((key, value));
-        skip_ws(bytes, idx);
-        if *idx >= bytes.len() {
-            return None;
-        }
-        match bytes[*idx] {
-            b',' => *idx += 1,
-            b'}' => {
-                *idx += 1;
-                break;
-            }
-            _ => return None,
+            let children = items
+                .unwrap_or_default()
+                .into_iter()
+                .filter_map(build_menu_entry)
+                .collect();
+            Some(TaskMenuEntry::Item(TaskMenuItem {
+                id: resolved_id,
+                title: resolved_title,
+                enabled: enabled.unwrap_or(true),
+                shortcut,
+                children,
+            }))
         }
     }
-    Some(JsonValue::Object(fields))
-}
-
-fn parse_json_array(bytes: &[u8], idx: &mut usize) -> Option<JsonValue> {
-    let mut values = Vec::new();
-    *idx += 1;
-    loop {
-        skip_ws(bytes, idx);
-        if *idx >= bytes.len() {
-            return None;
-        }
-        if bytes[*idx] == b']' {
-            *idx += 1;
-            break;
-        }
-        let value = parse_json_value(bytes, idx)?;
-        values.push(value);
-        skip_ws(bytes, idx);
-        if *idx >= bytes.len() {
-            return None;
-        }
-        match bytes[*idx] {
-            b',' => *idx += 1,
-            b']' => {
-                *idx += 1;
-                break;
-            }
-            _ => return None,
-        }
-    }
-    Some(JsonValue::Array(values))
-}
-
-fn skip_ws(bytes: &[u8], idx: &mut usize) {
-    while *idx < bytes.len() && bytes[*idx].is_ascii_whitespace() {
-        *idx += 1;
-    }
-}
-
-fn parse_json_string(bytes: &[u8], mut idx: usize) -> Option<(String, usize)> {
-    let mut out = String::new();
-    let mut escape = false;
-
-    while idx < bytes.len() {
-        let b = bytes[idx];
-        if escape {
-            match b {
-                b'"' => out.push('"'),
-                b'\\' => out.push('\\'),
-                b'n' => out.push('\n'),
-                b'r' => out.push('\r'),
-                b't' => out.push('\t'),
-                _ => out.push(b as char),
-            }
-            escape = false;
-            idx += 1;
-            continue;
-        }
-
-        match b {
-            b'\\' => {
-                escape = true;
-            }
-            b'"' => {
-                return Some((out, idx + 1));
-            }
-            _ => out.push(b as char),
-        }
-        idx += 1;
-    }
-
-    None
 }
 
 fn build_menu_bar_view(
@@ -553,7 +396,7 @@ impl Application for TaskBarApp {
             "[TaskBar] on_focus_changed: window_id={}, app_name={}, menu_titles={}",
             window_id, app_name, menu_titles
         );
-        let _ = (window_id, app_name, menu_titles);
+        self.update_menu_for_app(window_id, app_name, menu_titles);
     }
 
     fn on_active_app_changed(&mut self, window_id: u32, app_name: &str, menu_titles: &str) {

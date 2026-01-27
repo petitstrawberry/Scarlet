@@ -129,6 +129,16 @@ impl SWSPlatformWindow {
         )
     }
 
+    fn sanitize_menu_titles(menu_titles: &str) -> &str {
+        if menu_titles.chars().any(|c| {
+            c.is_control() && c != '\n' && c != '\r' && c != '\t'
+        }) {
+            ""
+        } else {
+            menu_titles
+        }
+    }
+
     fn push_event(&mut self, event: Event) {
         // Coalesce consecutive mouse-move events to reduce work.
         if let Event::Mouse(MouseEvent::Moved { .. }) = event {
@@ -575,6 +585,7 @@ impl SWSPlatformWindow {
                 title,
                 menu_titles,
             } => {
+                let menu_titles = Self::sanitize_menu_titles(&menu_titles);
                 // Push FocusChanged event for all windows to receive
                 // This allows TaskBar to update its menu based on focus changes
                 scarlet_std::println!("[SWSPlatformWindow] FocusChanged: window_id={}, app_name={}, menu_titles={}", window_id, app_name, menu_titles);
@@ -603,6 +614,7 @@ impl SWSPlatformWindow {
                 title,
                 menu_titles,
             } => {
+                let menu_titles = Self::sanitize_menu_titles(&menu_titles);
                 // Push ActiveAppChanged event for TaskBar to update menu bar
                 // This is ONLY sent for normal windows (not TaskBar/Desktop/etc)
                 // and only when the active APPLICATION changes (same app, different window = no broadcast)

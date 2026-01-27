@@ -2218,9 +2218,32 @@ impl Compositor {
                     window_id,
                     menu_titles.len()
                 );
+                let menu_titles_bytes = menu_titles.as_bytes().to_vec();
                 if super::ipc::set_app_session_menu_titles(window_id, menu_titles) {
                     if self.window_manager.get_focused_window_id() == Some(window_id) {
                         self.broadcast_focus_change(window_id);
+                    }
+                    if let (Some(active_app_id), Some(window)) = (
+                        self.active_app_id.as_ref(),
+                        self.window_manager.get_window(window_id),
+                    ) {
+                        let window_app_id = window.app_id.as_deref().unwrap_or(b"");
+                        if active_app_id.as_slice() == window_app_id {
+                            let (app_name, _) = super::ipc::get_app_session_info(window_id);
+                            let app_name_bytes = app_name.as_bytes();
+                            let title_bytes = window.title.as_deref().unwrap_or(b"");
+                            let payload = sws_protocol::payload_active_app_changed(
+                                window_id,
+                                window_app_id,
+                                app_name_bytes,
+                                title_bytes,
+                                &menu_titles_bytes,
+                            );
+                            super::ipc::broadcast_message_to_all_clients(
+                                sws_protocol::server_msg::ACTIVE_APP_CHANGED,
+                                payload,
+                            );
+                        }
                     }
                 }
             }

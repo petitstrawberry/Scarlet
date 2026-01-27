@@ -52,6 +52,109 @@ fn read_exact(socket: &mut Socket, buf: &mut [u8]) -> Result<(), Error> {
     Ok(())
 }
 
+struct FrameReader {
+    header: [u8; protocol::MessageHeader::SIZE],
+    header_filled: usize,
+    header_parsed: bool,
+    msg_type: u32,
+    payload_len: usize,
+    payload: Vec<u8>,
+    payload_filled: usize,
+}
+
+impl FrameReader {
+    fn new() -> Self {
+        Self {
+            header: [0u8; protocol::MessageHeader::SIZE],
+            header_filled: 0,
+            header_parsed: false,
+            msg_type: 0,
+            payload_len: 0,
+            payload: Vec::new(),
+            payload_filled: 0,
+        }
+    }
+
+    fn reset(&mut self) {
+        self.header_filled = 0;
+        self.header_parsed = false;
+        self.msg_type = 0;
+        self.payload_len = 0;
+        self.payload.clear();
+        self.payload_filled = 0;
+    }
+
+    fn poll(
+        &mut self,
+        socket: &mut Socket,
+        out_payload: &mut Vec<u8>,
+    ) -> Result<Option<u32>, Error> {
+        use scarlet_std::io::Read;
+
+        loop {
+            if !self.header_parsed {
+                match socket.read(&mut self.header[self.header_filled..]) {
+                    Ok(0) => return Err(Error::Disconnected),
+                    Ok(n) => {
+                        self.header_filled += n;
+                        if self.header_filled < self.header.len() {
+                            continue;
+                        }
+                        let header = protocol::MessageHeader::from_le_bytes(self.header);
+                        let payload_len = header.payload_size as usize;
+                        if payload_len > protocol::MAX_PAYLOAD_SIZE {
+                            return Err(Error::ProtocolError);
+                        }
+                        self.msg_type = header.msg_type;
+                        self.payload_len = payload_len;
+                        self.payload.clear();
+                        if payload_len > 0 {
+                            self.payload.resize(payload_len, 0);
+                        }
+                        self.payload_filled = 0;
+                        self.header_parsed = true;
+                        if payload_len == 0 {
+                            out_payload.clear();
+                            let msg_type = self.msg_type;
+                            self.reset();
+                            return Ok(Some(msg_type));
+                        }
+                    }
+                    Err(e) => {
+                        if e.kind() == scarlet_std::io::ErrorKind::WouldBlock {
+                            return Ok(None);
+                        }
+                        return Err(Error::IoError);
+                    }
+                }
+            }
+
+            if self.header_parsed {
+                match socket.read(&mut self.payload[self.payload_filled..]) {
+                    Ok(0) => return Err(Error::Disconnected),
+                    Ok(n) => {
+                        self.payload_filled += n;
+                        if self.payload_filled < self.payload_len {
+                            continue;
+                        }
+                        out_payload.clear();
+                        out_payload.extend_from_slice(&self.payload);
+                        let msg_type = self.msg_type;
+                        self.reset();
+                        return Ok(Some(msg_type));
+                    }
+                    Err(e) => {
+                        if e.kind() == scarlet_std::io::ErrorKind::WouldBlock {
+                            return Ok(None);
+                        }
+                        return Err(Error::IoError);
+                    }
+                }
+            }
+        }
+    }
+}
+
 fn write_all(socket: &mut Socket, buf: &[u8]) -> Result<(), Error> {
     use scarlet_std::io::Write;
 
@@ -120,6 +223,7 @@ pub struct Connection {
     pending_events: Vec<Event>,
     pending_head: usize,
     read_payload: Vec<u8>,
+    frame_reader: FrameReader,
 }
 
 impl Connection {
@@ -146,6 +250,7 @@ impl Connection {
             pending_events: Vec::new(),
             pending_head: 0,
             read_payload: Vec::new(),
+            frame_reader: FrameReader::new(),
         })
     }
 
@@ -758,8 +863,8 @@ impl Connection {
         }
 
         loop {
-            match read_frame_into(&mut self.socket, &mut self.read_payload) {
-                Ok(msg_type) => {
+            match self.frame_reader.poll(&mut self.socket, &mut self.read_payload) {
+                Ok(Some(msg_type)) => {
                     if let Ok(msg) = protocol::parse_server_message(msg_type, &self.read_payload) {
                         match msg {
                             ServerMessage::InputEvent {
@@ -874,7 +979,7 @@ impl Connection {
                         }
                     }
                 }
-                Err(Error::WouldBlock) => break,
+                Ok(None) => break,
                 Err(Error::Disconnected) => return Err(Error::Disconnected),
                 Err(_) => return Err(Error::IoError),
             }
