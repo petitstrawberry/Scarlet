@@ -204,8 +204,8 @@ impl ColorPalette {
     // System color accessors
 
     /// Get system gray colors
-    pub fn gray(&self) -> &SystemColors {
-        &self.system
+    pub fn gray(&self) -> &GrayColors {
+        &self.system.gray
     }
 
     /// Get system blue colors
