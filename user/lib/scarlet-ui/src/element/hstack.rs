@@ -162,24 +162,36 @@ impl Element for HStackElement {
         // Calculate final size
         // Tight constraints (min == max && min > 0 && finite): Frame explicitly set size
         // Loose constraints: fit to content size (do NOT expand to max)
-        scarlet_std::println!("[HStackElement::layout] child_x_offset={}, max_height={}", child_x_offset, max_height);
+        if crate::debug::is_enabled() {
+            scarlet_std::println!("[HStackElement::layout] child_x_offset={}, max_height={}", child_x_offset, max_height);
+        }
         let final_height = if constraints.min_height == constraints.max_height && constraints.min_height.is_finite() && constraints.min_height > 0.0 {
-            scarlet_std::println!("[HStackElement::layout] tight height detected, using constraint max_height");
+            if crate::debug::is_enabled() {
+                scarlet_std::println!("[HStackElement::layout] tight height detected, using constraint max_height");
+            }
             constraints.max_height  // Frame指定サイズ
         } else if constraints.max_height.is_finite() {
-            scarlet_std::println!("[HStackElement::layout] loose height with finite max, using min(max_height, max_height)");
+            if crate::debug::is_enabled() {
+                scarlet_std::println!("[HStackElement::layout] loose height with finite max, using min(max_height, max_height)");
+            }
             max_height.min(constraints.max_height)
         } else {
-            scarlet_std::println!("[HStackElement::layout] loose height, using max_height from content");
+            if crate::debug::is_enabled() {
+                scarlet_std::println!("[HStackElement::layout] loose height, using max_height from content");
+            }
             max_height  // コンテンツサイズ
         };
 
         // Width calculation: use content width (sum of children), cap at max_width if needed
         let final_width = if constraints.min_width == constraints.max_width && constraints.min_width.is_finite() && constraints.min_width > 0.0 {
-            scarlet_std::println!("[HStackElement::layout] tight width detected, using constraint max_width");
+            if crate::debug::is_enabled() {
+                scarlet_std::println!("[HStackElement::layout] tight width detected, using constraint max_width");
+            }
             constraints.max_width
         } else {
-            scarlet_std::println!("[HStackElement::layout] loose width, using child_x_offset from content");
+            if crate::debug::is_enabled() {
+                scarlet_std::println!("[HStackElement::layout] loose width, using child_x_offset from content");
+            }
             child_x_offset.min(constraints.max_width)
         };
 
@@ -187,7 +199,9 @@ impl Element for HStackElement {
             width: final_width,
             height: final_height,
         };
-        scarlet_std::println!("[HStackElement::layout] FINAL: size={}x{}", self.size.width, self.size.height);
+        if crate::debug::is_enabled() {
+            scarlet_std::println!("[HStackElement::layout] FINAL: size={}x{}", self.size.width, self.size.height);
+        }
         self.size
     }
 
