@@ -18,6 +18,7 @@ use scarlet_ui::prelude::*;
 use scarlet_ui::buffer::Buffer;
 use scarlet_ui::color::Color;
 use scarlet_ui::element::{ElementRenderObject, LayoutConstraints};
+use scarlet_ui::graphics;
 use scarlet_ui::geometry::Size;
 use scarlet_ui::{hstack, StateId};
 use scarlet_ui::{MenuBarModel, MenuItemModel};
@@ -147,7 +148,7 @@ fn default_system_menu_entries() -> Vec<TaskMenuEntry> {
 }
 
 const MENU_BAR_FONT_SIZE: f32 = 16.0;
-const MENU_BAR_ITEM_PADDING: f32 = 3.0;
+const MENU_BAR_ITEM_PADDING: f32 = 8.0;
 const MENU_BAR_ITEM_SPACING: f32 = 2.0;
 const MENU_BAR_OUTER_PADDING: f32 = 8.0;
 const MENU_BAR_MAX_APP_LABEL: usize = 18;
@@ -165,9 +166,8 @@ fn menu_bar_label(title: &str) -> String {
 }
 
 fn menu_bar_item_width(label: &str) -> f32 {
-    let char_width = MENU_BAR_FONT_SIZE * 0.6;
-    let text_width = label.chars().count() as f32 * char_width;
-    text_width + MENU_BAR_ITEM_PADDING * 2.0
+    let (text_w, _text_h) = graphics::measure_text_sized(label, MENU_BAR_FONT_SIZE);
+    text_w as f32 + MENU_BAR_ITEM_PADDING * 2.0
 }
 
 fn menu_bar_popup_x(items: &[TaskMenuItem], index: usize) -> f32 {
@@ -342,20 +342,31 @@ fn build_menu_bar_view(
             let title = item.title.to_string();
             let item_id = item.id.to_string();
             let has_children = !item.children.is_empty();
-            let open_state = open_menu_index.clone();
+            let open_state_hover = open_menu_index.clone();
+            let open_state_click = open_menu_index.clone();
             let window_id = active_window_id;
+            let is_open = open_menu_index.get() == Some(idx);
             MenuItem::new(title)
                 .font_size(MENU_BAR_FONT_SIZE)
                 .padding(MENU_BAR_ITEM_PADDING)
+                .selected(is_open)
+                .on_hover(move || {
+                    if !has_children {
+                        return;
+                    }
+                    if open_state_hover.get().is_some() && open_state_hover.get() != Some(idx) {
+                        open_state_hover.set(Some(idx));
+                    }
+                })
                 .on_click(move || {
                 if has_children {
-                    if open_state.get() == Some(idx) {
-                        open_state.set(None);
+                    if open_state_click.get() == Some(idx) {
+                        open_state_click.set(None);
                     } else {
-                        open_state.set(Some(idx));
+                        open_state_click.set(Some(idx));
                     }
                 } else {
-                    open_state.set(None);
+                    open_state_click.set(None);
                     if window_id == 0 || item_id.starts_with("system_") {
                         return;
                     }

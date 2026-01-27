@@ -371,6 +371,15 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
                 match mouse_event {
                     MouseEvent::Entered { .. } => {
                         render_object.set_hovered(true);
+                        menu_item.invoke_on_hover();
+                        crate::pipeline::mark_element_needs_paint(self.id);
+                        return true;
+                    }
+                    MouseEvent::Moved { .. } => {
+                        if !render_object.is_hovered() {
+                            render_object.set_hovered(true);
+                        }
+                        menu_item.invoke_on_hover();
                         crate::pipeline::mark_element_needs_paint(self.id);
                         return true;
                     }

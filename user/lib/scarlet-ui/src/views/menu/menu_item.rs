@@ -22,8 +22,10 @@ pub type MenuItemCallback = Box<dyn Fn() + 'static>;
 pub struct MenuItem {
     label: String,
     on_click: Option<Arc<dyn Fn() + 'static>>,
+    on_hover: Option<Arc<dyn Fn() + 'static>>,
     font_size: f32,
     padding: f32,
+    selected: bool,
 }
 
 impl MenuItem {
@@ -33,14 +35,22 @@ impl MenuItem {
         Self {
             label: label_str,
             on_click: None,
+            on_hover: None,
             font_size: 18.0,
             padding: 8.0,
+            selected: false,
         }
     }
 
     /// Set the click callback
     pub fn on_click(mut self, callback: impl Fn() + 'static) -> Self {
         self.on_click = Some(Arc::new(callback));
+        self
+    }
+
+    /// Set the hover callback
+    pub fn on_hover(mut self, callback: impl Fn() + 'static) -> Self {
+        self.on_hover = Some(Arc::new(callback));
         self
     }
 
@@ -53,6 +63,12 @@ impl MenuItem {
     /// Set the padding
     pub fn padding(mut self, padding: f32) -> Self {
         self.padding = padding;
+        self
+    }
+
+    /// Set the selected state
+    pub fn selected(mut self, selected: bool) -> Self {
+        self.selected = selected;
         self
     }
 
@@ -77,6 +93,18 @@ impl MenuItem {
             callback();
         }
     }
+
+    /// Invoke the hover callback if present
+    pub fn invoke_on_hover(&self) {
+        if let Some(callback) = self.on_hover.as_ref() {
+            callback();
+        }
+    }
+
+    /// Get selected state
+    pub fn is_selected(&self) -> bool {
+        self.selected
+    }
 }
 
 impl View for MenuItem {
@@ -87,6 +115,7 @@ impl View for MenuItem {
                 self.label.clone(),
                 self.font_size,
                 self.padding,
+                self.selected,
             ),
         ))
     }
@@ -105,6 +134,7 @@ pub struct MenuItemRenderObject {
     label: String,
     font_size: f32,
     padding: f32,
+    selected: bool,
     hovered: bool,
     pressed: bool,
     size: Size,
@@ -117,11 +147,13 @@ impl MenuItemRenderObject {
         label: String,
         font_size: f32,
         padding: f32,
+        selected: bool,
     ) -> Self {
         Self {
             label,
             font_size,
             padding,
+            selected,
             hovered: false,
             pressed: false,
             size: Size::ZERO,
@@ -146,6 +178,10 @@ impl MenuItemRenderObject {
         self.pressed = pressed;
     }
 
+    pub fn set_selected(&mut self, selected: bool) {
+        self.selected = selected;
+    }
+
     pub fn is_pressed(&self) -> bool {
         self.pressed
     }
@@ -156,7 +192,7 @@ impl MenuItemRenderObject {
 
     fn current_background(&self) -> Color {
         let palette = ColorPalette::default();
-        if self.pressed {
+        if self.pressed || self.selected {
             palette.menu_active()
         } else if self.hovered {
             palette.menu_hover()
@@ -213,6 +249,18 @@ impl ElementRenderObject for MenuItemRenderObject {
         }
 
         self.size
+    }
+
+    fn update(&mut self, new_view: &dyn crate::view::View) -> crate::element::UpdateResult {
+        if let Some(view) = new_view.as_any().downcast_ref::<MenuItem>() {
+            self.label = view.label.clone();
+            self.font_size = view.font_size;
+            self.padding = view.padding;
+            self.selected = view.selected;
+            crate::element::UpdateResult::Updated
+        } else {
+            crate::element::UpdateResult::Replaced
+        }
     }
 
     fn size(&self) -> Size {
