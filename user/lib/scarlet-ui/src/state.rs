@@ -8,6 +8,7 @@ use alloc::collections::BTreeMap;
 use core::any::Any;
 use core::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Mutex;
+use std::println;
 
 /// Unique identifier for State instances
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, PartialOrd, Ord)]
@@ -115,6 +116,7 @@ impl<T> StateInner<T> {
         T: Clone,
     {
         let subscribers = self.subscribers.lock();
+        println!("[State] Notifying {} subscribers", subscribers.len());
         for callback in subscribers.values() {
             callback();
         }

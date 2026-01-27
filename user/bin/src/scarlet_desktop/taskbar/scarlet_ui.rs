@@ -426,6 +426,7 @@ fn build_menu_bar_view(
     active_window_id: u32,
     open_menu_index: State<Option<usize>>,
 ) -> MenuBar {
+    println!("[TaskBar] build_menu_bar_view: {} items, active_window_id={}", items.len(), active_window_id);
     let entries = items
         .iter()
         .enumerate()
@@ -547,6 +548,50 @@ impl PopupMenuRenderer {
 }
 
 impl Application for TaskBarApp {
+    fn on_active_app_changed(&mut self, window_id: u32, app_name: &str, menu_titles: &str) {
+        println!("[TaskBar] on_active_app_changed: window_id={}, app_name={}, menu_titles={}", window_id, app_name, menu_titles);
+
+        // Check if this is a popup menu surface
+        if self.popup_surface_id.get() == Some(window_id) {
+            println!("[TaskBar] Skipping popup surface {}", window_id);
+            return;
+        }
+
+        // Handle empty app_name (no active application)
+        if app_name.is_empty() {
+            println!("[TaskBar] No active application, showing default menu");
+            self.active_window_id.set(0);
+            self.open_menu_index.set(None);
+            // Show default TaskBar menu (Scarlet menu)
+            let tree = MenuTree {
+                items: vec![TaskMenuItem {
+                    id: String::from("system_scarlet"),
+                    title: String::from("Scarlet"),
+                    enabled: true,
+                    shortcut: None,
+                    children: default_system_menu_entries(),
+                }],
+            };
+            self.menu_bar.set(menu_bar_from_tree(&tree));
+            self.menu_tree.set(tree);
+            return;
+        }
+
+        // Build new menu tree
+        let tree = build_menu_tree(app_name, menu_titles);
+        println!("[TaskBar] Built menu tree with {} items", tree.items.len());
+
+        // Update State
+        self.menu_bar.set(menu_bar_from_tree(&tree));
+        println!("[TaskBar] menu_bar.set() completed");
+        println!("[TaskBar] Calling menu_tree.set()");
+        self.menu_tree.set(tree);
+        println!("[TaskBar] menu_tree.set() completed");
+
+        self.active_window_id.set(window_id);
+        self.open_menu_index.set(None);
+    }
+
     fn body(&self) -> impl View {
         let cpu = self.cpu_usage.get();
         let mem = self.memory_usage.get();
@@ -554,6 +599,7 @@ impl Application for TaskBarApp {
         let screen_width = self.screen_width.get();
         let _menu_bar = self.menu_bar.get();
         let menu_tree = self.menu_tree.get();
+        println!("[TaskBar] body() called: menu_tree has {} items", menu_tree.items.len());
         let active_window_id = self.active_window_id.get();
 
         let mins = (uptime / 60) % 60;
@@ -607,15 +653,14 @@ impl TaskBarApp {
         // CPU/Memory simulation
         let cpu = self.cpu_usage.clone();
         let mem = self.memory_usage.clone();
-        let menu_bar = self.menu_bar.clone();
-        let active_window_id = self.active_window_id.clone();
-        let menu_tree = self.menu_tree.clone();
         let open_menu_index = self.open_menu_index.clone();
         let popup_surface_id = self.popup_surface_id.clone();
-        let menu_tree_popup = menu_tree.clone();
-        let active_window_id_popup = active_window_id.clone();
+        let menu_tree = self.menu_tree.clone();
+        let active_window_id = self.active_window_id.clone();
         let open_menu_index_popup = open_menu_index.clone();
         let popup_surface_id_popup = popup_surface_id.clone();
+        let menu_tree_popup = menu_tree.clone();
+        let active_window_id_popup = active_window_id.clone();
 
         std::thread::spawn(move || {
             loop {
@@ -625,38 +670,7 @@ impl TaskBarApp {
             }
         });
 
-        std::thread::spawn(move || {
-            let mut conn = match sws::Connection::connect("/tmp/sws.sock") {
-                Ok(conn) => conn,
-                Err(e) => {
-                    println!("[TaskBar] Failed to connect to SWS for menu updates: {:?}", e);
-                    return;
-                }
-            };
-
-            loop {
-                let _ = conn.dispatch();
-                while let Some(ev) = conn.poll_event() {
-                    if let sws::event::Event::FocusChanged {
-                        window_id,
-                        app_name,
-                        menu_titles,
-                        ..
-                    } = ev {
-                        if popup_surface_id.get() == Some(window_id) {
-                            continue;
-                        }
-                        let tree = build_menu_tree(&app_name, &menu_titles);
-                        menu_bar.set(menu_bar_from_tree(&tree));
-                        menu_tree.set(tree);
-                        active_window_id.set(window_id);
-                        open_menu_index.set(None);
-                    }
-                }
-                std::thread::sleep(Duration::from_millis(50));
-            }
-        });
-
+        // Menu popup handling thread (still needed for interactive menu popup)
         std::thread::spawn(move || {
             let mut conn = match sws::Connection::connect("/tmp/sws.sock") {
                 Ok(conn) => conn,

@@ -16,7 +16,9 @@ use crate::element::{Element, ElementId, LayoutConstraints, UpdateResult, Window
 use crate::geometry::{Point, Rect};
 use alloc::boxed::Box;
 use alloc::vec::Vec;
+use alloc::string::String;
 use core::any::Any;
+use std::println;
 
 /// Application trait - main entry point for ScarletUI apps
 ///
@@ -28,6 +30,26 @@ pub trait Application: View {
     ///
     /// This is where the application's UI is defined using Views.
     fn body(&self) -> impl View;
+
+    /// Handle focus change event from window server
+    ///
+    /// Called when another window gains focus. This allows applications
+    /// like TaskBar to update their state based on the focused window.
+    /// Default implementation does nothing.
+    fn on_focus_changed(&mut self, _window_id: u32, _app_name: &str, _menu_titles: &str) {
+        // Default: do nothing
+    }
+
+    /// Handle active application change event from window server
+    ///
+    /// Called when the active APPLICATION changes (normal window gains focus).
+    /// This is separate from on_focus_changed because TaskBar/Desktop/etc
+    /// can receive focus without changing the active application.
+    /// This is used by TaskBar to update its menu bar.
+    /// Default implementation does nothing.
+    fn on_active_app_changed(&mut self, _window_id: u32, _app_name: &str, _menu_titles: &str) {
+        // Default: do nothing
+    }
 
     /// Register all State instances used by this Application
     ///
@@ -152,6 +174,79 @@ pub trait Application: View {
                     } => {
                         let _ = menu_model::invoke_menu_callback(window_id, &menu_item_id);
                     }
+                    Event::Custom { event_type, data } if event_type == 0xF0C0F => {
+                        // FocusChanged event from SWS
+                        // Decode the data: window_id (u32) + app_id_len (u32) + app_id + app_name_len (u32) + app_name + title_len (u32) + title + menu_titles_len (u32) + menu_titles
+                        let mut offset = 0;
+                        if data.len() >= 4 {
+                            let window_id = u32::from_le_bytes(data[0..4].try_into().unwrap());
+                            offset = 4;
+
+                            let read_str = |data: &[u8], offset: &mut usize| -> String {
+                                if *offset + 4 > data.len() {
+                                    return String::new();
+                                }
+                                let len = u32::from_le_bytes(data[*offset..*offset+4].try_into().unwrap()) as usize;
+                                *offset += 4;
+                                if *offset + len > data.len() {
+                                    return String::new();
+                                }
+                                let s = core::str::from_utf8(&data[*offset..*offset+len]).unwrap_or("");
+                                *offset += len;
+                                String::from(s)
+                            };
+
+                            // Skip app_id
+                            let _app_id = read_str(&data, &mut offset);
+                            let app_name = read_str(&data, &mut offset);
+                            let _title = read_str(&data, &mut offset);
+                            let menu_titles = read_str(&data, &mut offset);
+
+                            println!("[Application] FocusChanged: window_id={}, app_name={}, menu_titles={}", window_id, app_name, menu_titles);
+                            self.on_focus_changed(window_id, &app_name, &menu_titles);
+                        }
+                    }
+                    Event::Custom { event_type, data } if event_type == 0xF0C0A => {
+                        // ActiveAppChanged event from SWS
+                        // Decode the data (same format as FocusChanged)
+                        let mut offset = 0;
+                        if data.len() >= 4 {
+                            let window_id = u32::from_le_bytes(data[0..4].try_into().unwrap());
+                            offset = 4;
+
+                            let read_str = |data: &[u8], offset: &mut usize| -> String {
+                                if *offset + 4 > data.len() {
+                                    return String::new();
+                                }
+                                let len = u32::from_le_bytes(data[*offset..*offset+4].try_into().unwrap()) as usize;
+                                *offset += 4;
+                                if *offset + len > data.len() {
+                                    return String::new();
+                                }
+                                let s = core::str::from_utf8(&data[*offset..*offset+len]).unwrap_or("");
+                                *offset += len;
+                                String::from(s)
+                            };
+
+                            // Skip app_id
+                            let _app_id = read_str(&data, &mut offset);
+                            let app_name = read_str(&data, &mut offset);
+                            let _title = read_str(&data, &mut offset);
+                            let menu_titles = read_str(&data, &mut offset);
+
+                            println!("[Application] ActiveAppChanged: window_id={}, app_name={}, menu_titles={}", window_id, app_name, menu_titles);
+                            self.on_active_app_changed(window_id, &app_name, &menu_titles);
+
+                            // Force redraw after active app changed (State updates trigger dirty flag)
+                            if !presented_this_cycle && pipeline.has_dirty() {
+                                println!("[Application] ActiveAppChanged triggered redraw, has_dirty=true");
+                                if let Some(buffer) = pipeline.render() {
+                                    platform_window.present(buffer);
+                                    presented_this_cycle = true;
+                                }
+                            }
+                        }
+                    }
                     _ => {
                         // Other events are handled by the pipeline
                         let _ = pipeline.handle_event(&event);
@@ -194,6 +289,7 @@ pub trait Application: View {
             //     platform_window.present(buffer);
             // }
             if !presented_this_cycle && pipeline.has_dirty() {
+                println!("[Application] has_dirty=true, calling render()");
                 if let Some(buffer) = pipeline.render() {
                     platform_window.present(buffer);
                 }
@@ -288,6 +384,7 @@ impl<A: Application + Clone + 'static> Element for ApplicationRootElement<A> {
     }
 
     fn rebuild(&mut self) -> UpdateResult {
+        println!("[ApplicationRootElement] rebuild() called for id={}", self.id.get());
         if let Some(ref mut child) = self.child {
             child.unmount();
         }
@@ -300,8 +397,10 @@ impl<A: Application + Clone + 'static> Element for ApplicationRootElement<A> {
 
     fn mount(&mut self) {
         let listenables = self.app.listenables();
+        println!("[ApplicationRootElement] mount() called: {} listenables found", listenables.len());
         for listenable in listenables {
             let element_id = self.id;
+            println!("[ApplicationRootElement] Subscribing to element_id={}", element_id.get());
             let callback = alloc::sync::Arc::new(move || {
                 crate::pipeline::mark_element_dirty(element_id);
             });

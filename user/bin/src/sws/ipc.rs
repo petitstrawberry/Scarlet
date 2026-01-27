@@ -544,6 +544,16 @@ fn accept_thread_main(server_socket: Socket) {
                     client_socket.as_raw()
                 );
 
+                // Register client for broadcast messages
+                {
+                    let mut pending = PENDING_CLIENT_RESPONSES.lock();
+                    pending.entry(client_id).or_insert_with(Vec::new);
+                    println!(
+                        "[AcceptThread] Registered client {} for broadcast messages",
+                        client_id
+                    );
+                }
+
                 // Spawn client handler thread
                 thread::spawn(move || {
                     client_thread_main(client_id, client_socket);
@@ -1261,6 +1271,16 @@ fn client_thread_main(client_id: usize, mut socket: Socket) {
             client_id,
             window_id,
         });
+    }
+
+    // Unregister client from broadcast messages
+    {
+        let mut pending = PENDING_CLIENT_RESPONSES.lock();
+        pending.remove(&client_id);
+        println!(
+            "[ClientThread {}] Unregistered client {} from broadcast messages",
+            client_id, client_id
+        );
     }
 
     println!("[ClientThread {}] Exiting", client_id);

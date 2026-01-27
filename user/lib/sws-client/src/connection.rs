@@ -800,6 +800,31 @@ impl Connection {
                                 });
                                 count += 1;
                             }
+                            ServerMessage::ActiveAppChanged {
+                                window_id,
+                                app_id,
+                                app_id_len,
+                                app_name,
+                                app_name_len,
+                                title,
+                                title_len,
+                                menu_titles,
+                                menu_titles_len,
+                            } => {
+                                // Convert fixed-size buffers to String
+                                let app_id_str = String::from_utf8_lossy(&app_id[..app_id_len as usize]).into_owned();
+                                let app_name_str = String::from_utf8_lossy(&app_name[..app_name_len as usize]).into_owned();
+                                let title_str = String::from_utf8_lossy(&title[..title_len as usize]).into_owned();
+                                let menu_titles_str = String::from_utf8_lossy(&menu_titles[..menu_titles_len as usize]).into_owned();
+                                self.pending_events.push(Event::ActiveAppChanged {
+                                    window_id,
+                                    app_id: app_id_str,
+                                    app_name: app_name_str,
+                                    title: title_str,
+                                    menu_titles: menu_titles_str,
+                                });
+                                count += 1;
+                            }
                             ServerMessage::MenuItemActivated {
                                 window_id,
                                 menu_item_id,

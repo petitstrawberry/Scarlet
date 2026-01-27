@@ -66,6 +66,7 @@ pub mod server_msg {
     pub const FOCUS_CHANGED: u32 = 18;
     pub const ACTIVE_APP: u32 = 19; // Response to GET_ACTIVE_APP
     pub const MENU_ITEM_ACTIVATED: u32 = 20; // Menu item activation for a window
+    pub const ACTIVE_APP_CHANGED: u32 = 21; // Broadcast when active application changes (normal windows only)
 }
 
 /// Flags for transient (parent/child) window behavior.
@@ -346,6 +347,19 @@ pub enum ServerMessage {
     WindowList,
     /// Focus changed to a different window (includes app info for TaskBar)
     FocusChanged {
+        window_id: u32,
+        app_id: [u8; 128],
+        app_id_len: u32,
+        app_name: [u8; 128],
+        app_name_len: u32,
+        title: [u8; 256],
+        title_len: u32,
+        menu_titles: [u8; 2048], // Format: "menu1|menu2|menu3"
+        menu_titles_len: u32,
+    },
+    /// Active application changed (normal window gained focus)
+    /// Broadcast to all clients for TaskBar menu updates
+    ActiveAppChanged {
         window_id: u32,
         app_id: [u8; 128],
         app_id_len: u32,
@@ -911,6 +925,117 @@ pub fn parse_server_message(msg_type: u32, payload: &[u8]) -> Result<ServerMessa
             }
 
             Ok(ServerMessage::FocusChanged {
+                window_id,
+                app_id,
+                app_id_len: app_id_len as u32,
+                app_name,
+                app_name_len: app_name_len as u32,
+                title,
+                title_len: title_len as u32,
+                menu_titles,
+                menu_titles_len: menu_titles_len as u32,
+            })
+        }
+        server_msg::ACTIVE_APP_CHANGED => {
+            // Payload format is the same as FOCUS_CHANGED
+            if payload.len() < 4 {
+                return Err(ProtocolError::MalformedPayload);
+            }
+            let window_id =
+                u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
+
+            let mut offset = 4;
+
+            let app_id_len = if offset + 4 <= payload.len() {
+                let len = u32::from_le_bytes([
+                    payload[offset],
+                    payload[offset + 1],
+                    payload[offset + 2],
+                    payload[offset + 3],
+                ]) as usize;
+                offset += 4;
+                len
+            } else {
+                return Err(ProtocolError::MalformedPayload);
+            };
+
+            if offset + app_id_len > payload.len() {
+                return Err(ProtocolError::MalformedPayload);
+            }
+            let mut app_id = [0u8; 128];
+            if app_id_len > 0 {
+                app_id[..app_id_len].copy_from_slice(&payload[offset..offset + app_id_len]);
+            }
+            offset += app_id_len;
+
+            let app_name_len = if offset + 4 <= payload.len() {
+                let len = u32::from_le_bytes([
+                    payload[offset],
+                    payload[offset + 1],
+                    payload[offset + 2],
+                    payload[offset + 3],
+                ]) as usize;
+                offset += 4;
+                len
+            } else {
+                return Err(ProtocolError::MalformedPayload);
+            };
+
+            if offset + app_name_len > payload.len() {
+                return Err(ProtocolError::MalformedPayload);
+            }
+            let mut app_name = [0u8; 128];
+            if app_name_len > 0 {
+                app_name[..app_name_len].copy_from_slice(&payload[offset..offset + app_name_len]);
+            }
+            offset += app_name_len;
+
+            let title_len = if offset + 4 <= payload.len() {
+                let len = u32::from_le_bytes([
+                    payload[offset],
+                    payload[offset + 1],
+                    payload[offset + 2],
+                    payload[offset + 3],
+                ]) as usize;
+                offset += 4;
+                len
+            } else {
+                return Err(ProtocolError::MalformedPayload);
+            };
+
+            if offset + title_len > payload.len() {
+                return Err(ProtocolError::MalformedPayload);
+            }
+            let mut title = [0u8; 256];
+            if title_len > 0 {
+                title[..title_len].copy_from_slice(&payload[offset..offset + title_len]);
+            }
+            offset += title_len;
+
+            let menu_titles_len = if offset + 4 <= payload.len() {
+                let len = u32::from_le_bytes([
+                    payload[offset],
+                    payload[offset + 1],
+                    payload[offset + 2],
+                    payload[offset + 3],
+                ]) as usize;
+                offset += 4;
+                len
+            } else {
+                return Err(ProtocolError::MalformedPayload);
+            };
+
+            if offset + menu_titles_len > payload.len() {
+                return Err(ProtocolError::MalformedPayload);
+            }
+
+            let mut menu_titles = [0u8; 2048];
+            if menu_titles_len > 0 {
+                menu_titles[..menu_titles_len]
+                    .copy_from_slice(&payload[offset..offset + menu_titles_len]);
+            }
+
+            Ok(ServerMessage::ActiveAppChanged {
                 window_id,
                 app_id,
                 app_id_len: app_id_len as u32,
@@ -1499,6 +1624,29 @@ pub fn payload_focus_changed(
     payload.extend_from_slice(&menu_titles[..menu_titles_len]);
 
     payload
+}
+
+/// Build payload for server->client `ACTIVE_APP_CHANGED`.
+///
+/// Broadcast when the active application changes (normal window gains focus).
+/// Payload format is the same as FOCUS_CHANGED:
+/// - window_id (u32)
+/// - app_id_len (u32)
+/// - app_id_bytes (variable, max 128)
+/// - app_name_len (u32)
+/// - app_name_bytes (variable, max 128)
+/// - title_len (u32)
+/// - title_bytes (variable, max 256)
+/// - menu_titles_len (u32)
+/// - menu_titles_bytes (variable, max 2048, format: "menu1|menu2|menu3")
+pub fn payload_active_app_changed(
+    window_id: u32,
+    app_id: &[u8],
+    app_name: &[u8],
+    title: &[u8],
+    menu_titles: &[u8],
+) -> Vec<u8> {
+    payload_focus_changed(window_id, app_id, app_name, title, menu_titles)
 }
 
 /// Build payload for server->client `MENU_ITEM_ACTIVATED`.

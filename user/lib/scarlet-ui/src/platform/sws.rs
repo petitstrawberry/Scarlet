@@ -10,6 +10,7 @@ use crate::platform::PlatformWindow;
 use sws_client as sws;
 use sws::event::{abs_code, event_type, key_code, Event as SwsEvent};
 use alloc::vec::Vec;
+use alloc::string::String;
 
 /// SWS platform window implementation
 pub struct SWSPlatformWindow {
@@ -515,6 +516,63 @@ impl SWSPlatformWindow {
                         menu_item_id,
                     });
                 }
+            }
+            SwsEvent::FocusChanged {
+                window_id,
+                app_id,
+                app_name,
+                title,
+                menu_titles,
+            } => {
+                // Push FocusChanged event for all windows to receive
+                // This allows TaskBar to update its menu based on focus changes
+                scarlet_std::println!("[SWSPlatformWindow] FocusChanged: window_id={}, app_name={}, menu_titles={}", window_id, app_name, menu_titles);
+                self.push_event(Event::Custom {
+                    event_type: 0xF0C0F, // FocusChanged event type
+                    data: {
+                        // Encode the focus change data
+                        let mut data = Vec::new();
+                        data.extend_from_slice(&window_id.to_le_bytes());
+                        data.extend_from_slice(&(app_id.len() as u32).to_le_bytes());
+                        data.extend_from_slice(app_id.as_bytes());
+                        data.extend_from_slice(&(app_name.len() as u32).to_le_bytes());
+                        data.extend_from_slice(app_name.as_bytes());
+                        data.extend_from_slice(&(title.len() as u32).to_le_bytes());
+                        data.extend_from_slice(title.as_bytes());
+                        data.extend_from_slice(&(menu_titles.len() as u32).to_le_bytes());
+                        data.extend_from_slice(menu_titles.as_bytes());
+                        data
+                    },
+                });
+            }
+            SwsEvent::ActiveAppChanged {
+                window_id,
+                app_id,
+                app_name,
+                title,
+                menu_titles,
+            } => {
+                // Push ActiveAppChanged event for TaskBar to update menu bar
+                // This is ONLY sent for normal windows (not TaskBar/Desktop/etc)
+                // and only when the active APPLICATION changes (same app, different window = no broadcast)
+                scarlet_std::println!("[SWSPlatformWindow] ActiveAppChanged: window_id={}, app_name={}, menu_titles={}", window_id, app_name, menu_titles);
+                self.push_event(Event::Custom {
+                    event_type: 0xF0C0A, // ActiveAppChanged event type
+                    data: {
+                        // Encode the active app change data (same format as FocusChanged)
+                        let mut data = Vec::new();
+                        data.extend_from_slice(&window_id.to_le_bytes());
+                        data.extend_from_slice(&(app_id.len() as u32).to_le_bytes());
+                        data.extend_from_slice(app_id.as_bytes());
+                        data.extend_from_slice(&(app_name.len() as u32).to_le_bytes());
+                        data.extend_from_slice(app_name.as_bytes());
+                        data.extend_from_slice(&(title.len() as u32).to_le_bytes());
+                        data.extend_from_slice(title.as_bytes());
+                        data.extend_from_slice(&(menu_titles.len() as u32).to_le_bytes());
+                        data.extend_from_slice(menu_titles.as_bytes());
+                        data
+                    },
+                });
             }
             _ => {}
         }

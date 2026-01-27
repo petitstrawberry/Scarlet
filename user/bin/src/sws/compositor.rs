@@ -44,6 +44,8 @@ pub struct Compositor {
     resize_drag: Option<ResizeDragState>,
     resize_outline: Option<(i32, i32, u32, u32)>,
     workarea: Option<(i32, i32, u32, u32)>,
+    /// Track the currently active application's app_id to avoid redundant ACTIVE_APP_CHANGED broadcasts
+    active_app_id: Option<Vec<u8>>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -142,6 +144,7 @@ impl Compositor {
             resize_drag: None,
             resize_outline: None,
             workarea: None,
+            active_app_id: None,
         })
     }
 
@@ -1139,7 +1142,7 @@ impl Compositor {
     }
 
     /// Broadcast focus change event to all connected clients
-    fn broadcast_focus_change(&self, window_id: u32) {
+    fn broadcast_focus_change(&mut self, window_id: u32) {
         if let Some(window) = self.window_manager.get_window(window_id) {
             let app_id_bytes = window.app_id.as_deref().unwrap_or(b"");
             let title_bytes = window.title.as_deref().unwrap_or(b"");
@@ -1149,6 +1152,7 @@ impl Compositor {
             let app_name_bytes = app_name.as_bytes();
             let menu_titles_bytes = menu_titles.as_bytes();
 
+            // Always broadcast FOCUS_CHANGED for all windows
             let payload = sws_protocol::payload_focus_changed(
                 window_id,
                 app_id_bytes,
@@ -1156,6 +1160,18 @@ impl Compositor {
                 title_bytes,
                 menu_titles_bytes,
             );
+
+            println!(
+                "[Compositor] ABOUT TO broadcast focus change: window_id={}, app_id_len={}, app_name_len={}, title_len={}, menu_titles_len={}, app_name={}, menu_titles={}",
+                window_id,
+                app_id_bytes.len(),
+                app_name_bytes.len(),
+                title_bytes.len(),
+                menu_titles_bytes.len(),
+                core::str::from_utf8(app_name_bytes).unwrap_or(""),
+                core::str::from_utf8(menu_titles_bytes).unwrap_or("")
+            );
+
             super::ipc::broadcast_message_to_all_clients(
                 sws_protocol::server_msg::FOCUS_CHANGED,
                 payload,
@@ -1169,6 +1185,49 @@ impl Compositor {
                 title_bytes.len(),
                 menu_titles_bytes.len()
             );
+
+            // For normal windows only, check if app_id changed and broadcast ACTIVE_APP_CHANGED
+            // This is used by TaskBar to update its menu bar
+            println!(
+                "[Compositor] Checking window type: window_type={:?}, Normal={}",
+                window.window_type,
+                window.window_type == super::window::WindowType::Normal
+            );
+            if window.window_type == super::window::WindowType::Normal {
+                let app_id_changed = match &self.active_app_id {
+                    Some(current_app_id) => current_app_id != app_id_bytes,
+                    None => true,
+                };
+
+                if app_id_changed {
+                    println!(
+                        "[Compositor] Active app changed: {:?} -> {:?}, broadcasting ACTIVE_APP_CHANGED",
+                        self.active_app_id.as_ref().map(|id| core::str::from_utf8(id).unwrap_or("")),
+                        core::str::from_utf8(app_id_bytes).unwrap_or("")
+                    );
+
+                    // Update active_app_id
+                    self.active_app_id = Some(app_id_bytes.to_vec());
+
+                    let active_app_payload = sws_protocol::payload_active_app_changed(
+                        window_id,
+                        app_id_bytes,
+                        app_name_bytes,
+                        title_bytes,
+                        menu_titles_bytes,
+                    );
+
+                    super::ipc::broadcast_message_to_all_clients(
+                        sws_protocol::server_msg::ACTIVE_APP_CHANGED,
+                        active_app_payload,
+                    );
+                } else {
+                    println!(
+                        "[Compositor] Active app unchanged ({}), skipping ACTIVE_APP_CHANGED",
+                        core::str::from_utf8(app_id_bytes).unwrap_or("")
+                    );
+                }
+            }
         } else {
             println!(
                 "[Compositor] Warning: Failed to broadcast focus change for non-existent window #{}",
@@ -1705,6 +1764,34 @@ impl Compositor {
                     "[Compositor] Client {} destroying window #{}",
                     client_id, window_id
                 );
+
+                // Check if the destroyed window was the active application
+                if let Some(window) = self.window_manager.get_window(window_id) {
+                    if let Some(current_app_id) = &self.active_app_id {
+                        let window_app_id = window.app_id.as_deref().unwrap_or(b"");
+                        if current_app_id == window_app_id {
+                            println!(
+                                "[Compositor] Active app window destroyed, resetting active_app_id (was={})",
+                                core::str::from_utf8(window_app_id).unwrap_or("")
+                            );
+                            self.active_app_id = None;
+
+                            // Broadcast ACTIVE_APP_CHANGED with empty menu to clear TaskBar
+                            let empty_payload = sws_protocol::payload_active_app_changed(
+                                0, // dummy window_id
+                                b"", // empty app_id
+                                b"", // empty app_name
+                                b"", // empty title
+                                b"", // empty menu_titles
+                            );
+                            println!("[Compositor] Broadcasting empty ACTIVE_APP_CHANGED to clear TaskBar menu");
+                            super::ipc::broadcast_message_to_all_clients(
+                                sws_protocol::server_msg::ACTIVE_APP_CHANGED,
+                                empty_payload,
+                            );
+                        }
+                    }
+                }
 
                 // Send WINDOW_DESTROYED event to client before closing
                 let payload = sws_protocol::payload_window_destroyed(window_id);
