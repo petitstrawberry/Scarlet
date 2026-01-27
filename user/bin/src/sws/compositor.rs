@@ -2122,6 +2122,23 @@ impl Compositor {
                     }
                 }
             }
+            IpcEvent::ActivateMenuItem {
+                window_id,
+                menu_item_id,
+            } => {
+                println!(
+                    "[Compositor] Activating menu item for window #{} (len={})",
+                    window_id,
+                    menu_item_id.len()
+                );
+                let payload =
+                    sws_protocol::payload_menu_item_activated(window_id, menu_item_id.as_bytes());
+                super::ipc::send_message_to_window(
+                    window_id,
+                    sws_protocol::server_msg::MENU_ITEM_ACTIVATED,
+                    payload,
+                );
+            }
             IpcEvent::SetWorkarea {
                 x,
                 y,

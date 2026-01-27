@@ -10,5 +10,6 @@ mod menu_bar;
 mod menu;
 
 pub use menu_item::MenuItem;
+pub(crate) use menu_item::MenuItemRenderObject;
 pub use menu_bar::{MenuBar, MenuBarElement};
 pub use menu::{Menu, MenuRenderObject, MenuItemContent, MenuAction};

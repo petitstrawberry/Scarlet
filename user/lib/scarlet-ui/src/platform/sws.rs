@@ -36,6 +36,17 @@ impl SWSPlatformWindow {
 
     /// Create a new platform window with a specific window type
     pub fn create_with_type(app_id: &str, title: &str, size: Size, window_type: u32) -> Result<Self> {
+        Self::create_with_type_and_menu(app_id, title, size, window_type, "")
+    }
+
+    /// Create a new platform window with a specific window type and initial menu titles
+    pub fn create_with_type_and_menu(
+        app_id: &str,
+        title: &str,
+        size: Size,
+        window_type: u32,
+        menu_titles: &str,
+    ) -> Result<Self> {
         // Connect to SWS
         let mut conn = sws::Connection::connect("/tmp/sws.sock")
             .map_err(|_| crate::error::Error::ConnectionFailed)?;
@@ -44,7 +55,7 @@ impl SWSPlatformWindow {
         let surface_id = conn.create_surface_with_type(
             app_id,
             title,
-            "",
+            menu_titles,
             size.width as u32,
             size.height as u32,
             window_type,
@@ -60,6 +71,16 @@ impl SWSPlatformWindow {
             pointer_y: 0,
             pending_move: false,
         })
+    }
+
+    pub fn new_with_menu(app_id: &str, title: &str, size: Size, menu_titles: &str) -> Result<Self> {
+        Self::create_with_type_and_menu(
+            app_id,
+            title,
+            size,
+            sws_protocol::window_types::NORMAL,
+            menu_titles,
+        )
     }
 
     fn push_event(&mut self, event: Event) {
@@ -482,6 +503,17 @@ impl SWSPlatformWindow {
                     if debug {
                         scarlet_std::println!("[SWSPlatformWindow] SurfaceDestroyed");
                     }
+                }
+            }
+            SwsEvent::MenuItemActivated {
+                window_id,
+                menu_item_id,
+            } => {
+                if window_id == self.surface_id {
+                    self.push_event(Event::MenuItemActivated {
+                        window_id,
+                        menu_item_id,
+                    });
                 }
             }
             _ => {}

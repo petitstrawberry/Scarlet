@@ -33,7 +33,7 @@ impl MenuItem {
         Self {
             label: label_str,
             on_click: None,
-            font_size: 13.0, // Standard menu bar font size
+            font_size: 18.0,
             padding: 8.0,
         }
     }
@@ -135,7 +135,7 @@ impl MenuItemRenderObject {
 
         let text_width = self.label.len() as f32 * char_width;
         let width = text_width + self.padding * 2.0;
-        let height = self.font_size * 1.2 + self.padding;
+        let height = self.font_size * 1.2 + self.padding * 2.0;
 
         Size { width, height }
     }
@@ -181,7 +181,13 @@ impl ElementRenderObject for MenuItemRenderObject {
         let mut width = intrinsic.width;
         let mut height = intrinsic.height;
 
-        // Apply max constraints
+        // Apply min/max constraints
+        if constraints.min_width.is_finite() && constraints.min_width > 0.0 {
+            width = width.max(constraints.min_width);
+        }
+        if constraints.min_height.is_finite() && constraints.min_height > 0.0 {
+            height = height.max(constraints.min_height);
+        }
         if constraints.max_width.is_finite() && constraints.max_width > 0.0 {
             width = width.min(constraints.max_width);
         }
@@ -238,6 +244,9 @@ impl ElementRenderObject for MenuItemRenderObject {
             let height = buffer.height();
             let mut data = buffer.data_mut();
             let mut canvas = graphics::Canvas::new(&mut data, width, height);
+
+            // Clear to avoid blending text on top of previous frames.
+            canvas.fill_rect(0, 0, width, height, Color::TRANSPARENT);
 
             // Fill background (only if hovered or pressed)
             if self.hovered || self.pressed {

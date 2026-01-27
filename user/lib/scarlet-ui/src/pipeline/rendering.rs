@@ -93,13 +93,13 @@ impl RenderingPipeline {
     /// the app_id, title, size, and window_type from it.
     ///
     /// Returns (app_id, title, size, window_type) or defaults if no Window is found.
-    fn extract_window_info(&self) -> (String, String, Size, u32, String) {
+    fn extract_window_info(&self) -> (String, String, Size, u32, Option<crate::menu_model::MenuBarModel>) {
         // Default values
         let default_app_id = String::from("com.example.scarletui");
         let default_title = String::from("ScarletUI Application");
         let default_size = Size::new(800.0, 600.0);
         let default_window_type = 0; // NORMAL
-        let default_menu_titles = String::new();
+        let default_menu_bar = None;
 
         // Try to find a Window View in the element tree
         if let Some(root) = self.element_tree.root() {
@@ -108,20 +108,14 @@ impl RenderingPipeline {
             }
         }
 
-        (
-            default_app_id,
-            default_title,
-            default_size,
-            default_window_type,
-            default_menu_titles,
-        )
+        (default_app_id, default_title, default_size, default_window_type, default_menu_bar)
     }
 
     /// Recursively search for a Window View in the element tree
     fn find_window_view(
         &self,
         element: &dyn Element,
-    ) -> Option<(String, String, Size, u32, String)> {
+    ) -> Option<(String, String, Size, u32, Option<crate::menu_model::MenuBarModel>)> {
         // Check if this element provides window info
         if let Some(info) = element.get_window_info() {
             return Some(info);
@@ -143,9 +137,11 @@ impl RenderingPipeline {
     /// to determine the window size and create the compositor.
     ///
     /// Returns (app_id, title, size, window_type) extracted from the Window View
-    pub fn layout_initial(&mut self) -> (String, String, Size, u32, String) {
+    pub fn layout_initial(
+        &mut self,
+    ) -> (String, String, Size, u32, Option<crate::menu_model::MenuBarModel>) {
         // Extract window info first
-        let (app_id, title, preferred_size, window_type, menu_titles) =
+        let (app_id, title, preferred_size, window_type, menu_bar) =
             self.extract_window_info();
 
         // Use the preferred size from Window as the actual window size
@@ -164,7 +160,7 @@ impl RenderingPipeline {
             self.pipeline_owner.mark_needs_paint(root.id());
         }
 
-        (app_id, title, window_size, window_type, menu_titles)
+        (app_id, title, window_size, window_type, menu_bar)
     }
 
     /// Set window size and resize compositor

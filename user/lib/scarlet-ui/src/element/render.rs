@@ -362,6 +362,79 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
             }
         }
 
+        if let Some(menu_item) = self.view.as_any().downcast_ref::<crate::views::MenuItem>() {
+            if let Some(render_object) = self
+                .render_object
+                .as_any_mut()
+                .downcast_mut::<crate::views::menu::MenuItemRenderObject>()
+            {
+                match mouse_event {
+                    MouseEvent::Entered { .. } => {
+                        render_object.set_hovered(true);
+                        crate::pipeline::mark_element_needs_paint(self.id);
+                        return true;
+                    }
+                    MouseEvent::Exited { .. } => {
+                        render_object.set_hovered(false);
+                        render_object.set_pressed(false);
+                        crate::pipeline::mark_element_needs_paint(self.id);
+                        return true;
+                    }
+                    MouseEvent::ButtonPressed { button: MouseButton::Left, .. } => {
+                        render_object.set_pressed(true);
+                        crate::pipeline::mark_element_needs_paint(self.id);
+                        return true;
+                    }
+                    MouseEvent::ButtonReleased { button: MouseButton::Left, .. } => {
+                        if render_object.is_pressed() {
+                            menu_item.invoke_on_click();
+                        }
+                        render_object.set_pressed(false);
+                        crate::pipeline::mark_element_needs_paint(self.id);
+                        return true;
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        if let Some(_menu) = self.view.as_any().downcast_ref::<crate::views::Menu>() {
+            if let Some(render_object) = self
+                .render_object
+                .as_any_mut()
+                .downcast_mut::<crate::views::menu::MenuRenderObject>()
+            {
+                match mouse_event {
+                    MouseEvent::Entered { x, y } | MouseEvent::Moved { x, y } => {
+                        let local_x = (*x as f32) - self.position.x;
+                        let local_y = (*y as f32) - self.position.y;
+                        let hovered = render_object.hit_test(local_x, local_y);
+                        if hovered != render_object.hovered() {
+                            render_object.set_hovered(hovered);
+                            crate::pipeline::mark_element_needs_paint(self.id);
+                        }
+                        return true;
+                    }
+                    MouseEvent::Exited { .. } => {
+                        if render_object.hovered().is_some() {
+                            render_object.set_hovered(None);
+                            crate::pipeline::mark_element_needs_paint(self.id);
+                        }
+                        return true;
+                    }
+                    MouseEvent::ButtonReleased { button: MouseButton::Left, x, y } => {
+                        let local_x = (*x as f32) - self.position.x;
+                        let local_y = (*y as f32) - self.position.y;
+                        if let Some(index) = render_object.hit_test(local_x, local_y) {
+                            render_object.invoke_item(index);
+                            return true;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+
         if let Some(toggle) = self.view.as_any().downcast_ref::<crate::views::Toggle>() {
             if let MouseEvent::ButtonReleased { button: MouseButton::Left, .. } = mouse_event {
                 if crate::debug::is_enabled() {

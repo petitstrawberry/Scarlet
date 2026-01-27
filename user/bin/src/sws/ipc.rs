@@ -1160,6 +1160,22 @@ fn client_thread_main(client_id: usize, mut socket: Socket) {
                     menu_titles: menu_titles_str,
                 });
             }
+            Ok(ClientMessageRef::ActivateMenuItem {
+                window_id,
+                menu_item_id,
+            }) => {
+                let menu_item_id_str = String::from_utf8_lossy(menu_item_id).into_owned();
+                println!(
+                    "[ClientThread {}] ActivateMenuItem: window_id={} item_len={}",
+                    client_id,
+                    window_id,
+                    menu_item_id_str.len()
+                );
+                push_ipc_event(IpcEvent::ActivateMenuItem {
+                    window_id,
+                    menu_item_id: menu_item_id_str,
+                });
+            }
             Ok(ClientMessageRef::SetWorkarea {
                 x,
                 y,
@@ -1349,6 +1365,7 @@ pub enum IpcEvent {
     /// Set whether window content contains alpha channel
     SetWindowHasAlphaContent { window_id: u32, has_alpha: bool },
     SetWindowMenuTitles { window_id: u32, menu_titles: String },
+    ActivateMenuItem { window_id: u32, menu_item_id: String },
 
     /// Set the workarea (usable screen area) for the window manager
     SetWorkarea {

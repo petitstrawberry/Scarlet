@@ -137,6 +137,9 @@ impl EventDispatcher {
                 // Raw input events are typically handled by higher layers
                 false
             }
+            Event::MenuItemActivated { .. } => {
+                false
+            }
             Event::Custom { .. } => {
                 // Custom events can be dispatched similarly
                 false

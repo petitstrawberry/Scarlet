@@ -16,6 +16,7 @@ use crate::element::{Element, ElementId, ElementRenderObject, LayoutConstraints,
 use crate::geometry::{Size, Rect, Point};
 use crate::color::Color;
 use crate::buffer::Buffer;
+use crate::menu_model::MenuBarModel;
 use crate::state::Listenable;
 
 /// Window types (matching sws_protocol::window_types)
@@ -26,13 +27,13 @@ pub mod window_type {
 }
 
 /// Window information
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct WindowInfo {
     pub app_id: String,
     pub title: String,
     pub size: Size,
     pub window_type: u32,
-    pub menu_titles: String,
+    pub menu_bar: Option<MenuBarModel>,
 }
 
 impl WindowInfo {
@@ -41,14 +42,14 @@ impl WindowInfo {
         title: String,
         size: Size,
         window_type: u32,
-        menu_titles: String,
+        menu_bar: Option<MenuBarModel>,
     ) -> Self {
         Self {
             app_id,
             title,
             size,
             window_type,
-            menu_titles,
+            menu_bar,
         }
     }
 }
@@ -76,7 +77,7 @@ pub struct Window<V: View> {
     decorated: bool,
     background_color: Option<Color>,
     window_type: u32,
-    menu_titles: String,
+    menu_bar: Option<MenuBarModel>,
     content: V,
 }
 
@@ -102,7 +103,7 @@ impl<V: View> Window<V> {
             decorated: true,
             background_color: Some(Color::WHITE),
             window_type: window_type::NORMAL,
-            menu_titles: String::new(),
+            menu_bar: None,
             content,
         }
     }
@@ -168,9 +169,9 @@ impl<V: View> Window<V> {
         self
     }
 
-    /// Set menu titles for the menu bar (format: "menu1|menu2|menu3")
-    pub fn menu_titles(mut self, menu_titles: impl Into<String>) -> Self {
-        self.menu_titles = menu_titles.into();
+    /// Set menu bar model for the window
+    pub fn menu_bar(mut self, menu_bar: MenuBarModel) -> Self {
+        self.menu_bar = Some(menu_bar);
         self
     }
 
@@ -224,7 +225,7 @@ impl<V: View + Clone> Clone for Window<V> {
             decorated: self.decorated,
             background_color: self.background_color,
             window_type: self.window_type,
-            menu_titles: self.menu_titles.clone(),
+            menu_bar: self.menu_bar.clone(),
             content: self.content.clone(),
         }
     }
@@ -237,7 +238,7 @@ impl<V: View + Clone> WindowViewInfo for Window<V> {
             self.title.clone(),
             self.size,
             self.window_type,
-            self.menu_titles.clone(),
+            self.menu_bar.clone(),
         )
     }
 
@@ -644,16 +645,16 @@ impl<C: View + Clone + WindowViewInfo> Element for WindowRenderElement<C> {
 
     fn get_window_info(
         &self,
-    ) -> Option<(alloc::string::String, alloc::string::String, Size, u32, alloc::string::String)>
+    ) -> Option<(
+        alloc::string::String,
+        alloc::string::String,
+        Size,
+        u32,
+        Option<MenuBarModel>,
+    )>
     {
         let info = self.view.window_info();
-        Some((
-            info.app_id,
-            info.title,
-            info.size,
-            info.window_type,
-            info.menu_titles,
-        ))
+        Some((info.app_id, info.title, info.size, info.window_type, info.menu_bar))
     }
 
     fn get_window_size_limits(&self) -> Option<WindowSizeLimits> {

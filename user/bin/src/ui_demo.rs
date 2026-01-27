@@ -9,11 +9,14 @@ extern crate alloc;
 extern crate scarlet_std;
 extern crate scarlet_ui_macros;
 
+use alloc::vec;
+use alloc::sync::Arc;
 use core::f32;
 
 use scarlet_std::format;
 use scarlet_std::println;
 use scarlet_ui::{hstack, prelude::*, vstack};
+use scarlet_ui::{MenuBarModel, MenuEntry, MenuItemModel};
 use scarlet_ui_macros::View;
 
 #[derive(View, Clone)]
@@ -87,7 +90,42 @@ impl Application for DemoApp {
         // .frame(400.0, 300.0)
         )
         .app_id("oeg.scarlet-os.ui_demo")
-        .menu_titles("File|Edit|View|Help")
+        .menu_bar(MenuBarModel::new(vec![
+            MenuItemModel::new("file", "File")
+                .on_activate(Arc::new(|| {
+                    println!("[ui_demo] Menu: File");
+                }))
+                .children(vec![
+                    MenuEntry::Item(MenuItemModel::new("new", "New").on_activate(Arc::new(|| {
+                        println!("[ui_demo] Menu: New");
+                    }))),
+                    MenuEntry::Item(MenuItemModel::new("open", "Open").on_activate(Arc::new(|| {
+                        println!("[ui_demo] Menu: Open");
+                    }))),
+                    MenuEntry::Separator,
+                    MenuEntry::Item(MenuItemModel::new("quit", "Quit").on_activate(Arc::new(|| {
+                        println!("[ui_demo] Menu: Quit");
+                    }))),
+                ]),
+            MenuItemModel::new("edit", "Edit")
+                .on_activate(Arc::new(|| {
+                    println!("[ui_demo] Menu: Edit");
+                }))
+                .children(vec![
+                    MenuEntry::Item(MenuItemModel::new("undo", "Undo").on_activate(Arc::new(|| {
+                        println!("[ui_demo] Menu: Undo");
+                    }))),
+                    MenuEntry::Item(MenuItemModel::new("redo", "Redo").on_activate(Arc::new(|| {
+                        println!("[ui_demo] Menu: Redo");
+                    }))),
+                ]),
+            MenuItemModel::new("view", "View").on_activate(Arc::new(|| {
+                println!("[ui_demo] Menu: View");
+            })),
+            MenuItemModel::new("help", "Help").on_activate(Arc::new(|| {
+                println!("[ui_demo] Menu: Help");
+            })),
+        ]))
         .size(Size::new(800.0, 600.0))
     }
 

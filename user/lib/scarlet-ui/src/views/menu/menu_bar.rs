@@ -124,15 +124,21 @@ impl Element for MenuBarElement {
         let mut total_width: f32 = 0.0;
         let mut max_height: f32 = 0.0;
 
+        let target_height = if constraints.max_height.is_finite() && constraints.max_height > 0.0 {
+            constraints.max_height
+        } else {
+            constraints.min_height
+        };
+
         let child_count = self.children.len();
 
         for (i, child) in self.children.iter_mut().enumerate() {
             // Use infinite width constraint for horizontal layout
             let child_constraints = LayoutConstraints {
                 min_width: 0.0,
-                min_height: constraints.min_height,
+                min_height: target_height,
                 max_width: f32::INFINITY,
-                max_height: constraints.max_height,
+                max_height: if target_height > 0.0 { target_height } else { constraints.max_height },
             };
 
             let child_size = child.layout(child_constraints);
@@ -152,8 +158,8 @@ impl Element for MenuBarElement {
             total_width
         };
 
-        let height = if constraints.max_height.is_finite() && constraints.max_height > 0.0 {
-            max_height.min(constraints.max_height)
+        let height = if target_height > 0.0 {
+            target_height
         } else {
             max_height
         };

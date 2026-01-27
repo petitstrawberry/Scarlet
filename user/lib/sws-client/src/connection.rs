@@ -322,6 +322,21 @@ impl Connection {
         .map_err(|_| Error::SendFailed)
     }
 
+    /// Notify the server that a menu item was activated for a window.
+    pub fn activate_menu_item(
+        &mut self,
+        window_id: u32,
+        menu_item_id: &str,
+    ) -> Result<(), Error> {
+        let payload = protocol::payload_activate_menu_item(window_id, menu_item_id.as_bytes());
+        write_frame(
+            &mut self.socket,
+            protocol::client_msg::ACTIVATE_MENU_ITEM,
+            &payload,
+        )
+        .map_err(|_| Error::SendFailed)
+    }
+
     /// Get a reference to a surface
     pub fn surface(&self, surface_id: u32) -> Option<&Surface> {
         self.surfaces.get(&surface_id)
@@ -782,6 +797,21 @@ impl Connection {
                                     app_name: app_name_str,
                                     title: title_str,
                                     menu_titles: menu_titles_str,
+                                });
+                                count += 1;
+                            }
+                            ServerMessage::MenuItemActivated {
+                                window_id,
+                                menu_item_id,
+                                menu_item_id_len,
+                            } => {
+                                let menu_item_id_str = String::from_utf8_lossy(
+                                    &menu_item_id[..menu_item_id_len as usize],
+                                )
+                                .into_owned();
+                                self.pending_events.push(Event::MenuItemActivated {
+                                    window_id,
+                                    menu_item_id: menu_item_id_str,
                                 });
                                 count += 1;
                             }

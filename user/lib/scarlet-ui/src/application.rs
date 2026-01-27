@@ -9,9 +9,10 @@ use crate::event::Event;
 use crate::platform::{PlatformWindow, SWSPlatformWindow};
 use crate::pipeline::RenderingPipeline;
 use crate::error::Result;
+use crate::menu_model;
 use crate::state::StateId;
 use crate::state::SubscriptionId;
-use crate::element::{Element, ElementId, LayoutConstraints, UpdateResult};
+use crate::element::{Element, ElementId, LayoutConstraints, UpdateResult, WindowSizeLimits};
 use crate::geometry::{Point, Rect};
 use alloc::boxed::Box;
 use alloc::vec::Vec;
@@ -77,7 +78,7 @@ pub trait Application: View {
         self.init();
 
         // 4. Perform initial layout to determine window size and extract window properties
-        let (app_id, window_title, window_size, window_type, menu_titles) =
+        let (app_id, window_title, window_size, window_type, menu_bar) =
             pipeline.layout_initial();
 
         // Debug: Dump element tree
@@ -85,22 +86,40 @@ pub trait Application: View {
             pipeline.element_tree().dump();
         }
 
+        let menu_json = menu_bar
+            .as_ref()
+            .map(|menu_bar| menu_bar.to_json())
+            .unwrap_or_default();
+
         // 5. Create platform window (default: SWS backend)
         // Use create_with_type for special window types (TASKBAR, ALWAYS_ON_TOP)
         let mut platform_window = if window_type == crate::views::window_type::NORMAL {
-            SWSPlatformWindow::new(&app_id, &window_title, window_size)
+            SWSPlatformWindow::new_with_menu(&app_id, &window_title, window_size, &menu_json)
                 .map_err(|_| crate::error::Error::WindowCreationFailed)?
         } else {
-            SWSPlatformWindow::create_with_type(&app_id, &window_title, window_size, window_type)
-                .map_err(|_| crate::error::Error::WindowCreationFailed)?
+            SWSPlatformWindow::create_with_type_and_menu(
+                &app_id,
+                &window_title,
+                window_size,
+                window_type,
+                &menu_json,
+            )
+            .map_err(|_| crate::error::Error::WindowCreationFailed)?
         };
 
-        if !menu_titles.is_empty() {
-            let _ = platform_window.set_menu_titles(&menu_titles);
+        if let Some(menu_bar) = menu_bar {
+            if !menu_json.is_empty() {
+                let _ = platform_window.set_menu_titles(&menu_json);
+                menu_model::register_menu_callbacks(platform_window.surface_id(), &menu_bar);
+            }
         }
 
         // Apply window size limits (resizable, etc.) from Window view
-        if let Some(limits) = pipeline.element_tree().root().and_then(|r| r.get_window_size_limits()) {
+        if let Some(limits) = pipeline
+            .element_tree()
+            .root()
+            .and_then(|r| find_window_size_limits(r))
+        {
             if !limits.resizable {
                 let _ = platform_window.set_resizable(false);
             }
@@ -126,6 +145,12 @@ pub trait Application: View {
                                 presented_this_cycle = true;
                             }
                         }
+                    }
+                    Event::MenuItemActivated {
+                        window_id,
+                        menu_item_id,
+                    } => {
+                        let _ = menu_model::invoke_menu_callback(window_id, &menu_item_id);
                     }
                     _ => {
                         // Other events are handled by the pipeline
@@ -179,6 +204,18 @@ pub trait Application: View {
             std::thread::sleep(std::time::Duration::from_millis(16));
         }
     }
+}
+
+fn find_window_size_limits(element: &dyn Element) -> Option<WindowSizeLimits> {
+    if let Some(limits) = element.get_window_size_limits() {
+        return Some(limits);
+    }
+    for child in element.children() {
+        if let Some(limits) = find_window_size_limits(child.as_ref()) {
+            return Some(limits);
+        }
+    }
+    None
 }
 
 struct ApplicationRootElement<A: Application + Clone> {

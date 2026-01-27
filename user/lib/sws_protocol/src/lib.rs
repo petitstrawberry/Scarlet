@@ -50,6 +50,7 @@ pub mod client_msg {
     pub const GET_ACTIVE_APP: u32 = 27; // Get active app info for TaskBar
     pub const SET_WINDOW_HAS_ALPHA_CONTENT: u32 = 28; // Set whether window content has alpha channel
     pub const SET_WINDOW_MENU_TITLES: u32 = 29; // Update menu titles for a window
+    pub const ACTIVATE_MENU_ITEM: u32 = 30; // Request menu item activation for a window
 }
 
 /// Message type IDs (server -> client).
@@ -64,6 +65,7 @@ pub mod server_msg {
     pub const WINDOW_LIST: u32 = 17;
     pub const FOCUS_CHANGED: u32 = 18;
     pub const ACTIVE_APP: u32 = 19; // Response to GET_ACTIVE_APP
+    pub const MENU_ITEM_ACTIVATED: u32 = 20; // Menu item activation for a window
 }
 
 /// Flags for transient (parent/child) window behavior.
@@ -293,6 +295,10 @@ pub enum ClientMessageRef<'a> {
         window_id: u32,
         menu_titles: &'a [u8], // Format: "menu1|menu2|menu3"
     },
+    ActivateMenuItem {
+        window_id: u32,
+        menu_item_id: &'a [u8],
+    },
 }
 
 /// Server->client messages.
@@ -347,7 +353,7 @@ pub enum ServerMessage {
         app_name_len: u32,
         title: [u8; 256],
         title_len: u32,
-        menu_titles: [u8; 512], // Format: "menu1|menu2|menu3"
+        menu_titles: [u8; 2048], // Format: "menu1|menu2|menu3"
         menu_titles_len: u32,
     },
     /// Active application information (response to GET_ACTIVE_APP)
@@ -356,8 +362,13 @@ pub enum ServerMessage {
         app_id_len: u32,
         app_name: [u8; 128],
         app_name_len: u32,
-        menu_titles: [u8; 512], // Format: "menu1|menu2|menu3"
+        menu_titles: [u8; 2048], // Format: "menu1|menu2|menu3"
         menu_titles_len: u32,
+    },
+    MenuItemActivated {
+        window_id: u32,
+        menu_item_id: [u8; 128],
+        menu_item_id_len: u32,
     },
     Error {
         code: u32,
@@ -697,6 +708,22 @@ pub fn parse_client_message<'a>(
                 menu_titles: &payload[8..],
             })
         }
+        client_msg::ACTIVATE_MENU_ITEM => {
+            // Payload: window_id (u32) + menu_item_id_len (u32) + menu_item_id_bytes
+            if payload.len() < 8 {
+                return Err(ProtocolError::MalformedPayload);
+            }
+            let window_id = u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
+            let menu_item_id_len =
+                u32::from_le_bytes([payload[4], payload[5], payload[6], payload[7]]) as usize;
+            if payload.len() != 8 + menu_item_id_len {
+                return Err(ProtocolError::MalformedPayload);
+            }
+            Ok(ClientMessageRef::ActivateMenuItem {
+                window_id,
+                menu_item_id: &payload[8..],
+            })
+        }
         _ => Err(ProtocolError::UnknownMessageType),
     }
 }
@@ -813,7 +840,7 @@ pub fn parse_server_message(msg_type: u32, payload: &[u8]) -> Result<ServerMessa
             // Payload: window_id (u32) + app_id_len (u32) + app_id (variable, max 128)
             //          + app_name_len (u32) + app_name (variable, max 128)
             //          + title_len (u32) + title (variable, max 256)
-            //          + menu_titles_len (u32) + menu_titles (variable, max 512)
+            //          + menu_titles_len (u32) + menu_titles (variable, max 2048)
             if payload.len() < 8 {
                 return Err(ProtocolError::MalformedPayload);
             }
@@ -877,7 +904,7 @@ pub fn parse_server_message(msg_type: u32, payload: &[u8]) -> Result<ServerMessa
                 return Err(ProtocolError::MalformedPayload);
             }
 
-            let mut menu_titles = [0u8; 512];
+            let mut menu_titles = [0u8; 2048];
             if menu_titles_len > 0 {
                 menu_titles[..menu_titles_len]
                     .copy_from_slice(&payload[offset - menu_titles_len..offset]);
@@ -905,7 +932,7 @@ pub fn parse_server_message(msg_type: u32, payload: &[u8]) -> Result<ServerMessa
         server_msg::ACTIVE_APP => {
             // Payload: app_id_len (u32) + app_id (variable, max 128)
             //          + app_name_len (u32) + app_name (variable, max 128)
-            //          + menu_titles_len (u32) + menu_titles (variable, max 512)
+            //          + menu_titles_len (u32) + menu_titles (variable, max 2048)
             if payload.len() < 4 {
                 return Err(ProtocolError::MalformedPayload);
             }
@@ -951,7 +978,7 @@ pub fn parse_server_message(msg_type: u32, payload: &[u8]) -> Result<ServerMessa
                 return Err(ProtocolError::MalformedPayload);
             }
 
-            let mut menu_titles = [0u8; 512];
+            let mut menu_titles = [0u8; 2048];
             if menu_titles_len > 0 {
                 menu_titles[..menu_titles_len]
                     .copy_from_slice(&payload[offset2 + 4..offset2 + 4 + menu_titles_len]);
@@ -964,6 +991,33 @@ pub fn parse_server_message(msg_type: u32, payload: &[u8]) -> Result<ServerMessa
                 app_name_len: app_name_len as u32,
                 menu_titles,
                 menu_titles_len: menu_titles_len as u32,
+            })
+        }
+        server_msg::MENU_ITEM_ACTIVATED => {
+            // Payload: window_id (u32) + menu_item_id_len (u32) + menu_item_id (variable, max 128)
+            if payload.len() < 8 {
+                return Err(ProtocolError::MalformedPayload);
+            }
+            let window_id = u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
+            let menu_item_id_len =
+                u32::from_le_bytes([payload[4], payload[5], payload[6], payload[7]]) as usize;
+            if payload.len() != 8 + menu_item_id_len {
+                return Err(ProtocolError::MalformedPayload);
+            }
+            let mut menu_item_id = [0u8; 128];
+            if menu_item_id_len > 0 {
+                let capped_len = menu_item_id_len.min(menu_item_id.len());
+                menu_item_id[..capped_len].copy_from_slice(&payload[8..8 + capped_len]);
+                return Ok(ServerMessage::MenuItemActivated {
+                    window_id,
+                    menu_item_id,
+                    menu_item_id_len: capped_len as u32,
+                });
+            }
+            Ok(ServerMessage::MenuItemActivated {
+                window_id,
+                menu_item_id,
+                menu_item_id_len: 0,
             })
         }
         _ => Err(ProtocolError::UnknownMessageType),
@@ -1031,6 +1085,20 @@ pub fn payload_set_window_menu_titles(window_id: u32, menu_titles: &[u8]) -> Vec
     out.extend_from_slice(&window_id.to_le_bytes());
     out.extend_from_slice(&(menu_titles.len() as u32).to_le_bytes());
     out.extend_from_slice(menu_titles);
+    out
+}
+
+/// Build payload for client->server `ACTIVATE_MENU_ITEM`.
+///
+/// Payload format:
+/// - window_id (u32)
+/// - menu_item_id_len (u32)
+/// - menu_item_id_bytes (variable)
+pub fn payload_activate_menu_item(window_id: u32, menu_item_id: &[u8]) -> Vec<u8> {
+    let mut out = Vec::new();
+    out.extend_from_slice(&window_id.to_le_bytes());
+    out.extend_from_slice(&(menu_item_id.len() as u32).to_le_bytes());
+    out.extend_from_slice(menu_item_id);
     out
 }
 
@@ -1403,7 +1471,7 @@ pub fn payload_focus_window(window_id: u32) -> Vec<u8> {
 /// - title_len (u32)
 /// - title_bytes (variable, max 256)
 /// - menu_titles_len (u32)
-/// - menu_titles_bytes (variable, max 512, format: "menu1|menu2|menu3")
+/// - menu_titles_bytes (variable, max 2048, format: "menu1|menu2|menu3")
 pub fn payload_focus_changed(
     window_id: u32,
     app_id: &[u8],
@@ -1426,10 +1494,25 @@ pub fn payload_focus_changed(
     payload.extend_from_slice(&(title_len as u32).to_le_bytes());
     payload.extend_from_slice(&title[..title_len]);
 
-    let menu_titles_len = menu_titles.len().min(512);
+    let menu_titles_len = menu_titles.len().min(2048);
     payload.extend_from_slice(&(menu_titles_len as u32).to_le_bytes());
     payload.extend_from_slice(&menu_titles[..menu_titles_len]);
 
+    payload
+}
+
+/// Build payload for server->client `MENU_ITEM_ACTIVATED`.
+///
+/// Payload format:
+/// - window_id (u32)
+/// - menu_item_id_len (u32, max 128)
+/// - menu_item_id_bytes (variable)
+pub fn payload_menu_item_activated(window_id: u32, menu_item_id: &[u8]) -> Vec<u8> {
+    let mut payload = Vec::new();
+    let menu_item_id_len = menu_item_id.len().min(128);
+    payload.extend_from_slice(&window_id.to_le_bytes());
+    payload.extend_from_slice(&(menu_item_id_len as u32).to_le_bytes());
+    payload.extend_from_slice(&menu_item_id[..menu_item_id_len]);
     payload
 }
 

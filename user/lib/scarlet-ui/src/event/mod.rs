@@ -1,5 +1,6 @@
 //! Event types and handling for ScarletUI
 
+use alloc::string::String;
 use alloc::vec::Vec;
 
 mod dispatcher;
@@ -46,6 +47,12 @@ pub enum Event {
 
     /// Window control event (from Window titlebar buttons)
     Window(WindowEvent),
+
+    /// Menu item activation (from SWS)
+    MenuItemActivated {
+        window_id: u32,
+        menu_item_id: String,
+    },
 }
 
 /// Mouse events

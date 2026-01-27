@@ -39,6 +39,11 @@ pub enum Event {
         title: std::string::String,
         menu_titles: std::string::String,
     },
+    /// Menu item activation for a window
+    MenuItemActivated {
+        window_id: u32,
+        menu_item_id: std::string::String,
+    },
     /// Error from server
     Error { code: u32 },
 }

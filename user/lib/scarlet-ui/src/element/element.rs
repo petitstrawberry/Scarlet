@@ -286,7 +286,13 @@ pub trait Element {
     /// None otherwise. Default implementation returns None.
     fn get_window_info(
         &self,
-    ) -> Option<(alloc::string::String, alloc::string::String, Size, u32, alloc::string::String)> {
+    ) -> Option<(
+        alloc::string::String,
+        alloc::string::String,
+        Size,
+        u32,
+        Option<crate::menu_model::MenuBarModel>,
+    )> {
         None
     }
 
