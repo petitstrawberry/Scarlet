@@ -45,6 +45,7 @@ impl Application for DemoApp {
                     .font_size(20.0),
                 Spacer::new(),
                 Toggle::new(self.toggle_state.clone()),
+                Spacer::new(),
                 Button::new("Click Me")
                     .on_click(|| {
                         println!("[ui_demo] Button clicked!");
