@@ -154,6 +154,8 @@ pub enum ClientMessageRef<'a> {
         height: u32,
         window_type: u32, // Window type (0=Normal, 1=AlwaysOnTop, 2=Taskbar, 3=Desktop)
         resizable: bool,
+        focus_on_create: bool,
+        active_on_focus: bool,
     },
     DestroyWindow {
         window_id: u32,
@@ -430,7 +432,10 @@ pub fn parse_client_message<'a>(
             ]) as usize;
             offset += 4 + menu_titles_len;
 
-            if payload.len() != offset + 12 && payload.len() != offset + 16 {
+            if payload.len() != offset + 12
+                && payload.len() != offset + 16
+                && payload.len() != offset + 24
+            {
                 return Err(ProtocolError::MalformedPayload);
             }
 
@@ -456,7 +461,7 @@ pub fn parse_client_message<'a>(
                 payload[offset + 10],
                 payload[offset + 11],
             ]);
-            let resizable = if payload.len() == offset + 16 {
+            let resizable = if payload.len() == offset + 16 || payload.len() == offset + 24 {
                 u32::from_le_bytes([
                     payload[offset + 12],
                     payload[offset + 13],
@@ -466,6 +471,22 @@ pub fn parse_client_message<'a>(
             } else {
                 true
             };
+            let mut focus_on_create = true;
+            let mut active_on_focus = window_type == window_types::NORMAL;
+            if payload.len() == offset + 24 {
+                focus_on_create = u32::from_le_bytes([
+                    payload[offset + 16],
+                    payload[offset + 17],
+                    payload[offset + 18],
+                    payload[offset + 19],
+                ]) != 0;
+                active_on_focus = u32::from_le_bytes([
+                    payload[offset + 20],
+                    payload[offset + 21],
+                    payload[offset + 22],
+                    payload[offset + 23],
+                ]) != 0;
+            }
             Ok(ClientMessageRef::CreateWindow {
                 app_id,
                 app_name,
@@ -474,6 +495,8 @@ pub fn parse_client_message<'a>(
                 height,
                 window_type,
                 resizable,
+                focus_on_create,
+                active_on_focus,
             })
         }
         client_msg::DESTROY_WINDOW => {
@@ -1162,6 +1185,8 @@ pub fn parse_server_message(msg_type: u32, payload: &[u8]) -> Result<ServerMessa
 /// - height (u32)
 /// - window_type (u32)
 /// - resizable (u32, 0=false, 1=true)
+/// - focus_on_create (u32, 0=false, 1=true)
+/// - active_on_focus (u32, 0=false, 1=true)
 pub fn payload_create_window(
     app_id: &[u8],
     app_name: &[u8],
@@ -1170,6 +1195,8 @@ pub fn payload_create_window(
     height: u32,
     window_type: u32,
     resizable: bool,
+    focus_on_create: bool,
+    active_on_focus: bool,
 ) -> Vec<u8> {
     let mut payload = Vec::new();
     payload.extend_from_slice(&(app_id.len() as u32).to_le_bytes());
@@ -1182,6 +1209,8 @@ pub fn payload_create_window(
     payload.extend_from_slice(&height.to_le_bytes());
     payload.extend_from_slice(&window_type.to_le_bytes());
     payload.extend_from_slice(&(resizable as u32).to_le_bytes());
+    payload.extend_from_slice(&(focus_on_create as u32).to_le_bytes());
+    payload.extend_from_slice(&(active_on_focus as u32).to_le_bytes());
     payload
 }
 

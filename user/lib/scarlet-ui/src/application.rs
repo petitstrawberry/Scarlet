@@ -100,8 +100,15 @@ pub trait Application: View {
         self.init();
 
         // 4. Perform initial layout to determine window size and extract window properties
-        let (app_id, window_title, window_size, window_type, menu_bar) =
-            pipeline.layout_initial();
+        let (
+            app_id,
+            window_title,
+            window_size,
+            window_type,
+            menu_bar,
+            focus_on_create,
+            active_on_focus,
+        ) = pipeline.layout_initial();
 
         // Debug: Dump element tree
         if crate::debug::is_enabled() {
@@ -116,15 +123,24 @@ pub trait Application: View {
         // 5. Create platform window (default: SWS backend)
         // Use create_with_type for special window types (TASKBAR, ALWAYS_ON_TOP)
         let mut platform_window = if window_type == crate::views::window_type::NORMAL {
-            SWSPlatformWindow::new_with_menu(&app_id, &window_title, window_size, &menu_json)
+            SWSPlatformWindow::new_with_menu_and_policies(
+                &app_id,
+                &window_title,
+                window_size,
+                &menu_json,
+                focus_on_create,
+                active_on_focus,
+            )
                 .map_err(|_| crate::error::Error::WindowCreationFailed)?
         } else {
-            SWSPlatformWindow::create_with_type_and_menu(
+            SWSPlatformWindow::create_with_type_and_menu_and_policies(
                 &app_id,
                 &window_title,
                 window_size,
                 window_type,
                 &menu_json,
+                focus_on_create,
+                active_on_focus,
             )
             .map_err(|_| crate::error::Error::WindowCreationFailed)?
         };

@@ -707,13 +707,16 @@ fn show_window_list_dropdown(
     let dropdown_height = (item_count as u32) * ITEM_HEIGHT + 4; // +4 for border
 
     // Create dropdown surface (AlwaysOnTop for popup)
-    let surface_id = match conn.create_surface_with_type(
+    let surface_id = match conn.create_surface_with_type_and_policies(
         "org.scarlet-os.desktop.taskbar",
         "Taskbar",
         "",
         DROPDOWN_WIDTH,
         dropdown_height,
         window_types::ALWAYS_ON_TOP,
+        false,
+        true,
+        false,
     ) {
         Ok(id) => id,
         Err(_) => {
@@ -878,13 +881,16 @@ fn show_app_menu_dropdown(
     let dropdown_height = num_items as u32 * ITEM_HEIGHT + 4;
 
     // Create dropdown surface (AlwaysOnTop for popup)
-    let surface_id = match conn.create_surface_with_type(
+    let surface_id = match conn.create_surface_with_type_and_policies(
         "org.scarlet-os.desktop.taskbar",
         "Taskbar",
         "",
         DROPDOWN_WIDTH,
         dropdown_height,
         window_types::ALWAYS_ON_TOP,
+        false,
+        true,
+        false,
     ) {
         Ok(id) => id,
         Err(_) => {
@@ -1159,13 +1165,16 @@ pub extern "C" fn main() -> i32 {
     };
 
     // Create taskbar surface directly with TASKBAR type
-    let surface_id = match conn.create_surface_with_type(
+    let surface_id = match conn.create_surface_with_type_and_policies(
         "org.scarlet-os.desktop.taskbar",
         "Taskbar",
         "",
         screen_width,
         bar_height,
         window_types::TASKBAR,
+        false,
+        true,
+        false,
     ) {
         Ok(id) => id,
         Err(_) => {

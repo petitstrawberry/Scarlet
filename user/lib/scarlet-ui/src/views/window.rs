@@ -22,8 +22,9 @@ use crate::state::Listenable;
 /// Window types (matching sws_protocol::window_types)
 pub mod window_type {
     pub const NORMAL: u32 = 0;
-    pub const TASKBAR: u32 = 1;
-    pub const ALWAYS_ON_TOP: u32 = 2;
+    pub const ALWAYS_ON_TOP: u32 = 1;
+    pub const TASKBAR: u32 = 2;
+    pub const DESKTOP: u32 = 3;
 }
 
 /// Window information
@@ -34,6 +35,8 @@ pub struct WindowInfo {
     pub size: Size,
     pub window_type: u32,
     pub menu_bar: Option<MenuBarModel>,
+    pub focus_on_create: bool,
+    pub active_on_focus: bool,
 }
 
 impl WindowInfo {
@@ -43,6 +46,8 @@ impl WindowInfo {
         size: Size,
         window_type: u32,
         menu_bar: Option<MenuBarModel>,
+        focus_on_create: bool,
+        active_on_focus: bool,
     ) -> Self {
         Self {
             app_id,
@@ -50,6 +55,8 @@ impl WindowInfo {
             size,
             window_type,
             menu_bar,
+            focus_on_create,
+            active_on_focus,
         }
     }
 }
@@ -78,6 +85,8 @@ pub struct Window<V: View> {
     background_color: Option<Color>,
     window_type: u32,
     menu_bar: Option<MenuBarModel>,
+    focus_on_create: bool,
+    active_on_focus: bool,
     content: V,
 }
 
@@ -104,6 +113,8 @@ impl<V: View> Window<V> {
             background_color: Some(Color::WHITE),
             window_type: window_type::NORMAL,
             menu_bar: None,
+            focus_on_create: true,
+            active_on_focus: true,
             content,
         }
     }
@@ -169,6 +180,18 @@ impl<V: View> Window<V> {
         self
     }
 
+    /// Set whether the window should request focus when created
+    pub fn focus_on_create(mut self, focus_on_create: bool) -> Self {
+        self.focus_on_create = focus_on_create;
+        self
+    }
+
+    /// Set whether focusing this window should change the active app
+    pub fn active_on_focus(mut self, active_on_focus: bool) -> Self {
+        self.active_on_focus = active_on_focus;
+        self
+    }
+
     /// Set menu bar model for the window
     pub fn menu_bar(mut self, menu_bar: MenuBarModel) -> Self {
         self.menu_bar = Some(menu_bar);
@@ -226,6 +249,8 @@ impl<V: View + Clone> Clone for Window<V> {
             background_color: self.background_color,
             window_type: self.window_type,
             menu_bar: self.menu_bar.clone(),
+            focus_on_create: self.focus_on_create,
+            active_on_focus: self.active_on_focus,
             content: self.content.clone(),
         }
     }
@@ -239,6 +264,8 @@ impl<V: View + Clone> WindowViewInfo for Window<V> {
             self.size,
             self.window_type,
             self.menu_bar.clone(),
+            self.focus_on_create,
+            self.active_on_focus,
         )
     }
 
@@ -651,10 +678,20 @@ impl<C: View + Clone + WindowViewInfo> Element for WindowRenderElement<C> {
         Size,
         u32,
         Option<MenuBarModel>,
+        bool,
+        bool,
     )>
     {
         let info = self.view.window_info();
-        Some((info.app_id, info.title, info.size, info.window_type, info.menu_bar))
+        Some((
+            info.app_id,
+            info.title,
+            info.size,
+            info.window_type,
+            info.menu_bar,
+            info.focus_on_create,
+            info.active_on_focus,
+        ))
     }
 
     fn get_window_size_limits(&self) -> Option<WindowSizeLimits> {

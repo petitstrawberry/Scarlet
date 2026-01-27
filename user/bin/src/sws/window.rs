@@ -121,6 +121,8 @@ pub struct Window {
     pub opacity: f32,
     /// Whether the window can be resized by the user via interactive resize
     pub resizable: bool,
+    /// Whether focusing this window should make it the active application
+    pub active_on_focus: bool,
     /// Whether the window content contains alpha channel (semi-transparent pixels)
     ///
     /// This is separate from window.opacity - this controls whether pixel alpha
@@ -158,6 +160,7 @@ impl Window {
             saved_geometry: None,
             opacity: 1.0,
             resizable: true,          // Default to resizable
+            active_on_focus: true,
             has_alpha_content: false, // Default to opaque content
         }
     }
@@ -191,6 +194,7 @@ impl Window {
             saved_geometry: None,
             opacity: 1.0,
             resizable: true,          // Default to resizable
+            active_on_focus: true,
             has_alpha_content: false, // Default to opaque content
         }
     }
@@ -250,6 +254,7 @@ impl Window {
             saved_geometry: None,
             opacity: 1.0,
             resizable: true,          // Default to resizable
+            active_on_focus: true,
             has_alpha_content: false, // Default to opaque content
         })
     }
@@ -374,9 +379,6 @@ impl WindowManager {
         let window = Window::new_with_shm(id, x, y, width, height)?;
         self.windows.push(window);
 
-        // Focus the new window
-        self.focus_window(id);
-
         Ok(id)
     }
 
@@ -425,12 +427,10 @@ impl WindowManager {
             saved_geometry: None,
             opacity: 1.0,
             resizable: true,          // Default to resizable
+            active_on_focus: true,
             has_alpha_content: false, // Default to opaque content
         };
         self.windows.push(window);
-
-        // Focus the new window
-        self.focus_window(id);
 
         Ok(id)
     }
@@ -510,7 +510,7 @@ impl WindowManager {
         match window_type {
             WindowType::Normal => true,
             WindowType::AlwaysOnTop => true,
-            WindowType::Taskbar => false,
+            WindowType::Taskbar => true,
             WindowType::Desktop => false,
         }
     }

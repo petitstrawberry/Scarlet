@@ -1186,14 +1186,12 @@ impl Compositor {
                 menu_titles_bytes.len()
             );
 
-            // For normal windows only, check if app_id changed and broadcast ACTIVE_APP_CHANGED
-            // This is used by TaskBar to update its menu bar
+            // For active-app windows only, check if app_id changed and broadcast ACTIVE_APP_CHANGED.
             println!(
-                "[Compositor] Checking window type: window_type={:?}, Normal={}",
-                window.window_type,
-                window.window_type == super::window::WindowType::Normal
+                "[Compositor] Checking active-on-focus: window_id={}, active_on_focus={}",
+                window_id, window.active_on_focus
             );
-            if window.window_type == super::window::WindowType::Normal {
+            if window.active_on_focus {
                 let app_id_changed = match &self.active_app_id {
                     Some(current_app_id) => current_app_id != app_id_bytes,
                     None => true,
@@ -1478,10 +1476,13 @@ impl Compositor {
                     }
                 }
 
-                // Route mouse position to focused window
-                if let Some(focused_id) = self.window_manager.get_focused_window_id() {
-                    if let Some(window) = self.window_manager.get_window(focused_id) {
-                        self.send_mouse_position_to_window(focused_id, window);
+                // Route mouse position to the window under the cursor (TaskBar needs hover input).
+                if let Some(win_id) = self
+                    .window_manager
+                    .window_at_point(self.cursor.x, self.cursor.y)
+                {
+                    if let Some(window) = self.window_manager.get_window(win_id) {
+                        self.send_mouse_position_to_window(win_id, window);
                     }
                 }
 
@@ -1578,22 +1579,25 @@ impl Compositor {
                     self.handle_click()?;
                 }
 
-                // Route button event to focused window only if cursor is within window bounds
-                if let Some(focused_id) = self.window_manager.get_focused_window_id() {
+                // Route button event to the window under the cursor (even if it can't take focus).
+                if let Some(target_id) = self
+                    .window_manager
+                    .window_at_point(self.cursor.x, self.cursor.y)
+                {
                     let window = self
                         .window_manager
-                        .get_window(focused_id)
-                        .ok_or("Focused window not found")?;
+                        .get_window(target_id)
+                        .ok_or("Target window not found")?;
                     if self.cursor_position_in_window(window).is_some() {
                         super::ipc::send_input_to_window(
-                            focused_id,
+                            target_id,
                             0,
                             super::input::event_types::EV_KEY,
                             button,
                             if pressed { 1 } else { 0 },
                         );
                         super::ipc::send_input_to_window(
-                            focused_id,
+                            target_id,
                             0,
                             super::input::event_types::EV_SYN,
                             0,
@@ -1641,6 +1645,8 @@ impl Compositor {
                 height,
                 window_type,
                 resizable,
+                focus_on_create,
+                active_on_focus,
                 shm,
                 shm_mapped_addr,
                 shm_size,
@@ -1750,6 +1756,15 @@ impl Compositor {
                     );
                 }
                 self.window_manager.set_window_resizable(window_id, resizable);
+                if let Some(window) = self.window_manager.get_window_mut(window_id) {
+                    window.active_on_focus = active_on_focus;
+                }
+
+                // Focus is for input routing only; give focus to newly created windows.
+                if focus_on_create {
+                    self.window_manager.set_focus(window_id);
+                    self.broadcast_focus_change(window_id);
+                }
 
                 // Don't trigger redraw yet - wait for client to draw and send UPDATE_BUFFER
                 // self.full_redraw_needed = true;

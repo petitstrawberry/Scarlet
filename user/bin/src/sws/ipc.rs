@@ -751,6 +751,8 @@ fn client_thread_main(client_id: usize, mut socket: Socket) {
                 height,
                 window_type,
                 resizable,
+                focus_on_create,
+                active_on_focus,
             }) => {
                 // Convert &[u8] to String
                 let app_id_str = String::from_utf8_lossy(app_id).into_owned();
@@ -889,6 +891,8 @@ fn client_thread_main(client_id: usize, mut socket: Socket) {
                             height,
                             window_type,
                             resizable,
+                            focus_on_create,
+                            active_on_focus,
                             shm: Some(shm),
                             shm_mapped_addr,
                             shm_size: buffer_size as usize,
@@ -1315,6 +1319,8 @@ pub enum IpcEvent {
         height: u32,
         window_type: u32, // Window type (0=Normal, 1=AlwaysOnTop, 2=Taskbar, 3=Desktop)
         resizable: bool,
+        focus_on_create: bool,
+        active_on_focus: bool,
         /// Shared memory for the window buffer (server-allocated)
         shm: Option<SharedMemory>,
         shm_mapped_addr: Option<usize>,

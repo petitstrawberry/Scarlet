@@ -548,48 +548,20 @@ impl PopupMenuRenderer {
 }
 
 impl Application for TaskBarApp {
+    fn on_focus_changed(&mut self, window_id: u32, app_name: &str, menu_titles: &str) {
+        println!(
+            "[TaskBar] on_focus_changed: window_id={}, app_name={}, menu_titles={}",
+            window_id, app_name, menu_titles
+        );
+        let _ = (window_id, app_name, menu_titles);
+    }
+
     fn on_active_app_changed(&mut self, window_id: u32, app_name: &str, menu_titles: &str) {
-        println!("[TaskBar] on_active_app_changed: window_id={}, app_name={}, menu_titles={}", window_id, app_name, menu_titles);
-
-        // Check if this is a popup menu surface
-        if self.popup_surface_id.get() == Some(window_id) {
-            println!("[TaskBar] Skipping popup surface {}", window_id);
-            return;
-        }
-
-        // Handle empty app_name (no active application)
-        if app_name.is_empty() {
-            println!("[TaskBar] No active application, showing default menu");
-            self.active_window_id.set(0);
-            self.open_menu_index.set(None);
-            // Show default TaskBar menu (Scarlet menu)
-            let tree = MenuTree {
-                items: vec![TaskMenuItem {
-                    id: String::from("system_scarlet"),
-                    title: String::from("Scarlet"),
-                    enabled: true,
-                    shortcut: None,
-                    children: default_system_menu_entries(),
-                }],
-            };
-            self.menu_bar.set(menu_bar_from_tree(&tree));
-            self.menu_tree.set(tree);
-            return;
-        }
-
-        // Build new menu tree
-        let tree = build_menu_tree(app_name, menu_titles);
-        println!("[TaskBar] Built menu tree with {} items", tree.items.len());
-
-        // Update State
-        self.menu_bar.set(menu_bar_from_tree(&tree));
-        println!("[TaskBar] menu_bar.set() completed");
-        println!("[TaskBar] Calling menu_tree.set()");
-        self.menu_tree.set(tree);
-        println!("[TaskBar] menu_tree.set() completed");
-
-        self.active_window_id.set(window_id);
-        self.open_menu_index.set(None);
+        println!(
+            "[TaskBar] on_active_app_changed: window_id={}, app_name={}, menu_titles={}",
+            window_id, app_name, menu_titles
+        );
+        self.update_menu_for_app(window_id, app_name, menu_titles);
     }
 
     fn body(&self) -> impl View {
@@ -636,6 +608,7 @@ impl Application for TaskBarApp {
         .decorated(false)
         .background_color(Some(Color::rgb(0.940, 0.940, 0.960)))
         .window_type(scarlet_ui::views::window_type::TASKBAR)
+        .active_on_focus(false)
         .resizable(false)
         .movable(false)
         .size(Size::new(screen_width, window_height))
@@ -724,13 +697,16 @@ impl TaskBarApp {
                                 let surface_id = match popup_surface_id {
                                     Some(id) => id,
                                     None => {
-                                        match conn.create_surface_with_type(
+                                        match conn.create_surface_with_type_and_policies(
                                             "org.scarlet-os.popup.menu",
                                             "Menu",
                                             "",
                                             width,
                                             height,
                                             window_types::ALWAYS_ON_TOP,
+                                            false,
+                                            true,
+                                            false,
                                         ) {
                                             Ok(id) => {
                                                 popup_surface_id = Some(id);
@@ -767,10 +743,22 @@ impl TaskBarApp {
                 let _ = conn.dispatch();
                 while let Some(ev) = conn.poll_event() {
                     match ev {
-                        sws::event::Event::FocusChanged { window_id, .. } => {
-                            if popup_surface_id_popup.get() != Some(window_id) {
-                                open_menu_index_popup.set(None);
+                        sws::event::Event::FocusChanged {
+                            window_id,
+                            app_id,
+                            app_name,
+                            ..
+                        } => {
+                            if popup_surface_id_popup.get() == Some(window_id) {
+                                continue;
                             }
+                            if app_id == "org.scarlet-os.desktop.taskbar"
+                                || app_name == "TaskBar"
+                                || app_name == "Menu"
+                            {
+                                continue;
+                            }
+                            open_menu_index_popup.set(None);
                         }
                         sws::event::Event::Input(input) => {
                             if Some(input.surface_id) != popup_surface_id {
@@ -854,6 +842,48 @@ impl TaskBarApp {
                 std::thread::sleep(Duration::from_secs(1));
             }
         });
+    }
+
+    fn update_menu_for_app(&mut self, window_id: u32, app_name: &str, menu_titles: &str) {
+        println!(
+            "[TaskBar] update_menu_for_app: window_id={}, app_name={}, menu_titles={}",
+            window_id, app_name, menu_titles
+        );
+
+        if self.popup_surface_id.get() == Some(window_id) {
+            println!("[TaskBar] Skipping popup surface {}", window_id);
+            return;
+        }
+
+        if app_name == "TaskBar" || app_name == "Menu" {
+            println!("[TaskBar] Skipping menu update for {}", app_name);
+            return;
+        }
+
+        if app_name.is_empty() {
+            println!("[TaskBar] No active application, showing default menu");
+            self.active_window_id.set(0);
+            self.open_menu_index.set(None);
+            let tree = MenuTree {
+                items: vec![TaskMenuItem {
+                    id: String::from("system_scarlet"),
+                    title: String::from("Scarlet"),
+                    enabled: true,
+                    shortcut: None,
+                    children: default_system_menu_entries(),
+                }],
+            };
+            self.menu_bar.set(menu_bar_from_tree(&tree));
+            self.menu_tree.set(tree);
+            return;
+        }
+
+        let tree = build_menu_tree(app_name, menu_titles);
+        println!("[TaskBar] Built menu tree with {} items", tree.items.len());
+        self.menu_bar.set(menu_bar_from_tree(&tree));
+        self.menu_tree.set(tree);
+        self.active_window_id.set(window_id);
+        self.open_menu_index.set(None);
     }
 }
 

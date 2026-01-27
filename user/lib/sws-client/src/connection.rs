@@ -180,6 +180,34 @@ impl Connection {
         window_type: u32,
         resizable: bool,
     ) -> Result<u32, Error> {
+        let focus_on_create = true;
+        let active_on_focus = window_type == 0;
+        self.create_surface_with_type_and_policies(
+            app_id,
+            app_name,
+            menu_titles,
+            width,
+            height,
+            window_type,
+            resizable,
+            focus_on_create,
+            active_on_focus,
+        )
+    }
+
+    /// Create a new surface (window) with explicit focus/active policies
+    pub fn create_surface_with_type_and_policies(
+        &mut self,
+        app_id: &str,
+        app_name: &str,
+        menu_titles: &str,
+        width: u32,
+        height: u32,
+        window_type: u32,
+        resizable: bool,
+        focus_on_create: bool,
+        active_on_focus: bool,
+    ) -> Result<u32, Error> {
         // Send CreateWindow request
         let payload = protocol::payload_create_window(
             app_id.as_bytes(),
@@ -189,6 +217,8 @@ impl Connection {
             height,
             window_type,
             resizable,
+            focus_on_create,
+            active_on_focus,
         );
         println!("[sws-client] Creating surface: payload size {}", payload.len());
         write_frame(

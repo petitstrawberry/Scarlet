@@ -37,7 +37,7 @@ impl SWSPlatformWindow {
 
     /// Create a new platform window with a specific window type
     pub fn create_with_type(app_id: &str, title: &str, size: Size, window_type: u32) -> Result<Self> {
-        Self::create_with_type_and_menu(app_id, title, size, window_type, "")
+        Self::create_with_type_and_menu_and_policies(app_id, title, size, window_type, "", true, window_type == sws_protocol::window_types::NORMAL)
     }
 
     /// Create a new platform window with a specific window type and initial menu titles
@@ -48,18 +48,42 @@ impl SWSPlatformWindow {
         window_type: u32,
         menu_titles: &str,
     ) -> Result<Self> {
+        Self::create_with_type_and_menu_and_policies(
+            app_id,
+            title,
+            size,
+            window_type,
+            menu_titles,
+            true,
+            window_type == sws_protocol::window_types::NORMAL,
+        )
+    }
+
+    /// Create a new platform window with a specific window type, menu titles, and focus policies
+    pub fn create_with_type_and_menu_and_policies(
+        app_id: &str,
+        title: &str,
+        size: Size,
+        window_type: u32,
+        menu_titles: &str,
+        focus_on_create: bool,
+        active_on_focus: bool,
+    ) -> Result<Self> {
         // Connect to SWS
         let mut conn = sws::Connection::connect("/tmp/sws.sock")
             .map_err(|_| crate::error::Error::ConnectionFailed)?;
 
         // Create surface with type
-        let surface_id = conn.create_surface_with_type(
+        let surface_id = conn.create_surface_with_type_and_policies(
             app_id,
             title,
             menu_titles,
             size.width as u32,
             size.height as u32,
             window_type,
+            true,
+            focus_on_create,
+            active_on_focus,
         ).map_err(|_| crate::error::Error::SurfaceCreationFailed)?;
 
         Ok(Self {
@@ -75,12 +99,33 @@ impl SWSPlatformWindow {
     }
 
     pub fn new_with_menu(app_id: &str, title: &str, size: Size, menu_titles: &str) -> Result<Self> {
-        Self::create_with_type_and_menu(
+        Self::create_with_type_and_menu_and_policies(
             app_id,
             title,
             size,
             sws_protocol::window_types::NORMAL,
             menu_titles,
+            true,
+            true,
+        )
+    }
+
+    pub fn new_with_menu_and_policies(
+        app_id: &str,
+        title: &str,
+        size: Size,
+        menu_titles: &str,
+        focus_on_create: bool,
+        active_on_focus: bool,
+    ) -> Result<Self> {
+        Self::create_with_type_and_menu_and_policies(
+            app_id,
+            title,
+            size,
+            sws_protocol::window_types::NORMAL,
+            menu_titles,
+            focus_on_create,
+            active_on_focus,
         )
     }
 
@@ -241,14 +286,20 @@ impl PlatformWindow for SWSPlatformWindow {
 
     fn create_popup(&mut self, position: Point, size: Size) -> Result<u32> {
         // Create a popup window with ALWAYS_ON_TOP type
-        let popup_surface_id = self.conn.create_surface_with_type(
-            "org.scarlet-os.popup",
-            "Popup",
-            "",
-            size.width as u32,
-            size.height as u32,
-            sws_protocol::window_types::ALWAYS_ON_TOP,
-        ).map_err(|_| crate::error::Error::SurfaceCreationFailed)?;
+        let popup_surface_id = self
+            .conn
+            .create_surface_with_type_and_policies(
+                "org.scarlet-os.popup",
+                "Popup",
+                "",
+                size.width as u32,
+                size.height as u32,
+                sws_protocol::window_types::ALWAYS_ON_TOP,
+                true,
+                true,
+                false,
+            )
+            .map_err(|_| crate::error::Error::SurfaceCreationFailed)?;
 
         // Position the popup
         self.conn.move_window(popup_surface_id, position.x as i32, position.y as i32)
