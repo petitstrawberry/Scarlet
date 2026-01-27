@@ -2220,15 +2220,19 @@ impl Compositor {
                 );
                 let menu_titles_bytes = menu_titles.as_bytes().to_vec();
                 if super::ipc::set_app_session_menu_titles(window_id, menu_titles) {
-                    if self.window_manager.get_focused_window_id() == Some(window_id) {
+                    let is_focused = self.window_manager.get_focused_window_id() == Some(window_id);
+                    if is_focused {
                         self.broadcast_focus_change(window_id);
                     }
-                    if let (Some(active_app_id), Some(window)) = (
-                        self.active_app_id.as_ref(),
-                        self.window_manager.get_window(window_id),
-                    ) {
+
+                    if let Some(window) = self.window_manager.get_window(window_id) {
                         let window_app_id = window.app_id.as_deref().unwrap_or(b"");
-                        if active_app_id.as_slice() == window_app_id {
+                        let is_active_app = self
+                            .active_app_id
+                            .as_ref()
+                            .map_or(false, |id| id.as_slice() == window_app_id);
+
+                        if is_active_app || is_focused {
                             let (app_name, _) = super::ipc::get_app_session_info(window_id);
                             let app_name_bytes = app_name.as_bytes();
                             let title_bytes = window.title.as_deref().unwrap_or(b"");

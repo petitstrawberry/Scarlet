@@ -11,6 +11,7 @@ extern crate scarlet_ui;
 extern crate scarlet_ui_macros;
 extern crate scarlet_std as std;
 
+use alloc::collections::BTreeMap;
 use alloc::vec;
 use core::time::Duration;
 use scarlet_ui::prelude::*;
@@ -43,6 +44,7 @@ struct TaskBarApp {
     menu_tree: State<MenuTree>,
     open_menu_index: State<Option<usize>>,
     popup_surface_id: State<Option<u32>>,
+    menu_titles_cache: State<BTreeMap<u32, String>>,
 }
 
 impl TaskBarApp {
@@ -71,6 +73,7 @@ impl TaskBarApp {
             ),
             open_menu_index: State::new(StateId::new(7), None),
             popup_surface_id: State::new(StateId::new(8), None),
+            menu_titles_cache: State::new(StateId::new(9), BTreeMap::new()),
         }
     }
 }
@@ -107,16 +110,13 @@ struct MenuTreePayload {
 }
 
 #[derive(Deserialize)]
-#[serde(untagged)]
-enum MenuEntryPayload {
-    Separator { separator: bool },
-    Item {
-        id: Option<String>,
-        title: Option<String>,
-        enabled: Option<bool>,
-        shortcut: Option<String>,
-        items: Option<Vec<MenuEntryPayload>>,
-    },
+struct MenuEntryPayload {
+    separator: Option<bool>,
+    id: Option<String>,
+    title: Option<String>,
+    enabled: Option<bool>,
+    shortcut: Option<String>,
+    items: Option<Vec<MenuEntryPayload>>,
 }
 
 fn default_system_menu_entries() -> Vec<TaskMenuEntry> {
@@ -146,6 +146,41 @@ fn default_system_menu_entries() -> Vec<TaskMenuEntry> {
     ]
 }
 
+const MENU_BAR_FONT_SIZE: f32 = 16.0;
+const MENU_BAR_ITEM_PADDING: f32 = 3.0;
+const MENU_BAR_ITEM_SPACING: f32 = 2.0;
+const MENU_BAR_OUTER_PADDING: f32 = 8.0;
+const MENU_BAR_MAX_APP_LABEL: usize = 18;
+
+fn menu_bar_label(title: &str) -> String {
+    if title.len() <= MENU_BAR_MAX_APP_LABEL {
+        return title.to_string();
+    }
+    let mut shortened = String::new();
+    for ch in title.chars().take(MENU_BAR_MAX_APP_LABEL.saturating_sub(3)) {
+        shortened.push(ch);
+    }
+    shortened.push_str("...");
+    shortened
+}
+
+fn menu_bar_item_width(label: &str) -> f32 {
+    let char_width = MENU_BAR_FONT_SIZE * 0.6;
+    let text_width = label.chars().count() as f32 * char_width;
+    text_width + MENU_BAR_ITEM_PADDING * 2.0
+}
+
+fn menu_bar_popup_x(items: &[TaskMenuItem], index: usize) -> f32 {
+    let mut x = MENU_BAR_OUTER_PADDING;
+    for (i, item) in items.iter().enumerate() {
+        if i >= index {
+            break;
+        }
+        x += menu_bar_item_width(&item.title) + MENU_BAR_ITEM_SPACING;
+    }
+    x
+}
+
 fn build_menu_tree(app_name: &str, menu_titles: &str) -> MenuTree {
     let mut items = Vec::new();
     items.push(TaskMenuItem {
@@ -159,26 +194,42 @@ fn build_menu_tree(app_name: &str, menu_titles: &str) -> MenuTree {
     if !app_name.is_empty() {
         items.push(TaskMenuItem {
             id: String::from("system_app"),
-            title: app_name.to_string(),
+            title: menu_bar_label(app_name),
             enabled: true,
             shortcut: None,
             children: Vec::new(),
         });
     }
 
-    let trimmed = menu_titles.trim();
-    if !trimmed.is_empty() {
-        if trimmed.starts_with('{') {
-            items.extend(parse_menu_tree_json(trimmed));
-        } else {
-            items.extend(trimmed.split('|').map(|s| TaskMenuItem {
-                id: s.to_string(),
-                title: s.to_string(),
-                enabled: true,
-                shortcut: None,
-                children: Vec::new(),
-            }));
-        }
+    let cleaned = sanitize_menu_json(menu_titles);
+    let trimmed = cleaned.trim();
+    if trimmed.is_empty() {
+        println!(
+            "[TaskBar] Empty menu_titles after sanitize: orig_len={}, cleaned_len={}",
+            menu_titles.len(),
+            cleaned.len()
+        );
+    } else if trimmed.starts_with('{') {
+        let parsed = parse_menu_tree_json(trimmed);
+        println!(
+            "[TaskBar] Parsed menu JSON: items={}",
+            parsed.len()
+        );
+        items.extend(parsed);
+    } else {
+        println!(
+            "[TaskBar] Non-JSON menu_titles: orig_len={}, cleaned_len={}, first_byte={:?}",
+            menu_titles.len(),
+            cleaned.len(),
+            trimmed.as_bytes().get(0).copied()
+        );
+        items.extend(trimmed.split('|').map(|s| TaskMenuItem {
+            id: s.to_string(),
+            title: s.to_string(),
+            enabled: true,
+            shortcut: None,
+            children: Vec::new(),
+        }));
     }
 
     MenuTree { items }
@@ -205,7 +256,19 @@ fn menu_height(entries: &[TaskMenuEntry], item_height: f32) -> f32 {
 }
 
 fn parse_menu_tree_json(input: &str) -> Vec<TaskMenuItem> {
-    let Ok((payload, _)) = from_str::<MenuTreePayload>(input) else {
+    let cleaned = sanitize_menu_json(input);
+    let trimmed = cleaned.trim();
+    let candidate = match (trimmed.find('{'), trimmed.rfind('}')) {
+        (Some(start), Some(end)) if start < end => &trimmed[start..=end],
+        _ => trimmed,
+    };
+    let Ok((payload, _)) = from_str::<MenuTreePayload>(candidate) else {
+        println!(
+            "[TaskBar] Failed to parse menu JSON (len={}, cleaned_len={}, candidate_len={})",
+            input.len(),
+            cleaned.len(),
+            candidate.len()
+        );
         return Vec::new();
     };
     payload
@@ -219,49 +282,51 @@ fn parse_menu_tree_json(input: &str) -> Vec<TaskMenuItem> {
         .collect()
 }
 
-fn build_menu_entry(entry: MenuEntryPayload) -> Option<TaskMenuEntry> {
-    match entry {
-        MenuEntryPayload::Separator { separator } => {
-            if separator {
-                Some(TaskMenuEntry::Separator)
-            } else {
-                None
-            }
+fn sanitize_menu_json(input: &str) -> String {
+    let mut out = String::new();
+    for ch in input.chars() {
+        if ch == '\0' {
+            break;
         }
-        MenuEntryPayload::Item {
-            id,
-            title,
-            enabled,
-            shortcut,
-            items,
-        } => {
-            let resolved_id = id.unwrap_or_default();
-            let mut resolved_title = title.unwrap_or_default();
-            if resolved_id.is_empty() && resolved_title.is_empty() {
-                return None;
-            }
-            let resolved_id = if resolved_id.is_empty() {
-                resolved_title.clone()
-            } else {
-                resolved_id
-            };
-            if resolved_title.is_empty() {
-                resolved_title = resolved_id.clone();
-            }
-            let children = items
-                .unwrap_or_default()
-                .into_iter()
-                .filter_map(build_menu_entry)
-                .collect();
-            Some(TaskMenuEntry::Item(TaskMenuItem {
-                id: resolved_id,
-                title: resolved_title,
-                enabled: enabled.unwrap_or(true),
-                shortcut,
-                children,
-            }))
+        if ch.is_control() && ch != '\n' && ch != '\r' && ch != '\t' {
+            continue;
         }
+        out.push(ch);
     }
+    out
+}
+
+fn build_menu_entry(entry: MenuEntryPayload) -> Option<TaskMenuEntry> {
+    if entry.separator.unwrap_or(false) {
+        return Some(TaskMenuEntry::Separator);
+    }
+
+    let resolved_id = entry.id.unwrap_or_default();
+    let mut resolved_title = entry.title.unwrap_or_default();
+    if resolved_id.is_empty() && resolved_title.is_empty() {
+        return None;
+    }
+    let resolved_id = if resolved_id.is_empty() {
+        resolved_title.clone()
+    } else {
+        resolved_id
+    };
+    if resolved_title.is_empty() {
+        resolved_title = resolved_id.clone();
+    }
+    let children = entry
+        .items
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(build_menu_entry)
+        .collect();
+    Some(TaskMenuEntry::Item(TaskMenuItem {
+        id: resolved_id,
+        title: resolved_title,
+        enabled: entry.enabled.unwrap_or(true),
+        shortcut: entry.shortcut,
+        children,
+    }))
 }
 
 fn build_menu_bar_view(
@@ -280,7 +345,8 @@ fn build_menu_bar_view(
             let open_state = open_menu_index.clone();
             let window_id = active_window_id;
             MenuItem::new(title)
-                .padding(4.0)
+                .font_size(MENU_BAR_FONT_SIZE)
+                .padding(MENU_BAR_ITEM_PADDING)
                 .on_click(move || {
                 if has_children {
                     if open_state.get() == Some(idx) {
@@ -300,7 +366,7 @@ fn build_menu_bar_view(
             })
         })
         .collect();
-    MenuBar::new(entries)
+    MenuBar::new(entries).spacing(MENU_BAR_ITEM_SPACING)
 }
 
 fn build_menu_items(
@@ -396,7 +462,20 @@ impl Application for TaskBarApp {
             "[TaskBar] on_focus_changed: window_id={}, app_name={}, menu_titles={}",
             window_id, app_name, menu_titles
         );
-        self.update_menu_for_app(window_id, app_name, menu_titles);
+        let resolved_menu_titles = if menu_titles.is_empty() {
+            self.menu_titles_cache
+                .get()
+                .get(&window_id)
+                .cloned()
+                .unwrap_or_default()
+        } else {
+            let owned = menu_titles.to_string();
+            self.menu_titles_cache.update(|cache| {
+                cache.insert(window_id, owned.clone());
+            });
+            owned
+        };
+        self.update_menu_for_app(window_id, app_name, &resolved_menu_titles);
     }
 
     fn on_active_app_changed(&mut self, window_id: u32, app_name: &str, menu_titles: &str) {
@@ -404,7 +483,20 @@ impl Application for TaskBarApp {
             "[TaskBar] on_active_app_changed: window_id={}, app_name={}, menu_titles={}",
             window_id, app_name, menu_titles
         );
-        self.update_menu_for_app(window_id, app_name, menu_titles);
+        let resolved_menu_titles = if menu_titles.is_empty() {
+            self.menu_titles_cache
+                .get()
+                .get(&window_id)
+                .cloned()
+                .unwrap_or_default()
+        } else {
+            let owned = menu_titles.to_string();
+            self.menu_titles_cache.update(|cache| {
+                cache.insert(window_id, owned.clone());
+            });
+            owned
+        };
+        self.update_menu_for_app(window_id, app_name, &resolved_menu_titles);
     }
 
     fn body(&self) -> impl View {
@@ -445,7 +537,7 @@ impl Application for TaskBarApp {
             }
             .spacing(10.0)
             .alignment(Alignment::Center)
-            .padding(8.0)
+            .padding(MENU_BAR_OUTER_PADDING)
         )
         .app_id("org.scarlet-os.desktop.taskbar")
         .decorated(false)
@@ -570,7 +662,8 @@ impl TaskBarApp {
                                     }
                                 };
                                 let bar_height = 40;
-                                let _ = conn.move_window(surface_id, 0, bar_height as i32);
+                                let popup_x = menu_bar_popup_x(&menu_tree_value.items, index);
+                                let _ = conn.move_window(surface_id, popup_x as i32, bar_height as i32);
                             }
                         } else {
                             if let Some(surface_id) = popup_surface_id.take() {
