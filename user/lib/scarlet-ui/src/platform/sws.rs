@@ -588,7 +588,9 @@ impl SWSPlatformWindow {
                 let menu_titles = Self::sanitize_menu_titles(&menu_titles);
                 // Push FocusChanged event for all windows to receive
                 // This allows TaskBar to update its menu based on focus changes
-                scarlet_std::println!("[SWSPlatformWindow] FocusChanged: window_id={}, app_name={}, menu_titles={}", window_id, app_name, menu_titles);
+                if debug {
+                    scarlet_std::println!("[SWSPlatformWindow] FocusChanged: window_id={}, app_name={}, menu_titles={}", window_id, app_name, menu_titles);
+                }
                 self.push_event(Event::Custom {
                     event_type: 0xF0C0F, // FocusChanged event type
                     data: {
@@ -618,7 +620,9 @@ impl SWSPlatformWindow {
                 // Push ActiveAppChanged event for TaskBar to update menu bar
                 // This is ONLY sent for normal windows (not TaskBar/Desktop/etc)
                 // and only when the active APPLICATION changes (same app, different window = no broadcast)
-                scarlet_std::println!("[SWSPlatformWindow] ActiveAppChanged: window_id={}, app_name={}, menu_titles={}", window_id, app_name, menu_titles);
+                if debug {
+                    scarlet_std::println!("[SWSPlatformWindow] ActiveAppChanged: window_id={}, app_name={}, menu_titles={}", window_id, app_name, menu_titles);
+                }
                 self.push_event(Event::Custom {
                     event_type: 0xF0C0A, // ActiveAppChanged event type
                     data: {

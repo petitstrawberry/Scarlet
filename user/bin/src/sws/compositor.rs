@@ -1215,7 +1215,9 @@ impl Compositor {
                 if app_id_changed {
                     println!(
                         "[Compositor] Active app changed: {:?} -> {:?}, broadcasting ACTIVE_APP_CHANGED",
-                        self.active_app_id.as_ref().map(|id| core::str::from_utf8(id).unwrap_or("")),
+                        self.active_app_id
+                            .as_ref()
+                            .map(|id| core::str::from_utf8(id).unwrap_or("")),
                         core::str::from_utf8(app_id_bytes).unwrap_or("")
                     );
 
@@ -1773,12 +1775,10 @@ impl Compositor {
                     window.app_id = Some(app_id);
                 }
                 if self.window_manager.set_window_type(window_id, wtype) {
-                    println!(
-                        "[Compositor] Set window #{} type to {:?}",
-                        window_id, wtype
-                    );
+                    println!("[Compositor] Set window #{} type to {:?}", window_id, wtype);
                 }
-                self.window_manager.set_window_resizable(window_id, resizable);
+                self.window_manager
+                    .set_window_resizable(window_id, resizable);
                 if let Some(window) = self.window_manager.get_window_mut(window_id) {
                     window.active_on_focus = active_on_focus;
                 }
@@ -1826,13 +1826,15 @@ impl Compositor {
 
                             // Broadcast ACTIVE_APP_CHANGED with empty menu to clear TaskBar
                             let empty_payload = sws_protocol::payload_active_app_changed(
-                                0, // dummy window_id
+                                0,   // dummy window_id
                                 b"", // empty app_id
                                 b"", // empty app_name
                                 b"", // empty title
                                 b"", // empty menu_titles
                             );
-                            println!("[Compositor] Broadcasting empty ACTIVE_APP_CHANGED to clear TaskBar menu");
+                            println!(
+                                "[Compositor] Broadcasting empty ACTIVE_APP_CHANGED to clear TaskBar menu"
+                            );
                             super::ipc::broadcast_message_to_all_clients(
                                 sws_protocol::server_msg::ACTIVE_APP_CHANGED,
                                 empty_payload,

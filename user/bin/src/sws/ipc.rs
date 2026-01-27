@@ -1334,7 +1334,10 @@ pub enum IpcEvent {
         shm_size: usize,
     },
     /// Client requested to destroy a window
-    DestroyWindow { client_id: usize, window_id: u32 },
+    DestroyWindow {
+        client_id: usize,
+        window_id: u32,
+    },
     /// Client updated their window buffer (damage region only)
     BufferUpdated {
         window_id: u32,
@@ -1344,17 +1347,29 @@ pub enum IpcEvent {
         damage_height: u32,
     },
     /// Client requested window move
-    RequestMove { window_id: u32 },
+    RequestMove {
+        window_id: u32,
+    },
     /// Client moved window
-    MoveWindow { window_id: u32, x: i32, y: i32 },
+    MoveWindow {
+        window_id: u32,
+        x: i32,
+        y: i32,
+    },
 
     /// Set (or clear) parent window relationship
     ///
     /// `parent_id == 0` means "no parent".
-    SetWindowParent { window_id: u32, parent_id: u32 },
+    SetWindowParent {
+        window_id: u32,
+        parent_id: u32,
+    },
 
     /// Set transient behavior flags for a window (bitset).
-    SetWindowTransientFlags { window_id: u32, flags: u32 },
+    SetWindowTransientFlags {
+        window_id: u32,
+        flags: u32,
+    },
 
     /// Set min/max size constraints for a window.
     SetWindowSizeLimits {
@@ -1377,27 +1392,50 @@ pub enum IpcEvent {
     },
 
     /// Minimize a window
-    MinimizeWindow { window_id: u32 },
+    MinimizeWindow {
+        window_id: u32,
+    },
 
     /// Maximize a window
-    MaximizeWindow { window_id: u32 },
+    MaximizeWindow {
+        window_id: u32,
+    },
 
     /// Restore a window from minimized or maximized state
-    RestoreWindow { window_id: u32 },
+    RestoreWindow {
+        window_id: u32,
+    },
 
     /// Focus and raise a window
-    FocusWindow { window_id: u32 },
+    FocusWindow {
+        window_id: u32,
+    },
 
     /// Set window type for Z-order management
-    SetWindowType { window_id: u32, window_type: u32 },
+    SetWindowType {
+        window_id: u32,
+        window_type: u32,
+    },
 
     /// Set window opacity
-    SetWindowOpacity { window_id: u32, opacity: u8 },
+    SetWindowOpacity {
+        window_id: u32,
+        opacity: u8,
+    },
 
     /// Set whether window content contains alpha channel
-    SetWindowHasAlphaContent { window_id: u32, has_alpha: bool },
-    SetWindowMenuTitles { window_id: u32, menu_titles: String },
-    ActivateMenuItem { window_id: u32, menu_item_id: String },
+    SetWindowHasAlphaContent {
+        window_id: u32,
+        has_alpha: bool,
+    },
+    SetWindowMenuTitles {
+        window_id: u32,
+        menu_titles: String,
+    },
+    ActivateMenuItem {
+        window_id: u32,
+        menu_item_id: String,
+    },
 
     /// Set the workarea (usable screen area) for the window manager
     SetWorkarea {
@@ -1408,11 +1446,18 @@ pub enum IpcEvent {
     },
 
     /// Set whether a window can be resized by the user via interactive resize
-    SetWindowResizable { window_id: u32, resizable: bool },
+    SetWindowResizable {
+        window_id: u32,
+        resizable: bool,
+    },
 
     /// Get the screen size
-    GetScreenSize { client_id: usize },
+    GetScreenSize {
+        client_id: usize,
+    },
 
     /// Get list of all windows
-    GetWindowList { client_id: usize },
+    GetWindowList {
+        client_id: usize,
+    },
 }

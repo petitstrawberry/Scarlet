@@ -9,14 +9,14 @@ extern crate alloc;
 extern crate scarlet_std;
 extern crate scarlet_ui_macros;
 
-use alloc::vec;
 use alloc::sync::Arc;
+use alloc::vec;
 use core::f32;
 
 use scarlet_std::format;
 use scarlet_std::println;
-use scarlet_ui::{hstack, prelude::*, vstack};
 use scarlet_ui::{MenuBarModel, MenuEntry, MenuItemModel};
+use scarlet_ui::{hstack, prelude::*, vstack};
 use scarlet_ui_macros::View;
 
 #[derive(View, Clone)]

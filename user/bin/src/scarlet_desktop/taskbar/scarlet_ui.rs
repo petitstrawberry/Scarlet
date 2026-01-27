@@ -7,29 +7,29 @@
 
 extern crate alloc;
 extern crate scarlet_desktop_config;
+extern crate scarlet_std as std;
 extern crate scarlet_ui;
 extern crate scarlet_ui_macros;
-extern crate scarlet_std as std;
 
 use alloc::collections::BTreeMap;
 use alloc::vec;
 use core::time::Duration;
-use scarlet_ui::prelude::*;
 use scarlet_ui::buffer::Buffer;
 use scarlet_ui::color::Color;
 use scarlet_ui::element::{ElementRenderObject, LayoutConstraints};
-use scarlet_ui::graphics;
 use scarlet_ui::geometry::Size;
-use scarlet_ui::{hstack, StateId};
-use scarlet_ui::{MenuBarModel, MenuItemModel};
-use scarlet_ui::views::{MenuAction, MenuBar, MenuItem, MenuItemContent};
+use scarlet_ui::graphics;
+use scarlet_ui::prelude::*;
 use scarlet_ui::views::menu::MenuRenderObject;
+use scarlet_ui::views::{MenuAction, MenuBar, MenuItem, MenuItemContent};
+use scarlet_ui::{MenuBarModel, MenuItemModel};
+use scarlet_ui::{StateId, hstack};
 use scarlet_ui_macros::View;
 use serde::Deserialize;
 use serde_json_core::from_str;
-use std::{format, println};
 use std::string::{String, ToString};
 use std::vec::Vec;
+use std::{format, println};
 use sws_client as sws;
 use sws_protocol::window_types;
 
@@ -211,10 +211,7 @@ fn build_menu_tree(app_name: &str, menu_titles: &str) -> MenuTree {
         );
     } else if trimmed.starts_with('{') {
         let parsed = parse_menu_tree_json(trimmed);
-        println!(
-            "[TaskBar] Parsed menu JSON: items={}",
-            parsed.len()
-        );
+        println!("[TaskBar] Parsed menu JSON: items={}", parsed.len());
         items.extend(parsed);
     } else {
         println!(
@@ -342,8 +339,13 @@ fn build_menu_bar_view(
     active_window_id: u32,
     open_menu_index: State<Option<usize>>,
 ) -> MenuBar {
-    println!("[TaskBar] build_menu_bar_view: {} items, active_window_id={}", items.len(), active_window_id);
-    let has_children_by_index: Vec<bool> = items.iter().map(|item| !item.children.is_empty()).collect();
+    println!(
+        "[TaskBar] build_menu_bar_view: {} items, active_window_id={}",
+        items.len(),
+        active_window_id
+    );
+    let has_children_by_index: Vec<bool> =
+        items.iter().map(|item| !item.children.is_empty()).collect();
     let entries = items
         .iter()
         .enumerate()
@@ -377,7 +379,7 @@ fn build_menu_bar_view(
                     } else {
                         open_state_click.set(None);
                     }
-            })
+                })
         })
         .collect();
     let open_state_bar = open_menu_index.clone();
@@ -449,7 +451,10 @@ impl PopupMenuRenderer {
         };
         let size = render_object.layout(constraints);
         render_object.render();
-        Self { render_object, size }
+        Self {
+            render_object,
+            size,
+        }
     }
 
     fn size(&self) -> Size {
@@ -531,7 +536,10 @@ impl Application for TaskBarApp {
         let screen_width = self.screen_width.get();
         let _menu_bar = self.menu_bar.get();
         let menu_tree = self.menu_tree.get();
-        println!("[TaskBar] body() called: menu_tree has {} items", menu_tree.items.len());
+        println!(
+            "[TaskBar] body() called: menu_tree has {} items",
+            menu_tree.items.len()
+        );
         let active_window_id = self.active_window_id.get();
 
         let mins = (uptime / 60) % 60;
@@ -736,22 +744,25 @@ impl TaskBarApp {
                                     pointer_y = input.value;
                                     pending_move = true;
                                 }
-                                (sws::event::event_type::EV_KEY, sws::event::key_code::BTN_LEFT) => {
+                                (
+                                    sws::event::event_type::EV_KEY,
+                                    sws::event::key_code::BTN_LEFT,
+                                ) => {
                                     if input.value == 1 {
                                         // pressed
                                     } else {
                                         if let Some(renderer) = popup_renderer.as_ref() {
-                                            renderer.handle_click(pointer_x as f32, pointer_y as f32);
+                                            renderer
+                                                .handle_click(pointer_x as f32, pointer_y as f32);
                                         }
                                     }
                                 }
                                 (sws::event::event_type::EV_SYN, _) => {
                                     if pending_move {
                                         if let Some(renderer) = popup_renderer.as_mut() {
-                                            if renderer.handle_move(
-                                                pointer_x as f32,
-                                                pointer_y as f32,
-                                            ) {
+                                            if renderer
+                                                .handle_move(pointer_x as f32, pointer_y as f32)
+                                            {
                                                 needs_render = true;
                                             }
                                         }
@@ -850,7 +861,6 @@ impl TaskBarApp {
     }
 }
 
-
 #[unsafe(no_mangle)]
 pub extern "C" fn main() {
     println!("[TaskBar] Starting ScarletUI TaskBar");
@@ -866,7 +876,10 @@ pub extern "C" fn main() {
                     (width, height)
                 }
                 Err(e) => {
-                    println!("[TaskBar] Failed to get screen size: {:?}, using default 1920x1080", e);
+                    println!(
+                        "[TaskBar] Failed to get screen size: {:?}, using default 1920x1080",
+                        e
+                    );
                     (1920, 1080)
                 }
             };
@@ -882,7 +895,10 @@ pub extern "C" fn main() {
             width as f32
         }
         Err(e) => {
-            println!("[TaskBar] Failed to connect to SWS: {:?}, using default screen width 1920", e);
+            println!(
+                "[TaskBar] Failed to connect to SWS: {:?}, using default screen width 1920",
+                e
+            );
             1920.0
         }
     };

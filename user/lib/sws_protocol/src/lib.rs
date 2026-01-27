@@ -986,8 +986,7 @@ pub fn parse_server_message(msg_type: u32, payload: &[u8]) -> Result<ServerMessa
             if payload.len() < 4 {
                 return Err(ProtocolError::MalformedPayload);
             }
-            let window_id =
-                u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
+            let window_id = u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
 
             let mut offset = 4;
 

@@ -32,7 +32,7 @@ fn read_exact(socket: &mut Socket, buf: &mut [u8]) -> Result<(), Error> {
     while filled < buf.len() {
         match socket.read(&mut buf[filled..]) {
             Ok(0) => {
-                println!("[sws-client] read_exact: EOF (connection closed)");
+                // println!("[sws-client] read_exact: EOF (connection closed)");
                 return Err(Error::Disconnected);
             }
             Ok(n) => {
@@ -325,7 +325,7 @@ impl Connection {
             focus_on_create,
             active_on_focus,
         );
-        println!("[sws-client] Creating surface: payload size {}", payload.len());
+        // println!("[sws-client] Creating surface: payload size {}", payload.len());
         write_frame(
             &mut self.socket,
             protocol::client_msg::CREATE_WINDOW,
@@ -402,7 +402,7 @@ impl Connection {
             x,
             y,
         );
-        println!("[sws-client] Creating surface: payload size {}", payload.len());
+        // println!("[sws-client] Creating surface: payload size {}", payload.len());
         write_frame(
             &mut self.socket,
             protocol::client_msg::CREATE_WINDOW,
