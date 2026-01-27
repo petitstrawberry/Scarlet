@@ -14,7 +14,12 @@ use std::thread;
 use sws_client::{Connection, Event};
 use sws_protocol::window_types;
 
-fn draw_background(conn: &mut Connection, surface_id: u32) {
+fn draw_gradient_background(
+    conn: &mut Connection,
+    surface_id: u32,
+    top: Color,
+    bottom: Color,
+) {
     let Some(surface) = conn.surface_mut(surface_id) else {
         return;
     };
@@ -22,10 +27,6 @@ fn draw_background(conn: &mut Connection, surface_id: u32) {
     let w = surface.width();
     let h = surface.height();
     surface.with_buffer(|buf, width, height| {
-        // Simple vertical gradient
-        let top = Color::rgb(0.157, 0.157, 0.196); // Dark blue-gray (40/255)
-        let bottom = Color::rgb(0.078, 0.078, 0.118); // Darker blue-gray (20/255)
-
         if h == 0 {
             return;
         }
@@ -74,6 +75,60 @@ fn draw_background(conn: &mut Connection, surface_id: u32) {
     });
 
     let _ = conn.commit(surface_id);
+}
+
+fn draw_solid_background(conn: &mut Connection, surface_id: u32, color: Color) {
+    let Some(surface) = conn.surface_mut(surface_id) else {
+        return;
+    };
+
+    let w = surface.width();
+    let h = surface.height();
+    surface.with_buffer(|buf, width, height| {
+        let bgra = color.to_bgra();
+
+        for y in 0..h {
+            for x in 0..w {
+                let idx = ((y as usize) * width as usize + (x as usize)) * 4;
+                if idx + 3 < buf.len() {
+                    buf[idx] = (bgra & 0xFF) as u8;
+                    buf[idx + 1] = ((bgra >> 8) & 0xFF) as u8;
+                    buf[idx + 2] = ((bgra >> 16) & 0xFF) as u8;
+                    buf[idx + 3] = ((bgra >> 24) & 0xFF) as u8;
+                }
+            }
+        }
+    });
+
+    let _ = conn.commit(surface_id);
+}
+
+fn draw_background(conn: &mut Connection, surface_id: u32) {
+    // Load config to get background color
+    let config = scarlet_desktop_config::load_desktop_config();
+
+    if let Some(bg_color) = config.theme.background {
+        // Create a gradient using the config color as base
+        let base = Color::rgb(
+            bg_color[0] as f32 / 255.0,
+            bg_color[1] as f32 / 255.0,
+            bg_color[2] as f32 / 255.0,
+        );
+
+        // Create a slightly darker version for the bottom
+        let darker = Color::rgb(
+            (bg_color[0] as f32 / 255.0 * 0.7).max(0.0),
+            (bg_color[1] as f32 / 255.0 * 0.7).max(0.0),
+            (bg_color[2] as f32 / 255.0 * 0.7).max(0.0),
+        );
+
+        draw_gradient_background(conn, surface_id, base, darker);
+    } else {
+        // Default gradient if no config
+        let top = Color::rgb(0.157, 0.157, 0.196); // Dark blue-gray (40/255)
+        let bottom = Color::rgb(0.078, 0.078, 0.118); // Darker blue-gray (20/255)
+        draw_gradient_background(conn, surface_id, top, bottom);
+    }
 }
 
 #[unsafe(no_mangle)]

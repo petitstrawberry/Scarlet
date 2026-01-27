@@ -110,6 +110,10 @@ path = "src/scarlet_desktop/taskbar/scarlet_ui.rs"
 name = "ui-demo"
 path = "src/ui_demo.rs"
 
+[[bin]]
+name = "settings"
+path = "src/settings.rs"
+
 [dependencies]
 scarlet_std = { path = "../lib/std", features = ["alloc_debug"] }
 framebuffer = { path = "../lib/framebuffer" }
