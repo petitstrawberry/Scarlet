@@ -246,7 +246,13 @@ fn load_default_font_from_rootfs_once() {
     let mut file = match File::open(DEFAULT_FONT_PATH) {
         Ok(f) => f,
         Err(e) => {
-            println!("[scarlet-ui] Failed to open default font '{}': {:?}", DEFAULT_FONT_PATH, e);
+            if crate::debug::is_enabled() {
+                println!(
+                    "[scarlet-ui] Failed to open default font '{}': {:?}",
+                    DEFAULT_FONT_PATH,
+                    e
+                );
+            }
             return;
         }
     };

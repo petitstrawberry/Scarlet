@@ -27,10 +27,14 @@ static GLOBAL_DIRTY_PAINT_IDS: Mutex<BTreeSet<ElementId>> = Mutex::new(BTreeSet:
 /// This function is called from State change callbacks in ComponentElement
 /// to notify the PipelineOwner that an element needs to be rebuilt.
 pub fn mark_element_dirty(id: ElementId) {
-    println!("[PipelineOwner] mark_element_dirty: id={}", id.get());
+    if crate::debug::is_enabled() {
+        println!("[PipelineOwner] mark_element_dirty: id={}", id.get());
+    }
     let mut ids = GLOBAL_DIRTY_IDS.lock();
     ids.insert(id);
-    println!("[PipelineOwner] Dirty count: {}", ids.len());
+    if crate::debug::is_enabled() {
+        println!("[PipelineOwner] Dirty count: {}", ids.len());
+    }
 }
 
 /// Mark an element as needing paint only (no build/layout).

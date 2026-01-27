@@ -222,7 +222,12 @@ pub trait Application: View {
                             let app_name: Box<str> = app_name.into_boxed_str();
                             let menu_titles: Box<str> = menu_titles.into_boxed_str();
 
-                            println!("[Application] FocusChanged: window_id={}, app_name={}, menu_titles={}", window_id, app_name, menu_titles);
+                            if crate::debug::is_enabled() {
+                                println!(
+                                    "[Application] FocusChanged: window_id={}, app_name={}, menu_titles={}",
+                                    window_id, app_name, menu_titles
+                                );
+                            }
                             self.on_focus_changed(window_id, &app_name, &menu_titles);
                         }
                     }
@@ -258,12 +263,19 @@ pub trait Application: View {
                             let app_name: Box<str> = app_name.into_boxed_str();
                             let menu_titles: Box<str> = menu_titles.into_boxed_str();
 
-                            println!("[Application] ActiveAppChanged: window_id={}, app_name={}, menu_titles={}", window_id, app_name, menu_titles);
+                            if crate::debug::is_enabled() {
+                                println!(
+                                    "[Application] ActiveAppChanged: window_id={}, app_name={}, menu_titles={}",
+                                    window_id, app_name, menu_titles
+                                );
+                            }
                             self.on_active_app_changed(window_id, &app_name, &menu_titles);
 
                             // Force redraw after active app changed (State updates trigger dirty flag)
                             if !presented_this_cycle && pipeline.has_dirty() {
-                                println!("[Application] ActiveAppChanged triggered redraw, has_dirty=true");
+                                if crate::debug::is_enabled() {
+                                    println!("[Application] ActiveAppChanged triggered redraw, has_dirty=true");
+                                }
                                 if let Some(buffer) = pipeline.render() {
                                     platform_window.present(buffer);
                                     presented_this_cycle = true;
@@ -313,7 +325,9 @@ pub trait Application: View {
             //     platform_window.present(buffer);
             // }
             if !presented_this_cycle && pipeline.has_dirty() {
-                println!("[Application] has_dirty=true, calling render()");
+                if crate::debug::is_enabled() {
+                    println!("[Application] has_dirty=true, calling render()");
+                }
                 if let Some(buffer) = pipeline.render() {
                     platform_window.present(buffer);
                 }
@@ -408,7 +422,12 @@ impl<A: Application + Clone + 'static> Element for ApplicationRootElement<A> {
     }
 
     fn rebuild(&mut self) -> UpdateResult {
-        println!("[ApplicationRootElement] rebuild() called for id={}", self.id.get());
+        if crate::debug::is_enabled() {
+            println!(
+                "[ApplicationRootElement] rebuild() called for id={}",
+                self.id.get()
+            );
+        }
         if let Some(ref mut child) = self.child {
             child.unmount();
         }
@@ -421,10 +440,20 @@ impl<A: Application + Clone + 'static> Element for ApplicationRootElement<A> {
 
     fn mount(&mut self) {
         let listenables = self.app.listenables();
-        println!("[ApplicationRootElement] mount() called: {} listenables found", listenables.len());
+        if crate::debug::is_enabled() {
+            println!(
+                "[ApplicationRootElement] mount() called: {} listenables found",
+                listenables.len()
+            );
+        }
         for listenable in listenables {
             let element_id = self.id;
-            println!("[ApplicationRootElement] Subscribing to element_id={}", element_id.get());
+            if crate::debug::is_enabled() {
+                println!(
+                    "[ApplicationRootElement] Subscribing to element_id={}",
+                    element_id.get()
+                );
+            }
             let callback = alloc::sync::Arc::new(move || {
                 crate::pipeline::mark_element_dirty(element_id);
             });

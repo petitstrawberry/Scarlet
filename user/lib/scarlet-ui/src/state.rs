@@ -116,7 +116,9 @@ impl<T> StateInner<T> {
         T: Clone,
     {
         let subscribers = self.subscribers.lock();
-        println!("[State] Notifying {} subscribers", subscribers.len());
+        if crate::debug::is_enabled() {
+            println!("[State] Notifying {} subscribers", subscribers.len());
+        }
         for callback in subscribers.values() {
             callback();
         }
