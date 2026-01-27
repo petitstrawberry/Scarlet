@@ -4,9 +4,11 @@
 
 use alloc::vec::Vec;
 use alloc::boxed::Box;
+use alloc::sync::Arc;
 use core::any::Any;
 use crate::view::View;
 use crate::element::{Element, ElementId, LayoutConstraints};
+use crate::event::Event;
 use crate::geometry::{Point, Rect, Size};
 
 /// MenuBar View - displays menu items horizontally
@@ -14,6 +16,7 @@ use crate::geometry::{Point, Rect, Size};
 pub struct MenuBar {
     items: Vec<MenuItem>,
     spacing: f32,
+    on_hover_index: Option<Arc<dyn Fn(usize) + 'static>>,
 }
 
 impl MenuBar {
@@ -22,12 +25,19 @@ impl MenuBar {
         Self {
             items,
             spacing: 0.0, // No spacing for menu items (they touch)
+            on_hover_index: None,
         }
     }
 
     /// Set the spacing between menu items
     pub fn spacing(mut self, spacing: f32) -> Self {
         self.spacing = spacing;
+        self
+    }
+
+    /// Set hover callback with the hovered item index.
+    pub fn on_hover_index(mut self, callback: impl Fn(usize) + 'static) -> Self {
+        self.on_hover_index = Some(Arc::new(callback));
         self
     }
 
@@ -45,7 +55,11 @@ impl View for MenuBar {
             .map(|item| item.create_element())
             .collect();
 
-        Box::new(MenuBarElement::new(elements, self.spacing))
+        Box::new(MenuBarElement::new(
+            elements,
+            self.spacing,
+            self.on_hover_index.clone(),
+        ))
     }
 
     fn listenables(&self) -> Vec<&dyn crate::state::Listenable> {
@@ -66,17 +80,25 @@ pub struct MenuBarElement {
     spacing: f32,
     position: Point,
     size: Size,
+    on_hover_index: Option<Arc<dyn Fn(usize) + 'static>>,
+    hovered_index: Option<usize>,
 }
 
 impl MenuBarElement {
     /// Create a new MenuBarElement
-    pub fn new(children: Vec<Box<dyn Element>>, spacing: f32) -> Self {
+    pub fn new(
+        children: Vec<Box<dyn Element>>,
+        spacing: f32,
+        on_hover_index: Option<Arc<dyn Fn(usize) + 'static>>,
+    ) -> Self {
         Self {
             id: ElementId::generate(),
             children,
             spacing,
             position: Point::ZERO,
             size: Size::ZERO,
+            on_hover_index,
+            hovered_index: None,
         }
     }
 
@@ -117,6 +139,54 @@ impl Element for MenuBarElement {
 
     fn rebuild(&mut self) -> crate::element::UpdateResult {
         crate::element::UpdateResult::NoChange
+    }
+
+    fn handle_event(&mut self, event: &crate::event::Event, _phase: crate::event::Phase) -> bool {
+        let Event::Mouse(mouse_event) = event else {
+            return false;
+        };
+
+        let point = match mouse_event {
+            crate::event::MouseEvent::Moved { x, y }
+            | crate::event::MouseEvent::Entered { x, y }
+            | crate::event::MouseEvent::ButtonPressed { x, y, .. }
+            | crate::event::MouseEvent::ButtonReleased { x, y, .. } => Point {
+                x: *x as f32,
+                y: *y as f32,
+            },
+            crate::event::MouseEvent::Exited { .. }
+            | crate::event::MouseEvent::Wheel { .. } => {
+                self.hovered_index = None;
+                return false;
+            }
+        };
+
+        let local_point = Point {
+            x: point.x - self.position.x,
+            y: point.y - self.position.y,
+        };
+
+        let mut new_index = None;
+        for (idx, child) in self.children.iter().enumerate() {
+            let bounds = child.bounds();
+            let rect = Rect {
+                origin: bounds.origin,
+                size: bounds.size,
+            };
+            if rect.contains(local_point) {
+                new_index = Some(idx);
+                break;
+            }
+        }
+
+        if new_index != self.hovered_index {
+            self.hovered_index = new_index;
+            if let (Some(index), Some(callback)) = (new_index, self.on_hover_index.as_ref()) {
+                callback(index);
+            }
+        }
+
+        false
     }
 
     fn layout(&mut self, constraints: LayoutConstraints) -> Size {

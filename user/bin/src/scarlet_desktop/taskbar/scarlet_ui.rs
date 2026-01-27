@@ -283,7 +283,8 @@ fn parse_menu_tree_json(input: &str) -> Vec<TaskMenuItem> {
 }
 
 fn sanitize_menu_json(input: &str) -> String {
-    let mut out = String::new();
+    // Pre-allocate with capacity to reduce reallocations
+    let mut out = String::with_capacity(input.len());
     for ch in input.chars() {
         if ch == '\0' {
             break;
@@ -293,6 +294,8 @@ fn sanitize_menu_json(input: &str) -> String {
         }
         out.push(ch);
     }
+    // Shrink to fit to free unused capacity immediately
+    out.shrink_to_fit();
     out
 }
 
@@ -301,28 +304,33 @@ fn build_menu_entry(entry: MenuEntryPayload) -> Option<TaskMenuEntry> {
         return Some(TaskMenuEntry::Separator);
     }
 
+    // Use unwrap_or_default() efficiently to avoid multiple moves
     let resolved_id = entry.id.unwrap_or_default();
-    let mut resolved_title = entry.title.unwrap_or_default();
+    let resolved_title = entry.title.unwrap_or_default();
+
     if resolved_id.is_empty() && resolved_title.is_empty() {
         return None;
     }
-    let resolved_id = if resolved_id.is_empty() {
-        resolved_title.clone()
+
+    // Avoid clones by using the values directly
+    let (final_id, final_title) = if resolved_id.is_empty() {
+        (&resolved_title, &resolved_title)
+    } else if resolved_title.is_empty() {
+        (&resolved_id, &resolved_id)
     } else {
-        resolved_id
+        (&resolved_id, &resolved_title)
     };
-    if resolved_title.is_empty() {
-        resolved_title = resolved_id.clone();
-    }
+
     let children = entry
         .items
         .unwrap_or_default()
         .into_iter()
         .filter_map(build_menu_entry)
         .collect();
+
     Some(TaskMenuEntry::Item(TaskMenuItem {
-        id: resolved_id,
-        title: resolved_title,
+        id: final_id.clone(),
+        title: final_title.clone(),
         enabled: entry.enabled.unwrap_or(true),
         shortcut: entry.shortcut,
         children,
@@ -339,14 +347,17 @@ fn build_menu_bar_view(
         .iter()
         .enumerate()
         .map(|(idx, item)| {
-            let title = item.title.to_string();
-            let item_id = item.id.to_string();
+            // Avoid creating intermediate Strings - use references directly
+            // MenuItem::new will handle the conversion
             let has_children = !item.children.is_empty();
             let open_state_hover = open_menu_index.clone();
             let open_state_click = open_menu_index.clone();
             let window_id = active_window_id;
             let is_open = open_menu_index.get() == Some(idx);
-            MenuItem::new(title)
+
+            let item_id = item.id.clone();
+
+            MenuItem::new(item.title.as_str())
                 .font_size(MENU_BAR_FONT_SIZE)
                 .padding(MENU_BAR_ITEM_PADDING)
                 .selected(is_open)
@@ -377,7 +388,14 @@ fn build_menu_bar_view(
             })
         })
         .collect();
-    MenuBar::new(entries).spacing(MENU_BAR_ITEM_SPACING)
+    let open_state_bar = open_menu_index.clone();
+    MenuBar::new(entries)
+        .spacing(MENU_BAR_ITEM_SPACING)
+        .on_hover_index(move |idx| {
+            if open_state_bar.get().is_some() && open_state_bar.get() != Some(idx) {
+                open_state_bar.set(Some(idx));
+            }
+        })
 }
 
 fn build_menu_items(

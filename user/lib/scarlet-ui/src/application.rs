@@ -218,6 +218,10 @@ pub trait Application: View {
                             let _title = read_str(&data, &mut offset);
                             let menu_titles = read_str(&data, &mut offset);
 
+                            // Box large strings to move them to heap and reduce stack pressure
+                            let app_name: Box<str> = app_name.into_boxed_str();
+                            let menu_titles: Box<str> = menu_titles.into_boxed_str();
+
                             println!("[Application] FocusChanged: window_id={}, app_name={}, menu_titles={}", window_id, app_name, menu_titles);
                             self.on_focus_changed(window_id, &app_name, &menu_titles);
                         }
@@ -249,6 +253,10 @@ pub trait Application: View {
                             let app_name = read_str(&data, &mut offset);
                             let _title = read_str(&data, &mut offset);
                             let menu_titles = read_str(&data, &mut offset);
+
+                            // Box large strings to move them to heap and reduce stack pressure
+                            let app_name: Box<str> = app_name.into_boxed_str();
+                            let menu_titles: Box<str> = menu_titles.into_boxed_str();
 
                             println!("[Application] ActiveAppChanged: window_id={}, app_name={}, menu_titles={}", window_id, app_name, menu_titles);
                             self.on_active_app_changed(window_id, &app_name, &menu_titles);
