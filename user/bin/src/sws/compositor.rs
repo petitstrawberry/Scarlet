@@ -46,6 +46,8 @@ pub struct Compositor {
     workarea: Option<(i32, i32, u32, u32)>,
     /// Track the currently active application's app_id to avoid redundant ACTIVE_APP_CHANGED broadcasts
     active_app_id: Option<Vec<u8>>,
+    /// Track the last focused window ID to avoid redundant FOCUS_CHANGED broadcasts
+    last_focused_window_id: Option<u32>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -145,6 +147,7 @@ impl Compositor {
             resize_outline: None,
             workarea: None,
             active_app_id: None,
+            last_focused_window_id: None,
         })
     }
 
@@ -1143,6 +1146,15 @@ impl Compositor {
 
     /// Broadcast focus change event to all connected clients
     fn broadcast_focus_change(&mut self, window_id: u32) {
+        // Only broadcast if the focused window actually changed
+        if self.last_focused_window_id == Some(window_id) {
+            println!(
+                "[Compositor] Window #{} already focused, skipping FOCUS_CHANGED broadcast",
+                window_id
+            );
+            return;
+        }
+
         if let Some(window) = self.window_manager.get_window(window_id) {
             let app_id_bytes = window.app_id.as_deref().unwrap_or(b"");
             let title_bytes = window.title.as_deref().unwrap_or(b"");
@@ -1152,7 +1164,10 @@ impl Compositor {
             let app_name_bytes = app_name.as_bytes();
             let menu_titles_bytes = menu_titles.as_bytes();
 
-            // Always broadcast FOCUS_CHANGED for all windows
+            // Update last focused window ID
+            self.last_focused_window_id = Some(window_id);
+
+            // Broadcast FOCUS_CHANGED for all windows
             let payload = sws_protocol::payload_focus_changed(
                 window_id,
                 app_id_bytes,
@@ -1790,8 +1805,18 @@ impl Compositor {
 
                 // Check if the destroyed window was the active application
                 if let Some(window) = self.window_manager.get_window(window_id) {
+                    let window_app_id = window.app_id.as_deref().unwrap_or(b"");
+
+                    // Reset last_focused_window_id if the destroyed window was focused
+                    if self.last_focused_window_id == Some(window_id) {
+                        println!(
+                            "[Compositor] Focused window destroyed, resetting last_focused_window_id (was={})",
+                            window_id
+                        );
+                        self.last_focused_window_id = None;
+                    }
+
                     if let Some(current_app_id) = &self.active_app_id {
-                        let window_app_id = window.app_id.as_deref().unwrap_or(b"");
                         if current_app_id == window_app_id {
                             println!(
                                 "[Compositor] Active app window destroyed, resetting active_app_id (was={})",

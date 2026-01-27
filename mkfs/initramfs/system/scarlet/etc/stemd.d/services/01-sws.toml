@@ -6,6 +6,6 @@ exec = "/bin/sws"
 order = 01
 depends = ["sbusd"]
 
-# [service.scarlet-desktop]
-# exec = "/bin/scarlet_desktop"
-# depends = ["sws"]
+[service.scarlet-desktop]
+exec = "/bin/scarlet_desktop"
+depends = ["sws"]
