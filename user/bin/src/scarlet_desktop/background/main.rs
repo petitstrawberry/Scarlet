@@ -88,13 +88,17 @@ pub extern "C" fn main() -> i32 {
         }
     };
 
-    // Start with a tiny surface; we'll be configured to screen size after maximize.
+    let (screen_width, screen_height) = match conn.get_screen_size() {
+        Ok((width, height)) => (width, height),
+        Err(_) => (1024, 768),
+    };
+
     let surface_id = match conn.create_surface_with_type_and_policies(
         "org.scarlet-os.desktop.background",
         "Background",
         "",
-        16,
-        16,
+        screen_width,
+        screen_height,
         window_types::DESKTOP,
         false,
         false,
@@ -108,7 +112,6 @@ pub extern "C" fn main() -> i32 {
     };
 
     let _ = conn.move_window(surface_id, 0, 0);
-    let _ = conn.maximize_window(surface_id);
 
     // Initial draw.
     draw_background(&mut conn, surface_id);
