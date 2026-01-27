@@ -343,6 +343,7 @@ fn build_menu_bar_view(
     open_menu_index: State<Option<usize>>,
 ) -> MenuBar {
     println!("[TaskBar] build_menu_bar_view: {} items, active_window_id={}", items.len(), active_window_id);
+    let has_children_by_index: Vec<bool> = items.iter().map(|item| !item.children.is_empty()).collect();
     let entries = items
         .iter()
         .enumerate()
@@ -352,10 +353,7 @@ fn build_menu_bar_view(
             let has_children = !item.children.is_empty();
             let open_state_hover = open_menu_index.clone();
             let open_state_click = open_menu_index.clone();
-            let window_id = active_window_id;
             let is_open = open_menu_index.get() == Some(idx);
-
-            let item_id = item.id.clone();
 
             MenuItem::new(item.title.as_str())
                 .font_size(MENU_BAR_FONT_SIZE)
@@ -370,28 +368,26 @@ fn build_menu_bar_view(
                     }
                 })
                 .on_click(move || {
-                if has_children {
-                    if open_state_click.get() == Some(idx) {
-                        open_state_click.set(None);
+                    if has_children {
+                        if open_state_click.get() == Some(idx) {
+                            open_state_click.set(None);
+                        } else {
+                            open_state_click.set(Some(idx));
+                        }
                     } else {
-                        open_state_click.set(Some(idx));
+                        open_state_click.set(None);
                     }
-                } else {
-                    open_state_click.set(None);
-                    if window_id == 0 || item_id.starts_with("system_") {
-                        return;
-                    }
-                    if let Ok(mut conn) = sws::Connection::connect("/tmp/sws.sock") {
-                        let _ = conn.activate_menu_item(window_id, &item_id);
-                    }
-                }
             })
         })
         .collect();
     let open_state_bar = open_menu_index.clone();
+    let hover_children = has_children_by_index.clone();
     MenuBar::new(entries)
         .spacing(MENU_BAR_ITEM_SPACING)
         .on_hover_index(move |idx| {
+            if !hover_children.get(idx).copied().unwrap_or(false) {
+                return;
+            }
             if open_state_bar.get().is_some() && open_state_bar.get() != Some(idx) {
                 open_state_bar.set(Some(idx));
             }
@@ -702,6 +698,7 @@ impl TaskBarApp {
                             popup_surface_id_popup.set(None);
                             popup_renderer = None;
                             last_open_index = None;
+                            open_menu_index_popup.set(None);
                         }
                     }
                 }
