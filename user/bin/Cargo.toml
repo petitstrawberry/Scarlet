@@ -66,10 +66,6 @@ name = "socket_pair"
 path = "src/socket_pair.rs"
 
 [[bin]]
-name = "window_server"
-path = "src/window_server.rs"
-
-[[bin]]
 name = "sws"
 path = "src/sws/main.rs"
 
