@@ -162,6 +162,9 @@ impl EventLoop {
                     win.window().dispatch_event(WindowEvent::Resized {
                         size: slint::LogicalSize::new(width as f32, content_h as f32),
                     });
+
+                    // Clear pixel buffer to force reallocation with new size
+                    self.pixel_buffers.remove(&surface_id);
                 }
             }
             SwsEvent::Error { code: _ } => {
