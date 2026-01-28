@@ -11,12 +11,12 @@ extern crate scarlet_ui_macros;
 
 use core::f32;
 
-use scarlet_std::format;
-use scarlet_std::println;
-use scarlet_std::fs;
-use scarlet_ui::{hstack, prelude::*, vstack, State, StateId, zstack};
-use scarlet_ui_macros::View;
 use scarlet_desktop_config::BackgroundStyle;
+use scarlet_std::format;
+use scarlet_std::fs;
+use scarlet_std::println;
+use scarlet_ui::{State, StateId, hstack, prelude::*, vstack, zstack};
+use scarlet_ui_macros::View;
 
 // Preset colors - Apple system-style palette
 #[derive(Clone, Copy, Debug)]
@@ -29,14 +29,38 @@ const DEFAULT_BG_PREVIEW: [u8; 3] = [40, 40, 50];
 const DEFAULT_STYLE: BackgroundStyle = BackgroundStyle::GradientLines;
 
 const PRESET_COLORS: &[PresetColor] = &[
-    PresetColor { name: "Default", color: DEFAULT_BG_PREVIEW },
-    PresetColor { name: "Space Gray", color: [120, 120, 128] },
-    PresetColor { name: "Blue", color: [0, 122, 255] },
-    PresetColor { name: "Green", color: [52, 199, 89] },
-    PresetColor { name: "Orange", color: [255, 149, 0] },
-    PresetColor { name: "Red", color: [255, 59, 48] },
-    PresetColor { name: "Purple", color: [175, 82, 222] },
-    PresetColor { name: "Teal", color: [90, 200, 250] },
+    PresetColor {
+        name: "Default",
+        color: DEFAULT_BG_PREVIEW,
+    },
+    PresetColor {
+        name: "Space Gray",
+        color: [120, 120, 128],
+    },
+    PresetColor {
+        name: "Blue",
+        color: [0, 122, 255],
+    },
+    PresetColor {
+        name: "Green",
+        color: [52, 199, 89],
+    },
+    PresetColor {
+        name: "Orange",
+        color: [255, 149, 0],
+    },
+    PresetColor {
+        name: "Red",
+        color: [255, 59, 48],
+    },
+    PresetColor {
+        name: "Purple",
+        color: [175, 82, 222],
+    },
+    PresetColor {
+        name: "Teal",
+        color: [90, 200, 250],
+    },
 ];
 
 #[derive(View, Clone)]
@@ -71,18 +95,22 @@ impl SettingsApp {
 
         let config_content = format!(
             "[theme]\nbackground = \"#{:02x}{:02x}{:02x}\"\nbackground_style = \"{}\"\n",
-            bg_color[0], bg_color[1], bg_color[2], style.as_str()
+            bg_color[0],
+            bg_color[1],
+            bg_color[2],
+            style.as_str()
         );
 
         let _ = fs::create_directory("/etc/scarlet-desktop.d");
 
         match fs::File::create("/etc/scarlet-desktop.d/background.toml") {
-            Ok(mut file) => {
-                match file.write(config_content.as_bytes()) {
-                    Ok(_) => println!("[settings] Saved: {:02x}{:02x}{:02x}", bg_color[0], bg_color[1], bg_color[2]),
-                    Err(e) => println!("[settings] Write error: {:?}", e),
-                }
-            }
+            Ok(mut file) => match file.write(config_content.as_bytes()) {
+                Ok(_) => println!(
+                    "[settings] Saved: {:02x}{:02x}{:02x}",
+                    bg_color[0], bg_color[1], bg_color[2]
+                ),
+                Err(e) => println!("[settings] Write error: {:?}", e),
+            },
             Err(e) => println!("[settings] Create error: {:?}", e),
         }
     }

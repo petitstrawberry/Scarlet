@@ -8,12 +8,12 @@
 extern crate scarlet_std as std;
 
 use core::time::Duration;
+use scarlet_desktop_config::BackgroundStyle;
 use scarlet_ui::Color;
 use std::println;
 use std::thread;
 use sws_client::{Connection, Event, SurfaceBuilder};
 use sws_protocol::window_types;
-use scarlet_desktop_config::BackgroundStyle;
 
 fn draw_gradient_background(
     conn: &mut Connection,
@@ -134,7 +134,9 @@ fn draw_background(conn: &mut Connection, surface_id: u32) {
     };
 
     match style {
-        BackgroundStyle::GradientLines => draw_gradient_background(conn, surface_id, top, bottom, true),
+        BackgroundStyle::GradientLines => {
+            draw_gradient_background(conn, surface_id, top, bottom, true)
+        }
         BackgroundStyle::Gradient => draw_gradient_background(conn, surface_id, top, bottom, false),
         BackgroundStyle::Solid => draw_solid_background(conn, surface_id, base),
     }
