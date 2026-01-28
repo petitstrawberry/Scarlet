@@ -981,6 +981,10 @@ impl WindowRenderObject {
         let nsize: i32 = 12;
         let nhalf = nsize / 2;
         canvas.draw_line(nx as i32 - nhalf, ny as i32, nx as i32 + nhalf, ny as i32, icon_color);
+
+        // Draw border at bottom of titlebar (matching slint-scarlet)
+        let border_color = Color::rgb(180u8, 180u8, 185u8);
+        canvas.draw_line(0, TITLEBAR_HEIGHT as i32 - 1, width as i32 - 1, TITLEBAR_HEIGHT as i32 - 1, border_color);
     }
 
     /// Static helper for button rect calculation
