@@ -16,6 +16,8 @@ use alloc::boxed::Box;
 pub struct Rectangle {
     color: Color,
     corner_radius: f32,
+    border_width: f32,
+    border_color: Option<Color>,
 }
 
 impl Rectangle {
@@ -24,6 +26,8 @@ impl Rectangle {
         Self {
             color: Color::BLACK,
             corner_radius: 0.0,
+            border_width: 0.0,
+            border_color: None,
         }
     }
 
@@ -36,6 +40,13 @@ impl Rectangle {
     /// Set the corner radius
     pub fn corner_radius(mut self, radius: f32) -> Self {
         self.corner_radius = radius;
+        self
+    }
+
+    /// Set the border width and color
+    pub fn border(mut self, width: f32, color: Color) -> Self {
+        self.border_width = width;
+        self.border_color = Some(color);
         self
     }
 
@@ -60,7 +71,7 @@ impl View for Rectangle {
     fn create_element(&self) -> Box<dyn Element> {
         Box::new(RenderElement::new(
             self.clone(),
-            RectangleRenderObject::new(self.color, self.corner_radius),
+            RectangleRenderObject::new(self.color, self.corner_radius, self.border_width, self.border_color),
         ))
     }
 
@@ -77,16 +88,20 @@ impl View for Rectangle {
 pub struct RectangleRenderObject {
     color: Color,
     corner_radius: f32,
+    border_width: f32,
+    border_color: Option<Color>,
     size: Size,
     buffer: Option<Buffer>,
 }
 
 impl RectangleRenderObject {
     /// Create a new RectangleRenderObject
-    pub fn new(color: Color, corner_radius: f32) -> Self {
+    pub fn new(color: Color, corner_radius: f32, border_width: f32, border_color: Option<Color>) -> Self {
         Self {
             color,
             corner_radius,
+            border_width,
+            border_color,
             size: Size::ZERO,
             buffer: None,
         }
@@ -198,6 +213,26 @@ impl ElementRenderObject for RectangleRenderObject {
 
             // Fill with solid color
             canvas.fill_rect(0, 0, width, height, self.color);
+
+            // Draw border if specified
+            if self.border_width > 0.0 {
+                if let Some(border_color) = self.border_color {
+                    let bw = self.border_width as u32;
+
+                    // Draw border by drawing 4 rectangles
+                    // Top
+                    canvas.fill_rect(0, 0, width, bw, border_color);
+                    // Bottom
+                    let y = (height as i32 - bw as i32) as i32;
+                    canvas.fill_rect(0, y, width, bw, border_color);
+                    // Left
+                    canvas.fill_rect(0, 0, bw, height, border_color);
+                    // Right
+                    let x = (width as i32 - bw as i32) as i32;
+                    canvas.fill_rect(x, 0, bw, height, border_color);
+                }
+            }
+
             if crate::debug::is_enabled() {
                 scarlet_std::println!("[RectangleRenderObject] render DONE");
             }

@@ -311,13 +311,36 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
     fn handle_event(&mut self, _event: &crate::event::Event, _phase: crate::event::Phase) -> bool {
         use crate::event::{Event, MouseButton, MouseEvent, Phase};
 
-        if _phase != Phase::Target {
-            return false;
-        }
-
         let Event::Mouse(mouse_event) = _event else {
             return false;
         };
+
+        let is_target_phase = _phase == Phase::Target;
+        let is_bubble_phase = _phase == Phase::Bubble;
+
+        if (is_target_phase || is_bubble_phase)
+            && self
+                .render_object
+                .as_any_mut()
+                .downcast_mut::<crate::views::modifiers::OnClickRenderObject>()
+                .is_some()
+        {
+            if let MouseEvent::ButtonReleased { button: MouseButton::Left, .. } = mouse_event {
+                if let Some(render_object) = self
+                    .render_object
+                    .as_any_mut()
+                    .downcast_mut::<crate::views::modifiers::OnClickRenderObject>()
+                {
+                    render_object.invoke_on_click();
+                    crate::pipeline::mark_element_needs_paint(self.id);
+                    return true;
+                }
+            }
+        }
+
+        if !is_target_phase {
+            return false;
+        }
 
         if let Some(button) = self.view.as_any().downcast_ref::<crate::views::Button>() {
             if let Some(render_object) = self

@@ -131,31 +131,55 @@ impl Application for SettingsApp {
 
                 // Color grid - 2 rows of 4
                 hstack! {
-                    Button::new("").background_color(Color::rgb(c[0].color[0], c[0].color[1], c[0].color[2]))
-                        .border_color(if is0 { highlight } else { border }).on_click(move || { s0.set(0); }).frame(85.0, 85.0),
+                    Rectangle::new()
+                        .fill(Color::rgb(c[0].color[0], c[0].color[1], c[0].color[2]))
+                        .border(2.0, if is0 { highlight } else { border })
+                        .on_click(move || { s0.set(0); })
+                        .frame(85.0, 85.0),
                     Spacer::new().frame_width(10.0),
-                    Button::new("").background_color(Color::rgb(c[1].color[0], c[1].color[1], c[1].color[2]))
-                        .border_color(if is1 { highlight } else { border }).on_click(move || { s1.set(1); }).frame(85.0, 85.0),
+                    Rectangle::new()
+                        .fill(Color::rgb(c[1].color[0], c[1].color[1], c[1].color[2]))
+                        .border(2.0, if is1 { highlight } else { border })
+                        .on_click(move || { s1.set(1); })
+                        .frame(85.0, 85.0),
                     Spacer::new().frame_width(10.0),
-                    Button::new("").background_color(Color::rgb(c[2].color[0], c[2].color[1], c[2].color[2]))
-                        .border_color(if is2 { highlight } else { border }).on_click(move || { s2.set(2); }).frame(85.0, 85.0),
+                    Rectangle::new()
+                        .fill(Color::rgb(c[2].color[0], c[2].color[1], c[2].color[2]))
+                        .border(2.0, if is2 { highlight } else { border })
+                        .on_click(move || { s2.set(2); })
+                        .frame(85.0, 85.0),
                     Spacer::new().frame_width(10.0),
-                    Button::new("").background_color(Color::rgb(c[3].color[0], c[3].color[1], c[3].color[2]))
-                        .border_color(if is3 { highlight } else { border }).on_click(move || { s3.set(3); }).frame(85.0, 85.0),
+                    Rectangle::new()
+                        .fill(Color::rgb(c[3].color[0], c[3].color[1], c[3].color[2]))
+                        .border(2.0, if is3 { highlight } else { border })
+                        .on_click(move || { s3.set(3); })
+                        .frame(85.0, 85.0),
                 },
                 Spacer::new().frame_height(10.0),
                 hstack! {
-                    Button::new("").background_color(Color::rgb(c[4].color[0], c[4].color[1], c[4].color[2]))
-                        .border_color(if is4 { highlight } else { border }).on_click(move || { s4.set(4); }).frame(85.0, 85.0),
+                    Rectangle::new()
+                        .fill(Color::rgb(c[4].color[0], c[4].color[1], c[4].color[2]))
+                        .border(2.0, if is4 { highlight } else { border })
+                        .on_click(move || { s4.set(4); })
+                        .frame(85.0, 85.0),
                     Spacer::new().frame_width(10.0),
-                    Button::new("").background_color(Color::rgb(c[5].color[0], c[5].color[1], c[5].color[2]))
-                        .border_color(if is5 { highlight } else { border }).on_click(move || { s5.set(5); }).frame(85.0, 85.0),
+                    Rectangle::new()
+                        .fill(Color::rgb(c[5].color[0], c[5].color[1], c[5].color[2]))
+                        .border(2.0, if is5 { highlight } else { border })
+                        .on_click(move || { s5.set(5); })
+                        .frame(85.0, 85.0),
                     Spacer::new().frame_width(10.0),
-                    Button::new("").background_color(Color::rgb(c[6].color[0], c[6].color[1], c[6].color[2]))
-                        .border_color(if is6 { highlight } else { border }).on_click(move || { s6.set(6); }).frame(85.0, 85.0),
+                    Rectangle::new()
+                        .fill(Color::rgb(c[6].color[0], c[6].color[1], c[6].color[2]))
+                        .border(2.0, if is6 { highlight } else { border })
+                        .on_click(move || { s6.set(6); })
+                        .frame(85.0, 85.0),
                     Spacer::new().frame_width(10.0),
-                    Button::new("").background_color(Color::rgb(c[7].color[0], c[7].color[1], c[7].color[2]))
-                        .border_color(if is7 { highlight } else { border }).on_click(move || { s7.set(7); }).frame(85.0, 85.0),
+                    Rectangle::new()
+                        .fill(Color::rgb(c[7].color[0], c[7].color[1], c[7].color[2]))
+                        .border(2.0, if is7 { highlight } else { border })
+                        .on_click(move || { s7.set(7); })
+                        .frame(85.0, 85.0),
                 },
 
                 Divider::new(),

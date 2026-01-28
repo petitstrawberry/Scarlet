@@ -31,13 +31,23 @@ impl<V: View, F: Fn() + Clone + 'static> OnClick<V, F> {
     pub fn callback(&self) -> &F {
         &self.callback
     }
+
+    /// Invoke the click callback
+    pub fn invoke_on_click(&self) {
+        (self.callback)();
+    }
 }
 
 impl<V: View + Clone, F: Fn() + Clone + 'static> View for OnClick<V, F> {
     fn create_element(&self) -> Box<dyn Element> {
+        let mut render_object = OnClickRenderObject::new();
+        // Store callback in render object
+        // We need to clone the callback since F: Clone
+        render_object.set_callback(Box::new(self.callback.clone()));
+
         Box::new(RenderElement::with_children(
             self.clone(),
-            OnClickRenderObject::new(),
+            render_object,
             vec![self.inner.create_element()],
         ))
     }
@@ -54,11 +64,23 @@ impl<V: View + Clone, F: Fn() + Clone + 'static> View for OnClick<V, F> {
 /// Click RenderObject
 pub struct OnClickRenderObject {
     is_hovered: bool,
+    callback: Option<Box<dyn Fn()>>,
+    size: Size,
 }
 
 impl OnClickRenderObject {
     pub fn new() -> Self {
-        Self { is_hovered: false }
+        Self { is_hovered: false, callback: None, size: Size::ZERO }
+    }
+
+    pub fn set_callback(&mut self, callback: Box<dyn Fn()>) {
+        self.callback = Some(callback);
+    }
+
+    pub fn invoke_on_click(&self) {
+        if let Some(ref cb) = self.callback {
+            cb();
+        }
     }
 }
 
@@ -73,19 +95,28 @@ impl ElementRenderObject for OnClickRenderObject {
         children: &mut [Box<dyn Element>],
     ) -> Size {
         if let Some(child) = children.first_mut() {
-            child.layout(constraints)
+            let size = child.layout(constraints);
+            self.size = size;
+            if crate::debug::is_enabled() {
+                scarlet_std::println!("[OnClickRenderObject::layout_with_children] size={}x{}", size.width, size.height);
+            }
+            size
         } else {
+            self.size = Size::ZERO;
             Size::ZERO
         }
     }
 
     fn size(&self) -> Size {
-        Size::ZERO
+        self.size
     }
 
-    fn hit_test(&self, _point: crate::geometry::Point) -> bool {
-        // Always claim hit so we can capture clicks
-        true
+    fn hit_test(&self, point: crate::geometry::Point) -> bool {
+        let result = point.x >= 0.0 && point.x < self.size.width && point.y >= 0.0 && point.y < self.size.height;
+        if crate::debug::is_enabled() {
+            scarlet_std::println!("[OnClickRenderObject::hit_test] point=({:?}), size={:?}, result={}", point, self.size, result);
+        }
+        result
     }
 
     fn as_any(&self) -> &dyn Any {

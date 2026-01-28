@@ -276,7 +276,7 @@ impl ElementRenderObject for FrameRenderObject {
             let child_size = child.layout(child_constraints);
             child_max.width = child_max.width.max(child_size.width);
             child_max.height = child_max.height.max(child_size.height);
-            child.set_position(Point::ZERO);
+            // Don't override position - let parent (HStack/VStack) control it
         }
 
         self.layout_with_child(child_max, constraints)
