@@ -82,7 +82,7 @@ pub use render::{RenderTree, RenderNode};
 pub use pipeline::{PipelineOwner, RenderingPipeline, DirtyPhase, StateRegistry};
 pub use views::{Window, Text, Button, Rectangle, Spacer, Image, VStack, HStack, ZStack};
 pub use views::{Divider, DividerOrientation, Toggle, Slider, ProgressView};
-pub use views::modifiers::{Padding, Frame, Background, SetSize, AlignmentFrame};
+pub use views::modifiers::{Padding, Frame, Background, SetSize, AlignmentFrame, Clip};
 pub use platform::{PlatformWindow, SWSPlatformWindow};
 pub use application::Application;
 pub use graphics::{Canvas, measure_text_sized, set_default_font};
@@ -104,7 +104,7 @@ pub mod prelude {
     pub use crate::views::{Window, Text, Button, Rectangle, Spacer, Image, VStack, HStack, ZStack};
     pub use crate::views::{Divider, DividerOrientation, Toggle, Slider, ProgressView};
     pub use crate::views::{MenuItem, MenuBar, Menu, MenuItemContent, MenuAction};
-    pub use crate::views::modifiers::{Padding, Frame, Background};
+    pub use crate::views::modifiers::{Padding, Frame, Background, Clip};
     pub use crate::menu_model::{MenuBarModel, MenuEntry, MenuItemModel};
 
     // Note: The View derive macro must be imported from scarlet_ui_macros:

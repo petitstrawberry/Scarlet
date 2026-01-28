@@ -202,6 +202,25 @@ pub trait ViewExt: View {
     {
         crate::views::modifiers::OnExit::new(self, callback)
     }
+
+    /// Clip this view to its bounds
+    fn clip(self) -> crate::views::modifiers::Clip<Self>
+    where
+        Self: Sized,
+    {
+        crate::views::modifiers::Clip::new(self, 0.0)
+    }
+
+    /// Clip this view to rounded corners
+    ///
+    /// # Arguments
+    /// * `radius` - Corner radius
+    fn clip_radius(self, radius: f32) -> crate::views::modifiers::Clip<Self>
+    where
+        Self: Sized,
+    {
+        crate::views::modifiers::Clip::new(self, radius)
+    }
 }
 
 /// Blanket implementation of ViewExt for all View types

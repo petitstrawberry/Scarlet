@@ -438,8 +438,8 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
             {
                 match mouse_event {
                     MouseEvent::Entered { x, y } | MouseEvent::Moved { x, y } => {
-                        let local_x = (*x as f32) - self.position.x;
-                        let local_y = (*y as f32) - self.position.y;
+                        let local_x = *x as f32;
+                        let local_y = *y as f32;
                         let hovered = render_object.hit_test(local_x, local_y);
                         if hovered != render_object.hovered() {
                             render_object.set_hovered(hovered);
@@ -455,8 +455,8 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
                         return true;
                     }
                     MouseEvent::ButtonReleased { button: MouseButton::Left, x, y } => {
-                        let local_x = (*x as f32) - self.position.x;
-                        let local_y = (*y as f32) - self.position.y;
+                        let local_x = *x as f32;
+                        let local_y = *y as f32;
                         if let Some(index) = render_object.hit_test(local_x, local_y) {
                             render_object.invoke_item(index);
                             return true;
@@ -504,11 +504,10 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
                     render_object: &mut crate::views::SliderRenderObject,
                     slider: &crate::views::Slider,
                     id: ElementId,
-                    position: Point,
                     x: i32,
                     commit: bool,
                 ) -> bool {
-                    let local_x = (x as f32) - position.x;
+                    let local_x = x as f32;
                     let new_value = render_object.value_from_local_x(local_x);
                     let state_value = slider.get_value().get();
                     if crate::debug::is_enabled() {
@@ -538,18 +537,18 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
                         if !dragging_state.get() {
                             dragging_state.set(true);
                         }
-                        update_slider_value(render_object, slider, self.id, self.position, *x, true);
+                        update_slider_value(render_object, slider, self.id, *x, true);
                         return true;
                     }
                     MouseEvent::Moved { x, .. } => {
                         if render_object.is_dragging() {
-                            update_slider_value(render_object, slider, self.id, self.position, *x, true);
+                            update_slider_value(render_object, slider, self.id, *x, true);
                             return true;
                         }
                     }
                     MouseEvent::ButtonReleased { button: MouseButton::Left, x, .. } => {
                         if render_object.is_dragging() {
-                            update_slider_value(render_object, slider, self.id, self.position, *x, true);
+                            update_slider_value(render_object, slider, self.id, *x, true);
                             render_object.set_dragging(false);
                             if dragging_state.get() {
                                 dragging_state.set(false);

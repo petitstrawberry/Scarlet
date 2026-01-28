@@ -161,11 +161,6 @@ impl Element for MenuBarElement {
             }
         };
 
-        let local_point = Point {
-            x: point.x - self.position.x,
-            y: point.y - self.position.y,
-        };
-
         let mut new_index = None;
         for (idx, child) in self.children.iter().enumerate() {
             let bounds = child.bounds();
@@ -173,7 +168,7 @@ impl Element for MenuBarElement {
                 origin: bounds.origin,
                 size: bounds.size,
             };
-            if rect.contains(local_point) {
+            if rect.contains(point) {
                 new_index = Some(idx);
                 break;
             }

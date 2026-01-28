@@ -116,6 +116,50 @@ impl RectangleRenderObject {
     pub fn get_corner_radius(&self) -> f32 {
         self.corner_radius
     }
+
+    fn fill_rounded_rect(
+        canvas: &mut graphics::Canvas<'_>,
+        x0: i32,
+        y0: i32,
+        width: u32,
+        height: u32,
+        radius: f32,
+        color: Color,
+    ) {
+        if width == 0 || height == 0 {
+            return;
+        }
+        let max_radius = (width.min(height) as f32) / 2.0;
+        let radius = radius.max(0.0).min(max_radius);
+        if radius <= 0.0 {
+            canvas.fill_rect(x0, y0, width, height, color);
+            return;
+        }
+
+        let left = radius;
+        let right = width as f32 - radius;
+        let top = radius;
+        let bottom = height as f32 - radius;
+        let radius_sq = radius * radius;
+
+        for y in 0..height as i32 {
+            let fy = y as f32;
+            for x in 0..width as i32 {
+                let fx = x as f32;
+                let in_center = (fx >= left && fx < right) || (fy >= top && fy < bottom);
+                if !in_center {
+                    let corner_x = if fx < left { left } else { right };
+                    let corner_y = if fy < top { top } else { bottom };
+                    let dx = fx - corner_x;
+                    let dy = fy - corner_y;
+                    if dx * dx + dy * dy > radius_sq {
+                        continue;
+                    }
+                }
+                canvas.put_pixel(x + x0, y + y0, color);
+            }
+        }
+    }
 }
 
 impl ElementRenderObject for RectangleRenderObject {
@@ -211,26 +255,29 @@ impl ElementRenderObject for RectangleRenderObject {
                 scarlet_std::println!("[RectangleRenderObject] filling rect...");
             }
 
-            // Fill with solid color
-            canvas.fill_rect(0, 0, width, height, self.color);
-
-            // Draw border if specified
             if self.border_width > 0.0 {
                 if let Some(border_color) = self.border_color {
-                    let bw = self.border_width as u32;
-
-                    // Draw border by drawing 4 rectangles
-                    // Top
-                    canvas.fill_rect(0, 0, width, bw, border_color);
-                    // Bottom
-                    let y = (height as i32 - bw as i32) as i32;
-                    canvas.fill_rect(0, y, width, bw, border_color);
-                    // Left
-                    canvas.fill_rect(0, 0, bw, height, border_color);
-                    // Right
-                    let x = (width as i32 - bw as i32) as i32;
-                    canvas.fill_rect(x, 0, bw, height, border_color);
+                    let bw = self.border_width.max(1.0).min((width.min(height) as f32) / 2.0);
+                    Self::fill_rounded_rect(&mut canvas, 0, 0, width, height, self.corner_radius, border_color);
+                    let inner_width = (width as f32 - 2.0 * bw).max(0.0) as u32;
+                    let inner_height = (height as f32 - 2.0 * bw).max(0.0) as u32;
+                    if inner_width > 0 && inner_height > 0 {
+                        let inner_radius = (self.corner_radius - bw).max(0.0);
+                        Self::fill_rounded_rect(
+                            &mut canvas,
+                            bw as i32,
+                            bw as i32,
+                            inner_width,
+                            inner_height,
+                            inner_radius,
+                            self.color,
+                        );
+                    }
+                } else {
+                    Self::fill_rounded_rect(&mut canvas, 0, 0, width, height, self.corner_radius, self.color);
                 }
+            } else {
+                Self::fill_rounded_rect(&mut canvas, 0, 0, width, height, self.corner_radius, self.color);
             }
 
             if crate::debug::is_enabled() {
