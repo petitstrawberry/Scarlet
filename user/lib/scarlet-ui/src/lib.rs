@@ -81,7 +81,7 @@ pub use compositor::Compositor;
 pub use render::{RenderTree, RenderNode};
 pub use pipeline::{PipelineOwner, RenderingPipeline, DirtyPhase, StateRegistry};
 pub use views::{Window, Text, Button, Rectangle, Spacer, Image, VStack, HStack, ZStack};
-pub use views::{Divider, DividerOrientation, Toggle, Slider, ProgressView};
+pub use views::{Divider, DividerOrientation, Toggle, Slider, ProgressView, CanvasView};
 pub use views::modifiers::{Padding, Frame, Background, SetSize, AlignmentFrame, Clip};
 pub use platform::{PlatformWindow, SWSPlatformWindow};
 pub use application::Application;
@@ -102,7 +102,7 @@ pub mod prelude {
     pub use crate::event::{Event, MouseEvent, KeyEvent, FocusEvent, LifecycleEvent};
     pub use crate::application::Application;
     pub use crate::views::{Window, Text, Button, Rectangle, Spacer, Image, VStack, HStack, ZStack};
-    pub use crate::views::{Divider, DividerOrientation, Toggle, Slider, ProgressView};
+    pub use crate::views::{Divider, DividerOrientation, Toggle, Slider, ProgressView, CanvasView};
     pub use crate::views::{MenuItem, MenuBar, Menu, MenuItemContent, MenuAction};
     pub use crate::views::modifiers::{Padding, Frame, Background, Clip};
     pub use crate::menu_model::{MenuBarModel, MenuEntry, MenuItemModel};
