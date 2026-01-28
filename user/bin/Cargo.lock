@@ -3712,6 +3712,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "slint-scarlet"
+version = "0.1.0"
+dependencies = [
+ "scarlet-ui",
+ "scarlet_std",
+ "slint",
+ "slint-build",
+ "sws-client",
+ "sws_protocol",
+]
+
+[[package]]
 name = "slotmap"
 version = "1.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4267,6 +4279,7 @@ dependencies = [
  "serde-json-core",
  "slint",
  "slint-build",
+ "slint-scarlet",
  "sws-client",
  "sws_protocol",
 ]

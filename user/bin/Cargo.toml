@@ -90,9 +90,9 @@ path = "src/stemd/main.rs"
 name = "sbusd"
 path = "src/sbusd/main.rs"
 
-# [[bin]]
-# name = "slint_demo"
-# path = "src/slint_demo.rs"
+[[bin]]
+name = "slint_demo"
+path = "src/slint_demo.rs"
 
 [[bin]]
 name = "scarlet_desktop"
@@ -121,7 +121,7 @@ sws_protocol = { path = "../lib/sws_protocol" }
 sws-client = { path = "../lib/sws-client" }
 scarlet-ui = { path = "../lib/scarlet-ui" }
 scarlet-ui-macros = { path = "../lib/scarlet-ui-macros" }
-# slint-scarlet = { path = "../lib/slint-scarlet" }
+slint-scarlet = { path = "../lib/slint-scarlet" }
 scarlet-desktop-config = { path = "../lib/scarlet-desktop-config" }
 sbus = { path = "../lib/sbus" }
 sbus-client = { path = "../lib/sbus-client" }
