@@ -237,18 +237,34 @@ impl Buffer {
             let src_y = target_y - dst_y;
             let src_row = (src_y * src.width as i32) as usize;
             let dst_row = (target_y * self.width as i32) as usize;
-            let dy_top = (target_y - clip_y) as f32;
-            let dy_bottom = (clip_y + clip_h - 1 - target_y) as f32;
+            let center_y = (target_y - clip_y) as f32 + 0.5;
+            let dy_top = center_y;
+            let dy_bottom = (clip_h as f32) - center_y;
             for target_x in dst_left..dst_right {
-                let dx_left = (target_x - clip_x) as f32;
-                let dx_right = (clip_x + clip_w - 1 - target_x) as f32;
+                let center_x = (target_x - clip_x) as f32 + 0.5;
+                let dx_left = center_x;
+                let dx_right = (clip_w as f32) - center_x;
 
                 let in_center = (dx_left >= radius && dx_right >= radius)
                     || (dy_top >= radius && dy_bottom >= radius);
                 if !in_center {
                     let corner_dx = radius - dx_left.min(dx_right);
                     let corner_dy = radius - dy_top.min(dy_bottom);
-                    if corner_dx * corner_dx + corner_dy * corner_dy > radius_sq {
+                    let dist_sq = corner_dx * corner_dx + corner_dy * corner_dy;
+                    if dist_sq > radius_sq {
+                        let dist = libm::sqrtf(dist_sq);
+                        let coverage = (radius + 0.5 - dist).max(0.0).min(1.0);
+                        if coverage <= 0.0 {
+                            continue;
+                        }
+                        let src_x = target_x - dst_x;
+                        let src_pixel = src.data[(src_row + src_x as usize)];
+                        let dst_idx = dst_row + target_x as usize;
+                        self.data[dst_idx] = Self::blend_pixels(
+                            self.data[dst_idx],
+                            src_pixel,
+                            opacity * coverage,
+                        );
                         continue;
                     }
                 }
