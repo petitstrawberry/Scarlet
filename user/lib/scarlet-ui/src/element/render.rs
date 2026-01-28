@@ -594,6 +594,25 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
             }
         }
 
+        // Handle CanvasView events
+        if let Some(canvas) = self.view.as_any().downcast_ref::<crate::views::CanvasView>() {
+            if let Some(render_object) = self
+                .render_object
+                .as_any()
+                .downcast_ref::<crate::views::CanvasRenderObject>()
+            {
+                if let Some(handler) = render_object.event_handler() {
+                    if let Ok(mut handler) = handler.try_borrow_mut() {
+                        let handled = handler(_event);
+                        if handled {
+                            crate::pipeline::mark_element_needs_paint(self.id);
+                        }
+                        return handled;
+                    }
+                }
+            }
+        }
+
         false
     }
 }
