@@ -41,6 +41,7 @@ impl ScarletWindowAdapter {
             .app_name("Slint App")
             .menu_titles("")
             .size(width, height)
+            .resizable(false)
             .build(connection)
             .map_err(|e| slint::platform::PlatformError::Other(
                 std::format!("Failed to create surface: {:?}", e).into()
