@@ -33,6 +33,8 @@ pub enum Error {
     SurfaceNotFound,
     /// Protocol error
     ProtocolError,
+    /// Invalid request (e.g., missing required field in builder)
+    InvalidRequest,
 }
 
 impl Error {
@@ -54,6 +56,7 @@ impl Error {
             Error::ShmMapFailed => "failed to map shared memory",
             Error::SurfaceNotFound => "surface not found",
             Error::ProtocolError => "protocol error",
+            Error::InvalidRequest => "invalid request (missing required field)",
         }
     }
 }

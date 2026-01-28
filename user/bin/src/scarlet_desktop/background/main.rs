@@ -11,7 +11,7 @@ use core::time::Duration;
 use scarlet_ui::Color;
 use std::println;
 use std::thread;
-use sws_client::{Connection, Event};
+use sws_client::{Connection, Event, SurfaceBuilder};
 use sws_protocol::window_types;
 use scarlet_desktop_config::BackgroundStyle;
 
@@ -157,25 +157,24 @@ pub extern "C" fn main() -> i32 {
         Err(_) => (1024, 768),
     };
 
-    let surface_id = match conn.create_surface_with_type_and_policies(
-        "org.scarlet-os.desktop.background",
-        "Background",
-        "",
-        screen_width,
-        screen_height,
-        window_types::DESKTOP,
-        false,
-        false,
-        false,
-    ) {
+    let surface_id = match SurfaceBuilder::new()
+        .app_id("org.scarlet-os.desktop.background")
+        .app_name("Background")
+        .menu_titles("")
+        .size(screen_width, screen_height)
+        .window_type(window_types::DESKTOP)
+        .resizable(false)
+        .focus_on_create(false)
+        .active_on_focus(false)
+        .position(0, 0)
+        .build(&mut conn)
+    {
         Ok(id) => id,
         Err(_) => {
             println!("[scarlet_desktop_background] Failed to create surface");
             return 1;
         }
     };
-
-    let _ = conn.move_window(surface_id, 0, 0);
 
     // Initial draw.
     draw_background(&mut conn, surface_id);
