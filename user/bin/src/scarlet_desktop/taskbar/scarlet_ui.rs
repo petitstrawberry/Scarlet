@@ -14,6 +14,7 @@ extern crate scarlet_ui_macros;
 use alloc::collections::BTreeMap;
 use alloc::vec;
 use core::time::Duration;
+use std::io::Write;
 use scarlet_ui::buffer::Buffer;
 use scarlet_ui::color::Color;
 use scarlet_ui::element::{ElementRenderObject, LayoutConstraints};
@@ -123,13 +124,6 @@ struct MenuEntryPayload {
 fn default_system_menu_entries() -> Vec<TaskMenuEntry> {
     vec![
         TaskMenuEntry::Item(TaskMenuItem {
-            id: String::from("system_about"),
-            title: String::from("About Scarlet"),
-            enabled: true,
-            shortcut: None,
-            children: Vec::new(),
-        }),
-        TaskMenuEntry::Item(TaskMenuItem {
             id: String::from("system_settings"),
             title: String::from("Settings"),
             enabled: true,
@@ -139,7 +133,7 @@ fn default_system_menu_entries() -> Vec<TaskMenuEntry> {
         TaskMenuEntry::Separator,
         TaskMenuEntry::Item(TaskMenuItem {
             id: String::from("system_quit"),
-            title: String::from("Quit Scarlet"),
+            title: String::from("Shutdown"),
             enabled: true,
             shortcut: None,
             children: Vec::new(),
@@ -419,6 +413,30 @@ fn build_menu_items(
                 let window_id = active_window_id;
                 content = content.callback(move || {
                     open_state.set(None);
+                    // Handle system menu items
+                    if item_id == "system_settings" {
+                        // Launch Settings via stemd
+                        if let Ok(mut stream) = std::socket::Socket::new() {
+                            if stream.connect("/tmp/stemd.sock").is_ok() {
+                                let app_id = b"org.scarlet-os.desktop.settings";
+                                let exec_path = b"";
+                                let mut msg = alloc::vec::Vec::new();
+                                msg.push(0x01); // LAUNCH_OR_FOCUS command
+                                msg.extend_from_slice(&(app_id.len() as u32).to_le_bytes());
+                                msg.extend_from_slice(app_id);
+                                msg.extend_from_slice(&(exec_path.len() as u32).to_le_bytes());
+                                msg.extend_from_slice(exec_path);
+                                let _ = stream.write(&msg);
+                            }
+                        }
+                        return;
+                    }
+                    if item_id == "system_quit" {
+                        // TODO: Show shutdown dialog
+                        println!("[TaskBar] System shutdown requested");
+                        return;
+                    }
+                    // Handle application menu items
                     if window_id == 0 || item_id.starts_with("system_") {
                         return;
                     }

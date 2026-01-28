@@ -908,10 +908,47 @@ impl WindowManager {
                 "[WindowManager] Window #{} type set to {:?}, resizable={}, raise_on_focus={}",
                 id, window_type, w.resizable, w.raise_on_focus
             );
+
+            // Rebuild Z-order to maintain proper layering: Desktop < Normal < Taskbar < AlwaysOnTop
+            self.rebuild_z_order_for_type_change(id, window_type);
+
             true
         } else {
             false
         }
+    }
+
+    /// Internal helper: rebuild Z-order after window type change
+    /// This ensures windows are in the correct layer: Desktop < Normal < Taskbar < AlwaysOnTop
+    fn rebuild_z_order_for_type_change(&mut self, _id: WindowId, _new_type: WindowType) {
+        let old = core::mem::take(&mut self.windows);
+        let mut desktop: Vec<Window> = Vec::new();
+        let mut normal: Vec<Window> = Vec::new();
+        let mut taskbar: Vec<Window> = Vec::new();
+        let mut always_on_top: Vec<Window> = Vec::new();
+
+        // Sort windows into layers by type
+        for w in old {
+            match w.window_type {
+                WindowType::Desktop => desktop.push(w),
+                WindowType::Normal => normal.push(w),
+                WindowType::Taskbar => taskbar.push(w),
+                WindowType::AlwaysOnTop => always_on_top.push(w),
+            }
+        }
+
+        // Reconstruct in proper Z-order: desktop -> normal -> taskbar -> always_on_top
+        self.windows = desktop;
+        self.windows.extend(normal);
+        self.windows.extend(taskbar);
+        self.windows.extend(always_on_top);
+
+        println!("[WindowManager] Z-order rebuilt after type change");
+        print!("[WindowManager] Current Z-order (bottom to top): ");
+        for w in &self.windows {
+            print!("#{}({:?}) ", w.id, w.window_type);
+        }
+        println!();
     }
 
     /// Set window opacity (0.0 = transparent, 1.0 = opaque)
