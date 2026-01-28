@@ -15,8 +15,8 @@ use scarlet_ui::{Canvas, Color};
 
 // Constants for titlebar rendering (matching scarlet-ui WindowRenderObject)
 const TITLEBAR_CONTROL_COUNT: u32 = 3;
-const CLOSE_BUTTON_SIZE: u32 = 46;
-const CLOSE_BUTTON_MARGIN: u32 = 2;
+const CLOSE_BUTTON_SIZE: u32 = 18;
+const CLOSE_BUTTON_MARGIN: u32 = 8;
 
 #[derive(Debug, Clone, Copy, Default)]
 struct PointerState {
@@ -531,6 +531,22 @@ fn draw_titlebar(deco: &DecorationState, title: &str, buffer: &mut [u8], width: 
     // Draw border at bottom of titlebar
     let border_color = Color::rgb(180u8, 180u8, 185u8);
     canvas.draw_line(0, titlebar_height as i32 - 1, width as i32 - 1, titlebar_height as i32 - 1, border_color);
+
+    // Draw window border (matching scarlet-ui)
+    // Outer border: rgb(100, 100, 105)
+    let window_border_color = Color::rgb(100u8, 100u8, 105u8);
+    canvas.draw_rect(0, 0, width, height, window_border_color);
+
+    // Inner highlight for depth: rgb(90, 90, 95)
+    if width > 2 && height > 2 {
+        canvas.draw_rect(
+            1,
+            1,
+            width.saturating_sub(2),
+            height.saturating_sub(2),
+            Color::rgb(90u8, 90u8, 95u8),
+        );
+    }
 }
 
 /// Get button color based on state (matching scarlet-ui)
