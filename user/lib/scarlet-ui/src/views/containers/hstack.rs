@@ -97,6 +97,8 @@ pub struct HStackRenderObject {
     spacing: f32,
     alignment: crate::geometry::Alignment,
     size: Size,
+    child_sizes: Vec<Size>,
+    greedy_indices: Vec<usize>,
 }
 
 impl HStackRenderObject {
@@ -105,6 +107,8 @@ impl HStackRenderObject {
             spacing,
             alignment,
             size: Size::ZERO,
+            child_sizes: Vec::new(),
+            greedy_indices: Vec::new(),
         }
     }
 }
@@ -137,35 +141,43 @@ impl ElementRenderObject for HStackRenderObject {
         let mut fixed_total_width: f32 = 0.0;
         let mut max_height: f32 = 0.0;
         let mut flex_total: u32 = 0;
-        let mut greedy_indices: Vec<usize> = Vec::new();
-        let mut child_sizes: Vec<Size> = Vec::with_capacity(children.len());
+        self.greedy_indices.clear();
+        self.child_sizes.clear();
+        self.child_sizes.resize(child_count, Size::ZERO);
 
         for (index, child) in children.iter_mut().enumerate() {
             let flex = child.flex_factor();
             flex_total += flex;
 
             if flex == 0 {
-                let child_constraints = LayoutConstraints::loose(constraints.max_width, constraints.max_height);
+                let fill_cross = child.fill_height();
+                let child_constraints = if fill_cross {
+                    LayoutConstraints::new(0.0, constraints.max_width, 0.0, f32::INFINITY)
+                } else {
+                    LayoutConstraints::new(0.0, constraints.max_width, 0.0, constraints.max_height)
+                };
                 let child_size = child.layout(child_constraints);
-                child_sizes.push(child_size);
+                self.child_sizes[index] = child_size;
                 if constraints.max_width.is_finite()
                     && constraints.max_width > 0.0
                     && child_size.width + 0.5 >= constraints.max_width
                 {
-                    greedy_indices.push(index);
+                    self.greedy_indices.push(index);
                 } else {
                     fixed_total_width += child_size.width;
                     max_height = max_height.max(child_size.height);
                 }
-            } else {
-                child_sizes.push(Size::ZERO);
             }
         }
 
-        if flex_total == 0 && !greedy_indices.is_empty() && constraints.max_width.is_finite() && constraints.max_width > 0.0 {
+        if flex_total == 0
+            && !self.greedy_indices.is_empty()
+            && constraints.max_width.is_finite()
+            && constraints.max_width > 0.0
+        {
             let share = (constraints.max_width - fixed_total_width - spacing_total).max(0.0)
-                / greedy_indices.len() as f32;
-            for &index in greedy_indices.iter() {
+                / self.greedy_indices.len() as f32;
+            for &index in self.greedy_indices.iter() {
                 let child = &mut children[index];
                 let child_constraints = LayoutConstraints {
                     min_width: share,
@@ -174,39 +186,37 @@ impl ElementRenderObject for HStackRenderObject {
                     max_height: constraints.max_height,
                 };
                 let child_size = child.layout(child_constraints);
-                child_sizes[index] = child_size;
+                self.child_sizes[index] = child_size;
                 fixed_total_width += child_size.width;
                 max_height = max_height.max(child_size.height);
             }
         }
 
-        let remaining_width = (constraints.max_width - fixed_total_width - spacing_total).max(0.0);
-        let mut child_x_offset = 0.0;
+        let max_width_finite = constraints.max_width.is_finite() && constraints.max_width > 0.0;
+        let remaining_width = if max_width_finite {
+            (constraints.max_width - fixed_total_width - spacing_total).max(0.0)
+        } else {
+            0.0
+        };
 
         for (i, child) in children.iter_mut().enumerate() {
             let flex = child.flex_factor();
-            let child_size = if flex == 0 {
-                child_sizes[i]
-            } else {
+            if flex > 0 {
                 let share = if flex_total > 0 {
                     remaining_width / flex_total as f32 * flex as f32
                 } else {
                     remaining_width
                 };
                 let child_constraints = LayoutConstraints {
-                    min_width: share,
-                    max_width: share,
+                    min_width: if max_width_finite { share } else { 0.0 },
+                    max_width: if max_width_finite { share } else { 0.0 },
                     min_height: 0.0,
                     max_height: constraints.max_height,
                 };
-                child.layout(child_constraints)
-            };
-
-            let child_y = self.alignment.align_y(max_height, child_size.height);
-            child.set_position(Point::new(child_x_offset, child_y));
-            child_x_offset += child_size.width;
-            if i < child_count.saturating_sub(1) {
-                child_x_offset += self.spacing;
+                let child_size = child.layout(child_constraints);
+                self.child_sizes[i] = child_size;
+                fixed_total_width += child_size.width;
+                max_height = max_height.max(child_size.height);
             }
         }
 
@@ -236,8 +246,34 @@ impl ElementRenderObject for HStackRenderObject {
             if crate::debug::is_enabled() {
                 scarlet_std::println!("[HStackRenderObject::layout] loose width, using child_x_offset from content");
             }
-            child_x_offset.min(constraints.max_width)
+            (fixed_total_width + spacing_total).min(constraints.max_width)
         };
+
+        for (index, child) in children.iter_mut().enumerate() {
+            if !child.fill_height() {
+                continue;
+            }
+            let width = self.child_sizes[index].width;
+            let child_constraints = LayoutConstraints {
+                min_width: width,
+                max_width: width,
+                min_height: final_height,
+                max_height: final_height,
+            };
+            let child_size = child.layout(child_constraints);
+            self.child_sizes[index] = child_size;
+        }
+
+        let mut child_x_offset = 0.0;
+        for (i, child) in children.iter_mut().enumerate() {
+            let child_size = self.child_sizes[i];
+            let child_y = self.alignment.align_y(final_height, child_size.height);
+            child.set_position(Point::new(child_x_offset, child_y));
+            child_x_offset += child_size.width;
+            if i < child_count.saturating_sub(1) {
+                child_x_offset += self.spacing;
+            }
+        }
 
         self.size = Size {
             width: final_width,

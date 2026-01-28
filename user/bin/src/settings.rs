@@ -9,11 +9,14 @@ extern crate alloc;
 extern crate scarlet_std;
 extern crate scarlet_ui_macros;
 
+use core::f32;
+
 use scarlet_std::format;
 use scarlet_std::println;
 use scarlet_std::fs;
-use scarlet_ui::{hstack, prelude::*, vstack, State, StateId};
+use scarlet_ui::{hstack, prelude::*, vstack, State, StateId, zstack};
 use scarlet_ui_macros::View;
+use scarlet_desktop_config::BackgroundStyle;
 
 // Preset colors - Apple system-style palette
 #[derive(Clone, Copy, Debug)]
@@ -23,6 +26,7 @@ pub struct PresetColor {
 }
 
 const DEFAULT_BG_PREVIEW: [u8; 3] = [40, 40, 50];
+const DEFAULT_STYLE: BackgroundStyle = BackgroundStyle::GradientLines;
 
 const PRESET_COLORS: &[PresetColor] = &[
     PresetColor { name: "Default", color: DEFAULT_BG_PREVIEW },
@@ -37,7 +41,7 @@ const PRESET_COLORS: &[PresetColor] = &[
 
 #[derive(View, Clone)]
 struct SettingsApp {
-    use_default: State<bool>,
+    background_style: State<BackgroundStyle>,
     red_value: State<f32>,
     green_value: State<f32>,
     blue_value: State<f32>,
@@ -46,10 +50,10 @@ struct SettingsApp {
 impl SettingsApp {
     pub fn new() -> Self {
         let config = scarlet_desktop_config::load_desktop_config();
-        let use_default = config.theme.background.is_none();
+        let style = config.theme.background_style.unwrap_or(DEFAULT_STYLE);
         let color = config.theme.background.unwrap_or(DEFAULT_BG_PREVIEW);
         Self {
-            use_default: State::new(StateId::new(0), use_default),
+            background_style: State::new(StateId::new(0), style),
             red_value: State::new(StateId::new(1), color[0] as f32),
             green_value: State::new(StateId::new(2), color[1] as f32),
             blue_value: State::new(StateId::new(3), color[2] as f32),
@@ -58,15 +62,16 @@ impl SettingsApp {
 
     fn save_config(&self) {
         let bg_color = self.current_color();
-        if self.use_default.get() && bg_color == DEFAULT_BG_PREVIEW {
+        let style = self.background_style.get();
+        if style == DEFAULT_STYLE && bg_color == DEFAULT_BG_PREVIEW {
             let _ = fs::remove_file("/etc/scarlet-desktop.d/background.toml");
             println!("[settings] Reset to default background");
             return;
         }
 
         let config_content = format!(
-            "[theme]\nbackground = \"#{:02x}{:02x}{:02x}\"\n",
-            bg_color[0], bg_color[1], bg_color[2]
+            "[theme]\nbackground = \"#{:02x}{:02x}{:02x}\"\nbackground_style = \"{}\"\n",
+            bg_color[0], bg_color[1], bg_color[2], style.as_str()
         );
 
         let _ = fs::create_directory("/etc/scarlet-desktop.d");
@@ -91,10 +96,7 @@ impl SettingsApp {
 
     fn selected_preset_index(&self) -> Option<usize> {
         let current = self.current_color();
-        if self.use_default.get() && current == DEFAULT_BG_PREVIEW {
-            return Some(0);
-        }
-        for (i, preset) in PRESET_COLORS.iter().enumerate().skip(1) {
+        for (i, preset) in PRESET_COLORS.iter().enumerate() {
             if preset.color == current {
                 return Some(i);
             }
@@ -106,40 +108,39 @@ impl SettingsApp {
 impl Application for SettingsApp {
     fn body(&self) -> impl View {
         let selected_idx = self.selected_preset_index();
+        let style = self.background_style.get();
+        let style_default = style == BackgroundStyle::GradientLines;
+        let style_gradient = style == BackgroundStyle::Gradient;
+        let style_solid = style == BackgroundStyle::Solid;
 
         // Prepare state clones
-        let d0 = self.use_default.clone();
         let r0 = self.red_value.clone();
         let g0 = self.green_value.clone();
         let b0 = self.blue_value.clone();
-        let d1 = self.use_default.clone();
         let r1 = self.red_value.clone();
         let g1 = self.green_value.clone();
         let b1 = self.blue_value.clone();
-        let d2 = self.use_default.clone();
         let r2 = self.red_value.clone();
         let g2 = self.green_value.clone();
         let b2 = self.blue_value.clone();
-        let d3 = self.use_default.clone();
         let r3 = self.red_value.clone();
         let g3 = self.green_value.clone();
         let b3 = self.blue_value.clone();
-        let d4 = self.use_default.clone();
         let r4 = self.red_value.clone();
         let g4 = self.green_value.clone();
         let b4 = self.blue_value.clone();
-        let d5 = self.use_default.clone();
         let r5 = self.red_value.clone();
         let g5 = self.green_value.clone();
         let b5 = self.blue_value.clone();
-        let d6 = self.use_default.clone();
         let r6 = self.red_value.clone();
         let g6 = self.green_value.clone();
         let b6 = self.blue_value.clone();
-        let d7 = self.use_default.clone();
         let r7 = self.red_value.clone();
         let g7 = self.green_value.clone();
         let b7 = self.blue_value.clone();
+        let s0 = self.background_style.clone();
+        let s1 = self.background_style.clone();
+        let s2 = self.background_style.clone();
 
         let c = &PRESET_COLORS;
         let is0 = selected_idx == Some(0);
@@ -163,98 +164,124 @@ impl Application for SettingsApp {
                 Text::new("Desktop Background").font_size(13.0),
                 Divider::new(),
 
-                // Color grid - 2 rows of 4
                 hstack! {
-                    Rectangle::new()
-                        .fill(Color::rgb(c[0].color[0], c[0].color[1], c[0].color[2]))
-                        .border(2.0, if is0 { highlight } else { border })
-                        .on_click(move || {
-                            d0.set(true);
-                            r0.set(c[0].color[0] as f32);
-                            g0.set(c[0].color[1] as f32);
-                            b0.set(c[0].color[2] as f32);
-                        })
-                        .frame(85.0, 85.0),
-                    Spacer::new().frame_width(10.0),
-                    Rectangle::new()
-                        .fill(Color::rgb(c[1].color[0], c[1].color[1], c[1].color[2]))
-                        .border(2.0, if is1 { highlight } else { border })
-                        .on_click(move || {
-                            d1.set(false);
-                            r1.set(c[1].color[0] as f32);
-                            g1.set(c[1].color[1] as f32);
-                            b1.set(c[1].color[2] as f32);
-                        })
-                        .frame(85.0, 85.0),
-                    Spacer::new().frame_width(10.0),
-                    Rectangle::new()
-                        .fill(Color::rgb(c[2].color[0], c[2].color[1], c[2].color[2]))
-                        .border(2.0, if is2 { highlight } else { border })
-                        .on_click(move || {
-                            d2.set(false);
-                            r2.set(c[2].color[0] as f32);
-                            g2.set(c[2].color[1] as f32);
-                            b2.set(c[2].color[2] as f32);
-                        })
-                        .frame(85.0, 85.0),
-                    Spacer::new().frame_width(10.0),
-                    Rectangle::new()
-                        .fill(Color::rgb(c[3].color[0], c[3].color[1], c[3].color[2]))
-                        .border(2.0, if is3 { highlight } else { border })
-                        .on_click(move || {
-                            d3.set(false);
-                            r3.set(c[3].color[0] as f32);
-                            g3.set(c[3].color[1] as f32);
-                            b3.set(c[3].color[2] as f32);
-                        })
-                        .frame(85.0, 85.0),
-                },
-                Spacer::new().frame_height(10.0),
-                hstack! {
-                    Rectangle::new()
-                        .fill(Color::rgb(c[4].color[0], c[4].color[1], c[4].color[2]))
-                        .border(2.0, if is4 { highlight } else { border })
-                        .on_click(move || {
-                            d4.set(false);
-                            r4.set(c[4].color[0] as f32);
-                            g4.set(c[4].color[1] as f32);
-                            b4.set(c[4].color[2] as f32);
-                        })
-                        .frame(85.0, 85.0),
-                    Spacer::new().frame_width(10.0),
-                    Rectangle::new()
-                        .fill(Color::rgb(c[5].color[0], c[5].color[1], c[5].color[2]))
-                        .border(2.0, if is5 { highlight } else { border })
-                        .on_click(move || {
-                            d5.set(false);
-                            r5.set(c[5].color[0] as f32);
-                            g5.set(c[5].color[1] as f32);
-                            b5.set(c[5].color[2] as f32);
-                        })
-                        .frame(85.0, 85.0),
-                    Spacer::new().frame_width(10.0),
-                    Rectangle::new()
-                        .fill(Color::rgb(c[6].color[0], c[6].color[1], c[6].color[2]))
-                        .border(2.0, if is6 { highlight } else { border })
-                        .on_click(move || {
-                            d6.set(false);
-                            r6.set(c[6].color[0] as f32);
-                            g6.set(c[6].color[1] as f32);
-                            b6.set(c[6].color[2] as f32);
-                        })
-                        .frame(85.0, 85.0),
-                    Spacer::new().frame_width(10.0),
-                    Rectangle::new()
-                        .fill(Color::rgb(c[7].color[0], c[7].color[1], c[7].color[2]))
-                        .border(2.0, if is7 { highlight } else { border })
-                        .on_click(move || {
-                            d7.set(false);
-                            r7.set(c[7].color[0] as f32);
-                            g7.set(c[7].color[1] as f32);
-                            b7.set(c[7].color[2] as f32);
-                        })
-                        .frame(85.0, 85.0),
-                },
+                    vstack! {
+                        Text::new("Style").font_size(14.0),
+                        zstack! {
+                            Rectangle::new()
+                                .fill(Color::rgb(48, 48, 56))
+                                .border(2.0, if style_default { highlight } else { border })
+                                .frame(200.0, 64.0),
+                            Text::new("Gradient + Lines").font_size(12.0).color(Color::WHITE),
+                        }
+                        .on_click(move || { s0.set(BackgroundStyle::GradientLines); }),
+                        zstack! {
+                            Rectangle::new()
+                                .fill(Color::rgb(40, 40, 50))
+                                .border(2.0, if style_gradient { highlight } else { border })
+                                .frame(200.0, 64.0),
+                            Text::new("Gradient").font_size(12.0).color(Color::WHITE),
+                        }
+                        .on_click(move || { s1.set(BackgroundStyle::Gradient); }),
+                        zstack! {
+                            Rectangle::new()
+                                .fill(Color::rgb(26, 26, 30))
+                                .border(2.0, if style_solid { highlight } else { border })
+                                .frame(200.0, 64.0),
+                            Text::new("Solid").font_size(12.0).color(Color::WHITE),
+                        }
+                        .on_click(move || { s2.set(BackgroundStyle::Solid); }),
+                    }
+                    .frame(220.0, f32::INFINITY),
+                    vstack! {
+                        Text::new("Color").font_size(14.0),
+                        // Color grid - 2 rows of 4
+                        hstack! {
+                            Rectangle::new()
+                                .fill(Color::rgb(c[0].color[0], c[0].color[1], c[0].color[2]))
+                                .border(2.0, if is0 { highlight } else { border })
+                                .on_click(move || {
+                                    r0.set(c[0].color[0] as f32);
+                                    g0.set(c[0].color[1] as f32);
+                                    b0.set(c[0].color[2] as f32);
+                                })
+                                .frame(85.0, 85.0),
+                            Spacer::new().frame_width(10.0),
+                            Rectangle::new()
+                                .fill(Color::rgb(c[1].color[0], c[1].color[1], c[1].color[2]))
+                                .border(2.0, if is1 { highlight } else { border })
+                                .on_click(move || {
+                                    r1.set(c[1].color[0] as f32);
+                                    g1.set(c[1].color[1] as f32);
+                                    b1.set(c[1].color[2] as f32);
+                                })
+                                .frame(85.0, 85.0),
+                            Spacer::new().frame_width(10.0),
+                            Rectangle::new()
+                                .fill(Color::rgb(c[2].color[0], c[2].color[1], c[2].color[2]))
+                                .border(2.0, if is2 { highlight } else { border })
+                                .on_click(move || {
+                                    r2.set(c[2].color[0] as f32);
+                                    g2.set(c[2].color[1] as f32);
+                                    b2.set(c[2].color[2] as f32);
+                                })
+                                .frame(85.0, 85.0),
+                            Spacer::new().frame_width(10.0),
+                            Rectangle::new()
+                                .fill(Color::rgb(c[3].color[0], c[3].color[1], c[3].color[2]))
+                                .border(2.0, if is3 { highlight } else { border })
+                                .on_click(move || {
+                                    r3.set(c[3].color[0] as f32);
+                                    g3.set(c[3].color[1] as f32);
+                                    b3.set(c[3].color[2] as f32);
+                                })
+                                .frame(85.0, 85.0),
+                        },
+                        Spacer::new().frame_height(10.0),
+                        hstack! {
+                            Rectangle::new()
+                                .fill(Color::rgb(c[4].color[0], c[4].color[1], c[4].color[2]))
+                                .border(2.0, if is4 { highlight } else { border })
+                                .on_click(move || {
+                                    r4.set(c[4].color[0] as f32);
+                                    g4.set(c[4].color[1] as f32);
+                                    b4.set(c[4].color[2] as f32);
+                                })
+                                .frame(85.0, 85.0),
+                            Spacer::new().frame_width(10.0),
+                            Rectangle::new()
+                                .fill(Color::rgb(c[5].color[0], c[5].color[1], c[5].color[2]))
+                                .border(2.0, if is5 { highlight } else { border })
+                                .on_click(move || {
+                                    r5.set(c[5].color[0] as f32);
+                                    g5.set(c[5].color[1] as f32);
+                                    b5.set(c[5].color[2] as f32);
+                                })
+                                .frame(85.0, 85.0),
+                            Spacer::new().frame_width(10.0),
+                            Rectangle::new()
+                                .fill(Color::rgb(c[6].color[0], c[6].color[1], c[6].color[2]))
+                                .border(2.0, if is6 { highlight } else { border })
+                                .on_click(move || {
+                                    r6.set(c[6].color[0] as f32);
+                                    g6.set(c[6].color[1] as f32);
+                                    b6.set(c[6].color[2] as f32);
+                                })
+                                .frame(85.0, 85.0),
+                            Spacer::new().frame_width(10.0),
+                            Rectangle::new()
+                                .fill(Color::rgb(c[7].color[0], c[7].color[1], c[7].color[2]))
+                                .border(2.0, if is7 { highlight } else { border })
+                                .on_click(move || {
+                                    r7.set(c[7].color[0] as f32);
+                                    g7.set(c[7].color[1] as f32);
+                                    b7.set(c[7].color[2] as f32);
+                                })
+                                .frame(85.0, 85.0),
+                        },
+                    },
+                }
+                .padding(10.0),
 
                 Divider::new(),
 
@@ -283,7 +310,7 @@ impl Application for SettingsApp {
                             self.current_color()[1],
                             self.current_color()[2],
                         ))
-                        .frame(360.0, 70.0)
+                        .frame(520.0, 70.0)
                         .clip_radius(10.0),
                 },
 
@@ -298,13 +325,13 @@ impl Application for SettingsApp {
                     }),
                     Spacer::new().frame_width(12.0),
                     Button::new("Close").on_click(|| { println!("[settings] Close"); }),
-                    Spacer::new(),
-                },
+                }.padding(10.0)
             }
+            .padding(10.0)
             .frame(f32::INFINITY, f32::INFINITY)
         )
         .app_id("org.scarlet-os.desktop.settings")
-        .size(Size::new(420.0, 520.0))
+        .size(Size::new(720.0, 560.0))
     }
 
     fn debug_logging(&self) -> bool {

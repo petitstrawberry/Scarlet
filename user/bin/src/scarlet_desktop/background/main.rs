@@ -13,12 +13,14 @@ use std::println;
 use std::thread;
 use sws_client::{Connection, Event};
 use sws_protocol::window_types;
+use scarlet_desktop_config::BackgroundStyle;
 
 fn draw_gradient_background(
     conn: &mut Connection,
     surface_id: u32,
     top: Color,
     bottom: Color,
+    draw_lines: bool,
 ) {
     let Some(surface) = conn.surface_mut(surface_id) else {
         return;
@@ -51,26 +53,28 @@ fn draw_gradient_background(
             }
         }
 
-        // Subtle diagonal accent lines
-        let accent = Color::rgba(0.392, 0.471, 0.549, 0.110); // RGB(100, 120, 140) with alpha 28/255
-        let bgra = accent.to_bgra();
-        let mut x = 0i32;
-        while x < w as i32 + h as i32 {
-            // Draw diagonal line from (x, 0) to (x-h, h-1)
-            for i in 0..h as i32 {
-                let px = x - i;
-                let py = i;
-                if px >= 0 && px < w as i32 && py >= 0 && py < h as i32 {
-                    let idx = (py as usize * width as usize + px as usize) * 4;
-                    if idx + 3 < buf.len() {
-                        buf[idx] = (bgra & 0xFF) as u8;
-                        buf[idx + 1] = ((bgra >> 8) & 0xFF) as u8;
-                        buf[idx + 2] = ((bgra >> 16) & 0xFF) as u8;
-                        buf[idx + 3] = ((bgra >> 24) & 0xFF) as u8;
+        if draw_lines {
+            // Subtle diagonal accent lines
+            let accent = Color::rgba(0.392, 0.471, 0.549, 0.110); // RGB(100, 120, 140) with alpha 28/255
+            let bgra = accent.to_bgra();
+            let mut x = 0i32;
+            while x < w as i32 + h as i32 {
+                // Draw diagonal line from (x, 0) to (x-h, h-1)
+                for i in 0..h as i32 {
+                    let px = x - i;
+                    let py = i;
+                    if px >= 0 && px < w as i32 && py >= 0 && py < h as i32 {
+                        let idx = (py as usize * width as usize + px as usize) * 4;
+                        if idx + 3 < buf.len() {
+                            buf[idx] = (bgra & 0xFF) as u8;
+                            buf[idx + 1] = ((bgra >> 8) & 0xFF) as u8;
+                            buf[idx + 2] = ((bgra >> 16) & 0xFF) as u8;
+                            buf[idx + 3] = ((bgra >> 24) & 0xFF) as u8;
+                        }
                     }
                 }
+                x += 64;
             }
-            x += 64;
         }
     });
 
@@ -106,28 +110,33 @@ fn draw_solid_background(conn: &mut Connection, surface_id: u32, color: Color) {
 fn draw_background(conn: &mut Connection, surface_id: u32) {
     // Load config to get background color
     let config = scarlet_desktop_config::load_desktop_config();
+    let style = config
+        .theme
+        .background_style
+        .unwrap_or(BackgroundStyle::GradientLines);
 
-    if let Some(bg_color) = config.theme.background {
-        // Create a gradient using the config color as base
+    let (top, bottom, base) = if let Some(bg_color) = config.theme.background {
         let base = Color::rgb(
             bg_color[0] as f32 / 255.0,
             bg_color[1] as f32 / 255.0,
             bg_color[2] as f32 / 255.0,
         );
-
-        // Create a slightly darker version for the bottom
         let darker = Color::rgb(
             (bg_color[0] as f32 / 255.0 * 0.7).max(0.0),
             (bg_color[1] as f32 / 255.0 * 0.7).max(0.0),
             (bg_color[2] as f32 / 255.0 * 0.7).max(0.0),
         );
-
-        draw_gradient_background(conn, surface_id, base, darker);
+        (base, darker, base)
     } else {
-        // Default gradient if no config
-        let top = Color::rgb(0.157, 0.157, 0.196); // Dark blue-gray (40/255)
-        let bottom = Color::rgb(0.078, 0.078, 0.118); // Darker blue-gray (20/255)
-        draw_gradient_background(conn, surface_id, top, bottom);
+        let top = Color::rgb(0.157, 0.157, 0.196);
+        let bottom = Color::rgb(0.078, 0.078, 0.118);
+        (top, bottom, top)
+    };
+
+    match style {
+        BackgroundStyle::GradientLines => draw_gradient_background(conn, surface_id, top, bottom, true),
+        BackgroundStyle::Gradient => draw_gradient_background(conn, surface_id, top, bottom, false),
+        BackgroundStyle::Solid => draw_solid_background(conn, surface_id, base),
     }
 }
 

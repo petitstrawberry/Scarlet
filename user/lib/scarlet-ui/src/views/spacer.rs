@@ -47,11 +47,20 @@ pub struct SpacerRenderObject;
 
 impl ElementRenderObject for SpacerRenderObject {
     fn layout(&mut self, constraints: crate::element::LayoutConstraints) -> Size {
-        // Spacer simply returns the constraints as size
-        // The parent (VStack/HStack) is responsible for providing proper constraints
+        // Spacer only expands on the axis where constraints are tight (min == max).
+        let width = if constraints.min_width == constraints.max_width {
+            constraints.max_width
+        } else {
+            0.0
+        };
+        let height = if constraints.min_height == constraints.max_height {
+            constraints.max_height
+        } else {
+            0.0
+        };
         Size {
-            width: constraints.max_width,
-            height: constraints.max_height,
+            width,
+            height,
         }
     }
 

@@ -310,4 +310,14 @@ pub trait Element {
             child.clear_buffers();
         }
     }
+
+    /// Whether this element wants to fill available width from its parent.
+    fn fill_width(&self) -> bool {
+        false
+    }
+
+    /// Whether this element wants to fill available height from its parent.
+    fn fill_height(&self) -> bool {
+        false
+    }
 }

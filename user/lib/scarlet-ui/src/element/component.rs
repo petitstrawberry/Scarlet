@@ -230,4 +230,12 @@ impl<V: View + Clone> Element for ComponentElement<V> {
             false
         }
     }
+
+    fn fill_width(&self) -> bool {
+        self.child.as_ref().map(|child| child.fill_width()).unwrap_or(false)
+    }
+
+    fn fill_height(&self) -> bool {
+        self.child.as_ref().map(|child| child.fill_height()).unwrap_or(false)
+    }
 }

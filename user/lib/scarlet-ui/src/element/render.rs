@@ -226,6 +226,38 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
         }
     }
 
+    fn fill_width(&self) -> bool {
+        if let Some(frame) = self
+            .render_object
+            .as_any()
+            .downcast_ref::<crate::views::FrameRenderObject>()
+        {
+            return matches!(frame.width_value(), Some(w) if !w.is_finite());
+        }
+
+        if self.children.len() == 1 {
+            return self.children[0].fill_width();
+        }
+
+        false
+    }
+
+    fn fill_height(&self) -> bool {
+        if let Some(frame) = self
+            .render_object
+            .as_any()
+            .downcast_ref::<crate::views::FrameRenderObject>()
+        {
+            return matches!(frame.height_value(), Some(h) if !h.is_finite());
+        }
+
+        if self.children.len() == 1 {
+            return self.children[0].fill_height();
+        }
+
+        false
+    }
+
     fn layout(&mut self, constraints: LayoutConstraints) -> Size {
         self.last_constraints = Some(constraints);
         // Delegate layout to the RenderObject (which may layout children)
