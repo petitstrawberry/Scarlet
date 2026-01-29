@@ -1,6 +1,9 @@
 [build]
 target = "../../targets/riscv64gc-unknown-scarlet-elf.json"
 
+[target.'cfg(all())']
+rustflags = ["-C", "link-arg=-T../../lds/user.ld"]
+
 [unstable]
 build-std = ["core", "compiler_builtins", "alloc"]
 build-std-features = ["compiler-builtins-mem"]

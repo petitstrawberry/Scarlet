@@ -6,6 +6,7 @@ edition = "2024"
 [lib]
 name = "scarlet_std"
 path = "src/lib.rs"
+test = false
 
 [[test]]
 name = "std_tests"

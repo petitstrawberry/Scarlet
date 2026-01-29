@@ -118,7 +118,7 @@ dependencies = ["test-std-riscv64", "test-ui-riscv64"]
 description = "Build and prepare scarlet_std tests (RISC-V)"
 cwd = "std"
 command = "cargo"
-args = ["test", "--no-run", "--features", "test_harness", "--target", "../../targets/riscv64gc-unknown-scarlet-elf.json"]
+args = ["test", "--no-run", "--features", "test_harness", "--target", "../../targets/riscv64gc-unknown-scarlet-elf-test.json"]
 
 [tasks.test-ui-riscv64]
 description = "Build and prepare scarlet-ui tests (RISC-V)"

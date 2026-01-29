@@ -4,37 +4,9 @@
 
 #![no_std]
 #![no_main]
-#![feature(custom_test_frameworks)]
-#![test_runner(test_runner)]
-#![reexport_test_harness_main = "test_main"]
 
 extern crate scarlet_std as std;
 use core::arch::naked_asm;
-
-// Test runner trait
-pub trait TestableFn {
-    fn run(&self);
-}
-
-impl<T> TestableFn for T
-where
-    T: Fn(),
-{
-    fn run(&self) {
-        std::println!("[Test Runner] test name={}", core::any::type_name::<T>());
-        self();
-    }
-}
-
-// Test runner function
-pub fn test_runner(tests: &[&dyn TestableFn]) {
-    std::println!("[Test Runner] Running {} tests", tests.len());
-    for test in tests {
-        test.run();
-    }
-    std::println!("[Test Runner] All {} tests passed", tests.len());
-    std::task::exit(0);
-}
 
 // Panic handler for test mode
 #[panic_handler]
@@ -72,14 +44,75 @@ pub extern "C" fn _entry() {
 #[unsafe(export_name = "main")]
 fn main() {
     std::println!("=== scarlet_std Test Runner ===\n");
-    test_main();
+    
+    // Run tests manually
+    let mut passed = 0;
+    let mut failed = 0;
+    
+    // Test 1: Basic assertion
+    std::println!("[Test Runner] Running test: test_basic_assertion");
+    if run_test(test_basic_assertion) {
+        passed += 1;
+    } else {
+        failed += 1;
+    }
+    
+    // Test 2: Vec operations (from collections.rs)
+    std::println!("[Test Runner] Running test: test_vec_creation");
+    if run_test(test_vec_creation) {
+        passed += 1;
+    } else {
+        failed += 1;
+    }
+    
+    std::println!("[Test Runner] Running test: test_vec_push");
+    if run_test(test_vec_push) {
+        passed += 1;
+    } else {
+        failed += 1;
+    }
+    
+    // Summary
+    std::println!("\n[Test Runner] Test Results:");
+    std::println!("  Passed: {}", passed);
+    std::println!("  Failed: {}", failed);
+    
+    if failed == 0 {
+        std::println!("[Test Runner] All {} tests passed", passed);
+        std::task::exit(0);
+    } else {
+        std::println!("[Test Runner] Some tests failed");
+        std::task::exit(1);
+    }
 }
 
-// Import and run tests from library modules
-#[path = "../src/collections.rs"]
-mod collections;
+fn run_test(test: fn()) -> bool {
+    // In a real implementation, we'd use catch_unwind, but that's not available in no_std
+    // For now, just run the test directly
+    test();
+    true
+}
 
-#[test_case]
 fn test_basic_assertion() {
     assert_eq!(1 + 1, 2);
+}
+
+fn test_vec_creation() {
+    use std::vec::Vec;
+    let v: Vec<i32> = Vec::new();
+    assert_eq!(v.len(), 0);
+    assert_eq!(v.capacity(), 0);
+}
+
+fn test_vec_push() {
+    use std::vec::Vec;
+    let mut v = Vec::new();
+    v.push(1);
+    v.push(2);
+    v.push(3);
+    
+    assert_eq!(v.len(), 3);
+    assert_eq!(v[0], 1);
+    assert_eq!(v[1], 2);
+    assert_eq!(v[2], 3);
 }

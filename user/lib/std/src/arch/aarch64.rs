@@ -2,6 +2,7 @@ use core::arch::{asm, naked_asm};
 
 use crate::{env, syscall::Syscall, task::exit};
 
+#[cfg(not(feature = "test_harness"))]
 #[unsafe(link_section = ".init")]
 #[unsafe(export_name = "_entry")]
 #[unsafe(naked)]
@@ -19,6 +20,8 @@ pub extern "C" fn _entry() {
 unsafe extern "Rust" {
     fn main() -> i32;
 }
+
+#[cfg(not(feature = "test_harness"))]
 #[unsafe(link_section = ".init")]
 #[unsafe(export_name = "_start")]
 pub fn _start(x0: usize, x1: usize) -> ! {

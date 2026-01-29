@@ -134,7 +134,7 @@ pub mod profiler {
 pub use alloc_exports::*;
 pub use core_exports::*;
 
-#[cfg(not(any(test, feature = "test_harness")))]
+#[cfg(not(feature = "test_harness"))]
 #[panic_handler]
 pub fn panic(_info: &core::panic::PanicInfo) -> ! {
     crate::println!("Panic occurred: {:?}", _info);
