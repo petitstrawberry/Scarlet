@@ -13,27 +13,77 @@
 //!
 //! # Usage
 //!
+//! ## Basic Window Creation
+//!
 //! ```no_run
-//! use sws_client::{Connection, Surface};
+//! use sws_client::{Connection, SurfaceBuilder};
 //!
 //! // Connect to SWS
-//! let mut connection = Connection::connect("/tmp/sws.sock")?;
+//! let mut connection = Connection::connect_default()?;
 //!
-//! // Create a surface (window)
-//! let surface = connection.create_surface(800, 600)?;
+//! // Create a surface (window) using builder pattern
+//! let window_id = SurfaceBuilder::new()
+//!     .app_id("com.example.app")
+//!     .app_name("My App")
+//!     .size(800, 600)
+//!     .build(&mut connection)?;
 //!
 //! // Draw to the surface buffer
-//! surface.with_buffer(|buffer| {
-//!     // Draw pixels...
-//! });
-//!
-//! // Commit changes
-//! surface.commit()?;
+//! if let Some(surface) = connection.surface(window_id) {
+//!     surface.with_buffer(|buffer| {
+//!         // Draw pixels...
+//!     });
+//!     connection.commit(window_id)?;
+//! }
 //!
 //! // Poll for events
 //! loop {
 //!     connection.dispatch()?;
+//!     while let Some(event) = connection.poll_event() {
+//!         // Handle events...
+//!     }
 //! }
+//! # Ok::<(), sws_client::Error>(())
+//! ```
+//!
+//! ## Desktop Background Window
+//!
+//! ```no_run
+//! use sws_client::{Connection, SurfaceBuilder};
+//! use sws_protocol::window_types;
+//!
+//! # fn main() -> Result<(), sws_client::Error> {
+//! let mut connection = Connection::connect_default()?;
+//!
+//! let desktop_id = SurfaceBuilder::new()
+//!     .app_id("com.example.desktop")
+//!     .app_name("Desktop")
+//!     .size(1920, 1080)
+//!     .window_type(window_types::DESKTOP)
+//!     .resizable(false)
+//!     .focus_on_create(false)
+//!     .active_on_focus(false)
+//!     .build(&mut connection)?;
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! ## Window with Initial Position
+//!
+//! ```no_run
+//! use sws_client::{Connection, SurfaceBuilder};
+//!
+//! # fn main() -> Result<(), sws_client::Error> {
+//! let mut connection = Connection::connect_default()?;
+//!
+//! let window_id = SurfaceBuilder::new()
+//!     .app_id("com.example.app")
+//!     .app_name("My App")
+//!     .size(400, 300)
+//!     .position(100, 100)
+//!     .build(&mut connection)?;
+//! # Ok(())
+//! # }
 //! ```
 
 #![no_std]
@@ -44,10 +94,16 @@ mod connection;
 mod error;
 pub mod event;
 mod surface;
+mod builder;
 
+pub use builder::SurfaceBuilder;
 pub use connection::Connection;
 pub use error::Error;
 pub use event::{Event, InputEvent};
+pub use event::event_type;
+pub use event::abs_code;
+pub use event::rel_code;
+pub use event::key_code;
 pub use surface::Surface;
 
 /// Transient relationship policy flags for child windows.

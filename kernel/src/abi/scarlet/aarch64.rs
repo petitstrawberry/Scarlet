@@ -520,36 +520,20 @@ impl AbiModule for ScarletAbi {
         self.on_task_exit(task);
     }
 
-    fn as_any(&self) -> &dyn core::any::Any {
-        self
+    fn set_tls_pointer(&mut self, ptr: usize) {
+        self.tls_pointer = Some(ptr);
     }
 
-    fn as_any_mut(&mut self) -> &mut dyn core::any::Any {
-        self
+    fn get_tls_pointer(&self) -> Option<usize> {
+        self.tls_pointer
+    }
+
+    fn set_clear_child_tid(&mut self, ptr: usize) {
+        self.clear_child_tid_ptr = Some(ptr);
     }
 }
 
 impl ScarletAbi {
-    /// Get the TLS pointer for this task
-    pub fn tls_pointer(&self) -> Option<usize> {
-        self.tls_pointer
-    }
-
-    /// Set the TLS pointer for this task
-    pub fn set_tls_pointer(&mut self, ptr: usize) {
-        self.tls_pointer = Some(ptr);
-    }
-
-    /// Clear the TLS pointer for this task
-    pub fn clear_tls_pointer(&mut self) {
-        self.tls_pointer = None;
-    }
-
-    /// Set the clear_child_tid pointer for thread exit notification
-    pub fn set_clear_child_tid(&mut self, ptr: usize) {
-        self.clear_child_tid_ptr = Some(ptr);
-    }
-
     /// Handle task exit with TLS cleanup (Linux-compatible)
     pub fn on_task_exit(&mut self, task: &mut crate::task::Task) {
         // Linux-compatible behavior: write 0 to clear_child_tid and futex wake

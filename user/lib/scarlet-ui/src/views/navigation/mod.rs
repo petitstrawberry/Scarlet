@@ -1,0 +1,14 @@
+//! NavigationView - Sidebar navigation with dynamic content switching
+//!
+//! This module provides a SwiftUI-style NavigationView component that provides
+//! sidebar navigation with dynamic content switching based on user selection.
+
+mod link;
+mod view;
+mod render;
+mod tuple;
+mod view_impl;
+
+pub use link::{NavigationLink, Icon};
+pub use view::NavigationView;
+pub use render::NavigationViewRenderObject;

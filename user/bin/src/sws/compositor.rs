@@ -2,7 +2,7 @@
 
 use super::cursor::Cursor;
 use super::input::{CompositorInputEvent, InputManager, key_codes};
-use super::ipc::{IpcEvent, IpcServer};
+use super::ipc::{IpcEvent, IpcServer, send_message_to_client, send_message_to_window};
 use super::window::WindowManager;
 use framebuffer::Framebuffer;
 use std::println;
@@ -43,6 +43,11 @@ pub struct Compositor {
     move_drag: Option<MoveDragState>,
     resize_drag: Option<ResizeDragState>,
     resize_outline: Option<(i32, i32, u32, u32)>,
+    workarea: Option<(i32, i32, u32, u32)>,
+    /// Track the currently active application's app_id to avoid redundant ACTIVE_APP_CHANGED broadcasts
+    active_app_id: Option<Vec<u8>>,
+    /// Track the last focused window ID to avoid redundant FOCUS_CHANGED broadcasts
+    last_focused_window_id: Option<u32>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -114,7 +119,8 @@ impl Compositor {
         // Keep prev position consistent to avoid an oversized first dirty region.
         cursor.mark_drawn();
 
-        let bg_color = [100, 100, 100, 255]; // Gray background
+        // Slightly desaturated charcoal background to better fit desktop surfaces.
+        let bg_color = [24, 28, 36, 255];
 
         let backbuffer_stride = screen_width * bytes_per_pixel;
         let buffer_size = (screen_width * screen_height * bytes_per_pixel) as usize;
@@ -139,6 +145,9 @@ impl Compositor {
             move_drag: None,
             resize_drag: None,
             resize_outline: None,
+            workarea: None,
+            active_app_id: None,
+            last_focused_window_id: None,
         })
     }
 
@@ -235,40 +244,9 @@ impl Compositor {
     pub fn init_display(&mut self) -> Result<(), &'static str> {
         println!("[Compositor] Initializing display...");
 
-        // Create multiple test windows with buffers
-        let win1 = self.window_manager.create_window(50, 50, 400, 250);
-        if let Some(window) = self.window_manager.get_window_mut(win1) {
-            window.set_title("Window 1");
-            // Fill with red gradient
-            if let Some(ref mut buffer) = window.buffer {
-                Self::fill_buffer_gradient(buffer, 400, 250, [200, 50, 50, 255]);
-            }
-        }
+        println!("[Compositor] No debug windows created (clean desktop startup)");
 
-        let win2 = self.window_manager.create_window(150, 120, 350, 200);
-        if let Some(window) = self.window_manager.get_window_mut(win2) {
-            window.set_title("Window 2");
-            // Fill with green gradient
-            if let Some(ref mut buffer) = window.buffer {
-                Self::fill_buffer_gradient(buffer, 350, 200, [50, 200, 50, 255]);
-            }
-        }
-
-        let win3 = self.window_manager.create_window(250, 180, 300, 180);
-        if let Some(window) = self.window_manager.get_window_mut(win3) {
-            window.set_title("Window 3");
-            // Fill with blue gradient
-            if let Some(ref mut buffer) = window.buffer {
-                Self::fill_buffer_gradient(buffer, 300, 180, [50, 50, 200, 255]);
-            }
-        }
-
-        // Focus the last created window
-        self.window_manager.set_focus(win3);
-
-        println!("[Compositor] Created 3 test windows with content");
-
-        self.dump_memory_layout("after init_display windows");
+        self.dump_memory_layout("after init_display (empty)");
 
         // Initial full composite
         self.full_redraw_needed = true;
@@ -444,6 +422,7 @@ impl Compositor {
     }
 
     /// Fill buffer with gradient (for testing, static method)
+    #[allow(dead_code)]
     fn fill_buffer_gradient(buffer: &mut [u8], width: u32, height: u32, base_color: [u8; 4]) {
         for y in 0..height {
             for x in 0..width {
@@ -585,15 +564,22 @@ impl Compositor {
             return;
         }
 
-        // Pick coordinates that avoid the default cursor position (center) AND
-        // avoid being fully covered by a client window at (0,0) size 400x300.
+        // Pick coordinates that avoid the default cursor position (center) and
+        // sample both corners and the center for sanity.
         let mut samples: Vec<(u32, u32, &'static str)> = Vec::new();
         samples.push((0, 0, "bg top-left"));
         samples.push((10, 10, "bg near top-left"));
-        samples.push((420, 60, "inside win1 (outside client 0,0-400x300)"));
-        samples.push((460, 130, "inside win2 (outside client 0,0-400x300)"));
-        samples.push((420, 190, "overlap win2/win3 (expect top-most)"));
-        samples.push((900, 700, "bg bottom-right"));
+        samples.push((self.screen_width / 2, self.screen_height / 2, "bg center"));
+        samples.push((
+            self.screen_width.saturating_sub(20),
+            self.screen_height / 2,
+            "bg mid-right",
+        ));
+        samples.push((
+            self.screen_width.saturating_sub(20),
+            self.screen_height.saturating_sub(20),
+            "bg bottom-right",
+        ));
 
         // For incremental redraw, also validate a point inside the dirty region.
         if let Some((dx, dy, dw, dh)) = dirty {
@@ -872,24 +858,42 @@ impl Compositor {
             return;
         }
 
-        // Check if window has transparency (opacity < 1.0)
-        let has_transparency = window.opacity < 1.0;
+        // Check if window has transparency (opacity < 1.0 or content has alpha channel)
+        // - window.opacity < 1.0: window-level transparency (fade in/out, etc.)
+        // - window.has_alpha_content: pixel-level transparency (semi-transparent UI elements)
+        let has_transparency = window.opacity < 1.0 || window.has_alpha_content;
 
-        // Copy BGRA pixels from the window buffer into the screen buffer.
-        // Apply alpha blending if window has transparency.
-        for sy in y0..y1 {
-            let wy = (sy - win_y0) as u32;
-            let screen_row_off = (sy as u32).saturating_mul(stride as u32) as usize;
-            for sx in x0..x1 {
-                let wx = (sx - win_x0) as u32;
-                let window_offset = ((wy * window.width + wx) * 4) as usize;
-                let screen_offset =
-                    screen_row_off + (sx as u32).saturating_mul(bytes_per_pixel) as usize;
+        // Fast path for opaque windows: copy row by row
+        if !has_transparency {
+            for sy in y0..y1 {
+                let wy = (sy - win_y0) as u32;
+                let screen_row_off = (sy as u32 * stride) as usize;
+                for sx in x0..x1 {
+                    let wx = (sx - win_x0) as u32;
+                    let window_offset = ((wy * window.width + wx) * 4) as usize;
+                    let screen_offset = screen_row_off + (sx as u32 * bytes_per_pixel) as usize;
 
-                if window_offset + 4 <= window_buffer.len()
-                    && screen_offset + 4 <= screen_buffer.len()
-                {
-                    if has_transparency {
+                    if window_offset + 4 <= window_buffer.len()
+                        && screen_offset + 4 <= screen_buffer.len()
+                    {
+                        screen_buffer[screen_offset..screen_offset + 4]
+                            .copy_from_slice(&window_buffer[window_offset..window_offset + 4]);
+                    }
+                }
+            }
+        } else {
+            // Slow path for transparent windows: per-pixel alpha blending
+            for sy in y0..y1 {
+                let wy = (sy - win_y0) as u32;
+                let screen_row_off = (sy as u32 * stride) as usize;
+                for sx in x0..x1 {
+                    let wx = (sx - win_x0) as u32;
+                    let window_offset = ((wy * window.width + wx) * 4) as usize;
+                    let screen_offset = screen_row_off + (sx as u32 * bytes_per_pixel) as usize;
+
+                    if window_offset + 4 <= window_buffer.len()
+                        && screen_offset + 4 <= screen_buffer.len()
+                    {
                         // Alpha blending: BGRA format
                         let src_b = window_buffer[window_offset] as u32;
                         let src_g = window_buffer[window_offset + 1] as u32;
@@ -913,10 +917,6 @@ impl Compositor {
                         screen_buffer[screen_offset + 1] = out_g;
                         screen_buffer[screen_offset + 2] = out_r;
                         screen_buffer[screen_offset + 3] = 255; // Output is always opaque
-                    } else {
-                        // No transparency: direct copy
-                        screen_buffer[screen_offset..screen_offset + 4]
-                            .copy_from_slice(&window_buffer[window_offset..window_offset + 4]);
                     }
                 }
             }
@@ -939,40 +939,36 @@ impl Compositor {
             [180, 180, 180, 255]
         };
 
-        for y in 0..window.height {
-            for x in 0..window.width {
-                let screen_x = window.x + x as i32;
-                let screen_y = window.y + y as i32;
+        // Pre-calculate visible area to reduce per-pixel checks
+        let win_x0 = window.x.max(0);
+        let win_y0 = window.y.max(0);
+        let win_x1 = (window.x + window.width as i32).min(screen_width as i32);
+        let win_y1 = (window.y + window.height as i32).min(screen_height as i32);
 
-                // Screen bounds check
-                if screen_x < 0
-                    || screen_x >= screen_width as i32
-                    || screen_y < 0
-                    || screen_y >= screen_height as i32
-                {
-                    continue;
-                }
+        let (x0, y0, x1, y1) = if let Some((clip_x, clip_y, clip_w, clip_h)) = clip_rect {
+            let clip_x1 = clip_x.saturating_add(clip_w as i32);
+            let clip_y1 = clip_y.saturating_add(clip_h as i32);
+            (
+                win_x0.max(clip_x),
+                win_y0.max(clip_y),
+                win_x1.min(clip_x1),
+                win_y1.min(clip_y1),
+            )
+        } else {
+            (win_x0, win_y0, win_x1, win_y1)
+        };
 
-                // Clip rect check
-                if let Some((clip_x, clip_y, clip_w, clip_h)) = clip_rect {
-                    if screen_x < clip_x
-                        || screen_x >= clip_x + clip_w as i32
-                        || screen_y < clip_y
-                        || screen_y >= clip_y + clip_h as i32
-                    {
-                        continue;
-                    }
-                }
+        if x1 <= x0 || y1 <= y0 {
+            return;
+        }
 
-                let offset =
-                    ((screen_y as u32 * stride) + (screen_x as u32 * bytes_per_pixel)) as usize;
-
-                // Fill with window color (no borders)
+        // Process row by row for better cache locality
+        for sy in y0..y1 {
+            let screen_row_off = (sy as u32 * stride + x0 as u32 * bytes_per_pixel) as usize;
+            for sx in x0..x1 {
+                let offset = screen_row_off + (sx as u32 * bytes_per_pixel) as usize;
                 if offset + 4 <= buffer.len() {
-                    buffer[offset] = window_color[0];
-                    buffer[offset + 1] = window_color[1];
-                    buffer[offset + 2] = window_color[2];
-                    buffer[offset + 3] = window_color[3];
+                    buffer[offset..offset + 4].copy_from_slice(&window_color);
                 }
             }
         }
@@ -1016,12 +1012,18 @@ impl Compositor {
             let backbuffer = &mut self.backbuffer;
 
             // Layer 1: Fill background (only within dirty region).
-            for yy in 0..h {
-                let sy = (y0 as u32).saturating_add(yy);
-                let row_off = (sy as usize)
-                    .saturating_mul(stride as usize)
-                    .saturating_add((x0 as usize).saturating_mul(self.bytes_per_pixel as usize));
-                let row_len = (w as usize).saturating_mul(self.bytes_per_pixel as usize);
+            // Pre-calculate values outside the loop
+            let x0_usize = x0 as usize;
+            let y0_u32 = y0 as u32;
+            let w_usize = w as usize;
+            let h_usize = h as usize;
+            let stride_usize = stride as usize;
+            let bytes_per_pixel_usize = self.bytes_per_pixel as usize;
+            let row_len = w_usize.saturating_mul(bytes_per_pixel_usize);
+
+            for yy in 0..h_usize {
+                let sy = y0_u32.saturating_add(yy as u32);
+                let row_off = sy as usize * stride_usize + x0_usize * bytes_per_pixel_usize;
                 if row_off.saturating_add(row_len) > backbuffer_len {
                     continue;
                 }
@@ -1114,15 +1116,139 @@ impl Compositor {
         if let Some(win_id) = self.window_manager.window_at_point(click_x, click_y) {
             println!("[Compositor] Clicked on window #{}", win_id);
 
-            // Change focus and bring to front
-            self.window_manager.set_focus(win_id);
-            self.window_manager.raise_to_top_with_type(win_id);
+            // Only change focus if the window accepts focus
+            // Taskbar and Desktop windows are global UI elements that don't steal focus
+            if self.window_manager.window_accepts_focus(win_id) {
+                // Raise window to top (with type-based Z-order) before focusing
+                self.window_manager.raise_to_top_with_type(win_id);
 
-            // Need full redraw when Z-order changes
-            self.full_redraw_needed = true;
+                // Set focus
+                self.window_manager.set_focus(win_id);
+
+                // Broadcast focus change event to all clients
+                self.broadcast_focus_change(win_id);
+
+                // Need full redraw when Z-order changes
+                self.full_redraw_needed = true;
+            } else {
+                println!(
+                    "[Compositor] Window #{} does not accept focus (global UI element)",
+                    win_id
+                );
+                // Still raise to top to maintain proper Z-order for that window type
+                self.window_manager.raise_to_top_with_type(win_id);
+                self.full_redraw_needed = true;
+            }
         }
 
         Ok(())
+    }
+
+    /// Broadcast focus change event to all connected clients
+    fn broadcast_focus_change(&mut self, window_id: u32) {
+        // Only broadcast if the focused window actually changed
+        if self.last_focused_window_id == Some(window_id) {
+            println!(
+                "[Compositor] Window #{} already focused, skipping FOCUS_CHANGED broadcast",
+                window_id
+            );
+            return;
+        }
+
+        if let Some(window) = self.window_manager.get_window(window_id) {
+            let app_id_bytes = window.app_id.as_deref().unwrap_or(b"");
+            let title_bytes = window.title.as_deref().unwrap_or(b"");
+
+            // Get app_name and menu_titles from AppSession
+            let (app_name, menu_titles) = super::ipc::get_app_session_info(window_id);
+            let app_name_bytes = app_name.as_bytes();
+            let menu_titles_bytes = menu_titles.as_bytes();
+
+            // Update last focused window ID
+            self.last_focused_window_id = Some(window_id);
+
+            // Broadcast FOCUS_CHANGED for all windows
+            let payload = sws_protocol::payload_focus_changed(
+                window_id,
+                app_id_bytes,
+                app_name_bytes,
+                title_bytes,
+                menu_titles_bytes,
+            );
+
+            println!(
+                "[Compositor] ABOUT TO broadcast focus change: window_id={}, app_id_len={}, app_name_len={}, title_len={}, menu_titles_len={}, app_name={}, menu_titles={}",
+                window_id,
+                app_id_bytes.len(),
+                app_name_bytes.len(),
+                title_bytes.len(),
+                menu_titles_bytes.len(),
+                core::str::from_utf8(app_name_bytes).unwrap_or(""),
+                core::str::from_utf8(menu_titles_bytes).unwrap_or("")
+            );
+
+            super::ipc::broadcast_message_to_all_clients(
+                sws_protocol::server_msg::FOCUS_CHANGED,
+                payload,
+            );
+
+            println!(
+                "[Compositor] Broadcast focus change: window_id={}, app_id_len={}, app_name_len={}, title_len={}, menu_titles_len={}",
+                window_id,
+                app_id_bytes.len(),
+                app_name_bytes.len(),
+                title_bytes.len(),
+                menu_titles_bytes.len()
+            );
+
+            // For active-app windows only, check if app_id changed and broadcast ACTIVE_APP_CHANGED.
+            println!(
+                "[Compositor] Checking active-on-focus: window_id={}, active_on_focus={}",
+                window_id, window.active_on_focus
+            );
+            if window.active_on_focus {
+                let app_id_changed = match &self.active_app_id {
+                    Some(current_app_id) => current_app_id != app_id_bytes,
+                    None => true,
+                };
+
+                if app_id_changed {
+                    println!(
+                        "[Compositor] Active app changed: {:?} -> {:?}, broadcasting ACTIVE_APP_CHANGED",
+                        self.active_app_id
+                            .as_ref()
+                            .map(|id| core::str::from_utf8(id).unwrap_or("")),
+                        core::str::from_utf8(app_id_bytes).unwrap_or("")
+                    );
+
+                    // Update active_app_id
+                    self.active_app_id = Some(app_id_bytes.to_vec());
+
+                    let active_app_payload = sws_protocol::payload_active_app_changed(
+                        window_id,
+                        app_id_bytes,
+                        app_name_bytes,
+                        title_bytes,
+                        menu_titles_bytes,
+                    );
+
+                    super::ipc::broadcast_message_to_all_clients(
+                        sws_protocol::server_msg::ACTIVE_APP_CHANGED,
+                        active_app_payload,
+                    );
+                } else {
+                    println!(
+                        "[Compositor] Active app unchanged ({}), skipping ACTIVE_APP_CHANGED",
+                        core::str::from_utf8(app_id_bytes).unwrap_or("")
+                    );
+                }
+            }
+        } else {
+            println!(
+                "[Compositor] Warning: Failed to broadcast focus change for non-existent window #{}",
+                window_id
+            );
+        }
     }
 
     /// Check if cursor is within the bounds of a window
@@ -1212,16 +1338,17 @@ impl Compositor {
             // Sleep briefly to limit frame rate and reduce CPU usage
             // 16ms = ~60fps, adjust as needed
             std::thread::sleep(core::time::Duration::from_millis(16));
+            // yield_now();
 
             // Periodically print Z-order (every 100 redraws)
-            if self.event_counter % 100 == 0 && self.event_counter > 0 {
-                use std::print;
-                print!("[Compositor] Z-order check #{}: ", self.event_counter);
-                for window in self.window_manager.get_windows() {
-                    print!("#{}{} ", window.id, if window.focused { "(F)" } else { "" });
-                }
-                println!();
-            }
+            // if self.event_counter % 100 == 0 && self.event_counter > 0 {
+            //     use std::print;
+            //     print!("[Compositor] Z-order check #{}: ", self.event_counter);
+            //     for window in self.window_manager.get_windows() {
+            //         print!("#{}{} ", window.id, if window.focused { "(F)" } else { "" });
+            //     }
+            //     println!();
+            // }
         }
     }
 
@@ -1366,10 +1493,13 @@ impl Compositor {
                     }
                 }
 
-                // Route mouse position to focused window
-                if let Some(focused_id) = self.window_manager.get_focused_window_id() {
-                    if let Some(window) = self.window_manager.get_window(focused_id) {
-                        self.send_mouse_position_to_window(focused_id, window);
+                // Route mouse position to the window under the cursor (TaskBar needs hover input).
+                if let Some(win_id) = self
+                    .window_manager
+                    .window_at_point(self.cursor.x, self.cursor.y)
+                {
+                    if let Some(window) = self.window_manager.get_window(win_id) {
+                        self.send_mouse_position_to_window(win_id, window);
                     }
                 }
 
@@ -1418,16 +1548,32 @@ impl Compositor {
                         .window_manager
                         .window_at_point(self.cursor.x, self.cursor.y)
                     {
-                        self.window_manager.set_focus(win_id);
-                        self.window_manager.raise_to_top_with_type(win_id);
-                        self.full_redraw_needed = true;
+                        // Only change focus if the window accepts focus
+                        // Taskbar and Desktop windows are global UI elements that don't steal focus
+                        if self.window_manager.window_accepts_focus(win_id) {
+                            self.window_manager.set_focus(win_id);
+
+                            // Broadcast focus change event to all clients
+                            self.broadcast_focus_change(win_id);
+
+                            self.full_redraw_needed = true;
+                        } else {
+                            println!(
+                                "[Compositor] Window #{} does not accept focus (global UI element)",
+                                win_id
+                            );
+                            // Still raise to top to maintain proper Z-order for that window type
+                            self.window_manager.raise_to_top_with_type(win_id);
+                            self.full_redraw_needed = true;
+                        }
 
                         // Start interactive resize if we're near the bottom/right edge.
                         if let Some(window) = self.window_manager.get_window(win_id) {
                             if let Some((wx, wy)) = self.cursor_position_in_window(window) {
                                 let near_right = wx >= window.width as i32 - RESIZE_GRIP_PX;
                                 let near_bottom = wy >= window.height as i32 - RESIZE_GRIP_PX;
-                                if near_right || near_bottom {
+                                // Only allow resize if window is marked as resizable
+                                if (near_right || near_bottom) && window.resizable {
                                     self.move_drag = None;
                                     self.resize_drag = Some(ResizeDragState {
                                         window_id: win_id,
@@ -1450,22 +1596,25 @@ impl Compositor {
                     self.handle_click()?;
                 }
 
-                // Route button event to focused window only if cursor is within window bounds
-                if let Some(focused_id) = self.window_manager.get_focused_window_id() {
+                // Route button event to the window under the cursor (even if it can't take focus).
+                if let Some(target_id) = self
+                    .window_manager
+                    .window_at_point(self.cursor.x, self.cursor.y)
+                {
                     let window = self
                         .window_manager
-                        .get_window(focused_id)
-                        .ok_or("Focused window not found")?;
+                        .get_window(target_id)
+                        .ok_or("Target window not found")?;
                     if self.cursor_position_in_window(window).is_some() {
                         super::ipc::send_input_to_window(
-                            focused_id,
+                            target_id,
                             0,
                             super::input::event_types::EV_KEY,
                             button,
                             if pressed { 1 } else { 0 },
                         );
                         super::ipc::send_input_to_window(
-                            focused_id,
+                            target_id,
                             0,
                             super::input::event_types::EV_SYN,
                             0,
@@ -1475,6 +1624,26 @@ impl Compositor {
                 }
 
                 Ok(true)
+            }
+            CompositorInputEvent::Keyboard { code, pressed } => {
+                // Route keyboard events to focused window
+                if let Some(focused_id) = self.window_manager.get_focused_window_id() {
+                    super::ipc::send_input_to_window(
+                        focused_id,
+                        0,
+                        super::input::event_types::EV_KEY,
+                        code,
+                        if pressed { 1 } else { 0 },
+                    );
+                    super::ipc::send_input_to_window(
+                        focused_id,
+                        0,
+                        super::input::event_types::EV_SYN,
+                        0,
+                        0,
+                    );
+                }
+                Ok(false) // Keyboard events don't trigger redraws
             }
         }
     }
@@ -1487,17 +1656,88 @@ impl Compositor {
         match event {
             IpcEvent::CreateWindow {
                 client_id,
+                app_id,
                 window_id,
                 width,
                 height,
+                window_type,
+                resizable,
+                focus_on_create,
+                active_on_focus,
+                initial_x,
+                initial_y,
                 shm,
                 shm_mapped_addr,
                 shm_size,
             } => {
                 println!(
-                    "[Compositor] Client {} creating window #{} ({}x{})",
-                    client_id, window_id, width, height
+                    "[Compositor] Client {} creating window #{} ({}x{}, type={})",
+                    client_id, window_id, width, height, window_type
                 );
+
+                use sws_protocol::window_types;
+
+                // Calculate initial position based on window type
+                let (x, y) = if let (Some(x), Some(y)) = (initial_x, initial_y) {
+                    println!(
+                        "[Compositor] Using requested position for window #{}: ({}, {})",
+                        window_id, x, y
+                    );
+                    (x, y)
+                } else if window_type == window_types::NORMAL {
+                    // Normal windows: cascade from focused window or position in workarea
+                    const OFFSET: i32 = 20;
+
+                    // Check if there's a focused Normal window
+                    let focused_pos = self
+                        .window_manager
+                        .get_focused_window_id()
+                        .and_then(|id| self.window_manager.get_window(id))
+                        .filter(|w| matches!(w.window_type, super::window::WindowType::Normal))
+                        .map(|w| (w.x, w.y));
+
+                    match (focused_pos, self.workarea) {
+                        (Some((fx, fy)), _) => {
+                            // Cascade from focused window
+                            let x = fx + OFFSET;
+                            let y = fy + OFFSET;
+                            println!(
+                                "[Compositor] Cascading Normal window from focused window at ({}, {}): ({}, {})",
+                                fx, fy, x, y
+                            );
+                            (x, y)
+                        }
+                        (None, Some((wx, wy, ww, wh))) => {
+                            // No focused Normal window: position in workarea with padding
+                            const PADDING: i32 = 20;
+                            let x = wx + PADDING;
+                            let y = wy + PADDING;
+                            println!(
+                                "[Compositor] No focused Normal window, positioning in workarea with padding: ({}, {})",
+                                x, y
+                            );
+                            (x, y)
+                        }
+                        (None, None) => {
+                            println!(
+                                "[Compositor] No workarea and no focused window, using (0, 0)"
+                            );
+                            (0, 0)
+                        }
+                    }
+                } else {
+                    // Non-Normal windows (Taskbar, AlwaysOnTop, Desktop): use (0, 0)
+                    println!("[Compositor] Positioning non-Normal window at (0, 0)");
+                    (0, 0)
+                };
+
+                let wtype = match window_type {
+                    window_types::NORMAL => super::window::WindowType::Normal,
+                    window_types::ALWAYS_ON_TOP => super::window::WindowType::AlwaysOnTop,
+                    window_types::TASKBAR => super::window::WindowType::Taskbar,
+                    window_types::DESKTOP => super::window::WindowType::Desktop,
+                    _ => super::window::WindowType::Normal,
+                };
 
                 // Check if SHM was provided (modern path)
                 if let Some(shm_obj) = shm {
@@ -1509,8 +1749,8 @@ impl Compositor {
                     // Create window with SHM ownership
                     match self.window_manager.create_window_with_shm_from_event(
                         window_id,
-                        0,
-                        0,
+                        x,
+                        y,
                         width,
                         height,
                         shm_obj,
@@ -1528,7 +1768,25 @@ impl Compositor {
                     // Fallback: legacy Vec-backed window (for test windows)
                     println!("[Compositor] Window #{} uses legacy Vec buffer", window_id);
                     self.window_manager
-                        .create_window_with_id(window_id, 0, 0, width, height);
+                        .create_window_with_id(window_id, x, y, width, height);
+                }
+
+                if let Some(window) = self.window_manager.get_window_mut(window_id) {
+                    window.app_id = Some(app_id);
+                }
+                if self.window_manager.set_window_type(window_id, wtype) {
+                    println!("[Compositor] Set window #{} type to {:?}", window_id, wtype);
+                }
+                self.window_manager
+                    .set_window_resizable(window_id, resizable);
+                if let Some(window) = self.window_manager.get_window_mut(window_id) {
+                    window.active_on_focus = active_on_focus;
+                }
+
+                // Focus is for input routing only; give focus to newly created windows.
+                if focus_on_create {
+                    self.window_manager.set_focus(window_id);
+                    self.broadcast_focus_change(window_id);
                 }
 
                 // Don't trigger redraw yet - wait for client to draw and send UPDATE_BUFFER
@@ -1544,6 +1802,59 @@ impl Compositor {
                     "[Compositor] Client {} destroying window #{}",
                     client_id, window_id
                 );
+
+                // Check if the destroyed window was the active application
+                if let Some(window) = self.window_manager.get_window(window_id) {
+                    let window_app_id = window.app_id.as_deref().unwrap_or(b"");
+
+                    // Reset last_focused_window_id if the destroyed window was focused
+                    if self.last_focused_window_id == Some(window_id) {
+                        println!(
+                            "[Compositor] Focused window destroyed, resetting last_focused_window_id (was={})",
+                            window_id
+                        );
+                        self.last_focused_window_id = None;
+                    }
+
+                    if let Some(current_app_id) = &self.active_app_id {
+                        if current_app_id == window_app_id {
+                            println!(
+                                "[Compositor] Active app window destroyed, resetting active_app_id (was={})",
+                                core::str::from_utf8(window_app_id).unwrap_or("")
+                            );
+                            self.active_app_id = None;
+
+                            // Broadcast ACTIVE_APP_CHANGED with empty menu to clear TaskBar
+                            let empty_payload = sws_protocol::payload_active_app_changed(
+                                0,   // dummy window_id
+                                b"", // empty app_id
+                                b"", // empty app_name
+                                b"", // empty title
+                                b"", // empty menu_titles
+                            );
+                            println!(
+                                "[Compositor] Broadcasting empty ACTIVE_APP_CHANGED to clear TaskBar menu"
+                            );
+                            super::ipc::broadcast_message_to_all_clients(
+                                sws_protocol::server_msg::ACTIVE_APP_CHANGED,
+                                empty_payload,
+                            );
+                        }
+                    }
+                }
+
+                // Send WINDOW_DESTROYED event to client before closing
+                let payload = sws_protocol::payload_window_destroyed(window_id);
+                send_message_to_client(
+                    client_id,
+                    sws_protocol::server_msg::WINDOW_DESTROYED,
+                    payload.to_vec(),
+                );
+                println!(
+                    "[Compositor] Sent WINDOW_DESTROYED for window #{} to client {}",
+                    window_id, client_id
+                );
+
                 self.window_manager.close_window(window_id);
                 self.full_redraw_needed = true;
 
@@ -1749,11 +2060,46 @@ impl Compositor {
                     .window_manager
                     .get_window(window_id)
                     .map(|w| (w.x, w.y, w.width, w.height));
-                if self.window_manager.maximize_window(
-                    window_id,
-                    self.screen_width,
-                    self.screen_height,
-                ) {
+
+                // Use workarea for Normal windows only
+                let (max_w, max_h, max_x, max_y) = if let Some(window) =
+                    self.window_manager.get_window(window_id)
+                {
+                    if window.window_type == super::window::WindowType::Normal {
+                        match self.workarea {
+                            Some((wx, wy, ww, wh)) => {
+                                // Maximize within workarea
+                                let padding = 10i32;
+                                let max_w = ww.saturating_sub(padding as u32 * 2).max(1);
+                                let max_h = wh.saturating_sub(padding as u32 * 2).max(1);
+                                let max_x = wx + padding;
+                                let max_y = wy + padding;
+                                println!(
+                                    "[Compositor] Maximizing Normal window #{} within workarea: ({}, {}) {}x{}",
+                                    window_id, max_x, max_y, max_w, max_h
+                                );
+                                (max_w, max_h, Some(max_x), Some(max_y))
+                            }
+                            None => (self.screen_width, self.screen_height, None, None),
+                        }
+                    } else {
+                        (self.screen_width, self.screen_height, None, None)
+                    }
+                } else {
+                    (self.screen_width, self.screen_height, None, None)
+                };
+
+                if self.window_manager.maximize_window(window_id, max_w, max_h) {
+                    // Set position for Normal windows within workarea
+                    if let (Some(max_x), Some(max_y)) = (max_x, max_y) {
+                        if let Some(window) = self.window_manager.get_window(window_id) {
+                            if window.window_type == super::window::WindowType::Normal {
+                                self.window_manager
+                                    .set_window_position(window_id, max_x, max_y);
+                            }
+                        }
+                    }
+
                     if let Some(r) = old_rect {
                         self.add_pending_damage(r);
                     }
@@ -1805,6 +2151,45 @@ impl Compositor {
                     self.full_redraw_needed = true;
                 }
             }
+            IpcEvent::FocusWindow { window_id } => {
+                println!("[Compositor] Focusing window #{}", window_id);
+                // Restore if minimized
+                if self.window_manager.is_minimized(window_id) {
+                    let old_rect = self
+                        .window_manager
+                        .get_window(window_id)
+                        .map(|w| (w.x, w.y, w.width, w.height));
+                    if self.window_manager.restore_window(window_id) {
+                        if let Some(r) = old_rect {
+                            self.add_pending_damage(r);
+                        }
+                    }
+                }
+
+                // Get the currently focused window before changing focus
+                let old_focused_rect = self
+                    .window_manager
+                    .get_focused_window_id()
+                    .and_then(|id| self.window_manager.get_window(id))
+                    .map(|w| (w.x, w.y, w.width, w.height));
+
+                // Focus and raise the window
+                self.window_manager.focus_window(window_id);
+                self.window_manager.raise_to_top_with_type(window_id);
+
+                // Mark old focused window area as dirty (to redraw titlebar without focus)
+                if let Some(r) = old_focused_rect {
+                    self.add_pending_damage(r);
+                }
+
+                // Mark newly focused window area as dirty (to redraw titlebar with focus)
+                if let Some(w) = self.window_manager.get_window(window_id) {
+                    self.add_pending_damage((w.x, w.y, w.width, w.height));
+                }
+
+                // Broadcast focus change event to all clients
+                self.broadcast_focus_change(window_id);
+            }
             IpcEvent::SetWindowType {
                 window_id,
                 window_type,
@@ -1841,6 +2226,171 @@ impl Compositor {
                         self.add_pending_damage((w.x, w.y, w.width, w.height));
                     }
                 }
+            }
+            IpcEvent::SetWindowHasAlphaContent {
+                window_id,
+                has_alpha,
+            } => {
+                println!(
+                    "[Compositor] Setting window #{} has_alpha_content to {}",
+                    window_id, has_alpha
+                );
+                if self
+                    .window_manager
+                    .set_window_has_alpha_content(window_id, has_alpha)
+                {
+                    if let Some(w) = self.window_manager.get_window(window_id) {
+                        self.add_pending_damage((w.x, w.y, w.width, w.height));
+                    }
+                }
+            }
+            IpcEvent::SetWindowMenuTitles {
+                window_id,
+                menu_titles,
+            } => {
+                println!(
+                    "[Compositor] Updating menu titles for window #{} (len={})",
+                    window_id,
+                    menu_titles.len()
+                );
+                let menu_titles_bytes = menu_titles.as_bytes().to_vec();
+                if super::ipc::set_app_session_menu_titles(window_id, menu_titles) {
+                    let is_focused = self.window_manager.get_focused_window_id() == Some(window_id);
+                    if is_focused {
+                        self.broadcast_focus_change(window_id);
+                    }
+
+                    if let Some(window) = self.window_manager.get_window(window_id) {
+                        let window_app_id = window.app_id.as_deref().unwrap_or(b"");
+                        let is_active_app = self
+                            .active_app_id
+                            .as_ref()
+                            .map_or(false, |id| id.as_slice() == window_app_id);
+
+                        if is_active_app || is_focused {
+                            let (app_name, _) = super::ipc::get_app_session_info(window_id);
+                            let app_name_bytes = app_name.as_bytes();
+                            let title_bytes = window.title.as_deref().unwrap_or(b"");
+                            let payload = sws_protocol::payload_active_app_changed(
+                                window_id,
+                                window_app_id,
+                                app_name_bytes,
+                                title_bytes,
+                                &menu_titles_bytes,
+                            );
+                            super::ipc::broadcast_message_to_all_clients(
+                                sws_protocol::server_msg::ACTIVE_APP_CHANGED,
+                                payload,
+                            );
+                        }
+                    }
+                }
+            }
+            IpcEvent::ActivateMenuItem {
+                window_id,
+                menu_item_id,
+            } => {
+                println!(
+                    "[Compositor] Activating menu item for window #{} (len={})",
+                    window_id,
+                    menu_item_id.len()
+                );
+                let payload =
+                    sws_protocol::payload_menu_item_activated(window_id, menu_item_id.as_bytes());
+                super::ipc::send_message_to_window(
+                    window_id,
+                    sws_protocol::server_msg::MENU_ITEM_ACTIVATED,
+                    payload,
+                );
+            }
+            IpcEvent::SetWorkarea {
+                x,
+                y,
+                width,
+                height,
+            } => {
+                println!(
+                    "[Compositor] Workarea set: x={}, y={}, width={}, height={}",
+                    x, y, width, height
+                );
+                self.workarea = Some((x, y, width, height));
+                // Notify window manager about workarea change
+                self.window_manager.set_workarea(x, y, width, height);
+                self.full_redraw_needed = true;
+            }
+            IpcEvent::SetWindowResizable {
+                window_id,
+                resizable,
+            } => {
+                println!(
+                    "[Compositor] Setting window #{} resizable to {}",
+                    window_id, resizable
+                );
+                if self
+                    .window_manager
+                    .set_window_resizable(window_id, resizable)
+                {
+                    // No redraw needed, just state change
+                }
+            }
+            IpcEvent::GetScreenSize { client_id } => {
+                println!(
+                    "[Compositor] GetScreenSize request from client {}",
+                    client_id
+                );
+                let width = self.screen_width;
+                let height = self.screen_height;
+                // Send SCREEN_SIZE response to the client
+                // Use the first window (if any) to send the response
+                if let Some(first_window_id) = self.window_manager.get_first_window_id() {
+                    let payload = sws_protocol::payload_screen_size(width, height);
+                    let _ = send_message_to_window(
+                        first_window_id,
+                        sws_protocol::server_msg::SCREEN_SIZE,
+                        payload.to_vec(),
+                    );
+                    println!(
+                        "[Compositor] Sent SCREEN_SIZE: {}x{} to client {} (via window {})",
+                        width, height, client_id, first_window_id
+                    );
+                }
+            }
+            IpcEvent::GetWindowList { client_id } => {
+                println!(
+                    "[Compositor] GetWindowList request from client {}",
+                    client_id
+                );
+                // Get window list from window manager
+                let windows = self.window_manager.get_window_list();
+
+                // Convert to WindowListEntry and use protocol library serialization
+                let entries: std::vec::Vec<sws_protocol::WindowListEntry> = windows
+                    .into_iter()
+                    .map(
+                        |(window_id, app_id, title, window_type, visible, focused, minimized)| {
+                            sws_protocol::WindowListEntry {
+                                window_id,
+                                app_id,
+                                title,
+                                window_type,
+                                visible,
+                                focused,
+                                minimized,
+                            }
+                        },
+                    )
+                    .collect();
+
+                let payload = sws_protocol::payload_window_list(&entries);
+
+                // Send WINDOW_LIST response directly to the client (not via window)
+                // This works for clients with or without windows (like stemd)
+                send_message_to_client(client_id, sws_protocol::server_msg::WINDOW_LIST, payload);
+                println!(
+                    "[Compositor] Sent WINDOW_LIST: {} windows to client {}",
+                    entries.len(),
+                    client_id
+                );
             }
         }
         Ok(false)

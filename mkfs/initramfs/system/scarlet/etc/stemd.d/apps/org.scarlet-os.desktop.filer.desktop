@@ -1,0 +1,6 @@
+[Desktop Entry]
+Name=Filer
+Exec=/bin/scarlet_desktop_filer
+Icon=folder
+Type=Application
+Terminal=false

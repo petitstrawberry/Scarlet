@@ -7,9 +7,23 @@ use crate::TransientFlags;
 use crate::WindowSizeLimits;
 use scarlet_std::collections::BTreeMap;
 use scarlet_std::ipc::SharedMemory;
+use scarlet_std::println;
 use scarlet_std::socket::Socket;
+use scarlet_std::string::String;
 use scarlet_std::vec::Vec;
 use sws_protocol::{self as protocol, ServerMessage};
+
+/// Window list entry
+#[derive(Debug, Clone)]
+pub struct WindowListEntry {
+    pub window_id: u32,
+    pub app_id: String,
+    pub title: String,
+    pub window_type: u32,
+    pub visible: bool,
+    pub focused: bool,
+    pub minimized: bool,
+}
 
 fn read_exact(socket: &mut Socket, buf: &mut [u8]) -> Result<(), Error> {
     use scarlet_std::io::Read;
@@ -17,9 +31,17 @@ fn read_exact(socket: &mut Socket, buf: &mut [u8]) -> Result<(), Error> {
     let mut filled = 0;
     while filled < buf.len() {
         match socket.read(&mut buf[filled..]) {
-            Ok(0) => return Err(Error::Disconnected),
-            Ok(n) => filled += n,
+            Ok(0) => {
+                // println!("[sws-client] read_exact: EOF (connection closed)");
+                return Err(Error::Disconnected);
+            }
+            Ok(n) => {
+                filled += n;
+            }
             Err(e) => {
+                if e.kind() != scarlet_std::io::ErrorKind::WouldBlock {
+                    println!("[sws-client] read_exact: error (not WouldBlock): {:?}", e);
+                }
                 if e.kind() == scarlet_std::io::ErrorKind::WouldBlock {
                     return Err(Error::WouldBlock);
                 }
@@ -28,6 +50,109 @@ fn read_exact(socket: &mut Socket, buf: &mut [u8]) -> Result<(), Error> {
         }
     }
     Ok(())
+}
+
+struct FrameReader {
+    header: [u8; protocol::MessageHeader::SIZE],
+    header_filled: usize,
+    header_parsed: bool,
+    msg_type: u32,
+    payload_len: usize,
+    payload: Vec<u8>,
+    payload_filled: usize,
+}
+
+impl FrameReader {
+    fn new() -> Self {
+        Self {
+            header: [0u8; protocol::MessageHeader::SIZE],
+            header_filled: 0,
+            header_parsed: false,
+            msg_type: 0,
+            payload_len: 0,
+            payload: Vec::new(),
+            payload_filled: 0,
+        }
+    }
+
+    fn reset(&mut self) {
+        self.header_filled = 0;
+        self.header_parsed = false;
+        self.msg_type = 0;
+        self.payload_len = 0;
+        self.payload.clear();
+        self.payload_filled = 0;
+    }
+
+    fn poll(
+        &mut self,
+        socket: &mut Socket,
+        out_payload: &mut Vec<u8>,
+    ) -> Result<Option<u32>, Error> {
+        use scarlet_std::io::Read;
+
+        loop {
+            if !self.header_parsed {
+                match socket.read(&mut self.header[self.header_filled..]) {
+                    Ok(0) => return Err(Error::Disconnected),
+                    Ok(n) => {
+                        self.header_filled += n;
+                        if self.header_filled < self.header.len() {
+                            continue;
+                        }
+                        let header = protocol::MessageHeader::from_le_bytes(self.header);
+                        let payload_len = header.payload_size as usize;
+                        if payload_len > protocol::MAX_PAYLOAD_SIZE {
+                            return Err(Error::ProtocolError);
+                        }
+                        self.msg_type = header.msg_type;
+                        self.payload_len = payload_len;
+                        self.payload.clear();
+                        if payload_len > 0 {
+                            self.payload.resize(payload_len, 0);
+                        }
+                        self.payload_filled = 0;
+                        self.header_parsed = true;
+                        if payload_len == 0 {
+                            out_payload.clear();
+                            let msg_type = self.msg_type;
+                            self.reset();
+                            return Ok(Some(msg_type));
+                        }
+                    }
+                    Err(e) => {
+                        if e.kind() == scarlet_std::io::ErrorKind::WouldBlock {
+                            return Ok(None);
+                        }
+                        return Err(Error::IoError);
+                    }
+                }
+            }
+
+            if self.header_parsed {
+                match socket.read(&mut self.payload[self.payload_filled..]) {
+                    Ok(0) => return Err(Error::Disconnected),
+                    Ok(n) => {
+                        self.payload_filled += n;
+                        if self.payload_filled < self.payload_len {
+                            continue;
+                        }
+                        out_payload.clear();
+                        out_payload.extend_from_slice(&self.payload);
+                        let msg_type = self.msg_type;
+                        self.reset();
+                        return Ok(Some(msg_type));
+                    }
+                    Err(e) => {
+                        if e.kind() == scarlet_std::io::ErrorKind::WouldBlock {
+                            return Ok(None);
+                        }
+                        return Err(Error::IoError);
+                    }
+                }
+            }
+        }
+    }
 }
 
 fn write_all(socket: &mut Socket, buf: &[u8]) -> Result<(), Error> {
@@ -54,6 +179,7 @@ fn write_all(socket: &mut Socket, buf: &[u8]) -> Result<(), Error> {
 fn read_frame_into(socket: &mut Socket, payload: &mut Vec<u8>) -> Result<u32, Error> {
     let mut header_bytes = [0u8; protocol::MessageHeader::SIZE];
     read_exact(socket, &mut header_bytes)?;
+
     let header = protocol::MessageHeader::from_le_bytes(header_bytes);
 
     let payload_len = header.payload_size as usize;
@@ -97,6 +223,7 @@ pub struct Connection {
     pending_events: Vec<Event>,
     pending_head: usize,
     read_payload: Vec<u8>,
+    frame_reader: FrameReader,
 }
 
 impl Connection {
@@ -123,6 +250,7 @@ impl Connection {
             pending_events: Vec::new(),
             pending_head: 0,
             read_payload: Vec::new(),
+            frame_reader: FrameReader::new(),
         })
     }
 
@@ -130,9 +258,74 @@ impl Connection {
     ///
     /// This sends a CreateWindow request and waits for the response.
     /// The returned Surface can be drawn to immediately.
-    pub fn create_surface(&mut self, width: u32, height: u32) -> Result<u32, Error> {
+    /// Default window type is NORMAL (0).
+    pub fn create_surface(&mut self, app_id: &str, app_name: &str, menu_titles: &str, width: u32, height: u32) -> Result<u32, Error> {
+        self.create_surface_with_type_and_resizable(app_id, app_name, menu_titles, width, height, 0, true)
+    }
+
+    /// Create a new surface (window) with specific window type
+    ///
+    /// This sends a CreateWindow request and waits for the response.
+    /// The returned Surface can be drawn to immediately.
+    pub fn create_surface_with_type(&mut self, app_id: &str, app_name: &str, menu_titles: &str, width: u32, height: u32, window_type: u32) -> Result<u32, Error> {
+        self.create_surface_with_type_and_resizable(app_id, app_name, menu_titles, width, height, window_type, true)
+    }
+
+    /// Create a new surface (window) with specific window type and resizable flag
+    ///
+    /// This sends a CreateWindow request and waits for the response.
+    /// The returned Surface can be drawn to immediately.
+    pub fn create_surface_with_type_and_resizable(
+        &mut self,
+        app_id: &str,
+        app_name: &str,
+        menu_titles: &str,
+        width: u32,
+        height: u32,
+        window_type: u32,
+        resizable: bool,
+    ) -> Result<u32, Error> {
+        let focus_on_create = true;
+        let active_on_focus = window_type == 0;
+        self.create_surface_with_type_and_policies(
+            app_id,
+            app_name,
+            menu_titles,
+            width,
+            height,
+            window_type,
+            resizable,
+            focus_on_create,
+            active_on_focus,
+        )
+    }
+
+    /// Create a new surface (window) with explicit focus/active policies
+    pub fn create_surface_with_type_and_policies(
+        &mut self,
+        app_id: &str,
+        app_name: &str,
+        menu_titles: &str,
+        width: u32,
+        height: u32,
+        window_type: u32,
+        resizable: bool,
+        focus_on_create: bool,
+        active_on_focus: bool,
+    ) -> Result<u32, Error> {
         // Send CreateWindow request
-        let payload = protocol::payload_create_window(width, height);
+        let payload = protocol::payload_create_window(
+            app_id.as_bytes(),
+            app_name.as_bytes(),
+            menu_titles.as_bytes(),
+            width,
+            height,
+            window_type,
+            resizable,
+            focus_on_create,
+            active_on_focus,
+        );
+        // println!("[sws-client] Creating surface: payload size {}", payload.len());
         write_frame(
             &mut self.socket,
             protocol::client_msg::CREATE_WINDOW,
@@ -175,6 +368,78 @@ impl Connection {
             .map_err(|_| Error::SocketConfig)?;
 
         // Create surface object
+        let surface = Surface::new(surface_id, width, height, shm)?;
+        self.surfaces.insert(surface_id, surface);
+
+        Ok(surface_id)
+    }
+
+    /// Create a new surface (window) with explicit focus/active policies and initial position.
+    pub fn create_surface_with_type_and_policies_at(
+        &mut self,
+        app_id: &str,
+        app_name: &str,
+        menu_titles: &str,
+        width: u32,
+        height: u32,
+        window_type: u32,
+        resizable: bool,
+        focus_on_create: bool,
+        active_on_focus: bool,
+        x: i32,
+        y: i32,
+    ) -> Result<u32, Error> {
+        let payload = protocol::payload_create_window_with_position(
+            app_id.as_bytes(),
+            app_name.as_bytes(),
+            menu_titles.as_bytes(),
+            width,
+            height,
+            window_type,
+            resizable,
+            focus_on_create,
+            active_on_focus,
+            x,
+            y,
+        );
+        // println!("[sws-client] Creating surface: payload size {}", payload.len());
+        write_frame(
+            &mut self.socket,
+            protocol::client_msg::CREATE_WINDOW,
+            &payload,
+        )
+        .map_err(|_| Error::SendFailed)?;
+
+        self.socket
+            .set_nonblocking(false)
+            .map_err(|_| Error::SocketConfig)?;
+
+        let msg_type =
+            read_frame_into(&mut self.socket, &mut self.read_payload).map_err(|_| Error::ReceiveFailed)?;
+
+        let response = protocol::parse_server_message(msg_type, &self.read_payload)
+            .map_err(|_| Error::InvalidResponse)?;
+
+        let (surface_id, _shm_size) = match response {
+            ServerMessage::WindowCreated {
+                window_id,
+                shm_size,
+            } => (window_id, shm_size),
+            _ => return Err(Error::InvalidResponse),
+        };
+
+        let shm_handle = self
+            .socket
+            .recv_handle()
+            .map_err(|_| Error::ShmHandleFailed)?;
+
+        let shm =
+            SharedMemory::from_handle(shm_handle).map_err(|_| Error::ShmHandleFailed)?;
+
+        self.socket
+            .set_nonblocking(true)
+            .map_err(|_| Error::SocketConfig)?;
+
         let surface = Surface::new(surface_id, width, height, shm)?;
         self.surfaces.insert(surface_id, surface);
 
@@ -240,6 +505,40 @@ impl Connection {
         write_frame(
             &mut self.socket,
             protocol::client_msg::SET_WINDOW_SIZE_LIMITS,
+            &payload,
+        )
+        .map_err(|_| Error::SendFailed)
+    }
+
+    /// Update menu titles for a window (format: "menu1|menu2|menu3").
+    pub fn set_window_menu_titles(
+        &mut self,
+        surface_id: u32,
+        menu_titles: &str,
+    ) -> Result<(), Error> {
+        if self.surfaces.get(&surface_id).is_none() {
+            return Err(Error::SurfaceNotFound);
+        }
+
+        let payload = protocol::payload_set_window_menu_titles(surface_id, menu_titles.as_bytes());
+        write_frame(
+            &mut self.socket,
+            protocol::client_msg::SET_WINDOW_MENU_TITLES,
+            &payload,
+        )
+        .map_err(|_| Error::SendFailed)
+    }
+
+    /// Notify the server that a menu item was activated for a window.
+    pub fn activate_menu_item(
+        &mut self,
+        window_id: u32,
+        menu_item_id: &str,
+    ) -> Result<(), Error> {
+        let payload = protocol::payload_activate_menu_item(window_id, menu_item_id.as_bytes());
+        write_frame(
+            &mut self.socket,
+            protocol::client_msg::ACTIVATE_MENU_ITEM,
             &payload,
         )
         .map_err(|_| Error::SendFailed)
@@ -430,6 +729,40 @@ impl Connection {
         .map_err(|_| Error::SendFailed)
     }
 
+    /// Focus and raise a window to the top of the Z-order.
+    ///
+    /// This only works for surfaces created by this client connection.
+    /// For focusing windows created by other clients, use `focus_window_any`.
+    pub fn focus_window(&mut self, surface_id: u32) -> Result<(), Error> {
+        if self.surfaces.get(&surface_id).is_none() {
+            return Err(Error::SurfaceNotFound);
+        }
+        let payload = protocol::payload_focus_window(surface_id);
+        write_frame(
+            &mut self.socket,
+            protocol::client_msg::FOCUS_WINDOW,
+            &payload,
+        )
+        .map_err(|_| Error::SendFailed)
+    }
+
+    /// Focus and raise any window (including those created by other clients).
+    ///
+    /// Unlike `focus_window`, this does not check if the surface exists locally.
+    /// This is useful for system services like stemd that need to focus windows
+    /// created by other applications.
+    ///
+    /// The server will return an error if the window_id does not exist.
+    pub fn focus_window_any(&mut self, window_id: u32) -> Result<(), Error> {
+        let payload = protocol::payload_focus_window(window_id);
+        write_frame(
+            &mut self.socket,
+            protocol::client_msg::FOCUS_WINDOW,
+            &payload,
+        )
+        .map_err(|_| Error::SendFailed)
+    }
+
     /// Set the window type used for Z-order management.
     ///
     /// The `window_type` argument selects one of the window type constants defined
@@ -467,6 +800,58 @@ impl Connection {
         write_frame(
             &mut self.socket,
             protocol::client_msg::SET_WINDOW_OPACITY,
+            &payload,
+        )
+        .map_err(|_| Error::SendFailed)
+    }
+
+    /// Set whether window content contains alpha channel (semi-transparent pixels).
+    ///
+    /// This is separate from window opacity - this controls whether pixel alpha
+    /// values in the window buffer should be respected during composition.
+    ///
+    /// - false: Window content is fully opaque, use fast copy path (default)
+    /// - true: Window content has semi-transparent pixels, use alpha blending
+    pub fn set_window_has_alpha_content(
+        &mut self,
+        surface_id: u32,
+        has_alpha: bool,
+    ) -> Result<(), Error> {
+        if self.surfaces.get(&surface_id).is_none() {
+            return Err(Error::SurfaceNotFound);
+        }
+        let payload = protocol::payload_set_window_has_alpha_content(surface_id, has_alpha);
+        write_frame(
+            &mut self.socket,
+            protocol::client_msg::SET_WINDOW_HAS_ALPHA_CONTENT,
+            &payload,
+        )
+        .map_err(|_| Error::SendFailed)
+    }
+
+    /// Set the workarea (usable screen area) for the window manager.
+    ///
+    /// This informs the window manager about the area where normal windows
+    /// should be placed, typically excluding the area occupied by the taskbar.
+    pub fn set_workarea(&mut self, x: i32, y: i32, width: u32, height: u32) -> Result<(), Error> {
+        let payload = protocol::payload_set_workarea(x, y, width, height);
+        write_frame(
+            &mut self.socket,
+            protocol::client_msg::SET_WORKAREA,
+            &payload,
+        )
+        .map_err(|_| Error::SendFailed)
+    }
+
+    /// Set whether a window can be resized by the user via interactive resize.
+    pub fn set_window_resizable(&mut self, surface_id: u32, resizable: bool) -> Result<(), Error> {
+        if self.surfaces.get(&surface_id).is_none() {
+            return Err(Error::SurfaceNotFound);
+        }
+        let payload = protocol::payload_set_window_resizable(surface_id, resizable);
+        write_frame(
+            &mut self.socket,
+            protocol::client_msg::SET_WINDOW_RESIZABLE,
             &payload,
         )
         .map_err(|_| Error::SendFailed)
@@ -550,8 +935,8 @@ impl Connection {
         }
 
         loop {
-            match read_frame_into(&mut self.socket, &mut self.read_payload) {
-                Ok(msg_type) => {
+            match self.frame_reader.poll(&mut self.socket, &mut self.read_payload) {
+                Ok(Some(msg_type)) => {
                     if let Ok(msg) = protocol::parse_server_message(msg_type, &self.read_payload) {
                         match msg {
                             ServerMessage::InputEvent {
@@ -597,11 +982,76 @@ impl Connection {
                                 self.pending_events.push(Event::Error { code });
                                 count += 1;
                             }
+                            ServerMessage::FocusChanged {
+                                window_id,
+                                app_id,
+                                app_id_len,
+                                app_name,
+                                app_name_len,
+                                title,
+                                title_len,
+                                menu_titles,
+                                menu_titles_len,
+                            } => {
+                                // Convert fixed-size buffers to String
+                                let app_id_str = String::from_utf8_lossy(&app_id[..app_id_len as usize]).into_owned();
+                                let app_name_str = String::from_utf8_lossy(&app_name[..app_name_len as usize]).into_owned();
+                                let title_str = String::from_utf8_lossy(&title[..title_len as usize]).into_owned();
+                                let menu_titles_str = String::from_utf8_lossy(&menu_titles[..menu_titles_len as usize]).into_owned();
+                                self.pending_events.push(Event::FocusChanged {
+                                    window_id,
+                                    app_id: app_id_str,
+                                    app_name: app_name_str,
+                                    title: title_str,
+                                    menu_titles: menu_titles_str,
+                                });
+                                count += 1;
+                            }
+                            ServerMessage::ActiveAppChanged {
+                                window_id,
+                                app_id,
+                                app_id_len,
+                                app_name,
+                                app_name_len,
+                                title,
+                                title_len,
+                                menu_titles,
+                                menu_titles_len,
+                            } => {
+                                // Convert fixed-size buffers to String
+                                let app_id_str = String::from_utf8_lossy(&app_id[..app_id_len as usize]).into_owned();
+                                let app_name_str = String::from_utf8_lossy(&app_name[..app_name_len as usize]).into_owned();
+                                let title_str = String::from_utf8_lossy(&title[..title_len as usize]).into_owned();
+                                let menu_titles_str = String::from_utf8_lossy(&menu_titles[..menu_titles_len as usize]).into_owned();
+                                self.pending_events.push(Event::ActiveAppChanged {
+                                    window_id,
+                                    app_id: app_id_str,
+                                    app_name: app_name_str,
+                                    title: title_str,
+                                    menu_titles: menu_titles_str,
+                                });
+                                count += 1;
+                            }
+                            ServerMessage::MenuItemActivated {
+                                window_id,
+                                menu_item_id,
+                                menu_item_id_len,
+                            } => {
+                                let menu_item_id_str = String::from_utf8_lossy(
+                                    &menu_item_id[..menu_item_id_len as usize],
+                                )
+                                .into_owned();
+                                self.pending_events.push(Event::MenuItemActivated {
+                                    window_id,
+                                    menu_item_id: menu_item_id_str,
+                                });
+                                count += 1;
+                            }
                             _ => {}
                         }
                     }
                 }
-                Err(Error::WouldBlock) => break,
+                Ok(None) => break,
                 Err(Error::Disconnected) => return Err(Error::Disconnected),
                 Err(_) => return Err(Error::IoError),
             }
@@ -618,7 +1068,7 @@ impl Connection {
             return None;
         }
 
-        let ev = self.pending_events[self.pending_head];
+        let ev = self.pending_events[self.pending_head].clone();
         self.pending_head += 1;
 
         if self.pending_head >= self.pending_events.len() {
@@ -638,6 +1088,90 @@ impl Connection {
             self.pending_events.clear();
             self.pending_head = 0;
             v
+        }
+    }
+
+    /// Get the screen size.
+    ///
+    /// This is a synchronous request: it blocks until the server responds with SCREEN_SIZE.
+    pub fn get_screen_size(&mut self) -> Result<(u32, u32), Error> {
+        // Send GET_SCREEN_SIZE request (no payload)
+        write_frame(&mut self.socket, protocol::client_msg::GET_SCREEN_SIZE, &[])
+            .map_err(|_| Error::SendFailed)?;
+
+        // Switch to blocking mode for synchronous response
+        self.socket
+            .set_nonblocking(false)
+            .map_err(|_| Error::SocketConfig)?;
+
+        // Wait for SCREEN_SIZE response
+        let msg_type =
+            read_frame_into(&mut self.socket, &mut self.read_payload).map_err(|_| Error::ReceiveFailed)?;
+        let response = protocol::parse_server_message(msg_type, &self.read_payload)
+            .map_err(|_| Error::InvalidResponse)?;
+
+        match response {
+            ServerMessage::ScreenSize { width, height } => {
+                // Restore non-blocking mode
+                let _ = self.socket.set_nonblocking(true);
+                Ok((width, height))
+            }
+            _ => {
+                // Restore non-blocking mode
+                let _ = self.socket.set_nonblocking(true);
+                Err(Error::InvalidResponse)
+            }
+        }
+    }
+
+    /// Get the list of all windows.
+    ///
+    /// This is a synchronous request: it blocks until the server responds with WINDOW_LIST.
+    pub fn get_window_list(&mut self) -> Result<Vec<WindowListEntry>, Error> {
+        // Send GET_WINDOW_LIST request (no payload)
+        write_frame(&mut self.socket, protocol::client_msg::GET_WINDOW_LIST, &[])
+            .map_err(|_| Error::SendFailed)?;
+
+        // Switch to blocking mode for synchronous response
+        self.socket
+            .set_nonblocking(false)
+            .map_err(|_| Error::SocketConfig)?;
+
+        // Wait for WINDOW_LIST response
+        let msg_type =
+            read_frame_into(&mut self.socket, &mut self.read_payload).map_err(|_| Error::ReceiveFailed)?;
+
+        let response = protocol::parse_server_message(msg_type, &self.read_payload)
+            .map_err(|_| Error::InvalidResponse)?;
+
+        match response {
+            ServerMessage::WindowList => {
+                // Use protocol library's parser
+                let windows = protocol::parse_window_list_payload(&self.read_payload)
+                    .map_err(|_| Error::InvalidResponse)?;
+
+                // Restore non-blocking mode
+                let _ = self.socket.set_nonblocking(true);
+
+                // Convert protocol::WindowListEntry to sws_client::WindowListEntry
+                Ok(windows
+                    .into_iter()
+                    .map(|w| WindowListEntry {
+                        window_id: w.window_id,
+                        app_id: w.app_id,
+                        title: w.title,
+                        window_type: w.window_type,
+                        visible: w.visible,
+                        focused: w.focused,
+                        minimized: w.minimized,
+                    })
+                    .collect())
+            }
+            _ => {
+                // Restore non-blocking mode
+                let _ = self.socket.set_nonblocking(true);
+                Err(Error::InvalidResponse)
+            }
         }
     }
 

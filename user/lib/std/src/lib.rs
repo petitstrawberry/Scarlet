@@ -65,6 +65,7 @@ mod core_exports {
     pub use core::mem;
     pub use core::ops;
     pub use core::option;
+    pub use core::panic;
     pub use core::pin;
     pub use core::ptr;
     pub use core::range;
@@ -83,7 +84,6 @@ mod alloc_exports {
 
     pub use alloc::borrow;
     pub use alloc::boxed;
-    pub use alloc::collections;
     pub use alloc::fmt;
     pub use alloc::format;
     pub use alloc::rc;
@@ -95,6 +95,7 @@ mod alloc_exports {
 
 mod allocator;
 mod arch;
+pub mod collections;
 pub mod env;
 pub mod ffi;
 pub mod fs;

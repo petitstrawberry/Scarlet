@@ -1,5 +1,0 @@
-# Stem Daemon Configuration File
-# Scarlet Window Server Service
-
-[service.sws]
-exec = "/bin/sws"

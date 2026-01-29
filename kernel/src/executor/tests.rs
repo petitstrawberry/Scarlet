@@ -13,8 +13,16 @@ use crate::task::new_user_task;
 /// Test that TransparentExecutor can backup and restore task state on exec failure
 #[test_case]
 fn test_exec_backup_restore() {
+    // Reset scheduler state before test
+    let scheduler = crate::sched::scheduler::get_scheduler();
+    scheduler.reset();
+
+    // Initialize task first, then add to scheduler
     let mut task = new_user_task("BackupTestTask".to_string(), 1001);
     task.init();
+
+    let task_id = scheduler.add_task(task, 0);
+    let mut task = scheduler.get_task_by_id(task_id).unwrap();
     let mut trapframe = Trapframe::new();
 
     // Record original state
@@ -73,8 +81,16 @@ fn test_exec_backup_restore() {
 /// Test TransparentExecutor basic functionality with valid parameters
 #[test_case]
 fn test_exec_parameter_validation() {
+    // Reset scheduler state before test
+    let scheduler = crate::sched::scheduler::get_scheduler();
+    scheduler.reset();
+
+    // Initialize task first, then add to scheduler
     let mut task = new_user_task("ParamTestTask".to_string(), 1002);
     task.init();
+
+    let task_id = scheduler.add_task(task, 0);
+    let mut task = scheduler.get_task_by_id(task_id).unwrap();
     let mut trapframe = Trapframe::new();
 
     // Test with empty arguments
@@ -113,8 +129,16 @@ fn test_exec_parameter_validation() {
 /// Test argument array handling
 #[test_case]
 fn test_argv_array_handling() {
+    // Reset scheduler state before test
+    let scheduler = crate::sched::scheduler::get_scheduler();
+    scheduler.reset();
+
+    // Initialize task first, then add to scheduler
     let mut task = new_user_task("ArgvTestTask".to_string(), 1003);
     task.init();
+
+    let task_id = scheduler.add_task(task, 0);
+    let mut task = scheduler.get_task_by_id(task_id).unwrap();
     let mut trapframe = Trapframe::new();
 
     // Test with different argument patterns
@@ -148,8 +172,16 @@ fn test_argv_array_handling() {
 /// Test environment variable array handling
 #[test_case]
 fn test_envp_array_handling() {
+    // Reset scheduler state before test
+    let scheduler = crate::sched::scheduler::get_scheduler();
+    scheduler.reset();
+
+    // Initialize task first, then add to scheduler
     let mut task = new_user_task("EnvpTestTask".to_string(), 1004);
     task.init();
+
+    let task_id = scheduler.add_task(task, 0);
+    let mut task = scheduler.get_task_by_id(task_id).unwrap();
     let mut trapframe = Trapframe::new();
 
     // Test with different environment variable patterns

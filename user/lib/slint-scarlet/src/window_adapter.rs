@@ -4,9 +4,8 @@ use slint::platform::{software_renderer as renderer, WindowAdapter};
 use slint::PhysicalSize;
 use std::rc::{Rc, Weak};
 use std::cell::RefCell;
-use sws_client::Connection;
-use crate::use_csd_titlebar;
-use scarlet_ui::Window as UiWindow;
+use sws_client::{Connection, SurfaceBuilder};
+use crate::{use_csd_titlebar, TITLEBAR_HEIGHT_PX};
 use core::sync::atomic::{AtomicBool, Ordering};
 
 /// Window adapter for Scarlet OS
@@ -31,14 +30,19 @@ impl ScarletWindowAdapter {
         let height: u32 = 600;
 
         let content_height = if use_csd_titlebar() {
-            height.saturating_sub(UiWindow::titlebar_height())
+            height.saturating_sub(TITLEBAR_HEIGHT_PX)
         } else {
             height
         };
-        
-        // Create a surface (window) through SWS
-        let surface_id = connection
-            .create_surface(width, height)
+
+        // Create a surface (window) through SWS using the builder pattern
+        let surface_id = SurfaceBuilder::new()
+            .app_id("org.slint.scarlet-app")
+            .app_name("Slint App")
+            .menu_titles("")
+            .size(width, height)
+            .resizable(false)
+            .build(connection)
             .map_err(|e| slint::platform::PlatformError::Other(
                 std::format!("Failed to create surface: {:?}", e).into()
             ))?;

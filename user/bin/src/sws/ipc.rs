@@ -5,11 +5,27 @@ use std::handle::capability::memory_mapping::flags as mmap_flags;
 use std::ipc::{SharedMemory, permissions};
 use std::println;
 use std::socket::Socket;
+use std::string::{String, ToString};
 use std::sync::Mutex;
-use std::thread;
+use std::thread::{self, sleep, yield_now};
 use std::vec::Vec;
 use sws_protocol as protocol;
 use sws_protocol::ClientMessageRef;
+
+/// Application session information
+#[derive(Debug, Clone)]
+struct AppSession {
+    window_id: u32,
+    app_id: String,
+    app_name: String,
+    menu_titles: String, // Format: "menu1|menu2|menu3"
+}
+
+/// Active application sessions (window_id -> AppSession)
+static APP_SESSIONS: Mutex<BTreeMap<u32, AppSession>> = Mutex::new(BTreeMap::new());
+
+/// Currently focused window ID
+static FOCUSED_WINDOW_ID: Mutex<Option<u32>> = Mutex::new(None);
 
 #[derive(Debug, Clone, Copy, Default)]
 struct WindowSizeLimits {
@@ -172,7 +188,14 @@ fn write_all(socket: &mut Socket, buf: &[u8]) -> Result<(), FrameIoError> {
         match socket.write(&buf[written..]) {
             Ok(0) => return Err(FrameIoError::Disconnected),
             Ok(n) => written += n,
-            Err(_) => return Err(FrameIoError::Io),
+            Err(e) => {
+                if e.kind() == std::io::ErrorKind::WouldBlock {
+                    // Non-blocking socket; give the scheduler a chance and retry.
+                    sleep(core::time::Duration::from_millis(1));
+                    continue;
+                }
+                return Err(FrameIoError::Io);
+            }
         }
     }
     Ok(())
@@ -219,6 +242,11 @@ pub struct PendingServerFrame {
 }
 
 static PENDING_SERVER_FRAMES: Mutex<BTreeMap<u32, Vec<PendingServerFrame>>> =
+    Mutex::new(BTreeMap::new());
+
+/// Pending server->client responses for specific clients (by client_id)
+/// This is used for responses to clients that don't have windows (like stemd)
+static PENDING_CLIENT_RESPONSES: Mutex<BTreeMap<usize, Vec<PendingServerFrame>>> =
     Mutex::new(BTreeMap::new());
 
 /// Add an event to the global queue
@@ -290,6 +318,68 @@ pub fn send_message_to_window(window_id: u32, msg_type: u32, payload: Vec<u8>) {
     }
 }
 
+/// Queue a server->client protocol message for a specific client (by client_id).
+/// This is used for responses to clients that don't have windows (like stemd).
+pub fn send_message_to_client(client_id: usize, msg_type: u32, payload: Vec<u8>) {
+    let mut pending = PENDING_CLIENT_RESPONSES.lock();
+    match pending.get_mut(&client_id) {
+        Some(frames) => frames.push(PendingServerFrame { msg_type, payload }),
+        None => {
+            println!(
+                "[IpcServer] Sending message to client {} (msg_type={}, payload_len={})",
+                client_id,
+                msg_type,
+                payload.len()
+            );
+            let mut frames = Vec::new();
+            frames.push(PendingServerFrame { msg_type, payload });
+            pending.insert(client_id, frames);
+        }
+    }
+}
+
+/// Broadcast a server->client protocol message to all connected clients.
+/// This is used for events like focus changes that all clients should be aware of.
+pub fn broadcast_message_to_all_clients(msg_type: u32, payload: Vec<u8>) {
+    let mut pending = PENDING_CLIENT_RESPONSES.lock();
+    let client_ids: Vec<usize> = pending.keys().copied().collect();
+    drop(pending);
+
+    println!(
+        "[IpcServer] Broadcasting message to {} clients (msg_type={}, payload_len={})",
+        client_ids.len(),
+        msg_type,
+        payload.len()
+    );
+
+    for client_id in client_ids {
+        // Clone the payload for each client
+        let payload_clone = payload.clone();
+        send_message_to_client(client_id, msg_type, payload_clone);
+    }
+}
+
+/// Get application session information for a window.
+/// Returns (app_name, menu_titles) if the session exists.
+pub fn get_app_session_info(window_id: u32) -> (String, String) {
+    let sessions = APP_SESSIONS.lock();
+    if let Some(session) = sessions.get(&window_id) {
+        (session.app_name.clone(), session.menu_titles.clone())
+    } else {
+        (String::new(), String::new())
+    }
+}
+
+pub fn set_app_session_menu_titles(window_id: u32, menu_titles: String) -> bool {
+    let mut sessions = APP_SESSIONS.lock();
+    if let Some(session) = sessions.get_mut(&window_id) {
+        session.menu_titles = menu_titles;
+        true
+    } else {
+        false
+    }
+}
+
 fn pop_pending_server_frames(window_id: u32) -> Vec<PendingServerFrame> {
     let mut pending = PENDING_SERVER_FRAMES.lock();
     if let Some(frames) = pending.get_mut(&window_id) {
@@ -312,6 +402,26 @@ fn pop_pending_input_events(window_id: u32) -> Vec<PendingInputEvent> {
             Vec::new() // Already empty, no reallocation needed
         } else {
             core::mem::take(events)
+        }
+    } else {
+        Vec::new()
+    }
+}
+
+/// Pop pending server responses for a specific client (by client_id)
+fn pop_pending_client_responses(client_id: usize) -> Vec<PendingServerFrame> {
+    let mut pending = PENDING_CLIENT_RESPONSES.lock();
+    if let Some(frames) = pending.get_mut(&client_id) {
+        if frames.is_empty() {
+            Vec::new()
+        } else {
+            let frames = core::mem::take(frames);
+            println!(
+                "[IpcServer] Popping {} pending responses for client {}",
+                frames.len(),
+                client_id
+            );
+            frames
         }
     } else {
         Vec::new()
@@ -434,6 +544,16 @@ fn accept_thread_main(server_socket: Socket) {
                     client_socket.as_raw()
                 );
 
+                // Register client for broadcast messages
+                {
+                    let mut pending = PENDING_CLIENT_RESPONSES.lock();
+                    pending.entry(client_id).or_insert_with(Vec::new);
+                    println!(
+                        "[AcceptThread] Registered client {} for broadcast messages",
+                        client_id
+                    );
+                }
+
                 // Spawn client handler thread
                 thread::spawn(move || {
                     client_thread_main(client_id, client_socket);
@@ -482,6 +602,7 @@ fn client_thread_main(client_id: usize, mut socket: Socket) {
     let mut next_window_id: u32 = 100 + (client_id as u32 * 1000);
     let mut managed_windows: Vec<u32> = Vec::new();
     let mut window_size_limits: BTreeMap<u32, WindowSizeLimits> = BTreeMap::new();
+    let mut window_resizable: BTreeMap<u32, bool> = BTreeMap::new();
 
     // Debug: loop counter for periodic logging
     let mut loop_count: u64 = 0;
@@ -490,13 +611,34 @@ fn client_thread_main(client_id: usize, mut socket: Socket) {
 
     println!("[ClientThread {}] Entering main loop", client_id);
 
-    loop {
+    'main: loop {
         loop_count += 1;
         let _should_log = loop_count % 100 == 0; // Log every 100 iterations (more frequent)
 
         // Send any pending input events for this client's windows
         let mut has_events = false;
         let mut _total_events = 0;
+
+        // First, check for pending responses addressed directly to this client
+        // (for clients that don't have windows, like stemd)
+        let client_responses = pop_pending_client_responses(client_id);
+        for frame in client_responses {
+            println!(
+                "[ClientThread {}] Sending client response (msg_type={}, payload_len={})",
+                client_id,
+                frame.msg_type,
+                frame.payload.len()
+            );
+            if let Err(e) = write_frame(&mut socket, frame.msg_type, &frame.payload) {
+                println!(
+                    "[ClientThread {}] Failed to send client response: {:?}",
+                    client_id, e
+                );
+                break 'main;
+            }
+            has_events = true;
+        }
+
         for &window_id in &managed_windows {
             // Send queued server->client control messages for this window.
             let frames = pop_pending_server_frames(window_id);
@@ -506,9 +648,9 @@ fn client_thread_main(client_id: usize, mut socket: Socket) {
                         "[ClientThread {}] Failed to send server message to window {}: {:?}",
                         client_id, window_id, e
                     );
-                } else {
-                    has_events = true;
+                    break 'main;
                 }
+                has_events = true;
             }
 
             let events = pop_pending_input_events(window_id);
@@ -537,6 +679,7 @@ fn client_thread_main(client_id: usize, mut socket: Socket) {
                             "[ClientThread {}] Failed to send input event to window {}: {:?}",
                             client_id, window_id, e
                         );
+                        break 'main;
                     } else {
                         // println!(
                         //     "[ClientThread {}] Sent event: type={} code={} value={}",
@@ -585,6 +728,8 @@ fn client_thread_main(client_id: usize, mut socket: Socket) {
             }
             Ok(None) => {
                 // No complete frame available yet; keep looping so we can deliver input events.
+                // Yield to avoid a tight busy loop when idle.
+                yield_now();
                 continue;
             }
             Err(FrameIoError::Disconnected) => {
@@ -598,7 +743,24 @@ fn client_thread_main(client_id: usize, mut socket: Socket) {
         };
 
         match protocol::parse_client_message(msg_type, &payload) {
-            Ok(ClientMessageRef::CreateWindow { width, height }) => {
+            Ok(ClientMessageRef::CreateWindow {
+                app_id,
+                app_name,
+                menu_titles,
+                width,
+                height,
+                window_type,
+                resizable,
+                focus_on_create,
+                active_on_focus,
+                initial_x,
+                initial_y,
+            }) => {
+                // Convert &[u8] to String
+                let app_id_str = String::from_utf8_lossy(app_id).into_owned();
+                let app_name_str = String::from_utf8_lossy(app_name).into_owned();
+                let menu_titles_str = String::from_utf8_lossy(menu_titles).into_owned();
+
                 // Calculate buffer size
                 let buffer_size = (width as u64)
                     .saturating_mul(height as u64)
@@ -607,10 +769,22 @@ fn client_thread_main(client_id: usize, mut socket: Socket) {
                 let window_id = next_window_id;
                 next_window_id = next_window_id.saturating_add(1);
 
+                // Create AppSession
+                let session = AppSession {
+                    window_id,
+                    app_id: app_id_str.clone(),
+                    app_name: app_name_str.clone(),
+                    menu_titles: menu_titles_str.clone(),
+                };
+                {
+                    let mut sessions = APP_SESSIONS.lock();
+                    sessions.insert(window_id, session);
+                }
+
                 // Create shared memory region for this window
                 println!(
-                    "[ClientThread {}] Creating SHM for window {} ({}x{} = {} bytes)",
-                    client_id, window_id, width, height, buffer_size
+                    "[ClientThread {}] Creating SHM for window {} ({}x{} = {} bytes) [app={}, name={}]",
+                    client_id, window_id, width, height, buffer_size, app_id_str, app_name_str
                 );
 
                 match SharedMemory::create(buffer_size as usize, permissions::READ_WRITE) {
@@ -685,6 +859,8 @@ fn client_thread_main(client_id: usize, mut socket: Socket) {
                             }
                         };
 
+                        window_resizable.insert(window_id, resizable);
+
                         // Reply to client with window created message
                         send_window_created(&mut socket, window_id, buffer_size);
 
@@ -711,9 +887,16 @@ fn client_thread_main(client_id: usize, mut socket: Socket) {
                         // Notify compositor to create window entry with SHM ownership
                         push_ipc_event(IpcEvent::CreateWindow {
                             client_id,
+                            app_id: app_id.to_vec(),
                             window_id,
                             width,
                             height,
+                            window_type,
+                            resizable,
+                            focus_on_create,
+                            active_on_focus,
+                            initial_x,
+                            initial_y,
                             shm: Some(shm),
                             shm_mapped_addr,
                             shm_size: buffer_size as usize,
@@ -736,6 +919,13 @@ fn client_thread_main(client_id: usize, mut socket: Socket) {
                 unregister_window(window_id);
 
                 window_size_limits.remove(&window_id);
+                window_resizable.remove(&window_id);
+
+                // Remove AppSession
+                {
+                    let mut sessions = APP_SESSIONS.lock();
+                    sessions.remove(&window_id);
+                }
 
                 // Remove from managed windows
                 managed_windows.retain(|&id| id != window_id);
@@ -814,6 +1004,14 @@ fn client_thread_main(client_id: usize, mut socket: Socket) {
                 width,
                 height,
             }) => {
+                if !window_resizable.get(&window_id).copied().unwrap_or(true) {
+                    println!(
+                        "[ClientThread {}] ResizeWindow ignored: window_id={} {}x{} (resizable=false)",
+                        client_id, window_id, width, height
+                    );
+                    continue;
+                }
+
                 let (width, height) = match window_size_limits.get(&window_id) {
                     Some(limits) => {
                         let (w, h) = limits.clamp(width, height);
@@ -924,6 +1122,13 @@ fn client_thread_main(client_id: usize, mut socket: Socket) {
                 );
                 push_ipc_event(IpcEvent::RestoreWindow { window_id });
             }
+            Ok(ClientMessageRef::FocusWindow { window_id }) => {
+                println!(
+                    "[ClientThread {}] FocusWindow: window_id={}",
+                    client_id, window_id
+                );
+                push_ipc_event(IpcEvent::FocusWindow { window_id });
+            }
             Ok(ClientMessageRef::SetWindowType {
                 window_id,
                 window_type,
@@ -944,6 +1149,113 @@ fn client_thread_main(client_id: usize, mut socket: Socket) {
                 );
                 push_ipc_event(IpcEvent::SetWindowOpacity { window_id, opacity });
             }
+            Ok(ClientMessageRef::SetWindowHasAlphaContent {
+                window_id,
+                has_alpha,
+            }) => {
+                println!(
+                    "[ClientThread {}] SetWindowHasAlphaContent: window_id={} has_alpha={}",
+                    client_id, window_id, has_alpha
+                );
+                push_ipc_event(IpcEvent::SetWindowHasAlphaContent {
+                    window_id,
+                    has_alpha,
+                });
+            }
+            Ok(ClientMessageRef::SetWindowMenuTitles {
+                window_id,
+                menu_titles,
+            }) => {
+                let menu_titles_str = String::from_utf8_lossy(menu_titles).into_owned();
+                println!(
+                    "[ClientThread {}] SetWindowMenuTitles: window_id={} titles_len={}",
+                    client_id,
+                    window_id,
+                    menu_titles_str.len()
+                );
+                push_ipc_event(IpcEvent::SetWindowMenuTitles {
+                    window_id,
+                    menu_titles: menu_titles_str,
+                });
+            }
+            Ok(ClientMessageRef::ActivateMenuItem {
+                window_id,
+                menu_item_id,
+            }) => {
+                let menu_item_id_str = String::from_utf8_lossy(menu_item_id).into_owned();
+                println!(
+                    "[ClientThread {}] ActivateMenuItem: window_id={} item_len={}",
+                    client_id,
+                    window_id,
+                    menu_item_id_str.len()
+                );
+                push_ipc_event(IpcEvent::ActivateMenuItem {
+                    window_id,
+                    menu_item_id: menu_item_id_str,
+                });
+            }
+            Ok(ClientMessageRef::SetWorkarea {
+                x,
+                y,
+                width,
+                height,
+            }) => {
+                println!(
+                    "[ClientThread {}] SetWorkarea: x={}, y={}, width={}, height={}",
+                    client_id, x, y, width, height
+                );
+                push_ipc_event(IpcEvent::SetWorkarea {
+                    x,
+                    y,
+                    width,
+                    height,
+                });
+            }
+            Ok(ClientMessageRef::SetWindowResizable {
+                window_id,
+                resizable,
+            }) => {
+                println!(
+                    "[ClientThread {}] SetWindowResizable: window_id={} resizable={}",
+                    client_id, window_id, resizable
+                );
+                window_resizable.insert(window_id, resizable);
+                push_ipc_event(IpcEvent::SetWindowResizable {
+                    window_id,
+                    resizable,
+                });
+            }
+            Ok(ClientMessageRef::GetScreenSize {}) => {
+                println!(
+                    "[ClientThread {}] GetScreenSize: requesting screen size",
+                    client_id
+                );
+                // Send response directly with default screen size
+                // TODO: Get actual screen size from compositor
+                let screen_width = 1024; // Default fallback
+                let screen_height = 768;
+                let payload = protocol::payload_screen_size(screen_width, screen_height);
+                if let Err(e) =
+                    write_frame(&mut socket, protocol::server_msg::SCREEN_SIZE, &payload)
+                {
+                    println!(
+                        "[ClientThread {}] Failed to send SCREEN_SIZE response: {:?}",
+                        client_id, e
+                    );
+                } else {
+                    println!(
+                        "[ClientThread {}] Sent SCREEN_SIZE: {}x{}",
+                        client_id, screen_width, screen_height
+                    );
+                }
+            }
+            Ok(ClientMessageRef::GetWindowList {}) => {
+                println!(
+                    "[ClientThread {}] GetWindowList: requesting window list",
+                    client_id
+                );
+                push_ipc_event(IpcEvent::GetWindowList { client_id });
+            }
             Ok(_) => {
                 // Ignore other messages for now
             }
@@ -954,6 +1266,29 @@ fn client_thread_main(client_id: usize, mut socket: Socket) {
                 );
             }
         }
+        // sleep(std::time::Duration::from_millis(16));
+        yield_now();
+    }
+
+    // Cleanup: ensure per-window routing queues don't leak when the client disappears.
+    // Also notify the compositor so orphaned windows don't stick around.
+    for window_id in managed_windows.drain(..) {
+        unregister_window(window_id);
+        window_size_limits.remove(&window_id);
+        push_ipc_event(IpcEvent::DestroyWindow {
+            client_id,
+            window_id,
+        });
+    }
+
+    // Unregister client from broadcast messages
+    {
+        let mut pending = PENDING_CLIENT_RESPONSES.lock();
+        pending.remove(&client_id);
+        println!(
+            "[ClientThread {}] Unregistered client {} from broadcast messages",
+            client_id, client_id
+        );
     }
 
     println!("[ClientThread {}] Exiting", client_id);
@@ -982,9 +1317,16 @@ pub enum IpcEvent {
     /// Client requested to create a window
     CreateWindow {
         client_id: usize,
+        app_id: Vec<u8>,
         window_id: u32,
         width: u32,
         height: u32,
+        window_type: u32, // Window type (0=Normal, 1=AlwaysOnTop, 2=Taskbar, 3=Desktop)
+        resizable: bool,
+        focus_on_create: bool,
+        active_on_focus: bool,
+        initial_x: Option<i32>,
+        initial_y: Option<i32>,
         /// Shared memory for the window buffer (server-allocated)
         shm: Option<SharedMemory>,
         shm_mapped_addr: Option<usize>,
@@ -992,7 +1334,10 @@ pub enum IpcEvent {
         shm_size: usize,
     },
     /// Client requested to destroy a window
-    DestroyWindow { client_id: usize, window_id: u32 },
+    DestroyWindow {
+        client_id: usize,
+        window_id: u32,
+    },
     /// Client updated their window buffer (damage region only)
     BufferUpdated {
         window_id: u32,
@@ -1002,17 +1347,29 @@ pub enum IpcEvent {
         damage_height: u32,
     },
     /// Client requested window move
-    RequestMove { window_id: u32 },
+    RequestMove {
+        window_id: u32,
+    },
     /// Client moved window
-    MoveWindow { window_id: u32, x: i32, y: i32 },
+    MoveWindow {
+        window_id: u32,
+        x: i32,
+        y: i32,
+    },
 
     /// Set (or clear) parent window relationship
     ///
     /// `parent_id == 0` means "no parent".
-    SetWindowParent { window_id: u32, parent_id: u32 },
+    SetWindowParent {
+        window_id: u32,
+        parent_id: u32,
+    },
 
     /// Set transient behavior flags for a window (bitset).
-    SetWindowTransientFlags { window_id: u32, flags: u32 },
+    SetWindowTransientFlags {
+        window_id: u32,
+        flags: u32,
+    },
 
     /// Set min/max size constraints for a window.
     SetWindowSizeLimits {
@@ -1035,17 +1392,72 @@ pub enum IpcEvent {
     },
 
     /// Minimize a window
-    MinimizeWindow { window_id: u32 },
+    MinimizeWindow {
+        window_id: u32,
+    },
 
     /// Maximize a window
-    MaximizeWindow { window_id: u32 },
+    MaximizeWindow {
+        window_id: u32,
+    },
 
     /// Restore a window from minimized or maximized state
-    RestoreWindow { window_id: u32 },
+    RestoreWindow {
+        window_id: u32,
+    },
+
+    /// Focus and raise a window
+    FocusWindow {
+        window_id: u32,
+    },
 
     /// Set window type for Z-order management
-    SetWindowType { window_id: u32, window_type: u32 },
+    SetWindowType {
+        window_id: u32,
+        window_type: u32,
+    },
 
     /// Set window opacity
-    SetWindowOpacity { window_id: u32, opacity: u8 },
+    SetWindowOpacity {
+        window_id: u32,
+        opacity: u8,
+    },
+
+    /// Set whether window content contains alpha channel
+    SetWindowHasAlphaContent {
+        window_id: u32,
+        has_alpha: bool,
+    },
+    SetWindowMenuTitles {
+        window_id: u32,
+        menu_titles: String,
+    },
+    ActivateMenuItem {
+        window_id: u32,
+        menu_item_id: String,
+    },
+
+    /// Set the workarea (usable screen area) for the window manager
+    SetWorkarea {
+        x: i32,
+        y: i32,
+        width: u32,
+        height: u32,
+    },
+
+    /// Set whether a window can be resized by the user via interactive resize
+    SetWindowResizable {
+        window_id: u32,
+        resizable: bool,
+    },
+
+    /// Get the screen size
+    GetScreenSize {
+        client_id: usize,
+    },
+
+    /// Get list of all windows
+    GetWindowList {
+        client_id: usize,
+    },
 }

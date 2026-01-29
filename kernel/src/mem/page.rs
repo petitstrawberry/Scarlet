@@ -5,7 +5,7 @@ use alloc::boxed::Box;
 use crate::environment::PAGE_SIZE;
 
 #[repr(C, align(4096))]
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct Page {
     pub data: [u8; PAGE_SIZE],
 }

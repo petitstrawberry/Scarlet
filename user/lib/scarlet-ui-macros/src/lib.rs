@@ -1,337 +1,184 @@
-//! Procedural macros for declarative UI in ScarletUI
+//! ScarletUI Macros - Procedural macros for ScarletUI
 //!
-//! This crate provides SwiftUI-style declarative macros for building UIs.
-//!
-//! # view_builder! Macro
-//!
-//! The `view_builder!` macro enables declarative, SwiftUI-style view construction:
-//!
-//! ```rust
-//! use scarlet_ui::view_builder;
-//!
-//! let view = view_builder! {
-//!     VStack(spacing: 16) {
-//!         Label("Hello, World!")
-//!             .font_size(24)
-//!             .color(Color::WHITE)
-//!         
-//!         Button("Click me", || println!("Clicked!"))
-//!             .background(Color::BLUE)
-//!     }
-//! };
-//! ```
+//! This crate provides derive macros for ScarletUI traits.
 
 use proc_macro::TokenStream;
-use proc_macro2::TokenStream as TokenStream2;
 use quote::quote;
-use syn::{
-    parse::{Parse, ParseStream},
-    parse_macro_input, 
-    DeriveInput, 
-    Expr, 
-    Ident, 
-    Result, 
-    Token,
-    braced, 
-    parenthesized,
-    punctuated::Punctuated,
-};
+use syn::{parse_macro_input, DeriveInput, Data, DataStruct, Fields, TypePath};
+use syn::punctuated::Punctuated;
 
-/// Derive macro for creating a stateful view
+/// Derive macro for View trait
 ///
 /// # Example
 ///
-/// ```rust
-/// use scarlet_ui_macros::View;
-///
-/// #[derive(View)]
-/// struct CounterView {
-///     #[state]
-///     count: i32,
+/// ```ignore
+/// #[derive(View, Clone)]
+/// struct CounterApp {
+///     count: State<i32>,
 /// }
 /// ```
-#[proc_macro_derive(View, attributes(state, binding))]
+///
+/// This macro generates:
+/// - `impl View for CounterApp` - creates ComponentElement, collects listenables
+/// - `impl Default for CounterApp` - auto-initializes State fields with auto-generated StateId
+///
+/// Users can implement their own `new()` method and use `Default::default()`:
+/// ```ignore
+/// #![no_std]
+///
+/// extern crate alloc;
+///
+/// #[derive(View, Clone)]
+/// struct MyApp { ... }
+/// ```
+///
+/// # Note for `#![no_std]` environments
+///
+/// In `#![no_std]` contexts, you must add `extern crate alloc;` at the crate level:
+/// ```ignore
+/// impl CounterApp {
+///     pub fn new(custom_value: i32) -> Self {
+///         Self {
+///             count: State::new(StateId::new(0), custom_value),
+///         }
+/// }
+/// }
+/// ```
+#[proc_macro_derive(View)]
 pub fn derive_view(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
     let name = &input.ident;
-    
-    // Generate state field wrappers
+
+    // Parse struct fields to find State<T> fields
+    let (state_fields, state_indices) = match &input.data {
+        Data::Struct(DataStruct { fields, .. }) => {
+            extract_state_fields_with_indices(fields)
+        }
+        _ => {
+            // For enums or other types, return empty
+            (Punctuated::new(), Vec::new())
+        }
+    };
+
+    // Generate code to collect State fields
+    let collect_state_fields: std::vec::Vec<proc_macro2::TokenStream> = state_fields
+        .iter()
+        .map(|field_name| {
+            let field_ident = quote::format_ident!("{}", field_name);
+            quote! {
+                vec.push(&self.#field_ident as &dyn ::scarlet_ui::state::Listenable);
+            }
+        })
+        .collect();
+
+    // Generate Default implementation that initializes State fields with auto-generated StateId
+    let default_init: std::vec::Vec<proc_macro2::TokenStream> = state_indices
+        .iter()
+        .zip(state_fields.iter())
+        .map(|(idx, field_name)| {
+            let field_ident = quote::format_ident!("{}", field_name);
+            let idx_as_u32 = *idx as u32;
+            // Use State::initial for types with Default (State<T> inner type)
+            quote! {
+                #field_ident: ::scarlet_ui::state::State::initial(
+                    ::scarlet_ui::state::StateId::new(#idx_as_u32)
+                ),
+            }
+        })
+        .collect();
+
+    let has_state_fields = !state_fields.is_empty();
+
+    let default_impl = if has_state_fields {
+        quote! {
+            impl core::default::Default for #name {
+                fn default() -> Self {
+                    Self {
+                        #(#default_init)*
+                    }
+                }
+            }
+        }
+    } else {
+        quote! {}
+    };
+
     let expanded = quote! {
-        impl Default for #name {
-            fn default() -> Self {
-                Self::new()
+        #default_impl
+
+        impl ::scarlet_ui::view::View for #name {
+            fn create_element(&self) -> alloc::boxed::Box<dyn ::scarlet_ui::element::Element> {
+                // Create a ComponentElement to wrap this View
+                alloc::boxed::Box::new(::scarlet_ui::element::ComponentElement::new(self.clone()))
+            }
+
+            fn listenables(&self) -> alloc::vec::Vec<&dyn ::scarlet_ui::state::Listenable> {
+                let mut vec = alloc::vec::Vec::new();
+                #(#collect_state_fields)*
+                vec
+            }
+
+            fn as_any(&self) -> &dyn core::any::Any {
+                self
             }
         }
     };
-    
-    TokenStream::from(expanded)
+
+    proc_macro::TokenStream::from(expanded)
 }
 
-/// A view expression in the DSL
-enum ViewExpr {
-    /// Simple view: `Label("text")`
-    Simple {
-        name: Ident,
-        args: Vec<Expr>,
-    },
-    /// Container view: `VStack { ... }`
-    Container {
-        name: Ident,
-        args: Vec<(Ident, Expr)>, // named args like spacing: 16
-        children: Vec<ViewExpr>,
-    },
-    /// Method chain: `Label("text").color(Color::WHITE)`
-    Chained {
-        base: Box<ViewExpr>,
-        methods: Vec<MethodCall>,
-    },
-}
+/// Extract field names that are of type State<T> (without types)
+fn extract_state_fields(fields: &Fields) -> Punctuated<syn::Ident, syn::token::Comma> {
+    let mut state_fields = Punctuated::new();
 
-struct MethodCall {
-    name: Ident,
-    args: Vec<Expr>,
-}
+    if let Fields::Named(named_fields) = fields {
+        for field in &named_fields.named {
+            let field_name = field.ident.as_ref().unwrap();
 
-impl Parse for ViewExpr {
-    fn parse(input: ParseStream) -> Result<Self> {
-        // Parse the base view name
-        let name: Ident = input.parse()?;
-        
-        // Parse constructor arguments if present
-        let mut constructor_args = Vec::new();
-        let mut named_args = Vec::new();
-        
-        if input.peek(syn::token::Paren) {
-            let content;
-            parenthesized!(content in input);
-            
-            // Parse comma-separated arguments
-            while !content.is_empty() {
-                // Check for named argument: `name: value`
-                if content.peek(Ident) && content.peek2(Token![:]) {
-                    let arg_name: Ident = content.parse()?;
-                    let _: Token![:] = content.parse()?;
-                    let arg_value: Expr = content.parse()?;
-                    named_args.push((arg_name, arg_value));
-                } else {
-                    let arg: Expr = content.parse()?;
-                    constructor_args.push(arg);
-                }
-                
-                if content.peek(Token![,]) {
-                    let _: Token![,] = content.parse()?;
-                }
-            }
-        }
-        
-        // Check for children block
-        let mut children = Vec::new();
-        if input.peek(syn::token::Brace) {
-            let content;
-            braced!(content in input);
-            
-            while !content.is_empty() {
-                children.push(content.parse()?);
-            }
-        }
-        
-        // Parse method chains
-        let mut methods = Vec::new();
-        while input.peek(Token![.]) {
-            let _: Token![.] = input.parse()?;
-            let method_name: Ident = input.parse()?;
-            
-            let mut method_args = Vec::new();
-            if input.peek(syn::token::Paren) {
-                let content;
-                parenthesized!(content in input);
-                let args: Punctuated<Expr, Token![,]> = 
-                    Punctuated::parse_terminated(&content)?;
-                method_args = args.into_iter().collect();
-            }
-            
-            methods.push(MethodCall {
-                name: method_name,
-                args: method_args,
-            });
-        }
-        
-        // Build the appropriate ViewExpr
-        let base = if !children.is_empty() || !named_args.is_empty() {
-            ViewExpr::Container {
-                name,
-                args: named_args,
-                children,
-            }
-        } else {
-            ViewExpr::Simple {
-                name,
-                args: constructor_args,
-            }
-        };
-        
-        if methods.is_empty() {
-            Ok(base)
-        } else {
-            Ok(ViewExpr::Chained {
-                base: Box::new(base),
-                methods,
-            })
-        }
-    }
-}
-
-impl ViewExpr {
-    fn to_tokens(&self) -> TokenStream2 {
-        match self {
-            ViewExpr::Simple { name, args } => {
-                if args.is_empty() {
-                    quote! { #name::new() }
-                } else {
-                    quote! { #name::new(#(#args),*) }
-                }
-            }
-            ViewExpr::Container { name, args, children } => {
-                let child_tokens: Vec<_> = children.iter()
-                    .map(|c| {
-                        let child_code = c.to_tokens();
-                        quote! { .child(#child_code) }
-                    })
-                    .collect();
-                
-                let named_arg_tokens: Vec<_> = args.iter()
-                    .map(|(n, v)| quote! { .#n(#v) })
-                    .collect();
-                
-                quote! {
-                    #name::new()
-                        #(#named_arg_tokens)*
-                        #(#child_tokens)*
-                }
-            }
-            ViewExpr::Chained { base, methods } => {
-                let base_tokens = base.to_tokens();
-                let method_tokens: Vec<_> = methods.iter()
-                    .map(|m| {
-                        let name = &m.name;
-                        let args = &m.args;
-                        if args.is_empty() {
-                            quote! { .#name() }
-                        } else {
-                            quote! { .#name(#(#args),*) }
-                        }
-                    })
-                    .collect();
-                
-                quote! {
-                    #base_tokens #(#method_tokens)*
-                }
+            // Check if field type is State<T>
+            if is_state_type(&field.ty) {
+                state_fields.push(field_name.clone());
             }
         }
     }
+
+    state_fields
 }
 
-/// Parse a full view builder input (may contain multiple top-level views)
-struct ViewBuilderInput {
-    views: Vec<ViewExpr>,
-}
+/// Extract field names and indices for State<T> fields (with auto-incrementing IDs)
+fn extract_state_fields_with_indices(fields: &Fields) -> (Punctuated<syn::Ident, syn::token::Comma>, Vec<usize>) {
+    let mut state_fields = Punctuated::new();
+    let mut state_indices = Vec::new();
+    let mut counter = 0usize;
 
-impl Parse for ViewBuilderInput {
-    fn parse(input: ParseStream) -> Result<Self> {
-        let mut views = Vec::new();
-        while !input.is_empty() {
-            views.push(input.parse()?);
+    if let Fields::Named(named_fields) = fields {
+        for field in &named_fields.named {
+            let field_name = field.ident.as_ref().unwrap();
+
+            // Check if field type is State<T>
+            if is_state_type(&field.ty) {
+                state_fields.push(field_name.clone());
+                state_indices.push(counter);
+                counter += 1;
+            }
         }
-        Ok(ViewBuilderInput { views })
     }
+
+    (state_fields, state_indices)
 }
 
-/// Macro for building view hierarchies declaratively
-///
-/// # Example
-///
-/// ```rust
-/// use scarlet_ui::view_builder;
-///
-/// let view = view_builder! {
-///     VStack(spacing: 16) {
-///         Label("Hello")
-///             .color(Color::BLACK)
-///             .font_size(24)
-///         
-///         HStack(spacing: 8) {
-///             Button("OK", || println!("OK"))
-///             Button("Cancel", || println!("Cancel"))
-///         }
-///     }
-/// };
-/// ```
-///
-/// # Supported Syntax
-///
-/// - `ViewName(args...)` - Create a view with constructor arguments
-/// - `ViewName(name: value, ...)` - Named arguments become method calls
-/// - `ViewName { children... }` - Container views with children
-/// - `.method(args...)` - Method chaining for modifiers
-#[proc_macro]
-pub fn view_builder(input: TokenStream) -> TokenStream {
-    let input = parse_macro_input!(input as ViewBuilderInput);
-    
-    if input.views.is_empty() {
-        return quote! { compile_error!("view_builder! requires at least one view") }.into();
+/// Check if a type is State<T> (either scarlet_ui::state::State or just State)
+fn is_state_type(ty: &syn::Type) -> bool {
+    if let syn::Type::Path(TypePath { path, .. }) = ty {
+        // Get the last segment of the path
+        if let Some(last_segment) = path.segments.last() {
+            // Check if it's "State"
+            if last_segment.ident == "State" {
+                // Optionally check if it's from scarlet_ui::state module
+                // For simplicity, we accept any "State" identifier
+                return true;
+            }
+        }
     }
-    
-    if input.views.len() == 1 {
-        let tokens = input.views[0].to_tokens();
-        return tokens.into();
-    }
-    
-    // Multiple top-level views - wrap in a VStack
-    let child_tokens: Vec<_> = input.views.iter()
-        .map(|v| {
-            let code = v.to_tokens();
-            quote! { .child(#code) }
-        })
-        .collect();
-    
-    quote! {
-        VStack::new() #(#child_tokens)*
-    }.into()
-}
-
-/// Attribute macro for reactive state properties
-///
-/// This attribute can be applied to struct fields to wrap them with State<T>.
-///
-/// # Example
-///
-/// ```rust
-/// struct MyView {
-///     #[state]
-///     counter: i32,  // becomes State<i32>
-/// }
-/// ```
-#[proc_macro_attribute]
-pub fn state(_attr: TokenStream, item: TokenStream) -> TokenStream {
-    // For now, pass through unchanged
-    // A full implementation would transform the field type
-    item
-}
-
-/// Attribute macro for binding properties
-///
-/// This attribute can be applied to struct fields to mark them as bindings.
-///
-/// # Example
-///
-/// ```rust
-/// struct MyView {
-///     #[binding]
-///     text: String,  // expects to receive Binding<String>
-/// }
-/// ```
-#[proc_macro_attribute]
-pub fn binding(_attr: TokenStream, item: TokenStream) -> TokenStream {
-    // For now, pass through unchanged
-    item
+    false
 }

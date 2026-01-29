@@ -1,0 +1,10 @@
+[package]
+name = "scarlet-desktop-config"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+scarlet_std = { path = "../std" }

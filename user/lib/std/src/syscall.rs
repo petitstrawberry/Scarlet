@@ -19,6 +19,10 @@ pub enum Syscall {
 
     Sleep = 20,
 
+    Yield = 21,
+
+    ExitGroup = 23, // Exit all tasks in thread group
+
     // TLS (Thread Local Storage) Management
     SetTls = 30,
     GetTls = 31,
