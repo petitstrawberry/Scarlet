@@ -20,20 +20,18 @@ where
     }
 }
 
-/// Custom panic handler for test mode
+/// Panic handler for test mode (lib tests)
 #[cfg(test)]
 #[panic_handler]
-fn panic(info: &PanicInfo) -> ! {
+fn panic_test(info: &PanicInfo) -> ! {
     crate::println!("[Test Runner] panic: {}", info);
     crate::println!("[Test Runner] Test failed");
     
     // Exit with error code
-    // In userland, we use the process exit syscall
     crate::task::exit(1);
 }
 
 /// Test runner function
-#[cfg(test)]
 pub fn test_runner(tests: &[&dyn TestableFn]) {
     crate::println!("[Test Runner] Running {} tests", tests.len());
     for test in tests {
@@ -45,3 +43,6 @@ pub fn test_runner(tests: &[&dyn TestableFn]) {
     // Exit successfully
     crate::task::exit(0);
 }
+
+
+

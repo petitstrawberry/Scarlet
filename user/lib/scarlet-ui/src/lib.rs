@@ -70,7 +70,6 @@ pub mod graphics;
 pub mod debug;
 pub mod menu_model;
 
-#[cfg(test)]
 pub mod test;
 
 // Re-exports for convenience

@@ -22,3 +22,9 @@ syn = { version = "2.0", default-features = false, features = ["derive"] }
 [lib]
 name = "scarlet_ui"
 path = "src/lib.rs"
+
+[[test]]
+name = "ui_tests"
+path = "tests/runner.rs"
+harness = false
+

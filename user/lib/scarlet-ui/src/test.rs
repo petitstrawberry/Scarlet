@@ -2,8 +2,6 @@
 //!
 //! This module provides a custom test runner for no_std environments.
 
-use core::panic::PanicInfo;
-
 /// Trait for testable functions
 pub trait TestableFn {
     fn run(&self);
@@ -20,21 +18,7 @@ where
     }
 }
 
-/// Custom panic handler for test mode
-#[cfg(test)]
-#[panic_handler]
-fn panic(info: &PanicInfo) -> ! {
-    use crate::std::{println, task};
-    
-    println!("[Test Runner] panic: {}", info);
-    println!("[Test Runner] Test failed");
-    
-    // Exit with error code
-    task::exit(1);
-}
-
 /// Test runner function
-#[cfg(test)]
 pub fn test_runner(tests: &[&dyn TestableFn]) {
     use crate::std::{println, task};
     
@@ -48,3 +32,4 @@ pub fn test_runner(tests: &[&dyn TestableFn]) {
     // Exit successfully
     task::exit(0);
 }
+

@@ -111,7 +111,6 @@ pub mod syscall;
 pub mod task;
 pub mod thread;
 
-#[cfg(test)]
 pub mod test;
 
 // Re-export LocalKey type for convenience
@@ -135,7 +134,7 @@ pub mod profiler {
 pub use alloc_exports::*;
 pub use core_exports::*;
 
-#[cfg(not(test))]
+#[cfg(not(any(test, feature = "test_harness")))]
 #[panic_handler]
 pub fn panic(_info: &core::panic::PanicInfo) -> ! {
     crate::println!("Panic occurred: {:?}", _info);
@@ -146,3 +145,4 @@ pub fn panic(_info: &core::panic::PanicInfo) -> ! {
 fn alloc_error_handler(_layout: core::alloc::Layout) -> ! {
     loop {}
 }
+

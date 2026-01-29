@@ -112,12 +112,33 @@ script = [
 
 [tasks.test]
 description = "Test all user libraries"
-script = [
-    "cd std && cargo test",
-    "cd ../framebuffer && cargo test",
-    "cd ../sws_protocol && cargo test",
-    "cd ../scarlet-desktop-config && cargo test"
-]
+dependencies = ["test-std-riscv64", "test-ui-riscv64"]
+
+[tasks.test-std-riscv64]
+description = "Build and prepare scarlet_std tests (RISC-V)"
+cwd = "std"
+command = "cargo"
+args = ["test", "--no-run", "--features", "test_harness", "--target", "../../targets/riscv64gc-unknown-scarlet-elf.json"]
+
+[tasks.test-ui-riscv64]
+description = "Build and prepare scarlet-ui tests (RISC-V)"
+cwd = "scarlet-ui"
+command = "cargo"
+args = ["test", "--no-run", "--target", "../../targets/riscv64gc-unknown-scarlet-elf.json"]
+dependencies = ["test-std-riscv64"]
+
+[tasks.test-std-aarch64]
+description = "Build and prepare scarlet_std tests (AArch64)"
+cwd = "std"
+command = "cargo"
+args = ["test", "--no-run", "--target", "../../targets/aarch64-unknown-scarlet-elf.json"]
+
+[tasks.test-ui-aarch64]
+description = "Build and prepare scarlet-ui tests (AArch64)"
+cwd = "scarlet-ui"
+command = "cargo"
+args = ["test", "--no-run", "--target", "../../targets/aarch64-unknown-scarlet-elf.json"]
+dependencies = ["test-std-aarch64"]
 
 [tasks.doc]
 description = "Generate documentation for all user libraries"
