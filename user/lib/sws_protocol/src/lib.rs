@@ -264,7 +264,6 @@ pub enum ClientMessageRef<'a> {
         opacity: u8,
     },
 
-
     // Extension API messages (100+)
     /// Register as an extension server
     RegisterExtension {
@@ -794,8 +793,14 @@ pub fn parse_client_message<'a>(
             let stride = i32::from_le_bytes([payload[20], payload[21], payload[22], payload[23]]);
             let format = u32::from_le_bytes([payload[24], payload[25], payload[26], payload[27]]);
             let shm_size = u64::from_le_bytes([
-                payload[28], payload[29], payload[30], payload[31], payload[32], payload[33],
-                payload[34], payload[35],
+                payload[28],
+                payload[29],
+                payload[30],
+                payload[31],
+                payload[32],
+                payload[33],
+                payload[34],
+                payload[35],
             ]);
             Ok(ClientMessageRef::ExtensionAttachBuffer {
                 external_client_id,
@@ -1664,7 +1669,6 @@ pub fn payload_set_window_opacity(window_id: u32, opacity: u8) -> [u8; 5] {
     payload[4] = opacity;
     payload
 }
-
 
 /// Build payload for client->server `REGISTER_EXTENSION`.
 ///

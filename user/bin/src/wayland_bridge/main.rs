@@ -28,8 +28,8 @@ use protocol::{MessageHeader, WaylandArg, WaylandMessage};
 use registry::Registry;
 use shm::ShmManager;
 use std::collections::BTreeMap;
-use std::ipc::{SharedMemory, permissions};
 use std::io::{Read, Write};
+use std::ipc::{SharedMemory, permissions};
 use std::println;
 use std::socket::Socket;
 use std::string::String;
@@ -247,7 +247,11 @@ impl WaylandBridge {
         if payload.len() < end {
             return None;
         }
-        let bytes = if len == 0 { &[] } else { &payload[start..end - 1] };
+        let bytes = if len == 0 {
+            &[]
+        } else {
+            &payload[start..end - 1]
+        };
         let s = String::from_utf8_lossy(bytes).into_owned();
         let padded = (len + 3) & !3;
         Some((s, start + padded))
@@ -274,7 +278,8 @@ impl WaylandBridge {
             );
 
             // Send EXTENSION_CREATE_WINDOW message
-            let payload = protocol_sws::payload_extension_create_window(wl_surface_id, width, height);
+            let payload =
+                protocol_sws::payload_extension_create_window(wl_surface_id, width, height);
             let header = protocol_sws::MessageHeader {
                 msg_type: protocol_sws::client_msg::EXTENSION_CREATE_WINDOW,
                 payload_size: payload.len() as u32,
@@ -415,14 +420,7 @@ impl WaylandBridge {
         }
 
         let payload = protocol_sws::payload_extension_attach_buffer(
-            surface_id,
-            window_id,
-            width,
-            height,
-            offset,
-            stride,
-            format,
-            shm_size,
+            surface_id, window_id, width, height, offset, stride, format, shm_size,
         );
         let header = protocol_sws::MessageHeader {
             msg_type: protocol_sws::client_msg::EXTENSION_ATTACH_BUFFER,
@@ -486,8 +484,11 @@ impl WaylandBridge {
                 );
 
                 // Handle the message
-                let responses =
-                    self.handle_message(&header, &buffer[offset + 8..offset + msg_size], &mut client)?;
+                let responses = self.handle_message(
+                    &header,
+                    &buffer[offset + 8..offset + msg_size],
+                    &mut client,
+                )?;
                 for response in responses {
                     if response.header.opcode() == input::keyboard_event::KEYMAP {
                         if let Some(shm) = self.keymap_shm.as_ref() {
@@ -522,7 +523,11 @@ impl WaylandBridge {
         let opcode = header.opcode();
 
         // Get the interface for this object
-        let interface = self.objects.get(&object_id).ok_or("Unknown object ID")?.clone();
+        let interface = self
+            .objects
+            .get(&object_id)
+            .ok_or("Unknown object ID")?
+            .clone();
 
         match interface.as_str() {
             "wl_display" => self.handle_display_message(opcode, payload),
@@ -636,8 +641,10 @@ impl WaylandBridge {
                                 if interface_name == "wl_seat" {
                                     self.input_manager.create_seat(new_id, "seat0");
                                     let mut msgs = Vec::new();
-                                    let mut caps =
-                                        WaylandMessage::new(new_id, input::seat_event::CAPABILITIES);
+                                    let mut caps = WaylandMessage::new(
+                                        new_id,
+                                        input::seat_event::CAPABILITIES,
+                                    );
                                     caps.add_arg(WaylandArg::Uint(
                                         input::seat_capabilities::POINTER
                                             | input::seat_capabilities::KEYBOARD,
@@ -653,8 +660,10 @@ impl WaylandBridge {
 
                                 if interface_name == "wl_output" {
                                     let mut msgs = Vec::new();
-                                    let mut geom =
-                                        WaylandMessage::new(new_id, protocol::output_event::GEOMETRY);
+                                    let mut geom = WaylandMessage::new(
+                                        new_id,
+                                        protocol::output_event::GEOMETRY,
+                                    );
                                     geom.add_arg(WaylandArg::Int(0)); // x
                                     geom.add_arg(WaylandArg::Int(0)); // y
                                     geom.add_arg(WaylandArg::Int(320)); // phys width mm
