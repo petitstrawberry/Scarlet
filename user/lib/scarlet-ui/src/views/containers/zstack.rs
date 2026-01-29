@@ -106,8 +106,8 @@ impl ElementRenderObject for ZStackRenderObject {
             return self.size;
         }
 
-        let width = constraints.min_width.max(0.0);
-        let height = constraints.min_height.max(0.0);
+        let width = constraints.min_width.min(constraints.max_width).max(0.0);
+        let height = constraints.min_height.min(constraints.max_height).max(0.0);
         self.size = Size { width, height };
         self.size
     }
@@ -138,12 +138,18 @@ impl ElementRenderObject for ZStackRenderObject {
             max_height = max_height.max(child_size.height);
         }
 
-        let final_width = if constraints.is_tight_width() {
+        let final_width = if constraints.is_tight_width()
+            && constraints.min_width.is_finite()
+            && constraints.min_width > 0.0
+        {
             constraints.max_width
         } else {
             max_width.clamp(constraints.min_width, constraints.max_width)
         };
-        let final_height = if constraints.is_tight_height() {
+        let final_height = if constraints.is_tight_height()
+            && constraints.min_height.is_finite()
+            && constraints.min_height > 0.0
+        {
             constraints.max_height
         } else {
             max_height.clamp(constraints.min_height, constraints.max_height)
