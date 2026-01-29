@@ -28,6 +28,7 @@ use protocol::{MessageHeader, WaylandArg, WaylandMessage};
 use registry::Registry;
 use shm::ShmManager;
 use std::collections::BTreeMap;
+use std::ipc::{SharedMemory, permissions};
 use std::io::{Read, Write};
 use std::println;
 use std::socket::Socket;
@@ -68,6 +69,9 @@ struct WaylandBridge {
     objects: BTreeMap<u32, String>,
     /// Map of Wayland surface ID -> SWS window ID
     surface_to_window: BTreeMap<u32, u32>,
+    /// Cached keymap SHM for wl_keyboard.keymap
+    keymap_shm: Option<SharedMemory>,
+    keymap_size: u32,
 }
 
 impl WaylandBridge {
@@ -106,6 +110,8 @@ impl WaylandBridge {
             next_serial: 1,
             objects,
             surface_to_window: BTreeMap::new(),
+            keymap_shm: None,
+            keymap_size: 0,
         })
     }
 
@@ -168,6 +174,46 @@ impl WaylandBridge {
         let serial = self.next_serial;
         self.next_serial = self.next_serial.wrapping_add(1);
         serial
+    }
+
+    fn ensure_keymap(&mut self) -> Result<u32, &'static str> {
+        if self.keymap_shm.is_some() {
+            return Ok(self.keymap_size);
+        }
+
+        let keymap = b"xkb_keymap {\n\
+            xkb_keycodes \"(unnamed)\" { minimum = 8; maximum = 255; };\n\
+            xkb_types \"(unnamed)\" { type \"ONE_LEVEL\" { level_name[1] = \"Any\"; }; };\n\
+            xkb_compatibility \"(unnamed)\" { };\n\
+            xkb_symbols \"(unnamed)\" { };\n\
+            xkb_geometry \"(unnamed)\" { };\n\
+        };";
+        let size = keymap.len() + 1;
+
+        let shm = SharedMemory::create(size, permissions::READ_WRITE)
+            .map_err(|_| "Failed to create keymap SHM")?;
+        let mapper = shm
+            .as_handle()
+            .as_memory_mapping()
+            .map_err(|_| "Keymap SHM mapping unsupported")?;
+        let addr = mapper
+            .mmap(
+                0,
+                size,
+                permissions::READ_WRITE,
+                std::handle::capability::memory_mapping::flags::SHARED,
+                0,
+            )
+            .map_err(|_| "Failed to mmap keymap SHM")?;
+        unsafe {
+            let ptr = addr as *mut u8;
+            core::ptr::copy_nonoverlapping(keymap.as_ptr(), ptr, keymap.len());
+            *ptr.add(keymap.len()) = 0;
+        }
+
+        self.keymap_size = size as u32;
+        self.keymap_shm = Some(shm);
+        Ok(self.keymap_size)
     }
 
     fn parse_u32(payload: &[u8], offset: usize) -> Option<u32> {
@@ -441,6 +487,11 @@ impl WaylandBridge {
                 let responses =
                     self.handle_message(&header, &buffer[offset + 8..offset + msg_size], &mut client)?;
                 for response in responses {
+                    if response.header.opcode() == input::keyboard_event::KEYMAP {
+                        if let Some(shm) = self.keymap_shm.as_ref() {
+                            let _ = client.send_handle(shm.as_handle());
+                        }
+                    }
                     let response_bytes = response.encode();
                     client
                         .write(&response_bytes)
@@ -482,6 +533,7 @@ impl WaylandBridge {
             "wl_seat" => self.handle_seat_message(object_id, opcode, payload),
             "wl_pointer" => self.handle_pointer_message(object_id, opcode, payload),
             "wl_keyboard" => self.handle_keyboard_message(object_id, opcode, payload),
+            "wl_output" => self.handle_output_message(object_id, opcode, payload),
             "xdg_wm_base" => self.handle_xdg_wm_base_message(opcode, payload),
             "xdg_surface" => self.handle_xdg_surface_message(object_id, opcode, payload),
             "xdg_toplevel" => self.handle_xdg_toplevel_message(object_id, opcode, payload),
@@ -574,6 +626,57 @@ impl WaylandBridge {
                                         WaylandMessage::new(new_id, shm::shm_event::FORMAT);
                                     fmt_xrgb.add_arg(WaylandArg::Uint(shm::shm_format::XRGB8888));
                                     msgs.push(fmt_xrgb);
+                                    return Ok(msgs);
+                                }
+
+                                if interface_name == "wl_seat" {
+                                    self.input_manager.create_seat(new_id, "seat0");
+                                    let mut msgs = Vec::new();
+                                    let mut caps =
+                                        WaylandMessage::new(new_id, input::seat_event::CAPABILITIES);
+                                    caps.add_arg(WaylandArg::Uint(
+                                        input::seat_capabilities::POINTER
+                                            | input::seat_capabilities::KEYBOARD,
+                                    ));
+                                    msgs.push(caps);
+
+                                    let mut name =
+                                        WaylandMessage::new(new_id, input::seat_event::NAME);
+                                    name.add_arg(WaylandArg::String(b"seat0".to_vec()));
+                                    msgs.push(name);
+                                    return Ok(msgs);
+                                }
+
+                                if interface_name == "wl_output" {
+                                    let mut msgs = Vec::new();
+                                    let mut geom =
+                                        WaylandMessage::new(new_id, protocol::output_event::GEOMETRY);
+                                    geom.add_arg(WaylandArg::Int(0)); // x
+                                    geom.add_arg(WaylandArg::Int(0)); // y
+                                    geom.add_arg(WaylandArg::Int(320)); // phys width mm
+                                    geom.add_arg(WaylandArg::Int(200)); // phys height mm
+                                    geom.add_arg(WaylandArg::Int(0)); // subpixel
+                                    geom.add_arg(WaylandArg::String(b"Scarlet".to_vec()));
+                                    geom.add_arg(WaylandArg::String(b"Virtual".to_vec()));
+                                    geom.add_arg(WaylandArg::Int(0)); // transform
+                                    msgs.push(geom);
+
+                                    let mut mode =
+                                        WaylandMessage::new(new_id, protocol::output_event::MODE);
+                                    mode.add_arg(WaylandArg::Uint(1)); // current
+                                    mode.add_arg(WaylandArg::Int(800)); // width
+                                    mode.add_arg(WaylandArg::Int(600)); // height
+                                    mode.add_arg(WaylandArg::Int(60000)); // refresh mHz
+                                    msgs.push(mode);
+
+                                    let mut scale =
+                                        WaylandMessage::new(new_id, protocol::output_event::SCALE);
+                                    scale.add_arg(WaylandArg::Int(1));
+                                    msgs.push(scale);
+
+                                    let done =
+                                        WaylandMessage::new(new_id, protocol::output_event::DONE);
+                                    msgs.push(done);
                                     return Ok(msgs);
                                 }
                             } else {
@@ -672,7 +775,9 @@ impl WaylandBridge {
             }
             protocol::surface_request::COMMIT => {
                 println!("[Bridge] wl_surface.commit on surface {}", surface_id);
+                let mut release_msg = None;
                 if let Some(surface) = self.surface_manager.get_surface_mut(surface_id) {
+                    let buffer_id = surface.buffer_id;
                     // If surface has a role and is mapped to SWS window, update it
                     if surface.role.is_some() {
                         if let Err(e) = self.update_sws_window(surface_id) {
@@ -680,8 +785,18 @@ impl WaylandBridge {
                         }
                     }
                     surface.commit();
+                    if let Some(buf_id) = buffer_id {
+                        if self.objects.get(&buf_id).is_some() {
+                            let msg = WaylandMessage::new(buf_id, shm::buffer_event::RELEASE);
+                            release_msg = Some(msg);
+                        }
+                    }
                 }
-                Ok(Vec::new())
+                if let Some(msg) = release_msg {
+                    Ok(vec![msg])
+                } else {
+                    Ok(Vec::new())
+                }
             }
             _ => {
                 println!("[Bridge] Unknown wl_surface opcode: {}", opcode);
@@ -976,10 +1091,11 @@ impl WaylandBridge {
                     self.input_manager.create_keyboard(keyboard_id, seat_id);
 
                     // Send keymap event (empty for now)
+                    let size = self.ensure_keymap()?;
                     let mut msg = WaylandMessage::new(keyboard_id, input::keyboard_event::KEYMAP);
                     msg.add_arg(WaylandArg::Uint(1)); // XKB_V1 format
-                    msg.add_arg(WaylandArg::Fd(0)); // FD (placeholder)
-                    msg.add_arg(WaylandArg::Uint(0)); // size
+                    msg.add_arg(WaylandArg::Fd(0)); // FD (out-of-band handle)
+                    msg.add_arg(WaylandArg::Uint(size)); // size
                     return Ok(vec![msg]);
                 }
                 Ok(Vec::new())
@@ -1016,6 +1132,17 @@ impl WaylandBridge {
     ) -> Result<Vec<WaylandMessage>, &'static str> {
         println!("[Bridge] wl_keyboard opcode: {}", opcode);
         // Keyboard events are sent from SWS, not received from client
+        Ok(Vec::new())
+    }
+
+    /// Handle wl_output messages
+    fn handle_output_message(
+        &mut self,
+        _output_id: u32,
+        opcode: u16,
+        _payload: &[u8],
+    ) -> Result<Vec<WaylandMessage>, &'static str> {
+        println!("[Bridge] wl_output opcode: {}", opcode);
         Ok(Vec::new())
     }
 

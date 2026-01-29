@@ -494,6 +494,7 @@ impl WindowManager {
             width.saturating_mul(4)
         };
         window.shm_format = format;
+        window.has_alpha_content = format == 0;
         Ok(())
     }
 

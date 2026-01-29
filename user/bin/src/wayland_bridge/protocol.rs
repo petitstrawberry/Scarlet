@@ -261,3 +261,11 @@ pub mod surface_event {
     pub const ENTER: u16 = 0;
     pub const LEAVE: u16 = 1;
 }
+
+/// wl_output opcodes (events from server)
+pub mod output_event {
+    pub const GEOMETRY: u16 = 0;
+    pub const MODE: u16 = 1;
+    pub const DONE: u16 = 2;
+    pub const SCALE: u16 = 3;
+}
