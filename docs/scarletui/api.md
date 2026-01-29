@@ -51,9 +51,7 @@ impl CounterApp {
 }
 
 fn main() {
-    let mut app = CounterApp {
-        count: State::initial(StateId::new(1)),
-    };
+    let mut app = CounterApp::new();
     app.run();
 }
 ```
