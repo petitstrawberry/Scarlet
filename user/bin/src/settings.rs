@@ -190,25 +190,40 @@ fn appearance_page(
                 zstack! {
                     Rectangle::new()
                         .fill(Color::rgb(48, 48, 56))
-                        .border(2.0, if style_default { highlight } else { border })
-                        .frame(200.0, 64.0),
-                    Text::new("Gradient + Lines").font_size(12.0).color(Color::WHITE),
+                        .frame(190.0, 60.0),
+                    zstack! {
+                        Rectangle::new()
+                            .fill(Color::CLEAR)
+                            .border(2.0, if style_default { highlight } else { Color::CLEAR })
+                            .frame(198.0, 68.0),
+                        Text::new("Gradient + Lines").font_size(12.0).color(Color::WHITE),
+                    },
                 }
                 .on_click(move || { s0.set(BackgroundStyle::GradientLines); }),
                 zstack! {
                     Rectangle::new()
                         .fill(Color::rgb(40, 40, 50))
-                        .border(2.0, if style_gradient { highlight } else { border })
-                        .frame(200.0, 64.0),
-                    Text::new("Gradient").font_size(12.0).color(Color::WHITE),
+                        .frame(190.0, 60.0),
+                    zstack! {
+                        Rectangle::new()
+                            .fill(Color::CLEAR)
+                            .border(2.0, if style_gradient { highlight } else { Color::CLEAR })
+                            .frame(198.0, 68.0),
+                        Text::new("Gradient").font_size(12.0).color(Color::WHITE),
+                    },
                 }
                 .on_click(move || { s1.set(BackgroundStyle::Gradient); }),
                 zstack! {
                     Rectangle::new()
                         .fill(Color::rgb(26, 26, 30))
-                        .border(2.0, if style_solid { highlight } else { border })
-                        .frame(200.0, 64.0),
-                    Text::new("Solid").font_size(12.0).color(Color::WHITE),
+                        .frame(190.0, 60.0),
+                    zstack! {
+                        Rectangle::new()
+                            .fill(Color::CLEAR)
+                            .border(2.0, if style_solid { highlight } else { Color::CLEAR })
+                            .frame(198.0, 68.0),
+                        Text::new("Solid").font_size(12.0).color(Color::WHITE),
+                    },
                 }
                 .on_click(move || { s2.set(BackgroundStyle::Solid); }),
             }
@@ -216,87 +231,135 @@ fn appearance_page(
             vstack! {
                 Text::new("Color").font_size(14.0),
                 hstack! {
-                    Rectangle::new()
-                        .fill(Color::rgb(PRESET_COLORS[0].color[0], PRESET_COLORS[0].color[1], PRESET_COLORS[0].color[2]))
-                        .border(2.0, if is0 { highlight } else { border })
-                        .on_click(move || {
-                            r0.set(PRESET_COLORS[0].color[0] as f32);
-                            g0.set(PRESET_COLORS[0].color[1] as f32);
-                            b0.set(PRESET_COLORS[0].color[2] as f32);
-                        })
-                        .frame(85.0, 85.0),
+                    zstack! {
+                        Rectangle::new()
+                            .fill(Color::rgb(PRESET_COLORS[0].color[0], PRESET_COLORS[0].color[1], PRESET_COLORS[0].color[2]))
+                            .frame(80.0, 80.0),
+                        Rectangle::new()
+                            .fill(Color::CLEAR)
+                            .border(2.0, if is0 { highlight } else { Color::CLEAR })
+                            .frame(88.0, 88.0),
+                    }
+                    .alignment(Alignment::Center)
+                    .on_click(move || {
+                        r0.set(PRESET_COLORS[0].color[0] as f32);
+                        g0.set(PRESET_COLORS[0].color[1] as f32);
+                        b0.set(PRESET_COLORS[0].color[2] as f32);
+                    }),
                     Spacer::new().frame_width(10.0),
-                    Rectangle::new()
-                        .fill(Color::rgb(PRESET_COLORS[1].color[0], PRESET_COLORS[1].color[1], PRESET_COLORS[1].color[2]))
-                        .border(2.0, if is1 { highlight } else { border })
-                        .on_click(move || {
-                            r1.set(PRESET_COLORS[1].color[0] as f32);
-                            g1.set(PRESET_COLORS[1].color[1] as f32);
-                            b1.set(PRESET_COLORS[1].color[2] as f32);
-                        })
-                        .frame(85.0, 85.0),
+                    zstack! {
+                        Rectangle::new()
+                            .fill(Color::rgb(PRESET_COLORS[1].color[0], PRESET_COLORS[1].color[1], PRESET_COLORS[1].color[2]))
+                            .frame(80.0, 80.0),
+                        Rectangle::new()
+                            .fill(Color::CLEAR)
+                            .border(2.0, if is1 { highlight } else { Color::CLEAR })
+                            .frame(88.0, 88.0),
+                    }
+                    .alignment(Alignment::Center)
+                    .on_click(move || {
+                        r1.set(PRESET_COLORS[1].color[0] as f32);
+                        g1.set(PRESET_COLORS[1].color[1] as f32);
+                        b1.set(PRESET_COLORS[1].color[2] as f32);
+                    }),
                     Spacer::new().frame_width(10.0),
-                    Rectangle::new()
-                        .fill(Color::rgb(PRESET_COLORS[2].color[0], PRESET_COLORS[2].color[1], PRESET_COLORS[2].color[2]))
-                        .border(2.0, if is2 { highlight } else { border })
-                        .on_click(move || {
-                            r2.set(PRESET_COLORS[2].color[0] as f32);
-                            g2.set(PRESET_COLORS[2].color[1] as f32);
-                            b2.set(PRESET_COLORS[2].color[2] as f32);
-                        })
-                        .frame(85.0, 85.0),
+                    zstack! {
+                        Rectangle::new()
+                            .fill(Color::rgb(PRESET_COLORS[2].color[0], PRESET_COLORS[2].color[1], PRESET_COLORS[2].color[2]))
+                            .frame(80.0, 80.0),
+                        Rectangle::new()
+                            .fill(Color::CLEAR)
+                            .border(2.0, if is2 { highlight } else { Color::CLEAR })
+                            .frame(88.0, 88.0),
+                    }
+                    .alignment(Alignment::Center)
+                    .on_click(move || {
+                        r2.set(PRESET_COLORS[2].color[0] as f32);
+                        g2.set(PRESET_COLORS[2].color[1] as f32);
+                        b2.set(PRESET_COLORS[2].color[2] as f32);
+                    }),
                     Spacer::new().frame_width(10.0),
-                    Rectangle::new()
-                        .fill(Color::rgb(PRESET_COLORS[3].color[0], PRESET_COLORS[3].color[1], PRESET_COLORS[3].color[2]))
-                        .border(2.0, if is3 { highlight } else { border })
-                        .on_click(move || {
-                            r3.set(PRESET_COLORS[3].color[0] as f32);
-                            g3.set(PRESET_COLORS[3].color[1] as f32);
-                            b3.set(PRESET_COLORS[3].color[2] as f32);
-                        })
-                        .frame(85.0, 85.0),
+                    zstack! {
+                        Rectangle::new()
+                            .fill(Color::rgb(PRESET_COLORS[3].color[0], PRESET_COLORS[3].color[1], PRESET_COLORS[3].color[2]))
+                            .frame(80.0, 80.0),
+                        Rectangle::new()
+                            .fill(Color::CLEAR)
+                            .border(2.0, if is3 { highlight } else { Color::CLEAR })
+                            .frame(88.0, 88.0),
+                    }
+                    .alignment(Alignment::Center)
+                    .on_click(move || {
+                        r3.set(PRESET_COLORS[3].color[0] as f32);
+                        g3.set(PRESET_COLORS[3].color[1] as f32);
+                        b3.set(PRESET_COLORS[3].color[2] as f32);
+                    }),
                 },
                 Spacer::new().frame_height(10.0),
                 hstack! {
-                    Rectangle::new()
-                        .fill(Color::rgb(PRESET_COLORS[4].color[0], PRESET_COLORS[4].color[1], PRESET_COLORS[4].color[2]))
-                        .border(2.0, if is4 { highlight } else { border })
-                        .on_click(move || {
-                            r4.set(PRESET_COLORS[4].color[0] as f32);
-                            g4.set(PRESET_COLORS[4].color[1] as f32);
-                            b4.set(PRESET_COLORS[4].color[2] as f32);
-                        })
-                        .frame(85.0, 85.0),
+                    zstack! {
+                        Rectangle::new()
+                            .fill(Color::rgb(PRESET_COLORS[4].color[0], PRESET_COLORS[4].color[1], PRESET_COLORS[4].color[2]))
+                            .frame(80.0, 80.0),
+                        Rectangle::new()
+                            .fill(Color::CLEAR)
+                            .border(2.0, if is4 { highlight } else { Color::CLEAR })
+                            .frame(88.0, 88.0),
+                    }
+                    .alignment(Alignment::Center)
+                    .on_click(move || {
+                        r4.set(PRESET_COLORS[4].color[0] as f32);
+                        g4.set(PRESET_COLORS[4].color[1] as f32);
+                        b4.set(PRESET_COLORS[4].color[2] as f32);
+                    }),
                     Spacer::new().frame_width(10.0),
-                    Rectangle::new()
-                        .fill(Color::rgb(PRESET_COLORS[5].color[0], PRESET_COLORS[5].color[1], PRESET_COLORS[5].color[2]))
-                        .border(2.0, if is5 { highlight } else { border })
-                        .on_click(move || {
-                            r5.set(PRESET_COLORS[5].color[0] as f32);
-                            g5.set(PRESET_COLORS[5].color[1] as f32);
-                            b5.set(PRESET_COLORS[5].color[2] as f32);
-                        })
-                        .frame(85.0, 85.0),
+                    zstack! {
+                        Rectangle::new()
+                            .fill(Color::rgb(PRESET_COLORS[5].color[0], PRESET_COLORS[5].color[1], PRESET_COLORS[5].color[2]))
+                            .frame(80.0, 80.0),
+                        Rectangle::new()
+                            .fill(Color::CLEAR)
+                            .border(2.0, if is5 { highlight } else { Color::CLEAR })
+                            .frame(88.0, 88.0),
+                    }
+                    .alignment(Alignment::Center)
+                    .on_click(move || {
+                        r5.set(PRESET_COLORS[5].color[0] as f32);
+                        g5.set(PRESET_COLORS[5].color[1] as f32);
+                        b5.set(PRESET_COLORS[5].color[2] as f32);
+                    }),
                     Spacer::new().frame_width(10.0),
-                    Rectangle::new()
-                        .fill(Color::rgb(PRESET_COLORS[6].color[0], PRESET_COLORS[6].color[1], PRESET_COLORS[6].color[2]))
-                        .border(2.0, if is6 { highlight } else { border })
-                        .on_click(move || {
-                            r6.set(PRESET_COLORS[6].color[0] as f32);
-                            g6.set(PRESET_COLORS[6].color[1] as f32);
-                            b6.set(PRESET_COLORS[6].color[2] as f32);
-                        })
-                        .frame(85.0, 85.0),
+                    zstack! {
+                        Rectangle::new()
+                            .fill(Color::rgb(PRESET_COLORS[6].color[0], PRESET_COLORS[6].color[1], PRESET_COLORS[6].color[2]))
+                            .frame(80.0, 80.0),
+                        Rectangle::new()
+                            .fill(Color::CLEAR)
+                            .border(2.0, if is6 { highlight } else { Color::CLEAR })
+                            .frame(88.0, 88.0),
+                    }
+                    .alignment(Alignment::Center)
+                    .on_click(move || {
+                        r6.set(PRESET_COLORS[6].color[0] as f32);
+                        g6.set(PRESET_COLORS[6].color[1] as f32);
+                        b6.set(PRESET_COLORS[6].color[2] as f32);
+                    }),
                     Spacer::new().frame_width(10.0),
-                    Rectangle::new()
-                        .fill(Color::rgb(PRESET_COLORS[7].color[0], PRESET_COLORS[7].color[1], PRESET_COLORS[7].color[2]))
-                        .border(2.0, if is7 { highlight } else { border })
-                        .on_click(move || {
-                            r7.set(PRESET_COLORS[7].color[0] as f32);
-                            g7.set(PRESET_COLORS[7].color[1] as f32);
-                            b7.set(PRESET_COLORS[7].color[2] as f32);
-                        })
-                        .frame(85.0, 85.0),
+                    zstack! {
+                        Rectangle::new()
+                            .fill(Color::rgb(PRESET_COLORS[7].color[0], PRESET_COLORS[7].color[1], PRESET_COLORS[7].color[2]))
+                            .frame(80.0, 80.0),
+                        Rectangle::new()
+                            .fill(Color::CLEAR)
+                            .border(2.0, if is7 { highlight } else { Color::CLEAR })
+                            .frame(88.0, 88.0),
+                    }
+                    .alignment(Alignment::Center)
+                    .on_click(move || {
+                        r7.set(PRESET_COLORS[7].color[0] as f32);
+                        g7.set(PRESET_COLORS[7].color[1] as f32);
+                        b7.set(PRESET_COLORS[7].color[2] as f32);
+                    }),
                 },
             },
         }
