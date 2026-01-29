@@ -11,6 +11,12 @@ use crate::render::{RenderNode, RenderTree};
 use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::vec::Vec;
 
+#[derive(Clone, Copy, Debug)]
+struct ClipRegion {
+    rect: Rect,
+    radius: f32,
+}
+
 /// Compositor for rendering element trees to buffers
 pub struct Compositor {
     window_buffer: Buffer,
@@ -93,7 +99,7 @@ impl Compositor {
         }
 
         self.clear(Color::WHITE);
-        self.composite_element(root, Point::ZERO);
+        self.composite_element_with_clip(root, Point::ZERO, None);
     }
 
     /// Composite a RenderTree into the window buffer using dirty rectangles.
@@ -177,6 +183,19 @@ impl Compositor {
     }
 
     fn composite_element(&mut self, element: &dyn Element, origin: Point) {
+        self.composite_element_with_clip(element, origin, None);
+    }
+
+    fn composite_element_clipped(&mut self, element: &dyn Element, origin: Point, dirty_rects: &[Rect]) {
+        self.composite_element_with_clip_dirty(element, origin, dirty_rects, None);
+    }
+
+    fn composite_element_with_clip(
+        &mut self,
+        element: &dyn Element,
+        origin: Point,
+        clip: Option<ClipRegion>,
+    ) {
         let position = element.position();
         let absolute_origin = Point {
             x: origin.x + position.x,
@@ -191,45 +210,131 @@ impl Compositor {
         );
         self.last_bounds.insert(element.id(), absolute_bounds);
 
+        let mut next_clip = clip;
+        if let Some(render_object) = element.render_object() {
+            if let Some(clip_render) = render_object
+                .as_any()
+                .downcast_ref::<crate::views::modifiers::ClipRenderObject>()
+            {
+                let current = ClipRegion {
+                    rect: absolute_bounds,
+                    radius: clip_render.radius(),
+                };
+                next_clip = match next_clip {
+                    Some(existing) => self.intersect_clip(existing, current),
+                    None => Some(current),
+                };
+                if next_clip.is_none() {
+                    return;
+                }
+            }
+        }
+
         if let Some(buffer) = element.get_buffer() {
             let opacity = 1.0;
-            self.window_buffer.composite(
-                buffer,
-                absolute_origin.x as i32,
-                absolute_origin.y as i32,
-                opacity,
-            );
+            if let Some(active_clip) = next_clip {
+                let (x, y, w, h) = self.rect_to_i32(active_clip.rect);
+                self.window_buffer.composite_clipped_rounded(
+                    buffer,
+                    absolute_origin.x as i32,
+                    absolute_origin.y as i32,
+                    opacity,
+                    x,
+                    y,
+                    w,
+                    h,
+                    active_clip.radius,
+                );
+            } else {
+                self.window_buffer.composite(
+                    buffer,
+                    absolute_origin.x as i32,
+                    absolute_origin.y as i32,
+                    opacity,
+                );
+            }
         }
 
         for child in element.children() {
-            self.composite_element(child.as_ref(), absolute_origin);
+            self.composite_element_with_clip(child.as_ref(), absolute_origin, next_clip);
         }
     }
 
-    fn composite_element_clipped(&mut self, element: &dyn Element, origin: Point, dirty_rects: &[Rect]) {
+    fn composite_element_with_clip_dirty(
+        &mut self,
+        element: &dyn Element,
+        origin: Point,
+        dirty_rects: &[Rect],
+        clip: Option<ClipRegion>,
+    ) {
         let position = element.position();
         let absolute_origin = Point {
             x: origin.x + position.x,
             y: origin.y + position.y,
         };
         let bounds = element.bounds();
-        let bounds = Rect::from_xywh(
+        let absolute_bounds = Rect::from_xywh(
             absolute_origin.x,
             absolute_origin.y,
             bounds.size.width,
             bounds.size.height,
         );
-        self.last_bounds.insert(element.id(), bounds);
+        self.last_bounds.insert(element.id(), absolute_bounds);
 
-        if !self.overlaps_any(bounds, dirty_rects) {
+        if !self.overlaps_any(absolute_bounds, dirty_rects) {
             return;
+        }
+
+        let mut next_clip = clip;
+        if let Some(render_object) = element.render_object() {
+            if let Some(clip_render) = render_object
+                .as_any()
+                .downcast_ref::<crate::views::modifiers::ClipRenderObject>()
+            {
+                let current = ClipRegion {
+                    rect: absolute_bounds,
+                    radius: clip_render.radius(),
+                };
+                next_clip = match next_clip {
+                    Some(existing) => self.intersect_clip(existing, current),
+                    None => Some(current),
+                };
+                if next_clip.is_none() {
+                    return;
+                }
+            }
         }
 
         if let Some(buffer) = element.get_buffer() {
             let opacity = 1.0;
             for rect in dirty_rects.iter() {
-                if bounds.overlaps(rect) {
-                    let (x, y, w, h) = self.rect_to_i32(*rect);
+                if !absolute_bounds.overlaps(rect) {
+                    continue;
+                }
+                let mut clip_rect = *rect;
+                let mut clip_radius = 0.0;
+                if let Some(active_clip) = next_clip {
+                    if let Some(intersection) = self.intersect_rect(clip_rect, active_clip.rect) {
+                        clip_rect = intersection;
+                        clip_radius = active_clip.radius;
+                    } else {
+                        continue;
+                    }
+                }
+                let (x, y, w, h) = self.rect_to_i32(clip_rect);
+                if clip_radius > 0.0 {
+                    self.window_buffer.composite_clipped_rounded(
+                        buffer,
+                        absolute_origin.x as i32,
+                        absolute_origin.y as i32,
+                        opacity,
+                        x,
+                        y,
+                        w,
+                        h,
+                        clip_radius,
+                    );
+                } else {
                     self.window_buffer.composite_clipped(
                         buffer,
                         absolute_origin.x as i32,
@@ -245,7 +350,7 @@ impl Compositor {
         }
 
         for child in element.children() {
-            self.composite_element_clipped(child.as_ref(), absolute_origin, dirty_rects);
+            self.composite_element_with_clip_dirty(child.as_ref(), absolute_origin, dirty_rects, next_clip);
         }
     }
 
@@ -289,6 +394,29 @@ impl Compositor {
         for child in node.children() {
             self.composite_node_clipped(child, absolute_origin, dirty_rects);
         }
+    }
+
+    fn intersect_clip(&self, a: ClipRegion, b: ClipRegion) -> Option<ClipRegion> {
+        let rect = self.intersect_rect(a.rect, b.rect)?;
+        let radius = if a.radius <= 0.0 {
+            b.radius
+        } else if b.radius <= 0.0 {
+            a.radius
+        } else {
+            a.radius.min(b.radius)
+        };
+        Some(ClipRegion { rect, radius })
+    }
+
+    fn intersect_rect(&self, a: Rect, b: Rect) -> Option<Rect> {
+        let left = a.left().max(b.left());
+        let top = a.top().max(b.top());
+        let right = a.right().min(b.right());
+        let bottom = a.bottom().min(b.bottom());
+        if right <= left || bottom <= top {
+            return None;
+        }
+        Some(Rect::from_xywh(left, top, right - left, bottom - top))
     }
 
     fn collect_dirty_rects_element(

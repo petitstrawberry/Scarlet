@@ -1236,6 +1236,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "framebuffer"
+version = "0.15.0"
+dependencies = [
+ "scarlet_std",
+]
+
+[[package]]
 name = "futures"
 version = "0.3.31"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3426,9 +3433,13 @@ name = "scarlet-ui"
 version = "0.1.0"
 dependencies = [
  "ab_glyph",
+ "bitflags 2.10.0",
+ "framebuffer",
+ "libm",
  "scarlet-ui-macros",
  "scarlet_std",
  "sws-client",
+ "sws_protocol",
 ]
 
 [[package]]
@@ -3444,6 +3455,7 @@ dependencies = [
 name = "scarlet_std"
 version = "0.15.0"
 dependencies = [
+ "hashbrown 0.15.5",
  "spin",
  "talc",
 ]

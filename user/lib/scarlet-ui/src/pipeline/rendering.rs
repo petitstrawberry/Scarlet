@@ -90,14 +90,28 @@ impl RenderingPipeline {
     /// Extract window information from the element tree
     ///
     /// This searches the element tree for a Window View and extracts
-    /// the app_id, title, and size from it.
+    /// the app_id, title, size, and window_type from it.
     ///
-    /// Returns (app_id, title, size) or defaults if no Window is found.
-    fn extract_window_info(&self) -> (String, String, Size) {
+    /// Returns (app_id, title, size, window_type) or defaults if no Window is found.
+    fn extract_window_info(
+        &self,
+    ) -> (
+        String,
+        String,
+        Size,
+        u32,
+        Option<crate::menu_model::MenuBarModel>,
+        bool,
+        bool,
+    ) {
         // Default values
         let default_app_id = String::from("com.example.scarletui");
         let default_title = String::from("ScarletUI Application");
         let default_size = Size::new(800.0, 600.0);
+        let default_window_type = 0; // NORMAL
+        let default_menu_bar = None;
+        let default_focus_on_create = true;
+        let default_active_on_focus = true;
 
         // Try to find a Window View in the element tree
         if let Some(root) = self.element_tree.root() {
@@ -106,11 +120,30 @@ impl RenderingPipeline {
             }
         }
 
-        (default_app_id, default_title, default_size)
+        (
+            default_app_id,
+            default_title,
+            default_size,
+            default_window_type,
+            default_menu_bar,
+            default_focus_on_create,
+            default_active_on_focus,
+        )
     }
 
     /// Recursively search for a Window View in the element tree
-    fn find_window_view(&self, element: &dyn Element) -> Option<(String, String, Size)> {
+    fn find_window_view(
+        &self,
+        element: &dyn Element,
+    ) -> Option<(
+        String,
+        String,
+        Size,
+        u32,
+        Option<crate::menu_model::MenuBarModel>,
+        bool,
+        bool,
+    )> {
         // Check if this element provides window info
         if let Some(info) = element.get_window_info() {
             return Some(info);
@@ -131,25 +164,47 @@ impl RenderingPipeline {
     /// This should be called once after setting the root element
     /// to determine the window size and create the compositor.
     ///
-    /// Returns (app_id, title, size) extracted from the Window View
-    pub fn layout_initial(&mut self) -> (String, String, Size) {
+    /// Returns (app_id, title, size, window_type) extracted from the Window View
+    pub fn layout_initial(
+        &mut self,
+    ) -> (
+        String,
+        String,
+        Size,
+        u32,
+        Option<crate::menu_model::MenuBarModel>,
+        bool,
+        bool,
+    ) {
         // Extract window info first
-        let (app_id, title, preferred_size) = self.extract_window_info();
+        let (app_id, title, preferred_size, window_type, menu_bar, focus_on_create, active_on_focus) =
+            self.extract_window_info();
 
-        // Perform initial layout with loose constraints
-        let constraints = LayoutConstraints::loose(preferred_size.width, preferred_size.height);
-        let size = self.element_tree.layout(constraints);
+        // Use the preferred size from Window as the actual window size
+        let window_size = preferred_size;
 
-        // Create compositor with the calculated size
-        self.compositor = Some(Compositor::new(size));
-        self.window_size = size;
+        // Perform initial layout with tight constraints matching the window size
+        let constraints = LayoutConstraints::tight(window_size.width, window_size.height);
+        let _layout_size = self.element_tree.layout(constraints);
+
+        // Create compositor with the window size (not layout size)
+        self.compositor = Some(Compositor::new(window_size));
+        self.window_size = window_size;
 
         // Mark root as dirty for initial paint
         if let Some(root) = self.element_tree.root() {
             self.pipeline_owner.mark_needs_paint(root.id());
         }
 
-        (app_id, title, size)
+        (
+            app_id,
+            title,
+            window_size,
+            window_type,
+            menu_bar,
+            focus_on_create,
+            active_on_focus,
+        )
     }
 
     /// Set window size and resize compositor

@@ -344,6 +344,29 @@ fn deserialize_arguments_at(bytes: &[u8], offset: usize) -> Result<(Vec<Argument
                 current_offset += 4;
                 Argument::Int(val)
             }
+            2 => {
+                // UInt
+                if bytes.len() < current_offset + 4 {
+                    return Err("UInt argument missing");
+                }
+                let val = u32::from_le_bytes([
+                    bytes[current_offset],
+                    bytes[current_offset + 1],
+                    bytes[current_offset + 2],
+                    bytes[current_offset + 3],
+                ]);
+                current_offset += 4;
+                Argument::UInt(val)
+            }
+            3 => {
+                // Boolean
+                if bytes.len() < current_offset + 1 {
+                    return Err("Boolean argument missing");
+                }
+                let val = bytes[current_offset] != 0;
+                current_offset += 1;
+                Argument::Boolean(val)
+            }
             _ => return Err("Unknown argument type"),
         };
 

@@ -94,6 +94,42 @@ impl ElementRenderObject for PaddingRenderObject {
         self.size
     }
 
+    fn layout_with_children(
+        &mut self,
+        constraints: LayoutConstraints,
+        children: &mut [Box<dyn Element>],
+    ) -> Size {
+        let horizontal_padding = self.insets.left + self.insets.right;
+        let vertical_padding = self.insets.top + self.insets.bottom;
+
+        let child_min_width = (constraints.min_width - horizontal_padding).max(0.0);
+        let child_max_width = (constraints.max_width - horizontal_padding).max(0.0);
+        let child_min_height = (constraints.min_height - vertical_padding).max(0.0);
+        let child_max_height = (constraints.max_height - vertical_padding).max(0.0);
+
+        let child_constraints = LayoutConstraints {
+            min_width: child_min_width,
+            max_width: child_max_width,
+            min_height: child_min_height,
+            max_height: child_max_height,
+        };
+
+        let mut child_max = Size::ZERO;
+        for child in children {
+            let child_size = child.layout(child_constraints);
+            child_max.width = child_max.width.max(child_size.width);
+            child_max.height = child_max.height.max(child_size.height);
+            child.set_position(Point::new(self.insets.left, self.insets.top));
+        }
+
+        let desired = Size {
+            width: child_max.width + horizontal_padding,
+            height: child_max.height + vertical_padding,
+        };
+        self.size = constraints.constrain(desired);
+        self.size
+    }
+
     fn size(&self) -> Size {
         self.size
     }

@@ -39,6 +39,21 @@ pub enum Event {
         title: std::string::String,
         menu_titles: std::string::String,
     },
+    /// Active application changed (normal window gained focus)
+    /// This is separate from FocusChanged because TaskBar/Desktop/etc
+    /// can receive focus without changing the active application
+    ActiveAppChanged {
+        window_id: u32,
+        app_id: std::string::String,
+        app_name: std::string::String,
+        title: std::string::String,
+        menu_titles: std::string::String,
+    },
+    /// Menu item activation for a window
+    MenuItemActivated {
+        window_id: u32,
+        menu_item_id: std::string::String,
+    },
     /// Error from server
     Error { code: u32 },
 }

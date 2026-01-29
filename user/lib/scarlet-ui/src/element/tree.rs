@@ -154,6 +154,9 @@ impl ElementTree {
 
     /// Dump the element tree structure for debugging
     pub fn dump(&self) {
+        if !crate::debug::is_enabled() {
+            return;
+        }
         scarlet_std::println!("[ElementTree] Dumping element tree:");
         if let Some(root) = self.root.as_deref() {
             self.dump_element(root, 0);

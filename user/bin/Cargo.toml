@@ -66,10 +66,6 @@ name = "socket_pair"
 path = "src/socket_pair.rs"
 
 [[bin]]
-name = "window_server"
-path = "src/window_server.rs"
-
-[[bin]]
 name = "sws"
 path = "src/sws/main.rs"
 
@@ -94,9 +90,9 @@ path = "src/stemd/main.rs"
 name = "sbusd"
 path = "src/sbusd/main.rs"
 
-# [[bin]]
-# name = "slint_demo"
-# path = "src/slint_demo.rs"
+[[bin]]
+name = "slint_demo"
+path = "src/slint_demo.rs"
 
 [[bin]]
 name = "scarlet_desktop"
@@ -108,7 +104,7 @@ path = "src/scarlet_desktop/background/main.rs"
 
 [[bin]]
 name = "scarlet_desktop_taskbar"
-path = "src/scarlet_desktop/taskbar/main.rs"
+path = "src/scarlet_desktop/taskbar/scarlet_ui.rs"
 
 [[bin]]
 name = "ui-demo"
@@ -118,6 +114,10 @@ path = "src/ui_demo.rs"
 name = "wayland_bridge"
 path = "src/wayland_bridge/main.rs"
 
+[[bin]]
+name = "settings"
+path = "src/settings.rs"
+
 [dependencies]
 scarlet_std = { path = "../lib/std", features = ["alloc_debug"] }
 framebuffer = { path = "../lib/framebuffer" }
@@ -125,10 +125,12 @@ sws_protocol = { path = "../lib/sws_protocol" }
 sws-client = { path = "../lib/sws-client" }
 scarlet-ui = { path = "../lib/scarlet-ui" }
 scarlet-ui-macros = { path = "../lib/scarlet-ui-macros" }
-# slint-scarlet = { path = "../lib/slint-scarlet" }
+slint-scarlet = { path = "../lib/slint-scarlet" }
 scarlet-desktop-config = { path = "../lib/scarlet-desktop-config" }
 sbus = { path = "../lib/sbus" }
 sbus-client = { path = "../lib/sbus-client" }
+serde = { version = "1.0", default-features = false, features = ["alloc", "derive"] }
+serde-json-core = { package = "serde-json-core", version = "0.6", default-features = false }
 slint = { version = "1.14", default-features = false, features = [
     "unsafe-single-threaded",
     "renderer-software",

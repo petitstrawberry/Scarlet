@@ -216,6 +216,18 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
         UpdateResult::NoChange
     }
 
+    fn mount(&mut self) {
+        for child in &mut self.children {
+            child.mount();
+        }
+    }
+
+    fn unmount(&mut self) {
+        for child in &mut self.children {
+            child.unmount();
+        }
+    }
+
     fn flex_factor(&self) -> u32 {
         // Check if this is a Spacer (which should expand to fill available space)
         let type_name = core::any::type_name_of_val(&self.render_object);
@@ -224,6 +236,38 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
         } else {
             0
         }
+    }
+
+    fn fill_width(&self) -> bool {
+        if let Some(frame) = self
+            .render_object
+            .as_any()
+            .downcast_ref::<crate::views::FrameRenderObject>()
+        {
+            return matches!(frame.width_value(), Some(w) if !w.is_finite());
+        }
+
+        if self.children.len() == 1 {
+            return self.children[0].fill_width();
+        }
+
+        false
+    }
+
+    fn fill_height(&self) -> bool {
+        if let Some(frame) = self
+            .render_object
+            .as_any()
+            .downcast_ref::<crate::views::FrameRenderObject>()
+        {
+            return matches!(frame.height_value(), Some(h) if !h.is_finite());
+        }
+
+        if self.children.len() == 1 {
+            return self.children[0].fill_height();
+        }
+
+        false
     }
 
     fn layout(&mut self, constraints: LayoutConstraints) -> Size {
@@ -311,13 +355,36 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
     fn handle_event(&mut self, _event: &crate::event::Event, _phase: crate::event::Phase) -> bool {
         use crate::event::{Event, MouseButton, MouseEvent, Phase};
 
-        if _phase != Phase::Target {
-            return false;
-        }
-
         let Event::Mouse(mouse_event) = _event else {
             return false;
         };
+
+        let is_target_phase = _phase == Phase::Target;
+        let is_bubble_phase = _phase == Phase::Bubble;
+
+        if (is_target_phase || is_bubble_phase)
+            && self
+                .render_object
+                .as_any_mut()
+                .downcast_mut::<crate::views::modifiers::OnClickRenderObject>()
+                .is_some()
+        {
+            if let MouseEvent::ButtonReleased { button: MouseButton::Left, .. } = mouse_event {
+                if let Some(render_object) = self
+                    .render_object
+                    .as_any_mut()
+                    .downcast_mut::<crate::views::modifiers::OnClickRenderObject>()
+                {
+                    render_object.invoke_on_click();
+                    crate::pipeline::mark_element_needs_paint(self.id);
+                    return true;
+                }
+            }
+        }
+
+        if !is_target_phase {
+            return false;
+        }
 
         if let Some(button) = self.view.as_any().downcast_ref::<crate::views::Button>() {
             if let Some(render_object) = self
@@ -362,6 +429,88 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
             }
         }
 
+        if let Some(menu_item) = self.view.as_any().downcast_ref::<crate::views::MenuItem>() {
+            if let Some(render_object) = self
+                .render_object
+                .as_any_mut()
+                .downcast_mut::<crate::views::menu::MenuItemRenderObject>()
+            {
+                match mouse_event {
+                    MouseEvent::Entered { .. } => {
+                        render_object.set_hovered(true);
+                        menu_item.invoke_on_hover();
+                        crate::pipeline::mark_element_needs_paint(self.id);
+                        return true;
+                    }
+                    MouseEvent::Moved { .. } => {
+                        if !render_object.is_hovered() {
+                            render_object.set_hovered(true);
+                        }
+                        menu_item.invoke_on_hover();
+                        crate::pipeline::mark_element_needs_paint(self.id);
+                        return true;
+                    }
+                    MouseEvent::Exited { .. } => {
+                        render_object.set_hovered(false);
+                        render_object.set_pressed(false);
+                        crate::pipeline::mark_element_needs_paint(self.id);
+                        return true;
+                    }
+                    MouseEvent::ButtonPressed { button: MouseButton::Left, .. } => {
+                        render_object.set_pressed(true);
+                        crate::pipeline::mark_element_needs_paint(self.id);
+                        return true;
+                    }
+                    MouseEvent::ButtonReleased { button: MouseButton::Left, .. } => {
+                        if render_object.is_pressed() {
+                            menu_item.invoke_on_click();
+                        }
+                        render_object.set_pressed(false);
+                        crate::pipeline::mark_element_needs_paint(self.id);
+                        return true;
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        if let Some(_menu) = self.view.as_any().downcast_ref::<crate::views::Menu>() {
+            if let Some(render_object) = self
+                .render_object
+                .as_any_mut()
+                .downcast_mut::<crate::views::menu::MenuRenderObject>()
+            {
+                match mouse_event {
+                    MouseEvent::Entered { x, y } | MouseEvent::Moved { x, y } => {
+                        let local_x = *x as f32;
+                        let local_y = *y as f32;
+                        let hovered = render_object.hit_test(local_x, local_y);
+                        if hovered != render_object.hovered() {
+                            render_object.set_hovered(hovered);
+                            crate::pipeline::mark_element_needs_paint(self.id);
+                        }
+                        return true;
+                    }
+                    MouseEvent::Exited { .. } => {
+                        if render_object.hovered().is_some() {
+                            render_object.set_hovered(None);
+                            crate::pipeline::mark_element_needs_paint(self.id);
+                        }
+                        return true;
+                    }
+                    MouseEvent::ButtonReleased { button: MouseButton::Left, x, y } => {
+                        let local_x = *x as f32;
+                        let local_y = *y as f32;
+                        if let Some(index) = render_object.hit_test(local_x, local_y) {
+                            render_object.invoke_item(index);
+                            return true;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+
         if let Some(toggle) = self.view.as_any().downcast_ref::<crate::views::Toggle>() {
             if let MouseEvent::ButtonReleased { button: MouseButton::Left, .. } = mouse_event {
                 if crate::debug::is_enabled() {
@@ -399,11 +548,10 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
                     render_object: &mut crate::views::SliderRenderObject,
                     slider: &crate::views::Slider,
                     id: ElementId,
-                    position: Point,
                     x: i32,
                     commit: bool,
                 ) -> bool {
-                    let local_x = (x as f32) - position.x;
+                    let local_x = x as f32;
                     let new_value = render_object.value_from_local_x(local_x);
                     let state_value = slider.get_value().get();
                     if crate::debug::is_enabled() {
@@ -433,18 +581,18 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
                         if !dragging_state.get() {
                             dragging_state.set(true);
                         }
-                        update_slider_value(render_object, slider, self.id, self.position, *x, true);
+                        update_slider_value(render_object, slider, self.id, *x, true);
                         return true;
                     }
                     MouseEvent::Moved { x, .. } => {
                         if render_object.is_dragging() {
-                            update_slider_value(render_object, slider, self.id, self.position, *x, true);
+                            update_slider_value(render_object, slider, self.id, *x, true);
                             return true;
                         }
                     }
                     MouseEvent::ButtonReleased { button: MouseButton::Left, x, .. } => {
                         if render_object.is_dragging() {
-                            update_slider_value(render_object, slider, self.id, self.position, *x, true);
+                            update_slider_value(render_object, slider, self.id, *x, true);
                             render_object.set_dragging(false);
                             if dragging_state.get() {
                                 dragging_state.set(false);
@@ -455,6 +603,92 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
                     MouseEvent::Exited { .. } => {}
                     _ => {}
                 }
+            }
+        }
+
+        // Handle CanvasView events
+        if let Some(_canvas) = self.view.as_any().downcast_ref::<crate::views::CanvasView>() {
+            if let Some(render_object) = self
+                .render_object
+                .as_any()
+                .downcast_ref::<crate::views::CanvasRenderObject>()
+            {
+                if let Some(handler) = render_object.event_handler() {
+                    if let Ok(mut handler) = handler.try_borrow_mut() {
+                        let handled = handler(_event);
+                        if handled {
+                            crate::pipeline::mark_element_needs_paint(self.id);
+                        }
+                        return handled;
+                    }
+                }
+            }
+        }
+
+        // Handle NavigationView events - check render object directly
+        if let Some(render_object) = self
+            .render_object
+            .as_any_mut()
+            .downcast_mut::<crate::views::navigation::NavigationViewRenderObject>()
+        {
+            match mouse_event {
+                MouseEvent::Entered { x, y } | MouseEvent::Moved { x, y } => {
+                    // Coordinates are already localized by EventDispatcher
+                    let local_x = *x as f32;
+                    let local_y = *y as f32;
+
+                    // Check if point is within sidebar
+                    if local_x >= 0.0 && local_x <= render_object.sidebar_width() {
+                        // Calculate which item is being hovered
+                        if let Some(index) = render_object.index_at_y(local_y) {
+                            if index < render_object.link_count() && render_object.hovered_index() != Some(index) {
+                                render_object.set_hovered_index(Some(index));
+                                crate::pipeline::mark_element_needs_paint(self.id);
+                            }
+                        } else {
+                            if render_object.hovered_index().is_some() {
+                                render_object.set_hovered_index(None);
+                                crate::pipeline::mark_element_needs_paint(self.id);
+                            }
+                        }
+                    } else {
+                        if render_object.hovered_index().is_some() {
+                            render_object.set_hovered_index(None);
+                            crate::pipeline::mark_element_needs_paint(self.id);
+                        }
+                    }
+                    return true;
+                }
+                MouseEvent::Exited { .. } => {
+                    if render_object.hovered_index().is_some() {
+                        render_object.set_hovered_index(None);
+                        crate::pipeline::mark_element_needs_paint(self.id);
+                    }
+                    return true;
+                }
+                MouseEvent::ButtonReleased { button: MouseButton::Left, x, y } => {
+                    // Coordinates are already localized by EventDispatcher
+                    let local_x = *x as f32;
+                    let local_y = *y as f32;
+
+                    // Check if click is within sidebar
+                    if local_x >= 0.0 && local_x <= render_object.sidebar_width() {
+                        if let Some(index) = render_object.index_at_y(local_y) {
+                            if index < render_object.link_count() {
+                                // Update selected index
+                                let selected_state = render_object.selected_index();
+                                let current = selected_state.get();
+
+                                if current != index {
+                                    selected_state.set(index);
+                                    crate::pipeline::mark_element_dirty(self.id);
+                                }
+                            }
+                        }
+                    }
+                    return true;
+                }
+                _ => {}
             }
         }
 

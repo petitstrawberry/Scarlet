@@ -93,6 +93,9 @@ impl Color {
     /// Transparent color
     pub const TRANSPARENT: Self = Self::rgba_f32(0.0, 0.0, 0.0, 0.0);
 
+    /// Clear/transparent color (alias for TRANSPARENT)
+    pub const CLEAR: Self = Self::TRANSPARENT;
+
     /// Convert color to 32-bit BGRA format (for framebuffers)
     pub fn to_bgra(&self) -> u32 {
         let r = (self.r * 255.0).clamp(0.0, 255.0) as u8;

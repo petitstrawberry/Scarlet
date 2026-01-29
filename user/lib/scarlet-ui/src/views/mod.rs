@@ -12,10 +12,14 @@ mod divider;
 mod toggle;
 mod slider;
 mod progress;
+mod canvas;
 pub mod modifiers;
 pub mod containers;
+pub mod menu;
+pub mod navigation;
 
-pub use window::{Window, WindowRenderObject, WindowRenderElement};
+pub use window::{Window, WindowRenderObject, WindowRenderElement, WindowInfo};
+pub use window::window_type;
 pub use text::{Text, TextRenderObject};
 pub use button::{Button, ButtonRenderObject, ButtonCallback};
 pub use rectangle::{Rectangle, RectangleRenderObject};
@@ -25,6 +29,9 @@ pub use divider::{Divider, DividerRenderObject, DividerOrientation};
 pub use toggle::{Toggle, ToggleRenderObject};
 pub use slider::{Slider, SliderRenderObject};
 pub use progress::{ProgressView, ProgressViewRenderObject};
+pub use canvas::{CanvasView, CanvasRenderObject, CanvasRenderCallback, CanvasEventHandler};
+pub use menu::{MenuItem, MenuBar, Menu, MenuItemContent, MenuAction};
+pub use navigation::{NavigationView, NavigationLink};
 
 // Re-export modifiers for convenience
 pub use modifiers::{

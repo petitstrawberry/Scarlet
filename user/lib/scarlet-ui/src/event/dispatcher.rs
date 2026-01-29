@@ -137,6 +137,9 @@ impl EventDispatcher {
                 // Raw input events are typically handled by higher layers
                 false
             }
+            Event::MenuItemActivated { .. } => {
+                false
+            }
             Event::Custom { .. } => {
                 // Custom events can be dispatched similarly
                 false
@@ -199,6 +202,7 @@ impl EventDispatcher {
         }
 
         if let Some(path) = path {
+            let path_origins = Self::path_origins(element_tree, &path);
             let target_id = *path.last().unwrap();
             if crate::debug::is_enabled() {
                 scarlet_std::println!(
@@ -244,17 +248,26 @@ impl EventDispatcher {
                         );
                     }
                     if let Some(old_id) = self.hovered_id {
+                        let old_origin = Self::path_origin_from_ids(element_tree, &self.hovered_path)
+                            .unwrap_or(Point::ZERO);
                         if let Some(old_element) = element_tree.find_element_mut(old_id) {
                             let _ = old_element.handle_event(
-                                &Event::Mouse(crate::event::MouseEvent::Exited { x: *x, y: *y }),
+                                &Event::Mouse(Self::localize_mouse_event(
+                                    &crate::event::MouseEvent::Exited { x: *x, y: *y },
+                                    old_origin,
+                                )),
                                 Phase::Target,
                             );
                         }
                     }
 
                     if let Some(new_element) = element_tree.find_element_mut(target_id) {
+                        let new_origin = *path_origins.last().unwrap_or(&Point::ZERO);
                         let _ = new_element.handle_event(
-                            &Event::Mouse(crate::event::MouseEvent::Entered { x: *x, y: *y }),
+                            &Event::Mouse(Self::localize_mouse_event(
+                                &crate::event::MouseEvent::Entered { x: *x, y: *y },
+                                new_origin,
+                            )),
                             Phase::Target,
                         );
                     }
@@ -272,13 +285,16 @@ impl EventDispatcher {
             }
 
             // 2. Three-phase dispatch
-            let event_wrapper = Event::Mouse(event.clone());
             let mut handled = false;
 
             // 2.1 Capture Phase: root → target (excluding target)
-            for id in path.iter().take(path.len().saturating_sub(1)) {
+            for (index, id) in path.iter().take(path.len().saturating_sub(1)).enumerate() {
                 if let Some(element) = element_tree.find_element_mut(*id) {
-                    if element.handle_event(&event_wrapper, Phase::Capture) {
+                    let localized = Event::Mouse(Self::localize_mouse_event(
+                        event,
+                        path_origins[index],
+                    ));
+                    if element.handle_event(&localized, Phase::Capture) {
                         if let Some(window_event) = element.take_window_action() {
                             self.emitted_events.push(Event::Window(window_event));
                         }
@@ -291,7 +307,11 @@ impl EventDispatcher {
             // 2.2 Target Phase: at the target
             if !handled {
                 if let Some(target) = element_tree.find_element_mut(target_id) {
-                    handled = target.handle_event(&event_wrapper, Phase::Target);
+                    let localized = Event::Mouse(Self::localize_mouse_event(
+                        event,
+                        *path_origins.last().unwrap_or(&Point::ZERO),
+                    ));
+                    handled = target.handle_event(&localized, Phase::Target);
                     if handled {
                         if let Some(window_event) = target.take_window_action() {
                             self.emitted_events.push(Event::Window(window_event));
@@ -302,9 +322,14 @@ impl EventDispatcher {
 
             // 2.3 Bubble Phase: target's parent → root
             if !handled {
-                for id in path.iter().rev().skip(1) {
+                for (index, id) in path.iter().rev().skip(1).enumerate() {
                     if let Some(element) = element_tree.find_element_mut(*id) {
-                        if element.handle_event(&event_wrapper, Phase::Bubble) {
+                        let origin_index = path.len().saturating_sub(2).saturating_sub(index);
+                        let localized = Event::Mouse(Self::localize_mouse_event(
+                            event,
+                            path_origins[origin_index],
+                        ));
+                        if element.handle_event(&localized, Phase::Bubble) {
                             if let Some(window_event) = element.take_window_action() {
                                 self.emitted_events.push(Event::Window(window_event));
                             }
@@ -328,9 +353,14 @@ impl EventDispatcher {
         } else {
             if let crate::event::MouseEvent::Moved { x, y } = event {
                 if let Some(old_id) = self.hovered_id {
+                    let old_origin = Self::path_origin_from_ids(element_tree, &self.hovered_path)
+                        .unwrap_or(Point::ZERO);
                     if let Some(old_element) = element_tree.find_element_mut(old_id) {
                         let _ = old_element.handle_event(
-                            &Event::Mouse(crate::event::MouseEvent::Exited { x: *x, y: *y }),
+                            &Event::Mouse(Self::localize_mouse_event(
+                                &crate::event::MouseEvent::Exited { x: *x, y: *y },
+                                old_origin,
+                            )),
                             Phase::Target,
                         );
                     }
@@ -541,6 +571,68 @@ impl EventDispatcher {
             x: absolute_origin.x + bounds.width / 2.0,
             y: absolute_origin.y + bounds.height / 2.0,
         });
+    }
+
+    fn path_origins(element_tree: &mut ElementTree, path: &[ElementId]) -> Vec<Point> {
+        let mut origins = Vec::with_capacity(path.len());
+        let mut acc = Point::ZERO;
+        for id in path {
+            if let Some(element) = element_tree.find_element_mut(*id) {
+                let pos = element.position();
+                acc.x += pos.x;
+                acc.y += pos.y;
+            }
+            origins.push(acc);
+        }
+        origins
+    }
+
+    fn path_origin_from_ids(element_tree: &mut ElementTree, path: &[ElementId]) -> Option<Point> {
+        if path.is_empty() {
+            return None;
+        }
+        let mut acc = Point::ZERO;
+        for id in path {
+            let element = element_tree.find_element_mut(*id)?;
+            let pos = element.position();
+            acc.x += pos.x;
+            acc.y += pos.y;
+        }
+        Some(acc)
+    }
+
+    fn localize_mouse_event(event: &crate::event::MouseEvent, origin: Point) -> crate::event::MouseEvent {
+        match *event {
+            crate::event::MouseEvent::Moved { x, y } => crate::event::MouseEvent::Moved {
+                x: x - origin.x as i32,
+                y: y - origin.y as i32,
+            },
+            crate::event::MouseEvent::Entered { x, y } => crate::event::MouseEvent::Entered {
+                x: x - origin.x as i32,
+                y: y - origin.y as i32,
+            },
+            crate::event::MouseEvent::Exited { x, y } => crate::event::MouseEvent::Exited {
+                x: x - origin.x as i32,
+                y: y - origin.y as i32,
+            },
+            crate::event::MouseEvent::ButtonPressed { button, x, y } => {
+                crate::event::MouseEvent::ButtonPressed {
+                    button,
+                    x: x - origin.x as i32,
+                    y: y - origin.y as i32,
+                }
+            }
+            crate::event::MouseEvent::ButtonReleased { button, x, y } => {
+                crate::event::MouseEvent::ButtonReleased {
+                    button,
+                    x: x - origin.x as i32,
+                    y: y - origin.y as i32,
+                }
+            }
+            crate::event::MouseEvent::Wheel { delta_x, delta_y } => {
+                crate::event::MouseEvent::Wheel { delta_x, delta_y }
+            }
+        }
     }
 }
 

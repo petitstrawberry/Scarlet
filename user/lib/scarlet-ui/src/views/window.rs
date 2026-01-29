@@ -16,7 +16,50 @@ use crate::element::{Element, ElementId, ElementRenderObject, LayoutConstraints,
 use crate::geometry::{Size, Rect, Point};
 use crate::color::Color;
 use crate::buffer::Buffer;
+use crate::menu_model::MenuBarModel;
 use crate::state::Listenable;
+
+/// Window types (matching sws_protocol::window_types)
+pub mod window_type {
+    pub const NORMAL: u32 = 0;
+    pub const ALWAYS_ON_TOP: u32 = 1;
+    pub const TASKBAR: u32 = 2;
+    pub const DESKTOP: u32 = 3;
+}
+
+/// Window information
+#[derive(Clone)]
+pub struct WindowInfo {
+    pub app_id: String,
+    pub title: String,
+    pub size: Size,
+    pub window_type: u32,
+    pub menu_bar: Option<MenuBarModel>,
+    pub focus_on_create: bool,
+    pub active_on_focus: bool,
+}
+
+impl WindowInfo {
+    pub fn new(
+        app_id: String,
+        title: String,
+        size: Size,
+        window_type: u32,
+        menu_bar: Option<MenuBarModel>,
+        focus_on_create: bool,
+        active_on_focus: bool,
+    ) -> Self {
+        Self {
+            app_id,
+            title,
+            size,
+            window_type,
+            menu_bar,
+            focus_on_create,
+            active_on_focus,
+        }
+    }
+}
 
 /// Constants for window decorations (matching Scarlet_old design)
 const TITLEBAR_HEIGHT: u32 = 32;
@@ -37,13 +80,21 @@ pub struct Window<V: View> {
     min_size: Option<Size>,
     max_size: Option<Size>,
     resizable: bool,
+    movable: bool,
     decorated: bool,
+    background_color: Option<Color>,
+    window_type: u32,
+    menu_bar: Option<MenuBarModel>,
+    focus_on_create: bool,
+    active_on_focus: bool,
     content: V,
 }
 
 pub trait WindowViewInfo {
-    fn window_info(&self) -> (String, String, Size);
+    fn window_info(&self) -> WindowInfo;
     fn window_size_limits(&self) -> WindowSizeLimits;
+    fn is_resizable(&self) -> bool { false }
+    fn is_movable(&self) -> bool { true }
 }
 
 impl<V: View> Window<V> {
@@ -57,7 +108,13 @@ impl<V: View> Window<V> {
             min_size: None,
             max_size: None,
             resizable: true,
+            movable: true,
             decorated: true,
+            background_color: Some(Color::WHITE),
+            window_type: window_type::NORMAL,
+            menu_bar: None,
+            focus_on_create: true,
+            active_on_focus: true,
             content,
         }
     }
@@ -99,9 +156,45 @@ impl<V: View> Window<V> {
         self
     }
 
+    /// Set whether the window is movable
+    pub fn movable(mut self, movable: bool) -> Self {
+        self.movable = movable;
+        self
+    }
+
     /// Set whether the window has decorations (title bar, borders)
     pub fn decorated(mut self, decorated: bool) -> Self {
         self.decorated = decorated;
+        self
+    }
+
+    /// Set the background color (None for transparent)
+    pub fn background_color(mut self, color: Option<Color>) -> Self {
+        self.background_color = color;
+        self
+    }
+
+    /// Set the window type (NORMAL, TASKBAR, ALWAYS_ON_TOP)
+    pub fn window_type(mut self, window_type: u32) -> Self {
+        self.window_type = window_type;
+        self
+    }
+
+    /// Set whether the window should request focus when created
+    pub fn focus_on_create(mut self, focus_on_create: bool) -> Self {
+        self.focus_on_create = focus_on_create;
+        self
+    }
+
+    /// Set whether focusing this window should change the active app
+    pub fn active_on_focus(mut self, active_on_focus: bool) -> Self {
+        self.active_on_focus = active_on_focus;
+        self
+    }
+
+    /// Set menu bar model for the window
+    pub fn menu_bar(mut self, menu_bar: MenuBarModel) -> Self {
+        self.menu_bar = Some(menu_bar);
         self
     }
 
@@ -151,22 +244,45 @@ impl<V: View + Clone> Clone for Window<V> {
             min_size: self.min_size,
             max_size: self.max_size,
             resizable: self.resizable,
+            movable: self.movable,
             decorated: self.decorated,
+            background_color: self.background_color,
+            window_type: self.window_type,
+            menu_bar: self.menu_bar.clone(),
+            focus_on_create: self.focus_on_create,
+            active_on_focus: self.active_on_focus,
             content: self.content.clone(),
         }
     }
 }
 
 impl<V: View + Clone> WindowViewInfo for Window<V> {
-    fn window_info(&self) -> (String, String, Size) {
-        (self.app_id.clone(), self.title.clone(), self.size)
+    fn window_info(&self) -> WindowInfo {
+        WindowInfo::new(
+            self.app_id.clone(),
+            self.title.clone(),
+            self.size,
+            self.window_type,
+            self.menu_bar.clone(),
+            self.focus_on_create,
+            self.active_on_focus,
+        )
     }
 
     fn window_size_limits(&self) -> WindowSizeLimits {
         WindowSizeLimits {
             min: self.min_size,
             max: self.max_size,
+            resizable: self.resizable,
         }
+    }
+
+    fn is_resizable(&self) -> bool {
+        self.resizable
+    }
+
+    fn is_movable(&self) -> bool {
+        self.movable
     }
 }
 
@@ -177,6 +293,7 @@ impl<V: View + Clone + 'static> View for Window<V> {
             self.title.clone(),
             self.size,
             self.decorated,
+            self.background_color,
         );
 
         // Create child element from content
@@ -300,6 +417,20 @@ impl<C: View + Clone + WindowViewInfo> Element for WindowRenderElement<C> {
 
     fn rebuild(&mut self) -> UpdateResult {
         UpdateResult::NoChange
+    }
+
+    fn mount(&mut self) {
+        // Mount children
+        for child in &mut self.children {
+            child.mount();
+        }
+    }
+
+    fn unmount(&mut self) {
+        // Unmount children
+        for child in &mut self.children {
+            child.unmount();
+        }
     }
 
     fn layout(&mut self, constraints: LayoutConstraints) -> Size {
@@ -552,6 +683,34 @@ impl<C: View + Clone + WindowViewInfo> Element for WindowRenderElement<C> {
     fn take_window_action(&mut self) -> Option<crate::event::WindowEvent> {
         core::mem::take(&mut self.pending_window_action)
     }
+
+    fn get_window_info(
+        &self,
+    ) -> Option<(
+        alloc::string::String,
+        alloc::string::String,
+        Size,
+        u32,
+        Option<MenuBarModel>,
+        bool,
+        bool,
+    )>
+    {
+        let info = self.view.window_info();
+        Some((
+            info.app_id,
+            info.title,
+            info.size,
+            info.window_type,
+            info.menu_bar,
+            info.focus_on_create,
+            info.active_on_focus,
+        ))
+    }
+
+    fn get_window_size_limits(&self) -> Option<WindowSizeLimits> {
+        Some(self.view.window_size_limits())
+    }
 }
 
 /// WindowRenderObject - renders window with titlebar and background
@@ -563,6 +722,7 @@ pub struct WindowRenderObject {
     title: String,
     size: Size,
     decorated: bool,
+    background_color: Option<Color>,
     focused: bool,
     buffer: Option<Buffer>,
     // Button hover states (0=none, 1=hover, 2=pressed)
@@ -572,11 +732,12 @@ pub struct WindowRenderObject {
 }
 
 impl WindowRenderObject {
-    pub fn new(title: String, size: Size, decorated: bool) -> Self {
+    pub fn new(title: String, size: Size, decorated: bool, background_color: Option<Color>) -> Self {
         Self {
             title,
             size,
             decorated,
+            background_color,
             focused: true,
             buffer: None,
             close_button_state: 0,
@@ -702,8 +863,10 @@ impl WindowRenderObject {
             use crate::graphics::Canvas;
             let mut canvas = Canvas::new(buffer.data_mut(), w, h);
 
-            // Fill entire background with white
-            canvas.fill_rect(0, 0, w, h, Color::WHITE);
+            // Fill background with specified color (or skip if None for transparent)
+            if let Some(bg_color) = self.background_color {
+                canvas.fill_rect(0, 0, w, h, bg_color);
+            }
 
             // Draw titlebar if decorated
             if decorated {
@@ -832,6 +995,10 @@ impl WindowRenderObject {
         let nsize: i32 = 12;
         let nhalf = nsize / 2;
         canvas.draw_line(nx as i32 - nhalf, ny as i32, nx as i32 + nhalf, ny as i32, icon_color);
+
+        // Draw border at bottom of titlebar (matching slint-scarlet)
+        let border_color = Color::rgb(180u8, 180u8, 185u8);
+        canvas.draw_line(0, TITLEBAR_HEIGHT as i32 - 1, width as i32 - 1, TITLEBAR_HEIGHT as i32 - 1, border_color);
     }
 
     /// Static helper for button rect calculation

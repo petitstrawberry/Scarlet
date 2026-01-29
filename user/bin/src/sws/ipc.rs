@@ -370,6 +370,16 @@ pub fn get_app_session_info(window_id: u32) -> (String, String) {
     }
 }
 
+pub fn set_app_session_menu_titles(window_id: u32, menu_titles: String) -> bool {
+    let mut sessions = APP_SESSIONS.lock();
+    if let Some(session) = sessions.get_mut(&window_id) {
+        session.menu_titles = menu_titles;
+        true
+    } else {
+        false
+    }
+}
+
 fn pop_pending_server_frames(window_id: u32) -> Vec<PendingServerFrame> {
     let mut pending = PENDING_SERVER_FRAMES.lock();
     if let Some(frames) = pending.get_mut(&window_id) {
@@ -539,6 +549,16 @@ fn accept_thread_main(server_socket: Socket) {
                     client_socket.as_raw()
                 );
 
+                // Register client for broadcast messages
+                {
+                    let mut pending = PENDING_CLIENT_RESPONSES.lock();
+                    pending.entry(client_id).or_insert_with(Vec::new);
+                    println!(
+                        "[AcceptThread] Registered client {} for broadcast messages",
+                        client_id
+                    );
+                }
+
                 // Spawn client handler thread
                 thread::spawn(move || {
                     client_thread_main(client_id, client_socket);
@@ -588,6 +608,7 @@ fn client_thread_main(client_id: usize, mut socket: Socket) {
     let mut next_window_id: u32 = 100 + (client_id as u32 * 1000);
     let mut managed_windows: Vec<u32> = Vec::new();
     let mut window_size_limits: BTreeMap<u32, WindowSizeLimits> = BTreeMap::new();
+    let mut window_resizable: BTreeMap<u32, bool> = BTreeMap::new();
 
     // Debug: loop counter for periodic logging
     let mut loop_count: u64 = 0;
@@ -735,6 +756,11 @@ fn client_thread_main(client_id: usize, mut socket: Socket) {
                 width,
                 height,
                 window_type,
+                resizable,
+                focus_on_create,
+                active_on_focus,
+                initial_x,
+                initial_y,
             }) => {
                 // Convert &[u8] to String
                 let app_id_str = String::from_utf8_lossy(app_id).into_owned();
@@ -839,6 +865,8 @@ fn client_thread_main(client_id: usize, mut socket: Socket) {
                             }
                         };
 
+                        window_resizable.insert(window_id, resizable);
+
                         // Reply to client with window created message
                         send_window_created(&mut socket, window_id, buffer_size);
 
@@ -870,6 +898,11 @@ fn client_thread_main(client_id: usize, mut socket: Socket) {
                             width,
                             height,
                             window_type,
+                            resizable,
+                            focus_on_create,
+                            active_on_focus,
+                            initial_x,
+                            initial_y,
                             shm: Some(shm),
                             shm_mapped_addr,
                             shm_size: buffer_size as usize,
@@ -892,6 +925,7 @@ fn client_thread_main(client_id: usize, mut socket: Socket) {
                 unregister_window(window_id);
 
                 window_size_limits.remove(&window_id);
+                window_resizable.remove(&window_id);
 
                 // Remove AppSession
                 {
@@ -976,6 +1010,14 @@ fn client_thread_main(client_id: usize, mut socket: Socket) {
                 width,
                 height,
             }) => {
+                if !window_resizable.get(&window_id).copied().unwrap_or(true) {
+                    println!(
+                        "[ClientThread {}] ResizeWindow ignored: window_id={} {}x{} (resizable=false)",
+                        client_id, window_id, width, height
+                    );
+                    continue;
+                }
+
                 let (width, height) = match window_size_limits.get(&window_id) {
                     Some(limits) => {
                         let (w, h) = limits.clamp(width, height);
@@ -1254,6 +1296,38 @@ fn client_thread_main(client_id: usize, mut socket: Socket) {
                     has_alpha,
                 });
             }
+            Ok(ClientMessageRef::SetWindowMenuTitles {
+                window_id,
+                menu_titles,
+            }) => {
+                let menu_titles_str = String::from_utf8_lossy(menu_titles).into_owned();
+                println!(
+                    "[ClientThread {}] SetWindowMenuTitles: window_id={} titles_len={}",
+                    client_id,
+                    window_id,
+                    menu_titles_str.len()
+                );
+                push_ipc_event(IpcEvent::SetWindowMenuTitles {
+                    window_id,
+                    menu_titles: menu_titles_str,
+                });
+            }
+            Ok(ClientMessageRef::ActivateMenuItem {
+                window_id,
+                menu_item_id,
+            }) => {
+                let menu_item_id_str = String::from_utf8_lossy(menu_item_id).into_owned();
+                println!(
+                    "[ClientThread {}] ActivateMenuItem: window_id={} item_len={}",
+                    client_id,
+                    window_id,
+                    menu_item_id_str.len()
+                );
+                push_ipc_event(IpcEvent::ActivateMenuItem {
+                    window_id,
+                    menu_item_id: menu_item_id_str,
+                });
+            }
             Ok(ClientMessageRef::SetWorkarea {
                 x,
                 y,
@@ -1279,6 +1353,7 @@ fn client_thread_main(client_id: usize, mut socket: Socket) {
                     "[ClientThread {}] SetWindowResizable: window_id={} resizable={}",
                     client_id, window_id, resizable
                 );
+                window_resizable.insert(window_id, resizable);
                 push_ipc_event(IpcEvent::SetWindowResizable {
                     window_id,
                     resizable,
@@ -1340,6 +1415,16 @@ fn client_thread_main(client_id: usize, mut socket: Socket) {
         });
     }
 
+    // Unregister client from broadcast messages
+    {
+        let mut pending = PENDING_CLIENT_RESPONSES.lock();
+        pending.remove(&client_id);
+        println!(
+            "[ClientThread {}] Unregistered client {} from broadcast messages",
+            client_id, client_id
+        );
+    }
+
     println!("[ClientThread {}] Exiting", client_id);
 }
 
@@ -1371,6 +1456,11 @@ pub enum IpcEvent {
         width: u32,
         height: u32,
         window_type: u32, // Window type (0=Normal, 1=AlwaysOnTop, 2=Taskbar, 3=Desktop)
+        resizable: bool,
+        focus_on_create: bool,
+        active_on_focus: bool,
+        initial_x: Option<i32>,
+        initial_y: Option<i32>,
         /// Shared memory for the window buffer (server-allocated)
         shm: Option<SharedMemory>,
         shm_mapped_addr: Option<usize>,
@@ -1378,7 +1468,10 @@ pub enum IpcEvent {
         shm_size: usize,
     },
     /// Client requested to destroy a window
-    DestroyWindow { client_id: usize, window_id: u32 },
+    DestroyWindow {
+        client_id: usize,
+        window_id: u32,
+    },
     /// Client updated their window buffer (damage region only)
     BufferUpdated {
         window_id: u32,
@@ -1388,17 +1481,29 @@ pub enum IpcEvent {
         damage_height: u32,
     },
     /// Client requested window move
-    RequestMove { window_id: u32 },
+    RequestMove {
+        window_id: u32,
+    },
     /// Client moved window
-    MoveWindow { window_id: u32, x: i32, y: i32 },
+    MoveWindow {
+        window_id: u32,
+        x: i32,
+        y: i32,
+    },
 
     /// Set (or clear) parent window relationship
     ///
     /// `parent_id == 0` means "no parent".
-    SetWindowParent { window_id: u32, parent_id: u32 },
+    SetWindowParent {
+        window_id: u32,
+        parent_id: u32,
+    },
 
     /// Set transient behavior flags for a window (bitset).
-    SetWindowTransientFlags { window_id: u32, flags: u32 },
+    SetWindowTransientFlags {
+        window_id: u32,
+        flags: u32,
+    },
 
     /// Set min/max size constraints for a window.
     SetWindowSizeLimits {
@@ -1421,22 +1526,36 @@ pub enum IpcEvent {
     },
 
     /// Minimize a window
-    MinimizeWindow { window_id: u32 },
+    MinimizeWindow {
+        window_id: u32,
+    },
 
     /// Maximize a window
-    MaximizeWindow { window_id: u32 },
+    MaximizeWindow {
+        window_id: u32,
+    },
 
     /// Restore a window from minimized or maximized state
-    RestoreWindow { window_id: u32 },
+    RestoreWindow {
+        window_id: u32,
+    },
 
     /// Focus and raise a window
-    FocusWindow { window_id: u32 },
+    FocusWindow {
+        window_id: u32,
+    },
 
     /// Set window type for Z-order management
-    SetWindowType { window_id: u32, window_type: u32 },
+    SetWindowType {
+        window_id: u32,
+        window_type: u32,
+    },
 
     /// Set window opacity
-    SetWindowOpacity { window_id: u32, opacity: u8 },
+    SetWindowOpacity {
+        window_id: u32,
+        opacity: u8,
+    },
 
     // Extension API events
     /// Extension registered
@@ -1469,7 +1588,18 @@ pub enum IpcEvent {
     },
 
     /// Set whether window content contains alpha channel
-    SetWindowHasAlphaContent { window_id: u32, has_alpha: bool },
+    SetWindowHasAlphaContent {
+        window_id: u32,
+        has_alpha: bool,
+    },
+    SetWindowMenuTitles {
+        window_id: u32,
+        menu_titles: String,
+    },
+    ActivateMenuItem {
+        window_id: u32,
+        menu_item_id: String,
+    },
 
     /// Set the workarea (usable screen area) for the window manager
     SetWorkarea {
@@ -1480,11 +1610,18 @@ pub enum IpcEvent {
     },
 
     /// Set whether a window can be resized by the user via interactive resize
-    SetWindowResizable { window_id: u32, resizable: bool },
+    SetWindowResizable {
+        window_id: u32,
+        resizable: bool,
+    },
 
     /// Get the screen size
-    GetScreenSize { client_id: usize },
+    GetScreenSize {
+        client_id: usize,
+    },
 
     /// Get list of all windows
-    GetWindowList { client_id: usize },
+    GetWindowList {
+        client_id: usize,
+    },
 }

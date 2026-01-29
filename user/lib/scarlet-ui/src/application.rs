@@ -9,13 +9,16 @@ use crate::event::Event;
 use crate::platform::{PlatformWindow, SWSPlatformWindow};
 use crate::pipeline::RenderingPipeline;
 use crate::error::Result;
+use crate::menu_model;
 use crate::state::StateId;
 use crate::state::SubscriptionId;
-use crate::element::{Element, ElementId, LayoutConstraints, UpdateResult};
+use crate::element::{Element, ElementId, LayoutConstraints, UpdateResult, WindowSizeLimits};
 use crate::geometry::{Point, Rect};
 use alloc::boxed::Box;
 use alloc::vec::Vec;
+use alloc::string::String;
 use core::any::Any;
+use std::println;
 
 /// Application trait - main entry point for ScarletUI apps
 ///
@@ -27,6 +30,26 @@ pub trait Application: View {
     ///
     /// This is where the application's UI is defined using Views.
     fn body(&self) -> impl View;
+
+    /// Handle focus change event from window server
+    ///
+    /// Called when another window gains focus. This allows applications
+    /// like TaskBar to update their state based on the focused window.
+    /// Default implementation does nothing.
+    fn on_focus_changed(&mut self, _window_id: u32, _app_name: &str, _menu_titles: &str) {
+        // Default: do nothing
+    }
+
+    /// Handle active application change event from window server
+    ///
+    /// Called when the active APPLICATION changes (normal window gains focus).
+    /// This is separate from on_focus_changed because TaskBar/Desktop/etc
+    /// can receive focus without changing the active application.
+    /// This is used by TaskBar to update its menu bar.
+    /// Default implementation does nothing.
+    fn on_active_app_changed(&mut self, _window_id: u32, _app_name: &str, _menu_titles: &str) {
+        // Default: do nothing
+    }
 
     /// Register all State instances used by this Application
     ///
@@ -77,16 +100,68 @@ pub trait Application: View {
         self.init();
 
         // 4. Perform initial layout to determine window size and extract window properties
-        let (app_id, window_title, window_size) = pipeline.layout_initial();
+        let (
+            app_id,
+            window_title,
+            window_size,
+            window_type,
+            menu_bar,
+            focus_on_create,
+            active_on_focus,
+        ) = pipeline.layout_initial();
 
         // Debug: Dump element tree
         if crate::debug::is_enabled() {
             pipeline.element_tree().dump();
         }
 
+        let menu_json = menu_bar
+            .as_ref()
+            .map(|menu_bar| menu_bar.to_json())
+            .unwrap_or_default();
+
         // 5. Create platform window (default: SWS backend)
-        let mut platform_window = SWSPlatformWindow::new(&app_id, &window_title, window_size)
-            .map_err(|_| crate::error::Error::WindowCreationFailed)?;
+        // Use create_with_type for special window types (TASKBAR, ALWAYS_ON_TOP)
+        let mut platform_window = if window_type == crate::views::window_type::NORMAL {
+            SWSPlatformWindow::new_with_menu_and_policies(
+                &app_id,
+                &window_title,
+                window_size,
+                &menu_json,
+                focus_on_create,
+                active_on_focus,
+            )
+                .map_err(|_| crate::error::Error::WindowCreationFailed)?
+        } else {
+            SWSPlatformWindow::create_with_type_and_menu_and_policies(
+                &app_id,
+                &window_title,
+                window_size,
+                window_type,
+                &menu_json,
+                focus_on_create,
+                active_on_focus,
+            )
+            .map_err(|_| crate::error::Error::WindowCreationFailed)?
+        };
+
+        if let Some(menu_bar) = menu_bar {
+            if !menu_json.is_empty() {
+                let _ = platform_window.set_menu_titles(&menu_json);
+                menu_model::register_menu_callbacks(platform_window.surface_id(), &menu_bar);
+            }
+        }
+
+        // Apply window size limits (resizable, etc.) from Window view
+        if let Some(limits) = pipeline
+            .element_tree()
+            .root()
+            .and_then(|r| find_window_size_limits(r))
+        {
+            if !limits.resizable {
+                let _ = platform_window.set_resizable(false);
+            }
+        }
 
         // 6. Main event loop
         loop {
@@ -106,6 +181,105 @@ pub trait Application: View {
                             if let Some(buffer) = pipeline.render() {
                                 platform_window.present(buffer);
                                 presented_this_cycle = true;
+                            }
+                        }
+                    }
+                    Event::MenuItemActivated {
+                        window_id,
+                        menu_item_id,
+                    } => {
+                        let _ = menu_model::invoke_menu_callback(window_id, &menu_item_id);
+                    }
+                    Event::Custom { event_type, data } if event_type == 0xF0C0F => {
+                        // FocusChanged event from SWS
+                        // Decode the data: window_id (u32) + app_id_len (u32) + app_id + app_name_len (u32) + app_name + title_len (u32) + title + menu_titles_len (u32) + menu_titles
+                        let mut offset = 0;
+                        if data.len() >= 4 {
+                            let window_id = u32::from_le_bytes(data[0..4].try_into().unwrap());
+                            offset = 4;
+
+                            let read_str = |data: &[u8], offset: &mut usize| -> String {
+                                if *offset + 4 > data.len() {
+                                    return String::new();
+                                }
+                                let len = u32::from_le_bytes(data[*offset..*offset+4].try_into().unwrap()) as usize;
+                                *offset += 4;
+                                if *offset + len > data.len() {
+                                    return String::new();
+                                }
+                                let s = core::str::from_utf8(&data[*offset..*offset+len]).unwrap_or("");
+                                *offset += len;
+                                String::from(s)
+                            };
+
+                            // Skip app_id
+                            let _app_id = read_str(&data, &mut offset);
+                            let app_name = read_str(&data, &mut offset);
+                            let _title = read_str(&data, &mut offset);
+                            let menu_titles = read_str(&data, &mut offset);
+
+                            // Box large strings to move them to heap and reduce stack pressure
+                            let app_name: Box<str> = app_name.into_boxed_str();
+                            let menu_titles: Box<str> = menu_titles.into_boxed_str();
+
+                            if crate::debug::is_enabled() {
+                                println!(
+                                    "[Application] FocusChanged: window_id={}, app_name={}, menu_titles={}",
+                                    window_id, app_name, menu_titles
+                                );
+                            }
+                            self.on_focus_changed(window_id, &app_name, &menu_titles);
+                        }
+                    }
+                    Event::Custom { event_type, data } if event_type == 0xF0C0A => {
+                        // ActiveAppChanged event from SWS
+                        // Decode the data (same format as FocusChanged)
+                        let mut offset = 0;
+                        if data.len() >= 4 {
+                            let window_id = u32::from_le_bytes(data[0..4].try_into().unwrap());
+                            offset = 4;
+
+                            let read_str = |data: &[u8], offset: &mut usize| -> String {
+                                if *offset + 4 > data.len() {
+                                    return String::new();
+                                }
+                                let len = u32::from_le_bytes(data[*offset..*offset+4].try_into().unwrap()) as usize;
+                                *offset += 4;
+                                if *offset + len > data.len() {
+                                    return String::new();
+                                }
+                                let s = core::str::from_utf8(&data[*offset..*offset+len]).unwrap_or("");
+                                *offset += len;
+                                String::from(s)
+                            };
+
+                            // Skip app_id
+                            let _app_id = read_str(&data, &mut offset);
+                            let app_name = read_str(&data, &mut offset);
+                            let _title = read_str(&data, &mut offset);
+                            let menu_titles = read_str(&data, &mut offset);
+
+                            // Box large strings to move them to heap and reduce stack pressure
+                            let app_name: Box<str> = app_name.into_boxed_str();
+                            let menu_titles: Box<str> = menu_titles.into_boxed_str();
+
+                            if crate::debug::is_enabled() {
+                                println!(
+                                    "[Application] ActiveAppChanged: window_id={}, app_name={}, menu_titles={}",
+                                    window_id, app_name, menu_titles
+                                );
+                            }
+                            self.on_active_app_changed(window_id, &app_name, &menu_titles);
+
+                            // Force redraw after active app changed (State updates trigger dirty flag)
+                            if !presented_this_cycle && pipeline.has_dirty() {
+                                if crate::debug::is_enabled() {
+                                    println!("[Application] ActiveAppChanged triggered redraw, has_dirty=true");
+                                }
+                                if let Some(buffer) = pipeline.render() {
+                                    platform_window.present(buffer);
+                                    presented_this_cycle = true;
+                                }
                             }
                         }
                     }
@@ -151,6 +325,9 @@ pub trait Application: View {
             //     platform_window.present(buffer);
             // }
             if !presented_this_cycle && pipeline.has_dirty() {
+                if crate::debug::is_enabled() {
+                    println!("[Application] has_dirty=true, calling render()");
+                }
                 if let Some(buffer) = pipeline.render() {
                     platform_window.present(buffer);
                 }
@@ -161,6 +338,18 @@ pub trait Application: View {
             std::thread::sleep(std::time::Duration::from_millis(16));
         }
     }
+}
+
+fn find_window_size_limits(element: &dyn Element) -> Option<WindowSizeLimits> {
+    if let Some(limits) = element.get_window_size_limits() {
+        return Some(limits);
+    }
+    for child in element.children() {
+        if let Some(limits) = find_window_size_limits(child.as_ref()) {
+            return Some(limits);
+        }
+    }
+    None
 }
 
 struct ApplicationRootElement<A: Application + Clone> {
@@ -233,6 +422,12 @@ impl<A: Application + Clone + 'static> Element for ApplicationRootElement<A> {
     }
 
     fn rebuild(&mut self) -> UpdateResult {
+        if crate::debug::is_enabled() {
+            println!(
+                "[ApplicationRootElement] rebuild() called for id={}",
+                self.id.get()
+            );
+        }
         if let Some(ref mut child) = self.child {
             child.unmount();
         }
@@ -245,8 +440,20 @@ impl<A: Application + Clone + 'static> Element for ApplicationRootElement<A> {
 
     fn mount(&mut self) {
         let listenables = self.app.listenables();
+        if crate::debug::is_enabled() {
+            println!(
+                "[ApplicationRootElement] mount() called: {} listenables found",
+                listenables.len()
+            );
+        }
         for listenable in listenables {
             let element_id = self.id;
+            if crate::debug::is_enabled() {
+                println!(
+                    "[ApplicationRootElement] Subscribing to element_id={}",
+                    element_id.get()
+                );
+            }
             let callback = alloc::sync::Arc::new(move || {
                 crate::pipeline::mark_element_dirty(element_id);
             });

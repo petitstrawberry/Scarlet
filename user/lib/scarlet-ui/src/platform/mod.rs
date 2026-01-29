@@ -7,7 +7,7 @@ mod sws;
 
 pub use sws::SWSPlatformWindow;
 
-use crate::geometry::Size;
+use crate::geometry::{Point, Size};
 use crate::buffer::Buffer;
 use crate::event::Event;
 use crate::error::Result;
@@ -51,4 +51,48 @@ pub trait PlatformWindow {
 
     /// Request that the window manager begins an interactive move
     fn request_move(&mut self) -> Result<()>;
+
+    /// Create a popup window (e.g., for dropdown menus)
+    ///
+    /// Returns the surface ID of the created popup window.
+    fn create_popup(&mut self, position: Point, size: Size) -> Result<u32>;
+
+    /// Destroy a popup window by surface ID
+    fn destroy_popup(&mut self, surface_id: u32) -> Result<()>;
+
+    /// Set the workarea (usable screen space excluding panels like taskbars)
+    ///
+    /// This informs the window manager about the area available for normal windows.
+    fn set_workarea(&mut self, x: i32, y: i32, width: u32, height: u32) -> Result<()>;
+
+    /// Create a window with a specific window type
+    ///
+    /// This is used to create special windows like TASKBAR, ALWAYS_ON_TOP, etc.
+    fn create_window_with_type(
+        &mut self,
+        app_id: &str,
+        title: &str,
+        size: Size,
+        window_type: u32,
+    ) -> Result<Self>
+    where
+        Self: Sized;
+
+    /// Move a window to a specific position
+    fn move_window(&mut self, x: i32, y: i32) -> Result<()>;
+
+    /// Set the window type (NORMAL, TASKBAR, ALWAYS_ON_TOP, etc.)
+    fn set_window_type(&mut self, surface_id: u32, window_type: u32) -> Result<()>;
+
+    /// Get the screen size
+    fn get_screen_size(&mut self) -> Result<(u32, u32)>;
+
+    /// Get the underlying surface ID (for SWS-specific operations)
+    fn surface_id(&self) -> u32;
+
+    /// Set whether the window is resizable
+    fn set_resizable(&mut self, resizable: bool) -> Result<()>;
+
+    /// Update menu titles for the window (format: "menu1|menu2|menu3")
+    fn set_menu_titles(&mut self, menu_titles: &str) -> Result<()>;
 }

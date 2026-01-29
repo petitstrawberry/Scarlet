@@ -106,10 +106,10 @@ impl SemanticColor {
             text_tertiary: Color::rgba(60, 60, 67, 0.3), // tertiaryLabel
             text_inverse: Color::rgb(1.0, 1.0, 1.0),
 
-            // Primary - blue
-            primary: Color::rgb(0.0, 0.48, 1.0),
-            primary_light: Color::rgb(0.39, 0.71, 1.0),
-            primary_dark: Color::rgb(0.0, 0.31, 0.71),
+            // Primary - scarlet red (緋色)
+            primary: Color::rgb(0.82, 0.15, 0.15),
+            primary_light: Color::rgb(0.92, 0.35, 0.35),
+            primary_dark: Color::rgb(0.60, 0.10, 0.10),
 
             // Secondary - gray
             secondary: Color::rgb(0.56, 0.56, 0.58),
@@ -162,10 +162,10 @@ impl SemanticColor {
             text_tertiary: Color::rgba(235, 235, 245, 0.3), // tertiaryLabel
             text_inverse: Color::rgb(0.0, 0.0, 0.0),
 
-            // Primary - blue (lighter variant for dark mode)
-            primary: Color::rgb(0.04, 0.52, 1.0),
-            primary_light: Color::rgb(0.39, 0.71, 1.0),
-            primary_dark: Color::rgb(0.0, 0.35, 0.78),
+            // Primary - scarlet red (緋色, lighter variant for dark mode)
+            primary: Color::rgb(0.88, 0.25, 0.25),
+            primary_light: Color::rgb(0.95, 0.45, 0.45),
+            primary_dark: Color::rgb(0.65, 0.15, 0.15),
 
             // Secondary - gray
             secondary: Color::rgb(0.55, 0.55, 0.57),

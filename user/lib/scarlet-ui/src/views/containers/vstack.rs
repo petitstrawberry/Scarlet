@@ -97,6 +97,8 @@ pub struct VStackRenderObject {
     spacing: f32,
     alignment: crate::geometry::Alignment,
     size: Size,
+    child_sizes: Vec<Size>,
+    greedy_indices: Vec<usize>,
 }
 
 impl VStackRenderObject {
@@ -105,6 +107,8 @@ impl VStackRenderObject {
             spacing,
             alignment,
             size: Size::ZERO,
+            child_sizes: Vec::new(),
+            greedy_indices: Vec::new(),
         }
     }
 }
@@ -137,35 +141,43 @@ impl ElementRenderObject for VStackRenderObject {
         let mut fixed_total_height: f32 = 0.0;
         let mut max_width: f32 = 0.0;
         let mut flex_total: u32 = 0;
-        let mut greedy_indices: Vec<usize> = Vec::new();
-        let mut child_sizes: Vec<Size> = Vec::with_capacity(children.len());
+        self.greedy_indices.clear();
+        self.child_sizes.clear();
+        self.child_sizes.resize(child_count, Size::ZERO);
 
         for (index, child) in children.iter_mut().enumerate() {
             let flex = child.flex_factor();
             flex_total += flex;
 
             if flex == 0 {
-                let child_constraints = LayoutConstraints::loose(constraints.max_width, constraints.max_height);
+                let fill_cross = child.fill_width();
+                let child_constraints = if fill_cross {
+                    LayoutConstraints::new(0.0, f32::INFINITY, 0.0, constraints.max_height)
+                } else {
+                    LayoutConstraints::new(0.0, constraints.max_width, 0.0, constraints.max_height)
+                };
                 let child_size = child.layout(child_constraints);
-                child_sizes.push(child_size);
+                self.child_sizes[index] = child_size;
                 if constraints.max_height.is_finite()
                     && constraints.max_height > 0.0
                     && child_size.height + 0.5 >= constraints.max_height
                 {
-                    greedy_indices.push(index);
+                    self.greedy_indices.push(index);
                 } else {
                     fixed_total_height += child_size.height;
                     max_width = max_width.max(child_size.width);
                 }
-            } else {
-                child_sizes.push(Size::ZERO);
             }
         }
 
-        if flex_total == 0 && !greedy_indices.is_empty() && constraints.max_height.is_finite() && constraints.max_height > 0.0 {
+        if flex_total == 0
+            && !self.greedy_indices.is_empty()
+            && constraints.max_height.is_finite()
+            && constraints.max_height > 0.0
+        {
             let share = (constraints.max_height - fixed_total_height - spacing_total).max(0.0)
-                / greedy_indices.len() as f32;
-            for &index in greedy_indices.iter() {
+                / self.greedy_indices.len() as f32;
+            for &index in self.greedy_indices.iter() {
                 let child = &mut children[index];
                 let child_constraints = LayoutConstraints {
                     min_width: 0.0,
@@ -174,13 +186,18 @@ impl ElementRenderObject for VStackRenderObject {
                     max_height: share,
                 };
                 let child_size = child.layout(child_constraints);
-                child_sizes[index] = child_size;
+                self.child_sizes[index] = child_size;
                 fixed_total_height += child_size.height;
                 max_width = max_width.max(child_size.width);
             }
         }
 
-        let remaining_height = (constraints.max_height - fixed_total_height - spacing_total).max(0.0);
+        let max_height_finite = constraints.max_height.is_finite() && constraints.max_height > 0.0;
+        let remaining_height = if max_height_finite {
+            (constraints.max_height - fixed_total_height - spacing_total).max(0.0)
+        } else {
+            0.0
+        };
         let mut total_height = fixed_total_height + spacing_total;
 
         for (i, child) in children.iter_mut().enumerate() {
@@ -194,11 +211,11 @@ impl ElementRenderObject for VStackRenderObject {
                 let child_constraints = LayoutConstraints {
                     min_width: 0.0,
                     max_width: constraints.max_width,
-                    min_height: share,
-                    max_height: share,
+                    min_height: if max_height_finite { share } else { 0.0 },
+                    max_height: if max_height_finite { share } else { 0.0 },
                 };
                 let child_size = child.layout(child_constraints);
-                child_sizes[i] = child_size;
+                self.child_sizes[i] = child_size;
                 total_height += child_size.height;
                 max_width = max_width.max(child_size.width);
             }
@@ -238,9 +255,24 @@ impl ElementRenderObject for VStackRenderObject {
             total_height
         };
 
+        for (index, child) in children.iter_mut().enumerate() {
+            if !child.fill_width() {
+                continue;
+            }
+            let height = self.child_sizes[index].height;
+            let child_constraints = LayoutConstraints {
+                min_width: final_width,
+                max_width: final_width,
+                min_height: height,
+                max_height: height,
+            };
+            let child_size = child.layout(child_constraints);
+            self.child_sizes[index] = child_size;
+        }
+
         let mut child_y_offset = 0.0;
         for (i, child) in children.iter_mut().enumerate() {
-            let child_size = child_sizes[i];
+            let child_size = self.child_sizes[i];
             let child_x = self.alignment.align_x(final_width, child_size.width);
             child.set_position(Point::new(child_x, child_y_offset));
             child_y_offset += child_size.height;

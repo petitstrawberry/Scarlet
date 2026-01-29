@@ -82,6 +82,7 @@ pub struct ZStackRenderObject {
     alignment: crate::geometry::Alignment,
     child_count: usize,
     size: Size,
+    child_sizes: alloc::vec::Vec<Size>,
 }
 
 impl ZStackRenderObject {
@@ -91,18 +92,92 @@ impl ZStackRenderObject {
             alignment,
             child_count,
             size: Size::ZERO,
+            child_sizes: alloc::vec::Vec::new(),
         }
     }
 }
 
 impl ElementRenderObject for ZStackRenderObject {
     fn layout(&mut self, constraints: LayoutConstraints) -> Size {
-        // ZStack takes the size of the largest child
-        // For now, use constraints as size
-        let width = constraints.min_width.max(constraints.max_width.min(200.0));
-        let height = constraints.min_height.max(constraints.max_height.min(200.0));
+        if constraints.is_tight() {
+            let width = constraints.max_width;
+            let height = constraints.max_height;
+            self.size = Size { width, height };
+            return self.size;
+        }
 
+        let width = constraints.min_width.min(constraints.max_width).max(0.0);
+        let height = constraints.min_height.min(constraints.max_height).max(0.0);
         self.size = Size { width, height };
+        self.size
+    }
+
+    fn layout_with_children(
+        &mut self,
+        constraints: LayoutConstraints,
+        children: &mut [Box<dyn Element>],
+    ) -> Size {
+        let child_count = children.len();
+        self.child_count = child_count;
+        self.child_sizes.clear();
+        self.child_sizes.resize(child_count, Size::ZERO);
+
+        let mut max_width: f32 = 0.0;
+        let mut max_height: f32 = 0.0;
+
+        for (index, child) in children.iter_mut().enumerate() {
+            let child_constraints = LayoutConstraints::new(
+                0.0,
+                constraints.max_width,
+                0.0,
+                constraints.max_height,
+            );
+            let child_size = child.layout(child_constraints);
+            self.child_sizes[index] = child_size;
+            max_width = max_width.max(child_size.width);
+            max_height = max_height.max(child_size.height);
+        }
+
+        let final_width = if constraints.is_tight_width()
+            && constraints.min_width.is_finite()
+            && constraints.min_width > 0.0
+        {
+            constraints.max_width
+        } else {
+            max_width.clamp(constraints.min_width, constraints.max_width)
+        };
+        let final_height = if constraints.is_tight_height()
+            && constraints.min_height.is_finite()
+            && constraints.min_height > 0.0
+        {
+            constraints.max_height
+        } else {
+            max_height.clamp(constraints.min_height, constraints.max_height)
+        };
+
+        self.size = Size {
+            width: final_width,
+            height: final_height,
+        };
+
+        for (index, child) in children.iter_mut().enumerate() {
+            let mut child_size = self.child_sizes[index];
+
+            if child.fill_width() || child.fill_height() {
+                let child_constraints = LayoutConstraints {
+                    min_width: if child.fill_width() { final_width } else { child_size.width },
+                    max_width: if child.fill_width() { final_width } else { child_size.width },
+                    min_height: if child.fill_height() { final_height } else { child_size.height },
+                    max_height: if child.fill_height() { final_height } else { child_size.height },
+                };
+                child_size = child.layout(child_constraints);
+                self.child_sizes[index] = child_size;
+            }
+
+            let origin = self.alignment.apply(self.size, child_size);
+            child.set_position(origin);
+        }
+
         self.size
     }
 

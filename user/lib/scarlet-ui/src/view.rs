@@ -169,6 +169,58 @@ pub trait ViewExt: View {
     {
         crate::views::AlignmentFrame::new(self, alignment)
     }
+
+    /// Add a click handler to this view
+    ///
+    /// # Arguments
+    /// * `callback` - Function to call when clicked
+    fn on_click<F: Fn() + Clone + 'static>(self, callback: F) -> crate::views::modifiers::OnClick<Self, F>
+    where
+        Self: Sized,
+    {
+        crate::views::modifiers::OnClick::new(self, callback)
+    }
+
+    /// Add a hover enter handler to this view
+    ///
+    /// # Arguments
+    /// * `callback` - Function to call when mouse enters
+    fn on_hover<F: Fn() + Clone + 'static>(self, callback: F) -> crate::views::modifiers::OnHover<Self, F>
+    where
+        Self: Sized,
+    {
+        crate::views::modifiers::OnHover::new(self, callback)
+    }
+
+    /// Add a hover exit handler to this view
+    ///
+    /// # Arguments
+    /// * `callback` - Function to call when mouse exits
+    fn on_exit<F: Fn() + Clone + 'static>(self, callback: F) -> crate::views::modifiers::OnExit<Self, F>
+    where
+        Self: Sized,
+    {
+        crate::views::modifiers::OnExit::new(self, callback)
+    }
+
+    /// Clip this view to its bounds
+    fn clip(self) -> crate::views::modifiers::Clip<Self>
+    where
+        Self: Sized,
+    {
+        crate::views::modifiers::Clip::new(self, 0.0)
+    }
+
+    /// Clip this view to rounded corners
+    ///
+    /// # Arguments
+    /// * `radius` - Corner radius
+    fn clip_radius(self, radius: f32) -> crate::views::modifiers::Clip<Self>
+    where
+        Self: Sized,
+    {
+        crate::views::modifiers::Clip::new(self, radius)
+    }
 }
 
 /// Blanket implementation of ViewExt for all View types

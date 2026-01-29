@@ -8,6 +8,7 @@ use alloc::collections::BTreeMap;
 use core::any::Any;
 use core::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Mutex;
+use std::println;
 
 /// Unique identifier for State instances
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, PartialOrd, Ord)]
@@ -63,11 +64,18 @@ pub fn generate_subscription_id() -> SubscriptionId {
 pub trait Listenable: Any {
     /// Subscribe to any changes in this listenable
     fn subscribe_any(&self, callback: Arc<dyn Fn() + Send + Sync>) -> SubscriptionId;
+
+    /// Unsubscribe from this listenable using the subscription ID
+    fn unsubscribe(&self, id: SubscriptionId) -> bool;
 }
 
 impl<T: Any> Listenable for State<T> {
     fn subscribe_any(&self, callback: Arc<dyn Fn() + Send + Sync>) -> SubscriptionId {
         self.subscribe_any_impl(callback)
+    }
+
+    fn unsubscribe(&self, id: SubscriptionId) -> bool {
+        self.unsubscribe(id)
     }
 }
 
@@ -115,6 +123,9 @@ impl<T> StateInner<T> {
         T: Clone,
     {
         let subscribers = self.subscribers.lock();
+        if crate::debug::is_enabled() {
+            println!("[State] Notifying {} subscribers", subscribers.len());
+        }
         for callback in subscribers.values() {
             callback();
         }

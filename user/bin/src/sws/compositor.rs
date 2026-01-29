@@ -44,6 +44,10 @@ pub struct Compositor {
     resize_drag: Option<ResizeDragState>,
     resize_outline: Option<(i32, i32, u32, u32)>,
     workarea: Option<(i32, i32, u32, u32)>,
+    /// Track the currently active application's app_id to avoid redundant ACTIVE_APP_CHANGED broadcasts
+    active_app_id: Option<Vec<u8>>,
+    /// Track the last focused window ID to avoid redundant FOCUS_CHANGED broadcasts
+    last_focused_window_id: Option<u32>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -142,6 +146,8 @@ impl Compositor {
             resize_drag: None,
             resize_outline: None,
             workarea: None,
+            active_app_id: None,
+            last_focused_window_id: None,
         })
     }
 
@@ -1139,7 +1145,16 @@ impl Compositor {
     }
 
     /// Broadcast focus change event to all connected clients
-    fn broadcast_focus_change(&self, window_id: u32) {
+    fn broadcast_focus_change(&mut self, window_id: u32) {
+        // Only broadcast if the focused window actually changed
+        if self.last_focused_window_id == Some(window_id) {
+            println!(
+                "[Compositor] Window #{} already focused, skipping FOCUS_CHANGED broadcast",
+                window_id
+            );
+            return;
+        }
+
         if let Some(window) = self.window_manager.get_window(window_id) {
             let app_id_bytes = window.app_id.as_deref().unwrap_or(b"");
             let title_bytes = window.title.as_deref().unwrap_or(b"");
@@ -1149,6 +1164,10 @@ impl Compositor {
             let app_name_bytes = app_name.as_bytes();
             let menu_titles_bytes = menu_titles.as_bytes();
 
+            // Update last focused window ID
+            self.last_focused_window_id = Some(window_id);
+
+            // Broadcast FOCUS_CHANGED for all windows
             let payload = sws_protocol::payload_focus_changed(
                 window_id,
                 app_id_bytes,
@@ -1156,6 +1175,18 @@ impl Compositor {
                 title_bytes,
                 menu_titles_bytes,
             );
+
+            println!(
+                "[Compositor] ABOUT TO broadcast focus change: window_id={}, app_id_len={}, app_name_len={}, title_len={}, menu_titles_len={}, app_name={}, menu_titles={}",
+                window_id,
+                app_id_bytes.len(),
+                app_name_bytes.len(),
+                title_bytes.len(),
+                menu_titles_bytes.len(),
+                core::str::from_utf8(app_name_bytes).unwrap_or(""),
+                core::str::from_utf8(menu_titles_bytes).unwrap_or("")
+            );
+
             super::ipc::broadcast_message_to_all_clients(
                 sws_protocol::server_msg::FOCUS_CHANGED,
                 payload,
@@ -1169,6 +1200,49 @@ impl Compositor {
                 title_bytes.len(),
                 menu_titles_bytes.len()
             );
+
+            // For active-app windows only, check if app_id changed and broadcast ACTIVE_APP_CHANGED.
+            println!(
+                "[Compositor] Checking active-on-focus: window_id={}, active_on_focus={}",
+                window_id, window.active_on_focus
+            );
+            if window.active_on_focus {
+                let app_id_changed = match &self.active_app_id {
+                    Some(current_app_id) => current_app_id != app_id_bytes,
+                    None => true,
+                };
+
+                if app_id_changed {
+                    println!(
+                        "[Compositor] Active app changed: {:?} -> {:?}, broadcasting ACTIVE_APP_CHANGED",
+                        self.active_app_id
+                            .as_ref()
+                            .map(|id| core::str::from_utf8(id).unwrap_or("")),
+                        core::str::from_utf8(app_id_bytes).unwrap_or("")
+                    );
+
+                    // Update active_app_id
+                    self.active_app_id = Some(app_id_bytes.to_vec());
+
+                    let active_app_payload = sws_protocol::payload_active_app_changed(
+                        window_id,
+                        app_id_bytes,
+                        app_name_bytes,
+                        title_bytes,
+                        menu_titles_bytes,
+                    );
+
+                    super::ipc::broadcast_message_to_all_clients(
+                        sws_protocol::server_msg::ACTIVE_APP_CHANGED,
+                        active_app_payload,
+                    );
+                } else {
+                    println!(
+                        "[Compositor] Active app unchanged ({}), skipping ACTIVE_APP_CHANGED",
+                        core::str::from_utf8(app_id_bytes).unwrap_or("")
+                    );
+                }
+            }
         } else {
             println!(
                 "[Compositor] Warning: Failed to broadcast focus change for non-existent window #{}",
@@ -1419,10 +1493,13 @@ impl Compositor {
                     }
                 }
 
-                // Route mouse position to focused window
-                if let Some(focused_id) = self.window_manager.get_focused_window_id() {
-                    if let Some(window) = self.window_manager.get_window(focused_id) {
-                        self.send_mouse_position_to_window(focused_id, window);
+                // Route mouse position to the window under the cursor (TaskBar needs hover input).
+                if let Some(win_id) = self
+                    .window_manager
+                    .window_at_point(self.cursor.x, self.cursor.y)
+                {
+                    if let Some(window) = self.window_manager.get_window(win_id) {
+                        self.send_mouse_position_to_window(win_id, window);
                     }
                 }
 
@@ -1519,22 +1596,25 @@ impl Compositor {
                     self.handle_click()?;
                 }
 
-                // Route button event to focused window only if cursor is within window bounds
-                if let Some(focused_id) = self.window_manager.get_focused_window_id() {
+                // Route button event to the window under the cursor (even if it can't take focus).
+                if let Some(target_id) = self
+                    .window_manager
+                    .window_at_point(self.cursor.x, self.cursor.y)
+                {
                     let window = self
                         .window_manager
-                        .get_window(focused_id)
-                        .ok_or("Focused window not found")?;
+                        .get_window(target_id)
+                        .ok_or("Target window not found")?;
                     if self.cursor_position_in_window(window).is_some() {
                         super::ipc::send_input_to_window(
-                            focused_id,
+                            target_id,
                             0,
                             super::input::event_types::EV_KEY,
                             button,
                             if pressed { 1 } else { 0 },
                         );
                         super::ipc::send_input_to_window(
-                            focused_id,
+                            target_id,
                             0,
                             super::input::event_types::EV_SYN,
                             0,
@@ -1581,6 +1661,11 @@ impl Compositor {
                 width,
                 height,
                 window_type,
+                resizable,
+                focus_on_create,
+                active_on_focus,
+                initial_x,
+                initial_y,
                 shm,
                 shm_mapped_addr,
                 shm_size,
@@ -1593,7 +1678,13 @@ impl Compositor {
                 use sws_protocol::window_types;
 
                 // Calculate initial position based on window type
-                let (x, y) = if window_type == window_types::NORMAL {
+                let (x, y) = if let (Some(x), Some(y)) = (initial_x, initial_y) {
+                    println!(
+                        "[Compositor] Using requested position for window #{}: ({}, {})",
+                        window_id, x, y
+                    );
+                    (x, y)
+                } else if window_type == window_types::NORMAL {
                     // Normal windows: cascade from focused window or position in workarea
                     const OFFSET: i32 = 20;
 
@@ -1640,6 +1731,14 @@ impl Compositor {
                     (0, 0)
                 };
 
+                let wtype = match window_type {
+                    window_types::NORMAL => super::window::WindowType::Normal,
+                    window_types::ALWAYS_ON_TOP => super::window::WindowType::AlwaysOnTop,
+                    window_types::TASKBAR => super::window::WindowType::Taskbar,
+                    window_types::DESKTOP => super::window::WindowType::Desktop,
+                    _ => super::window::WindowType::Normal,
+                };
+
                 // Check if SHM was provided (modern path)
                 if let Some(shm_obj) = shm {
                     println!(
@@ -1660,25 +1759,6 @@ impl Compositor {
                     ) {
                         Ok(_) => {
                             println!("[Compositor] Window #{} with SHM created", window_id);
-                            // Set app_id and window_type on the newly created window
-                            if let Some(window) = self.window_manager.get_window_mut(window_id) {
-                                window.app_id = Some(app_id);
-                                // Set window type
-                                let wtype = match window_type {
-                                    window_types::NORMAL => super::window::WindowType::Normal,
-                                    window_types::ALWAYS_ON_TOP => {
-                                        super::window::WindowType::AlwaysOnTop
-                                    }
-                                    window_types::TASKBAR => super::window::WindowType::Taskbar,
-                                    window_types::DESKTOP => super::window::WindowType::Desktop,
-                                    _ => super::window::WindowType::Normal,
-                                };
-                                window.window_type = wtype;
-                                println!(
-                                    "[Compositor] Set window #{} type to {:?}",
-                                    window_id, wtype
-                                );
-                            }
                         }
                         Err(e) => {
                             println!("[Compositor] Failed to create SHM window: {}", e);
@@ -1689,6 +1769,24 @@ impl Compositor {
                     println!("[Compositor] Window #{} uses legacy Vec buffer", window_id);
                     self.window_manager
                         .create_window_with_id(window_id, x, y, width, height);
+                }
+
+                if let Some(window) = self.window_manager.get_window_mut(window_id) {
+                    window.app_id = Some(app_id);
+                }
+                if self.window_manager.set_window_type(window_id, wtype) {
+                    println!("[Compositor] Set window #{} type to {:?}", window_id, wtype);
+                }
+                self.window_manager
+                    .set_window_resizable(window_id, resizable);
+                if let Some(window) = self.window_manager.get_window_mut(window_id) {
+                    window.active_on_focus = active_on_focus;
+                }
+
+                // Focus is for input routing only; give focus to newly created windows.
+                if focus_on_create {
+                    self.window_manager.set_focus(window_id);
+                    self.broadcast_focus_change(window_id);
                 }
 
                 // Don't trigger redraw yet - wait for client to draw and send UPDATE_BUFFER
@@ -1704,6 +1802,46 @@ impl Compositor {
                     "[Compositor] Client {} destroying window #{}",
                     client_id, window_id
                 );
+
+                // Check if the destroyed window was the active application
+                if let Some(window) = self.window_manager.get_window(window_id) {
+                    let window_app_id = window.app_id.as_deref().unwrap_or(b"");
+
+                    // Reset last_focused_window_id if the destroyed window was focused
+                    if self.last_focused_window_id == Some(window_id) {
+                        println!(
+                            "[Compositor] Focused window destroyed, resetting last_focused_window_id (was={})",
+                            window_id
+                        );
+                        self.last_focused_window_id = None;
+                    }
+
+                    if let Some(current_app_id) = &self.active_app_id {
+                        if current_app_id == window_app_id {
+                            println!(
+                                "[Compositor] Active app window destroyed, resetting active_app_id (was={})",
+                                core::str::from_utf8(window_app_id).unwrap_or("")
+                            );
+                            self.active_app_id = None;
+
+                            // Broadcast ACTIVE_APP_CHANGED with empty menu to clear TaskBar
+                            let empty_payload = sws_protocol::payload_active_app_changed(
+                                0,   // dummy window_id
+                                b"", // empty app_id
+                                b"", // empty app_name
+                                b"", // empty title
+                                b"", // empty menu_titles
+                            );
+                            println!(
+                                "[Compositor] Broadcasting empty ACTIVE_APP_CHANGED to clear TaskBar menu"
+                            );
+                            super::ipc::broadcast_message_to_all_clients(
+                                sws_protocol::server_msg::ACTIVE_APP_CHANGED,
+                                empty_payload,
+                            );
+                        }
+                    }
+                }
 
                 // Send WINDOW_DESTROYED event to client before closing
                 let payload = sws_protocol::payload_window_destroyed(window_id);
@@ -2178,6 +2316,65 @@ impl Compositor {
                         self.add_pending_damage((w.x, w.y, w.width, w.height));
                     }
                 }
+            }
+            IpcEvent::SetWindowMenuTitles {
+                window_id,
+                menu_titles,
+            } => {
+                println!(
+                    "[Compositor] Updating menu titles for window #{} (len={})",
+                    window_id,
+                    menu_titles.len()
+                );
+                let menu_titles_bytes = menu_titles.as_bytes().to_vec();
+                if super::ipc::set_app_session_menu_titles(window_id, menu_titles) {
+                    let is_focused = self.window_manager.get_focused_window_id() == Some(window_id);
+                    if is_focused {
+                        self.broadcast_focus_change(window_id);
+                    }
+
+                    if let Some(window) = self.window_manager.get_window(window_id) {
+                        let window_app_id = window.app_id.as_deref().unwrap_or(b"");
+                        let is_active_app = self
+                            .active_app_id
+                            .as_ref()
+                            .map_or(false, |id| id.as_slice() == window_app_id);
+
+                        if is_active_app || is_focused {
+                            let (app_name, _) = super::ipc::get_app_session_info(window_id);
+                            let app_name_bytes = app_name.as_bytes();
+                            let title_bytes = window.title.as_deref().unwrap_or(b"");
+                            let payload = sws_protocol::payload_active_app_changed(
+                                window_id,
+                                window_app_id,
+                                app_name_bytes,
+                                title_bytes,
+                                &menu_titles_bytes,
+                            );
+                            super::ipc::broadcast_message_to_all_clients(
+                                sws_protocol::server_msg::ACTIVE_APP_CHANGED,
+                                payload,
+                            );
+                        }
+                    }
+                }
+            }
+            IpcEvent::ActivateMenuItem {
+                window_id,
+                menu_item_id,
+            } => {
+                println!(
+                    "[Compositor] Activating menu item for window #{} (len={})",
+                    window_id,
+                    menu_item_id.len()
+                );
+                let payload =
+                    sws_protocol::payload_menu_item_activated(window_id, menu_item_id.as_bytes());
+                super::ipc::send_message_to_window(
+                    window_id,
+                    sws_protocol::server_msg::MENU_ITEM_ACTIVATED,
+                    payload,
+                );
             }
             IpcEvent::SetWorkarea {
                 x,

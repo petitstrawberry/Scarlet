@@ -8,9 +8,42 @@ use std::vec::Vec;
 #[derive(Debug, Clone, Default)]
 pub struct ThemeColors {
     pub background: Option<[u8; 3]>,
+    pub background_style: Option<BackgroundStyle>,
     pub taskbar: Option<[u8; 3]>,
     pub text: Option<[u8; 3]>,
     pub highlight: Option<[u8; 3]>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BackgroundStyle {
+    GradientLines,
+    Gradient,
+    Solid,
+}
+
+impl BackgroundStyle {
+    pub fn from_str(s: &str) -> Option<Self> {
+        match s.to_lowercase().as_str() {
+            "gradient_lines" | "gradient-lines" | "lines" => Some(BackgroundStyle::GradientLines),
+            "gradient" => Some(BackgroundStyle::Gradient),
+            "solid" => Some(BackgroundStyle::Solid),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            BackgroundStyle::GradientLines => "gradient_lines",
+            BackgroundStyle::Gradient => "gradient",
+            BackgroundStyle::Solid => "solid",
+        }
+    }
+}
+
+impl Default for BackgroundStyle {
+    fn default() -> Self {
+        BackgroundStyle::GradientLines
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -95,6 +128,11 @@ impl ConfigParser {
                         "text" => theme.text = Some(color),
                         "highlight" => theme.highlight = Some(color),
                         _ => {}
+                    }
+                } else if key == "background_style" {
+                    let value = Self::unquote(value);
+                    if let Some(style) = BackgroundStyle::from_str(&value) {
+                        theme.background_style = Some(style);
                     }
                 }
             }

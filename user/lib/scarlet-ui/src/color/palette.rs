@@ -204,8 +204,8 @@ impl ColorPalette {
     // System color accessors
 
     /// Get system gray colors
-    pub fn gray(&self) -> &SystemColors {
-        &self.system
+    pub fn gray(&self) -> &GrayColors {
+        &self.system.gray
     }
 
     /// Get system blue colors
@@ -241,6 +241,18 @@ impl ColorPalette {
     /// Get system yellow colors
     pub fn yellow(&self) -> &YellowColors {
         &self.system.yellow
+    }
+
+    // Menu color accessors
+
+    /// Menu hover color
+    pub fn menu_hover(&self) -> crate::Color {
+        crate::Color::rgb(0.824, 0.824, 0.839)
+    }
+
+    /// Menu active color (pressed)
+    pub fn menu_active(&self) -> crate::Color {
+        crate::Color::rgb(0.706, 0.706, 0.745)
     }
 }
 

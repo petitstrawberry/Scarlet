@@ -65,6 +65,7 @@ pub mod application;
 pub mod macros;
 pub mod graphics;
 pub mod debug;
+pub mod menu_model;
 
 // Re-exports for convenience
 pub use geometry::{Size, Point, Rect, Offset, EdgeInsets, Alignment};
@@ -80,11 +81,14 @@ pub use compositor::Compositor;
 pub use render::{RenderTree, RenderNode};
 pub use pipeline::{PipelineOwner, RenderingPipeline, DirtyPhase, StateRegistry};
 pub use views::{Window, Text, Button, Rectangle, Spacer, Image, VStack, HStack, ZStack};
-pub use views::{Divider, DividerOrientation, Toggle, Slider, ProgressView};
-pub use views::modifiers::{Padding, Frame, Background, SetSize, AlignmentFrame};
+pub use views::{Divider, DividerOrientation, Toggle, Slider, ProgressView, CanvasView};
+pub use views::{NavigationView, NavigationLink};
+pub use views::navigation::Icon;
+pub use views::modifiers::{Padding, Frame, Background, SetSize, AlignmentFrame, Clip};
 pub use platform::{PlatformWindow, SWSPlatformWindow};
 pub use application::Application;
 pub use graphics::{Canvas, measure_text_sized, set_default_font};
+pub use menu_model::{MenuBarModel, MenuEntry, MenuItemModel};
 
 // Macros are exported at root via #[macro_export]
 // Users can use them directly: vstack! {}, hstack! {}, etc.
@@ -100,8 +104,10 @@ pub mod prelude {
     pub use crate::event::{Event, MouseEvent, KeyEvent, FocusEvent, LifecycleEvent};
     pub use crate::application::Application;
     pub use crate::views::{Window, Text, Button, Rectangle, Spacer, Image, VStack, HStack, ZStack};
-    pub use crate::views::{Divider, DividerOrientation, Toggle, Slider, ProgressView};
-    pub use crate::views::modifiers::{Padding, Frame, Background};
+    pub use crate::views::{Divider, DividerOrientation, Toggle, Slider, ProgressView, CanvasView};
+    pub use crate::views::{MenuItem, MenuBar, Menu, MenuItemContent, MenuAction};
+    pub use crate::views::modifiers::{Padding, Frame, Background, Clip};
+    pub use crate::menu_model::{MenuBarModel, MenuEntry, MenuItemModel};
 
     // Note: The View derive macro must be imported from scarlet_ui_macros:
     // use scarlet_ui_macros::View;

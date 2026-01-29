@@ -39,6 +39,7 @@ pub struct LayoutConstraints {
 pub struct WindowSizeLimits {
     pub min: Option<Size>,
     pub max: Option<Size>,
+    pub resizable: bool,
 }
 
 impl WindowSizeLimits {
@@ -281,9 +282,20 @@ pub trait Element {
 
     /// Get window information if this Element represents a Window
     ///
-    /// Returns Some((app_id, title, size)) if this Element is a WindowElement,
+    /// Returns Some((app_id, title, size, window_type, menu_bar, focus_on_create, active_on_focus))
+    /// if this Element is a WindowElement,
     /// None otherwise. Default implementation returns None.
-    fn get_window_info(&self) -> Option<(alloc::string::String, alloc::string::String, Size)> {
+    fn get_window_info(
+        &self,
+    ) -> Option<(
+        alloc::string::String,
+        alloc::string::String,
+        Size,
+        u32,
+        Option<crate::menu_model::MenuBarModel>,
+        bool,
+        bool,
+    )> {
         None
     }
 
@@ -297,5 +309,15 @@ pub trait Element {
         for child in self.children_mut().iter_mut() {
             child.clear_buffers();
         }
+    }
+
+    /// Whether this element wants to fill available width from its parent.
+    fn fill_width(&self) -> bool {
+        false
+    }
+
+    /// Whether this element wants to fill available height from its parent.
+    fn fill_height(&self) -> bool {
+        false
     }
 }

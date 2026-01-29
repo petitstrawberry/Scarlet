@@ -25,14 +25,24 @@ pub struct Frame<V: View> {
 impl<V: View> Frame<V> {
     /// Create a new Frame modifier with fixed size
     pub fn new(inner: V, width: f32, height: f32) -> Self {
+        let (min_width, max_width) = if width.is_finite() {
+            (width, width)
+        } else {
+            (0.0, f32::INFINITY)
+        };
+        let (min_height, max_height) = if height.is_finite() {
+            (height, height)
+        } else {
+            (0.0, f32::INFINITY)
+        };
         Self {
             inner,
             width: Some(width),
             height: Some(height),
-            min_width: width,
-            min_height: height,
-            max_width: width,
-            max_height: height,
+            min_width,
+            min_height,
+            max_width,
+            max_height,
         }
     }
 
@@ -165,15 +175,24 @@ impl FrameRenderObject {
     /// Layout the frame using a child size
     pub fn layout_with_child(&mut self, child_size: Size, constraints: LayoutConstraints) -> Size {
         let min_w = self.min_width.max(constraints.min_width);
-        let max_w = self.max_width.min(constraints.max_width);
+        let mut max_w = self.max_width.min(constraints.max_width);
         let min_h = self.min_height.max(constraints.min_height);
-        let max_h = self.max_height.min(constraints.max_height);
+        let mut max_h = self.max_height.min(constraints.max_height);
+
+        if min_w > max_w {
+            max_w = min_w;
+        }
+        if min_h > max_h {
+            max_h = min_h;
+        }
 
         let width = if let Some(w) = self.width {
             if w.is_finite() {
                 w
-            } else {
+            } else if constraints.is_tight_width() {
                 constraints.max_width
+            } else {
+                child_size.width.clamp(min_w, max_w)
             }
         } else {
             child_size.width.clamp(min_w, max_w)
@@ -182,8 +201,10 @@ impl FrameRenderObject {
         let height = if let Some(h) = self.height {
             if h.is_finite() {
                 h
-            } else {
+            } else if constraints.is_tight_height() {
                 constraints.max_height
+            } else {
+                child_size.height.clamp(min_h, max_h)
             }
         } else {
             child_size.height.clamp(min_h, max_h)
@@ -203,18 +224,15 @@ impl ElementRenderObject for FrameRenderObject {
         // Determine the size based on explicit width/height and constraints
         let width = if let Some(w) = self.width {
             if w.is_finite() {
-                // Explicit finite width
                 w
+            } else if constraints.is_tight_width() {
+                constraints.max_width
             } else {
-                // INFINITY width - use parent's max_width if finite, else min_width
-                if constraints.max_width.is_finite() {
-                    constraints.max_width
-                } else {
-                    constraints.min_width.max(self.min_width)
-                }
+                constraints.min_width
+                    .max(self.min_width)
+                    .min(constraints.max_width.min(self.max_width))
             }
         } else {
-            // No explicit width - use constraints
             constraints.min_width
                 .max(self.min_width)
                 .min(constraints.max_width.min(self.max_width))
@@ -222,18 +240,15 @@ impl ElementRenderObject for FrameRenderObject {
 
         let height = if let Some(h) = self.height {
             if h.is_finite() {
-                // Explicit finite height
                 h
+            } else if constraints.is_tight_height() {
+                constraints.max_height
             } else {
-                // INFINITY height - use parent's max_height if finite, else min_height
-                if constraints.max_height.is_finite() {
-                    constraints.max_height
-                } else {
-                    constraints.min_height.max(self.min_height)
-                }
+                constraints.min_height
+                    .max(self.min_height)
+                    .min(constraints.max_height.min(self.max_height))
             }
         } else {
-            // No explicit height - use constraints
             constraints.min_height
                 .max(self.min_height)
                 .min(constraints.max_height.min(self.max_height))
@@ -253,13 +268,13 @@ impl ElementRenderObject for FrameRenderObject {
     ) -> Size {
         let (min_w, max_w) = match self.width {
             Some(w) if w.is_finite() => (w, w),
-            Some(_) if constraints.max_width.is_finite() => (constraints.max_width, constraints.max_width),
+            Some(_) if constraints.is_tight_width() => (constraints.max_width, constraints.max_width),
             Some(_) => (constraints.min_width, constraints.max_width),
             None => (constraints.min_width, constraints.max_width),
         };
         let (min_h, max_h) = match self.height {
             Some(h) if h.is_finite() => (h, h),
-            Some(_) if constraints.max_height.is_finite() => (constraints.max_height, constraints.max_height),
+            Some(_) if constraints.is_tight_height() => (constraints.max_height, constraints.max_height),
             Some(_) => (constraints.min_height, constraints.max_height),
             None => (constraints.min_height, constraints.max_height),
         };
@@ -276,7 +291,7 @@ impl ElementRenderObject for FrameRenderObject {
             let child_size = child.layout(child_constraints);
             child_max.width = child_max.width.max(child_size.width);
             child_max.height = child_max.height.max(child_size.height);
-            child.set_position(Point::ZERO);
+            // Don't override position - let parent (HStack/VStack) control it
         }
 
         self.layout_with_child(child_max, constraints)

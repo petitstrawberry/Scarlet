@@ -57,6 +57,8 @@ pub mod client_msg {
     pub const FOCUS_WINDOW: u32 = 26;
     pub const GET_ACTIVE_APP: u32 = 27; // Get active app info for TaskBar
     pub const SET_WINDOW_HAS_ALPHA_CONTENT: u32 = 28; // Set whether window content has alpha channel
+    pub const SET_WINDOW_MENU_TITLES: u32 = 29; // Update menu titles for a window
+    pub const ACTIVATE_MENU_ITEM: u32 = 30; // Request menu item activation for a window
 }
 
 /// Message type IDs (server -> client).
@@ -77,6 +79,8 @@ pub mod server_msg {
     pub const WINDOW_LIST: u32 = 17;
     pub const FOCUS_CHANGED: u32 = 18;
     pub const ACTIVE_APP: u32 = 19; // Response to GET_ACTIVE_APP
+    pub const MENU_ITEM_ACTIVATED: u32 = 20; // Menu item activation for a window
+    pub const ACTIVE_APP_CHANGED: u32 = 21; // Broadcast when active application changes (normal windows only)
 }
 
 /// Flags for transient (parent/child) window behavior.
@@ -163,6 +167,11 @@ pub enum ClientMessageRef<'a> {
         width: u32,
         height: u32,
         window_type: u32, // Window type (0=Normal, 1=AlwaysOnTop, 2=Taskbar, 3=Desktop)
+        resizable: bool,
+        focus_on_create: bool,
+        active_on_focus: bool,
+        initial_x: Option<i32>,
+        initial_y: Option<i32>,
     },
     DestroyWindow {
         window_id: u32,
@@ -325,6 +334,14 @@ pub enum ClientMessageRef<'a> {
         window_id: u32,
         has_alpha: bool,
     },
+    SetWindowMenuTitles {
+        window_id: u32,
+        menu_titles: &'a [u8], // Format: "menu1|menu2|menu3"
+    },
+    ActivateMenuItem {
+        window_id: u32,
+        menu_item_id: &'a [u8],
+    },
 }
 
 /// Server->client messages.
@@ -379,7 +396,20 @@ pub enum ServerMessage {
         app_name_len: u32,
         title: [u8; 256],
         title_len: u32,
-        menu_titles: [u8; 512], // Format: "menu1|menu2|menu3"
+        menu_titles: [u8; 2048], // Format: "menu1|menu2|menu3"
+        menu_titles_len: u32,
+    },
+    /// Active application changed (normal window gained focus)
+    /// Broadcast to all clients for TaskBar menu updates
+    ActiveAppChanged {
+        window_id: u32,
+        app_id: [u8; 128],
+        app_id_len: u32,
+        app_name: [u8; 128],
+        app_name_len: u32,
+        title: [u8; 256],
+        title_len: u32,
+        menu_titles: [u8; 2048], // Format: "menu1|menu2|menu3"
         menu_titles_len: u32,
     },
     /// Active application information (response to GET_ACTIVE_APP)
@@ -388,8 +418,13 @@ pub enum ServerMessage {
         app_id_len: u32,
         app_name: [u8; 128],
         app_name_len: u32,
-        menu_titles: [u8; 512], // Format: "menu1|menu2|menu3"
+        menu_titles: [u8; 2048], // Format: "menu1|menu2|menu3"
         menu_titles_len: u32,
+    },
+    MenuItemActivated {
+        window_id: u32,
+        menu_item_id: [u8; 128],
+        menu_item_id_len: u32,
     },
     Error {
         code: u32,
@@ -420,7 +455,8 @@ pub fn parse_client_message<'a>(
     match msg_type {
         client_msg::CREATE_WINDOW => {
             // Payload: app_id_len (u32) + app_id_bytes + app_name_len (u32) + app_name_bytes
-            //          + menu_titles_len (u32) + menu_titles_bytes + width (u32) + height (u32) + window_type (u32)
+            //          + menu_titles_len (u32) + menu_titles_bytes + width (u32) + height (u32)
+            //          + window_type (u32) + resizable (u32, optional)
             if payload.len() < 12 {
                 return Err(ProtocolError::MalformedPayload);
             }
@@ -452,7 +488,11 @@ pub fn parse_client_message<'a>(
             ]) as usize;
             offset += 4 + menu_titles_len;
 
-            if payload.len() != offset + 12 {
+            if payload.len() != offset + 12
+                && payload.len() != offset + 16
+                && payload.len() != offset + 24
+                && payload.len() != offset + 32
+            {
                 return Err(ProtocolError::MalformedPayload);
             }
 
@@ -478,6 +518,49 @@ pub fn parse_client_message<'a>(
                 payload[offset + 10],
                 payload[offset + 11],
             ]);
+            let resizable = if payload.len() == offset + 16 || payload.len() == offset + 24 {
+                u32::from_le_bytes([
+                    payload[offset + 12],
+                    payload[offset + 13],
+                    payload[offset + 14],
+                    payload[offset + 15],
+                ]) != 0
+            } else {
+                true
+            };
+            let mut focus_on_create = true;
+            let mut active_on_focus = window_type == window_types::NORMAL;
+            if payload.len() == offset + 24 || payload.len() == offset + 32 {
+                focus_on_create = u32::from_le_bytes([
+                    payload[offset + 16],
+                    payload[offset + 17],
+                    payload[offset + 18],
+                    payload[offset + 19],
+                ]) != 0;
+                active_on_focus = u32::from_le_bytes([
+                    payload[offset + 20],
+                    payload[offset + 21],
+                    payload[offset + 22],
+                    payload[offset + 23],
+                ]) != 0;
+            }
+            let (initial_x, initial_y) = if payload.len() == offset + 32 {
+                let x = i32::from_le_bytes([
+                    payload[offset + 24],
+                    payload[offset + 25],
+                    payload[offset + 26],
+                    payload[offset + 27],
+                ]);
+                let y = i32::from_le_bytes([
+                    payload[offset + 28],
+                    payload[offset + 29],
+                    payload[offset + 30],
+                    payload[offset + 31],
+                ]);
+                (Some(x), Some(y))
+            } else {
+                (None, None)
+            };
             Ok(ClientMessageRef::CreateWindow {
                 app_id,
                 app_name,
@@ -485,6 +568,11 @@ pub fn parse_client_message<'a>(
                 width,
                 height,
                 window_type,
+                resizable,
+                focus_on_create,
+                active_on_focus,
+                initial_x,
+                initial_y,
             })
         }
         client_msg::DESTROY_WINDOW => {
@@ -763,6 +851,38 @@ pub fn parse_client_message<'a>(
                 has_alpha,
             })
         }
+        client_msg::SET_WINDOW_MENU_TITLES => {
+            // Payload: window_id (u32) + menu_titles_len (u32) + menu_titles_bytes
+            if payload.len() < 8 {
+                return Err(ProtocolError::MalformedPayload);
+            }
+            let window_id = u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
+            let titles_len =
+                u32::from_le_bytes([payload[4], payload[5], payload[6], payload[7]]) as usize;
+            if payload.len() != 8 + titles_len {
+                return Err(ProtocolError::MalformedPayload);
+            }
+            Ok(ClientMessageRef::SetWindowMenuTitles {
+                window_id,
+                menu_titles: &payload[8..],
+            })
+        }
+        client_msg::ACTIVATE_MENU_ITEM => {
+            // Payload: window_id (u32) + menu_item_id_len (u32) + menu_item_id_bytes
+            if payload.len() < 8 {
+                return Err(ProtocolError::MalformedPayload);
+            }
+            let window_id = u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
+            let menu_item_id_len =
+                u32::from_le_bytes([payload[4], payload[5], payload[6], payload[7]]) as usize;
+            if payload.len() != 8 + menu_item_id_len {
+                return Err(ProtocolError::MalformedPayload);
+            }
+            Ok(ClientMessageRef::ActivateMenuItem {
+                window_id,
+                menu_item_id: &payload[8..],
+            })
+        }
         _ => Err(ProtocolError::UnknownMessageType),
     }
 }
@@ -879,7 +999,7 @@ pub fn parse_server_message(msg_type: u32, payload: &[u8]) -> Result<ServerMessa
             // Payload: window_id (u32) + app_id_len (u32) + app_id (variable, max 128)
             //          + app_name_len (u32) + app_name (variable, max 128)
             //          + title_len (u32) + title (variable, max 256)
-            //          + menu_titles_len (u32) + menu_titles (variable, max 512)
+            //          + menu_titles_len (u32) + menu_titles (variable, max 2048)
             if payload.len() < 8 {
                 return Err(ProtocolError::MalformedPayload);
             }
@@ -943,13 +1063,123 @@ pub fn parse_server_message(msg_type: u32, payload: &[u8]) -> Result<ServerMessa
                 return Err(ProtocolError::MalformedPayload);
             }
 
-            let mut menu_titles = [0u8; 512];
+            let mut menu_titles = [0u8; 2048];
             if menu_titles_len > 0 {
                 menu_titles[..menu_titles_len]
                     .copy_from_slice(&payload[offset - menu_titles_len..offset]);
             }
 
             Ok(ServerMessage::FocusChanged {
+                window_id,
+                app_id,
+                app_id_len: app_id_len as u32,
+                app_name,
+                app_name_len: app_name_len as u32,
+                title,
+                title_len: title_len as u32,
+                menu_titles,
+                menu_titles_len: menu_titles_len as u32,
+            })
+        }
+        server_msg::ACTIVE_APP_CHANGED => {
+            // Payload format is the same as FOCUS_CHANGED
+            if payload.len() < 4 {
+                return Err(ProtocolError::MalformedPayload);
+            }
+            let window_id = u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
+
+            let mut offset = 4;
+
+            let app_id_len = if offset + 4 <= payload.len() {
+                let len = u32::from_le_bytes([
+                    payload[offset],
+                    payload[offset + 1],
+                    payload[offset + 2],
+                    payload[offset + 3],
+                ]) as usize;
+                offset += 4;
+                len
+            } else {
+                return Err(ProtocolError::MalformedPayload);
+            };
+
+            if offset + app_id_len > payload.len() {
+                return Err(ProtocolError::MalformedPayload);
+            }
+            let mut app_id = [0u8; 128];
+            if app_id_len > 0 {
+                app_id[..app_id_len].copy_from_slice(&payload[offset..offset + app_id_len]);
+            }
+            offset += app_id_len;
+
+            let app_name_len = if offset + 4 <= payload.len() {
+                let len = u32::from_le_bytes([
+                    payload[offset],
+                    payload[offset + 1],
+                    payload[offset + 2],
+                    payload[offset + 3],
+                ]) as usize;
+                offset += 4;
+                len
+            } else {
+                return Err(ProtocolError::MalformedPayload);
+            };
+
+            if offset + app_name_len > payload.len() {
+                return Err(ProtocolError::MalformedPayload);
+            }
+            let mut app_name = [0u8; 128];
+            if app_name_len > 0 {
+                app_name[..app_name_len].copy_from_slice(&payload[offset..offset + app_name_len]);
+            }
+            offset += app_name_len;
+
+            let title_len = if offset + 4 <= payload.len() {
+                let len = u32::from_le_bytes([
+                    payload[offset],
+                    payload[offset + 1],
+                    payload[offset + 2],
+                    payload[offset + 3],
+                ]) as usize;
+                offset += 4;
+                len
+            } else {
+                return Err(ProtocolError::MalformedPayload);
+            };
+
+            if offset + title_len > payload.len() {
+                return Err(ProtocolError::MalformedPayload);
+            }
+            let mut title = [0u8; 256];
+            if title_len > 0 {
+                title[..title_len].copy_from_slice(&payload[offset..offset + title_len]);
+            }
+            offset += title_len;
+
+            let menu_titles_len = if offset + 4 <= payload.len() {
+                let len = u32::from_le_bytes([
+                    payload[offset],
+                    payload[offset + 1],
+                    payload[offset + 2],
+                    payload[offset + 3],
+                ]) as usize;
+                offset += 4;
+                len
+            } else {
+                return Err(ProtocolError::MalformedPayload);
+            };
+
+            if offset + menu_titles_len > payload.len() {
+                return Err(ProtocolError::MalformedPayload);
+            }
+
+            let mut menu_titles = [0u8; 2048];
+            if menu_titles_len > 0 {
+                menu_titles[..menu_titles_len]
+                    .copy_from_slice(&payload[offset..offset + menu_titles_len]);
+            }
+
+            Ok(ServerMessage::ActiveAppChanged {
                 window_id,
                 app_id,
                 app_id_len: app_id_len as u32,
@@ -1007,7 +1237,7 @@ pub fn parse_server_message(msg_type: u32, payload: &[u8]) -> Result<ServerMessa
         server_msg::ACTIVE_APP => {
             // Payload: app_id_len (u32) + app_id (variable, max 128)
             //          + app_name_len (u32) + app_name (variable, max 128)
-            //          + menu_titles_len (u32) + menu_titles (variable, max 512)
+            //          + menu_titles_len (u32) + menu_titles (variable, max 2048)
             if payload.len() < 4 {
                 return Err(ProtocolError::MalformedPayload);
             }
@@ -1053,7 +1283,7 @@ pub fn parse_server_message(msg_type: u32, payload: &[u8]) -> Result<ServerMessa
                 return Err(ProtocolError::MalformedPayload);
             }
 
-            let mut menu_titles = [0u8; 512];
+            let mut menu_titles = [0u8; 2048];
             if menu_titles_len > 0 {
                 menu_titles[..menu_titles_len]
                     .copy_from_slice(&payload[offset2 + 4..offset2 + 4 + menu_titles_len]);
@@ -1066,6 +1296,33 @@ pub fn parse_server_message(msg_type: u32, payload: &[u8]) -> Result<ServerMessa
                 app_name_len: app_name_len as u32,
                 menu_titles,
                 menu_titles_len: menu_titles_len as u32,
+            })
+        }
+        server_msg::MENU_ITEM_ACTIVATED => {
+            // Payload: window_id (u32) + menu_item_id_len (u32) + menu_item_id (variable, max 128)
+            if payload.len() < 8 {
+                return Err(ProtocolError::MalformedPayload);
+            }
+            let window_id = u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
+            let menu_item_id_len =
+                u32::from_le_bytes([payload[4], payload[5], payload[6], payload[7]]) as usize;
+            if payload.len() != 8 + menu_item_id_len {
+                return Err(ProtocolError::MalformedPayload);
+            }
+            let mut menu_item_id = [0u8; 128];
+            if menu_item_id_len > 0 {
+                let capped_len = menu_item_id_len.min(menu_item_id.len());
+                menu_item_id[..capped_len].copy_from_slice(&payload[8..8 + capped_len]);
+                return Ok(ServerMessage::MenuItemActivated {
+                    window_id,
+                    menu_item_id,
+                    menu_item_id_len: capped_len as u32,
+                });
+            }
+            Ok(ServerMessage::MenuItemActivated {
+                window_id,
+                menu_item_id,
+                menu_item_id_len: 0,
             })
         }
         _ => Err(ProtocolError::UnknownMessageType),
@@ -1084,6 +1341,9 @@ pub fn parse_server_message(msg_type: u32, payload: &[u8]) -> Result<ServerMessa
 /// - width (u32)
 /// - height (u32)
 /// - window_type (u32)
+/// - resizable (u32, 0=false, 1=true)
+/// - focus_on_create (u32, 0=false, 1=true)
+/// - active_on_focus (u32, 0=false, 1=true)
 pub fn payload_create_window(
     app_id: &[u8],
     app_name: &[u8],
@@ -1091,6 +1351,9 @@ pub fn payload_create_window(
     width: u32,
     height: u32,
     window_type: u32,
+    resizable: bool,
+    focus_on_create: bool,
+    active_on_focus: bool,
 ) -> Vec<u8> {
     let mut payload = Vec::new();
     payload.extend_from_slice(&(app_id.len() as u32).to_le_bytes());
@@ -1102,6 +1365,43 @@ pub fn payload_create_window(
     payload.extend_from_slice(&width.to_le_bytes());
     payload.extend_from_slice(&height.to_le_bytes());
     payload.extend_from_slice(&window_type.to_le_bytes());
+    payload.extend_from_slice(&(resizable as u32).to_le_bytes());
+    payload.extend_from_slice(&(focus_on_create as u32).to_le_bytes());
+    payload.extend_from_slice(&(active_on_focus as u32).to_le_bytes());
+    payload
+}
+
+/// Build payload for client->server `CREATE_WINDOW` with initial position.
+///
+/// Payload format extends `payload_create_window` with:
+/// - initial_x (i32)
+/// - initial_y (i32)
+pub fn payload_create_window_with_position(
+    app_id: &[u8],
+    app_name: &[u8],
+    menu_titles: &[u8],
+    width: u32,
+    height: u32,
+    window_type: u32,
+    resizable: bool,
+    focus_on_create: bool,
+    active_on_focus: bool,
+    initial_x: i32,
+    initial_y: i32,
+) -> Vec<u8> {
+    let mut payload = payload_create_window(
+        app_id,
+        app_name,
+        menu_titles,
+        width,
+        height,
+        window_type,
+        resizable,
+        focus_on_create,
+        active_on_focus,
+    );
+    payload.extend_from_slice(&initial_x.to_le_bytes());
+    payload.extend_from_slice(&initial_y.to_le_bytes());
     payload
 }
 
@@ -1116,6 +1416,34 @@ pub fn payload_set_window_title(window_id: u32, title: &[u8]) -> Vec<u8> {
     out.extend_from_slice(&window_id.to_le_bytes());
     out.extend_from_slice(&(title.len() as u32).to_le_bytes());
     out.extend_from_slice(title);
+    out
+}
+
+/// Build payload for client->server `SET_WINDOW_MENU_TITLES`.
+///
+/// Payload format:
+/// - window_id (u32)
+/// - menu_titles_len (u32)
+/// - menu_titles_bytes (variable, format: "menu1|menu2|menu3")
+pub fn payload_set_window_menu_titles(window_id: u32, menu_titles: &[u8]) -> Vec<u8> {
+    let mut out = Vec::new();
+    out.extend_from_slice(&window_id.to_le_bytes());
+    out.extend_from_slice(&(menu_titles.len() as u32).to_le_bytes());
+    out.extend_from_slice(menu_titles);
+    out
+}
+
+/// Build payload for client->server `ACTIVATE_MENU_ITEM`.
+///
+/// Payload format:
+/// - window_id (u32)
+/// - menu_item_id_len (u32)
+/// - menu_item_id_bytes (variable)
+pub fn payload_activate_menu_item(window_id: u32, menu_item_id: &[u8]) -> Vec<u8> {
+    let mut out = Vec::new();
+    out.extend_from_slice(&window_id.to_le_bytes());
+    out.extend_from_slice(&(menu_item_id.len() as u32).to_le_bytes());
+    out.extend_from_slice(menu_item_id);
     out
 }
 
@@ -1535,7 +1863,7 @@ pub fn payload_focus_window(window_id: u32) -> Vec<u8> {
 /// - title_len (u32)
 /// - title_bytes (variable, max 256)
 /// - menu_titles_len (u32)
-/// - menu_titles_bytes (variable, max 512, format: "menu1|menu2|menu3")
+/// - menu_titles_bytes (variable, max 2048, format: "menu1|menu2|menu3")
 pub fn payload_focus_changed(
     window_id: u32,
     app_id: &[u8],
@@ -1558,10 +1886,48 @@ pub fn payload_focus_changed(
     payload.extend_from_slice(&(title_len as u32).to_le_bytes());
     payload.extend_from_slice(&title[..title_len]);
 
-    let menu_titles_len = menu_titles.len().min(512);
+    let menu_titles_len = menu_titles.len().min(2048);
     payload.extend_from_slice(&(menu_titles_len as u32).to_le_bytes());
     payload.extend_from_slice(&menu_titles[..menu_titles_len]);
 
+    payload
+}
+
+/// Build payload for server->client `ACTIVE_APP_CHANGED`.
+///
+/// Broadcast when the active application changes (normal window gains focus).
+/// Payload format is the same as FOCUS_CHANGED:
+/// - window_id (u32)
+/// - app_id_len (u32)
+/// - app_id_bytes (variable, max 128)
+/// - app_name_len (u32)
+/// - app_name_bytes (variable, max 128)
+/// - title_len (u32)
+/// - title_bytes (variable, max 256)
+/// - menu_titles_len (u32)
+/// - menu_titles_bytes (variable, max 2048, format: "menu1|menu2|menu3")
+pub fn payload_active_app_changed(
+    window_id: u32,
+    app_id: &[u8],
+    app_name: &[u8],
+    title: &[u8],
+    menu_titles: &[u8],
+) -> Vec<u8> {
+    payload_focus_changed(window_id, app_id, app_name, title, menu_titles)
+}
+
+/// Build payload for server->client `MENU_ITEM_ACTIVATED`.
+///
+/// Payload format:
+/// - window_id (u32)
+/// - menu_item_id_len (u32, max 128)
+/// - menu_item_id_bytes (variable)
+pub fn payload_menu_item_activated(window_id: u32, menu_item_id: &[u8]) -> Vec<u8> {
+    let mut payload = Vec::new();
+    let menu_item_id_len = menu_item_id.len().min(128);
+    payload.extend_from_slice(&window_id.to_le_bytes());
+    payload.extend_from_slice(&(menu_item_id_len as u32).to_le_bytes());
+    payload.extend_from_slice(&menu_item_id[..menu_item_id_len]);
     payload
 }
 

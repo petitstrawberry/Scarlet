@@ -161,17 +161,16 @@ impl<V: View + Clone> Element for ComponentElement<V> {
     }
 
     fn unmount(&mut self) {
-        // Unmount the child
+        // Unmount the child first
         if let Some(ref mut child) = self.child {
             child.unmount();
         }
 
-        // Unsubscribe from all Listenables
-        // Note: We need to get the listenables again to call unsubscribe
-        // In the current design, State doesn't store a back-reference to subscribers,
-        // so we need to keep track of subscriptions differently
-        // For now, we'll clear the subscription list
-        // TODO: Implement proper cleanup when we have access to State references
+        // Unsubscribe from all Listenables to prevent stale callbacks
+        let listenables = self.view.listenables();
+        for (listenable, subscription_id) in listenables.iter().zip(self.subscriptions.iter()) {
+            listenable.unsubscribe(*subscription_id);
+        }
         self.subscriptions.clear();
     }
 
@@ -229,5 +228,13 @@ impl<V: View + Clone> Element for ComponentElement<V> {
         } else {
             false
         }
+    }
+
+    fn fill_width(&self) -> bool {
+        self.child.as_ref().map(|child| child.fill_width()).unwrap_or(false)
+    }
+
+    fn fill_height(&self) -> bool {
+        self.child.as_ref().map(|child| child.fill_height()).unwrap_or(false)
     }
 }

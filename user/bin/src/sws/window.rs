@@ -121,6 +121,8 @@ pub struct Window {
     pub opacity: f32,
     /// Whether the window can be resized by the user via interactive resize
     pub resizable: bool,
+    /// Whether focusing this window should make it the active application
+    pub active_on_focus: bool,
     /// Whether the window content contains alpha channel (semi-transparent pixels)
     ///
     /// This is separate from window.opacity - this controls whether pixel alpha
@@ -129,6 +131,11 @@ pub struct Window {
     /// - false: Window content is fully opaque, use fast copy path (default)
     /// - true: Window content has semi-transparent pixels, use alpha blending
     pub has_alpha_content: bool,
+    /// Whether focusing this window should raise it in Z-order
+    ///
+    /// - true: Focusing raises the window to top of its layer (Normal, Taskbar, AlwaysOnTop)
+    /// - false: Focusing does not change Z-order (Desktop, wallpapers)
+    pub raise_on_focus: bool,
 }
 
 #[allow(dead_code)]
@@ -157,8 +164,10 @@ impl Window {
             maximized: false,
             saved_geometry: None,
             opacity: 1.0,
-            resizable: true,          // Default to resizable
+            resizable: true, // Default to resizable
+            active_on_focus: true,
             has_alpha_content: false, // Default to opaque content
+            raise_on_focus: true,     // Default: Normal windows raise on focus
         }
     }
 
@@ -190,8 +199,10 @@ impl Window {
             maximized: false,
             saved_geometry: None,
             opacity: 1.0,
-            resizable: true,          // Default to resizable
+            resizable: true, // Default to resizable
+            active_on_focus: true,
             has_alpha_content: false, // Default to opaque content
+            raise_on_focus: true,     // Default: Normal windows raise on focus
         }
     }
 
@@ -249,8 +260,10 @@ impl Window {
             maximized: false,
             saved_geometry: None,
             opacity: 1.0,
-            resizable: true,          // Default to resizable
+            resizable: true, // Default to resizable
+            active_on_focus: true,
             has_alpha_content: false, // Default to opaque content
+            raise_on_focus: true,     // Default: Normal windows raise on focus
         })
     }
 
@@ -374,9 +387,6 @@ impl WindowManager {
         let window = Window::new_with_shm(id, x, y, width, height)?;
         self.windows.push(window);
 
-        // Focus the new window
-        self.focus_window(id);
-
         Ok(id)
     }
 
@@ -424,13 +434,12 @@ impl WindowManager {
             maximized: false,
             saved_geometry: None,
             opacity: 1.0,
-            resizable: true,          // Default to resizable
+            resizable: true, // Default to resizable
+            active_on_focus: true,
             has_alpha_content: false, // Default to opaque content
+            raise_on_focus: true,     // Default: Normal windows raise on focus
         };
         self.windows.push(window);
-
-        // Focus the new window
-        self.focus_window(id);
 
         Ok(id)
     }
@@ -505,13 +514,13 @@ impl WindowManager {
     }
 
     /// Check if a window type should accept keyboard focus
-    /// Taskbar and Desktop windows are global UI elements that don't participate in normal focus management
+    /// Desktop windows can accept focus (to receive events) but won't raise (raise_on_focus=false)
     pub fn window_type_accepts_focus(window_type: WindowType) -> bool {
         match window_type {
             WindowType::Normal => true,
             WindowType::AlwaysOnTop => true,
-            WindowType::Taskbar => false,
-            WindowType::Desktop => false,
+            WindowType::Taskbar => true,
+            WindowType::Desktop => true, // Desktop can now accept focus (for events), but won't raise
         }
     }
 
@@ -885,14 +894,61 @@ impl WindowManager {
                     w.resizable = true;
                 }
             }
+            // Set raise_on_focus behavior based on window type
+            // Desktop windows should NOT raise when focused (they stay in background)
+            match window_type {
+                WindowType::Desktop => {
+                    w.raise_on_focus = false;
+                }
+                WindowType::Normal | WindowType::Taskbar | WindowType::AlwaysOnTop => {
+                    w.raise_on_focus = true;
+                }
+            }
             println!(
-                "[WindowManager] Window #{} type set to {:?}, resizable={}",
-                id, window_type, w.resizable
+                "[WindowManager] Window #{} type set to {:?}, resizable={}, raise_on_focus={}",
+                id, window_type, w.resizable, w.raise_on_focus
             );
+
+            // Rebuild Z-order to maintain proper layering: Desktop < Normal < Taskbar < AlwaysOnTop
+            self.rebuild_z_order_for_type_change(id, window_type);
+
             true
         } else {
             false
         }
+    }
+
+    /// Internal helper: rebuild Z-order after window type change
+    /// This ensures windows are in the correct layer: Desktop < Normal < Taskbar < AlwaysOnTop
+    fn rebuild_z_order_for_type_change(&mut self, _id: WindowId, _new_type: WindowType) {
+        let old = core::mem::take(&mut self.windows);
+        let mut desktop: Vec<Window> = Vec::new();
+        let mut normal: Vec<Window> = Vec::new();
+        let mut taskbar: Vec<Window> = Vec::new();
+        let mut always_on_top: Vec<Window> = Vec::new();
+
+        // Sort windows into layers by type
+        for w in old {
+            match w.window_type {
+                WindowType::Desktop => desktop.push(w),
+                WindowType::Normal => normal.push(w),
+                WindowType::Taskbar => taskbar.push(w),
+                WindowType::AlwaysOnTop => always_on_top.push(w),
+            }
+        }
+
+        // Reconstruct in proper Z-order: desktop -> normal -> taskbar -> always_on_top
+        self.windows = desktop;
+        self.windows.extend(normal);
+        self.windows.extend(taskbar);
+        self.windows.extend(always_on_top);
+
+        println!("[WindowManager] Z-order rebuilt after type change");
+        print!("[WindowManager] Current Z-order (bottom to top): ");
+        for w in &self.windows {
+            print!("#{}({:?}) ", w.id, w.window_type);
+        }
+        println!();
     }
 
     /// Set window opacity (0.0 = transparent, 1.0 = opaque)
@@ -943,10 +999,19 @@ impl WindowManager {
     /// Raise window to top, respecting window types
     /// Desktop < Normal < Taskbar < AlwaysOnTop
     pub fn raise_to_top_with_type(&mut self, id: WindowId) {
-        let window_type = match self.get_window(id) {
-            Some(w) => w.window_type,
+        let (window_type, raise_on_focus) = match self.get_window(id) {
+            Some(w) => (w.window_type, w.raise_on_focus),
             None => return,
         };
+
+        // If raise_on_focus is false, don't raise the window (e.g., Desktop backgrounds)
+        if !raise_on_focus {
+            println!(
+                "[WindowManager] Window #{} has raise_on_focus=false, not raising",
+                id
+            );
+            return;
+        }
 
         let root = self.top_level_ancestor(id);
         println!(
@@ -986,29 +1051,37 @@ impl WindowManager {
             group.insert(0, root_w);
         }
 
-        // Reconstruct in proper Z-order: desktop -> normal -> group (if normal type) -> taskbar -> always_on_top
-        self.windows = desktop;
-
+        // Reconstruct in proper Z-order: desktop -> normal -> taskbar -> always_on_top
+        // Each window type is constrained to its own layer
         match window_type {
             WindowType::Desktop => {
+                // Desktop: put group at BOTTOM of Desktop layer (below all other Desktop windows)
+                // This ensures focused Desktop stays below all Normal windows
                 self.windows.extend(group);
+                self.windows.extend(desktop);
                 self.windows.extend(normal);
                 self.windows.extend(taskbar);
                 self.windows.extend(always_on_top);
             }
             WindowType::Normal => {
+                // Normal: put desktop, then normal, then group at top of Normal layer
+                self.windows = desktop;
                 self.windows.extend(normal);
                 self.windows.extend(group);
                 self.windows.extend(taskbar);
                 self.windows.extend(always_on_top);
             }
             WindowType::Taskbar => {
+                // Taskbar: desktop, normal, taskbar, group at top of Taskbar layer
+                self.windows = desktop;
                 self.windows.extend(normal);
                 self.windows.extend(taskbar);
                 self.windows.extend(group);
                 self.windows.extend(always_on_top);
             }
             WindowType::AlwaysOnTop => {
+                // AlwaysOnTop: desktop, normal, taskbar, always_on_top, group at top
+                self.windows = desktop;
                 self.windows.extend(normal);
                 self.windows.extend(taskbar);
                 self.windows.extend(always_on_top);
