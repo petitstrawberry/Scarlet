@@ -224,11 +224,11 @@ args = ["clean"]
 
 [tasks.test-riscv64]
 description = "Run tests (RISC-V)"
-dependencies = ["test-kernel-riscv64"]
+dependencies = ["test-kernel-riscv64", "test-userland-std-riscv64"]
 
 [tasks.test-aarch64]
 description = "Run tests (AArch64)"
-dependencies = ["test-kernel-aarch64"]
+dependencies = ["test-kernel-aarch64", "test-userland-std-aarch64"]
 
 [tasks.test-kernel-riscv64]
 description = "Run kernel tests (RISC-V)"
@@ -245,6 +245,26 @@ env = { "CARGO_TARGET_AARCH64_UNKNOWN_NONE_ELF_RUNNER" = "tools/test_aarch64.sh"
 command = "cargo"
 args = ["test", "--target", "targets/aarch64-unknown-none-elf.json"]
 dependencies = ["build-initramfs-debug-aarch64"]
+
+[tasks.test-userland-std-riscv64]
+description = "Run scarlet_std library tests (RISC-V)"
+command = "bash"
+args = ["tools/test-userland.sh", "--arch", "riscv64", "--lib", "std"]
+
+[tasks.test-userland-std-aarch64]
+description = "Run scarlet_std library tests (AArch64)"
+command = "bash"
+args = ["tools/test-userland.sh", "--arch", "aarch64", "--lib", "std"]
+
+[tasks.test-userland-ui-riscv64]
+description = "Run scarlet-ui library tests (RISC-V)"
+command = "bash"
+args = ["tools/test-userland.sh", "--arch", "riscv64", "--lib", "ui"]
+
+[tasks.test-userland-ui-aarch64]
+description = "Run scarlet-ui library tests (AArch64)"
+command = "bash"
+args = ["tools/test-userland.sh", "--arch", "aarch64", "--lib", "ui"]
 
 [tasks.run-riscv64]
 description = "Run the kernel in release mode (RISC-V)"

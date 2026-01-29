@@ -1,8 +1,11 @@
 [build]
 target = "../../targets/riscv64gc-unknown-scarlet-elf.json"
 
-[target.'cfg(all())']
+[target.'cfg(target_arch = "riscv64")']
 rustflags = ["-C", "link-arg=-T../../lds/user.ld"]
+
+[target.'cfg(target_arch = "aarch64")']
+rustflags = ["-C", "link-arg=-T../../lds/user_aarch64.ld"]
 
 [unstable]
 build-std = ["core", "compiler_builtins", "alloc"]

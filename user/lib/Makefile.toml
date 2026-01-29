@@ -112,32 +112,40 @@ script = [
 
 [tasks.test]
 description = "Test all user libraries"
-dependencies = ["test-std-riscv64", "test-ui-riscv64"]
+dependencies = ["test-riscv64"]
+
+[tasks.test-riscv64]
+description = "Test user libraries (RISC-V)"
+dependencies = ["test-std-riscv64"]
+
+[tasks.test-aarch64]
+description = "Test user libraries (AArch64)"
+dependencies = ["test-std-aarch64"]
 
 [tasks.test-std-riscv64]
-description = "Build and prepare scarlet_std tests (RISC-V)"
+description = "Build scarlet_std tests (RISC-V)"
 cwd = "std"
 command = "cargo"
 args = ["test", "--no-run", "--features", "test_harness", "--target", "../../targets/riscv64gc-unknown-scarlet-elf-test.json"]
 
 [tasks.test-ui-riscv64]
-description = "Build and prepare scarlet-ui tests (RISC-V)"
+description = "Build scarlet-ui tests (RISC-V)"
 cwd = "scarlet-ui"
 command = "cargo"
-args = ["test", "--no-run", "--target", "../../targets/riscv64gc-unknown-scarlet-elf.json"]
+args = ["test", "--no-run", "--features", "test_harness", "--target", "../../targets/riscv64gc-unknown-scarlet-elf-test.json"]
 dependencies = ["test-std-riscv64"]
 
 [tasks.test-std-aarch64]
-description = "Build and prepare scarlet_std tests (AArch64)"
+description = "Build scarlet_std tests (AArch64)"
 cwd = "std"
 command = "cargo"
-args = ["test", "--no-run", "--target", "../../targets/aarch64-unknown-scarlet-elf.json"]
+args = ["test", "--no-run", "--features", "test_harness", "--target", "../../targets/aarch64-unknown-scarlet-elf-test.json"]
 
 [tasks.test-ui-aarch64]
-description = "Build and prepare scarlet-ui tests (AArch64)"
+description = "Build scarlet-ui tests (AArch64)"
 cwd = "scarlet-ui"
 command = "cargo"
-args = ["test", "--no-run", "--target", "../../targets/aarch64-unknown-scarlet-elf.json"]
+args = ["test", "--no-run", "--features", "test_harness", "--target", "../../targets/aarch64-unknown-scarlet-elf-test.json"]
 dependencies = ["test-std-aarch64"]
 
 [tasks.doc]
