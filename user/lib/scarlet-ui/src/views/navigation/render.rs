@@ -113,188 +113,8 @@ impl NavigationViewRenderObject {
         self.link_count
     }
 
-    /// Render an icon at the given position
-    fn render_icon(&self, canvas: &mut graphics::Canvas, icon: &Icon, x: i32, y: i32, color: Color) {
-        let size = self.icon_size as i32;
-
-        match icon {
-            Icon::Home => {
-                // Draw house shape
-                // Roof (triangle)
-                let center_x = x + size / 2;
-                let roof_top = y + 2;
-                let roof_bottom = y + size / 2 + 2;
-                canvas.draw_line(center_x - size / 2, roof_bottom, center_x, roof_top, color);
-                canvas.draw_line(center_x, roof_top, center_x + size / 2, roof_bottom, color);
-
-                // Body (rectangle)
-                let body_left = center_x - size / 3;
-                let body_right = center_x + size / 3;
-                let body_bottom = y + size - 2;
-                canvas.draw_line(body_left, roof_bottom, body_left, body_bottom, color);
-                canvas.draw_line(body_right, roof_bottom, body_right, body_bottom, color);
-                canvas.draw_line(body_left, body_bottom, body_right, body_bottom, color);
-            }
-            Icon::Settings => {
-                // Draw gear shape (simplified as circle with spokes)
-                let center_x = x + size / 2;
-                let center_y = y + size / 2;
-                let radius = size / 2 - 2;
-
-                // Draw circle (approximate with lines)
-                let num_segments = 8;
-                for i in 0..num_segments {
-                    let angle1 = (i as f32 * 2.0 * core::f32::consts::PI) / num_segments as f32;
-                    let angle2 = ((i + 1) as f32 * 2.0 * core::f32::consts::PI) / num_segments as f32;
-
-                    let x1 = center_x as f32 + radius as f32 * libm::cosf(angle1);
-                    let y1 = center_y as f32 + radius as f32 * libm::sinf(angle1);
-                    let x2 = center_x as f32 + radius as f32 * libm::cosf(angle2);
-                    let y2 = center_y as f32 + radius as f32 * libm::sinf(angle2);
-
-                    canvas.draw_line(x1 as i32, y1 as i32, x2 as i32, y2 as i32, color);
-                }
-
-                // Draw spokes
-                canvas.draw_line(center_x, center_y - radius, center_x, center_y + radius, color);
-                canvas.draw_line(center_x - radius, center_y, center_x + radius, center_y, color);
-            }
-            Icon::Info => {
-                // Draw circle with 'i'
-                let center_x = x + size / 2;
-                let center_y = y + size / 2;
-                let radius = size / 2 - 2;
-
-                // Draw circle
-                let num_segments = 12;
-                for i in 0..num_segments {
-                    let angle1 = (i as f32 * 2.0 * core::f32::consts::PI) / num_segments as f32;
-                    let angle2 = ((i + 1) as f32 * 2.0 * core::f32::consts::PI) / num_segments as f32;
-
-                    let x1 = center_x as f32 + radius as f32 * libm::cosf(angle1);
-                    let y1 = center_y as f32 + radius as f32 * libm::sinf(angle1);
-                    let x2 = center_x as f32 + radius as f32 * libm::cosf(angle2);
-                    let y2 = center_y as f32 + radius as f32 * libm::sinf(angle2);
-
-                    canvas.draw_line(x1 as i32, y1 as i32, x2 as i32, y2 as i32, color);
-                }
-
-                // Draw 'i' dot (small circle)
-                let dot_radius = 1;
-                canvas.draw_line(center_x, center_y - 2, center_x + 1, center_y - 2, color);
-
-                // Draw 'i' line
-                canvas.draw_line(center_x, center_y, center_x, center_y + radius / 2, color);
-            }
-            Icon::Search => {
-                // Draw magnifying glass
-                let center_x = x + size / 2 - 2;
-                let center_y = y + size / 2 - 2;
-                let radius = size / 3;
-
-                // Draw circle
-                let num_segments = 12;
-                for i in 0..num_segments {
-                    let angle1 = (i as f32 * 2.0 * core::f32::consts::PI) / num_segments as f32;
-                    let angle2 = ((i + 1) as f32 * 2.0 * core::f32::consts::PI) / num_segments as f32;
-
-                    let x1 = center_x as f32 + radius as f32 * libm::cosf(angle1);
-                    let y1 = center_y as f32 + radius as f32 * libm::sinf(angle1);
-                    let x2 = center_x as f32 + radius as f32 * libm::cosf(angle2);
-                    let y2 = center_y as f32 + radius as f32 * libm::sinf(angle2);
-
-                    canvas.draw_line(x1 as i32, y1 as i32, x2 as i32, y2 as i32, color);
-                }
-
-                // Draw handle
-                let handle_start_x = center_x + (radius as f32 * 0.707) as i32;
-                let handle_start_y = center_y + (radius as f32 * 0.707) as i32;
-                let handle_end_x = handle_start_x + 4;
-                let handle_end_y = handle_start_y + 4;
-                canvas.draw_line(handle_start_x, handle_start_y, handle_end_x, handle_end_y, color);
-            }
-            Icon::User => {
-                // Draw person shape
-                let center_x = x + size / 2;
-
-                // Head (circle)
-                let head_center_y = y + size / 3;
-                let head_radius = size / 5;
-
-                let num_segments = 8;
-                for i in 0..num_segments {
-                    let angle1 = (i as f32 * 2.0 * core::f32::consts::PI) / num_segments as f32;
-                    let angle2 = ((i + 1) as f32 * 2.0 * core::f32::consts::PI) / num_segments as f32;
-
-                    let x1 = center_x as f32 + head_radius as f32 * libm::cosf(angle1);
-                    let y1 = head_center_y as f32 + head_radius as f32 * libm::sinf(angle1);
-                    let x2 = center_x as f32 + head_radius as f32 * libm::cosf(angle2);
-                    let y2 = head_center_y as f32 + head_radius as f32 * libm::sinf(angle2);
-
-                    canvas.draw_line(x1 as i32, y1 as i32, x2 as i32, y2 as i32, color);
-                }
-
-                // Body (rounded rectangle, simplified as arc)
-                let body_top = head_center_y + head_radius + 1;
-                let body_bottom = y + size - 2;
-                let body_width = size / 2 + 2;
-
-                canvas.draw_line(center_x - body_width / 2, body_bottom, center_x + body_width / 2, body_bottom, color);
-                canvas.draw_line(center_x - body_width / 2, body_top, center_x - body_width / 2, body_bottom, color);
-                canvas.draw_line(center_x + body_width / 2, body_top, center_x + body_width / 2, body_bottom, color);
-
-                // Shoulders (arc approximation)
-                canvas.draw_line(center_x - body_width / 2, body_top, center_x - 2, body_top - 2, color);
-                canvas.draw_line(center_x + body_width / 2, body_top, center_x + 2, body_top - 2, color);
-            }
-            Icon::File => {
-                // Draw document shape
-                let left = x + 3;
-                let right = x + size - 3;
-                let top = y + 2;
-                let bottom = y + size - 2;
-
-                // Rectangle
-                canvas.draw_line(left, top, right, top, color);
-                canvas.draw_line(right, top, right, bottom, color);
-                canvas.draw_line(right, bottom, left, bottom, color);
-                canvas.draw_line(left, bottom, left, top, color);
-
-                // Folded corner
-                canvas.draw_line(right - 3, top, right, top + 3, color);
-
-                // Lines for text
-                let line_spacing = 3;
-                let mut line_y = top + 5;
-                while line_y < bottom - 3 {
-                    canvas.draw_line(left + 3, line_y, right - 3, line_y, color);
-                    line_y += line_spacing;
-                }
-            }
-            Icon::Folder => {
-                // Draw folder shape
-                let left = x + 2;
-                let right = x + size - 2;
-                let top = y + 4;
-                let bottom = y + size - 2;
-
-                // Tab
-                let tab_right = left + (size / 3);
-                canvas.draw_line(left, top - 2, tab_right, top - 2, color);
-                canvas.draw_line(tab_right, top - 2, tab_right + 2, top, color);
-
-                // Back
-                canvas.draw_line(left, top - 2, left, bottom, color);
-                canvas.draw_line(right, top, right, bottom, color);
-                canvas.draw_line(left, bottom, right, bottom, color);
-
-                // Front
-                canvas.draw_line(left, top, right, top, color);
-            }
-        }
-    }
-
     /// Render a single navigation item
+    #[allow(dead_code)]
     fn render_item(
         &self,
         canvas: &mut graphics::Canvas,
@@ -318,15 +138,8 @@ impl NavigationViewRenderObject {
 
         canvas.fill_rect(0, y, width as u32, height as u32, background_color);
 
-        // Icon
-        let icon_x = (self.item_padding) as i32 + 4;
-        let icon_y = y + (height - self.icon_size as i32) / 2;
-        let icon_color = if is_selected {
-            Color { r: 1.0, g: 1.0, b: 1.0, a: 1.0 }
-        } else {
-            Color { r: 0.3, g: 0.3, b: 0.3, a: 1.0 }
-        };
-        self.render_icon(canvas, icon, icon_x, icon_y, icon_color);
+        // Icon (will be provided separately)
+        let _icon = icon;
 
         // Label
         let text_color = if is_selected {
@@ -335,7 +148,7 @@ impl NavigationViewRenderObject {
             Color { r: 0.2, g: 0.2, b: 0.2, a: 1.0 }
         };
 
-        let text_x = icon_x + self.icon_size as i32 + 8;
+        let text_x = (self.item_padding) as i32 + 8;
         let text_y = y + (height - (self.font_size * 1.2) as i32) / 2;
         canvas.draw_text_sized(text_x, text_y, label, text_color, self.font_size);
 
@@ -391,7 +204,7 @@ impl ElementRenderObject for NavigationViewRenderObject {
             content_width, content_width,
             0.0, constraints.max_height,
         );
-        let content_height = if let Some(content) = children.get_mut(1) {
+        let _content_height = if let Some(content) = children.get_mut(1) {
             content.layout(content_constraints)
         } else {
             Size::new(content_width, constraints.max_height)
@@ -456,11 +269,11 @@ impl ElementRenderObject for NavigationViewRenderObject {
             let mut data = buffer.data_mut();
             let mut canvas = graphics::Canvas::new(&mut data, width, height);
 
-            // Fill background
-            let bg_color = Color { r: 0.95, g: 0.95, b: 0.97, a: 1.0 };
+            // Fill background (lighter, semi-transparent look)
+            let palette = ColorPalette::default();
+            let bg_color = palette.background_secondary();
             canvas.fill_rect(0, 0, width, height, bg_color);
 
-            // Render items
             // Clone values we need before the loop to avoid borrow issues
             let link_count = self.link_count;
             let selected = self.selected_index.get();
@@ -480,52 +293,34 @@ impl ElementRenderObject for NavigationViewRenderObject {
                 let label = self.labels.get(i).map(|s| s.as_str()).unwrap_or("Item");
                 let icon = self.icons.get(i).copied().unwrap_or(Icon::Home);
 
-                // Inline render_item to avoid borrow checker issues
                 let width_px = sidebar_width as i32;
                 let height_px = item_height as i32;
 
-                // Background
-                let background_color = if is_selected {
-                    Color { r: 0.2, g: 0.4, b: 0.8, a: 1.0 }
-                } else if is_hovered {
-                    Color { r: 0.9, g: 0.9, b: 0.9, a: 1.0 }
-                } else {
-                    Color { r: 1.0, g: 1.0, b: 1.0, a: 1.0 }
-                };
+                // Draw underline for selected state (left indicator)
+                if is_selected {
+                    let indicator_width = 3.0;
+                    let indicator_x = 0;
+                    let indicator_y = y;
+                    let indicator_height = height_px;
+                    canvas.fill_rect(indicator_x, indicator_y, indicator_width as u32, indicator_height as u32, palette.primary());
+                }
 
-                canvas.fill_rect(0, y, width_px as u32, height_px as u32, background_color);
-
-                // Icon
-                let icon_x = item_padding as i32 + 4;
-                let icon_y = y + (height_px - icon_size as i32) / 2;
-                let icon_color = if is_selected {
-                    Color { r: 1.0, g: 1.0, b: 1.0, a: 1.0 }
-                } else {
-                    Color { r: 0.3, g: 0.3, b: 0.3, a: 1.0 }
-                };
-
-                // Inline icon rendering (simplified)
-                // For now, just skip icon rendering to avoid borrow issues
-                // A full implementation would call render_icon here
+                // Icon (will be provided separately)
+                let _icon = &icon;
 
                 // Label
                 let text_color = if is_selected {
-                    Color { r: 1.0, g: 1.0, b: 1.0, a: 1.0 }
+                    palette.primary()
                 } else {
-                    Color { r: 0.2, g: 0.2, b: 0.2, a: 1.0 }
+                    palette.text()
                 };
 
-                let text_x = icon_x + icon_size as i32 + 8;
+                let text_x = item_padding as i32 + 8;
                 let text_y = y + (height_px - (font_size * 1.2) as i32) / 2;
                 canvas.draw_text_sized(text_x, text_y, label, text_color, font_size);
-
-                // Bottom border
-                let border_color = Color { r: 0.85, g: 0.85, b: 0.85, a: 1.0 };
-                canvas.draw_line(0, y + height_px - 1, width_px - 1, y + height_px - 1, border_color);
             }
 
             // Draw separator line on the right edge
-            let palette = ColorPalette::default();
             let border_color = palette.border();
             canvas.draw_line(width as i32 - 1, 0, width as i32 - 1, height as i32, border_color);
         }
