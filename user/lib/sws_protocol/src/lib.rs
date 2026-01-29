@@ -50,6 +50,8 @@ pub mod client_msg {
     pub const EXTENSION_CREATE_WINDOW: u32 = 101;
     /// Update buffer on behalf of another client (extension-only)
     pub const EXTENSION_UPDATE_BUFFER: u32 = 102;
+    /// Attach SHM buffer on behalf of another client (extension-only)
+    pub const EXTENSION_ATTACH_BUFFER: u32 = 103;
     pub const SET_WORKAREA: u32 = 22;
     pub const SET_WINDOW_RESIZABLE: u32 = 23;
     pub const GET_WINDOW_LIST: u32 = 24;
@@ -284,6 +286,18 @@ pub enum ClientMessageRef<'a> {
         y: i32,
         width: u32,
         height: u32,
+    },
+
+    /// Attach a shared-memory buffer on behalf of an external client (extension-only)
+    ExtensionAttachBuffer {
+        external_client_id: u32,
+        window_id: u32,
+        width: u32,
+        height: u32,
+        offset: i32,
+        stride: i32,
+        format: u32,
+        shm_size: u64,
     },
 
     /// Set the workarea (usable screen area) for the window manager
@@ -765,6 +779,33 @@ pub fn parse_client_message<'a>(
                 y,
                 width,
                 height,
+            })
+        }
+        client_msg::EXTENSION_ATTACH_BUFFER => {
+            if payload.len() != 36 {
+                return Err(ProtocolError::MalformedPayload);
+            }
+            let external_client_id =
+                u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
+            let window_id = u32::from_le_bytes([payload[4], payload[5], payload[6], payload[7]]);
+            let width = u32::from_le_bytes([payload[8], payload[9], payload[10], payload[11]]);
+            let height = u32::from_le_bytes([payload[12], payload[13], payload[14], payload[15]]);
+            let offset = i32::from_le_bytes([payload[16], payload[17], payload[18], payload[19]]);
+            let stride = i32::from_le_bytes([payload[20], payload[21], payload[22], payload[23]]);
+            let format = u32::from_le_bytes([payload[24], payload[25], payload[26], payload[27]]);
+            let shm_size = u64::from_le_bytes([
+                payload[28], payload[29], payload[30], payload[31], payload[32], payload[33],
+                payload[34], payload[35],
+            ]);
+            Ok(ClientMessageRef::ExtensionAttachBuffer {
+                external_client_id,
+                window_id,
+                width,
+                height,
+                offset,
+                stride,
+                format,
+                shm_size,
             })
         }
         client_msg::SET_WORKAREA => {
@@ -1455,6 +1496,29 @@ pub fn payload_update_buffer(window_id: u32, x: i32, y: i32, width: u32, height:
     payload[8..12].copy_from_slice(&y.to_le_bytes());
     payload[12..16].copy_from_slice(&width.to_le_bytes());
     payload[16..20].copy_from_slice(&height.to_le_bytes());
+    payload
+}
+
+/// Build payload for extension->server `EXTENSION_ATTACH_BUFFER`.
+pub fn payload_extension_attach_buffer(
+    external_client_id: u32,
+    window_id: u32,
+    width: u32,
+    height: u32,
+    offset: i32,
+    stride: i32,
+    format: u32,
+    shm_size: u64,
+) -> [u8; 36] {
+    let mut payload = [0u8; 36];
+    payload[0..4].copy_from_slice(&external_client_id.to_le_bytes());
+    payload[4..8].copy_from_slice(&window_id.to_le_bytes());
+    payload[8..12].copy_from_slice(&width.to_le_bytes());
+    payload[12..16].copy_from_slice(&height.to_le_bytes());
+    payload[16..20].copy_from_slice(&offset.to_le_bytes());
+    payload[20..24].copy_from_slice(&stride.to_le_bytes());
+    payload[24..28].copy_from_slice(&format.to_le_bytes());
+    payload[28..36].copy_from_slice(&shm_size.to_le_bytes());
     payload
 }
 

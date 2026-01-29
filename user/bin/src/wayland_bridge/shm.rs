@@ -5,6 +5,7 @@
 //! to the compositor without copying.
 
 use std::collections::BTreeMap;
+use std::handle::Handle;
 
 /// Shared memory pool
 #[derive(Debug)]
@@ -13,7 +14,7 @@ pub struct ShmPool {
     pub pool_id: u32,
     /// Handle for the shared memory (received via Socket::recv_handle)
     /// The Linux compatibility layer converts SCM_RIGHTS FDs to kernel handles
-    pub fd: i32,
+    pub handle: Option<Handle>,
     /// Size of the pool in bytes
     pub size: usize,
 }
@@ -55,12 +56,12 @@ impl ShmManager {
     }
 
     /// Create a new shared memory pool
-    pub fn create_pool(&mut self, pool_id: u32, fd: i32, size: i32) {
+    pub fn create_pool(&mut self, pool_id: u32, handle: Option<Handle>, size: i32) {
         self.pools.insert(
             pool_id,
             ShmPool {
                 pool_id,
-                fd,
+                handle,
                 size: size as usize,
             },
         );

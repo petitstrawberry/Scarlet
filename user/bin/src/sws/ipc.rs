@@ -1283,6 +1283,106 @@ fn client_thread_main(client_id: usize, mut socket: Socket) {
                     damage_height: height,
                 });
             }
+            Ok(ClientMessageRef::ExtensionAttachBuffer {
+                external_client_id,
+                window_id,
+                width,
+                height,
+                offset,
+                stride,
+                format,
+                shm_size,
+            }) => {
+                println!(
+                    "[ClientThread {}] ExtensionAttachBuffer: external_client_id={} window_id={} {}x{} offset={} stride={} format={} size={}",
+                    client_id,
+                    external_client_id,
+                    window_id,
+                    width,
+                    height,
+                    offset,
+                    stride,
+                    format,
+                    shm_size
+                );
+
+                let shm_handle = match socket.recv_handle() {
+                    Ok(handle) => handle,
+                    Err(e) => {
+                        println!(
+                            "[ClientThread {}] ExtensionAttachBuffer: failed to recv handle: {:?}",
+                            client_id, e
+                        );
+                        push_ipc_event(IpcEvent::ExtensionAttachBuffer {
+                            external_client_id,
+                            window_id,
+                            width,
+                            height,
+                            offset,
+                            stride,
+                            format,
+                            shm: None,
+                            shm_mapped_addr: None,
+                            shm_size: 0,
+                        });
+                        continue;
+                    }
+                };
+
+                let shm = match SharedMemory::from_handle(shm_handle) {
+                    Ok(shm) => shm,
+                    Err(e) => {
+                        println!(
+                            "[ClientThread {}] ExtensionAttachBuffer: invalid shm handle: {:?}",
+                            client_id, e
+                        );
+                        push_ipc_event(IpcEvent::ExtensionAttachBuffer {
+                            external_client_id,
+                            window_id,
+                            width,
+                            height,
+                            offset,
+                            stride,
+                            format,
+                            shm: None,
+                            shm_mapped_addr: None,
+                            shm_size: 0,
+                        });
+                        continue;
+                    }
+                };
+
+                let shm_size_usize = shm_size as usize;
+                let shm_mapped_addr = if shm_size_usize > 0 {
+                    match shm.as_handle().as_memory_mapping() {
+                        Ok(mapper) => mapper
+                            .mmap(
+                                0,
+                                shm_size_usize,
+                                permissions::READ_WRITE,
+                                mmap_flags::SHARED,
+                                0,
+                            )
+                            .ok(),
+                        Err(_) => None,
+                    }
+                } else {
+                    None
+                };
+
+                push_ipc_event(IpcEvent::ExtensionAttachBuffer {
+                    external_client_id,
+                    window_id,
+                    width,
+                    height,
+                    offset,
+                    stride,
+                    format,
+                    shm: Some(shm),
+                    shm_mapped_addr,
+                    shm_size: shm_size_usize,
+                });
+            }
             Ok(ClientMessageRef::SetWindowHasAlphaContent {
                 window_id,
                 has_alpha,
@@ -1585,6 +1685,20 @@ pub enum IpcEvent {
         damage_y: i32,
         damage_width: u32,
         damage_height: u32,
+    },
+
+    /// Extension attached a shared-memory buffer for external client
+    ExtensionAttachBuffer {
+        external_client_id: u32,
+        window_id: u32,
+        width: u32,
+        height: u32,
+        offset: i32,
+        stride: i32,
+        format: u32,
+        shm: Option<SharedMemory>,
+        shm_mapped_addr: Option<usize>,
+        shm_size: usize,
     },
 
     /// Set whether window content contains alpha channel

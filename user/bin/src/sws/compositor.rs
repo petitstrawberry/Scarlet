@@ -692,14 +692,21 @@ impl Compositor {
                 }
             } else if let Some(shm_addr) = window.shm_mapped_addr {
                 // SHM-backed window
-                let wo = ((local_y as usize)
-                    .saturating_mul(window.width as usize)
-                    .saturating_add(local_x as usize))
-                .saturating_mul(4);
+                let row_stride = if window.shm_stride != 0 {
+                    window.shm_stride as usize
+                } else {
+                    window.width as usize * 4
+                };
+                let wo = window
+                    .shm_offset
+                    .saturating_add(local_y as usize * row_stride)
+                    .saturating_add(local_x as usize * 4);
 
-                let buffer_size = (window.width as usize)
-                    .saturating_mul(window.height as usize)
-                    .saturating_mul(4);
+                let buffer_size = if window.shm_size != 0 {
+                    window.shm_size
+                } else {
+                    row_stride.saturating_mul(window.height as usize)
+                };
 
                 if wo + 4 <= buffer_size {
                     unsafe {
@@ -776,12 +783,17 @@ impl Compositor {
         // Check if window uses SHM or Vec buffer
         if let Some(shm_addr) = window.shm_mapped_addr {
             // SHM-backed window: read from mapped memory
+            let row_stride = if window.shm_stride != 0 {
+                window.shm_stride as usize
+            } else {
+                window.width as usize * 4
+            };
             let buffer_size = if window.shm_size != 0 {
                 window.shm_size
             } else {
-                (window.width as usize)
-                    .saturating_mul(window.height as usize)
-                    .saturating_mul(4)
+                window
+                    .shm_offset
+                    .saturating_add(row_stride.saturating_mul(window.height as usize))
             };
 
             // Create slice from mapped address
@@ -863,6 +875,17 @@ impl Compositor {
         // - window.has_alpha_content: pixel-level transparency (semi-transparent UI elements)
         let has_transparency = window.opacity < 1.0 || window.has_alpha_content;
 
+        let row_stride = if window.shm_mapped_addr.is_some() && window.shm_stride != 0 {
+            window.shm_stride as usize
+        } else {
+            window.width as usize * 4
+        };
+        let base_offset = if window.shm_mapped_addr.is_some() {
+            window.shm_offset
+        } else {
+            0
+        };
+
         // Fast path for opaque windows: copy row by row
         if !has_transparency {
             for sy in y0..y1 {
@@ -870,7 +893,9 @@ impl Compositor {
                 let screen_row_off = (sy as u32 * stride) as usize;
                 for sx in x0..x1 {
                     let wx = (sx - win_x0) as u32;
-                    let window_offset = ((wy * window.width + wx) * 4) as usize;
+                    let window_offset = base_offset
+                        .saturating_add(wy as usize * row_stride)
+                        .saturating_add(wx as usize * 4);
                     let screen_offset = screen_row_off + (sx as u32 * bytes_per_pixel) as usize;
 
                     if window_offset + 4 <= window_buffer.len()
@@ -888,7 +913,9 @@ impl Compositor {
                 let screen_row_off = (sy as u32 * stride) as usize;
                 for sx in x0..x1 {
                     let wx = (sx - win_x0) as u32;
-                    let window_offset = ((wy * window.width + wx) * 4) as usize;
+                    let window_offset = base_offset
+                        .saturating_add(wy as usize * row_stride)
+                        .saturating_add(wx as usize * 4);
                     let screen_offset = screen_row_off + (sx as u32 * bytes_per_pixel) as usize;
 
                     if window_offset + 4 <= window_buffer.len()
@@ -2298,6 +2325,50 @@ impl Compositor {
                         damage_width,
                         damage_height,
                     ));
+                }
+            }
+            IpcEvent::ExtensionAttachBuffer {
+                external_client_id,
+                window_id,
+                width,
+                height,
+                offset,
+                stride,
+                format,
+                shm,
+                shm_mapped_addr,
+                shm_size,
+            } => {
+                println!(
+                    "[Compositor] IPC: ExtensionAttachBuffer ext_client={} window={} {}x{} stride={} format={}",
+                    external_client_id, window_id, width, height, stride, format
+                );
+
+                if let Some(shm_handle) = shm {
+                    if let Err(e) = self.window_manager.replace_window_shm_from_event(
+                        window_id,
+                        width,
+                        height,
+                        offset,
+                        stride,
+                        format,
+                        shm_handle,
+                        shm_mapped_addr,
+                        shm_size,
+                    ) {
+                        println!(
+                            "[Compositor] Failed to attach SHM buffer for window {}: {}",
+                            window_id, e
+                        );
+                    } else if let Some(w) = self.window_manager.get_window(window_id) {
+                        self.add_pending_damage((w.x, w.y, w.width, w.height));
+                        self.full_redraw_needed = true;
+                    }
+                } else {
+                    println!(
+                        "[Compositor] ExtensionAttachBuffer: no SHM provided for window {}",
+                        window_id
+                    );
                 }
             }
             IpcEvent::SetWindowHasAlphaContent {

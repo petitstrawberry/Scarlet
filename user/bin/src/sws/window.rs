@@ -109,6 +109,12 @@ pub struct Window {
     pub shm_mapped_addr: Option<usize>,
     /// Size of the SHM mapping in bytes (0 when not SHM-backed).
     pub shm_size: usize,
+    /// Byte offset into the SHM where pixel data begins.
+    pub shm_offset: usize,
+    /// Bytes per row for SHM-backed windows.
+    pub shm_stride: u32,
+    /// Pixel format for SHM-backed windows (Wayland wl_shm format).
+    pub shm_format: u32,
     /// Window type for Z-order management
     pub window_type: WindowType,
     /// Whether the window is minimized
@@ -159,6 +165,9 @@ impl Window {
             shm: None,
             shm_mapped_addr: None,
             shm_size: 0,
+            shm_offset: 0,
+            shm_stride: 0,
+            shm_format: 0,
             window_type: WindowType::default(),
             minimized: false,
             maximized: false,
@@ -194,6 +203,9 @@ impl Window {
             shm: None,
             shm_mapped_addr: None,
             shm_size: 0,
+            shm_offset: 0,
+            shm_stride: 0,
+            shm_format: 0,
             window_type: WindowType::default(),
             minimized: false,
             maximized: false,
@@ -255,6 +267,9 @@ impl Window {
             shm: Some(shm),
             shm_mapped_addr: Some(mapped_addr),
             shm_size: buffer_size,
+            shm_offset: 0,
+            shm_stride: width.saturating_mul(4),
+            shm_format: 0,
             window_type: WindowType::default(),
             minimized: false,
             maximized: false,
@@ -429,6 +444,9 @@ impl WindowManager {
             shm: Some(shm),
             shm_mapped_addr,
             shm_size,
+            shm_offset: 0,
+            shm_stride: width.saturating_mul(4),
+            shm_format: 0,
             window_type: WindowType::default(),
             minimized: false,
             maximized: false,
@@ -442,6 +460,41 @@ impl WindowManager {
         self.windows.push(window);
 
         Ok(id)
+    }
+
+    /// Replace the SHM backing store for an existing window.
+    pub fn replace_window_shm_from_event(
+        &mut self,
+        id: WindowId,
+        width: u32,
+        height: u32,
+        offset: i32,
+        stride: i32,
+        format: u32,
+        shm: SharedMemory,
+        shm_mapped_addr: Option<usize>,
+        shm_size: usize,
+    ) -> Result<(), &'static str> {
+        let window = self
+            .windows
+            .iter_mut()
+            .find(|window| window.id == id)
+            .ok_or("Window not found")?;
+
+        window.width = width;
+        window.height = height;
+        window.buffer = None;
+        window.shm = Some(shm);
+        window.shm_mapped_addr = shm_mapped_addr;
+        window.shm_size = shm_size;
+        window.shm_offset = offset.max(0) as usize;
+        window.shm_stride = if stride > 0 {
+            stride as u32
+        } else {
+            width.saturating_mul(4)
+        };
+        window.shm_format = format;
+        Ok(())
     }
 
     /// Create window without buffer (for testing)
@@ -797,6 +850,9 @@ impl WindowManager {
             w.shm = Some(shm);
             w.shm_mapped_addr = shm_mapped_addr;
             w.shm_size = shm_size;
+            w.shm_offset = 0;
+            w.shm_stride = width.saturating_mul(4);
+            w.shm_format = 0;
             true
         } else {
             false

@@ -62,8 +62,8 @@ struct WaylandBridge {
     sws_connection: Option<Socket>,
     /// Extension ID assigned by SWS
     extension_id: Option<u32>,
-    /// Next object ID to allocate
-    next_object_id: u32,
+    /// Next serial for configure events
+    next_serial: u32,
     /// Map of object ID -> interface name
     objects: BTreeMap<u32, String>,
     /// Map of Wayland surface ID -> SWS window ID
@@ -103,7 +103,7 @@ impl WaylandBridge {
             input_manager: InputManager::new(),
             sws_connection: None,
             extension_id: None,
-            next_object_id: 2,
+            next_serial: 1,
             objects,
             surface_to_window: BTreeMap::new(),
         })
@@ -164,12 +164,47 @@ impl WaylandBridge {
         Ok(())
     }
 
-    /// Allocate a new object ID
-    fn allocate_object_id(&mut self, interface: &str) -> u32 {
-        let id = self.next_object_id;
-        self.next_object_id += 1;
-        self.objects.insert(id, String::from(interface));
-        id
+    fn allocate_serial(&mut self) -> u32 {
+        let serial = self.next_serial;
+        self.next_serial = self.next_serial.wrapping_add(1);
+        serial
+    }
+
+    fn parse_u32(payload: &[u8], offset: usize) -> Option<u32> {
+        if payload.len() < offset + 4 {
+            return None;
+        }
+        Some(u32::from_ne_bytes([
+            payload[offset],
+            payload[offset + 1],
+            payload[offset + 2],
+            payload[offset + 3],
+        ]))
+    }
+
+    fn parse_i32(payload: &[u8], offset: usize) -> Option<i32> {
+        if payload.len() < offset + 4 {
+            return None;
+        }
+        Some(i32::from_ne_bytes([
+            payload[offset],
+            payload[offset + 1],
+            payload[offset + 2],
+            payload[offset + 3],
+        ]))
+    }
+
+    fn parse_string(payload: &[u8], offset: usize) -> Option<(String, usize)> {
+        let len = Self::parse_u32(payload, offset)? as usize;
+        let start = offset + 4;
+        let end = start.checked_add(len)?;
+        if payload.len() < end {
+            return None;
+        }
+        let bytes = if len == 0 { &[] } else { &payload[start..end - 1] };
+        let s = String::from_utf8_lossy(bytes).into_owned();
+        let padded = (len + 3) & !3;
+        Some((s, start + padded))
     }
 
     /// Create an SWS window for a Wayland surface
@@ -228,6 +263,16 @@ impl WaylandBridge {
                     window_id, wl_surface_id
                 );
                 self.surface_to_window.insert(wl_surface_id, window_id);
+
+                if let Some(surface) = self.surface_manager.get_surface(wl_surface_id) {
+                    if let Some(buffer_id) = surface.buffer_id {
+                        let _ = self.send_extension_attach_buffer(
+                            wl_surface_id,
+                            window_id,
+                            buffer_id,
+                        );
+                    }
+                }
 
                 // Receive SHM handle
                 if let Ok(shm_handle) = sws_conn.recv_handle() {
@@ -292,16 +337,71 @@ impl WaylandBridge {
         Ok(())
     }
 
+    fn send_extension_attach_buffer(
+        &mut self,
+        surface_id: u32,
+        window_id: u32,
+        buffer_id: u32,
+    ) -> Result<(), &'static str> {
+        let buffer = self
+            .shm_manager
+            .get_buffer(buffer_id)
+            .ok_or("Buffer not found")?;
+        let pool = self
+            .shm_manager
+            .get_pool(buffer.pool_id)
+            .ok_or("Pool not found")?;
+        let handle = pool.handle.as_ref().ok_or("Pool missing handle")?;
+        let sws_conn = self.sws_connection.as_mut().ok_or("Not connected to SWS")?;
+
+        let width = buffer.width.max(0) as u32;
+        let height = buffer.height.max(0) as u32;
+        let stride = buffer.stride;
+        let format = buffer.format;
+        let offset = buffer.offset;
+        let mut shm_size = pool.size as u64;
+        if stride > 0 && buffer.height > 0 {
+            let needed = (offset.max(0) as u64)
+                .saturating_add((stride as u64).saturating_mul(buffer.height as u64));
+            shm_size = shm_size.max(needed);
+        }
+
+        let payload = protocol_sws::payload_extension_attach_buffer(
+            surface_id,
+            window_id,
+            width,
+            height,
+            offset,
+            stride,
+            format,
+            shm_size,
+        );
+        let header = protocol_sws::MessageHeader {
+            msg_type: protocol_sws::client_msg::EXTENSION_ATTACH_BUFFER,
+            payload_size: payload.len() as u32,
+        };
+        let mut msg_bytes = Vec::new();
+        msg_bytes.extend_from_slice(&header.to_le_bytes());
+        msg_bytes.extend_from_slice(&payload);
+        sws_conn
+            .write(&msg_bytes)
+            .map_err(|_| "Failed to send EXTENSION_ATTACH_BUFFER")?;
+        sws_conn
+            .send_handle(handle)
+            .map_err(|_| "Failed to send EXTENSION_ATTACH_BUFFER handle")?;
+        Ok(())
+    }
+
     /// Handle a client connection
     fn handle_client(&mut self, mut client: Socket) -> Result<(), &'static str> {
         println!("[Bridge] New client connected");
 
-        let mut buffer = Vec::new();
-        buffer.resize(4096, 0);
+        let mut buffer: Vec<u8> = Vec::new();
 
         loop {
+            let mut read_buf = [0u8; 4096];
             // Read message from client
-            let n = match client.read(&mut buffer) {
+            let n = match client.read(&mut read_buf) {
                 Ok(0) => {
                     println!("[Bridge] Client disconnected");
                     break;
@@ -314,17 +414,18 @@ impl WaylandBridge {
             };
 
             println!("[Bridge] Received {} bytes from client", n);
+            buffer.extend_from_slice(&read_buf[..n]);
 
             // Parse and handle messages
             let mut offset = 0;
-            while offset + 8 <= n {
+            while offset + 8 <= buffer.len() {
                 let header_bytes = &buffer[offset..offset + 8];
                 let mut header_array = [0u8; 8];
                 header_array.copy_from_slice(header_bytes);
                 let header = MessageHeader::from_bytes(&header_array);
 
                 let msg_size = header.size() as usize;
-                if offset + msg_size > n {
+                if offset + msg_size > buffer.len() {
                     println!("[Bridge] Incomplete message, waiting for more data");
                     break;
                 }
@@ -337,9 +438,9 @@ impl WaylandBridge {
                 );
 
                 // Handle the message
-                if let Some(response) =
-                    self.handle_message(&header, &buffer[offset + 8..offset + msg_size])?
-                {
+                let responses =
+                    self.handle_message(&header, &buffer[offset + 8..offset + msg_size], &mut client)?;
+                for response in responses {
                     let response_bytes = response.encode();
                     client
                         .write(&response_bytes)
@@ -347,6 +448,10 @@ impl WaylandBridge {
                 }
 
                 offset += msg_size;
+            }
+
+            if offset > 0 {
+                buffer.drain(0..offset);
             }
         }
 
@@ -358,19 +463,20 @@ impl WaylandBridge {
         &mut self,
         header: &MessageHeader,
         payload: &[u8],
-    ) -> Result<Option<WaylandMessage>, &'static str> {
+        client: &mut Socket,
+    ) -> Result<Vec<WaylandMessage>, &'static str> {
         let object_id = header.object_id;
         let opcode = header.opcode();
 
         // Get the interface for this object
-        let interface = self.objects.get(&object_id).ok_or("Unknown object ID")?;
+        let interface = self.objects.get(&object_id).ok_or("Unknown object ID")?.clone();
 
         match interface.as_str() {
             "wl_display" => self.handle_display_message(opcode, payload),
             "wl_registry" => self.handle_registry_message(object_id, opcode, payload),
             "wl_compositor" => self.handle_compositor_message(opcode, payload),
             "wl_surface" => self.handle_surface_message(object_id, opcode, payload),
-            "wl_shm" => self.handle_shm_message(opcode, payload),
+            "wl_shm" => self.handle_shm_message(opcode, payload, client),
             "wl_shm_pool" => self.handle_shm_pool_message(object_id, opcode, payload),
             "wl_buffer" => self.handle_buffer_message(object_id, opcode, payload),
             "wl_seat" => self.handle_seat_message(object_id, opcode, payload),
@@ -381,7 +487,7 @@ impl WaylandBridge {
             "xdg_toplevel" => self.handle_xdg_toplevel_message(object_id, opcode, payload),
             _ => {
                 println!("[Bridge] Unhandled interface: {}", interface);
-                Ok(None)
+                Ok(Vec::new())
             }
         }
     }
@@ -391,7 +497,7 @@ impl WaylandBridge {
         &mut self,
         opcode: u16,
         payload: &[u8],
-    ) -> Result<Option<WaylandMessage>, &'static str> {
+    ) -> Result<Vec<WaylandMessage>, &'static str> {
         match opcode {
             protocol::display_request::SYNC => {
                 println!("[Bridge] wl_display.sync");
@@ -406,9 +512,9 @@ impl WaylandBridge {
                     // Send done event for the callback
                     let mut msg = WaylandMessage::new(callback_id, 0); // wl_callback.done
                     msg.add_arg(WaylandArg::Uint(0)); // serial
-                    return Ok(Some(msg));
+                    return Ok(vec![msg]);
                 }
-                Ok(None)
+                Ok(Vec::new())
             }
             protocol::display_request::GET_REGISTRY => {
                 println!("[Bridge] wl_display.get_registry");
@@ -420,16 +526,13 @@ impl WaylandBridge {
                     self.objects
                         .insert(registry_id, String::from("wl_registry"));
 
-                    // Note: In a complete implementation, we would queue all global events
-                    // and send them after this handler returns. For now, we just create
-                    // the registry object. The client will typically call sync after
-                    // get_registry, and we'll send globals in response to bind requests.
+                    return Ok(self.registry.get_global_events(registry_id));
                 }
-                Ok(None)
+                Ok(Vec::new())
             }
             _ => {
                 println!("[Bridge] Unknown wl_display opcode: {}", opcode);
-                Ok(None)
+                Ok(Vec::new())
             }
         }
     }
@@ -440,33 +543,55 @@ impl WaylandBridge {
         _registry_id: u32,
         opcode: u16,
         payload: &[u8],
-    ) -> Result<Option<WaylandMessage>, &'static str> {
+    ) -> Result<Vec<WaylandMessage>, &'static str> {
         match opcode {
             protocol::registry_request::BIND => {
                 println!("[Bridge] wl_registry.bind");
                 // Parse: name (u32), interface (string), version (u32), id (u32)
-                if payload.len() >= 4 {
-                    let name = u32::from_ne_bytes([payload[0], payload[1], payload[2], payload[3]]);
+                if let Some(name) = Self::parse_u32(payload, 0) {
                     println!("[Bridge] Binding global name: {}", name);
 
-                    // Get interface name before allocating object ID
-                    if let Some(global) = self.registry.get_global(name) {
-                        let interface_name = global.interface.clone();
-                        println!("[Bridge] Bound interface: {}", interface_name);
-
-                        // Now allocate object ID
-                        let object_id = self.allocate_object_id(&interface_name);
+                    if let Some((interface_name, offset)) = Self::parse_string(payload, 4) {
+                        let version = Self::parse_u32(payload, offset).unwrap_or(0);
+                        let new_id = Self::parse_u32(payload, offset + 4).unwrap_or(0);
                         println!(
-                            "[Bridge] Allocated object ID {} for {}",
-                            object_id, interface_name
+                            "[Bridge] Bind interface={} version={} new_id={}",
+                            interface_name, version, new_id
                         );
+
+                        if let Some(global) = self.registry.get_global(name) {
+                            if global.interface == interface_name && new_id != 0 {
+                                self.objects.insert(new_id, interface_name.clone());
+
+                                if interface_name == "wl_shm" {
+                                    let mut msgs = Vec::new();
+                                    let mut fmt_argb =
+                                        WaylandMessage::new(new_id, shm::shm_event::FORMAT);
+                                    fmt_argb.add_arg(WaylandArg::Uint(shm::shm_format::ARGB8888));
+                                    msgs.push(fmt_argb);
+
+                                    let mut fmt_xrgb =
+                                        WaylandMessage::new(new_id, shm::shm_event::FORMAT);
+                                    fmt_xrgb.add_arg(WaylandArg::Uint(shm::shm_format::XRGB8888));
+                                    msgs.push(fmt_xrgb);
+                                    return Ok(msgs);
+                                }
+                            } else {
+                                println!(
+                                    "[Bridge] Bind mismatch: requested={}, advertised={}",
+                                    interface_name, global.interface
+                                );
+                            }
+                        } else {
+                            println!("[Bridge] Unknown global name {}", name);
+                        }
                     }
                 }
-                Ok(None)
+                Ok(Vec::new())
             }
             _ => {
                 println!("[Bridge] Unknown wl_registry opcode: {}", opcode);
-                Ok(None)
+                Ok(Vec::new())
             }
         }
     }
@@ -476,7 +601,7 @@ impl WaylandBridge {
         &mut self,
         opcode: u16,
         payload: &[u8],
-    ) -> Result<Option<WaylandMessage>, &'static str> {
+    ) -> Result<Vec<WaylandMessage>, &'static str> {
         match opcode {
             protocol::compositor_request::CREATE_SURFACE => {
                 println!("[Bridge] wl_compositor.create_surface");
@@ -487,11 +612,11 @@ impl WaylandBridge {
                     self.objects.insert(surface_id, String::from("wl_surface"));
                     self.surface_manager.create_surface(surface_id);
                 }
-                Ok(None)
+                Ok(Vec::new())
             }
             _ => {
                 println!("[Bridge] Unknown wl_compositor opcode: {}", opcode);
-                Ok(None)
+                Ok(Vec::new())
             }
         }
     }
@@ -501,34 +626,66 @@ impl WaylandBridge {
         &mut self,
         surface_id: u32,
         opcode: u16,
-        _payload: &[u8],
-    ) -> Result<Option<WaylandMessage>, &'static str> {
+        payload: &[u8],
+    ) -> Result<Vec<WaylandMessage>, &'static str> {
         match opcode {
             protocol::surface_request::ATTACH => {
                 println!("[Bridge] wl_surface.attach on surface {}", surface_id);
-                Ok(None)
+                if payload.len() >= 12 {
+                    let buffer_id = Self::parse_u32(payload, 0).unwrap_or(0);
+                    let _x = Self::parse_i32(payload, 4).unwrap_or(0);
+                    let _y = Self::parse_i32(payload, 8).unwrap_or(0);
+
+                    if let Some(surface) = self.surface_manager.get_surface_mut(surface_id) {
+                        if buffer_id == 0 {
+                            surface.buffer_id = None;
+                        } else {
+                            surface.attach(buffer_id);
+                            if let Some(buffer) = self.shm_manager.get_buffer(buffer_id) {
+                                surface.width = buffer.width.max(0) as u32;
+                                surface.height = buffer.height.max(0) as u32;
+                            }
+                        }
+                    }
+
+                    if buffer_id != 0 {
+                        if let Some(&window_id) = self.surface_to_window.get(&surface_id) {
+                            let _ =
+                                self.send_extension_attach_buffer(surface_id, window_id, buffer_id);
+                        }
+                    }
+                }
+                Ok(Vec::new())
             }
             protocol::surface_request::DAMAGE => {
                 println!("[Bridge] wl_surface.damage on surface {}", surface_id);
-                Ok(None)
+                if payload.len() >= 16 {
+                    let x = Self::parse_i32(payload, 0).unwrap_or(0);
+                    let y = Self::parse_i32(payload, 4).unwrap_or(0);
+                    let width = Self::parse_i32(payload, 8).unwrap_or(0);
+                    let height = Self::parse_i32(payload, 12).unwrap_or(0);
+                    if let Some(surface) = self.surface_manager.get_surface_mut(surface_id) {
+                        surface.add_damage(x, y, width, height);
+                    }
+                }
+                Ok(Vec::new())
             }
             protocol::surface_request::COMMIT => {
                 println!("[Bridge] wl_surface.commit on surface {}", surface_id);
                 if let Some(surface) = self.surface_manager.get_surface_mut(surface_id) {
-                    surface.commit();
-
                     // If surface has a role and is mapped to SWS window, update it
                     if surface.role.is_some() {
                         if let Err(e) = self.update_sws_window(surface_id) {
                             println!("[Bridge] Failed to update SWS window: {}", e);
                         }
                     }
+                    surface.commit();
                 }
-                Ok(None)
+                Ok(Vec::new())
             }
             _ => {
                 println!("[Bridge] Unknown wl_surface opcode: {}", opcode);
-                Ok(None)
+                Ok(Vec::new())
             }
         }
     }
@@ -538,27 +695,26 @@ impl WaylandBridge {
         &mut self,
         opcode: u16,
         payload: &[u8],
-    ) -> Result<Option<WaylandMessage>, &'static str> {
+        client: &mut Socket,
+    ) -> Result<Vec<WaylandMessage>, &'static str> {
         match opcode {
             shm::shm_request::CREATE_POOL => {
                 println!("[Bridge] wl_shm.create_pool");
                 if payload.len() >= 12 {
-                    let pool_id =
-                        u32::from_ne_bytes([payload[0], payload[1], payload[2], payload[3]]);
+                    let pool_id = Self::parse_u32(payload, 0).unwrap_or(0);
                     // Note: FD is passed via handle transfer (Socket::recv_handle)
                     // The Linux compatibility layer converts SCM_RIGHTS to handle transfer
-                    let size =
-                        i32::from_ne_bytes([payload[8], payload[9], payload[10], payload[11]]);
+                    let size = Self::parse_i32(payload, 8).unwrap_or(0);
                     println!("[Bridge] Created pool ID: {} size: {}", pool_id, size);
                     self.objects.insert(pool_id, String::from("wl_shm_pool"));
-                    // TODO: Receive handle using Socket::recv_handle() and store it
-                    self.shm_manager.create_pool(pool_id, -1, size); // FD will be received separately
+                    let handle = client.recv_handle().ok();
+                    self.shm_manager.create_pool(pool_id, handle, size);
                 }
-                Ok(None)
+                Ok(Vec::new())
             }
             _ => {
                 println!("[Bridge] Unknown wl_shm opcode: {}", opcode);
-                Ok(None)
+                Ok(Vec::new())
             }
         }
     }
@@ -569,7 +725,7 @@ impl WaylandBridge {
         pool_id: u32,
         opcode: u16,
         payload: &[u8],
-    ) -> Result<Option<WaylandMessage>, &'static str> {
+    ) -> Result<Vec<WaylandMessage>, &'static str> {
         match opcode {
             shm::shm_pool_request::CREATE_BUFFER => {
                 println!("[Bridge] wl_shm_pool.create_buffer");
@@ -595,12 +751,12 @@ impl WaylandBridge {
                     self.shm_manager
                         .create_buffer(buffer_id, pool_id, offset, width, height, stride, format)?;
                 }
-                Ok(None)
+                Ok(Vec::new())
             }
             shm::shm_pool_request::DESTROY => {
                 println!("[Bridge] wl_shm_pool.destroy");
                 self.shm_manager.destroy_pool(pool_id);
-                Ok(None)
+                Ok(Vec::new())
             }
             shm::shm_pool_request::RESIZE => {
                 println!("[Bridge] wl_shm_pool.resize");
@@ -609,11 +765,11 @@ impl WaylandBridge {
                         i32::from_ne_bytes([payload[0], payload[1], payload[2], payload[3]]);
                     self.shm_manager.resize_pool(pool_id, new_size)?;
                 }
-                Ok(None)
+                Ok(Vec::new())
             }
             _ => {
                 println!("[Bridge] Unknown wl_shm_pool opcode: {}", opcode);
-                Ok(None)
+                Ok(Vec::new())
             }
         }
     }
@@ -624,16 +780,16 @@ impl WaylandBridge {
         buffer_id: u32,
         opcode: u16,
         _payload: &[u8],
-    ) -> Result<Option<WaylandMessage>, &'static str> {
+    ) -> Result<Vec<WaylandMessage>, &'static str> {
         match opcode {
             shm::buffer_request::DESTROY => {
                 println!("[Bridge] wl_buffer.destroy");
                 self.shm_manager.destroy_buffer(buffer_id);
-                Ok(None)
+                Ok(Vec::new())
             }
             _ => {
                 println!("[Bridge] Unknown wl_buffer opcode: {}", opcode);
-                Ok(None)
+                Ok(Vec::new())
             }
         }
     }
@@ -643,7 +799,7 @@ impl WaylandBridge {
         &mut self,
         opcode: u16,
         payload: &[u8],
-    ) -> Result<Option<WaylandMessage>, &'static str> {
+    ) -> Result<Vec<WaylandMessage>, &'static str> {
         match opcode {
             xdg_shell::wm_base_request::GET_XDG_SURFACE => {
                 println!("[Bridge] xdg_wm_base.get_xdg_surface");
@@ -661,15 +817,15 @@ impl WaylandBridge {
                     self.xdg_shell_manager
                         .create_xdg_surface(xdg_surface_id, wl_surface_id);
                 }
-                Ok(None)
+                Ok(Vec::new())
             }
             xdg_shell::wm_base_request::PONG => {
                 println!("[Bridge] xdg_wm_base.pong");
-                Ok(None)
+                Ok(Vec::new())
             }
             _ => {
                 println!("[Bridge] Unknown xdg_wm_base opcode: {}", opcode);
-                Ok(None)
+                Ok(Vec::new())
             }
         }
     }
@@ -680,7 +836,7 @@ impl WaylandBridge {
         xdg_surface_id: u32,
         opcode: u16,
         payload: &[u8],
-    ) -> Result<Option<WaylandMessage>, &'static str> {
+    ) -> Result<Vec<WaylandMessage>, &'static str> {
         match opcode {
             xdg_shell::xdg_surface_request::GET_TOPLEVEL => {
                 println!("[Bridge] xdg_surface.get_toplevel");
@@ -705,16 +861,33 @@ impl WaylandBridge {
                         // Create SWS window for this surface
                         self.create_sws_window_for_surface(wl_surface_id)?;
                     }
+
+                    let serial = self.allocate_serial();
+                    let mut toplevel_configure = WaylandMessage::new(
+                        xdg_toplevel_id,
+                        xdg_shell::xdg_toplevel_event::CONFIGURE,
+                    );
+                    toplevel_configure.add_arg(WaylandArg::Int(0));
+                    toplevel_configure.add_arg(WaylandArg::Int(0));
+                    toplevel_configure.add_arg(WaylandArg::Array(Vec::new()));
+
+                    let mut surface_configure = WaylandMessage::new(
+                        xdg_surface_id,
+                        xdg_shell::xdg_surface_event::CONFIGURE,
+                    );
+                    surface_configure.add_arg(WaylandArg::Uint(serial));
+
+                    return Ok(vec![toplevel_configure, surface_configure]);
                 }
-                Ok(None)
+                Ok(Vec::new())
             }
             xdg_shell::xdg_surface_request::ACK_CONFIGURE => {
                 println!("[Bridge] xdg_surface.ack_configure");
-                Ok(None)
+                Ok(Vec::new())
             }
             _ => {
                 println!("[Bridge] Unknown xdg_surface opcode: {}", opcode);
-                Ok(None)
+                Ok(Vec::new())
             }
         }
     }
@@ -725,28 +898,28 @@ impl WaylandBridge {
         _xdg_toplevel_id: u32,
         opcode: u16,
         _payload: &[u8],
-    ) -> Result<Option<WaylandMessage>, &'static str> {
+    ) -> Result<Vec<WaylandMessage>, &'static str> {
         match opcode {
             xdg_shell::xdg_toplevel_request::SET_TITLE => {
                 println!("[Bridge] xdg_toplevel.set_title");
                 // Parse title from payload (string format)
-                Ok(None)
+                Ok(Vec::new())
             }
             xdg_shell::xdg_toplevel_request::SET_APP_ID => {
                 println!("[Bridge] xdg_toplevel.set_app_id");
-                Ok(None)
+                Ok(Vec::new())
             }
             xdg_shell::xdg_toplevel_request::MOVE => {
                 println!("[Bridge] xdg_toplevel.move");
-                Ok(None)
+                Ok(Vec::new())
             }
             xdg_shell::xdg_toplevel_request::RESIZE => {
                 println!("[Bridge] xdg_toplevel.resize");
-                Ok(None)
+                Ok(Vec::new())
             }
             _ => {
                 println!("[Bridge] Unknown xdg_toplevel opcode: {}", opcode);
-                Ok(None)
+                Ok(Vec::new())
             }
         }
     }
@@ -779,7 +952,7 @@ impl WaylandBridge {
         seat_id: u32,
         opcode: u16,
         payload: &[u8],
-    ) -> Result<Option<WaylandMessage>, &'static str> {
+    ) -> Result<Vec<WaylandMessage>, &'static str> {
         match opcode {
             input::seat_request::GET_POINTER => {
                 println!("[Bridge] wl_seat.get_pointer");
@@ -790,7 +963,7 @@ impl WaylandBridge {
                     self.objects.insert(pointer_id, String::from("wl_pointer"));
                     self.input_manager.create_pointer(pointer_id, seat_id);
                 }
-                Ok(None)
+                Ok(Vec::new())
             }
             input::seat_request::GET_KEYBOARD => {
                 println!("[Bridge] wl_seat.get_keyboard");
@@ -807,17 +980,17 @@ impl WaylandBridge {
                     msg.add_arg(WaylandArg::Uint(1)); // XKB_V1 format
                     msg.add_arg(WaylandArg::Fd(0)); // FD (placeholder)
                     msg.add_arg(WaylandArg::Uint(0)); // size
-                    return Ok(Some(msg));
+                    return Ok(vec![msg]);
                 }
-                Ok(None)
+                Ok(Vec::new())
             }
             input::seat_request::RELEASE => {
                 println!("[Bridge] wl_seat.release");
-                Ok(None)
+                Ok(Vec::new())
             }
             _ => {
                 println!("[Bridge] Unknown wl_seat opcode: {}", opcode);
-                Ok(None)
+                Ok(Vec::new())
             }
         }
     }
@@ -828,10 +1001,10 @@ impl WaylandBridge {
         _pointer_id: u32,
         opcode: u16,
         _payload: &[u8],
-    ) -> Result<Option<WaylandMessage>, &'static str> {
+    ) -> Result<Vec<WaylandMessage>, &'static str> {
         println!("[Bridge] wl_pointer opcode: {}", opcode);
         // Pointer events are sent from SWS, not received from client
-        Ok(None)
+        Ok(Vec::new())
     }
 
     /// Handle wl_keyboard messages
@@ -840,10 +1013,10 @@ impl WaylandBridge {
         _keyboard_id: u32,
         opcode: u16,
         _payload: &[u8],
-    ) -> Result<Option<WaylandMessage>, &'static str> {
+    ) -> Result<Vec<WaylandMessage>, &'static str> {
         println!("[Bridge] wl_keyboard opcode: {}", opcode);
         // Keyboard events are sent from SWS, not received from client
-        Ok(None)
+        Ok(Vec::new())
     }
 
     /// Process input events from SWS and forward to Wayland clients
