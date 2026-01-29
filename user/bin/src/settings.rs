@@ -409,8 +409,8 @@ impl Application for SettingsApp {
         let is6 = selected_idx == Some(6);
         let is7 = selected_idx == Some(7);
 
-        let highlight = Color::rgb(59, 130, 246);
-        let border = Color::rgb(51, 65, 85);
+        let highlight = ColorPalette::light().primary();
+        let border = ColorPalette::light().border();
 
         Window::new(
             "Settings",
