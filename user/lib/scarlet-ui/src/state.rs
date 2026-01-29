@@ -64,11 +64,18 @@ pub fn generate_subscription_id() -> SubscriptionId {
 pub trait Listenable: Any {
     /// Subscribe to any changes in this listenable
     fn subscribe_any(&self, callback: Arc<dyn Fn() + Send + Sync>) -> SubscriptionId;
+
+    /// Unsubscribe from this listenable using the subscription ID
+    fn unsubscribe(&self, id: SubscriptionId) -> bool;
 }
 
 impl<T: Any> Listenable for State<T> {
     fn subscribe_any(&self, callback: Arc<dyn Fn() + Send + Sync>) -> SubscriptionId {
         self.subscribe_any_impl(callback)
+    }
+
+    fn unsubscribe(&self, id: SubscriptionId) -> bool {
+        self.unsubscribe(id)
     }
 }
 

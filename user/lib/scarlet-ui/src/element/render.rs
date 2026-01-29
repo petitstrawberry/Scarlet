@@ -621,9 +621,9 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
         {
             match mouse_event {
                 MouseEvent::Entered { x, y } | MouseEvent::Moved { x, y } => {
-                    // Translate to local coordinates
-                    let local_x = *x as f32 - self.position.x;
-                    let local_y = *y as f32 - self.position.y;
+                    // Coordinates are already localized by EventDispatcher
+                    let local_x = *x as f32;
+                    let local_y = *y as f32;
 
                     // Check if point is within sidebar
                     if local_x >= 0.0 && local_x <= render_object.sidebar_width() {
@@ -655,9 +655,9 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
                     return true;
                 }
                 MouseEvent::ButtonReleased { button: MouseButton::Left, x, y } => {
-                    // Translate to local coordinates
-                    let local_x = *x as f32 - self.position.x;
-                    let local_y = *y as f32 - self.position.y;
+                    // Coordinates are already localized by EventDispatcher
+                    let local_x = *x as f32;
+                    let local_y = *y as f32;
 
                     // Check if click is within sidebar
                     if local_x >= 0.0 && local_x <= render_object.sidebar_width() {

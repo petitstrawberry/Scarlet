@@ -440,6 +440,7 @@ impl Application for SettingsApp {
                 }),
             }
             .sidebar_width(200.0)
+            .frame(f32::INFINITY, f32::INFINITY)
         )
         .app_id("org.scarlet-os.desktop.settings")
         .size(Size::new(800.0, 600.0))
