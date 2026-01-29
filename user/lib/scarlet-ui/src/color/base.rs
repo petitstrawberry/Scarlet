@@ -194,4 +194,52 @@ impl Color {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test_case]
+    fn test_color_creation() {
+        let red = Color::rgb(255, 0, 0);
+        let bgra = red.as_bgra();
+        // Blue channel should be 0 (BGRA format)
+        assert_eq!((bgra & 0xFF) as u8, 0);
+        // Green channel should be 0
+        assert_eq!(((bgra >> 8) & 0xFF) as u8, 0);
+        // Red channel should be 255
+        assert_eq!(((bgra >> 16) & 0xFF) as u8, 255);
+    }
+
+    #[test_case]
+    fn test_color_constants() {
+        assert_eq!(Color::BLACK.r, 0.0);
+        assert_eq!(Color::BLACK.g, 0.0);
+        assert_eq!(Color::BLACK.b, 0.0);
+        
+        assert_eq!(Color::WHITE.r, 1.0);
+        assert_eq!(Color::WHITE.g, 1.0);
+        assert_eq!(Color::WHITE.b, 1.0);
+    }
+
+    #[test_case]
+    fn test_color_with_opacity() {
+        let red = Color::RED;
+        let semi_red = red.with_opacity(0.5);
+        
+        assert_eq!(semi_red.r, 1.0);
+        assert_eq!(semi_red.g, 0.0);
+        assert_eq!(semi_red.b, 0.0);
+        assert_eq!(semi_red.a, 0.5);
+    }
+
+    #[test_case]
+    fn test_grayscale_color() {
+        let gray = Color::gray(0.5);
+        assert_eq!(gray.r, 0.5);
+        assert_eq!(gray.g, 0.5);
+        assert_eq!(gray.b, 0.5);
+        assert_eq!(gray.a, 1.0);
+    }
+}
+
 

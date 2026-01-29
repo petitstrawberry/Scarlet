@@ -39,6 +39,9 @@
 #![feature(alloc_error_handler)]
 #![feature(async_iterator)]
 #![feature(new_range_api)]
+#![feature(custom_test_frameworks)]
+#![test_runner(crate::test::test_runner)]
+#![reexport_test_harness_main = "test_main"]
 
 mod core_exports {
     extern crate core;
@@ -108,6 +111,9 @@ pub mod syscall;
 pub mod task;
 pub mod thread;
 
+#[cfg(test)]
+pub mod test;
+
 // Re-export LocalKey type for convenience
 // Note: thread_local! macro is automatically exported at crate root by #[macro_export]
 pub use thread::LocalKey;
@@ -129,6 +135,7 @@ pub mod profiler {
 pub use alloc_exports::*;
 pub use core_exports::*;
 
+#[cfg(not(test))]
 #[panic_handler]
 pub fn panic(_info: &core::panic::PanicInfo) -> ! {
     crate::println!("Panic occurred: {:?}", _info);

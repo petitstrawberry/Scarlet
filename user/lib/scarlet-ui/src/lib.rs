@@ -41,6 +41,9 @@
 //! ```
 
 #![no_std]
+#![feature(custom_test_frameworks)]
+#![test_runner(crate::test::test_runner)]
+#![reexport_test_harness_main = "test_main"]
 
 extern crate alloc;
 extern crate scarlet_std as std;
@@ -66,6 +69,9 @@ pub mod macros;
 pub mod graphics;
 pub mod debug;
 pub mod menu_model;
+
+#[cfg(test)]
+pub mod test;
 
 // Re-exports for convenience
 pub use geometry::{Size, Point, Rect, Offset, EdgeInsets, Alignment};

@@ -413,4 +413,86 @@ impl Alignment {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test_case]
+    fn test_size_creation() {
+        let size = Size::new(100.0, 200.0);
+        assert_eq!(size.width, 100.0);
+        assert_eq!(size.height, 200.0);
+    }
+
+    #[test_case]
+    fn test_size_is_zero() {
+        let zero = Size::ZERO;
+        assert!(zero.is_zero());
+        
+        let non_zero = Size::new(1.0, 1.0);
+        assert!(!non_zero.is_zero());
+    }
+
+    #[test_case]
+    fn test_point_creation() {
+        let point = Point::new(10.0, 20.0);
+        assert_eq!(point.x, 10.0);
+        assert_eq!(point.y, 20.0);
+    }
+
+    #[test_case]
+    fn test_point_distance() {
+        let p1 = Point::new(0.0, 0.0);
+        let p2 = Point::new(3.0, 4.0);
+        
+        // Distance should be 5.0 (3-4-5 triangle)
+        let dist = p1.distance(p2);
+        assert!((dist - 5.0).abs() < 0.0001);
+    }
+
+    #[test_case]
+    fn test_rect_contains() {
+        let rect = Rect::new(Point::new(0.0, 0.0), Size::new(100.0, 100.0));
+
+        // Point inside
+        assert!(rect.contains(Point::new(50.0, 50.0)));
+
+        // Point on boundary
+        assert!(rect.contains(Point::new(0.0, 0.0)));
+        assert!(rect.contains(Point::new(100.0, 100.0)));
+
+        // Point outside
+        assert!(!rect.contains(Point::new(101.0, 50.0)));
+        assert!(!rect.contains(Point::new(50.0, 101.0)));
+    }
+
+    #[test_case]
+    fn test_rect_intersects() {
+        let rect1 = Rect::new(Point::new(0.0, 0.0), Size::new(100.0, 100.0));
+        let rect2 = Rect::new(Point::new(50.0, 50.0), Size::new(100.0, 100.0));
+        let rect3 = Rect::new(Point::new(200.0, 200.0), Size::new(100.0, 100.0));
+
+        assert!(rect1.intersects(&rect2));
+        assert!(!rect1.intersects(&rect3));
+    }
+
+    #[test_case]
+    fn test_offset_operations() {
+        let offset1 = Offset::new(10.0, 20.0);
+        let offset2 = Offset::new(5.0, 10.0);
+        
+        let sum = offset1 + offset2;
+        assert_eq!(sum.dx, 15.0);
+        assert_eq!(sum.dy, 30.0);
+    }
+
+    #[test_case]
+    fn test_edge_insets() {
+        let insets = EdgeInsets::all(10.0);
+        assert_eq!(insets.top, 10.0);
+        assert_eq!(insets.bottom, 10.0);
+        assert_eq!(insets.left, 10.0);
+        assert_eq!(insets.right, 10.0);
+    }
+}
 
