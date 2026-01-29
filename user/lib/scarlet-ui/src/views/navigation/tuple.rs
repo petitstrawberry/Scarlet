@@ -16,14 +16,14 @@ use crate::views::navigation::link::NavigationLink;
 ///
 /// ```ignore
 /// // Tuples of different sizes all implement NavigationLinkTuple
-/// let link1 = NavigationLink::new("Home", Icon::Home, || Box::new(Text::new("Home")));
-/// let link2 = NavigationLink::new("Settings", Icon::Settings, || Box::new(Text::new("Settings")));
+/// let link1 = NavigationLink::new("Home", Icon::Home, || Text::new("Home"));
+/// let link2 = NavigationLink::new("Settings", Icon::Settings, || Text::new("Settings"));
 ///
 /// // Works with 2 links
 /// let nav2 = NavigationView::new((link1, link2));
 ///
 /// // Works with 3 links
-/// let link3 = NavigationLink::new("Info", Icon::Info, || Box::new(Text::new("Info")));
+/// let link3 = NavigationLink::new("Info", Icon::Info, || Text::new("Info"));
 /// let nav3 = NavigationView::new((link1, link2, link3));
 /// ```
 pub trait NavigationLinkTuple {

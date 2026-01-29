@@ -415,8 +415,8 @@ impl Application for SettingsApp {
         Window::new(
             "Settings",
             navigation! {
-                NavigationLink::new("Appearance", Icon::Home, move || -> Box<dyn View> {
-                    Box::new(appearance_page(
+                NavigationLink::new("Appearance", Icon::Home, move || {
+                    appearance_page(
                         r0.clone(), g0.clone(), b0.clone(),
                         r1.clone(), g1.clone(), b1.clone(),
                         r2.clone(), g2.clone(), b2.clone(),
@@ -430,14 +430,10 @@ impl Application for SettingsApp {
                         style_default, style_gradient, style_solid,
                         highlight, border,
                         app.clone()
-                    ))
+                    )
                 }),
-                NavigationLink::new("Network", Icon::Search, || -> Box<dyn View> {
-                    Box::new(network_page())
-                }),
-                NavigationLink::new("About", Icon::Info, || -> Box<dyn View> {
-                    Box::new(about_page())
-                }),
+                NavigationLink::new("Network", Icon::Search, || network_page()),
+                NavigationLink::new("About", Icon::Info, || about_page()),
             }
             .sidebar_width(200.0)
             .frame(f32::INFINITY, f32::INFINITY)

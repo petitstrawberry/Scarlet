@@ -47,9 +47,7 @@ pub enum Icon {
 /// # Examples
 ///
 /// ```ignore
-/// let link = NavigationLink::new("Home", Icon::Home, || {
-///     Text::new("Welcome to Home")
-/// });
+/// let link = NavigationLink::new("Home", Icon::Home, || Text::new("Welcome to Home"));
 /// ```
 pub struct NavigationLink {
     label: String,
@@ -75,20 +73,22 @@ impl NavigationLink {
     ///
     /// * `label` - Display text for the navigation item
     /// * `icon` - Icon to display next to the label
-    /// * `content_builder` - Closure that builds the content view when selected
+    /// * `content_builder` - Closure that builds the content view when selected (boxed internally)
     ///
     /// # Examples
     ///
     /// ```ignore
-    /// NavigationLink::new("Settings", Icon::Settings, || {
-    ///     Box::new(SettingsView::new())
-    /// })
+    /// NavigationLink::new("Settings", Icon::Settings, || SettingsView::new())
     /// ```
-    pub fn new(label: impl Into<String>, icon: Icon, content_builder: impl Fn() -> Box<dyn View> + 'static) -> Self {
+    pub fn new<V>(label: impl Into<String>, icon: Icon, content_builder: impl Fn() -> V + 'static) -> Self
+    where
+        V: View + 'static,
+    {
+        let builder = move || -> Box<dyn View> { Box::new(content_builder()) };
         Self {
             label: label.into(),
             icon,
-            content_builder: Rc::new(content_builder),
+            content_builder: Rc::new(builder),
         }
     }
 

@@ -30,19 +30,19 @@ use crate::views::navigation::tuple::NavigationLinkTuple;
 /// ```ignore
 /// // Basic usage with macro (recommended)
 /// let nav = navigation! {
-///     NavigationLink::new("Home", Icon::Home, || Box::new(Text::new("Home View"))),
-///     NavigationLink::new("Settings", Icon::Settings, || Box::new(Text::new("Settings View"))),
+///     NavigationLink::new("Home", Icon::Home, || Text::new("Home View")),
+///     NavigationLink::new("Settings", Icon::Settings, || Text::new("Settings View")),
 /// };
 ///
 /// // With state preservation
 /// let home_state = State::new(StateId::new(1), HomeData::default());
 /// let nav = navigation! {
-///     NavigationLink::new("Home", Icon::Home, || Box::new(HomeView::new(home_state.clone()))),
+///     NavigationLink::new("Home", Icon::Home, || HomeView::new(home_state.clone())),
 /// };
 ///
 /// // With modifiers
 /// let nav = navigation! {
-///     NavigationLink::new("Home", Icon::Home, || Box::new(Text::new("Home"))),
+///     NavigationLink::new("Home", Icon::Home, || Text::new("Home")),
 /// }
 /// .sidebar_width(250.0)
 /// .padding(20.0);
@@ -73,8 +73,8 @@ where
     ///
     /// ```ignore
     /// let nav = NavigationView::new((
-    ///     NavigationLink::new("Home", Icon::Home, || Box::new(Text::new("Home"))),
-    ///     NavigationLink::new("Settings", Icon::Settings, || Box::new(Text::new("Settings"))),
+///     NavigationLink::new("Home", Icon::Home, || Text::new("Home")),
+///     NavigationLink::new("Settings", Icon::Settings, || Text::new("Settings")),
     /// ));
     /// ```
     pub fn new(links: T) -> Self {
