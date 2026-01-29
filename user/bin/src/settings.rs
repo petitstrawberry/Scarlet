@@ -435,7 +435,7 @@ impl Application for SettingsApp {
                 NavigationLink::new("Network", Icon::Search, || network_page()),
                 NavigationLink::new("About", Icon::Info, || about_page()),
             }
-            .sidebar_width(200.0)
+            .sidebar_width(150.0)
             .frame(f32::INFINITY, f32::INFINITY)
         )
         .app_id("org.scarlet-os.desktop.settings")
