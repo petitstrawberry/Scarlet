@@ -432,11 +432,11 @@ impl Application for SettingsApp {
                         app.clone()
                     ))
                 }),
-                NavigationLink::new("About", Icon::Info, || -> Box<dyn View> {
-                    Box::new(about_page())
-                }),
                 NavigationLink::new("Network", Icon::Search, || -> Box<dyn View> {
                     Box::new(network_page())
+                }),
+                NavigationLink::new("About", Icon::Info, || -> Box<dyn View> {
+                    Box::new(about_page())
                 }),
             }
             .sidebar_width(200.0)

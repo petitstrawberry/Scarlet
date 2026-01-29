@@ -216,6 +216,18 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
         UpdateResult::NoChange
     }
 
+    fn mount(&mut self) {
+        for child in &mut self.children {
+            child.mount();
+        }
+    }
+
+    fn unmount(&mut self) {
+        for child in &mut self.children {
+            child.unmount();
+        }
+    }
+
     fn flex_factor(&self) -> u32 {
         // Check if this is a Spacer (which should expand to fill available space)
         let type_name = core::any::type_name_of_val(&self.render_object);
