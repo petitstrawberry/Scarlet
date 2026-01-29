@@ -16,7 +16,9 @@ use scarlet_desktop_config::BackgroundStyle;
 use scarlet_std::format;
 use scarlet_std::fs;
 use scarlet_std::println;
-use scarlet_ui::{State, StateId, hstack, prelude::*, vstack, zstack, navigation, NavigationLink, Icon};
+use scarlet_ui::{
+    Icon, NavigationLink, State, StateId, hstack, navigation, prelude::*, vstack, zstack,
+};
 use scarlet_ui_macros::View;
 
 // Preset colors - Apple system-style palette
@@ -135,18 +137,46 @@ impl SettingsApp {
 }
 
 fn appearance_page(
-    r0: State<f32>, g0: State<f32>, b0: State<f32>,
-    r1: State<f32>, g1: State<f32>, b1: State<f32>,
-    r2: State<f32>, g2: State<f32>, b2: State<f32>,
-    r3: State<f32>, g3: State<f32>, b3: State<f32>,
-    r4: State<f32>, g4: State<f32>, b4: State<f32>,
-    r5: State<f32>, g5: State<f32>, b5: State<f32>,
-    r6: State<f32>, g6: State<f32>, b6: State<f32>,
-    r7: State<f32>, g7: State<f32>, b7: State<f32>,
-    s0: State<BackgroundStyle>, s1: State<BackgroundStyle>, s2: State<BackgroundStyle>,
-    is0: bool, is1: bool, is2: bool, is3: bool, is4: bool, is5: bool, is6: bool, is7: bool,
-    style_default: bool, style_gradient: bool, style_solid: bool,
-    highlight: Color, border: Color,
+    r0: State<f32>,
+    g0: State<f32>,
+    b0: State<f32>,
+    r1: State<f32>,
+    g1: State<f32>,
+    b1: State<f32>,
+    r2: State<f32>,
+    g2: State<f32>,
+    b2: State<f32>,
+    r3: State<f32>,
+    g3: State<f32>,
+    b3: State<f32>,
+    r4: State<f32>,
+    g4: State<f32>,
+    b4: State<f32>,
+    r5: State<f32>,
+    g5: State<f32>,
+    b5: State<f32>,
+    r6: State<f32>,
+    g6: State<f32>,
+    b6: State<f32>,
+    r7: State<f32>,
+    g7: State<f32>,
+    b7: State<f32>,
+    s0: State<BackgroundStyle>,
+    s1: State<BackgroundStyle>,
+    s2: State<BackgroundStyle>,
+    is0: bool,
+    is1: bool,
+    is2: bool,
+    is3: bool,
+    is4: bool,
+    is5: bool,
+    is6: bool,
+    is7: bool,
+    style_default: bool,
+    style_gradient: bool,
+    style_solid: bool,
+    highlight: Color,
+    border: Color,
     app: SettingsApp,
 ) -> impl View {
     vstack! {
@@ -436,7 +466,7 @@ impl Application for SettingsApp {
                 NavigationLink::new("About", Icon::Info, || about_page()),
             }
             .sidebar_width(150.0)
-            .frame(f32::INFINITY, f32::INFINITY)
+            .frame(f32::INFINITY, f32::INFINITY),
         )
         .app_id("org.scarlet-os.desktop.settings")
         .size(Size::new(800.0, 600.0))
