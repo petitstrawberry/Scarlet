@@ -260,70 +260,72 @@ impl WaylandBridge {
             return Ok(());
         }
 
-        let sws_conn = self.sws_connection.as_mut().ok_or("Not connected to SWS")?;
+        let mut window_id_opt = None;
+        {
+            let sws_conn = self.sws_connection.as_mut().ok_or("Not connected to SWS")?;
 
-        // Default size for now (800x600)
-        let width = 800u32;
-        let height = 600u32;
+            // Default size for now (800x600)
+            let width = 800u32;
+            let height = 600u32;
 
-        println!(
-            "[Bridge] Creating SWS window for surface {} ({}x{})",
-            wl_surface_id, width, height
-        );
+            println!(
+                "[Bridge] Creating SWS window for surface {} ({}x{})",
+                wl_surface_id, width, height
+            );
 
-        // Send EXTENSION_CREATE_WINDOW message
-        let payload = protocol_sws::payload_extension_create_window(wl_surface_id, width, height);
-        let header = protocol_sws::MessageHeader {
-            msg_type: protocol_sws::client_msg::EXTENSION_CREATE_WINDOW,
-            payload_size: payload.len() as u32,
-        };
+            // Send EXTENSION_CREATE_WINDOW message
+            let payload = protocol_sws::payload_extension_create_window(wl_surface_id, width, height);
+            let header = protocol_sws::MessageHeader {
+                msg_type: protocol_sws::client_msg::EXTENSION_CREATE_WINDOW,
+                payload_size: payload.len() as u32,
+            };
 
-        let mut msg_bytes = Vec::new();
-        msg_bytes.extend_from_slice(&header.to_le_bytes());
-        msg_bytes.extend_from_slice(&payload);
+            let mut msg_bytes = Vec::new();
+            msg_bytes.extend_from_slice(&header.to_le_bytes());
+            msg_bytes.extend_from_slice(&payload);
 
-        sws_conn
-            .write(&msg_bytes)
-            .map_err(|_| "Failed to send EXTENSION_CREATE_WINDOW")?;
+            sws_conn
+                .write(&msg_bytes)
+                .map_err(|_| "Failed to send EXTENSION_CREATE_WINDOW")?;
 
-        // Read WINDOW_CREATED response
-        let mut response_buf = [0u8; 1024];
-        let n = sws_conn
-            .read(&mut response_buf)
-            .map_err(|_| "Failed to read WINDOW_CREATED response")?;
+            // Read WINDOW_CREATED response
+            let mut response_buf = [0u8; 1024];
+            let n = sws_conn
+                .read(&mut response_buf)
+                .map_err(|_| "Failed to read WINDOW_CREATED response")?;
 
-        if n >= 20 {
-            let mut header_bytes = [0u8; 8];
-            header_bytes.copy_from_slice(&response_buf[0..8]);
-            let resp_header = protocol_sws::MessageHeader::from_le_bytes(header_bytes);
-            if resp_header.msg_type == protocol_sws::server_msg::WINDOW_CREATED {
-                let window_id = u32::from_le_bytes([
-                    response_buf[8],
-                    response_buf[9],
-                    response_buf[10],
-                    response_buf[11],
-                ]);
+            if n >= 20 {
+                let mut header_bytes = [0u8; 8];
+                header_bytes.copy_from_slice(&response_buf[0..8]);
+                let resp_header = protocol_sws::MessageHeader::from_le_bytes(header_bytes);
+                if resp_header.msg_type == protocol_sws::server_msg::WINDOW_CREATED {
+                    let window_id = u32::from_le_bytes([
+                        response_buf[8],
+                        response_buf[9],
+                        response_buf[10],
+                        response_buf[11],
+                    ]);
 
-                println!(
-                    "[Bridge] SWS window created: {} for surface {}",
-                    window_id, wl_surface_id
-                );
-                self.surface_to_window.insert(wl_surface_id, window_id);
+                    println!(
+                        "[Bridge] SWS window created: {} for surface {}",
+                        window_id, wl_surface_id
+                    );
+                    self.surface_to_window.insert(wl_surface_id, window_id);
+                    window_id_opt = Some(window_id);
 
-                if let Some(surface) = self.surface_manager.get_surface(wl_surface_id) {
-                    if let Some(buffer_id) = surface.buffer_id {
-                        let _ = self.send_extension_attach_buffer(
-                            wl_surface_id,
-                            window_id,
-                            buffer_id,
-                        );
+                    // Receive SHM handle
+                    if let Ok(_shm_handle) = sws_conn.recv_handle() {
+                        println!("[Bridge] Received SHM handle for window {}", window_id);
+                        // Store handle if needed
                     }
                 }
+            }
+        }
 
-                // Receive SHM handle
-                if let Ok(shm_handle) = sws_conn.recv_handle() {
-                    println!("[Bridge] Received SHM handle for window {}", window_id);
-                    // Store handle if needed
+        if let Some(window_id) = window_id_opt {
+            if let Some(surface) = self.surface_manager.get_surface(wl_surface_id) {
+                if let Some(buffer_id) = surface.buffer_id {
+                    let _ = self.send_extension_attach_buffer(wl_surface_id, window_id, buffer_id);
                 }
             }
         }
@@ -564,7 +566,9 @@ impl WaylandBridge {
                     // Send done event for the callback
                     let mut msg = WaylandMessage::new(callback_id, 0); // wl_callback.done
                     msg.add_arg(WaylandArg::Uint(0)); // serial
-                    return Ok(vec![msg]);
+                    let mut msgs = Vec::new();
+                    msgs.push(msg);
+                    return Ok(msgs);
                 }
                 Ok(Vec::new())
             }
@@ -776,14 +780,18 @@ impl WaylandBridge {
             protocol::surface_request::COMMIT => {
                 println!("[Bridge] wl_surface.commit on surface {}", surface_id);
                 let mut release_msg = None;
+                let has_role = self
+                    .surface_manager
+                    .get_surface(surface_id)
+                    .map(|surface| surface.role.is_some())
+                    .unwrap_or(false);
+                if has_role {
+                    if let Err(e) = self.update_sws_window(surface_id) {
+                        println!("[Bridge] Failed to update SWS window: {}", e);
+                    }
+                }
                 if let Some(surface) = self.surface_manager.get_surface_mut(surface_id) {
                     let buffer_id = surface.buffer_id;
-                    // If surface has a role and is mapped to SWS window, update it
-                    if surface.role.is_some() {
-                        if let Err(e) = self.update_sws_window(surface_id) {
-                            println!("[Bridge] Failed to update SWS window: {}", e);
-                        }
-                    }
                     surface.commit();
                     if let Some(buf_id) = buffer_id {
                         if self.objects.get(&buf_id).is_some() {
@@ -793,7 +801,9 @@ impl WaylandBridge {
                     }
                 }
                 if let Some(msg) = release_msg {
-                    Ok(vec![msg])
+                    let mut msgs = Vec::new();
+                    msgs.push(msg);
+                    Ok(msgs)
                 } else {
                     Ok(Vec::new())
                 }
@@ -992,7 +1002,10 @@ impl WaylandBridge {
                     );
                     surface_configure.add_arg(WaylandArg::Uint(serial));
 
-                    return Ok(vec![toplevel_configure, surface_configure]);
+                    let mut msgs = Vec::new();
+                    msgs.push(toplevel_configure);
+                    msgs.push(surface_configure);
+                    return Ok(msgs);
                 }
                 Ok(Vec::new())
             }
@@ -1096,7 +1109,9 @@ impl WaylandBridge {
                     msg.add_arg(WaylandArg::Uint(1)); // XKB_V1 format
                     msg.add_arg(WaylandArg::Fd(0)); // FD (out-of-band handle)
                     msg.add_arg(WaylandArg::Uint(size)); // size
-                    return Ok(vec![msg]);
+                    let mut msgs = Vec::new();
+                    msgs.push(msg);
+                    return Ok(msgs);
                 }
                 Ok(Vec::new())
             }
