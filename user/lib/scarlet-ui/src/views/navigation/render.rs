@@ -17,6 +17,7 @@ use crate::buffer::Buffer;
 use crate::state::State;
 use crate::graphics;
 use crate::views::navigation::link::Icon;
+use crate::color::ColorPalette;
 
 /// NavigationView RenderObject - handles rendering and layout
 ///
@@ -520,8 +521,13 @@ impl ElementRenderObject for NavigationViewRenderObject {
 
                 // Bottom border
                 let border_color = Color { r: 0.85, g: 0.85, b: 0.85, a: 1.0 };
-                canvas.draw_line(0, y + height_px - 1, width_px, y + height_px - 1, border_color);
+                canvas.draw_line(0, y + height_px - 1, width_px - 1, y + height_px - 1, border_color);
             }
+
+            // Draw separator line on the right edge
+            let palette = ColorPalette::default();
+            let border_color = palette.border();
+            canvas.draw_line(width as i32 - 1, 0, width as i32 - 1, height as i32, border_color);
         }
     }
 
