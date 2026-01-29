@@ -595,7 +595,7 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
         }
 
         // Handle CanvasView events
-        if let Some(canvas) = self.view.as_any().downcast_ref::<crate::views::CanvasView>() {
+        if let Some(_canvas) = self.view.as_any().downcast_ref::<crate::views::CanvasView>() {
             if let Some(render_object) = self
                 .render_object
                 .as_any()
@@ -610,6 +610,73 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
                         return handled;
                     }
                 }
+            }
+        }
+
+        // Handle NavigationView events - check render object directly
+        if let Some(render_object) = self
+            .render_object
+            .as_any_mut()
+            .downcast_mut::<crate::views::navigation::NavigationViewRenderObject>()
+        {
+            match mouse_event {
+                MouseEvent::Entered { x, y } | MouseEvent::Moved { x, y } => {
+                    // Translate to local coordinates
+                    let local_x = *x as f32 - self.position.x;
+                    let local_y = *y as f32 - self.position.y;
+
+                    // Check if point is within sidebar
+                    if local_x >= 0.0 && local_x <= render_object.sidebar_width() {
+                        // Calculate which item is being hovered
+                        if let Some(index) = render_object.index_at_y(local_y) {
+                            if index < render_object.link_count() && render_object.hovered_index() != Some(index) {
+                                render_object.set_hovered_index(Some(index));
+                                crate::pipeline::mark_element_needs_paint(self.id);
+                            }
+                        } else {
+                            if render_object.hovered_index().is_some() {
+                                render_object.set_hovered_index(None);
+                                crate::pipeline::mark_element_needs_paint(self.id);
+                            }
+                        }
+                    } else {
+                        if render_object.hovered_index().is_some() {
+                            render_object.set_hovered_index(None);
+                            crate::pipeline::mark_element_needs_paint(self.id);
+                        }
+                    }
+                    return true;
+                }
+                MouseEvent::Exited { .. } => {
+                    if render_object.hovered_index().is_some() {
+                        render_object.set_hovered_index(None);
+                        crate::pipeline::mark_element_needs_paint(self.id);
+                    }
+                    return true;
+                }
+                MouseEvent::ButtonReleased { button: MouseButton::Left, x, y } => {
+                    // Translate to local coordinates
+                    let local_x = *x as f32 - self.position.x;
+                    let local_y = *y as f32 - self.position.y;
+
+                    // Check if click is within sidebar
+                    if local_x >= 0.0 && local_x <= render_object.sidebar_width() {
+                        if let Some(index) = render_object.index_at_y(local_y) {
+                            if index < render_object.link_count() {
+                                // Update selected index
+                                let selected_state = render_object.selected_index();
+                                let current = selected_state.get();
+
+                                if current != index {
+                                    selected_state.set(index);
+                                    crate::pipeline::mark_element_dirty(self.id);
+                                }
+                            }
+                        }
+                    }
+                    return true;
+                }
+                _ => {}
             }
         }
 

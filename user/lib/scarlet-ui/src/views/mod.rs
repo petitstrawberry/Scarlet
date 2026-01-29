@@ -16,6 +16,7 @@ mod canvas;
 pub mod modifiers;
 pub mod containers;
 pub mod menu;
+pub mod navigation;
 
 pub use window::{Window, WindowRenderObject, WindowRenderElement, WindowInfo};
 pub use window::window_type;
@@ -30,6 +31,7 @@ pub use slider::{Slider, SliderRenderObject};
 pub use progress::{ProgressView, ProgressViewRenderObject};
 pub use canvas::{CanvasView, CanvasRenderObject, CanvasRenderCallback, CanvasEventHandler};
 pub use menu::{MenuItem, MenuBar, Menu, MenuItemContent, MenuAction};
+pub use navigation::{NavigationView, NavigationLink};
 
 // Re-export modifiers for convenience
 pub use modifiers::{

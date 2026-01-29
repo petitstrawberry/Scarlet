@@ -419,6 +419,20 @@ impl<C: View + Clone + WindowViewInfo> Element for WindowRenderElement<C> {
         UpdateResult::NoChange
     }
 
+    fn mount(&mut self) {
+        // Mount children
+        for child in &mut self.children {
+            child.mount();
+        }
+    }
+
+    fn unmount(&mut self) {
+        // Unmount children
+        for child in &mut self.children {
+            child.unmount();
+        }
+    }
+
     fn layout(&mut self, constraints: LayoutConstraints) -> Size {
         self.render_object
             .layout_with_children(constraints, &mut self.children)

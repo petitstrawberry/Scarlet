@@ -82,6 +82,8 @@ pub use render::{RenderTree, RenderNode};
 pub use pipeline::{PipelineOwner, RenderingPipeline, DirtyPhase, StateRegistry};
 pub use views::{Window, Text, Button, Rectangle, Spacer, Image, VStack, HStack, ZStack};
 pub use views::{Divider, DividerOrientation, Toggle, Slider, ProgressView, CanvasView};
+pub use views::{NavigationView, NavigationLink};
+pub use views::navigation::Icon;
 pub use views::modifiers::{Padding, Frame, Background, SetSize, AlignmentFrame, Clip};
 pub use platform::{PlatformWindow, SWSPlatformWindow};
 pub use application::Application;

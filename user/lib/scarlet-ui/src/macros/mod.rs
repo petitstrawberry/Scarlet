@@ -67,6 +67,24 @@ macro_rules! zstack {
     }};
 }
 
+/// Create a NavigationView with navigation links
+///
+/// # Examples
+///
+/// ```ignore
+/// let nav = navigation! {
+///     NavigationLink::new("Home", Icon::Home, || Text::new("Home")),
+///     NavigationLink::new("Settings", Icon::Settings, || Text::new("Settings")),
+/// }
+/// .sidebar_width(200.0);
+/// ```
+#[macro_export]
+macro_rules! navigation {
+    ($($link:expr),* $(,)?) => {{
+        $crate::views::NavigationView::new(($($link,)*))
+    }};
+}
+
 #[cfg(test)]
 mod tests {
     #[test]
