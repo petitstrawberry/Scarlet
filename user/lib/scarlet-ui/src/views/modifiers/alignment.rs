@@ -96,6 +96,40 @@ impl ElementRenderObject for AlignmentRenderObject {
         self.size
     }
 
+    fn layout_with_children(
+        &mut self,
+        constraints: LayoutConstraints,
+        children: &mut [Box<dyn Element>],
+    ) -> Size {
+        if let Some(child) = children.first_mut() {
+            let child_constraints = LayoutConstraints::new(
+                0.0,
+                constraints.max_width,
+                0.0,
+                constraints.max_height,
+            );
+            let child_size = child.layout(child_constraints);
+
+            let width = if constraints.max_width.is_finite() && constraints.max_width > 0.0 {
+                constraints.max_width.max(constraints.min_width)
+            } else {
+                child_size.width.max(constraints.min_width)
+            };
+            let height = if constraints.max_height.is_finite() && constraints.max_height > 0.0 {
+                constraints.max_height.max(constraints.min_height)
+            } else {
+                child_size.height.max(constraints.min_height)
+            };
+
+            self.size = Size { width, height };
+            let origin = self.alignment.apply(self.size, child_size);
+            child.set_position(origin);
+            self.size
+        } else {
+            self.layout(constraints)
+        }
+    }
+
     fn size(&self) -> Size {
         self.size
     }
