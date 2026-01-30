@@ -2448,19 +2448,56 @@ pub fn sys_faccessat(_abi: &mut LinuxRiscv64Abi, trapframe: &mut crate::arch::Tr
         Some(ptr) => ptr as *const u8,
         None => return usize::MAX,
     };
-    let flags = trapframe.get_arg(2) as i32;
+    let mode = trapframe.get_arg(2) as i32;
     let path_str = match get_path_str_v2(path_ptr) {
         Ok(p) => p,
         Err(_) => return usize::MAX,
     };
 
-    crate::println!(
-        "sys_faccessat: epc={:#x}, dirfd={}, path='{}', flags={:#o}",
-        trapframe.epc,
-        dirfd,
-        path_str,
-        flags
-    );
+    // crate::println!(
+    //     "sys_faccessat: epc={:#x}, dirfd={}, path='{}', mode={:#o}",
+    //     trapframe.epc,
+    //     dirfd,
+    //     path_str,
+    //     mode
+    // );
+
+    0
+}
+
+/// Linux faccessat2 system call (syscall 439)
+///
+/// Checks user's permissions for a file. Similar to faccessat but with
+/// additional flag support (AT_EACCESS, AT_SYMLINK_NOFOLLOW).
+///
+/// Signature: int faccessat2(int dirfd, const char *pathname, int mode, int flags);
+///
+/// Returns:
+/// - 0 (success)
+pub fn sys_faccessat2(_abi: &mut LinuxRiscv64Abi, trapframe: &mut crate::arch::Trapframe) -> usize {
+    let task = crate::task::mytask().unwrap();
+    trapframe.increment_pc_next(task);
+
+    let dirfd = trapframe.get_arg(0) as i32;
+    let path_ptr = match task.vm_manager.translate_vaddr(trapframe.get_arg(1)) {
+        Some(ptr) => ptr as *const u8,
+        None => return usize::MAX,
+    };
+    let mode = trapframe.get_arg(2) as i32;
+    let flags = trapframe.get_arg(3) as i32;
+    let path_str = match get_path_str_v2(path_ptr) {
+        Ok(p) => p,
+        Err(_) => return usize::MAX,
+    };
+
+    // crate::println!(
+    //     "sys_faccessat2: epc={:#x}, dirfd={}, path='{}', mode={:#o}, flags={:#x}",
+    //     trapframe.epc,
+    //     dirfd,
+    //     path_str,
+    //     mode,
+    //     flags
+    // );
 
     0
 }
