@@ -269,6 +269,39 @@ pub fn sys_gettid(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usiz
     task.get_id()
 }
 
+/// Linux prctl system call (syscall 167)
+///
+/// Operations on a process or thread. This is a stub implementation
+/// that returns success for common operations.
+///
+/// Arguments:
+///   - arg0: option (PR_* operation)
+///   - arg1-arg4: operation-specific arguments
+///
+/// Returns:
+/// - 0 on success
+/// - usize::MAX (Linux -1) for unsupported operations
+pub fn sys_prctl(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
+    let task = mytask().unwrap();
+    let option = trapframe.get_arg(0) as i32;
+    let _arg2 = trapframe.get_arg(1);
+    let _arg3 = trapframe.get_arg(2);
+    let _arg4 = trapframe.get_arg(3);
+    let _arg5 = trapframe.get_arg(4);
+
+    trapframe.increment_pc_next(task);
+
+    crate::println!(
+        "[stub] sys_prctl: option={}, arg2={:#x}, arg3={:#x}, arg4={:#x}, arg5={:#x}",
+        option, _arg2, _arg3, _arg4, _arg5
+    );
+
+    // Common PR_* operations (from include/uapi/linux/prctl.h)
+    // For now, just return success for all operations
+    // Specific operations can be implemented as needed
+    0
+}
+
 pub fn sys_setpgid(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
     let _pid = trapframe.get_arg(0);

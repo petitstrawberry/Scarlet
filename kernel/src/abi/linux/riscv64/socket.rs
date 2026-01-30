@@ -596,6 +596,56 @@ pub fn sys_getsockname(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) ->
     }
 }
 
+/// Linux sys_getpeername implementation (mock)
+///
+/// Gets the address of the peer connected to the socket.
+/// This is a mock implementation that writes dummy data and succeeds.
+///
+/// Arguments:
+///   - arg0: sockfd (socket file descriptor)
+///   - arg1: addr (pointer to socket address structure)
+///   - arg2: addrlen (pointer to size of address structure)
+///
+/// Returns:
+/// - 0 on success
+/// - usize::MAX (Linux -1) indicating failure
+pub fn sys_getpeername(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
+    let task = match mytask() {
+        Some(t) => t,
+        None => return usize::MAX,
+    };
+
+    let _sockfd = trapframe.get_arg(0) as i32;
+    let addr_ptr = trapframe.get_arg(1);
+    let addrlen_ptr = trapframe.get_arg(2);
+
+    // Increment PC to avoid infinite loop
+    trapframe.increment_pc_next(task);
+
+    // Mock implementation - write minimal valid sockaddr and return success
+    if let (Some(addr_paddr), Some(addrlen_paddr)) = (
+        task.vm_manager.translate_vaddr(addr_ptr),
+        task.vm_manager.translate_vaddr(addrlen_ptr),
+    ) {
+        unsafe {
+            // Read the provided length
+            let addrlen = *(addrlen_paddr as *const u32);
+
+            // Write minimal sockaddr_un structure for Unix domain socket
+            if addrlen >= 2 {
+                let sockaddr = addr_paddr as *mut u16;
+                *sockaddr = AF_UNIX as u16; // sa_family = AF_UNIX
+
+                // Update the actual length used
+                *(addrlen_paddr as *mut u32) = 2;
+            }
+        }
+        0 // Success
+    } else {
+        usize::MAX // Invalid pointers
+    }
+}
+
 /// Linux sys_getsockopt implementation (mock)
 ///
 /// Gets socket options. This is a mock implementation that
