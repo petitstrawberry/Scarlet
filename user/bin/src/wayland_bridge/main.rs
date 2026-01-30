@@ -34,6 +34,9 @@ use std::ipc::{SharedMemory, permissions};
 use std::println;
 use std::socket::Socket;
 use std::string::String;
+use std::sync::{Arc, Mutex as StdMutex};
+use std::thread;
+use std::time::Duration;
 use std::vec::Vec;
 use surface::SurfaceManager;
 use sws_protocol as protocol_sws;
@@ -87,6 +90,10 @@ struct WaylandBridge {
     /// Cached keymap SHM for wl_keyboard.keymap
     keymap_shm: Option<SharedMemory>,
     keymap_size: u32,
+    /// Input event queue from SWS (shared between threads)
+    input_event_queue: Arc<StdMutex<Vec<WaylandMessage>>>,
+    /// Objects map clone for input thread
+    objects_for_input_thread: Arc<StdMutex<BTreeMap<u32, String>>>,
 }
 
 impl WaylandBridge {
@@ -113,6 +120,9 @@ impl WaylandBridge {
         // Object ID 1 is always wl_display
         objects.insert(1, String::from("wl_display"));
 
+        let input_event_queue = Arc::new(StdMutex::new(Vec::new()));
+        let objects_for_input_thread = Arc::new(StdMutex::new(BTreeMap::new()));
+
         Ok(Self {
             server_socket,
             registry: Registry::new(),
@@ -128,6 +138,8 @@ impl WaylandBridge {
             window_shm: BTreeMap::new(),
             keymap_shm: None,
             keymap_size: 0,
+            input_event_queue,
+            objects_for_input_thread,
         })
     }
 
@@ -190,6 +202,14 @@ impl WaylandBridge {
         let serial = self.next_serial;
         self.next_serial = self.next_serial.wrapping_add(1);
         serial
+    }
+
+    /// Add an object to the objects map and sync to input thread
+    fn add_object(&mut self, id: u32, interface: String) {
+        self.objects.insert(id, interface.clone());
+        // Update input thread's objects map
+        let mut objects = self.objects_for_input_thread.lock();
+        objects.insert(id, interface);
     }
 
     fn ensure_keymap(&mut self) -> Result<u32, &'static str> {
@@ -917,6 +937,21 @@ impl WaylandBridge {
             if offset > 0 {
                 buffer.drain(0..offset);
             }
+
+            // Check for input events from SWS (from background thread)
+            let mut input_events = Vec::new();
+            {
+                let mut queue = self.input_event_queue.lock();
+                input_events.extend(queue.drain(..));
+            }
+            for input_msg in input_events {
+                let msg_bytes = input_msg.encode();
+                println!("[Bridge] Forwarding input event: obj={} opcode={}",
+                    input_msg.header.object_id, input_msg.header.opcode());
+                if let Err(e) = client.write(&msg_bytes) {
+                    println!("[Bridge] Failed to forward input event: {:?}", e);
+                }
+            }
         }
 
         Ok(())
@@ -1032,7 +1067,7 @@ impl WaylandBridge {
 
                         if let Some(global) = self.registry.get_global(name) {
                             if global.interface == interface_name && new_id != 0 {
-                                self.objects.insert(new_id, interface_name.clone());
+                                self.add_object(new_id, interface_name.clone());
 
                                 if interface_name == "wl_shm" {
                                     let mut msgs = Vec::new();
@@ -1131,7 +1166,7 @@ impl WaylandBridge {
                     let surface_id =
                         u32::from_ne_bytes([payload[0], payload[1], payload[2], payload[3]]);
                     println!("[Bridge] Created surface ID: {}", surface_id);
-                    self.objects.insert(surface_id, String::from("wl_surface"));
+                    self.add_object(surface_id, String::from("wl_surface"));
                     self.surface_manager.create_surface(surface_id);
                 }
                 Ok(Vec::new())
@@ -1273,7 +1308,7 @@ impl WaylandBridge {
                     let pool_id = Self::parse_u32(payload, 0).unwrap_or(0);
                     let size = Self::parse_i32(payload, 4).unwrap_or(0);
                     println!("[Bridge] Created pool ID: {} size: {}", pool_id, size);
-                    self.objects.insert(pool_id, String::from("wl_shm_pool"));
+                    self.add_object(pool_id, String::from("wl_shm_pool"));
                     let handle_result = client.recv_handle();
                     let handle = match handle_result {
                         Ok(h) => {
@@ -1324,7 +1359,7 @@ impl WaylandBridge {
                         "[Bridge] Buffer: {}x{} stride:{} format:{}",
                         width, height, stride, format
                     );
-                    self.objects.insert(buffer_id, String::from("wl_buffer"));
+                    self.add_object(buffer_id, String::from("wl_buffer"));
                     self.shm_manager
                         .create_buffer(buffer_id, pool_id, offset, width, height, stride, format)?;
                 }
@@ -1537,7 +1572,7 @@ impl WaylandBridge {
                     let pointer_id =
                         u32::from_ne_bytes([payload[0], payload[1], payload[2], payload[3]]);
                     println!("[Bridge] Pointer ID: {}", pointer_id);
-                    self.objects.insert(pointer_id, String::from("wl_pointer"));
+                    self.add_object(pointer_id, String::from("wl_pointer"));
                     self.input_manager.create_pointer(pointer_id, seat_id);
                 }
                 Ok(Vec::new())
@@ -1548,8 +1583,7 @@ impl WaylandBridge {
                     let keyboard_id =
                         u32::from_ne_bytes([payload[0], payload[1], payload[2], payload[3]]);
                     println!("[Bridge] Keyboard ID: {}", keyboard_id);
-                    self.objects
-                        .insert(keyboard_id, String::from("wl_keyboard"));
+                    self.add_object(keyboard_id, String::from("wl_keyboard"));
                     self.input_manager.create_keyboard(keyboard_id, seat_id);
 
                     // Send keymap event (empty for now)
@@ -1612,92 +1646,129 @@ impl WaylandBridge {
 
     /// Process input events from SWS and forward to Wayland clients
     /// This should be called periodically or in a separate thread
+    /// NOTE: This is now a no-op placeholder - input event forwarding is disabled
     fn process_sws_input_events(&mut self) -> Result<Vec<WaylandMessage>, &'static str> {
-        let mut messages = Vec::new();
+        // Disabled for now - was causing blocking issues
+        // TODO: Implement proper non-blocking I/O or use poll/epoll
+        Ok(Vec::new())
+    }
 
-        let sws_conn = match self.sws_connection.as_mut() {
-            Some(conn) => conn,
-            None => return Ok(messages),
-        };
+    /// Spawn a background thread to listen for SWS input events
+    fn spawn_input_thread(&self) -> Result<(), &'static str> {
+        let input_queue = self.input_event_queue.clone();
+        let objects_clone = self.objects_for_input_thread.clone();
 
-        // Try to read input events from SWS (non-blocking would be better)
-        let mut buf = [0u8; 1024];
-        match sws_conn.read(&mut buf) {
-            Ok(n) if n >= 8 => {
-                let mut header_bytes = [0u8; 8];
-                header_bytes.copy_from_slice(&buf[0..8]);
-                let header = protocol_sws::MessageHeader::from_le_bytes(header_bytes);
+        println!("[Bridge] Spawning input event thread...");
 
-                if header.msg_type == protocol_sws::server_msg::EXTENSION_INPUT_EVENT && n >= 32 {
-                    // Parse EXTENSION_INPUT_EVENT
-                    let external_client_id = u32::from_le_bytes([buf[8], buf[9], buf[10], buf[11]]);
-                    let window_id = u32::from_le_bytes([buf[12], buf[13], buf[14], buf[15]]);
-                    let time = u64::from_le_bytes([
-                        buf[16], buf[17], buf[18], buf[19], buf[20], buf[21], buf[22], buf[23],
-                    ]);
-                    let type_ = u16::from_le_bytes([buf[24], buf[25]]);
-                    let code = u16::from_le_bytes([buf[26], buf[27]]);
-                    let value = i32::from_le_bytes([buf[28], buf[29], buf[30], buf[31]]);
+        thread::spawn(move || {
+            println!("[Input Thread] Started, connecting to SWS...");
 
-                    println!(
-                        "[Bridge] Received input event: ext_client={} win={} type={} code={} value={}",
-                        external_client_id, window_id, type_, code, value
-                    );
+            // Create separate connection to SWS for input events
+            let sws_socket = match Socket::new() {
+                Ok(s) => s,
+                Err(_) => {
+                    println!("[Input Thread] Failed to create socket");
+                    return;
+                }
+            };
 
-                    // Find surface for this window (external_client_id is surface_id)
-                    // For simplicity, send to all input devices
-                    // In production, track which surface has focus
+            if let Err(_) = sws_socket.connect("/tmp/sws.sock") {
+                println!("[Input Thread] Failed to connect to SWS");
+                return;
+            }
 
-                    // Convert SWS event to Wayland input events
-                    // Type 1 = keyboard, Type 2 = mouse
-                    if type_ == 1 {
-                        // Keyboard event - forward to all wl_keyboard objects
-                        for (id, interface) in &self.objects {
-                            if interface == "wl_keyboard" {
-                                let mut msg = WaylandMessage::new(*id, input::keyboard_event::KEY);
-                                msg.add_arg(WaylandArg::Uint(0)); // serial
-                                msg.add_arg(WaylandArg::Uint(time as u32));
-                                msg.add_arg(WaylandArg::Uint(code as u32));
-                                msg.add_arg(WaylandArg::Uint(value as u32)); // state
-                                messages.push(msg);
-                            }
-                        }
-                    } else if type_ == 2 {
-                        // Mouse event - forward to all wl_pointer objects
-                        for (id, interface) in &self.objects {
-                            if interface == "wl_pointer" {
-                                if code == 0 {
-                                    // Motion event
-                                    let mut msg =
-                                        WaylandMessage::new(*id, input::pointer_event::MOTION);
-                                    msg.add_arg(WaylandArg::Uint(time as u32));
-                                    msg.add_arg(WaylandArg::Int(value)); // x (simplified)
-                                    msg.add_arg(WaylandArg::Int(value)); // y (simplified)
-                                    messages.push(msg);
-                                } else {
-                                    // Button event
-                                    let mut msg =
-                                        WaylandMessage::new(*id, input::pointer_event::BUTTON);
-                                    msg.add_arg(WaylandArg::Uint(0)); // serial
-                                    msg.add_arg(WaylandArg::Uint(time as u32));
-                                    msg.add_arg(WaylandArg::Uint(code as u32));
-                                    msg.add_arg(WaylandArg::Uint(value as u32)); // state
-                                    messages.push(msg);
+            println!("[Input Thread] Connected to SWS, listening for input events");
+
+            let mut sws = sws_socket;
+            let mut buf = [0u8; 1024];
+
+            loop {
+                match sws.read(&mut buf) {
+                    Ok(n) if n >= 8 => {
+                        let mut header_bytes = [0u8; 8];
+                        header_bytes.copy_from_slice(&buf[0..8]);
+                        let header = protocol_sws::MessageHeader::from_le_bytes(header_bytes);
+
+                        if header.msg_type == protocol_sws::server_msg::EXTENSION_INPUT_EVENT && n >= 32 {
+                            // Parse EXTENSION_INPUT_EVENT
+                            let _external_client_id = u32::from_le_bytes([buf[8], buf[9], buf[10], buf[11]]);
+                            let _window_id = u32::from_le_bytes([buf[12], buf[13], buf[14], buf[15]]);
+                            let time = u64::from_le_bytes([
+                                buf[16], buf[17], buf[18], buf[19], buf[20], buf[21], buf[22], buf[23],
+                            ]);
+                            let type_ = u16::from_le_bytes([buf[24], buf[25]]);
+                            let code = u16::from_le_bytes([buf[26], buf[27]]);
+                            let value = i32::from_le_bytes([buf[28], buf[29], buf[30], buf[31]]);
+
+                            println!(
+                                "[Input Thread] Received event: type={} code={} value={}",
+                                type_, code, value
+                            );
+
+                            // Get current objects list
+                            let objects_guard = objects_clone.lock();
+                            let mut messages = Vec::new();
+
+                            // Convert SWS event to Wayland input events
+                            // Type 1 = keyboard, Type 2 = mouse
+                            if type_ == 1 {
+                                // Keyboard event - forward to all wl_keyboard objects
+                                for (id, interface) in objects_guard.iter() {
+                                    if interface == "wl_keyboard" {
+                                        let mut msg = WaylandMessage::new(*id, input::keyboard_event::KEY);
+                                        msg.add_arg(WaylandArg::Uint(0)); // serial
+                                        msg.add_arg(WaylandArg::Uint(time as u32));
+                                        msg.add_arg(WaylandArg::Uint(code as u32));
+                                        msg.add_arg(WaylandArg::Uint(value as u32)); // state
+                                        messages.push(msg);
+                                    }
                                 }
+                            } else if type_ == 2 {
+                                // Mouse event - forward to all wl_pointer objects
+                                for (id, interface) in objects_guard.iter() {
+                                    if interface == "wl_pointer" {
+                                        if code == 0 {
+                                            // Motion event
+                                            let mut msg =
+                                                WaylandMessage::new(*id, input::pointer_event::MOTION);
+                                            msg.add_arg(WaylandArg::Uint(time as u32));
+                                            msg.add_arg(WaylandArg::Int(value)); // x (simplified)
+                                            msg.add_arg(WaylandArg::Int(value)); // y (simplified)
+                                            messages.push(msg);
+                                        } else {
+                                            // Button event
+                                            let mut msg =
+                                                WaylandMessage::new(*id, input::pointer_event::BUTTON);
+                                            msg.add_arg(WaylandArg::Uint(0)); // serial
+                                            msg.add_arg(WaylandArg::Uint(time as u32));
+                                            msg.add_arg(WaylandArg::Uint(code as u32));
+                                            msg.add_arg(WaylandArg::Uint(value as u32)); // state
+                                            messages.push(msg);
+                                        }
+                                    }
+                                }
+                            }
+
+                            // Add messages to shared queue
+                            if !messages.is_empty() {
+                                let mut queue = input_queue.lock();
+                                queue.extend(messages);
                             }
                         }
                     }
+                    Ok(_) => {
+                        // No data or incomplete message
+                        thread::sleep(Duration::from_millis(10));
+                    }
+                    Err(_) => {
+                        // Error - wait a bit before retrying
+                        thread::sleep(Duration::from_millis(10));
+                    }
                 }
             }
-            Ok(_) => {
-                // No data or incomplete message
-            }
-            Err(_) => {
-                // Would block or error - this is expected for non-blocking I/O
-            }
-        }
+        });
 
-        Ok(messages)
+        Ok(())
     }
 }
 
@@ -1726,6 +1797,13 @@ fn main() -> i32 {
     }
 
     println!("[Bridge] Connected to SWS successfully");
+
+    // Spawn input event listener thread
+    if let Err(e) = bridge.spawn_input_thread() {
+        println!("[Bridge] Failed to spawn input thread: {}", e);
+        return 1;
+    }
+
     println!("[Bridge] Clients can connect with WAYLAND_DISPLAY=wayland-0");
 
     if let Err(e) = bridge.run() {
