@@ -507,6 +507,30 @@ impl FileObject for Ext2FileObject {
         Ok(buffer.len())
     }
 
+    fn truncate(&self, size: u64) -> Result<(), StreamError> {
+        self.ensure_content_loaded()?;
+
+        let mut cached = self.cached_content.write();
+        let content = cached.as_mut().ok_or(StreamError::IoError)?;
+        let new_size = usize::try_from(size).map_err(|_| StreamError::InvalidArgument)?;
+
+        if new_size > content.len() {
+            content.resize(new_size, 0);
+        } else if new_size < content.len() {
+            content.truncate(new_size);
+        }
+
+        *self.is_dirty.write() = true;
+
+        // Clamp current position if it moved past EOF.
+        let mut position = self.position.lock();
+        if *position > size {
+            *position = size;
+        }
+
+        Ok(())
+    }
+
     fn seek(&self, whence: SeekFrom) -> Result<u64, StreamError> {
         let mut pos = self.position.lock();
 
