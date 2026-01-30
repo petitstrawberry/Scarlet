@@ -31,7 +31,7 @@ use std::collections::BTreeMap;
 use std::env;
 use std::handle::capability::memory_mapping::{self, flags};
 use std::io::{Read, Write};
-use std::ipc::{permissions, SharedMemory};
+use std::ipc::{SharedMemory, permissions};
 use std::println;
 use std::socket::Socket;
 use std::string::{String, ToString};

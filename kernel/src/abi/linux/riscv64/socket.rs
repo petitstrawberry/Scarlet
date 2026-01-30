@@ -1,14 +1,14 @@
 use crate::ipc::IpcError;
 use crate::object::capability::StreamError;
 use crate::{
-    abi::linux::riscv64::errno,
-    abi::linux::riscv64::fs::{IoVec, FD_CLOEXEC, O_NONBLOCK},
     abi::linux::riscv64::LinuxRiscv64Abi,
+    abi::linux::riscv64::errno,
+    abi::linux::riscv64::fs::{FD_CLOEXEC, IoVec, O_NONBLOCK},
     arch::Trapframe,
     ipc::pipe::UnidirectionalPipe,
-    network::{local::LocalSocket, NetworkManager, SocketDomain, SocketProtocol, SocketType},
-    object::capability::selectable::Selectable,
+    network::{NetworkManager, SocketDomain, SocketProtocol, SocketType, local::LocalSocket},
     object::KernelObject,
+    object::capability::selectable::Selectable,
     sched::scheduler::get_scheduler,
     task::mytask,
 };

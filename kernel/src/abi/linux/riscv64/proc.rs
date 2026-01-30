@@ -293,7 +293,11 @@ pub fn sys_prctl(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize
 
     crate::println!(
         "[stub] sys_prctl: option={}, arg2={:#x}, arg3={:#x}, arg4={:#x}, arg5={:#x}",
-        option, _arg2, _arg3, _arg4, _arg5
+        option,
+        _arg2,
+        _arg3,
+        _arg4,
+        _arg5
     );
 
     // Common PR_* operations (from include/uapi/linux/prctl.h)
