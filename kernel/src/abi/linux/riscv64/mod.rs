@@ -18,16 +18,15 @@ use alloc::{
 // use file::{sys_dup, sys_exec, sys_mknod, sys_open, sys_write};
 // use proc::{sys_exit, sys_fork, sys_wait, sys_getpid};
 
-use crate::{
-    abi::AbiModule, arch::{self, IntRegisters, Trapframe}, early_initcall, fs::{FileSystemError, FileSystemErrorKind, SeekFrom, VfsManager, drivers::overlayfs::OverlayFS, drivers::tmpfs::TmpFS, DeviceFileInfo}, register_abi, task::elf_loader::{ExecutionMode, LoadStrategy, LoadTarget, analyze_and_load_elf_with_strategy}, vm::{setup_trampoline, setup_user_stack}, device::{manager::DeviceManager, DeviceType}
-};
 use self::time::PosixTimer;
 use crate::{
     abi::AbiModule,
     arch::{self, IntRegisters, Trapframe},
+    device::{manager::DeviceManager, DeviceType},
     early_initcall,
     fs::{
-        FileSystemError, FileSystemErrorKind, SeekFrom, VfsManager, drivers::overlayfs::OverlayFS,
+        DeviceFileInfo, FileSystemError, FileSystemErrorKind, SeekFrom, VfsManager,
+        drivers::overlayfs::OverlayFS, drivers::tmpfs::TmpFS,
     },
     register_abi,
     task::elf_loader::{

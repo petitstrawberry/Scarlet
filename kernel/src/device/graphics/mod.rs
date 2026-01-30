@@ -16,6 +16,7 @@ use crate::object::capability::{ControlOps, MemoryMappingOps};
 pub mod framebuffer_device;
 pub mod drm_device;
 pub mod buffer;
+pub mod manager;
 
 #[cfg(test)]
 mod tests;
