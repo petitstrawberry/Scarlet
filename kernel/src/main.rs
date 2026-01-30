@@ -756,9 +756,6 @@ pub extern "C" fn start_kernel(boot_info: &BootInfo) -> ! {
 pub extern "C" fn start_ap(cpu_id: usize) {
     println!("[Scarlet Kernel] CPU {} (AP) initializing...", cpu_id);
 
-    // Initialize .bss section (safe to call multiple times)
-    mem::init_bss();
-
     // Get the per-CPU architecture structure
     let riscv = crate::arch::get_cpu();
 

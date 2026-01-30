@@ -198,7 +198,7 @@ pub fn sbi_hsm_hart_start(
 
     match error {
         0 => Ok(()),
-        error_code if error_code <= 8 => Err(SbiError::from_error(error_code)),
+        error_code if error_code as isize >= -8 && error_code as isize <= -1 => Err(SbiError::from_error(error_code)),
         _ => Err(SbiError::Failed),
     }
 }
@@ -250,7 +250,7 @@ pub fn sbi_hsm_hart_suspend(
 
     match error {
         0 => Ok(()),
-        error_code if error_code <= 8 => Err(SbiError::from_error(error_code)),
+        error_code if error_code as isize >= -8 && error_code as isize <= -1 => Err(SbiError::from_error(error_code)),
         _ => Err(SbiError::Failed),
     }
 }

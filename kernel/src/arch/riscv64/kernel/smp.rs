@@ -28,12 +28,6 @@ pub fn get_boot_hart_id() -> usize {
     BOOT_HART_ID.load(Ordering::SeqCst)
 }
 
-/// CPU start barrier to ensure all CPUs are ready
-static CPU_START_BARRIER: AtomicUsize = AtomicUsize::new(0);
-
-/// Number of CPUs that have been started
-static CPUS_STARTED: AtomicUsize = AtomicUsize::new(0);
-
 /// External symbol for the AP entry point
 extern "C" {
     fn _entry_ap();
@@ -91,7 +85,7 @@ pub fn start_secondary_cpus(boot_hart_id: usize, max_hart_id: usize) {
                 match sbi_hsm_hart_start(hart_id, ap_start_addr, hart_id) {
                     Ok(()) => {
                         early_println!("[SMP] Successfully started hart {}", hart_id);
-                        CPUS_STARTED.fetch_add(1, Ordering::SeqCst);
+                        // CPU start count is updated in `mark_cpu_started` when the hart finishes initialization
                     }
                     Err(e) => {
                         early_println!(
@@ -150,9 +144,9 @@ pub fn wait_for_cpus() {
 
     if started < expected {
         early_println!(
-            "[SMP] Warning: Only {} of {} expected CPUs started",
-            started + 1, // +1 for boot CPU
-            crate::environment::NUM_OF_CPUS
+            "[SMP] Warning: Only {} of {} expected secondary CPUs started",
+            started,
+            expected
         );
     } else {
         early_println!(

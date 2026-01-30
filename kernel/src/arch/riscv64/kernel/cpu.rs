@@ -1,6 +1,7 @@
 //! RISC-V CPU information from device tree
 
 use crate::device::fdt::FdtManager;
+use crate::early_println;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
 /// Maximum CPU ID discovered from device tree
