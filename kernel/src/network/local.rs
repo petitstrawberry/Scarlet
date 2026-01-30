@@ -46,12 +46,10 @@ const MAX_BUFFER_SIZE: usize = 65536;
 /// This prevents unbounded memory growth from DoS attacks
 const MAX_HANDLE_QUEUE_SIZE: usize = 64;
 
-/// Shared buffer structure that tracks reading task
+/// Shared buffer structure for socket data
 struct SocketBuffer {
     /// Data buffer
     data: RwLock<VecDeque<u8>>,
-    /// Task ID waiting to read (if any)
-    reading_task: RwLock<Option<usize>>,
     /// Flag indicating this buffer has been closed (peer shutdown)
     closed: RwLock<bool>,
 }
@@ -60,7 +58,6 @@ impl SocketBuffer {
     fn new() -> Arc<Self> {
         Arc::new(Self {
             data: RwLock::new(VecDeque::with_capacity(MAX_BUFFER_SIZE)),
-            reading_task: RwLock::new(None),
             closed: RwLock::new(false),
         })
     }
@@ -420,8 +417,6 @@ impl StreamOps for LocalSocket {
                     for i in 0..bytes_to_read {
                         buffer[i] = read_data.pop_front().unwrap();
                     }
-                    // Clear reading_task since we're done reading
-                    *read_buf_arc.reading_task.write() = None;
 
                     // if attempt < 5 || attempt % 100 == 0 {
                     //     crate::println!(
@@ -475,7 +470,6 @@ impl StreamOps for LocalSocket {
 
                 // Register this task as waiting to read
                 if let Some(task) = mytask() {
-                    *read_buf_arc.reading_task.write() = Some(task.get_id());
                     drop(read_buf_arc);
 
                     // Block the task
@@ -503,20 +497,15 @@ impl StreamOps for LocalSocket {
                 peer_data.extend(data.iter().copied());
                 let bytes_written = data.len();
 
-                // Check if there's a task waiting to read
-                // Keep reading_task lock held while we wake to prevent race condition
-                let reading_task_guard = peer_sock_buffer.reading_task.read();
-                let reading_task = *reading_task_guard;
-
                 drop(peer_data); // Release data lock
 
-                // Wake up the task if one is waiting (still holding reading_task lock)
-                if let Some(task_id) = reading_task {
-                    use crate::sched::scheduler::get_scheduler;
-                    get_scheduler().wake_task(task_id);
+                // Wake tasks waiting on read/select/poll.
+                if let Some(peer_weak) = self.peer_socket.read().as_ref() {
+                    if let Some(peer) = peer_weak.upgrade() {
+                        peer.read_waker.wake_one();
+                    }
                 }
 
-                drop(reading_task_guard); // Release reading_task lock
                 drop(peer_buffer); // Release peer_buffer lock
 
                 Ok(bytes_written)
