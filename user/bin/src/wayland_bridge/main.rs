@@ -64,14 +64,12 @@ fn get_log_level() -> LogLevel {
     }
 
     let level = match env::var("WAYLAND_BRIDGE_LOG") {
-        Some(val) => {
-            match val.as_str() {
-                "0" | "error" | "ERROR" => LogLevel::Error,
-                "1" | "warn" | "WARN" => LogLevel::Warn,
-                "2" | "info" | "INFO" => LogLevel::Info,
-                "3" | "debug" | "DEBUG" => LogLevel::Debug,
-                _ => LogLevel::Info,
-            }
+        Some(val) => match val.as_str() {
+            "0" | "error" | "ERROR" => LogLevel::Error,
+            "1" | "warn" | "WARN" => LogLevel::Warn,
+            "2" | "info" | "INFO" => LogLevel::Info,
+            "3" | "debug" | "DEBUG" => LogLevel::Debug,
+            _ => LogLevel::Info,
         },
         None => LogLevel::Info,
     };
