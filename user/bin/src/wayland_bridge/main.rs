@@ -563,6 +563,7 @@ impl WaylandBridge {
             window_id, x, y, width, height
         );
 
+        // Fallback: Use pixel copy for buffers that weren't zero-copied
         // Map client's SHM pool to read pixel data
         if let Ok(client_mapper) = client_shm_handle.as_memory_mapping() {
             let pool_size = pool.size.max((buffer.offset.abs() as usize)
@@ -574,7 +575,7 @@ impl WaylandBridge {
                 flags::SHARED,
                 0,
             ) {
-                println!("[Bridge] Mapped client SHM at 0x{:x}", client_addr);
+                // println!("[Bridge] Mapped client SHM at 0x{:x}", client_addr);
 
                 // Copy pixel data from client SHM to SWS window SHM
                 let src_width = buffer.width.max(0) as usize;
@@ -584,10 +585,10 @@ impl WaylandBridge {
 
                 let dst_stride = (surface.width.max(0) as u32 * 4) as usize;
 
-                println!(
-                    "[Bridge] Copying pixels: {}x{} stride={} src_offset={} dst_stride={}",
-                    src_width, src_height, src_stride, src_offset, dst_stride
-                );
+                // println!(
+                //     "[Bridge] Copying pixels: {}x{} stride={} src_offset={} dst_stride={}",
+                //     src_width, src_height, src_stride, src_offset, dst_stride
+                // );
 
                 // Copy row by row
                 unsafe {
@@ -611,7 +612,7 @@ impl WaylandBridge {
                     }
                 }
 
-                println!("[Bridge] Pixel copy complete");
+                // println!("[Bridge] Pixel copy complete");
             } else {
                 println!("[Bridge] Failed to map client SHM");
             }
@@ -659,8 +660,6 @@ impl WaylandBridge {
             .get_pool(buffer.pool_id)
             .ok_or("Pool not found")?;
         let handle = pool.handle.as_ref().ok_or("Pool missing handle")?;
-        println!("[Bridge] Attaching buffer {} to window {} with handle", buffer_id, window_id);
-        let sws_conn = self.sws_connection.as_mut().ok_or("Not connected to SWS")?;
 
         let width = buffer.width.max(0) as u32;
         let height = buffer.height.max(0) as u32;
@@ -674,6 +673,14 @@ impl WaylandBridge {
             shm_size = shm_size.max(needed);
         }
 
+        // println!("[Bridge] === EXTENSION_ATTACH_BUFFER ===");
+        // println!("[Bridge]   surface_id={}, window_id={}, buffer_id={}", surface_id, window_id, buffer_id);
+        // println!("[Bridge]   geometry={}x{} stride={} offset={} format={} shm_size={}",
+        //     width, height, stride, offset, format, shm_size);
+        // println!("[Bridge]   client_shm_handle={:?}", handle.as_raw());
+
+        let sws_conn = self.sws_connection.as_mut().ok_or("Not connected to SWS")?;
+
         let payload = protocol_sws::payload_extension_attach_buffer(
             surface_id, window_id, width, height, offset, stride, format, shm_size,
         );
@@ -684,12 +691,20 @@ impl WaylandBridge {
         let mut msg_bytes = Vec::new();
         msg_bytes.extend_from_slice(&header.to_le_bytes());
         msg_bytes.extend_from_slice(&payload);
+
+        // println!("[Bridge] Sending EXTENSION_ATTACH_BUFFER message ({} bytes)", msg_bytes.len());
         sws_conn
             .write(&msg_bytes)
             .map_err(|_| "Failed to send EXTENSION_ATTACH_BUFFER")?;
+        // println!("[Bridge] EXTENSION_ATTACH_BUFFER message sent successfully");
+
+        // println!("[Bridge] Sending client SHM handle to SWS...");
         sws_conn
             .send_handle(handle)
             .map_err(|_| "Failed to send EXTENSION_ATTACH_BUFFER handle")?;
+        // println!("[Bridge] Client SHM handle sent successfully");
+        // println!("[Bridge] === EXTENSION_ATTACH_BUFFER COMPLETE ===");
+
         Ok(())
     }
 
@@ -1164,7 +1179,7 @@ impl WaylandBridge {
 
                     if buffer_id != 0 {
                         if let Some(&window_id) = self.surface_to_window.get(&surface_id) {
-                            println!("[Bridge] Sending attach for surface {} buffer {} window {}", surface_id, buffer_id, window_id);
+                            // println!("[Bridge] Sending attach for surface {} buffer {} window {}", surface_id, buffer_id, window_id);
                             if let Err(e) = self.send_extension_attach_buffer(surface_id, window_id, buffer_id) {
                                 println!("[Bridge] Failed to send attach buffer: {}", e);
                             }

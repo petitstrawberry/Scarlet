@@ -492,6 +492,17 @@ impl Compositor {
         };
     }
 
+    /// Mark a window's entire area as damaged and request full redraw
+    fn mark_window_damage(&mut self, window_id: u32) {
+        if let Some(w) = self.window_manager.get_window(window_id) {
+            // println!("[Compositor] Marking window #{} damage: ({},{}) {}x{}",
+            //     window_id, w.x, w.y, w.width, w.height);
+            self.add_pending_damage((w.x, w.y, w.width, w.height));
+            self.full_redraw_needed = true;
+            // println!("[Compositor] Full redraw needed: {}", self.full_redraw_needed);
+        }
+    }
+
     /// Composite all layers directly to VRAM (or framebuffer as fallback)
     fn composite_and_present(&mut self) -> Result<(), &'static str> {
         fn union_rect(
@@ -2339,37 +2350,65 @@ impl Compositor {
                 shm_mapped_addr,
                 shm_size,
             } => {
-                println!(
-                    "[Compositor] IPC: ExtensionAttachBuffer ext_client={} window={} {}x{} stride={} format={}",
-                    external_client_id, window_id, width, height, stride, format
-                );
+                // println!(
+                //     "[Compositor] === EXTENSION_ATTACH_BUFFER === ext_client={} window={} ===",
+                //     external_client_id, window_id
+                // );
+                // println!(
+                //     "[Compositor] geometry={}x{} stride={} format={} shm_size={} shm={:?} addr={:?}",
+                //     width, height, stride, format, shm_size, shm.is_some(), shm_mapped_addr
+                // );
 
-                if let Some(shm_handle) = shm {
-                    if let Err(e) = self.window_manager.replace_window_shm_from_event(
-                        window_id,
-                        width,
-                        height,
-                        offset,
-                        stride,
-                        format,
-                        shm_handle,
-                        shm_mapped_addr,
-                        shm_size,
-                    ) {
-                        println!(
-                            "[Compositor] Failed to attach SHM buffer for window {}: {}",
-                            window_id, e
-                        );
-                    } else if let Some(w) = self.window_manager.get_window(window_id) {
-                        self.add_pending_damage((w.x, w.y, w.width, w.height));
-                        self.full_redraw_needed = true;
+                // For zero-copy external buffers, we only need the mapped address
+                if let Some(addr) = shm_mapped_addr {
+                    // println!("[Compositor] Attaching external buffer at address 0x{:x}", addr);
+                    if let Some(shm_handle) = shm {
+                        // We have both handle and address (normal case)
+                        if let Err(e) = self.window_manager.replace_window_shm_from_event(
+                            window_id,
+                            width,
+                            height,
+                            offset,
+                            stride,
+                            format,
+                            shm_handle,
+                            Some(addr),
+                            shm_size,
+                        ) {
+                            println!(
+                                "[Compositor] Failed to attach SHM buffer for window {}: {}",
+                                window_id, e
+                            );
+                        } else {
+                            self.mark_window_damage(window_id);
+                        }
+                    } else {
+                        // We have address but no SharedMemory wrapper (e.g., File handle from Linux compat)
+                        // This is zero-copy mode - just update the mapped address
+                        // println!("[Compositor] Zero-copy mode: updating mapped address without SharedMemory wrapper");
+                        if let Some(w) = self.window_manager.get_window_mut(window_id) {
+                            w.width = width;
+                            w.height = height;
+                            w.shm_mapped_addr = Some(addr);
+                            w.shm_size = shm_size;
+                            w.shm_offset = offset.max(0) as usize;
+                            w.shm_stride = if stride > 0 { stride as u32 } else { width.saturating_mul(4) };
+                            w.shm_format = format;
+                            w.has_alpha_content = format == 0;
+                            w.buffer = None; // Clear Vec buffer if present
+                            // Keep existing shm if any (for ownership tracking)
+                            self.mark_window_damage(window_id);
+                        } else {
+                            println!("[Compositor] Window {} not found", window_id);
+                        }
                     }
                 } else {
                     println!(
-                        "[Compositor] ExtensionAttachBuffer: no SHM provided for window {}",
+                        "[Compositor] No mapped address provided for window {}",
                         window_id
                     );
                 }
+                // println!("[Compositor] === EXTENSION_ATTACH_BUFFER COMPLETE ===");
             }
             IpcEvent::SetWindowHasAlphaContent {
                 window_id,

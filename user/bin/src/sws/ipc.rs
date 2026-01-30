@@ -1293,47 +1293,27 @@ fn client_thread_main(client_id: usize, mut socket: Socket) {
                 format,
                 shm_size,
             }) => {
-                println!(
-                    "[ClientThread {}] ExtensionAttachBuffer: external_client_id={} window_id={} {}x{} offset={} stride={} format={} size={}",
-                    client_id,
-                    external_client_id,
-                    window_id,
-                    width,
-                    height,
-                    offset,
-                    stride,
-                    format,
-                    shm_size
-                );
+                // println!(
+                //     "[ClientThread {}] === EXTENSION_ATTACH_BUFFER ===",
+                //     client_id
+                // );
+                // println!(
+                //     "[ClientThread {}]   external_client_id={} window_id={} {}x{}",
+                //     client_id, external_client_id, window_id, width, height
+                // );
+                // println!(
+                //     "[ClientThread {}]   offset={} stride={} format={} shm_size={}",
+                //     client_id, offset, stride, format, shm_size
+                // );
 
                 let shm_handle = match socket.recv_handle() {
-                    Ok(handle) => handle,
-                    Err(e) => {
-                        println!(
-                            "[ClientThread {}] ExtensionAttachBuffer: failed to recv handle: {:?}",
-                            client_id, e
-                        );
-                        push_ipc_event(IpcEvent::ExtensionAttachBuffer {
-                            external_client_id,
-                            window_id,
-                            width,
-                            height,
-                            offset,
-                            stride,
-                            format,
-                            shm: None,
-                            shm_mapped_addr: None,
-                            shm_size: 0,
-                        });
-                        continue;
+                    Ok(handle) => {
+                        // println!("[ClientThread {}]   Received SHM handle: {:?}", client_id, handle.as_raw());
+                        handle
                     }
-                };
-
-                let shm = match SharedMemory::from_handle(shm_handle) {
-                    Ok(shm) => shm,
                     Err(e) => {
                         println!(
-                            "[ClientThread {}] ExtensionAttachBuffer: invalid shm handle: {:?}",
+                            "[ClientThread {}] Failed to recv handle: {:?}",
                             client_id, e
                         );
                         push_ipc_event(IpcEvent::ExtensionAttachBuffer {
@@ -1353,35 +1333,72 @@ fn client_thread_main(client_id: usize, mut socket: Socket) {
                 };
 
                 let shm_size_usize = shm_size as usize;
-                let shm_mapped_addr = if shm_size_usize > 0 {
-                    match shm.as_handle().as_memory_mapping() {
-                        Ok(mapper) => mapper
-                            .mmap(
+                // println!("[ClientThread {}]   Attempting to map handle directly (size={} bytes)...", client_id, shm_size_usize);
+
+                // Try to map the handle directly without requiring SharedMemory type
+                // This allows File handles from the Linux compatibility layer to work
+                let result = if shm_size_usize > 0 {
+                    match shm_handle.as_memory_mapping() {
+                        Ok(mapper) => {
+                            match mapper.mmap(
                                 0,
                                 shm_size_usize,
-                                permissions::READ_WRITE,
+                                permissions::READ,
                                 mmap_flags::SHARED,
                                 0,
-                            )
-                            .ok(),
-                        Err(_) => None,
+                            ) {
+                                Ok(addr) => {
+                                    // println!("[ClientThread {}]   Handle mapped at 0x{:x}", client_id, addr);
+                                    Some(addr)
+                                }
+                                Err(e) => {
+                                    println!("[ClientThread {}] Failed to map handle: {:?}", client_id, e);
+                                    None
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            println!("[ClientThread {}] Handle doesn't support memory_mapping: {:?}", client_id, e);
+                            None
+                        }
                     }
                 } else {
                     None
                 };
 
-                push_ipc_event(IpcEvent::ExtensionAttachBuffer {
-                    external_client_id,
-                    window_id,
-                    width,
-                    height,
-                    offset,
-                    stride,
-                    format,
-                    shm: Some(shm),
-                    shm_mapped_addr,
-                    shm_size: shm_size_usize,
-                });
+                match result {
+                    Some(shm_mapped_addr) => {
+                        // For zero-copy mode, we only need the mapped address
+                        // The compositor will use it directly without needing SharedMemory ownership
+                        push_ipc_event(IpcEvent::ExtensionAttachBuffer {
+                            external_client_id,
+                            window_id,
+                            width,
+                            height,
+                            offset,
+                            stride,
+                            format,
+                            shm: None,  // No SharedMemory wrapper - using mapped address directly
+                            shm_mapped_addr: Some(shm_mapped_addr),
+                            shm_size: shm_size_usize,
+                        });
+                    }
+                    None => {
+                        push_ipc_event(IpcEvent::ExtensionAttachBuffer {
+                            external_client_id,
+                            window_id,
+                            width,
+                            height,
+                            offset,
+                            stride,
+                            format,
+                            shm: None,
+                            shm_mapped_addr: None,
+                            shm_size: 0,
+                        });
+                    }
+                }
+                // println!("[ClientThread {}] === EXTENSION_ATTACH_BUFFER COMPLETE ===", client_id);
             }
             Ok(ClientMessageRef::SetWindowHasAlphaContent {
                 window_id,
