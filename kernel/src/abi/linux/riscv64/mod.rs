@@ -833,6 +833,22 @@ impl AbiModule for LinuxRiscv64Abi {
             }
         }
 
+        // Setup tmp directory
+        match create_dir_if_not_exists(target_vfs, "/tmp") {
+            Ok(()) => {}
+            Err(_e) => {
+                crate::println!("Failed to create /tmp directory for Linux: {}", _e.message);
+                return Err("Failed to create /tmp directory for Linux");
+            }
+        }
+        match target_vfs.bind_mount_from(base_vfs, "/tmp", "/tmp") {
+            Ok(()) => {}
+            Err(_e) => {
+                crate::println!("Failed to bind mount /tmp for Linux: {}", _e.message);
+                return Err("Failed to bind mount /tmp for Linux");
+            }
+        }
+
         // Setup gateway to native Scarlet environment (read-only for security)
         match create_dir_if_not_exists(target_vfs, "/scarlet") {
             Ok(()) => {}
@@ -950,6 +966,8 @@ syscall_table! {
     Accept = 202 => socket::sys_accept,
     Connect = 203 => socket::sys_connect,
     GetSockname = 204 => socket::sys_getsockname,
+    Sendmsg = 211 => socket::sys_sendmsg,
+    Recvmsg = 212 => socket::sys_recvmsg,
     SetSockopt = 208 => socket::sys_setsockopt,
     GetSockopt = 209 => socket::sys_getsockopt,
     RenameAt2 = 276 => fs::sys_renameat2,
