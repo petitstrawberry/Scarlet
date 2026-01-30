@@ -28,12 +28,13 @@ use protocol::{MessageHeader, WaylandArg, WaylandMessage};
 use registry::Registry;
 use shm::ShmManager;
 use std::collections::BTreeMap;
+use std::env;
 use std::handle::capability::memory_mapping::{self, flags};
 use std::io::{Read, Write};
 use std::ipc::{SharedMemory, permissions};
 use std::println;
 use std::socket::Socket;
-use std::string::String;
+use std::string::{String, ToString};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::thread;
 use std::time::Duration;
@@ -41,6 +42,62 @@ use std::vec::Vec;
 use surface::SurfaceManager;
 use sws_protocol as protocol_sws;
 use xdg_shell::XdgShellManager;
+
+/// Log level for the Wayland bridge
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum LogLevel {
+    Error = 0,
+    Warn = 1,
+    Info = 2,
+    Debug = 3,
+}
+
+/// Get the current log level from environment variable
+fn get_log_level() -> LogLevel {
+    use core::sync::atomic::{AtomicU8, Ordering};
+
+    static LOG_LEVEL_CACHE: AtomicU8 = AtomicU8::new(u8::MAX);
+
+    let cached = LOG_LEVEL_CACHE.load(Ordering::Relaxed);
+    if cached != u8::MAX {
+        return unsafe { core::mem::transmute::<u8, LogLevel>(cached) };
+    }
+
+    let level = match env::var("WAYLAND_BRIDGE_LOG") {
+        Some(val) => {
+            match val.as_str() {
+                "0" | "error" | "ERROR" => LogLevel::Error,
+                "1" | "warn" | "WARN" => LogLevel::Warn,
+                "2" | "info" | "INFO" => LogLevel::Info,
+                "3" | "debug" | "DEBUG" => LogLevel::Debug,
+                _ => LogLevel::Info,
+            }
+        },
+        None => LogLevel::Info,
+    };
+
+    LOG_LEVEL_CACHE.store(level as u8, Ordering::Relaxed);
+    level
+}
+
+/// Check if debug logging is enabled
+fn is_debug_enabled() -> bool {
+    get_log_level() >= LogLevel::Debug
+}
+
+/// Check if info logging is enabled
+fn is_info_enabled() -> bool {
+    get_log_level() >= LogLevel::Info
+}
+
+/// Check if warn logging is enabled
+fn is_warn_enabled() -> bool {
+    get_log_level() >= LogLevel::Warn
+}
+
+// Note: We can't define macros here that use the above functions directly
+// due to macro hygiene rules. We'll use conditional compilation and
+// replace println! calls with if statements checking the log level.
 
 /// Mapping of Wayland surface ID to SWS window ID
 #[derive(Debug, Clone, Copy)]
@@ -1295,6 +1352,20 @@ impl WaylandBridge {
             protocol::surface_request::COMMIT => {
                 println!("[Bridge] wl_surface.commit on surface {}", surface_id);
                 let mut release_msg = None;
+                let mut callback_msg = None;
+
+                // Check if there's a pending frame callback
+                if let Some(surface) = self.surface_manager.get_surface_mut(surface_id) {
+                    let callback_id = surface.take_pending_callback();
+                    if let Some(cb_id) = callback_id {
+                        // Send wl_callback.done event when the surface is committed
+                        let time = self.allocate_serial();
+                        let mut msg = WaylandMessage::new(cb_id, protocol::callback_event::DONE);
+                        msg.add_arg(WaylandArg::Uint(time));
+                        callback_msg = Some(msg);
+                    }
+                }
+
                 let has_role = self
                     .surface_manager
                     .get_surface(surface_id)
@@ -1315,13 +1386,31 @@ impl WaylandBridge {
                         }
                     }
                 }
+
+                // Collect all messages to send
+                let mut msgs = Vec::new();
                 if let Some(msg) = release_msg {
-                    let mut msgs = Vec::new();
                     msgs.push(msg);
-                    Ok(msgs)
-                } else {
-                    Ok(Vec::new())
                 }
+                if let Some(msg) = callback_msg {
+                    msgs.push(msg);
+                }
+                Ok(msgs)
+            }
+            protocol::surface_request::FRAME => {
+                println!("[Bridge] wl_surface.frame on surface {}", surface_id);
+                if payload.len() >= 4 {
+                    let callback_id =
+                        u32::from_ne_bytes([payload[0], payload[1], payload[2], payload[3]]);
+                    println!("[Bridge] Callback ID: {}", callback_id);
+                    self.add_object(callback_id, String::from("wl_callback"));
+
+                    // Store the callback to be sent when the surface is committed
+                    if let Some(surface) = self.surface_manager.get_surface_mut(surface_id) {
+                        surface.set_pending_callback(callback_id);
+                    }
+                }
+                Ok(Vec::new())
             }
             _ => {
                 println!("[Bridge] Unknown wl_surface opcode: {}", opcode);

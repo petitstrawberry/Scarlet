@@ -22,6 +22,8 @@ pub struct Surface {
     /// Width and height (set when buffer is attached)
     pub width: u32,
     pub height: u32,
+    /// Pending frame callback ID (if any)
+    pub pending_callback: Option<u32>,
 }
 
 /// Surface role determines how the surface is displayed
@@ -46,6 +48,7 @@ impl Surface {
             role: None,
             width: 0,
             height: 0,
+            pending_callback: None,
         }
     }
 
@@ -57,6 +60,16 @@ impl Surface {
     /// Add damage to this surface
     pub fn add_damage(&mut self, x: i32, y: i32, width: i32, height: i32) {
         self.damage.push((x, y, width, height));
+    }
+
+    /// Set the pending frame callback
+    pub fn set_pending_callback(&mut self, callback_id: u32) {
+        self.pending_callback = Some(callback_id);
+    }
+
+    /// Take the pending frame callback (returns None if already taken)
+    pub fn take_pending_callback(&mut self) -> Option<u32> {
+        self.pending_callback.take()
     }
 
     /// Commit surface state (this is when changes take effect)

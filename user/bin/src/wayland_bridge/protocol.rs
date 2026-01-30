@@ -269,3 +269,8 @@ pub mod output_event {
     pub const DONE: u16 = 2;
     pub const SCALE: u16 = 3;
 }
+
+/// wl_callback opcodes (events from server)
+pub mod callback_event {
+    pub const DONE: u16 = 0;
+}
