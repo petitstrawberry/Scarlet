@@ -75,8 +75,10 @@ pub enum Syscall {
     SharedMemoryCreate = 620, // Create shared memory region
 
     // Socket Handle Transfer (similar to SCM_RIGHTS)
-    SocketSendHandle = 630, // Send kernel object handle through socket
-    SocketRecvHandle = 631, // Receive kernel object handle from socket
+    SocketSendHandle = 630,             // Send kernel object handle through socket
+    SocketRecvHandle = 631,             // Receive kernel object handle from socket
+    SocketSendHandleAndData = 632,      // Send handle and data atomically (for Wayland)
+    SocketRecvHandleAndData = 633,      // Receive handle and data atomically (for Wayland)
 
     // === Memory Mapping Operations ===
     MemoryMap = 700,   // Memory map operation (mmap)

@@ -893,9 +893,11 @@ syscall_table! {
         0
     },
     Getcwd = 17 => fs::sys_getcwd,
-    EpollCreate1 = 20 => fs::sys_epoll_create1,
+    // EpollCreate1 = 20 => fs::sys_epoll_create1, // Already defined below
     EpollCtl = 21 => fs::sys_epoll_ctl,
     EpollPwait = 22 => fs::sys_epoll_pwait,
+    EpollCreate1 = 20 => fs::sys_epoll_create1,
+    Flock = 47 => fs::sys_flock,
     Dup = 23 => fs::sys_dup,
     Dup3 = 24 => fs::sys_dup3,
     Fcntl = 25 => fs::sys_fcntl,
@@ -952,6 +954,9 @@ syscall_table! {
     GetGid = 176 => proc::sys_getgid,
     GetEgid = 177 => proc::sys_getegid,
     GetTid = 178 => proc::sys_gettid,
+    Kill = 129 => signal::sys_tkill, // Alias sys_kill to sys_tkill
+    Tkill = 130 => signal::sys_tkill,
+    // Brk = 214 => proc::sys_brk, // Already defined above
     Brk = 214 => proc::sys_brk,
     Munmap = 215 => mm::sys_munmap,
     Clone = 220 => proc::sys_clone,
@@ -959,6 +964,7 @@ syscall_table! {
     Mmap = 222 => mm::sys_mmap,
     Mprotect = 226 => mm::sys_mprotect,
     EpollWait = 232 => fs::sys_epoll_wait,
+    MemfdCreate = 279 => proc::sys_memfd_create, // Linux memfd_create
     Wait4 = 260 => proc::sys_wait4,
     Prlimit64 = 261 => proc::sys_prlimit64,
     Socket = 198 => socket::sys_socket,

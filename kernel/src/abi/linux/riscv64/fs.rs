@@ -2080,6 +2080,45 @@ pub fn sys_fcntl(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize 
     errno::to_result(errno::ENOSYS)
 }
 
+/// Linux sys_flock - Apply or remove an advisory lock on an open file
+///
+/// Apply or remove an advisory lock on the open file specified by fd.
+/// This is a simplified implementation that always succeeds.
+///
+/// Arguments:
+/// - abi: LinuxRiscv64Abi context
+/// - trapframe: Trapframe containing syscall arguments
+///   - arg0: fd (file descriptor)
+///   - arg1: operation (LOCK_SH, LOCK_EX, LOCK_UN, etc.)
+///
+/// Returns:
+/// - 0 on success
+/// - usize::MAX (Linux -1) on error
+pub fn sys_flock(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
+    let task = match mytask() {
+        Some(t) => t,
+        None => return usize::MAX,
+    };
+
+    let fd = trapframe.get_arg(0) as i32;
+    let _operation = trapframe.get_arg(1) as i32;
+
+    // Increment PC to avoid infinite loop
+    trapframe.increment_pc_next(task);
+
+    // Verify fd is valid
+    if abi.get_handle(fd as usize).is_none() {
+        crate::println!("[sys_flock] Invalid fd: {}", fd);
+        return usize::MAX;
+    }
+
+    // Simplified implementation: always succeed
+    // Real flock would require managing lock state per file descriptor
+    // For Wayland SHM operations, advisory locks aren't critical
+    crate::println!("[sys_flock] fd={} operation={} - SUCCESS (no-op)", fd, _operation);
+    0
+}
+
 /// Linux struct linux_dirent64 (for getdents64 syscall)
 #[repr(C)]
 pub struct LinuxDirent64 {

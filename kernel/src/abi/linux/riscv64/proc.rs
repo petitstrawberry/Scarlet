@@ -831,3 +831,79 @@ pub fn sys_membarrier(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> 
     // Always succeed - stub implementation
     0
 }
+
+/// Linux sys_memfd_create - Create an anonymous file descriptor for memory mapping
+///
+/// Creates a new anonymous file descriptor that can be used for memory mapping.
+/// This is primarily used by Wayland clients for shared memory.
+///
+/// Arguments:
+/// - abi: LinuxRiscv64Abi context
+/// - trapframe: Trapframe containing syscall arguments
+///   - arg0: uname (name for the memfd - can be NULL)
+///   - arg1: flags (MFD_CLOEXEC, MFD_ALLOW_SEALING, etc.)
+///
+/// Returns:
+/// - New file descriptor on success
+/// - usize::MAX (Linux -1) on error
+pub fn sys_memfd_create(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
+    use crate::ipc::SharedMemory;
+    use crate::object::KernelObject;
+
+    let task = match mytask() {
+        Some(t) => t,
+        None => return usize::MAX,
+    };
+
+    let _uname_ptr = trapframe.get_arg(0);
+    let flags = trapframe.get_arg(1) as u32;
+
+    // Increment PC to avoid infinite loop
+    trapframe.increment_pc_next(task);
+
+    // Parse flags (Linux memfd_create flags)
+    const MFD_CLOEXEC: u32 = 0x0001;
+    const MFD_ALLOW_SEALING: u32 = 0x0002;
+    const MFD_SEAL_SEAL: u32 = 0x0004;
+
+    let _cloexec = (flags & MFD_CLOEXEC) != 0;
+    let _allow_sealing = (flags & MFD_ALLOW_SEALING) != 0;
+    let _seal = (flags & MFD_SEAL_SEAL) != 0;
+
+    // Create shared memory object (size 0 initially, will be resized by ftruncate)
+    // Default size for Wayland SHM pools
+    const DEFAULT_SHM_SIZE: usize = 250 * 1024; // 250 KB as starting point
+
+    let shm = match SharedMemory::new(DEFAULT_SHM_SIZE, 0x3 /* READ | WRITE */) {
+        Ok(shm) => shm,
+        Err(e) => {
+            crate::early_println!("[sys_memfd_create] Failed to create shared memory: {:?}", e);
+            return usize::MAX;
+        }
+    };
+
+    // Insert into handle table
+    let handle = match task.handle_table.insert(KernelObject::SharedMemory(alloc::sync::Arc::new(shm))) {
+        Ok(h) => h,
+        Err(_) => {
+            crate::early_println!("[sys_memfd_create] Failed to insert handle into table");
+            return usize::MAX;
+        }
+    };
+
+    // Allocate fd for the shared memory
+    let fd = match abi.allocate_fd(handle) {
+        Ok(fd) => fd,
+        Err(_) => {
+            // Clean up on error
+            let _ = task.handle_table.remove(handle);
+            crate::early_println!("[sys_memfd_create] Failed to allocate fd");
+            return usize::MAX;
+        }
+    };
+
+    crate::early_println!("[sys_memfd_create] Created memfd: fd={}, handle={}", fd, handle);
+
+    fd
+}
+

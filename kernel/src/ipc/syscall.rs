@@ -518,3 +518,160 @@ pub fn sys_socket_recv_handle(trapframe: &mut Trapframe) -> usize {
         Err(_) => usize::MAX, // Too many open handles
     }
 }
+
+/// sys_socket_send_handle_and_data - Send a kernel object handle and data atomically
+///
+/// Sends a kernel object handle through a connected socket, along with data.
+/// This ensures both the handle and data are available before waking the peer,
+/// preventing race conditions in protocols like Wayland.
+///
+/// Arguments:
+/// - socket_handle: Handle to the connected socket
+/// - object_handle: Handle to the kernel object to send
+/// - data_ptr: Pointer to the data buffer
+/// - data_len: Length of the data buffer
+///
+/// Returns:
+/// - 0 on success
+/// - usize::MAX on error
+pub fn sys_socket_send_handle_and_data(trapframe: &mut Trapframe) -> usize {
+    let task = match mytask() {
+        Some(task) => task,
+        None => return usize::MAX,
+    };
+
+    let socket_handle = trapframe.get_arg(0) as u32;
+    let object_handle = trapframe.get_arg(1) as u32;
+    let data_ptr = trapframe.get_arg(2);
+    let data_len = trapframe.get_arg(3);
+
+    // Increment PC to avoid infinite loop
+    trapframe.increment_pc_next(task);
+
+    // Get the socket object (LocalSocket-only)
+    let socket_obj = match task.handle_table.get(socket_handle) {
+        Some(KernelObject::Socket(socket)) => socket.clone(),
+        _ => return usize::MAX, // Invalid socket handle
+    };
+
+    use crate::network::local::LocalSocket;
+    let local_socket = match LocalSocket::from_socket_object(&socket_obj) {
+        Some(s) => s,
+        None => return usize::MAX, // Not a LocalSocket
+    };
+
+    // Get the kernel object to send with dup semantics
+    let object = match task.handle_table.clone_for_dup(object_handle) {
+        Some(obj) => obj,
+        None => return usize::MAX, // Invalid object handle
+    };
+
+    // Validate and translate data pointer
+    if data_len == 0 {
+        // No data to send, just send the handle
+        match local_socket.send_handle(object) {
+            Ok(()) => return 0,
+            Err(_) => return usize::MAX,
+        }
+    }
+
+    let data_addr = match task.vm_manager.translate_vaddr(data_ptr) {
+        Some(addr) => addr,
+        None => return usize::MAX, // Invalid pointer
+    };
+
+    // Limit data size to prevent DoS attacks
+    const MAX_SEND_SIZE: usize = 65536; // 64 KB max
+    let data_len = data_len.min(MAX_SEND_SIZE);
+
+    // Read data from userspace
+    let data = unsafe { core::slice::from_raw_parts(data_addr as *const u8, data_len) };
+
+    // Send the handle and data atomically
+    match local_socket.send_handle_and_data(object, data) {
+        Ok(()) => 0,
+        Err(_) => usize::MAX,
+    }
+}
+
+/// sys_socket_recv_handle_and_data - Receive a kernel object handle and data atomically
+///
+/// Receives both a kernel object handle and data in a single atomic operation.
+/// This is the counterpart to send_handle_and_data.
+///
+/// Arguments:
+/// - socket_handle: Handle to the connected socket
+/// - handle_ptr: Pointer to store the received handle (output)
+/// - data_ptr: Pointer to store the received data (output)
+/// - max_data_len: Maximum amount of data to receive
+///
+/// Returns:
+/// - Number of bytes received on success
+/// - usize::MAX on error
+pub fn sys_socket_recv_handle_and_data(trapframe: &mut Trapframe) -> usize {
+    let task = match mytask() {
+        Some(task) => task,
+        None => return usize::MAX,
+    };
+
+    let socket_handle = trapframe.get_arg(0) as u32;
+    let handle_ptr = trapframe.get_arg(1);
+    let data_ptr = trapframe.get_arg(2);
+    let max_data_len = trapframe.get_arg(3);
+
+    // Increment PC to avoid infinite loop
+    trapframe.increment_pc_next(task);
+
+    // Get the socket object (LocalSocket-only)
+    let socket_obj = match task.handle_table.get(socket_handle) {
+        Some(KernelObject::Socket(socket)) => socket.clone(),
+        _ => return usize::MAX, // Invalid socket handle
+    };
+
+    use crate::network::local::LocalSocket;
+    let local_socket = match LocalSocket::from_socket_object(&socket_obj) {
+        Some(s) => s,
+        None => return usize::MAX, // Not a LocalSocket
+    };
+
+    // Limit data size to prevent DoS attacks
+    const MAX_RECV_SIZE: usize = 65536; // 64 KB max
+    let max_data_len = max_data_len.min(MAX_RECV_SIZE);
+
+    // Receive handle and data atomically
+    let (object, data) = match local_socket.recv_handle_and_data(max_data_len) {
+        Ok((h, d)) => (h, d),
+        Err(_) => return usize::MAX,
+    };
+
+    // Insert the received object into this task's handle table
+    let new_handle = match task.handle_table.insert(object) {
+        Ok(h) => h,
+        Err(_) => return usize::MAX, // Too many open handles
+    };
+
+    // Write the handle value to userspace
+    if handle_ptr != 0 {
+        let handle_addr = match task.vm_manager.translate_vaddr(handle_ptr) {
+            Some(addr) => addr as *mut u32,
+            None => return usize::MAX,
+        };
+        unsafe {
+            *handle_addr = new_handle;
+        }
+    }
+
+    // Write the data to userspace
+    if !data.is_empty() && data_ptr != 0 {
+        let data_addr = match task.vm_manager.translate_vaddr(data_ptr) {
+            Some(addr) => addr as *mut u8,
+            None => return usize::MAX,
+        };
+        unsafe {
+            core::ptr::copy_nonoverlapping(data.as_ptr(), data_addr, data.len());
+        }
+    }
+
+    data.len()
+}
+

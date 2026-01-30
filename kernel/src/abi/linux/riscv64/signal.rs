@@ -466,3 +466,41 @@ pub fn is_fatal_signal(signal: LinuxSignal) -> bool {
         LinuxSignal::SIGKILL | LinuxSignal::SIGTERM | LinuxSignal::SIGINT
     )
 }
+
+/// Linux sys_tkill - Send a signal to a specific thread
+///
+/// tkill() sends a signal to a specific thread within the same thread group.
+/// This is a simplified implementation that mainly prevents crashes.
+///
+/// Arguments:
+/// - abi: LinuxRiscv64Abi context
+/// - trapframe: Trapframe containing syscall arguments
+///   - arg0: tid (thread ID)
+///   - arg1: sig (signal number)
+///
+/// Returns:
+/// - 0 on success
+/// - usize::MAX (Linux -1) on error
+pub fn sys_tkill(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
+    let task = match mytask() {
+        Some(t) => t,
+        None => return usize::MAX,
+    };
+
+    let tid = trapframe.get_arg(0) as i32;
+    let sig = trapframe.get_arg(1) as i32;
+
+    // Increment PC to avoid infinite loop
+    trapframe.increment_pc_next(task);
+
+    // For now, just log and return success
+    // A proper implementation would:
+    // 1. Find the target task by TID
+    // 2. Add the signal to its pending signal queue
+    // 3. Wake the task if it's sleeping
+    crate::early_println!("[sys_tkill] tid={} sig={} - NOOP (signal delivery not implemented)", tid, sig);
+
+    // Return success to avoid crashing applications
+    // Many applications use tkill for thread management
+    0
+}

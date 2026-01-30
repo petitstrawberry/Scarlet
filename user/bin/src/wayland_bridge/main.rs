@@ -880,12 +880,32 @@ impl WaylandBridge {
                     &mut client,
                 )?;
                 for response in responses {
+                    let response_bytes = response.encode();
+                    println!("[Bridge] Sending response: obj={} opcode={} size={}",
+                        response.header.object_id, response.header.opcode(), response_bytes.len());
+                    // Only send KEYMAP with handle for wl_keyboard objects
                     if response.header.opcode() == input::keyboard_event::KEYMAP {
-                        if let Some(shm) = self.keymap_shm.as_ref() {
-                            let _ = client.send_handle(shm.as_handle());
+                        // Verify this is actually a wl_keyboard object
+                        if let Some(interface) = self.objects.get(&response.header.object_id) {
+                            if interface == "wl_keyboard" {
+                                println!("[Bridge] KEYMAP event for wl_keyboard, sending with handle");
+                                if let Some(shm) = self.keymap_shm.as_ref() {
+                                    match client.send_handle_and_data(shm.as_handle(), &response_bytes) {
+                                        Ok(()) => {
+                                            println!("[Bridge] KEYMAP sent successfully with handle");
+                                            continue; // Already sent, skip regular write
+                                        }
+                                        Err(e) => {
+                                            println!("[Bridge] Failed to send KEYMAP with handle: {:?}, falling back to regular write", e);
+                                            // Fall through to regular write
+                                        }
+                                    }
+                                }
+                            } else {
+                                println!("[Bridge] opcode 0 for non-keyboard object {}, not treating as KEYMAP", interface);
+                            }
                         }
                     }
-                    let response_bytes = response.encode();
                     client
                         .write(&response_bytes)
                         .map_err(|_| "Failed to send response")?;
@@ -1040,11 +1060,7 @@ impl WaylandBridge {
                                             | input::seat_capabilities::KEYBOARD,
                                     ));
                                     msgs.push(caps);
-
-                                    let mut name =
-                                        WaylandMessage::new(new_id, input::seat_event::NAME);
-                                    name.add_arg(WaylandArg::String(b"seat0".to_vec()));
-                                    msgs.push(name);
+                                    // NOTE: NAME event is optional, don't send it
                                     return Ok(msgs);
                                 }
 

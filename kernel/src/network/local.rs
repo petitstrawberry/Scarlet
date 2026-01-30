@@ -201,6 +201,114 @@ impl LocalSocket {
         Ok(())
     }
 
+    /// Send a handle and data together atomically for Wayland protocol
+    ///
+    /// This method ensures that both the handle and data are available before
+    /// waking the peer, preventing race conditions where recvmsg might get
+    /// the handle but not the data (or vice versa).
+    ///
+    /// This is needed for Wayland protocol messages with file descriptors,
+    /// where the client expects both the FD and message data in a single recvmsg call.
+    pub fn send_handle_and_data(
+        &self,
+        object: KernelObject,
+        data: &[u8],
+    ) -> Result<(), crate::ipc::IpcError> {
+        use crate::ipc::IpcError;
+
+        // Verify socket is connected
+        if *self.state.read() != SocketState::Connected {
+            return Err(IpcError::InvalidState);
+        }
+
+        // Get peer socket reference
+        let peer_weak = self.peer_socket.read();
+        let peer_weak_ref = peer_weak.as_ref().ok_or(IpcError::PeerClosed)?;
+        let peer = peer_weak_ref.upgrade().ok_or(IpcError::PeerClosed)?;
+
+        // Check if peer's handle queue is full to prevent DoS attacks
+        let mut peer_handle_queue = peer.handle_queue.write();
+        if peer_handle_queue.len() >= MAX_HANDLE_QUEUE_SIZE {
+            return Err(IpcError::ChannelFull);
+        }
+
+        // Get peer's data buffer through peer_read_buffer
+        let peer_buffer_option = peer.peer_read_buffer.read();
+        let peer_sock_buffer = peer_buffer_option.as_ref().ok_or(IpcError::PeerClosed)?;
+
+        // Check if peer's data buffer has space
+        let mut peer_buffer = peer_sock_buffer.data.write();
+        if peer_buffer.len() + data.len() > MAX_BUFFER_SIZE {
+            drop(peer_buffer);
+            drop(peer_buffer_option);
+            drop(peer_handle_queue);
+            return Err(IpcError::ChannelFull);
+        }
+
+        // Add handle to peer's receive queue
+        peer_handle_queue.push_back(object);
+        drop(peer_handle_queue);
+
+        // Add data to peer's buffer
+        peer_buffer.extend(data.iter().copied());
+        drop(peer_buffer);
+        drop(peer_buffer_option);
+
+        // Wake the peer after BOTH handle and data are available
+        peer.handle_waker.wake_one();
+        peer.read_waker.wake_one();
+
+        Ok(())
+    }
+
+    /// Receive a handle and data together atomically for Wayland protocol
+    ///
+    /// Returns both a handle and data in a single atomic operation.
+    /// This is the counterpart to send_handle_and_data().
+    ///
+    /// # Arguments
+    ///
+    /// * `max_data_len` - Maximum amount of data to read
+    ///
+    /// # Returns
+    ///
+    /// * `(KernelObject, Vec<u8>)` - Handle and data on success
+    /// * `IpcError` - Error if no handle/data available or other error
+    pub fn recv_handle_and_data(
+        &self,
+        max_data_len: usize,
+    ) -> Result<(KernelObject, Vec<u8>), crate::ipc::IpcError> {
+        use crate::ipc::IpcError;
+
+        // Verify socket is connected
+        if *self.state.read() != SocketState::Connected {
+            return Err(IpcError::InvalidState);
+        }
+
+        // Try to get a handle from the queue
+        let mut queue = self.handle_queue.write();
+        let handle = match queue.pop_front() {
+            Some(h) => h,
+            None => return Err(IpcError::ChannelEmpty),
+        };
+        drop(queue);
+
+        // Read data from read buffer
+        let read_buffer = self.read_buffer.read();
+        let mut buffer_data = read_buffer.data.write();
+
+        // Read up to max_data_len bytes
+        let actual_len = buffer_data.len().min(max_data_len);
+        let mut data = Vec::with_capacity(actual_len);
+        for _ in 0..actual_len {
+            data.push(buffer_data.pop_front().unwrap());
+        }
+        drop(buffer_data);
+        drop(read_buffer);
+
+        Ok((handle, data))
+    }
+
     /// Receive a KernelObject handle from this socket (non-blocking)
     pub fn recv_handle(&self) -> Result<KernelObject, crate::ipc::IpcError> {
         use crate::ipc::IpcError;
