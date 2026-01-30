@@ -6,12 +6,12 @@ edition = "2024"
 [lib]
 name = "scarlet_std"
 path = "src/lib.rs"
-test = false
 
 [[test]]
 name = "std_tests"
 path = "tests/runner.rs"
 harness = false
+required-features = ["test_harness"]
 
 [features]
 # Enables allocator overlap/invariant checks even in release builds.

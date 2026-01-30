@@ -27,4 +27,8 @@ path = "src/lib.rs"
 name = "ui_tests"
 path = "tests/runner.rs"
 harness = false
+required-features = ["test_harness"]
+
+[features]
+test_harness = []
 
