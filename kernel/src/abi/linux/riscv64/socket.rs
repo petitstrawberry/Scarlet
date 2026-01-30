@@ -1,3 +1,5 @@
+use crate::ipc::IpcError;
+use crate::object::capability::StreamError;
 use crate::{
     abi::linux::riscv64::LinuxRiscv64Abi,
     abi::linux::riscv64::errno,
@@ -5,15 +7,13 @@ use crate::{
     arch::Trapframe,
     ipc::pipe::UnidirectionalPipe,
     network::{NetworkManager, SocketDomain, SocketProtocol, SocketType, local::LocalSocket},
-    object::capability::selectable::Selectable,
     object::KernelObject,
+    object::capability::selectable::Selectable,
     sched::scheduler::get_scheduler,
     task::mytask,
 };
 use alloc::sync::Arc;
 use core::mem::size_of;
-use crate::ipc::IpcError;
-use crate::object::capability::StreamError;
 
 /// Linux socket domains
 pub const AF_UNIX: i32 = 1; // Unix domain sockets
@@ -777,13 +777,16 @@ pub fn sys_sendmsg(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usiz
         };
 
         if let Some(local_socket) = LocalSocket::from_socket_object(&socket_arc) {
-                let cmsg_addr = match task.vm_manager.translate_vaddr(msg.msg_control as usize) {
-                    Some(addr) => addr as *const LinuxCmsghdr,
-                    None => {
-                        crate::early_println!("[linux socket] sendmsg bad cmsg ptr {:x}", msg.msg_control);
-                        return errno::to_result(errno::EFAULT);
-                    }
-                };
+            let cmsg_addr = match task.vm_manager.translate_vaddr(msg.msg_control as usize) {
+                Some(addr) => addr as *const LinuxCmsghdr,
+                None => {
+                    crate::early_println!(
+                        "[linux socket] sendmsg bad cmsg ptr {:x}",
+                        msg.msg_control
+                    );
+                    return errno::to_result(errno::EFAULT);
+                }
+            };
 
             if !cmsg_addr.is_null() {
                 let cmsg = unsafe { *cmsg_addr };
@@ -797,24 +800,29 @@ pub fn sys_sendmsg(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usiz
                         if fd < 0 {
                             return errno::to_result(errno::EBADF);
                         }
-                            let send_handle = match abi.get_handle(fd as usize) {
-                                Some(h) => h,
-                                None => {
-                                    crate::early_println!("[linux socket] sendmsg bad fd in cmsg {}", fd);
-                                    return errno::to_result(errno::EBADF);
-                                }
-                            };
-                            let dup_obj = match task.handle_table.clone_for_dup(send_handle) {
-                                Some(obj) => obj,
-                                None => {
-                                    crate::early_println!("[linux socket] sendmsg clone_for_dup failed");
-                                    return errno::to_result(errno::EBADF);
-                                }
-                            };
-                            if local_socket.send_handle(dup_obj).is_err() {
-                                crate::early_println!("[linux socket] sendmsg send_handle failed");
-                                return errno::to_result(errno::EIO);
+                        let send_handle = match abi.get_handle(fd as usize) {
+                            Some(h) => h,
+                            None => {
+                                crate::early_println!(
+                                    "[linux socket] sendmsg bad fd in cmsg {}",
+                                    fd
+                                );
+                                return errno::to_result(errno::EBADF);
                             }
+                        };
+                        let dup_obj = match task.handle_table.clone_for_dup(send_handle) {
+                            Some(obj) => obj,
+                            None => {
+                                crate::early_println!(
+                                    "[linux socket] sendmsg clone_for_dup failed"
+                                );
+                                return errno::to_result(errno::EBADF);
+                            }
+                        };
+                        if local_socket.send_handle(dup_obj).is_err() {
+                            crate::early_println!("[linux socket] sendmsg send_handle failed");
+                            return errno::to_result(errno::EIO);
+                        }
                     }
                 }
             }
@@ -862,7 +870,10 @@ pub fn sys_sendmsg(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usiz
         let buf_addr = match task.vm_manager.translate_vaddr(iovec.iov_base as usize) {
             Some(addr) => addr as *const u8,
             None => {
-                crate::early_println!("[linux socket] sendmsg bad buf ptr {:x}", iovec.iov_base as usize);
+                crate::early_println!(
+                    "[linux socket] sendmsg bad buf ptr {:x}",
+                    iovec.iov_base as usize
+                );
                 return errno::to_result(errno::EFAULT);
             }
         };
@@ -1083,7 +1094,10 @@ pub fn sys_recvmsg(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usiz
         let buf_addr = match task.vm_manager.translate_vaddr(iovec.iov_base as usize) {
             Some(addr) => addr as *mut u8,
             None => {
-                crate::early_println!("[linux socket] recvmsg bad buf ptr {:x}", iovec.iov_base as usize);
+                crate::early_println!(
+                    "[linux socket] recvmsg bad buf ptr {:x}",
+                    iovec.iov_base as usize
+                );
                 return errno::to_result(errno::EFAULT);
             }
         };
@@ -1095,10 +1109,7 @@ pub fn sys_recvmsg(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usiz
 
         let buffer = unsafe { core::slice::from_raw_parts_mut(buf_addr, iovec.iov_len) };
 
-        crate::early_println!(
-            "[linux recvmsg] read attempt len={}",
-            iovec.iov_len
-        );
+        crate::early_println!("[linux recvmsg] read attempt len={}", iovec.iov_len);
         match stream.read(buffer) {
             Ok(n) => {
                 crate::early_println!("[linux recvmsg] read ok n={}", n);
@@ -1108,10 +1119,7 @@ pub fn sys_recvmsg(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usiz
                 }
             }
             Err(StreamError::WouldBlock) => {
-                crate::early_println!(
-                    "[linux recvmsg] would block total_read={}",
-                    total_read
-                );
+                crate::early_println!("[linux recvmsg] would block total_read={}", total_read);
                 return if total_read == 0 {
                     errno::to_result(errno::EAGAIN)
                 } else {

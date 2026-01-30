@@ -498,7 +498,11 @@ pub fn sys_tkill(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize 
     // 1. Find the target task by TID
     // 2. Add the signal to its pending signal queue
     // 3. Wake the task if it's sleeping
-    crate::early_println!("[sys_tkill] tid={} sig={} - NOOP (signal delivery not implemented)", tid, sig);
+    crate::early_println!(
+        "[sys_tkill] tid={} sig={} - NOOP (signal delivery not implemented)",
+        tid,
+        sig
+    );
 
     // Return success to avoid crashing applications
     // Many applications use tkill for thread management

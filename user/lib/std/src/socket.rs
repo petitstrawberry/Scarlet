@@ -174,8 +174,8 @@ impl Socket {
         let bytes_read = sock
             .recv_handle_and_data(&mut raw_handle, data_out)
             .map_err(|_| SocketError::WouldBlock)?;
-        let handle = unsafe { Handle::from_raw(raw_handle) }
-            .map_err(|_| SocketError::SyscallFailed)?;
+        let handle =
+            unsafe { Handle::from_raw(raw_handle) }.map_err(|_| SocketError::SyscallFailed)?;
         Ok((handle, bytes_read))
     }
 

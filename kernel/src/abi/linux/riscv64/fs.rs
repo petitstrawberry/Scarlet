@@ -2115,7 +2115,11 @@ pub fn sys_flock(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize 
     // Simplified implementation: always succeed
     // Real flock would require managing lock state per file descriptor
     // For Wayland SHM operations, advisory locks aren't critical
-    crate::println!("[sys_flock] fd={} operation={} - SUCCESS (no-op)", fd, _operation);
+    crate::println!(
+        "[sys_flock] fd={} operation={} - SUCCESS (no-op)",
+        fd,
+        _operation
+    );
     0
 }
 

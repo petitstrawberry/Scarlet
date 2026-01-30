@@ -128,7 +128,11 @@ impl<'a> SocketObject<'a> {
     ///
     /// * `object_handle` - The raw handle of the kernel object to send
     /// * `data` - The data to send with the handle
-    pub fn send_handle_and_data(&self, object_handle: RawHandle, data: &[u8]) -> SocketObjectResult<()> {
+    pub fn send_handle_and_data(
+        &self,
+        object_handle: RawHandle,
+        data: &[u8],
+    ) -> SocketObjectResult<()> {
         let result = syscall4(
             Syscall::SocketSendHandleAndData,
             self.handle.as_raw() as usize,

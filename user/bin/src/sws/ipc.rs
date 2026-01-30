@@ -1352,13 +1352,19 @@ fn client_thread_main(client_id: usize, mut socket: Socket) {
                                     Some(addr)
                                 }
                                 Err(e) => {
-                                    println!("[ClientThread {}] Failed to map handle: {:?}", client_id, e);
+                                    println!(
+                                        "[ClientThread {}] Failed to map handle: {:?}",
+                                        client_id, e
+                                    );
                                     None
                                 }
                             }
                         }
                         Err(e) => {
-                            println!("[ClientThread {}] Handle doesn't support memory_mapping: {:?}", client_id, e);
+                            println!(
+                                "[ClientThread {}] Handle doesn't support memory_mapping: {:?}",
+                                client_id, e
+                            );
                             None
                         }
                     }
@@ -1378,7 +1384,7 @@ fn client_thread_main(client_id: usize, mut socket: Socket) {
                             offset,
                             stride,
                             format,
-                            shm: None,  // No SharedMemory wrapper - using mapped address directly
+                            shm: None, // No SharedMemory wrapper - using mapped address directly
                             shm_mapped_addr: Some(shm_mapped_addr),
                             shm_size: shm_size_usize,
                         });

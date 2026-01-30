@@ -674,4 +674,3 @@ pub fn sys_socket_recv_handle_and_data(trapframe: &mut Trapframe) -> usize {
 
     data.len()
 }
-

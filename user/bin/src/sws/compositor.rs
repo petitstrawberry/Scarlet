@@ -2392,7 +2392,11 @@ impl Compositor {
                             w.shm_mapped_addr = Some(addr);
                             w.shm_size = shm_size;
                             w.shm_offset = offset.max(0) as usize;
-                            w.shm_stride = if stride > 0 { stride as u32 } else { width.saturating_mul(4) };
+                            w.shm_stride = if stride > 0 {
+                                stride as u32
+                            } else {
+                                width.saturating_mul(4)
+                            };
                             w.shm_format = format;
                             w.has_alpha_content = format == 0;
                             w.buffer = None; // Clear Vec buffer if present

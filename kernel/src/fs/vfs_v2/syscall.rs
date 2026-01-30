@@ -565,8 +565,7 @@ fn pivot_root_in_place(
         old_root_path
     };
 
-    let (new_root_entry, parent_mount) =
-        vfs.mount_tree.resolve_mount_point(new_root_path)?;
+    let (new_root_entry, parent_mount) = vfs.mount_tree.resolve_mount_point(new_root_path)?;
     let new_root_mount = match parent_mount.get_child(&new_root_entry) {
         Some(child) => child,
         None => {
@@ -580,16 +579,18 @@ fn pivot_root_in_place(
     let old_root_mount = vfs.mount_tree.root_mount.read().clone();
     let old_root_entry = old_root_mount.root.clone();
 
-    let detached = parent_mount.remove_child(&new_root_entry).ok_or_else(|| {
-        crate::fs::FileSystemError {
-            kind: crate::fs::FileSystemErrorKind::NotFound,
-            message: "New root mount point not found in parent".to_string(),
-        }
-    })?;
+    let detached =
+        parent_mount
+            .remove_child(&new_root_entry)
+            .ok_or_else(|| crate::fs::FileSystemError {
+                kind: crate::fs::FileSystemErrorKind::NotFound,
+                message: "New root mount point not found in parent".to_string(),
+            })?;
     let new_root_mount = detached;
 
     unsafe {
-        let mut_ptr = Arc::as_ptr(&new_root_mount) as *mut crate::fs::vfs_v2::mount_tree::MountPoint;
+        let mut_ptr =
+            Arc::as_ptr(&new_root_mount) as *mut crate::fs::vfs_v2::mount_tree::MountPoint;
         (*mut_ptr).parent = None;
         (*mut_ptr).parent_entry = None;
         (*mut_ptr).path = "/".to_string();

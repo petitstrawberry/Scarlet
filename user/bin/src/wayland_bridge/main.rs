@@ -28,8 +28,8 @@ use protocol::{MessageHeader, WaylandArg, WaylandMessage};
 use registry::Registry;
 use shm::ShmManager;
 use std::collections::BTreeMap;
-use std::io::{Read, Write};
 use std::handle::capability::memory_mapping::{self, flags};
+use std::io::{Read, Write};
 use std::ipc::{SharedMemory, permissions};
 use std::println;
 use std::socket::Socket;
@@ -395,7 +395,10 @@ impl WaylandBridge {
                                     println!("[Bridge] Failed to map window {} SHM", window_id);
                                 }
                             } else {
-                                println!("[Bridge] Window {} SHM doesn't support mapping", window_id);
+                                println!(
+                                    "[Bridge] Window {} SHM doesn't support mapping",
+                                    window_id
+                                );
                             }
                         } else {
                             println!("[Bridge] Received handle is not a shared memory object");
@@ -518,7 +521,10 @@ impl WaylandBridge {
                                     println!("[Bridge] Failed to map window {} SHM", window_id);
                                 }
                             } else {
-                                println!("[Bridge] Window {} SHM doesn't support mapping", window_id);
+                                println!(
+                                    "[Bridge] Window {} SHM doesn't support mapping",
+                                    window_id
+                                );
                             }
                         } else {
                             println!("[Bridge] Received handle is not a shared memory object");
@@ -586,15 +592,13 @@ impl WaylandBridge {
         // Fallback: Use pixel copy for buffers that weren't zero-copied
         // Map client's SHM pool to read pixel data
         if let Ok(client_mapper) = client_shm_handle.as_memory_mapping() {
-            let pool_size = pool.size.max((buffer.offset.abs() as usize)
-                + (buffer.stride.abs() as usize).saturating_mul(buffer.height.max(0) as usize));
-            if let Ok(client_addr) = client_mapper.mmap(
-                0,
-                pool_size,
-                permissions::READ,
-                flags::SHARED,
-                0,
-            ) {
+            let pool_size = pool.size.max(
+                (buffer.offset.abs() as usize)
+                    + (buffer.stride.abs() as usize).saturating_mul(buffer.height.max(0) as usize),
+            );
+            if let Ok(client_addr) =
+                client_mapper.mmap(0, pool_size, permissions::READ, flags::SHARED, 0)
+            {
                 // println!("[Bridge] Mapped client SHM at 0x{:x}", client_addr);
 
                 // Copy pixel data from client SHM to SWS window SHM
@@ -619,9 +623,8 @@ impl WaylandBridge {
                         let src_start = client_addr + src_row_offset;
                         let dst_start = window_shm_info.mapped_addr + dst_row_offset;
 
-                        let bytes_to_copy = (src_width * 4).min(
-                            (window_shm_info.size.saturating_sub(dst_row_offset))
-                        );
+                        let bytes_to_copy = (src_width * 4)
+                            .min((window_shm_info.size.saturating_sub(dst_row_offset)));
 
                         // Copy pixel data
                         core::ptr::copy_nonoverlapping(
@@ -738,7 +741,9 @@ impl WaylandBridge {
         let sws_conn = self.sws_connection.as_mut().ok_or("Not connected to SWS")?;
 
         // Calculate new buffer size
-        let new_buffer_size = (new_width as u64).saturating_mul(new_height as u64).saturating_mul(4);
+        let new_buffer_size = (new_width as u64)
+            .saturating_mul(new_height as u64)
+            .saturating_mul(4);
 
         println!(
             "[Bridge] Resizing window {} to {}x{} ({} bytes)",
@@ -812,13 +817,9 @@ impl WaylandBridge {
 
                     if let Ok(shm) = SharedMemory::from_handle(shm_handle) {
                         if let Ok(mapper) = shm.as_handle().as_memory_mapping() {
-                            if let Ok(mapped_addr) = mapper.mmap(
-                                0,
-                                shm_size,
-                                permissions::READ_WRITE,
-                                flags::SHARED,
-                                0,
-                            ) {
+                            if let Ok(mapped_addr) =
+                                mapper.mmap(0, shm_size, permissions::READ_WRITE, flags::SHARED, 0)
+                            {
                                 println!(
                                     "[Bridge] Remapped window {} SHM at 0x{:x}",
                                     window_id, mapped_addr
@@ -836,7 +837,10 @@ impl WaylandBridge {
                                 println!("[Bridge] Failed to map resized window {} SHM", window_id);
                             }
                         } else {
-                            println!("[Bridge] Resized window {} SHM doesn't support mapping", window_id);
+                            println!(
+                                "[Bridge] Resized window {} SHM doesn't support mapping",
+                                window_id
+                            );
                         }
                     } else {
                         println!("[Bridge] Received handle is not a shared memory object");
@@ -901,28 +905,44 @@ impl WaylandBridge {
                 )?;
                 for response in responses {
                     let response_bytes = response.encode();
-                    println!("[Bridge] Sending response: obj={} opcode={} size={}",
-                        response.header.object_id, response.header.opcode(), response_bytes.len());
+                    println!(
+                        "[Bridge] Sending response: obj={} opcode={} size={}",
+                        response.header.object_id,
+                        response.header.opcode(),
+                        response_bytes.len()
+                    );
                     // Only send KEYMAP with handle for wl_keyboard objects
                     if response.header.opcode() == input::keyboard_event::KEYMAP {
                         // Verify this is actually a wl_keyboard object
                         if let Some(interface) = self.objects.get(&response.header.object_id) {
                             if interface == "wl_keyboard" {
-                                println!("[Bridge] KEYMAP event for wl_keyboard, sending with handle");
+                                println!(
+                                    "[Bridge] KEYMAP event for wl_keyboard, sending with handle"
+                                );
                                 if let Some(shm) = self.keymap_shm.as_ref() {
-                                    match client.send_handle_and_data(shm.as_handle(), &response_bytes) {
+                                    match client
+                                        .send_handle_and_data(shm.as_handle(), &response_bytes)
+                                    {
                                         Ok(()) => {
-                                            println!("[Bridge] KEYMAP sent successfully with handle");
+                                            println!(
+                                                "[Bridge] KEYMAP sent successfully with handle"
+                                            );
                                             continue; // Already sent, skip regular write
                                         }
                                         Err(e) => {
-                                            println!("[Bridge] Failed to send KEYMAP with handle: {:?}, falling back to regular write", e);
+                                            println!(
+                                                "[Bridge] Failed to send KEYMAP with handle: {:?}, falling back to regular write",
+                                                e
+                                            );
                                             // Fall through to regular write
                                         }
                                     }
                                 }
                             } else {
-                                println!("[Bridge] opcode 0 for non-keyboard object {}, not treating as KEYMAP", interface);
+                                println!(
+                                    "[Bridge] opcode 0 for non-keyboard object {}, not treating as KEYMAP",
+                                    interface
+                                );
                             }
                         }
                     }
@@ -946,8 +966,11 @@ impl WaylandBridge {
             }
             for input_msg in input_events {
                 let msg_bytes = input_msg.encode();
-                println!("[Bridge] Forwarding input event: obj={} opcode={}",
-                    input_msg.header.object_id, input_msg.header.opcode());
+                println!(
+                    "[Bridge] Forwarding input event: obj={} opcode={}",
+                    input_msg.header.object_id,
+                    input_msg.header.opcode()
+                );
                 if let Err(e) = client.write(&msg_bytes) {
                     println!("[Bridge] Failed to forward input event: {:?}", e);
                 }
@@ -1211,16 +1234,29 @@ impl WaylandBridge {
                                     let old_height = surface.height;
 
                                     if buffer_width != old_width || buffer_height != old_height {
-                                        println!("[Bridge] Buffer size {}x{} differs from surface {}x{}, resizing window",
-                                            buffer_width, buffer_height, old_width, old_height);
-                                        if let Err(e) = self.resize_sws_window(window_id, buffer_width, buffer_height) {
+                                        println!(
+                                            "[Bridge] Buffer size {}x{} differs from surface {}x{}, resizing window",
+                                            buffer_width, buffer_height, old_width, old_height
+                                        );
+                                        if let Err(e) = self.resize_sws_window(
+                                            window_id,
+                                            buffer_width,
+                                            buffer_height,
+                                        ) {
                                             println!("[Bridge] Failed to resize window: {}", e);
                                         }
                                     }
                                 } else {
                                     // Window doesn't exist yet, create it with buffer size
-                                    println!("[Bridge] No window yet, creating with buffer size {}x{}", buffer_width, buffer_height);
-                                    if let Err(e) = self.create_sws_window_with_size(surface_id, buffer_width, buffer_height) {
+                                    println!(
+                                        "[Bridge] No window yet, creating with buffer size {}x{}",
+                                        buffer_width, buffer_height
+                                    );
+                                    if let Err(e) = self.create_sws_window_with_size(
+                                        surface_id,
+                                        buffer_width,
+                                        buffer_height,
+                                    ) {
                                         println!("[Bridge] Failed to create window: {}", e);
                                     }
                                 }
@@ -1231,7 +1267,9 @@ impl WaylandBridge {
                     if buffer_id != 0 {
                         if let Some(&window_id) = self.surface_to_window.get(&surface_id) {
                             // println!("[Bridge] Sending attach for surface {} buffer {} window {}", surface_id, buffer_id, window_id);
-                            if let Err(e) = self.send_extension_attach_buffer(surface_id, window_id, buffer_id) {
+                            if let Err(e) =
+                                self.send_extension_attach_buffer(surface_id, window_id, buffer_id)
+                            {
                                 println!("[Bridge] Failed to send attach buffer: {}", e);
                             }
                         } else {
@@ -1689,12 +1727,17 @@ impl WaylandBridge {
                         header_bytes.copy_from_slice(&buf[0..8]);
                         let header = protocol_sws::MessageHeader::from_le_bytes(header_bytes);
 
-                        if header.msg_type == protocol_sws::server_msg::EXTENSION_INPUT_EVENT && n >= 32 {
+                        if header.msg_type == protocol_sws::server_msg::EXTENSION_INPUT_EVENT
+                            && n >= 32
+                        {
                             // Parse EXTENSION_INPUT_EVENT
-                            let _external_client_id = u32::from_le_bytes([buf[8], buf[9], buf[10], buf[11]]);
-                            let _window_id = u32::from_le_bytes([buf[12], buf[13], buf[14], buf[15]]);
+                            let _external_client_id =
+                                u32::from_le_bytes([buf[8], buf[9], buf[10], buf[11]]);
+                            let _window_id =
+                                u32::from_le_bytes([buf[12], buf[13], buf[14], buf[15]]);
                             let time = u64::from_le_bytes([
-                                buf[16], buf[17], buf[18], buf[19], buf[20], buf[21], buf[22], buf[23],
+                                buf[16], buf[17], buf[18], buf[19], buf[20], buf[21], buf[22],
+                                buf[23],
                             ]);
                             let type_ = u16::from_le_bytes([buf[24], buf[25]]);
                             let code = u16::from_le_bytes([buf[26], buf[27]]);
@@ -1715,7 +1758,8 @@ impl WaylandBridge {
                                 // Keyboard event - forward to all wl_keyboard objects
                                 for (id, interface) in objects_guard.iter() {
                                     if interface == "wl_keyboard" {
-                                        let mut msg = WaylandMessage::new(*id, input::keyboard_event::KEY);
+                                        let mut msg =
+                                            WaylandMessage::new(*id, input::keyboard_event::KEY);
                                         msg.add_arg(WaylandArg::Uint(0)); // serial
                                         msg.add_arg(WaylandArg::Uint(time as u32));
                                         msg.add_arg(WaylandArg::Uint(code as u32));
@@ -1729,16 +1773,20 @@ impl WaylandBridge {
                                     if interface == "wl_pointer" {
                                         if code == 0 {
                                             // Motion event
-                                            let mut msg =
-                                                WaylandMessage::new(*id, input::pointer_event::MOTION);
+                                            let mut msg = WaylandMessage::new(
+                                                *id,
+                                                input::pointer_event::MOTION,
+                                            );
                                             msg.add_arg(WaylandArg::Uint(time as u32));
                                             msg.add_arg(WaylandArg::Int(value)); // x (simplified)
                                             msg.add_arg(WaylandArg::Int(value)); // y (simplified)
                                             messages.push(msg);
                                         } else {
                                             // Button event
-                                            let mut msg =
-                                                WaylandMessage::new(*id, input::pointer_event::BUTTON);
+                                            let mut msg = WaylandMessage::new(
+                                                *id,
+                                                input::pointer_event::BUTTON,
+                                            );
                                             msg.add_arg(WaylandArg::Uint(0)); // serial
                                             msg.add_arg(WaylandArg::Uint(time as u32));
                                             msg.add_arg(WaylandArg::Uint(code as u32));
