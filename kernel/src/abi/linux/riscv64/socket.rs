@@ -924,12 +924,12 @@ pub fn sys_recvmsg(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usiz
     let sockfd = trapframe.get_arg(0) as usize;
     let msg_ptr = trapframe.get_arg(1);
     let flags = trapframe.get_arg(2) as i32;
-    crate::early_println!(
-        "[linux recvmsg] fd={} msg_ptr={:#x} flags={:#x}",
-        sockfd,
-        msg_ptr,
-        flags
-    );
+    // crate::early_println!(
+    //     "[linux recvmsg] fd={} msg_ptr={:#x} flags={:#x}",
+    //     sockfd,
+    //     msg_ptr,
+    //     flags
+    // );
 
     trapframe.increment_pc_next(task);
 
@@ -941,7 +941,7 @@ pub fn sys_recvmsg(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usiz
         }
     };
 
-    crate::early_println!("[linux recvmsg] handle={}", handle);
+    // crate::early_println!("[linux recvmsg] handle={}", handle);
 
     let kernel_obj = match task.handle_table.get(handle) {
         Some(obj) => obj,
@@ -979,13 +979,13 @@ pub fn sys_recvmsg(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usiz
     }
 
     let msg = unsafe { *msg_addr };
-    crate::early_println!(
-        "[linux recvmsg] iov_ptr={:#x} iovlen={} control_ptr={:#x} controllen={}",
-        msg.msg_iov,
-        msg.msg_iovlen,
-        msg.msg_control,
-        msg.msg_controllen
-    );
+    // crate::early_println!(
+    //     "[linux recvmsg] iov_ptr={:#x} iovlen={} control_ptr={:#x} controllen={}",
+    //     msg.msg_iov,
+    //     msg.msg_iovlen,
+    //     msg.msg_control,
+    //     msg.msg_controllen
+    // );
     let iovcnt = msg.msg_iovlen as usize;
     if iovcnt == 0 {
         return 0;
@@ -1010,7 +1010,7 @@ pub fn sys_recvmsg(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usiz
     }
 
     let iovecs = unsafe { core::slice::from_raw_parts(iovec_addr, iovcnt) };
-    crate::early_println!("[linux recvmsg] iovcnt={}", iovecs.len());
+    // crate::early_println!("[linux recvmsg] iovcnt={}", iovecs.len());
     let mut total_read = 0usize;
     let mut pending_fd: Option<i32> = None;
     let mut msg_controllen = 0usize;
@@ -1051,7 +1051,7 @@ pub fn sys_recvmsg(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usiz
             let socket_arc = match &kernel_obj {
                 KernelObject::Socket(socket) => Arc::clone(socket),
                 _ => {
-                    crate::early_println!("[linux socket] recvmsg not socket for cmsg");
+                    // crate::early_println!("[linux socket] recvmsg not socket for cmsg");
                     return errno::to_result(errno::ENOTSOCK);
                 }
             };
@@ -1078,7 +1078,7 @@ pub fn sys_recvmsg(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usiz
                         // No ancillary data; still allow data receive to proceed.
                     }
                     Err(_) => {
-                        crate::early_println!("[linux socket] recvmsg recv_handle failed");
+                        // crate::early_println!("[linux socket] recvmsg recv_handle failed");
                         return errno::to_result(errno::EIO);
                     }
                 }
@@ -1094,32 +1094,32 @@ pub fn sys_recvmsg(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usiz
         let buf_addr = match task.vm_manager.translate_vaddr(iovec.iov_base as usize) {
             Some(addr) => addr as *mut u8,
             None => {
-                crate::early_println!(
-                    "[linux socket] recvmsg bad buf ptr {:x}",
-                    iovec.iov_base as usize
-                );
+                // crate::early_println!(
+                //     "[linux socket] recvmsg bad buf ptr {:x}",
+                //     iovec.iov_base as usize
+                // );
                 return errno::to_result(errno::EFAULT);
             }
         };
 
         if buf_addr.is_null() {
-            crate::early_println!("[linux socket] recvmsg null buf ptr");
+            // crate::early_println!("[linux socket] recvmsg null buf ptr");
             return errno::to_result(errno::EFAULT);
         }
 
         let buffer = unsafe { core::slice::from_raw_parts_mut(buf_addr, iovec.iov_len) };
 
-        crate::early_println!("[linux recvmsg] read attempt len={}", iovec.iov_len);
+        // crate::early_println!("[linux recvmsg] read attempt len={}", iovec.iov_len);
         match stream.read(buffer) {
             Ok(n) => {
-                crate::early_println!("[linux recvmsg] read ok n={}", n);
+                // crate::early_println!("[linux recvmsg] read ok n={}", n);
                 total_read = total_read.saturating_add(n);
                 if n < iovec.iov_len {
                     break;
                 }
             }
             Err(StreamError::WouldBlock) => {
-                crate::early_println!("[linux recvmsg] would block total_read={}", total_read);
+                // crate::early_println!("[linux recvmsg] would block total_read={}", total_read);
                 return if total_read == 0 {
                     errno::to_result(errno::EAGAIN)
                 } else {
@@ -1127,7 +1127,7 @@ pub fn sys_recvmsg(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usiz
                 };
             }
             Err(_) => {
-                crate::early_println!("[linux socket] recvmsg read error");
+                // crate::early_println!("[linux socket] recvmsg read error");
                 return errno::to_result(errno::EIO);
             }
         }

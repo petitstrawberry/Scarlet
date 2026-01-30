@@ -641,10 +641,12 @@ impl WaylandBridge {
             (0, 0, surface.width, surface.height)
         };
 
-        println!(
-            "[Bridge] Updating SWS window {} with damage [{},{} {}x{}]",
-            window_id, x, y, width, height
-        );
+        if is_debug_enabled() {
+            println!(
+                "[Bridge] Updating SWS window {} with damage [{},{} {}x{}]",
+                window_id, x, y, width, height
+            );
+        }
 
         // Fallback: Use pixel copy for buffers that weren't zero-copied
         // Map client's SHM pool to read pixel data
@@ -930,7 +932,9 @@ impl WaylandBridge {
                 }
             };
 
-            println!("[Bridge] Received {} bytes from client", n);
+            if is_debug_enabled() {
+                println!("[Bridge] Received {} bytes from client", n);
+            }
             buffer.extend_from_slice(&read_buf[..n]);
 
             // Parse and handle messages
@@ -943,16 +947,20 @@ impl WaylandBridge {
 
                 let msg_size = header.size() as usize;
                 if offset + msg_size > buffer.len() {
-                    println!("[Bridge] Incomplete message, waiting for more data");
+                    if is_debug_enabled() {
+                        println!("[Bridge] Incomplete message, waiting for more data");
+                    }
                     break;
                 }
 
-                println!(
-                    "[Bridge] Message: object_id={} opcode={} size={}",
-                    header.object_id,
-                    header.opcode(),
-                    msg_size
-                );
+                if is_debug_enabled() {
+                    println!(
+                        "[Bridge] Message: object_id={} opcode={} size={}",
+                        header.object_id,
+                        header.opcode(),
+                        msg_size
+                    );
+                }
 
                 // Handle the message
                 let responses = self.handle_message(
@@ -962,28 +970,34 @@ impl WaylandBridge {
                 )?;
                 for response in responses {
                     let response_bytes = response.encode();
-                    println!(
-                        "[Bridge] Sending response: obj={} opcode={} size={}",
-                        response.header.object_id,
-                        response.header.opcode(),
-                        response_bytes.len()
-                    );
+                    if is_debug_enabled() {
+                        println!(
+                            "[Bridge] Sending response: obj={} opcode={} size={}",
+                            response.header.object_id,
+                            response.header.opcode(),
+                            response_bytes.len()
+                        );
+                    }
                     // Only send KEYMAP with handle for wl_keyboard objects
                     if response.header.opcode() == input::keyboard_event::KEYMAP {
                         // Verify this is actually a wl_keyboard object
                         if let Some(interface) = self.objects.get(&response.header.object_id) {
                             if interface == "wl_keyboard" {
-                                println!(
-                                    "[Bridge] KEYMAP event for wl_keyboard, sending with handle"
-                                );
+                                if is_debug_enabled() {
+                                    println!(
+                                        "[Bridge] KEYMAP event for wl_keyboard, sending with handle"
+                                    );
+                                }
                                 if let Some(shm) = self.keymap_shm.as_ref() {
                                     match client
                                         .send_handle_and_data(shm.as_handle(), &response_bytes)
                                     {
                                         Ok(()) => {
-                                            println!(
-                                                "[Bridge] KEYMAP sent successfully with handle"
-                                            );
+                                            if is_debug_enabled() {
+                                                println!(
+                                                    "[Bridge] KEYMAP sent successfully with handle"
+                                                );
+                                            }
                                             continue; // Already sent, skip regular write
                                         }
                                         Err(e) => {
@@ -995,11 +1009,6 @@ impl WaylandBridge {
                                         }
                                     }
                                 }
-                            } else {
-                                println!(
-                                    "[Bridge] opcode 0 for non-keyboard object {}, not treating as KEYMAP",
-                                    interface
-                                );
                             }
                         }
                     }
@@ -1267,7 +1276,9 @@ impl WaylandBridge {
     ) -> Result<Vec<WaylandMessage>, &'static str> {
         match opcode {
             protocol::surface_request::ATTACH => {
-                println!("[Bridge] wl_surface.attach on surface {}", surface_id);
+                if is_debug_enabled() {
+                    println!("[Bridge] wl_surface.attach on surface {}", surface_id);
+                }
                 if payload.len() >= 12 {
                     let buffer_id = Self::parse_u32(payload, 0).unwrap_or(0);
                     let _x = Self::parse_i32(payload, 4).unwrap_or(0);
@@ -1337,7 +1348,9 @@ impl WaylandBridge {
                 Ok(Vec::new())
             }
             protocol::surface_request::DAMAGE => {
-                println!("[Bridge] wl_surface.damage on surface {}", surface_id);
+                if is_debug_enabled() {
+                    println!("[Bridge] wl_surface.damage on surface {}", surface_id);
+                }
                 if payload.len() >= 16 {
                     let x = Self::parse_i32(payload, 0).unwrap_or(0);
                     let y = Self::parse_i32(payload, 4).unwrap_or(0);
@@ -1350,7 +1363,9 @@ impl WaylandBridge {
                 Ok(Vec::new())
             }
             protocol::surface_request::COMMIT => {
-                println!("[Bridge] wl_surface.commit on surface {}", surface_id);
+                if is_debug_enabled() {
+                    println!("[Bridge] wl_surface.commit on surface {}", surface_id);
+                }
                 let mut release_msg = None;
                 let mut callback_msg = None;
 
@@ -1398,11 +1413,15 @@ impl WaylandBridge {
                 Ok(msgs)
             }
             protocol::surface_request::FRAME => {
-                println!("[Bridge] wl_surface.frame on surface {}", surface_id);
+                if is_debug_enabled() {
+                    println!("[Bridge] wl_surface.frame on surface {}", surface_id);
+                }
                 if payload.len() >= 4 {
                     let callback_id =
                         u32::from_ne_bytes([payload[0], payload[1], payload[2], payload[3]]);
-                    println!("[Bridge] Callback ID: {}", callback_id);
+                    if is_debug_enabled() {
+                        println!("[Bridge] Callback ID: {}", callback_id);
+                    }
                     self.add_object(callback_id, String::from("wl_callback"));
 
                     // Store the callback to be sent when the surface is committed
