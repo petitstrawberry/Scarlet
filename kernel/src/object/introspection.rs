@@ -1,5 +1,5 @@
 //! KernelObject introspection and capability discovery
-//! 
+//!
 //! This module provides types and functions for discovering KernelObject
 //! types and capabilities at runtime, enabling type-safe user-space wrappers.
 
@@ -88,7 +88,7 @@ impl KernelObjectInfo {
             access_mode: Self::encode_access_mode(readable, writable),
         }
     }
-    
+
     /// Create info for a Pipe KernelObject
     pub fn for_pipe(handle_role: HandleRole, readable: bool, writable: bool) -> Self {
         Self {
@@ -105,7 +105,26 @@ impl KernelObjectInfo {
             access_mode: Self::encode_access_mode(readable, writable),
         }
     }
-    
+
+    /// Create info for a Socket KernelObject
+    pub fn for_socket(handle_role: HandleRole, readable: bool, writable: bool) -> Self {
+        Self {
+            object_type: KernelObjectType::Socket,
+            // Sockets are stream-like and support handle transfer; we conservatively
+            // model them as supporting StreamOps + PipeOps + CloneOps.
+            capabilities: ObjectCapabilities {
+                stream_ops: true,
+                file_ops: false,
+                pipe_ops: true,
+                event_ops: false,
+                clone_ops: true,
+                reserved: [false; 3],
+            },
+            handle_role,
+            access_mode: Self::encode_access_mode(readable, writable),
+        }
+    }
+
     /// Create info for an EventChannel KernelObject
     pub fn for_event_channel(handle_role: HandleRole) -> Self {
         Self {
@@ -122,13 +141,13 @@ impl KernelObjectInfo {
             access_mode: Self::encode_access_mode(true, true), // Channel can be read and written
         }
     }
-    
+
     /// Create info for an EventSubscription KernelObject
     pub fn for_event_subscription(handle_role: HandleRole) -> Self {
         Self {
             object_type: KernelObjectType::EventSubscription,
             capabilities: ObjectCapabilities {
-                stream_ops: true,  // Can receive events like reading
+                stream_ops: true, // Can receive events like reading
                 file_ops: false,
                 pipe_ops: false,
                 event_ops: true,
@@ -173,11 +192,15 @@ impl KernelObjectInfo {
             access_mode: 0,
         }
     }
-    
+
     fn encode_access_mode(readable: bool, writable: bool) -> u32 {
         let mut mode = 0;
-        if readable { mode |= 0x1; }
-        if writable { mode |= 0x2; }
+        if readable {
+            mode |= 0x1;
+        }
+        if writable {
+            mode |= 0x2;
+        }
         mode
     }
 }
@@ -186,7 +209,9 @@ impl KernelObjectInfo {
 impl From<crate::object::handle::HandleType> for HandleRole {
     fn from(handle_type: crate::object::handle::HandleType) -> Self {
         match handle_type {
-            crate::object::handle::HandleType::StandardInputOutput(_) => HandleRole::StandardInputOutput,
+            crate::object::handle::HandleType::StandardInputOutput(_) => {
+                HandleRole::StandardInputOutput
+            }
             crate::object::handle::HandleType::IpcChannel => HandleRole::IpcChannel,
             crate::object::handle::HandleType::EventChannel => HandleRole::IpcChannel, // Map to IPC channel for now
             crate::object::handle::HandleType::EventSubscription => HandleRole::IpcChannel, // Map to IPC channel for now

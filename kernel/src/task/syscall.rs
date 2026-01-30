@@ -20,12 +20,16 @@ use crate::abi::MAX_ABI_LENGTH;
 use crate::device::manager::DeviceManager;
 use crate::executor::executor::TransparentExecutor;
 use crate::fs::MAX_PATH_LENGTH;
-use crate::library::std::string::{parse_c_string_from_userspace, parse_string_array_from_userspace};
+use crate::library::std::string::{
+    parse_c_string_from_userspace, parse_string_array_from_userspace,
+};
 
-use crate::arch::{get_cpu, Trapframe};
+use crate::arch::{Trapframe, get_cpu};
 use crate::sched::scheduler::get_scheduler;
-use crate::task::{get_parent_waitpid_waker, get_waitpid_waker, CloneFlags, WaitError};
-use crate::timer::{get_tick, ms_to_ticks, ns_to_ticks};
+use crate::task::{
+    CloneFlags, CloneFlagsDef, WaitError, get_parent_waitpid_waker, get_waitpid_waker,
+};
+use crate::timer::ns_to_ticks;
 
 const MAX_ARG_COUNT: usize = 256; // Maximum number of arguments for execve
 
@@ -79,7 +83,7 @@ pub fn sys_putchar(trapframe: &mut Trapframe) -> usize {
 pub fn sys_getchar(trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
     trapframe.increment_pc_next(task);
-    
+
     // Find TTY device for blocking input
     let manager = DeviceManager::get_manager();
     if let Some(borrowed_device) = manager.get_device_by_name("tty0") {
@@ -90,7 +94,7 @@ pub fn sys_getchar(trapframe: &mut Trapframe) -> usize {
             }
         }
     }
-    
+
     0 // Return 0 if no device found (should not happen)
 }
 
@@ -108,96 +112,206 @@ pub fn sys_clone(trapframe: &mut Trapframe) -> usize {
     /* Save the trapframe to the task before cloning */
     parent_task.vcpu.store(trapframe);
     let clone_flags = CloneFlags::from_raw(trapframe.get_arg(0) as u64);
+    let child_stack = trapframe.get_arg(1); // Second argument: child stack pointer
+    let child_fn = trapframe.get_arg(2); // Third argument: function pointer (trampoline)
+    let child_arg = trapframe.get_arg(3); // Fourth argument: argument to pass to function (closure pointer)
+    let tls_ptr = trapframe.get_arg(4); // Fifth argument: TLS pointer
 
     // crate::println!("[CLONE] Parent task {} cloning with flags: 0x{:x}", parent_task.get_id(), clone_flags.get_raw());
 
     /* Clone the task */
     match parent_task.clone_task(clone_flags) {
         Ok(mut child_task) => {
-            let child_id = child_task.get_id();
-            // crate::println!("[CLONE] Successfully created child task {}, state: {:?}, PC: 0x{:x}", 
+            // crate::println!("[CLONE] Successfully created child task {}, state: {:?}, PC: 0x{:x}",
             //     child_id, child_task.get_state(), child_task.vcpu.get_pc());
-            child_task.vcpu.iregs.reg[10] = 0; /* Set the return value to 0 in the child task */
-            get_scheduler().add_task(child_task, get_cpu().get_cpuid());
+            child_task.vcpu.iregs.set_return_value(0); /* Set the return value to 0 in the child task */
+
+            // If child_stack is provided, set child's user SP
+            if child_stack != 0 {
+                child_task.vcpu.set_sp(child_stack);
+            }
+
+            // If child_fn is provided, set it as PC (thread entry point)
+            if child_fn != 0 {
+                child_task.vcpu.set_pc(child_fn as u64);
+            }
+
+            // If child_arg is provided, pass it as first argument (a0/x0)
+            if child_arg != 0 {
+                child_task.vcpu.iregs.set_arg(0, child_arg);
+            }
+
+            let scheduler = get_scheduler();
+            let cpu_id = get_cpu().get_cpuid();
+            let parent_id = parent_task.get_id();
+
+            // Handle SetTls flag: set TLS pointer and tp register
+            if clone_flags.is_set(CloneFlagsDef::SetTls) {
+                // Set TLS pointer in task's ABI state
+                if let Some(abi) = child_task.default_abi.as_mut() {
+                    abi.set_tls_pointer(tls_ptr);
+                }
+
+                // Set TLS pointer using architecture-specific VCPU method
+                child_task.vcpu.set_tls_pointer(tls_ptr);
+            }
+
+            // Add child to scheduler and get the allocated ID
+            let child_id = scheduler.add_task(child_task, cpu_id);
             // crate::println!("[CLONE] Child task {} added to scheduler", child_id);
-            /* Return the child task ID to the parent task */
-            child_id
-        },
+
+            // Establish parent-child relationship now that both have valid IDs
+            if let Some(child) = scheduler.get_task_by_id(child_id) {
+                child.set_parent_id(parent_id);
+            }
+            if let Some(parent) = scheduler.get_task_by_id(parent_id) {
+                parent.add_child(child_id);
+            }
+
+            // Get the child's namespace-local PID (after add_task has set the IDs)
+            let child_ns_pid = scheduler
+                .get_task_by_id(child_id)
+                .map(|t| t.get_namespace_id())
+                .unwrap_or(0);
+
+            /* Return the child task PID (namespace-local) to the parent task */
+            child_ns_pid
+        }
         Err(_) => {
             usize::MAX /* Return -1 on error */
         }
     }
 }
 
+/// Set the TLS pointer for the current task
+pub fn sys_set_tls(trapframe: &mut Trapframe) -> usize {
+    let task = mytask().unwrap();
+    let tls_ptr = trapframe.get_arg(0);
+
+    // Update ABI state
+    if let Some(abi) = task.default_abi.as_mut() {
+        abi.set_tls_pointer(tls_ptr);
+    }
+
+    // Set TLS pointer using architecture-specific VCPU method
+    task.vcpu.set_tls_pointer(tls_ptr);
+
+    trapframe.increment_pc_next(task);
+    0 // Success
+}
+
+/// Get the TLS pointer for the current task
+pub fn sys_get_tls(trapframe: &mut Trapframe) -> usize {
+    let task = mytask().unwrap();
+
+    // Get TLS pointer from ABI state
+    let tls_ptr = task
+        .default_abi
+        .as_ref()
+        .and_then(|abi| abi.get_tls_pointer())
+        .unwrap_or(0);
+
+    trapframe.increment_pc_next(task);
+    tls_ptr // Return TLS pointer
+}
+
+/// Set the clear_child_tid pointer for thread exit notification
+pub fn sys_set_tid_address(trapframe: &mut Trapframe) -> usize {
+    let task = mytask().unwrap();
+    let tid_ptr = trapframe.get_arg(0);
+
+    // Update ABI state
+    if let Some(abi) = task.default_abi.as_mut() {
+        abi.set_clear_child_tid(tid_ptr);
+    }
+
+    trapframe.increment_pc_next(task);
+    task.get_namespace_id() // Return current TID (Linux-compatible)
+}
+
 pub fn sys_execve(trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
-    
+
     // crate::println!("[EXECVE] Task {} starting execve", task.get_id());
-    
+
     // Increment PC to avoid infinite loop if execve fails
     trapframe.increment_pc_next(task);
-    
+
     // Get arguments from trapframe
     let path_ptr = trapframe.get_arg(0);
     let argv_ptr = trapframe.get_arg(1);
     let envp_ptr = trapframe.get_arg(2);
     let flags = trapframe.get_arg(3); // New flags argument
-    
+
     // Parse path
     let path_str = match parse_c_string_from_userspace(task, path_ptr, MAX_PATH_LENGTH) {
         Ok(path) => {
             // crate::println!("[EXECVE] Task {}: Executing path: {}", task.get_id(), path);
             path
-        },
+        }
         Err(_) => {
             // crate::println!("[EXECVE] Task {}: Path parsing error", task.get_id());
             return usize::MAX; // Path parsing error
         }
     };
-    
+
     // Parse argv and envp
-    let argv_strings = match parse_string_array_from_userspace(task, argv_ptr, MAX_ARG_COUNT, MAX_PATH_LENGTH) {
-        Ok(args) => {
-            // crate::println!("[EXECVE] Task {}: argv count: {}", task.get_id(), args.len());
-            args
-        },
-        Err(_) => {
-            // crate::println!("[EXECVE] Task {}: argv parsing error", task.get_id());
-            return usize::MAX; // argv parsing error
-        }
-    };
-    
-    let envp_strings = match parse_string_array_from_userspace(task, envp_ptr, MAX_ARG_COUNT, MAX_PATH_LENGTH) {
-        Ok(env) => {
-            // crate::println!("[EXECVE] Task {}: envp count: {}", task.get_id(), env.len());
-            env
-        },
-        Err(_) => {
-            // crate::println!("[EXECVE] Task {}: envp parsing error", task.get_id());
-            return usize::MAX; // envp parsing error
-        }
-    };
-    
+    let argv_strings =
+        match parse_string_array_from_userspace(task, argv_ptr, MAX_ARG_COUNT, MAX_PATH_LENGTH) {
+            Ok(args) => {
+                // crate::println!("[EXECVE] Task {}: argv count: {}", task.get_id(), args.len());
+                args
+            }
+            Err(_) => {
+                // crate::println!("[EXECVE] Task {}: argv parsing error", task.get_id());
+                return usize::MAX; // argv parsing error
+            }
+        };
+
+    let envp_strings =
+        match parse_string_array_from_userspace(task, envp_ptr, MAX_ARG_COUNT, MAX_PATH_LENGTH) {
+            Ok(env) => {
+                // crate::println!("[EXECVE] Task {}: envp count: {}", task.get_id(), env.len());
+                env
+            }
+            Err(_) => {
+                // crate::println!("[EXECVE] Task {}: envp parsing error", task.get_id());
+                return usize::MAX; // envp parsing error
+            }
+        };
+
     // Convert Vec<String> to Vec<&str> for TransparentExecutor
     let argv_refs: Vec<&str> = argv_strings.iter().map(|s| s.as_str()).collect();
     let envp_refs: Vec<&str> = envp_strings.iter().map(|s| s.as_str()).collect();
-    
+
     // Check if force ABI rebuild is requested
     let force_abi_rebuild = (flags & EXECVE_FORCE_ABI_REBUILD) != 0;
-    
+
     // crate::println!("[EXECVE] Task {}: Starting TransparentExecutor::execute_binary", task.get_id());
-    
+
     // Use TransparentExecutor for cross-ABI execution
-    match TransparentExecutor::execute_binary(&path_str, &argv_refs, &envp_refs, task, trapframe, force_abi_rebuild) {
+    match TransparentExecutor::execute_binary(
+        &path_str,
+        &argv_refs,
+        &envp_refs,
+        task,
+        trapframe,
+        force_abi_rebuild,
+    ) {
         Ok(_) => {
             // crate::println!("[EXECVE] Task {}: execute_binary succeeded", task.get_id());
             // execve normally should not return on success - the process is replaced
             // However, if ABI module sets trapframe return value and returns here,
             // we should respect that value instead of hardcoding 0
             trapframe.get_return_value()
-        },
-        Err(_) => {
-            // crate::println!("[EXECVE] Task {}: execute_binary failed", task.get_id());
+        }
+        Err(e) => {
+            crate::println!(
+                "[EXECVE] Task {}: execute_binary failed for path='{}': {}",
+                task.get_id(),
+                path_str,
+                e
+            );
             // Execution failed - return error code
             // The trap handler will automatically set trapframe return value from our return
             usize::MAX // Error return value
@@ -207,7 +321,7 @@ pub fn sys_execve(trapframe: &mut Trapframe) -> usize {
 
 pub fn sys_execve_abi(trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
-    
+
     // Increment PC to avoid infinite loop if execve fails
     trapframe.increment_pc_next(task);
 
@@ -217,30 +331,32 @@ pub fn sys_execve_abi(trapframe: &mut Trapframe) -> usize {
     let envp_ptr = trapframe.get_arg(2);
     let abi_str_ptr = trapframe.get_arg(3);
     let flags = trapframe.get_arg(4); // New flags argument
-    
+
     // Parse path
     let path_str = match parse_c_string_from_userspace(task, path_ptr, MAX_PATH_LENGTH) {
         Ok(path) => path,
         Err(_) => return usize::MAX, // Path parsing error
     };
-    
+
     // Parse ABI string
     let abi_str = match parse_c_string_from_userspace(task, abi_str_ptr, MAX_ABI_LENGTH) {
         Ok(abi) => abi,
         Err(_) => return usize::MAX, // ABI parsing error
     };
-    
+
     // Parse argv and envp
-    let argv_strings = match parse_string_array_from_userspace(task, argv_ptr, 256, MAX_PATH_LENGTH) {
+    let argv_strings = match parse_string_array_from_userspace(task, argv_ptr, 256, MAX_PATH_LENGTH)
+    {
         Ok(args) => args,
         Err(_) => return usize::MAX, // argv parsing error
     };
-    
-    let envp_strings = match parse_string_array_from_userspace(task, envp_ptr, 256, MAX_PATH_LENGTH) {
+
+    let envp_strings = match parse_string_array_from_userspace(task, envp_ptr, 256, MAX_PATH_LENGTH)
+    {
         Ok(env) => env,
         Err(_) => return usize::MAX, // envp parsing error
     };
-    
+
     // Convert Vec<String> to Vec<&str> for TransparentExecutor
     let argv_refs: Vec<&str> = argv_strings.iter().map(|s| s.as_str()).collect();
     let envp_refs: Vec<&str> = envp_strings.iter().map(|s| s.as_str()).collect();
@@ -274,9 +390,13 @@ pub fn sys_execve_abi(trapframe: &mut Trapframe) -> usize {
 
 pub fn sys_waitpid(trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
+    // pid is namespace-local PID as seen by the calling task.
     let pid = trapframe.get_arg(0) as i32;
     let status_ptr = trapframe.get_arg(1) as *mut i32;
-    let _options = trapframe.get_arg(2) as i32; // Not used in this implementation
+    let options = trapframe.get_arg(2) as i32;
+
+    // WNOHANG flag (0x1): Return immediately if no child has exited
+    let wnohang = (options & 0x1) != 0;
 
     // Loop until a child exits or an error occurs
     loop {
@@ -287,39 +407,68 @@ pub fn sys_waitpid(trapframe: &mut Trapframe) -> usize {
                     Ok(status) => {
                         // Child has exited, return the status
                         if status_ptr != core::ptr::null_mut() {
-                            let status_ptr = task.vm_manager.translate_vaddr(status_ptr as usize).unwrap() as *mut i32;
+                            let status_ptr = task
+                                .vm_manager
+                                .translate_vaddr(status_ptr as usize)
+                                .unwrap() as *mut i32;
                             unsafe {
                                 *status_ptr = status;
                             }
                         }
                         trapframe.increment_pc_next(task);
-                        return child_pid;
-                    },
-                    Err(error) => {
-                        match error {
-                            WaitError::ChildNotExited(_) => continue,
-                            _ => {
-                                trapframe.increment_pc_next(task);
-                                return usize::MAX;
-                            },
+                        // Return child's PID in caller's namespace (if visible)
+                        if let Some(local) = task.get_namespace().resolve_local_id(child_pid) {
+                            return local;
                         }
+                        // Not visible in this namespace; keep searching
+                        continue;
                     }
+                    Err(error) => match error {
+                        WaitError::ChildNotExited(_) => continue,
+                        _ => {
+                            trapframe.increment_pc_next(task);
+                            return usize::MAX;
+                        }
+                    },
                 }
             }
-            
-            // No child has exited yet, block until one does
+
+            // No child has exited yet
+            if wnohang {
+                // WNOHANG: Return immediately without blocking
+                trapframe.increment_pc_next(task);
+                return 0; // Return 0 to indicate no child has exited
+            }
+
+            // Block until a child exits
             let parent_waker = get_parent_waitpid_waker(task.get_id());
             parent_waker.wait(task.get_id(), trapframe);
             // Continue the loop to re-check after waking up
             continue;
         }
-        
+
         // Wait for specific child process
-        match task.wait(pid as usize) {
+        if pid <= 0 {
+            trapframe.increment_pc_next(task);
+            return usize::MAX;
+        }
+
+        let target_global = match task.get_namespace().resolve_global_id(pid as usize) {
+            Some(g) => g,
+            None => {
+                trapframe.increment_pc_next(task);
+                return usize::MAX;
+            }
+        };
+
+        match task.wait(target_global) {
             Ok(status) => {
                 // Child has exited, return the status
                 if status_ptr != core::ptr::null_mut() {
-                    let status_ptr = task.vm_manager.translate_vaddr(status_ptr as usize).unwrap() as *mut i32;
+                    let status_ptr = task
+                        .vm_manager
+                        .translate_vaddr(status_ptr as usize)
+                        .unwrap() as *mut i32;
                     unsafe {
                         *status_ptr = status;
                     }
@@ -332,20 +481,27 @@ pub fn sys_waitpid(trapframe: &mut Trapframe) -> usize {
                     WaitError::NoSuchChild(_) => {
                         trapframe.increment_pc_next(task);
                         return usize::MAX;
-                    },
+                    }
                     WaitError::ChildTaskNotFound(_) => {
                         trapframe.increment_pc_next(task);
                         crate::print!("Child task with PID {} not found", pid);
                         return usize::MAX;
-                    },
+                    }
                     WaitError::ChildNotExited(_) => {
-                        // If the child task is not exited, we need to wait for it
-                        let child_waker = get_waitpid_waker(pid as usize);
+                        // Child has not exited yet
+                        if wnohang {
+                            // WNOHANG: Return immediately without blocking
+                            trapframe.increment_pc_next(task);
+                            return 0; // Return 0 to indicate child has not exited
+                        }
+
+                        // Block until child exits
+                        let child_waker = get_waitpid_waker(target_global);
                         child_waker.wait(task.get_id(), trapframe);
                         assert_eq!(mytask().unwrap().get_id(), task.get_id());
                         // Continue the loop to re-check after waking up
                         continue;
-                    },
+                    }
                 }
             }
         }
@@ -355,13 +511,23 @@ pub fn sys_waitpid(trapframe: &mut Trapframe) -> usize {
 pub fn sys_getpid(trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
     trapframe.increment_pc_next(task);
-    task.get_id() as usize
+    // Expose namespace-local task ID to user space.
+    // This allows task namespaces (PID namespaces) to provide independent PID spaces.
+    task.get_namespace_id() as usize
 }
 
 pub fn sys_getppid(trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
     trapframe.increment_pc_next(task);
-    task.get_parent_id().unwrap_or(task.get_id()) as usize
+    // Return parent's PID as seen from the caller's namespace.
+    // If the parent is not mapped/visible in this namespace, return 0.
+    match task.get_parent_id() {
+        Some(parent_global) => task
+            .get_namespace()
+            .resolve_local_id(parent_global)
+            .unwrap_or(0),
+        None => 0,
+    }
 }
 
 pub fn sys_sleep(trapframe: &mut Trapframe) -> usize {
@@ -380,13 +546,57 @@ pub fn sys_sleep(trapframe: &mut Trapframe) -> usize {
     0
 }
 
+/// Yield execution to the scheduler
+///
+/// This is a cooperative scheduling primitive similar to `sched_yield(2)`.
+/// The calling task remains runnable, but allows another ready task to run.
+///
+/// # Returns
+/// * `0` on success
+pub fn sys_yield(trapframe: &mut Trapframe) -> usize {
+    let task = mytask().unwrap();
+
+    // Increment PC before yielding to avoid re-executing the syscall on resume
+    trapframe.increment_pc_next(task);
+
+    // Yield CPU to scheduler - returns when this task is scheduled again
+    get_scheduler().schedule(trapframe);
+
+    0
+}
+
+/// Exit all tasks in the thread group
+///
+/// This system call terminates all tasks with the same TGID (thread group).
+/// It is similar to Linux's exit_group system call and is the proper way
+/// for multi-threaded processes to exit.
+///
+/// # Arguments
+/// * `trapframe.arg(0)` - Exit status code
+///
+/// # Returns
+/// This function does not return on success (all tasks are terminated).
+/// Returns `usize::MAX` (-1) on error.
+///
+/// # Behavior
+/// - Terminates all tasks with the same TGID as the caller
+/// - The calling task is set to Zombie/Terminated
+/// - Other tasks in the group are forcefully terminated
+pub fn sys_exit_group(trapframe: &mut Trapframe) -> usize {
+    let task = mytask().unwrap();
+    task.vcpu.store(trapframe);
+    let exit_code = trapframe.get_arg(0) as i32;
+    task.exit_group(exit_code);
+    usize::MAX // -1 (If exit_group is successful, this will not be reached)
+}
+
 /// Register an ABI zone for a specific memory range
-/// 
+///
 /// # Arguments
 /// * `start` - Start address of the memory range
 /// * `len` - Length of the memory range in bytes
 /// * `abi_name_ptr` - Pointer to null-terminated ABI name string in user space
-/// 
+///
 /// # Returns
 /// * `0` on success
 /// * `usize::MAX` (-1) on failure
@@ -395,9 +605,9 @@ pub fn sys_register_abi_zone(trapframe: &mut Trapframe) -> usize {
     let start = trapframe.get_arg(0);
     let len = trapframe.get_arg(1);
     let abi_name_ptr = trapframe.get_arg(2);
-    
+
     trapframe.increment_pc_next(task);
-    
+
     // Parse the ABI name from user space
     let abi_name = match parse_c_string_from_userspace(task, abi_name_ptr, MAX_ABI_LENGTH) {
         Ok(name) => name,
@@ -406,9 +616,14 @@ pub fn sys_register_abi_zone(trapframe: &mut Trapframe) -> usize {
             return usize::MAX; // -1
         }
     };
-    
-    crate::early_println!("[syscall] Registering ABI zone: start={:#x}, len={:#x}, abi={}", start, len, abi_name);
-    
+
+    crate::early_println!(
+        "[syscall] Registering ABI zone: start={:#x}, len={:#x}, abi={}",
+        start,
+        len,
+        abi_name
+    );
+
     // Instantiate the ABI module
     let abi = match crate::abi::AbiRegistry::instantiate(&abi_name) {
         Some(abi) => abi,
@@ -417,36 +632,36 @@ pub fn sys_register_abi_zone(trapframe: &mut Trapframe) -> usize {
             return usize::MAX; // -1
         }
     };
-    
+
     // Create the ABI zone
     let zone = crate::task::AbiZone {
         range: start..(start + len),
         abi,
     };
-    
+
     // Insert into the task's ABI zones map
     task.abi_zones.insert(start, zone);
-    
+
     crate::early_println!("[syscall] Successfully registered ABI zone");
     0
 }
 
 /// Unregister an ABI zone
-/// 
+///
 /// # Arguments
 /// * `start` - Start address of the memory range to unregister
-/// 
+///
 /// # Returns
 /// * `0` on success
 /// * `usize::MAX` (-1) on failure (zone not found)
 pub fn sys_unregister_abi_zone(trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
     let start = trapframe.get_arg(0);
-    
+
     trapframe.increment_pc_next(task);
-    
+
     crate::early_println!("[syscall] Unregistering ABI zone at start={:#x}", start);
-    
+
     // Remove the ABI zone from the map
     match task.abi_zones.remove(&start) {
         Some(_) => {
@@ -460,3 +675,104 @@ pub fn sys_unregister_abi_zone(trapframe: &mut Trapframe) -> usize {
     }
 }
 
+// Namespace creation flags (bit flags for smart control)
+pub const NS_CREATE_TASK: usize = 0x01; // Create separate task namespace
+pub const NS_CREATE_VFS: usize = 0x02; // Create separate VFS namespace
+pub const NS_CREATE_NET: usize = 0x04; // Create separate network namespace (future)
+pub const NS_CREATE_IPC: usize = 0x08; // Create separate IPC namespace (future)
+
+// Syscall error return value
+const SYSCALL_ERROR: usize = usize::MAX;
+
+/// Create a new namespace for the current task (Scarlet-style smart syscall)
+///
+/// # Arguments
+/// * `flags` - Bitfield specifying which namespaces to create (NS_CREATE_*)
+/// * `name_ptr` - Pointer to C string with namespace name (optional, can be null)
+///
+/// # Returns
+/// * `0` on success
+/// * `SYSCALL_ERROR` (-1) on failure
+///
+/// # Example
+/// ```rust
+/// // Create separate task and VFS namespaces
+/// sys_create_namespace(NS_CREATE_TASK | NS_CREATE_VFS, "container1");
+/// ```
+pub fn sys_create_namespace(trapframe: &mut Trapframe) -> usize {
+    use crate::fs::VfsManager;
+    use crate::task::namespace::TaskNamespace;
+
+    let task = mytask().unwrap();
+    let flags = trapframe.get_arg(0);
+    let name_ptr = trapframe.get_arg(1);
+
+    trapframe.increment_pc_next(task);
+
+    // Parse namespace name (optional)
+    let name = if name_ptr == 0 {
+        alloc::format!("ns_{}", task.get_id())
+    } else {
+        match parse_c_string_from_userspace(task, name_ptr, 64) {
+            Ok(s) => s,
+            Err(_) => {
+                crate::early_println!("[syscall] Failed to parse namespace name");
+                return SYSCALL_ERROR;
+            }
+        }
+    };
+
+    crate::early_println!(
+        "[syscall] Creating namespace '{}' with flags={:#x}",
+        name,
+        flags
+    );
+
+    // Create task namespace if requested
+    if flags & NS_CREATE_TASK != 0 {
+        let new_task_ns = TaskNamespace::new_child(task.get_namespace().clone(), name.clone());
+        task.set_namespace(new_task_ns);
+        crate::early_println!("[syscall] Created task namespace '{}'", name);
+    }
+
+    // Create VFS namespace if requested
+    if flags & NS_CREATE_VFS != 0 {
+        // Deep-clone the current mount topology so the initial view is the same,
+        // but future mount operations are isolated.
+        let source_vfs = match task.get_vfs() {
+            Some(vfs) => vfs,
+            None => return SYSCALL_ERROR,
+        };
+
+        let new_vfs = match VfsManager::clone_mount_namespace_deep(&source_vfs) {
+            Ok(vfs) => vfs,
+            Err(e) => {
+                crate::early_println!(
+                    "[syscall] Failed to clone VFS namespace '{}': {}",
+                    name,
+                    e.message
+                );
+                return SYSCALL_ERROR;
+            }
+        };
+
+        // Preserve current working directory when possible.
+        let cwd_path = source_vfs.get_cwd_path();
+        let _ = new_vfs.set_cwd_by_path(&cwd_path);
+
+        task.set_vfs(new_vfs);
+        crate::early_println!("[syscall] Created VFS namespace '{}'", name);
+    }
+
+    // Future: Network namespace
+    if flags & NS_CREATE_NET != 0 {
+        crate::early_println!("[syscall] Network namespace not yet implemented");
+    }
+
+    // Future: IPC namespace
+    if flags & NS_CREATE_IPC != 0 {
+        crate::early_println!("[syscall] IPC namespace not yet implemented");
+    }
+
+    0
+}

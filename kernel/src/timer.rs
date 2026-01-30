@@ -1,8 +1,8 @@
 //! Kernel timer module.
-//! 
+//!
 //! This module provides the kernel timer functionality, which is responsible for
 //! managing the system timer and scheduling tasks based on time intervals.
-//! 
+//!
 
 use crate::arch::Trapframe;
 use crate::arch::timer::ArchTimer;
@@ -10,8 +10,8 @@ use crate::environment::NUM_OF_CPUS;
 use crate::sched::scheduler::get_scheduler;
 use core::sync::atomic::{AtomicU64, Ordering};
 extern crate alloc;
-use alloc::sync::{Arc, Weak};
 use alloc::collections::BinaryHeap;
+use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
 use core::cmp::Ordering as CmpOrdering;
 
@@ -112,11 +112,11 @@ pub trait TimerHandler: Send + Sync {
 
 /// Software timer structure
 pub struct SoftwareTimer {
-    pub id: u64,                        // Unique timer ID
-    pub expires: u64,                   // Expiration tick
-    pub handler: Weak<dyn TimerHandler>,// Weak reference to callback handler
-    pub context: usize,                 // User context
-    pub active: bool,                   // Is this timer active?
+    pub id: u64,                         // Unique timer ID
+    pub expires: u64,                    // Expiration tick
+    pub handler: Weak<dyn TimerHandler>, // Weak reference to callback handler
+    pub context: usize,                  // User context
+    pub active: bool,                    // Is this timer active?
 }
 
 // Global timer ID counter
@@ -145,10 +145,15 @@ impl PartialOrd for SoftwareTimer {
     }
 }
 
-use spin::Mutex;
+use alloc::collections::BTreeMap;
+use spin::{Mutex, RwLock};
 
 // Heap-based timer list (protected by spin::Mutex)
 static SOFTWARE_TIMER_HEAP: Mutex<BinaryHeap<SoftwareTimer>> = Mutex::new(BinaryHeap::new());
+
+// Active timer flags (protected by RwLock for efficient concurrent reads)
+// Maps timer ID -> active status
+static TIMER_ACTIVE_FLAGS: RwLock<BTreeMap<u64, bool>> = RwLock::new(BTreeMap::new());
 
 /// Add a new software timer. Returns timer id.
 pub fn add_timer(expires: u64, handler: &Arc<dyn TimerHandler>, context: usize) -> u64 {
@@ -160,38 +165,78 @@ pub fn add_timer(expires: u64, handler: &Arc<dyn TimerHandler>, context: usize) 
         context,
         active: true,
     };
+
+    // Mark as active in the flags map
+    TIMER_ACTIVE_FLAGS.write().insert(id, true);
+
     SOFTWARE_TIMER_HEAP.lock().push(timer);
     id
 }
 
-/// Cancel a timer by id
+/// Cancel a timer by id (O(1) operation - just marks as inactive)
 pub fn cancel_timer(id: u64) {
-    let mut heap = SOFTWARE_TIMER_HEAP.lock();
-    let mut timers: Vec<_> = heap.drain().collect();
-    timers.retain(|t| t.id != id);
-    for t in timers {
-        heap.push(t);
+    // Simply mark as inactive - the timer will be skipped in check_software_timers()
+    // and cleaned up when it expires
+    if let Some(active) = TIMER_ACTIVE_FLAGS.write().get_mut(&id) {
+        *active = false;
     }
+}
+
+/// Check if a timer is active (used by check_software_timers)
+#[inline]
+fn is_timer_active(id: u64) -> bool {
+    TIMER_ACTIVE_FLAGS.read().get(&id).copied().unwrap_or(false)
 }
 
 /// Call this from tick() to check and fire expired timers
 fn check_software_timers(now: u64) {
     use alloc::vec::Vec;
     let mut expired = Vec::new();
+    let mut cleanup_ids = Vec::new();
+
     {
         let mut heap = SOFTWARE_TIMER_HEAP.lock();
+        let active_flags = TIMER_ACTIVE_FLAGS.read();
+
         while let Some(timer) = heap.peek() {
-            if timer.active && timer.expires <= now {
+            if timer.expires <= now {
                 let timer = heap.pop().unwrap();
-                expired.push(timer);
+                // Check if still active
+                if active_flags.get(&timer.id).copied().unwrap_or(false) {
+                    expired.push(timer);
+                } else {
+                    // Mark for cleanup (will be done outside locks)
+                    cleanup_ids.push(timer.id);
+                }
             } else {
                 break;
             }
         }
-    } // Unlock the heap to allow other operations
+    } // Unlock the heap
+
+    // Clean up inactive timers (outside of read lock to avoid deadlock)
+    if !cleanup_ids.is_empty() {
+        let mut active_flags = TIMER_ACTIVE_FLAGS.write();
+        for id in cleanup_ids {
+            active_flags.remove(&id);
+        }
+    }
+
+    // Execute callbacks outside of all locks
     for timer in expired {
-        if let Some(handler) = timer.handler.upgrade() {
-            handler.on_timer_expired(timer.context);
+        // Double-check active status before executing
+        let should_execute = {
+            let active_flags = TIMER_ACTIVE_FLAGS.read();
+            active_flags.get(&timer.id).copied().unwrap_or(false)
+        };
+
+        if should_execute {
+            // Clean up from flags map before executing handler
+            TIMER_ACTIVE_FLAGS.write().remove(&timer.id);
+
+            if let Some(handler) = timer.handler.upgrade() {
+                handler.on_timer_expired(timer.context);
+            }
         }
     }
 }

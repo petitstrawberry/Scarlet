@@ -5,9 +5,11 @@
 //!
 //! ## Available Capabilities
 //!
-//! - **StreamOps**: Read/write operations for streaming data
-//! - **FileObject**: File-specific operations (seek, truncate, metadata)
-//! - **MemoryMappingOps**: Memory mapping operations (mmap, munmap)
+//! - **StreamOps**: Read/write operations for streaming data (borrowed from `Handle`)
+//! - **FileObject**: File-specific operations (seek, truncate, metadata) (borrowed)
+//! - **SocketObject**: Socket-specific operations (bind, listen, connect, accept) (borrowed)
+//! - **SharedMemoryObject**: Shared-memory object marker and operations (borrowed)
+//! - **MemoryMappingOps**: Memory mapping operations (mmap, munmap) (borrowed)
 //!
 //! ## Design Philosophy
 //!
@@ -16,10 +18,15 @@
 //! - Type safety prevents calling unsupported operations
 //! - Direct syscall mapping for zero-cost abstractions
 
-pub mod stream;
 pub mod file;
 pub mod memory_mapping;
+pub mod shared_memory;
+pub mod socket;
+pub mod stream;
 
 // Re-export capability types for convenience
-pub use stream::{StreamOps, StreamError, StreamResult};
-pub use file::{FileObject, FileError, FileResult, SeekFrom, FileMetadata};
+pub use file::{FileError, FileMetadata, FileObject, FileResult, SeekFrom};
+pub use memory_mapping::MemoryMappingOps;
+pub use shared_memory::{SharedMemoryObject, SharedMemoryObjectError, SharedMemoryObjectResult};
+pub use socket::{ShutdownHow, SocketObject, SocketObjectError, SocketObjectResult};
+pub use stream::{StreamError, StreamOps, StreamResult};

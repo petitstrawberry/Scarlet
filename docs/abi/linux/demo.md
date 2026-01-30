@@ -43,8 +43,8 @@ bash tools/linux/deploy_rootfs.sh
 Build the kernel and the root filesystem image, then run Scarlet:
 
 ```bash
-cargo make build
-cargo make run
+cargo make build-riscv64
+cargo make run-riscv64
 ```
 
 ### 4. Execute Linux Binaries
@@ -70,7 +70,7 @@ You can run standard Linux commands provided by BusyBox:
 
 Other demo binaries are available but require specific arguments or setup:
 
-- **green**: A Rust-based PDF rendering test (requires a PDF file argument).
+- **green**: A SDL-based PDF rendering test (requires a PDF file argument).
 - **fbdoom**: A Doom port (requires a WAD file, e.g., `fbdoom -iwad /path/to/doom1.wad`).
 
 ```bash

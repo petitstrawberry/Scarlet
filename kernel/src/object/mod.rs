@@ -1,21 +1,22 @@
 //! Kernel object management system
-//! 
+//!
 //! This module provides a unified abstraction for all kernel-managed resources
 //! including files, pipes, devices, and other IPC mechanisms.
 
 pub mod capability;
-pub mod introspection;
 pub mod handle;
+pub mod introspection;
 
 use alloc::sync::Arc;
 use crate::fs::FileObject;
-use crate::ipc::pipe::PipeObject;
-use crate::ipc::event::{EventChannelObject, EventSubscriptionObject};
 use crate::ipc::StreamIpcOps;
 use crate::device::graphics::buffer::GraphicsBuffer;
 use capability::{StreamOps, CloneOps, ControlOps, MemoryMappingOps, Selectable};
 
 /// Unified representation of all kernel-managed resources
+///
+/// Note: Debug is not implemented for KernelObject because it contains
+/// trait objects that may not implement Debug. Use introspection methods instead.
 pub enum KernelObject {
     File(Arc<dyn FileObject>),
     Pipe(Arc<dyn PipeObject>),
@@ -24,8 +25,6 @@ pub enum KernelObject {
     GraphicsBuffer(Arc<dyn GraphicsBuffer>),
     // Future variants will be added here:
     // MessageQueue(Arc<dyn MessageQueueObject>),
-    // SharedMemory(Arc<dyn SharedMemoryObject>),
-    // Socket(Arc<dyn SocketObject>),
     // CharDevice(Arc<dyn CharDevice>),
 }
 
@@ -34,7 +33,7 @@ impl KernelObject {
     pub fn from_file_object(file_object: Arc<dyn FileObject>) -> Self {
         KernelObject::File(file_object)
     }
-    
+
     /// Create a KernelObject from a PipeObject
     pub fn from_pipe_object(pipe_object: Arc<dyn PipeObject>) -> Self {
         KernelObject::Pipe(pipe_object)
@@ -49,7 +48,18 @@ impl KernelObject {
     pub fn from_event_subscription(event_subscription: Arc<EventSubscriptionObject>) -> Self {
         KernelObject::EventSubscription(event_subscription)
     }
-    
+
+    /// Create a KernelObject from a SocketObject
+    #[cfg(feature = "network")]
+    pub fn from_socket_object(socket: Arc<dyn SocketObject>) -> Self {
+        KernelObject::Socket(socket)
+    }
+
+    /// Create a KernelObject from a SharedMemoryObject
+    pub fn from_shared_memory_object(shared_memory: Arc<dyn SharedMemoryObject>) -> Self {
+        KernelObject::SharedMemory(shared_memory)
+    }
+
     /// Try to get StreamOps capability
     pub fn as_stream(&self) -> Option<&dyn StreamOps> {
         match self {
@@ -63,6 +73,12 @@ impl KernelObject {
                 let stream_ops: &dyn StreamOps = pipe_object.as_ref();
                 Some(stream_ops)
             }
+            #[cfg(feature = "network")]
+            KernelObject::Socket(socket) => {
+                // SocketObject implements StreamOps
+                let stream_ops: &dyn StreamOps = socket.as_ref();
+                Some(stream_ops)
+            }
             KernelObject::EventChannel(_) => {
                 // Event channels don't provide stream operations
                 None
@@ -74,7 +90,7 @@ impl KernelObject {
             KernelObject::GraphicsBuffer(_) => None,
         }
     }
-    
+
     /// Try to get StreamIpcOps capability for IPC stream operations
     pub fn as_stream_ipc(&self) -> Option<&dyn StreamIpcOps> {
         match self {
@@ -85,6 +101,12 @@ impl KernelObject {
             KernelObject::Pipe(pipe_object) => {
                 // PipeObject implements StreamIpcOps
                 let stream_ipc_ops: &dyn StreamIpcOps = pipe_object.as_ref();
+                Some(stream_ipc_ops)
+            }
+            #[cfg(feature = "network")]
+            KernelObject::Socket(socket) => {
+                // SocketObject implements StreamIpcOps
+                let stream_ipc_ops: &dyn StreamIpcOps = socket.as_ref();
                 Some(stream_ipc_ops)
             }
             KernelObject::EventChannel(_) => {
@@ -98,7 +120,7 @@ impl KernelObject {
             KernelObject::GraphicsBuffer(_) => None,
         }
     }
-    
+
     /// Try to get FileObject that provides file-like operations and stream capabilities
     pub fn as_file(&self) -> Option<&dyn FileObject> {
         match self {
@@ -109,6 +131,11 @@ impl KernelObject {
             }
             KernelObject::Pipe(_) => {
                 // Pipes don't provide file operations
+                None
+            }
+            #[cfg(feature = "network")]
+            KernelObject::Socket(_) => {
+                // Sockets don't provide file operations
                 None
             }
             KernelObject::EventChannel(_) => {
@@ -122,7 +149,7 @@ impl KernelObject {
             KernelObject::GraphicsBuffer(_) => None,
         }
     }
-    
+
     /// Try to get PipeObject that provides pipe-specific operations
     pub fn as_pipe(&self) -> Option<&dyn PipeObject> {
         match self {
@@ -133,6 +160,11 @@ impl KernelObject {
             KernelObject::Pipe(pipe_object) => {
                 let pipe_ops: &dyn PipeObject = pipe_object.as_ref();
                 Some(pipe_ops)
+            }
+            #[cfg(feature = "network")]
+            KernelObject::Socket(_) => {
+                // Sockets don't provide pipe operations
+                None
             }
             KernelObject::EventChannel(_) => {
                 // Event channels don't provide pipe operations
@@ -145,7 +177,30 @@ impl KernelObject {
             KernelObject::GraphicsBuffer(_) => None,
         }
     }
-    
+
+    /// Try to get SocketObject that provides socket-specific operations
+    #[cfg(feature = "network")]
+    pub fn as_socket(&self) -> Option<&dyn SocketObject> {
+        match self {
+            KernelObject::Socket(socket) => {
+                let socket_ops: &dyn SocketObject = socket.as_ref();
+                Some(socket_ops)
+            }
+            _ => None,
+        }
+    }
+
+    /// Try to get SharedMemoryObject that provides shared memory operations
+    pub fn as_shared_memory(&self) -> Option<&dyn SharedMemoryObject> {
+        match self {
+            KernelObject::SharedMemory(shared_memory) => {
+                let shmem_ops: &dyn SharedMemoryObject = shared_memory.as_ref();
+                Some(shmem_ops)
+            }
+            _ => None,
+        }
+    }
+
     /// Try to get CloneOps capability
     pub fn as_cloneable(&self) -> Option<&dyn CloneOps> {
         match self {
@@ -156,6 +211,11 @@ impl KernelObject {
                 // Check if PipeObject implements CloneOps
                 let cloneable: &dyn CloneOps = pipe_object.as_ref();
                 Some(cloneable)
+            }
+            #[cfg(feature = "network")]
+            KernelObject::Socket(_) => {
+                // Sockets don't implement CloneOps, use Arc::clone directly
+                None
             }
             KernelObject::EventChannel(event_channel) => {
                 // EventChannel implements CloneOps
@@ -170,7 +230,7 @@ impl KernelObject {
             KernelObject::GraphicsBuffer(_) => None,
         }
     }
-    
+
     /// Try to get ControlOps capability
     pub fn as_control(&self) -> Option<&dyn ControlOps> {
         match self {
@@ -182,6 +242,11 @@ impl KernelObject {
             KernelObject::Pipe(_) => {
                 // Pipes don't provide control operations
                 None
+            }
+            #[cfg(feature = "network")]
+            KernelObject::Socket(socket) => {
+                // Try to get control operations through SocketObject trait
+                socket.as_control_ops()
             }
             KernelObject::EventChannel(_) => {
                 // Event channels don't provide control operations
@@ -197,7 +262,7 @@ impl KernelObject {
             }
         }
     }
-    
+
     /// Try to get MemoryMappingOps capability
     pub fn as_memory_mappable(&self) -> Option<&dyn MemoryMappingOps> {
         match self {
@@ -208,6 +273,11 @@ impl KernelObject {
             }
             KernelObject::Pipe(_) => {
                 // Pipes don't provide memory mapping operations
+                None
+            }
+            #[cfg(feature = "network")]
+            KernelObject::Socket(_) => {
+                // Sockets don't provide memory mapping operations
                 None
             }
             KernelObject::EventChannel(_) => {
@@ -238,6 +308,11 @@ impl KernelObject {
                 // Pipes don't provide memory mapping operations
                 None
             }
+            #[cfg(feature = "network")]
+            KernelObject::Socket(_) => {
+                // Sockets don't provide memory mapping operations
+                None
+            }
             KernelObject::EventChannel(_) => {
                 // Event channels don't provide memory mapping operations
                 None
@@ -260,10 +335,10 @@ impl KernelObject {
                 let event_channel_obj: &EventChannelObject = event_channel.as_ref();
                 Some(event_channel_obj)
             }
-            _ => None
+            _ => None,
         }
     }
-    
+
     /// Try to get EventSubscriptionObject
     pub fn as_event_subscription(&self) -> Option<&EventSubscriptionObject> {
         match self {
@@ -271,7 +346,7 @@ impl KernelObject {
                 let event_subscription_obj: &EventSubscriptionObject = event_subscription.as_ref();
                 Some(event_subscription_obj)
             }
-            _ => None
+            _ => None,
         }
     }
 
@@ -283,9 +358,9 @@ impl KernelObject {
                 let sel: &dyn Selectable = file_object.as_ref();
                 Some(sel)
             }
-            KernelObject::Pipe(pipe_object) => {
-                pipe_object.as_selectable()
-            }
+            KernelObject::Pipe(pipe_object) => pipe_object.as_selectable(),
+            #[cfg(feature = "network")]
+            KernelObject::Socket(socket) => socket.as_selectable(),
             KernelObject::EventChannel(_) => None,
             KernelObject::EventSubscription(_) => None,
             KernelObject::GraphicsBuffer(_) => None,
@@ -301,12 +376,10 @@ impl Clone for KernelObject {
         } else {
             // Default: Use Arc::clone for direct cloning
             match self {
-                KernelObject::File(file_object) => {
-                    KernelObject::File(Arc::clone(file_object))
-                }
-                KernelObject::Pipe(pipe_object) => {
-                    KernelObject::Pipe(Arc::clone(pipe_object))
-                }
+                KernelObject::File(file_object) => KernelObject::File(Arc::clone(file_object)),
+                KernelObject::Pipe(pipe_object) => KernelObject::Pipe(Arc::clone(pipe_object)),
+                #[cfg(feature = "network")]
+                KernelObject::Socket(socket) => KernelObject::Socket(Arc::clone(socket)),
                 KernelObject::EventChannel(event_channel) => {
                     KernelObject::EventChannel(Arc::clone(event_channel))
                 }

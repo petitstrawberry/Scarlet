@@ -1,26 +1,27 @@
 //! Device module.
-//! 
+//!
 //! This module provides a framework for managing devices in the kernel.
 //! It includes device information and driver management,
 //! as well as platform-specific device handling.
 
-
-pub mod manager;
-pub mod fdt;
-pub mod platform;
 pub mod block;
 pub mod char;
-pub mod graphics;
-pub mod network;
 pub mod events;
+pub mod fdt;
+pub mod graphics;
+pub mod input;
+pub mod manager;
+pub mod network;
+pub mod pci;
+pub mod platform;
 
 extern crate alloc;
 use core::any::Any;
 
-use alloc::vec::Vec;
-use crate::object::capability::{ControlOps, MemoryMappingOps};
 use crate::device::events::EventCapableDevice;
 use crate::object::capability::selectable::Selectable;
+use crate::object::capability::{ControlOps, MemoryMappingOps};
+use alloc::vec::Vec;
 
 /// Device capability flags for neutral feature discovery across ABIs
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -39,7 +40,7 @@ pub trait DeviceInfo {
 }
 
 /// Device driver trait.
-/// 
+///
 /// This trait defines the interface for device drivers in the kernel.
 /// It includes methods for getting the driver's name,
 /// matching the driver to devices, and handling device probing and removal.
@@ -51,11 +52,11 @@ pub trait DeviceDriver {
 }
 
 /// Device type enumeration.
-/// 
+///
 /// This enum defines the types of devices that can be managed by the kernel.
 /// It includes block devices, character devices, network devices,
 /// and generic devices.
-/// 
+///
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Clone, Copy)]
 pub enum DeviceType {
     Block,
@@ -68,26 +69,28 @@ pub enum DeviceType {
 }
 
 /// Device trait.
-/// 
+///
 /// This trait defines the interface for devices in the kernel.
 /// Device IDs are assigned by DeviceManager when devices are registered.
 /// All devices must support control operations through the ControlOps trait
 /// and memory mapping operations through the MemoryMappingOps trait.
-/// 
+///
 pub trait Device: Send + Sync + ControlOps + MemoryMappingOps + Selectable {
     fn device_type(&self) -> DeviceType;
     fn name(&self) -> &'static str;
     fn as_any(&self) -> &dyn Any;
     fn as_any_mut(&mut self) -> &mut dyn Any;
-    
+
     /// Optional capabilities exposed by this device (default: none)
-    fn capabilities(&self) -> &'static [DeviceCapability] { &[] }
-    
+    fn capabilities(&self) -> &'static [DeviceCapability] {
+        &[]
+    }
+
     /// Cast to EventCapableDevice if this device can emit events
     fn as_event_capable(&self) -> Option<&dyn EventCapableDevice> {
         None
     }
-    
+
     /// Cast to CharDevice if this device is a character device
     fn as_char_device(&self) -> Option<&dyn char::CharDevice> {
         None
@@ -97,38 +100,46 @@ pub trait Device: Send + Sync + ControlOps + MemoryMappingOps + Selectable {
     fn as_block_device(&self) -> Option<&dyn block::BlockDevice> {
         None
     }
-    
+
     /// Cast to GraphicsDevice if this device is a graphics device
     fn as_graphics_device(&self) -> Option<&dyn graphics::GraphicsDevice> {
         None
     }
-    
+
     /// Cast to NetworkDevice if this device is a network device
     fn as_network_device(&self) -> Option<&dyn network::NetworkDevice> {
         None
     }
-    
+
     /// Cast Arc<Self> to Arc<dyn BlockDevice> if this device is a block device
     /// This allows direct ownership of the block device for efficient I/O operations
-    fn into_block_device(self: alloc::sync::Arc<Self>) -> Option<alloc::sync::Arc<dyn block::BlockDevice>> {
+    fn into_block_device(
+        self: alloc::sync::Arc<Self>,
+    ) -> Option<alloc::sync::Arc<dyn block::BlockDevice>> {
         None
     }
-    
+
     /// Cast Arc<Self> to Arc<dyn CharDevice> if this device is a character device
     /// This allows direct ownership of the char device for efficient I/O operations
-    fn into_char_device(self: alloc::sync::Arc<Self>) -> Option<alloc::sync::Arc<dyn char::CharDevice>> {
+    fn into_char_device(
+        self: alloc::sync::Arc<Self>,
+    ) -> Option<alloc::sync::Arc<dyn char::CharDevice>> {
         None
     }
-    
+
     /// Cast Arc<Self> to Arc<dyn GraphicsDevice> if this device is a graphics device
     /// This allows direct ownership of the graphics device for efficient operations
-    fn into_graphics_device(self: alloc::sync::Arc<Self>) -> Option<alloc::sync::Arc<dyn graphics::GraphicsDevice>> {
+    fn into_graphics_device(
+        self: alloc::sync::Arc<Self>,
+    ) -> Option<alloc::sync::Arc<dyn graphics::GraphicsDevice>> {
         None
     }
-    
+
     /// Cast Arc<Self> to Arc<dyn NetworkDevice> if this device is a network device
     /// This allows direct ownership of the network device for efficient operations
-    fn into_network_device(self: alloc::sync::Arc<Self>) -> Option<alloc::sync::Arc<dyn network::NetworkDevice>> {
+    fn into_network_device(
+        self: alloc::sync::Arc<Self>,
+    ) -> Option<alloc::sync::Arc<dyn network::NetworkDevice>> {
         None
     }
 }
@@ -140,7 +151,10 @@ pub struct GenericDevice {
 
 impl GenericDevice {
     pub fn new(name: &'static str) -> Self {
-        Self { device_type: DeviceType::Generic, name }
+        Self {
+            device_type: DeviceType::Generic,
+            name,
+        }
     }
 }
 
@@ -156,7 +170,7 @@ impl Device for GenericDevice {
     fn as_any(&self) -> &dyn Any {
         self
     }
-    
+
     fn as_any_mut(&mut self) -> &mut dyn Any {
         self
     }
@@ -172,19 +186,22 @@ impl ControlOps for GenericDevice {
 }
 
 impl MemoryMappingOps for GenericDevice {
-    fn get_mapping_info(&self, _offset: usize, _length: usize) 
-                       -> Result<(usize, usize, bool), &'static str> {
+    fn get_mapping_info(
+        &self,
+        _offset: usize,
+        _length: usize,
+    ) -> Result<(usize, usize, bool), &'static str> {
         Err("Memory mapping not supported by this generic device")
     }
-    
+
     fn on_mapped(&self, _vaddr: usize, _paddr: usize, _length: usize, _offset: usize) {
         // Generic devices don't support memory mapping
     }
-    
+
     fn on_unmapped(&self, _vaddr: usize, _length: usize) {
         // Generic devices don't support memory mapping
     }
-    
+
     fn supports_mmap(&self) -> bool {
         false
     }

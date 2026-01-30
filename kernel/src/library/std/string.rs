@@ -11,7 +11,10 @@ pub enum StringConversionError {
 }
 
 /// Convert a C string pointer to a Rust String
-pub fn cstring_to_string(cstr_ptr: *const u8, max_len: usize) -> Result<(String, usize), StringConversionError> {
+pub fn cstring_to_string(
+    cstr_ptr: *const u8,
+    max_len: usize,
+) -> Result<(String, usize), StringConversionError> {
     if cstr_ptr.is_null() {
         return Err(StringConversionError::NullPointer);
     }
@@ -37,55 +40,59 @@ pub fn cstring_to_string(cstr_ptr: *const u8, max_len: usize) -> Result<(String,
 
 /// Parse a null-terminated C string from user space using task's VM manager
 pub fn parse_c_string_from_userspace(
-    task: &crate::task::Task, 
-    ptr: usize, 
-    max_len: usize
+    task: &crate::task::Task,
+    ptr: usize,
+    max_len: usize,
 ) -> Result<String, StringConversionError> {
     if ptr == 0 {
         return Err(StringConversionError::NullPointer);
     }
-    
-    let c_str_ptr = task.vm_manager.translate_vaddr(ptr)
+
+    let c_str_ptr = task
+        .vm_manager
+        .translate_vaddr(ptr)
         .ok_or(StringConversionError::TranslationError)? as *const u8;
-    
+
     let (string, _) = cstring_to_string(c_str_ptr, max_len)?;
     Ok(string)
 }
 
 /// Parse an array of string pointers (char **) from user space
 pub fn parse_string_array_from_userspace(
-    task: &crate::task::Task, 
-    array_ptr: usize, 
+    task: &crate::task::Task,
+    array_ptr: usize,
     max_strings: usize,
-    max_string_len: usize
+    max_string_len: usize,
 ) -> Result<Vec<String>, StringConversionError> {
     if array_ptr == 0 {
         return Ok(Vec::new());
     }
-    
-    let ptr_array = task.vm_manager.translate_vaddr(array_ptr)
+
+    let ptr_array = task
+        .vm_manager
+        .translate_vaddr(array_ptr)
         .ok_or(StringConversionError::TranslationError)? as *const usize;
-    
+
     let mut strings = Vec::new();
     let mut i = 0;
-    
+
     unsafe {
         loop {
             let str_ptr = *ptr_array.add(i);
             if str_ptr == 0 {
                 break; // Null pointer terminates the array
             }
-            
+
             let string = parse_c_string_from_userspace(task, str_ptr, max_string_len)?;
             strings.push(string);
             i += 1;
-            
+
             if i > max_strings {
                 return Err(StringConversionError::TooManyStrings);
             }
         }
     }
-    
+
     Ok(strings)
 }
 
@@ -125,7 +132,7 @@ mod tests {
     fn test_parse_c_string_from_userspace_null_pointer() {
         // Create a minimal task for testing
         let task = crate::task::new_user_task("test".into(), 1);
-        
+
         // Test null pointer
         let result = parse_c_string_from_userspace(&task, 0, 100);
         assert_eq!(result, Err(StringConversionError::NullPointer));
@@ -135,7 +142,7 @@ mod tests {
     fn test_parse_string_array_from_userspace_null_pointer() {
         // Create a minimal task for testing
         let task = crate::task::new_user_task("test".into(), 1);
-        
+
         // Test null pointer array
         let result = parse_string_array_from_userspace(&task, 0, 10, 100);
         assert!(result.is_ok());

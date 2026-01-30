@@ -18,8 +18,11 @@ Executing commands in the Docker container at the root of the repository:
 - Build: `cargo make build`
 
 #### Testing
-Use `cargo make test` to run all tests at the root of the repository.
-You cannot run a specific test directly; instead, you can run the entire test suite.
+Use the root workspace tasks to run the full test suite:
+- `cargo make test-riscv64`
+- `cargo make test-aarch64`
+
+These tasks run the full kernel test suite for each architecture.
 Ensure all tests pass before committing changes to maintain code integrity.
 
 ## Key guidelines

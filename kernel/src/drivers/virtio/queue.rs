@@ -1,11 +1,15 @@
 //! Virtio Queue module.
-//! 
+//!
 //! This module provides the implementation of the Virtio Queue.
 //! It includes the data structures and methods to manage the Virtio Queue.
-//! 
+//!
 
-use core::{alloc::Layout, mem::{self, swap}, sync::atomic::compiler_fence};
 use alloc::{alloc::alloc_zeroed, vec::Vec};
+use core::{
+    alloc::Layout,
+    mem::{self},
+    sync::atomic::{compiler_fence, fence},
+};
 
 // struct RawVirtQueue {
 //     pub desc: [Descriptor; 0], /* Flexible array member */
@@ -15,12 +19,12 @@ use alloc::{alloc::alloc_zeroed, vec::Vec};
 // }
 
 /// VirtQueue structure
-/// 
+///
 /// This structure represents the wrapper of the virtqueue.
 /// It contains the descriptor table, available ring, and used ring.
 ///
 /// # Fields
-/// 
+///
 /// * `index`: The ID of the virtqueue.
 /// * `desc`: A mutable slice of descriptors.
 /// * `avail`: The available ring.
@@ -47,7 +51,8 @@ impl<'a> VirtQueue<'a> {
         /* Calculate the size of each ring */
         let desc_size = queue_size * mem::size_of::<Descriptor>();
         let avail_size = mem::size_of::<RawAvailableRing>() + queue_size * mem::size_of::<u16>();
-        let used_size = mem::size_of::<RawUsedRing>() + queue_size * mem::size_of::<RawUsedRingEntry>();
+        let used_size =
+            mem::size_of::<RawUsedRing>() + queue_size * mem::size_of::<RawUsedRingEntry>();
 
         /* Floor the sum of desc_size, avail_size to the nearest multiple of 4 */
         let align_size = (desc_size + avail_size + 3) & !3;
@@ -78,7 +83,11 @@ impl<'a> VirtQueue<'a> {
 
         /* Create the used ring */
         let used_ptr = unsafe {
-            (avail_ptr as *mut u8).add(mem::size_of::<RawAvailableRing>() + queue_size * mem::size_of::<u16>() + padding_size) as *mut RawUsedRing
+            (avail_ptr as *mut u8).add(
+                mem::size_of::<RawAvailableRing>()
+                    + queue_size * mem::size_of::<u16>()
+                    + padding_size,
+            ) as *mut RawUsedRing
         };
         let used = unsafe { UsedRing::new(queue_size, used_ptr) };
 
@@ -88,14 +97,22 @@ impl<'a> VirtQueue<'a> {
             free_descriptors.push(i);
         }
         let last_used_idx = 0;
-        Self { desc, avail, used, free_descriptors, last_used_idx, ptr, layout }
+        Self {
+            desc,
+            avail,
+            used,
+            free_descriptors,
+            last_used_idx,
+            ptr,
+            layout,
+        }
     }
 
     /// Initialize the virtqueue
-    /// 
+    ///
     /// This function initializes the descriptor table, available ring, and used ring.
     /// It sets the next pointer of each descriptor to point to the next descriptor in the table.
-    /// 
+    ///
     pub fn init(&mut self) {
         // Initialize the descriptor table
         for i in 0..self.desc.len() {
@@ -114,29 +131,31 @@ impl<'a> VirtQueue<'a> {
     }
 
     /// Get the raw pointer to the virtqueue
-    /// 
+    ///
     /// This function returns a raw pointer to the start of the virtqueue memory.
     /// It can be used to access the memory directly.
-    /// 
+    ///
     /// # Returns
-    /// 
+    ///
     /// *const u8: A raw pointer to the start of the virtqueue memory.
     pub fn get_raw_ptr(&self) -> *const u8 {
         self.desc.as_ptr() as *const u8
     }
 
     /// Get the size of the raw virtqueue
-    /// 
+    ///
     /// This function returns the size of the virtqueue in bytes.
     /// It is calculated as the sum of the sizes of the descriptor table, available ring, and used ring.
     ///
     /// # Returns
-    /// 
+    ///
     /// usize: The size of the virtqueue in bytes.
     pub fn get_raw_size(&self) -> usize {
         let desc_size = self.desc.len() * mem::size_of::<Descriptor>();
-        let avail_size = mem::size_of::<RawAvailableRing>() + self.desc.len() * mem::size_of::<u16>();
-        let used_size = mem::size_of::<RawUsedRing>() + self.desc.len() * mem::size_of::<RawUsedRingEntry>();
+        let avail_size =
+            mem::size_of::<RawAvailableRing>() + self.desc.len() * mem::size_of::<u16>();
+        let used_size =
+            mem::size_of::<RawUsedRing>() + self.desc.len() * mem::size_of::<RawUsedRingEntry>();
         let align_size = (desc_size + avail_size + 3) & !3;
         let padding_size = align_size - (desc_size + avail_size);
         desc_size + avail_size + used_size + padding_size
@@ -149,11 +168,11 @@ impl<'a> VirtQueue<'a> {
     /// Allocate a descriptor
     ///
     /// This function allocates a descriptor from the free list.
-    /// 
+    ///
     /// # Returns
-    /// 
+    ///
     /// Option<usize>: The index of the allocated descriptor, or None if no descriptors are available.
-    /// 
+    ///
     pub fn alloc_desc(&mut self) -> Option<usize> {
         let desc = self.free_descriptors.pop();
         if let Some(desc_idx) = desc {
@@ -168,13 +187,13 @@ impl<'a> VirtQueue<'a> {
     }
 
     /// Free a descriptor
-    /// 
+    ///
     /// This function frees a descriptor and adds it back to the free list.
-    /// 
+    ///
     /// # Arguments
-    /// 
+    ///
     /// * `desc_idx` - The index of the descriptor to free.
-    /// 
+    ///
     pub fn free_desc(&mut self, desc_idx: usize) {
         if desc_idx < self.desc.len() {
             self.desc[desc_idx].next = 0;
@@ -185,17 +204,17 @@ impl<'a> VirtQueue<'a> {
     }
 
     /// Allocate a chain of descriptors
-    /// 
+    ///
     /// This function allocates a chain of descriptors of the specified length.
-    /// 
+    ///
     /// # Arguments
-    /// 
+    ///
     /// * `length` - The length of the chain to allocate.
-    /// 
+    ///
     /// # Returns
-    /// 
+    ///
     /// Option<usize>: The index of the first descriptor in the chain, or None if no descriptors are available.
-    /// 
+    ///
     pub fn alloc_desc_chain(&mut self, length: usize) -> Option<usize> {
         let desc_idx = self.alloc_desc();
         if desc_idx.is_none() {
@@ -221,13 +240,13 @@ impl<'a> VirtQueue<'a> {
     }
 
     /// Free a chain of descriptors
-    /// 
+    ///
     /// This function frees a chain of descriptors starting from the given index.
-    /// 
+    ///
     /// # Arguments
-    /// 
+    ///
     /// * `desc_idx` - The index of the first descriptor in the chain.
-    /// 
+    ///
     pub fn free_desc_chain(&mut self, desc_idx: usize) {
         let mut idx = desc_idx;
         loop {
@@ -249,65 +268,95 @@ impl<'a> VirtQueue<'a> {
     }
 
     /// Check if the virtqueue is busy
-    /// 
+    ///
     /// This function checks if the virtqueue is busy by comparing the last used index with the current index.
-    /// 
+    ///
     /// # Returns
-    /// 
+    ///
     /// bool: True if the virtqueue is busy, false otherwise.
     pub fn is_busy(&self) -> bool {
+        // A memory fence is needed to ensure that we see the latest value of `used.idx`
+        // written by the device.
+        core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
         // Volatile read to ensure we get the latest value
         let used_idx = unsafe { core::ptr::read_volatile(self.used.idx) };
         self.last_used_idx == used_idx
     }
 
     /// Push a descriptor index to the available ring
-    /// 
+    ///
     /// This function pushes a descriptor index to the available ring.
-    /// 
+    ///
     /// # Arguments
-    /// 
-    /// * `desc_idx` - The index of the descriptor to push. 
+    ///
+    /// * `desc_idx` - The index of the descriptor to push.
     /// If you want to push a chain of descriptors, you should pass the first descriptor index.
-    /// 
+    ///
     /// # Returns
-    /// 
+    ///
     /// Result<(), &'static str>: Ok if the push was successful, or an error message if it failed.
     pub fn push(&mut self, desc_idx: usize) -> Result<(), &'static str> {
         if desc_idx >= self.desc.len() {
             return Err("Invalid descriptor index");
         }
 
-        let ring_ptr = &mut self.avail.ring[(*self.avail.idx as usize) % self.avail.size] as *mut u16;
+        // Ensure all descriptor writes are visible before publishing the descriptor index.
+        // Using the architecture-provided I/O barrier is conservative but safe for virtio.
+        crate::arch::io_mb();
+
+        let ring_ptr =
+            &mut self.avail.ring[(*self.avail.idx as usize) % self.avail.size] as *mut u16;
+
         unsafe {
             core::ptr::write_volatile(ring_ptr, desc_idx as u16);
         }
-        *self.avail.idx = (*self.avail.idx).wrapping_add(1);
+
+        // Ensure the ring entry is visible before updating idx.
+        crate::arch::io_mb();
+
+        // *self.avail.idx = (*self.avail.idx).wrapping_add(1);
+
+        let new_idx = self.avail.idx.wrapping_add(1);
+        unsafe {
+            core::ptr::write_volatile(self.avail.idx, new_idx);
+        }
+
+        // Ensure idx is visible before any subsequent device notification.
+        crate::arch::io_mb();
+
         Ok(())
     }
 
     /// Pop a buffer from the used ring
-    /// 
+    ///
     /// This function retrieves a buffer from the used ring when the device has finished processing it.
     /// The caller is responsible for freeing the descriptor when it's done with the buffer.
-    /// 
+    ///
     /// # Returns
-    /// 
+    ///
     /// Option<usize>: The index of the descriptor that was used, or None if no descriptors are available.
     ///
     pub fn pop(&mut self) -> Option<usize> {
+        // A memory fence is needed to ensure that we see the latest value of `used.idx`
+        // written by the device.
+        core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
+
+        let used_idx = unsafe { core::ptr::read_volatile(self.used.idx) };
+
         // Check if there are any used buffers available
-        if self.last_used_idx == *self.used.idx {
+        if self.last_used_idx == used_idx {
             return None;
         }
-        
+
         // Calculate the index in the used ring
-        let used_idx = self.last_used_idx as usize % self.desc.len();
-        
+        let used_ring_idx = self.last_used_idx as usize % self.desc.len();
+
         // Retrieve the descriptor index from the used ring
-        let desc_idx = self.used.ring[used_idx].id as usize;
+        let used_entry_ptr = self.used.ring.as_ptr().wrapping_add(used_ring_idx);
+        let used_entry = unsafe { core::ptr::read_volatile(used_entry_ptr) };
+        let desc_idx = used_entry.id as usize;
+
         // Update the last used index
-        // self.last_used_idx = (self.last_used_idx + 1) % self.used.ring.len();
         self.last_used_idx = self.last_used_idx.wrapping_add(1);
 
         Some(desc_idx)
@@ -336,7 +385,7 @@ pub struct Descriptor {
 }
 
 /// Descriptor flags
-/// 
+///
 /// This enum represents the flags that can be set for a descriptor.
 /// It includes flags for indicating the next descriptor, write operation, and indirect descriptor.
 #[derive(Clone, Copy)]
@@ -348,15 +397,15 @@ pub enum DescriptorFlag {
 
 impl DescriptorFlag {
     /// Check if the flag is set
-    /// 
+    ///
     /// This method checks if the specified flag is set in the given flags.
-    /// 
+    ///
     /// # Arguments
-    /// 
+    ///
     /// * `flags` - The flags to check.
-    /// 
+    ///
     /// # Returns
-    /// 
+    ///
     /// Returns true if the flag is set, false otherwise.
     ///
     pub fn is_set(&self, flags: u16) -> bool {
@@ -364,57 +413,57 @@ impl DescriptorFlag {
     }
 
     /// Set the flag
-    /// 
+    ///
     /// This method sets the specified flag in the given flags.
-    /// 
+    ///
     /// # Arguments
-    /// 
+    ///
     /// * `flags` - A mutable reference to the flags to modify.
-    /// 
+    ///
     pub fn set(&self, flags: &mut u16) {
         (*flags) |= *self as u16;
     }
 
     /// Clear the flag
-    /// 
+    ///
     /// This method clears the specified flag in the given flags.
-    /// 
+    ///
     /// # Arguments
-    /// 
+    ///
     /// * `flags` - A mutable reference to the flags to modify.
-    /// 
+    ///
     pub fn clear(&self, flags: &mut u16) {
         (*flags) &= !(*self as u16);
     }
 
     /// Toggle the flag
-    /// 
+    ///
     /// This method toggles the specified flag in the given flags.
-    /// 
+    ///
     /// # Arguments
-    /// 
+    ///
     /// * `flags` - A mutable reference to the flags to modify.
-    /// 
+    ///
     pub fn toggle(&self, flags: &mut u16) {
         (*flags) ^= *self as u16;
     }
 }
 
 /// Raw available ring structure
-/// 
+///
 /// This structure represents the raw available ring.
-/// It contains the flags, index, ring buffer, and used event. 
+/// It contains the flags, index, ring buffer, and used event.
 /// This structure is located in the physical memory directly.
 #[repr(C, align(2))]
 pub struct RawAvailableRing {
     flags: u16,
     idx: u16,
-    ring: [u16; 0], /* Flexible array member */
+    ring: [u16; 0],  /* Flexible array member */
     used_event: u16, /* Locate after ring */
 }
 
 /// Available ring structure
-/// 
+///
 /// This structure is wrapped around the `RawAvailableRing` structure.
 /// It provides a safe interface to access the available ring entries.
 #[repr(C)]
@@ -428,21 +477,21 @@ pub struct AvailableRing<'a> {
 
 impl<'a> AvailableRing<'a> {
     /// Create a new `AvailableRing` instance
-    /// 
+    ///
     /// This function creates a new `AvailableRing` instance from a raw pointer to a `RawAvailableRing`.
-    /// 
+    ///
     /// # Safety
-    /// 
+    ///
     /// This function is unsafe because it dereferences raw pointers and assumes that the memory layout is correct.
     /// The caller must ensure that the pointer is valid and points to a properly initialized `RawAvailableRing`.
     ///
     /// # Arguments
-    /// 
+    ///
     /// * `size` - The size of the ring.
     /// * `ptr` - A raw pointer to a `RawAvailableRing`.
-    /// 
+    ///
     /// # Returns
-    /// 
+    ///
     /// `AvailableRing` - A new `AvailableRing` instance.
     pub unsafe fn new(size: usize, ptr: *mut RawAvailableRing) -> Self {
         let flags = unsafe { &mut (*ptr).flags };
@@ -461,7 +510,7 @@ impl<'a> AvailableRing<'a> {
 }
 
 /// Raw used ring structure
-/// 
+///
 /// This structure represents the raw used ring.
 /// It contains the flags, index, ring buffer, and available event.
 /// This structure is located in the physical memory directly.
@@ -474,12 +523,12 @@ pub struct RawUsedRing {
 }
 
 /// Raw used ring entry structure
-/// 
+///
 /// This structure represents a single entry in the used ring.
 /// It contains the ID and length of the used buffer.
-/// 
+///
 /// This structure is located in the physical memory directly.
-#[derive(Clone)]
+#[derive(Clone, Copy)]
 #[repr(C)]
 pub struct RawUsedRingEntry {
     pub id: u32,
@@ -488,15 +537,12 @@ pub struct RawUsedRingEntry {
 
 impl Default for RawUsedRingEntry {
     fn default() -> Self {
-        Self {
-            id: 0,
-            len: 0,
-        }
+        Self { id: 0, len: 0 }
     }
 }
 
 /// Used ring structure
-/// 
+///
 /// This structure is wrapped around the `RawUsedRing` structure.
 /// It provides a safe interface to access the used ring entries.
 pub struct UsedRing<'a> {
@@ -507,23 +553,22 @@ pub struct UsedRing<'a> {
 }
 
 impl<'a> UsedRing<'a> {
-
     /// Create a new `UsedRing` instance
-    /// 
+    ///
     /// This function creates a new `UsedRing` instance from a raw pointer to a `RawUsedRing`.
-    /// 
+    ///
     /// # Safety
-    /// 
+    ///
     /// This function is unsafe because it dereferences raw pointers and assumes that the memory layout is correct.
     /// The caller must ensure that the pointer is valid and points to a properly initialized `RawUsedRing`.
-    /// 
+    ///
     /// # Arguments
-    /// 
+    ///
     /// * `size` - The size of the ring.
     /// * `ptr` - A raw pointer to a `RawUsedRing`.
-    /// 
+    ///
     /// # Returns
-    /// 
+    ///
     /// `UsedRing` - A new `UsedRing` instance.
     pub unsafe fn new(size: usize, ptr: *mut RawUsedRing) -> Self {
         let flags = unsafe { &mut (*ptr).flags };
@@ -553,16 +598,16 @@ mod tests {
             ring: [RawUsedRingEntry { id: 0, len: 0 }; 0],
             avail_event: 0,
         };
-    
+
         let used_ring = unsafe { UsedRing::new(0, &mut raw) };
-    
+
         // Verify initial values
         assert_eq!(raw.flags, 0);
         assert_eq!(*used_ring.flags, 0);
-    
+
         // Modify flags
         *used_ring.flags = 42;
-    
+
         // Verify the modification is reflected
         assert_eq!(raw.flags, 42);
         assert_eq!(*used_ring.flags, 42);
@@ -573,7 +618,7 @@ mod tests {
         let queue_size = 2;
         let mut virtqueue = VirtQueue::new(queue_size);
         virtqueue.init();
-    
+
         // 1. Write values to UsedRing via VirtQueue
         *virtqueue.used.flags = 42;
         *virtqueue.used.idx = 1;
@@ -581,20 +626,20 @@ mod tests {
             virtqueue.used.ring[i].id = i as u32;
             virtqueue.used.ring[i].len = 456;
         }
-    
+
         // 2. Get a pointer to RawUsedRing
         let raw_used_ptr = virtqueue.used.flags as *mut u16 as *mut RawUsedRing;
-    
+
         // 3. Directly access RawUsedRing and verify values
         let raw_used = unsafe { &*raw_used_ptr };
         assert_eq!(raw_used.flags, 42, "flags mismatch");
         assert_eq!(raw_used.idx, 1, "idx mismatch");
-    
+
         // 4. Verify the contents of the ring
         unsafe {
             let used_ring = &mut *virtqueue.used.ring.as_mut_ptr();
             let ring = core::slice::from_raw_parts_mut(used_ring, queue_size);
-            
+
             for i in 0..queue_size {
                 assert_eq!(ring[i].id, i as u32, "ring[{}].id mismatch", i);
                 assert_eq!(ring[i].len, 456, "ring[{}].len mismatch", i);
@@ -627,11 +672,10 @@ mod tests {
         unsafe {
             let avail_ring = &mut *virtqueue.avail.ring.as_mut_ptr();
             let ring = core::slice::from_raw_parts_mut(avail_ring, queue_size);
-            
+
             for i in 0..queue_size {
                 assert_eq!(ring[i], i as u16, "ring[{}] mismatch", i);
             }
-
         }
     }
 
@@ -704,24 +748,24 @@ mod tests {
         let queue_size = 2;
         let mut virtqueue = VirtQueue::new(queue_size);
         virtqueue.init();
-        
+
         // 1. Allocate and configure a descriptor
         let desc_idx = virtqueue.alloc_desc().unwrap();
         virtqueue.desc[desc_idx].addr = 0x1000;
         virtqueue.desc[desc_idx].len = 100;
-        
+
         // 2. Push to the queue
         assert!(virtqueue.push(desc_idx).is_ok());
-        
+
         // 3. Simulate device processing the buffer
         *virtqueue.used.idx = 1;
         virtqueue.used.ring[0].id = desc_idx as u32;
-        
+
         // 4. Pop the buffer
         let popped = virtqueue.pop();
         assert!(popped.is_some());
         assert_eq!(popped.unwrap(), desc_idx);
-        
+
         // 5. Verify no more buffers are available
         assert!(virtqueue.pop().is_none());
     }
@@ -731,44 +775,47 @@ mod tests {
         let queue_size = 4;
         let mut virtqueue = VirtQueue::new(queue_size);
         virtqueue.init();
-        
+
         // 1. Allocate a chain of descriptors
         let chain_len = 3;
         let desc_idx = virtqueue.alloc_desc_chain(chain_len).unwrap();
-        
+
         // 2. Configure the descriptors in the chain
         let mut current_idx = desc_idx;
         for i in 0..chain_len {
             virtqueue.desc[current_idx].addr = 0x1000 + (i * 0x100) as u64;
             virtqueue.desc[current_idx].len = 100;
-            
+
             // Set appropriate flags (except for the last one)
             if i < chain_len - 1 {
                 DescriptorFlag::Next.set(&mut virtqueue.desc[current_idx].flags);
                 current_idx = virtqueue.desc[current_idx].next as usize;
             }
         }
-        
+
         // 3. Push the chain to the queue
         assert!(virtqueue.push(desc_idx).is_ok());
-        
+
         // 4. Simulate device processing the chain
         *virtqueue.used.idx = 1;
         virtqueue.used.ring[0].id = desc_idx as u32;
         virtqueue.used.ring[0].len = 300; // Total bytes processed (100 per descriptor)
-        
+
         // 5. Pop the buffer
         let popped = virtqueue.pop();
         assert!(popped.is_some());
         assert_eq!(popped.unwrap(), desc_idx);
-        
+
         // 6. Verify the chain is intact
         let mut current_idx = desc_idx;
         for i in 0..chain_len {
             // Check each descriptor in the chain
-            assert_eq!(virtqueue.desc[current_idx].addr, 0x1000 + (i * 0x100) as u64);
+            assert_eq!(
+                virtqueue.desc[current_idx].addr,
+                0x1000 + (i * 0x100) as u64
+            );
             assert_eq!(virtqueue.desc[current_idx].len, 100);
-            
+
             if i < chain_len - 1 {
                 assert!(DescriptorFlag::Next.is_set(virtqueue.desc[current_idx].flags));
                 current_idx = virtqueue.desc[current_idx].next as usize;
@@ -777,13 +824,12 @@ mod tests {
                 assert!(!DescriptorFlag::Next.is_set(virtqueue.desc[current_idx].flags));
             }
         }
-        
+
         // 7. Free the chain after processing
         virtqueue.free_desc_chain(desc_idx);
         assert_eq!(virtqueue.free_descriptors.len(), queue_size);
-        
+
         // 8. Verify no more buffers are available
         assert!(virtqueue.pop().is_none());
     }
 }
-

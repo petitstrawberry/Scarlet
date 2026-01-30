@@ -4,70 +4,201 @@ CARGO_MAKE_EXTEND_WORKSPACE_MAKEFILE = true
 CARGO_MAKE_WORKSPACE_INCLUDE_MEMBERS = ["kernel", "user/lib/std", "user/bin"]
 
 [config]
-default_task = "build"
+default_task = "build-riscv64"
 skip_core_tasks = true
 
-[tasks.build]
-description = "Build all components (default: debug)"
-dependencies = ["build-debug"]
+[tasks.fmt]
+description = "Format all code"
+dependencies = ["fmt-kernel", "fmt-userlib", "fmt-userbin"]
 
-[tasks.build-debug]
-description = "Build all components in debug mode"
-dependencies = ["build-kernel-debug", "build-userlib-debug", "build-userbin-debug", "build-initramfs-debug", "build-rootfs"]
+[tasks.fmt-check]
+description = "Check formatting (no changes)"
+dependencies = ["fmt-kernel-check", "fmt-userlib-check", "fmt-userbin-check"]
 
-[tasks.build-release]
-description = "Build all components in release mode"
-dependencies = ["build-kernel-release", "build-userlib-release", "build-userbin-release", "build-initramfs-release", "build-rootfs"]
-
-[tasks.build-kernel]
-description = "Build the kernel (default: debug)"
-dependencies = ["build-kernel-debug"]
-
-[tasks.build-kernel-debug]
-description = "Build the kernel in debug mode"
+[tasks.fmt-kernel-check]
+description = "Check kernel formatting"
 cwd = "kernel"
 command = "cargo"
-args = ["build"]
+args = ["fmt", "--", "--check"]
 
-[tasks.build-kernel-release]
-description = "Build the kernel in release mode"
+[tasks.fmt-userlib-check]
+description = "Check user library formatting by calling sub Makefile.toml"
+cwd = "user/lib"
+command = "cargo"
+args = ["make", "fmt-check"]
+
+[tasks.fmt-userbin-check]
+description = "Check user program formatting"
+cwd = "user/bin"
+command = "cargo"
+args = ["make", "fmt-check"]
+
+[tasks.clippy-riscv64]
+description = "Run clippy for all components (RISC-V)"
+dependencies = ["clippy-kernel", "clippy-userlib", "clippy-userbin"]
+
+[tasks.clippy-aarch64]
+description = "Run clippy for all components (AArch64)"
+dependencies = ["clippy-kernel", "clippy-userlib", "clippy-userbin"]
+
+[tasks.clippy-kernel]
+description = "Run clippy for kernel"
 cwd = "kernel"
 command = "cargo"
-args = ["build", "--release"]
+args = ["clippy", "--", "-D", "warnings"]
 
-[tasks.build-userlib]
-description = "Build user libraries (default: debug)"
-dependencies = ["build-userlib-debug"]
+[tasks.clippy-userlib]
+description = "Run clippy for user libraries by calling sub Makefile.toml"
+cwd = "user/lib"
+command = "cargo"
+args = ["make", "clippy"]
 
-[tasks.build-userlib-debug]
-description = "Build user libraries in debug mode"
+[tasks.clippy-userbin]
+description = "Run clippy for user programs by calling sub Makefile.toml"
+cwd = "user/bin"
+command = "cargo"
+args = ["make", "clippy"]
+[tasks.fmt-kernel]
+description = "Format kernel code"
+cwd = "kernel"
+command = "cargo"
+args = ["fmt"]
+
+[tasks.fmt-userlib]
+description = "Format user library code"
+cwd = "user/lib"
+command = "cargo"
+args = ["make", "fmt"]
+
+[tasks.fmt-userbin]
+description = "Format user program code"
+cwd = "user/bin"
+command = "cargo"
+args = ["make", "fmt"]
+
+[tasks.build-riscv64]
+description = "Build all components (RISC-V, debug)"
+dependencies = ["build-debug-riscv64"]
+
+[tasks.build-aarch64]
+description = "Build all components (AArch64, debug)"
+dependencies = ["build-debug-aarch64"]
+
+[tasks.build-debug-riscv64]
+description = "Build all components in debug mode (RISC-V)"
+dependencies = ["build-kernel-debug-riscv64", "build-userlib-debug-riscv64", "build-userbin-debug-riscv64", "build-initramfs-debug-riscv64", "build-rootfs-riscv64"]
+
+[tasks.build-release-riscv64]
+description = "Build all components in release mode (RISC-V)"
+dependencies = ["build-kernel-release-riscv64", "build-userlib-release-riscv64", "build-userbin-release-riscv64", "build-initramfs-release-riscv64", "build-rootfs-riscv64"]
+
+[tasks.build-debug-aarch64]
+description = "Build all components in debug mode (AArch64)"
+dependencies = ["build-kernel-debug-aarch64", "build-userlib-debug-aarch64", "build-userbin-debug-aarch64", "build-initramfs-debug-aarch64", "build-rootfs-aarch64"]
+
+[tasks.build-release-aarch64]
+description = "Build all components in release mode (AArch64)"
+dependencies = ["build-kernel-release-aarch64", "build-userlib-release-aarch64", "build-userbin-release-aarch64", "build-initramfs-release-aarch64", "build-rootfs-aarch64"]
+
+[tasks.build-kernel-riscv64]
+description = "Build the kernel (RISC-V, debug)"
+dependencies = ["build-kernel-debug-riscv64"]
+
+[tasks.build-kernel-aarch64]
+description = "Build the kernel (AArch64, debug)"
+dependencies = ["build-kernel-debug-aarch64"]
+
+[tasks.build-kernel-debug-riscv64]
+description = "Build the kernel in debug mode (RISC-V)"
+cwd = "kernel"
+command = "cargo"
+args = ["build", "--target", "targets/riscv64gc-unknown-none-elf.json"]
+
+[tasks.build-kernel-debug-aarch64]
+description = "Build the kernel in debug mode (AArch64)"
+cwd = "kernel"
+command = "cargo"
+args = ["build", "--target", "targets/aarch64-unknown-none-elf.json"]
+
+[tasks.build-kernel-release-riscv64]
+description = "Build the kernel in release mode (RISC-V)"
+cwd = "kernel"
+command = "cargo"
+args = ["build", "--release", "--target", "targets/riscv64gc-unknown-none-elf.json"]
+
+[tasks.build-kernel-release-aarch64]
+description = "Build the kernel in release mode (AArch64)"
+cwd = "kernel"
+command = "cargo"
+args = ["build", "--release", "--target", "targets/aarch64-unknown-none-elf.json"]
+
+[tasks.build-userlib-debug-riscv64]
+description = "Build user libraries for RISC-V in debug mode"
 cwd = "user/lib"
 command = "cargo"
 args = ["make", "build-userlib-debug"]
 
-[tasks.build-userlib-release]
-description = "Build user libraries in release mode"
+[tasks.build-userlib-release-riscv64]
+description = "Build user libraries for RISC-V in release mode"
 cwd = "user/lib"
 command = "cargo"
 args = ["make", "build-userlib-release"]
 
-[tasks.build-userbin]
-description = "Build user programs (default: debug)"
-dependencies = ["build-userbin-debug"]
+[tasks.build-userlib-debug-aarch64]
+description = "Build user libraries for AArch64 in debug mode"
+cwd = "user/lib"
+command = "cargo"
+args = ["make", "build-userlib-debug-aarch64"]
 
-[tasks.build-userbin-debug]
-description = "Build user programs in debug mode"
+[tasks.build-userlib-release-aarch64]
+description = "Build user libraries for AArch64 in release mode"
+cwd = "user/lib"
+command = "cargo"
+args = ["make", "build-userlib-release-aarch64"]
+
+[tasks.build-userlib-riscv64]
+description = "Build user libraries (RISC-V, debug)"
+dependencies = ["build-userlib-debug-riscv64"]
+
+[tasks.build-userlib-aarch64]
+description = "Build user libraries (AArch64, debug)"
+dependencies = ["build-userlib-debug-aarch64"]
+
+[tasks.build-userbin-debug-riscv64]
+description = "Build user programs for RISC-V in debug mode"
 cwd = "user/bin"
 command = "cargo"
 args = ["make", "build"]
-dependencies = ["build-userlib-debug"]
+dependencies = ["build-userlib-debug-riscv64"]
 
-[tasks.build-userbin-release]
-description = "Build user programs in release mode"
+[tasks.build-userbin-debug-aarch64]
+description = "Build user programs for AArch64 in debug mode"
+cwd = "user/bin"
+command = "cargo"
+args = ["make", "build-aarch64"]
+dependencies = ["build-userlib-debug-aarch64"]
+
+[tasks.build-userbin-release-riscv64]
+description = "Build user programs for RISC-V in release mode"
 cwd = "user/bin"
 command = "cargo"
 args = ["make", "build-release"]
-dependencies = ["build-userlib-release"]
+dependencies = ["build-userlib-release-riscv64"]
+
+[tasks.build-userbin-release-aarch64]
+description = "Build user programs for AArch64 in release mode"
+cwd = "user/bin"
+command = "cargo"
+args = ["make", "build-release-aarch64"]
+dependencies = ["build-userlib-release-aarch64"]
+
+[tasks.build-userbin-riscv64]
+description = "Build user programs (RISC-V, debug)"
+dependencies = ["build-userbin-debug-riscv64"]
+
+[tasks.build-userbin-aarch64]
+description = "Build user programs (AArch64, debug)"
+dependencies = ["build-userbin-debug-aarch64"]
 
 [tasks.clean]
 description = "Clean all build artifacts"
@@ -91,49 +222,94 @@ cwd = "user/bin"
 command = "cargo"
 args = ["clean"]
 
-[tasks.test]
-description = "Run tests"
-dependencies = ["test-kernel"]
+[tasks.test-riscv64]
+description = "Run tests (RISC-V)"
+dependencies = ["test-kernel-riscv64"]
 
-[tasks.test-kernel]
-description = "Run kernel tests"
+[tasks.test-aarch64]
+description = "Run tests (AArch64)"
+dependencies = ["test-kernel-aarch64"]
+
+[tasks.test-kernel-riscv64]
+description = "Run kernel tests (RISC-V)"
 cwd = "kernel"
 env = { "CARGO_TARGET_RISCV64GC_UNKNOWN_NONE_ELF_RUNNER" = "tools/test.sh" }
 command = "cargo"
-args = ["test"]
-dependencies = ["build-initramfs"]
+args = ["test", "--target", "targets/riscv64gc-unknown-none-elf.json"]
+dependencies = ["build-initramfs-debug-riscv64"]
 
-[tasks.run]
-description = "Run the kernel in release mode"
+[tasks.test-kernel-aarch64]
+description = "Run kernel tests (AArch64)"
+cwd = "kernel"
+env = { "CARGO_TARGET_AARCH64_UNKNOWN_NONE_ELF_RUNNER" = "tools/test_aarch64.sh" }
+command = "cargo"
+args = ["test", "--target", "targets/aarch64-unknown-none-elf.json"]
+dependencies = ["build-initramfs-debug-aarch64"]
+
+[tasks.run-riscv64]
+description = "Run the kernel in release mode (RISC-V)"
 cwd = "kernel"
 command = "cargo"
-args = ["run", "--release"]
-dependencies = ["build-release"]
+args = ["run", "--release", "--target", "targets/riscv64gc-unknown-none-elf.json"]
+dependencies = ["build-release-riscv64"]
 
-[tasks.run-debug]
-description = "Run the kernel in debug mode"
+[tasks.run-aarch64]
+description = "Run the kernel in release mode (AArch64)"
 cwd = "kernel"
 command = "cargo"
-args = ["run"]
-dependencies = ["build-debug"]
+args = ["run", "--release", "--target", "targets/aarch64-unknown-none-elf.json"]
+dependencies = ["build-release-aarch64"]
 
-[tasks.debug]
-description = "Run the kernel in debug mode"
+[tasks.run-debug-riscv64]
+description = "Run the kernel in debug mode (RISC-V)"
+cwd = "kernel"
+command = "cargo"
+args = ["run", "--target", "targets/riscv64gc-unknown-none-elf.json"]
+dependencies = ["build-debug-riscv64"]
+
+[tasks.run-debug-aarch64]
+description = "Run the kernel in debug mode (AArch64)"
+cwd = "kernel"
+command = "cargo"
+args = ["run", "--target", "targets/aarch64-unknown-none-elf.json"]
+dependencies = ["build-debug-aarch64"]
+
+[tasks.debug-riscv64]
+description = "Run the kernel in debug mode (RISC-V)"
 cwd = "kernel"
 command = "./tools/run.sh"
 args = ["--debug", "target/riscv64gc-unknown-none-elf/debug/kernel"]
-dependencies = ["build-debug"]
+dependencies = ["build-debug-riscv64"]
 
-[tasks.debug-test]
-description = "Run kernel tests in debug mode with gdb"
+[tasks.debug-aarch64]
+description = "Run the kernel in debug mode (AArch64)"
+cwd = "kernel"
+command = "./tools/run_aarch64.sh"
+args = ["--debug", "target/aarch64-unknown-none-elf/debug/kernel"]
+dependencies = ["build-debug-aarch64"]
+
+[tasks.debug-test-riscv64]
+description = "Run kernel tests in debug mode with gdb (RISC-V)"
 cwd = "kernel"
 env = { "CARGO_TARGET_RISCV64GC_UNKNOWN_NONE_ELF_RUNNER" = "tools/test.sh" }
 command = "cargo"
 args = ["test", "--", "--debug"]
-dependencies = ["build-initramfs-debug"]
+dependencies = ["build-initramfs-debug-riscv64"]
 
-[tasks.doc]
-description = "Generate documentation for all components"
+[tasks.debug-test-aarch64]
+description = "Run kernel tests in debug mode with gdb (AArch64)"
+cwd = "kernel"
+env = { "CARGO_TARGET_AARCH64_UNKNOWN_NONE_ELF_RUNNER" = "tools/test_aarch64.sh" }
+command = "cargo"
+args = ["test", "--target", "targets/aarch64-unknown-none-elf.json", "--", "--debug"]
+dependencies = ["build-initramfs-debug-aarch64"]
+
+[tasks.doc-riscv64]
+description = "Generate documentation for all components (RISC-V)"
+dependencies = ["doc-kernel", "doc-userlib"]
+
+[tasks.doc-aarch64]
+description = "Generate documentation for all components (AArch64)"
 dependencies = ["doc-kernel", "doc-userlib"]
 
 [tasks.doc-kernel]
@@ -148,26 +324,41 @@ cwd = "user/lib"
 command = "cargo"
 args = ["make", "doc"]
 
-[tasks.build-initramfs]
-description = "Create initramfs archive (default: debug)"
+[tasks.build-initramfs-debug-aarch64]
+description = "Create AArch64 initramfs archive (debug)"
 cwd = "mkfs"
 command = "sh"
-args = ["make_initramfs.sh"]
-dependencies = ["build-userbin-debug"]
+args = ["make_initramfs.sh", "aarch64"]
+dependencies = ["build-userbin-debug-aarch64"]
 
-[tasks.build-initramfs-release]
-description = "Create initramfs archive in release mode"
-cwd = "mkfs"
-command = "sh"
-args = ["make_initramfs.sh"]
-dependencies = ["build-userbin-release"]
+[tasks.build-initramfs-aarch64]
+description = "Create AArch64 initramfs archive (debug)"
+dependencies = ["build-initramfs-debug-aarch64"]
 
-[tasks.build-initramfs-debug]
-description = "Create initramfs archive in debug mode"
+[tasks.build-initramfs-debug-riscv64]
+description = "Create RISC-V initramfs archive (debug)"
 cwd = "mkfs"
 command = "sh"
-args = ["make_initramfs.sh"]
-dependencies = ["build-userbin-debug"]
+args = ["make_initramfs.sh", "riscv64"]
+dependencies = ["build-userbin-debug-riscv64"]
+
+[tasks.build-initramfs-riscv64]
+description = "Create RISC-V initramfs archive (debug)"
+dependencies = ["build-initramfs-debug-riscv64"]
+
+[tasks.build-initramfs-release-aarch64]
+description = "Create AArch64 initramfs archive (release)"
+cwd = "mkfs"
+command = "sh"
+args = ["make_initramfs.sh", "aarch64"]
+dependencies = ["build-userbin-release-aarch64"]
+
+[tasks.build-initramfs-release-riscv64]
+description = "Create RISC-V initramfs archive (release)"
+cwd = "mkfs"
+command = "sh"
+args = ["make_initramfs.sh", "riscv64"]
+dependencies = ["build-userbin-release-riscv64"]
 
 [tasks.clean-initramfs]
 description = "Clean initramfs archive"
@@ -175,8 +366,15 @@ cwd = "mkfs"
 command = "sh"
 args = ["clean_initramfs.sh"]
 
-[tasks.build-rootfs]
-description = "Create rootfs.img if it doesn't exist"
+[tasks.build-rootfs-riscv64]
+description = "Create rootfs.img if it doesn't exist (RISC-V)"
+cwd = "mkfs"
+command = "sh"
+args = ["make_rootfs.sh"]
+condition = { files_not_exist = ["dist/rootfs.img"] }
+
+[tasks.build-rootfs-aarch64]
+description = "Create rootfs.img if it doesn't exist (AArch64)"
 cwd = "mkfs"
 command = "sh"
 args = ["make_rootfs.sh"]

@@ -1,0 +1,24 @@
+[package]
+name = "scarlet-ui"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+scarlet_std = { path = "../std" }
+sws-client = { path = "../sws-client" }
+sws_protocol = { path = "../sws_protocol" }
+framebuffer = { path = "../framebuffer" }
+libm = { version = "0.2", default-features = false }
+scarlet-ui-macros = { path = "../scarlet-ui-macros" }
+bitflags = { version = "2.6", default-features = false }
+ab_glyph = { version = "0.2", default-features = false, features = ["libm"] }
+
+[dev-dependencies]
+# For additional testing
+proc-macro2 = { version = "1.0", default-features = false }
+quote = { version = "1.0", default-features = false }
+syn = { version = "2.0", default-features = false, features = ["derive"] }
+
+[lib]
+name = "scarlet_ui"
+path = "src/lib.rs"

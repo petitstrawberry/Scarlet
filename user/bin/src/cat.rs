@@ -3,15 +3,15 @@
 
 extern crate scarlet_std as std;
 
-use std::{println, print, format};
 use std::fs::File;
 use std::string::String;
 use std::vec::Vec;
+use std::{format, print, println};
 
 #[unsafe(no_mangle)]
 fn main() -> i32 {
     let args: Vec<String> = std::env::args().collect();
-    
+
     // If no arguments provided, read from stdin (not implemented yet)
     if args.len() <= 1 {
         println!("cat: missing file operand");
@@ -24,9 +24,9 @@ fn main() -> i32 {
     // Process each file argument
     for i in 1..args.len() {
         let filename = &args[i];
-        
+
         match cat_file(filename) {
-            Ok(_) => {},
+            Ok(_) => {}
             Err(err) => {
                 println!("cat: {}: {}", filename, err);
                 exit_code = 1;
@@ -52,7 +52,7 @@ fn cat_file(filename: &str) -> Result<(), String> {
                 if bytes_read == 0 {
                     break; // End of file
                 }
-                
+
                 // Convert bytes to string and print
                 // Handle potential UTF-8 conversion errors gracefully
                 let slice = &buffer[..bytes_read];
@@ -71,7 +71,7 @@ fn cat_file(filename: &str) -> Result<(), String> {
                         }
                     }
                 }
-            },
+            }
             Err(_) => return Err(format!("Read error")),
         }
     }

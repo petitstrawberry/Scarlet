@@ -5,7 +5,6 @@ extern crate scarlet_std as std;
 
 use std::{println, task::execve_abi};
 
-
 #[unsafe(no_mangle)]
 fn main() -> i32 {
     println!("xv6 container");
@@ -16,5 +15,5 @@ fn main() -> i32 {
         return -1;
     }
 
-    return 0;
+    0
 }

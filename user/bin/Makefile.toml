@@ -4,7 +4,23 @@ skip_core_tasks = true
 
 [env]
 OSABI_VALUE = "83"
-DIST_DIR = "dist"
+DIST_DIR = "dist/riscv64"
+TARGET_SPEC = "../targets/riscv64gc-unknown-scarlet-elf.json"
+
+[tasks.fmt]
+description = "Format all user program code"
+command = "cargo"
+args = ["fmt"]
+
+[tasks.fmt-check]
+description = "Check formatting for all user program code"
+command = "cargo"
+args = ["fmt", "--", "--check"]
+
+[tasks.clippy]
+description = "Run clippy for all user programs"
+command = "cargo"
+args = ["clippy", "--", "-D", "warnings"]
 
 [tasks.build]
 description = "Build all user programs with OSABI=83 (debug mode)"
@@ -20,13 +36,85 @@ dependencies = ["build-only-debug"]
 
 [tasks.build-only-debug]
 description = "Build user programs in debug mode without OSABI setting (internal)"
-command = "cargo"
-args = ["build", "--out-dir", "dist"]
+script = 'cargo build --target "${TARGET_SPEC}" --out-dir "${DIST_DIR}"'
 
 [tasks.build-only-release]
 description = "Build user programs in release mode without OSABI setting (internal)"
-command = "cargo"
-args = ["build", "--release", "--out-dir", "dist"]
+script = 'cargo build --release --target "${TARGET_SPEC}" --out-dir "${DIST_DIR}"'
+
+[tasks.build-aarch64]
+description = "Build all user programs for AArch64 with OSABI=83 (debug mode)"
+dependencies = ["build-only-debug-aarch64", "set-osabi-debug-aarch64"]
+
+[tasks.build-release-aarch64]
+description = "Build all user programs for AArch64 with OSABI=83 (release mode)"
+dependencies = ["build-only-release-aarch64", "set-osabi-release-aarch64"]
+
+[tasks.build-only-debug-aarch64]
+description = "Build user programs for AArch64 in debug mode without OSABI setting (internal)"
+env = { "DIST_DIR" = "dist/aarch64", "TARGET_SPEC" = "../targets/aarch64-unknown-scarlet-elf.json" }
+script = [
+    'rm -rf "${DIST_DIR}" && mkdir -p "${DIST_DIR}"',
+    'cargo build --target "${TARGET_SPEC}" --out-dir "${DIST_DIR}"'
+]
+
+[tasks.build-only-release-aarch64]
+description = "Build user programs for AArch64 in release mode without OSABI setting (internal)"
+env = { "DIST_DIR" = "dist/aarch64", "TARGET_SPEC" = "../targets/aarch64-unknown-scarlet-elf.json" }
+script = [
+    'rm -rf "${DIST_DIR}" && mkdir -p "${DIST_DIR}"',
+    'cargo build --release --target "${TARGET_SPEC}" --out-dir "${DIST_DIR}"'
+]
+
+[tasks.set-osabi-debug-aarch64]
+description = "Set OSABI to 83 for all user program binaries (AArch64 debug)"
+env = { "DIST_DIR" = "dist/aarch64" }
+dependencies = ["build-only-debug-aarch64"]
+script = '''
+echo "Setting OSABI to ${OSABI_VALUE} for user programs..."
+if [ ! -d "${DIST_DIR}" ]; then
+    echo "Error: ${DIST_DIR} directory not found"
+    exit 1
+fi
+
+for binary_path in "${DIST_DIR}"/*; do
+    if [ -f "${binary_path}" ] && [ -x "${binary_path}" ]; then
+        binary=$(basename "${binary_path}")
+        echo "Setting OSABI for ${binary}"
+        python3 ./set_osabi.py "${binary_path}" ${OSABI_VALUE}
+    fi
+done
+
+binary_count=$(find "${DIST_DIR}" -type f -executable | wc -l)
+if [ "$binary_count" -eq 0 ]; then
+    echo "Warning: No executable binaries found in ${DIST_DIR}"
+fi
+'''
+
+[tasks.set-osabi-release-aarch64]
+description = "Set OSABI to 83 for all user program binaries (AArch64 release)"
+env = { "DIST_DIR" = "dist/aarch64" }
+dependencies = ["build-only-release-aarch64"]
+script = '''
+echo "Setting OSABI to ${OSABI_VALUE} for user programs..."
+if [ ! -d "${DIST_DIR}" ]; then
+    echo "Error: ${DIST_DIR} directory not found"
+    exit 1
+fi
+
+for binary_path in "${DIST_DIR}"/*; do
+    if [ -f "${binary_path}" ] && [ -x "${binary_path}" ]; then
+        binary=$(basename "${binary_path}")
+        echo "Setting OSABI for ${binary}"
+        python3 ./set_osabi.py "${binary_path}" ${OSABI_VALUE}
+    fi
+done
+
+binary_count=$(find "${DIST_DIR}" -type f -executable | wc -l)
+if [ "$binary_count" -eq 0 ]; then
+    echo "Warning: No executable binaries found in ${DIST_DIR}"
+fi
+'''
 
 [tasks.set-osabi-debug]
 description = "Set OSABI to 83 for all user program binaries (debug mode)"

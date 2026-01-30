@@ -1,17 +1,28 @@
 use crate::{arch::Trapframe, ipc::UnidirectionalPipe, task::mytask};
 
-pub fn sys_pipe(abi: &mut crate::abi::xv6::riscv64::Xv6Riscv64Abi, trapframe: &mut Trapframe) -> usize {
+pub fn sys_pipe(
+    abi: &mut crate::abi::xv6::riscv64::Xv6Riscv64Abi,
+    trapframe: &mut Trapframe,
+) -> usize {
     let task = mytask().unwrap();
     trapframe.increment_pc_next(task);
 
-    let pipefd_ptr = task.vm_manager.translate_vaddr(trapframe.get_arg(0))
+    let pipefd_ptr = task
+        .vm_manager
+        .translate_vaddr(trapframe.get_arg(0))
         .expect("Invalid pipefd pointer");
     let pipefd = unsafe { &mut *(pipefd_ptr as *mut [u32; 2]) };
 
     let (read_end, write_end) = UnidirectionalPipe::create_pair(4096);
 
-    let read_handle = task.handle_table.insert(read_end).expect("Failed to insert read end");
-    let write_handle = task.handle_table.insert(write_end).expect("Failed to insert write end");
+    let read_handle = task
+        .handle_table
+        .insert(read_end)
+        .expect("Failed to insert read end");
+    let write_handle = task
+        .handle_table
+        .insert(write_end)
+        .expect("Failed to insert write end");
 
     // Allocate XV6 file descriptors and store them in the array
     let read_fd = match abi.allocate_fd(read_handle as u32) {

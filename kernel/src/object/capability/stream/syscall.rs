@@ -1,5 +1,5 @@
 //! System calls for StreamOps capability
-//! 
+//!
 //! This module implements system calls that operate on KernelObjects
 //! with StreamOps capability (read/write operations).
 
@@ -7,12 +7,12 @@ use crate::arch::Trapframe;
 use crate::task::mytask;
 
 /// System call for reading from a KernelObject with StreamOps capability
-/// 
+///
 /// # Arguments
 /// - handle: Handle to the KernelObject
 /// - buffer_ptr: Pointer to the buffer to read into
 /// - count: Number of bytes to read
-/// 
+///
 /// # Returns
 /// - On success: number of bytes read
 /// - On error: usize::MAX
@@ -21,7 +21,7 @@ pub fn sys_stream_read(trapframe: &mut Trapframe) -> usize {
         Some(task) => task,
         None => return usize::MAX,
     };
-    
+
     let handle = trapframe.get_arg(0) as u32;
     let buf_ptr = match task.vm_manager.translate_vaddr(trapframe.get_arg(1)) {
         Some(ptr) => ptr as *mut u8,
@@ -35,7 +35,7 @@ pub fn sys_stream_read(trapframe: &mut Trapframe) -> usize {
     // Get KernelObject from handle table
     let kernel_obj = match task.handle_table.get(handle) {
         Some(obj) => obj,
-        None => return usize::MAX, // Invalid handle
+        None => return usize::MAX,
     };
 
     // Check if object supports StreamOps
@@ -44,21 +44,25 @@ pub fn sys_stream_read(trapframe: &mut Trapframe) -> usize {
         None => return usize::MAX, // Object doesn't support stream operations
     };
 
-    // Perform read operation
+    // Perform read operation (may block)
     let buffer = unsafe { core::slice::from_raw_parts_mut(buf_ptr, count) };
     match stream.read(buffer) {
-        Ok(bytes_read) => bytes_read,
-        Err(_) => usize::MAX, // Read error
+        Ok(n) => n,
+        Err(super::StreamError::WouldBlock) => {
+            // Return EAGAIN error code (negative value indicates error)
+            (-(11i32)) as usize
+        }
+        Err(_) => usize::MAX,
     }
 }
 
 /// System call for writing to a KernelObject with StreamOps capability
-/// 
+///
 /// # Arguments
 /// - handle: Handle to the KernelObject
 /// - buffer_ptr: Pointer to the buffer to write from
 /// - count: Number of bytes to write
-/// 
+///
 /// # Returns
 /// - On success: number of bytes written
 /// - On error: usize::MAX
@@ -67,7 +71,7 @@ pub fn sys_stream_write(trapframe: &mut Trapframe) -> usize {
         Some(task) => task,
         None => return usize::MAX,
     };
-    
+
     let handle = trapframe.get_arg(0) as u32;
     let buf_ptr = match task.vm_manager.translate_vaddr(trapframe.get_arg(1)) {
         Some(ptr) => ptr as *const u8,

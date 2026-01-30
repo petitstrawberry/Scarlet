@@ -37,8 +37,8 @@
 use core::fmt;
 use core::fmt::Write;
 
-use crate::device::manager::DeviceManager;
 use crate::device::char::CharDevice;
+use crate::device::manager::DeviceManager;
 use crate::device::{DeviceCapability, DeviceType};
 use crate::early_println;
 

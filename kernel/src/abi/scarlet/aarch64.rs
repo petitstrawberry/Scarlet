@@ -1,18 +1,51 @@
-//! Scarlet Native ABI Module
-//! 
+//! Scarlet Native ABI Module (AArch64)
+//!
 //! This module implements the Scarlet ABI for the Scarlet kernel.
 //! It provides the necessary functionality for handling system calls
 //! and interacting with the Scarlet kernel.
-//! 
 
-use alloc::{boxed::Box, collections::btree_map::BTreeMap, format, string::{String, ToString}, sync::Arc, vec::Vec};
+use alloc::{
+    boxed::Box,
+    collections::btree_map::BTreeMap,
+    format,
+    string::{String, ToString},
+    sync::Arc,
+    vec::Vec,
+};
 
-use crate::{arch::{vm, IntRegisters, Trapframe}, early_initcall, fs::{drivers::overlayfs::OverlayFS, FileSystemError, FileSystemErrorKind, SeekFrom, VfsManager}, register_abi, syscall::syscall_handler, task::elf_loader::{analyze_and_load_elf_with_strategy, build_auxiliary_vector, ExecutionMode, LoadStrategy, LoadTarget, setup_auxiliary_vector_on_stack}, vm::{setup_trampoline, setup_user_stack}};
+use crate::{
+    arch::{Trapframe, vm},
+    early_initcall,
+    fs::{
+        FileSystemError, FileSystemErrorKind, SeekFrom, VfsManager, drivers::overlayfs::OverlayFS,
+    },
+    register_abi,
+    syscall::syscall_handler,
+    task::elf_loader::{
+        ExecutionMode, LoadStrategy, LoadTarget, analyze_and_load_elf_with_strategy,
+        build_auxiliary_vector, setup_auxiliary_vector_on_stack,
+    },
+    vm::setup_user_stack,
+};
 
-use super::AbiModule;
+use crate::abi::AbiModule;
 
-#[derive(Default, Copy, Clone)]
-pub struct ScarletAbi;
+#[derive(Clone, Copy)]
+pub struct ScarletAbi {
+    /// TLS (Thread Local Storage) pointer for this task
+    pub tls_pointer: Option<usize>,
+    /// clear_child_tid pointer for thread exit notification (Linux-compatible)
+    pub clear_child_tid_ptr: Option<usize>,
+}
+
+impl Default for ScarletAbi {
+    fn default() -> Self {
+        Self {
+            tls_pointer: None,
+            clear_child_tid_ptr: None,
+        }
+    }
+}
 
 impl AbiModule for ScarletAbi {
     fn name() -> &'static str {
@@ -31,7 +64,12 @@ impl AbiModule for ScarletAbi {
         syscall_handler(trapframe)
     }
 
-    fn can_execute_binary(&self, file_object: &crate::object::KernelObject, file_path: &str, current_abi: Option<&(dyn crate::abi::AbiModule + Send + Sync)>) -> Option<u8> {
+    fn can_execute_binary(
+        &self,
+        file_object: &crate::object::KernelObject,
+        file_path: &str,
+        current_abi: Option<&(dyn crate::abi::AbiModule + Send + Sync)>,
+    ) -> Option<u8> {
         // Stage 1: Basic format validation
         let magic_score = match file_object.as_file() {
             Some(file_obj) => {
@@ -46,14 +84,14 @@ impl AbiModule for ScarletAbi {
                             return None; // Not an ELF file, cannot execute
                         }
                     }
-                    _ => return None // Read failed, cannot determine
+                    _ => return None, // Read failed, cannot determine
                 }
             }
-            None => return None // Not a file object
+            None => return None, // Not a file object
         };
-        
+
         let mut confidence = magic_score;
-        
+
         // Stage 2: ELF header checks
         if let Some(file_obj) = file_object.as_file() {
             // Check ELF header for Scarlet-specific OSABI (83)
@@ -61,29 +99,79 @@ impl AbiModule for ScarletAbi {
             file_obj.seek(SeekFrom::Start(7)).ok(); // OSABI is at
             match file_obj.read(&mut osabi_buffer) {
                 Ok(bytes_read) if bytes_read == 1 => {
-                    if osabi_buffer[0] == 83 { // Scarlet OSABI
+                    if osabi_buffer[0] == 83 {
+                        // Scarlet OSABI
                         confidence += 70; // Strong indicator for Scarlet ABI
                     }
                 }
-                _ => return None // Read failed, cannot determine
+                _ => return None, // Read failed, cannot determine
             }
         } else {
             return None; // Not a file object
         }
-        
+
         // Stage 3: File path hints
         if file_path.ends_with(".elf") || file_path.contains("scarlet") {
             confidence += 15; // Scarlet-specific path indicators
         }
-        
+
         // Stage 4: ABI inheritance bonus - high priority for same ABI
         if let Some(abi) = current_abi {
             if abi.get_name() == self.get_name() {
                 confidence += 40; // Strong inheritance bonus for Scarlet Native
             }
         }
-        
+
         Some(confidence.min(100))
+    }
+
+    fn get_runtime_config(
+        &self,
+        file_object: &crate::object::KernelObject,
+        file_path: &str,
+    ) -> Option<crate::abi::RuntimeConfig> {
+        // Example: Delegate WebAssembly binaries to a Scarlet-native Wasm runtime
+        // This demonstrates how to configure runtime delegation
+
+        // Check for Wasm magic bytes (0x00 0x61 0x73 0x6D) or .wasm extension
+        let is_wasm = if let Some(file_obj) = file_object.as_file() {
+            let mut magic_buffer = [0u8; 4];
+            // Save current position to restore later
+            let original_pos = file_obj.seek(SeekFrom::Current(0)).ok();
+
+            // Check magic bytes
+            let has_wasm_magic = if file_obj.seek(SeekFrom::Start(0)).is_ok() {
+                match file_obj.read(&mut magic_buffer) {
+                    Ok(bytes_read) if bytes_read >= 4 => {
+                        magic_buffer == [0x00, 0x61, 0x73, 0x6D] // Wasm magic "\0asm"
+                    }
+                    _ => false,
+                }
+            } else {
+                false
+            };
+
+            // Restore original file position
+            if let Some(pos) = original_pos {
+                let _ = file_obj.seek(SeekFrom::Start(pos));
+            }
+
+            has_wasm_magic
+        } else {
+            false
+        } || file_path.ends_with(".wasm");
+
+        if is_wasm {
+            // Delegate to Scarlet-native Wasm runtime
+            Some(crate::abi::RuntimeConfig {
+                runtime_path: "/system/scarlet/bin/wasm-runtime".to_string(),
+                runtime_abi: None, // Auto-detect (will be Scarlet native)
+                runtime_args: alloc::vec!["--wasm".to_string()],
+            })
+        } else {
+            // Not a Wasm binary, execute directly (or return None for unknown formats)
+            None
+        }
     }
 
     fn execute_binary(
@@ -92,7 +180,7 @@ impl AbiModule for ScarletAbi {
         argv: &[&str],
         envp: &[&str],
         task: &mut crate::task::Task,
-        trapframe: &mut Trapframe
+        trapframe: &mut Trapframe,
     ) -> Result<(), &'static str> {
         // Get file object from KernelObject::File
         match file_object.as_file() {
@@ -100,17 +188,17 @@ impl AbiModule for ScarletAbi {
                 task.text_size = 0;
                 task.data_size = 0;
                 task.stack_size = 0;
-                task.brk = None;
+                task.brk
+                    .store(usize::MAX, core::sync::atomic::Ordering::SeqCst);
 
                 // Create Scarlet-specific loading strategy
                 let strategy = LoadStrategy {
-                    choose_base_address: |target, needs_relocation| {
-                        match (target, needs_relocation) {
-                            (LoadTarget::MainProgram, false) => 0,        // ET_EXEC: absolute
-                            (LoadTarget::MainProgram, true) => 0x10000,   // ET_DYN: PIE
-                            (LoadTarget::Interpreter, _) => 0x40000000,   // Dynamic linker
-                            (LoadTarget::SharedLib, _) => 0x50000000,     // Shared libraries
-                        }
+                    choose_base_address: |target, needs_relocation| match (target, needs_relocation)
+                    {
+                        (LoadTarget::MainProgram, false) => 0, // ET_EXEC: absolute
+                        (LoadTarget::MainProgram, true) => 0x10000, // ET_DYN: PIE
+                        (LoadTarget::Interpreter, _) => 0x40000000, // Dynamic linker
+                        (LoadTarget::SharedLib, _) => 0x50000000, // Shared libraries
                     },
                     resolve_interpreter: |requested| {
                         // Scarlet ABI: use interpreter as specified in ELF
@@ -122,14 +210,16 @@ impl AbiModule for ScarletAbi {
                 match analyze_and_load_elf_with_strategy(file_obj, task, &strategy) {
                     Ok(elf_result) => {
                         // Set the name from argv[0] or use default
-                        task.name = argv.get(0).map_or("Unnamed Task".to_string(), |s| s.to_string());
-                        
+                        task.name = argv
+                            .get(0)
+                            .map_or("Unnamed Task".to_string(), |s| s.to_string());
+
                         // Clear old page table entries
-                        let root_page_table = vm::get_root_pagetable(task.vm_manager.get_asid()).unwrap();
+                        let root_page_table =
+                            vm::get_root_pagetable(task.vm_manager.get_asid()).unwrap();
                         root_page_table.unmap_all();
-                        
+
                         // Setup the new memory environment
-                        setup_trampoline(&mut task.vm_manager);
                         let stack_pointer = setup_user_stack(task).1;
 
                         // Handle different execution modes
@@ -138,96 +228,105 @@ impl AbiModule for ScarletAbi {
                                 // Static linking - direct execution
                                 task.set_entry_point(elf_result.entry_point as usize);
                             }
-                            ExecutionMode::Dynamic { ref interpreter_path } => {
+                            ExecutionMode::Dynamic {
+                                ref interpreter_path,
+                            } => {
                                 // Dynamic linking - setup auxiliary vector and jump to interpreter
-                                crate::println!("Scarlet ABI: Using dynamic linker at {}", interpreter_path);
-                                
+                                crate::println!(
+                                    "Scarlet ABI: Using dynamic linker at {}",
+                                    interpreter_path
+                                );
+
                                 // Build auxiliary vector for dynamic linking
                                 let auxv = build_auxiliary_vector(&elf_result);
-                                
+
                                 // Setup auxiliary vector on stack
                                 match setup_auxiliary_vector_on_stack(task, &auxv) {
                                     Ok(_auxv_addr) => {
-                                        crate::println!("Scarlet ABI: Auxiliary vector setup complete");
+                                        crate::println!(
+                                            "Scarlet ABI: Auxiliary vector setup complete"
+                                        );
                                     }
                                     Err(e) => {
-                                        crate::println!("Scarlet ABI: Failed to setup auxiliary vector: {}", e.message);
+                                        crate::println!(
+                                            "Scarlet ABI: Failed to setup auxiliary vector: {}",
+                                            e.message
+                                        );
                                         return Err("Failed to setup auxiliary vector");
                                     }
                                 }
-                                
+
                                 task.set_entry_point(elf_result.entry_point as usize);
                             }
                         }
-                        
+
                         // Reset task's registers for clean start
                         task.vcpu.reset_iregs();
                         task.vcpu.set_sp(stack_pointer);
 
-                        // Setup argv/envp on stack following Unix and RISC-V conventions
-                        let (adjusted_sp, argv_ptr) = self.setup_arguments_on_stack(task, argv, envp, stack_pointer)?;
+                        // Setup argv/envp on stack following Unix conventions
+                        let (adjusted_sp, argv_ptr) =
+                            self.setup_arguments_on_stack(task, argv, envp, stack_pointer)?;
                         task.vcpu.set_sp(adjusted_sp);
-                        
-                        // Set RISC-V calling convention registers
-                        // a0 (reg[10]) = argc
-                        // a1 (reg[11]) = argv pointer
-                        task.vcpu.iregs.reg[10] = argv.len(); // argc
-                        task.vcpu.iregs.reg[11] = argv_ptr; // argv array pointer
 
-                        // crate::println!("Executing binary: {} with entry point: {:#x}", task.name, entry_point);
-                        // crate::println!("Arguments: {:?}", argv);
-                        // crate::println!("Environment: {:?}", envp);
-                        // crate::println!("argv pointer set to: {:#x}", argv_ptr);
-                        // crate::println!("Environment pointer set to: {:#x}", env_ptr);
+                        // Set AArch64 calling convention registers
+                        // x0 (reg[0]) = argc
+                        // x1 (reg[1]) = argv pointer
+                        task.vcpu.iregs.reg[0] = argv.len(); // argc
+                        task.vcpu.iregs.reg[1] = argv_ptr; // argv array pointer
 
                         // Switch to the new task
                         task.vcpu.switch(trapframe);
                         Ok(())
-                    },
+                    }
                     Err(e) => {
                         // Log error details
                         crate::println!("ELF loading failed: {}", e.message);
                         Err("Failed to load ELF binary")
                     }
                 }
-            },
+            }
             None => Err("Invalid file object type for binary execution"),
         }
     }
 
-    fn choose_load_address(&self, elf_type: u16, target: crate::task::elf_loader::LoadTarget) -> Option<u64> {
-        use crate::task::elf_loader::{LoadTarget, ET_DYN};
-        
+    fn choose_load_address(
+        &self,
+        elf_type: u16,
+        target: crate::task::elf_loader::LoadTarget,
+    ) -> Option<u64> {
+        use crate::task::elf_loader::{ET_DYN, LoadTarget};
+
         // Scarlet Native ABI uses standard Linux-style memory layout
         if elf_type == ET_DYN {
             match target {
                 LoadTarget::MainProgram => {
                     // PIE main program: low memory area, avoiding null pointer region
-                    Some(0x10000)  // 64KB base
-                },
+                    Some(0x10000) // 64KB base
+                }
                 LoadTarget::Interpreter => {
                     // Dynamic linker: high memory area to avoid conflicts with main program
-                    Some(0x40000000)  // 1GB base
-                },
+                    Some(0x40000000) // 1GB base
+                }
                 LoadTarget::SharedLib => {
                     // Shared libraries: medium memory area
-                    Some(0x50000000)  // 1.25GB base  
-                },
+                    Some(0x50000000) // 1.25GB base
+                }
             }
         } else {
-            None  // Use kernel default for ET_EXEC and other types
+            None // Use kernel default for ET_EXEC and other types
         }
     }
 
     fn normalize_env_to_scarlet(&self, envp: &mut Vec<String>) {
         // Scarlet ABI is already in canonical format, but ensure all paths are absolute
         // Modify in-place to avoid allocations
-        
+
         for env_var in envp.iter_mut() {
             if let Some(eq_pos) = env_var.find('=') {
                 let key = &env_var[..eq_pos];
                 let value = &env_var[eq_pos + 1..];
-                
+
                 let normalized_value = match key {
                     "PATH" | "LD_LIBRARY_PATH" => {
                         // Ensure all paths are in absolute Scarlet namespace format
@@ -243,7 +342,7 @@ impl AbiModule for ScarletAbi {
                     }
                     _ => value.to_string(), // Most variables pass through unchanged
                 };
-                
+
                 // Update in-place if value changed
                 let new_env_var = format!("{}={}", key, normalized_value);
                 if new_env_var != *env_var {
@@ -252,11 +351,11 @@ impl AbiModule for ScarletAbi {
             }
         }
     }
-    
+
     fn denormalize_env_from_scarlet(&self, envp: &mut Vec<String>) {
         // For Scarlet ABI, canonical format is the native format
         // But ensure proper Scarlet-specific defaults exist
-        
+
         // Convert to temporary map for easier processing
         let mut env_map = BTreeMap::new();
         for env_var in envp.iter() {
@@ -266,16 +365,19 @@ impl AbiModule for ScarletAbi {
                 env_map.insert(key, value);
             }
         }
-        
+
         // Add defaults if they don't exist
         if !env_map.contains_key("PATH") {
-            env_map.insert("PATH".to_string(), "/system/scarlet/bin:/bin:/usr/bin".to_string());
+            env_map.insert(
+                "PATH".to_string(),
+                "/system/scarlet/bin:/bin:/usr/bin".to_string(),
+            );
         }
-        
+
         if !env_map.contains_key("SHELL") {
             env_map.insert("SHELL".to_string(), "/system/scarlet/bin/sh".to_string());
         }
-        
+
         // Convert back to Vec<String> format
         envp.clear();
         for (key, value) in env_map.iter() {
@@ -290,14 +392,20 @@ impl AbiModule for ScarletAbi {
         system_path: &str,
         config_path: &str,
     ) -> Result<(), &'static str> {
-        // crate::println!("Setting up Scarlet overlay environment with system path: {} and config path: {}", system_path, config_path);
         // Scarlet ABI uses overlay mount with system Scarlet tools and config persistence
         let lower_vfs_list = alloc::vec![(base_vfs, system_path)];
         let upper_vfs = base_vfs;
-        let fs = match OverlayFS::new_from_paths_and_vfs(Some((upper_vfs, config_path)), lower_vfs_list, "/") {
+        let fs = match OverlayFS::new_from_paths_and_vfs(
+            Some((upper_vfs, config_path)),
+            lower_vfs_list,
+            "/",
+        ) {
             Ok(fs) => fs,
             Err(e) => {
-                crate::println!("Failed to create overlay filesystem for Scarlet ABI: {}", e.message);
+                crate::println!(
+                    "Failed to create overlay filesystem for Scarlet ABI: {}",
+                    e.message
+                );
                 return Err("Failed to create Scarlet overlay environment");
             }
         };
@@ -305,47 +413,51 @@ impl AbiModule for ScarletAbi {
         match target_vfs.mount(fs, "/", 0) {
             Ok(()) => Ok(()),
             Err(e) => {
-                crate::println!("Failed to create cross-VFS overlay for Scarlet ABI: {}", e.message);
+                crate::println!(
+                    "Failed to create cross-VFS overlay for Scarlet ABI: {}",
+                    e.message
+                );
                 Err("Failed to create Scarlet overlay environment")
             }
         }
     }
-    
+
     fn setup_shared_resources(
         &self,
         target_vfs: &Arc<VfsManager>,
         base_vfs: &Arc<VfsManager>,
     ) -> Result<(), &'static str> {
-        // crate::println!("Setting up Scarlet shared resources with base VFS");
         // Scarlet shared resource setup: bind mount common directories and Scarlet gateway
         match create_dir_if_not_exists(target_vfs, "/home") {
             Ok(()) => {}
             Err(e) => {
-                crate::println!("Failed to create /home directory for Scarlet: {}", e.message);
+                crate::println!(
+                    "Failed to create /home directory for Scarlet: {}",
+                    e.message
+                );
                 return Err("Failed to create /home directory for Scarlet");
             }
         }
 
         match target_vfs.bind_mount_from(base_vfs, "/home", "/home") {
             Ok(()) => {}
-            Err(_e) => {
-                // crate::println!("Failed to bind mount /home for Scarlet: {}", e.message);
-            }
+            Err(_e) => {}
         }
 
         match create_dir_if_not_exists(target_vfs, "/data") {
             Ok(()) => {}
             Err(e) => {
-                crate::println!("Failed to create /data directory for Scarlet: {}", e.message);
+                crate::println!(
+                    "Failed to create /data directory for Scarlet: {}",
+                    e.message
+                );
                 return Err("Failed to create /data directory for Scarlet");
             }
         }
 
         match target_vfs.bind_mount_from(base_vfs, "/data/shared", "/data/shared") {
             Ok(()) => {}
-            Err(_e) => {
-                // crate::println!("Failed to bind mount /data/shared for Scarlet: {}", e.message);
-            }
+            Err(_e) => {}
         }
 
         // Bind mount /dev for device access
@@ -364,44 +476,97 @@ impl AbiModule for ScarletAbi {
             }
         }
 
+        // Bind moutt /tmp for temporary files
+        match create_dir_if_not_exists(target_vfs, "/tmp") {
+            Ok(()) => {}
+            Err(e) => {
+                crate::println!("Failed to create /tmp directory for Scarlet: {}", e.message);
+                return Err("Failed to create /tmp directory for Scarlet");
+            }
+        }
+        match target_vfs.bind_mount_from(base_vfs, "/tmp", "/tmp") {
+            Ok(()) => {}
+            Err(e) => {
+                crate::println!("Failed to bind mount /tmp for Scarlet: {}", e.message);
+                return Err("Failed to bind mount /tmp for Scarlet");
+            }
+        }
+
         // Setup gateway to native Scarlet environment (read-only for security)
         match create_dir_if_not_exists(target_vfs, "/scarlet") {
             Ok(()) => {}
             Err(e) => {
-                crate::println!("Failed to create /scarlet directory for Scarlet: {}", e.message);
+                crate::println!(
+                    "Failed to create /scarlet directory for Scarlet: {}",
+                    e.message
+                );
                 return Err("Failed to create /scarlet directory for Scarlet");
             }
         }
         match target_vfs.bind_mount_from(base_vfs, "/", "/scarlet") {
             Ok(()) => Ok(()),
             Err(e) => {
-                crate::println!("Failed to bind mount native Scarlet root to /scarlet for Scarlet: {}", e.message);
+                crate::println!(
+                    "Failed to bind mount native Scarlet root to /scarlet for Scarlet: {}",
+                    e.message
+                );
                 return Err("Failed to bind mount native Scarlet root to /scarlet for Scarlet");
             }
         }
     }
+
+    fn on_task_exit(&mut self, task: &mut crate::task::Task) {
+        // Delegate to the implementation method
+        self.on_task_exit(task);
+    }
+
+    fn set_tls_pointer(&mut self, ptr: usize) {
+        self.tls_pointer = Some(ptr);
+    }
+
+    fn get_tls_pointer(&self) -> Option<usize> {
+        self.tls_pointer
+    }
+
+    fn set_clear_child_tid(&mut self, ptr: usize) {
+        self.clear_child_tid_ptr = Some(ptr);
+    }
 }
 
 impl ScarletAbi {
+    /// Handle task exit with TLS cleanup (Linux-compatible)
+    pub fn on_task_exit(&mut self, task: &mut crate::task::Task) {
+        // Linux-compatible behavior: write 0 to clear_child_tid and futex wake
+        if let Some(ptr) = self.clear_child_tid_ptr {
+            if let Some(paddr) = task.vm_manager.translate_vaddr(ptr) {
+                unsafe {
+                    *(paddr as *mut i32) = 0;
+                }
+            }
+            // Note: Futex wake for clear_child_tid is handled by the Linux ABI's
+            // on_task_exit implementation. For Scarlet Native, we just clear the value.
+        }
+    }
+
     /// Setup argc, argv, and envp on the user stack following Unix conventions
-    /// 
+    ///
     /// Standard Unix stack layout (from high to low addresses):
     /// ```
     /// [high addresses]
     /// envp strings (null-terminated)
-    /// argv strings (null-terminated)  
+    /// argv strings (null-terminated)
     /// envp[] array (null-terminated pointer array)
     /// argv[] array (null-terminated pointer array)
     /// argc (integer)
     /// [low addresses - returned stack pointer]
     /// ```
-    /// 
+    ///
     /// # Arguments
     /// * `task` - The task to set up arguments for
     /// * `argv` - Command line arguments
     /// * `envp` - Environment variables
     /// * `initial_sp` - Initial stack pointer from setup_user_stack
-    /// 
+    ///
     /// # Returns
     /// Tuple of (new stack pointer, argv array pointer)
     fn setup_arguments_on_stack(
@@ -409,46 +574,47 @@ impl ScarletAbi {
         task: &mut crate::task::Task,
         argv: &[&str],
         envp: &[&str],
-        initial_sp: usize
+        initial_sp: usize,
     ) -> Result<(usize, usize), &'static str> {
         // Calculate total size needed
         let argc = argv.len();
         let envc = envp.len();
-        
+
         // Calculate string sizes (including null terminators)
         let argv_strings_size: usize = argv.iter().map(|s| s.len() + 1).sum();
         let envp_strings_size: usize = envp.iter().map(|s| s.len() + 1).sum();
-        
+
         // Calculate pointer array sizes (including null terminators)
         let argv_array_size = (argc + 1) * core::mem::size_of::<usize>(); // +1 for NULL terminator
         let envp_array_size = (envc + 1) * core::mem::size_of::<usize>(); // +1 for NULL terminator
         let argc_size = core::mem::size_of::<usize>();
-        
+
         // Total space needed
-        let total_size = argc_size + argv_array_size + envp_array_size + argv_strings_size + envp_strings_size;
-        
-        // Align to 16-byte boundary for RISC-V ABI compliance
+        let total_size =
+            argc_size + argv_array_size + envp_array_size + argv_strings_size + envp_strings_size;
+
+        // Align to 16-byte boundary for ABI compliance
         let aligned_total_size = (total_size + 15) & !15;
-        
+
         // Calculate new stack pointer
         let new_sp = initial_sp - aligned_total_size;
-        
+
         // Layout from new_sp (low) to initial_sp (high):
         // argc | argv[] | envp[] | argv_strings | envp_strings
-        
+
         let mut current_addr = new_sp;
-        
+
         // 1. Write argc
         self.write_to_stack_memory(task, current_addr, &argc.to_le_bytes())?;
         current_addr += argc_size;
-        
+
         // 2. Save argv array pointer for return value
         let argv_ptr = current_addr;
-        
+
         // 3. Calculate string positions first
         let argv_strings_start = current_addr + argv_array_size + envp_array_size;
         let envp_strings_start = argv_strings_start + argv_strings_size;
-        
+
         // 4. Write argv[] array
         let mut string_addr = argv_strings_start;
         for i in 0..argc {
@@ -460,7 +626,7 @@ impl ScarletAbi {
         let null_ptr: usize = 0;
         self.write_to_stack_memory(task, current_addr, &null_ptr.to_le_bytes())?;
         current_addr += core::mem::size_of::<usize>();
-        
+
         // 5. Write envp[] array
         string_addr = envp_strings_start;
         for i in 0..envc {
@@ -471,50 +637,46 @@ impl ScarletAbi {
         // NULL terminate envp[]
         self.write_to_stack_memory(task, current_addr, &null_ptr.to_le_bytes())?;
         current_addr += core::mem::size_of::<usize>();
-        
+
         // 6. Write argv strings
         for arg in argv {
             self.write_string_to_stack(task, current_addr, arg)?;
             current_addr += arg.len() + 1; // +1 for null terminator
         }
-        
+
         // 7. Write envp strings
         for env in envp {
             self.write_string_to_stack(task, current_addr, env)?;
             current_addr += env.len() + 1; // +1 for null terminator
         }
-        
+
         Ok((new_sp, argv_ptr))
     }
-    
+
     /// Write bytes to stack memory using virtual memory translation
     fn write_to_stack_memory(
         &self,
         task: &mut crate::task::Task,
         vaddr: usize,
-        data: &[u8]
+        data: &[u8],
     ) -> Result<(), &'static str> {
         match task.vm_manager.translate_vaddr(vaddr) {
             Some(paddr) => {
                 unsafe {
-                    core::ptr::copy_nonoverlapping(
-                        data.as_ptr(),
-                        paddr as *mut u8,
-                        data.len()
-                    );
+                    core::ptr::copy_nonoverlapping(data.as_ptr(), paddr as *mut u8, data.len());
                 }
                 Ok(())
             }
-            None => Err("Failed to translate virtual address for stack write")
+            None => Err("Failed to translate virtual address for stack write"),
         }
     }
-    
+
     /// Write a null-terminated string to stack memory
     fn write_string_to_stack(
         &self,
         task: &mut crate::task::Task,
         vaddr: usize,
-        string: &str
+        string: &str,
     ) -> Result<(), &'static str> {
         // Write the string content
         self.write_to_stack_memory(task, vaddr, string.as_bytes())?;
@@ -524,13 +686,13 @@ impl ScarletAbi {
     }
 
     /// Normalize path string to absolute Scarlet namespace format
-    /// 
+    ///
     /// This ensures all paths in PATH-like variables are absolute and
     /// in the proper Scarlet namespace format.
     fn normalize_path_to_absolute_scarlet(&self, path_value: &str) -> String {
         let paths: Vec<&str> = path_value.split(':').collect();
         let mut normalized_paths = Vec::new();
-        
+
         for path in paths {
             if path.starts_with('/') {
                 // Already absolute - ensure it's in proper Scarlet namespace
@@ -557,7 +719,7 @@ impl ScarletAbi {
             }
             // Skip empty paths
         }
-        
+
         normalized_paths.join(":")
     }
 }

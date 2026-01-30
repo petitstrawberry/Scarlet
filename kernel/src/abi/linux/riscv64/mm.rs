@@ -1,5 +1,13 @@
 use crate::{
-    abi::linux::riscv64::{LinuxRiscv64Abi, errno::{self, to_result}}, arch::Trapframe, environment::PAGE_SIZE, mem::page::allocate_raw_pages, task::mytask, vm::vmem::{MemoryArea, VirtualMemoryMap}
+    abi::linux::riscv64::{
+        LinuxRiscv64Abi,
+        errno::{self, to_result},
+    },
+    arch::Trapframe,
+    environment::PAGE_SIZE,
+    mem::page::allocate_raw_pages,
+    task::mytask,
+    vm::vmem::{MemoryArea, VirtualMemoryMap},
 };
 use alloc::boxed::Box;
 
@@ -10,7 +18,7 @@ pub fn sys_mmap(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
     const MAP_FIXED: usize = 0x10;
     #[allow(dead_code)]
     const MAP_SHARED: usize = 0x01;
-    
+
     // Linux protection flags
     const PROT_READ: usize = 0x1;
     const PROT_WRITE: usize = 0x2;
@@ -30,7 +38,7 @@ pub fn sys_mmap(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
 
     // crate::println!("linux-riscv64: sys_mmap called: pc={:#x} addr={:#x} length={} prot={:#x} flags={:#x} fd={} offset={:#x}",
     //     trapframe.epc, addr, length, prot, flags, fd, offset);
-    
+
     trapframe.increment_pc_next(task);
 
     // crate::println!("sys_mmap: Step 1 - PC incremented");
@@ -76,9 +84,12 @@ pub fn sys_mmap(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
         Some(h) => {
             // crate::println!("linux-riscv64: sys_mmap - fd {} -> handle {}", fd, h);
             h
-        },
+        }
         None => {
-            crate::println!("linux-riscv64: sys_mmap error - invalid file descriptor {}", fd);
+            crate::println!(
+                "linux-riscv64: sys_mmap error - invalid file descriptor {}",
+                fd
+            );
             return to_result(errno::EBADF);
         }
     };
@@ -90,7 +101,7 @@ pub fn sys_mmap(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
         Some(obj) => {
             // crate::println!("sys_mmap: Step 9 - Got kernel object");
             obj
-        },
+        }
         None => {
             // crate::println!("sys_mmap: Invalid handle {}", handle);
             return to_result(errno::EBADF);
@@ -104,9 +115,11 @@ pub fn sys_mmap(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
         Some(mappable) => {
             // crate::println!("linux-riscv64: sys_mmap - object supports memory mapping");
             mappable
-        },
+        }
         None => {
-            crate::println!("linux-riscv64: sys_mmap error - object doesn't support memory mapping");
+            crate::println!(
+                "linux-riscv64: sys_mmap error - object doesn't support memory mapping"
+            );
             return to_result(errno::ENODEV);
         }
     };
@@ -136,7 +149,11 @@ pub fn sys_mmap(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
                 break info;
             }
             Err(e) => {
-                if ok_len >= PAGE_SIZE { ok_len -= PAGE_SIZE; } else { ok_len = 0; }
+                if ok_len >= PAGE_SIZE {
+                    ok_len -= PAGE_SIZE;
+                } else {
+                    ok_len = 0;
+                }
                 if ok_len == 0 {
                     // crate::println!(
                     //     "linux-riscv64: sys_mmap - object rejected requested length (offset={:#x}, length={}), no mappable bytes: {:?}",
@@ -154,19 +171,28 @@ pub fn sys_mmap(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
     let is_fixed = (flags & MAP_FIXED) != 0;
 
     let final_vaddr = if addr == 0 {
-        match task.vm_manager.find_unmapped_area(aligned_length, PAGE_SIZE) {
+        match task
+            .vm_manager
+            .find_unmapped_area(aligned_length, PAGE_SIZE)
+        {
             Some(vaddr) => {
                 // crate::println!("linux-riscv64: sys_mmap - found unmapped area at {:#x}", vaddr);
                 vaddr
-            },
+            }
             None => {
-                crate::println!("linux-riscv64: sys_mmap error - no suitable unmapped area for length={}", aligned_length);
+                crate::println!(
+                    "linux-riscv64: sys_mmap error - no suitable unmapped area for length={}",
+                    aligned_length
+                );
                 return to_result(errno::ENOMEM);
             }
         }
     } else {
         if addr % PAGE_SIZE != 0 {
-            crate::println!("linux-riscv64: sys_mmap error - requested addr {:#x} not page aligned", addr);
+            crate::println!(
+                "linux-riscv64: sys_mmap error - requested addr {:#x} not page aligned",
+                addr
+            );
             return to_result(errno::EINVAL);
         }
 
@@ -174,17 +200,24 @@ pub fn sys_mmap(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
             // addr is a hint, check if it's available
             let requested_end = addr + aligned_length - 1;
             let has_overlap = task.vm_manager.with_memmaps(|mm| {
-                mm.values().any(|map| !(requested_end < map.vmarea.start || addr > map.vmarea.end))
+                mm.values()
+                    .any(|map| !(requested_end < map.vmarea.start || addr > map.vmarea.end))
             });
 
             if has_overlap {
-                match task.vm_manager.find_unmapped_area(aligned_length, PAGE_SIZE) {
+                match task
+                    .vm_manager
+                    .find_unmapped_area(aligned_length, PAGE_SIZE)
+                {
                     Some(vaddr) => {
                         // crate::println!("linux-riscv64: sys_mmap - hint address {:#x} overlaps, alternative {:#x}", addr, vaddr);
                         vaddr
-                    },
+                    }
                     None => {
-                        crate::println!("linux-riscv64: sys_mmap error - no suitable unmapped area for length={}", aligned_length);
+                        crate::println!(
+                            "linux-riscv64: sys_mmap error - no suitable unmapped area for length={}",
+                            aligned_length
+                        );
                         return to_result(errno::ENOMEM);
                     }
                 }
@@ -212,15 +245,21 @@ pub fn sys_mmap(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
     // For private mappings, we use the requested prot directly
     // For shared mappings, we need to respect object permissions
     let mut prot_mask = 0;
-    if (prot & PROT_READ) != 0 { prot_mask |= 0x1; }
-    if (prot & PROT_WRITE) != 0 { prot_mask |= 0x2; }
-    if (prot & PROT_EXEC) != 0 { prot_mask |= 0x4; }
-    
+    if (prot & PROT_READ) != 0 {
+        prot_mask |= 0x1;
+    }
+    if (prot & PROT_WRITE) != 0 {
+        prot_mask |= 0x2;
+    }
+    if (prot & PROT_EXEC) != 0 {
+        prot_mask |= 0x4;
+    }
+
     // For private mappings, use requested permissions directly
     // For shared mappings, combine with object permissions
     const MAP_PRIVATE: usize = 0x02;
     let is_map_private_flag = (flags & MAP_PRIVATE) != 0;
-    
+
     let mut final_permissions = if is_map_private_flag {
         // Private mapping: use requested permissions (will copy data)
         prot_mask
@@ -228,14 +267,14 @@ pub fn sys_mmap(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
         // Shared mapping: must respect object permissions
         obj_permissions & prot_mask
     };
-    
+
     if prot != 0 {
         final_permissions |= 0x08; // Access from user space (only if not PROT_NONE)
     }
 
     // Note: Tail-only permission adjustments (e.g., execute-only) are handled separately.
 
-    // crate::println!("sys_mmap: Step 21 - final_permissions={:#x} (prot_mask={:#x}, obj_perm={:#x}, is_private={})", 
+    // crate::println!("sys_mmap: Step 21 - final_permissions={:#x} (prot_mask={:#x}, obj_perm={:#x}, is_private={})",
     //     final_permissions, prot_mask, obj_permissions, is_map_private_flag);
 
     // Determine whether the mapping was requested as MAP_PRIVATE
@@ -255,14 +294,16 @@ pub fn sys_mmap(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
         let vm_map = VirtualMemoryMap::new(private_pmarea, vmarea, final_permissions, false, None);
 
         // crate::println!("sys_mmap: Step 26 - Adding memory map to VM manager (is_fixed={})", is_fixed);
-        
+
         // Use add_memory_map_fixed only if MAP_FIXED is set, otherwise use add_memory_map
         let map_result = if is_fixed {
-            task.vm_manager.add_memory_map_fixed(vm_map).map(|removed| Some(removed))
+            task.vm_manager
+                .add_memory_map_fixed(vm_map)
+                .map(|removed| Some(removed))
         } else {
             task.vm_manager.add_memory_map(vm_map).map(|_| None)
         };
-        
+
         match map_result {
             Ok(removed_mappings_opt) => {
                 // let removed_count = removed_mappings_opt.as_ref().map(|r| r.len()).unwrap_or(0);
@@ -278,7 +319,10 @@ pub fn sys_mmap(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
                         if removed_map.is_shared {
                             if let Some(owner_weak) = &removed_map.owner {
                                 if let Some(owner) = owner_weak.upgrade() {
-                                    owner.on_unmapped(removed_map.vmarea.start, removed_map.vmarea.size());
+                                    owner.on_unmapped(
+                                        removed_map.vmarea.start,
+                                        removed_map.vmarea.size(),
+                                    );
                                 }
                             }
                         }
@@ -292,7 +336,8 @@ pub fn sys_mmap(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
                         if !removed_map.is_shared {
                             let mapping_start = removed_map.vmarea.start;
                             let mapping_end = removed_map.vmarea.end;
-                            let num_removed_pages = (mapping_end - mapping_start + 1 + PAGE_SIZE - 1) / PAGE_SIZE;
+                            let num_removed_pages =
+                                (mapping_end - mapping_start + 1 + PAGE_SIZE - 1) / PAGE_SIZE;
                             for i in 0..num_removed_pages {
                                 let page_vaddr = mapping_start + i * PAGE_SIZE;
                                 if let Some(_managed_page) = task.remove_managed_page(page_vaddr) {
@@ -304,7 +349,9 @@ pub fn sys_mmap(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
                 }
 
                 // Zero-initialize entire region, then copy only the mappable portion (ok_len)
-                unsafe { core::ptr::write_bytes(pages as *mut u8, 0u8, aligned_length); }
+                unsafe {
+                    core::ptr::write_bytes(pages as *mut u8, 0u8, aligned_length);
+                }
                 if ok_len > 0 {
                     let copy_len = core::cmp::min(ok_len, aligned_length);
                     unsafe {
@@ -328,7 +375,7 @@ pub fn sys_mmap(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
                 }
 
                 // crate::println!("sys_mmap: Step 32 - Private mapping complete, returning {:#x}", final_vaddr);
-                
+
                 // Print current memory map for debugging
                 // crate::println!("=== Memory Map After mmap ===");
                 // for map in task.vm_manager.memmap_iter() {
@@ -338,7 +385,7 @@ pub fn sys_mmap(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
                 //         map.permissions, map.is_shared);
                 // }
                 // crate::println!("=============================");
-                
+
                 // crate::println!("sys_mmap: RETURN {:#x} (private file-backed)", final_vaddr);
                 final_vaddr
             }
@@ -364,7 +411,9 @@ pub fn sys_mmap(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
         if ok_len_aligned == 0 {
             // Partial (< PAGE_SIZE) tail only is not representable as shared mapping safely
             // without a COW-like helper; reject for now.
-            crate::println!("linux-riscv64: sys_mmap - only subpage tail available; rejecting shared mapping");
+            crate::println!(
+                "linux-riscv64: sys_mmap - only subpage tail available; rejecting shared mapping"
+            );
             return to_result(errno::EINVAL);
         }
 
@@ -378,13 +427,15 @@ pub fn sys_mmap(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
 
         // Add the mapping to VM manager
         // crate::println!("sys_mmap: Step 35 - Adding memory map to VM manager (is_fixed={})", is_fixed);
-        
+
         let map_result = if is_fixed {
-            task.vm_manager.add_memory_map_fixed(vm_map).map(|removed| Some(removed))
+            task.vm_manager
+                .add_memory_map_fixed(vm_map)
+                .map(|removed| Some(removed))
         } else {
             task.vm_manager.add_memory_map(vm_map).map(|_| None)
         };
-        
+
         match map_result {
             Ok(removed_mappings_opt) => {
                 // Notify the object that mapping was created
@@ -396,7 +447,10 @@ pub fn sys_mmap(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
                         if removed_map.is_shared {
                             if let Some(owner_weak) = &removed_map.owner {
                                 if let Some(owner) = owner_weak.upgrade() {
-                                    owner.on_unmapped(removed_map.vmarea.start, removed_map.vmarea.size());
+                                    owner.on_unmapped(
+                                        removed_map.vmarea.start,
+                                        removed_map.vmarea.size(),
+                                    );
                                 }
                             }
                         }
@@ -410,8 +464,9 @@ pub fn sys_mmap(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
                         if !removed_map.is_shared {
                             let mapping_start = removed_map.vmarea.start;
                             let mapping_end = removed_map.vmarea.end;
-                            let num_removed_pages = (mapping_end - mapping_start + 1 + PAGE_SIZE - 1) / PAGE_SIZE;
-                        
+                            let num_removed_pages =
+                                (mapping_end - mapping_start + 1 + PAGE_SIZE - 1) / PAGE_SIZE;
+
                             for i in 0..num_removed_pages {
                                 let page_vaddr = mapping_start + i * PAGE_SIZE;
                                 if let Some(_managed_page) = task.remove_managed_page(page_vaddr) {
@@ -454,11 +509,14 @@ fn handle_anonymous_mapping(
 
     // Determine final address - if vaddr is 0, find an unmapped area
     let final_vaddr = if vaddr == 0 {
-        match task.vm_manager.find_unmapped_area(aligned_length, PAGE_SIZE) {
+        match task
+            .vm_manager
+            .find_unmapped_area(aligned_length, PAGE_SIZE)
+        {
             Some(addr) => {
                 // crate::println!("sys_mmap (anonymous): Found unmapped area at {:#x}", addr);
                 addr
-            },
+            }
             None => {
                 // crate::println!("sys_mmap (anonymous): No suitable address found");
                 return to_result(errno::ENOMEM);
@@ -471,15 +529,19 @@ fn handle_anonymous_mapping(
             // Check if the requested range is available
             let requested_end = vaddr + aligned_length - 1;
             let has_overlap = task.vm_manager.with_memmaps(|mm| {
-                mm.values().any(|map| !(requested_end < map.vmarea.start || vaddr > map.vmarea.end))
+                mm.values()
+                    .any(|map| !(requested_end < map.vmarea.start || vaddr > map.vmarea.end))
             });
-            
+
             if has_overlap {
-                match task.vm_manager.find_unmapped_area(aligned_length, PAGE_SIZE) {
+                match task
+                    .vm_manager
+                    .find_unmapped_area(aligned_length, PAGE_SIZE)
+                {
                     Some(addr) => {
                         // crate::println!("sys_mmap (anonymous): Hint address {:#x} occupied, using {:#x}", vaddr, addr);
                         addr
-                    },
+                    }
                     None => {
                         // crate::println!("sys_mmap (anonymous): No suitable address found");
                         return to_result(errno::ENOMEM);
@@ -517,8 +579,8 @@ fn handle_anonymous_mapping(
     // Create memory areas
     let vmarea = MemoryArea::new(final_vaddr, final_vaddr + aligned_length - 1);
     let pmarea = MemoryArea::new(pages_ptr, pages_ptr + aligned_length - 1);
-    
-    // Create virtual memory map  
+
+    // Create virtual memory map
     let vm_map = VirtualMemoryMap::new(pmarea, vmarea, permissions, is_shared, None); // Anonymous mappings have no owner
 
     // Use add_memory_map_fixed for both FIXED and non-FIXED mappings to handle overlaps consistently
@@ -534,15 +596,16 @@ fn handle_anonymous_mapping(
                     }
                 }
             }
-            
+
             // Then, handle managed page cleanup (MMU cleanup is already handled by VmManager.add_memory_map_fixed)
             for removed_map in removed_mappings {
                 // Remove managed pages only for private mappings
                 if !removed_map.is_shared {
                     let mapping_start = removed_map.vmarea.start;
                     let mapping_end = removed_map.vmarea.end;
-                    let num_removed_pages = (mapping_end - mapping_start + 1 + PAGE_SIZE - 1) / PAGE_SIZE;
-                    
+                    let num_removed_pages =
+                        (mapping_end - mapping_start + 1 + PAGE_SIZE - 1) / PAGE_SIZE;
+
                     for i in 0..num_removed_pages {
                         let page_vaddr = mapping_start + i * PAGE_SIZE;
                         if let Some(_managed_page) = task.remove_managed_page(page_vaddr) {
@@ -551,7 +614,7 @@ fn handle_anonymous_mapping(
                     }
                 }
             }
-            
+
             // Add managed pages for the new anonymous mapping
             for i in 0..num_pages {
                 let page_vaddr = final_vaddr + i * crate::environment::PAGE_SIZE;
@@ -561,14 +624,14 @@ fn handle_anonymous_mapping(
                     page: unsafe { Box::from_raw(page_ptr) },
                 });
             }
-            
+
             final_vaddr
         }
         Err(_) => {
             // Free allocated pages on error to avoid leak
             crate::mem::page::free_raw_pages(pages, num_pages);
             to_result(errno::ENOMEM)
-        },
+        }
     }
 }
 
@@ -665,10 +728,9 @@ pub fn sys_mprotect(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> us
     // Use add_memory_map_fixed to handle splitting and overlaps automatically
     match task.vm_manager.add_memory_map_fixed(new_map) {
         Ok(_removed_mappings) => {
+            // crate::println!("sys_mprotect: Successfully updated permissions for {:#x}-{:#x}",
+            //    addr, addr + aligned_length - 1);
 
-            // crate::println!("sys_mprotect: Successfully updated permissions for {:#x}-{:#x}", 
-                        //    addr, addr + aligned_length - 1);
-            
             0 // Success
         }
         Err(_) => {
@@ -688,7 +750,7 @@ pub fn sys_munmap(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usiz
     let length = trapframe.get_arg(1);
 
     trapframe.increment_pc_next(task);
-    
+
     // Input validation
     if length == 0 || vaddr % PAGE_SIZE != 0 {
         return usize::MAX; // -EINVAL
@@ -709,7 +771,7 @@ pub fn sys_munmap(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usiz
                 }
             }
         }
-        
+
         // Remove managed pages only for private mappings
         // Shared mappings should not have their physical pages freed here
         // as they might be used by other processes
@@ -718,7 +780,7 @@ pub fn sys_munmap(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usiz
             let mapping_start = removed_map.vmarea.start;
             let mapping_end = removed_map.vmarea.end;
             let num_pages = (mapping_end - mapping_start + 1 + PAGE_SIZE - 1) / PAGE_SIZE;
-            
+
             for i in 0..num_pages {
                 let page_vaddr = mapping_start + i * PAGE_SIZE;
                 if let Some(_managed_page) = task.remove_managed_page(page_vaddr) {
@@ -726,7 +788,7 @@ pub fn sys_munmap(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usiz
                 }
             }
         }
-        
+
         0
     } else {
         usize::MAX // No mapping found at this address

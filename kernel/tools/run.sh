@@ -47,7 +47,29 @@ fi
 # Find the project root by looking for Makefile.toml
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR" && cd .. && cd .. && pwd)"
-INITRAMFS_PATH="$PROJECT_ROOT/mkfs/dist/initramfs.cpio"
+INITRAMFS_PATH="$PROJECT_ROOT/mkfs/dist/initramfs-riscv64.cpio"
+
+QEMU_DEBUG_ARGS=""
+
+# Optional QEMU debug logging
+# - Enable guest errors: SCARLET_QEMU_GUEST_ERRORS=1
+# - Or pass explicit QEMU -d flags: SCARLET_QEMU_DEBUG_FLAGS=virtio (comma-separated)
+QEMU_DEBUG_FLAGS=""
+if [ -n "${SCARLET_QEMU_DEBUG_FLAGS:-}" ]; then
+    QEMU_DEBUG_FLAGS="${SCARLET_QEMU_DEBUG_FLAGS}"
+elif [ "${SCARLET_QEMU_GUEST_ERRORS:-0}" = "1" ] || [ "${SCARLET_QEMU_GUEST_ERRORS:-}" = "true" ]; then
+    QEMU_DEBUG_FLAGS="guest_errors"
+fi
+
+if [ -n "$QEMU_DEBUG_FLAGS" ]; then
+    if [ "$QEMU_DEBUG_FLAGS" = "guest_errors" ]; then
+        QEMU_DEBUG_LOG="${SCARLET_QEMU_GUEST_ERRORS_LOG:-$PROJECT_ROOT/qemu-guest-errors-riscv64.log}"
+    else
+        QEMU_DEBUG_LOG="${SCARLET_QEMU_DEBUG_LOG:-$PROJECT_ROOT/qemu-debug-riscv64.log}"
+    fi
+    echo "QEMU debug logging enabled (-d $QEMU_DEBUG_FLAGS): $QEMU_DEBUG_LOG"
+    QEMU_DEBUG_ARGS="-d $QEMU_DEBUG_FLAGS -D $QEMU_DEBUG_LOG"
+fi
 
 # Create temporary file for capturing output
 TEMP_OUTPUT=$(mktemp)
@@ -67,6 +89,10 @@ qemu-system-riscv64 \
     -device virtio-gpu-device,bus=virtio-mmio-bus.1 \
     -netdev user,id=net0 \
     -device virtio-net-device,netdev=net0,bus=virtio-mmio-bus.2 \
+    -device virtio-keyboard-device,bus=virtio-mmio-bus.3 \
+    -device virtio-mouse-device,bus=virtio-mmio-bus.4 \
+    -device virtio-rng-device,bus=virtio-mmio-bus.5 \
+    $QEMU_DEBUG_ARGS \
     $DEBUG_FLAGS \
     -initrd "$INITRAMFS_PATH" \
     -kernel "$KERNEL_PATH" | tee "$TEMP_OUTPUT"

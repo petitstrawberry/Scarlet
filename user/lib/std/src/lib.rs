@@ -1,6 +1,6 @@
 //! # Scarlet Standard Library
 //!
-//! This no_std library provides the core functionality for user-space programs 
+//! This no_std library provides the core functionality for user-space programs
 //! running on the Scarlet.
 //!
 //! ## Features
@@ -9,6 +9,30 @@
 //! - System call interface for interacting with the Scarlet kernel
 //! - Architecture-specific functionality
 //! - Custom memory allocator implementation
+//!
+//! ## Handle Model (RawHandle / Handle / Capabilities)
+//!
+//! Scarlet user space interacts with the kernel primarily through *handles*.
+//!
+//! - [`handle::RawHandle`] is the raw integer handle value returned by syscalls.
+//!   By itself it does **not** provide ownership or type information.
+//! - [`handle::Handle`] is the owning RAII wrapper. Dropping it closes the underlying
+//!   kernel object handle.
+//! - When a `Handle` is created (e.g. [`handle::Handle::open`] or
+//!   [`handle::Handle::from_raw`]), user space queries the kernel for
+//!   [`handle::introspection::KernelObjectInfo`] and caches it inside the `Handle`.
+//!   This cached info is then used to validate conversions such as
+//!   [`handle::Handle::as_socket`] without additional syscalls.
+//!
+//! ## High-level Wrappers (File / Socket / SharedMemory)
+//!
+//! Higher-level types in this crate (e.g. [`fs::File`], [`socket::Socket`],
+//! [`ipc::SharedMemory`]) own a [`handle::Handle`] internally.
+//!
+//! - Wrapper constructors from an existing handle are *fallible* and perform a type
+//!   check using the cached object info.
+//! - Capability views (e.g. `StreamOps`, `FileObject`) borrow `&Handle` and are
+//!   obtained via `Handle::as_*` methods.
 //!
 #![no_std]
 #![no_main]
@@ -41,6 +65,7 @@ mod core_exports {
     pub use core::mem;
     pub use core::ops;
     pub use core::option;
+    pub use core::panic;
     pub use core::pin;
     pub use core::ptr;
     pub use core::range;
@@ -59,7 +84,6 @@ mod alloc_exports {
 
     pub use alloc::borrow;
     pub use alloc::boxed;
-    pub use alloc::collections;
     pub use alloc::fmt;
     pub use alloc::format;
     pub use alloc::rc;
@@ -69,23 +93,31 @@ mod alloc_exports {
     pub use alloc::vec;
 }
 
-mod arch;
 mod allocator;
-pub mod syscall;
-pub mod io;
+mod arch;
+pub mod collections;
+pub mod env;
+pub mod ffi;
 pub mod fs;
+pub mod handle;
+pub mod io;
+pub mod ipc;
+pub mod socket;
+pub mod sync;
+pub mod syscall;
 pub mod task;
 pub mod thread;
-pub mod ffi;
-pub mod env;
-pub mod handle;
+
+// Re-export LocalKey type for convenience
+// Note: thread_local! macro is automatically exported at crate root by #[macro_export]
+pub use thread::LocalKey;
 
 /// Debug/profiler utilities
 pub mod profiler {
-    use crate::syscall::{syscall0, Syscall};
-    
+    use crate::syscall::{Syscall, syscall0};
+
     /// Dump profiler statistics from the kernel
-    /// 
+    ///
     /// This function calls the kernel's profiler dump system call to output
     /// performance statistics collected during execution. Only available
     /// when the kernel is built with profiler support.
@@ -94,8 +126,8 @@ pub mod profiler {
     }
 }
 
-pub use core_exports::*;
 pub use alloc_exports::*;
+pub use core_exports::*;
 
 #[panic_handler]
 pub fn panic(_info: &core::panic::PanicInfo) -> ! {

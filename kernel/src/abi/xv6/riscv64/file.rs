@@ -1,23 +1,26 @@
-use alloc::{string::{String, ToString}, sync::Arc, vec::Vec, vec};
 use crate::{
-    abi::xv6::riscv64::fs::xv6fs::{Dirent, Stat}, 
-    arch::Trapframe, 
-    device::manager::DeviceManager, 
-    executor::TransparentExecutor, 
+    abi::xv6::riscv64::fs::xv6fs::{Dirent, Stat},
+    arch::Trapframe,
+    device::manager::DeviceManager,
+    executor::TransparentExecutor,
     fs::{
-        FileType, 
-        SeekFrom,
-        DirectoryEntry, // Legacy support for conversion
         DeviceFileInfo,
-    }, 
+        DirectoryEntry, // Legacy support for conversion
+        FileType,
+        SeekFrom,
+    },
     library::std::string::{
-        cstring_to_string, 
-        parse_c_string_from_userspace, 
-        parse_string_array_from_userspace, 
-    }, 
-    object::capability::StreamError, 
-    sched::scheduler::get_scheduler, 
-    task::mytask, 
+        cstring_to_string, parse_c_string_from_userspace, parse_string_array_from_userspace,
+    },
+    object::capability::StreamError,
+    sched::scheduler::get_scheduler,
+    task::mytask,
+};
+use alloc::{
+    string::{String, ToString},
+    sync::Arc,
+    vec,
+    vec::Vec,
 };
 
 /// Convert Scarlet DirectoryEntry to xv6 Dirent and write to buffer
@@ -31,40 +34,39 @@ fn read_directory_as_xv6_dirent(buf_ptr: *mut u8, count: usize, buffer_data: &[u
         // Convert Scarlet DirectoryEntry to xv6 Dirent
         let inum = (dir_entry.file_id & 0xFFFF) as u16; // Use lower 16 bits as inode number
         let name = dir_entry.name_str().unwrap_or("");
-        
+
         let xv6_dirent = Dirent::new(inum, name);
-        
+
         // Check if we have enough space
         if count >= Dirent::DIRENT_SIZE {
             // Copy the dirent to the buffer
             let dirent_bytes = xv6_dirent.as_bytes();
             unsafe {
-                core::ptr::copy_nonoverlapping(
-                    dirent_bytes.as_ptr(),
-                    buf_ptr,
-                    Dirent::DIRENT_SIZE
-                );
+                core::ptr::copy_nonoverlapping(dirent_bytes.as_ptr(), buf_ptr, Dirent::DIRENT_SIZE);
             }
             return Dirent::DIRENT_SIZE;
         }
     }
-    
+
     0 // No data or error
 }
 
 const MAX_PATH_LENGTH: usize = 128;
 const MAX_ARG_COUNT: usize = 64;
 
-pub fn sys_exec(_abi: &mut crate::abi::xv6::riscv64::Xv6Riscv64Abi, trapframe: &mut Trapframe) -> usize {
+pub fn sys_exec(
+    _abi: &mut crate::abi::xv6::riscv64::Xv6Riscv64Abi,
+    trapframe: &mut Trapframe,
+) -> usize {
     let task = mytask().unwrap();
-    
+
     // Increment PC to avoid infinite loop if execve fails
     trapframe.increment_pc_next(task);
-    
+
     // Get arguments from trapframe
     let path_ptr = trapframe.get_arg(0);
     let argv_ptr = trapframe.get_arg(1);
-    
+
     // Parse path
     let path_str = match parse_c_string_from_userspace(task, path_ptr, MAX_PATH_LENGTH) {
         Ok(path) => match to_absolute_path_v2(&task, &path) {
@@ -73,16 +75,17 @@ pub fn sys_exec(_abi: &mut crate::abi::xv6::riscv64::Xv6Riscv64Abi, trapframe: &
         },
         Err(_) => return usize::MAX, // Path parsing error
     };
-    
+
     // Parse argv and envp
-    let argv_strings = match parse_string_array_from_userspace(task, argv_ptr, MAX_ARG_COUNT, MAX_PATH_LENGTH) {
-        Ok(args) => args,
-        Err(_) => return usize::MAX, // argv parsing error
-    };
-    
+    let argv_strings =
+        match parse_string_array_from_userspace(task, argv_ptr, MAX_ARG_COUNT, MAX_PATH_LENGTH) {
+            Ok(args) => args,
+            Err(_) => return usize::MAX, // argv parsing error
+        };
+
     // Convert Vec<String> to Vec<&str> for TransparentExecutor
     let argv_refs: Vec<&str> = argv_strings.iter().map(|s| s.as_str()).collect();
-    
+
     // Use TransparentExecutor for cross-ABI execution
     match TransparentExecutor::execute_binary(&path_str, &argv_refs, &[], task, trapframe, false) {
         Ok(_) => {
@@ -90,7 +93,7 @@ pub fn sys_exec(_abi: &mut crate::abi::xv6::riscv64::Xv6Riscv64Abi, trapframe: &
             // However, if ABI module sets trapframe return value and returns here,
             // we should respect that value instead of hardcoding 0
             trapframe.get_return_value()
-        },
+        }
         Err(_) => {
             // Execution failed - return error code
             // The trap handler will automatically set trapframe return value from our return
@@ -101,16 +104,22 @@ pub fn sys_exec(_abi: &mut crate::abi::xv6::riscv64::Xv6Riscv64Abi, trapframe: &
 
 #[repr(i32)]
 enum OpenMode {
-    ReadOnly  = 0x000,
+    ReadOnly = 0x000,
     WriteOnly = 0x001,
     ReadWrite = 0x002,
-    Create    = 0x200,
-    Truncate  = 0x400,
+    Create = 0x200,
+    Truncate = 0x400,
 }
 
-pub fn sys_open(abi: &mut crate::abi::xv6::riscv64::Xv6Riscv64Abi, trapframe: &mut Trapframe) -> usize {
+pub fn sys_open(
+    abi: &mut crate::abi::xv6::riscv64::Xv6Riscv64Abi,
+    trapframe: &mut Trapframe,
+) -> usize {
     let task = mytask().unwrap();
-    let path_ptr = task.vm_manager.translate_vaddr(trapframe.get_arg(0)).unwrap() as *const u8;
+    let path_ptr = task
+        .vm_manager
+        .translate_vaddr(trapframe.get_arg(0))
+        .unwrap() as *const u8;
     let mode = trapframe.get_arg(1) as i32;
 
     // Increment PC to avoid infinite loop if open fails
@@ -141,11 +150,11 @@ pub fn sys_open(abi: &mut crate::abi::xv6::riscv64::Xv6Riscv64Abi, trapframe: &m
                         Ok(fd) => fd,
                         Err(_) => usize::MAX, // Too many open files
                     }
-                },
+                }
                 Err(_) => usize::MAX, // Handle table full
             }
         }
-        Err(_) =>{
+        Err(_) => {
             // If the file does not exist and we are trying to create it
             if mode & OpenMode::Create as i32 != 0 {
                 let res = vfs.create_file(&path_str, FileType::RegularFile);
@@ -162,7 +171,7 @@ pub fn sys_open(abi: &mut crate::abi::xv6::riscv64::Xv6Riscv64Abi, trapframe: &m
                                     Ok(fd) => fd,
                                     Err(_) => usize::MAX, // Too many open files
                                 }
-                            },
+                            }
                             Err(_) => usize::MAX, // Handle table full
                         }
                     }
@@ -175,15 +184,18 @@ pub fn sys_open(abi: &mut crate::abi::xv6::riscv64::Xv6Riscv64Abi, trapframe: &m
     }
 }
 
-pub fn sys_dup(abi: &mut crate::abi::xv6::riscv64::Xv6Riscv64Abi, trapframe: &mut Trapframe) -> usize {
+pub fn sys_dup(
+    abi: &mut crate::abi::xv6::riscv64::Xv6Riscv64Abi,
+    trapframe: &mut Trapframe,
+) -> usize {
     let task = mytask().unwrap();
     let fd = trapframe.get_arg(0) as usize;
     trapframe.increment_pc_next(task);
 
     // Get handle from XV6 fd
     if let Some(old_handle) = abi.get_handle(fd) {
-        if let Some(old_kernel_obj) = task.handle_table.get(old_handle) {
-            let kernel_obj = old_kernel_obj.clone();
+        // Use clone_for_dup to get proper dup() semantics (increments Pipe reader/writer counts etc.)
+        if let Some(kernel_obj) = task.handle_table.clone_for_dup(old_handle) {
             let handle = task.handle_table.insert(kernel_obj);
             match handle {
                 Ok(new_handle) => {
@@ -191,7 +203,7 @@ pub fn sys_dup(abi: &mut crate::abi::xv6::riscv64::Xv6Riscv64Abi, trapframe: &mu
                         Ok(fd) => fd,
                         Err(_) => usize::MAX, // Too many open files
                     }
-                },
+                }
                 Err(_) => usize::MAX, // Handle table full
             }
         } else {
@@ -202,11 +214,14 @@ pub fn sys_dup(abi: &mut crate::abi::xv6::riscv64::Xv6Riscv64Abi, trapframe: &mu
     }
 }
 
-pub fn sys_close(abi: &mut crate::abi::xv6::riscv64::Xv6Riscv64Abi, trapframe: &mut Trapframe) -> usize {
+pub fn sys_close(
+    abi: &mut crate::abi::xv6::riscv64::Xv6Riscv64Abi,
+    trapframe: &mut Trapframe,
+) -> usize {
     let task = mytask().unwrap();
     let fd = trapframe.get_arg(0) as usize;
     trapframe.increment_pc_next(task);
-    
+
     // Get handle from XV6 fd and remove mapping
     if let Some(handle) = abi.remove_fd(fd) {
         if task.handle_table.remove(handle).is_some() {
@@ -219,10 +234,16 @@ pub fn sys_close(abi: &mut crate::abi::xv6::riscv64::Xv6Riscv64Abi, trapframe: &
     }
 }
 
-pub fn sys_read(abi: &mut crate::abi::xv6::riscv64::Xv6Riscv64Abi, trapframe: &mut Trapframe) -> usize {
+pub fn sys_read(
+    abi: &mut crate::abi::xv6::riscv64::Xv6Riscv64Abi,
+    trapframe: &mut Trapframe,
+) -> usize {
     let task = mytask().unwrap();
     let fd = trapframe.get_arg(0) as usize;
-    let buf_ptr = task.vm_manager.translate_vaddr(trapframe.get_arg(1)).unwrap() as *mut u8;
+    let buf_ptr = task
+        .vm_manager
+        .translate_vaddr(trapframe.get_arg(1))
+        .unwrap() as *mut u8;
     let count = trapframe.get_arg(2) as usize;
 
     // Get handle from XV6 fd
@@ -265,39 +286,46 @@ pub fn sys_read(abi: &mut crate::abi::xv6::riscv64::Xv6Riscv64Abi, trapframe: &m
         // For directories, we need a larger buffer to read DirectoryEntry, then convert to Dirent
         let directory_entry_size = core::mem::size_of::<DirectoryEntry>();
         let mut temp_buffer = vec![0u8; directory_entry_size];
-        
+
         match stream.read(&mut temp_buffer) {
             Ok(n) => {
                 trapframe.increment_pc_next(task); // Increment PC to avoid infinite loop
                 if n > 0 && n >= directory_entry_size {
                     // Convert DirectoryEntry to xv6 Dirent
-                    let converted_bytes = read_directory_as_xv6_dirent(buf_ptr, count, &temp_buffer[..n]);
+                    let converted_bytes =
+                        read_directory_as_xv6_dirent(buf_ptr, count, &temp_buffer[..n]);
                     if converted_bytes > 0 {
                         return converted_bytes; // Return converted xv6 dirent size
                     }
                 }
                 0 // EOF or no valid directory entry
-            },
+            }
             Err(_) => usize::MAX, // Read error
         }
     } else {
         // For regular files, use the user-provided buffer directly
         let mut buffer = unsafe { core::slice::from_raw_parts_mut(buf_ptr, count) };
-        
+
         match stream.read(&mut buffer) {
             Ok(n) => {
                 trapframe.increment_pc_next(task); // Increment PC to avoid infinite loop
                 n
-            }, // Return original read size for regular files
+            } // Return original read size for regular files
             Err(_) => usize::MAX, // Read error
         }
     }
 }
 
-pub fn sys_write(abi: &mut crate::abi::xv6::riscv64::Xv6Riscv64Abi, trapframe: &mut Trapframe) -> usize {
+pub fn sys_write(
+    abi: &mut crate::abi::xv6::riscv64::Xv6Riscv64Abi,
+    trapframe: &mut Trapframe,
+) -> usize {
     let task = mytask().unwrap();
     let fd = trapframe.get_arg(0) as usize;
-    let buf_ptr = task.vm_manager.translate_vaddr(trapframe.get_arg(1)).unwrap() as *const u8;
+    let buf_ptr = task
+        .vm_manager
+        .translate_vaddr(trapframe.get_arg(1))
+        .unwrap() as *const u8;
     let count = trapframe.get_arg(2) as usize;
 
     // Increment PC to avoid infinite loop if write fails
@@ -327,7 +355,10 @@ pub fn sys_write(abi: &mut crate::abi::xv6::riscv64::Xv6Riscv64Abi, trapframe: &
     }
 }
 
-pub fn sys_lseek(abi: &mut crate::abi::xv6::riscv64::Xv6Riscv64Abi, trapframe: &mut Trapframe) -> usize {
+pub fn sys_lseek(
+    abi: &mut crate::abi::xv6::riscv64::Xv6Riscv64Abi,
+    trapframe: &mut Trapframe,
+) -> usize {
     let task = mytask().unwrap();
     let fd = trapframe.get_arg(0) as usize;
     let offset = trapframe.get_arg(1) as i64;
@@ -366,10 +397,16 @@ pub fn sys_lseek(abi: &mut crate::abi::xv6::riscv64::Xv6Riscv64Abi, trapframe: &
 }
 
 // Create device file
-pub fn sys_mknod(_abi: &mut crate::abi::xv6::riscv64::Xv6Riscv64Abi, trapframe: &mut Trapframe) -> usize {
+pub fn sys_mknod(
+    _abi: &mut crate::abi::xv6::riscv64::Xv6Riscv64Abi,
+    trapframe: &mut Trapframe,
+) -> usize {
     let task = mytask().unwrap();
     trapframe.increment_pc_next(task);
-    let name_ptr = task.vm_manager.translate_vaddr(trapframe.get_arg(0)).unwrap() as *const u8;
+    let name_ptr = task
+        .vm_manager
+        .translate_vaddr(trapframe.get_arg(0))
+        .unwrap() as *const u8;
     let name = get_path_str_v2(name_ptr).unwrap();
     let path = to_absolute_path_v2(&task, &name).unwrap();
 
@@ -380,40 +417,44 @@ pub fn sys_mknod(_abi: &mut crate::abi::xv6::riscv64::Xv6Riscv64Abi, trapframe: 
         (1, 0) => {
             // Create a console device
             let console_dev = Some(DeviceManager::get_mut_manager().register_device(Arc::new(
-                crate::abi::xv6::drivers::console::ConsoleDevice::new(0, "console")
+                crate::abi::xv6::drivers::console::ConsoleDevice::new(0, "console"),
             )));
-        
+
             let vfs = task.vfs.as_mut().unwrap();
-            let _res = vfs.create_file(&path, FileType::CharDevice(
-                DeviceFileInfo {
+            let _res = vfs.create_file(
+                &path,
+                FileType::CharDevice(DeviceFileInfo {
                     device_id: console_dev.unwrap(),
                     device_type: crate::device::DeviceType::Char,
-                }
-            ));
+                }),
+            );
             // crate::println!("Created console device at {}", path);
-        },
-        _ => {},
+        }
+        _ => {}
     }
     0
 }
 
-
-pub fn sys_fstat(abi: &mut crate::abi::xv6::riscv64::Xv6Riscv64Abi, trapframe: &mut crate::arch::Trapframe) -> usize {
+pub fn sys_fstat(
+    abi: &mut crate::abi::xv6::riscv64::Xv6Riscv64Abi,
+    trapframe: &mut crate::arch::Trapframe,
+) -> usize {
     let fd = trapframe.get_arg(0) as usize;
 
-    let task = mytask()
-        .expect("sys_fstat: No current task found");
+    let task = mytask().expect("sys_fstat: No current task found");
     trapframe.increment_pc_next(task); // Increment the program counter
 
-    let stat_ptr = task.vm_manager.translate_vaddr(trapframe.get_arg(1) as usize)
+    let stat_ptr = task
+        .vm_manager
+        .translate_vaddr(trapframe.get_arg(1) as usize)
         .expect("sys_fstat: Failed to translate stat pointer") as *mut Stat;
-    
+
     // Get handle from XV6 fd
     let handle = match abi.get_handle(fd) {
         Some(h) => h,
         None => return usize::MAX, // Invalid file descriptor
     };
-    
+
     let kernel_obj = match task.handle_table.get(handle) {
         Some(obj) => obj,
         None => return usize::MAX, // Return -1 on error
@@ -424,24 +465,25 @@ pub fn sys_fstat(abi: &mut crate::abi::xv6::riscv64::Xv6Riscv64Abi, trapframe: &
         None => return usize::MAX, // Not a file object
     };
 
-    let metadata = file.metadata()
+    let metadata = file
+        .metadata()
         .expect("sys_fstat: Failed to get file metadata");
 
     if stat_ptr.is_null() {
         return usize::MAX; // Return -1 if stat pointer is null
     }
-    
+
     let stat = unsafe { &mut *stat_ptr };
 
     *stat = Stat {
         dev: 0,
         ino: metadata.file_id as u32,
         file_type: match metadata.file_type {
-            FileType::Directory => 1, // T_DIR
-            FileType::RegularFile => 2,      // T_FILE
-            FileType::CharDevice(_) => 3, // T_DEVICE
+            FileType::Directory => 1,      // T_DIR
+            FileType::RegularFile => 2,    // T_FILE
+            FileType::CharDevice(_) => 3,  // T_DEVICE
             FileType::BlockDevice(_) => 3, // T_DEVICE
-            _ => 0, // Unknown type
+            _ => 0,                        // Unknown type
         },
         nlink: 1,
         size: metadata.size as u64,
@@ -450,11 +492,17 @@ pub fn sys_fstat(abi: &mut crate::abi::xv6::riscv64::Xv6Riscv64Abi, trapframe: &
     0
 }
 
-pub fn sys_mkdir(_abi: &mut crate::abi::xv6::riscv64::Xv6Riscv64Abi, trapframe: &mut Trapframe) -> usize {
+pub fn sys_mkdir(
+    _abi: &mut crate::abi::xv6::riscv64::Xv6Riscv64Abi,
+    trapframe: &mut Trapframe,
+) -> usize {
     let task = mytask().unwrap();
     trapframe.increment_pc_next(task);
-    
-    let path_ptr = task.vm_manager.translate_vaddr(trapframe.get_arg(0)).unwrap() as *const u8;
+
+    let path_ptr = task
+        .vm_manager
+        .translate_vaddr(trapframe.get_arg(0))
+        .unwrap() as *const u8;
     let path = match get_path_str_v2(path_ptr) {
         Ok(p) => to_absolute_path_v2(&task, &p).unwrap(),
         Err(_) => return usize::MAX, // Invalid path
@@ -463,16 +511,22 @@ pub fn sys_mkdir(_abi: &mut crate::abi::xv6::riscv64::Xv6Riscv64Abi, trapframe: 
     // Try to create the directory
     let vfs = task.vfs.as_mut().unwrap();
     match vfs.create_dir(&path) {
-        Ok(_) => 0, // Success
+        Ok(_) => 0,           // Success
         Err(_) => usize::MAX, // Error
     }
 }
 
-pub fn sys_unlink(_abi: &mut crate::abi::xv6::riscv64::Xv6Riscv64Abi, trapframe: &mut Trapframe) -> usize {
+pub fn sys_unlink(
+    _abi: &mut crate::abi::xv6::riscv64::Xv6Riscv64Abi,
+    trapframe: &mut Trapframe,
+) -> usize {
     let task = mytask().unwrap();
     trapframe.increment_pc_next(task);
-    
-    let path_ptr = task.vm_manager.translate_vaddr(trapframe.get_arg(0)).unwrap() as *const u8;
+
+    let path_ptr = task
+        .vm_manager
+        .translate_vaddr(trapframe.get_arg(0))
+        .unwrap() as *const u8;
     let path = match cstring_to_string(path_ptr, MAX_PATH_LENGTH) {
         Ok((p, _)) => to_absolute_path_v2(&task, &p).unwrap(),
         Err(_) => return usize::MAX, // Invalid path
@@ -481,17 +535,26 @@ pub fn sys_unlink(_abi: &mut crate::abi::xv6::riscv64::Xv6Riscv64Abi, trapframe:
     // Try to remove the file or directory
     let vfs = task.vfs.as_mut().unwrap();
     match vfs.remove(&path) {
-        Ok(_) => 0, // Success
+        Ok(_) => 0,           // Success
         Err(_) => usize::MAX, // Error
     }
 }
 
-pub fn sys_link(_abi: &mut crate::abi::xv6::riscv64::Xv6Riscv64Abi, trapframe: &mut Trapframe) -> usize {
+pub fn sys_link(
+    _abi: &mut crate::abi::xv6::riscv64::Xv6Riscv64Abi,
+    trapframe: &mut Trapframe,
+) -> usize {
     let task = mytask().unwrap();
     trapframe.increment_pc_next(task);
-    
-    let src_path_ptr = task.vm_manager.translate_vaddr(trapframe.get_arg(0)).unwrap() as *const u8;
-    let dst_path_ptr = task.vm_manager.translate_vaddr(trapframe.get_arg(1)).unwrap() as *const u8;
+
+    let src_path_ptr = task
+        .vm_manager
+        .translate_vaddr(trapframe.get_arg(0))
+        .unwrap() as *const u8;
+    let dst_path_ptr = task
+        .vm_manager
+        .translate_vaddr(trapframe.get_arg(1))
+        .unwrap() as *const u8;
 
     let src_path = match cstring_to_string(src_path_ptr, MAX_PATH_LENGTH) {
         Ok((p, _)) => to_absolute_path_v2(&task, &p).unwrap(),
@@ -508,28 +571,28 @@ pub fn sys_link(_abi: &mut crate::abi::xv6::riscv64::Xv6Riscv64Abi, trapframe: &
         Ok(_) => 0, // Success
         Err(err) => {
             use crate::fs::FileSystemErrorKind;
-            
+
             // Map VFS errors to appropriate errno values for xv6
             match err.kind {
                 FileSystemErrorKind::NotFound => {
                     // Source file doesn't exist
                     2 // ENOENT
-                },
+                }
                 FileSystemErrorKind::FileExists => {
                     // Destination already exists
                     17 // EEXIST
-                },
+                }
                 FileSystemErrorKind::CrossDevice => {
                     // Hard links across devices not supported
                     18 // EXDEV
-                },
+                }
                 FileSystemErrorKind::InvalidOperation => {
                     // Operation not supported (e.g., directory hardlink)
                     1 // EPERM
-                },
+                }
                 FileSystemErrorKind::PermissionDenied => {
                     13 // EACCES
-                },
+                }
                 _ => {
                     // Other errors
                     5 // EIO
@@ -554,5 +617,7 @@ fn to_absolute_path_v2(task: &crate::task::Task, path: &str) -> Result<String, (
 /// TODO: This should be moved to a shared helper when VFS v2 provides public API
 fn get_path_str_v2(ptr: *const u8) -> Result<String, ()> {
     const MAX_PATH_LENGTH: usize = 128;
-    cstring_to_string(ptr, MAX_PATH_LENGTH).map(|(s, _)| s).map_err(|_| ())
+    cstring_to_string(ptr, MAX_PATH_LENGTH)
+        .map(|(s, _)| s)
+        .map_err(|_| ())
 }

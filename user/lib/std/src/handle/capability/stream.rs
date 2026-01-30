@@ -3,7 +3,8 @@
 //! This module provides type-safe stream operations (read/write) for KernelObjects
 //! that support the StreamOps capability.
 
-use crate::syscall::{syscall3, Syscall};
+use crate::handle::Handle;
+use crate::syscall::{Syscall, syscall3};
 
 /// Result type for stream operations
 pub type StreamResult<T> = Result<T, StreamError>;
@@ -17,6 +18,8 @@ pub enum StreamError {
     InvalidHandle,
     /// End of stream reached
     EndOfStream,
+    /// Operation would block (non-blocking I/O)
+    WouldBlock,
     /// Input/output error
     IoError,
     /// Permission denied
@@ -29,8 +32,16 @@ pub enum StreamError {
 
 impl StreamError {
     pub fn from_syscall_result(result: usize) -> Result<usize, Self> {
+        // Check for negative error codes (stored as large usize values)
         if result == usize::MAX {
             Err(StreamError::SystemError(-1)) // Generic error
+        } else if result > (isize::MAX as usize) {
+            // Negative value stored as usize indicates errno
+            let errno = -(result as isize) as i32;
+            match errno {
+                11 => Err(StreamError::WouldBlock), // EAGAIN
+                _ => Err(StreamError::SystemError(errno)),
+            }
         } else {
             Ok(result)
         }
@@ -38,57 +49,56 @@ impl StreamError {
 }
 
 /// Stream operations capability for reading and writing data
-pub struct StreamOps {
-    handle: i32,
+pub struct StreamOps<'a> {
+    handle: &'a Handle,
 }
 
-impl StreamOps {
-    /// Create a StreamOps capability from a raw handle
-    /// 
-    /// # Safety
-    /// The caller must ensure that the handle is valid and supports StreamOps
-    pub fn from_handle(handle: i32) -> Self {
+impl<'a> StreamOps<'a> {
+    /// Construct a `StreamOps` capability from a [`Handle`] reference.
+    ///
+    /// This is crate-internal to prevent bypassing `Handle::as_stream` validation.
+    pub(crate) fn from_handle(handle: &'a Handle) -> Self {
         Self { handle }
     }
 
     /// Read data from the stream
-    /// 
+    ///
     /// # Arguments
     /// * `buffer` - Buffer to read data into
-    /// 
+    ///
     /// # Returns
     /// Number of bytes actually read, or StreamError on failure
     pub fn read(&self, buffer: &mut [u8]) -> StreamResult<usize> {
         let result = syscall3(
             Syscall::StreamRead,
-            self.handle as usize,
+            self.handle.as_raw() as usize,
             buffer.as_mut_ptr() as usize,
             buffer.len(),
         );
-        
+
         StreamError::from_syscall_result(result)
     }
 
     /// Write data to the stream
-    /// 
+    ///
     /// # Arguments
     /// * `buffer` - Data to write
-    /// 
+    ///
     /// # Returns
     /// Number of bytes actually written, or StreamError on failure
     pub fn write(&self, buffer: &[u8]) -> StreamResult<usize> {
         let result = syscall3(
             Syscall::StreamWrite,
-            self.handle as usize,
+            self.handle.as_raw() as usize,
             buffer.as_ptr() as usize,
             buffer.len(),
         );
-        
+
         StreamError::from_syscall_result(result)
     }
 
     /// Write all data to the stream
-    /// 
+    ///
     /// This is a convenience method that calls write() repeatedly until
     /// all data is written or an error occurs.
     pub fn write_all(&self, mut buffer: &[u8]) -> StreamResult<()> {
@@ -103,7 +113,7 @@ impl StreamOps {
     }
 
     /// Read exact amount of data from the stream
-    /// 
+    ///
     /// This is a convenience method that calls read() repeatedly until
     /// the buffer is filled or an error occurs.
     pub fn read_exact(&self, mut buffer: &mut [u8]) -> StreamResult<()> {

@@ -3,6 +3,12 @@ name = "userprogram"
 version = "0.15.0"
 edition = "2024"
 
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"
+
 [[bin]]
 name = "init"
 path = "src/init.rs"
@@ -13,11 +19,15 @@ path = "src/login.rs"
 
 [[bin]]
 name = "sh"
-path = "src/sh.rs"
+path = "src/sh/main.rs"
 
 [[bin]]
 name = "ls"
 path = "src/ls.rs"
+
+[[bin]]
+name = "rm"
+path = "src/rm.rs"
 
 [[bin]]
 name = "hello"
@@ -48,5 +58,24 @@ name = "drm_test"
 path = "src/drm_test.rs"
 
 [dependencies]
-scarlet_std = { path = "../lib/std" }
+scarlet_std = { path = "../lib/std", features = ["alloc_debug"] }
 framebuffer = { path = "../lib/framebuffer" }
+sws_protocol = { path = "../lib/sws_protocol" }
+sws-client = { path = "../lib/sws-client" }
+scarlet-ui = { path = "../lib/scarlet-ui" }
+scarlet-ui-macros = { path = "../lib/scarlet-ui-macros" }
+slint-scarlet = { path = "../lib/slint-scarlet" }
+scarlet-desktop-config = { path = "../lib/scarlet-desktop-config" }
+sbus = { path = "../lib/sbus" }
+sbus-client = { path = "../lib/sbus-client" }
+serde = { version = "1.0", default-features = false, features = ["alloc", "derive"] }
+serde-json-core = { package = "serde-json-core", version = "0.6", default-features = false }
+slint = { version = "1.14", default-features = false, features = [
+    "unsafe-single-threaded",
+    "renderer-software",
+    "libm",
+    "compat-1-2"
+] }
+
+[build-dependencies]
+slint-build = "1.14"

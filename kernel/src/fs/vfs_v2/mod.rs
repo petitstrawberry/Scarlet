@@ -43,7 +43,5 @@ pub mod syscall;
 #[cfg(test)]
 pub mod tests;
 
-
-
 pub use core::*;
-pub use manager::{VfsManager, PathResolutionOptions};
+pub use manager::{PathResolutionOptions, VfsManager};

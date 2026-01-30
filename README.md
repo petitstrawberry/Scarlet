@@ -7,6 +7,7 @@
 [![Version](https://img.shields.io/badge/version-0.15.0-blue.svg)](https://github.com/petitstrawberry/Scarlet)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![RISC-V](https://img.shields.io/badge/arch-RISC--V%2064-green)](https://riscv.org/)
+[![AArch64](https://img.shields.io/badge/arch-AArch64-orange)](https://www.arm.com/)
 [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/petitstrawberry/Scarlet)
 
 </div>
@@ -22,7 +23,7 @@ Scarlet is an operating system kernel written in Rust that implements native ABI
 ```bash
 # Get started with Docker (recommended)
 docker build -t scarlet-dev .
-docker run -it --rm scarlet-dev bash -c "cargo make build && cargo make run"
+docker run -it --rm -v $(pwd):/workspaces/Scarlet scarlet-dev bash -c "cargo make run-riscv64"
 
 # Once Scarlet boots, you'll see:
 Login successful for user: root
@@ -58,10 +59,11 @@ See [Linux ABI Demo instructions](docs/abi/linux/demo.md) for detailed instructi
 
 ```bash
 # Quick summary (inside scarlet-dev container):
+# For RISC-V (default)
 bash tools/linux/build_buildroot.sh
 bash tools/linux/build_user_programs.sh
 bash tools/linux/deploy_rootfs.sh
-cargo make run
+cargo make run-riscv64
 ```
 
 These commands rebuild the Buildroot-based Linux rootfs (providing standard utilities via BusyBox) and optional demo binaries, showcasing the initial Linux ABI support alongside Scarlet and xv6.
@@ -95,10 +97,13 @@ This interoperability is possible because all ABIs share the same underlying ker
 ## Key Features
 
 - **Multi-ABI Support**: Transparent execution of binaries from different operating systems
+- **Runtime Delegation**: Execute binaries via userland runtimes (Wasm, emulators, etc.) - [Details](docs/runtime-delegation.md)
+- **Service Management**: Stem daemon (stemd) provides systemd-like service management with dependency resolution - [Details](docs/stemd.md)
 - **Container Runtime**: Complete filesystem isolation with namespace support
 - **Dynamic Linking**: Native dynamic linker support for shared libraries and position-independent executables
 - **Advanced VFS**: Modern virtual filesystem with ext2, FAT32, overlay, bind mount, and device file support
 - **Graphics Support**: Framebuffer device support with graphics hardware abstraction
+- **Windowing / UI (in progress)**: SWS protocol + client libraries - [Protocol](docs/sws_ipc_protocol.md), [sws-client](docs/sws_client.md), [scarlet-ui](docs/scarlet_ui.md)
 - **System Integration**: TTY devices, interrupt handling, and comprehensive device management
 - **Task Management**: Full task lifecycle with environment variables and IPC pipes
 - **Event System**: Advanced IPC with event-driven communication and synchronization
@@ -144,7 +149,26 @@ The Linux ABI implementation is currently in active development:
 
 ## Architecture Support
 
-Currently supports RISC-V 64-bit architecture with plans for additional architectures. The kernel includes hardware abstraction layers for interrupt handling, memory management, graphics/framebuffer support, and device drivers.
+Scarlet supports multiple CPU architectures with a unified codebase:
+
+- **RISC-V 64-bit** - Primary development platform, fully supported
+- **AArch64 (ARM 64-bit)** - Experimental supported
+
+The kernel includes hardware abstraction layers for interrupt handling, memory management, graphics/framebuffer support, and device drivers that work across both architectures.
+
+### Building for Different Architectures
+
+```bash
+# RISC-V (default)
+cargo make build
+cargo make run-riscv64
+
+# AArch64
+ARCH=aarch64 cargo make build
+cargo make run-aarch64
+```
+
+See [Multi-Architecture Support documentation](docs/multi-architecture.md) for detailed information on cross-architecture development.
 
 ## Filesystem Support
 
@@ -175,9 +199,9 @@ docker build -t scarlet-dev .
 docker run -it --rm -v $(pwd):/workspaces/Scarlet scarlet-dev
 
 # Common commands:
-cargo make build && cargo make run    # Build and run
-cargo make test                       # Run tests  
-cargo make debug                      # Debug with GDB
+cargo make run-riscv64                        # Build (release) and run (RISC-V)
+cargo make test-riscv64               # Run tests (RISC-V)
+cargo make debug-riscv64              # Debug with GDB
 ```
 
 ### Local Development
@@ -187,27 +211,28 @@ Requirements: Rust nightly, `cargo-make`, `qemu`, RISC-V toolchain
 ### Build Commands
 
 ```bash
-# Full build (recommended for first time)
-cargo make build
+# Full build (RISC-V, debug)
+cargo make build-riscv64
 
 # Individual components
-cargo make build-kernel    # Kernel only
-cargo make build-userlib   # User space library
-cargo make build-userbin   # User programs
-cargo make build-initramfs # Initial RAM filesystem
+cargo make build-kernel-debug-riscv64     # Kernel only
+cargo make build-userlib-debug-riscv64    # User space library
+cargo make build-userbin-debug-riscv64    # User programs
+cargo make build-initramfs-debug-riscv64  # Initial RAM filesystem
+cargo make build-rootfs-riscv64           # Root filesystem image
 
 # Clean build artifacts
-cargo make clean
+cargo make clean-riscv64
 ```
 
 ### Testing and Debugging
 
 ```bash
 # Run all tests
-cargo make test
+cargo make test-riscv64
 
 # Debug kernel with GDB
-cargo make debug
+cargo make debug-riscv64
 # Then in another terminal: gdb and connect to :1234
 ```
 
@@ -230,7 +255,7 @@ To generate the documentation, run:
 
 ```bash
 # Generate documentation
-cargo make doc             # Generate docs for all components
+cargo make doc-riscv64      # Generate docs for all components (RISC-V)
 cargo make doc-kernel      # Generate kernel docs only
 cargo make doc-userlib     # Generate user library docs only
 ```

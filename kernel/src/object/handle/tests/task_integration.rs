@@ -1,15 +1,15 @@
 use super::super::*;
-use super::mock::{MockTaskFileObject};
+use super::mock::MockTaskFileObject;
+use crate::fs::{FileType, SeekFrom};
 use crate::object::handle::HandleTable;
-use crate::task::{new_user_task, CloneFlags};
+use crate::task::{CloneFlags, new_user_task};
+use alloc::format;
+use alloc::string::ToString;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
-use alloc::string::ToString;
-use alloc::format;
-use crate::fs::{FileType, SeekFrom};
 
 /// Task integration tests for HandleTable
-/// 
+///
 /// These tests verify that the handle table integrates correctly with the Task
 /// system, including process lifecycle management, FD compatibility, cloning,
 /// and error handling.
@@ -68,12 +68,10 @@ fn test_task_handle_table_fd_compatibility() {
 
     // Test that handles work like traditional file descriptors
     let mut handles = Vec::new();
-    
+
     // Allocate several handles
     for i in 0..10 {
-        let mock_file = Arc::new(MockTaskFileObject::new(
-            format!("file_{}", i).into_bytes()
-        ));
+        let mock_file = Arc::new(MockTaskFileObject::new(format!("file_{}", i).into_bytes()));
         let kernel_obj = KernelObject::File(mock_file);
         let handle = task.handle_table.insert(kernel_obj).unwrap();
         handles.push(handle);
@@ -104,10 +102,10 @@ fn test_task_handle_table_process_lifecycle() {
 
     // Simulate a process opening multiple files
     let mut open_handles = Vec::new();
-    
+
     for i in 0..5 {
         let mock_file = Arc::new(MockTaskFileObject::new(
-            format!("process_file_{}", i).into_bytes()
+            format!("process_file_{}", i).into_bytes(),
         ));
         let kernel_obj = KernelObject::File(mock_file);
         let handle = task.handle_table.insert(kernel_obj).unwrap();
@@ -123,7 +121,10 @@ fn test_task_handle_table_process_lifecycle() {
     assert_eq!(task.handle_table.active_handles().len(), 0);
 
     // All handles should now be available for reuse
-    assert_eq!(task.handle_table.free_handles.len(), HandleTable::MAX_HANDLES);
+    assert_eq!(
+        task.handle_table.free_handles_len(),
+        HandleTable::MAX_HANDLES
+    );
 }
 
 #[test_case]
@@ -138,11 +139,11 @@ fn test_task_handle_table_error_conditions() {
 
     // Test handle limit enforcement
     let mut handles = Vec::new();
-    
+
     // Fill up to the limit
     for i in 0..HandleTable::MAX_HANDLES {
         let mock_file = Arc::new(MockTaskFileObject::new(
-            format!("limit_test_{}", i).into_bytes()
+            format!("limit_test_{}", i).into_bytes(),
         ));
         let kernel_obj = KernelObject::File(mock_file);
         let handle = task.handle_table.insert(kernel_obj).unwrap();
@@ -153,16 +154,26 @@ fn test_task_handle_table_error_conditions() {
     let mock_file = Arc::new(MockTaskFileObject::new(b"overflow".to_vec()));
     let kernel_obj = KernelObject::File(mock_file);
     let result = task.handle_table.insert(kernel_obj);
-    
+
     assert!(result.is_err());
-    assert_eq!(result.unwrap_err(), "Too many open KernelObjects, limit reached");
+    assert_eq!(
+        result.unwrap_err(),
+        "Too many open KernelObjects, limit reached"
+    );
 }
 
 #[test_case]
 fn test_task_handle_table_clone_behavior() {
-    // Test how handle table behaves during task cloning
+    // Reset scheduler state before test
+    let scheduler = crate::sched::scheduler::get_scheduler();
+    scheduler.reset();
+
+    // Initialize parent task first, then add to scheduler
     let mut parent_task = new_user_task("ParentTask".to_string(), 1);
     parent_task.init();
+
+    let parent_id = scheduler.add_task(parent_task, 0);
+    let mut parent_task = scheduler.get_task_by_id(parent_id).unwrap();
 
     // Open some files in parent
     let mock_file1 = Arc::new(MockTaskFileObject::new(b"parent_file_1".to_vec()));
@@ -176,58 +187,52 @@ fn test_task_handle_table_clone_behavior() {
 
     assert_eq!(parent_task.handle_table.open_count(), 2);
 
-    // Clone the task (this should clone the handle table)
-    let mut child_task = parent_task.clone_task(CloneFlags::default()).unwrap();
+    // Clone the task with default flags (CLONE_FILES is set by default)
+    // Since CLONE_FILES is set, the handle table is shared (shallow clone)
+    let child_task = parent_task.clone_task(CloneFlags::default()).unwrap();
 
-    // Child should inherit parent's handle table (Linux fork() behavior)
+    // With CLONE_FILES, child shares handle table with parent
+    // When we remove handle1 from child, it affects parent too
     assert_eq!(child_task.handle_table.open_count(), 2);
-    
-    // Parent's handle table should be unaffected
     assert_eq!(parent_task.handle_table.open_count(), 2);
     assert!(parent_task.handle_table.is_valid_handle(handle1));
     assert!(parent_task.handle_table.is_valid_handle(handle2));
-
-    // Child should have inherited the same handles
     assert!(child_task.handle_table.is_valid_handle(handle1));
     assert!(child_task.handle_table.is_valid_handle(handle2));
 
-    // Verify that child and parent have independent handle tables (closing in one doesn't affect the other)
+    // With CLONE_FILES, removing from child DOES affect parent (shared table)
     child_task.handle_table.remove(handle1);
     assert_eq!(child_task.handle_table.open_count(), 1);
-    assert_eq!(parent_task.handle_table.open_count(), 2); // Parent still has both handles
-    assert!(parent_task.handle_table.is_valid_handle(handle1)); // Parent's handle1 still valid
+    assert_eq!(parent_task.handle_table.open_count(), 1); // Parent is also affected
+    assert!(!parent_task.handle_table.is_valid_handle(handle1)); // Parent's handle1 is now invalid
 
-    // Child and parent should have independent handle tables for new allocations
-    let mock_child_file = Arc::new(MockTaskFileObject::new(b"child_file".to_vec()));
-    let child_kernel_obj = KernelObject::File(mock_child_file);
-    let child_handle = child_task.handle_table.insert(child_kernel_obj).unwrap();
+    // Both still share access to handle2
+    let parent_obj = parent_task.handle_table.get(handle2);
+    let child_obj = child_task.handle_table.get(handle2);
+    assert!(parent_obj.is_some());
+    assert!(child_obj.is_some());
 
-    assert_eq!(child_task.handle_table.open_count(), 2); // handle2 + new child_handle
-    assert_eq!(parent_task.handle_table.open_count(), 2); // Still has both original handles
-    
-    // New child handle should reuse the freed handle1 slot
-    assert_eq!(child_handle, handle1); // Should reuse handle1 (0)
-
-    // Verify that the file objects are still accessible from both tasks
-    // and contain the same data (Arc sharing), but positions are also shared
-    if let Some(parent_obj) = parent_task.handle_table.get(handle2) {
-        if let Some(child_obj) = child_task.handle_table.get(handle2) {
-            if let (Some(parent_stream), Some(child_stream)) = (parent_obj.as_stream(), child_obj.as_stream()) {
+    // Verify the file objects are the same (shared via Arc)
+    if let Some(parent_obj) = parent_obj {
+        if let Some(child_obj) = child_obj {
+            if let (Some(parent_stream), Some(child_stream)) =
+                (parent_obj.as_stream(), child_obj.as_stream())
+            {
                 // Read from parent first - this will advance the shared position
                 let mut parent_buffer = [0u8; 13];
                 let parent_bytes = parent_stream.read(&mut parent_buffer).unwrap();
                 assert_eq!(parent_bytes, 13);
                 assert_eq!(&parent_buffer, b"parent_file_2");
-                
+
                 // Now try to read from child - position should have advanced, so it returns 0
                 let mut child_buffer = [0u8; 13];
                 let child_bytes = child_stream.read(&mut child_buffer).unwrap();
                 assert_eq!(child_bytes, 0); // No more data to read because position is at EOF
-                
+
                 // Reset position using parent's file object and try again
                 if let Some(parent_file) = parent_obj.as_file() {
                     parent_file.seek(SeekFrom::Start(0)).unwrap(); // Reset to beginning
-                    
+
                     // Now child should be able to read from the beginning
                     let child_bytes = child_stream.read(&mut child_buffer).unwrap();
                     assert_eq!(child_bytes, 13);
@@ -240,8 +245,16 @@ fn test_task_handle_table_clone_behavior() {
 
 #[test_case]
 fn test_task_handle_table_memory_efficiency() {
+    // Reset scheduler state before test
+    let scheduler = crate::sched::scheduler::get_scheduler();
+    scheduler.reset();
+
+    // Initialize task first, then add to scheduler
     let mut task = new_user_task("MemoryTask".to_string(), 1);
     task.init();
+
+    let task_id = scheduler.add_task(task, 0);
+    let mut task = scheduler.get_task_by_id(task_id).unwrap();
 
     // Test that repeated allocation/deallocation doesn't cause memory leaks
     for iteration in 0..50 {
@@ -250,7 +263,7 @@ fn test_task_handle_table_memory_efficiency() {
         // Allocate some handles
         for i in 0..20 {
             let mock_file = Arc::new(MockTaskFileObject::new(
-                format!("iter_{}_file_{}", iteration, i).into_bytes()
+                format!("iter_{}_file_{}", iteration, i).into_bytes(),
             ));
             let kernel_obj = KernelObject::File(mock_file);
             let handle = task.handle_table.insert(kernel_obj).unwrap();
@@ -269,13 +282,24 @@ fn test_task_handle_table_memory_efficiency() {
 
     // After all iterations, handle table should be in clean state
     assert_eq!(task.handle_table.open_count(), 0);
-    assert_eq!(task.handle_table.free_handles.len(), HandleTable::MAX_HANDLES);
+    assert_eq!(
+        task.handle_table.free_handles_len(),
+        HandleTable::MAX_HANDLES
+    );
 }
 
 #[test_case]
 fn test_task_handle_table_capability_access() {
+    // Reset scheduler state before test
+    let scheduler = crate::sched::scheduler::get_scheduler();
+    scheduler.reset();
+
+    // Initialize task first, then add to scheduler
     let mut task = new_user_task("CapabilityTask".to_string(), 1);
     task.init();
+
+    let task_id = scheduler.add_task(task, 0);
+    let mut task = scheduler.get_task_by_id(task_id).unwrap();
 
     // Test accessing different capabilities through handles
     let mock_file = Arc::new(MockTaskFileObject::new(b"capability_test_data".to_vec()));

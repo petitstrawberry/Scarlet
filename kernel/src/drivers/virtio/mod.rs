@@ -1,5 +1,5 @@
-pub mod queue;
 pub mod device;
+pub mod queue;
 
 pub mod features {
     pub const VIRTIO_F_ANY_LAYOUT: u32 = 27;

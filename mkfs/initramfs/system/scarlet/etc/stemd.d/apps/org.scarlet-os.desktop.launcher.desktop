@@ -1,0 +1,7 @@
+[Desktop Entry]
+Name=Application Launcher
+Comment=Launch applications
+Exec=/bin/scarlet_desktop_launcher
+Icon=launcher
+Type=Application
+Terminal=false

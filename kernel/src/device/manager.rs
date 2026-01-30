@@ -31,10 +31,10 @@
 //!
 //! ```
 //! use crate::device::manager::{DeviceManager, DriverPriority};
-//! 
+//!
 //! // Create a new device driver
 //! let my_driver = Box::new(MyDeviceDriver::new());
-//! 
+//!
 //! // Register with the device manager at Core priority
 //! DeviceManager::get_mut_manager().register_driver(my_driver, DriverPriority::Core);
 //! ```
@@ -44,22 +44,22 @@ extern crate alloc;
 use core::sync::atomic::AtomicUsize;
 use core::sync::atomic::Ordering;
 
+use alloc::boxed::Box;
 use alloc::collections::btree_map::BTreeMap;
+use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
-use alloc::boxed::Box;
-use alloc::string::String;
 use spin::mutex::Mutex;
 
+use crate::device::platform::PlatformDeviceInfo;
 use crate::device::platform::resource::PlatformDeviceResource;
 use crate::device::platform::resource::PlatformDeviceResourceType;
-use crate::device::platform::PlatformDeviceInfo;
 use crate::early_println;
 
-use crate::DeviceSource;
 use super::Device;
 use super::DeviceDriver;
 use super::DeviceInfo;
+use crate::DeviceSource;
 
 /// Simplified shared device type
 pub type SharedDevice = Arc<dyn Device>;
@@ -102,10 +102,10 @@ impl DriverPriority {
 static mut MANAGER: DeviceManager = DeviceManager::new();
 
 /// DeviceManager
-/// 
+///
 /// This struct is the main device management system.
 /// It handles all devices and drivers with priority-based initialization.
-/// 
+///
 /// # Fields
 /// - `devices`: A mutex-protected map of all registered devices by ID.
 /// - `device_by_name`: A mutex-protected map of devices by name.
@@ -147,20 +147,20 @@ impl DeviceManager {
     }
 
     /// Register a device with the manager
-    /// 
+    ///
     /// # Arguments
     /// * `device`: The device to register.
-    /// 
+    ///
     /// # Returns
     ///  * The id of the registered device.
-    /// 
+    ///
     /// # Example
-    /// 
+    ///
     /// ```rust
     /// let device = Arc::new(MyDevice::new());
     /// let id = DeviceManager::get_mut_manager().register_device(device);
     /// ```
-    /// 
+    ///
     pub fn register_device(&self, device: Arc<dyn Device>) -> usize {
         let mut devices = self.devices.lock();
         let id = self.next_device_id.fetch_add(1, Ordering::SeqCst);
@@ -169,19 +169,19 @@ impl DeviceManager {
     }
 
     /// Register a device with the manager by name
-    /// 
+    ///
     /// # Arguments
     /// * `name`: The name of the device.
     /// * `device`: The device to register.
-    /// 
+    ///
     /// # Returns
     ///  * The id of the registered device.
-    /// 
+    ///
     pub fn register_device_with_name(&self, name: String, device: Arc<dyn Device>) -> usize {
         let mut devices = self.devices.lock();
         let mut device_by_name = self.device_by_name.lock();
         let mut name_to_id = self.name_to_id.lock();
-        
+
         let id = self.next_device_id.fetch_add(1, Ordering::SeqCst);
         devices.insert(id, device.clone());
         device_by_name.insert(name.clone(), device);
@@ -190,63 +190,63 @@ impl DeviceManager {
     }
 
     /// Get a device by ID
-    /// 
+    ///
     /// # Arguments
     /// * `id`: The id of the device to get.
-    /// 
+    ///
     /// # Returns
     /// * The device if found, or None if not found.
-    /// 
+    ///
     pub fn get_device(&self, id: usize) -> Option<SharedDevice> {
         let devices = self.devices.lock();
         devices.get(&id).cloned()
     }
 
     /// Get a device by name
-    /// 
+    ///
     /// # Arguments
     /// * `name`: The name of the device to get.
-    /// 
+    ///
     /// # Returns
     /// * The device if found, or None if not found.
-    /// 
+    ///
     pub fn get_device_by_name(&self, name: &str) -> Option<SharedDevice> {
         let device_by_name = self.device_by_name.lock();
         device_by_name.get(name).cloned()
     }
 
     /// Get a device ID by name
-    /// 
+    ///
     /// # Arguments
     /// * `name`: The name of the device to find.
-    /// 
+    ///
     /// # Returns
     /// * The device ID if found, or None if not found.
-    /// 
+    ///
     pub fn get_device_id_by_name(&self, name: &str) -> Option<usize> {
         let name_to_id = self.name_to_id.lock();
         name_to_id.get(name).cloned()
     }
 
     /// Get the number of devices
-    /// 
+    ///
     /// # Returns
-    /// 
+    ///
     /// The number of devices.
-    /// 
+    ///
     pub fn get_devices_count(&self) -> usize {
         let devices = self.devices.lock();
         devices.len()
     }
 
     /// Get the first device of a specific type
-    /// 
+    ///
     /// # Arguments
     /// * `device_type`: The device type to find.
-    /// 
+    ///
     /// # Returns
     /// * The first device ID of the specified type, or None if not found.
-    /// 
+    ///
     pub fn get_first_device_by_type(&self, device_type: super::DeviceType) -> Option<usize> {
         let devices = self.devices.lock();
         for (id, device) in devices.iter() {
@@ -258,16 +258,19 @@ impl DeviceManager {
     }
 
     /// Get all devices registered by name
-    /// 
+    ///
     /// Returns an iterator over (name, device) pairs for all devices
     /// that were registered with explicit names.
-    /// 
+    ///
     /// # Returns
-    /// 
+    ///
     /// Vector of (name, device) tuples
     pub fn get_named_devices(&self) -> Vec<(String, SharedDevice)> {
         let device_by_name = self.device_by_name.lock();
-        device_by_name.iter().map(|(name, device)| (name.clone(), device.clone())).collect()
+        device_by_name
+            .iter()
+            .map(|(name, device)| (name.clone(), device.clone()))
+            .collect()
     }
 
     pub fn borrow_drivers(&self) -> &Mutex<BTreeMap<DriverPriority, Vec<Box<dyn DeviceDriver>>>> {
@@ -275,34 +278,38 @@ impl DeviceManager {
     }
 
     /// Populates devices from the FDT (Flattened Device Tree).
-    /// 
+    ///
     /// This function searches for the `/soc` node in the FDT and iterates through its children.
     /// For each child node, it checks if there is a compatible driver registered.
     /// If a matching driver is found, it probes the device using the driver's `probe` method.
     /// If the probe is successful, the device is registered with the driver.
-    /// 
+    ///
     /// # Deprecated
     /// Use `populate_devices_from_source` with `DeviceSource::Fdt` instead.
     pub fn populate_devices(&mut self) {
         use super::fdt::FdtManager;
-        
+
         let fdt_manager = unsafe { FdtManager::get_mut_manager() };
         let fdt = fdt_manager.get_fdt();
         if fdt.is_none() {
             early_println!("FDT not initialized");
             return;
         }
-        
+
         self.populate_devices_from_fdt(None);
     }
 
     /// Populate devices using a specific device source
-    /// 
+    ///
     /// # Arguments
-    /// 
+    ///
     /// * `device_source` - The source of device information (FDT, UEFI, ACPI, etc.)
     /// * `priorities` - Optional slice of priority levels to use. If None, uses all priorities in order.
-    pub fn populate_devices_from_source(&mut self, device_source: &DeviceSource, priorities: Option<&[DriverPriority]>) {
+    pub fn populate_devices_from_source(
+        &mut self,
+        device_source: &DeviceSource,
+        priorities: Option<&[DriverPriority]>,
+    ) {
         match device_source {
             DeviceSource::Fdt(_addr) => {
                 early_println!("Populating devices from FDT...");
@@ -325,7 +332,7 @@ impl DeviceManager {
     /// Populate devices from FDT
     fn populate_devices_from_fdt(&mut self, priorities: Option<&[DriverPriority]>) {
         use super::fdt::FdtManager;
-        
+
         let fdt_manager = unsafe { FdtManager::get_mut_manager() };
         let fdt = fdt_manager.get_fdt();
         if fdt.is_none() {
@@ -333,66 +340,88 @@ impl DeviceManager {
             return;
         }
         let fdt = fdt.unwrap();
-        
+
         let priority_list = priorities.unwrap_or(DriverPriority::all());
-        
+
         // Process each priority level separately to reduce stack depth
         for &priority in priority_list {
             self.process_priority_level(fdt, priority);
         }
     }
-    
+
     /// Process devices for a single priority level - reduces stack nesting
     fn process_priority_level(&mut self, fdt: &fdt::Fdt, priority: DriverPriority) {
-        early_println!("Populating devices with {} drivers from FDT...", priority.description());
-        
-        let soc = fdt.find_node("/soc");
-        if soc.is_none() {
-            early_println!("No /soc node found");
-            return;
-        }
+        early_println!(
+            "Populating devices with {} drivers from FDT...",
+            priority.description()
+        );
 
-        let soc = soc.unwrap();
+        // Try /soc node first (RISC-V virt), then fall back to root node (AArch64 virt)
+        let parent_node = if let Some(soc) = fdt.find_node("/soc") {
+            Some(soc)
+        } else {
+            // For AArch64 virt and other platforms where devices are at root level
+            fdt.find_node("/")
+        };
+
+        let parent_node = match parent_node {
+            Some(node) => node,
+            None => {
+                early_println!("No device tree root found");
+                return;
+            }
+        };
+
         let mut idx = 0;
-        
+
         // Process each child node separately to reduce stack usage
-        for child in soc.children() {
+        for child in parent_node.children() {
             self.process_single_device_node(child, priority, &mut idx);
         }
     }
-    
+
     /// Process a single device node with minimal stack usage
-    fn process_single_device_node(&mut self, child: fdt::node::FdtNode, priority: DriverPriority, idx: &mut usize) {
+    fn process_single_device_node(
+        &mut self,
+        child: fdt::node::FdtNode,
+        priority: DriverPriority,
+        idx: &mut usize,
+    ) {
         let compatible = child.compatible();
         if compatible.is_none() {
             return;
         }
-        
+
         // Minimize stack usage by not collecting all compatible strings at once
         let compatible_iter = compatible.unwrap().all();
-        
+
         // Check if we have any drivers for this priority level
         let has_drivers = {
             let drivers = self.drivers.lock();
-            drivers.get(&priority).map_or(false, |list| !list.is_empty())
+            drivers
+                .get(&priority)
+                .map_or(false, |list| !list.is_empty())
         };
-        
+
         if !has_drivers {
             return;
         }
-        
+
         // Build resources separately to reduce stack usage
         let resources = self.build_minimal_resources(&child);
-        
+
         // Try to match with drivers
         let compatible_vec: alloc::vec::Vec<&str> = compatible_iter.collect();
         self.try_match_and_probe_device(child, priority, idx, compatible_vec, resources);
     }
-    
+
     /// Build device resources with minimal stack allocation
-    fn build_minimal_resources(&self, child: &fdt::node::FdtNode) -> alloc::vec::Vec<PlatformDeviceResource> {
+    fn build_minimal_resources(
+        &self,
+        child: &fdt::node::FdtNode,
+    ) -> alloc::vec::Vec<PlatformDeviceResource> {
         let mut resources = alloc::vec::Vec::new();
-        
+
         // Add memory regions
         if let Some(regions) = child.reg() {
             for region in regions {
@@ -400,6 +429,7 @@ impl DeviceManager {
                     res_type: PlatformDeviceResourceType::MEM,
                     start: region.starting_address as usize,
                     end: region.starting_address as usize + region.size.unwrap() - 1,
+                    irq_metadata: None, // No IRQ metadata for memory regions
                 };
                 resources.push(res);
             }
@@ -407,48 +437,168 @@ impl DeviceManager {
 
         // Add IRQs
         if let Some(irqs) = child.interrupts() {
+            // Standard path: fdt-rs successfully parsed interrupts
             for irq in irqs {
                 let res = PlatformDeviceResource {
                     res_type: PlatformDeviceResourceType::IRQ,
                     start: irq,
                     end: irq,
+                    irq_metadata: None, // No metadata when fdt-rs handles it
+                };
+                resources.push(res);
+            }
+        } else if let Some(prop) = child.property("interrupts") {
+            // Fallback: Parse raw interrupts property when fdt-rs fails
+            // This preserves interrupt controller metadata for later translation
+            let value = prop.value;
+
+            // Detect cell format based on property length
+            let cell_size = if value.len() % 12 == 0 {
+                3 // 3-cell format (e.g., ARM GIC: <type, number, flags>)
+            } else if value.len() % 8 == 0 {
+                2 // 2-cell format
+            } else if value.len() % 4 == 0 {
+                1 // 1-cell format (just interrupt number)
+            } else {
+                return resources; // Unknown format, skip
+            };
+
+            let num_irqs = value.len() / (cell_size * 4);
+
+            for i in 0..num_irqs {
+                let offset = i * cell_size * 4;
+
+                let (irq_num, metadata) = match cell_size {
+                    3 => {
+                        // 3-cell format: <type, number, flags>
+                        let irq_type = u32::from_be_bytes([
+                            value[offset],
+                            value[offset + 1],
+                            value[offset + 2],
+                            value[offset + 3],
+                        ]);
+                        let irq_number = u32::from_be_bytes([
+                            value[offset + 4],
+                            value[offset + 5],
+                            value[offset + 6],
+                            value[offset + 7],
+                        ]);
+                        let irq_flags = u32::from_be_bytes([
+                            value[offset + 8],
+                            value[offset + 9],
+                            value[offset + 10],
+                            value[offset + 11],
+                        ]);
+
+                        // Store raw number, let interrupt controller translate
+                        (
+                            irq_number as usize,
+                            Some(crate::device::platform::resource::IrqMetadata {
+                                irq_type,
+                                irq_number,
+                                irq_flags,
+                            }),
+                        )
+                    }
+                    2 => {
+                        // 2-cell format: <number, flags>
+                        let irq_number = u32::from_be_bytes([
+                            value[offset],
+                            value[offset + 1],
+                            value[offset + 2],
+                            value[offset + 3],
+                        ]);
+                        let irq_flags = u32::from_be_bytes([
+                            value[offset + 4],
+                            value[offset + 5],
+                            value[offset + 6],
+                            value[offset + 7],
+                        ]);
+
+                        (
+                            irq_number as usize,
+                            Some(crate::device::platform::resource::IrqMetadata {
+                                irq_type: 0, // No type in 2-cell format
+                                irq_number,
+                                irq_flags,
+                            }),
+                        )
+                    }
+                    1 => {
+                        // 1-cell format: just interrupt number
+                        let irq_number = u32::from_be_bytes([
+                            value[offset],
+                            value[offset + 1],
+                            value[offset + 2],
+                            value[offset + 3],
+                        ]);
+
+                        (irq_number as usize, None)
+                    }
+                    _ => unreachable!(),
+                };
+
+                let res = PlatformDeviceResource {
+                    res_type: PlatformDeviceResourceType::IRQ,
+                    start: irq_num,
+                    end: irq_num,
+                    irq_metadata: metadata,
                 };
                 resources.push(res);
             }
         }
-        
+
         resources
     }
-    
+
     /// Try to match device with drivers and probe if successful
-    fn try_match_and_probe_device(&mut self, child: fdt::node::FdtNode, priority: DriverPriority, idx: &mut usize, compatible: alloc::vec::Vec<&str>, resources: alloc::vec::Vec<PlatformDeviceResource>) {
+    fn try_match_and_probe_device(
+        &mut self,
+        child: fdt::node::FdtNode,
+        priority: DriverPriority,
+        idx: &mut usize,
+        compatible: alloc::vec::Vec<&str>,
+        resources: alloc::vec::Vec<PlatformDeviceResource>,
+    ) {
         let drivers = self.drivers.lock();
         if let Some(driver_list) = drivers.get(&priority) {
             for driver in driver_list.iter() {
-                if driver.match_table().iter().any(|&c| compatible.contains(&c)) {
+                if driver
+                    .match_table()
+                    .iter()
+                    .any(|&c| compatible.contains(&c))
+                {
                     // Convert borrowed strings to static strings (FDT data is actually static)
                     // This is safe because FDT is loaded at boot and remains in memory
-                    let static_name: &'static str = unsafe { 
-                        core::mem::transmute(child.name) 
-                    };
-                    let static_compatible: alloc::vec::Vec<&'static str> = compatible.into_iter().map(|s| unsafe {
-                        core::mem::transmute(s)
-                    }).collect();
-                    
+                    let static_name: &'static str = unsafe { core::mem::transmute(child.name) };
+                    let static_compatible: alloc::vec::Vec<&'static str> = compatible
+                        .into_iter()
+                        .map(|s| unsafe { core::mem::transmute(s) })
+                        .collect();
+
                     let device = alloc::boxed::Box::new(PlatformDeviceInfo::new(
                         static_name,
                         *idx,
                         static_compatible,
                         resources,
                     ));
-                    
+
                     match driver.probe(&*device) {
                         Ok(_) => {
-                            early_println!("Successfully probed {} device: {}", priority.description(), device.name());
+                            early_println!(
+                                "Successfully probed {} device: {}",
+                                priority.description(),
+                                device.name()
+                            );
                             *idx += 1;
-                        },
+                        }
                         Err(e) => {
-                            early_println!("Failed to probe {} device {}: {}", priority.description(), device.name(), e);
+                            early_println!(
+                                "Failed to probe {} device {}: {}",
+                                priority.description(),
+                                device.name(),
+                                e
+                            );
                         }
                     }
                     break; // Found matching driver, move to next device
@@ -458,13 +608,13 @@ impl DeviceManager {
     }
 
     /// Populate devices from UEFI (stub implementation)
-    /// 
+    ///
     /// # Arguments
-    /// 
+    ///
     /// * `priorities` - Optional slice of priority levels to use. If None, uses all priorities in order.
-    /// 
+    ///
     /// # Note
-    /// 
+    ///
     /// This is currently a stub implementation. UEFI device discovery will be implemented
     /// when UEFI boot support is added.
     fn populate_devices_from_uefi(&mut self, _priorities: Option<&[DriverPriority]>) {
@@ -476,13 +626,13 @@ impl DeviceManager {
     }
 
     /// Populate devices from ACPI (stub implementation)
-    /// 
+    ///
     /// # Arguments
-    /// 
+    ///
     /// * `priorities` - Optional slice of priority levels to use. If None, uses all priorities in order.
-    /// 
+    ///
     /// # Note
-    /// 
+    ///
     /// This is currently a stub implementation. ACPI device discovery will be implemented
     /// when x86 support is added.
     fn populate_devices_from_acpi(&mut self, _priorities: Option<&[DriverPriority]>) {
@@ -494,11 +644,11 @@ impl DeviceManager {
     }
 
     /// Populate devices using drivers of specific priority levels
-    /// 
+    ///
     /// # Arguments
-    /// 
+    ///
     /// * `priorities` - Optional slice of priority levels to use. If None, uses all priorities in order.
-    /// 
+    ///
     /// # Deprecated
     /// Use `populate_devices_from_source` instead.
     pub fn populate_devices_by_priority(&mut self, priorities: Option<&[DriverPriority]>) {
@@ -506,32 +656,35 @@ impl DeviceManager {
     }
 
     /// Registers a device driver with the device manager.
-    /// 
+    ///
     /// This function takes a boxed device driver and adds it to the list of registered drivers
     /// at the specified priority level.
-    /// 
+    ///
     /// # Arguments
-    /// 
+    ///
     /// * `driver` - A boxed device driver that implements the `DeviceDriver` trait.
     /// * `priority` - The priority level for this driver.
-    /// 
+    ///
     /// # Example
-    /// 
+    ///
     /// ```rust
     /// let driver = Box::new(MyDeviceDriver::new());
     /// DeviceManager::get_mut_manager().register_driver(driver, DriverPriority::Standard);
     /// ```
     pub fn register_driver(&mut self, driver: Box<dyn DeviceDriver>, priority: DriverPriority) {
         let mut drivers = self.drivers.lock();
-        drivers.entry(priority).or_insert_with(Vec::new).push(driver);
+        drivers
+            .entry(priority)
+            .or_insert_with(Vec::new)
+            .push(driver);
     }
 
     /// Registers a device driver with default Standard priority.
-    /// 
+    ///
     /// This is a convenience method for backward compatibility.
-    /// 
+    ///
     /// # Arguments
-    /// 
+    ///
     /// * `driver` - A boxed device driver that implements the `DeviceDriver` trait.
     pub fn register_driver_default(&mut self, driver: Box<dyn DeviceDriver>) {
         self.register_driver(driver, DriverPriority::Standard);
@@ -546,7 +699,7 @@ impl DeviceManager {
         let mut devices = self.devices.lock();
         let mut device_by_name = self.device_by_name.lock();
         let mut name_to_id = self.name_to_id.lock();
-        
+
         devices.clear();
         device_by_name.clear();
         name_to_id.clear();
@@ -556,17 +709,18 @@ impl DeviceManager {
 
 #[cfg(test)]
 mod tests {
-    use alloc::vec;
     use super::*;
-    use crate::device::{platform::*, GenericDevice};
+    use crate::device::{GenericDevice, platform::*};
+    use alloc::vec;
 
+    #[cfg(target_arch = "riscv64")]
     #[test_case]
     fn test_populate_driver() {
         static mut TEST_RESULT: bool = false;
-        fn probe_fn(_device: &PlatformDeviceInfo) -> Result<(), &'static str> {      
+        fn probe_fn(_device: &PlatformDeviceInfo) -> Result<(), &'static str> {
             unsafe {
                 TEST_RESULT = true;
-            }  
+            }
             Ok(())
         }
 
@@ -574,7 +728,7 @@ mod tests {
             "test",
             probe_fn,
             |_device| Ok(()),
-            vec!["sifive,test0"]
+            vec!["sifive,test0"],
         ));
         let mut manager = DeviceManager::new();
         manager.register_driver(driver, DriverPriority::Standard);
@@ -613,7 +767,7 @@ mod tests {
         let manager = DeviceManager::new();
         let _id1 = manager.register_device(device1);
         let _id2 = manager.register_device(device2);
-        
+
         let char_device_id = manager.get_first_device_by_type(crate::device::DeviceType::Generic);
         assert!(char_device_id.is_some());
         let char_device_id = char_device_id.unwrap();

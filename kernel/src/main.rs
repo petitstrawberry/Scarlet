@@ -1,7 +1,7 @@
 //! # Scarlet Kernel
 //!
-//! Scarlet is an operating system kernel written in Rust that implements a transparent ABI 
-//! conversion layer for executing binaries across different operating systems and architectures. 
+//! Scarlet is an operating system kernel written in Rust that implements a transparent ABI
+//! conversion layer for executing binaries across different operating systems and architectures.
 //! The kernel provides a universal container runtime environment with strong isolation capabilities,
 //! comprehensive filesystem support, dynamic linking, and modern graphics capabilities.
 //!
@@ -214,10 +214,10 @@
 //!
 //! The kernel integrates with `cargo-make` for streamlined development:
 //!
-//! - `cargo make build`: Full kernel build with user programs
-//! - `cargo make test`: Run all kernel tests
-//! - `cargo make debug`: Launch kernel with GDB support
-//! - `cargo make run`: Quick development cycle execution
+//! - `cargo make build-debug-riscv64` / `cargo make build-debug-aarch64`: Full build with user programs
+//! - `cargo make test-riscv64` / `cargo make test-aarch64`: Run kernel tests
+//! - `cargo make debug-riscv64` / `cargo make debug-aarch64`: Launch kernel with GDB support
+//! - `cargo make run-riscv64` / `cargo make run-aarch64`: Quick development cycle execution
 //!
 //! ## Entry Points
 //!
@@ -241,7 +241,7 @@
 //! - **`object/`**: Kernel object system with handle management
 //! - **`interrupt/`**: Interrupt handling and controller support
 //!
-//! *Note: Currently, Scarlet Native ABI is fully implemented. Linux and xv6 ABI support 
+//! *Note: Currently, Scarlet Native ABI is fully implemented. Linux and xv6 ABI support
 //! are under development and will be available in future releases.*
 
 #![no_std]
@@ -253,51 +253,58 @@
 
 pub mod abi;
 pub mod arch;
+pub mod device;
 pub mod drivers;
-pub mod interrupt;
-pub mod timer;
-pub mod time;
-pub mod library;
-pub mod mem;
-pub mod traits;
-pub mod sched;
-pub mod sync;
 pub mod earlycon;
 pub mod environment;
-pub mod vm;
-pub mod task;
-pub mod initcall;
-pub mod syscall;
-pub mod device;
-pub mod fs;
-pub mod object;
-pub mod ipc;
 pub mod executor;
+pub mod fs;
+pub mod initcall;
+pub mod interrupt;
+pub mod ipc;
+pub mod library;
+pub mod mem;
+#[cfg(feature = "network")]
+pub mod network;
+pub mod object;
 pub mod profiler;
+pub mod random;
+pub mod sched;
+pub mod sync;
+pub mod syscall;
+pub mod task;
+pub mod time;
+pub mod timer;
+pub mod traits;
+pub mod vm;
 
 #[cfg(test)]
 pub mod test;
 
 extern crate alloc;
 use alloc::string::ToString;
-use device::manager::DeviceManager;
+use device::manager::{DeviceManager, DriverPriority};
 use environment::PAGE_SIZE;
 use initcall::{call_initcalls, driver::driver_initcall_call, early::early_initcall_call};
 use slab_allocator_rs::MIN_HEAP_SIZE;
 
+use crate::{
+    device::graphics::manager::GraphicsManager,
+    fs::{drivers::initramfs::init_initramfs, vfs_v2::manager::init_global_vfs_manager},
+    interrupt::InterruptManager,
+};
 use arch::get_cpu;
-use task::{elf_loader::load_elf_into_task, new_user_task};
-use vm::{kernel_vm_init, vmem::MemoryArea};
+use core::sync::atomic::{Ordering, fence};
+use mem::{__KERNEL_SPACE_START, allocator::init_heap};
 use sched::scheduler::get_scheduler;
-use mem::{allocator::init_heap, __KERNEL_SPACE_START};
+use task::{elf_loader::load_elf_into_task, new_user_task};
 use timer::get_kernel_timer;
-use core::{panic::PanicInfo, sync::atomic::{fence, Ordering}};
-use crate::{device::graphics::manager::GraphicsManager, fs::{drivers::initramfs::init_initramfs, vfs_v2::manager::init_global_vfs_manager}, interrupt::InterruptManager};
+use vm::{kernel_vm_init, vmem::MemoryArea};
 
 /// A panic handler is required in Rust, this is probably the most basic one possible
 #[cfg(not(test))]
 #[panic_handler]
-fn panic(info: &PanicInfo) -> ! {
+fn panic(info: &core::panic::PanicInfo) -> ! {
     use arch::instruction::idle;
 
     crate::early_println!("[Scarlet Kernel] panic: {}", info);
@@ -313,7 +320,7 @@ fn panic(info: &PanicInfo) -> ! {
 }
 
 /// Represents the source of device information during boot
-/// 
+///
 /// Different boot protocols provide hardware information through various mechanisms.
 /// This enum captures the source and relevant parameters for device discovery.
 #[derive(Debug, Clone, Copy)]
@@ -333,24 +340,24 @@ pub enum DeviceSource {
 }
 
 /// Boot information structure containing essential system parameters
-/// 
+///
 /// This structure is created during the early boot process and contains
 /// all necessary information for kernel initialization. It abstracts
 /// architecture-specific boot protocols into a common interface.
-/// 
+///
 /// # Architecture Integration
-/// 
+///
 /// Different architectures populate this structure from their respective
 /// boot protocols:
 /// - **RISC-V**: Created from FDT (Flattened Device Tree) data
 /// - **ARM/AArch64**: Created from FDT or UEFI
 /// - **x86/x86_64**: Created from ACPI tables or legacy BIOS structures
-/// 
+///
 /// # Usage
-/// 
+///
 /// The BootInfo is passed to `start_kernel()` as the primary parameter
 /// and provides all essential information needed for kernel initialization:
-/// 
+///
 /// ```rust
 /// #[no_mangle]
 /// pub extern "C" fn start_kernel(boot_info: &BootInfo) -> ! {
@@ -380,19 +387,25 @@ pub struct BootInfo {
 
 impl BootInfo {
     /// Creates a new BootInfo instance with the specified parameters
-    /// 
+    ///
     /// # Arguments
-    /// 
+    ///
     /// * `cpu_id` - ID of the boot processor/hart
     /// * `usable_memory` - Memory area available for kernel allocation
     /// * `initramfs` - Optional initramfs memory area
     /// * `cmdline` - Optional kernel command line parameters
     /// * `device_source` - Source of device information for hardware discovery
-    /// 
+    ///
     /// # Returns
-    /// 
+    ///
     /// A new BootInfo instance containing the specified boot parameters
-    pub fn new(cpu_id: usize, usable_memory: MemoryArea, initramfs: Option<MemoryArea>, cmdline: Option<&'static str>, device_source: DeviceSource) -> Self {
+    pub fn new(
+        cpu_id: usize,
+        usable_memory: MemoryArea,
+        initramfs: Option<MemoryArea>,
+        cmdline: Option<&'static str>,
+        device_source: DeviceSource,
+    ) -> Self {
         Self {
             cpu_id,
             usable_memory,
@@ -403,12 +416,12 @@ impl BootInfo {
     }
 
     /// Returns the kernel command line arguments
-    /// 
+    ///
     /// Provides access to boot parameters passed by the bootloader.
     /// Returns an empty string if no command line was provided.
-    /// 
+    ///
     /// # Returns
-    /// 
+    ///
     /// Command line string slice, or empty string if none available
     pub fn get_cmdline(&self) -> &str {
         if let Some(cmdline) = self.cmdline {
@@ -419,12 +432,12 @@ impl BootInfo {
     }
 
     /// Returns the initramfs memory area if available
-    /// 
+    ///
     /// The initramfs contains an initial root filesystem that can be used
     /// during early boot before mounting the real root filesystem.
-    /// 
+    ///
     /// # Returns
-    /// 
+    ///
     /// Optional memory area containing the initramfs data
     pub fn get_initramfs(&self) -> Option<MemoryArea> {
         self.initramfs
@@ -432,15 +445,15 @@ impl BootInfo {
 }
 
 /// Main kernel entry point for the boot processor
-/// 
+///
 /// This function is called by architecture-specific boot code and performs
 /// the complete kernel initialization sequence using information provided
 /// in the BootInfo structure.
-/// 
+///
 /// # Boot Sequence
-/// 
+///
 /// The kernel initialization follows this structured sequence:
-/// 
+///
 /// 1. **Early System Setup**: Extract boot parameters from BootInfo
 /// 2. **Memory Initialization**: Set up heap allocator with usable memory
 /// 3. **Early Initcalls**: Initialize critical early subsystems
@@ -454,41 +467,41 @@ impl BootInfo {
 /// 11. **Initramfs Processing**: Mount initramfs if provided in BootInfo
 /// 12. **Initial Task**: Create and load initial userspace process
 /// 13. **Scheduler Start**: Begin task scheduling and enter normal operation
-/// 
+///
 /// # Architecture Integration
-/// 
+///
 /// This function is architecture-agnostic and relies on the BootInfo structure
 /// to abstract hardware-specific details. Architecture-specific boot code is
 /// responsible for creating a properly initialized BootInfo before calling
 /// this function.
-/// 
+///
 /// # Arguments
-/// 
+///
 /// * `boot_info` - Comprehensive boot information structure containing:
 ///   - CPU ID for multicore initialization
 ///   - Usable memory area for heap allocation
 ///   - Optional initramfs location and size
 ///   - Kernel command line parameters
 ///   - Device information source (FDT/UEFI/ACPI)
-/// 
+///
 /// # Memory Layout
-/// 
+///
 /// The function expects the following memory layout:
 /// - Kernel image loaded and executable
 /// - BootInfo.usable_memory available for allocation
 /// - Hardware description (FDT/ACPI) accessible via device_source
 /// - Optional initramfs data at specified location
-/// 
+///
 /// # Safety
-/// 
+///
 /// This function assumes:
 /// - Architecture-specific initialization has completed successfully
 /// - BootInfo contains valid memory areas and addresses
 /// - Basic CPU features (MMU, interrupts) are available
 /// - Memory protection allows kernel operation
-/// 
+///
 /// # Returns
-/// 
+///
 /// This function never returns - it transitions to the scheduler and
 /// enters normal kernel operation mode.
 #[unsafe(no_mangle)]
@@ -499,17 +512,24 @@ pub extern "C" fn start_kernel(boot_info: &BootInfo) -> ! {
     early_println!("[Scarlet Kernel] Boot on CPU {}", cpu_id);
     /* Use usable memory area from BootInfo */
     let usable_area = boot_info.usable_memory;
-    early_println!("[Scarlet Kernel] Usable memory area : {:#x} - {:#x}", usable_area.start, usable_area.end);
-    
+    early_println!(
+        "[Scarlet Kernel] Usable memory area : {:#x} - {:#x}",
+        usable_area.start,
+        usable_area.end
+    );
+
     /* Handle initramfs if available in BootInfo */
     if let Some(initramfs_area) = boot_info.initramfs {
-        early_println!("[Scarlet Kernel] InitramFS available: {:#x} - {:#x}", 
-                      initramfs_area.start, initramfs_area.end);
+        early_println!(
+            "[Scarlet Kernel] InitramFS available: {:#x} - {:#x}",
+            initramfs_area.start,
+            initramfs_area.end
+        );
         // Note: initramfs already relocated by arch-specific boot code
     } else {
         early_println!("[Scarlet Kernel] No initramfs found");
     }
-    
+
     /* Initialize heap with the usable memory area */
     early_println!("[Scarlet Kernel] Initializing heap...");
     let heap_start = (usable_area.start + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
@@ -518,14 +538,18 @@ pub extern "C" fn start_kernel(boot_info: &BootInfo) -> ! {
     init_heap(MemoryArea::new(heap_start, heap_end));
 
     fence(Ordering::SeqCst);
-    early_println!("[Scarlet Kernel] Heap initialized at {:#x} - {:#x}", heap_start, heap_end);
-    
+    early_println!(
+        "[Scarlet Kernel] Heap initialized at {:#x} - {:#x}",
+        heap_start,
+        heap_end
+    );
+
     {
         let test_vec = alloc::vec::Vec::<u8>::with_capacity(1024);
         drop(test_vec);
         early_println!("[Scarlet Kernel] Heap allocation test passed");
     }
-    
+
     fence(Ordering::Release);
 
     /* After this point, we can use the heap */
@@ -534,7 +558,7 @@ pub extern "C" fn start_kernel(boot_info: &BootInfo) -> ! {
     driver_initcall_call();
 
     early_println!("[Scarlet Kernel] Initializing Virtual Memory...");
-    let kernel_start =  unsafe { &__KERNEL_SPACE_START as *const usize as usize };
+    let kernel_start = unsafe { &__KERNEL_SPACE_START as *const usize as usize };
     kernel_vm_init(MemoryArea::new(kernel_start, usable_area.end));
     /* After this point, we can use the heap and virtual memory */
     /* We will also be restricted to the kernel address space */
@@ -542,63 +566,97 @@ pub extern "C" fn start_kernel(boot_info: &BootInfo) -> ! {
     /* Populate devices from BootInfo device source */
     early_println!("[Scarlet Kernel] Populating devices...");
     let device_manager = DeviceManager::get_mut_manager();
-    device_manager.populate_devices_from_source(&boot_info.device_source, None);
+    // Two-phase interrupt bring-up:
+    // 1) Discover critical interrupt controllers (PLIC/CLINT) first.
+    // 2) Initialize interrupt controllers.
+    // 3) Discover remaining devices (which may enable specific IRQ lines).
+    device_manager
+        .populate_devices_from_source(&boot_info.device_source, Some(&[DriverPriority::Critical]));
     fence(Ordering::SeqCst); // Ensure device population is complete before proceeding
+
+    /* Initialize interrupt controllers (stage 1) */
+    early_println!("[Scarlet Kernel] Initializing interrupt controllers...");
+    InterruptManager::get_manager().init_controllers();
+
+    fence(Ordering::SeqCst); // Ensure interrupt controllers are initialized before proceeding
+
+    /* Discover remaining devices */
+    early_println!("[Scarlet Kernel] Populating remaining devices...");
+    device_manager.populate_devices_from_source(
+        &boot_info.device_source,
+        Some(&[
+            DriverPriority::Core,
+            DriverPriority::Standard,
+            DriverPriority::Late,
+        ]),
+    );
+    fence(Ordering::SeqCst);
+
     /* After this point, we can use the device manager */
     /* Serial console also works */
-    
+
     /* Initialize Graphics Manager and discover graphics devices */
     early_println!("[Scarlet Kernel] Initializing graphics subsystem...");
-    
+
     // Add extra safety measures for optimized builds
     fence(Ordering::SeqCst); // Ensure device population is complete before proceeding
-    
+
     // Verify that devices are actually registered before attempting graphics initialization
     let device_count = DeviceManager::get_manager().get_devices_count();
-    early_println!("[Scarlet Kernel] Found {} devices before graphics initialization", device_count);
-    
+    early_println!(
+        "[Scarlet Kernel] Found {} devices before graphics initialization",
+        device_count
+    );
+
     if device_count > 0 {
         GraphicsManager::get_mut_manager().discover_graphics_devices();
     } else {
-        early_println!("[Scarlet Kernel] Warning: No devices found, skipping graphics initialization");
+        early_println!(
+            "[Scarlet Kernel] Warning: No devices found, skipping graphics initialization"
+        );
     }
-    
+
     fence(Ordering::SeqCst); // Ensure graphics devices are discovered before proceeding
 
     #[cfg(test)]
     test_main();
-    
+
     /* Initcalls */
+    early_println!("[boot] entering initcalls");
     call_initcalls();
+    early_println!("[boot] leaving initcalls");
 
     fence(Ordering::SeqCst); // Ensure all initcalls are completed before proceeding
 
-    /* Initialize interrupt management system */
-    println!("[Scarlet Kernel] Initializing interrupt system...");
-    InterruptManager::get_manager().init();
+    /* Enable CPU interrupt reception (stage 2) */
+    println!("[Scarlet Kernel] Enabling CPU interrupts...");
+    InterruptManager::get_manager().enable_cpu_interrupts();
 
     fence(Ordering::SeqCst); // Ensure interrupt manager is initialized before proceeding
 
     /* Initialize timer */
-    println!("[Scarlet Kernel] Initializing timer...");
+    early_println!("[boot] Initializing timer...");
     get_kernel_timer().init();
 
     fence(Ordering::SeqCst); // Ensure timer is initialized before proceeding
 
     /* Initialize scheduler */
-    println!("[Scarlet Kernel] Initializing scheduler...");
+    early_println!("[boot] Initializing scheduler...");
     let scheduler = get_scheduler();
     fence(Ordering::SeqCst); // Ensure scheduler is initialized before proceeding
 
     /* Initialize global VFS */
-    println!("[Scarlet Kernel] Initializing global VFS...");
+    early_println!("[boot] Initializing global VFS...");
     let manager = init_global_vfs_manager();
-    
+
     /* Initialize initramfs from BootInfo if available */
     if let Some(initramfs_area) = boot_info.initramfs {
         println!("[Scarlet Kernel] Initializing initramfs from BootInfo...");
         if let Err(e) = init_initramfs(&manager, initramfs_area) {
-            println!("[Scarlet Kernel] Warning: Failed to initialize initramfs: {}", e);
+            println!(
+                "[Scarlet Kernel] Warning: Failed to initialize initramfs: {}",
+                e
+            );
         }
     } else {
         println!("[Scarlet Kernel] No initramfs found in BootInfo");
@@ -606,18 +664,35 @@ pub extern "C" fn start_kernel(boot_info: &BootInfo) -> ! {
 
     fence(Ordering::SeqCst); // Ensure VFS and initramfs are initialized before proceeding
 
+    /* Initialize NetworkManager */
+    #[cfg(feature = "network")]
+    {
+        early_println!("[boot] Initializing NetworkManager...");
+        let _network_manager = crate::network::NetworkManager::init();
+        fence(Ordering::SeqCst); // Ensure NetworkManager is initialized before proceeding
+    }
+
     /* Make init task */
-    println!("[Scarlet Kernel] Creating initial user task...");
+    early_println!("[boot] Creating initial user task...");
     let mut task = new_user_task("init".to_string(), 0);
 
     task.init();
     task.vfs = Some(manager.clone());
-    task.vfs.as_ref().unwrap().set_cwd_by_path("/").expect("Failed to set initial working directory");
-    let file_obj = match task.vfs.as_ref().unwrap().open("/system/scarlet/bin/init", 0) {
+    task.vfs
+        .as_ref()
+        .unwrap()
+        .set_cwd_by_path("/")
+        .expect("Failed to set initial working directory");
+    let file_obj = match task
+        .vfs
+        .as_ref()
+        .unwrap()
+        .open("/system/scarlet/bin/init", 0)
+    {
         Ok(kernel_obj) => kernel_obj,
         Err(e) => {
             panic!("Failed to open init file: {:?}", e);
-        },
+        }
     };
     // file_obj is already a KernelObject::File
     let file_ref = match file_obj.as_file() {
@@ -626,23 +701,50 @@ pub extern "C" fn start_kernel(boot_info: &BootInfo) -> ! {
     };
 
     match load_elf_into_task(file_ref, &mut task) {
-        Ok(_) => {
+        Ok(entry_point) => {
             task.vm_manager.memmaps_iter_with(|maps| {
                 for map in maps {
-                early_println!("[Scarlet Kernel] Task memory map: {:#x} - {:#x}", map.vmarea.start, map.vmarea.end);
+                    early_println!(
+                        "[Scarlet Kernel] Task memory map: {:#x} - {:#x}",
+                        map.vmarea.start,
+                        map.vmarea.end
+                    );
                 }
             });
+            early_println!(
+                "[Scarlet Kernel] Init ELF loaded with entry point at {:#x}",
+                entry_point
+            );
             early_println!("[Scarlet Kernel] Successfully loaded init ELF into task");
-            get_scheduler().add_task(task, get_cpu().get_cpuid());
+            early_println!("[Scarlet Kernel] Adding init task to scheduler...");
+            let cpu_id = get_cpu().get_cpuid();
+            early_println!("[Scarlet Kernel] cpu_id for init task: {}", cpu_id);
+            get_scheduler().add_task(task, cpu_id);
+            early_println!("[Scarlet Kernel] Init task added to scheduler");
         }
         Err(e) => early_println!("[Scarlet Kernel] Error loading ELF into task: {:?}", e),
     }
 
+    early_println!("[Scarlet Kernel] About to fence before scheduler start...");
     fence(Ordering::SeqCst); // Ensure task is added to scheduler before proceeding
+    early_println!("[Scarlet Kernel] Fence complete; about to print scheduler start...");
 
-    println!("[Scarlet Kernel] Scheduler will start...");
-    scheduler.start_scheduler();
-    loop {} 
+    // Use early_println here to avoid any potential console lock issues.
+    early_println!("[Scarlet Kernel] Scheduler will start...");
+    early_println!("[Scarlet Kernel] Calling start_scheduler()...");
+
+    let next_task_id = scheduler.start_scheduler();
+    if let Some(next_task_id) = next_task_id {
+        let next_task = scheduler
+            .get_task_by_id(next_task_id)
+            .expect("First runnable task must exist");
+        crate::arch::first_switch_to_user(next_task);
+    }
+
+    early_println!("[Scarlet Kernel] No runnable task; entering idle loop");
+    loop {
+        crate::arch::instruction::idle();
+    }
 }
 
 #[unsafe(no_mangle)]

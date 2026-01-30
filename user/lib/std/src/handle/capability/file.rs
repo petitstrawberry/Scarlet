@@ -3,7 +3,8 @@
 //! This module provides type-safe file operations (seek, truncate, metadata) for
 //! KernelObjects that support the FileObject capability.
 
-use crate::syscall::{syscall2, syscall3, Syscall};
+use crate::handle::Handle;
+use crate::syscall::{Syscall, syscall2, syscall3};
 
 /// Result type for file operations
 pub type FileResult<T> = Result<T, FileError>;
@@ -82,17 +83,17 @@ impl FileMetadata {
     pub fn is_directory(&self) -> bool {
         self.file_type == 1 // FileType::Directory as u8
     }
-    
+
     /// Check if this entry is a regular file
     pub fn is_file(&self) -> bool {
         self.file_type == 0 // FileType::RegularFile as u8
     }
-    
+
     /// Check if this entry is a symbolic link
     pub fn is_symlink(&self) -> bool {
         self.file_type == 2 // FileType::SymbolicLink as u8
     }
-    
+
     /// Get file type as a human-readable string
     pub fn file_type_str(&self) -> &'static str {
         match self.file_type {
@@ -108,73 +109,72 @@ impl FileMetadata {
 }
 
 /// File object capability for file-specific operations
-pub struct FileObject {
-    handle: i32,
+pub struct FileObject<'a> {
+    handle: &'a Handle,
 }
 
-impl FileObject {
-    /// Create a FileObject capability from a raw handle
-    /// 
-    /// # Safety
-    /// The caller must ensure that the handle is valid and supports FileObject
-    pub fn from_handle(handle: i32) -> Self {
+impl<'a> FileObject<'a> {
+    /// Construct a `FileObject` capability from a [`Handle`] reference.
+    ///
+    /// This is crate-internal to prevent bypassing `Handle::as_file` validation.
+    pub(crate) fn from_handle(handle: &'a Handle) -> Self {
         Self { handle }
     }
 
     /// Seek to a position in the file
-    /// 
+    ///
     /// # Arguments
     /// * `pos` - Position to seek to
-    /// 
+    ///
     /// # Returns
     /// New absolute position from the start of the file, or FileError on failure
     pub fn seek(&self, pos: SeekFrom) -> FileResult<u64> {
         let (offset, whence) = pos.to_syscall_args();
-        
+
         let result = syscall3(
             Syscall::FileSeek,
-            self.handle as usize,
+            self.handle.as_raw() as usize,
             offset as usize,
             whence as usize,
         );
-        
+
         FileError::from_syscall_result(result).map(|pos| pos as u64)
     }
 
     /// Truncate the file to the specified size
-    /// 
+    ///
     /// # Arguments
     /// * `size` - New size of the file in bytes
-    /// 
+    ///
     /// # Returns
     /// Success or FileError on failure
     pub fn truncate(&self, size: u64) -> FileResult<()> {
         let result = syscall2(
             Syscall::FileTruncate,
-            self.handle as usize,
+            self.handle.as_raw() as usize,
             size as usize,
         );
-        
+
         FileError::from_syscall_result(result).map(|_| ())
     }
 
     // /// Get metadata about the file
-    // /// 
+    // ///
     // /// # Returns
     // /// FileMetadata structure or FileError on failure
     // pub fn metadata(&self) -> FileResult<FileMetadata> {
     //     // For now, we'll use a simple implementation
     //     // In the future, this could be enhanced to use a more sophisticated metadata syscall
-        
+
     //     // Allocate space for metadata on the stack
     //     let mut metadata_raw = [0u64; 8]; // Size to hold kernel FileMetadata
-        
+
     //     let result = syscall2(
     //         Syscall::FileMetadata,
-    //         self.handle as usize,
+    //         self.handle.as_raw() as usize,
     //         metadata_raw.as_mut_ptr() as usize,
     //     );
-        
+
     //     match FileError::from_syscall_result(result) {
     //         Ok(_) => {
     //             Ok(FileMetadata {
@@ -191,14 +191,14 @@ impl FileObject {
     // }
 
     /// Get the current position in the file
-    /// 
+    ///
     /// This is a convenience method equivalent to seek(SeekFrom::Current(0))
     pub fn position(&self) -> FileResult<u64> {
         self.seek(SeekFrom::Current(0))
     }
 
     /// Get the size of the file
-    /// 
+    ///
     /// This is a convenience method that gets metadata and returns just the size
     pub fn size(&self) -> FileResult<u64> {
         // self.metadata().map(|meta| meta.size)

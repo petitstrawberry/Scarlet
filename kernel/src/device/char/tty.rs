@@ -1,25 +1,27 @@
 //! TTY (Terminal) device implementation.
-//! 
+//!
 //! This module implements a TTY device that acts as a terminal interface
 //! providing line discipline, echo, and basic terminal I/O operations.
 
 extern crate alloc;
-use core::any::Any;
-use alloc::collections::VecDeque;
-use alloc::sync::Arc;
-use spin::Mutex;
-use crate::device::{Device, DeviceType, DeviceCapability};
 use crate::arch::Trapframe;
 use crate::device::char::{CharDevice, TtyControl};
-use crate::object::capability::selectable::{Selectable, ReadyInterest, ReadySet, SelectWaitOutcome};
 use crate::device::events::{DeviceEvent, DeviceEventListener, InputEvent};
 use crate::device::manager::DeviceManager;
-use crate::sync::waker::Waker;
+use crate::device::{Device, DeviceCapability, DeviceType};
 use crate::late_initcall;
-use crate::task::mytask;
-use crate::timer::{add_timer, cancel_timer, get_tick, TimerHandler};
+use crate::object::capability::selectable::{
+    ReadyInterest, ReadySet, SelectWaitOutcome, Selectable,
+};
 use crate::object::capability::{ControlOps, MemoryMappingOps};
+use crate::sync::waker::Waker;
+use crate::task::mytask;
+use crate::timer::{TimerHandler, add_timer, cancel_timer, get_tick};
+use alloc::collections::VecDeque;
+use alloc::sync::Arc;
+use core::any::Any;
 use core::sync::atomic::{AtomicBool, AtomicU16, Ordering};
+use spin::Mutex;
 
 /// Scarlet-private, OS-agnostic control opcodes for TTY devices.
 /// These are stable only within Scarlet and must be mapped by ABI adapters.
@@ -80,11 +82,14 @@ fn try_init_tty_subsystem() -> Result<(), &'static str> {
         }
     }
 
-    let uart_device_id = serial_device_id.ok_or("No Serial-capable char device found for TTY initialization")?;
+    let uart_device_id =
+        serial_device_id.ok_or("No Serial-capable char device found for TTY initialization")?;
 
     // Create TTY device with the resolved UART device ID
     let tty_device = Arc::new(TtyDevice::new("tty0", uart_device_id));
-    let uart_device = device_manager.get_device(uart_device_id).ok_or("UART device not found")?;
+    let uart_device = device_manager
+        .get_device(uart_device_id)
+        .ok_or("UART device not found")?;
 
     // Register TTY device as event listener for UART input events via capability
     if let Some(ec) = uart_device.as_event_capable() {
@@ -94,7 +99,8 @@ fn try_init_tty_subsystem() -> Result<(), &'static str> {
     }
 
     // Register TTY device with device manager under name tty0
-    let _tty_id = device_manager.register_device_with_name(alloc::string::String::from("tty0"), tty_device);
+    let _tty_id =
+        device_manager.register_device_with_name(alloc::string::String::from("tty0"), tty_device);
 
     crate::early_println!("TTY subsystem initialized successfully");
     Ok(())
@@ -103,19 +109,19 @@ fn try_init_tty_subsystem() -> Result<(), &'static str> {
 late_initcall!(init_tty_subsystem);
 
 /// TTY device implementation.
-/// 
+///
 /// This device provides terminal functionality including line discipline,
 /// echo, and basic terminal I/O operations.
 pub struct TtyDevice {
     name: &'static str,
     uart_device_id: usize,
-    
+
     // Input buffer for line discipline
     input_buffer: Arc<Mutex<VecDeque<u8>>>,
-    
+
     // Waker for blocking reads
     input_waker: Waker,
-    
+
     // Line discipline flags (OS/ABI-neutral)
     canonical_mode: AtomicBool,
     echo_enabled: AtomicBool,
@@ -165,7 +171,9 @@ impl TtyDevice {
     /// Used by polling syscalls (e.g. pselect6) to implement blocking semantics.
     pub fn wait_until_readable(&self, trapframe: &mut Trapframe) {
         loop {
-            if self.can_read() { return; }
+            if self.can_read() {
+                return;
+            }
             if let Some(task) = mytask() {
                 self.input_waker.wait(task.get_id(), trapframe);
             } else {
@@ -183,21 +191,35 @@ impl TtyDevice {
 
     /// Wait until readable with a timeout (in ticks).
     /// Returns true if timed out, false if input became available.
-    pub fn wait_until_readable_with_timeout_ticks(&self, trapframe: &mut Trapframe, ticks: u64) -> bool {
-        if self.can_read() { return false; }
-        if ticks == 0 { return true; }
+    pub fn wait_until_readable_with_timeout_ticks(
+        &self,
+        trapframe: &mut Trapframe,
+        ticks: u64,
+    ) -> bool {
+        if self.can_read() {
+            return false;
+        }
+        if ticks == 0 {
+            return true;
+        }
 
-        struct TtyTimeoutHandler { tty_ptr: *const TtyDevice }
+        struct TtyTimeoutHandler {
+            tty_ptr: *const TtyDevice,
+        }
         unsafe impl Send for TtyTimeoutHandler {}
         unsafe impl Sync for TtyTimeoutHandler {}
         impl TimerHandler for TtyTimeoutHandler {
             fn on_timer_expired(self: Arc<Self>, _context: usize) {
-                unsafe { (*self.tty_ptr).wake_input(); }
+                unsafe {
+                    (*self.tty_ptr).wake_input();
+                }
             }
         }
 
         let deadline = get_tick().saturating_add(ticks);
-        let handler: Arc<dyn TimerHandler> = Arc::new(TtyTimeoutHandler { tty_ptr: self as *const TtyDevice });
+        let handler: Arc<dyn TimerHandler> = Arc::new(TtyTimeoutHandler {
+            tty_ptr: self as *const TtyDevice,
+        });
         let timer_id = add_timer(deadline, &handler, 0);
 
         if let Some(task) = mytask() {
@@ -228,14 +250,18 @@ impl TtyDevice {
 
         // If min_ready == 0, read() is defined to return immediately
         // (possibly 0 bytes), so this is non-blocking -> ready.
-        if min_ready == 0 { return true; }
+        if min_ready == 0 {
+            return true;
+        }
 
         if kb_mode == 2 {
             let g = self.input_buffer.lock();
             let available = g.len();
             if let Some(&first) = g.front() {
                 if first == 0xE0 {
-                    if available < 2 { return false; }
+                    if available < 2 {
+                        return false;
+                    }
                     return available >= min_ready;
                 }
             } else {
@@ -247,17 +273,23 @@ impl TtyDevice {
             available >= min_ready
         }
     }
-    
+
     /// Handle input byte from UART device.
-    /// 
+    ///
     /// This method processes incoming bytes and applies line discipline.
     fn handle_input_byte(&self, byte: u8) {
         if self.debug_enabled.load(Ordering::Relaxed) {
-            crate::println!("[TTY] RX byte=0x{:02x} '{}' canonical={} size={}",
+            crate::println!(
+                "[TTY] RX byte=0x{:02x} '{}' canonical={} size={}",
                 byte,
-                if byte.is_ascii_graphic() || byte == b' ' { byte as char } else { '.' },
+                if byte.is_ascii_graphic() || byte == b' ' {
+                    byte as char
+                } else {
+                    '.'
+                },
                 self.canonical_mode.load(Ordering::Relaxed),
-                self.input_buffer.lock().len());
+                self.input_buffer.lock().len()
+            );
         }
         // Canonical mode processing
         if self.canonical_mode.load(Ordering::Relaxed) {
@@ -265,7 +297,9 @@ impl TtyDevice {
                 // Backspace/DEL
                 0x08 | 0x7F => {
                     let mut input_buffer = self.input_buffer.lock();
-                    if input_buffer.pop_back().is_some() && self.echo_enabled.load(Ordering::Relaxed) {
+                    if input_buffer.pop_back().is_some()
+                        && self.echo_enabled.load(Ordering::Relaxed)
+                    {
                         self.echo_backspace();
                     }
                 }
@@ -319,19 +353,56 @@ impl TtyDevice {
                 // MEDIUMRAW: return 1-byte Linux keycode (press-only)
                 fn ascii_to_linux_keycode(b: u8) -> Option<u8> {
                     match b {
-                        b'1' => Some(2), b'2' => Some(3), b'3' => Some(4), b'4' => Some(5), b'5' => Some(6),
-                        b'6' => Some(7), b'7' => Some(8), b'8' => Some(9), b'9' => Some(10), b'0' => Some(11),
-                        b'-' => Some(12), b'=' => Some(13),
+                        b'1' => Some(2),
+                        b'2' => Some(3),
+                        b'3' => Some(4),
+                        b'4' => Some(5),
+                        b'5' => Some(6),
+                        b'6' => Some(7),
+                        b'7' => Some(8),
+                        b'8' => Some(9),
+                        b'9' => Some(10),
+                        b'0' => Some(11),
+                        b'-' => Some(12),
+                        b'=' => Some(13),
                         0x08 | 0x7F => Some(14), // Backspace
                         b'\t' => Some(15),
-                        b'q' => Some(16), b'w' => Some(17), b'e' => Some(18), b'r' => Some(19), b't' => Some(20),
-                        b'y' => Some(21), b'u' => Some(22), b'i' => Some(23), b'o' => Some(24), b'p' => Some(25),
-                        b'[' => Some(26), b']' => Some(27), b'\n' | b'\r' => Some(28),
-                        b'a' => Some(30), b's' => Some(31), b'd' => Some(32), b'f' => Some(33), b'g' => Some(34),
-                        b'h' => Some(35), b'j' => Some(36), b'k' => Some(37), b'l' => Some(38), b';' => Some(39),
-                        b'\'' => Some(40), b'`' => Some(41), b'\\' => Some(43),
-                        b'z' => Some(44), b'x' => Some(45), b'c' => Some(46), b'v' => Some(47), b'b' => Some(48),
-                        b'n' => Some(49), b'm' => Some(50), b',' => Some(51), b'.' => Some(52), b'/' => Some(53),
+                        b'q' => Some(16),
+                        b'w' => Some(17),
+                        b'e' => Some(18),
+                        b'r' => Some(19),
+                        b't' => Some(20),
+                        b'y' => Some(21),
+                        b'u' => Some(22),
+                        b'i' => Some(23),
+                        b'o' => Some(24),
+                        b'p' => Some(25),
+                        b'[' => Some(26),
+                        b']' => Some(27),
+                        b'\n' | b'\r' => Some(28),
+                        b'a' => Some(30),
+                        b's' => Some(31),
+                        b'd' => Some(32),
+                        b'f' => Some(33),
+                        b'g' => Some(34),
+                        b'h' => Some(35),
+                        b'j' => Some(36),
+                        b'k' => Some(37),
+                        b'l' => Some(38),
+                        b';' => Some(39),
+                        b'\'' => Some(40),
+                        b'`' => Some(41),
+                        b'\\' => Some(43),
+                        b'z' => Some(44),
+                        b'x' => Some(45),
+                        b'c' => Some(46),
+                        b'v' => Some(47),
+                        b'b' => Some(48),
+                        b'n' => Some(49),
+                        b'm' => Some(50),
+                        b',' => Some(51),
+                        b'.' => Some(52),
+                        b'/' => Some(53),
                         b' ' => Some(57),
                         // Uppercase letters -> map to same keycode as lowercase
                         b'A'..=b'Z' => Some(30 + (b.to_ascii_lowercase() - b'a') as u8),
@@ -350,34 +421,117 @@ impl TtyDevice {
                 {
                     let mut st = self.esc_state.lock();
                     match (*st, byte) {
-                        (0, 0x1B) => { *st = 1; handled_escape = true; }
-                        (1, b'[') => { *st = 2; handled_escape = true; }
-                        (1, b'O') => { *st = 3; handled_escape = true; }
+                        (0, 0x1B) => {
+                            *st = 1;
+                            handled_escape = true;
+                        }
+                        (1, b'[') => {
+                            *st = 2;
+                            handled_escape = true;
+                        }
+                        (1, b'O') => {
+                            *st = 3;
+                            handled_escape = true;
+                        }
                         // Arrows (CSI)
-                        (2, b'A') => { *st = 0; handled_escape = true; push_keycode_press_release(self, 103); } // Up
-                        (2, b'B') => { *st = 0; handled_escape = true; push_keycode_press_release(self, 108); } // Down
-                        (2, b'C') => { *st = 0; handled_escape = true; push_keycode_press_release(self, 106); } // Right
-                        (2, b'D') => { *st = 0; handled_escape = true; push_keycode_press_release(self, 105); } // Left
+                        (2, b'A') => {
+                            *st = 0;
+                            handled_escape = true;
+                            push_keycode_press_release(self, 103);
+                        } // Up
+                        (2, b'B') => {
+                            *st = 0;
+                            handled_escape = true;
+                            push_keycode_press_release(self, 108);
+                        } // Down
+                        (2, b'C') => {
+                            *st = 0;
+                            handled_escape = true;
+                            push_keycode_press_release(self, 106);
+                        } // Right
+                        (2, b'D') => {
+                            *st = 0;
+                            handled_escape = true;
+                            push_keycode_press_release(self, 105);
+                        } // Left
                         // Arrows (SS3)
-                        (3, b'H') => { *st = 0; handled_escape = true; push_keycode_press_release(self, 103); }
-                        (3, b'P') => { *st = 0; handled_escape = true; push_keycode_press_release(self, 108); }
-                        (3, b'M') => { *st = 0; handled_escape = true; push_keycode_press_release(self, 106); }
-                        (3, b'K') => { *st = 0; handled_escape = true; push_keycode_press_release(self, 105); }
+                        (3, b'H') => {
+                            *st = 0;
+                            handled_escape = true;
+                            push_keycode_press_release(self, 103);
+                        }
+                        (3, b'P') => {
+                            *st = 0;
+                            handled_escape = true;
+                            push_keycode_press_release(self, 108);
+                        }
+                        (3, b'M') => {
+                            *st = 0;
+                            handled_escape = true;
+                            push_keycode_press_release(self, 106);
+                        }
+                        (3, b'K') => {
+                            *st = 0;
+                            handled_escape = true;
+                            push_keycode_press_release(self, 105);
+                        }
                         // Home/End (CSI)
-                        (2, b'H') => { *st = 0; handled_escape = true; push_keycode_press_release(self, 102); } // Home
-                        (2, b'F') => { *st = 0; handled_escape = true; push_keycode_press_release(self, 107); } // End
+                        (2, b'H') => {
+                            *st = 0;
+                            handled_escape = true;
+                            push_keycode_press_release(self, 102);
+                        } // Home
+                        (2, b'F') => {
+                            *st = 0;
+                            handled_escape = true;
+                            push_keycode_press_release(self, 107);
+                        } // End
                         // Home/End (SS3)
-                        (3, b'F') => { *st = 0; handled_escape = true; push_keycode_press_release(self, 107); }
+                        (3, b'F') => {
+                            *st = 0;
+                            handled_escape = true;
+                            push_keycode_press_release(self, 107);
+                        }
                         // CSI numeric ~ sequences
-                        (2, b'2') => { *st = 4; handled_escape = true; } // -> Insert
-                        (2, b'3') => { *st = 5; handled_escape = true; } // -> Delete
-                        (2, b'5') => { *st = 6; handled_escape = true; } // -> PageUp
-                        (2, b'6') => { *st = 7; handled_escape = true; } // -> PageDown
-                        (4, b'~') => { *st = 0; handled_escape = true; push_keycode_press_release(self, 110); } // Insert
-                        (5, b'~') => { *st = 0; handled_escape = true; push_keycode_press_release(self, 111); } // Delete
-                        (6, b'~') => { *st = 0; handled_escape = true; push_keycode_press_release(self, 104); } // PageUp
-                        (7, b'~') => { *st = 0; handled_escape = true; push_keycode_press_release(self, 109); } // PageDown
-                        (1, _) | (2, _) | (3, _) => { *st = 0; }
+                        (2, b'2') => {
+                            *st = 4;
+                            handled_escape = true;
+                        } // -> Insert
+                        (2, b'3') => {
+                            *st = 5;
+                            handled_escape = true;
+                        } // -> Delete
+                        (2, b'5') => {
+                            *st = 6;
+                            handled_escape = true;
+                        } // -> PageUp
+                        (2, b'6') => {
+                            *st = 7;
+                            handled_escape = true;
+                        } // -> PageDown
+                        (4, b'~') => {
+                            *st = 0;
+                            handled_escape = true;
+                            push_keycode_press_release(self, 110);
+                        } // Insert
+                        (5, b'~') => {
+                            *st = 0;
+                            handled_escape = true;
+                            push_keycode_press_release(self, 111);
+                        } // Delete
+                        (6, b'~') => {
+                            *st = 0;
+                            handled_escape = true;
+                            push_keycode_press_release(self, 104);
+                        } // PageUp
+                        (7, b'~') => {
+                            *st = 0;
+                            handled_escape = true;
+                            push_keycode_press_release(self, 109);
+                        } // PageDown
+                        (1, _) | (2, _) | (3, _) => {
+                            *st = 0;
+                        }
                         _ => {}
                     }
                 }
@@ -390,19 +544,56 @@ impl TtyDevice {
                 // RAW: XT Set1 scancodes (extended codes are E0-prefixed)
                 fn ascii_to_set1_scancode(b: u8) -> Option<u8> {
                     match b {
-                        b'1' => Some(2), b'2' => Some(3), b'3' => Some(4), b'4' => Some(5), b'5' => Some(6),
-                        b'6' => Some(7), b'7' => Some(8), b'8' => Some(9), b'9' => Some(10), b'0' => Some(11),
-                        b'-' => Some(12), b'=' => Some(13),
+                        b'1' => Some(2),
+                        b'2' => Some(3),
+                        b'3' => Some(4),
+                        b'4' => Some(5),
+                        b'5' => Some(6),
+                        b'6' => Some(7),
+                        b'7' => Some(8),
+                        b'8' => Some(9),
+                        b'9' => Some(10),
+                        b'0' => Some(11),
+                        b'-' => Some(12),
+                        b'=' => Some(13),
                         0x08 | 0x7F => Some(14),
                         b'\t' => Some(15),
-                        b'q' => Some(16), b'w' => Some(17), b'e' => Some(18), b'r' => Some(19), b't' => Some(20),
-                        b'y' => Some(21), b'u' => Some(22), b'i' => Some(23), b'o' => Some(24), b'p' => Some(25),
-                        b'[' => Some(26), b']' => Some(27), b'\n' | b'\r' => Some(28),
-                        b'a' => Some(30), b's' => Some(31), b'd' => Some(32), b'f' => Some(33), b'g' => Some(34),
-                        b'h' => Some(35), b'j' => Some(36), b'k' => Some(37), b'l' => Some(38), b';' => Some(39),
-                        b'\'' => Some(40), b'`' => Some(41), b'\\' => Some(43),
-                        b'z' => Some(44), b'x' => Some(45), b'c' => Some(46), b'v' => Some(47), b'b' => Some(48),
-                        b'n' => Some(49), b'm' => Some(50), b',' => Some(51), b'.' => Some(52), b'/' => Some(53),
+                        b'q' => Some(16),
+                        b'w' => Some(17),
+                        b'e' => Some(18),
+                        b'r' => Some(19),
+                        b't' => Some(20),
+                        b'y' => Some(21),
+                        b'u' => Some(22),
+                        b'i' => Some(23),
+                        b'o' => Some(24),
+                        b'p' => Some(25),
+                        b'[' => Some(26),
+                        b']' => Some(27),
+                        b'\n' | b'\r' => Some(28),
+                        b'a' => Some(30),
+                        b's' => Some(31),
+                        b'd' => Some(32),
+                        b'f' => Some(33),
+                        b'g' => Some(34),
+                        b'h' => Some(35),
+                        b'j' => Some(36),
+                        b'k' => Some(37),
+                        b'l' => Some(38),
+                        b';' => Some(39),
+                        b'\'' => Some(40),
+                        b'`' => Some(41),
+                        b'\\' => Some(43),
+                        b'z' => Some(44),
+                        b'x' => Some(45),
+                        b'c' => Some(46),
+                        b'v' => Some(47),
+                        b'b' => Some(48),
+                        b'n' => Some(49),
+                        b'm' => Some(50),
+                        b',' => Some(51),
+                        b'.' => Some(52),
+                        b'/' => Some(53),
                         b' ' => Some(57),
                         b'A'..=b'Z' => Some(30 + (b.to_ascii_lowercase() - b'a') as u8),
                         _ => None,
@@ -411,10 +602,14 @@ impl TtyDevice {
                 fn push_scancode_press_release(dev: &TtyDevice, code: u8, extended: bool) {
                     let mut input_buffer = dev.input_buffer.lock();
                     // press
-                    if extended { input_buffer.push_back(0xE0); }
+                    if extended {
+                        input_buffer.push_back(0xE0);
+                    }
                     input_buffer.push_back(code);
                     // release
-                    if extended { input_buffer.push_back(0xE0); }
+                    if extended {
+                        input_buffer.push_back(0xE0);
+                    }
                     input_buffer.push_back(code | 0x80);
                     drop(input_buffer);
                     dev.input_waker.wake_all();
@@ -423,33 +618,114 @@ impl TtyDevice {
                 {
                     let mut st = self.esc_state.lock();
                     match (*st, byte) {
-                        (0, 0x1B) => { *st = 1; handled_escape = true; }
-                        (1, b'[') => { *st = 2; handled_escape = true; }
-                        (1, b'O') => { *st = 3; handled_escape = true; }
+                        (0, 0x1B) => {
+                            *st = 1;
+                            handled_escape = true;
+                        }
+                        (1, b'[') => {
+                            *st = 2;
+                            handled_escape = true;
+                        }
+                        (1, b'O') => {
+                            *st = 3;
+                            handled_escape = true;
+                        }
                         // Arrows via CSI
-                        (2, b'A') => { *st = 0; handled_escape = true; push_scancode_press_release(self, 0x48, true); } // Up   E0 48
-                        (2, b'B') => { *st = 0; handled_escape = true; push_scancode_press_release(self, 0x50, true); } // Down E0 50
-                        (2, b'C') => { *st = 0; handled_escape = true; push_scancode_press_release(self, 0x4D, true); } // Right E0 4D
-                        (2, b'D') => { *st = 0; handled_escape = true; push_scancode_press_release(self, 0x4B, true); } // Left  E0 4B
+                        (2, b'A') => {
+                            *st = 0;
+                            handled_escape = true;
+                            push_scancode_press_release(self, 0x48, true);
+                        } // Up   E0 48
+                        (2, b'B') => {
+                            *st = 0;
+                            handled_escape = true;
+                            push_scancode_press_release(self, 0x50, true);
+                        } // Down E0 50
+                        (2, b'C') => {
+                            *st = 0;
+                            handled_escape = true;
+                            push_scancode_press_release(self, 0x4D, true);
+                        } // Right E0 4D
+                        (2, b'D') => {
+                            *st = 0;
+                            handled_escape = true;
+                            push_scancode_press_release(self, 0x4B, true);
+                        } // Left  E0 4B
                         // Arrows via SS3 keypad-style (DEC application keypad): O H/K/M/P etc.
-                        (3, b'H') => { *st = 0; handled_escape = true; push_scancode_press_release(self, 0x48, true); } // KP-8 = Up
-                        (3, b'P') => { *st = 0; handled_escape = true; push_scancode_press_release(self, 0x50, true); } // KP-2 = Down
-                        (3, b'M') => { *st = 0; handled_escape = true; push_scancode_press_release(self, 0x4D, true); } // KP-6 = Right
-                        (3, b'K') => { *st = 0; handled_escape = true; push_scancode_press_release(self, 0x4B, true); } // KP-4 = Left
+                        (3, b'H') => {
+                            *st = 0;
+                            handled_escape = true;
+                            push_scancode_press_release(self, 0x48, true);
+                        } // KP-8 = Up
+                        (3, b'P') => {
+                            *st = 0;
+                            handled_escape = true;
+                            push_scancode_press_release(self, 0x50, true);
+                        } // KP-2 = Down
+                        (3, b'M') => {
+                            *st = 0;
+                            handled_escape = true;
+                            push_scancode_press_release(self, 0x4D, true);
+                        } // KP-6 = Right
+                        (3, b'K') => {
+                            *st = 0;
+                            handled_escape = true;
+                            push_scancode_press_release(self, 0x4B, true);
+                        } // KP-4 = Left
                         // Home/End via CSI
-                        (2, b'H') => { *st = 0; handled_escape = true; push_scancode_press_release(self, 0x47, true); } // Home  E0 47
-                        (2, b'F') => { *st = 0; handled_escape = true; push_scancode_press_release(self, 0x4F, true); } // End   E0 4F
+                        (2, b'H') => {
+                            *st = 0;
+                            handled_escape = true;
+                            push_scancode_press_release(self, 0x47, true);
+                        } // Home  E0 47
+                        (2, b'F') => {
+                            *st = 0;
+                            handled_escape = true;
+                            push_scancode_press_release(self, 0x4F, true);
+                        } // End   E0 4F
                         // Home/End via SS3 (common mappings)
-                        (3, b'F') => { *st = 0; handled_escape = true; push_scancode_press_release(self, 0x4F, true); }
+                        (3, b'F') => {
+                            *st = 0;
+                            handled_escape = true;
+                            push_scancode_press_release(self, 0x4F, true);
+                        }
                         // CSI numeric ~ sequences
-                        (2, b'2') => { *st = 4; handled_escape = true; } // expect '~' => Insert
-                        (2, b'3') => { *st = 5; handled_escape = true; } // expect '~' => Delete
-                        (2, b'5') => { *st = 6; handled_escape = true; } // expect '~' => PageUp
-                        (2, b'6') => { *st = 7; handled_escape = true; } // expect '~' => PageDown
-                        (4, b'~') => { *st = 0; handled_escape = true; push_scancode_press_release(self, 0x52, true); } // Ins  E0 52
-                        (5, b'~') => { *st = 0; handled_escape = true; push_scancode_press_release(self, 0x53, true); } // Del  E0 53
-                        (6, b'~') => { *st = 0; handled_escape = true; push_scancode_press_release(self, 0x49, true); } // PgUp E0 49
-                        (7, b'~') => { *st = 0; handled_escape = true; push_scancode_press_release(self, 0x51, true); } // PgDn E0 51
+                        (2, b'2') => {
+                            *st = 4;
+                            handled_escape = true;
+                        } // expect '~' => Insert
+                        (2, b'3') => {
+                            *st = 5;
+                            handled_escape = true;
+                        } // expect '~' => Delete
+                        (2, b'5') => {
+                            *st = 6;
+                            handled_escape = true;
+                        } // expect '~' => PageUp
+                        (2, b'6') => {
+                            *st = 7;
+                            handled_escape = true;
+                        } // expect '~' => PageDown
+                        (4, b'~') => {
+                            *st = 0;
+                            handled_escape = true;
+                            push_scancode_press_release(self, 0x52, true);
+                        } // Ins  E0 52
+                        (5, b'~') => {
+                            *st = 0;
+                            handled_escape = true;
+                            push_scancode_press_release(self, 0x53, true);
+                        } // Del  E0 53
+                        (6, b'~') => {
+                            *st = 0;
+                            handled_escape = true;
+                            push_scancode_press_release(self, 0x49, true);
+                        } // PgUp E0 49
+                        (7, b'~') => {
+                            *st = 0;
+                            handled_escape = true;
+                            push_scancode_press_release(self, 0x51, true);
+                        } // PgDn E0 51
                         (1, _) | (2, _) | (3, _) => {
                             // Unknown sequence, reset and fall through to ASCII mapping
                             *st = 0;
@@ -470,7 +746,7 @@ impl TtyDevice {
             }
         }
     }
-    
+
     /// Echo character back to output.
     fn echo_char(&self, byte: u8) {
         // Get actual UART device and output
@@ -482,7 +758,7 @@ impl TtyDevice {
             }
         }
     }
-    
+
     /// Echo backspace sequence.
     fn echo_backspace(&self) {
         // Backspace echo: BS + space + BS
@@ -490,7 +766,6 @@ impl TtyDevice {
         self.echo_char(b' ');
         self.echo_char(0x08);
     }
-
 }
 
 impl Selectable for TtyDevice {
@@ -520,7 +795,11 @@ impl Selectable for TtyDevice {
             match timeout_ticks {
                 Some(ticks) => {
                     let timed_out = self.wait_until_readable_with_timeout_ticks(trapframe, ticks);
-                    if timed_out { SelectWaitOutcome::TimedOut } else { SelectWaitOutcome::Ready }
+                    if timed_out {
+                        SelectWaitOutcome::TimedOut
+                    } else {
+                        SelectWaitOutcome::Ready
+                    }
                 }
                 None => {
                     self.wait_until_readable(trapframe);
@@ -546,12 +825,16 @@ impl TtyControl for TtyDevice {
     fn set_echo(&self, enabled: bool) {
         self.echo_enabled.store(enabled, Ordering::Relaxed);
     }
-    fn is_echo_enabled(&self) -> bool { self.echo_enabled.load(Ordering::Relaxed) }
+    fn is_echo_enabled(&self) -> bool {
+        self.echo_enabled.load(Ordering::Relaxed)
+    }
 
     fn set_canonical(&self, enabled: bool) {
         self.canonical_mode.store(enabled, Ordering::Relaxed);
     }
-    fn is_canonical(&self) -> bool { self.canonical_mode.load(Ordering::Relaxed) }
+    fn is_canonical(&self) -> bool {
+        self.canonical_mode.load(Ordering::Relaxed)
+    }
 
     fn set_winsize(&self, cols: u16, rows: u16) {
         *self.winsize_cols.lock() = cols;
@@ -568,26 +851,29 @@ impl DeviceEventListener for TtyDevice {
             self.handle_input_byte(input_event.data);
         }
     }
-    
+
     fn interested_in(&self, event_type: &str) -> bool {
         event_type == "input"
     }
 }
 
 impl MemoryMappingOps for TtyDevice {
-    fn get_mapping_info(&self, _offset: usize, _length: usize) 
-                       -> Result<(usize, usize, bool), &'static str> {
+    fn get_mapping_info(
+        &self,
+        _offset: usize,
+        _length: usize,
+    ) -> Result<(usize, usize, bool), &'static str> {
         Err("Memory mapping not supported by TTY device")
     }
-    
+
     fn on_mapped(&self, _vaddr: usize, _paddr: usize, _length: usize, _offset: usize) {
         // TTY devices don't support memory mapping
     }
-    
+
     fn on_unmapped(&self, _vaddr: usize, _length: usize) {
         // TTY devices don't support memory mapping
     }
-    
+
     fn supports_mmap(&self) -> bool {
         false
     }
@@ -597,19 +883,19 @@ impl Device for TtyDevice {
     fn device_type(&self) -> DeviceType {
         DeviceType::Char
     }
-    
+
     fn name(&self) -> &'static str {
         self.name
     }
-    
+
     fn as_any(&self) -> &dyn Any {
         self
     }
-    
+
     fn as_any_mut(&mut self) -> &mut dyn Any {
         self
     }
-    
+
     fn as_char_device(&self) -> Option<&dyn CharDevice> {
         Some(self)
     }
@@ -639,12 +925,22 @@ impl CharDevice for TtyDevice {
                     // Include the newline itself
                     let take = core::cmp::min(pos + 1, buf.len());
                     for i in 0..take {
-                        if let Some(b) = guard.pop_front() { buf[i] = b; bytes += 1; } else { break; }
+                        if let Some(b) = guard.pop_front() {
+                            buf[i] = b;
+                            bytes += 1;
+                        } else {
+                            break;
+                        }
                     }
                 }
             } else {
                 while bytes < buf.len() {
-                    if let Some(b) = guard.pop_front() { buf[bytes] = b; bytes += 1; } else { break; }
+                    if let Some(b) = guard.pop_front() {
+                        buf[bytes] = b;
+                        bytes += 1;
+                    } else {
+                        break;
+                    }
                 }
             }
             bytes
@@ -655,7 +951,10 @@ impl CharDevice for TtyDevice {
             loop {
                 // If a newline exists, copy out a line chunk
                 {
-                    let has_newline = { let g = self.input_buffer.lock(); g.iter().any(|&b| b == b'\n') };
+                    let has_newline = {
+                        let g = self.input_buffer.lock();
+                        g.iter().any(|&b| b == b'\n')
+                    };
                     if has_newline {
                         return copy_out(buffer, true);
                     }
@@ -686,7 +985,9 @@ impl CharDevice for TtyDevice {
                             let b0 = guard.pop_front().unwrap();
                             let b1 = guard.pop_front().unwrap();
                             drop(guard);
-                            buffer[0] = b0; buffer[1] = b1; return 2;
+                            buffer[0] = b0;
+                            buffer[1] = b1;
+                            return 2;
                         }
                     }
                 }
@@ -706,8 +1007,15 @@ impl CharDevice for TtyDevice {
                     (head_is_e0 && buffer.len() >= 2, have)
                 };
                 if need_pair && !have_pair {
-                    if self.nonblocking.load(Ordering::Relaxed) { return 0; }
-                    if let Some(task) = mytask() { self.input_waker.wait(task.get_id(), task.get_trapframe()); continue; } else { return 0; }
+                    if self.nonblocking.load(Ordering::Relaxed) {
+                        return 0;
+                    }
+                    if let Some(task) = mytask() {
+                        self.input_waker.wait(task.get_id(), task.get_trapframe());
+                        continue;
+                    } else {
+                        return 0;
+                    }
                 }
             }
 
@@ -722,7 +1030,9 @@ impl CharDevice for TtyDevice {
                             let b0 = guard.pop_front().unwrap();
                             let b1 = guard.pop_front().unwrap();
                             drop(guard);
-                            buffer[0] = b0; buffer[1] = b1; return 2;
+                            buffer[0] = b0;
+                            buffer[1] = b1;
+                            return 2;
                         }
                     }
                     drop(guard);
@@ -730,7 +1040,9 @@ impl CharDevice for TtyDevice {
                 return copy_out(buffer, false);
             }
             // Not enough yet; block until new input arrives
-            if self.nonblocking.load(Ordering::Relaxed) { return 0; }
+            if self.nonblocking.load(Ordering::Relaxed) {
+                return 0;
+            }
             if let Some(task) = mytask() {
                 self.input_waker.wait(task.get_id(), task.get_trapframe());
             } else {
@@ -746,13 +1058,13 @@ impl CharDevice for TtyDevice {
                 return Some(byte);
             }
             drop(input_buffer);
-            
+
             // No data available, block the current task
             if let Some(task) = mytask() {
                 // Wait for input to become available
                 // This will return when the task is woken up by input_waker.wake_all()
                 self.input_waker.wait(task.get_id(), task.get_trapframe());
-                
+
                 // Continue the loop to re-check if data is available
                 continue;
             } else {
@@ -761,7 +1073,7 @@ impl CharDevice for TtyDevice {
             }
         }
     }
-    
+
     fn write_byte(&self, byte: u8) -> Result<(), &'static str> {
         // Forward to UART device with line ending conversion
         let device_manager = DeviceManager::get_manager();
@@ -780,12 +1092,12 @@ impl CharDevice for TtyDevice {
         }
         Err("UART device not available")
     }
-    
+
     fn can_read(&self) -> bool {
         let input_buffer = self.input_buffer.lock();
         !input_buffer.is_empty()
     }
-    
+
     fn can_write(&self) -> bool {
         // Check if backend char device is available and writable
         let device_manager = DeviceManager::get_manager();
@@ -806,16 +1118,12 @@ impl ControlOps for TtyDevice {
                 self.set_echo(arg != 0);
                 Ok(0)
             }
-            SCTL_TTY_GET_ECHO => {
-                Ok(self.is_echo_enabled() as i32)
-            }
+            SCTL_TTY_GET_ECHO => Ok(self.is_echo_enabled() as i32),
             SCTL_TTY_SET_CANONICAL => {
                 self.set_canonical(arg != 0);
                 Ok(0)
             }
-            SCTL_TTY_GET_CANONICAL => {
-                Ok(self.is_canonical() as i32)
-            }
+            SCTL_TTY_GET_CANONICAL => Ok(self.is_canonical() as i32),
             SCTL_TTY_SET_WINSIZE => {
                 let cols = ((arg >> 16) & 0xFFFF) as u16;
                 let rows = (arg & 0xFFFF) as u16;
@@ -830,7 +1138,8 @@ impl ControlOps for TtyDevice {
             SCTL_TTY_SET_READ_POLICY => {
                 let min_ready = (arg & 0xFFFF) as u16;
                 let timeout_ms = ((arg >> 16) & 0xFFFF) as u16;
-                self.read_min_ready_bytes.store(min_ready, Ordering::Relaxed);
+                self.read_min_ready_bytes
+                    .store(min_ready, Ordering::Relaxed);
                 self.read_timeout_ms.store(timeout_ms, Ordering::Relaxed);
                 Ok(0)
             }
@@ -849,17 +1158,13 @@ impl ControlOps for TtyDevice {
                 self.debug_enabled.store(arg != 0, Ordering::Relaxed);
                 Ok(0)
             }
-            SCTL_TTY_GET_DEBUG => {
-                Ok(self.debug_enabled.load(Ordering::Relaxed) as i32)
-            }
+            SCTL_TTY_GET_DEBUG => Ok(self.debug_enabled.load(Ordering::Relaxed) as i32),
             SCTL_TTY_SET_KBMODE => {
                 let v = (arg & 0xFF) as u8;
                 self.kb_mode.store(v, Ordering::Relaxed);
                 Ok(0)
             }
-            SCTL_TTY_GET_KBMODE => {
-                Ok(self.kb_mode.load(Ordering::Relaxed) as i32)
-            }
+            SCTL_TTY_GET_KBMODE => Ok(self.kb_mode.load(Ordering::Relaxed) as i32),
             _ => Err("Unsupported control command for TTY device"),
         }
     }

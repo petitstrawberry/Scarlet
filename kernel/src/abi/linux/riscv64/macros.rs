@@ -19,14 +19,14 @@ macro_rules! syscall_table {
         }
 
         /// Syscall handler
-        /// 
+        ///
         /// # Arguments
         /// * `abi` - The ABI module instance
         /// * `trapframe` - The trapframe
-        /// 
+        ///
         /// # Returns
         /// The result of the syscall handler
-        /// 
+        ///
         /// # Errors
         /// Returns an error if the syscall number is invalid
         pub fn syscall_handler(abi: &mut crate::abi::linux::riscv64::LinuxRiscv64Abi, trapframe: &mut crate::arch::Trapframe) -> Result<usize, &'static str> {

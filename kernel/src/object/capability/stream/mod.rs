@@ -1,5 +1,5 @@
 //! Stream operations capability module
-//! 
+//!
 //! This module provides system calls and traits for StreamOps capability,
 //! which enables read and write operations on KernelObjects.
 
@@ -50,13 +50,13 @@ impl From<FileSystemError> for StreamError {
 }
 
 /// Stream operations capability
-/// 
+///
 /// This trait represents the ability to perform stream-like operations
 /// such as read, write, and seek on a resource.
 pub trait StreamOps: Send + Sync {
     /// Read data from the stream
     fn read(&self, buffer: &mut [u8]) -> Result<usize, StreamError>;
-    
+
     /// Write data to the stream
     fn write(&self, buffer: &[u8]) -> Result<usize, StreamError>;
 }

@@ -8,29 +8,46 @@ ENV DEBIAN_FRONTEND noninteractive
 
 # Install dependencies and tools
 RUN apt update && \
-	apt install -y build-essential autoconf automake autotools-dev curl bc git device-tree-compiler vim python3 python3-venv gdb-multiarch gcc-riscv64-linux-gnu cpio libncurses5-dev libncursesw5-dev \
+	apt install -y build-essential autoconf automake autotools-dev curl bc git device-tree-compiler vim python3 python3-venv gdb-multiarch gcc-riscv64-linux-gnu gcc-aarch64-linux-gnu cpio libncurses5-dev libncursesw5-dev \
     mtools dosfstools sleuthkit libslirp-dev
 
 # # # Install QEMU
 # RUN apt install -y qemu-system-riscv64
 
 RUN apt update && \
-    apt install -y pkg-config libglib2.0-dev libmount-dev python3 python3-venv python3-pip python3-dev git libssl-dev libffi-dev build-essential automake libfreetype6-dev libtheora-dev libtool libvorbis-dev pkg-config texinfo zlib1g-dev unzip cmake yasm libx264-dev libmp3lame-dev libopus-dev libvorbis-dev libxcb1-dev libxcb-shm0-dev libxcb-xfixes0-dev pkg-config texinfo wget zlib1g-dev ninja-build libpixman-1-dev
+    apt install -y pkg-config libglib2.0-dev libmount-dev python3 python3-venv python3-pip python3-dev git libssl-dev libffi-dev build-essential automake libfreetype6-dev libtheora-dev libtool libvorbis-dev pkg-config texinfo zlib1g-dev unzip cmake yasm libx264-dev libmp3lame-dev libopus-dev libvorbis-dev libxcb1-dev libxcb-shm0-dev libxcb-xfixes0-dev pkg-config texinfo wget zlib1g-dev ninja-build libpixman-1-dev libcapstone-dev
 RUN cd /opt && \
     wget https://download.qemu.org/qemu-10.1.2.tar.xz && \
 	tar xvJf qemu-10.1.2.tar.xz && \
 	rm qemu-10.1.2.tar.xz && \
 	cd qemu-10.1.2 && \
-    ./configure --target-list=riscv32-softmmu,riscv64-softmmu --prefix=/opt --enable-slirp --python=/usr/bin/python3 && \
+    ./configure --target-list=riscv32-softmmu,riscv64-softmmu,aarch64-softmmu --prefix=/opt --enable-slirp --python=/usr/bin/python3 --enable-debug --enable-capstone && \
 	make -j 8 && \
 	make install
 
-# Install Rust and RISC-V target
+# Build U-Boot for QEMU AArch64
+# U-Boot provides proper boot protocol support (DTB in x0, etc.)
+# Configure auto-boot with QEMU fw_cfg to load kernel passed via -kernel option
+RUN apt update && \
+    apt install -y bison flex libssl-dev python3-setuptools python3-pyelftools libgnutls28-dev && \
+    cd /opt && \
+    wget https://ftp.denx.de/pub/u-boot/u-boot-2025.01.tar.bz2 && \
+    tar xjf u-boot-2025.01.tar.bz2 && \
+    rm u-boot-2025.01.tar.bz2 && \
+    cd u-boot-2025.01 && \
+    make CROSS_COMPILE=aarch64-linux-gnu- qemu_arm64_defconfig && \
+    sed -i 's/CONFIG_BOOTCOMMAND=.*/CONFIG_BOOTCOMMAND="qfw load 0x40200000 0x44000000; booti 0x40200000 0x44000000:${filesize} ${fdtcontroladdr}"/' .config && \
+    sed -i 's/CONFIG_PREBOOT=.*/CONFIG_PREBOOT=""/' .config && \
+    make CROSS_COMPILE=aarch64-linux-gnu- -j$(nproc) && \
+    cp u-boot.bin /opt/u-boot-aarch64.bin
+
+# Install Rust and architecture targets
 RUN curl https://sh.rustup.rs -sSf | sh -s -- -y && \
-    rustup default nightly-2025-04-28 && \
-    rustup install nightly-2025-04-28 && \
-    rustup component add rust-src --toolchain nightly-2025-04-28 && \
-    rustup target add riscv64gc-unknown-none-elf
+    rustup default nightly-2025-12-31 && \
+    rustup install nightly-2025-12-31 && \
+    rustup component add rust-src --toolchain nightly-2025-12-31 && \
+    rustup target add riscv64gc-unknown-none-elf && \
+    rustup target add aarch64-unknown-none
 
 # Install cargo tools
 RUN cargo install cargo-make
