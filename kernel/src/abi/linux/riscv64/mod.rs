@@ -968,6 +968,7 @@ syscall_table! {
     Mmap = 222 => mm::sys_mmap,
     Mprotect = 226 => mm::sys_mprotect,
     EpollWait = 232 => fs::sys_epoll_wait,
+    Getrandom = 278 => fs::sys_getrandom,
     MemfdCreate = 279 => proc::sys_memfd_create, // Linux memfd_create
     Wait4 = 260 => proc::sys_wait4,
     Prlimit64 = 261 => proc::sys_prlimit64,

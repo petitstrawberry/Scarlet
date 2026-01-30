@@ -16,8 +16,11 @@ use alloc::{
     vec,
     vec::Vec,
 };
+use core::sync::atomic::{AtomicU64, Ordering};
 
 use super::errno;
+
+static XORSHIFT_STATE: AtomicU64 = AtomicU64::new(0);
 
 fn remap_shm_path(path: &str) -> String {
     if let Some(rest) = path.strip_prefix("/dev/shm/") {
@@ -158,6 +161,14 @@ pub const STATX_BASIC_STATS: u32 = 0x000007ff;
 #[allow(dead_code)]
 pub const STATX_BTIME: u32 = 0x00000800;
 
+// Linux getrandom flags
+#[allow(dead_code)]
+pub const GRND_NONBLOCK: u32 = 0x0001;
+#[allow(dead_code)]
+pub const GRND_RANDOM: u32 = 0x0002;
+#[allow(dead_code)]
+pub const GRND_INSECURE: u32 = 0x0004;
+
 // Linux fcntl command constants
 pub const F_DUPFD: u32 = 0; // Duplicate file descriptor
 pub const F_GETFD: u32 = 1; // Get file descriptor flags
@@ -270,6 +281,38 @@ fn statx_timestamp_from_secs(seconds: u64) -> LinuxStatxTimestamp {
         tv_sec: seconds as i64,
         tv_nsec: 0,
         __reserved: 0,
+    }
+}
+
+fn next_pseudo_random_u64() -> u64 {
+    loop {
+        let mut state = XORSHIFT_STATE.load(Ordering::Relaxed);
+        if state == 0 {
+            state = crate::time::current_time() ^ 0x9e3779b97f4a7c15;
+            if state == 0 {
+                state = 0x4f1bbcdcb7a43413;
+            }
+        }
+        let mut x = state;
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        if XORSHIFT_STATE
+            .compare_exchange(state, x, Ordering::Relaxed, Ordering::Relaxed)
+            .is_ok()
+        {
+            return x;
+        }
+    }
+}
+
+fn fill_pseudo_random(buffer: &mut [u8]) {
+    let mut offset = 0;
+    while offset < buffer.len() {
+        let bytes = next_pseudo_random_u64().to_le_bytes();
+        let to_copy = core::cmp::min(bytes.len(), buffer.len() - offset);
+        buffer[offset..offset + to_copy].copy_from_slice(&bytes[..to_copy]);
+        offset += to_copy;
     }
 }
 
@@ -3825,6 +3868,53 @@ pub fn sys_readlinkat(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> u
     }
 
     copy_len
+}
+
+/// Linux sys_getrandom implementation
+///
+/// Fills the user buffer with random bytes from the kernel pool.
+pub fn sys_getrandom(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
+    let task = match mytask() {
+        Some(t) => t,
+        None => return errno::to_result(errno::EIO),
+    };
+
+    let buf_ptr = trapframe.get_arg(0);
+    let buflen = trapframe.get_arg(1) as usize;
+    let flags = trapframe.get_arg(2) as u32;
+
+    trapframe.increment_pc_next(task);
+
+    if buflen == 0 {
+        return 0;
+    }
+
+    let user_buf = match task.vm_manager.translate_vaddr(buf_ptr) {
+        Some(addr) => addr as *mut u8,
+        None => return errno::to_result(errno::EFAULT),
+    };
+
+    if user_buf.is_null() {
+        return errno::to_result(errno::EFAULT);
+    }
+
+    let buffer = unsafe { core::slice::from_raw_parts_mut(user_buf, buflen) };
+    let bytes_read = crate::random::RandomManager::get_random_bytes(buffer);
+
+    if bytes_read == 0 {
+        if (flags & GRND_NONBLOCK) != 0 {
+            return errno::to_result(errno::EAGAIN);
+        }
+        fill_pseudo_random(buffer);
+        return buflen;
+    }
+
+    if bytes_read < buflen && (flags & GRND_NONBLOCK) == 0 {
+        fill_pseudo_random(&mut buffer[bytes_read..]);
+        return buflen;
+    }
+
+    bytes_read
 }
 
 /// Linux sys_getcwd system call implementation
