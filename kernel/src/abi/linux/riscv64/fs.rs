@@ -57,6 +57,50 @@ pub struct LinuxStat {
     pub __unused: [i32; 2], // Reserved for future use
 }
 
+/// Linux statx timestamp structure
+#[derive(Debug, Clone, Copy, Default)]
+#[repr(C)]
+pub struct LinuxStatxTimestamp {
+    pub tv_sec: i64,
+    pub tv_nsec: u32,
+    pub __reserved: i32,
+}
+
+/// Linux statx structure (matches Linux UAPI layout)
+#[derive(Debug, Clone, Copy, Default)]
+#[repr(C)]
+pub struct LinuxStatx {
+    pub stx_mask: u32,
+    pub stx_blksize: u32,
+    pub stx_attributes: u64,
+    pub stx_nlink: u32,
+    pub stx_uid: u32,
+    pub stx_gid: u32,
+    pub stx_mode: u16,
+    pub __spare0: [u16; 1],
+    pub stx_ino: u64,
+    pub stx_size: u64,
+    pub stx_blocks: u64,
+    pub stx_attributes_mask: u64,
+    pub stx_atime: LinuxStatxTimestamp,
+    pub stx_btime: LinuxStatxTimestamp,
+    pub stx_ctime: LinuxStatxTimestamp,
+    pub stx_mtime: LinuxStatxTimestamp,
+    pub stx_rdev_major: u32,
+    pub stx_rdev_minor: u32,
+    pub stx_dev_major: u32,
+    pub stx_dev_minor: u32,
+    pub stx_mnt_id: u64,
+    pub stx_dio_mem_align: u32,
+    pub stx_dio_offset_align: u32,
+    pub stx_subvol: u64,
+    pub stx_atomic_write_unit_min: u32,
+    pub stx_atomic_write_unit_max: u32,
+    pub stx_atomic_write_segments_max: u32,
+    pub stx_dio_read_offset_align: u32,
+    pub __spare3: [u64; 9],
+}
+
 // Linux file type constants for st_mode field
 #[allow(dead_code)]
 pub const S_IFMT: u32 = 0o170000; // Bit mask for the file type bit field
@@ -86,6 +130,33 @@ pub const S_IROTH: u32 = 0o0004; // Others have read permission
 #[allow(dead_code)]
 pub const S_IWOTH: u32 = 0o0002; // Others have write permission
 pub const S_IXOTH: u32 = 0o0001; // Others have execute permission
+
+// Linux statx mask bits
+#[allow(dead_code)]
+pub const STATX_TYPE: u32 = 0x00000001;
+#[allow(dead_code)]
+pub const STATX_MODE: u32 = 0x00000002;
+#[allow(dead_code)]
+pub const STATX_NLINK: u32 = 0x00000004;
+#[allow(dead_code)]
+pub const STATX_UID: u32 = 0x00000008;
+#[allow(dead_code)]
+pub const STATX_GID: u32 = 0x00000010;
+#[allow(dead_code)]
+pub const STATX_ATIME: u32 = 0x00000020;
+#[allow(dead_code)]
+pub const STATX_MTIME: u32 = 0x00000040;
+#[allow(dead_code)]
+pub const STATX_CTIME: u32 = 0x00000080;
+#[allow(dead_code)]
+pub const STATX_INO: u32 = 0x00000100;
+#[allow(dead_code)]
+pub const STATX_SIZE: u32 = 0x00000200;
+#[allow(dead_code)]
+pub const STATX_BLOCKS: u32 = 0x00000400;
+pub const STATX_BASIC_STATS: u32 = 0x000007ff;
+#[allow(dead_code)]
+pub const STATX_BTIME: u32 = 0x00000800;
 
 // Linux fcntl command constants
 pub const F_DUPFD: u32 = 0; // Duplicate file descriptor
@@ -192,6 +263,58 @@ impl LinuxStat {
             __unused: [0; 2],
         }
     }
+}
+
+fn statx_timestamp_from_secs(seconds: u64) -> LinuxStatxTimestamp {
+    LinuxStatxTimestamp {
+        tv_sec: seconds as i64,
+        tv_nsec: 0,
+        __reserved: 0,
+    }
+}
+
+fn fill_statx_from_stat(
+    statx: &mut LinuxStatx,
+    stat: &LinuxStat,
+    created_time: u64,
+    requested_mask: u32,
+) {
+    let supported_mask = STATX_BASIC_STATS | STATX_BTIME;
+    let effective_mask = if requested_mask == 0 {
+        STATX_BASIC_STATS
+    } else {
+        requested_mask
+    };
+
+    statx.stx_mask = supported_mask & effective_mask;
+    statx.stx_blksize = stat.st_blksize as u32;
+    statx.stx_attributes = 0;
+    statx.stx_nlink = stat.st_nlink;
+    statx.stx_uid = stat.st_uid;
+    statx.stx_gid = stat.st_gid;
+    statx.stx_mode = stat.st_mode as u16;
+    statx.__spare0 = [0; 1];
+    statx.stx_ino = stat.st_ino;
+    statx.stx_size = stat.st_size as u64;
+    statx.stx_blocks = stat.st_blocks as u64;
+    statx.stx_attributes_mask = 0;
+    statx.stx_atime = statx_timestamp_from_secs(stat.st_atime as u64);
+    statx.stx_btime = statx_timestamp_from_secs(created_time);
+    statx.stx_ctime = statx_timestamp_from_secs(stat.st_ctime as u64);
+    statx.stx_mtime = statx_timestamp_from_secs(stat.st_mtime as u64);
+    statx.stx_rdev_major = 0;
+    statx.stx_rdev_minor = 0;
+    statx.stx_dev_major = 0;
+    statx.stx_dev_minor = 0;
+    statx.stx_mnt_id = 0;
+    statx.stx_dio_mem_align = 0;
+    statx.stx_dio_offset_align = 0;
+    statx.stx_subvol = 0;
+    statx.stx_atomic_write_unit_min = 0;
+    statx.stx_atomic_write_unit_max = 0;
+    statx.stx_atomic_write_segments_max = 0;
+    statx.stx_dio_read_offset_align = 0;
+    statx.__spare3 = [0; 9];
 }
 
 // /// Convert Scarlet DirectoryEntry to Linux Dirent and write to buffer
@@ -1337,6 +1460,152 @@ pub fn sys_newfstatat(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> u
         }
         Err(_) => usize::MAX, // Error resolving path
     }
+}
+
+/// Linux sys_statx implementation for Scarlet VFS v2
+///
+/// Gets extended file status relative to a directory file descriptor (dirfd) and path.
+/// If dirfd == AT_FDCWD, uses the current working directory as the base.
+/// Supports AT_EMPTY_PATH for file-descriptor based queries.
+pub fn sys_statx(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
+    let task = match mytask() {
+        Some(t) => t,
+        None => return errno::to_result(errno::EIO),
+    };
+
+    let dirfd = trapframe.get_arg(0) as i32;
+    let pathname_ptr = trapframe.get_arg(1);
+    let flags = trapframe.get_arg(2) as u32;
+    let mask = trapframe.get_arg(3) as u32;
+    let statx_ptr = match task.vm_manager.translate_vaddr(trapframe.get_arg(4)) {
+        Some(ptr) => ptr as *mut LinuxStatx,
+        None => return errno::to_result(errno::EFAULT),
+    };
+
+    // Increment PC to avoid infinite loop
+    trapframe.increment_pc_next(task);
+
+    if statx_ptr.is_null() {
+        return errno::to_result(errno::EFAULT);
+    }
+
+    const AT_FDCWD: i32 = -100;
+    const AT_SYMLINK_NOFOLLOW: u32 = 0x100;
+    const AT_EMPTY_PATH: u32 = 0x1000;
+
+    let path_str = match parse_c_string_from_userspace(task, pathname_ptr, MAX_PATH_LENGTH) {
+        Ok(s) => s,
+        Err(_) => return errno::to_result(errno::EFAULT),
+    };
+    let path_str = remap_shm_path(&path_str);
+
+    let vfs = match task.vfs.as_ref() {
+        Some(v) => v,
+        None => return errno::to_result(errno::EIO),
+    };
+
+    // Support AT_EMPTY_PATH for stat-by-fd
+    if path_str.is_empty() && (flags & AT_EMPTY_PATH) != 0 {
+        let handle = match abi.get_handle(dirfd as usize) {
+            Some(h) => h,
+            None => return errno::to_result(errno::EBADF),
+        };
+        let kernel_obj = match task.handle_table.get(handle) {
+            Some(obj) => obj,
+            None => return errno::to_result(errno::EBADF),
+        };
+        let file_obj = match kernel_obj.as_file() {
+            Some(f) => f,
+            None => return errno::to_result(errno::EBADF),
+        };
+
+        use crate::fs::vfs_v2::core::VfsFileObject;
+        if let Some(vfs_file_obj) = file_obj.as_any().downcast_ref::<VfsFileObject>() {
+            let entry = vfs_file_obj.get_vfs_entry();
+            let node = entry.node();
+            let metadata = match node.metadata() {
+                Ok(m) => m,
+                Err(e) => return errno::to_result(errno::from_fs_error(&e)),
+            };
+            let stat = LinuxStat::from_metadata(&metadata);
+            let statx_ref = unsafe { &mut *statx_ptr };
+            fill_statx_from_stat(statx_ref, &stat, metadata.created_time, mask);
+            return 0;
+        }
+
+        let stat = LinuxStat {
+            st_dev: 0,
+            st_ino: handle as u64,
+            st_mode: S_IFCHR | 0o666,
+            st_nlink: 1,
+            st_uid: 0,
+            st_gid: 0,
+            st_rdev: handle as u64,
+            st_size: 0,
+            st_blksize: 4096,
+            st_blocks: 0,
+            st_atime: 0,
+            st_atime_nsec: 0,
+            st_mtime: 0,
+            st_mtime_nsec: 0,
+            st_ctime: 0,
+            st_ctime_nsec: 0,
+            __unused: [0; 2],
+        };
+        let statx_ref = unsafe { &mut *statx_ptr };
+        fill_statx_from_stat(statx_ref, &stat, 0, mask);
+        return 0;
+    }
+
+    // Determine base directory (entry and mount) for path resolution
+    use crate::fs::vfs_v2::core::VfsFileObject;
+
+    let (base_entry, base_mount) = if dirfd == AT_FDCWD {
+        vfs.get_cwd().unwrap_or_else(|| {
+            let root_mount = vfs.mount_tree.root_mount.read().clone();
+            (root_mount.root.clone(), root_mount)
+        })
+    } else {
+        let handle = match abi.get_handle(dirfd as usize) {
+            Some(h) => h,
+            None => return errno::to_result(errno::EBADF),
+        };
+        let kernel_obj = match task.handle_table.get(handle) {
+            Some(obj) => obj,
+            None => return errno::to_result(errno::EBADF),
+        };
+        let file_obj = match kernel_obj.as_file() {
+            Some(f) => f,
+            None => return errno::to_result(errno::ENOTDIR),
+        };
+        let vfs_file_obj = match file_obj.as_any().downcast_ref::<VfsFileObject>() {
+            Some(vfs_obj) => vfs_obj,
+            None => return errno::to_result(errno::ENOTDIR),
+        };
+        (
+            vfs_file_obj.get_vfs_entry().clone(),
+            vfs_file_obj.get_mount_point().clone(),
+        )
+    };
+
+    // TODO: Handle AT_SYMLINK_NOFOLLOW flag properly; for now, always follow.
+    let _follow_symlinks = (flags & AT_SYMLINK_NOFOLLOW) == 0;
+
+    let (entry, _mount_point) = match vfs.resolve_path_from(&base_entry, &base_mount, &path_str) {
+        Ok(v) => v,
+        Err(e) => return errno::to_result(errno::from_fs_error(&e)),
+    };
+
+    let node = entry.node();
+    let metadata = match node.metadata() {
+        Ok(m) => m,
+        Err(e) => return errno::to_result(errno::from_fs_error(&e)),
+    };
+
+    let stat = LinuxStat::from_metadata(&metadata);
+    let statx_ref = unsafe { &mut *statx_ptr };
+    fill_statx_from_stat(statx_ref, &stat, metadata.created_time, mask);
+    0
 }
 
 #[allow(dead_code)]

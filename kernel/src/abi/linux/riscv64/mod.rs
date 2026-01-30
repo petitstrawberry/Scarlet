@@ -982,6 +982,7 @@ syscall_table! {
     Recvmsg = 212 => socket::sys_recvmsg,
     SetSockopt = 208 => socket::sys_setsockopt,
     GetSockopt = 209 => socket::sys_getsockopt,
+    Statx = 291 => fs::sys_statx,
     RenameAt2 = 276 => fs::sys_renameat2,
     Membarrier = 283 => proc::sys_membarrier,
     FaccessAt2 = 439 => fs::sys_faccessat2,
