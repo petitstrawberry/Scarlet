@@ -19,6 +19,20 @@ use alloc::{
 
 use super::errno;
 
+fn remap_shm_path(path: &str) -> String {
+    if let Some(rest) = path.strip_prefix("/dev/shm/") {
+        alloc::format!("/tmp/{}", rest)
+    } else if path == "/dev/shm" || path == "/dev/shm/" {
+        "/tmp".to_string()
+    } else {
+        path.to_string()
+    }
+}
+
+fn is_wl_shm_path(path: &str) -> bool {
+    path.starts_with("/tmp/wl_shm-")
+}
+
 /// Linux stat structure for RISC-V 64-bit
 /// This structure matches the Linux kernel's definition for newstat on RISC-V 64-bit
 #[derive(Debug, Clone, Copy)]
@@ -314,6 +328,8 @@ pub fn sys_openat(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize
         Err(_) => return errno::to_result(errno::EFAULT), // Invalid UTF-8 or bad address
     };
 
+    let path_str = remap_shm_path(&path_str);
+
     // crate::println!("sys_openat: epc={:#x}, dirfd={}, path='{}', flags={:#o}", trapframe.epc, dirfd, path_str, flags);
 
     let vfs = task.vfs.as_ref().unwrap();
@@ -429,7 +445,7 @@ pub fn sys_openat(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize
                         let vfs = task.vfs.as_ref().unwrap();
                         match vfs.open_from(&base_entry, &base_mount, &mapped_path, flags as u32) {
                             Ok(obj) => obj,
-                            Err(err) => return errno::to_result(errno::from_fs_error(&err)), // Failed to open newly created file
+                            Err(err) => return errno::to_result(errno::from_fs_error(&err)),
                         }
                     }
                     Err(create_err) => {
@@ -446,7 +462,7 @@ pub fn sys_openat(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize
                             Ok(obj) => obj,
                             Err(open_err) => {
                                 return errno::to_result(errno::from_fs_error(&open_err));
-                            } // Still failed to open
+                            }
                         }
                     }
                 }
@@ -1254,6 +1270,8 @@ pub fn sys_newfstatat(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> u
         Err(_) => return usize::MAX, // Invalid UTF-8
     };
 
+    let path_str = remap_shm_path(&path_str);
+
     // crate::println!("sys_newfstatat: dirfd={}, path='{}', flags={:#o}", dirfd, path_str, flags);
 
     let vfs = task.vfs.as_ref().unwrap();
@@ -1807,7 +1825,45 @@ pub fn sys_fcntl(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize 
                     arg
                 );
             }
-            // TODO: Implement F_DUPFD
+            if fd >= super::MAX_FDS {
+                return errno::to_result(errno::EBADF);
+            }
+            let min_fd = arg as usize;
+            if min_fd >= super::MAX_FDS {
+                return errno::to_result(errno::EMFILE);
+            }
+            let old_handle = match abi.get_handle(fd) {
+                Some(h) => h,
+                None => return errno::to_result(errno::EBADF),
+            };
+            let kernel_obj = match task.handle_table.clone_for_dup(old_handle) {
+                Some(obj) => obj,
+                None => return errno::to_result(errno::EBADF),
+            };
+            let mut new_fd = None;
+            for candidate in min_fd..super::MAX_FDS {
+                if abi.get_handle(candidate).is_none() {
+                    new_fd = Some(candidate);
+                    break;
+                }
+            }
+            let new_fd = match new_fd {
+                Some(fd) => fd,
+                None => return errno::to_result(errno::EMFILE),
+            };
+            let new_handle = match task.handle_table.insert(kernel_obj) {
+                Ok(handle) => handle,
+                Err(_) => return errno::to_result(errno::ENFILE),
+            };
+            if abi.allocate_specific_fd(new_fd, new_handle as u32).is_err() {
+                let _ = task.handle_table.remove(new_handle as u32);
+                return errno::to_result(errno::EMFILE);
+            }
+            if let Some(flags) = abi.get_file_status_flags(fd) {
+                let _ = abi.set_file_status_flags(new_fd, flags);
+            }
+            let _ = abi.set_fd_flags(new_fd, 0);
+            return new_fd;
         }
         F_GETFD => {
             // Get file descriptor flags (IMPLEMENTED)
@@ -1968,7 +2024,45 @@ pub fn sys_fcntl(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize 
                     arg
                 );
             }
-            // TODO: Implement F_DUPFD_CLOEXEC
+            if fd >= super::MAX_FDS {
+                return errno::to_result(errno::EBADF);
+            }
+            let min_fd = arg as usize;
+            if min_fd >= super::MAX_FDS {
+                return errno::to_result(errno::EMFILE);
+            }
+            let old_handle = match abi.get_handle(fd) {
+                Some(h) => h,
+                None => return errno::to_result(errno::EBADF),
+            };
+            let kernel_obj = match task.handle_table.clone_for_dup(old_handle) {
+                Some(obj) => obj,
+                None => return errno::to_result(errno::EBADF),
+            };
+            let mut new_fd = None;
+            for candidate in min_fd..super::MAX_FDS {
+                if abi.get_handle(candidate).is_none() {
+                    new_fd = Some(candidate);
+                    break;
+                }
+            }
+            let new_fd = match new_fd {
+                Some(fd) => fd,
+                None => return errno::to_result(errno::EMFILE),
+            };
+            let new_handle = match task.handle_table.insert(kernel_obj) {
+                Ok(handle) => handle,
+                Err(_) => return errno::to_result(errno::ENFILE),
+            };
+            if abi.allocate_specific_fd(new_fd, new_handle as u32).is_err() {
+                let _ = task.handle_table.remove(new_handle as u32);
+                return errno::to_result(errno::EMFILE);
+            }
+            if let Some(flags) = abi.get_file_status_flags(fd) {
+                let _ = abi.set_file_status_flags(new_fd, flags);
+            }
+            let _ = abi.set_fd_flags(new_fd, FD_CLOEXEC);
+            return new_fd;
         }
         _ => {
             if LOG_FCNTL {
@@ -1983,7 +2077,7 @@ pub fn sys_fcntl(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize 
     }
 
     // All unimplemented commands return ENOSYS (already logged above)
-    usize::MAX // Return -1 (ENOSYS - Function not implemented)
+    errno::to_result(errno::ENOSYS)
 }
 
 /// Linux struct linux_dirent64 (for getdents64 syscall)
@@ -2242,9 +2336,54 @@ pub fn sys_ftruncate(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> us
         None => return errno::to_result(errno::EINVAL),
     };
 
+    let mut is_shm = false;
+    let mut shm_path = None;
+    if let Some(vfs_obj) = file_obj
+        .as_any()
+        .downcast_ref::<crate::fs::vfs_v2::core::VfsFileObject>()
+    {
+        let path = vfs_obj.get_original_path();
+        if path.contains("wl_shm-") {
+            is_shm = true;
+            shm_path = Some(path);
+            crate::println!("sys_ftruncate: shm path='{}' len={}", path, length);
+        }
+    }
+
     match file_obj.truncate(length as u64) {
         Ok(()) => 0,
-        Err(_) => errno::to_result(errno::EIO),
+        Err(err) => {
+            if is_shm {
+                if let Ok(meta) = file_obj.metadata() {
+                    crate::println!(
+                        "sys_ftruncate: shm truncate failed len={} file_type={:?} size={}",
+                        length,
+                        meta.file_type,
+                        meta.size
+                    );
+                }
+                crate::println!("sys_ftruncate: shm truncate error={:?}", err);
+            } else if length > 0 {
+                let kind = match kernel_obj {
+                    crate::object::KernelObject::File(_) => "File",
+                    crate::object::KernelObject::Pipe(_) => "Pipe",
+                    crate::object::KernelObject::EventChannel(_) => "EventChannel",
+                    crate::object::KernelObject::EventSubscription(_) => "EventSubscription",
+                    crate::object::KernelObject::SharedMemory(_) => "SharedMemory",
+                    #[cfg(feature = "network")]
+                    crate::object::KernelObject::Socket(_) => "Socket",
+                };
+                crate::println!(
+                    "sys_ftruncate: fd={} kind={} path={:?} len={} err={:?}",
+                    fd,
+                    kind,
+                    shm_path,
+                    length,
+                    err
+                );
+            }
+            errno::to_result(errno::EIO)
+        }
     }
 }
 
@@ -2454,6 +2593,12 @@ pub fn sys_unlinkat(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usi
         Ok((path, _)) => path,
         Err(_) => return usize::MAX, // Invalid UTF-8
     };
+
+    let path_str = remap_shm_path(&path_str);
+    if is_wl_shm_path(&path_str) {
+        crate::println!("sys_unlinkat: shm ignore path='{}'", path_str);
+        return 0;
+    }
 
     // Linux constants for unlinkat
     const AT_FDCWD: i32 = -100;

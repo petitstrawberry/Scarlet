@@ -17,6 +17,11 @@ pub struct ShmPool {
     pub handle: Option<Handle>,
     /// Size of the pool in bytes
     pub size: usize,
+    /// Reference count (number of buffers using this pool)
+    /// The pool is only fully destroyed when this reaches 0 after client sends destroy
+    pub ref_count: u32,
+    /// Whether the client has requested destruction
+    pub destroyed: bool,
 }
 
 /// Shared memory buffer
@@ -63,6 +68,8 @@ impl ShmManager {
                 pool_id,
                 handle,
                 size: size as usize,
+                ref_count: 0,
+                destroyed: false,
             },
         );
     }
@@ -78,8 +85,10 @@ impl ShmManager {
         stride: i32,
         format: u32,
     ) -> Result<(), &'static str> {
-        // Verify pool exists
-        if !self.pools.contains_key(&pool_id) {
+        // Verify pool exists and increment ref count
+        if let Some(pool) = self.pools.get_mut(&pool_id) {
+            pool.ref_count += 1;
+        } else {
             return Err("Pool not found");
         }
 
@@ -111,12 +120,28 @@ impl ShmManager {
 
     /// Destroy a buffer
     pub fn destroy_buffer(&mut self, buffer_id: u32) {
-        self.buffers.remove(&buffer_id);
+        if let Some(buffer) = self.buffers.remove(&buffer_id) {
+            // Decrement pool ref count
+            if let Some(pool) = self.pools.get_mut(&buffer.pool_id) {
+                pool.ref_count -= 1;
+                // If pool was marked destroyed and has no more references, remove it
+                if pool.destroyed && pool.ref_count == 0 {
+                    self.pools.remove(&buffer.pool_id);
+                }
+            }
+        }
     }
 
-    /// Destroy a pool
+    /// Destroy a pool (client-side destruction)
+    /// The pool is marked for destruction but actually removed when all buffers are destroyed
     pub fn destroy_pool(&mut self, pool_id: u32) {
-        self.pools.remove(&pool_id);
+        if let Some(pool) = self.pools.get_mut(&pool_id) {
+            pool.destroyed = true;
+            // If no buffers reference this pool, remove it immediately
+            if pool.ref_count == 0 {
+                self.pools.remove(&pool_id);
+            }
+        }
     }
 
     /// Resize a pool
