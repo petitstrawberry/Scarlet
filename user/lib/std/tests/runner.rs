@@ -6,43 +6,9 @@
 #![no_main]
 
 extern crate scarlet_std as std;
-use core::arch::naked_asm;
 
-// Panic handler for test mode
-#[panic_handler]
-fn panic(info: &core::panic::PanicInfo) -> ! {
-    std::println!("[Test Runner] panic: {}", info);
-    std::println!("[Test Runner] Test failed");
-    std::task::exit(1);
-}
-
-#[unsafe(link_section = ".init")]
-#[unsafe(export_name = "_entry")]
-#[unsafe(naked)]
-pub extern "C" fn _entry() {
-    #[cfg(target_arch = "riscv64")]
-    naked_asm!(
-        "
-    .option norvc
-    .option norelax
-    .align 8
-            ecall
-            j main
-    ",
-    );
-
-    #[cfg(target_arch = "aarch64")]
-    naked_asm!(
-        "
-    .align 8
-            b main
-    ",
-    );
-}
-
-#[unsafe(link_section = ".text")]
-#[unsafe(export_name = "main")]
-fn main() {
+#[unsafe(no_mangle)]
+unsafe extern "C" fn main() -> i32 {
     std::println!("=== scarlet_std Test Runner ===\n");
 
     // Run tests manually
@@ -79,10 +45,10 @@ fn main() {
 
     if failed == 0 {
         std::println!("[Test Runner] All {} tests passed", passed);
-        std::task::exit(0);
+        0
     } else {
         std::println!("[Test Runner] Some tests failed");
-        std::task::exit(1);
+        1
     }
 }
 
