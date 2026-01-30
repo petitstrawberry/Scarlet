@@ -800,23 +800,16 @@ pub extern "C" fn start_ap(cpu_id: usize) {
     // Enable timer for this CPU
     get_kernel_timer().init();
 
-    // Secondary CPUs enter the scheduler loop
-    // They will wait for work to be assigned
+    // Start the scheduler for this CPU
     let scheduler = get_scheduler();
 
+    // Initialize the scheduler timer for this CPU
+    let _ = scheduler.start_scheduler();
+
+    // Secondary CPUs wait for timer interrupts
+    // The scheduler will be invoked from the timer interrupt handler
     loop {
-        // Try to schedule a task on this CPU
-        if let Some(task_id) = scheduler.schedule() {
-            let task = scheduler
-                .get_task_by_id(task_id)
-                .expect("Scheduled task must exist");
-
-            // Switch to the task
-            // For now, just continue - the scheduler will handle the actual switch
-            println!("[Scarlet Kernel] CPU {} running task {}", cpu_id, task_id);
-        }
-
-        // No tasks available, wait for interrupt
+        // Wait for interrupt
         crate::arch::instruction::idle();
     }
 }

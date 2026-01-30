@@ -34,6 +34,7 @@
 extern crate alloc;
 
 use core::panic;
+use core::sync::OnceLock;
 
 use alloc::{boxed::Box, collections::vec_deque::VecDeque, string::ToString, vec::Vec};
 
@@ -350,48 +351,51 @@ impl TaskPool {
     }
 }
 
-static mut SCHEDULER: Option<Scheduler> = None;
+static SCHEDULER: OnceLock<Scheduler> = OnceLock::new();
 
-pub fn get_scheduler() -> &'static mut Scheduler {
-    unsafe {
-        match SCHEDULER {
-            Some(ref mut s) => s,
-            None => {
-                SCHEDULER = Some(Scheduler::new());
-                get_scheduler()
-            }
-        }
-    }
+pub fn get_scheduler() -> &'static Scheduler {
+    SCHEDULER.get_or_init(|| Scheduler::new())
 }
 
 pub struct Scheduler {
-    /// Queue for ready-to-run task IDs
-    ready_queue: [VecDeque<usize>; NUM_OF_CPUS],
+    /// Queue for ready-to-run task IDs (per-CPU, lock-protected)
+    ready_queue: [RwLock<VecDeque<usize>>; NUM_OF_CPUS],
     /// Queue for blocked task IDs (waiting for I/O, etc.)
-    blocked_queue: [VecDeque<usize>; NUM_OF_CPUS],
+    blocked_queue: [RwLock<VecDeque<usize>>; NUM_OF_CPUS],
     /// Queue for zombie task IDs (finished but not yet cleaned up)
-    zombie_queue: [VecDeque<usize>; NUM_OF_CPUS],
-    current_task_id: [Option<usize>; NUM_OF_CPUS],
+    zombie_queue: [RwLock<VecDeque<usize>>; NUM_OF_CPUS],
+    current_task_id: [RwLock<Option<usize>>; NUM_OF_CPUS],
 }
 
 impl Scheduler {
     pub fn new() -> Self {
-        Scheduler {
-            ready_queue: [const { VecDeque::new() }; NUM_OF_CPUS],
-            blocked_queue: [const { VecDeque::new() }; NUM_OF_CPUS],
-            zombie_queue: [const { VecDeque::new() }; NUM_OF_CPUS],
-            current_task_id: [const { None }; NUM_OF_CPUS],
+        // Initialize arrays with const blocks
+        let mut scheduler = Scheduler {
+            ready_queue: [const { RwLock::new(VecDeque::new()) }; NUM_OF_CPUS],
+            blocked_queue: [const { RwLock::new(VecDeque::new()) }; NUM_OF_CPUS],
+            zombie_queue: [const { RwLock::new(VecDeque::new()) }; NUM_OF_CPUS],
+            current_task_id: [const { RwLock::new(None) }; NUM_OF_CPUS],
+        };
+
+        // Initialize each queue element explicitly
+        for i in 0..NUM_OF_CPUS {
+            scheduler.ready_queue[i] = RwLock::new(VecDeque::new());
+            scheduler.blocked_queue[i] = RwLock::new(VecDeque::new());
+            scheduler.zombie_queue[i] = RwLock::new(VecDeque::new());
+            scheduler.current_task_id[i] = RwLock::new(None);
         }
+
+        scheduler
     }
 
-    pub fn add_task(&mut self, task: Task, cpu_id: usize) -> usize {
+    pub fn add_task(&self, task: Task, cpu_id: usize) -> usize {
         // Add task to the global task pool and get the allocated ID
         let task_id = match get_task_pool().add_task(task) {
             Ok(id) => id,
             Err(e) => panic!("Failed to add task: {}", e),
         };
         // Add task state info to ready queue
-        self.ready_queue[cpu_id].push_back(task_id);
+        self.ready_queue[cpu_id].write().push_back(task_id);
         task_id
     }
 
@@ -405,21 +409,25 @@ impl Scheduler {
     ///
     /// # Returns
     /// * `(old_task_id, new_task_id)` - Tuple of old and new task IDs
-    fn run(&mut self, cpu: &Arch) -> (Option<usize>, Option<usize>) {
+    fn run(&self, cpu: &Arch) -> (Option<usize>, Option<usize>) {
         let cpu_id = cpu.get_cpuid();
-        let old_current_task_id = self.current_task_id[cpu_id];
+
+        // Get current task ID and release lock immediately
+        let old_current_task_id = *self.current_task_id[cpu_id].read();
 
         // IMPORTANT: If there's a current running task, re-queue it BEFORE scheduling
         // This ensures it's available as a fallback if no other tasks are ready
         if let Some(current_id) = old_current_task_id {
             // Check if current task is still in ready_queue (it shouldn't be if it's running)
-            if !self.ready_queue[cpu_id].iter().any(|&id| id == current_id) {
+            let already_in_queue = self.ready_queue[cpu_id].read().iter().any(|&id| id == current_id);
+
+            if !already_in_queue {
                 // Current task is not in ready_queue (it's running), add it back
                 // Only add if the task is in a valid state to be scheduled
                 if let Some(task) = self.get_task_by_id(current_id) {
                     match task.state {
                         TaskState::Ready | TaskState::Running => {
-                            self.ready_queue[cpu_id].push_back(current_id);
+                            self.ready_queue[cpu_id].write().push_back(current_id);
                         }
                         _ => {
                             // Task is in Zombie, Terminated, Blocked, or NotInitialized state
@@ -430,107 +438,88 @@ impl Scheduler {
             }
         }
 
-        // Continue trying to find a suitable task to run
-        loop {
-            let task_id = self.ready_queue[cpu_id].pop_front();
+        // Try to get a task from local queue first
+        let mut task_id = self.ready_queue[cpu_id].write().pop_front();
 
-            /* If there are no subsequent tasks */
-            if self.ready_queue[cpu_id].is_empty() {
-                match task_id {
-                    Some(task_id) => {
-                        let t = self
-                            .get_task_by_id(task_id)
-                            .expect("Task must exist in task pool");
-                        match t.state {
-                            TaskState::NotInitialized => {
-                                panic!("Task must be initialized before scheduling");
-                            }
-                            TaskState::Zombie => {
-                                let task_id = t.get_id();
-                                let parent_id = t.get_parent_id();
-                                self.zombie_queue[cpu_id].push_back(task_id);
-                                self.current_task_id[cpu_id] = None;
-                                // Wake up any processes waiting for this specific task
-                                wake_task_waiters(task_id);
-                                // Also wake up parent process for waitpid(-1)
-                                if let Some(parent_id) = parent_id {
-                                    wake_parent_waiters(parent_id);
-                                }
-                                continue;
-                            }
-                            TaskState::Terminated => {
-                                panic!("At least one task must be scheduled");
-                            }
-                            TaskState::Blocked(_) => {
-                                // Reset current_task_id since this task is no longer current
-                                if self.current_task_id[cpu_id] == Some(task_id) {
-                                    self.current_task_id[cpu_id] = None;
-                                }
-                                // Put blocked task to blocked queue without running it
-                                self.blocked_queue[cpu_id].push_back(task_id);
-                                continue;
-                            }
-                            TaskState::Ready | TaskState::Running => {
-                                t.state = TaskState::Running;
-                                // Task is ready to run
-                                t.time_slice = 1; // Reset time slice on dispatch
-                                let next_task_id = t.get_id();
-                                self.current_task_id[cpu_id] = Some(next_task_id);
-                                self.ready_queue[cpu_id].push_back(task_id);
-                                return (old_current_task_id, Some(next_task_id));
-                            }
+        // If no local tasks, try to steal from other CPUs (work stealing)
+        if task_id.is_none() {
+            task_id = self.steal_task(cpu_id);
+        }
+
+        // Process the selected task
+        loop {
+            match task_id {
+                Some(task_id) => {
+                    let t = self
+                        .get_task_by_id(task_id)
+                        .expect("Task must exist in task pool");
+
+                    match t.state {
+                        TaskState::NotInitialized => {
+                            panic!("Task must be initialized before scheduling");
                         }
-                    }
-                    // If no tasks are ready, create an idle task
-                    None => {
-                        panic!("At least one task must be scheduled");
+                        TaskState::Zombie => {
+                            let task_id = t.get_id();
+                            let parent_id = t.get_parent_id();
+                            self.zombie_queue[cpu_id].write().push_back(task_id);
+                            *self.current_task_id[cpu_id].write() = None;
+                            // Wake up any processes waiting for this specific task
+                            wake_task_waiters(task_id);
+                            // Also wake up parent process for waitpid(-1)
+                            if let Some(parent_id) = parent_id {
+                                wake_parent_waiters(parent_id);
+                            }
+                            // Try to get next task
+                            task_id = self.ready_queue[cpu_id].write().pop_front();
+                            if task_id.is_none() {
+                                task_id = self.steal_task(cpu_id);
+                            }
+                            continue;
+                        }
+                        TaskState::Terminated => {
+                            get_task_pool().remove_task(task_id);
+                            // Try to get next task
+                            task_id = self.ready_queue[cpu_id].write().pop_front();
+                            if task_id.is_none() {
+                                task_id = self.steal_task(cpu_id);
+                            }
+                            continue;
+                        }
+                        TaskState::Blocked(_) => {
+                            // Reset current_task_id since this task is no longer current
+                            let mut current = self.current_task_id[cpu_id].write();
+                            if *current == Some(task_id) {
+                                *current = None;
+                            }
+                            drop(current);
+
+                            // Put blocked task to blocked queue without running it
+                            self.blocked_queue[cpu_id].write().push_back(task_id);
+
+                            // Try to get next task
+                            task_id = self.ready_queue[cpu_id].write().pop_front();
+                            if task_id.is_none() {
+                                task_id = self.steal_task(cpu_id);
+                            }
+                            continue;
+                        }
+                        TaskState::Ready | TaskState::Running => {
+                            t.state = TaskState::Running;
+                            // Task is ready to run
+                            t.time_slice = 1; // Reset time slice on dispatch
+                            let next_task_id = t.get_id();
+
+                            // Update current task and add back to ready queue
+                            *self.current_task_id[cpu_id].write() = Some(next_task_id);
+                            self.ready_queue[cpu_id].write().push_back(task_id);
+
+                            return (old_current_task_id, Some(next_task_id));
+                        }
                     }
                 }
-            } else {
-                match task_id {
-                    Some(task_id) => {
-                        let t = self
-                            .get_task_by_id(task_id)
-                            .expect("Task must exist in task pool");
-                        match t.state {
-                            TaskState::NotInitialized => {
-                                panic!("Task must be initialized before scheduling");
-                            }
-                            TaskState::Zombie => {
-                                let task_id = t.get_id();
-                                let parent_id = t.get_parent_id();
-                                self.zombie_queue[cpu_id].push_back(task_id);
-                                // Wake up any processes waiting for this specific task
-                                wake_task_waiters(task_id);
-                                // Also wake up parent process for waitpid(-1)
-                                if let Some(parent_id) = parent_id {
-                                    wake_parent_waiters(parent_id);
-                                }
-                                continue;
-                            }
-                            TaskState::Terminated => {
-                                get_task_pool().remove_task(task_id);
-                                continue;
-                            }
-                            TaskState::Blocked(_) => {
-                                // Reset current_task_id since this task is no longer current
-                                if self.current_task_id[cpu_id] == Some(task_id) {
-                                    self.current_task_id[cpu_id] = None;
-                                }
-                                // Put blocked task back to the end of queue without running it
-                                self.blocked_queue[cpu_id].push_back(task_id);
-                                continue;
-                            }
-                            TaskState::Ready | TaskState::Running => {
-                                t.time_slice = 1; // Reset time slice on dispatch
-                                let next_task_id = t.get_id();
-                                self.current_task_id[cpu_id] = Some(next_task_id);
-                                self.ready_queue[cpu_id].push_back(task_id);
-                                return (old_current_task_id, Some(next_task_id));
-                            }
-                        }
-                    }
-                    None => return (old_current_task_id, self.current_task_id[cpu_id]),
+                None => {
+                    // No tasks found anywhere
+                    return (old_current_task_id, old_current_task_id);
                 }
             }
         }
@@ -538,7 +527,7 @@ impl Scheduler {
 
     /// Called every timer tick. Decrements the current task's time_slice.
     /// If time_slice reaches 0, triggers a reschedule.
-    pub fn on_tick(&mut self, cpu_id: usize, trapframe: &mut Trapframe) {
+    pub fn on_tick(&self, cpu_id: usize, trapframe: &mut Trapframe) {
         // crate::early_println!("[SCHED] CPU{}: on_tick called", cpu_id);
         if let Some(task_id) = self.get_current_task_id(cpu_id) {
             if let Some(task) = TaskPool::get_task_mut(task_id) {
@@ -566,13 +555,17 @@ impl Scheduler {
     /// kernel contexts. It returns to the caller, allowing the trap handler
     /// to handle user space return.
     ///
+    /// CRITICAL: All locks MUST be released before calling kernel_context_switch
+    /// to prevent deadlock during context switches.
+    ///
     /// # Arguments
-    /// * `cpu` - The CPU architecture state
-    pub fn schedule(&mut self, trapframe: &mut Trapframe) {
+    /// * `trapframe` - The trapframe to use for scheduling
+    pub fn schedule(&self, trapframe: &mut Trapframe) {
         let cpu = get_cpu();
         let cpu_id = cpu.get_cpuid();
 
         // Step 1: Run scheduling algorithm to get current and next task IDs
+        // Locks are acquired and released inside run()
         let (current_task_id, next_task_id) = self.run(cpu);
 
         // Debug output for monitoring scheduler behavior
@@ -589,6 +582,7 @@ impl Scheduler {
         // }
 
         // Step 2: Check if a context switch is needed
+        // All locks from run() are already released at this point
         if next_task_id.is_some() && current_task_id != next_task_id {
             let next_task_id = next_task_id.expect("Next task ID should be valid");
 
@@ -598,6 +592,7 @@ impl Scheduler {
                 current_task.vcpu.store(trapframe);
 
                 // Perform kernel context switch
+                // CRITICAL: No locks held at this point
                 self.kernel_context_switch(cpu_id, current_task_id, next_task_id);
                 // NOTE: After this point, the current task will not execute until it is scheduled again
 
@@ -626,7 +621,7 @@ impl Scheduler {
     /// This function intentionally avoids performing the initial user-mode transition.
     /// The very first switch is architecture-specific and should be performed by
     /// `crate::arch::first_switch_to_user()` from the boot path.
-    pub fn start_scheduler(&mut self) -> Option<usize> {
+    pub fn start_scheduler(&self) -> Option<usize> {
         let cpu = get_cpu();
         let cpu_id = cpu.get_cpuid();
         let timer = get_kernel_timer();
@@ -640,15 +635,63 @@ impl Scheduler {
         next_task_id
     }
 
-    pub fn get_current_task(&mut self, cpu_id: usize) -> Option<&mut Task> {
-        match self.current_task_id[cpu_id] {
-            Some(task_id) => TaskPool::get_task_mut(task_id),
+    pub fn get_current_task(&self, cpu_id: usize) -> Option<&mut Task> {
+        let task_id = *self.current_task_id[cpu_id].read();
+        match task_id {
+            Some(id) => TaskPool::get_task_mut(id),
             None => None,
         }
     }
 
     pub fn get_current_task_id(&self, cpu_id: usize) -> Option<usize> {
-        self.current_task_id[cpu_id]
+        *self.current_task_id[cpu_id].read()
+    }
+
+    /// Attempt to steal a task from another CPU's ready queue
+    ///
+    /// This implements work stealing for load balancing across CPUs.
+    /// Searches other CPUs' queues in round-robin order and takes half
+    /// of their tasks if found.
+    ///
+    /// # Arguments
+    /// * `cpu_id` - The CPU ID that is trying to steal work
+    ///
+    /// # Returns
+    /// * Some(task_id) if a task was stolen, None otherwise
+    fn steal_task(&self, cpu_id: usize) -> Option<usize> {
+        for i in 1..NUM_OF_CPUS {
+            let target_cpu = (cpu_id + i) % NUM_OF_CPUS;
+
+            // Try to steal from target CPU
+            let mut target_queue = self.ready_queue[target_cpu].write();
+
+            if target_queue.len() > 1 {
+                // Steal half the tasks (rounded down) to balance load
+                let steal_count = target_queue.len() / 2;
+
+                // Take the first task
+                let stolen_task = target_queue.pop_front();
+
+                // Move additional tasks to our queue
+                if steal_count > 1 {
+                    drop(target_queue); // Release lock before acquiring our queue lock
+                    let mut our_queue = self.ready_queue[cpu_id].write();
+
+                    // Re-acquire target queue lock to transfer remaining tasks
+                    let mut target_queue = self.ready_queue[target_cpu].write();
+
+                    for _ in 1..steal_count {
+                        if let Some(task) = target_queue.pop_front() {
+                            our_queue.push_back(task);
+                        }
+                    }
+                }
+
+                return stolen_task;
+            }
+        }
+
+        None
     }
 
     /// Returns a mutable reference to the task with the specified ID, if found.
@@ -661,7 +704,7 @@ impl Scheduler {
     ///
     /// # Returns
     /// A mutable reference to the task if found, or None otherwise.
-    pub fn get_task_by_id(&mut self, task_id: usize) -> Option<&mut Task> {
+    pub fn get_task_by_id(&self, task_id: usize) -> Option<&mut Task> {
         TaskPool::get_task_mut(task_id)
     }
 
@@ -674,15 +717,15 @@ impl Scheduler {
     ///
     /// # Returns
     /// true if the task was found and moved, false otherwise
-    pub fn wake_task(&mut self, task_id: usize) -> bool {
+    pub fn wake_task(&self, task_id: usize) -> bool {
         // Search for the task in blocked queues
-        for cpu_id in 0..self.blocked_queue.len() {
-            if let Some(pos) = self.blocked_queue[cpu_id]
-                .iter()
-                .position(|&id| id == task_id)
-            {
+        for cpu_id in 0..NUM_OF_CPUS {
+            let mut blocked_queue = self.blocked_queue[cpu_id].write();
+
+            if let Some(pos) = blocked_queue.iter().position(|&id| id == task_id) {
                 // Remove from blocked queue
-                self.blocked_queue[cpu_id].remove(pos);
+                blocked_queue.remove(pos);
+                drop(blocked_queue);
 
                 // Get task from TaskPool and set state to Running
                 if let Some(task) = TaskPool::get_task_mut(task_id) {
@@ -690,11 +733,12 @@ impl Scheduler {
                     // Memory barrier to ensure state change is visible
                     core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
                     // Move to ready queue
-                    self.ready_queue[cpu_id].push_back(task_id);
+                    self.ready_queue[cpu_id].write().push_back(task_id);
                     return true;
                 }
             }
         }
+
         // Not found in blocked queues. This can happen if a wake occurs between
         // a task marking itself Blocked and the scheduler moving it to the
         // blocked_queue. In that case, ensure the task state is set back to
@@ -704,27 +748,28 @@ impl Scheduler {
                 task.state = TaskState::Running;
                 // Memory barrier to ensure state change is visible
                 core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
-                // CRITICAL FIX: Check if task is in ready_queue, add if not
-                // This prevents tasks from being permanently unscheduled
-                let cpu_id = if let Some(current_id) = self.current_task_id[0] {
-                    if current_id == task_id {
-                        0 // Current task, no need to enqueue
-                    } else {
-                        // Find which CPU's ready_queue should contain this task
-                        // For simplicity, use CPU 0 (can be improved for multi-CPU)
-                        0
+
+                // Add to the least loaded CPU's queue
+                let mut min_len = usize::MAX;
+                let mut target_cpu = 0;
+
+                for cpu_id in 0..NUM_OF_CPUS {
+                    let len = self.ready_queue[cpu_id].read().len();
+                    if len < min_len {
+                        min_len = len;
+                        target_cpu = cpu_id;
                     }
-                } else {
-                    0 // Default to CPU 0
-                };
+                }
 
                 // Only add if not already in ready_queue to avoid duplicates
-                if !self.ready_queue[cpu_id].contains(&task_id) {
-                    self.ready_queue[cpu_id].push_back(task_id);
+                let mut ready_queue = self.ready_queue[target_cpu].write();
+                if !ready_queue.contains(&task_id) {
+                    ready_queue.push_back(task_id);
                 }
                 return true;
             }
         }
+
         false
     }
 
@@ -735,14 +780,13 @@ impl Scheduler {
     ///
     /// # Arguments
     /// * `task_id` - The ID of the zombie task to clean up
-    pub fn cleanup_zombie_task(&mut self, task_id: usize) {
+    pub fn cleanup_zombie_task(&self, task_id: usize) {
         // Remove from zombie queue
         for cpu_id in 0..NUM_OF_CPUS {
-            if let Some(pos) = self.zombie_queue[cpu_id]
-                .iter()
-                .position(|&id| id == task_id)
-            {
-                self.zombie_queue[cpu_id].remove(pos);
+            let mut zombie_queue = self.zombie_queue[cpu_id].write();
+
+            if let Some(pos) = zombie_queue.iter().position(|&id| id == task_id) {
+                zombie_queue.remove(pos);
                 crate::println!("[Scheduler] Removed task {} from zombie_queue", task_id);
                 break;
             }
@@ -761,24 +805,31 @@ impl Scheduler {
     /// reference to the scheduler during delivery.
     pub fn get_all_task_ids(&self) -> alloc::vec::Vec<usize> {
         let mut ids = alloc::vec::Vec::new();
+
         // Ready tasks
         for q in &self.ready_queue {
-            for t in q.iter() {
+            let queue = q.read();
+            for t in queue.iter() {
                 ids.push(*t);
             }
         }
+
         // Blocked tasks
         for q in &self.blocked_queue {
-            for t in q.iter() {
+            let queue = q.read();
+            for t in queue.iter() {
                 ids.push(*t);
             }
         }
+
         // Zombie tasks
         for q in &self.zombie_queue {
-            for t in q.iter() {
+            let queue = q.read();
+            for t in queue.iter() {
                 ids.push(*t);
             }
         }
+
         ids
     }
 
@@ -788,11 +839,14 @@ impl Scheduler {
     /// the current task and the next selected task. It also saves/restores
     /// FPU/SIMD/Vector context for user-space tasks.
     ///
+    /// CRITICAL: No scheduler locks should be held when calling this function
+    /// to prevent deadlock during context switches.
+    ///
     /// # Arguments
     /// * `cpu_id` - The CPU ID
     /// * `from_task_id` - Current task ID
     /// * `to_task_id` - Next task ID
-    fn kernel_context_switch(&mut self, cpu_id: usize, from_task_id: usize, to_task_id: usize) {
+    fn kernel_context_switch(&self, cpu_id: usize, from_task_id: usize, to_task_id: usize) {
         // crate::println!("[SCHED] CPU{}: Switching kernel context from Task {} to Task {}", cpu_id, from_task_id, to_task_id);
         if from_task_id != to_task_id {
             // Find tasks in all queues (ready, blocked, zombie)
@@ -885,13 +939,13 @@ impl Scheduler {
     /// Clears all queues, resets current task IDs, and resets the task pool.
     /// This should ONLY be called in tests to clean up state between test cases.
     #[cfg(test)]
-    pub fn reset(&mut self) {
+    pub fn reset(&self) {
         // Clear all queues
         for cpu_id in 0..NUM_OF_CPUS {
-            self.ready_queue[cpu_id].clear();
-            self.blocked_queue[cpu_id].clear();
-            self.zombie_queue[cpu_id].clear();
-            self.current_task_id[cpu_id] = None;
+            self.ready_queue[cpu_id].write().clear();
+            self.blocked_queue[cpu_id].write().clear();
+            self.zombie_queue[cpu_id].write().clear();
+            *self.current_task_id[cpu_id].write() = None;
         }
 
         // Reset the task pool
@@ -978,9 +1032,9 @@ mod tests {
 
     #[test_case]
     fn test_add_task() {
-        let mut scheduler = Scheduler::new();
+        let scheduler = Scheduler::new();
         let task = Task::new("TestTask".to_string(), 1, TaskType::Kernel);
         scheduler.add_task(task, 0);
-        assert_eq!(scheduler.ready_queue[0].len(), 1);
+        assert_eq!(scheduler.ready_queue[0].read().len(), 1);
     }
 }

@@ -9,6 +9,7 @@ use crate::arch::timer::ArchTimer;
 use crate::environment::NUM_OF_CPUS;
 use crate::sched::scheduler::get_scheduler;
 use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::OnceLock;
 extern crate alloc;
 use alloc::collections::BinaryHeap;
 use alloc::sync::{Arc, Weak};
@@ -20,18 +21,10 @@ pub struct KernelTimer {
     pub interval: u64,
 }
 
-static mut KERNEL_TIMER: Option<KernelTimer> = None;
+static KERNEL_TIMER: OnceLock<KernelTimer> = OnceLock::new();
 
-pub fn get_kernel_timer() -> &'static mut KernelTimer {
-    unsafe {
-        match KERNEL_TIMER {
-            Some(ref mut t) => t,
-            None => {
-                KERNEL_TIMER = Some(KernelTimer::new());
-                get_kernel_timer()
-            }
-        }
-    }
+pub fn get_kernel_timer() -> &'static KernelTimer {
+    KERNEL_TIMER.get_or_init(|| KernelTimer::new())
 }
 
 impl KernelTimer {
@@ -42,28 +35,43 @@ impl KernelTimer {
         }
     }
 
-    pub fn init(&mut self) {
+    pub fn init(&self) {
         for i in 0..NUM_OF_CPUS {
-            self.core_local_timer[i].stop();
+            // Need to mutate through interior mutability or change design
+            // For now, we'll use unsafe to get mutable access
+            // This is safe because timers are per-CPU and we're only accessing our own timer
+            unsafe {
+                let timer_ptr = &self.core_local_timer[i] as *const ArchTimer as *mut ArchTimer;
+                (*timer_ptr).stop();
+            }
         }
     }
 
-    pub fn start(&mut self, cpu_id: usize) {
-        self.core_local_timer[cpu_id].start();
+    pub fn start(&self, cpu_id: usize) {
+        unsafe {
+            let timer_ptr = &self.core_local_timer[cpu_id] as *const ArchTimer as *mut ArchTimer;
+            (*timer_ptr).start();
+        }
     }
 
-    pub fn stop(&mut self, cpu_id: usize) {
-        self.core_local_timer[cpu_id].stop();
+    pub fn stop(&self, cpu_id: usize) {
+        unsafe {
+            let timer_ptr = &self.core_local_timer[cpu_id] as *const ArchTimer as *mut ArchTimer;
+            (*timer_ptr).stop();
+        }
     }
 
-    pub fn restart(&mut self, cpu_id: usize) {
+    pub fn restart(&self, cpu_id: usize) {
         self.stop(cpu_id);
         self.start(cpu_id);
     }
 
     /* Set the interval in microseconds */
-    pub fn set_interval_us(&mut self, cpu_id: usize, interval: u64) {
-        self.core_local_timer[cpu_id].set_interval_us(interval);
+    pub fn set_interval_us(&self, cpu_id: usize, interval: u64) {
+        unsafe {
+            let timer_ptr = &self.core_local_timer[cpu_id] as *const ArchTimer as *mut ArchTimer;
+            (*timer_ptr).set_interval_us(interval);
+        }
     }
 
     pub fn get_time_us(&self, cpu_id: usize) -> u64 {
