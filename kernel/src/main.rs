@@ -747,9 +747,79 @@ pub extern "C" fn start_kernel(boot_info: &BootInfo) -> ! {
     }
 }
 
+/// Application processor (secondary CPU) entry point
+///
+/// This function is called by _entry_ap for each secondary CPU.
+/// It performs minimal initialization and then enables the CPU to participate
+/// in scheduling.
 #[unsafe(no_mangle)]
 pub extern "C" fn start_ap(cpu_id: usize) {
+    println!("[Scarlet Kernel] CPU {} (AP) initializing...", cpu_id);
+
+    // Initialize .bss section (safe to call multiple times)
+    mem::init_bss();
+
+    // Get the per-CPU architecture structure
+    let riscv = crate::arch::get_cpu();
+
+    // Initialize trap handling for this CPU
+    #[cfg(target_arch = "riscv64")]
+    {
+        use crate::arch::riscv64::{trap_init, Riscv64};
+        let riscv_mut: &mut Riscv64 = unsafe {
+            core::mem::transmute(riscv as *const _ as usize)
+        };
+        trap_init(riscv_mut);
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    {
+        // AArch64 trap initialization
+        use crate::arch::aarch64::trap_init;
+        trap_init(riscv);
+    }
+
+    println!("[Scarlet Kernel] CPU {} trap initialized", cpu_id);
+
+    // Enable interrupts on this CPU
+    #[cfg(target_arch = "riscv64")]
+    {
+        crate::arch::riscv64::enable_interrupt();
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    {
+        crate::arch::aarch64::enable_interrupt();
+    }
+
     println!("[Scarlet Kernel] CPU {} is up and running", cpu_id);
 
-    loop {}
+    // Mark this CPU as started
+    #[cfg(target_arch = "riscv64")]
+    {
+        crate::arch::riscv64::kernel::smp::mark_cpu_started();
+    }
+
+    // Enable timer for this CPU
+    get_kernel_timer().init();
+
+    // Secondary CPUs enter the scheduler loop
+    // They will wait for work to be assigned
+    let scheduler = get_scheduler();
+
+    loop {
+        // Try to schedule a task on this CPU
+        if let Some(task_id) = scheduler.schedule() {
+            let task = scheduler
+                .get_task_by_id(task_id)
+                .expect("Scheduled task must exist");
+
+            // Switch to the task
+            // For now, just continue - the scheduler will handle the actual switch
+            println!("[Scarlet Kernel] CPU {} running task {}", cpu_id, task_id);
+        }
+
+        // No tasks available, wait for interrupt
+        crate::arch::instruction::idle();
+    }
 }

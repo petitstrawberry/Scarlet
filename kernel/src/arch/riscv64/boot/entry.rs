@@ -87,5 +87,30 @@ pub extern "C" fn arch_start_kernel(hartid: usize, fdt_ptr: usize) {
     let riscv: &mut Riscv64 = unsafe { transmute(&CPUS[hartid] as *const _ as usize) };
     trap_init(riscv);
 
+    // Start secondary CPUs if this is the boot hart (hart 0)
+    if hartid == 0 {
+        use crate::arch::riscv64::kernel::cpu;
+        use crate::arch::riscv64::kernel::smp;
+
+        // Set the boot hart ID
+        smp::set_boot_hart_id(hartid);
+
+        // Get CPU information from device tree
+        if let Some((num_cpus, max_hart_id)) = cpu::get_cpu_info_from_fdt() {
+            crate::early_println!(
+                "[SMP] Boot hart: Detected {} CPUs in device tree, max hart ID: {}",
+                num_cpus,
+                max_hart_id
+            );
+
+            // Start secondary CPUs
+            if num_cpus > 1 {
+                smp::start_secondary_cpus(hartid, max_hart_id);
+            }
+        } else {
+            crate::early_println!("[SMP] No CPU info found in device tree, skipping SMP init");
+        }
+    }
+
     start_kernel(&bootinfo);
 }
