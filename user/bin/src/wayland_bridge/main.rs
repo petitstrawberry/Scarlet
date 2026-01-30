@@ -149,6 +149,10 @@ struct WaylandBridge {
     input_event_queue: Arc<StdMutex<Vec<WaylandMessage>>>,
     /// Objects map clone for input thread
     objects_for_input_thread: Arc<StdMutex<BTreeMap<u32, String>>>,
+    /// Currently focused surface (for keyboard enter/leave events)
+    focused_surface: Option<u32>,
+    /// Last focused keyboard (for sending leave events)
+    focused_keyboard: Option<u32>,
 }
 
 impl WaylandBridge {
@@ -195,6 +199,8 @@ impl WaylandBridge {
             keymap_size: 0,
             input_event_queue,
             objects_for_input_thread,
+            focused_surface: None,
+            focused_keyboard: None,
         })
     }
 
@@ -1605,11 +1611,14 @@ impl WaylandBridge {
                     self.xdg_shell_manager
                         .create_toplevel(xdg_surface_id, xdg_toplevel_id)?;
 
+                    // Get wl_surface_id for focus management
+                    let mut wl_surface_id_opt = None;
                     // Set surface role to toplevel
                     if let Some(xdg_surface) =
                         self.xdg_shell_manager.get_xdg_surface(xdg_surface_id)
                     {
                         let wl_surface_id = xdg_surface.wl_surface_id;
+                        wl_surface_id_opt = Some(wl_surface_id);
                         if let Some(surface) = self.surface_manager.get_surface_mut(wl_surface_id) {
                             surface.set_role(surface::SurfaceRole::XdgToplevel);
                         }
@@ -1633,6 +1642,31 @@ impl WaylandBridge {
                     let mut msgs = Vec::new();
                     msgs.push(toplevel_configure);
                     msgs.push(surface_configure);
+
+                    // Set this surface as focused and send keyboard.enter if keyboard exists
+                    if let Some(wl_surface_id) = wl_surface_id_opt {
+                        self.focused_surface = Some(wl_surface_id);
+                        if let Some(keyboard_id) = self.focused_keyboard {
+                            let serial = self.allocate_serial();
+                            let mut enter_msg =
+                                WaylandMessage::new(keyboard_id, input::keyboard_event::ENTER);
+                            enter_msg.add_arg(WaylandArg::Uint(serial));
+                            enter_msg.add_arg(WaylandArg::Object(wl_surface_id));
+                            enter_msg.add_arg(WaylandArg::Array(Vec::new())); // keys array
+                            msgs.push(enter_msg);
+
+                            // Send modifiers event
+                            let mut modifiers_msg =
+                                WaylandMessage::new(keyboard_id, input::keyboard_event::MODIFIERS);
+                            modifiers_msg.add_arg(WaylandArg::Uint(serial));
+                            modifiers_msg.add_arg(WaylandArg::Uint(0)); // mods_depressed
+                            modifiers_msg.add_arg(WaylandArg::Uint(0)); // mods_latched
+                            modifiers_msg.add_arg(WaylandArg::Uint(0)); // mods_locked
+                            modifiers_msg.add_arg(WaylandArg::Uint(0)); // group
+                            msgs.push(modifiers_msg);
+                        }
+                    }
+
                     return Ok(msgs);
                 }
                 Ok(Vec::new())
@@ -1730,14 +1764,40 @@ impl WaylandBridge {
                     self.add_object(keyboard_id, String::from("wl_keyboard"));
                     self.input_manager.create_keyboard(keyboard_id, seat_id);
 
-                    // Send keymap event (empty for now)
+                    // Store keyboard as focused
+                    self.focused_keyboard = Some(keyboard_id);
+
+                    // Send keymap event
                     let size = self.ensure_keymap()?;
-                    let mut msg = WaylandMessage::new(keyboard_id, input::keyboard_event::KEYMAP);
-                    msg.add_arg(WaylandArg::Uint(1)); // XKB_V1 format
-                    msg.add_arg(WaylandArg::Fd(0)); // FD (out-of-band handle)
-                    msg.add_arg(WaylandArg::Uint(size)); // size
+                    let mut keymap_msg = WaylandMessage::new(keyboard_id, input::keyboard_event::KEYMAP);
+                    keymap_msg.add_arg(WaylandArg::Uint(1)); // XKB_V1 format
+                    keymap_msg.add_arg(WaylandArg::Fd(0)); // FD (out-of-band handle)
+                    keymap_msg.add_arg(WaylandArg::Uint(size)); // size
+
                     let mut msgs = Vec::new();
-                    msgs.push(msg);
+                    msgs.push(keymap_msg);
+
+                    // If there's a focused surface, send enter and modifiers events
+                    if let Some(surface_id) = self.focused_surface {
+                        let serial = self.allocate_serial();
+                        let mut enter_msg =
+                            WaylandMessage::new(keyboard_id, input::keyboard_event::ENTER);
+                        enter_msg.add_arg(WaylandArg::Uint(serial));
+                        enter_msg.add_arg(WaylandArg::Object(surface_id));
+                        enter_msg.add_arg(WaylandArg::Array(Vec::new())); // keys array
+                        msgs.push(enter_msg);
+
+                        // Send modifiers event
+                        let mut modifiers_msg =
+                            WaylandMessage::new(keyboard_id, input::keyboard_event::MODIFIERS);
+                        modifiers_msg.add_arg(WaylandArg::Uint(serial));
+                        modifiers_msg.add_arg(WaylandArg::Uint(0)); // mods_depressed
+                        modifiers_msg.add_arg(WaylandArg::Uint(0)); // mods_latched
+                        modifiers_msg.add_arg(WaylandArg::Uint(0)); // mods_locked
+                        modifiers_msg.add_arg(WaylandArg::Uint(0)); // group
+                        msgs.push(modifiers_msg);
+                    }
+
                     return Ok(msgs);
                 }
                 Ok(Vec::new())
