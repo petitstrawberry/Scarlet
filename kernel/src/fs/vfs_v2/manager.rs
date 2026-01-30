@@ -280,6 +280,21 @@ impl VfsManager {
         )
     }
 
+    pub(crate) fn bind_mount_from_entry(
+        &self,
+        source_entry: Arc<VfsEntry>,
+        source_mount_point: Arc<MountPoint>,
+        target_path: &str,
+    ) -> Result<(), FileSystemError> {
+        let (target_entry, target_mount_point) = self.resolve_path(target_path)?;
+        self.bind_mount_entry(
+            source_entry,
+            source_mount_point,
+            target_entry,
+            target_mount_point,
+        )
+    }
+
     /// Create a new VFS manager that starts with the same mount tree as `source`,
     /// but does not share mount tree structures (deep copy of mount topology).
     ///
