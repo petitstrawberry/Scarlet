@@ -902,6 +902,7 @@ syscall_table! {
     Ioctl = 29 => fs::sys_ioctl,
     MkdirAt = 34 => fs::sys_mkdirat,
     UnlinkAt = 35 => fs::sys_unlinkat,
+    Ftruncate = 46 => fs::sys_ftruncate,
     LinkAt = 37 => fs::sys_linkat,
     FaccessAt = 48 => fs::sys_faccessat,
     Chdir = 49 => fs::sys_chdir,

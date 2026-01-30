@@ -2201,6 +2201,53 @@ pub fn sys_fsync(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize
     0
 }
 
+/// Linux sys_ftruncate implementation
+///
+/// Truncate a file to a specified length using a file descriptor.
+///
+/// Arguments:
+/// - fd: File descriptor to truncate
+/// - length: New file length
+///
+/// Returns:
+/// - 0 on success
+/// - negative errno on failure
+pub fn sys_ftruncate(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
+    let task = match mytask() {
+        Some(t) => t,
+        None => return errno::to_result(errno::EFAULT),
+    };
+
+    let fd = trapframe.get_arg(0) as usize;
+    let length = trapframe.get_arg(1) as i64;
+
+    trapframe.increment_pc_next(task);
+
+    if length < 0 {
+        return errno::to_result(errno::EINVAL);
+    }
+
+    let handle = match abi.get_handle(fd) {
+        Some(h) => h,
+        None => return errno::to_result(errno::EBADF),
+    };
+
+    let kernel_obj = match task.handle_table.get(handle) {
+        Some(obj) => obj,
+        None => return errno::to_result(errno::EBADF),
+    };
+
+    let file_obj = match kernel_obj.as_file() {
+        Some(f) => f,
+        None => return errno::to_result(errno::EINVAL),
+    };
+
+    match file_obj.truncate(length as u64) {
+        Ok(()) => 0,
+        Err(_) => errno::to_result(errno::EIO),
+    }
+}
+
 /// Linux sys_faccessat implementation (dummy: always returns 0)
 ///
 /// Arguments:
