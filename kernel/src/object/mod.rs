@@ -10,6 +10,15 @@ pub mod introspection;
 use alloc::sync::Arc;
 use crate::fs::FileObject;
 use crate::ipc::StreamIpcOps;
+
+// Import IPC traits and types
+use crate::ipc::PipeObject;
+use crate::ipc::SharedMemoryObject;
+use crate::ipc::event::{EventChannelObject, EventSubscriptionObject};
+
+#[cfg(feature = "network")]
+use crate::ipc::SocketObject;
+
 use crate::device::graphics::buffer::GraphicsBuffer;
 use capability::{StreamOps, CloneOps, ControlOps, MemoryMappingOps, Selectable};
 
@@ -22,6 +31,9 @@ pub enum KernelObject {
     Pipe(Arc<dyn PipeObject>),
     EventChannel(Arc<EventChannelObject>),
     EventSubscription(Arc<EventSubscriptionObject>),
+    #[cfg(feature = "network")]
+    Socket(Arc<dyn SocketObject>),
+    SharedMemory(Arc<dyn SharedMemoryObject>),
     GraphicsBuffer(Arc<dyn GraphicsBuffer>),
     // Future variants will be added here:
     // MessageQueue(Arc<dyn MessageQueueObject>),
@@ -227,6 +239,11 @@ impl KernelObject {
                 let cloneable: &dyn CloneOps = event_subscription.as_ref();
                 Some(cloneable)
             }
+            KernelObject::SharedMemory(shared_memory) => {
+                // SharedMemory implements CloneOps
+                let cloneable: &dyn CloneOps = shared_memory.as_ref();
+                Some(cloneable)
+            }
             KernelObject::GraphicsBuffer(_) => None,
         }
     }
@@ -255,6 +272,11 @@ impl KernelObject {
             KernelObject::EventSubscription(_) => {
                 // Event subscriptions don't provide control operations
                 None
+            }
+            KernelObject::SharedMemory(shared_memory) => {
+                // SharedMemory implements ControlOps
+                let control_ops: &dyn ControlOps = shared_memory.as_ref();
+                Some(control_ops)
             }
             KernelObject::GraphicsBuffer(buffer) => {
                 let control_ops: &dyn ControlOps = buffer.as_ref();
@@ -288,6 +310,11 @@ impl KernelObject {
                 // Event subscriptions don't provide memory mapping operations
                 None
             }
+            KernelObject::SharedMemory(shared_memory) => {
+                // SharedMemory implements MemoryMappingOps
+                let memory_mapping_ops: &dyn MemoryMappingOps = shared_memory.as_ref();
+                Some(memory_mapping_ops)
+            }
             KernelObject::GraphicsBuffer(buffer) => {
                 let memory_mapping_ops: &dyn MemoryMappingOps = buffer.as_ref();
                 Some(memory_mapping_ops)
@@ -320,6 +347,11 @@ impl KernelObject {
             KernelObject::EventSubscription(_) => {
                 // Event subscriptions don't provide memory mapping operations
                 None
+            }
+            KernelObject::SharedMemory(shared_memory) => {
+                // SharedMemory implements MemoryMappingOps
+                let weak_shmem = Arc::downgrade(shared_memory);
+                Some(weak_shmem)
             }
             KernelObject::GraphicsBuffer(buffer) => {
                 let weak_buffer = Arc::downgrade(buffer);
@@ -363,6 +395,7 @@ impl KernelObject {
             KernelObject::Socket(socket) => socket.as_selectable(),
             KernelObject::EventChannel(_) => None,
             KernelObject::EventSubscription(_) => None,
+            KernelObject::SharedMemory(_) => None,
             KernelObject::GraphicsBuffer(_) => None,
         }
     }
@@ -385,6 +418,9 @@ impl Clone for KernelObject {
                 }
                 KernelObject::EventSubscription(event_subscription) => {
                     KernelObject::EventSubscription(Arc::clone(event_subscription))
+                }
+                KernelObject::SharedMemory(shared_memory) => {
+                    KernelObject::SharedMemory(Arc::clone(shared_memory))
                 }
                 KernelObject::GraphicsBuffer(buffer) => {
                     KernelObject::GraphicsBuffer(Arc::clone(buffer))
