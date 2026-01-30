@@ -26,7 +26,7 @@ where
 fn panic_test(info: &PanicInfo) -> ! {
     crate::println!("[Test Runner] panic: {}", info);
     crate::println!("[Test Runner] Test failed");
-    
+
     // Exit with error code
     crate::task::exit(1);
 }
@@ -39,10 +39,7 @@ pub fn test_runner(tests: &[&dyn TestableFn]) {
     }
 
     crate::println!("[Test Runner] All {} tests passed", tests.len());
-    
+
     // Exit successfully
     crate::task::exit(0);
 }
-
-
-

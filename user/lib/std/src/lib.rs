@@ -145,4 +145,3 @@ pub fn panic(_info: &core::panic::PanicInfo) -> ! {
 fn alloc_error_handler(_layout: core::alloc::Layout) -> ! {
     loop {}
 }
-

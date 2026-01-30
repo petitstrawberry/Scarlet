@@ -44,11 +44,11 @@ pub extern "C" fn _entry() {
 #[unsafe(export_name = "main")]
 fn main() {
     std::println!("=== scarlet_std Test Runner ===\n");
-    
+
     // Run tests manually
     let mut passed = 0;
     let mut failed = 0;
-    
+
     // Test 1: Basic assertion
     std::println!("[Test Runner] Running test: test_basic_assertion");
     if run_test(test_basic_assertion) {
@@ -56,7 +56,7 @@ fn main() {
     } else {
         failed += 1;
     }
-    
+
     // Test 2: Vec operations (from collections.rs)
     std::println!("[Test Runner] Running test: test_vec_creation");
     if run_test(test_vec_creation) {
@@ -64,19 +64,19 @@ fn main() {
     } else {
         failed += 1;
     }
-    
+
     std::println!("[Test Runner] Running test: test_vec_push");
     if run_test(test_vec_push) {
         passed += 1;
     } else {
         failed += 1;
     }
-    
+
     // Summary
     std::println!("\n[Test Runner] Test Results:");
     std::println!("  Passed: {}", passed);
     std::println!("  Failed: {}", failed);
-    
+
     if failed == 0 {
         std::println!("[Test Runner] All {} tests passed", passed);
         std::task::exit(0);
@@ -110,7 +110,7 @@ fn test_vec_push() {
     v.push(1);
     v.push(2);
     v.push(3);
-    
+
     assert_eq!(v.len(), 3);
     assert_eq!(v[0], 1);
     assert_eq!(v[1], 2);
