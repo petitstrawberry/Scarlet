@@ -822,6 +822,38 @@ pub fn sys_sendmsg(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usiz
     }
 
     let mut total_written = 0usize;
+    struct NonblockGuard<'a> {
+        sel: Option<&'a dyn Selectable>,
+        prev: bool,
+    }
+
+    impl<'a> Drop for NonblockGuard<'a> {
+        fn drop(&mut self) {
+            if let Some(sel) = self.sel {
+                sel.set_nonblocking(self.prev);
+            }
+        }
+    }
+
+    let _nonblock_guard = if nonblocking {
+        if let Some(sel) = kernel_obj.as_selectable() {
+            let prev = sel.is_nonblocking();
+            if !prev {
+                sel.set_nonblocking(true);
+                Some(NonblockGuard {
+                    sel: Some(sel),
+                    prev,
+                })
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
     for iovec in iovecs {
         if iovec.iov_len == 0 {
             continue;
@@ -881,6 +913,12 @@ pub fn sys_recvmsg(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usiz
     let sockfd = trapframe.get_arg(0) as usize;
     let msg_ptr = trapframe.get_arg(1);
     let flags = trapframe.get_arg(2) as i32;
+    crate::early_println!(
+        "[linux recvmsg] fd={} msg_ptr={:#x} flags={:#x}",
+        sockfd,
+        msg_ptr,
+        flags
+    );
 
     trapframe.increment_pc_next(task);
 
@@ -891,6 +929,8 @@ pub fn sys_recvmsg(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usiz
             return errno::to_result(errno::EBADF);
         }
     };
+
+    crate::early_println!("[linux recvmsg] handle={}", handle);
 
     let kernel_obj = match task.handle_table.get(handle) {
         Some(obj) => obj,
@@ -928,6 +968,13 @@ pub fn sys_recvmsg(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usiz
     }
 
     let msg = unsafe { *msg_addr };
+    crate::early_println!(
+        "[linux recvmsg] iov_ptr={:#x} iovlen={} control_ptr={:#x} controllen={}",
+        msg.msg_iov,
+        msg.msg_iovlen,
+        msg.msg_control,
+        msg.msg_controllen
+    );
     let iovcnt = msg.msg_iovlen as usize;
     if iovcnt == 0 {
         return 0;
@@ -952,9 +999,41 @@ pub fn sys_recvmsg(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usiz
     }
 
     let iovecs = unsafe { core::slice::from_raw_parts(iovec_addr, iovcnt) };
+    crate::early_println!("[linux recvmsg] iovcnt={}", iovecs.len());
     let mut total_read = 0usize;
     let mut pending_fd: Option<i32> = None;
     let mut msg_controllen = 0usize;
+    struct NonblockGuard<'a> {
+        sel: Option<&'a dyn Selectable>,
+        prev: bool,
+    }
+
+    impl<'a> Drop for NonblockGuard<'a> {
+        fn drop(&mut self) {
+            if let Some(sel) = self.sel {
+                sel.set_nonblocking(self.prev);
+            }
+        }
+    }
+
+    let _nonblock_guard = if nonblocking {
+        if let Some(sel) = kernel_obj.as_selectable() {
+            let prev = sel.is_nonblocking();
+            if !prev {
+                sel.set_nonblocking(true);
+                Some(NonblockGuard {
+                    sel: Some(sel),
+                    prev,
+                })
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    } else {
+        None
+    };
 
     if msg.msg_control != 0 {
         if (msg.msg_controllen as usize) >= size_of::<LinuxCmsghdr>() + size_of::<i32>() {
@@ -1016,14 +1095,23 @@ pub fn sys_recvmsg(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usiz
 
         let buffer = unsafe { core::slice::from_raw_parts_mut(buf_addr, iovec.iov_len) };
 
+        crate::early_println!(
+            "[linux recvmsg] read attempt len={}",
+            iovec.iov_len
+        );
         match stream.read(buffer) {
             Ok(n) => {
+                crate::early_println!("[linux recvmsg] read ok n={}", n);
                 total_read = total_read.saturating_add(n);
                 if n < iovec.iov_len {
                     break;
                 }
             }
             Err(StreamError::WouldBlock) => {
+                crate::early_println!(
+                    "[linux recvmsg] would block total_read={}",
+                    total_read
+                );
                 return if total_read == 0 {
                     errno::to_result(errno::EAGAIN)
                 } else {
