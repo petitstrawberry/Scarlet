@@ -31,7 +31,7 @@ macro_rules! syscall_table {
         /// Returns an error if the syscall number is invalid
         pub fn syscall_handler(abi: &mut crate::abi::linux::riscv64::LinuxRiscv64Abi, trapframe: &mut crate::arch::Trapframe) -> Result<usize, &'static str> {
             let syscall_number = trapframe.get_arg(7);
-            // crate::println!("Syscall number: {}", syscall_number);
+            crate::println!("Syscall number: {}", syscall_number);
             if syscall_number == 0 {
                 return Err("Invalid syscall number");
             }
@@ -42,7 +42,7 @@ macro_rules! syscall_table {
                     }
                 )*
                 _ => {
-                    crate::println!("Syscall number: {}", syscall_number);
+                    crate::println!("Invalid Syscall number: {}", syscall_number);
                     Err("Invalid syscall number")
                 }
             }

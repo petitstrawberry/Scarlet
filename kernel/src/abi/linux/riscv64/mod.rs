@@ -401,6 +401,8 @@ impl AbiModule for LinuxRiscv64Abi {
         let is_thread = ts.pending_clone_is_thread;
 
         // Initialize child's TGID based on whether this was a thread (CLONE_THREAD) or a process clone.
+        // Note: For non-thread (process) clones, TGID will be set to the child's ID later in set_id()
+        // when the task is added to the scheduler. We set it to 0 here as a placeholder.
         ts.tgid = if is_thread {
             if parent_tgid != 0 {
                 parent_tgid
@@ -408,7 +410,7 @@ impl AbiModule for LinuxRiscv64Abi {
                 _parent_task.get_id()
             }
         } else {
-            _child_task.get_id()
+            0 // Will be set to child's ID in Task::set_id() when added to scheduler
         };
 
         // Clear transient flag in the child copy
@@ -893,6 +895,7 @@ syscall_table! {
         0
     },
     Getcwd = 17 => fs::sys_getcwd,
+    Eventfd2 = 19 => fs::sys_eventfd2,
     // EpollCreate1 = 20 => fs::sys_epoll_create1, // Already defined below
     EpollCtl = 21 => fs::sys_epoll_ctl,
     EpollPwait = 22 => fs::sys_epoll_pwait,

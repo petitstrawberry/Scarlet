@@ -2410,6 +2410,7 @@ pub fn sys_ftruncate(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> us
                 let kind = match kernel_obj {
                     crate::object::KernelObject::File(_) => "File",
                     crate::object::KernelObject::Pipe(_) => "Pipe",
+                    crate::object::KernelObject::Counter(_) => "Counter",
                     crate::object::KernelObject::EventChannel(_) => "EventChannel",
                     crate::object::KernelObject::EventSubscription(_) => "EventSubscription",
                     crate::object::KernelObject::SharedMemory(_) => "SharedMemory",
@@ -3803,4 +3804,67 @@ pub fn sys_renameat2(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> u
         crate::println!("sys_renameat2: Full rename operation not yet implemented");
         0 // Return success for basic compatibility (temporary)
     }
+}
+
+/// eventfd2 - create file descriptor for event notification
+///
+/// # Arguments
+/// * `initval` - Initial value of the event counter (unsigned int)
+/// * `flags` - Flags (bitwise OR of EFD_CLOEXEC, EFD_NONBLOCK, EFD_SEMAPHORE)
+///
+/// # Returns
+/// * New file descriptor on success
+/// * Error code on failure
+pub fn sys_eventfd2(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
+    let task = match mytask() {
+        Some(t) => t,
+        None => return errno::to_result(errno::EIO),
+    };
+
+    let initval = trapframe.get_arg(0) as u32;
+    let flags = trapframe.get_arg(1) as u32;
+
+    trapframe.increment_pc_next(task);
+
+    // eventfd2 flags
+    const EFD_CLOEXEC: u32 = 0o02000000;
+    const EFD_NONBLOCK: u32 = 0o00004000;
+    const EFD_SEMAPHORE: u32 = 0x00000001;
+
+    // Validate flags (only allow EFD_CLOEXEC, EFD_NONBLOCK, EFD_SEMAPHORE)
+    let valid_flags = EFD_CLOEXEC | EFD_NONBLOCK | EFD_SEMAPHORE;
+    if flags & !valid_flags != 0 {
+        crate::println!("[sys_eventfd2] Invalid flags: 0x{:x}", flags);
+        return errno::to_result(errno::EINVAL);
+    }
+
+    // Create Counter object
+    let counter_obj = crate::ipc::counter::Counter::create_kernel_object(initval, flags);
+
+    // Insert into handle table
+    let handle = match task.handle_table.insert(counter_obj) {
+        Ok(h) => h,
+        Err(_) => return errno::to_result(errno::EMFILE),
+    };
+
+    // Allocate file descriptor for the handle
+    let fd = match abi.allocate_fd(handle as u32) {
+        Ok(fd) => fd,
+        Err(_) => {
+            let _ = task.handle_table.remove(handle);
+            return errno::to_result(errno::EMFILE);
+        }
+    };
+
+    // Set FD_CLOEXEC if requested
+    if (flags & EFD_CLOEXEC) != 0 {
+        let _ = abi.set_fd_flags(fd, FD_CLOEXEC);
+    }
+
+    // Set O_NONBLOCK if requested (already set in Counter, but also in ABI for consistency)
+    if (flags & EFD_NONBLOCK) != 0 {
+        let _ = abi.set_file_status_flags(fd, O_NONBLOCK as u32);
+    }
+
+    fd
 }

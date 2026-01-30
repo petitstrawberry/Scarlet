@@ -148,6 +148,10 @@ impl HandleTable {
                 // Shared memory is used for IPC and data sharing
                 HandleType::IpcChannel
             }
+            KernelObject::Counter(_) => {
+                // Counter is used for event notification (IPC)
+                HandleType::IpcChannel
+            }
         };
 
         HandleMetadata {
@@ -357,6 +361,11 @@ impl HandleTable {
             KernelObject::SharedMemory(_) => Some(
                 introspection::KernelObjectInfo::for_shared_memory(handle_role, readable, writable),
             ),
+            KernelObject::Counter(_) => Some(introspection::KernelObjectInfo::for_counter(
+                handle_role,
+                readable,
+                writable,
+            )),
         }
     }
 
