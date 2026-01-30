@@ -216,8 +216,11 @@ impl LocalSocket {
     ) -> Result<(), crate::ipc::IpcError> {
         use crate::ipc::IpcError;
 
+        crate::println!("[LocalSocket] send_handle_and_data: self={:p}, data_len={}", self as *const _, data.len());
+
         // Verify socket is connected
         if *self.state.read() != SocketState::Connected {
+            crate::println!("[LocalSocket] send_handle_and_data: not connected");
             return Err(IpcError::InvalidState);
         }
 
@@ -226,9 +229,12 @@ impl LocalSocket {
         let peer_weak_ref = peer_weak.as_ref().ok_or(IpcError::PeerClosed)?;
         let peer = peer_weak_ref.upgrade().ok_or(IpcError::PeerClosed)?;
 
+        crate::println!("[LocalSocket] send_handle_and_data: peer={:p}", peer.as_ref() as *const _);
+
         // Check if peer's handle queue is full to prevent DoS attacks
         let mut peer_handle_queue = peer.handle_queue.write();
         if peer_handle_queue.len() >= MAX_HANDLE_QUEUE_SIZE {
+            crate::println!("[LocalSocket] send_handle_and_data: handle queue full");
             return Err(IpcError::ChannelFull);
         }
 
@@ -239,20 +245,27 @@ impl LocalSocket {
         // Check if peer's data buffer has space
         let mut peer_buffer = peer_sock_buffer.data.write();
         if peer_buffer.len() + data.len() > MAX_BUFFER_SIZE {
+            crate::println!("[LocalSocket] send_handle_and_data: buffer full, current_len={}, adding_len={}", peer_buffer.len(), data.len());
             drop(peer_buffer);
             drop(peer_buffer_option);
             drop(peer_handle_queue);
             return Err(IpcError::ChannelFull);
         }
 
+        crate::println!("[LocalSocket] send_handle_and_data: before send - handle_queue_len={}, buffer_len={}", peer_handle_queue.len(), peer_buffer.len());
+
         // Add handle to peer's receive queue
         peer_handle_queue.push_back(object);
+        let queue_len = peer_handle_queue.len();
         drop(peer_handle_queue);
 
         // Add data to peer's buffer
         peer_buffer.extend(data.iter().copied());
+        let buffer_len = peer_buffer.len();
         drop(peer_buffer);
         drop(peer_buffer_option);
+
+        crate::println!("[LocalSocket] send_handle_and_data: after send - handle_queue_len={}, buffer_len={}", queue_len, buffer_len);
 
         // Wake the peer after BOTH handle and data are available
         peer.handle_waker.wake_one();
@@ -280,22 +293,31 @@ impl LocalSocket {
     ) -> Result<(KernelObject, Vec<u8>), crate::ipc::IpcError> {
         use crate::ipc::IpcError;
 
+        crate::println!("[LocalSocket] recv_handle_and_data: self={:p}, max_data_len={}", self as *const _, max_data_len);
+
         // Verify socket is connected
         if *self.state.read() != SocketState::Connected {
+            crate::println!("[LocalSocket] recv_handle_and_data: not connected");
             return Err(IpcError::InvalidState);
         }
 
         // Try to get a handle from the queue
         let mut queue = self.handle_queue.write();
+        crate::println!("[LocalSocket] recv_handle_and_data: handle_queue_len={}", queue.len());
+
         let handle = match queue.pop_front() {
             Some(h) => h,
-            None => return Err(IpcError::ChannelEmpty),
+            None => {
+                crate::println!("[LocalSocket] recv_handle_and_data: handle queue empty - returning ChannelEmpty");
+                return Err(IpcError::ChannelEmpty);
+            }
         };
         drop(queue);
 
         // Read data from read buffer
         let read_buffer = self.read_buffer.read();
         let mut buffer_data = read_buffer.data.write();
+        crate::println!("[LocalSocket] recv_handle_and_data: buffer_len={}, max_data_len={}", buffer_data.len(), max_data_len);
 
         // Read up to max_data_len bytes
         let actual_len = buffer_data.len().min(max_data_len);
@@ -305,6 +327,8 @@ impl LocalSocket {
         }
         drop(buffer_data);
         drop(read_buffer);
+
+        crate::println!("[LocalSocket] recv_handle_and_data: returning handle and {} bytes of data", data.len());
 
         Ok((handle, data))
     }

@@ -31,7 +31,7 @@ use std::collections::BTreeMap;
 use std::env;
 use std::handle::capability::memory_mapping::{self, flags};
 use std::io::{Read, Write};
-use std::ipc::{SharedMemory, permissions};
+use std::ipc::{permissions, SharedMemory};
 use std::println;
 use std::socket::Socket;
 use std::string::{String, ToString};
@@ -985,36 +985,21 @@ impl WaylandBridge {
                             response_bytes.len()
                         );
                     }
-                    // Only send KEYMAP with handle for wl_keyboard objects
+                    // Check if this is a KEYMAP event that needs handle transfer
                     if response.header.opcode() == input::keyboard_event::KEYMAP {
-                        // Verify this is actually a wl_keyboard object
-                        if let Some(interface) = self.objects.get(&response.header.object_id) {
-                            if interface == "wl_keyboard" {
-                                if is_debug_enabled() {
-                                    println!(
-                                        "[Bridge] KEYMAP event for wl_keyboard, sending with handle"
-                                    );
-                                }
-                                if let Some(shm) = self.keymap_shm.as_ref() {
-                                    match client
-                                        .send_handle_and_data(shm.as_handle(), &response_bytes)
-                                    {
-                                        Ok(()) => {
-                                            if is_debug_enabled() {
-                                                println!(
-                                                    "[Bridge] KEYMAP sent successfully with handle"
-                                                );
-                                            }
-                                            continue; // Already sent, skip regular write
-                                        }
-                                        Err(e) => {
-                                            println!(
-                                                "[Bridge] Failed to send KEYMAP with handle: {:?}, falling back to regular write",
-                                                e
-                                            );
-                                            // Fall through to regular write
-                                        }
+                        if let Some(shm) = self.keymap_shm.as_ref() {
+                            match client.send_handle_and_data(shm.as_handle(), &response_bytes) {
+                                Ok(()) => {
+                                    if is_debug_enabled() {
+                                        println!("[Bridge] KEYMAP sent with handle successfully");
                                     }
+                                    continue;
+                                }
+                                Err(e) => {
+                                    println!(
+                                        "[Bridge] Failed to send KEYMAP with handle: {:?}, falling back",
+                                        e
+                                    );
                                 }
                             }
                         }
@@ -1164,6 +1149,12 @@ impl WaylandBridge {
                         );
 
                         if let Some(global) = self.registry.get_global(name) {
+                            println!(
+                                "[Bridge] Global info: interface='{}' requested='{}' match={}",
+                                global.interface,
+                                interface_name,
+                                global.interface == interface_name
+                            );
                             if global.interface == interface_name && new_id != 0 {
                                 self.add_object(new_id, interface_name.clone());
 
@@ -1181,9 +1172,22 @@ impl WaylandBridge {
                                     return Ok(msgs);
                                 }
 
+                                if interface_name == "wl_data_device_manager" {
+                                    // Just accept bind, no events needed
+                                    return Ok(Vec::new());
+                                }
+
                                 if interface_name == "wl_seat" {
                                     self.input_manager.create_seat(new_id, "seat0");
                                     let mut msgs = Vec::new();
+
+                                    // Send NAME event (may be required by GTK3)
+                                    let mut name_msg =
+                                        WaylandMessage::new(new_id, input::seat_event::NAME);
+                                    name_msg.add_arg(WaylandArg::String(b"seat0".to_vec()));
+                                    msgs.push(name_msg);
+
+                                    // Send CAPABILITIES event
                                     let mut caps = WaylandMessage::new(
                                         new_id,
                                         input::seat_event::CAPABILITIES,
@@ -1193,7 +1197,6 @@ impl WaylandBridge {
                                             | input::seat_capabilities::KEYBOARD,
                                     ));
                                     msgs.push(caps);
-                                    // NOTE: NAME event is optional, don't send it
                                     return Ok(msgs);
                                 }
 
@@ -1810,7 +1813,7 @@ impl WaylandBridge {
                     let mut keymap_msg =
                         WaylandMessage::new(keyboard_id, input::keyboard_event::KEYMAP);
                     keymap_msg.add_arg(WaylandArg::Uint(1)); // XKB_V1 format
-                    keymap_msg.add_arg(WaylandArg::Fd(0)); // FD (out-of-band handle)
+                    keymap_msg.add_arg(WaylandArg::FdPlaceholder); // FD placeholder
                     keymap_msg.add_arg(WaylandArg::Uint(size)); // size
 
                     let mut msgs = Vec::new();

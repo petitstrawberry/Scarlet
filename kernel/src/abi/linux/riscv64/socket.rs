@@ -1,18 +1,19 @@
 use crate::ipc::IpcError;
 use crate::object::capability::StreamError;
 use crate::{
-    abi::linux::riscv64::LinuxRiscv64Abi,
     abi::linux::riscv64::errno,
-    abi::linux::riscv64::fs::{FD_CLOEXEC, IoVec, O_NONBLOCK},
+    abi::linux::riscv64::fs::{IoVec, FD_CLOEXEC, O_NONBLOCK},
+    abi::linux::riscv64::LinuxRiscv64Abi,
     arch::Trapframe,
     ipc::pipe::UnidirectionalPipe,
-    network::{NetworkManager, SocketDomain, SocketProtocol, SocketType, local::LocalSocket},
-    object::KernelObject,
+    network::{local::LocalSocket, NetworkManager, SocketDomain, SocketProtocol, SocketType},
     object::capability::selectable::Selectable,
+    object::KernelObject,
     sched::scheduler::get_scheduler,
     task::mytask,
 };
 use alloc::sync::Arc;
+use alloc::vec::Vec;
 use core::mem::size_of;
 
 /// Linux socket domains
@@ -1096,89 +1097,114 @@ pub fn sys_recvmsg(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usiz
         None
     };
 
-    if msg.msg_control != 0 {
-        if (msg.msg_controllen as usize) >= size_of::<LinuxCmsghdr>() + size_of::<i32>() {
-            let socket_arc = match &kernel_obj {
-                KernelObject::Socket(socket) => Arc::clone(socket),
-                _ => {
-                    // crate::early_println!("[linux socket] recvmsg not socket for cmsg");
-                    return errno::to_result(errno::ENOTSOCK);
+    // Calculate total buffer size for potential handle+data receive
+    let total_buffer_size: usize = iovecs.iter().map(|i| i.iov_len).sum();
+    let mut atomic_data: Option<Vec<u8>> = None;
+
+    // Try atomic handle+data receive if control buffer is provided
+    if msg.msg_control != 0
+        && (msg.msg_controllen as usize) >= size_of::<LinuxCmsghdr>() + size_of::<i32>()
+    {
+        let socket_arc = match &kernel_obj {
+            KernelObject::Socket(socket) => Arc::clone(socket),
+            _ => {
+                return errno::to_result(errno::ENOTSOCK);
+            }
+        };
+
+        if let Some(local_socket) = LocalSocket::from_socket_object(&socket_arc) {
+            match local_socket.recv_handle_and_data(total_buffer_size) {
+                Ok((obj, data)) => {
+                    let new_handle = match task.handle_table.insert(obj) {
+                        Ok(h) => h,
+                        Err(_) => return errno::to_result(errno::EMFILE),
+                    };
+                    let new_fd = match abi.allocate_fd(new_handle) {
+                        Ok(fd) => fd,
+                        Err(_) => {
+                            let _ = task.handle_table.remove(new_handle);
+                            return errno::to_result(errno::EMFILE);
+                        }
+                    };
+                    pending_fd = Some(new_fd as i32);
+                    atomic_data = Some(data);
                 }
-            };
-
-            if let Some(local_socket) = LocalSocket::from_socket_object(&socket_arc) {
-                let recv_result = local_socket.recv_handle();
-
-                match recv_result {
-                    Ok(obj) => {
-                        let new_handle = match task.handle_table.insert(obj) {
-                            Ok(h) => h,
-                            Err(_) => return errno::to_result(errno::EMFILE),
-                        };
-                        let new_fd = match abi.allocate_fd(new_handle) {
-                            Ok(fd) => fd,
-                            Err(_) => {
-                                let _ = task.handle_table.remove(new_handle);
-                                return errno::to_result(errno::EMFILE);
-                            }
-                        };
-                        pending_fd = Some(new_fd as i32);
-                    }
-                    Err(IpcError::ChannelEmpty) => {
-                        // No ancillary data; still allow data receive to proceed.
-                    }
-                    Err(_) => {
-                        // crate::early_println!("[linux socket] recvmsg recv_handle failed");
-                        return errno::to_result(errno::EIO);
-                    }
+                Err(IpcError::ChannelEmpty) => {
+                    // No handle available; fall back to regular stream read
+                }
+                Err(_) => {
+                    return errno::to_result(errno::EIO);
                 }
             }
         }
     }
 
-    for iovec in iovecs {
-        if iovec.iov_len == 0 {
-            continue;
-        }
+    // Copy data from atomic receive or read from stream
+    if let Some(ref data) = atomic_data {
+        // Copy atomically received data into iovecs
+        let mut data_offset = 0;
+        let data_len = data.len();
+        for iovec in iovecs {
+            if data_offset >= data_len {
+                break;
+            }
+            if iovec.iov_len == 0 {
+                continue;
+            }
 
-        let buf_addr = match task.vm_manager.translate_vaddr(iovec.iov_base as usize) {
-            Some(addr) => addr as *mut u8,
-            None => {
-                // crate::early_println!(
-                //     "[linux socket] recvmsg bad buf ptr {:x}",
-                //     iovec.iov_base as usize
-                // );
+            let buf_addr = match task.vm_manager.translate_vaddr(iovec.iov_base as usize) {
+                Some(addr) => addr as *mut u8,
+                None => return errno::to_result(errno::EFAULT),
+            };
+
+            if buf_addr.is_null() {
                 return errno::to_result(errno::EFAULT);
             }
-        };
 
-        if buf_addr.is_null() {
-            // crate::early_println!("[linux socket] recvmsg null buf ptr");
-            return errno::to_result(errno::EFAULT);
+            let remaining = data.len() - data_offset;
+            let to_copy = remaining.min(iovec.iov_len);
+            let buffer = unsafe { core::slice::from_raw_parts_mut(buf_addr, to_copy) };
+            buffer.copy_from_slice(&data[data_offset..data_offset + to_copy]);
+            data_offset += to_copy;
+            total_read += to_copy;
         }
+    } else {
+        // No handle received; read data from stream
+        for iovec in iovecs {
+            if iovec.iov_len == 0 {
+                continue;
+            }
 
-        let buffer = unsafe { core::slice::from_raw_parts_mut(buf_addr, iovec.iov_len) };
-
-        // crate::early_println!("[linux recvmsg] read attempt len={}", iovec.iov_len);
-        match stream.read(buffer) {
-            Ok(n) => {
-                // crate::early_println!("[linux recvmsg] read ok n={}", n);
-                total_read = total_read.saturating_add(n);
-                if n < iovec.iov_len {
-                    break;
+            let buf_addr = match task.vm_manager.translate_vaddr(iovec.iov_base as usize) {
+                Some(addr) => addr as *mut u8,
+                None => {
+                    return errno::to_result(errno::EFAULT);
                 }
+            };
+
+            if buf_addr.is_null() {
+                return errno::to_result(errno::EFAULT);
             }
-            Err(StreamError::WouldBlock) => {
-                // crate::early_println!("[linux recvmsg] would block total_read={}", total_read);
-                return if total_read == 0 {
-                    errno::to_result(errno::EAGAIN)
-                } else {
-                    total_read
-                };
-            }
-            Err(_) => {
-                // crate::early_println!("[linux socket] recvmsg read error");
-                return errno::to_result(errno::EIO);
+
+            let buffer = unsafe { core::slice::from_raw_parts_mut(buf_addr, iovec.iov_len) };
+
+            match stream.read(buffer) {
+                Ok(n) => {
+                    total_read = total_read.saturating_add(n);
+                    if n < iovec.iov_len {
+                        break;
+                    }
+                }
+                Err(StreamError::WouldBlock) => {
+                    return if total_read == 0 {
+                        errno::to_result(errno::EAGAIN)
+                    } else {
+                        total_read
+                    };
+                }
+                Err(_) => {
+                    return errno::to_result(errno::EIO);
+                }
             }
         }
     }

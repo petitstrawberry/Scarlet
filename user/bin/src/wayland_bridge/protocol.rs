@@ -11,6 +11,7 @@
 //!   - size includes the header (8 bytes minimum)
 //! - Arguments follow the header based on message signature
 
+use std::ipc::SharedMemory;
 use std::vec::Vec;
 
 /// Wayland message header (8 bytes)
@@ -80,8 +81,10 @@ pub enum WaylandArg {
     NewId(u32),
     /// Array of bytes
     Array(Vec<u8>),
-    /// File descriptor (index in ancillary data)
-    Fd(i32),
+    /// File descriptor placeholder
+    /// The FD placeholder (0) is encoded in the message body
+    /// The actual handle is sent separately via send_handle_and_data
+    FdPlaceholder,
 }
 
 /// Wayland message
@@ -146,7 +149,7 @@ impl WaylandArg {
                 // size (4 bytes) + data + padding
                 4 + ((a.len() + 3) & !3) as u32
             }
-            WaylandArg::Fd(_) => 0, // FDs are passed via handle transfer (Socket::recv_handle/send_handle)
+            WaylandArg::FdPlaceholder => 4, // FD placeholder is 4 bytes (u32 with value 0)
         }
     }
 
@@ -163,7 +166,7 @@ impl WaylandArg {
                 bytes.extend_from_slice(&len.to_ne_bytes());
                 bytes.extend_from_slice(s);
                 bytes.push(0); // Null terminator
-                // Pad to 4-byte boundary
+                               // Pad to 4-byte boundary
                 while bytes.len() % 4 != 0 {
                     bytes.push(0);
                 }
@@ -177,10 +180,10 @@ impl WaylandArg {
                     bytes.push(0);
                 }
             }
-            WaylandArg::Fd(_) => {
-                // FDs are passed via handle transfer (Socket::recv_handle/send_handle)
-                // The Linux compatibility layer converts SCM_RIGHTS to handle transfer
-                // Nothing to encode in the message body
+            WaylandArg::FdPlaceholder => {
+                // FD placeholder: always encode as 0
+                // The actual handle is sent via SCM_RIGHTS separately
+                bytes.extend_from_slice(&0u32.to_ne_bytes());
             }
         }
     }
@@ -273,4 +276,10 @@ pub mod output_event {
 /// wl_callback opcodes (events from server)
 pub mod callback_event {
     pub const DONE: u16 = 0;
+}
+
+/// wl_data_device_manager opcodes (events from server)
+pub mod data_device_manager_event {
+    // No standard events for this protocol
+    // Advertised as placeholder for GTK3 compatibility
 }

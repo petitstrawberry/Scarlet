@@ -5,6 +5,7 @@
 
 use super::protocol::{WaylandArg, WaylandMessage};
 use std::collections::BTreeMap;
+use std::println;
 use std::string::String;
 use std::vec::Vec;
 
@@ -39,6 +40,16 @@ impl Registry {
         registry.add_global("wl_output", 3);
         registry.add_global("xdg_wm_base", 2);
 
+        // Clear and re-add with different order (seat first, version 7)
+        registry.globals.clear();
+        registry.next_name = 1;
+        registry.add_global("wl_seat", 7);
+        registry.add_global("wl_compositor", 4);
+        registry.add_global("wl_data_device_manager", 3);
+        registry.add_global("wl_shm", 1);
+        registry.add_global("wl_output", 3);
+        registry.add_global("xdg_wm_base", 2);
+
         registry
     }
 
@@ -63,7 +74,16 @@ impl Registry {
     pub fn get_global_events(&self, registry_id: u32) -> Vec<WaylandMessage> {
         let mut messages = Vec::new();
 
+        println!(
+            "[Registry] Sending {} globals to registry {}",
+            self.globals.len(),
+            registry_id
+        );
         for global in self.globals.values() {
+            println!(
+                "[Registry] Global {}: {} (version {})",
+                global.name, global.interface, global.version
+            );
             let mut msg = WaylandMessage::new(registry_id, super::protocol::registry_event::GLOBAL);
             msg.add_arg(WaylandArg::Uint(global.name));
             msg.add_arg(WaylandArg::String(global.interface.as_bytes().to_vec()));
