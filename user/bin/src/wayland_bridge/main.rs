@@ -1039,11 +1039,13 @@ impl WaylandBridge {
             }
             for input_msg in input_events {
                 let msg_bytes = input_msg.encode();
-                println!(
-                    "[Bridge] Forwarding input event: obj={} opcode={}",
-                    input_msg.header.object_id,
-                    input_msg.header.opcode()
-                );
+                if is_debug_enabled() {
+                    println!(
+                        "[Bridge] Forwarding input event: obj={} opcode={}",
+                        input_msg.header.object_id,
+                        input_msg.header.opcode()
+                    );
+                }
                 if let Err(e) = client.write(&msg_bytes) {
                     println!("[Bridge] Failed to forward input event: {:?}", e);
                 }
@@ -1946,10 +1948,12 @@ impl WaylandBridge {
                             let code = u16::from_le_bytes([buf[26], buf[27]]);
                             let value = i32::from_le_bytes([buf[28], buf[29], buf[30], buf[31]]);
 
-                            println!(
-                                "[Input Thread] Received event: type={} code={} value={}",
-                                type_, code, value
-                            );
+                            if is_debug_enabled() {
+                                println!(
+                                    "[Input Thread] Received event: type={} code={} value={}",
+                                    type_, code, value
+                                );
+                            }
 
                             // Get current objects list
                             let objects_guard = objects_clone.lock();
@@ -2009,11 +2013,11 @@ impl WaylandBridge {
                     }
                     Ok(_) => {
                         // No data or incomplete message
-                        thread::sleep(Duration::from_millis(10));
+                        thread::sleep(Duration::from_millis(16));
                     }
                     Err(_) => {
-                        // Error - wait a bit before retrying
-                        thread::sleep(Duration::from_millis(10));
+                        // Error - wait before retrying
+                        thread::sleep(Duration::from_millis(16));
                     }
                 }
             }
