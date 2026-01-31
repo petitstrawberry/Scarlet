@@ -1093,6 +1093,11 @@ impl WaylandBridge {
     fn send_request_move_window(&mut self, window_id: u32) -> Result<(), &'static str> {
         let sws_conn = self.sws_connection.as_mut().ok_or("Not connected to SWS")?;
 
+        bridge_log!(
+            "[Bridge] Sending REQUEST_MOVE_WINDOW for window {}",
+            window_id
+        );
+
         let payload = protocol_sws::payload_request_move_window(window_id);
         let header = protocol_sws::MessageHeader {
             msg_type: protocol_sws::client_msg::REQUEST_MOVE_WINDOW,
@@ -2308,7 +2313,12 @@ impl WaylandBridge {
                 Ok(Vec::new())
             }
             xdg_shell::xdg_toplevel_request::MOVE => {
-                bridge_log!("[Bridge] xdg_toplevel.move");
+                let serial = Self::parse_u32(payload, 4).unwrap_or(0);
+                bridge_log!(
+                    "[Bridge] xdg_toplevel.move: toplevel={} serial={}",
+                    xdg_toplevel_id,
+                    serial
+                );
                 let window_id = self
                     .xdg_shell_manager
                     .get_toplevel_mut(xdg_toplevel_id)
@@ -2316,7 +2326,13 @@ impl WaylandBridge {
                         self.surface_to_window.get(&wl_surface_id).copied()
                     });
                 if let Some(window_id) = window_id {
+                    bridge_log!("[Bridge] xdg_toplevel.move mapped to window {}", window_id);
                     let _ = self.send_request_move_window(window_id);
+                } else {
+                    bridge_log!(
+                        "[Bridge] xdg_toplevel.move missing window mapping for toplevel {}",
+                        xdg_toplevel_id
+                    );
                 }
                 Ok(Vec::new())
             }

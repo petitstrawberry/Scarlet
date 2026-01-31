@@ -1133,6 +1133,10 @@ fn client_thread_main(client_id: usize, mut socket: Socket) {
                 });
             }
             Ok(ClientMessageRef::RequestMoveWindow { window_id }) => {
+                println!(
+                    "[IpcServer] RequestMoveWindow received for window {}",
+                    window_id
+                );
                 push_ipc_event(IpcEvent::RequestMove { window_id });
             }
             Ok(ClientMessageRef::MoveWindow { window_id, x, y }) => {

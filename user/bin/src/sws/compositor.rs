@@ -1500,6 +1500,18 @@ impl Compositor {
                             .map(|w| (w.x, w.y, w.width, w.height));
                         let new_x = state.start_window_x + (self.cursor.x - state.grab_cursor_x);
                         let new_y = state.start_window_y + (self.cursor.y - state.grab_cursor_y);
+                        println!(
+                            "[Compositor] Move drag: window #{} start=({}, {}) grab=({}, {}) cursor=({}, {}) new=({}, {})",
+                            state.window_id,
+                            state.start_window_x,
+                            state.start_window_y,
+                            state.grab_cursor_x,
+                            state.grab_cursor_y,
+                            self.cursor.x,
+                            self.cursor.y,
+                            new_x,
+                            new_y
+                        );
                         self.window_manager
                             .set_window_position(state.window_id, new_x, new_y);
 
@@ -2069,6 +2081,10 @@ impl Compositor {
                 let (grab_cursor_x, grab_cursor_y) = self
                     .last_left_down_cursor
                     .unwrap_or((self.cursor.x, self.cursor.y));
+                println!(
+                    "[Compositor] Move start: window #{} grab=({}, {}) cursor=({}, {})",
+                    window_id, grab_cursor_x, grab_cursor_y, self.cursor.x, self.cursor.y
+                );
 
                 // Bring the window to front for the drag (focus is handled by click routing).
                 self.window_manager.raise_to_top_with_type(window_id);
