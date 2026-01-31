@@ -201,8 +201,6 @@ struct WaylandBridge {
     /// Pointer position (surface-local, in pixels)
     pointer_x: i32,
     pointer_y: i32,
-    /// True while SWS is performing a compositor-side pointer grab (e.g., move)
-    pointer_grab_active: bool,
 }
 
 impl WaylandBridge {
@@ -245,7 +243,6 @@ impl WaylandBridge {
             update_flush_interval: Duration::from_millis(16),
             pointer_x: 0,
             pointer_y: 0,
-            pointer_grab_active: false,
         })
     }
 
@@ -394,35 +391,6 @@ impl WaylandBridge {
 
         if let Some(surface_id) = self.surface_id_for_window(window_id) {
             self.queue_focus_events(surface_id);
-        }
-
-        if self.pointer_grab_active {
-            match type_ {
-                EV_REL => {
-                    if code == REL_X {
-                        self.pointer_x = self.pointer_x.saturating_add(value);
-                    } else if code == REL_Y {
-                        self.pointer_y = self.pointer_y.saturating_add(value);
-                    }
-                    return;
-                }
-                EV_ABS => {
-                    if code == ABS_X {
-                        self.pointer_x = value;
-                    } else if code == ABS_Y {
-                        self.pointer_y = value;
-                    }
-                    return;
-                }
-                EV_KEY if code >= BTN_MOUSE_MIN && code <= BTN_MOUSE_MAX => {
-                    if code == BTN_LEFT && value == 0 {
-                        self.pointer_grab_active = false;
-                    } else {
-                        return;
-                    }
-                }
-                _ => {}
-            }
         }
 
         let mut messages = Vec::new();
@@ -1122,6 +1090,26 @@ impl WaylandBridge {
         Ok(())
     }
 
+    fn send_request_move_window(&mut self, window_id: u32) -> Result<(), &'static str> {
+        let sws_conn = self.sws_connection.as_mut().ok_or("Not connected to SWS")?;
+
+        let payload = protocol_sws::payload_request_move_window(window_id);
+        let header = protocol_sws::MessageHeader {
+            msg_type: protocol_sws::client_msg::REQUEST_MOVE_WINDOW,
+            payload_size: payload.len() as u32,
+        };
+
+        let mut msg_bytes = Vec::new();
+        msg_bytes.extend_from_slice(&header.to_le_bytes());
+        msg_bytes.extend_from_slice(&payload);
+
+        sws_conn
+            .write(&msg_bytes)
+            .map_err(|_| "Failed to send REQUEST_MOVE_WINDOW")?;
+
+        Ok(())
+    }
+
     fn send_extension_attach_buffer(
         &mut self,
         surface_id: u32,
@@ -1716,9 +1704,6 @@ impl WaylandBridge {
                 // Remove from surface_to_window mapping
                 if let Some(window_id) = self.surface_to_window.remove(&surface_id) {
                     self.pending_damage.remove(&window_id);
-                    if self.pointer_grab_active {
-                        self.pointer_grab_active = false;
-                    }
                 }
                 Ok(Vec::new())
             }
@@ -2324,7 +2309,15 @@ impl WaylandBridge {
             }
             xdg_shell::xdg_toplevel_request::MOVE => {
                 bridge_log!("[Bridge] xdg_toplevel.move");
-                // TODO: Window move temporarily disabled until behavior is stable.
+                let window_id = self
+                    .xdg_shell_manager
+                    .get_toplevel_mut(xdg_toplevel_id)
+                    .and_then(|(_, wl_surface_id)| {
+                        self.surface_to_window.get(&wl_surface_id).copied()
+                    });
+                if let Some(window_id) = window_id {
+                    let _ = self.send_request_move_window(window_id);
+                }
                 Ok(Vec::new())
             }
             xdg_shell::xdg_toplevel_request::RESIZE => {
