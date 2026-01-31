@@ -434,7 +434,6 @@ impl UdpLayer {
         ip_context.set("ip_dst", &dest_ip);
         ip_context.set("ip_protocol", &[17]); // UDP protocol number
 
-        crate::println!(
             "[UDP] Send: {} bytes (src port: {}, dst: {}.{}.{}.{})",
             udp_packet.len(),
             src_port,
@@ -459,7 +458,6 @@ impl UdpLayer {
 
     /// Receive a UDP datagram
     pub fn receive_datagram(&self, src_port: u16, dst_port: u16, data: Vec<u8>) {
-        crate::println!(
             "[UDP] Recv: {} bytes (src port: {}, dst port: {})",
             data.len(),
             src_port,
@@ -477,7 +475,6 @@ impl UdpLayer {
             socket.deliver_datagram(data);
         } else {
             // No socket bound to this port - drop the datagram
-            crate::println!("[UDP] No socket bound to port {}, dropping", dst_port);
         }
     }
 }

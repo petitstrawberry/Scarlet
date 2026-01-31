@@ -177,7 +177,6 @@ impl NetworkLayer for EthernetLayer {
 
         // In a real implementation, we would send this through NetworkDevice
         // For now, just log that we're sending
-        crate::println!(
             "[Ethernet] Send: {} bytes (dst: {:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X}, type: 0x{:04X})",
             total_size,
             dest_mac[0],
@@ -208,7 +207,6 @@ impl NetworkLayer for EthernetLayer {
 
         let payload = &frame[ETHERNET_HEADER_SIZE..];
 
-        crate::println!(
             "[Ethernet] Recv: {} bytes (src: {:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X}, type: 0x{:04X})",
             frame.len(),
             header.src_mac[0],

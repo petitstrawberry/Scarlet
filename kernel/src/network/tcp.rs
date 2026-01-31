@@ -246,7 +246,6 @@ impl TcpSocket {
     pub fn process_segment(&self, src_ip: Ipv4Address, header: TcpHeader, data: &[u8]) {
         let current_state = self.get_state();
 
-        crate::println!(
             "[TCP] Segment: {} bytes (seq={}, ack={}, flags={:02X})",
             data.len(),
             header.seq_number,
@@ -269,7 +268,6 @@ impl TcpSocket {
                     self.handle_syn_ack_received(src_ip, header);
                 } else if header.flags() & tcp_flags::RST != 0 {
                     // Received RST, abort connection
-                    crate::println!("[TCP] Connection reset during SYN-SENT");
                     self.set_state(TcpState::Closed);
                 }
             }
@@ -281,7 +279,6 @@ impl TcpSocket {
                 }
             }
             _ => {
-                crate::println!("[TCP] Unexpected segment in state: {:?}", current_state);
             }
         }
     }
@@ -314,13 +311,11 @@ impl TcpSocket {
         self.send_ack(src_ip, header.src_port, header.seq_number.wrapping_add(1));
 
         self.set_state(TcpState::Established);
-        crate::println!("[TCP] Connection established");
     }
 
     /// Handle control segment (ACK, FIN, RST)
     fn handle_control_segment(&self, src_ip: Ipv4Address, header: TcpHeader) {
         if header.flags() & tcp_flags::RST != 0 {
-            crate::println!("[TCP] Connection reset");
             self.set_state(TcpState::Closed);
             return;
         }
@@ -337,7 +332,6 @@ impl TcpSocket {
     /// Handle data segment
     fn handle_data_segment(&self, src_ip: Ipv4Address, header: TcpHeader, data: &[u8]) {
         if header.flags() & tcp_flags::RST != 0 {
-            crate::println!("[TCP] Connection reset");
             self.set_state(TcpState::Closed);
             return;
         }
@@ -553,7 +547,6 @@ impl TcpSocket {
                     self.send_seq.fetch_add(total_len as u32, Ordering::SeqCst);
                 }
 
-                crate::println!(
                     "[TCP] Sent {} bytes (seq={})",
                     segment.len(),
                     header.seq_number
@@ -831,7 +824,6 @@ impl TcpLayer {
 
     /// Process incoming TCP segment
     pub fn receive_segment(&self, src_ip: Ipv4Address, header: TcpHeader, data: &[u8]) {
-        crate::println!("[TCP] Received segment for port: {}", header.dst_port);
 
         let mut stats = self.stats.write();
         stats.packets_received += 1;
@@ -840,7 +832,6 @@ impl TcpLayer {
         if let Some(socket) = self.find_socket(header.dst_port) {
             socket.process_segment(src_ip, header, data);
         } else {
-            crate::println!("[TCP] No socket for port {}", header.dst_port);
         }
     }
 }
