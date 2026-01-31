@@ -644,7 +644,10 @@ impl MemoryMappingOps for Fat32FileObject {
         let backing_guard = self.mmap_backing.read();
         let backing = match backing_guard.as_ref() {
             Some(buf) => buf,
-            None => return,
+            None => {
+                let _ = self.sync_to_disk();
+                return;
+            }
         };
         let backing_len = *self.mmap_backing_len.lock();
         if backing_len == 0 {
@@ -705,11 +708,30 @@ impl MemoryMappingOps for Fat32FileObject {
             return Err(crate::object::capability::memory_mapping::ResolveFaultError::Invalid);
         }
 
-        let page_vaddr = access.vaddr & !(PAGE_SIZE - 1);
-        let offset_in_mapping = page_vaddr - map.vmarea.start;
+        let fs = self
+            .node
+            .filesystem
+            .read()
+            .as_ref()
+            .and_then(|weak| weak.upgrade())
+            .ok_or(crate::object::capability::memory_mapping::ResolveFaultError::Invalid)?;
+        let fat32_fs = fs
+            .as_any()
+            .downcast_ref::<crate::fs::vfs_v2::drivers::fat32::Fat32FileSystem>()
+            .ok_or(crate::object::capability::memory_mapping::ResolveFaultError::Invalid)?;
+
+        let page_index = (file_offset / PAGE_SIZE) as u64;
+        let pinned = PageCacheManager::global()
+            .pin_or_load(self.cache_id(), page_index, |paddr| {
+                fat32_fs
+                    .read_page_content(self.node.cluster(), page_index, paddr)
+                    .map_err(|_| "fat32: read_page_content failed")
+            })
+            .map_err(|_| crate::object::capability::memory_mapping::ResolveFaultError::Invalid)?;
+
         Ok(
             crate::object::capability::memory_mapping::ResolveFaultResult {
-                paddr_page_base: map.pmarea.start + offset_in_mapping,
+                paddr_page_base: pinned.paddr(),
                 is_tail: false,
             },
         )

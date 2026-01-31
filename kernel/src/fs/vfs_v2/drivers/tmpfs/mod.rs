@@ -28,7 +28,7 @@ use crate::{
         FileSystemError, FileSystemErrorKind, FileType, SocketFileInfo, get_fs_driver_manager,
         vfs_v2::cache::PageCacheCapable,
     },
-    mem::page_cache::PageCacheManager,
+    mem::{page::allocate_boxed_pages, page_cache::PageCacheManager},
     object::capability::MemoryMappingOps,
 };
 
@@ -498,7 +498,7 @@ impl FileSystemOperations for TmpFS {
 
 /// TmpNode represents a file, directory, or device node in TmpFS.
 ///
-/// Each node contains metadata, content (for files), children (for directories),
+/// Each node contains metadata, content (for symlinks), children (for directories),
 /// and references to its parent and filesystem. All fields are protected by locks for thread safety.
 pub struct TmpNode {
     /// File name
@@ -507,7 +507,7 @@ pub struct TmpNode {
     file_type: RwLock<FileType>,
     /// File metadata
     metadata: RwLock<FileMetadata>,
-    /// File content (for regular files)
+    /// File content (for symlinks)
     content: RwLock<Vec<u8>>,
     /// Child nodes (for directories)
     children: RwLock<BTreeMap<String, Arc<dyn VfsNode>>>,
@@ -727,6 +727,12 @@ pub struct TmpFileObject {
 
     /// Optional socket reference for socket files
     socket_ref: Option<Arc<dyn crate::network::SocketObject>>,
+    /// Page-aligned backing for private mmap operations
+    mmap_backing: RwLock<Option<Box<[crate::mem::page::Page]>>>,
+    /// Byte length of the mmap backing (file size snapshot)
+    mmap_backing_len: Mutex<usize>,
+    /// Active mmap ranges keyed by starting virtual address
+    mmap_ranges: RwLock<BTreeMap<usize, MmapRange>>,
 }
 
 impl TmpFileObject {
@@ -737,6 +743,9 @@ impl TmpFileObject {
             position: RwLock::new(0),
             device_guard: None,
             socket_ref: None,
+            mmap_backing: RwLock::new(None),
+            mmap_backing_len: Mutex::new(0),
+            mmap_ranges: RwLock::new(BTreeMap::new()),
         }
     }
 
@@ -747,6 +756,9 @@ impl TmpFileObject {
             position: RwLock::new(0),
             device_guard: None,
             socket_ref: None,
+            mmap_backing: RwLock::new(None),
+            mmap_backing_len: Mutex::new(0),
+            mmap_ranges: RwLock::new(BTreeMap::new()),
         }
     }
 
@@ -759,6 +771,9 @@ impl TmpFileObject {
                 position: RwLock::new(0),
                 device_guard: Some(device_guard),
                 socket_ref: None,
+                mmap_backing: RwLock::new(None),
+                mmap_backing_len: Mutex::new(0),
+                mmap_ranges: RwLock::new(BTreeMap::new()),
             },
             None => {
                 // If borrowing fails, return an error
@@ -776,6 +791,9 @@ impl TmpFileObject {
                 position: RwLock::new(0),
                 device_guard: None,
                 socket_ref: Some(socket),
+                mmap_backing: RwLock::new(None),
+                mmap_backing_len: Mutex::new(0),
+                mmap_ranges: RwLock::new(BTreeMap::new()),
             },
             None => {
                 // Socket not found in NetworkManager. This can happen in legitimate
@@ -788,9 +806,57 @@ impl TmpFileObject {
                     position: RwLock::new(0),
                     device_guard: None,
                     socket_ref: None,
+                    mmap_backing: RwLock::new(None),
+                    mmap_backing_len: Mutex::new(0),
+                    mmap_ranges: RwLock::new(BTreeMap::new()),
                 }
             }
         }
+    }
+
+    fn ensure_mmap_backing(
+        &self,
+        file_size: usize,
+        required_size: usize,
+    ) -> Result<(), StreamError> {
+        if file_size == 0 || required_size == 0 {
+            return Err(StreamError::InvalidArgument);
+        }
+
+        let num_pages = (required_size + PAGE_SIZE - 1) / PAGE_SIZE;
+        let mut backing_guard = self.mmap_backing.write();
+        let needs_alloc = backing_guard
+            .as_ref()
+            .map(|buf| buf.len() < num_pages)
+            .unwrap_or(true);
+        if needs_alloc {
+            *backing_guard = Some(allocate_boxed_pages(num_pages));
+        }
+
+        let backing = backing_guard.as_mut().expect("mmap backing missing");
+        *self.mmap_backing_len.lock() = file_size;
+
+        let cache_id = self.cache_id();
+        let backing_ptr = backing.as_mut_ptr() as *mut u8;
+        for page_index in 0..num_pages {
+            let pinned = PageCacheManager::global()
+                .pin_or_load(cache_id, page_index as u64, |paddr| {
+                    unsafe {
+                        core::ptr::write_bytes(paddr as *mut u8, 0, PAGE_SIZE);
+                    }
+                    Ok(())
+                })
+                .map_err(|_| StreamError::IoError)?;
+            unsafe {
+                core::ptr::copy_nonoverlapping(
+                    pinned.paddr() as *const u8,
+                    backing_ptr.add(page_index * PAGE_SIZE),
+                    PAGE_SIZE,
+                );
+            }
+        }
+
+        Ok(())
     }
 
     fn read_device(&self, buffer: &mut [u8]) -> Result<usize, FileSystemError> {
@@ -879,23 +945,10 @@ impl TmpFileObject {
         while total_read < buffer.len() && pos < file_size {
             let page_index = (pos as usize / PAGE_SIZE) as u64;
             let offset_in_page = (pos as usize) % PAGE_SIZE;
-            let content = self.node.content.read();
-            let content_len = content.len();
             let pinned = PageCacheManager::global()
                 .pin_or_load(cache_id, page_index, |paddr| {
                     unsafe {
                         core::ptr::write_bytes(paddr as *mut u8, 0, PAGE_SIZE);
-                    }
-                    let start = page_index as usize * PAGE_SIZE;
-                    if start < content_len {
-                        let len = core::cmp::min(PAGE_SIZE, content_len - start);
-                        unsafe {
-                            core::ptr::copy_nonoverlapping(
-                                content.as_ptr().add(start),
-                                paddr as *mut u8,
-                                len,
-                            );
-                        }
                     }
                     Ok(())
                 })
@@ -995,7 +1048,6 @@ impl TmpFileObject {
     fn write_regular_file(&self, buffer: &[u8]) -> Result<usize, FileSystemError> {
         let mut pos = *self.position.read() as usize;
         let mut written = 0usize;
-        let start_pos = pos;
         let cache_id = self.cache_id();
 
         while written < buffer.len() {
@@ -1004,23 +1056,10 @@ impl TmpFileObject {
             let remain_in_page = PAGE_SIZE - page_off;
             let chunk = core::cmp::min(buffer.len() - written, remain_in_page);
 
-            let content = self.node.content.read();
-            let content_len = content.len();
             let pinned = PageCacheManager::global()
                 .pin_or_load(cache_id, page_index, |paddr| {
                     unsafe {
                         core::ptr::write_bytes(paddr as *mut u8, 0, PAGE_SIZE);
-                    }
-                    let start = page_index as usize * PAGE_SIZE;
-                    if start < content_len {
-                        let len = core::cmp::min(PAGE_SIZE, content_len - start);
-                        unsafe {
-                            core::ptr::copy_nonoverlapping(
-                                content.as_ptr().add(start),
-                                paddr as *mut u8,
-                                len,
-                            );
-                        }
                     }
                     Ok(())
                 })
@@ -1045,15 +1084,6 @@ impl TmpFileObject {
             if pos > meta.size {
                 meta.size = pos;
             }
-        }
-
-        {
-            let mut content = self.node.content.write();
-            let new_end = start_pos + buffer.len();
-            if new_end > content.len() {
-                content.resize(new_end, 0);
-            }
-            content[start_pos..new_end].copy_from_slice(buffer);
         }
 
         Ok(written)
@@ -1193,51 +1223,129 @@ impl ControlOps for TmpFileObject {
     }
 }
 
+#[derive(Clone, Copy, Debug)]
+struct MmapRange {
+    vaddr_start: usize,
+    vaddr_end: usize,
+    offset: usize,
+}
+
 impl MemoryMappingOps for TmpFileObject {
     fn get_mapping_info(
         &self,
         offset: usize,
         length: usize,
     ) -> Result<(usize, usize, bool), &'static str> {
-        let content = self.node.content.read();
+        if offset % PAGE_SIZE != 0 {
+            return Err("Offset not page aligned");
+        }
 
-        // Check bounds
-        if offset >= content.len() {
+        let file_size = self.node.metadata.read().size;
+        if file_size == 0 || offset >= file_size {
             return Err("Offset beyond file size");
         }
 
-        let available_length = content.len() - offset;
-        let actual_length = core::cmp::min(length, available_length);
+        let required_size = offset.saturating_add(length).max(file_size);
+        self.ensure_mmap_backing(file_size, required_size)
+            .map_err(|_| "Failed to prepare mmap backing")?;
 
-        if actual_length == 0 {
-            return Err("Requested length is zero or beyond file size");
+        let backing_guard = self.mmap_backing.read();
+        let backing = backing_guard.as_ref().ok_or("mmap backing missing")?;
+        let base = backing.as_ptr() as usize;
+        let paddr = base + offset;
+        if paddr % PAGE_SIZE != 0 {
+            return Err("Backing address not aligned");
         }
 
-        // For tmpfs, we provide the physical address of the data in memory
-        let data_ptr = content.as_ptr().wrapping_add(offset);
-        let physical_addr = data_ptr as usize;
-
-        // Set permissions: 0x7 = read + write + execute, adjust based on file permissions if needed
-        let permissions = 0x7; // Read, write, and execute permissions
-
-        // tmpfs mappings are shared (changes are visible to all processes)
-        let is_shared = true;
-
-        Ok((physical_addr, permissions, is_shared))
+        Ok((paddr, 0x3, false))
     }
 
-    fn on_mapped(&self, _vaddr: usize, _paddr: usize, _length: usize, _offset: usize) {
-        // For tmpfs, no special action needed when mapped
-        // The data is already in memory
+    fn get_mapping_info_with(
+        &self,
+        offset: usize,
+        length: usize,
+        is_shared: bool,
+    ) -> Result<(usize, usize, bool), &'static str> {
+        if is_shared {
+            if offset % PAGE_SIZE != 0 {
+                return Err("Offset not page aligned");
+            }
+
+            let file_size = self.node.metadata.read().size;
+            if file_size == 0 || offset >= file_size {
+                return Err("Offset beyond file size");
+            }
+
+            let _ = length;
+            return Ok((0, 0x3, true));
+        }
+
+        self.get_mapping_info(offset, length)
     }
 
-    fn on_unmapped(&self, _vaddr: usize, _length: usize) {
-        // For tmpfs, no special action needed when unmapped
-        // The data remains in memory
+    fn on_mapped(&self, vaddr: usize, _paddr: usize, length: usize, offset: usize) {
+        if length == 0 {
+            return;
+        }
+        let vaddr_end = vaddr.saturating_add(length - 1);
+        let range = MmapRange {
+            vaddr_start: vaddr,
+            vaddr_end,
+            offset,
+        };
+        self.mmap_ranges.write().insert(vaddr, range);
+    }
+
+    fn on_unmapped(&self, vaddr: usize, _length: usize) {
+        self.mmap_ranges.write().remove(&vaddr);
     }
 
     fn supports_mmap(&self) -> bool {
         true
+    }
+
+    fn resolve_fault(
+        &self,
+        access: &crate::object::capability::memory_mapping::AccessKind,
+        map: &crate::vm::vmem::VirtualMemoryMap,
+    ) -> core::result::Result<
+        crate::object::capability::memory_mapping::ResolveFaultResult,
+        crate::object::capability::memory_mapping::ResolveFaultError,
+    > {
+        let range = self
+            .mmap_ranges
+            .read()
+            .get(&map.vmarea.start)
+            .copied()
+            .ok_or(crate::object::capability::memory_mapping::ResolveFaultError::Invalid)?;
+        if access.vaddr < range.vaddr_start || access.vaddr > range.vaddr_end {
+            return Err(crate::object::capability::memory_mapping::ResolveFaultError::Invalid);
+        }
+
+        let file_size = self.node.metadata.read().size;
+        let file_offset = range
+            .offset
+            .saturating_add(access.vaddr.saturating_sub(range.vaddr_start));
+        if file_size == 0 || file_offset >= file_size {
+            return Err(crate::object::capability::memory_mapping::ResolveFaultError::Invalid);
+        }
+
+        let page_index = (file_offset / PAGE_SIZE) as u64;
+        let pinned = PageCacheManager::global()
+            .pin_or_load(self.cache_id(), page_index, |paddr| {
+                unsafe {
+                    core::ptr::write_bytes(paddr as *mut u8, 0, PAGE_SIZE);
+                }
+                Ok(())
+            })
+            .map_err(|_| crate::object::capability::memory_mapping::ResolveFaultError::Invalid)?;
+
+        Ok(
+            crate::object::capability::memory_mapping::ResolveFaultResult {
+                paddr_page_base: pinned.paddr(),
+                is_tail: false,
+            },
+        )
     }
 }
 
@@ -1260,23 +1368,10 @@ impl FileObject for TmpFileObject {
             let page_index = (absolute / PAGE_SIZE) as u64;
             let offset_in_page = absolute % PAGE_SIZE;
 
-            let content = self.node.content.read();
-            let content_len = content.len();
             let pinned = PageCacheManager::global()
                 .pin_or_load(cache_id, page_index, |paddr| {
                     unsafe {
                         core::ptr::write_bytes(paddr as *mut u8, 0, PAGE_SIZE);
-                    }
-                    let start = page_index as usize * PAGE_SIZE;
-                    if start < content_len {
-                        let len = core::cmp::min(PAGE_SIZE, content_len - start);
-                        unsafe {
-                            core::ptr::copy_nonoverlapping(
-                                content.as_ptr().add(start),
-                                paddr as *mut u8,
-                                len,
-                            );
-                        }
                     }
                     Ok(())
                 })
@@ -1305,7 +1400,6 @@ impl FileObject for TmpFileObject {
         }
 
         let offset = usize::try_from(offset).map_err(|_| StreamError::InvalidArgument)?;
-        let start_pos = offset;
         let mut written = 0usize;
         let cache_id = self.cache_id();
 
@@ -1316,23 +1410,10 @@ impl FileObject for TmpFileObject {
             let remain_in_page = PAGE_SIZE - page_off;
             let chunk = core::cmp::min(buffer.len() - written, remain_in_page);
 
-            let content = self.node.content.read();
-            let content_len = content.len();
             let pinned = PageCacheManager::global()
                 .pin_or_load(cache_id, page_index, |paddr| {
                     unsafe {
                         core::ptr::write_bytes(paddr as *mut u8, 0, PAGE_SIZE);
-                    }
-                    let start = page_index as usize * PAGE_SIZE;
-                    if start < content_len {
-                        let len = core::cmp::min(PAGE_SIZE, content_len - start);
-                        unsafe {
-                            core::ptr::copy_nonoverlapping(
-                                content.as_ptr().add(start),
-                                paddr as *mut u8,
-                                len,
-                            );
-                        }
                     }
                     Ok(())
                 })
@@ -1353,15 +1434,6 @@ impl FileObject for TmpFileObject {
             if new_end > meta.size {
                 meta.size = new_end;
             }
-        }
-
-        {
-            let mut content = self.node.content.write();
-            let end = start_pos + buffer.len();
-            if end > content.len() {
-                content.resize(end, 0);
-            }
-            content[start_pos..end].copy_from_slice(buffer);
         }
 
         Ok(written)
@@ -1419,15 +1491,6 @@ impl FileObject for TmpFileObject {
         {
             let mut meta = self.node.metadata.write();
             meta.size = size as usize;
-        }
-        {
-            let mut content = self.node.content.write();
-            let new_size = size as usize;
-            if new_size > content.len() {
-                content.resize(new_size, 0);
-            } else if new_size < content.len() {
-                content.truncate(new_size);
-            }
         }
         Ok(())
     }
