@@ -180,8 +180,12 @@ impl NetworkLayer for EthernetLayer {
         crate::println!(
             "[Ethernet] Send: {} bytes (dst: {:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X}, type: 0x{:04X})",
             total_size,
-            dest_mac[0], dest_mac[1], dest_mac[2],
-            dest_mac[3], dest_mac[4], dest_mac[5],
+            dest_mac[0],
+            dest_mac[1],
+            dest_mac[2],
+            dest_mac[3],
+            dest_mac[4],
+            dest_mac[5],
             ether_type
         );
 
@@ -207,8 +211,12 @@ impl NetworkLayer for EthernetLayer {
         crate::println!(
             "[Ethernet] Recv: {} bytes (src: {:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X}, type: 0x{:04X})",
             frame.len(),
-            header.src_mac[0], header.src_mac[1], header.src_mac[2],
-            header.src_mac[3], header.src_mac[4], header.src_mac[5],
+            header.src_mac[0],
+            header.src_mac[1],
+            header.src_mac[2],
+            header.src_mac[3],
+            header.src_mac[4],
+            header.src_mac[5],
             header.ether_type
         );
 

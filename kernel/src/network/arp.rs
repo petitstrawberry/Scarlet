@@ -377,9 +377,16 @@ impl ArpLayer {
 
                     crate::println!(
                         "[ARP] Received reply for {}.{}.{}.{} -> {:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X}",
-                        sender_ip[0], sender_ip[1], sender_ip[2], sender_ip[3],
-                        arp_packet.sender_mac[0], arp_packet.sender_mac[1], arp_packet.sender_mac[2],
-                        arp_packet.sender_mac[3], arp_packet.sender_mac[4], arp_packet.sender_mac[5]
+                        sender_ip[0],
+                        sender_ip[1],
+                        sender_ip[2],
+                        sender_ip[3],
+                        arp_packet.sender_mac[0],
+                        arp_packet.sender_mac[1],
+                        arp_packet.sender_mac[2],
+                        arp_packet.sender_mac[3],
+                        arp_packet.sender_mac[4],
+                        arp_packet.sender_mac[5]
                     );
 
                     // Send queued packets
