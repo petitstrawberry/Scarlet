@@ -283,7 +283,6 @@ impl ArpLayer {
         // Create ARP request packet
         let arp_packet = ArpPacket::request(local_ip.0, target_ip.0);
 
-        crate::println!(
             "[ARP] Sending request for {}.{}.{}.{}",
             target_ip[0],
             target_ip[1],
@@ -343,7 +342,6 @@ impl ArpLayer {
                 // Request is for us - send reply
                 let reply = ArpPacket::reply(local_mac, local_ip.0, arp_packet.sender_mac);
 
-                crate::println!(
                     "[ARP] Received request for {}.{}.{}.{}",
                     sender_ip[0],
                     sender_ip[1],
@@ -375,7 +373,6 @@ impl ArpLayer {
                     // Update cache with resolved MAC
                     self.add_entry(sender_ip, arp_packet.sender_mac);
 
-                    crate::println!(
                         "[ARP] Received reply for {}.{}.{}.{} -> {:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X}",
                         sender_ip[0],
                         sender_ip[1],
@@ -400,7 +397,6 @@ impl ArpLayer {
 
                             // Re-send the queued packet
                             if let Err(e) = eth_layer.send(&packet_bytes, &eth_context, &[]) {
-                                crate::println!("[ARP] Failed to send queued packet: {}", e);
                             }
                         }
                     }
@@ -410,7 +406,6 @@ impl ArpLayer {
                     pending_entry.entry.mac_address = arp_packet.sender_mac;
                 } else {
                     // Not in pending list, but cache the reply anyway
-                    crate::println!(
                         "[ARP] Received unsolicited reply for {}.{}.{}.{}",
                         sender_ip[0],
                         sender_ip[1],
@@ -476,7 +471,6 @@ impl NetworkLayer for ArpLayer {
     }
 
     fn receive(&self, packet: &[u8]) -> Result<(), SocketError> {
-        crate::println!("[ARP] Received {} bytes", packet.len());
 
         // Update statistics
         let mut stats = self.stats.write();

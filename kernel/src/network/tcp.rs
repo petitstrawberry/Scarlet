@@ -423,7 +423,7 @@ impl TcpSocket {
     }
 
     /// Send SYN-ACK packet
-    fn send_syn_ack(&self, dest_ip: Ipv4Address, dest_port: u16, recv_seq: u32, ack_seq: u32) {
+    fn send_syn_ack(&self, dest_ip: Ipv4Address, dest_port: u16, their_seq: u32, ack_seq: u32) {
         let local_port = self.local_port.load(Ordering::SeqCst);
         let local_ip = self
             .local_ip
@@ -431,14 +431,13 @@ impl TcpSocket {
             .clone()
             .unwrap_or(Ipv4Address::new(0, 0, 0, 0));
 
-        let recv_seq = self.recv_seq.load(Ordering::SeqCst);
-
         let mut header = TcpHeader::new(local_port, dest_port);
-        header.seq_number = ack_seq;
-        header.ack_number = recv_seq.wrapping_add(1);
+        header.seq_number = their_seq;
+        header.ack_number = ack_seq;
         header.set_flags(tcp_flags::SYN | tcp_flags::ACK);
 
         self.send_segment(dest_ip, header, &[], false);
+        self.set_state(TcpState::SynReceived);
     }
 
     /// Send ACK packet

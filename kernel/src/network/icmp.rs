@@ -217,7 +217,6 @@ impl IcmpLayer {
         ip_context.set("ip_dst", &dest_ip.0);
         ip_context.set("ip_protocol", &[1]); // ICMP protocol
 
-        crate::println!(
             "[ICMP] Ping {}.{}.{}.{} (id={}, seq={}, data_len={})",
             dest_ip[0],
             dest_ip[1],
@@ -273,7 +272,6 @@ impl IcmpLayer {
         ip_context.set("ip_dst", &dest_ip.0);
         ip_context.set("ip_protocol", &[1]); // ICMP protocol
 
-        crate::println!(
             "[ICMP] Pong {}.{}.{}.{} (id={}, seq={}, data_len={})",
             dest_ip[0],
             dest_ip[1],
@@ -308,7 +306,6 @@ impl IcmpLayer {
 
         let data = &packet[8..];
 
-        crate::println!(
             "[ICMP] Recv: type={}, code={}, len={}",
             header.message_type,
             header.code,
@@ -325,7 +322,6 @@ impl IcmpLayer {
                 // Handle ping request - send reply
                 if data.len() >= 4 {
                     if let Some(echo) = IcmpEcho::from_bytes(data) {
-                        crate::println!(
                             "[ICMP] Ping request from (id={}, seq={})",
                             echo.identifier,
                             echo.sequence
@@ -337,10 +333,8 @@ impl IcmpLayer {
                 }
             }
             message_type::ECHO_REPLY => {
-                crate::println!("[ICMP] Ping reply received");
             }
             _ => {
-                crate::println!("[ICMP] Unknown ICMP type: {}", header.message_type);
             }
         }
 

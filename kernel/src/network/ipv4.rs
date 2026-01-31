@@ -301,7 +301,6 @@ impl NetworkLayer for Ipv4Layer {
         // Create IP packet: header + payload
         let ip_packet = [header_bytes, packet].concat();
 
-        crate::println!(
             "[IPv4] Send: {} bytes (src: {}.{}.{}.{}, dst: {}.{}.{}.{}, proto: {})",
             ip_packet.len(),
             src_ip_bytes[0],
@@ -341,7 +340,6 @@ impl NetworkLayer for Ipv4Layer {
         // Verify checksum
         let calculated_checksum = header.calculate_checksum();
         if calculated_checksum != header.checksum {
-            crate::println!(
                 "[IPv4] Checksum mismatch: calculated=0x{:04X}, header=0x{:04X}",
                 calculated_checksum,
                 header.checksum
@@ -353,7 +351,6 @@ impl NetworkLayer for Ipv4Layer {
 
         let payload = &packet[header_len..];
 
-        crate::println!(
             "[IPv4] Recv: {} bytes (src: {}.{}.{}.{}, dst: {}.{}.{}.{}, proto: {})",
             packet.len(),
             header.source_ip[0],
