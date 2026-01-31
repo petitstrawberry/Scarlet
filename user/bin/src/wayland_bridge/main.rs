@@ -138,6 +138,8 @@ struct WaylandBridge {
     next_serial: u32,
     /// Map of object ID -> interface name
     objects: BTreeMap<u32, String>,
+    /// Map of object ID -> interface version
+    object_versions: BTreeMap<u32, u32>,
     /// Map of Wayland surface ID -> SWS window ID
     surface_to_window: BTreeMap<u32, u32>,
     /// Map of SWS window ID -> window SHM information
@@ -195,6 +197,7 @@ impl WaylandBridge {
             extension_id: None,
             next_serial: 1,
             objects,
+            object_versions: BTreeMap::new(),
             surface_to_window: BTreeMap::new(),
             window_shm: BTreeMap::new(),
             keymap_shm: None,
@@ -274,6 +277,10 @@ impl WaylandBridge {
         // Update input thread's objects map
         let mut objects = self.objects_for_input_thread.lock();
         objects.insert(id, interface);
+    }
+
+    fn get_object_version(&self, id: u32) -> Option<u32> {
+        self.object_versions.get(&id).copied()
     }
 
     fn ensure_keymap(&mut self) -> Result<u32, &'static str> {
@@ -985,21 +992,30 @@ impl WaylandBridge {
                             response_bytes.len()
                         );
                     }
-                    // Check if this is a KEYMAP event that needs handle transfer
+                    // Only wl_keyboard.keymap requires an FD/handle transfer.
                     if response.header.opcode() == input::keyboard_event::KEYMAP {
-                        if let Some(shm) = self.keymap_shm.as_ref() {
-                            match client.send_handle_and_data(shm.as_handle(), &response_bytes) {
-                                Ok(()) => {
-                                    if is_debug_enabled() {
-                                        println!("[Bridge] KEYMAP sent with handle successfully");
+                        let is_keyboard = self
+                            .objects
+                            .get(&response.header.object_id)
+                            .map(|iface| iface == "wl_keyboard")
+                            .unwrap_or(false);
+                        if is_keyboard {
+                            if let Some(shm) = self.keymap_shm.as_ref() {
+                                match client.send_handle_and_data(shm.as_handle(), &response_bytes) {
+                                    Ok(()) => {
+                                        if is_debug_enabled() {
+                                            println!(
+                                                "[Bridge] KEYMAP sent with handle successfully"
+                                            );
+                                        }
+                                        continue;
                                     }
-                                    continue;
-                                }
-                                Err(e) => {
-                                    println!(
-                                        "[Bridge] Failed to send KEYMAP with handle: {:?}, falling back",
-                                        e
-                                    );
+                                    Err(e) => {
+                                        println!(
+                                            "[Bridge] Failed to send KEYMAP with handle: {:?}, falling back",
+                                            e
+                                        );
+                                    }
                                 }
                             }
                         }
@@ -1051,11 +1067,13 @@ impl WaylandBridge {
         let opcode = header.opcode();
 
         // Get the interface for this object
-        let interface = self
-            .objects
-            .get(&object_id)
-            .ok_or("Unknown object ID")?
-            .clone();
+        let interface = match self.objects.get(&object_id) {
+            Some(interface) => interface.clone(),
+            None => {
+                println!("[Bridge] Unknown object ID: {}", object_id);
+                return Ok(Vec::new());
+            }
+        };
 
         match interface.as_str() {
             "wl_display" => self.handle_display_message(opcode, payload),
@@ -1072,6 +1090,8 @@ impl WaylandBridge {
             "xdg_wm_base" => self.handle_xdg_wm_base_message(opcode, payload),
             "xdg_surface" => self.handle_xdg_surface_message(object_id, opcode, payload),
             "xdg_toplevel" => self.handle_xdg_toplevel_message(object_id, opcode, payload),
+            "xdg_toplevel_dead" => Ok(Vec::new()),
+            "xdg_surface_dead" => Ok(Vec::new()),
             _ => {
                 println!("[Bridge] Unhandled interface: {}", interface);
                 Ok(Vec::new())
@@ -1157,6 +1177,7 @@ impl WaylandBridge {
                             );
                             if global.interface == interface_name && new_id != 0 {
                                 self.add_object(new_id, interface_name.clone());
+                                self.object_versions.insert(new_id, version);
 
                                 if interface_name == "wl_shm" {
                                     let mut msgs = Vec::new();
@@ -1181,12 +1202,6 @@ impl WaylandBridge {
                                     self.input_manager.create_seat(new_id, "seat0");
                                     let mut msgs = Vec::new();
 
-                                    // Send NAME event (may be required by GTK3)
-                                    let mut name_msg =
-                                        WaylandMessage::new(new_id, input::seat_event::NAME);
-                                    name_msg.add_arg(WaylandArg::String(b"seat0".to_vec()));
-                                    msgs.push(name_msg);
-
                                     // Send CAPABILITIES event
                                     let mut caps = WaylandMessage::new(
                                         new_id,
@@ -1197,6 +1212,15 @@ impl WaylandBridge {
                                             | input::seat_capabilities::KEYBOARD,
                                     ));
                                     msgs.push(caps);
+
+                                    if version >= 2 {
+                                        let mut name_msg = WaylandMessage::new(
+                                            new_id,
+                                            input::seat_event::NAME,
+                                        );
+                                        name_msg.add_arg(WaylandArg::String(b"seat0".to_vec()));
+                                        msgs.push(name_msg);
+                                    }
                                     return Ok(msgs);
                                 }
 
@@ -1380,47 +1404,103 @@ impl WaylandBridge {
                 }
                 let mut release_msg = None;
                 let mut callback_msg = None;
+                let mut should_update = false;
+                let mut buffer_present = false;
+                let mut surface_size = (0u32, 0u32);
+                let mut callback_serial = None;
+                let serial_for_callback = self.allocate_serial();
+                let mut configure_msgs = Vec::new();
+                let mut configure_state = None;
 
-                // Check if there's a pending frame callback
                 if let Some(surface) = self.surface_manager.get_surface_mut(surface_id) {
-                    let callback_id = surface.take_pending_callback();
-                    if let Some(cb_id) = callback_id {
-                        // Send wl_callback.done event when the surface is committed
-                        let time = self.allocate_serial();
-                        let mut msg = WaylandMessage::new(cb_id, protocol::callback_event::DONE);
-                        msg.add_arg(WaylandArg::Uint(time));
-                        callback_msg = Some(msg);
+                    if let Some(cb_id) = surface.take_pending_callback() {
+                        callback_serial = Some((cb_id, serial_for_callback));
                     }
-                }
-
-                let has_role = self
-                    .surface_manager
-                    .get_surface(surface_id)
-                    .map(|surface| surface.role.is_some())
-                    .unwrap_or(false);
-                if has_role {
-                    if let Err(e) = self.update_sws_window(surface_id) {
-                        println!("[Bridge] Failed to update SWS window: {}", e);
-                    }
-                }
-                if let Some(surface) = self.surface_manager.get_surface_mut(surface_id) {
-                    let buffer_id = surface.buffer_id;
+                    should_update = surface.role.is_some();
+                    buffer_present = surface.buffer_id.is_some();
+                    surface_size = (surface.width.max(1), surface.height.max(1));
                     surface.commit();
-                    if let Some(buf_id) = buffer_id {
+                    if let Some(buf_id) = surface.buffer_id {
                         if self.objects.get(&buf_id).is_some() {
-                            let msg = WaylandMessage::new(buf_id, shm::buffer_event::RELEASE);
-                            release_msg = Some(msg);
+                            release_msg = Some(WaylandMessage::new(
+                                buf_id,
+                                shm::buffer_event::RELEASE,
+                            ));
                         }
                     }
                 }
 
-                // Collect all messages to send
+                if !buffer_present {
+                    if let Some((xdg_surface_id, toplevel_id_opt)) = self
+                        .xdg_shell_manager
+                        .get_xdg_surface_ids_by_wl_surface(surface_id)
+                    {
+                        if let Some(toplevel_id) = toplevel_id_opt {
+                            let needs_configure = self
+                                .xdg_shell_manager
+                                .get_xdg_surface(xdg_surface_id)
+                                .map(|surface| surface.last_configure_serial.is_none())
+                                .unwrap_or(false);
+                            if needs_configure {
+                                let serial = self.allocate_serial();
+                                configure_state = Some((xdg_surface_id, toplevel_id, serial));
+                            }
+                        }
+                    }
+                }
+
+                if let Some((xdg_surface_id, toplevel_id, serial)) = configure_state {
+                    if let Some(xdg_surface) =
+                        self.xdg_shell_manager.get_xdg_surface_mut(xdg_surface_id)
+                    {
+                        xdg_surface.last_configure_serial = Some(serial);
+                    }
+
+                    let mut toplevel_configure = WaylandMessage::new(
+                        toplevel_id,
+                        xdg_shell::xdg_toplevel_event::CONFIGURE,
+                    );
+                    toplevel_configure.add_arg(WaylandArg::Int(0));
+                    toplevel_configure.add_arg(WaylandArg::Int(0));
+                    toplevel_configure.add_arg(WaylandArg::Array(Vec::new()));
+
+                    let mut surface_configure = WaylandMessage::new(
+                        xdg_surface_id,
+                        xdg_shell::xdg_surface_event::CONFIGURE,
+                    );
+                    surface_configure.add_arg(WaylandArg::Uint(serial));
+
+                    configure_msgs.push(toplevel_configure);
+                    configure_msgs.push(surface_configure);
+                }
+
+                if should_update && buffer_present {
+                    if !self.surface_to_window.contains_key(&surface_id) {
+                        let _ = self
+                            .create_sws_window_with_size(surface_id, surface_size.0, surface_size.1);
+                    }
+                    if self.surface_to_window.contains_key(&surface_id) {
+                        if let Err(e) = self.update_sws_window(surface_id) {
+                            println!("[Bridge] Failed to update SWS window: {}", e);
+                        }
+                    }
+                }
+
+                if let Some((cb_id, time)) = callback_serial {
+                    let mut msg = WaylandMessage::new(cb_id, protocol::callback_event::DONE);
+                    msg.add_arg(WaylandArg::Uint(time));
+                    callback_msg = Some(msg);
+                }
+
                 let mut msgs = Vec::new();
                 if let Some(msg) = release_msg {
                     msgs.push(msg);
                 }
                 if let Some(msg) = callback_msg {
                     msgs.push(msg);
+                }
+                if !configure_msgs.is_empty() {
+                    msgs.extend(configure_msgs);
                 }
                 Ok(msgs)
             }
@@ -1608,6 +1688,13 @@ impl WaylandBridge {
         payload: &[u8],
     ) -> Result<Vec<WaylandMessage>, &'static str> {
         match opcode {
+            xdg_shell::xdg_surface_request::DESTROY => {
+                println!("[Bridge] xdg_surface.destroy");
+                self.xdg_shell_manager.destroy_xdg_surface(xdg_surface_id);
+                self.objects
+                    .insert(xdg_surface_id, String::from("xdg_surface_dead"));
+                Ok(Vec::new())
+            }
             xdg_shell::xdg_surface_request::GET_TOPLEVEL => {
                 println!("[Bridge] xdg_surface.get_toplevel");
                 if payload.len() >= 4 {
@@ -1619,82 +1706,38 @@ impl WaylandBridge {
                     self.xdg_shell_manager
                         .create_toplevel(xdg_surface_id, xdg_toplevel_id)?;
 
-                    // Get wl_surface_id for focus management
-                    let mut wl_surface_id_opt = None;
                     // Set surface role to toplevel
                     if let Some(xdg_surface) =
                         self.xdg_shell_manager.get_xdg_surface(xdg_surface_id)
                     {
                         let wl_surface_id = xdg_surface.wl_surface_id;
-                        wl_surface_id_opt = Some(wl_surface_id);
                         if let Some(surface) = self.surface_manager.get_surface_mut(wl_surface_id) {
                             surface.set_role(surface::SurfaceRole::XdgToplevel);
                         }
                     }
-
-                    let serial = self.allocate_serial();
-                    let mut toplevel_configure = WaylandMessage::new(
-                        xdg_toplevel_id,
-                        xdg_shell::xdg_toplevel_event::CONFIGURE,
-                    );
-                    toplevel_configure.add_arg(WaylandArg::Int(0));
-                    toplevel_configure.add_arg(WaylandArg::Int(0));
-                    toplevel_configure.add_arg(WaylandArg::Array(Vec::new()));
-
-                    let mut surface_configure = WaylandMessage::new(
-                        xdg_surface_id,
-                        xdg_shell::xdg_surface_event::CONFIGURE,
-                    );
-                    surface_configure.add_arg(WaylandArg::Uint(serial));
-
-                    let mut msgs = Vec::new();
-                    msgs.push(toplevel_configure);
-                    msgs.push(surface_configure);
-
-                    // Set this surface as focused and send keyboard.enter if keyboard exists
-                    if let Some(wl_surface_id) = wl_surface_id_opt {
-                        self.focused_surface = Some(wl_surface_id);
-
-                        // Send keyboard enter if keyboard exists
-                        if let Some(keyboard_id) = self.focused_keyboard {
-                            let serial = self.allocate_serial();
-                            let mut enter_msg =
-                                WaylandMessage::new(keyboard_id, input::keyboard_event::ENTER);
-                            enter_msg.add_arg(WaylandArg::Uint(serial));
-                            enter_msg.add_arg(WaylandArg::Object(wl_surface_id));
-                            enter_msg.add_arg(WaylandArg::Array(Vec::new())); // keys array
-                            msgs.push(enter_msg);
-
-                            // Send modifiers event
-                            let mut modifiers_msg =
-                                WaylandMessage::new(keyboard_id, input::keyboard_event::MODIFIERS);
-                            modifiers_msg.add_arg(WaylandArg::Uint(serial));
-                            modifiers_msg.add_arg(WaylandArg::Uint(0)); // mods_depressed
-                            modifiers_msg.add_arg(WaylandArg::Uint(0)); // mods_latched
-                            modifiers_msg.add_arg(WaylandArg::Uint(0)); // mods_locked
-                            modifiers_msg.add_arg(WaylandArg::Uint(0)); // group
-                            msgs.push(modifiers_msg);
-                        }
-
-                        // Send pointer enter if pointer exists
-                        if let Some(pointer_id) = self.focused_pointer {
-                            let serial = self.allocate_serial();
-                            let mut enter_msg =
-                                WaylandMessage::new(pointer_id, input::pointer_event::ENTER);
-                            enter_msg.add_arg(WaylandArg::Uint(serial));
-                            enter_msg.add_arg(WaylandArg::Object(wl_surface_id));
-                            enter_msg.add_arg(WaylandArg::Fixed(0)); // surface_x
-                            enter_msg.add_arg(WaylandArg::Fixed(0)); // surface_y
-                            msgs.push(enter_msg);
-                        }
-                    }
-
-                    return Ok(msgs);
+                    return Ok(Vec::new());
                 }
+                Ok(Vec::new())
+            }
+            xdg_shell::xdg_surface_request::GET_POPUP => {
+                println!("[Bridge] xdg_surface.get_popup (ignored)");
+                Ok(Vec::new())
+            }
+            xdg_shell::xdg_surface_request::SET_WINDOW_GEOMETRY => {
+                println!("[Bridge] xdg_surface.set_window_geometry");
                 Ok(Vec::new())
             }
             xdg_shell::xdg_surface_request::ACK_CONFIGURE => {
                 println!("[Bridge] xdg_surface.ack_configure");
+                if payload.len() >= 4 {
+                    let serial =
+                        u32::from_ne_bytes([payload[0], payload[1], payload[2], payload[3]]);
+                    if let Some(surface) =
+                        self.xdg_shell_manager.get_xdg_surface_mut(xdg_surface_id)
+                    {
+                        surface.last_ack_serial = Some(serial);
+                    }
+                }
                 Ok(Vec::new())
             }
             _ => {
@@ -1707,18 +1750,71 @@ impl WaylandBridge {
     /// Handle xdg_toplevel messages
     fn handle_xdg_toplevel_message(
         &mut self,
-        _xdg_toplevel_id: u32,
+        xdg_toplevel_id: u32,
         opcode: u16,
-        _payload: &[u8],
+        payload: &[u8],
     ) -> Result<Vec<WaylandMessage>, &'static str> {
         match opcode {
+            xdg_shell::xdg_toplevel_request::DESTROY => {
+                println!("[Bridge] xdg_toplevel.destroy");
+                if let Some(wl_surface_id) = self.xdg_shell_manager.clear_toplevel(xdg_toplevel_id)
+                {
+                    if let Some(surface) =
+                        self.surface_manager.get_surface_mut(wl_surface_id)
+                    {
+                        surface.role = None;
+                    }
+                }
+                self.objects
+                    .insert(xdg_toplevel_id, String::from("xdg_toplevel_dead"));
+                Ok(Vec::new())
+            }
+            xdg_shell::xdg_toplevel_request::SET_PARENT => {
+                println!("[Bridge] xdg_toplevel.set_parent");
+                Ok(Vec::new())
+            }
             xdg_shell::xdg_toplevel_request::SET_TITLE => {
                 println!("[Bridge] xdg_toplevel.set_title");
-                // Parse title from payload (string format)
+                if let Some((title, _)) = Self::parse_string(payload, 0) {
+                    if let Some((toplevel, _)) =
+                        self.xdg_shell_manager.get_toplevel_mut(xdg_toplevel_id)
+                    {
+                        toplevel.title = Some(title);
+                    }
+                }
                 Ok(Vec::new())
             }
             xdg_shell::xdg_toplevel_request::SET_APP_ID => {
                 println!("[Bridge] xdg_toplevel.set_app_id");
+                if let Some((app_id, _)) = Self::parse_string(payload, 0) {
+                    if let Some((toplevel, _)) =
+                        self.xdg_shell_manager.get_toplevel_mut(xdg_toplevel_id)
+                    {
+                        toplevel.app_id = Some(app_id);
+                    }
+                }
+                Ok(Vec::new())
+            }
+            xdg_shell::xdg_toplevel_request::SET_MAX_SIZE => {
+                println!("[Bridge] xdg_toplevel.set_max_size");
+                let width = Self::parse_i32(payload, 0).unwrap_or(0);
+                let height = Self::parse_i32(payload, 4).unwrap_or(0);
+                if let Some((toplevel, _)) =
+                    self.xdg_shell_manager.get_toplevel_mut(xdg_toplevel_id)
+                {
+                    toplevel.max_size = Some((width, height));
+                }
+                Ok(Vec::new())
+            }
+            xdg_shell::xdg_toplevel_request::SET_MIN_SIZE => {
+                println!("[Bridge] xdg_toplevel.set_min_size");
+                let width = Self::parse_i32(payload, 0).unwrap_or(0);
+                let height = Self::parse_i32(payload, 4).unwrap_or(0);
+                if let Some((toplevel, _)) =
+                    self.xdg_shell_manager.get_toplevel_mut(xdg_toplevel_id)
+                {
+                    toplevel.min_size = Some((width, height));
+                }
                 Ok(Vec::new())
             }
             xdg_shell::xdg_toplevel_request::MOVE => {
@@ -1727,6 +1823,30 @@ impl WaylandBridge {
             }
             xdg_shell::xdg_toplevel_request::RESIZE => {
                 println!("[Bridge] xdg_toplevel.resize");
+                Ok(Vec::new())
+            }
+            xdg_shell::xdg_toplevel_request::SHOW_WINDOW_MENU => {
+                println!("[Bridge] xdg_toplevel.show_window_menu");
+                Ok(Vec::new())
+            }
+            xdg_shell::xdg_toplevel_request::SET_MAXIMIZED => {
+                println!("[Bridge] xdg_toplevel.set_maximized");
+                Ok(Vec::new())
+            }
+            xdg_shell::xdg_toplevel_request::UNSET_MAXIMIZED => {
+                println!("[Bridge] xdg_toplevel.unset_maximized");
+                Ok(Vec::new())
+            }
+            xdg_shell::xdg_toplevel_request::SET_FULLSCREEN => {
+                println!("[Bridge] xdg_toplevel.set_fullscreen");
+                Ok(Vec::new())
+            }
+            xdg_shell::xdg_toplevel_request::UNSET_FULLSCREEN => {
+                println!("[Bridge] xdg_toplevel.unset_fullscreen");
+                Ok(Vec::new())
+            }
+            xdg_shell::xdg_toplevel_request::SET_MINIMIZED => {
+                println!("[Bridge] xdg_toplevel.set_minimized");
                 Ok(Vec::new())
             }
             _ => {

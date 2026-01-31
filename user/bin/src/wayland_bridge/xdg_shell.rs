@@ -16,6 +16,10 @@ pub struct XdgSurface {
     pub wl_surface_id: u32,
     /// XDG toplevel (if this is a toplevel window)
     pub toplevel: Option<XdgToplevel>,
+    /// Serial from the last configure event sent
+    pub last_configure_serial: Option<u32>,
+    /// Serial from the last ack_configure received
+    pub last_ack_serial: Option<u32>,
 }
 
 /// XDG toplevel (application window) state
@@ -67,6 +71,8 @@ impl XdgShellManager {
                 xdg_surface_id,
                 wl_surface_id,
                 toplevel: None,
+                last_configure_serial: None,
+                last_ack_serial: None,
             },
         );
     }
@@ -79,6 +85,32 @@ impl XdgShellManager {
     /// Get a mutable XDG surface
     pub fn get_xdg_surface_mut(&mut self, xdg_surface_id: u32) -> Option<&mut XdgSurface> {
         self.surfaces.get_mut(&xdg_surface_id)
+    }
+
+    /// Get an XDG surface by wl_surface ID
+    pub fn get_xdg_surface_by_wl_surface_mut(
+        &mut self,
+        wl_surface_id: u32,
+    ) -> Option<&mut XdgSurface> {
+        self.surfaces
+            .values_mut()
+            .find(|surface| surface.wl_surface_id == wl_surface_id)
+    }
+
+    /// Get XDG surface IDs by wl_surface ID
+    pub fn get_xdg_surface_ids_by_wl_surface(
+        &self,
+        wl_surface_id: u32,
+    ) -> Option<(u32, Option<u32>)> {
+        self.surfaces
+            .values()
+            .find(|surface| surface.wl_surface_id == wl_surface_id)
+            .map(|surface| {
+                (
+                    surface.xdg_surface_id,
+                    surface.toplevel.as_ref().map(|t| t.xdg_toplevel_id),
+                )
+            })
     }
 
     /// Create a toplevel for an XDG surface
@@ -94,6 +126,34 @@ impl XdgShellManager {
 
         surface.toplevel = Some(XdgToplevel::new(xdg_toplevel_id));
         Ok(())
+    }
+
+    /// Get a mutable toplevel by ID (returns underlying wl_surface_id too)
+    pub fn get_toplevel_mut(
+        &mut self,
+        xdg_toplevel_id: u32,
+    ) -> Option<(&mut XdgToplevel, u32)> {
+        for surface in self.surfaces.values_mut() {
+            if let Some(toplevel) = surface.toplevel.as_mut() {
+                if toplevel.xdg_toplevel_id == xdg_toplevel_id {
+                    return Some((toplevel, surface.wl_surface_id));
+                }
+            }
+        }
+        None
+    }
+
+    /// Clear a toplevel by ID, returning the owning wl_surface_id if found
+    pub fn clear_toplevel(&mut self, xdg_toplevel_id: u32) -> Option<u32> {
+        for surface in self.surfaces.values_mut() {
+            if let Some(toplevel) = &surface.toplevel {
+                if toplevel.xdg_toplevel_id == xdg_toplevel_id {
+                    surface.toplevel = None;
+                    return Some(surface.wl_surface_id);
+                }
+            }
+        }
+        None
     }
 
     /// Destroy an XDG surface
