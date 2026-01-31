@@ -93,14 +93,13 @@ pub fn sys_memory_map(trapframe: &mut Trapframe) -> usize {
     // Get mapping information from the object.
     // IMPORTANT: use the page-aligned length, because the VM mapping will be created
     // with `aligned_length` and must not exceed the object's available range.
+    // Determine is_shared from flags (MAP_SHARED controls sharing semantics)
+    let is_shared = (flags & MAP_SHARED) != 0;
     let (paddr, obj_permissions, _obj_is_shared) =
-        match memory_mappable.get_mapping_info(offset, aligned_length) {
+        match memory_mappable.get_mapping_info_with(offset, aligned_length, is_shared) {
             Ok(info) => info,
             Err(_) => return usize::MAX,
         };
-
-    // Determine is_shared from flags (MAP_SHARED controls sharing semantics)
-    let is_shared = (flags & MAP_SHARED) != 0;
     let is_map_fixed = (flags & MAP_FIXED) != 0;
 
     // Determine final address

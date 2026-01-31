@@ -25,7 +25,7 @@ use crate::{
         FileSystemDriver, FileSystemType,
         core::DirectoryEntryInternal,
         get_fs_driver_manager,
-        vfs_v2::core::{FileSystemOperations, VfsNode},
+        vfs_v2::core::{FileSystemId, FileSystemOperations, VfsNode},
     },
     object::capability::MemoryMappingOps,
     vm::vmem::MemoryArea,
@@ -33,6 +33,8 @@ use crate::{
 
 /// CPIO filesystem implementation
 pub struct CpioFS {
+    /// Unique filesystem identifier
+    fs_id: FileSystemId,
     /// Root node of the filesystem
     root_node: Arc<CpioNode>,
 
@@ -170,6 +172,7 @@ impl CpioFS {
     pub fn new(name: String, cpio_data: &[u8]) -> Result<Arc<Self>, FileSystemError> {
         let root_node = CpioNode::new("/".to_string(), FileType::Directory, Vec::new(), 1);
         let filesystem = Arc::new(Self {
+            fs_id: FileSystemId::new(),
             root_node: Arc::clone(&root_node),
             name,
         });
@@ -344,6 +347,10 @@ impl CpioFS {
 }
 
 impl FileSystemOperations for CpioFS {
+    fn fs_id(&self) -> FileSystemId {
+        self.fs_id
+    }
+
     fn lookup(
         &self,
         parent_node: &Arc<dyn VfsNode>,
