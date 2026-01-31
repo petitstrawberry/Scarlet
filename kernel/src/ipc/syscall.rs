@@ -462,7 +462,10 @@ pub fn sys_shared_memory_resize(trapframe: &mut Trapframe) -> usize {
         return usize::MAX;
     }
 
-    crate::println!("[sys_shared_memory_resize] SUCCESS new_size={}", shared_memory.size());
+    crate::println!(
+        "[sys_shared_memory_resize] SUCCESS new_size={}",
+        shared_memory.size()
+    );
     0
 }
 

@@ -129,10 +129,7 @@ impl XdgShellManager {
     }
 
     /// Get a mutable toplevel by ID (returns underlying wl_surface_id too)
-    pub fn get_toplevel_mut(
-        &mut self,
-        xdg_toplevel_id: u32,
-    ) -> Option<(&mut XdgToplevel, u32)> {
+    pub fn get_toplevel_mut(&mut self, xdg_toplevel_id: u32) -> Option<(&mut XdgToplevel, u32)> {
         for surface in self.surfaces.values_mut() {
             if let Some(toplevel) = surface.toplevel.as_mut() {
                 if toplevel.xdg_toplevel_id == xdg_toplevel_id {

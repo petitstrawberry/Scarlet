@@ -1314,21 +1314,60 @@ impl Compositor {
     /// Send mouse position event to a window
     fn send_mouse_position_to_window(&self, window_id: u32, window: &super::window::Window) {
         if let Some((window_x, window_y)) = self.cursor_position_in_window(window) {
-            super::ipc::send_input_to_window(
-                window_id,
-                0,
-                super::input::event_types::EV_ABS,
-                super::input::abs_codes::ABS_X,
-                window_x,
-            );
-            super::ipc::send_input_to_window(
-                window_id,
-                0,
-                super::input::event_types::EV_ABS,
-                super::input::abs_codes::ABS_Y,
-                window_y,
-            );
-            super::ipc::send_input_to_window(window_id, 0, super::input::event_types::EV_SYN, 0, 0);
+            // Check if this is an extension-owned window
+            if let Some((extension_id, external_client_id)) = window.extension_owner {
+                // Send EXTENSION_INPUT_EVENT for extension windows
+                super::ipc::send_extension_input_event(
+                    extension_id,
+                    external_client_id,
+                    window_id,
+                    0,
+                    super::input::event_types::EV_ABS,
+                    super::input::abs_codes::ABS_X,
+                    window_x,
+                );
+                super::ipc::send_extension_input_event(
+                    extension_id,
+                    external_client_id,
+                    window_id,
+                    0,
+                    super::input::event_types::EV_ABS,
+                    super::input::abs_codes::ABS_Y,
+                    window_y,
+                );
+                super::ipc::send_extension_input_event(
+                    extension_id,
+                    external_client_id,
+                    window_id,
+                    0,
+                    super::input::event_types::EV_SYN,
+                    0,
+                    0,
+                );
+            } else {
+                // Send regular INPUT_EVENT for normal windows
+                super::ipc::send_input_to_window(
+                    window_id,
+                    0,
+                    super::input::event_types::EV_ABS,
+                    super::input::abs_codes::ABS_X,
+                    window_x,
+                );
+                super::ipc::send_input_to_window(
+                    window_id,
+                    0,
+                    super::input::event_types::EV_ABS,
+                    super::input::abs_codes::ABS_Y,
+                    window_y,
+                );
+                super::ipc::send_input_to_window(
+                    window_id,
+                    0,
+                    super::input::event_types::EV_SYN,
+                    0,
+                    0,
+                );
+            }
         }
     }
 
@@ -1644,20 +1683,42 @@ impl Compositor {
                         .get_window(target_id)
                         .ok_or("Target window not found")?;
                     if self.cursor_position_in_window(window).is_some() {
-                        super::ipc::send_input_to_window(
-                            target_id,
-                            0,
-                            super::input::event_types::EV_KEY,
-                            button,
-                            if pressed { 1 } else { 0 },
-                        );
-                        super::ipc::send_input_to_window(
-                            target_id,
-                            0,
-                            super::input::event_types::EV_SYN,
-                            0,
-                            0,
-                        );
+                        // Check if this is an extension-owned window
+                        if let Some((extension_id, external_client_id)) = window.extension_owner {
+                            super::ipc::send_extension_input_event(
+                                extension_id,
+                                external_client_id,
+                                target_id,
+                                0,
+                                super::input::event_types::EV_KEY,
+                                button,
+                                if pressed { 1 } else { 0 },
+                            );
+                            super::ipc::send_extension_input_event(
+                                extension_id,
+                                external_client_id,
+                                target_id,
+                                0,
+                                super::input::event_types::EV_SYN,
+                                0,
+                                0,
+                            );
+                        } else {
+                            super::ipc::send_input_to_window(
+                                target_id,
+                                0,
+                                super::input::event_types::EV_KEY,
+                                button,
+                                if pressed { 1 } else { 0 },
+                            );
+                            super::ipc::send_input_to_window(
+                                target_id,
+                                0,
+                                super::input::event_types::EV_SYN,
+                                0,
+                                0,
+                            );
+                        }
                     }
                 }
 
@@ -1666,20 +1727,44 @@ impl Compositor {
             CompositorInputEvent::Keyboard { code, pressed } => {
                 // Route keyboard events to focused window
                 if let Some(focused_id) = self.window_manager.get_focused_window_id() {
-                    super::ipc::send_input_to_window(
-                        focused_id,
-                        0,
-                        super::input::event_types::EV_KEY,
-                        code,
-                        if pressed { 1 } else { 0 },
-                    );
-                    super::ipc::send_input_to_window(
-                        focused_id,
-                        0,
-                        super::input::event_types::EV_SYN,
-                        0,
-                        0,
-                    );
+                    if let Some(window) = self.window_manager.get_window(focused_id) {
+                        // Check if this is an extension-owned window
+                        if let Some((extension_id, external_client_id)) = window.extension_owner {
+                            super::ipc::send_extension_input_event(
+                                extension_id,
+                                external_client_id,
+                                focused_id,
+                                0,
+                                super::input::event_types::EV_KEY,
+                                code,
+                                if pressed { 1 } else { 0 },
+                            );
+                            super::ipc::send_extension_input_event(
+                                extension_id,
+                                external_client_id,
+                                focused_id,
+                                0,
+                                super::input::event_types::EV_SYN,
+                                0,
+                                0,
+                            );
+                        } else {
+                            super::ipc::send_input_to_window(
+                                focused_id,
+                                0,
+                                super::input::event_types::EV_KEY,
+                                code,
+                                if pressed { 1 } else { 0 },
+                            );
+                            super::ipc::send_input_to_window(
+                                focused_id,
+                                0,
+                                super::input::event_types::EV_SYN,
+                                0,
+                                0,
+                            );
+                        }
+                    }
                 }
                 Ok(false) // Keyboard events don't trigger redraws
             }
@@ -2293,7 +2378,7 @@ impl Compositor {
 
                 // Create window using window manager
                 if let Some(shm_handle) = shm {
-                    match self.window_manager.create_window_with_shm_from_event(
+                    match self.window_manager.create_extension_window(
                         window_id,
                         100, // x position
                         100, // y position
@@ -2302,9 +2387,14 @@ impl Compositor {
                         shm_handle,
                         shm_mapped_addr,
                         shm_size,
+                        extension_id,
+                        external_client_id,
                     ) {
                         Ok(wid) => {
-                            println!("[Compositor] Created extension window: {}", wid);
+                            println!(
+                                "[Compositor] Created extension window: {} (ext_id={}, ext_client_id={})",
+                                wid, extension_id, external_client_id
+                            );
                             self.full_redraw_needed = true;
                         }
                         Err(e) => {

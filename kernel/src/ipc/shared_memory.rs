@@ -204,7 +204,9 @@ impl SharedMemoryObject for SharedMemory {
 
         crate::println!(
             "[SharedMemory::resize] reallocated: old_paddr={:#x} new_paddr={:#x} mapping_count={}",
-            old_paddr, state.paddr, state.mapping_count
+            old_paddr,
+            state.paddr,
+            state.mapping_count
         );
 
         // NOTE: マッピングがある場合、古いpmap.pmarea.startは無効になる

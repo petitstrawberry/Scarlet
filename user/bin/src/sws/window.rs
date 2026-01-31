@@ -142,6 +142,12 @@ pub struct Window {
     /// - true: Focusing raises the window to top of its layer (Normal, Taskbar, AlwaysOnTop)
     /// - false: Focusing does not change Z-order (Desktop, wallpapers)
     pub raise_on_focus: bool,
+    /// Extension owner information for windows created by extension clients (e.g., wayland_bridge)
+    ///
+    /// Format: (extension_id, external_client_id)
+    /// - extension_id: The client ID of the extension that owns this window
+    /// - external_client_id: The external client ID assigned by the extension (e.g., Wayland surface ID)
+    pub extension_owner: Option<(u32, u32)>,
 }
 
 #[allow(dead_code)]
@@ -177,6 +183,7 @@ impl Window {
             active_on_focus: true,
             has_alpha_content: false, // Default to opaque content
             raise_on_focus: true,     // Default: Normal windows raise on focus
+            extension_owner: None,
         }
     }
 
@@ -215,6 +222,7 @@ impl Window {
             active_on_focus: true,
             has_alpha_content: false, // Default to opaque content
             raise_on_focus: true,     // Default: Normal windows raise on focus
+            extension_owner: None,
         }
     }
 
@@ -279,6 +287,7 @@ impl Window {
             active_on_focus: true,
             has_alpha_content: false, // Default to opaque content
             raise_on_focus: true,     // Default: Normal windows raise on focus
+            extension_owner: None,
         })
     }
 
@@ -407,6 +416,66 @@ impl WindowManager {
 
     /// Create window from IPC event with pre-mapped SHM
     /// This takes ownership of the SharedMemory object passed from the IPC thread
+    pub fn create_extension_window(
+        &mut self,
+        id: WindowId,
+        x: i32,
+        y: i32,
+        width: u32,
+        height: u32,
+        shm: SharedMemory,
+        shm_mapped_addr: Option<usize>,
+        shm_size: usize,
+        extension_id: u32,
+        external_client_id: u32,
+    ) -> Result<WindowId, &'static str> {
+        if id >= self.next_window_id {
+            self.next_window_id = id + 1;
+        }
+
+        println!(
+            "[WindowManager] Creating extension window #{} from IPC event with SHM at 0x{:x?} (ext_id={}, ext_client_id={})",
+            id, shm_mapped_addr, extension_id, external_client_id
+        );
+
+        let window = Window {
+            id,
+            app_id: None,
+            parent: None,
+            transient_flags: 0,
+            x,
+            y,
+            width,
+            height,
+            size_limits: WindowSizeLimits::default(),
+            title: None,
+            visible: true,
+            focused: false,
+            buffer: None,
+            shm: Some(shm),
+            shm_mapped_addr,
+            shm_size,
+            shm_offset: 0,
+            shm_stride: width.saturating_mul(4),
+            shm_format: 0,
+            window_type: WindowType::default(),
+            minimized: false,
+            maximized: false,
+            saved_geometry: None,
+            opacity: 1.0,
+            resizable: true,
+            active_on_focus: true,
+            has_alpha_content: false,
+            raise_on_focus: true,
+            extension_owner: Some((extension_id, external_client_id)),
+        };
+        self.windows.push(window);
+
+        Ok(id)
+    }
+
+    /// Create window from IPC event with pre-mapped SHM
+    /// This takes ownership of the SharedMemory object passed from the IPC thread
     pub fn create_window_with_shm_from_event(
         &mut self,
         id: WindowId,
@@ -456,6 +525,7 @@ impl WindowManager {
             active_on_focus: true,
             has_alpha_content: false, // Default to opaque content
             raise_on_focus: true,     // Default: Normal windows raise on focus
+            extension_owner: None,
         };
         self.windows.push(window);
 

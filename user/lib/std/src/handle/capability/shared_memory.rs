@@ -15,7 +15,7 @@ pub enum SharedMemoryObjectError {
 
 /// Shared memory object capability
 use crate::handle::{Handle, RawHandle};
-use crate::syscall::{syscall2, Syscall};
+use crate::syscall::{Syscall, syscall2};
 
 pub struct SharedMemoryObject<'a> {
     handle: &'a Handle,

@@ -301,6 +301,52 @@ pub fn send_input_to_window(window_id: u32, time: u64, type_: u16, code: u16, va
     }
 }
 
+/// Pending extension input events: BTreeMap from (extension_id, external_client_id) to events
+static PENDING_EXTENSION_INPUT_EVENTS: Mutex<BTreeMap<(u32, u32), Vec<PendingInputEvent>>> =
+    Mutex::new(BTreeMap::new());
+
+/// Queue an input event for an extension-owned window (O(log n) lookup)
+/// This sends EXTENSION_INPUT_EVENT to the extension client instead of regular INPUT_EVENT
+pub fn send_extension_input_event(
+    extension_id: u32,
+    external_client_id: u32,
+    window_id: u32,
+    time: u64,
+    type_: u16,
+    code: u16,
+    value: i32,
+) {
+    let mut pending = PENDING_EXTENSION_INPUT_EVENTS.lock();
+
+    let events = pending
+        .entry((extension_id, external_client_id))
+        .or_insert_with(Vec::new);
+    events.push(PendingInputEvent {
+        time,
+        type_,
+        code,
+        value,
+    });
+}
+
+/// Get and clear pending extension input events for a specific extension client
+pub fn pop_extension_input_events(
+    extension_id: u32,
+    external_client_id: u32,
+) -> Vec<PendingInputEvent> {
+    let mut pending = PENDING_EXTENSION_INPUT_EVENTS.lock();
+
+    if let Some(events) = pending.get_mut(&(extension_id, external_client_id)) {
+        if events.is_empty() {
+            Vec::new()
+        } else {
+            core::mem::take(events)
+        }
+    } else {
+        Vec::new()
+    }
+}
+
 /// Queue a server->client protocol message for a specific window.
 pub fn send_message_to_window(window_id: u32, msg_type: u32, payload: Vec<u8>) {
     let mut pending = PENDING_SERVER_FRAMES.lock();
@@ -609,6 +655,11 @@ fn client_thread_main(client_id: usize, mut socket: Socket) {
     let mut managed_windows: Vec<u32> = Vec::new();
     let mut window_size_limits: BTreeMap<u32, WindowSizeLimits> = BTreeMap::new();
     let mut window_resizable: BTreeMap<u32, bool> = BTreeMap::new();
+    // Track if this client is an extension client (e.g., wayland_bridge)
+    let mut is_extension_client: bool = false;
+    let mut extension_id: u32 = 0;
+    // Map window_id to external_client_id for extension windows
+    let mut window_to_external_client: BTreeMap<u32, u32> = BTreeMap::new();
 
     // Debug: loop counter for periodic logging
     let mut loop_count: u64 = 0;
@@ -659,38 +710,71 @@ fn client_thread_main(client_id: usize, mut socket: Socket) {
                 has_events = true;
             }
 
-            let events = pop_pending_input_events(window_id);
-            if !events.is_empty() {
-                has_events = true;
-                _total_events += events.len();
-                // println!(
-                //     "[ClientThread {}] Loop #{}: Found {} events for window {}",
-                //     client_id,
-                //     loop_count,
-                //     events.len(),
-                //     window_id
-                // );
-                for event in events {
-                    let payload = protocol::payload_input_event(
-                        window_id,
-                        event.time,
-                        event.type_,
-                        event.code,
-                        event.value,
-                    );
-                    if let Err(e) =
-                        write_frame(&mut socket, protocol::server_msg::INPUT_EVENT, &payload)
-                    {
-                        println!(
-                            "[ClientThread {}] Failed to send input event to window {}: {:?}",
-                            client_id, window_id, e
+            if is_extension_client {
+                // Extension clients receive EXTENSION_INPUT_EVENT
+                if let Some(&external_client_id) = window_to_external_client.get(&window_id) {
+                    let events = pop_extension_input_events(extension_id, external_client_id);
+                    if !events.is_empty() {
+                        has_events = true;
+                        _total_events += events.len();
+                        for event in events {
+                            let payload = protocol::payload_extension_input_event(
+                                external_client_id,
+                                window_id,
+                                event.time,
+                                event.type_,
+                                event.code,
+                                event.value,
+                            );
+                            if let Err(e) = write_frame(
+                                &mut socket,
+                                protocol::server_msg::EXTENSION_INPUT_EVENT,
+                                &payload,
+                            ) {
+                                println!(
+                                    "[ClientThread {}] Failed to send extension input event to window {}: {:?}",
+                                    client_id, window_id, e
+                                );
+                                break 'main;
+                            }
+                        }
+                    }
+                }
+            } else {
+                // Regular clients receive INPUT_EVENT
+                let events = pop_pending_input_events(window_id);
+                if !events.is_empty() {
+                    has_events = true;
+                    _total_events += events.len();
+                    // println!(
+                    //     "[ClientThread {}] Loop #{}: Found {} events for window {}",
+                    //     client_id,
+                    //     loop_count,
+                    //     events.len(),
+                    //     window_id
+                    // );
+                    for event in events {
+                        let payload = protocol::payload_input_event(
+                            window_id,
+                            event.time,
+                            event.type_,
+                            event.code,
+                            event.value,
                         );
-                        break 'main;
-                    } else {
-                        // println!(
-                        //     "[ClientThread {}] Sent event: type={} code={} value={}",
-                        //     client_id, event.type_, event.code, event.value
-                        // );
+                        if let Err(e) =
+                            write_frame(&mut socket, protocol::server_msg::INPUT_EVENT, &payload)
+                        {
+                            println!(
+                                "[ClientThread {}] Failed to send input event to window {}: {:?}",
+                                client_id, window_id, e
+                            );
+                            break 'main;
+                        } else {
+                            // println!(
+                            //     "[ClientThread {}] Sent event: type={} code={} value={}",
+                            //     client_id, event.type_, event.code, event.value
+                            // );
+                        }
                     }
                 }
             }
@@ -1173,6 +1257,13 @@ fn client_thread_main(client_id: usize, mut socket: Socket) {
                     extension_name: name,
                 });
 
+                // Mark this client as an extension client
+                is_extension_client = true;
+                println!(
+                    "[ClientThread {}] Registered as extension client with ID {}",
+                    client_id, extension_id
+                );
+
                 // Send ExtensionRegistered response
                 let payload = protocol::payload_extension_registered(extension_id);
                 if let Err(e) = write_frame(
@@ -1203,6 +1294,9 @@ fn client_thread_main(client_id: usize, mut socket: Socket) {
 
                 let window_id = next_window_id;
                 next_window_id = next_window_id.saturating_add(1);
+
+                // Track mapping from window_id to external_client_id
+                window_to_external_client.insert(window_id, external_client_id);
 
                 // Create shared memory for this window
                 match SharedMemory::create(buffer_size as usize, permissions::READ_WRITE) {

@@ -153,7 +153,8 @@ impl ShmManager {
             let shm = handle
                 .as_shared_memory()
                 .map_err(|_| "Shared memory handle invalid")?;
-            shm.resize(pool.size).map_err(|_| "Shared memory resize failed")?;
+            shm.resize(pool.size)
+                .map_err(|_| "Shared memory resize failed")?;
         }
         Ok(())
     }

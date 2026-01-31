@@ -1634,6 +1634,26 @@ pub fn payload_input_event(
     payload
 }
 
+/// Build payload for server->client `EXTENSION_INPUT_EVENT`.
+/// Payload format: external_client_id (4) + window_id (4) + time (8) + type (2) + code (2) + value (4) = 24 bytes
+pub fn payload_extension_input_event(
+    external_client_id: u32,
+    window_id: u32,
+    time: u64,
+    type_: u16,
+    code: u16,
+    value: i32,
+) -> [u8; 24] {
+    let mut payload = [0u8; 24];
+    payload[0..4].copy_from_slice(&external_client_id.to_le_bytes());
+    payload[4..8].copy_from_slice(&window_id.to_le_bytes());
+    payload[8..16].copy_from_slice(&time.to_le_bytes());
+    payload[16..18].copy_from_slice(&type_.to_le_bytes());
+    payload[18..20].copy_from_slice(&code.to_le_bytes());
+    payload[20..24].copy_from_slice(&value.to_le_bytes());
+    payload
+}
+
 /// Build payload for server->client `ERROR`.
 pub fn payload_error(code: u32) -> [u8; 4] {
     code.to_le_bytes()

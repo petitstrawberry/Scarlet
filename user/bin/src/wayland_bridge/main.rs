@@ -157,6 +157,13 @@ struct WaylandBridge {
     focused_keyboard: Option<u32>,
     /// Last focused pointer (for sending leave events)
     focused_pointer: Option<u32>,
+    /// Incoming buffer for SWS frames
+    sws_rx_buffer: Vec<u8>,
+    /// Pending SWS responses that are not input events
+    sws_pending: Vec<protocol_sws::ServerMessage>,
+    /// Pointer position (surface-local, in pixels)
+    pointer_x: i32,
+    pointer_y: i32,
 }
 
 impl WaylandBridge {
@@ -207,6 +214,10 @@ impl WaylandBridge {
             focused_surface: None,
             focused_keyboard: None,
             focused_pointer: None,
+            sws_rx_buffer: Vec::new(),
+            sws_pending: Vec::new(),
+            pointer_x: 0,
+            pointer_y: 0,
         })
     }
 
@@ -238,30 +249,19 @@ impl WaylandBridge {
         sws_socket_mut
             .write(&msg_bytes)
             .map_err(|_| "Failed to send REGISTER_EXTENSION")?;
-
-        // Read response
-        let mut response_buf = [0u8; 1024];
-        let n = sws_socket_mut
-            .read(&mut response_buf)
-            .map_err(|_| "Failed to read EXTENSION_REGISTERED response")?;
-
-        if n >= 12 {
-            let mut header_bytes = [0u8; 8];
-            header_bytes.copy_from_slice(&response_buf[0..8]);
-            let resp_header = protocol_sws::MessageHeader::from_le_bytes(header_bytes);
-            if resp_header.msg_type == protocol_sws::server_msg::EXTENSION_REGISTERED {
-                let extension_id = u32::from_le_bytes([
-                    response_buf[8],
-                    response_buf[9],
-                    response_buf[10],
-                    response_buf[11],
-                ]);
-                self.extension_id = Some(extension_id);
-                println!("[Bridge] Registered as extension with ID: {}", extension_id);
-            }
-        }
+        sws_socket_mut
+            .set_nonblocking(true)
+            .map_err(|_| "Failed to set SWS socket non-blocking")?;
 
         self.sws_connection = Some(sws_socket_mut);
+        if let protocol_sws::ServerMessage::ExtensionRegistered { extension_id } = self
+            .wait_for_sws_message(|msg| {
+                matches!(msg, protocol_sws::ServerMessage::ExtensionRegistered { .. })
+            })?
+        {
+            self.extension_id = Some(extension_id);
+            println!("[Bridge] Registered as extension with ID: {}", extension_id);
+        }
         Ok(())
     }
 
@@ -277,6 +277,225 @@ impl WaylandBridge {
         // Update input thread's objects map
         let mut objects = self.objects_for_input_thread.lock();
         objects.insert(id, interface);
+    }
+
+    fn surface_id_for_window(&self, window_id: u32) -> Option<u32> {
+        self.surface_to_window
+            .iter()
+            .find_map(|(surface_id, &win_id)| {
+                if win_id == window_id {
+                    Some(*surface_id)
+                } else {
+                    None
+                }
+            })
+    }
+
+    fn queue_input_messages(&self, messages: Vec<WaylandMessage>) {
+        if messages.is_empty() {
+            return;
+        }
+        let mut queue = self.input_event_queue.lock();
+        queue.extend(messages);
+    }
+
+    fn queue_focus_events(&mut self, surface_id: u32) {
+        if self.focused_surface == Some(surface_id) {
+            return;
+        }
+
+        let old_surface = self.focused_surface;
+        self.focused_surface = Some(surface_id);
+
+        let mut messages = Vec::new();
+
+        if let Some(pointer_id) = self.focused_pointer {
+            if let Some(old_id) = old_surface {
+                let serial = self.allocate_serial();
+                let mut leave = WaylandMessage::new(pointer_id, input::pointer_event::LEAVE);
+                leave.add_arg(WaylandArg::Uint(serial));
+                leave.add_arg(WaylandArg::Object(old_id));
+                messages.push(leave);
+            }
+            let serial = self.allocate_serial();
+            let mut enter = WaylandMessage::new(pointer_id, input::pointer_event::ENTER);
+            enter.add_arg(WaylandArg::Uint(serial));
+            enter.add_arg(WaylandArg::Object(surface_id));
+            enter.add_arg(WaylandArg::Fixed(self.pointer_x << 8));
+            enter.add_arg(WaylandArg::Fixed(self.pointer_y << 8));
+            messages.push(enter);
+        }
+
+        if let Some(keyboard_id) = self.focused_keyboard {
+            if let Some(old_id) = old_surface {
+                let serial = self.allocate_serial();
+                let mut leave = WaylandMessage::new(keyboard_id, input::keyboard_event::LEAVE);
+                leave.add_arg(WaylandArg::Uint(serial));
+                leave.add_arg(WaylandArg::Object(old_id));
+                messages.push(leave);
+            }
+            let serial = self.allocate_serial();
+            let mut enter = WaylandMessage::new(keyboard_id, input::keyboard_event::ENTER);
+            enter.add_arg(WaylandArg::Uint(serial));
+            enter.add_arg(WaylandArg::Object(surface_id));
+            messages.push(enter);
+        }
+
+        self.queue_input_messages(messages);
+    }
+
+    fn handle_sws_input_event(
+        &mut self,
+        window_id: u32,
+        time: u64,
+        type_: u16,
+        code: u16,
+        value: i32,
+    ) {
+        const EV_KEY: u16 = 0x01;
+        const EV_REL: u16 = 0x02;
+        const EV_ABS: u16 = 0x03;
+        const REL_X: u16 = 0x00;
+        const REL_Y: u16 = 0x01;
+        const ABS_X: u16 = 0x00;
+        const ABS_Y: u16 = 0x01;
+        const BTN_MOUSE_MIN: u16 = 0x110;
+        const BTN_MOUSE_MAX: u16 = 0x118;
+
+        if let Some(surface_id) = self.surface_id_for_window(window_id) {
+            self.queue_focus_events(surface_id);
+        }
+
+        let mut messages = Vec::new();
+
+        match type_ {
+            EV_REL => {
+                if code == REL_X {
+                    self.pointer_x = self.pointer_x.saturating_add(value);
+                } else if code == REL_Y {
+                    self.pointer_y = self.pointer_y.saturating_add(value);
+                }
+                if let Some(pointer_id) = self.focused_pointer {
+                    let mut msg = WaylandMessage::new(pointer_id, input::pointer_event::MOTION);
+                    msg.add_arg(WaylandArg::Uint(time as u32));
+                    msg.add_arg(WaylandArg::Fixed(self.pointer_x << 8));
+                    msg.add_arg(WaylandArg::Fixed(self.pointer_y << 8));
+                    messages.push(msg);
+                }
+            }
+            EV_ABS => {
+                if code == ABS_X {
+                    self.pointer_x = value;
+                } else if code == ABS_Y {
+                    self.pointer_y = value;
+                }
+                if let Some(pointer_id) = self.focused_pointer {
+                    let mut msg = WaylandMessage::new(pointer_id, input::pointer_event::MOTION);
+                    msg.add_arg(WaylandArg::Uint(time as u32));
+                    msg.add_arg(WaylandArg::Fixed(self.pointer_x << 8));
+                    msg.add_arg(WaylandArg::Fixed(self.pointer_y << 8));
+                    messages.push(msg);
+                }
+            }
+            EV_KEY => {
+                if code >= BTN_MOUSE_MIN && code <= BTN_MOUSE_MAX {
+                    if let Some(pointer_id) = self.focused_pointer {
+                        let mut msg = WaylandMessage::new(pointer_id, input::pointer_event::BUTTON);
+                        msg.add_arg(WaylandArg::Uint(self.allocate_serial()));
+                        msg.add_arg(WaylandArg::Uint(time as u32));
+                        msg.add_arg(WaylandArg::Uint(code as u32));
+                        msg.add_arg(WaylandArg::Uint(if value != 0 {
+                            input::pointer_button_state::PRESSED
+                        } else {
+                            input::pointer_button_state::RELEASED
+                        }));
+                        messages.push(msg);
+                    }
+                } else if let Some(keyboard_id) = self.focused_keyboard {
+                    let mut msg = WaylandMessage::new(keyboard_id, input::keyboard_event::KEY);
+                    msg.add_arg(WaylandArg::Uint(self.allocate_serial()));
+                    msg.add_arg(WaylandArg::Uint(time as u32));
+                    msg.add_arg(WaylandArg::Uint(code as u32));
+                    msg.add_arg(WaylandArg::Uint(value as u32));
+                    messages.push(msg);
+                }
+            }
+            _ => {}
+        }
+
+        self.queue_input_messages(messages);
+    }
+
+    fn poll_sws_messages(&mut self) -> Result<(), &'static str> {
+        let sws_conn = match self.sws_connection.as_mut() {
+            Some(conn) => conn,
+            None => return Ok(()),
+        };
+
+        let mut buf = [0u8; 1024];
+        loop {
+            match sws_conn.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => {
+                    self.sws_rx_buffer.extend_from_slice(&buf[..n]);
+                }
+                Err(_) => break,
+            }
+        }
+
+        loop {
+            if self.sws_rx_buffer.len() < protocol_sws::MessageHeader::SIZE {
+                break;
+            }
+            let mut header_bytes = [0u8; protocol_sws::MessageHeader::SIZE];
+            header_bytes.copy_from_slice(&self.sws_rx_buffer[..protocol_sws::MessageHeader::SIZE]);
+            let header = protocol_sws::MessageHeader::from_le_bytes(header_bytes);
+            let frame_len = protocol_sws::MessageHeader::SIZE + header.payload_size as usize;
+            if self.sws_rx_buffer.len() < frame_len {
+                break;
+            }
+            let payload = self.sws_rx_buffer[protocol_sws::MessageHeader::SIZE..frame_len].to_vec();
+            self.sws_rx_buffer.drain(0..frame_len);
+
+            if let Ok(msg) = protocol_sws::parse_server_message(header.msg_type, &payload) {
+                match msg {
+                    protocol_sws::ServerMessage::InputEvent {
+                        window_id,
+                        time,
+                        type_,
+                        code,
+                        value,
+                    } => {
+                        self.handle_sws_input_event(window_id, time, type_, code, value);
+                    }
+                    other => {
+                        self.sws_pending.push(other);
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    fn wait_for_sws_message<F>(
+        &mut self,
+        mut matches: F,
+    ) -> Result<protocol_sws::ServerMessage, &'static str>
+    where
+        F: FnMut(&protocol_sws::ServerMessage) -> bool,
+    {
+        loop {
+            self.poll_sws_messages()?;
+            let mut idx = 0;
+            while idx < self.sws_pending.len() {
+                if matches(&self.sws_pending[idx]) {
+                    return Ok(self.sws_pending.remove(idx));
+                }
+                idx += 1;
+            }
+            thread::sleep(Duration::from_millis(1));
+        }
     }
 
     fn get_object_version(&self, id: u32) -> Option<u32> {
@@ -399,82 +618,53 @@ impl WaylandBridge {
             sws_conn
                 .write(&msg_bytes)
                 .map_err(|_| "Failed to send EXTENSION_CREATE_WINDOW")?;
+        }
+        if let protocol_sws::ServerMessage::WindowCreated {
+            window_id,
+            shm_size,
+        } = self.wait_for_sws_message(|msg| {
+            matches!(msg, protocol_sws::ServerMessage::WindowCreated { .. })
+        })? {
+            println!(
+                "[Bridge] SWS window created: {} for surface {} (shm_size={})",
+                window_id, wl_surface_id, shm_size
+            );
+            self.surface_to_window.insert(wl_surface_id, window_id);
+            window_id_opt = Some(window_id);
 
-            // Read WINDOW_CREATED response
-            let mut response_buf = [0u8; 1024];
-            let n = sws_conn
-                .read(&mut response_buf)
-                .map_err(|_| "Failed to read WINDOW_CREATED response")?;
-
-            if n >= 20 {
-                let mut header_bytes = [0u8; 8];
-                header_bytes.copy_from_slice(&response_buf[0..8]);
-                let resp_header = protocol_sws::MessageHeader::from_le_bytes(header_bytes);
-                if resp_header.msg_type == protocol_sws::server_msg::WINDOW_CREATED {
-                    let window_id = u32::from_le_bytes([
-                        response_buf[8],
-                        response_buf[9],
-                        response_buf[10],
-                        response_buf[11],
-                    ]);
-                    let shm_size = u64::from_le_bytes([
-                        response_buf[12],
-                        response_buf[13],
-                        response_buf[14],
-                        response_buf[15],
-                        response_buf[16],
-                        response_buf[17],
-                        response_buf[18],
-                        response_buf[19],
-                    ]) as usize;
-
-                    println!(
-                        "[Bridge] SWS window created: {} for surface {} (shm_size={})",
-                        window_id, wl_surface_id, shm_size
-                    );
-                    self.surface_to_window.insert(wl_surface_id, window_id);
-                    window_id_opt = Some(window_id);
-
-                    // Receive SHM handle and store it
-                    if let Ok(shm_handle) = sws_conn.recv_handle() {
-                        println!("[Bridge] Received SHM handle for window {}", window_id);
-                        // Wrap the handle in SharedMemory
-                        if let Ok(shm) = SharedMemory::from_handle(shm_handle) {
-                            // Map the SHM for read/write access
-                            if let Ok(mapper) = shm.as_handle().as_memory_mapping() {
-                                if let Ok(mapped_addr) = mapper.mmap(
-                                    0,
-                                    shm_size,
-                                    permissions::READ_WRITE,
-                                    flags::SHARED,
-                                    0,
-                                ) {
-                                    println!(
-                                        "[Bridge] Mapped window {} SHM at 0x{:x}",
-                                        window_id, mapped_addr
-                                    );
-                                    self.window_shm.insert(
-                                        window_id,
-                                        WindowShmInfo {
-                                            window_id,
-                                            shm,
-                                            mapped_addr,
-                                            size: shm_size,
-                                        },
-                                    );
-                                } else {
-                                    println!("[Bridge] Failed to map window {} SHM", window_id);
-                                }
-                            } else {
-                                println!(
-                                    "[Bridge] Window {} SHM doesn't support mapping",
-                                    window_id
-                                );
-                            }
+            let sws_conn = self.sws_connection.as_mut().ok_or("Not connected to SWS")?;
+            if let Ok(shm_handle) = sws_conn.recv_handle() {
+                println!("[Bridge] Received SHM handle for window {}", window_id);
+                if let Ok(shm) = SharedMemory::from_handle(shm_handle) {
+                    if let Ok(mapper) = shm.as_handle().as_memory_mapping() {
+                        if let Ok(mapped_addr) = mapper.mmap(
+                            0,
+                            shm_size as usize,
+                            permissions::READ_WRITE,
+                            flags::SHARED,
+                            0,
+                        ) {
+                            println!(
+                                "[Bridge] Mapped window {} SHM at 0x{:x}",
+                                window_id, mapped_addr
+                            );
+                            self.window_shm.insert(
+                                window_id,
+                                WindowShmInfo {
+                                    window_id,
+                                    shm,
+                                    mapped_addr,
+                                    size: shm_size as usize,
+                                },
+                            );
                         } else {
-                            println!("[Bridge] Received handle is not a shared memory object");
+                            println!("[Bridge] Failed to map window {} SHM", window_id);
                         }
+                    } else {
+                        println!("[Bridge] Window {} SHM doesn't support mapping", window_id);
                     }
+                } else {
+                    println!("[Bridge] Received handle is not a shared memory object");
                 }
             }
         }
@@ -526,81 +716,54 @@ impl WaylandBridge {
             sws_conn
                 .write(&msg_bytes)
                 .map_err(|_| "Failed to send EXTENSION_CREATE_WINDOW")?;
+        }
+        if let protocol_sws::ServerMessage::WindowCreated {
+            window_id,
+            shm_size,
+        } = self.wait_for_sws_message(|msg| {
+            matches!(msg, protocol_sws::ServerMessage::WindowCreated { .. })
+        })? {
+            println!(
+                "[Bridge] SWS window created: {} for surface {} (shm_size={})",
+                window_id, wl_surface_id, shm_size
+            );
+            self.surface_to_window.insert(wl_surface_id, window_id);
+            window_id_opt = Some(window_id);
 
-            // Read WINDOW_CREATED response
-            let mut response_buf = [0u8; 1024];
-            let n = sws_conn
-                .read(&mut response_buf)
-                .map_err(|_| "Failed to read WINDOW_CREATED response")?;
+            let sws_conn = self.sws_connection.as_mut().ok_or("Not connected to SWS")?;
+            if let Ok(shm_handle) = sws_conn.recv_handle() {
+                println!("[Bridge] Received SHM handle for window {}", window_id);
 
-            if n >= 20 {
-                let mut header_bytes = [0u8; 8];
-                header_bytes.copy_from_slice(&response_buf[0..8]);
-                let resp_header = protocol_sws::MessageHeader::from_le_bytes(header_bytes);
-                if resp_header.msg_type == protocol_sws::server_msg::WINDOW_CREATED {
-                    let window_id = u32::from_le_bytes([
-                        response_buf[8],
-                        response_buf[9],
-                        response_buf[10],
-                        response_buf[11],
-                    ]);
-                    let shm_size = u64::from_le_bytes([
-                        response_buf[12],
-                        response_buf[13],
-                        response_buf[14],
-                        response_buf[15],
-                        response_buf[16],
-                        response_buf[17],
-                        response_buf[18],
-                        response_buf[19],
-                    ]) as usize;
-
-                    println!(
-                        "[Bridge] SWS window created: {} for surface {} (shm_size={})",
-                        window_id, wl_surface_id, shm_size
-                    );
-                    self.surface_to_window.insert(wl_surface_id, window_id);
-                    window_id_opt = Some(window_id);
-
-                    // Receive SHM handle and store it
-                    if let Ok(shm_handle) = sws_conn.recv_handle() {
-                        println!("[Bridge] Received SHM handle for window {}", window_id);
-
-                        if let Ok(shm) = SharedMemory::from_handle(shm_handle) {
-                            if let Ok(mapper) = shm.as_handle().as_memory_mapping() {
-                                if let Ok(mapped_addr) = mapper.mmap(
-                                    0,
-                                    shm_size,
-                                    permissions::READ_WRITE,
-                                    flags::SHARED,
-                                    0,
-                                ) {
-                                    println!(
-                                        "[Bridge] Mapped window {} SHM at 0x{:x}",
-                                        window_id, mapped_addr
-                                    );
-                                    self.window_shm.insert(
-                                        window_id,
-                                        WindowShmInfo {
-                                            window_id,
-                                            shm,
-                                            mapped_addr,
-                                            size: shm_size,
-                                        },
-                                    );
-                                } else {
-                                    println!("[Bridge] Failed to map window {} SHM", window_id);
-                                }
-                            } else {
-                                println!(
-                                    "[Bridge] Window {} SHM doesn't support mapping",
-                                    window_id
-                                );
-                            }
+                if let Ok(shm) = SharedMemory::from_handle(shm_handle) {
+                    if let Ok(mapper) = shm.as_handle().as_memory_mapping() {
+                        if let Ok(mapped_addr) = mapper.mmap(
+                            0,
+                            shm_size as usize,
+                            permissions::READ_WRITE,
+                            flags::SHARED,
+                            0,
+                        ) {
+                            println!(
+                                "[Bridge] Mapped window {} SHM at 0x{:x}",
+                                window_id, mapped_addr
+                            );
+                            self.window_shm.insert(
+                                window_id,
+                                WindowShmInfo {
+                                    window_id,
+                                    shm,
+                                    mapped_addr,
+                                    size: shm_size as usize,
+                                },
+                            );
                         } else {
-                            println!("[Bridge] Received handle is not a shared memory object");
+                            println!("[Bridge] Failed to map window {} SHM", window_id);
                         }
+                    } else {
+                        println!("[Bridge] Window {} SHM doesn't support mapping", window_id);
                     }
+                } else {
+                    println!("[Bridge] Received handle is not a shared memory object");
                 }
             }
         }
@@ -811,8 +974,6 @@ impl WaylandBridge {
         new_width: u32,
         new_height: u32,
     ) -> Result<(), &'static str> {
-        let sws_conn = self.sws_connection.as_mut().ok_or("Not connected to SWS")?;
-
         // Calculate new buffer size
         let new_buffer_size = (new_width as u64)
             .saturating_mul(new_height as u64)
@@ -834,90 +995,62 @@ impl WaylandBridge {
         msg_bytes.extend_from_slice(&header.to_le_bytes());
         msg_bytes.extend_from_slice(&payload);
 
-        sws_conn
-            .write(&msg_bytes)
-            .map_err(|_| "Failed to send RESIZE_WINDOW")?;
+        {
+            let sws_conn = self.sws_connection.as_mut().ok_or("Not connected to SWS")?;
+            sws_conn
+                .write(&msg_bytes)
+                .map_err(|_| "Failed to send RESIZE_WINDOW")?;
+        }
 
-        // Read WINDOW_RESIZED response
-        let mut response_buf = [0u8; 1024];
-        let n = sws_conn
-            .read(&mut response_buf)
-            .map_err(|_| "Failed to read WINDOW_RESIZED response")?;
+        if let protocol_sws::ServerMessage::WindowResized {
+            window_id: resized_window_id,
+            shm_size,
+            ..
+        } = self.wait_for_sws_message(|msg| {
+            matches!(msg, protocol_sws::ServerMessage::WindowResized { .. })
+        })? {
+            println!(
+                "[Bridge] Window {} resized to shm_size={}",
+                resized_window_id, shm_size
+            );
 
-        if n >= 28 {
-            let mut header_bytes = [0u8; 8];
-            header_bytes.copy_from_slice(&response_buf[0..8]);
-            let resp_header = protocol_sws::MessageHeader::from_le_bytes(header_bytes);
+            let sws_conn = self.sws_connection.as_mut().ok_or("Not connected to SWS")?;
+            if let Ok(shm_handle) = sws_conn.recv_handle() {
+                println!("[Bridge] Received new SHM handle for window {}", window_id);
 
-            if resp_header.msg_type == protocol_sws::server_msg::WINDOW_RESIZED {
-                let resized_window_id = u32::from_le_bytes([
-                    response_buf[8],
-                    response_buf[9],
-                    response_buf[10],
-                    response_buf[11],
-                ]);
-                let shm_size = u64::from_le_bytes([
-                    response_buf[12],
-                    response_buf[13],
-                    response_buf[14],
-                    response_buf[15],
-                    response_buf[16],
-                    response_buf[17],
-                    response_buf[18],
-                    response_buf[19],
-                ]) as usize;
-                let _resized_width = u32::from_le_bytes([
-                    response_buf[20],
-                    response_buf[21],
-                    response_buf[22],
-                    response_buf[23],
-                ]);
-                let _resized_height = u32::from_le_bytes([
-                    response_buf[24],
-                    response_buf[25],
-                    response_buf[26],
-                    response_buf[27],
-                ]);
-
-                println!(
-                    "[Bridge] Window {} resized to shm_size={}",
-                    resized_window_id, shm_size
-                );
-
-                // Receive new SHM handle
-                if let Ok(shm_handle) = sws_conn.recv_handle() {
-                    println!("[Bridge] Received new SHM handle for window {}", window_id);
-
-                    if let Ok(shm) = SharedMemory::from_handle(shm_handle) {
-                        if let Ok(mapper) = shm.as_handle().as_memory_mapping() {
-                            if let Ok(mapped_addr) =
-                                mapper.mmap(0, shm_size, permissions::READ_WRITE, flags::SHARED, 0)
-                            {
-                                println!(
-                                    "[Bridge] Remapped window {} SHM at 0x{:x}",
-                                    window_id, mapped_addr
-                                );
-                                self.window_shm.insert(
-                                    window_id,
-                                    WindowShmInfo {
-                                        window_id,
-                                        shm,
-                                        mapped_addr,
-                                        size: shm_size,
-                                    },
-                                );
-                            } else {
-                                println!("[Bridge] Failed to map resized window {} SHM", window_id);
-                            }
-                        } else {
+                if let Ok(shm) = SharedMemory::from_handle(shm_handle) {
+                    if let Ok(mapper) = shm.as_handle().as_memory_mapping() {
+                        if let Ok(mapped_addr) = mapper.mmap(
+                            0,
+                            shm_size as usize,
+                            permissions::READ_WRITE,
+                            flags::SHARED,
+                            0,
+                        ) {
                             println!(
-                                "[Bridge] Resized window {} SHM doesn't support mapping",
-                                window_id
+                                "[Bridge] Remapped window {} SHM at 0x{:x}",
+                                window_id, mapped_addr
                             );
+                            self.window_shm.insert(
+                                window_id,
+                                WindowShmInfo {
+                                    window_id,
+                                    shm,
+                                    mapped_addr,
+                                    size: shm_size as usize,
+                                },
+                            );
+                        } else {
+                            println!("[Bridge] Failed to map resized window {} SHM", window_id);
                         }
                     } else {
-                        println!("[Bridge] Received handle is not a shared memory object");
+                        println!(
+                            "[Bridge] Resized window {} SHM doesn't support mapping",
+                            window_id
+                        );
                     }
+                } else {
+                    println!("[Bridge] Received handle is not a shared memory object");
                 }
             }
         }
@@ -1001,7 +1134,8 @@ impl WaylandBridge {
                             .unwrap_or(false);
                         if is_keyboard {
                             if let Some(shm) = self.keymap_shm.as_ref() {
-                                match client.send_handle_and_data(shm.as_handle(), &response_bytes) {
+                                match client.send_handle_and_data(shm.as_handle(), &response_bytes)
+                                {
                                     Ok(()) => {
                                         if is_debug_enabled() {
                                             println!(
@@ -1032,7 +1166,8 @@ impl WaylandBridge {
                 buffer.drain(0..offset);
             }
 
-            // Check for input events from SWS (from background thread)
+            // Check for input events from SWS (from shared connection)
+            let _ = self.poll_sws_messages();
             let mut input_events = Vec::new();
             {
                 let mut queue = self.input_event_queue.lock();
@@ -1214,10 +1349,8 @@ impl WaylandBridge {
                                     msgs.push(caps);
 
                                     if version >= 2 {
-                                        let mut name_msg = WaylandMessage::new(
-                                            new_id,
-                                            input::seat_event::NAME,
-                                        );
+                                        let mut name_msg =
+                                            WaylandMessage::new(new_id, input::seat_event::NAME);
                                         name_msg.add_arg(WaylandArg::String(b"seat0".to_vec()));
                                         msgs.push(name_msg);
                                     }
@@ -1422,10 +1555,8 @@ impl WaylandBridge {
                     surface.commit();
                     if let Some(buf_id) = surface.buffer_id {
                         if self.objects.get(&buf_id).is_some() {
-                            release_msg = Some(WaylandMessage::new(
-                                buf_id,
-                                shm::buffer_event::RELEASE,
-                            ));
+                            release_msg =
+                                Some(WaylandMessage::new(buf_id, shm::buffer_event::RELEASE));
                         }
                     }
                 }
@@ -1456,10 +1587,8 @@ impl WaylandBridge {
                         xdg_surface.last_configure_serial = Some(serial);
                     }
 
-                    let mut toplevel_configure = WaylandMessage::new(
-                        toplevel_id,
-                        xdg_shell::xdg_toplevel_event::CONFIGURE,
-                    );
+                    let mut toplevel_configure =
+                        WaylandMessage::new(toplevel_id, xdg_shell::xdg_toplevel_event::CONFIGURE);
                     toplevel_configure.add_arg(WaylandArg::Int(0));
                     toplevel_configure.add_arg(WaylandArg::Int(0));
                     toplevel_configure.add_arg(WaylandArg::Array(Vec::new()));
@@ -1476,13 +1605,19 @@ impl WaylandBridge {
 
                 if should_update && buffer_present {
                     if !self.surface_to_window.contains_key(&surface_id) {
-                        let _ = self
-                            .create_sws_window_with_size(surface_id, surface_size.0, surface_size.1);
+                        let _ = self.create_sws_window_with_size(
+                            surface_id,
+                            surface_size.0,
+                            surface_size.1,
+                        );
                     }
                     if self.surface_to_window.contains_key(&surface_id) {
                         if let Err(e) = self.update_sws_window(surface_id) {
                             println!("[Bridge] Failed to update SWS window: {}", e);
                         }
+                    }
+                    if self.focused_surface.is_none() {
+                        self.queue_focus_events(surface_id);
                     }
                 }
 
@@ -1758,9 +1893,7 @@ impl WaylandBridge {
                 println!("[Bridge] xdg_toplevel.destroy");
                 if let Some(wl_surface_id) = self.xdg_shell_manager.clear_toplevel(xdg_toplevel_id)
                 {
-                    if let Some(surface) =
-                        self.surface_manager.get_surface_mut(wl_surface_id)
-                    {
+                    if let Some(surface) = self.surface_manager.get_surface_mut(wl_surface_id) {
                         surface.role = None;
                     }
                 }
@@ -1818,6 +1951,45 @@ impl WaylandBridge {
             }
             xdg_shell::xdg_toplevel_request::MOVE => {
                 println!("[Bridge] xdg_toplevel.move");
+                let seat_id = Self::parse_u32(payload, 0).unwrap_or(0);
+                let serial = Self::parse_u32(payload, 4).unwrap_or(0);
+
+                if let Some((_, wl_surface_id)) =
+                    self.xdg_shell_manager.get_toplevel_mut(xdg_toplevel_id)
+                {
+                    if let Some(window_id) = self.surface_to_window.get(&wl_surface_id).copied() {
+                        let payload = protocol_sws::payload_request_move_window(window_id);
+                        let header = protocol_sws::MessageHeader {
+                            msg_type: protocol_sws::client_msg::REQUEST_MOVE_WINDOW,
+                            payload_size: payload.len() as u32,
+                        };
+
+                        let mut msg_bytes = Vec::new();
+                        msg_bytes.extend_from_slice(&header.to_le_bytes());
+                        msg_bytes.extend_from_slice(&payload);
+
+                        let sws_conn =
+                            self.sws_connection.as_mut().ok_or("Not connected to SWS")?;
+                        sws_conn
+                            .write(&msg_bytes)
+                            .map_err(|_| "Failed to send REQUEST_MOVE_WINDOW")?;
+
+                        println!(
+                            "[Bridge] Requested move for window {} (seat {}, serial {})",
+                            window_id, seat_id, serial
+                        );
+                    } else {
+                        println!(
+                            "[Bridge] xdg_toplevel.move: no window for surface {}",
+                            wl_surface_id
+                        );
+                    }
+                } else {
+                    println!(
+                        "[Bridge] xdg_toplevel.move: unknown toplevel {}",
+                        xdg_toplevel_id
+                    );
+                }
                 Ok(Vec::new())
             }
             xdg_shell::xdg_toplevel_request::RESIZE => {
@@ -2174,12 +2346,6 @@ fn main() -> i32 {
     }
 
     println!("[Bridge] Connected to SWS successfully");
-
-    // Spawn input event listener thread
-    if let Err(e) = bridge.spawn_input_thread() {
-        println!("[Bridge] Failed to spawn input thread: {}", e);
-        return 1;
-    }
 
     println!("[Bridge] Clients can connect with WAYLAND_DISPLAY=wayland-0");
 

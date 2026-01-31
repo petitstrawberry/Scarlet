@@ -448,7 +448,7 @@ impl VirtualMemoryManager {
         {
             // Lock scope
             let mut g = self.inner.write();
-            
+
             // Find a mapping whose vmarea.end < vaddr but might have an owner that has grown
             let mut found = None;
             for (_, map) in g.memmap.iter_mut() {
@@ -458,26 +458,31 @@ impl VirtualMemoryManager {
                     if let Some(owner_weak) = &map.owner {
                         if let Some(owner) = owner_weak.upgrade() {
                             // Try resolve_fault to see if owner supports this offset
-                            let test_access = crate::object::capability::memory_mapping::AccessKind {
-                                vaddr: page_vaddr,
-                                op: access.op,
-                                size: access.size,
-                            };
-                            
+                            let test_access =
+                                crate::object::capability::memory_mapping::AccessKind {
+                                    vaddr: page_vaddr,
+                                    op: access.op,
+                                    size: access.size,
+                                };
+
                             match owner.resolve_fault(&test_access, map) {
                                 Ok(res) => {
                                     // Owner says this offset is valid - extend vmarea.end
                                     let new_end = page_vaddr + PAGE_SIZE - 1;
                                     crate::println!(
                                         "[VmManager] Extending mapping vmarea.end from {:#x} to {:#x} for owner={}",
-                                        map.vmarea.end, new_end, owner.mmap_owner_name()
+                                        map.vmarea.end,
+                                        new_end,
+                                        owner.mmap_owner_name()
                                     );
                                     map.vmarea.end = new_end;
-                                    
+
                                     // Also extend pmarea proportionally
-                                    let pmarea_growth = new_end - map.vmarea.start - (map.pmarea.end - map.pmarea.start);
+                                    let pmarea_growth = new_end
+                                        - map.vmarea.start
+                                        - (map.pmarea.end - map.pmarea.start);
                                     map.pmarea.end += pmarea_growth;
-                                    
+
                                     found = Some((res.paddr_page_base, map.permissions));
                                     break;
                                 }
@@ -508,7 +513,7 @@ impl VirtualMemoryManager {
                 return Err("No root page table available");
             }
         }
-        
+
         Err("No extendable memory mapping found for virtual address")
     }
 
