@@ -318,15 +318,15 @@ impl Fat32FileObject {
                     meta.file_id = new_cluster as u64;
                 }
             }
-            self.update_directory_entry(fat32_fs, new_cluster, buffer.len())?;
-            PageCacheManager::global().invalidate(old_cache_id);
         } else if current_cluster != 0 {
             let mut meta = self.node.metadata.write();
             if meta.file_id != current_cluster as u64 {
                 meta.file_id = current_cluster as u64;
-                PageCacheManager::global().invalidate(old_cache_id);
             }
         }
+
+        self.update_directory_entry(fat32_fs, new_cluster, buffer.len())?;
+        PageCacheManager::global().invalidate(old_cache_id);
 
         {
             let mut metadata = self.node.metadata.write();
