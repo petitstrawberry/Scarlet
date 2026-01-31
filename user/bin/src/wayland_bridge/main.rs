@@ -373,6 +373,12 @@ impl WaylandBridge {
             })
     }
 
+    fn window_id_for_toplevel(&mut self, xdg_toplevel_id: u32) -> Option<u32> {
+        self.xdg_shell_manager
+            .get_toplevel_mut(xdg_toplevel_id)
+            .and_then(|(_, wl_surface_id)| self.surface_to_window.get(&wl_surface_id).copied())
+    }
+
     fn queue_input_messages(&self, messages: Vec<WaylandMessage>) {
         if messages.is_empty() {
             return;
@@ -1205,6 +1211,94 @@ impl WaylandBridge {
         Ok(())
     }
 
+    fn send_minimize_window(&mut self, window_id: u32) -> Result<(), &'static str> {
+        let sws_conn = self.sws_connection.as_mut().ok_or("Not connected to SWS")?;
+
+        bridge_log!("[Bridge] Sending MINIMIZE_WINDOW for window {}", window_id);
+
+        let payload = protocol_sws::payload_minimize_window(window_id);
+        let header = protocol_sws::MessageHeader {
+            msg_type: protocol_sws::client_msg::MINIMIZE_WINDOW,
+            payload_size: payload.len() as u32,
+        };
+
+        let mut msg_bytes = Vec::new();
+        msg_bytes.extend_from_slice(&header.to_le_bytes());
+        msg_bytes.extend_from_slice(&payload);
+
+        sws_conn
+            .write(&msg_bytes)
+            .map_err(|_| "Failed to send MINIMIZE_WINDOW")?;
+
+        Ok(())
+    }
+
+    fn send_maximize_window(&mut self, window_id: u32) -> Result<(), &'static str> {
+        let sws_conn = self.sws_connection.as_mut().ok_or("Not connected to SWS")?;
+
+        bridge_log!("[Bridge] Sending MAXIMIZE_WINDOW for window {}", window_id);
+
+        let payload = protocol_sws::payload_maximize_window(window_id);
+        let header = protocol_sws::MessageHeader {
+            msg_type: protocol_sws::client_msg::MAXIMIZE_WINDOW,
+            payload_size: payload.len() as u32,
+        };
+
+        let mut msg_bytes = Vec::new();
+        msg_bytes.extend_from_slice(&header.to_le_bytes());
+        msg_bytes.extend_from_slice(&payload);
+
+        sws_conn
+            .write(&msg_bytes)
+            .map_err(|_| "Failed to send MAXIMIZE_WINDOW")?;
+
+        Ok(())
+    }
+
+    fn send_restore_window(&mut self, window_id: u32) -> Result<(), &'static str> {
+        let sws_conn = self.sws_connection.as_mut().ok_or("Not connected to SWS")?;
+
+        bridge_log!("[Bridge] Sending RESTORE_WINDOW for window {}", window_id);
+
+        let payload = protocol_sws::payload_restore_window(window_id);
+        let header = protocol_sws::MessageHeader {
+            msg_type: protocol_sws::client_msg::RESTORE_WINDOW,
+            payload_size: payload.len() as u32,
+        };
+
+        let mut msg_bytes = Vec::new();
+        msg_bytes.extend_from_slice(&header.to_le_bytes());
+        msg_bytes.extend_from_slice(&payload);
+
+        sws_conn
+            .write(&msg_bytes)
+            .map_err(|_| "Failed to send RESTORE_WINDOW")?;
+
+        Ok(())
+    }
+
+    fn send_destroy_window(&mut self, window_id: u32) -> Result<(), &'static str> {
+        let sws_conn = self.sws_connection.as_mut().ok_or("Not connected to SWS")?;
+
+        bridge_log!("[Bridge] Sending DESTROY_WINDOW for window {}", window_id);
+
+        let payload = protocol_sws::payload_destroy_window(window_id);
+        let header = protocol_sws::MessageHeader {
+            msg_type: protocol_sws::client_msg::DESTROY_WINDOW,
+            payload_size: payload.len() as u32,
+        };
+
+        let mut msg_bytes = Vec::new();
+        msg_bytes.extend_from_slice(&header.to_le_bytes());
+        msg_bytes.extend_from_slice(&payload);
+
+        sws_conn
+            .write(&msg_bytes)
+            .map_err(|_| "Failed to send DESTROY_WINDOW")?;
+
+        Ok(())
+    }
+
     fn send_extension_attach_buffer(
         &mut self,
         surface_id: u32,
@@ -1799,6 +1893,7 @@ impl WaylandBridge {
                 // Remove from surface_to_window mapping
                 if let Some(window_id) = self.surface_to_window.remove(&surface_id) {
                     self.pending_damage.remove(&window_id);
+                    let _ = self.send_destroy_window(window_id);
                 }
                 Ok(Vec::new())
             }
@@ -2425,12 +2520,7 @@ impl WaylandBridge {
                     xdg_toplevel_id,
                     serial
                 );
-                let window_id = self
-                    .xdg_shell_manager
-                    .get_toplevel_mut(xdg_toplevel_id)
-                    .and_then(|(_, wl_surface_id)| {
-                        self.surface_to_window.get(&wl_surface_id).copied()
-                    });
+                let window_id = self.window_id_for_toplevel(xdg_toplevel_id);
                 if let Some(window_id) = window_id {
                     bridge_log!("[Bridge] xdg_toplevel.move mapped to window {}", window_id);
                     let _ = self.send_request_move_window(window_id);
@@ -2452,10 +2542,16 @@ impl WaylandBridge {
             }
             xdg_shell::xdg_toplevel_request::SET_MAXIMIZED => {
                 bridge_log!("[Bridge] xdg_toplevel.set_maximized");
+                if let Some(window_id) = self.window_id_for_toplevel(xdg_toplevel_id) {
+                    let _ = self.send_maximize_window(window_id);
+                }
                 Ok(Vec::new())
             }
             xdg_shell::xdg_toplevel_request::UNSET_MAXIMIZED => {
                 bridge_log!("[Bridge] xdg_toplevel.unset_maximized");
+                if let Some(window_id) = self.window_id_for_toplevel(xdg_toplevel_id) {
+                    let _ = self.send_restore_window(window_id);
+                }
                 Ok(Vec::new())
             }
             xdg_shell::xdg_toplevel_request::SET_FULLSCREEN => {
@@ -2468,6 +2564,9 @@ impl WaylandBridge {
             }
             xdg_shell::xdg_toplevel_request::SET_MINIMIZED => {
                 bridge_log!("[Bridge] xdg_toplevel.set_minimized");
+                if let Some(window_id) = self.window_id_for_toplevel(xdg_toplevel_id) {
+                    let _ = self.send_minimize_window(window_id);
+                }
                 Ok(Vec::new())
             }
             _ => {
