@@ -9,7 +9,7 @@ use crate::arch::timer::ArchTimer;
 use crate::environment::NUM_OF_CPUS;
 use crate::sched::scheduler::get_scheduler;
 use core::sync::atomic::{AtomicU64, Ordering};
-use core::sync::OnceLock;
+use spin::Once;
 extern crate alloc;
 use alloc::collections::BinaryHeap;
 use alloc::sync::{Arc, Weak};
@@ -21,10 +21,10 @@ pub struct KernelTimer {
     pub interval: u64,
 }
 
-static KERNEL_TIMER: OnceLock<KernelTimer> = OnceLock::new();
+static KERNEL_TIMER: Once<KernelTimer> = Once::new();
 
 pub fn get_kernel_timer() -> &'static KernelTimer {
-    KERNEL_TIMER.get_or_init(|| KernelTimer::new())
+    KERNEL_TIMER.call_once(|| KernelTimer::new())
 }
 
 impl KernelTimer {

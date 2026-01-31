@@ -4,7 +4,7 @@
 //! using the SBI HSM (Hart State Management) extension.
 
 use crate::arch::riscv64::instruction::sbi::{
-    sbi_hsm_hart_get_status, sbi_hsm_hart_start, HartState,
+    HartState, sbi_hsm_hart_get_status, sbi_hsm_hart_start,
 };
 use crate::early_println;
 use core::sync::atomic::{AtomicUsize, Ordering};
@@ -29,7 +29,7 @@ pub fn get_boot_hart_id() -> usize {
 }
 
 /// External symbol for the AP entry point
-extern "C" {
+unsafe extern "C" {
     fn _entry_ap();
 }
 
@@ -67,11 +67,7 @@ pub fn start_secondary_cpus(boot_hart_id: usize, max_hart_id: usize) {
             }
         };
 
-        early_println!(
-            "[SMP] Hart {} initial state: {:?}",
-            hart_id,
-            state
-        );
+        early_println!("[SMP] Hart {} initial state: {:?}", hart_id, state);
 
         match state {
             HartState::Stopped => {
@@ -88,20 +84,13 @@ pub fn start_secondary_cpus(boot_hart_id: usize, max_hart_id: usize) {
                         // CPU start count is updated in `mark_cpu_started` when the hart finishes initialization
                     }
                     Err(e) => {
-                        early_println!(
-                            "[SMP] Failed to start hart {}: {:?}",
-                            hart_id,
-                            e
-                        );
+                        early_println!("[SMP] Failed to start hart {}: {:?}", hart_id, e);
                     }
                 }
             }
             HartState::Started => {
                 // Hart is already running (shouldn't happen in normal boot)
-                early_println!(
-                    "[SMP] Hart {} is already started, skipping",
-                    hart_id
-                );
+                early_println!("[SMP] Hart {} is already started, skipping", hart_id);
             }
             _ => {
                 early_println!(
@@ -149,9 +138,6 @@ pub fn wait_for_cpus() {
             expected
         );
     } else {
-        early_println!(
-            "[SMP] All {} CPUs ready",
-            crate::environment::NUM_OF_CPUS
-        );
+        early_println!("[SMP] All {} CPUs ready", crate::environment::NUM_OF_CPUS);
     }
 }

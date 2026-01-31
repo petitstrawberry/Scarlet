@@ -19,6 +19,7 @@ pub struct SbiRet {
     pub value: usize,
 }
 
+#[derive(Debug)]
 pub enum SbiError {
     Failed = -1,
     NotSupported = -2,
@@ -169,11 +170,7 @@ pub fn sbi_hsm_hart_get_status(hartid: usize) -> Result<HartState, SbiError> {
 /// # Returns
 /// * `Ok(())` - Hart start request was successful
 /// * `Err(SbiError)` - SBI call error
-pub fn sbi_hsm_hart_start(
-    hartid: usize,
-    start_addr: usize,
-    opaque: usize,
-) -> Result<(), SbiError> {
+pub fn sbi_hsm_hart_start(hartid: usize, start_addr: usize, opaque: usize) -> Result<(), SbiError> {
     // sbi_call expects arg0 in a0, arg1 in a1
     // We need to pass hartid in a0, start_addr in a1, and opaque in a2
     // Our current sbi_call only takes 2 args, so we need to call it directly
@@ -198,7 +195,9 @@ pub fn sbi_hsm_hart_start(
 
     match error {
         0 => Ok(()),
-        error_code if error_code as isize >= -8 && error_code as isize <= -1 => Err(SbiError::from_error(error_code)),
+        error_code if error_code as isize >= -8 && error_code as isize <= -1 => {
+            Err(SbiError::from_error(error_code))
+        }
         _ => Err(SbiError::Failed),
     }
 }
@@ -250,7 +249,9 @@ pub fn sbi_hsm_hart_suspend(
 
     match error {
         0 => Ok(()),
-        error_code if error_code as isize >= -8 && error_code as isize <= -1 => Err(SbiError::from_error(error_code)),
+        error_code if error_code as isize >= -8 && error_code as isize <= -1 => {
+            Err(SbiError::from_error(error_code))
+        }
         _ => Err(SbiError::Failed),
     }
 }

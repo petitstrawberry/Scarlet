@@ -767,10 +767,8 @@ pub extern "C" fn start_ap(cpu_id: usize) {
     // Initialize trap handling for this CPU
     #[cfg(target_arch = "riscv64")]
     {
-        use crate::arch::riscv64::{trap_init, Riscv64};
-        let riscv_mut: &mut Riscv64 = unsafe {
-            core::mem::transmute(riscv as *const _ as usize)
-        };
+        use crate::arch::riscv64::{Riscv64, trap_init};
+        let riscv_mut: &mut Riscv64 = unsafe { core::mem::transmute(riscv as *const _ as usize) };
         trap_init(riscv_mut);
     }
 

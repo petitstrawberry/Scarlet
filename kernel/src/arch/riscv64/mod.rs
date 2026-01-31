@@ -388,7 +388,7 @@ pub fn get_user_trap_handler() -> usize {
 }
 
 #[allow(static_mut_refs)]
-fn trap_init(riscv: &mut Riscv64) {
+pub fn trap_init(riscv: &mut Riscv64) {
     let trap_stack_start = unsafe { KERNEL_STACK.start() };
     let stack_size = STACK_SIZE;
 

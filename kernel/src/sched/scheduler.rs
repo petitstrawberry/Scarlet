@@ -34,9 +34,9 @@
 extern crate alloc;
 
 use core::panic;
-use core::sync::OnceLock;
 
-use alloc::{boxed::Box, collections::vec_deque::VecDeque, string::ToString, vec::Vec};
+use alloc::{boxed::Box, collections::vec_deque::VecDeque, format, string::ToString, vec::Vec};
+use spin::{Once, RwLock};
 
 use crate::print;
 use crate::println;
@@ -361,10 +361,10 @@ impl TaskPool {
     }
 }
 
-static SCHEDULER: OnceLock<Scheduler> = OnceLock::new();
+static SCHEDULER: Once<Scheduler> = Once::new();
 
 pub fn get_scheduler() -> &'static Scheduler {
-    SCHEDULER.get_or_init(|| Scheduler::new())
+    SCHEDULER.call_once(|| Scheduler::new())
 }
 
 pub struct Scheduler {
@@ -382,7 +382,8 @@ impl Scheduler {
     pub fn new() -> Self {
         // Initialize arrays with const blocks
         let mut scheduler = Scheduler {
-            ready_queue: [const { RwLock::new(const { VecDeque::new() }) }; NUM_OF_CPUS],
+            ready_queue: [const { RwLock::new([const { VecDeque::new() }; NUM_PRIORITY_LEVELS]) };
+                NUM_OF_CPUS],
             blocked_queue: [const { RwLock::new(VecDeque::new()) }; NUM_OF_CPUS],
             zombie_queue: [const { RwLock::new(VecDeque::new()) }; NUM_OF_CPUS],
             current_task_id: [const { RwLock::new(None) }; NUM_OF_CPUS],
@@ -390,7 +391,8 @@ impl Scheduler {
 
         // Initialize each queue element explicitly
         for i in 0..NUM_OF_CPUS {
-            scheduler.ready_queue[i] = RwLock::new(const { VecDeque::new() });
+            scheduler.ready_queue[i] =
+                RwLock::new([const { VecDeque::new() }; NUM_PRIORITY_LEVELS]);
             scheduler.blocked_queue[i] = RwLock::new(VecDeque::new());
             scheduler.zombie_queue[i] = RwLock::new(VecDeque::new());
             scheduler.current_task_id[i] = RwLock::new(None);
@@ -443,7 +445,9 @@ impl Scheduler {
         if let Some(current_id) = old_current_task_id {
             // Check if current task is still in ready_queue (it shouldn't be if it's running)
             let ready_queues = self.ready_queue[cpu_id].read();
-            let already_in_queue = ready_queues.iter().any(|q| q.iter().any(|&id| id == current_id));
+            let already_in_queue = ready_queues
+                .iter()
+                .any(|q| q.iter().any(|&id| id == current_id));
             drop(ready_queues);
 
             if !already_in_queue {
@@ -475,9 +479,9 @@ impl Scheduler {
         // Process the selected task
         loop {
             match task_id {
-                Some(task_id) => {
+                Some(tid) => {
                     let t = self
-                        .get_task_by_id(task_id)
+                        .get_task_by_id(tid)
                         .expect("Task must exist in task pool");
 
                     match t.state {
@@ -485,12 +489,12 @@ impl Scheduler {
                             panic!("Task must be initialized before scheduling");
                         }
                         TaskState::Zombie => {
-                            let task_id = t.get_id();
+                            let zombie_id = t.get_id();
                             let parent_id = t.get_parent_id();
-                            self.zombie_queue[cpu_id].write().push_back(task_id);
+                            self.zombie_queue[cpu_id].write().push_back(zombie_id);
                             *self.current_task_id[cpu_id].write() = None;
                             // Wake up any processes waiting for this specific task
-                            wake_task_waiters(task_id);
+                            wake_task_waiters(zombie_id);
                             // Also wake up parent process for waitpid(-1)
                             if let Some(parent_id) = parent_id {
                                 wake_parent_waiters(parent_id);
@@ -503,7 +507,7 @@ impl Scheduler {
                             continue;
                         }
                         TaskState::Terminated => {
-                            get_task_pool().remove_task(task_id);
+                            get_task_pool().remove_task(tid);
                             // Try to get next task
                             task_id = self.pick_highest_priority_task(cpu_id);
                             if task_id.is_none() {
@@ -514,13 +518,13 @@ impl Scheduler {
                         TaskState::Blocked(_) => {
                             // Reset current_task_id since this task is no longer current
                             let mut current = self.current_task_id[cpu_id].write();
-                            if *current == Some(task_id) {
+                            if *current == Some(tid) {
                                 *current = None;
                             }
                             drop(current);
 
                             // Put blocked task to blocked queue without running it
-                            self.blocked_queue[cpu_id].write().push_back(task_id);
+                            self.blocked_queue[cpu_id].write().push_back(tid);
 
                             // Try to get next task
                             task_id = self.pick_highest_priority_task(cpu_id);
@@ -538,7 +542,7 @@ impl Scheduler {
                             // Update current task and add back to ready queue
                             *self.current_task_id[cpu_id].write() = Some(next_task_id);
                             let priority = (t.priority as usize).min(NUM_PRIORITY_LEVELS - 1);
-                            self.ready_queue[cpu_id].write()[priority].push_back(task_id);
+                            self.ready_queue[cpu_id].write()[priority].push_back(tid);
 
                             return (old_current_task_id, Some(next_task_id));
                         }
@@ -1015,16 +1019,12 @@ pub fn create_idle_tasks() {
     let scheduler = get_scheduler();
 
     for cpu_id in 0..NUM_OF_CPUS {
-        let mut idle_task = new_kernel_task(
-            format!("idle_cpu{}", cpu_id),
-            IDLE_PRIORITY,
-            || {
-                // Idle task - just spinloop
-                loop {
-                    crate::arch::instruction::idle();
-                }
-            },
-        );
+        let mut idle_task = new_kernel_task(format!("idle_cpu{}", cpu_id), IDLE_PRIORITY, || {
+            // Idle task - just spinloop
+            loop {
+                crate::arch::instruction::idle();
+            }
+        });
         idle_task.init();
         scheduler.add_task(idle_task, cpu_id);
         crate::early_println!("[SCHED] Created idle task for CPU {}", cpu_id);
