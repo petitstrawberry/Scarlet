@@ -251,11 +251,29 @@ impl Selectable for Counter {
 
     fn wait_until_ready(
         &self,
-        _interest: ReadyInterest,
-        _trapframe: &mut crate::arch::Trapframe,
+        interest: ReadyInterest,
+        trapframe: &mut crate::arch::Trapframe,
         _timeout_ticks: Option<u64>,
     ) -> SelectWaitOutcome {
-        // For now, just return Ready (blocking not fully implemented)
+        let current = self.current_ready(interest);
+        if (interest.read && current.read) || (interest.write && current.write) {
+            return SelectWaitOutcome::Ready;
+        }
+
+        let task_id = {
+            use crate::arch::get_cpu;
+            use crate::sched::scheduler::get_scheduler;
+            let cpu_id = get_cpu().get_cpuid();
+            get_scheduler().get_current_task_id(cpu_id).unwrap_or(0)
+        };
+
+        if interest.read {
+            self.data.read_waker.wait(task_id, trapframe);
+        } else if interest.write {
+            self.data.write_waker.wait(task_id, trapframe);
+        }
+
+        // TODO: handle timeout properly
         SelectWaitOutcome::Ready
     }
 
