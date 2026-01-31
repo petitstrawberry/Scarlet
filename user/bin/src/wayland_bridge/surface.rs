@@ -17,6 +17,8 @@ pub struct Surface {
     pub buffer_id: Option<u32>,
     /// Pending damage regions (x, y, width, height)
     pub damage: Vec<(i32, i32, i32, i32)>,
+    /// Last buffer ID attached to SWS (avoid redundant attach)
+    pub last_attached_buffer: Option<u32>,
     /// Last buffer ID we committed (used to delay wl_buffer.release for zero-copy)
     pub last_committed_buffer: Option<u32>,
     /// Surface role (e.g., "xdg_toplevel")
@@ -55,6 +57,7 @@ impl Surface {
             sws_window_id: None,
             buffer_id: None,
             damage: Vec::new(),
+            last_attached_buffer: None,
             last_committed_buffer: None,
             role: None,
             width: 0,

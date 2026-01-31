@@ -753,9 +753,25 @@ impl WaylandBridge {
         }
 
         if let Some(window_id) = window_id_opt {
-            if let Some(surface) = self.surface_manager.get_surface(wl_surface_id) {
-                if let Some(buffer_id) = surface.buffer_id {
-                    let _ = self.send_extension_attach_buffer(wl_surface_id, window_id, buffer_id);
+            let (buffer_id_opt, should_send) = self
+                .surface_manager
+                .get_surface(wl_surface_id)
+                .and_then(|surface| {
+                    surface.buffer_id.map(|buffer_id| {
+                        (buffer_id, surface.last_attached_buffer != Some(buffer_id))
+                    })
+                })
+                .map(|(buffer_id, should_send)| (Some(buffer_id), should_send))
+                .unwrap_or((None, false));
+
+            if let (Some(buffer_id), true) = (buffer_id_opt, should_send) {
+                if self
+                    .send_extension_attach_buffer(wl_surface_id, window_id, buffer_id)
+                    .is_ok()
+                {
+                    if let Some(surface) = self.surface_manager.get_surface_mut(wl_surface_id) {
+                        surface.last_attached_buffer = Some(buffer_id);
+                    }
                 }
             }
         }
@@ -858,9 +874,25 @@ impl WaylandBridge {
         }
 
         if let Some(window_id) = window_id_opt {
-            if let Some(surface) = self.surface_manager.get_surface(wl_surface_id) {
-                if let Some(buffer_id) = surface.buffer_id {
-                    let _ = self.send_extension_attach_buffer(wl_surface_id, window_id, buffer_id);
+            let (buffer_id_opt, should_send) = self
+                .surface_manager
+                .get_surface(wl_surface_id)
+                .and_then(|surface| {
+                    surface.buffer_id.map(|buffer_id| {
+                        (buffer_id, surface.last_attached_buffer != Some(buffer_id))
+                    })
+                })
+                .map(|(buffer_id, should_send)| (Some(buffer_id), should_send))
+                .unwrap_or((None, false));
+
+            if let (Some(buffer_id), true) = (buffer_id_opt, should_send) {
+                if self
+                    .send_extension_attach_buffer(wl_surface_id, window_id, buffer_id)
+                    .is_ok()
+                {
+                    if let Some(surface) = self.surface_manager.get_surface_mut(wl_surface_id) {
+                        surface.last_attached_buffer = Some(buffer_id);
+                    }
                 }
             }
         }
@@ -913,6 +945,53 @@ impl WaylandBridge {
         entry.height = new_bottom.saturating_sub(new_y);
     }
 
+    fn compute_damage_rect(
+        damage: &[(i32, i32, i32, i32)],
+        surface_width: u32,
+        surface_height: u32,
+    ) -> (u32, u32, u32, u32) {
+        if surface_width == 0 || surface_height == 0 {
+            return (0, 0, 0, 0);
+        }
+        if damage.is_empty() {
+            return (0, 0, surface_width, surface_height);
+        }
+
+        let mut x0 = i32::MAX;
+        let mut y0 = i32::MAX;
+        let mut x1 = i32::MIN;
+        let mut y1 = i32::MIN;
+
+        for &(dx, dy, dw, dh) in damage {
+            if dw <= 0 || dh <= 0 {
+                continue;
+            }
+            let rx0 = dx;
+            let ry0 = dy;
+            let rx1 = dx.saturating_add(dw);
+            let ry1 = dy.saturating_add(dh);
+
+            let cx0 = rx0.max(0).min(surface_width as i32);
+            let cy0 = ry0.max(0).min(surface_height as i32);
+            let cx1 = rx1.max(0).min(surface_width as i32);
+            let cy1 = ry1.max(0).min(surface_height as i32);
+
+            if cx1 <= cx0 || cy1 <= cy0 {
+                continue;
+            }
+            x0 = x0.min(cx0);
+            y0 = y0.min(cy0);
+            x1 = x1.max(cx1);
+            y1 = y1.max(cy1);
+        }
+
+        if x1 <= x0 || y1 <= y0 {
+            return (0, 0, surface_width, surface_height);
+        }
+
+        (x0 as u32, y0 as u32, (x1 - x0) as u32, (y1 - y0) as u32)
+    }
+
     fn flush_pending_updates(&mut self) -> Result<bool, &'static str> {
         if self.pending_damage.is_empty() {
             return Ok(false);
@@ -950,38 +1029,25 @@ impl WaylandBridge {
     }
 
     /// Update SWS window buffer when surface commits
-    fn update_sws_window(&mut self, wl_surface_id: u32) -> Result<(), &'static str> {
+    fn update_sws_window(
+        &mut self,
+        wl_surface_id: u32,
+        damage_rect: (u32, u32, u32, u32),
+    ) -> Result<(), &'static str> {
         let window_id = *self
             .surface_to_window
             .get(&wl_surface_id)
             .ok_or("Surface not mapped to window")?;
-
-        // Get surface and buffer info
-        let surface = self
-            .surface_manager
-            .get_surface(wl_surface_id)
-            .ok_or("Surface not found")?;
-
-        if surface.buffer_id.is_none() {
-            return Err("No buffer attached");
-        }
 
         // Get SWS window SHM info
         if self.window_shm.get(&window_id).is_none() {
             return Err("Window SHM not found");
         }
 
-        // Use full surface damage for simplicity (or first damage rect if available)
-        let (x, y, width, height) = if let Some(&(dx, dy, dw, dh)) = surface.damage.first() {
-            (
-                dx.max(0) as u32,
-                dy.max(0) as u32,
-                dw.max(0) as u32,
-                dh.max(0) as u32,
-            )
-        } else {
-            (0, 0, surface.width, surface.height)
-        };
+        let (x, y, width, height) = damage_rect;
+        if width == 0 || height == 0 {
+            return Ok(());
+        }
 
         self.queue_pending_damage(window_id, wl_surface_id, x, y, width, height);
 
@@ -1634,12 +1700,17 @@ impl WaylandBridge {
                     let buffer_id = Self::parse_u32(payload, 0).unwrap_or(0);
                     let _x = Self::parse_i32(payload, 4).unwrap_or(0);
                     let _y = Self::parse_i32(payload, 8).unwrap_or(0);
+                    let mut should_send_attach = false;
 
                     if let Some(surface) = self.surface_manager.get_surface_mut(surface_id) {
                         if buffer_id == 0 {
                             surface.buffer_id = None;
+                            surface.last_attached_buffer = None;
                         } else {
                             surface.attach(buffer_id);
+                            if surface.last_attached_buffer != Some(buffer_id) {
+                                should_send_attach = true;
+                            }
                             if let Some(buffer) = self.shm_manager.get_buffer(buffer_id) {
                                 let buffer_width = buffer.width.max(0) as u32;
                                 let buffer_height = buffer.height.max(0) as u32;
@@ -1690,10 +1761,16 @@ impl WaylandBridge {
                     if buffer_id != 0 {
                         if let Some(&window_id) = self.surface_to_window.get(&surface_id) {
                             // bridge_log!("[Bridge] Sending attach for surface {} buffer {} window {}", surface_id, buffer_id, window_id);
-                            if let Err(e) =
-                                self.send_extension_attach_buffer(surface_id, window_id, buffer_id)
-                            {
-                                bridge_log!("[Bridge] Failed to send attach buffer: {}", e);
+                            if should_send_attach {
+                                if let Err(e) = self
+                                    .send_extension_attach_buffer(surface_id, window_id, buffer_id)
+                                {
+                                    bridge_log!("[Bridge] Failed to send attach buffer: {}", e);
+                                } else if let Some(surface) =
+                                    self.surface_manager.get_surface_mut(surface_id)
+                                {
+                                    surface.last_attached_buffer = Some(buffer_id);
+                                }
                             }
                         } else {
                             bridge_log!("[Bridge] No window ID found for surface {}", surface_id);
@@ -1726,6 +1803,7 @@ impl WaylandBridge {
                 let mut should_update = false;
                 let mut buffer_present = false;
                 let mut surface_size = (0u32, 0u32);
+                let mut damage_rect = (0u32, 0u32, 0u32, 0u32);
                 let mut callback_serial = None;
                 let serial_for_callback = self.allocate_serial();
                 let mut configure_msgs = Vec::new();
@@ -1738,6 +1816,8 @@ impl WaylandBridge {
                     should_update = surface.role.is_some();
                     buffer_present = surface.buffer_id.is_some();
                     surface_size = (surface.width.max(1), surface.height.max(1));
+                    damage_rect =
+                        Self::compute_damage_rect(&surface.damage, surface.width, surface.height);
                     surface.commit();
                     let current_buffer = surface.buffer_id;
                     if let Some(prev_buffer) = surface.swap_committed_buffer(current_buffer) {
@@ -1801,7 +1881,7 @@ impl WaylandBridge {
                         );
                     }
                     if self.surface_to_window.contains_key(&surface_id) {
-                        if let Err(e) = self.update_sws_window(surface_id) {
+                        if let Err(e) = self.update_sws_window(surface_id, damage_rect) {
                             bridge_log!("[Bridge] Failed to update SWS window: {}", e);
                         }
                     }
