@@ -603,6 +603,29 @@ impl MemoryMappingOps for Fat32FileObject {
         Ok((paddr, 0x3, true))
     }
 
+    fn get_mapping_info_with(
+        &self,
+        offset: usize,
+        length: usize,
+        is_shared: bool,
+    ) -> Result<(usize, usize, bool), &'static str> {
+        if is_shared {
+            if offset % PAGE_SIZE != 0 {
+                return Err("Offset not page aligned");
+            }
+
+            let file_size = self.node.metadata.read().size;
+            if file_size == 0 || offset >= file_size {
+                return Err("Offset beyond file size");
+            }
+
+            let _ = length;
+            return Ok((0, 0x3, true));
+        }
+
+        self.get_mapping_info(offset, length)
+    }
+
     fn on_mapped(&self, vaddr: usize, _paddr: usize, length: usize, offset: usize) {
         if length == 0 {
             return;

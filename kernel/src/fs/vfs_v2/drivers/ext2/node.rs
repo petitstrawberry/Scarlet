@@ -555,6 +555,43 @@ impl MemoryMappingOps for Ext2FileObject {
         Ok((paddr, 0x3, true))
     }
 
+    fn get_mapping_info_with(
+        &self,
+        offset: usize,
+        length: usize,
+        is_shared: bool,
+    ) -> Result<(usize, usize, bool), &'static str> {
+        if is_shared {
+            if offset % PAGE_SIZE != 0 {
+                return Err("Offset not page aligned");
+            }
+
+            let fs = self
+                .filesystem
+                .read()
+                .as_ref()
+                .and_then(|weak| weak.upgrade())
+                .ok_or("Filesystem closed")?;
+            let ext2_fs = fs
+                .as_any()
+                .downcast_ref::<Ext2FileSystem>()
+                .ok_or("Invalid filesystem type")?;
+            let inode = ext2_fs
+                .read_inode(self.inode_number)
+                .map_err(|_| "Read inode failed")?;
+            let file_size = self.effective_size(inode.size as usize);
+
+            if file_size == 0 || offset >= file_size {
+                return Err("Offset beyond file size");
+            }
+
+            let _ = length;
+            return Ok((0, 0x3, true));
+        }
+
+        self.get_mapping_info(offset, length)
+    }
+
     fn on_mapped(&self, _vaddr: usize, _paddr: usize, _length: usize, _offset: usize) {
         if _length == 0 {
             return;
