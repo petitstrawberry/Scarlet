@@ -477,6 +477,18 @@ impl WaylandBridge {
                     } => {
                         self.handle_sws_input_event(window_id, time, type_, code, value);
                     }
+                    protocol_sws::ServerMessage::ExtensionInputEvent {
+                        external_client_id,
+                        window_id,
+                        time,
+                        type_,
+                        code,
+                        value,
+                    } => {
+                        if self.extension_id == Some(external_client_id) {
+                            self.handle_sws_input_event(window_id, time, type_, code, value);
+                        }
+                    }
                     other => {
                         self.sws_pending.push(other);
                     }
@@ -1071,107 +1083,120 @@ impl WaylandBridge {
     fn handle_client(&mut self, mut client: Socket) -> Result<(), &'static str> {
         println!("[Bridge] New client connected");
 
+        client
+            .set_nonblocking(true)
+            .map_err(|_| "Failed to set client socket non-blocking")?;
+
         let mut buffer: Vec<u8> = Vec::new();
 
         loop {
-            let mut read_buf = [0u8; 4096];
-            // Read message from client
-            let n = match client.read(&mut read_buf) {
-                Ok(0) => {
-                    println!("[Bridge] Client disconnected");
-                    break;
-                }
-                Ok(n) => n,
-                Err(_) => {
-                    println!("[Bridge] Error reading from client");
-                    break;
-                }
-            };
-
-            if is_debug_enabled() {
-                println!("[Bridge] Received {} bytes from client", n);
-            }
-            buffer.extend_from_slice(&read_buf[..n]);
-
-            // Parse and handle messages
-            let mut offset = 0;
-            while offset + 8 <= buffer.len() {
-                let header_bytes = &buffer[offset..offset + 8];
-                let mut header_array = [0u8; 8];
-                header_array.copy_from_slice(header_bytes);
-                let header = MessageHeader::from_bytes(&header_array);
-
-                let msg_size = header.size() as usize;
-                if offset + msg_size > buffer.len() {
-                    if is_debug_enabled() {
-                        println!("[Bridge] Incomplete message, waiting for more data");
+            let mut got_data = false;
+            loop {
+                let mut read_buf = [0u8; 4096];
+                match client.read(&mut read_buf) {
+                    Ok(0) => {
+                        println!("[Bridge] Client disconnected");
+                        return Ok(());
                     }
-                    break;
+                    Ok(n) => {
+                        got_data = true;
+                        if is_debug_enabled() {
+                            println!("[Bridge] Received {} bytes from client", n);
+                        }
+                        buffer.extend_from_slice(&read_buf[..n]);
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                        break;
+                    }
+                    Err(_) => {
+                        println!("[Bridge] Error reading from client");
+                        return Ok(());
+                    }
                 }
+            }
 
-                if is_debug_enabled() {
-                    println!(
-                        "[Bridge] Message: object_id={} opcode={} size={}",
-                        header.object_id,
-                        header.opcode(),
-                        msg_size
-                    );
-                }
+            if got_data {
+                // Parse and handle messages
+                let mut offset = 0;
+                while offset + 8 <= buffer.len() {
+                    let header_bytes = &buffer[offset..offset + 8];
+                    let mut header_array = [0u8; 8];
+                    header_array.copy_from_slice(header_bytes);
+                    let header = MessageHeader::from_bytes(&header_array);
 
-                // Handle the message
-                let responses = self.handle_message(
-                    &header,
-                    &buffer[offset + 8..offset + msg_size],
-                    &mut client,
-                )?;
-                for response in responses {
-                    let response_bytes = response.encode();
-                    // Always log responses for debugging
-                    println!(
-                        "[Bridge] Sending response: obj={} opcode={} size={}",
-                        response.header.object_id,
-                        response.header.opcode(),
-                        response_bytes.len()
-                    );
-                    // Only wl_keyboard.keymap requires an FD/handle transfer.
-                    if response.header.opcode() == input::keyboard_event::KEYMAP {
-                        let is_keyboard = self
-                            .objects
-                            .get(&response.header.object_id)
-                            .map(|iface| iface == "wl_keyboard")
-                            .unwrap_or(false);
-                        if is_keyboard {
-                            if let Some(shm) = self.keymap_shm.as_ref() {
-                                match client.send_handle_and_data(shm.as_handle(), &response_bytes)
-                                {
-                                    Ok(()) => {
-                                        if is_debug_enabled() {
+                    let msg_size = header.size() as usize;
+                    if offset + msg_size > buffer.len() {
+                        if is_debug_enabled() {
+                            println!("[Bridge] Incomplete message, waiting for more data");
+                        }
+                        break;
+                    }
+
+                    if is_debug_enabled() {
+                        println!(
+                            "[Bridge] Message: object_id={} opcode={} size={}",
+                            header.object_id,
+                            header.opcode(),
+                            msg_size
+                        );
+                    }
+
+                    // Handle the message
+                    let responses = self.handle_message(
+                        &header,
+                        &buffer[offset + 8..offset + msg_size],
+                        &mut client,
+                    )?;
+                    for response in responses {
+                        let response_bytes = response.encode();
+                        // Always log responses for debugging
+                        println!(
+                            "[Bridge] Sending response: obj={} opcode={} size={}",
+                            response.header.object_id,
+                            response.header.opcode(),
+                            response_bytes.len()
+                        );
+                        // Only wl_keyboard.keymap requires an FD/handle transfer.
+                        if response.header.opcode() == input::keyboard_event::KEYMAP {
+                            let is_keyboard = self
+                                .objects
+                                .get(&response.header.object_id)
+                                .map(|iface| iface == "wl_keyboard")
+                                .unwrap_or(false);
+                            if is_keyboard {
+                                if let Some(shm) = self.keymap_shm.as_ref() {
+                                    match client
+                                        .send_handle_and_data(shm.as_handle(), &response_bytes)
+                                    {
+                                        Ok(()) => {
+                                            if is_debug_enabled() {
+                                                println!(
+                                                    "[Bridge] KEYMAP sent with handle successfully"
+                                                );
+                                            }
+                                            continue;
+                                        }
+                                        Err(e) => {
                                             println!(
-                                                "[Bridge] KEYMAP sent with handle successfully"
+                                                "[Bridge] Failed to send KEYMAP with handle: {:?}, falling back",
+                                                e
                                             );
                                         }
-                                        continue;
-                                    }
-                                    Err(e) => {
-                                        println!(
-                                            "[Bridge] Failed to send KEYMAP with handle: {:?}, falling back",
-                                            e
-                                        );
                                     }
                                 }
                             }
                         }
+                        client
+                            .write(&response_bytes)
+                            .map_err(|_| "Failed to send response")?;
                     }
-                    client
-                        .write(&response_bytes)
-                        .map_err(|_| "Failed to send response")?;
+
+                    offset += msg_size;
                 }
 
-                offset += msg_size;
-            }
-
-            if offset > 0 {
-                buffer.drain(0..offset);
+                if offset > 0 {
+                    buffer.drain(0..offset);
+                }
             }
 
             // Check for input events from SWS (from shared connection)
@@ -1181,6 +1206,7 @@ impl WaylandBridge {
                 let mut queue = self.input_event_queue.lock();
                 input_events.extend(queue.drain(..));
             }
+            let had_input_events = !input_events.is_empty();
             for input_msg in input_events {
                 let msg_bytes = input_msg.encode();
                 // Always log input events for debugging
@@ -1194,9 +1220,11 @@ impl WaylandBridge {
                     println!("[Bridge] Failed to forward input event: {:?}", e);
                 }
             }
-        }
 
-        Ok(())
+            if !got_data && !had_input_events {
+                thread::sleep(Duration::from_millis(1));
+            }
+        }
     }
 
     /// Handle a Wayland protocol message
