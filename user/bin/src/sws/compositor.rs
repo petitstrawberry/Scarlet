@@ -1615,6 +1615,12 @@ impl Compositor {
             CompositorInputEvent::MouseButton { button, pressed } => {
                 if button == key_codes::BTN_LEFT {
                     self.left_button_down = pressed;
+                    println!(
+                        "[Compositor] Left button {} at cursor=({}, {})",
+                        if pressed { "down" } else { "up" },
+                        self.cursor.x,
+                        self.cursor.y
+                    );
                     if !pressed {
                         self.last_left_down_cursor = None;
                         // Always exit move mode on left button release.
@@ -2071,6 +2077,10 @@ impl Compositor {
             }
             IpcEvent::RequestMove { window_id } => {
                 println!("[Compositor] Window #{} requested move", window_id);
+                println!(
+                    "[Compositor] RequestMove state: left_down={} last_left_down={:?} cursor=({}, {})",
+                    self.left_button_down, self.last_left_down_cursor, self.cursor.x, self.cursor.y
+                );
 
                 let (start_window_x, start_window_y) =
                     match self.window_manager.get_window(window_id) {

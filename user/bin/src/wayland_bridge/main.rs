@@ -426,6 +426,15 @@ impl WaylandBridge {
             }
             EV_KEY => {
                 if code >= BTN_MOUSE_MIN && code <= BTN_MOUSE_MAX {
+                    if code == BTN_LEFT {
+                        bridge_log!(
+                            "[Bridge] Pointer button: code={} value={} pos=({}, {})",
+                            code,
+                            value,
+                            self.pointer_x,
+                            self.pointer_y
+                        );
+                    }
                     if let Some(pointer_id) = self.focused_pointer {
                         let mut msg = WaylandMessage::new(pointer_id, input::pointer_event::BUTTON);
                         msg.add_arg(WaylandArg::Uint(self.allocate_serial()));
