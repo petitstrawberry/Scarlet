@@ -61,6 +61,12 @@ impl InputManager {
         self.pointers.insert(pointer_id, pointer);
     }
 
+    pub fn pointer_seat_id(&self, pointer_id: u32) -> Option<u32> {
+        self.pointers
+            .get(&pointer_id)
+            .map(|pointer| pointer.seat_id)
+    }
+
     pub fn create_keyboard(&mut self, keyboard_id: u32, seat_id: u32) {
         let keyboard = Keyboard {
             keyboard_id,

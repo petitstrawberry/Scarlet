@@ -35,14 +35,14 @@ impl Registry {
         // Register default globals
         registry.add_global("wl_compositor", 4);
         registry.add_global("wl_shm", 1);
-        registry.add_global("wl_seat", 7);
+        registry.add_global("wl_seat", 5);
         registry.add_global("wl_output", 3);
         registry.add_global("xdg_wm_base", 2);
 
         // Clear and re-add with different order (seat first, version 7)
         registry.globals.clear();
         registry.next_name = 1;
-        registry.add_global("wl_seat", 7);
+        registry.add_global("wl_seat", 5);
         registry.add_global("wl_compositor", 4);
         registry.add_global("wl_data_device_manager", 3);
         registry.add_global("wl_shm", 1);

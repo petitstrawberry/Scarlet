@@ -93,10 +93,55 @@ fn is_warn_enabled() -> bool {
     get_log_level() >= LogLevel::Warn
 }
 
+fn log_moves_only() -> bool {
+    static LOG_MOVES_ONLY: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *LOG_MOVES_ONLY.get_or_init(|| {
+        std::env::var("WAYLAND_BRIDGE_LOG_MOVES_ONLY")
+            .map(|value| value != "0")
+            .unwrap_or(false)
+    })
+}
+
+fn log_suppress_moves() -> bool {
+    static LOG_SUPPRESS_MOVES: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *LOG_SUPPRESS_MOVES.get_or_init(|| {
+        std::env::var("WAYLAND_BRIDGE_LOG_SUPPRESS_MOVES")
+            .map(|value| value != "0")
+            .unwrap_or(false)
+    })
+}
+
+fn log_suppress_forwarding() -> bool {
+    static LOG_SUPPRESS_FORWARDING: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *LOG_SUPPRESS_FORWARDING.get_or_init(|| {
+        std::env::var("WAYLAND_BRIDGE_LOG_SUPPRESS_FORWARDING")
+            .map(|value| value != "0")
+            .unwrap_or(false)
+    })
+}
+
 macro_rules! bridge_log {
     ($($arg:tt)*) => {
         if is_debug_enabled() {
-            ::std::println!($($arg)*);
+            let msg = ::std::format!($($arg)*);
+            let is_move_msg =
+                msg.contains("xdg_toplevel.move") || msg.contains("REQUEST_MOVE_WINDOW");
+            let is_forwarding_msg = msg.contains("Forwarding input event");
+            if log_moves_only() {
+                if is_move_msg {
+                    ::std::println!("{}", msg);
+                }
+            } else if log_suppress_moves() {
+                if !is_move_msg && !(log_suppress_forwarding() && is_forwarding_msg) {
+                    ::std::println!("{}", msg);
+                }
+            } else if log_suppress_forwarding() {
+                if !is_forwarding_msg {
+                    ::std::println!("{}", msg);
+                }
+            } else {
+                ::std::println!("{}", msg);
+            }
         }
     };
 }
@@ -203,6 +248,12 @@ struct WaylandBridge {
     pointer_y: i32,
     /// Current cursor surface (if set via wl_pointer.set_cursor)
     cursor_surface_id: Option<u32>,
+    /// Track pointer left button state for xdg_toplevel.move timing
+    left_button_down: bool,
+    /// Last left-button press serial (from wl_pointer.button)
+    last_left_button_serial: Option<u32>,
+    /// Last left-button press time
+    last_left_button_time: Option<u32>,
 }
 
 impl WaylandBridge {
@@ -246,6 +297,9 @@ impl WaylandBridge {
             pointer_x: 0,
             pointer_y: 0,
             cursor_surface_id: None,
+            left_button_down: false,
+            last_left_button_serial: None,
+            last_left_button_time: None,
         })
     }
 
@@ -327,6 +381,14 @@ impl WaylandBridge {
         queue.extend(messages);
     }
 
+    fn pointer_frame_supported(&self, pointer_id: u32) -> bool {
+        let seat_id = match self.input_manager.pointer_seat_id(pointer_id) {
+            Some(id) => id,
+            None => return false,
+        };
+        self.object_versions.get(&seat_id).copied().unwrap_or(1) >= 5
+    }
+
     fn queue_focus_events(&mut self, surface_id: u32) {
         if self.focused_surface == Some(surface_id) {
             return;
@@ -397,6 +459,8 @@ impl WaylandBridge {
         }
 
         let mut messages = Vec::new();
+        let mut pointer_event_sent = false;
+        let mut pointer_event_id: Option<u32> = None;
 
         match type_ {
             EV_REL => {
@@ -411,6 +475,8 @@ impl WaylandBridge {
                     msg.add_arg(WaylandArg::Fixed(self.pointer_x << 8));
                     msg.add_arg(WaylandArg::Fixed(self.pointer_y << 8));
                     messages.push(msg);
+                    pointer_event_sent = true;
+                    pointer_event_id = Some(pointer_id);
                 }
             }
             EV_ABS => {
@@ -425,22 +491,23 @@ impl WaylandBridge {
                     msg.add_arg(WaylandArg::Fixed(self.pointer_x << 8));
                     msg.add_arg(WaylandArg::Fixed(self.pointer_y << 8));
                     messages.push(msg);
+                    pointer_event_sent = true;
+                    pointer_event_id = Some(pointer_id);
                 }
             }
             EV_KEY => {
                 if code >= BTN_MOUSE_MIN && code <= BTN_MOUSE_MAX {
                     if code == BTN_LEFT {
-                        bridge_log!(
-                            "[Bridge] Pointer button: code={} value={} pos=({}, {})",
-                            code,
-                            value,
-                            self.pointer_x,
-                            self.pointer_y
-                        );
+                        self.left_button_down = value != 0;
                     }
                     if let Some(pointer_id) = self.focused_pointer {
+                        let serial = self.allocate_serial();
+                        if code == BTN_LEFT && value != 0 {
+                            self.last_left_button_serial = Some(serial);
+                            self.last_left_button_time = Some(time as u32);
+                        }
                         let mut msg = WaylandMessage::new(pointer_id, input::pointer_event::BUTTON);
-                        msg.add_arg(WaylandArg::Uint(self.allocate_serial()));
+                        msg.add_arg(WaylandArg::Uint(serial));
                         msg.add_arg(WaylandArg::Uint(time as u32));
                         msg.add_arg(WaylandArg::Uint(code as u32));
                         msg.add_arg(WaylandArg::Uint(if value != 0 {
@@ -449,6 +516,8 @@ impl WaylandBridge {
                             input::pointer_button_state::RELEASED
                         }));
                         messages.push(msg);
+                        pointer_event_sent = true;
+                        pointer_event_id = Some(pointer_id);
                     }
                 } else if let Some(keyboard_id) = self.focused_keyboard {
                     let mut msg = WaylandMessage::new(keyboard_id, input::keyboard_event::KEY);
@@ -460,6 +529,15 @@ impl WaylandBridge {
                 }
             }
             _ => {}
+        }
+
+        if pointer_event_sent {
+            if let Some(pointer_id) = pointer_event_id {
+                if self.pointer_frame_supported(pointer_id) {
+                    let frame_msg = WaylandMessage::new(pointer_id, input::pointer_event::FRAME);
+                    messages.push(frame_msg);
+                }
+            }
         }
 
         self.queue_input_messages(messages);
@@ -1423,12 +1501,12 @@ impl WaylandBridge {
             for input_msg in input_events {
                 let msg_bytes = input_msg.encode();
                 // Always log input events for debugging
-                bridge_log!(
-                    "[Bridge] Forwarding input event: obj={} opcode={} size={} bytes",
-                    input_msg.header.object_id,
-                    input_msg.header.opcode(),
-                    msg_bytes.len()
-                );
+                // bridge_log!(
+                //     "[Bridge] Forwarding input event: obj={} opcode={} size={} bytes",
+                //     input_msg.header.object_id,
+                //     input_msg.header.opcode(),
+                //     msg_bytes.len()
+                // );
                 if let Err(e) = client.write(&msg_bytes) {
                     bridge_log!("[Bridge] Failed to forward input event: {:?}", e);
                 }
@@ -2784,6 +2862,13 @@ impl WaylandBridge {
                                             msg.add_arg(WaylandArg::Uint(button_code as u32));
                                             msg.add_arg(WaylandArg::Uint(value as u32)); // state (0=up, 1=down)
                                             messages.push(msg);
+
+                                            // End pointer event frame
+                                            let frame_msg = WaylandMessage::new(
+                                                *id,
+                                                input::pointer_event::FRAME,
+                                            );
+                                            messages.push(frame_msg);
                                             bridge_log!(
                                                 "[Input Thread] Queued pointer button event: id={}, button={}, state={}, x={}, y={}",
                                                 id,
