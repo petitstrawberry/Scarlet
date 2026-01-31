@@ -37,6 +37,8 @@ pub enum KernelObjectType {
     Socket = 7,
     /// Shared memory for IPC
     SharedMemory = 8,
+    /// Counter for event notification (like eventfd)
+    Counter = 9,
     /// Unknown or unsupported type
     Unknown = 0,
 }
@@ -97,6 +99,23 @@ impl KernelObjectInfo {
                 stream_ops: true,
                 file_ops: false,
                 pipe_ops: true,
+                event_ops: false,
+                clone_ops: true,
+                reserved: [false; 3],
+            },
+            handle_role,
+            access_mode: Self::encode_access_mode(readable, writable),
+        }
+    }
+
+    /// Create info for a Counter KernelObject
+    pub fn for_counter(handle_role: HandleRole, readable: bool, writable: bool) -> Self {
+        Self {
+            object_type: KernelObjectType::Counter,
+            capabilities: ObjectCapabilities {
+                stream_ops: true,
+                file_ops: false,
+                pipe_ops: false,
                 event_ops: false,
                 clone_ops: true,
                 reserved: [false; 3],

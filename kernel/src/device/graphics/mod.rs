@@ -227,7 +227,16 @@ impl MemoryMappingOps for GenericGraphicsDevice {
     }
 }
 
-impl Selectable for GenericGraphicsDevice {}
+impl Selectable for GenericGraphicsDevice {
+    fn wait_until_ready(
+        &self,
+        _interest: crate::object::capability::selectable::ReadyInterest,
+        _trapframe: &mut crate::arch::Trapframe,
+        _timeout_ticks: Option<u64>,
+    ) -> crate::object::capability::selectable::SelectWaitOutcome {
+        crate::object::capability::selectable::SelectWaitOutcome::Ready
+    }
+}
 
 impl GraphicsDevice for GenericGraphicsDevice {
     fn get_display_name(&self) -> &'static str {

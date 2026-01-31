@@ -16,11 +16,28 @@ use alloc::{
     vec,
     vec::Vec,
 };
+use core::sync::atomic::{AtomicU64, Ordering};
 
 use super::errno;
 
+static XORSHIFT_STATE: AtomicU64 = AtomicU64::new(0);
+
+fn remap_shm_path(path: &str) -> String {
+    if let Some(rest) = path.strip_prefix("/dev/shm/") {
+        alloc::format!("/tmp/{}", rest)
+    } else if path == "/dev/shm" || path == "/dev/shm/" {
+        "/tmp".to_string()
+    } else {
+        path.to_string()
+    }
+}
+
+fn is_wl_shm_path(path: &str) -> bool {
+    path.starts_with("/tmp/wl_shm-")
+}
+
 /// Linux stat structure for RISC-V 64-bit
-/// This structure matches the Linux kernel's definition for newstat on RISC-V 64-bit
+/// Matches asm-generic struct stat layout used by musl on 64-bit.
 #[derive(Debug, Clone, Copy)]
 #[repr(C)]
 pub struct LinuxStat {
@@ -31,16 +48,63 @@ pub struct LinuxStat {
     pub st_uid: u32,        // User ID of owner
     pub st_gid: u32,        // Group ID of owner
     pub st_rdev: u64,       // Device ID (if special file)
+    pub __pad1: u64,        // Padding for alignment
     pub st_size: i64,       // Total size, in bytes
     pub st_blksize: i32,    // Block size for filesystem I/O
+    pub __pad2: i32,        // Padding for alignment
     pub st_blocks: i64,     // Number of 512B blocks allocated
     pub st_atime: i64,      // Time of last access (seconds)
-    pub st_atime_nsec: i64, // Time of last access (nanoseconds)
+    pub st_atime_nsec: u64, // Time of last access (nanoseconds)
     pub st_mtime: i64,      // Time of last modification (seconds)
-    pub st_mtime_nsec: i64, // Time of last modification (nanoseconds)
+    pub st_mtime_nsec: u64, // Time of last modification (nanoseconds)
     pub st_ctime: i64,      // Time of last status change (seconds)
-    pub st_ctime_nsec: i64, // Time of last status change (nanoseconds)
-    pub __unused: [i32; 2], // Reserved for future use
+    pub st_ctime_nsec: u64, // Time of last status change (nanoseconds)
+    pub __unused4: u32,     // Reserved
+    pub __unused5: u32,     // Reserved
+}
+
+/// Linux statx timestamp structure
+#[derive(Debug, Clone, Copy, Default)]
+#[repr(C)]
+pub struct LinuxStatxTimestamp {
+    pub tv_sec: i64,
+    pub tv_nsec: u32,
+    pub __reserved: i32,
+}
+
+/// Linux statx structure (matches Linux UAPI layout)
+#[derive(Debug, Clone, Copy, Default)]
+#[repr(C)]
+pub struct LinuxStatx {
+    pub stx_mask: u32,
+    pub stx_blksize: u32,
+    pub stx_attributes: u64,
+    pub stx_nlink: u32,
+    pub stx_uid: u32,
+    pub stx_gid: u32,
+    pub stx_mode: u16,
+    pub __spare0: [u16; 1],
+    pub stx_ino: u64,
+    pub stx_size: u64,
+    pub stx_blocks: u64,
+    pub stx_attributes_mask: u64,
+    pub stx_atime: LinuxStatxTimestamp,
+    pub stx_btime: LinuxStatxTimestamp,
+    pub stx_ctime: LinuxStatxTimestamp,
+    pub stx_mtime: LinuxStatxTimestamp,
+    pub stx_rdev_major: u32,
+    pub stx_rdev_minor: u32,
+    pub stx_dev_major: u32,
+    pub stx_dev_minor: u32,
+    pub stx_mnt_id: u64,
+    pub stx_dio_mem_align: u32,
+    pub stx_dio_offset_align: u32,
+    pub stx_subvol: u64,
+    pub stx_atomic_write_unit_min: u32,
+    pub stx_atomic_write_unit_max: u32,
+    pub stx_atomic_write_segments_max: u32,
+    pub stx_dio_read_offset_align: u32,
+    pub __spare3: [u64; 9],
 }
 
 // Linux file type constants for st_mode field
@@ -72,6 +136,41 @@ pub const S_IROTH: u32 = 0o0004; // Others have read permission
 #[allow(dead_code)]
 pub const S_IWOTH: u32 = 0o0002; // Others have write permission
 pub const S_IXOTH: u32 = 0o0001; // Others have execute permission
+
+// Linux statx mask bits
+#[allow(dead_code)]
+pub const STATX_TYPE: u32 = 0x00000001;
+#[allow(dead_code)]
+pub const STATX_MODE: u32 = 0x00000002;
+#[allow(dead_code)]
+pub const STATX_NLINK: u32 = 0x00000004;
+#[allow(dead_code)]
+pub const STATX_UID: u32 = 0x00000008;
+#[allow(dead_code)]
+pub const STATX_GID: u32 = 0x00000010;
+#[allow(dead_code)]
+pub const STATX_ATIME: u32 = 0x00000020;
+#[allow(dead_code)]
+pub const STATX_MTIME: u32 = 0x00000040;
+#[allow(dead_code)]
+pub const STATX_CTIME: u32 = 0x00000080;
+#[allow(dead_code)]
+pub const STATX_INO: u32 = 0x00000100;
+#[allow(dead_code)]
+pub const STATX_SIZE: u32 = 0x00000200;
+#[allow(dead_code)]
+pub const STATX_BLOCKS: u32 = 0x00000400;
+pub const STATX_BASIC_STATS: u32 = 0x000007ff;
+#[allow(dead_code)]
+pub const STATX_BTIME: u32 = 0x00000800;
+
+// Linux getrandom flags
+#[allow(dead_code)]
+pub const GRND_NONBLOCK: u32 = 0x0001;
+#[allow(dead_code)]
+pub const GRND_RANDOM: u32 = 0x0002;
+#[allow(dead_code)]
+pub const GRND_INSECURE: u32 = 0x0004;
 
 // Linux fcntl command constants
 pub const F_DUPFD: u32 = 0; // Duplicate file descriptor
@@ -166,8 +265,10 @@ impl LinuxStat {
             st_uid: 0,  // Root user
             st_gid: 0,  // Root group
             st_rdev: 0, // Not a special file by default
+            __pad1: 0,
             st_size: metadata.size as i64,
-            st_blksize: 4096,                                // Standard block size
+            st_blksize: 4096, // Standard block size
+            __pad2: 0,
             st_blocks: ((metadata.size + 511) / 512) as i64, // Number of 512-byte blocks
             st_atime: metadata.accessed_time as i64,
             st_atime_nsec: 0,
@@ -175,9 +276,94 @@ impl LinuxStat {
             st_mtime_nsec: 0,
             st_ctime: metadata.created_time as i64,
             st_ctime_nsec: 0,
-            __unused: [0; 2],
+            __unused4: 0,
+            __unused5: 0,
         }
     }
+}
+
+fn statx_timestamp_from_secs(seconds: u64) -> LinuxStatxTimestamp {
+    LinuxStatxTimestamp {
+        tv_sec: seconds as i64,
+        tv_nsec: 0,
+        __reserved: 0,
+    }
+}
+
+fn next_pseudo_random_u64() -> u64 {
+    loop {
+        let mut state = XORSHIFT_STATE.load(Ordering::Relaxed);
+        if state == 0 {
+            state = crate::time::current_time() ^ 0x9e3779b97f4a7c15;
+            if state == 0 {
+                state = 0x4f1bbcdcb7a43413;
+            }
+        }
+        let mut x = state;
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        if XORSHIFT_STATE
+            .compare_exchange(state, x, Ordering::Relaxed, Ordering::Relaxed)
+            .is_ok()
+        {
+            return x;
+        }
+    }
+}
+
+fn fill_pseudo_random(buffer: &mut [u8]) {
+    let mut offset = 0;
+    while offset < buffer.len() {
+        let bytes = next_pseudo_random_u64().to_le_bytes();
+        let to_copy = core::cmp::min(bytes.len(), buffer.len() - offset);
+        buffer[offset..offset + to_copy].copy_from_slice(&bytes[..to_copy]);
+        offset += to_copy;
+    }
+}
+
+fn fill_statx_from_stat(
+    statx: &mut LinuxStatx,
+    stat: &LinuxStat,
+    created_time: u64,
+    requested_mask: u32,
+) {
+    let supported_mask = STATX_BASIC_STATS | STATX_BTIME;
+    let effective_mask = if requested_mask == 0 {
+        STATX_BASIC_STATS
+    } else {
+        requested_mask
+    };
+
+    statx.stx_mask = supported_mask & effective_mask;
+    statx.stx_blksize = stat.st_blksize as u32;
+    statx.stx_attributes = 0;
+    statx.stx_nlink = stat.st_nlink;
+    statx.stx_uid = stat.st_uid;
+    statx.stx_gid = stat.st_gid;
+    statx.stx_mode = stat.st_mode as u16;
+    statx.__spare0 = [0; 1];
+    statx.stx_ino = stat.st_ino;
+    statx.stx_size = stat.st_size as u64;
+    statx.stx_blocks = stat.st_blocks as u64;
+    statx.stx_attributes_mask = 0;
+    statx.stx_atime = statx_timestamp_from_secs(stat.st_atime as u64);
+    statx.stx_btime = statx_timestamp_from_secs(created_time);
+    statx.stx_ctime = statx_timestamp_from_secs(stat.st_ctime as u64);
+    statx.stx_mtime = statx_timestamp_from_secs(stat.st_mtime as u64);
+    statx.stx_rdev_major = 0;
+    statx.stx_rdev_minor = 0;
+    statx.stx_dev_major = 0;
+    statx.stx_dev_minor = 0;
+    statx.stx_mnt_id = 0;
+    statx.stx_dio_mem_align = 0;
+    statx.stx_dio_offset_align = 0;
+    statx.stx_subvol = 0;
+    statx.stx_atomic_write_unit_min = 0;
+    statx.stx_atomic_write_unit_max = 0;
+    statx.stx_atomic_write_segments_max = 0;
+    statx.stx_dio_read_offset_align = 0;
+    statx.__spare3 = [0; 9];
 }
 
 // /// Convert Scarlet DirectoryEntry to Linux Dirent and write to buffer
@@ -314,6 +500,8 @@ pub fn sys_openat(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize
         Err(_) => return errno::to_result(errno::EFAULT), // Invalid UTF-8 or bad address
     };
 
+    let path_str = remap_shm_path(&path_str);
+
     // crate::println!("sys_openat: epc={:#x}, dirfd={}, path='{}', flags={:#o}", trapframe.epc, dirfd, path_str, flags);
 
     let vfs = task.vfs.as_ref().unwrap();
@@ -429,7 +617,7 @@ pub fn sys_openat(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize
                         let vfs = task.vfs.as_ref().unwrap();
                         match vfs.open_from(&base_entry, &base_mount, &mapped_path, flags as u32) {
                             Ok(obj) => obj,
-                            Err(err) => return errno::to_result(errno::from_fs_error(&err)), // Failed to open newly created file
+                            Err(err) => return errno::to_result(errno::from_fs_error(&err)),
                         }
                     }
                     Err(create_err) => {
@@ -446,7 +634,7 @@ pub fn sys_openat(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize
                             Ok(obj) => obj,
                             Err(open_err) => {
                                 return errno::to_result(errno::from_fs_error(&open_err));
-                            } // Still failed to open
+                            }
                         }
                     }
                 }
@@ -1254,7 +1442,14 @@ pub fn sys_newfstatat(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> u
         Err(_) => return usize::MAX, // Invalid UTF-8
     };
 
-    // crate::println!("sys_newfstatat: dirfd={}, path='{}', flags={:#o}", dirfd, path_str, flags);
+    let path_str = remap_shm_path(&path_str);
+
+    // crate::println!(
+    //     "sys_newfstatat: dirfd={}, path='{}', flags={:#o}",
+    //     dirfd,
+    //     path_str,
+    //     flags
+    // );
 
     let vfs = task.vfs.as_ref().unwrap();
 
@@ -1312,6 +1507,11 @@ pub fn sys_newfstatat(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> u
 
                     let stat = unsafe { &mut *(stat_ptr as *mut LinuxStat) };
                     *stat = LinuxStat::from_metadata(&metadata);
+                    // crate::println!(
+                    //     "sys_newfstatat: path='{}' size={}",
+                    //     path_str,
+                    //     metadata.size
+                    // );
                     0 // Success
                 }
                 Err(_) => usize::MAX, // Error getting metadata
@@ -1319,6 +1519,172 @@ pub fn sys_newfstatat(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> u
         }
         Err(_) => usize::MAX, // Error resolving path
     }
+}
+
+/// Linux sys_statx implementation for Scarlet VFS v2
+///
+/// Gets extended file status relative to a directory file descriptor (dirfd) and path.
+/// If dirfd == AT_FDCWD, uses the current working directory as the base.
+/// Supports AT_EMPTY_PATH for file-descriptor based queries.
+pub fn sys_statx(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
+    let task = match mytask() {
+        Some(t) => t,
+        None => return errno::to_result(errno::EIO),
+    };
+
+    let dirfd = trapframe.get_arg(0) as i32;
+    let pathname_ptr = trapframe.get_arg(1);
+    let flags = trapframe.get_arg(2) as u32;
+    let mask = trapframe.get_arg(3) as u32;
+    let statx_ptr = match task.vm_manager.translate_vaddr(trapframe.get_arg(4)) {
+        Some(ptr) => ptr as *mut LinuxStatx,
+        None => return errno::to_result(errno::EFAULT),
+    };
+
+    // Increment PC to avoid infinite loop
+    trapframe.increment_pc_next(task);
+
+    if statx_ptr.is_null() {
+        return errno::to_result(errno::EFAULT);
+    }
+
+    const AT_FDCWD: i32 = -100;
+    const AT_SYMLINK_NOFOLLOW: u32 = 0x100;
+    const AT_EMPTY_PATH: u32 = 0x1000;
+
+    let path_str = match parse_c_string_from_userspace(task, pathname_ptr, MAX_PATH_LENGTH) {
+        Ok(s) => s,
+        Err(_) => return errno::to_result(errno::EFAULT),
+    };
+    let path_str = remap_shm_path(&path_str);
+    // crate::println!(
+    //     "sys_statx: dirfd={} path='{}' flags={:#x} mask={:#x}",
+    //     dirfd,
+    //     path_str,
+    //     flags,
+    //     mask
+    // );
+
+    let vfs = match task.vfs.as_ref() {
+        Some(v) => v,
+        None => return errno::to_result(errno::EIO),
+    };
+
+    // Support AT_EMPTY_PATH for stat-by-fd
+    if path_str.is_empty() && (flags & AT_EMPTY_PATH) != 0 {
+        let handle = match abi.get_handle(dirfd as usize) {
+            Some(h) => h,
+            None => return errno::to_result(errno::EBADF),
+        };
+        let kernel_obj = match task.handle_table.get(handle) {
+            Some(obj) => obj,
+            None => return errno::to_result(errno::EBADF),
+        };
+        let file_obj = match kernel_obj.as_file() {
+            Some(f) => f,
+            None => return errno::to_result(errno::EBADF),
+        };
+
+        use crate::fs::vfs_v2::core::VfsFileObject;
+        if let Some(vfs_file_obj) = file_obj.as_any().downcast_ref::<VfsFileObject>() {
+            let entry = vfs_file_obj.get_vfs_entry();
+            let node = entry.node();
+            let metadata = match node.metadata() {
+                Ok(m) => m,
+                Err(e) => return errno::to_result(errno::from_fs_error(&e)),
+            };
+            let stat = LinuxStat::from_metadata(&metadata);
+            let statx_ref = unsafe { &mut *statx_ptr };
+            fill_statx_from_stat(statx_ref, &stat, metadata.created_time, mask);
+            // crate::println!(
+            //     "sys_statx: empty_path name='{}' size={}",
+            //     entry.name(),
+            //     metadata.size
+            // );
+            return 0;
+        }
+
+        let stat = LinuxStat {
+            st_dev: 0,
+            st_ino: handle as u64,
+            st_mode: S_IFCHR | 0o666,
+            st_nlink: 1,
+            st_uid: 0,
+            st_gid: 0,
+            st_rdev: handle as u64,
+            __pad1: 0,
+            st_size: 0,
+            st_blksize: 4096,
+            __pad2: 0,
+            st_blocks: 0,
+            st_atime: 0,
+            st_atime_nsec: 0,
+            st_mtime: 0,
+            st_mtime_nsec: 0,
+            st_ctime: 0,
+            st_ctime_nsec: 0,
+            __unused4: 0,
+            __unused5: 0,
+        };
+        let statx_ref = unsafe { &mut *statx_ptr };
+        fill_statx_from_stat(statx_ref, &stat, 0, mask);
+        return 0;
+    }
+
+    // Determine base directory (entry and mount) for path resolution
+    use crate::fs::vfs_v2::core::VfsFileObject;
+
+    let (base_entry, base_mount) = if dirfd == AT_FDCWD {
+        vfs.get_cwd().unwrap_or_else(|| {
+            let root_mount = vfs.mount_tree.root_mount.read().clone();
+            (root_mount.root.clone(), root_mount)
+        })
+    } else {
+        let handle = match abi.get_handle(dirfd as usize) {
+            Some(h) => h,
+            None => return errno::to_result(errno::EBADF),
+        };
+        let kernel_obj = match task.handle_table.get(handle) {
+            Some(obj) => obj,
+            None => return errno::to_result(errno::EBADF),
+        };
+        let file_obj = match kernel_obj.as_file() {
+            Some(f) => f,
+            None => return errno::to_result(errno::ENOTDIR),
+        };
+        let vfs_file_obj = match file_obj.as_any().downcast_ref::<VfsFileObject>() {
+            Some(vfs_obj) => vfs_obj,
+            None => return errno::to_result(errno::ENOTDIR),
+        };
+        (
+            vfs_file_obj.get_vfs_entry().clone(),
+            vfs_file_obj.get_mount_point().clone(),
+        )
+    };
+
+    // TODO: Handle AT_SYMLINK_NOFOLLOW flag properly; for now, always follow.
+    let _follow_symlinks = (flags & AT_SYMLINK_NOFOLLOW) == 0;
+
+    let (entry, _mount_point) = match vfs.resolve_path_from(&base_entry, &base_mount, &path_str) {
+        Ok(v) => v,
+        Err(e) => return errno::to_result(errno::from_fs_error(&e)),
+    };
+
+    let node = entry.node();
+    let metadata = match node.metadata() {
+        Ok(m) => m,
+        Err(e) => return errno::to_result(errno::from_fs_error(&e)),
+    };
+
+    let stat = LinuxStat::from_metadata(&metadata);
+    let statx_ref = unsafe { &mut *statx_ptr };
+    fill_statx_from_stat(statx_ref, &stat, metadata.created_time, mask);
+    // crate::println!(
+    //     "sys_statx: path='{}' size={}",
+    //     path_str,
+    //     metadata.size
+    // );
+    0
 }
 
 #[allow(dead_code)]
@@ -1807,7 +2173,45 @@ pub fn sys_fcntl(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize 
                     arg
                 );
             }
-            // TODO: Implement F_DUPFD
+            if fd >= super::MAX_FDS {
+                return errno::to_result(errno::EBADF);
+            }
+            let min_fd = arg as usize;
+            if min_fd >= super::MAX_FDS {
+                return errno::to_result(errno::EMFILE);
+            }
+            let old_handle = match abi.get_handle(fd) {
+                Some(h) => h,
+                None => return errno::to_result(errno::EBADF),
+            };
+            let kernel_obj = match task.handle_table.clone_for_dup(old_handle) {
+                Some(obj) => obj,
+                None => return errno::to_result(errno::EBADF),
+            };
+            let mut new_fd = None;
+            for candidate in min_fd..super::MAX_FDS {
+                if abi.get_handle(candidate).is_none() {
+                    new_fd = Some(candidate);
+                    break;
+                }
+            }
+            let new_fd = match new_fd {
+                Some(fd) => fd,
+                None => return errno::to_result(errno::EMFILE),
+            };
+            let new_handle = match task.handle_table.insert(kernel_obj) {
+                Ok(handle) => handle,
+                Err(_) => return errno::to_result(errno::ENFILE),
+            };
+            if abi.allocate_specific_fd(new_fd, new_handle as u32).is_err() {
+                let _ = task.handle_table.remove(new_handle as u32);
+                return errno::to_result(errno::EMFILE);
+            }
+            if let Some(flags) = abi.get_file_status_flags(fd) {
+                let _ = abi.set_file_status_flags(new_fd, flags);
+            }
+            let _ = abi.set_fd_flags(new_fd, 0);
+            return new_fd;
         }
         F_GETFD => {
             // Get file descriptor flags (IMPLEMENTED)
@@ -1968,7 +2372,45 @@ pub fn sys_fcntl(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize 
                     arg
                 );
             }
-            // TODO: Implement F_DUPFD_CLOEXEC
+            if fd >= super::MAX_FDS {
+                return errno::to_result(errno::EBADF);
+            }
+            let min_fd = arg as usize;
+            if min_fd >= super::MAX_FDS {
+                return errno::to_result(errno::EMFILE);
+            }
+            let old_handle = match abi.get_handle(fd) {
+                Some(h) => h,
+                None => return errno::to_result(errno::EBADF),
+            };
+            let kernel_obj = match task.handle_table.clone_for_dup(old_handle) {
+                Some(obj) => obj,
+                None => return errno::to_result(errno::EBADF),
+            };
+            let mut new_fd = None;
+            for candidate in min_fd..super::MAX_FDS {
+                if abi.get_handle(candidate).is_none() {
+                    new_fd = Some(candidate);
+                    break;
+                }
+            }
+            let new_fd = match new_fd {
+                Some(fd) => fd,
+                None => return errno::to_result(errno::EMFILE),
+            };
+            let new_handle = match task.handle_table.insert(kernel_obj) {
+                Ok(handle) => handle,
+                Err(_) => return errno::to_result(errno::ENFILE),
+            };
+            if abi.allocate_specific_fd(new_fd, new_handle as u32).is_err() {
+                let _ = task.handle_table.remove(new_handle as u32);
+                return errno::to_result(errno::EMFILE);
+            }
+            if let Some(flags) = abi.get_file_status_flags(fd) {
+                let _ = abi.set_file_status_flags(new_fd, flags);
+            }
+            let _ = abi.set_fd_flags(new_fd, FD_CLOEXEC);
+            return new_fd;
         }
         _ => {
             if LOG_FCNTL {
@@ -1983,7 +2425,110 @@ pub fn sys_fcntl(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize 
     }
 
     // All unimplemented commands return ENOSYS (already logged above)
-    usize::MAX // Return -1 (ENOSYS - Function not implemented)
+    errno::to_result(errno::ENOSYS)
+}
+
+/// Linux sys_flock - Apply or remove an advisory lock on an open file
+///
+/// Apply or remove an advisory lock on the open file specified by fd.
+/// This is a simplified implementation that always succeeds.
+///
+/// Arguments:
+/// - abi: LinuxRiscv64Abi context
+/// - trapframe: Trapframe containing syscall arguments
+///   - arg0: fd (file descriptor)
+///   - arg1: operation (LOCK_SH, LOCK_EX, LOCK_UN, etc.)
+///
+/// Returns:
+/// - 0 on success
+/// - usize::MAX (Linux -1) on error
+pub fn sys_flock(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
+    let task = match mytask() {
+        Some(t) => t,
+        None => return usize::MAX,
+    };
+
+    let fd = trapframe.get_arg(0) as i32;
+    let _operation = trapframe.get_arg(1) as i32;
+
+    // Increment PC to avoid infinite loop
+    trapframe.increment_pc_next(task);
+
+    // Verify fd is valid
+    if abi.get_handle(fd as usize).is_none() {
+        return usize::MAX;
+    }
+
+    // Simplified implementation: always succeed
+    // Real flock would require managing lock state per file descriptor
+    // For Wayland SHM operations, advisory locks aren't critical
+    0
+}
+
+/// Linux sys_fallocate - Manipulate file space
+///
+/// This is used by glib/Wayland to extend shared memory file size.
+/// When mode is 0 (default), it extends the file to at least offset + len.
+///
+/// Arguments:
+/// - fd: File descriptor
+/// - mode: Operation mode (0 = allocate, FALLOC_FL_KEEP_SIZE, etc.)
+/// - offset: Starting offset
+/// - len: Length of the allocation
+///
+/// Returns:
+/// - 0 on success
+/// - negative errno on failure
+pub fn sys_fallocate(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
+    use super::errno;
+
+    let task = match mytask() {
+        Some(t) => t,
+        None => return errno::to_result(errno::EFAULT),
+    };
+
+    let fd = trapframe.get_arg(0) as usize;
+    let mode = trapframe.get_arg(1) as i32;
+    let offset = trapframe.get_arg(2) as i64;
+    let len = trapframe.get_arg(3) as i64;
+
+    trapframe.increment_pc_next(task);
+
+    if offset < 0 || len <= 0 {
+        return errno::to_result(errno::EINVAL);
+    }
+
+    let handle = match abi.get_handle(fd) {
+        Some(h) => h,
+        None => return errno::to_result(errno::EBADF),
+    };
+
+    let kernel_obj = match task.handle_table.get(handle) {
+        Some(obj) => obj,
+        None => return errno::to_result(errno::EBADF),
+    };
+
+    // Handle SharedMemory (memfd)
+    if let Some(shared_memory) = kernel_obj.as_shared_memory() {
+        // FALLOC_FL_KEEP_SIZE = 0x01 - don't change file size
+        const FALLOC_FL_KEEP_SIZE: i32 = 0x01;
+
+        let new_size = (offset + len) as usize;
+        let current_size = shared_memory.size();
+
+        // If mode doesn't have KEEP_SIZE, extend the file
+        if (mode & FALLOC_FL_KEEP_SIZE) == 0 && new_size > current_size {
+            if let Err(_e) = shared_memory.resize(new_size) {
+                return errno::to_result(errno::ENOSPC);
+            }
+        }
+
+        return 0;
+    }
+
+    // For regular files, just succeed (no-op for now)
+    // Real implementation would preallocate disk space
+    0
 }
 
 /// Linux struct linux_dirent64 (for getdents64 syscall)
@@ -2201,6 +2746,106 @@ pub fn sys_fsync(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize
     0
 }
 
+/// Linux sys_ftruncate implementation
+///
+/// Truncate a file to a specified length using a file descriptor.
+///
+/// Arguments:
+/// - fd: File descriptor to truncate
+/// - length: New file length
+///
+/// Returns:
+/// - 0 on success
+/// - negative errno on failure
+pub fn sys_ftruncate(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
+    let task = match mytask() {
+        Some(t) => t,
+        None => return errno::to_result(errno::EFAULT),
+    };
+
+    let fd = trapframe.get_arg(0) as usize;
+    let length = trapframe.get_arg(1) as i64;
+
+    trapframe.increment_pc_next(task);
+
+    if length < 0 {
+        return errno::to_result(errno::EINVAL);
+    }
+
+    let handle = match abi.get_handle(fd) {
+        Some(h) => h,
+        None => return errno::to_result(errno::EBADF),
+    };
+
+    let kernel_obj = match task.handle_table.get(handle) {
+        Some(obj) => obj,
+        None => return errno::to_result(errno::EBADF),
+    };
+
+    if let Some(shared_memory) = kernel_obj.as_shared_memory() {
+        if let Err(_err) = shared_memory.resize(length as usize) {
+            return errno::to_result(errno::EINVAL);
+        }
+        return 0;
+    }
+
+    let file_obj = match kernel_obj.as_file() {
+        Some(f) => f,
+        None => return errno::to_result(errno::EINVAL),
+    };
+
+    let mut is_shm = false;
+    let mut shm_path = None;
+    if let Some(vfs_obj) = file_obj
+        .as_any()
+        .downcast_ref::<crate::fs::vfs_v2::core::VfsFileObject>()
+    {
+        let path = vfs_obj.get_original_path();
+        if path.contains("wl_shm-") {
+            is_shm = true;
+            shm_path = Some(path);
+            crate::println!("sys_ftruncate: shm path='{}' len={}", path, length);
+        }
+    }
+
+    match file_obj.truncate(length as u64) {
+        Ok(()) => 0,
+        Err(err) => {
+            if is_shm {
+                if let Ok(meta) = file_obj.metadata() {
+                    crate::println!(
+                        "sys_ftruncate: shm truncate failed len={} file_type={:?} size={}",
+                        length,
+                        meta.file_type,
+                        meta.size
+                    );
+                }
+                crate::println!("sys_ftruncate: shm truncate error={:?}", err);
+            } else if length > 0 {
+                let kind = match kernel_obj {
+                    crate::object::KernelObject::File(_) => "File",
+                    crate::object::KernelObject::Pipe(_) => "Pipe",
+                    crate::object::KernelObject::Counter(_) => "Counter",
+                    crate::object::KernelObject::EventChannel(_) => "EventChannel",
+                    crate::object::KernelObject::EventSubscription(_) => "EventSubscription",
+                    crate::object::KernelObject::SharedMemory(_) => "SharedMemory",
+                    #[cfg(feature = "network")]
+                    crate::object::KernelObject::Socket(_) => "Socket",
+                };
+                crate::println!(
+                    "sys_ftruncate: fd={} kind={} path={:?} len={} err={:?}",
+                    fd,
+                    kind,
+                    shm_path,
+                    length,
+                    err
+                );
+            }
+            errno::to_result(errno::EIO)
+        }
+    }
+}
+
 /// Linux sys_faccessat implementation (dummy: always returns 0)
 ///
 /// Arguments:
@@ -2218,19 +2863,56 @@ pub fn sys_faccessat(_abi: &mut LinuxRiscv64Abi, trapframe: &mut crate::arch::Tr
         Some(ptr) => ptr as *const u8,
         None => return usize::MAX,
     };
-    let flags = trapframe.get_arg(2) as i32;
+    let mode = trapframe.get_arg(2) as i32;
     let path_str = match get_path_str_v2(path_ptr) {
         Ok(p) => p,
         Err(_) => return usize::MAX,
     };
 
-    crate::println!(
-        "sys_faccessat: epc={:#x}, dirfd={}, path='{}', flags={:#o}",
-        trapframe.epc,
-        dirfd,
-        path_str,
-        flags
-    );
+    // crate::println!(
+    //     "sys_faccessat: epc={:#x}, dirfd={}, path='{}', mode={:#o}",
+    //     trapframe.epc,
+    //     dirfd,
+    //     path_str,
+    //     mode
+    // );
+
+    0
+}
+
+/// Linux faccessat2 system call (syscall 439)
+///
+/// Checks user's permissions for a file. Similar to faccessat but with
+/// additional flag support (AT_EACCESS, AT_SYMLINK_NOFOLLOW).
+///
+/// Signature: int faccessat2(int dirfd, const char *pathname, int mode, int flags);
+///
+/// Returns:
+/// - 0 (success)
+pub fn sys_faccessat2(_abi: &mut LinuxRiscv64Abi, trapframe: &mut crate::arch::Trapframe) -> usize {
+    let task = crate::task::mytask().unwrap();
+    trapframe.increment_pc_next(task);
+
+    let dirfd = trapframe.get_arg(0) as i32;
+    let path_ptr = match task.vm_manager.translate_vaddr(trapframe.get_arg(1)) {
+        Some(ptr) => ptr as *const u8,
+        None => return usize::MAX,
+    };
+    let mode = trapframe.get_arg(2) as i32;
+    let flags = trapframe.get_arg(3) as i32;
+    let path_str = match get_path_str_v2(path_ptr) {
+        Ok(p) => p,
+        Err(_) => return usize::MAX,
+    };
+
+    // crate::println!(
+    //     "sys_faccessat2: epc={:#x}, dirfd={}, path='{}', mode={:#o}, flags={:#x}",
+    //     trapframe.epc,
+    //     dirfd,
+    //     path_str,
+    //     mode,
+    //     flags
+    // );
 
     0
 }
@@ -2341,8 +3023,10 @@ pub fn sys_newfstat(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usi
                 st_uid: 0,
                 st_gid: 0,
                 st_rdev: handle as u64,
+                __pad1: 0,
                 st_size: 0,
                 st_blksize: 4096,
+                __pad2: 0,
                 st_blocks: 0,
                 st_atime: 0,
                 st_atime_nsec: 0,
@@ -2350,7 +3034,8 @@ pub fn sys_newfstat(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usi
                 st_mtime_nsec: 0,
                 st_ctime: 0,
                 st_ctime_nsec: 0,
-                __unused: [0; 2],
+                __unused4: 0,
+                __unused5: 0,
             };
             return 0; // Success
         }
@@ -2364,6 +3049,12 @@ pub fn sys_newfstat(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usi
         Ok(metadata) => {
             let stat = unsafe { &mut *(stat_ptr as *mut LinuxStat) };
             *stat = LinuxStat::from_metadata(&metadata);
+            // crate::println!(
+            //     "sys_newfstat: fd={} name='{}' size={}",
+            //     fd,
+            //     entry.name(),
+            //     metadata.size
+            // );
             0 // Success
         }
         Err(_) => usize::MAX, // Error getting metadata
@@ -2407,6 +3098,12 @@ pub fn sys_unlinkat(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usi
         Ok((path, _)) => path,
         Err(_) => return usize::MAX, // Invalid UTF-8
     };
+
+    let path_str = remap_shm_path(&path_str);
+    if is_wl_shm_path(&path_str) {
+        crate::println!("sys_unlinkat: shm ignore path='{}'", path_str);
+        return 0;
+    }
 
     // Linux constants for unlinkat
     const AT_FDCWD: i32 = -100;
@@ -2951,6 +3648,13 @@ pub fn sys_ppoll(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize 
             let ns = (ts.tv_sec as i128) * 1_000_000_000i128 + (ts.tv_nsec as i128);
             let ns_u = if ns <= 0 { 0 } else { (ns as u128) as u64 };
             timeout_ticks = Some(ns_to_ticks(ns_u));
+            // crate::println!(
+            //     "[sys_ppoll] timeout ts={}s {}ns -> ns={} ticks={:?}",
+            //     ts.tv_sec,
+            //     ts.tv_nsec,
+            //     ns_u,
+            //     timeout_ticks
+            // );
         }
     }
 
@@ -2959,10 +3663,11 @@ pub fn sys_ppoll(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize 
         selectable: bool,
     }
 
-    let abi_ref = &*abi;
-    let task_ref: &crate::task::Task = &*task;
-
-    let eval_pfd = |pfd: &mut PollFd| -> EvalResult {
+    fn eval_pfd(
+        pfd: &mut PollFd,
+        abi_ref: &LinuxRiscv64Abi,
+        task_ref: &crate::task::Task,
+    ) -> EvalResult {
         pfd.revents = 0;
         if pfd.fd < 0 {
             pfd.revents |= POLLNVAL;
@@ -3034,27 +3739,133 @@ pub fn sys_ppoll(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize 
             ready: pfd.revents != 0,
             selectable,
         }
-    };
+    }
 
     let mut any_ready = false;
     let mut first_selectable_index: Option<usize> = None;
-    for (idx, pfd) in fds.iter_mut().enumerate() {
-        let eval = eval_pfd(pfd);
-        if eval.ready {
-            any_ready = true;
+    let mut selectable_count = 0usize;
+    let mut ready_count = 0usize;
+    {
+        let abi_ref = &*abi;
+        let task_ref: &crate::task::Task = &*task;
+        for (idx, pfd) in fds.iter_mut().enumerate() {
+            let eval = eval_pfd(pfd, abi_ref, task_ref);
+            if eval.ready {
+                any_ready = true;
+                ready_count += 1;
+            }
+            if eval.selectable {
+                selectable_count += 1;
+            }
+            if first_selectable_index.is_none() && eval.selectable {
+                first_selectable_index = Some(idx);
+            }
+
+            let mut kind = "unknown";
+            let mut socket_state: Option<u32> = None;
+            let fd_usize = pfd.fd as usize;
+            if let Some(handle) = abi_ref.get_handle(fd_usize) {
+                if let Some(kobj) = task_ref.handle_table.get(handle) {
+                    match kobj {
+                        crate::object::KernelObject::File(_) => {
+                            kind = "file";
+                        }
+                        crate::object::KernelObject::Pipe(_) => {
+                            kind = "pipe";
+                        }
+                        crate::object::KernelObject::Counter(_) => {
+                            kind = "counter";
+                        }
+                        crate::object::KernelObject::EventChannel(_) => {
+                            kind = "event_channel";
+                        }
+                        crate::object::KernelObject::EventSubscription(_) => {
+                            kind = "event_sub";
+                        }
+                        #[cfg(feature = "network")]
+                        crate::object::KernelObject::Socket(socket) => {
+                            kind = "socket";
+                            socket_state = Some(socket.state() as u32);
+                        }
+                        crate::object::KernelObject::SharedMemory(_) => {
+                            kind = "shmem";
+                        }
+                    }
+                }
+            }
+
+            // crate::println!(
+            //     "[sys_ppoll] fd={} events=0x{:x} revents=0x{:x} selectable={} kind={} socket_state={:?}",
+            //     pfd.fd,
+            //     pfd.events as u16,
+            //     pfd.revents as u16,
+            //     eval.selectable,
+            //     kind,
+            //     socket_state
+            // );
         }
-        if first_selectable_index.is_none() && eval.selectable {
-            first_selectable_index = Some(idx);
-        }
+    }
+
+    {
+        let zero_poll = matches!(timeout_ticks, Some(t) if t == 0);
+        // crate::println!(
+        //     "[sys_ppoll] task={} nfds={} selectable={} ready={} any_ready={} zero_poll={} timeout_ticks={:?} first_selectable={:?}",
+        //     task.name,
+        //     nfds,
+        //     selectable_count,
+        //     ready_count,
+        //     any_ready,
+        //     zero_poll,
+        //     timeout_ticks,
+        //     first_selectable_index
+        // );
     }
 
     if !any_ready {
         let zero_poll = matches!(timeout_ticks, Some(t) if t == 0);
         if !zero_poll {
-            if let Some(wait_idx) = first_selectable_index {
+            if selectable_count > 1 {
+                use crate::timer::get_tick;
+
+                let deadline = timeout_ticks.map(|ticks| get_tick().saturating_add(ticks));
+                loop {
+                    if let Some(deadline) = deadline {
+                        let now = get_tick();
+                        if now >= deadline {
+                            break;
+                        }
+                        let remaining = deadline.saturating_sub(now);
+                        if remaining == 0 {
+                            break;
+                        }
+                    }
+
+                    task.sleep(trapframe, 1);
+
+                    any_ready = false;
+                    ready_count = 0;
+                    {
+                        let abi_ref = &*abi;
+                        let task_ref: &crate::task::Task = &*task;
+                        for pfd in fds.iter_mut() {
+                            let eval = eval_pfd(pfd, abi_ref, task_ref);
+                            if eval.ready {
+                                any_ready = true;
+                                ready_count += 1;
+                            }
+                        }
+                    }
+
+                    if any_ready {
+                        break;
+                    }
+                }
+            } else if let Some(wait_idx) = first_selectable_index {
                 let pfd = &fds[wait_idx];
                 if pfd.fd >= 0 {
                     let fd_usize = pfd.fd as usize;
+                    let abi_ref = &*abi;
+                    let task_ref: &crate::task::Task = &*task;
                     if let Some(handle) = abi_ref.get_handle(fd_usize) {
                         if let Some(kobj) = task_ref.handle_table.get(handle) {
                             if let Some(sel) = kobj.as_selectable() {
@@ -3074,10 +3885,12 @@ pub fn sys_ppoll(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize 
                         }
                     }
                 }
-            }
 
-            for pfd in fds.iter_mut() {
-                let _ = eval_pfd(pfd);
+                let abi_ref = &*abi;
+                let task_ref: &crate::task::Task = &*task;
+                for pfd in fds.iter_mut() {
+                    let _ = eval_pfd(pfd, abi_ref, task_ref);
+                }
             }
         }
     }
@@ -3283,6 +4096,53 @@ pub fn sys_readlinkat(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> u
     }
 
     copy_len
+}
+
+/// Linux sys_getrandom implementation
+///
+/// Fills the user buffer with random bytes from the kernel pool.
+pub fn sys_getrandom(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
+    let task = match mytask() {
+        Some(t) => t,
+        None => return errno::to_result(errno::EIO),
+    };
+
+    let buf_ptr = trapframe.get_arg(0);
+    let buflen = trapframe.get_arg(1) as usize;
+    let flags = trapframe.get_arg(2) as u32;
+
+    trapframe.increment_pc_next(task);
+
+    if buflen == 0 {
+        return 0;
+    }
+
+    let user_buf = match task.vm_manager.translate_vaddr(buf_ptr) {
+        Some(addr) => addr as *mut u8,
+        None => return errno::to_result(errno::EFAULT),
+    };
+
+    if user_buf.is_null() {
+        return errno::to_result(errno::EFAULT);
+    }
+
+    let buffer = unsafe { core::slice::from_raw_parts_mut(user_buf, buflen) };
+    let bytes_read = crate::random::RandomManager::get_random_bytes(buffer);
+
+    if bytes_read == 0 {
+        if (flags & GRND_NONBLOCK) != 0 {
+            return errno::to_result(errno::EAGAIN);
+        }
+        fill_pseudo_random(buffer);
+        return buflen;
+    }
+
+    if bytes_read < buflen && (flags & GRND_NONBLOCK) == 0 {
+        fill_pseudo_random(&mut buffer[bytes_read..]);
+        return buflen;
+    }
+
+    bytes_read
 }
 
 /// Linux sys_getcwd system call implementation
@@ -3568,4 +4428,67 @@ pub fn sys_renameat2(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> u
         crate::println!("sys_renameat2: Full rename operation not yet implemented");
         0 // Return success for basic compatibility (temporary)
     }
+}
+
+/// eventfd2 - create file descriptor for event notification
+///
+/// # Arguments
+/// * `initval` - Initial value of the event counter (unsigned int)
+/// * `flags` - Flags (bitwise OR of EFD_CLOEXEC, EFD_NONBLOCK, EFD_SEMAPHORE)
+///
+/// # Returns
+/// * New file descriptor on success
+/// * Error code on failure
+pub fn sys_eventfd2(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
+    let task = match mytask() {
+        Some(t) => t,
+        None => return errno::to_result(errno::EIO),
+    };
+
+    let initval = trapframe.get_arg(0) as u32;
+    let flags = trapframe.get_arg(1) as u32;
+
+    trapframe.increment_pc_next(task);
+
+    // eventfd2 flags
+    const EFD_CLOEXEC: u32 = 0o02000000;
+    const EFD_NONBLOCK: u32 = 0o00004000;
+    const EFD_SEMAPHORE: u32 = 0x00000001;
+
+    // Validate flags (only allow EFD_CLOEXEC, EFD_NONBLOCK, EFD_SEMAPHORE)
+    let valid_flags = EFD_CLOEXEC | EFD_NONBLOCK | EFD_SEMAPHORE;
+    if flags & !valid_flags != 0 {
+        crate::println!("[sys_eventfd2] Invalid flags: 0x{:x}", flags);
+        return errno::to_result(errno::EINVAL);
+    }
+
+    // Create Counter object
+    let counter_obj = crate::ipc::counter::Counter::create_kernel_object(initval, flags);
+
+    // Insert into handle table
+    let handle = match task.handle_table.insert(counter_obj) {
+        Ok(h) => h,
+        Err(_) => return errno::to_result(errno::EMFILE),
+    };
+
+    // Allocate file descriptor for the handle
+    let fd = match abi.allocate_fd(handle as u32) {
+        Ok(fd) => fd,
+        Err(_) => {
+            let _ = task.handle_table.remove(handle);
+            return errno::to_result(errno::EMFILE);
+        }
+    };
+
+    // Set FD_CLOEXEC if requested
+    if (flags & EFD_CLOEXEC) != 0 {
+        let _ = abi.set_fd_flags(fd, FD_CLOEXEC);
+    }
+
+    // Set O_NONBLOCK if requested (already set in Counter, but also in ABI for consistency)
+    if (flags & EFD_NONBLOCK) != 0 {
+        let _ = abi.set_file_status_flags(fd, O_NONBLOCK as u32);
+    }
+
+    fd
 }

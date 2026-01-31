@@ -722,7 +722,16 @@ impl Device for VirtioBlockDevice {
     }
 }
 
-impl Selectable for VirtioBlockDevice {}
+impl Selectable for VirtioBlockDevice {
+    fn wait_until_ready(
+        &self,
+        _interest: crate::object::capability::selectable::ReadyInterest,
+        _trapframe: &mut crate::arch::Trapframe,
+        _timeout_ticks: Option<u64>,
+    ) -> crate::object::capability::selectable::SelectWaitOutcome {
+        crate::object::capability::selectable::SelectWaitOutcome::Ready
+    }
+}
 
 impl VirtioDevice for VirtioBlockDevice {
     fn get_base_addr(&self) -> usize {

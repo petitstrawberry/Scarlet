@@ -752,12 +752,8 @@ impl crate::object::capability::selectable::Selectable for DevFileObject {
                 .as_ref()
                 .wait_until_ready(interest, trapframe, timeout_ticks);
         }
-        crate::object::capability::selectable::Selectable::wait_until_ready(
-            self,
-            interest,
-            trapframe,
-            timeout_ticks,
-        )
+        let _ = (interest, trapframe, timeout_ticks);
+        crate::object::capability::selectable::SelectWaitOutcome::Ready
     }
 
     fn set_nonblocking(&self, enabled: bool) {

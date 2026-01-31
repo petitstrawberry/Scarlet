@@ -39,6 +39,16 @@ use crate::object::capability::{
 };
 use crate::sync::Waker;
 
+const LOCALSOCKET_LOG: bool = false;
+
+macro_rules! localsocket_log {
+    ($($arg:tt)*) => {
+        if LOCALSOCKET_LOG {
+            crate::println!($($arg)*);
+        }
+    };
+}
+
 /// Maximum buffer size per socket (64 KB)
 const MAX_BUFFER_SIZE: usize = 65536;
 
@@ -46,12 +56,10 @@ const MAX_BUFFER_SIZE: usize = 65536;
 /// This prevents unbounded memory growth from DoS attacks
 const MAX_HANDLE_QUEUE_SIZE: usize = 64;
 
-/// Shared buffer structure that tracks reading task
+/// Shared buffer structure for socket data
 struct SocketBuffer {
     /// Data buffer
     data: RwLock<VecDeque<u8>>,
-    /// Task ID waiting to read (if any)
-    reading_task: RwLock<Option<usize>>,
     /// Flag indicating this buffer has been closed (peer shutdown)
     closed: RwLock<bool>,
 }
@@ -60,7 +68,6 @@ impl SocketBuffer {
     fn new() -> Arc<Self> {
         Arc::new(Self {
             data: RwLock::new(VecDeque::with_capacity(MAX_BUFFER_SIZE)),
-            reading_task: RwLock::new(None),
             closed: RwLock::new(false),
         })
     }
@@ -202,6 +209,173 @@ impl LocalSocket {
         peer.handle_waker.wake_one();
 
         Ok(())
+    }
+
+    /// Send a handle and data together atomically for Wayland protocol
+    ///
+    /// This method ensures that both the handle and data are available before
+    /// waking the peer, preventing race conditions where recvmsg might get
+    /// the handle but not the data (or vice versa).
+    ///
+    /// This is needed for Wayland protocol messages with file descriptors,
+    /// where the client expects both the FD and message data in a single recvmsg call.
+    pub fn send_handle_and_data(
+        &self,
+        object: KernelObject,
+        data: &[u8],
+    ) -> Result<(), crate::ipc::IpcError> {
+        use crate::ipc::IpcError;
+
+        localsocket_log!(
+            "[LocalSocket] send_handle_and_data: self={:p}, data_len={}",
+            self as *const _,
+            data.len()
+        );
+
+        // Verify socket is connected
+        if *self.state.read() != SocketState::Connected {
+            localsocket_log!("[LocalSocket] send_handle_and_data: not connected");
+            return Err(IpcError::InvalidState);
+        }
+
+        // Get peer socket reference
+        let peer_weak = self.peer_socket.read();
+        let peer_weak_ref = peer_weak.as_ref().ok_or(IpcError::PeerClosed)?;
+        let peer = peer_weak_ref.upgrade().ok_or(IpcError::PeerClosed)?;
+
+        localsocket_log!(
+            "[LocalSocket] send_handle_and_data: peer={:p}",
+            peer.as_ref() as *const _
+        );
+
+        // Check if peer's handle queue is full to prevent DoS attacks
+        let mut peer_handle_queue = peer.handle_queue.write();
+        if peer_handle_queue.len() >= MAX_HANDLE_QUEUE_SIZE {
+            localsocket_log!("[LocalSocket] send_handle_and_data: handle queue full");
+            return Err(IpcError::ChannelFull);
+        }
+
+        // Get peer's data buffer through peer_read_buffer
+        let peer_buffer_option = peer.peer_read_buffer.read();
+        let peer_sock_buffer = peer_buffer_option.as_ref().ok_or(IpcError::PeerClosed)?;
+
+        // Check if peer's data buffer has space
+        let mut peer_buffer = peer_sock_buffer.data.write();
+        if peer_buffer.len() + data.len() > MAX_BUFFER_SIZE {
+            localsocket_log!(
+                "[LocalSocket] send_handle_and_data: buffer full, current_len={}, adding_len={}",
+                peer_buffer.len(),
+                data.len()
+            );
+            drop(peer_buffer);
+            drop(peer_buffer_option);
+            drop(peer_handle_queue);
+            return Err(IpcError::ChannelFull);
+        }
+
+        localsocket_log!(
+            "[LocalSocket] send_handle_and_data: before send - handle_queue_len={}, buffer_len={}",
+            peer_handle_queue.len(),
+            peer_buffer.len()
+        );
+
+        // Add handle to peer's receive queue
+        peer_handle_queue.push_back(object);
+        let queue_len = peer_handle_queue.len();
+        drop(peer_handle_queue);
+
+        // Add data to peer's buffer
+        peer_buffer.extend(data.iter().copied());
+        let buffer_len = peer_buffer.len();
+        drop(peer_buffer);
+        drop(peer_buffer_option);
+
+        localsocket_log!(
+            "[LocalSocket] send_handle_and_data: after send - handle_queue_len={}, buffer_len={}",
+            queue_len,
+            buffer_len
+        );
+
+        // Wake the peer after BOTH handle and data are available
+        peer.handle_waker.wake_one();
+        peer.read_waker.wake_one();
+
+        Ok(())
+    }
+
+    /// Receive a handle and data together atomically for Wayland protocol
+    ///
+    /// Returns both a handle and data in a single atomic operation.
+    /// This is the counterpart to send_handle_and_data().
+    ///
+    /// # Arguments
+    ///
+    /// * `max_data_len` - Maximum amount of data to read
+    ///
+    /// # Returns
+    ///
+    /// * `(KernelObject, Vec<u8>)` - Handle and data on success
+    /// * `IpcError` - Error if no handle/data available or other error
+    pub fn recv_handle_and_data(
+        &self,
+        max_data_len: usize,
+    ) -> Result<(KernelObject, Vec<u8>), crate::ipc::IpcError> {
+        use crate::ipc::IpcError;
+
+        localsocket_log!(
+            "[LocalSocket] recv_handle_and_data: self={:p}, max_data_len={}",
+            self as *const _,
+            max_data_len
+        );
+
+        // Verify socket is connected
+        if *self.state.read() != SocketState::Connected {
+            localsocket_log!("[LocalSocket] recv_handle_and_data: not connected");
+            return Err(IpcError::InvalidState);
+        }
+
+        // Try to get a handle from the queue
+        let mut queue = self.handle_queue.write();
+        localsocket_log!(
+            "[LocalSocket] recv_handle_and_data: handle_queue_len={}",
+            queue.len()
+        );
+
+        let handle = match queue.pop_front() {
+            Some(h) => h,
+            None => {
+                localsocket_log!(
+                    "[LocalSocket] recv_handle_and_data: handle queue empty - returning ChannelEmpty"
+                );
+                return Err(IpcError::ChannelEmpty);
+            }
+        };
+        drop(queue);
+
+        // Read data from read buffer
+        let read_buffer = self.read_buffer.read();
+        let mut buffer_data = read_buffer.data.write();
+        localsocket_log!(
+            "[LocalSocket] recv_handle_and_data: buffer_len={}, max_data_len={}",
+            buffer_data.len(),
+            max_data_len
+        );
+
+        // Read up to max_data_len bytes
+        let actual_len = buffer_data.len().min(max_data_len);
+        let mut data = Vec::with_capacity(actual_len);
+        for _ in 0..actual_len {
+            data.push(buffer_data.pop_front().unwrap());
+        }
+        drop(buffer_data);
+        drop(read_buffer);
+
+        localsocket_log!(
+            "[LocalSocket] recv_handle_and_data: returning handle and {} bytes of data",
+            data.len()
+        );
+
+        Ok((handle, data))
     }
 
     /// Receive a KernelObject handle from this socket (non-blocking)
@@ -420,8 +594,6 @@ impl StreamOps for LocalSocket {
                     for i in 0..bytes_to_read {
                         buffer[i] = read_data.pop_front().unwrap();
                     }
-                    // Clear reading_task since we're done reading
-                    *read_buf_arc.reading_task.write() = None;
 
                     // if attempt < 5 || attempt % 100 == 0 {
                     //     crate::println!(
@@ -475,7 +647,6 @@ impl StreamOps for LocalSocket {
 
                 // Register this task as waiting to read
                 if let Some(task) = mytask() {
-                    *read_buf_arc.reading_task.write() = Some(task.get_id());
                     drop(read_buf_arc);
 
                     // Block the task
@@ -503,20 +674,15 @@ impl StreamOps for LocalSocket {
                 peer_data.extend(data.iter().copied());
                 let bytes_written = data.len();
 
-                // Check if there's a task waiting to read
-                // Keep reading_task lock held while we wake to prevent race condition
-                let reading_task_guard = peer_sock_buffer.reading_task.read();
-                let reading_task = *reading_task_guard;
-
                 drop(peer_data); // Release data lock
 
-                // Wake up the task if one is waiting (still holding reading_task lock)
-                if let Some(task_id) = reading_task {
-                    use crate::sched::scheduler::get_scheduler;
-                    get_scheduler().wake_task(task_id);
+                // Wake tasks waiting on read/select/poll.
+                if let Some(peer_weak) = self.peer_socket.read().as_ref() {
+                    if let Some(peer) = peer_weak.upgrade() {
+                        peer.read_waker.wake_one();
+                    }
                 }
 
-                drop(reading_task_guard); // Release reading_task lock
                 drop(peer_buffer); // Release peer_buffer lock
 
                 Ok(bytes_written)
@@ -856,7 +1022,7 @@ impl Selectable for LocalSocket {
         &self,
         interest: ReadyInterest,
         trapframe: &mut crate::arch::Trapframe,
-        _timeout_ticks: Option<u64>,
+        timeout_ticks: Option<u64>,
     ) -> SelectWaitOutcome {
         // Check if already ready
         let current = self.current_ready(interest);
@@ -876,23 +1042,32 @@ impl Selectable for LocalSocket {
 
         // Wait based on state and interest
         // Note: timeout is not yet implemented - always blocks until ready
-        match state {
+        let woke = match state {
             SocketState::Listening if interest.read => {
                 // Wait for incoming connections
-                self.accept_waker.wait(task_id, trapframe);
+                self.accept_waker
+                    .wait_with_timeout(task_id, trapframe, timeout_ticks)
             }
             SocketState::Connected if interest.read => {
                 // Wait for data to arrive
-                self.read_waker.wait(task_id, trapframe);
+                self.read_waker
+                    .wait_with_timeout(task_id, trapframe, timeout_ticks)
             }
             SocketState::Connected if interest.write => {
                 // For write readiness, treat as immediately ready (optimistic)
                 // Most sockets are writable most of the time
-                return SelectWaitOutcome::Ready;
+                true
             }
             _ => {
                 // Other states: immediately return as not ready
-                return SelectWaitOutcome::Ready;
+                true
+            }
+        };
+
+        if timeout_ticks.is_some() && !woke {
+            let after = self.current_ready(interest);
+            if (interest.read && !after.read) && (interest.write && !after.write) {
+                return SelectWaitOutcome::TimedOut;
             }
         }
 
@@ -952,7 +1127,7 @@ impl ControlOps for LocalSocket {
                 Ok(if is_nonblocking { 1 } else { 0 })
             }
             _ => {
-                crate::println!("[LocalSocket::control] Unknown command");
+                localsocket_log!("[LocalSocket::control] Unknown command");
                 Err("Unknown control command")
             }
         }

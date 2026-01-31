@@ -139,6 +139,55 @@ impl Waker {
         get_scheduler().schedule(trapframe);
     }
 
+    /// Block the task until woken or the timeout elapses.
+    ///
+    /// Returns true if woken by event, false if timeout elapsed.
+    pub fn wait_with_timeout(
+        &self,
+        task_id: usize,
+        trapframe: &mut Trapframe,
+        timeout_ticks: Option<u64>,
+    ) -> bool {
+        if matches!(timeout_ticks, Some(0)) {
+            return false;
+        }
+
+        if let Some(ticks) = timeout_ticks {
+            use crate::timer::{TimerHandler, add_timer, cancel_timer, get_tick};
+            use alloc::sync::Arc;
+            use core::sync::atomic::{AtomicBool, Ordering};
+
+            struct TimeoutWake {
+                task_id: usize,
+                timed_out: AtomicBool,
+            }
+
+            impl TimerHandler for TimeoutWake {
+                fn on_timer_expired(self: Arc<Self>, _context: usize) {
+                    self.timed_out.store(true, Ordering::SeqCst);
+                    let scheduler = get_scheduler();
+                    let _ = scheduler.wake_task(self.task_id);
+                }
+            }
+
+            let handler: Arc<TimeoutWake> = Arc::new(TimeoutWake {
+                task_id,
+                timed_out: AtomicBool::new(false),
+            });
+            let handler_ref: Arc<dyn TimerHandler> = handler.clone();
+            let id = add_timer(get_tick().saturating_add(ticks), &handler_ref, 0);
+
+            self.wait(task_id, trapframe);
+
+            cancel_timer(id);
+
+            !handler.timed_out.load(Ordering::SeqCst)
+        } else {
+            self.wait(task_id, trapframe);
+            true
+        }
+    }
+
     // /// Block any task (not limited to the current task) and add it to the wait queue
     // ///
     // /// This method is intended for blocking tasks other than the current one.

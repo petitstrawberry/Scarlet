@@ -1495,9 +1495,44 @@ impl FileObject for TmpFileObject {
             )));
         }
 
+        let new_size = usize::try_from(size).map_err(|_| StreamError::InvalidArgument)?;
+        let old_size = self.node.metadata.read().size;
+        if new_size == old_size {
+            return Ok(());
+        }
+
+        let cache_id = self.cache_id();
+        if new_size == 0 {
+            PageCacheManager::global().invalidate(cache_id);
+        } else if new_size < old_size {
+            let start_page = new_size / PAGE_SIZE;
+            let end_page = (old_size - 1) / PAGE_SIZE;
+            let tail_offset = new_size % PAGE_SIZE;
+            for page_index in start_page..=end_page {
+                let pinned = PageCacheManager::global()
+                    .pin_or_load(cache_id, page_index as u64, |paddr| {
+                        unsafe {
+                            core::ptr::write_bytes(paddr as *mut u8, 0, PAGE_SIZE);
+                        }
+                        Ok(())
+                    })
+                    .map_err(|_| StreamError::IoError)?;
+
+                unsafe {
+                    let base = pinned.paddr() as *mut u8;
+                    if page_index == start_page && tail_offset != 0 {
+                        core::ptr::write_bytes(base.add(tail_offset), 0, PAGE_SIZE - tail_offset);
+                    } else {
+                        core::ptr::write_bytes(base, 0, PAGE_SIZE);
+                    }
+                }
+                pinned.mark_dirty();
+            }
+        }
+
         {
             let mut meta = self.node.metadata.write();
-            meta.size = size as usize;
+            meta.size = new_size;
         }
         Ok(())
     }
@@ -1521,7 +1556,16 @@ impl PageCacheCapable for TmpFileObject {
     }
 }
 
-impl crate::object::capability::selectable::Selectable for TmpFileObject {}
+impl crate::object::capability::selectable::Selectable for TmpFileObject {
+    fn wait_until_ready(
+        &self,
+        _interest: crate::object::capability::selectable::ReadyInterest,
+        _trapframe: &mut crate::arch::Trapframe,
+        _timeout_ticks: Option<u64>,
+    ) -> crate::object::capability::selectable::SelectWaitOutcome {
+        crate::object::capability::selectable::SelectWaitOutcome::Ready
+    }
+}
 
 pub struct TmpFSDriver;
 

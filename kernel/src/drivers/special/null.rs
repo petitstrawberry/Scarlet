@@ -21,7 +21,16 @@ use crate::{
 
 pub struct NullDevice;
 
-impl Selectable for NullDevice {} // Use default Selectable implementation
+impl Selectable for NullDevice {
+    fn wait_until_ready(
+        &self,
+        _interest: crate::object::capability::selectable::ReadyInterest,
+        _trapframe: &mut crate::arch::Trapframe,
+        _timeout_ticks: Option<u64>,
+    ) -> crate::object::capability::selectable::SelectWaitOutcome {
+        crate::object::capability::selectable::SelectWaitOutcome::Ready
+    }
+}
 
 impl Device for NullDevice {
     fn device_type(&self) -> DeviceType {

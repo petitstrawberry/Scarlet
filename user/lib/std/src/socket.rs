@@ -135,6 +135,50 @@ impl Socket {
         unsafe { Handle::from_raw(raw) }.map_err(|_| SocketError::SyscallFailed)
     }
 
+    /// Send a kernel object handle and data atomically through this connected socket.
+    ///
+    /// This method ensures that both the handle and data are available before
+    /// waking the peer, preventing race conditions in protocols like Wayland.
+    ///
+    /// # Arguments
+    ///
+    /// * `object` - The kernel object handle to send
+    /// * `data` - The data to send with the handle
+    pub fn send_handle_and_data(&self, object: &Handle, data: &[u8]) -> Result<()> {
+        let sock = self
+            .handle
+            .as_socket()
+            .map_err(|_| SocketError::InvalidHandle)?;
+        sock.send_handle_and_data(object.as_raw(), data)
+            .map_err(|_| SocketError::SyscallFailed)
+    }
+
+    /// Receive a kernel object handle and data atomically through this connected socket.
+    ///
+    /// Returns both a handle and data in a single atomic operation.
+    ///
+    /// # Arguments
+    ///
+    /// * `data_out` - Buffer to store the received data
+    ///
+    /// # Returns
+    ///
+    /// * `(Handle, usize)` - The received handle and number of bytes on success
+    /// * `SocketError` - Error on failure
+    pub fn recv_handle_and_data(&self, data_out: &mut [u8]) -> Result<(Handle, usize)> {
+        let sock = self
+            .handle
+            .as_socket()
+            .map_err(|_| SocketError::InvalidHandle)?;
+        let mut raw_handle = 0;
+        let bytes_read = sock
+            .recv_handle_and_data(&mut raw_handle, data_out)
+            .map_err(|_| SocketError::WouldBlock)?;
+        let handle =
+            unsafe { Handle::from_raw(raw_handle) }.map_err(|_| SocketError::SyscallFailed)?;
+        Ok((handle, bytes_read))
+    }
+
     /// Bind socket to a path
     ///
     /// # Arguments

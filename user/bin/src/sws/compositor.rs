@@ -4,10 +4,26 @@ use super::cursor::Cursor;
 use super::input::{CompositorInputEvent, InputManager, key_codes};
 use super::ipc::{IpcEvent, IpcServer, send_message_to_client, send_message_to_window};
 use super::window::WindowManager;
+use core::sync::atomic::{AtomicU8, Ordering};
 use framebuffer::Framebuffer;
+use std::env;
 use std::println;
 use std::vec::Vec;
 use sws_protocol;
+
+fn is_sws_debug_enabled() -> bool {
+    static LOG_CACHE: AtomicU8 = AtomicU8::new(u8::MAX);
+    let cached = LOG_CACHE.load(Ordering::Relaxed);
+    if cached != u8::MAX {
+        return cached != 0;
+    }
+    let enabled = match env::var("SWS_LOG") {
+        Some(val) => matches!(val.as_str(), "debug" | "DEBUG" | "3"),
+        None => false,
+    };
+    LOG_CACHE.store(enabled as u8, Ordering::Relaxed);
+    enabled
+}
 
 // NOTE: The compositor intentionally does NOT manage a manual VRAM mmap mapping.
 // Rendering goes through the framebuffer library (which may internally use mmap).
@@ -40,6 +56,8 @@ pub struct Compositor {
     pending_damage: Option<(i32, i32, u32, u32)>,
     event_counter: u64,
     left_button_down: bool,
+    last_left_down_cursor: Option<(i32, i32)>,
+    pointer_grab_window_id: Option<u32>,
     move_drag: Option<MoveDragState>,
     resize_drag: Option<ResizeDragState>,
     resize_outline: Option<(i32, i32, u32, u32)>,
@@ -142,6 +160,8 @@ impl Compositor {
             pending_damage: None,
             event_counter: 0,
             left_button_down: false,
+            last_left_down_cursor: None,
+            pointer_grab_window_id: None,
             move_drag: None,
             resize_drag: None,
             resize_outline: None,
@@ -492,6 +512,17 @@ impl Compositor {
         };
     }
 
+    /// Mark a window's entire area as damaged and request full redraw
+    fn mark_window_damage(&mut self, window_id: u32) {
+        if let Some(w) = self.window_manager.get_window(window_id) {
+            // println!("[Compositor] Marking window #{} damage: ({},{}) {}x{}",
+            //     window_id, w.x, w.y, w.width, w.height);
+            self.add_pending_damage((w.x, w.y, w.width, w.height));
+            self.full_redraw_needed = true;
+            // println!("[Compositor] Full redraw needed: {}", self.full_redraw_needed);
+        }
+    }
+
     /// Composite all layers directly to VRAM (or framebuffer as fallback)
     fn composite_and_present(&mut self) -> Result<(), &'static str> {
         fn union_rect(
@@ -692,14 +723,21 @@ impl Compositor {
                 }
             } else if let Some(shm_addr) = window.shm_mapped_addr {
                 // SHM-backed window
-                let wo = ((local_y as usize)
-                    .saturating_mul(window.width as usize)
-                    .saturating_add(local_x as usize))
-                .saturating_mul(4);
+                let row_stride = if window.shm_stride != 0 {
+                    window.shm_stride as usize
+                } else {
+                    window.width as usize * 4
+                };
+                let wo = window
+                    .shm_offset
+                    .saturating_add(local_y as usize * row_stride)
+                    .saturating_add(local_x as usize * 4);
 
-                let buffer_size = (window.width as usize)
-                    .saturating_mul(window.height as usize)
-                    .saturating_mul(4);
+                let buffer_size = if window.shm_size != 0 {
+                    window.shm_size
+                } else {
+                    row_stride.saturating_mul(window.height as usize)
+                };
 
                 if wo + 4 <= buffer_size {
                     unsafe {
@@ -776,12 +814,17 @@ impl Compositor {
         // Check if window uses SHM or Vec buffer
         if let Some(shm_addr) = window.shm_mapped_addr {
             // SHM-backed window: read from mapped memory
+            let row_stride = if window.shm_stride != 0 {
+                window.shm_stride as usize
+            } else {
+                window.width as usize * 4
+            };
             let buffer_size = if window.shm_size != 0 {
                 window.shm_size
             } else {
-                (window.width as usize)
-                    .saturating_mul(window.height as usize)
-                    .saturating_mul(4)
+                window
+                    .shm_offset
+                    .saturating_add(row_stride.saturating_mul(window.height as usize))
             };
 
             // Create slice from mapped address
@@ -863,6 +906,17 @@ impl Compositor {
         // - window.has_alpha_content: pixel-level transparency (semi-transparent UI elements)
         let has_transparency = window.opacity < 1.0 || window.has_alpha_content;
 
+        let row_stride = if window.shm_mapped_addr.is_some() && window.shm_stride != 0 {
+            window.shm_stride as usize
+        } else {
+            window.width as usize * 4
+        };
+        let base_offset = if window.shm_mapped_addr.is_some() {
+            window.shm_offset
+        } else {
+            0
+        };
+
         // Fast path for opaque windows: copy row by row
         if !has_transparency {
             for sy in y0..y1 {
@@ -870,7 +924,9 @@ impl Compositor {
                 let screen_row_off = (sy as u32 * stride) as usize;
                 for sx in x0..x1 {
                     let wx = (sx - win_x0) as u32;
-                    let window_offset = ((wy * window.width + wx) * 4) as usize;
+                    let window_offset = base_offset
+                        .saturating_add(wy as usize * row_stride)
+                        .saturating_add(wx as usize * 4);
                     let screen_offset = screen_row_off + (sx as u32 * bytes_per_pixel) as usize;
 
                     if window_offset + 4 <= window_buffer.len()
@@ -888,7 +944,9 @@ impl Compositor {
                 let screen_row_off = (sy as u32 * stride) as usize;
                 for sx in x0..x1 {
                     let wx = (sx - win_x0) as u32;
-                    let window_offset = ((wy * window.width + wx) * 4) as usize;
+                    let window_offset = base_offset
+                        .saturating_add(wy as usize * row_stride)
+                        .saturating_add(wx as usize * 4);
                     let screen_offset = screen_row_off + (sx as u32 * bytes_per_pixel) as usize;
 
                     if window_offset + 4 <= window_buffer.len()
@@ -1273,9 +1331,45 @@ impl Compositor {
         }
     }
 
-    /// Send mouse position event to a window
-    fn send_mouse_position_to_window(&self, window_id: u32, window: &super::window::Window) {
-        if let Some((window_x, window_y)) = self.cursor_position_in_window(window) {
+    fn send_mouse_position_to_window_coords(
+        &self,
+        window_id: u32,
+        window: &super::window::Window,
+        window_x: i32,
+        window_y: i32,
+    ) {
+        // Check if this is an extension-owned window
+        if let Some((extension_id, external_client_id)) = window.extension_owner {
+            // Send EXTENSION_INPUT_EVENT for extension windows
+            super::ipc::send_extension_input_event(
+                extension_id,
+                external_client_id,
+                window_id,
+                0,
+                super::input::event_types::EV_ABS,
+                super::input::abs_codes::ABS_X,
+                window_x,
+            );
+            super::ipc::send_extension_input_event(
+                extension_id,
+                external_client_id,
+                window_id,
+                0,
+                super::input::event_types::EV_ABS,
+                super::input::abs_codes::ABS_Y,
+                window_y,
+            );
+            super::ipc::send_extension_input_event(
+                extension_id,
+                external_client_id,
+                window_id,
+                0,
+                super::input::event_types::EV_SYN,
+                0,
+                0,
+            );
+        } else {
+            // Send regular INPUT_EVENT for normal windows
             super::ipc::send_input_to_window(
                 window_id,
                 0,
@@ -1292,6 +1386,23 @@ impl Compositor {
             );
             super::ipc::send_input_to_window(window_id, 0, super::input::event_types::EV_SYN, 0, 0);
         }
+    }
+
+    /// Send mouse position event to a window
+    fn send_mouse_position_to_window(&self, window_id: u32, window: &super::window::Window) {
+        if let Some((window_x, window_y)) = self.cursor_position_in_window(window) {
+            self.send_mouse_position_to_window_coords(window_id, window, window_x, window_y);
+        }
+    }
+
+    fn send_mouse_position_to_window_unclipped(
+        &self,
+        window_id: u32,
+        window: &super::window::Window,
+    ) {
+        let window_x = self.cursor.x - window.x;
+        let window_y = self.cursor.y - window.y;
+        self.send_mouse_position_to_window_coords(window_id, window, window_x, window_y);
     }
 
     /// Main event loop
@@ -1328,7 +1439,7 @@ impl Compositor {
                 || self.pending_damage.is_some()
                 || self.cursor.needs_redraw()
             {
-                if self.full_redraw_needed {
+                if self.full_redraw_needed && is_sws_debug_enabled() {
                     println!("[Compositor] Full redraw triggered");
                 }
                 self.composite_and_present()?;
@@ -1397,26 +1508,43 @@ impl Compositor {
 
                 // If a window move is in progress, update the window position before
                 // converting cursor coordinates into window-local space.
-                if self.left_button_down {
-                    if let Some(state) = self.move_drag {
-                        let old_rect = self
-                            .window_manager
-                            .get_window(state.window_id)
-                            .map(|w| (w.x, w.y, w.width, w.height));
-                        let new_x = state.start_window_x + (self.cursor.x - state.grab_cursor_x);
-                        let new_y = state.start_window_y + (self.cursor.y - state.grab_cursor_y);
-                        self.window_manager
-                            .set_window_position(state.window_id, new_x, new_y);
+                if let Some(state) = self.move_drag {
+                    let old_rect = self
+                        .window_manager
+                        .get_window(state.window_id)
+                        .map(|w| (w.x, w.y, w.width, w.height));
+                    let new_x = state.start_window_x + (self.cursor.x - state.grab_cursor_x);
+                    let new_y = state.start_window_y + (self.cursor.y - state.grab_cursor_y);
+                    println!(
+                        "[Compositor] Move drag: window #{} start=({}, {}) grab=({}, {}) cursor=({}, {}) new=({}, {})",
+                        state.window_id,
+                        state.start_window_x,
+                        state.start_window_y,
+                        state.grab_cursor_x,
+                        state.grab_cursor_y,
+                        self.cursor.x,
+                        self.cursor.y,
+                        new_x,
+                        new_y
+                    );
+                    self.window_manager
+                        .set_window_position(state.window_id, new_x, new_y);
 
-                        if let Some(r) = old_rect {
-                            self.add_pending_damage(r);
-                        }
-                        if let Some(w) = self.window_manager.get_window(state.window_id) {
-                            self.add_pending_damage((w.x, w.y, w.width, w.height));
-                        }
+                    if let Some(r) = old_rect {
+                        self.add_pending_damage(r);
+                    }
+                    if let Some(w) = self.window_manager.get_window(state.window_id) {
+                        self.add_pending_damage((w.x, w.y, w.width, w.height));
+                    }
 
-                        // While moving a window, the compositor "grabs" the pointer.
-                        // Avoid routing mouse moves to the currently focused client.
+                    // While moving a window, the compositor "grabs" the pointer.
+                    // Avoid routing mouse moves to the currently focused client.
+                    return Ok(true);
+                }
+
+                if let Some(grab_id) = self.pointer_grab_window_id {
+                    if let Some(window) = self.window_manager.get_window(grab_id) {
+                        self.send_mouse_position_to_window_unclipped(grab_id, window);
                         return Ok(true);
                     }
                 }
@@ -1469,26 +1597,31 @@ impl Compositor {
                     }
                 }
 
-                if self.left_button_down {
-                    if let Some(state) = self.move_drag {
-                        let old_rect = self
-                            .window_manager
-                            .get_window(state.window_id)
-                            .map(|w| (w.x, w.y, w.width, w.height));
-                        let new_x = state.start_window_x + (self.cursor.x - state.grab_cursor_x);
-                        let new_y = state.start_window_y + (self.cursor.y - state.grab_cursor_y);
-                        self.window_manager
-                            .set_window_position(state.window_id, new_x, new_y);
+                if let Some(state) = self.move_drag {
+                    let old_rect = self
+                        .window_manager
+                        .get_window(state.window_id)
+                        .map(|w| (w.x, w.y, w.width, w.height));
+                    let new_x = state.start_window_x + (self.cursor.x - state.grab_cursor_x);
+                    let new_y = state.start_window_y + (self.cursor.y - state.grab_cursor_y);
+                    self.window_manager
+                        .set_window_position(state.window_id, new_x, new_y);
 
-                        if let Some(r) = old_rect {
-                            self.add_pending_damage(r);
-                        }
-                        if let Some(w) = self.window_manager.get_window(state.window_id) {
-                            self.add_pending_damage((w.x, w.y, w.width, w.height));
-                        }
+                    if let Some(r) = old_rect {
+                        self.add_pending_damage(r);
+                    }
+                    if let Some(w) = self.window_manager.get_window(state.window_id) {
+                        self.add_pending_damage((w.x, w.y, w.width, w.height));
+                    }
 
-                        // While moving a window, the compositor "grabs" the pointer.
-                        // Avoid routing mouse moves to the currently focused client.
+                    // While moving a window, the compositor "grabs" the pointer.
+                    // Avoid routing mouse moves to the currently focused client.
+                    return Ok(true);
+                }
+
+                if let Some(grab_id) = self.pointer_grab_window_id {
+                    if let Some(window) = self.window_manager.get_window(grab_id) {
+                        self.send_mouse_position_to_window_unclipped(grab_id, window);
                         return Ok(true);
                     }
                 }
@@ -1506,9 +1639,20 @@ impl Compositor {
                 Ok(true)
             }
             CompositorInputEvent::MouseButton { button, pressed } => {
+                let mut grab_target = None;
+
                 if button == key_codes::BTN_LEFT {
                     self.left_button_down = pressed;
+                    println!(
+                        "[Compositor] Left button {} at cursor=({}, {})",
+                        if pressed { "down" } else { "up" },
+                        self.cursor.x,
+                        self.cursor.y
+                    );
                     if !pressed {
+                        grab_target = self.pointer_grab_window_id;
+                        self.pointer_grab_window_id = None;
+                        self.last_left_down_cursor = None;
                         // Always exit move mode on left button release.
                         if self.move_drag.take().is_some() {
                             // No special redraw needed: the last drag motion already queued damage.
@@ -1543,11 +1687,13 @@ impl Compositor {
                 }
 
                 if button == key_codes::BTN_LEFT && pressed {
+                    self.last_left_down_cursor = Some((self.cursor.x, self.cursor.y));
                     // Determine target window under cursor.
-                    if let Some(win_id) = self
+                    let win_id_opt = self
                         .window_manager
-                        .window_at_point(self.cursor.x, self.cursor.y)
-                    {
+                        .window_at_point(self.cursor.x, self.cursor.y);
+                    if let Some(win_id) = win_id_opt {
+                        self.pointer_grab_window_id = Some(win_id);
                         // Only change focus if the window accepts focus
                         // Taskbar and Desktop windows are global UI elements that don't steal focus
                         if self.window_manager.window_accepts_focus(win_id) {
@@ -1590,6 +1736,8 @@ impl Compositor {
                                 }
                             }
                         }
+                    } else {
+                        self.pointer_grab_window_id = None;
                     }
 
                     // Normal click behavior (focus/raise).
@@ -1597,29 +1745,69 @@ impl Compositor {
                 }
 
                 // Route button event to the window under the cursor (even if it can't take focus).
-                if let Some(target_id) = self
-                    .window_manager
-                    .window_at_point(self.cursor.x, self.cursor.y)
-                {
+                let target_id = if button == key_codes::BTN_LEFT {
+                    if pressed {
+                        self.pointer_grab_window_id.or_else(|| {
+                            self.window_manager
+                                .window_at_point(self.cursor.x, self.cursor.y)
+                        })
+                    } else {
+                        grab_target.or_else(|| {
+                            self.window_manager
+                                .window_at_point(self.cursor.x, self.cursor.y)
+                        })
+                    }
+                } else {
+                    self.window_manager
+                        .window_at_point(self.cursor.x, self.cursor.y)
+                };
+
+                if let Some(target_id) = target_id {
                     let window = self
                         .window_manager
                         .get_window(target_id)
                         .ok_or("Target window not found")?;
-                    if self.cursor_position_in_window(window).is_some() {
-                        super::ipc::send_input_to_window(
-                            target_id,
-                            0,
-                            super::input::event_types::EV_KEY,
-                            button,
-                            if pressed { 1 } else { 0 },
-                        );
-                        super::ipc::send_input_to_window(
-                            target_id,
-                            0,
-                            super::input::event_types::EV_SYN,
-                            0,
-                            0,
-                        );
+                    let allow_outside =
+                        button == key_codes::BTN_LEFT && !pressed && grab_target == Some(target_id);
+                    if allow_outside || self.cursor_position_in_window(window).is_some() {
+                        // Ensure clients see the current pointer position before the button event.
+                        self.send_mouse_position_to_window_unclipped(target_id, window);
+                        // Check if this is an extension-owned window
+                        if let Some((extension_id, external_client_id)) = window.extension_owner {
+                            super::ipc::send_extension_input_event(
+                                extension_id,
+                                external_client_id,
+                                target_id,
+                                0,
+                                super::input::event_types::EV_KEY,
+                                button,
+                                if pressed { 1 } else { 0 },
+                            );
+                            super::ipc::send_extension_input_event(
+                                extension_id,
+                                external_client_id,
+                                target_id,
+                                0,
+                                super::input::event_types::EV_SYN,
+                                0,
+                                0,
+                            );
+                        } else {
+                            super::ipc::send_input_to_window(
+                                target_id,
+                                0,
+                                super::input::event_types::EV_KEY,
+                                button,
+                                if pressed { 1 } else { 0 },
+                            );
+                            super::ipc::send_input_to_window(
+                                target_id,
+                                0,
+                                super::input::event_types::EV_SYN,
+                                0,
+                                0,
+                            );
+                        }
                     }
                 }
 
@@ -1628,20 +1816,44 @@ impl Compositor {
             CompositorInputEvent::Keyboard { code, pressed } => {
                 // Route keyboard events to focused window
                 if let Some(focused_id) = self.window_manager.get_focused_window_id() {
-                    super::ipc::send_input_to_window(
-                        focused_id,
-                        0,
-                        super::input::event_types::EV_KEY,
-                        code,
-                        if pressed { 1 } else { 0 },
-                    );
-                    super::ipc::send_input_to_window(
-                        focused_id,
-                        0,
-                        super::input::event_types::EV_SYN,
-                        0,
-                        0,
-                    );
+                    if let Some(window) = self.window_manager.get_window(focused_id) {
+                        // Check if this is an extension-owned window
+                        if let Some((extension_id, external_client_id)) = window.extension_owner {
+                            super::ipc::send_extension_input_event(
+                                extension_id,
+                                external_client_id,
+                                focused_id,
+                                0,
+                                super::input::event_types::EV_KEY,
+                                code,
+                                if pressed { 1 } else { 0 },
+                            );
+                            super::ipc::send_extension_input_event(
+                                extension_id,
+                                external_client_id,
+                                focused_id,
+                                0,
+                                super::input::event_types::EV_SYN,
+                                0,
+                                0,
+                            );
+                        } else {
+                            super::ipc::send_input_to_window(
+                                focused_id,
+                                0,
+                                super::input::event_types::EV_KEY,
+                                code,
+                                if pressed { 1 } else { 0 },
+                            );
+                            super::ipc::send_input_to_window(
+                                focused_id,
+                                0,
+                                super::input::event_types::EV_SYN,
+                                0,
+                                0,
+                            );
+                        }
+                    }
                 }
                 Ok(false) // Keyboard events don't trigger redraws
             }
@@ -1916,6 +2128,17 @@ impl Compositor {
             }
             IpcEvent::RequestMove { window_id } => {
                 println!("[Compositor] Window #{} requested move", window_id);
+                println!(
+                    "[Compositor] RequestMove state: left_down={} last_left_down={:?} cursor=({}, {})",
+                    self.left_button_down, self.last_left_down_cursor, self.cursor.x, self.cursor.y
+                );
+                if !self.left_button_down {
+                    println!(
+                        "[Compositor] Ignoring move request for window #{} (left button not down)",
+                        window_id
+                    );
+                    return Ok(false);
+                }
 
                 let (start_window_x, start_window_y) =
                     match self.window_manager.get_window(window_id) {
@@ -1923,13 +2146,21 @@ impl Compositor {
                         None => return Ok(false),
                     };
 
+                let (grab_cursor_x, grab_cursor_y) = self
+                    .last_left_down_cursor
+                    .unwrap_or((self.cursor.x, self.cursor.y));
+                println!(
+                    "[Compositor] Move start: window #{} grab=({}, {}) cursor=({}, {})",
+                    window_id, grab_cursor_x, grab_cursor_y, self.cursor.x, self.cursor.y
+                );
+
                 // Bring the window to front for the drag (focus is handled by click routing).
                 self.window_manager.raise_to_top_with_type(window_id);
 
                 self.move_drag = Some(MoveDragState {
                     window_id,
-                    grab_cursor_x: self.cursor.x,
-                    grab_cursor_y: self.cursor.y,
+                    grab_cursor_x,
+                    grab_cursor_y,
                     start_window_x,
                     start_window_y,
                 });
@@ -2226,6 +2457,174 @@ impl Compositor {
                         self.add_pending_damage((w.x, w.y, w.width, w.height));
                     }
                 }
+            }
+            IpcEvent::ExtensionRegistered {
+                client_id,
+                extension_id,
+                extension_name,
+            } => {
+                println!(
+                    "[Compositor] IPC: ExtensionRegistered client={} ext_id={} name={}",
+                    client_id, extension_id, extension_name
+                );
+                // Extension is now registered and can create windows
+            }
+            IpcEvent::ExtensionCreateWindow {
+                extension_id,
+                external_client_id,
+                window_id,
+                width,
+                height,
+                shm,
+                shm_mapped_addr,
+                shm_size,
+            } => {
+                println!(
+                    "[Compositor] IPC: ExtensionCreateWindow ext_id={} ext_client={} window={} {}x{}",
+                    extension_id, external_client_id, window_id, width, height
+                );
+
+                // Create window using window manager
+                if let Some(shm_handle) = shm {
+                    match self.window_manager.create_extension_window(
+                        window_id,
+                        100, // x position
+                        100, // y position
+                        width,
+                        height,
+                        shm_handle,
+                        shm_mapped_addr,
+                        shm_size,
+                        extension_id,
+                        external_client_id,
+                    ) {
+                        Ok(wid) => {
+                            println!(
+                                "[Compositor] Created extension window: {} (ext_id={}, ext_client_id={})",
+                                wid, extension_id, external_client_id
+                            );
+                            self.full_redraw_needed = true;
+                        }
+                        Err(e) => {
+                            println!("[Compositor] Failed to create extension window: {}", e);
+                        }
+                    }
+                } else {
+                    println!("[Compositor] ExtensionCreateWindow: no SHM provided");
+                }
+            }
+            IpcEvent::ExtensionUpdateBuffer {
+                external_client_id,
+                window_id,
+                damage_x,
+                damage_y,
+                damage_width,
+                damage_height,
+            } => {
+                if is_sws_debug_enabled() {
+                    println!(
+                        "[Compositor] IPC: ExtensionUpdateBuffer ext_client={} window={} damage=[{},{} {}x{}]",
+                        external_client_id,
+                        window_id,
+                        damage_x,
+                        damage_y,
+                        damage_width,
+                        damage_height
+                    );
+                }
+
+                // Mark window as damaged and trigger redraw
+                if let Some(w) = self.window_manager.get_window(window_id) {
+                    self.add_pending_damage((
+                        w.x + damage_x,
+                        w.y + damage_y,
+                        damage_width,
+                        damage_height,
+                    ));
+                }
+            }
+            IpcEvent::ExtensionAttachBuffer {
+                external_client_id,
+                window_id,
+                width,
+                height,
+                offset,
+                stride,
+                format,
+                shm,
+                shm_mapped_addr,
+                shm_size,
+            } => {
+                // println!(
+                //     "[Compositor] === EXTENSION_ATTACH_BUFFER === ext_client={} window={} ===",
+                //     external_client_id, window_id
+                // );
+                // println!(
+                //     "[Compositor] geometry={}x{} stride={} format={} shm_size={} shm={:?} addr={:?}",
+                //     width, height, stride, format, shm_size, shm.is_some(), shm_mapped_addr
+                // );
+
+                // For zero-copy external buffers, we only need the mapped address
+                if let Some(addr) = shm_mapped_addr {
+                    // println!("[Compositor] Attaching external buffer at address 0x{:x}", addr);
+                    if let Some(shm_handle) = shm {
+                        // We have both handle and address (normal case)
+                        if let Err(e) = self.window_manager.replace_window_shm_from_event(
+                            window_id,
+                            width,
+                            height,
+                            offset,
+                            stride,
+                            format,
+                            shm_handle,
+                            Some(addr),
+                            shm_size,
+                        ) {
+                            println!(
+                                "[Compositor] Failed to attach SHM buffer for window {}: {}",
+                                window_id, e
+                            );
+                        } else {
+                            if let Some(w) = self.window_manager.get_window(window_id) {
+                                self.add_pending_damage((w.x, w.y, w.width, w.height));
+                            }
+                        }
+                    } else {
+                        // We have address but no SharedMemory wrapper (e.g., File handle from Linux compat)
+                        // This is zero-copy mode - just update the mapped address
+                        // println!("[Compositor] Zero-copy mode: updating mapped address without SharedMemory wrapper");
+                        let rect = if let Some(w) = self.window_manager.get_window_mut(window_id) {
+                            w.width = width;
+                            w.height = height;
+                            w.shm_mapped_addr = Some(addr);
+                            w.shm_size = shm_size;
+                            w.shm_offset = offset.max(0) as usize;
+                            w.shm_stride = if stride > 0 {
+                                stride as u32
+                            } else {
+                                width.saturating_mul(4)
+                            };
+                            w.shm_format = format;
+                            w.has_alpha_content = format == 0;
+                            w.buffer = None; // Clear Vec buffer if present
+                            // Keep existing shm if any (for ownership tracking)
+                            Some((w.x, w.y, w.width, w.height))
+                        } else {
+                            println!("[Compositor] Window {} not found", window_id);
+                            None
+                        };
+
+                        if let Some(rect) = rect {
+                            self.add_pending_damage(rect);
+                        }
+                    }
+                } else {
+                    println!(
+                        "[Compositor] No mapped address provided for window {}",
+                        window_id
+                    );
+                }
+                // println!("[Compositor] === EXTENSION_ATTACH_BUFFER COMPLETE ===");
             }
             IpcEvent::SetWindowHasAlphaContent {
                 window_id,

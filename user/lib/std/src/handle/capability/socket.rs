@@ -4,7 +4,7 @@
 //! implement the Scarlet Native local socket interface.
 
 use crate::handle::{Handle, RawHandle};
-use crate::syscall::{Syscall, syscall1, syscall2, syscall3};
+use crate::syscall::{Syscall, syscall1, syscall2, syscall3, syscall4, syscall5};
 
 /// Result type for socket operations
 pub type SocketObjectResult<T> = Result<T, SocketObjectError>;
@@ -117,5 +117,58 @@ impl<'a> SocketObject<'a> {
     pub fn recv_handle(&self) -> SocketObjectResult<RawHandle> {
         let result = syscall1(Syscall::SocketRecvHandle, self.handle.as_raw() as usize);
         SocketObjectError::from_syscall_result(result).map(|h| h as RawHandle)
+    }
+
+    /// Send a kernel object handle and data atomically through a socket
+    ///
+    /// This method ensures that both the handle and data are available before
+    /// waking the peer, preventing race conditions in Wayland protocol.
+    ///
+    /// # Arguments
+    ///
+    /// * `object_handle` - The raw handle of the kernel object to send
+    /// * `data` - The data to send with the handle
+    pub fn send_handle_and_data(
+        &self,
+        object_handle: RawHandle,
+        data: &[u8],
+    ) -> SocketObjectResult<()> {
+        let result = syscall4(
+            Syscall::SocketSendHandleAndData,
+            self.handle.as_raw() as usize,
+            object_handle as usize,
+            data.as_ptr() as usize,
+            data.len(),
+        );
+        SocketObjectError::from_syscall_result(result).map(|_| ())
+    }
+
+    /// Receive a kernel object handle and data atomically through a socket
+    ///
+    /// Returns both a handle and data in a single atomic operation.
+    ///
+    /// # Arguments
+    ///
+    /// * `handle_out` - Pointer to store the received handle
+    /// * `data_out` - Buffer to store the received data
+    ///
+    /// # Returns
+    ///
+    /// * `usize` - Number of bytes received on success
+    /// * `SocketObjectError` - Error on failure
+    pub fn recv_handle_and_data(
+        &self,
+        handle_out: &mut RawHandle,
+        data_out: &mut [u8],
+    ) -> SocketObjectResult<usize> {
+        let result = syscall5(
+            Syscall::SocketRecvHandleAndData,
+            self.handle.as_raw() as usize,
+            handle_out as *mut RawHandle as usize,
+            data_out.as_mut_ptr() as usize,
+            data_out.len(),
+            0, // reserved
+        );
+        SocketObjectError::from_syscall_result(result)
     }
 }

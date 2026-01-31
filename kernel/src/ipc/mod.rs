@@ -14,6 +14,7 @@
 use crate::object::capability::{StreamError, StreamOps};
 use alloc::string::String;
 
+pub mod counter;
 pub mod event;
 pub mod pipe;
 pub mod shared_memory;
