@@ -1492,40 +1492,38 @@ impl Compositor {
 
                 // If a window move is in progress, update the window position before
                 // converting cursor coordinates into window-local space.
-                if self.left_button_down {
-                    if let Some(state) = self.move_drag {
-                        let old_rect = self
-                            .window_manager
-                            .get_window(state.window_id)
-                            .map(|w| (w.x, w.y, w.width, w.height));
-                        let new_x = state.start_window_x + (self.cursor.x - state.grab_cursor_x);
-                        let new_y = state.start_window_y + (self.cursor.y - state.grab_cursor_y);
-                        println!(
-                            "[Compositor] Move drag: window #{} start=({}, {}) grab=({}, {}) cursor=({}, {}) new=({}, {})",
-                            state.window_id,
-                            state.start_window_x,
-                            state.start_window_y,
-                            state.grab_cursor_x,
-                            state.grab_cursor_y,
-                            self.cursor.x,
-                            self.cursor.y,
-                            new_x,
-                            new_y
-                        );
-                        self.window_manager
-                            .set_window_position(state.window_id, new_x, new_y);
+                if let Some(state) = self.move_drag {
+                    let old_rect = self
+                        .window_manager
+                        .get_window(state.window_id)
+                        .map(|w| (w.x, w.y, w.width, w.height));
+                    let new_x = state.start_window_x + (self.cursor.x - state.grab_cursor_x);
+                    let new_y = state.start_window_y + (self.cursor.y - state.grab_cursor_y);
+                    println!(
+                        "[Compositor] Move drag: window #{} start=({}, {}) grab=({}, {}) cursor=({}, {}) new=({}, {})",
+                        state.window_id,
+                        state.start_window_x,
+                        state.start_window_y,
+                        state.grab_cursor_x,
+                        state.grab_cursor_y,
+                        self.cursor.x,
+                        self.cursor.y,
+                        new_x,
+                        new_y
+                    );
+                    self.window_manager
+                        .set_window_position(state.window_id, new_x, new_y);
 
-                        if let Some(r) = old_rect {
-                            self.add_pending_damage(r);
-                        }
-                        if let Some(w) = self.window_manager.get_window(state.window_id) {
-                            self.add_pending_damage((w.x, w.y, w.width, w.height));
-                        }
-
-                        // While moving a window, the compositor "grabs" the pointer.
-                        // Avoid routing mouse moves to the currently focused client.
-                        return Ok(true);
+                    if let Some(r) = old_rect {
+                        self.add_pending_damage(r);
                     }
+                    if let Some(w) = self.window_manager.get_window(state.window_id) {
+                        self.add_pending_damage((w.x, w.y, w.width, w.height));
+                    }
+
+                    // While moving a window, the compositor "grabs" the pointer.
+                    // Avoid routing mouse moves to the currently focused client.
+                    return Ok(true);
                 }
 
                 // Route mouse move to focused window (converted to absolute coordinates)

@@ -201,6 +201,8 @@ struct WaylandBridge {
     /// Pointer position (surface-local, in pixels)
     pointer_x: i32,
     pointer_y: i32,
+    /// Current cursor surface (if set via wl_pointer.set_cursor)
+    cursor_surface_id: Option<u32>,
 }
 
 impl WaylandBridge {
@@ -243,6 +245,7 @@ impl WaylandBridge {
             update_flush_interval: Duration::from_millis(16),
             pointer_x: 0,
             pointer_y: 0,
+            cursor_surface_id: None,
         })
     }
 
@@ -1730,8 +1733,12 @@ impl WaylandBridge {
                     let _x = Self::parse_i32(payload, 4).unwrap_or(0);
                     let _y = Self::parse_i32(payload, 8).unwrap_or(0);
                     let mut should_send_attach = false;
+                    let mut skip_window = false;
 
                     if let Some(surface) = self.surface_manager.get_surface_mut(surface_id) {
+                        if surface.role == Some(surface::SurfaceRole::Cursor) {
+                            skip_window = true;
+                        }
                         if buffer_id == 0 {
                             surface.buffer_id = None;
                             surface.last_attached_buffer = None;
@@ -1748,45 +1755,53 @@ impl WaylandBridge {
                                 surface.width = buffer_width;
                                 surface.height = buffer_height;
 
-                                // Check if window already exists
-                                if let Some(&window_id) = self.surface_to_window.get(&surface_id) {
-                                    // Window exists, check if resize is needed
-                                    if buffer_width != old_width || buffer_height != old_height {
+                                if !skip_window {
+                                    // Check if window already exists
+                                    if let Some(&window_id) =
+                                        self.surface_to_window.get(&surface_id)
+                                    {
+                                        // Window exists, check if resize is needed
+                                        if buffer_width != old_width || buffer_height != old_height
+                                        {
+                                            bridge_log!(
+                                                "[Bridge] Buffer size {}x{} differs from surface {}x{}, resizing window",
+                                                buffer_width,
+                                                buffer_height,
+                                                old_width,
+                                                old_height
+                                            );
+                                            if let Err(e) = self.resize_sws_window(
+                                                window_id,
+                                                buffer_width,
+                                                buffer_height,
+                                            ) {
+                                                bridge_log!(
+                                                    "[Bridge] Failed to resize window: {}",
+                                                    e
+                                                );
+                                            }
+                                        }
+                                    } else {
+                                        // Window doesn't exist yet, create it with buffer size
                                         bridge_log!(
-                                            "[Bridge] Buffer size {}x{} differs from surface {}x{}, resizing window",
+                                            "[Bridge] No window yet, creating with buffer size {}x{}",
                                             buffer_width,
-                                            buffer_height,
-                                            old_width,
-                                            old_height
+                                            buffer_height
                                         );
-                                        if let Err(e) = self.resize_sws_window(
-                                            window_id,
+                                        if let Err(e) = self.create_sws_window_with_size(
+                                            surface_id,
                                             buffer_width,
                                             buffer_height,
                                         ) {
-                                            bridge_log!("[Bridge] Failed to resize window: {}", e);
+                                            bridge_log!("[Bridge] Failed to create window: {}", e);
                                         }
-                                    }
-                                } else {
-                                    // Window doesn't exist yet, create it with buffer size
-                                    bridge_log!(
-                                        "[Bridge] No window yet, creating with buffer size {}x{}",
-                                        buffer_width,
-                                        buffer_height
-                                    );
-                                    if let Err(e) = self.create_sws_window_with_size(
-                                        surface_id,
-                                        buffer_width,
-                                        buffer_height,
-                                    ) {
-                                        bridge_log!("[Bridge] Failed to create window: {}", e);
                                     }
                                 }
                             }
                         }
                     }
 
-                    if buffer_id != 0 {
+                    if buffer_id != 0 && !skip_window {
                         if let Some(&window_id) = self.surface_to_window.get(&surface_id) {
                             // bridge_log!("[Bridge] Sending attach for surface {} buffer {} window {}", surface_id, buffer_id, window_id);
                             if should_send_attach {
@@ -1841,7 +1856,11 @@ impl WaylandBridge {
                     if let Some(cb_id) = surface.take_pending_callback() {
                         callback_serial = Some((cb_id, serial_for_callback));
                     }
-                    should_update = surface.role.is_some();
+                    should_update = matches!(
+                        surface.role,
+                        Some(surface::SurfaceRole::XdgToplevel)
+                            | Some(surface::SurfaceRole::XdgPopup)
+                    );
                     buffer_present = surface.buffer_id.is_some();
                     surface_size = (surface.width.max(1), surface.height.max(1));
                     damage_rect =
@@ -2482,11 +2501,47 @@ impl WaylandBridge {
         &mut self,
         _pointer_id: u32,
         opcode: u16,
-        _payload: &[u8],
+        payload: &[u8],
     ) -> Result<Vec<WaylandMessage>, &'static str> {
         bridge_log!("[Bridge] wl_pointer opcode: {}", opcode);
-        // Pointer events are sent from SWS, not received from client
-        Ok(Vec::new())
+        match opcode {
+            0 => {
+                // wl_pointer.set_cursor(serial, surface, hotspot_x, hotspot_y)
+                let serial = Self::parse_u32(payload, 0).unwrap_or(0);
+                let surface_id = Self::parse_u32(payload, 4).unwrap_or(0);
+                let hotspot_x = Self::parse_i32(payload, 8).unwrap_or(0);
+                let hotspot_y = Self::parse_i32(payload, 12).unwrap_or(0);
+                bridge_log!(
+                    "[Bridge] wl_pointer.set_cursor serial={} surface={} hotspot=({}, {})",
+                    serial,
+                    surface_id,
+                    hotspot_x,
+                    hotspot_y
+                );
+                if surface_id == 0 {
+                    self.cursor_surface_id = None;
+                } else {
+                    if let Some(prev) = self.cursor_surface_id {
+                        if prev != surface_id {
+                            if let Some(surface) = self.surface_manager.get_surface_mut(prev) {
+                                if surface.role == Some(surface::SurfaceRole::Cursor) {
+                                    surface.role = None;
+                                }
+                            }
+                        }
+                    }
+                    self.cursor_surface_id = Some(surface_id);
+                    if let Some(surface) = self.surface_manager.get_surface_mut(surface_id) {
+                        surface.set_role(surface::SurfaceRole::Cursor);
+                    }
+                }
+                Ok(Vec::new())
+            }
+            _ => {
+                // Pointer events are sent from SWS, not received from client
+                Ok(Vec::new())
+            }
+        }
     }
 
     /// Handle wl_keyboard messages
