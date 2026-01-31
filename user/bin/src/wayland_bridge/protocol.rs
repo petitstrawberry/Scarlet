@@ -166,7 +166,7 @@ impl WaylandArg {
                 bytes.extend_from_slice(&len.to_ne_bytes());
                 bytes.extend_from_slice(s);
                 bytes.push(0); // Null terminator
-                               // Pad to 4-byte boundary
+                // Pad to 4-byte boundary
                 while bytes.len() % 4 != 0 {
                     bytes.push(0);
                 }

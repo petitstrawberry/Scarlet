@@ -39,6 +39,16 @@ use crate::object::capability::{
 };
 use crate::sync::Waker;
 
+const LOCALSOCKET_LOG: bool = false;
+
+macro_rules! localsocket_log {
+    ($($arg:tt)*) => {
+        if LOCALSOCKET_LOG {
+            crate::println!($($arg)*);
+        }
+    };
+}
+
 /// Maximum buffer size per socket (64 KB)
 const MAX_BUFFER_SIZE: usize = 65536;
 
@@ -216,7 +226,7 @@ impl LocalSocket {
     ) -> Result<(), crate::ipc::IpcError> {
         use crate::ipc::IpcError;
 
-        crate::println!(
+        localsocket_log!(
             "[LocalSocket] send_handle_and_data: self={:p}, data_len={}",
             self as *const _,
             data.len()
@@ -224,7 +234,7 @@ impl LocalSocket {
 
         // Verify socket is connected
         if *self.state.read() != SocketState::Connected {
-            crate::println!("[LocalSocket] send_handle_and_data: not connected");
+            localsocket_log!("[LocalSocket] send_handle_and_data: not connected");
             return Err(IpcError::InvalidState);
         }
 
@@ -233,7 +243,7 @@ impl LocalSocket {
         let peer_weak_ref = peer_weak.as_ref().ok_or(IpcError::PeerClosed)?;
         let peer = peer_weak_ref.upgrade().ok_or(IpcError::PeerClosed)?;
 
-        crate::println!(
+        localsocket_log!(
             "[LocalSocket] send_handle_and_data: peer={:p}",
             peer.as_ref() as *const _
         );
@@ -241,7 +251,7 @@ impl LocalSocket {
         // Check if peer's handle queue is full to prevent DoS attacks
         let mut peer_handle_queue = peer.handle_queue.write();
         if peer_handle_queue.len() >= MAX_HANDLE_QUEUE_SIZE {
-            crate::println!("[LocalSocket] send_handle_and_data: handle queue full");
+            localsocket_log!("[LocalSocket] send_handle_and_data: handle queue full");
             return Err(IpcError::ChannelFull);
         }
 
@@ -252,7 +262,7 @@ impl LocalSocket {
         // Check if peer's data buffer has space
         let mut peer_buffer = peer_sock_buffer.data.write();
         if peer_buffer.len() + data.len() > MAX_BUFFER_SIZE {
-            crate::println!(
+            localsocket_log!(
                 "[LocalSocket] send_handle_and_data: buffer full, current_len={}, adding_len={}",
                 peer_buffer.len(),
                 data.len()
@@ -263,7 +273,7 @@ impl LocalSocket {
             return Err(IpcError::ChannelFull);
         }
 
-        crate::println!(
+        localsocket_log!(
             "[LocalSocket] send_handle_and_data: before send - handle_queue_len={}, buffer_len={}",
             peer_handle_queue.len(),
             peer_buffer.len()
@@ -280,7 +290,7 @@ impl LocalSocket {
         drop(peer_buffer);
         drop(peer_buffer_option);
 
-        crate::println!(
+        localsocket_log!(
             "[LocalSocket] send_handle_and_data: after send - handle_queue_len={}, buffer_len={}",
             queue_len,
             buffer_len
@@ -312,7 +322,7 @@ impl LocalSocket {
     ) -> Result<(KernelObject, Vec<u8>), crate::ipc::IpcError> {
         use crate::ipc::IpcError;
 
-        crate::println!(
+        localsocket_log!(
             "[LocalSocket] recv_handle_and_data: self={:p}, max_data_len={}",
             self as *const _,
             max_data_len
@@ -320,13 +330,13 @@ impl LocalSocket {
 
         // Verify socket is connected
         if *self.state.read() != SocketState::Connected {
-            crate::println!("[LocalSocket] recv_handle_and_data: not connected");
+            localsocket_log!("[LocalSocket] recv_handle_and_data: not connected");
             return Err(IpcError::InvalidState);
         }
 
         // Try to get a handle from the queue
         let mut queue = self.handle_queue.write();
-        crate::println!(
+        localsocket_log!(
             "[LocalSocket] recv_handle_and_data: handle_queue_len={}",
             queue.len()
         );
@@ -334,7 +344,7 @@ impl LocalSocket {
         let handle = match queue.pop_front() {
             Some(h) => h,
             None => {
-                crate::println!(
+                localsocket_log!(
                     "[LocalSocket] recv_handle_and_data: handle queue empty - returning ChannelEmpty"
                 );
                 return Err(IpcError::ChannelEmpty);
@@ -345,7 +355,7 @@ impl LocalSocket {
         // Read data from read buffer
         let read_buffer = self.read_buffer.read();
         let mut buffer_data = read_buffer.data.write();
-        crate::println!(
+        localsocket_log!(
             "[LocalSocket] recv_handle_and_data: buffer_len={}, max_data_len={}",
             buffer_data.len(),
             max_data_len
@@ -360,7 +370,7 @@ impl LocalSocket {
         drop(buffer_data);
         drop(read_buffer);
 
-        crate::println!(
+        localsocket_log!(
             "[LocalSocket] recv_handle_and_data: returning handle and {} bytes of data",
             data.len()
         );
@@ -1108,7 +1118,7 @@ impl ControlOps for LocalSocket {
                 Ok(if is_nonblocking { 1 } else { 0 })
             }
             _ => {
-                crate::println!("[LocalSocket::control] Unknown command");
+                localsocket_log!("[LocalSocket::control] Unknown command");
                 Err("Unknown control command")
             }
         }

@@ -32,8 +32,7 @@ use std::collections::BTreeMap;
 use std::env;
 use std::handle::capability::memory_mapping::{self, flags};
 use std::io::{Read, Write};
-use std::ipc::{permissions, SharedMemory};
-use std::println;
+use std::ipc::{SharedMemory, permissions};
 use std::socket::Socket;
 use std::string::{String, ToString};
 use std::sync::{Arc, Mutex as StdMutex};
@@ -94,9 +93,13 @@ fn is_warn_enabled() -> bool {
     get_log_level() >= LogLevel::Warn
 }
 
-// Note: We can't define macros here that use the above functions directly
-// due to macro hygiene rules. We'll use conditional compilation and
-// replace println! calls with if statements checking the log level.
+macro_rules! bridge_log {
+    ($($arg:tt)*) => {
+        if is_debug_enabled() {
+            ::std::println!($($arg)*);
+        }
+    };
+}
 
 /// Mapping of Wayland surface ID to SWS window ID
 #[derive(Debug, Clone, Copy)]
@@ -169,12 +172,14 @@ struct WaylandBridge {
     /// Pointer position (surface-local, in pixels)
     pointer_x: i32,
     pointer_y: i32,
+    /// True while SWS is performing a compositor-side pointer grab (e.g., move)
+    pointer_grab_active: bool,
 }
 
 impl WaylandBridge {
     /// Create a new Wayland bridge
     fn new(socket_path: &str) -> Result<Self, &'static str> {
-        println!("[Bridge] Creating server socket at {}", socket_path);
+        bridge_log!("[Bridge] Creating server socket at {}", socket_path);
 
         // Create server socket
         let server_socket = Socket::new().map_err(|_| "Failed to create socket")?;
@@ -189,7 +194,7 @@ impl WaylandBridge {
             .listen(5)
             .map_err(|_| "Failed to listen on socket")?;
 
-        println!("[Bridge] Server socket ready");
+        bridge_log!("[Bridge] Server socket ready");
 
         let mut objects = BTreeMap::new();
         // Object ID 1 is always wl_display
@@ -226,12 +231,13 @@ impl WaylandBridge {
             sws_pending: Vec::new(),
             pointer_x: 0,
             pointer_y: 0,
+            pointer_grab_active: false,
         })
     }
 
     /// Connect to SWS server and register as extension
     fn connect_to_sws(&mut self) -> Result<(), &'static str> {
-        println!("[Bridge] Connecting to SWS at /tmp/sws.sock");
+        bridge_log!("[Bridge] Connecting to SWS at /tmp/sws.sock");
 
         let sws_socket = Socket::new().map_err(|_| "Failed to create SWS socket")?;
 
@@ -239,7 +245,7 @@ impl WaylandBridge {
             .connect("/tmp/sws.sock")
             .map_err(|_| "Failed to connect to SWS")?;
 
-        println!("[Bridge] Connected to SWS, registering as extension");
+        bridge_log!("[Bridge] Connected to SWS, registering as extension");
 
         // Send REGISTER_EXTENSION message
         let extension_name = b"wayland_bridge";
@@ -268,7 +274,7 @@ impl WaylandBridge {
             })?
         {
             self.extension_id = Some(extension_id);
-            println!("[Bridge] Registered as extension with ID: {}", extension_id);
+            bridge_log!("[Bridge] Registered as extension with ID: {}", extension_id);
         }
         Ok(())
     }
@@ -370,9 +376,39 @@ impl WaylandBridge {
         const ABS_Y: u16 = 0x01;
         const BTN_MOUSE_MIN: u16 = 0x110;
         const BTN_MOUSE_MAX: u16 = 0x118;
+        const BTN_LEFT: u16 = 0x110;
 
         if let Some(surface_id) = self.surface_id_for_window(window_id) {
             self.queue_focus_events(surface_id);
+        }
+
+        if self.pointer_grab_active {
+            match type_ {
+                EV_REL => {
+                    if code == REL_X {
+                        self.pointer_x = self.pointer_x.saturating_add(value);
+                    } else if code == REL_Y {
+                        self.pointer_y = self.pointer_y.saturating_add(value);
+                    }
+                    return;
+                }
+                EV_ABS => {
+                    if code == ABS_X {
+                        self.pointer_x = value;
+                    } else if code == ABS_Y {
+                        self.pointer_y = value;
+                    }
+                    return;
+                }
+                EV_KEY if code >= BTN_MOUSE_MIN && code <= BTN_MOUSE_MAX => {
+                    if code == BTN_LEFT && value == 0 {
+                        self.pointer_grab_active = false;
+                    } else {
+                        return;
+                    }
+                }
+                _ => {}
+            }
         }
 
         let mut messages = Vec::new();
@@ -487,9 +523,11 @@ impl WaylandBridge {
                     } => {
                         if let Some(surface_id) = self.surface_id_for_window(window_id) {
                             if external_client_id != surface_id {
-                                println!(
+                                bridge_log!(
                                     "[Bridge] EXTENSION_INPUT_EVENT client mismatch: window={} external_client_id={} surface_id={}",
-                                    window_id, external_client_id, surface_id
+                                    window_id,
+                                    external_client_id,
+                                    surface_id
                                 );
                             }
                         }
@@ -625,9 +663,11 @@ impl WaylandBridge {
             let width = 800u32;
             let height = 600u32;
 
-            println!(
+            bridge_log!(
                 "[Bridge] Creating SWS window for surface {} ({}x{})",
-                wl_surface_id, width, height
+                wl_surface_id,
+                width,
+                height
             );
 
             // Send EXTENSION_CREATE_WINDOW message
@@ -652,16 +692,18 @@ impl WaylandBridge {
         } = self.wait_for_sws_message(|msg| {
             matches!(msg, protocol_sws::ServerMessage::WindowCreated { .. })
         })? {
-            println!(
+            bridge_log!(
                 "[Bridge] SWS window created: {} for surface {} (shm_size={})",
-                window_id, wl_surface_id, shm_size
+                window_id,
+                wl_surface_id,
+                shm_size
             );
             self.surface_to_window.insert(wl_surface_id, window_id);
             window_id_opt = Some(window_id);
 
             let sws_conn = self.sws_connection.as_mut().ok_or("Not connected to SWS")?;
             if let Ok(shm_handle) = sws_conn.recv_handle() {
-                println!("[Bridge] Received SHM handle for window {}", window_id);
+                bridge_log!("[Bridge] Received SHM handle for window {}", window_id);
                 if let Ok(shm) = SharedMemory::from_handle(shm_handle) {
                     if let Ok(mapper) = shm.as_handle().as_memory_mapping() {
                         if let Ok(mapped_addr) = mapper.mmap(
@@ -671,9 +713,10 @@ impl WaylandBridge {
                             flags::SHARED,
                             0,
                         ) {
-                            println!(
+                            bridge_log!(
                                 "[Bridge] Mapped window {} SHM at 0x{:x}",
-                                window_id, mapped_addr
+                                window_id,
+                                mapped_addr
                             );
                             self.window_shm.insert(
                                 window_id,
@@ -685,13 +728,13 @@ impl WaylandBridge {
                                 },
                             );
                         } else {
-                            println!("[Bridge] Failed to map window {} SHM", window_id);
+                            bridge_log!("[Bridge] Failed to map window {} SHM", window_id);
                         }
                     } else {
-                        println!("[Bridge] Window {} SHM doesn't support mapping", window_id);
+                        bridge_log!("[Bridge] Window {} SHM doesn't support mapping", window_id);
                     }
                 } else {
-                    println!("[Bridge] Received handle is not a shared memory object");
+                    bridge_log!("[Bridge] Received handle is not a shared memory object");
                 }
             }
         }
@@ -723,9 +766,11 @@ impl WaylandBridge {
         {
             let sws_conn = self.sws_connection.as_mut().ok_or("Not connected to SWS")?;
 
-            println!(
+            bridge_log!(
                 "[Bridge] Creating SWS window for surface {} ({}x{})",
-                wl_surface_id, width, height
+                wl_surface_id,
+                width,
+                height
             );
 
             // Send EXTENSION_CREATE_WINDOW message
@@ -750,16 +795,18 @@ impl WaylandBridge {
         } = self.wait_for_sws_message(|msg| {
             matches!(msg, protocol_sws::ServerMessage::WindowCreated { .. })
         })? {
-            println!(
+            bridge_log!(
                 "[Bridge] SWS window created: {} for surface {} (shm_size={})",
-                window_id, wl_surface_id, shm_size
+                window_id,
+                wl_surface_id,
+                shm_size
             );
             self.surface_to_window.insert(wl_surface_id, window_id);
             window_id_opt = Some(window_id);
 
             let sws_conn = self.sws_connection.as_mut().ok_or("Not connected to SWS")?;
             if let Ok(shm_handle) = sws_conn.recv_handle() {
-                println!("[Bridge] Received SHM handle for window {}", window_id);
+                bridge_log!("[Bridge] Received SHM handle for window {}", window_id);
 
                 if let Ok(shm) = SharedMemory::from_handle(shm_handle) {
                     if let Ok(mapper) = shm.as_handle().as_memory_mapping() {
@@ -770,9 +817,10 @@ impl WaylandBridge {
                             flags::SHARED,
                             0,
                         ) {
-                            println!(
+                            bridge_log!(
                                 "[Bridge] Mapped window {} SHM at 0x{:x}",
-                                window_id, mapped_addr
+                                window_id,
+                                mapped_addr
                             );
                             self.window_shm.insert(
                                 window_id,
@@ -784,13 +832,13 @@ impl WaylandBridge {
                                 },
                             );
                         } else {
-                            println!("[Bridge] Failed to map window {} SHM", window_id);
+                            bridge_log!("[Bridge] Failed to map window {} SHM", window_id);
                         }
                     } else {
-                        println!("[Bridge] Window {} SHM doesn't support mapping", window_id);
+                        bridge_log!("[Bridge] Window {} SHM doesn't support mapping", window_id);
                     }
                 } else {
-                    println!("[Bridge] Received handle is not a shared memory object");
+                    bridge_log!("[Bridge] Received handle is not a shared memory object");
                 }
             }
         }
@@ -846,9 +894,13 @@ impl WaylandBridge {
         };
 
         if is_debug_enabled() {
-            println!(
+            bridge_log!(
                 "[Bridge] Updating SWS window {} with damage [{},{} {}x{}]",
-                window_id, x, y, width, height
+                window_id,
+                x,
+                y,
+                width,
+                height
             );
         }
 
@@ -862,7 +914,7 @@ impl WaylandBridge {
             if let Ok(client_addr) =
                 client_mapper.mmap(0, pool_size, permissions::READ, flags::SHARED, 0)
             {
-                // println!("[Bridge] Mapped client SHM at 0x{:x}", client_addr);
+                // bridge_log!("[Bridge] Mapped client SHM at 0x{:x}", client_addr);
 
                 // Copy pixel data from client SHM to SWS window SHM
                 let src_width = buffer.width.max(0) as usize;
@@ -872,7 +924,7 @@ impl WaylandBridge {
 
                 let dst_stride = (surface.width.max(0) as u32 * 4) as usize;
 
-                // println!(
+                // bridge_log!(
                 //     "[Bridge] Copying pixels: {}x{} stride={} src_offset={} dst_stride={}",
                 //     src_width, src_height, src_stride, src_offset, dst_stride
                 // );
@@ -898,12 +950,12 @@ impl WaylandBridge {
                     }
                 }
 
-                // println!("[Bridge] Pixel copy complete");
+                // bridge_log!("[Bridge] Pixel copy complete");
             } else {
-                println!("[Bridge] Failed to map client SHM");
+                bridge_log!("[Bridge] Failed to map client SHM");
             }
         } else {
-            println!("[Bridge] Client SHM handle doesn't support memory mapping");
+            bridge_log!("[Bridge] Client SHM handle doesn't support memory mapping");
         }
 
         // Send EXTENSION_UPDATE_BUFFER message
@@ -959,11 +1011,11 @@ impl WaylandBridge {
             shm_size = shm_size.max(needed);
         }
 
-        // println!("[Bridge] === EXTENSION_ATTACH_BUFFER ===");
-        // println!("[Bridge]   surface_id={}, window_id={}, buffer_id={}", surface_id, window_id, buffer_id);
-        // println!("[Bridge]   geometry={}x{} stride={} offset={} format={} shm_size={}",
+        // bridge_log!("[Bridge] === EXTENSION_ATTACH_BUFFER ===");
+        // bridge_log!("[Bridge]   surface_id={}, window_id={}, buffer_id={}", surface_id, window_id, buffer_id);
+        // bridge_log!("[Bridge]   geometry={}x{} stride={} offset={} format={} shm_size={}",
         //     width, height, stride, offset, format, shm_size);
-        // println!("[Bridge]   client_shm_handle={:?}", handle.as_raw());
+        // bridge_log!("[Bridge]   client_shm_handle={:?}", handle.as_raw());
 
         let sws_conn = self.sws_connection.as_mut().ok_or("Not connected to SWS")?;
 
@@ -978,18 +1030,18 @@ impl WaylandBridge {
         msg_bytes.extend_from_slice(&header.to_le_bytes());
         msg_bytes.extend_from_slice(&payload);
 
-        // println!("[Bridge] Sending EXTENSION_ATTACH_BUFFER message ({} bytes)", msg_bytes.len());
+        // bridge_log!("[Bridge] Sending EXTENSION_ATTACH_BUFFER message ({} bytes)", msg_bytes.len());
         sws_conn
             .write(&msg_bytes)
             .map_err(|_| "Failed to send EXTENSION_ATTACH_BUFFER")?;
-        // println!("[Bridge] EXTENSION_ATTACH_BUFFER message sent successfully");
+        // bridge_log!("[Bridge] EXTENSION_ATTACH_BUFFER message sent successfully");
 
-        // println!("[Bridge] Sending client SHM handle to SWS...");
+        // bridge_log!("[Bridge] Sending client SHM handle to SWS...");
         sws_conn
             .send_handle(handle)
             .map_err(|_| "Failed to send EXTENSION_ATTACH_BUFFER handle")?;
-        // println!("[Bridge] Client SHM handle sent successfully");
-        // println!("[Bridge] === EXTENSION_ATTACH_BUFFER COMPLETE ===");
+        // bridge_log!("[Bridge] Client SHM handle sent successfully");
+        // bridge_log!("[Bridge] === EXTENSION_ATTACH_BUFFER COMPLETE ===");
 
         Ok(())
     }
@@ -1006,9 +1058,12 @@ impl WaylandBridge {
             .saturating_mul(new_height as u64)
             .saturating_mul(4);
 
-        println!(
+        bridge_log!(
             "[Bridge] Resizing window {} to {}x{} ({} bytes)",
-            window_id, new_width, new_height, new_buffer_size
+            window_id,
+            new_width,
+            new_height,
+            new_buffer_size
         );
 
         // Send RESIZE_WINDOW message
@@ -1036,14 +1091,15 @@ impl WaylandBridge {
         } = self.wait_for_sws_message(|msg| {
             matches!(msg, protocol_sws::ServerMessage::WindowResized { .. })
         })? {
-            println!(
+            bridge_log!(
                 "[Bridge] Window {} resized to shm_size={}",
-                resized_window_id, shm_size
+                resized_window_id,
+                shm_size
             );
 
             let sws_conn = self.sws_connection.as_mut().ok_or("Not connected to SWS")?;
             if let Ok(shm_handle) = sws_conn.recv_handle() {
-                println!("[Bridge] Received new SHM handle for window {}", window_id);
+                bridge_log!("[Bridge] Received new SHM handle for window {}", window_id);
 
                 if let Ok(shm) = SharedMemory::from_handle(shm_handle) {
                     if let Ok(mapper) = shm.as_handle().as_memory_mapping() {
@@ -1054,9 +1110,10 @@ impl WaylandBridge {
                             flags::SHARED,
                             0,
                         ) {
-                            println!(
+                            bridge_log!(
                                 "[Bridge] Remapped window {} SHM at 0x{:x}",
-                                window_id, mapped_addr
+                                window_id,
+                                mapped_addr
                             );
                             self.window_shm.insert(
                                 window_id,
@@ -1068,16 +1125,16 @@ impl WaylandBridge {
                                 },
                             );
                         } else {
-                            println!("[Bridge] Failed to map resized window {} SHM", window_id);
+                            bridge_log!("[Bridge] Failed to map resized window {} SHM", window_id);
                         }
                     } else {
-                        println!(
+                        bridge_log!(
                             "[Bridge] Resized window {} SHM doesn't support mapping",
                             window_id
                         );
                     }
                 } else {
-                    println!("[Bridge] Received handle is not a shared memory object");
+                    bridge_log!("[Bridge] Received handle is not a shared memory object");
                 }
             }
         }
@@ -1087,7 +1144,7 @@ impl WaylandBridge {
 
     /// Handle a client connection
     fn handle_client(&mut self, mut client: Socket) -> Result<(), &'static str> {
-        println!("[Bridge] New client connected");
+        bridge_log!("[Bridge] New client connected");
 
         client
             .set_nonblocking(true)
@@ -1101,13 +1158,13 @@ impl WaylandBridge {
                 let mut read_buf = [0u8; 4096];
                 match client.read(&mut read_buf) {
                     Ok(0) => {
-                        println!("[Bridge] Client disconnected");
+                        bridge_log!("[Bridge] Client disconnected");
                         return Ok(());
                     }
                     Ok(n) => {
                         got_data = true;
                         if is_debug_enabled() {
-                            println!("[Bridge] Received {} bytes from client", n);
+                            bridge_log!("[Bridge] Received {} bytes from client", n);
                         }
                         buffer.extend_from_slice(&read_buf[..n]);
                     }
@@ -1115,7 +1172,7 @@ impl WaylandBridge {
                         break;
                     }
                     Err(_) => {
-                        println!("[Bridge] Error reading from client");
+                        bridge_log!("[Bridge] Error reading from client");
                         return Ok(());
                     }
                 }
@@ -1133,13 +1190,13 @@ impl WaylandBridge {
                     let msg_size = header.size() as usize;
                     if offset + msg_size > buffer.len() {
                         if is_debug_enabled() {
-                            println!("[Bridge] Incomplete message, waiting for more data");
+                            bridge_log!("[Bridge] Incomplete message, waiting for more data");
                         }
                         break;
                     }
 
                     if is_debug_enabled() {
-                        println!(
+                        bridge_log!(
                             "[Bridge] Message: object_id={} opcode={} size={}",
                             header.object_id,
                             header.opcode(),
@@ -1156,7 +1213,7 @@ impl WaylandBridge {
                     for response in responses {
                         let response_bytes = response.encode();
                         // Always log responses for debugging
-                        println!(
+                        bridge_log!(
                             "[Bridge] Sending response: obj={} opcode={} size={}",
                             response.header.object_id,
                             response.header.opcode(),
@@ -1176,14 +1233,14 @@ impl WaylandBridge {
                                     {
                                         Ok(()) => {
                                             if is_debug_enabled() {
-                                                println!(
+                                                bridge_log!(
                                                     "[Bridge] KEYMAP sent with handle successfully"
                                                 );
                                             }
                                             continue;
                                         }
                                         Err(e) => {
-                                            println!(
+                                            bridge_log!(
                                                 "[Bridge] Failed to send KEYMAP with handle: {:?}, falling back",
                                                 e
                                             );
@@ -1216,14 +1273,14 @@ impl WaylandBridge {
             for input_msg in input_events {
                 let msg_bytes = input_msg.encode();
                 // Always log input events for debugging
-                println!(
+                bridge_log!(
                     "[Bridge] Forwarding input event: obj={} opcode={} size={} bytes",
                     input_msg.header.object_id,
                     input_msg.header.opcode(),
                     msg_bytes.len()
                 );
                 if let Err(e) = client.write(&msg_bytes) {
-                    println!("[Bridge] Failed to forward input event: {:?}", e);
+                    bridge_log!("[Bridge] Failed to forward input event: {:?}", e);
                 }
             }
 
@@ -1247,7 +1304,7 @@ impl WaylandBridge {
         let interface = match self.objects.get(&object_id) {
             Some(interface) => interface.clone(),
             None => {
-                println!("[Bridge] Unknown object ID: {}", object_id);
+                bridge_log!("[Bridge] Unknown object ID: {}", object_id);
                 return Ok(Vec::new());
             }
         };
@@ -1271,7 +1328,7 @@ impl WaylandBridge {
             "xdg_toplevel_dead" => Ok(Vec::new()),
             "xdg_surface_dead" => Ok(Vec::new()),
             _ => {
-                println!("[Bridge] Unhandled interface: {}", interface);
+                bridge_log!("[Bridge] Unhandled interface: {}", interface);
                 Ok(Vec::new())
             }
         }
@@ -1285,12 +1342,12 @@ impl WaylandBridge {
     ) -> Result<Vec<WaylandMessage>, &'static str> {
         match opcode {
             protocol::display_request::SYNC => {
-                println!("[Bridge] wl_display.sync");
+                bridge_log!("[Bridge] wl_display.sync");
                 // Parse callback ID from payload
                 if payload.len() >= 4 {
                     let callback_id =
                         u32::from_ne_bytes([payload[0], payload[1], payload[2], payload[3]]);
-                    println!("[Bridge] Sync callback ID: {}", callback_id);
+                    bridge_log!("[Bridge] Sync callback ID: {}", callback_id);
                     self.objects
                         .insert(callback_id, String::from("wl_callback"));
 
@@ -1305,12 +1362,12 @@ impl WaylandBridge {
                 Ok(Vec::new())
             }
             protocol::display_request::GET_REGISTRY => {
-                println!("[Bridge] wl_display.get_registry");
+                bridge_log!("[Bridge] wl_display.get_registry");
                 // Parse registry ID from payload
                 if payload.len() >= 4 {
                     let registry_id =
                         u32::from_ne_bytes([payload[0], payload[1], payload[2], payload[3]]);
-                    println!("[Bridge] Registry ID: {}", registry_id);
+                    bridge_log!("[Bridge] Registry ID: {}", registry_id);
                     self.objects
                         .insert(registry_id, String::from("wl_registry"));
 
@@ -1319,7 +1376,7 @@ impl WaylandBridge {
                 Ok(Vec::new())
             }
             _ => {
-                println!("[Bridge] Unknown wl_display opcode: {}", opcode);
+                bridge_log!("[Bridge] Unknown wl_display opcode: {}", opcode);
                 Ok(Vec::new())
             }
         }
@@ -1334,21 +1391,23 @@ impl WaylandBridge {
     ) -> Result<Vec<WaylandMessage>, &'static str> {
         match opcode {
             protocol::registry_request::BIND => {
-                println!("[Bridge] wl_registry.bind");
+                bridge_log!("[Bridge] wl_registry.bind");
                 // Parse: name (u32), interface (string), version (u32), id (u32)
                 if let Some(name) = Self::parse_u32(payload, 0) {
-                    println!("[Bridge] Binding global name: {}", name);
+                    bridge_log!("[Bridge] Binding global name: {}", name);
 
                     if let Some((interface_name, offset)) = Self::parse_string(payload, 4) {
                         let version = Self::parse_u32(payload, offset).unwrap_or(0);
                         let new_id = Self::parse_u32(payload, offset + 4).unwrap_or(0);
-                        println!(
+                        bridge_log!(
                             "[Bridge] Bind interface={} version={} new_id={}",
-                            interface_name, version, new_id
+                            interface_name,
+                            version,
+                            new_id
                         );
 
                         if let Some(global) = self.registry.get_global(name) {
-                            println!(
+                            bridge_log!(
                                 "[Bridge] Global info: interface='{}' requested='{}' match={}",
                                 global.interface,
                                 interface_name,
@@ -1436,20 +1495,21 @@ impl WaylandBridge {
                                     return Ok(msgs);
                                 }
                             } else {
-                                println!(
+                                bridge_log!(
                                     "[Bridge] Bind mismatch: requested={}, advertised={}",
-                                    interface_name, global.interface
+                                    interface_name,
+                                    global.interface
                                 );
                             }
                         } else {
-                            println!("[Bridge] Unknown global name {}", name);
+                            bridge_log!("[Bridge] Unknown global name {}", name);
                         }
                     }
                 }
                 Ok(Vec::new())
             }
             _ => {
-                println!("[Bridge] Unknown wl_registry opcode: {}", opcode);
+                bridge_log!("[Bridge] Unknown wl_registry opcode: {}", opcode);
                 Ok(Vec::new())
             }
         }
@@ -1463,29 +1523,29 @@ impl WaylandBridge {
     ) -> Result<Vec<WaylandMessage>, &'static str> {
         match opcode {
             protocol::compositor_request::CREATE_SURFACE => {
-                println!("[Bridge] wl_compositor.create_surface");
+                bridge_log!("[Bridge] wl_compositor.create_surface");
                 if payload.len() >= 4 {
                     let surface_id =
                         u32::from_ne_bytes([payload[0], payload[1], payload[2], payload[3]]);
-                    println!("[Bridge] Created surface ID: {}", surface_id);
+                    bridge_log!("[Bridge] Created surface ID: {}", surface_id);
                     self.add_object(surface_id, String::from("wl_surface"));
                     self.surface_manager.create_surface(surface_id);
                 }
                 Ok(Vec::new())
             }
             protocol::compositor_request::CREATE_REGION => {
-                println!("[Bridge] wl_compositor.create_region");
+                bridge_log!("[Bridge] wl_compositor.create_region");
                 if payload.len() >= 4 {
                     let region_id =
                         u32::from_ne_bytes([payload[0], payload[1], payload[2], payload[3]]);
-                    println!("[Bridge] Created region ID: {}", region_id);
+                    bridge_log!("[Bridge] Created region ID: {}", region_id);
                     self.add_object(region_id, String::from("wl_region"));
                     self.region_manager.create_region_with_id(region_id);
                 }
                 Ok(Vec::new())
             }
             _ => {
-                println!("[Bridge] Unknown wl_compositor opcode: {}", opcode);
+                bridge_log!("[Bridge] Unknown wl_compositor opcode: {}", opcode);
                 Ok(Vec::new())
             }
         }
@@ -1500,7 +1560,7 @@ impl WaylandBridge {
     ) -> Result<Vec<WaylandMessage>, &'static str> {
         match opcode {
             protocol::surface_request::DESTROY => {
-                println!("[Bridge] wl_surface.destroy: {}", surface_id);
+                bridge_log!("[Bridge] wl_surface.destroy: {}", surface_id);
                 self.surface_manager.destroy_surface(surface_id);
                 self.objects.remove(&surface_id);
                 // Remove from surface_to_window mapping
@@ -1509,7 +1569,7 @@ impl WaylandBridge {
             }
             protocol::surface_request::ATTACH => {
                 if is_debug_enabled() {
-                    println!("[Bridge] wl_surface.attach on surface {}", surface_id);
+                    bridge_log!("[Bridge] wl_surface.attach on surface {}", surface_id);
                 }
                 if payload.len() >= 12 {
                     let buffer_id = Self::parse_u32(payload, 0).unwrap_or(0);
@@ -1534,30 +1594,34 @@ impl WaylandBridge {
                                     let old_height = surface.height;
 
                                     if buffer_width != old_width || buffer_height != old_height {
-                                        println!(
+                                        bridge_log!(
                                             "[Bridge] Buffer size {}x{} differs from surface {}x{}, resizing window",
-                                            buffer_width, buffer_height, old_width, old_height
+                                            buffer_width,
+                                            buffer_height,
+                                            old_width,
+                                            old_height
                                         );
                                         if let Err(e) = self.resize_sws_window(
                                             window_id,
                                             buffer_width,
                                             buffer_height,
                                         ) {
-                                            println!("[Bridge] Failed to resize window: {}", e);
+                                            bridge_log!("[Bridge] Failed to resize window: {}", e);
                                         }
                                     }
                                 } else {
                                     // Window doesn't exist yet, create it with buffer size
-                                    println!(
+                                    bridge_log!(
                                         "[Bridge] No window yet, creating with buffer size {}x{}",
-                                        buffer_width, buffer_height
+                                        buffer_width,
+                                        buffer_height
                                     );
                                     if let Err(e) = self.create_sws_window_with_size(
                                         surface_id,
                                         buffer_width,
                                         buffer_height,
                                     ) {
-                                        println!("[Bridge] Failed to create window: {}", e);
+                                        bridge_log!("[Bridge] Failed to create window: {}", e);
                                     }
                                 }
                             }
@@ -1566,14 +1630,14 @@ impl WaylandBridge {
 
                     if buffer_id != 0 {
                         if let Some(&window_id) = self.surface_to_window.get(&surface_id) {
-                            // println!("[Bridge] Sending attach for surface {} buffer {} window {}", surface_id, buffer_id, window_id);
+                            // bridge_log!("[Bridge] Sending attach for surface {} buffer {} window {}", surface_id, buffer_id, window_id);
                             if let Err(e) =
                                 self.send_extension_attach_buffer(surface_id, window_id, buffer_id)
                             {
-                                println!("[Bridge] Failed to send attach buffer: {}", e);
+                                bridge_log!("[Bridge] Failed to send attach buffer: {}", e);
                             }
                         } else {
-                            println!("[Bridge] No window ID found for surface {}", surface_id);
+                            bridge_log!("[Bridge] No window ID found for surface {}", surface_id);
                         }
                     }
                 }
@@ -1581,7 +1645,7 @@ impl WaylandBridge {
             }
             protocol::surface_request::DAMAGE => {
                 if is_debug_enabled() {
-                    println!("[Bridge] wl_surface.damage on surface {}", surface_id);
+                    bridge_log!("[Bridge] wl_surface.damage on surface {}", surface_id);
                 }
                 if payload.len() >= 16 {
                     let x = Self::parse_i32(payload, 0).unwrap_or(0);
@@ -1596,7 +1660,7 @@ impl WaylandBridge {
             }
             protocol::surface_request::COMMIT => {
                 if is_debug_enabled() {
-                    println!("[Bridge] wl_surface.commit on surface {}", surface_id);
+                    bridge_log!("[Bridge] wl_surface.commit on surface {}", surface_id);
                 }
                 let mut release_msg = None;
                 let mut callback_msg = None;
@@ -1676,7 +1740,7 @@ impl WaylandBridge {
                     }
                     if self.surface_to_window.contains_key(&surface_id) {
                         if let Err(e) = self.update_sws_window(surface_id) {
-                            println!("[Bridge] Failed to update SWS window: {}", e);
+                            bridge_log!("[Bridge] Failed to update SWS window: {}", e);
                         }
                     }
                     if self.focused_surface.is_none() {
@@ -1704,13 +1768,13 @@ impl WaylandBridge {
             }
             protocol::surface_request::FRAME => {
                 if is_debug_enabled() {
-                    println!("[Bridge] wl_surface.frame on surface {}", surface_id);
+                    bridge_log!("[Bridge] wl_surface.frame on surface {}", surface_id);
                 }
                 if payload.len() >= 4 {
                     let callback_id =
                         u32::from_ne_bytes([payload[0], payload[1], payload[2], payload[3]]);
                     if is_debug_enabled() {
-                        println!("[Bridge] Callback ID: {}", callback_id);
+                        bridge_log!("[Bridge] Callback ID: {}", callback_id);
                     }
                     self.add_object(callback_id, String::from("wl_callback"));
 
@@ -1726,9 +1790,10 @@ impl WaylandBridge {
                     let region_id =
                         u32::from_ne_bytes([payload[0], payload[1], payload[2], payload[3]]);
                     if is_debug_enabled() {
-                        println!(
+                        bridge_log!(
                             "[Bridge] wl_surface.set_opaque_region: surface={} region={}",
-                            surface_id, region_id
+                            surface_id,
+                            region_id
                         );
                     }
                     let region_opt = if region_id == 0 {
@@ -1746,9 +1811,10 @@ impl WaylandBridge {
                     let region_id =
                         u32::from_ne_bytes([payload[0], payload[1], payload[2], payload[3]]);
                     if is_debug_enabled() {
-                        println!(
+                        bridge_log!(
                             "[Bridge] wl_surface.set_input_region: surface={} region={}",
-                            surface_id, region_id
+                            surface_id,
+                            region_id
                         );
                     }
                     let region_opt = if region_id == 0 {
@@ -1765,9 +1831,10 @@ impl WaylandBridge {
                 if payload.len() >= 4 {
                     let scale =
                         i32::from_ne_bytes([payload[0], payload[1], payload[2], payload[3]]);
-                    println!(
+                    bridge_log!(
                         "[Bridge] wl_surface.set_buffer_scale: surface={} scale={}",
-                        surface_id, scale
+                        surface_id,
+                        scale
                     );
                     if let Some(surface) = self.surface_manager.get_surface_mut(surface_id) {
                         surface.set_buffer_scale(scale);
@@ -1779,9 +1846,10 @@ impl WaylandBridge {
                 if payload.len() >= 4 {
                     let transform =
                         u32::from_ne_bytes([payload[0], payload[1], payload[2], payload[3]]);
-                    println!(
+                    bridge_log!(
                         "[Bridge] wl_surface.set_buffer_transform: surface={} transform={}",
-                        surface_id, transform
+                        surface_id,
+                        transform
                     );
                     if let Some(surface) = self.surface_manager.get_surface_mut(surface_id) {
                         surface.set_buffer_transform(transform as i32);
@@ -1790,7 +1858,7 @@ impl WaylandBridge {
                 Ok(Vec::new())
             }
             _ => {
-                println!("[Bridge] Unknown wl_surface opcode: {}", opcode);
+                bridge_log!("[Bridge] Unknown wl_surface opcode: {}", opcode);
                 Ok(Vec::new())
             }
         }
@@ -1805,22 +1873,22 @@ impl WaylandBridge {
     ) -> Result<Vec<WaylandMessage>, &'static str> {
         match opcode {
             shm::shm_request::CREATE_POOL => {
-                println!("[Bridge] wl_shm.create_pool");
+                bridge_log!("[Bridge] wl_shm.create_pool");
                 // Payload: new_id (u32) + size (i32) = 8 bytes
                 // FD is passed via handle transfer (Socket::recv_handle)
                 if payload.len() >= 8 {
                     let pool_id = Self::parse_u32(payload, 0).unwrap_or(0);
                     let size = Self::parse_i32(payload, 4).unwrap_or(0);
-                    println!("[Bridge] Created pool ID: {} size: {}", pool_id, size);
+                    bridge_log!("[Bridge] Created pool ID: {} size: {}", pool_id, size);
                     self.add_object(pool_id, String::from("wl_shm_pool"));
                     let handle_result = client.recv_handle();
                     let handle = match handle_result {
                         Ok(h) => {
-                            println!("[Bridge] Received SHM handle for pool {}", pool_id);
+                            bridge_log!("[Bridge] Received SHM handle for pool {}", pool_id);
                             Some(h)
                         }
                         Err(e) => {
-                            println!("[Bridge] Failed to receive SHM handle: {:?}", e);
+                            bridge_log!("[Bridge] Failed to receive SHM handle: {:?}", e);
                             None
                         }
                     };
@@ -1829,7 +1897,7 @@ impl WaylandBridge {
                 Ok(Vec::new())
             }
             _ => {
-                println!("[Bridge] Unknown wl_shm opcode: {}", opcode);
+                bridge_log!("[Bridge] Unknown wl_shm opcode: {}", opcode);
                 Ok(Vec::new())
             }
         }
@@ -1858,9 +1926,12 @@ impl WaylandBridge {
                     let format =
                         u32::from_ne_bytes([payload[20], payload[21], payload[22], payload[23]]);
 
-                    println!(
+                    bridge_log!(
                         "[Bridge] Buffer: {}x{} stride:{} format:{}",
-                        width, height, stride, format
+                        width,
+                        height,
+                        stride,
+                        format
                     );
                     self.add_object(buffer_id, String::from("wl_buffer"));
                     self.shm_manager
@@ -1869,12 +1940,12 @@ impl WaylandBridge {
                 Ok(Vec::new())
             }
             shm::shm_pool_request::DESTROY => {
-                println!("[Bridge] wl_shm_pool.destroy");
+                bridge_log!("[Bridge] wl_shm_pool.destroy");
                 self.shm_manager.destroy_pool(pool_id);
                 Ok(Vec::new())
             }
             shm::shm_pool_request::RESIZE => {
-                println!("[Bridge] wl_shm_pool.resize");
+                bridge_log!("[Bridge] wl_shm_pool.resize");
                 if payload.len() >= 4 {
                     let new_size =
                         i32::from_ne_bytes([payload[0], payload[1], payload[2], payload[3]]);
@@ -1883,7 +1954,7 @@ impl WaylandBridge {
                 Ok(Vec::new())
             }
             _ => {
-                println!("[Bridge] Unknown wl_shm_pool opcode: {}", opcode);
+                bridge_log!("[Bridge] Unknown wl_shm_pool opcode: {}", opcode);
                 Ok(Vec::new())
             }
         }
@@ -1898,12 +1969,12 @@ impl WaylandBridge {
     ) -> Result<Vec<WaylandMessage>, &'static str> {
         match opcode {
             shm::buffer_request::DESTROY => {
-                println!("[Bridge] wl_buffer.destroy");
+                bridge_log!("[Bridge] wl_buffer.destroy");
                 self.shm_manager.destroy_buffer(buffer_id);
                 Ok(Vec::new())
             }
             _ => {
-                println!("[Bridge] Unknown wl_buffer opcode: {}", opcode);
+                bridge_log!("[Bridge] Unknown wl_buffer opcode: {}", opcode);
                 Ok(Vec::new())
             }
         }
@@ -1917,15 +1988,16 @@ impl WaylandBridge {
     ) -> Result<Vec<WaylandMessage>, &'static str> {
         match opcode {
             xdg_shell::wm_base_request::GET_XDG_SURFACE => {
-                println!("[Bridge] xdg_wm_base.get_xdg_surface");
+                bridge_log!("[Bridge] xdg_wm_base.get_xdg_surface");
                 if payload.len() >= 8 {
                     let xdg_surface_id =
                         u32::from_ne_bytes([payload[0], payload[1], payload[2], payload[3]]);
                     let wl_surface_id =
                         u32::from_ne_bytes([payload[4], payload[5], payload[6], payload[7]]);
-                    println!(
+                    bridge_log!(
                         "[Bridge] XDG surface ID: {} for wl_surface: {}",
-                        xdg_surface_id, wl_surface_id
+                        xdg_surface_id,
+                        wl_surface_id
                     );
                     self.objects
                         .insert(xdg_surface_id, String::from("xdg_surface"));
@@ -1935,11 +2007,11 @@ impl WaylandBridge {
                 Ok(Vec::new())
             }
             xdg_shell::wm_base_request::PONG => {
-                println!("[Bridge] xdg_wm_base.pong");
+                bridge_log!("[Bridge] xdg_wm_base.pong");
                 Ok(Vec::new())
             }
             _ => {
-                println!("[Bridge] Unknown xdg_wm_base opcode: {}", opcode);
+                bridge_log!("[Bridge] Unknown xdg_wm_base opcode: {}", opcode);
                 Ok(Vec::new())
             }
         }
@@ -1954,18 +2026,18 @@ impl WaylandBridge {
     ) -> Result<Vec<WaylandMessage>, &'static str> {
         match opcode {
             xdg_shell::xdg_surface_request::DESTROY => {
-                println!("[Bridge] xdg_surface.destroy");
+                bridge_log!("[Bridge] xdg_surface.destroy");
                 self.xdg_shell_manager.destroy_xdg_surface(xdg_surface_id);
                 self.objects
                     .insert(xdg_surface_id, String::from("xdg_surface_dead"));
                 Ok(Vec::new())
             }
             xdg_shell::xdg_surface_request::GET_TOPLEVEL => {
-                println!("[Bridge] xdg_surface.get_toplevel");
+                bridge_log!("[Bridge] xdg_surface.get_toplevel");
                 if payload.len() >= 4 {
                     let xdg_toplevel_id =
                         u32::from_ne_bytes([payload[0], payload[1], payload[2], payload[3]]);
-                    println!("[Bridge] XDG toplevel ID: {}", xdg_toplevel_id);
+                    bridge_log!("[Bridge] XDG toplevel ID: {}", xdg_toplevel_id);
                     self.objects
                         .insert(xdg_toplevel_id, String::from("xdg_toplevel"));
                     self.xdg_shell_manager
@@ -1985,15 +2057,15 @@ impl WaylandBridge {
                 Ok(Vec::new())
             }
             xdg_shell::xdg_surface_request::GET_POPUP => {
-                println!("[Bridge] xdg_surface.get_popup (ignored)");
+                bridge_log!("[Bridge] xdg_surface.get_popup (ignored)");
                 Ok(Vec::new())
             }
             xdg_shell::xdg_surface_request::SET_WINDOW_GEOMETRY => {
-                println!("[Bridge] xdg_surface.set_window_geometry");
+                bridge_log!("[Bridge] xdg_surface.set_window_geometry");
                 Ok(Vec::new())
             }
             xdg_shell::xdg_surface_request::ACK_CONFIGURE => {
-                println!("[Bridge] xdg_surface.ack_configure");
+                bridge_log!("[Bridge] xdg_surface.ack_configure");
                 if payload.len() >= 4 {
                     let serial =
                         u32::from_ne_bytes([payload[0], payload[1], payload[2], payload[3]]);
@@ -2006,7 +2078,7 @@ impl WaylandBridge {
                 Ok(Vec::new())
             }
             _ => {
-                println!("[Bridge] Unknown xdg_surface opcode: {}", opcode);
+                bridge_log!("[Bridge] Unknown xdg_surface opcode: {}", opcode);
                 Ok(Vec::new())
             }
         }
@@ -2021,7 +2093,7 @@ impl WaylandBridge {
     ) -> Result<Vec<WaylandMessage>, &'static str> {
         match opcode {
             xdg_shell::xdg_toplevel_request::DESTROY => {
-                println!("[Bridge] xdg_toplevel.destroy");
+                bridge_log!("[Bridge] xdg_toplevel.destroy");
                 if let Some(wl_surface_id) = self.xdg_shell_manager.clear_toplevel(xdg_toplevel_id)
                 {
                     if let Some(surface) = self.surface_manager.get_surface_mut(wl_surface_id) {
@@ -2033,11 +2105,11 @@ impl WaylandBridge {
                 Ok(Vec::new())
             }
             xdg_shell::xdg_toplevel_request::SET_PARENT => {
-                println!("[Bridge] xdg_toplevel.set_parent");
+                bridge_log!("[Bridge] xdg_toplevel.set_parent");
                 Ok(Vec::new())
             }
             xdg_shell::xdg_toplevel_request::SET_TITLE => {
-                println!("[Bridge] xdg_toplevel.set_title");
+                bridge_log!("[Bridge] xdg_toplevel.set_title");
                 if let Some((title, _)) = Self::parse_string(payload, 0) {
                     if let Some((toplevel, _)) =
                         self.xdg_shell_manager.get_toplevel_mut(xdg_toplevel_id)
@@ -2048,7 +2120,7 @@ impl WaylandBridge {
                 Ok(Vec::new())
             }
             xdg_shell::xdg_toplevel_request::SET_APP_ID => {
-                println!("[Bridge] xdg_toplevel.set_app_id");
+                bridge_log!("[Bridge] xdg_toplevel.set_app_id");
                 if let Some((app_id, _)) = Self::parse_string(payload, 0) {
                     if let Some((toplevel, _)) =
                         self.xdg_shell_manager.get_toplevel_mut(xdg_toplevel_id)
@@ -2059,7 +2131,7 @@ impl WaylandBridge {
                 Ok(Vec::new())
             }
             xdg_shell::xdg_toplevel_request::SET_MAX_SIZE => {
-                println!("[Bridge] xdg_toplevel.set_max_size");
+                bridge_log!("[Bridge] xdg_toplevel.set_max_size");
                 let width = Self::parse_i32(payload, 0).unwrap_or(0);
                 let height = Self::parse_i32(payload, 4).unwrap_or(0);
                 if let Some((toplevel, _)) =
@@ -2070,7 +2142,7 @@ impl WaylandBridge {
                 Ok(Vec::new())
             }
             xdg_shell::xdg_toplevel_request::SET_MIN_SIZE => {
-                println!("[Bridge] xdg_toplevel.set_min_size");
+                bridge_log!("[Bridge] xdg_toplevel.set_min_size");
                 let width = Self::parse_i32(payload, 0).unwrap_or(0);
                 let height = Self::parse_i32(payload, 4).unwrap_or(0);
                 if let Some((toplevel, _)) =
@@ -2081,7 +2153,7 @@ impl WaylandBridge {
                 Ok(Vec::new())
             }
             xdg_shell::xdg_toplevel_request::MOVE => {
-                println!("[Bridge] xdg_toplevel.move");
+                bridge_log!("[Bridge] xdg_toplevel.move");
                 let seat_id = Self::parse_u32(payload, 0).unwrap_or(0);
                 let serial = Self::parse_u32(payload, 4).unwrap_or(0);
 
@@ -2089,6 +2161,7 @@ impl WaylandBridge {
                     self.xdg_shell_manager.get_toplevel_mut(xdg_toplevel_id)
                 {
                     if let Some(window_id) = self.surface_to_window.get(&wl_surface_id).copied() {
+                        self.pointer_grab_active = true;
                         let payload = protocol_sws::payload_request_move_window(window_id);
                         let header = protocol_sws::MessageHeader {
                             msg_type: protocol_sws::client_msg::REQUEST_MOVE_WINDOW,
@@ -2105,18 +2178,20 @@ impl WaylandBridge {
                             .write(&msg_bytes)
                             .map_err(|_| "Failed to send REQUEST_MOVE_WINDOW")?;
 
-                        println!(
+                        bridge_log!(
                             "[Bridge] Requested move for window {} (seat {}, serial {})",
-                            window_id, seat_id, serial
+                            window_id,
+                            seat_id,
+                            serial
                         );
                     } else {
-                        println!(
+                        bridge_log!(
                             "[Bridge] xdg_toplevel.move: no window for surface {}",
                             wl_surface_id
                         );
                     }
                 } else {
-                    println!(
+                    bridge_log!(
                         "[Bridge] xdg_toplevel.move: unknown toplevel {}",
                         xdg_toplevel_id
                     );
@@ -2124,35 +2199,35 @@ impl WaylandBridge {
                 Ok(Vec::new())
             }
             xdg_shell::xdg_toplevel_request::RESIZE => {
-                println!("[Bridge] xdg_toplevel.resize");
+                bridge_log!("[Bridge] xdg_toplevel.resize");
                 Ok(Vec::new())
             }
             xdg_shell::xdg_toplevel_request::SHOW_WINDOW_MENU => {
-                println!("[Bridge] xdg_toplevel.show_window_menu");
+                bridge_log!("[Bridge] xdg_toplevel.show_window_menu");
                 Ok(Vec::new())
             }
             xdg_shell::xdg_toplevel_request::SET_MAXIMIZED => {
-                println!("[Bridge] xdg_toplevel.set_maximized");
+                bridge_log!("[Bridge] xdg_toplevel.set_maximized");
                 Ok(Vec::new())
             }
             xdg_shell::xdg_toplevel_request::UNSET_MAXIMIZED => {
-                println!("[Bridge] xdg_toplevel.unset_maximized");
+                bridge_log!("[Bridge] xdg_toplevel.unset_maximized");
                 Ok(Vec::new())
             }
             xdg_shell::xdg_toplevel_request::SET_FULLSCREEN => {
-                println!("[Bridge] xdg_toplevel.set_fullscreen");
+                bridge_log!("[Bridge] xdg_toplevel.set_fullscreen");
                 Ok(Vec::new())
             }
             xdg_shell::xdg_toplevel_request::UNSET_FULLSCREEN => {
-                println!("[Bridge] xdg_toplevel.unset_fullscreen");
+                bridge_log!("[Bridge] xdg_toplevel.unset_fullscreen");
                 Ok(Vec::new())
             }
             xdg_shell::xdg_toplevel_request::SET_MINIMIZED => {
-                println!("[Bridge] xdg_toplevel.set_minimized");
+                bridge_log!("[Bridge] xdg_toplevel.set_minimized");
                 Ok(Vec::new())
             }
             _ => {
-                println!("[Bridge] Unknown xdg_toplevel opcode: {}", opcode);
+                bridge_log!("[Bridge] Unknown xdg_toplevel opcode: {}", opcode);
                 Ok(Vec::new())
             }
         }
@@ -2160,20 +2235,20 @@ impl WaylandBridge {
 
     /// Run the bridge server
     fn run(&mut self) -> Result<(), &'static str> {
-        println!("[Bridge] Waiting for connections...");
+        bridge_log!("[Bridge] Waiting for connections...");
 
         loop {
             // Accept a connection
             match self.server_socket.accept() {
                 Ok(client) => {
-                    println!("[Bridge] Accepted connection");
+                    bridge_log!("[Bridge] Accepted connection");
                     // Handle this client (blocking for now)
                     if let Err(e) = self.handle_client(client) {
-                        println!("[Bridge] Error handling client: {}", e);
+                        bridge_log!("[Bridge] Error handling client: {}", e);
                     }
                 }
                 Err(e) => {
-                    println!("[Bridge] Error accepting connection: {:?}", e);
+                    bridge_log!("[Bridge] Error accepting connection: {:?}", e);
                     std::thread::sleep(std::time::Duration::from_millis(100));
                 }
             }
@@ -2189,11 +2264,11 @@ impl WaylandBridge {
     ) -> Result<Vec<WaylandMessage>, &'static str> {
         match opcode {
             input::seat_request::GET_POINTER => {
-                println!("[Bridge] wl_seat.get_pointer");
+                bridge_log!("[Bridge] wl_seat.get_pointer");
                 if payload.len() >= 4 {
                     let pointer_id =
                         u32::from_ne_bytes([payload[0], payload[1], payload[2], payload[3]]);
-                    println!("[Bridge] Pointer ID: {}", pointer_id);
+                    bridge_log!("[Bridge] Pointer ID: {}", pointer_id);
                     self.add_object(pointer_id, String::from("wl_pointer"));
                     self.input_manager.create_pointer(pointer_id, seat_id);
 
@@ -2219,11 +2294,11 @@ impl WaylandBridge {
                 Ok(Vec::new())
             }
             input::seat_request::GET_KEYBOARD => {
-                println!("[Bridge] wl_seat.get_keyboard");
+                bridge_log!("[Bridge] wl_seat.get_keyboard");
                 if payload.len() >= 4 {
                     let keyboard_id =
                         u32::from_ne_bytes([payload[0], payload[1], payload[2], payload[3]]);
-                    println!("[Bridge] Keyboard ID: {}", keyboard_id);
+                    bridge_log!("[Bridge] Keyboard ID: {}", keyboard_id);
                     self.add_object(keyboard_id, String::from("wl_keyboard"));
                     self.input_manager.create_keyboard(keyboard_id, seat_id);
 
@@ -2267,11 +2342,11 @@ impl WaylandBridge {
                 Ok(Vec::new())
             }
             input::seat_request::RELEASE => {
-                println!("[Bridge] wl_seat.release");
+                bridge_log!("[Bridge] wl_seat.release");
                 Ok(Vec::new())
             }
             _ => {
-                println!("[Bridge] Unknown wl_seat opcode: {}", opcode);
+                bridge_log!("[Bridge] Unknown wl_seat opcode: {}", opcode);
                 Ok(Vec::new())
             }
         }
@@ -2284,7 +2359,7 @@ impl WaylandBridge {
         opcode: u16,
         _payload: &[u8],
     ) -> Result<Vec<WaylandMessage>, &'static str> {
-        println!("[Bridge] wl_pointer opcode: {}", opcode);
+        bridge_log!("[Bridge] wl_pointer opcode: {}", opcode);
         // Pointer events are sent from SWS, not received from client
         Ok(Vec::new())
     }
@@ -2296,7 +2371,7 @@ impl WaylandBridge {
         opcode: u16,
         _payload: &[u8],
     ) -> Result<Vec<WaylandMessage>, &'static str> {
-        println!("[Bridge] wl_keyboard opcode: {}", opcode);
+        bridge_log!("[Bridge] wl_keyboard opcode: {}", opcode);
         // Keyboard events are sent from SWS, not received from client
         Ok(Vec::new())
     }
@@ -2308,7 +2383,7 @@ impl WaylandBridge {
         opcode: u16,
         _payload: &[u8],
     ) -> Result<Vec<WaylandMessage>, &'static str> {
-        println!("[Bridge] wl_output opcode: {}", opcode);
+        bridge_log!("[Bridge] wl_output opcode: {}", opcode);
         Ok(Vec::new())
     }
 
@@ -2322,7 +2397,7 @@ impl WaylandBridge {
         match opcode {
             0 => {
                 // wl_region.destroy
-                println!("[Bridge] wl_region.destroy: {}", region_id);
+                bridge_log!("[Bridge] wl_region.destroy: {}", region_id);
                 self.region_manager.destroy_region(region_id);
                 self.objects.remove(&region_id);
                 Ok(Vec::new())
@@ -2337,9 +2412,13 @@ impl WaylandBridge {
                     let height =
                         i32::from_ne_bytes([payload[12], payload[13], payload[14], payload[15]]);
                     if is_debug_enabled() {
-                        println!(
+                        bridge_log!(
                             "[Bridge] wl_region.add: region={} x={} y={} w={} h={}",
-                            region_id, x, y, width, height
+                            region_id,
+                            x,
+                            y,
+                            width,
+                            height
                         );
                     }
                     self.region_manager
@@ -2357,9 +2436,13 @@ impl WaylandBridge {
                     let height =
                         i32::from_ne_bytes([payload[12], payload[13], payload[14], payload[15]]);
                     if is_debug_enabled() {
-                        println!(
+                        bridge_log!(
                             "[Bridge] wl_region.subtract: region={} x={} y={} w={} h={}",
-                            region_id, x, y, width, height
+                            region_id,
+                            x,
+                            y,
+                            width,
+                            height
                         );
                     }
                     self.region_manager
@@ -2368,7 +2451,7 @@ impl WaylandBridge {
                 Ok(Vec::new())
             }
             _ => {
-                println!("[Bridge] Unknown wl_region opcode: {}", opcode);
+                bridge_log!("[Bridge] Unknown wl_region opcode: {}", opcode);
                 Ok(Vec::new())
             }
         }
@@ -2389,10 +2472,10 @@ impl WaylandBridge {
         let objects_clone = self.objects_for_input_thread.clone();
         let pointer_pos = self.pointer_position_for_thread.clone();
 
-        println!("[Bridge] Spawning input event thread...");
+        bridge_log!("[Bridge] Spawning input event thread...");
 
         thread::spawn(move || {
-            println!("[Input Thread] Started, connecting to SWS...");
+            bridge_log!("[Input Thread] Started, connecting to SWS...");
 
             // Serial counter for input events (must be non-zero for GTK)
             let mut next_serial: u32 = 1;
@@ -2401,17 +2484,17 @@ impl WaylandBridge {
             let sws_socket = match Socket::new() {
                 Ok(s) => s,
                 Err(_) => {
-                    println!("[Input Thread] Failed to create socket");
+                    bridge_log!("[Input Thread] Failed to create socket");
                     return;
                 }
             };
 
             if let Err(_) = sws_socket.connect("/tmp/sws.sock") {
-                println!("[Input Thread] Failed to connect to SWS");
+                bridge_log!("[Input Thread] Failed to connect to SWS");
                 return;
             }
 
-            println!("[Input Thread] Connected to SWS, listening for input events");
+            bridge_log!("[Input Thread] Connected to SWS, listening for input events");
 
             let mut sws = sws_socket;
             let mut buf = [0u8; 1024];
@@ -2441,9 +2524,11 @@ impl WaylandBridge {
                             let code = u16::from_le_bytes([buf[26], buf[27]]);
                             let value = i32::from_le_bytes([buf[28], buf[29], buf[30], buf[31]]);
 
-                            println!(
+                            bridge_log!(
                                 "[Input Thread] Received EXTENSION_INPUT_EVENT: type={} code={} value={}",
-                                type_, code, value
+                                type_,
+                                code,
+                                value
                             );
 
                             // Get current objects list
@@ -2464,9 +2549,11 @@ impl WaylandBridge {
                                         msg.add_arg(WaylandArg::Uint(code as u32));
                                         msg.add_arg(WaylandArg::Uint(value as u32)); // state
                                         messages.push(msg);
-                                        println!(
+                                        bridge_log!(
                                             "[Input Thread] Queued keyboard key event: id={}, code={}, state={}",
-                                            id, code, value
+                                            id,
+                                            code,
+                                            value
                                         );
                                     }
                                 }
@@ -2475,11 +2562,11 @@ impl WaylandBridge {
                                 if code == 0 {
                                     // ABS_X
                                     current_x = value;
-                                    println!("[Input Thread] Updated X position: {}", current_x);
+                                    bridge_log!("[Input Thread] Updated X position: {}", current_x);
                                 } else if code == 1 {
                                     // ABS_Y
                                     current_y = value;
-                                    println!("[Input Thread] Updated Y position: {}", current_y);
+                                    bridge_log!("[Input Thread] Updated Y position: {}", current_y);
                                 } else if code >= 0x100 && code <= 0x104 {
                                     // Mouse buttons (BTN_LEFT, BTN_RIGHT, etc.)
                                     for (id, interface) in objects_guard.iter() {
@@ -2517,9 +2604,13 @@ impl WaylandBridge {
                                             msg.add_arg(WaylandArg::Uint(button_code as u32));
                                             msg.add_arg(WaylandArg::Uint(value as u32)); // state (0=up, 1=down)
                                             messages.push(msg);
-                                            println!(
+                                            bridge_log!(
                                                 "[Input Thread] Queued pointer button event: id={}, button={}, state={}, x={}, y={}",
-                                                id, button_code, value, current_x, current_y
+                                                id,
+                                                button_code,
+                                                value,
+                                                current_x,
+                                                current_y
                                             );
                                         }
                                     }
@@ -2531,7 +2622,7 @@ impl WaylandBridge {
                             if msg_count > 0 {
                                 let mut queue = input_queue.lock();
                                 queue.extend(messages);
-                                println!("[Input Thread] Added {} messages to queue", msg_count);
+                                bridge_log!("[Input Thread] Added {} messages to queue", msg_count);
                             }
                         }
                     }
@@ -2553,40 +2644,40 @@ impl WaylandBridge {
 
 #[unsafe(no_mangle)]
 fn main() -> i32 {
-    println!("=== Wayland Bridge Server ===");
-    println!("Starting Wayland to SWS bridge...");
+    bridge_log!("=== Wayland Bridge Server ===");
+    bridge_log!("Starting Wayland to SWS bridge...");
 
     let socket_path = "/tmp/wayland-0";
 
     let mut bridge = match WaylandBridge::new(socket_path) {
         Ok(b) => b,
         Err(e) => {
-            println!("[Bridge] Failed to initialize: {}", e);
+            bridge_log!("[Bridge] Failed to initialize: {}", e);
             return 1;
         }
     };
 
-    println!("[Bridge] Listening on {}", socket_path);
+    bridge_log!("[Bridge] Listening on {}", socket_path);
 
     // Connect to SWS and register as extension
     if let Err(e) = bridge.connect_to_sws() {
-        println!("[Bridge] Failed to connect to SWS: {}", e);
-        println!("[Bridge] Make sure SWS is running at /tmp/sws.sock");
+        bridge_log!("[Bridge] Failed to connect to SWS: {}", e);
+        bridge_log!("[Bridge] Make sure SWS is running at /tmp/sws.sock");
         return 1;
     }
 
-    println!("[Bridge] Connected to SWS successfully");
+    bridge_log!("[Bridge] Connected to SWS successfully");
 
     // Spawn input event listener thread
     if let Err(e) = bridge.spawn_input_thread() {
-        println!("[Bridge] Failed to spawn input thread: {}", e);
+        bridge_log!("[Bridge] Failed to spawn input thread: {}", e);
         return 1;
     }
 
-    println!("[Bridge] Clients can connect with WAYLAND_DISPLAY=wayland-0");
+    bridge_log!("[Bridge] Clients can connect with WAYLAND_DISPLAY=wayland-0");
 
     if let Err(e) = bridge.run() {
-        println!("[Bridge] Error: {}", e);
+        bridge_log!("[Bridge] Error: {}", e);
         return 1;
     }
 

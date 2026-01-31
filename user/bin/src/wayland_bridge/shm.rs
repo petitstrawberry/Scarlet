@@ -6,7 +6,6 @@
 
 use std::collections::BTreeMap;
 use std::handle::Handle;
-use std::println;
 
 /// Shared memory pool
 #[derive(Debug)]
