@@ -194,6 +194,10 @@ struct WaylandBridge {
     sws_pending: Vec<protocol_sws::ServerMessage>,
     /// Coalesced SWS updates waiting to be sent per window
     pending_damage: BTreeMap<u32, PendingDamage>,
+    /// Whether a coalescing delay is pending before the next flush
+    flush_deferred: bool,
+    /// Minimum interval between EXTENSION_UPDATE_BUFFER flushes
+    update_flush_interval: Duration,
     /// Pointer position (surface-local, in pixels)
     pointer_x: i32,
     pointer_y: i32,
@@ -237,6 +241,8 @@ impl WaylandBridge {
             sws_rx_buffer: Vec::new(),
             sws_pending: Vec::new(),
             pending_damage: BTreeMap::new(),
+            flush_deferred: false,
+            update_flush_interval: Duration::from_millis(16),
             pointer_x: 0,
             pointer_y: 0,
             pointer_grab_active: false,
@@ -904,6 +910,7 @@ impl WaylandBridge {
         width: u32,
         height: u32,
     ) {
+        let was_empty = self.pending_damage.is_empty();
         let entry = self
             .pending_damage
             .entry(window_id)
@@ -922,6 +929,10 @@ impl WaylandBridge {
             entry.width = width;
             entry.height = height;
             return;
+        }
+
+        if was_empty {
+            self.flush_deferred = true;
         }
 
         let right_existing = entry.x.saturating_add(entry.width);
@@ -1032,6 +1043,19 @@ impl WaylandBridge {
         }
 
         Ok(sent_any)
+    }
+
+    fn maybe_flush_pending_updates(&mut self) -> Result<bool, &'static str> {
+        if self.pending_damage.is_empty() {
+            return Ok(false);
+        }
+
+        if self.flush_deferred {
+            self.flush_deferred = false;
+            thread::sleep(self.update_flush_interval);
+        }
+
+        self.flush_pending_updates()
     }
 
     /// Update SWS window buffer when surface commits
@@ -1405,7 +1429,7 @@ impl WaylandBridge {
                 }
             }
 
-            let sent_updates = self.flush_pending_updates()?;
+            let sent_updates = self.maybe_flush_pending_updates()?;
 
             if !got_data && !had_input_events && !sent_updates {
                 thread::sleep(Duration::from_millis(idle_backoff_ms));
