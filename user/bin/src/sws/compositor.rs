@@ -40,6 +40,7 @@ pub struct Compositor {
     pending_damage: Option<(i32, i32, u32, u32)>,
     event_counter: u64,
     left_button_down: bool,
+    last_left_down_cursor: Option<(i32, i32)>,
     move_drag: Option<MoveDragState>,
     resize_drag: Option<ResizeDragState>,
     resize_outline: Option<(i32, i32, u32, u32)>,
@@ -142,6 +143,7 @@ impl Compositor {
             pending_damage: None,
             event_counter: 0,
             left_button_down: false,
+            last_left_down_cursor: None,
             move_drag: None,
             resize_drag: None,
             resize_outline: None,
@@ -1586,6 +1588,7 @@ impl Compositor {
                 if button == key_codes::BTN_LEFT {
                     self.left_button_down = pressed;
                     if !pressed {
+                        self.last_left_down_cursor = None;
                         // Always exit move mode on left button release.
                         if self.move_drag.take().is_some() {
                             // No special redraw needed: the last drag motion already queued damage.
@@ -1620,6 +1623,7 @@ impl Compositor {
                 }
 
                 if button == key_codes::BTN_LEFT && pressed {
+                    self.last_left_down_cursor = Some((self.cursor.x, self.cursor.y));
                     // Determine target window under cursor.
                     if let Some(win_id) = self
                         .window_manager
@@ -2046,13 +2050,17 @@ impl Compositor {
                         None => return Ok(false),
                     };
 
+                let (grab_cursor_x, grab_cursor_y) = self
+                    .last_left_down_cursor
+                    .unwrap_or((self.cursor.x, self.cursor.y));
+
                 // Bring the window to front for the drag (focus is handled by click routing).
                 self.window_manager.raise_to_top_with_type(window_id);
 
                 self.move_drag = Some(MoveDragState {
                     window_id,
-                    grab_cursor_x: self.cursor.x,
-                    grab_cursor_y: self.cursor.y,
+                    grab_cursor_x,
+                    grab_cursor_y,
                     start_window_x,
                     start_window_y,
                 });
