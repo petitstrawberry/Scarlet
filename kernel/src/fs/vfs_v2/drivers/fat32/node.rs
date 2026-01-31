@@ -4,6 +4,7 @@
 //! It provides the interface between the VFS layer and FAT32-specific node data.
 
 use alloc::{
+    boxed::Box,
     collections::BTreeMap,
     string::String,
     sync::{Arc, Weak},
@@ -18,7 +19,7 @@ use crate::object::capability::{ControlOps, MemoryMappingOps, StreamError, Strea
 use crate::environment::PAGE_SIZE;
 use crate::fs::vfs_v2::cache::PageCacheCapable;
 use crate::fs::vfs_v2::core::{FileSystemOperations, VfsNode};
-use crate::mem::page_cache::PageCacheManager;
+use crate::mem::{page::allocate_boxed_pages, page_cache::PageCacheManager};
 
 /// FAT32 filesystem node
 ///
@@ -183,6 +184,12 @@ pub struct Fat32FileObject {
     parent_cluster: u32,
     /// File-level dirty flag to avoid unnecessary writeback
     dirty: Mutex<bool>,
+    /// Page-aligned backing for mmap operations (lazy initialized)
+    mmap_backing: RwLock<Option<Box<[crate::mem::page::Page]>>>,
+    /// Byte length of the mmap backing (file size snapshot)
+    mmap_backing_len: Mutex<usize>,
+    /// Active mmap ranges keyed by starting virtual address
+    mmap_ranges: RwLock<BTreeMap<usize, MmapRange>>,
 }
 
 impl Fat32FileObject {
@@ -192,6 +199,9 @@ impl Fat32FileObject {
             position: RwLock::new(0),
             parent_cluster,
             dirty: Mutex::new(false),
+            mmap_backing: RwLock::new(None),
+            mmap_backing_len: Mutex::new(0),
+            mmap_ranges: RwLock::new(BTreeMap::new()),
         }
     }
 
@@ -310,6 +320,62 @@ impl Fat32FileObject {
         Ok(())
     }
 
+    fn ensure_mmap_backing(
+        &self,
+        file_size: usize,
+        required_size: usize,
+    ) -> Result<(), StreamError> {
+        if file_size == 0 || required_size == 0 {
+            return Err(StreamError::InvalidArgument);
+        }
+
+        let num_pages = (required_size + PAGE_SIZE - 1) / PAGE_SIZE;
+        let mut backing_guard = self.mmap_backing.write();
+        let needs_alloc = backing_guard
+            .as_ref()
+            .map(|buf| buf.len() < num_pages)
+            .unwrap_or(true);
+        if needs_alloc {
+            *backing_guard = Some(allocate_boxed_pages(num_pages));
+        }
+
+        let backing = backing_guard.as_mut().expect("mmap backing missing");
+        *self.mmap_backing_len.lock() = file_size;
+
+        let fs = self
+            .node
+            .filesystem
+            .read()
+            .as_ref()
+            .and_then(|weak| weak.upgrade())
+            .ok_or(StreamError::Closed)?;
+        let fat32_fs = fs
+            .as_any()
+            .downcast_ref::<crate::fs::vfs_v2::drivers::fat32::Fat32FileSystem>()
+            .ok_or(StreamError::NotSupported)?;
+
+        let cache_id = self.cache_id();
+        let backing_ptr = backing.as_mut_ptr() as *mut u8;
+        for page_index in 0..num_pages {
+            let pinned = PageCacheManager::global()
+                .pin_or_load(cache_id, page_index as u64, |paddr| {
+                    fat32_fs
+                        .read_page_content(self.node.cluster(), page_index as u64, paddr)
+                        .map_err(|_| "fat32: read_page_content failed")
+                })
+                .map_err(|_| StreamError::IoError)?;
+            unsafe {
+                core::ptr::copy_nonoverlapping(
+                    pinned.paddr() as *const u8,
+                    backing_ptr.add(page_index * PAGE_SIZE),
+                    PAGE_SIZE,
+                );
+            }
+        }
+
+        Ok(())
+    }
+
     /// Update the directory entry for this file
     fn update_directory_entry(
         &self,
@@ -351,6 +417,13 @@ impl Fat32FileObject {
             }
         }
     }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct MmapRange {
+    vaddr_start: usize,
+    vaddr_end: usize,
+    offset: usize,
 }
 
 impl Debug for Fat32FileObject {
@@ -492,16 +565,117 @@ impl MemoryMappingOps for Fat32FileObject {
         offset: usize,
         length: usize,
     ) -> Result<(usize, usize, bool), &'static str> {
-        let _ = (offset, length);
-        Err("Memory mapping not supported for FAT32 files")
+        if offset % PAGE_SIZE != 0 {
+            return Err("Offset not page aligned");
+        }
+
+        let file_size = self.node.metadata.read().size;
+        if file_size == 0 || offset >= file_size {
+            return Err("Offset beyond file size");
+        }
+
+        let required_size = offset.saturating_add(length).max(file_size);
+        self.ensure_mmap_backing(file_size, required_size)
+            .map_err(|_| "Failed to prepare mmap backing")?;
+
+        let backing_guard = self.mmap_backing.read();
+        let backing = backing_guard.as_ref().ok_or("mmap backing missing")?;
+        let base = backing.as_ptr() as usize;
+        let paddr = base + offset;
+        if paddr % PAGE_SIZE != 0 {
+            return Err("Backing address not aligned");
+        }
+
+        Ok((paddr, 0x3, true))
     }
 
-    fn on_mapped(&self, _vaddr: usize, _paddr: usize, _length: usize, _offset: usize) {}
+    fn on_mapped(&self, vaddr: usize, _paddr: usize, length: usize, offset: usize) {
+        if length == 0 {
+            return;
+        }
+        let vaddr_end = vaddr.saturating_add(length - 1);
+        let range = MmapRange {
+            vaddr_start: vaddr,
+            vaddr_end,
+            offset,
+        };
+        self.mmap_ranges.write().insert(vaddr, range);
+    }
 
-    fn on_unmapped(&self, _vaddr: usize, _length: usize) {}
+    fn on_unmapped(&self, vaddr: usize, _length: usize) {
+        self.mmap_ranges.write().remove(&vaddr);
+        let backing_guard = self.mmap_backing.read();
+        let backing = match backing_guard.as_ref() {
+            Some(buf) => buf,
+            None => return,
+        };
+        let backing_len = *self.mmap_backing_len.lock();
+        if backing_len == 0 {
+            return;
+        }
+
+        let fs = match self
+            .node
+            .filesystem
+            .read()
+            .as_ref()
+            .and_then(|weak| weak.upgrade())
+        {
+            Some(fs) => fs,
+            None => return,
+        };
+        let fat32_fs = match fs
+            .as_any()
+            .downcast_ref::<crate::fs::vfs_v2::drivers::fat32::Fat32FileSystem>()
+        {
+            Some(fs) => fs,
+            None => return,
+        };
+
+        let backing_ptr = backing.as_ptr() as *const u8;
+        let data = unsafe { core::slice::from_raw_parts(backing_ptr, backing_len) };
+        let _ = fat32_fs.write_file_content(self.node.cluster(), data);
+        PageCacheManager::global().invalidate(self.cache_id());
+    }
 
     fn supports_mmap(&self) -> bool {
-        false
+        true
+    }
+
+    fn resolve_fault(
+        &self,
+        access: &crate::object::capability::memory_mapping::AccessKind,
+        map: &crate::vm::vmem::VirtualMemoryMap,
+    ) -> core::result::Result<
+        crate::object::capability::memory_mapping::ResolveFaultResult,
+        crate::object::capability::memory_mapping::ResolveFaultError,
+    > {
+        let range = self
+            .mmap_ranges
+            .read()
+            .get(&map.vmarea.start)
+            .copied()
+            .ok_or(crate::object::capability::memory_mapping::ResolveFaultError::Invalid)?;
+        if access.vaddr < range.vaddr_start || access.vaddr > range.vaddr_end {
+            return Err(crate::object::capability::memory_mapping::ResolveFaultError::Invalid);
+        }
+
+        let file_size = self.node.metadata.read().size;
+        let file_offset = range
+            .offset
+            .saturating_add(access.vaddr.saturating_sub(range.vaddr_start));
+        if file_size == 0 || file_offset >= file_size {
+            return Err(crate::object::capability::memory_mapping::ResolveFaultError::Invalid);
+        }
+
+        let page_vaddr = access.vaddr & !(PAGE_SIZE - 1);
+        let offset_in_mapping = page_vaddr - map.vmarea.start;
+        Ok(
+            crate::object::capability::memory_mapping::ResolveFaultResult {
+                paddr_page_base: map.pmarea.start + offset_in_mapping,
+                is_tail: false,
+            },
+        )
     }
 }
 

@@ -3,7 +3,7 @@
 //! This module implements the VFS node interface for ext2 filesystem nodes,
 //! providing file and directory objects that integrate with the VFS v2 architecture.
 
-use alloc::{format, string::String, sync::Weak, vec::Vec};
+use alloc::{boxed::Box, collections::BTreeMap, format, string::String, sync::Weak, vec::Vec};
 use core::{any::Any, fmt::Debug};
 use spin::{Mutex, RwLock};
 
@@ -17,7 +17,10 @@ use crate::{
         DeviceFileInfo, FileMetadata, FileObject, FilePermission, FileSystemError,
         FileSystemErrorKind, FileType, SeekFrom, SocketFileInfo, vfs_v2::cache::PageCacheCapable,
     },
-    mem::page_cache::{PageCacheManager, PageIndex},
+    mem::{
+        page::allocate_boxed_pages,
+        page_cache::{PageCacheManager, PageIndex},
+    },
     object::capability::{ControlOps, MemoryMappingOps, StreamError, StreamOps},
 };
 
@@ -181,6 +184,12 @@ pub struct Ext2FileObject {
     dirty: Mutex<bool>,
     /// Weak reference to the filesystem
     filesystem: RwLock<Option<Weak<dyn FileSystemOperations>>>,
+    /// Page-aligned backing for mmap operations (lazy initialized)
+    mmap_backing: RwLock<Option<Box<[crate::mem::page::Page]>>>,
+    /// Byte length of the mmap backing (file size snapshot)
+    mmap_backing_len: Mutex<usize>,
+    /// Active mmap ranges keyed by starting virtual address
+    mmap_ranges: RwLock<BTreeMap<usize, MmapRange>>,
 }
 
 impl Ext2FileObject {
@@ -193,6 +202,9 @@ impl Ext2FileObject {
             size_override: Mutex::new(None),
             dirty: Mutex::new(false),
             filesystem: RwLock::new(None),
+            mmap_backing: RwLock::new(None),
+            mmap_backing_len: Mutex::new(0),
+            mmap_ranges: RwLock::new(BTreeMap::new()),
         }
     }
 
@@ -274,6 +286,78 @@ impl Ext2FileObject {
         *self.dirty.lock() = false;
         Ok(())
     }
+
+    fn effective_size(&self, inode_size: usize) -> usize {
+        let mut file_size = inode_size;
+        if let Some(override_size) = *self.size_override.lock() {
+            if override_size > file_size {
+                file_size = override_size;
+            }
+        }
+        file_size
+    }
+
+    fn ensure_mmap_backing(
+        &self,
+        file_size: usize,
+        required_size: usize,
+    ) -> Result<(), StreamError> {
+        if file_size == 0 || required_size == 0 {
+            return Err(StreamError::InvalidArgument);
+        }
+
+        let num_pages = (required_size + PAGE_SIZE - 1) / PAGE_SIZE;
+        let mut backing_guard = self.mmap_backing.write();
+        let needs_alloc = backing_guard
+            .as_ref()
+            .map(|buf| buf.len() < num_pages)
+            .unwrap_or(true);
+        if needs_alloc {
+            *backing_guard = Some(allocate_boxed_pages(num_pages));
+        }
+
+        let backing = backing_guard.as_mut().expect("mmap backing missing");
+        *self.mmap_backing_len.lock() = file_size;
+
+        let fs = self
+            .filesystem
+            .read()
+            .as_ref()
+            .and_then(|weak| weak.upgrade())
+            .ok_or(StreamError::Closed)?;
+        let ext2_fs = fs
+            .as_any()
+            .downcast_ref::<Ext2FileSystem>()
+            .ok_or(StreamError::NotSupported)?;
+
+        let cache_id = self.cache_id();
+        let backing_ptr = backing.as_mut_ptr() as *mut u8;
+        for page_index in 0..num_pages {
+            let pinned = PageCacheManager::global()
+                .pin_or_load(cache_id, page_index as u64, |paddr| {
+                    ext2_fs
+                        .read_page_content(self.inode_number, page_index as u64, paddr)
+                        .map_err(|_| "ext2: read_page_content failed")
+                })
+                .map_err(|_| StreamError::IoError)?;
+            unsafe {
+                core::ptr::copy_nonoverlapping(
+                    pinned.paddr() as *const u8,
+                    backing_ptr.add(page_index * PAGE_SIZE),
+                    PAGE_SIZE,
+                );
+            }
+        }
+
+        Ok(())
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct MmapRange {
+    vaddr_start: usize,
+    vaddr_end: usize,
+    offset: usize,
 }
 
 impl StreamOps for Ext2FileObject {
@@ -433,20 +517,141 @@ impl MemoryMappingOps for Ext2FileObject {
         offset: usize,
         length: usize,
     ) -> Result<(usize, usize, bool), &'static str> {
-        let _ = (offset, length);
-        Err("mmap not yet supported with PageCache")
+        if offset % PAGE_SIZE != 0 {
+            return Err("Offset not page aligned");
+        }
+
+        let fs = self
+            .filesystem
+            .read()
+            .as_ref()
+            .and_then(|weak| weak.upgrade())
+            .ok_or("Filesystem closed")?;
+        let ext2_fs = fs
+            .as_any()
+            .downcast_ref::<Ext2FileSystem>()
+            .ok_or("Invalid filesystem type")?;
+        let inode = ext2_fs
+            .read_inode(self.inode_number)
+            .map_err(|_| "Read inode failed")?;
+        let file_size = self.effective_size(inode.size as usize);
+
+        if file_size == 0 || offset >= file_size {
+            return Err("Offset beyond file size");
+        }
+
+        let required_size = offset.saturating_add(length).max(file_size);
+        self.ensure_mmap_backing(file_size, required_size)
+            .map_err(|_| "Failed to prepare mmap backing")?;
+
+        let backing_guard = self.mmap_backing.read();
+        let backing = backing_guard.as_ref().ok_or("mmap backing missing")?;
+        let base = backing.as_ptr() as usize;
+        let paddr = base + offset;
+        if paddr % PAGE_SIZE != 0 {
+            return Err("Backing address not aligned");
+        }
+
+        Ok((paddr, 0x3, true))
     }
 
     fn on_mapped(&self, _vaddr: usize, _paddr: usize, _length: usize, _offset: usize) {
-        // TODO: Phase 2 - Set object lock in PageCacheManager
+        if _length == 0 {
+            return;
+        }
+        let vaddr_end = _vaddr.saturating_add(_length - 1);
+        let range = MmapRange {
+            vaddr_start: _vaddr,
+            vaddr_end,
+            offset: _offset,
+        };
+        self.mmap_ranges.write().insert(_vaddr, range);
     }
 
     fn on_unmapped(&self, _vaddr: usize, _length: usize) {
-        // TODO: Phase 2 - Release object lock and flush dirty pages
+        self.mmap_ranges.write().remove(&_vaddr);
+        let backing_guard = self.mmap_backing.read();
+        let backing = match backing_guard.as_ref() {
+            Some(buf) => buf,
+            None => return,
+        };
+        let backing_len = *self.mmap_backing_len.lock();
+        if backing_len == 0 {
+            return;
+        }
+
+        let fs = match self
+            .filesystem
+            .read()
+            .as_ref()
+            .and_then(|weak| weak.upgrade())
+        {
+            Some(fs) => fs,
+            None => return,
+        };
+        let ext2_fs = match fs.as_any().downcast_ref::<Ext2FileSystem>() {
+            Some(fs) => fs,
+            None => return,
+        };
+
+        let backing_ptr = backing.as_ptr() as *const u8;
+        let data = unsafe { core::slice::from_raw_parts(backing_ptr, backing_len) };
+        let _ = ext2_fs.write_file_content(self.inode_number, data);
+        PageCacheManager::global().invalidate(self.cache_id());
     }
 
     fn supports_mmap(&self) -> bool {
-        false
+        true
+    }
+
+    fn resolve_fault(
+        &self,
+        access: &crate::object::capability::memory_mapping::AccessKind,
+        map: &crate::vm::vmem::VirtualMemoryMap,
+    ) -> core::result::Result<
+        crate::object::capability::memory_mapping::ResolveFaultResult,
+        crate::object::capability::memory_mapping::ResolveFaultError,
+    > {
+        let range = self
+            .mmap_ranges
+            .read()
+            .get(&map.vmarea.start)
+            .copied()
+            .ok_or(crate::object::capability::memory_mapping::ResolveFaultError::Invalid)?;
+        if access.vaddr < range.vaddr_start || access.vaddr > range.vaddr_end {
+            return Err(crate::object::capability::memory_mapping::ResolveFaultError::Invalid);
+        }
+
+        let fs = self
+            .filesystem
+            .read()
+            .as_ref()
+            .and_then(|weak| weak.upgrade())
+            .ok_or(crate::object::capability::memory_mapping::ResolveFaultError::Invalid)?;
+        let ext2_fs = fs
+            .as_any()
+            .downcast_ref::<Ext2FileSystem>()
+            .ok_or(crate::object::capability::memory_mapping::ResolveFaultError::Invalid)?;
+        let inode = ext2_fs
+            .read_inode(self.inode_number)
+            .map_err(|_| crate::object::capability::memory_mapping::ResolveFaultError::Invalid)?;
+        let file_size = self.effective_size(inode.size as usize);
+
+        let file_offset = range
+            .offset
+            .saturating_add(access.vaddr.saturating_sub(range.vaddr_start));
+        if file_size == 0 || file_offset >= file_size {
+            return Err(crate::object::capability::memory_mapping::ResolveFaultError::Invalid);
+        }
+
+        let page_vaddr = access.vaddr & !(PAGE_SIZE - 1);
+        let offset_in_mapping = page_vaddr - map.vmarea.start;
+        Ok(
+            crate::object::capability::memory_mapping::ResolveFaultResult {
+                paddr_page_base: map.pmarea.start + offset_in_mapping,
+                is_tail: false,
+            },
+        )
     }
 }
 
