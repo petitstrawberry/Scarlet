@@ -101,6 +101,21 @@ macro_rules! bridge_log {
     };
 }
 
+fn create_server_socket(socket_path: &str) -> Result<Socket, &'static str> {
+    bridge_log!("[Bridge] Creating server socket at {}", socket_path);
+
+    let server_socket = Socket::new().map_err(|_| "Failed to create socket")?;
+    server_socket
+        .bind(socket_path)
+        .map_err(|_| "Failed to bind socket")?;
+    server_socket
+        .listen(5)
+        .map_err(|_| "Failed to listen on socket")?;
+
+    bridge_log!("[Bridge] Server socket ready");
+    Ok(server_socket)
+}
+
 /// Mapping of Wayland surface ID to SWS window ID
 #[derive(Debug, Clone, Copy)]
 struct SurfaceWindowMapping {
@@ -132,8 +147,6 @@ struct PendingDamage {
 
 /// Wayland Bridge Server
 struct WaylandBridge {
-    /// Server socket listening for Wayland clients
-    server_socket: Socket,
     /// Registry of global interfaces
     registry: Registry,
     /// Surface manager
@@ -189,25 +202,8 @@ struct WaylandBridge {
 }
 
 impl WaylandBridge {
-    /// Create a new Wayland bridge
-    fn new(socket_path: &str) -> Result<Self, &'static str> {
-        bridge_log!("[Bridge] Creating server socket at {}", socket_path);
-
-        // Create server socket
-        let server_socket = Socket::new().map_err(|_| "Failed to create socket")?;
-
-        // Bind to socket path
-        server_socket
-            .bind(socket_path)
-            .map_err(|_| "Failed to bind socket")?;
-
-        // Listen for connections
-        server_socket
-            .listen(5)
-            .map_err(|_| "Failed to listen on socket")?;
-
-        bridge_log!("[Bridge] Server socket ready");
-
+    /// Create a new Wayland bridge client state
+    fn new_client() -> Result<Self, &'static str> {
         let mut objects = BTreeMap::new();
         // Object ID 1 is always wl_display
         objects.insert(1, String::from("wl_display"));
@@ -217,7 +213,6 @@ impl WaylandBridge {
         let pointer_position_for_thread = Arc::new(StdMutex::new((0, 0)));
 
         Ok(Self {
-            server_socket,
             registry: Registry::new(),
             surface_manager: SurfaceManager::new(),
             xdg_shell_manager: XdgShellManager::new(),
@@ -2343,28 +2338,6 @@ impl WaylandBridge {
         }
     }
 
-    /// Run the bridge server
-    fn run(&mut self) -> Result<(), &'static str> {
-        bridge_log!("[Bridge] Waiting for connections...");
-
-        loop {
-            // Accept a connection
-            match self.server_socket.accept() {
-                Ok(client) => {
-                    bridge_log!("[Bridge] Accepted connection");
-                    // Handle this client (blocking for now)
-                    if let Err(e) = self.handle_client(client) {
-                        bridge_log!("[Bridge] Error handling client: {}", e);
-                    }
-                }
-                Err(e) => {
-                    bridge_log!("[Bridge] Error accepting connection: {:?}", e);
-                    std::thread::sleep(std::time::Duration::from_millis(100));
-                }
-            }
-        }
-    }
-
     /// Handle wl_seat messages
     fn handle_seat_message(
         &mut self,
@@ -2759,8 +2732,8 @@ fn main() -> i32 {
 
     let socket_path = "/tmp/wayland-0";
 
-    let mut bridge = match WaylandBridge::new(socket_path) {
-        Ok(b) => b,
+    let server_socket = match create_server_socket(socket_path) {
+        Ok(sock) => sock,
         Err(e) => {
             bridge_log!("[Bridge] Failed to initialize: {}", e);
             return 1;
@@ -2768,35 +2741,51 @@ fn main() -> i32 {
     };
 
     bridge_log!("[Bridge] Listening on {}", socket_path);
+    bridge_log!("[Bridge] Clients can connect with WAYLAND_DISPLAY=wayland-0");
 
-    // Connect to SWS and register as extension
-    if let Err(e) = bridge.connect_to_sws() {
-        bridge_log!("[Bridge] Failed to connect to SWS: {}", e);
-        bridge_log!("[Bridge] Make sure SWS is running at /tmp/sws.sock");
-        return 1;
-    }
-
-    bridge_log!("[Bridge] Connected to SWS successfully");
-
-    // Spawn input event listener thread (optional)
     let use_input_thread = env::var("WAYLAND_BRIDGE_INPUT_THREAD")
         .map(|val| val == "1")
         .unwrap_or(false);
-    if use_input_thread {
-        if let Err(e) = bridge.spawn_input_thread() {
-            bridge_log!("[Bridge] Failed to spawn input thread: {}", e);
-            return 1;
-        }
-    } else {
+    if !use_input_thread {
         bridge_log!("[Bridge] Input thread disabled (set WAYLAND_BRIDGE_INPUT_THREAD=1 to enable)");
     }
 
-    bridge_log!("[Bridge] Clients can connect with WAYLAND_DISPLAY=wayland-0");
+    loop {
+        match server_socket.accept() {
+            Ok(client) => {
+                bridge_log!("[Bridge] Accepted connection");
+                let enable_input = use_input_thread;
+                thread::spawn(move || {
+                    let mut bridge = match WaylandBridge::new_client() {
+                        Ok(b) => b,
+                        Err(e) => {
+                            bridge_log!("[Bridge] Failed to init client state: {}", e);
+                            return;
+                        }
+                    };
 
-    if let Err(e) = bridge.run() {
-        bridge_log!("[Bridge] Error: {}", e);
-        return 1;
+                    if let Err(e) = bridge.connect_to_sws() {
+                        bridge_log!("[Bridge] Failed to connect to SWS: {}", e);
+                        bridge_log!("[Bridge] Make sure SWS is running at /tmp/sws.sock");
+                        return;
+                    }
+
+                    if enable_input {
+                        if let Err(e) = bridge.spawn_input_thread() {
+                            bridge_log!("[Bridge] Failed to spawn input thread: {}", e);
+                            return;
+                        }
+                    }
+
+                    if let Err(e) = bridge.handle_client(client) {
+                        bridge_log!("[Bridge] Error handling client: {}", e);
+                    }
+                });
+            }
+            Err(e) => {
+                bridge_log!("[Bridge] Error accepting connection: {:?}", e);
+                thread::sleep(Duration::from_millis(100));
+            }
+        }
     }
-
-    0
 }
