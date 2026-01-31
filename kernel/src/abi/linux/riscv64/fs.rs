@@ -3648,6 +3648,13 @@ pub fn sys_ppoll(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize 
             let ns = (ts.tv_sec as i128) * 1_000_000_000i128 + (ts.tv_nsec as i128);
             let ns_u = if ns <= 0 { 0 } else { (ns as u128) as u64 };
             timeout_ticks = Some(ns_to_ticks(ns_u));
+            crate::println!(
+                "[sys_ppoll] timeout ts={}s {}ns -> ns={} ticks={:?}",
+                ts.tv_sec,
+                ts.tv_nsec,
+                ns_u,
+                timeout_ticks
+            );
         }
     }
 
@@ -3656,10 +3663,11 @@ pub fn sys_ppoll(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize 
         selectable: bool,
     }
 
-    let abi_ref = &*abi;
-    let task_ref: &crate::task::Task = &*task;
-
-    let eval_pfd = |pfd: &mut PollFd| -> EvalResult {
+    fn eval_pfd(
+        pfd: &mut PollFd,
+        abi_ref: &LinuxRiscv64Abi,
+        task_ref: &crate::task::Task,
+    ) -> EvalResult {
         pfd.revents = 0;
         if pfd.fd < 0 {
             pfd.revents |= POLLNVAL;
@@ -3731,27 +3739,133 @@ pub fn sys_ppoll(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize 
             ready: pfd.revents != 0,
             selectable,
         }
-    };
+    }
 
     let mut any_ready = false;
     let mut first_selectable_index: Option<usize> = None;
-    for (idx, pfd) in fds.iter_mut().enumerate() {
-        let eval = eval_pfd(pfd);
-        if eval.ready {
-            any_ready = true;
+    let mut selectable_count = 0usize;
+    let mut ready_count = 0usize;
+    {
+        let abi_ref = &*abi;
+        let task_ref: &crate::task::Task = &*task;
+        for (idx, pfd) in fds.iter_mut().enumerate() {
+            let eval = eval_pfd(pfd, abi_ref, task_ref);
+            if eval.ready {
+                any_ready = true;
+                ready_count += 1;
+            }
+            if eval.selectable {
+                selectable_count += 1;
+            }
+            if first_selectable_index.is_none() && eval.selectable {
+                first_selectable_index = Some(idx);
+            }
+
+            let mut kind = "unknown";
+            let mut socket_state: Option<u32> = None;
+            let fd_usize = pfd.fd as usize;
+            if let Some(handle) = abi_ref.get_handle(fd_usize) {
+                if let Some(kobj) = task_ref.handle_table.get(handle) {
+                    match kobj {
+                        crate::object::KernelObject::File(_) => {
+                            kind = "file";
+                        }
+                        crate::object::KernelObject::Pipe(_) => {
+                            kind = "pipe";
+                        }
+                        crate::object::KernelObject::Counter(_) => {
+                            kind = "counter";
+                        }
+                        crate::object::KernelObject::EventChannel(_) => {
+                            kind = "event_channel";
+                        }
+                        crate::object::KernelObject::EventSubscription(_) => {
+                            kind = "event_sub";
+                        }
+                        #[cfg(feature = "network")]
+                        crate::object::KernelObject::Socket(socket) => {
+                            kind = "socket";
+                            socket_state = Some(socket.state() as u32);
+                        }
+                        crate::object::KernelObject::SharedMemory(_) => {
+                            kind = "shmem";
+                        }
+                    }
+                }
+            }
+
+            crate::println!(
+                "[sys_ppoll] fd={} events=0x{:x} revents=0x{:x} selectable={} kind={} socket_state={:?}",
+                pfd.fd,
+                pfd.events as u16,
+                pfd.revents as u16,
+                eval.selectable,
+                kind,
+                socket_state
+            );
         }
-        if first_selectable_index.is_none() && eval.selectable {
-            first_selectable_index = Some(idx);
-        }
+    }
+
+    {
+        let zero_poll = matches!(timeout_ticks, Some(t) if t == 0);
+        crate::println!(
+            "[sys_ppoll] task={} nfds={} selectable={} ready={} any_ready={} zero_poll={} timeout_ticks={:?} first_selectable={:?}",
+            task.name,
+            nfds,
+            selectable_count,
+            ready_count,
+            any_ready,
+            zero_poll,
+            timeout_ticks,
+            first_selectable_index
+        );
     }
 
     if !any_ready {
         let zero_poll = matches!(timeout_ticks, Some(t) if t == 0);
         if !zero_poll {
-            if let Some(wait_idx) = first_selectable_index {
+            if selectable_count > 1 {
+                use crate::timer::get_tick;
+
+                let deadline = timeout_ticks.map(|ticks| get_tick().saturating_add(ticks));
+                loop {
+                    if let Some(deadline) = deadline {
+                        let now = get_tick();
+                        if now >= deadline {
+                            break;
+                        }
+                        let remaining = deadline.saturating_sub(now);
+                        if remaining == 0 {
+                            break;
+                        }
+                    }
+
+                    task.sleep(trapframe, 1);
+
+                    any_ready = false;
+                    ready_count = 0;
+                    {
+                        let abi_ref = &*abi;
+                        let task_ref: &crate::task::Task = &*task;
+                        for pfd in fds.iter_mut() {
+                            let eval = eval_pfd(pfd, abi_ref, task_ref);
+                            if eval.ready {
+                                any_ready = true;
+                                ready_count += 1;
+                            }
+                        }
+                    }
+
+                    if any_ready {
+                        break;
+                    }
+                }
+            } else if let Some(wait_idx) = first_selectable_index {
                 let pfd = &fds[wait_idx];
                 if pfd.fd >= 0 {
                     let fd_usize = pfd.fd as usize;
+                    let abi_ref = &*abi;
+                    let task_ref: &crate::task::Task = &*task;
                     if let Some(handle) = abi_ref.get_handle(fd_usize) {
                         if let Some(kobj) = task_ref.handle_table.get(handle) {
                             if let Some(sel) = kobj.as_selectable() {
@@ -3771,10 +3885,12 @@ pub fn sys_ppoll(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize 
                         }
                     }
                 }
-            }
 
-            for pfd in fds.iter_mut() {
-                let _ = eval_pfd(pfd);
+                let abi_ref = &*abi;
+                let task_ref: &crate::task::Task = &*task;
+                for pfd in fds.iter_mut() {
+                    let _ = eval_pfd(pfd, abi_ref, task_ref);
+                }
             }
         }
     }

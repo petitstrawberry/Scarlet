@@ -253,7 +253,7 @@ impl Selectable for Counter {
         &self,
         interest: ReadyInterest,
         trapframe: &mut crate::arch::Trapframe,
-        _timeout_ticks: Option<u64>,
+        timeout_ticks: Option<u64>,
     ) -> SelectWaitOutcome {
         let current = self.current_ready(interest);
         if (interest.read && current.read) || (interest.write && current.write) {
@@ -267,14 +267,24 @@ impl Selectable for Counter {
             get_scheduler().get_current_task_id(cpu_id).unwrap_or(0)
         };
 
-        if interest.read {
-            self.data.read_waker.wait(task_id, trapframe);
+        let woke = if interest.read {
+            self.data
+                .read_waker
+                .wait_with_timeout(task_id, trapframe, timeout_ticks)
         } else if interest.write {
-            self.data.write_waker.wait(task_id, trapframe);
-        }
+            self.data
+                .write_waker
+                .wait_with_timeout(task_id, trapframe, timeout_ticks)
+        } else {
+            false
+        };
 
-        // TODO: handle timeout properly
-        SelectWaitOutcome::Ready
+        let after = self.current_ready(interest);
+        if timeout_ticks.is_some() && !woke && !after.read && !after.write {
+            SelectWaitOutcome::TimedOut
+        } else {
+            SelectWaitOutcome::Ready
+        }
     }
 
     fn set_nonblocking(&self, enabled: bool) {

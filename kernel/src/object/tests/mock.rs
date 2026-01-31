@@ -86,7 +86,16 @@ impl MemoryMappingOps for MockFileObject {
     }
 }
 
-impl Selectable for MockFileObject {} // Use default Selectable implementation
+impl Selectable for MockFileObject {
+    fn wait_until_ready(
+        &self,
+        _interest: crate::object::capability::selectable::ReadyInterest,
+        _trapframe: &mut crate::arch::Trapframe,
+        _timeout_ticks: Option<u64>,
+    ) -> crate::object::capability::selectable::SelectWaitOutcome {
+        crate::object::capability::selectable::SelectWaitOutcome::Ready
+    }
+}
 
 impl crate::fs::FileObject for MockFileObject {
     fn seek(&self, whence: SeekFrom) -> Result<u64, StreamError> {
@@ -194,7 +203,16 @@ impl MemoryMappingOps for MockTaskFileObject {
     }
 }
 
-impl Selectable for MockTaskFileObject {} // Use default Selectable implementation
+impl Selectable for MockTaskFileObject {
+    fn wait_until_ready(
+        &self,
+        _interest: crate::object::capability::selectable::ReadyInterest,
+        _trapframe: &mut crate::arch::Trapframe,
+        _timeout_ticks: Option<u64>,
+    ) -> crate::object::capability::selectable::SelectWaitOutcome {
+        crate::object::capability::selectable::SelectWaitOutcome::Ready
+    }
+}
 
 impl crate::fs::FileObject for MockTaskFileObject {
     fn seek(&self, whence: SeekFrom) -> Result<u64, StreamError> {

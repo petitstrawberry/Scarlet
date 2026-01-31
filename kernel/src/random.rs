@@ -260,4 +260,13 @@ impl MemoryMappingOps for RandomCharDevice {
     }
 }
 
-impl Selectable for RandomCharDevice {}
+impl Selectable for RandomCharDevice {
+    fn wait_until_ready(
+        &self,
+        _interest: crate::object::capability::selectable::ReadyInterest,
+        _trapframe: &mut crate::arch::Trapframe,
+        _timeout_ticks: Option<u64>,
+    ) -> crate::object::capability::selectable::SelectWaitOutcome {
+        crate::object::capability::selectable::SelectWaitOutcome::Ready
+    }
+}

@@ -1022,7 +1022,7 @@ impl Selectable for LocalSocket {
         &self,
         interest: ReadyInterest,
         trapframe: &mut crate::arch::Trapframe,
-        _timeout_ticks: Option<u64>,
+        timeout_ticks: Option<u64>,
     ) -> SelectWaitOutcome {
         // Check if already ready
         let current = self.current_ready(interest);
@@ -1042,23 +1042,32 @@ impl Selectable for LocalSocket {
 
         // Wait based on state and interest
         // Note: timeout is not yet implemented - always blocks until ready
-        match state {
+        let woke = match state {
             SocketState::Listening if interest.read => {
                 // Wait for incoming connections
-                self.accept_waker.wait(task_id, trapframe);
+                self.accept_waker
+                    .wait_with_timeout(task_id, trapframe, timeout_ticks)
             }
             SocketState::Connected if interest.read => {
                 // Wait for data to arrive
-                self.read_waker.wait(task_id, trapframe);
+                self.read_waker
+                    .wait_with_timeout(task_id, trapframe, timeout_ticks)
             }
             SocketState::Connected if interest.write => {
                 // For write readiness, treat as immediately ready (optimistic)
                 // Most sockets are writable most of the time
-                return SelectWaitOutcome::Ready;
+                true
             }
             _ => {
                 // Other states: immediately return as not ready
-                return SelectWaitOutcome::Ready;
+                true
+            }
+        };
+
+        if timeout_ticks.is_some() && !woke {
+            let after = self.current_ready(interest);
+            if (interest.read && !after.read) && (interest.write && !after.write) {
+                return SelectWaitOutcome::TimedOut;
             }
         }
 

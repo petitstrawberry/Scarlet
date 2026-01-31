@@ -712,7 +712,16 @@ impl MemoryMappingOps for VirtioGpuDevice {
     }
 }
 
-impl Selectable for VirtioGpuDevice {} // Use default Selectable implementation
+impl Selectable for VirtioGpuDevice {
+    fn wait_until_ready(
+        &self,
+        _interest: crate::object::capability::selectable::ReadyInterest,
+        _trapframe: &mut crate::arch::Trapframe,
+        _timeout_ticks: Option<u64>,
+    ) -> crate::object::capability::selectable::SelectWaitOutcome {
+        crate::object::capability::selectable::SelectWaitOutcome::Ready
+    }
+}
 
 impl GraphicsDevice for VirtioGpuDevice {
     fn get_display_name(&self) -> &'static str {

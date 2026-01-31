@@ -108,7 +108,16 @@ impl MemoryMappingOps for GenericBlockDevice {
     }
 }
 
-impl Selectable for GenericBlockDevice {}
+impl Selectable for GenericBlockDevice {
+    fn wait_until_ready(
+        &self,
+        _interest: crate::object::capability::selectable::ReadyInterest,
+        _trapframe: &mut crate::arch::Trapframe,
+        _timeout_ticks: Option<u64>,
+    ) -> crate::object::capability::selectable::SelectWaitOutcome {
+        crate::object::capability::selectable::SelectWaitOutcome::Ready
+    }
+}
 
 impl BlockDevice for GenericBlockDevice {
     fn get_disk_name(&self) -> &'static str {

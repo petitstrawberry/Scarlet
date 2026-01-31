@@ -308,7 +308,16 @@ impl InterruptCapableDevice for Uart {
     }
 }
 
-impl Selectable for Uart {} // Use default Selectable implementation
+impl Selectable for Uart {
+    fn wait_until_ready(
+        &self,
+        _interest: crate::object::capability::selectable::ReadyInterest,
+        _trapframe: &mut crate::arch::Trapframe,
+        _timeout_ticks: Option<u64>,
+    ) -> crate::object::capability::selectable::SelectWaitOutcome {
+        crate::object::capability::selectable::SelectWaitOutcome::Ready
+    }
+}
 
 fn register_uart() {
     use alloc::vec;
