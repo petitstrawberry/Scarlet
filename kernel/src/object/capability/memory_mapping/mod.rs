@@ -31,6 +31,19 @@ pub trait MemoryMappingOps: Send + Sync {
         length: usize,
     ) -> Result<(usize, usize, bool), &'static str>;
 
+    /// Get mapping information with sharing intent.
+    ///
+    /// Default implementation ignores `is_shared` and delegates to
+    /// `get_mapping_info` for backward compatibility.
+    fn get_mapping_info_with(
+        &self,
+        offset: usize,
+        length: usize,
+        _is_shared: bool,
+    ) -> Result<(usize, usize, bool), &'static str> {
+        self.get_mapping_info(offset, length)
+    }
+
     /// Notification that a mapping has been created
     ///
     /// Called when a mapping of this object has been successfully created

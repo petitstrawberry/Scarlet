@@ -138,9 +138,10 @@ pub fn sys_mmap(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
     // Get mapping information from the object.
     // Some backends reject length that extends beyond file size. We try to clamp
     // to the largest mappable length (page down step) to avoid immediate failure.
+    let is_shared = (flags & MAP_SHARED) != 0;
     let mut ok_len = aligned_length;
     let (paddr, obj_permissions, _obj_is_shared) = loop {
-        match memory_mappable.get_mapping_info(offset, ok_len) {
+        match memory_mappable.get_mapping_info_with(offset, ok_len, is_shared) {
             Ok(info) => {
                 // crate::println!(
                 //     "linux-riscv64: sys_mmap - get_mapping_info returned paddr={:#x}, obj_perm={:#x}, is_shared={}, ok_len={}",
