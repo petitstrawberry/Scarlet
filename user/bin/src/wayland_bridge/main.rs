@@ -346,6 +346,7 @@ impl WaylandBridge {
             let mut enter = WaylandMessage::new(keyboard_id, input::keyboard_event::ENTER);
             enter.add_arg(WaylandArg::Uint(serial));
             enter.add_arg(WaylandArg::Object(surface_id));
+            enter.add_arg(WaylandArg::Array(Vec::new()));
             messages.push(enter);
         }
 
