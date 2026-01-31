@@ -729,6 +729,14 @@ impl MemoryMappingOps for Fat32FileObject {
             })
             .map_err(|_| crate::object::capability::memory_mapping::ResolveFaultError::Invalid)?;
 
+        if matches!(
+            access.op,
+            crate::object::capability::memory_mapping::AccessOp::Store
+        ) {
+            pinned.mark_dirty();
+            *self.dirty.lock() = true;
+        }
+
         Ok(
             crate::object::capability::memory_mapping::ResolveFaultResult {
                 paddr_page_base: pinned.paddr(),
