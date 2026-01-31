@@ -118,6 +118,8 @@ struct WindowShmInfo {
     mapped_addr: usize,
     /// Size of the SHM buffer
     size: usize,
+    /// True when SWS renders directly from client buffers.
+    external_buffer_attached: bool,
 }
 
 /// Wayland Bridge Server
@@ -725,6 +727,7 @@ impl WaylandBridge {
                                     shm,
                                     mapped_addr,
                                     size: shm_size as usize,
+                                    external_buffer_attached: false,
                                 },
                             );
                         } else {
@@ -829,6 +832,7 @@ impl WaylandBridge {
                                     shm,
                                     mapped_addr,
                                     size: shm_size as usize,
+                                    external_buffer_attached: false,
                                 },
                             );
                         } else {
@@ -904,58 +908,52 @@ impl WaylandBridge {
             );
         }
 
-        // Fallback: Use pixel copy for buffers that weren't zero-copied
-        // Map client's SHM pool to read pixel data
-        if let Ok(client_mapper) = client_shm_handle.as_memory_mapping() {
-            let pool_size = pool.size.max(
-                (buffer.offset.abs() as usize)
-                    + (buffer.stride.abs() as usize).saturating_mul(buffer.height.max(0) as usize),
-            );
-            if let Ok(client_addr) =
-                client_mapper.mmap(0, pool_size, permissions::READ, flags::SHARED, 0)
-            {
-                // bridge_log!("[Bridge] Mapped client SHM at 0x{:x}", client_addr);
+        if !window_shm_info.external_buffer_attached {
+            // Fallback: Use pixel copy for buffers that weren't zero-copied
+            // Map client's SHM pool to read pixel data
+            if let Ok(client_mapper) = client_shm_handle.as_memory_mapping() {
+                let pool_size = pool.size.max(
+                    (buffer.offset.abs() as usize)
+                        + (buffer.stride.abs() as usize)
+                            .saturating_mul(buffer.height.max(0) as usize),
+                );
+                if let Ok(client_addr) =
+                    client_mapper.mmap(0, pool_size, permissions::READ, flags::SHARED, 0)
+                {
+                    // Copy pixel data from client SHM to SWS window SHM
+                    let src_width = buffer.width.max(0) as usize;
+                    let src_height = buffer.height.max(0) as usize;
+                    let src_stride = buffer.stride.max(0) as usize;
+                    let src_offset = buffer.offset.max(0) as usize;
 
-                // Copy pixel data from client SHM to SWS window SHM
-                let src_width = buffer.width.max(0) as usize;
-                let src_height = buffer.height.max(0) as usize;
-                let src_stride = buffer.stride.max(0) as usize;
-                let src_offset = buffer.offset.max(0) as usize;
+                    let dst_stride = (surface.width.max(0) as u32 * 4) as usize;
 
-                let dst_stride = (surface.width.max(0) as u32 * 4) as usize;
+                    // Copy row by row
+                    unsafe {
+                        for row in 0..src_height.min(height as usize) {
+                            let src_row_offset = src_offset + row * src_stride;
+                            let dst_row_offset = (y as usize + row) * dst_stride + (x as usize * 4);
 
-                // bridge_log!(
-                //     "[Bridge] Copying pixels: {}x{} stride={} src_offset={} dst_stride={}",
-                //     src_width, src_height, src_stride, src_offset, dst_stride
-                // );
+                            let src_start = client_addr + src_row_offset;
+                            let dst_start = window_shm_info.mapped_addr + dst_row_offset;
 
-                // Copy row by row
-                unsafe {
-                    for row in 0..src_height.min(height as usize) {
-                        let src_row_offset = src_offset + row * src_stride;
-                        let dst_row_offset = (y as usize + row) * dst_stride + (x as usize * 4);
+                            let bytes_to_copy = (src_width * 4)
+                                .min(window_shm_info.size.saturating_sub(dst_row_offset));
 
-                        let src_start = client_addr + src_row_offset;
-                        let dst_start = window_shm_info.mapped_addr + dst_row_offset;
-
-                        let bytes_to_copy = (src_width * 4)
-                            .min((window_shm_info.size.saturating_sub(dst_row_offset)));
-
-                        // Copy pixel data
-                        core::ptr::copy_nonoverlapping(
-                            src_start as *const u8,
-                            dst_start as *mut u8,
-                            bytes_to_copy.min(src_stride),
-                        );
+                            // Copy pixel data
+                            core::ptr::copy_nonoverlapping(
+                                src_start as *const u8,
+                                dst_start as *mut u8,
+                                bytes_to_copy.min(src_stride),
+                            );
+                        }
                     }
+                } else {
+                    bridge_log!("[Bridge] Failed to map client SHM");
                 }
-
-                // bridge_log!("[Bridge] Pixel copy complete");
             } else {
-                bridge_log!("[Bridge] Failed to map client SHM");
+                bridge_log!("[Bridge] Client SHM handle doesn't support memory mapping");
             }
-        } else {
-            bridge_log!("[Bridge] Client SHM handle doesn't support memory mapping");
         }
 
         // Send EXTENSION_UPDATE_BUFFER message
@@ -1043,6 +1041,10 @@ impl WaylandBridge {
         // bridge_log!("[Bridge] Client SHM handle sent successfully");
         // bridge_log!("[Bridge] === EXTENSION_ATTACH_BUFFER COMPLETE ===");
 
+        if let Some(window_shm_info) = self.window_shm.get_mut(&window_id) {
+            window_shm_info.external_buffer_attached = true;
+        }
+
         Ok(())
     }
 
@@ -1122,6 +1124,7 @@ impl WaylandBridge {
                                     shm,
                                     mapped_addr,
                                     size: shm_size as usize,
+                                    external_buffer_attached: false,
                                 },
                             );
                         } else {
@@ -1151,6 +1154,7 @@ impl WaylandBridge {
             .map_err(|_| "Failed to set client socket non-blocking")?;
 
         let mut buffer: Vec<u8> = Vec::new();
+        let mut idle_backoff_ms = 1u64;
 
         loop {
             let mut got_data = false;
@@ -1285,7 +1289,10 @@ impl WaylandBridge {
             }
 
             if !got_data && !had_input_events {
-                thread::sleep(Duration::from_millis(1));
+                thread::sleep(Duration::from_millis(idle_backoff_ms));
+                idle_backoff_ms = (idle_backoff_ms * 2).min(8);
+            } else {
+                idle_backoff_ms = 1;
             }
         }
     }
