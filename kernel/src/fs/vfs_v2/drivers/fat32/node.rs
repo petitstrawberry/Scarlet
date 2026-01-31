@@ -298,6 +298,7 @@ impl Fat32FileObject {
         }
 
         let current_cluster = self.node.cluster();
+        let old_cache_id = self.cache_id();
         let new_cluster = if buffer.is_empty() {
             0
         } else {
@@ -308,7 +309,20 @@ impl Fat32FileObject {
 
         if new_cluster != current_cluster {
             *self.node.cluster.write() = new_cluster;
+            {
+                let mut meta = self.node.metadata.write();
+                if new_cluster != 0 {
+                    meta.file_id = new_cluster as u64;
+                }
+            }
             self.update_directory_entry(fat32_fs, new_cluster, buffer.len())?;
+            PageCacheManager::global().invalidate(old_cache_id);
+        } else if current_cluster != 0 {
+            let mut meta = self.node.metadata.write();
+            if meta.file_id != current_cluster as u64 {
+                meta.file_id = current_cluster as u64;
+                PageCacheManager::global().invalidate(old_cache_id);
+            }
         }
 
         {
