@@ -18,6 +18,7 @@ extern crate scarlet_std as std;
 
 mod input;
 mod protocol;
+mod region;
 mod registry;
 mod shm;
 mod surface;
@@ -31,7 +32,7 @@ use std::collections::BTreeMap;
 use std::env;
 use std::handle::capability::memory_mapping::{self, flags};
 use std::io::{Read, Write};
-use std::ipc::{SharedMemory, permissions};
+use std::ipc::{permissions, SharedMemory};
 use std::println;
 use std::socket::Socket;
 use std::string::{String, ToString};
@@ -128,6 +129,8 @@ struct WaylandBridge {
     xdg_shell_manager: XdgShellManager,
     /// Shared memory manager for client SHM pools
     shm_manager: ShmManager,
+    /// Region manager
+    region_manager: region::RegionManager,
     /// Input manager
     input_manager: InputManager,
     /// Connection to SWS server
@@ -151,6 +154,8 @@ struct WaylandBridge {
     input_event_queue: Arc<StdMutex<Vec<WaylandMessage>>>,
     /// Objects map clone for input thread
     objects_for_input_thread: Arc<StdMutex<BTreeMap<u32, String>>>,
+    /// Pointer position shared with input thread
+    pointer_position_for_thread: Arc<StdMutex<(i32, i32)>>,
     /// Currently focused surface (for keyboard enter/leave events)
     focused_surface: Option<u32>,
     /// Last focused keyboard (for sending leave events)
@@ -192,6 +197,7 @@ impl WaylandBridge {
 
         let input_event_queue = Arc::new(StdMutex::new(Vec::new()));
         let objects_for_input_thread = Arc::new(StdMutex::new(BTreeMap::new()));
+        let pointer_position_for_thread = Arc::new(StdMutex::new((0, 0)));
 
         Ok(Self {
             server_socket,
@@ -199,6 +205,7 @@ impl WaylandBridge {
             surface_manager: SurfaceManager::new(),
             xdg_shell_manager: XdgShellManager::new(),
             shm_manager: ShmManager::new(),
+            region_manager: region::RegionManager::new(),
             input_manager: InputManager::new(),
             sws_connection: None,
             extension_id: None,
@@ -211,6 +218,7 @@ impl WaylandBridge {
             keymap_size: 0,
             input_event_queue,
             objects_for_input_thread,
+            pointer_position_for_thread,
             focused_surface: None,
             focused_keyboard: None,
             focused_pointer: None,
@@ -1117,14 +1125,13 @@ impl WaylandBridge {
                 )?;
                 for response in responses {
                     let response_bytes = response.encode();
-                    if is_debug_enabled() {
-                        println!(
-                            "[Bridge] Sending response: obj={} opcode={} size={}",
-                            response.header.object_id,
-                            response.header.opcode(),
-                            response_bytes.len()
-                        );
-                    }
+                    // Always log responses for debugging
+                    println!(
+                        "[Bridge] Sending response: obj={} opcode={} size={}",
+                        response.header.object_id,
+                        response.header.opcode(),
+                        response_bytes.len()
+                    );
                     // Only wl_keyboard.keymap requires an FD/handle transfer.
                     if response.header.opcode() == input::keyboard_event::KEYMAP {
                         let is_keyboard = self
@@ -1175,13 +1182,13 @@ impl WaylandBridge {
             }
             for input_msg in input_events {
                 let msg_bytes = input_msg.encode();
-                if is_debug_enabled() {
-                    println!(
-                        "[Bridge] Forwarding input event: obj={} opcode={}",
-                        input_msg.header.object_id,
-                        input_msg.header.opcode()
-                    );
-                }
+                // Always log input events for debugging
+                println!(
+                    "[Bridge] Forwarding input event: obj={} opcode={} size={} bytes",
+                    input_msg.header.object_id,
+                    input_msg.header.opcode(),
+                    msg_bytes.len()
+                );
                 if let Err(e) = client.write(&msg_bytes) {
                     println!("[Bridge] Failed to forward input event: {:?}", e);
                 }
@@ -1222,6 +1229,7 @@ impl WaylandBridge {
             "wl_pointer" => self.handle_pointer_message(object_id, opcode, payload),
             "wl_keyboard" => self.handle_keyboard_message(object_id, opcode, payload),
             "wl_output" => self.handle_output_message(object_id, opcode, payload),
+            "wl_region" => self.handle_region_message(object_id, opcode, payload),
             "xdg_wm_base" => self.handle_xdg_wm_base_message(opcode, payload),
             "xdg_surface" => self.handle_xdg_surface_message(object_id, opcode, payload),
             "xdg_toplevel" => self.handle_xdg_toplevel_message(object_id, opcode, payload),
@@ -1253,7 +1261,8 @@ impl WaylandBridge {
 
                     // Send done event for the callback
                     let mut msg = WaylandMessage::new(callback_id, 0); // wl_callback.done
-                    msg.add_arg(WaylandArg::Uint(0)); // serial
+                    let serial = self.allocate_serial();
+                    msg.add_arg(WaylandArg::Uint(serial)); // serial
                     let mut msgs = Vec::new();
                     msgs.push(msg);
                     return Ok(msgs);
@@ -1429,6 +1438,17 @@ impl WaylandBridge {
                 }
                 Ok(Vec::new())
             }
+            protocol::compositor_request::CREATE_REGION => {
+                println!("[Bridge] wl_compositor.create_region");
+                if payload.len() >= 4 {
+                    let region_id =
+                        u32::from_ne_bytes([payload[0], payload[1], payload[2], payload[3]]);
+                    println!("[Bridge] Created region ID: {}", region_id);
+                    self.add_object(region_id, String::from("wl_region"));
+                    self.region_manager.create_region_with_id(region_id);
+                }
+                Ok(Vec::new())
+            }
             _ => {
                 println!("[Bridge] Unknown wl_compositor opcode: {}", opcode);
                 Ok(Vec::new())
@@ -1444,6 +1464,14 @@ impl WaylandBridge {
         payload: &[u8],
     ) -> Result<Vec<WaylandMessage>, &'static str> {
         match opcode {
+            protocol::surface_request::DESTROY => {
+                println!("[Bridge] wl_surface.destroy: {}", surface_id);
+                self.surface_manager.destroy_surface(surface_id);
+                self.objects.remove(&surface_id);
+                // Remove from surface_to_window mapping
+                self.surface_to_window.remove(&surface_id);
+                Ok(Vec::new())
+            }
             protocol::surface_request::ATTACH => {
                 if is_debug_enabled() {
                     println!("[Bridge] wl_surface.attach on surface {}", surface_id);
@@ -1654,6 +1682,74 @@ impl WaylandBridge {
                     // Store the callback to be sent when the surface is committed
                     if let Some(surface) = self.surface_manager.get_surface_mut(surface_id) {
                         surface.set_pending_callback(callback_id);
+                    }
+                }
+                Ok(Vec::new())
+            }
+            protocol::surface_request::SET_OPAQUE_REGION => {
+                if payload.len() >= 4 {
+                    let region_id =
+                        u32::from_ne_bytes([payload[0], payload[1], payload[2], payload[3]]);
+                    if is_debug_enabled() {
+                        println!(
+                            "[Bridge] wl_surface.set_opaque_region: surface={} region={}",
+                            surface_id, region_id
+                        );
+                    }
+                    let region_opt = if region_id == 0 {
+                        None
+                    } else {
+                        Some(region_id)
+                    };
+                    self.surface_manager
+                        .set_opaque_region(surface_id, region_opt);
+                }
+                Ok(Vec::new())
+            }
+            protocol::surface_request::SET_INPUT_REGION => {
+                if payload.len() >= 4 {
+                    let region_id =
+                        u32::from_ne_bytes([payload[0], payload[1], payload[2], payload[3]]);
+                    if is_debug_enabled() {
+                        println!(
+                            "[Bridge] wl_surface.set_input_region: surface={} region={}",
+                            surface_id, region_id
+                        );
+                    }
+                    let region_opt = if region_id == 0 {
+                        None
+                    } else {
+                        Some(region_id)
+                    };
+                    self.surface_manager
+                        .set_input_region(surface_id, region_opt);
+                }
+                Ok(Vec::new())
+            }
+            protocol::surface_request::SET_BUFFER_SCALE => {
+                if payload.len() >= 4 {
+                    let scale =
+                        i32::from_ne_bytes([payload[0], payload[1], payload[2], payload[3]]);
+                    println!(
+                        "[Bridge] wl_surface.set_buffer_scale: surface={} scale={}",
+                        surface_id, scale
+                    );
+                    if let Some(surface) = self.surface_manager.get_surface_mut(surface_id) {
+                        surface.set_buffer_scale(scale);
+                    }
+                }
+                Ok(Vec::new())
+            }
+            protocol::surface_request::SET_BUFFER_TRANSFORM => {
+                if payload.len() >= 4 {
+                    let transform =
+                        u32::from_ne_bytes([payload[0], payload[1], payload[2], payload[3]]);
+                    println!(
+                        "[Bridge] wl_surface.set_buffer_transform: surface={} transform={}",
+                        surface_id, transform
+                    );
+                    if let Some(surface) = self.surface_manager.get_surface_mut(surface_id) {
+                        surface.set_buffer_transform(transform as i32);
                     }
                 }
                 Ok(Vec::new())
@@ -2181,6 +2277,68 @@ impl WaylandBridge {
         Ok(Vec::new())
     }
 
+    /// Handle wl_region messages
+    fn handle_region_message(
+        &mut self,
+        region_id: u32,
+        opcode: u16,
+        payload: &[u8],
+    ) -> Result<Vec<WaylandMessage>, &'static str> {
+        match opcode {
+            0 => {
+                // wl_region.destroy
+                println!("[Bridge] wl_region.destroy: {}", region_id);
+                self.region_manager.destroy_region(region_id);
+                self.objects.remove(&region_id);
+                Ok(Vec::new())
+            }
+            1 => {
+                // wl_region.add
+                if payload.len() >= 16 {
+                    let x = i32::from_ne_bytes([payload[0], payload[1], payload[2], payload[3]]);
+                    let y = i32::from_ne_bytes([payload[4], payload[5], payload[6], payload[7]]);
+                    let width =
+                        i32::from_ne_bytes([payload[8], payload[9], payload[10], payload[11]]);
+                    let height =
+                        i32::from_ne_bytes([payload[12], payload[13], payload[14], payload[15]]);
+                    if is_debug_enabled() {
+                        println!(
+                            "[Bridge] wl_region.add: region={} x={} y={} w={} h={}",
+                            region_id, x, y, width, height
+                        );
+                    }
+                    self.region_manager
+                        .add_to_region(region_id, x, y, width, height);
+                }
+                Ok(Vec::new())
+            }
+            2 => {
+                // wl_region.subtract
+                if payload.len() >= 16 {
+                    let x = i32::from_ne_bytes([payload[0], payload[1], payload[2], payload[3]]);
+                    let y = i32::from_ne_bytes([payload[4], payload[5], payload[6], payload[7]]);
+                    let width =
+                        i32::from_ne_bytes([payload[8], payload[9], payload[10], payload[11]]);
+                    let height =
+                        i32::from_ne_bytes([payload[12], payload[13], payload[14], payload[15]]);
+                    if is_debug_enabled() {
+                        println!(
+                            "[Bridge] wl_region.subtract: region={} x={} y={} w={} h={}",
+                            region_id, x, y, width, height
+                        );
+                    }
+                    self.region_manager
+                        .subtract_from_region(region_id, x, y, width, height);
+                }
+                Ok(Vec::new())
+            }
+            _ => {
+                println!("[Bridge] Unknown wl_region opcode: {}", opcode);
+                Ok(Vec::new())
+            }
+        }
+    }
+
     /// Process input events from SWS and forward to Wayland clients
     /// This should be called periodically or in a separate thread
     /// NOTE: This is now a no-op placeholder - input event forwarding is disabled
@@ -2194,11 +2352,15 @@ impl WaylandBridge {
     fn spawn_input_thread(&self) -> Result<(), &'static str> {
         let input_queue = self.input_event_queue.clone();
         let objects_clone = self.objects_for_input_thread.clone();
+        let pointer_pos = self.pointer_position_for_thread.clone();
 
         println!("[Bridge] Spawning input event thread...");
 
         thread::spawn(move || {
             println!("[Input Thread] Started, connecting to SWS...");
+
+            // Serial counter for input events (must be non-zero for GTK)
+            let mut next_serial: u32 = 1;
 
             // Create separate connection to SWS for input events
             let sws_socket = match Socket::new() {
@@ -2218,6 +2380,8 @@ impl WaylandBridge {
 
             let mut sws = sws_socket;
             let mut buf = [0u8; 1024];
+            let mut current_x: i32 = 0;
+            let mut current_y: i32 = 0;
 
             loop {
                 match sws.read(&mut buf) {
@@ -2242,66 +2406,97 @@ impl WaylandBridge {
                             let code = u16::from_le_bytes([buf[26], buf[27]]);
                             let value = i32::from_le_bytes([buf[28], buf[29], buf[30], buf[31]]);
 
-                            if is_debug_enabled() {
-                                println!(
-                                    "[Input Thread] Received event: type={} code={} value={}",
-                                    type_, code, value
-                                );
-                            }
+                            println!(
+                                "[Input Thread] Received EXTENSION_INPUT_EVENT: type={} code={} value={}",
+                                type_, code, value
+                            );
 
                             // Get current objects list
                             let objects_guard = objects_clone.lock();
                             let mut messages = Vec::new();
 
                             // Convert SWS event to Wayland input events
-                            // Type 1 = keyboard, Type 2 = mouse
+                            // Type 1 = keyboard (EV_KEY), Type 3 = mouse absolute (EV_ABS)
                             if type_ == 1 {
                                 // Keyboard event - forward to all wl_keyboard objects
                                 for (id, interface) in objects_guard.iter() {
                                     if interface == "wl_keyboard" {
                                         let mut msg =
                                             WaylandMessage::new(*id, input::keyboard_event::KEY);
-                                        msg.add_arg(WaylandArg::Uint(0)); // serial
+                                        msg.add_arg(WaylandArg::Uint(next_serial));
+                                        next_serial = next_serial.wrapping_add(1); // serial
                                         msg.add_arg(WaylandArg::Uint(time as u32));
                                         msg.add_arg(WaylandArg::Uint(code as u32));
                                         msg.add_arg(WaylandArg::Uint(value as u32)); // state
                                         messages.push(msg);
+                                        println!(
+                                            "[Input Thread] Queued keyboard key event: id={}, code={}, state={}",
+                                            id, code, value
+                                        );
                                     }
                                 }
-                            } else if type_ == 2 {
-                                // Mouse event - forward to all wl_pointer objects
-                                for (id, interface) in objects_guard.iter() {
-                                    if interface == "wl_pointer" {
-                                        if code == 0 {
-                                            // Motion event
-                                            let mut msg = WaylandMessage::new(
+                            } else if type_ == 3 {
+                                // EV_ABS - absolute position or button
+                                if code == 0 {
+                                    // ABS_X
+                                    current_x = value;
+                                    println!("[Input Thread] Updated X position: {}", current_x);
+                                } else if code == 1 {
+                                    // ABS_Y
+                                    current_y = value;
+                                    println!("[Input Thread] Updated Y position: {}", current_y);
+                                } else if code >= 0x100 && code <= 0x104 {
+                                    // Mouse buttons (BTN_LEFT, BTN_RIGHT, etc.)
+                                    for (id, interface) in objects_guard.iter() {
+                                        if interface == "wl_pointer" {
+                                            // Update shared pointer position
+                                            {
+                                                let mut pos = pointer_pos.lock();
+                                                pos.0 = current_x;
+                                                pos.1 = current_y;
+                                            }
+
+                                            // Send motion event first (required before button)
+                                            let mut motion_msg = WaylandMessage::new(
                                                 *id,
                                                 input::pointer_event::MOTION,
                                             );
-                                            msg.add_arg(WaylandArg::Uint(time as u32));
-                                            msg.add_arg(WaylandArg::Int(value)); // x (simplified)
-                                            msg.add_arg(WaylandArg::Int(value)); // y (simplified)
-                                            messages.push(msg);
-                                        } else {
-                                            // Button event
+                                            motion_msg.add_arg(WaylandArg::Uint(time as u32));
+                                            motion_msg.add_arg(WaylandArg::Fixed(
+                                                (current_x as f64 * 256.0) as i32,
+                                            )); // wl_fixed_t
+                                            motion_msg.add_arg(WaylandArg::Fixed(
+                                                (current_y as f64 * 256.0) as i32,
+                                            ));
+                                            messages.push(motion_msg);
+
+                                            // Send button event
+                                            let button_code = code - 0x100 + 272; // Convert to Linux input button code
                                             let mut msg = WaylandMessage::new(
                                                 *id,
                                                 input::pointer_event::BUTTON,
                                             );
-                                            msg.add_arg(WaylandArg::Uint(0)); // serial
+                                            msg.add_arg(WaylandArg::Uint(next_serial));
+                                            next_serial = next_serial.wrapping_add(1); // serial
                                             msg.add_arg(WaylandArg::Uint(time as u32));
-                                            msg.add_arg(WaylandArg::Uint(code as u32));
-                                            msg.add_arg(WaylandArg::Uint(value as u32)); // state
+                                            msg.add_arg(WaylandArg::Uint(button_code as u32));
+                                            msg.add_arg(WaylandArg::Uint(value as u32)); // state (0=up, 1=down)
                                             messages.push(msg);
+                                            println!(
+                                                "[Input Thread] Queued pointer button event: id={}, button={}, state={}, x={}, y={}",
+                                                id, button_code, value, current_x, current_y
+                                            );
                                         }
                                     }
                                 }
                             }
 
                             // Add messages to shared queue
-                            if !messages.is_empty() {
+                            let msg_count = messages.len();
+                            if msg_count > 0 {
                                 let mut queue = input_queue.lock();
                                 queue.extend(messages);
+                                println!("[Input Thread] Added {} messages to queue", msg_count);
                             }
                         }
                     }
@@ -2346,6 +2541,12 @@ fn main() -> i32 {
     }
 
     println!("[Bridge] Connected to SWS successfully");
+
+    // Spawn input event listener thread
+    if let Err(e) = bridge.spawn_input_thread() {
+        println!("[Bridge] Failed to spawn input thread: {}", e);
+        return 1;
+    }
 
     println!("[Bridge] Clients can connect with WAYLAND_DISPLAY=wayland-0");
 

@@ -166,7 +166,7 @@ impl WaylandArg {
                 bytes.extend_from_slice(&len.to_ne_bytes());
                 bytes.extend_from_slice(s);
                 bytes.push(0); // Null terminator
-                // Pad to 4-byte boundary
+                               // Pad to 4-byte boundary
                 while bytes.len() % 4 != 0 {
                     bytes.push(0);
                 }
@@ -257,6 +257,8 @@ pub mod surface_request {
     pub const SET_OPAQUE_REGION: u16 = 4;
     pub const SET_INPUT_REGION: u16 = 5;
     pub const COMMIT: u16 = 6;
+    pub const SET_BUFFER_TRANSFORM: u16 = 7;
+    pub const SET_BUFFER_SCALE: u16 = 8;
 }
 
 /// wl_surface opcodes (events from server)

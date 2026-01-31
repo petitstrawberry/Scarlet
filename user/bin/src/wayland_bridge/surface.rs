@@ -24,6 +24,14 @@ pub struct Surface {
     pub height: u32,
     /// Pending frame callback ID (if any)
     pub pending_callback: Option<u32>,
+    /// Opaque region (region ID or None for entire surface)
+    pub opaque_region: Option<u32>,
+    /// Input region (region ID or None for entire surface)
+    pub input_region: Option<u32>,
+    /// Buffer scale factor (HiDPI support, default 1)
+    pub buffer_scale: i32,
+    /// Buffer transform (rotation/flipping, default 0 = normal)
+    pub buffer_transform: i32,
 }
 
 /// Surface role determines how the surface is displayed
@@ -49,6 +57,10 @@ impl Surface {
             width: 0,
             height: 0,
             pending_callback: None,
+            opaque_region: None,
+            input_region: None,
+            buffer_scale: 1,
+            buffer_transform: 0,
         }
     }
 
@@ -81,6 +93,16 @@ impl Surface {
     /// Set the surface role
     pub fn set_role(&mut self, role: SurfaceRole) {
         self.role = Some(role);
+    }
+
+    /// Set the buffer scale factor
+    pub fn set_buffer_scale(&mut self, scale: i32) {
+        self.buffer_scale = scale.max(1); // Minimum scale is 1
+    }
+
+    /// Set the buffer transform
+    pub fn set_buffer_transform(&mut self, transform: i32) {
+        self.buffer_transform = transform;
     }
 }
 
@@ -117,5 +139,19 @@ impl SurfaceManager {
     /// Destroy a surface
     pub fn destroy_surface(&mut self, wl_surface_id: u32) {
         self.surfaces.remove(&wl_surface_id);
+    }
+
+    /// Set the opaque region for a surface
+    pub fn set_opaque_region(&mut self, wl_surface_id: u32, region_id: Option<u32>) {
+        if let Some(surface) = self.surfaces.get_mut(&wl_surface_id) {
+            surface.opaque_region = region_id;
+        }
+    }
+
+    /// Set the input region for a surface
+    pub fn set_input_region(&mut self, wl_surface_id: u32, region_id: Option<u32>) {
+        if let Some(surface) = self.surfaces.get_mut(&wl_surface_id) {
+            surface.input_region = region_id;
+        }
     }
 }
