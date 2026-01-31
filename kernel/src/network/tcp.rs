@@ -745,6 +745,15 @@ impl SocketControl for TcpSocket {
     fn is_connected(&self) -> bool {
         self.get_state() == TcpState::Established
     }
+
+    fn state(&self) -> SocketState {
+        match self.get_state() {
+            TcpState::Closed => SocketState::Unconnected,
+            TcpState::Listen => SocketState::Listening,
+            TcpState::Established => SocketState::Connected,
+            _ => SocketState::Unconnected,
+        }
+    }
 }
 
 impl crate::ipc::StreamIpcOps for TcpSocket {

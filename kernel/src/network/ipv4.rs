@@ -47,7 +47,7 @@ impl Ipv4Address {
 
     /// Check if this is a loopback address (127.0.0.0/8)
     pub fn is_loopback(&self) -> bool {
-        self.0[0] == 127
+        self.0 .0 == 127
     }
 
     /// Check if this is the "any" address (0.0.0.0)

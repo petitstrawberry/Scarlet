@@ -509,6 +509,10 @@ pub struct NetworkLayerStats {
     pub packets_dropped: u64,
     /// Protocol errors encountered
     pub protocol_errors: u64,
+    /// Bytes sent through this layer
+    pub bytes_sent: u64,
+    /// Bytes received by this layer
+    pub bytes_received: u64,
 }
 
 /// Protocol stack trait for network protocols

@@ -273,6 +273,10 @@ impl SocketControl for UdpSocket {
     fn is_connected(&self) -> bool {
         *self.state.read() == SocketState::Connected
     }
+
+    fn state(&self) -> SocketState {
+        *self.state.read()
+    }
 }
 
 impl crate::ipc::StreamIpcOps for UdpSocket {
