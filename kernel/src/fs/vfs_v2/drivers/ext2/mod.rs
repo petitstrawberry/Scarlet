@@ -47,7 +47,7 @@ use crate::{
 };
 
 use super::super::{
-    core::{DirectoryEntryInternal, FileSystemOperations, VfsNode},
+    core::{DirectoryEntryInternal, FileSystemId, FileSystemOperations, VfsNode},
     manager::get_global_vfs_manager,
 };
 
@@ -282,6 +282,8 @@ impl FileSystemParams for Ext2Params {
 /// It maintains the block device reference and provides filesystem operations
 /// through the VFS v2 interface.
 pub struct Ext2FileSystem {
+    /// Unique filesystem identifier
+    fs_id: FileSystemId,
     /// Reference to the underlying block device
     block_device: Arc<dyn BlockDevice>,
     /// Superblock information (heap allocated to avoid stack overflow)
@@ -765,6 +767,7 @@ impl Ext2FileSystem {
         );
 
         let fs = Arc::new(Self {
+            fs_id: FileSystemId::new(),
             block_device,
             superblock,
             block_size,
@@ -1309,6 +1312,124 @@ impl Ext2FileSystem {
         // Truncate to the exact size
         content.truncate(size);
         Ok(content)
+    }
+
+    /// Read a single page (4096 bytes) of file content into physical memory.
+    ///
+    /// This is used by the page cache manager for demand paging.
+    /// The page is filled with zeros if beyond EOF.
+    pub fn read_page_content(
+        &self,
+        inode_num: u32,
+        page_index: u64,
+        paddr: usize,
+    ) -> Result<(), FileSystemError> {
+        use crate::environment::PAGE_SIZE;
+
+        profile_scope!("ext2::read_page_content");
+
+        let inode = self.read_inode(inode_num)?;
+        let file_size = inode.size as u64;
+        let page_offset = page_index * PAGE_SIZE as u64;
+
+        // Clear the page first
+        unsafe {
+            core::ptr::write_bytes(paddr as *mut u8, 0, PAGE_SIZE);
+        }
+
+        // If page is beyond EOF, return zeros
+        if page_offset >= file_size {
+            return Ok(());
+        }
+
+        // Calculate how many bytes to read from this page
+        let bytes_in_page = if page_offset + PAGE_SIZE as u64 > file_size {
+            (file_size - page_offset) as usize
+        } else {
+            PAGE_SIZE
+        };
+
+        // Calculate block range for this page
+        let start_block = page_offset / self.block_size as u64;
+        let end_block = (page_offset + bytes_in_page as u64 + self.block_size as u64 - 1)
+            / self.block_size as u64;
+        let num_blocks = end_block - start_block;
+
+        if num_blocks == 0 {
+            return Ok(());
+        }
+
+        // Get block numbers
+        let block_nums = self.get_inode_blocks(&inode, start_block, num_blocks)?;
+
+        let mut page_ptr = paddr as *mut u8;
+        let mut bytes_written = 0usize;
+
+        for (i, &block_num) in block_nums.iter().enumerate() {
+            if block_num == 0 {
+                // Sparse block - already zeroed
+                let bytes_to_skip =
+                    core::cmp::min(self.block_size as usize, bytes_in_page - bytes_written);
+                unsafe {
+                    page_ptr = page_ptr.add(bytes_to_skip);
+                }
+                bytes_written += bytes_to_skip;
+                continue;
+            }
+
+            // Read the block
+            let block_data = self.read_block_cached(block_num)?;
+
+            // Calculate offset within this block
+            let block_offset = if i == 0 {
+                (page_offset % self.block_size as u64) as usize
+            } else {
+                0
+            };
+
+            // Calculate how many bytes to copy from this block
+            let bytes_to_copy = core::cmp::min(
+                self.block_size as usize - block_offset,
+                bytes_in_page - bytes_written,
+            );
+
+            // Copy to page
+            unsafe {
+                core::ptr::copy_nonoverlapping(
+                    block_data.as_ptr().add(block_offset),
+                    page_ptr,
+                    bytes_to_copy,
+                );
+                page_ptr = page_ptr.add(bytes_to_copy);
+            }
+
+            bytes_written += bytes_to_copy;
+
+            if bytes_written >= bytes_in_page {
+                break;
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Write a single page (4096 bytes) of file content from physical memory.
+    ///
+    /// This is used by the page cache manager for writeback.
+    pub fn write_page_content(
+        &self,
+        inode_num: u32,
+        page_index: u64,
+        paddr: usize,
+    ) -> Result<(), FileSystemError> {
+        profile_scope!("ext2::write_page_content");
+
+        // TODO: Phase 2 - Implement page writeback
+        let _ = (inode_num, page_index, paddr);
+        Err(FileSystemError::new(
+            FileSystemErrorKind::NotSupported,
+            "Page writeback not yet implemented",
+        ))
     }
 
     /// Write an inode to disk
@@ -4269,6 +4390,10 @@ impl Ext2FileSystem {
 }
 
 impl FileSystemOperations for Ext2FileSystem {
+    fn fs_id(&self) -> FileSystemId {
+        self.fs_id
+    }
+
     fn lookup(
         &self,
         parent: &Arc<dyn VfsNode>,
@@ -4306,13 +4431,8 @@ impl FileSystemOperations for Ext2FileSystem {
                 // Use file_type_from_inode to get the correct file type including device files
                 let file_type = self.file_type_from_inode(&child_inode, entry.entry.inode)?;
 
-                // Generate new file ID
-                let file_id = {
-                    let mut next_id = self.next_file_id.lock();
-                    let id = *next_id;
-                    *next_id += 1;
-                    id
-                };
+                // Use inode number as stable file_id for page cache identity
+                let file_id = entry.entry.inode as u64;
 
                 // Create new node
                 let node = Ext2Node::new(entry.entry.inode, file_type, file_id);
@@ -4507,16 +4627,9 @@ impl FileSystemOperations for Ext2FileSystem {
             ));
         }
 
-        // Generate new file ID
-        let file_id = {
-            let mut next_id = self.next_file_id.lock();
-            let id = *next_id;
-            *next_id += 1;
-            id
-        };
-
         // Allocate an inode from the ext2 filesystem
         let new_inode_number = self.allocate_inode()?;
+        let file_id = new_inode_number as u64;
 
         // Create the inode structure on disk
         let mode = match &file_type {
@@ -4788,6 +4901,15 @@ impl FileSystemOperations for Ext2FileSystem {
 
         // Free the inode and its data blocks
         self.free_inode(inode_number)?;
+
+        // Invalidate page cache entries for this file to avoid stale data after delete/recreate
+        {
+            use crate::fs::vfs_v2::cache::CacheId;
+            use crate::mem::page_cache::PageCacheManager;
+            let fs_id = self.fs_id().get();
+            let cache_id = CacheId::new((fs_id << 32) | (inode_number as u64));
+            PageCacheManager::global().invalidate(cache_id);
+        }
 
         Ok(())
     }

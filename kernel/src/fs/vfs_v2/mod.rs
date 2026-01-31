@@ -33,6 +33,7 @@
 //!
 //! VFS v2 provides backward compatibility while offering improved APIs.
 //! New code should use the v2 interfaces for better performance and maintainability.
+pub mod cache;
 pub mod core;
 pub mod drivers;
 pub mod manager;
@@ -43,5 +44,6 @@ pub mod syscall;
 #[cfg(test)]
 pub mod tests;
 
+pub use cache::*;
 pub use core::*;
 pub use manager::{PathResolutionOptions, VfsManager};

@@ -12,6 +12,7 @@ use alloc::{
     vec::Vec,
 };
 use core::fmt;
+use core::sync::atomic::{AtomicU64, Ordering};
 use core::{any::Any, fmt::Debug};
 use spin::RwLock;
 
@@ -30,6 +31,24 @@ pub struct DirectoryEntryInternal {
     pub name: String,
     pub file_type: FileType,
     pub file_id: u64,
+}
+
+/// Globally unique identifier for a filesystem instance.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+pub struct FileSystemId(u64);
+
+impl FileSystemId {
+    /// Generate a new unique FileSystemId.
+    pub fn new() -> Self {
+        static NEXT_ID: AtomicU64 = AtomicU64::new(1);
+        Self(NEXT_ID.fetch_add(1, Ordering::Relaxed))
+    }
+
+    /// Get the raw u64 value.
+    #[inline]
+    pub const fn get(self) -> u64 {
+        self.0
+    }
 }
 
 /// Reference to a filesystem instance
@@ -226,6 +245,12 @@ impl fmt::Debug for dyn VfsNode {
 /// across different interfaces. It provides a clean contract between VFS and
 /// filesystem drivers.
 pub trait FileSystemOperations: Send + Sync {
+    /// Get the unique filesystem identifier.
+    ///
+    /// This ID is stable for the lifetime of the filesystem mount and is used
+    /// in combination with file identifiers to create globally unique cache keys.
+    fn fs_id(&self) -> FileSystemId;
+
     /// Look up a child node by name within a parent directory
     ///
     /// This is the heart of the new driver API. It takes a parent directory's
