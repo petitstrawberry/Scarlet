@@ -2132,6 +2132,13 @@ impl Compositor {
                     "[Compositor] RequestMove state: left_down={} last_left_down={:?} cursor=({}, {})",
                     self.left_button_down, self.last_left_down_cursor, self.cursor.x, self.cursor.y
                 );
+                if !self.left_button_down {
+                    println!(
+                        "[Compositor] Ignoring move request for window #{} (left button not down)",
+                        window_id
+                    );
+                    return Ok(false);
+                }
 
                 let (start_window_x, start_window_y) =
                     match self.window_manager.get_window(window_id) {
