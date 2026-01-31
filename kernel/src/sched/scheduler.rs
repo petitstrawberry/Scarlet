@@ -54,6 +54,16 @@ use crate::{
 
 use crate::task::Task;
 
+/// Number of priority levels (0-31)
+/// 0 = Highest priority, 31 = Lowest priority
+const NUM_PRIORITY_LEVELS: usize = 32;
+
+/// Default priority for normal tasks (middle level)
+const DEFAULT_PRIORITY: u32 = 16;
+
+/// Lowest priority for idle task
+const IDLE_PRIORITY: u32 = 31;
+
 /// Task pool that stores tasks in fixed positions
 /// With each Task being 824 bytes, 1024 tasks consume approximately 824 KiB of memory,
 /// which is very reasonable for general-purpose systems.
@@ -358,8 +368,9 @@ pub fn get_scheduler() -> &'static Scheduler {
 }
 
 pub struct Scheduler {
-    /// Queue for ready-to-run task IDs (per-CPU, lock-protected)
-    ready_queue: [RwLock<VecDeque<usize>>; NUM_OF_CPUS],
+    /// Priority queues for ready-to-run task IDs (per-CPU, per-priority)
+    /// ready_queue[cpu_id][priority] = VecDeque of task IDs at that priority level
+    ready_queue: [RwLock<[VecDeque<usize>; NUM_PRIORITY_LEVELS]>; NUM_OF_CPUS],
     /// Queue for blocked task IDs (waiting for I/O, etc.)
     blocked_queue: [RwLock<VecDeque<usize>>; NUM_OF_CPUS],
     /// Queue for zombie task IDs (finished but not yet cleaned up)
@@ -371,7 +382,7 @@ impl Scheduler {
     pub fn new() -> Self {
         // Initialize arrays with const blocks
         let mut scheduler = Scheduler {
-            ready_queue: [const { RwLock::new(VecDeque::new()) }; NUM_OF_CPUS],
+            ready_queue: [const { RwLock::new(const { VecDeque::new() }) }; NUM_OF_CPUS],
             blocked_queue: [const { RwLock::new(VecDeque::new()) }; NUM_OF_CPUS],
             zombie_queue: [const { RwLock::new(VecDeque::new()) }; NUM_OF_CPUS],
             current_task_id: [const { RwLock::new(None) }; NUM_OF_CPUS],
@@ -379,7 +390,7 @@ impl Scheduler {
 
         // Initialize each queue element explicitly
         for i in 0..NUM_OF_CPUS {
-            scheduler.ready_queue[i] = RwLock::new(VecDeque::new());
+            scheduler.ready_queue[i] = RwLock::new(const { VecDeque::new() });
             scheduler.blocked_queue[i] = RwLock::new(VecDeque::new());
             scheduler.zombie_queue[i] = RwLock::new(VecDeque::new());
             scheduler.current_task_id[i] = RwLock::new(None);
@@ -394,8 +405,13 @@ impl Scheduler {
             Ok(id) => id,
             Err(e) => panic!("Failed to add task: {}", e),
         };
-        // Add task state info to ready queue
-        self.ready_queue[cpu_id].write().push_back(task_id);
+
+        // Get task to read its priority
+        let task = self.get_task_by_id(task_id).expect("Task must exist");
+        let priority = (task.priority as usize).min(NUM_PRIORITY_LEVELS - 1);
+
+        // Add task state info to ready queue at its priority level
+        self.ready_queue[cpu_id].write()[priority].push_back(task_id);
         task_id
     }
 
@@ -403,6 +419,13 @@ impl Scheduler {
     ///
     /// This method performs the core scheduling algorithm and task state management
     /// without performing actual context switches or hardware setup.
+    ///
+    /// # Scheduling Algorithm
+    ///
+    /// 1. **Priority-based selection**: Search from highest priority (0) to lowest (31)
+    /// 2. **Round-robin within priority**: Rotate tasks at the same priority level
+    /// 3. **Work stealing**: If no local tasks, try to steal from other CPUs
+    /// 4. **Idle fallback**: If absolutely no tasks, run idle or continue current task
     ///
     /// # Arguments
     /// * `cpu` - The CPU architecture state (for CPU ID)
@@ -419,7 +442,9 @@ impl Scheduler {
         // This ensures it's available as a fallback if no other tasks are ready
         if let Some(current_id) = old_current_task_id {
             // Check if current task is still in ready_queue (it shouldn't be if it's running)
-            let already_in_queue = self.ready_queue[cpu_id].read().iter().any(|&id| id == current_id);
+            let ready_queues = self.ready_queue[cpu_id].read();
+            let already_in_queue = ready_queues.iter().any(|q| q.iter().any(|&id| id == current_id));
+            drop(ready_queues);
 
             if !already_in_queue {
                 // Current task is not in ready_queue (it's running), add it back
@@ -427,7 +452,8 @@ impl Scheduler {
                 if let Some(task) = self.get_task_by_id(current_id) {
                     match task.state {
                         TaskState::Ready | TaskState::Running => {
-                            self.ready_queue[cpu_id].write().push_back(current_id);
+                            let priority = (task.priority as usize).min(NUM_PRIORITY_LEVELS - 1);
+                            self.ready_queue[cpu_id].write()[priority].push_back(current_id);
                         }
                         _ => {
                             // Task is in Zombie, Terminated, Blocked, or NotInitialized state
@@ -438,8 +464,8 @@ impl Scheduler {
             }
         }
 
-        // Try to get a task from local queue first
-        let mut task_id = self.ready_queue[cpu_id].write().pop_front();
+        // Try to get a task from local queue using priority scheduling
+        let mut task_id = self.pick_highest_priority_task(cpu_id);
 
         // If no local tasks, try to steal from other CPUs (work stealing)
         if task_id.is_none() {
@@ -470,7 +496,7 @@ impl Scheduler {
                                 wake_parent_waiters(parent_id);
                             }
                             // Try to get next task
-                            task_id = self.ready_queue[cpu_id].write().pop_front();
+                            task_id = self.pick_highest_priority_task(cpu_id);
                             if task_id.is_none() {
                                 task_id = self.steal_task(cpu_id);
                             }
@@ -479,7 +505,7 @@ impl Scheduler {
                         TaskState::Terminated => {
                             get_task_pool().remove_task(task_id);
                             // Try to get next task
-                            task_id = self.ready_queue[cpu_id].write().pop_front();
+                            task_id = self.pick_highest_priority_task(cpu_id);
                             if task_id.is_none() {
                                 task_id = self.steal_task(cpu_id);
                             }
@@ -497,7 +523,7 @@ impl Scheduler {
                             self.blocked_queue[cpu_id].write().push_back(task_id);
 
                             // Try to get next task
-                            task_id = self.ready_queue[cpu_id].write().pop_front();
+                            task_id = self.pick_highest_priority_task(cpu_id);
                             if task_id.is_none() {
                                 task_id = self.steal_task(cpu_id);
                             }
@@ -511,7 +537,8 @@ impl Scheduler {
 
                             // Update current task and add back to ready queue
                             *self.current_task_id[cpu_id].write() = Some(next_task_id);
-                            self.ready_queue[cpu_id].write().push_back(task_id);
+                            let priority = (t.priority as usize).min(NUM_PRIORITY_LEVELS - 1);
+                            self.ready_queue[cpu_id].write()[priority].push_back(task_id);
 
                             return (old_current_task_id, Some(next_task_id));
                         }
@@ -523,6 +550,32 @@ impl Scheduler {
                 }
             }
         }
+    }
+
+    /// Pick the highest priority task from this CPU's ready queues
+    ///
+    /// Searches from priority 0 (highest) to 31 (lowest) and returns
+    /// the first task found. Implements round-robin by rotating the queue.
+    ///
+    /// # Arguments
+    /// * `cpu_id` - The CPU ID to pick from
+    ///
+    /// # Returns
+    /// * Some(task_id) if a task was found, None otherwise
+    fn pick_highest_priority_task(&self, cpu_id: usize) -> Option<usize> {
+        let ready_queues = self.ready_queue[cpu_id].read();
+
+        // Search from highest priority (0) to lowest (31)
+        for priority in 0..NUM_PRIORITY_LEVELS {
+            if !ready_queues[priority].is_empty() {
+                // Found a task at this priority level
+                // Need to upgrade to write lock to pop
+                drop(ready_queues);
+                return self.ready_queue[cpu_id].write()[priority].pop_front();
+            }
+        }
+
+        None
     }
 
     /// Called every timer tick. Decrements the current task's time_slice.
@@ -650,8 +703,8 @@ impl Scheduler {
     /// Attempt to steal a task from another CPU's ready queue
     ///
     /// This implements work stealing for load balancing across CPUs.
-    /// Searches other CPUs' queues in round-robin order and takes half
-    /// of their tasks if found.
+    /// Searches other CPUs' queues in round-robin order and takes tasks
+    /// starting from the highest priority that has tasks available.
     ///
     /// # Arguments
     /// * `cpu_id` - The CPU ID that is trying to steal work
@@ -662,32 +715,24 @@ impl Scheduler {
         for i in 1..NUM_OF_CPUS {
             let target_cpu = (cpu_id + i) % NUM_OF_CPUS;
 
-            // Try to steal from target CPU
-            let mut target_queue = self.ready_queue[target_cpu].write();
+            // Try to steal from target CPU's priority queues
+            let target_queues = self.ready_queue[target_cpu].read();
 
-            if target_queue.len() > 1 {
-                // Steal half the tasks (rounded down) to balance load
-                let steal_count = target_queue.len() / 2;
+            // Search from highest priority (0) to lowest (31)
+            for priority in 0..NUM_PRIORITY_LEVELS {
+                if !target_queues[priority].is_empty() {
+                    // Found a task at this priority level
+                    // Need to upgrade to write lock to pop
+                    drop(target_queues);
+                    let stolen_task = self.ready_queue[target_cpu].write()[priority].pop_front();
 
-                // Take the first task
-                let stolen_task = target_queue.pop_front();
-
-                // Move additional tasks to our queue
-                if steal_count > 1 {
-                    drop(target_queue); // Release lock before acquiring our queue lock
-                    let mut our_queue = self.ready_queue[cpu_id].write();
-
-                    // Re-acquire target queue lock to transfer remaining tasks
-                    let mut target_queue = self.ready_queue[target_cpu].write();
-
-                    for _ in 1..steal_count {
-                        if let Some(task) = target_queue.pop_front() {
-                            our_queue.push_back(task);
-                        }
+                    // Only steal if we got a task
+                    if stolen_task.is_some() {
+                        return stolen_task;
                     }
+                    // If race condition occurred (task taken by another CPU), continue searching
+                    break;
                 }
-
-                return stolen_task;
             }
         }
 
@@ -732,8 +777,9 @@ impl Scheduler {
                     task.state = TaskState::Running;
                     // Memory barrier to ensure state change is visible
                     core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
-                    // Move to ready queue
-                    self.ready_queue[cpu_id].write().push_back(task_id);
+                    // Move to ready queue at its priority level
+                    let priority = (task.priority as usize).min(NUM_PRIORITY_LEVELS - 1);
+                    self.ready_queue[cpu_id].write()[priority].push_back(task_id);
                     return true;
                 }
             }
@@ -754,7 +800,11 @@ impl Scheduler {
                 let mut target_cpu = 0;
 
                 for cpu_id in 0..NUM_OF_CPUS {
-                    let len = self.ready_queue[cpu_id].read().len();
+                    // Count total tasks across all priority levels
+                    let ready_queues = self.ready_queue[cpu_id].read();
+                    let len: usize = ready_queues.iter().map(|q| q.len()).sum();
+                    drop(ready_queues);
+
                     if len < min_len {
                         min_len = len;
                         target_cpu = cpu_id;
@@ -762,9 +812,10 @@ impl Scheduler {
                 }
 
                 // Only add if not already in ready_queue to avoid duplicates
-                let mut ready_queue = self.ready_queue[target_cpu].write();
-                if !ready_queue.contains(&task_id) {
-                    ready_queue.push_back(task_id);
+                let priority = (task.priority as usize).min(NUM_PRIORITY_LEVELS - 1);
+                let mut ready_queues = self.ready_queue[target_cpu].write();
+                if !ready_queues[priority].contains(&task_id) {
+                    ready_queues[priority].push_back(task_id);
                 }
                 return true;
             }
@@ -806,11 +857,13 @@ impl Scheduler {
     pub fn get_all_task_ids(&self) -> alloc::vec::Vec<usize> {
         let mut ids = alloc::vec::Vec::new();
 
-        // Ready tasks
+        // Ready tasks (across all priority levels)
         for q in &self.ready_queue {
-            let queue = q.read();
-            for t in queue.iter() {
-                ids.push(*t);
+            let queues = q.read();
+            for priority_queue in queues.iter() {
+                for t in priority_queue.iter() {
+                    ids.push(*t);
+                }
             }
         }
 
@@ -953,6 +1006,31 @@ impl Scheduler {
     }
 }
 
+/// Create idle tasks for all CPUs
+///
+/// Creates one idle task per CPU at the lowest priority (31).
+/// Each idle task simply spins in a loop, ensuring CPUs always
+/// have something to run when no other tasks are available.
+pub fn create_idle_tasks() {
+    let scheduler = get_scheduler();
+
+    for cpu_id in 0..NUM_OF_CPUS {
+        let mut idle_task = new_kernel_task(
+            format!("idle_cpu{}", cpu_id),
+            IDLE_PRIORITY,
+            || {
+                // Idle task - just spinloop
+                loop {
+                    crate::arch::instruction::idle();
+                }
+            },
+        );
+        idle_task.init();
+        scheduler.add_task(idle_task, cpu_id);
+        crate::early_println!("[SCHED] Created idle task for CPU {}", cpu_id);
+    }
+}
+
 pub fn make_test_tasks() {
     println!("Making test tasks...");
     let sched = get_scheduler();
@@ -1035,6 +1113,7 @@ mod tests {
         let scheduler = Scheduler::new();
         let task = Task::new("TestTask".to_string(), 1, TaskType::Kernel);
         scheduler.add_task(task, 0);
-        assert_eq!(scheduler.ready_queue[0].read().len(), 1);
+        // Task with priority 1 should be in ready_queue[0][1]
+        assert_eq!(scheduler.ready_queue[0].read()[1].len(), 1);
     }
 }

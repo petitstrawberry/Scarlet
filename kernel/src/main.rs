@@ -645,6 +645,11 @@ pub extern "C" fn start_kernel(boot_info: &BootInfo) -> ! {
     let scheduler = get_scheduler();
     fence(Ordering::SeqCst); // Ensure scheduler is initialized before proceeding
 
+    /* Create idle tasks for all CPUs */
+    early_println!("[boot] Creating idle tasks...");
+    crate::sched::scheduler::create_idle_tasks();
+    fence(Ordering::SeqCst); // Ensure idle tasks are created before proceeding
+
     /* Initialize global VFS */
     early_println!("[boot] Initializing global VFS...");
     let manager = init_global_vfs_manager();
