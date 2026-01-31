@@ -30,10 +30,16 @@ use alloc::{
 use core::sync::atomic::{AtomicUsize, Ordering};
 use spin::{Once, RwLock};
 
+pub mod arp;
+pub mod ethernet;
+pub mod icmp;
+pub mod ipv4;
 pub mod local;
 pub mod protocol_stack;
 pub mod socket;
 pub mod syscall;
+pub mod tcp;
+pub mod udp;
 
 // Re-export commonly used types
 pub use protocol_stack::{
