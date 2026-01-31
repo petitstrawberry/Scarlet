@@ -122,6 +122,14 @@ struct WindowShmInfo {
     external_buffer_attached: bool,
 }
 
+struct PendingDamage {
+    surface_id: u32,
+    x: u32,
+    y: u32,
+    width: u32,
+    height: u32,
+}
+
 /// Wayland Bridge Server
 struct WaylandBridge {
     /// Server socket listening for Wayland clients
@@ -171,6 +179,8 @@ struct WaylandBridge {
     sws_rx_buffer: Vec<u8>,
     /// Pending SWS responses that are not input events
     sws_pending: Vec<protocol_sws::ServerMessage>,
+    /// Coalesced SWS updates waiting to be sent per window
+    pending_damage: BTreeMap<u32, PendingDamage>,
     /// Pointer position (surface-local, in pixels)
     pointer_x: i32,
     pointer_y: i32,
@@ -231,6 +241,7 @@ impl WaylandBridge {
             focused_pointer: None,
             sws_rx_buffer: Vec::new(),
             sws_pending: Vec::new(),
+            pending_damage: BTreeMap::new(),
             pointer_x: 0,
             pointer_y: 0,
             pointer_grab_active: false,
@@ -858,14 +869,93 @@ impl WaylandBridge {
         Ok(())
     }
 
+    fn queue_pending_damage(
+        &mut self,
+        window_id: u32,
+        surface_id: u32,
+        x: u32,
+        y: u32,
+        width: u32,
+        height: u32,
+    ) {
+        let entry = self
+            .pending_damage
+            .entry(window_id)
+            .or_insert(PendingDamage {
+                surface_id,
+                x,
+                y,
+                width,
+                height,
+            });
+
+        if entry.surface_id != surface_id {
+            entry.surface_id = surface_id;
+            entry.x = x;
+            entry.y = y;
+            entry.width = width;
+            entry.height = height;
+            return;
+        }
+
+        let right_existing = entry.x.saturating_add(entry.width);
+        let right_new = x.saturating_add(width);
+        let bottom_existing = entry.y.saturating_add(entry.height);
+        let bottom_new = y.saturating_add(height);
+
+        let new_x = entry.x.min(x);
+        let new_y = entry.y.min(y);
+        let new_right = right_existing.max(right_new);
+        let new_bottom = bottom_existing.max(bottom_new);
+
+        entry.x = new_x;
+        entry.y = new_y;
+        entry.width = new_right.saturating_sub(new_x);
+        entry.height = new_bottom.saturating_sub(new_y);
+    }
+
+    fn flush_pending_updates(&mut self) -> Result<bool, &'static str> {
+        if self.pending_damage.is_empty() {
+            return Ok(false);
+        }
+
+        let window_ids: Vec<u32> = self.pending_damage.keys().copied().collect();
+        let mut sent_any = false;
+
+        for window_id in window_ids {
+            let Some(pending) = self.pending_damage.remove(&window_id) else {
+                continue;
+            };
+            if is_debug_enabled() {
+                bridge_log!(
+                    "[Bridge] Updating SWS window {} with damage [{},{} {}x{}]",
+                    window_id,
+                    pending.x,
+                    pending.y,
+                    pending.width,
+                    pending.height
+                );
+            }
+            self.send_extension_update_buffer(
+                pending.surface_id,
+                window_id,
+                pending.x,
+                pending.y,
+                pending.width,
+                pending.height,
+            )?;
+            sent_any = true;
+        }
+
+        Ok(sent_any)
+    }
+
     /// Update SWS window buffer when surface commits
     fn update_sws_window(&mut self, wl_surface_id: u32) -> Result<(), &'static str> {
-        let window_id = self
+        let window_id = *self
             .surface_to_window
             .get(&wl_surface_id)
             .ok_or("Surface not mapped to window")?;
-
-        let sws_conn = self.sws_connection.as_mut().ok_or("Not connected to SWS")?;
 
         // Get surface and buffer info
         let surface = self
@@ -873,90 +963,46 @@ impl WaylandBridge {
             .get_surface(wl_surface_id)
             .ok_or("Surface not found")?;
 
-        let buffer_id = surface.buffer_id.ok_or("No buffer attached")?;
-        let buffer = self
-            .shm_manager
-            .get_buffer(buffer_id)
-            .ok_or("Buffer not found")?;
-        let pool = self
-            .shm_manager
-            .get_pool(buffer.pool_id)
-            .ok_or("Pool not found")?;
-        let client_shm_handle = pool.handle.as_ref().ok_or("Pool missing handle")?;
+        if surface.buffer_id.is_none() {
+            return Err("No buffer attached");
+        }
 
         // Get SWS window SHM info
-        let window_shm_info = self
-            .window_shm
-            .get(&window_id)
-            .ok_or("Window SHM not found")?;
+        if self.window_shm.get(&window_id).is_none() {
+            return Err("Window SHM not found");
+        }
 
         // Use full surface damage for simplicity (or first damage rect if available)
         let (x, y, width, height) = if let Some(&(dx, dy, dw, dh)) = surface.damage.first() {
-            (dx, dy, dw as u32, dh as u32)
+            (
+                dx.max(0) as u32,
+                dy.max(0) as u32,
+                dw.max(0) as u32,
+                dh.max(0) as u32,
+            )
         } else {
             (0, 0, surface.width, surface.height)
         };
 
-        if is_debug_enabled() {
-            bridge_log!(
-                "[Bridge] Updating SWS window {} with damage [{},{} {}x{}]",
-                window_id,
-                x,
-                y,
-                width,
-                height
-            );
-        }
+        self.queue_pending_damage(window_id, wl_surface_id, x, y, width, height);
 
-        if !window_shm_info.external_buffer_attached {
-            // Fallback: Use pixel copy for buffers that weren't zero-copied
-            // Map client's SHM pool to read pixel data
-            if let Ok(client_mapper) = client_shm_handle.as_memory_mapping() {
-                let pool_size = pool.size.max(
-                    (buffer.offset.abs() as usize)
-                        + (buffer.stride.abs() as usize)
-                            .saturating_mul(buffer.height.max(0) as usize),
-                );
-                if let Ok(client_addr) =
-                    client_mapper.mmap(0, pool_size, permissions::READ, flags::SHARED, 0)
-                {
-                    // Copy pixel data from client SHM to SWS window SHM
-                    let src_width = buffer.width.max(0) as usize;
-                    let src_height = buffer.height.max(0) as usize;
-                    let src_stride = buffer.stride.max(0) as usize;
-                    let src_offset = buffer.offset.max(0) as usize;
+        // Zero-copy path: SWS uses the client SHM mapping provided via EXTENSION_ATTACH_BUFFER.
+        // TODO: If we need a fallback copy path, reintroduce it behind a flag.
 
-                    let dst_stride = (surface.width.max(0) as u32 * 4) as usize;
+        Ok(())
+    }
 
-                    // Copy row by row
-                    unsafe {
-                        for row in 0..src_height.min(height as usize) {
-                            let src_row_offset = src_offset + row * src_stride;
-                            let dst_row_offset = (y as usize + row) * dst_stride + (x as usize * 4);
+    fn send_extension_update_buffer(
+        &mut self,
+        wl_surface_id: u32,
+        window_id: u32,
+        x: u32,
+        y: u32,
+        width: u32,
+        height: u32,
+    ) -> Result<(), &'static str> {
+        let sws_conn = self.sws_connection.as_mut().ok_or("Not connected to SWS")?;
 
-                            let src_start = client_addr + src_row_offset;
-                            let dst_start = window_shm_info.mapped_addr + dst_row_offset;
-
-                            let bytes_to_copy = (src_width * 4)
-                                .min(window_shm_info.size.saturating_sub(dst_row_offset));
-
-                            // Copy pixel data
-                            core::ptr::copy_nonoverlapping(
-                                src_start as *const u8,
-                                dst_start as *mut u8,
-                                bytes_to_copy.min(src_stride),
-                            );
-                        }
-                    }
-                } else {
-                    bridge_log!("[Bridge] Failed to map client SHM");
-                }
-            } else {
-                bridge_log!("[Bridge] Client SHM handle doesn't support memory mapping");
-            }
-        }
-
-        // Send EXTENSION_UPDATE_BUFFER message
         let mut payload = Vec::new();
         payload.extend_from_slice(&wl_surface_id.to_le_bytes());
         payload.extend_from_slice(&window_id.to_le_bytes());
@@ -1288,7 +1334,9 @@ impl WaylandBridge {
                 }
             }
 
-            if !got_data && !had_input_events {
+            let sent_updates = self.flush_pending_updates()?;
+
+            if !got_data && !had_input_events && !sent_updates {
                 thread::sleep(Duration::from_millis(idle_backoff_ms));
                 idle_backoff_ms = (idle_backoff_ms * 2).min(8);
             } else {
@@ -1571,7 +1619,12 @@ impl WaylandBridge {
                 self.surface_manager.destroy_surface(surface_id);
                 self.objects.remove(&surface_id);
                 // Remove from surface_to_window mapping
-                self.surface_to_window.remove(&surface_id);
+                if let Some(window_id) = self.surface_to_window.remove(&surface_id) {
+                    self.pending_damage.remove(&window_id);
+                    if self.pointer_grab_active {
+                        self.pointer_grab_active = false;
+                    }
+                }
                 Ok(Vec::new())
             }
             protocol::surface_request::ATTACH => {
@@ -1687,10 +1740,13 @@ impl WaylandBridge {
                     buffer_present = surface.buffer_id.is_some();
                     surface_size = (surface.width.max(1), surface.height.max(1));
                     surface.commit();
-                    if let Some(buf_id) = surface.buffer_id {
-                        if self.objects.get(&buf_id).is_some() {
+                    let current_buffer = surface.buffer_id;
+                    if let Some(prev_buffer) = surface.swap_committed_buffer(current_buffer) {
+                        if current_buffer != Some(prev_buffer)
+                            && self.objects.get(&prev_buffer).is_some()
+                        {
                             release_msg =
-                                Some(WaylandMessage::new(buf_id, shm::buffer_event::RELEASE));
+                                Some(WaylandMessage::new(prev_buffer, shm::buffer_event::RELEASE));
                         }
                     }
                 }
@@ -2161,48 +2217,7 @@ impl WaylandBridge {
             }
             xdg_shell::xdg_toplevel_request::MOVE => {
                 bridge_log!("[Bridge] xdg_toplevel.move");
-                let seat_id = Self::parse_u32(payload, 0).unwrap_or(0);
-                let serial = Self::parse_u32(payload, 4).unwrap_or(0);
-
-                if let Some((_, wl_surface_id)) =
-                    self.xdg_shell_manager.get_toplevel_mut(xdg_toplevel_id)
-                {
-                    if let Some(window_id) = self.surface_to_window.get(&wl_surface_id).copied() {
-                        self.pointer_grab_active = true;
-                        let payload = protocol_sws::payload_request_move_window(window_id);
-                        let header = protocol_sws::MessageHeader {
-                            msg_type: protocol_sws::client_msg::REQUEST_MOVE_WINDOW,
-                            payload_size: payload.len() as u32,
-                        };
-
-                        let mut msg_bytes = Vec::new();
-                        msg_bytes.extend_from_slice(&header.to_le_bytes());
-                        msg_bytes.extend_from_slice(&payload);
-
-                        let sws_conn =
-                            self.sws_connection.as_mut().ok_or("Not connected to SWS")?;
-                        sws_conn
-                            .write(&msg_bytes)
-                            .map_err(|_| "Failed to send REQUEST_MOVE_WINDOW")?;
-
-                        bridge_log!(
-                            "[Bridge] Requested move for window {} (seat {}, serial {})",
-                            window_id,
-                            seat_id,
-                            serial
-                        );
-                    } else {
-                        bridge_log!(
-                            "[Bridge] xdg_toplevel.move: no window for surface {}",
-                            wl_surface_id
-                        );
-                    }
-                } else {
-                    bridge_log!(
-                        "[Bridge] xdg_toplevel.move: unknown toplevel {}",
-                        xdg_toplevel_id
-                    );
-                }
+                // TODO: Window move temporarily disabled until behavior is stable.
                 Ok(Vec::new())
             }
             xdg_shell::xdg_toplevel_request::RESIZE => {

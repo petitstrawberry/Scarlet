@@ -4,7 +4,7 @@
 //! Shared memory allows multiple processes to access the same physical memory region,
 //! providing efficient data sharing without copying.
 
-use alloc::{format, string::String, sync::Arc};
+use alloc::{format, string::String, sync::Arc, vec::Vec};
 use spin::RwLock;
 
 use crate::mem::page::{allocate_raw_pages, free_raw_pages};
@@ -12,6 +12,8 @@ use crate::object::capability::memory_mapping::{
     AccessKind, MemoryMappingOps, ResolveFaultError, ResolveFaultResult,
 };
 use crate::vm::vmem::VirtualMemoryMap;
+
+const LOG_SHARED_MEMORY_RESIZE: bool = false;
 
 /// Shared memory operations
 ///
@@ -44,6 +46,8 @@ struct SharedMemoryState {
     valid: bool,
     /// Number of active mappings
     mapping_count: usize,
+    /// Old allocations kept alive while mappings still exist
+    stale_pages: Vec<(usize, usize)>,
     /// Whether this object owns the physical memory (should free on drop)
     owns_memory: bool,
 }
@@ -57,6 +61,7 @@ impl SharedMemoryState {
             permissions,
             valid: true,
             mapping_count: 0,
+            stale_pages: Vec::new(),
             owns_memory,
         }
     }
@@ -194,29 +199,35 @@ impl SharedMemoryObject for SharedMemory {
         // 古いメモリを解放
         let old_pages = state.capacity / PAGE_SIZE;
         if old_pages > 0 {
-            let old_ptr = state.paddr as *mut crate::mem::page::Page;
-            free_raw_pages(old_ptr, old_pages);
+            if state.mapping_count > 0 {
+                state.stale_pages.push((old_paddr, old_pages));
+            } else {
+                let old_ptr = old_paddr as *mut crate::mem::page::Page;
+                free_raw_pages(old_ptr, old_pages);
+            }
         }
 
         state.paddr = pages as usize;
         state.size = aligned_size;
         state.capacity = aligned_size;
 
-        crate::println!(
-            "[SharedMemory::resize] reallocated: old_paddr={:#x} new_paddr={:#x} mapping_count={}",
-            old_paddr,
-            state.paddr,
-            state.mapping_count
-        );
+        // if LOG_SHARED_MEMORY_RESIZE {
+        //     crate::println!(
+        //         "[SharedMemory::resize] reallocated: old_paddr={:#x} new_paddr={:#x} mapping_count={}",
+        //         old_paddr,
+        //         state.paddr,
+        //         state.mapping_count
+        //     );
+        // }
 
         // NOTE: マッピングがある場合、古いpmap.pmarea.startは無効になる
         // resolve_faultで動的にpaddrを取得するように修正済み
-        if state.mapping_count > 0 {
-            crate::println!(
-                "[SharedMemory::resize] WARNING: {} active mappings exist, their pmarea is now stale!",
-                state.mapping_count
-            );
-        }
+        // if LOG_SHARED_MEMORY_RESIZE && state.mapping_count > 0 {
+        //     crate::println!(
+        //         "[SharedMemory::resize] WARNING: {} active mappings exist, their pmarea is now stale!",
+        //         state.mapping_count
+        //     );
+        // }
 
         Ok(())
     }
@@ -271,6 +282,16 @@ impl MemoryMappingOps for SharedMemory {
         let mut state = self.state.write();
         if state.mapping_count > 0 {
             state.mapping_count -= 1;
+        }
+        if state.mapping_count == 0 && !state.stale_pages.is_empty() {
+            let stale = core::mem::take(&mut state.stale_pages);
+            for (paddr, pages) in stale {
+                if pages == 0 {
+                    continue;
+                }
+                let ptr = paddr as *mut crate::mem::page::Page;
+                free_raw_pages(ptr, pages);
+            }
         }
     }
 
@@ -340,6 +361,13 @@ impl Drop for SharedMemory {
             let num_pages = (state.capacity + PAGE_SIZE - 1) / PAGE_SIZE;
             let pages_ptr = state.paddr as *mut crate::mem::page::Page;
             free_raw_pages(pages_ptr, num_pages);
+            for (paddr, pages) in &state.stale_pages {
+                if *pages == 0 {
+                    continue;
+                }
+                let pages_ptr = *paddr as *mut crate::mem::page::Page;
+                free_raw_pages(pages_ptr, *pages);
+            }
         }
     }
 }

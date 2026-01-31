@@ -17,6 +17,8 @@ pub struct Surface {
     pub buffer_id: Option<u32>,
     /// Pending damage regions (x, y, width, height)
     pub damage: Vec<(i32, i32, i32, i32)>,
+    /// Last buffer ID we committed (used to delay wl_buffer.release for zero-copy)
+    pub last_committed_buffer: Option<u32>,
     /// Surface role (e.g., "xdg_toplevel")
     pub role: Option<SurfaceRole>,
     /// Width and height (set when buffer is attached)
@@ -53,6 +55,7 @@ impl Surface {
             sws_window_id: None,
             buffer_id: None,
             damage: Vec::new(),
+            last_committed_buffer: None,
             role: None,
             width: 0,
             height: 0,
@@ -88,6 +91,12 @@ impl Surface {
     pub fn commit(&mut self) {
         // Clear damage after commit
         self.damage.clear();
+    }
+
+    pub fn swap_committed_buffer(&mut self, new_buffer: Option<u32>) -> Option<u32> {
+        let old = self.last_committed_buffer;
+        self.last_committed_buffer = new_buffer;
+        old
     }
 
     /// Set the surface role

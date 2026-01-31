@@ -1,6 +1,8 @@
 //! IPC Server module - handles client connections and messages
 
+use core::sync::atomic::{AtomicU8, Ordering};
 use std::collections::BTreeMap;
+use std::env;
 use std::handle::capability::memory_mapping::flags as mmap_flags;
 use std::ipc::{SharedMemory, permissions};
 use std::println;
@@ -11,6 +13,43 @@ use std::thread::{self, sleep, yield_now};
 use std::vec::Vec;
 use sws_protocol as protocol;
 use sws_protocol::ClientMessageRef;
+
+fn is_sws_debug_enabled() -> bool {
+    static LOG_CACHE: AtomicU8 = AtomicU8::new(u8::MAX);
+    let cached = LOG_CACHE.load(Ordering::Relaxed);
+    if cached != u8::MAX {
+        return cached != 0;
+    }
+    let enabled = match env::var("SWS_LOG") {
+        Some(val) => matches!(val.as_str(), "debug" | "DEBUG" | "3"),
+        None => false,
+    };
+    LOG_CACHE.store(enabled as u8, Ordering::Relaxed);
+    enabled
+}
+
+fn merge_damage(
+    ax: i32,
+    ay: i32,
+    aw: u32,
+    ah: u32,
+    bx: i32,
+    by: i32,
+    bw: u32,
+    bh: u32,
+) -> (i32, i32, u32, u32) {
+    let x0 = i64::from(ax.min(bx));
+    let y0 = i64::from(ay.min(by));
+    let ax1 = (ax as i64).saturating_add(aw as i64);
+    let ay1 = (ay as i64).saturating_add(ah as i64);
+    let bx1 = (bx as i64).saturating_add(bw as i64);
+    let by1 = (by as i64).saturating_add(bh as i64);
+    let x1 = ax1.max(bx1);
+    let y1 = ay1.max(by1);
+    let w = (x1 - x0).max(0) as u32;
+    let h = (y1 - y0).max(0) as u32;
+    (x0 as i32, y0 as i32, w, h)
+}
 
 /// Application session information
 #[derive(Debug, Clone)]
@@ -252,6 +291,54 @@ static PENDING_CLIENT_RESPONSES: Mutex<BTreeMap<usize, Vec<PendingServerFrame>>>
 /// Add an event to the global queue
 pub fn push_ipc_event(event: IpcEvent) {
     let mut queue = EVENT_QUEUE.lock();
+    if let IpcEvent::ExtensionUpdateBuffer {
+        external_client_id,
+        window_id,
+        damage_x,
+        damage_y,
+        damage_width,
+        damage_height,
+    } = event
+    {
+        for existing in queue.iter_mut().rev() {
+            if let IpcEvent::ExtensionUpdateBuffer {
+                window_id: existing_window,
+                damage_x: existing_x,
+                damage_y: existing_y,
+                damage_width: existing_w,
+                damage_height: existing_h,
+                ..
+            } = existing
+            {
+                if *existing_window == window_id {
+                    let (nx, ny, nw, nh) = merge_damage(
+                        *existing_x,
+                        *existing_y,
+                        *existing_w,
+                        *existing_h,
+                        damage_x,
+                        damage_y,
+                        damage_width,
+                        damage_height,
+                    );
+                    *existing_x = nx;
+                    *existing_y = ny;
+                    *existing_w = nw;
+                    *existing_h = nh;
+                    return;
+                }
+            }
+        }
+        queue.push(IpcEvent::ExtensionUpdateBuffer {
+            external_client_id,
+            window_id,
+            damage_x,
+            damage_y,
+            damage_width,
+            damage_height,
+        });
+        return;
+    }
     queue.push(event);
 }
 
@@ -665,6 +752,7 @@ fn client_thread_main(client_id: usize, mut socket: Socket) {
     let mut loop_count: u64 = 0;
 
     let mut frame_reader = FrameReader::new();
+    let mut idle_backoff_ms = 1u64;
 
     println!("[ClientThread {}] Entering main loop", client_id);
 
@@ -794,6 +882,7 @@ fn client_thread_main(client_id: usize, mut socket: Socket) {
         // If we sent events, loop back immediately to check for more
         // This ensures rapid delivery during input bursts
         if has_events {
+            idle_backoff_ms = 1;
             continue;
         }
 
@@ -810,6 +899,7 @@ fn client_thread_main(client_id: usize, mut socket: Socket) {
 
         let (msg_type, payload) = match frame_reader.poll(&mut socket) {
             Ok(Some(v)) => {
+                idle_backoff_ms = 1;
                 // println!(
                 //     "[ClientThread {}] Loop #{}: read_frame SUCCESS (msg_type={})",
                 //     client_id, loop_count, v.0
@@ -818,8 +908,9 @@ fn client_thread_main(client_id: usize, mut socket: Socket) {
             }
             Ok(None) => {
                 // No complete frame available yet; keep looping so we can deliver input events.
-                // Yield to avoid a tight busy loop when idle.
-                yield_now();
+                // Back off to avoid a tight busy loop when idle.
+                sleep(core::time::Duration::from_millis(idle_backoff_ms));
+                idle_backoff_ms = (idle_backoff_ms * 2).min(8);
                 continue;
             }
             Err(FrameIoError::Disconnected) => {
@@ -1365,10 +1456,12 @@ fn client_thread_main(client_id: usize, mut socket: Socket) {
                 width,
                 height,
             }) => {
-                println!(
-                    "[ClientThread {}] ExtensionUpdateBuffer: external_client_id={} window_id={} damage=[{},{} {}x{}]",
-                    client_id, external_client_id, window_id, x, y, width, height
-                );
+                if is_sws_debug_enabled() {
+                    println!(
+                        "[ClientThread {}] ExtensionUpdateBuffer: external_client_id={} window_id={} damage=[{},{} {}x{}]",
+                        client_id, external_client_id, window_id, x, y, width, height
+                    );
+                }
                 push_ipc_event(IpcEvent::ExtensionUpdateBuffer {
                     external_client_id,
                     window_id,

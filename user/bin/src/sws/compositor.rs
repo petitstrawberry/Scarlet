@@ -4,10 +4,26 @@ use super::cursor::Cursor;
 use super::input::{CompositorInputEvent, InputManager, key_codes};
 use super::ipc::{IpcEvent, IpcServer, send_message_to_client, send_message_to_window};
 use super::window::WindowManager;
+use core::sync::atomic::{AtomicU8, Ordering};
 use framebuffer::Framebuffer;
+use std::env;
 use std::println;
 use std::vec::Vec;
 use sws_protocol;
+
+fn is_sws_debug_enabled() -> bool {
+    static LOG_CACHE: AtomicU8 = AtomicU8::new(u8::MAX);
+    let cached = LOG_CACHE.load(Ordering::Relaxed);
+    if cached != u8::MAX {
+        return cached != 0;
+    }
+    let enabled = match env::var("SWS_LOG") {
+        Some(val) => matches!(val.as_str(), "debug" | "DEBUG" | "3"),
+        None => false,
+    };
+    LOG_CACHE.store(enabled as u8, Ordering::Relaxed);
+    enabled
+}
 
 // NOTE: The compositor intentionally does NOT manage a manual VRAM mmap mapping.
 // Rendering goes through the framebuffer library (which may internally use mmap).
@@ -2421,10 +2437,17 @@ impl Compositor {
                 damage_width,
                 damage_height,
             } => {
-                println!(
-                    "[Compositor] IPC: ExtensionUpdateBuffer ext_client={} window={} damage=[{},{} {}x{}]",
-                    external_client_id, window_id, damage_x, damage_y, damage_width, damage_height
-                );
+                if is_sws_debug_enabled() {
+                    println!(
+                        "[Compositor] IPC: ExtensionUpdateBuffer ext_client={} window={} damage=[{},{} {}x{}]",
+                        external_client_id,
+                        window_id,
+                        damage_x,
+                        damage_y,
+                        damage_width,
+                        damage_height
+                    );
+                }
 
                 // Mark window as damaged and trigger redraw
                 if let Some(w) = self.window_manager.get_window(window_id) {

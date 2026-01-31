@@ -942,11 +942,11 @@ pub fn sys_memfd_create(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) ->
         }
     };
 
-    crate::early_println!(
-        "[sys_memfd_create] Created memfd: fd={}, handle={}",
-        fd,
-        handle
-    );
+    // crate::early_println!(
+    //     "[sys_memfd_create] Created memfd: fd={}, handle={}",
+    //     fd,
+    //     handle
+    // );
 
     fd
 }
