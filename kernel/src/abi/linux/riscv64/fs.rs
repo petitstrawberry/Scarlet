@@ -3648,13 +3648,13 @@ pub fn sys_ppoll(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize 
             let ns = (ts.tv_sec as i128) * 1_000_000_000i128 + (ts.tv_nsec as i128);
             let ns_u = if ns <= 0 { 0 } else { (ns as u128) as u64 };
             timeout_ticks = Some(ns_to_ticks(ns_u));
-            crate::println!(
-                "[sys_ppoll] timeout ts={}s {}ns -> ns={} ticks={:?}",
-                ts.tv_sec,
-                ts.tv_nsec,
-                ns_u,
-                timeout_ticks
-            );
+            // crate::println!(
+            //     "[sys_ppoll] timeout ts={}s {}ns -> ns={} ticks={:?}",
+            //     ts.tv_sec,
+            //     ts.tv_nsec,
+            //     ns_u,
+            //     timeout_ticks
+            // );
         }
     }
 
@@ -3794,31 +3794,31 @@ pub fn sys_ppoll(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize 
                 }
             }
 
-            crate::println!(
-                "[sys_ppoll] fd={} events=0x{:x} revents=0x{:x} selectable={} kind={} socket_state={:?}",
-                pfd.fd,
-                pfd.events as u16,
-                pfd.revents as u16,
-                eval.selectable,
-                kind,
-                socket_state
-            );
+            // crate::println!(
+            //     "[sys_ppoll] fd={} events=0x{:x} revents=0x{:x} selectable={} kind={} socket_state={:?}",
+            //     pfd.fd,
+            //     pfd.events as u16,
+            //     pfd.revents as u16,
+            //     eval.selectable,
+            //     kind,
+            //     socket_state
+            // );
         }
     }
 
     {
         let zero_poll = matches!(timeout_ticks, Some(t) if t == 0);
-        crate::println!(
-            "[sys_ppoll] task={} nfds={} selectable={} ready={} any_ready={} zero_poll={} timeout_ticks={:?} first_selectable={:?}",
-            task.name,
-            nfds,
-            selectable_count,
-            ready_count,
-            any_ready,
-            zero_poll,
-            timeout_ticks,
-            first_selectable_index
-        );
+        // crate::println!(
+        //     "[sys_ppoll] task={} nfds={} selectable={} ready={} any_ready={} zero_poll={} timeout_ticks={:?} first_selectable={:?}",
+        //     task.name,
+        //     nfds,
+        //     selectable_count,
+        //     ready_count,
+        //     any_ready,
+        //     zero_poll,
+        //     timeout_ticks,
+        //     first_selectable_index
+        // );
     }
 
     if !any_ready {
