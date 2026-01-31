@@ -1023,6 +1023,17 @@ impl WaylandBridge {
                 pending.height,
             )?;
             sent_any = true;
+
+            if let Some(surface) = self.surface_manager.get_surface_mut(pending.surface_id) {
+                if !surface.pending_release.is_empty() {
+                    let mut release_msgs = Vec::new();
+                    for buffer_id in surface.pending_release.drain(..) {
+                        release_msgs
+                            .push(WaylandMessage::new(buffer_id, shm::buffer_event::RELEASE));
+                    }
+                    self.queue_input_messages(release_msgs);
+                }
+            }
         }
 
         Ok(sent_any)
@@ -1707,6 +1718,8 @@ impl WaylandBridge {
                             surface.buffer_id = None;
                             surface.last_attached_buffer = None;
                         } else {
+                            let old_width = surface.width;
+                            let old_height = surface.height;
                             surface.attach(buffer_id);
                             if surface.last_attached_buffer != Some(buffer_id) {
                                 should_send_attach = true;
@@ -1720,9 +1733,6 @@ impl WaylandBridge {
                                 // Check if window already exists
                                 if let Some(&window_id) = self.surface_to_window.get(&surface_id) {
                                     // Window exists, check if resize is needed
-                                    let old_width = surface.width;
-                                    let old_height = surface.height;
-
                                     if buffer_width != old_width || buffer_height != old_height {
                                         bridge_log!(
                                             "[Bridge] Buffer size {}x{} differs from surface {}x{}, resizing window",
@@ -1798,7 +1808,7 @@ impl WaylandBridge {
                 if is_debug_enabled() {
                     bridge_log!("[Bridge] wl_surface.commit on surface {}", surface_id);
                 }
-                let mut release_msg = None;
+                let mut release_buffers = Vec::new();
                 let mut callback_msg = None;
                 let mut should_update = false;
                 let mut buffer_present = false;
@@ -1824,9 +1834,11 @@ impl WaylandBridge {
                         if current_buffer != Some(prev_buffer)
                             && self.objects.get(&prev_buffer).is_some()
                         {
-                            release_msg =
-                                Some(WaylandMessage::new(prev_buffer, shm::buffer_event::RELEASE));
+                            release_buffers.push(prev_buffer);
                         }
+                    }
+                    if !release_buffers.is_empty() {
+                        surface.pending_release.extend(release_buffers.drain(..));
                     }
                 }
 
@@ -1897,9 +1909,6 @@ impl WaylandBridge {
                 }
 
                 let mut msgs = Vec::new();
-                if let Some(msg) = release_msg {
-                    msgs.push(msg);
-                }
                 if let Some(msg) = callback_msg {
                     msgs.push(msg);
                 }

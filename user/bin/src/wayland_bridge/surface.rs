@@ -21,6 +21,8 @@ pub struct Surface {
     pub last_attached_buffer: Option<u32>,
     /// Last buffer ID we committed (used to delay wl_buffer.release for zero-copy)
     pub last_committed_buffer: Option<u32>,
+    /// Buffers pending wl_buffer.release (sent after SWS consumes updates)
+    pub pending_release: Vec<u32>,
     /// Surface role (e.g., "xdg_toplevel")
     pub role: Option<SurfaceRole>,
     /// Width and height (set when buffer is attached)
@@ -59,6 +61,7 @@ impl Surface {
             damage: Vec::new(),
             last_attached_buffer: None,
             last_committed_buffer: None,
+            pending_release: Vec::new(),
             role: None,
             width: 0,
             height: 0,
