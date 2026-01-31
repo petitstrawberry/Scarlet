@@ -1339,9 +1339,10 @@ fn client_thread_main(client_id: usize, mut socket: Socket) {
 
                         // TODO: Map extension_id to client_id for routing
                         register_window(window_id, client_id);
+                        managed_windows.push(window_id);
 
                         push_ipc_event(IpcEvent::ExtensionCreateWindow {
-                            extension_id: client_id as u32, // Use client_id as extension_id for now
+                            extension_id,
                             external_client_id,
                             window_id,
                             width,

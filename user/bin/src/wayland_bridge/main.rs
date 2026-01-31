@@ -485,9 +485,15 @@ impl WaylandBridge {
                         code,
                         value,
                     } => {
-                        if self.extension_id == Some(external_client_id) {
-                            self.handle_sws_input_event(window_id, time, type_, code, value);
+                        if let Some(surface_id) = self.surface_id_for_window(window_id) {
+                            if external_client_id != surface_id {
+                                println!(
+                                    "[Bridge] EXTENSION_INPUT_EVENT client mismatch: window={} external_client_id={} surface_id={}",
+                                    window_id, external_client_id, surface_id
+                                );
+                            }
                         }
+                        self.handle_sws_input_event(window_id, time, type_, code, value);
                     }
                     other => {
                         self.sws_pending.push(other);
