@@ -13,7 +13,10 @@ use alloc::{
 use core::{any::Any, fmt::Debug};
 use spin::{Mutex, rwlock::RwLock};
 
-use crate::fs::{FileMetadata, FileObject, FilePermission, FileSystemError, FileType, SeekFrom};
+use crate::fs::{
+    FileMetadata, FileObject, FilePermission, FileSystemError, FileSystemErrorKind, FileType,
+    SeekFrom,
+};
 use crate::object::capability::{ControlOps, MemoryMappingOps, StreamError, StreamOps};
 
 use crate::environment::PAGE_SIZE;
@@ -843,6 +846,103 @@ impl FileObject for Fat32FileObject {
         *self.dirty.lock() = true;
 
         Ok(written)
+    }
+
+    fn truncate(&self, size: u64) -> Result<(), StreamError> {
+        if *self.node.file_type.read() != FileType::RegularFile {
+            return Err(StreamError::from(FileSystemError::new(
+                FileSystemErrorKind::IsADirectory,
+                "Cannot truncate non-regular file",
+            )));
+        }
+
+        let new_size = usize::try_from(size).map_err(|_| StreamError::InvalidArgument)?;
+        let old_size = self.node.metadata.read().size;
+        if new_size == old_size {
+            return Ok(());
+        }
+
+        let fs = self
+            .node
+            .filesystem
+            .read()
+            .as_ref()
+            .and_then(|w| w.upgrade())
+            .ok_or(StreamError::Closed)?;
+        let fat32_fs = fs
+            .as_any()
+            .downcast_ref::<crate::fs::vfs_v2::drivers::fat32::Fat32FileSystem>()
+            .ok_or(StreamError::NotSupported)?;
+
+        let mut buffer = Vec::with_capacity(new_size);
+        buffer.resize(new_size, 0);
+        let copy_len = core::cmp::min(old_size, new_size);
+        if copy_len > 0 {
+            let cache_id = self.cache_id();
+            let page_count = (copy_len + PAGE_SIZE - 1) / PAGE_SIZE;
+            for page_index in 0..(page_count as u64) {
+                let start = page_index as usize * PAGE_SIZE;
+                let len = core::cmp::min(PAGE_SIZE, copy_len.saturating_sub(start));
+                if len == 0 {
+                    break;
+                }
+                let pinned = PageCacheManager::global()
+                    .pin_or_load(cache_id, page_index, |paddr| {
+                        fat32_fs
+                            .read_page_content(self.node.cluster(), page_index, paddr)
+                            .map_err(|_| "io error")
+                    })
+                    .map_err(|_| StreamError::IoError)?;
+                unsafe {
+                    core::ptr::copy_nonoverlapping(
+                        pinned.paddr() as *const u8,
+                        buffer.as_mut_ptr().add(start),
+                        len,
+                    );
+                }
+            }
+        }
+
+        let current_cluster = self.node.cluster();
+        let old_cache_id = self.cache_id();
+        let new_cluster = if buffer.is_empty() {
+            0
+        } else {
+            fat32_fs
+                .write_file_content(current_cluster, &buffer)
+                .map_err(|_| StreamError::IoError)?
+        };
+
+        if new_cluster != current_cluster {
+            *self.node.cluster.write() = new_cluster;
+            {
+                let mut meta = self.node.metadata.write();
+                if new_cluster != 0 {
+                    meta.file_id = new_cluster as u64;
+                }
+            }
+            self.update_directory_entry(fat32_fs, new_cluster, buffer.len())?;
+            PageCacheManager::global().invalidate(old_cache_id);
+        } else if current_cluster != 0 {
+            let mut meta = self.node.metadata.write();
+            if meta.file_id != current_cluster as u64 {
+                meta.file_id = current_cluster as u64;
+                PageCacheManager::global().invalidate(old_cache_id);
+            }
+        }
+
+        {
+            let mut metadata = self.node.metadata.write();
+            metadata.size = buffer.len();
+        }
+        *self.dirty.lock() = false;
+
+        let mut position = self.position.write();
+        if *position > size as usize {
+            *position = size as usize;
+        }
+
+        Ok(())
     }
 
     fn seek(&self, from: SeekFrom) -> Result<u64, StreamError> {

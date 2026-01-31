@@ -878,21 +878,62 @@ impl FileObject for Ext2FileObject {
     }
 
     fn truncate(&self, size: u64) -> Result<(), StreamError> {
-        self.ensure_content_loaded()?;
-
-        let mut cached = self.cached_content.write();
-        let content = cached.as_mut().ok_or(StreamError::IoError)?;
         let new_size = usize::try_from(size).map_err(|_| StreamError::InvalidArgument)?;
-
-        if new_size > content.len() {
-            content.resize(new_size, 0);
-        } else if new_size < content.len() {
-            content.truncate(new_size);
+        let fs = self
+            .filesystem
+            .read()
+            .as_ref()
+            .and_then(|weak| weak.upgrade())
+            .ok_or(StreamError::Closed)?;
+        let ext2_fs = fs
+            .as_any()
+            .downcast_ref::<Ext2FileSystem>()
+            .ok_or(StreamError::NotSupported)?;
+        let inode_size = ext2_fs
+            .read_inode(self.inode_number)
+            .map_err(|_| StreamError::IoError)?
+            .size as usize;
+        let cur_size = self.effective_size(inode_size);
+        if new_size == cur_size {
+            return Ok(());
         }
 
-        *self.is_dirty.write() = true;
+        let mut buffer = Vec::with_capacity(new_size);
+        buffer.resize(new_size, 0);
+        let copy_len = core::cmp::min(cur_size, new_size);
+        if copy_len > 0 {
+            let cache_id = self.cache_id();
+            let page_count = (copy_len + PAGE_SIZE - 1) / PAGE_SIZE;
+            for page_index in 0..(page_count as u64) {
+                let start = page_index as usize * PAGE_SIZE;
+                let len = core::cmp::min(PAGE_SIZE, copy_len.saturating_sub(start));
+                if len == 0 {
+                    break;
+                }
+                let pinned = PageCacheManager::global()
+                    .pin_or_load(cache_id, page_index, |paddr| {
+                        ext2_fs
+                            .read_page_content(self.inode_number, page_index, paddr)
+                            .map_err(|_| "io error")
+                    })
+                    .map_err(|_| StreamError::IoError)?;
+                unsafe {
+                    core::ptr::copy_nonoverlapping(
+                        pinned.paddr() as *const u8,
+                        buffer.as_mut_ptr().add(start),
+                        len,
+                    );
+                }
+            }
+        }
 
-        // Clamp current position if it moved past EOF.
+        ext2_fs
+            .write_file_content(self.inode_number, &buffer)
+            .map_err(|_| StreamError::IoError)?;
+        PageCacheManager::global().invalidate(self.cache_id());
+        *self.size_override.lock() = None;
+        *self.dirty.lock() = false;
+
         let mut position = self.position.lock();
         if *position > size {
             *position = size;
