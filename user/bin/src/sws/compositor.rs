@@ -2501,13 +2501,15 @@ impl Compositor {
                                 window_id, e
                             );
                         } else {
-                            self.mark_window_damage(window_id);
+                            if let Some(w) = self.window_manager.get_window(window_id) {
+                                self.add_pending_damage((w.x, w.y, w.width, w.height));
+                            }
                         }
                     } else {
                         // We have address but no SharedMemory wrapper (e.g., File handle from Linux compat)
                         // This is zero-copy mode - just update the mapped address
                         // println!("[Compositor] Zero-copy mode: updating mapped address without SharedMemory wrapper");
-                        if let Some(w) = self.window_manager.get_window_mut(window_id) {
+                        let rect = if let Some(w) = self.window_manager.get_window_mut(window_id) {
                             w.width = width;
                             w.height = height;
                             w.shm_mapped_addr = Some(addr);
@@ -2522,9 +2524,14 @@ impl Compositor {
                             w.has_alpha_content = format == 0;
                             w.buffer = None; // Clear Vec buffer if present
                             // Keep existing shm if any (for ownership tracking)
-                            self.mark_window_damage(window_id);
+                            Some((w.x, w.y, w.width, w.height))
                         } else {
                             println!("[Compositor] Window {} not found", window_id);
+                            None
+                        };
+
+                        if let Some(rect) = rect {
+                            self.add_pending_damage(rect);
                         }
                     }
                 } else {
