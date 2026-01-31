@@ -398,19 +398,44 @@ impl UdpLayer {
     /// Send a UDP datagram
     pub fn send_datagram(
         &self,
-        socket: &UdpSocket,
+        socket: &Arc<UdpSocket>,
         dest_ip: [u8; 4],
         dest_port: u16,
         data: Vec<u8>,
     ) -> Result<(), SocketError> {
-        // Get source port from local address
-        let local_addr = socket.local_addr.read();
-        let src_port = match *local_addr {
-            Some(SocketAddress::Inet { port, .. }) => port,
-            _ => {
-                // Allocate ephemeral port if not bound
-                return Err(SocketError::NotBound);
-            }
+        let src_port = socket.local_port.load(Ordering::SeqCst);
+        let total_length = (8 + data.len()) as u16;
+
+        let mut header = UdpHeader::new(src_port, dest_port, total_length);
+
+        let src_ip_bytes = [0u8; 4];
+        header.checksum = header.calculate_checksum(&src_ip_bytes, dest_ip, &data);
+
+        let mut udp_packet = Vec::with_capacity(8 + data.len());
+        udp_packet.extend_from_slice(&header.to_bytes());
+        udp_packet.extend_from_slice(data);
+
+        let mut ip_context = LayerContext::new();
+        ip_context.set("ip_dst", &dest_ip);
+        ip_context.set("ip_protocol", &[17]);
+
+        if let Some(ip_layer) = get_network_manager().get_layer("ip") {
+            ip_layer.send(&udp_packet, &ip_context, &[])?;
+        }
+
+        let mut stats = self.stats.write();
+        stats.packets_sent += 1;
+        stats.bytes_sent += udp_packet.len() as u64;
+
+        Ok(())
+    }
+
+        let mut stats = self.stats.write();
+        stats.packets_sent += 1;
+        stats.bytes_sent += udp_packet.len() as u64;
+
+        Ok(())
+    }
         };
 
         // Build UDP header
@@ -448,7 +473,6 @@ impl UdpLayer {
             ip_layer.send(&udp_packet, &ip_context, &[])?;
         }
 
-        // Update statistics
         let mut stats = self.stats.write();
         stats.packets_sent += 1;
         stats.bytes_sent += udp_packet.len() as u64;
@@ -456,25 +480,17 @@ impl UdpLayer {
         Ok(())
     }
 
+        Ok(())
+    }
+
     /// Receive a UDP datagram
     pub fn receive_datagram(&self, src_port: u16, dst_port: u16, data: Vec<u8>) {
-            "[UDP] Recv: {} bytes (src port: {}, dst port: {})",
-            data.len(),
-            src_port,
-            dst_port
-        );
-
-        // Update statistics
         let mut stats = self.stats.write();
         stats.packets_received += 1;
         stats.bytes_received += (8 + data.len()) as u64;
 
-        // Find socket registered for destination port
         if let Some(socket) = self.find_socket(dst_port) {
-            // Deliver datagram to socket
             socket.deliver_datagram(data);
-        } else {
-            // No socket bound to this port - drop the datagram
         }
     }
 }

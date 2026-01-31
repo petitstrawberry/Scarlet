@@ -246,13 +246,6 @@ impl TcpSocket {
     pub fn process_segment(&self, src_ip: Ipv4Address, header: TcpHeader, data: &[u8]) {
         let current_state = self.get_state();
 
-            "[TCP] Segment: {} bytes (seq={}, ack={}, flags={:02X})",
-            data.len(),
-            header.seq_number,
-            header.ack_number,
-            header.flags()
-        );
-
         match current_state {
             TcpState::Listen => {
                 if header.flags() & tcp_flags::SYN != 0 {
@@ -537,22 +530,18 @@ impl TcpSocket {
         ip_context.set("ip_protocol", &[6]); // TCP protocol
 
         // Send through IP layer
-        if let Some(ip_layer) = get_network_manager().get_layer("ip") {
-            if let Ok(()) = ip_layer.send(&segment, &ip_context, &[]) {
-                // Update statistics
-                self.bytes_sent
-                    .fetch_add(segment.len() as u64, Ordering::SeqCst);
+            if let Some(ip_layer) = get_network_manager().get_layer("ip") {
+                if let Ok(()) = ip_layer.send(&segment, &ip_context, &[]) {
+                    self.bytes_sent.fetch_add(segment.len() as u64, Ordering::SeqCst);
 
-                if update_seq {
-                    self.send_seq.fetch_add(total_len as u32, Ordering::SeqCst);
+                    if update_seq {
+                        self.send_seq.fetch_add(total_len as u32, Ordering::SeqCst);
+                    }
                 }
-
-                    "[TCP] Sent {} bytes (seq={})",
-                    segment.len(),
-                    header.seq_number
-                );
             }
         }
+
+        Ok(data.len())
     }
 
     /// Send data through socket
@@ -602,9 +591,8 @@ impl TcpSocket {
 
         Ok(len)
     }
-}
 
-impl SocketObject for TcpSocket {
+    impl SocketObject for TcpSocket {
     fn socket_type(&self) -> crate::network::socket::SocketType {
         crate::network::socket::SocketType::Stream
     }

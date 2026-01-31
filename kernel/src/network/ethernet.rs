@@ -132,17 +132,12 @@ impl NetworkLayer for EthernetLayer {
     ) -> Result<(), SocketError> {
         let src_mac = *self.src_mac.read();
 
-        // Try to get destination MAC from context
-        // For broadcast, use FF:FF:FF:FF:FF:FF
         let dest_mac = if let Some(dest_ip) = context.get("ip_dst") {
-            // Check if it's a broadcast address
             if dest_ip.len() >= 4 {
                 let ip_bytes = [dest_ip[0], dest_ip[1], dest_ip[2], dest_ip[3]];
                 if ip_bytes == [255, 255, 255, 255] {
                     [0xFF; 6]
                 } else {
-                    // TODO: Use ARP to resolve MAC address
-                    // For now, use a placeholder (will be resolved by ARP)
                     [0x00, 0x00, 0x00, 0x00, 0x00, 0x00]
                 }
             } else {
@@ -155,11 +150,9 @@ impl NetworkLayer for EthernetLayer {
             }
             mac
         } else {
-            // Default to broadcast
             [0xFF; 6]
         };
 
-        // Get EtherType from context (IP protocol)
         let ether_type = context
             .get("ip_protocol")
             .and_then(|p| {
@@ -171,24 +164,9 @@ impl NetworkLayer for EthernetLayer {
             })
             .unwrap_or(ether_type::IPV4);
 
-        // Build Ethernet frame: header + packet
-        let header = EthernetHeader::new(dest_mac, src_mac.0, ether_type);
+        let header = EthernetHeader::new(dest_mac, src_mac, ether_type);
         let total_size = ETHERNET_HEADER_SIZE + packet.len();
 
-        // In a real implementation, we would send this through NetworkDevice
-        // For now, just log that we're sending
-            "[Ethernet] Send: {} bytes (dst: {:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X}, type: 0x{:04X})",
-            total_size,
-            dest_mac[0],
-            dest_mac[1],
-            dest_mac[2],
-            dest_mac[3],
-            dest_mac[4],
-            dest_mac[5],
-            ether_type
-        );
-
-        // Update statistics
         let mut stats = self.stats.write();
         stats.packets_sent += 1;
         stats.bytes_sent += total_size as u64;
@@ -201,29 +179,15 @@ impl NetworkLayer for EthernetLayer {
             return Err(SocketError::InvalidPacket);
         }
 
-        // Parse Ethernet header
         let header = EthernetHeader::from_bytes(&frame[..ETHERNET_HEADER_SIZE])
             .ok_or(SocketError::InvalidPacket)?;
 
         let payload = &frame[ETHERNET_HEADER_SIZE..];
 
-            "[Ethernet] Recv: {} bytes (src: {:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X}, type: 0x{:04X})",
-            frame.len(),
-            header.src_mac[0],
-            header.src_mac[1],
-            header.src_mac[2],
-            header.src_mac[3],
-            header.src_mac[4],
-            header.src_mac[5],
-            header.ether_type
-        );
-
-        // Update statistics
         let mut stats = self.stats.write();
         stats.packets_received += 1;
         stats.bytes_received += frame.len() as u64;
 
-        // Route to protocol handler based on EtherType
         let protocols = self.protocols.read();
         if let Some(handler) = protocols.get(&header.ether_type) {
             handler.receive(payload)
@@ -231,10 +195,8 @@ impl NetworkLayer for EthernetLayer {
             || header.ether_type == ether_type::ARP
             || header.ether_type == ether_type::IPV6
         {
-            // No handler for this EtherType, but frame is valid
-            Err(SocketError::ProtocolNotSupported)
+            Ok(())
         } else {
-            // Unknown EtherType - log and drop
             Ok(())
         }
     }
