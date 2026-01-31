@@ -909,7 +909,7 @@ pub fn sys_memfd_create(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) ->
 
     // Create shared memory object (size 0 initially, will be resized by ftruncate)
     // Default size for Wayland SHM pools
-    const DEFAULT_SHM_SIZE: usize = 250 * 1024; // 250 KB as starting point
+    const DEFAULT_SHM_SIZE: usize = crate::environment::PAGE_SIZE; // one page as starting point
 
     let shm = match SharedMemory::new(DEFAULT_SHM_SIZE, 0x3 /* READ | WRITE */) {
         Ok(shm) => shm,

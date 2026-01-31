@@ -2722,6 +2722,20 @@ pub fn sys_ftruncate(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> us
         None => return errno::to_result(errno::EBADF),
     };
 
+    if let Some(shared_memory) = kernel_obj.as_shared_memory() {
+        if let Err(err) = shared_memory.resize(length as usize) {
+            if length > 0 {
+                crate::println!(
+                    "sys_ftruncate: shared memory resize failed len={} err={}",
+                    length,
+                    err
+                );
+            }
+            return errno::to_result(errno::EINVAL);
+        }
+        return 0;
+    }
+
     let file_obj = match kernel_obj.as_file() {
         Some(f) => f,
         None => return errno::to_result(errno::EINVAL),

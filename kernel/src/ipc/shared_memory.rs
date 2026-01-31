@@ -20,6 +20,9 @@ pub trait SharedMemoryObject: MemoryMappingOps + Send + Sync {
     /// Get the size of the shared memory region in bytes
     fn size(&self) -> usize;
 
+    /// Resize the shared memory region (within capacity)
+    fn resize(&self, new_size: usize) -> Result<(), &'static str>;
+
     /// Get a unique identifier for this shared memory object
     fn id(&self) -> String;
 
@@ -33,6 +36,8 @@ struct SharedMemoryState {
     paddr: usize,
     /// Size of the shared memory region in bytes
     size: usize,
+    /// Allocated capacity of the shared memory region in bytes
+    capacity: usize,
     /// Access permissions for the shared memory
     permissions: usize,
     /// Whether this shared memory is still valid
@@ -48,6 +53,7 @@ impl SharedMemoryState {
         Self {
             paddr,
             size,
+            capacity: size,
             permissions,
             valid: true,
             mapping_count: 0,
@@ -143,6 +149,15 @@ impl SharedMemoryObject for SharedMemory {
         self.state.read().size
     }
 
+    fn resize(&self, new_size: usize) -> Result<(), &'static str> {
+        let mut state = self.state.write();
+        if new_size > state.capacity {
+            return Err("Shared memory resize exceeds capacity");
+        }
+        state.size = new_size;
+        Ok(())
+    }
+
     fn id(&self) -> String {
         self.id.clone()
     }
@@ -171,7 +186,7 @@ impl MemoryMappingOps for SharedMemory {
             }
         };
 
-        if end > state.size {
+        if end > state.capacity {
             return Err("Mapping request exceeds shared memory size");
         }
 
