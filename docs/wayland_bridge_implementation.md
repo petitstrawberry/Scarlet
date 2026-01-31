@@ -31,6 +31,9 @@ The bridge implements the following Wayland protocols:
 - `wl_surface` - Individual surface management
   - attach, damage, commit operations
 - `wl_callback` - Frame synchronization callbacks
+ - `wl_seat` - Input device grouping (advertised version 5)
+ - `wl_pointer` - Motion/button events, with frame events
+ - `wl_keyboard` - Key events + keymap
 
 #### Shared Memory Protocol
 - `wl_shm` - Shared memory management
@@ -45,17 +48,25 @@ The bridge implements the following Wayland protocols:
   - set_title, set_app_id
   - move, resize operations
   - min/max size constraints
+  - minimize, maximize, restore
+  - destroy (mapped to SWS window close)
 
 ### 3. SWS Extension API ✓
 
 **Location**: `user/lib/sws_protocol/src/lib.rs`
 
-New protocol messages added:
+Extension protocol messages:
 
 #### Client → Server
 - `REGISTER_EXTENSION (100)` - Register as extension server
 - `EXTENSION_CREATE_WINDOW (101)` - Create window for external client
 - `EXTENSION_UPDATE_BUFFER (102)` - Update buffer for external client
+- `EXTENSION_ATTACH_BUFFER (103)` - Attach SHM buffer for external client
+- `REQUEST_MOVE_WINDOW (5)` - Begin compositor-side move
+- `MINIMIZE_WINDOW (17)` - Minimize window
+- `MAXIMIZE_WINDOW (18)` - Maximize window
+- `RESTORE_WINDOW (19)` - Restore window
+- `DESTROY_WINDOW (2)` - Close window
 
 #### Server → Client
 - `EXTENSION_REGISTERED (100)` - Extension registration confirmation
@@ -63,97 +74,46 @@ New protocol messages added:
 
 **Documentation**: `docs/sws_ipc_protocol.md` updated with Extension API details
 
-### 4. Infrastructure
+### 4. Bridge ↔ SWS Integration ✓
 
 - Socket server listening on `/tmp/wayland-0`
 - Object ID allocation and tracking
 - Message header parsing and encoding
 - Argument encoding for various types (int, uint, string, object, array)
+- SWS extension registration + window creation
+- Surface → window mapping for update/resize/move/close
+- SHM handle forwarding via `EXTENSION_ATTACH_BUFFER`
+- Input event translation from SWS → Wayland
 
-## What Needs to Be Implemented
+## What Is Still Missing / Partial
 
-### 1. SWS Compositor Extension Handler (Critical)
+### 1. Additional Wayland Protocols (Missing)
 
-The SWS compositor needs to implement handlers for the new extension API messages:
-
-**Location**: `user/bin/src/sws/` (compositor.rs, ipc.rs)
-
-Required changes:
-- Parse and handle `REGISTER_EXTENSION` messages
-- Maintain registry of registered extensions
-- Implement `EXTENSION_CREATE_WINDOW` handler
-  - Associate window with external client ID
-  - Track ownership separately from socket connection
-- Implement `EXTENSION_INPUT_EVENT` routing
-  - Send input events to extension for its managed windows
-  - Include external_client_id in event payload
-
-### 2. Wayland Bridge ↔ SWS Integration
-
-**Location**: `user/bin/src/wayland_bridge/main.rs`
-
-Required implementation:
-- Connect to SWS server at `/tmp/sws.sock`
-- Send `REGISTER_EXTENSION` with name "wayland_bridge"
-- Handle `EXTENSION_REGISTERED` response
-- Map Wayland surfaces to SWS windows:
-  - On `xdg_surface.get_toplevel`, create SWS window via `EXTENSION_CREATE_WINDOW`
-  - Use Wayland surface ID as external_client_id
-  - Store mapping: wl_surface_id → sws_window_id
-- Forward buffer commits:
-  - On `wl_surface.commit`, send `EXTENSION_UPDATE_BUFFER` to SWS
-  - Include damage rectangle information
-- Handle input events:
-  - Receive `EXTENSION_INPUT_EVENT` from SWS
-  - Look up Wayland surface by external_client_id
-  - Translate to Wayland input protocol
-  - Send to appropriate Wayland client
-
-### 3. Shared Memory Integration
-
-**Location**: Multiple files
-
-Required implementation:
-- Handle transfer for shared memory:
-  - Wayland clients pass SHM FDs via SCM_RIGHTS (standard Wayland protocol)
-  - Linux compatibility layer converts SCM_RIGHTS to handle transfer automatically
-  - Bridge receives handles using `Socket::recv_handle()`
-  - Bridge forwards handles to SWS using `Socket::send_handle()`
-- SHM handle mapping:
-  - Map Wayland wl_shm_pool to SWS shared memory
-  - Translate buffer offsets and formats
-  - Share memory between Wayland client and SWS compositor
-
-Current status: Structure in place, handle transfer APIs available via Socket
-
-### 4. Input Event Translation
-
-**Location**: `user/bin/src/wayland_bridge/main.rs`
-
-Required implementation:
-- Map SWS input event types to Wayland:
-  - Mouse: pointer motion, button press/release
-  - Keyboard: key press/release
-  - Touch: touch down/move/up (if supported)
-- Implement wl_seat protocol:
-  - wl_seat for input device grouping
-  - wl_pointer for mouse events
-  - wl_keyboard for keyboard events
-- Focus management:
-  - Track which Wayland surface has input focus
-  - Route events only to focused surface
-
-### 5. Additional Wayland Protocols
-
-**Location**: `user/bin/src/wayland_bridge/`
-
-Optional but useful:
-- `wl_output` - Display information (resolution, scale)
 - `wl_data_device_manager` - Clipboard and drag-and-drop
 - `xdg_popup` - Popup windows (context menus, tooltips)
 - `wl_subsurface` - Sub-surfaces for complex UIs
+- `xdg_decoration` - Server-side decorations / SSD hints
+- `wl_output` - Real output info (currently minimal)
 
-### 6. Testing and Validation
+### 2. Input Coverage (Partial)
+
+- `wl_pointer.axis` (scroll) is not implemented
+- Touch input is not implemented
+- Relative pointer protocol not implemented
+
+### 3. Window Management Details (Partial)
+
+- `xdg_toplevel.resize` is not mapped to compositor resize
+- `xdg_toplevel.set_fullscreen` / `unset_fullscreen` are not mapped
+- `xdg_surface.set_window_geometry` is accepted but not used for hit-testing
+
+### 4. Robustness / Edge Cases (Partial)
+
+- Multi-seat or multiple pointers not supported
+- Input focus is single-surface and simplistic
+- Buffer lifecycle and release paths are minimal
+
+### 5. Testing and Validation (Missing)
 
 Required tests:
 - Minimal Wayland client application
@@ -198,23 +158,13 @@ Required tests:
 └─────────────────────────┘
 ```
 
-## Implementation Priority
+## Known Limitations
 
-1. **High Priority** (Required for basic functionality):
-   - SWS compositor extension handler
-   - Wayland bridge SWS integration
-   - Surface to window mapping
-   - Basic input event routing
-
-2. **Medium Priority** (Required for real applications):
-   - Shared memory integration (handle transfer APIs available)
-   - wl_seat protocol for proper input handling
-   - wl_output for display information
-
-3. **Low Priority** (Nice to have):
-   - Additional protocols (popup, subsurface, clipboard)
-   - Multi-client support with threading
-   - Performance optimizations
+- Wayland input does not include scroll or touch events.
+- `xdg_decoration` is missing; titlebar behavior depends on toolkit defaults.
+- `wl_output` data is minimal; no scale/transform handling.
+- Buffer updates are damage-based but do not enforce throttling or frame pacing.
+- Close/minimize/maximize rely on SWS behavior, not Wayland-side configure state.
 
 ## Files Modified/Created
 
@@ -239,29 +189,17 @@ Required tests:
 - Future: Restrict extension registration to trusted processes
 - Future: Validate external_client_id to prevent spoofing
 
-## Next Steps
+## Next Tasks
 
-The immediate next steps to make the bridge functional:
-
-1. Implement extension API handlers in SWS compositor (highest priority)
-2. Complete Wayland bridge SWS integration
-3. Test with a minimal Wayland client
-4. Iterate based on test results
-
-Once basic functionality works, add:
-- Proper input event translation
-- Complete shared memory integration with handle forwarding
-- Additional Wayland protocols as needed
+1. Add `wl_pointer.axis` for scroll input and translate SWS scroll events.
+2. Implement `xdg_toplevel.resize` and fullscreen mapping to SWS.
+3. Implement `xdg_decoration` or SSD policy to improve titlebar behavior.
+4. Add `wl_data_device_manager` (clipboard) and `xdg_popup`.
+5. Improve focus handling and multi-seat support.
+6. Add integration tests with a simple Wayland client.
 
 ## Conclusion
 
-The foundation for the Wayland bridge is complete. The core protocol parsing, object management, and message handling are implemented. The SWS Extension API has been designed and documented. The remaining work is primarily integration: connecting the bridge to SWS, implementing the extension handlers in the compositor, and testing with real Wayland clients.
-
-The implementation follows the requirements from issue #272:
-- ✓ Rust userland process
-- ✓ LocalSocket usage (UNIX domain socket)
-- ✓ Basic Wayland protocol support (xdg-shell, shm, input)
-- ✓ SWS Extension API design
-- ⧗ Minimal viable client support (in progress)
+The bridge is functional for basic Wayland apps: surfaces, shm buffers, input, and xdg_toplevel move/min/max/close are wired through SWS. The main remaining work is protocol breadth (popup/clipboard/scroll/fullscreen/resize) and tighter window-management integration.
 
 The architecture is extensible and can support additional Wayland protocols as needed in the future.
