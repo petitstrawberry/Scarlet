@@ -1423,7 +1423,7 @@ impl Compositor {
                 || self.pending_damage.is_some()
                 || self.cursor.needs_redraw()
             {
-                if self.full_redraw_needed {
+                if self.full_redraw_needed && is_sws_debug_enabled() {
                     println!("[Compositor] Full redraw triggered");
                 }
                 self.composite_and_present()?;

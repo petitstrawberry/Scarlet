@@ -512,10 +512,8 @@ impl WaylandBridge {
             if self.sws_rx_buffer.len() < frame_len {
                 break;
             }
-            let payload = self.sws_rx_buffer[protocol_sws::MessageHeader::SIZE..frame_len].to_vec();
-            self.sws_rx_buffer.drain(0..frame_len);
-
-            if let Ok(msg) = protocol_sws::parse_server_message(header.msg_type, &payload) {
+            let payload = &self.sws_rx_buffer[protocol_sws::MessageHeader::SIZE..frame_len];
+            if let Ok(msg) = protocol_sws::parse_server_message(header.msg_type, payload) {
                 match msg {
                     protocol_sws::ServerMessage::InputEvent {
                         window_id,
@@ -551,6 +549,7 @@ impl WaylandBridge {
                     }
                 }
             }
+            self.sws_rx_buffer.drain(0..frame_len);
         }
 
         Ok(())
@@ -2690,10 +2689,17 @@ fn main() -> i32 {
 
     bridge_log!("[Bridge] Connected to SWS successfully");
 
-    // Spawn input event listener thread
-    if let Err(e) = bridge.spawn_input_thread() {
-        bridge_log!("[Bridge] Failed to spawn input thread: {}", e);
-        return 1;
+    // Spawn input event listener thread (optional)
+    let use_input_thread = env::var("WAYLAND_BRIDGE_INPUT_THREAD")
+        .map(|val| val == "1")
+        .unwrap_or(false);
+    if use_input_thread {
+        if let Err(e) = bridge.spawn_input_thread() {
+            bridge_log!("[Bridge] Failed to spawn input thread: {}", e);
+            return 1;
+        }
+    } else {
+        bridge_log!("[Bridge] Input thread disabled (set WAYLAND_BRIDGE_INPUT_THREAD=1 to enable)");
     }
 
     bridge_log!("[Bridge] Clients can connect with WAYLAND_DISPLAY=wayland-0");
