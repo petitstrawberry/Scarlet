@@ -73,6 +73,7 @@ pub enum Syscall {
 
     // Shared Memory
     SharedMemoryCreate = 620, // Create shared memory region
+    SharedMemoryResize = 621, // Resize shared memory region
 
     // Socket Handle Transfer (similar to SCM_RIGHTS)
     SocketSendHandle = 630,        // Send kernel object handle through socket

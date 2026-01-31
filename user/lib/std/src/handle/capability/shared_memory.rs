@@ -15,6 +15,7 @@ pub enum SharedMemoryObjectError {
 
 /// Shared memory object capability
 use crate::handle::{Handle, RawHandle};
+use crate::syscall::{syscall2, Syscall};
 
 pub struct SharedMemoryObject<'a> {
     handle: &'a Handle,
@@ -31,5 +32,18 @@ impl<'a> SharedMemoryObject<'a> {
     /// Get the raw handle value
     pub fn as_raw(&self) -> RawHandle {
         self.handle.as_raw()
+    }
+
+    /// Resize the shared memory region
+    pub fn resize(&self, new_size: usize) -> SharedMemoryObjectResult<()> {
+        let result = syscall2(
+            Syscall::SharedMemoryResize,
+            self.handle.as_raw() as usize,
+            new_size,
+        );
+        if result == usize::MAX {
+            return Err(SharedMemoryObjectError::SystemError(-1));
+        }
+        Ok(())
     }
 }

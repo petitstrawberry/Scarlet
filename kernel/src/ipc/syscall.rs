@@ -419,6 +419,53 @@ pub fn sys_shared_memory_create(trapframe: &mut Trapframe) -> usize {
     handle as usize
 }
 
+/// sys_shared_memory_resize - Resize a shared memory object
+///
+/// Arguments:
+/// - handle: Handle to the shared memory object
+/// - size: New size in bytes (will be page-aligned in kernel)
+///
+/// Returns:
+/// - 0 on success
+/// - usize::MAX on error
+pub fn sys_shared_memory_resize(trapframe: &mut Trapframe) -> usize {
+    let task = match mytask() {
+        Some(task) => task,
+        None => return usize::MAX,
+    };
+
+    let handle = trapframe.get_arg(0) as u32;
+    let size = trapframe.get_arg(1);
+
+    crate::println!("[sys_shared_memory_resize] handle={} size={}", handle, size);
+
+    trapframe.increment_pc_next(task);
+
+    let kernel_obj = match task.handle_table.get(handle) {
+        Some(obj) => obj,
+        None => {
+            crate::println!("[sys_shared_memory_resize] handle not found");
+            return usize::MAX;
+        }
+    };
+
+    let shared_memory = match kernel_obj.as_shared_memory() {
+        Some(obj) => obj,
+        None => {
+            crate::println!("[sys_shared_memory_resize] not a shared memory object");
+            return usize::MAX;
+        }
+    };
+
+    if let Err(e) = shared_memory.resize(size) {
+        crate::println!("[sys_shared_memory_resize] resize failed: {}", e);
+        return usize::MAX;
+    }
+
+    crate::println!("[sys_shared_memory_resize] SUCCESS new_size={}", shared_memory.size());
+    0
+}
+
 /// sys_socket_send_handle - Send a kernel object handle through a socket
 ///
 /// Transfers a kernel object (like SharedMemoryObject) to another task

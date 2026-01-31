@@ -2456,18 +2456,78 @@ pub fn sys_flock(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize 
 
     // Verify fd is valid
     if abi.get_handle(fd as usize).is_none() {
-        crate::println!("[sys_flock] Invalid fd: {}", fd);
         return usize::MAX;
     }
 
     // Simplified implementation: always succeed
     // Real flock would require managing lock state per file descriptor
     // For Wayland SHM operations, advisory locks aren't critical
-    crate::println!(
-        "[sys_flock] fd={} operation={} - SUCCESS (no-op)",
-        fd,
-        _operation
-    );
+    0
+}
+
+/// Linux sys_fallocate - Manipulate file space
+///
+/// This is used by glib/Wayland to extend shared memory file size.
+/// When mode is 0 (default), it extends the file to at least offset + len.
+///
+/// Arguments:
+/// - fd: File descriptor
+/// - mode: Operation mode (0 = allocate, FALLOC_FL_KEEP_SIZE, etc.)
+/// - offset: Starting offset
+/// - len: Length of the allocation
+///
+/// Returns:
+/// - 0 on success
+/// - negative errno on failure
+pub fn sys_fallocate(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
+    use super::errno;
+
+    let task = match mytask() {
+        Some(t) => t,
+        None => return errno::to_result(errno::EFAULT),
+    };
+
+    let fd = trapframe.get_arg(0) as usize;
+    let mode = trapframe.get_arg(1) as i32;
+    let offset = trapframe.get_arg(2) as i64;
+    let len = trapframe.get_arg(3) as i64;
+
+    trapframe.increment_pc_next(task);
+
+    if offset < 0 || len <= 0 {
+        return errno::to_result(errno::EINVAL);
+    }
+
+    let handle = match abi.get_handle(fd) {
+        Some(h) => h,
+        None => return errno::to_result(errno::EBADF),
+    };
+
+    let kernel_obj = match task.handle_table.get(handle) {
+        Some(obj) => obj,
+        None => return errno::to_result(errno::EBADF),
+    };
+
+    // Handle SharedMemory (memfd)
+    if let Some(shared_memory) = kernel_obj.as_shared_memory() {
+        // FALLOC_FL_KEEP_SIZE = 0x01 - don't change file size
+        const FALLOC_FL_KEEP_SIZE: i32 = 0x01;
+
+        let new_size = (offset + len) as usize;
+        let current_size = shared_memory.size();
+
+        // If mode doesn't have KEEP_SIZE, extend the file
+        if (mode & FALLOC_FL_KEEP_SIZE) == 0 && new_size > current_size {
+            if let Err(_e) = shared_memory.resize(new_size) {
+                return errno::to_result(errno::ENOSPC);
+            }
+        }
+
+        return 0;
+    }
+
+    // For regular files, just succeed (no-op for now)
+    // Real implementation would preallocate disk space
     0
 }
 
@@ -2723,14 +2783,7 @@ pub fn sys_ftruncate(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> us
     };
 
     if let Some(shared_memory) = kernel_obj.as_shared_memory() {
-        if let Err(err) = shared_memory.resize(length as usize) {
-            if length > 0 {
-                crate::println!(
-                    "sys_ftruncate: shared memory resize failed len={} err={}",
-                    length,
-                    err
-                );
-            }
+        if let Err(_err) = shared_memory.resize(length as usize) {
             return errno::to_result(errno::EINVAL);
         }
         return 0;

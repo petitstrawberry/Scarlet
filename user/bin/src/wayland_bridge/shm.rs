@@ -6,6 +6,7 @@
 
 use std::collections::BTreeMap;
 use std::handle::Handle;
+use std::println;
 
 /// Shared memory pool
 #[derive(Debug)]
@@ -148,6 +149,12 @@ impl ShmManager {
     pub fn resize_pool(&mut self, pool_id: u32, new_size: i32) -> Result<(), &'static str> {
         let pool = self.pools.get_mut(&pool_id).ok_or("Pool not found")?;
         pool.size = new_size as usize;
+        if let Some(handle) = pool.handle.as_ref() {
+            let shm = handle
+                .as_shared_memory()
+                .map_err(|_| "Shared memory handle invalid")?;
+            shm.resize(pool.size).map_err(|_| "Shared memory resize failed")?;
+        }
         Ok(())
     }
 }

@@ -1578,7 +1578,6 @@ impl WaylandBridge {
     ) -> Result<Vec<WaylandMessage>, &'static str> {
         match opcode {
             shm::shm_pool_request::CREATE_BUFFER => {
-                println!("[Bridge] wl_shm_pool.create_buffer");
                 if payload.len() >= 24 {
                     let buffer_id =
                         u32::from_ne_bytes([payload[0], payload[1], payload[2], payload[3]]);

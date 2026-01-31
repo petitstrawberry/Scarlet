@@ -7,7 +7,7 @@
 use alloc::{format, string::String, sync::Arc};
 use spin::RwLock;
 
-use crate::mem::page::allocate_raw_pages;
+use crate::mem::page::{allocate_raw_pages, free_raw_pages};
 use crate::object::capability::memory_mapping::{
     AccessKind, MemoryMappingOps, ResolveFaultError, ResolveFaultResult,
 };
@@ -150,11 +150,72 @@ impl SharedMemoryObject for SharedMemory {
     }
 
     fn resize(&self, new_size: usize) -> Result<(), &'static str> {
+        use crate::environment::PAGE_SIZE;
+
         let mut state = self.state.write();
-        if new_size > state.capacity {
-            return Err("Shared memory resize exceeds capacity");
+        let aligned_size = if new_size == 0 {
+            0
+        } else {
+            let num_pages = (new_size + PAGE_SIZE - 1) / PAGE_SIZE;
+            num_pages * PAGE_SIZE
+        };
+
+        // 容量内であればサイズ更新のみ
+        if aligned_size <= state.capacity {
+            state.size = aligned_size;
+            return Ok(());
         }
-        state.size = new_size;
+
+        if !state.owns_memory {
+            return Err("Shared memory resize not supported for external memory");
+        }
+
+        // 新しいメモリを割り当て
+        let num_pages = aligned_size / PAGE_SIZE;
+        let pages = allocate_raw_pages(num_pages);
+        if pages.is_null() {
+            return Err("Failed to allocate physical memory for shared memory resize");
+        }
+
+        let old_paddr = state.paddr;
+        let copy_size = state.size;
+
+        // 古いデータをコピー
+        if copy_size > 0 {
+            unsafe {
+                core::ptr::copy_nonoverlapping(
+                    state.paddr as *const u8,
+                    pages as *mut u8,
+                    copy_size,
+                );
+            }
+        }
+
+        // 古いメモリを解放
+        let old_pages = state.capacity / PAGE_SIZE;
+        if old_pages > 0 {
+            let old_ptr = state.paddr as *mut crate::mem::page::Page;
+            free_raw_pages(old_ptr, old_pages);
+        }
+
+        state.paddr = pages as usize;
+        state.size = aligned_size;
+        state.capacity = aligned_size;
+
+        crate::println!(
+            "[SharedMemory::resize] reallocated: old_paddr={:#x} new_paddr={:#x} mapping_count={}",
+            old_paddr, state.paddr, state.mapping_count
+        );
+
+        // NOTE: マッピングがある場合、古いpmap.pmarea.startは無効になる
+        // resolve_faultで動的にpaddrを取得するように修正済み
+        if state.mapping_count > 0 {
+            crate::println!(
+                "[SharedMemory::resize] WARNING: {} active mappings exist, their pmarea is now stale!",
+                state.mapping_count
+            );
+        }
+
         Ok(())
     }
 
@@ -186,7 +247,7 @@ impl MemoryMappingOps for SharedMemory {
             }
         };
 
-        if end > state.capacity {
+        if end > state.size {
             return Err("Mapping request exceeds shared memory size");
         }
 
@@ -233,17 +294,27 @@ impl MemoryMappingOps for SharedMemory {
         // Calculate the page-aligned virtual address
         let page_vaddr = access.vaddr & !(crate::environment::PAGE_SIZE - 1);
 
-        // Check if the access is within the mapped range
-        if page_vaddr < map.vmarea.start || page_vaddr >= map.vmarea.end {
+        // vmarea範囲チェック（マッピング時のサイズ）
+        // NOTE: ftruncateでリサイズされた場合、vmarea.endは古いままなので、
+        //       SharedMemoryの現在のsizeも確認する必要がある
+        if page_vaddr < map.vmarea.start {
             return Err(ResolveFaultError::Unmapped);
         }
 
         let offset_in_mapping = page_vaddr - map.vmarea.start;
-        let paddr_page_base = map
-            .pmarea
-            .start
+
+        // 現在のSharedMemoryサイズを確認（動的に拡張された可能性がある）
+        if offset_in_mapping >= state.size {
+            return Err(ResolveFaultError::Unmapped);
+        }
+
+        // 動的にpaddrを取得（resizeで変更されている可能性があるため）
+        // map.pmarea.startは古い可能性があるので使わない
+        let paddr_page_base = state
+            .paddr
             .checked_add(offset_in_mapping)
             .ok_or(ResolveFaultError::Invalid)?;
+
         Ok(ResolveFaultResult {
             paddr_page_base,
             is_tail: false,
@@ -254,7 +325,6 @@ impl MemoryMappingOps for SharedMemory {
 impl Drop for SharedMemory {
     fn drop(&mut self) {
         use crate::environment::PAGE_SIZE;
-        use crate::mem::page::free_raw_pages;
 
         let state = self.state.read();
         if state.mapping_count > 0 {
@@ -265,7 +335,7 @@ impl Drop for SharedMemory {
 
         // Only free the physical pages if this object owns them
         if state.owns_memory {
-            let num_pages = (state.size + PAGE_SIZE - 1) / PAGE_SIZE;
+            let num_pages = (state.capacity + PAGE_SIZE - 1) / PAGE_SIZE;
             let pages_ptr = state.paddr as *mut crate::mem::page::Page;
             free_raw_pages(pages_ptr, num_pages);
         }
