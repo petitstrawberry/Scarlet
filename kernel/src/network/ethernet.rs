@@ -136,12 +136,15 @@ impl NetworkLayer for EthernetLayer {
             if dest_ip.len() >= 4 {
                 let ip_bytes = [dest_ip[0], dest_ip[1], dest_ip[2], dest_ip[3]];
                 if ip_bytes == [255, 255, 255, 255] {
-                    [0xFF; 6]
+                    let mac = [0xFF; 6];
+                    mac
                 } else {
-                    [0x00, 0x00, 0x00, 0x00, 0x00, 0x00]
+                    let mac = [0x00, 0x00, 0x00, 0x00, 0x00];
+                    mac
                 }
             } else {
-                [0x00; 6]
+                let mac = [0x00; 6];
+                mac
             }
         } else if let Some(mac_bytes) = context.get("eth_dst_mac") {
             let mut mac = [0u8; 6];
@@ -150,7 +153,8 @@ impl NetworkLayer for EthernetLayer {
             }
             mac
         } else {
-            [0xFF; 6]
+            let mac = [0xFF; 6];
+            mac
         };
 
         let ether_type = context
