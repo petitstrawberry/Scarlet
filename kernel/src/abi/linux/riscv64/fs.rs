@@ -37,27 +37,30 @@ fn is_wl_shm_path(path: &str) -> bool {
 }
 
 /// Linux stat structure for RISC-V 64-bit
-/// This structure matches the Linux kernel's definition for newstat on RISC-V 64-bit
+/// Matches asm-generic struct stat layout used by musl on 64-bit.
 #[derive(Debug, Clone, Copy)]
 #[repr(C)]
 pub struct LinuxStat {
-    pub st_dev: u64,        // Device ID of device containing file
-    pub st_ino: u64,        // Inode number
-    pub st_mode: u32,       // File type and mode
-    pub st_nlink: u32,      // Number of hard links
-    pub st_uid: u32,        // User ID of owner
-    pub st_gid: u32,        // Group ID of owner
-    pub st_rdev: u64,       // Device ID (if special file)
-    pub st_size: i64,       // Total size, in bytes
-    pub st_blksize: i32,    // Block size for filesystem I/O
-    pub st_blocks: i64,     // Number of 512B blocks allocated
-    pub st_atime: i64,      // Time of last access (seconds)
-    pub st_atime_nsec: i64, // Time of last access (nanoseconds)
-    pub st_mtime: i64,      // Time of last modification (seconds)
-    pub st_mtime_nsec: i64, // Time of last modification (nanoseconds)
-    pub st_ctime: i64,      // Time of last status change (seconds)
-    pub st_ctime_nsec: i64, // Time of last status change (nanoseconds)
-    pub __unused: [i32; 2], // Reserved for future use
+    pub st_dev: u64,           // Device ID of device containing file
+    pub st_ino: u64,           // Inode number
+    pub st_mode: u32,          // File type and mode
+    pub st_nlink: u32,         // Number of hard links
+    pub st_uid: u32,           // User ID of owner
+    pub st_gid: u32,           // Group ID of owner
+    pub st_rdev: u64,          // Device ID (if special file)
+    pub __pad1: u64,           // Padding for alignment
+    pub st_size: i64,          // Total size, in bytes
+    pub st_blksize: i32,       // Block size for filesystem I/O
+    pub __pad2: i32,           // Padding for alignment
+    pub st_blocks: i64,        // Number of 512B blocks allocated
+    pub st_atime: i64,         // Time of last access (seconds)
+    pub st_atime_nsec: u64,    // Time of last access (nanoseconds)
+    pub st_mtime: i64,         // Time of last modification (seconds)
+    pub st_mtime_nsec: u64,    // Time of last modification (nanoseconds)
+    pub st_ctime: i64,         // Time of last status change (seconds)
+    pub st_ctime_nsec: u64,    // Time of last status change (nanoseconds)
+    pub __unused4: u32,        // Reserved
+    pub __unused5: u32,        // Reserved
 }
 
 /// Linux statx timestamp structure
@@ -262,8 +265,10 @@ impl LinuxStat {
             st_uid: 0,  // Root user
             st_gid: 0,  // Root group
             st_rdev: 0, // Not a special file by default
+            __pad1: 0,
             st_size: metadata.size as i64,
             st_blksize: 4096,                                // Standard block size
+            __pad2: 0,
             st_blocks: ((metadata.size + 511) / 512) as i64, // Number of 512-byte blocks
             st_atime: metadata.accessed_time as i64,
             st_atime_nsec: 0,
@@ -271,7 +276,8 @@ impl LinuxStat {
             st_mtime_nsec: 0,
             st_ctime: metadata.created_time as i64,
             st_ctime_nsec: 0,
-            __unused: [0; 2],
+            __unused4: 0,
+            __unused5: 0,
         }
     }
 }
@@ -1438,7 +1444,12 @@ pub fn sys_newfstatat(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> u
 
     let path_str = remap_shm_path(&path_str);
 
-    // crate::println!("sys_newfstatat: dirfd={}, path='{}', flags={:#o}", dirfd, path_str, flags);
+    // crate::println!(
+    //     "sys_newfstatat: dirfd={}, path='{}', flags={:#o}",
+    //     dirfd,
+    //     path_str,
+    //     flags
+    // );
 
     let vfs = task.vfs.as_ref().unwrap();
 
@@ -1496,6 +1507,11 @@ pub fn sys_newfstatat(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> u
 
                     let stat = unsafe { &mut *(stat_ptr as *mut LinuxStat) };
                     *stat = LinuxStat::from_metadata(&metadata);
+                    // crate::println!(
+                    //     "sys_newfstatat: path='{}' size={}",
+                    //     path_str,
+                    //     metadata.size
+                    // );
                     0 // Success
                 }
                 Err(_) => usize::MAX, // Error getting metadata
@@ -1541,6 +1557,13 @@ pub fn sys_statx(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize 
         Err(_) => return errno::to_result(errno::EFAULT),
     };
     let path_str = remap_shm_path(&path_str);
+    // crate::println!(
+    //     "sys_statx: dirfd={} path='{}' flags={:#x} mask={:#x}",
+    //     dirfd,
+    //     path_str,
+    //     flags,
+    //     mask
+    // );
 
     let vfs = match task.vfs.as_ref() {
         Some(v) => v,
@@ -1573,6 +1596,11 @@ pub fn sys_statx(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize 
             let stat = LinuxStat::from_metadata(&metadata);
             let statx_ref = unsafe { &mut *statx_ptr };
             fill_statx_from_stat(statx_ref, &stat, metadata.created_time, mask);
+            // crate::println!(
+            //     "sys_statx: empty_path name='{}' size={}",
+            //     entry.name(),
+            //     metadata.size
+            // );
             return 0;
         }
 
@@ -1584,8 +1612,10 @@ pub fn sys_statx(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize 
             st_uid: 0,
             st_gid: 0,
             st_rdev: handle as u64,
+            __pad1: 0,
             st_size: 0,
             st_blksize: 4096,
+            __pad2: 0,
             st_blocks: 0,
             st_atime: 0,
             st_atime_nsec: 0,
@@ -1593,7 +1623,8 @@ pub fn sys_statx(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize 
             st_mtime_nsec: 0,
             st_ctime: 0,
             st_ctime_nsec: 0,
-            __unused: [0; 2],
+            __unused4: 0,
+            __unused5: 0,
         };
         let statx_ref = unsafe { &mut *statx_ptr };
         fill_statx_from_stat(statx_ref, &stat, 0, mask);
@@ -1648,6 +1679,11 @@ pub fn sys_statx(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize 
     let stat = LinuxStat::from_metadata(&metadata);
     let statx_ref = unsafe { &mut *statx_ptr };
     fill_statx_from_stat(statx_ref, &stat, metadata.created_time, mask);
+    // crate::println!(
+    //     "sys_statx: path='{}' size={}",
+    //     path_str,
+    //     metadata.size
+    // );
     0
 }
 
@@ -2920,8 +2956,10 @@ pub fn sys_newfstat(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usi
                 st_uid: 0,
                 st_gid: 0,
                 st_rdev: handle as u64,
+                __pad1: 0,
                 st_size: 0,
                 st_blksize: 4096,
+                __pad2: 0,
                 st_blocks: 0,
                 st_atime: 0,
                 st_atime_nsec: 0,
@@ -2929,7 +2967,8 @@ pub fn sys_newfstat(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usi
                 st_mtime_nsec: 0,
                 st_ctime: 0,
                 st_ctime_nsec: 0,
-                __unused: [0; 2],
+                __unused4: 0,
+                __unused5: 0,
             };
             return 0; // Success
         }
@@ -2943,6 +2982,12 @@ pub fn sys_newfstat(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usi
         Ok(metadata) => {
             let stat = unsafe { &mut *(stat_ptr as *mut LinuxStat) };
             *stat = LinuxStat::from_metadata(&metadata);
+            // crate::println!(
+            //     "sys_newfstat: fd={} name='{}' size={}",
+            //     fd,
+            //     entry.name(),
+            //     metadata.size
+            // );
             0 // Success
         }
         Err(_) => usize::MAX, // Error getting metadata

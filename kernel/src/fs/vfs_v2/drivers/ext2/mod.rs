@@ -880,7 +880,7 @@ impl Ext2FileSystem {
         let bgd = Ext2BlockGroupDescriptor::from_bytes(&bgd_data[bgd_offset as usize..])?;
 
         // Calculate inode table location
-        let inode_size = self.superblock.inode_size as u32;
+        let inode_size = self.superblock.get_inode_size() as u32;
         let inode_block = bgd.inode_table + (local_inode * inode_size) / self.block_size;
         let inode_offset = (local_inode * inode_size) % self.block_size;
 
@@ -1490,7 +1490,7 @@ impl Ext2FileSystem {
         ]);
 
         // Calculate the block and offset within that block for this inode
-        let inode_size = self.superblock.inode_size as u32;
+        let inode_size = self.superblock.get_inode_size() as u32;
         let inodes_per_block = self.block_size / inode_size;
         let block_offset = inode_index / inodes_per_block;
         let inode_offset_in_block = (inode_index % inodes_per_block) * inode_size;

@@ -393,6 +393,8 @@ impl VirtualMemoryManager {
         // If there is an owner, allow it to adjust mapping and tell if this is a tail page
         if let Some(owner_weak) = &memory_map.owner {
             if let Some(owner) = owner_weak.upgrade() {
+                let owner_name = owner.mmap_owner_name();
+                let should_log = owner_name.contains("xkb");
                 match owner.resolve_fault(&access, &memory_map) {
                     Ok(res) => {
                         page_paddr = res.paddr_page_base;
