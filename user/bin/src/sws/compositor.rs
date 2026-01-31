@@ -1574,28 +1574,26 @@ impl Compositor {
                     }
                 }
 
-                if self.left_button_down {
-                    if let Some(state) = self.move_drag {
-                        let old_rect = self
-                            .window_manager
-                            .get_window(state.window_id)
-                            .map(|w| (w.x, w.y, w.width, w.height));
-                        let new_x = state.start_window_x + (self.cursor.x - state.grab_cursor_x);
-                        let new_y = state.start_window_y + (self.cursor.y - state.grab_cursor_y);
-                        self.window_manager
-                            .set_window_position(state.window_id, new_x, new_y);
+                if let Some(state) = self.move_drag {
+                    let old_rect = self
+                        .window_manager
+                        .get_window(state.window_id)
+                        .map(|w| (w.x, w.y, w.width, w.height));
+                    let new_x = state.start_window_x + (self.cursor.x - state.grab_cursor_x);
+                    let new_y = state.start_window_y + (self.cursor.y - state.grab_cursor_y);
+                    self.window_manager
+                        .set_window_position(state.window_id, new_x, new_y);
 
-                        if let Some(r) = old_rect {
-                            self.add_pending_damage(r);
-                        }
-                        if let Some(w) = self.window_manager.get_window(state.window_id) {
-                            self.add_pending_damage((w.x, w.y, w.width, w.height));
-                        }
-
-                        // While moving a window, the compositor "grabs" the pointer.
-                        // Avoid routing mouse moves to the currently focused client.
-                        return Ok(true);
+                    if let Some(r) = old_rect {
+                        self.add_pending_damage(r);
                     }
+                    if let Some(w) = self.window_manager.get_window(state.window_id) {
+                        self.add_pending_damage((w.x, w.y, w.width, w.height));
+                    }
+
+                    // While moving a window, the compositor "grabs" the pointer.
+                    // Avoid routing mouse moves to the currently focused client.
+                    return Ok(true);
                 }
 
                 // Route mouse position to the window under the cursor (TaskBar needs hover input).
