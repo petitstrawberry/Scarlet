@@ -1770,6 +1770,8 @@ impl Compositor {
                     let allow_outside =
                         button == key_codes::BTN_LEFT && !pressed && grab_target == Some(target_id);
                     if allow_outside || self.cursor_position_in_window(window).is_some() {
+                        // Ensure clients see the current pointer position before the button event.
+                        self.send_mouse_position_to_window_unclipped(target_id, window);
                         // Check if this is an extension-owned window
                         if let Some((extension_id, external_client_id)) = window.extension_owner {
                             super::ipc::send_extension_input_event(
