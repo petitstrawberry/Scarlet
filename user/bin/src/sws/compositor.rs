@@ -57,6 +57,7 @@ pub struct Compositor {
     event_counter: u64,
     left_button_down: bool,
     last_left_down_cursor: Option<(i32, i32)>,
+    pointer_grab_window_id: Option<u32>,
     move_drag: Option<MoveDragState>,
     resize_drag: Option<ResizeDragState>,
     resize_outline: Option<(i32, i32, u32, u32)>,
@@ -160,6 +161,7 @@ impl Compositor {
             event_counter: 0,
             left_button_down: false,
             last_left_down_cursor: None,
+            pointer_grab_window_id: None,
             move_drag: None,
             resize_drag: None,
             resize_outline: None,
@@ -1329,64 +1331,78 @@ impl Compositor {
         }
     }
 
+    fn send_mouse_position_to_window_coords(
+        &self,
+        window_id: u32,
+        window: &super::window::Window,
+        window_x: i32,
+        window_y: i32,
+    ) {
+        // Check if this is an extension-owned window
+        if let Some((extension_id, external_client_id)) = window.extension_owner {
+            // Send EXTENSION_INPUT_EVENT for extension windows
+            super::ipc::send_extension_input_event(
+                extension_id,
+                external_client_id,
+                window_id,
+                0,
+                super::input::event_types::EV_ABS,
+                super::input::abs_codes::ABS_X,
+                window_x,
+            );
+            super::ipc::send_extension_input_event(
+                extension_id,
+                external_client_id,
+                window_id,
+                0,
+                super::input::event_types::EV_ABS,
+                super::input::abs_codes::ABS_Y,
+                window_y,
+            );
+            super::ipc::send_extension_input_event(
+                extension_id,
+                external_client_id,
+                window_id,
+                0,
+                super::input::event_types::EV_SYN,
+                0,
+                0,
+            );
+        } else {
+            // Send regular INPUT_EVENT for normal windows
+            super::ipc::send_input_to_window(
+                window_id,
+                0,
+                super::input::event_types::EV_ABS,
+                super::input::abs_codes::ABS_X,
+                window_x,
+            );
+            super::ipc::send_input_to_window(
+                window_id,
+                0,
+                super::input::event_types::EV_ABS,
+                super::input::abs_codes::ABS_Y,
+                window_y,
+            );
+            super::ipc::send_input_to_window(window_id, 0, super::input::event_types::EV_SYN, 0, 0);
+        }
+    }
+
     /// Send mouse position event to a window
     fn send_mouse_position_to_window(&self, window_id: u32, window: &super::window::Window) {
         if let Some((window_x, window_y)) = self.cursor_position_in_window(window) {
-            // Check if this is an extension-owned window
-            if let Some((extension_id, external_client_id)) = window.extension_owner {
-                // Send EXTENSION_INPUT_EVENT for extension windows
-                super::ipc::send_extension_input_event(
-                    extension_id,
-                    external_client_id,
-                    window_id,
-                    0,
-                    super::input::event_types::EV_ABS,
-                    super::input::abs_codes::ABS_X,
-                    window_x,
-                );
-                super::ipc::send_extension_input_event(
-                    extension_id,
-                    external_client_id,
-                    window_id,
-                    0,
-                    super::input::event_types::EV_ABS,
-                    super::input::abs_codes::ABS_Y,
-                    window_y,
-                );
-                super::ipc::send_extension_input_event(
-                    extension_id,
-                    external_client_id,
-                    window_id,
-                    0,
-                    super::input::event_types::EV_SYN,
-                    0,
-                    0,
-                );
-            } else {
-                // Send regular INPUT_EVENT for normal windows
-                super::ipc::send_input_to_window(
-                    window_id,
-                    0,
-                    super::input::event_types::EV_ABS,
-                    super::input::abs_codes::ABS_X,
-                    window_x,
-                );
-                super::ipc::send_input_to_window(
-                    window_id,
-                    0,
-                    super::input::event_types::EV_ABS,
-                    super::input::abs_codes::ABS_Y,
-                    window_y,
-                );
-                super::ipc::send_input_to_window(
-                    window_id,
-                    0,
-                    super::input::event_types::EV_SYN,
-                    0,
-                    0,
-                );
-            }
+            self.send_mouse_position_to_window_coords(window_id, window, window_x, window_y);
         }
+    }
+
+    fn send_mouse_position_to_window_unclipped(
+        &self,
+        window_id: u32,
+        window: &super::window::Window,
+    ) {
+        let window_x = self.cursor.x - window.x;
+        let window_y = self.cursor.y - window.y;
+        self.send_mouse_position_to_window_coords(window_id, window, window_x, window_y);
     }
 
     /// Main event loop
@@ -1526,6 +1542,13 @@ impl Compositor {
                     return Ok(true);
                 }
 
+                if let Some(grab_id) = self.pointer_grab_window_id {
+                    if let Some(window) = self.window_manager.get_window(grab_id) {
+                        self.send_mouse_position_to_window_unclipped(grab_id, window);
+                        return Ok(true);
+                    }
+                }
+
                 // Route mouse move to focused window (converted to absolute coordinates)
                 if let Some(focused_id) = self.window_manager.get_focused_window_id() {
                     if let Some(window) = self.window_manager.get_window(focused_id) {
@@ -1596,6 +1619,13 @@ impl Compositor {
                     return Ok(true);
                 }
 
+                if let Some(grab_id) = self.pointer_grab_window_id {
+                    if let Some(window) = self.window_manager.get_window(grab_id) {
+                        self.send_mouse_position_to_window_unclipped(grab_id, window);
+                        return Ok(true);
+                    }
+                }
+
                 // Route mouse position to the window under the cursor (TaskBar needs hover input).
                 if let Some(win_id) = self
                     .window_manager
@@ -1609,6 +1639,8 @@ impl Compositor {
                 Ok(true)
             }
             CompositorInputEvent::MouseButton { button, pressed } => {
+                let mut grab_target = None;
+
                 if button == key_codes::BTN_LEFT {
                     self.left_button_down = pressed;
                     println!(
@@ -1618,6 +1650,8 @@ impl Compositor {
                         self.cursor.y
                     );
                     if !pressed {
+                        grab_target = self.pointer_grab_window_id;
+                        self.pointer_grab_window_id = None;
                         self.last_left_down_cursor = None;
                         // Always exit move mode on left button release.
                         if self.move_drag.take().is_some() {
@@ -1655,10 +1689,11 @@ impl Compositor {
                 if button == key_codes::BTN_LEFT && pressed {
                     self.last_left_down_cursor = Some((self.cursor.x, self.cursor.y));
                     // Determine target window under cursor.
-                    if let Some(win_id) = self
+                    let win_id_opt = self
                         .window_manager
-                        .window_at_point(self.cursor.x, self.cursor.y)
-                    {
+                        .window_at_point(self.cursor.x, self.cursor.y);
+                    if let Some(win_id) = win_id_opt {
+                        self.pointer_grab_window_id = Some(win_id);
                         // Only change focus if the window accepts focus
                         // Taskbar and Desktop windows are global UI elements that don't steal focus
                         if self.window_manager.window_accepts_focus(win_id) {
@@ -1701,6 +1736,8 @@ impl Compositor {
                                 }
                             }
                         }
+                    } else {
+                        self.pointer_grab_window_id = None;
                     }
 
                     // Normal click behavior (focus/raise).
@@ -1708,15 +1745,31 @@ impl Compositor {
                 }
 
                 // Route button event to the window under the cursor (even if it can't take focus).
-                if let Some(target_id) = self
-                    .window_manager
-                    .window_at_point(self.cursor.x, self.cursor.y)
-                {
+                let target_id = if button == key_codes::BTN_LEFT {
+                    if pressed {
+                        self.pointer_grab_window_id.or_else(|| {
+                            self.window_manager
+                                .window_at_point(self.cursor.x, self.cursor.y)
+                        })
+                    } else {
+                        grab_target.or_else(|| {
+                            self.window_manager
+                                .window_at_point(self.cursor.x, self.cursor.y)
+                        })
+                    }
+                } else {
+                    self.window_manager
+                        .window_at_point(self.cursor.x, self.cursor.y)
+                };
+
+                if let Some(target_id) = target_id {
                     let window = self
                         .window_manager
                         .get_window(target_id)
                         .ok_or("Target window not found")?;
-                    if self.cursor_position_in_window(window).is_some() {
+                    let allow_outside =
+                        button == key_codes::BTN_LEFT && !pressed && grab_target == Some(target_id);
+                    if allow_outside || self.cursor_position_in_window(window).is_some() {
                         // Check if this is an extension-owned window
                         if let Some((extension_id, external_client_id)) = window.extension_owner {
                             super::ipc::send_extension_input_event(
