@@ -417,12 +417,14 @@ impl ArpLayer {
 
                 drop(pending);
 
-                // Update statistics
                 let mut stats = self.stats.write();
                 stats.packets_received += 1;
                 stats.bytes_received += (arp_bytes.len() + 14) as u64;
             }
         }
+
+        Ok(())
+    }
 
         Ok(())
     }
@@ -471,13 +473,10 @@ impl NetworkLayer for ArpLayer {
     }
 
     fn receive(&self, packet: &[u8]) -> Result<(), SocketError> {
-
-        // Update statistics
         let mut stats = self.stats.write();
         stats.packets_received += 1;
         stats.bytes_received += packet.len() as u64;
 
-        // Process ARP packet
         self.receive_packet(packet)
     }
 
