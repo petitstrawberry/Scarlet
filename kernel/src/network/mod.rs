@@ -31,8 +31,9 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 use spin::Once;
 
 pub mod arp;
-pub mod device_integration;
+pub mod config;
 pub mod ethernet;
+pub mod ethernet_interface;
 pub mod icmp;
 pub mod ipv4;
 pub mod local;
@@ -42,7 +43,6 @@ pub mod syscall;
 pub mod tcp;
 pub mod tcpip_stack;
 pub mod udp;
-pub mod virtio_integration;
 #[cfg(target_arch = "riscv64")]
 pub mod virtio_net_tests;
 

@@ -30,10 +30,14 @@ use crate::device::events::InterruptCapableDevice;
 use crate::device::{Device, DeviceType};
 use crate::drivers::virtio::features::{VIRTIO_RING_F_EVENT_IDX, VIRTIO_RING_F_INDIRECT_DESC};
 use crate::interrupt::InterruptId;
+use crate::network::config::apply_pending_ip_for_interface;
+use crate::network::ethernet_interface::EthernetNetworkInterface;
+use crate::network::get_network_manager;
 use crate::object::capability::{MemoryMappingOps, Selectable};
 use crate::{
     device::network::{
-        DevicePacket, MacAddress, NetworkDevice, NetworkInterfaceConfig, NetworkStats,
+        DevicePacket, EthernetDevice, MacAddress, NetworkDevice, NetworkInterfaceConfig,
+        NetworkStats,
     },
     drivers::virtio::{
         device::{Register, VirtioDevice},
@@ -193,6 +197,22 @@ impl VirtioNetDevice {
         }
 
         device
+    }
+
+    pub fn register_interface(self: &alloc::sync::Arc<Self>, name: &str) {
+        let manager = get_network_manager();
+        let interface = alloc::sync::Arc::new(EthernetNetworkInterface::new(name, self.clone()));
+
+        match manager.register_interface(name, interface) {
+            Ok(()) => {
+                *self.interface_name.lock() = Some(alloc::string::String::from(name));
+                apply_pending_ip_for_interface(name);
+                crate::early_println!("[virtio-net] Registered interface {}", name);
+            }
+            Err(e) => {
+                crate::early_println!("[virtio-net] Failed to register interface {}: {}", name, e);
+            }
+        }
     }
 
     /// Read device configuration from the VirtIO config space
@@ -524,6 +544,7 @@ impl ControlOps for VirtioNetDevice {
 impl InterruptCapableDevice for VirtioNetDevice {
     fn handle_interrupt(&self) -> crate::interrupt::InterruptResult<()> {
         let isr = self.read32_register(Register::InterruptStatus);
+        crate::early_println!("[virtio-net] Interrupt received, ISR=0x{:x}", isr);
         if isr == 0 {
             return Ok(());
         }
@@ -531,15 +552,30 @@ impl InterruptCapableDevice for VirtioNetDevice {
         self.write32_register(Register::InterruptAck, isr & 0x03);
 
         let packets = self.process_received_packets().unwrap_or_default();
+        crate::early_println!("[virtio-net] Processed {} packets", packets.len());
         if packets.is_empty() {
             return Ok(());
         }
 
-        if let Some(name) = self.interface_name.lock().clone() {
+        let interface_name = self.interface_name.lock().clone();
+        crate::early_println!("[virtio-net] Interface name: {:?}", interface_name);
+        if let Some(name) = interface_name {
+            crate::early_println!(
+                "[virtio-net] Forwarding {} packets to interface {}",
+                packets.len(),
+                name
+            );
             let manager = crate::network::get_network_manager();
-            for packet in packets {
+            for (i, packet) in packets.iter().enumerate() {
+                crate::early_println!("[virtio-net] Packet {}: {} bytes", i, packet.len);
+                if packet.len >= 14 {
+                    let eth_type = u16::from_be_bytes([packet.data[12], packet.data[13]]);
+                    crate::early_println!("[virtio-net]   EtherType: 0x{:04X}", eth_type);
+                }
                 manager.handle_received_packet(&name, &packet);
             }
+        } else {
+            crate::early_println!("[virtio-net] No interface name set!");
         }
 
         Ok(())
@@ -724,6 +760,12 @@ impl NetworkDevice for VirtioNetDevice {
 
     fn get_stats(&self) -> NetworkStats {
         self.stats.lock().clone()
+    }
+}
+
+impl EthernetDevice for VirtioNetDevice {
+    fn mac_address(&self) -> Result<MacAddress, &'static str> {
+        self.get_mac_address()
     }
 }
 

@@ -113,7 +113,7 @@ pub fn sys_network_set_ipv4(tf: &mut Trapframe) -> usize {
         return usize::MAX;
     }
 
-    match crate::network::device_integration::set_interface_ip(&iface, ip) {
+    match crate::network::config::set_interface_ip(&iface, ip) {
         Ok(()) => 0,
         Err(_) => usize::MAX,
     }

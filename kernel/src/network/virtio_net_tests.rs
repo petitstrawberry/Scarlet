@@ -22,13 +22,13 @@ use crate::device::network::DevicePacket;
 use crate::drivers::network::virtio_net::VirtioNetDevice;
 use crate::network::arp::{ArpCacheEntry, ArpEntryState, ArpLayer, ArpPacket};
 use crate::network::ethernet::{EthernetHeader, EthernetLayer, ether_type};
+use crate::network::ethernet_interface::EthernetNetworkInterface;
 use crate::network::icmp::{IcmpEcho, IcmpHeader, IcmpLayer, code, message_type};
 use crate::network::ipv4::{Ipv4Address, Ipv4Header, Ipv4Layer, protocol};
 use crate::network::socket::SocketError;
 use crate::network::socket::{SocketAddress, SocketControl, SocketObject, SocketState};
 use crate::network::tcp::{TcpHeader, tcp_flags};
 use crate::network::udp::{UdpHeader, UdpLayer, UdpSocket};
-use crate::network::virtio_integration::VirtIONetworkInterface;
 use crate::network::{LayerContext, NetworkInterface, NetworkLayer, get_network_manager};
 
 /// Base MMIO address for virtio devices on RISC-V virt machine
@@ -68,8 +68,10 @@ const TEST_TIMEOUT_MS: u64 = 5000;
 fn init_test_interfaces()
 -> Result<(Arc<dyn NetworkInterface>, Arc<dyn NetworkInterface>), &'static str> {
     // Create VirtIO network interfaces at known MMIO addresses
-    let net0_interface = Arc::new(VirtIONetworkInterface::new("eth0", NET0_MMIO_ADDR));
-    let net1_interface = Arc::new(VirtIONetworkInterface::new("eth1", NET1_MMIO_ADDR));
+    let net0_device = Arc::new(VirtioNetDevice::new(NET0_MMIO_ADDR));
+    let net1_device = Arc::new(VirtioNetDevice::new(NET1_MMIO_ADDR));
+    let net0_interface = Arc::new(EthernetNetworkInterface::new("eth0", net0_device));
+    let net1_interface = Arc::new(EthernetNetworkInterface::new("eth1", net1_device));
 
     // Register interfaces with the network manager
     let manager = get_network_manager();

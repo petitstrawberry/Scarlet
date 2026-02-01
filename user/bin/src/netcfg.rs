@@ -5,7 +5,8 @@ extern crate scarlet_std as std;
 
 use std::env;
 use std::network::{
-    set_default_gateway, set_dns_server, set_interface_ipv4, set_netmask, Ipv4Address,
+    Ipv4Address, list_interfaces, set_default_gateway, set_dns_server, set_interface_ipv4,
+    set_netmask,
 };
 use std::println;
 
@@ -30,6 +31,7 @@ fn print_usage() {
     println!(
         "Usage: netcfg --iface <name> [--ip <addr>] [--mask <addr>] [--gw <addr>] [--dns <addr>]"
     );
+    println!("       netcfg --list");
 }
 
 #[unsafe(no_mangle)]
@@ -44,6 +46,23 @@ fn main() -> i32 {
     let mut i = 1;
     while i < args.len() {
         match args[i].as_str() {
+            "--list" => {
+                let mut buffer = [0u8; 256];
+                match list_interfaces(&mut buffer) {
+                    Ok(len) if len > 0 => {
+                        if let Ok(text) = core::str::from_utf8(&buffer[..len]) {
+                            println!("{}", text);
+                        }
+                    }
+                    Ok(_) => {
+                        println!("(no interfaces)");
+                    }
+                    Err(_) => {
+                        println!("netcfg: failed to list interfaces");
+                    }
+                }
+                return 0;
+            }
             "--iface" => {
                 i += 1;
                 iface = args.get(i).map(|s| s.as_str());
@@ -89,7 +108,7 @@ fn main() -> i32 {
     let mut failed = false;
     if let Some(ip) = ip {
         if let Err(_) = set_interface_ipv4(iface, ip) {
-            println!("netcfg: failed to set ip");
+            println!("netcfg: failed to set ip (iface not found?)");
             failed = true;
         }
     }
@@ -112,9 +131,5 @@ fn main() -> i32 {
         }
     }
 
-    if failed {
-        1
-    } else {
-        0
-    }
+    if failed { 1 } else { 0 }
 }

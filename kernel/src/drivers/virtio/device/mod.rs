@@ -987,6 +987,7 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
                 name
             );
             let dev = Arc::new(VirtioNetDevice::new(base_addr));
+            dev.register_interface(&name);
 
             // Register interrupt handler if IRQ resource is available
             if let Some(irq_resource) = device
