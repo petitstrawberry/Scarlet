@@ -520,9 +520,12 @@ mod tests {
     fn test_udp_header_creation() {
         let header = UdpHeader::new(1234, 5678, 100);
 
-        assert_eq!(header.src_port, 1234);
-        assert_eq!(header.dst_port, 5678);
-        assert_eq!(header.length, 100);
+        let src_port = unsafe { core::ptr::addr_of!(header.src_port).read_unaligned() };
+        let dst_port = unsafe { core::ptr::addr_of!(header.dst_port).read_unaligned() };
+        let length = unsafe { core::ptr::addr_of!(header.length).read_unaligned() };
+        assert_eq!(src_port, 1234);
+        assert_eq!(dst_port, 5678);
+        assert_eq!(length, 100);
     }
 
     #[test_case]
@@ -546,10 +549,14 @@ mod tests {
 
         let header = UdpHeader::from_bytes(&bytes).unwrap();
 
-        assert_eq!(header.src_port, 1234);
-        assert_eq!(header.dst_port, 5678);
-        assert_eq!(header.length, 100);
-        assert_eq!(header.checksum, 0xABCD);
+        let src_port = unsafe { core::ptr::addr_of!(header.src_port).read_unaligned() };
+        let dst_port = unsafe { core::ptr::addr_of!(header.dst_port).read_unaligned() };
+        let length = unsafe { core::ptr::addr_of!(header.length).read_unaligned() };
+        let checksum = unsafe { core::ptr::addr_of!(header.checksum).read_unaligned() };
+        assert_eq!(src_port, 1234);
+        assert_eq!(dst_port, 5678);
+        assert_eq!(length, 100);
+        assert_eq!(checksum, 0xABCD);
     }
 
     #[test_case]
@@ -562,7 +569,8 @@ mod tests {
         header.checksum = header.calculate_checksum(src_ip, dst_ip, data);
 
         // Just verify that checksum calculation runs without panicking
-        assert_ne!(header.checksum, 0);
+        let checksum = unsafe { core::ptr::addr_of!(header.checksum).read_unaligned() };
+        assert_ne!(checksum, 0);
     }
 
     #[test_case]

@@ -992,6 +992,10 @@ mod tests {
             fn name(&self) -> &'static str {
                 self.name
             }
+
+            fn as_any(&self) -> &dyn core::any::Any {
+                self
+            }
         }
 
         let manager = NetworkManager::new();

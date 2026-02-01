@@ -399,6 +399,8 @@ impl NetworkLayer for Ipv4Layer {
 
 #[cfg(test)]
 mod tests {
+    use alloc::vec;
+
     use super::*;
 
     #[test_case]
@@ -476,7 +478,9 @@ mod tests {
         let header = Ipv4Header::from_bytes(&bytes).unwrap();
         assert_eq!(header.version(), 4);
         assert_eq!(header.ihl(), 5);
-        assert_eq!(header.total_length, 30);
+        let total_length =
+            unsafe { core::ptr::addr_of!(header.total_length).read_unaligned() };
+        assert_eq!(total_length, 30);
         assert_eq!(header.protocol, protocol::TCP);
         assert_eq!(header.source_ip, [192, 168, 1, 100]);
         assert_eq!(header.dest_ip, [192, 168, 1, 1]);
@@ -485,7 +489,7 @@ mod tests {
 
     #[test_case]
     fn test_ipv4_header_invalid_version() {
-        let mut bytes = vec![0x55u8; 20]; // Invalid version (5)
+        let mut bytes = alloc::vec![0x55u8; 20]; // Invalid version (5)
         assert!(Ipv4Header::from_bytes(&bytes).is_none());
     }
 

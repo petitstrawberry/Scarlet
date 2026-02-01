@@ -919,6 +919,10 @@ mod tests {
             fn name(&self) -> &'static str {
                 "simple"
             }
+
+            fn as_any(&self) -> &dyn core::any::Any {
+                self
+            }
         }
 
         let layer = Arc::new(SimpleMockLayer);
@@ -950,6 +954,10 @@ mod tests {
             }
             fn name(&self) -> &'static str {
                 self.0
+            }
+
+            fn as_any(&self) -> &dyn core::any::Any {
+                self
             }
         }
 
@@ -984,6 +992,10 @@ mod tests {
             }
             fn name(&self) -> &'static str {
                 "simple"
+            }
+
+            fn as_any(&self) -> &dyn core::any::Any {
+                self
             }
         }
 
@@ -1022,6 +1034,10 @@ mod tests {
             }
             fn name(&self) -> &'static str {
                 "global_test"
+            }
+
+            fn as_any(&self) -> &dyn core::any::Any {
+                self
             }
         }
 
@@ -1197,6 +1213,10 @@ mod tests {
         fn name(&self) -> &'static str {
             self.name
         }
+
+        fn as_any(&self) -> &dyn core::any::Any {
+            self
+        }
     }
 
     /// Mock IP layer simulating real IPv4 packets
@@ -1322,6 +1342,10 @@ mod tests {
 
         fn name(&self) -> &'static str {
             self.name
+        }
+
+        fn as_any(&self) -> &dyn core::any::Any {
+            self
         }
     }
 
@@ -1452,6 +1476,10 @@ mod tests {
 
         fn name(&self) -> &'static str {
             self.name
+        }
+
+        fn as_any(&self) -> &dyn core::any::Any {
+            self
         }
     }
 
@@ -1835,6 +1863,10 @@ mod tests {
                     layer.configure(config, &[])?;
                 }
                 Ok(())
+            }
+
+            fn as_any(&self) -> &dyn core::any::Any {
+                self
             }
         }
 

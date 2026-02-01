@@ -893,8 +893,10 @@ mod tests {
     fn test_tcp_header_creation() {
         let header = TcpHeader::new(8080, 80);
 
-        assert_eq!(header.src_port, 8080);
-        assert_eq!(header.dst_port, 80);
+        let src_port = unsafe { core::ptr::addr_of!(header.src_port).read_unaligned() };
+        let dst_port = unsafe { core::ptr::addr_of!(header.dst_port).read_unaligned() };
+        assert_eq!(src_port, 8080);
+        assert_eq!(dst_port, 80);
         assert_eq!(header.flags(), 0);
         assert_eq!(header.data_offset(), 20);
     }
@@ -935,7 +937,7 @@ mod tests {
         header.seq_number = 1000;
         header.ack_number = 2000;
 
-        let checksum = header.calculate_checksum(&local_ip, &dest_ip, data);
+        let checksum = header.calculate_checksum(local_ip, dest_ip, data);
 
         assert_ne!(checksum, 0);
     }

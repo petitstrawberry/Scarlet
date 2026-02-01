@@ -514,7 +514,9 @@ mod tests {
         assert!(!packet.is_reply());
         assert_eq!(packet.sender_ip, sender_ip);
         assert_eq!(packet.target_ip, target_ip);
-        assert_eq!(packet.operation, operation::REQUEST);
+        let operation_value =
+            unsafe { core::ptr::addr_of!(packet.operation).read_unaligned() };
+        assert_eq!(operation_value, operation::REQUEST);
     }
 
     #[test_case]
@@ -528,7 +530,9 @@ mod tests {
         assert!(packet.is_reply());
         assert_eq!(packet.sender_mac, sender_mac);
         assert_eq!(packet.target_mac, sender_mac);
-        assert_eq!(packet.operation, operation::REPLY);
+        let operation_value =
+            unsafe { core::ptr::addr_of!(packet.operation).read_unaligned() };
+        assert_eq!(operation_value, operation::REPLY);
     }
 
     #[test_case]
@@ -562,11 +566,19 @@ mod tests {
 
         let parsed = ArpPacket::from_bytes(&bytes).unwrap();
 
-        assert_eq!(parsed.htype, original.htype);
-        assert_eq!(parsed.ptype, original.ptype);
+        let parsed_htype = unsafe { core::ptr::addr_of!(parsed.htype).read_unaligned() };
+        let original_htype = unsafe { core::ptr::addr_of!(original.htype).read_unaligned() };
+        assert_eq!(parsed_htype, original_htype);
+        let parsed_ptype = unsafe { core::ptr::addr_of!(parsed.ptype).read_unaligned() };
+        let original_ptype = unsafe { core::ptr::addr_of!(original.ptype).read_unaligned() };
+        assert_eq!(parsed_ptype, original_ptype);
         assert_eq!(parsed.hlen, original.hlen);
         assert_eq!(parsed.plen, original.plen);
-        assert_eq!(parsed.operation, original.operation);
+        let parsed_operation =
+            unsafe { core::ptr::addr_of!(parsed.operation).read_unaligned() };
+        let original_operation =
+            unsafe { core::ptr::addr_of!(original.operation).read_unaligned() };
+        assert_eq!(parsed_operation, original_operation);
         assert_eq!(parsed.sender_mac, original.sender_mac);
         assert_eq!(parsed.sender_ip, original.sender_ip);
         assert_eq!(parsed.target_mac, original.target_mac);

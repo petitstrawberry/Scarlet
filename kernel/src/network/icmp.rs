@@ -401,8 +401,10 @@ mod tests {
     fn test_icmp_echo_header() {
         let echo = IcmpEcho::new(1234, 5678);
 
-        assert_eq!(echo.identifier, 1234);
-        assert_eq!(echo.sequence, 5678);
+        let identifier = unsafe { core::ptr::addr_of!(echo.identifier).read_unaligned() };
+        let sequence = unsafe { core::ptr::addr_of!(echo.sequence).read_unaligned() };
+        assert_eq!(identifier, 1234);
+        assert_eq!(sequence, 5678);
     }
 
     #[test_case]
@@ -423,8 +425,10 @@ mod tests {
 
         let echo = IcmpEcho::from_bytes(&bytes).unwrap();
 
-        assert_eq!(echo.identifier, 1234);
-        assert_eq!(echo.sequence, 5678);
+        let identifier = unsafe { core::ptr::addr_of!(echo.identifier).read_unaligned() };
+        let sequence = unsafe { core::ptr::addr_of!(echo.sequence).read_unaligned() };
+        assert_eq!(identifier, 1234);
+        assert_eq!(sequence, 5678);
     }
 
     #[test_case]
