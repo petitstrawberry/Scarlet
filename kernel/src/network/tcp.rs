@@ -15,7 +15,9 @@ use crate::network::ipv4::Ipv4Address;
 use crate::network::protocol_stack::get_network_manager;
 use crate::network::protocol_stack::{LayerContext, NetworkLayer, NetworkLayerStats};
 use crate::network::socket::SocketError;
-use crate::network::socket::{Inet4SocketAddress, SocketAddress, SocketControl, SocketObject, SocketState};
+use crate::network::socket::{
+    Inet4SocketAddress, SocketAddress, SocketControl, SocketObject, SocketState,
+};
 
 /// TCP connection states
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -271,8 +273,7 @@ impl TcpSocket {
                     self.handle_data_segment(src_ip, header, data);
                 }
             }
-            _ => {
-            }
+            _ => {}
         }
     }
 
@@ -537,7 +538,8 @@ impl TcpSocket {
         // Send through IP layer
         if let Some(ip_layer) = get_network_manager().get_layer("ip") {
             if let Ok(()) = ip_layer.send(&segment, &ip_context, &[]) {
-                self.bytes_sent.fetch_add(segment.len() as u64, Ordering::SeqCst);
+                self.bytes_sent
+                    .fetch_add(segment.len() as u64, Ordering::SeqCst);
 
                 if update_seq {
                     self.send_seq.fetch_add(total_len as u32, Ordering::SeqCst);
@@ -825,7 +827,6 @@ impl TcpLayer {
 
     /// Process incoming TCP segment
     pub fn receive_segment(&self, src_ip: Ipv4Address, header: TcpHeader, data: &[u8]) {
-
         let mut stats = self.stats.write();
         stats.packets_received += 1;
         stats.bytes_received += (header.data_offset() + data.len()) as u64;

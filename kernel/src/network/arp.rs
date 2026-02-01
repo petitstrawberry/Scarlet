@@ -403,8 +403,7 @@ impl ArpLayer {
                             eth_context.set("eth_src_mac", &local_mac);
 
                             // Re-send the queued packet
-                            if let Err(e) = eth_layer.send(&packet_bytes, &eth_context, &[]) {
-                            }
+                            if let Err(e) = eth_layer.send(&packet_bytes, &eth_context, &[]) {}
                         }
                     }
 
@@ -514,8 +513,7 @@ mod tests {
         assert!(!packet.is_reply());
         assert_eq!(packet.sender_ip, sender_ip);
         assert_eq!(packet.target_ip, target_ip);
-        let operation_value =
-            unsafe { core::ptr::addr_of!(packet.operation).read_unaligned() };
+        let operation_value = unsafe { core::ptr::addr_of!(packet.operation).read_unaligned() };
         assert_eq!(operation_value, operation::REQUEST);
     }
 
@@ -530,8 +528,7 @@ mod tests {
         assert!(packet.is_reply());
         assert_eq!(packet.sender_mac, sender_mac);
         assert_eq!(packet.target_mac, sender_mac);
-        let operation_value =
-            unsafe { core::ptr::addr_of!(packet.operation).read_unaligned() };
+        let operation_value = unsafe { core::ptr::addr_of!(packet.operation).read_unaligned() };
         assert_eq!(operation_value, operation::REPLY);
     }
 
@@ -574,8 +571,7 @@ mod tests {
         assert_eq!(parsed_ptype, original_ptype);
         assert_eq!(parsed.hlen, original.hlen);
         assert_eq!(parsed.plen, original.plen);
-        let parsed_operation =
-            unsafe { core::ptr::addr_of!(parsed.operation).read_unaligned() };
+        let parsed_operation = unsafe { core::ptr::addr_of!(parsed.operation).read_unaligned() };
         let original_operation =
             unsafe { core::ptr::addr_of!(original.operation).read_unaligned() };
         assert_eq!(parsed_operation, original_operation);

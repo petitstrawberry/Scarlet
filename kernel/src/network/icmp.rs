@@ -329,8 +329,10 @@ impl IcmpLayer {
                 // Handle ping request - send reply
                 if data.len() >= 4 {
                     if let Some(echo) = IcmpEcho::from_bytes(data) {
-                        let identifier = unsafe { core::ptr::addr_of!(echo.identifier).read_unaligned() };
-                        let sequence = unsafe { core::ptr::addr_of!(echo.sequence).read_unaligned() };
+                        let identifier =
+                            unsafe { core::ptr::addr_of!(echo.identifier).read_unaligned() };
+                        let sequence =
+                            unsafe { core::ptr::addr_of!(echo.sequence).read_unaligned() };
                         early_println!(
                             "[ICMP] Ping request from (id={}, seq={})",
                             identifier,
@@ -342,10 +344,8 @@ impl IcmpLayer {
                     }
                 }
             }
-            message_type::ECHO_REPLY => {
-            }
-            _ => {
-            }
+            message_type::ECHO_REPLY => {}
+            _ => {}
         }
 
         Ok(())

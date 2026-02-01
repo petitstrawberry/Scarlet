@@ -40,6 +40,7 @@ pub mod socket;
 pub mod syscall;
 pub mod tcp;
 pub mod udp;
+pub mod virtio_integration;
 
 // Re-export commonly used types
 pub use protocol_stack::{

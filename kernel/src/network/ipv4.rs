@@ -478,8 +478,7 @@ mod tests {
         let header = Ipv4Header::from_bytes(&bytes).unwrap();
         assert_eq!(header.version(), 4);
         assert_eq!(header.ihl(), 5);
-        let total_length =
-            unsafe { core::ptr::addr_of!(header.total_length).read_unaligned() };
+        let total_length = unsafe { core::ptr::addr_of!(header.total_length).read_unaligned() };
         assert_eq!(total_length, 30);
         assert_eq!(header.protocol, protocol::TCP);
         assert_eq!(header.source_ip, [192, 168, 1, 100]);
