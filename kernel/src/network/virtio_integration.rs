@@ -16,7 +16,7 @@ use crate::device::network::{DevicePacket, MacAddress, NetworkDevice};
 use crate::drivers::network::virtio_net::VirtioNetDevice;
 use crate::network::ethernet::EthernetLayer;
 use crate::network::ipv4::Ipv4Address;
-use crate::network::{InterfaceStats, NetworkConfig, NetworkInterface, get_network_manager};
+use crate::network::{get_network_manager, InterfaceStats, NetworkConfig, NetworkInterface};
 
 /// VirtIO Network Interface
 ///
@@ -141,6 +141,7 @@ pub fn init_virtio_net_interfaces() {
         crate::println!("[VirtIO-net] Registering {} at MMIO {:#x}", name, mmio_addr);
 
         let interface = Arc::new(VirtIONetworkInterface::new(name, *mmio_addr));
+        interface.device().set_interface_name(name);
 
         match manager.register_interface(name, interface.clone()) {
             Ok(_) => {
@@ -178,10 +179,6 @@ pub fn init_virtio_net_interfaces() {
         gateway.as_bytes()[2],
         gateway.as_bytes()[3]
     );
-
-    // Start network polling
-    manager.start_polling();
-    crate::println!("[VirtIO-net] Started network polling");
 
     crate::println!("[VirtIO-net] Initialization complete");
 }

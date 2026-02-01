@@ -42,11 +42,11 @@ use alloc::sync::Arc;
 
 use crate::arch::Trapframe;
 use crate::network::{
-    LocalSocketAddress, NetworkManager, ShutdownHow, SocketAddress, SocketObject, SocketProtocol,
-    SocketType, local::LocalSocket,
+    local::LocalSocket, LocalSocketAddress, NetworkManager, ShutdownHow, SocketAddress,
+    SocketObject, SocketProtocol, SocketType,
 };
-use crate::object::KernelObject;
 use crate::object::handle::{AccessMode, HandleMetadata, HandleType};
+use crate::object::KernelObject;
 use crate::task::mytask;
 
 /// System call: Create a new socket

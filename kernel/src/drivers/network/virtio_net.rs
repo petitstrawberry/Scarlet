@@ -23,18 +23,20 @@
 //! Each network packet is handled through the VirtIO descriptor chain mechanism,
 //! with proper memory management for packet buffers.
 
-use alloc::{boxed::Box, vec, vec::Vec};
+use alloc::{boxed::Box, string::String, vec, vec::Vec};
 use spin::{Mutex, RwLock};
 
+use crate::device::events::InterruptCapableDevice;
 use crate::device::{Device, DeviceType};
 use crate::drivers::virtio::features::{VIRTIO_RING_F_EVENT_IDX, VIRTIO_RING_F_INDIRECT_DESC};
+use crate::interrupt::InterruptId;
 use crate::object::capability::{MemoryMappingOps, Selectable};
 use crate::{
     device::network::{
         DevicePacket, MacAddress, NetworkDevice, NetworkInterfaceConfig, NetworkStats,
     },
     drivers::virtio::{
-        device::VirtioDevice,
+        device::{Register, VirtioDevice},
         queue::{DescriptorFlag, VirtQueue},
     },
     object::capability::ControlOps,
@@ -143,6 +145,8 @@ pub struct VirtioNetDevice {
     stats: Mutex<NetworkStats>,
     initialized: Mutex<bool>,
     rx_buffers: Mutex<Vec<Box<[u8]>>>,
+    interrupt_id: Mutex<Option<InterruptId>>,
+    interface_name: Mutex<Option<String>>,
 }
 
 impl VirtioNetDevice {
@@ -164,6 +168,8 @@ impl VirtioNetDevice {
             stats: Mutex::new(NetworkStats::default()),
             initialized: Mutex::new(false),
             rx_buffers: Mutex::new(Vec::new()),
+            interrupt_id: Mutex::new(None),
+            interface_name: Mutex::new(None),
         };
 
         // Initialize the VirtIO device first
@@ -440,6 +446,28 @@ impl VirtioNetDevice {
             true
         }
     }
+
+    /// Enable interrupts for this device
+    pub fn enable_interrupts(&self, interrupt_id: InterruptId) -> Result<(), &'static str> {
+        *self.interrupt_id.lock() = Some(interrupt_id);
+
+        let isr = self.read32_register(Register::InterruptStatus);
+        if isr != 0 {
+            self.write32_register(Register::InterruptAck, isr & 0x03);
+        }
+
+        crate::interrupt::InterruptManager::with_manager(|mgr| {
+            mgr.enable_external_interrupt(interrupt_id, 0)
+        })
+        .map_err(|_| "Failed to enable interrupt in controller")?;
+
+        Ok(())
+    }
+
+    /// Set interface name for interrupt dispatch
+    pub fn set_interface_name(&self, name: &str) {
+        *self.interface_name.lock() = Some(String::from(name));
+    }
 }
 
 impl MemoryMappingOps for VirtioNetDevice {
@@ -490,6 +518,35 @@ impl ControlOps for VirtioNetDevice {
     // VirtIO network devices don't support control operations by default
     fn control(&self, _command: u32, _arg: usize) -> Result<i32, &'static str> {
         Err("Control operations not supported")
+    }
+}
+
+impl InterruptCapableDevice for VirtioNetDevice {
+    fn handle_interrupt(&self) -> crate::interrupt::InterruptResult<()> {
+        let isr = self.read32_register(Register::InterruptStatus);
+        if isr == 0 {
+            return Ok(());
+        }
+
+        self.write32_register(Register::InterruptAck, isr & 0x03);
+
+        let packets = self.process_received_packets().unwrap_or_default();
+        if packets.is_empty() {
+            return Ok(());
+        }
+
+        if let Some(name) = self.interface_name.lock().clone() {
+            let manager = crate::network::get_network_manager();
+            for packet in packets {
+                manager.handle_received_packet(&name, &packet);
+            }
+        }
+
+        Ok(())
+    }
+
+    fn interrupt_id(&self) -> Option<InterruptId> {
+        self.interrupt_id.lock().clone()
     }
 }
 
@@ -813,7 +870,7 @@ mod tests {
     fn test_virtio_net_multiple_devices() {
         // Test creating multiple devices (simulating net0, net1, net2)
         let device1 = VirtioNetDevice::new(0x10003000); // net0 - user netdev
-        let device2 = VirtioNetDevice::new(0x10004000); // net1 - hub netdev  
+        let device2 = VirtioNetDevice::new(0x10004000); // net1 - hub netdev
         let device3 = VirtioNetDevice::new(0x10005000); // net2 - hub netdev
 
         // Verify each device has unique base addresses
@@ -1087,7 +1144,7 @@ mod tests {
         // -netdev hubport,id=net2,hubid=0
 
         let device_net0 = VirtioNetDevice::new(0x10003000); // bus.2 -> user netdev
-        let device_net1 = VirtioNetDevice::new(0x10004000); // bus.3 -> hub netdev 
+        let device_net1 = VirtioNetDevice::new(0x10004000); // bus.3 -> hub netdev
         let device_net2 = VirtioNetDevice::new(0x10005000); // bus.4 -> hub netdev
 
         // Verify all devices are properly configured

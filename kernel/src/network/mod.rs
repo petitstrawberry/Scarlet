@@ -69,7 +69,6 @@ use crate::device::network::{DevicePacket, MacAddress};
 use crate::network::arp::ArpCacheEntry;
 use crate::network::ipv4::Ipv4Address;
 use crate::object::KernelObject;
-use crate::timer::{TimerHandler, add_timer, get_tick, ms_to_ticks};
 
 /// Unique socket identifier
 pub type SocketId = usize;
@@ -156,12 +155,6 @@ pub struct NetworkManager {
 
     /// Network configuration
     network_config: spin::RwLock<NetworkConfig>,
-
-    /// Polling interval in milliseconds
-    poll_interval_ms: spin::RwLock<u64>,
-
-    /// Polling active flag
-    polling_active: spin::RwLock<bool>,
 }
 
 impl NetworkManager {
@@ -179,8 +172,6 @@ impl NetworkManager {
             default_interface: spin::RwLock::new(None),
             arp_cache: spin::RwLock::new(BTreeMap::new()),
             network_config: spin::RwLock::new(NetworkConfig::default()),
-            poll_interval_ms: spin::RwLock::new(10),
-            polling_active: spin::RwLock::new(false),
         }
     }
 
@@ -306,41 +297,6 @@ impl NetworkManager {
 
     pub fn get_default_gateway(&self) -> Option<Ipv4Address> {
         self.network_config.read().default_gateway
-    }
-
-    // ===================================================================
-    // Polling Management
-    // ===================================================================
-
-    pub fn start_polling(&self) {
-        if *self.polling_active.read() {
-            return;
-        }
-        *self.polling_active.write() = true;
-
-        let interval_ms = *self.poll_interval_ms.read();
-        let interval_ticks = ms_to_ticks(interval_ms);
-
-        let handler: Arc<dyn TimerHandler> = Arc::new(NetworkPollingHandler);
-        let now = get_tick();
-        add_timer(now + interval_ticks, &handler, 0);
-    }
-
-    pub fn poll_all_interfaces(&self) -> Vec<(String, DevicePacket)> {
-        let mut received = Vec::new();
-        for (name, interface) in self.interfaces.read().iter() {
-            match interface.poll() {
-                Ok(packets) => {
-                    for packet in packets {
-                        received.push((name.clone(), packet));
-                    }
-                }
-                Err(e) => {
-                    crate::println!("[NetworkManager] Error polling {}: {}", name, e);
-                }
-            }
-        }
-        received
     }
 
     pub fn handle_received_packet(&self, _interface_name: &str, packet: &DevicePacket) {
@@ -543,29 +499,6 @@ impl NetworkManager {
     pub fn named_socket_count(&self) -> usize {
         let sockets = self.named_sockets.read();
         sockets.values().filter(|s| s.upgrade().is_some()).count()
-    }
-}
-
-/// Timer handler for network polling
-struct NetworkPollingHandler;
-
-impl TimerHandler for NetworkPollingHandler {
-    fn on_timer_expired(self: Arc<Self>, _context: usize) {
-        let manager = NetworkManager::get_manager();
-        let interval_ms = *manager.poll_interval_ms.read();
-        let interval_ticks = ms_to_ticks(interval_ms);
-
-        let received = manager.poll_all_interfaces();
-        for (interface_name, packet) in received {
-            manager.handle_received_packet(&interface_name, &packet);
-        }
-
-        let now = get_tick();
-        add_timer(
-            now + interval_ticks,
-            &(Arc::new(NetworkPollingHandler) as Arc<dyn TimerHandler>),
-            0,
-        );
     }
 }
 

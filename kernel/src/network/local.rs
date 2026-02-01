@@ -32,11 +32,11 @@ use super::{
     SocketError, SocketObject, SocketProtocol, SocketState, SocketType,
 };
 use crate::ipc::StreamIpcOps;
-use crate::object::KernelObject;
 use crate::object::capability::{
     CloneOps, ControlOps, ReadyInterest, ReadySet, SelectWaitOutcome, Selectable, StreamError,
     StreamOps,
 };
+use crate::object::KernelObject;
 use crate::sync::Waker;
 
 const LOCALSOCKET_LOG: bool = false;
@@ -655,7 +655,7 @@ impl StreamOps for LocalSocket {
                     return Err(StreamError::WouldBlock);
                 }
             } // Release lock
-            // When woken, loop back to check for data or shutdown
+              // When woken, loop back to check for data or shutdown
         }
     }
 
