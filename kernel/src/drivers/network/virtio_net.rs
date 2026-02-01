@@ -412,18 +412,19 @@ impl VirtioNetDevice {
         let rx_queue = &mut virtqueues[0]; // RX queue is index 0
 
         // Process all completed RX descriptors
-        while let Some(desc_idx) = rx_queue.pop() {
+        while let Some((desc_idx, used_len)) = rx_queue.pop_used() {
             // Get the buffer from the descriptor
             let buffer_addr = rx_queue.desc[desc_idx].addr as *mut u8;
             let buffer_len = rx_queue.desc[desc_idx].len as usize;
+            let used_len = core::cmp::min(used_len as usize, buffer_len);
 
             // Read the received data
             unsafe {
                 // Skip the VirtIO network header (use appropriate size based on device features)
                 let hdr_size = self.get_header_size();
-                if buffer_len > hdr_size {
+                if used_len > hdr_size {
                     let packet_data_ptr = buffer_addr.add(hdr_size);
-                    let packet_len = buffer_len - hdr_size;
+                    let packet_len = used_len - hdr_size;
 
                     // Create packet from received data
                     let packet_data = core::slice::from_raw_parts(packet_data_ptr, packet_len);

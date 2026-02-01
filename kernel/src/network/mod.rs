@@ -320,19 +320,13 @@ impl NetworkManager {
         }
 
         let arp_data = &packet.data[14..];
-        let operation = u16::from_be_bytes([arp_data[6], arp_data[7]]);
-        if operation == 2 {
-            let sender_mac = MacAddress::new([
-                arp_data[8],
-                arp_data[9],
-                arp_data[10],
-                arp_data[11],
-                arp_data[12],
-                arp_data[13],
-            ]);
-            let sender_ip =
-                Ipv4Address::new(arp_data[14], arp_data[15], arp_data[16], arp_data[17]);
-            self.arp_cache_add(sender_ip, sender_mac);
+        if let Some(arp_layer) = self.get_layer("arp") {
+            if let Some(arp) = arp_layer
+                .as_any()
+                .downcast_ref::<crate::network::arp::ArpLayer>()
+            {
+                let _ = arp.receive_packet(arp_data);
+            }
         }
     }
 
