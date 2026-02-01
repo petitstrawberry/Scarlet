@@ -480,6 +480,11 @@ impl ArpLayer {
         *self.local_mac.read()
     }
 
+    /// Update local IP address
+    pub fn set_local_ip(&self, ip: Ipv4Address) {
+        *self.local_ip.write() = ip;
+    }
+
     /// Check if IP address is resolved
     pub fn is_resolved(&self, ip_address: Ipv4Address) -> bool {
         self.lookup(ip_address).is_some()

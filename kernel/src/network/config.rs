@@ -144,6 +144,16 @@ pub fn set_interface_ip(name: &str, ip: Ipv4Address) -> Result<(), &'static str>
                     ip.0[3]
                 );
                 ipv4.set_local_ip(ip);
+                if let Some(arp_layer) =
+                    crate::network::protocol_stack::get_network_manager().get_layer("arp")
+                {
+                    if let Some(arp) = arp_layer
+                        .as_any()
+                        .downcast_ref::<crate::network::arp::ArpLayer>()
+                    {
+                        arp.set_local_ip(ip);
+                    }
+                }
             } else {
                 crate::early_println!("[network] set {} IP failed: no IPv4 layer", name);
             }

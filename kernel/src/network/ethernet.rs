@@ -135,6 +135,7 @@ impl NetworkLayer for EthernetLayer {
     ) -> Result<(), SocketError> {
         let src_mac = *self.src_mac.read();
 
+        let mut unresolved_target: Option<crate::network::ipv4::Ipv4Address> = None;
         let dest_mac = if let Some(dest_ip) = context.get("ip_dst") {
             if dest_ip.len() >= 4 {
                 let ip_bytes = [dest_ip[0], dest_ip[1], dest_ip[2], dest_ip[3]];
@@ -168,6 +169,7 @@ impl NetworkLayer for EthernetLayer {
                                 }
 
                                 if mac == [0u8; 6] {
+                                    unresolved_target = Some(target_ip);
                                     if let Some(ip_layer) = get_network_manager().get_layer("ip") {
                                         if let Some(ip) = ip_layer
                                             .as_any()
@@ -205,6 +207,20 @@ impl NetworkLayer for EthernetLayer {
             let mac = [0xFF; 6];
             mac
         };
+
+        if dest_mac == [0u8; 6] {
+            if let Some(target_ip) = unresolved_target {
+                if let Some(arp_layer) = get_network_manager().get_layer("arp") {
+                    if let Some(arp) = arp_layer
+                        .as_any()
+                        .downcast_ref::<crate::network::arp::ArpLayer>()
+                    {
+                        arp.queue_packet(target_ip, packet.to_vec());
+                    }
+                }
+                return Ok(());
+            }
+        }
 
         let ether_type = if let Some(eth_type) = context.get("eth_type") {
             if eth_type.len() >= 2 {

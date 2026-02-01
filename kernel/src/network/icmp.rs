@@ -193,6 +193,21 @@ pub struct IcmpLayer {
 }
 
 impl IcmpLayer {
+    fn compute_checksum(packet: &[u8]) -> u16 {
+        let mut sum: u32 = 0;
+        let mut chunks = packet.chunks_exact(2);
+        for chunk in &mut chunks {
+            sum += u16::from_be_bytes([chunk[0], chunk[1]]) as u32;
+        }
+        if let Some(&byte) = chunks.remainder().first() {
+            sum += (byte as u32) << 8;
+        }
+        while (sum >> 16) != 0 {
+            sum = (sum & 0xFFFF) + (sum >> 16);
+        }
+        !(sum as u16)
+    }
+
     /// Create a new ICMP layer
     pub fn new() -> Arc<Self> {
         Arc::new_cyclic(|weak| Self {
@@ -232,12 +247,14 @@ impl IcmpLayer {
         icmp_data.extend_from_slice(data);
 
         // Calculate checksum
-        let checksum = header.calculate_checksum(&[&echo.to_bytes(), data].concat());
         let mut icmp_packet = Vec::with_capacity(8 + data.len());
         icmp_packet.extend_from_slice(&header.to_bytes()[..2]); // Type + Code
-        icmp_packet.extend_from_slice(&checksum.to_be_bytes());
+        icmp_packet.extend_from_slice(&0u16.to_be_bytes());
         icmp_packet.extend_from_slice(&echo.to_bytes());
         icmp_packet.extend_from_slice(data);
+        let checksum = Self::compute_checksum(&icmp_packet);
+        icmp_packet[2] = (checksum >> 8) as u8;
+        icmp_packet[3] = checksum as u8;
 
         // Create IP context
         let mut ip_context = LayerContext::new();
@@ -293,12 +310,14 @@ impl IcmpLayer {
         icmp_data.extend_from_slice(data);
 
         // Calculate checksum
-        let checksum = header.calculate_checksum(&[&echo.to_bytes(), data].concat());
         let mut icmp_packet = Vec::with_capacity(8 + data.len());
         icmp_packet.extend_from_slice(&header.to_bytes()[..2]); // Type + Code
-        icmp_packet.extend_from_slice(&checksum.to_be_bytes());
+        icmp_packet.extend_from_slice(&0u16.to_be_bytes());
         icmp_packet.extend_from_slice(&echo.to_bytes());
         icmp_packet.extend_from_slice(data);
+        let checksum = Self::compute_checksum(&icmp_packet);
+        icmp_packet[2] = (checksum >> 8) as u8;
+        icmp_packet[3] = checksum as u8;
 
         // Create IP context
         let mut ip_context = LayerContext::new();
@@ -430,6 +449,7 @@ pub struct IcmpSocket {
     local_addr: Mutex<Option<SocketAddress>>,
     remote_addr: RwLock<Option<SocketAddress>>,
     recv_queue: Mutex<VecDeque<(Vec<u8>, SocketAddress)>>,
+    recv_waker: crate::sync::waker::Waker,
 }
 
 impl IcmpSocket {
@@ -441,12 +461,14 @@ impl IcmpSocket {
             local_addr: Mutex::new(None),
             remote_addr: RwLock::new(None),
             recv_queue: Mutex::new(VecDeque::new()),
+            recv_waker: crate::sync::waker::Waker::new_interruptible("icmp_recv"),
         })
     }
 
     fn deliver_reply(&self, payload: Vec<u8>, src_ip: Ipv4Address) {
         let addr = SocketAddress::Inet(Inet4SocketAddress::new(src_ip.0, 0));
         self.recv_queue.lock().push_back((payload, addr));
+        self.recv_waker.wake_one();
     }
 }
 
@@ -519,11 +541,21 @@ impl SocketObject for IcmpSocket {
         buffer: &mut [u8],
         _flags: u32,
     ) -> Result<(usize, SocketAddress), SocketError> {
-        let mut queue = self.recv_queue.lock();
-        let (data, addr) = queue.pop_front().ok_or(SocketError::WouldBlock)?;
-        let len = buffer.len().min(data.len());
-        buffer[..len].copy_from_slice(&data[..len]);
-        Ok((len, addr))
+        use crate::task::mytask;
+
+        loop {
+            if let Some((data, addr)) = self.recv_queue.lock().pop_front() {
+                let len = buffer.len().min(data.len());
+                buffer[..len].copy_from_slice(&data[..len]);
+                return Ok((len, addr));
+            }
+
+            if let Some(task) = mytask() {
+                self.recv_waker.wait(task.get_id(), task.get_trapframe());
+            } else {
+                return Err(SocketError::WouldBlock);
+            }
+        }
     }
 }
 

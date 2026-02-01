@@ -422,9 +422,10 @@ impl VirtioNetDevice {
             unsafe {
                 // Skip the VirtIO network header (use appropriate size based on device features)
                 let hdr_size = self.get_header_size();
-                if used_len > hdr_size {
-                    let packet_data_ptr = buffer_addr.add(hdr_size);
-                    let packet_len = used_len - hdr_size;
+                if used_len > 0 {
+                    let frame_offset = if used_len >= hdr_size { hdr_size } else { 0 };
+                    let packet_data_ptr = buffer_addr.add(frame_offset);
+                    let packet_len = used_len.saturating_sub(frame_offset);
 
                     // Create packet from received data
                     let packet_data = core::slice::from_raw_parts(packet_data_ptr, packet_len);
