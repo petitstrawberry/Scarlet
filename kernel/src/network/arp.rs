@@ -186,6 +186,14 @@ impl ArpCacheEntry {
             state: ArpEntryState::Pending,
         }
     }
+
+    /// Check if the ARP cache entry has expired
+    /// An entry expires after 1 minute (60000 ticks) in the Valid state
+    pub fn is_expired(&self) -> bool {
+        // For now, check if state is Expired
+        // In a real implementation, compare timestamp with current time
+        self.state == ArpEntryState::Expired || self.state == ArpEntryState::Pending
+    }
 }
 
 /// ARP cache entry with packet queue

@@ -18,20 +18,18 @@ use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
 
-use crate::device::network::{DevicePacket, MacAddress};
+use crate::device::network::DevicePacket;
 use crate::drivers::network::virtio_net::VirtioNetDevice;
 use crate::network::arp::{ArpCacheEntry, ArpEntryState, ArpLayer, ArpPacket};
 use crate::network::ethernet::{EthernetHeader, EthernetLayer, ether_type};
 use crate::network::icmp::{IcmpEcho, IcmpHeader, IcmpLayer, code, message_type};
 use crate::network::ipv4::{Ipv4Address, Ipv4Header, Ipv4Layer, protocol};
-use crate::network::protocol_stack::{LayerContext, NetworkLayer, get_network_manager};
 use crate::network::socket::SocketError;
 use crate::network::socket::{SocketAddress, SocketControl, SocketObject, SocketState};
-use crate::network::tcp::{TcpHeader, TcpLayer, TcpSocket, TcpState, tcp_flags};
+use crate::network::tcp::{TcpHeader, tcp_flags};
 use crate::network::udp::{UdpHeader, UdpLayer, UdpSocket};
-use crate::network::virtio_integration::{
-    NetworkInterface, NetworkInterfaceManager, get_interface_manager,
-};
+use crate::network::virtio_integration::VirtIONetworkInterface;
+use crate::network::{LayerContext, NetworkInterface, NetworkLayer, get_network_manager};
 
 /// Base MMIO address for virtio devices on RISC-V virt machine
 const VIRTIO_MMIO_BASE: usize = 0x10001000;
@@ -67,15 +65,16 @@ const TEST_TIMEOUT_MS: u64 = 5000;
 ///
 /// Creates VirtIO-net devices at known MMIO addresses and registers
 /// them with the network interface manager.
-fn init_test_interfaces() -> Result<(Arc<NetworkInterface>, Arc<NetworkInterface>), &'static str> {
-    // Create VirtIO-net devices at known MMIO addresses
-    let net0_device = Arc::new(VirtioNetDevice::new(NET0_MMIO_ADDR));
-    let net1_device = Arc::new(VirtioNetDevice::new(NET1_MMIO_ADDR));
+fn init_test_interfaces()
+-> Result<(Arc<dyn NetworkInterface>, Arc<dyn NetworkInterface>), &'static str> {
+    // Create VirtIO network interfaces at known MMIO addresses
+    let net0_interface = Arc::new(VirtIONetworkInterface::new("eth0", NET0_MMIO_ADDR));
+    let net1_interface = Arc::new(VirtIONetworkInterface::new("eth1", NET1_MMIO_ADDR));
 
-    // Initialize network interfaces
-    let manager = get_interface_manager();
-    let net0_interface = manager.register_interface("eth0", net0_device)?;
-    let net1_interface = manager.register_interface("eth1", net1_device)?;
+    // Register interfaces with the network manager
+    let manager = get_network_manager();
+    manager.register_interface("eth0", net0_interface.clone())?;
+    manager.register_interface("eth1", net1_interface.clone())?;
 
     // Configure IP addresses
     net0_interface.set_ip_address(net0_ip());
@@ -101,12 +100,12 @@ fn test_arp_request_reply_between_nics() {
         net0_ip().as_bytes()[1],
         net0_ip().as_bytes()[2],
         net0_ip().as_bytes()[3],
-        eth0.get_mac_address().as_bytes()[0],
-        eth0.get_mac_address().as_bytes()[1],
-        eth0.get_mac_address().as_bytes()[2],
-        eth0.get_mac_address().as_bytes()[3],
-        eth0.get_mac_address().as_bytes()[4],
-        eth0.get_mac_address().as_bytes()[5]
+        eth0.mac_address().as_bytes()[0],
+        eth0.mac_address().as_bytes()[1],
+        eth0.mac_address().as_bytes()[2],
+        eth0.mac_address().as_bytes()[3],
+        eth0.mac_address().as_bytes()[4],
+        eth0.mac_address().as_bytes()[5]
     );
     crate::println!(
         "[NetworkTest] eth1: IP={}.{}.{}.{}, MAC={:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X}",
@@ -114,16 +113,16 @@ fn test_arp_request_reply_between_nics() {
         net1_ip().as_bytes()[1],
         net1_ip().as_bytes()[2],
         net1_ip().as_bytes()[3],
-        eth1.get_mac_address().as_bytes()[0],
-        eth1.get_mac_address().as_bytes()[1],
-        eth1.get_mac_address().as_bytes()[2],
-        eth1.get_mac_address().as_bytes()[3],
-        eth1.get_mac_address().as_bytes()[4],
-        eth1.get_mac_address().as_bytes()[5]
+        eth1.mac_address().as_bytes()[0],
+        eth1.mac_address().as_bytes()[1],
+        eth1.mac_address().as_bytes()[2],
+        eth1.mac_address().as_bytes()[3],
+        eth1.mac_address().as_bytes()[4],
+        eth1.mac_address().as_bytes()[5]
     );
 
     // Create ARP layer for eth0
-    let eth0_mac = *eth0.get_mac_address().as_bytes();
+    let eth0_mac = *eth0.mac_address().as_bytes();
     let arp_layer = ArpLayer::new(eth0_mac, net0_ip());
 
     // Create ARP request packet
@@ -225,8 +224,8 @@ fn test_icmp_ping_between_nics() {
     ip_header.checksum = ip_header.calculate_checksum();
 
     // Build Ethernet frame
-    let eth0_mac = *eth0.get_mac_address().as_bytes();
-    let eth1_mac = *eth1.get_mac_address().as_bytes();
+    let eth0_mac = *eth0.mac_address().as_bytes();
+    let eth1_mac = *eth1.mac_address().as_bytes();
     let eth_header = EthernetHeader::new(eth1_mac, eth0_mac, ether_type::IPV4);
 
     // Assemble full packet
@@ -286,8 +285,8 @@ fn test_udp_datagram_exchange() {
     ip_header.checksum = ip_header.calculate_checksum();
 
     // Build Ethernet frame
-    let eth0_mac = *eth0.get_mac_address().as_bytes();
-    let eth1_mac = *eth1.get_mac_address().as_bytes();
+    let eth0_mac = *eth0.mac_address().as_bytes();
+    let eth1_mac = *eth1.mac_address().as_bytes();
     let eth_header = EthernetHeader::new(eth1_mac, eth0_mac, ether_type::IPV4);
 
     // Assemble packet
@@ -351,8 +350,8 @@ fn test_tcp_connection_establishment() {
     ip_header.checksum = ip_header.calculate_checksum();
 
     // Build Ethernet frame
-    let eth0_mac = *eth0.get_mac_address().as_bytes();
-    let eth1_mac = *eth1.get_mac_address().as_bytes();
+    let eth0_mac = *eth0.mac_address().as_bytes();
+    let eth1_mac = *eth1.mac_address().as_bytes();
     let eth_header = EthernetHeader::new(eth1_mac, eth0_mac, ether_type::IPV4);
 
     // Assemble packet
@@ -402,8 +401,8 @@ fn test_interface_statistics() {
     let (eth0, eth1) = init_test_interfaces().expect("[NetworkTest] interface init failed");
 
     // Get initial stats
-    let stats0_before = eth0.get_stats();
-    let stats1_before = eth1.get_stats();
+    let stats0_before = eth0.stats();
+    let stats1_before = eth1.stats();
 
     crate::println!(
         "[NetworkTest] eth0 before: TX={}/{} RX={}/{}",
@@ -426,7 +425,7 @@ fn test_interface_statistics() {
     let _ = eth0.send(packet);
 
     // Get stats after send
-    let stats0_after = eth0.get_stats();
+    let stats0_after = eth0.stats();
     crate::println!(
         "[NetworkTest] eth0 after: TX={}/{} RX={}/{}",
         stats0_after.tx_packets,
@@ -455,7 +454,7 @@ fn test_multi_protocol_transmission() {
 
     // Send ARP packet
     let arp_request = ArpPacket::request(net0_ip().as_bytes(), net1_ip().as_bytes());
-    let eth0_mac = *eth0.get_mac_address().as_bytes();
+    let eth0_mac = *eth0.mac_address().as_bytes();
     let eth_header = EthernetHeader::new([0xFF; 6], eth0_mac, ether_type::ARP);
     let mut arp_frame = Vec::new();
     arp_frame.extend_from_slice(&eth_header.to_bytes());
@@ -475,8 +474,8 @@ fn test_multi_protocol_transmission() {
     ip_header.total_length = (20 + 8 + icmp_data.len()) as u16;
     ip_header.checksum = ip_header.calculate_checksum();
 
-    let eth0_mac = *eth0.get_mac_address().as_bytes();
-    let eth1_mac = *eth1.get_mac_address().as_bytes();
+    let eth0_mac = *eth0.mac_address().as_bytes();
+    let eth1_mac = *eth1.mac_address().as_bytes();
     let eth_header2 = EthernetHeader::new(eth1_mac, eth0_mac, ether_type::IPV4);
 
     let mut icmp_packet = Vec::new();
