@@ -31,6 +31,7 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 use spin::Once;
 
 pub mod arp;
+pub mod device_integration;
 pub mod ethernet;
 pub mod icmp;
 pub mod ipv4;

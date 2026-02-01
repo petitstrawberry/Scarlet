@@ -14,7 +14,6 @@ use super::ipv4::{Ipv4Address, Ipv4Layer};
 use super::protocol_stack::{get_network_manager, NetworkLayer};
 use super::tcp::TcpLayer;
 use super::udp::UdpLayer;
-use crate::device::network::NetworkDevice;
 
 /// Initialize complete TCP/IP network stack
 ///
@@ -26,27 +25,24 @@ pub fn init_tcp_ip_stack() {
     INIT_DONE.call_once(|| {
         let network_manager = get_network_manager();
 
-        let device = match crate::device::network::get_network_device() {
-            Some(dev) => dev,
+        let interface = match network_manager.get_default_interface() {
+            Some(interface) => interface,
             None => {
                 return;
             }
         };
 
-        let config = device
-            .as_network_device()
-            .and_then(|network_device| network_device.get_interface_config().ok());
-        let mac_address = match config {
-            Some(config) => config.mac_address,
-            None => {
-                return;
-            }
-        };
+        let mac_address = interface.mac_address();
 
         let ethernet_layer = EthernetLayer::new(mac_address);
         network_manager.register_layer("ethernet", ethernet_layer.clone());
 
-        let local_ip = Ipv4Address::new(192, 168, 1, 100);
+        let local_ip = interface
+            .ip_address()
+            .unwrap_or_else(|| Ipv4Address::new(192, 168, 1, 100));
+        if interface.ip_address().is_none() {
+            interface.set_ip_address(local_ip);
+        }
         let arp_layer = ArpLayer::new(*mac_address.as_bytes(), local_ip);
         network_manager.register_layer("arp", arp_layer.clone());
 
