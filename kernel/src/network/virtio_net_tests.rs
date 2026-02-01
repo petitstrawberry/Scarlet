@@ -93,8 +93,7 @@ fn test_arp_request_reply_between_nics() {
     crate::println!("[NetworkTest] Starting ARP request/reply test...");
 
     // Initialize interfaces
-    let (eth0, eth1) =
-        init_test_interfaces().expect("[NetworkTest] interface init failed");
+    let (eth0, eth1) = init_test_interfaces().expect("[NetworkTest] interface init failed");
 
     crate::println!(
         "[NetworkTest] eth0: IP={}.{}.{}.{}, MAC={:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X}",
@@ -202,8 +201,7 @@ fn test_arp_request_reply_between_nics() {
 fn test_icmp_ping_between_nics() {
     crate::println!("[NetworkTest] Starting ICMP ping test...");
 
-    let (eth0, eth1) =
-        init_test_interfaces().expect("[NetworkTest] interface init failed");
+    let (eth0, eth1) = init_test_interfaces().expect("[NetworkTest] interface init failed");
 
     // Build ICMP echo request
     let icmp_echo = IcmpEcho::new(0x1234, 0x0001);
@@ -267,8 +265,7 @@ fn test_icmp_ping_between_nics() {
 fn test_udp_datagram_exchange() {
     crate::println!("[NetworkTest] Starting UDP datagram test...");
 
-    let (eth0, eth1) =
-        init_test_interfaces().expect("[NetworkTest] interface init failed");
+    let (eth0, eth1) = init_test_interfaces().expect("[NetworkTest] interface init failed");
 
     // Create UDP packet
     let src_port: u16 = 12345;
@@ -328,8 +325,7 @@ fn test_udp_datagram_exchange() {
 fn test_tcp_connection_establishment() {
     crate::println!("[NetworkTest] Starting TCP connection test...");
 
-    let (eth0, eth1) =
-        init_test_interfaces().expect("[NetworkTest] interface init failed");
+    let (eth0, eth1) = init_test_interfaces().expect("[NetworkTest] interface init failed");
 
     // Create TCP SYN packet
     let src_port: u16 = 12345;
@@ -403,8 +399,7 @@ fn test_tcp_connection_establishment() {
 fn test_interface_statistics() {
     crate::println!("[NetworkTest] Starting statistics test...");
 
-    let (eth0, eth1) =
-        init_test_interfaces().expect("[NetworkTest] interface init failed");
+    let (eth0, eth1) = init_test_interfaces().expect("[NetworkTest] interface init failed");
 
     // Get initial stats
     let stats0_before = eth0.get_stats();
@@ -456,8 +451,7 @@ fn test_interface_statistics() {
 fn test_multi_protocol_transmission() {
     crate::println!("[NetworkTest] Starting multi-protocol test...");
 
-    let (eth0, eth1) =
-        init_test_interfaces().expect("[NetworkTest] interface init failed");
+    let (eth0, eth1) = init_test_interfaces().expect("[NetworkTest] interface init failed");
 
     // Send ARP packet
     let arp_request = ArpPacket::request(net0_ip().as_bytes(), net1_ip().as_bytes());
