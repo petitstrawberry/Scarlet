@@ -5,10 +5,11 @@
 
 use alloc::collections::BTreeMap;
 use alloc::string::String;
-use alloc::sync::Arc;
+use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
 use spin::{Mutex, RwLock};
 
+use crate::early_println;
 use crate::network::protocol_stack::get_network_manager;
 use crate::network::protocol_stack::{LayerContext, NetworkLayer, NetworkLayerStats, SocketConfig};
 use crate::network::socket::{
@@ -46,13 +47,13 @@ impl UdpHeader {
         let mut sum: u32 = 0;
 
         // Pseudo-header: src IP (4) + dst IP (4) + zero (1) + protocol (1) + UDP length (2)
-        sum += u32::from_be_bytes([src_ip[0], src_ip[1]]);
+        sum += u16::from_be_bytes([src_ip[0], src_ip[1]]) as u32;
         sum = (sum & 0xFFFF) + (sum >> 16);
-        sum += u32::from_be_bytes([src_ip[2], src_ip[3]]);
+        sum += u16::from_be_bytes([src_ip[2], src_ip[3]]) as u32;
         sum = (sum & 0xFFFF) + (sum >> 16);
-        sum += u32::from_be_bytes([dst_ip[0], dst_ip[1]]);
+        sum += u16::from_be_bytes([dst_ip[0], dst_ip[1]]) as u32;
         sum = (sum & 0xFFFF) + (sum >> 16);
-        sum += u32::from_be_bytes([dst_ip[2], dst_ip[3]]);
+        sum += u16::from_be_bytes([dst_ip[2], dst_ip[3]]) as u32;
         sum = (sum & 0xFFFF) + (sum >> 16);
         sum += 17u32; // UDP protocol number
         sum = (sum & 0xFFFF) + (sum >> 16);
@@ -72,7 +73,7 @@ impl UdpHeader {
         // Data
         for chunk in data.chunks(2) {
             if chunk.len() == 2 {
-                sum += u32::from_be_bytes([chunk[0], chunk[1]]);
+                sum += u16::from_be_bytes([chunk[0], chunk[1]]) as u32;
                 sum = (sum & 0xFFFF) + (sum >> 16);
             } else if chunk.len() == 1 {
                 sum += (chunk[0] as u32) << 8;
@@ -124,18 +125,21 @@ pub struct UdpSocket {
     state: RwLock<SocketState>,
     /// Reference to UDP layer
     udp_layer: Arc<UdpLayer>,
+    /// Weak self reference for registration
+    self_weak: Weak<UdpSocket>,
 }
 
 impl UdpSocket {
     /// Create a new UDP socket
     pub fn new(udp_layer: Arc<UdpLayer>) -> Arc<Self> {
-        Arc::new(Self {
+        Arc::new_cyclic(|weak| Self {
             local_addr: RwLock::new(None),
             remote_addr: RwLock::new(None),
             send_buffer: Mutex::new(Vec::new()),
             recv_buffer: Mutex::new(Vec::new()),
             state: RwLock::new(SocketState::Unconnected),
             udp_layer,
+            self_weak: weak.clone(),
         })
     }
 
@@ -169,11 +173,13 @@ impl SocketObject for UdpSocket {
         _flags: u32,
     ) -> Result<usize, SocketError> {
         match address {
-            SocketAddress::Inet { addr, port } => {
+            SocketAddress::Inet(inet) => {
+                let addr = inet.addr;
+                let port = inet.port;
                 // Queue the datagram for sending
                 let mut buffer = self.send_buffer.lock();
                 let datagram = data.to_vec();
-                buffer.push(datagram);
+                buffer.push(datagram.clone());
 
                 // Update state
                 *self.remote_addr.write() = Some(address.clone());
@@ -216,13 +222,16 @@ impl SocketObject for UdpSocket {
 impl SocketControl for UdpSocket {
     fn bind(&self, address: &SocketAddress) -> Result<(), SocketError> {
         match address {
-            SocketAddress::Inet { addr, port } => {
+            SocketAddress::Inet(inet) => {
+                let addr = inet.addr;
+                let port = inet.port;
                 let mut config = SocketConfig::new();
                 config.set("udp_local_port", &port.to_be_bytes());
                 config.set("ip_local", &addr);
 
                 // Configure UDP layer
-                self.udp_layer.configure_socket(self, &config)?;
+                self.udp_layer
+                    .configure_socket(self.self_weak.clone(), &config)?;
 
                 *self.local_addr.write() = Some(address.clone());
                 *self.state.write() = SocketState::Bound;
@@ -234,7 +243,7 @@ impl SocketControl for UdpSocket {
 
     fn connect(&self, address: &SocketAddress) -> Result<(), SocketError> {
         match address {
-            SocketAddress::Inet { .. } => {
+            SocketAddress::Inet(_) => {
                 *self.remote_addr.write() = Some(address.clone());
                 *self.state.write() = SocketState::Connected;
                 Ok(())
@@ -301,7 +310,7 @@ impl crate::object::capability::StreamOps for UdpSocket {
     fn read(&self, buffer: &mut [u8]) -> Result<usize, crate::object::capability::StreamError> {
         let (len, _) = self
             .recvfrom(buffer, 0)
-            .map_err(|_| crate::object::capability::StreamError::Other)?;
+            .map_err(|_| crate::object::capability::StreamError::Other("udp recv error".into()))?;
         Ok(len)
     }
 
@@ -312,14 +321,14 @@ impl crate::object::capability::StreamOps for UdpSocket {
             .clone()
             .unwrap_or(SocketAddress::Unspecified);
         self.sendto(data, &remote_addr, 0)
-            .map_err(|_| crate::object::capability::StreamError::Other)?;
+            .map_err(|_| crate::object::capability::StreamError::Other("udp send error".into()))?;
         Ok(data.len())
     }
 }
 
 impl crate::object::capability::CloneOps for UdpSocket {
     fn custom_clone(&self) -> crate::object::KernelObject {
-        crate::object::KernelObject::Socket(Arc::clone(self))
+        crate::object::KernelObject::Socket(UdpSocket::new(self.udp_layer.clone()))
     }
 }
 
@@ -381,7 +390,7 @@ impl UdpLayer {
     /// Configure a UDP socket (bind)
     pub fn configure_socket(
         &self,
-        socket: &Arc<UdpSocket>,
+        socket: Weak<UdpSocket>,
         config: &SocketConfig,
     ) -> Result<(), SocketError> {
         let port = config
@@ -389,7 +398,7 @@ impl UdpLayer {
             .ok_or(SocketError::InvalidAddress)?;
 
         // Register the port
-        self.register_port(port, Arc::downgrade(socket));
+        self.register_port(port, socket);
 
         // TODO: Configure IP layer with local address
         Ok(())
@@ -398,67 +407,30 @@ impl UdpLayer {
     /// Send a UDP datagram
     pub fn send_datagram(
         &self,
-        socket: &Arc<UdpSocket>,
+        socket: &UdpSocket,
         dest_ip: [u8; 4],
         dest_port: u16,
         data: Vec<u8>,
     ) -> Result<(), SocketError> {
-        let src_port = socket.local_port.load(Ordering::SeqCst);
+        let (src_ip_bytes, src_port) = match socket.local_addr.read().clone() {
+            Some(SocketAddress::Inet(inet)) => (inet.addr, inet.port),
+            _ => ([0u8; 4], 0),
+        };
         let total_length = (8 + data.len()) as u16;
 
         let mut header = UdpHeader::new(src_port, dest_port, total_length);
 
-        let src_ip_bytes = [0u8; 4];
-        header.checksum = header.calculate_checksum(&src_ip_bytes, dest_ip, &data);
+        header.checksum = header.calculate_checksum(src_ip_bytes, dest_ip, &data);
 
         let mut udp_packet = Vec::with_capacity(8 + data.len());
         udp_packet.extend_from_slice(&header.to_bytes());
-        udp_packet.extend_from_slice(data);
+        udp_packet.extend_from_slice(&data);
 
         let mut ip_context = LayerContext::new();
         ip_context.set("ip_dst", &dest_ip);
         ip_context.set("ip_protocol", &[17]);
 
-        if let Some(ip_layer) = get_network_manager().get_layer("ip") {
-            ip_layer.send(&udp_packet, &ip_context, &[])?;
-        }
-
-        let mut stats = self.stats.write();
-        stats.packets_sent += 1;
-        stats.bytes_sent += udp_packet.len() as u64;
-
-        Ok(())
-    }
-
-        let mut stats = self.stats.write();
-        stats.packets_sent += 1;
-        stats.bytes_sent += udp_packet.len() as u64;
-
-        Ok(())
-    }
-        };
-
-        // Build UDP header
-        let total_length = (8 + data.len()) as u16;
-        let mut header = UdpHeader::new(src_port, dest_port, total_length);
-
-        // Calculate checksum
-        let src_ip = match *local_addr {
-            Some(SocketAddress::Inet { addr, .. }) => addr,
-            _ => [0, 0, 0, 0],
-        };
-        header.checksum = header.calculate_checksum(src_ip, dest_ip, &data);
-
-        // Serialize header and combine with data
-        let mut udp_packet = Vec::with_capacity(8 + data.len());
-        udp_packet.extend_from_slice(&header.to_bytes());
-        udp_packet.extend_from_slice(&data);
-
-        // Create context for IP layer
-        let mut ip_context = LayerContext::new();
-        ip_context.set("ip_dst", &dest_ip);
-        ip_context.set("ip_protocol", &[17]); // UDP protocol number
-
+        early_println!(
             "[UDP] Send: {} bytes (src port: {}, dst: {}.{}.{}.{})",
             udp_packet.len(),
             src_port,
@@ -468,7 +440,6 @@ impl UdpLayer {
             dest_ip[3]
         );
 
-        // Send through IP layer
         if let Some(ip_layer) = get_network_manager().get_layer("ip") {
             ip_layer.send(&udp_packet, &ip_context, &[])?;
         }
@@ -476,9 +447,6 @@ impl UdpLayer {
         let mut stats = self.stats.write();
         stats.packets_sent += 1;
         stats.bytes_sent += udp_packet.len() as u64;
-
-        Ok(())
-    }
 
         Ok(())
     }

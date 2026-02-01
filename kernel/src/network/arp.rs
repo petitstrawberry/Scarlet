@@ -9,6 +9,7 @@ use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU32, Ordering};
 use spin::{Mutex, RwLock};
 
+use crate::early_println;
 use crate::network::ipv4::Ipv4Address;
 use crate::network::protocol_stack::get_network_manager;
 use crate::network::protocol_stack::{LayerContext, NetworkLayer, NetworkLayerStats};
@@ -283,11 +284,13 @@ impl ArpLayer {
         // Create ARP request packet
         let arp_packet = ArpPacket::request(local_ip.0, target_ip.0);
 
+        let target_ip_bytes = target_ip.0;
+        early_println!(
             "[ARP] Sending request for {}.{}.{}.{}",
-            target_ip[0],
-            target_ip[1],
-            target_ip[2],
-            target_ip[3]
+            target_ip_bytes[0],
+            target_ip_bytes[1],
+            target_ip_bytes[2],
+            target_ip_bytes[3]
         );
 
         // Add to pending list
@@ -342,11 +345,13 @@ impl ArpLayer {
                 // Request is for us - send reply
                 let reply = ArpPacket::reply(local_mac, local_ip.0, arp_packet.sender_mac);
 
+                let sender_ip_bytes = sender_ip.0;
+                early_println!(
                     "[ARP] Received request for {}.{}.{}.{}",
-                    sender_ip[0],
-                    sender_ip[1],
-                    sender_ip[2],
-                    sender_ip[3]
+                    sender_ip_bytes[0],
+                    sender_ip_bytes[1],
+                    sender_ip_bytes[2],
+                    sender_ip_bytes[3]
                 );
 
                 // Build Ethernet frame for unicast reply
@@ -373,11 +378,13 @@ impl ArpLayer {
                     // Update cache with resolved MAC
                     self.add_entry(sender_ip, arp_packet.sender_mac);
 
+                    let sender_ip_bytes = sender_ip.0;
+                    early_println!(
                         "[ARP] Received reply for {}.{}.{}.{} -> {:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X}",
-                        sender_ip[0],
-                        sender_ip[1],
-                        sender_ip[2],
-                        sender_ip[3],
+                        sender_ip_bytes[0],
+                        sender_ip_bytes[1],
+                        sender_ip_bytes[2],
+                        sender_ip_bytes[3],
                         arp_packet.sender_mac[0],
                         arp_packet.sender_mac[1],
                         arp_packet.sender_mac[2],
@@ -406,11 +413,13 @@ impl ArpLayer {
                     pending_entry.entry.mac_address = arp_packet.sender_mac;
                 } else {
                     // Not in pending list, but cache the reply anyway
+                    let sender_ip_bytes = sender_ip.0;
+                    early_println!(
                         "[ARP] Received unsolicited reply for {}.{}.{}.{}",
-                        sender_ip[0],
-                        sender_ip[1],
-                        sender_ip[2],
-                        sender_ip[3]
+                        sender_ip_bytes[0],
+                        sender_ip_bytes[1],
+                        sender_ip_bytes[2],
+                        sender_ip_bytes[3]
                     );
                     self.add_entry(sender_ip, arp_packet.sender_mac);
                 }
@@ -422,9 +431,6 @@ impl ArpLayer {
                 stats.bytes_received += (arp_bytes.len() + 14) as u64;
             }
         }
-
-        Ok(())
-    }
 
         Ok(())
     }

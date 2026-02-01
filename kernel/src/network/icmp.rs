@@ -7,6 +7,8 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use spin::RwLock;
 
+use crate::early_println;
+
 use crate::network::ipv4::Ipv4Address;
 use crate::network::protocol_stack::get_network_manager;
 use crate::network::protocol_stack::{LayerContext, NetworkLayer, NetworkLayerStats};
@@ -82,7 +84,7 @@ impl IcmpHeader {
             unsafe { core::slice::from_raw_parts(self as *const IcmpHeader as *const u8, 8) };
         for chunk in header_bytes.chunks(2) {
             if chunk.len() == 2 {
-                sum += u32::from_be_bytes([chunk[0], chunk[1]]);
+                sum += u16::from_be_bytes([chunk[0], chunk[1]]) as u32;
             } else if chunk.len() == 1 {
                 sum += (chunk[0] as u32) << 8;
             }
@@ -91,7 +93,7 @@ impl IcmpHeader {
         // Data
         for chunk in data.chunks(2) {
             if chunk.len() == 2 {
-                sum += u32::from_be_bytes([chunk[0], chunk[1]]);
+                sum += u16::from_be_bytes([chunk[0], chunk[1]]) as u32;
             } else if chunk.len() == 1 {
                 sum += (chunk[0] as u32) << 8;
             }
@@ -217,11 +219,13 @@ impl IcmpLayer {
         ip_context.set("ip_dst", &dest_ip.0);
         ip_context.set("ip_protocol", &[1]); // ICMP protocol
 
+        let dest_ip_bytes = dest_ip.0;
+        early_println!(
             "[ICMP] Ping {}.{}.{}.{} (id={}, seq={}, data_len={})",
-            dest_ip[0],
-            dest_ip[1],
-            dest_ip[2],
-            dest_ip[3],
+            dest_ip_bytes[0],
+            dest_ip_bytes[1],
+            dest_ip_bytes[2],
+            dest_ip_bytes[3],
             identifier,
             sequence,
             data.len()
@@ -272,11 +276,13 @@ impl IcmpLayer {
         ip_context.set("ip_dst", &dest_ip.0);
         ip_context.set("ip_protocol", &[1]); // ICMP protocol
 
+        let dest_ip_bytes = dest_ip.0;
+        early_println!(
             "[ICMP] Pong {}.{}.{}.{} (id={}, seq={}, data_len={})",
-            dest_ip[0],
-            dest_ip[1],
-            dest_ip[2],
-            dest_ip[3],
+            dest_ip_bytes[0],
+            dest_ip_bytes[1],
+            dest_ip_bytes[2],
+            dest_ip_bytes[3],
             identifier,
             sequence,
             data.len()
@@ -306,6 +312,7 @@ impl IcmpLayer {
 
         let data = &packet[8..];
 
+        early_println!(
             "[ICMP] Recv: type={}, code={}, len={}",
             header.message_type,
             header.code,
@@ -322,9 +329,12 @@ impl IcmpLayer {
                 // Handle ping request - send reply
                 if data.len() >= 4 {
                     if let Some(echo) = IcmpEcho::from_bytes(data) {
+                        let identifier = unsafe { core::ptr::addr_of!(echo.identifier).read_unaligned() };
+                        let sequence = unsafe { core::ptr::addr_of!(echo.sequence).read_unaligned() };
+                        early_println!(
                             "[ICMP] Ping request from (id={}, seq={})",
-                            echo.identifier,
-                            echo.sequence
+                            identifier,
+                            sequence
                         );
 
                         // TODO: Send ping reply back

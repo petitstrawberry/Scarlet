@@ -15,7 +15,7 @@ use crate::network::ipv4::Ipv4Address;
 use crate::network::protocol_stack::get_network_manager;
 use crate::network::protocol_stack::{LayerContext, NetworkLayer, NetworkLayerStats};
 use crate::network::socket::SocketError;
-use crate::network::socket::{SocketAddress, SocketControl, SocketObject, SocketState};
+use crate::network::socket::{Inet4SocketAddress, SocketAddress, SocketControl, SocketObject, SocketState};
 
 /// TCP connection states
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -100,13 +100,13 @@ impl TcpHeader {
         let mut sum: u32 = 0;
 
         // Pseudo-header: src IP (4) + dst IP (4) + zero (1) + protocol (1) + TCP length (2)
-        sum += u32::from_be_bytes([src_ip[0], src_ip[1]]);
+        sum += u16::from_be_bytes([src_ip[0], src_ip[1]]) as u32;
         sum = (sum & 0xFFFF) + (sum >> 16);
-        sum += u32::from_be_bytes([src_ip[2], src_ip[3]]);
+        sum += u16::from_be_bytes([src_ip[2], src_ip[3]]) as u32;
         sum = (sum & 0xFFFF) + (sum >> 16);
-        sum += u32::from_be_bytes([dst_ip[0], dst_ip[1]]);
+        sum += u16::from_be_bytes([dst_ip[0], dst_ip[1]]) as u32;
         sum = (sum & 0xFFFF) + (sum >> 16);
-        sum += u32::from_be_bytes([dst_ip[2], dst_ip[3]]);
+        sum += u16::from_be_bytes([dst_ip[2], dst_ip[3]]) as u32;
         sum = (sum & 0xFFFF) + (sum >> 16);
         sum += 6u32; // TCP protocol number
         sum = (sum & 0xFFFF) + (sum >> 16);
@@ -117,14 +117,14 @@ impl TcpHeader {
         let header_bytes =
             unsafe { core::slice::from_raw_parts(self as *const TcpHeader as *const u8, 12) };
         for chunk in header_bytes.chunks(2) {
-            sum += u32::from_be_bytes([chunk[0], chunk[1]]);
+            sum += u16::from_be_bytes([chunk[0], chunk[1]]) as u32;
             sum = (sum & 0xFFFF) + (sum >> 16);
         }
 
         // Data
         for chunk in data.chunks(2) {
             if chunk.len() == 2 {
-                sum += u32::from_be_bytes([chunk[0], chunk[1]]);
+                sum += u16::from_be_bytes([chunk[0], chunk[1]]) as u32;
                 sum = (sum & 0xFFFF) + (sum >> 16);
             } else if chunk.len() == 1 {
                 sum += (chunk[0] as u32) << 8;
@@ -330,7 +330,7 @@ impl TcpSocket {
         }
 
         // Check sequence number
-        let expected_seq = *self.recv_seq.lock();
+        let expected_seq = self.recv_seq.load(Ordering::SeqCst);
         let segment_seq = header.seq_number;
 
         if segment_seq == expected_seq.wrapping_sub(1) {
@@ -376,7 +376,7 @@ impl TcpSocket {
                 } else {
                     // FIN received
                     self.send_ack(
-                        *self.remote_ip.lock().unwrap(),
+                        self.remote_ip.lock().clone().unwrap(),
                         self.remote_port.load(Ordering::SeqCst),
                         header.seq_number.wrapping_add(1),
                     );
@@ -461,7 +461,7 @@ impl TcpSocket {
 
     /// Send FIN packet
     fn send_fin(&self) {
-        let dest_ip = *self.remote_ip.lock().unwrap();
+        let dest_ip = self.remote_ip.lock().clone().unwrap();
         let dest_port = self.remote_port.load(Ordering::SeqCst);
         let local_port = self.local_port.load(Ordering::SeqCst);
         let local_ip = self
@@ -482,7 +482,7 @@ impl TcpSocket {
 
     /// Send FIN-ACK packet
     fn send_fin_ack(&self) {
-        let dest_ip = *self.remote_ip.lock().unwrap();
+        let dest_ip = self.remote_ip.lock().clone().unwrap();
         let dest_port = self.remote_port.load(Ordering::SeqCst);
         let local_port = self.local_port.load(Ordering::SeqCst);
         let local_ip = self
@@ -502,7 +502,13 @@ impl TcpSocket {
     }
 
     /// Send TCP segment through IP layer
-    fn send_segment(&self, dest_ip: Ipv4Address, header: TcpHeader, data: &[u8], update_seq: bool) {
+    fn send_segment(
+        &self,
+        dest_ip: Ipv4Address,
+        mut header: TcpHeader,
+        data: &[u8],
+        update_seq: bool,
+    ) {
         let local_ip = self
             .local_ip
             .lock()
@@ -510,10 +516,10 @@ impl TcpSocket {
             .unwrap_or(Ipv4Address::new(0, 0, 0, 0));
 
         let total_len = header.data_offset() + data.len();
-        header.window_size = *self.recv_window.lock();
+        header.window_size = self.recv_window.load(Ordering::SeqCst);
 
         // Calculate checksum
-        header.checksum = header.calculate_checksum(&local_ip.0, &dest_ip.0, data);
+        header.checksum = header.calculate_checksum(local_ip.0, dest_ip.0, data);
 
         // Serialize header
         let header_bytes = header.to_bytes();
@@ -529,18 +535,15 @@ impl TcpSocket {
         ip_context.set("ip_protocol", &[6]); // TCP protocol
 
         // Send through IP layer
-            if let Some(ip_layer) = get_network_manager().get_layer("ip") {
-                if let Ok(()) = ip_layer.send(&segment, &ip_context, &[]) {
-                    self.bytes_sent.fetch_add(segment.len() as u64, Ordering::SeqCst);
+        if let Some(ip_layer) = get_network_manager().get_layer("ip") {
+            if let Ok(()) = ip_layer.send(&segment, &ip_context, &[]) {
+                self.bytes_sent.fetch_add(segment.len() as u64, Ordering::SeqCst);
 
-                    if update_seq {
-                        self.send_seq.fetch_add(total_len as u32, Ordering::SeqCst);
-                    }
+                if update_seq {
+                    self.send_seq.fetch_add(total_len as u32, Ordering::SeqCst);
                 }
             }
         }
-
-        Ok(data.len())
     }
 
     /// Send data through socket
@@ -549,7 +552,11 @@ impl TcpSocket {
             return Err(SocketError::NotConnected);
         }
 
-        let dest_ip = *self.remote_ip.lock().ok_or(SocketError::NotConnected)?;
+        let dest_ip = self
+            .remote_ip
+            .lock()
+            .clone()
+            .ok_or(SocketError::NotConnected)?;
         let dest_port = self.remote_port.load(Ordering::SeqCst);
 
         // Add to send buffer
@@ -590,8 +597,9 @@ impl TcpSocket {
 
         Ok(len)
     }
+}
 
-    impl SocketObject for TcpSocket {
+impl SocketObject for TcpSocket {
     fn socket_type(&self) -> crate::network::socket::SocketType {
         crate::network::socket::SocketType::Stream
     }
@@ -617,7 +625,9 @@ impl TcpSocket {
         let _ = flags;
 
         match address {
-            SocketAddress::Inet { addr, port } => {
+            SocketAddress::Inet(inet) => {
+                let addr = Ipv4Address::from_bytes(inet.addr);
+                let port = inet.port;
                 // Update remote address
                 *self.remote_ip.lock() = Some(addr);
                 self.remote_port.store(port, Ordering::SeqCst);
@@ -635,13 +645,15 @@ impl TcpSocket {
         let _ = flags;
 
         let len = self.recv_data(buffer)?;
-        let addr = SocketAddress::Inet {
-            addr: *self
-                .remote_ip
-                .lock()
-                .unwrap_or(&Ipv4Address::new(0, 0, 0, 0)),
-            port: self.remote_port.load(Ordering::SeqCst),
-        };
+        let remote_ip = self
+            .remote_ip
+            .lock()
+            .clone()
+            .unwrap_or(Ipv4Address::new(0, 0, 0, 0));
+        let addr = SocketAddress::Inet(Inet4SocketAddress::new(
+            remote_ip.0,
+            self.remote_port.load(Ordering::SeqCst),
+        ));
 
         Ok((len, addr))
     }
@@ -650,9 +662,9 @@ impl TcpSocket {
 impl SocketControl for TcpSocket {
     fn bind(&self, address: &SocketAddress) -> Result<(), SocketError> {
         match address {
-            SocketAddress::Inet { addr, port } => {
-                *self.local_ip.lock() = Some(addr);
-                self.local_port.store(port, Ordering::SeqCst);
+            SocketAddress::Inet(inet) => {
+                *self.local_ip.lock() = Some(Ipv4Address::from_bytes(inet.addr));
+                self.local_port.store(inet.port, Ordering::SeqCst);
                 Ok(())
             }
             _ => Err(SocketError::InvalidAddress),
@@ -661,7 +673,7 @@ impl SocketControl for TcpSocket {
 
     fn listen(&self, _backlog: usize) -> Result<(), SocketError> {
         if self.local_port.load(Ordering::SeqCst) == 0 {
-            return Err(SocketError::NotBound);
+            return Err(SocketError::InvalidOperation);
         }
         self.set_state(TcpState::Listen);
         Ok(())
@@ -669,7 +681,9 @@ impl SocketControl for TcpSocket {
 
     fn connect(&self, address: &SocketAddress) -> Result<(), SocketError> {
         match address {
-            SocketAddress::Inet { addr, port } => {
+            SocketAddress::Inet(inet) => {
+                let addr = Ipv4Address::from_bytes(inet.addr);
+                let port = inet.port;
                 *self.remote_ip.lock() = Some(addr);
                 self.remote_port.store(port, Ordering::SeqCst);
 
@@ -683,7 +697,7 @@ impl SocketControl for TcpSocket {
 
     fn accept(&self) -> Result<Arc<dyn SocketObject>, SocketError> {
         if self.get_state() != TcpState::Listen {
-            return Err(SocketError::InvalidState);
+            return Err(SocketError::NotListening);
         }
 
         // TODO: Implement accept from pending connections
@@ -694,21 +708,21 @@ impl SocketControl for TcpSocket {
     fn getpeername(&self) -> Result<SocketAddress, SocketError> {
         let ip = self
             .remote_ip
-            .read()
+            .lock()
             .clone()
             .ok_or(SocketError::NotConnected)?;
         let port = self.remote_port.load(Ordering::SeqCst);
-        Ok(SocketAddress::Inet { addr: ip, port })
+        Ok(SocketAddress::Inet(Inet4SocketAddress::new(ip.0, port)))
     }
 
     fn getsockname(&self) -> Result<SocketAddress, SocketError> {
         let ip = self
             .local_ip
-            .read()
+            .lock()
             .clone()
             .ok_or(SocketError::InvalidAddress)?;
         let port = self.local_port.load(Ordering::SeqCst);
-        Ok(SocketAddress::Inet { addr: ip, port })
+        Ok(SocketAddress::Inet(Inet4SocketAddress::new(ip.0, port)))
     }
 
     fn shutdown(&self, how: crate::network::socket::ShutdownHow) -> Result<(), SocketError> {
@@ -757,12 +771,12 @@ impl crate::ipc::StreamIpcOps for TcpSocket {
 impl crate::object::capability::StreamOps for TcpSocket {
     fn read(&self, buffer: &mut [u8]) -> Result<usize, crate::object::capability::StreamError> {
         self.recv_data(buffer)
-            .map_err(|_| crate::object::capability::StreamError::Other)
+            .map_err(|_| crate::object::capability::StreamError::Other("tcp recv error".into()))
     }
 
     fn write(&self, data: &[u8]) -> Result<usize, crate::object::capability::StreamError> {
         self.send_data(data)
-            .map_err(|_| crate::object::capability::StreamError::Other)
+            .map_err(|_| crate::object::capability::StreamError::Other("tcp send error".into()))
     }
 }
 

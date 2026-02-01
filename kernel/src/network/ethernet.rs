@@ -12,7 +12,7 @@ use crate::network::socket::SocketError;
 
 /// Ethernet frame header (14 bytes)
 #[derive(Debug, Clone, Copy)]
-#[repr(C, packed)]
+#[repr(C)]
 pub struct EthernetHeader {
     /// Destination MAC address (6 bytes)
     pub dest_mac: [u8; 6],
@@ -139,7 +139,7 @@ impl NetworkLayer for EthernetLayer {
                     let mac = [0xFF; 6];
                     mac
                 } else {
-                    let mac = [0x00, 0x00, 0x00, 0x00, 0x00];
+                    let mac = [0x00; 6];
                     mac
                 }
             } else {
@@ -168,7 +168,7 @@ impl NetworkLayer for EthernetLayer {
             })
             .unwrap_or(ether_type::IPV4);
 
-        let header = EthernetHeader::new(dest_mac, src_mac, ether_type);
+        let header = EthernetHeader::new(dest_mac, *src_mac.as_bytes(), ether_type);
         let total_size = ETHERNET_HEADER_SIZE + packet.len();
 
         let mut stats = self.stats.write();

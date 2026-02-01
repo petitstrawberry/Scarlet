@@ -6,6 +6,7 @@
 use alloc::vec::Vec;
 use spin::RwLock;
 
+use crate::early_println;
 use crate::network::ethernet::ETHERNET_HEADER_SIZE;
 use crate::network::protocol_stack::{LayerContext, NetworkLayer, NetworkLayerStats};
 use crate::network::socket::SocketError;
@@ -47,7 +48,7 @@ impl Ipv4Address {
 
     /// Check if this is a loopback address (127.0.0.0/8)
     pub fn is_loopback(&self) -> bool {
-        self.0.0 == 127
+        self.0[0] == 127
     }
 
     /// Check if this is the "any" address (0.0.0.0)
@@ -296,11 +297,12 @@ impl NetworkLayer for Ipv4Layer {
         header.checksum = header.calculate_checksum();
 
         // Serialize header
-        let header_bytes = header.to_bytes();
+        let mut ip_packet = header.to_bytes();
 
         // Create IP packet: header + payload
-        let ip_packet = [header_bytes, packet].concat();
+        ip_packet.extend_from_slice(packet);
 
+        early_println!(
             "[IPv4] Send: {} bytes (src: {}.{}.{}.{}, dst: {}.{}.{}.{}, proto: {})",
             ip_packet.len(),
             src_ip_bytes[0],
@@ -340,9 +342,11 @@ impl NetworkLayer for Ipv4Layer {
         // Verify checksum
         let calculated_checksum = header.calculate_checksum();
         if calculated_checksum != header.checksum {
+            let header_checksum = unsafe { core::ptr::addr_of!(header.checksum).read_unaligned() };
+            early_println!(
                 "[IPv4] Checksum mismatch: calculated=0x{:04X}, header=0x{:04X}",
                 calculated_checksum,
-                header.checksum
+                header_checksum
             );
             let mut stats = self.stats.write();
             stats.protocol_errors += 1;
@@ -351,6 +355,7 @@ impl NetworkLayer for Ipv4Layer {
 
         let payload = &packet[header_len..];
 
+        early_println!(
             "[IPv4] Recv: {} bytes (src: {}.{}.{}.{}, dst: {}.{}.{}.{}, proto: {})",
             packet.len(),
             header.source_ip[0],
