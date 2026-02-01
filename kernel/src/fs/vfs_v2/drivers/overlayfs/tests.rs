@@ -702,7 +702,7 @@ fn test_overlayfs_cross_vfs() {
     let lib_obj = base_fs.open(&lib_file, 0o2).unwrap(); // Write mode
     lib_obj.write(lib_content).unwrap();
 
-    let config_obj = base_fs.open(&config_file, 0o2).unwrap(); // Write mode 
+    let config_obj = base_fs.open(&config_file, 0o2).unwrap(); // Write mode
     config_obj.write(config_content).unwrap();
 
     // Setup container VFS: create /overlay directory with files

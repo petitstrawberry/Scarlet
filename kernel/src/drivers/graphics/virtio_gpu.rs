@@ -1274,7 +1274,7 @@ mod tests {
                     let color = if (x / 10 + y / 10) % 2 == 0 {
                         0xFFFF0000 // Blue squares
                     } else {
-                        0xFF00FF00 // Green squares  
+                        0xFF00FF00 // Green squares
                     };
                     *fb_ptr.add(pixel_index) = color;
                 }

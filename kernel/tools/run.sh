@@ -71,6 +71,11 @@ if [ -n "$QEMU_DEBUG_FLAGS" ]; then
     QEMU_DEBUG_ARGS="-d $QEMU_DEBUG_FLAGS -D $QEMU_DEBUG_LOG"
 fi
 
+CMDLINE_ARGS=()
+if [ -n "${SCARLET_CMDLINE:-}" ]; then
+    CMDLINE_ARGS=(-append "${SCARLET_CMDLINE}")
+fi
+
 # Create temporary file for capturing output
 TEMP_OUTPUT=$(mktemp)
 
@@ -92,6 +97,7 @@ qemu-system-riscv64 \
     -device virtio-keyboard-device,bus=virtio-mmio-bus.3 \
     -device virtio-mouse-device,bus=virtio-mmio-bus.4 \
     -device virtio-rng-device,bus=virtio-mmio-bus.5 \
+    "${CMDLINE_ARGS[@]}" \
     $QEMU_DEBUG_ARGS \
     $DEBUG_FLAGS \
     -initrd "$INITRAMFS_PATH" \

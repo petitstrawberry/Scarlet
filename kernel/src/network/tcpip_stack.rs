@@ -4,16 +4,16 @@
 //! It sets up all protocol layers (Ethernet, ARP, IPv4, ICMP, UDP, TCP)
 //! and integrates them with NetworkManager.
 
-use alloc::sync::Arc;
 use spin::Once;
 
 use super::arp::ArpLayer;
 use super::ethernet::EthernetLayer;
 use super::icmp::IcmpLayer;
 use super::ipv4::{Ipv4Address, Ipv4Layer};
-use super::protocol_stack::{get_network_manager, NetworkLayer};
+use super::protocol_stack::{NetworkLayer, get_network_manager as get_protocol_manager};
 use super::tcp::TcpLayer;
 use super::udp::UdpLayer;
+use crate::network::get_network_manager as get_global_network_manager;
 
 /// Initialize complete TCP/IP network stack
 ///
@@ -23,7 +23,7 @@ pub fn init_tcp_ip_stack() {
     static INIT_DONE: Once = Once::new();
 
     INIT_DONE.call_once(|| {
-        let network_manager = get_network_manager();
+        let network_manager = get_global_network_manager();
 
         let interface = match network_manager.get_default_interface() {
             Some(interface) => interface,
@@ -39,10 +39,7 @@ pub fn init_tcp_ip_stack() {
 
         let local_ip = interface
             .ip_address()
-            .unwrap_or_else(|| Ipv4Address::new(192, 168, 1, 100));
-        if interface.ip_address().is_none() {
-            interface.set_ip_address(local_ip);
-        }
+            .unwrap_or_else(|| Ipv4Address::new(0, 0, 0, 0));
         let arp_layer = ArpLayer::new(*mac_address.as_bytes(), local_ip);
         network_manager.register_layer("arp", arp_layer.clone());
 
@@ -78,7 +75,7 @@ pub fn create_tcp_ip_stack(
         return Err(super::socket::SocketError::InvalidAddress);
     }
 
-    let network_manager = get_network_manager();
+    let network_manager = get_protocol_manager();
 
     if network_manager.has_layer("ethernet")
         && network_manager.has_layer("arp")

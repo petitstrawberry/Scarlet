@@ -73,6 +73,11 @@ if [ -n "$QEMU_DEBUG_FLAGS" ]; then
     QEMU_DEBUG_ARGS="-d $QEMU_DEBUG_FLAGS -D $QEMU_DEBUG_LOG"
 fi
 
+CMDLINE_ARGS=()
+if [ -n "${SCARLET_CMDLINE:-}" ]; then
+    CMDLINE_ARGS=(-append "${SCARLET_CMDLINE}")
+fi
+
 # Ensure initramfs exists (do NOT auto-generate here; keep behavior consistent across architectures)
 if [ ! -f "$INITRAMFS_PATH" ]; then
     echo "Error: initramfs not found at $INITRAMFS_PATH"
@@ -130,6 +135,7 @@ qemu-system-aarch64 \
     -device virtio-keyboard-device \
     -device virtio-mouse-device \
     -device virtio-rng-device \
+    "${CMDLINE_ARGS[@]}" \
     $QEMU_DEBUG_ARGS \
     $DEBUG_FLAGS | tee "$TEMP_OUTPUT"
 

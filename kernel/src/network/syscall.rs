@@ -39,16 +39,132 @@
 
 use alloc::string::String;
 use alloc::sync::Arc;
+use alloc::vec::Vec;
 
 use crate::arch::Trapframe;
 use crate::network::{
-    local::LocalSocket, tcpip_stack::create_tcp_ip_stack, Inet4SocketAddress, LocalSocketAddress,
-    NetworkManager, ShutdownHow, SocketAddress, SocketDomain, SocketObject, SocketProtocol,
-    SocketType,
+    Inet4SocketAddress, Ipv4Address, LocalSocketAddress, NetworkManager, ShutdownHow,
+    SocketAddress, SocketDomain, SocketObject, SocketProtocol, SocketType, local::LocalSocket,
+    tcpip_stack::create_tcp_ip_stack,
 };
-use crate::object::handle::{AccessMode, HandleMetadata, HandleType};
 use crate::object::KernelObject;
+use crate::object::handle::{AccessMode, HandleMetadata, HandleType};
 use crate::task::mytask;
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct NetworkSetIpv4Request {
+    iface_ptr: usize,
+    iface_len: usize,
+    addr: [u8; 4],
+}
+
+fn read_user_string(ptr: usize, len: usize) -> Option<String> {
+    let task = mytask()?;
+    if len == 0 {
+        return None;
+    }
+    let addr = task.vm_manager.translate_vaddr(ptr)? as *const u8;
+    if len > 256 {
+        return None;
+    }
+    let mut bytes = Vec::with_capacity(len);
+    unsafe {
+        for i in 0..len {
+            bytes.push(*addr.add(i));
+        }
+    }
+    String::from_utf8(bytes).ok()
+}
+
+fn read_user_ipv4(ptr: usize) -> Option<Ipv4Address> {
+    let task = mytask()?;
+    let addr = task.vm_manager.translate_vaddr(ptr)? as *const u8;
+    unsafe {
+        let bytes = [*addr, *addr.add(1), *addr.add(2), *addr.add(3)];
+        Some(Ipv4Address::from_bytes(bytes))
+    }
+}
+
+pub fn sys_network_set_ipv4(tf: &mut Trapframe) -> usize {
+    let task = match mytask() {
+        Some(task) => task,
+        None => return usize::MAX,
+    };
+    tf.increment_pc_next(task);
+
+    let req_ptr = tf.get_arg(0);
+    let req_addr = match task.vm_manager.translate_vaddr(req_ptr) {
+        Some(addr) => addr as *const NetworkSetIpv4Request,
+        None => return usize::MAX,
+    };
+
+    let req = unsafe { *req_addr };
+    let iface = match read_user_string(req.iface_ptr, req.iface_len) {
+        Some(name) => name,
+        None => return usize::MAX,
+    };
+    let ip = Ipv4Address::from_bytes(req.addr);
+
+    match crate::network::device_integration::set_interface_ip(&iface, ip) {
+        Ok(()) => 0,
+        Err(_) => usize::MAX,
+    }
+}
+
+pub fn sys_network_set_gateway(tf: &mut Trapframe) -> usize {
+    let task = match mytask() {
+        Some(task) => task,
+        None => return usize::MAX,
+    };
+    tf.increment_pc_next(task);
+
+    let addr_ptr = tf.get_arg(0);
+    let gateway = match read_user_ipv4(addr_ptr) {
+        Some(addr) => addr,
+        None => return usize::MAX,
+    };
+    crate::network::get_network_manager().set_default_gateway(gateway);
+    0
+}
+
+pub fn sys_network_set_dns(tf: &mut Trapframe) -> usize {
+    let task = match mytask() {
+        Some(task) => task,
+        None => return usize::MAX,
+    };
+    tf.increment_pc_next(task);
+
+    let addr_ptr = tf.get_arg(0);
+    let dns = match read_user_ipv4(addr_ptr) {
+        Some(addr) => addr,
+        None => return usize::MAX,
+    };
+    let manager = crate::network::get_network_manager();
+    let mut config = manager.get_config();
+    config.dns_server = Some(dns);
+    manager.set_config(config);
+    0
+}
+
+pub fn sys_network_set_netmask(tf: &mut Trapframe) -> usize {
+    let task = match mytask() {
+        Some(task) => task,
+        None => return usize::MAX,
+    };
+    tf.increment_pc_next(task);
+
+    let addr_ptr = tf.get_arg(0);
+    let mask = match read_user_ipv4(addr_ptr) {
+        Some(addr) => addr,
+        None => return usize::MAX,
+    };
+    let manager = crate::network::get_network_manager();
+    let mut config = manager.get_config();
+    config.subnet_mask = mask;
+    manager.set_config(config);
+    0
+}
 
 /// System call: Create a new socket
 ///

@@ -729,7 +729,7 @@ mod tests {
         }
 
         // Write more data through target file (truncate first to overwrite)
-        let write_target = vfs.open("/target.txt", 0x02).unwrap(); // Write mode  
+        let write_target = vfs.open("/target.txt", 0x02).unwrap(); // Write mode
         if let crate::object::KernelObject::File(file_obj) = write_target {
             file_obj.truncate(0).unwrap(); // Clear the file first
             file_obj.write(b"Additional data").unwrap();

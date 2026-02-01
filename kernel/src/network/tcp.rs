@@ -285,11 +285,7 @@ impl TcpSocket {
         if port == u16::MAX {
             NEXT_EPHEMERAL_PORT.store(49152, Ordering::SeqCst);
         }
-        if port < 49152 {
-            49152
-        } else {
-            port
-        }
+        if port < 49152 { 49152 } else { port }
     }
 
     /// Get current TCP state

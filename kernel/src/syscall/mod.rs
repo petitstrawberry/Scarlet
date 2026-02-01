@@ -89,6 +89,9 @@ use crate::ipc::syscall::{
     sys_socket_send_handle, sys_socket_send_handle_and_data,
 };
 use crate::network::syscall::{
+    sys_network_set_dns, sys_network_set_gateway, sys_network_set_ipv4, sys_network_set_netmask,
+};
+use crate::network::syscall::{
     sys_socket_accept, sys_socket_bind, sys_socket_connect, sys_socket_create, sys_socket_listen,
     sys_socket_shutdown, sys_socketpair,
 };
@@ -233,6 +236,12 @@ syscall_table! {
     SocketAccept = 904 => sys_socket_accept,     // Accept connection
     Socketpair = 905 => sys_socketpair,          // Create socket pair
     SocketShutdown = 906 => sys_socket_shutdown, // Shutdown socket
+
+    // === Network Configuration ===
+    NetworkSetIpv4 = 910 => sys_network_set_ipv4,       // Set interface IPv4 address
+    NetworkSetGateway = 911 => sys_network_set_gateway, // Set default gateway
+    NetworkSetDns = 912 => sys_network_set_dns,         // Set DNS server
+    NetworkSetNetmask = 913 => sys_network_set_netmask, // Set subnet mask
 
     // === Task Event Operations ===
 

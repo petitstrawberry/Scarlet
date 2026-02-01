@@ -4,7 +4,7 @@
 //! implement the Scarlet Native local socket interface.
 
 use crate::handle::{Handle, RawHandle};
-use crate::syscall::{syscall1, syscall2, syscall3, syscall4, syscall5, Syscall};
+use crate::syscall::{Syscall, syscall1, syscall2, syscall3, syscall4, syscall5};
 
 /// Scarlet Native socket domains
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

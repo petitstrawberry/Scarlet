@@ -197,7 +197,7 @@ pub const FD_CLOEXEC: u32 = 1; // Close-on-exec flag
 #[allow(dead_code)]
 pub const O_RDONLY: i32 = 0o0; // Read only
 #[allow(dead_code)]
-pub const O_WRONLY: i32 = 0o1; // Write only  
+pub const O_WRONLY: i32 = 0o1; // Write only
 #[allow(dead_code)]
 pub const O_RDWR: i32 = 0o2; // Read and write
 pub const O_CREAT: i32 = 0o100; // Create file if it doesn't exist

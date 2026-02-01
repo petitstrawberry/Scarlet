@@ -193,7 +193,6 @@ use alloc::{
     vec::Vec,
 };
 
-use ::core::fmt;
 use spin::RwLock;
 
 extern crate alloc;
@@ -238,8 +237,8 @@ impl FileSystemError {
     }
 }
 
-impl fmt::Debug for FileSystemError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl ::core::fmt::Debug for FileSystemError {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
         write!(
             f,
             "FileSystemError {{ kind: {:?}, message: {} }}",

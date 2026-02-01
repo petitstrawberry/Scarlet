@@ -94,6 +94,12 @@ pub enum Syscall {
     Socketpair = 905,     // Create socket pair
     SocketShutdown = 906, // Shutdown socket
 
+    // === Network Configuration ===
+    NetworkSetIpv4 = 910,    // Set interface IPv4 address
+    NetworkSetGateway = 911, // Set default gateway
+    NetworkSetDns = 912,     // Set DNS server
+    NetworkSetNetmask = 913, // Set subnet mask
+
     // === Debug/Profiler Operations ===
     ProfilerDump = 999, // Dump profiler statistics (debug only)
 }

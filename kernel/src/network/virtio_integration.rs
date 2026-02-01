@@ -16,7 +16,7 @@ use crate::device::network::{DevicePacket, MacAddress, NetworkDevice};
 use crate::drivers::network::virtio_net::VirtioNetDevice;
 use crate::network::ethernet::EthernetLayer;
 use crate::network::ipv4::Ipv4Address;
-use crate::network::{get_network_manager, InterfaceStats, NetworkConfig, NetworkInterface};
+use crate::network::{InterfaceStats, NetworkConfig, NetworkInterface, get_network_manager};
 
 /// VirtIO Network Interface
 ///

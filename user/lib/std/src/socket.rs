@@ -24,13 +24,13 @@
 
 use crate::handle::Handle;
 use crate::handle::RawHandle;
-use crate::syscall::{syscall1, syscall3, Syscall};
+use crate::syscall::{Syscall, syscall1, syscall3};
 
+pub use crate::handle::capability::ShutdownHow;
 pub use crate::handle::capability::socket::Inet4SocketAddress;
 pub use crate::handle::capability::socket::SocketDomain;
 pub use crate::handle::capability::socket::SocketProtocol;
 pub use crate::handle::capability::socket::SocketType;
-pub use crate::handle::capability::ShutdownHow;
 
 /// Socket handle wrapper
 ///

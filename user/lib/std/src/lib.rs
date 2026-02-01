@@ -102,6 +102,7 @@ pub mod fs;
 pub mod handle;
 pub mod io;
 pub mod ipc;
+pub mod network;
 pub mod socket;
 pub mod sync;
 pub mod syscall;
