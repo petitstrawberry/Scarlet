@@ -4,6 +4,7 @@
 //! It implements NetworkLayer trait for ICMP messages.
 
 use alloc::collections::{BTreeMap, VecDeque};
+use alloc::format;
 use alloc::string::String;
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
@@ -426,7 +427,7 @@ pub struct IcmpSocket {
     icmp_layer: Weak<IcmpLayer>,
     identifier: u16,
     sequence: AtomicU16,
-    local_ip: Mutex<Option<Ipv4Address>>,
+    local_addr: Mutex<Option<SocketAddress>>,
     remote_addr: RwLock<Option<SocketAddress>>,
     recv_queue: Mutex<VecDeque<(Vec<u8>, SocketAddress)>>,
 }
@@ -437,7 +438,7 @@ impl IcmpSocket {
             icmp_layer,
             identifier,
             sequence: AtomicU16::new(0),
-            local_ip: Mutex::new(None),
+            local_addr: Mutex::new(None),
             remote_addr: RwLock::new(None),
             recv_queue: Mutex::new(VecDeque::new()),
         })
@@ -485,6 +486,15 @@ impl SocketObject for IcmpSocket {
         let dest_ip = Ipv4Address::from_bytes(target.addr);
 
         if let Some(ip_layer) = get_network_manager().get_layer("ip") {
+            if let Some(ipv4) = ip_layer
+                .as_any()
+                .downcast_ref::<crate::network::ipv4::Ipv4Layer>()
+            {
+                if ipv4.get_local_ip().0 == [0, 0, 0, 0] {
+                    early_println!("[ICMP] send blocked: local IP unset");
+                    return Err(SocketError::NotConnected);
+                }
+            }
             if let Some(icmp_layer) = self.icmp_layer.upgrade() {
                 icmp_layer.send_ping_request(
                     dest_ip,
@@ -494,7 +504,11 @@ impl SocketObject for IcmpSocket {
                     &[ip_layer],
                 )?;
                 return Ok(data.len());
+            } else {
+                early_println!("[ICMP] send failed: ICMP layer unavailable");
             }
+        } else {
+            early_println!("[ICMP] send failed: IP layer unavailable");
         }
 
         Err(SocketError::NoRoute)
@@ -516,8 +530,8 @@ impl SocketObject for IcmpSocket {
 impl SocketControl for IcmpSocket {
     fn bind(&self, address: &SocketAddress) -> Result<(), SocketError> {
         match address {
-            SocketAddress::Inet(inet) => {
-                *self.local_ip.lock() = Some(Ipv4Address::from_bytes(inet.addr));
+            SocketAddress::Inet(_) => {
+                *self.local_addr.lock() = Some(address.clone());
                 Ok(())
             }
             SocketAddress::Unspecified => Ok(()),
@@ -551,12 +565,10 @@ impl SocketControl for IcmpSocket {
     }
 
     fn getsockname(&self) -> Result<SocketAddress, SocketError> {
-        let ip = self
-            .local_ip
+        self.local_addr
             .lock()
             .clone()
-            .ok_or(SocketError::InvalidAddress)?;
-        Ok(SocketAddress::Inet(Inet4SocketAddress::new(ip.0, 0)))
+            .ok_or(SocketError::InvalidAddress)
     }
 
     fn shutdown(&self, _how: crate::network::socket::ShutdownHow) -> Result<(), SocketError> {
@@ -596,20 +608,19 @@ impl crate::ipc::StreamIpcOps for IcmpSocket {
 
 impl crate::object::capability::StreamOps for IcmpSocket {
     fn read(&self, buffer: &mut [u8]) -> Result<usize, crate::object::capability::StreamError> {
-        let (len, _) = self
-            .recvfrom(buffer, 0)
-            .map_err(|_| crate::object::capability::StreamError::Other("icmp recv error".into()))?;
+        let (len, _) = self.recvfrom(buffer, 0).map_err(|err| {
+            crate::object::capability::StreamError::Other(format!("icmp recv error: {:?}", err))
+        })?;
         Ok(len)
     }
 
     fn write(&self, data: &[u8]) -> Result<usize, crate::object::capability::StreamError> {
-        let addr = self
-            .remote_addr
-            .read()
-            .clone()
-            .unwrap_or(SocketAddress::Unspecified);
-        self.sendto(data, &addr, 0)
-            .map_err(|_| crate::object::capability::StreamError::Other("icmp send error".into()))?;
+        let addr = self.remote_addr.read().clone().ok_or_else(|| {
+            crate::object::capability::StreamError::Other("icmp not connected".into())
+        })?;
+        self.sendto(data, &addr, 0).map_err(|err| {
+            crate::object::capability::StreamError::Other(format!("icmp send error: {:?}", err))
+        })?;
         Ok(data.len())
     }
 }

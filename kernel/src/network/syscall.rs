@@ -106,6 +106,13 @@ pub fn sys_network_set_ipv4(tf: &mut Trapframe) -> usize {
     };
     let ip = Ipv4Address::from_bytes(req.addr);
 
+    if crate::network::get_network_manager()
+        .get_interface(&iface)
+        .is_none()
+    {
+        return usize::MAX;
+    }
+
     match crate::network::device_integration::set_interface_ip(&iface, ip) {
         Ok(()) => 0,
         Err(_) => usize::MAX,
@@ -164,6 +171,41 @@ pub fn sys_network_set_netmask(tf: &mut Trapframe) -> usize {
     config.subnet_mask = mask;
     manager.set_config(config);
     0
+}
+
+pub fn sys_network_list_interfaces(tf: &mut Trapframe) -> usize {
+    let task = match mytask() {
+        Some(task) => task,
+        None => return usize::MAX,
+    };
+    tf.increment_pc_next(task);
+
+    let buf_ptr = tf.get_arg(0);
+    let buf_len = tf.get_arg(1);
+    if buf_ptr == 0 || buf_len == 0 {
+        return usize::MAX;
+    }
+
+    let buf_addr = match task.vm_manager.translate_vaddr(buf_ptr) {
+        Some(addr) => addr as *mut u8,
+        None => return usize::MAX,
+    };
+
+    let interfaces = crate::network::get_network_manager().list_interfaces();
+    let mut output = String::new();
+    for (idx, name) in interfaces.iter().enumerate() {
+        if idx > 0 {
+            output.push('\n');
+        }
+        output.push_str(name);
+    }
+
+    let bytes = output.as_bytes();
+    let copy_len = bytes.len().min(buf_len);
+    unsafe {
+        core::ptr::copy_nonoverlapping(bytes.as_ptr(), buf_addr, copy_len);
+    }
+    copy_len
 }
 
 /// System call: Create a new socket

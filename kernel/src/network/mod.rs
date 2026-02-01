@@ -132,7 +132,7 @@ pub struct NetworkManager {
     protocol_stacks: protocol_stack::ProtocolStackManager,
 
     /// Protocol layers registry (shared instances like VFS filesystems)
-    protocol_layers: spin::RwLock<BTreeMap<String, Arc<dyn protocol_stack::NetworkLayer>>>,
+    protocol_layers: spin::RwLock<BTreeMap<String, Arc<dyn NetworkLayer>>>,
 
     /// Named sockets namespace (path/name -> socket)
     named_sockets: spin::RwLock<BTreeMap<String, Weak<dyn SocketObject>>>,
@@ -420,11 +420,11 @@ impl NetworkManager {
         self.protocol_stacks.register_stack(stack);
     }
 
-    pub fn register_layer(&self, name: &str, layer: Arc<dyn protocol_stack::NetworkLayer>) {
+    pub fn register_layer(&self, name: &str, layer: Arc<dyn NetworkLayer>) {
         self.protocol_layers.write().insert(name.to_string(), layer);
     }
 
-    pub fn get_layer(&self, name: &str) -> Option<Arc<dyn protocol_stack::NetworkLayer>> {
+    pub fn get_layer(&self, name: &str) -> Option<Arc<dyn NetworkLayer>> {
         self.protocol_layers.read().get(name).cloned()
     }
 

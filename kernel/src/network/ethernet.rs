@@ -8,6 +8,7 @@ use spin::RwLock;
 
 use crate::device::network::DevicePacket;
 use crate::device::network::MacAddress;
+use crate::early_println;
 use crate::network::get_network_manager;
 use crate::network::protocol_stack::{LayerContext, NetworkLayer, NetworkLayerStats};
 use crate::network::socket::SocketError;
@@ -147,12 +148,16 @@ impl NetworkLayer for EthernetLayer {
                         ip_bytes[2],
                         ip_bytes[3],
                     );
+                    let target_ip = match get_network_manager().get_default_gateway() {
+                        Some(gateway) => gateway,
+                        None => dest_ip,
+                    };
                     if let Some(arp_layer) = get_network_manager().get_layer("arp") {
                         if let Some(arp) = arp_layer
                             .as_any()
                             .downcast_ref::<crate::network::arp::ArpLayer>()
                         {
-                            if let Some(mac) = arp.lookup(dest_ip) {
+                            if let Some(mac) = arp.lookup(target_ip) {
                                 mac
                             } else {
                                 let mut mac = [0u8; 6];
@@ -171,7 +176,7 @@ impl NetworkLayer for EthernetLayer {
                                             let local_ip = ip.get_local_ip();
                                             let mut ctx = LayerContext::new();
                                             ctx.set("ip_src", &local_ip.0);
-                                            let _ = arp.send_request(dest_ip, &ctx, &[]);
+                                            let _ = arp.send_request(target_ip, &ctx, &[]);
                                         }
                                     }
                                 }
@@ -228,13 +233,28 @@ impl NetworkLayer for EthernetLayer {
         let mut frame = Vec::with_capacity(total_size);
         frame.extend_from_slice(&header.to_bytes());
         frame.extend_from_slice(packet);
+        let frame_len = frame.len();
 
         if let Some(interface) = get_network_manager().get_default_interface() {
+            early_println!(
+                "[Ethernet] Sending {} bytes to {:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X} (type=0x{:04X})",
+                frame_len,
+                dest_mac[0],
+                dest_mac[1],
+                dest_mac[2],
+                dest_mac[3],
+                dest_mac[4],
+                dest_mac[5],
+                ether_type
+            );
             let packet = DevicePacket::with_data(frame);
-            interface
-                .send(packet)
-                .map_err(|_| SocketError::Other("send failed".into()))?;
+            interface.send(packet).map_err(|e| {
+                early_println!("[Ethernet] Send failed: {}", e);
+                SocketError::Other("send failed".into())
+            })?;
+            early_println!("[Ethernet] Send succeeded");
         } else {
+            early_println!("[Ethernet] No default interface!");
             return Err(SocketError::NoRoute);
         }
 

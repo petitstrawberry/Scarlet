@@ -22,13 +22,25 @@ use crate::network::get_network_manager as get_global_network_manager;
 pub fn init_tcp_ip_stack() {
     static INIT_DONE: Once = Once::new();
 
-    INIT_DONE.call_once(|| {
-        let network_manager = get_global_network_manager();
+    let network_manager = get_global_network_manager();
+    let has_interface = network_manager.get_default_interface().is_some()
+        || !network_manager.list_interfaces().is_empty();
+    if !has_interface {
+        return;
+    }
 
+    INIT_DONE.call_once(|| {
         let interface = match network_manager.get_default_interface() {
             Some(interface) => interface,
             None => {
-                return;
+                let Some(name) = network_manager.list_interfaces().first().cloned() else {
+                    return;
+                };
+                network_manager.set_default_interface(&name);
+                match network_manager.get_default_interface() {
+                    Some(interface) => interface,
+                    None => return,
+                }
             }
         };
 
@@ -77,12 +89,12 @@ pub fn create_tcp_ip_stack(
 
     let network_manager = get_protocol_manager();
 
-    if network_manager.has_layer("ethernet")
-        && network_manager.has_layer("arp")
-        && network_manager.has_layer("ip")
-        && network_manager.has_layer("udp")
-        && network_manager.has_layer("tcp")
-        && network_manager.has_layer("icmp")
+    if network_manager.get_layer("ethernet").is_some()
+        && network_manager.get_layer("arp").is_some()
+        && network_manager.get_layer("ip").is_some()
+        && network_manager.get_layer("udp").is_some()
+        && network_manager.get_layer("tcp").is_some()
+        && network_manager.get_layer("icmp").is_some()
     {
         return Ok(());
     }

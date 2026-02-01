@@ -333,6 +333,16 @@ impl ArpLayer {
             let mut stats = self.stats.write();
             stats.packets_sent += 1;
             stats.bytes_sent += (28 + 14) as u64; // ARP (28) + Ethernet header (14)
+        } else {
+            // Fallback: Send directly through default interface's Ethernet layer
+            if let Some(eth_layer) = get_network_manager().get_layer("ethernet") {
+                eth_layer.send(&arp_bytes, &eth_context, &[])?;
+
+                // Update statistics
+                let mut stats = self.stats.write();
+                stats.packets_sent += 1;
+                stats.bytes_sent += (28 + 14) as u64; // ARP (28) + Ethernet header (14)
+            }
         }
 
         Ok(())

@@ -195,6 +195,35 @@ pub fn set_interface_ip(name: &str, ip: Ipv4Address) -> Result<(), &'static str>
     let network_manager = get_network_manager();
     if let Some(interface) = network_manager.get_interface(name) {
         interface.set_ip_address(ip);
+        if crate::network::protocol_stack::get_network_manager()
+            .get_layer("ip")
+            .is_none()
+        {
+            crate::network::tcpip_stack::init_tcp_ip_stack();
+        }
+
+        if let Some(ip_layer) =
+            crate::network::protocol_stack::get_network_manager().get_layer("ip")
+        {
+            if let Some(ipv4) = ip_layer
+                .as_any()
+                .downcast_ref::<crate::network::ipv4::Ipv4Layer>()
+            {
+                crate::early_println!(
+                    "[network] set {} IP to {}.{}.{}.{}",
+                    name,
+                    ip.0[0],
+                    ip.0[1],
+                    ip.0[2],
+                    ip.0[3]
+                );
+                ipv4.set_local_ip(ip);
+            } else {
+                crate::early_println!("[network] set {} IP failed: no IPv4 layer", name);
+            }
+        } else {
+            crate::early_println!("[network] set {} IP failed: no IP layer", name);
+        }
         return Ok(());
     }
 
