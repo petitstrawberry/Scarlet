@@ -39,6 +39,7 @@ pub mod protocol_stack;
 pub mod socket;
 pub mod syscall;
 pub mod tcp;
+pub mod tcpip_stack;
 pub mod udp;
 pub mod virtio_integration;
 #[cfg(target_arch = "riscv64")]
@@ -335,7 +336,50 @@ impl NetworkManager {
     }
 
     fn handle_ipv4_packet(&self, packet: &DevicePacket) {
-        let _ = packet;
+        if packet.len < 14 + 20 {
+            return;
+        }
+
+        let ip_bytes = &packet.data[14..packet.len];
+        let header = match crate::network::ipv4::Ipv4Header::from_bytes(ip_bytes) {
+            Some(h) => h,
+            None => return,
+        };
+
+        let header_len = header.header_length();
+        if ip_bytes.len() < header_len {
+            return;
+        }
+
+        let payload = &ip_bytes[header_len..];
+        let protocol = header.protocol;
+
+        if let Some(ip_layer) = self.get_layer("ip") {
+            if let Some(ip) = ip_layer
+                .as_any()
+                .downcast_ref::<crate::network::ipv4::Ipv4Layer>()
+            {
+                if let Some(handler) = ip.get_protocol_handler(protocol) {
+                    let src_ip = crate::network::ipv4::Ipv4Address::from_bytes(header.source_ip);
+                    let dst_ip = crate::network::ipv4::Ipv4Address::from_bytes(header.dest_ip);
+                    let _ = match protocol {
+                        crate::network::ipv4::protocol::ICMP => handler
+                            .as_any()
+                            .downcast_ref::<crate::network::icmp::IcmpLayer>()
+                            .map(|icmp| icmp.receive_packet(payload, src_ip, dst_ip)),
+                        crate::network::ipv4::protocol::TCP => handler
+                            .as_any()
+                            .downcast_ref::<crate::network::tcp::TcpLayer>()
+                            .map(|tcp| tcp.receive_packet(src_ip, dst_ip, payload)),
+                        crate::network::ipv4::protocol::UDP => handler
+                            .as_any()
+                            .downcast_ref::<crate::network::udp::UdpLayer>()
+                            .map(|udp| udp.receive_packet(payload)),
+                        _ => Some(handler.receive(payload)),
+                    };
+                }
+            }
+        }
     }
 
     // ===================================================================

@@ -8,7 +8,9 @@ use spin::RwLock;
 
 use crate::early_println;
 use crate::network::ethernet::ETHERNET_HEADER_SIZE;
-use crate::network::protocol_stack::{LayerContext, NetworkLayer, NetworkLayerStats};
+use crate::network::protocol_stack::{
+    get_network_manager, LayerContext, NetworkLayer, NetworkLayerStats,
+};
 use crate::network::socket::SocketError;
 
 /// IPv4 address
@@ -237,6 +239,14 @@ impl Ipv4Layer {
     pub fn set_local_ip(&self, ip: Ipv4Address) {
         *self.local_ip.write() = ip;
     }
+
+    /// Get protocol handler for a protocol number
+    pub fn get_protocol_handler(
+        &self,
+        proto_num: u8,
+    ) -> Option<alloc::sync::Arc<dyn NetworkLayer>> {
+        self.protocols.read().get(&proto_num).cloned()
+    }
 }
 
 impl NetworkLayer for Ipv4Layer {
@@ -317,8 +327,15 @@ impl NetworkLayer for Ipv4Layer {
         );
 
         // Forward to Ethernet layer
+        let mut eth_context = context.clone();
+        eth_context.set(
+            "eth_type",
+            &crate::network::ethernet::ether_type::IPV4.to_be_bytes(),
+        );
         if !next_layers.is_empty() {
-            next_layers[0].send(&ip_packet, context, &next_layers[1..])?;
+            next_layers[0].send(&ip_packet, &eth_context, &next_layers[1..])?;
+        } else if let Some(eth_layer) = get_network_manager().get_layer("ethernet") {
+            eth_layer.send(&ip_packet, &eth_context, &[])?;
         }
 
         // Update statistics

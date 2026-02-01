@@ -6,7 +6,9 @@
 use alloc::vec::Vec;
 use spin::RwLock;
 
+use crate::device::network::DevicePacket;
 use crate::device::network::MacAddress;
+use crate::network::get_network_manager;
 use crate::network::protocol_stack::{LayerContext, NetworkLayer, NetworkLayerStats};
 use crate::network::socket::SocketError;
 
@@ -139,8 +141,50 @@ impl NetworkLayer for EthernetLayer {
                     let mac = [0xFF; 6];
                     mac
                 } else {
-                    let mac = [0x00; 6];
-                    mac
+                    let dest_ip = crate::network::ipv4::Ipv4Address::new(
+                        ip_bytes[0],
+                        ip_bytes[1],
+                        ip_bytes[2],
+                        ip_bytes[3],
+                    );
+                    if let Some(arp_layer) = get_network_manager().get_layer("arp") {
+                        if let Some(arp) = arp_layer
+                            .as_any()
+                            .downcast_ref::<crate::network::arp::ArpLayer>()
+                        {
+                            if let Some(mac) = arp.lookup(dest_ip) {
+                                mac
+                            } else {
+                                let mut mac = [0u8; 6];
+                                if let Some(mac_bytes) = context.get("eth_dst_mac") {
+                                    if mac_bytes.len() >= 6 {
+                                        mac.copy_from_slice(&mac_bytes[0..6]);
+                                    }
+                                }
+
+                                if mac == [0u8; 6] {
+                                    if let Some(ip_layer) = get_network_manager().get_layer("ip") {
+                                        if let Some(ip) = ip_layer
+                                            .as_any()
+                                            .downcast_ref::<crate::network::ipv4::Ipv4Layer>(
+                                        ) {
+                                            let local_ip = ip.get_local_ip();
+                                            let mut ctx = LayerContext::new();
+                                            ctx.set("ip_src", &local_ip.0);
+                                            let _ = arp.send_request(dest_ip, &ctx, &[]);
+                                        }
+                                    }
+                                }
+                                mac
+                            }
+                        } else {
+                            let mac = [0u8; 6];
+                            mac
+                        }
+                    } else {
+                        let mac = [0u8; 6];
+                        mac
+                    }
                 }
             } else {
                 let mac = [0x00; 6];
@@ -157,19 +201,42 @@ impl NetworkLayer for EthernetLayer {
             mac
         };
 
-        let ether_type = context
-            .get("ip_protocol")
-            .and_then(|p| {
-                if !p.is_empty() {
-                    Some(p[0] as u16)
-                } else {
-                    None
+        let ether_type = if let Some(eth_type) = context.get("eth_type") {
+            if eth_type.len() >= 2 {
+                u16::from_be_bytes([eth_type[0], eth_type[1]])
+            } else if !eth_type.is_empty() {
+                eth_type[0] as u16
+            } else {
+                ether_type::IPV4
+            }
+        } else if let Some(ip_proto) = context.get("ip_protocol") {
+            if !ip_proto.is_empty() {
+                match ip_proto[0] {
+                    1 | 6 | 17 => ether_type::IPV4,
+                    _ => ether_type::IPV4,
                 }
-            })
-            .unwrap_or(ether_type::IPV4);
+            } else {
+                ether_type::IPV4
+            }
+        } else {
+            ether_type::IPV4
+        };
 
         let header = EthernetHeader::new(dest_mac, *src_mac.as_bytes(), ether_type);
         let total_size = ETHERNET_HEADER_SIZE + packet.len();
+
+        let mut frame = Vec::with_capacity(total_size);
+        frame.extend_from_slice(&header.to_bytes());
+        frame.extend_from_slice(packet);
+
+        if let Some(interface) = get_network_manager().get_default_interface() {
+            let packet = DevicePacket::with_data(frame);
+            interface
+                .send(packet)
+                .map_err(|_| SocketError::Other("send failed".into()))?;
+        } else {
+            return Err(SocketError::NoRoute);
+        }
 
         let mut stats = self.stats.write();
         stats.packets_sent += 1;

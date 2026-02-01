@@ -342,21 +342,27 @@ pub struct UdpLayer {
     next_ephemeral_port: Mutex<u16>,
     /// Statistics
     stats: RwLock<NetworkLayerStats>,
+    self_weak: Weak<UdpLayer>,
 }
 
 impl UdpLayer {
     /// Create a new UDP layer
     pub fn new() -> Arc<Self> {
-        Arc::new(Self {
+        Arc::new_cyclic(|weak| Self {
             port_map: RwLock::new(BTreeMap::new()),
             next_ephemeral_port: Mutex::new(49152),
             stats: RwLock::new(NetworkLayerStats::default()),
+            self_weak: weak.clone(),
         })
     }
 
     /// Create a new UDP socket
-    pub fn create_socket(self: &Arc<Self>) -> Arc<UdpSocket> {
-        UdpSocket::new(Arc::clone(self))
+    pub fn create_socket(&self) -> Arc<UdpSocket> {
+        let layer = self
+            .self_weak
+            .upgrade()
+            .expect("udp layer is not initialized");
+        UdpSocket::new(layer)
     }
 
     /// Allocate an ephemeral port
@@ -479,6 +485,25 @@ impl NetworkLayer for UdpLayer {
     }
 
     fn receive(&self, packet: &[u8]) -> Result<(), SocketError> {
+        self.receive_packet(packet)
+    }
+
+    fn name(&self) -> &'static str {
+        "UDP"
+    }
+
+    fn stats(&self) -> NetworkLayerStats {
+        self.stats.read().clone()
+    }
+
+    fn as_any(&self) -> &dyn core::any::Any {
+        self
+    }
+}
+
+impl UdpLayer {
+    /// Receive a UDP datagram
+    pub fn receive_packet(&self, packet: &[u8]) -> Result<(), SocketError> {
         if packet.len() < 8 {
             return Err(SocketError::InvalidPacket);
         }
@@ -497,18 +522,6 @@ impl NetworkLayer for UdpLayer {
         self.receive_datagram(header.src_port, header.dst_port, data.to_vec());
 
         Ok(())
-    }
-
-    fn name(&self) -> &'static str {
-        "UDP"
-    }
-
-    fn stats(&self) -> NetworkLayerStats {
-        self.stats.read().clone()
-    }
-
-    fn as_any(&self) -> &dyn core::any::Any {
-        self
     }
 }
 

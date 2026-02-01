@@ -317,7 +317,10 @@ impl ArpLayer {
         let mut eth_context = LayerContext::new();
         eth_context.set("eth_dst_mac", &[0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF]);
         eth_context.set("eth_src_mac", &local_mac);
-        eth_context.set("ip_protocol", &arp_packet.htype.to_be_bytes()); // EtherType = ARP
+        eth_context.set(
+            "eth_type",
+            &crate::network::ethernet::ether_type::ARP.to_be_bytes(),
+        );
 
         // ARP packet bytes
         let arp_bytes = arp_packet.to_bytes();
@@ -366,7 +369,10 @@ impl ArpLayer {
                 let mut eth_context = LayerContext::new();
                 eth_context.set("eth_dst_mac", &arp_packet.sender_mac);
                 eth_context.set("eth_src_mac", &local_mac);
-                eth_context.set("ip_protocol", &arp_packet.htype.to_be_bytes());
+                eth_context.set(
+                    "eth_type",
+                    &crate::network::ethernet::ether_type::ARP.to_be_bytes(),
+                );
 
                 // Get Ethernet layer from NetworkManager
                 if let Some(eth_layer) = get_network_manager().get_layer("ethernet") {

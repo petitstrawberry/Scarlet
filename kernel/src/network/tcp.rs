@@ -205,6 +205,10 @@ pub struct TcpSocket {
 
     /// Reference to TCP layer
     tcp_layer: Weak<TcpLayer>,
+    /// Weak self reference for registration
+    self_weak: Weak<TcpSocket>,
+    /// Pending accepted connections (listener only)
+    pending_accept: Mutex<VecDeque<Arc<TcpSocket>>>,
 
     /// Statistics
     bytes_sent: AtomicU64,
@@ -213,8 +217,8 @@ pub struct TcpSocket {
 
 impl TcpSocket {
     /// Create a new TCP socket
-    pub fn new(tcp_layer: Weak<TcpLayer>) -> Self {
-        Self {
+    pub fn new(tcp_layer: Weak<TcpLayer>) -> Arc<Self> {
+        Arc::new_cyclic(|weak| Self {
             state: Mutex::new(TcpState::Closed),
             local_ip: Mutex::new(None),
             local_port: AtomicU16::new(0),
@@ -229,8 +233,62 @@ impl TcpSocket {
             send_buffer: Mutex::new(VecDeque::new()),
             recv_buffer: Mutex::new(VecDeque::new()),
             tcp_layer,
+            self_weak: weak.clone(),
+            pending_accept: Mutex::new(VecDeque::new()),
             bytes_sent: AtomicU64::new(0),
             bytes_received: AtomicU64::new(0),
+        })
+    }
+
+    fn matches_peer(&self, src_ip: Ipv4Address, src_port: u16) -> bool {
+        if self.get_state() == TcpState::Listen {
+            return false;
+        }
+
+        let remote_ip = self.remote_ip.lock().clone();
+        let remote_port = self.remote_port.load(Ordering::SeqCst);
+        match remote_ip {
+            Some(ip) => ip == src_ip && remote_port == src_port,
+            None => false,
+        }
+    }
+
+    fn ensure_local_ip(&self) {
+        if self.local_ip.lock().is_some() {
+            return;
+        }
+
+        if let Some(ip_layer) = get_network_manager().get_layer("ip") {
+            if let Some(ip) = ip_layer
+                .as_any()
+                .downcast_ref::<crate::network::ipv4::Ipv4Layer>()
+            {
+                *self.local_ip.lock() = Some(ip.get_local_ip());
+            }
+        }
+    }
+
+    fn register_local_port(&self, port: u16) -> Result<(), SocketError> {
+        let tcp_layer = self
+            .tcp_layer
+            .upgrade()
+            .ok_or(SocketError::InvalidOperation)?;
+
+        tcp_layer.register_port(port, self.self_weak.clone());
+        Ok(())
+    }
+
+    fn allocate_ephemeral_port(&self) -> u16 {
+        static NEXT_EPHEMERAL_PORT: AtomicU16 = AtomicU16::new(49152);
+
+        let port = NEXT_EPHEMERAL_PORT.fetch_add(1, Ordering::SeqCst);
+        if port == u16::MAX {
+            NEXT_EPHEMERAL_PORT.store(49152, Ordering::SeqCst);
+        }
+        if port < 49152 {
+            49152
+        } else {
+            port
         }
     }
 
@@ -251,8 +309,27 @@ impl TcpSocket {
         match current_state {
             TcpState::Listen => {
                 if header.flags() & tcp_flags::SYN != 0 {
-                    // Handle incoming SYN (SYN-RECEIVED state)
-                    self.handle_syn_received(src_ip, header);
+                    let tcp_layer = match self.tcp_layer.upgrade() {
+                        Some(layer) => layer,
+                        None => return,
+                    };
+
+                    let child = TcpSocket::new(Arc::downgrade(&tcp_layer));
+                    let local_port = self.local_port.load(Ordering::SeqCst);
+                    if local_port == 0 {
+                        return;
+                    }
+
+                    if let Some(local_ip) = self.local_ip.lock().clone() {
+                        *child.local_ip.lock() = Some(local_ip);
+                    } else {
+                        child.ensure_local_ip();
+                    }
+
+                    child.local_port.store(local_port, Ordering::SeqCst);
+                    tcp_layer.register_port(local_port, child.self_weak.clone());
+                    child.handle_syn_received(src_ip, header);
+                    self.pending_accept.lock().push_back(child);
                 }
             }
             TcpState::SynSent => {
@@ -283,17 +360,16 @@ impl TcpSocket {
         *self.remote_ip.lock() = Some(src_ip);
         self.remote_port.store(header.src_port, Ordering::SeqCst);
 
-        // Generate initial sequence number
+        // Track peer sequence and our initial sequence
         let initial_seq = 1000;
-        self.recv_seq.store(initial_seq, Ordering::SeqCst);
+        let next_recv = header.seq_number.wrapping_add(1);
+        self.send_seq.store(initial_seq, Ordering::SeqCst);
+        self.recv_seq.store(next_recv, Ordering::SeqCst);
+        self.recv_ack.store(next_recv, Ordering::SeqCst);
 
         // Send SYN-ACK
-        self.send_syn_ack(
-            src_ip,
-            header.src_port,
-            initial_seq,
-            header.seq_number.wrapping_add(1),
-        );
+        self.send_syn_ack(src_ip, header.src_port, initial_seq, next_recv);
+        self.send_seq.fetch_add(1, Ordering::SeqCst);
         self.set_state(TcpState::SynReceived);
     }
 
@@ -302,7 +378,11 @@ impl TcpSocket {
         *self.remote_ip.lock() = Some(src_ip);
         self.remote_port.store(header.src_port, Ordering::SeqCst);
 
-        self.send_ack(src_ip, header.src_port, header.seq_number.wrapping_add(1));
+        let next_recv = header.seq_number.wrapping_add(1);
+        self.recv_seq.store(next_recv, Ordering::SeqCst);
+        self.recv_ack.store(next_recv, Ordering::SeqCst);
+
+        self.send_ack(src_ip, header.src_port, next_recv);
 
         self.set_state(TcpState::Established);
     }
@@ -334,11 +414,8 @@ impl TcpSocket {
         let expected_seq = self.recv_seq.load(Ordering::SeqCst);
         let segment_seq = header.seq_number;
 
-        if segment_seq == expected_seq.wrapping_sub(1) {
-            // Duplicate ACK, just update acknowledgment
-            if header.flags() & tcp_flags::ACK != 0 {
-                self.update_send_window(header.ack_number);
-            }
+        if segment_seq < expected_seq {
+            self.send_ack(src_ip, header.src_port, expected_seq);
             return;
         }
 
@@ -347,13 +424,14 @@ impl TcpSocket {
             if header.flags() & tcp_flags::ACK != 0 {
                 self.update_send_window(header.ack_number);
             }
-        } else if segment_seq >= expected_seq {
+        } else if segment_seq == expected_seq {
             let mut recv_buf = self.recv_buffer.lock();
             recv_buf.extend(data);
-            self.recv_seq.fetch_add(data.len() as u32, Ordering::SeqCst);
+            let next_seq = expected_seq.wrapping_add(data.len() as u32);
+            self.recv_seq.store(next_seq, Ordering::SeqCst);
+            self.recv_ack.store(next_seq, Ordering::SeqCst);
 
             // Send ACK
-            let next_seq = segment_seq.wrapping_add(data.len() as u32);
             self.send_ack(src_ip, header.src_port, next_seq);
 
             // Update received bytes
@@ -406,11 +484,6 @@ impl TcpSocket {
     /// Send SYN packet
     fn send_syn(&self, dest_ip: Ipv4Address, dest_port: u16) {
         let local_port = self.local_port.load(Ordering::SeqCst);
-        let local_ip = self
-            .local_ip
-            .lock()
-            .clone()
-            .unwrap_or(Ipv4Address::new(0, 0, 0, 0));
 
         let initial_seq = 1000;
         self.send_seq.store(initial_seq, Ordering::SeqCst);
@@ -420,17 +493,13 @@ impl TcpSocket {
         header.set_flags(tcp_flags::SYN);
 
         self.send_segment(dest_ip, header, &[], false);
+        self.send_seq.fetch_add(1, Ordering::SeqCst);
         self.set_state(TcpState::SynSent);
     }
 
     /// Send SYN-ACK packet
     fn send_syn_ack(&self, dest_ip: Ipv4Address, dest_port: u16, their_seq: u32, ack_seq: u32) {
         let local_port = self.local_port.load(Ordering::SeqCst);
-        let local_ip = self
-            .local_ip
-            .lock()
-            .clone()
-            .unwrap_or(Ipv4Address::new(0, 0, 0, 0));
 
         let mut header = TcpHeader::new(local_port, dest_port);
         header.seq_number = their_seq;
@@ -444,20 +513,14 @@ impl TcpSocket {
     /// Send ACK packet
     fn send_ack(&self, dest_ip: Ipv4Address, dest_port: u16, ack_seq: u32) {
         let local_port = self.local_port.load(Ordering::SeqCst);
-        let local_ip = self
-            .local_ip
-            .lock()
-            .clone()
-            .unwrap_or(Ipv4Address::new(0, 0, 0, 0));
-
-        let recv_seq = self.recv_seq.load(Ordering::SeqCst);
+        let send_seq = self.send_seq.load(Ordering::SeqCst);
 
         let mut header = TcpHeader::new(local_port, dest_port);
-        header.seq_number = recv_seq.wrapping_add(1);
+        header.seq_number = send_seq;
         header.ack_number = ack_seq;
         header.set_flags(tcp_flags::ACK);
 
-        self.send_segment(dest_ip, header, &[], true);
+        self.send_segment(dest_ip, header, &[], false);
     }
 
     /// Send FIN packet
@@ -465,11 +528,6 @@ impl TcpSocket {
         let dest_ip = self.remote_ip.lock().clone().unwrap();
         let dest_port = self.remote_port.load(Ordering::SeqCst);
         let local_port = self.local_port.load(Ordering::SeqCst);
-        let local_ip = self
-            .local_ip
-            .lock()
-            .clone()
-            .unwrap_or(Ipv4Address::new(0, 0, 0, 0));
 
         let send_seq = self.send_seq.load(Ordering::SeqCst);
 
@@ -478,6 +536,7 @@ impl TcpSocket {
         header.set_flags(tcp_flags::FIN);
 
         self.send_segment(dest_ip, header, &[], true);
+        self.send_seq.fetch_add(1, Ordering::SeqCst);
         self.set_state(TcpState::FinWait1);
     }
 
@@ -486,20 +545,16 @@ impl TcpSocket {
         let dest_ip = self.remote_ip.lock().clone().unwrap();
         let dest_port = self.remote_port.load(Ordering::SeqCst);
         let local_port = self.local_port.load(Ordering::SeqCst);
-        let local_ip = self
-            .local_ip
-            .lock()
-            .clone()
-            .unwrap_or(Ipv4Address::new(0, 0, 0, 0));
-
+        let send_seq = self.send_seq.load(Ordering::SeqCst);
         let recv_seq = self.recv_seq.load(Ordering::SeqCst);
 
         let mut header = TcpHeader::new(local_port, dest_port);
-        header.seq_number = recv_seq.wrapping_add(1);
-        header.ack_number = self.recv_ack.load(Ordering::SeqCst).wrapping_add(1);
+        header.seq_number = send_seq;
+        header.ack_number = recv_seq;
         header.set_flags(tcp_flags::FIN | tcp_flags::ACK);
 
         self.send_segment(dest_ip, header, &[], true);
+        self.send_seq.fetch_add(1, Ordering::SeqCst);
     }
 
     /// Send TCP segment through IP layer
@@ -510,6 +565,7 @@ impl TcpSocket {
         data: &[u8],
         update_seq: bool,
     ) {
+        self.ensure_local_ip();
         let local_ip = self
             .local_ip
             .lock()
@@ -665,6 +721,11 @@ impl SocketControl for TcpSocket {
     fn bind(&self, address: &SocketAddress) -> Result<(), SocketError> {
         match address {
             SocketAddress::Inet(inet) => {
+                if inet.port == 0 {
+                    return Err(SocketError::InvalidAddress);
+                }
+
+                self.register_local_port(inet.port)?;
                 *self.local_ip.lock() = Some(Ipv4Address::from_bytes(inet.addr));
                 self.local_port.store(inet.port, Ordering::SeqCst);
                 Ok(())
@@ -689,6 +750,15 @@ impl SocketControl for TcpSocket {
                 *self.remote_ip.lock() = Some(addr);
                 self.remote_port.store(port, Ordering::SeqCst);
 
+                let local_port = self.local_port.load(Ordering::SeqCst);
+                if local_port == 0 {
+                    let port = self.allocate_ephemeral_port();
+                    self.register_local_port(port)?;
+                    self.local_port.store(port, Ordering::SeqCst);
+                }
+
+                self.ensure_local_ip();
+
                 // Start 3-way handshake
                 self.send_syn(addr, port);
                 Ok(())
@@ -702,9 +772,11 @@ impl SocketControl for TcpSocket {
             return Err(SocketError::NotListening);
         }
 
-        // TODO: Implement accept from pending connections
-        // For now, return would block
-        Err(SocketError::WouldBlock)
+        let mut pending = self.pending_accept.lock();
+        pending
+            .pop_front()
+            .map(|socket| socket as Arc<dyn SocketObject>)
+            .ok_or(SocketError::WouldBlock)
     }
 
     fn getpeername(&self) -> Result<SocketAddress, SocketError> {
@@ -784,7 +856,7 @@ impl crate::object::capability::StreamOps for TcpSocket {
 
 impl crate::object::capability::CloneOps for TcpSocket {
     fn custom_clone(&self) -> crate::object::KernelObject {
-        crate::object::KernelObject::Socket(Arc::new(TcpSocket::new(self.tcp_layer.clone())))
+        crate::object::KernelObject::Socket(TcpSocket::new(self.tcp_layer.clone()))
     }
 }
 
@@ -793,23 +865,46 @@ impl crate::object::capability::CloneOps for TcpSocket {
 /// Manages TCP port bindings and routes packets to sockets.
 pub struct TcpLayer {
     /// Port-to-socket mapping for receiving packets
-    port_map: RwLock<BTreeMap<u16, Weak<TcpSocket>>>,
+    port_map: RwLock<BTreeMap<u16, Vec<Weak<TcpSocket>>>>,
     /// Statistics
     stats: RwLock<NetworkLayerStats>,
+    self_weak: Weak<TcpLayer>,
 }
 
 impl TcpLayer {
     /// Create a new TCP layer
     pub fn new() -> Arc<Self> {
-        Arc::new(Self {
+        Arc::new_cyclic(|weak| Self {
             port_map: RwLock::new(BTreeMap::new()),
             stats: RwLock::new(NetworkLayerStats::default()),
+            self_weak: weak.clone(),
         })
+    }
+
+    pub fn create_socket(&self) -> Arc<TcpSocket> {
+        TcpSocket::new(self.self_weak.clone())
     }
 
     /// Register a socket for a specific port
     pub fn register_port(&self, port: u16, socket: Weak<TcpSocket>) {
-        self.port_map.write().insert(port, socket);
+        let mut map = self.port_map.write();
+        let entry = map.entry(port).or_default();
+        if entry.iter().any(|existing| existing.ptr_eq(&socket)) {
+            return;
+        }
+        if entry.iter().any(|existing| {
+            existing
+                .upgrade()
+                .map(|sock| sock.get_state() == TcpState::Listen)
+                .unwrap_or(false)
+                && socket
+                    .upgrade()
+                    .map(|sock| sock.get_state() == TcpState::Listen)
+                    .unwrap_or(false)
+        }) {
+            return;
+        }
+        entry.push(socket);
     }
 
     /// Unregister a socket from a port
@@ -818,11 +913,39 @@ impl TcpLayer {
     }
 
     /// Find socket for a destination port
-    pub fn find_socket(&self, port: u16) -> Option<Arc<TcpSocket>> {
-        self.port_map
-            .read()
-            .get(&port)
-            .and_then(|weak| weak.upgrade())
+    pub fn find_socket(
+        &self,
+        port: u16,
+        src_ip: Ipv4Address,
+        src_port: u16,
+    ) -> Option<Arc<TcpSocket>> {
+        let map = self.port_map.read();
+        let sockets = map.get(&port)?;
+        let mut listening = None;
+        for weak in sockets {
+            if let Some(socket) = weak.upgrade() {
+                if socket.matches_peer(src_ip, src_port) {
+                    return Some(socket);
+                }
+                if socket.get_state() == TcpState::Listen {
+                    listening = Some(socket);
+                }
+            }
+        }
+        listening
+    }
+
+    pub fn find_listening_socket(&self, port: u16) -> Option<Arc<TcpSocket>> {
+        let map = self.port_map.read();
+        let sockets = map.get(&port)?;
+        for weak in sockets {
+            if let Some(socket) = weak.upgrade() {
+                if socket.get_state() == TcpState::Listen {
+                    return Some(socket);
+                }
+            }
+        }
+        None
     }
 
     /// Process incoming TCP segment
@@ -831,7 +954,7 @@ impl TcpLayer {
         stats.packets_received += 1;
         stats.bytes_received += (header.data_offset() + data.len()) as u64;
 
-        if let Some(socket) = self.find_socket(header.dst_port) {
+        if let Some(socket) = self.find_socket(header.dst_port, src_ip, header.src_port) {
             socket.process_segment(src_ip, header, data);
         } else {
         }
@@ -854,23 +977,11 @@ impl NetworkLayer for TcpLayer {
     }
 
     fn receive(&self, packet: &[u8]) -> Result<(), SocketError> {
-        if packet.len() < 20 {
-            return Err(SocketError::InvalidPacket);
-        }
-
-        let header = TcpHeader::from_bytes(&packet[..20]).ok_or(SocketError::InvalidPacket)?;
-
-        let data_offset = header.data_offset();
-        if data_offset < 20 || data_offset > packet.len() {
-            return Err(SocketError::InvalidPacket);
-        }
-
-        let data = &packet[data_offset..];
-        let src_ip = Ipv4Address::new(0, 0, 0, 0);
-
-        self.receive_segment(src_ip, header, data);
-
-        Ok(())
+        self.receive_packet(
+            Ipv4Address::new(0, 0, 0, 0),
+            Ipv4Address::new(0, 0, 0, 0),
+            packet,
+        )
     }
 
     fn name(&self) -> &'static str {
@@ -883,6 +994,33 @@ impl NetworkLayer for TcpLayer {
 
     fn as_any(&self) -> &dyn core::any::Any {
         self
+    }
+}
+
+impl TcpLayer {
+    /// Receive a TCP segment with IPv4 addressing information
+    pub fn receive_packet(
+        &self,
+        src_ip: Ipv4Address,
+        _dst_ip: Ipv4Address,
+        packet: &[u8],
+    ) -> Result<(), SocketError> {
+        if packet.len() < 20 {
+            return Err(SocketError::InvalidPacket);
+        }
+
+        let header = TcpHeader::from_bytes(&packet[..20]).ok_or(SocketError::InvalidPacket)?;
+
+        let data_offset = header.data_offset();
+        if data_offset < 20 || data_offset > packet.len() {
+            return Err(SocketError::InvalidPacket);
+        }
+
+        let data = &packet[data_offset..];
+
+        self.receive_segment(src_ip, header, data);
+
+        Ok(())
     }
 }
 

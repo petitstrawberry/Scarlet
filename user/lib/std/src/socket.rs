@@ -24,8 +24,12 @@
 
 use crate::handle::Handle;
 use crate::handle::RawHandle;
-use crate::syscall::{Syscall, syscall0, syscall1, syscall3};
+use crate::syscall::{syscall1, syscall3, Syscall};
 
+pub use crate::handle::capability::socket::Inet4SocketAddress;
+pub use crate::handle::capability::socket::SocketDomain;
+pub use crate::handle::capability::socket::SocketProtocol;
+pub use crate::handle::capability::socket::SocketType;
 pub use crate::handle::capability::ShutdownHow;
 
 /// Socket handle wrapper
@@ -71,7 +75,24 @@ impl Socket {
     /// let socket = Socket::new().unwrap();
     /// ```
     pub fn new() -> Result<Self> {
-        let raw_handle = syscall0(Syscall::SocketCreate);
+        Self::new_with_domain(
+            SocketDomain::Local,
+            SocketType::Stream,
+            SocketProtocol::Default,
+        )
+    }
+
+    pub fn new_with_domain(
+        domain: SocketDomain,
+        socket_type: SocketType,
+        protocol: SocketProtocol,
+    ) -> Result<Self> {
+        let raw_handle = syscall3(
+            Syscall::SocketCreate,
+            domain as usize,
+            socket_type as usize,
+            protocol as usize,
+        );
         if raw_handle == usize::MAX {
             return Err(SocketError::SyscallFailed);
         }
@@ -79,6 +100,23 @@ impl Socket {
         let handle = unsafe { Handle::from_raw(raw_handle as i32) }
             .map_err(|_| SocketError::SyscallFailed)?;
         Ok(Socket { handle })
+    }
+
+    pub fn bind_inet(&self, addr: Inet4SocketAddress) -> Result<()> {
+        let sock = self
+            .handle
+            .as_socket()
+            .map_err(|_| SocketError::InvalidHandle)?;
+        sock.bind_inet(&addr).map_err(|_| SocketError::AlreadyBound)
+    }
+
+    pub fn connect_inet(&self, addr: Inet4SocketAddress) -> Result<()> {
+        let sock = self
+            .handle
+            .as_socket()
+            .map_err(|_| SocketError::InvalidHandle)?;
+        sock.connect_inet(&addr)
+            .map_err(|_| SocketError::ConnectionRefused)
     }
 
     /// Create a `Socket` from an existing [`Handle`].

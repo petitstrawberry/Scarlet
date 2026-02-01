@@ -226,7 +226,7 @@ syscall_table! {
     MemoryUnmap = 701 => sys_memory_unmap, // Memory unmap operation (munmap)
 
     // === Socket Operations (Scarlet Native) ===
-    SocketCreate = 900 => sys_socket_create,     // Create a local socket
+    SocketCreate = 900 => sys_socket_create,     // Create a socket (domain/type/protocol)
     SocketBind = 901 => sys_socket_bind,         // Bind socket to path
     SocketListen = 902 => sys_socket_listen,     // Start listening
     SocketConnect = 903 => sys_socket_connect,   // Connect to socket

@@ -86,7 +86,7 @@ pub enum Syscall {
     MemoryUnmap = 701, // Memory unmap operation (munmap)
 
     // === Socket Operations (Scarlet Native) ===
-    SocketCreate = 900,   // Create a local socket
+    SocketCreate = 900,   // Create a socket (domain/type/protocol)
     SocketBind = 901,     // Bind socket to path
     SocketListen = 902,   // Start listening
     SocketConnect = 903,  // Connect to socket

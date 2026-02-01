@@ -4,7 +4,50 @@
 //! implement the Scarlet Native local socket interface.
 
 use crate::handle::{Handle, RawHandle};
-use crate::syscall::{Syscall, syscall1, syscall2, syscall3, syscall4, syscall5};
+use crate::syscall::{syscall1, syscall2, syscall3, syscall4, syscall5, Syscall};
+
+/// Scarlet Native socket domains
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u32)]
+pub enum SocketDomain {
+    Local = 1,
+    Inet = 2,
+    Inet6 = 3,
+}
+
+/// Scarlet Native socket types
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u32)]
+pub enum SocketType {
+    Stream = 1,
+    Datagram = 2,
+    Raw = 3,
+    SeqPacket = 4,
+}
+
+/// Scarlet Native socket protocols
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u32)]
+pub enum SocketProtocol {
+    Default = 0,
+    Icmp = 1,
+    Tcp = 6,
+    Udp = 17,
+    Raw = 255,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Inet4SocketAddress {
+    pub addr: [u8; 4],
+    pub port: u16,
+}
+
+impl Inet4SocketAddress {
+    pub fn new(addr: [u8; 4], port: u16) -> Self {
+        Self { addr, port }
+    }
+}
 
 /// Result type for socket operations
 pub type SocketObjectResult<T> = Result<T, SocketObjectError>;
@@ -66,6 +109,17 @@ impl<'a> SocketObject<'a> {
         SocketObjectError::from_syscall_result(result).map(|_| ())
     }
 
+    /// Bind socket to an IPv4 address
+    pub fn bind_inet(&self, addr: &Inet4SocketAddress) -> SocketObjectResult<()> {
+        let result = syscall3(
+            Syscall::SocketBind,
+            self.handle.as_raw() as usize,
+            addr as *const Inet4SocketAddress as usize,
+            core::mem::size_of::<Inet4SocketAddress>(),
+        );
+        SocketObjectError::from_syscall_result(result).map(|_| ())
+    }
+
     /// Start listening for connections
     pub fn listen(&self, backlog: usize) -> SocketObjectResult<()> {
         let result = syscall2(
@@ -83,6 +137,17 @@ impl<'a> SocketObject<'a> {
             self.handle.as_raw() as usize,
             path.as_ptr() as usize,
             path.len(),
+        );
+        SocketObjectError::from_syscall_result(result).map(|_| ())
+    }
+
+    /// Connect to an IPv4 address
+    pub fn connect_inet(&self, addr: &Inet4SocketAddress) -> SocketObjectResult<()> {
+        let result = syscall3(
+            Syscall::SocketConnect,
+            self.handle.as_raw() as usize,
+            addr as *const Inet4SocketAddress as usize,
+            core::mem::size_of::<Inet4SocketAddress>(),
         );
         SocketObjectError::from_syscall_result(result).map(|_| ())
     }

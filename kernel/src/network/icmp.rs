@@ -3,9 +3,12 @@
 //! This module provides ICMP handling for network stack.
 //! It implements NetworkLayer trait for ICMP messages.
 
-use alloc::sync::Arc;
+use alloc::collections::{BTreeMap, VecDeque};
+use alloc::string::String;
+use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
-use spin::RwLock;
+use core::sync::atomic::{AtomicU16, Ordering};
+use spin::{Mutex, RwLock};
 
 use crate::early_println;
 
@@ -13,6 +16,10 @@ use crate::network::ipv4::Ipv4Address;
 use crate::network::protocol_stack::get_network_manager;
 use crate::network::protocol_stack::{LayerContext, NetworkLayer, NetworkLayerStats};
 use crate::network::socket::SocketError;
+use crate::network::socket::{
+    Inet4SocketAddress, SocketAddress, SocketControl, SocketObject, SocketProtocol, SocketState,
+    SocketType,
+};
 
 /// ICMP message types
 pub mod message_type {
@@ -177,14 +184,31 @@ impl IcmpEcho {
 pub struct IcmpLayer {
     /// Statistics
     stats: RwLock<NetworkLayerStats>,
+    /// ICMP sockets by identifier
+    sockets: RwLock<BTreeMap<u16, Weak<IcmpSocket>>>,
+    /// Identifier allocator
+    next_identifier: AtomicU16,
+    self_weak: Weak<IcmpLayer>,
 }
 
 impl IcmpLayer {
     /// Create a new ICMP layer
     pub fn new() -> Arc<Self> {
-        Arc::new(Self {
+        Arc::new_cyclic(|weak| Self {
             stats: RwLock::new(NetworkLayerStats::default()),
+            sockets: RwLock::new(BTreeMap::new()),
+            next_identifier: AtomicU16::new(1),
+            self_weak: weak.clone(),
         })
+    }
+
+    pub fn create_socket(&self) -> Arc<IcmpSocket> {
+        let identifier = self.next_identifier.fetch_add(1, Ordering::SeqCst);
+        let socket = IcmpSocket::new(self.self_weak.clone(), identifier);
+        self.sockets
+            .write()
+            .insert(identifier, Arc::downgrade(&socket));
+        socket
     }
 
     /// Send an ICMP Echo Request (ping)
@@ -234,11 +258,15 @@ impl IcmpLayer {
         // Send through IP layer
         if !next_layers.is_empty() {
             next_layers[0].send(&icmp_packet, &ip_context, &next_layers[1..])?;
+        } else if let Some(ip_layer) = get_network_manager().get_layer("ip") {
+            ip_layer.send(&icmp_packet, &ip_context, &[])?;
 
             // Update statistics
             let mut stats = self.stats.write();
             stats.packets_sent += 1;
             stats.bytes_sent += icmp_packet.len() as u64;
+        } else {
+            return Err(SocketError::NoRoute);
         }
 
         Ok(())
@@ -291,18 +319,27 @@ impl IcmpLayer {
         // Send through IP layer
         if !next_layers.is_empty() {
             next_layers[0].send(&icmp_packet, &ip_context, &next_layers[1..])?;
+        } else if let Some(ip_layer) = get_network_manager().get_layer("ip") {
+            ip_layer.send(&icmp_packet, &ip_context, &[])?;
 
             // Update statistics
             let mut stats = self.stats.write();
             stats.packets_sent += 1;
             stats.bytes_sent += icmp_packet.len() as u64;
+        } else {
+            return Err(SocketError::NoRoute);
         }
 
         Ok(())
     }
 
     /// Process received ICMP packet
-    pub fn receive_packet(&self, packet: &[u8]) -> Result<(), SocketError> {
+    pub fn receive_packet(
+        &self,
+        packet: &[u8],
+        src_ip: Ipv4Address,
+        dst_ip: Ipv4Address,
+    ) -> Result<(), SocketError> {
         if packet.len() < 8 {
             return Err(SocketError::InvalidPacket);
         }
@@ -339,16 +376,241 @@ impl IcmpLayer {
                             sequence
                         );
 
-                        // TODO: Send ping reply back
-                        // Need to get source IP from IP layer context
+                        let payload = &data[4..];
+
+                        if let Some(ip_layer) = get_network_manager().get_layer("ip") {
+                            let mut ctx = LayerContext::new();
+                            ctx.set("ip_dst", &src_ip.0);
+                            ctx.set("ip_src", &dst_ip.0);
+                            ctx.set("ip_protocol", &[1]);
+                            let _ = self.send_ping_reply(
+                                src_ip,
+                                identifier,
+                                sequence,
+                                payload,
+                                &[ip_layer],
+                            );
+                        }
                     }
                 }
             }
-            message_type::ECHO_REPLY => {}
+            message_type::ECHO_REPLY => {
+                if data.len() >= 4 {
+                    if let Some(echo) = IcmpEcho::from_bytes(data) {
+                        let identifier =
+                            unsafe { core::ptr::addr_of!(echo.identifier).read_unaligned() };
+                        let payload = data[4..].to_vec();
+                        self.deliver_echo_reply(identifier, payload, src_ip);
+                    }
+                }
+            }
             _ => {}
         }
 
         Ok(())
+    }
+
+    fn deliver_echo_reply(&self, identifier: u16, payload: Vec<u8>, src_ip: Ipv4Address) {
+        if let Some(socket) = self
+            .sockets
+            .read()
+            .get(&identifier)
+            .and_then(|weak| weak.upgrade())
+        {
+            socket.deliver_reply(payload, src_ip);
+        }
+    }
+}
+
+pub struct IcmpSocket {
+    icmp_layer: Weak<IcmpLayer>,
+    identifier: u16,
+    sequence: AtomicU16,
+    local_ip: Mutex<Option<Ipv4Address>>,
+    remote_addr: RwLock<Option<SocketAddress>>,
+    recv_queue: Mutex<VecDeque<(Vec<u8>, SocketAddress)>>,
+}
+
+impl IcmpSocket {
+    fn new(icmp_layer: Weak<IcmpLayer>, identifier: u16) -> Arc<Self> {
+        Arc::new(Self {
+            icmp_layer,
+            identifier,
+            sequence: AtomicU16::new(0),
+            local_ip: Mutex::new(None),
+            remote_addr: RwLock::new(None),
+            recv_queue: Mutex::new(VecDeque::new()),
+        })
+    }
+
+    fn deliver_reply(&self, payload: Vec<u8>, src_ip: Ipv4Address) {
+        let addr = SocketAddress::Inet(Inet4SocketAddress::new(src_ip.0, 0));
+        self.recv_queue.lock().push_back((payload, addr));
+    }
+}
+
+impl SocketObject for IcmpSocket {
+    fn socket_type(&self) -> SocketType {
+        SocketType::Datagram
+    }
+
+    fn socket_domain(&self) -> crate::network::socket::SocketDomain {
+        crate::network::socket::SocketDomain::Inet
+    }
+
+    fn socket_protocol(&self) -> SocketProtocol {
+        SocketProtocol::Icmp
+    }
+
+    fn as_any(&self) -> &dyn core::any::Any {
+        self
+    }
+
+    fn sendto(
+        &self,
+        data: &[u8],
+        address: &SocketAddress,
+        _flags: u32,
+    ) -> Result<usize, SocketError> {
+        let target = match address {
+            SocketAddress::Inet(inet) => *inet,
+            SocketAddress::Unspecified => match self.remote_addr.read().clone() {
+                Some(SocketAddress::Inet(inet)) => inet,
+                _ => return Err(SocketError::InvalidAddress),
+            },
+            _ => return Err(SocketError::InvalidAddress),
+        };
+
+        let sequence = self.sequence.fetch_add(1, Ordering::SeqCst);
+        let dest_ip = Ipv4Address::from_bytes(target.addr);
+
+        if let Some(ip_layer) = get_network_manager().get_layer("ip") {
+            if let Some(icmp_layer) = self.icmp_layer.upgrade() {
+                icmp_layer.send_ping_request(
+                    dest_ip,
+                    self.identifier,
+                    sequence,
+                    data,
+                    &[ip_layer],
+                )?;
+                return Ok(data.len());
+            }
+        }
+
+        Err(SocketError::NoRoute)
+    }
+
+    fn recvfrom(
+        &self,
+        buffer: &mut [u8],
+        _flags: u32,
+    ) -> Result<(usize, SocketAddress), SocketError> {
+        let mut queue = self.recv_queue.lock();
+        let (data, addr) = queue.pop_front().ok_or(SocketError::WouldBlock)?;
+        let len = buffer.len().min(data.len());
+        buffer[..len].copy_from_slice(&data[..len]);
+        Ok((len, addr))
+    }
+}
+
+impl SocketControl for IcmpSocket {
+    fn bind(&self, address: &SocketAddress) -> Result<(), SocketError> {
+        match address {
+            SocketAddress::Inet(inet) => {
+                *self.local_ip.lock() = Some(Ipv4Address::from_bytes(inet.addr));
+                Ok(())
+            }
+            SocketAddress::Unspecified => Ok(()),
+            _ => Err(SocketError::InvalidAddress),
+        }
+    }
+
+    fn connect(&self, address: &SocketAddress) -> Result<(), SocketError> {
+        match address {
+            SocketAddress::Inet(_) => {
+                *self.remote_addr.write() = Some(address.clone());
+                Ok(())
+            }
+            _ => Err(SocketError::InvalidAddress),
+        }
+    }
+
+    fn listen(&self, _backlog: usize) -> Result<(), SocketError> {
+        Err(SocketError::NotSupported)
+    }
+
+    fn accept(&self) -> Result<Arc<dyn SocketObject>, SocketError> {
+        Err(SocketError::NotSupported)
+    }
+
+    fn getpeername(&self) -> Result<SocketAddress, SocketError> {
+        self.remote_addr
+            .read()
+            .clone()
+            .ok_or(SocketError::NotConnected)
+    }
+
+    fn getsockname(&self) -> Result<SocketAddress, SocketError> {
+        let ip = self
+            .local_ip
+            .lock()
+            .clone()
+            .ok_or(SocketError::InvalidAddress)?;
+        Ok(SocketAddress::Inet(Inet4SocketAddress::new(ip.0, 0)))
+    }
+
+    fn shutdown(&self, _how: crate::network::socket::ShutdownHow) -> Result<(), SocketError> {
+        Ok(())
+    }
+
+    fn is_connected(&self) -> bool {
+        self.remote_addr.read().is_some()
+    }
+
+    fn state(&self) -> SocketState {
+        if self.is_connected() {
+            SocketState::Connected
+        } else {
+            SocketState::Unconnected
+        }
+    }
+}
+
+impl crate::ipc::StreamIpcOps for IcmpSocket {
+    fn is_connected(&self) -> bool {
+        SocketControl::is_connected(self)
+    }
+
+    fn peer_count(&self) -> usize {
+        if SocketControl::is_connected(self) {
+            1
+        } else {
+            0
+        }
+    }
+
+    fn description(&self) -> String {
+        alloc::format!("ICMP socket")
+    }
+}
+
+impl crate::object::capability::StreamOps for IcmpSocket {
+    fn read(&self, buffer: &mut [u8]) -> Result<usize, crate::object::capability::StreamError> {
+        let (len, _) = self
+            .recvfrom(buffer, 0)
+            .map_err(|_| crate::object::capability::StreamError::Other("icmp recv error".into()))?;
+        Ok(len)
+    }
+
+    fn write(&self, data: &[u8]) -> Result<usize, crate::object::capability::StreamError> {
+        let addr = self
+            .remote_addr
+            .read()
+            .clone()
+            .unwrap_or(SocketAddress::Unspecified);
+        self.sendto(data, &addr, 0)
+            .map_err(|_| crate::object::capability::StreamError::Other("icmp send error".into()))?;
+        Ok(data.len())
     }
 }
 
@@ -367,8 +629,8 @@ impl NetworkLayer for IcmpLayer {
         Ok(())
     }
 
-    fn receive(&self, packet: &[u8]) -> Result<(), SocketError> {
-        self.receive_packet(packet)
+    fn receive(&self, _packet: &[u8]) -> Result<(), SocketError> {
+        Ok(())
     }
 
     fn name(&self) -> &'static str {

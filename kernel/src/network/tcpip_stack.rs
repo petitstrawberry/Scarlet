@@ -10,10 +10,11 @@ use spin::Once;
 use super::arp::ArpLayer;
 use super::ethernet::EthernetLayer;
 use super::icmp::IcmpLayer;
-use super::ipv4::Ipv4Layer;
-use super::protocol_stack::get_network_manager;
+use super::ipv4::{Ipv4Address, Ipv4Layer};
+use super::protocol_stack::{get_network_manager, NetworkLayer};
 use super::tcp::TcpLayer;
 use super::udp::UdpLayer;
+use crate::device::network::NetworkDevice;
 
 /// Initialize complete TCP/IP network stack
 ///
@@ -32,14 +33,21 @@ pub fn init_tcp_ip_stack() {
             }
         };
 
-        let config = device.get_interface_config().ok();
-        let mac_address = config.mac_address;
+        let config = device
+            .as_network_device()
+            .and_then(|network_device| network_device.get_interface_config().ok());
+        let mac_address = match config {
+            Some(config) => config.mac_address,
+            None => {
+                return;
+            }
+        };
 
         let ethernet_layer = EthernetLayer::new(mac_address);
         network_manager.register_layer("ethernet", ethernet_layer.clone());
 
         let local_ip = Ipv4Address::new(192, 168, 1, 100);
-        let arp_layer = ArpLayer::new(mac_address.as_bytes().try_into().unwrap(), local_ip);
+        let arp_layer = ArpLayer::new(*mac_address.as_bytes(), local_ip);
         network_manager.register_layer("arp", arp_layer.clone());
 
         let ip_layer = Ipv4Layer::new(local_ip);

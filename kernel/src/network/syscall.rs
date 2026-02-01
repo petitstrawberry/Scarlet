@@ -42,8 +42,9 @@ use alloc::sync::Arc;
 
 use crate::arch::Trapframe;
 use crate::network::{
-    local::LocalSocket, LocalSocketAddress, NetworkManager, ShutdownHow, SocketAddress,
-    SocketObject, SocketProtocol, SocketType,
+    local::LocalSocket, tcpip_stack::create_tcp_ip_stack, Inet4SocketAddress, LocalSocketAddress,
+    NetworkManager, ShutdownHow, SocketAddress, SocketDomain, SocketObject, SocketProtocol,
+    SocketType,
 };
 use crate::object::handle::{AccessMode, HandleMetadata, HandleType};
 use crate::object::KernelObject;
@@ -55,7 +56,9 @@ use crate::task::mytask;
 ///
 /// # Arguments (via trapframe)
 ///
-/// This syscall takes no arguments. All Scarlet Native sockets are local (IPC) sockets.
+/// - `a0`: Socket domain (SocketDomain)
+/// - `a1`: Socket type (SocketType)
+/// - `a2`: Socket protocol (SocketProtocol)
 ///
 /// # Returns
 ///
@@ -74,17 +77,87 @@ pub fn sys_socket_create(tf: &mut Trapframe) -> usize {
 
     tf.increment_pc_next(task);
 
-    // Create a local socket for Scarlet Native IPC
-    let socket = Arc::new(LocalSocket::new(
-        SocketType::Stream,
-        SocketProtocol::Default,
-    ));
-    LocalSocket::init_self_weak(&socket);
+    let domain = tf.get_arg(0) as u32;
+    let socket_type = tf.get_arg(1) as u32;
+    let protocol = tf.get_arg(2) as u32;
+
+    let domain = match domain {
+        0 | 1 => SocketDomain::Local,
+        2 => SocketDomain::Inet,
+        3 => SocketDomain::Inet6,
+        _ => return usize::MAX,
+    };
+
+    let socket_type = match socket_type {
+        0 | 1 => SocketType::Stream,
+        2 => SocketType::Datagram,
+        3 => SocketType::Raw,
+        4 => SocketType::SeqPacket,
+        _ => return usize::MAX,
+    };
+
+    let protocol = match protocol {
+        0 => SocketProtocol::Default,
+        1 => SocketProtocol::Icmp,
+        6 => SocketProtocol::Tcp,
+        17 => SocketProtocol::Udp,
+        value => SocketProtocol::Raw(value as u16),
+    };
+
+    let protocol = match (socket_type, protocol) {
+        (SocketType::Stream, SocketProtocol::Default) => SocketProtocol::Tcp,
+        (SocketType::Datagram, SocketProtocol::Default) => SocketProtocol::Udp,
+        (SocketType::Raw, SocketProtocol::Default) => SocketProtocol::Raw(0),
+        _ => protocol,
+    };
+
+    if matches!(domain, SocketDomain::Inet | SocketDomain::Inet6) {
+        let _ = create_tcp_ip_stack(domain);
+    }
+
+    let socket = match domain {
+        SocketDomain::Local => {
+            let socket = Arc::new(LocalSocket::new(socket_type, protocol));
+            LocalSocket::init_self_weak(&socket);
+            socket as Arc<dyn SocketObject>
+        }
+        SocketDomain::Inet | SocketDomain::Inet6 => {
+            let manager = NetworkManager::get_manager();
+            let socket = match protocol {
+                SocketProtocol::Tcp => manager.get_layer("tcp").map(|layer| {
+                    let tcp = layer
+                        .as_any()
+                        .downcast_ref::<crate::network::tcp::TcpLayer>()
+                        .expect("tcp layer type mismatch");
+                    tcp.create_socket() as Arc<dyn SocketObject>
+                }),
+                SocketProtocol::Udp => manager.get_layer("udp").map(|layer| {
+                    let udp = layer
+                        .as_any()
+                        .downcast_ref::<crate::network::udp::UdpLayer>()
+                        .expect("udp layer type mismatch");
+                    udp.create_socket() as Arc<dyn SocketObject>
+                }),
+                SocketProtocol::Icmp => manager.get_layer("icmp").map(|layer| {
+                    let icmp = layer
+                        .as_any()
+                        .downcast_ref::<crate::network::icmp::IcmpLayer>()
+                        .expect("icmp layer type mismatch");
+                    icmp.create_socket() as Arc<dyn SocketObject>
+                }),
+                _ => None,
+            };
+
+            match socket {
+                Some(socket) => socket,
+                None => return usize::MAX,
+            }
+        }
+        SocketDomain::Packet => return usize::MAX,
+    };
 
     // Register socket with NetworkManager to get a socket ID for VFS integration
-    let socket_id = match NetworkManager::get_manager()
-        .allocate_socket_id(socket.clone() as Arc<dyn SocketObject>)
-    {
+    let socket_id = match NetworkManager::get_manager().allocate_socket_id(socket.clone()) {
         Ok(id) => id,
         Err(_) => return usize::MAX,
     };
@@ -157,6 +230,14 @@ pub fn sys_socket_bind(tf: &mut Trapframe) -> usize {
         Some(addr) => addr as *const u8,
         None => return usize::MAX,
     };
+
+    if path_len == core::mem::size_of::<Inet4SocketAddress>() {
+        let addr = unsafe { *(path_physical as *const Inet4SocketAddress) };
+        if socket_arc.bind(&SocketAddress::Inet(addr)).is_err() {
+            return usize::MAX;
+        }
+        return 0;
+    }
 
     // Read path string from user space (up to path_len bytes)
     let path = unsafe {
@@ -328,6 +409,14 @@ pub fn sys_socket_connect(tf: &mut Trapframe) -> usize {
         Some(addr) => addr as *const u8,
         None => return usize::MAX,
     };
+
+    if path_len == core::mem::size_of::<Inet4SocketAddress>() {
+        let addr = unsafe { *(path_physical as *const Inet4SocketAddress) };
+        if socket.connect(&SocketAddress::Inet(addr)).is_err() {
+            return usize::MAX;
+        }
+        return 0;
+    }
 
     // Read path string from user space (up to path_len bytes)
     let path = unsafe {

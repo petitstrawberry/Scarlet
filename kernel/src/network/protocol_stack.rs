@@ -334,7 +334,7 @@ impl SocketConfig {
 /// // Assign to task
 /// task.network_manager = Some(container_net);
 /// ```
-pub trait NetworkLayer: Send + Sync {
+pub trait NetworkLayer: Send + Sync + core::any::Any {
     /// Register a protocol handler for this layer
     ///
     /// Upper layer protocols register themselves with their protocol number.

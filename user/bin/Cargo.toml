@@ -66,6 +66,10 @@ name = "socket_pair"
 path = "src/socket_pair.rs"
 
 [[bin]]
+name = "ping"
+path = "src/ping.rs"
+
+[[bin]]
 name = "sws"
 path = "src/sws/main.rs"
 
