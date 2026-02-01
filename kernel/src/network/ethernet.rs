@@ -242,7 +242,7 @@ mod tests {
         let mut bytes = [0u8; 14];
         bytes[0..6].copy_from_slice(&[0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF]);
         bytes[6..12].copy_from_slice(&[0x00, 0x11, 0x22, 0x33, 0x44, 0x55]);
-        bytes[12..14].copy_from_slice(&0x08u16.to_be_bytes());
+        bytes[12..14].copy_from_slice(&ether_type::IPV4.to_be_bytes());
 
         let header = EthernetHeader::from_bytes(&bytes).unwrap();
         assert_eq!(header.dest_mac, [0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF]);

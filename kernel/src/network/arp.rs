@@ -545,8 +545,8 @@ mod tests {
         let bytes = packet.to_bytes();
 
         assert_eq!(bytes.len(), 28);
-        assert_eq!(&bytes[0..2], 0x00u16.to_be_bytes()); // htype
-        assert_eq!(&bytes[2..4], 0x08u16.to_be_bytes()); // ptype
+        assert_eq!(&bytes[0..2], HTYPE_ETHERNET.to_be_bytes()); // htype
+        assert_eq!(&bytes[2..4], PTYPE_IPV4.to_be_bytes()); // ptype
         assert_eq!(bytes[4], HLEN_ETHERNET); // hlen
         assert_eq!(bytes[5], PLEN_IPV4); // plen
         assert_eq!(&bytes[6..8], operation::REPLY.to_be_bytes()); // operation
