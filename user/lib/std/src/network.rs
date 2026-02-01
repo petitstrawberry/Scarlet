@@ -1,7 +1,7 @@
 //! User-space network configuration helpers for Scarlet Native.
 
 use crate::handle::HandleError;
-use crate::syscall::{Syscall, syscall1};
+use crate::syscall::{Syscall, syscall1, syscall2};
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -53,4 +53,13 @@ pub fn set_dns_server(addr: Ipv4Address) -> Result<(), HandleError> {
 pub fn set_netmask(addr: Ipv4Address) -> Result<(), HandleError> {
     let result = syscall1(Syscall::NetworkSetNetmask, addr.0.as_ptr() as usize);
     HandleError::from_syscall_result(result).map(|_| ())
+}
+
+pub fn list_interfaces(buffer: &mut [u8]) -> Result<usize, HandleError> {
+    let result = syscall2(
+        Syscall::NetworkListInterfaces,
+        buffer.as_mut_ptr() as usize,
+        buffer.len(),
+    );
+    HandleError::from_syscall_result(result).map(|size| size as usize)
 }
