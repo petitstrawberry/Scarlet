@@ -208,6 +208,17 @@ impl IcmpLayer {
         !(sum as u16)
     }
 
+    fn verify_checksum(packet: &[u8]) -> bool {
+        if packet.len() < 4 {
+            return false;
+        }
+        let expected = u16::from_be_bytes([packet[2], packet[3]]);
+        let mut check = packet.to_vec();
+        check[2] = 0;
+        check[3] = 0;
+        Self::compute_checksum(&check) == expected
+    }
+
     /// Create a new ICMP layer
     pub fn new() -> Arc<Self> {
         Arc::new_cyclic(|weak| Self {
@@ -237,20 +248,14 @@ impl IcmpLayer {
         next_layers: &[Arc<dyn NetworkLayer>],
     ) -> Result<(), SocketError> {
         // Build ICMP Echo Request header
-        let header = IcmpHeader::new(message_type::ECHO_REQUEST, code::NO_CODE);
         let echo = IcmpEcho::new(identifier, sequence);
-
-        // Combine header and data
-        let mut icmp_data = Vec::with_capacity(8 + data.len());
-        icmp_data.extend_from_slice(&header.to_bytes());
-        icmp_data.extend_from_slice(&echo.to_bytes());
-        icmp_data.extend_from_slice(data);
+        let mut header = IcmpHeader::new(message_type::ECHO_REQUEST, code::NO_CODE);
+        header.rest = echo.to_bytes();
 
         // Calculate checksum
         let mut icmp_packet = Vec::with_capacity(8 + data.len());
-        icmp_packet.extend_from_slice(&header.to_bytes()[..2]); // Type + Code
-        icmp_packet.extend_from_slice(&0u16.to_be_bytes());
-        icmp_packet.extend_from_slice(&echo.to_bytes());
+        header.checksum = 0;
+        icmp_packet.extend_from_slice(&header.to_bytes());
         icmp_packet.extend_from_slice(data);
         let checksum = Self::compute_checksum(&icmp_packet);
         icmp_packet[2] = (checksum >> 8) as u8;
@@ -300,20 +305,14 @@ impl IcmpLayer {
         next_layers: &[Arc<dyn NetworkLayer>],
     ) -> Result<(), SocketError> {
         // Build ICMP Echo Reply header
-        let header = IcmpHeader::new(message_type::ECHO_REPLY, code::NO_CODE);
         let echo = IcmpEcho::new(identifier, sequence);
-
-        // Combine header and data
-        let mut icmp_data = Vec::with_capacity(8 + data.len());
-        icmp_data.extend_from_slice(&header.to_bytes());
-        icmp_data.extend_from_slice(&echo.to_bytes());
-        icmp_data.extend_from_slice(data);
+        let mut header = IcmpHeader::new(message_type::ECHO_REPLY, code::NO_CODE);
+        header.rest = echo.to_bytes();
 
         // Calculate checksum
         let mut icmp_packet = Vec::with_capacity(8 + data.len());
-        icmp_packet.extend_from_slice(&header.to_bytes()[..2]); // Type + Code
-        icmp_packet.extend_from_slice(&0u16.to_be_bytes());
-        icmp_packet.extend_from_slice(&echo.to_bytes());
+        header.checksum = 0;
+        icmp_packet.extend_from_slice(&header.to_bytes());
         icmp_packet.extend_from_slice(data);
         let checksum = Self::compute_checksum(&icmp_packet);
         icmp_packet[2] = (checksum >> 8) as u8;
@@ -364,6 +363,25 @@ impl IcmpLayer {
             return Err(SocketError::InvalidPacket);
         }
 
+        if !Self::verify_checksum(packet) {
+            let mut stats = self.stats.write();
+            stats.protocol_errors += 1;
+            return Err(SocketError::InvalidPacket);
+        }
+
+        early_println!(
+            "[ICMP] RX: {} bytes src={}.{}.{}.{} dst={}.{}.{}.{}",
+            packet.len(),
+            src_ip.0[0],
+            src_ip.0[1],
+            src_ip.0[2],
+            src_ip.0[3],
+            dst_ip.0[0],
+            dst_ip.0[1],
+            dst_ip.0[2],
+            dst_ip.0[3]
+        );
+
         // Parse ICMP header
         let header = IcmpHeader::from_bytes(&packet[..8]).ok_or(SocketError::InvalidPacket)?;
 
@@ -384,45 +402,26 @@ impl IcmpLayer {
         match header.message_type {
             message_type::ECHO_REQUEST => {
                 // Handle ping request - send reply
-                if data.len() >= 4 {
-                    if let Some(echo) = IcmpEcho::from_bytes(data) {
-                        let identifier =
-                            unsafe { core::ptr::addr_of!(echo.identifier).read_unaligned() };
-                        let sequence =
-                            unsafe { core::ptr::addr_of!(echo.sequence).read_unaligned() };
-                        early_println!(
-                            "[ICMP] Ping request from (id={}, seq={})",
-                            identifier,
-                            sequence
-                        );
+                let identifier = u16::from_be_bytes([header.rest[0], header.rest[1]]);
+                let sequence = u16::from_be_bytes([header.rest[2], header.rest[3]]);
+                early_println!(
+                    "[ICMP] Ping request from (id={}, seq={})",
+                    identifier,
+                    sequence
+                );
 
-                        let payload = &data[4..];
-
-                        if let Some(ip_layer) = get_network_manager().get_layer("ip") {
-                            let mut ctx = LayerContext::new();
-                            ctx.set("ip_dst", &src_ip.0);
-                            ctx.set("ip_src", &dst_ip.0);
-                            ctx.set("ip_protocol", &[1]);
-                            let _ = self.send_ping_reply(
-                                src_ip,
-                                identifier,
-                                sequence,
-                                payload,
-                                &[ip_layer],
-                            );
-                        }
-                    }
+                if let Some(ip_layer) = get_network_manager().get_layer("ip") {
+                    let mut ctx = LayerContext::new();
+                    ctx.set("ip_dst", &src_ip.0);
+                    ctx.set("ip_src", &dst_ip.0);
+                    ctx.set("ip_protocol", &[1]);
+                    let _ = self.send_ping_reply(src_ip, identifier, sequence, data, &[ip_layer]);
                 }
             }
             message_type::ECHO_REPLY => {
-                if data.len() >= 4 {
-                    if let Some(echo) = IcmpEcho::from_bytes(data) {
-                        let identifier =
-                            unsafe { core::ptr::addr_of!(echo.identifier).read_unaligned() };
-                        let payload = data[4..].to_vec();
-                        self.deliver_echo_reply(identifier, payload, src_ip);
-                    }
-                }
+                let identifier = u16::from_be_bytes([header.rest[0], header.rest[1]]);
+                let payload = data.to_vec();
+                self.deliver_echo_reply(identifier, payload, src_ip);
             }
             _ => {}
         }
@@ -755,6 +754,21 @@ mod tests {
     fn test_icmp_header_too_short() {
         let bytes = [0u8; 4];
         assert!(IcmpHeader::from_bytes(&bytes).is_none());
+    }
+
+    #[test_case]
+    fn test_icmp_echo_checksum_known_vector() {
+        let mut header = IcmpHeader::new(message_type::ECHO_REQUEST, code::NO_CODE);
+        header.rest = IcmpEcho::new(0x1234, 0x0001).to_bytes();
+        let data = b"scarlet";
+
+        let mut packet = header.to_bytes();
+        packet.extend_from_slice(data);
+        header.checksum = IcmpLayer::compute_checksum(&packet);
+
+        let mut checked = header.to_bytes();
+        checked.extend_from_slice(data);
+        assert!(IcmpLayer::verify_checksum(&checked));
     }
 
     #[test_case]

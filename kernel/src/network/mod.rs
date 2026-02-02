@@ -438,12 +438,24 @@ impl NetworkManager {
         self.protocol_layers.write().insert(name.to_string(), layer);
     }
 
+    pub fn unregister_layer(&self, name: &str) -> Option<Arc<dyn NetworkLayer>> {
+        self.protocol_layers.write().remove(name)
+    }
+
     pub fn get_layer(&self, name: &str) -> Option<Arc<dyn NetworkLayer>> {
         self.protocol_layers.read().get(name).cloned()
     }
 
     pub fn list_layers(&self) -> Vec<String> {
         self.protocol_layers.read().keys().cloned().collect()
+    }
+
+    pub fn layer_count(&self) -> usize {
+        self.protocol_layers.read().len()
+    }
+
+    pub fn has_layer(&self, name: &str) -> bool {
+        self.protocol_layers.read().contains_key(name)
     }
 
     pub fn register_named_socket(

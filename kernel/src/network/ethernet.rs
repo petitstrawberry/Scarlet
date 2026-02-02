@@ -293,6 +293,12 @@ impl NetworkLayer for EthernetLayer {
         let header = EthernetHeader::from_bytes(&frame[..ETHERNET_HEADER_SIZE])
             .ok_or(SocketError::InvalidPacket)?;
 
+        early_println!(
+            "[Ethernet] RX: {} bytes (type=0x{:04X})",
+            frame.len(),
+            header.ether_type
+        );
+
         let payload = &frame[ETHERNET_HEADER_SIZE..];
 
         let mut stats = self.stats.write();

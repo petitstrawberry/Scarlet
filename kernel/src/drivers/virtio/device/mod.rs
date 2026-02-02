@@ -373,6 +373,18 @@ pub trait VirtioDevice {
         Ok(negotiated_features)
     }
 
+    fn is_modern_device(&self) -> bool {
+        self.read32_register(Register::Version) == 2
+    }
+
+    fn supports_feature(&self, feature: u32) -> bool {
+        let device_features = self.read32_register(Register::DeviceFeatures);
+        if feature >= 32 {
+            return false;
+        }
+        (device_features & (1u32 << feature)) != 0
+    }
+
     /// Reset the device by writing 0 to the Status register
     fn reset(&mut self) -> Result<(), &'static str> {
         // self.debug_dump_mmio_state("reset:before");
@@ -515,6 +527,11 @@ pub trait VirtioDevice {
         // By default, accept all device features
         // Device-specific implementations should override this
         device_features
+    }
+
+    fn allow_ring_features(&self) -> bool {
+        self.is_modern_device()
+            && self.supports_feature(crate::drivers::virtio::features::VIRTIO_F_VERSION_1)
     }
 
     /// Set up a virtqueue

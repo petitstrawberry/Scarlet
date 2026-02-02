@@ -6,6 +6,8 @@ use super::*;
 struct TestVirtioDevice {
     base_addr: usize,
     virtqueues: [UnsafeCell<VirtQueue<'static>>; 2],
+    features: UnsafeCell<u32>,
+    version: UnsafeCell<u32>,
 }
 
 impl TestVirtioDevice {
@@ -16,6 +18,8 @@ impl TestVirtioDevice {
                 UnsafeCell::new(VirtQueue::new(queue_size)),
                 UnsafeCell::new(VirtQueue::new(queue_size)),
             ],
+            features: UnsafeCell::new(0),
+            version: UnsafeCell::new(2),
         }
     }
 }
@@ -58,6 +62,26 @@ impl VirtioDevice for TestVirtioDevice {
             Some(self.base_addr as u64 + (queue_idx * 0x1000 + 0x100) as u64) // Example offset
         } else {
             None
+        }
+    }
+
+    fn read32_register(&self, register: Register) -> u32 {
+        match register {
+            Register::Version => unsafe { *self.version.get() },
+            Register::DeviceFeatures => unsafe { *self.features.get() },
+            _ => VirtioDevice::read32_register(self, register),
+        }
+    }
+
+    fn write32_register(&self, register: Register, value: u32) {
+        match register {
+            Register::Version => unsafe {
+                *self.version.get() = value;
+            },
+            Register::DeviceFeatures => unsafe {
+                *self.features.get() = value;
+            },
+            _ => VirtioDevice::write32_register(self, register, value),
         }
     }
 }
@@ -133,6 +157,23 @@ fn test_feature_negotiation() {
     // Verify that the FeaturesOK status bit is set
     let status = device.read32_register(Register::Status);
     assert!(DeviceStatus::FeaturesOK.is_set(status));
+}
+
+#[test_case]
+fn test_allow_ring_features_version_gate() {
+    let page = allocate_raw_pages(1);
+    let base_addr = page as usize;
+    let device = TestVirtioDevice::new(base_addr, 2);
+
+    device.write32_register(Register::Version, 2);
+    device.write32_register(
+        Register::DeviceFeatures,
+        (1u64 << crate::drivers::virtio::features::VIRTIO_F_VERSION_1) as u32,
+    );
+    assert!(device.allow_ring_features());
+
+    device.write32_register(Register::DeviceFeatures, 0);
+    assert!(!device.allow_ring_features());
 }
 
 #[test_case]

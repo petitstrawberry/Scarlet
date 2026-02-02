@@ -272,7 +272,7 @@ impl VirtioNetDevice {
         let rx_queue = &mut virtqueues[0]; // RX queue is index 0
 
         // Use standard single-buffer approach like Linux virtio-net
-        let buffer_count = 2; // Minimal number of buffers
+        let buffer_count = 16; // Provide extra RX headroom
 
         for _ in 0..buffer_count {
             let hdr_size = self.get_header_size(); // 10 bytes for VirtioNetHdrBasic
@@ -324,6 +324,8 @@ impl VirtioNetDevice {
         // combine header and packet in single buffer like their send() function
         let hdr_size = mem::size_of::<VirtioNetHdrBasic>();
         let total_size = hdr_size + packet.len;
+
+        crate::early_println!("[virtio-net] TX: payload={} bytes", packet.len);
 
         // Create single buffer with header first, followed by packet data
         let mut combined_buffer = vec![0u8; total_size];
@@ -426,6 +428,12 @@ impl VirtioNetDevice {
                     let frame_offset = if used_len >= hdr_size { hdr_size } else { 0 };
                     let packet_data_ptr = buffer_addr.add(frame_offset);
                     let packet_len = used_len.saturating_sub(frame_offset);
+
+                    crate::early_println!(
+                        "[virtio-net] RX: used_len={} payload={} bytes",
+                        used_len,
+                        packet_len
+                    );
 
                     // Create packet from received data
                     let packet_data = core::slice::from_raw_parts(packet_data_ptr, packet_len);
@@ -568,14 +576,19 @@ impl InterruptCapableDevice for VirtioNetDevice {
                 name
             );
             let manager = crate::network::get_network_manager();
+            let mut inbound = 0usize;
             for (i, packet) in packets.iter().enumerate() {
                 crate::early_println!("[virtio-net] Packet {}: {} bytes", i, packet.len);
                 if packet.len >= 14 {
                     let eth_type = u16::from_be_bytes([packet.data[12], packet.data[13]]);
                     crate::early_println!("[virtio-net]   EtherType: 0x{:04X}", eth_type);
+                    if eth_type == 0x0800 {
+                        inbound += 1;
+                    }
                 }
                 manager.handle_received_packet(&name, &packet);
             }
+            crate::early_println!("[virtio-net] Forwarded IPv4 packets: {}", inbound);
         } else {
             crate::early_println!("[virtio-net] No interface name set!");
         }
@@ -640,11 +653,13 @@ impl VirtioDevice for VirtioNetDevice {
 
         // Use virtio-blk style: accept most features, exclude problematic ones
         // Start with all device features and exclude specific ones we don't want
-        let result = device_features
-            & (1 << VIRTIO_NET_F_STATUS
-                | 1 << VIRTIO_NET_F_MAC
-                | 1 << VIRTIO_RING_F_EVENT_IDX
-                | 1 << VIRTIO_RING_F_INDIRECT_DESC);
+        let mut result = device_features
+            & (1 << VIRTIO_NET_F_STATUS | 1 << VIRTIO_NET_F_MAC | 1 << VIRTIO_NET_F_MTU);
+
+        if self.allow_ring_features() {
+            result |=
+                device_features & (1 << VIRTIO_RING_F_EVENT_IDX | 1 << VIRTIO_RING_F_INDIRECT_DESC);
+        }
 
         #[cfg(test)]
         {

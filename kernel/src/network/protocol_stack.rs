@@ -759,6 +759,7 @@ pub fn get_network_manager() -> &'static crate::network::NetworkManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::network::NetworkManager;
     use alloc::sync::Arc;
     use core::sync::atomic::{AtomicU64, Ordering};
 

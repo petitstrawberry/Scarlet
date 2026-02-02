@@ -335,10 +335,28 @@ impl NetworkLayer for Ipv4Layer {
         let header = Ipv4Header::from_bytes(packet).ok_or(SocketError::InvalidPacket)?;
 
         let header_len = header.header_length();
+        let total_length = usize::from(header.total_length);
 
         if packet.len() < header_len {
             return Err(SocketError::InvalidPacket);
         }
+        if total_length < header_len || total_length > packet.len() {
+            return Err(SocketError::InvalidPacket);
+        }
+
+        early_println!(
+            "[IPv4] RX: total_len={} src={}.{}.{}.{} dst={}.{}.{}.{} proto={}",
+            total_length,
+            header.source_ip[0],
+            header.source_ip[1],
+            header.source_ip[2],
+            header.source_ip[3],
+            header.dest_ip[0],
+            header.dest_ip[1],
+            header.dest_ip[2],
+            header.dest_ip[3],
+            header.protocol
+        );
 
         // Verify checksum
         let calculated_checksum = checksum_from_bytes(&packet[..header_len]);
@@ -354,7 +372,7 @@ impl NetworkLayer for Ipv4Layer {
             return Err(SocketError::InvalidPacket);
         }
 
-        let payload = &packet[header_len..];
+        let payload = &packet[header_len..total_length];
 
         early_println!(
             "[IPv4] Recv: {} bytes (src: {}.{}.{}.{}, dst: {}.{}.{}.{}, proto: {})",
@@ -373,7 +391,7 @@ impl NetworkLayer for Ipv4Layer {
         // Update statistics
         let mut stats = self.stats.write();
         stats.packets_received += 1;
-        stats.bytes_received += packet.len() as u64;
+        stats.bytes_received += total_length as u64;
 
         // Route to protocol handler based on protocol field
         let protocols = self.protocols.read();
