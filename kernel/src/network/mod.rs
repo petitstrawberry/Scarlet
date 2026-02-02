@@ -68,6 +68,7 @@ pub use socket::{
 };
 
 use crate::device::network::{DevicePacket, MacAddress};
+use crate::early_println;
 use crate::network::arp::ArpCacheEntry;
 use crate::network::ipv4::Ipv4Address;
 use crate::object::KernelObject;
@@ -307,6 +308,11 @@ impl NetworkManager {
         }
 
         let eth_type = u16::from_be_bytes([packet.data[12], packet.data[13]]);
+        early_println!(
+            "[net] recv frame len={} eth_type=0x{:04X}",
+            packet.len,
+            eth_type
+        );
         match eth_type {
             0x0806 => self.handle_arp_packet(packet),
             0x0800 => self.handle_ipv4_packet(packet),
@@ -340,6 +346,20 @@ impl NetworkManager {
             Some(h) => h,
             None => return,
         };
+
+        early_println!(
+            "[IPv4] Recv frame: ip_len={} src={}.{}.{}.{} dst={}.{}.{}.{} proto={}",
+            ip_bytes.len(),
+            header.source_ip[0],
+            header.source_ip[1],
+            header.source_ip[2],
+            header.source_ip[3],
+            header.dest_ip[0],
+            header.dest_ip[1],
+            header.dest_ip[2],
+            header.dest_ip[3],
+            header.protocol
+        );
 
         let header_len = header.header_length();
         if ip_bytes.len() < header_len {

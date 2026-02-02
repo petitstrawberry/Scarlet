@@ -119,28 +119,12 @@ impl Ipv4Header {
 
     /// Calculate checksum
     pub fn calculate_checksum(&self) -> u16 {
-        let mut sum: u32 = 0;
-
-        // Convert header to u16 array
-        let header = unsafe {
-            core::slice::from_raw_parts(
-                self as *const Ipv4Header as *const u8,
-                self.header_length(),
-            )
-        };
-
-        for chunk in header.chunks(2) {
-            if chunk.len() == 2 {
-                let word = u16::from_be_bytes([chunk[0], chunk[1]]);
-                sum += word as u32;
-            }
+        let mut bytes = self.to_bytes();
+        if bytes.len() >= 12 {
+            bytes[10] = 0;
+            bytes[11] = 0;
         }
-
-        while sum >> 16 != 0 {
-            sum = (sum & 0xFFFF) + (sum >> 16);
-        }
-
-        !sum as u16
+        checksum_from_bytes(&bytes)
     }
 
     /// Serialize header to bytes
@@ -357,7 +341,7 @@ impl NetworkLayer for Ipv4Layer {
         }
 
         // Verify checksum
-        let calculated_checksum = header.calculate_checksum();
+        let calculated_checksum = checksum_from_bytes(&packet[..header_len]);
         if calculated_checksum != header.checksum {
             let header_checksum = unsafe { core::ptr::addr_of!(header.checksum).read_unaligned() };
             early_println!(
@@ -412,6 +396,32 @@ impl NetworkLayer for Ipv4Layer {
     fn as_any(&self) -> &dyn core::any::Any {
         self
     }
+}
+
+fn checksum_from_bytes(header_bytes: &[u8]) -> u16 {
+    let mut sum: u32 = 0;
+    let mut i = 0;
+
+    while i + 1 < header_bytes.len() {
+        if i == 10 {
+            i += 2;
+            continue;
+        }
+        let word = u16::from_be_bytes([header_bytes[i], header_bytes[i + 1]]);
+        sum += word as u32;
+        i += 2;
+    }
+
+    if i < header_bytes.len() {
+        let word = u16::from_be_bytes([header_bytes[i], 0]);
+        sum += word as u32;
+    }
+
+    while sum >> 16 != 0 {
+        sum = (sum & 0xFFFF) + (sum >> 16);
+    }
+
+    !sum as u16
 }
 
 #[cfg(test)]
@@ -547,6 +557,25 @@ mod tests {
         let checksum = header.calculate_checksum();
         // Just verify that checksum calculation runs without panicking
         assert_ne!(checksum, 0);
+    }
+
+    #[test_case]
+    fn test_ipv4_checksum_known_vector() {
+        let header = Ipv4Header {
+            version_ihl: 0x45,
+            tos: 0x00,
+            total_length: 0x003C,
+            identification: 0x1C46,
+            flags_fragment: 0x4000,
+            ttl: 0x40,
+            protocol: 0x06,
+            checksum: 0x0000,
+            source_ip: [192, 168, 0, 1],
+            dest_ip: [192, 168, 0, 199],
+        };
+
+        let checksum = header.calculate_checksum();
+        assert_eq!(checksum, 0x9C5D);
     }
 
     #[test_case]

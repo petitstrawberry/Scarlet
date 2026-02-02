@@ -249,6 +249,10 @@ impl NetworkLayer for EthernetLayer {
         let mut frame = Vec::with_capacity(total_size);
         frame.extend_from_slice(&header.to_bytes());
         frame.extend_from_slice(packet);
+        let min_payload = ETHERNET_MIN_SIZE.saturating_sub(4);
+        if frame.len() < min_payload {
+            frame.resize(min_payload, 0);
+        }
         let frame_len = frame.len();
 
         if let Some(interface) = get_network_manager().get_default_interface() {
