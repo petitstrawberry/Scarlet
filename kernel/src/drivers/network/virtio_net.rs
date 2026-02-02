@@ -657,8 +657,8 @@ impl VirtioDevice for VirtioNetDevice {
             & (1 << VIRTIO_NET_F_STATUS | 1 << VIRTIO_NET_F_MAC | 1 << VIRTIO_NET_F_MTU);
 
         if self.allow_ring_features() {
-            result |=
-                device_features & (1 << VIRTIO_RING_F_EVENT_IDX | 1 << VIRTIO_RING_F_INDIRECT_DESC);
+            // TODO: Implement EVENT_IDX before negotiating it.
+            result |= device_features & (1 << VIRTIO_RING_F_INDIRECT_DESC);
         }
 
         #[cfg(test)]
