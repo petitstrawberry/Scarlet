@@ -74,6 +74,10 @@ name = "netcfg"
 path = "src/netcfg.rs"
 
 [[bin]]
+name = "tcp_client"
+path = "src/tcp_client.rs"
+
+[[bin]]
 name = "sws"
 path = "src/sws/main.rs"
 

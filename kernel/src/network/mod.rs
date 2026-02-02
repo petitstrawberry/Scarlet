@@ -362,11 +362,15 @@ impl NetworkManager {
         );
 
         let header_len = header.header_length();
+        let total_length = usize::from(header.total_length);
         if ip_bytes.len() < header_len {
             return;
         }
+        if total_length < header_len || total_length > ip_bytes.len() {
+            return;
+        }
 
-        let payload = &ip_bytes[header_len..];
+        let payload = &ip_bytes[header_len..total_length];
         let protocol = header.protocol;
 
         if let Some(ip_layer) = self.get_layer("ip") {

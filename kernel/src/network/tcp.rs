@@ -114,14 +114,35 @@ impl TcpHeader {
         sum = (sum & 0xFFFF) + (sum >> 16);
         let tcp_len = (self.data_offset() + data.len()) as u16;
         sum += tcp_len as u32;
+        sum = (sum & 0xFFFF) + (sum >> 16);
 
-        // TCP header (exclude checksum field)
-        let header_bytes =
-            unsafe { core::slice::from_raw_parts(self as *const TcpHeader as *const u8, 12) };
-        for chunk in header_bytes.chunks(2) {
-            sum += u16::from_be_bytes([chunk[0], chunk[1]]) as u32;
-            sum = (sum & 0xFFFF) + (sum >> 16);
-        }
+        // TCP header (checksum field treated as 0)
+        // src_port (2 bytes)
+        sum += self.src_port as u32;
+        sum = (sum & 0xFFFF) + (sum >> 16);
+        // dst_port (2 bytes)
+        sum += self.dst_port as u32;
+        sum = (sum & 0xFFFF) + (sum >> 16);
+        // seq_number (4 bytes)
+        sum += ((self.seq_number >> 16) & 0xFFFF) as u32;
+        sum = (sum & 0xFFFF) + (sum >> 16);
+        sum += (self.seq_number & 0xFFFF) as u32;
+        sum = (sum & 0xFFFF) + (sum >> 16);
+        // ack_number (4 bytes)
+        sum += ((self.ack_number >> 16) & 0xFFFF) as u32;
+        sum = (sum & 0xFFFF) + (sum >> 16);
+        sum += (self.ack_number & 0xFFFF) as u32;
+        sum = (sum & 0xFFFF) + (sum >> 16);
+        // data_offset_flags (2 bytes)
+        sum += self.data_offset_flags as u32;
+        sum = (sum & 0xFFFF) + (sum >> 16);
+        // window_size (2 bytes)
+        sum += self.window_size as u32;
+        sum = (sum & 0xFFFF) + (sum >> 16);
+        // checksum field - treated as 0, skip
+        // urgent_pointer (2 bytes)
+        sum += self.urgent_pointer as u32;
+        sum = (sum & 0xFFFF) + (sum >> 16);
 
         // Data
         for chunk in data.chunks(2) {
@@ -378,6 +399,11 @@ impl TcpSocket {
         self.recv_seq.store(next_recv, Ordering::SeqCst);
         self.recv_ack.store(next_recv, Ordering::SeqCst);
 
+        // Advance our sequence number past the SYN we sent
+        let acked = header.ack_number;
+        self.send_seq.store(acked, Ordering::SeqCst);
+        self.send_unacked.store(acked, Ordering::SeqCst);
+
         self.send_ack(src_ip, header.src_port, next_recv);
 
         self.set_state(TcpState::Established);
@@ -391,7 +417,7 @@ impl TcpSocket {
         }
 
         if header.flags() & tcp_flags::FIN != 0 {
-            self.handle_fin(header);
+            self.handle_fin(src_ip, header);
         }
 
         if header.flags() & tcp_flags::ACK != 0 {
@@ -441,28 +467,21 @@ impl TcpSocket {
     }
 
     /// Handle FIN segment
-    fn handle_fin(&self, header: TcpHeader) {
+    fn handle_fin(&self, src_ip: Ipv4Address, header: TcpHeader) {
         let current_state = self.get_state();
+        let ack_seq = header.seq_number.wrapping_add(1);
+        self.recv_seq.store(ack_seq, Ordering::SeqCst);
+        self.recv_ack.store(ack_seq, Ordering::SeqCst);
         match current_state {
             TcpState::Established => {
-                if header.flags() & tcp_flags::ACK != 0 {
-                    // FIN-ACK received
-                    self.set_state(TcpState::CloseWait);
-                } else {
-                    // FIN received
-                    self.send_ack(
-                        self.remote_ip.lock().clone().unwrap(),
-                        self.remote_port.load(Ordering::SeqCst),
-                        header.seq_number.wrapping_add(1),
-                    );
-                    self.set_state(TcpState::CloseWait);
-                }
+                self.send_ack(src_ip, header.src_port, ack_seq);
+                self.set_state(TcpState::CloseWait);
             }
             TcpState::FinWait1 => {
                 if header.flags() & (tcp_flags::FIN | tcp_flags::ACK)
                     == (tcp_flags::FIN | tcp_flags::ACK)
                 {
-                    self.send_fin_ack();
+                    self.send_ack(src_ip, header.src_port, ack_seq);
                     self.set_state(TcpState::TimeWait);
                 }
             }
@@ -472,9 +491,8 @@ impl TcpSocket {
 
     /// Update send window based on acknowledgment
     fn update_send_window(&self, ack_number: u32) {
-        let send_seq = self.send_seq.load(Ordering::SeqCst);
-        let unacked = send_seq.wrapping_sub(ack_number);
-        self.send_unacked.store(unacked, Ordering::SeqCst);
+        // Track the latest acknowledged sequence number
+        self.send_unacked.store(ack_number, Ordering::SeqCst);
     }
 
     /// Send SYN packet
@@ -532,7 +550,6 @@ impl TcpSocket {
         header.set_flags(tcp_flags::FIN);
 
         self.send_segment(dest_ip, header, &[], true);
-        self.send_seq.fetch_add(1, Ordering::SeqCst);
         self.set_state(TcpState::FinWait1);
     }
 
@@ -550,7 +567,6 @@ impl TcpSocket {
         header.set_flags(tcp_flags::FIN | tcp_flags::ACK);
 
         self.send_segment(dest_ip, header, &[], true);
-        self.send_seq.fetch_add(1, Ordering::SeqCst);
     }
 
     /// Send TCP segment through IP layer
@@ -594,7 +610,17 @@ impl TcpSocket {
                     .fetch_add(segment.len() as u64, Ordering::SeqCst);
 
                 if update_seq {
-                    self.send_seq.fetch_add(total_len as u32, Ordering::SeqCst);
+                    let mut advance = data.len() as u32;
+                    let flags = header.flags();
+                    if (flags & tcp_flags::SYN) != 0 {
+                        advance = advance.wrapping_add(1);
+                    }
+                    if (flags & tcp_flags::FIN) != 0 {
+                        advance = advance.wrapping_add(1);
+                    }
+                    if advance != 0 {
+                        self.send_seq.fetch_add(advance, Ordering::SeqCst);
+                    }
                 }
             }
         }
@@ -638,8 +664,9 @@ impl TcpSocket {
 
     /// Receive data from socket
     pub fn recv_data(&self, buffer: &mut [u8]) -> Result<usize, SocketError> {
-        if self.get_state() != TcpState::Established {
-            return Err(SocketError::NotConnected);
+        match self.get_state() {
+            TcpState::Established | TcpState::CloseWait => {}
+            _ => return Err(SocketError::NotConnected),
         }
 
         let mut recv_buf = self.recv_buffer.lock();
@@ -853,6 +880,37 @@ impl crate::object::capability::StreamOps for TcpSocket {
 impl crate::object::capability::CloneOps for TcpSocket {
     fn custom_clone(&self) -> crate::object::KernelObject {
         crate::object::KernelObject::Socket(TcpSocket::new(self.tcp_layer.clone()))
+    }
+}
+
+impl Drop for TcpSocket {
+    fn drop(&mut self) {
+        // Send FIN if connection is still open
+        let state = self.get_state();
+        match state {
+            TcpState::Established | TcpState::SynReceived | TcpState::SynSent => {
+                // Send FIN to close connection gracefully
+                let _ = self.remote_ip.lock().clone().map(|dest_ip| {
+                    let dest_port = self.remote_port.load(Ordering::SeqCst);
+                    let local_port = self.local_port.load(Ordering::SeqCst);
+                    let send_seq = self.send_seq.load(Ordering::SeqCst);
+
+                    let mut header = TcpHeader::new(local_port, dest_port);
+                    header.seq_number = send_seq;
+                    header.set_flags(tcp_flags::FIN);
+                    self.send_segment(dest_ip, header, &[], true);
+                });
+            }
+            _ => {}
+        }
+
+        // Unregister port from TcpLayer
+        if let Some(layer) = self.tcp_layer.upgrade() {
+            let port = self.local_port.load(Ordering::SeqCst);
+            if port != 0 {
+                layer.unregister_port(port);
+            }
+        }
     }
 }
 
