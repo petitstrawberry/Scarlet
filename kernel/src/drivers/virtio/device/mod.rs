@@ -378,11 +378,11 @@ pub trait VirtioDevice {
     }
 
     fn supports_feature(&self, feature: u32) -> bool {
+        let selector = feature / 32;
+        let bit = feature % 32;
+        self.write32_register(Register::DeviceFeaturesSel, selector);
         let device_features = self.read32_register(Register::DeviceFeatures);
-        if feature >= 32 {
-            return false;
-        }
-        (device_features & (1u32 << feature)) != 0
+        (device_features & (1u32 << bit)) != 0
     }
 
     /// Reset the device by writing 0 to the Status register
