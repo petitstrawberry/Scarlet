@@ -52,22 +52,41 @@ pub extern "C" fn main(_argc: isize, _argv: *const *const u8) -> isize {
     }
 
     let mut buf = [0u8; 64];
-    let n = match socket.as_stream() {
-        Ok(mut stream) => match stream.read(&mut buf) {
-            Ok(n) => n,
-            Err(_) => {
-                println!("[ping] recv failed");
-                return 1;
-            }
-        },
-        Err(_) => {
-            println!("[ping] recv failed");
-            return 1;
-        }
-    };
+    if let Err(_) = socket.set_nonblocking(true) {
+        println!("[ping] recv failed");
+        return 1;
+    }
 
-    println!("[ping] reply {} bytes", n);
-    0
+    let mut n = 0usize;
+    let mut got_reply = false;
+    for _ in 0..200 {
+        if let Ok(mut stream) = socket.as_stream() {
+            match stream.read(&mut buf) {
+                Ok(read) => {
+                    n = read;
+                    got_reply = true;
+                    break;
+                }
+                Err(_) => {
+                    // WouldBlock or no data yet
+                }
+            }
+        }
+        std::thread::sleep(core::time::Duration::from_millis(10));
+    }
+
+    if !got_reply {
+        println!("[ping] timeout");
+        return 1;
+    }
+
+    if n == payload.len() && &buf[..n] == payload {
+        println!("[ping] reply {} bytes", n);
+        return 0;
+    }
+
+    println!("[ping] invalid reply (payload mismatch)");
+    1
 }
 
 fn parse_ipv4(value: &str) -> Option<[u8; 4]> {

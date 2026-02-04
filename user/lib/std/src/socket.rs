@@ -405,7 +405,7 @@ impl Socket {
     /// socket.set_nonblocking(true).unwrap();
     /// ```
     pub fn set_nonblocking(&self, enabled: bool) -> Result<()> {
-        const SOCKET_CMD_SET_NONBLOCKING: u32 = 1;
+        const SOCKET_CMD_SET_NONBLOCKING: u32 = 0x5353_0007;
         let result = syscall3(
             Syscall::HandleControl,
             self.handle.as_raw() as usize,
@@ -432,7 +432,7 @@ impl Socket {
     /// assert!(socket.is_nonblocking().unwrap());
     /// ```
     pub fn is_nonblocking(&self) -> Result<bool> {
-        const SOCKET_CMD_GET_NONBLOCKING: u32 = 2;
+        const SOCKET_CMD_GET_NONBLOCKING: u32 = 0x5353_000B;
         let result = syscall3(
             Syscall::HandleControl,
             self.handle.as_raw() as usize,

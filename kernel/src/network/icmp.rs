@@ -401,6 +401,9 @@ impl IcmpLayer {
 
         match header.message_type {
             message_type::ECHO_REQUEST => {
+                if header.code != code::NO_CODE {
+                    return Ok(());
+                }
                 // Handle ping request - send reply
                 let identifier = u16::from_be_bytes([header.rest[0], header.rest[1]]);
                 let sequence = u16::from_be_bytes([header.rest[2], header.rest[3]]);
@@ -419,6 +422,9 @@ impl IcmpLayer {
                 }
             }
             message_type::ECHO_REPLY => {
+                if header.code != code::NO_CODE {
+                    return Ok(());
+                }
                 let identifier = u16::from_be_bytes([header.rest[0], header.rest[1]]);
                 let payload = data.to_vec();
                 self.deliver_echo_reply(identifier, payload, src_ip);
@@ -449,6 +455,7 @@ pub struct IcmpSocket {
     remote_addr: RwLock<Option<SocketAddress>>,
     recv_queue: Mutex<VecDeque<(Vec<u8>, SocketAddress)>>,
     recv_waker: crate::sync::waker::Waker,
+    nonblocking: RwLock<bool>,
 }
 
 impl IcmpSocket {
@@ -461,6 +468,7 @@ impl IcmpSocket {
             remote_addr: RwLock::new(None),
             recv_queue: Mutex::new(VecDeque::new()),
             recv_waker: crate::sync::waker::Waker::new_interruptible("icmp_recv"),
+            nonblocking: RwLock::new(false),
         })
     }
 
@@ -486,6 +494,10 @@ impl SocketObject for IcmpSocket {
 
     fn as_any(&self) -> &dyn core::any::Any {
         self
+    }
+
+    fn as_control_ops(&self) -> Option<&dyn crate::object::capability::ControlOps> {
+        Some(self)
     }
 
     fn sendto(
@@ -549,12 +561,44 @@ impl SocketObject for IcmpSocket {
                 return Ok((len, addr));
             }
 
+            if *self.nonblocking.read() {
+                return Err(SocketError::WouldBlock);
+            }
+
             if let Some(task) = mytask() {
                 self.recv_waker.wait(task.get_id(), task.get_trapframe());
             } else {
                 return Err(SocketError::WouldBlock);
             }
         }
+    }
+}
+
+impl crate::object::capability::ControlOps for IcmpSocket {
+    fn control(&self, command: u32, arg: usize) -> Result<i32, &'static str> {
+        match command {
+            crate::network::socket::socket_ctl::SCTL_SOCKET_SET_NONBLOCK => {
+                *self.nonblocking.write() = arg != 0;
+                Ok(0)
+            }
+            crate::network::socket::socket_ctl::SCTL_SOCKET_GET_NONBLOCK => {
+                Ok(if *self.nonblocking.read() { 1 } else { 0 })
+            }
+            _ => Err("Unsupported socket control command"),
+        }
+    }
+
+    fn supported_control_commands(&self) -> alloc::vec::Vec<(u32, &'static str)> {
+        alloc::vec![
+            (
+                crate::network::socket::socket_ctl::SCTL_SOCKET_SET_NONBLOCK,
+                "Set non-blocking mode",
+            ),
+            (
+                crate::network::socket::socket_ctl::SCTL_SOCKET_GET_NONBLOCK,
+                "Get non-blocking mode",
+            ),
+        ]
     }
 }
 

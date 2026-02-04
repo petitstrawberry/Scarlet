@@ -41,6 +41,8 @@ pub mod socket_ctl {
     pub const SCTL_SOCKET_SET_NONBLOCK: u32 = 0x5353_0007;
     /// Get socket state (returns SocketState value)
     pub const SCTL_SOCKET_GET_STATE: u32 = 0x5353_0008;
+    /// Get socket non-blocking mode (returns 0 or 1)
+    pub const SCTL_SOCKET_GET_NONBLOCK: u32 = 0x5353_000B;
     /// Get socket type (returns SocketType value)
     pub const SCTL_SOCKET_GET_TYPE: u32 = 0x5353_0009;
     /// Check if connected (returns 0 or 1)

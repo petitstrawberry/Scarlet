@@ -1102,15 +1102,11 @@ impl Selectable for LocalSocket {
     }
 }
 
-/// Control command IDs for socket operations
-const SOCKET_CMD_SET_NONBLOCKING: u32 = 1;
-const SOCKET_CMD_GET_NONBLOCKING: u32 = 2;
-
 impl ControlOps for LocalSocket {
     fn control(&self, command: u32, arg: usize) -> Result<i32, &'static str> {
         // crate::println!("[LocalSocket::control] command={} arg={}", command, arg);
         match command {
-            SOCKET_CMD_SET_NONBLOCKING => {
+            crate::network::socket::socket_ctl::SCTL_SOCKET_SET_NONBLOCK => {
                 let enabled = arg != 0;
                 // crate::println!("[LocalSocket::control] Setting nonblocking={}", enabled);
                 self.set_nonblocking(enabled);
@@ -1118,7 +1114,7 @@ impl ControlOps for LocalSocket {
                 // crate::println!("[LocalSocket::control] Verified nonblocking={}", verify);
                 Ok(0)
             }
-            SOCKET_CMD_GET_NONBLOCKING => {
+            crate::network::socket::socket_ctl::SCTL_SOCKET_GET_NONBLOCK => {
                 let is_nonblocking = self.is_nonblocking();
                 // crate::println!(
                 // "[LocalSocket::control] Getting nonblocking={}",
@@ -1135,8 +1131,14 @@ impl ControlOps for LocalSocket {
 
     fn supported_control_commands(&self) -> alloc::vec::Vec<(u32, &'static str)> {
         alloc::vec![
-            (SOCKET_CMD_SET_NONBLOCKING, "Set non-blocking mode"),
-            (SOCKET_CMD_GET_NONBLOCKING, "Get non-blocking mode"),
+            (
+                crate::network::socket::socket_ctl::SCTL_SOCKET_SET_NONBLOCK,
+                "Set non-blocking mode",
+            ),
+            (
+                crate::network::socket::socket_ctl::SCTL_SOCKET_GET_NONBLOCK,
+                "Get non-blocking mode",
+            ),
         ]
     }
 }
