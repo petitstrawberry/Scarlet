@@ -426,8 +426,9 @@ impl IcmpLayer {
                     return Ok(());
                 }
                 let identifier = u16::from_be_bytes([header.rest[0], header.rest[1]]);
+                let sequence = u16::from_be_bytes([header.rest[2], header.rest[3]]);
                 let payload = data.to_vec();
-                self.deliver_echo_reply(identifier, payload, src_ip);
+                self.deliver_echo_reply(identifier, payload, src_ip, sequence);
             }
             _ => {}
         }
@@ -435,14 +436,20 @@ impl IcmpLayer {
         Ok(())
     }
 
-    fn deliver_echo_reply(&self, identifier: u16, payload: Vec<u8>, src_ip: Ipv4Address) {
+    fn deliver_echo_reply(
+        &self,
+        identifier: u16,
+        payload: Vec<u8>,
+        src_ip: Ipv4Address,
+        sequence: u16,
+    ) {
         if let Some(socket) = self
             .sockets
             .read()
             .get(&identifier)
             .and_then(|weak| weak.upgrade())
         {
-            socket.deliver_reply(payload, src_ip);
+            socket.deliver_reply(payload, src_ip, sequence);
         }
     }
 }
@@ -451,6 +458,7 @@ pub struct IcmpSocket {
     icmp_layer: Weak<IcmpLayer>,
     identifier: u16,
     sequence: AtomicU16,
+    expected_sequence: AtomicU16,
     local_addr: Mutex<Option<SocketAddress>>,
     remote_addr: RwLock<Option<SocketAddress>>,
     recv_queue: Mutex<VecDeque<(Vec<u8>, SocketAddress)>>,
@@ -464,6 +472,7 @@ impl IcmpSocket {
             icmp_layer,
             identifier,
             sequence: AtomicU16::new(0),
+            expected_sequence: AtomicU16::new(0),
             local_addr: Mutex::new(None),
             remote_addr: RwLock::new(None),
             recv_queue: Mutex::new(VecDeque::new()),
@@ -472,7 +481,11 @@ impl IcmpSocket {
         })
     }
 
-    fn deliver_reply(&self, payload: Vec<u8>, src_ip: Ipv4Address) {
+    fn deliver_reply(&self, payload: Vec<u8>, src_ip: Ipv4Address, sequence: u16) {
+        let expected = self.expected_sequence.load(Ordering::SeqCst);
+        if sequence != expected {
+            return;
+        }
         let addr = SocketAddress::Inet(Inet4SocketAddress::new(src_ip.0, 0));
         self.recv_queue.lock().push_back((payload, addr));
         self.recv_waker.wake_one();
@@ -516,6 +529,7 @@ impl SocketObject for IcmpSocket {
         };
 
         let sequence = self.sequence.fetch_add(1, Ordering::SeqCst);
+        self.expected_sequence.store(sequence, Ordering::SeqCst);
         let dest_ip = Ipv4Address::from_bytes(target.addr);
 
         if let Some(ip_layer) = get_network_manager().get_layer("ip") {
