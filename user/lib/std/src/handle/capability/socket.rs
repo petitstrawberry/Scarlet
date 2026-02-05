@@ -49,6 +49,22 @@ impl Inet4SocketAddress {
     }
 }
 
+/// Socket address abstraction - OS-agnostic
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SocketAddress {
+    /// IPv4 address with port
+    Inet(Inet4SocketAddress),
+    /// Unspecified/any address
+    Unspecified,
+}
+
+impl SocketAddress {
+    /// Check if this is an unspecified address
+    pub fn is_unspecified(&self) -> bool {
+        matches!(self, SocketAddress::Unspecified)
+    }
+}
+
 /// Result type for socket operations
 pub type SocketObjectResult<T> = Result<T, SocketObjectError>;
 

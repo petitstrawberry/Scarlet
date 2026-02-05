@@ -16,6 +16,7 @@ use crate::network::socket::{
     SocketAddress, SocketControl, SocketError, SocketObject, SocketProtocol, SocketState,
     SocketType,
 };
+use crate::object::capability::selectable::Selectable;
 
 /// UDP header (8 bytes)
 #[derive(Debug, Clone, Copy)]
@@ -60,14 +61,12 @@ impl UdpHeader {
         sum += self.length as u32;
         sum = (sum & 0xFFFF) + (sum >> 16);
 
-        // UDP header
+        // UDP header (except checksum field)
         sum += self.src_port as u32;
         sum = (sum & 0xFFFF) + (sum >> 16);
         sum += self.dst_port as u32;
         sum = (sum & 0xFFFF) + (sum >> 16);
         sum += self.length as u32;
-        sum = (sum & 0xFFFF) + (sum >> 16);
-        sum += self.checksum as u32;
         sum = (sum & 0xFFFF) + (sum >> 16);
 
         // Data
@@ -79,6 +78,11 @@ impl UdpHeader {
                 sum += (chunk[0] as u32) << 8;
                 sum = (sum & 0xFFFF) + (sum >> 16);
             }
+        }
+
+        // Final carry
+        while sum >> 16 != 0 {
+            sum = (sum & 0xFFFF) + (sum >> 16);
         }
 
         !sum as u16
@@ -127,6 +131,12 @@ pub struct UdpSocket {
     udp_layer: Arc<UdpLayer>,
     /// Weak self reference for registration
     self_weak: Weak<UdpSocket>,
+    /// Receive waker for blocking I/O
+    recv_waker: Mutex<Option<alloc::sync::Arc<crate::sync::Waker>>>,
+    /// Send waker for blocking I/O
+    send_waker: Mutex<Option<alloc::sync::Arc<crate::sync::Waker>>>,
+    /// Blocking mode (default: true)
+    blocking_mode: spin::Mutex<bool>,
 }
 
 impl UdpSocket {
@@ -140,12 +150,19 @@ impl UdpSocket {
             state: RwLock::new(SocketState::Unconnected),
             udp_layer,
             self_weak: weak.clone(),
+            recv_waker: Mutex::new(None),
+            send_waker: Mutex::new(None),
+            blocking_mode: spin::Mutex::new(true),
         })
     }
 
     /// Deliver received datagram to this socket
     pub fn deliver_datagram(&self, data: Vec<u8>) {
         self.recv_buffer.lock().push(data);
+        // Wake up any waiting reader
+        if let Some(waker) = self.recv_waker.lock().as_ref() {
+            waker.wake_one();
+        }
     }
 }
 
@@ -199,6 +216,20 @@ impl SocketObject for UdpSocket {
         buffer: &mut [u8],
         _flags: u32,
     ) -> Result<(usize, SocketAddress), SocketError> {
+        // Blocking mode: wait for data
+        if !self.is_nonblocking() {
+            let interest = crate::object::capability::selectable::ReadyInterest {
+                read: true,
+                write: false,
+                except: false,
+            };
+            let task = crate::task::mytask();
+            if let Some(t) = task {
+                let trapframe = t.get_trapframe();
+                Selectable::wait_until_ready(self, interest, trapframe, None);
+            }
+        }
+
         let mut recv_buf = self.recv_buffer.lock();
 
         if recv_buf.is_empty() {
@@ -308,9 +339,26 @@ impl crate::ipc::StreamIpcOps for UdpSocket {
 
 impl crate::object::capability::StreamOps for UdpSocket {
     fn read(&self, buffer: &mut [u8]) -> Result<usize, crate::object::capability::StreamError> {
-        let (len, _) = self
-            .recvfrom(buffer, 0)
-            .map_err(|_| crate::object::capability::StreamError::Other("udp recv error".into()))?;
+        use crate::object::capability::selectable::Selectable;
+
+        if !Selectable::is_nonblocking(self) {
+            // Blocking mode: wait for data
+            let task = crate::task::mytask();
+            if let Some(t) = task {
+                let trapframe = t.get_trapframe();
+                let interest = crate::object::capability::selectable::ReadyInterest {
+                    read: true,
+                    write: false,
+                    except: false,
+                };
+                Selectable::wait_until_ready(self, interest, trapframe, None);
+            }
+        }
+
+        let (len, _) = self.recvfrom(buffer, 0).map_err(|e| match e {
+            SocketError::WouldBlock => crate::object::capability::StreamError::WouldBlock,
+            _ => crate::object::capability::StreamError::Other("udp recv error".into()),
+        })?;
         Ok(len)
     }
 
@@ -329,6 +377,77 @@ impl crate::object::capability::StreamOps for UdpSocket {
 impl crate::object::capability::CloneOps for UdpSocket {
     fn custom_clone(&self) -> crate::object::KernelObject {
         crate::object::KernelObject::Socket(UdpSocket::new(self.udp_layer.clone()))
+    }
+}
+
+impl crate::object::capability::Selectable for UdpSocket {
+    fn current_ready(
+        &self,
+        interest: crate::object::capability::selectable::ReadyInterest,
+    ) -> crate::object::capability::selectable::ReadySet {
+        let mut ready = crate::object::capability::selectable::ReadySet::none();
+
+        if interest.read {
+            let recv_buf = self.recv_buffer.lock();
+            ready.read = !recv_buf.is_empty();
+        }
+
+        if interest.write {
+            // UDP writes are always ready (no congestion control)
+            ready.write = true;
+        }
+
+        ready
+    }
+
+    fn wait_until_ready(
+        &self,
+        interest: crate::object::capability::selectable::ReadyInterest,
+        trapframe: &mut crate::arch::Trapframe,
+        timeout_ticks: Option<u64>,
+    ) -> crate::object::capability::selectable::SelectWaitOutcome {
+        let current = self.current_ready(interest);
+        if (interest.read && current.read) || (interest.write && current.write) {
+            return crate::object::capability::selectable::SelectWaitOutcome::Ready;
+        }
+
+        let task_id = {
+            use crate::arch::get_cpu;
+            use crate::sched::scheduler::get_scheduler;
+            let cpu_id = get_cpu().get_cpuid();
+            get_scheduler().get_current_task_id(cpu_id).unwrap_or(0)
+        };
+
+        let woke = if interest.read {
+            let waker = {
+                let mut waker_lock = self.recv_waker.lock();
+                waker_lock
+                    .get_or_insert_with(|| {
+                        alloc::sync::Arc::new(crate::sync::Waker::new_interruptible("udp_recv"))
+                    })
+                    .clone()
+            };
+            waker.wait_with_timeout(task_id, trapframe, timeout_ticks)
+        } else {
+            true
+        };
+
+        if timeout_ticks.is_some() && !woke {
+            let after = self.current_ready(interest);
+            if (interest.read && !after.read) && (interest.write && !after.write) {
+                return crate::object::capability::selectable::SelectWaitOutcome::TimedOut;
+            }
+        }
+
+        crate::object::capability::selectable::SelectWaitOutcome::Ready
+    }
+
+    fn set_nonblocking(&self, enabled: bool) {
+        *self.blocking_mode.lock() = !enabled;
+    }
+
+    fn is_nonblocking(&self) -> bool {
+        !*self.blocking_mode.lock()
     }
 }
 
@@ -420,8 +539,27 @@ impl UdpLayer {
     ) -> Result<(), SocketError> {
         let (src_ip_bytes, src_port) = match socket.local_addr.read().clone() {
             Some(SocketAddress::Inet(inet)) => (inet.addr, inet.port),
-            _ => ([0u8; 4], 0),
+            _ => {
+                // Get local IP from IPv4 layer if not bound
+                let ip = if let Some(ip_layer) = get_network_manager().get_layer("ip") {
+                    if let Some(ipv4_layer) = ip_layer
+                        .as_any()
+                        .downcast_ref::<crate::network::ipv4::Ipv4Layer>()
+                    {
+                        ipv4_layer.get_local_ip().as_bytes()
+                    } else {
+                        [0u8; 4]
+                    }
+                } else {
+                    [0u8; 4]
+                };
+                // Allocate ephemeral port for unbound socket
+                let port = self.allocate_port();
+                self.register_port(port, socket.self_weak.clone());
+                (ip, port)
+            }
         };
+
         let total_length = (8 + data.len()) as u16;
 
         let mut header = UdpHeader::new(src_port, dest_port, total_length);
@@ -433,6 +571,7 @@ impl UdpLayer {
         udp_packet.extend_from_slice(&data);
 
         let mut ip_context = LayerContext::new();
+        ip_context.set("ip_src", &src_ip_bytes);
         ip_context.set("ip_dst", &dest_ip);
         ip_context.set("ip_protocol", &[17]);
 

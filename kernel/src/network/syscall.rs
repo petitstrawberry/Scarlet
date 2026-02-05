@@ -39,6 +39,7 @@
 
 use alloc::string::String;
 use alloc::sync::Arc;
+use alloc::vec;
 use alloc::vec::Vec;
 
 use crate::arch::Trapframe;
@@ -822,4 +823,171 @@ pub fn sys_socket_shutdown(tf: &mut Trapframe) -> usize {
     }
 
     0
+}
+
+/// System call: Receive datagram with sender address
+///
+/// Receives a datagram from a socket and returns the sender's address.
+/// Used for UDP and Local datagram sockets.
+///
+/// # Arguments (via trapframe)
+///
+/// - `a0`: Socket handle ID
+/// - `a1`: Pointer to buffer for receiving data
+/// - `a2`: Buffer length
+/// - `a3`: Pointer to SocketAddress structure for storing sender address (can be null)
+///
+/// # Returns
+///
+/// Number of bytes received on success, usize::MAX (-1) on error
+///
+/// # Errors
+///
+/// Returns usize::MAX (-1) if:
+/// - Invalid handle ID
+/// - Invalid buffer pointer
+/// - Socket error
+pub fn sys_socket_recvfrom(tf: &mut Trapframe) -> usize {
+    let task = match mytask() {
+        Some(task) => task,
+        None => return usize::MAX,
+    };
+
+    tf.increment_pc_next(task);
+
+    let handle_id = tf.get_arg(0) as u32;
+    let buf_ptr = tf.get_arg(1);
+    let buf_len = tf.get_arg(2);
+    let addr_ptr = tf.get_arg(3);
+
+    // Validate buffer pointer
+    let buf_vaddr = match task.vm_manager.translate_vaddr(buf_ptr) {
+        Some(addr) => addr as *mut u8,
+        None => return usize::MAX,
+    };
+
+    // Get the socket from handle table
+    let socket = match task.handle_table.get(handle_id) {
+        Some(KernelObject::Socket(socket)) => socket.clone(),
+        _ => return usize::MAX,
+    };
+
+    // Create a temporary buffer
+    let mut temp_buf = vec![0u8; buf_len];
+
+    // Receive datagram
+    match socket.recvfrom(&mut temp_buf, 0) {
+        Ok((len, addr)) => {
+            // Copy data to user buffer
+            unsafe {
+                core::ptr::copy_nonoverlapping(temp_buf.as_ptr(), buf_vaddr, len);
+            }
+
+            // Store sender address if pointer is provided
+            if addr_ptr != 0 {
+                if let Some(addr_vaddr) = task.vm_manager.translate_vaddr(addr_ptr) {
+                    unsafe {
+                        match addr {
+                            SocketAddress::Inet(inet) => {
+                                let addr_bytes = inet.addr;
+                                let port_bytes = inet.port.to_be_bytes();
+                                let ptr = addr_vaddr as *mut u8;
+                                *ptr = 2; // AF_INET
+                                *ptr.add(1) = 0;
+                                core::ptr::copy_nonoverlapping(addr_bytes.as_ptr(), ptr.add(2), 4);
+                                core::ptr::copy_nonoverlapping(port_bytes.as_ptr(), ptr.add(6), 2);
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+
+            len
+        }
+        Err(crate::network::socket::SocketError::WouldBlock) => (-(11i32)) as usize,
+        Err(_) => usize::MAX,
+    }
+}
+
+/// System call: Send datagram to specified address
+///
+/// Sends a datagram to a specific address.
+/// Used for UDP and Local datagram sockets.
+///
+/// # Arguments (via trapframe)
+///
+/// - `a0`: Socket handle ID
+/// - `a1`: Pointer to data buffer
+/// - `a2`: Data length
+/// - `a3`: Pointer to SocketAddress structure (destination address)
+///
+/// # Returns
+///
+/// Number of bytes sent on success, usize::MAX (-1) on error
+///
+/// # Errors
+///
+/// Returns usize::MAX (-1) if:
+/// - Invalid handle ID
+/// - Invalid buffer pointer
+/// - Invalid address
+/// - Socket error
+pub fn sys_socket_sendto(tf: &mut Trapframe) -> usize {
+    let task = match mytask() {
+        Some(task) => task,
+        None => return usize::MAX,
+    };
+
+    tf.increment_pc_next(task);
+
+    let handle_id = tf.get_arg(0) as u32;
+    let buf_ptr = tf.get_arg(1);
+    let buf_len = tf.get_arg(2);
+    let addr_ptr = tf.get_arg(3);
+
+    // Validate buffer pointer
+    let buf_vaddr = match task.vm_manager.translate_vaddr(buf_ptr) {
+        Some(addr) => addr as *const u8,
+        None => return usize::MAX,
+    };
+
+    // Read data from user buffer
+    let data: Vec<u8> = unsafe { core::slice::from_raw_parts(buf_vaddr, buf_len).to_vec() };
+
+    // Get the socket from handle table
+    let socket = match task.handle_table.get(handle_id) {
+        Some(KernelObject::Socket(socket)) => socket.clone(),
+        _ => return usize::MAX,
+    };
+
+    // Parse destination address
+    let addr = if addr_ptr != 0 {
+        match task.vm_manager.translate_vaddr(addr_ptr) {
+            Some(addr_vaddr) => {
+                unsafe {
+                    let ptr = addr_vaddr as *const u8;
+                    let family = *ptr;
+                    match family {
+                        2 => {
+                            // AF_INET
+                            let ip_bytes = [*ptr.add(2), *ptr.add(3), *ptr.add(4), *ptr.add(5)];
+                            let port = u16::from_be_bytes([*ptr.add(6), *ptr.add(7)]);
+                            SocketAddress::Inet(Inet4SocketAddress::new(ip_bytes, port))
+                        }
+                        _ => return usize::MAX,
+                    }
+                }
+            }
+            None => return usize::MAX,
+        }
+    } else {
+        return usize::MAX;
+    };
+
+    // Send datagram
+    match socket.sendto(&data, &addr, 0) {
+        Ok(len) => len,
+        Err(_) => usize::MAX,
+    }
 }

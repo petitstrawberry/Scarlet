@@ -24,13 +24,14 @@
 
 use crate::handle::Handle;
 use crate::handle::RawHandle;
-use crate::syscall::{Syscall, syscall1, syscall3};
+use crate::syscall::{syscall1, syscall3, syscall4, Syscall};
 
-pub use crate::handle::capability::ShutdownHow;
 pub use crate::handle::capability::socket::Inet4SocketAddress;
+pub use crate::handle::capability::socket::SocketAddress;
 pub use crate::handle::capability::socket::SocketDomain;
 pub use crate::handle::capability::socket::SocketProtocol;
 pub use crate::handle::capability::socket::SocketType;
+pub use crate::handle::capability::ShutdownHow;
 
 /// Socket handle wrapper
 ///
@@ -50,6 +51,8 @@ pub enum SocketError {
     InvalidHandle,
     /// Invalid path
     InvalidPath,
+    /// Invalid address
+    InvalidAddress,
     /// Already bound or connected
     AlreadyBound,
     /// Not listening
@@ -478,6 +481,111 @@ impl crate::io::Read for Socket {
                 _ => crate::io::Error::new(crate::io::ErrorKind::Other, "Failed to read"),
             }
         })
+    }
+}
+
+/// Datagram operations trait for UDP and Local datagram sockets
+///
+/// This trait provides operations for connectionless datagram sockets,
+/// allowing send/receive with explicit addresses.
+pub trait DatagramOps {
+    /// Receive a datagram with sender address
+    ///
+    /// # Arguments
+    /// * `buf` - Buffer to store received data
+    ///
+    /// # Returns
+    /// * `(usize, SocketAddress)` - Number of bytes received and sender address
+    fn recvfrom(&self, buf: &mut [u8]) -> Result<(usize, SocketAddress)>;
+
+    /// Send a datagram to specified address
+    ///
+    /// # Arguments
+    /// * `buf` - Data to send
+    /// * `addr` - Destination address
+    ///
+    /// # Returns
+    /// * `usize` - Number of bytes sent
+    fn sendto(&self, buf: &[u8], addr: &SocketAddress) -> Result<usize>;
+}
+
+impl DatagramOps for Socket {
+    fn recvfrom(&self, buf: &mut [u8]) -> Result<(usize, SocketAddress)> {
+        use crate::syscall::{syscall4, Syscall};
+
+        // Allocate space for address (8 bytes: 2 for family, 4 for IP, 2 for port)
+        let mut addr_buf = [0u8; 8];
+
+        // Check if non-blocking mode
+        let is_nonblocking = self.is_nonblocking().unwrap_or(false);
+
+        loop {
+            let result = syscall4(
+                Syscall::SocketRecvFrom,
+                self.handle.as_raw() as usize,
+                buf.as_mut_ptr() as usize,
+                buf.len(),
+                addr_buf.as_mut_ptr() as usize,
+            );
+
+            // Handle negative errno values first
+            if result > (isize::MAX as usize) {
+                let errno = -(result as isize) as i32;
+                if errno == 11 {
+                    if is_nonblocking {
+                        return Err(SocketError::WouldBlock);
+                    }
+                    crate::thread::yield_now();
+                    continue;
+                }
+                return Err(SocketError::SyscallFailed);
+            }
+
+            if result == usize::MAX {
+                return Err(SocketError::SyscallFailed);
+            }
+
+            // Success - parse address
+            let addr = match addr_buf[0] {
+                2 => {
+                    // AF_INET
+                    let ip = [addr_buf[2], addr_buf[3], addr_buf[4], addr_buf[5]];
+                    let port = u16::from_be_bytes([addr_buf[6], addr_buf[7]]);
+                    SocketAddress::Inet(Inet4SocketAddress::new(ip, port))
+                }
+                _ => return Err(SocketError::InvalidAddress),
+            };
+            return Ok((result, addr));
+        }
+    }
+
+    fn sendto(&self, buf: &[u8], addr: &SocketAddress) -> Result<usize> {
+        use crate::syscall::{syscall4, Syscall};
+
+        // Serialize address
+        let mut addr_buf = [0u8; 8];
+        match addr {
+            SocketAddress::Inet(inet) => {
+                addr_buf[0] = 2; // AF_INET
+                addr_buf[2..6].copy_from_slice(&inet.addr);
+                addr_buf[6..8].copy_from_slice(&inet.port.to_be_bytes());
+            }
+            _ => return Err(SocketError::InvalidAddress),
+        }
+
+        let result = syscall4(
+            Syscall::SocketSendTo,
+            self.handle.as_raw() as usize,
+            buf.as_ptr() as usize,
+            buf.len(),
+            addr_buf.as_ptr() as usize,
+        );
+
+        if result == usize::MAX {
+            return Err(SocketError::SyscallFailed);
+        }
+
+        Ok(result)
     }
 }
 

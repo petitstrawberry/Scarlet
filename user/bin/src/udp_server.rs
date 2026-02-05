@@ -1,6 +1,6 @@
 // Simple UDP server - receives datagrams and echoes data
 // Usage: udp_server <port>
-// Example: udp_server 8080
+// Example: udp_server 18080
 
 #![no_std]
 #![no_main]
@@ -8,9 +8,11 @@
 extern crate scarlet_std as std;
 
 use std::env;
-use std::io::{Read, Write};
 use std::println;
-use std::socket::{Inet4SocketAddress, Socket, SocketDomain, SocketProtocol, SocketType};
+use std::socket::{
+    DatagramOps, Inet4SocketAddress, Socket, SocketAddress, SocketDomain, SocketProtocol,
+    SocketType,
+};
 
 #[unsafe(no_mangle)]
 pub extern "C" fn main(_argc: isize, _argv: *const *const u8) -> isize {
@@ -18,7 +20,7 @@ pub extern "C" fn main(_argc: isize, _argv: *const *const u8) -> isize {
 
     if args.len() != 2 {
         println!("Usage: udp_server <port>");
-        println!("Example: udp_server 8080");
+        println!("Example: udp_server 18080");
         return 1;
     }
 
@@ -32,7 +34,7 @@ pub extern "C" fn main(_argc: isize, _argv: *const *const u8) -> isize {
 
     println!("[udp-server] Starting on port {}...", port);
 
-    let mut socket = match Socket::new_with_domain(
+    let socket = match Socket::new_with_domain(
         SocketDomain::Inet4,
         SocketType::Datagram,
         SocketProtocol::Udp,
@@ -56,23 +58,27 @@ pub extern "C" fn main(_argc: isize, _argv: *const *const u8) -> isize {
     let mut response = [0u8; 1024];
 
     loop {
-        match socket.read(&mut buf) {
-            Ok(0) => {
-                println!("[udp-server] Connection closed");
-                break;
-            }
-            Ok(n) => {
-                println!("[udp-server] Received {} bytes", n);
+        // Receive datagram with sender address
+        match socket.recvfrom(&mut buf) {
+            Ok((n, src_addr)) => {
+                if n == 0 {
+                    println!("[udp-server] Connection closed");
+                    break;
+                }
 
+                println!("[udp-server] Received {} bytes from {:?}", n, src_addr);
+
+                // Prepare response with prefix
                 let response_len = n.min(1024);
                 response[0] = b'[';
-                let data_len = response_len - 1;
+                let data_len = response_len.saturating_sub(1);
 
                 if n > 0 && data_len > 0 {
                     response[1..1 + data_len].copy_from_slice(&buf[..data_len]);
                 }
 
-                match socket.write(&response[..response_len]) {
+                // Send response back to sender
+                match socket.sendto(&response[..response_len], &src_addr) {
                     Ok(_) => {}
                     Err(_) => {
                         println!("[udp-server] Send failed");

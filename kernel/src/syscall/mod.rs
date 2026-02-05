@@ -94,7 +94,7 @@ use crate::network::syscall::{
 };
 use crate::network::syscall::{
     sys_socket_accept, sys_socket_bind, sys_socket_connect, sys_socket_create, sys_socket_listen,
-    sys_socket_shutdown, sys_socketpair,
+    sys_socket_recvfrom, sys_socket_sendto, sys_socket_shutdown, sys_socketpair,
 };
 use crate::object::capability::file::{sys_file_seek, sys_file_truncate};
 use crate::object::capability::memory_mapping::{sys_memory_map, sys_memory_unmap};
@@ -237,6 +237,10 @@ syscall_table! {
     SocketAccept = 904 => sys_socket_accept,     // Accept connection
     Socketpair = 905 => sys_socketpair,          // Create socket pair
     SocketShutdown = 906 => sys_socket_shutdown, // Shutdown socket
+
+    // === Datagram Operations (UDP/Local datagram) ===
+    SocketRecvFrom = 907 => sys_socket_recvfrom, // Receive datagram with sender address
+    SocketSendTo = 908 => sys_socket_sendto,     // Send datagram to specified address
 
     // === Network Configuration ===
     NetworkSetIpv4 = 910 => sys_network_set_ipv4,       // Set interface IPv4 address

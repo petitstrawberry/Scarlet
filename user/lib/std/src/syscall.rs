@@ -94,6 +94,10 @@ pub enum Syscall {
     Socketpair = 905,     // Create socket pair
     SocketShutdown = 906, // Shutdown socket
 
+    // === Datagram Operations (UDP/Local datagram) ===
+    SocketRecvFrom = 907, // Receive datagram with sender address
+    SocketSendTo = 908,   // Send datagram to specified address
+
     // === Network Configuration ===
     NetworkSetIpv4 = 910,        // Set interface IPv4 address
     NetworkSetGateway = 911,     // Set default gateway

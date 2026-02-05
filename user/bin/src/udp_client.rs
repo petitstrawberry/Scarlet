@@ -48,7 +48,7 @@ pub extern "C" fn main(_argc: isize, _argv: *const *const u8) -> isize {
         "Hello from UDP client!"
     };
 
-    println!("[udp-client] Connecting to {}.{}", host_str, port);
+    println!("[udp-client] Sending to {}:{}", host_str, port);
 
     let mut socket = match Socket::new_with_domain(
         SocketDomain::Inet4,
@@ -62,14 +62,15 @@ pub extern "C" fn main(_argc: isize, _argv: *const *const u8) -> isize {
         }
     };
 
-    // Connect to set default destination
+    // NOTE: For UDP client, we use connect() + write() pattern
+    // This allows us to send to a fixed destination without bind
     let server_addr = Inet4SocketAddress::new(host, port);
     if let Err(_e) = socket.connect_inet(server_addr) {
         println!("[udp-client] Connect failed");
         return 1;
     }
 
-    println!("[udp-client] Connected to {}.{}", host_str, port);
+    println!("[udp-client] Connected to {}:{}", host_str, port);
 
     // Send message
     let message_bytes = message.as_bytes();
