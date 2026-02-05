@@ -9,7 +9,7 @@ use spin::RwLock;
 use crate::early_println;
 use crate::network::ethernet::ETHERNET_HEADER_SIZE;
 use crate::network::protocol_stack::{
-    get_network_manager, LayerContext, NetworkLayer, NetworkLayerStats,
+    LayerContext, NetworkLayer, NetworkLayerStats, get_network_manager,
 };
 use crate::network::socket::SocketError;
 

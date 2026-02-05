@@ -166,7 +166,7 @@ impl VirtioNetDevice {
     pub fn new(base_addr: usize) -> Self {
         let mut device = Self {
             base_addr,
-            virtqueues: Mutex::new([VirtQueue::new(8), VirtQueue::new(8)]), // RX and TX queues
+            virtqueues: Mutex::new([VirtQueue::new(32), VirtQueue::new(32)]), // RX and TX queues
             config: RwLock::new(None),
             features: RwLock::new(0),
             stats: Mutex::new(NetworkStats::default()),
@@ -413,16 +413,15 @@ impl VirtioNetDevice {
         let mut virtqueues = self.virtqueues.lock();
         let rx_queue = &mut virtqueues[0]; // RX queue is index 0
 
+        let mut buffers_recycled = 0usize;
+
         // Process all completed RX descriptors
         while let Some((desc_idx, used_len)) = rx_queue.pop_used() {
-            // Get the buffer from the descriptor
             let buffer_addr = rx_queue.desc[desc_idx].addr as *mut u8;
             let buffer_len = rx_queue.desc[desc_idx].len as usize;
             let used_len = core::cmp::min(used_len as usize, buffer_len);
 
-            // Read the received data
             unsafe {
-                // Skip the VirtIO network header (use appropriate size based on device features)
                 let hdr_size = self.get_header_size();
                 if used_len > 0 {
                     let frame_offset = if used_len >= hdr_size { hdr_size } else { 0 };
@@ -435,27 +434,27 @@ impl VirtioNetDevice {
                         packet_len
                     );
 
-                    // Create packet from received data
                     let packet_data = core::slice::from_raw_parts(packet_data_ptr, packet_len);
                     let packet = DevicePacket::with_data(packet_data.to_vec());
                     packets.push(packet);
                 }
             }
 
-            // Recycle the buffer by putting it back in the RX queue
             rx_queue.desc[desc_idx].flags = DescriptorFlag::Write as u16;
             if let Err(_) = rx_queue.push(desc_idx) {
-                // If we can't recycle, free the descriptor
                 rx_queue.free_desc(desc_idx);
-                // Note: This may cause buffer leaks but prevents descriptor leaks
+            } else {
+                buffers_recycled += 1;
             }
         }
 
-        // Notify device about recycled buffers
-        if !packets.is_empty() {
+        // Always notify device if we recycled any buffers, so it knows RX buffers are available
+        if buffers_recycled > 0 {
             self.notify(0); // Notify RX queue
+        }
 
-            // Update statistics
+        // Update statistics if we received packets
+        if !packets.is_empty() {
             let mut stats = self.stats.lock();
             stats.rx_packets += packets.len() as u64;
             stats.rx_bytes += packets.iter().map(|p| p.len as u64).sum::<u64>();

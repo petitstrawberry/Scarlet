@@ -1784,7 +1784,7 @@ impl NetworkLayer for TcpLayer {
         Ok(())
     }
 
-    fn receive(&self, packet: &[u8]) -> Result<(), SocketError> {
+    fn receive(&self, packet: &[u8], _context: Option<&LayerContext>) -> Result<(), SocketError> {
         self.receive_packet(
             Ipv4Address::new(0, 0, 0, 0),
             Ipv4Address::new(0, 0, 0, 0),
