@@ -104,60 +104,27 @@ impl TcpHeader {
 
     /// Calculate TCP checksum
     pub fn calculate_checksum(&self, src_ip: [u8; 4], dst_ip: [u8; 4], data: &[u8]) -> u16 {
-        let mut sum: u32 = 0;
-
-        // Pseudo-header: src IP (4) + dst IP (4) + zero (1) + protocol (1) + TCP length (2)
-        sum += u16::from_be_bytes([src_ip[0], src_ip[1]]) as u32;
-        sum = (sum & 0xFFFF) + (sum >> 16);
-        sum += u16::from_be_bytes([src_ip[2], src_ip[3]]) as u32;
-        sum = (sum & 0xFFFF) + (sum >> 16);
-        sum += u16::from_be_bytes([dst_ip[0], dst_ip[1]]) as u32;
-        sum = (sum & 0xFFFF) + (sum >> 16);
-        sum += u16::from_be_bytes([dst_ip[2], dst_ip[3]]) as u32;
-        sum = (sum & 0xFFFF) + (sum >> 16);
-        sum += 6u32; // TCP protocol number
-        sum = (sum & 0xFFFF) + (sum >> 16);
         let tcp_len = (self.data_offset() + data.len()) as u16;
-        sum += tcp_len as u32;
-        sum = (sum & 0xFFFF) + (sum >> 16);
+        let mut pseudo = Vec::with_capacity(12 + 20 + data.len());
+        pseudo.extend_from_slice(&src_ip);
+        pseudo.extend_from_slice(&dst_ip);
+        pseudo.push(0);
+        pseudo.push(6); // TCP protocol number
+        pseudo.extend_from_slice(&tcp_len.to_be_bytes());
 
-        // TCP header (checksum field treated as 0)
-        // src_port (2 bytes)
-        sum += self.src_port as u32;
-        sum = (sum & 0xFFFF) + (sum >> 16);
-        // dst_port (2 bytes)
-        sum += self.dst_port as u32;
-        sum = (sum & 0xFFFF) + (sum >> 16);
-        // seq_number (4 bytes)
-        sum += ((self.seq_number >> 16) & 0xFFFF) as u32;
-        sum = (sum & 0xFFFF) + (sum >> 16);
-        sum += (self.seq_number & 0xFFFF) as u32;
-        sum = (sum & 0xFFFF) + (sum >> 16);
-        // ack_number (4 bytes)
-        sum += ((self.ack_number >> 16) & 0xFFFF) as u32;
-        sum = (sum & 0xFFFF) + (sum >> 16);
-        sum += (self.ack_number & 0xFFFF) as u32;
-        sum = (sum & 0xFFFF) + (sum >> 16);
-        // data_offset_flags (2 bytes)
-        sum += self.data_offset_flags as u32;
-        sum = (sum & 0xFFFF) + (sum >> 16);
-        // window_size (2 bytes)
-        sum += self.window_size as u32;
-        sum = (sum & 0xFFFF) + (sum >> 16);
-        // checksum field - treated as 0, skip
-        // urgent_pointer (2 bytes)
-        sum += self.urgent_pointer as u32;
-        sum = (sum & 0xFFFF) + (sum >> 16);
+        let mut header = *self;
+        header.checksum = 0;
+        pseudo.extend_from_slice(&header.to_bytes());
+        pseudo.extend_from_slice(data);
 
-        // Data
-        for chunk in data.chunks(2) {
+        let mut sum: u32 = 0;
+        for chunk in pseudo.chunks(2) {
             if chunk.len() == 2 {
                 sum += u16::from_be_bytes([chunk[0], chunk[1]]) as u32;
-                sum = (sum & 0xFFFF) + (sum >> 16);
-            } else if chunk.len() == 1 {
+            } else {
                 sum += (chunk[0] as u32) << 8;
-                sum = (sum & 0xFFFF) + (sum >> 16);
             }
+            sum = (sum & 0xFFFF) + (sum >> 16);
         }
 
         while sum >> 16 != 0 {
@@ -441,7 +408,12 @@ impl TcpSocket {
     }
 
     fn ensure_local_ip(&self) {
-        if self.local_ip.lock().is_some() {
+        let mut local_ip = self.local_ip.lock();
+        let needs_update = match *local_ip {
+            Some(ip) => ip.0 == [0, 0, 0, 0],
+            None => true,
+        };
+        if !needs_update {
             return;
         }
 
@@ -450,7 +422,7 @@ impl TcpSocket {
                 .as_any()
                 .downcast_ref::<crate::network::ipv4::Ipv4Layer>()
             {
-                *self.local_ip.lock() = Some(ip.get_local_ip());
+                *local_ip = Some(ip.get_local_ip());
             }
         }
     }
@@ -570,7 +542,12 @@ impl TcpSocket {
         self.recv_ack.store(next_recv, Ordering::SeqCst);
 
         // Send SYN-ACK
-        self.send_segment(src_ip, header, &[], false, false);
+        let local_port = self.local_port.load(Ordering::SeqCst);
+        let mut syn_ack = TcpHeader::new(local_port, header.src_port);
+        syn_ack.seq_number = initial_seq;
+        syn_ack.ack_number = next_recv;
+        syn_ack.set_flags(tcp_flags::SYN | tcp_flags::ACK);
+        self.send_segment(src_ip, syn_ack, &[], false, false);
         self.send_seq.fetch_add(1, Ordering::SeqCst);
         self.set_state(TcpState::SynReceived);
     }
