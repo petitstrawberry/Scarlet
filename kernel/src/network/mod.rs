@@ -350,6 +350,18 @@ impl NetworkManager {
     pub fn set_default_gateway(&self, gateway: Ipv4Address) {
         self.network_config.write().default_gateway = Some(gateway);
         self.network_config.write().gateway_mac = None;
+
+        // Add default route to Ipv4Layer's routing table
+        if let Some(default_iface) = self.get_default_interface() {
+            if let Some(ip_layer) = self.get_layer("ip") {
+                if let Some(ipv4) = ip_layer
+                    .as_any()
+                    .downcast_ref::<crate::network::ipv4::Ipv4Layer>()
+                {
+                    ipv4.set_default_gateway(gateway, default_iface.name());
+                }
+            }
+        }
     }
 
     pub fn get_default_gateway(&self) -> Option<Ipv4Address> {

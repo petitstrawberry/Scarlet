@@ -473,15 +473,17 @@ impl ArpLayer {
         let arp_packet = ArpPacket::from_bytes(arp_bytes).ok_or(SocketError::InvalidPacket)?;
 
         // Get interface (from parameter or default)
-        let iface = interface
+        let iface = match interface
             .map(alloc::string::String::from)
             .or_else(|| self.get_default_interface())
             .or_else(|| {
                 get_network_manager()
                     .get_default_interface()
-                    .map(|i| i.name().to_string())
-            })
-            .unwrap_or_else(|| alloc::string::String::from("eth0"));
+                    .map(|i| alloc::string::String::from(i.name()))
+            }) {
+            Some(name) => name,
+            None => return Err(SocketError::NoRoute),
+        };
 
         // Get local MAC/IP for this interface
         let local_mac = self.get_local_mac_for_interface(&iface);
@@ -583,6 +585,19 @@ impl ArpLayer {
 
                     // Send queued packets
                     let mut queue = pending_entry.packet_queue.lock();
+                    let queued_count = queue.len();
+                    if queued_count > 0 {
+                        early_println!(
+                            "[ARP] Flushing {} queued packet(s) to {:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X}",
+                            queued_count,
+                            arp_packet.sender_mac[0],
+                            arp_packet.sender_mac[1],
+                            arp_packet.sender_mac[2],
+                            arp_packet.sender_mac[3],
+                            arp_packet.sender_mac[4],
+                            arp_packet.sender_mac[5]
+                        );
+                    }
                     if let Some(eth_layer) = get_network_manager().get_layer("ethernet") {
                         if let Some(src_mac) = local_mac {
                             for packet_bytes in queue.drain(..) {
@@ -590,7 +605,17 @@ impl ArpLayer {
                                 eth_context.set("eth_dst_mac", &arp_packet.sender_mac);
                                 eth_context.set("eth_src_mac", &src_mac);
                                 eth_context.set("interface", iface.as_bytes());
+                                // Set EtherType to IPv4 (queued packets are IP packets)
+                                eth_context.set(
+                                    "eth_type",
+                                    &crate::network::ethernet::ether_type::IPV4.to_be_bytes(),
+                                );
 
+                                early_println!(
+                                    "[ARP] Sending queued packet ({} bytes) via {}",
+                                    packet_bytes.len(),
+                                    iface
+                                );
                                 let _ = eth_layer.send(&packet_bytes, &eth_context, &[]);
                             }
                         }
@@ -640,6 +665,26 @@ impl ArpLayer {
 
         if let Some(entry) = pending.get_mut(&pending_key) {
             entry.packet_queue.lock().push(packet);
+        } else {
+            // Pending entry doesn't exist yet - create one with this packet
+            // This can happen due to timing issues
+            let ip_bytes = ip_address.0;
+            early_println!(
+                "[ARP] Creating pending entry for {}.{}.{}.{} to queue packet",
+                ip_bytes[0],
+                ip_bytes[1],
+                ip_bytes[2],
+                ip_bytes[3]
+            );
+            let mut queue = Vec::new();
+            queue.push(packet);
+            pending.insert(
+                pending_key,
+                ArpPendingEntry {
+                    entry: ArpCacheEntry::pending(ip_address),
+                    packet_queue: Mutex::new(queue),
+                },
+            );
         }
 
         drop(pending);

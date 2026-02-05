@@ -373,7 +373,47 @@ impl NetworkLayer for EthernetLayer {
         let src_mac = self.get_mac(&interface_name).ok_or(SocketError::NoRoute)?;
 
         // Determine destination MAC
-        let dest_mac = self.resolve_dest_mac(context, &interface_name)?;
+        let dest_mac = match self.resolve_dest_mac(context, &interface_name) {
+            Ok(mac) => mac,
+            Err(SocketError::WouldBlock) => {
+                // ARP resolution pending - queue the packet for later transmission
+                // Get the IP address we're resolving (next_hop or dst_ip)
+                let resolve_ip = context.get("next_hop").or_else(|| context.get("dst_ip"));
+                if let Some(ip_bytes) = resolve_ip {
+                    if ip_bytes.len() >= 4 {
+                        let ip = crate::network::ipv4::Ipv4Address::from_bytes([
+                            ip_bytes[0],
+                            ip_bytes[1],
+                            ip_bytes[2],
+                            ip_bytes[3],
+                        ]);
+
+                        // Queue packet in ARP layer for later transmission
+                        if let Some(arp_layer) =
+                            crate::network::protocol_stack::get_network_manager().get_layer("arp")
+                        {
+                            if let Some(arp) = arp_layer
+                                .as_any()
+                                .downcast_ref::<crate::network::arp::ArpLayer>()
+                            {
+                                early_println!(
+                                    "[Ethernet] Queuing packet ({} bytes) for ARP resolution of {}.{}.{}.{}",
+                                    packet.len(),
+                                    ip_bytes[0],
+                                    ip_bytes[1],
+                                    ip_bytes[2],
+                                    ip_bytes[3]
+                                );
+                                arp.queue_packet_on_interface(&interface_name, ip, packet.to_vec());
+                            }
+                        }
+                    }
+                }
+                // Return WouldBlock so caller knows packet is queued, not sent
+                return Err(SocketError::WouldBlock);
+            }
+            Err(e) => return Err(e),
+        };
 
         // Get EtherType
         let ether_type = if let Some(eth_type) = context.get("eth_type") {

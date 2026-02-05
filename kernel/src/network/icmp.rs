@@ -568,14 +568,20 @@ impl SocketObject for IcmpSocket {
                 }
             }
             if let Some(icmp_layer) = self.icmp_layer.upgrade() {
-                icmp_layer.send_ping_request(
+                match icmp_layer.send_ping_request(
                     dest_ip,
                     self.identifier,
                     sequence,
                     data,
                     &[ip_layer],
-                )?;
-                return Ok(data.len());
+                ) {
+                    Ok(()) => return Ok(data.len()),
+                    Err(SocketError::WouldBlock) => {
+                        // Packet queued for ARP resolution - treat as success
+                        return Ok(data.len());
+                    }
+                    Err(e) => return Err(e),
+                }
             } else {
                 early_println!("[ICMP] send failed: ICMP layer unavailable");
             }

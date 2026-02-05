@@ -440,8 +440,7 @@ impl NetworkLayer for Ipv4Layer {
         // Get source IP from context, or select based on routing
         let (interface_name, src_ip_bytes, gateway) = if let Some(ip_src) = context.get("ip_src") {
             if ip_src.len() >= 4 {
-                // Source IP explicitly set - find which interface it belongs to
-                let src_ip = Ipv4Address::from_bytes([ip_src[0], ip_src[1], ip_src[2], ip_src[3]]);
+                // Source IP explicitly set - still need to check routing for gateway
                 let iface = context
                     .get("interface")
                     .and_then(|b| core::str::from_utf8(b).ok())
@@ -449,10 +448,14 @@ impl NetworkLayer for Ipv4Layer {
                     .or_else(|| {
                         get_network_manager()
                             .get_default_interface()
-                            .map(|i| i.name().to_string())
+                            .map(|i| String::from(i.name()))
                     })
-                    .unwrap_or_else(|| "eth0".to_string());
-                (iface, [ip_src[0], ip_src[1], ip_src[2], ip_src[3]], None)
+                    .ok_or(SocketError::NoRoute)?;
+
+                // Look up gateway from routing table for this destination
+                let gateway = self.select_source(dest_ip).and_then(|(_, _, gw)| gw);
+
+                (iface, [ip_src[0], ip_src[1], ip_src[2], ip_src[3]], gateway)
             } else {
                 return Err(SocketError::InvalidAddress);
             }
