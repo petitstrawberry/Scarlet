@@ -10,11 +10,12 @@ use alloc::vec::Vec;
 use spin::{Mutex, RwLock};
 
 use crate::early_println;
+use crate::network::Ipv4Address;
 use crate::network::protocol_stack::get_network_manager;
 use crate::network::protocol_stack::{LayerContext, NetworkLayer, NetworkLayerStats, SocketConfig};
 use crate::network::socket::{
-    SocketAddress, SocketControl, SocketError, SocketObject, SocketProtocol, SocketState,
-    SocketType,
+    Inet4SocketAddress, SocketAddress, SocketControl, SocketError, SocketObject, SocketProtocol,
+    SocketState, SocketType,
 };
 use crate::object::capability::selectable::Selectable;
 
@@ -538,7 +539,25 @@ impl UdpLayer {
         data: Vec<u8>,
     ) -> Result<(), SocketError> {
         let (src_ip_bytes, src_port) = match socket.local_addr.read().clone() {
-            Some(SocketAddress::Inet(inet)) => (inet.addr, inet.port),
+            Some(SocketAddress::Inet(inet)) => {
+                if inet.addr == [0, 0, 0, 0] {
+                    let ip = if let Some(ip_layer) = get_network_manager().get_layer("ip") {
+                        if let Some(ipv4_layer) = ip_layer
+                            .as_any()
+                            .downcast_ref::<crate::network::ipv4::Ipv4Layer>()
+                        {
+                            ipv4_layer.get_local_ip().as_bytes()
+                        } else {
+                            [0u8; 4]
+                        }
+                    } else {
+                        [0u8; 4]
+                    };
+                    (ip, inet.port)
+                } else {
+                    (inet.addr, inet.port)
+                }
+            }
             _ => {
                 // Get local IP from IPv4 layer if not bound
                 let ip = if let Some(ip_layer) = get_network_manager().get_layer("ip") {
@@ -597,13 +616,25 @@ impl UdpLayer {
     }
 
     /// Receive a UDP datagram
-    pub fn receive_datagram(&self, src_port: u16, dst_port: u16, data: Vec<u8>) {
+    pub fn receive_datagram(
+        &self,
+        src_ip: Ipv4Address,
+        src_port: u16,
+        dst_port: u16,
+        data: Vec<u8>,
+    ) {
         let mut stats = self.stats.write();
         stats.packets_received += 1;
         stats.bytes_received += (8 + data.len()) as u64;
 
         if let Some(socket) = self.find_socket(dst_port) {
             socket.deliver_datagram(data);
+            let mut remote_lock = socket.remote_addr.write();
+            if remote_lock.is_none() {
+                *remote_lock = Some(SocketAddress::Inet(Inet4SocketAddress::new(
+                    src_ip.0, src_port,
+                )));
+            }
         }
     }
 }
@@ -623,8 +654,22 @@ impl NetworkLayer for UdpLayer {
         Ok(())
     }
 
-    fn receive(&self, packet: &[u8], _context: Option<&LayerContext>) -> Result<(), SocketError> {
-        self.receive_packet(packet)
+    fn receive(&self, packet: &[u8], context: Option<&LayerContext>) -> Result<(), SocketError> {
+        let mut src_ip = Ipv4Address::new(0, 0, 0, 0);
+        let mut dst_ip = Ipv4Address::new(0, 0, 0, 0);
+        if let Some(ctx) = context {
+            if let Some(raw) = ctx.get("ip_src") {
+                if raw.len() >= 4 {
+                    src_ip = Ipv4Address::new(raw[0], raw[1], raw[2], raw[3]);
+                }
+            }
+            if let Some(raw) = ctx.get("ip_dst") {
+                if raw.len() >= 4 {
+                    dst_ip = Ipv4Address::new(raw[0], raw[1], raw[2], raw[3]);
+                }
+            }
+        }
+        self.receive_packet(src_ip, dst_ip, packet)
     }
 
     fn name(&self) -> &'static str {
@@ -642,7 +687,12 @@ impl NetworkLayer for UdpLayer {
 
 impl UdpLayer {
     /// Receive a UDP datagram
-    pub fn receive_packet(&self, packet: &[u8]) -> Result<(), SocketError> {
+    pub fn receive_packet(
+        &self,
+        src_ip: Ipv4Address,
+        _dst_ip: Ipv4Address,
+        packet: &[u8],
+    ) -> Result<(), SocketError> {
         if packet.len() < 8 {
             return Err(SocketError::InvalidPacket);
         }
@@ -658,7 +708,7 @@ impl UdpLayer {
         let data = &packet[8..data_offset];
 
         // Receive the datagram
-        self.receive_datagram(header.src_port, header.dst_port, data.to_vec());
+        self.receive_datagram(src_ip, header.src_port, header.dst_port, data.to_vec());
 
         Ok(())
     }

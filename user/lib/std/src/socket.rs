@@ -24,14 +24,14 @@
 
 use crate::handle::Handle;
 use crate::handle::RawHandle;
-use crate::syscall::{syscall1, syscall3, syscall4, Syscall};
+use crate::syscall::{Syscall, syscall1, syscall3, syscall4};
 
+pub use crate::handle::capability::ShutdownHow;
 pub use crate::handle::capability::socket::Inet4SocketAddress;
 pub use crate::handle::capability::socket::SocketAddress;
 pub use crate::handle::capability::socket::SocketDomain;
 pub use crate::handle::capability::socket::SocketProtocol;
 pub use crate::handle::capability::socket::SocketType;
-pub use crate::handle::capability::ShutdownHow;
 
 /// Socket handle wrapper
 ///
@@ -511,7 +511,7 @@ pub trait DatagramOps {
 
 impl DatagramOps for Socket {
     fn recvfrom(&self, buf: &mut [u8]) -> Result<(usize, SocketAddress)> {
-        use crate::syscall::{syscall4, Syscall};
+        use crate::syscall::{Syscall, syscall4};
 
         // Allocate space for address (8 bytes: 2 for family, 4 for IP, 2 for port)
         let mut addr_buf = [0u8; 8];
@@ -560,7 +560,7 @@ impl DatagramOps for Socket {
     }
 
     fn sendto(&self, buf: &[u8], addr: &SocketAddress) -> Result<usize> {
-        use crate::syscall::{syscall4, Syscall};
+        use crate::syscall::{Syscall, syscall4};
 
         // Serialize address
         let mut addr_buf = [0u8; 8];

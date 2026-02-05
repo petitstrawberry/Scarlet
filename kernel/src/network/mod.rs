@@ -393,7 +393,7 @@ impl NetworkManager {
                         crate::network::ipv4::protocol::UDP => handler
                             .as_any()
                             .downcast_ref::<crate::network::udp::UdpLayer>()
-                            .map(|udp| udp.receive_packet(payload)),
+                            .map(|udp| udp.receive_packet(src_ip, dst_ip, payload)),
                         _ => Some(handler.receive(payload, None)),
                     };
                 }

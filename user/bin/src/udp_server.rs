@@ -85,6 +85,9 @@ pub extern "C" fn main(_argc: isize, _argv: *const *const u8) -> isize {
                         break;
                     }
                 }
+
+                // Single-shot: exit after one response
+                break;
             }
             Err(_) => {
                 println!("[udp-server] Receive error");
