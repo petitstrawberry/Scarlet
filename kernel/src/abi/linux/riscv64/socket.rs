@@ -1450,3 +1450,399 @@ pub fn sys_recvmsg(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usiz
 
     total_read
 }
+
+/// Linux sys_sendto implementation
+///
+/// Send a message on a socket. Unlike sendmsg, this directly takes a buffer and address.
+///
+/// Arguments:
+/// - abi: LinuxRiscv64Abi context
+/// - trapframe: Trapframe containing syscall arguments
+///   - arg0: sockfd (socket file descriptor)
+///   - arg1: buf (pointer to data buffer)
+///   - arg2: len (length of data)
+///   - arg3: flags (send flags)
+///   - arg4: dest_addr (pointer to destination address, may be NULL for connected sockets)
+///   - arg5: addrlen (size of destination address)
+///
+/// Returns:
+/// - number of bytes sent on success
+/// - negative errno on error
+pub fn sys_sendto(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
+    let task = match mytask() {
+        Some(t) => t,
+        None => return errno::to_result(errno::ESRCH),
+    };
+
+    let sockfd = trapframe.get_arg(0);
+    let buf_ptr = trapframe.get_arg(1);
+    let len = trapframe.get_arg(2);
+    let flags = trapframe.get_arg(3) as u32;
+    let dest_addr_ptr = trapframe.get_arg(4);
+    let addrlen = trapframe.get_arg(5) as u32;
+
+    trapframe.increment_pc_next(task);
+
+    // Get socket handle
+    let handle = match abi.get_handle(sockfd) {
+        Some(h) => h,
+        None => return errno::to_result(errno::EBADF),
+    };
+
+    // Get socket object
+    let socket = match task.handle_table.get(handle) {
+        Some(KernelObject::Socket(s)) => s.clone(),
+        _ => return errno::to_result(errno::ENOTSOCK),
+    };
+
+    // Translate buffer pointer
+    let buf_paddr = match task.vm_manager.translate_vaddr(buf_ptr) {
+        Some(addr) => addr,
+        None => return errno::to_result(errno::EFAULT),
+    };
+
+    let data = unsafe { core::slice::from_raw_parts(buf_paddr as *const u8, len) };
+
+    // Parse destination address if provided
+    let dest_addr = if dest_addr_ptr != 0 && addrlen > 0 {
+        let addr_paddr = match task.vm_manager.translate_vaddr(dest_addr_ptr) {
+            Some(addr) => addr,
+            None => return errno::to_result(errno::EFAULT),
+        };
+
+        // Read address family
+        let sa_family = unsafe { *(addr_paddr as *const u16) };
+
+        match sa_family {
+            AF_INET_U16 => {
+                if addrlen < size_of::<SockaddrIn>() as u32 {
+                    return errno::to_result(errno::EINVAL);
+                }
+                let sockaddr = unsafe { *(addr_paddr as *const SockaddrIn) };
+                let port = u16::from_be(sockaddr.sin_port);
+                let addr_bytes = sockaddr.sin_addr.to_be_bytes();
+                crate::network::SocketAddress::Inet(crate::network::Inet4SocketAddress::new(
+                    addr_bytes, port,
+                ))
+            }
+            AF_UNIX_U16 => {
+                // Unix domain socket sendto - usually not used for stream sockets
+                crate::network::SocketAddress::Unspecified
+            }
+            _ => return errno::to_result(errno::EAFNOSUPPORT),
+        }
+    } else {
+        // No address - use connected peer
+        crate::network::SocketAddress::Unspecified
+    };
+
+    // Send data
+    match socket.sendto(data, &dest_addr, flags) {
+        Ok(n) => n,
+        Err(crate::network::socket::SocketError::WouldBlock) => errno::to_result(errno::EAGAIN),
+        Err(crate::network::socket::SocketError::NotConnected) => errno::to_result(errno::ENOTCONN),
+        Err(crate::network::socket::SocketError::NoRoute) => errno::to_result(errno::ENETUNREACH),
+        Err(crate::network::socket::SocketError::InvalidAddress) => errno::to_result(errno::EINVAL),
+        Err(_) => errno::to_result(errno::EIO),
+    }
+}
+
+/// Linux sys_recvfrom implementation
+///
+/// Receive a message from a socket. Returns the source address if provided.
+///
+/// Arguments:
+/// - abi: LinuxRiscv64Abi context
+/// - trapframe: Trapframe containing syscall arguments
+///   - arg0: sockfd (socket file descriptor)
+///   - arg1: buf (pointer to receive buffer)
+///   - arg2: len (length of buffer)
+///   - arg3: flags (receive flags)
+///   - arg4: src_addr (pointer to store source address, may be NULL)
+///   - arg5: addrlen (pointer to address length, input/output)
+///
+/// Returns:
+/// - number of bytes received on success
+/// - negative errno on error
+pub fn sys_recvfrom(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
+    let task = match mytask() {
+        Some(t) => t,
+        None => return errno::to_result(errno::ESRCH),
+    };
+
+    let sockfd = trapframe.get_arg(0);
+    let buf_ptr = trapframe.get_arg(1);
+    let len = trapframe.get_arg(2);
+    let flags = trapframe.get_arg(3) as u32;
+    let src_addr_ptr = trapframe.get_arg(4);
+    let addrlen_ptr = trapframe.get_arg(5);
+
+    trapframe.increment_pc_next(task);
+
+    // Get socket handle
+    let handle = match abi.get_handle(sockfd) {
+        Some(h) => h,
+        None => return errno::to_result(errno::EBADF),
+    };
+
+    // Get socket object
+    let socket = match task.handle_table.get(handle) {
+        Some(KernelObject::Socket(s)) => s.clone(),
+        _ => return errno::to_result(errno::ENOTSOCK),
+    };
+
+    // Translate buffer pointer
+    let buf_paddr = match task.vm_manager.translate_vaddr(buf_ptr) {
+        Some(addr) => addr,
+        None => return errno::to_result(errno::EFAULT),
+    };
+
+    let buffer = unsafe { core::slice::from_raw_parts_mut(buf_paddr as *mut u8, len) };
+
+    // Check for non-blocking mode
+    let nonblocking = (flags & (MSG_DONTWAIT as u32)) != 0
+        || abi
+            .get_file_status_flags(sockfd)
+            .map(|f| ((f as i32) & O_NONBLOCK) != 0)
+            .unwrap_or(false);
+
+    // Set non-blocking if requested
+    if let Some(selectable) = socket.as_selectable() {
+        if nonblocking {
+            selectable.set_nonblocking(true);
+        }
+    }
+
+    // Receive data
+    let result = socket.recvfrom(buffer, flags);
+
+    // Restore blocking mode if we changed it
+    if nonblocking {
+        if let Some(selectable) = socket.as_selectable() {
+            selectable.set_nonblocking(false);
+        }
+    }
+
+    match result {
+        Ok((n, src_addr)) => {
+            // Store source address if requested
+            if src_addr_ptr != 0 && addrlen_ptr != 0 {
+                let addrlen_paddr = match task.vm_manager.translate_vaddr(addrlen_ptr) {
+                    Some(addr) => addr as *mut u32,
+                    None => return errno::to_result(errno::EFAULT),
+                };
+
+                let provided_len = unsafe { *addrlen_paddr };
+
+                match src_addr {
+                    crate::network::SocketAddress::Inet(inet) => {
+                        if provided_len >= size_of::<SockaddrIn>() as u32 {
+                            let addr_paddr = match task.vm_manager.translate_vaddr(src_addr_ptr) {
+                                Some(addr) => addr as *mut SockaddrIn,
+                                None => return errno::to_result(errno::EFAULT),
+                            };
+
+                            let sockaddr = SockaddrIn {
+                                sin_family: AF_INET as u16,
+                                sin_port: inet.port.to_be(),
+                                sin_addr: u32::from_be_bytes(inet.addr),
+                                sin_zero: [0; 8],
+                            };
+                            unsafe {
+                                *addr_paddr = sockaddr;
+                                *addrlen_paddr = size_of::<SockaddrIn>() as u32;
+                            }
+                        }
+                    }
+                    crate::network::SocketAddress::Local(_) => {
+                        // Unix domain socket - store sockaddr_un
+                        unsafe {
+                            *addrlen_paddr = 0;
+                        }
+                    }
+                    crate::network::SocketAddress::Unspecified => unsafe {
+                        *addrlen_paddr = 0;
+                    },
+                    _ => unsafe {
+                        *addrlen_paddr = 0;
+                    },
+                }
+            }
+            n
+        }
+        Err(crate::network::socket::SocketError::WouldBlock) => errno::to_result(errno::EAGAIN),
+        Err(crate::network::socket::SocketError::NotConnected) => errno::to_result(errno::ENOTCONN),
+        Err(_) => errno::to_result(errno::EIO),
+    }
+}
+
+/// Linux sys_socketpair implementation
+///
+/// Create a pair of connected sockets. This is primarily used for AF_UNIX sockets
+/// to create a bidirectional communication channel between processes.
+///
+/// Arguments:
+/// - abi: LinuxRiscv64Abi context
+/// - trapframe: Trapframe containing syscall arguments
+///   - arg0: domain (address family, must be AF_UNIX)
+///   - arg1: type (socket type, e.g., SOCK_STREAM)
+///   - arg2: protocol (usually 0)
+///   - arg3: sv (pointer to int[2] to receive the file descriptors)
+///
+/// Returns:
+/// - 0 on success
+/// - negative errno on error
+pub fn sys_socketpair(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
+    let task = match mytask() {
+        Some(t) => t,
+        None => return errno::to_result(errno::ESRCH),
+    };
+
+    let domain = trapframe.get_arg(0) as i32;
+    let socket_type = trapframe.get_arg(1) as i32;
+    let _protocol = trapframe.get_arg(2) as i32;
+    let sv_ptr = trapframe.get_arg(3);
+
+    trapframe.increment_pc_next(task);
+
+    // Validate domain - socketpair only supports AF_UNIX
+    if domain != AF_UNIX {
+        return errno::to_result(errno::EAFNOSUPPORT);
+    }
+
+    // Extract socket type flags
+    let base_type = socket_type & SOCK_TYPE_MASK;
+    let flags = socket_type & !SOCK_TYPE_MASK;
+    let nonblocking = (flags & SOCK_NONBLOCK) != 0;
+    let cloexec = (flags & SOCK_CLOEXEC) != 0;
+
+    // Validate socket type - we support SOCK_STREAM and SOCK_DGRAM
+    if base_type != SOCK_STREAM && base_type != SOCK_DGRAM {
+        return errno::to_result(errno::ESOCKTNOSUPPORT);
+    }
+
+    // Translate sv pointer (needs to write 2 i32 values)
+    let sv_paddr = match task.vm_manager.translate_vaddr(sv_ptr) {
+        Some(addr) => addr as *mut i32,
+        None => return errno::to_result(errno::EFAULT),
+    };
+
+    // Create connected socket pair
+    let (socket1, socket2) = LocalSocket::create_connected_pair(
+        alloc::string::String::from("socketpair:0"),
+        alloc::string::String::from("socketpair:1"),
+    );
+
+    // Set non-blocking mode if requested
+    if nonblocking {
+        socket1.set_nonblocking(true);
+        socket2.set_nonblocking(true);
+    }
+
+    // Add first socket to handle table
+    let kernel_obj1 = KernelObject::Socket(socket1);
+    let handle1 = match task.handle_table.insert(kernel_obj1) {
+        Ok(id) => id,
+        Err(_) => return errno::to_result(errno::EMFILE),
+    };
+
+    // Add second socket to handle table
+    let kernel_obj2 = KernelObject::Socket(socket2);
+    let handle2 = match task.handle_table.insert(kernel_obj2) {
+        Ok(id) => id,
+        Err(_) => {
+            // Clean up handle1 if handle2 allocation fails
+            let _ = task.handle_table.remove(handle1);
+            return errno::to_result(errno::EMFILE);
+        }
+    };
+
+    // Allocate file descriptors
+    let fd1 = match abi.allocate_fd(handle1) {
+        Ok(fd) => fd,
+        Err(_) => {
+            let _ = task.handle_table.remove(handle1);
+            let _ = task.handle_table.remove(handle2);
+            return errno::to_result(errno::EMFILE);
+        }
+    };
+
+    let fd2 = match abi.allocate_fd(handle2) {
+        Ok(fd) => fd,
+        Err(_) => {
+            let _ = abi.remove_fd(fd1);
+            let _ = task.handle_table.remove(handle1);
+            let _ = task.handle_table.remove(handle2);
+            return errno::to_result(errno::EMFILE);
+        }
+    };
+
+    // Set flags
+    if nonblocking {
+        let _ = abi.set_file_status_flags(fd1, O_NONBLOCK as u32);
+        let _ = abi.set_file_status_flags(fd2, O_NONBLOCK as u32);
+    }
+    if cloexec {
+        let _ = abi.set_fd_flags(fd1, FD_CLOEXEC);
+        let _ = abi.set_fd_flags(fd2, FD_CLOEXEC);
+    }
+
+    // Write file descriptors to user space
+    unsafe {
+        *sv_paddr = fd1 as i32;
+        *sv_paddr.add(1) = fd2 as i32;
+    }
+
+    0
+}
+
+/// Linux sys_shutdown implementation
+///
+/// Shut down part of a full-duplex connection.
+///
+/// Arguments:
+/// - abi: LinuxRiscv64Abi context
+/// - trapframe: Trapframe containing syscall arguments
+///   - arg0: sockfd (socket file descriptor)
+///   - arg1: how (0=SHUT_RD, 1=SHUT_WR, 2=SHUT_RDWR)
+///
+/// Returns:
+/// - 0 on success
+/// - negative errno on error
+pub fn sys_shutdown(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
+    let task = match mytask() {
+        Some(t) => t,
+        None => return errno::to_result(errno::ESRCH),
+    };
+
+    let sockfd = trapframe.get_arg(0);
+    let how = trapframe.get_arg(1) as u32;
+
+    trapframe.increment_pc_next(task);
+
+    // Get socket handle
+    let handle = match abi.get_handle(sockfd) {
+        Some(h) => h,
+        None => return errno::to_result(errno::EBADF),
+    };
+
+    // Get socket object
+    let socket = match task.handle_table.get(handle) {
+        Some(KernelObject::Socket(s)) => s.clone(),
+        _ => return errno::to_result(errno::ENOTSOCK),
+    };
+
+    // Convert how to ShutdownHow
+    let shutdown_how = match how {
+        0 => crate::network::socket::ShutdownHow::Read,
+        1 => crate::network::socket::ShutdownHow::Write,
+        2 => crate::network::socket::ShutdownHow::Both,
+        _ => return errno::to_result(errno::EINVAL),
+    };
+
+    match socket.shutdown(shutdown_how) {
+        Ok(()) => 0,
+        Err(crate::network::socket::SocketError::NotConnected) => errno::to_result(errno::ENOTCONN),
+        Err(_) => errno::to_result(errno::EIO),
+    }
+}
