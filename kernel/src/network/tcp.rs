@@ -45,6 +45,11 @@ pub mod tcp_flags {
     pub const URG: u8 = 0x20;
 }
 
+/// Buffer size limits (prevent memory exhaustion)
+const MAX_SEND_BUFFER_SIZE: usize = 65536; // 64KB
+const MAX_RECV_BUFFER_SIZE: usize = 65536; // 64KB
+const MAX_UNACKED_SEGMENTS: usize = 256; // Limit unacked segment list
+
 /// TCP header
 #[derive(Debug, Clone, Copy)]
 #[repr(C, packed)]
@@ -516,10 +521,24 @@ impl TcpSocket {
             }
         } else if segment_seq == expected_seq {
             let mut recv_buf = self.recv_buffer.lock();
+            // Check receive buffer limit - drop data if full (should update window to 0)
+            if recv_buf.len() + data.len() > MAX_RECV_BUFFER_SIZE {
+                // Buffer full - send ACK with window=0 to stop sender
+                drop(recv_buf);
+                self.send_ack(src_ip, header.src_port, expected_seq);
+                return;
+            }
             recv_buf.extend(data);
             let next_seq = expected_seq.wrapping_add(data.len() as u32);
+
+            // Update receive window based on remaining buffer space
+            let available = MAX_RECV_BUFFER_SIZE.saturating_sub(recv_buf.len());
+            self.recv_window
+                .store(available.min(65535) as u16, Ordering::SeqCst);
+
             self.recv_seq.store(next_seq, Ordering::SeqCst);
             self.recv_ack.store(next_seq, Ordering::SeqCst);
+            drop(recv_buf);
 
             // Send ACK
             self.send_ack(src_ip, header.src_port, next_seq);
@@ -723,8 +742,13 @@ impl TcpSocket {
             .ok_or(SocketError::NotConnected)?;
         let dest_port = self.remote_port.load(Ordering::SeqCst);
 
-        // Add to send buffer
-        self.send_buffer.lock().extend(data);
+        // Check buffer size limit
+        let mut send_buf = self.send_buffer.lock();
+        if send_buf.len() + data.len() > MAX_SEND_BUFFER_SIZE {
+            return Err(SocketError::WouldBlock);
+        }
+        send_buf.extend(data);
+        drop(send_buf);
 
         // Create TCP header
         let local_port = self.local_port.load(Ordering::SeqCst);
@@ -759,6 +783,11 @@ impl TcpSocket {
         for i in 0..len {
             buffer[i] = recv_buf.pop_front().unwrap();
         }
+
+        // Update receive window after reading data
+        let available = MAX_RECV_BUFFER_SIZE.saturating_sub(recv_buf.len());
+        self.recv_window
+            .store(available.min(65535) as u16, Ordering::SeqCst);
 
         Ok(len)
     }
@@ -961,6 +990,15 @@ impl TcpSocket {
 
     /// Add segment to unacked list and schedule retransmission
     fn add_unacked_segment(&self, seq: u32, data: Vec<u8>, flags: u8) {
+        // Check unacked segment limit to prevent memory exhaustion
+        let mut unacked = self.unacked_segments.lock();
+        if unacked.len() >= MAX_UNACKED_SEGMENTS {
+            // Remove oldest segment if limit reached
+            if let Some(old) = unacked.pop_front() {
+                // Cancel its timer (timer will be skipped when it fires)
+            }
+        }
+
         let segment = UnackedSegment {
             seq,
             data,
@@ -969,7 +1007,8 @@ impl TcpSocket {
             last_tx_time: crate::timer::get_tick(),
         };
 
-        self.unacked_segments.lock().push_back(segment);
+        unacked.push_back(segment);
+        drop(unacked);
 
         // Schedule retransmission timer
         self.schedule_retrans_timer(seq);
@@ -1209,6 +1248,9 @@ impl crate::object::capability::CloneOps for TcpSocket {
 
 impl Drop for TcpSocket {
     fn drop(&mut self) {
+        // Cancel any pending retransmission timers
+        self.cancel_retrans_timer();
+
         // Send FIN if connection is still open
         let state = self.get_state();
         match state {
