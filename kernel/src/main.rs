@@ -580,6 +580,14 @@ pub extern "C" fn start_kernel(boot_info: &BootInfo) -> ! {
 
     fence(Ordering::SeqCst); // Ensure interrupt controllers are initialized before proceeding
 
+    /* Initialize NetworkManager before device discovery so protocol layers are ready */
+    #[cfg(feature = "network")]
+    {
+        early_println!("[NetworkManager] Initializing NetworkLayers...");
+        let _network_manager = crate::network::NetworkManager::init();
+        fence(Ordering::SeqCst);
+    }
+
     /* Discover remaining devices */
     early_println!("[Scarlet Kernel] Populating remaining devices...");
     device_manager.populate_devices_from_source(
@@ -664,17 +672,13 @@ pub extern "C" fn start_kernel(boot_info: &BootInfo) -> ! {
 
     fence(Ordering::SeqCst); // Ensure VFS and initramfs are initialized before proceeding
 
-    /* Initialize NetworkManager */
+    /* Apply network configuration from cmdline */
     #[cfg(feature = "network")]
     {
-        early_println!("[boot] Initializing NetworkManager...");
-        let _network_manager = crate::network::NetworkManager::init();
-
         let cmdline = boot_info.get_cmdline();
         if !cmdline.is_empty() {
             crate::network::config::apply_cmdline_config(cmdline);
         }
-        fence(Ordering::SeqCst); // Ensure NetworkManager is initialized before proceeding
     }
 
     /* Make init task */

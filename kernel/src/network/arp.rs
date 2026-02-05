@@ -475,6 +475,11 @@ impl ArpLayer {
         let iface = interface
             .map(alloc::string::String::from)
             .or_else(|| self.get_default_interface())
+            .or_else(|| {
+                get_network_manager()
+                    .get_default_interface()
+                    .map(|i| i.name().to_string())
+            })
             .unwrap_or_else(|| alloc::string::String::from("eth0"));
 
         // Get local MAC/IP for this interface

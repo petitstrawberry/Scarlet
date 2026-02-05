@@ -19,7 +19,7 @@ use spin::RwLock;
 
 use crate::early_println;
 use crate::network::protocol_stack::{
-    LayerContext, NetworkLayer, NetworkLayerStats, get_network_manager,
+    get_network_manager, LayerContext, NetworkLayer, NetworkLayerStats,
 };
 use crate::network::socket::SocketError;
 
@@ -446,6 +446,11 @@ impl NetworkLayer for Ipv4Layer {
                     .get("interface")
                     .and_then(|b| core::str::from_utf8(b).ok())
                     .map(String::from)
+                    .or_else(|| {
+                        get_network_manager()
+                            .get_default_interface()
+                            .map(|i| i.name().to_string())
+                    })
                     .unwrap_or_else(|| "eth0".to_string());
                 (iface, [ip_src[0], ip_src[1], ip_src[2], ip_src[3]], None)
             } else {
