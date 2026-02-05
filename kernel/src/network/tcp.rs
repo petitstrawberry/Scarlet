@@ -7,7 +7,7 @@ use alloc::collections::{BTreeMap, VecDeque};
 use alloc::string::String;
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicU16, AtomicU32, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU16, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use core::time::Duration;
 use spin::{Mutex, RwLock};
 
@@ -293,6 +293,8 @@ pub struct TcpSocket {
     self_weak: Weak<TcpSocket>,
     /// Pending accepted connections (listener only)
     pending_accept: Mutex<VecDeque<Arc<TcpSocket>>>,
+    /// Maximum backlog size (from listen())
+    max_backlog: AtomicUsize,
 
     /// Statistics
     bytes_sent: AtomicU64,
@@ -321,9 +323,60 @@ pub struct TcpSocket {
 
     /// Out-of-order segments for reassembly (sorted by sequence number)
     out_of_order: Mutex<BTreeMap<u32, OutOfOrderSegment>>,
+
+    /// Waker for blocking operations (accept, recv, send)
+    waker: Mutex<Option<crate::sync::Waker>>,
+    /// Block mode: true for blocking, false for non-blocking
+    blocking_mode: AtomicBool,
+
+    /// Duplicate ACK count for Fast Retransmit
+    dup_ack_count: AtomicU16,
+    /// Last ACK sequence number for detecting duplicates
+    last_ack_seq: AtomicU32,
 }
 
 impl TcpSocket {
+    /// Safely downcast a SocketObject to TcpSocket using Any trait
+    ///
+    /// Returns None if socket is not a TcpSocket.
+    /// This is completely safe and does not use any unsafe code.
+    pub fn from_socket_object(socket: &Arc<dyn SocketObject>) -> Option<&Self> {
+        socket.as_any().downcast_ref::<TcpSocket>()
+    }
+
+    /// Blocking accept - waits for a connection
+    pub fn accept_blocking(
+        &self,
+        task_id: usize,
+        trapframe: &mut crate::arch::Trapframe,
+    ) -> Result<Arc<dyn SocketObject>, SocketError> {
+        if self.get_state() != TcpState::Listen {
+            return Err(SocketError::NotListening);
+        }
+
+        let nonblocking = !self.blocking_mode.load(Ordering::SeqCst);
+
+        loop {
+            {
+                let mut pending = self.pending_accept.lock();
+                if let Some(socket) = pending.pop_front() {
+                    return Ok(socket as Arc<dyn SocketObject>);
+                }
+            }
+
+            if nonblocking {
+                return Err(SocketError::WouldBlock);
+            }
+
+            {
+                let mut waker_lock = self.waker.lock();
+                let waker = waker_lock
+                    .get_or_insert_with(|| crate::sync::Waker::new_interruptible("tcp_accept"));
+                waker.wait(task_id, trapframe);
+            }
+        }
+    }
+
     /// Create a new TCP socket
     pub fn new(tcp_layer: Weak<TcpLayer>) -> Arc<Self> {
         Arc::new_cyclic(|weak| Self {
@@ -343,6 +396,7 @@ impl TcpSocket {
             tcp_layer,
             self_weak: weak.clone(),
             pending_accept: Mutex::new(VecDeque::new()),
+            max_backlog: AtomicUsize::new(0),
             bytes_sent: AtomicU64::new(0),
             bytes_received: AtomicU64::new(0),
 
@@ -362,6 +416,14 @@ impl TcpSocket {
 
             // Out-of-order segments map
             out_of_order: Mutex::new(BTreeMap::new()),
+
+            // Blocking support
+            waker: Mutex::new(None),              // Initialize lazy
+            blocking_mode: AtomicBool::new(true), // Default to blocking mode
+
+            // Fast Retransmit - duplicate ACK tracking
+            dup_ack_count: AtomicU16::new(0),
+            last_ack_seq: AtomicU32::new(0),
         })
     }
 
@@ -450,7 +512,26 @@ impl TcpSocket {
                     child.local_port.store(local_port, Ordering::SeqCst);
                     tcp_layer.register_port(local_port, child.self_weak.clone());
                     child.handle_syn_received(src_ip, header);
-                    self.pending_accept.lock().push_back(child);
+
+                    // Check backlog limit
+                    let max_backlog = self.max_backlog.load(Ordering::SeqCst);
+                    if self.pending_accept.lock().len() < max_backlog {
+                        self.pending_accept.lock().push_back(child);
+
+                        // Wake up any blocking accept() calls
+                        if let Some(waker) = self.waker.lock().as_ref() {
+                            waker.wake_one();
+                        }
+                    } else {
+                        // Backlog full - send RST to reject connection
+                        let rst_port = self.local_port.load(Ordering::SeqCst);
+                        let rst_seq = self.send_seq.load(Ordering::SeqCst);
+                        let mut rst_header = TcpHeader::new(rst_port, header.src_port);
+                        rst_header.seq_number = rst_seq;
+                        rst_header.ack_number = child.recv_ack.load(Ordering::SeqCst);
+                        rst_header.set_flags(tcp_flags::RST);
+                        child.send_segment(src_ip, rst_header, &[], false, false);
+                    }
                 }
             }
             TcpState::SynSent => {
@@ -675,6 +756,11 @@ impl TcpSocket {
             self.recv_ack.store(next_seq, Ordering::SeqCst);
             drop(recv_buf);
 
+            // Wake up any blocking recv() calls
+            if let Some(waker) = self.waker.lock().as_ref() {
+                waker.wake_one();
+            }
+
             // Send ACK for the new next_seq (may acknowledge multiple segments)
             self.send_ack(src_ip, header.src_port, next_seq);
 
@@ -718,6 +804,57 @@ impl TcpSocket {
     fn update_send_window(&self, ack_number: u32) {
         // Track the latest acknowledged sequence number
         self.send_unacked.store(ack_number, Ordering::SeqCst);
+
+        // Fast Retransmit - duplicate ACK detection
+        let last_ack = self.last_ack_seq.load(Ordering::SeqCst);
+        if ack_number == last_ack {
+            // Duplicate ACK - increment counter
+            let count = self.dup_ack_count.fetch_add(1, Ordering::SeqCst);
+
+            // If we've received 3 duplicate ACKs, trigger fast retransmit
+            if count >= 2 {
+                self.fast_retransmit();
+                self.dup_ack_count.store(0, Ordering::SeqCst);
+            }
+        } else {
+            // New ACK - reset duplicate counter
+            self.last_ack_seq.store(ack_number, Ordering::SeqCst);
+            self.dup_ack_count.store(0, Ordering::SeqCst);
+        }
+
+        // Wake up any blocking send() calls (buffer may have space now)
+        if let Some(waker) = self.waker.lock().as_ref() {
+            waker.wake_one();
+        }
+    }
+
+    /// Fast Retransmit - immediately retransmit unacknowledged segments
+    fn fast_retransmit(&self) {
+        let mut unacked = self.unacked_segments.lock();
+        if let Some(first_seg) = unacked.front() {
+            // Retransmit the oldest unacknowledged segment
+            if let Some(dest_ip) = self.remote_ip.lock().clone() {
+                let dest_port = self.remote_port.load(Ordering::SeqCst);
+                let local_port = self.local_port.load(Ordering::SeqCst);
+
+                let mut header = TcpHeader::new(local_port, dest_port);
+                header.seq_number = first_seg.seq;
+                header.ack_number = self.recv_ack.load(Ordering::SeqCst);
+                header.set_flags(first_seg.flags);
+
+                // Retransmit (don't update sequence number, mark as retransmission)
+                self.send_segment(dest_ip, header, &first_seg.data, false, true);
+
+                // Update transmission count
+                if let Some(seg) = unacked.front_mut() {
+                    seg.tx_count += 1;
+                    seg.last_tx_time = crate::timer::get_tick();
+                }
+
+                // Reset RTO for next retransmission
+                self.retrans_count.store(1, Ordering::SeqCst);
+            }
+        }
     }
 
     /// Send SYN packet
@@ -906,6 +1043,65 @@ impl TcpSocket {
         Ok(data.len())
     }
 
+    /// Blocking send - waits for buffer space
+    pub fn send_blocking(
+        &self,
+        data: &[u8],
+        task_id: usize,
+        trapframe: &mut crate::arch::Trapframe,
+    ) -> Result<usize, SocketError> {
+        if self.get_state() != TcpState::Established {
+            return Err(SocketError::NotConnected);
+        }
+
+        let dest_ip = self
+            .remote_ip
+            .lock()
+            .clone()
+            .ok_or(SocketError::NotConnected)?;
+        let dest_port = self.remote_port.load(Ordering::SeqCst);
+        let local_port = self.local_port.load(Ordering::SeqCst);
+        let local_ip = self
+            .local_ip
+            .lock()
+            .clone()
+            .unwrap_or(Ipv4Address::new(0, 0, 0, 0));
+
+        let nonblocking = !self.blocking_mode.load(Ordering::SeqCst);
+
+        loop {
+            {
+                let mut send_buf = self.send_buffer.lock();
+                if send_buf.len() + data.len() <= MAX_SEND_BUFFER_SIZE {
+                    send_buf.extend(data);
+                    drop(send_buf);
+
+                    let send_seq = self.send_seq.load(Ordering::SeqCst);
+
+                    let mut header = TcpHeader::new(local_port, dest_port);
+                    header.seq_number = send_seq;
+                    header.ack_number = self.recv_ack.load(Ordering::SeqCst);
+                    header.set_flags(tcp_flags::ACK | tcp_flags::PSH);
+
+                    self.send_segment(dest_ip, header, data, true, false);
+
+                    return Ok(data.len());
+                }
+            }
+
+            if nonblocking {
+                return Err(SocketError::WouldBlock);
+            }
+
+            {
+                let mut waker_lock = self.waker.lock();
+                let waker = waker_lock
+                    .get_or_insert_with(|| crate::sync::Waker::new_interruptible("tcp_send"));
+                waker.wait(task_id, trapframe);
+            }
+        }
+    }
+
     /// Receive data from socket
     pub fn recv_data(&self, buffer: &mut [u8]) -> Result<usize, SocketError> {
         match self.get_state() {
@@ -926,6 +1122,57 @@ impl TcpSocket {
             .store(available.min(65535) as u16, Ordering::SeqCst);
 
         Ok(len)
+    }
+
+    /// Blocking receive - waits for data to be available
+    pub fn recv_blocking(
+        &self,
+        buffer: &mut [u8],
+        task_id: usize,
+        trapframe: &mut crate::arch::Trapframe,
+    ) -> Result<usize, SocketError> {
+        match self.get_state() {
+            TcpState::Established | TcpState::CloseWait => {}
+            _ => return Err(SocketError::NotConnected),
+        }
+
+        let nonblocking = !self.blocking_mode.load(Ordering::SeqCst);
+
+        loop {
+            {
+                let mut recv_buf = self.recv_buffer.lock();
+                let len = buffer.len().min(recv_buf.len());
+
+                if len > 0 {
+                    for i in 0..len {
+                        buffer[i] = recv_buf.pop_front().unwrap();
+                    }
+
+                    // Update receive window after reading data
+                    let available = MAX_RECV_BUFFER_SIZE.saturating_sub(recv_buf.len());
+                    self.recv_window
+                        .store(available.min(65535) as u16, Ordering::SeqCst);
+
+                    return Ok(len);
+                }
+
+                // Check if connection is closed
+                if self.get_state() == TcpState::Closed || self.get_state() == TcpState::TimeWait {
+                    return Ok(0);
+                }
+            }
+
+            if nonblocking {
+                return Err(SocketError::WouldBlock);
+            }
+
+            {
+                let mut waker_lock = self.waker.lock();
+                let waker = waker_lock
+                    .get_or_insert_with(|| crate::sync::Waker::new_interruptible("tcp_recv"));
+                waker.wait(task_id, trapframe);
+            }
+        }
     }
 
     // ===================================================================
@@ -1256,10 +1503,15 @@ impl SocketControl for TcpSocket {
         }
     }
 
-    fn listen(&self, _backlog: usize) -> Result<(), SocketError> {
+    fn listen(&self, backlog: usize) -> Result<(), SocketError> {
         if self.local_port.load(Ordering::SeqCst) == 0 {
             return Err(SocketError::InvalidOperation);
         }
+
+        // Set backlog limit (clamp to reasonable range)
+        let max_backlog = backlog.max(1).min(128);
+        self.max_backlog.store(max_backlog, Ordering::SeqCst);
+
         self.set_state(TcpState::Listen);
         Ok(())
     }

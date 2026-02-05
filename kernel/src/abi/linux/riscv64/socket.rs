@@ -418,15 +418,18 @@ pub fn sys_accept(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize
         }
     };
 
-    let local_socket = match LocalSocket::from_socket_object(&socket_obj) {
-        Some(socket) => socket,
-        None => {
-            crate::early_println!("[linux socket] accept not LocalSocket");
-            return usize::MAX;
-        }
+    // Try LocalSocket first, then TcpSocket
+    let accepted_socket = if let Some(local_socket) = LocalSocket::from_socket_object(&socket_obj) {
+        local_socket.accept_blocking(task.get_id(), trapframe)
+    } else if let Some(tcp_socket) = crate::network::tcp::TcpSocket::from_socket_object(&socket_obj)
+    {
+        tcp_socket.accept_blocking(task.get_id(), trapframe)
+    } else {
+        crate::early_println!("[linux socket] accept not supported socket type");
+        return usize::MAX;
     };
 
-    let accepted_socket = match local_socket.accept_blocking(task.get_id(), trapframe) {
+    let accepted_socket = match accepted_socket {
         Ok(socket) => socket,
         Err(_) => {
             crate::early_println!("[linux socket] accept_blocking failed");
