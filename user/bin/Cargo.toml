@@ -53,9 +53,17 @@ path = "src/cat.rs"
 name = "fb_test"
 path = "src/fb_test.rs"
 
-[[bin]]
-name = "socket_server"
-path = "src/socket_server.rs"
+ [[bin]]
+ name = "socket_server"
+ path = "src/socket_server.rs"
+
+ [[bin]]
+ name = "udp_server"
+ path = "src/udp_server.rs"
+
+ [[bin]]
+ name = "udp_client"
+ path = "src/udp_client.rs"
 
 [[bin]]
 name = "socket_client"

@@ -34,17 +34,15 @@ pub extern "C" fn main(_argc: isize, _argv: *const *const u8) -> isize {
     println!("[tcp-server] Starting on port {}...", port);
 
     // Create TCP socket
-    let listen_socket = match Socket::new_with_domain(
-        SocketDomain::Inet4,
-        SocketType::Stream,
-        SocketProtocol::Tcp,
-    ) {
-        Ok(s) => s,
-        Err(_) => {
-            println!("[tcp-server] Failed to create socket");
-            return 1;
-        }
-    };
+    let listen_socket =
+        match Socket::new_with_domain(SocketDomain::Inet4, SocketType::Stream, SocketProtocol::Tcp)
+        {
+            Ok(s) => s,
+            Err(_) => {
+                println!("[tcp-server] Failed to create socket");
+                return 1;
+            }
+        };
 
     // Bind to port
     let bind_addr = Inet4SocketAddress::new([0, 0, 0, 0], port);

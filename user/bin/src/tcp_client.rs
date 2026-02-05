@@ -46,17 +46,15 @@ pub extern "C" fn main(_argc: isize, _argv: *const *const u8) -> isize {
     );
 
     // Create TCP socket
-    let socket = match Socket::new_with_domain(
-        SocketDomain::Inet4,
-        SocketType::Stream,
-        SocketProtocol::Tcp,
-    ) {
-        Ok(s) => s,
-        Err(_) => {
-            println!("[tcp-client] Failed to create socket");
-            return 1;
-        }
-    };
+    let socket =
+        match Socket::new_with_domain(SocketDomain::Inet4, SocketType::Stream, SocketProtocol::Tcp)
+        {
+            Ok(s) => s,
+            Err(_) => {
+                println!("[tcp-client] Failed to create socket");
+                return 1;
+            }
+        };
 
     // Connect to server
     let server_addr = Inet4SocketAddress::new(ip, port);
