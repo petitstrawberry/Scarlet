@@ -22,7 +22,7 @@ pub extern "C" fn main(_argc: isize, _argv: *const *const u8) -> isize {
     };
 
     let socket = match Socket::new_with_domain(
-        SocketDomain::Inet,
+        SocketDomain::Inet4,
         SocketType::Datagram,
         SocketProtocol::Icmp,
     ) {
