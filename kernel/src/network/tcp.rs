@@ -453,11 +453,7 @@ impl TcpSocket {
         if port == u16::MAX {
             NEXT_EPHEMERAL_PORT.store(49152, Ordering::SeqCst);
         }
-        if port < 49152 {
-            49152
-        } else {
-            port
-        }
+        if port < 49152 { 49152 } else { port }
     }
 
     /// Get current TCP state
@@ -802,6 +798,9 @@ impl TcpSocket {
             TcpState::Established => {
                 self.send_ack(src_ip, header.src_port, ack_seq);
                 self.set_state(TcpState::CloseWait);
+                if let Some(waker) = self.recv_waker.lock().as_ref() {
+                    waker.wake_one();
+                }
             }
             TcpState::FinWait1 => {
                 if header.flags() & (tcp_flags::FIN | tcp_flags::ACK)
@@ -1177,7 +1176,11 @@ impl TcpSocket {
                 }
 
                 // Check if connection is closed
-                if self.get_state() == TcpState::Closed || self.get_state() == TcpState::TimeWait {
+                let state = self.get_state();
+                if state == TcpState::Closed
+                    || state == TcpState::TimeWait
+                    || state == TcpState::CloseWait
+                {
                     return Ok(0);
                 }
             }
@@ -1472,6 +1475,14 @@ impl SocketObject for TcpSocket {
         self
     }
 
+    fn as_selectable(&self) -> Option<&dyn crate::object::capability::Selectable> {
+        Some(self)
+    }
+
+    fn as_control_ops(&self) -> Option<&dyn crate::object::capability::ControlOps> {
+        Some(self)
+    }
+
     fn sendto(
         &self,
         data: &[u8],
@@ -1512,6 +1523,38 @@ impl SocketObject for TcpSocket {
         ));
 
         Ok((len, addr))
+    }
+}
+
+impl crate::object::capability::ControlOps for TcpSocket {
+    fn control(&self, command: u32, arg: usize) -> Result<i32, &'static str> {
+        match command {
+            crate::network::socket::socket_ctl::SCTL_SOCKET_SET_NONBLOCK => {
+                crate::object::capability::selectable::Selectable::set_nonblocking(self, arg != 0);
+                Ok(0)
+            }
+            crate::network::socket::socket_ctl::SCTL_SOCKET_GET_NONBLOCK => Ok(
+                if crate::object::capability::selectable::Selectable::is_nonblocking(self) {
+                    1
+                } else {
+                    0
+                },
+            ),
+            _ => Err("Unsupported socket control command"),
+        }
+    }
+
+    fn supported_control_commands(&self) -> alloc::vec::Vec<(u32, &'static str)> {
+        alloc::vec![
+            (
+                crate::network::socket::socket_ctl::SCTL_SOCKET_SET_NONBLOCK,
+                "Set non-blocking mode",
+            ),
+            (
+                crate::network::socket::socket_ctl::SCTL_SOCKET_GET_NONBLOCK,
+                "Get non-blocking mode",
+            ),
+        ]
     }
 }
 
@@ -1647,13 +1690,140 @@ impl crate::ipc::StreamIpcOps for TcpSocket {
 
 impl crate::object::capability::StreamOps for TcpSocket {
     fn read(&self, buffer: &mut [u8]) -> Result<usize, crate::object::capability::StreamError> {
-        self.recv_data(buffer)
-            .map_err(|_| crate::object::capability::StreamError::Other("tcp recv error".into()))
+        use crate::object::capability::selectable::Selectable;
+
+        if Selectable::is_nonblocking(self) {
+            return self.recv_data(buffer).map_err(|err| match err {
+                SocketError::WouldBlock => crate::object::capability::StreamError::WouldBlock,
+                SocketError::NotConnected => crate::object::capability::StreamError::BrokenPipe,
+                _ => crate::object::capability::StreamError::Other("tcp recv error".into()),
+            });
+        }
+
+        let task = match crate::task::mytask() {
+            Some(task) => task,
+            None => {
+                return Err(crate::object::capability::StreamError::Other(
+                    "tcp recv: no task".into(),
+                ));
+            }
+        };
+
+        self.recv_blocking(buffer, task.get_id(), task.get_trapframe())
+            .map_err(|err| match err {
+                SocketError::WouldBlock => crate::object::capability::StreamError::WouldBlock,
+                SocketError::NotConnected => crate::object::capability::StreamError::BrokenPipe,
+                _ => crate::object::capability::StreamError::Other("tcp recv error".into()),
+            })
     }
 
     fn write(&self, data: &[u8]) -> Result<usize, crate::object::capability::StreamError> {
-        self.send_data(data)
+        use crate::object::capability::selectable::Selectable;
+
+        if Selectable::is_nonblocking(self) {
+            return self.send_data(data).map_err(|_| {
+                crate::object::capability::StreamError::Other("tcp send error".into())
+            });
+        }
+
+        let task = match crate::task::mytask() {
+            Some(task) => task,
+            None => {
+                return Err(crate::object::capability::StreamError::Other(
+                    "tcp send: no task".into(),
+                ));
+            }
+        };
+
+        self.send_blocking(data, task.get_id(), task.get_trapframe())
             .map_err(|_| crate::object::capability::StreamError::Other("tcp send error".into()))
+    }
+}
+
+impl crate::object::capability::Selectable for TcpSocket {
+    fn current_ready(
+        &self,
+        interest: crate::object::capability::selectable::ReadyInterest,
+    ) -> crate::object::capability::selectable::ReadySet {
+        let mut ready = crate::object::capability::selectable::ReadySet::none();
+
+        if interest.read {
+            let recv_buf = self.recv_buffer.lock();
+            let has_data = !recv_buf.is_empty();
+            drop(recv_buf);
+            let state = self.get_state();
+            ready.read = has_data
+                || state == TcpState::Closed
+                || state == TcpState::TimeWait
+                || state == TcpState::CloseWait;
+        }
+
+        if interest.write {
+            let send_buf = self.send_buffer.lock();
+            ready.write = send_buf.len() < MAX_SEND_BUFFER_SIZE;
+        }
+
+        ready
+    }
+
+    fn wait_until_ready(
+        &self,
+        interest: crate::object::capability::selectable::ReadyInterest,
+        trapframe: &mut crate::arch::Trapframe,
+        timeout_ticks: Option<u64>,
+    ) -> crate::object::capability::selectable::SelectWaitOutcome {
+        let current = self.current_ready(interest);
+        if (interest.read && current.read) || (interest.write && current.write) {
+            return crate::object::capability::selectable::SelectWaitOutcome::Ready;
+        }
+
+        let task_id = {
+            use crate::arch::get_cpu;
+            use crate::sched::scheduler::get_scheduler;
+            let cpu_id = get_cpu().get_cpuid();
+            get_scheduler().get_current_task_id(cpu_id).unwrap_or(0)
+        };
+
+        let woke = if interest.read {
+            let waker = {
+                let mut waker_lock = self.recv_waker.lock();
+                waker_lock
+                    .get_or_insert_with(|| {
+                        Arc::new(crate::sync::Waker::new_interruptible("tcp_recv"))
+                    })
+                    .clone()
+            };
+            waker.wait_with_timeout(task_id, trapframe, timeout_ticks)
+        } else if interest.write {
+            let waker = {
+                let mut waker_lock = self.send_waker.lock();
+                waker_lock
+                    .get_or_insert_with(|| {
+                        Arc::new(crate::sync::Waker::new_interruptible("tcp_send"))
+                    })
+                    .clone()
+            };
+            waker.wait_with_timeout(task_id, trapframe, timeout_ticks)
+        } else {
+            true
+        };
+
+        if timeout_ticks.is_some() && !woke {
+            let after = self.current_ready(interest);
+            if (interest.read && !after.read) && (interest.write && !after.write) {
+                return crate::object::capability::selectable::SelectWaitOutcome::TimedOut;
+            }
+        }
+
+        crate::object::capability::selectable::SelectWaitOutcome::Ready
+    }
+
+    fn set_nonblocking(&self, enabled: bool) {
+        self.blocking_mode.store(!enabled, Ordering::SeqCst);
+    }
+
+    fn is_nonblocking(&self) -> bool {
+        !self.blocking_mode.load(Ordering::SeqCst)
     }
 }
 
