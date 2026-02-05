@@ -215,6 +215,35 @@ struct UnackedSegment {
     last_tx_time: u64,
 }
 
+/// Out-of-order TCP segment for reassembly
+#[derive(Clone)]
+struct OutOfOrderSegment {
+    /// Sequence number of first byte
+    seq: u32,
+    /// Segment data
+    data: Vec<u8>,
+}
+
+impl PartialEq for OutOfOrderSegment {
+    fn eq(&self, other: &Self) -> bool {
+        self.seq == other.seq
+    }
+}
+
+impl Eq for OutOfOrderSegment {}
+
+impl PartialOrd for OutOfOrderSegment {
+    fn partial_cmp(&self, other: &Self) -> Option<core::cmp::Ordering> {
+        self.seq.partial_cmp(&other.seq)
+    }
+}
+
+impl Ord for OutOfOrderSegment {
+    fn cmp(&self, other: &Self) -> core::cmp::Ordering {
+        self.seq.cmp(&other.seq)
+    }
+}
+
 /// Retransmission timer handler
 struct RetransTimer {
     socket: Weak<TcpSocket>,
@@ -289,6 +318,9 @@ pub struct TcpSocket {
 
     /// List of unacknowledged segments for retransmission
     unacked_segments: Mutex<VecDeque<UnackedSegment>>,
+
+    /// Out-of-order segments for reassembly (sorted by sequence number)
+    out_of_order: Mutex<BTreeMap<u32, OutOfOrderSegment>>,
 }
 
 impl TcpSocket {
@@ -327,6 +359,9 @@ impl TcpSocket {
 
             // Unacked segments list
             unacked_segments: Mutex::new(VecDeque::new()),
+
+            // Out-of-order segments map
+            out_of_order: Mutex::new(BTreeMap::new()),
         })
     }
 
@@ -426,7 +461,7 @@ impl TcpSocket {
                     self.handle_syn_ack_received(src_ip, header);
                 } else if header.flags() & tcp_flags::RST != 0 {
                     // Received RST, abort connection
-                    self.set_state(TcpState::Closed);
+                    self.handle_rst();
                 }
             }
             TcpState::Established => {
@@ -478,10 +513,54 @@ impl TcpSocket {
         self.set_state(TcpState::Established);
     }
 
+    /// Handle RST (Reset) - properly cleanup connection
+    fn handle_rst(&self) {
+        // Cancel retransmission timers
+        self.cancel_retrans_timer();
+
+        // Clear send buffer
+        self.send_buffer.lock().clear();
+
+        // Clear receive buffer
+        self.recv_buffer.lock().clear();
+
+        // Clear unacked segments
+        self.unacked_segments.lock().clear();
+
+        // Clear out-of-order segments
+        self.out_of_order.lock().clear();
+
+        // Reset sequence numbers
+        self.send_seq.store(0, Ordering::SeqCst);
+        self.send_unacked.store(0, Ordering::SeqCst);
+        self.recv_seq.store(0, Ordering::SeqCst);
+        self.recv_ack.store(0, Ordering::SeqCst);
+
+        // Reset window sizes
+        self.send_window.store(65535, Ordering::SeqCst);
+        self.recv_window.store(65535, Ordering::SeqCst);
+
+        // Reset RTO state
+        self.srtt.store(0, Ordering::SeqCst);
+        self.rttvar.store(0, Ordering::SeqCst);
+        self.rto.store(100, Ordering::SeqCst); // Reset to initial value
+        self.retrans_count.store(0, Ordering::SeqCst);
+        self.timing_rtt.store(0, Ordering::SeqCst);
+
+        // Clear addresses
+        *self.local_ip.lock() = None;
+        *self.remote_ip.lock() = None;
+        self.local_port.store(0, Ordering::SeqCst);
+        self.remote_port.store(0, Ordering::SeqCst);
+
+        // Set state to Closed
+        self.set_state(TcpState::Closed);
+    }
+
     /// Handle control segment (ACK, FIN, RST)
     fn handle_control_segment(&self, src_ip: Ipv4Address, header: TcpHeader) {
         if header.flags() & tcp_flags::RST != 0 {
-            self.set_state(TcpState::Closed);
+            self.handle_rst();
             return;
         }
 
@@ -499,28 +578,55 @@ impl TcpSocket {
     /// Handle data segment
     fn handle_data_segment(&self, src_ip: Ipv4Address, header: TcpHeader, data: &[u8]) {
         if header.flags() & tcp_flags::RST != 0 {
-            self.set_state(TcpState::Closed);
+            self.handle_rst();
             return;
         }
 
         // Check sequence number
         let expected_seq = self.recv_seq.load(Ordering::SeqCst);
         let segment_seq = header.seq_number;
+        let segment_end = segment_seq.wrapping_add(data.len() as u32);
 
-        if segment_seq < expected_seq {
+        // Old segment (duplicate) - send ACK
+        if segment_end <= expected_seq {
             self.send_ack(src_ip, header.src_port, expected_seq);
             return;
         }
 
-        // Add data to receive buffer
-        if data.is_empty() {
+        // Out-of-order segment - buffer it
+        if segment_seq > expected_seq {
+            if !data.is_empty() {
+                let mut out_of_order = self.out_of_order.lock();
+                // Check if segment already buffered
+                if !out_of_order.contains_key(&segment_seq) {
+                    // Check out-of-order buffer limit
+                    if out_of_order.len() < 128 {
+                        let ooo_seg = OutOfOrderSegment {
+                            seq: segment_seq,
+                            data: data.to_vec(),
+                        };
+                        out_of_order.insert(segment_seq, ooo_seg);
+                    }
+                }
+                drop(out_of_order);
+
+                // Send ACK for expected sequence
+                self.send_ack(src_ip, header.src_port, expected_seq);
+            }
+
+            // Process ACK if present
             if header.flags() & tcp_flags::ACK != 0 {
                 self.update_send_window(header.ack_number);
                 self.stop_rtt_measurement(header.ack_number);
                 self.remove_acked_segments(header.ack_number);
             }
-        } else if segment_seq == expected_seq {
+            return;
+        }
+
+        // In-order segment (segment_seq == expected_seq)
+        if !data.is_empty() {
             let mut recv_buf = self.recv_buffer.lock();
+
             // Check receive buffer limit - drop data if full (should update window to 0)
             if recv_buf.len() + data.len() > MAX_RECV_BUFFER_SIZE {
                 // Buffer full - send ACK with window=0 to stop sender
@@ -528,8 +634,37 @@ impl TcpSocket {
                 self.send_ack(src_ip, header.src_port, expected_seq);
                 return;
             }
+
             recv_buf.extend(data);
-            let next_seq = expected_seq.wrapping_add(data.len() as u32);
+            let mut next_seq = expected_seq.wrapping_add(data.len() as u32);
+
+            // Check if we can reassemble from out-of-order buffer
+            let mut out_of_order = self.out_of_order.lock();
+            loop {
+                // Remove and process next consecutive segment from out-of-order buffer
+                if let Some((_seq, ooo_seg)) = out_of_order.first_key_value() {
+                    if *_seq == next_seq {
+                        let seq = *_seq;
+                        let ooo_seg = out_of_order.remove(&seq).unwrap();
+
+                        // Check buffer limit before adding out-of-order data
+                        if recv_buf.len() + ooo_seg.data.len() <= MAX_RECV_BUFFER_SIZE {
+                            recv_buf.extend(&ooo_seg.data);
+                            next_seq = next_seq.wrapping_add(ooo_seg.data.len() as u32);
+                        } else {
+                            // Buffer full, stop reassembly
+                            break;
+                        }
+                    } else {
+                        // Gap found, stop reassembly
+                        break;
+                    }
+                } else {
+                    // No more out-of-order segments
+                    break;
+                }
+            }
+            drop(out_of_order);
 
             // Update receive window based on remaining buffer space
             let available = MAX_RECV_BUFFER_SIZE.saturating_sub(recv_buf.len());
@@ -540,7 +675,7 @@ impl TcpSocket {
             self.recv_ack.store(next_seq, Ordering::SeqCst);
             drop(recv_buf);
 
-            // Send ACK
+            // Send ACK for the new next_seq (may acknowledge multiple segments)
             self.send_ack(src_ip, header.src_port, next_seq);
 
             // Update received bytes
@@ -548,6 +683,7 @@ impl TcpSocket {
                 .fetch_add(data.len() as u64, Ordering::SeqCst);
         }
 
+        // Process ACK if present
         if header.flags() & tcp_flags::ACK != 0 {
             self.update_send_window(header.ack_number);
             self.stop_rtt_measurement(header.ack_number);
