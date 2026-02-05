@@ -28,6 +28,7 @@ use spin::{Mutex, RwLock};
 
 use crate::device::events::InterruptCapableDevice;
 use crate::device::{Device, DeviceType};
+use crate::drivers::virtio::features::VIRTIO_F_ANY_LAYOUT;
 use crate::drivers::virtio::features::{VIRTIO_RING_F_EVENT_IDX, VIRTIO_RING_F_INDIRECT_DESC};
 use crate::interrupt::InterruptId;
 use crate::network::config::apply_pending_ip_for_interface;
@@ -314,6 +315,10 @@ impl VirtioNetDevice {
         }
 
         // Notify device about available RX buffers
+        unsafe {
+            core::ptr::write_volatile(rx_queue.avail.flags, 0);
+            core::ptr::write_volatile(rx_queue.used.flags, 0);
+        }
         self.notify(0); // Notify RX queue
 
         Ok(())
@@ -450,6 +455,10 @@ impl VirtioNetDevice {
 
         // Always notify device if we recycled any buffers, so it knows RX buffers are available
         if buffers_recycled > 0 {
+            unsafe {
+                core::ptr::write_volatile(rx_queue.avail.flags, 0);
+                core::ptr::write_volatile(rx_queue.used.flags, 0);
+            }
             self.notify(0); // Notify RX queue
         }
 
@@ -553,43 +562,44 @@ impl ControlOps for VirtioNetDevice {
 impl InterruptCapableDevice for VirtioNetDevice {
     fn handle_interrupt(&self) -> crate::interrupt::InterruptResult<()> {
         let isr = self.read32_register(Register::InterruptStatus);
-        crate::early_println!("[virtio-net] Interrupt received, ISR=0x{:x}", isr);
         if isr == 0 {
             return Ok(());
         }
-
+        crate::early_println!("[virtio-net] Interrupt received, ISR=0x{:x}", isr);
         self.write32_register(Register::InterruptAck, isr & 0x03);
 
-        let packets = self.process_received_packets().unwrap_or_default();
-        crate::early_println!("[virtio-net] Processed {} packets", packets.len());
-        if packets.is_empty() {
-            return Ok(());
-        }
-
-        let interface_name = self.interface_name.lock().clone();
-        crate::early_println!("[virtio-net] Interface name: {:?}", interface_name);
-        if let Some(name) = interface_name {
-            crate::early_println!(
-                "[virtio-net] Forwarding {} packets to interface {}",
-                packets.len(),
-                name
-            );
-            let manager = crate::network::get_network_manager();
-            let mut inbound = 0usize;
-            for (i, packet) in packets.iter().enumerate() {
-                crate::early_println!("[virtio-net] Packet {}: {} bytes", i, packet.len);
-                if packet.len >= 14 {
-                    let eth_type = u16::from_be_bytes([packet.data[12], packet.data[13]]);
-                    crate::early_println!("[virtio-net]   EtherType: 0x{:04X}", eth_type);
-                    if eth_type == 0x0800 {
-                        inbound += 1;
-                    }
-                }
-                manager.handle_received_packet(&name, &packet);
+        loop {
+            let packets = self.process_received_packets().unwrap_or_default();
+            crate::early_println!("[virtio-net] Processed {} packets", packets.len());
+            if packets.is_empty() {
+                break;
             }
-            crate::early_println!("[virtio-net] Forwarded IPv4 packets: {}", inbound);
-        } else {
-            crate::early_println!("[virtio-net] No interface name set!");
+
+            let interface_name = self.interface_name.lock().clone();
+            crate::early_println!("[virtio-net] Interface name: {:?}", interface_name);
+            if let Some(name) = interface_name {
+                crate::early_println!(
+                    "[virtio-net] Forwarding {} packets to interface {}",
+                    packets.len(),
+                    name
+                );
+                let manager = crate::network::get_network_manager();
+                let mut inbound = 0usize;
+                for (i, packet) in packets.iter().enumerate() {
+                    crate::early_println!("[virtio-net] Packet {}: {} bytes", i, packet.len);
+                    if packet.len >= 14 {
+                        let eth_type = u16::from_be_bytes([packet.data[12], packet.data[13]]);
+                        crate::early_println!("[virtio-net]   EtherType: 0x{:04X}", eth_type);
+                        if eth_type == 0x0800 {
+                            inbound += 1;
+                        }
+                    }
+                    manager.handle_received_packet(&name, &packet);
+                }
+                crate::early_println!("[virtio-net] Forwarded IPv4 packets: {}", inbound);
+            } else {
+                crate::early_println!("[virtio-net] No interface name set!");
+            }
         }
 
         Ok(())
@@ -653,7 +663,10 @@ impl VirtioDevice for VirtioNetDevice {
         // Use virtio-blk style: accept most features, exclude problematic ones
         // Start with all device features and exclude specific ones we don't want
         let mut result = device_features
-            & (1 << VIRTIO_NET_F_STATUS | 1 << VIRTIO_NET_F_MAC | 1 << VIRTIO_NET_F_MTU);
+            & (1 << VIRTIO_NET_F_STATUS
+                | 1 << VIRTIO_NET_F_MAC
+                | 1 << VIRTIO_NET_F_MTU
+                | 1 << VIRTIO_F_ANY_LAYOUT);
 
         if self.allow_ring_features() {
             // TODO: Implement EVENT_IDX before negotiating it.

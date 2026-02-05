@@ -444,7 +444,11 @@ impl TcpSocket {
         if port == u16::MAX {
             NEXT_EPHEMERAL_PORT.store(49152, Ordering::SeqCst);
         }
-        if port < 49152 { 49152 } else { port }
+        if port < 49152 {
+            49152
+        } else {
+            port
+        }
     }
 
     /// Get current TCP state
@@ -1739,9 +1743,33 @@ impl TcpLayer {
         stats.packets_received += 1;
         stats.bytes_received += (header.data_offset() + data.len()) as u64;
 
-        if let Some(socket) = self.find_socket(header.dst_port, src_ip, header.src_port) {
+        let src_port = unsafe { core::ptr::addr_of!(header.src_port).read_unaligned() };
+        let dst_port = unsafe { core::ptr::addr_of!(header.dst_port).read_unaligned() };
+        let flags = header.flags();
+        crate::early_println!(
+            "[TCP] RX: src={}.{}.{}.{}:{} dst_port={} flags=0x{:02X} len={}",
+            src_ip.0[0],
+            src_ip.0[1],
+            src_ip.0[2],
+            src_ip.0[3],
+            src_port,
+            dst_port,
+            flags,
+            data.len()
+        );
+
+        if let Some(socket) = self.find_socket(dst_port, src_ip, src_port) {
             socket.process_segment(src_ip, header, data);
         } else {
+            crate::early_println!(
+                "[TCP] No socket for dst_port={} src={}.{}.{}.{}:{}",
+                dst_port,
+                src_ip.0[0],
+                src_ip.0[1],
+                src_ip.0[2],
+                src_ip.0[3],
+                src_port
+            );
         }
     }
 }
@@ -1761,12 +1789,22 @@ impl NetworkLayer for TcpLayer {
         Ok(())
     }
 
-    fn receive(&self, packet: &[u8], _context: Option<&LayerContext>) -> Result<(), SocketError> {
-        self.receive_packet(
-            Ipv4Address::new(0, 0, 0, 0),
-            Ipv4Address::new(0, 0, 0, 0),
-            packet,
-        )
+    fn receive(&self, packet: &[u8], context: Option<&LayerContext>) -> Result<(), SocketError> {
+        let mut src_ip = Ipv4Address::new(0, 0, 0, 0);
+        let mut dst_ip = Ipv4Address::new(0, 0, 0, 0);
+        if let Some(ctx) = context {
+            if let Some(raw) = ctx.get("ip_src") {
+                if raw.len() >= 4 {
+                    src_ip = Ipv4Address::new(raw[0], raw[1], raw[2], raw[3]);
+                }
+            }
+            if let Some(raw) = ctx.get("ip_dst") {
+                if raw.len() >= 4 {
+                    dst_ip = Ipv4Address::new(raw[0], raw[1], raw[2], raw[3]);
+                }
+            }
+        }
+        self.receive_packet(src_ip, dst_ip, packet)
     }
 
     fn name(&self) -> &'static str {
