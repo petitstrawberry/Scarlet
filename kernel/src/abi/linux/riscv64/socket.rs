@@ -91,7 +91,7 @@ pub fn sys_socket(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize
     // Map Linux socket domain to Scarlet domain
     let scarlet_domain = match domain {
         AF_UNIX => SocketDomain::Local,
-        AF_INET => SocketDomain::Inet,
+        AF_INET => SocketDomain::Inet4,
         AF_INET6 => SocketDomain::Inet6,
         _ => {
             crate::early_println!("[linux socket] unsupported domain {}", domain);

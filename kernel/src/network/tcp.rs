@@ -1432,7 +1432,7 @@ impl SocketObject for TcpSocket {
     }
 
     fn socket_domain(&self) -> crate::network::socket::SocketDomain {
-        crate::network::socket::SocketDomain::Inet
+        crate::network::socket::SocketDomain::Inet4
     }
 
     fn socket_protocol(&self) -> crate::network::socket::SocketProtocol {

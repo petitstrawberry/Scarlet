@@ -83,7 +83,7 @@ pub fn init_tcp_ip_stack() {
 pub fn create_tcp_ip_stack(
     domain: super::socket::SocketDomain,
 ) -> Result<(), super::socket::SocketError> {
-    if domain != super::socket::SocketDomain::Inet {
+    if domain != super::socket::SocketDomain::Inet4 {
         return Err(super::socket::SocketError::InvalidAddress);
     }
 

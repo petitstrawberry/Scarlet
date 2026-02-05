@@ -155,7 +155,7 @@ impl SocketObject for UdpSocket {
     }
 
     fn socket_domain(&self) -> crate::network::socket::SocketDomain {
-        crate::network::socket::SocketDomain::Inet
+        crate::network::socket::SocketDomain::Inet4
     }
 
     fn socket_protocol(&self) -> SocketProtocol {

@@ -766,7 +766,7 @@ mod tests {
     #[test_case]
     fn test_protocol_stack_manager_creation() {
         let manager = ProtocolStackManager::new();
-        assert!(manager.get_stack(SocketDomain::Inet).is_none());
+        assert!(manager.get_stack(SocketDomain::Inet4).is_none());
     }
 
     #[test_case]

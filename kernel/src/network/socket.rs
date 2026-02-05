@@ -71,7 +71,7 @@ pub enum SocketDomain {
     /// (Unix domain socket equivalent, but OS-agnostic)
     Local = 1,
     /// IPv4 Internet protocols
-    Inet = 2,
+    Inet4 = 2,
     /// IPv6 Internet protocols
     Inet6 = 3,
     /// Packet-level communication
@@ -117,7 +117,7 @@ impl SocketAddress {
     pub fn domain(&self) -> SocketDomain {
         match self {
             SocketAddress::Local(_) => SocketDomain::Local,
-            SocketAddress::Inet(_) => SocketDomain::Inet,
+            SocketAddress::Inet(_) => SocketDomain::Inet4,
             SocketAddress::Inet6(_) => SocketDomain::Inet6,
             SocketAddress::Unspecified => SocketDomain::Local, // Default
         }
@@ -407,7 +407,7 @@ mod tests {
     #[test_case]
     fn test_socket_domain() {
         assert_eq!(SocketDomain::Local, SocketDomain::Local);
-        assert_ne!(SocketDomain::Local, SocketDomain::Inet);
+        assert_ne!(SocketDomain::Local, SocketDomain::Inet4);
     }
 
     #[test_case]
@@ -445,7 +445,7 @@ mod tests {
         assert_eq!(local_addr.domain(), SocketDomain::Local);
 
         let inet_addr = SocketAddress::Inet(Inet4SocketAddress::new([127, 0, 0, 1], 8080));
-        assert_eq!(inet_addr.domain(), SocketDomain::Inet);
+        assert_eq!(inet_addr.domain(), SocketDomain::Inet4);
     }
 
     #[test_case]

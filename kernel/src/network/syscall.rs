@@ -241,7 +241,7 @@ pub fn sys_socket_create(tf: &mut Trapframe) -> usize {
 
     let domain = match domain {
         0 | 1 => SocketDomain::Local,
-        2 => SocketDomain::Inet,
+        2 => SocketDomain::Inet4,
         3 => SocketDomain::Inet6,
         _ => return usize::MAX,
     };
@@ -269,7 +269,7 @@ pub fn sys_socket_create(tf: &mut Trapframe) -> usize {
         _ => protocol,
     };
 
-    if matches!(domain, SocketDomain::Inet | SocketDomain::Inet6) {
+    if matches!(domain, SocketDomain::Inet4 | SocketDomain::Inet6) {
         let _ = create_tcp_ip_stack(domain);
     }
 
@@ -279,7 +279,7 @@ pub fn sys_socket_create(tf: &mut Trapframe) -> usize {
             LocalSocket::init_self_weak(&socket);
             socket as Arc<dyn SocketObject>
         }
-        SocketDomain::Inet | SocketDomain::Inet6 => {
+        SocketDomain::Inet4 | SocketDomain::Inet6 => {
             let manager = NetworkManager::get_manager();
             let socket = match protocol {
                 SocketProtocol::Tcp => manager.get_layer("tcp").map(|layer| {
@@ -643,24 +643,37 @@ pub fn sys_socket_accept(tf: &mut Trapframe) -> usize {
         _ => return usize::MAX,
     };
 
-    // Try to downcast to LocalSocket to access accept_blocking
+    // Try to downcast to LocalSocket or TcpSocket
     use crate::network::local::LocalSocket;
 
-    let local_socket = match LocalSocket::from_socket_object(&socket_obj) {
-        Some(socket) => socket,
-        None => {
-            crate::println!("[sys_socket_accept] Not a LocalSocket");
-            return usize::MAX;
+    let accepted_socket = if let Some(local_socket) = LocalSocket::from_socket_object(&socket_obj) {
+        // LocalSocket accept
+        match local_socket.accept_blocking(task.get_id(), tf) {
+            Ok(socket) => socket,
+            Err(e) => {
+                crate::println!(
+                    "[sys_socket_accept] LocalSocket accept_blocking failed: {:?}",
+                    e
+                );
+                return usize::MAX;
+            }
         }
-    };
-
-    // Accept a connection with blocking
-    let accepted_socket = match local_socket.accept_blocking(task.get_id(), tf) {
-        Ok(socket) => socket,
-        Err(e) => {
-            crate::println!("[sys_socket_accept] accept_blocking failed: {:?}", e);
-            return usize::MAX;
+    } else if let Some(tcp_socket) = crate::network::tcp::TcpSocket::from_socket_object(&socket_obj)
+    {
+        // TcpSocket accept
+        match tcp_socket.accept_blocking(task.get_id(), tf) {
+            Ok(socket) => socket,
+            Err(e) => {
+                crate::println!(
+                    "[sys_socket_accept] TcpSocket accept_blocking failed: {:?}",
+                    e
+                );
+                return usize::MAX;
+            }
         }
+    } else {
+        crate::println!("[sys_socket_accept] Not a supported socket type");
+        return usize::MAX;
     };
 
     // Add the accepted socket to handle table
