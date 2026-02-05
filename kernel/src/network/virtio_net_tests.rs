@@ -125,7 +125,7 @@ fn test_arp_request_reply_between_nics() {
 
     // Create ARP layer for eth0
     let eth0_mac = *eth0.mac_address().as_bytes();
-    let arp_layer = ArpLayer::new(eth0_mac, net0_ip());
+    let arp_layer = ArpLayer::new();
 
     // Create ARP request packet
     // eth0 asks: "Who has net1_ip()? Tell net0_ip()"

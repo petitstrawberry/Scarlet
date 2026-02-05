@@ -1490,12 +1490,12 @@ mod tests {
         frame.extend_from_slice(payload); // Payload
 
         // Receive through Ethernet layer
-        let result = ethernet.receive(&frame);
+        let result = ethernet.receive(&frame, None);
         assert!(result.is_ok());
 
         // Extract IP packet and pass to IP layer
         let ip_packet = &frame[14..];
-        let result = ip.receive(ip_packet);
+        let result = ip.receive(ip_packet, None);
         assert!(result.is_ok());
 
         // Verify TCP received the payload
@@ -1833,10 +1833,10 @@ mod tests {
         frame.extend_from_slice(payload);
 
         // Receive through layers
-        assert!(ethernet.receive(&frame).is_ok());
+        assert!(ethernet.receive(&frame, None).is_ok());
 
         let ip_packet = &frame[14..];
-        assert!(ip.receive(ip_packet).is_ok());
+        assert!(ip.receive(ip_packet, None).is_ok());
 
         // Verify TCP received payload
         assert_eq!(tcp.packets_received.load(Ordering::SeqCst), 1);
