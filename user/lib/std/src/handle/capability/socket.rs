@@ -11,7 +11,7 @@ use crate::syscall::{Syscall, syscall1, syscall2, syscall3, syscall4, syscall5};
 #[repr(u32)]
 pub enum SocketDomain {
     Local = 1,
-    Inet = 2,
+    Inet4 = 2,
     Inet6 = 3,
 }
 

@@ -35,7 +35,7 @@ pub extern "C" fn main(_argc: isize, _argv: *const *const u8) -> isize {
 
     // Create TCP socket
     let listen_socket = match Socket::new_with_domain(
-        SocketDomain::Inet,
+        SocketDomain::Inet4,
         SocketType::Stream,
         SocketProtocol::Tcp,
     ) {
