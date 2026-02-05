@@ -799,7 +799,7 @@ impl TcpSocket {
                 self.send_ack(src_ip, header.src_port, ack_seq);
                 self.set_state(TcpState::CloseWait);
                 if let Some(waker) = self.recv_waker.lock().as_ref() {
-                    waker.wake_one();
+                    waker.wake_all();
                 }
             }
             TcpState::FinWait1 => {
@@ -1198,6 +1198,13 @@ impl TcpSocket {
                         })
                         .clone()
                 };
+                let state = self.get_state();
+                if state == TcpState::Closed
+                    || state == TcpState::TimeWait
+                    || state == TcpState::CloseWait
+                {
+                    return Ok(0);
+                }
                 waker.wait(task_id, trapframe);
             }
         }
