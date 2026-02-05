@@ -46,7 +46,6 @@ use crate::arch::Trapframe;
 use crate::network::{
     Inet4SocketAddress, Ipv4Address, LocalSocketAddress, NetworkManager, ShutdownHow,
     SocketAddress, SocketDomain, SocketObject, SocketProtocol, SocketType, local::LocalSocket,
-    tcpip_stack::create_tcp_ip_stack,
 };
 use crate::object::KernelObject;
 use crate::object::handle::{AccessMode, HandleMetadata, HandleType};
@@ -269,10 +268,6 @@ pub fn sys_socket_create(tf: &mut Trapframe) -> usize {
         (SocketType::Raw, SocketProtocol::Default) => SocketProtocol::Raw(0),
         _ => protocol,
     };
-
-    if matches!(domain, SocketDomain::Inet4 | SocketDomain::Inet6) {
-        let _ = create_tcp_ip_stack(domain);
-    }
 
     let socket = match domain {
         SocketDomain::Local => {

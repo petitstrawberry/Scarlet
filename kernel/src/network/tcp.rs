@@ -426,12 +426,17 @@ impl TcpSocket {
             return;
         }
 
-        if let Some(ip_layer) = get_network_manager().get_layer("ip") {
-            if let Some(ip) = ip_layer
-                .as_any()
-                .downcast_ref::<crate::network::ipv4::Ipv4Layer>()
-            {
-                *local_ip = Some(ip.get_local_ip());
+        let manager = get_network_manager();
+        if let Some(default_iface) = manager.get_default_interface() {
+            if let Some(ip_layer) = manager.get_layer("ip") {
+                if let Some(ip) = ip_layer
+                    .as_any()
+                    .downcast_ref::<crate::network::ipv4::Ipv4Layer>()
+                {
+                    if let Some(addr) = ip.get_primary_ip(default_iface.name()) {
+                        *local_ip = Some(addr);
+                    }
+                }
             }
         }
     }
@@ -1893,6 +1898,25 @@ impl TcpLayer {
             stats: RwLock::new(NetworkLayerStats::default()),
             self_weak: weak.clone(),
         })
+    }
+
+    /// Initialize and register the TCP layer with NetworkManager
+    ///
+    /// Registers with NetworkManager and registers itself with Ipv4Layer
+    /// for protocol number 6 (TCP).
+    ///
+    /// # Panics
+    ///
+    /// Panics if Ipv4Layer is not registered (must be initialized first).
+    pub fn init(network_manager: &crate::network::NetworkManager) {
+        let layer = Self::new();
+        network_manager.register_layer("tcp", layer.clone());
+
+        // Register with IPv4 layer for TCP packets (protocol 6)
+        let ipv4 = network_manager
+            .get_layer("ip")
+            .expect("Ipv4Layer must be initialized before TcpLayer");
+        ipv4.register_protocol(crate::network::ipv4::protocol::TCP as u16, layer);
     }
 
     pub fn create_socket(&self) -> Arc<TcpSocket> {

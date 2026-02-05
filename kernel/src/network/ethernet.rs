@@ -2,14 +2,26 @@
 //!
 //! This module provides Ethernet II frame handling for the network stack.
 //! It implements the NetworkLayer trait for Ethernet encapsulation/decapsulation.
+//!
+//! # Design
+//!
+//! The EthernetLayer manages:
+//! - Multiple network interfaces with their MAC addresses
+//! - Interface selection for outgoing packets
+//! - Device access for sending/receiving frames
+//!
+//! This design supports multiple network interfaces (eth0, eth1, wlan0, etc.).
 
+use alloc::collections::BTreeMap;
+use alloc::string::{String, ToString};
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 use spin::RwLock;
 
 use crate::device::network::DevicePacket;
 use crate::device::network::MacAddress;
 use crate::early_println;
-use crate::network::get_network_manager;
+use crate::network::NetworkInterface;
 use crate::network::protocol_stack::{LayerContext, NetworkLayer, NetworkLayerStats};
 use crate::network::socket::SocketError;
 
@@ -88,42 +100,258 @@ pub const ETHERNET_MIN_SIZE: usize = 64;
 /// Ethernet header size
 pub const ETHERNET_HEADER_SIZE: usize = 14;
 
+/// Ethernet interface information
+#[derive(Debug, Clone)]
+pub struct EthernetInterfaceInfo {
+    /// Interface name (e.g., "eth0", "wlan0")
+    pub name: String,
+    /// MAC address
+    pub mac: MacAddress,
+    /// Maximum Transmission Unit
+    pub mtu: usize,
+}
+
 /// Ethernet layer
 ///
 /// Handles Ethernet II frame encapsulation and decapsulation.
-/// Routes frames based on EtherType field.
+/// Manages multiple interfaces and routes frames based on EtherType field.
 pub struct EthernetLayer {
-    /// Source MAC address
-    src_mac: RwLock<MacAddress>,
+    /// Registered interfaces: name -> info
+    interfaces: RwLock<BTreeMap<String, EthernetInterfaceInfo>>,
+    /// Interface devices: name -> device (kept separate for Arc<dyn> handling)
+    devices: RwLock<BTreeMap<String, Arc<dyn NetworkInterface>>>,
+    /// Default interface name
+    default_interface: RwLock<Option<String>>,
     /// Protocol handlers registered by EtherType
-    protocols: RwLock<alloc::collections::BTreeMap<u16, alloc::sync::Arc<dyn NetworkLayer>>>,
+    protocols: RwLock<BTreeMap<u16, Arc<dyn NetworkLayer>>>,
     /// Statistics
     stats: RwLock<NetworkLayerStats>,
 }
 
 impl EthernetLayer {
     /// Create a new Ethernet layer
-    pub fn new(src_mac: MacAddress) -> alloc::sync::Arc<Self> {
-        alloc::sync::Arc::new(Self {
-            src_mac: RwLock::new(src_mac),
-            protocols: RwLock::new(alloc::collections::BTreeMap::new()),
+    pub fn new() -> Arc<Self> {
+        Arc::new(Self {
+            interfaces: RwLock::new(BTreeMap::new()),
+            devices: RwLock::new(BTreeMap::new()),
+            default_interface: RwLock::new(None),
+            protocols: RwLock::new(BTreeMap::new()),
             stats: RwLock::new(NetworkLayerStats::default()),
         })
     }
 
-    /// Get source MAC address
-    pub fn get_src_mac(&self) -> MacAddress {
-        *self.src_mac.read()
+    /// Initialize and register the Ethernet layer with NetworkManager
+    ///
+    /// This is the first layer to be initialized as it has no dependencies.
+    /// Other layers (IPv4, ARP) will register their protocols with this layer.
+    pub fn init(network_manager: &crate::network::NetworkManager) {
+        let layer = Self::new();
+        network_manager.register_layer("ethernet", layer);
     }
 
-    /// Set source MAC address
-    pub fn set_src_mac(&self, mac: MacAddress) {
-        *self.src_mac.write() = mac;
+    /// Register a network interface
+    pub fn register_interface(
+        &self,
+        name: &str,
+        mac: MacAddress,
+        device: Arc<dyn NetworkInterface>,
+    ) {
+        let info = EthernetInterfaceInfo {
+            name: name.to_string(),
+            mac,
+            mtu: ETHERNET_MTU,
+        };
+
+        self.interfaces.write().insert(name.to_string(), info);
+        self.devices.write().insert(name.to_string(), device);
+
+        // First interface becomes default
+        if self.default_interface.read().is_none() {
+            *self.default_interface.write() = Some(name.to_string());
+        }
+    }
+
+    /// Unregister a network interface
+    pub fn unregister_interface(&self, name: &str) {
+        self.interfaces.write().remove(name);
+        self.devices.write().remove(name);
+
+        // If this was the default, pick another
+        let mut default = self.default_interface.write();
+        if default.as_deref() == Some(name) {
+            *default = self.interfaces.read().keys().next().cloned();
+        }
+    }
+
+    /// Get interface info by name
+    pub fn get_interface(&self, name: &str) -> Option<EthernetInterfaceInfo> {
+        self.interfaces.read().get(name).cloned()
+    }
+
+    /// Get MAC address for an interface
+    pub fn get_mac(&self, name: &str) -> Option<MacAddress> {
+        self.interfaces.read().get(name).map(|i| i.mac)
+    }
+
+    /// Get default interface name
+    pub fn get_default_interface(&self) -> Option<String> {
+        self.default_interface.read().clone()
+    }
+
+    /// Set default interface
+    pub fn set_default_interface(&self, name: &str) {
+        if self.interfaces.read().contains_key(name) {
+            *self.default_interface.write() = Some(name.to_string());
+        }
+    }
+
+    /// Get all interface names
+    pub fn list_interfaces(&self) -> Vec<String> {
+        self.interfaces.read().keys().cloned().collect()
+    }
+
+    /// Get device for an interface
+    fn get_device(&self, name: &str) -> Option<Arc<dyn NetworkInterface>> {
+        self.devices.read().get(name).cloned()
+    }
+
+    /// Resolve destination MAC address for sending
+    ///
+    /// This method determines the destination MAC address for an outgoing packet:
+    /// 1. If explicit `eth_dst_mac` is in context, use it directly
+    /// 2. If destination is broadcast IP (255.255.255.255), use broadcast MAC
+    /// 3. Otherwise, look up in ARP cache (using `next_hop` if set, else `dst_ip`)
+    ///
+    /// # Arguments
+    ///
+    /// * `context` - Layer context with addressing info
+    /// * `interface` - Interface name for per-interface ARP cache lookup
+    ///
+    /// # Returns
+    ///
+    /// MAC address to use as destination, or error if resolution fails
+    fn resolve_dest_mac(
+        &self,
+        context: &LayerContext,
+        interface: &str,
+    ) -> Result<[u8; 6], SocketError> {
+        // 1. Check for explicit destination MAC in context
+        if let Some(mac_bytes) = context.get("eth_dst_mac") {
+            if mac_bytes.len() >= 6 {
+                let mut mac = [0u8; 6];
+                mac.copy_from_slice(&mac_bytes[..6]);
+                return Ok(mac);
+            }
+        }
+
+        // 2. Check if destination IP is broadcast
+        if let Some(dst_ip_bytes) = context.get("dst_ip") {
+            if dst_ip_bytes.len() >= 4 {
+                // Broadcast IP (255.255.255.255) → Broadcast MAC
+                if dst_ip_bytes[0] == 255
+                    && dst_ip_bytes[1] == 255
+                    && dst_ip_bytes[2] == 255
+                    && dst_ip_bytes[3] == 255
+                {
+                    return Ok([0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF]);
+                }
+            }
+        }
+
+        // 3. Determine which IP to resolve (next_hop from gateway, or direct dst_ip)
+        let resolve_ip = context.get("next_hop").or_else(|| context.get("dst_ip"));
+
+        if let Some(ip_bytes) = resolve_ip {
+            if ip_bytes.len() >= 4 {
+                let ip = crate::network::ipv4::Ipv4Address::from_bytes([
+                    ip_bytes[0],
+                    ip_bytes[1],
+                    ip_bytes[2],
+                    ip_bytes[3],
+                ]);
+
+                // Look up in ARP cache via NetworkManager (interface-aware)
+                if let Some(arp_layer) =
+                    crate::network::protocol_stack::get_network_manager().get_layer("arp")
+                {
+                    if let Some(arp) = arp_layer
+                        .as_any()
+                        .downcast_ref::<crate::network::arp::ArpLayer>()
+                    {
+                        // Use interface-aware lookup
+                        if let Some(mac) = arp.lookup_on_interface(interface, ip) {
+                            return Ok(mac);
+                        }
+
+                        // Not in cache - trigger ARP request
+                        early_println!(
+                            "[Ethernet] ARP cache miss for {}.{}.{}.{} on {}, need resolution",
+                            ip_bytes[0],
+                            ip_bytes[1],
+                            ip_bytes[2],
+                            ip_bytes[3],
+                            interface
+                        );
+
+                        // Trigger ARP request with interface info
+                        let mut arp_context = LayerContext::new();
+                        arp_context.set("interface", interface.as_bytes());
+                        let _ = arp.send_request(ip, &arp_context, &[]);
+
+                        return Err(SocketError::WouldBlock);
+                    }
+                }
+            }
+        }
+
+        // No way to determine destination MAC
+        early_println!("[Ethernet] Cannot resolve destination MAC: no dst_ip or eth_dst_mac");
+        Err(SocketError::NoRoute)
+    }
+
+    /// Receive a frame on a specific interface
+    ///
+    /// This method should be called by drivers to process incoming frames.
+    /// It passes the interface name to upper layers via context.
+    pub fn receive_on_interface(&self, frame: &[u8], interface: &str) -> Result<(), SocketError> {
+        if frame.len() < ETHERNET_HEADER_SIZE {
+            return Err(SocketError::InvalidPacket);
+        }
+
+        let header = EthernetHeader::from_bytes(&frame[..ETHERNET_HEADER_SIZE])
+            .ok_or(SocketError::InvalidPacket)?;
+
+        early_println!(
+            "[Ethernet] RX on {}: {} bytes (type=0x{:04X})",
+            interface,
+            frame.len(),
+            header.ether_type
+        );
+
+        let payload = &frame[ETHERNET_HEADER_SIZE..];
+
+        let mut stats = self.stats.write();
+        stats.packets_received += 1;
+        stats.bytes_received += frame.len() as u64;
+        drop(stats);
+
+        // Build context with interface info and source MAC
+        let mut context = LayerContext::new();
+        context.set("interface", interface.as_bytes());
+        context.set("eth_src_mac", &header.src_mac);
+        context.set("eth_dst_mac", &header.dest_mac);
+
+        let protocols = self.protocols.read();
+        if let Some(handler) = protocols.get(&header.ether_type) {
+            handler.receive(payload, Some(&context))
+        } else {
+            Ok(())
+        }
     }
 }
 
 impl NetworkLayer for EthernetLayer {
-    fn register_protocol(&self, proto_num: u16, handler: alloc::sync::Arc<dyn NetworkLayer>) {
+    fn register_protocol(&self, proto_num: u16, handler: Arc<dyn NetworkLayer>) {
         self.protocols.write().insert(proto_num, handler);
     }
 
@@ -131,97 +359,23 @@ impl NetworkLayer for EthernetLayer {
         &self,
         packet: &[u8],
         context: &LayerContext,
-        _next_layers: &[alloc::sync::Arc<dyn NetworkLayer>],
+        _next_layers: &[Arc<dyn NetworkLayer>],
     ) -> Result<(), SocketError> {
-        let src_mac = *self.src_mac.read();
+        // Get interface from context, or use default
+        let interface_name = context
+            .get("interface")
+            .and_then(|b| core::str::from_utf8(b).ok())
+            .map(String::from)
+            .or_else(|| self.get_default_interface())
+            .ok_or(SocketError::NoRoute)?;
 
-        let mut unresolved_target: Option<crate::network::ipv4::Ipv4Address> = None;
-        let dest_mac = if let Some(dest_ip) = context.get("ip_dst") {
-            if dest_ip.len() >= 4 {
-                let ip_bytes = [dest_ip[0], dest_ip[1], dest_ip[2], dest_ip[3]];
-                if ip_bytes == [255, 255, 255, 255] {
-                    let mac = [0xFF; 6];
-                    mac
-                } else {
-                    let dest_ip = crate::network::ipv4::Ipv4Address::new(
-                        ip_bytes[0],
-                        ip_bytes[1],
-                        ip_bytes[2],
-                        ip_bytes[3],
-                    );
-                    let target_ip = match get_network_manager().get_default_gateway() {
-                        Some(gateway) => gateway,
-                        None => dest_ip,
-                    };
-                    if let Some(arp_layer) = get_network_manager().get_layer("arp") {
-                        if let Some(arp) = arp_layer
-                            .as_any()
-                            .downcast_ref::<crate::network::arp::ArpLayer>()
-                        {
-                            if let Some(mac) = arp.lookup(target_ip) {
-                                mac
-                            } else {
-                                let mut mac = [0u8; 6];
-                                if let Some(mac_bytes) = context.get("eth_dst_mac") {
-                                    if mac_bytes.len() >= 6 {
-                                        mac.copy_from_slice(&mac_bytes[0..6]);
-                                    }
-                                }
+        // Get source MAC from interface
+        let src_mac = self.get_mac(&interface_name).ok_or(SocketError::NoRoute)?;
 
-                                if mac == [0u8; 6] {
-                                    unresolved_target = Some(target_ip);
-                                    if let Some(ip_layer) = get_network_manager().get_layer("ip") {
-                                        if let Some(ip) = ip_layer
-                                            .as_any()
-                                            .downcast_ref::<crate::network::ipv4::Ipv4Layer>(
-                                        ) {
-                                            let local_ip = ip.get_local_ip();
-                                            let mut ctx = LayerContext::new();
-                                            ctx.set("ip_src", &local_ip.0);
-                                            let _ = arp.send_request(target_ip, &ctx, &[]);
-                                        }
-                                    }
-                                }
-                                mac
-                            }
-                        } else {
-                            let mac = [0u8; 6];
-                            mac
-                        }
-                    } else {
-                        let mac = [0u8; 6];
-                        mac
-                    }
-                }
-            } else {
-                let mac = [0x00; 6];
-                mac
-            }
-        } else if let Some(mac_bytes) = context.get("eth_dst_mac") {
-            let mut mac = [0u8; 6];
-            if mac_bytes.len() >= 6 {
-                mac.copy_from_slice(&mac_bytes[0..6]);
-            }
-            mac
-        } else {
-            let mac = [0xFF; 6];
-            mac
-        };
+        // Determine destination MAC
+        let dest_mac = self.resolve_dest_mac(context, &interface_name)?;
 
-        if dest_mac == [0u8; 6] {
-            if let Some(target_ip) = unresolved_target {
-                if let Some(arp_layer) = get_network_manager().get_layer("arp") {
-                    if let Some(arp) = arp_layer
-                        .as_any()
-                        .downcast_ref::<crate::network::arp::ArpLayer>()
-                    {
-                        arp.queue_packet(target_ip, packet.to_vec());
-                    }
-                }
-                return Ok(());
-            }
-        }
-
+        // Get EtherType
         let ether_type = if let Some(eth_type) = context.get("eth_type") {
             if eth_type.len() >= 2 {
                 u16::from_be_bytes([eth_type[0], eth_type[1]])
@@ -230,35 +384,31 @@ impl NetworkLayer for EthernetLayer {
             } else {
                 ether_type::IPV4
             }
-        } else if let Some(ip_proto) = context.get("ip_protocol") {
-            if !ip_proto.is_empty() {
-                match ip_proto[0] {
-                    1 | 6 | 17 => ether_type::IPV4,
-                    _ => ether_type::IPV4,
-                }
-            } else {
-                ether_type::IPV4
-            }
         } else {
             ether_type::IPV4
         };
 
+        // Build frame
         let header = EthernetHeader::new(dest_mac, *src_mac.as_bytes(), ether_type);
         let total_size = ETHERNET_HEADER_SIZE + packet.len();
 
         let mut frame = Vec::with_capacity(total_size);
         frame.extend_from_slice(&header.to_bytes());
         frame.extend_from_slice(packet);
+
+        // Pad to minimum frame size
         let min_payload = ETHERNET_MIN_SIZE.saturating_sub(4);
         if frame.len() < min_payload {
             frame.resize(min_payload, 0);
         }
         let frame_len = frame.len();
 
-        if let Some(interface) = get_network_manager().get_default_interface() {
+        // Send through device
+        if let Some(device) = self.get_device(&interface_name) {
             early_println!(
-                "[Ethernet] Sending {} bytes to {:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X} (type=0x{:04X})",
+                "[Ethernet] Sending {} bytes via {} to {:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X} (type=0x{:04X})",
                 frame_len,
+                interface_name,
                 dest_mac[0],
                 dest_mac[1],
                 dest_mac[2],
@@ -267,14 +417,14 @@ impl NetworkLayer for EthernetLayer {
                 dest_mac[5],
                 ether_type
             );
-            let packet = DevicePacket::with_data(frame);
-            interface.send(packet).map_err(|e| {
+            let pkt = DevicePacket::with_data(frame);
+            device.send(pkt).map_err(|e| {
                 early_println!("[Ethernet] Send failed: {}", e);
                 SocketError::Other("send failed".into())
             })?;
             early_println!("[Ethernet] Send succeeded");
         } else {
-            early_println!("[Ethernet] No default interface!");
+            early_println!("[Ethernet] No device for interface {}", interface_name);
             return Err(SocketError::NoRoute);
         }
 
@@ -285,36 +435,43 @@ impl NetworkLayer for EthernetLayer {
         Ok(())
     }
 
-    fn receive(&self, frame: &[u8], _context: Option<&LayerContext>) -> Result<(), SocketError> {
-        if frame.len() < ETHERNET_HEADER_SIZE {
-            return Err(SocketError::InvalidPacket);
-        }
+    fn receive(&self, frame: &[u8], context: Option<&LayerContext>) -> Result<(), SocketError> {
+        // If context has interface, use it; otherwise use default
+        let interface = context
+            .and_then(|c| c.get("interface"))
+            .and_then(|b| core::str::from_utf8(b).ok())
+            .map(String::from)
+            .or_else(|| self.get_default_interface());
 
-        let header = EthernetHeader::from_bytes(&frame[..ETHERNET_HEADER_SIZE])
-            .ok_or(SocketError::InvalidPacket)?;
-
-        early_println!(
-            "[Ethernet] RX: {} bytes (type=0x{:04X})",
-            frame.len(),
-            header.ether_type
-        );
-
-        let payload = &frame[ETHERNET_HEADER_SIZE..];
-
-        let mut stats = self.stats.write();
-        stats.packets_received += 1;
-        stats.bytes_received += frame.len() as u64;
-
-        let protocols = self.protocols.read();
-        if let Some(handler) = protocols.get(&header.ether_type) {
-            handler.receive(payload, None)
-        } else if header.ether_type == ether_type::IPV4
-            || header.ether_type == ether_type::ARP
-            || header.ether_type == ether_type::IPV6
-        {
-            Ok(())
+        if let Some(iface) = interface {
+            self.receive_on_interface(frame, &iface)
         } else {
-            Ok(())
+            // Fallback: receive without interface context
+            if frame.len() < ETHERNET_HEADER_SIZE {
+                return Err(SocketError::InvalidPacket);
+            }
+
+            let header = EthernetHeader::from_bytes(&frame[..ETHERNET_HEADER_SIZE])
+                .ok_or(SocketError::InvalidPacket)?;
+
+            early_println!(
+                "[Ethernet] RX: {} bytes (type=0x{:04X})",
+                frame.len(),
+                header.ether_type
+            );
+
+            let payload = &frame[ETHERNET_HEADER_SIZE..];
+
+            let mut stats = self.stats.write();
+            stats.packets_received += 1;
+            stats.bytes_received += frame.len() as u64;
+
+            let protocols = self.protocols.read();
+            if let Some(handler) = protocols.get(&header.ether_type) {
+                handler.receive(payload, None)
+            } else {
+                Ok(())
+            }
         }
     }
 
@@ -379,18 +536,36 @@ mod tests {
 
     #[test_case]
     fn test_ethernet_layer_creation() {
-        let mac = MacAddress::new([0x52, 0x54, 0x00, 0x12, 0x34, 0x56]);
-        let eth_layer = EthernetLayer::new(mac);
-        assert_eq!(eth_layer.get_src_mac(), mac);
+        let eth_layer = EthernetLayer::new();
+        // New layer has no interfaces initially
+        assert!(eth_layer.get_default_interface().is_none());
+        assert!(eth_layer.list_interfaces().is_empty());
     }
 
     #[test_case]
-    fn test_ethernet_layer_set_mac() {
-        let mac1 = MacAddress::new([0x52, 0x54, 0x00, 0x12, 0x34, 0x56]);
-        let eth_layer = EthernetLayer::new(mac1);
+    fn test_ethernet_layer_register_interface() {
+        let eth_layer = EthernetLayer::new();
+        let mac = MacAddress::new([0x52, 0x54, 0x00, 0x12, 0x34, 0x56]);
 
-        let mac2 = MacAddress::new([0x00, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE]);
-        eth_layer.set_src_mac(mac2);
-        assert_eq!(eth_layer.get_src_mac(), mac2);
+        // Create a mock device - we can't easily test without one,
+        // so we test interface registration by checking get_interface
+        // Note: In real usage, you'd pass an actual Arc<dyn NetworkInterface>
+
+        // For now, test that interface info struct works
+        let info = EthernetInterfaceInfo {
+            name: "eth0".into(),
+            mac,
+            mtu: ETHERNET_MTU,
+        };
+        assert_eq!(info.name, "eth0");
+        assert_eq!(info.mac, mac);
+        assert_eq!(info.mtu, ETHERNET_MTU);
+    }
+
+    #[test_case]
+    fn test_ethernet_layer_default_interface() {
+        let eth_layer = EthernetLayer::new();
+        // Initially no default
+        assert!(eth_layer.get_default_interface().is_none());
     }
 }

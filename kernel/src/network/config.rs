@@ -7,17 +7,19 @@
 use alloc::string::String;
 use spin::Mutex;
 
-use crate::network::ipv4::Ipv4Address;
+use crate::network::ipv4::{Ipv4Address, Ipv4AddressInfo};
 use crate::network::{NetworkManager, get_network_manager};
 
 #[derive(Debug, Default)]
 struct PendingNetworkConfig {
     ip: Option<Ipv4Address>,
+    netmask: Option<Ipv4Address>,
     iface: Option<String>,
 }
 
 static PENDING_CONFIG: Mutex<PendingNetworkConfig> = Mutex::new(PendingNetworkConfig {
     ip: None,
+    netmask: None,
     iface: None,
 });
 
@@ -118,16 +120,32 @@ pub fn apply_cmdline_config(cmdline: &str) {
 }
 
 pub fn set_interface_ip(name: &str, ip: Ipv4Address) -> Result<(), &'static str> {
-    let network_manager = get_network_manager();
-    if let Some(interface) = network_manager.get_interface(name) {
-        interface.set_ip_address(ip);
-        if crate::network::protocol_stack::get_network_manager()
-            .get_layer("ip")
-            .is_none()
-        {
-            crate::network::tcpip_stack::init_tcp_ip_stack();
-        }
+    set_interface_ip_with_mask(name, ip, Ipv4Address::new(255, 255, 255, 0))
+}
 
+/// Set IP address with netmask on a network interface
+pub fn set_interface_ip_with_mask(
+    name: &str,
+    ip: Ipv4Address,
+    netmask: Ipv4Address,
+) -> Result<(), &'static str> {
+    let network_manager = get_network_manager();
+
+    // Ensure network stack is initialized (NetworkManager::init sets up all layers)
+    if crate::network::protocol_stack::get_network_manager()
+        .get_layer("ip")
+        .is_none()
+    {
+        // Layers are already initialized by NetworkManager::init()
+        // If not present, something is wrong with initialization order
+        return Err("Network stack not initialized");
+    }
+
+    if let Some(interface) = network_manager.get_interface(name) {
+        // Set IP on the interface object (for backward compatibility)
+        interface.set_ip_address(ip);
+
+        // Add address to Ipv4Layer
         if let Some(ip_layer) =
             crate::network::protocol_stack::get_network_manager().get_layer("ip")
         {
@@ -135,25 +153,34 @@ pub fn set_interface_ip(name: &str, ip: Ipv4Address) -> Result<(), &'static str>
                 .as_any()
                 .downcast_ref::<crate::network::ipv4::Ipv4Layer>()
             {
+                // Calculate broadcast address from IP and netmask
+                let broadcast = Ipv4Address::new(
+                    ip.0[0] | !netmask.0[0],
+                    ip.0[1] | !netmask.0[1],
+                    ip.0[2] | !netmask.0[2],
+                    ip.0[3] | !netmask.0[3],
+                );
+
+                let addr_info = Ipv4AddressInfo {
+                    address: ip,
+                    netmask,
+                    broadcast: Some(broadcast),
+                    is_primary: true,
+                };
+
+                // Remove old addresses and add new one
+                // (For now, just add - in future could track and replace)
+                ipv4.add_address(name, addr_info);
+
                 crate::early_println!(
-                    "[network] set {} IP to {}.{}.{}.{}",
+                    "[network] {} IP set to {}.{}.{}.{}/{}",
                     name,
                     ip.0[0],
                     ip.0[1],
                     ip.0[2],
-                    ip.0[3]
+                    ip.0[3],
+                    netmask_to_prefix(netmask)
                 );
-                ipv4.set_local_ip(ip);
-                if let Some(arp_layer) =
-                    crate::network::protocol_stack::get_network_manager().get_layer("arp")
-                {
-                    if let Some(arp) = arp_layer
-                        .as_any()
-                        .downcast_ref::<crate::network::arp::ArpLayer>()
-                    {
-                        arp.set_local_ip(ip);
-                    }
-                }
             } else {
                 crate::early_println!("[network] set {} IP failed: no IPv4 layer", name);
             }
@@ -163,14 +190,21 @@ pub fn set_interface_ip(name: &str, ip: Ipv4Address) -> Result<(), &'static str>
         return Ok(());
     }
 
+    // Interface not ready yet, save for later
     let mut pending = PENDING_CONFIG.lock();
     pending.ip = Some(ip);
+    pending.netmask = Some(netmask);
     pending.iface = Some(String::from(name));
     Ok(())
 }
 
+/// Convert netmask to CIDR prefix length
+fn netmask_to_prefix(mask: Ipv4Address) -> u8 {
+    let bits = u32::from_be_bytes(mask.0);
+    bits.count_ones() as u8
+}
+
 pub fn apply_pending_ip_for_interface(name: &str) {
-    let network_manager = get_network_manager();
     let mut pending = PENDING_CONFIG.lock();
 
     if pending.ip.is_none() {
@@ -183,11 +217,15 @@ pub fn apply_pending_ip_for_interface(name: &str) {
         }
     }
 
-    if let Some(interface) = network_manager.get_interface(name) {
-        if let Some(ip) = pending.ip {
-            interface.set_ip_address(ip);
-        }
-        pending.ip = None;
-        pending.iface = None;
+    let ip = pending.ip.take();
+    let netmask = pending
+        .netmask
+        .take()
+        .unwrap_or(Ipv4Address::new(255, 255, 255, 0));
+    pending.iface = None;
+    drop(pending);
+
+    if let Some(ip) = ip {
+        let _ = set_interface_ip_with_mask(name, ip, netmask);
     }
 }

@@ -41,7 +41,6 @@ pub mod protocol_stack;
 pub mod socket;
 pub mod syscall;
 pub mod tcp;
-pub mod tcpip_stack;
 pub mod udp;
 #[cfg(target_arch = "riscv64")]
 pub mod virtio_net_tests;
@@ -184,8 +183,28 @@ impl NetworkManager {
     }
 
     /// Initialize the global NetworkManager
+    ///
+    /// Initializes all protocol layers in dependency order:
+    /// 1. Ethernet (no dependencies)
+    /// 2. IPv4, ARP (depend on Ethernet)
+    /// 3. ICMP, UDP, TCP (depend on IPv4)
     pub fn init() -> &'static NetworkManager {
-        GLOBAL_NETWORK_MANAGER.call_once(|| NetworkManager::new())
+        let manager = GLOBAL_NETWORK_MANAGER.call_once(|| NetworkManager::new());
+
+        // Initialize protocol layers in dependency order
+        // Layer 1: Ethernet (no dependencies)
+        crate::network::ethernet::EthernetLayer::init(manager);
+
+        // Layer 2: IPv4 and ARP (depend on Ethernet)
+        crate::network::ipv4::Ipv4Layer::init(manager);
+        crate::network::arp::ArpLayer::init(manager);
+
+        // Layer 3: ICMP, UDP, TCP (depend on IPv4)
+        crate::network::icmp::IcmpLayer::init(manager);
+        crate::network::udp::UdpLayer::init(manager);
+        crate::network::tcp::TcpLayer::init(manager);
+
+        manager
     }
 
     // ===================================================================
@@ -202,9 +221,15 @@ impl NetworkManager {
             *default = Some(String::from(name));
         }
 
+        let interface_clone = interface.clone();
         self.interfaces
             .write()
             .insert(String::from(name), interface);
+
+        // Configure protocol layers when first interface is registered
+        if self.interfaces.read().len() == 1 {
+            self.configure_protocol_layers_with_interface(interface_clone);
+        }
 
         Ok(())
     }
@@ -226,6 +251,35 @@ impl NetworkManager {
 
     pub fn list_interfaces(&self) -> Vec<String> {
         self.interfaces.read().keys().cloned().collect()
+    }
+
+    // ===================================================================
+    // Protocol Layer Configuration
+    // ===================================================================
+
+    fn configure_protocol_layers_with_interface(&self, interface: Arc<dyn NetworkInterface>) {
+        let local_ip = interface.ip_address();
+        let interface_name = interface.name();
+
+        // Configure IP layer with local IP address
+        if let Some(ip_layer) = self.get_layer("ip") {
+            if let Some(ip) = ip_layer
+                .as_any()
+                .downcast_ref::<crate::network::ipv4::Ipv4Layer>()
+            {
+                if let Some(local_ip_addr) = local_ip {
+                    ip.add_address(
+                        interface_name,
+                        crate::network::ipv4::Ipv4AddressInfo {
+                            address: local_ip_addr,
+                            netmask: crate::network::ipv4::Ipv4Address::new(255, 255, 255, 0),
+                            broadcast: None,
+                            is_primary: true,
+                        },
+                    );
+                }
+            }
+        }
     }
 
     // ===================================================================

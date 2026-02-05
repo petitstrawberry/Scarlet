@@ -2,12 +2,22 @@
 //!
 //! This module provides IPv4 packet handling for the network stack.
 //! It implements the NetworkLayer trait for IPv4 encapsulation/decapsulation.
+//!
+//! # Design
+//!
+//! The Ipv4Layer manages:
+//! - Multiple IPv4 addresses per interface (primary + secondary)
+//! - Routing table for destination-based forwarding
+//! - Source IP selection based on routing decisions
+//!
+//! This design supports multiple network interfaces with multiple IP addresses each.
 
+use alloc::collections::BTreeMap;
+use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use spin::RwLock;
 
 use crate::early_println;
-use crate::network::ethernet::ETHERNET_HEADER_SIZE;
 use crate::network::protocol_stack::{
     LayerContext, NetworkLayer, NetworkLayerStats, get_network_manager,
 };
@@ -188,15 +198,45 @@ pub mod protocol {
     pub const IPV6: u8 = 41;
 }
 
+/// IPv4 address information for an interface
+#[derive(Debug, Clone)]
+pub struct Ipv4AddressInfo {
+    /// The IPv4 address
+    pub address: Ipv4Address,
+    /// Network mask
+    pub netmask: Ipv4Address,
+    /// Broadcast address (optional)
+    pub broadcast: Option<Ipv4Address>,
+    /// Whether this is the primary address for the interface
+    pub is_primary: bool,
+}
+
+/// Routing table entry
+#[derive(Debug, Clone)]
+pub struct RouteEntry {
+    /// Destination network
+    pub destination: Ipv4Address,
+    /// Network mask
+    pub netmask: Ipv4Address,
+    /// Gateway (None for directly connected networks)
+    pub gateway: Option<Ipv4Address>,
+    /// Outgoing interface name
+    pub interface: String,
+    /// Route metric (lower is preferred)
+    pub metric: u32,
+}
+
 /// IPv4 layer
 ///
 /// Handles IPv4 packet encapsulation and decapsulation.
-/// Routes packets based on protocol field.
+/// Manages multiple addresses per interface and routing table.
 pub struct Ipv4Layer {
-    /// Local IP address
-    local_ip: RwLock<Ipv4Address>,
+    /// Interface name -> list of IPv4 addresses
+    addresses: RwLock<BTreeMap<String, Vec<Ipv4AddressInfo>>>,
+    /// Routing table (ordered by specificity)
+    routing_table: RwLock<Vec<RouteEntry>>,
     /// Protocol handlers registered by protocol number
-    protocols: RwLock<alloc::collections::BTreeMap<u8, alloc::sync::Arc<dyn NetworkLayer>>>,
+    protocols: RwLock<BTreeMap<u8, alloc::sync::Arc<dyn NetworkLayer>>>,
     /// Statistics
     stats: RwLock<NetworkLayerStats>,
     /// Default TTL
@@ -205,23 +245,157 @@ pub struct Ipv4Layer {
 
 impl Ipv4Layer {
     /// Create a new IPv4 layer
-    pub fn new(local_ip: Ipv4Address) -> alloc::sync::Arc<Self> {
+    pub fn new() -> alloc::sync::Arc<Self> {
         alloc::sync::Arc::new(Self {
-            local_ip: RwLock::new(local_ip),
-            protocols: RwLock::new(alloc::collections::BTreeMap::new()),
+            addresses: RwLock::new(BTreeMap::new()),
+            routing_table: RwLock::new(Vec::new()),
+            protocols: RwLock::new(BTreeMap::new()),
             stats: RwLock::new(NetworkLayerStats::default()),
             default_ttl: 64,
         })
     }
 
-    /// Get local IP address
-    pub fn get_local_ip(&self) -> Ipv4Address {
-        *self.local_ip.read()
+    /// Initialize and register the IPv4 layer with NetworkManager
+    ///
+    /// Registers with NetworkManager and registers itself with EthernetLayer
+    /// for EtherType 0x0800 (IPv4).
+    ///
+    /// # Panics
+    ///
+    /// Panics if EthernetLayer is not registered (must be initialized first).
+    pub fn init(network_manager: &crate::network::NetworkManager) {
+        let layer = Self::new();
+        network_manager.register_layer("ip", layer.clone());
+
+        // Register with Ethernet layer for IPv4 packets (EtherType 0x0800)
+        let ethernet = network_manager
+            .get_layer("ethernet")
+            .expect("EthernetLayer must be initialized before Ipv4Layer");
+        ethernet.register_protocol(crate::network::ethernet::ether_type::IPV4, layer);
     }
 
-    /// Set local IP address
-    pub fn set_local_ip(&self, ip: Ipv4Address) {
-        *self.local_ip.write() = ip;
+    /// Add an IPv4 address to an interface
+    pub fn add_address(&self, interface: &str, info: Ipv4AddressInfo) {
+        let mut addrs = self.addresses.write();
+        addrs
+            .entry(interface.to_string())
+            .or_insert_with(Vec::new)
+            .push(info);
+    }
+
+    /// Remove an IPv4 address from an interface
+    pub fn remove_address(&self, interface: &str, ip: Ipv4Address) {
+        let mut addrs = self.addresses.write();
+        if let Some(list) = addrs.get_mut(interface) {
+            list.retain(|a| a.address != ip);
+        }
+    }
+
+    /// Get all addresses for an interface
+    pub fn get_addresses(&self, interface: &str) -> Vec<Ipv4AddressInfo> {
+        self.addresses
+            .read()
+            .get(interface)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    /// Get primary IP address for an interface
+    pub fn get_primary_ip(&self, interface: &str) -> Option<Ipv4Address> {
+        self.addresses
+            .read()
+            .get(interface)?
+            .iter()
+            .find(|a| a.is_primary)
+            .map(|a| a.address)
+    }
+
+    /// Add a route to the routing table
+    pub fn add_route(&self, entry: RouteEntry) {
+        let mut table = self.routing_table.write();
+        table.push(entry);
+        // Sort by netmask specificity (more specific routes first)
+        table.sort_by(|a, b| {
+            let a_bits = a.netmask.to_u32_be().count_ones();
+            let b_bits = b.netmask.to_u32_be().count_ones();
+            b_bits.cmp(&a_bits).then(a.metric.cmp(&b.metric))
+        });
+    }
+
+    /// Remove a route from the routing table
+    pub fn remove_route(&self, destination: Ipv4Address, netmask: Ipv4Address) {
+        let mut table = self.routing_table.write();
+        table.retain(|r| r.destination != destination || r.netmask != netmask);
+    }
+
+    /// Set default gateway
+    pub fn set_default_gateway(&self, gateway: Ipv4Address, interface: &str) {
+        self.add_route(RouteEntry {
+            destination: Ipv4Address::new(0, 0, 0, 0),
+            netmask: Ipv4Address::new(0, 0, 0, 0),
+            gateway: Some(gateway),
+            interface: interface.to_string(),
+            metric: 100,
+        });
+    }
+
+    /// Select source IP and interface for a destination
+    ///
+    /// Returns (interface_name, source_ip, optional_gateway)
+    pub fn select_source(
+        &self,
+        dest: Ipv4Address,
+    ) -> Option<(String, Ipv4Address, Option<Ipv4Address>)> {
+        let table = self.routing_table.read();
+
+        // Find matching route
+        for route in table.iter() {
+            if self.ip_matches_route(dest, route) {
+                if let Some(src_ip) = self.get_primary_ip(&route.interface) {
+                    return Some((route.interface.clone(), src_ip, route.gateway));
+                }
+            }
+        }
+
+        // Fallback: check if destination is on a directly connected network
+        let addrs = self.addresses.read();
+        for (iface, ips) in addrs.iter() {
+            for ip_info in ips {
+                if self.same_subnet(dest, ip_info.address, ip_info.netmask) {
+                    return Some((iface.clone(), ip_info.address, None));
+                }
+            }
+        }
+
+        // Last resort: use any available primary IP
+        for (iface, ips) in addrs.iter() {
+            if let Some(primary) = ips.iter().find(|a| a.is_primary) {
+                return Some((iface.clone(), primary.address, None));
+            }
+        }
+
+        None
+    }
+
+    /// Check if an IP matches a route
+    fn ip_matches_route(&self, ip: Ipv4Address, route: &RouteEntry) -> bool {
+        self.same_subnet(ip, route.destination, route.netmask)
+    }
+
+    /// Check if two IPs are in the same subnet
+    fn same_subnet(&self, ip1: Ipv4Address, ip2: Ipv4Address, mask: Ipv4Address) -> bool {
+        let ip1_u32 = ip1.to_u32_be();
+        let ip2_u32 = ip2.to_u32_be();
+        let mask_u32 = mask.to_u32_be();
+        (ip1_u32 & mask_u32) == (ip2_u32 & mask_u32)
+    }
+
+    /// Check if an IP is local (assigned to any interface)
+    pub fn is_local_ip(&self, ip: Ipv4Address) -> bool {
+        self.addresses
+            .read()
+            .values()
+            .any(|ips| ips.iter().any(|a| a.address == ip))
     }
 
     /// Get protocol handler for a protocol number
@@ -244,9 +418,7 @@ impl NetworkLayer for Ipv4Layer {
         context: &LayerContext,
         next_layers: &[alloc::sync::Arc<dyn NetworkLayer>],
     ) -> Result<(), SocketError> {
-        let local_ip = *self.local_ip.read();
-
-        // Get destination IP from context
+        // Get destination IP from context (required)
         let dest_ip_bytes = context
             .get("ip_dst")
             .and_then(|ip| {
@@ -257,6 +429,7 @@ impl NetworkLayer for Ipv4Layer {
                 }
             })
             .ok_or(SocketError::InvalidPacket)?;
+        let dest_ip = Ipv4Address::from_bytes(dest_ip_bytes);
 
         // Get protocol number from context
         let protocol = context
@@ -264,17 +437,25 @@ impl NetworkLayer for Ipv4Layer {
             .and_then(|p| if !p.is_empty() { Some(p[0]) } else { None })
             .unwrap_or(protocol::TCP);
 
-        // Get source IP from context or use local IP
-        let src_ip_bytes = context
-            .get("ip_src")
-            .and_then(|ip| {
-                if ip.len() >= 4 {
-                    Some([ip[0], ip[1], ip[2], ip[3]])
-                } else {
-                    None
-                }
-            })
-            .unwrap_or(local_ip.0);
+        // Get source IP from context, or select based on routing
+        let (interface_name, src_ip_bytes, gateway) = if let Some(ip_src) = context.get("ip_src") {
+            if ip_src.len() >= 4 {
+                // Source IP explicitly set - find which interface it belongs to
+                let src_ip = Ipv4Address::from_bytes([ip_src[0], ip_src[1], ip_src[2], ip_src[3]]);
+                let iface = context
+                    .get("interface")
+                    .and_then(|b| core::str::from_utf8(b).ok())
+                    .map(String::from)
+                    .unwrap_or_else(|| "eth0".to_string());
+                (iface, [ip_src[0], ip_src[1], ip_src[2], ip_src[3]], None)
+            } else {
+                return Err(SocketError::InvalidAddress);
+            }
+        } else {
+            // Select source IP based on routing table
+            let (iface, src_ip, gw) = self.select_source(dest_ip).ok_or(SocketError::NoRoute)?;
+            (iface, src_ip.0, gw)
+        };
 
         // Build IPv4 header
         let mut header = Ipv4Header::new();
@@ -297,7 +478,7 @@ impl NetworkLayer for Ipv4Layer {
         ip_packet.extend_from_slice(packet);
 
         early_println!(
-            "[IPv4] Send: {} bytes (src: {}.{}.{}.{}, dst: {}.{}.{}.{}, proto: {})",
+            "[IPv4] Send: {} bytes (src: {}.{}.{}.{}, dst: {}.{}.{}.{}, proto: {}, iface: {})",
             ip_packet.len(),
             src_ip_bytes[0],
             src_ip_bytes[1],
@@ -307,15 +488,27 @@ impl NetworkLayer for Ipv4Layer {
             dest_ip_bytes[1],
             dest_ip_bytes[2],
             dest_ip_bytes[3],
-            protocol
+            protocol,
+            interface_name
         );
 
-        // Forward to Ethernet layer
+        // Prepare context for Ethernet layer
         let mut eth_context = context.clone();
         eth_context.set(
             "eth_type",
             &crate::network::ethernet::ether_type::IPV4.to_be_bytes(),
         );
+        eth_context.set("interface", interface_name.as_bytes());
+        eth_context.set("ip_src", &src_ip_bytes);
+
+        // If we have a gateway, set that as the next-hop for ARP resolution
+        if let Some(gw) = gateway {
+            eth_context.set("next_hop", &gw.0);
+        } else {
+            eth_context.set("next_hop", &dest_ip_bytes);
+        }
+
+        // Forward to Ethernet layer
         if !next_layers.is_empty() {
             next_layers[0].send(&ip_packet, &eth_context, &next_layers[1..])?;
         } else if let Some(eth_layer) = get_network_manager().get_layer("ethernet") {
@@ -447,6 +640,7 @@ fn checksum_from_bytes(header_bytes: &[u8]) -> u16 {
 
 #[cfg(test)]
 mod tests {
+    use alloc::string::ToString;
     use alloc::vec;
 
     use super::*;
@@ -548,19 +742,126 @@ mod tests {
 
     #[test_case]
     fn test_ipv4_layer_creation() {
-        let ip = Ipv4Address::new(192, 168, 1, 100);
-        let ip_layer = Ipv4Layer::new(ip);
-        assert_eq!(ip_layer.get_local_ip(), ip);
+        let ip_layer = Ipv4Layer::new();
+        // New layer has no addresses
+        assert!(ip_layer.get_addresses("eth0").is_empty());
     }
 
     #[test_case]
-    fn test_ipv4_layer_set_ip() {
-        let ip1 = Ipv4Address::new(192, 168, 1, 100);
-        let ip_layer = Ipv4Layer::new(ip1);
+    fn test_ipv4_layer_add_address() {
+        let ip_layer = Ipv4Layer::new();
 
-        let ip2 = Ipv4Address::new(10, 0, 0, 1);
-        ip_layer.set_local_ip(ip2);
-        assert_eq!(ip_layer.get_local_ip(), ip2);
+        let ip = Ipv4Address::new(192, 168, 1, 100);
+        ip_layer.add_address(
+            "eth0",
+            Ipv4AddressInfo {
+                address: ip,
+                netmask: Ipv4Address::new(255, 255, 255, 0),
+                broadcast: Some(Ipv4Address::new(192, 168, 1, 255)),
+                is_primary: true,
+            },
+        );
+
+        let addrs = ip_layer.get_addresses("eth0");
+        assert_eq!(addrs.len(), 1);
+        assert_eq!(addrs[0].address, ip);
+        assert!(addrs[0].is_primary);
+    }
+
+    #[test_case]
+    fn test_ipv4_layer_multiple_addresses() {
+        let ip_layer = Ipv4Layer::new();
+
+        // Add primary address
+        ip_layer.add_address(
+            "eth0",
+            Ipv4AddressInfo {
+                address: Ipv4Address::new(192, 168, 1, 100),
+                netmask: Ipv4Address::new(255, 255, 255, 0),
+                broadcast: None,
+                is_primary: true,
+            },
+        );
+
+        // Add secondary address
+        ip_layer.add_address(
+            "eth0",
+            Ipv4AddressInfo {
+                address: Ipv4Address::new(192, 168, 1, 101),
+                netmask: Ipv4Address::new(255, 255, 255, 0),
+                broadcast: None,
+                is_primary: false,
+            },
+        );
+
+        let addrs = ip_layer.get_addresses("eth0");
+        assert_eq!(addrs.len(), 2);
+        assert_eq!(
+            ip_layer.get_primary_ip("eth0"),
+            Some(Ipv4Address::new(192, 168, 1, 100))
+        );
+    }
+
+    #[test_case]
+    fn test_ipv4_layer_routing() {
+        let ip_layer = Ipv4Layer::new();
+
+        // Add address to eth0
+        ip_layer.add_address(
+            "eth0",
+            Ipv4AddressInfo {
+                address: Ipv4Address::new(192, 168, 1, 100),
+                netmask: Ipv4Address::new(255, 255, 255, 0),
+                broadcast: None,
+                is_primary: true,
+            },
+        );
+
+        // Add route for local subnet
+        ip_layer.add_route(RouteEntry {
+            destination: Ipv4Address::new(192, 168, 1, 0),
+            netmask: Ipv4Address::new(255, 255, 255, 0),
+            gateway: None,
+            interface: "eth0".to_string(),
+            metric: 0,
+        });
+
+        // Add default route
+        ip_layer.set_default_gateway(Ipv4Address::new(192, 168, 1, 1), "eth0");
+
+        // Test routing to local subnet - should use direct route
+        let result = ip_layer.select_source(Ipv4Address::new(192, 168, 1, 50));
+        assert!(result.is_some());
+        let (iface, src_ip, gw) = result.unwrap();
+        assert_eq!(iface, "eth0");
+        assert_eq!(src_ip, Ipv4Address::new(192, 168, 1, 100));
+        assert!(gw.is_none()); // Direct route, no gateway
+
+        // Test routing to external address - should use default gateway
+        let result = ip_layer.select_source(Ipv4Address::new(8, 8, 8, 8));
+        assert!(result.is_some());
+        let (iface, src_ip, gw) = result.unwrap();
+        assert_eq!(iface, "eth0");
+        assert_eq!(src_ip, Ipv4Address::new(192, 168, 1, 100));
+        assert_eq!(gw, Some(Ipv4Address::new(192, 168, 1, 1)));
+    }
+
+    #[test_case]
+    fn test_ipv4_is_local_ip() {
+        let ip_layer = Ipv4Layer::new();
+
+        ip_layer.add_address(
+            "eth0",
+            Ipv4AddressInfo {
+                address: Ipv4Address::new(192, 168, 1, 100),
+                netmask: Ipv4Address::new(255, 255, 255, 0),
+                broadcast: None,
+                is_primary: true,
+            },
+        );
+
+        assert!(ip_layer.is_local_ip(Ipv4Address::new(192, 168, 1, 100)));
+        assert!(!ip_layer.is_local_ip(Ipv4Address::new(192, 168, 1, 101)));
     }
 
     #[test_case]

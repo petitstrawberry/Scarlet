@@ -669,6 +669,7 @@ pub extern "C" fn start_kernel(boot_info: &BootInfo) -> ! {
     {
         early_println!("[boot] Initializing NetworkManager...");
         let _network_manager = crate::network::NetworkManager::init();
+
         let cmdline = boot_info.get_cmdline();
         if !cmdline.is_empty() {
             crate::network::config::apply_cmdline_config(cmdline);

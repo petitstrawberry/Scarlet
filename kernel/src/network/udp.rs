@@ -19,6 +19,24 @@ use crate::network::socket::{
 };
 use crate::object::capability::selectable::Selectable;
 
+/// Helper function to get local IP address bytes from the default interface
+fn get_local_ip_bytes() -> [u8; 4] {
+    let manager = get_network_manager();
+    if let Some(default_iface) = manager.get_default_interface() {
+        if let Some(ip_layer) = manager.get_layer("ip") {
+            if let Some(ipv4_layer) = ip_layer
+                .as_any()
+                .downcast_ref::<crate::network::ipv4::Ipv4Layer>()
+            {
+                if let Some(addr) = ipv4_layer.get_primary_ip(default_iface.name()) {
+                    return addr.as_bytes();
+                }
+            }
+        }
+    }
+    [0u8; 4]
+}
+
 /// UDP header (8 bytes)
 #[derive(Debug, Clone, Copy)]
 #[repr(C, packed)]
@@ -476,6 +494,25 @@ impl UdpLayer {
         })
     }
 
+    /// Initialize and register the UDP layer with NetworkManager
+    ///
+    /// Registers with NetworkManager and registers itself with Ipv4Layer
+    /// for protocol number 17 (UDP).
+    ///
+    /// # Panics
+    ///
+    /// Panics if Ipv4Layer is not registered (must be initialized first).
+    pub fn init(network_manager: &crate::network::NetworkManager) {
+        let layer = Self::new();
+        network_manager.register_layer("udp", layer.clone());
+
+        // Register with IPv4 layer for UDP packets (protocol 17)
+        let ipv4 = network_manager
+            .get_layer("ip")
+            .expect("Ipv4Layer must be initialized before UdpLayer");
+        ipv4.register_protocol(crate::network::ipv4::protocol::UDP as u16, layer);
+    }
+
     /// Create a new UDP socket
     pub fn create_socket(&self) -> Arc<UdpSocket> {
         let layer = self
@@ -541,18 +578,7 @@ impl UdpLayer {
         let (src_ip_bytes, src_port) = match socket.local_addr.read().clone() {
             Some(SocketAddress::Inet(inet)) => {
                 if inet.addr == [0, 0, 0, 0] {
-                    let ip = if let Some(ip_layer) = get_network_manager().get_layer("ip") {
-                        if let Some(ipv4_layer) = ip_layer
-                            .as_any()
-                            .downcast_ref::<crate::network::ipv4::Ipv4Layer>()
-                        {
-                            ipv4_layer.get_local_ip().as_bytes()
-                        } else {
-                            [0u8; 4]
-                        }
-                    } else {
-                        [0u8; 4]
-                    };
+                    let ip = get_local_ip_bytes();
                     (ip, inet.port)
                 } else {
                     (inet.addr, inet.port)
@@ -560,18 +586,7 @@ impl UdpLayer {
             }
             _ => {
                 // Get local IP from IPv4 layer if not bound
-                let ip = if let Some(ip_layer) = get_network_manager().get_layer("ip") {
-                    if let Some(ipv4_layer) = ip_layer
-                        .as_any()
-                        .downcast_ref::<crate::network::ipv4::Ipv4Layer>()
-                    {
-                        ipv4_layer.get_local_ip().as_bytes()
-                    } else {
-                        [0u8; 4]
-                    }
-                } else {
-                    [0u8; 4]
-                };
+                let ip = get_local_ip_bytes();
                 // Allocate ephemeral port for unbound socket
                 let port = self.allocate_port();
                 self.register_port(port, socket.self_weak.clone());

@@ -204,9 +204,39 @@ impl VirtioNetDevice {
         let manager = get_network_manager();
         let interface = alloc::sync::Arc::new(EthernetNetworkInterface::new(name, self.clone()));
 
-        match manager.register_interface(name, interface) {
+        match manager.register_interface(name, interface.clone()) {
             Ok(()) => {
                 *self.interface_name.lock() = Some(alloc::string::String::from(name));
+
+                // Register with EthernetLayer for multi-interface support
+                if let Some(eth_layer) =
+                    crate::network::protocol_stack::get_network_manager().get_layer("ethernet")
+                {
+                    if let Some(eth) = eth_layer
+                        .as_any()
+                        .downcast_ref::<crate::network::ethernet::EthernetLayer>()
+                    {
+                        if let Ok(mac) = self.get_mac_address() {
+                            eth.register_interface(name, mac, interface.clone());
+                            crate::early_println!(
+                                "[virtio-net] Registered {} with EthernetLayer (MAC: {:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X})",
+                                name,
+                                mac.as_bytes()[0],
+                                mac.as_bytes()[1],
+                                mac.as_bytes()[2],
+                                mac.as_bytes()[3],
+                                mac.as_bytes()[4],
+                                mac.as_bytes()[5]
+                            );
+                        }
+                    }
+                } else {
+                    crate::early_println!(
+                        "[virtio-net] Warning: EthernetLayer not initialized, {} not registered with protocol stack",
+                        name
+                    );
+                }
+
                 apply_pending_ip_for_interface(name);
                 crate::early_println!("[virtio-net] Registered interface {}", name);
             }

@@ -229,6 +229,25 @@ impl IcmpLayer {
         })
     }
 
+    /// Initialize and register the ICMP layer with NetworkManager
+    ///
+    /// Registers with NetworkManager and registers itself with Ipv4Layer
+    /// for protocol number 1 (ICMP).
+    ///
+    /// # Panics
+    ///
+    /// Panics if Ipv4Layer is not registered (must be initialized first).
+    pub fn init(network_manager: &crate::network::NetworkManager) {
+        let layer = Self::new();
+        network_manager.register_layer("icmp", layer.clone());
+
+        // Register with IPv4 layer for ICMP packets (protocol 1)
+        let ipv4 = network_manager
+            .get_layer("ip")
+            .expect("Ipv4Layer must be initialized before IcmpLayer");
+        ipv4.register_protocol(crate::network::ipv4::protocol::ICMP as u16, layer);
+    }
+
     pub fn create_socket(&self) -> Arc<IcmpSocket> {
         let identifier = self.next_identifier.fetch_add(1, Ordering::SeqCst);
         let socket = IcmpSocket::new(self.self_weak.clone(), identifier);
@@ -537,7 +556,13 @@ impl SocketObject for IcmpSocket {
                 .as_any()
                 .downcast_ref::<crate::network::ipv4::Ipv4Layer>()
             {
-                if ipv4.get_local_ip().0 == [0, 0, 0, 0] {
+                // Check if we have a configured IP on any interface
+                let has_ip = get_network_manager()
+                    .get_default_interface()
+                    .and_then(|iface| ipv4.get_primary_ip(iface.name()))
+                    .map(|ip| ip.0 != [0, 0, 0, 0])
+                    .unwrap_or(false);
+                if !has_ip {
                     early_println!("[ICMP] send blocked: local IP unset");
                     return Err(SocketError::NotConnected);
                 }
