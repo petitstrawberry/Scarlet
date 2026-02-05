@@ -300,13 +300,13 @@ impl SocketConfig {
 ///         Err(SocketError::NoRoute)
 ///     }
 ///
-///     fn receive(&self, packet: &[u8]) -> Result<(), SocketError> {
+///     fn receive(&self, packet: &[u8], context: Option<&LayerContext>) -> Result<(), SocketError> {
 ///         // Parse IP header
 ///         let (proto_num, payload) = parse_ip_header(packet)?;
 ///         
 ///         // Route to registered protocol handler
 ///         if let Some(handler) = self.protocols.read().get(&proto_num) {
-///             handler.receive(payload)
+///             handler.receive(payload, context)
 ///         } else {
 ///             Err(SocketError::ProtocolNotSupported)
 ///         }
@@ -418,6 +418,7 @@ pub trait NetworkLayer: Send + Sync + core::any::Any {
     /// # Arguments
     ///
     /// * `packet` - Packet data received from lower layer
+    /// * `context` - Optional routing context from lower layer
     ///
     /// # Returns
     ///
@@ -430,7 +431,7 @@ pub trait NetworkLayer: Send + Sync + core::any::Any {
     /// // IP layer receives packet, parses header, routes to TCP (proto=6)
     /// ip_layer.receive(&packet)?;
     /// ```
-    fn receive(&self, packet: &[u8]) -> Result<(), SocketError>;
+    fn receive(&self, packet: &[u8], context: Option<&LayerContext>) -> Result<(), SocketError>;
 
     /// Get layer name for debugging
     fn name(&self) -> &'static str;
@@ -800,7 +801,7 @@ mod tests {
             ) -> Result<(), SocketError> {
                 Ok(())
             }
-            fn receive(&self, _: &[u8]) -> Result<(), SocketError> {
+            fn receive(&self, _: &[u8], _: Option<&LayerContext>) -> Result<(), SocketError> {
                 Ok(())
             }
             fn name(&self) -> &'static str {
@@ -836,7 +837,7 @@ mod tests {
             ) -> Result<(), SocketError> {
                 Ok(())
             }
-            fn receive(&self, _: &[u8]) -> Result<(), SocketError> {
+            fn receive(&self, _: &[u8], _: Option<&LayerContext>) -> Result<(), SocketError> {
                 Ok(())
             }
             fn name(&self) -> &'static str {
@@ -874,7 +875,7 @@ mod tests {
             ) -> Result<(), SocketError> {
                 Ok(())
             }
-            fn receive(&self, _: &[u8]) -> Result<(), SocketError> {
+            fn receive(&self, _: &[u8], _: Option<&LayerContext>) -> Result<(), SocketError> {
                 Ok(())
             }
             fn name(&self) -> &'static str {
@@ -916,7 +917,7 @@ mod tests {
             ) -> Result<(), SocketError> {
                 Ok(())
             }
-            fn receive(&self, _: &[u8]) -> Result<(), SocketError> {
+            fn receive(&self, _: &[u8], _: Option<&LayerContext>) -> Result<(), SocketError> {
                 Ok(())
             }
             fn name(&self) -> &'static str {
@@ -1075,7 +1076,11 @@ mod tests {
             Ok(())
         }
 
-        fn receive(&self, frame: &[u8]) -> Result<(), SocketError> {
+        fn receive(
+            &self,
+            frame: &[u8],
+            _context: Option<&LayerContext>,
+        ) -> Result<(), SocketError> {
             self.packets_received.fetch_add(1, Ordering::SeqCst);
 
             // Parse Ethernet header
@@ -1090,7 +1095,7 @@ mod tests {
 
             // Route to registered protocol handler based on EtherType
             if let Some(handler) = self.protocols.read().get(&ethertype) {
-                handler.receive(payload)
+                handler.receive(payload, None)
             } else {
                 // No handler for this EtherType, but frame is valid
                 Ok(())
@@ -1207,7 +1212,11 @@ mod tests {
             Err(SocketError::NoRoute)
         }
 
-        fn receive(&self, packet: &[u8]) -> Result<(), SocketError> {
+        fn receive(
+            &self,
+            packet: &[u8],
+            _context: Option<&LayerContext>,
+        ) -> Result<(), SocketError> {
             self.packets_received.fetch_add(1, Ordering::SeqCst);
 
             // Parse IP header
@@ -1221,7 +1230,7 @@ mod tests {
             // Route to registered protocol handler
             let protocols = self.protocols.read();
             if let Some(handler) = protocols.get(&(protocol as u16)) {
-                handler.receive(payload)
+                handler.receive(payload, None)
             } else {
                 Err(SocketError::ProtocolNotSupported)
             }
@@ -1337,7 +1346,11 @@ mod tests {
             }
         }
 
-        fn receive(&self, segment: &[u8]) -> Result<(), SocketError> {
+        fn receive(
+            &self,
+            segment: &[u8],
+            _context: Option<&LayerContext>,
+        ) -> Result<(), SocketError> {
             self.packets_received.fetch_add(1, Ordering::SeqCst);
 
             // Parse TCP header
@@ -1730,7 +1743,11 @@ mod tests {
                 Ok(())
             }
 
-            fn receive(&self, _packet: &[u8]) -> Result<(), SocketError> {
+            fn receive(
+                &self,
+                _packet: &[u8],
+                _context: Option<&LayerContext>,
+            ) -> Result<(), SocketError> {
                 Ok(())
             }
 

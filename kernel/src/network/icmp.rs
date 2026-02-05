@@ -729,7 +729,7 @@ impl NetworkLayer for IcmpLayer {
         Ok(())
     }
 
-    fn receive(&self, _packet: &[u8]) -> Result<(), SocketError> {
+    fn receive(&self, _packet: &[u8], _context: Option<&LayerContext>) -> Result<(), SocketError> {
         Ok(())
     }
 

@@ -285,7 +285,7 @@ impl NetworkLayer for EthernetLayer {
         Ok(())
     }
 
-    fn receive(&self, frame: &[u8]) -> Result<(), SocketError> {
+    fn receive(&self, frame: &[u8], _context: Option<&LayerContext>) -> Result<(), SocketError> {
         if frame.len() < ETHERNET_HEADER_SIZE {
             return Err(SocketError::InvalidPacket);
         }
@@ -307,7 +307,7 @@ impl NetworkLayer for EthernetLayer {
 
         let protocols = self.protocols.read();
         if let Some(handler) = protocols.get(&header.ether_type) {
-            handler.receive(payload)
+            handler.receive(payload, None)
         } else if header.ether_type == ether_type::IPV4
             || header.ether_type == ether_type::ARP
             || header.ether_type == ether_type::IPV6

@@ -9,7 +9,7 @@ use spin::RwLock;
 use crate::early_println;
 use crate::network::ethernet::ETHERNET_HEADER_SIZE;
 use crate::network::protocol_stack::{
-    LayerContext, NetworkLayer, NetworkLayerStats, get_network_manager,
+    get_network_manager, LayerContext, NetworkLayer, NetworkLayerStats,
 };
 use crate::network::socket::SocketError;
 
@@ -330,7 +330,7 @@ impl NetworkLayer for Ipv4Layer {
         Ok(())
     }
 
-    fn receive(&self, packet: &[u8]) -> Result<(), SocketError> {
+    fn receive(&self, packet: &[u8], _context: Option<&LayerContext>) -> Result<(), SocketError> {
         // Parse IPv4 header
         let header = Ipv4Header::from_bytes(packet).ok_or(SocketError::InvalidPacket)?;
 
@@ -358,10 +358,10 @@ impl NetworkLayer for Ipv4Layer {
             header.protocol
         );
 
-        // Verify checksum
+        // Verify checksum (header.checksum is already in host order)
         let calculated_checksum = checksum_from_bytes(&packet[..header_len]);
-        if calculated_checksum != header.checksum {
-            let header_checksum = unsafe { core::ptr::addr_of!(header.checksum).read_unaligned() };
+        let header_checksum = unsafe { core::ptr::addr_of!(header.checksum).read_unaligned() };
+        if calculated_checksum != header_checksum {
             early_println!(
                 "[IPv4] Checksum mismatch: calculated=0x{:04X}, header=0x{:04X}",
                 calculated_checksum,
@@ -396,7 +396,10 @@ impl NetworkLayer for Ipv4Layer {
         // Route to protocol handler based on protocol field
         let protocols = self.protocols.read();
         if let Some(handler) = protocols.get(&header.protocol) {
-            handler.receive(payload)
+            let mut proto_context = LayerContext::new();
+            proto_context.set("ip_src", &header.source_ip);
+            proto_context.set("ip_dst", &header.dest_ip);
+            handler.receive(payload, Some(&proto_context))
         } else {
             // No handler for this protocol - log and drop
             Err(SocketError::ProtocolNotSupported)

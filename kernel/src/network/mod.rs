@@ -394,7 +394,7 @@ impl NetworkManager {
                             .as_any()
                             .downcast_ref::<crate::network::udp::UdpLayer>()
                             .map(|udp| udp.receive_packet(payload)),
-                        _ => Some(handler.receive(payload)),
+                        _ => Some(handler.receive(payload, None)),
                     };
                 }
             }

@@ -362,6 +362,27 @@ impl ArpLayer {
 
         // Process ARP request
         if arp_packet.is_request() {
+            // Cache sender information from the request (helps avoid extra ARP round-trips)
+            self.add_entry(sender_ip, arp_packet.sender_mac);
+
+            // If we had queued packets for this sender, flush them now
+            let sender_key = u32::from_be_bytes(sender_ip.0);
+            let mut pending = self.pending.write();
+            if let Some(mut pending_entry) = pending.remove(&sender_key) {
+                let mut queue = pending_entry.packet_queue.lock();
+                if let Some(eth_layer) = get_network_manager().get_layer("ethernet") {
+                    for packet_bytes in queue.drain(..) {
+                        let mut eth_context = LayerContext::new();
+                        eth_context.set("eth_dst_mac", &arp_packet.sender_mac);
+                        eth_context.set("eth_src_mac", &local_mac);
+                        let _ = eth_layer.send(&packet_bytes, &eth_context, &[]);
+                    }
+                }
+                pending_entry.entry.state = ArpEntryState::Valid;
+                pending_entry.entry.mac_address = arp_packet.sender_mac;
+            }
+            drop(pending);
+
             if target_ip == local_ip {
                 // Request is for us - send reply
                 let reply = ArpPacket::reply(local_mac, local_ip.0, arp_packet.sender_mac);
@@ -506,7 +527,7 @@ impl NetworkLayer for ArpLayer {
         Ok(())
     }
 
-    fn receive(&self, packet: &[u8]) -> Result<(), SocketError> {
+    fn receive(&self, packet: &[u8], _context: Option<&LayerContext>) -> Result<(), SocketError> {
         let mut stats = self.stats.write();
         stats.packets_received += 1;
         stats.bytes_received += packet.len() as u64;

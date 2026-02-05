@@ -484,7 +484,7 @@ impl NetworkLayer for UdpLayer {
         Ok(())
     }
 
-    fn receive(&self, packet: &[u8]) -> Result<(), SocketError> {
+    fn receive(&self, packet: &[u8], _context: Option<&LayerContext>) -> Result<(), SocketError> {
         self.receive_packet(packet)
     }
 
