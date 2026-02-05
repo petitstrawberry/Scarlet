@@ -291,8 +291,12 @@ pub struct TcpSocket {
     /// Out-of-order segments for reassembly (sorted by sequence number)
     out_of_order: Mutex<BTreeMap<u32, OutOfOrderSegment>>,
 
-    /// Waker for blocking operations (accept, recv, send)
-    waker: Mutex<Option<crate::sync::Waker>>,
+    /// Waker for blocking accept() operations
+    accept_waker: Mutex<Option<Arc<crate::sync::Waker>>>,
+    /// Waker for blocking recv() operations
+    recv_waker: Mutex<Option<Arc<crate::sync::Waker>>>,
+    /// Waker for blocking send() operations
+    send_waker: Mutex<Option<Arc<crate::sync::Waker>>>,
     /// Block mode: true for blocking, false for non-blocking
     blocking_mode: AtomicBool,
 
@@ -335,12 +339,15 @@ impl TcpSocket {
                 return Err(SocketError::WouldBlock);
             }
 
-            {
-                let mut waker_lock = self.waker.lock();
-                let waker = waker_lock
-                    .get_or_insert_with(|| crate::sync::Waker::new_interruptible("tcp_accept"));
-                waker.wait(task_id, trapframe);
-            }
+            let waker = {
+                let mut waker_lock = self.accept_waker.lock();
+                waker_lock
+                    .get_or_insert_with(|| {
+                        Arc::new(crate::sync::Waker::new_interruptible("tcp_accept"))
+                    })
+                    .clone()
+            };
+            waker.wait(task_id, trapframe);
         }
     }
 
@@ -385,7 +392,9 @@ impl TcpSocket {
             out_of_order: Mutex::new(BTreeMap::new()),
 
             // Blocking support
-            waker: Mutex::new(None),              // Initialize lazy
+            accept_waker: Mutex::new(None),
+            recv_waker: Mutex::new(None),
+            send_waker: Mutex::new(None),
             blocking_mode: AtomicBool::new(true), // Default to blocking mode
 
             // Fast Retransmit - duplicate ACK tracking
@@ -495,8 +504,13 @@ impl TcpSocket {
                         self.pending_accept.lock().push_back(child);
 
                         // Wake up any blocking accept() calls
-                        if let Some(waker) = self.waker.lock().as_ref() {
+                        crate::early_println!("[tcp-accept] wake_one (pre-lock)");
+                        if let Some(waker) = self.accept_waker.lock().as_ref() {
+                            crate::early_println!("[tcp-accept] wake_one (locked)");
                             waker.wake_one();
+                            crate::early_println!("[tcp-accept] wake_one (done)");
+                        } else {
+                            crate::early_println!("[tcp-accept] wake_one (no waker)");
                         }
                     } else {
                         // Backlog full - send RST to reject connection
@@ -519,6 +533,26 @@ impl TcpSocket {
                 } else if header.flags() & tcp_flags::RST != 0 {
                     // Received RST, abort connection
                     self.handle_rst();
+                }
+            }
+            TcpState::SynReceived => {
+                if header.flags() & tcp_flags::RST != 0 {
+                    self.handle_rst();
+                    return;
+                }
+
+                if header.flags() & tcp_flags::ACK != 0 {
+                    let expected_ack = self.send_seq.load(Ordering::SeqCst);
+                    if header.ack_number == expected_ack {
+                        self.update_send_window(header.ack_number);
+                        self.set_state(TcpState::Established);
+
+                        if !data.is_empty() {
+                            self.handle_data_segment(src_ip, header, data);
+                        } else if header.flags() & tcp_flags::FIN != 0 {
+                            self.handle_fin(src_ip, header);
+                        }
+                    }
                 }
             }
             TcpState::Established => {
@@ -738,7 +772,7 @@ impl TcpSocket {
             drop(recv_buf);
 
             // Wake up any blocking recv() calls
-            if let Some(waker) = self.waker.lock().as_ref() {
+            if let Some(waker) = self.recv_waker.lock().as_ref() {
                 waker.wake_one();
             }
 
@@ -804,7 +838,7 @@ impl TcpSocket {
         }
 
         // Wake up any blocking send() calls (buffer may have space now)
-        if let Some(waker) = self.waker.lock().as_ref() {
+        if let Some(waker) = self.send_waker.lock().as_ref() {
             waker.wake_one();
         }
     }
@@ -1075,9 +1109,14 @@ impl TcpSocket {
             }
 
             {
-                let mut waker_lock = self.waker.lock();
-                let waker = waker_lock
-                    .get_or_insert_with(|| crate::sync::Waker::new_interruptible("tcp_send"));
+                let waker = {
+                    let mut waker_lock = self.send_waker.lock();
+                    waker_lock
+                        .get_or_insert_with(|| {
+                            Arc::new(crate::sync::Waker::new_interruptible("tcp_send"))
+                        })
+                        .clone()
+                };
                 waker.wait(task_id, trapframe);
             }
         }
@@ -1148,9 +1187,14 @@ impl TcpSocket {
             }
 
             {
-                let mut waker_lock = self.waker.lock();
-                let waker = waker_lock
-                    .get_or_insert_with(|| crate::sync::Waker::new_interruptible("tcp_recv"));
+                let waker = {
+                    let mut waker_lock = self.recv_waker.lock();
+                    waker_lock
+                        .get_or_insert_with(|| {
+                            Arc::new(crate::sync::Waker::new_interruptible("tcp_recv"))
+                        })
+                        .clone()
+                };
                 waker.wait(task_id, trapframe);
             }
         }
@@ -1346,9 +1390,13 @@ impl TcpSocket {
 
     /// Cancel retransmission timer
     fn cancel_retrans_timer(&self) {
-        if let Some(timer_id) = *self.retrans_timer_id.lock() {
+        let timer_id = {
+            let mut timer_lock = self.retrans_timer_id.lock();
+            timer_lock.take()
+        };
+
+        if let Some(timer_id) = timer_id {
             crate::timer::cancel_timer(timer_id);
-            *self.retrans_timer_id.lock() = None;
         }
     }
 
