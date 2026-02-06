@@ -1,6 +1,6 @@
 use core::arch::asm;
 use core::mem::transmute;
-use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use instruction::sbi::sbi_system_reset;
 use trap::kernel::_kernel_trap_entry;
 use trap::kernel::arch_kernel_trap_handler;
@@ -36,6 +36,117 @@ pub use earlycon::*;
 pub use registers::IntRegisters;
 
 use crate::vm::vmem::MemoryArea;
+
+// ---------------------------------------------------------------------------
+// CPU_ID <-> Hart ID mapping
+// ---------------------------------------------------------------------------
+//
+// The kernel uses a sequential, zero-based CPU_ID as the canonical per-CPU
+// index for all data structures (scheduler queues, timer arrays, etc.).
+// The hardware Hart ID is only used for SBI calls and boot identification.
+//
+// `MAX_HARTS` is deliberately larger than `NUM_OF_CPUS` because QEMU can
+// assign non-contiguous hart IDs.  If we ever need more, bump this constant.
+const MAX_HARTS: usize = 16;
+
+/// Sentinel value for "no mapping registered".
+const INVALID_ID: usize = usize::MAX;
+
+/// Maps CPU_ID -> Hart ID.
+static CPU_TO_HART: [AtomicUsize; NUM_OF_CPUS] =
+    [const { AtomicUsize::new(INVALID_ID) }; NUM_OF_CPUS];
+
+/// Maps Hart ID -> CPU_ID.
+static HART_TO_CPU: [AtomicUsize; MAX_HARTS] = [const { AtomicUsize::new(INVALID_ID) }; MAX_HARTS];
+
+/// Number of CPUs that have been registered so far (monotonically increasing).
+static NUM_CPUS_ONLINE: AtomicUsize = AtomicUsize::new(0);
+
+/// Saved kernel page-table base register value for secondary CPUs.
+///
+/// The BSP stores the page-table base register value (satp on RISC-V,
+/// TTBR on AArch64) here after `kernel_vm_init()` completes.  The
+/// `_entry_ap` assembly trampoline reads this variable (at its physical
+/// address, which equals the virtual address thanks to identity mapping)
+/// and writes it into the page-table base register before jumping to
+/// Rust code.
+#[unsafe(no_mangle)]
+static KERNEL_PT_BASE: AtomicU64 = AtomicU64::new(0);
+
+/// Save the current page-table base register so that secondary CPUs can
+/// activate the same kernel page table in their assembly entry code.
+///
+/// Must be called once by the BSP after `kernel_vm_init()` completes.
+pub fn save_kernel_page_table() {
+    let val: u64;
+    unsafe {
+        asm!("csrr {0}, satp", out(reg) val);
+    }
+    KERNEL_PT_BASE.store(val, Ordering::Release);
+    early_println!("[SMP] Kernel page-table base saved: {:#018x}", val);
+}
+
+/// Register a physical CPU (hart) and assign it the next sequential CPU_ID.
+///
+/// # Arguments
+///
+/// * `physical_id` - The hardware-level CPU identifier (hart ID on RISC-V)
+///
+/// # Returns
+///
+/// The newly assigned CPU_ID for this physical CPU
+///
+/// # Panics
+///
+/// Panics if `physical_id >= MAX_HARTS` or if all CPU_ID slots are exhausted.
+pub fn register_cpu(physical_id: usize) -> usize {
+    assert!(
+        physical_id < MAX_HARTS,
+        "Physical CPU ID {} exceeds MAX_HARTS ({})",
+        physical_id,
+        MAX_HARTS
+    );
+
+    let cpu_id = NUM_CPUS_ONLINE.fetch_add(1, Ordering::SeqCst);
+    assert!(
+        cpu_id < NUM_OF_CPUS,
+        "Too many CPUs: cpu_id {} >= NUM_OF_CPUS ({})",
+        cpu_id,
+        NUM_OF_CPUS
+    );
+
+    CPU_TO_HART[cpu_id].store(physical_id, Ordering::SeqCst);
+    HART_TO_CPU[physical_id].store(cpu_id, Ordering::SeqCst);
+
+    cpu_id
+}
+
+/// Convert a CPU_ID to the corresponding physical CPU ID (hart ID on RISC-V).
+pub fn cpu_id_to_physical_id(cpu_id: usize) -> usize {
+    let phys = CPU_TO_HART[cpu_id].load(Ordering::Relaxed);
+    debug_assert_ne!(
+        phys, INVALID_ID,
+        "CPU_ID {} has no physical mapping",
+        cpu_id
+    );
+    phys
+}
+
+/// Convert a physical CPU ID (hart ID on RISC-V) to the corresponding CPU_ID.
+pub fn physical_id_to_cpu_id(physical_id: usize) -> usize {
+    let cpu = HART_TO_CPU[physical_id].load(Ordering::Relaxed);
+    debug_assert_ne!(
+        cpu, INVALID_ID,
+        "Physical CPU ID {} has no CPU mapping",
+        physical_id
+    );
+    cpu
+}
+
+/// Return the number of CPUs that are currently online.
+pub fn num_cpus_online() -> usize {
+    NUM_CPUS_ONLINE.load(Ordering::Relaxed)
+}
 
 pub type Arch = Riscv64;
 
@@ -253,7 +364,7 @@ pub fn get_device_memory_areas() -> alloc::vec::Vec<MemoryArea> {
 }
 
 #[unsafe(link_section = ".trampoline.data")]
-static mut CPUS: [Riscv64; NUM_OF_CPUS] = [const { Riscv64::new(0) }; NUM_OF_CPUS];
+pub(crate) static mut CPUS: [Riscv64; NUM_OF_CPUS] = [const { Riscv64::new(0) }; NUM_OF_CPUS];
 
 #[repr(align(4))]
 #[allow(dead_code)]
@@ -264,6 +375,7 @@ pub struct Riscv64 {
     satp: u64,         // offset: 16
     kernel_stack: u64, // offset: 24
     kernel_trap: u64,  // offset: 32
+    cpu_id: u64,       // offset: 40 — abstract kernel CPU_ID
 }
 
 impl Riscv64 {
@@ -274,11 +386,24 @@ impl Riscv64 {
             kernel_stack: 0,
             kernel_trap: 0,
             satp: 0,
+            cpu_id: cpu_id as u64,
         }
     }
 
+    /// Return the abstract kernel CPU_ID (sequential, zero-based).
     pub fn get_cpuid(&self) -> usize {
+        self.cpu_id as usize
+    }
+
+    /// Return the hardware Hart ID for this CPU.
+    pub fn get_hartid(&self) -> usize {
         self.hartid as usize
+    }
+
+    /// Set both the hart ID and CPU_ID on this struct.
+    pub fn set_ids(&mut self, hart_id: usize, cpu_id: usize) {
+        self.hartid = hart_id as u64;
+        self.cpu_id = cpu_id as u64;
     }
 
     pub fn get_trapframe_paddr(&self) -> usize {
@@ -303,7 +428,7 @@ impl Riscv64 {
     }
 
     pub fn as_paddr_cpu(&mut self) -> &mut Riscv64 {
-        unsafe { &mut CPUS[self.hartid as usize] }
+        unsafe { &mut CPUS[self.cpu_id as usize] }
     }
 }
 
@@ -388,16 +513,20 @@ pub fn get_user_trap_handler() -> usize {
 }
 
 #[allow(static_mut_refs)]
-fn trap_init(riscv: &mut Riscv64) {
+pub(crate) fn trap_init(riscv: &mut Riscv64) {
     let trap_stack_start = unsafe { KERNEL_STACK.start() };
     let stack_size = STACK_SIZE;
 
+    // Use the hardware Hart ID to select the correct boot stack slice —
+    // this must match the stack computation done in _entry / _entry_ap assembly.
     let trap_stack = trap_stack_start + stack_size * (riscv.hartid + 1) as usize;
     riscv.kernel_stack = trap_stack as u64;
     riscv.kernel_trap = arch_kernel_trap_handler as u64;
     let scratch_addr = riscv as *const _ as usize;
 
-    let sie: usize = 0x20;
+    // Enable supervisor software interrupt (SSIE, bit 1) for IPI and
+    // supervisor timer interrupt (STIE, bit 5) for scheduling.
+    let sie: usize = 0x22; // SSIE | STIE
     unsafe {
         asm!("
         csrci sstatus, 0x2 // Disable interrupts
@@ -581,4 +710,63 @@ pub fn shutdown_with_code(exit_code: u32) -> ! {
 
 pub fn reboot() -> ! {
     sbi_system_reset(1, 0);
+}
+
+// ---------------------------------------------------------------------------
+// SMP helpers
+// ---------------------------------------------------------------------------
+
+/// Boot all secondary physical CPUs (harts) by issuing SBI HSM `hart_start`
+/// for each one discovered from the device tree (except the BSP).
+///
+/// The secondary CPUs will jump to `_entry_ap` and eventually call `start_ap`.
+///
+/// # Arguments
+///
+/// * `bsp_physical_id` - Physical CPU ID (hart ID) of the bootstrap processor
+/// * `num_cpus` - Total number of physical CPUs discovered from FDT
+pub fn boot_secondary_cpus(bsp_physical_id: usize, num_cpus: usize) {
+    use instruction::sbi::sbi_hart_start;
+
+    let entry_ap_addr = boot::entry::_entry_ap as usize;
+
+    for phys_id in 0..num_cpus {
+        if phys_id == bsp_physical_id {
+            continue;
+        }
+        if phys_id >= MAX_HARTS {
+            early_println!(
+                "[SMP] Skipping physical CPU {} — exceeds limit ({})",
+                phys_id,
+                MAX_HARTS
+            );
+            continue;
+        }
+
+        early_println!(
+            "[SMP] Starting physical CPU {} at entry {:#x}",
+            phys_id,
+            entry_ap_addr
+        );
+        match sbi_hart_start(phys_id, entry_ap_addr, 0) {
+            Ok(_) => early_println!(
+                "[SMP] Physical CPU {} start requested successfully",
+                phys_id
+            ),
+            Err(_) => early_println!("[SMP] Failed to start physical CPU {}", phys_id),
+        }
+    }
+}
+
+/// Send an IPI (software interrupt) to a specific CPU.
+///
+/// # Arguments
+///
+/// * `cpu_id` - The kernel CPU_ID of the target CPU
+pub fn send_ipi(cpu_id: usize) {
+    use instruction::sbi::sbi_send_ipi;
+
+    let hart_id = cpu_id_to_physical_id(cpu_id);
+    let hart_mask: usize = 1 << hart_id;
+    let _ = sbi_send_ipi(hart_mask, 0);
 }

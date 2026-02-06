@@ -89,6 +89,7 @@ if [ "$DEBUG_MODE" = true ]; then
         -machine virt \
         -bios default \
         -m 4G \
+        -smp 2 \
         -nographic \
         -serial mon:stdio \
         --no-reboot \
@@ -120,6 +121,7 @@ else
         -cpu rv64,v=true,vlen=256 \
         -bios default \
         -m 4G \
+        -smp 2 \
         -nographic \
         -serial mon:stdio \
         --no-reboot \

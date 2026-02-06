@@ -9,6 +9,8 @@ use crate::object::capability::memory_mapping::{AccessKind, AccessOp};
 use crate::sched::scheduler::get_scheduler;
 use crate::vm::get_kernel_vm_manager;
 
+use super::interrupt::arch_interrupt_handler;
+
 #[unsafe(export_name = "_kernel_trap_entry")]
 #[unsafe(naked)]
 pub extern "C" fn _kernel_trap_entry() {
@@ -123,7 +125,7 @@ pub extern "C" fn arch_kernel_trap_handler(addr: usize) {
 
     let interrupt = cause & 0x8000000000000000 != 0;
     if interrupt {
-        panic!("Interrupt is not supported in kernel mode");
+        arch_interrupt_handler(trapframe, cause & !0x8000000000000000);
     } else {
         arch_kernel_exception_handler(trapframe, cause & !0x8000000000000000);
     }

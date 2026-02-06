@@ -3,7 +3,7 @@ use core::{arch::naked_asm, mem::transmute};
 use crate::{
     arch::{
         Riscv64,
-        riscv64::{CPUS, trap_init},
+        riscv64::{CPUS, register_cpu, trap_init},
     },
     device::fdt::{create_bootinfo_from_fdt, init_fdt, relocate_fdt},
     environment::STACK_SIZE,
@@ -26,9 +26,9 @@ pub extern "C" fn _entry() {
                 li      t0, {}
                 mv      t1, a0
                 addi    t1, t1, 1
-                mul     t1, t1, a0          
+                mul     t1, t1, t0          
                 la      sp, KERNEL_STACK
-                add     sp, sp, t0
+                add     sp, sp, t1
 
                 la     t0, arch_start_kernel
                 jr      t0
@@ -52,9 +52,19 @@ pub extern "C" fn _entry_ap() {
                 li      t0, {}
                 mv      t1, a0
                 addi    t1, t1, 1
-                mul     t1, t1, a0          
+                mul     t1, t1, t0          
                 la      sp, KERNEL_STACK
-                add     sp, sp, t0
+                add     sp, sp, t1
+
+                // Activate kernel page table before entering Rust code.
+                // KERNEL_PT_BASE was stored by the BSP after kernel_vm_init().
+                // Because the kernel is identity-mapped (vaddr == paddr),
+                // the `la` gives us the correct physical address and code
+                // continues to execute at the same address after the switch.
+                la      t0, KERNEL_PT_BASE
+                ld      t0, 0(t0)
+                csrw    satp, t0
+                sfence.vma zero, zero
 
                 // Use indirect jump to avoid JAL range limitation
                 la      t0, start_ap
@@ -82,9 +92,17 @@ pub extern "C" fn arch_start_kernel(hartid: usize, fdt_ptr: usize) {
     // Decide whether user-mode FPU/Vector handling is enabled based on DTB.
     crate::arch::init_user_context_from_fdt();
 
-    crate::early_println!("Hart {}: Initializing core....", hartid);
-    // Get raw Riscv64 struct
-    let riscv: &mut Riscv64 = unsafe { transmute(&CPUS[hartid] as *const _ as usize) };
+    // Register this BSP hart and obtain CPU_ID (always 0 for the first hart).
+    let cpu_id = register_cpu(hartid);
+    crate::early_println!(
+        "Hart {}: Registered as CPU {} — initializing core....",
+        hartid,
+        cpu_id
+    );
+
+    // Set up per-CPU arch struct indexed by CPU_ID.
+    let riscv: &mut Riscv64 = unsafe { transmute(&CPUS[cpu_id] as *const _ as usize) };
+    riscv.set_ids(hartid, cpu_id);
     trap_init(riscv);
 
     start_kernel(&bootinfo);

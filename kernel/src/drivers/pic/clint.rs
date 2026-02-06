@@ -7,13 +7,14 @@ use crate::{
     device::{
         manager::{DeviceManager, DriverPriority},
         platform::{
-            PlatformDeviceDriver, PlatformDeviceInfo, resource::PlatformDeviceResourceType,
+            resource::PlatformDeviceResourceType, PlatformDeviceDriver, PlatformDeviceInfo,
         },
     },
     driver_initcall,
+    environment::NUM_OF_CPUS,
     interrupt::{
-        CpuId, InterruptError, InterruptManager, InterruptResult,
         controllers::{LocalInterruptController, LocalInterruptType},
+        CpuId, InterruptError, InterruptManager, InterruptResult,
     },
 };
 use alloc::{boxed::Box, vec};
@@ -203,15 +204,12 @@ impl LocalInterruptController for Clint {
 
     /// Clear a software interrupt for a specific CPU
     fn clear_software_interrupt(&mut self, cpu_id: CpuId) -> InterruptResult<()> {
-        // self.validate_cpu_id(cpu_id)?;
+        self.validate_cpu_id(cpu_id)?;
 
-        // let addr = self.msip_addr(cpu_id);
-        // unsafe {
-        //     write_volatile(addr as *mut u32, 0);
-        // }
-
-        // TODO: Use SBI to clear software interrupt
-        // For now, just return Ok
+        let addr = self.msip_addr(cpu_id);
+        unsafe {
+            write_volatile(addr as *mut u32, 0);
+        }
 
         Ok(())
     }
@@ -256,10 +254,15 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
     // Read the timebase frequency once from device tree
     // Prefer the timebase frequency provided by the device tree.
     // Fallback keeps QEMU virt default (10MHz) working even if FDT is unavailable.
-    let timebase_frequency_hz = crate::arch::riscv64::fdt::timebase_frequency_hz_from_fdt().unwrap_or(10_000_000);
+    let timebase_frequency_hz =
+        crate::arch::riscv64::fdt::timebase_frequency_hz_from_fdt().unwrap_or(10_000_000);
 
     // Create CLINT controller
-    let mut controller = Box::new(Clint::new(base_addr, 4, timebase_frequency_hz)); // Example: 4 CPUs for QEMU virt
+    let mut controller = Box::new(Clint::new(
+        base_addr,
+        NUM_OF_CPUS as CpuId,
+        timebase_frequency_hz,
+    ));
 
     // Initialize CLINT (Currently only initializes for CPU 0)
     if let Err(e) = controller.init(0) {
@@ -274,7 +277,7 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
     // Register with InterruptManager instead of DeviceManager
     match InterruptManager::global()
         .lock()
-        .register_local_controller_for_range(controller, 0..4)
+        .register_local_controller_for_range(controller, 0..NUM_OF_CPUS)
     {
         Ok(_) => {
             crate::early_println!(

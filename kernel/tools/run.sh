@@ -84,6 +84,7 @@ qemu-system-riscv64 \
     -machine virt \
     -bios default \
     -m 4G \
+    -smp 2 \
     -nographic \
     -serial mon:stdio \
     --no-reboot \

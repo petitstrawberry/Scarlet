@@ -8,6 +8,7 @@ use alloc::boxed::Box;
 
 use crate::{
     early_initcall,
+    environment::NUM_OF_CPUS,
     interrupt::{
         CpuId, InterruptError, InterruptManager, InterruptResult,
         controllers::{LocalInterruptController, LocalInterruptType},
@@ -122,23 +123,16 @@ impl LocalInterruptController for SbiClint {
         }
     }
 
-    /// Send a software interrupt to a specific CPU
-    fn send_software_interrupt(&mut self, _target_cpu: CpuId) -> InterruptResult<()> {
+    /// Send a software interrupt to a specific CPU (IPI)
+    fn send_software_interrupt(&mut self, target_cpu: CpuId) -> InterruptResult<()> {
+        self.validate_cpu_id(target_cpu)?;
+        crate::arch::send_ipi(target_cpu as usize);
         Ok(())
     }
 
     /// Clear a software interrupt for a specific CPU
     fn clear_software_interrupt(&mut self, _cpu_id: CpuId) -> InterruptResult<()> {
-        // self.validate_cpu_id(cpu_id)?;
-
-        // let addr = self.msip_addr(cpu_id);
-        // unsafe {
-        //     write_volatile(addr as *mut u32, 0);
-        // }
-
-        // TODO: Use SBI to clear software interrupt
-        // For now, just return Ok
-
+        crate::arch::riscv64::instruction::sbi::sbi_clear_ipi();
         Ok(())
     }
 
@@ -181,10 +175,11 @@ fn register_driver() {
 
     // Create the SBI timer controller
     let mut controller = Box::new(SbiClint {
-        max_cpus: 4,
+        max_cpus: NUM_OF_CPUS,
         timebase_frequency_hz,
     });
 
+    // Initialize for the BSP (CPU 0). APs will be initialized in start_ap().
     if let Err(e) = controller.init(0) {
         crate::early_println!(
             "[interrupt] Failed to initialize CLINT for CPU {}: {}",
@@ -193,10 +188,10 @@ fn register_driver() {
         );
     }
 
-    // Register with InterruptManager instead of DeviceManager
+    // Register with InterruptManager for all CPUs
     match InterruptManager::global()
         .lock()
-        .register_local_controller_for_range(controller, 0..4)
+        .register_local_controller_for_range(controller, 0..NUM_OF_CPUS as u32)
     {
         Ok(_) => {}
         Err(e) => {

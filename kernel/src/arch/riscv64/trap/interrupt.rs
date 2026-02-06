@@ -1,6 +1,5 @@
 use crate::arch::{Trapframe, get_cpu};
 use crate::interrupt::InterruptManager;
-use crate::sched::scheduler::get_scheduler;
 
 /// RISC-V S-mode interrupt causes
 const SUPERVISOR_SOFTWARE_INTERRUPT: usize = 1;
@@ -9,7 +8,7 @@ const SUPERVISOR_EXTERNAL_INTERRUPT: usize = 9;
 
 pub fn arch_interrupt_handler(trapframe: &mut Trapframe, cause: usize) {
     match cause {
-        SUPERVISOR_SOFTWARE_INTERRUPT => handle_software_interrupt(),
+        SUPERVISOR_SOFTWARE_INTERRUPT => handle_software_interrupt(trapframe),
         SUPERVISOR_TIMER_INTERRUPT => handle_timer_interrupt(trapframe),
         SUPERVISOR_EXTERNAL_INTERRUPT => handle_external_interrupt(trapframe),
         _ => handle_unknown_interrupt(trapframe, cause),
@@ -17,11 +16,16 @@ pub fn arch_interrupt_handler(trapframe: &mut Trapframe, cause: usize) {
 }
 
 /// Handle software interrupt (IPI)
-/// TODO: Implement inter-processor interrupt handling
-fn handle_software_interrupt() {
-    crate::early_println!("[interrupt] Software interrupt received - TODO: implement IPI");
-    // TODO: CLINT software interrupt handling
-    // TODO: Inter-processor interrupt (IPI) support
+///
+/// Clears the SSIP bit to acknowledge the interrupt and triggers a reschedule
+/// on this CPU so that newly-enqueued tasks are picked up promptly.
+fn handle_software_interrupt(trapframe: &mut Trapframe) {
+    // Acknowledge the IPI by clearing the supervisor software interrupt pending bit.
+    crate::arch::riscv64::instruction::sbi::sbi_clear_ipi();
+
+    // Trigger a reschedule so this CPU picks up any newly-enqueued work.
+    let scheduler = crate::sched::scheduler::get_scheduler();
+    scheduler.on_tick(get_cpu().get_cpuid(), trapframe);
 }
 
 /// Handle timer interrupt from CLINT

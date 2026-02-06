@@ -82,6 +82,44 @@ pub fn sbi_call(
     }
 }
 
+/// SBI call with three arguments (a0, a1, a2).
+///
+/// Required by extensions like HSM `hart_start` which takes hartid, start_addr,
+/// and opaque as three separate arguments.
+#[inline(never)]
+pub fn sbi_call3(
+    extension: Extension,
+    function: usize,
+    arg0: usize,
+    arg1: usize,
+    arg2: usize,
+) -> Result<usize, SbiError> {
+    let error: usize;
+    let ret: usize;
+
+    unsafe {
+        asm!(
+            "ecall",
+            inout("a0") arg0 => error,
+            inout("a1") arg1 => ret,
+            inout("a2") arg2 => _,
+            inout("a3") 0 => _,
+            inout("a4") 0 => _,
+            inout("a5") 0 => _,
+            inout("a6") function => _,
+            inout("a7") extension as usize => _,
+            clobber_abi("C"),
+            options(nostack),
+        );
+    }
+
+    match error {
+        0 => Ok(ret),
+        error_code if error_code <= 8 => Err(SbiError::from_error(error_code)),
+        _ => Err(SbiError::Failed),
+    }
+}
+
 pub fn sbi_console_putchar(c: char) {
     let _ = sbi_call(Extension::ConsolePutChar, 0, c as usize, 0);
 }
@@ -110,4 +148,42 @@ pub fn sbi_system_reset(reset_type: u32, reset_reason: u32) -> ! {
         reset_reason as usize,
     );
     loop {}
+}
+
+/// Start a hart using the SBI HSM (Hart State Management) extension.
+///
+/// # Arguments
+///
+/// * `hartid` - The hart to start
+/// * `start_addr` - Physical address of the entry point for the hart
+/// * `opaque` - An opaque value passed to the hart in register `a1`
+///
+/// # Returns
+///
+/// `Ok(0)` on success, or an `SbiError` on failure
+pub fn sbi_hart_start(hartid: usize, start_addr: usize, opaque: usize) -> Result<usize, SbiError> {
+    sbi_call3(Extension::Hsm, 0, hartid, start_addr, opaque)
+}
+
+/// Send an inter-processor interrupt (IPI) to a set of harts.
+///
+/// # Arguments
+///
+/// * `hart_mask` - Bitmask of harts to receive the IPI (relative to `hart_mask_base`)
+/// * `hart_mask_base` - The starting hart ID for the mask
+///
+/// # Returns
+///
+/// `Ok(0)` on success, or an `SbiError` on failure
+pub fn sbi_send_ipi(hart_mask: usize, hart_mask_base: usize) -> Result<usize, SbiError> {
+    sbi_call(Extension::Ipi, 0, hart_mask, hart_mask_base)
+}
+
+/// Clear the supervisor software interrupt pending bit (SSIP) in `sip`.
+///
+/// This must be called after handling a software interrupt (IPI) to acknowledge it.
+pub fn sbi_clear_ipi() {
+    unsafe {
+        asm!("csrc sip, {0}", in(reg) 0x2); // Clear SSIP (bit 1)
+    }
 }

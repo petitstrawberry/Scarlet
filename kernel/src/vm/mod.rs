@@ -489,7 +489,8 @@ pub fn switch_to_kernel_vm() {
 
 pub fn switch_to_user_vm(cpu: &mut Arch) {
     let cpu_id = cpu.get_cpuid();
-    let task = get_scheduler()
+    let sched = get_scheduler();
+    let task = sched
         .get_current_task(cpu_id)
         .expect("No current task found");
     let manager = &task.vm_manager;

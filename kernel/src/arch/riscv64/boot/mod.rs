@@ -1,1 +1,1 @@
-mod entry;
+pub(crate) mod entry;

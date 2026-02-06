@@ -563,6 +563,10 @@ pub extern "C" fn start_kernel(boot_info: &BootInfo) -> ! {
     /* After this point, we can use the heap and virtual memory */
     /* We will also be restricted to the kernel address space */
 
+    // Save the kernel page-table base register so that secondary CPUs can
+    // activate the same page table in their assembly entry trampoline.
+    crate::arch::save_kernel_page_table();
+
     /* Populate devices from BootInfo device source */
     early_println!("[Scarlet Kernel] Populating devices...");
     let device_manager = DeviceManager::get_mut_manager();
@@ -648,9 +652,15 @@ pub extern "C" fn start_kernel(boot_info: &BootInfo) -> ! {
 
     fence(Ordering::SeqCst); // Ensure timer is initialized before proceeding
 
+    /* Boot secondary CPUs */
+    early_println!("[boot] Booting secondary CPUs...");
+    crate::arch::boot_secondary_cpus(cpu_id, environment::NUM_OF_CPUS);
+
+    fence(Ordering::SeqCst); // Ensure secondary CPUs have a chance to start
+
     /* Initialize scheduler */
     early_println!("[boot] Initializing scheduler...");
-    let scheduler = get_scheduler();
+    get_scheduler().init_idle_tasks();
     fence(Ordering::SeqCst); // Ensure scheduler is initialized before proceeding
 
     /* Initialize global VFS */
@@ -742,10 +752,9 @@ pub extern "C" fn start_kernel(boot_info: &BootInfo) -> ! {
     early_println!("[Scarlet Kernel] Scheduler will start...");
     early_println!("[Scarlet Kernel] Calling start_scheduler()...");
 
-    let next_task_id = scheduler.start_scheduler();
+    let next_task_id = get_scheduler().start_scheduler();
     if let Some(next_task_id) = next_task_id {
-        let next_task = scheduler
-            .get_task_by_id(next_task_id)
+        let next_task = crate::sched::scheduler::TaskPool::get_task_mut(next_task_id)
             .expect("First runnable task must exist");
         crate::arch::first_switch_to_user(next_task);
     }
@@ -757,8 +766,37 @@ pub extern "C" fn start_kernel(boot_info: &BootInfo) -> ! {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn start_ap(cpu_id: usize) {
-    println!("[Scarlet Kernel] CPU {} is up and running", cpu_id);
+pub extern "C" fn start_ap(hartid: usize) {
+    use core::mem::transmute;
 
-    loop {}
+    // Register this hart and obtain a sequential CPU_ID.
+    let cpu_id = crate::arch::riscv64::register_cpu(hartid);
+    early_println!(
+        "[SMP] Hart {}: online as CPU {} — initializing...",
+        hartid,
+        cpu_id
+    );
+
+    // Set up per-CPU arch struct indexed by CPU_ID.
+    let riscv: &mut crate::arch::Arch =
+        unsafe { transmute(&crate::arch::riscv64::CPUS[cpu_id] as *const _ as usize) };
+    riscv.set_ids(hartid, cpu_id);
+
+    // Initialize trap handling (also enables FPU/Vector).
+    crate::arch::riscv64::trap_init(riscv);
+
+    // Initialize the per-CPU timer.
+    let timer = get_kernel_timer();
+    timer.set_interval_us(cpu_id, crate::timer::TICK_INTERVAL_US);
+    timer.start(cpu_id);
+
+    // Enable interrupts on this CPU.
+    crate::arch::enable_interrupt();
+
+    early_println!("[SMP] CPU {} is up and running", cpu_id);
+
+    // Enter idle loop — this CPU will pick up work via IPI / timer.
+    loop {
+        crate::arch::instruction::idle();
+    }
 }

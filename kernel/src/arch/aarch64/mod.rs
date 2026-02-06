@@ -669,6 +669,48 @@ pub fn reboot() -> ! {
     }
 }
 
+// ---------------------------------------------------------------------------
+// SMP stubs for aarch64 — to be implemented when aarch64 SMP is added
+// ---------------------------------------------------------------------------
+
+/// Register a physical CPU and assign it the next sequential CPU_ID.
+pub fn register_cpu(_physical_id: usize) -> usize {
+    // TODO: Implement aarch64 CPU registration
+    0
+}
+
+/// Convert a CPU_ID to the corresponding physical CPU ID (MPIDR affinity on AArch64).
+pub fn cpu_id_to_physical_id(cpu_id: usize) -> usize {
+    cpu_id // 1:1 mapping placeholder
+}
+
+/// Convert a physical CPU ID to the corresponding CPU_ID.
+pub fn physical_id_to_cpu_id(physical_id: usize) -> usize {
+    physical_id // 1:1 mapping placeholder
+}
+
+/// Return the number of CPUs that are currently online.
+pub fn num_cpus_online() -> usize {
+    1
+}
+
+/// Boot secondary CPUs — stub for aarch64.
+pub fn boot_secondary_cpus(_bsp_physical_id: usize, _num_cpus: usize) {
+    // TODO: Implement PSCI-based secondary CPU startup
+}
+
+/// Send an IPI to a specific CPU — stub for aarch64.
+pub fn send_ipi(_cpu_id: usize) {
+    // TODO: Implement GIC-based IPI
+}
+
+/// Save the kernel page-table base register — stub for aarch64.
+///
+/// The aarch64 implementation will save TTBR1_EL1 here when SMP is added.
+pub fn save_kernel_page_table() {
+    // TODO: Implement for aarch64
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

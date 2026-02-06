@@ -42,9 +42,8 @@ pub fn arch_exception_handler(trapframe: &mut Trapframe, cause: usize) {
     match cause {
         /* Illegal instruction (used for lazy FP/Vector enable) */
         2 => {
-            let task = get_scheduler()
-                .get_current_task(get_cpu().get_cpuid())
-                .unwrap();
+            let sched = get_scheduler();
+            let task = sched.get_current_task(get_cpu().get_cpuid()).unwrap();
 
             let user_fpu_allowed = crate::arch::user_fpu_enabled();
             let user_vec_allowed = crate::arch::user_vector_enabled();
@@ -187,9 +186,8 @@ pub fn arch_exception_handler(trapframe: &mut Trapframe, cause: usize) {
         /* Instruction page fault */
         12 => {
             let mut vaddr = trapframe.epc as usize;
-            let task = get_scheduler()
-                .get_current_task(get_cpu().get_cpuid())
-                .unwrap();
+            let sched = get_scheduler();
+            let task = sched.get_current_task(get_cpu().get_cpuid()).unwrap();
             use crate::object::capability::memory_mapping::{AccessKind, AccessOp};
             loop {
                 let access = AccessKind {
@@ -229,9 +227,8 @@ pub fn arch_exception_handler(trapframe: &mut Trapframe, cause: usize) {
             unsafe {
                 asm!("csrr {}, stval", out(reg) vaddr);
             }
-            let task = get_scheduler()
-                .get_current_task(get_cpu().get_cpuid())
-                .unwrap();
+            let sched = get_scheduler();
+            let task = sched.get_current_task(get_cpu().get_cpuid()).unwrap();
             use crate::object::capability::memory_mapping::{AccessKind, AccessOp};
             loop {
                 let op = if cause == 13 {

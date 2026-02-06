@@ -31,7 +31,7 @@ use crate::{
     ipc::{EventContent, event::ProcessControlType},
     mem::page::{Page, allocate_raw_pages, free_boxed_page},
     object::handle::HandleTable,
-    sched::scheduler::{Scheduler, get_scheduler},
+    sched::scheduler::{Scheduler, TaskPool, get_scheduler},
     timer::{TimerHandler, add_timer, get_tick},
     vm::{
         manager::VirtualMemoryManager,
@@ -1782,7 +1782,8 @@ pub fn mytask() -> Option<&'static mut Task> {
     }
 
     let cpu = get_cpu();
-    get_scheduler().get_current_task(cpu.get_cpuid())
+    let task_id = get_scheduler().get_current_task_id(cpu.get_cpuid())?;
+    TaskPool::get_task_mut(task_id)
 }
 
 /// Set the current working directory for the current task via VfsManager
@@ -1812,7 +1813,10 @@ pub fn set_current_task_cwd(path: String) -> bool {
 /// This function is called when a task is first scheduled.
 pub fn task_initial_kernel_entrypoint() -> ! {
     let cpu = get_cpu();
-    let current_task = get_scheduler().get_current_task(cpu.get_cpuid()).unwrap();
+    let task_id = get_scheduler()
+        .get_current_task_id(cpu.get_cpuid())
+        .unwrap();
+    let current_task = TaskPool::get_task_mut(task_id).unwrap();
     Scheduler::setup_task_execution(cpu, current_task);
     arch_switch_to_user_space(current_task.get_trapframe());
 }

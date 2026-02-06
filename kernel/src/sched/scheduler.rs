@@ -352,6 +352,7 @@ impl TaskPool {
 
 static mut SCHEDULER: Option<Scheduler> = None;
 
+#[allow(static_mut_refs)]
 pub fn get_scheduler() -> &'static mut Scheduler {
     unsafe {
         match SCHEDULER {
@@ -372,6 +373,8 @@ pub struct Scheduler {
     /// Queue for zombie task IDs (finished but not yet cleaned up)
     zombie_queue: [VecDeque<usize>; NUM_OF_CPUS],
     current_task_id: [Option<usize>; NUM_OF_CPUS],
+    /// Per-CPU idle task IDs (always schedulable, lowest priority)
+    idle_task_id: [Option<usize>; NUM_OF_CPUS],
 }
 
 impl Scheduler {
@@ -381,6 +384,36 @@ impl Scheduler {
             blocked_queue: [const { VecDeque::new() }; NUM_OF_CPUS],
             zombie_queue: [const { VecDeque::new() }; NUM_OF_CPUS],
             current_task_id: [const { None }; NUM_OF_CPUS],
+            idle_task_id: [const { None }; NUM_OF_CPUS],
+        }
+    }
+
+    /// Create per-CPU idle tasks at the lowest possible priority.
+    ///
+    /// Each idle task loops calling `idle()` (WFI). Because they always remain
+    /// in the ready queue at `u32::MAX` priority, the scheduler will only pick
+    /// them when no other tasks are runnable, eliminating the need to panic on
+    /// an empty ready queue.
+    pub fn init_idle_tasks(&mut self) {
+        for cpu_id in 0..NUM_OF_CPUS {
+            let name = alloc::format!("idle-cpu{}", cpu_id);
+            let mut task = new_kernel_task(name, u32::MAX, || {
+                loop {
+                    idle();
+                }
+            });
+            task.init();
+            let task_id = match get_task_pool().add_task(task) {
+                Ok(id) => id,
+                Err(e) => panic!("Failed to create idle task for CPU {}: {}", cpu_id, e),
+            };
+            // Mark the idle task as Ready so the scheduler can pick it up
+            if let Some(t) = TaskPool::get_task_mut(task_id) {
+                t.state = TaskState::Ready;
+            }
+            self.idle_task_id[cpu_id] = Some(task_id);
+            self.ready_queue[cpu_id].push_back(task_id);
+            crate::early_println!("[SCHED] Created idle task {} for CPU {}", task_id, cpu_id);
         }
     }
 
@@ -395,10 +428,14 @@ impl Scheduler {
         task_id
     }
 
-    /// Determines the next task to run and returns current and next task IDs
+    /// Determines the next task to run using priority-based scheduling.
     ///
-    /// This method performs the core scheduling algorithm and task state management
-    /// without performing actual context switches or hardware setup.
+    /// Selects the highest-priority (lowest `priority` value) ready task from
+    /// this CPU's ready queue.  Zombie and blocked tasks encountered during
+    /// selection are moved to their respective queues.
+    ///
+    /// Per-CPU idle tasks (priority `u32::MAX`) guarantee the ready queue is
+    /// never empty, so this method always finds a runnable task.
     ///
     /// # Arguments
     /// * `cpu` - The CPU architecture state (for CPU ID)
@@ -409,131 +446,91 @@ impl Scheduler {
         let cpu_id = cpu.get_cpuid();
         let old_current_task_id = self.current_task_id[cpu_id];
 
-        // IMPORTANT: If there's a current running task, re-queue it BEFORE scheduling
-        // This ensures it's available as a fallback if no other tasks are ready
+        // Re-queue the currently running task if it is still runnable.
         if let Some(current_id) = old_current_task_id {
-            // Check if current task is still in ready_queue (it shouldn't be if it's running)
             if !self.ready_queue[cpu_id].iter().any(|&id| id == current_id) {
-                // Current task is not in ready_queue (it's running), add it back
-                // Only add if the task is in a valid state to be scheduled
-                if let Some(task) = self.get_task_by_id(current_id) {
+                if let Some(task) = TaskPool::get_task_mut(current_id) {
                     match task.state {
                         TaskState::Ready | TaskState::Running => {
                             self.ready_queue[cpu_id].push_back(current_id);
                         }
-                        _ => {
-                            // Task is in Zombie, Terminated, Blocked, or NotInitialized state
-                            // Don't re-queue it
-                        }
+                        _ => {}
                     }
                 }
             }
         }
 
-        // Continue trying to find a suitable task to run
-        loop {
-            let task_id = self.ready_queue[cpu_id].pop_front();
-
-            /* If there are no subsequent tasks */
-            if self.ready_queue[cpu_id].is_empty() {
-                match task_id {
-                    Some(task_id) => {
-                        let t = self
-                            .get_task_by_id(task_id)
-                            .expect("Task must exist in task pool");
-                        match t.state {
-                            TaskState::NotInitialized => {
-                                panic!("Task must be initialized before scheduling");
-                            }
-                            TaskState::Zombie => {
-                                let task_id = t.get_id();
-                                let parent_id = t.get_parent_id();
-                                self.zombie_queue[cpu_id].push_back(task_id);
-                                self.current_task_id[cpu_id] = None;
-                                // Wake up any processes waiting for this specific task
-                                wake_task_waiters(task_id);
-                                // Also wake up parent process for waitpid(-1)
-                                if let Some(parent_id) = parent_id {
-                                    wake_parent_waiters(parent_id);
-                                }
-                                continue;
-                            }
-                            TaskState::Terminated => {
-                                panic!("At least one task must be scheduled");
-                            }
-                            TaskState::Blocked(_) => {
-                                // Reset current_task_id since this task is no longer current
-                                if self.current_task_id[cpu_id] == Some(task_id) {
-                                    self.current_task_id[cpu_id] = None;
-                                }
-                                // Put blocked task to blocked queue without running it
-                                self.blocked_queue[cpu_id].push_back(task_id);
-                                continue;
-                            }
-                            TaskState::Ready | TaskState::Running => {
-                                t.state = TaskState::Running;
-                                // Task is ready to run
-                                t.time_slice = 1; // Reset time slice on dispatch
-                                let next_task_id = t.get_id();
-                                self.current_task_id[cpu_id] = Some(next_task_id);
-                                self.ready_queue[cpu_id].push_back(task_id);
-                                return (old_current_task_id, Some(next_task_id));
-                            }
-                        }
+        // Drain the ready queue, moving non-runnable tasks out and collecting
+        // runnable candidates for priority comparison.
+        let mut candidates: VecDeque<usize> = VecDeque::new();
+        while let Some(task_id) = self.ready_queue[cpu_id].pop_front() {
+            let Some(task) = TaskPool::get_task_mut(task_id) else {
+                continue;
+            };
+            match task.state {
+                TaskState::NotInitialized => {
+                    panic!("Task {} must be initialized before scheduling", task_id);
+                }
+                TaskState::Zombie => {
+                    let parent_id = task.get_parent_id();
+                    self.zombie_queue[cpu_id].push_back(task_id);
+                    if self.current_task_id[cpu_id] == Some(task_id) {
+                        self.current_task_id[cpu_id] = None;
                     }
-                    // If no tasks are ready, create an idle task
-                    None => {
-                        panic!("At least one task must be scheduled");
+                    wake_task_waiters(task_id);
+                    if let Some(pid) = parent_id {
+                        wake_parent_waiters(pid);
                     }
                 }
-            } else {
-                match task_id {
-                    Some(task_id) => {
-                        let t = self
-                            .get_task_by_id(task_id)
-                            .expect("Task must exist in task pool");
-                        match t.state {
-                            TaskState::NotInitialized => {
-                                panic!("Task must be initialized before scheduling");
-                            }
-                            TaskState::Zombie => {
-                                let task_id = t.get_id();
-                                let parent_id = t.get_parent_id();
-                                self.zombie_queue[cpu_id].push_back(task_id);
-                                // Wake up any processes waiting for this specific task
-                                wake_task_waiters(task_id);
-                                // Also wake up parent process for waitpid(-1)
-                                if let Some(parent_id) = parent_id {
-                                    wake_parent_waiters(parent_id);
-                                }
-                                continue;
-                            }
-                            TaskState::Terminated => {
-                                get_task_pool().remove_task(task_id);
-                                continue;
-                            }
-                            TaskState::Blocked(_) => {
-                                // Reset current_task_id since this task is no longer current
-                                if self.current_task_id[cpu_id] == Some(task_id) {
-                                    self.current_task_id[cpu_id] = None;
-                                }
-                                // Put blocked task back to the end of queue without running it
-                                self.blocked_queue[cpu_id].push_back(task_id);
-                                continue;
-                            }
-                            TaskState::Ready | TaskState::Running => {
-                                t.time_slice = 1; // Reset time slice on dispatch
-                                let next_task_id = t.get_id();
-                                self.current_task_id[cpu_id] = Some(next_task_id);
-                                self.ready_queue[cpu_id].push_back(task_id);
-                                return (old_current_task_id, Some(next_task_id));
-                            }
-                        }
+                TaskState::Terminated => {
+                    get_task_pool().remove_task(task_id);
+                }
+                TaskState::Blocked(_) => {
+                    if self.current_task_id[cpu_id] == Some(task_id) {
+                        self.current_task_id[cpu_id] = None;
                     }
-                    None => return (old_current_task_id, self.current_task_id[cpu_id]),
+                    self.blocked_queue[cpu_id].push_back(task_id);
+                }
+                TaskState::Ready | TaskState::Running => {
+                    candidates.push_back(task_id);
                 }
             }
         }
+
+        // No runnable candidates at all — should not happen with idle tasks,
+        // but handle gracefully.
+        if candidates.is_empty() {
+            self.current_task_id[cpu_id] = None;
+            return (old_current_task_id, None);
+        }
+
+        // Pick the candidate with the best (lowest) priority value.
+        let mut best_idx = 0;
+        let mut best_priority = u32::MAX;
+        for (i, &tid) in candidates.iter().enumerate() {
+            if let Some(t) = TaskPool::get_task_mut(tid) {
+                if t.priority < best_priority {
+                    best_priority = t.priority;
+                    best_idx = i;
+                }
+            }
+        }
+
+        // Remove the chosen task from candidates; the rest go back to ready_queue.
+        let chosen_id = candidates.remove(best_idx).unwrap();
+        // Put remaining candidates back into ready_queue (preserving relative order).
+        self.ready_queue[cpu_id] = candidates;
+
+        // Dispatch the chosen task.
+        if let Some(task) = TaskPool::get_task_mut(chosen_id) {
+            task.state = TaskState::Running;
+            task.time_slice = 1; // Reset time slice
+        }
+        self.current_task_id[cpu_id] = Some(chosen_id);
+        // Keep the chosen task in the ready queue so it can be re-selected next tick.
+        self.ready_queue[cpu_id].push_back(chosen_id);
+
+        (old_current_task_id, Some(chosen_id))
     }
 
     /// Called every timer tick. Decrements the current task's time_slice.
@@ -892,6 +889,7 @@ impl Scheduler {
             self.blocked_queue[cpu_id].clear();
             self.zombie_queue[cpu_id].clear();
             self.current_task_id[cpu_id] = None;
+            self.idle_task_id[cpu_id] = None;
         }
 
         // Reset the task pool
