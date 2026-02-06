@@ -373,6 +373,18 @@ pub trait VirtioDevice {
         Ok(negotiated_features)
     }
 
+    fn is_modern_device(&self) -> bool {
+        self.read32_register(Register::Version) == 2
+    }
+
+    fn supports_feature(&self, feature: u32) -> bool {
+        let selector = feature / 32;
+        let bit = feature % 32;
+        self.write32_register(Register::DeviceFeaturesSel, selector);
+        let device_features = self.read32_register(Register::DeviceFeatures);
+        (device_features & (1u32 << bit)) != 0
+    }
+
     /// Reset the device by writing 0 to the Status register
     fn reset(&mut self) -> Result<(), &'static str> {
         // self.debug_dump_mmio_state("reset:before");
@@ -515,6 +527,11 @@ pub trait VirtioDevice {
         // By default, accept all device features
         // Device-specific implementations should override this
         device_features
+    }
+
+    fn allow_ring_features(&self) -> bool {
+        self.is_modern_device()
+            && self.supports_feature(crate::drivers::virtio::features::VIRTIO_F_VERSION_1)
     }
 
     /// Set up a virtqueue
@@ -986,7 +1003,34 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
                 base_addr,
                 name
             );
-            let dev: Arc<dyn Device> = Arc::new(VirtioNetDevice::new(base_addr));
+            let dev = Arc::new(VirtioNetDevice::new(base_addr));
+            dev.register_interface(&name);
+
+            // Register interrupt handler if IRQ resource is available
+            if let Some(irq_resource) = device
+                .get_resources()
+                .iter()
+                .find(|r| r.res_type == PlatformDeviceResourceType::IRQ)
+            {
+                let interrupt_id = irq_resource.start as u32;
+                crate::early_println!("[Virtio] Net device interrupt ID: {}", interrupt_id);
+
+                if let Err(e) = dev.enable_interrupts(interrupt_id) {
+                    crate::early_println!("[Virtio] Failed to enable net interrupts: {}", e);
+                } else if let Err(e) = crate::interrupt::InterruptManager::with_manager(|mgr| {
+                    mgr.register_interrupt_device(interrupt_id, dev.clone())
+                }) {
+                    crate::early_println!(
+                        "[Virtio] Failed to register net interrupt device: {}",
+                        e
+                    );
+                } else {
+                    crate::early_println!("[Virtio] Net interrupt device registered");
+                }
+            } else {
+                crate::early_println!("[Virtio] No interrupt resource found for net device");
+            }
+
             DeviceManager::get_mut_manager().register_device_with_name(name, dev);
         }
         VirtioDeviceType::GPU => {

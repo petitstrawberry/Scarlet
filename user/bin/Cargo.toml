@@ -53,9 +53,17 @@ path = "src/cat.rs"
 name = "fb_test"
 path = "src/fb_test.rs"
 
-[[bin]]
-name = "socket_server"
-path = "src/socket_server.rs"
+ [[bin]]
+ name = "socket_server"
+ path = "src/socket_server.rs"
+
+ [[bin]]
+ name = "udp_server"
+ path = "src/udp_server.rs"
+
+ [[bin]]
+ name = "udp_client"
+ path = "src/udp_client.rs"
 
 [[bin]]
 name = "socket_client"
@@ -64,6 +72,22 @@ path = "src/socket_client.rs"
 [[bin]]
 name = "socket_pair"
 path = "src/socket_pair.rs"
+
+[[bin]]
+name = "ping"
+path = "src/ping.rs"
+
+[[bin]]
+name = "netcfg"
+path = "src/netcfg.rs"
+
+[[bin]]
+name = "tcp_client"
+path = "src/tcp_client.rs"
+
+[[bin]]
+name = "tcp_server"
+path = "src/tcp_server.rs"
 
 [[bin]]
 name = "sws"

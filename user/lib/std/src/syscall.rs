@@ -86,13 +86,24 @@ pub enum Syscall {
     MemoryUnmap = 701, // Memory unmap operation (munmap)
 
     // === Socket Operations (Scarlet Native) ===
-    SocketCreate = 900,   // Create a local socket
+    SocketCreate = 900,   // Create a socket (domain/type/protocol)
     SocketBind = 901,     // Bind socket to path
     SocketListen = 902,   // Start listening
     SocketConnect = 903,  // Connect to socket
     SocketAccept = 904,   // Accept connection
     Socketpair = 905,     // Create socket pair
     SocketShutdown = 906, // Shutdown socket
+
+    // === Datagram Operations (UDP/Local datagram) ===
+    SocketRecvFrom = 907, // Receive datagram with sender address
+    SocketSendTo = 908,   // Send datagram to specified address
+
+    // === Network Configuration ===
+    NetworkSetIpv4 = 910,        // Set interface IPv4 address
+    NetworkSetGateway = 911,     // Set default gateway
+    NetworkSetDns = 912,         // Set DNS server
+    NetworkSetNetmask = 913,     // Set subnet mask
+    NetworkListInterfaces = 914, // List network interfaces
 
     // === Debug/Profiler Operations ===
     ProfilerDump = 999, // Dump profiler statistics (debug only)

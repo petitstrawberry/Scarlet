@@ -327,16 +327,15 @@ impl<'a> VirtQueue<'a> {
         Ok(())
     }
 
-    /// Pop a buffer from the used ring
+    /// Pop a buffer from the used ring and return descriptor index + used length.
     ///
     /// This function retrieves a buffer from the used ring when the device has finished processing it.
     /// The caller is responsible for freeing the descriptor when it's done with the buffer.
     ///
     /// # Returns
     ///
-    /// Option<usize>: The index of the descriptor that was used, or None if no descriptors are available.
-    ///
-    pub fn pop(&mut self) -> Option<usize> {
+    /// Option<(usize, u32)>: The descriptor index and the used length, or None if no descriptors are available.
+    pub fn pop_used(&mut self) -> Option<(usize, u32)> {
         // A memory fence is needed to ensure that we see the latest value of `used.idx`
         // written by the device.
         core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
@@ -359,7 +358,20 @@ impl<'a> VirtQueue<'a> {
         // Update the last used index
         self.last_used_idx = self.last_used_idx.wrapping_add(1);
 
-        Some(desc_idx)
+        Some((desc_idx, used_entry.len))
+    }
+
+    /// Pop a buffer from the used ring
+    ///
+    /// This function retrieves a buffer from the used ring when the device has finished processing it.
+    /// The caller is responsible for freeing the descriptor when it's done with the buffer.
+    ///
+    /// # Returns
+    ///
+    /// Option<usize>: The index of the descriptor that was used, or None if no descriptors are available.
+    ///
+    pub fn pop(&mut self) -> Option<usize> {
+        self.pop_used().map(|(desc_idx, _)| desc_idx)
     }
 }
 

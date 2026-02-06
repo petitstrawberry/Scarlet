@@ -89,8 +89,12 @@ use crate::ipc::syscall::{
     sys_socket_send_handle, sys_socket_send_handle_and_data,
 };
 use crate::network::syscall::{
+    sys_network_list_interfaces, sys_network_set_dns, sys_network_set_gateway,
+    sys_network_set_ipv4, sys_network_set_netmask,
+};
+use crate::network::syscall::{
     sys_socket_accept, sys_socket_bind, sys_socket_connect, sys_socket_create, sys_socket_listen,
-    sys_socket_shutdown, sys_socketpair,
+    sys_socket_recvfrom, sys_socket_sendto, sys_socket_shutdown, sys_socketpair,
 };
 use crate::object::capability::file::{sys_file_seek, sys_file_truncate};
 use crate::object::capability::memory_mapping::{sys_memory_map, sys_memory_unmap};
@@ -226,13 +230,24 @@ syscall_table! {
     MemoryUnmap = 701 => sys_memory_unmap, // Memory unmap operation (munmap)
 
     // === Socket Operations (Scarlet Native) ===
-    SocketCreate = 900 => sys_socket_create,     // Create a local socket
+    SocketCreate = 900 => sys_socket_create,     // Create a socket (domain/type/protocol)
     SocketBind = 901 => sys_socket_bind,         // Bind socket to path
     SocketListen = 902 => sys_socket_listen,     // Start listening
     SocketConnect = 903 => sys_socket_connect,   // Connect to socket
     SocketAccept = 904 => sys_socket_accept,     // Accept connection
     Socketpair = 905 => sys_socketpair,          // Create socket pair
     SocketShutdown = 906 => sys_socket_shutdown, // Shutdown socket
+
+    // === Datagram Operations (UDP/Local datagram) ===
+    SocketRecvFrom = 907 => sys_socket_recvfrom, // Receive datagram with sender address
+    SocketSendTo = 908 => sys_socket_sendto,     // Send datagram to specified address
+
+    // === Network Configuration ===
+    NetworkSetIpv4 = 910 => sys_network_set_ipv4,       // Set interface IPv4 address
+    NetworkSetGateway = 911 => sys_network_set_gateway, // Set default gateway
+    NetworkSetDns = 912 => sys_network_set_dns,         // Set DNS server
+    NetworkSetNetmask = 913 => sys_network_set_netmask, // Set subnet mask
+    NetworkListInterfaces = 914 => sys_network_list_interfaces, // List network interfaces
 
     // === Task Event Operations ===
 
