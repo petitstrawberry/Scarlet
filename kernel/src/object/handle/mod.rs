@@ -265,6 +265,17 @@ impl HandleTable {
             .collect()
     }
 
+    /// Check if this is the sole owner of the underlying handle table.
+    ///
+    /// Returns `true` if no other `HandleTable` shares the same inner data
+    /// (i.e., the `Arc` strong reference count is 1).
+    /// This is used to decide whether `close_all` should run during task exit:
+    /// when the handle table is shared via `CLONE_FILES` (threads), only the
+    /// last task holding the table should close all handles.
+    pub fn is_sole_owner(&self) -> bool {
+        Arc::strong_count(&self.inner) == 1
+    }
+
     /// Close all handles (for process termination)
     pub fn close_all(&self) {
         let mut inner = self.inner.write();

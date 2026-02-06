@@ -12,8 +12,11 @@ use std::env;
 use std::fs::File;
 use std::io::{Read, SeekFrom, Write};
 use std::println;
-use std::socket::{Inet4SocketAddress, Socket, SocketDomain, SocketProtocol, SocketType};
+use std::socket::{
+    Inet4SocketAddress, ShutdownHow, Socket, SocketDomain, SocketProtocol, SocketType,
+};
 use std::string::{String, ToString};
+use std::thread;
 use std::vec::Vec;
 
 #[unsafe(no_mangle)]
@@ -73,7 +76,9 @@ pub extern "C" fn main(_argc: isize, _argv: *const *const u8) -> isize {
         };
 
         println!("[httpd] Client connected!");
-        handle_client(client_socket);
+        thread::spawn(move || {
+            handle_client(client_socket);
+        });
     }
 }
 
@@ -155,7 +160,7 @@ fn handle_client(mut client_socket: Socket) {
     }
 
     println!("[httpd] Response sent, closing connection");
-    let _ = client_socket.shutdown(std::socket::ShutdownHow::Both);
+    let _ = client_socket.shutdown(ShutdownHow::Both);
 }
 
 fn build_file_headers(path: &str) -> Option<(String, String, u64)> {
@@ -204,8 +209,9 @@ fn stream_file(client_socket: &mut Socket, file_path: &str, file_size: u64) {
 
 fn send_not_found(client_socket: &mut Socket) {
     let body = b"Not Found";
-    let response =
-        String::from("HTTP/1.1 404 Not Found\r\nContent-Type: text/plain\r\nConnection: close\r\nContent-Length: 9\r\n\r\n");
+    let response = String::from(
+        "HTTP/1.1 404 Not Found\r\nContent-Type: text/plain\r\nConnection: close\r\nContent-Length: 9\r\n\r\n",
+    );
     let _ = client_socket.write(response.as_bytes());
     let _ = client_socket.write(body);
 }

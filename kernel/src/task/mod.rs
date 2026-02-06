@@ -1316,8 +1316,13 @@ impl Task {
     /// * `status` - The exit status
     ///
     pub fn exit(&mut self, status: i32) {
-        // Close all open handles when task exits
-        self.handle_table.close_all();
+        // Close all open handles only if this task is the sole owner of the
+        // handle table.  When CLONE_FILES is used (thread::spawn), multiple
+        // tasks share the same Arc<HandleTableInner>.  Closing all handles
+        // here would destroy handles that sibling/parent threads still need.
+        if self.handle_table.is_sole_owner() {
+            self.handle_table.close_all();
+        }
         // Let current ABI perform exit-time cleanup (Linux: clear_child_tid, robust list, etc.)
         // Use take/restore to avoid aliasing &mut self and &mut field
         self.with_default_abi_mut(|abi, task| abi.on_task_exit(task));

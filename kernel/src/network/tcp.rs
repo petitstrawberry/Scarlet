@@ -233,7 +233,7 @@ pub struct TcpSocket {
     /// Local IP address
     local_ip: Mutex<Option<Ipv4Address>>,
     /// Local port
-    local_port: AtomicU16,
+    pub(crate) local_port: AtomicU16,
 
     /// Remote IP address
     remote_ip: Mutex<Option<Ipv4Address>>,
@@ -499,29 +499,30 @@ impl TcpSocket {
                     tcp_layer.register_port(local_port, child.self_weak.clone());
                     child.handle_syn_received(src_ip, header);
 
-                    // Check backlog limit
+                    // Check backlog limit and enqueue atomically
                     let max_backlog = self.max_backlog.load(Ordering::SeqCst);
-                    if self.pending_accept.lock().len() < max_backlog {
-                        self.pending_accept.lock().push_back(child);
-
-                        // Wake up any blocking accept() calls
-                        crate::early_println!("[tcp-accept] wake_one (pre-lock)");
-                        if let Some(waker) = self.accept_waker.lock().as_ref() {
-                            crate::early_println!("[tcp-accept] wake_one (locked)");
-                            waker.wake_one();
-                            crate::early_println!("[tcp-accept] wake_one (done)");
+                    {
+                        let mut pending = self.pending_accept.lock();
+                        if pending.len() < max_backlog {
+                            pending.push_back(child);
                         } else {
-                            crate::early_println!("[tcp-accept] wake_one (no waker)");
+                            // Must drop lock before sending RST (child borrows network)
+                            drop(pending);
+                            // Backlog full - send RST to reject connection
+                            let rst_port = self.local_port.load(Ordering::SeqCst);
+                            let rst_seq = self.send_seq.load(Ordering::SeqCst);
+                            let mut rst_header = TcpHeader::new(rst_port, header.src_port);
+                            rst_header.seq_number = rst_seq;
+                            rst_header.ack_number = child.recv_ack.load(Ordering::SeqCst);
+                            rst_header.set_flags(tcp_flags::RST);
+                            child.send_segment(src_ip, rst_header, &[], false, false);
+                            return;
                         }
-                    } else {
-                        // Backlog full - send RST to reject connection
-                        let rst_port = self.local_port.load(Ordering::SeqCst);
-                        let rst_seq = self.send_seq.load(Ordering::SeqCst);
-                        let mut rst_header = TcpHeader::new(rst_port, header.src_port);
-                        rst_header.seq_number = rst_seq;
-                        rst_header.ack_number = child.recv_ack.load(Ordering::SeqCst);
-                        rst_header.set_flags(tcp_flags::RST);
-                        child.send_segment(src_ip, rst_header, &[], false, false);
+                    }
+
+                    // Wake up any blocking accept() calls (lock released above)
+                    if let Some(waker) = self.accept_waker.lock().as_ref() {
+                        waker.wake_one();
                     }
                 }
             }
@@ -2003,31 +2004,9 @@ impl TcpLayer {
 
         let src_port = unsafe { core::ptr::addr_of!(header.src_port).read_unaligned() };
         let dst_port = unsafe { core::ptr::addr_of!(header.dst_port).read_unaligned() };
-        let flags = header.flags();
-        crate::early_println!(
-            "[TCP] RX: src={}.{}.{}.{}:{} dst_port={} flags=0x{:02X} len={}",
-            src_ip.0[0],
-            src_ip.0[1],
-            src_ip.0[2],
-            src_ip.0[3],
-            src_port,
-            dst_port,
-            flags,
-            data.len()
-        );
 
         if let Some(socket) = self.find_socket(dst_port, src_ip, src_port) {
             socket.process_segment(src_ip, header, data);
-        } else {
-            crate::early_println!(
-                "[TCP] No socket for dst_port={} src={}.{}.{}.{}:{}",
-                dst_port,
-                src_ip.0[0],
-                src_ip.0[1],
-                src_ip.0[2],
-                src_ip.0[3],
-                src_port
-            );
         }
     }
 }

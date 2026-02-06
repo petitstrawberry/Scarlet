@@ -636,7 +636,8 @@ pub fn sys_socket_accept(tf: &mut Trapframe) -> usize {
     // Get the listening socket from handle table
     let socket_obj = match task.handle_table.get(handle_id) {
         Some(KernelObject::Socket(socket)) => socket.clone(),
-        _ => return usize::MAX,
+        Some(_) => return usize::MAX,
+        None => return usize::MAX,
     };
 
     // Try to downcast to LocalSocket or TcpSocket
@@ -659,13 +660,7 @@ pub fn sys_socket_accept(tf: &mut Trapframe) -> usize {
         // TcpSocket accept
         match tcp_socket.accept_blocking(task.get_id(), tf) {
             Ok(socket) => socket,
-            Err(e) => {
-                crate::println!(
-                    "[sys_socket_accept] TcpSocket accept_blocking failed: {:?}",
-                    e
-                );
-                return usize::MAX;
-            }
+            Err(_) => return usize::MAX,
         }
     } else {
         crate::println!("[sys_socket_accept] Not a supported socket type");
@@ -680,12 +675,10 @@ pub fn sys_socket_accept(tf: &mut Trapframe) -> usize {
         special_semantics: None,
     };
 
-    let new_handle_id = match task.handle_table.insert_with_metadata(kernel_obj, metadata) {
+    match task.handle_table.insert_with_metadata(kernel_obj, metadata) {
         Ok(id) => id as usize,
-        Err(_) => return usize::MAX,
-    };
-
-    new_handle_id
+        Err(_) => usize::MAX,
+    }
 }
 
 /// System call: Create a connected socket pair
