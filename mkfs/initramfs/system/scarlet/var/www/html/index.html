@@ -220,10 +220,10 @@
         <h1>Scarlet HTTP server is live.</h1>
         <p class="lead">
           This page is served directly from the Scarlet initramfs. The httpd
-          process runs inside your own OS and reads files from <strong>/www</strong>.
+          process runs inside your own OS and reads files from <strong>/var/www/html</strong>.
         </p>
         <div class="callout">
-          Confirmed path: <strong>/www/index.html</strong>. You are not hitting a host
+          Confirmed path: <strong>/var/www/html/index.html</strong>. You are not hitting a host
           web server.
         </div>
       </header>
@@ -243,22 +243,21 @@
             <h3>Serving</h3>
             <p>Static files from initramfs</p>
             <ul class="list">
-              <li>Root directory: /www</li>
-              <li>Default: /www/index.html</li>
+              <li>Root directory: /var/www/html</li>
+              <li>Default: /var/www/html/index.html</li>
               <li>Path traversal blocked</li>
             </ul>
           </article>
           <article class="card">
             <h3>Try</h3>
             <p>Use curl or a browser</p>
-            <div class="code">http://localhost:18080/</div>
-            <div class="code">http://localhost:18080/index.html</div>
+            <div class="code">http://localhost:8080/</div>
           </article>
         </div>
       </section>
 
       <footer>
-        <span>Scarlet initramfs web root: /www</span>
+        <span>Scarlet initramfs web root: /var/www/html</span>
         <span>Build: Rust user/bin httpd</span>
       </footer>
     </main>

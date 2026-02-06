@@ -243,7 +243,7 @@ fn sanitize_path(request_path: &str) -> Option<String> {
         return None;
     }
 
-    let mut full = String::from("/www");
+    let mut full = String::from("/var/www/html");
     if path == "/" {
         full.push_str("/index.html");
         return Some(full);
