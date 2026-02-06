@@ -92,7 +92,7 @@ qemu-system-riscv64 \
     -device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
     -display vnc=:0 \
     -device virtio-gpu-device,bus=virtio-mmio-bus.1 \
-    -netdev user,id=net0,hostfwd=tcp::18080-:18080,hostfwd=udp::18080-:18080,hostfwd=udp::18888-:18888 \
+    -netdev user,id=net0,hostfwd=tcp::8080-:8080,hostfwd=udp::8080-:8080,hostfwd=udp::1234-:1234 \
     -device virtio-net-device,netdev=net0,bus=virtio-mmio-bus.2 \
     -device virtio-keyboard-device,bus=virtio-mmio-bus.3 \
     -device virtio-mouse-device,bus=virtio-mmio-bus.4 \
