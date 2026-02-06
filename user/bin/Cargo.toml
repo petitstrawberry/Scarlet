@@ -90,6 +90,10 @@ name = "tcp_server"
 path = "src/tcp_server.rs"
 
 [[bin]]
+name = "httpd"
+path = "src/httpd.rs"
+
+[[bin]]
 name = "sws"
 path = "src/sws/main.rs"
 
