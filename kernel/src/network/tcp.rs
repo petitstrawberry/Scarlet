@@ -458,7 +458,11 @@ impl TcpSocket {
         if port == u16::MAX {
             NEXT_EPHEMERAL_PORT.store(49152, Ordering::SeqCst);
         }
-        if port < 49152 { 49152 } else { port }
+        if port < 49152 {
+            49152
+        } else {
+            port
+        }
     }
 
     /// Get current TCP state
@@ -1869,11 +1873,11 @@ impl Drop for TcpSocket {
             _ => {}
         }
 
-        // Unregister port from TcpLayer
+        // Unregister this socket from TcpLayer (not all sockets on this port)
         if let Some(layer) = self.tcp_layer.upgrade() {
             let port = self.local_port.load(Ordering::SeqCst);
             if port != 0 {
-                layer.unregister_port(port);
+                layer.unregister_socket(port, &self.self_weak);
             }
         }
     }
@@ -1945,9 +1949,18 @@ impl TcpLayer {
         entry.push(socket);
     }
 
-    /// Unregister a socket from a port
-    pub fn unregister_port(&self, port: u16) {
-        self.port_map.write().remove(&port);
+    /// Unregister a specific socket from a port
+    ///
+    /// Only removes the given socket from the port's socket list.
+    /// The port entry itself is removed only when no sockets remain.
+    pub fn unregister_socket(&self, port: u16, socket: &Weak<TcpSocket>) {
+        let mut map = self.port_map.write();
+        if let Some(sockets) = map.get_mut(&port) {
+            sockets.retain(|existing| !existing.ptr_eq(socket));
+            if sockets.is_empty() {
+                map.remove(&port);
+            }
+        }
     }
 
     /// Find socket for a destination port

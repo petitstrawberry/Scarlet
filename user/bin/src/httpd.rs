@@ -10,11 +10,10 @@ extern crate scarlet_std as std;
 
 use std::env;
 use std::fs::File;
-use std::io::{Read, Write};
+use std::io::{Read, SeekFrom, Write};
 use std::println;
 use std::socket::{Inet4SocketAddress, Socket, SocketDomain, SocketProtocol, SocketType};
 use std::string::{String, ToString};
-use std::thread;
 use std::vec::Vec;
 
 #[unsafe(no_mangle)]
@@ -74,7 +73,7 @@ pub extern "C" fn main(_argc: isize, _argv: *const *const u8) -> isize {
         };
 
         println!("[httpd] Client connected!");
-        thread::spawn(move || handle_client(client_socket));
+        handle_client(client_socket);
     }
 }
 
@@ -101,87 +100,131 @@ fn parse_port(s: &str) -> Option<u16> {
 
 fn handle_client(mut client_socket: Socket) {
     let mut buf = [0u8; 1024];
-    match client_socket.read(&mut buf) {
+    let n = match client_socket.read(&mut buf) {
         Ok(0) => {
-            println!("[httpd] Client disconnected");
+            println!("[httpd] Client disconnected immediately");
+            return;
         }
-        Ok(n) => {
-            println!("[httpd] Received {} bytes", n);
-            let request = match core::str::from_utf8(&buf[..n]) {
-                Ok(s) => s,
-                Err(_) => {
-                    println!("[httpd] Invalid UTF-8");
-                    return;
-                }
-            };
-
-            let lines: Vec<&str> = request.lines().collect();
-            if lines.is_empty() {
-                return;
-            }
-
-            let first_line = lines[0];
-            let parts: Vec<&str> = first_line.split_whitespace().collect();
-            if parts.len() < 2 {
-                return;
-            }
-
-            let method = parts[0];
-            let path = parts[1];
-
-            if method != "GET" {
-                let response = "HTTP/1.1 405 Method Not Allowed\r\nAllow: GET\r\nConnection: close\r\nContent-Length: 0\r\n\r\n";
-                let _ = client_socket.write(response.as_bytes());
-                let _ = client_socket.shutdown(std::socket::ShutdownHow::Both);
-                return;
-            }
-
-            println!("[httpd] GET {}", path);
-            match build_file_response(path) {
-                Some((headers, body)) => {
-                    if client_socket.write(headers.as_bytes()).is_err()
-                        || client_socket.write(&body).is_err()
-                    {
-                        println!("[httpd] Send failed");
-                    }
-                }
-                None => {
-                    let body = b"Not Found";
-                    let response = "HTTP/1.1 404 Not Found\r\nContent-Type: text/plain\r\nConnection: close\r\nContent-Length: 9\r\n\r\n";
-                    let _ = client_socket.write(response.as_bytes());
-                    let _ = client_socket.write(body);
-                }
-            }
-            let _ = client_socket.shutdown(std::socket::ShutdownHow::Both);
-        }
+        Ok(n) => n,
         Err(_) => {
             println!("[httpd] Receive error");
+            return;
+        }
+    };
+
+    println!("[httpd] Received {} bytes", n);
+    let request = match core::str::from_utf8(&buf[..n]) {
+        Ok(s) => s,
+        Err(_) => {
+            println!("[httpd] Invalid UTF-8");
+            return;
+        }
+    };
+
+    let lines: Vec<&str> = request.lines().collect();
+    if lines.is_empty() {
+        return;
+    }
+
+    let parts: Vec<&str> = lines[0].split_whitespace().collect();
+    if parts.len() < 2 {
+        return;
+    }
+
+    let method = parts[0];
+    let path = parts[1];
+
+    if method != "GET" {
+        let response = "HTTP/1.1 405 Method Not Allowed\r\nAllow: GET\r\nConnection: close\r\nContent-Length: 0\r\n\r\n";
+        let _ = client_socket.write(response.as_bytes());
+        return;
+    }
+
+    println!("[httpd] GET {}", path);
+    match build_file_headers(path) {
+        Some((headers, file_path, file_size)) => {
+            if write_all_socket(&mut client_socket, headers.as_bytes()).is_err() {
+                println!("[httpd] Send headers failed");
+                return;
+            }
+            stream_file(&mut client_socket, &file_path, file_size);
+        }
+        None => {
+            send_not_found(&mut client_socket);
         }
     }
+
+    println!("[httpd] Response sent, closing connection");
+    let _ = client_socket.shutdown(std::socket::ShutdownHow::Both);
 }
 
-fn build_file_response(path: &str) -> Option<(String, Vec<u8>)> {
+fn build_file_headers(path: &str) -> Option<(String, String, u64)> {
     let file_path = sanitize_path(path)?;
-    let mut file = File::open(&file_path).ok()?;
-    let mut body = Vec::new();
-    let mut chunk = [0u8; 1024];
-    loop {
-        match file.read(&mut chunk) {
-            Ok(0) => break,
-            Ok(n) => body.extend_from_slice(&chunk[..n]),
-            Err(_) => return None,
-        }
-    }
-
+    let file_size = file_size(&file_path)?;
     let content_type = content_type(&file_path);
     let mut headers = String::new();
     headers.push_str("HTTP/1.1 200 OK\r\n");
     headers.push_str("Content-Type: ");
     headers.push_str(content_type);
     headers.push_str("\r\nConnection: close\r\nContent-Length: ");
-    headers.push_str(&body.len().to_string());
+    headers.push_str(&file_size.to_string());
     headers.push_str("\r\n\r\n");
-    Some((headers, body))
+    Some((headers, file_path, file_size))
+}
+
+fn stream_file(client_socket: &mut Socket, file_path: &str, file_size: u64) {
+    let mut file = match File::open(file_path) {
+        Ok(f) => f,
+        Err(_) => {
+            println!("[httpd] Failed to open file for streaming: {}", file_path);
+            return;
+        }
+    };
+
+    let mut chunk = [0u8; 512];
+    let mut remaining = file_size as usize;
+    loop {
+        if remaining == 0 {
+            break;
+        }
+        match file.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(n) => {
+                let to_send = if n > remaining { remaining } else { n };
+                if write_all_socket(client_socket, &chunk[..to_send]).is_err() {
+                    println!("[httpd] Send failed");
+                    break;
+                }
+                remaining -= to_send;
+            }
+            Err(_) => break,
+        }
+    }
+}
+
+fn send_not_found(client_socket: &mut Socket) {
+    let body = b"Not Found";
+    let response =
+        String::from("HTTP/1.1 404 Not Found\r\nContent-Type: text/plain\r\nConnection: close\r\nContent-Length: 9\r\n\r\n");
+    let _ = client_socket.write(response.as_bytes());
+    let _ = client_socket.write(body);
+}
+
+fn write_all_socket(client_socket: &mut Socket, mut buf: &[u8]) -> Result<(), ()> {
+    while !buf.is_empty() {
+        match client_socket.write(buf) {
+            Ok(0) | Err(_) => return Err(()),
+            Ok(n) => buf = &buf[n..],
+        }
+    }
+    Ok(())
+}
+
+fn file_size(file_path: &str) -> Option<u64> {
+    let mut file = File::open(file_path).ok()?;
+    let size = file.seek(SeekFrom::End(0)).ok()?;
+    let _ = file.seek(SeekFrom::Start(0));
+    Some(size)
 }
 
 fn sanitize_path(request_path: &str) -> Option<String> {
