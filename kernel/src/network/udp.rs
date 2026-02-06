@@ -10,13 +10,13 @@ use alloc::vec::Vec;
 use spin::{Mutex, RwLock};
 
 use crate::early_println;
-use crate::network::Ipv4Address;
 use crate::network::protocol_stack::get_network_manager;
 use crate::network::protocol_stack::{LayerContext, NetworkLayer, NetworkLayerStats, SocketConfig};
 use crate::network::socket::{
     Inet4SocketAddress, SocketAddress, SocketControl, SocketError, SocketObject, SocketProtocol,
     SocketState, SocketType,
 };
+use crate::network::Ipv4Address;
 use crate::object::capability::selectable::Selectable;
 
 /// Helper function to get local IP address bytes from the default interface
@@ -537,9 +537,16 @@ impl UdpLayer {
         self.port_map.write().insert(port, socket);
     }
 
-    /// Unregister a socket from a port
-    pub fn unregister_port(&self, port: u16) {
-        self.port_map.write().remove(&port);
+    /// Unregister a specific socket from a port
+    ///
+    /// Only removes the port entry if the registered socket matches.
+    pub fn unregister_socket(&self, port: u16, socket: &alloc::sync::Weak<UdpSocket>) {
+        let mut map = self.port_map.write();
+        if let Some(existing) = map.get(&port) {
+            if existing.ptr_eq(socket) {
+                map.remove(&port);
+            }
+        }
     }
 
     /// Find socket for a destination port
