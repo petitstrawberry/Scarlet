@@ -24,6 +24,7 @@ fn handle_software_interrupt(trapframe: &mut Trapframe) {
     crate::arch::riscv64::instruction::sbi::sbi_clear_ipi();
 
     // Trigger a reschedule so this CPU picks up any newly-enqueued work.
+    // The scheduler's on_tick() handles its own locking internally.
     let scheduler = crate::sched::scheduler::get_scheduler();
     scheduler.on_tick(get_cpu().get_cpuid(), trapframe);
 }
@@ -36,17 +37,20 @@ fn handle_timer_interrupt(trapframe: &mut Trapframe) {
 
 /// Handle external interrupt from PLIC
 fn handle_external_interrupt(trapframe: &mut Trapframe) {
-    let cpu_id = get_cpu().get_cpuid() as u32;
+    // PLIC hardware operations require the physical CPU ID (hart ID),
+    // not the abstract kernel CPU_ID.
+    let physical_id = get_cpu().get_hartid() as u32;
 
     // Claim and handle external interrupt through PLIC
-    match InterruptManager::with_manager(|mgr| mgr.claim_and_handle_external_interrupt(cpu_id)) {
+    match InterruptManager::with_manager(|mgr| mgr.claim_and_handle_external_interrupt(physical_id))
+    {
         Ok(Some(interrupt_id)) => {
-            // crate::early_println!("[interrupt] Handled external interrupt {} on CPU {}", interrupt_id, cpu_id);
+            // crate::early_println!("[interrupt] Handled external interrupt {} on hart {}", interrupt_id, physical_id);
         }
         Ok(None) => {
             crate::early_println!(
-                "[interrupt] No pending external interrupt on CPU {}",
-                cpu_id
+                "[interrupt] No pending external interrupt on hart {}",
+                physical_id
             );
         }
         Err(e) => {

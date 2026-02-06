@@ -46,7 +46,7 @@ use crate::{
         trap::user::arch_switch_to_user_space,
     },
     environment::NUM_OF_CPUS,
-    task::{TaskState, new_kernel_task, wake_parent_waiters, wake_task_waiters},
+    task::{TaskState, TaskType, new_kernel_task, wake_parent_waiters, wake_task_waiters},
     timer::get_kernel_timer,
     vm::get_trampoline_trap_vector,
 };
@@ -190,8 +190,15 @@ impl TaskPool {
             return Err("Task ID slot already occupied");
         }
 
-        // Allocate namespace ID AFTER checking slot availability
-        let namespace_id = task.get_namespace().allocate_task_id_for(task_id);
+        // Allocate namespace ID AFTER checking slot availability.
+        // Kernel tasks (idle, etc.) are invisible to user-space and must not
+        // consume namespace-local IDs so that the first user task (init) gets
+        // namespace-local ID 1 — which user-space code conventionally expects.
+        let namespace_id = if task.task_type == TaskType::User {
+            task.get_namespace().allocate_task_id_for(task_id)
+        } else {
+            0 // Kernel tasks do not need a namespace-local ID
+        };
 
         // Set IDs on the task
         task.set_id(task_id);
@@ -352,6 +359,136 @@ impl TaskPool {
 
 static mut SCHEDULER: Option<Scheduler> = None;
 
+/// A lightweight spin-lock that protects the global [`Scheduler`].
+///
+/// Unlike a naive `spin::Mutex`, this lock is **always** acquired with
+/// interrupts disabled on the calling CPU.  This avoids the classic
+/// deadlock where a timer interrupt fires while the current CPU already
+/// holds the scheduler lock:
+///
+///   CPU-0 holds lock → timer IRQ on CPU-0 → ISR tries to lock → deadlock
+///
+/// With interrupt disabling the above scenario is impossible.
+///
+/// **IMPORTANT**: This lock must NOT be held across `switch_to()` calls,
+/// because `switch_to()` suspends the current CPU's execution context.
+/// The resumed task would not drop the guard, causing a permanent deadlock.
+/// Instead, the lock is acquired/released internally within scheduler methods
+/// around queue manipulation only, never across context switches.
+static SCHED_LOCK: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+/// A guard that disables interrupts and holds the scheduler spinlock.
+/// Interrupts are restored to their previous state when the guard is dropped.
+///
+/// This guard protects short critical sections within scheduler methods
+/// (queue manipulation, task state changes). It must NOT be held across
+/// context switches (`switch_to()`).
+pub struct SchedulerGuard {
+    irq_was_enabled: bool,
+}
+
+impl SchedulerGuard {
+    /// Obtain a mutable reference to the global scheduler.
+    #[allow(static_mut_refs)]
+    pub fn scheduler(&mut self) -> &mut Scheduler {
+        unsafe {
+            match SCHEDULER {
+                Some(ref mut s) => s,
+                None => {
+                    SCHEDULER = Some(Scheduler::new());
+                    self.scheduler()
+                }
+            }
+        }
+    }
+}
+
+impl Drop for SchedulerGuard {
+    fn drop(&mut self) {
+        // Release spinlock
+        SCHED_LOCK.store(false, core::sync::atomic::Ordering::Release);
+        // Restore interrupt state
+        if self.irq_was_enabled {
+            crate::arch::enable_interrupt();
+        }
+    }
+}
+
+/// Acquire exclusive access to the global scheduler with interrupts disabled.
+///
+/// Returns a [`SchedulerGuard`] that automatically releases the lock and
+/// re-enables interrupts when dropped.
+///
+/// **WARNING**: The returned guard must NOT be held across `switch_to()`.
+/// Prefer calling the scheduler's public methods (which manage locking
+/// internally) instead of using this directly.
+///
+/// ```ignore
+/// let mut guard = lock_scheduler();
+/// let sched = guard.scheduler();
+/// sched.add_task(task, cpu_id);
+/// // lock released and interrupts restored when `guard` drops
+/// ```
+pub fn lock_scheduler() -> SchedulerGuard {
+    let irq_was_enabled = crate::arch::interrupt::are_interrupts_enabled();
+    crate::arch::disable_interrupt();
+
+    // Spin until we acquire the lock.  Interrupts are disabled on this CPU
+    // so we cannot be preempted.  Another CPU may hold the lock briefly.
+    while SCHED_LOCK
+        .compare_exchange_weak(
+            false,
+            true,
+            core::sync::atomic::Ordering::Acquire,
+            core::sync::atomic::Ordering::Relaxed,
+        )
+        .is_err()
+    {
+        core::hint::spin_loop();
+    }
+
+    SchedulerGuard { irq_was_enabled }
+}
+
+/// Release the scheduler spinlock without restoring interrupts.
+///
+/// This is used internally by scheduler methods that need to release the
+/// lock before performing a context switch, while keeping interrupts
+/// disabled until the switch completes.
+fn unlock_scheduler_no_irq_restore() {
+    SCHED_LOCK.store(false, core::sync::atomic::Ordering::Release);
+}
+
+/// Acquire the scheduler spinlock without changing interrupt state.
+///
+/// Caller must ensure interrupts are already disabled.
+fn lock_scheduler_no_irq_change() {
+    while SCHED_LOCK
+        .compare_exchange_weak(
+            false,
+            true,
+            core::sync::atomic::Ordering::Acquire,
+            core::sync::atomic::Ordering::Relaxed,
+        )
+        .is_err()
+    {
+        core::hint::spin_loop();
+    }
+}
+
+/// Convenience function that returns a mutable reference to the global
+/// scheduler **without** acquiring the spinlock.
+///
+/// # Safety / Usage Contract
+///
+/// This is only safe to call when:
+/// - The caller already holds a [`SchedulerGuard`], **or**
+/// - Running on a single CPU before secondaries are started, **or**
+/// - Inside an ISR that has already called `lock_scheduler()` higher up
+///   the call stack (the lock is non-reentrant — do NOT call this from a
+///   nested context if the same CPU might already hold the lock).
+///
+/// Most code should use [`lock_scheduler()`] instead.
 #[allow(static_mut_refs)]
 pub fn get_scheduler() -> &'static mut Scheduler {
     unsafe {
@@ -394,8 +531,12 @@ impl Scheduler {
     /// in the ready queue at `u32::MAX` priority, the scheduler will only pick
     /// them when no other tasks are runnable, eliminating the need to panic on
     /// an empty ready queue.
+    ///
+    /// Only creates idle tasks for CPUs that are currently online, avoiding
+    /// wasteful allocation of tasks for CPUs that will never run.
     pub fn init_idle_tasks(&mut self) {
-        for cpu_id in 0..NUM_OF_CPUS {
+        let online = crate::arch::num_cpus_online();
+        for cpu_id in 0..online {
             let name = alloc::format!("idle-cpu{}", cpu_id);
             let mut task = new_kernel_task(name, u32::MAX, || {
                 loop {
@@ -423,8 +564,15 @@ impl Scheduler {
             Ok(id) => id,
             Err(e) => panic!("Failed to add task: {}", e),
         };
-        // Add task state info to ready queue
+        // Acquire lock to protect ready_queue mutation
+        let irq_was_enabled = crate::arch::interrupt::are_interrupts_enabled();
+        crate::arch::disable_interrupt();
+        lock_scheduler_no_irq_change();
         self.ready_queue[cpu_id].push_back(task_id);
+        unlock_scheduler_no_irq_restore();
+        if irq_was_enabled {
+            crate::arch::enable_interrupt();
+        }
         task_id
     }
 
@@ -446,13 +594,29 @@ impl Scheduler {
         let cpu_id = cpu.get_cpuid();
         let old_current_task_id = self.current_task_id[cpu_id];
 
-        // Re-queue the currently running task if it is still runnable.
+        // Re-queue the currently running task if it is still runnable, or
+        // move it to the appropriate queue if it has changed state.
         if let Some(current_id) = old_current_task_id {
             if !self.ready_queue[cpu_id].iter().any(|&id| id == current_id) {
                 if let Some(task) = TaskPool::get_task_mut(current_id) {
                     match task.state {
                         TaskState::Ready | TaskState::Running => {
                             self.ready_queue[cpu_id].push_back(current_id);
+                        }
+                        TaskState::Zombie => {
+                            // The current task exited — move it to the zombie
+                            // queue so it can be reaped by waitpid.  Waiters
+                            // have already been notified in Task::exit().
+                            self.zombie_queue[cpu_id].push_back(current_id);
+                            self.current_task_id[cpu_id] = None;
+                        }
+                        TaskState::Terminated => {
+                            get_task_pool().remove_task(current_id);
+                            self.current_task_id[cpu_id] = None;
+                        }
+                        TaskState::Blocked(_) => {
+                            self.blocked_queue[cpu_id].push_back(current_id);
+                            self.current_task_id[cpu_id] = None;
                         }
                         _ => {}
                     }
@@ -535,24 +699,31 @@ impl Scheduler {
 
     /// Called every timer tick. Decrements the current task's time_slice.
     /// If time_slice reaches 0, triggers a reschedule.
+    ///
+    /// This method is safe to call from interrupt context — it internally
+    /// acquires the scheduler lock with interrupts disabled.
     pub fn on_tick(&mut self, cpu_id: usize, trapframe: &mut Trapframe) {
-        // crate::early_println!("[SCHED] CPU{}: on_tick called", cpu_id);
-        if let Some(task_id) = self.get_current_task_id(cpu_id) {
+        // We are already in an ISR so interrupts are disabled on RISC-V.
+        // Acquire the scheduler lock for the time-slice check.
+        lock_scheduler_no_irq_change();
+
+        let should_schedule = if let Some(task_id) = self.get_current_task_id(cpu_id) {
             if let Some(task) = TaskPool::get_task_mut(task_id) {
                 if task.time_slice > 0 {
                     task.time_slice -= 1;
                 }
-                if task.time_slice == 0 {
-                    // crate::early_println!(
-                    //     "[SCHED] CPU{}: Time slice expired for Task {}",
-                    //     cpu_id,
-                    //     task_id
-                    // );
-                    // Time slice expired, trigger reschedule
-                    self.schedule(trapframe);
-                }
+                task.time_slice == 0
+            } else {
+                true
             }
         } else {
+            true
+        };
+
+        unlock_scheduler_no_irq_restore();
+
+        if should_schedule {
+            // schedule() manages its own locking
             self.schedule(trapframe);
         }
     }
@@ -560,30 +731,24 @@ impl Scheduler {
     /// Schedule tasks on the CPU with kernel context switching
     ///
     /// This function performs cooperative scheduling by switching between task
-    /// kernel contexts. It returns to the caller, allowing the trap handler
-    /// to handle user space return.
+    /// kernel contexts. It internally acquires the scheduler lock around queue
+    /// manipulation but releases it before any context switch (`switch_to()`).
     ///
     /// # Arguments
-    /// * `cpu` - The CPU architecture state
+    /// * `trapframe` - The current trap frame
     pub fn schedule(&mut self, trapframe: &mut Trapframe) {
         let cpu = get_cpu();
         let cpu_id = cpu.get_cpuid();
 
-        // Step 1: Run scheduling algorithm to get current and next task IDs
-        let (current_task_id, next_task_id) = self.run(cpu);
+        // Disable interrupts for the entire schedule operation.
+        // We will re-enable them at the end.
+        let irq_was_enabled = crate::arch::interrupt::are_interrupts_enabled();
+        crate::arch::disable_interrupt();
 
-        // Debug output for monitoring scheduler behavior
-        // if let Some(current_id) = current_task_id {
-        //     if let Some(next_id) = next_task_id {
-        //         if current_id != next_id {
-        //             crate::println!("[SCHED] CPU{}: Task {} -> Task {}", cpu_id, current_id, next_id);
-        //         }
-        //     } else {
-        //         crate::println!("[SCHED] CPU{}: Task {} -> idle", cpu_id, current_id);
-        //     }
-        // } else if let Some(next_id) = next_task_id {
-        //     crate::println!("[SCHED] CPU{}: idle -> Task {}", cpu_id, next_id);
-        // }
+        // Step 1: Acquire lock, run scheduling algorithm, release lock.
+        lock_scheduler_no_irq_change();
+        let (current_task_id, next_task_id) = self.run(cpu);
+        unlock_scheduler_no_irq_restore();
 
         // Step 2: Check if a context switch is needed
         if next_task_id.is_some() && current_task_id != next_task_id {
@@ -594,7 +759,7 @@ impl Scheduler {
                 let current_task = self.get_task_by_id(current_task_id).unwrap();
                 current_task.vcpu.store(trapframe);
 
-                // Perform kernel context switch
+                // Perform kernel context switch — lock is NOT held here
                 self.kernel_context_switch(cpu_id, current_task_id, next_task_id);
                 // NOTE: After this point, the current task will not execute until it is scheduled again
 
@@ -604,16 +769,21 @@ impl Scheduler {
             } else {
                 // No current task (e.g., first scheduling), just switch to next task
                 let next_task = self.get_task_by_id(next_task_id).unwrap();
-                // crate::println!("[SCHED] Setting up task {} for execution", next_task_id);
                 Self::setup_task_execution(get_cpu(), next_task);
                 arch_switch_to_user_space(next_task.get_trapframe()); // Force switch to user space
             }
         }
 
-        // Step 3: Setup task execution and process events (after context switch)
-        if let Some(current_task) = self.get_current_task(cpu_id) {
-            // Process pending events before dispatching task
-            let _ = current_task.process_pending_events();
+        // Step 3: Process pending events (lock not needed for this)
+        if let Some(current_task_id) = self.get_current_task_id(cpu_id) {
+            if let Some(current_task) = self.get_task_by_id(current_task_id) {
+                let _ = current_task.process_pending_events();
+            }
+        }
+
+        // Restore interrupt state
+        if irq_was_enabled {
+            crate::arch::enable_interrupt();
         }
         // Schedule returns - trap handler will call arch_switch_to_user_space()
     }
@@ -623,6 +793,7 @@ impl Scheduler {
     /// This function intentionally avoids performing the initial user-mode transition.
     /// The very first switch is architecture-specific and should be performed by
     /// `crate::arch::first_switch_to_user()` from the boot path.
+    /// Internally acquires the scheduler lock around queue manipulation.
     pub fn start_scheduler(&mut self) -> Option<usize> {
         let cpu = get_cpu();
         let cpu_id = cpu.get_cpuid();
@@ -633,7 +804,14 @@ impl Scheduler {
         timer.set_interval_us(cpu_id, crate::timer::TICK_INTERVAL_US);
         timer.start(cpu_id);
 
+        let irq_was_enabled = crate::arch::interrupt::are_interrupts_enabled();
+        crate::arch::disable_interrupt();
+        lock_scheduler_no_irq_change();
         let (_current_task_id, next_task_id) = self.run(cpu);
+        unlock_scheduler_no_irq_restore();
+        if irq_was_enabled {
+            crate::arch::enable_interrupt();
+        }
         next_task_id
     }
 
@@ -665,6 +843,7 @@ impl Scheduler {
     /// Move a task from blocked queue to ready queue when it's woken up
     ///
     /// This method is called by Waker when a blocked task needs to be woken up.
+    /// It internally acquires the scheduler lock for thread-safety.
     ///
     /// # Arguments
     /// * `task_id` - The ID of the task to move to ready queue
@@ -672,6 +851,21 @@ impl Scheduler {
     /// # Returns
     /// true if the task was found and moved, false otherwise
     pub fn wake_task(&mut self, task_id: usize) -> bool {
+        let irq_was_enabled = crate::arch::interrupt::are_interrupts_enabled();
+        crate::arch::disable_interrupt();
+        lock_scheduler_no_irq_change();
+
+        let result = self.wake_task_locked(task_id);
+
+        unlock_scheduler_no_irq_restore();
+        if irq_was_enabled {
+            crate::arch::enable_interrupt();
+        }
+        result
+    }
+
+    /// Internal wake_task implementation — caller must hold the scheduler lock.
+    fn wake_task_locked(&mut self, task_id: usize) -> bool {
         // Search for the task in blocked queues
         for cpu_id in 0..self.blocked_queue.len() {
             if let Some(pos) = self.blocked_queue[cpu_id]
@@ -701,23 +895,21 @@ impl Scheduler {
                 task.state = TaskState::Running;
                 // Memory barrier to ensure state change is visible
                 core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
-                // CRITICAL FIX: Check if task is in ready_queue, add if not
-                // This prevents tasks from being permanently unscheduled
-                let cpu_id = if let Some(current_id) = self.current_task_id[0] {
-                    if current_id == task_id {
-                        0 // Current task, no need to enqueue
-                    } else {
-                        // Find which CPU's ready_queue should contain this task
-                        // For simplicity, use CPU 0 (can be improved for multi-CPU)
-                        0
+                // Find the CPU where this task was last running, default to CPU 0
+                let target_cpu = {
+                    let mut found_cpu = 0usize;
+                    for cpu_id in 0..NUM_OF_CPUS {
+                        if self.current_task_id[cpu_id] == Some(task_id) {
+                            found_cpu = cpu_id;
+                            break;
+                        }
                     }
-                } else {
-                    0 // Default to CPU 0
+                    found_cpu
                 };
 
                 // Only add if not already in ready_queue to avoid duplicates
-                if !self.ready_queue[cpu_id].contains(&task_id) {
-                    self.ready_queue[cpu_id].push_back(task_id);
+                if !self.ready_queue[target_cpu].contains(&task_id) {
+                    self.ready_queue[target_cpu].push_back(task_id);
                 }
                 return true;
             }
@@ -729,10 +921,15 @@ impl Scheduler {
     ///
     /// This removes the task from zombie_queue and task_pool, freeing all resources.
     /// Should only be called from Task::wait() after confirming the task is a zombie.
+    /// Internally acquires the scheduler lock.
     ///
     /// # Arguments
     /// * `task_id` - The ID of the zombie task to clean up
     pub fn cleanup_zombie_task(&mut self, task_id: usize) {
+        let irq_was_enabled = crate::arch::interrupt::are_interrupts_enabled();
+        crate::arch::disable_interrupt();
+        lock_scheduler_no_irq_change();
+
         // Remove from zombie queue
         for cpu_id in 0..NUM_OF_CPUS {
             if let Some(pos) = self.zombie_queue[cpu_id]
@@ -745,7 +942,13 @@ impl Scheduler {
             }
         }
 
+        unlock_scheduler_no_irq_restore();
+        if irq_was_enabled {
+            crate::arch::enable_interrupt();
+        }
+
         // Remove from task pool (this frees all task resources)
+        // TaskPool has its own spin::Mutex so we don't need the scheduler lock here
         if let Some(_task) = get_task_pool().remove_task(task_id) {
             crate::println!("[Scheduler] Cleaned up zombie task {}", task_id);
         }
@@ -756,7 +959,12 @@ impl Scheduler {
     /// This helper is used by subsystems (e.g., event broadcast) that need
     /// to target every task in the system without holding a mutable
     /// reference to the scheduler during delivery.
+    /// Internally acquires the scheduler lock.
     pub fn get_all_task_ids(&self) -> alloc::vec::Vec<usize> {
+        let irq_was_enabled = crate::arch::interrupt::are_interrupts_enabled();
+        crate::arch::disable_interrupt();
+        lock_scheduler_no_irq_change();
+
         let mut ids = alloc::vec::Vec::new();
         // Ready tasks
         for q in &self.ready_queue {
@@ -775,6 +983,11 @@ impl Scheduler {
             for t in q.iter() {
                 ids.push(*t);
             }
+        }
+
+        unlock_scheduler_no_irq_restore();
+        if irq_was_enabled {
+            crate::arch::enable_interrupt();
         }
         ids
     }

@@ -145,6 +145,10 @@ pub fn kernel_vm_init(kernel_area: MemoryArea) {
     early_println!("[vm] kernel_vm_init: switch (ttbr0/arch-dependent)...");
     root_page_table.switch(manager.get_asid());
 
+    // Save the kernel page-table base register so that secondary CPUs can
+    // activate the same page table in their assembly entry trampoline.
+    crate::arch::save_kernel_page_table();
+
     #[cfg(any(debug_assertions, test))]
     early_println!("[vm] kernel_vm_init: done");
 }

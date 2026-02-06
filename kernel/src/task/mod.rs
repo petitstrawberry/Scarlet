@@ -1338,8 +1338,14 @@ impl Task {
                 self.set_exit_status(status);
                 self.state = TaskState::Zombie;
 
-                // TODO: Notify parent via ABI-specific mechanism
-                // crate::println!("Task {}: Set to Zombie state, parent {}", self.id, parent_id);
+                // Wake any process waiting on this specific task (waitpid(pid))
+                // and the parent if it is waiting for any child (waitpid(-1)).
+                // This must happen here because the scheduler's run() method
+                // only encounters tasks that are in the ready queue, but a
+                // zombie task set by exit() is the *current* task and will not
+                // be re-queued.
+                wake_task_waiters(self.id);
+                wake_parent_waiters(parent_id);
             }
             None => {
                 /* If the task has no parent, it is terminated */

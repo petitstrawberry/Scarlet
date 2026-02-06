@@ -563,10 +563,6 @@ pub extern "C" fn start_kernel(boot_info: &BootInfo) -> ! {
     /* After this point, we can use the heap and virtual memory */
     /* We will also be restricted to the kernel address space */
 
-    // Save the kernel page-table base register so that secondary CPUs can
-    // activate the same page table in their assembly entry trampoline.
-    crate::arch::save_kernel_page_table();
-
     /* Populate devices from BootInfo device source */
     early_println!("[Scarlet Kernel] Populating devices...");
     let device_manager = DeviceManager::get_mut_manager();

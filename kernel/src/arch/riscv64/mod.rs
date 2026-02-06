@@ -47,7 +47,7 @@ use crate::vm::vmem::MemoryArea;
 //
 // `MAX_HARTS` is deliberately larger than `NUM_OF_CPUS` because QEMU can
 // assign non-contiguous hart IDs.  If we ever need more, bump this constant.
-const MAX_HARTS: usize = 16;
+const MAX_HARTS: usize = 64;
 
 /// Sentinel value for "no mapping registered".
 const INVALID_ID: usize = usize::MAX;
@@ -524,9 +524,10 @@ pub(crate) fn trap_init(riscv: &mut Riscv64) {
     riscv.kernel_trap = arch_kernel_trap_handler as u64;
     let scratch_addr = riscv as *const _ as usize;
 
-    // Enable supervisor software interrupt (SSIE, bit 1) for IPI and
-    // supervisor timer interrupt (STIE, bit 5) for scheduling.
-    let sie: usize = 0x22; // SSIE | STIE
+    // Enable supervisor software interrupt (SSIE, bit 1) for IPI,
+    // supervisor timer interrupt (STIE, bit 5) for scheduling, and
+    // supervisor external interrupt (SEIE, bit 9) for device IRQs.
+    let sie: usize = 0x222; // SSIE | STIE | SEIE
     unsafe {
         asm!("
         csrci sstatus, 0x2 // Disable interrupts
@@ -717,29 +718,27 @@ pub fn reboot() -> ! {
 // ---------------------------------------------------------------------------
 
 /// Boot all secondary physical CPUs (harts) by issuing SBI HSM `hart_start`
-/// for each one discovered from the device tree (except the BSP).
+/// for every possible hart ID in `0..MAX_HARTS` (except the BSP).
 ///
 /// The secondary CPUs will jump to `_entry_ap` and eventually call `start_ap`.
+/// Harts that do not physically exist will simply fail the SBI call, which is
+/// handled gracefully.
+///
+/// After issuing start requests, this function spins until all successfully
+/// started harts have registered via `register_cpu()`, ensuring
+/// `num_cpus_online()` is accurate by the time this function returns.
 ///
 /// # Arguments
 ///
 /// * `bsp_physical_id` - Physical CPU ID (hart ID) of the bootstrap processor
-/// * `num_cpus` - Total number of physical CPUs discovered from FDT
-pub fn boot_secondary_cpus(bsp_physical_id: usize, num_cpus: usize) {
+pub fn boot_secondary_cpus(bsp_physical_id: usize, _num_cpus: usize) {
     use instruction::sbi::sbi_hart_start;
 
     let entry_ap_addr = boot::entry::_entry_ap as usize;
+    let mut started_count: usize = 0;
 
-    for phys_id in 0..num_cpus {
+    for phys_id in 0..MAX_HARTS {
         if phys_id == bsp_physical_id {
-            continue;
-        }
-        if phys_id >= MAX_HARTS {
-            early_println!(
-                "[SMP] Skipping physical CPU {} — exceeds limit ({})",
-                phys_id,
-                MAX_HARTS
-            );
             continue;
         }
 
@@ -749,13 +748,25 @@ pub fn boot_secondary_cpus(bsp_physical_id: usize, num_cpus: usize) {
             entry_ap_addr
         );
         match sbi_hart_start(phys_id, entry_ap_addr, 0) {
-            Ok(_) => early_println!(
-                "[SMP] Physical CPU {} start requested successfully",
-                phys_id
-            ),
+            Ok(_) => {
+                early_println!(
+                    "[SMP] Physical CPU {} start requested successfully",
+                    phys_id
+                );
+                started_count += 1;
+            }
             Err(_) => early_println!("[SMP] Failed to start physical CPU {}", phys_id),
         }
     }
+
+    // Wait for all successfully started harts to call register_cpu().
+    // The BSP has already registered (count starts at 1).
+    let expected = 1 + started_count;
+    early_println!("[SMP] Waiting for {} CPUs to come online...", expected);
+    while num_cpus_online() < expected {
+        core::hint::spin_loop();
+    }
+    early_println!("[SMP] All {} CPUs are online", num_cpus_online());
 }
 
 /// Send an IPI (software interrupt) to a specific CPU.

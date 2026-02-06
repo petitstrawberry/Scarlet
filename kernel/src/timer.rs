@@ -82,9 +82,9 @@ pub fn tick(trapframe: &mut Trapframe) {
     timer.start(cpu_id);
     let now = TICK_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
     check_software_timers(now);
-    // Call scheduler tick handler to manage time slices
+    // Call scheduler tick handler to manage time slices.
+    // The scheduler's on_tick() handles its own locking internally.
     let scheduler = get_scheduler();
-    // crate::println!("[timer] Tick: {}, CPU: {}", now, cpu_id);
     scheduler.on_tick(cpu_id, trapframe);
 }
 
