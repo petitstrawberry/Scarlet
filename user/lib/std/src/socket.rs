@@ -24,7 +24,7 @@
 
 use crate::handle::Handle;
 use crate::handle::RawHandle;
-use crate::syscall::{Syscall, syscall1, syscall3, syscall4};
+use crate::syscall::{Syscall, syscall1, syscall3};
 
 pub use crate::handle::capability::ShutdownHow;
 pub use crate::handle::capability::socket::Inet4SocketAddress;
@@ -85,6 +85,28 @@ impl Socket {
         )
     }
 
+    /// Create a new socket with specified domain, type, and protocol
+    ///
+    /// # Arguments
+    ///
+    /// * `domain` - Socket domain (e.g., Local, Inet)
+    /// * `socket_type` - Socket type (e.g., Stream, Datagram)
+    /// * `protocol` - Socket protocol (e.g., Default, Tcp, Udp)
+    ///
+    /// # Returns
+    ///
+    /// A new unconnected socket with the specified configuration, or an error if creation fails.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use std::socket::{Socket, SocketDomain, SocketType, SocketProtocol};
+    /// let socket = Socket::new_with_domain(
+    ///     SocketDomain::Inet4,
+    ///     SocketType::Stream,
+    ///     SocketProtocol::Tcp
+    /// ).unwrap();
+    /// ```
     pub fn new_with_domain(
         domain: SocketDomain,
         socket_type: SocketType,
@@ -105,6 +127,24 @@ impl Socket {
         Ok(Socket { handle })
     }
 
+    /// Bind socket to an IPv4 address
+    ///
+    /// # Arguments
+    ///
+    /// * `addr` - IPv4 socket address to bind to
+    ///
+    /// # Returns
+    ///
+    /// Ok on success, or an error if the socket is already bound or the address is invalid.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use std::socket::{Socket, Inet4SocketAddress};
+    /// let socket = Socket::new().unwrap();
+    /// let addr = Inet4SocketAddress::new([0, 0, 0, 0], 8080);
+    /// socket.bind_inet(addr).unwrap();
+    /// ```
     pub fn bind_inet(&self, addr: Inet4SocketAddress) -> Result<()> {
         let sock = self
             .handle
@@ -113,6 +153,24 @@ impl Socket {
         sock.bind_inet(&addr).map_err(|_| SocketError::AlreadyBound)
     }
 
+    /// Connect socket to an IPv4 address
+    ///
+    /// # Arguments
+    ///
+    /// * `addr` - IPv4 socket address to connect to
+    ///
+    /// # Returns
+    ///
+    /// Ok on success, or an error if connection fails.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use std::socket::{Socket, Inet4SocketAddress};
+    /// let socket = Socket::new().unwrap();
+    /// let addr = Inet4SocketAddress::new([10, 0, 2, 15], 8080);
+    /// socket.connect_inet(addr).unwrap();
+    /// ```
     pub fn connect_inet(&self, addr: Inet4SocketAddress) -> Result<()> {
         let sock = self
             .handle
@@ -516,47 +574,38 @@ impl DatagramOps for Socket {
         // Allocate space for address (8 bytes: 2 for family, 4 for IP, 2 for port)
         let mut addr_buf = [0u8; 8];
 
-        // Check if non-blocking mode
-        let is_nonblocking = self.is_nonblocking().unwrap_or(false);
+        let result = syscall4(
+            Syscall::SocketRecvFrom,
+            self.handle.as_raw() as usize,
+            buf.as_mut_ptr() as usize,
+            buf.len(),
+            addr_buf.as_mut_ptr() as usize,
+        );
 
-        loop {
-            let result = syscall4(
-                Syscall::SocketRecvFrom,
-                self.handle.as_raw() as usize,
-                buf.as_mut_ptr() as usize,
-                buf.len(),
-                addr_buf.as_mut_ptr() as usize,
-            );
-
-            // Handle negative errno values first
-            if result > (isize::MAX as usize) {
-                let errno = -(result as isize) as i32;
-                if errno == 11 {
-                    if is_nonblocking {
-                        return Err(SocketError::WouldBlock);
-                    }
-                    crate::thread::yield_now();
-                    continue;
-                }
-                return Err(SocketError::SyscallFailed);
+        // Handle negative errno values first
+        if result > (isize::MAX as usize) {
+            let errno = -(result as isize) as i32;
+            if errno == 11 {
+                return Err(SocketError::WouldBlock);
             }
-
-            if result == usize::MAX {
-                return Err(SocketError::SyscallFailed);
-            }
-
-            // Success - parse address
-            let addr = match addr_buf[0] {
-                2 => {
-                    // AF_INET
-                    let ip = [addr_buf[2], addr_buf[3], addr_buf[4], addr_buf[5]];
-                    let port = u16::from_be_bytes([addr_buf[6], addr_buf[7]]);
-                    SocketAddress::Inet(Inet4SocketAddress::new(ip, port))
-                }
-                _ => return Err(SocketError::InvalidAddress),
-            };
-            return Ok((result, addr));
+            return Err(SocketError::SyscallFailed);
         }
+
+        if result == usize::MAX {
+            return Err(SocketError::SyscallFailed);
+        }
+
+        // Success - parse address
+        let addr = match addr_buf[0] {
+            2 => {
+                // AF_INET
+                let ip = [addr_buf[2], addr_buf[3], addr_buf[4], addr_buf[5]];
+                let port = u16::from_be_bytes([addr_buf[6], addr_buf[7]]);
+                SocketAddress::Inet(Inet4SocketAddress::new(ip, port))
+            }
+            _ => return Err(SocketError::InvalidAddress),
+        };
+        Ok((result, addr))
     }
 
     fn sendto(&self, buf: &[u8], addr: &SocketAddress) -> Result<usize> {

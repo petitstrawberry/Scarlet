@@ -6,7 +6,6 @@ Usage: python3 tcp_client.py <host> <port>
 
 import sys
 import socket
-import time
 
 def main():
     if len(sys.argv) != 3:

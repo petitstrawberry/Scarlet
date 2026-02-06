@@ -23,47 +23,45 @@ import binascii
 
 def run_server(port: int):
     """Run TCP echo server on specified port"""
-    # Create socket
-    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    # Create socket with context manager
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as server:
+        server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 
-    # Bind to all interfaces
-    server.bind(('0.0.0.0', port))
-    server.listen(1)
+        # Bind to all interfaces
+        server.bind(('0.0.0.0', port))
+        server.listen(1)
 
-    print(f"[tcp-server] Listening on 0.0.0.0:{port}")
-    print(f"[tcp-server] Ready to accept connections from Scarlet...")
+        print(f"[tcp-server] Listening on 0.0.0.0:{port}")
+        print(f"[tcp-server] Ready to accept connections from Scarlet...")
 
-    try:
-        while True:
-            # Accept connection
-            client, addr = server.accept()
-            print(f"[tcp-server] Client connected from {addr}")
+        try:
+            while True:
+                # Accept connection
+                client, addr = server.accept()
+                print(f"[tcp-server] Client connected from {addr}")
 
-            try:
-                # Receive data
-                data = client.recv(1024)
-                if data:
-                    print(f"[tcp-server] Received {len(data)} bytes")
-                    print(f"[tcp-server] Data (hex): {binascii.hexlify(data).decode()}")
-                    print(f"[tcp-server] Data (text): {data.decode('utf-8', errors='replace')}")
+                try:
+                    # Receive data
+                    data = client.recv(1024)
+                    if data:
+                        print(f"[tcp-server] Received {len(data)} bytes")
+                        print(f"[tcp-server] Data (hex): {binascii.hexlify(data).decode()}")
+                        print(f"[tcp-server] Data (text): {data.decode('utf-8', errors='replace')}")
 
-                    # Echo back
-                    client.sendall(data)
-                    print(f"[tcp-server] Echoed back {len(data)} bytes")
-                else:
-                    print(f"[tcp-server] Client closed connection")
+                        # Echo back
+                        client.sendall(data)
+                        print(f"[tcp-server] Echoed back {len(data)} bytes")
+                    else:
+                        print(f"[tcp-server] Client closed connection")
 
-            except Exception as e:
-                print(f"[tcp-server] Error: {e}")
-            finally:
-                client.close()
-                print(f"[tcp-server] Client disconnected")
+                except Exception as e:
+                    print(f"[tcp-server] Error: {e}")
+                finally:
+                    client.close()
+                    print(f"[tcp-server] Client disconnected")
 
-    except KeyboardInterrupt:
-        print(f"\n[tcp-server] Shutting down...")
-    finally:
-        server.close()
+        except KeyboardInterrupt:
+            print(f"\n[tcp-server] Shutting down...")
 
 
 if __name__ == "__main__":
