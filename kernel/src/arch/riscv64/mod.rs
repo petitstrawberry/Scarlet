@@ -717,12 +717,11 @@ pub fn reboot() -> ! {
 // SMP helpers
 // ---------------------------------------------------------------------------
 
-/// Boot all secondary physical CPUs (harts) by issuing SBI HSM `hart_start`
-/// for every possible hart ID in `0..MAX_HARTS` (except the BSP).
+/// Boot all secondary physical CPUs (harts) discovered from the device tree.
 ///
-/// The secondary CPUs will jump to `_entry_ap` and eventually call `start_ap`.
-/// Harts that do not physically exist will simply fail the SBI call, which is
-/// handled gracefully.
+/// Instead of probing every possible hart ID up to `MAX_HARTS`, this function
+/// reads the list of valid hart IDs from the FDT `/cpus` node and only issues
+/// SBI `hart_start` for those that actually exist (excluding the BSP).
 ///
 /// After issuing start requests, this function spins until all successfully
 /// started harts have registered via `register_cpu()`, ensuring
@@ -732,13 +731,35 @@ pub fn reboot() -> ! {
 ///
 /// * `bsp_physical_id` - Physical CPU ID (hart ID) of the bootstrap processor
 pub fn boot_secondary_cpus(bsp_physical_id: usize, _num_cpus: usize) {
+    use crate::device::fdt::FdtManager;
     use instruction::sbi::sbi_hart_start;
 
     let entry_ap_addr = boot::entry::_entry_ap as usize;
     let mut started_count: usize = 0;
 
-    for phys_id in 0..MAX_HARTS {
+    // Get the list of valid hart IDs from the device tree.
+    let hart_ids = FdtManager::get_manager().get_cpu_ids().unwrap_or_else(|| {
+        early_println!("[SMP] Warning: FDT CPU enumeration failed, no secondary CPUs started");
+        alloc::vec::Vec::new()
+    });
+
+    early_println!(
+        "[SMP] FDT reports {} CPU(s): {:?}",
+        hart_ids.len(),
+        hart_ids
+    );
+
+    for &phys_id in &hart_ids {
         if phys_id == bsp_physical_id {
+            continue;
+        }
+
+        if phys_id >= MAX_HARTS {
+            early_println!(
+                "[SMP] Skipping physical CPU {} (exceeds MAX_HARTS={})",
+                phys_id,
+                MAX_HARTS
+            );
             continue;
         }
 

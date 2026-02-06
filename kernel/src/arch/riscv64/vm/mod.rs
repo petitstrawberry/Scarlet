@@ -19,10 +19,11 @@ use spin::RwLock;
 use crate::mem::page::allocate_raw_pages;
 
 use crate::arch::Arch;
-use crate::arch::get_cpu;
 use crate::arch::get_user_trapvector_paddr;
 use crate::early_println;
-use crate::environment::{KERNEL_KSTACK_REGION_END, KERNEL_KSTACK_REGION_START, TRAMPOLINE_VA_END};
+use crate::environment::{
+    KERNEL_KSTACK_REGION_END, KERNEL_KSTACK_REGION_START, NUM_OF_CPUS, TRAMPOLINE_VA_END,
+};
 use crate::vm::manager::VirtualMemoryManager;
 use crate::vm::vmem::{MemoryArea, VirtualMemoryMap, VirtualMemoryPermission};
 
@@ -151,6 +152,74 @@ pub fn is_asid_used(asid: u16) -> bool {
     }
 }
 
+/// Walk the page table rooted at the given physical address (extracted from a SATP value)
+/// and print the PTE chain for `vaddr`. This is a debug-only helper that does NOT allocate.
+///
+/// # Safety
+/// The caller must ensure the SATP value corresponds to a valid page table.
+pub fn debug_walk_pte_from_satp(satp: usize, vaddr: usize) {
+    let ppn = satp & 0x00000FFF_FFFFFFFF; // lower 44 bits
+    let root_paddr = ppn << 12;
+    let root_pt = root_paddr as *const PageTable;
+
+    crate::early_println!(
+        "[pte-walk] satp={:#x} root_pt={:#x} vaddr={:#x}",
+        satp,
+        root_paddr,
+        vaddr
+    );
+
+    let mut pt = root_pt;
+    // Sv48: levels 3, 2, 1, 0
+    for level in (0..=3usize).rev() {
+        let vpn = (vaddr >> (12 + 9 * level)) & 0x1ff;
+        let pte_val = unsafe { (*pt).entries[vpn].entry };
+        let valid = pte_val & 1;
+        let r = (pte_val >> 1) & 1;
+        let w = (pte_val >> 2) & 1;
+        let x = (pte_val >> 3) & 1;
+        let u = (pte_val >> 4) & 1;
+        let g = (pte_val >> 5) & 1;
+        let a = (pte_val >> 6) & 1;
+        let d = (pte_val >> 7) & 1;
+        let next_ppn = (pte_val >> 10) & 0x3ffffffffff;
+
+        crate::early_println!(
+            "[pte-walk]   L{} vpn={:#x} pte={:#018x} V={} R={} W={} X={} U={} G={} A={} D={} ppn={:#x}",
+            level,
+            vpn,
+            pte_val,
+            valid,
+            r,
+            w,
+            x,
+            u,
+            g,
+            a,
+            d,
+            next_ppn
+        );
+
+        if valid == 0 {
+            crate::early_println!("[pte-walk]   -> INVALID at level {}", level);
+            return;
+        }
+
+        // Leaf check: R=1 or X=1 means this is the final PTE
+        if r == 1 || x == 1 {
+            crate::early_println!(
+                "[pte-walk]   -> LEAF at level {} => phys={:#x}",
+                level,
+                next_ppn << 12
+            );
+            return;
+        }
+
+        // Non-leaf: descend to next level
+        pt = ((next_ppn << 12) as usize) as *const PageTable;
+    }
+}
+
 pub fn get_root_pagetable_ptr(asid: u16) -> Option<*mut PageTable> {
     if is_asid_used(asid) {
         let page_tabels = get_page_tables().read();
@@ -178,16 +247,11 @@ fn setup_trampoline_at_end(manager: &mut VirtualMemoryManager, trampoline_vaddr_
     let trampoline_end = unsafe { &__TRAMPOLINE_END as *const usize as usize } - 1;
     let trampoline_size = trampoline_end - trampoline_start;
 
-    let arch = get_cpu().as_paddr_cpu();
     let trampoline_vaddr_start = trampoline_vaddr_end - trampoline_size;
 
     let trap_entry_paddr = get_user_trapvector_paddr();
-    let arch_paddr = arch as *const Arch as usize;
     let trap_entry_offset = trap_entry_paddr - trampoline_start;
-    let arch_offset = arch_paddr - trampoline_start;
-
     let trap_entry_vaddr = trampoline_vaddr_start + trap_entry_offset;
-    let arch_vaddr = trampoline_vaddr_start + arch_offset;
 
     #[cfg(any(debug_assertions, test))]
     {
@@ -202,9 +266,7 @@ fn setup_trampoline_at_end(manager: &mut VirtualMemoryManager, trampoline_vaddr_
             trampoline_end
         );
         early_println!("  Trap entry paddr        : {:#x}", trap_entry_paddr);
-        early_println!("  Arch paddr              : {:#x}", arch_paddr);
         early_println!("  Trap entry vaddr        : {:#x}", trap_entry_vaddr);
-        early_println!("  Arch vaddr              : {:#x}", arch_vaddr);
     }
 
     let trampoline_map = VirtualMemoryMap {
@@ -263,7 +325,17 @@ fn setup_trampoline_at_end(manager: &mut VirtualMemoryManager, trampoline_vaddr_
         .unwrap();
 
     crate::vm::set_trampoline_trap_vector(trap_entry_vaddr);
-    crate::vm::set_trampoline_arch(arch.get_cpuid(), arch_vaddr);
+
+    // Register the trampoline virtual address for every CPU's per-CPU arch
+    // struct.  The entire CPUS array lives inside the trampoline section and
+    // is mapped at the same offset in every address space, so we compute each
+    // CPU's VA with the same base-offset formula.
+    for i in 0..NUM_OF_CPUS {
+        let cpu_paddr = unsafe { &super::CPUS[i] as *const Arch as usize };
+        let cpu_offset = cpu_paddr - trampoline_start;
+        let cpu_vaddr = trampoline_vaddr_start + cpu_offset;
+        crate::vm::set_trampoline_arch(i, cpu_vaddr);
+    }
 }
 
 pub fn setup_trampoline_for_kernel(manager: &mut VirtualMemoryManager) {

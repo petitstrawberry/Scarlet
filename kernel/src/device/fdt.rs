@@ -93,6 +93,7 @@
 //! to provide access throughout the kernel, with careful synchronization to prevent
 //! data races during initialization.
 
+use alloc::vec::Vec;
 use core::panic;
 use core::result::Result;
 
@@ -308,6 +309,23 @@ impl<'a> FdtManager<'a> {
         }
 
         None
+    }
+
+    /// Enumerate all CPU physical IDs from the `/cpus` node in the device tree.
+    ///
+    /// Each `/cpus/cpu@N` node has a `reg` property containing the physical
+    /// CPU identifier (hart ID on RISC-V, MPIDR on AArch64).  This method
+    /// collects them into a `Vec` sorted in ascending order.
+    ///
+    /// # Returns
+    ///
+    /// `Some(Vec<usize>)` with all discovered CPU physical IDs, or `None`
+    /// if the FDT is unavailable.
+    pub fn get_cpu_ids(&self) -> Option<Vec<usize>> {
+        let fdt = self.get_fdt()?;
+        let mut ids: Vec<usize> = fdt.cpus().map(|cpu| cpu.ids().first()).collect();
+        ids.sort_unstable();
+        Some(ids)
     }
 
     pub fn get_dram_memoryarea(&self) -> Option<MemoryArea> {

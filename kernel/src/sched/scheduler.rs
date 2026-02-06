@@ -41,17 +41,15 @@ use crate::print;
 use crate::println;
 use crate::{
     arch::{
-        Arch, Trapframe, get_cpu, get_user_trap_handler, instruction::idle,
-        interrupt::enable_external_interrupts, set_next_mode, set_trapvector,
+        Arch, Trapframe, get_cpu, get_kernel_trapvector_paddr, get_user_trap_handler,
+        instruction::idle, set_arch, set_next_mode, set_trapvector,
         trap::user::arch_switch_to_user_space,
     },
     environment::NUM_OF_CPUS,
-    task::{TaskState, TaskType, new_kernel_task, wake_parent_waiters, wake_task_waiters},
+    task::{Task, TaskState, TaskType, new_kernel_task, wake_parent_waiters, wake_task_waiters},
     timer::get_kernel_timer,
-    vm::get_trampoline_trap_vector,
+    vm::{get_trampoline_arch, get_trampoline_trap_vector},
 };
-
-use crate::task::Task;
 
 /// Task pool that stores tasks in fixed positions
 /// With each Task being 824 bytes, 1024 tasks consume approximately 824 KiB of memory,
@@ -558,7 +556,7 @@ impl Scheduler {
         }
     }
 
-    pub fn add_task(&mut self, task: Task, cpu_id: usize) -> usize {
+    pub fn add_task(&mut self, task: Task, _cpu_id_hint: usize) -> usize {
         // Add task to the global task pool and get the allocated ID
         let task_id = match get_task_pool().add_task(task) {
             Ok(id) => id,
@@ -568,12 +566,42 @@ impl Scheduler {
         let irq_was_enabled = crate::arch::interrupt::are_interrupts_enabled();
         crate::arch::disable_interrupt();
         lock_scheduler_no_irq_change();
-        self.ready_queue[cpu_id].push_back(task_id);
+
+        let target_cpu = self.select_least_loaded_cpu();
+        self.ready_queue[target_cpu].push_back(task_id);
+
         unlock_scheduler_no_irq_restore();
         if irq_was_enabled {
             crate::arch::enable_interrupt();
         }
         task_id
+    }
+
+    /// Select the CPU with the fewest runnable tasks (ready queue + current).
+    ///
+    /// This provides basic load balancing by distributing new tasks across all
+    /// online CPUs.  Only considers CPUs that have been brought online
+    /// (i.e., have an idle task registered).
+    ///
+    /// **Must be called with the scheduler lock held.**
+    fn select_least_loaded_cpu(&self) -> usize {
+        let online = crate::arch::num_cpus_online();
+        let mut best_cpu = 0usize;
+        let mut best_load = usize::MAX;
+        for cpu in 0..online {
+            // Count ready tasks, excluding the idle task (it always sits
+            // in the ready queue and should not count as real load).
+            let idle_id = self.idle_task_id[cpu];
+            let load = self.ready_queue[cpu]
+                .iter()
+                .filter(|&&tid| Some(tid) != idle_id)
+                .count();
+            if load < best_load {
+                best_load = load;
+                best_cpu = cpu;
+            }
+        }
+        best_cpu
     }
 
     /// Determines the next task to run using priority-based scheduling.
@@ -763,14 +791,37 @@ impl Scheduler {
                 self.kernel_context_switch(cpu_id, current_task_id, next_task_id);
                 // NOTE: After this point, the current task will not execute until it is scheduled again
 
-                // Restore trapframe of same task
+                // Restore execution context for the resumed task
                 let current_task = self.get_task_by_id(current_task_id).unwrap();
-                Self::setup_task_execution(get_cpu(), current_task);
+                if current_task.task_type == TaskType::User {
+                    Self::setup_task_execution(get_cpu(), current_task);
+                } else {
+                    // Kernel task resumed: restore kernel trap vector so the
+                    // next interrupt goes through _kernel_trap_entry, not the
+                    // user-mode trampoline.
+                    set_trapvector(get_kernel_trapvector_paddr());
+                }
             } else {
-                // No current task (e.g., first scheduling), just switch to next task
+                // No current task (e.g., first scheduling on this CPU).
                 let next_task = self.get_task_by_id(next_task_id).unwrap();
-                Self::setup_task_execution(get_cpu(), next_task);
-                arch_switch_to_user_space(next_task.get_trapframe()); // Force switch to user space
+
+                if next_task.task_type == TaskType::Kernel {
+                    // Kernel tasks (e.g., idle) run in supervisor mode and
+                    // do not need arch_switch_to_user_space().  The CPU is
+                    // already executing its idle loop (start_ap), so just
+                    // return and let the timer continue firing until a real
+                    // user task appears on this CPU's ready queue.
+                } else {
+                    // First user task on this CPU.  Switch the per-CPU arch
+                    // pointer to its trampoline-mapped address so that
+                    // user-mode trap entry/exit can locate it, then jump
+                    // into user space (this call never returns).
+                    set_arch(get_trampoline_arch(cpu_id));
+
+                    let next_task = self.get_task_by_id(next_task_id).unwrap();
+                    Self::setup_task_execution(get_cpu(), next_task);
+                    arch_switch_to_user_space(next_task.get_trapframe());
+                }
             }
         }
 
@@ -880,8 +931,9 @@ impl Scheduler {
                     task.state = TaskState::Running;
                     // Memory barrier to ensure state change is visible
                     core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
-                    // Move to ready queue
-                    self.ready_queue[cpu_id].push_back(task_id);
+                    // Place on the least-loaded CPU for better balance
+                    let target_cpu = self.select_least_loaded_cpu();
+                    self.ready_queue[target_cpu].push_back(task_id);
                     return true;
                 }
             }
@@ -895,17 +947,8 @@ impl Scheduler {
                 task.state = TaskState::Running;
                 // Memory barrier to ensure state change is visible
                 core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
-                // Find the CPU where this task was last running, default to CPU 0
-                let target_cpu = {
-                    let mut found_cpu = 0usize;
-                    for cpu_id in 0..NUM_OF_CPUS {
-                        if self.current_task_id[cpu_id] == Some(task_id) {
-                            found_cpu = cpu_id;
-                            break;
-                        }
-                    }
-                    found_cpu
-                };
+                // Place on the least-loaded CPU
+                let target_cpu = self.select_least_loaded_cpu();
 
                 // Only add if not already in ready_queue to avoid duplicates
                 if !self.ready_queue[target_cpu].contains(&task_id) {

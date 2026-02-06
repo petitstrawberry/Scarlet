@@ -16,10 +16,11 @@ use spin::RwLock;
 use crate::mem::page::allocate_raw_pages;
 
 use crate::arch::Arch;
-use crate::arch::get_cpu;
 use crate::arch::get_user_trapvector_paddr;
 use crate::early_println;
-use crate::environment::{KERNEL_KSTACK_REGION_END, KERNEL_KSTACK_REGION_START, TRAMPOLINE_VA_END};
+use crate::environment::{
+    KERNEL_KSTACK_REGION_END, KERNEL_KSTACK_REGION_START, NUM_OF_CPUS, TRAMPOLINE_VA_END,
+};
 use crate::vm::manager::VirtualMemoryManager;
 use crate::vm::vmem::{MemoryArea, VirtualMemoryMap, VirtualMemoryPermission};
 
@@ -187,16 +188,11 @@ fn setup_trampoline_at_end(manager: &mut VirtualMemoryManager, trampoline_vaddr_
     let trampoline_end = unsafe { &__TRAMPOLINE_END as *const usize as usize } - 1;
     let trampoline_size = trampoline_end - trampoline_start;
 
-    let arch = get_cpu().as_paddr_cpu();
     let trampoline_vaddr_start = trampoline_vaddr_end - trampoline_size;
 
     let trap_entry_paddr = get_user_trapvector_paddr();
-    let arch_paddr = arch as *const Arch as usize;
     let trap_entry_offset = trap_entry_paddr - trampoline_start;
-    let arch_offset = arch_paddr - trampoline_start;
-
     let trap_entry_vaddr = trampoline_vaddr_start + trap_entry_offset;
-    let arch_vaddr = trampoline_vaddr_start + arch_offset;
 
     #[cfg(any(debug_assertions, test))]
     {
@@ -211,9 +207,7 @@ fn setup_trampoline_at_end(manager: &mut VirtualMemoryManager, trampoline_vaddr_
             trampoline_end
         );
         early_println!("  Trap entry paddr        : {:#x}", trap_entry_paddr);
-        early_println!("  Arch paddr              : {:#x}", arch_paddr);
         early_println!("  Trap entry vaddr        : {:#x}", trap_entry_vaddr);
-        early_println!("  Arch vaddr              : {:#x}", arch_vaddr);
     }
 
     let trampoline_map = VirtualMemoryMap {
@@ -272,7 +266,17 @@ fn setup_trampoline_at_end(manager: &mut VirtualMemoryManager, trampoline_vaddr_
         .unwrap();
 
     crate::vm::set_trampoline_trap_vector(trap_entry_vaddr);
-    crate::vm::set_trampoline_arch(arch.get_cpuid(), arch_vaddr);
+
+    // Register the trampoline virtual address for every CPU's per-CPU arch
+    // struct.  The entire CPUS array lives inside the trampoline section and
+    // is mapped at the same offset in every address space, so we compute each
+    // CPU's VA with the same base-offset formula.
+    for i in 0..NUM_OF_CPUS {
+        let cpu_paddr = unsafe { &super::CPUS[i] as *const Arch as usize };
+        let cpu_offset = cpu_paddr - trampoline_start;
+        let cpu_vaddr = trampoline_vaddr_start + cpu_offset;
+        crate::vm::set_trampoline_arch(i, cpu_vaddr);
+    }
 }
 
 pub fn setup_trampoline_for_kernel(manager: &mut VirtualMemoryManager) {

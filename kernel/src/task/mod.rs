@@ -1819,11 +1819,19 @@ pub fn set_current_task_cwd(path: String) -> bool {
 /// This function is called when a task is first scheduled.
 pub fn task_initial_kernel_entrypoint() -> ! {
     let cpu = get_cpu();
-    let task_id = get_scheduler()
-        .get_current_task_id(cpu.get_cpuid())
-        .unwrap();
+    let cpu_id = cpu.get_cpuid();
+    let task_id = get_scheduler().get_current_task_id(cpu_id).unwrap();
     let current_task = TaskPool::get_task_mut(task_id).unwrap();
-    Scheduler::setup_task_execution(cpu, current_task);
+
+    // Ensure the per-CPU arch pointer is switched to its trampoline-mapped
+    // virtual address.  On the BSP this was already done by
+    // `first_switch_to_user()`, but on secondary CPUs this is the first
+    // opportunity to perform the switch (sscratch still holds the physical
+    // address set by `trap_init()`).  The call is idempotent so it is safe
+    // to do unconditionally.
+    crate::arch::set_arch(crate::vm::get_trampoline_arch(cpu_id));
+
+    Scheduler::setup_task_execution(get_cpu(), current_task);
     arch_switch_to_user_space(current_task.get_trapframe());
 }
 

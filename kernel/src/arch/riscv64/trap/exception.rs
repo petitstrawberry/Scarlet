@@ -267,6 +267,62 @@ pub fn arch_exception_handler(trapframe: &mut Trapframe, cause: usize) {
                 vaddr = (vaddr + 4) & !0b11; // Align to the next 4-byte boundary
             }
         }
+        /* Access faults (instruction=1, load=5, store=7) */
+        1 | 5 | 7 => {
+            let mut vaddr: usize;
+            let satp_val: usize;
+            unsafe {
+                asm!("csrr {}, stval", out(reg) vaddr);
+                asm!("csrr {}, satp", out(reg) satp_val);
+            }
+            let fault_kind = match cause {
+                1 => "Instruction access fault",
+                5 => "Load access fault",
+                7 => "Store/AMO access fault",
+                _ => unreachable!(),
+            };
+            let cpu_id = get_cpu().get_cpuid();
+            println!(
+                "[user-trap] {} (cause {}): cpu={} epc={:#x} stval={:#x}",
+                fault_kind, cause, cpu_id, trapframe.epc, vaddr
+            );
+
+            // Walk the kernel SATP page table for the trampoline VA
+            let trampoline_va = 0xffff_ffff_ffff_f000usize;
+            println!(
+                "[user-trap] Walking kernel PT (satp={:#x}) for trampoline:",
+                satp_val
+            );
+            crate::arch::vm::debug_walk_pte_from_satp(satp_val, trampoline_va);
+
+            // Walk the task's own page table
+            let sched = get_scheduler();
+            if let Some(task) = sched.get_current_task(cpu_id) {
+                println!(
+                    "[user-trap] task: id={} name={} asid={}",
+                    task.get_id(),
+                    task.name,
+                    task.vm_manager.get_asid()
+                );
+                let task_asid = task.vm_manager.get_asid();
+                if let Some(root_pt) = crate::arch::vm::get_root_pagetable_ptr(task_asid) {
+                    let task_satp =
+                        (9usize << 60) | ((task_asid as usize) << 44) | (root_pt as usize >> 12);
+                    println!(
+                        "[user-trap] Walking task PT (satp={:#x}) for trampoline:",
+                        task_satp
+                    );
+                    crate::arch::vm::debug_walk_pte_from_satp(task_satp, trampoline_va);
+                    if vaddr != 0 && vaddr != trampoline_va {
+                        println!("[user-trap] Walking task PT for stval={:#x}:", vaddr);
+                        crate::arch::vm::debug_walk_pte_from_satp(task_satp, vaddr);
+                    }
+                }
+            }
+
+            print_traplog(trapframe);
+            panic!("{} (cause {})", fault_kind, cause);
+        }
         _ => {
             print_traplog(trapframe);
             panic!("Unhandled exception: {}", cause);
