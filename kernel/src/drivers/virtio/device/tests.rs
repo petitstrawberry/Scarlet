@@ -6,16 +6,20 @@ use super::*;
 struct TestVirtioDevice {
     base_addr: usize,
     virtqueues: [UnsafeCell<VirtQueue<'static>>; 2],
+    regs: UnsafeCell<[u32; 0x200 / 4]>,
 }
 
 impl TestVirtioDevice {
     fn new(base_addr: usize, queue_size: usize) -> Self {
+        let mut regs = [0u32; 0x200 / 4];
+        regs[Register::Version.offset() / 4] = 2;
         Self {
             base_addr,
             virtqueues: [
                 UnsafeCell::new(VirtQueue::new(queue_size)),
                 UnsafeCell::new(VirtQueue::new(queue_size)),
             ],
+            regs: UnsafeCell::new(regs),
         }
     }
 }
@@ -58,6 +62,30 @@ impl VirtioDevice for TestVirtioDevice {
             Some(self.base_addr as u64 + (queue_idx * 0x1000 + 0x100) as u64) // Example offset
         } else {
             None
+        }
+    }
+
+    fn get_supported_features(&self, device_features: u32) -> u32 {
+        device_features
+    }
+
+    fn read32_register(&self, register: Register) -> u32 {
+        let idx = register.offset() / 4;
+        let regs = unsafe { &*self.regs.get() };
+        regs.get(idx).copied().unwrap_or(0)
+    }
+
+    fn write32_register(&self, register: Register, value: u32) {
+        let idx = register.offset() / 4;
+        let regs = unsafe { &mut *self.regs.get() };
+        if let Some(slot) = regs.get_mut(idx) {
+            *slot = value;
+        }
+        if register == Register::InterruptAck {
+            let status_idx = Register::InterruptStatus.offset() / 4;
+            if let Some(status_slot) = regs.get_mut(status_idx) {
+                *status_slot &= !value;
+            }
         }
     }
 }
@@ -136,6 +164,24 @@ fn test_feature_negotiation() {
 }
 
 #[test_case]
+fn test_allow_ring_features_version_gate() {
+    let page = allocate_raw_pages(1);
+    let base_addr = page as usize;
+    let device = TestVirtioDevice::new(base_addr, 2);
+
+    device.write32_register(Register::Version, 2);
+    device.write32_register(Register::DeviceFeaturesSel, 1);
+    device.write32_register(
+        Register::DeviceFeatures,
+        (1u32 << (crate::drivers::virtio::features::VIRTIO_F_VERSION_1 - 32)),
+    );
+    assert!(device.allow_ring_features());
+
+    device.write32_register(Register::DeviceFeatures, 0);
+    assert!(!device.allow_ring_features());
+}
+
+#[test_case]
 fn test_queue_setup() {
     let page = allocate_raw_pages(1);
     let base_addr = page as usize;
@@ -192,16 +238,6 @@ fn test_interrupt_handling() {
     // Process the interrupt
     let processed = device.process_interrupts();
     assert_eq!(processed, 0x3);
-
-    // Simulate acknowledging the interrupt
-    let current_status = device.read32_register(Register::InterruptStatus);
-    let new_status = current_status & !0x3; // Clear the bits being acknowledged
-    unsafe {
-        core::ptr::write_volatile(
-            (device.get_base_addr() + Register::InterruptStatus.offset()) as *mut u32,
-            new_status,
-        )
-    };
 
     // Verify that the interrupt is cleared
     let status_after = device.get_interrupt_status();

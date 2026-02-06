@@ -381,7 +381,11 @@ impl VirtualMemoryManager {
         // Find the memory mapping for this virtual address
         let memory_map = match self.search_memory_map(vaddr) {
             Some(map) => map,
-            None => return Err("No memory mapping found for virtual address"),
+            None => {
+                // Try to find a mapping that contains an address just before this one
+                // which might have an owner that supports dynamic extension
+                return self.try_extend_mapping_for_access(&access);
+            }
         };
 
         // Calculate the page-aligned virtual and physical addresses
@@ -393,6 +397,8 @@ impl VirtualMemoryManager {
         // If there is an owner, allow it to adjust mapping and tell if this is a tail page
         if let Some(owner_weak) = &memory_map.owner {
             if let Some(owner) = owner_weak.upgrade() {
+                let owner_name = owner.mmap_owner_name();
+                let _should_log = owner_name.contains("xkb");
                 match owner.resolve_fault(&access, &memory_map) {
                     Ok(res) => {
                         page_paddr = res.paddr_page_base;
@@ -423,6 +429,92 @@ impl VirtualMemoryManager {
         } else {
             Err("No root page table available")
         }
+    }
+
+    /// Try to extend a mapping for an access that falls outside the current vmarea
+    ///
+    /// This handles the case where a SharedMemory has been resized via ftruncate
+    /// but the VirtualMemoryMap.vmarea.end hasn't been updated.
+    fn try_extend_mapping_for_access(
+        &self,
+        access: &crate::object::capability::memory_mapping::AccessKind,
+    ) -> Result<(), &'static str> {
+        let vaddr = access.vaddr;
+        let page_vaddr = vaddr & !(PAGE_SIZE - 1);
+
+        // Result of successful extend: (paddr_page_base, permissions)
+        let extend_result: Option<(usize, usize)>;
+
+        {
+            // Lock scope
+            let mut g = self.inner.write();
+
+            // Find a mapping whose vmarea.end < vaddr but might have an owner that has grown
+            let mut found = None;
+            for (_, map) in g.memmap.iter_mut() {
+                // Check if vaddr is just past this mapping's end
+                if map.vmarea.end < vaddr {
+                    // Check if there's an owner that might support extended access
+                    if let Some(owner_weak) = &map.owner {
+                        if let Some(owner) = owner_weak.upgrade() {
+                            // Try resolve_fault to see if owner supports this offset
+                            let test_access =
+                                crate::object::capability::memory_mapping::AccessKind {
+                                    vaddr: page_vaddr,
+                                    op: access.op,
+                                    size: access.size,
+                                };
+
+                            match owner.resolve_fault(&test_access, map) {
+                                Ok(res) => {
+                                    // Owner says this offset is valid - extend vmarea.end
+                                    let new_end = page_vaddr + PAGE_SIZE - 1;
+                                    crate::println!(
+                                        "[VmManager] Extending mapping vmarea.end from {:#x} to {:#x} for owner={}",
+                                        map.vmarea.end,
+                                        new_end,
+                                        owner.mmap_owner_name()
+                                    );
+                                    map.vmarea.end = new_end;
+
+                                    // Also extend pmarea proportionally
+                                    let pmarea_growth = new_end
+                                        - map.vmarea.start
+                                        - (map.pmarea.end - map.pmarea.start);
+                                    map.pmarea.end += pmarea_growth;
+
+                                    found = Some((res.paddr_page_base, map.permissions));
+                                    break;
+                                }
+                                Err(_) => {
+                                    // Owner doesn't support this offset, continue searching
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            extend_result = found;
+        } // Lock released here
+
+        // Now map the page outside the lock
+        if let Some((paddr_page_base, permissions)) = extend_result {
+            if let Some(root_pagetable) = self.get_root_page_table() {
+                root_pagetable.map(
+                    self.get_asid(),
+                    page_vaddr,
+                    paddr_page_base,
+                    permissions,
+                    true,
+                    access.op == AccessOp::Store,
+                );
+                return Ok(());
+            } else {
+                return Err("No root page table available");
+            }
+        }
+
+        Err("No extendable memory mapping found for virtual address")
     }
 
     /// Unmap a virtual address range from MMU

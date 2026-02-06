@@ -24,7 +24,7 @@ args = ["clippy", "--", "-D", "warnings"]
 
 [tasks.build]
 description = "Build all user programs with OSABI=83 (debug mode)"
-dependencies = ["build-only-debug", "set-osabi-debug"]
+dependencies = ["build-only-debug", "set-osabi-debug", "split-debug-symbols"]
 
 [tasks.build-release]
 description = "Build all user programs with OSABI=83 (release mode)"
@@ -44,7 +44,7 @@ script = 'cargo build --release --target "${TARGET_SPEC}" --out-dir "${DIST_DIR}
 
 [tasks.build-aarch64]
 description = "Build all user programs for AArch64 with OSABI=83 (debug mode)"
-dependencies = ["build-only-debug-aarch64", "set-osabi-debug-aarch64"]
+dependencies = ["build-only-debug-aarch64", "set-osabi-debug-aarch64", "split-debug-symbols-aarch64"]
 
 [tasks.build-release-aarch64]
 description = "Build all user programs for AArch64 with OSABI=83 (release mode)"
@@ -190,6 +190,70 @@ done
 if [ "$found_binaries" = false ]; then
     echo "No executable binaries found in ${DIST_DIR}"
 fi
+'''
+
+[tasks.split-debug-symbols]
+description = "Split debug symbols for user programs (riscv64 debug)"
+env = { "DEBUG_DIR" = "dist/riscv64.debug", "DIST_DIR" = "dist/riscv64" }
+script = '''
+if [ ! -d "${DIST_DIR}" ]; then
+    echo "Error: ${DIST_DIR} directory not found"
+    exit 1
+fi
+
+if command -v llvm-objcopy >/dev/null 2>&1; then
+    OBJCOPY=llvm-objcopy
+elif command -v riscv64-unknown-elf-objcopy >/dev/null 2>&1; then
+    OBJCOPY=riscv64-unknown-elf-objcopy
+elif command -v riscv64-linux-gnu-objcopy >/dev/null 2>&1; then
+    OBJCOPY=riscv64-linux-gnu-objcopy
+else
+    echo "Error: objcopy not found for RISC-V"
+    exit 1
+fi
+
+mkdir -p "${DEBUG_DIR}"
+
+for binary_path in "${DIST_DIR}"/*; do
+    if [ -f "${binary_path}" ] && [ -x "${binary_path}" ]; then
+        binary=$(basename "${binary_path}")
+        debug_file="${DEBUG_DIR}/${binary}.debug"
+        "$OBJCOPY" --only-keep-debug "${binary_path}" "${debug_file}"
+        "$OBJCOPY" --strip-debug --strip-unneeded "${binary_path}"
+        "$OBJCOPY" --add-gnu-debuglink="${debug_file}" "${binary_path}"
+    fi
+done
+'''
+
+[tasks.split-debug-symbols-aarch64]
+description = "Split debug symbols for user programs (aarch64 debug)"
+env = { "DEBUG_DIR" = "dist/aarch64.debug", "DIST_DIR" = "dist/aarch64" }
+script = '''
+if [ ! -d "${DIST_DIR}" ]; then
+    echo "Error: ${DIST_DIR} directory not found"
+    exit 1
+fi
+
+if command -v llvm-objcopy >/dev/null 2>&1; then
+    OBJCOPY=llvm-objcopy
+elif command -v aarch64-linux-gnu-objcopy >/dev/null 2>&1; then
+    OBJCOPY=aarch64-linux-gnu-objcopy
+else
+    echo "Error: objcopy not found for AArch64"
+    exit 1
+fi
+
+mkdir -p "${DEBUG_DIR}"
+
+for binary_path in "${DIST_DIR}"/*; do
+    if [ -f "${binary_path}" ] && [ -x "${binary_path}" ]; then
+        binary=$(basename "${binary_path}")
+        debug_file="${DEBUG_DIR}/${binary}.debug"
+        "$OBJCOPY" --only-keep-debug "${binary_path}" "${debug_file}"
+        "$OBJCOPY" --strip-debug --strip-unneeded "${binary_path}"
+        "$OBJCOPY" --add-gnu-debuglink="${debug_file}" "${binary_path}"
+    fi
+done
 '''
 
 [tasks.clean]

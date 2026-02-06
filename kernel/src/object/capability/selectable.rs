@@ -94,13 +94,10 @@ pub trait Selectable {
     /// readiness, otherwise `SelectWaitOutcome::Ready`.
     fn wait_until_ready(
         &self,
-        _interest: ReadyInterest,
-        _trapframe: &mut Trapframe,
-        _timeout_ticks: Option<u64>,
-    ) -> SelectWaitOutcome {
-        // Default: non-blocking, report Ready
-        SelectWaitOutcome::Ready
-    }
+        interest: ReadyInterest,
+        trapframe: &mut Trapframe,
+        timeout_ticks: Option<u64>,
+    ) -> SelectWaitOutcome;
 
     /// Enable or disable non-blocking I/O semantics on this object.
     ///

@@ -23,7 +23,14 @@ if ! ls "$USER_DIST_DIR"/* >/dev/null 2>&1; then
 	exit 1
 fi
 
-cp "$USER_DIST_DIR"/* initramfs/system/scarlet/bin/
+for binary_path in "$USER_DIST_DIR"/*; do
+    if [ -f "$binary_path" ]; then
+        case "$binary_path" in
+            *.debug) continue ;;
+        esac
+        cp "$binary_path" initramfs/system/scarlet/bin/
+    fi
+done
 
 mkdir -p dist
 cd initramfs || exit 1

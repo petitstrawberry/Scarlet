@@ -1,6 +1,8 @@
 //! IPC Server module - handles client connections and messages
 
+use core::sync::atomic::{AtomicU8, Ordering};
 use std::collections::BTreeMap;
+use std::env;
 use std::handle::capability::memory_mapping::flags as mmap_flags;
 use std::ipc::{SharedMemory, permissions};
 use std::println;
@@ -11,6 +13,43 @@ use std::thread::{self, sleep, yield_now};
 use std::vec::Vec;
 use sws_protocol as protocol;
 use sws_protocol::ClientMessageRef;
+
+fn is_sws_debug_enabled() -> bool {
+    static LOG_CACHE: AtomicU8 = AtomicU8::new(u8::MAX);
+    let cached = LOG_CACHE.load(Ordering::Relaxed);
+    if cached != u8::MAX {
+        return cached != 0;
+    }
+    let enabled = match env::var("SWS_LOG") {
+        Some(val) => matches!(val.as_str(), "debug" | "DEBUG" | "3"),
+        None => false,
+    };
+    LOG_CACHE.store(enabled as u8, Ordering::Relaxed);
+    enabled
+}
+
+fn merge_damage(
+    ax: i32,
+    ay: i32,
+    aw: u32,
+    ah: u32,
+    bx: i32,
+    by: i32,
+    bw: u32,
+    bh: u32,
+) -> (i32, i32, u32, u32) {
+    let x0 = i64::from(ax.min(bx));
+    let y0 = i64::from(ay.min(by));
+    let ax1 = (ax as i64).saturating_add(aw as i64);
+    let ay1 = (ay as i64).saturating_add(ah as i64);
+    let bx1 = (bx as i64).saturating_add(bw as i64);
+    let by1 = (by as i64).saturating_add(bh as i64);
+    let x1 = ax1.max(bx1);
+    let y1 = ay1.max(by1);
+    let w = (x1 - x0).max(0) as u32;
+    let h = (y1 - y0).max(0) as u32;
+    (x0 as i32, y0 as i32, w, h)
+}
 
 /// Application session information
 #[derive(Debug, Clone)]
@@ -252,6 +291,54 @@ static PENDING_CLIENT_RESPONSES: Mutex<BTreeMap<usize, Vec<PendingServerFrame>>>
 /// Add an event to the global queue
 pub fn push_ipc_event(event: IpcEvent) {
     let mut queue = EVENT_QUEUE.lock();
+    if let IpcEvent::ExtensionUpdateBuffer {
+        external_client_id,
+        window_id,
+        damage_x,
+        damage_y,
+        damage_width,
+        damage_height,
+    } = event
+    {
+        for existing in queue.iter_mut().rev() {
+            if let IpcEvent::ExtensionUpdateBuffer {
+                window_id: existing_window,
+                damage_x: existing_x,
+                damage_y: existing_y,
+                damage_width: existing_w,
+                damage_height: existing_h,
+                ..
+            } = existing
+            {
+                if *existing_window == window_id {
+                    let (nx, ny, nw, nh) = merge_damage(
+                        *existing_x,
+                        *existing_y,
+                        *existing_w,
+                        *existing_h,
+                        damage_x,
+                        damage_y,
+                        damage_width,
+                        damage_height,
+                    );
+                    *existing_x = nx;
+                    *existing_y = ny;
+                    *existing_w = nw;
+                    *existing_h = nh;
+                    return;
+                }
+            }
+        }
+        queue.push(IpcEvent::ExtensionUpdateBuffer {
+            external_client_id,
+            window_id,
+            damage_x,
+            damage_y,
+            damage_width,
+            damage_height,
+        });
+        return;
+    }
     queue.push(event);
 }
 
@@ -298,6 +385,52 @@ pub fn send_input_to_window(window_id: u32, time: u64, type_: u16, code: u16, va
             code,
             value,
         });
+    }
+}
+
+/// Pending extension input events: BTreeMap from (extension_id, external_client_id) to events
+static PENDING_EXTENSION_INPUT_EVENTS: Mutex<BTreeMap<(u32, u32), Vec<PendingInputEvent>>> =
+    Mutex::new(BTreeMap::new());
+
+/// Queue an input event for an extension-owned window (O(log n) lookup)
+/// This sends EXTENSION_INPUT_EVENT to the extension client instead of regular INPUT_EVENT
+pub fn send_extension_input_event(
+    extension_id: u32,
+    external_client_id: u32,
+    window_id: u32,
+    time: u64,
+    type_: u16,
+    code: u16,
+    value: i32,
+) {
+    let mut pending = PENDING_EXTENSION_INPUT_EVENTS.lock();
+
+    let events = pending
+        .entry((extension_id, external_client_id))
+        .or_insert_with(Vec::new);
+    events.push(PendingInputEvent {
+        time,
+        type_,
+        code,
+        value,
+    });
+}
+
+/// Get and clear pending extension input events for a specific extension client
+pub fn pop_extension_input_events(
+    extension_id: u32,
+    external_client_id: u32,
+) -> Vec<PendingInputEvent> {
+    let mut pending = PENDING_EXTENSION_INPUT_EVENTS.lock();
+
+    if let Some(events) = pending.get_mut(&(extension_id, external_client_id)) {
+        if events.is_empty() {
+            Vec::new()
+        } else {
+            core::mem::take(events)
+        }
+    } else {
+        Vec::new()
     }
 }
 
@@ -526,13 +659,18 @@ fn accept_thread_main(server_socket: Socket) {
     println!("[AcceptThread] stack marker addr: 0x{:x}", sp_hint);
 
     let mut client_id_counter: usize = 0;
+    let mut poll_count: u64 = 0;
 
     loop {
-        // Accept new client (blocking)
-        println!(
-            "[AcceptThread] Calling accept() on handle {}...",
-            server_socket.as_raw()
-        );
+        // Kernel accept() currently returns WouldBlock when no connections are
+        // pending, so we poll with a short sleep to avoid busy looping.
+        poll_count = poll_count.wrapping_add(1);
+        if poll_count % 100 == 1 {
+            println!(
+                "[AcceptThread] Polling accept() on handle {}...",
+                server_socket.as_raw()
+            );
+        }
         match server_socket.accept() {
             Ok(client_socket) => {
                 let client_id = client_id_counter;
@@ -559,17 +697,18 @@ fn accept_thread_main(server_socket: Socket) {
                     client_thread_main(client_id, client_socket);
                 });
             }
-            Err(e) => {
-                println!("[AcceptThread] Accept failed: {:?}", e);
-                // TODO: Kernel accept() should block instead of returning WouldBlock
-                // For now, break on error to avoid busy loop
-                println!("[AcceptThread] Exiting due to accept error");
-                break;
+            Err(std::socket::SocketError::WouldBlock) => {
+                thread::sleep(core::time::Duration::from_millis(10));
+                continue;
+            }
+            Err(_) => {
+                // At the moment `Socket::accept()` maps all failures to `WouldBlock`,
+                // but keep this arm for forward compatibility.
+                thread::sleep(core::time::Duration::from_millis(10));
+                continue;
             }
         }
     }
-
-    println!("[AcceptThread] Thread exiting");
 }
 
 /// Client thread main function
@@ -603,11 +742,17 @@ fn client_thread_main(client_id: usize, mut socket: Socket) {
     let mut managed_windows: Vec<u32> = Vec::new();
     let mut window_size_limits: BTreeMap<u32, WindowSizeLimits> = BTreeMap::new();
     let mut window_resizable: BTreeMap<u32, bool> = BTreeMap::new();
+    // Track if this client is an extension client (e.g., wayland_bridge)
+    let mut is_extension_client: bool = false;
+    let mut extension_id: u32 = 0;
+    // Map window_id to external_client_id for extension windows
+    let mut window_to_external_client: BTreeMap<u32, u32> = BTreeMap::new();
 
     // Debug: loop counter for periodic logging
     let mut loop_count: u64 = 0;
 
     let mut frame_reader = FrameReader::new();
+    let mut idle_backoff_ms = 1u64;
 
     println!("[ClientThread {}] Entering main loop", client_id);
 
@@ -653,38 +798,71 @@ fn client_thread_main(client_id: usize, mut socket: Socket) {
                 has_events = true;
             }
 
-            let events = pop_pending_input_events(window_id);
-            if !events.is_empty() {
-                has_events = true;
-                _total_events += events.len();
-                // println!(
-                //     "[ClientThread {}] Loop #{}: Found {} events for window {}",
-                //     client_id,
-                //     loop_count,
-                //     events.len(),
-                //     window_id
-                // );
-                for event in events {
-                    let payload = protocol::payload_input_event(
-                        window_id,
-                        event.time,
-                        event.type_,
-                        event.code,
-                        event.value,
-                    );
-                    if let Err(e) =
-                        write_frame(&mut socket, protocol::server_msg::INPUT_EVENT, &payload)
-                    {
-                        println!(
-                            "[ClientThread {}] Failed to send input event to window {}: {:?}",
-                            client_id, window_id, e
+            if is_extension_client {
+                // Extension clients receive EXTENSION_INPUT_EVENT
+                if let Some(&external_client_id) = window_to_external_client.get(&window_id) {
+                    let events = pop_extension_input_events(extension_id, external_client_id);
+                    if !events.is_empty() {
+                        has_events = true;
+                        _total_events += events.len();
+                        for event in events {
+                            let payload = protocol::payload_extension_input_event(
+                                external_client_id,
+                                window_id,
+                                event.time,
+                                event.type_,
+                                event.code,
+                                event.value,
+                            );
+                            if let Err(e) = write_frame(
+                                &mut socket,
+                                protocol::server_msg::EXTENSION_INPUT_EVENT,
+                                &payload,
+                            ) {
+                                println!(
+                                    "[ClientThread {}] Failed to send extension input event to window {}: {:?}",
+                                    client_id, window_id, e
+                                );
+                                break 'main;
+                            }
+                        }
+                    }
+                }
+            } else {
+                // Regular clients receive INPUT_EVENT
+                let events = pop_pending_input_events(window_id);
+                if !events.is_empty() {
+                    has_events = true;
+                    _total_events += events.len();
+                    // println!(
+                    //     "[ClientThread {}] Loop #{}: Found {} events for window {}",
+                    //     client_id,
+                    //     loop_count,
+                    //     events.len(),
+                    //     window_id
+                    // );
+                    for event in events {
+                        let payload = protocol::payload_input_event(
+                            window_id,
+                            event.time,
+                            event.type_,
+                            event.code,
+                            event.value,
                         );
-                        break 'main;
-                    } else {
-                        // println!(
-                        //     "[ClientThread {}] Sent event: type={} code={} value={}",
-                        //     client_id, event.type_, event.code, event.value
-                        // );
+                        if let Err(e) =
+                            write_frame(&mut socket, protocol::server_msg::INPUT_EVENT, &payload)
+                        {
+                            println!(
+                                "[ClientThread {}] Failed to send input event to window {}: {:?}",
+                                client_id, window_id, e
+                            );
+                            break 'main;
+                        } else {
+                            // println!(
+                            //     "[ClientThread {}] Sent event: type={} code={} value={}",
+                            //     client_id, event.type_, event.code, event.value
+                            // );
+                        }
                     }
                 }
             }
@@ -704,6 +882,7 @@ fn client_thread_main(client_id: usize, mut socket: Socket) {
         // If we sent events, loop back immediately to check for more
         // This ensures rapid delivery during input bursts
         if has_events {
+            idle_backoff_ms = 1;
             continue;
         }
 
@@ -720,6 +899,7 @@ fn client_thread_main(client_id: usize, mut socket: Socket) {
 
         let (msg_type, payload) = match frame_reader.poll(&mut socket) {
             Ok(Some(v)) => {
+                idle_backoff_ms = 1;
                 // println!(
                 //     "[ClientThread {}] Loop #{}: read_frame SUCCESS (msg_type={})",
                 //     client_id, loop_count, v.0
@@ -728,8 +908,9 @@ fn client_thread_main(client_id: usize, mut socket: Socket) {
             }
             Ok(None) => {
                 // No complete frame available yet; keep looping so we can deliver input events.
-                // Yield to avoid a tight busy loop when idle.
-                yield_now();
+                // Back off to avoid a tight busy loop when idle.
+                sleep(core::time::Duration::from_millis(idle_backoff_ms));
+                idle_backoff_ms = (idle_backoff_ms * 2).min(8);
                 continue;
             }
             Err(FrameIoError::Disconnected) => {
@@ -952,6 +1133,10 @@ fn client_thread_main(client_id: usize, mut socket: Socket) {
                 });
             }
             Ok(ClientMessageRef::RequestMoveWindow { window_id }) => {
+                println!(
+                    "[IpcServer] RequestMoveWindow received for window {}",
+                    window_id
+                );
                 push_ipc_event(IpcEvent::RequestMove { window_id });
             }
             Ok(ClientMessageRef::MoveWindow { window_id, x, y }) => {
@@ -1148,6 +1333,270 @@ fn client_thread_main(client_id: usize, mut socket: Socket) {
                     client_id, window_id, opacity
                 );
                 push_ipc_event(IpcEvent::SetWindowOpacity { window_id, opacity });
+            }
+            Ok(ClientMessageRef::RegisterExtension { extension_name }) => {
+                println!(
+                    "[ClientThread {}] RegisterExtension: name={:?}",
+                    client_id,
+                    std::string::String::from_utf8_lossy(extension_name)
+                );
+
+                // Allocate extension ID
+                let extension_id = next_window_id; // Reuse window ID counter for simplicity
+                next_window_id = next_window_id.saturating_add(1);
+
+                let name = std::string::String::from_utf8_lossy(extension_name).into_owned();
+                push_ipc_event(IpcEvent::ExtensionRegistered {
+                    client_id,
+                    extension_id,
+                    extension_name: name,
+                });
+
+                // Mark this client as an extension client
+                is_extension_client = true;
+                println!(
+                    "[ClientThread {}] Registered as extension client with ID {}",
+                    client_id, extension_id
+                );
+
+                // Send ExtensionRegistered response
+                let payload = protocol::payload_extension_registered(extension_id);
+                if let Err(e) = write_frame(
+                    &mut socket,
+                    protocol::server_msg::EXTENSION_REGISTERED,
+                    &payload,
+                ) {
+                    println!(
+                        "[ClientThread {}] Failed to send ExtensionRegistered: {:?}",
+                        client_id, e
+                    );
+                }
+            }
+            Ok(ClientMessageRef::ExtensionCreateWindow {
+                external_client_id,
+                width,
+                height,
+            }) => {
+                println!(
+                    "[ClientThread {}] ExtensionCreateWindow: external_client_id={} {}x{}",
+                    client_id, external_client_id, width, height
+                );
+
+                // Calculate buffer size
+                let buffer_size = (width as u64)
+                    .saturating_mul(height as u64)
+                    .saturating_mul(4);
+
+                let window_id = next_window_id;
+                next_window_id = next_window_id.saturating_add(1);
+
+                // Track mapping from window_id to external_client_id
+                window_to_external_client.insert(window_id, external_client_id);
+
+                // Create shared memory for this window
+                match SharedMemory::create(buffer_size as usize, permissions::READ_WRITE) {
+                    Ok(shm) => {
+                        let shm_mapped_addr = match shm.as_handle().as_memory_mapping() {
+                            Ok(mapper) => {
+                                match mapper.mmap(
+                                    0,
+                                    buffer_size as usize,
+                                    permissions::READ_WRITE,
+                                    mmap_flags::SHARED,
+                                    0,
+                                ) {
+                                    Ok(addr) => {
+                                        // Zero-initialize
+                                        unsafe {
+                                            let ptr = addr as *mut u8;
+                                            for i in 0..buffer_size as usize {
+                                                *ptr.add(i) = 0;
+                                            }
+                                        }
+                                        Some(addr)
+                                    }
+                                    Err(_) => None,
+                                }
+                            }
+                            Err(_) => None,
+                        };
+
+                        // Reply with window created
+                        send_window_created(&mut socket, window_id, buffer_size);
+
+                        // Send SHM handle
+                        if let Err(e) = socket.send_handle(shm.as_handle()) {
+                            println!(
+                                "[ClientThread {}] Failed to send SHM handle: {:?}",
+                                client_id, e
+                            );
+                        }
+
+                        // TODO: Map extension_id to client_id for routing
+                        register_window(window_id, client_id);
+                        managed_windows.push(window_id);
+
+                        push_ipc_event(IpcEvent::ExtensionCreateWindow {
+                            extension_id,
+                            external_client_id,
+                            window_id,
+                            width,
+                            height,
+                            shm: Some(shm),
+                            shm_mapped_addr,
+                            shm_size: buffer_size as usize,
+                        });
+                    }
+                    Err(e) => {
+                        println!("[ClientThread {}] Failed to create SHM: {:?}", client_id, e);
+                    }
+                }
+            }
+            Ok(ClientMessageRef::ExtensionUpdateBuffer {
+                external_client_id,
+                window_id,
+                x,
+                y,
+                width,
+                height,
+            }) => {
+                if is_sws_debug_enabled() {
+                    println!(
+                        "[ClientThread {}] ExtensionUpdateBuffer: external_client_id={} window_id={} damage=[{},{} {}x{}]",
+                        client_id, external_client_id, window_id, x, y, width, height
+                    );
+                }
+                push_ipc_event(IpcEvent::ExtensionUpdateBuffer {
+                    external_client_id,
+                    window_id,
+                    damage_x: x,
+                    damage_y: y,
+                    damage_width: width,
+                    damage_height: height,
+                });
+            }
+            Ok(ClientMessageRef::ExtensionAttachBuffer {
+                external_client_id,
+                window_id,
+                width,
+                height,
+                offset,
+                stride,
+                format,
+                shm_size,
+            }) => {
+                // println!(
+                //     "[ClientThread {}] === EXTENSION_ATTACH_BUFFER ===",
+                //     client_id
+                // );
+                // println!(
+                //     "[ClientThread {}]   external_client_id={} window_id={} {}x{}",
+                //     client_id, external_client_id, window_id, width, height
+                // );
+                // println!(
+                //     "[ClientThread {}]   offset={} stride={} format={} shm_size={}",
+                //     client_id, offset, stride, format, shm_size
+                // );
+
+                let shm_handle = match socket.recv_handle() {
+                    Ok(handle) => {
+                        // println!("[ClientThread {}]   Received SHM handle: {:?}", client_id, handle.as_raw());
+                        handle
+                    }
+                    Err(e) => {
+                        println!(
+                            "[ClientThread {}] Failed to recv handle: {:?}",
+                            client_id, e
+                        );
+                        push_ipc_event(IpcEvent::ExtensionAttachBuffer {
+                            external_client_id,
+                            window_id,
+                            width,
+                            height,
+                            offset,
+                            stride,
+                            format,
+                            shm: None,
+                            shm_mapped_addr: None,
+                            shm_size: 0,
+                        });
+                        continue;
+                    }
+                };
+
+                let shm_size_usize = shm_size as usize;
+                // println!("[ClientThread {}]   Attempting to map handle directly (size={} bytes)...", client_id, shm_size_usize);
+
+                // Try to map the handle directly without requiring SharedMemory type
+                // This allows File handles from the Linux compatibility layer to work
+                let result = if shm_size_usize > 0 {
+                    match shm_handle.as_memory_mapping() {
+                        Ok(mapper) => {
+                            match mapper.mmap(
+                                0,
+                                shm_size_usize,
+                                permissions::READ,
+                                mmap_flags::SHARED,
+                                0,
+                            ) {
+                                Ok(addr) => {
+                                    // println!("[ClientThread {}]   Handle mapped at 0x{:x}", client_id, addr);
+                                    Some(addr)
+                                }
+                                Err(e) => {
+                                    println!(
+                                        "[ClientThread {}] Failed to map handle: {:?}",
+                                        client_id, e
+                                    );
+                                    None
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            println!(
+                                "[ClientThread {}] Handle doesn't support memory_mapping: {:?}",
+                                client_id, e
+                            );
+                            None
+                        }
+                    }
+                } else {
+                    None
+                };
+
+                match result {
+                    Some(shm_mapped_addr) => {
+                        // For zero-copy mode, we only need the mapped address
+                        // The compositor will use it directly without needing SharedMemory ownership
+                        push_ipc_event(IpcEvent::ExtensionAttachBuffer {
+                            external_client_id,
+                            window_id,
+                            width,
+                            height,
+                            offset,
+                            stride,
+                            format,
+                            shm: None, // No SharedMemory wrapper - using mapped address directly
+                            shm_mapped_addr: Some(shm_mapped_addr),
+                            shm_size: shm_size_usize,
+                        });
+                    }
+                    None => {
+                        push_ipc_event(IpcEvent::ExtensionAttachBuffer {
+                            external_client_id,
+                            window_id,
+                            width,
+                            height,
+                            offset,
+                            stride,
+                            format,
+                            shm: None,
+                            shm_mapped_addr: None,
+                            shm_size: 0,
+                        });
+                    }
+                }
+                // println!("[ClientThread {}] === EXTENSION_ATTACH_BUFFER COMPLETE ===", client_id);
             }
             Ok(ClientMessageRef::SetWindowHasAlphaContent {
                 window_id,
@@ -1421,6 +1870,50 @@ pub enum IpcEvent {
     SetWindowOpacity {
         window_id: u32,
         opacity: u8,
+    },
+
+    // Extension API events
+    /// Extension registered
+    ExtensionRegistered {
+        client_id: usize,
+        extension_id: u32,
+        extension_name: std::string::String,
+    },
+
+    /// Extension created a window for external client
+    ExtensionCreateWindow {
+        extension_id: u32,
+        external_client_id: u32,
+        window_id: u32,
+        width: u32,
+        height: u32,
+        shm: Option<SharedMemory>,
+        shm_mapped_addr: Option<usize>,
+        shm_size: usize,
+    },
+
+    /// Extension updated buffer for external client
+    ExtensionUpdateBuffer {
+        external_client_id: u32,
+        window_id: u32,
+        damage_x: i32,
+        damage_y: i32,
+        damage_width: u32,
+        damage_height: u32,
+    },
+
+    /// Extension attached a shared-memory buffer for external client
+    ExtensionAttachBuffer {
+        external_client_id: u32,
+        window_id: u32,
+        width: u32,
+        height: u32,
+        offset: i32,
+        stride: i32,
+        format: u32,
+        shm: Option<SharedMemory>,
+        shm_mapped_addr: Option<usize>,
+        shm_size: usize,
     },
 
     /// Set whether window content contains alpha channel

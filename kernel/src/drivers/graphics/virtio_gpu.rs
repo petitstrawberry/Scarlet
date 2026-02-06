@@ -712,7 +712,16 @@ impl MemoryMappingOps for VirtioGpuDevice {
     }
 }
 
-impl Selectable for VirtioGpuDevice {} // Use default Selectable implementation
+impl Selectable for VirtioGpuDevice {
+    fn wait_until_ready(
+        &self,
+        _interest: crate::object::capability::selectable::ReadyInterest,
+        _trapframe: &mut crate::arch::Trapframe,
+        _timeout_ticks: Option<u64>,
+    ) -> crate::object::capability::selectable::SelectWaitOutcome {
+        crate::object::capability::selectable::SelectWaitOutcome::Ready
+    }
+}
 
 impl GraphicsDevice for VirtioGpuDevice {
     fn get_display_name(&self) -> &'static str {
@@ -1265,7 +1274,7 @@ mod tests {
                     let color = if (x / 10 + y / 10) % 2 == 0 {
                         0xFFFF0000 // Blue squares
                     } else {
-                        0xFF00FF00 // Green squares  
+                        0xFF00FF00 // Green squares
                     };
                     *fb_ptr.add(pixel_index) = color;
                 }

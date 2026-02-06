@@ -222,6 +222,14 @@ pub trait NetworkDevice: Device {
     fn get_stats(&self) -> NetworkStats;
 }
 
+/// Ethernet-capable network device.
+///
+/// This is the concrete link-layer device type used by the IPv4/ARP stack.
+pub trait EthernetDevice: NetworkDevice {
+    /// Get the Ethernet MAC address for this device.
+    fn mac_address(&self) -> Result<MacAddress, &'static str>;
+}
+
 /// Network device statistics
 #[derive(Debug, Clone, Default)]
 pub struct NetworkStats {
@@ -333,7 +341,16 @@ impl MemoryMappingOps for GenericNetworkDevice {
     }
 }
 
-impl Selectable for GenericNetworkDevice {}
+impl Selectable for GenericNetworkDevice {
+    fn wait_until_ready(
+        &self,
+        _interest: crate::object::capability::selectable::ReadyInterest,
+        _trapframe: &mut crate::arch::Trapframe,
+        _timeout_ticks: Option<u64>,
+    ) -> crate::object::capability::selectable::SelectWaitOutcome {
+        crate::object::capability::selectable::SelectWaitOutcome::Ready
+    }
+}
 
 impl NetworkDevice for GenericNetworkDevice {
     fn get_interface_name(&self) -> &'static str {
@@ -420,6 +437,12 @@ impl NetworkDevice for GenericNetworkDevice {
 
     fn get_stats(&self) -> NetworkStats {
         self.stats.lock().clone()
+    }
+}
+
+impl EthernetDevice for GenericNetworkDevice {
+    fn mac_address(&self) -> Result<MacAddress, &'static str> {
+        self.get_mac_address()
     }
 }
 

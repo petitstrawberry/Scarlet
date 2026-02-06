@@ -175,9 +175,12 @@ fn input_thread_main(screen_width: u32, screen_height: u32) {
         }
     };
 
+    let mut idle_backoff_ms = 1u64;
+
     loop {
         match input_manager.read_event() {
             Ok(Some(event)) => {
+                idle_backoff_ms = 1;
                 // Convert raw event to compositor event
                 match event.type_ {
                     event_types::EV_REL => match event.code {
@@ -231,7 +234,9 @@ fn input_thread_main(screen_width: u32, screen_height: u32) {
                 }
             }
             Ok(None) => {
-                // No event, continue
+                // No event, back off to avoid a tight busy loop
+                thread::sleep(core::time::Duration::from_millis(idle_backoff_ms));
+                idle_backoff_ms = (idle_backoff_ms * 2).min(8);
             }
             Err(e) => {
                 println!("[InputThread] Error reading event: {}", e);

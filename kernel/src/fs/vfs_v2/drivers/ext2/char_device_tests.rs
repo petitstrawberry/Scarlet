@@ -53,7 +53,16 @@ mod tests {
         }
     }
 
-    impl Selectable for MockCharDevice {} // Use default Selectable implementation
+    impl Selectable for MockCharDevice {
+        fn wait_until_ready(
+            &self,
+            _interest: crate::object::capability::selectable::ReadyInterest,
+            _trapframe: &mut crate::arch::Trapframe,
+            _timeout_ticks: Option<u64>,
+        ) -> crate::object::capability::selectable::SelectWaitOutcome {
+            crate::object::capability::selectable::SelectWaitOutcome::Ready
+        }
+    }
 
     impl CharDevice for MockCharDevice {
         fn read_byte(&self) -> Option<u8> {

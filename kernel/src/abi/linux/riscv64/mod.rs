@@ -401,6 +401,8 @@ impl AbiModule for LinuxRiscv64Abi {
         let is_thread = ts.pending_clone_is_thread;
 
         // Initialize child's TGID based on whether this was a thread (CLONE_THREAD) or a process clone.
+        // Note: For non-thread (process) clones, TGID will be set to the child's ID later in set_id()
+        // when the task is added to the scheduler. We set it to 0 here as a placeholder.
         ts.tgid = if is_thread {
             if parent_tgid != 0 {
                 parent_tgid
@@ -408,7 +410,7 @@ impl AbiModule for LinuxRiscv64Abi {
                 _parent_task.get_id()
             }
         } else {
-            _child_task.get_id()
+            0 // Will be set to child's ID in Task::set_id() when added to scheduler
         };
 
         // Clear transient flag in the child copy
@@ -833,6 +835,22 @@ impl AbiModule for LinuxRiscv64Abi {
             }
         }
 
+        // Setup tmp directory
+        match create_dir_if_not_exists(target_vfs, "/tmp") {
+            Ok(()) => {}
+            Err(_e) => {
+                crate::println!("Failed to create /tmp directory for Linux: {}", _e.message);
+                return Err("Failed to create /tmp directory for Linux");
+            }
+        }
+        match target_vfs.bind_mount_from(base_vfs, "/tmp", "/tmp") {
+            Ok(()) => {}
+            Err(_e) => {
+                crate::println!("Failed to bind mount /tmp for Linux: {}", _e.message);
+                return Err("Failed to bind mount /tmp for Linux");
+            }
+        }
+
         // Setup gateway to native Scarlet environment (read-only for security)
         match create_dir_if_not_exists(target_vfs, "/scarlet") {
             Ok(()) => {}
@@ -877,15 +895,20 @@ syscall_table! {
         0
     },
     Getcwd = 17 => fs::sys_getcwd,
-    EpollCreate1 = 20 => fs::sys_epoll_create1,
+    Eventfd2 = 19 => fs::sys_eventfd2,
+    // EpollCreate1 = 20 => fs::sys_epoll_create1, // Already defined below
     EpollCtl = 21 => fs::sys_epoll_ctl,
     EpollPwait = 22 => fs::sys_epoll_pwait,
+    EpollCreate1 = 20 => fs::sys_epoll_create1,
+    Flock = 32 => fs::sys_flock,
     Dup = 23 => fs::sys_dup,
     Dup3 = 24 => fs::sys_dup3,
     Fcntl = 25 => fs::sys_fcntl,
     Ioctl = 29 => fs::sys_ioctl,
     MkdirAt = 34 => fs::sys_mkdirat,
     UnlinkAt = 35 => fs::sys_unlinkat,
+    Ftruncate = 46 => fs::sys_ftruncate,
+    Fallocate = 47 => fs::sys_fallocate,
     LinkAt = 37 => fs::sys_linkat,
     FaccessAt = 48 => fs::sys_faccessat,
     Chdir = 49 => fs::sys_chdir,
@@ -928,6 +951,7 @@ syscall_table! {
     GetPgid = 155 => proc::sys_getpgid,
     Uname = 160 => proc::sys_uname,
     Umask = 166 => fs::sys_umask,
+    Prctl = 167 => proc::sys_prctl,
     GetPid = 172 => proc::sys_getpid,
     GetPpid = 173 => proc::sys_getppid,
     GetUid = 174 => proc::sys_getuid,
@@ -935,6 +959,9 @@ syscall_table! {
     GetGid = 176 => proc::sys_getgid,
     GetEgid = 177 => proc::sys_getegid,
     GetTid = 178 => proc::sys_gettid,
+    Kill = 129 => signal::sys_tkill, // Alias sys_kill to sys_tkill
+    Tkill = 130 => signal::sys_tkill,
+    // Brk = 214 => proc::sys_brk, // Already defined above
     Brk = 214 => proc::sys_brk,
     Munmap = 215 => mm::sys_munmap,
     Clone = 220 => proc::sys_clone,
@@ -942,18 +969,29 @@ syscall_table! {
     Mmap = 222 => mm::sys_mmap,
     Mprotect = 226 => mm::sys_mprotect,
     EpollWait = 232 => fs::sys_epoll_wait,
+    Getrandom = 278 => fs::sys_getrandom,
+    MemfdCreate = 279 => proc::sys_memfd_create, // Linux memfd_create
     Wait4 = 260 => proc::sys_wait4,
     Prlimit64 = 261 => proc::sys_prlimit64,
     Socket = 198 => socket::sys_socket,
+    Socketpair = 199 => socket::sys_socketpair,
     Bind = 200 => socket::sys_bind,
     Listen = 201 => socket::sys_listen,
     Accept = 202 => socket::sys_accept,
     Connect = 203 => socket::sys_connect,
     GetSockname = 204 => socket::sys_getsockname,
+    GetPeerName = 205 => socket::sys_getpeername,
+    Sendto = 206 => socket::sys_sendto,
+    Recvfrom = 207 => socket::sys_recvfrom,
     SetSockopt = 208 => socket::sys_setsockopt,
     GetSockopt = 209 => socket::sys_getsockopt,
+    Shutdown = 210 => socket::sys_shutdown,
+    Sendmsg = 211 => socket::sys_sendmsg,
+    Recvmsg = 212 => socket::sys_recvmsg,
+    Statx = 291 => fs::sys_statx,
     RenameAt2 = 276 => fs::sys_renameat2,
     Membarrier = 283 => proc::sys_membarrier,
+    FaccessAt2 = 439 => fs::sys_faccessat2,
 }
 
 fn create_dir_if_not_exists(vfs: &Arc<VfsManager>, path: &str) -> Result<(), FileSystemError> {

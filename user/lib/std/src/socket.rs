@@ -24,9 +24,14 @@
 
 use crate::handle::Handle;
 use crate::handle::RawHandle;
-use crate::syscall::{Syscall, syscall0, syscall1, syscall3};
+use crate::syscall::{Syscall, syscall1, syscall3};
 
 pub use crate::handle::capability::ShutdownHow;
+pub use crate::handle::capability::socket::Inet4SocketAddress;
+pub use crate::handle::capability::socket::SocketAddress;
+pub use crate::handle::capability::socket::SocketDomain;
+pub use crate::handle::capability::socket::SocketProtocol;
+pub use crate::handle::capability::socket::SocketType;
 
 /// Socket handle wrapper
 ///
@@ -46,6 +51,8 @@ pub enum SocketError {
     InvalidHandle,
     /// Invalid path
     InvalidPath,
+    /// Invalid address
+    InvalidAddress,
     /// Already bound or connected
     AlreadyBound,
     /// Not listening
@@ -71,7 +78,46 @@ impl Socket {
     /// let socket = Socket::new().unwrap();
     /// ```
     pub fn new() -> Result<Self> {
-        let raw_handle = syscall0(Syscall::SocketCreate);
+        Self::new_with_domain(
+            SocketDomain::Local,
+            SocketType::Stream,
+            SocketProtocol::Default,
+        )
+    }
+
+    /// Create a new socket with specified domain, type, and protocol
+    ///
+    /// # Arguments
+    ///
+    /// * `domain` - Socket domain (e.g., Local, Inet)
+    /// * `socket_type` - Socket type (e.g., Stream, Datagram)
+    /// * `protocol` - Socket protocol (e.g., Default, Tcp, Udp)
+    ///
+    /// # Returns
+    ///
+    /// A new unconnected socket with the specified configuration, or an error if creation fails.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use std::socket::{Socket, SocketDomain, SocketType, SocketProtocol};
+    /// let socket = Socket::new_with_domain(
+    ///     SocketDomain::Inet4,
+    ///     SocketType::Stream,
+    ///     SocketProtocol::Tcp
+    /// ).unwrap();
+    /// ```
+    pub fn new_with_domain(
+        domain: SocketDomain,
+        socket_type: SocketType,
+        protocol: SocketProtocol,
+    ) -> Result<Self> {
+        let raw_handle = syscall3(
+            Syscall::SocketCreate,
+            domain as usize,
+            socket_type as usize,
+            protocol as usize,
+        );
         if raw_handle == usize::MAX {
             return Err(SocketError::SyscallFailed);
         }
@@ -79,6 +125,59 @@ impl Socket {
         let handle = unsafe { Handle::from_raw(raw_handle as i32) }
             .map_err(|_| SocketError::SyscallFailed)?;
         Ok(Socket { handle })
+    }
+
+    /// Bind socket to an IPv4 address
+    ///
+    /// # Arguments
+    ///
+    /// * `addr` - IPv4 socket address to bind to
+    ///
+    /// # Returns
+    ///
+    /// Ok on success, or an error if the socket is already bound or the address is invalid.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use std::socket::{Socket, Inet4SocketAddress};
+    /// let socket = Socket::new().unwrap();
+    /// let addr = Inet4SocketAddress::new([0, 0, 0, 0], 8080);
+    /// socket.bind_inet(addr).unwrap();
+    /// ```
+    pub fn bind_inet(&self, addr: Inet4SocketAddress) -> Result<()> {
+        let sock = self
+            .handle
+            .as_socket()
+            .map_err(|_| SocketError::InvalidHandle)?;
+        sock.bind_inet(&addr).map_err(|_| SocketError::AlreadyBound)
+    }
+
+    /// Connect socket to an IPv4 address
+    ///
+    /// # Arguments
+    ///
+    /// * `addr` - IPv4 socket address to connect to
+    ///
+    /// # Returns
+    ///
+    /// Ok on success, or an error if connection fails.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use std::socket::{Socket, Inet4SocketAddress};
+    /// let socket = Socket::new().unwrap();
+    /// let addr = Inet4SocketAddress::new([10, 0, 2, 15], 8080);
+    /// socket.connect_inet(addr).unwrap();
+    /// ```
+    pub fn connect_inet(&self, addr: Inet4SocketAddress) -> Result<()> {
+        let sock = self
+            .handle
+            .as_socket()
+            .map_err(|_| SocketError::InvalidHandle)?;
+        sock.connect_inet(&addr)
+            .map_err(|_| SocketError::ConnectionRefused)
     }
 
     /// Create a `Socket` from an existing [`Handle`].
@@ -133,6 +232,50 @@ impl Socket {
             .map_err(|_| SocketError::InvalidHandle)?;
         let raw = sock.recv_handle().map_err(|_| SocketError::WouldBlock)?;
         unsafe { Handle::from_raw(raw) }.map_err(|_| SocketError::SyscallFailed)
+    }
+
+    /// Send a kernel object handle and data atomically through this connected socket.
+    ///
+    /// This method ensures that both the handle and data are available before
+    /// waking the peer, preventing race conditions in protocols like Wayland.
+    ///
+    /// # Arguments
+    ///
+    /// * `object` - The kernel object handle to send
+    /// * `data` - The data to send with the handle
+    pub fn send_handle_and_data(&self, object: &Handle, data: &[u8]) -> Result<()> {
+        let sock = self
+            .handle
+            .as_socket()
+            .map_err(|_| SocketError::InvalidHandle)?;
+        sock.send_handle_and_data(object.as_raw(), data)
+            .map_err(|_| SocketError::SyscallFailed)
+    }
+
+    /// Receive a kernel object handle and data atomically through this connected socket.
+    ///
+    /// Returns both a handle and data in a single atomic operation.
+    ///
+    /// # Arguments
+    ///
+    /// * `data_out` - Buffer to store the received data
+    ///
+    /// # Returns
+    ///
+    /// * `(Handle, usize)` - The received handle and number of bytes on success
+    /// * `SocketError` - Error on failure
+    pub fn recv_handle_and_data(&self, data_out: &mut [u8]) -> Result<(Handle, usize)> {
+        let sock = self
+            .handle
+            .as_socket()
+            .map_err(|_| SocketError::InvalidHandle)?;
+        let mut raw_handle = 0;
+        let bytes_read = sock
+            .recv_handle_and_data(&mut raw_handle, data_out)
+            .map_err(|_| SocketError::WouldBlock)?;
+        let handle =
+            unsafe { Handle::from_raw(raw_handle) }.map_err(|_| SocketError::SyscallFailed)?;
+        Ok((handle, bytes_read))
     }
 
     /// Bind socket to a path
@@ -323,7 +466,7 @@ impl Socket {
     /// socket.set_nonblocking(true).unwrap();
     /// ```
     pub fn set_nonblocking(&self, enabled: bool) -> Result<()> {
-        const SOCKET_CMD_SET_NONBLOCKING: u32 = 1;
+        const SOCKET_CMD_SET_NONBLOCKING: u32 = 0x5353_0007;
         let result = syscall3(
             Syscall::HandleControl,
             self.handle.as_raw() as usize,
@@ -350,7 +493,7 @@ impl Socket {
     /// assert!(socket.is_nonblocking().unwrap());
     /// ```
     pub fn is_nonblocking(&self) -> Result<bool> {
-        const SOCKET_CMD_GET_NONBLOCKING: u32 = 2;
+        const SOCKET_CMD_GET_NONBLOCKING: u32 = 0x5353_000B;
         let result = syscall3(
             Syscall::HandleControl,
             self.handle.as_raw() as usize,
@@ -396,6 +539,102 @@ impl crate::io::Read for Socket {
                 _ => crate::io::Error::new(crate::io::ErrorKind::Other, "Failed to read"),
             }
         })
+    }
+}
+
+/// Datagram operations trait for UDP and Local datagram sockets
+///
+/// This trait provides operations for connectionless datagram sockets,
+/// allowing send/receive with explicit addresses.
+pub trait DatagramOps {
+    /// Receive a datagram with sender address
+    ///
+    /// # Arguments
+    /// * `buf` - Buffer to store received data
+    ///
+    /// # Returns
+    /// * `(usize, SocketAddress)` - Number of bytes received and sender address
+    fn recvfrom(&self, buf: &mut [u8]) -> Result<(usize, SocketAddress)>;
+
+    /// Send a datagram to specified address
+    ///
+    /// # Arguments
+    /// * `buf` - Data to send
+    /// * `addr` - Destination address
+    ///
+    /// # Returns
+    /// * `usize` - Number of bytes sent
+    fn sendto(&self, buf: &[u8], addr: &SocketAddress) -> Result<usize>;
+}
+
+impl DatagramOps for Socket {
+    fn recvfrom(&self, buf: &mut [u8]) -> Result<(usize, SocketAddress)> {
+        use crate::syscall::{Syscall, syscall4};
+
+        // Allocate space for address (8 bytes: 2 for family, 4 for IP, 2 for port)
+        let mut addr_buf = [0u8; 8];
+
+        let result = syscall4(
+            Syscall::SocketRecvFrom,
+            self.handle.as_raw() as usize,
+            buf.as_mut_ptr() as usize,
+            buf.len(),
+            addr_buf.as_mut_ptr() as usize,
+        );
+
+        // Handle negative errno values first
+        if result > (isize::MAX as usize) {
+            let errno = -(result as isize) as i32;
+            if errno == 11 {
+                return Err(SocketError::WouldBlock);
+            }
+            return Err(SocketError::SyscallFailed);
+        }
+
+        if result == usize::MAX {
+            return Err(SocketError::SyscallFailed);
+        }
+
+        // Success - parse address
+        let addr = match addr_buf[0] {
+            2 => {
+                // AF_INET
+                let ip = [addr_buf[2], addr_buf[3], addr_buf[4], addr_buf[5]];
+                let port = u16::from_be_bytes([addr_buf[6], addr_buf[7]]);
+                SocketAddress::Inet(Inet4SocketAddress::new(ip, port))
+            }
+            _ => return Err(SocketError::InvalidAddress),
+        };
+        Ok((result, addr))
+    }
+
+    fn sendto(&self, buf: &[u8], addr: &SocketAddress) -> Result<usize> {
+        use crate::syscall::{Syscall, syscall4};
+
+        // Serialize address
+        let mut addr_buf = [0u8; 8];
+        match addr {
+            SocketAddress::Inet(inet) => {
+                addr_buf[0] = 2; // AF_INET
+                addr_buf[2..6].copy_from_slice(&inet.addr);
+                addr_buf[6..8].copy_from_slice(&inet.port.to_be_bytes());
+            }
+            _ => return Err(SocketError::InvalidAddress),
+        }
+
+        let result = syscall4(
+            Syscall::SocketSendTo,
+            self.handle.as_raw() as usize,
+            buf.as_ptr() as usize,
+            buf.len(),
+            addr_buf.as_ptr() as usize,
+        );
+
+        if result == usize::MAX {
+            return Err(SocketError::SyscallFailed);
+        }
+
+        Ok(result)
     }
 }
 

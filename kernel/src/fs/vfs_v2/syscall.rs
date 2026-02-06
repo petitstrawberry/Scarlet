@@ -554,9 +554,6 @@ fn pivot_root_in_place(
     new_root_path: &str,
     old_root_path: &str,
 ) -> Result<(), crate::fs::FileSystemError> {
-    // Use bind mount to mount the new root as "/" in the new mount tree
-    let temp_vfs = VfsManager::new();
-    temp_vfs.bind_mount_from(&vfs, new_root_path, "/")?;
     let old_root_path = if old_root_path == new_root_path {
         return Err(crate::fs::FileSystemError {
             kind: crate::fs::FileSystemErrorKind::InvalidPath,
@@ -568,37 +565,42 @@ fn pivot_root_in_place(
         old_root_path
     };
 
-    let temp_root_entry = vfs.mount_tree.resolve_path(new_root_path)?.0;
-    let temp_root = temp_root_entry.node();
-    let fs = match temp_root.filesystem() {
-        Some(fs) => match fs.upgrade() {
-            Some(fs) => fs,
-            None => {
-                return Err(crate::fs::FileSystemError {
-                    kind: crate::fs::FileSystemErrorKind::InvalidPath,
-                    message: "New root path does not have a valid filesystem".to_string(),
-                });
-            }
-        },
+    let (new_root_entry, parent_mount) = vfs.mount_tree.resolve_mount_point(new_root_path)?;
+    let new_root_mount = match parent_mount.get_child(&new_root_entry) {
+        Some(child) => child,
         None => {
             return Err(crate::fs::FileSystemError {
                 kind: crate::fs::FileSystemErrorKind::InvalidPath,
-                message: "New root path does not have a filesystem".to_string(),
+                message: "New root path is not a mount point".to_string(),
             });
         }
     };
-    // Mount the new root filesystem at "/"
-    match temp_vfs.mount(fs, "/", 0) {
-        Ok(_) => {}
-        Err(e) => {
-            crate::println!("Failed to mount new root filesystem: {}", e.message);
-            return Err(e);
-        }
+
+    let old_root_mount = vfs.mount_tree.root_mount.read().clone();
+    let old_root_entry = old_root_mount.root.clone();
+
+    let detached =
+        parent_mount
+            .remove_child(&new_root_entry)
+            .ok_or_else(|| crate::fs::FileSystemError {
+                kind: crate::fs::FileSystemErrorKind::NotFound,
+                message: "New root mount point not found in parent".to_string(),
+            })?;
+    let new_root_mount = detached;
+
+    unsafe {
+        let mut_ptr =
+            Arc::as_ptr(&new_root_mount) as *mut crate::fs::vfs_v2::mount_tree::MountPoint;
+        (*mut_ptr).parent = None;
+        (*mut_ptr).parent_entry = None;
+        (*mut_ptr).path = "/".to_string();
     }
 
+    vfs.mount_tree.replace_root(new_root_mount);
+
     // Create old_root directory if it doesn't exist
-    if temp_vfs.resolve_path(old_root_path).is_err() {
-        match temp_vfs.create_dir(old_root_path) {
+    if vfs.resolve_path(old_root_path).is_err() {
+        match vfs.create_dir(old_root_path) {
             Ok(_) => {}
             Err(e) if e.kind == crate::fs::FileSystemErrorKind::AlreadyExists => {
                 // Directory already exists, which is fine
@@ -607,24 +609,12 @@ fn pivot_root_in_place(
         }
     }
 
-    match temp_vfs.bind_mount_from(&vfs, "/", old_root_path) {
+    match vfs.bind_mount_from_entry(old_root_entry, old_root_mount, old_root_path) {
         Ok(_) => {}
         Err(e) => {
             crate::println!("Failed to bind mount old root path: {}", e.message);
             return Err(e);
         }
-    }
-
-    {
-        let mut original_guard = temp_vfs.mount_tree.root_mount.write();
-        let mut temp_guard = vfs.mount_tree.root_mount.write();
-        core::mem::swap(&mut *original_guard, &mut *temp_guard);
-    }
-
-    {
-        let mut vfs_fs = vfs.mounted_filesystems.write();
-        let temp_fs = temp_vfs.mounted_filesystems.read();
-        *vfs_fs = temp_fs.clone();
     }
 
     Ok(())

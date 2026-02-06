@@ -42,7 +42,7 @@ macro_rules! syscall_table {
                     }
                 )*
                 _ => {
-                    crate::println!("Syscall number: {}", syscall_number);
+                    crate::println!("Invalid Syscall number: {}", syscall_number);
                     Err("Invalid syscall number")
                 }
             }

@@ -45,7 +45,9 @@ use core::any::Any;
 use spin::RwLock;
 
 use crate::driver_initcall;
-use crate::fs::vfs_v2::core::{DirectoryEntryInternal, FileSystemOperations, VfsEntry, VfsNode};
+use crate::fs::vfs_v2::core::{
+    DirectoryEntryInternal, FileSystemId, FileSystemOperations, VfsEntry, VfsNode,
+};
 use crate::fs::vfs_v2::mount_tree::MountPoint;
 use crate::fs::{
     FileMetadata, FileObject, FileSystemDriver, FileSystemError, FileSystemErrorKind, FileType,
@@ -75,6 +77,8 @@ use crate::vm::vmem::MemoryArea;
 /// before modification.
 #[derive(Clone)]
 pub struct OverlayFS {
+    /// Unique filesystem identifier
+    fs_id: FileSystemId,
     /// Upper layer for write operations (may be None for read-only overlay)
     upper: Option<(Arc<MountPoint>, Arc<VfsEntry>)>,
     /// Lower layers (in priority order, highest priority first)
@@ -216,6 +220,7 @@ impl OverlayFS {
     ) -> Result<Arc<Self>, FileSystemError> {
         let root_node = OverlayNode::new("/".to_string(), "/".to_string(), FileType::Directory, 1);
         let overlay = Arc::new(Self {
+            fs_id: FileSystemId::new(),
             upper,
             lower_layers,
             name,
@@ -733,6 +738,10 @@ impl OverlayFS {
 }
 
 impl FileSystemOperations for OverlayFS {
+    fn fs_id(&self) -> FileSystemId {
+        self.fs_id
+    }
+
     fn lookup(
         &self,
         parent_node: &Arc<dyn VfsNode>,
@@ -1425,7 +1434,16 @@ impl FileObject for OverlayDirectoryObject {
     }
 }
 
-impl crate::object::capability::selectable::Selectable for OverlayDirectoryObject {}
+impl crate::object::capability::selectable::Selectable for OverlayDirectoryObject {
+    fn wait_until_ready(
+        &self,
+        _interest: crate::object::capability::selectable::ReadyInterest,
+        _trapframe: &mut crate::arch::Trapframe,
+        _timeout_ticks: Option<u64>,
+    ) -> crate::object::capability::selectable::SelectWaitOutcome {
+        crate::object::capability::selectable::SelectWaitOutcome::Ready
+    }
+}
 
 /// Driver for creating OverlayFS instances
 ///

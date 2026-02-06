@@ -23,18 +23,25 @@
 //! Each network packet is handled through the VirtIO descriptor chain mechanism,
 //! with proper memory management for packet buffers.
 
-use alloc::{boxed::Box, vec, vec::Vec};
+use alloc::{boxed::Box, string::String, vec, vec::Vec};
 use spin::{Mutex, RwLock};
 
+use crate::device::events::InterruptCapableDevice;
 use crate::device::{Device, DeviceType};
+use crate::drivers::virtio::features::VIRTIO_F_ANY_LAYOUT;
 use crate::drivers::virtio::features::{VIRTIO_RING_F_EVENT_IDX, VIRTIO_RING_F_INDIRECT_DESC};
+use crate::interrupt::InterruptId;
+use crate::network::config::apply_pending_ip_for_interface;
+use crate::network::ethernet_interface::EthernetNetworkInterface;
+use crate::network::get_network_manager;
 use crate::object::capability::{MemoryMappingOps, Selectable};
 use crate::{
     device::network::{
-        DevicePacket, MacAddress, NetworkDevice, NetworkInterfaceConfig, NetworkStats,
+        DevicePacket, EthernetDevice, MacAddress, NetworkDevice, NetworkInterfaceConfig,
+        NetworkStats,
     },
     drivers::virtio::{
-        device::VirtioDevice,
+        device::{Register, VirtioDevice},
         queue::{DescriptorFlag, VirtQueue},
     },
     object::capability::ControlOps,
@@ -143,6 +150,8 @@ pub struct VirtioNetDevice {
     stats: Mutex<NetworkStats>,
     initialized: Mutex<bool>,
     rx_buffers: Mutex<Vec<Box<[u8]>>>,
+    interrupt_id: Mutex<Option<InterruptId>>,
+    interface_name: Mutex<Option<String>>,
 }
 
 impl VirtioNetDevice {
@@ -158,12 +167,14 @@ impl VirtioNetDevice {
     pub fn new(base_addr: usize) -> Self {
         let mut device = Self {
             base_addr,
-            virtqueues: Mutex::new([VirtQueue::new(8), VirtQueue::new(8)]), // RX and TX queues
+            virtqueues: Mutex::new([VirtQueue::new(32), VirtQueue::new(32)]), // RX and TX queues
             config: RwLock::new(None),
             features: RwLock::new(0),
             stats: Mutex::new(NetworkStats::default()),
             initialized: Mutex::new(false),
             rx_buffers: Mutex::new(Vec::new()),
+            interrupt_id: Mutex::new(None),
+            interface_name: Mutex::new(None),
         };
 
         // Initialize the VirtIO device first
@@ -187,6 +198,52 @@ impl VirtioNetDevice {
         }
 
         device
+    }
+
+    pub fn register_interface(self: &alloc::sync::Arc<Self>, name: &str) {
+        let manager = get_network_manager();
+        let interface = alloc::sync::Arc::new(EthernetNetworkInterface::new(name, self.clone()));
+
+        match manager.register_interface(name, interface.clone()) {
+            Ok(()) => {
+                *self.interface_name.lock() = Some(alloc::string::String::from(name));
+
+                // Register with EthernetLayer for multi-interface support
+                if let Some(eth_layer) =
+                    crate::network::protocol_stack::get_network_manager().get_layer("ethernet")
+                {
+                    if let Some(eth) = eth_layer
+                        .as_any()
+                        .downcast_ref::<crate::network::ethernet::EthernetLayer>()
+                    {
+                        if let Ok(mac) = self.get_mac_address() {
+                            eth.register_interface(name, mac, interface.clone());
+                            crate::early_println!(
+                                "[virtio-net] Registered {} with EthernetLayer (MAC: {:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X})",
+                                name,
+                                mac.as_bytes()[0],
+                                mac.as_bytes()[1],
+                                mac.as_bytes()[2],
+                                mac.as_bytes()[3],
+                                mac.as_bytes()[4],
+                                mac.as_bytes()[5]
+                            );
+                        }
+                    }
+                } else {
+                    crate::early_println!(
+                        "[virtio-net] Warning: EthernetLayer not initialized, {} not registered with protocol stack",
+                        name
+                    );
+                }
+
+                apply_pending_ip_for_interface(name);
+                crate::early_println!("[virtio-net] Registered interface {}", name);
+            }
+            Err(e) => {
+                crate::early_println!("[virtio-net] Failed to register interface {}: {}", name, e);
+            }
+        }
     }
 
     /// Read device configuration from the VirtIO config space
@@ -246,7 +303,7 @@ impl VirtioNetDevice {
         let rx_queue = &mut virtqueues[0]; // RX queue is index 0
 
         // Use standard single-buffer approach like Linux virtio-net
-        let buffer_count = 2; // Minimal number of buffers
+        let buffer_count = 16; // Provide extra RX headroom
 
         for _ in 0..buffer_count {
             let hdr_size = self.get_header_size(); // 10 bytes for VirtioNetHdrBasic
@@ -288,6 +345,10 @@ impl VirtioNetDevice {
         }
 
         // Notify device about available RX buffers
+        unsafe {
+            core::ptr::write_volatile(rx_queue.avail.flags, 0);
+            core::ptr::write_volatile(rx_queue.used.flags, 0);
+        }
         self.notify(0); // Notify RX queue
 
         Ok(())
@@ -298,6 +359,8 @@ impl VirtioNetDevice {
         // combine header and packet in single buffer like their send() function
         let hdr_size = mem::size_of::<VirtioNetHdrBasic>();
         let total_size = hdr_size + packet.len;
+
+        crate::early_println!("[virtio-net] TX: payload={} bytes", packet.len);
 
         // Create single buffer with header first, followed by packet data
         let mut combined_buffer = vec![0u8; total_size];
@@ -385,41 +448,52 @@ impl VirtioNetDevice {
         let mut virtqueues = self.virtqueues.lock();
         let rx_queue = &mut virtqueues[0]; // RX queue is index 0
 
+        let mut buffers_recycled = 0usize;
+
         // Process all completed RX descriptors
-        while let Some(desc_idx) = rx_queue.pop() {
-            // Get the buffer from the descriptor
+        while let Some((desc_idx, used_len)) = rx_queue.pop_used() {
             let buffer_addr = rx_queue.desc[desc_idx].addr as *mut u8;
             let buffer_len = rx_queue.desc[desc_idx].len as usize;
+            let used_len = core::cmp::min(used_len as usize, buffer_len);
 
-            // Read the received data
             unsafe {
-                // Skip the VirtIO network header (use appropriate size based on device features)
                 let hdr_size = self.get_header_size();
-                if buffer_len > hdr_size {
-                    let packet_data_ptr = buffer_addr.add(hdr_size);
-                    let packet_len = buffer_len - hdr_size;
+                if used_len > 0 {
+                    let frame_offset = if used_len >= hdr_size { hdr_size } else { 0 };
+                    let packet_data_ptr = buffer_addr.add(frame_offset);
+                    let packet_len = used_len.saturating_sub(frame_offset);
 
-                    // Create packet from received data
+                    crate::early_println!(
+                        "[virtio-net] RX: used_len={} payload={} bytes",
+                        used_len,
+                        packet_len
+                    );
+
                     let packet_data = core::slice::from_raw_parts(packet_data_ptr, packet_len);
                     let packet = DevicePacket::with_data(packet_data.to_vec());
                     packets.push(packet);
                 }
             }
 
-            // Recycle the buffer by putting it back in the RX queue
             rx_queue.desc[desc_idx].flags = DescriptorFlag::Write as u16;
             if let Err(_) = rx_queue.push(desc_idx) {
-                // If we can't recycle, free the descriptor
                 rx_queue.free_desc(desc_idx);
-                // Note: This may cause buffer leaks but prevents descriptor leaks
+            } else {
+                buffers_recycled += 1;
             }
         }
 
-        // Notify device about recycled buffers
-        if !packets.is_empty() {
+        // Always notify device if we recycled any buffers, so it knows RX buffers are available
+        if buffers_recycled > 0 {
+            unsafe {
+                core::ptr::write_volatile(rx_queue.avail.flags, 0);
+                core::ptr::write_volatile(rx_queue.used.flags, 0);
+            }
             self.notify(0); // Notify RX queue
+        }
 
-            // Update statistics
+        // Update statistics if we received packets
+        if !packets.is_empty() {
             let mut stats = self.stats.lock();
             stats.rx_packets += packets.len() as u64;
             stats.rx_bytes += packets.iter().map(|p| p.len as u64).sum::<u64>();
@@ -439,6 +513,28 @@ impl VirtioNetDevice {
             // Assume link is up if status feature is not supported
             true
         }
+    }
+
+    /// Enable interrupts for this device
+    pub fn enable_interrupts(&self, interrupt_id: InterruptId) -> Result<(), &'static str> {
+        *self.interrupt_id.lock() = Some(interrupt_id);
+
+        let isr = self.read32_register(Register::InterruptStatus);
+        if isr != 0 {
+            self.write32_register(Register::InterruptAck, isr & 0x03);
+        }
+
+        crate::interrupt::InterruptManager::with_manager(|mgr| {
+            mgr.enable_external_interrupt(interrupt_id, 0)
+        })
+        .map_err(|_| "Failed to enable interrupt in controller")?;
+
+        Ok(())
+    }
+
+    /// Set interface name for interrupt dispatch
+    pub fn set_interface_name(&self, name: &str) {
+        *self.interface_name.lock() = Some(String::from(name));
     }
 }
 
@@ -490,6 +586,57 @@ impl ControlOps for VirtioNetDevice {
     // VirtIO network devices don't support control operations by default
     fn control(&self, _command: u32, _arg: usize) -> Result<i32, &'static str> {
         Err("Control operations not supported")
+    }
+}
+
+impl InterruptCapableDevice for VirtioNetDevice {
+    fn handle_interrupt(&self) -> crate::interrupt::InterruptResult<()> {
+        let isr = self.read32_register(Register::InterruptStatus);
+        if isr == 0 {
+            return Ok(());
+        }
+        crate::early_println!("[virtio-net] Interrupt received, ISR=0x{:x}", isr);
+        self.write32_register(Register::InterruptAck, isr & 0x03);
+
+        loop {
+            let packets = self.process_received_packets().unwrap_or_default();
+            crate::early_println!("[virtio-net] Processed {} packets", packets.len());
+            if packets.is_empty() {
+                break;
+            }
+
+            let interface_name = self.interface_name.lock().clone();
+            crate::early_println!("[virtio-net] Interface name: {:?}", interface_name);
+            if let Some(name) = interface_name {
+                crate::early_println!(
+                    "[virtio-net] Forwarding {} packets to interface {}",
+                    packets.len(),
+                    name
+                );
+                let manager = crate::network::get_network_manager();
+                let mut inbound = 0usize;
+                for (i, packet) in packets.iter().enumerate() {
+                    crate::early_println!("[virtio-net] Packet {}: {} bytes", i, packet.len);
+                    if packet.len >= 14 {
+                        let eth_type = u16::from_be_bytes([packet.data[12], packet.data[13]]);
+                        crate::early_println!("[virtio-net]   EtherType: 0x{:04X}", eth_type);
+                        if eth_type == 0x0800 {
+                            inbound += 1;
+                        }
+                    }
+                    manager.handle_received_packet(&name, &packet);
+                }
+                crate::early_println!("[virtio-net] Forwarded IPv4 packets: {}", inbound);
+            } else {
+                crate::early_println!("[virtio-net] No interface name set!");
+            }
+        }
+
+        Ok(())
+    }
+
+    fn interrupt_id(&self) -> Option<InterruptId> {
+        self.interrupt_id.lock().clone()
     }
 }
 
@@ -545,11 +692,16 @@ impl VirtioDevice for VirtioNetDevice {
 
         // Use virtio-blk style: accept most features, exclude problematic ones
         // Start with all device features and exclude specific ones we don't want
-        let result = device_features
+        let mut result = device_features
             & (1 << VIRTIO_NET_F_STATUS
                 | 1 << VIRTIO_NET_F_MAC
-                | 1 << VIRTIO_RING_F_EVENT_IDX
-                | 1 << VIRTIO_RING_F_INDIRECT_DESC);
+                | 1 << VIRTIO_NET_F_MTU
+                | 1 << VIRTIO_F_ANY_LAYOUT);
+
+        if self.allow_ring_features() {
+            // TODO: Implement EVENT_IDX before negotiating it.
+            result |= device_features & (1 << VIRTIO_RING_F_INDIRECT_DESC);
+        }
 
         #[cfg(test)]
         {
@@ -588,7 +740,16 @@ impl VirtioDevice for VirtioNetDevice {
     }
 }
 
-impl Selectable for VirtioNetDevice {} // Use default Selectable implementation
+impl Selectable for VirtioNetDevice {
+    fn wait_until_ready(
+        &self,
+        _interest: crate::object::capability::selectable::ReadyInterest,
+        _trapframe: &mut crate::arch::Trapframe,
+        _timeout_ticks: Option<u64>,
+    ) -> crate::object::capability::selectable::SelectWaitOutcome {
+        crate::object::capability::selectable::SelectWaitOutcome::Ready
+    }
+}
 
 impl NetworkDevice for VirtioNetDevice {
     fn get_interface_name(&self) -> &'static str {
@@ -658,6 +819,12 @@ impl NetworkDevice for VirtioNetDevice {
 
     fn get_stats(&self) -> NetworkStats {
         self.stats.lock().clone()
+    }
+}
+
+impl EthernetDevice for VirtioNetDevice {
+    fn mac_address(&self) -> Result<MacAddress, &'static str> {
+        self.get_mac_address()
     }
 }
 
@@ -804,7 +971,7 @@ mod tests {
     fn test_virtio_net_multiple_devices() {
         // Test creating multiple devices (simulating net0, net1, net2)
         let device1 = VirtioNetDevice::new(0x10003000); // net0 - user netdev
-        let device2 = VirtioNetDevice::new(0x10004000); // net1 - hub netdev  
+        let device2 = VirtioNetDevice::new(0x10004000); // net1 - hub netdev
         let device3 = VirtioNetDevice::new(0x10005000); // net2 - hub netdev
 
         // Verify each device has unique base addresses
@@ -1078,7 +1245,7 @@ mod tests {
         // -netdev hubport,id=net2,hubid=0
 
         let device_net0 = VirtioNetDevice::new(0x10003000); // bus.2 -> user netdev
-        let device_net1 = VirtioNetDevice::new(0x10004000); // bus.3 -> hub netdev 
+        let device_net1 = VirtioNetDevice::new(0x10004000); // bus.3 -> hub netdev
         let device_net2 = VirtioNetDevice::new(0x10005000); // bus.4 -> hub netdev
 
         // Verify all devices are properly configured

@@ -208,8 +208,8 @@ where
         closure();
     }
 
-    // Exit the thread
-    crate::task::exit(0);
+    // Exit the thread (not the entire process)
+    crate::task::exit_thread(0);
 }
 
 /// Thread Local Storage key

@@ -42,6 +42,16 @@ pub mod client_msg {
     pub const RESTORE_WINDOW: u32 = 19;
     pub const SET_WINDOW_TYPE: u32 = 20;
     pub const SET_WINDOW_OPACITY: u32 = 21;
+
+    // Extension API messages (100+)
+    /// Register as an extension server (e.g., Wayland bridge)
+    pub const REGISTER_EXTENSION: u32 = 100;
+    /// Create a window on behalf of another client (extension-only)
+    pub const EXTENSION_CREATE_WINDOW: u32 = 101;
+    /// Update buffer on behalf of another client (extension-only)
+    pub const EXTENSION_UPDATE_BUFFER: u32 = 102;
+    /// Attach SHM buffer on behalf of another client (extension-only)
+    pub const EXTENSION_ATTACH_BUFFER: u32 = 103;
     pub const SET_WORKAREA: u32 = 22;
     pub const SET_WINDOW_RESIZABLE: u32 = 23;
     pub const GET_WINDOW_LIST: u32 = 24;
@@ -61,6 +71,12 @@ pub mod server_msg {
     pub const ERROR: u32 = 13;
     pub const WINDOW_RESIZED: u32 = 14;
     pub const WINDOW_CONFIGURE: u32 = 15;
+
+    // Extension API messages (100+)
+    /// Confirmation that extension registration succeeded
+    pub const EXTENSION_REGISTERED: u32 = 100;
+    /// Forward input event to extension (for extension clients)
+    pub const EXTENSION_INPUT_EVENT: u32 = 101;
     pub const SCREEN_SIZE: u32 = 16;
     pub const WINDOW_LIST: u32 = 17;
     pub const FOCUS_CHANGED: u32 = 18;
@@ -248,6 +264,41 @@ pub enum ClientMessageRef<'a> {
         opacity: u8,
     },
 
+    // Extension API messages (100+)
+    /// Register as an extension server
+    RegisterExtension {
+        extension_name: &'a [u8],
+    },
+
+    /// Create a window on behalf of an external client (extension-only)
+    ExtensionCreateWindow {
+        external_client_id: u32,
+        width: u32,
+        height: u32,
+    },
+
+    /// Update buffer on behalf of an external client (extension-only)
+    ExtensionUpdateBuffer {
+        external_client_id: u32,
+        window_id: u32,
+        x: i32,
+        y: i32,
+        width: u32,
+        height: u32,
+    },
+
+    /// Attach a shared-memory buffer on behalf of an external client (extension-only)
+    ExtensionAttachBuffer {
+        external_client_id: u32,
+        window_id: u32,
+        width: u32,
+        height: u32,
+        offset: i32,
+        stride: i32,
+        format: u32,
+        shm_size: u64,
+    },
+
     /// Set the workarea (usable screen area) for the window manager
     ///
     /// This is typically sent by the taskbar to inform the window manager
@@ -390,6 +441,22 @@ pub enum ServerMessage {
     },
     Error {
         code: u32,
+    },
+
+    // Extension API messages (100+)
+    /// Extension registration successful
+    ExtensionRegistered {
+        extension_id: u32,
+    },
+
+    /// Input event for extension-managed window
+    ExtensionInputEvent {
+        external_client_id: u32,
+        window_id: u32,
+        time: u64,
+        type_: u16,
+        code: u16,
+        value: i32,
     },
 }
 
@@ -666,6 +733,85 @@ pub fn parse_client_message<'a>(
             let window_id = u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
             let opacity = payload[4];
             Ok(ClientMessageRef::SetWindowOpacity { window_id, opacity })
+        }
+        client_msg::REGISTER_EXTENSION => {
+            if payload.len() < 4 {
+                return Err(ProtocolError::MalformedPayload);
+            }
+            let name_len =
+                u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]) as usize;
+            if payload.len() != 4 + name_len {
+                return Err(ProtocolError::MalformedPayload);
+            }
+            let extension_name = &payload[4..4 + name_len];
+            Ok(ClientMessageRef::RegisterExtension { extension_name })
+        }
+        client_msg::EXTENSION_CREATE_WINDOW => {
+            if payload.len() != 12 {
+                return Err(ProtocolError::MalformedPayload);
+            }
+            let external_client_id =
+                u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
+            let width = u32::from_le_bytes([payload[4], payload[5], payload[6], payload[7]]);
+            let height = u32::from_le_bytes([payload[8], payload[9], payload[10], payload[11]]);
+            Ok(ClientMessageRef::ExtensionCreateWindow {
+                external_client_id,
+                width,
+                height,
+            })
+        }
+        client_msg::EXTENSION_UPDATE_BUFFER => {
+            if payload.len() != 24 {
+                return Err(ProtocolError::MalformedPayload);
+            }
+            let external_client_id =
+                u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
+            let window_id = u32::from_le_bytes([payload[4], payload[5], payload[6], payload[7]]);
+            let x = i32::from_le_bytes([payload[8], payload[9], payload[10], payload[11]]);
+            let y = i32::from_le_bytes([payload[12], payload[13], payload[14], payload[15]]);
+            let width = u32::from_le_bytes([payload[16], payload[17], payload[18], payload[19]]);
+            let height = u32::from_le_bytes([payload[20], payload[21], payload[22], payload[23]]);
+            Ok(ClientMessageRef::ExtensionUpdateBuffer {
+                external_client_id,
+                window_id,
+                x,
+                y,
+                width,
+                height,
+            })
+        }
+        client_msg::EXTENSION_ATTACH_BUFFER => {
+            if payload.len() != 36 {
+                return Err(ProtocolError::MalformedPayload);
+            }
+            let external_client_id =
+                u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
+            let window_id = u32::from_le_bytes([payload[4], payload[5], payload[6], payload[7]]);
+            let width = u32::from_le_bytes([payload[8], payload[9], payload[10], payload[11]]);
+            let height = u32::from_le_bytes([payload[12], payload[13], payload[14], payload[15]]);
+            let offset = i32::from_le_bytes([payload[16], payload[17], payload[18], payload[19]]);
+            let stride = i32::from_le_bytes([payload[20], payload[21], payload[22], payload[23]]);
+            let format = u32::from_le_bytes([payload[24], payload[25], payload[26], payload[27]]);
+            let shm_size = u64::from_le_bytes([
+                payload[28],
+                payload[29],
+                payload[30],
+                payload[31],
+                payload[32],
+                payload[33],
+                payload[34],
+                payload[35],
+            ]);
+            Ok(ClientMessageRef::ExtensionAttachBuffer {
+                external_client_id,
+                window_id,
+                width,
+                height,
+                offset,
+                stride,
+                format,
+                shm_size,
+            })
         }
         client_msg::SET_WORKAREA => {
             if payload.len() != 16 {
@@ -1098,6 +1244,42 @@ pub fn parse_server_message(msg_type: u32, payload: &[u8]) -> Result<ServerMessa
             let code = u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
             Ok(ServerMessage::Error { code })
         }
+        server_msg::EXTENSION_REGISTERED => {
+            if payload.len() != 4 {
+                return Err(ProtocolError::MalformedPayload);
+            }
+            let extension_id = u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
+            Ok(ServerMessage::ExtensionRegistered { extension_id })
+        }
+        server_msg::EXTENSION_INPUT_EVENT => {
+            if payload.len() != 24 {
+                return Err(ProtocolError::MalformedPayload);
+            }
+            let external_client_id =
+                u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
+            let window_id = u32::from_le_bytes([payload[4], payload[5], payload[6], payload[7]]);
+            let time = u64::from_le_bytes([
+                payload[8],
+                payload[9],
+                payload[10],
+                payload[11],
+                payload[12],
+                payload[13],
+                payload[14],
+                payload[15],
+            ]);
+            let type_ = u16::from_le_bytes([payload[16], payload[17]]);
+            let code = u16::from_le_bytes([payload[18], payload[19]]);
+            let value = i32::from_le_bytes([payload[20], payload[21], payload[22], payload[23]]);
+            Ok(ServerMessage::ExtensionInputEvent {
+                external_client_id,
+                window_id,
+                time,
+                type_,
+                code,
+                value,
+            })
+        }
         server_msg::ACTIVE_APP => {
             // Payload: app_id_len (u32) + app_id (variable, max 128)
             //          + app_name_len (u32) + app_name (variable, max 128)
@@ -1322,6 +1504,29 @@ pub fn payload_update_buffer(window_id: u32, x: i32, y: i32, width: u32, height:
     payload
 }
 
+/// Build payload for extension->server `EXTENSION_ATTACH_BUFFER`.
+pub fn payload_extension_attach_buffer(
+    external_client_id: u32,
+    window_id: u32,
+    width: u32,
+    height: u32,
+    offset: i32,
+    stride: i32,
+    format: u32,
+    shm_size: u64,
+) -> [u8; 36] {
+    let mut payload = [0u8; 36];
+    payload[0..4].copy_from_slice(&external_client_id.to_le_bytes());
+    payload[4..8].copy_from_slice(&window_id.to_le_bytes());
+    payload[8..12].copy_from_slice(&width.to_le_bytes());
+    payload[12..16].copy_from_slice(&height.to_le_bytes());
+    payload[16..20].copy_from_slice(&offset.to_le_bytes());
+    payload[20..24].copy_from_slice(&stride.to_le_bytes());
+    payload[24..28].copy_from_slice(&format.to_le_bytes());
+    payload[28..36].copy_from_slice(&shm_size.to_le_bytes());
+    payload
+}
+
 /// Build payload for client->server `REQUEST_MOVE_WINDOW`.
 pub fn payload_request_move_window(window_id: u32) -> [u8; 4] {
     window_id.to_le_bytes()
@@ -1429,6 +1634,26 @@ pub fn payload_input_event(
     payload
 }
 
+/// Build payload for server->client `EXTENSION_INPUT_EVENT`.
+/// Payload format: external_client_id (4) + window_id (4) + time (8) + type (2) + code (2) + value (4) = 24 bytes
+pub fn payload_extension_input_event(
+    external_client_id: u32,
+    window_id: u32,
+    time: u64,
+    type_: u16,
+    code: u16,
+    value: i32,
+) -> [u8; 24] {
+    let mut payload = [0u8; 24];
+    payload[0..4].copy_from_slice(&external_client_id.to_le_bytes());
+    payload[4..8].copy_from_slice(&window_id.to_le_bytes());
+    payload[8..16].copy_from_slice(&time.to_le_bytes());
+    payload[16..18].copy_from_slice(&type_.to_le_bytes());
+    payload[18..20].copy_from_slice(&code.to_le_bytes());
+    payload[20..24].copy_from_slice(&value.to_le_bytes());
+    payload
+}
+
 /// Build payload for server->client `ERROR`.
 pub fn payload_error(code: u32) -> [u8; 4] {
     code.to_le_bytes()
@@ -1463,6 +1688,52 @@ pub fn payload_set_window_opacity(window_id: u32, opacity: u8) -> [u8; 5] {
     payload[0..4].copy_from_slice(&window_id.to_le_bytes());
     payload[4] = opacity;
     payload
+}
+
+/// Build payload for client->server `REGISTER_EXTENSION`.
+///
+/// Registers a client as an extension server (e.g., Wayland bridge).
+/// Extension servers can create windows on behalf of other clients.
+///
+/// Payload (variable):
+/// - extension_name_len: u32 (length of extension name)
+/// - extension_name: bytes (UTF-8 string)
+pub fn payload_register_extension(extension_name: &[u8]) -> Vec<u8> {
+    let mut out = Vec::new();
+    out.extend_from_slice(&(extension_name.len() as u32).to_le_bytes());
+    out.extend_from_slice(extension_name);
+    out
+}
+
+/// Build payload for client->server `EXTENSION_CREATE_WINDOW`.
+///
+/// Extension servers use this to create windows that will be associated
+/// with external clients (e.g., Wayland clients).
+///
+/// Payload (12 bytes):
+/// - external_client_id: u32 (identifier for the external client)
+/// - width: u32
+/// - height: u32
+pub fn payload_extension_create_window(
+    external_client_id: u32,
+    width: u32,
+    height: u32,
+) -> [u8; 12] {
+    let mut payload = [0u8; 12];
+    payload[0..4].copy_from_slice(&external_client_id.to_le_bytes());
+    payload[4..8].copy_from_slice(&width.to_le_bytes());
+    payload[8..12].copy_from_slice(&height.to_le_bytes());
+    payload
+}
+
+/// Build payload for server->client `EXTENSION_REGISTERED`.
+///
+/// Confirms successful extension registration.
+///
+/// Payload (4 bytes):
+/// - extension_id: u32 (assigned extension ID)
+pub fn payload_extension_registered(extension_id: u32) -> [u8; 4] {
+    extension_id.to_le_bytes()
 }
 
 /// Build payload for client->server `SET_WORKAREA`.

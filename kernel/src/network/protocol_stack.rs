@@ -300,13 +300,13 @@ impl SocketConfig {
 ///         Err(SocketError::NoRoute)
 ///     }
 ///
-///     fn receive(&self, packet: &[u8]) -> Result<(), SocketError> {
+///     fn receive(&self, packet: &[u8], context: Option<&LayerContext>) -> Result<(), SocketError> {
 ///         // Parse IP header
 ///         let (proto_num, payload) = parse_ip_header(packet)?;
 ///         
 ///         // Route to registered protocol handler
 ///         if let Some(handler) = self.protocols.read().get(&proto_num) {
-///             handler.receive(payload)
+///             handler.receive(payload, context)
 ///         } else {
 ///             Err(SocketError::ProtocolNotSupported)
 ///         }
@@ -334,7 +334,7 @@ impl SocketConfig {
 /// // Assign to task
 /// task.network_manager = Some(container_net);
 /// ```
-pub trait NetworkLayer: Send + Sync {
+pub trait NetworkLayer: Send + Sync + core::any::Any {
     /// Register a protocol handler for this layer
     ///
     /// Upper layer protocols register themselves with their protocol number.
@@ -418,6 +418,7 @@ pub trait NetworkLayer: Send + Sync {
     /// # Arguments
     ///
     /// * `packet` - Packet data received from lower layer
+    /// * `context` - Optional routing context from lower layer
     ///
     /// # Returns
     ///
@@ -430,7 +431,7 @@ pub trait NetworkLayer: Send + Sync {
     /// // IP layer receives packet, parses header, routes to TCP (proto=6)
     /// ip_layer.receive(&packet)?;
     /// ```
-    fn receive(&self, packet: &[u8]) -> Result<(), SocketError>;
+    fn receive(&self, packet: &[u8], context: Option<&LayerContext>) -> Result<(), SocketError>;
 
     /// Get layer name for debugging
     fn name(&self) -> &'static str;
@@ -439,6 +440,9 @@ pub trait NetworkLayer: Send + Sync {
     fn stats(&self) -> NetworkLayerStats {
         NetworkLayerStats::default()
     }
+
+    /// Cast to Any for safe downcasting
+    fn as_any(&self) -> &dyn core::any::Any;
 
     /// Configure this layer with socket-specific parameters
     ///
@@ -506,6 +510,10 @@ pub struct NetworkLayerStats {
     pub packets_dropped: u64,
     /// Protocol errors encountered
     pub protocol_errors: u64,
+    /// Bytes sent through this layer
+    pub bytes_sent: u64,
+    /// Bytes received by this layer
+    pub bytes_received: u64,
 }
 
 /// Protocol stack trait for network protocols
@@ -745,134 +753,21 @@ impl Default for ProtocolStackManager {
 /// 2. **Sending**: Upper layers pass lower layers as temporary parameters
 ///    - `send(packet, context, &[next_layer])` (no permanent storage)
 /// 3. **Sockets**: Hold references to all layers they need (temporary per-socket)
-pub struct NetworkManager {
-    /// Registered network layers by name
-    layers: RwLock<BTreeMap<String, Arc<dyn NetworkLayer>>>,
-}
-
-impl NetworkManager {
-    /// Create a new network manager
-    pub const fn new() -> Self {
-        Self {
-            layers: RwLock::new(BTreeMap::new()),
-        }
-    }
-
-    /// Register a network layer
-    ///
-    /// # Arguments
-    ///
-    /// * `name` - Unique name for this layer (e.g., "ethernet", "ip", "tcp")
-    /// * `layer` - The layer implementation to register
-    ///
-    /// # Example
-    ///
-    /// ```rust,ignore
-    /// let manager = NetworkManager::new();
-    /// manager.register_layer("tcp", Arc::new(TcpLayer::new()));
-    /// ```
-    pub fn register_layer(&self, name: &str, layer: Arc<dyn NetworkLayer>) {
-        self.layers.write().insert(name.to_string(), layer);
-    }
-
-    /// Get a registered network layer by name
-    ///
-    /// # Arguments
-    ///
-    /// * `name` - Name of the layer to retrieve
-    ///
-    /// # Returns
-    ///
-    /// The layer if registered, None otherwise
-    ///
-    /// # Example
-    ///
-    /// ```rust,ignore
-    /// if let Some(tcp_layer) = manager.get_layer("tcp") {
-    ///     // Use the shared TCP layer
-    /// }
-    /// ```
-    pub fn get_layer(&self, name: &str) -> Option<Arc<dyn NetworkLayer>> {
-        self.layers.read().get(name).cloned()
-    }
-
-    /// Remove a network layer
-    ///
-    /// # Arguments
-    ///
-    /// * `name` - Name of the layer to remove
-    ///
-    /// # Returns
-    ///
-    /// The removed layer if it existed, None otherwise
-    pub fn unregister_layer(&self, name: &str) -> Option<Arc<dyn NetworkLayer>> {
-        self.layers.write().remove(name)
-    }
-
-    /// List all registered layer names
-    ///
-    /// # Returns
-    ///
-    /// Vector of layer names currently registered
-    pub fn list_layers(&self) -> Vec<String> {
-        self.layers.read().keys().cloned().collect()
-    }
-
-    /// Check if a layer is registered
-    ///
-    /// # Arguments
-    ///
-    /// * `name` - Name of the layer to check
-    ///
-    /// # Returns
-    ///
-    /// true if the layer is registered, false otherwise
-    pub fn has_layer(&self, name: &str) -> bool {
-        self.layers.read().contains_key(name)
-    }
-
-    /// Get the number of registered layers
-    pub fn layer_count(&self) -> usize {
-        self.layers.read().len()
-    }
-}
-
-impl Default for NetworkManager {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-// Global network manager instance
-static GLOBAL_NETWORK_MANAGER: spin::Once<NetworkManager> = spin::Once::new();
-
-/// Get the global network manager
-///
-/// Returns a reference to the global NetworkManager singleton.
-/// The manager is initialized on first access.
-///
-/// # Example
-///
-/// ```rust,ignore
-/// let manager = get_network_manager();
-/// if let Some(tcp_layer) = manager.get_layer("tcp") {
-///     // Use TCP layer
-/// }
-/// ```
-pub fn get_network_manager() -> &'static NetworkManager {
-    GLOBAL_NETWORK_MANAGER.call_once(|| NetworkManager::new())
+pub fn get_network_manager() -> &'static crate::network::NetworkManager {
+    crate::network::get_network_manager()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::network::NetworkManager;
     use alloc::sync::Arc;
     use core::sync::atomic::{AtomicU64, Ordering};
 
     #[test_case]
     fn test_protocol_stack_manager_creation() {
         let manager = ProtocolStackManager::new();
-        assert!(manager.get_stack(SocketDomain::Inet).is_none());
+        assert!(manager.get_stack(SocketDomain::Inet4).is_none());
     }
 
     #[test_case]
@@ -906,11 +801,15 @@ mod tests {
             ) -> Result<(), SocketError> {
                 Ok(())
             }
-            fn receive(&self, _: &[u8]) -> Result<(), SocketError> {
+            fn receive(&self, _: &[u8], _: Option<&LayerContext>) -> Result<(), SocketError> {
                 Ok(())
             }
             fn name(&self) -> &'static str {
                 "simple"
+            }
+
+            fn as_any(&self) -> &dyn core::any::Any {
+                self
             }
         }
 
@@ -938,11 +837,15 @@ mod tests {
             ) -> Result<(), SocketError> {
                 Ok(())
             }
-            fn receive(&self, _: &[u8]) -> Result<(), SocketError> {
+            fn receive(&self, _: &[u8], _: Option<&LayerContext>) -> Result<(), SocketError> {
                 Ok(())
             }
             fn name(&self) -> &'static str {
                 self.0
+            }
+
+            fn as_any(&self) -> &dyn core::any::Any {
+                self
             }
         }
 
@@ -972,11 +875,15 @@ mod tests {
             ) -> Result<(), SocketError> {
                 Ok(())
             }
-            fn receive(&self, _: &[u8]) -> Result<(), SocketError> {
+            fn receive(&self, _: &[u8], _: Option<&LayerContext>) -> Result<(), SocketError> {
                 Ok(())
             }
             fn name(&self) -> &'static str {
                 "simple"
+            }
+
+            fn as_any(&self) -> &dyn core::any::Any {
+                self
             }
         }
 
@@ -1010,11 +917,15 @@ mod tests {
             ) -> Result<(), SocketError> {
                 Ok(())
             }
-            fn receive(&self, _: &[u8]) -> Result<(), SocketError> {
+            fn receive(&self, _: &[u8], _: Option<&LayerContext>) -> Result<(), SocketError> {
                 Ok(())
             }
             fn name(&self) -> &'static str {
                 "global_test"
+            }
+
+            fn as_any(&self) -> &dyn core::any::Any {
+                self
             }
         }
 
@@ -1165,7 +1076,11 @@ mod tests {
             Ok(())
         }
 
-        fn receive(&self, frame: &[u8]) -> Result<(), SocketError> {
+        fn receive(
+            &self,
+            frame: &[u8],
+            _context: Option<&LayerContext>,
+        ) -> Result<(), SocketError> {
             self.packets_received.fetch_add(1, Ordering::SeqCst);
 
             // Parse Ethernet header
@@ -1180,7 +1095,7 @@ mod tests {
 
             // Route to registered protocol handler based on EtherType
             if let Some(handler) = self.protocols.read().get(&ethertype) {
-                handler.receive(payload)
+                handler.receive(payload, None)
             } else {
                 // No handler for this EtherType, but frame is valid
                 Ok(())
@@ -1189,6 +1104,10 @@ mod tests {
 
         fn name(&self) -> &'static str {
             self.name
+        }
+
+        fn as_any(&self) -> &dyn core::any::Any {
+            self
         }
     }
 
@@ -1293,7 +1212,11 @@ mod tests {
             Err(SocketError::NoRoute)
         }
 
-        fn receive(&self, packet: &[u8]) -> Result<(), SocketError> {
+        fn receive(
+            &self,
+            packet: &[u8],
+            _context: Option<&LayerContext>,
+        ) -> Result<(), SocketError> {
             self.packets_received.fetch_add(1, Ordering::SeqCst);
 
             // Parse IP header
@@ -1307,7 +1230,7 @@ mod tests {
             // Route to registered protocol handler
             let protocols = self.protocols.read();
             if let Some(handler) = protocols.get(&(protocol as u16)) {
-                handler.receive(payload)
+                handler.receive(payload, None)
             } else {
                 Err(SocketError::ProtocolNotSupported)
             }
@@ -1315,6 +1238,10 @@ mod tests {
 
         fn name(&self) -> &'static str {
             self.name
+        }
+
+        fn as_any(&self) -> &dyn core::any::Any {
+            self
         }
     }
 
@@ -1419,7 +1346,11 @@ mod tests {
             }
         }
 
-        fn receive(&self, segment: &[u8]) -> Result<(), SocketError> {
+        fn receive(
+            &self,
+            segment: &[u8],
+            _context: Option<&LayerContext>,
+        ) -> Result<(), SocketError> {
             self.packets_received.fetch_add(1, Ordering::SeqCst);
 
             // Parse TCP header
@@ -1445,6 +1376,10 @@ mod tests {
 
         fn name(&self) -> &'static str {
             self.name
+        }
+
+        fn as_any(&self) -> &dyn core::any::Any {
+            self
         }
     }
 
@@ -1555,12 +1490,12 @@ mod tests {
         frame.extend_from_slice(payload); // Payload
 
         // Receive through Ethernet layer
-        let result = ethernet.receive(&frame);
+        let result = ethernet.receive(&frame, None);
         assert!(result.is_ok());
 
         // Extract IP packet and pass to IP layer
         let ip_packet = &frame[14..];
-        let result = ip.receive(ip_packet);
+        let result = ip.receive(ip_packet, None);
         assert!(result.is_ok());
 
         // Verify TCP received the payload
@@ -1808,7 +1743,11 @@ mod tests {
                 Ok(())
             }
 
-            fn receive(&self, _packet: &[u8]) -> Result<(), SocketError> {
+            fn receive(
+                &self,
+                _packet: &[u8],
+                _context: Option<&LayerContext>,
+            ) -> Result<(), SocketError> {
                 Ok(())
             }
 
@@ -1828,6 +1767,10 @@ mod tests {
                     layer.configure(config, &[])?;
                 }
                 Ok(())
+            }
+
+            fn as_any(&self) -> &dyn core::any::Any {
+                self
             }
         }
 
@@ -1890,10 +1833,10 @@ mod tests {
         frame.extend_from_slice(payload);
 
         // Receive through layers
-        assert!(ethernet.receive(&frame).is_ok());
+        assert!(ethernet.receive(&frame, None).is_ok());
 
         let ip_packet = &frame[14..];
-        assert!(ip.receive(ip_packet).is_ok());
+        assert!(ip.receive(ip_packet, None).is_ok());
 
         // Verify TCP received payload
         assert_eq!(tcp.packets_received.load(Ordering::SeqCst), 1);

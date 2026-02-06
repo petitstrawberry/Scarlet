@@ -722,7 +722,16 @@ impl Device for VirtioBlockDevice {
     }
 }
 
-impl Selectable for VirtioBlockDevice {}
+impl Selectable for VirtioBlockDevice {
+    fn wait_until_ready(
+        &self,
+        _interest: crate::object::capability::selectable::ReadyInterest,
+        _trapframe: &mut crate::arch::Trapframe,
+        _timeout_ticks: Option<u64>,
+    ) -> crate::object::capability::selectable::SelectWaitOutcome {
+        crate::object::capability::selectable::SelectWaitOutcome::Ready
+    }
+}
 
 impl VirtioDevice for VirtioBlockDevice {
     fn get_base_addr(&self) -> usize {
@@ -744,14 +753,18 @@ impl VirtioDevice for VirtioBlockDevice {
 
     fn get_supported_features(&self, device_features: u32) -> u32 {
         // Accept most features but we might want to be selective
-        device_features
+        let mut result = device_features
             & !(1 << VIRTIO_BLK_F_RO
                 | 1 << VIRTIO_BLK_F_SCSI
                 | 1 << VIRTIO_BLK_F_CONFIG_WCE
                 | 1 << VIRTIO_BLK_F_MQ
-                | 1 << VIRTIO_F_ANY_LAYOUT
-                | 1 << VIRTIO_RING_F_EVENT_IDX
-                | 1 << VIRTIO_RING_F_INDIRECT_DESC)
+                | 1 << VIRTIO_F_ANY_LAYOUT);
+
+        if !self.allow_ring_features() {
+            result &= !(1 << VIRTIO_RING_F_EVENT_IDX | 1 << VIRTIO_RING_F_INDIRECT_DESC);
+        }
+
+        result
     }
 
     fn get_queue_desc_addr(&self, queue_idx: usize) -> Option<u64> {

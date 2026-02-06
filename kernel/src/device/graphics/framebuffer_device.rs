@@ -513,7 +513,16 @@ impl MemoryMappingOps for FramebufferCharDevice {
     }
 }
 
-impl Selectable for FramebufferCharDevice {}
+impl Selectable for FramebufferCharDevice {
+    fn wait_until_ready(
+        &self,
+        _interest: crate::object::capability::selectable::ReadyInterest,
+        _trapframe: &mut crate::arch::Trapframe,
+        _timeout_ticks: Option<u64>,
+    ) -> crate::object::capability::selectable::SelectWaitOutcome {
+        crate::object::capability::selectable::SelectWaitOutcome::Ready
+    }
+}
 
 impl FramebufferCharDevice {
     /// Build a FbVarScreenInfo reflecting the current framebuffer configuration

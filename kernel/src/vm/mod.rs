@@ -154,7 +154,7 @@ pub fn user_vm_init(task: &mut Task) {
     task.vm_manager.set_asid(asid);
 
     /* User stack page */
-    let num_of_stack_page = 16; // 16 pages for user stack
+    let num_of_stack_page = 256; // 1MB user stack (4KB pages)
     let stack_start = USER_STACK_END - num_of_stack_page * PAGE_SIZE;
     task.allocate_stack_pages(stack_start, num_of_stack_page)
         .map_err(|e| panic!("Failed to allocate user stack pages: {}", e))
@@ -432,7 +432,7 @@ pub fn verify_task_kernel_stack_guard(task: &Task) -> bool {
 
 pub fn setup_user_stack(task: &mut Task) -> (usize, usize) {
     /* User stack page */
-    let num_of_stack_page = 16; // 4 pages for user stack
+    let num_of_stack_page = 256; // 1MB user stack (4KB pages)
     let stack_base = USER_STACK_END - num_of_stack_page * PAGE_SIZE;
     task.allocate_stack_pages(stack_base, num_of_stack_page)
         .map_err(|e| panic!("Failed to allocate user stack pages: {}", e))

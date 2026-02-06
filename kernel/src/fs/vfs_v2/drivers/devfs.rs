@@ -47,7 +47,7 @@ use crate::{
     object::capability::MemoryMappingOps,
 };
 
-use super::super::core::{DirectoryEntryInternal, FileSystemOperations, VfsNode};
+use super::super::core::{DirectoryEntryInternal, FileSystemId, FileSystemOperations, VfsNode};
 
 /// DevFS - Device filesystem implementation
 ///
@@ -55,6 +55,8 @@ use super::super::core::{DirectoryEntryInternal, FileSystemOperations, VfsNode};
 /// DeviceManager as device files. It provides a virtual view of the system's
 /// devices, similar to /dev in Unix-like systems.
 pub struct DevFS {
+    /// Unique filesystem identifier
+    fs_id: FileSystemId,
     /// Root directory node
     root: RwLock<Arc<DevNode>>,
     /// Filesystem name
@@ -66,6 +68,7 @@ impl DevFS {
     pub fn new() -> Arc<Self> {
         let root = Arc::new(DevNode::new_directory("/".to_string()));
         let fs = Arc::new(Self {
+            fs_id: FileSystemId::new(),
             root: RwLock::new(Arc::clone(&root)),
             name: "devfs".to_string(),
         });
@@ -129,6 +132,10 @@ impl DevFS {
 }
 
 impl FileSystemOperations for DevFS {
+    fn fs_id(&self) -> FileSystemId {
+        self.fs_id
+    }
+
     fn name(&self) -> &str {
         &self.name
     }
@@ -745,12 +752,8 @@ impl crate::object::capability::selectable::Selectable for DevFileObject {
                 .as_ref()
                 .wait_until_ready(interest, trapframe, timeout_ticks);
         }
-        crate::object::capability::selectable::Selectable::wait_until_ready(
-            self,
-            interest,
-            trapframe,
-            timeout_ticks,
-        )
+        let _ = (interest, trapframe, timeout_ticks);
+        crate::object::capability::selectable::SelectWaitOutcome::Ready
     }
 
     fn set_nonblocking(&self, enabled: bool) {

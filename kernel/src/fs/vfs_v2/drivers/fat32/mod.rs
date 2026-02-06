@@ -39,7 +39,7 @@ use crate::{
     fs::{FileObject, FileSystemError, FileSystemErrorKind, FileType, get_fs_driver_manager},
 };
 
-use super::super::core::{DirectoryEntryInternal, FileSystemOperations, VfsNode};
+use super::super::core::{DirectoryEntryInternal, FileSystemId, FileSystemOperations, VfsNode};
 
 pub mod driver;
 pub mod node;
@@ -58,6 +58,8 @@ pub use structures::*;
 /// It maintains the block device reference and provides filesystem operations
 /// through the VFS v2 interface.
 pub struct Fat32FileSystem {
+    /// Unique filesystem identifier
+    fs_id: FileSystemId,
     /// Reference to the underlying block device
     block_device: Arc<dyn BlockDevice>,
     /// Boot sector information
@@ -107,6 +109,7 @@ impl Fat32FileSystem {
         let root = Arc::new(Fat32Node::new_directory("/".to_string(), 1, root_cluster));
 
         let fs = Arc::new(Self {
+            fs_id: FileSystemId::new(),
             block_device,
             boot_sector,
             root_cluster,
@@ -688,6 +691,81 @@ impl Fat32FileSystem {
         // Truncate to exact size if needed
         content.truncate(size);
         Ok(content)
+    }
+
+    /// Read a single page (4096 bytes) of file content into physical memory.
+    ///
+    /// This is used by the page cache manager for demand paging.
+    pub fn read_page_content(
+        &self,
+        start_cluster: u32,
+        page_index: u64,
+        paddr: usize,
+    ) -> Result<(), FileSystemError> {
+        use crate::environment::PAGE_SIZE;
+
+        if start_cluster < 2 {
+            unsafe {
+                core::ptr::write_bytes(paddr as *mut u8, 0, PAGE_SIZE);
+            }
+            return Ok(());
+        }
+
+        let cluster_size = (self.sectors_per_cluster * self.bytes_per_sector) as usize;
+        let page_offset = page_index as usize * PAGE_SIZE;
+
+        let start_cluster_index = page_offset / cluster_size;
+        let offset_in_cluster = page_offset % cluster_size;
+
+        unsafe {
+            core::ptr::write_bytes(paddr as *mut u8, 0, PAGE_SIZE);
+        }
+
+        let mut current_cluster = start_cluster;
+        for _ in 0..start_cluster_index {
+            let fat_entry = self.read_fat_entry(current_cluster)?;
+            if fat_entry >= 0x0FFFFFF8 {
+                return Ok(());
+            }
+            current_cluster = fat_entry;
+        }
+
+        let mut page_ptr = paddr as *mut u8;
+        let mut bytes_written = 0usize;
+        let mut cluster_offset = offset_in_cluster;
+
+        while bytes_written < PAGE_SIZE {
+            let cluster_data = self.read_cluster(current_cluster)?;
+
+            let bytes_to_copy = core::cmp::min(
+                cluster_data.len() - cluster_offset,
+                PAGE_SIZE - bytes_written,
+            );
+
+            unsafe {
+                core::ptr::copy_nonoverlapping(
+                    cluster_data.as_ptr().add(cluster_offset),
+                    page_ptr,
+                    bytes_to_copy,
+                );
+                page_ptr = page_ptr.add(bytes_to_copy);
+            }
+
+            bytes_written += bytes_to_copy;
+            cluster_offset = 0;
+
+            if bytes_written >= PAGE_SIZE {
+                break;
+            }
+
+            let fat_entry = self.read_fat_entry(current_cluster)?;
+            if fat_entry >= 0x0FFFFFF8 {
+                break;
+            }
+            current_cluster = fat_entry;
+        }
+
+        Ok(())
     }
 
     /// Write file content to disk and return the starting cluster
@@ -2602,6 +2680,10 @@ impl Fat32FileSystem {
 }
 
 impl FileSystemOperations for Fat32FileSystem {
+    fn fs_id(&self) -> FileSystemId {
+        self.fs_id
+    }
+
     fn lookup(
         &self,
         parent: &Arc<dyn VfsNode>,
@@ -2638,14 +2720,22 @@ impl FileSystemOperations for Fat32FileSystem {
         let found_entry = self.lookup_file_in_directory(starting_cluster, name)?;
         // Create a new Fat32Node for the found entry
         let node = if found_entry.is_directory() {
-            let dir_node = Fat32Node::new_directory(found_entry.name(), 0, found_entry.cluster());
+            let dir_node = Fat32Node::new_directory(
+                found_entry.name(),
+                found_entry.cluster() as u64,
+                found_entry.cluster(),
+            );
             // Set filesystem reference from parent
             if let Some(fs_ref) = fat32_parent.filesystem() {
                 dir_node.set_filesystem(fs_ref);
             }
             dir_node
         } else {
-            let file_node = Fat32Node::new_file(found_entry.name(), 0, found_entry.cluster());
+            let file_node = Fat32Node::new_file(
+                found_entry.name(),
+                found_entry.cluster() as u64,
+                found_entry.cluster(),
+            );
             // Update file size
             {
                 let mut metadata = file_node.metadata.write();
@@ -2906,6 +2996,22 @@ impl FileSystemOperations for Fat32FileSystem {
         {
             let mut children = fat32_parent.children.write();
             children.remove(name);
+        }
+
+        // Invalidate page cache entries for this file to avoid stale data after delete/recreate
+        {
+            use crate::fs::vfs_v2::cache::CacheId;
+            use crate::mem::page_cache::PageCacheManager;
+            let fs_id = self.fs_id().get();
+            let node_file_id = file_node.metadata.read().file_id;
+            if node_file_id != 0 {
+                let cid = CacheId::new((fs_id << 32) | node_file_id);
+                PageCacheManager::global().invalidate(cid);
+            }
+            if start_cluster != 0 {
+                let cid = CacheId::new((fs_id << 32) | (start_cluster as u64));
+                PageCacheManager::global().invalidate(cid);
+            }
         }
 
         Ok(())

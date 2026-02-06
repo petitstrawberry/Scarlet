@@ -1302,7 +1302,7 @@ pub fn build_auxiliary_vector(load_result: &LoadElfResult) -> alloc::vec::Vec<Au
     // Set all IDs to 0 (root) to make real and effective IDs equal
     // This prevents libc.secure from being set to true
     auxv.push(AuxVec::new(AT_UID, 0)); // Real user ID
-    auxv.push(AuxVec::new(AT_EUID, 0)); // Effective user ID  
+    auxv.push(AuxVec::new(AT_EUID, 0)); // Effective user ID
     auxv.push(AuxVec::new(AT_GID, 0)); // Real group ID
     auxv.push(AuxVec::new(AT_EGID, 0)); // Effective group ID
 

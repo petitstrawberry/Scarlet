@@ -3,7 +3,7 @@
 //! This module implements the VFS node interface for ext2 filesystem nodes,
 //! providing file and directory objects that integrate with the VFS v2 architecture.
 
-use alloc::{format, string::String, sync::Weak, vec::Vec};
+use alloc::{boxed::Box, collections::BTreeMap, format, string::String, sync::Weak, vec::Vec};
 use core::{any::Any, fmt::Debug};
 use spin::{Mutex, RwLock};
 
@@ -12,9 +12,14 @@ use crate::object::capability::selectable::{
 };
 use crate::{
     DeviceManager,
+    environment::PAGE_SIZE,
     fs::{
         DeviceFileInfo, FileMetadata, FileObject, FilePermission, FileSystemError,
-        FileSystemErrorKind, FileType, SeekFrom, SocketFileInfo,
+        FileSystemErrorKind, FileType, SeekFrom, SocketFileInfo, vfs_v2::cache::PageCacheCapable,
+    },
+    mem::{
+        page::allocate_boxed_pages,
+        page_cache::{PageCacheManager, PageIndex},
     },
     object::capability::{ControlOps, MemoryMappingOps, StreamError, StreamOps},
 };
@@ -173,12 +178,18 @@ pub struct Ext2FileObject {
     file_id: u64,
     /// Current position in the file
     position: Mutex<u64>,
+    /// Optional logical size override after in-memory writes (not yet flushed)
+    size_override: Mutex<Option<usize>>,
+    /// Dirty flag indicating in-memory changes not yet persisted to disk
+    dirty: Mutex<bool>,
     /// Weak reference to the filesystem
     filesystem: RwLock<Option<Weak<dyn FileSystemOperations>>>,
-    /// Cached file content in memory (lazily loaded)
-    cached_content: RwLock<Option<Vec<u8>>>,
-    /// Whether the cached content has been modified
-    is_dirty: RwLock<bool>,
+    /// Page-aligned backing for mmap operations (lazy initialized)
+    mmap_backing: RwLock<Option<Box<[crate::mem::page::Page]>>>,
+    /// Byte length of the mmap backing (file size snapshot)
+    mmap_backing_len: Mutex<usize>,
+    /// Active mmap ranges keyed by starting virtual address
+    mmap_ranges: RwLock<BTreeMap<usize, MmapRange>>,
 }
 
 impl Ext2FileObject {
@@ -188,9 +199,12 @@ impl Ext2FileObject {
             inode_number,
             file_id,
             position: Mutex::new(0),
+            size_override: Mutex::new(None),
+            dirty: Mutex::new(false),
             filesystem: RwLock::new(None),
-            cached_content: RwLock::new(None),
-            is_dirty: RwLock::new(false),
+            mmap_backing: RwLock::new(None),
+            mmap_backing_len: Mutex::new(0),
+            mmap_ranges: RwLock::new(BTreeMap::new()),
         }
     }
 
@@ -204,167 +218,294 @@ impl Ext2FileObject {
         self.file_id
     }
 
-    /// Load file content from disk into cache if not already loaded
-    fn ensure_content_loaded(&self) -> Result<(), StreamError> {
-        crate::profile_scope!("ext2::node::ensure_content_loaded");
-
-        let mut cached = self.cached_content.write();
-
-        // If already loaded, nothing to do
-        if cached.is_some() {
+    /// Flush current page-cache-backed content to disk.
+    fn sync_to_disk(&self) -> Result<(), StreamError> {
+        let no_size_override = self.size_override.lock().is_none();
+        let is_dirty = *self.dirty.lock();
+        if no_size_override && !is_dirty {
             return Ok(());
         }
 
-        // Get filesystem reference
         let fs = self
             .filesystem
             .read()
             .as_ref()
             .and_then(|weak| weak.upgrade())
             .ok_or(StreamError::Closed)?;
-
-        // Downcast to Ext2FileSystem
         let ext2_fs = fs
             .as_any()
             .downcast_ref::<Ext2FileSystem>()
             .ok_or(StreamError::NotSupported)?;
 
-        // Read inode to get file size
-        let inode = ext2_fs
+        let on_disk = ext2_fs
             .read_inode(self.inode_number)
-            .map_err(|_| StreamError::IoError)?;
-
-        // Read entire file content from disk
-        let content = if inode.size > 0 {
-            ext2_fs
-                .read_file_content(self.inode_number, inode.size as usize)
-                .map_err(|_| StreamError::IoError)?
-        } else {
-            Vec::new()
+            .map_err(|_| StreamError::IoError)?
+            .size as usize;
+        let eff_size = match *self.size_override.lock() {
+            Some(ov) => core::cmp::max(on_disk, ov),
+            None => on_disk,
         };
 
-        *cached = Some(content);
+        let mut buffer = Vec::with_capacity(eff_size);
+        buffer.resize(eff_size, 0);
+        let cache_id = self.cache_id();
+        let page_count = (eff_size + PAGE_SIZE - 1) / PAGE_SIZE;
+        for page_index in 0..(page_count as u64) {
+            let start = page_index as usize * PAGE_SIZE;
+            let len = core::cmp::min(PAGE_SIZE, eff_size.saturating_sub(start));
+            if len == 0 {
+                break;
+            }
+
+            let pinned = if let Some(p) = PageCacheManager::global().try_pin(cache_id, page_index) {
+                p
+            } else {
+                PageCacheManager::global()
+                    .pin_or_load(cache_id, page_index, |paddr| {
+                        ext2_fs
+                            .read_page_content(self.inode_number, page_index, paddr)
+                            .map_err(|_| "io error")
+                    })
+                    .map_err(|_| StreamError::IoError)?
+            };
+
+            unsafe {
+                core::ptr::copy_nonoverlapping(
+                    pinned.paddr() as *const u8,
+                    buffer.as_mut_ptr().add(start),
+                    len,
+                );
+            }
+        }
+
+        ext2_fs
+            .write_file_content(self.inode_number, &buffer)
+            .map_err(|_| StreamError::IoError)?;
+
+        *self.size_override.lock() = None;
+        *self.dirty.lock() = false;
         Ok(())
     }
 
-    /// Sync cached content to disk
-    fn sync_to_disk(&self) -> Result<(), StreamError> {
-        crate::profile_scope!("ext2::node::sync_to_disk");
+    fn effective_size(&self, inode_size: usize) -> usize {
+        let mut file_size = inode_size;
+        if let Some(override_size) = *self.size_override.lock() {
+            if override_size > file_size {
+                file_size = override_size;
+            }
+        }
+        file_size
+    }
 
-        let is_dirty = *self.is_dirty.read();
-        if !is_dirty {
-            return Ok(());
+    fn ensure_mmap_backing(
+        &self,
+        file_size: usize,
+        required_size: usize,
+    ) -> Result<(), StreamError> {
+        if file_size == 0 || required_size == 0 {
+            return Err(StreamError::InvalidArgument);
         }
 
-        #[cfg(test)]
-        crate::early_println!(
-            "[ext2] sync_to_disk: Starting sync for inode {}",
-            self.inode_number
-        );
+        let num_pages = (required_size + PAGE_SIZE - 1) / PAGE_SIZE;
+        let mut backing_guard = self.mmap_backing.write();
+        let needs_alloc = backing_guard
+            .as_ref()
+            .map(|buf| buf.len() < num_pages)
+            .unwrap_or(true);
+        if needs_alloc {
+            *backing_guard = Some(allocate_boxed_pages(num_pages));
+        }
 
-        // Get filesystem reference
+        let backing = backing_guard.as_mut().expect("mmap backing missing");
+        *self.mmap_backing_len.lock() = file_size;
+
         let fs = self
             .filesystem
             .read()
             .as_ref()
             .and_then(|weak| weak.upgrade())
             .ok_or(StreamError::Closed)?;
-
-        // Downcast to Ext2FileSystem
         let ext2_fs = fs
             .as_any()
             .downcast_ref::<Ext2FileSystem>()
             .ok_or(StreamError::NotSupported)?;
 
-        // Get cached content
-        let cached = self.cached_content.read();
-        let content = cached.as_ref().ok_or(StreamError::IoError)?;
+        let cache_id = self.cache_id();
+        let backing_ptr = backing.as_mut_ptr() as *mut u8;
+        for page_index in 0..num_pages {
+            let pinned = PageCacheManager::global()
+                .pin_or_load(cache_id, page_index as u64, |paddr| {
+                    ext2_fs
+                        .read_page_content(self.inode_number, page_index as u64, paddr)
+                        .map_err(|_| "ext2: read_page_content failed")
+                })
+                .map_err(|_| StreamError::IoError)?;
+            unsafe {
+                core::ptr::copy_nonoverlapping(
+                    pinned.paddr() as *const u8,
+                    backing_ptr.add(page_index * PAGE_SIZE),
+                    PAGE_SIZE,
+                );
+            }
+        }
 
-        #[cfg(test)]
-        crate::early_println!(
-            "[ext2] sync_to_disk: Writing {} bytes to inode {}",
-            content.len(),
-            self.inode_number
-        );
-
-        // Write content to disk
-        ext2_fs
-            .write_file_content(self.inode_number, content)
-            .map_err(|_e| {
-                #[cfg(test)]
-                crate::early_println!("[ext2] sync_to_disk: Error writing to disk: {:?}", _e);
-                StreamError::IoError
-            })?;
-
-        // Mark as clean
-        *self.is_dirty.write() = false;
-        #[cfg(test)]
-        crate::early_println!(
-            "[ext2] sync_to_disk: Successfully synced inode {}",
-            self.inode_number
-        );
         Ok(())
     }
 }
 
+#[derive(Clone, Copy, Debug)]
+struct MmapRange {
+    vaddr_start: usize,
+    vaddr_end: usize,
+    offset: usize,
+}
+
 impl StreamOps for Ext2FileObject {
     fn read(&self, buffer: &mut [u8]) -> Result<usize, StreamError> {
-        // Ensure file content is loaded into cache
-        self.ensure_content_loaded()?;
+        crate::profile_scope!("ext2::node::read");
 
-        let content = self.cached_content.read();
-        let content = content.as_ref().ok_or(StreamError::IoError)?;
+        let fs = self
+            .filesystem
+            .read()
+            .as_ref()
+            .and_then(|weak| weak.upgrade())
+            .ok_or(StreamError::Closed)?;
+        let ext2_fs = fs
+            .as_any()
+            .downcast_ref::<Ext2FileSystem>()
+            .ok_or(StreamError::NotSupported)?;
+
+        let inode = ext2_fs
+            .read_inode(self.inode_number)
+            .map_err(|_| StreamError::IoError)?;
+        let mut file_size = inode.size as usize;
+        if let Some(override_size) = *self.size_override.lock() {
+            if override_size > file_size {
+                file_size = override_size;
+            }
+        }
 
         let mut position_guard = self.position.lock();
         let current_pos = *position_guard as usize;
-
-        // If position is beyond file size, return 0 bytes read
-        if current_pos >= content.len() {
+        if current_pos >= file_size {
             return Ok(0);
         }
 
-        // Calculate how many bytes to read
-        let bytes_available = content.len() - current_pos;
+        let bytes_available = file_size - current_pos;
         let bytes_to_read = core::cmp::min(buffer.len(), bytes_available);
+        if bytes_to_read == 0 {
+            return Ok(0);
+        }
 
-        // Copy data from cached content to buffer
-        buffer[..bytes_to_read].copy_from_slice(&content[current_pos..current_pos + bytes_to_read]);
+        let cache_id = self.cache_id();
+        let mut bytes_read = 0usize;
+        let mut buf_offset = 0usize;
+        let mut pos = current_pos;
 
-        // Update position
-        *position_guard += bytes_to_read as u64;
+        while bytes_read < bytes_to_read {
+            let page_index = (pos / PAGE_SIZE) as PageIndex;
+            let page_offset = pos % PAGE_SIZE;
+            let remaining_in_page = PAGE_SIZE - page_offset;
+            let bytes_in_page = core::cmp::min(bytes_to_read - bytes_read, remaining_in_page);
 
-        Ok(bytes_to_read)
+            let pinned = PageCacheManager::global()
+                .pin_or_load(cache_id, page_index, |paddr| {
+                    ext2_fs
+                        .read_page_content(self.inode_number, page_index, paddr)
+                        .map_err(|_| "Failed to load page")
+                })
+                .map_err(|_| StreamError::IoError)?;
+
+            unsafe {
+                let page_ptr = pinned.paddr() as *const u8;
+                let src = page_ptr.add(page_offset);
+                let dst = buffer.as_mut_ptr().add(buf_offset);
+                core::ptr::copy_nonoverlapping(src, dst, bytes_in_page);
+            }
+
+            bytes_read += bytes_in_page;
+            buf_offset += bytes_in_page;
+            pos += bytes_in_page;
+        }
+
+        *position_guard += bytes_read as u64;
+        Ok(bytes_read)
     }
 
     fn write(&self, buffer: &[u8]) -> Result<usize, StreamError> {
-        // Ensure content is loaded into cache
-        self.ensure_content_loaded()?;
+        crate::profile_scope!("ext2::node::write");
 
-        let pos = *self.position.lock() as usize;
-        let mut cached = self.cached_content.write();
-        let content = cached.as_mut().ok_or(StreamError::IoError)?;
+        let fs = self
+            .filesystem
+            .read()
+            .as_ref()
+            .and_then(|weak| weak.upgrade())
+            .ok_or(StreamError::Closed)?;
+        let ext2_fs = fs
+            .as_any()
+            .downcast_ref::<Ext2FileSystem>()
+            .ok_or(StreamError::NotSupported)?;
 
-        // Calculate new size
-        let new_size = core::cmp::max(content.len(), pos + buffer.len());
-
-        // Extend content if needed
-        if new_size > content.len() {
-            content.resize(new_size, 0);
+        let mut position_guard = self.position.lock();
+        let mut pos = *position_guard as usize;
+        let bytes_to_write = buffer.len();
+        if bytes_to_write == 0 {
+            return Ok(0);
         }
 
-        // Write new data to cached content
-        content[pos..pos + buffer.len()].copy_from_slice(buffer);
+        let cache_id = self.cache_id();
+        let mut written = 0usize;
+        let mut buf_offset = 0usize;
+        while written < bytes_to_write {
+            let page_index = (pos / PAGE_SIZE) as PageIndex;
+            let page_off = pos % PAGE_SIZE;
+            let remain_in_page = PAGE_SIZE - page_off;
+            let chunk = core::cmp::min(bytes_to_write - written, remain_in_page);
 
-        // Mark as dirty
-        *self.is_dirty.write() = true;
+            let pinned = PageCacheManager::global()
+                .pin_or_load(cache_id, page_index, |paddr| {
+                    ext2_fs
+                        .read_page_content(self.inode_number, page_index, paddr)
+                        .map_err(|_| "Failed to load page")
+                })
+                .map_err(|_| StreamError::IoError)?;
 
-        // Update position
-        {
-            let mut position = self.position.lock();
-            *position += buffer.len() as u64;
+            unsafe {
+                let dst = (pinned.paddr() as *mut u8).add(page_off);
+                let src = buffer.as_ptr().add(buf_offset);
+                core::ptr::copy_nonoverlapping(src, dst, chunk);
+            }
+
+            pinned.mark_dirty();
+            *self.dirty.lock() = true;
+
+            written += chunk;
+            buf_offset += chunk;
+            pos += chunk;
         }
 
-        Ok(buffer.len())
+        *position_guard = (*position_guard as usize + written) as u64;
+
+        let mut override_size = self.size_override.lock();
+        let new_end = pos;
+        match *override_size {
+            Some(cur) => {
+                if new_end > cur {
+                    *override_size = Some(new_end);
+                }
+            }
+            None => {
+                let base = ext2_fs
+                    .read_inode(self.inode_number)
+                    .map_err(|_| StreamError::IoError)?
+                    .size as usize;
+                if new_end > base {
+                    *override_size = Some(new_end);
+                }
+            }
+        }
+
+        Ok(written)
     }
 }
 
@@ -376,49 +517,196 @@ impl MemoryMappingOps for Ext2FileObject {
         offset: usize,
         length: usize,
     ) -> Result<(usize, usize, bool), &'static str> {
-        // Ensure content is loaded into cache
-        self.ensure_content_loaded()
-            .map_err(|_| "Failed to load file content")?;
+        if offset % PAGE_SIZE != 0 {
+            return Err("Offset not page aligned");
+        }
 
-        let cached = self.cached_content.read();
-        let content = cached.as_ref().ok_or("No cached content available")?;
+        let fs = self
+            .filesystem
+            .read()
+            .as_ref()
+            .and_then(|weak| weak.upgrade())
+            .ok_or("Filesystem closed")?;
+        let ext2_fs = fs
+            .as_any()
+            .downcast_ref::<Ext2FileSystem>()
+            .ok_or("Invalid filesystem type")?;
+        let inode = ext2_fs
+            .read_inode(self.inode_number)
+            .map_err(|_| "Read inode failed")?;
+        let file_size = self.effective_size(inode.size as usize);
 
-        // Check bounds
-        if offset >= content.len() {
+        if file_size == 0 || offset >= file_size {
             return Err("Offset beyond file size");
         }
 
-        let available_length = content.len() - offset;
-        if length > available_length {
-            return Err("Length extends beyond file size");
+        let required_size = offset.saturating_add(length).max(file_size);
+        self.ensure_mmap_backing(file_size, required_size)
+            .map_err(|_| "Failed to prepare mmap backing")?;
+
+        let backing_guard = self.mmap_backing.read();
+        let backing = backing_guard.as_ref().ok_or("mmap backing missing")?;
+        let base = backing.as_ptr() as usize;
+        let paddr = base + offset;
+        if paddr % PAGE_SIZE != 0 {
+            return Err("Backing address not aligned");
         }
 
-        // Return the virtual address of the cached content as the physical address
-        // This is a simplified implementation - in a real OS, this would involve
-        // proper virtual-to-physical address translation
-        let content_ptr = content.as_ptr() as usize;
-        let paddr = content_ptr + offset;
+        Ok((paddr, 0x3, true))
+    }
 
-        // Return read/write permissions (0x3 = read | write)
-        // Not shared between processes (false)
-        Ok((paddr, 0x3, false))
+    fn get_mapping_info_with(
+        &self,
+        offset: usize,
+        length: usize,
+        is_shared: bool,
+    ) -> Result<(usize, usize, bool), &'static str> {
+        if is_shared {
+            if offset % PAGE_SIZE != 0 {
+                return Err("Offset not page aligned");
+            }
+
+            let fs = self
+                .filesystem
+                .read()
+                .as_ref()
+                .and_then(|weak| weak.upgrade())
+                .ok_or("Filesystem closed")?;
+            let ext2_fs = fs
+                .as_any()
+                .downcast_ref::<Ext2FileSystem>()
+                .ok_or("Invalid filesystem type")?;
+            let inode = ext2_fs
+                .read_inode(self.inode_number)
+                .map_err(|_| "Read inode failed")?;
+            let file_size = self.effective_size(inode.size as usize);
+
+            if file_size == 0 || offset >= file_size {
+                return Err("Offset beyond file size");
+            }
+
+            let _ = length;
+            return Ok((0, 0x3, true));
+        }
+
+        self.get_mapping_info(offset, length)
     }
 
     fn on_mapped(&self, _vaddr: usize, _paddr: usize, _length: usize, _offset: usize) {
-        // For a simple implementation, we don't need to track mappings
-        // In a more complex system, we might track active mappings here
+        if _length == 0 {
+            return;
+        }
+        let vaddr_end = _vaddr.saturating_add(_length - 1);
+        let range = MmapRange {
+            vaddr_start: _vaddr,
+            vaddr_end,
+            offset: _offset,
+        };
+        self.mmap_ranges.write().insert(_vaddr, range);
     }
 
-    fn on_unmapped(&self, _vaddr: usize, _length: usize) {
-        // For a simple implementation, we don't need to track unmappings
-        // In a more complex system, we might want to sync dirty pages here
+    fn on_unmapped(&self, vaddr: usize, _length: usize) {
+        self.mmap_ranges.write().remove(&vaddr);
+        let backing_guard = self.mmap_backing.read();
+        let backing = match backing_guard.as_ref() {
+            Some(buf) => buf,
+            None => {
+                let _ = self.sync_to_disk();
+                return;
+            }
+        };
+        let backing_len = *self.mmap_backing_len.lock();
+        if backing_len == 0 {
+            return;
+        }
 
-        // Optionally sync to disk when unmapped
-        let _ = self.sync_to_disk();
+        let fs = match self
+            .filesystem
+            .read()
+            .as_ref()
+            .and_then(|weak| weak.upgrade())
+        {
+            Some(fs) => fs,
+            None => return,
+        };
+        let ext2_fs = match fs.as_any().downcast_ref::<Ext2FileSystem>() {
+            Some(fs) => fs,
+            None => return,
+        };
+
+        let backing_ptr = backing.as_ptr() as *const u8;
+        let data = unsafe { core::slice::from_raw_parts(backing_ptr, backing_len) };
+        let _ = ext2_fs.write_file_content(self.inode_number, data);
+        PageCacheManager::global().invalidate(self.cache_id());
     }
 
     fn supports_mmap(&self) -> bool {
         true
+    }
+
+    fn resolve_fault(
+        &self,
+        access: &crate::object::capability::memory_mapping::AccessKind,
+        map: &crate::vm::vmem::VirtualMemoryMap,
+    ) -> core::result::Result<
+        crate::object::capability::memory_mapping::ResolveFaultResult,
+        crate::object::capability::memory_mapping::ResolveFaultError,
+    > {
+        let range = self
+            .mmap_ranges
+            .read()
+            .get(&map.vmarea.start)
+            .copied()
+            .ok_or(crate::object::capability::memory_mapping::ResolveFaultError::Invalid)?;
+        if access.vaddr < range.vaddr_start || access.vaddr > range.vaddr_end {
+            return Err(crate::object::capability::memory_mapping::ResolveFaultError::Invalid);
+        }
+
+        let fs = self
+            .filesystem
+            .read()
+            .as_ref()
+            .and_then(|weak| weak.upgrade())
+            .ok_or(crate::object::capability::memory_mapping::ResolveFaultError::Invalid)?;
+        let ext2_fs = fs
+            .as_any()
+            .downcast_ref::<Ext2FileSystem>()
+            .ok_or(crate::object::capability::memory_mapping::ResolveFaultError::Invalid)?;
+        let inode = ext2_fs
+            .read_inode(self.inode_number)
+            .map_err(|_| crate::object::capability::memory_mapping::ResolveFaultError::Invalid)?;
+        let file_size = self.effective_size(inode.size as usize);
+
+        let file_offset = range
+            .offset
+            .saturating_add(access.vaddr.saturating_sub(range.vaddr_start));
+        if file_size == 0 || file_offset >= file_size {
+            return Err(crate::object::capability::memory_mapping::ResolveFaultError::Invalid);
+        }
+
+        let page_index = (file_offset / PAGE_SIZE) as u64;
+        let pinned = PageCacheManager::global()
+            .pin_or_load(self.cache_id(), page_index, |paddr| {
+                ext2_fs
+                    .read_page_content(self.inode_number, page_index, paddr)
+                    .map_err(|_| "ext2: read_page_content failed")
+            })
+            .map_err(|_| crate::object::capability::memory_mapping::ResolveFaultError::Invalid)?;
+
+        if matches!(
+            access.op,
+            crate::object::capability::memory_mapping::AccessOp::Store
+        ) {
+            pinned.mark_dirty();
+            *self.dirty.lock() = true;
+        }
+
+        Ok(
+            crate::object::capability::memory_mapping::ResolveFaultResult {
+                paddr_page_base: pinned.paddr(),
+                is_tail: false,
+            },
+        )
     }
 }
 
@@ -472,39 +760,194 @@ impl FileObject for Ext2FileObject {
     }
 
     fn read_at(&self, offset: u64, buffer: &mut [u8]) -> Result<usize, StreamError> {
-        self.ensure_content_loaded()?;
+        let file_size = {
+            let fs = self
+                .filesystem
+                .read()
+                .as_ref()
+                .and_then(|weak| weak.upgrade())
+                .ok_or(StreamError::Closed)?;
+            let ext2_fs = fs
+                .as_any()
+                .downcast_ref::<Ext2FileSystem>()
+                .ok_or(StreamError::NotSupported)?;
+            ext2_fs
+                .read_inode(self.inode_number)
+                .map_err(|_| StreamError::IoError)?
+                .size as usize
+        };
 
-        let content = self.cached_content.read();
-        let content = content.as_ref().ok_or(StreamError::IoError)?;
-        let offset = usize::try_from(offset).map_err(|_| StreamError::InvalidArgument)?;
-
-        if offset >= content.len() {
+        let off = usize::try_from(offset).map_err(|_| StreamError::InvalidArgument)?;
+        if off >= file_size {
             return Ok(0);
         }
 
-        let bytes_available = content.len() - offset;
-        let bytes_to_read = core::cmp::min(buffer.len(), bytes_available);
-        buffer[..bytes_to_read].copy_from_slice(&content[offset..offset + bytes_to_read]);
+        let mut total_read = 0usize;
+        let cache_id = self.cache_id();
+        while total_read < buffer.len() && off + total_read < file_size {
+            let absolute = off + total_read;
+            let page_index = (absolute / PAGE_SIZE) as PageIndex;
+            let offset_in_page = absolute % PAGE_SIZE;
 
-        Ok(bytes_to_read)
+            let pinned = PageCacheManager::global()
+                .pin_or_load(cache_id, page_index, |paddr| {
+                    let fs = self
+                        .filesystem
+                        .read()
+                        .as_ref()
+                        .and_then(|weak| weak.upgrade())
+                        .ok_or("filesystem gone")?;
+                    let ext2_fs = fs
+                        .as_any()
+                        .downcast_ref::<Ext2FileSystem>()
+                        .ok_or("bad fs type")?;
+                    ext2_fs
+                        .read_page_content(self.inode_number, page_index, paddr)
+                        .map_err(|_| "Failed to load page")
+                })
+                .map_err(|_| StreamError::IoError)?;
+
+            unsafe {
+                let src = (pinned.paddr() as *const u8).add(offset_in_page);
+                let remaining_in_page = PAGE_SIZE - offset_in_page;
+                let remaining_file = file_size - (off + total_read);
+                let remaining_buf = buffer.len() - total_read;
+                let chunk = core::cmp::min(
+                    remaining_in_page,
+                    core::cmp::min(remaining_file, remaining_buf),
+                );
+                core::ptr::copy_nonoverlapping(src, buffer.as_mut_ptr().add(total_read), chunk);
+                total_read += chunk;
+            }
+        }
+
+        Ok(total_read)
     }
 
     fn write_at(&self, offset: u64, buffer: &[u8]) -> Result<usize, StreamError> {
-        self.ensure_content_loaded()?;
+        if buffer.is_empty() {
+            return Ok(0);
+        }
+        let off = usize::try_from(offset).map_err(|_| StreamError::InvalidArgument)?;
+        let mut written = 0usize;
+        let cache_id = self.cache_id();
 
-        let mut cached = self.cached_content.write();
-        let content = cached.as_mut().ok_or(StreamError::IoError)?;
-        let offset = usize::try_from(offset).map_err(|_| StreamError::InvalidArgument)?;
+        while written < buffer.len() {
+            let absolute = off + written;
+            let page_index = (absolute / PAGE_SIZE) as PageIndex;
+            let page_off = absolute % PAGE_SIZE;
+            let remain_in_page = PAGE_SIZE - page_off;
+            let chunk = core::cmp::min(buffer.len() - written, remain_in_page);
 
-        let required_size = offset.saturating_add(buffer.len());
-        if required_size > content.len() {
-            content.resize(required_size, 0);
+            let pinned = PageCacheManager::global()
+                .pin_or_load(cache_id, page_index, |paddr| {
+                    let fs = self
+                        .filesystem
+                        .read()
+                        .as_ref()
+                        .and_then(|weak| weak.upgrade())
+                        .ok_or("filesystem gone")?;
+                    let ext2_fs = fs
+                        .as_any()
+                        .downcast_ref::<Ext2FileSystem>()
+                        .ok_or("bad fs type")?;
+                    ext2_fs
+                        .read_page_content(self.inode_number, page_index, paddr)
+                        .map_err(|_| "Failed to load page")
+                })
+                .map_err(|_| StreamError::IoError)?;
+
+            unsafe {
+                let dst = (pinned.paddr() as *mut u8).add(page_off);
+                let src = buffer.as_ptr().add(written);
+                core::ptr::copy_nonoverlapping(src, dst, chunk);
+            }
+
+            pinned.mark_dirty();
+            written += chunk;
         }
 
-        content[offset..offset + buffer.len()].copy_from_slice(buffer);
-        *self.is_dirty.write() = true;
+        let new_end = off + written;
+        let mut size_override = self.size_override.lock();
+        match *size_override {
+            Some(cur) => {
+                if new_end > cur {
+                    *size_override = Some(new_end);
+                }
+            }
+            None => {
+                *size_override = Some(new_end);
+            }
+        }
 
-        Ok(buffer.len())
+        *self.dirty.lock() = true;
+
+        Ok(written)
+    }
+
+    fn truncate(&self, size: u64) -> Result<(), StreamError> {
+        let new_size = usize::try_from(size).map_err(|_| StreamError::InvalidArgument)?;
+        let fs = self
+            .filesystem
+            .read()
+            .as_ref()
+            .and_then(|weak| weak.upgrade())
+            .ok_or(StreamError::Closed)?;
+        let ext2_fs = fs
+            .as_any()
+            .downcast_ref::<Ext2FileSystem>()
+            .ok_or(StreamError::NotSupported)?;
+        let inode_size = ext2_fs
+            .read_inode(self.inode_number)
+            .map_err(|_| StreamError::IoError)?
+            .size as usize;
+        let cur_size = self.effective_size(inode_size);
+        if new_size == cur_size {
+            return Ok(());
+        }
+
+        let mut buffer = Vec::with_capacity(new_size);
+        buffer.resize(new_size, 0);
+        let copy_len = core::cmp::min(cur_size, new_size);
+        if copy_len > 0 {
+            let cache_id = self.cache_id();
+            let page_count = (copy_len + PAGE_SIZE - 1) / PAGE_SIZE;
+            for page_index in 0..(page_count as u64) {
+                let start = page_index as usize * PAGE_SIZE;
+                let len = core::cmp::min(PAGE_SIZE, copy_len.saturating_sub(start));
+                if len == 0 {
+                    break;
+                }
+                let pinned = PageCacheManager::global()
+                    .pin_or_load(cache_id, page_index, |paddr| {
+                        ext2_fs
+                            .read_page_content(self.inode_number, page_index, paddr)
+                            .map_err(|_| "io error")
+                    })
+                    .map_err(|_| StreamError::IoError)?;
+                unsafe {
+                    core::ptr::copy_nonoverlapping(
+                        pinned.paddr() as *const u8,
+                        buffer.as_mut_ptr().add(start),
+                        len,
+                    );
+                }
+            }
+        }
+
+        ext2_fs
+            .write_file_content(self.inode_number, &buffer)
+            .map_err(|_| StreamError::IoError)?;
+        PageCacheManager::global().invalidate(self.cache_id());
+        *self.size_override.lock() = None;
+        *self.dirty.lock() = false;
+
+        let mut position = self.position.lock();
+        if *position > size {
+            *position = size;
+        }
+
+        Ok(())
     }
 
     fn seek(&self, whence: SeekFrom) -> Result<u64, StreamError> {
@@ -551,6 +994,29 @@ impl FileObject for Ext2FileObject {
     fn as_any(&self) -> &dyn Any {
         self
     }
+
+    fn sync(&self) -> Result<(), StreamError> {
+        self.sync_to_disk()
+    }
+}
+
+impl PageCacheCapable for Ext2FileObject {
+    fn cache_id(&self) -> crate::fs::vfs_v2::cache::CacheId {
+        let fs = self
+            .filesystem
+            .read()
+            .as_ref()
+            .and_then(|weak| weak.upgrade())
+            .expect("Ext2FileObject: filesystem gone");
+        let ext2_fs = fs
+            .as_any()
+            .downcast_ref::<Ext2FileSystem>()
+            .expect("Ext2FileObject: invalid filesystem type");
+
+        let fs_id = ext2_fs.fs_id().get();
+        let cache_id = (fs_id << 32) | self.file_id;
+        crate::fs::vfs_v2::cache::CacheId::new(cache_id)
+    }
 }
 
 impl crate::object::capability::selectable::Selectable for Ext2FileObject {
@@ -587,10 +1053,12 @@ impl crate::object::capability::selectable::Selectable for Ext2FileObject {
 
 impl Drop for Ext2FileObject {
     fn drop(&mut self) {
-        #[cfg(test)]
-        crate::early_println!("[ext2] Drop: syncing inode {} to disk", self.inode_number);
-        // Sync to disk when the file object is dropped
         let _ = self.sync_to_disk();
+        #[cfg(test)]
+        crate::early_println!(
+            "[ext2] Drop: File object dropped for inode {}",
+            self.inode_number
+        );
     }
 }
 

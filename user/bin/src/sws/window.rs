@@ -109,6 +109,12 @@ pub struct Window {
     pub shm_mapped_addr: Option<usize>,
     /// Size of the SHM mapping in bytes (0 when not SHM-backed).
     pub shm_size: usize,
+    /// Byte offset into the SHM where pixel data begins.
+    pub shm_offset: usize,
+    /// Bytes per row for SHM-backed windows.
+    pub shm_stride: u32,
+    /// Pixel format for SHM-backed windows (Wayland wl_shm format).
+    pub shm_format: u32,
     /// Window type for Z-order management
     pub window_type: WindowType,
     /// Whether the window is minimized
@@ -136,6 +142,12 @@ pub struct Window {
     /// - true: Focusing raises the window to top of its layer (Normal, Taskbar, AlwaysOnTop)
     /// - false: Focusing does not change Z-order (Desktop, wallpapers)
     pub raise_on_focus: bool,
+    /// Extension owner information for windows created by extension clients (e.g., wayland_bridge)
+    ///
+    /// Format: (extension_id, external_client_id)
+    /// - extension_id: The client ID of the extension that owns this window
+    /// - external_client_id: The external client ID assigned by the extension (e.g., Wayland surface ID)
+    pub extension_owner: Option<(u32, u32)>,
 }
 
 #[allow(dead_code)]
@@ -159,6 +171,9 @@ impl Window {
             shm: None,
             shm_mapped_addr: None,
             shm_size: 0,
+            shm_offset: 0,
+            shm_stride: 0,
+            shm_format: 0,
             window_type: WindowType::default(),
             minimized: false,
             maximized: false,
@@ -168,6 +183,7 @@ impl Window {
             active_on_focus: true,
             has_alpha_content: false, // Default to opaque content
             raise_on_focus: true,     // Default: Normal windows raise on focus
+            extension_owner: None,
         }
     }
 
@@ -194,6 +210,9 @@ impl Window {
             shm: None,
             shm_mapped_addr: None,
             shm_size: 0,
+            shm_offset: 0,
+            shm_stride: 0,
+            shm_format: 0,
             window_type: WindowType::default(),
             minimized: false,
             maximized: false,
@@ -203,6 +222,7 @@ impl Window {
             active_on_focus: true,
             has_alpha_content: false, // Default to opaque content
             raise_on_focus: true,     // Default: Normal windows raise on focus
+            extension_owner: None,
         }
     }
 
@@ -255,6 +275,9 @@ impl Window {
             shm: Some(shm),
             shm_mapped_addr: Some(mapped_addr),
             shm_size: buffer_size,
+            shm_offset: 0,
+            shm_stride: width.saturating_mul(4),
+            shm_format: 0,
             window_type: WindowType::default(),
             minimized: false,
             maximized: false,
@@ -264,6 +287,7 @@ impl Window {
             active_on_focus: true,
             has_alpha_content: false, // Default to opaque content
             raise_on_focus: true,     // Default: Normal windows raise on focus
+            extension_owner: None,
         })
     }
 
@@ -392,6 +416,66 @@ impl WindowManager {
 
     /// Create window from IPC event with pre-mapped SHM
     /// This takes ownership of the SharedMemory object passed from the IPC thread
+    pub fn create_extension_window(
+        &mut self,
+        id: WindowId,
+        x: i32,
+        y: i32,
+        width: u32,
+        height: u32,
+        shm: SharedMemory,
+        shm_mapped_addr: Option<usize>,
+        shm_size: usize,
+        extension_id: u32,
+        external_client_id: u32,
+    ) -> Result<WindowId, &'static str> {
+        if id >= self.next_window_id {
+            self.next_window_id = id + 1;
+        }
+
+        println!(
+            "[WindowManager] Creating extension window #{} from IPC event with SHM at 0x{:x?} (ext_id={}, ext_client_id={})",
+            id, shm_mapped_addr, extension_id, external_client_id
+        );
+
+        let window = Window {
+            id,
+            app_id: None,
+            parent: None,
+            transient_flags: 0,
+            x,
+            y,
+            width,
+            height,
+            size_limits: WindowSizeLimits::default(),
+            title: None,
+            visible: true,
+            focused: false,
+            buffer: None,
+            shm: Some(shm),
+            shm_mapped_addr,
+            shm_size,
+            shm_offset: 0,
+            shm_stride: width.saturating_mul(4),
+            shm_format: 0,
+            window_type: WindowType::default(),
+            minimized: false,
+            maximized: false,
+            saved_geometry: None,
+            opacity: 1.0,
+            resizable: true,
+            active_on_focus: true,
+            has_alpha_content: false,
+            raise_on_focus: true,
+            extension_owner: Some((extension_id, external_client_id)),
+        };
+        self.windows.push(window);
+
+        Ok(id)
+    }
+
+    /// Create window from IPC event with pre-mapped SHM
+    /// This takes ownership of the SharedMemory object passed from the IPC thread
     pub fn create_window_with_shm_from_event(
         &mut self,
         id: WindowId,
@@ -429,6 +513,9 @@ impl WindowManager {
             shm: Some(shm),
             shm_mapped_addr,
             shm_size,
+            shm_offset: 0,
+            shm_stride: width.saturating_mul(4),
+            shm_format: 0,
             window_type: WindowType::default(),
             minimized: false,
             maximized: false,
@@ -438,10 +525,47 @@ impl WindowManager {
             active_on_focus: true,
             has_alpha_content: false, // Default to opaque content
             raise_on_focus: true,     // Default: Normal windows raise on focus
+            extension_owner: None,
         };
         self.windows.push(window);
 
         Ok(id)
+    }
+
+    /// Replace the SHM backing store for an existing window.
+    pub fn replace_window_shm_from_event(
+        &mut self,
+        id: WindowId,
+        width: u32,
+        height: u32,
+        offset: i32,
+        stride: i32,
+        format: u32,
+        shm: SharedMemory,
+        shm_mapped_addr: Option<usize>,
+        shm_size: usize,
+    ) -> Result<(), &'static str> {
+        let window = self
+            .windows
+            .iter_mut()
+            .find(|window| window.id == id)
+            .ok_or("Window not found")?;
+
+        window.width = width;
+        window.height = height;
+        window.buffer = None;
+        window.shm = Some(shm);
+        window.shm_mapped_addr = shm_mapped_addr;
+        window.shm_size = shm_size;
+        window.shm_offset = offset.max(0) as usize;
+        window.shm_stride = if stride > 0 {
+            stride as u32
+        } else {
+            width.saturating_mul(4)
+        };
+        window.shm_format = format;
+        window.has_alpha_content = format == 0;
+        Ok(())
     }
 
     /// Create window without buffer (for testing)
@@ -797,6 +921,9 @@ impl WindowManager {
             w.shm = Some(shm);
             w.shm_mapped_addr = shm_mapped_addr;
             w.shm_size = shm_size;
+            w.shm_offset = 0;
+            w.shm_stride = width.saturating_mul(4);
+            w.shm_format = 0;
             true
         } else {
             false
