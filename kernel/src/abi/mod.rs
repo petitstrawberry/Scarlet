@@ -435,20 +435,11 @@ impl AbiRegistry {
         }
     }
 
-    #[allow(static_mut_refs)]
     pub fn global() -> &'static Mutex<AbiRegistry> {
-        // Lazy initialization using spin lock
-        static mut INSTANCE: Option<Mutex<AbiRegistry>> = None;
-        static INIT: spin::Once = spin::Once::new();
+        // Thread-safe lazy initialization using spin::Once
+        static INSTANCE: spin::Once<Mutex<AbiRegistry>> = spin::Once::new();
 
-        unsafe {
-            INIT.call_once(|| {
-                INSTANCE = Some(Mutex::new(AbiRegistry::new()));
-            });
-
-            // Safe to access after INIT.call_once is called
-            INSTANCE.as_ref().unwrap()
-        }
+        INSTANCE.call_once(|| Mutex::new(AbiRegistry::new()))
     }
 
     pub fn register<T>()

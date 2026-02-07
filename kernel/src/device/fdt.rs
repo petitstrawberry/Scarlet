@@ -352,6 +352,26 @@ impl<'a> FdtManager<'a> {
             MemoryArea::new(start as usize, start + size - 1), // end is inclusive
         )
     }
+
+    pub fn get_cpu_count(&self) -> Option<usize> {
+        let fdt = self.get_fdt()?;
+        let cpus = fdt.find_node("/cpus")?;
+
+        let mut count = 0usize;
+        for cpu in cpus.children() {
+            if let Some(dev_type) = cpu.property("device_type") {
+                if bytes_to_cstr(dev_type.value)
+                    .map(|s| s != "cpu")
+                    .unwrap_or(false)
+                {
+                    continue;
+                }
+            }
+            count += 1;
+        }
+
+        if count == 0 { None } else { Some(count) }
+    }
 }
 
 /// Initializes the FDT subsystem with the given address.
@@ -496,11 +516,19 @@ pub fn create_bootinfo_from_fdt(cpu_id: usize, relocated_fdt_addr: usize) -> Boo
         .get_fdt()
         .and_then(|fdt| fdt.chosen().bootargs());
 
+    let cpu_count = fdt_manager.get_cpu_count().unwrap_or(1);
+
     BootInfo::new(
         cpu_id,
+        cpu_count,
         usable_memory,
         relocated_initramfs,
         cmdline,
         DeviceSource::Fdt(relocated_fdt_addr),
     )
+}
+
+fn bytes_to_cstr(bytes: &[u8]) -> Option<&str> {
+    let len = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
+    core::str::from_utf8(&bytes[..len]).ok()
 }

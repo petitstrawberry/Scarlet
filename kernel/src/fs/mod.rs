@@ -621,7 +621,7 @@ pub trait FileSystemDriver: Send + Sync {
 }
 
 /// Singleton for global access to the FileSystemDriverManager
-static mut FS_DRIVER_MANAGER: Option<FileSystemDriverManager> = None;
+static FS_DRIVER_MANAGER: spin::Once<FileSystemDriverManager> = spin::Once::new();
 
 /// Global filesystem driver manager singleton
 ///
@@ -637,14 +637,8 @@ static mut FS_DRIVER_MANAGER: Option<FileSystemDriverManager> = None;
 ///
 /// This function is marked as unsafe due to static mutable access, but
 /// the returned manager uses internal synchronization for thread safety.
-#[allow(static_mut_refs)]
-pub fn get_fs_driver_manager() -> &'static mut FileSystemDriverManager {
-    unsafe {
-        if FS_DRIVER_MANAGER.is_none() {
-            FS_DRIVER_MANAGER = Some(FileSystemDriverManager::new());
-        }
-        FS_DRIVER_MANAGER.as_mut().unwrap()
-    }
+pub fn get_fs_driver_manager() -> &'static FileSystemDriverManager {
+    FS_DRIVER_MANAGER.call_once(|| FileSystemDriverManager::new())
 }
 
 /// Global filesystem driver manager singleton

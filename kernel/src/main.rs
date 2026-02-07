@@ -371,6 +371,9 @@ pub struct BootInfo {
     /// CPU/Hart ID of the boot processor
     /// Used for multicore initialization and per-CPU data structures
     pub cpu_id: usize,
+    /// Number of CPUs detected at runtime (from FDT)
+    /// Used to drive SMP initialization and per-CPU resource sizing
+    pub cpu_count: usize,
     /// Usable memory area available for kernel allocation
     /// Excludes reserved regions, firmware areas, and kernel image
     pub usable_memory: MemoryArea,
@@ -401,6 +404,7 @@ impl BootInfo {
     /// A new BootInfo instance containing the specified boot parameters
     pub fn new(
         cpu_id: usize,
+        cpu_count: usize,
         usable_memory: MemoryArea,
         initramfs: Option<MemoryArea>,
         cmdline: Option<&'static str>,
@@ -408,6 +412,7 @@ impl BootInfo {
     ) -> Self {
         Self {
             cpu_id,
+            cpu_count,
             usable_memory,
             initramfs,
             cmdline,
@@ -507,9 +512,11 @@ impl BootInfo {
 #[unsafe(no_mangle)]
 pub extern "C" fn start_kernel(boot_info: &BootInfo) -> ! {
     let cpu_id = boot_info.cpu_id;
+    let cpu_count = boot_info.cpu_count;
 
     early_println!("[Scarlet Kernel] Hello, I'm Scarlet kernel!");
     early_println!("[Scarlet Kernel] Boot on CPU {}", cpu_id);
+    early_println!("[Scarlet Kernel] Detected {} CPU(s)", cpu_count);
     /* Use usable memory area from BootInfo */
     let usable_area = boot_info.usable_memory;
     early_println!(
