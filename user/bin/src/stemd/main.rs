@@ -655,10 +655,12 @@ fn launch_service(service: &Service) -> Result<i32, &'static str> {
             // Child process: execute the service
             // println!("stemd: Executing: {}", service.exec);
 
+            // DEBUG: Keep sbusd's output visible for debugging
             if let Some(tty) = &service.tty {
                 try_attach_stdio_to_tty(tty);
             } else {
-                try_attach_stdio_to_null();
+                // For now, keep stdout/stderr on tty for debugging
+                // try_attach_stdio_to_null();
             }
 
             fence(core::sync::atomic::Ordering::SeqCst);
@@ -1458,6 +1460,49 @@ fn main() -> i32 {
     // Directory structure:
     //   /etc/stemd.d/services/*.toml  - Service definitions
     //   /etc/stemd.d/apps/*.desktop   - Application definitions
+
+    // DEBUG: Diagnose filesystem visibility
+    println!("stemd: DEBUG: Diagnosing filesystem visibility...");
+    let diag_paths = [
+        "/",
+        "/etc",
+        "/etc/stemd.d",
+        "/etc/stemd.d/services",
+        "/system",
+        "/system/scarlet",
+        "/system/scarlet/etc",
+        "/system/scarlet/etc/stemd.d",
+        "/system/scarlet/etc/stemd.d/services",
+        "/bin",
+        "/tmp",
+        "/dev",
+        "/scarlet",
+        "/scarlet/system",
+        "/scarlet/system/scarlet",
+        "/scarlet/system/scarlet/etc",
+        "/scarlet/system/scarlet/etc/stemd.d",
+        "/scarlet/system/scarlet/etc/stemd.d/services",
+    ];
+    for path in &diag_paths {
+        match std::fs::list_directory(path) {
+            Ok(entries) => {
+                let mut count = 0;
+                for entry in &entries {
+                    if entry.name != "." && entry.name != ".." {
+                        println!("stemd: DEBUG:   {} -> {}", path, entry.name);
+                        count += 1;
+                    }
+                }
+                if count == 0 {
+                    println!("stemd: DEBUG:   {} -> (empty)", path);
+                }
+            }
+            Err(_) => {
+                println!("stemd: DEBUG: {} -> FAILED to list", path);
+            }
+        }
+    }
+
     let config_dirs = [
         "/etc/stemd.d/services",
         "/system/scarlet/etc/stemd.d/services",

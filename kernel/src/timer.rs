@@ -20,18 +20,26 @@ pub struct KernelTimer {
     pub interval: u64,
 }
 
-static mut KERNEL_TIMER: Option<KernelTimer> = None;
+/// Thread-safe wrapper for `KernelTimer`.
+///
+/// Per-CPU timer access is inherently safe because each CPU only accesses
+/// its own element of `core_local_timer[cpu_id]`.  The `UnsafeCell` allows
+/// `&mut` access without a lock, and `spin::Once` guarantees one-time init.
+struct KernelTimerCell(core::cell::UnsafeCell<KernelTimer>);
+// SAFETY: Each CPU only touches its own `core_local_timer[cpu_id]` slot,
+// so no two CPUs access the same mutable state concurrently.
+unsafe impl Sync for KernelTimerCell {}
+
+static KERNEL_TIMER: spin::Once<KernelTimerCell> = spin::Once::new();
+
+fn kernel_timer_cell() -> &'static KernelTimerCell {
+    KERNEL_TIMER.call_once(|| KernelTimerCell(core::cell::UnsafeCell::new(KernelTimer::new())))
+}
 
 pub fn get_kernel_timer() -> &'static mut KernelTimer {
-    unsafe {
-        match KERNEL_TIMER {
-            Some(ref mut t) => t,
-            None => {
-                KERNEL_TIMER = Some(KernelTimer::new());
-                get_kernel_timer()
-            }
-        }
-    }
+    // SAFETY: Per-CPU access pattern — each CPU only modifies its own
+    // timer slot.  The `spin::Once` guarantees single initialization.
+    unsafe { &mut *kernel_timer_cell().0.get() }
 }
 
 impl KernelTimer {

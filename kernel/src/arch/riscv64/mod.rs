@@ -593,6 +593,23 @@ pub fn disable_interrupt() {
     }
 }
 
+/// Set `sstatus.SPIE` without touching `SIE`.
+///
+/// This prepares the kernel trap return path so that the upcoming `sret`
+/// atomically re-enables interrupts (`SIE = SPIE`) without opening a
+/// window for nested interrupts while still inside the handler's call chain.
+///
+/// MUST be called instead of `enable_interrupt()` when returning from a
+/// context switch that resumes inside a kernel trap handler
+/// (`_kernel_trap_entry` → … → `schedule()` → `switch_to()` → here).
+#[inline(always)]
+pub fn prepare_kernel_trap_return() {
+    const SPIE: usize = 1 << 5;
+    unsafe {
+        asm!("csrs sstatus, {0}", in(reg) SPIE, options(nostack));
+    }
+}
+
 /// Full memory barrier for normal memory (RAM).
 ///
 /// This orders previous reads/writes before subsequent reads/writes.
@@ -801,4 +818,30 @@ pub fn send_ipi(cpu_id: usize) {
     let hart_id = cpu_id_to_physical_id(cpu_id);
     let hart_mask: usize = 1 << hart_id;
     let _ = sbi_send_ipi(hart_mask, 0);
+}
+
+/// Initialize a secondary CPU (AP).
+///
+/// Registers the physical CPU, sets up the per-CPU arch struct, and
+/// initializes trap handling.  Returns the assigned kernel CPU_ID.
+///
+/// # Arguments
+///
+/// * `physical_id` - The physical CPU identifier (hart ID on RISC-V)
+#[allow(static_mut_refs)]
+pub fn init_secondary_cpu(physical_id: usize) -> usize {
+    let cpu_id = register_cpu(physical_id);
+
+    // Set up per-CPU arch struct indexed by CPU_ID.
+    // SAFETY: Each CPU_ID is unique (assigned by atomic counter), so no
+    // two CPUs access the same element concurrently.
+    let cpu_arch: &mut Riscv64 =
+        unsafe { core::mem::transmute(&CPUS[cpu_id] as *const _ as usize) };
+    cpu_arch.set_ids(physical_id, cpu_id);
+
+    // Initialize trap handling — sets stvec, sscratch, enables FPU/Vector.
+    // Interrupts remain disabled.
+    trap_init(cpu_arch);
+
+    cpu_id
 }

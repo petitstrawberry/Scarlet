@@ -156,14 +156,18 @@ pub fn sys_clone(trapframe: &mut Trapframe) -> usize {
                 child_task.vcpu.set_tls_pointer(tls_ptr);
             }
 
+            // Set parent ID on the child BEFORE add_task() so that if
+            // another CPU schedules the child immediately (via IPI), the
+            // child already knows its parent.  Without this, a fast exit()
+            // on the child would see no parent and become Terminated instead
+            // of Zombie, leaking waitpid state.
+            child_task.set_parent_id(parent_id);
+
             // Add child to scheduler and get the allocated ID
             let child_id = scheduler.add_task(child_task, cpu_id);
-            // crate::println!("[CLONE] Child task {} added to scheduler", child_id);
 
-            // Establish parent-child relationship now that both have valid IDs
-            if let Some(child) = scheduler.get_task_by_id(child_id) {
-                child.set_parent_id(parent_id);
-            }
+            // Add the child to the parent's children list.  The parent is
+            // the current task on this CPU so there is no race here.
             if let Some(parent) = scheduler.get_task_by_id(parent_id) {
                 parent.add_child(child_id);
             }
@@ -231,8 +235,6 @@ pub fn sys_set_tid_address(trapframe: &mut Trapframe) -> usize {
 
 pub fn sys_execve(trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
-
-    // crate::println!("[EXECVE] Task {} starting execve", task.get_id());
 
     // Increment PC to avoid infinite loop if execve fails
     trapframe.increment_pc_next(task);

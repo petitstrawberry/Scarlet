@@ -12,15 +12,17 @@ pub struct Stimer {
 
 impl Stimer {
     pub fn new() -> Self {
-        let freq = InterruptManager::with_manager(|manager| {
-            let cpu_id = get_cpu().get_cpuid() as u32;
-            match manager.get_timer_frequency_hz(cpu_id) {
+        // Query timer frequency from any available local controller.
+        // All harts on RISC-V share the same timebase, so we ask for
+        // CPU 0's controller which is always registered by the BSP
+        // before any Stimer is constructed.
+        let freq =
+            InterruptManager::with_manager(|manager| match manager.get_timer_frequency_hz(0) {
                 Ok(freq) => freq,
                 Err(e) => {
                     panic!("Failed to get timer frequency: {}", e);
                 }
-            }
-        });
+            });
 
         Stimer {
             next_event: 0,

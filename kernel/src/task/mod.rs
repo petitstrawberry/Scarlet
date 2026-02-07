@@ -139,9 +139,16 @@ pub fn get_parent_waitpid_waker(parent_id: usize) -> &'static Waker {
 /// * `task_id` - The ID of the task that has exited
 pub fn wake_task_waiters(task_id: usize) {
     let wakers_mutex = WAITPID_WAKERS.call_once(init_waitpid_wakers);
-    let wakers = wakers_mutex.lock();
-    if let Some(waker) = wakers.get(&task_id) {
-        waker.wake_all();
+    let waker_ptr = {
+        let wakers = wakers_mutex.lock();
+        wakers.get(&task_id).map(|w| w as *const Waker)
+    };
+    // Lock is dropped here — call wake_all() without holding WAITPID_WAKERS
+    // to avoid ABBA deadlock with SCHED_LOCK.
+    if let Some(ptr) = waker_ptr {
+        // SAFETY: The Waker is stored in a BTreeMap that is never dropped and
+        // the Waker is never moved, so the pointer remains valid.
+        unsafe { &*ptr }.wake_all();
     }
 }
 
@@ -154,9 +161,16 @@ pub fn wake_task_waiters(task_id: usize) {
 /// * `parent_id` - The ID of the parent task
 pub fn wake_parent_waiters(parent_id: usize) {
     let wakers_mutex = PARENT_WAITPID_WAKERS.call_once(init_parent_waitpid_wakers);
-    let wakers = wakers_mutex.lock();
-    if let Some(waker) = wakers.get(&parent_id) {
-        waker.wake_all();
+    let waker_ptr = {
+        let wakers = wakers_mutex.lock();
+        wakers.get(&parent_id).map(|w| w as *const Waker)
+    };
+    // Lock is dropped here — call wake_all() without holding PARENT_WAITPID_WAKERS
+    // to avoid ABBA deadlock with SCHED_LOCK.
+    if let Some(ptr) = waker_ptr {
+        // SAFETY: The Waker is stored in a BTreeMap that is never dropped and
+        // the Waker is never moved, so the pointer remains valid.
+        unsafe { &*ptr }.wake_all();
     }
 }
 
@@ -1388,6 +1402,9 @@ impl Task {
         let all_task_ids = scheduler.get_all_task_ids();
 
         // Terminate all tasks with the same TGID (except self)
+        // Collect sibling IDs first, then terminate them via the scheduler's
+        // cleanup path so they are properly removed from all queues.
+        let mut siblings_to_terminate: alloc::vec::Vec<usize> = alloc::vec::Vec::new();
         for task_id in all_task_ids {
             if task_id == my_id {
                 continue; // Skip self
@@ -1395,25 +1412,22 @@ impl Task {
 
             if let Some(task) = scheduler.get_task_by_id(task_id) {
                 if task.get_tgid() == tgid {
-                    // Terminate this thread group member
-                    crate::println!(
-                        "[exit_group] Task {} terminating sibling task {} (TGD={})",
-                        my_id,
-                        task_id,
-                        tgid
-                    );
-                    // Set state to Terminated directly (bypass normal exit)
-                    // Use unsafe to modify state through immutable reference
-                    // This is safe because we're in a termination context
-                    let task_ptr = task as *const Task as *mut Task;
-                    unsafe {
-                        (*task_ptr).state = TaskState::Terminated;
-                        (*task_ptr).exit_status = Some(status);
-                        // Close handles to prevent resource leaks
-                        (*task_ptr).handle_table.close_all();
-                    }
+                    // Mark as Terminated and record exit status.
+                    // get_task_by_id returns &mut Task so no unsafe needed.
+                    task.state = TaskState::Terminated;
+                    task.exit_status = Some(status);
+                    task.handle_table.close_all();
+                    siblings_to_terminate.push(task_id);
                 }
             }
+        }
+
+        // Remove terminated siblings from all scheduler queues and the task
+        // pool.  cleanup_zombie_task acquires SCHED_LOCK internally and
+        // removes from ready/blocked/zombie queues + task pool atomically.
+        for task_id in siblings_to_terminate {
+            scheduler.cleanup_zombie_task(task_id);
+            cleanup_task_waker(task_id);
         }
 
         // Now exit the current task normally
@@ -1438,6 +1452,11 @@ impl Task {
                 let status = child_task.get_exit_status().unwrap_or(-1);
                 child_task.set_state(TaskState::Terminated);
                 self.remove_child(child_id);
+                // Clean up the zombie task: remove from zombie queue and task
+                // pool so that resources are freed.  Also clean up the per-task
+                // waker entry.
+                get_scheduler().cleanup_zombie_task(child_id);
+                cleanup_task_waker(child_id);
                 Ok(status)
             } else {
                 Err(WaitError::ChildNotExited(

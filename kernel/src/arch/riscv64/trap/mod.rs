@@ -28,13 +28,16 @@ pub fn print_traplog(tf: &Trapframe) {
     }
     let spp = (status >> 8) & 0b1;
 
-    early_println!("trapframe:\n{:#x?}", tf);
-    early_println!("cause: {}", cause);
-    early_println!("tval: 0x{:x}", tval);
-    early_println!("status: 0x{:x}", status);
-    early_println!("spp: {}", spp);
-    early_println!("sepc: 0x{:x}", sepc);
-    early_println!("stvec: 0x{:x}", stvec);
-    early_println!("satp: 0x{:x}", satp);
-    early_println!("sscratch: 0x{:x}", sscratch);
+    early_println!(
+        "traplog: cause={} tval={:#x} status={:#x} spp={} epc(tf)={:#x} sepc={:#x} stvec={:#x} satp={:#x} sscratch={:#x}",
+        cause,
+        tval,
+        status,
+        spp,
+        tf.epc,
+        sepc,
+        stvec,
+        satp,
+        sscratch
+    );
 }

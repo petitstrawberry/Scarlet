@@ -9,6 +9,7 @@
 use crate::{
     arch::Trapframe,
     fs::{VfsManager, drivers::overlayfs::OverlayFS},
+    sched::scheduler::get_scheduler,
     task::{CloneFlags, mytask},
 };
 use alloc::{
@@ -524,7 +525,20 @@ pub fn syscall_dispatcher(trapframe: &mut Trapframe) -> Result<usize, &'static s
     let pc = trapframe.get_current_pc() as usize;
 
     // 2. Get mutable reference to current task
-    let task = mytask().unwrap();
+    let task = match mytask() {
+        Some(t) => t,
+        None => {
+            let cpu_id = crate::arch::get_cpu().get_cpuid();
+            let tid = get_scheduler().get_current_task_id(cpu_id);
+            crate::early_println!(
+                "[BUG] syscall_dispatcher: mytask() returned None, cpu={} current_task_id={:?} epc={:#x}",
+                cpu_id,
+                tid,
+                pc
+            );
+            return Err("No current task for syscall");
+        }
+    };
 
     // 3. Resolve the appropriate ABI based on PC address
     let abi_module = task.resolve_abi_mut(pc);

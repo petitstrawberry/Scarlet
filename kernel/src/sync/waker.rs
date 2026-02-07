@@ -113,26 +113,21 @@ impl Waker {
     /// 1. Set task state to Blocked BEFORE adding to queue
     /// 2. This ensures wake_task() can safely operate even if called immediately
     pub fn wait(&self, task_id: usize, trapframe: &mut Trapframe) {
-        // CRITICAL: Set task state to Blocked FIRST, before adding to queue
-        // This prevents race condition where wake_one() is called after queue.push_back()
-        // but before set_state(), which would leave the task in Running state but not in queue
-        if let Some(task) = get_scheduler().get_task_by_id(task_id) {
-            task.set_state(TaskState::Blocked(self.block_type));
-        } else {
-            panic!("[WAKER] Task ID {} not found in scheduler", task_id);
-        }
-
-        // Memory barrier to ensure state change is visible before queue operation
-        core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
-
-        // Now add task to wait queue - at this point task is already Blocked
-        // Even if wake_one() is called immediately, wake_task() will work correctly
+        // Set the task state to Blocked and add to wait queue atomically
+        // (under the wait_queue lock) to minimize the window where a wake
+        // could miss this task.
         {
             let mut queue = self.wait_queue.lock();
+            if let Some(task) = get_scheduler().get_task_by_id(task_id) {
+                task.set_state(TaskState::Blocked(self.block_type));
+            } else {
+                panic!("[WAKER] Task ID {} not found in scheduler", task_id);
+            }
             queue.push_back(task_id);
         }
 
-        // Memory barrier to ensure queue addition is visible before yielding
+        // Memory barrier to ensure state change and queue addition are
+        // visible before yielding to the scheduler.
         core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
 
         // Yield CPU to scheduler - returns when woken

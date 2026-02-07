@@ -305,14 +305,16 @@ use vm::{kernel_vm_init, vmem::MemoryArea};
 #[cfg(not(test))]
 #[panic_handler]
 fn panic(info: &core::panic::PanicInfo) -> ! {
+    use crate::earlycon::{print_unlocked, release_console_lock, try_acquire_console_lock};
     use arch::instruction::idle;
 
-    crate::early_println!("[Scarlet Kernel] panic: {}", info);
-
-    // if let Some(task) = get_scheduler().get_current_task(get_cpu().get_cpuid()) {
-    //     task.exit(1); // Exit the task with error code 1
-    //     get_scheduler().schedule(get_cpu());
-    // }
+    // Try to acquire the console lock; if another CPU holds it, force output
+    // anyway to ensure the panic message is visible.
+    let lock_state = try_acquire_console_lock();
+    print_unlocked(format_args!("[Scarlet Kernel] panic: {}\n", info));
+    if let Some(was_enabled) = lock_state {
+        release_console_lock(was_enabled);
+    }
 
     loop {
         idle();
@@ -742,10 +744,14 @@ pub extern "C" fn start_kernel(boot_info: &BootInfo) -> ! {
 
     early_println!("[Scarlet Kernel] About to fence before scheduler start...");
     fence(Ordering::SeqCst); // Ensure task is added to scheduler before proceeding
-    early_println!("[Scarlet Kernel] Fence complete; about to print scheduler start...");
+
+    // All shared subsystems are ready.  Allow secondary CPUs to enable
+    // their timers and start taking interrupts.
+    early_println!("[SMP] Releasing secondary CPUs...");
+    AP_CAN_RUN.store(true, Ordering::Release);
+    fence(Ordering::SeqCst);
 
     // Use early_println here to avoid any potential console lock issues.
-    early_println!("[Scarlet Kernel] Scheduler will start...");
     early_println!("[Scarlet Kernel] Calling start_scheduler()...");
 
     let next_task_id = get_scheduler().start_scheduler();
@@ -761,35 +767,55 @@ pub extern "C" fn start_kernel(boot_info: &BootInfo) -> ! {
     }
 }
 
+/// Flag set by the BSP after all shared subsystems (scheduler, VFS, init
+/// task) are fully initialized.  Secondary CPUs must not enable their
+/// timers or interrupts until this flag is `true`, because timer ticks
+/// call into the scheduler and other subsystems that are not yet ready.
+static AP_CAN_RUN: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
 #[unsafe(no_mangle)]
 pub extern "C" fn start_ap(hartid: usize) {
-    use core::mem::transmute;
+    use core::sync::atomic::{AtomicBool, Ordering};
 
-    // Register this hart and obtain a sequential CPU_ID.
-    let cpu_id = crate::arch::riscv64::register_cpu(hartid);
+    // Serialize AP initialization — only one secondary CPU initializes at a
+    // time.  This prevents races on shared global state (KernelTimer,
+    // InterruptManager, console output) that is not fully reentrant.
+    static AP_INIT_LOCK: AtomicBool = AtomicBool::new(false);
+    while AP_INIT_LOCK
+        .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
+        .is_err()
+    {
+        core::hint::spin_loop();
+    }
+
+    // Register this CPU and perform arch-specific initialization.
+    let cpu_id = crate::arch::init_secondary_cpu(hartid);
     early_println!(
-        "[SMP] Hart {}: online as CPU {} — initializing...",
+        "[SMP] Physical CPU {}: online as CPU {} — initializing...",
         hartid,
         cpu_id
     );
 
-    // Set up per-CPU arch struct indexed by CPU_ID.
-    let riscv: &mut crate::arch::Arch =
-        unsafe { transmute(&crate::arch::riscv64::CPUS[cpu_id] as *const _ as usize) };
-    riscv.set_ids(hartid, cpu_id);
+    early_println!("[SMP] CPU {} is up and running", cpu_id);
 
-    // Initialize trap handling (also enables FPU/Vector).
-    crate::arch::riscv64::trap_init(riscv);
+    // Release the init lock so the next AP can proceed.
+    AP_INIT_LOCK.store(false, Ordering::Release);
 
-    // Initialize the per-CPU timer.
+    // ---------------------------------------------------------------
+    // Wait for the BSP to finish initializing all shared subsystems
+    // (scheduler, VFS, init task).  Only then is it safe to enable
+    // timer interrupts, because the tick handler calls into those
+    // subsystems.
+    // ---------------------------------------------------------------
+    while !AP_CAN_RUN.load(Ordering::Acquire) {
+        core::hint::spin_loop();
+    }
+
+    // Now it is safe to start the per-CPU timer and enable interrupts.
     let timer = get_kernel_timer();
     timer.set_interval_us(cpu_id, crate::timer::TICK_INTERVAL_US);
     timer.start(cpu_id);
-
-    // Enable interrupts on this CPU.
     crate::arch::enable_interrupt();
-
-    early_println!("[SMP] CPU {} is up and running", cpu_id);
 
     // Enter idle loop — this CPU will pick up work via IPI / timer.
     loop {

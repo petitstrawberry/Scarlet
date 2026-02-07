@@ -442,6 +442,16 @@ pub fn disable_interrupt() {
     }
 }
 
+/// Prepare for returning through a kernel trap handler frame.
+///
+/// On AArch64 the kernel trap entry/exit asm saves and restores `spsr_el1`
+/// on the stack, so the original PSTATE (with IRQs enabled) is automatically
+/// restored by `eret`.  Nothing extra is needed here.
+#[inline(always)]
+pub fn prepare_kernel_trap_return() {
+    // No-op on AArch64; eret restores SPSR_EL1 from the saved frame.
+}
+
 pub fn get_cpu() -> &'static mut Aarch64 {
     // Prefer the EL1 thread pointer (kept at the kernel-mapped Arch address).
     let tpidr_el1: usize;
@@ -702,6 +712,20 @@ pub fn boot_secondary_cpus(_bsp_physical_id: usize, _num_cpus: usize) {
 /// Send an IPI to a specific CPU — stub for aarch64.
 pub fn send_ipi(_cpu_id: usize) {
     // TODO: Implement GIC-based IPI
+}
+
+/// Initialize a secondary CPU (AP).
+///
+/// Registers the physical CPU and performs arch-specific setup.
+/// Returns the assigned kernel CPU_ID.
+///
+/// # Arguments
+///
+/// * `physical_id` - The physical CPU identifier (MPIDR affinity on AArch64)
+pub fn init_secondary_cpu(physical_id: usize) -> usize {
+    let cpu_id = register_cpu(physical_id);
+    // TODO: aarch64-specific per-CPU setup (GIC, trap vectors, etc.)
+    cpu_id
 }
 
 /// Save the kernel page-table base register — stub for aarch64.

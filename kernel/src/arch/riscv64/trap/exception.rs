@@ -4,9 +4,35 @@ use core::panic;
 use crate::abi::syscall_dispatcher;
 use crate::arch::trap::print_traplog;
 use crate::arch::{Trapframe, get_cpu};
+use crate::early_println;
 use crate::println;
 use crate::sched::scheduler::get_scheduler;
 use crate::task::mytask;
+
+/// Helper: get the current task or log a diagnostic and reschedule.
+///
+/// When `get_current_task()` returns `None` it means the CPU has no valid
+/// current task — e.g. after a race during task teardown.  Rather than
+/// panicking, we force a reschedule so the CPU picks up its idle task.
+macro_rules! current_task_or_reschedule {
+    ($trapframe:expr, $cause:expr) => {{
+        let cpu_id = get_cpu().get_cpuid();
+        let sched = get_scheduler();
+        match sched.get_current_task(cpu_id) {
+            Some(t) => t,
+            None => {
+                early_println!(
+                    "[BUG] user exception handler: no current task on cpu={} cause={} epc={:#x}",
+                    cpu_id,
+                    $cause,
+                    $trapframe.epc
+                );
+                sched.schedule($trapframe);
+                return;
+            }
+        }
+    }};
+}
 
 fn log_fatal_page_fault_context(
     trapframe: &Trapframe,
@@ -42,8 +68,7 @@ pub fn arch_exception_handler(trapframe: &mut Trapframe, cause: usize) {
     match cause {
         /* Illegal instruction (used for lazy FP/Vector enable) */
         2 => {
-            let sched = get_scheduler();
-            let task = sched.get_current_task(get_cpu().get_cpuid()).unwrap();
+            let task = current_task_or_reschedule!(trapframe, cause);
 
             let user_fpu_allowed = crate::arch::user_fpu_enabled();
             let user_vec_allowed = crate::arch::user_vector_enabled();
@@ -179,15 +204,16 @@ pub fn arch_exception_handler(trapframe: &mut Trapframe, cause: usize) {
                     // panic!("Syscall error: {}", msg);
                     println!("Syscall error: {}", msg);
                     trapframe.set_return_value(usize::MAX); // Set error code: -1
-                    trapframe.increment_pc_next(mytask().unwrap());
+                    if let Some(task) = mytask() {
+                        trapframe.increment_pc_next(task);
+                    }
                 }
             }
         }
         /* Instruction page fault */
         12 => {
             let mut vaddr = trapframe.epc as usize;
-            let sched = get_scheduler();
-            let task = sched.get_current_task(get_cpu().get_cpuid()).unwrap();
+            let task = current_task_or_reschedule!(trapframe, cause);
             use crate::object::capability::memory_mapping::{AccessKind, AccessOp};
             loop {
                 let access = AccessKind {
@@ -227,8 +253,7 @@ pub fn arch_exception_handler(trapframe: &mut Trapframe, cause: usize) {
             unsafe {
                 asm!("csrr {}, stval", out(reg) vaddr);
             }
-            let sched = get_scheduler();
-            let task = sched.get_current_task(get_cpu().get_cpuid()).unwrap();
+            let task = current_task_or_reschedule!(trapframe, cause);
             use crate::object::capability::memory_mapping::{AccessKind, AccessOp};
             loop {
                 let op = if cause == 13 {

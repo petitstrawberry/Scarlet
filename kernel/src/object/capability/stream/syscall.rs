@@ -98,6 +98,6 @@ pub fn sys_stream_write(trapframe: &mut Trapframe) -> usize {
     let buffer = unsafe { core::slice::from_raw_parts(buf_ptr, count) };
     match stream.write(buffer) {
         Ok(bytes_written) => bytes_written,
-        Err(_) => usize::MAX, // Write error
+        Err(_) => usize::MAX,
     }
 }

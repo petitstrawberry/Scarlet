@@ -11,12 +11,12 @@ extern crate scarlet_std as std;
 
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
-use sbus::{DEFAULT_SOCKET_PATH};
+use sbus::DEFAULT_SOCKET_PATH;
 use std::io::{Read, Write};
 use std::socket::Socket;
 
 // Re-export sbus types for convenience
-pub use sbus::{Message, MessageHeader, Argument};
+pub use sbus::{Argument, Message, MessageHeader};
 
 /// Connection error types
 #[derive(Debug)]
@@ -47,19 +47,27 @@ impl Connection {
 
     /// Connect to sbusd at a specific path
     pub fn connect_to_path(path: &str) -> Result<Self, Error> {
+        std::println!("sbus-client: Creating socket...");
         let mut socket = Socket::new().map_err(|_| Error::ConnectionFailed)?;
 
+        std::println!("sbus-client: Connecting to {}...", path);
         if let Err(_) = socket.connect(path) {
+            std::println!("sbus-client: Connect failed");
             return Err(Error::ConnectionFailed);
         }
+        std::println!("sbus-client: Connected successfully");
 
         // Send HELLO message
         let hello = Message::Hello {
             client_name: "sbus-client".to_string(),
         };
 
-        let bytes = hello.to_bytes().map_err(|_| Error::ProtocolError("Failed to serialize HELLO"))?;
+        std::println!("sbus-client: Sending HELLO...");
+        let bytes = hello
+            .to_bytes()
+            .map_err(|_| Error::ProtocolError("Failed to serialize HELLO"))?;
         Self::write_all(&mut socket, &bytes).map_err(|_| Error::IoError)?;
+        std::println!("sbus-client: HELLO sent ({} bytes)", bytes.len());
 
         Ok(Connection {
             socket,
@@ -69,15 +77,24 @@ impl Connection {
 
     /// Register a service
     pub fn register_service(&mut self, bus_name: &str) -> Result<(), Error> {
+        std::println!("sbus-client: Registering service: {}", bus_name);
         let msg = Message::RegisterService {
             bus_name: bus_name.to_string(),
         };
 
-        let bytes = msg.to_bytes().map_err(|_| Error::ProtocolError("Failed to serialize REGISTER_SERVICE"))?;
+        let bytes = msg
+            .to_bytes()
+            .map_err(|_| Error::ProtocolError("Failed to serialize REGISTER_SERVICE"))?;
+        std::println!(
+            "sbus-client: Sending RegisterService ({} bytes)...",
+            bytes.len()
+        );
         Self::write_all(&mut self.socket, &bytes).map_err(|_| Error::IoError)?;
+        std::println!("sbus-client: RegisterService sent, waiting for response...");
 
         // Wait for acknowledgment
         self.wait_for_response().map_err(|_| Error::IoError)?;
+        std::println!("sbus-client: Got response for RegisterService");
 
         Ok(())
     }
@@ -88,7 +105,9 @@ impl Connection {
             bus_name: bus_name.to_string(),
         };
 
-        let bytes = msg.to_bytes().map_err(|_| Error::ProtocolError("Failed to serialize UNREGISTER_SERVICE"))?;
+        let bytes = msg
+            .to_bytes()
+            .map_err(|_| Error::ProtocolError("Failed to serialize UNREGISTER_SERVICE"))?;
         Self::write_all(&mut self.socket, &bytes).map_err(|_| Error::IoError)?;
 
         Ok(())
@@ -114,7 +133,9 @@ impl Connection {
             args,
         };
 
-        let bytes = msg.to_bytes().map_err(|_| Error::ProtocolError("Failed to serialize CALL_METHOD"))?;
+        let bytes = msg
+            .to_bytes()
+            .map_err(|_| Error::ProtocolError("Failed to serialize CALL_METHOD"))?;
         Self::write_all(&mut self.socket, &bytes).map_err(|_| Error::IoError)?;
 
         // Wait for response
@@ -122,7 +143,11 @@ impl Connection {
 
         match response {
             Message::MethodReturn { serial: _, result } => Ok(result),
-            Message::MethodError { serial: _, error_name, message } => {
+            Message::MethodError {
+                serial: _,
+                error_name,
+                message,
+            } => {
                 if error_name == "org.scarlet.sbus.ServiceNotFound" {
                     Err(Error::ServiceNotFound)
                 } else {
@@ -150,7 +175,9 @@ impl Connection {
             args,
         };
 
-        let bytes = msg.to_bytes().map_err(|_| Error::ProtocolError("Failed to serialize SIGNAL"))?;
+        let bytes = msg
+            .to_bytes()
+            .map_err(|_| Error::ProtocolError("Failed to serialize SIGNAL"))?;
         Self::write_all(&mut self.socket, &bytes).map_err(|_| Error::IoError)?;
 
         Ok(())
@@ -164,19 +191,28 @@ impl Connection {
     /// Send a method return response
     pub fn send_method_return(&mut self, serial: u32, result: Vec<Argument>) -> Result<(), Error> {
         let msg = Message::MethodReturn { serial, result };
-        let bytes = msg.to_bytes().map_err(|_| Error::ProtocolError("Failed to serialize METHOD_RETURN"))?;
+        let bytes = msg
+            .to_bytes()
+            .map_err(|_| Error::ProtocolError("Failed to serialize METHOD_RETURN"))?;
         Self::write_all(&mut self.socket, &bytes).map_err(|_| Error::IoError)?;
         Ok(())
     }
 
     /// Send a method error response
-    pub fn send_method_error(&mut self, serial: u32, error_name: &str, message: &str) -> Result<(), Error> {
+    pub fn send_method_error(
+        &mut self,
+        serial: u32,
+        error_name: &str,
+        message: &str,
+    ) -> Result<(), Error> {
         let msg = Message::MethodError {
             serial,
             error_name: error_name.to_string(),
             message: message.to_string(),
         };
-        let bytes = msg.to_bytes().map_err(|_| Error::ProtocolError("Failed to serialize METHOD_ERROR"))?;
+        let bytes = msg
+            .to_bytes()
+            .map_err(|_| Error::ProtocolError("Failed to serialize METHOD_ERROR"))?;
         Self::write_all(&mut self.socket, &bytes).map_err(|_| Error::IoError)?;
         Ok(())
     }
@@ -186,16 +222,25 @@ impl Connection {
         let mut buffer = [0u8; 4096];
         let mut read_buffer = Vec::new();
 
+        std::println!("sbus-client: wait_for_response: reading header...");
+
         // Read header
         while read_buffer.len() < 16 {
             match self.socket.read(&mut buffer) {
                 Ok(0) => {
+                    std::println!("sbus-client: wait_for_response: read returned 0 (EOF)");
                     return Err(Error::IoError);
                 }
                 Ok(n) => {
+                    std::println!(
+                        "sbus-client: wait_for_response: read {} bytes (total: {})",
+                        n,
+                        read_buffer.len() + n
+                    );
                     read_buffer.extend_from_slice(&buffer[..n]);
                 }
                 Err(_e) => {
+                    std::println!("sbus-client: wait_for_response: read error, retrying...");
                     continue;
                 }
             }

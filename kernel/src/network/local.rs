@@ -427,8 +427,6 @@ impl LocalSocket {
 
             // No connection available, block the task
             self.accept_waker.wait(task_id, trapframe);
-
-            // When we reach here, task has been woken up
             // Check again if there's a connection
         }
     }

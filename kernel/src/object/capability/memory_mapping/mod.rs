@@ -95,10 +95,24 @@ pub trait MemoryMappingOps: Send + Sync {
         crate::object::capability::memory_mapping::ResolveFaultError,
     > {
         let page_vaddr = access.vaddr & !(crate::environment::PAGE_SIZE - 1);
+
+        // Validate that page_vaddr falls within the mapping's virtual range.
+        // Under SMP, a stale (cloned) mapping may no longer cover this address
+        // due to a concurrent munmap/mmap on another CPU.
+        if page_vaddr < map.vmarea.start || page_vaddr > map.vmarea.end {
+            return Err(crate::object::capability::memory_mapping::ResolveFaultError::Unmapped);
+        }
+
         let offset_in_mapping = page_vaddr - map.vmarea.start;
+        let paddr_page_base = map
+            .pmarea
+            .start
+            .checked_add(offset_in_mapping)
+            .ok_or(crate::object::capability::memory_mapping::ResolveFaultError::Invalid)?;
+
         Ok(
             crate::object::capability::memory_mapping::ResolveFaultResult {
-                paddr_page_base: map.pmarea.start + offset_in_mapping,
+                paddr_page_base,
                 is_tail: false,
             },
         )

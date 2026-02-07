@@ -220,11 +220,14 @@ pub fn execve(path: &str, argv: &[&str], envp: &[&str]) -> i32 {
     };
     let (envp_ptr_array, envp_len) = create_ptr_array_box(envp_ptrs);
 
-    let res = syscall3(
+    // Use syscall4 with flags=0 to ensure the flags argument is explicitly zeroed.
+    // syscall3 would leave register a3 undefined, which the kernel reads as flags.
+    let res = syscall4(
         Syscall::Execve,
         path_ptr,
         argv_ptr_array as usize,
         envp_ptr_array as usize,
+        0, // flags = 0 (no force ABI rebuild)
     );
 
     // If the syscall fails, we need to free the allocated memory
@@ -281,12 +284,15 @@ pub fn execve_abi(path: &str, argv: &[&str], envp: &[&str], abi: &str) -> i32 {
     let abi_boxed_slice_len = abi_boxed_slice.len();
     let abi_ptr = Box::into_raw(abi_boxed_slice) as *const u8 as usize;
 
-    let res = syscall4(
+    // Use syscall5 with flags=0 to ensure the flags argument is explicitly zeroed.
+    // syscall4 would leave register a4 undefined, which the kernel reads as flags.
+    let res = syscall5(
         Syscall::ExecveABI,
         path_ptr,
         argv_ptr_array as usize,
         envp_ptr_array as usize,
         abi_ptr,
+        0, // flags = 0 (no force ABI rebuild)
     );
 
     let _ = unsafe {

@@ -54,6 +54,8 @@ macro_rules! println {
 }
 
 pub fn _print(args: fmt::Arguments) {
+    use crate::earlycon::{acquire_console_lock, release_console_lock};
+
     let manager = DeviceManager::get_manager();
 
     // Helper: write to a specific CharDevice implementation
@@ -69,6 +71,8 @@ pub fn _print(args: fmt::Arguments) {
         }
     }
 
+    let was_enabled = acquire_console_lock();
+
     // 1) Prefer devices that advertise Serial capability (raw UART-like)
     let count = manager.get_devices_count();
     for id in 1..=count {
@@ -80,6 +84,7 @@ pub fn _print(args: fmt::Arguments) {
                 if let Some(char_dev) = dev.as_char_device() {
                     let mut writer = CharDeviceWriter(char_dev);
                     if writer.write_fmt(args).is_ok() {
+                        release_console_lock(was_enabled);
                         return;
                     }
                 }
@@ -96,6 +101,7 @@ pub fn _print(args: fmt::Arguments) {
                 if let Some(char_dev) = dev.as_char_device() {
                     let mut writer = CharDeviceWriter(char_dev);
                     if writer.write_fmt(args).is_ok() {
+                        release_console_lock(was_enabled);
                         return;
                     }
                 }
@@ -103,6 +109,8 @@ pub fn _print(args: fmt::Arguments) {
         }
     }
 
-    // Final fallback: early console
+    release_console_lock(was_enabled);
+
+    // Final fallback: early console (acquires its own lock)
     early_println!("[print] No usable character device found; using early console");
 }

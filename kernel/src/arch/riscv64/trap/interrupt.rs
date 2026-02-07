@@ -17,16 +17,20 @@ pub fn arch_interrupt_handler(trapframe: &mut Trapframe, cause: usize) {
 
 /// Handle software interrupt (IPI)
 ///
-/// Clears the SSIP bit to acknowledge the interrupt and triggers a reschedule
-/// on this CPU so that newly-enqueued tasks are picked up promptly.
+/// Clears the SSIP bit to acknowledge the interrupt and triggers an
+/// immediate reschedule on this CPU so that newly-enqueued tasks are
+/// picked up promptly.
+///
+/// Unlike timer ticks, an IPI-triggered reschedule bypasses the time-slice
+/// check — the whole point is to wake the CPU from idle (or preempt the
+/// idle task) as soon as new work arrives.
 fn handle_software_interrupt(trapframe: &mut Trapframe) {
     // Acknowledge the IPI by clearing the supervisor software interrupt pending bit.
     crate::arch::riscv64::instruction::sbi::sbi_clear_ipi();
 
-    // Trigger a reschedule so this CPU picks up any newly-enqueued work.
-    // The scheduler's on_tick() handles its own locking internally.
+    // Trigger an immediate reschedule — skip time_slice decrement.
     let scheduler = crate::sched::scheduler::get_scheduler();
-    scheduler.on_tick(get_cpu().get_cpuid(), trapframe);
+    scheduler.schedule(trapframe);
 }
 
 /// Handle timer interrupt from CLINT

@@ -219,10 +219,8 @@ fn arch_kernel_exception_handler(trapframe: &mut Trapframe, cause: usize) {
         /* Access faults (instruction=1, load=5, store=7) — likely PMP or PTE issue */
         1 | 5 | 7 => {
             let vaddr: usize;
-            let satp_val: usize;
             unsafe {
                 asm!("csrr {}, stval", out(reg) vaddr);
-                asm!("csrr {}, satp", out(reg) satp_val);
             }
             let fault_kind = match cause {
                 1 => "Instruction access fault",
@@ -237,25 +235,8 @@ fn arch_kernel_exception_handler(trapframe: &mut Trapframe, cause: usize) {
                 trapframe.epc,
                 vaddr
             );
-            // Walk the page table from the current SATP to show PTE state
-            // for both the faulting address and the trampoline base
-            early_println!("[kernel-trap] Walking PTE for stval={:#x}:", vaddr);
-            crate::arch::vm::debug_walk_pte_from_satp(satp_val, vaddr);
-            if vaddr != trapframe.epc as usize {
-                early_println!("[kernel-trap] Walking PTE for epc={:#x}:", trapframe.epc);
-                crate::arch::vm::debug_walk_pte_from_satp(satp_val, trapframe.epc as usize);
-            }
-            // Also walk the trampoline page itself
-            let trampoline_va = 0xffff_ffff_ffff_f000usize;
-            if vaddr != trampoline_va && trapframe.epc as usize != trampoline_va {
-                early_println!(
-                    "[kernel-trap] Walking PTE for trampoline={:#x}:",
-                    trampoline_va
-                );
-                crate::arch::vm::debug_walk_pte_from_satp(satp_val, trampoline_va);
-            }
 
-            // Try to identify the task
+            // Identify the current task for diagnostics
             let cpu_id = get_cpu().get_cpuid();
             if let Some(task) = get_scheduler().get_current_task(cpu_id) {
                 early_println!(
@@ -265,19 +246,6 @@ fn arch_kernel_exception_handler(trapframe: &mut Trapframe, cause: usize) {
                     task.name,
                     task.vm_manager.get_asid()
                 );
-                // Walk the task's page table too (might differ from current SATP)
-                let task_asid = task.vm_manager.get_asid();
-                if let Some(root_pt) = crate::arch::vm::get_root_pagetable_ptr(task_asid) {
-                    let task_satp =
-                        (9usize << 60) | ((task_asid as usize) << 44) | (root_pt as usize >> 12);
-                    if task_satp != satp_val {
-                        early_println!(
-                            "[kernel-trap] Walking task's PT (satp={:#x}) for trampoline:",
-                            task_satp
-                        );
-                        crate::arch::vm::debug_walk_pte_from_satp(task_satp, trampoline_va);
-                    }
-                }
             } else {
                 early_println!("[kernel-trap] CPU {}: no current task", cpu_id);
             }
@@ -286,8 +254,29 @@ fn arch_kernel_exception_handler(trapframe: &mut Trapframe, cause: usize) {
             panic!("{} (cause {})", fault_kind, cause);
         }
         _ => {
+            let cpu_id = get_cpu().get_cpuid();
+            if let Some(task) = get_scheduler().get_current_task(cpu_id) {
+                early_println!(
+                    "[kernel-trap] Unhandled exception {}: cpu={} task_id={} task_name={} epc={:#x}",
+                    cause,
+                    cpu_id,
+                    task.get_id(),
+                    task.name,
+                    trapframe.epc
+                );
+            } else {
+                early_println!(
+                    "[kernel-trap] Unhandled exception {}: cpu={} (no task) epc={:#x}",
+                    cause,
+                    cpu_id,
+                    trapframe.epc
+                );
+            }
             print_traplog(trapframe);
-            panic!("Unhandled exception: {}", cause);
+            panic!(
+                "Unhandled kernel exception: cause={} epc={:#x}",
+                cause, trapframe.epc
+            );
         }
     }
 }

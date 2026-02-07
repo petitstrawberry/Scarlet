@@ -56,6 +56,37 @@ fn setup_new_root() -> bool {
     // Copy from the actual location in initramfs
     // copy_dir("/bin", "/mnt/newroot/bin");
     copy_dir("/system/scarlet", "/mnt/newroot/system/scarlet");
+
+    // DEBUG: Verify copy results for config files
+    println!("init: DEBUG: Verifying copy of stemd config files...");
+    let verify_paths = [
+        "/system/scarlet/etc",
+        "/system/scarlet/etc/stemd.d",
+        "/system/scarlet/etc/stemd.d/services",
+        "/mnt/newroot/system/scarlet/etc",
+        "/mnt/newroot/system/scarlet/etc/stemd.d",
+        "/mnt/newroot/system/scarlet/etc/stemd.d/services",
+    ];
+    for path in &verify_paths {
+        match list_directory(path) {
+            Ok(entries) => {
+                let mut count = 0;
+                for entry in &entries {
+                    if entry.name != "." && entry.name != ".." {
+                        println!("init: DEBUG:   {} -> {}", path, entry.name);
+                        count += 1;
+                    }
+                }
+                if count == 0 {
+                    println!("init: DEBUG:   {} -> (empty)", path);
+                }
+            }
+            Err(_) => {
+                println!("init: DEBUG: {} -> FAILED to list", path);
+            }
+        }
+    }
+
     // copy_dir("/data", "/mnt/newroot/data");
 
     // // 3. Merge essential binaries into new root (overwrite existing files)
@@ -173,6 +204,24 @@ fn perform_pivot_root() -> bool {
     }
 }
 
+// Recursively remove a directory and all its contents
+fn remove_dir_recursive(path: &str) {
+    if let Ok(entries) = list_directory(path) {
+        for entry in entries {
+            if entry.name == "." || entry.name == ".." {
+                continue;
+            }
+            let entry_path = format!("{}/{}", path, entry.name);
+            if entry.is_directory() {
+                remove_dir_recursive(&entry_path);
+            } else {
+                let _ = remove_file(&entry_path);
+            }
+        }
+    }
+    let _ = remove_directory(path);
+}
+
 // Copy a directory from src to dest recursively
 // Recursively copy src directory to dest, completely replacing dest (dest is deleted first)
 fn copy_dir(src: &str, dest: &str) -> bool {
@@ -194,12 +243,8 @@ fn copy_dir(src: &str, dest: &str) -> bool {
 
                 let dest_entry_path = format!("{}/{}", dest, entry.name);
                 if entry.is_directory() {
-                    // Recursively remove subdirectory (this will handle nested contents)
-                    copy_dir("/dev/null", &dest_entry_path); // Use dummy source to trigger cleanup
-                    match remove_directory(&dest_entry_path) {
-                        Ok(_) => (),
-                        Err(_) => println!("init: Failed to remove directory: {}", dest_entry_path),
-                    }
+                    // Recursively remove subdirectory contents
+                    remove_dir_recursive(&dest_entry_path);
                 } else {
                     match remove_file(&dest_entry_path) {
                         Ok(_) => (),
@@ -441,6 +486,40 @@ fn main() -> i32 {
 
             // Verify the new root by trying to access files
             println!("init: Current working directory after pivot_root");
+
+            // DEBUG: Verify filesystem after pivot_root
+            println!("init: DEBUG: Post-pivot_root filesystem check...");
+            let post_paths = [
+                "/",
+                "/system",
+                "/system/scarlet",
+                "/system/scarlet/etc",
+                "/system/scarlet/etc/stemd.d",
+                "/system/scarlet/etc/stemd.d/services",
+                "/data",
+                "/data/config",
+                "/data/config/scarlet",
+                "/tmp",
+            ];
+            for path in &post_paths {
+                match list_directory(path) {
+                    Ok(entries) => {
+                        let mut count = 0;
+                        for entry in &entries {
+                            if entry.name != "." && entry.name != ".." {
+                                println!("init: DEBUG(post):   {} -> {}", path, entry.name);
+                                count += 1;
+                            }
+                        }
+                        if count == 0 {
+                            println!("init: DEBUG(post):   {} -> (empty)", path);
+                        }
+                    }
+                    Err(_) => {
+                        println!("init: DEBUG(post): {} -> FAILED", path);
+                    }
+                }
+            }
         } else {
             println!("init: Failed to pivot root, continuing with current root");
         }

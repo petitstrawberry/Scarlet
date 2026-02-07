@@ -390,8 +390,21 @@ impl VirtualMemoryManager {
 
         // Calculate the page-aligned virtual and physical addresses
         let page_vaddr = vaddr & !(PAGE_SIZE - 1);
+
+        // Validate that the page falls within the cloned mapping.  Under SMP
+        // another CPU may have removed/replaced this mapping between the
+        // search_memory_map() call above (which released the lock) and now.
+        if page_vaddr < memory_map.vmarea.start || page_vaddr > memory_map.vmarea.end {
+            // Stale mapping — retry the lookup from scratch.
+            return self.lazy_map_page_with(access);
+        }
+
         let offset_in_mapping = page_vaddr - memory_map.vmarea.start;
-        let mut page_paddr = memory_map.pmarea.start + offset_in_mapping;
+        let mut page_paddr = memory_map
+            .pmarea
+            .start
+            .checked_add(offset_in_mapping)
+            .ok_or("Physical address overflow in lazy_map_page_with")?;
         let mut perms = memory_map.permissions;
 
         // If there is an owner, allow it to adjust mapping and tell if this is a tail page
