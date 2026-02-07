@@ -7,13 +7,13 @@ use crate::{
     device::{
         manager::{DeviceManager, DriverPriority},
         platform::{
-            PlatformDeviceDriver, PlatformDeviceInfo, resource::PlatformDeviceResourceType,
+            resource::PlatformDeviceResourceType, PlatformDeviceDriver, PlatformDeviceInfo,
         },
     },
     driver_initcall,
     interrupt::{
-        CpuId, InterruptError, InterruptManager, InterruptResult,
         controllers::{LocalInterruptController, LocalInterruptType},
+        CpuId, InterruptError, InterruptManager, InterruptResult,
     },
 };
 use alloc::{boxed::Box, vec};
@@ -256,7 +256,8 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
     // Read the timebase frequency once from device tree
     // Prefer the timebase frequency provided by the device tree.
     // Fallback keeps QEMU virt default (10MHz) working even if FDT is unavailable.
-    let timebase_frequency_hz = crate::arch::riscv64::fdt::timebase_frequency_hz_from_fdt().unwrap_or(10_000_000);
+    let timebase_frequency_hz =
+        crate::arch::riscv64::fdt::timebase_frequency_hz_from_fdt().unwrap_or(10_000_000);
 
     // Create CLINT controller
     let mut controller = Box::new(Clint::new(base_addr, 4, timebase_frequency_hz)); // Example: 4 CPUs for QEMU virt
@@ -303,7 +304,7 @@ fn register_driver() {
         vec!["sifive,clint0", "riscv,clint0"],
     );
     // Register the driver with the kernel
-    DeviceManager::get_mut_manager().register_driver(Box::new(driver), DriverPriority::Critical);
+    DeviceManager::get_manager().register_driver(Box::new(driver), DriverPriority::Critical);
 }
 
 driver_initcall!(register_driver);

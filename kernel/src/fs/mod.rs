@@ -718,9 +718,9 @@ impl FileSystemDriverManager {
 
     /// Register a filesystem driver
     ///
-    /// Adds a new filesystem driver to the manager's registry. The driver
+    /// Adds a new filesystem driver to manager's registry. The driver
     /// will be indexed by its name() method return value. If a driver with
-    /// the same name already exists, it will be replaced.
+    /// same name already exists, it will be replaced.
     ///
     /// # Arguments
     ///
@@ -732,7 +732,7 @@ impl FileSystemDriverManager {
     /// let manager = get_fs_driver_manager();
     /// manager.register_driver(Box::new(MyFileSystemDriver));
     /// ```
-    pub fn register_driver(&mut self, driver: Box<dyn FileSystemDriver>) {
+    pub fn register_driver(&self, driver: Box<dyn FileSystemDriver>) {
         self.drivers
             .write()
             .insert(driver.name().to_string(), driver);

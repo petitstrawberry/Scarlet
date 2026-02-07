@@ -59,7 +59,7 @@ impl EventDevice {
     ///
     /// ```
     /// let event_dev = Arc::new(EventDevice::new("keyboard"));
-    /// DeviceManager::get_mut_manager().register_device(event_dev);
+    /// DeviceManager::get_manager().register_device(event_dev);
     /// ```
     pub fn new(device_type: &str) -> Self {
         // Get incremented ID based on device type

@@ -489,7 +489,7 @@ fn register_driver() {
         vec!["arm,gic-v3", "arm,gic-v3.1", "arm,gic-v3.2"],
     );
 
-    DeviceManager::get_mut_manager().register_driver(Box::new(driver), DriverPriority::Critical)
+    DeviceManager::get_manager().register_driver(Box::new(driver), DriverPriority::Critical)
 }
 
 early_initcall!(register_driver);

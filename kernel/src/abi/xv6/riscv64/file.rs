@@ -416,7 +416,7 @@ pub fn sys_mknod(
     match (major, minor) {
         (1, 0) => {
             // Create a console device
-            let console_dev = Some(DeviceManager::get_mut_manager().register_device(Arc::new(
+            let console_dev = Some(DeviceManager::get_manager().register_device(Arc::new(
                 crate::abi::xv6::drivers::console::ConsoleDevice::new(0, "console"),
             )));
 

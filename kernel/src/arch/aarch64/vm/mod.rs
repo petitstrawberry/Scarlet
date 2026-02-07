@@ -182,7 +182,7 @@ pub fn get_root_pagetable(asid: u16) -> Option<&'static mut PageTable> {
     }
 }
 
-fn setup_trampoline_at_end(manager: &mut VirtualMemoryManager, trampoline_vaddr_end: usize) {
+fn setup_trampoline_at_end(manager: &VirtualMemoryManager, trampoline_vaddr_end: usize) {
     let trampoline_start = unsafe { &__TRAMPOLINE_START as *const usize as usize };
     let trampoline_end = unsafe { &__TRAMPOLINE_END as *const usize as usize } - 1;
     let trampoline_size = trampoline_end - trampoline_start;
@@ -275,7 +275,7 @@ fn setup_trampoline_at_end(manager: &mut VirtualMemoryManager, trampoline_vaddr_
     crate::vm::set_trampoline_arch(arch.get_cpuid(), arch_vaddr);
 }
 
-pub fn setup_trampoline_for_kernel(manager: &mut VirtualMemoryManager) {
+pub fn setup_trampoline_for_kernel(manager: &VirtualMemoryManager) {
     setup_trampoline_at_end(manager, TRAMPOLINE_VA_END);
 
     // Sanity check: the per-task kernel stack windows are part of the same high-VA

@@ -565,7 +565,7 @@ pub extern "C" fn start_kernel(boot_info: &BootInfo) -> ! {
 
     /* Populate devices from BootInfo device source */
     early_println!("[Scarlet Kernel] Populating devices...");
-    let device_manager = DeviceManager::get_mut_manager();
+    let device_manager = DeviceManager::get_manager();
     // Two-phase interrupt bring-up:
     // 1) Discover critical interrupt controllers (PLIC/CLINT) first.
     // 2) Initialize interrupt controllers.
@@ -617,7 +617,7 @@ pub extern "C" fn start_kernel(boot_info: &BootInfo) -> ! {
     );
 
     if device_count > 0 {
-        GraphicsManager::get_mut_manager().discover_graphics_devices();
+        GraphicsManager::get_manager().discover_graphics_devices();
     } else {
         early_println!(
             "[Scarlet Kernel] Warning: No devices found, skipping graphics initialization"

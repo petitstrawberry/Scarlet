@@ -993,7 +993,7 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
                 name
             );
             let dev: Arc<dyn Device> = Arc::new(VirtioBlockDevice::new(base_addr));
-            DeviceManager::get_mut_manager().register_device_with_name(name, dev);
+            DeviceManager::get_manager().register_device_with_name(name, dev);
         }
         VirtioDeviceType::Net => {
             let id = NET_COUNTER.fetch_add(1, Ordering::SeqCst);
@@ -1031,7 +1031,7 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
                 crate::early_println!("[Virtio] No interrupt resource found for net device");
             }
 
-            DeviceManager::get_mut_manager().register_device_with_name(name, dev);
+            DeviceManager::get_manager().register_device_with_name(name, dev);
         }
         VirtioDeviceType::GPU => {
             let id = GPU_COUNTER.fetch_add(1, Ordering::SeqCst);
@@ -1042,7 +1042,7 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
                 name
             );
             let dev: Arc<dyn Device> = Arc::new(VirtioGpuDevice::new(base_addr));
-            DeviceManager::get_mut_manager().register_device_with_name(name, dev);
+            DeviceManager::get_manager().register_device_with_name(name, dev);
         }
         VirtioDeviceType::Input => {
             crate::early_println!("[Virtio] Detected Virtio Input Device at {:#x}", base_addr);
@@ -1084,7 +1084,7 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
             }
 
             // Keep device alive by registering with DeviceManager
-            DeviceManager::get_mut_manager().register_device(dev);
+            DeviceManager::get_manager().register_device(dev);
         }
         VirtioDeviceType::Rng => {
             let id = RNG_COUNTER.fetch_add(1, Ordering::SeqCst);
@@ -1098,7 +1098,7 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
             if id == 0 {
                 let random_char_dev: Arc<dyn Device> =
                     Arc::new(crate::random::RandomCharDevice::new());
-                DeviceManager::get_mut_manager()
+                DeviceManager::get_manager()
                     .register_device_with_name("random".to_string(), random_char_dev);
                 crate::early_println!("[Virtio] Registered /dev/random character device");
             }
@@ -1119,7 +1119,7 @@ fn remove_fn(_device: &PlatformDeviceInfo) -> Result<(), &'static str> {
 fn register_driver() {
     let driver = PlatformDeviceDriver::new("virtio-mmio", probe_fn, remove_fn, vec!["virtio,mmio"]);
     // Register the driver with the kernel
-    DeviceManager::get_mut_manager().register_driver(Box::new(driver), DriverPriority::Standard)
+    DeviceManager::get_manager().register_driver(Box::new(driver), DriverPriority::Standard)
 }
 
 driver_initcall!(register_driver);

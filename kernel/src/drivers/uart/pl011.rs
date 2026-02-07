@@ -330,7 +330,7 @@ fn register_pl011() {
     ));
 
     // Register with Core priority since UART is essential
-    DeviceManager::get_mut_manager().register_driver(driver, DriverPriority::Core);
+    DeviceManager::get_manager().register_driver(driver, DriverPriority::Core);
 }
 
 fn pl011_probe(device_info: &PlatformDeviceInfo) -> Result<(), &'static str> {
@@ -387,7 +387,7 @@ fn pl011_probe(device_info: &PlatformDeviceInfo) -> Result<(), &'static str> {
         crate::early_println!("No interrupt resource found for PL011, using polling mode");
     }
 
-    let device_id = DeviceManager::get_mut_manager().register_device(uart);
+    let device_id = DeviceManager::get_manager().register_device(uart);
     crate::early_println!("PL011 UART device registered with ID: {}", device_id);
 
     Ok(())

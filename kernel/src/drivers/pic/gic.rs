@@ -500,7 +500,7 @@ fn register_driver() {
         vec!["arm,gic-400", "arm,cortex-a15-gic", "arm,cortex-a9-gic"],
     );
     // Register the driver with the kernel
-    DeviceManager::get_mut_manager().register_driver(Box::new(driver), DriverPriority::Critical)
+    DeviceManager::get_manager().register_driver(Box::new(driver), DriverPriority::Critical)
 }
 
 // driver_initcall!(register_driver);

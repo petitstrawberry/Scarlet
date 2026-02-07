@@ -1336,7 +1336,7 @@ pub fn sys_lseek(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize 
 //     match (major, minor) {
 //         (1, 0) => {
 //             // Create a console device
-//             let console_dev = Some(DeviceManager::get_mut_manager().register_device(Arc::new(
+//             let console_dev = Some(DeviceManager::get_manager().register_device(Arc::new(
 //                 crate::abi::Linux::drivers::console::ConsoleDevice::new(0, "console")
 //             )));
 

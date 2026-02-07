@@ -228,7 +228,7 @@ impl PciBus {
         self.scan();
 
         let devices = self.devices();
-        let device_manager = DeviceManager::get_mut_manager();
+        let device_manager = DeviceManager::get_manager();
 
         early_println!(
             "Registering {} PCI devices with DeviceManager",

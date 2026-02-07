@@ -331,7 +331,7 @@ fn register_uart() {
     ));
 
     // Register with Core priority since UART is essential for early console output
-    DeviceManager::get_mut_manager().register_driver(driver, DriverPriority::Core);
+    DeviceManager::get_manager().register_driver(driver, DriverPriority::Core);
 }
 
 /// Probe function for UART devices
@@ -384,7 +384,7 @@ fn uart_probe(device_info: &PlatformDeviceInfo) -> Result<(), &'static str> {
     }
 
     // Register the UART device with the device manager
-    let device_id = DeviceManager::get_mut_manager().register_device(uart);
+    let device_id = DeviceManager::get_manager().register_device(uart);
     crate::early_println!("UART device registered with ID: {}", device_id);
 
     Ok(())

@@ -26,7 +26,7 @@ mod tests {
     #[test_case]
     fn test_framebuffer_control_ops_basic() {
         // Setup clean graphics manager
-        let graphics_manager = GraphicsManager::get_mut_manager();
+        let graphics_manager = GraphicsManager::get_manager();
         graphics_manager.clear_for_test();
 
         // Create a test graphics device
@@ -43,7 +43,7 @@ mod tests {
         let shared_device: Arc<dyn Device> = Arc::new(test_device);
 
         // Register device with DeviceManager
-        let device_manager = DeviceManager::get_mut_manager();
+        let device_manager = DeviceManager::get_manager();
         device_manager.clear_for_test();
         let device_id = device_manager
             .register_device_with_name("test-fb-basic-control".to_string(), shared_device.clone());
@@ -91,7 +91,7 @@ mod tests {
         // Test that control operations properly handle error cases
 
         // Setup clean graphics manager
-        let graphics_manager = GraphicsManager::get_mut_manager();
+        let graphics_manager = GraphicsManager::get_manager();
         graphics_manager.clear_for_test();
 
         // Create a framebuffer device
@@ -107,7 +107,7 @@ mod tests {
         let shared_device: Arc<dyn Device> = Arc::new(test_device);
 
         // Register device
-        let device_manager = DeviceManager::get_mut_manager();
+        let device_manager = DeviceManager::get_manager();
         device_manager.clear_for_test();
         let device_id = device_manager
             .register_device_with_name("test-fb-errors-control".to_string(), shared_device.clone());

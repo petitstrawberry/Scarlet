@@ -609,7 +609,7 @@ fn register_driver() {
         vec!["sifive,plic-1.0.0", "riscv,plic0"],
     );
     // Register the driver with the kernel
-    DeviceManager::get_mut_manager().register_driver(Box::new(driver), DriverPriority::Critical)
+    DeviceManager::get_manager().register_driver(Box::new(driver), DriverPriority::Critical)
 }
 
 // driver_initcall!(register_driver);

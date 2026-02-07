@@ -33,29 +33,13 @@ extern crate alloc;
 pub mod manager;
 pub mod vmem;
 
-static mut KERNEL_VM_MANAGER: Option<VirtualMemoryManager> = None;
+static KERNEL_VM_MANAGER: Once<VirtualMemoryManager> = Once::new();
 
-pub fn get_kernel_vm_manager() -> &'static mut VirtualMemoryManager {
-    unsafe {
-        match KERNEL_VM_MANAGER {
-            Some(ref mut m) => m,
-            None => {
-                kernel_vm_manager_init();
-                get_kernel_vm_manager()
-            }
-        }
-    }
+pub fn get_kernel_vm_manager() -> &'static VirtualMemoryManager {
+    KERNEL_VM_MANAGER.call_once(|| VirtualMemoryManager::new())
 }
 
-fn kernel_vm_manager_init() {
-    let manager = VirtualMemoryManager::new();
-
-    unsafe {
-        KERNEL_VM_MANAGER = Some(manager);
-    }
-}
-
-static mut KERNEL_AREA: Option<MemoryArea> = None;
+static KERNEL_AREA: Once<MemoryArea> = Once::new();
 /* Initialize MMU and enable paging */
 #[allow(static_mut_refs)]
 pub fn kernel_vm_init(kernel_area: MemoryArea) {
@@ -77,9 +61,7 @@ pub fn kernel_vm_init(kernel_area: MemoryArea) {
         start: kernel_start,
         end: kernel_end,
     };
-    unsafe {
-        KERNEL_AREA = Some(kernel_area);
-    }
+    KERNEL_AREA.call_once(|| kernel_area);
 
     let kernel_map = VirtualMemoryMap {
         vmarea: kernel_area,
@@ -90,7 +72,7 @@ pub fn kernel_vm_init(kernel_area: MemoryArea) {
         is_shared: true, // Kernel memory should be shared across all processes
         owner: None,
     };
-    manager
+    get_kernel_vm_manager()
         .add_memory_map(kernel_map.clone())
         .map_err(|e| panic!("Failed to add kernel memory map: {}", e))
         .unwrap();
@@ -110,7 +92,7 @@ pub fn kernel_vm_init(kernel_area: MemoryArea) {
             is_shared: true, // Device memory should be shared
             owner: None,
         };
-        manager
+        get_kernel_vm_manager()
             .add_memory_map(dev_map.clone())
             .map_err(|e| panic!("Failed to add device memory map: {}", e))
             .unwrap();
@@ -136,7 +118,7 @@ pub fn kernel_vm_init(kernel_area: MemoryArea) {
     #[cfg(any(debug_assertions, test))]
     early_println!("[vm] kernel_vm_init: setup_trampoline_for_kernel...");
 
-    crate::arch::vm::setup_trampoline_for_kernel(manager);
+    crate::arch::vm::setup_trampoline_for_kernel(get_kernel_vm_manager());
 
     #[cfg(any(debug_assertions, test))]
     early_println!("[vm] kernel_vm_init: trampoline ok");
@@ -179,7 +161,7 @@ pub fn user_kernel_vm_init(task: &mut Task) {
     let root_page_table = get_root_pagetable(asid).unwrap();
     task.vm_manager.set_asid(asid);
 
-    let kernel_area = unsafe { KERNEL_AREA.unwrap() };
+    let kernel_area = *KERNEL_AREA.get().expect("KERNEL_AREA not initialized");
 
     let kernel_map = VirtualMemoryMap {
         vmarea: kernel_area,
@@ -445,37 +427,27 @@ pub fn setup_user_stack(task: &mut Task) -> (usize, usize) {
     (stack_base, USER_STACK_END)
 }
 
-static mut TRAMPOLINE_TRAP_VECTOR: Option<usize> = None;
-static mut TRAMPOLINE_ARCH: [Option<usize>; MAX_NUM_CPUS] = [None; MAX_NUM_CPUS];
+static TRAMPOLINE_TRAP_VECTOR: Once<usize> = Once::new();
+static TRAMPOLINE_ARCH: Mutex<[Option<usize>; MAX_NUM_CPUS]> = Mutex::new([None; MAX_NUM_CPUS]);
 
 pub fn set_trampoline_trap_vector(trap_vector: usize) {
-    unsafe {
-        TRAMPOLINE_TRAP_VECTOR = Some(trap_vector);
-    }
+    TRAMPOLINE_TRAP_VECTOR.call_once(|| trap_vector);
 }
 
 pub fn get_trampoline_trap_vector() -> usize {
-    unsafe {
-        match TRAMPOLINE_TRAP_VECTOR {
-            Some(v) => v,
-            None => panic!("Trampoline is not initialized"),
-        }
-    }
+    *TRAMPOLINE_TRAP_VECTOR
+        .get()
+        .expect("Trampoline is not initialized")
 }
 
 pub fn set_trampoline_arch(cpu_id: usize, arch: usize) {
-    unsafe {
-        TRAMPOLINE_ARCH[cpu_id] = Some(arch);
-    }
+    let mut trampolines = TRAMPOLINE_ARCH.lock();
+    trampolines[cpu_id] = Some(arch);
 }
 
 pub fn get_trampoline_arch(cpu_id: usize) -> usize {
-    unsafe {
-        match TRAMPOLINE_ARCH[cpu_id] {
-            Some(v) => v,
-            None => panic!("Trampoline is not initialized"),
-        }
-    }
+    let trampolines = TRAMPOLINE_ARCH.lock();
+    trampolines[cpu_id].expect("Trampoline is not initialized")
 }
 
 pub fn switch_to_kernel_vm() {
