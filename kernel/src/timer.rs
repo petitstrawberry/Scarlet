@@ -6,7 +6,7 @@
 
 use crate::arch::Trapframe;
 use crate::arch::timer::ArchTimer;
-use crate::environment::NUM_OF_CPUS;
+use crate::environment::MAX_NUM_CPUS;
 use crate::sched::scheduler::get_scheduler;
 use core::sync::atomic::{AtomicU64, Ordering};
 extern crate alloc;
@@ -16,7 +16,7 @@ use alloc::vec::Vec;
 use core::cmp::Ordering as CmpOrdering;
 
 pub struct KernelTimer {
-    pub core_local_timer: [ArchTimer; NUM_OF_CPUS],
+    pub core_local_timer: [ArchTimer; MAX_NUM_CPUS],
     pub interval: u64,
 }
 
@@ -43,7 +43,7 @@ impl KernelTimer {
     }
 
     pub fn init(&mut self) {
-        for i in 0..NUM_OF_CPUS {
+        for i in 0..MAX_NUM_CPUS {
             self.core_local_timer[i].stop();
         }
     }

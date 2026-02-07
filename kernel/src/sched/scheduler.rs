@@ -45,7 +45,7 @@ use crate::{
         interrupt::enable_external_interrupts, set_next_mode, set_trapvector,
         trap::user::arch_switch_to_user_space,
     },
-    environment::NUM_OF_CPUS,
+    environment::MAX_NUM_CPUS,
     task::{TaskState, new_kernel_task, wake_parent_waiters, wake_task_waiters},
     timer::get_kernel_timer,
     vm::get_trampoline_trap_vector,
@@ -366,21 +366,21 @@ pub fn get_scheduler() -> &'static mut Scheduler {
 
 pub struct Scheduler {
     /// Queue for ready-to-run task IDs
-    ready_queue: [VecDeque<usize>; NUM_OF_CPUS],
+    ready_queue: [VecDeque<usize>; MAX_NUM_CPUS],
     /// Queue for blocked task IDs (waiting for I/O, etc.)
-    blocked_queue: [VecDeque<usize>; NUM_OF_CPUS],
+    blocked_queue: [VecDeque<usize>; MAX_NUM_CPUS],
     /// Queue for zombie task IDs (finished but not yet cleaned up)
-    zombie_queue: [VecDeque<usize>; NUM_OF_CPUS],
-    current_task_id: [Option<usize>; NUM_OF_CPUS],
+    zombie_queue: [VecDeque<usize>; MAX_NUM_CPUS],
+    current_task_id: [Option<usize>; MAX_NUM_CPUS],
 }
 
 impl Scheduler {
     pub fn new() -> Self {
         Scheduler {
-            ready_queue: [const { VecDeque::new() }; NUM_OF_CPUS],
-            blocked_queue: [const { VecDeque::new() }; NUM_OF_CPUS],
-            zombie_queue: [const { VecDeque::new() }; NUM_OF_CPUS],
-            current_task_id: [const { None }; NUM_OF_CPUS],
+            ready_queue: [const { VecDeque::new() }; MAX_NUM_CPUS],
+            blocked_queue: [const { VecDeque::new() }; MAX_NUM_CPUS],
+            zombie_queue: [const { VecDeque::new() }; MAX_NUM_CPUS],
+            current_task_id: [const { None }; MAX_NUM_CPUS],
         }
     }
 
@@ -737,7 +737,7 @@ impl Scheduler {
     /// * `task_id` - The ID of the zombie task to clean up
     pub fn cleanup_zombie_task(&mut self, task_id: usize) {
         // Remove from zombie queue
-        for cpu_id in 0..NUM_OF_CPUS {
+        for cpu_id in 0..MAX_NUM_CPUS {
             if let Some(pos) = self.zombie_queue[cpu_id]
                 .iter()
                 .position(|&id| id == task_id)
@@ -887,7 +887,7 @@ impl Scheduler {
     #[cfg(test)]
     pub fn reset(&mut self) {
         // Clear all queues
-        for cpu_id in 0..NUM_OF_CPUS {
+        for cpu_id in 0..MAX_NUM_CPUS {
             self.ready_queue[cpu_id].clear();
             self.blocked_queue[cpu_id].clear();
             self.zombie_queue[cpu_id].clear();

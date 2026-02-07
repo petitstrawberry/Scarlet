@@ -13,7 +13,7 @@
 
 use core::arch::asm;
 
-use crate::environment::NUM_OF_CPUS;
+use crate::environment::MAX_NUM_CPUS;
 use crate::interrupt::controllers::{LocalInterruptController, LocalInterruptType};
 use crate::interrupt::{CpuId, InterruptError, InterruptManager, InterruptResult};
 
@@ -193,7 +193,7 @@ fn register_local_timer_controller() {
     // Register for all CPUs that Scarlet is configured to support.
     let controller = alloc::boxed::Box::new(ArmGenericTimer::new());
     let _ = InterruptManager::with_manager(|mgr| {
-        mgr.register_local_controller_for_range(controller, 0..(NUM_OF_CPUS as CpuId))
+        mgr.register_local_controller_for_range(controller, 0..(MAX_NUM_CPUS as CpuId))
     });
 }
 

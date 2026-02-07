@@ -17,7 +17,7 @@ use crate::arch::vm::get_root_pagetable;
 use crate::early_println;
 use crate::environment::KERNEL_VM_STACK_SIZE;
 use crate::environment::KERNEL_VM_STACK_START;
-use crate::environment::NUM_OF_CPUS;
+use crate::environment::MAX_NUM_CPUS;
 use crate::environment::PAGE_SIZE;
 use crate::environment::USER_STACK_END;
 use crate::environment::{
@@ -446,7 +446,7 @@ pub fn setup_user_stack(task: &mut Task) -> (usize, usize) {
 }
 
 static mut TRAMPOLINE_TRAP_VECTOR: Option<usize> = None;
-static mut TRAMPOLINE_ARCH: [Option<usize>; NUM_OF_CPUS] = [None; NUM_OF_CPUS];
+static mut TRAMPOLINE_ARCH: [Option<usize>; MAX_NUM_CPUS] = [None; MAX_NUM_CPUS];
 
 pub fn set_trampoline_trap_vector(trap_vector: usize) {
     unsafe {

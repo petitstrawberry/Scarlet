@@ -11,7 +11,7 @@ use vcpu::Mode;
 use crate::arch::instruction::Instruction;
 use crate::arch::vm::get_root_pagetable;
 use crate::early_println;
-use crate::environment::NUM_OF_CPUS;
+use crate::environment::MAX_NUM_CPUS;
 use crate::environment::STACK_SIZE;
 use crate::mem::KERNEL_STACK;
 use crate::task::Task;
@@ -45,8 +45,8 @@ pub type Arch = Riscv64;
 /// skip restoring vregs if it still owns the live state. This removes a very
 /// expensive per-timeslice illegal-instruction trap for vector-heavy workloads.
 const NO_VECTOR_OWNER: usize = usize::MAX;
-static VECTOR_OWNER: [AtomicUsize; NUM_OF_CPUS] =
-    [const { AtomicUsize::new(NO_VECTOR_OWNER) }; NUM_OF_CPUS];
+static VECTOR_OWNER: [AtomicUsize; MAX_NUM_CPUS] =
+    [const { AtomicUsize::new(NO_VECTOR_OWNER) }; MAX_NUM_CPUS];
 
 /// Whether the live vector register file contains state that is newer than the
 /// saved per-task context of `VECTOR_OWNER`.
@@ -54,8 +54,8 @@ static VECTOR_OWNER: [AtomicUsize; NUM_OF_CPUS] =
 /// This is needed because we sometimes keep vregs live across timeslices while
 /// forcing sstatus.VS to Clean/Off to avoid mis-attributing Dirtiness to another
 /// task.
-static VECTOR_OWNER_DIRTY: [AtomicBool; NUM_OF_CPUS] =
-    [const { AtomicBool::new(false) }; NUM_OF_CPUS];
+static VECTOR_OWNER_DIRTY: [AtomicBool; MAX_NUM_CPUS] =
+    [const { AtomicBool::new(false) }; MAX_NUM_CPUS];
 
 #[inline]
 pub(crate) fn get_vector_owner(cpu_id: usize) -> usize {
@@ -253,7 +253,7 @@ pub fn get_device_memory_areas() -> alloc::vec::Vec<MemoryArea> {
 }
 
 #[unsafe(link_section = ".trampoline.data")]
-static mut CPUS: [Riscv64; NUM_OF_CPUS] = [const { Riscv64::new(0) }; NUM_OF_CPUS];
+static mut CPUS: [Riscv64; MAX_NUM_CPUS] = [const { Riscv64::new(0) }; MAX_NUM_CPUS];
 
 #[repr(align(4))]
 #[allow(dead_code)]

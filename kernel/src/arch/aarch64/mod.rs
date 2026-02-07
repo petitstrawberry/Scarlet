@@ -3,7 +3,7 @@ use core::mem::transmute;
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use crate::early_println;
-use crate::environment::NUM_OF_CPUS;
+use crate::environment::MAX_NUM_CPUS;
 use crate::environment::STACK_SIZE;
 use crate::mem::KERNEL_STACK;
 use crate::task::Task;
@@ -63,7 +63,7 @@ pub fn get_device_memory_areas() -> alloc::vec::Vec<MemoryArea> {
 }
 
 #[unsafe(link_section = ".trampoline.data")]
-static mut CPUS: [Aarch64; NUM_OF_CPUS] = [const { Aarch64::new(0) }; NUM_OF_CPUS];
+static mut CPUS: [Aarch64; MAX_NUM_CPUS] = [const { Aarch64::new(0) }; MAX_NUM_CPUS];
 
 pub fn init_arch(cpu_id: usize) {
     early_println!("[aarch64] CPU {}: Initializing core....", cpu_id);
@@ -685,7 +685,7 @@ mod tests {
         // Test AArch64-specific CPU ID retrieval
         let cpu_id = get_current_cpu_id();
         assert!(
-            cpu_id < crate::environment::NUM_OF_CPUS,
+            cpu_id < crate::environment::MAX_NUM_CPUS,
             "AArch64 CPU ID should be within valid range"
         );
     }
