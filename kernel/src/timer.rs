@@ -8,6 +8,7 @@ use crate::arch::Trapframe;
 use crate::arch::timer::ArchTimer;
 use crate::environment::MAX_NUM_CPUS;
 use crate::sched::scheduler::get_scheduler;
+use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicU64, Ordering};
 extern crate alloc;
 use alloc::collections::BinaryHeap;
@@ -16,58 +17,61 @@ use alloc::vec::Vec;
 use core::cmp::Ordering as CmpOrdering;
 
 pub struct KernelTimer {
-    pub core_local_timer: [ArchTimer; MAX_NUM_CPUS],
+    // SAFETY: Each CPU only accesses its own timer via cpu_id index.
+    // UnsafeCell allows per-CPU mutable access without data races.
+    core_local_timer: [UnsafeCell<ArchTimer>; MAX_NUM_CPUS],
     pub interval: u64,
 }
 
-static mut KERNEL_TIMER: Option<KernelTimer> = None;
+// SAFETY: KernelTimer is thread-safe because each CPU only accesses its own timer.
+// The ArchTimer instances are per-CPU, and the hardware registers are CPU-local.
+unsafe impl Sync for KernelTimer {}
 
-pub fn get_kernel_timer() -> &'static mut KernelTimer {
-    unsafe {
-        match KERNEL_TIMER {
-            Some(ref mut t) => t,
-            None => {
-                KERNEL_TIMER = Some(KernelTimer::new());
-                get_kernel_timer()
-            }
-        }
-    }
+static KERNEL_TIMER: spin::Once<KernelTimer> = spin::Once::new();
+
+pub fn get_kernel_timer() -> &'static KernelTimer {
+    KERNEL_TIMER.call_once(|| KernelTimer::new())
 }
 
 impl KernelTimer {
     fn new() -> Self {
         KernelTimer {
-            core_local_timer: core::array::from_fn(|_| ArchTimer::new()),
+            core_local_timer: core::array::from_fn(|_| UnsafeCell::new(ArchTimer::new())),
             interval: 0xffffffff_ffffffff,
         }
     }
 
-    pub fn init(&mut self) {
+    pub fn init(&self) {
         for i in 0..MAX_NUM_CPUS {
-            self.core_local_timer[i].stop();
+            // SAFETY: Each CPU only accesses its own timer
+            unsafe { (*self.core_local_timer[i].get()).stop() };
         }
     }
 
-    pub fn start(&mut self, cpu_id: usize) {
-        self.core_local_timer[cpu_id].start();
+    pub fn start(&self, cpu_id: usize) {
+        // SAFETY: Each CPU only accesses its own timer
+        unsafe { (*self.core_local_timer[cpu_id].get()).start() };
     }
 
-    pub fn stop(&mut self, cpu_id: usize) {
-        self.core_local_timer[cpu_id].stop();
+    pub fn stop(&self, cpu_id: usize) {
+        // SAFETY: Each CPU only accesses its own timer
+        unsafe { (*self.core_local_timer[cpu_id].get()).stop() };
     }
 
-    pub fn restart(&mut self, cpu_id: usize) {
+    pub fn restart(&self, cpu_id: usize) {
         self.stop(cpu_id);
         self.start(cpu_id);
     }
 
     /* Set the interval in microseconds */
-    pub fn set_interval_us(&mut self, cpu_id: usize, interval: u64) {
-        self.core_local_timer[cpu_id].set_interval_us(interval);
+    pub fn set_interval_us(&self, cpu_id: usize, interval: u64) {
+        // SAFETY: Each CPU only accesses its own timer
+        unsafe { (*self.core_local_timer[cpu_id].get()).set_interval_us(interval) };
     }
 
     pub fn get_time_us(&self, cpu_id: usize) -> u64 {
-        self.core_local_timer[cpu_id].get_time_us()
+        // SAFETY: Each CPU only accesses its own timer
+        unsafe { (*self.core_local_timer[cpu_id].get()).get_time_us() }
     }
 }
 
