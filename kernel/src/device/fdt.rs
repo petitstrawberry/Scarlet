@@ -161,9 +161,16 @@ impl<'a> FdtManager<'a> {
     ///
     /// # Returns
     /// A reference to the static FdtManager instance.
+    ///
+    /// # Panics
+    /// Panics if called before FdtManager is initialized via `init_fdt()`.
     pub fn get_manager() -> &'static FdtManager<'static> {
-        MANAGER_INITIALIZED.call_once(|| {});
-        // SAFETY: After initialization, only read-only access occurs
+        // Wait for initialization to complete
+        if !MANAGER_INITIALIZED.is_completed() {
+            panic!("FdtManager::get_manager() called before init_fdt()");
+        }
+        // SAFETY: After initialization, only read-only access occurs.
+        // The Once guarantees happens-before relationship with init_fdt().
         unsafe { &*MANAGER.0.get() }
     }
 
@@ -359,13 +366,18 @@ impl<'a> FdtManager<'a> {
 
         let mut count = 0usize;
         for cpu in cpus.children() {
-            if let Some(dev_type) = cpu.property("device_type") {
-                if bytes_to_cstr(dev_type.value)
-                    .map(|s| s != "cpu")
-                    .unwrap_or(false)
-                {
-                    continue;
-                }
+            // Only count nodes that explicitly declare `device_type = "cpu"`.
+            let dev_type = match cpu.property("device_type") {
+                Some(dev_type) => dev_type,
+                None => continue,
+            };
+
+            let is_cpu = bytes_to_cstr(dev_type.value)
+                .map(|s| s == "cpu")
+                .unwrap_or(false);
+
+            if !is_cpu {
+                continue;
             }
             count += 1;
         }
@@ -399,6 +411,9 @@ pub fn init_fdt(addr: usize) {
             }
             let model = fdt.root().model();
             early_println!("Model: {}", model);
+
+            // Mark initialization as complete to establish happens-before relationship
+            MANAGER_INITIALIZED.call_once(|| {});
         }
         Err(e) => {
             early_println!("FDT error: {:?}", e);

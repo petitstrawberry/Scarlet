@@ -331,9 +331,9 @@ impl<T> TaskLocal<T> {
     /// The caller must be the hart currently executing the owning task,
     /// or the task must not yet be visible to the scheduler.
     #[inline]
-    pub fn get(&self) -> &T {
+    pub unsafe fn get(&self) -> &T {
         // SAFETY: Upheld by caller (single-hart-per-task invariant).
-        unsafe { &*self.inner.get() }
+        &*self.inner.get()
     }
 
     /// Get a mutable reference to the contained value.
@@ -344,9 +344,9 @@ impl<T> TaskLocal<T> {
     /// or the task must not yet be visible to the scheduler.
     #[inline]
     #[allow(clippy::mut_from_ref)]
-    pub fn get_mut(&self) -> &mut T {
+    pub unsafe fn get_mut(&self) -> &mut T {
         // SAFETY: Upheld by caller (single-hart-per-task invariant).
-        unsafe { &mut *self.inner.get() }
+        &mut *self.inner.get()
     }
 }
 
@@ -1206,14 +1206,16 @@ impl Task {
         F: FnOnce(&mut (dyn AbiModule + Send + Sync)) -> R,
     {
         // Search for the zone containing addr using efficient BTreeMap range query
-        let abi_zones = self.abi_zones.get_mut();
+        // SAFETY: This is the currently executing task on this hart
+        let abi_zones = unsafe { self.abi_zones.get_mut() };
         if let Some((_start, zone)) = abi_zones.range_mut(..=addr).next_back() {
             if zone.range.contains(&addr) {
                 return f(zone.abi.as_mut());
             }
         }
         // No zone found, use default ABI
-        let abi = self.default_abi.get_mut();
+        // SAFETY: This is the currently executing task on this hart
+        let abi = unsafe { self.default_abi.get_mut() };
         f(abi.as_deref_mut().expect("default_abi not set"))
     }
 
@@ -1228,7 +1230,8 @@ impl Task {
     where
         F: FnOnce(&(dyn AbiModule + Send + Sync)) -> R,
     {
-        let abi = self.default_abi.get();
+        // SAFETY: This is the currently executing task on this hart
+        let abi = unsafe { self.default_abi.get() };
         f(abi.as_deref().expect("default_abi not set"))
     }
 
@@ -1240,7 +1243,8 @@ impl Task {
     where
         F: FnOnce(&mut (dyn AbiModule + Send + Sync), &Task) -> R,
     {
-        let abi = self.default_abi.get_mut();
+        // SAFETY: This is the currently executing task on this hart
+        let abi = unsafe { self.default_abi.get_mut() };
         let abi_ref = abi.as_deref_mut().expect("default_abi not set");
         f(abi_ref, self)
     }
@@ -1377,25 +1381,28 @@ impl Task {
         self.vcpu.lock().clone_to(&mut child.vcpu.lock());
 
         // Clone the default ABI and ABI zones
-        *child.default_abi.get_mut() = Some(
-            self.default_abi
-                .get()
-                .as_ref()
-                .expect("default_abi not set")
-                .clone_boxed(),
-        );
-        // Clone ABI zones (each zone contains a boxed ABI that needs to be cloned)
-        for (start, zone) in self.abi_zones.get().iter() {
-            let new_zone = AbiZone {
-                range: zone.range.clone(),
-                abi: zone.abi.clone_boxed(),
-            };
-            child.abi_zones.get_mut().insert(*start, new_zone);
-        }
-        // Notify child's default ABI instance that cloning has completed
-        // Child is not yet in the scheduler, so direct access is safe.
-        if let Some(abi_boxed) = child.default_abi.get_mut().as_mut() {
-            let _ = abi_boxed.on_task_cloned(self, &child, flags);
+        // SAFETY: Child task is not yet visible to scheduler, parent is currently executing
+        unsafe {
+            *child.default_abi.get_mut() = Some(
+                self.default_abi
+                    .get()
+                    .as_ref()
+                    .expect("default_abi not set")
+                    .clone_boxed(),
+            );
+            // Clone ABI zones (each zone contains a boxed ABI that needs to be cloned)
+            for (start, zone) in self.abi_zones.get().iter() {
+                let new_zone = AbiZone {
+                    range: zone.range.clone(),
+                    abi: zone.abi.clone_boxed(),
+                };
+                child.abi_zones.get_mut().insert(*start, new_zone);
+            }
+            // Notify child's default ABI instance that cloning has completed
+            // Child is not yet in the scheduler, so direct access is safe.
+            if let Some(abi_boxed) = child.default_abi.get_mut().as_mut() {
+                let _ = abi_boxed.on_task_cloned(self, &child, flags);
+            }
         }
 
         // Copy state such as data size

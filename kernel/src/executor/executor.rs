@@ -280,7 +280,10 @@ impl TransparentExecutor {
 
         // Step 7: Update task's ABI if switch occurred
         if abi_switch_required {
-            *task.default_abi.get_mut() = Some(abi);
+            // SAFETY: This is the currently executing task on this hart
+            unsafe {
+                *task.default_abi.get_mut() = Some(abi);
+            }
         }
 
         Ok(())

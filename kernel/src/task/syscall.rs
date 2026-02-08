@@ -148,8 +148,11 @@ pub fn sys_clone(trapframe: &mut Trapframe) -> usize {
             // Handle SetTls flag: set TLS pointer and tp register
             if clone_flags.is_set(CloneFlagsDef::SetTls) {
                 // Set TLS pointer in task's ABI state
-                if let Some(abi) = child_task.default_abi.get_mut().as_mut() {
-                    abi.set_tls_pointer(tls_ptr);
+                // SAFETY: Child task is not yet visible to scheduler
+                unsafe {
+                    if let Some(abi) = child_task.default_abi.get_mut().as_mut() {
+                        abi.set_tls_pointer(tls_ptr);
+                    }
                 }
 
                 // Set TLS pointer using architecture-specific VCPU method
@@ -189,8 +192,11 @@ pub fn sys_set_tls(trapframe: &mut Trapframe) -> usize {
     let tls_ptr = trapframe.get_arg(0);
 
     // Update ABI state
-    if let Some(abi) = task.default_abi.get_mut().as_mut() {
-        abi.set_tls_pointer(tls_ptr);
+    // SAFETY: This is the currently executing task on this hart
+    unsafe {
+        if let Some(abi) = task.default_abi.get_mut().as_mut() {
+            abi.set_tls_pointer(tls_ptr);
+        }
     }
 
     // Set TLS pointer using architecture-specific VCPU method
@@ -205,12 +211,14 @@ pub fn sys_get_tls(trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
 
     // Get TLS pointer from ABI state
-    let tls_ptr = task
-        .default_abi
-        .get()
-        .as_ref()
-        .and_then(|abi| abi.get_tls_pointer())
-        .unwrap_or(0);
+    // SAFETY: This is the currently executing task on this hart
+    let tls_ptr = unsafe {
+        task.default_abi
+            .get()
+            .as_ref()
+            .and_then(|abi| abi.get_tls_pointer())
+            .unwrap_or(0)
+    };
 
     trapframe.increment_pc_next(task);
     tls_ptr // Return TLS pointer
@@ -222,8 +230,11 @@ pub fn sys_set_tid_address(trapframe: &mut Trapframe) -> usize {
     let tid_ptr = trapframe.get_arg(0);
 
     // Update ABI state
-    if let Some(abi) = task.default_abi.get_mut().as_mut() {
-        abi.set_clear_child_tid(tid_ptr);
+    // SAFETY: This is the currently executing task on this hart
+    unsafe {
+        if let Some(abi) = task.default_abi.get_mut().as_mut() {
+            abi.set_clear_child_tid(tid_ptr);
+        }
     }
 
     trapframe.increment_pc_next(task);
@@ -641,7 +652,10 @@ pub fn sys_register_abi_zone(trapframe: &mut Trapframe) -> usize {
     };
 
     // Insert into the task's ABI zones map
-    task.abi_zones.get_mut().insert(start, zone);
+    // SAFETY: This is the currently executing task on this hart
+    unsafe {
+        task.abi_zones.get_mut().insert(start, zone);
+    }
 
     crate::early_println!("[syscall] Successfully registered ABI zone");
     0
@@ -664,7 +678,9 @@ pub fn sys_unregister_abi_zone(trapframe: &mut Trapframe) -> usize {
     crate::early_println!("[syscall] Unregistering ABI zone at start={:#x}", start);
 
     // Remove the ABI zone from the map
-    match task.abi_zones.get_mut().remove(&start) {
+    // SAFETY: This is the currently executing task on this hart
+    let result = unsafe { task.abi_zones.get_mut().remove(&start) };
+    match result {
         Some(_) => {
             crate::early_println!("[syscall] Successfully unregistered ABI zone");
             0

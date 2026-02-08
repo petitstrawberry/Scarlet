@@ -41,11 +41,15 @@ impl KernelTimer {
         }
     }
 
-    pub fn init(&self) {
-        for i in 0..MAX_NUM_CPUS {
-            // SAFETY: Each CPU only accesses its own timer
-            unsafe { (*self.core_local_timer[i].get()).stop() };
-        }
+    /// Initialize the timer for a specific CPU.
+    /// This must be called by each CPU individually during its initialization.
+    ///
+    /// # Arguments
+    /// * `cpu_id` - The ID of the CPU whose timer should be initialized
+    pub fn init(&self, cpu_id: usize) {
+        // SAFETY: Only the specified CPU's timer is accessed, maintaining
+        // the per-CPU access invariant.
+        unsafe { (*self.core_local_timer[cpu_id].get()).stop() };
     }
 
     pub fn start(&self, cpu_id: usize) {
