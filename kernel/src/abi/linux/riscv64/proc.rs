@@ -42,7 +42,7 @@ use crate::{
 
 //     trapframe.increment_pc_next(parent_task); /* Increment the program counter */
 //     /* Save the trapframe to the task before cloning */
-//     parent_task.vcpu.store(trapframe);
+//     parent_task.vcpu.lock().store(trapframe);
 
 //     /* Clone the task */
 //     match parent_task.clone_task(CloneFlags::default()) {
@@ -74,7 +74,7 @@ pub fn sys_set_tid_address(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe)
 
 pub fn sys_exit(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
-    task.vcpu.store(trapframe);
+    task.vcpu.lock().store(trapframe);
     let exit_code = trapframe.get_arg(0) as i32;
 
     task.exit(exit_code);
@@ -84,7 +84,7 @@ pub fn sys_exit(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize 
 
 pub fn sys_exit_group(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
-    task.vcpu.store(trapframe);
+    task.vcpu.lock().store(trapframe);
     let exit_code = trapframe.get_arg(0) as i32;
     task.exit(exit_code);
     get_scheduler().schedule(trapframe);
@@ -228,7 +228,7 @@ pub fn sys_brk(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
 //     };
 
 //     // Try to open the file
-//     let file = match task.vfs.as_ref() {
+//     let file = match task.vfs.read().clone() {
 //         Some(vfs) => vfs.open(&path, 0),
 //         None => return usize::MAX, // VFS not initialized
 //     };
@@ -537,7 +537,7 @@ pub fn sys_clone(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize 
     }
 
     trapframe.increment_pc_next(parent_task);
-    parent_task.vcpu.store(trapframe);
+    parent_task.vcpu.lock().store(trapframe);
 
     // Map Linux clone flags to Scarlet CloneFlags
     let mut cflags = CloneFlags::new();
@@ -556,16 +556,16 @@ pub fn sys_clone(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize 
 
     let ret = match parent_task.clone_task(cflags) {
         Ok(mut child_task) => {
-            child_task.vcpu.iregs.reg[10] = 0; // a0 = 0 in child
+            child_task.vcpu.lock().iregs.reg[10] = 0; // a0 = 0 in child
             // If child_stack is provided, set child's user SP
             if child_stack != 0 {
-                child_task.vcpu.set_sp(child_stack);
+                child_task.vcpu.lock().set_sp(child_stack);
             }
             // If CLONE_SETTLS requested, set tp (x4) to tls for child
             #[allow(non_snake_case)]
             const CLONE_SETTLS: usize = 0x00080000;
             if (flags & CLONE_SETTLS) != 0 {
-                child_task.vcpu.iregs.reg[4] = tls; // x4 = tp
+                child_task.vcpu.lock().iregs.reg[4] = tls; // x4 = tp
             }
 
             let scheduler = get_scheduler();

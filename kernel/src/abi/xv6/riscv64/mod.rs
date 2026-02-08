@@ -13,6 +13,7 @@ use alloc::{
     sync::Arc,
     vec::Vec,
 };
+use core::sync::atomic::Ordering;
 use file::{sys_dup, sys_exec, sys_mknod, sys_open, sys_write};
 use hashbrown::HashMap;
 use proc::{sys_exit, sys_fork, sys_getpid, sys_kill, sys_sleep, sys_wait};
@@ -229,9 +230,9 @@ impl AbiModule for Xv6Riscv64Abi {
         match file_object.as_file() {
             Some(file_obj) => {
                 // Reset task state for XV6 execution
-                task.text_size = 0;
-                task.data_size = 0;
-                task.stack_size = 0;
+                task.text_size.store(0, Ordering::SeqCst);
+                task.data_size.store(0, Ordering::SeqCst);
+                task.stack_size.store(0, Ordering::SeqCst);
                 task.brk
                     .store(usize::MAX, core::sync::atomic::Ordering::SeqCst);
 
@@ -239,7 +240,8 @@ impl AbiModule for Xv6Riscv64Abi {
                 match load_elf_into_task(file_obj, task) {
                     Ok(entry_point) => {
                         // Set the name
-                        task.name = argv.get(0).map_or("xv6".to_string(), |s| s.to_string());
+                        *task.name.write() =
+                            argv.get(0).map_or("xv6".to_string(), |s| s.to_string());
                         // Clear page table entries
                         let idx =
                             arch::vm::get_root_pagetable_ptr(task.vm_manager.get_asid()).unwrap();
@@ -289,14 +291,14 @@ impl AbiModule for Xv6Riscv64Abi {
                         task.set_entry_point(entry_point as usize);
 
                         // Reset task's registers (except for those needed for arguments)
-                        task.vcpu.iregs = IntRegisters::new();
+                        task.vcpu.lock().iregs = IntRegisters::new();
                         // Set the stack pointer
-                        task.vcpu.set_sp(stack_pointer);
-                        task.vcpu.iregs.reg[11] = stack_pointer as usize; // Set the return value (a0) to 0 in the new proc
-                        task.vcpu.iregs.reg[10] = argc; // Set argc in a0
+                        task.vcpu.lock().set_sp(stack_pointer);
+                        task.vcpu.lock().iregs.reg[11] = stack_pointer as usize; // Set the return value (a0) to 0 in the new proc
+                        task.vcpu.lock().iregs.reg[10] = argc; // Set argc in a0
 
                         // Switch to the new task
-                        task.vcpu.switch(trapframe);
+                        task.vcpu.lock().switch(trapframe);
                         Ok(())
                     }
                     Err(_e) => Err("Failed to load XV6 ELF binary"),

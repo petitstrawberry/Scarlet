@@ -77,7 +77,7 @@ pub trait AbiModule: Send + Sync + 'static {
     fn on_task_cloned(
         &mut self,
         _parent_task: &crate::task::Task,
-        _child_task: &mut crate::task::Task,
+        _child_task: &crate::task::Task,
         _flags: CloneFlags,
     ) -> Result<(), &'static str> {
         Ok(())
@@ -87,7 +87,7 @@ pub trait AbiModule: Send + Sync + 'static {
     ///
     /// ABI modules can perform per-ABI teardown such as waking futex waiters,
     /// clearing TLS/robust-list pointers, or delivering exit-related signals.
-    fn on_task_exit(&mut self, _task: &mut crate::task::Task) {}
+    fn on_task_exit(&mut self, _task: &crate::task::Task) {}
 
     /// Get the task namespace for this ABI.
     ///
@@ -482,8 +482,7 @@ impl AbiRegistry {
         let registry = Self::global().lock();
 
         // Get current task's ABI reference for inheritance consideration
-        let current_abi: Option<&(dyn AbiModule + Send + Sync)> =
-            mytask().and_then(|task| task.default_abi.as_deref());
+        let _task = mytask();
 
         // Try all ABI modules and find the one with highest confidence
         // Each ABI decides its own confidence based on:
@@ -491,15 +490,29 @@ impl AbiRegistry {
         // - Architecture compatibility
         // - Entry point validity
         // - Inheritance bonus from current ABI
-        registry
-            .factories
-            .iter()
-            .filter_map(|(name, factory)| {
-                let abi = factory();
-                abi.can_execute_binary(file_object, file_path, current_abi)
-                    .map(|confidence| (name.clone(), confidence))
+        if let Some(ref task) = _task {
+            task.with_default_abi(|current_abi| {
+                registry
+                    .factories
+                    .iter()
+                    .filter_map(|(name, factory)| {
+                        let abi = factory();
+                        abi.can_execute_binary(file_object, file_path, Some(current_abi))
+                            .map(|confidence| (name.clone(), confidence))
+                    })
+                    .max_by_key(|(_, confidence)| *confidence)
             })
-            .max_by_key(|(_, confidence)| *confidence)
+        } else {
+            registry
+                .factories
+                .iter()
+                .filter_map(|(name, factory)| {
+                    let abi = factory();
+                    abi.can_execute_binary(file_object, file_path, None)
+                        .map(|confidence| (name.clone(), confidence))
+                })
+                .max_by_key(|(_, confidence)| *confidence)
+        }
     }
 }
 
@@ -517,9 +530,9 @@ pub fn syscall_dispatcher(trapframe: &mut Trapframe) -> Result<usize, &'static s
     // 2. Get mutable reference to current task
     let task = mytask().unwrap();
 
-    // 3. Resolve the appropriate ABI based on PC address
-    let abi_module = task.resolve_abi_mut(pc);
-
-    // 4. Handle the system call with the resolved ABI
-    abi_module.handle_syscall(trapframe)
+    // 3. Resolve the appropriate ABI based on PC address and handle the syscall
+    task.with_resolve_abi_mut(pc, |abi_module| {
+        // 4. Handle the system call with the resolved ABI
+        abi_module.handle_syscall(trapframe)
+    })
 }

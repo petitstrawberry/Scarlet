@@ -281,7 +281,7 @@ pub fn setup_trampoline_for_kernel(manager: &VirtualMemoryManager) {
     }
 }
 
-pub fn setup_trampoline_for_user(manager: &mut VirtualMemoryManager) {
+pub fn setup_trampoline_for_user(manager: &VirtualMemoryManager) {
     setup_trampoline_at_end(manager, TRAMPOLINE_VA_END);
 }
 

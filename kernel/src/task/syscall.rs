@@ -100,7 +100,7 @@ pub fn sys_getchar(trapframe: &mut Trapframe) -> usize {
 
 pub fn sys_exit(trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
-    task.vcpu.store(trapframe);
+    task.vcpu.lock().store(trapframe);
     let exit_code = trapframe.get_arg(0) as i32;
     task.exit(exit_code);
     usize::MAX // -1 (If exit is successful, this will not be reached)
@@ -110,7 +110,7 @@ pub fn sys_clone(trapframe: &mut Trapframe) -> usize {
     let parent_task = mytask().unwrap();
     trapframe.increment_pc_next(parent_task); /* Increment the program counter */
     /* Save the trapframe to the task before cloning */
-    parent_task.vcpu.store(trapframe);
+    parent_task.vcpu.lock().store(trapframe);
     let clone_flags = CloneFlags::from_raw(trapframe.get_arg(0) as u64);
     let child_stack = trapframe.get_arg(1); // Second argument: child stack pointer
     let child_fn = trapframe.get_arg(2); // Third argument: function pointer (trampoline)
@@ -124,21 +124,21 @@ pub fn sys_clone(trapframe: &mut Trapframe) -> usize {
         Ok(mut child_task) => {
             // crate::println!("[CLONE] Successfully created child task {}, state: {:?}, PC: 0x{:x}",
             //     child_id, child_task.get_state(), child_task.vcpu.get_pc());
-            child_task.vcpu.iregs.set_return_value(0); /* Set the return value to 0 in the child task */
+            child_task.vcpu.lock().iregs.set_return_value(0); /* Set the return value to 0 in the child task */
 
             // If child_stack is provided, set child's user SP
             if child_stack != 0 {
-                child_task.vcpu.set_sp(child_stack);
+                child_task.vcpu.lock().set_sp(child_stack);
             }
 
             // If child_fn is provided, set it as PC (thread entry point)
             if child_fn != 0 {
-                child_task.vcpu.set_pc(child_fn as u64);
+                child_task.vcpu.lock().set_pc(child_fn as u64);
             }
 
             // If child_arg is provided, pass it as first argument (a0/x0)
             if child_arg != 0 {
-                child_task.vcpu.iregs.set_arg(0, child_arg);
+                child_task.vcpu.lock().iregs.set_arg(0, child_arg);
             }
 
             let scheduler = get_scheduler();
@@ -148,12 +148,12 @@ pub fn sys_clone(trapframe: &mut Trapframe) -> usize {
             // Handle SetTls flag: set TLS pointer and tp register
             if clone_flags.is_set(CloneFlagsDef::SetTls) {
                 // Set TLS pointer in task's ABI state
-                if let Some(abi) = child_task.default_abi.as_mut() {
+                if let Some(abi) = child_task.default_abi.lock().as_mut() {
                     abi.set_tls_pointer(tls_ptr);
                 }
 
                 // Set TLS pointer using architecture-specific VCPU method
-                child_task.vcpu.set_tls_pointer(tls_ptr);
+                child_task.vcpu.lock().set_tls_pointer(tls_ptr);
             }
 
             // Add child to scheduler and get the allocated ID
@@ -189,12 +189,12 @@ pub fn sys_set_tls(trapframe: &mut Trapframe) -> usize {
     let tls_ptr = trapframe.get_arg(0);
 
     // Update ABI state
-    if let Some(abi) = task.default_abi.as_mut() {
+    if let Some(abi) = task.default_abi.lock().as_mut() {
         abi.set_tls_pointer(tls_ptr);
     }
 
     // Set TLS pointer using architecture-specific VCPU method
-    task.vcpu.set_tls_pointer(tls_ptr);
+    task.vcpu.lock().set_tls_pointer(tls_ptr);
 
     trapframe.increment_pc_next(task);
     0 // Success
@@ -207,6 +207,7 @@ pub fn sys_get_tls(trapframe: &mut Trapframe) -> usize {
     // Get TLS pointer from ABI state
     let tls_ptr = task
         .default_abi
+        .lock()
         .as_ref()
         .and_then(|abi| abi.get_tls_pointer())
         .unwrap_or(0);
@@ -221,7 +222,7 @@ pub fn sys_set_tid_address(trapframe: &mut Trapframe) -> usize {
     let tid_ptr = trapframe.get_arg(0);
 
     // Update ABI state
-    if let Some(abi) = task.default_abi.as_mut() {
+    if let Some(abi) = task.default_abi.lock().as_mut() {
         abi.set_clear_child_tid(tid_ptr);
     }
 
@@ -584,7 +585,7 @@ pub fn sys_yield(trapframe: &mut Trapframe) -> usize {
 /// - Other tasks in the group are forcefully terminated
 pub fn sys_exit_group(trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
-    task.vcpu.store(trapframe);
+    task.vcpu.lock().store(trapframe);
     let exit_code = trapframe.get_arg(0) as i32;
     task.exit_group(exit_code);
     usize::MAX // -1 (If exit_group is successful, this will not be reached)
@@ -640,7 +641,7 @@ pub fn sys_register_abi_zone(trapframe: &mut Trapframe) -> usize {
     };
 
     // Insert into the task's ABI zones map
-    task.abi_zones.insert(start, zone);
+    task.abi_zones.lock().insert(start, zone);
 
     crate::early_println!("[syscall] Successfully registered ABI zone");
     0
@@ -663,7 +664,7 @@ pub fn sys_unregister_abi_zone(trapframe: &mut Trapframe) -> usize {
     crate::early_println!("[syscall] Unregistering ABI zone at start={:#x}", start);
 
     // Remove the ABI zone from the map
-    match task.abi_zones.remove(&start) {
+    match task.abi_zones.lock().remove(&start) {
         Some(_) => {
             crate::early_println!("[syscall] Successfully unregistered ABI zone");
             0

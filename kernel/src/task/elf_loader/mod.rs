@@ -48,6 +48,7 @@ use crate::vm::vmem::{MemoryArea, VirtualMemoryMap, VirtualMemoryPermission, Vir
 use alloc::boxed::Box;
 use alloc::string::{String, ToString};
 use alloc::{format, vec};
+use core::sync::atomic::Ordering;
 
 use super::TaskType;
 
@@ -988,10 +989,12 @@ fn load_elf_into_task_static(
 
             match segment_type {
                 VirtualMemoryRegion::Text => {
-                    task.text_size += aligned_size as usize;
+                    task.text_size
+                        .fetch_add(aligned_size as usize, Ordering::SeqCst);
                 }
                 VirtualMemoryRegion::Data => {
-                    task.data_size += aligned_size as usize;
+                    task.data_size
+                        .fetch_add(aligned_size as usize, Ordering::SeqCst);
                 }
                 _ => {
                     return Err(ElfLoaderError {
@@ -1433,10 +1436,10 @@ fn load_elf_segment_at_address(
 
     // Update task size information for proper memory management
     let segment_type = if ph.p_flags & PF_X != 0 {
-        task.text_size += aligned_size;
+        task.text_size.fetch_add(aligned_size, Ordering::SeqCst);
         "text"
     } else if ph.p_flags & PF_W != 0 || ph.p_flags & PF_R != 0 {
-        task.data_size += aligned_size;
+        task.data_size.fetch_add(aligned_size, Ordering::SeqCst);
         "data"
     } else {
         "unknown"

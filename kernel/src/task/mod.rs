@@ -14,7 +14,8 @@ use alloc::{
     sync::Arc,
     vec::Vec,
 };
-use spin::Mutex;
+use core::ops::{Deref, DerefMut};
+use spin::{Mutex, RwLock};
 
 use crate::abi::{AbiModule, scarlet::ScarletAbi};
 use crate::sync::waker::Waker;
@@ -41,7 +42,7 @@ use crate::{
 };
 use alloc::collections::BTreeMap;
 use core::ops::Range;
-use core::sync::atomic::{AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicI32, AtomicU8, AtomicU32, AtomicUsize, Ordering};
 use spin::Once;
 
 /// Global registry of task-specific wakers for waitpid
@@ -208,6 +209,74 @@ pub enum TaskState {
     Terminated,
 }
 
+impl TaskState {
+    /// Convert TaskState to u8 for atomic storage
+    pub const fn to_u8(self) -> u8 {
+        match self {
+            TaskState::NotInitialized => 0,
+            TaskState::Ready => 1,
+            TaskState::Running => 2,
+            TaskState::Blocked(bt) => match bt {
+                BlockedType::Interruptible => 3,
+                BlockedType::Uninterruptible => 4,
+            },
+            TaskState::Zombie => 5,
+            TaskState::Terminated => 6,
+        }
+    }
+
+    /// Convert u8 to TaskState
+    pub const fn from_u8(val: u8) -> Option<Self> {
+        match val {
+            0 => Some(TaskState::NotInitialized),
+            1 => Some(TaskState::Ready),
+            2 => Some(TaskState::Running),
+            3 => Some(TaskState::Blocked(BlockedType::Interruptible)),
+            4 => Some(TaskState::Blocked(BlockedType::Uninterruptible)),
+            5 => Some(TaskState::Zombie),
+            6 => Some(TaskState::Terminated),
+            _ => None,
+        }
+    }
+}
+
+/// Atomic task state for thread-safe state management
+pub struct AtomicTaskState {
+    inner: AtomicU8,
+}
+
+impl AtomicTaskState {
+    pub const fn new(state: TaskState) -> Self {
+        Self {
+            inner: AtomicU8::new(state.to_u8()),
+        }
+    }
+
+    pub fn load(&self, ordering: Ordering) -> TaskState {
+        TaskState::from_u8(self.inner.load(ordering)).unwrap_or(TaskState::NotInitialized)
+    }
+
+    pub fn store(&self, state: TaskState, ordering: Ordering) {
+        self.inner.store(state.to_u8(), ordering);
+    }
+
+    pub fn compare_exchange(
+        &self,
+        current: TaskState,
+        new: TaskState,
+        success: Ordering,
+        failure: Ordering,
+    ) -> Result<TaskState, TaskState> {
+        match self
+            .inner
+            .compare_exchange(current.to_u8(), new.to_u8(), success, failure)
+        {
+            Ok(_) => Ok(new),
+            Err(actual) => Err(TaskState::from_u8(actual).unwrap_or(TaskState::NotInitialized)),
+        }
+    }
+}
+
 #[derive(Debug, PartialEq, Clone, Copy)]
 pub enum TaskType {
     Kernel,
@@ -221,62 +290,47 @@ pub struct AbiZone {
 }
 
 pub struct Task {
+    // === Read-only fields (set at creation) ===
     id: usize,
     /// Task ID within the task's namespace (may differ from global ID)
     namespace_id: usize,
     /// Task namespace for ID management
     namespace: Arc<namespace::TaskNamespace>,
-    pub name: String,
-    pub priority: u32,
-    pub vcpu: Vcpu,
-    /// Kernel context for context switching
-    pub kernel_context: KernelContext,
-    pub state: TaskState,
     pub task_type: TaskType,
     pub entry: usize,
-    pub brk: Arc<AtomicUsize>, /* Program break (NOT work in Kernel task) */
-    pub stack_size: usize,     /* Size of the stack in bytes */
-    pub data_size: usize, /* Size of the data segment in bytes (page unit) (NOT work in Kernel task) */
-    pub text_size: usize, /* Size of the text segment in bytes (NOT work in Kernel task) */
-    pub max_stack_size: usize, /* Maximum size of the stack in bytes */
-    pub max_data_size: usize, /* Maximum size of the data segment in bytes */
-    pub max_text_size: usize, /* Maximum size of the text segment in bytes */
-    pub vm_manager: VirtualMemoryManager,
-    /// Managed pages
-    ///
-    /// Managed pages are freed automatically when the task is terminated.
-    pub managed_pages: Vec<ManagedPage>,
-    parent_id: Option<usize>, /* Parent task ID */
-    children: Vec<usize>,     /* List of child task IDs */
-    exit_status: Option<i32>, /* Exit code (for monitoring child task termination) */
+    parent_id: Option<usize>,
     /// Thread Group ID (TGID)
-    ///
-    /// Tasks created with CLONE_VM flag share the same TGID as their parent.
-    /// This identifies the thread group (process) for exit_group semantics.
-    /// For standalone tasks (no CLONE_VM), TGID equals the task ID.
     tgid: usize,
+    pub max_stack_size: usize,
+    pub max_data_size: usize,
+    pub max_text_size: usize,
 
-    /// Default ABI for this task. Determined from ELF OSABI etc.
-    /// Wrapped in Option to allow temporary take() during callbacks
-    /// that also need `&mut self` without borrow conflicts.
-    pub default_abi: Option<Box<dyn AbiModule + Send + Sync>>,
+    // === Atomic fields (lock-free) ===
+    /// Task state with atomic transitions
+    pub state: AtomicTaskState,
+    /// Task priority
+    pub priority: AtomicU32,
+    /// Time slice for scheduling
+    pub time_slice: AtomicU32,
+    /// Stack size in bytes
+    pub stack_size: AtomicUsize,
+    /// Data segment size in bytes
+    pub data_size: AtomicUsize,
+    /// Text segment size in bytes
+    pub text_size: AtomicUsize,
+    /// Exit status (i32::MIN represents None)
+    pub exit_status: AtomicI32,
+    /// Program break (already thread-safe)
+    pub brk: Arc<AtomicUsize>,
 
-    /// ABI zones map. Key is the start address of the range.
-    pub abi_zones: BTreeMap<usize, AbiZone>,
-
+    // === RwLock fields (frequent reads) ===
+    /// Task name
+    pub name: RwLock<String>,
+    /// List of child task IDs
+    pub children: RwLock<Vec<usize>>,
+    /// Managed pages (auto-freed on termination)
+    pub managed_pages: RwLock<Vec<ManagedPage>>,
     /// Virtual File System Manager
-    ///
-    /// Each task can have its own isolated VfsManager instance for containerization
-    /// and namespace isolation. The VfsManager provides:
-    ///
-    /// - **Filesystem Isolation**: Independent mount point namespaces allowing
-    ///   complete filesystem isolation between tasks or containers
-    /// - **Selective Sharing**: Arc-based filesystem object sharing enables
-    ///   controlled resource sharing while maintaining namespace independence
-    /// - **Bind Mount Support**: Advanced bind mount capabilities for flexible
-    ///   directory mapping and container orchestration scenarios
-    /// - **Security**: Path normalization and validation preventing directory
-    ///   traversal attacks and unauthorized filesystem access
     ///
     /// # Usage Patterns
     ///
@@ -287,26 +341,33 @@ pub struct Task {
     ///
     /// VfsManager is thread-safe and can be shared between tasks using Arc.
     /// All internal operations use RwLock for concurrent access protection.
-    pub vfs: Option<Arc<VfsManager>>,
-
-    // KernelObject table
-    pub handle_table: HandleTable,
-    /// Time slice (in ticks) for round-robin scheduling. Decremented every tick; when it reaches 0, the scheduler is invoked.
-    pub time_slice: u32,
+    pub vfs: RwLock<Option<Arc<VfsManager>>>,
     /// Software timer handlers
-    pub software_timers_handlers: Vec<Arc<dyn TimerHandler>>,
+    pub software_timers_handlers: RwLock<Vec<Arc<dyn TimerHandler>>>,
 
-    // Wakers for task-specific operations
-    /// Waker for sleep operations
+    // === Mutex fields (complex operations) ===
+    /// VCPU state for context switching
+    pub vcpu: Mutex<Vcpu>,
+    /// Kernel context for context switching
+    pub kernel_context: Mutex<KernelContext>,
+    /// Virtual memory manager (already thread-safe internally)
+    pub vm_manager: VirtualMemoryManager,
+    /// Default ABI module
+    pub default_abi: Mutex<Option<Box<dyn AbiModule + Send + Sync>>>,
+    /// ABI zones map (key is start address)
+    pub abi_zones: Mutex<BTreeMap<usize, AbiZone>>,
+    /// Handle table for kernel objects (already thread-safe internally)
+    pub handle_table: HandleTable,
+    /// Waker for sleep operations (already thread-safe internally)
     pub sleep_waker: Waker,
+    /// Kernel stack window base (slot_index, base_vaddr)
+    pub kernel_stack_window_base: Mutex<Option<(usize, usize)>>,
 
+    // === Already protected fields ===
     /// Task-local event queue with priority ordering
     pub event_queue: Mutex<crate::ipc::event::TaskEventQueue>,
-    /// Event processing enabled flag (similar to interrupt enable/disable)
+    /// Event processing enabled flag
     pub events_enabled: Mutex<bool>,
-
-    /// Kernel stack window base in shared kernel PT: (slot_index, base_vaddr)
-    kernel_stack_window_base: Option<(usize, usize)>,
 }
 
 #[derive(Debug, Clone)]
@@ -396,73 +457,75 @@ impl Task {
         task_type: TaskType,
         ns: Arc<namespace::TaskNamespace>,
     ) -> Self {
-        let task = Task {
-            id: 0,           // Will be allocated by add_task()
-            namespace_id: 0, // Will be set by add_task()
+        Task {
+            // Read-only fields
+            id: 0,
+            namespace_id: 0,
             namespace: ns,
-            name,
-            priority,
-            vcpu: Vcpu::new(match task_type {
-                TaskType::Kernel => crate::arch::vcpu::Mode::Kernel,
-                TaskType::User => crate::arch::vcpu::Mode::User,
-            }),
-            kernel_context: KernelContext::new(),
-            state: TaskState::NotInitialized,
             task_type,
             entry: 0,
-            brk: Arc::new(AtomicUsize::new(usize::MAX)),
-            stack_size: 0,
-            data_size: 0,
-            text_size: 0,
+            parent_id: None,
+            tgid: 0,
             max_stack_size: DEAFAULT_MAX_TASK_STACK_SIZE,
             max_data_size: DEAFAULT_MAX_TASK_DATA_SIZE,
             max_text_size: DEAFAULT_MAX_TASK_TEXT_SIZE,
+            // Atomic fields
+            state: AtomicTaskState::new(TaskState::NotInitialized),
+            priority: AtomicU32::new(priority),
+            time_slice: AtomicU32::new(10),
+            stack_size: AtomicUsize::new(0),
+            data_size: AtomicUsize::new(0),
+            text_size: AtomicUsize::new(0),
+            exit_status: AtomicI32::new(i32::MIN), // i32::MIN represents None
+            brk: Arc::new(AtomicUsize::new(usize::MAX)),
+            // RwLock fields
+            name: RwLock::new(name),
+            children: RwLock::new(Vec::new()),
+            managed_pages: RwLock::new(Vec::new()),
+            vfs: RwLock::new(None),
+            software_timers_handlers: RwLock::new(Vec::new()),
+            // Mutex fields
+            vcpu: Mutex::new(Vcpu::new(match task_type {
+                TaskType::Kernel => crate::arch::vcpu::Mode::Kernel,
+                TaskType::User => crate::arch::vcpu::Mode::User,
+            })),
+            kernel_context: Mutex::new(KernelContext::new()),
             vm_manager: VirtualMemoryManager::new(),
-            managed_pages: Vec::new(),
-            parent_id: None,
-            children: Vec::new(),
-            exit_status: None,
-            tgid: 0, // Will be set to id when task is added to scheduler
-            default_abi: Some(Box::new(ScarletAbi::default())), // Default ABI
-            abi_zones: BTreeMap::new(),
-            vfs: None,
+            default_abi: Mutex::new(Some(Box::new(ScarletAbi::default()))),
+            abi_zones: Mutex::new(BTreeMap::new()),
             handle_table: HandleTable::new(),
-            time_slice: 10, // Assign 10 ticks by default
-            software_timers_handlers: Vec::new(),
-            // Wakers for task-specific operations
             sleep_waker: Waker::new_interruptible("task_sleep_waker"),
-            event_queue: spin::Mutex::new(crate::ipc::event::TaskEventQueue::new()),
-            events_enabled: spin::Mutex::new(true), // Events enabled by default
-            kernel_stack_window_base: None,
-        };
-
-        task
+            kernel_stack_window_base: Mutex::new(None),
+            // Already protected
+            event_queue: Mutex::new(crate::ipc::event::TaskEventQueue::new()),
+            events_enabled: Mutex::new(true),
+        }
     }
 
-    pub fn init(&mut self) {
+    pub fn init(&self) {
         // Initialize kernel context with the task's entry point
         // The kernel stack is allocated within the KernelContext
-        self.kernel_context = KernelContext::new();
+        *self.kernel_context.lock() = KernelContext::new();
 
         match self.task_type {
             TaskType::Kernel => {
                 user_kernel_vm_init(self);
                 /* Set sp to the top of the kernel stack */
-                self.vcpu.set_sp(KERNEL_VM_STACK_END + 1);
+                self.vcpu.lock().set_sp(KERNEL_VM_STACK_END + 1);
                 /* Set pc to the task's entry point */
-                self.vcpu.set_pc(self.entry as u64);
+                self.vcpu.lock().set_pc(self.entry as u64);
             }
             TaskType::User => {
                 user_vm_init(self);
                 /* Set sp to the top of the user stack */
-                self.vcpu.set_sp(USER_STACK_END);
+                self.vcpu.lock().set_sp(USER_STACK_END);
                 /* PC will be set when loading the ELF binary */
             }
         }
 
         /* Set the task state to Ready */
-        self.state = TaskState::Ready;
-        self.time_slice = 1;
+        self.state.store(TaskState::Ready, Ordering::SeqCst);
+        self.time_slice.store(1, Ordering::SeqCst);
     }
 
     pub fn get_id(&self) -> usize {
@@ -557,8 +620,8 @@ impl Task {
     /// # Arguments
     /// * `state` - The new task state
     ///
-    pub fn set_state(&mut self, state: TaskState) {
-        self.state = state;
+    pub fn set_state(&self, state: TaskState) {
+        self.state.store(state, Ordering::SeqCst);
     }
 
     /// Get the task state
@@ -567,7 +630,7 @@ impl Task {
     /// The task state
     ///
     pub fn get_state(&self) -> TaskState {
-        self.state
+        self.state.load(Ordering::SeqCst)
     }
 
     /// Get the size of the task.
@@ -575,7 +638,9 @@ impl Task {
     /// # Returns
     /// The size of the task in bytes.
     pub fn get_size(&self) -> usize {
-        self.stack_size + self.text_size + self.data_size
+        self.stack_size.load(Ordering::SeqCst)
+            + self.text_size.load(Ordering::SeqCst)
+            + self.data_size.load(Ordering::SeqCst)
     }
 
     /// Get the program break (NOT work in Kernel task)
@@ -587,7 +652,7 @@ impl Task {
         // Otherwise fallback to legacy size-based calculation for compatibility
         let brk = self.brk.load(Ordering::SeqCst);
         if brk == usize::MAX {
-            self.text_size + self.data_size
+            self.text_size.load(Ordering::SeqCst) + self.data_size.load(Ordering::SeqCst)
         } else {
             brk
         }
@@ -600,7 +665,7 @@ impl Task {
     ///
     /// # Returns
     /// If successful, returns Ok(()), otherwise returns an error.
-    pub fn set_brk(&mut self, brk: usize) -> Result<(), &'static str> {
+    pub fn set_brk(&self, brk: usize) -> Result<(), &'static str> {
         let prev_brk = self.get_brk();
         if brk < prev_brk {
             /* Free pages */
@@ -664,7 +729,7 @@ impl Task {
     /// You must increment the size of the task manually.
     ///
     pub fn allocate_pages(
-        &mut self,
+        &self,
         vaddr: usize,
         num_of_pages: usize,
         permissions: usize,
@@ -707,7 +772,7 @@ impl Task {
     /// # Arguments
     /// * `vaddr` - The virtual address to free pages (NOTE: The address must be page aligned)
     /// * `num_of_pages` - The number of pages to free
-    pub fn free_pages(&mut self, vaddr: usize, num_of_pages: usize) {
+    pub fn free_pages(&self, vaddr: usize, num_of_pages: usize) {
         let page = vaddr / PAGE_SIZE;
         for p in 0..num_of_pages {
             let vaddr = (page + p) * PAGE_SIZE;
@@ -795,14 +860,15 @@ impl Task {
     /// If the address is not page aligned, or if the pages cannot be allocated.
     ///
     pub fn allocate_text_pages(
-        &mut self,
+        &self,
         vaddr: usize,
         num_of_pages: usize,
     ) -> Result<VirtualMemoryMap, &'static str> {
         let permissions = VirtualMemoryRegion::Text.default_permissions();
         let res = self.allocate_pages(vaddr, num_of_pages, permissions);
         if res.is_ok() {
-            self.text_size += num_of_pages * PAGE_SIZE;
+            self.text_size
+                .fetch_add(num_of_pages * PAGE_SIZE, Ordering::SeqCst);
         }
         res
     }
@@ -813,9 +879,10 @@ impl Task {
     /// * `vaddr` - The virtual address to free pages (NOTE: The address must be page aligned)
     /// * `num_of_pages` - The number of pages to free
     ///
-    pub fn free_text_pages(&mut self, vaddr: usize, num_of_pages: usize) {
+    pub fn free_text_pages(&self, vaddr: usize, num_of_pages: usize) {
         self.free_pages(vaddr, num_of_pages);
-        self.text_size -= num_of_pages * PAGE_SIZE;
+        self.text_size
+            .fetch_sub(num_of_pages * PAGE_SIZE, Ordering::SeqCst);
     }
 
     /// Allocate stack pages for the task. And increment the size of the task.
@@ -831,13 +898,14 @@ impl Task {
     /// If the address is not page aligned, or if the pages cannot be allocated.
     ///
     pub fn allocate_stack_pages(
-        &mut self,
+        &self,
         vaddr: usize,
         num_of_pages: usize,
     ) -> Result<VirtualMemoryMap, &'static str> {
         let permissions = VirtualMemoryRegion::Stack.default_permissions();
         let res = self.allocate_pages(vaddr, num_of_pages, permissions)?;
-        self.stack_size += num_of_pages * PAGE_SIZE;
+        self.stack_size
+            .fetch_add(num_of_pages * PAGE_SIZE, Ordering::SeqCst);
         Ok(res)
     }
 
@@ -847,9 +915,10 @@ impl Task {
     /// * `vaddr` - The virtual address to free pages (NOTE: The address must be page aligned)
     /// * `num_of_pages` - The number of pages to free
     ///
-    pub fn free_stack_pages(&mut self, vaddr: usize, num_of_pages: usize) {
+    pub fn free_stack_pages(&self, vaddr: usize, num_of_pages: usize) {
         self.free_pages(vaddr, num_of_pages);
-        self.stack_size -= num_of_pages * PAGE_SIZE;
+        self.stack_size
+            .fetch_sub(num_of_pages * PAGE_SIZE, Ordering::SeqCst);
     }
 
     /// Allocate data pages for the task. And increment the size of the task.
@@ -865,13 +934,14 @@ impl Task {
     /// If the address is not page aligned, or if the pages cannot be allocated.
     ///
     pub fn allocate_data_pages(
-        &mut self,
+        &self,
         vaddr: usize,
         num_of_pages: usize,
     ) -> Result<VirtualMemoryMap, &'static str> {
         let permissions = VirtualMemoryRegion::Data.default_permissions();
         let res = self.allocate_pages(vaddr, num_of_pages, permissions)?;
-        self.data_size += num_of_pages * PAGE_SIZE;
+        self.data_size
+            .fetch_add(num_of_pages * PAGE_SIZE, Ordering::SeqCst);
         Ok(res)
     }
 
@@ -881,9 +951,10 @@ impl Task {
     /// * `vaddr` - The virtual address to free pages (NOTE: The address must be page aligned)
     /// * `num_of_pages` - The number of pages to free
     ///
-    pub fn free_data_pages(&mut self, vaddr: usize, num_of_pages: usize) {
+    pub fn free_data_pages(&self, vaddr: usize, num_of_pages: usize) {
         self.free_pages(vaddr, num_of_pages);
-        self.data_size -= num_of_pages * PAGE_SIZE;
+        self.data_size
+            .fetch_sub(num_of_pages * PAGE_SIZE, Ordering::SeqCst);
     }
 
     /// Allocate guard pages for the task.
@@ -903,7 +974,7 @@ impl Task {
     /// This function only maps the pages to the virtual memory space.
     ///
     pub fn allocate_guard_pages(
-        &mut self,
+        &self,
         vaddr: usize,
         num_of_pages: usize,
     ) -> Result<VirtualMemoryMap, &'static str> {
@@ -930,8 +1001,8 @@ impl Task {
     /// Pages added as ManagedPage of the Task will be automatically freed when the Task is terminated.
     /// So, you must not free them by calling free_raw_pages/free_boxed_pages manually.
     ///
-    pub fn add_managed_page(&mut self, pages: ManagedPage) {
-        self.managed_pages.push(pages);
+    pub fn add_managed_page(&self, pages: ManagedPage) {
+        self.managed_pages.write().push(pages);
     }
 
     /// Get managed page
@@ -942,10 +1013,14 @@ impl Task {
     /// # Returns
     /// The managed page if found, otherwise None
     ///
-    fn get_managed_page(&self, vaddr: usize) -> Option<&ManagedPage> {
-        for page in &self.managed_pages {
+    fn get_managed_page(&self, vaddr: usize) -> Option<ManagedPage> {
+        let pages = self.managed_pages.read();
+        for page in pages.iter() {
             if page.vaddr == vaddr {
-                return Some(page);
+                return Some(ManagedPage {
+                    vaddr: page.vaddr,
+                    page: page.page.clone(),
+                });
             }
         }
         None
@@ -959,10 +1034,11 @@ impl Task {
     /// # Returns
     /// The removed managed page if found, otherwise None
     ///
-    pub fn remove_managed_page(&mut self, vaddr: usize) -> Option<crate::task::ManagedPage> {
-        for i in 0..self.managed_pages.len() {
-            if self.managed_pages[i].vaddr == vaddr {
-                let page = self.managed_pages.remove(i);
+    pub fn remove_managed_page(&self, vaddr: usize) -> Option<crate::task::ManagedPage> {
+        let mut pages = self.managed_pages.write();
+        for i in 0..pages.len() {
+            if pages[i].vaddr == vaddr {
+                let page = pages.remove(i);
                 return Some(page);
             }
         }
@@ -970,8 +1046,8 @@ impl Task {
     }
 
     // Set the entry point
-    pub fn set_entry_point(&mut self, entry: usize) {
-        self.vcpu.set_pc(entry as u64);
+    pub fn set_entry_point(&self, entry: usize) {
+        self.vcpu.lock().set_pc(entry as u64);
     }
 
     /// Get the parent ID
@@ -994,9 +1070,10 @@ impl Task {
     ///
     /// # Arguments
     /// * `child_id` - The ID of the child task
-    pub fn add_child(&mut self, child_id: usize) {
-        if !self.children.contains(&child_id) {
-            self.children.push(child_id);
+    pub fn add_child(&self, child_id: usize) {
+        let mut children = self.children.write();
+        if !children.contains(&child_id) {
+            children.push(child_id);
         }
     }
 
@@ -1007,9 +1084,10 @@ impl Task {
     ///
     /// # Returns
     /// true if the removal was successful, false if the child task was not found
-    pub fn remove_child(&mut self, child_id: usize) -> bool {
-        if let Some(pos) = self.children.iter().position(|&id| id == child_id) {
-            self.children.remove(pos);
+    pub fn remove_child(&self, child_id: usize) -> bool {
+        let mut children = self.children.write();
+        if let Some(pos) = children.iter().position(|&id| id == child_id) {
+            children.remove(pos);
             true
         } else {
             false
@@ -1020,16 +1098,16 @@ impl Task {
     ///
     /// # Returns
     /// A vector of child task IDs
-    pub fn get_children(&self) -> &Vec<usize> {
-        &self.children
+    pub fn get_children(&self) -> Vec<usize> {
+        self.children.read().clone()
     }
 
     /// Set the exit status
     ///
     /// # Arguments
     /// * `status` - The exit status
-    pub fn set_exit_status(&mut self, status: i32) {
-        self.exit_status = Some(status);
+    pub fn set_exit_status(&self, status: i32) {
+        self.exit_status.store(status, Ordering::SeqCst);
     }
 
     /// Get the exit status
@@ -1037,53 +1115,66 @@ impl Task {
     /// # Returns
     /// The exit status, or None if not set
     pub fn get_exit_status(&self) -> Option<i32> {
-        self.exit_status
+        let status = self.exit_status.load(Ordering::SeqCst);
+        if status == i32::MIN {
+            None
+        } else {
+            Some(status)
+        }
     }
 
     /// Resolve the ABI to use for the given address
     ///
-    /// This method returns a mutable reference to the ABI module that should be used
+    /// This method calls a closure with the ABI module that should be used
     /// for a system call issued from the given address. It searches the ABI zones map
     /// and returns the appropriate ABI, falling back to the default ABI if no zone matches.
     ///
     /// # Arguments
     /// * `addr` - The program counter address where the system call was issued
+    /// * `f` - Closure to call with the ABI module
     ///
     /// # Returns
-    /// A mutable reference to the ABI module to use
-    pub fn resolve_abi_mut(&mut self, addr: usize) -> &mut (dyn AbiModule + Send + Sync) {
+    /// The result of the closure
+    pub fn with_resolve_abi_mut<R, F>(&self, addr: usize, f: F) -> R
+    where
+        F: FnOnce(&mut (dyn AbiModule + Send + Sync)) -> R,
+    {
         // Search for the zone containing addr using efficient BTreeMap range query
-        if let Some((_start, zone)) = self.abi_zones.range_mut(..=addr).next_back() {
+        let mut abi_zones = self.abi_zones.lock();
+        if let Some((_start, zone)) = abi_zones.range_mut(..=addr).next_back() {
             if zone.range.contains(&addr) {
-                return zone.abi.as_mut();
+                return f(zone.abi.as_mut());
             }
         }
-        // No zone found, return default ABI
-        self.default_abi
-            .as_deref_mut()
-            .expect("default_abi not set")
+        drop(abi_zones);
+        // No zone found, use default ABI
+        let mut guard = self.default_abi.lock();
+        f(guard.as_deref_mut().expect("default_abi not set"))
     }
 
-    /// Get an immutable reference to the default ABI
-    pub fn default_abi_ref(&self) -> &(dyn AbiModule + Send + Sync) {
-        self.default_abi.as_deref().expect("default_abi not set")
-    }
-
-    /// Get a mutable reference to the default ABI
-    pub fn default_abi_mut(&mut self) -> &mut (dyn AbiModule + Send + Sync) {
-        self.default_abi
-            .as_deref_mut()
-            .expect("default_abi not set")
+    /// Execute a closure with the default ABI
+    ///
+    /// # Arguments
+    /// * `f` - Closure to call with the default ABI
+    ///
+    /// # Returns
+    /// The result of the closure
+    pub fn with_default_abi<F, R>(&self, f: F) -> R
+    where
+        F: FnOnce(&(dyn AbiModule + Send + Sync)) -> R,
+    {
+        let guard = self.default_abi.lock();
+        f(guard.as_deref().expect("default_abi not set"))
     }
 
     /// Temporarily take ownership of the default ABI to run a closure that also needs &mut self
-    pub fn with_default_abi_mut<R>(
-        &mut self,
-        f: impl FnOnce(&mut (dyn AbiModule + Send + Sync), &mut Task) -> R,
-    ) -> R {
-        let mut abi = self.default_abi.take().expect("default_abi not set");
+    pub fn with_default_abi_mut<R, F>(&self, f: F) -> R
+    where
+        F: FnOnce(&mut (dyn AbiModule + Send + Sync), &Task) -> R,
+    {
+        let mut abi = self.default_abi.lock().take().expect("default_abi not set");
         let r = f(abi.as_mut(), self);
-        self.default_abi = Some(abi);
+        *self.default_abi.lock() = Some(abi);
         r
     }
 
@@ -1105,8 +1196,8 @@ impl Task {
     pub fn clone_task(&mut self, flags: CloneFlags) -> Result<Task, &'static str> {
         // Create a new task in the same namespace as the parent
         let mut child = Task::new_with_namespace(
-            self.name.clone(),
-            self.priority,
+            self.name.read().clone(),
+            self.priority.load(Ordering::SeqCst),
             self.task_type,
             self.namespace.clone(),
         );
@@ -1216,34 +1307,41 @@ impl Task {
         }
 
         // Copy register states (architecture-specific VCPU state)
-        self.vcpu.clone_to(&mut child.vcpu);
+        self.vcpu.lock().clone_to(&mut child.vcpu.lock());
 
         // Clone the default ABI and ABI zones
-        child.default_abi = Some(
+        *child.default_abi.lock() = Some(
             self.default_abi
+                .lock()
                 .as_ref()
                 .expect("default_abi not set")
                 .clone_boxed(),
         );
         // Clone ABI zones (each zone contains a boxed ABI that needs to be cloned)
-        for (start, zone) in &self.abi_zones {
+        for (start, zone) in self.abi_zones.lock().iter() {
             let new_zone = AbiZone {
                 range: zone.range.clone(),
                 abi: zone.abi.clone_boxed(),
             };
-            child.abi_zones.insert(*start, new_zone);
+            child.abi_zones.lock().insert(*start, new_zone);
         }
         // Notify child's default ABI instance that cloning has completed
         // Take and restore to avoid mutable aliasing with &mut child
-        if let Some(mut abi_boxed) = child.default_abi.take() {
-            let _ = abi_boxed.on_task_cloned(self, &mut child, flags);
-            child.default_abi = Some(abi_boxed);
+        if let Some(mut abi_boxed) = child.default_abi.lock().take() {
+            let _ = abi_boxed.on_task_cloned(self, &child, flags);
+            *child.default_abi.lock() = Some(abi_boxed);
         }
 
         // Copy state such as data size
-        child.stack_size = self.stack_size;
-        child.data_size = self.data_size;
-        child.text_size = self.text_size;
+        child
+            .stack_size
+            .store(self.stack_size.load(Ordering::SeqCst), Ordering::SeqCst);
+        child
+            .data_size
+            .store(self.data_size.load(Ordering::SeqCst), Ordering::SeqCst);
+        child
+            .text_size
+            .store(self.text_size.load(Ordering::SeqCst), Ordering::SeqCst);
         child.max_stack_size = self.max_stack_size;
         child.max_data_size = self.max_data_size;
         child.max_text_size = self.max_text_size;
@@ -1257,7 +1355,9 @@ impl Task {
         }
 
         // Copy scheduling and event handling state
-        child.time_slice = self.time_slice;
+        child
+            .time_slice
+            .store(self.time_slice.load(Ordering::SeqCst), Ordering::SeqCst);
         // Note: software_timers_handlers, sleep_waker, event_queue are NOT copied
         // as they are task-specific runtime state that should start fresh
 
@@ -1275,11 +1375,11 @@ impl Task {
 
         if flags.is_set(CloneFlagsDef::Fs) {
             // Clone the filesystem manager
-            if let Some(vfs) = &self.vfs {
-                child.vfs = Some(vfs.clone());
+            if let Some(vfs) = self.vfs.read().clone() {
+                *child.vfs.write() = Some(vfs.clone());
                 // Current working directory is managed within VfsManager
             } else {
-                child.vfs = None;
+                *child.vfs.write() = None;
             }
         }
 
@@ -1291,7 +1391,9 @@ impl Task {
             crate::vm::setup_trampoline_for_task_kstack_window(&mut child)?;
         }
         // Set the state to Ready
-        child.state = self.state;
+        child
+            .state
+            .store(self.state.load(Ordering::SeqCst), Ordering::SeqCst);
 
         // NOTE: Parent-child relationship will be established AFTER add_task()
         // when the child has a valid ID. The caller is responsible for calling:
@@ -1331,12 +1433,12 @@ impl Task {
             Some(parent_id) => {
                 if get_scheduler().get_task_by_id(parent_id).is_none() {
                     // crate::println!("Task {}: Parent {} not found, terminating", self.id, parent_id);
-                    self.state = TaskState::Terminated;
+                    self.state.store(TaskState::Terminated, Ordering::SeqCst);
                     return;
                 }
                 /* Set the exit status */
                 self.set_exit_status(status);
-                self.state = TaskState::Zombie;
+                self.state.store(TaskState::Zombie, Ordering::SeqCst);
 
                 // TODO: Notify parent via ABI-specific mechanism
                 // crate::println!("Task {}: Set to Zombie state, parent {}", self.id, parent_id);
@@ -1344,7 +1446,7 @@ impl Task {
             None => {
                 /* If the task has no parent, it is terminated */
                 // crate::println!("Task {}: No parent, terminating", self.id);
-                self.state = TaskState::Terminated;
+                self.state.store(TaskState::Terminated, Ordering::SeqCst);
             }
         }
 
@@ -1401,8 +1503,10 @@ impl Task {
                     // This is safe because we're in a termination context
                     let task_ptr = task as *const Task as *mut Task;
                     unsafe {
-                        (*task_ptr).state = TaskState::Terminated;
-                        (*task_ptr).exit_status = Some(status);
+                        (*task_ptr)
+                            .state
+                            .store(TaskState::Terminated, Ordering::SeqCst);
+                        (*task_ptr).exit_status.store(status, Ordering::SeqCst);
                         // Close handles to prevent resource leaks
                         (*task_ptr).handle_table.close_all();
                     }
@@ -1422,7 +1526,7 @@ impl Task {
     /// # Returns
     /// The exit status of the child task, or an error if the child is not found or not in Zombie state
     pub fn wait(&mut self, child_id: usize) -> Result<i32, WaitError> {
-        if !self.children.contains(&child_id) {
+        if !self.children.read().contains(&child_id) {
             crate::println!("[Task {}] wait: No such child task: {}", self.id, child_id);
             return Err(WaitError::NoSuchChild("No such child task".to_string()));
         }
@@ -1493,25 +1597,22 @@ impl Task {
     /// # Arguments
     /// * `vfs` - The VfsManager to set as the VFS
     pub fn set_vfs(&mut self, vfs: Arc<VfsManager>) {
-        self.vfs = Some(vfs);
+        *self.vfs.write() = Some(vfs);
     }
 
     /// Get a reference to the VFS
-    pub fn get_vfs(&self) -> Option<&Arc<VfsManager>> {
-        self.vfs.as_ref()
+    pub fn get_vfs(&self) -> Option<Arc<VfsManager>> {
+        self.vfs.read().clone()
     }
 
-    pub fn add_software_timer_handler(&mut self, timer: Arc<dyn TimerHandler>) {
-        self.software_timers_handlers.push(timer);
+    pub fn add_software_timer_handler(&self, timer: Arc<dyn TimerHandler>) {
+        self.software_timers_handlers.write().push(timer);
     }
 
-    pub fn remove_software_timer_handler(&mut self, timer: &Arc<dyn TimerHandler>) {
-        if let Some(pos) = self
-            .software_timers_handlers
-            .iter()
-            .position(|x| Arc::ptr_eq(x, timer))
-        {
-            self.software_timers_handlers.remove(pos);
+    pub fn remove_software_timer_handler(&self, timer: &Arc<dyn TimerHandler>) {
+        let mut handlers = self.software_timers_handlers.write();
+        if let Some(pos) = handlers.iter().position(|x| Arc::ptr_eq(x, timer)) {
+            handlers.remove(pos);
         }
     }
 
@@ -1539,61 +1640,62 @@ impl Task {
     /// - Process a limited number of events per scheduler cycle to avoid starvation
     /// - Critical events (like KILL) are processed immediately
     /// - Normal events are batched and processed in priority order
-    pub fn process_pending_events(&self) -> Result<(), &'static str> {
+    pub fn process_pending_events(&mut self) -> Result<(), &'static str> {
         // Check if events are enabled
         if !self.events_enabled() {
             return Ok(()); // Events disabled, skip processing
         }
 
         // Delegate to ABI module for event processing
-        let abi = self.default_abi_ref();
-        const MAX_EVENTS_PER_CYCLE: usize = 8; // Prevent scheduler starvation
-        let mut processed_count = 0;
+        self.with_default_abi_mut(|abi, _| {
+            const MAX_EVENTS_PER_CYCLE: usize = 8; // Prevent scheduler starvation
+            let mut processed_count = 0;
 
-        // Process events with limits to prevent infinite loops
-        while processed_count < MAX_EVENTS_PER_CYCLE {
-            let event = {
-                let mut queue = self.event_queue.lock();
-                queue.dequeue()
-            };
+            // Process events with limits to prevent infinite loops
+            while processed_count < MAX_EVENTS_PER_CYCLE {
+                let event = {
+                    let mut queue = self.event_queue.lock();
+                    queue.dequeue()
+                };
 
-            match event {
-                Some(event) => {
-                    processed_count += 1;
+                match event {
+                    Some(event) => {
+                        processed_count += 1;
 
-                    // Check if this is a critical event that requires immediate attention
-                    let is_critical = self.is_critical_event(&event);
+                        // Check if this is a critical event that requires immediate attention
+                        let is_critical = self.is_critical_event(&event);
 
-                    // Let ABI handle the event
-                    abi.handle_event(event, self.id as u32)?;
+                        // Let ABI handle the event
+                        abi.handle_event(event, self.id as u32)?;
 
-                    // Check if events were disabled during handling
-                    if !self.events_enabled() {
-                        break;
+                        // Check if events were disabled during handling
+                        if !self.events_enabled() {
+                            break;
+                        }
+
+                        // If we processed a critical event, we can stop here
+                        // to allow the ABI module to take appropriate action
+                        if is_critical {
+                            break;
+                        }
                     }
-
-                    // If we processed a critical event, we can stop here
-                    // to allow the ABI module to take appropriate action
-                    if is_critical {
-                        break;
-                    }
+                    None => break, // No more events
                 }
-                None => break, // No more events
             }
-        }
 
-        // If we hit the limit and there are still events, the scheduler
-        // will call us again on the next cycle
-        if processed_count == MAX_EVENTS_PER_CYCLE {
-            let queue = self.event_queue.lock();
-            if !queue.is_empty() {
-                // Log that we're deferring events to next cycle
-                // crate::early_println!("Task {}: Deferring {} events to next scheduler cycle",
-                //                      self.id, queue.len());
+            // If we hit the limit and there are still events, the scheduler
+            // will call us again on the next cycle
+            if processed_count == MAX_EVENTS_PER_CYCLE {
+                let queue = self.event_queue.lock();
+                if !queue.is_empty() {
+                    // Log that we're deferring events to next cycle
+                    // crate::early_println!("Task {}: Deferring {} events to next scheduler cycle",
+                    //                      self.id, queue.len());
+                }
             }
-        }
 
-        Ok(())
+            Ok(())
+        })
     }
 
     /// Check if an event is critical and should be processed immediately
@@ -1619,14 +1721,19 @@ impl Task {
         }
     }
 
-    /// Get a mutable reference to the kernel context for context switching
-    pub fn get_kernel_context_mut(&mut self) -> &mut KernelContext {
-        &mut self.kernel_context
-    }
+    // /// Get a mutable reference to the kernel context for context switching
+    // pub fn get_kernel_context_mut(&mut self) -> &mut KernelContext {
+    //     self.kernel_context.lock().deref_mut()
+    // }
 
-    /// Get a reference to the kernel context
-    pub fn get_kernel_context(&self) -> &KernelContext {
-        &self.kernel_context
+    // /// Get a reference to the kernel context
+    // pub fn get_kernel_context(&self) -> &KernelContext {
+    //     self.kernel_context.lock().deref()
+    // }
+
+    pub fn with_kernel_context<R>(&self, f: impl FnOnce(&mut KernelContext) -> R) -> R {
+        let mut kctx = self.kernel_context.lock();
+        f(&mut kctx)
     }
 
     /// Get the kernel stack bottom address for this task
@@ -1634,7 +1741,7 @@ impl Task {
     /// # Returns
     /// The kernel stack bottom address as u64, or 0 if no kernel stack is allocated
     pub fn get_kernel_stack_bottom_paddr(&self) -> u64 {
-        self.kernel_context.get_kernel_stack_bottom_paddr()
+        self.kernel_context.lock().get_kernel_stack_bottom_paddr()
     }
 
     /// Get the kernel stack memory area for this task
@@ -1643,7 +1750,9 @@ impl Task {
     /// The kernel stack memory area as a MemoryArea
     ///
     pub fn get_kernel_stack_memory_area_paddr(&self) -> MemoryArea {
-        self.kernel_context.get_kernel_stack_memory_area_paddr()
+        self.kernel_context
+            .lock()
+            .get_kernel_stack_memory_area_paddr()
     }
 
     /// Get a mutable reference to the trapframe for this task
@@ -1660,7 +1769,7 @@ impl Task {
     /// A mutable reference to the Trapframe
     pub fn get_trapframe(&mut self) -> &mut Trapframe {
         // If we have a kernel stack window mapped, use the high-VA address
-        if let Some((_slot, base)) = self.kernel_stack_window_base {
+        if let Some((_slot, base)) = *self.kernel_stack_window_base.lock() {
             let trapframe_offset = crate::environment::PAGE_SIZE
                 + crate::environment::TASK_KERNEL_STACK_SIZE
                 - core::mem::size_of::<Trapframe>();
@@ -1668,18 +1777,19 @@ impl Task {
             unsafe { &mut *(trapframe_vaddr as *mut Trapframe) }
         } else {
             // Fallback to physical address (should not happen for user tasks after init)
-            self.kernel_context.get_trapframe()
+            // self.kernel_context.lock().get_trapframe()
+            panic!("get_trapframe: No kernel stack window mapped");
         }
     }
 
     /// Internal: set kernel stack window base (slot index and base vaddr)
-    pub fn set_kernel_stack_window_base(&mut self, base: Option<(usize, usize)>) {
-        self.kernel_stack_window_base = base;
+    pub fn set_kernel_stack_window_base(&self, base: Option<(usize, usize)>) {
+        *self.kernel_stack_window_base.lock() = base;
     }
 
     /// Get kernel stack window base (slot index and base vaddr)
     pub fn get_kernel_stack_window_base(&self) -> Option<(usize, usize)> {
-        self.kernel_stack_window_base
+        *self.kernel_stack_window_base.lock()
     }
 }
 
@@ -1797,7 +1907,7 @@ pub fn mytask() -> Option<&'static mut Task> {
 /// * `true` if successful, `false` if no current task or VfsManager
 pub fn set_current_task_cwd(path: String) -> bool {
     if let Some(task) = mytask() {
-        if let Some(vfs) = &task.vfs {
+        if let Some(vfs) = task.vfs.read().as_ref() {
             // Use VfsManager to set current working directory
             vfs.set_cwd_by_path(&path).is_ok()
         } else {
@@ -1950,13 +2060,13 @@ mod tests {
         );
 
         // Save values that will be needed after add_task
-        let parent_pc = parent_task.vcpu.get_pc();
+        let parent_pc = parent_task.vcpu.lock().get_pc();
         let parent_entry = parent_task.entry;
         let parent_state = parent_task.state;
-        let child_pc = child_task.vcpu.get_pc();
+        let child_pc = child_task.vcpu.lock().get_pc();
         let child_entry = child_task.entry;
         let child_state = child_task.state;
-        let child_managed_pages_len = child_task.managed_pages.len();
+        let child_managed_pages_len = child_task.managed_pages.read().len();
 
         // Add both tasks to scheduler to establish parent-child relationship
         let scheduler = crate::sched::scheduler::get_scheduler();

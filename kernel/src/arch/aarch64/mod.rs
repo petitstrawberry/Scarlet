@@ -108,7 +108,7 @@ pub fn first_switch_to_user(task: &mut Task) -> ! {
     let task_ptr = task as *mut Task;
     unsafe {
         let trapframe = (*task_ptr).get_trapframe();
-        (*task_ptr).vcpu.switch(trapframe);
+        (*task_ptr).vcpu.lock().switch(trapframe);
 
         // Ensure IRQs are unmasked in the user PSTATE after `eret`.
         crate::arch::configure_user_entry(
@@ -404,7 +404,7 @@ pub fn configure_user_entry(trapframe: &mut Trapframe, options: crate::arch::Use
     if crate::arch::user_fpu_enabled() {
         let cpu_id = crate::arch::get_current_cpu_id();
         if let Some(task) = crate::sched::scheduler::get_scheduler().get_current_task(cpu_id) {
-            crate::arch::fpu::set_user_fpu_enabled(task.vcpu.fpu_used);
+            crate::arch::fpu::set_user_fpu_enabled(task.vcpu.lock().fpu_used);
         } else {
             crate::arch::fpu::set_user_fpu_enabled(false);
         }

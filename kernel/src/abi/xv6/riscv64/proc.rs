@@ -12,7 +12,7 @@ fn to_absolute_path_v2(task: &crate::task::Task, path: &str) -> Result<String, (
     if path.starts_with('/') {
         Ok(path.to_string())
     } else {
-        let vfs = task.vfs.as_ref().ok_or(())?;
+        let vfs = task.vfs.read().clone().ok_or(())?;
         Ok(vfs.resolve_path_to_absolute(path))
     }
 }
@@ -35,12 +35,12 @@ pub fn sys_fork(
     trapframe.increment_pc_next(parent_task); /* Increment the program counter */
 
     /* Save the trapframe to the task before cloning */
-    parent_task.vcpu.store(trapframe);
+    parent_task.vcpu.lock().store(trapframe);
 
     /* Clone the task */
     match parent_task.clone_task(CloneFlags::default()) {
         Ok(mut child_task) => {
-            child_task.vcpu.iregs.reg[10] = 0; /* Set the return value (a0) to 0 in the child proc */
+            child_task.vcpu.lock().iregs.reg[10] = 0; /* Set the return value (a0) to 0 in the child proc */
 
             let scheduler = get_scheduler();
             let cpu_id = get_cpu().get_cpuid();
@@ -77,7 +77,7 @@ pub fn sys_exit(
     trapframe: &mut Trapframe,
 ) -> usize {
     let task = mytask().unwrap();
-    task.vcpu.store(trapframe);
+    task.vcpu.lock().store(trapframe);
     let exit_code = trapframe.get_arg(0) as i32;
     task.exit(exit_code);
     get_scheduler().schedule(trapframe);
@@ -188,7 +188,7 @@ pub fn sys_chdir(
     };
 
     // Try to open the file
-    let file = match task.vfs.as_ref() {
+    let file = match task.vfs.read().clone() {
         Some(vfs) => vfs.open(&path, 0),
         None => return usize::MAX, // VFS not initialized
     };
@@ -203,7 +203,7 @@ pub fn sys_chdir(
     }
 
     // Update the current working directory via VfsManager
-    if let Some(vfs) = &task.vfs {
+    if let Some(vfs) = task.vfs.read().clone() {
         let _ = vfs.set_cwd_by_path(&path);
     }
 

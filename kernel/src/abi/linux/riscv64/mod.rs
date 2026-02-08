@@ -15,6 +15,7 @@ mod time;
 use alloc::{
     boxed::Box, collections::BTreeMap, format, string::ToString, sync::Arc, vec, vec::Vec,
 };
+use core::sync::atomic::Ordering;
 // use file::{sys_dup, sys_exec, sys_mknod, sys_open, sys_write};
 // use proc::{sys_exit, sys_fork, sys_wait, sys_getpid};
 
@@ -390,7 +391,7 @@ impl AbiModule for LinuxRiscv64Abi {
     fn on_task_cloned(
         &mut self,
         _parent_task: &crate::task::Task,
-        _child_task: &mut crate::task::Task,
+        _child_task: &crate::task::Task,
         _flags: crate::task::CloneFlags,
     ) -> Result<(), &'static str> {
         // Child ABI state is a clone of parent's state (including pointers set in sys_clone).
@@ -423,7 +424,7 @@ impl AbiModule for LinuxRiscv64Abi {
         Ok(())
     }
 
-    fn on_task_exit(&mut self, task: &mut crate::task::Task) {
+    fn on_task_exit(&mut self, task: &crate::task::Task) {
         // No pthread/TLS structure probing at exit; user space owns pthread list.
         // Linux semantics: if clear_child_tid is set, write 0 and FUTEX_WAKE.
         if let Some(ptr) = self.thread_state.clear_child_tid_ptr {
@@ -516,9 +517,9 @@ impl AbiModule for LinuxRiscv64Abi {
         match file_object.as_file() {
             Some(file_obj) => {
                 // Reset task state for Linux execution
-                task.text_size = 0;
-                task.data_size = 0;
-                task.stack_size = 0;
+                task.text_size.store(0, Ordering::SeqCst);
+                task.data_size.store(0, Ordering::SeqCst);
+                task.stack_size.store(0, Ordering::SeqCst);
                 task.brk
                     .store(usize::MAX, core::sync::atomic::Ordering::SeqCst);
 
@@ -550,7 +551,8 @@ impl AbiModule for LinuxRiscv64Abi {
                 ) {
                     Ok(load_result) => {
                         // Set the name
-                        task.name = argv.get(0).map_or("linux".to_string(), |s| s.to_string());
+                        *task.name.write() =
+                            argv.get(0).map_or("linux".to_string(), |s| s.to_string());
                         // Do not resolve pthread/TLS or arm futex-based watches in kernel.
                         crate::println!("Program segments:");
                         task.vm_manager.with_memmaps(|mm| {
@@ -719,16 +721,16 @@ impl AbiModule for LinuxRiscv64Abi {
                         // }
 
                         task.set_entry_point(load_result.entry_point as usize);
-                        task.vcpu.iregs = IntRegisters::new(); // Clear registers
-                        task.vcpu.set_sp(sp); // Set stack pointer
+                        task.vcpu.lock().iregs = IntRegisters::new(); // Clear registers
+                        task.vcpu.lock().set_sp(sp); // Set stack pointer
 
                         // Initialize trapframe with clean state
-                        trapframe.regs = task.vcpu.iregs;
+                        trapframe.regs = task.vcpu.lock().iregs;
                         trapframe.epc = load_result.entry_point;
                         // crate::println!("DEBUG: Set trapframe.epc to {:#x}", trapframe.epc);
 
                         // Switch to the new task
-                        task.vcpu.switch(trapframe);
+                        task.vcpu.lock().switch(trapframe);
                         Ok(())
                     }
                     Err(e) => {

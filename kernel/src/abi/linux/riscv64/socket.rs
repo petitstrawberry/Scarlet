@@ -368,7 +368,7 @@ pub fn sys_bind(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
                 // Create socket file in VFS on a best-effort basis
                 // The socket has already been successfully bound, so VFS file creation
                 // is optional - the socket remains functional even if this fails
-                let vfs = match &task.vfs {
+                let vfs = match task.vfs.read().clone() {
                     Some(vfs) => vfs.clone(),
                     None => {
                         // Use global VFS if task doesn't have its own

@@ -26,6 +26,7 @@ use crate::environment::{
 };
 use crate::sched::scheduler::get_scheduler;
 use crate::task::Task;
+use core::sync::atomic::Ordering;
 use spin::{Mutex, Once};
 
 extern crate alloc;
@@ -131,7 +132,7 @@ pub fn kernel_vm_init(kernel_area: MemoryArea) {
     early_println!("[vm] kernel_vm_init: done");
 }
 
-pub fn user_vm_init(task: &mut Task) {
+pub fn user_vm_init(task: &Task) {
     let asid = alloc_virtual_address_space();
     task.vm_manager.set_asid(asid);
 
@@ -147,7 +148,7 @@ pub fn user_vm_init(task: &mut Task) {
         .map_err(|e| panic!("Failed to allocate guard page: {}", e))
         .unwrap();
 
-    crate::arch::vm::setup_trampoline_for_user(&mut task.vm_manager);
+    crate::arch::vm::setup_trampoline_for_user(&task.vm_manager);
 
     // Trampoline-managed high-VA infrastructure also includes per-task kstack windows.
     // Keep this in the VM init flow so callers don't need a separate map_* step.
@@ -156,7 +157,7 @@ pub fn user_vm_init(task: &mut Task) {
         .unwrap();
 }
 
-pub fn user_kernel_vm_init(task: &mut Task) {
+pub fn user_kernel_vm_init(task: &Task) {
     let asid = alloc_virtual_address_space();
     let root_page_table = get_root_pagetable(asid).unwrap();
     task.vm_manager.set_asid(asid);
@@ -185,7 +186,7 @@ pub fn user_kernel_vm_init(task: &mut Task) {
             panic!("Failed to map kernel memory area: {}", e);
         })
         .unwrap();
-    task.data_size = kernel_area.end + 1;
+    task.data_size.store(kernel_area.end + 1, Ordering::SeqCst);
 
     /* Stack page */
     task.allocate_stack_pages(KERNEL_VM_STACK_START, KERNEL_VM_STACK_SIZE / PAGE_SIZE)
@@ -208,7 +209,7 @@ pub fn user_kernel_vm_init(task: &mut Task) {
             .unwrap();
     }
 
-    crate::arch::vm::setup_trampoline_for_user(&mut task.vm_manager);
+    crate::arch::vm::setup_trampoline_for_user(&task.vm_manager);
 
     setup_trampoline_for_task_kstack_window(task)
         .map_err(|e| panic!("Failed to setup task kstack window: {}", e))
@@ -269,7 +270,7 @@ fn kstack_alloc() -> &'static Mutex<KernelKstackAllocator> {
 /// Map the task's kernel stack physical pages into the shared kernel PT at a unique high VA window.
 /// Adds an unmapped guard page at the bottom of the window.
 #[allow(static_mut_refs)]
-pub fn setup_trampoline_for_task_kstack_window(task: &mut Task) -> Result<(), &'static str> {
+pub fn setup_trampoline_for_task_kstack_window(task: &Task) -> Result<(), &'static str> {
     // Allocate a window slot
     let (slot_idx, base, _top) = kstack_alloc()
         .lock()
@@ -323,7 +324,9 @@ pub fn setup_trampoline_for_task_kstack_window(task: &mut Task) -> Result<(), &'
     let tf_align = core::mem::align_of::<crate::arch::Trapframe>() as u64;
     debug_assert!(tf_align.is_power_of_two());
     let sp = (stack_top - tf_size) & !(tf_align - 1);
-    task.get_kernel_context_mut().set_sp(sp);
+    task.with_kernel_context(|kctx| {
+        kctx.set_sp(sp);
+    });
 
     #[cfg(any(debug_assertions, test))]
     crate::early_println!(

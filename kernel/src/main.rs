@@ -693,14 +693,16 @@ pub extern "C" fn start_kernel(boot_info: &BootInfo) -> ! {
     let mut task = new_user_task("init".to_string(), 0);
 
     task.init();
-    task.vfs = Some(manager.clone());
+    *task.vfs.write() = Some(manager.clone());
     task.vfs
+        .read()
         .as_ref()
         .unwrap()
         .set_cwd_by_path("/")
         .expect("Failed to set initial working directory");
     let file_obj = match task
         .vfs
+        .read()
         .as_ref()
         .unwrap()
         .open("/system/scarlet/bin/init", 0)
