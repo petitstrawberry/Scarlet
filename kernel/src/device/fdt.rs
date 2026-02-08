@@ -366,13 +366,18 @@ impl<'a> FdtManager<'a> {
 
         let mut count = 0usize;
         for cpu in cpus.children() {
-            if let Some(dev_type) = cpu.property("device_type") {
-                if bytes_to_cstr(dev_type.value)
-                    .map(|s| s != "cpu")
-                    .unwrap_or(false)
-                {
-                    continue;
-                }
+            // Only count nodes that explicitly declare `device_type = "cpu"`.
+            let dev_type = match cpu.property("device_type") {
+                Some(dev_type) => dev_type,
+                None => continue,
+            };
+
+            let is_cpu = bytes_to_cstr(dev_type.value)
+                .map(|s| s == "cpu")
+                .unwrap_or(false);
+
+            if !is_cpu {
+                continue;
             }
             count += 1;
         }
