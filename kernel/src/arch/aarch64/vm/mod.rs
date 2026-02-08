@@ -304,7 +304,7 @@ pub fn setup_trampoline_for_kernel(manager: &VirtualMemoryManager) {
 
 /// AArch64: trampoline/high-VA live in the fixed TTBR1 kernel mapping.
 /// Per-task TTBR0 page tables should not pre-map the trampoline.
-pub fn setup_trampoline_for_user(_manager: &mut VirtualMemoryManager) {}
+pub fn setup_trampoline_for_user(_manager: &VirtualMemoryManager) {}
 
 #[cfg(test)]
 mod tests {
