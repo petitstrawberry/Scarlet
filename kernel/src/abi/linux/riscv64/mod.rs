@@ -511,7 +511,7 @@ impl AbiModule for LinuxRiscv64Abi {
         file_object: &crate::object::KernelObject,
         argv: &[&str],
         envp: &[&str],
-        task: &mut crate::task::Task,
+        task: &crate::task::Task,
         trapframe: &mut crate::arch::Trapframe,
     ) -> Result<(), &'static str> {
         match file_object.as_file() {
@@ -571,7 +571,7 @@ impl AbiModule for LinuxRiscv64Abi {
                         let root_page_table = arch::vm::get_pagetable(idx).unwrap();
                         root_page_table.unmap_all();
                         // Setup the trampoline
-                        arch::vm::setup_trampoline_for_user(&mut task.vm_manager);
+                        arch::vm::setup_trampoline_for_user(&task.vm_manager);
                         // Setup the stack following Linux ABI standard layout
                         let (_, stack_top) = setup_user_stack(task);
                         let mut sp = stack_top as usize;
@@ -878,7 +878,7 @@ impl AbiModule for LinuxRiscv64Abi {
 
     fn initialize_from_existing_handles(
         &mut self,
-        _task: &mut crate::task::Task,
+        _task: &crate::task::Task,
     ) -> Result<(), &'static str> {
         // _task.handle_table.close_all();
         self.init_std_fds(

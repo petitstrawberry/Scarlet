@@ -216,7 +216,7 @@ impl AbiModule for ScarletAbi {
         file_object: &crate::object::KernelObject,
         argv: &[&str],
         envp: &[&str],
-        task: &mut crate::task::Task,
+        task: &crate::task::Task,
         trapframe: &mut Trapframe,
     ) -> Result<(), &'static str> {
         // Get file object from KernelObject::File
@@ -257,7 +257,7 @@ impl AbiModule for ScarletAbi {
                         root_page_table.unmap_all();
 
                         // Setup the new memory environment
-                        vm::setup_trampoline_for_user(&mut task.vm_manager);
+                        vm::setup_trampoline_for_user(&task.vm_manager);
                         let stack_pointer = setup_user_stack(task).1;
 
                         // Handle different execution modes
@@ -595,7 +595,7 @@ impl ScarletAbi {
     /// Tuple of (new stack pointer, argv array pointer)
     fn setup_arguments_on_stack(
         &self,
-        task: &mut crate::task::Task,
+        task: &crate::task::Task,
         argv: &[&str],
         envp: &[&str],
         initial_sp: usize,
@@ -680,7 +680,7 @@ impl ScarletAbi {
     /// Write bytes to stack memory using virtual memory translation
     fn write_to_stack_memory(
         &self,
-        task: &mut crate::task::Task,
+        task: &crate::task::Task,
         vaddr: usize,
         data: &[u8],
     ) -> Result<(), &'static str> {
@@ -698,7 +698,7 @@ impl ScarletAbi {
     /// Write a null-terminated string to stack memory
     fn write_string_to_stack(
         &self,
-        task: &mut crate::task::Task,
+        task: &crate::task::Task,
         vaddr: usize,
         string: &str,
     ) -> Result<(), &'static str> {

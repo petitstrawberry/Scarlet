@@ -224,7 +224,7 @@ impl AbiModule for Xv6Riscv64Abi {
         file_object: &crate::object::KernelObject,
         argv: &[&str],
         _envp: &[&str],
-        task: &mut crate::task::Task,
+        task: &crate::task::Task,
         trapframe: &mut crate::arch::Trapframe,
     ) -> Result<(), &'static str> {
         match file_object.as_file() {
@@ -248,7 +248,7 @@ impl AbiModule for Xv6Riscv64Abi {
                         let root_page_table = arch::vm::get_pagetable(idx).unwrap();
                         root_page_table.unmap_all();
                         // Setup the trapframe
-                        arch::vm::setup_trampoline_for_user(&mut task.vm_manager);
+                        arch::vm::setup_trampoline_for_user(&task.vm_manager);
                         // Setup the stack
                         let (_, stack_top) = setup_user_stack(task);
                         let mut stack_pointer = stack_top as usize;
@@ -408,7 +408,7 @@ impl AbiModule for Xv6Riscv64Abi {
 
     fn initialize_from_existing_handles(
         &mut self,
-        task: &mut crate::task::Task,
+        task: &crate::task::Task,
     ) -> Result<(), &'static str> {
         task.handle_table.close_all();
         Ok(())

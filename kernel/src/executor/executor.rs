@@ -36,7 +36,7 @@ impl TaskStateBackup {
     /// Create a backup of the current task state including trapframe
     ///
     /// This creates a complete snapshot that can be restored if exec fails.
-    fn create_backup(task: &mut Task, trapframe: &Trapframe) -> Self {
+    fn create_backup(task: &Task, trapframe: &Trapframe) -> Self {
         // Move managed pages to backup (avoiding clone)
         let mut backup_pages = Vec::new();
         backup_pages.append(&mut *task.managed_pages.write());
@@ -59,11 +59,7 @@ impl TaskStateBackup {
     ///
     /// This restores the complete task state from a previous backup,
     /// ensuring full rollback on exec failure.
-    fn restore_to_task(
-        self,
-        task: &mut Task,
-        trapframe: &mut Trapframe,
-    ) -> Result<(), &'static str> {
+    fn restore_to_task(self, task: &Task, trapframe: &mut Trapframe) -> Result<(), &'static str> {
         // Restore managed pages
         *task.managed_pages.write() = self.managed_pages;
 
@@ -145,7 +141,7 @@ impl TransparentExecutor {
         path: &str,
         argv: &[&str],
         envp: &[&str],
-        task: &mut Task,
+        task: &Task,
         trapframe: &mut Trapframe,
         force_abi_rebuild: bool,
     ) -> ExecutorResult<()> {
@@ -175,7 +171,7 @@ impl TransparentExecutor {
         argv: &[&str],
         envp: &[&str],
         abi_name: &str,
-        task: &mut Task,
+        task: &Task,
         trapframe: &mut Trapframe,
         force_abi_rebuild: bool,
     ) -> ExecutorResult<()> {
@@ -199,7 +195,7 @@ impl TransparentExecutor {
         argv: &[&str],
         envp: &[&str],
         explicit_abi: Option<&str>,
-        task: &mut Task,
+        task: &Task,
         trapframe: &mut Trapframe,
         force_abi_rebuild: bool,
     ) -> ExecutorResult<()> {
@@ -239,7 +235,7 @@ impl TransparentExecutor {
         argv: &[&str],
         envp: &[&str],
         explicit_abi: Option<&str>,
-        task: &mut Task,
+        task: &Task,
         trapframe: &mut Trapframe,
         force_abi_rebuild: bool,
     ) -> ExecutorResult<()> {
@@ -346,7 +342,7 @@ impl TransparentExecutor {
         target_argv: &[&str],
         target_envp: &[&str],
         runtime_config: &crate::abi::RuntimeConfig,
-        task: &mut Task,
+        task: &Task,
         trapframe: &mut Trapframe,
         force_abi_rebuild: bool,
     ) -> ExecutorResult<()> {
@@ -415,7 +411,7 @@ impl TransparentExecutor {
     /// Design principle: ABI directories (/system/{abi}, /data/config/{abi}) should be
     /// prepared by the user/administrator beforehand as part of system setup.
     fn setup_task_environment(
-        task: &mut Task,
+        task: &Task,
         abi: &mut Box<dyn crate::abi::AbiModule + Send + Sync>,
     ) -> ExecutorResult<()> {
         // TransparentExecutor provides clean VFS for ABI environment

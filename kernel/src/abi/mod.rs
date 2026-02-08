@@ -163,7 +163,7 @@ pub trait AbiModule: Send + Sync + 'static {
     /// Handle conversion when switching ABIs
     fn initialize_from_existing_handles(
         &mut self,
-        _task: &mut crate::task::Task,
+        _task: &crate::task::Task,
     ) -> Result<(), &'static str> {
         Ok(()) // Default: no conversion needed
     }
@@ -240,7 +240,7 @@ pub trait AbiModule: Send + Sync + 'static {
         file_object: &crate::object::KernelObject,
         argv: &[&str],
         envp: &[&str],
-        task: &mut crate::task::Task,
+        task: &crate::task::Task,
         trapframe: &mut Trapframe,
     ) -> Result<(), &'static str>;
 

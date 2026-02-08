@@ -14,7 +14,10 @@ use alloc::{
     sync::Arc,
     vec::Vec,
 };
-use core::ops::{Deref, DerefMut};
+use core::{
+    ops::{Deref, DerefMut},
+    sync::atomic,
+};
 use spin::{Mutex, RwLock};
 
 use crate::abi::{AbiModule, scarlet::ScarletAbi};
@@ -293,9 +296,9 @@ pub struct Task {
     // === Read-only fields (set at creation) ===
     id: usize,
     /// Task ID within the task's namespace (may differ from global ID)
-    namespace_id: usize,
+    namespace_id: atomic::AtomicUsize,
     /// Task namespace for ID management
-    namespace: Arc<namespace::TaskNamespace>,
+    namespace: RwLock<Arc<namespace::TaskNamespace>>,
     pub task_type: TaskType,
     pub entry: usize,
     parent_id: Option<usize>,
@@ -460,8 +463,8 @@ impl Task {
         Task {
             // Read-only fields
             id: 0,
-            namespace_id: 0,
-            namespace: ns,
+            namespace_id: AtomicUsize::new(0),
+            namespace: RwLock::new(ns),
             task_type,
             entry: 0,
             parent_id: None,
@@ -547,8 +550,9 @@ impl Task {
     }
 
     /// Set the namespace ID (used by TaskPool during task addition)
-    pub fn set_namespace_id(&mut self, namespace_id: usize) {
-        self.namespace_id = namespace_id;
+    pub fn set_namespace_id(&self, namespace_id: usize) {
+        self.namespace_id
+            .store(namespace_id, atomic::Ordering::SeqCst);
     }
 
     /// Get the task ID within its namespace.
@@ -559,19 +563,20 @@ impl Task {
     /// # Returns
     /// The namespace-local task ID
     pub fn get_namespace_id(&self) -> usize {
+        let namespace_id = self.namespace_id.load(atomic::Ordering::SeqCst);
         assert!(
-            self.namespace_id != 0,
+            namespace_id != 0,
             "Task namespace_id is 0 - task may not have been added to scheduler yet"
         );
-        self.namespace_id
+        namespace_id
     }
 
     /// Get the task's namespace.
     ///
     /// # Returns
     /// Reference to the task's namespace
-    pub fn get_namespace(&self) -> &Arc<namespace::TaskNamespace> {
-        &self.namespace
+    pub fn get_namespace(&self) -> Arc<namespace::TaskNamespace> {
+        self.namespace.read().clone()
     }
 
     /// Set the task's namespace.
@@ -586,10 +591,13 @@ impl Task {
     ///
     /// # Arguments
     /// * `ns` - New namespace for the task
-    pub fn set_namespace(&mut self, ns: Arc<namespace::TaskNamespace>) {
-        self.namespace = ns;
+    pub fn set_namespace(&self, ns: Arc<namespace::TaskNamespace>) {
+        *self.namespace.write() = ns;
         // Allocate a new namespace-local ID (and register translation mapping)
-        self.namespace_id = self.namespace.allocate_task_id_for(self.id);
+        self.namespace_id.store(
+            self.namespace.write().allocate_task_id_for(self.id),
+            atomic::Ordering::SeqCst,
+        );
     }
 
     /// Get the Thread Group ID (TGID)
@@ -1193,13 +1201,13 @@ impl Task {
     /// # Errors
     /// If the task cannot be cloned, an error is returned.
     ///
-    pub fn clone_task(&mut self, flags: CloneFlags) -> Result<Task, &'static str> {
+    pub fn clone_task(&self, flags: CloneFlags) -> Result<Task, &'static str> {
         // Create a new task in the same namespace as the parent
         let mut child = Task::new_with_namespace(
             self.name.read().clone(),
             self.priority.load(Ordering::SeqCst),
             self.task_type,
-            self.namespace.clone(),
+            self.namespace.read().clone(),
         );
 
         // First, set up the virtual memory manager with the same ASID allocation
@@ -1417,7 +1425,7 @@ impl Task {
     /// # Arguments
     /// * `status` - The exit status
     ///
-    pub fn exit(&mut self, status: i32) {
+    pub fn exit(&self, status: i32) {
         // Close all open handles only if this task is the sole owner of the
         // handle table.  When CLONE_FILES is used (thread::spawn), multiple
         // tasks share the same Arc<HandleTableInner>.  Closing all handles
@@ -1475,7 +1483,7 @@ impl Task {
     /// - Terminates all tasks with the same TGID
     /// - The calling task is set to Zombie/Terminated
     /// - Other tasks in the group are forcefully terminated
-    pub fn exit_group(&mut self, status: i32) {
+    pub fn exit_group(&self, status: i32) {
         let tgid = self.tgid;
         let my_id = self.id;
 
@@ -1525,7 +1533,7 @@ impl Task {
     ///
     /// # Returns
     /// The exit status of the child task, or an error if the child is not found or not in Zombie state
-    pub fn wait(&mut self, child_id: usize) -> Result<i32, WaitError> {
+    pub fn wait(&self, child_id: usize) -> Result<i32, WaitError> {
         if !self.children.read().contains(&child_id) {
             crate::println!("[Task {}] wait: No such child task: {}", self.id, child_id);
             return Err(WaitError::NoSuchChild("No such child task".to_string()));
@@ -1556,7 +1564,7 @@ impl Task {
     /// * `trapframe` - The trapframe of the current CPU state
     /// * `ticks` - The number of ticks to sleep
     ///
-    pub fn sleep(&mut self, trapframe: &mut Trapframe, ticks: u64) {
+    pub fn sleep(&self, trapframe: &mut Trapframe, ticks: u64) {
         struct SleepWakerHandler {
             task_id: usize,
             _start_tick: u64,
@@ -1596,7 +1604,7 @@ impl Task {
     ///
     /// # Arguments
     /// * `vfs` - The VfsManager to set as the VFS
-    pub fn set_vfs(&mut self, vfs: Arc<VfsManager>) {
+    pub fn set_vfs(&self, vfs: Arc<VfsManager>) {
         *self.vfs.write() = Some(vfs);
     }
 
@@ -1640,7 +1648,7 @@ impl Task {
     /// - Process a limited number of events per scheduler cycle to avoid starvation
     /// - Critical events (like KILL) are processed immediately
     /// - Normal events are batched and processed in priority order
-    pub fn process_pending_events(&mut self) -> Result<(), &'static str> {
+    pub fn process_pending_events(&self) -> Result<(), &'static str> {
         // Check if events are enabled
         if !self.events_enabled() {
             return Ok(()); // Events disabled, skip processing
@@ -1767,7 +1775,7 @@ impl Task {
     ///
     /// # Returns
     /// A mutable reference to the Trapframe
-    pub fn get_trapframe(&mut self) -> &mut Trapframe {
+    pub fn get_trapframe(&self) -> &mut Trapframe {
         // If we have a kernel stack window mapped, use the high-VA address
         if let Some((_slot, base)) = *self.kernel_stack_window_base.lock() {
             let trapframe_offset = crate::environment::PAGE_SIZE
@@ -1881,12 +1889,12 @@ pub unsafe fn clear_mock_current_task() {
 ///
 /// # Returns
 /// The current task if it exists.
-pub fn mytask() -> Option<&'static mut Task> {
+pub fn mytask() -> Option<&'static Task> {
     #[cfg(test)]
     {
         unsafe {
             if let Some(task_ptr) = MOCK_CURRENT_TASK {
-                return Some(&mut *task_ptr);
+                return Some(&*task_ptr);
             }
         }
     }
@@ -1922,7 +1930,11 @@ pub fn set_current_task_cwd(path: String) -> bool {
 /// This function is called when a task is first scheduled.
 pub fn task_initial_kernel_entrypoint() -> ! {
     let cpu = get_cpu();
-    let current_task = get_scheduler().get_current_task(cpu.get_cpuid()).unwrap();
+    let current_task = unsafe {
+        get_scheduler()
+            .get_current_task_mut(cpu.get_cpuid())
+            .unwrap()
+    };
     Scheduler::setup_task_execution(cpu, current_task);
     arch_switch_to_user_space(current_task.get_trapframe());
 }

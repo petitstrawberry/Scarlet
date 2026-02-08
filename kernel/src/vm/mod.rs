@@ -415,7 +415,7 @@ pub fn verify_task_kernel_stack_guard(task: &Task) -> bool {
     guard_ok && stack_ok
 }
 
-pub fn setup_user_stack(task: &mut Task) -> (usize, usize) {
+pub fn setup_user_stack(task: &Task) -> (usize, usize) {
     /* User stack page */
     let num_of_stack_page = 256; // 1MB user stack (4KB pages)
     let stack_base = USER_STACK_END - num_of_stack_page * PAGE_SIZE;

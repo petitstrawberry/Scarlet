@@ -646,7 +646,23 @@ impl Scheduler {
         next_task_id
     }
 
-    pub fn get_current_task(&mut self, cpu_id: usize) -> Option<&mut Task> {
+    pub fn get_current_task(&mut self, cpu_id: usize) -> Option<&Task> {
+        match self.current_task_id[cpu_id] {
+            Some(task_id) => TaskPool::get_task(task_id),
+            None => None,
+        }
+    }
+
+    /// Get a mutable reference to the current task on the specified CPU
+    ///
+    /// # Safety
+    /// This function returns a mutable reference to the current task,
+    /// which can lead to undefined behavior if misused. The caller must ensure:
+    /// - No other references (mutable or immutable) to the same task exist
+    /// - The task is not concurrently accessed from other contexts
+    /// - The scheduler's invariants are maintained
+    ///
+    pub unsafe fn get_current_task_mut(&mut self, cpu_id: usize) -> Option<&mut Task> {
         match self.current_task_id[cpu_id] {
             Some(task_id) => TaskPool::get_task_mut(task_id),
             None => None,
