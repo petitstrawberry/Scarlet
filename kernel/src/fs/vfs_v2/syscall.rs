@@ -167,7 +167,8 @@ pub fn sys_vfs_truncate(trapframe: &mut Trapframe) -> usize {
         Err(_) => return usize::MAX, // Invalid UTF-8
     };
 
-    let vfs = match task.vfs.as_ref() {
+    let vfs_guard = task.vfs.read();
+    let vfs = match vfs_guard.as_ref() {
         Some(vfs) => vfs,
         None => return usize::MAX, // VFS not initialized
     };
@@ -218,7 +219,8 @@ pub fn sys_vfs_create_file(trapframe: &mut Trapframe) -> usize {
         Err(_) => return usize::MAX, // Invalid UTF-8
     };
 
-    let vfs = match task.vfs.as_ref() {
+    let vfs_guard = task.vfs.read();
+    let vfs = match vfs_guard.as_ref() {
         Some(vfs) => vfs,
         None => return usize::MAX, // VFS not initialized
     };
@@ -259,7 +261,8 @@ pub fn sys_vfs_create_directory(trapframe: &mut Trapframe) -> usize {
         Err(_) => return usize::MAX, // Invalid UTF-8
     };
 
-    let vfs = match task.vfs.as_ref() {
+    let vfs_guard = task.vfs.read();
+    let vfs = match vfs_guard.as_ref() {
         Some(vfs) => vfs,
         None => return usize::MAX, // VFS not initialized
     };
@@ -337,7 +340,8 @@ pub fn sys_fs_mount(trapframe: &mut Trapframe) -> usize {
     };
 
     // Get VFS reference
-    let vfs = match task.vfs.as_ref() {
+    let vfs_guard = task.vfs.read();
+    let vfs = match vfs_guard.as_ref() {
         Some(vfs) => vfs,
         None => return usize::MAX,
     };
@@ -439,7 +443,8 @@ pub fn sys_fs_umount(trapframe: &mut Trapframe) -> usize {
     };
 
     // Get VFS reference
-    let vfs = match task.vfs.as_ref() {
+    let vfs_guard = task.vfs.read();
+    let vfs = match vfs_guard.as_ref() {
         Some(vfs) => vfs,
         None => return usize::MAX,
     };
@@ -524,7 +529,7 @@ pub fn sys_fs_pivot_root(trapframe: &mut Trapframe) -> usize {
     };
 
     // Get current VFS reference - pivot_root requires isolated VFS namespace
-    let current_vfs = match task.vfs.as_ref() {
+    let current_vfs = match task.vfs.read().clone() {
         Some(vfs) => vfs.clone(),
         None => {
             // pivot_root requires a task-specific VFS namespace
@@ -776,7 +781,8 @@ pub fn sys_vfs_create_symlink(trapframe: &mut Trapframe) -> usize {
         Err(_) => return usize::MAX, // Invalid UTF-8
     };
 
-    let vfs = match task.vfs.as_ref() {
+    let vfs_guard = task.vfs.read();
+    let vfs = match vfs_guard.as_ref() {
         Some(vfs) => vfs,
         None => return usize::MAX, // VFS not initialized
     };
@@ -824,7 +830,8 @@ pub fn sys_vfs_readlink(trapframe: &mut Trapframe) -> usize {
         Err(_) => return usize::MAX, // Invalid UTF-8
     };
 
-    let vfs = match task.vfs.as_ref() {
+    let vfs_guard = task.vfs.read();
+    let vfs = match vfs_guard.as_ref() {
         Some(vfs) => vfs,
         None => return usize::MAX, // VFS not initialized
     };
@@ -888,7 +895,8 @@ pub fn sys_vfs_get_cwd_path(trapframe: &mut Trapframe) -> usize {
 
     trapframe.increment_pc_next(task);
 
-    let vfs = match task.vfs.as_ref() {
+    let vfs_guard = task.vfs.read();
+    let vfs = match vfs_guard.as_ref() {
         Some(vfs) => vfs,
         None => return usize::MAX,
     };
@@ -909,7 +917,7 @@ fn to_absolute_path_v2(task: &crate::task::Task, path: &str) -> Result<String, (
     if path.starts_with('/') {
         Ok(path.to_string())
     } else {
-        let vfs = task.vfs.as_ref().ok_or(())?;
+        let vfs = task.vfs.read().clone().ok_or(())?;
         Ok(vfs.resolve_path_to_absolute(path))
     }
 }

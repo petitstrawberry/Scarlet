@@ -117,23 +117,23 @@ pub fn arch_exception_handler(trapframe: &mut Trapframe, cause: usize) {
             // This avoids panicking if stval is 0 or if we cannot classify the instruction.
             #[cfg(feature = "user-vector")]
             if user_vec_allowed && vs_off && is_vector_insn {
-                task.vcpu.vector_used = true;
+                task.vcpu.lock().vector_used = true;
                 crate::arch::riscv64::fpu::enable_vector();
-                if task.vcpu.vector.is_none() {
-                    task.vcpu.vector = Some(alloc::boxed::Box::new(
+                if task.vcpu.lock().vector.is_none() {
+                    task.vcpu.lock().vector = Some(alloc::boxed::Box::new(
                         crate::arch::riscv64::fpu::VectorContext::new(),
                     ));
                 }
-                unsafe { task.vcpu.vector.as_ref().unwrap().restore() };
+                unsafe { task.vcpu.lock().vector.as_ref().unwrap().restore() };
                 crate::arch::riscv64::fpu::mark_vector_clean();
                 return;
             }
 
             #[cfg(feature = "user-fpu")]
             if user_fpu_allowed && fs_off && is_fpu_insn {
-                task.vcpu.fpu_used = true;
+                task.vcpu.lock().fpu_used = true;
                 crate::arch::riscv64::fpu::enable_fpu();
-                unsafe { task.vcpu.fpu.restore() };
+                unsafe { task.vcpu.lock().fpu.restore() };
                 crate::arch::riscv64::fpu::mark_fpu_clean();
                 return;
             }
@@ -142,23 +142,23 @@ pub fn arch_exception_handler(trapframe: &mut Trapframe, cause: usize) {
             // safe initial context (prevents leaking previous task state).
             #[cfg(feature = "user-fpu")]
             if user_fpu_allowed && fs_off {
-                task.vcpu.fpu_used = true;
+                task.vcpu.lock().fpu_used = true;
                 crate::arch::riscv64::fpu::enable_fpu();
-                unsafe { task.vcpu.fpu.restore() };
+                unsafe { task.vcpu.lock().fpu.restore() };
                 crate::arch::riscv64::fpu::mark_fpu_clean();
                 return;
             }
 
             #[cfg(feature = "user-vector")]
             if user_vec_allowed && vs_off {
-                task.vcpu.vector_used = true;
+                task.vcpu.lock().vector_used = true;
                 crate::arch::riscv64::fpu::enable_vector();
-                if task.vcpu.vector.is_none() {
-                    task.vcpu.vector = Some(alloc::boxed::Box::new(
+                if task.vcpu.lock().vector.is_none() {
+                    task.vcpu.lock().vector = Some(alloc::boxed::Box::new(
                         crate::arch::riscv64::fpu::VectorContext::new(),
                     ));
                 }
-                unsafe { task.vcpu.vector.as_ref().unwrap().restore() };
+                unsafe { task.vcpu.lock().vector.as_ref().unwrap().restore() };
                 crate::arch::riscv64::fpu::mark_vector_clean();
                 return;
             }
@@ -206,7 +206,7 @@ pub fn arch_exception_handler(trapframe: &mut Trapframe, cause: usize) {
                             cause,
                             vaddr,
                             task.get_id(),
-                            &task.name,
+                            &task.name.read(),
                             task.vm_manager.get_asid(),
                         );
                         panic!(
@@ -253,7 +253,7 @@ pub fn arch_exception_handler(trapframe: &mut Trapframe, cause: usize) {
                             cause,
                             vaddr,
                             task.get_id(),
-                            &task.name,
+                            &task.name.read(),
                             task.vm_manager.get_asid(),
                         );
                         panic!(

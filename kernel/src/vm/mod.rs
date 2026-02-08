@@ -17,7 +17,7 @@ use crate::arch::vm::get_root_pagetable;
 use crate::early_println;
 use crate::environment::KERNEL_VM_STACK_SIZE;
 use crate::environment::KERNEL_VM_STACK_START;
-use crate::environment::NUM_OF_CPUS;
+use crate::environment::MAX_NUM_CPUS;
 use crate::environment::PAGE_SIZE;
 use crate::environment::USER_STACK_END;
 use crate::environment::{
@@ -26,6 +26,7 @@ use crate::environment::{
 };
 use crate::sched::scheduler::get_scheduler;
 use crate::task::Task;
+use core::sync::atomic::Ordering;
 use spin::{Mutex, Once};
 
 extern crate alloc;
@@ -33,29 +34,13 @@ extern crate alloc;
 pub mod manager;
 pub mod vmem;
 
-static mut KERNEL_VM_MANAGER: Option<VirtualMemoryManager> = None;
+static KERNEL_VM_MANAGER: Once<VirtualMemoryManager> = Once::new();
 
-pub fn get_kernel_vm_manager() -> &'static mut VirtualMemoryManager {
-    unsafe {
-        match KERNEL_VM_MANAGER {
-            Some(ref mut m) => m,
-            None => {
-                kernel_vm_manager_init();
-                get_kernel_vm_manager()
-            }
-        }
-    }
+pub fn get_kernel_vm_manager() -> &'static VirtualMemoryManager {
+    KERNEL_VM_MANAGER.call_once(|| VirtualMemoryManager::new())
 }
 
-fn kernel_vm_manager_init() {
-    let manager = VirtualMemoryManager::new();
-
-    unsafe {
-        KERNEL_VM_MANAGER = Some(manager);
-    }
-}
-
-static mut KERNEL_AREA: Option<MemoryArea> = None;
+static KERNEL_AREA: Once<MemoryArea> = Once::new();
 /* Initialize MMU and enable paging */
 #[allow(static_mut_refs)]
 pub fn kernel_vm_init(kernel_area: MemoryArea) {
@@ -77,9 +62,7 @@ pub fn kernel_vm_init(kernel_area: MemoryArea) {
         start: kernel_start,
         end: kernel_end,
     };
-    unsafe {
-        KERNEL_AREA = Some(kernel_area);
-    }
+    KERNEL_AREA.call_once(|| kernel_area);
 
     let kernel_map = VirtualMemoryMap {
         vmarea: kernel_area,
@@ -90,7 +73,7 @@ pub fn kernel_vm_init(kernel_area: MemoryArea) {
         is_shared: true, // Kernel memory should be shared across all processes
         owner: None,
     };
-    manager
+    get_kernel_vm_manager()
         .add_memory_map(kernel_map.clone())
         .map_err(|e| panic!("Failed to add kernel memory map: {}", e))
         .unwrap();
@@ -110,7 +93,7 @@ pub fn kernel_vm_init(kernel_area: MemoryArea) {
             is_shared: true, // Device memory should be shared
             owner: None,
         };
-        manager
+        get_kernel_vm_manager()
             .add_memory_map(dev_map.clone())
             .map_err(|e| panic!("Failed to add device memory map: {}", e))
             .unwrap();
@@ -136,7 +119,7 @@ pub fn kernel_vm_init(kernel_area: MemoryArea) {
     #[cfg(any(debug_assertions, test))]
     early_println!("[vm] kernel_vm_init: setup_trampoline_for_kernel...");
 
-    crate::arch::vm::setup_trampoline_for_kernel(manager);
+    crate::arch::vm::setup_trampoline_for_kernel(get_kernel_vm_manager());
 
     #[cfg(any(debug_assertions, test))]
     early_println!("[vm] kernel_vm_init: trampoline ok");
@@ -149,7 +132,7 @@ pub fn kernel_vm_init(kernel_area: MemoryArea) {
     early_println!("[vm] kernel_vm_init: done");
 }
 
-pub fn user_vm_init(task: &mut Task) {
+pub fn user_vm_init(task: &Task) {
     let asid = alloc_virtual_address_space();
     task.vm_manager.set_asid(asid);
 
@@ -165,7 +148,7 @@ pub fn user_vm_init(task: &mut Task) {
         .map_err(|e| panic!("Failed to allocate guard page: {}", e))
         .unwrap();
 
-    crate::arch::vm::setup_trampoline_for_user(&mut task.vm_manager);
+    crate::arch::vm::setup_trampoline_for_user(&task.vm_manager);
 
     // Trampoline-managed high-VA infrastructure also includes per-task kstack windows.
     // Keep this in the VM init flow so callers don't need a separate map_* step.
@@ -174,12 +157,12 @@ pub fn user_vm_init(task: &mut Task) {
         .unwrap();
 }
 
-pub fn user_kernel_vm_init(task: &mut Task) {
+pub fn user_kernel_vm_init(task: &Task) {
     let asid = alloc_virtual_address_space();
     let root_page_table = get_root_pagetable(asid).unwrap();
     task.vm_manager.set_asid(asid);
 
-    let kernel_area = unsafe { KERNEL_AREA.unwrap() };
+    let kernel_area = *KERNEL_AREA.get().expect("KERNEL_AREA not initialized");
 
     let kernel_map = VirtualMemoryMap {
         vmarea: kernel_area,
@@ -203,7 +186,7 @@ pub fn user_kernel_vm_init(task: &mut Task) {
             panic!("Failed to map kernel memory area: {}", e);
         })
         .unwrap();
-    task.data_size = kernel_area.end + 1;
+    task.data_size.store(kernel_area.end + 1, Ordering::SeqCst);
 
     /* Stack page */
     task.allocate_stack_pages(KERNEL_VM_STACK_START, KERNEL_VM_STACK_SIZE / PAGE_SIZE)
@@ -226,7 +209,7 @@ pub fn user_kernel_vm_init(task: &mut Task) {
             .unwrap();
     }
 
-    crate::arch::vm::setup_trampoline_for_user(&mut task.vm_manager);
+    crate::arch::vm::setup_trampoline_for_user(&task.vm_manager);
 
     setup_trampoline_for_task_kstack_window(task)
         .map_err(|e| panic!("Failed to setup task kstack window: {}", e))
@@ -287,7 +270,7 @@ fn kstack_alloc() -> &'static Mutex<KernelKstackAllocator> {
 /// Map the task's kernel stack physical pages into the shared kernel PT at a unique high VA window.
 /// Adds an unmapped guard page at the bottom of the window.
 #[allow(static_mut_refs)]
-pub fn setup_trampoline_for_task_kstack_window(task: &mut Task) -> Result<(), &'static str> {
+pub fn setup_trampoline_for_task_kstack_window(task: &Task) -> Result<(), &'static str> {
     // Allocate a window slot
     let (slot_idx, base, _top) = kstack_alloc()
         .lock()
@@ -341,7 +324,9 @@ pub fn setup_trampoline_for_task_kstack_window(task: &mut Task) -> Result<(), &'
     let tf_align = core::mem::align_of::<crate::arch::Trapframe>() as u64;
     debug_assert!(tf_align.is_power_of_two());
     let sp = (stack_top - tf_size) & !(tf_align - 1);
-    task.get_kernel_context_mut().set_sp(sp);
+    task.with_kernel_context(|kctx| {
+        kctx.set_sp(sp);
+    });
 
     #[cfg(any(debug_assertions, test))]
     crate::early_println!(
@@ -430,7 +415,7 @@ pub fn verify_task_kernel_stack_guard(task: &Task) -> bool {
     guard_ok && stack_ok
 }
 
-pub fn setup_user_stack(task: &mut Task) -> (usize, usize) {
+pub fn setup_user_stack(task: &Task) -> (usize, usize) {
     /* User stack page */
     let num_of_stack_page = 256; // 1MB user stack (4KB pages)
     let stack_base = USER_STACK_END - num_of_stack_page * PAGE_SIZE;
@@ -445,37 +430,27 @@ pub fn setup_user_stack(task: &mut Task) -> (usize, usize) {
     (stack_base, USER_STACK_END)
 }
 
-static mut TRAMPOLINE_TRAP_VECTOR: Option<usize> = None;
-static mut TRAMPOLINE_ARCH: [Option<usize>; NUM_OF_CPUS] = [None; NUM_OF_CPUS];
+static TRAMPOLINE_TRAP_VECTOR: Once<usize> = Once::new();
+static TRAMPOLINE_ARCH: Mutex<[Option<usize>; MAX_NUM_CPUS]> = Mutex::new([None; MAX_NUM_CPUS]);
 
 pub fn set_trampoline_trap_vector(trap_vector: usize) {
-    unsafe {
-        TRAMPOLINE_TRAP_VECTOR = Some(trap_vector);
-    }
+    TRAMPOLINE_TRAP_VECTOR.call_once(|| trap_vector);
 }
 
 pub fn get_trampoline_trap_vector() -> usize {
-    unsafe {
-        match TRAMPOLINE_TRAP_VECTOR {
-            Some(v) => v,
-            None => panic!("Trampoline is not initialized"),
-        }
-    }
+    *TRAMPOLINE_TRAP_VECTOR
+        .get()
+        .expect("Trampoline is not initialized")
 }
 
 pub fn set_trampoline_arch(cpu_id: usize, arch: usize) {
-    unsafe {
-        TRAMPOLINE_ARCH[cpu_id] = Some(arch);
-    }
+    let mut trampolines = TRAMPOLINE_ARCH.lock();
+    trampolines[cpu_id] = Some(arch);
 }
 
 pub fn get_trampoline_arch(cpu_id: usize) -> usize {
-    unsafe {
-        match TRAMPOLINE_ARCH[cpu_id] {
-            Some(v) => v,
-            None => panic!("Trampoline is not initialized"),
-        }
-    }
+    let trampolines = TRAMPOLINE_ARCH.lock();
+    trampolines[cpu_id].expect("Trampoline is not initialized")
 }
 
 pub fn switch_to_kernel_vm() {

@@ -144,10 +144,10 @@ pub fn arch_exception_handler(trapframe: &mut Trapframe, trap_kind: usize) {
             if crate::arch::user_fpu_enabled() {
                 let cpu_id = get_cpu().get_cpuid();
                 let task = get_scheduler().get_current_task(cpu_id).unwrap();
-                task.vcpu.fpu_used = true;
+                task.vcpu.lock().fpu_used = true;
                 crate::arch::fpu::set_user_fpu_enabled(true);
                 unsafe {
-                    task.vcpu.fpu.restore();
+                    task.vcpu.lock().fpu.restore();
                 }
                 return;
             }
@@ -246,7 +246,6 @@ fn handle_instruction_fault(trapframe: &mut Trapframe, vaddr: usize) {
     let task = get_scheduler()
         .get_current_task(get_cpu().get_cpuid())
         .unwrap();
-    let manager = &mut task.vm_manager;
 
     let access = AccessKind {
         op: AccessOp::Instruction,
@@ -254,7 +253,7 @@ fn handle_instruction_fault(trapframe: &mut Trapframe, vaddr: usize) {
         size: None,
     };
 
-    match manager.lazy_map_page_with(access) {
+    match task.vm_manager.lazy_map_page_with(access) {
         Ok(_) => (),
         Err(_) => {
             print_trap_info(trapframe, get_esr_el1());
@@ -271,7 +270,6 @@ fn handle_data_fault(trapframe: &mut Trapframe, vaddr: usize, is_write: bool) {
     let task = get_scheduler()
         .get_current_task(get_cpu().get_cpuid())
         .unwrap();
-    let manager = &mut task.vm_manager;
 
     let op = if is_write {
         AccessOp::Store
@@ -299,7 +297,7 @@ fn handle_data_fault(trapframe: &mut Trapframe, vaddr: usize, is_write: bool) {
             dfsc
         );
         // Print current memory mapping for this address
-        if let Some(map) = manager.search_memory_map(vaddr) {
+        if let Some(map) = task.vm_manager.search_memory_map(vaddr) {
             early_println!(
                 "[PF] Mapping found: vmarea=[{:#x}..{:#x}] perms={:#x} (R={} W={} X={} U={})",
                 map.vmarea.start,
@@ -328,14 +326,14 @@ fn handle_data_fault(trapframe: &mut Trapframe, vaddr: usize, is_write: bool) {
         early_println!("[PF] Current TTBR0_EL1={:#x}", current_ttbr0);
     }
 
-    match manager.lazy_map_page_with(access) {
+    match task.vm_manager.lazy_map_page_with(access) {
         Ok(_) => (),
         Err(e) => {
             print_trap_info(trapframe, get_esr_el1());
             if let Some(task) = get_scheduler().get_current_task(get_cpu().get_cpuid()) {
                 early_println!(
                     "Task {} (PID {}) caused data fault at vaddr: {:#x} (write={}) from PC: {:#x}",
-                    task.name,
+                    task.name.read(),
                     task.get_id(),
                     vaddr,
                     is_write,

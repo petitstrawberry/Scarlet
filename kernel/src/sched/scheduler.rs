@@ -45,7 +45,7 @@ use crate::{
         interrupt::enable_external_interrupts, set_next_mode, set_trapvector,
         trap::user::arch_switch_to_user_space,
     },
-    environment::NUM_OF_CPUS,
+    environment::MAX_NUM_CPUS,
     task::{TaskState, new_kernel_task, wake_parent_waiters, wake_task_waiters},
     timer::get_kernel_timer,
     vm::get_trampoline_trap_vector,
@@ -366,21 +366,21 @@ pub fn get_scheduler() -> &'static mut Scheduler {
 
 pub struct Scheduler {
     /// Queue for ready-to-run task IDs
-    ready_queue: [VecDeque<usize>; NUM_OF_CPUS],
+    ready_queue: [VecDeque<usize>; MAX_NUM_CPUS],
     /// Queue for blocked task IDs (waiting for I/O, etc.)
-    blocked_queue: [VecDeque<usize>; NUM_OF_CPUS],
+    blocked_queue: [VecDeque<usize>; MAX_NUM_CPUS],
     /// Queue for zombie task IDs (finished but not yet cleaned up)
-    zombie_queue: [VecDeque<usize>; NUM_OF_CPUS],
-    current_task_id: [Option<usize>; NUM_OF_CPUS],
+    zombie_queue: [VecDeque<usize>; MAX_NUM_CPUS],
+    current_task_id: [Option<usize>; MAX_NUM_CPUS],
 }
 
 impl Scheduler {
     pub fn new() -> Self {
         Scheduler {
-            ready_queue: [const { VecDeque::new() }; NUM_OF_CPUS],
-            blocked_queue: [const { VecDeque::new() }; NUM_OF_CPUS],
-            zombie_queue: [const { VecDeque::new() }; NUM_OF_CPUS],
-            current_task_id: [const { None }; NUM_OF_CPUS],
+            ready_queue: [const { VecDeque::new() }; MAX_NUM_CPUS],
+            blocked_queue: [const { VecDeque::new() }; MAX_NUM_CPUS],
+            zombie_queue: [const { VecDeque::new() }; MAX_NUM_CPUS],
+            current_task_id: [const { None }; MAX_NUM_CPUS],
         }
     }
 
@@ -417,7 +417,7 @@ impl Scheduler {
                 // Current task is not in ready_queue (it's running), add it back
                 // Only add if the task is in a valid state to be scheduled
                 if let Some(task) = self.get_task_by_id(current_id) {
-                    match task.state {
+                    match task.state.load(core::sync::atomic::Ordering::SeqCst) {
                         TaskState::Ready | TaskState::Running => {
                             self.ready_queue[cpu_id].push_back(current_id);
                         }
@@ -441,7 +441,7 @@ impl Scheduler {
                         let t = self
                             .get_task_by_id(task_id)
                             .expect("Task must exist in task pool");
-                        match t.state {
+                        match t.state.load(core::sync::atomic::Ordering::SeqCst) {
                             TaskState::NotInitialized => {
                                 panic!("Task must be initialized before scheduling");
                             }
@@ -471,9 +471,12 @@ impl Scheduler {
                                 continue;
                             }
                             TaskState::Ready | TaskState::Running => {
-                                t.state = TaskState::Running;
+                                t.state.store(
+                                    TaskState::Running,
+                                    core::sync::atomic::Ordering::SeqCst,
+                                );
                                 // Task is ready to run
-                                t.time_slice = 1; // Reset time slice on dispatch
+                                t.time_slice.store(1, core::sync::atomic::Ordering::SeqCst); // Reset time slice on dispatch
                                 let next_task_id = t.get_id();
                                 self.current_task_id[cpu_id] = Some(next_task_id);
                                 self.ready_queue[cpu_id].push_back(task_id);
@@ -492,7 +495,7 @@ impl Scheduler {
                         let t = self
                             .get_task_by_id(task_id)
                             .expect("Task must exist in task pool");
-                        match t.state {
+                        match t.state.load(core::sync::atomic::Ordering::SeqCst) {
                             TaskState::NotInitialized => {
                                 panic!("Task must be initialized before scheduling");
                             }
@@ -522,7 +525,7 @@ impl Scheduler {
                                 continue;
                             }
                             TaskState::Ready | TaskState::Running => {
-                                t.time_slice = 1; // Reset time slice on dispatch
+                                t.time_slice.store(1, core::sync::atomic::Ordering::SeqCst); // Reset time slice on dispatch
                                 let next_task_id = t.get_id();
                                 self.current_task_id[cpu_id] = Some(next_task_id);
                                 self.ready_queue[cpu_id].push_back(task_id);
@@ -542,10 +545,13 @@ impl Scheduler {
         // crate::early_println!("[SCHED] CPU{}: on_tick called", cpu_id);
         if let Some(task_id) = self.get_current_task_id(cpu_id) {
             if let Some(task) = TaskPool::get_task_mut(task_id) {
-                if task.time_slice > 0 {
-                    task.time_slice -= 1;
+                let current_slice = task.time_slice.load(core::sync::atomic::Ordering::SeqCst);
+                if current_slice > 0 {
+                    task.time_slice
+                        .store(current_slice - 1, core::sync::atomic::Ordering::SeqCst);
                 }
-                if task.time_slice == 0 {
+                let new_slice = task.time_slice.load(core::sync::atomic::Ordering::SeqCst);
+                if new_slice == 0 {
                     // crate::early_println!(
                     //     "[SCHED] CPU{}: Time slice expired for Task {}",
                     //     cpu_id,
@@ -595,7 +601,7 @@ impl Scheduler {
             // Store current task's user state to VCPU
             if let Some(current_task_id) = current_task_id {
                 let current_task = self.get_task_by_id(current_task_id).unwrap();
-                current_task.vcpu.store(trapframe);
+                current_task.vcpu.lock().store(trapframe);
 
                 // Perform kernel context switch
                 self.kernel_context_switch(cpu_id, current_task_id, next_task_id);
@@ -640,7 +646,23 @@ impl Scheduler {
         next_task_id
     }
 
-    pub fn get_current_task(&mut self, cpu_id: usize) -> Option<&mut Task> {
+    pub fn get_current_task(&mut self, cpu_id: usize) -> Option<&Task> {
+        match self.current_task_id[cpu_id] {
+            Some(task_id) => TaskPool::get_task(task_id),
+            None => None,
+        }
+    }
+
+    /// Get a mutable reference to the current task on the specified CPU
+    ///
+    /// # Safety
+    /// This function returns a mutable reference to the current task,
+    /// which can lead to undefined behavior if misused. The caller must ensure:
+    /// - No other references (mutable or immutable) to the same task exist
+    /// - The task is not concurrently accessed from other contexts
+    /// - The scheduler's invariants are maintained
+    ///
+    pub unsafe fn get_current_task_mut(&mut self, cpu_id: usize) -> Option<&mut Task> {
         match self.current_task_id[cpu_id] {
             Some(task_id) => TaskPool::get_task_mut(task_id),
             None => None,
@@ -686,7 +708,8 @@ impl Scheduler {
 
                 // Get task from TaskPool and set state to Running
                 if let Some(task) = TaskPool::get_task_mut(task_id) {
-                    task.state = TaskState::Running;
+                    task.state
+                        .store(TaskState::Running, core::sync::atomic::Ordering::SeqCst);
                     // Memory barrier to ensure state change is visible
                     core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
                     // Move to ready queue
@@ -700,8 +723,10 @@ impl Scheduler {
         // blocked_queue. In that case, ensure the task state is set back to
         // Running so that the scheduler does not park it.
         if let Some(task) = TaskPool::get_task_mut(task_id) {
-            if let TaskState::Blocked(_) = task.state {
-                task.state = TaskState::Running;
+            let task_state = task.state.load(core::sync::atomic::Ordering::SeqCst);
+            if let TaskState::Blocked(_) = task_state {
+                task.state
+                    .store(TaskState::Running, core::sync::atomic::Ordering::SeqCst);
                 // Memory barrier to ensure state change is visible
                 core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
                 // CRITICAL FIX: Check if task is in ready_queue, add if not
@@ -737,7 +762,7 @@ impl Scheduler {
     /// * `task_id` - The ID of the zombie task to clean up
     pub fn cleanup_zombie_task(&mut self, task_id: usize) {
         // Remove from zombie queue
-        for cpu_id in 0..NUM_OF_CPUS {
+        for cpu_id in 0..MAX_NUM_CPUS {
             if let Some(pos) = self.zombie_queue[cpu_id]
                 .iter()
                 .position(|&id| id == task_id)
@@ -801,20 +826,20 @@ impl Scheduler {
 
             {
                 if let Some(from_task) = TaskPool::get_task_mut(from_task_id) {
-                    from_ctx_ptr = &mut from_task.kernel_context;
+                    from_ctx_ptr = &mut *from_task.kernel_context.lock();
 
                     #[cfg(feature = "user-fpu")]
-                    crate::arch::fpu::kernel_switch_out_user_fpu(&mut from_task.vcpu);
+                    crate::arch::fpu::kernel_switch_out_user_fpu(&mut *from_task.vcpu.lock());
 
                     #[cfg(feature = "user-vector")]
                     crate::arch::fpu::kernel_switch_out_user_vector(
                         cpu_id,
                         from_task_id,
-                        &mut from_task.vcpu,
+                        &mut *from_task.vcpu.lock(),
                     );
                 }
                 if let Some(to_task) = TaskPool::get_task_mut(to_task_id) {
-                    to_ctx_ptr = &to_task.kernel_context;
+                    to_ctx_ptr = &*to_task.kernel_context.lock();
                 }
             }
 
@@ -827,7 +852,7 @@ impl Scheduler {
                 // Execution resumes here when this task is rescheduled
                 if let Some(from_task) = TaskPool::get_task_mut(from_task_id) {
                     #[cfg(feature = "user-fpu")]
-                    crate::arch::fpu::kernel_switch_in_user_fpu(&mut from_task.vcpu);
+                    crate::arch::fpu::kernel_switch_in_user_fpu(&mut *from_task.vcpu.lock());
                 }
             } else {
                 // crate::println!("[SCHED] ERROR: Context pointers not found - from: {:p}, to: {:p}", from_ctx_ptr, to_ctx_ptr);
@@ -865,12 +890,12 @@ impl Scheduler {
         let task_ptr = task as *mut Task;
         unsafe {
             let trapframe = (*task_ptr).get_trapframe();
-            (*task_ptr).vcpu.switch(trapframe);
+            (*task_ptr).vcpu.lock().switch(trapframe);
         }
 
         cpu.set_trap_handler(get_user_trap_handler());
         cpu.set_next_address_space(task.vm_manager.get_asid());
-        set_next_mode(task.vcpu.get_mode());
+        set_next_mode(task.vcpu.lock().get_mode());
         // Setup trap vector
         set_trapvector(get_trampoline_trap_vector());
 
@@ -887,7 +912,7 @@ impl Scheduler {
     #[cfg(test)]
     pub fn reset(&mut self) {
         // Clear all queues
-        for cpu_id in 0..NUM_OF_CPUS {
+        for cpu_id in 0..MAX_NUM_CPUS {
             self.ready_queue[cpu_id].clear();
             self.blocked_queue[cpu_id].clear();
             self.zombie_queue[cpu_id].clear();

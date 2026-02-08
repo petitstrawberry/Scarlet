@@ -15,6 +15,7 @@ use alloc::{
     vec::Vec,
 };
 use core::fmt;
+use core::sync::atomic::Ordering;
 
 /// Task state backup for exec rollback
 ///
@@ -35,10 +36,10 @@ impl TaskStateBackup {
     /// Create a backup of the current task state including trapframe
     ///
     /// This creates a complete snapshot that can be restored if exec fails.
-    fn create_backup(task: &mut Task, trapframe: &Trapframe) -> Self {
+    fn create_backup(task: &Task, trapframe: &Trapframe) -> Self {
         // Move managed pages to backup (avoiding clone)
         let mut backup_pages = Vec::new();
-        backup_pages.append(&mut task.managed_pages);
+        backup_pages.append(&mut *task.managed_pages.write());
 
         // Backup VM mapping - collect iterator into Vec for storage
         let backup_vm_mapping = task.vm_manager.remove_all_memory_maps().collect();
@@ -46,10 +47,10 @@ impl TaskStateBackup {
         Self {
             managed_pages: backup_pages,
             vm_mapping: backup_vm_mapping,
-            text_size: task.text_size,
-            data_size: task.data_size,
-            stack_size: task.stack_size,
-            name: task.name.clone(),
+            text_size: task.text_size.load(Ordering::SeqCst),
+            data_size: task.data_size.load(Ordering::SeqCst),
+            stack_size: task.stack_size.load(Ordering::SeqCst),
+            name: task.name.read().clone(),
             trapframe: trapframe.clone(),
         }
     }
@@ -58,22 +59,18 @@ impl TaskStateBackup {
     ///
     /// This restores the complete task state from a previous backup,
     /// ensuring full rollback on exec failure.
-    fn restore_to_task(
-        self,
-        task: &mut Task,
-        trapframe: &mut Trapframe,
-    ) -> Result<(), &'static str> {
+    fn restore_to_task(self, task: &Task, trapframe: &mut Trapframe) -> Result<(), &'static str> {
         // Restore managed pages
-        task.managed_pages = self.managed_pages;
+        *task.managed_pages.write() = self.managed_pages;
 
         // Restore VM mapping
         task.vm_manager.restore_memory_maps(self.vm_mapping)?;
 
         // Restore sizes and name
-        task.text_size = self.text_size;
-        task.data_size = self.data_size;
-        task.stack_size = self.stack_size;
-        task.name = self.name;
+        task.text_size.store(self.text_size, Ordering::SeqCst);
+        task.data_size.store(self.data_size, Ordering::SeqCst);
+        task.stack_size.store(self.stack_size, Ordering::SeqCst);
+        *task.name.write() = self.name;
 
         // Restore trapframe
         *trapframe = self.trapframe;
@@ -144,7 +141,7 @@ impl TransparentExecutor {
         path: &str,
         argv: &[&str],
         envp: &[&str],
-        task: &mut Task,
+        task: &Task,
         trapframe: &mut Trapframe,
         force_abi_rebuild: bool,
     ) -> ExecutorResult<()> {
@@ -174,7 +171,7 @@ impl TransparentExecutor {
         argv: &[&str],
         envp: &[&str],
         abi_name: &str,
-        task: &mut Task,
+        task: &Task,
         trapframe: &mut Trapframe,
         force_abi_rebuild: bool,
     ) -> ExecutorResult<()> {
@@ -198,7 +195,7 @@ impl TransparentExecutor {
         argv: &[&str],
         envp: &[&str],
         explicit_abi: Option<&str>,
-        task: &mut Task,
+        task: &Task,
         trapframe: &mut Trapframe,
         force_abi_rebuild: bool,
     ) -> ExecutorResult<()> {
@@ -238,7 +235,7 @@ impl TransparentExecutor {
         argv: &[&str],
         envp: &[&str],
         explicit_abi: Option<&str>,
-        task: &mut Task,
+        task: &Task,
         trapframe: &mut Trapframe,
         force_abi_rebuild: bool,
     ) -> ExecutorResult<()> {
@@ -268,7 +265,7 @@ impl TransparentExecutor {
         }
 
         // Step 4: Check if ABI switch or forced rebuild is required
-        let current_abi_name = task.default_abi_ref().get_name();
+        let current_abi_name = task.with_default_abi(|abi| abi.get_name());
         let abi_switch_required = abi_name != current_abi_name;
         let rebuild_required = abi_switch_required || force_abi_rebuild;
 
@@ -283,7 +280,10 @@ impl TransparentExecutor {
 
         // Step 7: Update task's ABI if switch occurred
         if abi_switch_required {
-            task.default_abi = Some(abi);
+            // SAFETY: This is the currently executing task on this hart
+            unsafe {
+                *task.default_abi.get_mut() = Some(abi);
+            }
         }
 
         Ok(())
@@ -345,7 +345,7 @@ impl TransparentExecutor {
         target_argv: &[&str],
         target_envp: &[&str],
         runtime_config: &crate::abi::RuntimeConfig,
-        task: &mut Task,
+        task: &Task,
         trapframe: &mut Trapframe,
         force_abi_rebuild: bool,
     ) -> ExecutorResult<()> {
@@ -414,14 +414,14 @@ impl TransparentExecutor {
     /// Design principle: ABI directories (/system/{abi}, /data/config/{abi}) should be
     /// prepared by the user/administrator beforehand as part of system setup.
     fn setup_task_environment(
-        task: &mut Task,
+        task: &Task,
         abi: &mut Box<dyn crate::abi::AbiModule + Send + Sync>,
     ) -> ExecutorResult<()> {
         // TransparentExecutor provides clean VFS for ABI environment
         let clean_vfs =
             Self::create_clean_vfs().map_err(|e| ExecutorError::ExecutionFailed(e.to_string()))?;
 
-        task.vfs = Some(clean_vfs);
+        *task.vfs.write() = Some(clean_vfs);
 
         // Get base VFS (global VFS) for overlay and shared resources
         let base_vfs = get_global_vfs_manager();
@@ -448,7 +448,7 @@ impl TransparentExecutor {
         }
 
         // Setup ABI-specific environment with the clean VFS
-        if let Some(ref vfs_arc) = task.vfs {
+        if let Some(ref vfs_arc) = *task.vfs.read() {
             // Step 1: Overlay environment setup with prepared paths
             abi.setup_overlay_environment(vfs_arc, &base_vfs, &system_path, &config_path)
                 .map_err(|e| ExecutorError::ExecutionFailed(e.to_string()))?;
@@ -473,7 +473,7 @@ impl TransparentExecutor {
         }
 
         // Set default working directory for the ABI via VfsManager
-        if let Some(vfs) = &task.vfs {
+        if let Some(vfs) = task.vfs.read().clone() {
             let _ = vfs.set_cwd_by_path(abi.get_default_cwd());
         }
 

@@ -12,6 +12,7 @@ use alloc::{
     sync::Arc,
     vec::Vec,
 };
+use core::sync::atomic::Ordering;
 
 use crate::{
     arch::{Trapframe, vm},
@@ -69,7 +70,7 @@ impl ScarletAbi {
     }
 
     /// Handle task exit with TLS cleanup (Linux-compatible)
-    pub fn on_task_exit(&mut self, task: &mut crate::task::Task) {
+    pub fn on_task_exit(&mut self, task: &crate::task::Task) {
         // Linux-compatible behavior: write 0 to clear_child_tid and futex wake
         if let Some(ptr) = self.clear_child_tid_ptr {
             if let Some(paddr) = task.vm_manager.translate_vaddr(ptr) {
@@ -215,15 +216,15 @@ impl AbiModule for ScarletAbi {
         file_object: &crate::object::KernelObject,
         argv: &[&str],
         envp: &[&str],
-        task: &mut crate::task::Task,
+        task: &crate::task::Task,
         trapframe: &mut Trapframe,
     ) -> Result<(), &'static str> {
         // Get file object from KernelObject::File
         match file_object.as_file() {
             Some(file_obj) => {
-                task.text_size = 0;
-                task.data_size = 0;
-                task.stack_size = 0;
+                task.text_size.store(0, Ordering::SeqCst);
+                task.data_size.store(0, Ordering::SeqCst);
+                task.stack_size.store(0, Ordering::SeqCst);
                 task.brk
                     .store(usize::MAX, core::sync::atomic::Ordering::SeqCst);
 
@@ -246,7 +247,7 @@ impl AbiModule for ScarletAbi {
                 match analyze_and_load_elf_with_strategy(file_obj, task, &strategy) {
                     Ok(elf_result) => {
                         // Set the name from argv[0] or use default
-                        task.name = argv
+                        *task.name.write() = argv
                             .get(0)
                             .map_or("Unnamed Task".to_string(), |s| s.to_string());
 
@@ -256,7 +257,7 @@ impl AbiModule for ScarletAbi {
                         root_page_table.unmap_all();
 
                         // Setup the new memory environment
-                        vm::setup_trampoline_for_user(&mut task.vm_manager);
+                        vm::setup_trampoline_for_user(&task.vm_manager);
                         let stack_pointer = setup_user_stack(task).1;
 
                         // Handle different execution modes
@@ -298,22 +299,22 @@ impl AbiModule for ScarletAbi {
                         }
 
                         // Reset task's registers for clean start
-                        task.vcpu.reset_iregs();
-                        task.vcpu.set_sp(stack_pointer);
+                        task.vcpu.lock().reset_iregs();
+                        task.vcpu.lock().set_sp(stack_pointer);
 
                         // Setup argv/envp on stack following Unix and RISC-V conventions
                         let (adjusted_sp, argv_ptr) =
                             self.setup_arguments_on_stack(task, argv, envp, stack_pointer)?;
-                        task.vcpu.set_sp(adjusted_sp);
+                        task.vcpu.lock().set_sp(adjusted_sp);
 
                         // Set RISC-V calling convention registers
                         // a0 (reg[10]) = argc
                         // a1 (reg[11]) = argv pointer
-                        task.vcpu.iregs.reg[10] = argv.len(); // argc
-                        task.vcpu.iregs.reg[11] = argv_ptr; // argv array pointer
+                        task.vcpu.lock().iregs.reg[10] = argv.len(); // argc
+                        task.vcpu.lock().iregs.reg[11] = argv_ptr; // argv array pointer
 
                         // Switch to the new task
-                        task.vcpu.switch(trapframe);
+                        task.vcpu.lock().switch(trapframe);
                         Ok(())
                     }
                     Err(e) => {
@@ -552,7 +553,7 @@ impl AbiModule for ScarletAbi {
         }
     }
 
-    fn on_task_exit(&mut self, task: &mut crate::task::Task) {
+    fn on_task_exit(&mut self, task: &crate::task::Task) {
         // Delegate to the implementation method
         self.on_task_exit(task);
     }
@@ -594,7 +595,7 @@ impl ScarletAbi {
     /// Tuple of (new stack pointer, argv array pointer)
     fn setup_arguments_on_stack(
         &self,
-        task: &mut crate::task::Task,
+        task: &crate::task::Task,
         argv: &[&str],
         envp: &[&str],
         initial_sp: usize,
@@ -679,7 +680,7 @@ impl ScarletAbi {
     /// Write bytes to stack memory using virtual memory translation
     fn write_to_stack_memory(
         &self,
-        task: &mut crate::task::Task,
+        task: &crate::task::Task,
         vaddr: usize,
         data: &[u8],
     ) -> Result<(), &'static str> {
@@ -697,7 +698,7 @@ impl ScarletAbi {
     /// Write a null-terminated string to stack memory
     fn write_string_to_stack(
         &self,
-        task: &mut crate::task::Task,
+        task: &crate::task::Task,
         vaddr: usize,
         string: &str,
     ) -> Result<(), &'static str> {

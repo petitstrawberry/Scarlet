@@ -113,7 +113,7 @@ pub struct GraphicsManager {
     active_mappings: Mutex<Vec<MmapRegion>>,
 }
 
-static mut MANAGER: GraphicsManager = GraphicsManager::new();
+static MANAGER: GraphicsManager = GraphicsManager::new();
 
 impl GraphicsManager {
     /// Create a new GraphicsManager instance
@@ -125,23 +125,16 @@ impl GraphicsManager {
         }
     }
 
-    /// Get immutable reference to the global GraphicsManager instance
-    #[allow(static_mut_refs)]
+    /// Get reference to the global GraphicsManager instance
     pub fn get_manager() -> &'static GraphicsManager {
-        unsafe { &MANAGER }
-    }
-
-    /// Get mutable reference to the global GraphicsManager instance
-    #[allow(static_mut_refs)]
-    pub fn get_mut_manager() -> &'static mut GraphicsManager {
-        unsafe { &mut MANAGER }
+        &MANAGER
     }
 
     /// Discover and register graphics devices from DeviceManager
     ///
     /// This method scans all devices in the DeviceManager for graphics devices
     /// and extracts their framebuffer resources for management.
-    pub fn discover_graphics_devices(&mut self) {
+    pub fn discover_graphics_devices(&self) {
         let device_manager = DeviceManager::get_manager();
         let device_count = device_manager.get_devices_count();
 
@@ -184,7 +177,7 @@ impl GraphicsManager {
     ///
     /// Result indicating success or failure
     pub fn register_framebuffer_from_device(
-        &mut self,
+        &self,
         device_id: usize,
         device: SharedDevice,
     ) -> Result<(), &'static str> {
@@ -307,7 +300,7 @@ impl GraphicsManager {
     /// # Returns
     ///
     /// Result indicating success or failure
-    pub fn create_framebuffer_char_device(&mut self, fb_name: &str) -> Result<(), &'static str> {
+    pub fn create_framebuffer_char_device(&self, fb_name: &str) -> Result<(), &'static str> {
         use crate::device::{
             graphics::framebuffer_device::FramebufferCharDevice, manager::DeviceManager,
         };
@@ -327,7 +320,7 @@ impl GraphicsManager {
         let fb_char_device = FramebufferCharDevice::new(fb_resource);
 
         // Register with DeviceManager (this will automatically publish to DevFS)
-        let device_manager = DeviceManager::get_mut_manager();
+        let device_manager = DeviceManager::get_manager();
         let device_id =
             device_manager.register_device_with_name(fb_name.to_string(), Arc::new(fb_char_device));
 
@@ -352,7 +345,7 @@ impl GraphicsManager {
     ///
     /// Result indicating success or failure
     pub fn set_char_device_id(
-        &mut self,
+        &self,
         fb_name: &str,
         char_device_id: usize,
     ) -> Result<(), &'static str> {
@@ -510,7 +503,7 @@ impl GraphicsManager {
     /// Clear all framebuffers (for testing only)
     /// This allows tests to start with a clean GraphicsManager state
     #[cfg(test)]
-    pub fn clear_for_test(&mut self) {
+    pub fn clear_for_test(&self) {
         use crate::device::manager::DeviceManager;
 
         // Clear GraphicsManager state
@@ -524,7 +517,7 @@ impl GraphicsManager {
         active_mappings.clear();
 
         // Also clear DeviceManager state to ensure test isolation
-        DeviceManager::get_mut_manager().clear_for_test();
+        DeviceManager::get_manager().clear_for_test();
     }
 }
 
@@ -539,10 +532,10 @@ mod test_utils {
     }
 
     /// Setup a clean GraphicsManager for testing
-    /// This clears the global singleton and returns a mutable reference to it
+    /// This clears the global singleton and returns a reference to it
     /// ensuring each test starts with a clean state
-    pub fn setup_clean_global_graphics_manager() -> &'static mut GraphicsManager {
-        let manager = GraphicsManager::get_mut_manager();
+    pub fn setup_clean_global_graphics_manager() -> &'static GraphicsManager {
+        let manager = GraphicsManager::get_manager();
         manager.clear_for_test();
         manager
     }

@@ -102,7 +102,20 @@ use crate::early_println;
 use crate::vm::vmem::MemoryArea;
 use crate::{BootInfo, DeviceSource};
 
-static mut MANAGER: FdtManager = FdtManager::new();
+use core::cell::UnsafeCell;
+use spin::Once;
+
+struct SyncUnsafeCell<T>(UnsafeCell<T>);
+
+// SAFETY: FDT is initialized during single-threaded boot before SMP is enabled.
+// After initialization, only read-only access is used through get_manager().
+unsafe impl<T> Sync for SyncUnsafeCell<T> {}
+
+// SAFETY: FDT is initialized during single-threaded boot before SMP is enabled.
+// After initialization, only read-only access is used through get_manager().
+static MANAGER: SyncUnsafeCell<FdtManager<'static>> =
+    SyncUnsafeCell(UnsafeCell::new(FdtManager::new()));
+static MANAGER_INITIALIZED: Once = Once::new();
 
 pub struct FdtManager<'a> {
     fdt: Option<Fdt<'a>>,
@@ -134,28 +147,31 @@ impl<'a> FdtManager<'a> {
         self.fdt.as_ref()
     }
 
-    /// Returns a mutable reference to the FdtManager.
-    /// This is unsafe because it allows mutable access to a static variable.
-    /// It should be used with caution to avoid data races.
+    /// Returns a mutable reference to the FdtManager for initialization.
     ///
     /// # Safety
-    /// This function provides mutable access to the static FdtManager instance.
-    /// Ensure that no other references to the manager are active to prevent data races.
-    ///
-    /// # Returns
-    /// A mutable reference to the static FdtManager instance.
-    #[allow(static_mut_refs)]
-    pub unsafe fn get_mut_manager() -> &'static mut FdtManager<'a> {
-        unsafe { &mut MANAGER }
+    /// This function is only safe to call during single-threaded boot initialization.
+    /// After SMP is enabled, this should not be called.
+    pub unsafe fn get_mut_manager() -> &'static mut FdtManager<'static> {
+        // SAFETY: We're in single-threaded boot context
+        &mut *MANAGER.0.get()
     }
 
     /// Returns a reference to the FdtManager.
     ///
     /// # Returns
     /// A reference to the static FdtManager instance.
-    #[allow(static_mut_refs)]
-    pub fn get_manager() -> &'static FdtManager<'a> {
-        unsafe { &MANAGER }
+    ///
+    /// # Panics
+    /// Panics if called before FdtManager is initialized via `init_fdt()`.
+    pub fn get_manager() -> &'static FdtManager<'static> {
+        // Wait for initialization to complete
+        if !MANAGER_INITIALIZED.is_completed() {
+            panic!("FdtManager::get_manager() called before init_fdt()");
+        }
+        // SAFETY: After initialization, only read-only access occurs.
+        // The Once guarantees happens-before relationship with init_fdt().
+        unsafe { &*MANAGER.0.get() }
     }
 
     /// Relocates the FDT to a new address.
@@ -343,6 +359,31 @@ impl<'a> FdtManager<'a> {
             MemoryArea::new(start as usize, start + size - 1), // end is inclusive
         )
     }
+
+    pub fn get_cpu_count(&self) -> Option<usize> {
+        let fdt = self.get_fdt()?;
+        let cpus = fdt.find_node("/cpus")?;
+
+        let mut count = 0usize;
+        for cpu in cpus.children() {
+            // Only count nodes that explicitly declare `device_type = "cpu"`.
+            let dev_type = match cpu.property("device_type") {
+                Some(dev_type) => dev_type,
+                None => continue,
+            };
+
+            let is_cpu = bytes_to_cstr(dev_type.value)
+                .map(|s| s == "cpu")
+                .unwrap_or(false);
+
+            if !is_cpu {
+                continue;
+            }
+            count += 1;
+        }
+
+        if count == 0 { None } else { Some(count) }
+    }
 }
 
 /// Initializes the FDT subsystem with the given address.
@@ -370,6 +411,9 @@ pub fn init_fdt(addr: usize) {
             }
             let model = fdt.root().model();
             early_println!("Model: {}", model);
+
+            // Mark initialization as complete to establish happens-before relationship
+            MANAGER_INITIALIZED.call_once(|| {});
         }
         Err(e) => {
             early_println!("FDT error: {:?}", e);
@@ -487,11 +531,19 @@ pub fn create_bootinfo_from_fdt(cpu_id: usize, relocated_fdt_addr: usize) -> Boo
         .get_fdt()
         .and_then(|fdt| fdt.chosen().bootargs());
 
+    let cpu_count = fdt_manager.get_cpu_count().unwrap_or(1);
+
     BootInfo::new(
         cpu_id,
+        cpu_count,
         usable_memory,
         relocated_initramfs,
         cmdline,
         DeviceSource::Fdt(relocated_fdt_addr),
     )
+}
+
+fn bytes_to_cstr(bytes: &[u8]) -> Option<&str> {
+    let len = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
+    core::str::from_utf8(&bytes[..len]).ok()
 }

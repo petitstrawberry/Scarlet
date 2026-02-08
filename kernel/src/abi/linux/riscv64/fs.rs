@@ -504,7 +504,8 @@ pub fn sys_openat(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize
 
     // crate::println!("sys_openat: epc={:#x}, dirfd={}, path='{}', flags={:#o}", trapframe.epc, dirfd, path_str, flags);
 
-    let vfs = task.vfs.as_ref().unwrap();
+    let vfs_guard = task.vfs.read();
+    let vfs = vfs_guard.as_deref().unwrap();
 
     // Determine base directory (entry and mount) for path resolution
     use crate::fs::vfs_v2::core::VfsFileObject;
@@ -604,7 +605,7 @@ pub fn sys_openat(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize
                 };
 
                 // Get mutable VFS reference for file creation
-                let vfs_mut = match task.vfs.as_mut() {
+                let vfs_mut = match task.vfs.read().clone() {
                     Some(v) => v,
                     None => return errno::to_result(errno::EIO), // VFS not available
                 };
@@ -614,7 +615,8 @@ pub fn sys_openat(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize
                     Ok(_) => {
                         // File created successfully, now try to open it
                         // Get immutable VFS reference again for opening
-                        let vfs = task.vfs.as_ref().unwrap();
+                        let vfs_guard = task.vfs.read();
+                        let vfs = vfs_guard.as_deref().unwrap();
                         match vfs.open_from(&base_entry, &base_mount, &mapped_path, flags as u32) {
                             Ok(obj) => obj,
                             Err(err) => return errno::to_result(errno::from_fs_error(&err)),
@@ -628,7 +630,8 @@ pub fn sys_openat(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize
                             return errno::to_result(errno::EEXIST); // File exists and O_EXCL is set
                         }
                         // Try to open the existing file
-                        let vfs = task.vfs.as_ref().unwrap();
+                        let vfs_guard = task.vfs.read();
+                        let vfs = vfs_guard.as_deref().unwrap();
                         let reopen_flags = (flags as u32) & !((O_CREAT | O_EXCL) as u32);
                         match vfs.open_from(&base_entry, &base_mount, &mapped_path, reopen_flags) {
                             Ok(obj) => obj,
@@ -1336,11 +1339,11 @@ pub fn sys_lseek(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize 
 //     match (major, minor) {
 //         (1, 0) => {
 //             // Create a console device
-//             let console_dev = Some(DeviceManager::get_mut_manager().register_device(Arc::new(
+//             let console_dev = Some(DeviceManager::get_manager().register_device(Arc::new(
 //                 crate::abi::Linux::drivers::console::ConsoleDevice::new(0, "console")
 //             )));
 
-//             let vfs = task.vfs.as_mut().unwrap();
+//             let vfs = task.vfs.read().clone().unwrap();
 //             let _res = vfs.create_file(&path, FileType::CharDevice(
 //                 DeviceFileInfo {
 //                     device_id: console_dev.unwrap(),
@@ -1451,7 +1454,8 @@ pub fn sys_newfstatat(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> u
     //     flags
     // );
 
-    let vfs = task.vfs.as_ref().unwrap();
+    let vfs_guard = task.vfs.read();
+    let vfs = vfs_guard.as_deref().unwrap();
 
     // Determine base directory (entry and mount) for path resolution
     use crate::fs::vfs_v2::core::VfsFileObject;
@@ -1565,7 +1569,7 @@ pub fn sys_statx(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize 
     //     mask
     // );
 
-    let vfs = match task.vfs.as_ref() {
+    let vfs = match task.vfs.read().clone() {
         Some(v) => v,
         None => return errno::to_result(errno::EIO),
     };
@@ -1702,7 +1706,7 @@ pub fn sys_mkdir(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize
     };
 
     // Try to create the directory
-    let vfs = task.vfs.as_mut().unwrap();
+    let vfs = task.vfs.read().clone().unwrap();
     match vfs.create_dir(&path) {
         Ok(_) => 0,           // Success
         Err(_) => usize::MAX, // Error
@@ -1724,7 +1728,7 @@ pub fn sys_unlink(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usiz
     };
 
     // Try to remove the file or directory
-    let vfs = task.vfs.as_mut().unwrap();
+    let vfs = task.vfs.read().clone().unwrap();
     match vfs.remove(&path) {
         Ok(_) => 0,           // Success
         Err(_) => usize::MAX, // Error
@@ -1755,7 +1759,8 @@ pub fn sys_link(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize 
         Err(_) => return usize::MAX, // Invalid path
     };
 
-    let vfs = task.vfs.as_ref().unwrap();
+    let vfs_guard = task.vfs.read();
+    let vfs = vfs_guard.as_deref().unwrap();
     match vfs.create_hardlink(&src_path, &dst_path) {
         Ok(_) => 0, // Success
         Err(err) => {
@@ -1819,7 +1824,7 @@ pub fn sys_linkat(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize
     const AT_SYMLINK_FOLLOW: i32 = 0x400;
     const AT_EMPTY_PATH: i32 = 0x1000;
 
-    let vfs = match task.vfs.as_ref() {
+    let vfs = match task.vfs.read().clone() {
         Some(v) => v,
         None => return usize::MAX,
     };
@@ -1920,7 +1925,7 @@ pub fn sys_linkat(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize
     };
 
     // Get mutable VFS reference for link creation
-    let _vfs_mut = match task.vfs.as_mut() {
+    let _vfs_mut = match task.vfs.write().clone() {
         Some(v) => v,
         None => return usize::MAX,
     };
@@ -1956,7 +1961,8 @@ fn to_absolute_path_v2(task: &crate::task::Task, path: &str) -> Result<String, (
     if path.starts_with('/') {
         Ok(path.to_string())
     } else {
-        let vfs = task.vfs.as_ref().ok_or(())?;
+        let vfs_guard = task.vfs.read();
+        let vfs = vfs_guard.as_ref().ok_or(())?;
         Ok(vfs.resolve_path_to_absolute(path))
     }
 }
@@ -2946,7 +2952,7 @@ pub fn sys_mkdirat(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usi
         Ok(p) => p,
         Err(_) => return usize::MAX,
     };
-    let vfs = match task.vfs.as_mut() {
+    let vfs = match task.vfs.write().clone() {
         Some(v) => v,
         None => return usize::MAX,
     };
@@ -3109,7 +3115,7 @@ pub fn sys_unlinkat(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usi
     const AT_FDCWD: i32 = -100;
     const AT_REMOVEDIR: i32 = 0x200;
 
-    let vfs = match task.vfs.as_ref() {
+    let vfs = match task.vfs.read().clone() {
         Some(v) => v,
         None => return usize::MAX,
     };
@@ -3162,7 +3168,7 @@ pub fn sys_unlinkat(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usi
             };
 
             // Get mutable reference to VFS for removal operations
-            let vfs_mut = match task.vfs.as_mut() {
+            let vfs_mut = match task.vfs.write().clone() {
                 Some(v) => v,
                 None => return usize::MAX,
             };
@@ -4024,7 +4030,7 @@ pub fn sys_readlinkat(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> u
     };
 
     // Acquire VFS
-    let vfs = match task.vfs.as_ref() {
+    let vfs = match task.vfs.read().clone() {
         Some(v) => v,
         None => return errno::to_result(errno::EIO),
     };
@@ -4167,7 +4173,7 @@ pub fn sys_getcwd(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usiz
     }
 
     // Get current working directory from task context
-    let cwd = if let Some(vfs) = &task.vfs {
+    let cwd = if let Some(vfs) = task.vfs.read().clone() {
         vfs.get_cwd_path()
     } else {
         "/".to_string() // Default to root if no VFS manager
@@ -4237,7 +4243,7 @@ pub fn sys_chdir(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize
         }
     };
 
-    let vfs = match task.vfs.as_ref() {
+    let vfs = match task.vfs.read().clone() {
         Some(v) => v,
         None => return usize::MAX,
     };
@@ -4362,7 +4368,7 @@ pub fn sys_renameat2(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> u
         return usize::MAX; // EINVAL
     }
 
-    let vfs = match task.vfs.as_ref() {
+    let vfs = match task.vfs.read().clone() {
         Some(v) => v,
         None => return usize::MAX,
     };

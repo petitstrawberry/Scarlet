@@ -437,7 +437,8 @@ pub fn sys_socket_bind(tf: &mut Trapframe) -> usize {
 
     // Create socket file in VFS for filesystem visibility
     // Note: This is optional - the socket is already functional via named_sockets
-    let vfs = match &task.vfs {
+    let vfs_guard = task.vfs.read();
+    let vfs = match vfs_guard.as_ref() {
         Some(vfs) => vfs.clone(),
         None => {
             // Use global VFS if task doesn't have its own

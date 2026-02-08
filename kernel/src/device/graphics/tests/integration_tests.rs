@@ -61,7 +61,7 @@ mod integration_tests {
     #[test_case]
     fn test_framebuffer_char_device_integration() {
         // Setup clean graphics manager for this test
-        let graphics_manager = GraphicsManager::get_mut_manager();
+        let graphics_manager = GraphicsManager::get_manager();
         graphics_manager.clear_for_test();
 
         let mut test_device = GenericGraphicsDevice::new("test-gpu");
@@ -117,7 +117,7 @@ mod integration_tests {
     #[test_case]
     fn test_multiple_framebuffer_management() {
         // Setup clean graphics manager for this test
-        let graphics_manager = GraphicsManager::get_mut_manager();
+        let graphics_manager = GraphicsManager::get_manager();
         graphics_manager.clear_for_test();
 
         // Create first framebuffer device
@@ -198,7 +198,7 @@ mod integration_tests {
     #[test_case]
     fn test_char_device_id_assignment() {
         // Setup clean graphics manager for this test
-        let graphics_manager = GraphicsManager::get_mut_manager();
+        let graphics_manager = GraphicsManager::get_manager();
         graphics_manager.clear_for_test();
 
         // Register a device
@@ -271,7 +271,7 @@ mod integration_tests {
     #[test_case]
     fn test_framebuffer_boundary_conditions() {
         // Setup clean graphics manager for this test
-        let graphics_manager = GraphicsManager::get_mut_manager();
+        let graphics_manager = GraphicsManager::get_manager();
         graphics_manager.clear_for_test();
 
         // Create a very small framebuffer
@@ -344,7 +344,7 @@ mod integration_tests {
         use crate::object::capability::StreamOps;
 
         // Setup clean graphics manager for this test
-        let graphics_manager = GraphicsManager::get_mut_manager();
+        let graphics_manager = GraphicsManager::get_manager();
         graphics_manager.clear_for_test();
 
         // Create a test framebuffer device
@@ -423,7 +423,7 @@ mod integration_tests {
     #[test_case]
     fn test_devfs_integration_with_device_manager() {
         // Setup clean managers for this test
-        let graphics_manager = GraphicsManager::get_mut_manager();
+        let graphics_manager = GraphicsManager::get_manager();
         graphics_manager.clear_for_test();
 
         let device_manager = DeviceManager::get_manager();
@@ -506,7 +506,7 @@ mod integration_tests {
     #[cfg(target_arch = "riscv64")]
     fn test_dev_fb0_gradient_drawing() {
         // Setup clean graphics manager for this test
-        let graphics_manager = GraphicsManager::get_mut_manager();
+        let graphics_manager = GraphicsManager::get_manager();
         graphics_manager.clear_for_test();
 
         // Create a VirtIO GPU device suitable for gradient drawing

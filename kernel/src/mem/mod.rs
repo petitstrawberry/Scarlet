@@ -9,11 +9,11 @@ pub mod page_cache;
 
 use alloc::{boxed::Box, vec};
 
-use crate::environment::{NUM_OF_CPUS, STACK_SIZE};
+use crate::environment::{MAX_NUM_CPUS, STACK_SIZE};
 
 #[repr(C, align(4096))]
 pub struct Stack {
-    pub data: [u32; (STACK_SIZE / 4) * NUM_OF_CPUS],
+    pub data: [u32; (STACK_SIZE / 4) * MAX_NUM_CPUS],
 }
 
 impl Stack {
@@ -26,13 +26,13 @@ impl Stack {
     }
 
     pub fn size(&self) -> usize {
-        STACK_SIZE * NUM_OF_CPUS
+        STACK_SIZE * MAX_NUM_CPUS
     }
 }
 
 #[unsafe(no_mangle)]
 pub static mut KERNEL_STACK: Stack = Stack {
-    data: [0xdeadbeef; STACK_SIZE / 4 * NUM_OF_CPUS],
+    data: [0xdeadbeef; STACK_SIZE / 4 * MAX_NUM_CPUS],
 };
 
 /// Allocates a block of memory of the specified size from the kernel heap.

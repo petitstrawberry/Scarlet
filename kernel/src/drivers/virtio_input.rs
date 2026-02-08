@@ -185,7 +185,7 @@ impl VirtioInputDevice {
         }
 
         // Register the EventDevice with DeviceManager
-        DeviceManager::get_mut_manager()
+        DeviceManager::get_manager()
             .register_device_with_name(device_name.to_string(), event_device);
 
         early_println!("[virtio-input] Device initialized successfully");

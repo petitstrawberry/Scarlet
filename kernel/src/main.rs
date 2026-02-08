@@ -371,6 +371,9 @@ pub struct BootInfo {
     /// CPU/Hart ID of the boot processor
     /// Used for multicore initialization and per-CPU data structures
     pub cpu_id: usize,
+    /// Number of CPUs detected at runtime (from FDT)
+    /// Used to drive SMP initialization and per-CPU resource sizing
+    pub cpu_count: usize,
     /// Usable memory area available for kernel allocation
     /// Excludes reserved regions, firmware areas, and kernel image
     pub usable_memory: MemoryArea,
@@ -401,6 +404,7 @@ impl BootInfo {
     /// A new BootInfo instance containing the specified boot parameters
     pub fn new(
         cpu_id: usize,
+        cpu_count: usize,
         usable_memory: MemoryArea,
         initramfs: Option<MemoryArea>,
         cmdline: Option<&'static str>,
@@ -408,6 +412,7 @@ impl BootInfo {
     ) -> Self {
         Self {
             cpu_id,
+            cpu_count,
             usable_memory,
             initramfs,
             cmdline,
@@ -507,9 +512,11 @@ impl BootInfo {
 #[unsafe(no_mangle)]
 pub extern "C" fn start_kernel(boot_info: &BootInfo) -> ! {
     let cpu_id = boot_info.cpu_id;
+    let cpu_count = boot_info.cpu_count;
 
     early_println!("[Scarlet Kernel] Hello, I'm Scarlet kernel!");
     early_println!("[Scarlet Kernel] Boot on CPU {}", cpu_id);
+    early_println!("[Scarlet Kernel] Detected {} CPU(s)", cpu_count);
     /* Use usable memory area from BootInfo */
     let usable_area = boot_info.usable_memory;
     early_println!(
@@ -565,7 +572,7 @@ pub extern "C" fn start_kernel(boot_info: &BootInfo) -> ! {
 
     /* Populate devices from BootInfo device source */
     early_println!("[Scarlet Kernel] Populating devices...");
-    let device_manager = DeviceManager::get_mut_manager();
+    let device_manager = DeviceManager::get_manager();
     // Two-phase interrupt bring-up:
     // 1) Discover critical interrupt controllers (PLIC/CLINT) first.
     // 2) Initialize interrupt controllers.
@@ -617,7 +624,7 @@ pub extern "C" fn start_kernel(boot_info: &BootInfo) -> ! {
     );
 
     if device_count > 0 {
-        GraphicsManager::get_mut_manager().discover_graphics_devices();
+        GraphicsManager::get_manager().discover_graphics_devices();
     } else {
         early_println!(
             "[Scarlet Kernel] Warning: No devices found, skipping graphics initialization"
@@ -644,7 +651,8 @@ pub extern "C" fn start_kernel(boot_info: &BootInfo) -> ! {
 
     /* Initialize timer */
     early_println!("[boot] Initializing timer...");
-    get_kernel_timer().init();
+    // Initialize timer for the boot CPU (from BootInfo)
+    get_kernel_timer().init(boot_info.cpu_id);
 
     fence(Ordering::SeqCst); // Ensure timer is initialized before proceeding
 
@@ -686,14 +694,16 @@ pub extern "C" fn start_kernel(boot_info: &BootInfo) -> ! {
     let mut task = new_user_task("init".to_string(), 0);
 
     task.init();
-    task.vfs = Some(manager.clone());
+    *task.vfs.write() = Some(manager.clone());
     task.vfs
+        .read()
         .as_ref()
         .unwrap()
         .set_cwd_by_path("/")
         .expect("Failed to set initial working directory");
     let file_obj = match task
         .vfs
+        .read()
         .as_ref()
         .unwrap()
         .open("/system/scarlet/bin/init", 0)

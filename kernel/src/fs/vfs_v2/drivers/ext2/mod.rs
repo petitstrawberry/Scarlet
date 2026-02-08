@@ -136,6 +136,7 @@ impl Ext2Params {
             let vfs_manager = {
                 if let Some(task) = mytask() {
                     task.vfs
+                        .read()
                         .as_ref()
                         .cloned()
                         .unwrap_or_else(|| get_global_vfs_manager())

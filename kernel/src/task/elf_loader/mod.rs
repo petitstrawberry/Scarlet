@@ -48,6 +48,7 @@ use crate::vm::vmem::{MemoryArea, VirtualMemoryMap, VirtualMemoryPermission, Vir
 use alloc::boxed::Box;
 use alloc::string::{String, ToString};
 use alloc::{format, vec};
+use core::sync::atomic::Ordering;
 
 use super::TaskType;
 
@@ -442,10 +443,7 @@ pub struct LoadedSegment {
 /// This function provides backward compatibility with the existing API.
 /// It calls the new analyze_and_load_elf function and returns only the entry point.
 ///
-pub fn load_elf_into_task(
-    file_obj: &dyn FileObject,
-    task: &mut Task,
-) -> Result<u64, ElfLoaderError> {
+pub fn load_elf_into_task(file_obj: &dyn FileObject, task: &Task) -> Result<u64, ElfLoaderError> {
     let result = analyze_and_load_elf(file_obj, task)?;
     Ok(result.entry_point)
 }
@@ -468,7 +466,7 @@ pub fn load_elf_into_task(
 ///
 pub fn analyze_and_load_elf(
     file_obj: &dyn FileObject,
-    task: &mut Task,
+    task: &Task,
 ) -> Result<LoadElfResult, ElfLoaderError> {
     analyze_and_load_elf_with_strategy(file_obj, task, &LoadStrategy::default())
 }
@@ -492,7 +490,7 @@ pub fn analyze_and_load_elf(
 ///
 pub fn analyze_and_load_elf_with_strategy(
     file_obj: &dyn FileObject,
-    task: &mut Task,
+    task: &Task,
     strategy: &LoadStrategy,
 ) -> Result<LoadElfResult, ElfLoaderError> {
     // Move to the beginning of the file
@@ -663,7 +661,7 @@ fn find_interpreter_path(
 fn load_elf_segments_for_interpreter(
     header: &ElfHeader,
     file_obj: &dyn FileObject,
-    task: &mut Task,
+    task: &Task,
     strategy: &LoadStrategy,
 ) -> Result<u64, ElfLoaderError> {
     // Use strategy to determine base address
@@ -715,7 +713,7 @@ const MAX_INTERPRETER_DEPTH: usize = 5;
 
 fn load_interpreter(
     interpreter_path: &str,
-    task: &mut Task,
+    task: &Task,
     strategy: &LoadStrategy,
 ) -> Result<(u64, u64), ElfLoaderError> {
     load_interpreter_recursive(interpreter_path, task, strategy, 0)
@@ -724,7 +722,7 @@ fn load_interpreter(
 /// Recursive interpreter loading with depth limiting
 fn load_interpreter_recursive(
     interpreter_path: &str,
-    task: &mut Task,
+    task: &Task,
     strategy: &LoadStrategy,
     depth: usize,
 ) -> Result<(u64, u64), ElfLoaderError> {
@@ -889,7 +887,7 @@ fn load_interpreter_recursive(
 fn load_elf_segments_with_base(
     header: &ElfHeader,
     file_obj: &dyn FileObject,
-    task: &mut Task,
+    task: &Task,
     base_address: u64,
 ) -> Result<(), ElfLoaderError> {
     // Load PT_LOAD segments with provided base address
@@ -908,7 +906,7 @@ fn load_elf_segments_with_base(
 fn load_elf_into_task_static(
     header: &ElfHeader,
     file_obj: &dyn FileObject,
-    task: &mut Task,
+    task: &Task,
     strategy: &LoadStrategy,
 ) -> Result<u64, ElfLoaderError> {
     // Use strategy to determine base address for main program
@@ -988,10 +986,12 @@ fn load_elf_into_task_static(
 
             match segment_type {
                 VirtualMemoryRegion::Text => {
-                    task.text_size += aligned_size as usize;
+                    task.text_size
+                        .fetch_add(aligned_size as usize, Ordering::SeqCst);
                 }
                 VirtualMemoryRegion::Data => {
-                    task.data_size += aligned_size as usize;
+                    task.data_size
+                        .fetch_add(aligned_size as usize, Ordering::SeqCst);
                 }
                 _ => {
                     return Err(ElfLoaderError {
@@ -1104,7 +1104,7 @@ fn load_elf_into_task_static(
 fn load_program_headers_into_memory(
     header: &ElfHeader,
     file_obj: &dyn FileObject,
-    task: &mut Task,
+    task: &Task,
 ) -> Result<u64, ElfLoaderError> {
     // Calculate total size of program headers
     let phdr_table_size = (header.e_phentsize as u64) * (header.e_phnum as u64);
@@ -1169,7 +1169,7 @@ fn load_program_headers_into_memory(
 }
 
 fn map_elf_segment(
-    task: &mut Task,
+    task: &Task,
     vaddr: usize,
     size: usize,
     align: usize,
@@ -1322,7 +1322,7 @@ pub fn build_auxiliary_vector(load_result: &LoadElfResult) -> alloc::vec::Vec<Au
 /// This function places the auxiliary vector at the top of the stack,
 /// which is expected by the dynamic linker and C runtime.
 pub fn setup_auxiliary_vector_on_stack(
-    task: &mut Task,
+    task: &Task,
     auxv: &[AuxVec],
 ) -> Result<usize, ElfLoaderError> {
     // Calculate size needed for auxiliary vector
@@ -1367,7 +1367,7 @@ mod tests;
 fn load_elf_segment_at_address(
     ph: &ProgramHeader,
     file_obj: &dyn FileObject,
-    task: &mut Task,
+    task: &Task,
     segment_addr: u64,
 ) -> Result<(), ElfLoaderError> {
     let align = if ph.p_align == 0 || ph.p_align == 1 {
@@ -1433,10 +1433,10 @@ fn load_elf_segment_at_address(
 
     // Update task size information for proper memory management
     let segment_type = if ph.p_flags & PF_X != 0 {
-        task.text_size += aligned_size;
+        task.text_size.fetch_add(aligned_size, Ordering::SeqCst);
         "text"
     } else if ph.p_flags & PF_W != 0 || ph.p_flags & PF_R != 0 {
-        task.data_size += aligned_size;
+        task.data_size.fetch_add(aligned_size, Ordering::SeqCst);
         "data"
     } else {
         "unknown"

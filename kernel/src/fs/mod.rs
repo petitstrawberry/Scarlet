@@ -621,7 +621,7 @@ pub trait FileSystemDriver: Send + Sync {
 }
 
 /// Singleton for global access to the FileSystemDriverManager
-static mut FS_DRIVER_MANAGER: Option<FileSystemDriverManager> = None;
+static FS_DRIVER_MANAGER: spin::Once<FileSystemDriverManager> = spin::Once::new();
 
 /// Global filesystem driver manager singleton
 ///
@@ -637,14 +637,8 @@ static mut FS_DRIVER_MANAGER: Option<FileSystemDriverManager> = None;
 ///
 /// This function is marked as unsafe due to static mutable access, but
 /// the returned manager uses internal synchronization for thread safety.
-#[allow(static_mut_refs)]
-pub fn get_fs_driver_manager() -> &'static mut FileSystemDriverManager {
-    unsafe {
-        if FS_DRIVER_MANAGER.is_none() {
-            FS_DRIVER_MANAGER = Some(FileSystemDriverManager::new());
-        }
-        FS_DRIVER_MANAGER.as_mut().unwrap()
-    }
+pub fn get_fs_driver_manager() -> &'static FileSystemDriverManager {
+    FS_DRIVER_MANAGER.call_once(|| FileSystemDriverManager::new())
 }
 
 /// Global filesystem driver manager singleton
@@ -718,9 +712,9 @@ impl FileSystemDriverManager {
 
     /// Register a filesystem driver
     ///
-    /// Adds a new filesystem driver to the manager's registry. The driver
+    /// Adds a new filesystem driver to manager's registry. The driver
     /// will be indexed by its name() method return value. If a driver with
-    /// the same name already exists, it will be replaced.
+    /// same name already exists, it will be replaced.
     ///
     /// # Arguments
     ///
@@ -732,7 +726,7 @@ impl FileSystemDriverManager {
     /// let manager = get_fs_driver_manager();
     /// manager.register_driver(Box::new(MyFileSystemDriver));
     /// ```
-    pub fn register_driver(&mut self, driver: Box<dyn FileSystemDriver>) {
+    pub fn register_driver(&self, driver: Box<dyn FileSystemDriver>) {
         self.drivers
             .write()
             .insert(driver.name().to_string(), driver);

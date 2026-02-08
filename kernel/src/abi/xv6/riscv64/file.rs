@@ -135,7 +135,7 @@ pub fn sys_open(
     };
 
     // Use task's VFS manager
-    let vfs = task.vfs.as_ref().unwrap();
+    let vfs = task.vfs.read().clone().unwrap();
 
     // Try to open the file
     let file = vfs.open(&path_str, 0);
@@ -416,11 +416,11 @@ pub fn sys_mknod(
     match (major, minor) {
         (1, 0) => {
             // Create a console device
-            let console_dev = Some(DeviceManager::get_mut_manager().register_device(Arc::new(
+            let console_dev = Some(DeviceManager::get_manager().register_device(Arc::new(
                 crate::abi::xv6::drivers::console::ConsoleDevice::new(0, "console"),
             )));
 
-            let vfs = task.vfs.as_mut().unwrap();
+            let vfs = task.vfs.read().clone().unwrap();
             let _res = vfs.create_file(
                 &path,
                 FileType::CharDevice(DeviceFileInfo {
@@ -509,7 +509,7 @@ pub fn sys_mkdir(
     };
 
     // Try to create the directory
-    let vfs = task.vfs.as_mut().unwrap();
+    let vfs = task.vfs.read().clone().unwrap();
     match vfs.create_dir(&path) {
         Ok(_) => 0,           // Success
         Err(_) => usize::MAX, // Error
@@ -533,7 +533,7 @@ pub fn sys_unlink(
     };
 
     // Try to remove the file or directory
-    let vfs = task.vfs.as_mut().unwrap();
+    let vfs = task.vfs.read().clone().unwrap();
     match vfs.remove(&path) {
         Ok(_) => 0,           // Success
         Err(_) => usize::MAX, // Error
@@ -566,7 +566,7 @@ pub fn sys_link(
         Err(_) => return usize::MAX, // Invalid path
     };
 
-    let vfs = task.vfs.as_ref().unwrap();
+    let vfs = task.vfs.read().clone().unwrap();
     match vfs.create_hardlink(&src_path, &dst_path) {
         Ok(_) => 0, // Success
         Err(err) => {
@@ -608,7 +608,7 @@ fn to_absolute_path_v2(task: &crate::task::Task, path: &str) -> Result<String, (
     if path.starts_with('/') {
         Ok(path.to_string())
     } else {
-        let vfs = task.vfs.as_ref().ok_or(())?;
+        let vfs = task.vfs.read().clone().ok_or(())?;
         Ok(vfs.resolve_path_to_absolute(path))
     }
 }

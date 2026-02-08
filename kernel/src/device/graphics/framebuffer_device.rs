@@ -810,8 +810,8 @@ mod tests {
     use spin::RwLock;
 
     /// Test utility to setup a clean global GraphicsManager for each test
-    fn setup_clean_graphics_manager() -> &'static mut GraphicsManager {
-        let manager = GraphicsManager::get_mut_manager();
+    fn setup_clean_graphics_manager() -> &'static GraphicsManager {
+        let manager = GraphicsManager::get_manager();
         // Clear any existing state from previous tests
         manager.clear_for_test();
         manager

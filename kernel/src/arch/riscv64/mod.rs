@@ -11,7 +11,7 @@ use vcpu::Mode;
 use crate::arch::instruction::Instruction;
 use crate::arch::vm::get_root_pagetable;
 use crate::early_println;
-use crate::environment::NUM_OF_CPUS;
+use crate::environment::MAX_NUM_CPUS;
 use crate::environment::STACK_SIZE;
 use crate::mem::KERNEL_STACK;
 use crate::task::Task;
@@ -45,8 +45,8 @@ pub type Arch = Riscv64;
 /// skip restoring vregs if it still owns the live state. This removes a very
 /// expensive per-timeslice illegal-instruction trap for vector-heavy workloads.
 const NO_VECTOR_OWNER: usize = usize::MAX;
-static VECTOR_OWNER: [AtomicUsize; NUM_OF_CPUS] =
-    [const { AtomicUsize::new(NO_VECTOR_OWNER) }; NUM_OF_CPUS];
+static VECTOR_OWNER: [AtomicUsize; MAX_NUM_CPUS] =
+    [const { AtomicUsize::new(NO_VECTOR_OWNER) }; MAX_NUM_CPUS];
 
 /// Whether the live vector register file contains state that is newer than the
 /// saved per-task context of `VECTOR_OWNER`.
@@ -54,8 +54,8 @@ static VECTOR_OWNER: [AtomicUsize; NUM_OF_CPUS] =
 /// This is needed because we sometimes keep vregs live across timeslices while
 /// forcing sstatus.VS to Clean/Off to avoid mis-attributing Dirtiness to another
 /// task.
-static VECTOR_OWNER_DIRTY: [AtomicBool; NUM_OF_CPUS] =
-    [const { AtomicBool::new(false) }; NUM_OF_CPUS];
+static VECTOR_OWNER_DIRTY: [AtomicBool; MAX_NUM_CPUS] =
+    [const { AtomicBool::new(false) }; MAX_NUM_CPUS];
 
 #[inline]
 pub(crate) fn get_vector_owner(cpu_id: usize) -> usize {
@@ -139,18 +139,18 @@ pub fn configure_user_entry(_trapframe: &mut Trapframe, options: crate::arch::Us
 
     let task = unsafe { &mut *current_task_ptr };
 
-    if !crate::arch::user_fpu_enabled() || !task.vcpu.fpu_used {
+    if !crate::arch::user_fpu_enabled() || !task.vcpu.lock().fpu_used {
         crate::arch::riscv64::fpu::disable_fpu();
     }
 
-    if !crate::arch::user_vector_enabled() || !task.vcpu.vector_used {
+    if !crate::arch::user_vector_enabled() || !task.vcpu.lock().vector_used {
         crate::arch::riscv64::fpu::disable_vector();
         return;
     }
 
     // Ensure the task has a backing context (allocated lazily).
-    if task.vcpu.vector.is_none() {
-        task.vcpu.vector = Some(alloc::boxed::Box::new(
+    if task.vcpu.lock().vector.is_none() {
+        task.vcpu.lock().vector = Some(alloc::boxed::Box::new(
             crate::arch::riscv64::fpu::VectorContext::new(),
         ));
     }
@@ -160,14 +160,14 @@ pub fn configure_user_entry(_trapframe: &mut Trapframe, options: crate::arch::Us
     if owner_dirty && owner_id != NO_VECTOR_OWNER && owner_id != current_task_id {
         if let Some(owner_ptr) = owner_task_ptr {
             let owner_task = unsafe { &mut *owner_ptr };
-            if owner_task.vcpu.vector.is_none() {
-                owner_task.vcpu.vector = Some(alloc::boxed::Box::new(
+            if owner_task.vcpu.lock().vector.is_none() {
+                owner_task.vcpu.lock().vector = Some(alloc::boxed::Box::new(
                     crate::arch::riscv64::fpu::VectorContext::new(),
                 ));
-                owner_task.vcpu.vector_used = true;
+                owner_task.vcpu.lock().vector_used = true;
             }
             crate::arch::riscv64::fpu::enable_vector();
-            unsafe { owner_task.vcpu.vector.as_mut().unwrap().save() };
+            unsafe { owner_task.vcpu.lock().vector.as_mut().unwrap().save() };
             crate::arch::riscv64::fpu::mark_vector_clean();
             set_vector_owner_dirty(cpu_id, false);
         } else {
@@ -181,7 +181,7 @@ pub fn configure_user_entry(_trapframe: &mut Trapframe, options: crate::arch::Us
     // - Otherwise just re-enable access without a full restore.
     if owner_id != current_task_id {
         crate::arch::riscv64::fpu::enable_vector();
-        unsafe { task.vcpu.vector.as_ref().unwrap().restore() };
+        unsafe { task.vcpu.lock().vector.as_ref().unwrap().restore() };
         crate::arch::riscv64::fpu::mark_vector_clean();
         set_vector_owner(cpu_id, current_task_id);
         set_vector_owner_dirty(cpu_id, false);
@@ -226,11 +226,11 @@ pub fn first_switch_to_user(task: &mut Task) -> ! {
     let task_ptr = task as *mut Task;
     unsafe {
         let trapframe = (*task_ptr).get_trapframe();
-        (*task_ptr).vcpu.switch(trapframe);
+        (*task_ptr).vcpu.lock().switch(trapframe);
     }
 
     // Ensure the next return is to the correct privilege mode.
-    set_next_mode(task.vcpu.get_mode());
+    set_next_mode(task.vcpu.lock().get_mode());
 
     // Program trampoline trap vector right before the jump.
     set_trapvector(crate::vm::get_trampoline_trap_vector());
@@ -253,7 +253,7 @@ pub fn get_device_memory_areas() -> alloc::vec::Vec<MemoryArea> {
 }
 
 #[unsafe(link_section = ".trampoline.data")]
-static mut CPUS: [Riscv64; NUM_OF_CPUS] = [const { Riscv64::new(0) }; NUM_OF_CPUS];
+static mut CPUS: [Riscv64; MAX_NUM_CPUS] = [const { Riscv64::new(0) }; MAX_NUM_CPUS];
 
 #[repr(align(4))]
 #[allow(dead_code)]

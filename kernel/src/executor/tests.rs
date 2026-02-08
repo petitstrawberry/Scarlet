@@ -26,11 +26,11 @@ fn test_exec_backup_restore() {
     let mut trapframe = Trapframe::new();
 
     // Record original state
-    let original_name = task.name.clone();
-    let original_text_size = task.text_size;
-    let original_data_size = task.data_size;
-    let original_stack_size = task.stack_size;
-    let original_managed_pages_count = task.managed_pages.len();
+    let original_name = task.name.read().clone();
+    let original_text_size = task.text_size.load(core::sync::atomic::Ordering::SeqCst);
+    let original_data_size = task.data_size.load(core::sync::atomic::Ordering::SeqCst);
+    let original_stack_size = task.stack_size.load(core::sync::atomic::Ordering::SeqCst);
+    let original_managed_pages_count = task.managed_pages.read().len();
     let original_vm_mappings_count = task.vm_manager.memmap_len();
     let original_pc = trapframe.get_current_pc();
     let original_sp = trapframe.regs.reg[2];
@@ -50,21 +50,28 @@ fn test_exec_backup_restore() {
     assert!(result.is_err(), "Exec should fail for non-existent binary");
 
     // Verify that all state was restored to original values
-    assert_eq!(task.name, original_name, "Task name should be restored");
     assert_eq!(
-        task.text_size, original_text_size,
+        *task.name.read(),
+        original_name,
+        "Task name should be restored"
+    );
+    assert_eq!(
+        task.text_size.load(core::sync::atomic::Ordering::SeqCst),
+        original_text_size,
         "Text size should be restored"
     );
     assert_eq!(
-        task.data_size, original_data_size,
+        task.data_size.load(core::sync::atomic::Ordering::SeqCst),
+        original_data_size,
         "Data size should be restored"
     );
     assert_eq!(
-        task.stack_size, original_stack_size,
+        task.stack_size.load(core::sync::atomic::Ordering::SeqCst),
+        original_stack_size,
         "Stack size should be restored"
     );
     assert_eq!(
-        task.managed_pages.len(),
+        task.managed_pages.read().len(),
         original_managed_pages_count,
         "Managed pages count should be restored"
     );
@@ -86,7 +93,7 @@ fn test_exec_parameter_validation() {
     scheduler.reset();
 
     // Initialize task first, then add to scheduler
-    let mut task = new_user_task("ParamTestTask".to_string(), 1002);
+    let task = new_user_task("ParamTestTask".to_string(), 1002);
     task.init();
 
     let task_id = scheduler.add_task(task, 0);

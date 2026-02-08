@@ -24,8 +24,7 @@
 //! ## Usage
 //!
 //! The device manager is implemented as a global singleton that can be accessed via:
-//! - `DeviceManager::get_manager()` - Immutable access
-//! - `DeviceManager::get_mut_manager()` - Mutable access
+//! - `DeviceManager::get_manager()` - Shared access (thread-safe via internal Mutex)
 //!
 //! ### Example: Registering a device driver
 //!
@@ -36,7 +35,7 @@
 //! let my_driver = Box::new(MyDeviceDriver::new());
 //!
 //! // Register with the device manager at Core priority
-//! DeviceManager::get_mut_manager().register_driver(my_driver, DriverPriority::Core);
+//! DeviceManager::get_manager().register_driver(my_driver, DriverPriority::Core);
 //! ```
 
 extern crate alloc;
@@ -99,7 +98,7 @@ impl DriverPriority {
     }
 }
 
-static mut MANAGER: DeviceManager = DeviceManager::new();
+static MANAGER: DeviceManager = DeviceManager::new();
 
 /// DeviceManager
 ///
@@ -136,14 +135,8 @@ impl DeviceManager {
         }
     }
 
-    #[allow(static_mut_refs)]
     pub fn get_manager() -> &'static DeviceManager {
-        unsafe { &MANAGER }
-    }
-
-    #[allow(static_mut_refs)]
-    pub fn get_mut_manager() -> &'static mut DeviceManager {
-        unsafe { &mut MANAGER }
+        &MANAGER
     }
 
     /// Register a device with the manager
@@ -158,7 +151,7 @@ impl DeviceManager {
     ///
     /// ```rust
     /// let device = Arc::new(MyDevice::new());
-    /// let id = DeviceManager::get_mut_manager().register_device(device);
+    /// let id = DeviceManager::get_manager().register_device(device);
     /// ```
     ///
     pub fn register_device(&self, device: Arc<dyn Device>) -> usize {
@@ -286,7 +279,7 @@ impl DeviceManager {
     ///
     /// # Deprecated
     /// Use `populate_devices_from_source` with `DeviceSource::Fdt` instead.
-    pub fn populate_devices(&mut self) {
+    pub fn populate_devices(&self) {
         use super::fdt::FdtManager;
 
         let fdt_manager = unsafe { FdtManager::get_mut_manager() };
@@ -306,7 +299,7 @@ impl DeviceManager {
     /// * `device_source` - The source of device information (FDT, UEFI, ACPI, etc.)
     /// * `priorities` - Optional slice of priority levels to use. If None, uses all priorities in order.
     pub fn populate_devices_from_source(
-        &mut self,
+        &self,
         device_source: &DeviceSource,
         priorities: Option<&[DriverPriority]>,
     ) {
@@ -330,7 +323,7 @@ impl DeviceManager {
     }
 
     /// Populate devices from FDT
-    fn populate_devices_from_fdt(&mut self, priorities: Option<&[DriverPriority]>) {
+    fn populate_devices_from_fdt(&self, priorities: Option<&[DriverPriority]>) {
         use super::fdt::FdtManager;
 
         let fdt_manager = unsafe { FdtManager::get_mut_manager() };
@@ -350,7 +343,7 @@ impl DeviceManager {
     }
 
     /// Process devices for a single priority level - reduces stack nesting
-    fn process_priority_level(&mut self, fdt: &fdt::Fdt, priority: DriverPriority) {
+    fn process_priority_level(&self, fdt: &fdt::Fdt, priority: DriverPriority) {
         early_println!(
             "Populating devices with {} drivers from FDT...",
             priority.description()
@@ -382,7 +375,7 @@ impl DeviceManager {
 
     /// Process a single device node with minimal stack usage
     fn process_single_device_node(
-        &mut self,
+        &self,
         child: fdt::node::FdtNode,
         priority: DriverPriority,
         idx: &mut usize,
@@ -553,7 +546,7 @@ impl DeviceManager {
 
     /// Try to match device with drivers and probe if successful
     fn try_match_and_probe_device(
-        &mut self,
+        &self,
         child: fdt::node::FdtNode,
         priority: DriverPriority,
         idx: &mut usize,
@@ -617,7 +610,7 @@ impl DeviceManager {
     ///
     /// This is currently a stub implementation. UEFI device discovery will be implemented
     /// when UEFI boot support is added.
-    fn populate_devices_from_uefi(&mut self, _priorities: Option<&[DriverPriority]>) {
+    fn populate_devices_from_uefi(&self, _priorities: Option<&[DriverPriority]>) {
         early_println!("UEFI device discovery not yet implemented");
         // TODO: Implement UEFI device discovery
         // - Enumerate UEFI protocols
@@ -635,7 +628,7 @@ impl DeviceManager {
     ///
     /// This is currently a stub implementation. ACPI device discovery will be implemented
     /// when x86 support is added.
-    fn populate_devices_from_acpi(&mut self, _priorities: Option<&[DriverPriority]>) {
+    fn populate_devices_from_acpi(&self, _priorities: Option<&[DriverPriority]>) {
         early_println!("ACPI device discovery not yet implemented");
         // TODO: Implement ACPI device discovery
         // - Parse ACPI tables (DSDT, etc.)
@@ -651,7 +644,7 @@ impl DeviceManager {
     ///
     /// # Deprecated
     /// Use `populate_devices_from_source` instead.
-    pub fn populate_devices_by_priority(&mut self, priorities: Option<&[DriverPriority]>) {
+    pub fn populate_devices_by_priority(&self, priorities: Option<&[DriverPriority]>) {
         self.populate_devices_from_fdt(priorities);
     }
 
@@ -669,9 +662,9 @@ impl DeviceManager {
     ///
     /// ```rust
     /// let driver = Box::new(MyDeviceDriver::new());
-    /// DeviceManager::get_mut_manager().register_driver(driver, DriverPriority::Standard);
+    /// DeviceManager::get_manager().register_driver(driver, DriverPriority::Standard);
     /// ```
-    pub fn register_driver(&mut self, driver: Box<dyn DeviceDriver>, priority: DriverPriority) {
+    pub fn register_driver(&self, driver: Box<dyn DeviceDriver>, priority: DriverPriority) {
         let mut drivers = self.drivers.lock();
         drivers
             .entry(priority)
@@ -686,7 +679,7 @@ impl DeviceManager {
     /// # Arguments
     ///
     /// * `driver` - A boxed device driver that implements the `DeviceDriver` trait.
-    pub fn register_driver_default(&mut self, driver: Box<dyn DeviceDriver>) {
+    pub fn register_driver_default(&self, driver: Box<dyn DeviceDriver>) {
         self.register_driver(driver, DriverPriority::Standard);
     }
 
@@ -695,7 +688,7 @@ impl DeviceManager {
     /// This method is only available in test builds and should only be used
     /// for unit testing to ensure test isolation.
     #[cfg(test)]
-    pub fn clear_for_test(&mut self) {
+    pub fn clear_for_test(&self) {
         let mut devices = self.devices.lock();
         let mut device_by_name = self.device_by_name.lock();
         let mut name_to_id = self.name_to_id.lock();
@@ -730,7 +723,7 @@ mod tests {
             |_device| Ok(()),
             vec!["sifive,test0"],
         ));
-        let mut manager = DeviceManager::new();
+        let manager = DeviceManager::new();
         manager.register_driver(driver, DriverPriority::Standard);
 
         manager.populate_devices();

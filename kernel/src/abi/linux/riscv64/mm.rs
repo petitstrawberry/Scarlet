@@ -538,7 +538,7 @@ pub fn sys_mmap(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
 
 /// Handle anonymous memory mapping based on scarlet's implementation
 fn handle_anonymous_mapping(
-    task: &mut crate::task::Task,
+    task: &crate::task::Task,
     vaddr: usize,
     aligned_length: usize,
     num_pages: usize,
