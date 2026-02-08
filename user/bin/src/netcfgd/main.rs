@@ -10,6 +10,7 @@ extern crate scarlet_std as std;
 
 use std::{
     env,
+    ffi::ToString,
     fs::File,
     network::{
         Ipv4Address, list_interfaces, set_default_gateway, set_dns_server, set_interface_ipv4,
@@ -21,7 +22,6 @@ use std::{
 };
 
 /// Network interface configuration
-#[derive(Debug)]
 struct InterfaceConfig {
     name: String,
     address: Option<Ipv4Address>,
