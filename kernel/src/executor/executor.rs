@@ -280,7 +280,7 @@ impl TransparentExecutor {
 
         // Step 7: Update task's ABI if switch occurred
         if abi_switch_required {
-            *task.default_abi.lock() = Some(abi);
+            *task.default_abi.get_mut() = Some(abi);
         }
 
         Ok(())

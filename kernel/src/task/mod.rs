@@ -15,6 +15,7 @@ use alloc::{
     vec::Vec,
 };
 use core::{
+    cell::UnsafeCell,
     ops::{Deref, DerefMut},
     sync::atomic,
 };
@@ -292,6 +293,63 @@ pub struct AbiZone {
     pub abi: Box<dyn AbiModule + Send + Sync>,
 }
 
+/// A cell type for task-local data that is only accessed by the hart currently
+/// executing the task.
+///
+/// # Safety
+///
+/// This type uses `UnsafeCell` internally and is `Sync` so it can live inside
+/// `Task` (which is `Send + Sync`).  The safety invariant is:
+///
+/// * **Only the hart that is currently running this task may access the
+///   contents.**  Because a task is scheduled on exactly one hart at a time,
+///   there is no concurrent access and no lock is needed.
+/// * During `clone_task`, the **parent** accesses its own `TaskLocal` fields
+///   (safe – it is the running hart) and writes to the **child's** `TaskLocal`
+///   fields (safe – the child has not been added to the scheduler yet, so no
+///   other hart can touch it).
+pub struct TaskLocal<T> {
+    inner: UnsafeCell<T>,
+}
+
+// SAFETY: Access is restricted to the hart executing the owning task.
+// See the doc comment on `TaskLocal` for the full safety argument.
+unsafe impl<T> Sync for TaskLocal<T> {}
+
+impl<T> TaskLocal<T> {
+    /// Create a new `TaskLocal` with the given value.
+    pub fn new(value: T) -> Self {
+        Self {
+            inner: UnsafeCell::new(value),
+        }
+    }
+
+    /// Get an immutable reference to the contained value.
+    ///
+    /// # Safety
+    ///
+    /// The caller must be the hart currently executing the owning task,
+    /// or the task must not yet be visible to the scheduler.
+    #[inline]
+    pub fn get(&self) -> &T {
+        // SAFETY: Upheld by caller (single-hart-per-task invariant).
+        unsafe { &*self.inner.get() }
+    }
+
+    /// Get a mutable reference to the contained value.
+    ///
+    /// # Safety
+    ///
+    /// The caller must be the hart currently executing the owning task,
+    /// or the task must not yet be visible to the scheduler.
+    #[inline]
+    #[allow(clippy::mut_from_ref)]
+    pub fn get_mut(&self) -> &mut T {
+        // SAFETY: Upheld by caller (single-hart-per-task invariant).
+        unsafe { &mut *self.inner.get() }
+    }
+}
+
 pub struct Task {
     // === Read-only fields (set at creation) ===
     id: usize,
@@ -355,10 +413,10 @@ pub struct Task {
     pub kernel_context: Mutex<KernelContext>,
     /// Virtual memory manager (already thread-safe internally)
     pub vm_manager: VirtualMemoryManager,
-    /// Default ABI module
-    pub default_abi: Mutex<Option<Box<dyn AbiModule + Send + Sync>>>,
-    /// ABI zones map (key is start address)
-    pub abi_zones: Mutex<BTreeMap<usize, AbiZone>>,
+    /// Default ABI module (task-local: only accessed by the executing hart)
+    pub default_abi: TaskLocal<Option<Box<dyn AbiModule + Send + Sync>>>,
+    /// ABI zones map (task-local: only accessed by the executing hart)
+    pub abi_zones: TaskLocal<BTreeMap<usize, AbiZone>>,
     /// Handle table for kernel objects (already thread-safe internally)
     pub handle_table: HandleTable,
     /// Waker for sleep operations (already thread-safe internally)
@@ -494,8 +552,8 @@ impl Task {
             })),
             kernel_context: Mutex::new(KernelContext::new()),
             vm_manager: VirtualMemoryManager::new(),
-            default_abi: Mutex::new(Some(Box::new(ScarletAbi::default()))),
-            abi_zones: Mutex::new(BTreeMap::new()),
+            default_abi: TaskLocal::new(Some(Box::new(ScarletAbi::default()))),
+            abi_zones: TaskLocal::new(BTreeMap::new()),
             handle_table: HandleTable::new(),
             sleep_waker: Waker::new_interruptible("task_sleep_waker"),
             kernel_stack_window_base: Mutex::new(None),
@@ -1148,16 +1206,15 @@ impl Task {
         F: FnOnce(&mut (dyn AbiModule + Send + Sync)) -> R,
     {
         // Search for the zone containing addr using efficient BTreeMap range query
-        let mut abi_zones = self.abi_zones.lock();
+        let abi_zones = self.abi_zones.get_mut();
         if let Some((_start, zone)) = abi_zones.range_mut(..=addr).next_back() {
             if zone.range.contains(&addr) {
                 return f(zone.abi.as_mut());
             }
         }
-        drop(abi_zones);
         // No zone found, use default ABI
-        let mut guard = self.default_abi.lock();
-        f(guard.as_deref_mut().expect("default_abi not set"))
+        let abi = self.default_abi.get_mut();
+        f(abi.as_deref_mut().expect("default_abi not set"))
     }
 
     /// Execute a closure with the default ABI
@@ -1171,19 +1228,21 @@ impl Task {
     where
         F: FnOnce(&(dyn AbiModule + Send + Sync)) -> R,
     {
-        let guard = self.default_abi.lock();
-        f(guard.as_deref().expect("default_abi not set"))
+        let abi = self.default_abi.get();
+        f(abi.as_deref().expect("default_abi not set"))
     }
 
-    /// Temporarily take ownership of the default ABI to run a closure that also needs &mut self
+    /// Run a closure with mutable access to the default ABI and a reference to the task
+    ///
+    /// Since `default_abi` is task-local (no lock), we can safely provide both
+    /// `&mut AbiModule` and `&Task` without any take/restore dance.
     pub fn with_default_abi_mut<R, F>(&self, f: F) -> R
     where
         F: FnOnce(&mut (dyn AbiModule + Send + Sync), &Task) -> R,
     {
-        let mut abi = self.default_abi.lock().take().expect("default_abi not set");
-        let r = f(abi.as_mut(), self);
-        *self.default_abi.lock() = Some(abi);
-        r
+        let abi = self.default_abi.get_mut();
+        let abi_ref = abi.as_deref_mut().expect("default_abi not set");
+        f(abi_ref, self)
     }
 
     /// Get the file descriptor table
@@ -1318,26 +1377,25 @@ impl Task {
         self.vcpu.lock().clone_to(&mut child.vcpu.lock());
 
         // Clone the default ABI and ABI zones
-        *child.default_abi.lock() = Some(
+        *child.default_abi.get_mut() = Some(
             self.default_abi
-                .lock()
+                .get()
                 .as_ref()
                 .expect("default_abi not set")
                 .clone_boxed(),
         );
         // Clone ABI zones (each zone contains a boxed ABI that needs to be cloned)
-        for (start, zone) in self.abi_zones.lock().iter() {
+        for (start, zone) in self.abi_zones.get().iter() {
             let new_zone = AbiZone {
                 range: zone.range.clone(),
                 abi: zone.abi.clone_boxed(),
             };
-            child.abi_zones.lock().insert(*start, new_zone);
+            child.abi_zones.get_mut().insert(*start, new_zone);
         }
         // Notify child's default ABI instance that cloning has completed
-        // Take and restore to avoid mutable aliasing with &mut child
-        if let Some(mut abi_boxed) = child.default_abi.lock().take() {
+        // Child is not yet in the scheduler, so direct access is safe.
+        if let Some(abi_boxed) = child.default_abi.get_mut().as_mut() {
             let _ = abi_boxed.on_task_cloned(self, &child, flags);
-            *child.default_abi.lock() = Some(abi_boxed);
         }
 
         // Copy state such as data size

@@ -148,7 +148,7 @@ pub fn sys_clone(trapframe: &mut Trapframe) -> usize {
             // Handle SetTls flag: set TLS pointer and tp register
             if clone_flags.is_set(CloneFlagsDef::SetTls) {
                 // Set TLS pointer in task's ABI state
-                if let Some(abi) = child_task.default_abi.lock().as_mut() {
+                if let Some(abi) = child_task.default_abi.get_mut().as_mut() {
                     abi.set_tls_pointer(tls_ptr);
                 }
 
@@ -189,7 +189,7 @@ pub fn sys_set_tls(trapframe: &mut Trapframe) -> usize {
     let tls_ptr = trapframe.get_arg(0);
 
     // Update ABI state
-    if let Some(abi) = task.default_abi.lock().as_mut() {
+    if let Some(abi) = task.default_abi.get_mut().as_mut() {
         abi.set_tls_pointer(tls_ptr);
     }
 
@@ -207,7 +207,7 @@ pub fn sys_get_tls(trapframe: &mut Trapframe) -> usize {
     // Get TLS pointer from ABI state
     let tls_ptr = task
         .default_abi
-        .lock()
+        .get()
         .as_ref()
         .and_then(|abi| abi.get_tls_pointer())
         .unwrap_or(0);
@@ -222,7 +222,7 @@ pub fn sys_set_tid_address(trapframe: &mut Trapframe) -> usize {
     let tid_ptr = trapframe.get_arg(0);
 
     // Update ABI state
-    if let Some(abi) = task.default_abi.lock().as_mut() {
+    if let Some(abi) = task.default_abi.get_mut().as_mut() {
         abi.set_clear_child_tid(tid_ptr);
     }
 
@@ -641,7 +641,7 @@ pub fn sys_register_abi_zone(trapframe: &mut Trapframe) -> usize {
     };
 
     // Insert into the task's ABI zones map
-    task.abi_zones.lock().insert(start, zone);
+    task.abi_zones.get_mut().insert(start, zone);
 
     crate::early_println!("[syscall] Successfully registered ABI zone");
     0
@@ -664,7 +664,7 @@ pub fn sys_unregister_abi_zone(trapframe: &mut Trapframe) -> usize {
     crate::early_println!("[syscall] Unregistering ABI zone at start={:#x}", start);
 
     // Remove the ABI zone from the map
-    match task.abi_zones.lock().remove(&start) {
+    match task.abi_zones.get_mut().remove(&start) {
         Some(_) => {
             crate::early_println!("[syscall] Successfully unregistered ABI zone");
             0
