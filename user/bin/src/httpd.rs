@@ -234,10 +234,7 @@ fn file_size(file_path: &str) -> Option<u64> {
 }
 
 fn sanitize_path(request_path: &str) -> Option<String> {
-    let path = match request_path.split('?').next() {
-        Some(p) => p,
-        None => return None,
-    };
+    let path = request_path.split('?').next()?;
 
     if !path.starts_with('/') {
         return None;

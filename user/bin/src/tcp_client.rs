@@ -58,7 +58,7 @@ pub extern "C" fn main(_argc: isize, _argv: *const *const u8) -> isize {
 
     // Connect to server
     let server_addr = Inet4SocketAddress::new(ip, port);
-    if let Err(_) = socket.connect_inet(server_addr) {
+    if socket.connect_inet(server_addr).is_err() {
         println!("[tcp-client] Connection failed");
         return 1;
     }
@@ -67,7 +67,7 @@ pub extern "C" fn main(_argc: isize, _argv: *const *const u8) -> isize {
 
     // Send message
     let message = b"Hello from Scarlet TCP client!";
-    let mut stream = match socket.as_stream() {
+    let stream = match socket.as_stream() {
         Ok(s) => s,
         Err(_) => {
             println!("[tcp-client] Failed to get stream");

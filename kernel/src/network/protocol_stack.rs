@@ -45,12 +45,7 @@
 //! - Send packets to multiple lower layers
 //! - Route based on protocol numbers
 
-use alloc::{
-    collections::BTreeMap,
-    string::{String, ToString},
-    sync::Arc,
-    vec::Vec,
-};
+use alloc::{collections::BTreeMap, string::String, sync::Arc, vec, vec::Vec};
 use spin::RwLock;
 
 use super::socket::{SocketDomain, SocketError, SocketObject, SocketProtocol, SocketType};
@@ -761,8 +756,9 @@ pub fn get_network_manager() -> &'static crate::network::NetworkManager {
 mod tests {
     use super::*;
     use crate::network::NetworkManager;
-    use alloc::sync::Arc;
+    use alloc::{string::ToString, sync::Arc};
     use core::sync::atomic::{AtomicU64, Ordering};
+    use spin::RwLock;
 
     #[test_case]
     fn test_protocol_stack_manager_creation() {

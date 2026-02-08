@@ -230,19 +230,19 @@ pub fn execve(path: &str, argv: &[&str], envp: &[&str]) -> i32 {
     // If the syscall fails, we need to free the allocated memory
     // (On success, the context is switched, so this code is not reached)
     let _ = unsafe {
-        Box::from_raw(core::slice::from_raw_parts_mut(
+        Box::from_raw(core::ptr::slice_from_raw_parts_mut(
             path_ptr as *mut u8,
             path_boxed_slice_len,
         ))
     };
     let _ = unsafe {
-        Box::from_raw(core::slice::from_raw_parts_mut(
+        Box::from_raw(core::ptr::slice_from_raw_parts_mut(
             argv_ptr_array as *mut usize,
             argv_len,
         ))
     };
     let _ = unsafe {
-        Box::from_raw(core::slice::from_raw_parts_mut(
+        Box::from_raw(core::ptr::slice_from_raw_parts_mut(
             envp_ptr_array as *mut usize,
             envp_len,
         ))
@@ -290,25 +290,25 @@ pub fn execve_abi(path: &str, argv: &[&str], envp: &[&str], abi: &str) -> i32 {
     );
 
     let _ = unsafe {
-        Box::from_raw(core::slice::from_raw_parts_mut(
+        Box::from_raw(core::ptr::slice_from_raw_parts_mut(
             path_ptr as *mut u8,
             path_boxed_slice_len,
         ))
     }; // Free the path
     let _ = unsafe {
-        Box::from_raw(core::slice::from_raw_parts_mut(
+        Box::from_raw(core::ptr::slice_from_raw_parts_mut(
             abi_ptr as *mut u8,
             abi_boxed_slice_len,
         ))
     }; // Free the abi
     let _ = unsafe {
-        Box::from_raw(core::slice::from_raw_parts_mut(
+        Box::from_raw(core::ptr::slice_from_raw_parts_mut(
             argv_ptr_array as *mut usize,
             argv_len,
         ))
     };
     let _ = unsafe {
-        Box::from_raw(core::slice::from_raw_parts_mut(
+        Box::from_raw(core::ptr::slice_from_raw_parts_mut(
             envp_ptr_array as *mut usize,
             envp_len,
         ))
@@ -408,19 +408,19 @@ pub fn execve_with_flags(path: &str, argv: &[&str], envp: &[&str], flags: usize)
     // If the syscall fails, we need to free the allocated memory
     // (On success, the context is switched, so this code is not reached)
     let _ = unsafe {
-        Box::from_raw(core::slice::from_raw_parts_mut(
+        Box::from_raw(core::ptr::slice_from_raw_parts_mut(
             path_ptr as *mut u8,
             path_boxed_slice_len,
         ))
     };
     let _ = unsafe {
-        Box::from_raw(core::slice::from_raw_parts_mut(
+        Box::from_raw(core::ptr::slice_from_raw_parts_mut(
             argv_ptr_array as *mut usize,
             argv_len,
         ))
     };
     let _ = unsafe {
-        Box::from_raw(core::slice::from_raw_parts_mut(
+        Box::from_raw(core::ptr::slice_from_raw_parts_mut(
             envp_ptr_array as *mut usize,
             envp_len,
         ))
@@ -490,25 +490,25 @@ pub fn execve_abi_with_flags(
     );
 
     let _ = unsafe {
-        Box::from_raw(core::slice::from_raw_parts_mut(
+        Box::from_raw(core::ptr::slice_from_raw_parts_mut(
             path_ptr as *mut u8,
             path_boxed_slice_len,
         ))
     }; // Free the path
     let _ = unsafe {
-        Box::from_raw(core::slice::from_raw_parts_mut(
+        Box::from_raw(core::ptr::slice_from_raw_parts_mut(
             abi_ptr as *mut u8,
             abi_boxed_slice_len,
         ))
     }; // Free the abi
     let _ = unsafe {
-        Box::from_raw(core::slice::from_raw_parts_mut(
+        Box::from_raw(core::ptr::slice_from_raw_parts_mut(
             argv_ptr_array as *mut usize,
             argv_len,
         ))
     };
     let _ = unsafe {
-        Box::from_raw(core::slice::from_raw_parts_mut(
+        Box::from_raw(core::ptr::slice_from_raw_parts_mut(
             envp_ptr_array as *mut usize,
             envp_len,
         ))

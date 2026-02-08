@@ -8,7 +8,6 @@ use alloc::string::String;
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, AtomicU16, AtomicU32, AtomicU64, AtomicUsize, Ordering};
-use core::time::Duration;
 use spin::{Mutex, RwLock};
 
 use crate::network::ipv4::Ipv4Address;

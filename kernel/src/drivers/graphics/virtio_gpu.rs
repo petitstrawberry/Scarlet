@@ -20,9 +20,9 @@ use crate::{
     },
     mem::page::{Page, allocate_raw_pages},
     object::capability::{ControlOps, MemoryMappingOps, Selectable},
-    timer::{SoftwareTimer, TimerHandler, add_timer, get_tick, ms_to_ticks},
+    timer::{TimerHandler, add_timer, get_tick, ms_to_ticks},
 };
-use core::{ptr, sync::atomic::fence};
+use core::ptr;
 
 // VirtIO GPU Constants
 const VIRTIO_GPU_F_VIRGL: u32 = 0;

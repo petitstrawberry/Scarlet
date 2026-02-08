@@ -3,7 +3,7 @@
 //! This module implements the VFS node interface for ext2 filesystem nodes,
 //! providing file and directory objects that integrate with the VFS v2 architecture.
 
-use alloc::{boxed::Box, collections::BTreeMap, format, string::String, sync::Weak, vec::Vec};
+use alloc::{boxed::Box, collections::BTreeMap, format, string::String, sync::Weak, vec, vec::Vec};
 use core::{any::Any, fmt::Debug};
 use spin::{Mutex, RwLock};
 

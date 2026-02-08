@@ -9,7 +9,6 @@ use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU32, Ordering};
 use spin::{Mutex, RwLock};
 
-use crate::alloc::string::ToString;
 use crate::early_println;
 use crate::network::ipv4::Ipv4Address;
 use crate::network::protocol_stack::get_network_manager;

@@ -4,7 +4,6 @@
 //! windows with standard window management features (minimize, maximize,
 //! close, etc.).
 
-use super::surface::SurfaceRole;
 use std::collections::BTreeMap;
 
 /// XDG surface state
@@ -131,10 +130,10 @@ impl XdgShellManager {
     /// Get a mutable toplevel by ID (returns underlying wl_surface_id too)
     pub fn get_toplevel_mut(&mut self, xdg_toplevel_id: u32) -> Option<(&mut XdgToplevel, u32)> {
         for surface in self.surfaces.values_mut() {
-            if let Some(toplevel) = surface.toplevel.as_mut() {
-                if toplevel.xdg_toplevel_id == xdg_toplevel_id {
-                    return Some((toplevel, surface.wl_surface_id));
-                }
+            if let Some(toplevel) = surface.toplevel.as_mut()
+                && toplevel.xdg_toplevel_id == xdg_toplevel_id
+            {
+                return Some((toplevel, surface.wl_surface_id));
             }
         }
         None
@@ -143,11 +142,11 @@ impl XdgShellManager {
     /// Clear a toplevel by ID, returning the owning wl_surface_id if found
     pub fn clear_toplevel(&mut self, xdg_toplevel_id: u32) -> Option<u32> {
         for surface in self.surfaces.values_mut() {
-            if let Some(toplevel) = &surface.toplevel {
-                if toplevel.xdg_toplevel_id == xdg_toplevel_id {
-                    surface.toplevel = None;
-                    return Some(surface.wl_surface_id);
-                }
+            if let Some(toplevel) = &surface.toplevel
+                && toplevel.xdg_toplevel_id == xdg_toplevel_id
+            {
+                surface.toplevel = None;
+                return Some(surface.wl_surface_id);
             }
         }
         None

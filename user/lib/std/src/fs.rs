@@ -1106,10 +1106,10 @@ pub fn parse_dir_entry_safe(
         return None; // EOF
     }
 
-    if let Some(entry) = parse_dir_entry(&buf[..bytes_read]) {
-        if let Ok(owned_name) = entry.name_string() {
-            return Some((owned_name, entry.file_type, entry.file_id, entry.size));
-        }
+    if let Some(entry) = parse_dir_entry(&buf[..bytes_read])
+        && let Ok(owned_name) = entry.name_string()
+    {
+        return Some((owned_name, entry.file_type, entry.file_id, entry.size));
     }
 
     None

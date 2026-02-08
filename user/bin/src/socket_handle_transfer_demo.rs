@@ -264,13 +264,13 @@ fn main() -> i32 {
 
         if sent_ok && response_non_empty {
             println!("\n✓ Handle transfer test completed successfully!");
-            return 0;
+            0
         } else {
             println!("\nHandle transfer test failed");
-            return 1;
+            1
         }
     } else {
         println!("Fork failed!");
-        return 1;
+        1
     }
 }

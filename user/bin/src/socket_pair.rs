@@ -115,31 +115,31 @@ pub extern "C" fn main(_argc: isize, _argv: *const *const u8) -> isize {
 
     // Socket 2 receives and responds
     let mut buffer3 = [0u8; 256];
-    if let Ok(n) = stream2.read(&mut buffer3) {
-        if n > 0 {
-            println!(
-                "Socket 2 received: {:?}",
-                core::str::from_utf8(&buffer3[..n]).unwrap()
-            );
+    if let Ok(n) = stream2.read(&mut buffer3)
+        && n > 0
+    {
+        println!(
+            "Socket 2 received: {:?}",
+            core::str::from_utf8(&buffer3[..n]).unwrap()
+        );
 
-            let response = b"Pong";
-            println!(
-                "Socket 2 responding: {:?}",
-                core::str::from_utf8(response).unwrap()
-            );
-            let _ = stream2.write(response);
-        }
+        let response = b"Pong";
+        println!(
+            "Socket 2 responding: {:?}",
+            core::str::from_utf8(response).unwrap()
+        );
+        let _ = stream2.write(response);
     }
 
     // Socket 1 receives response
     let mut buffer4 = [0u8; 256];
-    if let Ok(n) = stream1.read(&mut buffer4) {
-        if n > 0 {
-            println!(
-                "Socket 1 received: {:?}",
-                core::str::from_utf8(&buffer4[..n]).unwrap()
-            );
-        }
+    if let Ok(n) = stream1.read(&mut buffer4)
+        && n > 0
+    {
+        println!(
+            "Socket 1 received: {:?}",
+            core::str::from_utf8(&buffer4[..n]).unwrap()
+        );
     }
 
     // Shutdown both sockets

@@ -4,7 +4,7 @@
 //! enabling kernel tasks to yield execution and resume later at the same point.
 
 use crate::arch::KernelContext;
-use core::arch::{asm, naked_asm};
+use core::arch::naked_asm;
 
 /// Switch from the current kernel context to the next kernel context
 ///

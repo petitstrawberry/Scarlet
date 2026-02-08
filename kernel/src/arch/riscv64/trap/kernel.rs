@@ -3,7 +3,6 @@ use core::{arch::asm, mem::transmute};
 
 use crate::arch::trap::print_traplog;
 use crate::arch::{Trapframe, get_cpu};
-use crate::early_println;
 use crate::environment::PAGE_SIZE;
 use crate::object::capability::memory_mapping::{AccessKind, AccessOp};
 use crate::sched::scheduler::get_scheduler;

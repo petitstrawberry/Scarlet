@@ -29,7 +29,7 @@ use spin::{Mutex, RwLock};
 use crate::device::events::InterruptCapableDevice;
 use crate::device::{Device, DeviceType};
 use crate::drivers::virtio::features::VIRTIO_F_ANY_LAYOUT;
-use crate::drivers::virtio::features::{VIRTIO_RING_F_EVENT_IDX, VIRTIO_RING_F_INDIRECT_DESC};
+use crate::drivers::virtio::features::VIRTIO_RING_F_INDIRECT_DESC;
 use crate::interrupt::InterruptId;
 use crate::network::config::apply_pending_ip_for_interface;
 use crate::network::ethernet_interface::EthernetNetworkInterface;

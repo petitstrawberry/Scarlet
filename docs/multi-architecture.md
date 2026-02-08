@@ -7,7 +7,7 @@ Scarlet supports multiple target architectures, enabling execution of binaries a
 ### Currently Supported
 
 - **RISC-V 64-bit (riscv64)** - Primary development architecture
-- **AArch64 (ARM 64-bit)** - Fully supported since recent updates
+- **AArch64 (ARM 64-bit)** - In development, basic support available
 
 ### Architecture Selection
 

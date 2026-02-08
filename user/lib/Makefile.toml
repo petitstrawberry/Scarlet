@@ -155,3 +155,31 @@ description = "Run clippy for user library scarlet-desktop-config code"
 cwd = "scarlet-desktop-config"
 command = "cargo"
 args = ["clippy", "--", "-D", "warnings"]
+
+[tasks.clippy-fix]
+description = "Run clippy with auto-fix for all user libraries"
+dependencies = ["clippy-fix-std", "clippy-fix-framebuffer", "clippy-fix-sws-protocol", "clippy-fix-scarlet-desktop-config"]
+
+[tasks.clippy-fix-std]
+description = "Run clippy with auto-fix for user library std code"
+cwd = "std"
+command = "cargo"
+args = ["clippy", "--fix", "--allow-dirty", "--allow-staged", "--", "-D", "warnings"]
+
+[tasks.clippy-fix-framebuffer]
+description = "Run clippy with auto-fix for user library framebuffer code"
+cwd = "framebuffer"
+command = "cargo"
+args = ["clippy", "--fix", "--allow-dirty", "--allow-staged", "--", "-D", "warnings"]
+
+[tasks.clippy-fix-sws-protocol]
+description = "Run clippy with auto-fix for user library sws_protocol code"
+cwd = "sws_protocol"
+command = "cargo"
+args = ["clippy", "--fix", "--allow-dirty", "--allow-staged", "--", "-D", "warnings"]
+
+[tasks.clippy-fix-scarlet-desktop-config]
+description = "Run clippy with auto-fix for user library scarlet-desktop-config code"
+cwd = "scarlet-desktop-config"
+command = "cargo"
+args = ["clippy", "--fix", "--allow-dirty", "--allow-staged", "--", "-D", "warnings"]

@@ -15,8 +15,7 @@
 //! - net0 @ 0x10003000, net1 @ 0x10004000, net2 @ 0x10005000
 
 use alloc::sync::Arc;
-use alloc::vec;
-use alloc::vec::Vec;
+use alloc::{vec, vec::Vec};
 
 use crate::device::network::DevicePacket;
 use crate::drivers::network::virtio_net::VirtioNetDevice;

@@ -16,7 +16,7 @@ use alloc::{
 use core::sync::atomic::Ordering;
 use file::{sys_dup, sys_exec, sys_mknod, sys_open, sys_write};
 use hashbrown::HashMap;
-use proc::{sys_exit, sys_fork, sys_getpid, sys_kill, sys_sleep, sys_wait};
+use proc::{sys_exit, sys_fork, sys_getpid, sys_sleep, sys_wait};
 
 use crate::{
     abi::{

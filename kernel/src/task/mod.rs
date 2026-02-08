@@ -14,11 +14,7 @@ use alloc::{
     sync::Arc,
     vec::Vec,
 };
-use core::{
-    cell::UnsafeCell,
-    ops::{Deref, DerefMut},
-    sync::atomic,
-};
+use core::{cell::UnsafeCell, sync::atomic};
 use spin::{Mutex, RwLock};
 
 use crate::abi::{AbiModule, scarlet::ScarletAbi};
@@ -54,7 +50,7 @@ static WAITPID_WAKERS: Once<Mutex<BTreeMap<usize, Waker>>> = Once::new();
 
 /// Note: TASK_ID has been moved to TaskPool::next_id for better ID management
 /// including recycling of freed task IDs. Use TaskPool::allocate_id() instead.
-
+///
 /// Global registry of parent task wakers for waitpid(-1) operations
 /// Each parent task has a waker that gets triggered when any of its children exit
 static PARENT_WAITPID_WAKERS: Once<Mutex<BTreeMap<usize, Waker>>> = Once::new();

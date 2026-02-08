@@ -130,7 +130,7 @@ fn parse_u8(s: &str) -> Option<u8> {
     for c in s.bytes() {
         match c {
             b'0'..=b'9' => {
-                result = result * 10 + (c - b'0') as u8;
+                result = result * 10 + (c - b'0');
             }
             _ => return None,
         }

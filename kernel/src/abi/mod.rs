@@ -8,7 +8,7 @@
 
 use crate::{
     arch::Trapframe,
-    fs::{VfsManager, drivers::overlayfs::OverlayFS},
+    fs::VfsManager,
     task::{CloneFlags, mytask},
 };
 use alloc::{
@@ -519,7 +519,7 @@ impl AbiRegistry {
 #[macro_export]
 macro_rules! register_abi {
     ($ty:ty) => {
-        crate::abi::AbiRegistry::register::<$ty>();
+        $crate::abi::AbiRegistry::register::<$ty>();
     };
 }
 

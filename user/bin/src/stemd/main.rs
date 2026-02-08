@@ -246,7 +246,7 @@ impl ConfigParser {
 
         let mut acc: i32 = 0;
         for ch in digits.bytes() {
-            if !(b'0'..=b'9').contains(&ch) {
+            if !ch.is_ascii_digit() {
                 return None;
             }
             let digit = (ch - b'0') as i32;
@@ -492,7 +492,7 @@ fn get_focused_window_app_id() -> Option<String> {
     // Try to connect to SWS
     let mut conn = match Connection::connect_default() {
         Ok(c) => c,
-        Err(e) => {
+        Err(_e) => {
             // Silent failure - don't log on every poll
             return None;
         }
@@ -501,7 +501,7 @@ fn get_focused_window_app_id() -> Option<String> {
     // Get the list of windows
     let windows = match conn.get_window_list() {
         Ok(w) => w,
-        Err(e) => {
+        Err(_e) => {
             // Silent failure - don't log on every poll
             return None;
         }
@@ -711,8 +711,7 @@ fn resolve_dependencies(services: &[Service]) -> Vec<Service> {
     for _ in 0..n {
         edges.push(Vec::new());
     }
-    let mut indegree: Vec<usize> = Vec::new();
-    indegree.resize(n, 0);
+    let mut indegree: Vec<usize> = vec![0; n];
 
     for (to_idx, svc) in services.iter().enumerate() {
         for dep_name in &svc.depends {
@@ -1368,7 +1367,7 @@ fn handle_sbus_message(
                     // This handler is kept for backward compatibility only.
                     println!(
                         "[sbus] Handling GetAppMenus method for app: {}",
-                        args.get(0).map_or("", |a| match a {
+                        args.first().map_or("", |a| match a {
                             sbus::Argument::String(s) => s.as_str(),
                             _ => "",
                         })
@@ -1631,14 +1630,14 @@ tty = "/dev/tty0"
         }
 
         // Skip services that were already launched as dependencies
-        if let Some(stemd_svc) = &stemd_service {
-            if stemd_svc.depends.contains(&service.name) {
-                println!(
-                    "stemd: Skipping {} (already launched as dependency)",
-                    service.name
-                );
-                continue;
-            }
+        if let Some(stemd_svc) = &stemd_service
+            && stemd_svc.depends.contains(&service.name)
+        {
+            println!(
+                "stemd: Skipping {} (already launched as dependency)",
+                service.name
+            );
+            continue;
         }
 
         if let Err(e) = launch_service(service) {

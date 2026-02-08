@@ -18,7 +18,7 @@
 //! from the host. Random bytes are fetched in batches and buffered internally
 //! to minimize virtqueue operations when requests are made.
 
-use alloc::{boxed::Box, collections::VecDeque, sync::Arc, vec, vec::Vec};
+use alloc::{boxed::Box, collections::VecDeque, vec};
 use spin::{Mutex, RwLock};
 
 use crate::drivers::virtio::{

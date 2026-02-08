@@ -30,7 +30,7 @@
 ///
 /// This function is not meant to be called directly. Use the `print!` or
 /// `println!` macros instead.
-
+///
 /// Wraps a UART device to implement the `core::fmt::Write` trait.
 ///
 /// This allows the UART to be used with the standard formatting macros.

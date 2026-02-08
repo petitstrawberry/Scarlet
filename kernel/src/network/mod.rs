@@ -42,7 +42,7 @@ pub mod socket;
 pub mod syscall;
 pub mod tcp;
 pub mod udp;
-#[cfg(target_arch = "riscv64")]
+#[cfg(all(test, target_arch = "riscv64"))]
 pub mod virtio_net_tests;
 
 // Re-export commonly used types

@@ -35,15 +35,14 @@ extern crate alloc;
 
 use core::panic;
 
-use alloc::{boxed::Box, collections::vec_deque::VecDeque, string::ToString, vec::Vec};
+use alloc::{boxed::Box, collections::vec_deque::VecDeque, string::ToString};
 
 use crate::print;
 use crate::println;
 use crate::{
     arch::{
-        Arch, Trapframe, get_cpu, get_user_trap_handler, instruction::idle,
-        interrupt::enable_external_interrupts, set_next_mode, set_trapvector,
-        trap::user::arch_switch_to_user_space,
+        Arch, Trapframe, get_cpu, get_user_trap_handler, instruction::idle, set_next_mode,
+        set_trapvector, trap::user::arch_switch_to_user_space,
     },
     environment::MAX_NUM_CPUS,
     task::{TaskState, new_kernel_task, wake_parent_waiters, wake_task_waiters},

@@ -28,14 +28,14 @@ fn draw_gradient_background(
 
     let w = surface.width();
     let h = surface.height();
-    surface.with_buffer(|buf, width, height| {
+    surface.with_buffer(|buf, width, _height| {
         if h == 0 {
             return;
         }
 
         // Draw gradient
         for y in 0..h {
-            let t = (y as u32).saturating_mul(255) / (h.saturating_sub(1).max(1));
+            let t = y.saturating_mul(255) / (h.saturating_sub(1).max(1));
             let r = (top.r * 255.0 * (255.0 - t as f32) + bottom.r * 255.0 * t as f32) / 255.0;
             let g = (top.g * 255.0 * (255.0 - t as f32) + bottom.g * 255.0 * t as f32) / 255.0;
             let b_val = (top.b * 255.0 * (255.0 - t as f32) + bottom.b * 255.0 * t as f32) / 255.0;
@@ -88,7 +88,7 @@ fn draw_solid_background(conn: &mut Connection, surface_id: u32, color: Color) {
 
     let w = surface.width();
     let h = surface.height();
-    surface.with_buffer(|buf, width, height| {
+    surface.with_buffer(|buf, width, _height| {
         let bgra = color.to_bgra();
 
         for y in 0..h {

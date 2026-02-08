@@ -12,8 +12,6 @@ use crate::{
     library::std::string::{
         cstring_to_string, parse_c_string_from_userspace, parse_string_array_from_userspace,
     },
-    object::capability::StreamError,
-    sched::scheduler::get_scheduler,
     task::mytask,
 };
 use alloc::{

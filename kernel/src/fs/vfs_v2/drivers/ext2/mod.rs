@@ -23,7 +23,7 @@
 
 use alloc::{
     boxed::Box,
-    collections::{BTreeMap, VecDeque},
+    collections::BTreeMap,
     format,
     string::{String, ToString},
     sync::Arc,
