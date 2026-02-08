@@ -144,6 +144,10 @@ impl HandleTable {
                 // Event subscriptions are used for receiving events
                 HandleType::EventSubscription
             }
+            KernelObject::SharedMemory(_) => {
+                // Shared memory is used for efficient IPC
+                HandleType::IpcChannel
+            }
             KernelObject::GraphicsBuffer(_) => {
                 // Graphics buffers are regular resources
                 HandleType::Regular

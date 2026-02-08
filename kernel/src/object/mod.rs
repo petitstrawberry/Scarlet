@@ -99,6 +99,10 @@ impl KernelObject {
                 // Event subscriptions don't provide stream operations
                 None
             }
+            KernelObject::SharedMemory(_) => {
+                // Shared memory doesn't provide stream operations
+                None
+            }
             KernelObject::GraphicsBuffer(_) => None,
         }
     }
@@ -127,6 +131,10 @@ impl KernelObject {
             }
             KernelObject::EventSubscription(_) => {
                 // Event subscriptions don't provide stream IPC operations
+                None
+            }
+            KernelObject::SharedMemory(_) => {
+                // Shared memory doesn't provide stream IPC operations
                 None
             }
             KernelObject::GraphicsBuffer(_) => None,
@@ -158,6 +166,10 @@ impl KernelObject {
                 // Event subscriptions don't provide file operations
                 None
             }
+            KernelObject::SharedMemory(_) => {
+                // Shared memory doesn't provide file operations
+                None
+            }
             KernelObject::GraphicsBuffer(_) => None,
         }
     }
@@ -184,6 +196,10 @@ impl KernelObject {
             }
             KernelObject::EventSubscription(_) => {
                 // Event subscriptions don't provide pipe operations
+                None
+            }
+            KernelObject::SharedMemory(_) => {
+                // Shared memory doesn't provide pipe operations
                 None
             }
             KernelObject::GraphicsBuffer(_) => None,
