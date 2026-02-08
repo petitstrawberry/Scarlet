@@ -16,7 +16,7 @@ use std::{
         set_netmask,
     },
     println,
-    string::String,
+    string::{String, ToString},
     vec::Vec,
 };
 

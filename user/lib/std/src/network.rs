@@ -4,7 +4,7 @@ use crate::handle::HandleError;
 use crate::syscall::{Syscall, syscall1, syscall2};
 
 #[repr(C)]
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub struct Ipv4Address(pub [u8; 4]);
 
 impl Ipv4Address {

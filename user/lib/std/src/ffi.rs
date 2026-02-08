@@ -1,6 +1,5 @@
 use crate::vec::Vec;
 extern crate alloc;
-pub use alloc::string::*;
 
 /// Converts a Rust string slice (`&str`) into a null-terminated C-style string represented as a `Vec<u8>`.
 ///
