@@ -2001,6 +2001,7 @@ pub fn task_initial_kernel_entrypoint() -> ! {
 mod tests {
     use alloc::string::ToString;
     use alloc::sync::Arc;
+    use core::sync::atomic::Ordering;
 
     use crate::task::CloneFlags;
 
@@ -2132,10 +2133,10 @@ mod tests {
         // Save values that will be needed after add_task
         let parent_pc = parent_task.vcpu.lock().get_pc();
         let parent_entry = parent_task.entry;
-        let parent_state = parent_task.state;
+        let parent_state = parent_task.state.load(Ordering::SeqCst);
         let child_pc = child_task.vcpu.lock().get_pc();
         let child_entry = child_task.entry;
-        let child_state = child_task.state;
+        let child_state = child_task.state.load(Ordering::SeqCst);
         let child_managed_pages_len = child_task.managed_pages.read().len();
 
         // Add both tasks to scheduler to establish parent-child relationship
@@ -2166,27 +2167,27 @@ mod tests {
         // Get references for further verification (in separate scopes)
         let child_stack_size = {
             let child = scheduler.get_task_by_id(child_id).unwrap();
-            child.stack_size
+            child.stack_size.load(Ordering::SeqCst)
         };
         let child_data_size = {
             let child = scheduler.get_task_by_id(child_id).unwrap();
-            child.data_size
+            child.data_size.load(Ordering::SeqCst)
         };
         let child_text_size = {
             let child = scheduler.get_task_by_id(child_id).unwrap();
-            child.text_size
+            child.text_size.load(Ordering::SeqCst)
         };
         let parent_stack_size = {
             let parent = scheduler.get_task_by_id(parent_id).unwrap();
-            parent.stack_size
+            parent.stack_size.load(Ordering::SeqCst)
         };
         let parent_data_size = {
             let parent = scheduler.get_task_by_id(parent_id).unwrap();
-            parent.data_size
+            parent.data_size.load(Ordering::SeqCst)
         };
         let parent_text_size = {
             let parent = scheduler.get_task_by_id(parent_id).unwrap();
-            parent.text_size
+            parent.text_size.load(Ordering::SeqCst)
         };
 
         // Verify memory sizes were copied
@@ -2374,7 +2375,8 @@ mod tests {
 
         // Verify stack sizes match
         assert_eq!(
-            child_task.stack_size, parent_task.stack_size,
+            child_task.stack_size.load(Ordering::SeqCst),
+            parent_task.stack_size.load(Ordering::SeqCst),
             "Child and parent should have the same stack size"
         );
     }
@@ -2537,7 +2539,7 @@ mod tests {
 
         // Managed pages are per-task; child should not acquire new managed pages
         // when sharing VM (physical memory isn't privately managed by the child)
-        assert!(child.managed_pages.len() <= parent.managed_pages.len());
+        assert!(child.managed_pages.read().len() <= parent.managed_pages.read().len());
     }
 
     #[test_case]
