@@ -11,7 +11,7 @@ extern crate alloc;
 
 use std::println;
 use std::fs::File;
-use std::handle::capability::memory_mapping::{mmap, munmap, prot, flags};
+use std::handle::capability::memory_mapping::{munmap, prot, flags};
 use std::thread;
 use std::time::Duration;
 
@@ -122,8 +122,9 @@ fn main() -> i32 {
     // 3. mmap the buffer
     // Note: In Scarlet's current DRM implementation, the offset returned IS the physical address
     // and we use it as the offset for mmap.
-    let mapped_addr = match mmap(
-        file.as_handle().as_raw() as u32,
+    let buffer_handle = file.as_handle().as_memory_mapping()
+        .expect("File handle should support memory mapping");
+    let mapped_addr = match buffer_handle.mmap(
         0,
         create_dumb.size as usize,
         prot::READ | prot::WRITE,
