@@ -35,8 +35,12 @@ pub enum KernelObjectType {
     BlockDevice = 6,
     /// Socket (future)
     Socket = 7,
+    /// Shared Memory
+    SharedMemory = 8,
+    /// Counter
+    Counter = 9,
     /// Graphics Buffer
-    GraphicsBuffer = 8,
+    GraphicsBuffer = 10,
     /// Unknown or unsupported type
     Unknown = 0,
 }
@@ -156,6 +160,40 @@ impl KernelObjectInfo {
             },
             handle_role,
             access_mode: Self::encode_access_mode(true, false), // Subscription is read-only
+        }
+    }
+    
+    /// Create info for a SharedMemory KernelObject
+    pub fn for_shared_memory(handle_role: HandleRole, readable: bool, writable: bool) -> Self {
+        Self {
+            object_type: KernelObjectType::SharedMemory,
+            capabilities: ObjectCapabilities {
+                stream_ops: false,
+                file_ops: false,
+                pipe_ops: false,
+                event_ops: false,
+                clone_ops: true, // Shared memory is cloneable
+                reserved: [false; 3],
+            },
+            handle_role,
+            access_mode: Self::encode_access_mode(readable, writable),
+        }
+    }
+    
+    /// Create info for a Counter KernelObject
+    pub fn for_counter(handle_role: HandleRole, readable: bool, writable: bool) -> Self {
+        Self {
+            object_type: KernelObjectType::Counter,
+            capabilities: ObjectCapabilities {
+                stream_ops: false,
+                file_ops: false,
+                pipe_ops: false,
+                event_ops: false,
+                clone_ops: true, // Counters are cloneable
+                reserved: [false; 3],
+            },
+            handle_role,
+            access_mode: Self::encode_access_mode(readable, writable),
         }
     }
     

@@ -609,7 +609,7 @@ pub extern "C" fn start_kernel(boot_info: &BootInfo) -> ! {
     );
 
     if device_count > 0 {
-        GraphicsManager::get_mut_manager().discover_graphics_devices();
+        GraphicsManager::get_manager().discover_graphics_devices();
     } else {
         early_println!(
             "[Scarlet Kernel] Warning: No devices found, skipping graphics initialization"

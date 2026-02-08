@@ -145,12 +145,12 @@ impl HandleTable {
                 HandleType::EventSubscription
             }
             KernelObject::SharedMemory(_) => {
-                // Shared memory is used for efficient IPC
+                // Shared memory is used for IPC and data sharing
                 HandleType::IpcChannel
             }
-            KernelObject::GraphicsBuffer(_) => {
-                // Graphics buffers are regular resources
-                HandleType::Regular
+            KernelObject::Counter(_) => {
+                // Counter is used for event notification (IPC)
+                HandleType::IpcChannel
             }
         };
 
@@ -265,6 +265,17 @@ impl HandleTable {
             .collect()
     }
 
+    /// Check if this is the sole owner of the underlying handle table.
+    ///
+    /// Returns `true` if no other `HandleTable` shares the same inner data
+    /// (i.e., the `Arc` strong reference count is 1).
+    /// This is used to decide whether `close_all` should run during task exit:
+    /// when the handle table is shared via `CLONE_FILES` (threads), only the
+    /// last task holding the table should close all handles.
+    pub fn is_sole_owner(&self) -> bool {
+        Arc::strong_count(&self.inner) == 1
+    }
+
     /// Close all handles (for process termination)
     pub fn close_all(&self) {
         let mut inner = self.inner.write();
@@ -318,9 +329,6 @@ impl HandleTable {
                 if let Some(m) = inner.metadata[i].as_ref() {
                     f(i as Handle, o, m);
                 }
-                KernelObject::GraphicsBuffer(_) => {
-                    Some(introspection::KernelObjectInfo::for_graphics_buffer(handle_role, readable, writable))
-                }
             }
         }
     }
@@ -364,6 +372,11 @@ impl HandleTable {
             KernelObject::SharedMemory(_) => Some(
                 introspection::KernelObjectInfo::for_shared_memory(handle_role, readable, writable),
             ),
+            KernelObject::Counter(_) => Some(introspection::KernelObjectInfo::for_counter(
+                handle_role,
+                readable,
+                writable,
+            )),
         }
     }
 
@@ -412,7 +425,7 @@ impl Default for HandleTable {
 ///     }
 /// )?;
 /// ```
-
+///
 /// Clone implementation creates a shallow copy (Arc clone).
 /// This means the cloned HandleTable shares the same underlying data.
 /// Use `deep_clone()` to create an independent copy.

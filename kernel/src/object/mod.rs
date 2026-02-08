@@ -7,20 +7,17 @@ pub mod capability;
 pub mod handle;
 pub mod introspection;
 
-use alloc::sync::Arc;
 use crate::fs::FileObject;
 use crate::ipc::StreamIpcOps;
-
-// Import IPC traits and types
-use crate::ipc::PipeObject;
-use crate::ipc::SharedMemoryObject;
+use crate::ipc::counter::{Counter, CounterObject};
 use crate::ipc::event::{EventChannelObject, EventSubscriptionObject};
+use crate::ipc::pipe::PipeObject;
+use crate::ipc::shared_memory::SharedMemoryObject;
+use alloc::sync::Arc;
+use capability::{CloneOps, ControlOps, MemoryMappingOps, Selectable, StreamOps};
 
 #[cfg(feature = "network")]
-use crate::ipc::SocketObject;
-
-use crate::device::graphics::buffer::GraphicsBuffer;
-use capability::{StreamOps, CloneOps, ControlOps, MemoryMappingOps, Selectable};
+use crate::network::SocketObject;
 
 /// Unified representation of all kernel-managed resources
 ///
@@ -29,12 +26,12 @@ use capability::{StreamOps, CloneOps, ControlOps, MemoryMappingOps, Selectable};
 pub enum KernelObject {
     File(Arc<dyn FileObject>),
     Pipe(Arc<dyn PipeObject>),
+    Counter(Arc<dyn CounterObject>),
     EventChannel(Arc<EventChannelObject>),
     EventSubscription(Arc<EventSubscriptionObject>),
     #[cfg(feature = "network")]
     Socket(Arc<dyn SocketObject>),
     SharedMemory(Arc<dyn SharedMemoryObject>),
-    GraphicsBuffer(Arc<dyn GraphicsBuffer>),
     // Future variants will be added here:
     // MessageQueue(Arc<dyn MessageQueueObject>),
     // CharDevice(Arc<dyn CharDevice>),
@@ -72,6 +69,11 @@ impl KernelObject {
         KernelObject::SharedMemory(shared_memory)
     }
 
+    /// Create a KernelObject from a Counter
+    pub fn from_counter(counter: Arc<Counter>) -> Self {
+        KernelObject::Counter(counter as Arc<dyn CounterObject>)
+    }
+
     /// Try to get StreamOps capability
     pub fn as_stream(&self) -> Option<&dyn StreamOps> {
         match self {
@@ -83,6 +85,11 @@ impl KernelObject {
             KernelObject::Pipe(pipe_object) => {
                 // PipeObject automatically implements StreamOps
                 let stream_ops: &dyn StreamOps = pipe_object.as_ref();
+                Some(stream_ops)
+            }
+            KernelObject::Counter(counter) => {
+                // CounterObject implements StreamOps
+                let stream_ops: &dyn StreamOps = counter.as_ref();
                 Some(stream_ops)
             }
             #[cfg(feature = "network")]
@@ -103,7 +110,6 @@ impl KernelObject {
                 // Shared memory doesn't provide stream operations
                 None
             }
-            KernelObject::GraphicsBuffer(_) => None,
         }
     }
 
@@ -118,6 +124,10 @@ impl KernelObject {
                 // PipeObject implements StreamIpcOps
                 let stream_ipc_ops: &dyn StreamIpcOps = pipe_object.as_ref();
                 Some(stream_ipc_ops)
+            }
+            KernelObject::Counter(_) => {
+                // Counter doesn't provide IPC stream operations
+                None
             }
             #[cfg(feature = "network")]
             KernelObject::Socket(socket) => {
@@ -137,7 +147,6 @@ impl KernelObject {
                 // Shared memory doesn't provide stream IPC operations
                 None
             }
-            KernelObject::GraphicsBuffer(_) => None,
         }
     }
 
@@ -151,6 +160,10 @@ impl KernelObject {
             }
             KernelObject::Pipe(_) => {
                 // Pipes don't provide file operations
+                None
+            }
+            KernelObject::Counter(_) => {
+                // Counter doesn't provide file operations
                 None
             }
             #[cfg(feature = "network")]
@@ -170,7 +183,6 @@ impl KernelObject {
                 // Shared memory doesn't provide file operations
                 None
             }
-            KernelObject::GraphicsBuffer(_) => None,
         }
     }
 
@@ -184,6 +196,10 @@ impl KernelObject {
             KernelObject::Pipe(pipe_object) => {
                 let pipe_ops: &dyn PipeObject = pipe_object.as_ref();
                 Some(pipe_ops)
+            }
+            KernelObject::Counter(_) => {
+                // Counter doesn't provide pipe operations
+                None
             }
             #[cfg(feature = "network")]
             KernelObject::Socket(_) => {
@@ -202,7 +218,6 @@ impl KernelObject {
                 // Shared memory doesn't provide pipe operations
                 None
             }
-            KernelObject::GraphicsBuffer(_) => None,
         }
     }
 
@@ -240,6 +255,11 @@ impl KernelObject {
                 let cloneable: &dyn CloneOps = pipe_object.as_ref();
                 Some(cloneable)
             }
+            KernelObject::Counter(counter) => {
+                // CounterObject implements CloneOps
+                let cloneable: &dyn CloneOps = counter.as_ref();
+                Some(cloneable)
+            }
             #[cfg(feature = "network")]
             KernelObject::Socket(_) => {
                 // Sockets don't implement CloneOps, use Arc::clone directly
@@ -255,12 +275,10 @@ impl KernelObject {
                 let cloneable: &dyn CloneOps = event_subscription.as_ref();
                 Some(cloneable)
             }
-            KernelObject::SharedMemory(shared_memory) => {
-                // SharedMemory implements CloneOps
-                let cloneable: &dyn CloneOps = shared_memory.as_ref();
-                Some(cloneable)
+            KernelObject::SharedMemory(_) => {
+                // Shared memory doesn't implement CloneOps, use Arc::clone directly
+                None
             }
-            KernelObject::GraphicsBuffer(_) => None,
         }
     }
 
@@ -276,6 +294,10 @@ impl KernelObject {
                 // Pipes don't provide control operations
                 None
             }
+            KernelObject::Counter(_) => {
+                // Counter doesn't provide control operations
+                None
+            }
             #[cfg(feature = "network")]
             KernelObject::Socket(socket) => {
                 // Try to get control operations through SocketObject trait
@@ -289,14 +311,9 @@ impl KernelObject {
                 // Event subscriptions don't provide control operations
                 None
             }
-            KernelObject::SharedMemory(shared_memory) => {
-                // SharedMemory implements ControlOps
-                let control_ops: &dyn ControlOps = shared_memory.as_ref();
-                Some(control_ops)
-            }
-            KernelObject::GraphicsBuffer(buffer) => {
-                let control_ops: &dyn ControlOps = buffer.as_ref();
-                Some(control_ops)
+            KernelObject::SharedMemory(_) => {
+                // Shared memory doesn't provide control operations
+                None
             }
         }
     }
@@ -311,6 +328,10 @@ impl KernelObject {
             }
             KernelObject::Pipe(_) => {
                 // Pipes don't provide memory mapping operations
+                None
+            }
+            KernelObject::Counter(_) => {
+                // Counter doesn't provide memory mapping operations
                 None
             }
             #[cfg(feature = "network")]
@@ -331,10 +352,6 @@ impl KernelObject {
                 let memory_mapping_ops: &dyn MemoryMappingOps = shared_memory.as_ref();
                 Some(memory_mapping_ops)
             }
-            KernelObject::GraphicsBuffer(buffer) => {
-                let memory_mapping_ops: &dyn MemoryMappingOps = buffer.as_ref();
-                Some(memory_mapping_ops)
-            }
         }
     }
 
@@ -351,6 +368,10 @@ impl KernelObject {
                 // Pipes don't provide memory mapping operations
                 None
             }
+            KernelObject::Counter(_) => {
+                // Counter doesn't provide memory mapping operations
+                None
+            }
             #[cfg(feature = "network")]
             KernelObject::Socket(_) => {
                 // Sockets don't provide memory mapping operations
@@ -365,13 +386,10 @@ impl KernelObject {
                 None
             }
             KernelObject::SharedMemory(shared_memory) => {
-                // SharedMemory implements MemoryMappingOps
+                // Create weak reference from the Arc<dyn SharedMemoryObject>
+                // SharedMemoryObject implements MemoryMappingOps
                 let weak_shmem = Arc::downgrade(shared_memory);
                 Some(weak_shmem)
-            }
-            KernelObject::GraphicsBuffer(buffer) => {
-                let weak_buffer = Arc::downgrade(buffer);
-                Some(weak_buffer)
             }
         }
     }
@@ -398,6 +416,17 @@ impl KernelObject {
         }
     }
 
+    /// Try to get CounterObject
+    pub fn as_counter(&self) -> Option<&dyn CounterObject> {
+        match self {
+            KernelObject::Counter(counter) => {
+                let counter_obj: &dyn CounterObject = counter.as_ref();
+                Some(counter_obj)
+            }
+            _ => None,
+        }
+    }
+
     /// Try to get Selectable capability for pselect/select readiness
     pub fn as_selectable(&self) -> Option<&dyn Selectable> {
         match self {
@@ -407,12 +436,44 @@ impl KernelObject {
                 Some(sel)
             }
             KernelObject::Pipe(pipe_object) => pipe_object.as_selectable(),
+            KernelObject::Counter(counter) => {
+                // CounterObject implements Selectable
+                let sel: &dyn Selectable = counter.as_ref();
+                Some(sel)
+            }
             #[cfg(feature = "network")]
             KernelObject::Socket(socket) => socket.as_selectable(),
             KernelObject::EventChannel(_) => None,
             KernelObject::EventSubscription(_) => None,
             KernelObject::SharedMemory(_) => None,
-            KernelObject::GraphicsBuffer(_) => None,
+        }
+    }
+
+    /// Clone the KernelObject at the Arc level only (no state changes).
+    ///
+    /// Unlike the `Clone` trait implementation which may use `custom_clone()` for
+    /// objects like Pipes (incrementing reader/writer counts), this method performs
+    /// a simple `Arc::clone()` that only increments the Arc reference count without
+    /// modifying the underlying object state.
+    ///
+    /// Use this when you need a copy of the KernelObject for temporary access
+    /// without intending to create a new logical file descriptor (dup semantics).
+    pub fn arc_clone(&self) -> Self {
+        match self {
+            KernelObject::File(file_object) => KernelObject::File(Arc::clone(file_object)),
+            KernelObject::Pipe(pipe_object) => KernelObject::Pipe(Arc::clone(pipe_object)),
+            KernelObject::Counter(counter) => KernelObject::Counter(Arc::clone(counter)),
+            #[cfg(feature = "network")]
+            KernelObject::Socket(socket) => KernelObject::Socket(Arc::clone(socket)),
+            KernelObject::EventChannel(event_channel) => {
+                KernelObject::EventChannel(Arc::clone(event_channel))
+            }
+            KernelObject::EventSubscription(event_subscription) => {
+                KernelObject::EventSubscription(Arc::clone(event_subscription))
+            }
+            KernelObject::SharedMemory(shared_memory) => {
+                KernelObject::SharedMemory(Arc::clone(shared_memory))
+            }
         }
     }
 }
@@ -427,6 +488,7 @@ impl Clone for KernelObject {
             match self {
                 KernelObject::File(file_object) => KernelObject::File(Arc::clone(file_object)),
                 KernelObject::Pipe(pipe_object) => KernelObject::Pipe(Arc::clone(pipe_object)),
+                KernelObject::Counter(counter) => KernelObject::Counter(Arc::clone(counter)),
                 #[cfg(feature = "network")]
                 KernelObject::Socket(socket) => KernelObject::Socket(Arc::clone(socket)),
                 KernelObject::EventChannel(event_channel) => {
@@ -437,9 +499,6 @@ impl Clone for KernelObject {
                 }
                 KernelObject::SharedMemory(shared_memory) => {
                     KernelObject::SharedMemory(Arc::clone(shared_memory))
-                }
-                KernelObject::GraphicsBuffer(buffer) => {
-                    KernelObject::GraphicsBuffer(Arc::clone(buffer))
                 }
             }
         }

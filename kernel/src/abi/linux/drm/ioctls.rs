@@ -12,6 +12,60 @@ use super::file::DrmFile;
 use crate::device::graphics::manager::GraphicsManager;
 use crate::object::KernelObject;
 use alloc::sync::Arc;
+use alloc::collections::BTreeMap;
+use spin::Mutex;
+
+/// Per-device DRM context for tracking buffers
+struct DrmDeviceContext {
+    next_handle: u32,
+    buffers: BTreeMap<u32, (usize, usize)>, // handle -> (phys_addr, size)
+}
+
+impl DrmDeviceContext {
+    const fn new() -> Self {
+        Self {
+            next_handle: 1,
+            buffers: BTreeMap::new(),
+        }
+    }
+    
+    fn allocate_handle(&mut self) -> u32 {
+        let handle = self.next_handle;
+        if self.next_handle == u32::MAX {
+            panic!("DRM handle space exhausted: cannot allocate more handles");
+        }
+        self.next_handle += 1;
+        handle
+    }
+    
+    fn store_buffer(&mut self, handle: u32, phys_addr: usize, size: usize) {
+        self.buffers.insert(handle, (phys_addr, size));
+    }
+    
+    fn get_buffer(&self, handle: u32) -> Option<(usize, usize)> {
+        self.buffers.get(&handle).copied()
+    }
+    
+    fn remove_buffer(&mut self, handle: u32) -> Result<(), &'static str> {
+        if let Some((phys_addr, size)) = self.buffers.remove(&handle) {
+            // Free the memory
+            let pages = (size + 4095) / 4096;
+            unsafe {
+                crate::mem::page::free_raw_pages(phys_addr as *mut crate::mem::page::Page, pages);
+            }
+            Ok(())
+        } else {
+            Err("Invalid buffer handle")
+        }
+    }
+}
+
+// Global DRM context (for MVP, we only support one device)
+static DRM_CONTEXT: Mutex<Option<DrmDeviceContext>> = Mutex::new(None);
+
+fn get_drm_context() -> &'static Mutex<Option<DrmDeviceContext>> {
+    &DRM_CONTEXT
+}
 
 /// DRM ioctl command numbers
 pub mod commands {
@@ -198,15 +252,18 @@ pub fn handle_drm_get_resources(arg: usize) -> Result<i32, &'static str> {
 /// Handle DRM_IOCTL_MODE_GETCRTC
 /// 
 /// Gets the current CRTC configuration.
-pub fn handle_drm_get_crtc(arg: usize, device_id: usize) -> Result<i32, &'static str> {
+pub fn handle_drm_get_crtc(arg: usize, _device_id: usize) -> Result<i32, &'static str> {
     let target_ptr = translate_user_pointer(arg)?;
     
     let crtc_ptr = target_ptr as *mut DrmModeCrtc;
     let mut crtc = unsafe { core::ptr::read_unaligned(crtc_ptr) };
     
     // Get framebuffer configuration through GraphicsManager
+    // MVP: Use fb0 as the primary framebuffer
     let graphics_manager = GraphicsManager::get_manager();
-    let config = graphics_manager.get_framebuffer_config_by_device(device_id)?;
+    let fb_resource = graphics_manager.get_framebuffer("fb0")
+        .ok_or("Framebuffer fb0 not found")?;
+    let config = &fb_resource.config;
     
     // Fill in mode information
     crtc.mode.hdisplay = config.width as u16;
@@ -255,23 +312,38 @@ pub fn handle_drm_create_dumb(arg: usize, file: &DrmFile) -> Result<i32, &'stati
         _ => return Err("Invalid dumb buffer bpp"),
     }
 
-    // Create buffer via GraphicsManager
-    let graphics_manager = GraphicsManager::get_manager();
-    let buffer = graphics_manager.create_dumb_buffer(dumb.width, dumb.height, dumb.bpp)?;
+    // Create buffer via simple memory allocation
+    // For MVP: Just allocate memory and track it in the DRM context
+    // Calculate size with checked arithmetic
+    let width_bpp = dumb.width.checked_mul(dumb.bpp)
+        .ok_or("Width * bpp overflow")?;
+    let pitch = ((width_bpp + 31) / 32) * 4;
+    let size = pitch.checked_mul(dumb.height)
+        .ok_or("Pitch * height overflow")? as usize;
     
-    // Wrap in KernelObject
-    let kernel_object = Arc::new(KernelObject::GraphicsBuffer(buffer.clone()));
+    // Allocate physical pages for the buffer
+    let pages_needed = (size + 4095) / 4096;
+    let phys_addr = crate::mem::page::allocate_raw_pages(pages_needed) as usize;
     
-    // Register in DrmFile session
-    let handle = file.add_gem_handle(kernel_object)?;
+    // Check for allocation failure
+    if phys_addr == 0 {
+        return Err("Failed to allocate buffer memory");
+    }
+    
+    // Store buffer info in DRM context
+    let mut context_guard = get_drm_context().lock();
+    if context_guard.is_none() {
+        *context_guard = Some(DrmDeviceContext::new());
+    }
+    let context = context_guard.as_mut().unwrap();
+    let handle = context.allocate_handle();
+    context.store_buffer(handle, phys_addr, size);
+    drop(context_guard);
     
     // Fill in response
     dumb.handle = handle;
-    dumb.pitch = buffer.as_ref().as_any().downcast_ref::<crate::device::graphics::buffer::DumbBuffer>()
-        .map(|b| b.pitch())
-        .unwrap_or(0); // Should not happen if we just created it as DumbBuffer
-        
-    dumb.size = buffer.size() as u64;
+    dumb.pitch = pitch;
+    dumb.size = size as u64;
     
     unsafe { core::ptr::write_unaligned(dumb_ptr, dumb); }
     Ok(0)
@@ -295,20 +367,17 @@ pub fn handle_drm_map_dumb(arg: usize, file: &DrmFile) -> Result<i32, &'static s
     let map_ptr = target_ptr as *mut DrmModeMapDumb;
     let mut map = unsafe { core::ptr::read(map_ptr) };
     
-    // Get buffer object
-    let object = file.get_gem_object(map.handle)
+    // Get buffer info from DRM context
+    let context_guard = get_drm_context().lock();
+    let context = context_guard.as_ref().ok_or("DRM context not initialized")?;
+    let (phys_addr, _size) = context.get_buffer(map.handle)
         .ok_or("Invalid buffer handle")?;
-        
-    // Verify it is a graphics buffer
-    // In the new architecture, we should return a fake offset that maps to this object.
-    // For MVP compatibility with the old test/implementation, we return the physical address.
-    // This is technically insecure/incorrect for a real DRM driver but matches the previous behavior.
+    drop(context_guard);
     
-    if let KernelObject::GraphicsBuffer(buffer) = object.as_ref() {
-        map.offset = buffer.physical_address() as u64;
-    } else {
-        return Err("Not a graphics buffer");
-    }
+    // For MVP: Return physical address as offset
+    // In a real implementation, this would return a fake offset that the kernel
+    // would use to map the buffer when mmap is called
+    map.offset = phys_addr as u64;
     
     unsafe { core::ptr::write_unaligned(map_ptr, map); }
     Ok(0)
@@ -333,10 +402,11 @@ pub fn handle_drm_destroy_dumb(arg: usize, file: &DrmFile) -> Result<i32, &'stat
     let destroy = unsafe { core::ptr::read(destroy_ptr) };
     
     // Remove the GEM handle
-    // This drops the Arc<KernelObject>, which will drop the buffer if no other references exist
-    if file.remove_gem_handle(destroy.handle).is_none() {
-        return Err("Invalid buffer handle");
-    }
+    // Remove the buffer from DRM context
+    let mut context_guard = get_drm_context().lock();
+    let context = context_guard.as_mut().ok_or("DRM context not initialized")?;
+    context.remove_buffer(destroy.handle)?;
+    drop(context_guard);
     
     Ok(0)
 }
@@ -353,40 +423,38 @@ pub fn handle_drm_page_flip(arg: usize, file: &DrmFile) -> Result<i32, &'static 
     
     // Get framebuffer configuration and address through GraphicsManager
     let graphics_manager = GraphicsManager::get_manager();
+    let fb_resource = graphics_manager.get_framebuffer("fb0")
+        .ok_or("Framebuffer fb0 not found")?;
     
-    let device_id = file.device_id();
+    let config = &fb_resource.config;
+    let fb_addr = fb_resource.get_current_address()
+        .unwrap_or(fb_resource.physical_addr);
     
-    let config = graphics_manager.get_framebuffer_config_by_device(device_id)?;
-    let fb_addr = graphics_manager.get_framebuffer_address_by_device(device_id)?;
-    
-    // Get source buffer
-    let object = file.get_gem_object(flip.fb_id)
+    // Get source buffer from DRM context
+    let context_guard = get_drm_context().lock();
+    let context = context_guard.as_ref().ok_or("DRM context not initialized")?;
+    let (src_addr, src_size) = context.get_buffer(flip.fb_id)
         .ok_or("Invalid framebuffer ID")?;
-        
-    if let KernelObject::GraphicsBuffer(buffer) = object.as_ref() {
-        let src_addr = buffer.physical_address();
-        let src_size = buffer.size();
-        
-        // Calculate copy size
-        let fb_size = config.size();
-        let copy_size = src_size.min(fb_size);
-        
-        // Copy from source buffer to framebuffer
-        unsafe {
-            core::ptr::copy_nonoverlapping(
-                src_addr as *const u8,
-                fb_addr as *mut u8,
-                copy_size
-            );
-        }
-        
-        // Flush the framebuffer
-        graphics_manager.flush_framebuffer_by_device(device_id, 0, 0, config.width, config.height)?;
-        
-        Ok(0)
-    } else {
-        Err("Not a graphics buffer")
+    drop(context_guard);
+    
+    // Calculate copy size
+    let fb_size = config.size();
+    let copy_size = src_size.min(fb_size);
+    
+    // Copy from source buffer to framebuffer
+    unsafe {
+        core::ptr::copy_nonoverlapping(
+            src_addr as *const u8,
+            fb_addr as *mut u8,
+            copy_size
+        );
     }
+    
+    // Flush the framebuffer
+    // For MVP, we can skip flush or call directly on the device
+    // since GraphicsManager doesn't have flush_framebuffer_by_device in dev
+    
+    Ok(0)
 }
 
 #[cfg(test)]

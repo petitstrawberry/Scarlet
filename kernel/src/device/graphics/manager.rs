@@ -29,7 +29,8 @@ use hashbrown::HashMap;
 use spin::{Mutex, RwLock};
 
 use crate::device::{
-    graphics::{FramebufferConfig, buffer::{DumbBuffer, GraphicsBuffer}},
+    DeviceType,
+    graphics::{FramebufferConfig, GraphicsDevice},
     manager::{DeviceManager, SharedDevice},
 };
 
@@ -42,8 +43,7 @@ pub struct FramebufferResource {
     pub logical_name: String,
     /// Framebuffer configuration (resolution, format, etc.)
     pub config: FramebufferConfig,
-    /// Physical memory address of the framebuffer (cached, may be stale)
-    /// Use get_current_address() to query the device for the latest address
+    /// Physical memory address of the framebuffer
     pub physical_addr: usize,
     /// Size of the allocated framebuffer memory in bytes (page-aligned).
     /// This is the actual allocated size, which may be larger than the logical
@@ -145,7 +145,7 @@ pub struct GraphicsManager {
     active_mappings: Mutex<Vec<MmapRegion>>,
 }
 
-static mut MANAGER: GraphicsManager = GraphicsManager::new();
+static MANAGER: GraphicsManager = GraphicsManager::new();
 
 impl GraphicsManager {
     /// Create a new GraphicsManager instance
@@ -157,39 +157,16 @@ impl GraphicsManager {
         }
     }
 
-    /// Get immutable reference to the global GraphicsManager instance
-    #[allow(static_mut_refs)]
+    /// Get reference to the global GraphicsManager instance
     pub fn get_manager() -> &'static GraphicsManager {
-        unsafe { &MANAGER }
-    }
-
-    /// Get mutable reference to the global GraphicsManager instance
-    #[allow(static_mut_refs)]
-    pub fn get_mut_manager() -> &'static mut GraphicsManager {
-        unsafe { &mut MANAGER }
-    }
-
-    /// Create a new dumb buffer
-    /// 
-    /// # Arguments
-    /// 
-    /// * `width` - Width in pixels
-    /// * `height` - Height in pixels
-    /// * `bpp` - Bits per pixel
-    /// 
-    /// # Returns
-    /// 
-    /// Result containing the new dumb buffer or an error
-    pub fn create_dumb_buffer(&self, width: u32, height: u32, bpp: u32) -> Result<Arc<dyn GraphicsBuffer>, &'static str> {
-        let buffer = DumbBuffer::new(width, height, bpp)?;
-        Ok(Arc::new(buffer))
+        &MANAGER
     }
 
     /// Discover and register graphics devices from DeviceManager
     ///
     /// This method scans all devices in the DeviceManager for graphics devices
     /// and extracts their framebuffer resources for management.
-    pub fn discover_graphics_devices(&mut self) {
+    pub fn discover_graphics_devices(&self) {
         let device_manager = DeviceManager::get_manager();
         let device_count = device_manager.get_devices_count();
 
@@ -232,7 +209,7 @@ impl GraphicsManager {
     ///
     /// Result indicating success or failure
     pub fn register_framebuffer_from_device(
-        &mut self,
+        &self,
         device_id: usize,
         device: SharedDevice,
     ) -> Result<(), &'static str> {
@@ -301,20 +278,6 @@ impl GraphicsManager {
             );
         }
 
-        // Create DRM character device
-        // We use the same index as the framebuffer (fb0 -> card0)
-        // Note: logical_name is "fbX", so we can parse X or just use the fact that we just added it.
-        // But we don't have the index easily available here anymore without parsing or recalculating.
-        // Let's just parse it from logical_name.
-        if let Some(index_str) = logical_name.strip_prefix("fb") {
-            if let Ok(_index) = index_str.parse::<usize>() {
-                let card_name = format!("card{}", index_str);
-                if let Err(e) = self.create_drm_char_device(device_id, &card_name) {
-                    crate::early_println!("[GraphicsManager] Warning: Failed to create DRM character device for device {}: {}", device_id, e);
-                }
-            }
-        }
-        
         Ok(())
     }
 
@@ -359,100 +322,6 @@ impl GraphicsManager {
             0
         }
     }
-    
-    /// Get framebuffer configuration by device ID
-    ///
-    /// This provides an OS-independent way to query framebuffer configuration
-    /// without directly accessing the device.
-    ///
-    /// # Arguments
-    ///
-    /// * `device_id` - The device ID from DeviceManager
-    ///
-    /// # Returns
-    ///
-    /// Result containing the framebuffer configuration or an error
-    pub fn get_framebuffer_config_by_device(&self, device_id: usize) -> Result<FramebufferConfig, &'static str> {
-        // Find the framebuffer resource associated with this device
-        let framebuffers = self.framebuffers.lock();
-        if let Some(map) = framebuffers.as_ref() {
-            for (_, resource) in map.iter() {
-                if resource.source_device_id == device_id {
-                    return resource.get_current_config();
-                }
-            }
-        }
-        Err("No framebuffer found for device")
-    }
-    
-    /// Get current framebuffer address by device ID
-    ///
-    /// This provides an OS-independent way to query the current framebuffer
-    /// address without directly accessing the device.
-    ///
-    /// # Arguments
-    ///
-    /// * `device_id` - The device ID from DeviceManager
-    ///
-    /// # Returns
-    ///
-    /// Result containing the physical address or an error
-    pub fn get_framebuffer_address_by_device(&self, device_id: usize) -> Result<usize, &'static str> {
-        // Find the framebuffer resource associated with this device
-        let framebuffers = self.framebuffers.lock();
-        if let Some(map) = framebuffers.as_ref() {
-            for (_, resource) in map.iter() {
-                if resource.source_device_id == device_id {
-                    return resource.get_current_address();
-                }
-            }
-        }
-        Err("No framebuffer found for device")
-    }
-    
-    /// Flush framebuffer region by device ID
-    ///
-    /// This provides an OS-independent way to flush the framebuffer
-    /// without directly accessing the device.
-    ///
-    /// # Arguments
-    ///
-    /// * `device_id` - The device ID from DeviceManager
-    /// * `x` - X coordinate of the region to flush
-    /// * `y` - Y coordinate of the region to flush
-    /// * `width` - Width of the region to flush
-    /// * `height` - Height of the region to flush
-    ///
-    /// # Returns
-    ///
-    /// Result indicating success or failure
-    pub fn flush_framebuffer_by_device(&self, device_id: usize, x: u32, y: u32, width: u32, height: u32) -> Result<(), &'static str> {
-        // Find the framebuffer resource and flush through the device
-        let device_manager = DeviceManager::get_manager();
-        let device = device_manager.get_device(device_id)
-            .ok_or("Device not found")?;
-        
-        let graphics_device = device.as_graphics_device()
-            .ok_or("Not a graphics device")?;
-        
-        graphics_device.flush_framebuffer(x, y, width, height)
-    }
-    
-    /// Get the device ID for a framebuffer by logical name
-    ///
-    /// # Arguments
-    ///
-    /// * `fb_name` - The logical name of the framebuffer (e.g., "fb0")
-    ///
-    /// # Returns
-    ///
-    /// Optional device ID
-    pub fn get_device_id_by_framebuffer(&self, fb_name: &str) -> Option<usize> {
-        let framebuffers = self.framebuffers.lock();
-        framebuffers.as_ref()
-            .and_then(|map| map.get(fb_name))
-            .map(|resource| resource.source_device_id)
-    }
 
     /// Create a FramebufferCharDevice and register it with DeviceManager
     ///
@@ -463,7 +332,7 @@ impl GraphicsManager {
     /// # Returns
     ///
     /// Result indicating success or failure
-    pub fn create_framebuffer_char_device(&mut self, fb_name: &str) -> Result<(), &'static str> {
+    pub fn create_framebuffer_char_device(&self, fb_name: &str) -> Result<(), &'static str> {
         use crate::device::{
             graphics::framebuffer_device::FramebufferCharDevice, manager::DeviceManager,
         };
@@ -483,7 +352,7 @@ impl GraphicsManager {
         let fb_char_device = FramebufferCharDevice::new(fb_resource);
 
         // Register with DeviceManager (this will automatically publish to DevFS)
-        let device_manager = DeviceManager::get_mut_manager();
+        let device_manager = DeviceManager::get_manager();
         let device_id =
             device_manager.register_device_with_name(fb_name.to_string(), Arc::new(fb_char_device));
 
@@ -494,34 +363,6 @@ impl GraphicsManager {
             "[GraphicsManager] Created framebuffer character device: /dev/{}",
             fb_name
         );
-        Ok(())
-    }
-
-    /// Create a DrmCharDevice and register it with DeviceManager
-    ///
-    /// # Arguments
-    ///
-    /// * `device_id` - The device ID of the underlying graphics device
-    /// * `name` - The name for the character device (e.g., "card0")
-    ///
-    /// # Returns
-    ///
-    /// Result indicating success or failure
-    pub fn create_drm_char_device(&mut self, device_id: usize, name: &str) -> Result<(), &'static str> {
-        use crate::device::{graphics::drm_device::DrmCharDevice, manager::DeviceManager};
-        use alloc::sync::Arc;
-        
-        // Create the character device
-        let drm_char_device = DrmCharDevice::new(device_id);
-        
-        // Register with DeviceManager
-        let device_manager = DeviceManager::get_mut_manager();
-        let _device_id = device_manager.register_device_with_name(
-            name.to_string(),
-            Arc::new(drm_char_device)
-        );
-        
-        crate::early_println!("[GraphicsManager] Created DRM character device: /dev/{}", name);
         Ok(())
     }
 
@@ -536,7 +377,7 @@ impl GraphicsManager {
     ///
     /// Result indicating success or failure
     pub fn set_char_device_id(
-        &mut self,
+        &self,
         fb_name: &str,
         char_device_id: usize,
     ) -> Result<(), &'static str> {
@@ -694,7 +535,7 @@ impl GraphicsManager {
     /// Clear all framebuffers (for testing only)
     /// This allows tests to start with a clean GraphicsManager state
     #[cfg(test)]
-    pub fn clear_for_test(&mut self) {
+    pub fn clear_for_test(&self) {
         use crate::device::manager::DeviceManager;
 
         // Clear GraphicsManager state
@@ -708,7 +549,7 @@ impl GraphicsManager {
         active_mappings.clear();
 
         // Also clear DeviceManager state to ensure test isolation
-        DeviceManager::get_mut_manager().clear_for_test();
+        DeviceManager::get_manager().clear_for_test();
     }
 }
 
@@ -723,10 +564,10 @@ mod test_utils {
     }
 
     /// Setup a clean GraphicsManager for testing
-    /// This clears the global singleton and returns a mutable reference to it
+    /// This clears the global singleton and returns a reference to it
     /// ensuring each test starts with a clean state
-    pub fn setup_clean_global_graphics_manager() -> &'static mut GraphicsManager {
-        let manager = GraphicsManager::get_mut_manager();
+    pub fn setup_clean_global_graphics_manager() -> &'static GraphicsManager {
+        let manager = GraphicsManager::get_manager();
         manager.clear_for_test();
         manager
     }
@@ -735,7 +576,12 @@ mod test_utils {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::device::graphics::{manager::GraphicsManager, GenericGraphicsDevice, FramebufferConfig, PixelFormat};
+    use crate::device::{
+        Device,
+        graphics::{
+            FramebufferConfig, GenericGraphicsDevice, PixelFormat, manager::GraphicsManager,
+        },
+    };
     use alloc::{string::ToString, sync::Arc};
 
     #[test_case]
