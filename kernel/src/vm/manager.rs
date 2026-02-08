@@ -53,11 +53,6 @@ pub struct VirtualMemoryManager {
     inner: Arc<RwLock<InnerVmm>>, // shared, internally synchronized
 }
 
-// SAFETY: VirtualMemoryManager uses Arc<RwLock<InnerVmm>> internally,
-// which provides thread-safe access. Clone shares the same Arc, ensuring
-// all instances reference the same synchronized state.
-unsafe impl Sync for VirtualMemoryManager {}
-
 #[derive(Debug, Clone)]
 struct InnerVmm {
     memmap: BTreeMap<usize, VirtualMemoryMap>,
