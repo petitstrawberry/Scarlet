@@ -161,9 +161,16 @@ impl<'a> FdtManager<'a> {
     ///
     /// # Returns
     /// A reference to the static FdtManager instance.
+    ///
+    /// # Panics
+    /// Panics if called before FdtManager is initialized via `init_fdt()`.
     pub fn get_manager() -> &'static FdtManager<'static> {
-        MANAGER_INITIALIZED.call_once(|| {});
-        // SAFETY: After initialization, only read-only access occurs
+        // Wait for initialization to complete
+        if !MANAGER_INITIALIZED.is_completed() {
+            panic!("FdtManager::get_manager() called before init_fdt()");
+        }
+        // SAFETY: After initialization, only read-only access occurs.
+        // The Once guarantees happens-before relationship with init_fdt().
         unsafe { &*MANAGER.0.get() }
     }
 
@@ -399,6 +406,9 @@ pub fn init_fdt(addr: usize) {
             }
             let model = fdt.root().model();
             early_println!("Model: {}", model);
+
+            // Mark initialization as complete to establish happens-before relationship
+            MANAGER_INITIALIZED.call_once(|| {});
         }
         Err(e) => {
             early_println!("FDT error: {:?}", e);
