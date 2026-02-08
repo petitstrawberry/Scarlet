@@ -1,6 +1,6 @@
 //! Network Configuration Daemon (netcfgd)
 //!
-//! This daemon reads TOML configuration files from /system/scarlet/etc/netcfgd/
+//! This daemon reads TOML configuration files from /etc/netcfgd.d/
 //! and applies network settings automatically. It is started by stemd during boot.
 
 #![no_std]
@@ -299,7 +299,7 @@ fn main() -> i32 {
     let config_dir = if args.len() > 1 {
         args[1].clone()
     } else {
-        "/system/scarlet/etc/netcfgd".to_string()
+        "/etc/netcfgd.d".to_string()
     };
 
     println!("netcfgd: Config directory: {}", config_dir);
