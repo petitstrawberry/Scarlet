@@ -10,7 +10,10 @@ fn main() -> i32 {
     std::env::set_var("USER", "root");
     std::env::set_var("HOME", "/root");
     std::env::set_var("SHELL", "/bin/sh");
-    println!("Login successful for user: {}", std::env::var("USER").unwrap_or("unknown".to_string()));
+    println!(
+        "Login successful for user: {}",
+        std::env::var("USER").unwrap_or("unknown".to_string())
+    );
 
     let mut env = Vec::new();
 
@@ -37,12 +40,15 @@ fn main() -> i32 {
         }
         pid => {
             let res = std::task::waitpid(pid, 0);
-            println!("Child process (PID={}) exited with status: {}", res.0, res.1);
+            println!(
+                "Child process (PID={}) exited with status: {}",
+                res.0, res.1
+            );
             if res.1 != 0 {
                 println!("Child process exited with error");
             }
         }
     }
 
-    return 0;
+    0
 }

@@ -1,0 +1,133 @@
+//! Window adapter implementation for Scarlet OS
+
+use slint::platform::{software_renderer as renderer, WindowAdapter};
+use slint::PhysicalSize;
+use std::rc::{Rc, Weak};
+use std::cell::RefCell;
+use sws_client::{Connection, SurfaceBuilder};
+use crate::{use_csd_titlebar, TITLEBAR_HEIGHT_PX};
+use core::sync::atomic::{AtomicBool, Ordering};
+
+/// Window adapter for Scarlet OS
+pub struct ScarletWindowAdapter {
+    window: slint::Window,
+    surface_id: u32,
+    /// The size reported to Slint (client/content area).
+    size: RefCell<PhysicalSize>,
+    /// The actual surface size allocated in SWS (may include decorations).
+    surface_size: RefCell<PhysicalSize>,
+    // Store renderer to implement the Renderer trait
+    renderer: RefCell<renderer::SoftwareRenderer>,
+
+    redraw_requested: AtomicBool,
+}
+
+impl ScarletWindowAdapter {
+    /// Create a new window adapter
+    pub fn new(connection: &mut Connection) -> Result<Rc<Self>, slint::platform::PlatformError> {
+        // Default window size
+        let width: u32 = 800;
+        let height: u32 = 600;
+
+        let content_height = if use_csd_titlebar() {
+            height.saturating_sub(TITLEBAR_HEIGHT_PX)
+        } else {
+            height
+        };
+
+        // Create a surface (window) through SWS using the builder pattern
+        let surface_id = SurfaceBuilder::new()
+            .app_id("org.slint.scarlet-app")
+            .app_name("Slint App")
+            .menu_titles("")
+            .size(width, height)
+            .resizable(false)
+            .build(connection)
+            .map_err(|e| slint::platform::PlatformError::Other(
+                std::format!("Failed to create surface: {:?}", e).into()
+            ))?;
+        
+        let size = PhysicalSize::new(width, content_height);
+        let surface_size = PhysicalSize::new(width, height);
+        
+        // Create software renderer
+        let renderer = renderer::SoftwareRenderer::new();
+        
+        // Use Rc::new_cyclic to handle the circular reference between Window and WindowAdapter
+        let adapter = Rc::new_cyclic(|weak: &Weak<Self>| {
+            let window = slint::Window::new(weak.clone());
+            
+            Self {
+                window,
+                surface_id,
+                size: RefCell::new(size),
+                surface_size: RefCell::new(surface_size),
+                renderer: RefCell::new(renderer),
+                redraw_requested: AtomicBool::new(true),
+            }
+        });
+
+        // Inform Slint about the initial scale factor and size so hit-testing works.
+        adapter.window.dispatch_event(slint::platform::WindowEvent::ScaleFactorChanged {
+            scale_factor: 1.0,
+        });
+        adapter.window.dispatch_event(slint::platform::WindowEvent::Resized {
+            size: slint::LogicalSize::new(width as f32, content_height as f32),
+        });
+
+        Ok(adapter)
+    }
+
+    /// Get the surface id for rendering
+    pub fn surface_id(&self) -> u32 {
+        self.surface_id
+    }
+
+    pub fn surface_size(&self) -> PhysicalSize {
+        *self.surface_size.borrow()
+    }
+
+    pub fn set_surface_size(&self, size: PhysicalSize) {
+        *self.surface_size.borrow_mut() = size;
+    }
+
+    pub fn set_content_size(&self, size: PhysicalSize) {
+        *self.size.borrow_mut() = size;
+        self.redraw_requested.store(true, Ordering::Relaxed);
+    }
+
+    pub fn take_redraw_requested(&self) -> bool {
+        self.redraw_requested.swap(false, Ordering::Relaxed)
+    }
+    
+    /// Get the renderer
+    pub fn renderer_ref(&self) -> &RefCell<renderer::SoftwareRenderer> {
+        &self.renderer
+    }
+}
+
+impl WindowAdapter for ScarletWindowAdapter {
+    fn window(&self) -> &slint::Window {
+        &self.window
+    }
+
+    fn size(&self) -> PhysicalSize {
+        *self.size.borrow()
+    }
+
+    fn renderer(&self) -> &dyn slint::platform::Renderer {
+        // Return a reference to the software renderer
+        // This is a bit tricky because we need to return a trait object
+        // For now, we'll use a workaround
+        unsafe {
+            // SAFETY: We're converting the RefCell<SoftwareRenderer> to a raw pointer
+            // and then to a reference. This is safe as long as we don't drop the RefCell
+            // while the reference is in use.
+            &*(&*self.renderer.as_ptr() as *const dyn slint::platform::Renderer)
+        }
+    }
+
+    fn request_redraw(&self) {
+        self.redraw_requested.store(true, Ordering::Relaxed);
+    }
+}

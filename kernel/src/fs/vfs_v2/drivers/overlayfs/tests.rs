@@ -1,28 +1,28 @@
 //! OverlayFS v2 tests including cross-VFS support
 
-use super::OverlayFS;
 use super::super::tmpfs::TmpFS;
-use crate::fs::mount_tree::MountPoint;
+use super::OverlayFS;
 use crate::fs::FileSystemOperations;
 use crate::fs::FileType;
 use crate::fs::SeekFrom;
 use crate::fs::VfsEntry;
+use crate::fs::mount_tree::MountPoint;
 use alloc::string::ToString;
-use alloc::vec::Vec;
-use alloc::vec;
 use alloc::sync::Arc;
+use alloc::vec;
+use alloc::vec::Vec;
 
 // Helper to create a MountPoint
 fn make_mount(fs: Arc<dyn FileSystemOperations>) -> Arc<MountPoint> {
     let root_node = fs.root_node();
     let root_entry = VfsEntry::new(None, "/".to_string(), root_node);
-    MountPoint::new_regular("/".to_string(), root_entry)
+    MountPoint::new_regular("/".to_string(), root_entry, fs)
 }
 
 fn make_mount_and_entry(fs: Arc<dyn FileSystemOperations>) -> (Arc<MountPoint>, Arc<VfsEntry>) {
     let root_node = fs.root_node();
     let root_entry = VfsEntry::new(None, "/".to_string(), root_node);
-    let mp = MountPoint::new_regular("/".to_string(), root_entry.clone());
+    let mp = MountPoint::new_regular("/".to_string(), root_entry.clone(), fs);
     (mp, root_entry)
 }
 
@@ -45,24 +45,55 @@ fn test_overlayfs_basic() {
     */
     let lower = TmpFS::new(0);
     let upper = TmpFS::new(0);
-    
+
     // Create files in lower layer
     let lower_root = lower.root_node();
-    lower.create(&lower_root.clone(), &"foo".to_string(), FileType::RegularFile, 0o644).unwrap();
-    lower.create(&lower_root.clone(), &"bar".to_string(), FileType::RegularFile, 0o644).unwrap();
-    
+    lower
+        .create(
+            &lower_root.clone(),
+            &"foo".to_string(),
+            FileType::RegularFile,
+            0o644,
+        )
+        .unwrap();
+    lower
+        .create(
+            &lower_root.clone(),
+            &"bar".to_string(),
+            FileType::RegularFile,
+            0o644,
+        )
+        .unwrap();
+
     // Create files in upper layer
     let upper_root = upper.root_node();
-    upper.create(&upper_root.clone(), &"foo".to_string(), FileType::RegularFile, 0o644).unwrap(); // Override lower
-    upper.create(&upper_root.clone(), &"baz".to_string(), FileType::RegularFile, 0o644).unwrap();
-    
-    let (lower_mp, lower_entry) = make_mount_and_entry(lower.clone() as Arc<dyn FileSystemOperations>);
-    let (upper_mp, upper_entry) = make_mount_and_entry(upper.clone() as Arc<dyn FileSystemOperations>);
+    upper
+        .create(
+            &upper_root.clone(),
+            &"foo".to_string(),
+            FileType::RegularFile,
+            0o644,
+        )
+        .unwrap(); // Override lower
+    upper
+        .create(
+            &upper_root.clone(),
+            &"baz".to_string(),
+            FileType::RegularFile,
+            0o644,
+        )
+        .unwrap();
+
+    let (lower_mp, lower_entry) =
+        make_mount_and_entry(lower.clone() as Arc<dyn FileSystemOperations>);
+    let (upper_mp, upper_entry) =
+        make_mount_and_entry(upper.clone() as Arc<dyn FileSystemOperations>);
     let overlay = OverlayFS::new(
         Some((upper_mp.clone(), upper_entry.clone())),
         vec![(lower_mp.clone(), lower_entry.clone())],
-        "overlayfs".to_string()
-    ).unwrap();
+        "overlayfs".to_string(),
+    )
+    .unwrap();
     let root = overlay.root_node();
     // Test lookups
     let foo = overlay.lookup(&root, &"foo".to_string()).unwrap(); // Should be from upper
@@ -92,28 +123,59 @@ fn test_overlayfs_readdir() {
     */
     let lower = TmpFS::new(0);
     let upper = TmpFS::new(0);
-    
+
     let lower_root = lower.root_node();
-    lower.create(&lower_root.clone(), &"a".to_string(), FileType::RegularFile, 0o644).unwrap();
-    lower.create(&lower_root.clone(), &"b".to_string(), FileType::RegularFile, 0o644).unwrap();
-    
+    lower
+        .create(
+            &lower_root.clone(),
+            &"a".to_string(),
+            FileType::RegularFile,
+            0o644,
+        )
+        .unwrap();
+    lower
+        .create(
+            &lower_root.clone(),
+            &"b".to_string(),
+            FileType::RegularFile,
+            0o644,
+        )
+        .unwrap();
+
     let upper_root = upper.root_node();
-    upper.create(&upper_root.clone(), &"b".to_string(), FileType::RegularFile, 0o644).unwrap(); // Override
-    upper.create(&upper_root.clone(), &"c".to_string(), FileType::RegularFile, 0o644).unwrap();
-    
-    let (lower_mp, lower_entry) = make_mount_and_entry(lower.clone() as Arc<dyn FileSystemOperations>);
-    let (upper_mp, upper_entry) = make_mount_and_entry(upper.clone() as Arc<dyn FileSystemOperations>);
+    upper
+        .create(
+            &upper_root.clone(),
+            &"b".to_string(),
+            FileType::RegularFile,
+            0o644,
+        )
+        .unwrap(); // Override
+    upper
+        .create(
+            &upper_root.clone(),
+            &"c".to_string(),
+            FileType::RegularFile,
+            0o644,
+        )
+        .unwrap();
+
+    let (lower_mp, lower_entry) =
+        make_mount_and_entry(lower.clone() as Arc<dyn FileSystemOperations>);
+    let (upper_mp, upper_entry) =
+        make_mount_and_entry(upper.clone() as Arc<dyn FileSystemOperations>);
     let overlay = OverlayFS::new(
         Some((upper_mp.clone(), upper_entry.clone())),
         vec![(lower_mp.clone(), lower_entry.clone())],
-        "overlayfs".to_string()
-    ).unwrap();
-    
+        "overlayfs".to_string(),
+    )
+    .unwrap();
+
     let root = overlay.root_node();
     let entries = overlay.readdir(&root).unwrap();
     let mut names: Vec<_> = entries.iter().map(|e| e.name.as_str()).collect();
     names.sort();
-    
+
     // Should have . .. a b c (b from upper, not duplicated)
     assert_eq!(names, vec![".", "..", "a", "b", "c"]);
 }
@@ -137,31 +199,41 @@ fn test_overlayfs_copy_up() {
     */
     let lower = TmpFS::new(0);
     let upper = TmpFS::new(0);
-    
+
     // Create file in lower only
     let lower_root = lower.root_node();
-    let lower_file = lower.create(&lower_root.clone(), &"testfile".to_string(), FileType::RegularFile, 0o644).unwrap();
-    
+    let lower_file = lower
+        .create(
+            &lower_root.clone(),
+            &"testfile".to_string(),
+            FileType::RegularFile,
+            0o644,
+        )
+        .unwrap();
+
     // Write content to lower file
     let lower_file_obj = lower.open(&lower_file, 1).unwrap(); // Write mode
     lower_file_obj.write(b"lower content").unwrap();
-    
-    let (lower_mp, lower_entry) = make_mount_and_entry(lower.clone() as Arc<dyn FileSystemOperations>);
-    let (upper_mp, upper_entry) = make_mount_and_entry(upper.clone() as Arc<dyn FileSystemOperations>);
+
+    let (lower_mp, lower_entry) =
+        make_mount_and_entry(lower.clone() as Arc<dyn FileSystemOperations>);
+    let (upper_mp, upper_entry) =
+        make_mount_and_entry(upper.clone() as Arc<dyn FileSystemOperations>);
     let overlay = OverlayFS::new(
         Some((upper_mp.clone(), upper_entry.clone())),
         vec![(lower_mp.clone(), lower_entry.clone())],
-        "overlayfs".to_string()
-    ).unwrap();
-    
+        "overlayfs".to_string(),
+    )
+    .unwrap();
+
     // Open file for writing - should trigger copy-up
     let root = overlay.root_node();
     let overlay_file_node = overlay.lookup(&root, &"testfile".to_string()).unwrap();
     let overlay_file_obj = overlay.open(&overlay_file_node, 1).unwrap(); // Write mode
-    
+
     // Write new content
     overlay_file_obj.write(b"upper content").unwrap();
-    
+
     // Verify upper layer now has the file
     let upper_root = upper.root_node();
     let upper_file = upper.lookup(&upper_root, &"testfile".to_string()).unwrap();
@@ -176,7 +248,7 @@ fn test_overlayfs_copy_up() {
     lower_file_obj.write(b"lower content").unwrap();
     lower_file_obj.seek(SeekFrom::Start(0)).unwrap();
     let lower_bytes_read = lower_file_obj.read(&mut lower_buffer).unwrap();
-    assert_eq!(&lower_buffer[..lower_bytes_read], b"lower content");    
+    assert_eq!(&lower_buffer[..lower_bytes_read], b"lower content");
 }
 
 #[test_case]
@@ -198,26 +270,36 @@ fn test_overlayfs_whiteout() {
     */
     let lower = TmpFS::new(0);
     let upper = TmpFS::new(0);
-    
+
     // Create file in lower
     let lower_root = lower.root_node();
-    lower.create(&lower_root.clone(), &"hideme".to_string(), FileType::RegularFile, 0o644).unwrap();
-    
-    let (lower_mp, lower_entry) = make_mount_and_entry(lower.clone() as Arc<dyn FileSystemOperations>);
-    let (upper_mp, upper_entry) = make_mount_and_entry(upper.clone() as Arc<dyn FileSystemOperations>);
+    lower
+        .create(
+            &lower_root.clone(),
+            &"hideme".to_string(),
+            FileType::RegularFile,
+            0o644,
+        )
+        .unwrap();
+
+    let (lower_mp, lower_entry) =
+        make_mount_and_entry(lower.clone() as Arc<dyn FileSystemOperations>);
+    let (upper_mp, upper_entry) =
+        make_mount_and_entry(upper.clone() as Arc<dyn FileSystemOperations>);
     let overlay = OverlayFS::new(
         Some((upper_mp.clone(), upper_entry.clone())),
         vec![(lower_mp.clone(), lower_entry.clone())],
-        "overlayfs".to_string()
-    ).unwrap();
-    
+        "overlayfs".to_string(),
+    )
+    .unwrap();
+
     // Remove file - should create whiteout
     let root = overlay.root_node();
     overlay.remove(&root, &"hideme".to_string()).unwrap();
-    
+
     // File should no longer be visible
     assert!(overlay.lookup(&root, &"hideme".to_string()).is_err());
-    
+
     // Verify whiteout file exists in upper
     let upper_root = upper.root_node();
     assert!(upper.lookup(&upper_root, &".wh.hideme".to_string()).is_ok());
@@ -238,34 +320,47 @@ fn test_overlayfs_read_only() {
     ├── readonly (readable, not writable)
     */
     let lower = TmpFS::new(0);
-    
+
     // Create file in lower
     let lower_root = lower.root_node();
-    lower.create(&lower_root.clone(), &"readonly".to_string(), FileType::RegularFile, 0o644).unwrap();
-    
-    let (lower_mp, lower_entry) = make_mount_and_entry(lower.clone() as Arc<dyn FileSystemOperations>);
+    lower
+        .create(
+            &lower_root.clone(),
+            &"readonly".to_string(),
+            FileType::RegularFile,
+            0o644,
+        )
+        .unwrap();
+
+    let (lower_mp, lower_entry) =
+        make_mount_and_entry(lower.clone() as Arc<dyn FileSystemOperations>);
     // Create read-only overlay (no upper layer)
-    let overlay = OverlayFS::new(
-        None,
-        vec![(lower_mp, lower_entry)],
-        "overlayfs".to_string()
-    ).unwrap();
-    
+    let overlay =
+        OverlayFS::new(None, vec![(lower_mp, lower_entry)], "overlayfs".to_string()).unwrap();
+
     assert!(overlay.is_read_only());
-    
+
     // Should be able to read
     let root = overlay.root_node();
-    let file_node = overlay.lookup(&root.clone(), &"readonly".to_string()).unwrap();
+    let file_node = overlay
+        .lookup(&root.clone(), &"readonly".to_string())
+        .unwrap();
     let _file_obj = overlay.open(&file_node, 0).unwrap(); // Read mode
-    
+
     // Should not be able to write
     let root = overlay.root_node();
-    let file_node = overlay.lookup(&root.clone(), &"readonly".to_string()).unwrap();
+    let file_node = overlay
+        .lookup(&root.clone(), &"readonly".to_string())
+        .unwrap();
     assert!(overlay.open(&file_node, 1).is_err()); // Write mode
-    
+
     // Should not be able to create
     let root = overlay.root_node();
-    assert!(overlay.create(&root, &"newfile".to_string(), FileType::RegularFile, 0o644).is_err());
+    assert!(
+        overlay
+            .create(&root, &"newfile".to_string(), FileType::RegularFile, 0o644)
+            .is_err()
+    );
 }
 
 #[test_case]
@@ -290,17 +385,24 @@ fn test_overlayfs_upper_dir_remove_whiteout() {
 
     // Create a directory named "dir1" in both lower and upper layers
     let lower_root = lower.root_node();
-    lower.create(&lower_root, &"dir1".to_string(), FileType::Directory, 0o755).unwrap();
+    lower
+        .create(&lower_root, &"dir1".to_string(), FileType::Directory, 0o755)
+        .unwrap();
     let upper_root = upper.root_node();
-    upper.create(&upper_root, &"dir1".to_string(), FileType::Directory, 0o755).unwrap();
+    upper
+        .create(&upper_root, &"dir1".to_string(), FileType::Directory, 0o755)
+        .unwrap();
 
-    let (lower_mp, lower_entry) = make_mount_and_entry(lower.clone() as Arc<dyn FileSystemOperations>);
-    let (upper_mp, upper_entry) = make_mount_and_entry(upper.clone() as Arc<dyn FileSystemOperations>);
+    let (lower_mp, lower_entry) =
+        make_mount_and_entry(lower.clone() as Arc<dyn FileSystemOperations>);
+    let (upper_mp, upper_entry) =
+        make_mount_and_entry(upper.clone() as Arc<dyn FileSystemOperations>);
     let overlay = OverlayFS::new(
         Some((upper_mp.clone(), upper_entry.clone())),
         vec![(lower_mp.clone(), lower_entry.clone())],
-        "overlayfs".to_string()
-    ).unwrap();
+        "overlayfs".to_string(),
+    )
+    .unwrap();
     let root = overlay.root_node();
 
     // Remove dir1 via OverlayFS
@@ -345,29 +447,47 @@ fn test_overlayfs_lower_mount_visibility_and_whiteout() {
 
     // Create /dir1/mnt in lower_mgr
     let lower_root = lower.root_node();
-    let dir1 = lower.create(&lower_root, &"dir1".to_string(), FileType::Directory, 0o755).unwrap();
-    let _mnt = lower.create(&dir1, &"mnt".to_string(), FileType::Directory, 0o755).unwrap();
+    let dir1 = lower
+        .create(&lower_root, &"dir1".to_string(), FileType::Directory, 0o755)
+        .unwrap();
+    let _mnt = lower
+        .create(&dir1, &"mnt".to_string(), FileType::Directory, 0o755)
+        .unwrap();
     // Create a file in mount_fs
     let mount_root = mount_fs.root_node();
-    mount_fs.create(&mount_root, &"file_in_mount".to_string(), FileType::RegularFile, 0o644).unwrap();
+    mount_fs
+        .create(
+            &mount_root,
+            &"file_in_mount".to_string(),
+            FileType::RegularFile,
+            0o644,
+        )
+        .unwrap();
 
     // bind mount: mount_mgr:/ → lower_mgr:/dir1/mnt
-    lower_mgr.bind_mount_from(&Arc::new(mount_mgr), "/", "/dir1/mnt").unwrap();
+    lower_mgr
+        .bind_mount_from(&Arc::new(mount_mgr), "/", "/dir1/mnt")
+        .unwrap();
 
     // Use /dir1/mnt in lower_mgr as the lower layer for OverlayFS
     let (mnt_entry, _) = lower_mgr.resolve_path("/dir1/mnt").unwrap();
     let mnt_mp = make_mount(lower.clone() as Arc<dyn FileSystemOperations>);
-    let (upper_mp, upper_entry) = make_mount_and_entry(upper.clone() as Arc<dyn FileSystemOperations>);
+    let (upper_mp, upper_entry) =
+        make_mount_and_entry(upper.clone() as Arc<dyn FileSystemOperations>);
     let overlay = OverlayFS::new(
         Some((upper_mp.clone(), upper_entry.clone())),
         vec![(mnt_mp.clone(), mnt_entry.clone())],
-        "overlayfs".to_string()
-    ).unwrap();
+        "overlayfs".to_string(),
+    )
+    .unwrap();
     let root = overlay.root_node();
 
     // Confirm that file_in_mount is visible via OverlayFS
     let file_node = overlay.lookup(&root, &"file_in_mount".to_string()).unwrap();
-    assert_eq!(file_node.metadata().unwrap().file_type, FileType::RegularFile);
+    assert_eq!(
+        file_node.metadata().unwrap().file_type,
+        FileType::RegularFile
+    );
 
     // Remove file_in_mount via OverlayFS (whiteout)
     overlay.remove(&root, &"file_in_mount".to_string()).unwrap();
@@ -375,7 +495,11 @@ fn test_overlayfs_lower_mount_visibility_and_whiteout() {
     assert!(overlay.lookup(&root, &"file_in_mount".to_string()).is_err());
     // Confirm that a whiteout file was created in the upper layer
     let upper_root = upper.root_node();
-    assert!(upper.lookup(&upper_root, &".wh.file_in_mount".to_string()).is_ok());
+    assert!(
+        upper
+            .lookup(&upper_root, &".wh.file_in_mount".to_string())
+            .is_ok()
+    );
 }
 
 #[test_case]
@@ -417,22 +541,49 @@ fn test_overlayfs_nested_mnt_bind_mounts() {
 
     // Create /mnt/child in lower
     let lower_root = lower.root_node();
-    let _mnt = lower.create(&lower_root, &"mnt".to_string(), FileType::Directory, 0o755).unwrap();
+    let _mnt = lower
+        .create(&lower_root, &"mnt".to_string(), FileType::Directory, 0o755)
+        .unwrap();
 
     // Create mount1:/file1, mount2:/file2
     let mount1_root = mount1.root_node();
-    mount1.create(&mount1_root, &"file1".to_string(), FileType::RegularFile, 0o644).unwrap();
-    let _child = lower.create(&mount1_root, &"child".to_string(), FileType::Directory, 0o755).unwrap();
+    mount1
+        .create(
+            &mount1_root,
+            &"file1".to_string(),
+            FileType::RegularFile,
+            0o644,
+        )
+        .unwrap();
+    let _child = lower
+        .create(
+            &mount1_root,
+            &"child".to_string(),
+            FileType::Directory,
+            0o755,
+        )
+        .unwrap();
 
     let mount2_root = mount2.root_node();
-    mount2.create(&mount2_root, &"file2".to_string(), FileType::RegularFile, 0o644).unwrap();
+    mount2
+        .create(
+            &mount2_root,
+            &"file2".to_string(),
+            FileType::RegularFile,
+            0o644,
+        )
+        .unwrap();
 
     // Bind mount with VfsManager
     let lower_mgr = VfsManager::new_with_root(lower.clone());
     let mount1_mgr = VfsManager::new_with_root(mount1.clone());
     let mount2_mgr = VfsManager::new_with_root(mount2.clone());
-    lower_mgr.bind_mount_from(&Arc::new(mount1_mgr), "/", "/mnt").unwrap();
-    lower_mgr.bind_mount_from(&Arc::new(mount2_mgr), "/", "/mnt/child").unwrap();
+    lower_mgr
+        .bind_mount_from(&Arc::new(mount1_mgr), "/", "/mnt")
+        .unwrap();
+    lower_mgr
+        .bind_mount_from(&Arc::new(mount2_mgr), "/", "/mnt/child")
+        .unwrap();
 
     // Check the lower_mgr's readdir for /mnt and /mnt/child
     // Expected structure:
@@ -446,7 +597,6 @@ fn test_overlayfs_nested_mnt_bind_mounts() {
     let entries = lower_mgr.readdir("/mnt/child").unwrap();
     assert!(entries.iter().any(|e| e.name == "file2"));
 
-
     // Get VfsEntry and MountPoint for lower:/mnt
     let (mnt_entry, mnt_mp) = lower_mgr.mount_tree.resolve_path("/mnt").unwrap();
     // Check mnt_mp has child mount
@@ -455,14 +605,16 @@ fn test_overlayfs_nested_mnt_bind_mounts() {
 
     // Upper layer is an empty TmpFS
     let upper = TmpFS::new(0);
-    let (upper_mp, upper_entry) = make_mount_and_entry(upper.clone() as Arc<dyn FileSystemOperations>);
+    let (upper_mp, upper_entry) =
+        make_mount_and_entry(upper.clone() as Arc<dyn FileSystemOperations>);
 
     // Create OverlayFS
     let overlay = OverlayFS::new(
         Some((upper_mp, upper_entry)),
         vec![(mnt_mp, mnt_entry.clone())],
-        "overlayfs".to_string()
-    ).unwrap();
+        "overlayfs".to_string(),
+    )
+    .unwrap();
     let root = overlay.root_node();
 
     // file1 and child should be visible at OverlayFS root
@@ -483,129 +635,187 @@ fn test_overlayfs_nested_mnt_bind_mounts() {
 fn test_overlayfs_cross_vfs() {
     /*
     Cross-VFS overlay test:
-    
+
     VFS1 (base_vfs) with lower layer:
     └── system/
         ├── lib.txt (file)
         └── config.txt (file)
-    
+
     VFS2 (container_vfs) with upper layer:
     └── overlay/
         ├── config.txt (file, overrides lower)
         └── app.txt (file, new)
-    
+
     Expected result in overlay:
     ├── lib.txt (from VFS1/system)
     ├── config.txt (from VFS2/overlay, overrides VFS1)
     └── app.txt (from VFS2/overlay)
     */
-    
+
     // Create two separate VfsManager instances to simulate cross-VFS scenario
     use crate::fs::vfs_v2::manager::VfsManager;
-    
+
     let base_vfs = Arc::new(VfsManager::new());
     let container_vfs = Arc::new(VfsManager::new());
-    
+
     // Create filesystems for each VFS
     let base_fs = TmpFS::new(0);
     let container_fs = TmpFS::new(0);
-    
+
     // Mount filesystems in their respective VFS managers
     base_vfs.mount(base_fs.clone(), "/", 0).unwrap();
     container_vfs.mount(container_fs.clone(), "/", 0).unwrap();
-    
+
     // Setup base VFS: create /system directory with files
     let base_root = base_fs.root_node();
-    let system_dir = base_fs.create(&base_root, &"system".to_string(), FileType::Directory, 0o755).unwrap();
-    
+    let system_dir = base_fs
+        .create(
+            &base_root,
+            &"system".to_string(),
+            FileType::Directory,
+            0o755,
+        )
+        .unwrap();
+
     // Create files in base system
-    let lib_file = base_fs.create(&system_dir, &"lib.txt".to_string(), FileType::RegularFile, 0o644).unwrap();
-    let config_file = base_fs.create(&system_dir, &"config.txt".to_string(), FileType::RegularFile, 0o644).unwrap();
+    let lib_file = base_fs
+        .create(
+            &system_dir,
+            &"lib.txt".to_string(),
+            FileType::RegularFile,
+            0o644,
+        )
+        .unwrap();
+    let config_file = base_fs
+        .create(
+            &system_dir,
+            &"config.txt".to_string(),
+            FileType::RegularFile,
+            0o644,
+        )
+        .unwrap();
 
     // Write content to base files
     let lib_content = b"Base library file";
     let config_content = b"Base config file";
-    
+
     let lib_obj = base_fs.open(&lib_file, 0o2).unwrap(); // Write mode
     lib_obj.write(lib_content).unwrap();
-    
-    let config_obj = base_fs.open(&config_file, 0o2).unwrap(); // Write mode 
+
+    let config_obj = base_fs.open(&config_file, 0o2).unwrap(); // Write mode
     config_obj.write(config_content).unwrap();
-    
+
     // Setup container VFS: create /overlay directory with files
     let container_root = container_fs.root_node();
-    let overlay_dir = container_fs.create(&container_root, &"overlay".to_string(), FileType::Directory, 0o755).unwrap();
-    
+    let overlay_dir = container_fs
+        .create(
+            &container_root,
+            &"overlay".to_string(),
+            FileType::Directory,
+            0o755,
+        )
+        .unwrap();
+
     // Create files in container overlay (one overrides, one is new)
-    let override_config = container_fs.create(&overlay_dir, &"config.txt".to_string(), FileType::RegularFile, 0o644).unwrap();
-    let app_file = container_fs.create(&overlay_dir, &"app.txt".to_string(), FileType::RegularFile, 0o644).unwrap();
-    
+    let override_config = container_fs
+        .create(
+            &overlay_dir,
+            &"config.txt".to_string(),
+            FileType::RegularFile,
+            0o644,
+        )
+        .unwrap();
+    let app_file = container_fs
+        .create(
+            &overlay_dir,
+            &"app.txt".to_string(),
+            FileType::RegularFile,
+            0o644,
+        )
+        .unwrap();
+
     // Write content to container files
     let override_content = b"Container config override";
     let app_content = b"Container app file";
-    
+
     let override_obj = container_fs.open(&override_config, 0o2).unwrap(); // Write mode
     override_obj.write(override_content).unwrap();
-    
+
     let app_obj = container_fs.open(&app_file, 0o2).unwrap(); // Write mode
     app_obj.write(app_content).unwrap();
-    
+
     // Create cross-VFS overlay using the new API
     let overlay = OverlayFS::new_from_paths_and_vfs(
-        Some((&container_vfs, "/overlay")),  // Upper layer from container VFS
-        vec![(&base_vfs, "/system")],        // Lower layer from base VFS
+        Some((&container_vfs, "/overlay")), // Upper layer from container VFS
+        vec![(&base_vfs, "/system")],       // Lower layer from base VFS
         "cross_vfs_test",
-    ).unwrap();
-    
+    )
+    .unwrap();
+
     let overlay_root = overlay.root_node();
-    
+
     // Test 1: Verify all expected files are visible
     let entries = overlay.readdir(&overlay_root).unwrap();
     let mut names: Vec<_> = entries.iter().map(|e| e.name.as_str()).collect();
     names.sort();
-    
-    assert!(names.contains(&"lib.txt"));     // From base VFS
-    assert!(names.contains(&"config.txt"));  // From container VFS (overrides base)
-    assert!(names.contains(&"app.txt"));     // From container VFS (new)
+
+    assert!(names.contains(&"lib.txt")); // From base VFS
+    assert!(names.contains(&"config.txt")); // From container VFS (overrides base)
+    assert!(names.contains(&"app.txt")); // From container VFS (new)
     assert_eq!(names.len(), 5); // Should have . .. lib.txt config.txt app.txt
-    
+
     // Test 2: Verify config.txt comes from upper layer (container VFS)
-    let config_node = overlay.lookup(&overlay_root, &"config.txt".to_string()).unwrap();
+    let config_node = overlay
+        .lookup(&overlay_root, &"config.txt".to_string())
+        .unwrap();
     let config_read_obj = overlay.open(&config_node, 0).unwrap(); // Read mode
     let mut config_buffer = vec![0u8; 128];
     let config_bytes_read = config_read_obj.read(&mut config_buffer).unwrap();
     let config_data = &config_buffer[..config_bytes_read];
     assert_eq!(config_data, override_content); // Should be container version
-    
+
     // Test 3: Verify lib.txt comes from lower layer (base VFS)
-    let lib_node = overlay.lookup(&overlay_root, &"lib.txt".to_string()).unwrap();
+    let lib_node = overlay
+        .lookup(&overlay_root, &"lib.txt".to_string())
+        .unwrap();
     let lib_read_obj = overlay.open(&lib_node, 0).unwrap(); // Read mode
     let mut lib_buffer = vec![0u8; 128];
     let lib_bytes_read = lib_read_obj.read(&mut lib_buffer).unwrap();
     let lib_data = &lib_buffer[..lib_bytes_read];
     assert_eq!(lib_data, lib_content); // Should be base version
-    
+
     // Test 4: Verify app.txt comes from upper layer (container VFS)
-    let app_node = overlay.lookup(&overlay_root, &"app.txt".to_string()).unwrap();
+    let app_node = overlay
+        .lookup(&overlay_root, &"app.txt".to_string())
+        .unwrap();
     let app_read_obj = overlay.open(&app_node, 0).unwrap(); // Read mode
     let mut app_buffer = vec![0u8; 128];
     let app_bytes_read = app_read_obj.read(&mut app_buffer).unwrap();
     let app_data = &app_buffer[..app_bytes_read];
     assert_eq!(app_data, app_content); // Should be container version
-    
+
     // Test 5: Verify write operations go to upper layer (container VFS)
-    let new_file = overlay.create(&overlay_root, &"new.txt".to_string(), FileType::RegularFile, 0o644).unwrap();
+    let new_file = overlay
+        .create(
+            &overlay_root,
+            &"new.txt".to_string(),
+            FileType::RegularFile,
+            0o644,
+        )
+        .unwrap();
     let new_obj = overlay.open(&new_file, 0o2).unwrap(); // Write mode
     let new_content = b"New file content";
     new_obj.write(new_content).unwrap();
-    
+
     // Verify the file appears in the overlay
     let updated_entries = overlay.readdir(&overlay_root).unwrap();
     let updated_names: Vec<_> = updated_entries.iter().map(|e| e.name.as_str()).collect();
     assert!(updated_names.contains(&"new.txt"));
-    
+
     // Verify we can read back what we wrote
-    let read_new_node = overlay.lookup(&overlay_root, &"new.txt".to_string()).unwrap();
+    let read_new_node = overlay
+        .lookup(&overlay_root, &"new.txt".to_string())
+        .unwrap();
     let read_new_obj = overlay.open(&read_new_node, 0).unwrap(); // Read mode
     let mut read_buffer = vec![0u8; 128];
     let read_bytes = read_new_obj.read(&mut read_buffer).unwrap();
@@ -617,34 +827,34 @@ fn test_overlayfs_cross_vfs() {
 fn test_overlayfs_cross_vfs_multi_layer() {
     /*
     Multi-layer cross-VFS overlay test:
-    
+
     VFS1 with layer1:
     └── base/
         └── base.txt
-    
+
     VFS2 with layer2:
     └── middle/
         ├── base.txt (overrides VFS1)
         └── middle.txt
-    
+
     VFS3 with upper layer:
     └── top/
         ├── middle.txt (overrides VFS2)
         └── top.txt
-    
+
     Expected overlay result:
     ├── base.txt (from VFS2/middle, overrides VFS1)
     ├── middle.txt (from VFS3/top, overrides VFS2)
     └── top.txt (from VFS3/top)
     */
-    
+
     use crate::fs::vfs_v2::manager::VfsManager;
-    
+
     // Create three VFS managers
     let vfs1 = Arc::new(VfsManager::new());
-    let vfs2 = Arc::new(VfsManager::new());  
+    let vfs2 = Arc::new(VfsManager::new());
     let vfs3 = Arc::new(VfsManager::new());
-    
+
     // Create filesystems
     let fs1 = TmpFS::new(0);
     let fs2 = TmpFS::new(0);
@@ -654,74 +864,122 @@ fn test_overlayfs_cross_vfs_multi_layer() {
     vfs1.mount(fs1.clone(), "/", 0).unwrap();
     vfs2.mount(fs2.clone(), "/", 0).unwrap();
     vfs3.mount(fs3.clone(), "/", 0).unwrap();
-    
+
     // Setup VFS1 (bottom layer)
     let root1 = fs1.root_node();
-    let base_dir = fs1.create(&root1, &"base".to_string(), FileType::Directory, 0o755).unwrap();
-    let base_file = fs1.create(&base_dir, &"base.txt".to_string(), FileType::RegularFile, 0o644).unwrap();
+    let base_dir = fs1
+        .create(&root1, &"base".to_string(), FileType::Directory, 0o755)
+        .unwrap();
+    let base_file = fs1
+        .create(
+            &base_dir,
+            &"base.txt".to_string(),
+            FileType::RegularFile,
+            0o644,
+        )
+        .unwrap();
     let base_obj = fs1.open(&base_file, 0o2).unwrap();
     base_obj.write(b"VFS1 base content").unwrap();
-    
+
     // Setup VFS2 (middle layer)
     let root2 = fs2.root_node();
-    let middle_dir = fs2.create(&root2, &"middle".to_string(), FileType::Directory, 0o755).unwrap();
-    let override_base = fs2.create(&middle_dir, &"base.txt".to_string(), FileType::RegularFile, 0o644).unwrap();
-    let middle_file = fs2.create(&middle_dir, &"middle.txt".to_string(), FileType::RegularFile, 0o644).unwrap();
+    let middle_dir = fs2
+        .create(&root2, &"middle".to_string(), FileType::Directory, 0o755)
+        .unwrap();
+    let override_base = fs2
+        .create(
+            &middle_dir,
+            &"base.txt".to_string(),
+            FileType::RegularFile,
+            0o644,
+        )
+        .unwrap();
+    let middle_file = fs2
+        .create(
+            &middle_dir,
+            &"middle.txt".to_string(),
+            FileType::RegularFile,
+            0o644,
+        )
+        .unwrap();
 
     let override_obj = fs2.open(&override_base, 0o2).unwrap();
     override_obj.write(b"VFS2 base override").unwrap();
     let middle_obj = fs2.open(&middle_file, 0o2).unwrap();
     middle_obj.write(b"VFS2 middle content").unwrap();
-    
+
     // Setup VFS3 (top layer)
     let root3 = fs3.root_node();
-    let top_dir = fs3.create(&root3, &"top".to_string(), FileType::Directory, 0o755).unwrap();
-    let override_middle = fs3.create(&top_dir, &"middle.txt".to_string(), FileType::RegularFile, 0o644).unwrap();
-    let top_file = fs3.create(&top_dir, &"top.txt".to_string(), FileType::RegularFile, 0o644).unwrap();
+    let top_dir = fs3
+        .create(&root3, &"top".to_string(), FileType::Directory, 0o755)
+        .unwrap();
+    let override_middle = fs3
+        .create(
+            &top_dir,
+            &"middle.txt".to_string(),
+            FileType::RegularFile,
+            0o644,
+        )
+        .unwrap();
+    let top_file = fs3
+        .create(
+            &top_dir,
+            &"top.txt".to_string(),
+            FileType::RegularFile,
+            0o644,
+        )
+        .unwrap();
 
     let override_middle_obj = fs3.open(&override_middle, 0o2).unwrap();
     override_middle_obj.write(b"VFS3 middle override").unwrap();
     let top_obj = fs3.open(&top_file, 0o2).unwrap();
     top_obj.write(b"VFS3 top content").unwrap();
-    
+
     // Create multi-layer cross-VFS overlay
     let overlay = OverlayFS::new_from_paths_and_vfs(
-        Some((&vfs3, "/top")),              // Upper from VFS3
+        Some((&vfs3, "/top")), // Upper from VFS3
         vec![
-            (&vfs2, "/middle"),             // Middle from VFS2  
-            (&vfs1, "/base"),               // Base from VFS1
+            (&vfs2, "/middle"), // Middle from VFS2
+            (&vfs1, "/base"),   // Base from VFS1
         ],
         "multi_cross_vfs_test",
-    ).unwrap();
-    
+    )
+    .unwrap();
+
     let overlay_root = overlay.root_node();
-    
+
     // Verify all files are visible
     let entries = overlay.readdir(&overlay_root).unwrap();
     let mut names: Vec<_> = entries.iter().map(|e| e.name.as_str()).collect();
     names.sort();
-    
+
     assert!(names.contains(&"base.txt"));
     assert!(names.contains(&"middle.txt"));
     assert!(names.contains(&"top.txt"));
     assert_eq!(names.len(), 5); // Should have . .. base.txt middle.txt top.txt
 
     // Verify base.txt comes from VFS2 (overrides VFS1)
-    let base_node = overlay.lookup(&overlay_root, &"base.txt".to_string()).unwrap();
+    let base_node = overlay
+        .lookup(&overlay_root, &"base.txt".to_string())
+        .unwrap();
     let base_read_obj = overlay.open(&base_node, 0).unwrap();
     let mut buffer = vec![0u8; 128];
     let bytes_read = base_read_obj.read(&mut buffer).unwrap();
     assert_eq!(&buffer[..bytes_read], b"VFS2 base override");
-    
+
     // Verify middle.txt comes from VFS3 (overrides VFS2)
-    let middle_node = overlay.lookup(&overlay_root, &"middle.txt".to_string()).unwrap();
+    let middle_node = overlay
+        .lookup(&overlay_root, &"middle.txt".to_string())
+        .unwrap();
     let middle_read_obj = overlay.open(&middle_node, 0).unwrap();
     let mut buffer = vec![0u8; 128];
     let bytes_read = middle_read_obj.read(&mut buffer).unwrap();
     assert_eq!(&buffer[..bytes_read], b"VFS3 middle override");
-    
+
     // Verify top.txt comes from VFS3
-    let top_node = overlay.lookup(&overlay_root, &"top.txt".to_string()).unwrap();
+    let top_node = overlay
+        .lookup(&overlay_root, &"top.txt".to_string())
+        .unwrap();
     let top_read_obj = overlay.open(&top_node, 0).unwrap();
     let mut buffer = vec![0u8; 128];
     let bytes_read = top_read_obj.read(&mut buffer).unwrap();
@@ -735,29 +993,46 @@ fn test_overlayfs_simple_readdir() {
     */
     let lower = TmpFS::new(0);
     let upper = TmpFS::new(0);
-    
+
     // Create one file in each layer
     let lower_root = lower.root_node();
-    lower.create(&lower_root, &"lower_file".to_string(), FileType::RegularFile, 0o644).unwrap();
-    
+    lower
+        .create(
+            &lower_root,
+            &"lower_file".to_string(),
+            FileType::RegularFile,
+            0o644,
+        )
+        .unwrap();
+
     let upper_root = upper.root_node();
-    upper.create(&upper_root, &"upper_file".to_string(), FileType::RegularFile, 0o644).unwrap();
-    
+    upper
+        .create(
+            &upper_root,
+            &"upper_file".to_string(),
+            FileType::RegularFile,
+            0o644,
+        )
+        .unwrap();
+
     // Create overlay
-    let (lower_mp, lower_entry) = make_mount_and_entry(lower.clone() as Arc<dyn FileSystemOperations>);
-    let (upper_mp, upper_entry) = make_mount_and_entry(upper.clone() as Arc<dyn FileSystemOperations>);
+    let (lower_mp, lower_entry) =
+        make_mount_and_entry(lower.clone() as Arc<dyn FileSystemOperations>);
+    let (upper_mp, upper_entry) =
+        make_mount_and_entry(upper.clone() as Arc<dyn FileSystemOperations>);
     let overlay = OverlayFS::new(
         Some((upper_mp, upper_entry)),
         vec![(lower_mp, lower_entry)],
-        "simple_test".to_string()
-    ).unwrap();
-    
+        "simple_test".to_string(),
+    )
+    .unwrap();
+
     // Test readdir
     let root = overlay.root_node();
     let entries = overlay.readdir(&root).unwrap();
     let mut names: Vec<_> = entries.iter().map(|e| e.name.as_str()).collect();
     names.sort();
-    
+
     // Should contain both files
     assert!(names.contains(&"lower_file"));
     assert!(names.contains(&"upper_file"));
@@ -769,11 +1044,11 @@ fn test_overlayfs_simple_readdir() {
 #[test_case]
 fn test_overlayfs_directory_read() {
     use crate::fs::DirectoryEntry;
-    
+
     /*
     Test directory read operations (not readdir, but reading directory via StreamOps::read)
     This tests the OverlayDirectoryObject implementation
-    
+
     Directory structure:
     lower:/
     ├── lower_file (file)
@@ -781,76 +1056,100 @@ fn test_overlayfs_directory_read() {
     upper:/
     ├── upper_file (file)
     ├── shared_dir/ (directory, merged with lower)
-    
+
     Expected read result should merge both layers
     */
-    
+
     let lower: Arc<dyn FileSystemOperations> = TmpFS::new(0);
     let upper: Arc<dyn FileSystemOperations> = TmpFS::new(0);
-    
+
     // Create files and directories in lower layer
     let lower_root = lower.root_node();
-    let _lower_file = lower.create(&lower_root, &"lower_file".to_string(), FileType::RegularFile, 0o644).unwrap();
-    let _lower_shared_dir = lower.create(&lower_root, &"shared_dir".to_string(), FileType::Directory, 0o755).unwrap();
-    
-    // Create files and directories in upper layer  
+    let _lower_file = lower
+        .create(
+            &lower_root,
+            &"lower_file".to_string(),
+            FileType::RegularFile,
+            0o644,
+        )
+        .unwrap();
+    let _lower_shared_dir = lower
+        .create(
+            &lower_root,
+            &"shared_dir".to_string(),
+            FileType::Directory,
+            0o755,
+        )
+        .unwrap();
+
+    // Create files and directories in upper layer
     let upper_root = upper.root_node();
-    let _upper_file = upper.create(&upper_root, &"upper_file".to_string(), FileType::RegularFile, 0o644).unwrap();
-    let _upper_shared_dir = upper.create(&upper_root, &"shared_dir".to_string(), FileType::Directory, 0o755).unwrap();
-    
+    let _upper_file = upper
+        .create(
+            &upper_root,
+            &"upper_file".to_string(),
+            FileType::RegularFile,
+            0o644,
+        )
+        .unwrap();
+    let _upper_shared_dir = upper
+        .create(
+            &upper_root,
+            &"shared_dir".to_string(),
+            FileType::Directory,
+            0o755,
+        )
+        .unwrap();
+
     // Create overlay filesystem
     let (upper_mount, upper_entry) = make_mount_and_entry(upper.clone());
     let (lower_mount, lower_entry) = make_mount_and_entry(lower.clone());
-    
+
     let overlay = OverlayFS::new(
         Some((upper_mount, upper_entry)),
         vec![(lower_mount, lower_entry)],
-        "test_overlay".to_string()
-    ).unwrap();
-    
+        "test_overlay".to_string(),
+    )
+    .unwrap();
+
     // Keep TmpFS instances alive
     let _keep_upper_alive = upper;
     let _keep_lower_alive = lower;
-    
+
     // Get overlay root node
     let overlay_root = overlay.root_node();
-    
+
     // Open the root directory for reading
     let dir_file = overlay.open(&overlay_root, 0).unwrap(); // O_RDONLY
-    
+
     // Read directory entries one by one using StreamOps::read
     let mut found_entries = Vec::new();
-    
+
     loop {
         let mut buffer = vec![0u8; 512]; // Buffer for one directory entry
         let bytes_read = dir_file.read(&mut buffer).unwrap();
         if bytes_read == 0 {
             break; // EOF
         }
-        
+
         // Parse the directory entry from the buffer
-        let dir_entry = unsafe {
-            &*(buffer.as_ptr() as *const DirectoryEntry)
-        };
-        
+        let dir_entry = unsafe { &*(buffer.as_ptr() as *const DirectoryEntry) };
+
         // Extract the name from the directory entry
         let name_bytes = unsafe {
-            core::slice::from_raw_parts(
-                dir_entry.name.as_ptr(),
-                dir_entry.name_len as usize
-            )
+            core::slice::from_raw_parts(dir_entry.name.as_ptr(), dir_entry.name_len as usize)
         };
         let name = core::str::from_utf8(name_bytes).unwrap().to_string();
         found_entries.push(name);
     }
-    
+
     // Verify that we found entries from both layers
     assert!(found_entries.contains(&"lower_file".to_string()));
     assert!(found_entries.contains(&"upper_file".to_string()));
     assert!(found_entries.contains(&"shared_dir".to_string()));
     assert!(found_entries.contains(&".".to_string()));
     assert!(found_entries.contains(&"..".to_string()));
-    
+
     // Should have exactly 5 entries: ., .., lower_file, upper_file, shared_dir
     assert_eq!(found_entries.len(), 5);
 }
@@ -858,10 +1157,10 @@ fn test_overlayfs_directory_read() {
 #[test_case]
 fn test_overlayfs_directory_read_whiteout() {
     use crate::fs::DirectoryEntry;
-    
+
     /*
     Test directory read with whiteout files - whiteout files should hide lower layer entries
-    
+
     Directory structure:
     lower:/
     ├── hidden_file (file)
@@ -869,67 +1168,91 @@ fn test_overlayfs_directory_read_whiteout() {
     upper:/
     ├── .wh.hidden_file (whiteout for hidden_file)
     ├── upper_file (file)
-    
+
     Expected: hidden_file should not appear in read results
     */
-    
+
     let lower: Arc<dyn FileSystemOperations> = TmpFS::new(0);
     let upper: Arc<dyn FileSystemOperations> = TmpFS::new(0);
-    
+
     // Create files in lower layer
     let lower_root = lower.root_node();
-    let _hidden_file = lower.create(&lower_root, &"hidden_file".to_string(), FileType::RegularFile, 0o644).unwrap();
-    let _visible_file = lower.create(&lower_root, &"visible_file".to_string(), FileType::RegularFile, 0o644).unwrap();
-    
+    let _hidden_file = lower
+        .create(
+            &lower_root,
+            &"hidden_file".to_string(),
+            FileType::RegularFile,
+            0o644,
+        )
+        .unwrap();
+    let _visible_file = lower
+        .create(
+            &lower_root,
+            &"visible_file".to_string(),
+            FileType::RegularFile,
+            0o644,
+        )
+        .unwrap();
+
     // Create whiteout and file in upper layer
     let upper_root = upper.root_node();
-    let _whiteout = upper.create(&upper_root, &".wh.hidden_file".to_string(), FileType::RegularFile, 0o644).unwrap();
-    let _upper_file = upper.create(&upper_root, &"upper_file".to_string(), FileType::RegularFile, 0o644).unwrap();
-    
+    let _whiteout = upper
+        .create(
+            &upper_root,
+            &".wh.hidden_file".to_string(),
+            FileType::RegularFile,
+            0o644,
+        )
+        .unwrap();
+    let _upper_file = upper
+        .create(
+            &upper_root,
+            &"upper_file".to_string(),
+            FileType::RegularFile,
+            0o644,
+        )
+        .unwrap();
+
     // Create overlay filesystem
     let (upper_mount, upper_entry) = make_mount_and_entry(upper.clone());
     let (lower_mount, lower_entry) = make_mount_and_entry(lower.clone());
-    
+
     let overlay = OverlayFS::new(
         Some((upper_mount, upper_entry)),
         vec![(lower_mount, lower_entry)],
-        "test_overlay".to_string()
-    ).unwrap();
-    
+        "test_overlay".to_string(),
+    )
+    .unwrap();
+
     // Keep filesystem instances alive for the test
     let _keep_upper_alive = upper;
     let _keep_lower_alive = lower;
-    
+
     // Get overlay root node
     let overlay_root = overlay.root_node();
-    
+
     // Open the root directory for reading
     let dir_file = overlay.open(&overlay_root, 0).unwrap(); // O_RDONLY
-    
+
     // Read directory entries
     let mut found_entries = Vec::new();
-    
+
     loop {
         let mut buffer = vec![0u8; 512]; // Buffer for one directory entry
         let bytes_read = dir_file.read(&mut buffer).unwrap();
         if bytes_read == 0 {
             break; // EOF
         }
-        
-        let dir_entry = unsafe {
-            &*(buffer.as_ptr() as *const DirectoryEntry)
-        };
-        
+
+        let dir_entry = unsafe { &*(buffer.as_ptr() as *const DirectoryEntry) };
+
         let name_bytes = unsafe {
-            core::slice::from_raw_parts(
-                dir_entry.name.as_ptr(),
-                dir_entry.name_len as usize
-            )
+            core::slice::from_raw_parts(dir_entry.name.as_ptr(), dir_entry.name_len as usize)
         };
         let name = core::str::from_utf8(name_bytes).unwrap().to_string();
         found_entries.push(name);
     }
-    
+
     // Verify whiteout behavior
     assert!(!found_entries.contains(&"hidden_file".to_string())); // Should be hidden by whiteout
     assert!(!found_entries.contains(&".wh.hidden_file".to_string())); // Whiteout itself should not appear
@@ -937,7 +1260,7 @@ fn test_overlayfs_directory_read_whiteout() {
     assert!(found_entries.contains(&"upper_file".to_string())); // Should be visible
     assert!(found_entries.contains(&".".to_string()));
     assert!(found_entries.contains(&"..".to_string()));
-    
+
     // Should have exactly 4 entries: ., .., visible_file, upper_file
     assert_eq!(found_entries.len(), 4);
 }

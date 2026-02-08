@@ -1,6 +1,6 @@
 [package]
 name = "Scarlet"
-version = "0.15.0"
+version = "0.16.0"
 edition = "2024"
 
 [[bin]]
@@ -15,5 +15,8 @@ hashbrown = "0.16.0"
 lazy_static = { version = "1.4.0", features = ["spin_no_std"], optional = true }
 
 [features]
-default = []
+default = ["network", "user-fpu", "user-vector"]
 profiler = ["dep:lazy_static"]
+network = []
+user-fpu = []
+user-vector = []

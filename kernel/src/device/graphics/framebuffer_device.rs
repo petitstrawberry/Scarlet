@@ -15,13 +15,15 @@
 
 extern crate alloc;
 
-use core::{any::Any};
-use alloc::{sync::Arc, vec::Vec, vec, collections::BTreeMap};
+use alloc::{collections::BTreeMap, sync::Arc, vec, vec::Vec};
+use core::any::Any;
 use spin::RwLock;
 
 use crate::device::{
-    char::CharDevice, graphics::manager::FramebufferResource, manager::DeviceManager, Device, DeviceType
+    Device, DeviceType, char::CharDevice, graphics::manager::FramebufferResource,
+    manager::DeviceManager,
 };
+use crate::object::capability::selectable::Selectable;
 use crate::object::capability::{ControlOps, MemoryMappingOps};
 
 /// Linux framebuffer ioctl command constants
@@ -218,6 +220,7 @@ impl Default for FbBitfield {
 }
 
 /// Mock mapping for testing purposes
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 struct MockMapping {
     vaddr: usize,
@@ -225,11 +228,11 @@ struct MockMapping {
 }
 
 /// Framebuffer character device implementation
-/// 
+///
 /// This device provides character-based access to framebuffer memory.
 /// It acts as a bridge between user-space programs and the graphics
 /// hardware through the GraphicsManager.
-/// 
+///
 /// Note: This device is stateless and does not maintain position information.
 /// Position management is handled by the FileObject layer for proper POSIX semantics.
 pub struct FramebufferCharDevice {
@@ -286,7 +289,7 @@ impl Device for FramebufferCharDevice {
 
 impl CharDevice for FramebufferCharDevice {
     /// Read a single byte from the framebuffer
-    /// 
+    ///
     /// This method is not supported in the new position-per-file-handle architecture.
     /// Use read_at() through a DevFileObject instead for proper position management.
     ///
@@ -300,7 +303,7 @@ impl CharDevice for FramebufferCharDevice {
     }
 
     /// Write a single byte to the framebuffer
-    /// 
+    ///
     /// This method is not supported in the new position-per-file-handle architecture.
     /// Use write_at() through a DevFileObject instead for proper position management.
     ///
@@ -355,19 +358,29 @@ impl CharDevice for FramebufferCharDevice {
             return Err("Invalid framebuffer address");
         }
 
+        // Use logical framebuffer size for boundary checks
+        let logical_size = fb_resource.config.size();
         let start_pos = position as usize;
-        if start_pos >= fb_resource.size {
+        if start_pos >= logical_size {
             return Ok(0); // EOF
         }
 
-        let available = fb_resource.size - start_pos;
+        let available = logical_size - start_pos;
         let to_read = buffer.len().min(available);
 
-        // Read data from framebuffer memory
+        // Read data from framebuffer memory.
+        //
+        // NOTE: On QEMU+HVF, some non-volatile memcpy-style accesses to MMIO-like
+        // framebuffer regions can VM-exit as EC_DATAABORT without ISV set, which
+        // causes QEMU's HVF backend to abort (assert(isv)). Use byte-wise volatile
+        // accesses to keep the trapped instruction decodable.
         unsafe {
             let fb_ptr = fb_resource.physical_addr as *const u8;
             let src_ptr = fb_ptr.add(start_pos);
-            core::ptr::copy_nonoverlapping(src_ptr, buffer.as_mut_ptr(), to_read);
+
+            for i in 0..to_read {
+                buffer[i] = core::ptr::read_volatile(src_ptr.add(i));
+            }
         }
 
         Ok(to_read)
@@ -391,19 +404,25 @@ impl CharDevice for FramebufferCharDevice {
             return Err("Invalid framebuffer address");
         }
 
+        // Use logical framebuffer size for boundary checks
+        let logical_size = fb_resource.config.size();
         let start_pos = position as usize;
-        if start_pos >= fb_resource.size {
+        if start_pos >= logical_size {
             return Err("Position beyond framebuffer size");
         }
 
-        let available = fb_resource.size - start_pos;
+        let available = logical_size - start_pos;
         let to_write = buffer.len().min(available);
 
-        // Write data to framebuffer memory
+        // Write data to framebuffer memory.
+        // See note in read_at() about QEMU+HVF and ISV.
         unsafe {
             let fb_ptr = fb_resource.physical_addr as *mut u8;
             let dst_ptr = fb_ptr.add(start_pos);
-            core::ptr::copy_nonoverlapping(buffer.as_ptr(), dst_ptr, to_write);
+
+            for i in 0..to_write {
+                core::ptr::write_volatile(dst_ptr.add(i), buffer[i]);
+            }
         }
 
         Ok(to_write)
@@ -413,26 +432,16 @@ impl CharDevice for FramebufferCharDevice {
 impl ControlOps for FramebufferCharDevice {
     fn control(&self, command: u32, arg: usize) -> Result<i32, &'static str> {
         use framebuffer_commands::*;
-        
+
         match command {
-            FBIOGET_VSCREENINFO => {
-                self.handle_get_vscreeninfo(arg)
-            }
-            FBIOGET_FSCREENINFO => {
-                self.handle_get_fscreeninfo(arg)
-            }
-            FBIO_FLUSH => {
-                self.handle_flush(arg)
-            }
-            FBIOPUT_VSCREENINFO => {
-                self.handle_put_vscreeninfo(arg)
-            }
-            _ => {
-                Err("Unsupported framebuffer control command")
-            }
+            FBIOGET_VSCREENINFO => self.handle_get_vscreeninfo(arg),
+            FBIOGET_FSCREENINFO => self.handle_get_fscreeninfo(arg),
+            FBIO_FLUSH => self.handle_flush(arg),
+            FBIOPUT_VSCREENINFO => self.handle_put_vscreeninfo(arg),
+            _ => Err("Unsupported framebuffer control command"),
         }
     }
-    
+
     fn supported_control_commands(&self) -> Vec<(u32, &'static str)> {
         use framebuffer_commands::*;
         vec![
@@ -445,166 +454,266 @@ impl ControlOps for FramebufferCharDevice {
 }
 
 impl MemoryMappingOps for FramebufferCharDevice {
-    fn get_mapping_info(&self, offset: usize, length: usize) 
-                       -> Result<(usize, usize, bool), &'static str> {
+    fn get_mapping_info(
+        &self,
+        offset: usize,
+        length: usize,
+    ) -> Result<(usize, usize, bool), &'static str> {
         let fb_resource = &self.fb_resource;
-        
+
+        // VMM requires page-aligned physical mappings.
+        if offset % crate::environment::PAGE_SIZE != 0 {
+            return Err("Framebuffer mmap offset must be page-aligned");
+        }
+        if length % crate::environment::PAGE_SIZE != 0 {
+            return Err("Framebuffer mmap length must be page-aligned");
+        }
+
         // Check if framebuffer supports memory mapping
         if fb_resource.physical_addr == 0 || fb_resource.size == 0 {
             return Err("Invalid framebuffer configuration");
         }
-        
+
         // Basic validation
+        // fb_resource.size is the page-aligned physical size, safe for mmap
         if offset >= fb_resource.size {
             return Err("Offset exceeds framebuffer size");
         }
-        
+
         let available_size = fb_resource.size - offset;
         if length > available_size {
             return Err("Requested length exceeds available framebuffer size");
         }
-        
-        // Return physical address, permissions (read/write), and shared flag
-        let paddr = fb_resource.physical_addr + offset;
+
+        // FramebufferResource stores a kernel virtual address for CPU access.
+        // Convert it to a physical address for user mmap.
+        let kva = fb_resource.physical_addr + offset;
+        let paddr = crate::vm::get_kernel_vm_manager()
+            .translate_vaddr(kva)
+            .ok_or("Failed to translate framebuffer address")?;
         let permissions = 0x3; // Read and Write
         let is_shared = true; // Framebuffer mappings are shared
-        
+
         Ok((paddr, permissions, is_shared))
     }
-    
+
     fn on_mapped(&self, vaddr: usize, _paddr: usize, length: usize, _offset: usize) {
         // Record this mapping in our tracking structure
         let mapping = MockMapping { vaddr, length };
         self.mappings.write().insert(vaddr, mapping);
     }
-    
+
     fn on_unmapped(&self, vaddr: usize, _length: usize) {
         // Remove the mapping from our tracking
         self.mappings.write().remove(&vaddr);
     }
-    
+
     fn supports_mmap(&self) -> bool {
         self.fb_resource.physical_addr != 0 && self.fb_resource.size > 0
     }
 }
 
+impl Selectable for FramebufferCharDevice {
+    fn wait_until_ready(
+        &self,
+        _interest: crate::object::capability::selectable::ReadyInterest,
+        _trapframe: &mut crate::arch::Trapframe,
+        _timeout_ticks: Option<u64>,
+    ) -> crate::object::capability::selectable::SelectWaitOutcome {
+        crate::object::capability::selectable::SelectWaitOutcome::Ready
+    }
+}
+
 impl FramebufferCharDevice {
-    /// Handle FBIOGET_VSCREENINFO control command
-    fn handle_get_vscreeninfo(&self, arg: usize) -> Result<i32, &'static str> {
-        if arg == 0 {
-            return Err("Invalid argument pointer");
-        }
-        
-        // Try to get current task for user pointer translation
-        // If no task (kernel context), use pointer directly
-        let target_ptr = if let Some(current_task) = crate::task::mytask() {
-            // User space: translate virtual address to physical
-            current_task.vm_manager.translate_vaddr(arg)
-                .ok_or("Invalid user pointer - not mapped")?
-        } else {
-            // Kernel space: use pointer directly
-            arg
-        };
-        
+    /// Build a FbVarScreenInfo reflecting the current framebuffer configuration
+    fn current_var_info(&self) -> FbVarScreenInfo {
         let fb_resource = &self.fb_resource;
         let config = &fb_resource.config;
-        
-        // Create variable screen info structure
+
         let mut var_info = FbVarScreenInfo::default();
         var_info.xres = config.width;
         var_info.yres = config.height;
         var_info.xres_virtual = config.width;
         var_info.yres_virtual = config.height;
         var_info.bits_per_pixel = (config.format.bytes_per_pixel() * 8) as u32;
-        
-        // Set color bitfields based on format
+
         match config.format {
             super::PixelFormat::RGBA8888 => {
-                var_info.red = FbBitfield { offset: 0, length: 8, msb_right: 0 };
-                var_info.green = FbBitfield { offset: 8, length: 8, msb_right: 0 };
-                var_info.blue = FbBitfield { offset: 16, length: 8, msb_right: 0 };
-                var_info.transp = FbBitfield { offset: 24, length: 8, msb_right: 0 };
+                var_info.red = FbBitfield {
+                    offset: 0,
+                    length: 8,
+                    msb_right: 0,
+                };
+                var_info.green = FbBitfield {
+                    offset: 8,
+                    length: 8,
+                    msb_right: 0,
+                };
+                var_info.blue = FbBitfield {
+                    offset: 16,
+                    length: 8,
+                    msb_right: 0,
+                };
+                var_info.transp = FbBitfield {
+                    offset: 24,
+                    length: 8,
+                    msb_right: 0,
+                };
             }
             super::PixelFormat::BGRA8888 => {
-                var_info.blue = FbBitfield { offset: 0, length: 8, msb_right: 0 };
-                var_info.green = FbBitfield { offset: 8, length: 8, msb_right: 0 };
-                var_info.red = FbBitfield { offset: 16, length: 8, msb_right: 0 };
-                var_info.transp = FbBitfield { offset: 24, length: 8, msb_right: 0 };
+                var_info.blue = FbBitfield {
+                    offset: 0,
+                    length: 8,
+                    msb_right: 0,
+                };
+                var_info.green = FbBitfield {
+                    offset: 8,
+                    length: 8,
+                    msb_right: 0,
+                };
+                var_info.red = FbBitfield {
+                    offset: 16,
+                    length: 8,
+                    msb_right: 0,
+                };
+                var_info.transp = FbBitfield {
+                    offset: 24,
+                    length: 8,
+                    msb_right: 0,
+                };
             }
             super::PixelFormat::RGB888 => {
-                var_info.red = FbBitfield { offset: 0, length: 8, msb_right: 0 };
-                var_info.green = FbBitfield { offset: 8, length: 8, msb_right: 0 };
-                var_info.blue = FbBitfield { offset: 16, length: 8, msb_right: 0 };
-                var_info.transp = FbBitfield { offset: 0, length: 0, msb_right: 0 };
+                var_info.red = FbBitfield {
+                    offset: 0,
+                    length: 8,
+                    msb_right: 0,
+                };
+                var_info.green = FbBitfield {
+                    offset: 8,
+                    length: 8,
+                    msb_right: 0,
+                };
+                var_info.blue = FbBitfield {
+                    offset: 16,
+                    length: 8,
+                    msb_right: 0,
+                };
+                var_info.transp = FbBitfield {
+                    offset: 0,
+                    length: 0,
+                    msb_right: 0,
+                };
             }
             super::PixelFormat::RGB565 => {
-                var_info.red = FbBitfield { offset: 11, length: 5, msb_right: 0 };
-                var_info.green = FbBitfield { offset: 5, length: 6, msb_right: 0 };
-                var_info.blue = FbBitfield { offset: 0, length: 5, msb_right: 0 };
-                var_info.transp = FbBitfield { offset: 0, length: 0, msb_right: 0 };
+                var_info.red = FbBitfield {
+                    offset: 11,
+                    length: 5,
+                    msb_right: 0,
+                };
+                var_info.green = FbBitfield {
+                    offset: 5,
+                    length: 6,
+                    msb_right: 0,
+                };
+                var_info.blue = FbBitfield {
+                    offset: 0,
+                    length: 5,
+                    msb_right: 0,
+                };
+                var_info.transp = FbBitfield {
+                    offset: 0,
+                    length: 0,
+                    msb_right: 0,
+                };
             }
         }
-        
-        // Safely copy to user space using translated physical address
-        unsafe {
-            let user_ptr = target_ptr as *mut FbVarScreenInfo;
-            core::ptr::write(user_ptr, var_info);
-        }
-        
-        Ok(0) // Success
+
+        var_info
     }
-    
-    /// Handle FBIOGET_FSCREENINFO control command
-    fn handle_get_fscreeninfo(&self, arg: usize) -> Result<i32, &'static str> {
+
+    /// Handle FBIOGET_VSCREENINFO control command
+    fn handle_get_vscreeninfo(&self, arg: usize) -> Result<i32, &'static str> {
         if arg == 0 {
             return Err("Invalid argument pointer");
         }
-        
+
         // Try to get current task for user pointer translation
         // If no task (kernel context), use pointer directly
         let target_ptr = if let Some(current_task) = crate::task::mytask() {
             // User space: translate virtual address to physical
-            current_task.vm_manager.translate_vaddr(arg)
+            current_task
+                .vm_manager
+                .translate_vaddr(arg)
                 .ok_or("Invalid user pointer - not mapped")?
         } else {
             // Kernel space: use pointer directly
             arg
         };
-        
+
+        let var_info = self.current_var_info();
+
+        // Safely copy to user space using translated physical address
+        unsafe {
+            let user_ptr = target_ptr as *mut FbVarScreenInfo;
+            core::ptr::write(user_ptr, var_info);
+        }
+
+        Ok(0) // Success
+    }
+
+    /// Handle FBIOGET_FSCREENINFO control command
+    fn handle_get_fscreeninfo(&self, arg: usize) -> Result<i32, &'static str> {
+        if arg == 0 {
+            return Err("Invalid argument pointer");
+        }
+
+        // Try to get current task for user pointer translation
+        // If no task (kernel context), use pointer directly
+        let target_ptr = if let Some(current_task) = crate::task::mytask() {
+            // User space: translate virtual address to physical
+            current_task
+                .vm_manager
+                .translate_vaddr(arg)
+                .ok_or("Invalid user pointer - not mapped")?
+        } else {
+            // Kernel space: use pointer directly
+            arg
+        };
+
         let fb_resource = &self.fb_resource;
         let config = &fb_resource.config;
-        
+
         // Create fixed screen info structure
         let mut fix_info = FbFixScreenInfo::default();
-        
+
         // Set identification string
         let fb_name = fb_resource.logical_name.as_bytes();
         let copy_len = fb_name.len().min(fix_info.id.len() - 1);
         fix_info.id[..copy_len].copy_from_slice(&fb_name[..copy_len]);
-        
+
         fix_info.smem_start = fb_resource.physical_addr;
         fix_info.smem_len = fb_resource.size as u32;
         fix_info.line_length = config.stride;
         fix_info.type_ = 0; // FB_TYPE_PACKED_PIXELS
         fix_info.visual = 2; // FB_VISUAL_TRUECOLOR
-        
+
         // Safely copy to user space using translated physical address
         unsafe {
             let user_ptr = target_ptr as *mut FbFixScreenInfo;
             core::ptr::write(user_ptr, fix_info);
         }
-        
+
         Ok(0) // Success
     }
-    
+
     /// Handle FBIO_FLUSH control command
-    /// 
+    ///
     /// This command forces any pending framebuffer changes to be displayed.
     /// For memory-mapped framebuffers, this typically involves ensuring
     /// CPU caches are flushed and any display controller updates are triggered.
     fn handle_flush(&self, _arg: usize) -> Result<i32, &'static str> {
         let fb_resource = &self.fb_resource;
-        
+
         // Check if framebuffer address is valid
         if fb_resource.physical_addr == 0 {
             return Err("Invalid framebuffer address");
@@ -614,16 +723,16 @@ impl FramebufferCharDevice {
         // In a real implementation, this would ensure that any writes to the framebuffer
         // are visible to the display controller.
         // TODO: Implement actual cache flushing logic
-        
+
         // Trigger display controller update if needed
         // For some hardware, writing to framebuffer memory doesn't immediately update the display
         self.trigger_display_update()?;
-        
+
         Ok(0) // Success
     }
-    
+
     /// Trigger display controller update
-    /// 
+    ///
     /// Some display controllers require explicit commands to update the display
     /// from framebuffer contents. This method handles such updates.
     fn trigger_display_update(&self) -> Result<(), &'static str> {
@@ -635,7 +744,7 @@ impl FramebufferCharDevice {
                 // Trigger a full framebuffer flush to ensure display is updated
                 let config = &self.fb_resource.config;
                 graphics_device.flush_framebuffer(0, 0, config.width, config.height)?;
-                
+
                 // Verify that the framebuffer address is still valid
                 match graphics_device.get_framebuffer_address() {
                     Ok(addr) => {
@@ -650,18 +759,41 @@ impl FramebufferCharDevice {
                 }
             }
         }
-        
+
         // For virtualized environments (like QEMU), framebuffer writes are often
         // automatically reflected on the display, so no additional action is needed
-        
+
         Ok(())
     }
-    
+
     /// Handle FBIOPUT_VSCREENINFO control command  
-    fn handle_put_vscreeninfo(&self, _arg: usize) -> Result<i32, &'static str> {
-        // Setting screen info is not supported in this basic implementation
-        // In a real implementation, this would validate and apply new settings
-        Err("Setting screen information not supported")
+    fn handle_put_vscreeninfo(&self, arg: usize) -> Result<i32, &'static str> {
+        // Basic validation of user pointer
+        if arg == 0 {
+            return Ok(-22); // EINVAL
+        }
+
+        // Translate user-space pointer if available
+        let target_ptr = if let Some(current_task) = crate::task::mytask() {
+            match current_task.vm_manager.translate_vaddr(arg) {
+                Some(p) => p,
+                None => return Ok(-14), // EFAULT
+            }
+        } else {
+            arg
+        } as *mut FbVarScreenInfo;
+
+        // Read the requested settings (not strictly required, but useful for future validation)
+        let _req = unsafe { core::ptr::read(target_ptr as *const FbVarScreenInfo) };
+
+        // We currently do not support mode switching. Acknowledge the request
+        // and write back the actually supported mode so userland can proceed.
+        let accepted = self.current_var_info();
+        unsafe {
+            core::ptr::write(target_ptr, accepted);
+        }
+
+        Ok(0)
     }
 }
 
@@ -669,15 +801,17 @@ impl FramebufferCharDevice {
 mod tests {
     use super::*;
     use crate::device::{
-        graphics::{manager::GraphicsManager, GenericGraphicsDevice, FramebufferConfig, PixelFormat},
         Device,
+        graphics::{
+            FramebufferConfig, GenericGraphicsDevice, PixelFormat, manager::GraphicsManager,
+        },
     };
     use alloc::{string::ToString, sync::Arc};
     use spin::RwLock;
 
     /// Test utility to setup a clean global GraphicsManager for each test
-    fn setup_clean_graphics_manager() -> &'static mut GraphicsManager {
-        let manager = GraphicsManager::get_mut_manager();
+    fn setup_clean_graphics_manager() -> &'static GraphicsManager {
+        let manager = GraphicsManager::get_manager();
         // Clear any existing state from previous tests
         manager.clear_for_test();
         manager
@@ -708,26 +842,30 @@ mod tests {
         let mut test_device = GenericGraphicsDevice::new("test-gpu-read-write");
         let config = FramebufferConfig::new(100, 100, PixelFormat::RGBA8888);
         test_device.set_framebuffer_config(config.clone());
-        
+
         // Allocate memory for test framebuffer
         let fb_size = config.size();
         let fb_pages = (fb_size + 4095) / 4096;
         let fb_addr = crate::mem::page::allocate_raw_pages(fb_pages) as usize;
         test_device.set_framebuffer_address(fb_addr);
-        
+
         let shared_device: Arc<dyn Device> = Arc::new(test_device);
-        
+
         // Register device with DeviceManager first
         let device_manager = DeviceManager::get_manager();
-        let device_id = device_manager.register_device_with_name("test-gpu-read-write".to_string(), shared_device.clone());
-        
+        let device_id = device_manager
+            .register_device_with_name("test-gpu-read-write".to_string(), shared_device.clone());
+
         // Then register with GraphicsManager
-        graphics_manager.register_framebuffer_from_device(device_id, shared_device).unwrap();
+        graphics_manager
+            .register_framebuffer_from_device(device_id, shared_device)
+            .unwrap();
 
         // Get the framebuffer resource that was assigned to this specific device
         let fb_resource = {
             let fb_names = graphics_manager.get_framebuffer_names();
-            let fb_name = fb_names.iter()
+            let fb_name = fb_names
+                .iter()
                 .find(|name| {
                     if let Some(fb_resource) = graphics_manager.get_framebuffer(name) {
                         fb_resource.source_device_id == device_id
@@ -736,15 +874,17 @@ mod tests {
                     }
                 })
                 .expect("Should have framebuffer for this device");
-            graphics_manager.get_framebuffer(fb_name).expect("Framebuffer should exist")
+            graphics_manager
+                .get_framebuffer(fb_name)
+                .expect("Framebuffer should exist")
         };
         let char_device = FramebufferCharDevice::new(fb_resource);
-        
+
         // Test write_at operation
         let test_data = [0x12, 0x34, 0x56, 0x78];
         let written = char_device.write_at(0, &test_data).unwrap();
         assert_eq!(written, 4);
-        
+
         // Test read_at operation
         let mut read_buffer = [0u8; 4];
         let read_count = char_device.read_at(0, &mut read_buffer).unwrap();
@@ -759,20 +899,24 @@ mod tests {
         let mut test_device = GenericGraphicsDevice::new("test-gpu-boundaries");
         let config = FramebufferConfig::new(10, 10, PixelFormat::RGB888); // Small 10x10 framebuffer
         test_device.set_framebuffer_config(config.clone());
-        
+
         let fb_size = config.size(); // 10 * 10 * 3 = 300 bytes
         let fb_pages = (fb_size + 4095) / 4096;
         let fb_addr = crate::mem::page::allocate_raw_pages(fb_pages) as usize;
         test_device.set_framebuffer_address(fb_addr);
-        
+
         let shared_device: Arc<dyn Device> = Arc::new(test_device);
         let device_manager = DeviceManager::get_manager();
-        let device_id = device_manager.register_device_with_name("test-gpu-boundaries".to_string(), shared_device.clone());
-        graphics_manager.register_framebuffer_from_device(device_id, shared_device).unwrap();
+        let device_id = device_manager
+            .register_device_with_name("test-gpu-boundaries".to_string(), shared_device.clone());
+        graphics_manager
+            .register_framebuffer_from_device(device_id, shared_device)
+            .unwrap();
 
         let fb_resource = {
             let fb_names = graphics_manager.get_framebuffer_names();
-            let fb_name = fb_names.iter()
+            let fb_name = fb_names
+                .iter()
                 .find(|name| {
                     if let Some(fb_resource) = graphics_manager.get_framebuffer(name) {
                         fb_resource.source_device_id == device_id
@@ -781,44 +925,63 @@ mod tests {
                     }
                 })
                 .expect("Should have framebuffer for this device");
-            graphics_manager.get_framebuffer(fb_name).expect("Framebuffer should exist")
+            graphics_manager
+                .get_framebuffer(fb_name)
+                .expect("Framebuffer should exist")
         };
         let char_device = FramebufferCharDevice::new(fb_resource);
-        
+
         // First, clear the framebuffer by writing zeros
         let zero_buffer = vec![0u8; fb_size];
         assert_eq!(char_device.write_at(0, &zero_buffer).unwrap(), fb_size);
-        
+
         // Test writing at the start
         let start_data = [0xFF, 0x00, 0xFF];
         assert_eq!(char_device.write_at(0, &start_data).unwrap(), 3);
-        
+
         // Test writing at the end (non-overlapping with partial write test)
         let end_data = [0x00, 0xFF, 0x00];
-        assert_eq!(char_device.write_at((fb_size - 6) as u64, &end_data).unwrap(), 3);
-        
+        assert_eq!(
+            char_device
+                .write_at((fb_size - 6) as u64, &end_data)
+                .unwrap(),
+            3
+        );
+
         // Test writing beyond boundaries (should fail or write partial)
         let beyond_data = [0xAA, 0xBB, 0xCC, 0xDD];
         let result = char_device.write_at(fb_size as u64, &beyond_data);
         assert!(result.is_err() || result.unwrap() == 0);
-        
+
         // Test partial write at boundary (this will overwrite the last 2 bytes)
         let partial_data = [0x11, 0x22, 0x33, 0x44, 0x55];
-        let written = char_device.write_at((fb_size - 2) as u64, &partial_data).unwrap();
+        let written = char_device
+            .write_at((fb_size - 2) as u64, &partial_data)
+            .unwrap();
         assert_eq!(written, 2); // Should only write 2 bytes that fit
-        
+
         // Verify reads
         let mut read_start = [0u8; 3];
         assert_eq!(char_device.read_at(0, &mut read_start).unwrap(), 3);
         assert_eq!(read_start, start_data);
-        
+
         let mut read_end = [0u8; 3];
-        assert_eq!(char_device.read_at((fb_size - 6) as u64, &mut read_end).unwrap(), 3);
+        assert_eq!(
+            char_device
+                .read_at((fb_size - 6) as u64, &mut read_end)
+                .unwrap(),
+            3
+        );
         assert_eq!(read_end, end_data);
-        
+
         // Verify the partial write at the very end
         let mut read_partial = [0u8; 2];
-        assert_eq!(char_device.read_at((fb_size - 2) as u64, &mut read_partial).unwrap(), 2);
+        assert_eq!(
+            char_device
+                .read_at((fb_size - 2) as u64, &mut read_partial)
+                .unwrap(),
+            2
+        );
         assert_eq!(read_partial, [0x11, 0x22]);
     }
 
@@ -834,23 +997,29 @@ mod tests {
             let mut test_device = GenericGraphicsDevice::new("test-gpu-pixel-format");
             let config = FramebufferConfig::new(4, 4, pixel_format); // 4x4 pixels
             test_device.set_framebuffer_config(config.clone());
-            
+
             let fb_size = config.size();
             let expected_size = 4 * 4 * expected_bpp;
             assert_eq!(fb_size, expected_size);
-            
+
             let fb_pages = (fb_size + 4095) / 4096;
             let fb_addr = crate::mem::page::allocate_raw_pages(fb_pages) as usize;
             test_device.set_framebuffer_address(fb_addr);
-            
+
             let shared_device: Arc<dyn Device> = Arc::new(test_device);
             let device_manager = DeviceManager::get_manager();
-            let device_id = device_manager.register_device_with_name(alloc::format!("test-gpu-{:?}", pixel_format), shared_device.clone());
-            graphics_manager.register_framebuffer_from_device(device_id, shared_device).unwrap();
+            let device_id = device_manager.register_device_with_name(
+                alloc::format!("test-gpu-{:?}", pixel_format),
+                shared_device.clone(),
+            );
+            graphics_manager
+                .register_framebuffer_from_device(device_id, shared_device)
+                .unwrap();
 
             let fb_resource = {
                 let fb_names = graphics_manager.get_framebuffer_names();
-                let fb_name = fb_names.iter()
+                let fb_name = fb_names
+                    .iter()
                     .find(|name| {
                         if let Some(fb_resource) = graphics_manager.get_framebuffer(name) {
                             fb_resource.source_device_id == device_id
@@ -859,23 +1028,28 @@ mod tests {
                         }
                     })
                     .expect("Should have framebuffer for this device");
-                graphics_manager.get_framebuffer(fb_name).expect("Framebuffer should exist")
+                graphics_manager
+                    .get_framebuffer(fb_name)
+                    .expect("Framebuffer should exist")
             };
             let char_device = FramebufferCharDevice::new(fb_resource);
-            
+
             // Test writing a single pixel
             let pixel_data = match expected_bpp {
-                2 => vec![0xFF, 0x00], // RGB565
-                3 => vec![0xFF, 0x00, 0xFF], // RGB888
+                2 => vec![0xFF, 0x00],             // RGB565
+                3 => vec![0xFF, 0x00, 0xFF],       // RGB888
                 4 => vec![0xFF, 0x00, 0xFF, 0x80], // RGBA8888/BGRA8888
                 _ => unreachable!(),
             };
-            
+
             assert_eq!(char_device.write_at(0, &pixel_data).unwrap(), expected_bpp);
-            
+
             // Test reading the pixel back
             let mut read_pixel = vec![0u8; expected_bpp];
-            assert_eq!(char_device.read_at(0, &mut read_pixel).unwrap(), expected_bpp);
+            assert_eq!(
+                char_device.read_at(0, &mut read_pixel).unwrap(),
+                expected_bpp
+            );
             assert_eq!(read_pixel, pixel_data);
         }
     }
@@ -887,20 +1061,24 @@ mod tests {
         let mut test_device = GenericGraphicsDevice::new("test-gpu-caps");
         let config = FramebufferConfig::new(100, 100, PixelFormat::RGBA8888);
         test_device.set_framebuffer_config(config.clone());
-        
+
         let fb_size = config.size();
         let fb_pages = (fb_size + 4095) / 4096;
         let fb_addr = crate::mem::page::allocate_raw_pages(fb_pages) as usize;
         test_device.set_framebuffer_address(fb_addr);
-        
+
         let shared_device: Arc<dyn Device> = Arc::new(test_device);
         let device_manager = DeviceManager::get_manager();
-        let device_id = device_manager.register_device_with_name("test-gpu-caps".to_string(), shared_device.clone());
-        graphics_manager.register_framebuffer_from_device(device_id, shared_device).unwrap();
+        let device_id = device_manager
+            .register_device_with_name("test-gpu-caps".to_string(), shared_device.clone());
+        graphics_manager
+            .register_framebuffer_from_device(device_id, shared_device)
+            .unwrap();
 
         let fb_resource = {
             let fb_names = graphics_manager.get_framebuffer_names();
-            let fb_name = fb_names.iter()
+            let fb_name = fb_names
+                .iter()
                 .find(|name| {
                     if let Some(fb_resource) = graphics_manager.get_framebuffer(name) {
                         fb_resource.source_device_id == device_id
@@ -909,16 +1087,18 @@ mod tests {
                     }
                 })
                 .expect("Should have framebuffer for this device");
-            graphics_manager.get_framebuffer(fb_name).expect("Framebuffer should exist")
+            graphics_manager
+                .get_framebuffer(fb_name)
+                .expect("Framebuffer should exist")
         };
         let char_device = FramebufferCharDevice::new(fb_resource);
-        
+
         // Test capabilities
         assert!(char_device.can_read());
         assert!(char_device.can_write());
         assert_eq!(char_device.device_type(), DeviceType::Char);
         assert_eq!(char_device.name(), "framebuffer");
-        
+
         // Test with invalid framebuffer (zero address)
         let invalid_config = FramebufferConfig::new(10, 10, PixelFormat::RGB888);
         let invalid_resource = Arc::new(FramebufferResource {
@@ -930,7 +1110,7 @@ mod tests {
             created_char_device_id: RwLock::new(None),
         });
         let invalid_device = FramebufferCharDevice::new(invalid_resource);
-        
+
         assert!(!invalid_device.can_read());
         assert!(!invalid_device.can_write());
     }
@@ -941,20 +1121,24 @@ mod tests {
         let mut test_device = GenericGraphicsDevice::new("test-gpu-unsupported");
         let config = FramebufferConfig::new(10, 10, PixelFormat::RGB888);
         test_device.set_framebuffer_config(config.clone());
-        
+
         let fb_size = config.size();
         let fb_pages = (fb_size + 4095) / 4096;
         let fb_addr = crate::mem::page::allocate_raw_pages(fb_pages) as usize;
         test_device.set_framebuffer_address(fb_addr);
-        
+
         let shared_device: Arc<dyn Device> = Arc::new(test_device);
         let device_manager = DeviceManager::get_manager();
-        let device_id = device_manager.register_device_with_name("test-gpu-unsupported".to_string(), shared_device.clone());
-        graphics_manager.register_framebuffer_from_device(device_id, shared_device).unwrap();
+        let device_id = device_manager
+            .register_device_with_name("test-gpu-unsupported".to_string(), shared_device.clone());
+        graphics_manager
+            .register_framebuffer_from_device(device_id, shared_device)
+            .unwrap();
 
         let fb_resource = {
             let fb_names = graphics_manager.get_framebuffer_names();
-            let fb_name = fb_names.iter()
+            let fb_name = fb_names
+                .iter()
                 .find(|name| {
                     if let Some(fb_resource) = graphics_manager.get_framebuffer(name) {
                         fb_resource.source_device_id == device_id
@@ -963,13 +1147,15 @@ mod tests {
                     }
                 })
                 .expect("Should have framebuffer for this device");
-            graphics_manager.get_framebuffer(fb_name).expect("Framebuffer should exist")
+            graphics_manager
+                .get_framebuffer(fb_name)
+                .expect("Framebuffer should exist")
         };
         let char_device = FramebufferCharDevice::new(fb_resource);
-        
+
         // Test that read_byte returns None (unsupported)
         assert_eq!(char_device.read_byte(), None);
-        
+
         // Test that write_byte returns error (unsupported)
         let result = char_device.write_byte(0xFF);
         assert!(result.is_err());
@@ -982,20 +1168,24 @@ mod tests {
         let mut test_device = GenericGraphicsDevice::new("test-gpu-large");
         let config = FramebufferConfig::new(256, 256, PixelFormat::RGBA8888);
         test_device.set_framebuffer_config(config.clone());
-        
+
         let fb_size = config.size(); // 256 * 256 * 4 = 262,144 bytes
         let fb_pages = (fb_size + 4095) / 4096;
         let fb_addr = crate::mem::page::allocate_raw_pages(fb_pages) as usize;
         test_device.set_framebuffer_address(fb_addr);
-        
+
         let shared_device: Arc<dyn Device> = Arc::new(test_device);
         let device_manager = DeviceManager::get_manager();
-        let device_id = device_manager.register_device_with_name("test-gpu-large".to_string(), shared_device.clone());
-        graphics_manager.register_framebuffer_from_device(device_id, shared_device).unwrap();
+        let device_id = device_manager
+            .register_device_with_name("test-gpu-large".to_string(), shared_device.clone());
+        graphics_manager
+            .register_framebuffer_from_device(device_id, shared_device)
+            .unwrap();
 
         let fb_resource = {
             let fb_names = graphics_manager.get_framebuffer_names();
-            let fb_name = fb_names.iter()
+            let fb_name = fb_names
+                .iter()
                 .find(|name| {
                     if let Some(fb_resource) = graphics_manager.get_framebuffer(name) {
                         fb_resource.source_device_id == device_id
@@ -1004,26 +1194,28 @@ mod tests {
                     }
                 })
                 .expect("Should have framebuffer for this device");
-            graphics_manager.get_framebuffer(fb_name).expect("Framebuffer should exist")
+            graphics_manager
+                .get_framebuffer(fb_name)
+                .expect("Framebuffer should exist")
         };
         let char_device = FramebufferCharDevice::new(fb_resource);
-        
+
         // Test large write operation
         let large_data = vec![0x55u8; 4096]; // 4KB
         let written = char_device.write_at(0, &large_data).unwrap();
         assert_eq!(written, 4096);
-        
+
         // Test large read operation
         let mut read_buffer = vec![0u8; 4096];
         let read_count = char_device.read_at(0, &mut read_buffer).unwrap();
         assert_eq!(read_count, 4096);
         assert_eq!(read_buffer, large_data);
-        
+
         // Test writing across page boundaries
         let cross_page_data = vec![0xAAu8; 8192]; // 8KB
         let written = char_device.write_at(2048, &cross_page_data).unwrap();
         assert_eq!(written, 8192);
-        
+
         // Test reading across page boundaries
         let mut cross_read_buffer = vec![0u8; 8192];
         let read_count = char_device.read_at(2048, &mut cross_read_buffer).unwrap();
@@ -1037,20 +1229,24 @@ mod tests {
         let mut test_device = GenericGraphicsDevice::new("test-gpu-pattern");
         let config = FramebufferConfig::new(16, 16, PixelFormat::RGB888);
         test_device.set_framebuffer_config(config.clone());
-        
+
         let fb_size = config.size(); // 16 * 16 * 3 = 768 bytes
         let fb_pages = (fb_size + 4095) / 4096;
         let fb_addr = crate::mem::page::allocate_raw_pages(fb_pages) as usize;
         test_device.set_framebuffer_address(fb_addr);
-        
+
         let shared_device: Arc<dyn Device> = Arc::new(test_device);
         let device_manager = DeviceManager::get_manager();
-        let device_id = device_manager.register_device_with_name("test-gpu-pattern".to_string(), shared_device.clone());
-        graphics_manager.register_framebuffer_from_device(device_id, shared_device).unwrap();
+        let device_id = device_manager
+            .register_device_with_name("test-gpu-pattern".to_string(), shared_device.clone());
+        graphics_manager
+            .register_framebuffer_from_device(device_id, shared_device)
+            .unwrap();
 
         let fb_resource = {
             let fb_names = graphics_manager.get_framebuffer_names();
-            let fb_name = fb_names.iter()
+            let fb_name = fb_names
+                .iter()
                 .find(|name| {
                     if let Some(fb_resource) = graphics_manager.get_framebuffer(name) {
                         fb_resource.source_device_id == device_id
@@ -1059,10 +1255,12 @@ mod tests {
                     }
                 })
                 .expect("Should have framebuffer for this device");
-            graphics_manager.get_framebuffer(fb_name).expect("Framebuffer should exist")
+            graphics_manager
+                .get_framebuffer(fb_name)
+                .expect("Framebuffer should exist")
         };
         let char_device = FramebufferCharDevice::new(fb_resource);
-        
+
         // Test checkerboard pattern
         for y in 0..16 {
             for x in 0..16 {
@@ -1072,17 +1270,25 @@ mod tests {
                 } else {
                     [0x00, 0xFF, 0x00] // Green
                 };
-                assert_eq!(char_device.write_at(pixel_offset as u64, &color).unwrap(), 3);
+                assert_eq!(
+                    char_device.write_at(pixel_offset as u64, &color).unwrap(),
+                    3
+                );
             }
         }
-        
+
         // Verify checkerboard pattern
         for y in 0..16 {
             for x in 0..16 {
                 let pixel_offset = (y * 16 + x) * 3;
                 let mut read_color = [0u8; 3];
-                assert_eq!(char_device.read_at(pixel_offset as u64, &mut read_color).unwrap(), 3);
-                
+                assert_eq!(
+                    char_device
+                        .read_at(pixel_offset as u64, &mut read_color)
+                        .unwrap(),
+                    3
+                );
+
                 let expected_color = if (x + y) % 2 == 0 {
                     [0xFF, 0x00, 0x00] // Red
                 } else {
@@ -1092,29 +1298,33 @@ mod tests {
             }
         }
     }
-    
+
     #[test_case]
     fn test_framebuffer_memory_mapping_ops() {
         use crate::object::capability::MemoryMappingOps;
-        
+
         let graphics_manager = setup_clean_graphics_manager();
         let mut test_device = GenericGraphicsDevice::new("test-mmap-ops");
         let config = FramebufferConfig::new(4, 4, PixelFormat::RGBA8888);
         test_device.set_framebuffer_config(config.clone());
-        
+
         let fb_size = config.size();
         let fb_pages = (fb_size + 4095) / 4096;
         let fb_addr = crate::mem::page::allocate_raw_pages(fb_pages) as usize;
         test_device.set_framebuffer_address(fb_addr);
-        
+
         let shared_device: Arc<dyn Device> = Arc::new(test_device);
         let device_manager = DeviceManager::get_manager();
-        let device_id = device_manager.register_device_with_name("test-mmap-ops-device".to_string(), shared_device.clone());
-        graphics_manager.register_framebuffer_from_device(device_id, shared_device).unwrap();
+        let device_id = device_manager
+            .register_device_with_name("test-mmap-ops-device".to_string(), shared_device.clone());
+        graphics_manager
+            .register_framebuffer_from_device(device_id, shared_device)
+            .unwrap();
 
         let fb_resource = {
             let fb_names = graphics_manager.get_framebuffer_names();
-            let fb_name = fb_names.iter()
+            let fb_name = fb_names
+                .iter()
                 .find(|name| {
                     if let Some(fb_resource) = graphics_manager.get_framebuffer(name) {
                         fb_resource.source_device_id == device_id
@@ -1123,66 +1333,74 @@ mod tests {
                     }
                 })
                 .expect("Should have framebuffer for this device");
-            graphics_manager.get_framebuffer(fb_name).expect("Framebuffer should exist")
+            graphics_manager
+                .get_framebuffer(fb_name)
+                .expect("Framebuffer should exist")
         };
-        
+
         let fb_device = FramebufferCharDevice::new(fb_resource.clone());
-        
+
         // Test supports_mmap
         assert!(fb_device.supports_mmap());
-        
+
         // Test get_mapping_info
-        let result = fb_device.get_mapping_info(0, 32);
+        let result = fb_device.get_mapping_info(0, fb_pages * 4096);
         assert!(result.is_ok());
         let (paddr, permissions, is_shared) = result.unwrap();
         assert_eq!(paddr, fb_addr);
         assert_eq!(permissions, 0x3); // Read and Write
         assert!(is_shared);
-        
+
         // Test invalid offset
         let result = fb_device.get_mapping_info(fb_size + 1, 32);
         assert!(result.is_err());
-        
-        // Test invalid length  
+
+        // Test invalid length
         let result = fb_device.get_mapping_info(0, fb_size + 1);
         assert!(result.is_err());
-        
+
         // Test on_mapped callback
-        fb_device.on_mapped(0x1000, paddr, 32, 0);
+        fb_device.on_mapped(0x1000, paddr, fb_pages * 4096, 0);
         {
             let mappings = fb_device.mappings.read();
             assert_eq!(mappings.len(), 1);
             assert!(mappings.contains_key(&0x1000));
         }
-        
+
         // Test on_unmapped callback
-        fb_device.on_unmapped(0x1000, 32);
+        fb_device.on_unmapped(0x1000, fb_pages * 4096);
         {
             let mappings = fb_device.mappings.read();
             assert_eq!(mappings.len(), 0);
         }
     }
-    
-    #[test_case] 
+
+    #[test_case]
     fn test_framebuffer_mapping_basic_ops() {
         let graphics_manager = setup_clean_graphics_manager();
         let mut test_device = GenericGraphicsDevice::new("test-mapping-basic");
         let config = FramebufferConfig::new(4, 4, PixelFormat::RGBA8888);
         test_device.set_framebuffer_config(config.clone());
-        
+
         let fb_size = config.size();
         let fb_pages = (fb_size + 4095) / 4096;
         let fb_addr = crate::mem::page::allocate_raw_pages(fb_pages) as usize;
         test_device.set_framebuffer_address(fb_addr);
-        
+
         let shared_device: Arc<dyn Device> = Arc::new(test_device);
         let device_manager = DeviceManager::get_manager();
-        let device_id = device_manager.register_device_with_name("test-mapping-basic-device".to_string(), shared_device.clone());
-        graphics_manager.register_framebuffer_from_device(device_id, shared_device).unwrap();
+        let device_id = device_manager.register_device_with_name(
+            "test-mapping-basic-device".to_string(),
+            shared_device.clone(),
+        );
+        graphics_manager
+            .register_framebuffer_from_device(device_id, shared_device)
+            .unwrap();
 
         let fb_resource = {
             let fb_names = graphics_manager.get_framebuffer_names();
-            let fb_name = fb_names.iter()
+            let fb_name = fb_names
+                .iter()
                 .find(|name| {
                     if let Some(fb_resource) = graphics_manager.get_framebuffer(name) {
                         fb_resource.source_device_id == device_id
@@ -1191,22 +1409,24 @@ mod tests {
                     }
                 })
                 .expect("Should have framebuffer for this device");
-            graphics_manager.get_framebuffer(fb_name).expect("Framebuffer should exist")
+            graphics_manager
+                .get_framebuffer(fb_name)
+                .expect("Framebuffer should exist")
         };
-        
+
         let char_device = FramebufferCharDevice::new(fb_resource);
-        
+
         // Test that mappings are initially empty
         {
             let mappings = char_device.mappings.read();
             assert_eq!(mappings.len(), 0);
         }
-        
+
         // Test supports_mmap
         assert!(char_device.supports_mmap());
-        
+
         // Test get_mapping_info with valid parameters
-        let result = char_device.get_mapping_info(0, fb_size);
+        let result = char_device.get_mapping_info(0, fb_pages * 4096);
         assert!(result.is_ok());
         let (paddr, permissions, is_shared) = result.unwrap();
         assert_eq!(paddr, fb_addr);

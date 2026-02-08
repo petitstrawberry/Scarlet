@@ -11,7 +11,7 @@ fn dummy_request_fn(_request: &mut BlockIORequest) -> Result<(), &'static str> {
 
 #[test_case]
 fn test_block_device_creation() {
-    let device = GenericBlockDevice::new( "test_disk", 1024, dummy_request_fn);
+    let device = GenericBlockDevice::new("test_disk", 1024, dummy_request_fn);
     assert_eq!(device.get_disk_name(), "test_disk");
     assert_eq!(device.get_disk_size(), 1024);
     assert_eq!(device.request_queue.lock().len(), 0);
@@ -65,7 +65,6 @@ fn test_read_write() {
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].result, Ok(()));
 
-
     let read_request = Box::new(BlockIORequest {
         request_type: request::BlockIORequestType::Read,
         sector: 0,
@@ -84,5 +83,4 @@ fn test_read_write() {
     for i in 0..512 {
         assert_eq!(read_request.buffer[i], 0xff);
     }
-    
 }

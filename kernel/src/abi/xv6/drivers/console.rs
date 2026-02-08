@@ -1,6 +1,10 @@
 use core::any::Any;
 
-use crate::{device::{char::CharDevice, manager::DeviceManager, Device, DeviceType}, object::capability::{ControlOps, MemoryMappingOps}};
+use crate::object::capability::selectable::Selectable;
+use crate::{
+    device::{Device, DeviceType, char::CharDevice, manager::DeviceManager},
+    object::capability::{ControlOps, MemoryMappingOps},
+};
 
 /// Character device for xv6 console that bridges to TTY
 pub struct ConsoleDevice {
@@ -10,10 +14,7 @@ pub struct ConsoleDevice {
 
 impl ConsoleDevice {
     pub fn new(id: usize, name: &'static str) -> Self {
-        Self {
-            id,
-            name,
-        }
+        Self { id, name }
     }
 }
 
@@ -29,11 +30,11 @@ impl Device for ConsoleDevice {
     fn as_any(&self) -> &dyn Any {
         self
     }
-    
+
     fn as_any_mut(&mut self) -> &mut dyn Any {
         self
     }
-    
+
     fn as_char_device(&self) -> Option<&dyn CharDevice> {
         Some(self)
     }
@@ -44,9 +45,11 @@ impl CharDevice for ConsoleDevice {
         // Bridge to TTY device instead of direct serial access
         let device_manager = DeviceManager::get_manager();
         if let Some(tty_device) = device_manager.get_device_by_name("tty0") {
-            return tty_device.as_char_device().and_then(|char_device| char_device.read_byte());
+            return tty_device
+                .as_char_device()
+                .and_then(|char_device| char_device.read_byte());
         }
-        
+
         // Fallback: return None if TTY is not available
         None
     }
@@ -59,7 +62,7 @@ impl CharDevice for ConsoleDevice {
                 return char_device.write_byte(byte);
             }
         }
-        
+
         Err("TTY device not available")
     }
 
@@ -94,21 +97,34 @@ impl ControlOps for ConsoleDevice {
 }
 
 impl MemoryMappingOps for ConsoleDevice {
-    fn get_mapping_info(&self, _offset: usize, _length: usize) 
-                       -> Result<(usize, usize, bool), &'static str> {
+    fn get_mapping_info(
+        &self,
+        _offset: usize,
+        _length: usize,
+    ) -> Result<(usize, usize, bool), &'static str> {
         Err("Memory mapping not supported by console device")
     }
-    
+
     fn on_mapped(&self, _vaddr: usize, _paddr: usize, _length: usize, _offset: usize) {
         // Console devices don't support memory mapping
     }
-    
+
     fn on_unmapped(&self, _vaddr: usize, _length: usize) {
         // Console devices don't support memory mapping
     }
-    
+
     fn supports_mmap(&self) -> bool {
         false
     }
 }
 
+impl Selectable for ConsoleDevice {
+    fn wait_until_ready(
+        &self,
+        _interest: crate::object::capability::selectable::ReadyInterest,
+        _trapframe: &mut crate::arch::Trapframe,
+        _timeout_ticks: Option<u64>,
+    ) -> crate::object::capability::selectable::SelectWaitOutcome {
+        crate::object::capability::selectable::SelectWaitOutcome::Ready
+    }
+}

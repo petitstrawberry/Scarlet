@@ -3,13 +3,172 @@ use core::panic;
 
 use crate::abi::syscall_dispatcher;
 use crate::arch::trap::print_traplog;
-use crate::arch::Trapframe;
+use crate::arch::{Trapframe, get_cpu};
 use crate::println;
 use crate::sched::scheduler::get_scheduler;
 use crate::task::mytask;
 
+fn log_fatal_page_fault_context(
+    trapframe: &Trapframe,
+    cause: usize,
+    vaddr: usize,
+    task_id: usize,
+    task_name: &str,
+    asid: u16,
+) {
+    use crate::arch::vm::{get_root_pagetable_ptr, is_asid_used};
+
+    let cpu_id = get_cpu().get_cpuid();
+    let epc = trapframe.epc as usize;
+    // RISC-V integer registers: x1=ra, x2=sp, x8=s0/fp
+    let ra = trapframe.regs.reg[1] as usize;
+    let sp = trapframe.regs.reg[2] as usize;
+    let fp = trapframe.regs.reg[8] as usize;
+
+    let asid_used = is_asid_used(asid);
+    let root_pt = get_root_pagetable_ptr(asid).unwrap_or(core::ptr::null_mut());
+
+    println!(
+        "[Trap] fatal page fault map failed: cpu={} cause={} task_id={} name={} asid={} asid_used={} root_pt={:p}",
+        cpu_id, cause, task_id, task_name, asid, asid_used, root_pt
+    );
+    println!(
+        "[Trap] epc={:#x} vaddr={:#x} ra={:#x} sp={:#x} fp={:#x}",
+        epc, vaddr, ra, sp, fp
+    );
+}
+
 pub fn arch_exception_handler(trapframe: &mut Trapframe, cause: usize) {
     match cause {
+        /* Illegal instruction (used for lazy FP/Vector enable) */
+        2 => {
+            let task = get_scheduler()
+                .get_current_task(get_cpu().get_cpuid())
+                .unwrap();
+
+            let user_fpu_allowed = crate::arch::user_fpu_enabled();
+            let user_vec_allowed = crate::arch::user_vector_enabled();
+
+            // Read stval (may contain the faulting instruction word; can also be 0).
+            let mut inst: usize;
+            let sstatus: usize;
+            unsafe {
+                asm!(
+                    "csrr {0}, stval",
+                    "csrr {1}, sstatus",
+                    out(reg) inst,
+                    out(reg) sstatus,
+                );
+            }
+
+            // If stval doesn't contain the instruction, try to fetch it from the task's
+            // mapped user code via the VM translation.
+            if inst == 0 {
+                if let Some(paddr) = task.vm_manager.translate_vaddr(trapframe.epc as usize) {
+                    inst = crate::arch::instruction::Instruction::fetch(paddr).raw as usize;
+                }
+            }
+
+            // Helpers for determining whether we should treat this as a lazy enable trap.
+            let fs_off = (sstatus & 0x6000) == 0;
+            let vs_off = (sstatus & 0x600) == 0;
+
+            let raw32 = inst as u32;
+            let is_32bit = (raw32 & 0b11) == 0b11;
+
+            // Vector instructions are always 32-bit.
+            let is_vector_insn = if is_32bit {
+                let opcode = raw32 & 0x7f;
+                if opcode == 0x57 {
+                    true
+                } else if opcode == 0x73 {
+                    // SYSTEM/CSR access: treat v* CSRs as vector-related.
+                    let csr = (raw32 >> 20) & 0xfff;
+                    // vstart..vcsr, vl..vlenb
+                    (csr >= 0x008 && csr <= 0x00a) || (csr >= 0xc20 && csr <= 0xc22)
+                } else {
+                    false
+                }
+            } else {
+                false
+            };
+
+            let is_fpu_insn = if is_32bit {
+                let opcode = raw32 & 0x7f;
+                let funct3 = (raw32 >> 12) & 0x7;
+                match opcode {
+                    // FP arithmetic and conversion ops.
+                    0x53 | 0x43 | 0x47 | 0x4b | 0x4f => true,
+                    // FP loads/stores.
+                    0x07 | 0x27 => matches!(funct3, 0b010 | 0b011 | 0b100),
+                    _ => false,
+                }
+            } else {
+                // Minimal support for common compressed FP loads/stores.
+                let raw16 = (raw32 & 0xffff) as u16;
+                let quadrant = raw16 & 0b11;
+                let funct3 = (raw16 >> 13) & 0x7;
+
+                // C.FLD/C.FSD (quadrant 0), C.FLDSP/C.FSDSP (quadrant 2)
+                (quadrant == 0b00 || quadrant == 0b10) && matches!(funct3, 0b001 | 0b101)
+            };
+
+            // Handle lazy enable without relying purely on instruction decoding.
+            // This avoids panicking if stval is 0 or if we cannot classify the instruction.
+            #[cfg(feature = "user-vector")]
+            if user_vec_allowed && vs_off && is_vector_insn {
+                task.vcpu.lock().vector_used = true;
+                crate::arch::riscv64::fpu::enable_vector();
+                if task.vcpu.lock().vector.is_none() {
+                    task.vcpu.lock().vector = Some(alloc::boxed::Box::new(
+                        crate::arch::riscv64::fpu::VectorContext::new(),
+                    ));
+                }
+                unsafe { task.vcpu.lock().vector.as_ref().unwrap().restore() };
+                crate::arch::riscv64::fpu::mark_vector_clean();
+                return;
+            }
+
+            #[cfg(feature = "user-fpu")]
+            if user_fpu_allowed && fs_off && is_fpu_insn {
+                task.vcpu.lock().fpu_used = true;
+                crate::arch::riscv64::fpu::enable_fpu();
+                unsafe { task.vcpu.lock().fpu.restore() };
+                crate::arch::riscv64::fpu::mark_fpu_clean();
+                return;
+            }
+
+            // Fallback: if the relevant extension is disabled, enable it and restore a
+            // safe initial context (prevents leaking previous task state).
+            #[cfg(feature = "user-fpu")]
+            if user_fpu_allowed && fs_off {
+                task.vcpu.lock().fpu_used = true;
+                crate::arch::riscv64::fpu::enable_fpu();
+                unsafe { task.vcpu.lock().fpu.restore() };
+                crate::arch::riscv64::fpu::mark_fpu_clean();
+                return;
+            }
+
+            #[cfg(feature = "user-vector")]
+            if user_vec_allowed && vs_off {
+                task.vcpu.lock().vector_used = true;
+                crate::arch::riscv64::fpu::enable_vector();
+                if task.vcpu.lock().vector.is_none() {
+                    task.vcpu.lock().vector = Some(alloc::boxed::Box::new(
+                        crate::arch::riscv64::fpu::VectorContext::new(),
+                    ));
+                }
+                unsafe { task.vcpu.lock().vector.as_ref().unwrap().restore() };
+                crate::arch::riscv64::fpu::mark_vector_clean();
+                return;
+            }
+
+            print_traplog(trapframe);
+            panic!(
+                "Unhandled illegal instruction: inst={:#x} epc={:#x}",
+                raw32, trapframe.epc
+            );
+        }
         /* Environment call from U-mode */
         8 => {
             /* Execute SystemCall */
@@ -28,14 +187,32 @@ pub fn arch_exception_handler(trapframe: &mut Trapframe, cause: usize) {
         /* Instruction page fault */
         12 => {
             let mut vaddr = trapframe.epc as usize;
-            let task = get_scheduler().get_current_task(trapframe.get_cpuid()).unwrap();
-            let manager = &mut task.vm_manager;
+            let task = get_scheduler()
+                .get_current_task(get_cpu().get_cpuid())
+                .unwrap();
+            use crate::object::capability::memory_mapping::{AccessKind, AccessOp};
             loop {
-                match manager.lazy_map_page(vaddr) {
+                let access = AccessKind {
+                    op: AccessOp::Instruction,
+                    vaddr,
+                    size: None,
+                };
+                match task.vm_manager.lazy_map_page_with(access) {
                     Ok(_) => (),
                     Err(_) => {
                         print_traplog(trapframe);
-                        panic!("Failed to map page for instruction page fault at vaddr: {:#x}", vaddr);
+                        log_fatal_page_fault_context(
+                            trapframe,
+                            cause,
+                            vaddr,
+                            task.get_id(),
+                            &task.name.read(),
+                            task.vm_manager.get_asid(),
+                        );
+                        panic!(
+                            "Failed to map page for instruction page fault at vaddr: {:#x}",
+                            vaddr
+                        );
                     }
                 }
 
@@ -52,14 +229,37 @@ pub fn arch_exception_handler(trapframe: &mut Trapframe, cause: usize) {
             unsafe {
                 asm!("csrr {}, stval", out(reg) vaddr);
             }
-            let task = get_scheduler().get_current_task(trapframe.get_cpuid()).unwrap();
-            let manager = &mut task.vm_manager;
+            let task = get_scheduler()
+                .get_current_task(get_cpu().get_cpuid())
+                .unwrap();
+            use crate::object::capability::memory_mapping::{AccessKind, AccessOp};
             loop {
-                match manager.lazy_map_page(vaddr) {
+                let op = if cause == 13 {
+                    AccessOp::Load
+                } else {
+                    AccessOp::Store
+                };
+                let access = AccessKind {
+                    op,
+                    vaddr,
+                    size: None,
+                };
+                match task.vm_manager.lazy_map_page_with(access) {
                     Ok(_) => (),
                     Err(_) => {
                         print_traplog(trapframe);
-                        panic!("Failed to map page for load/store page fault at vaddr: {:#x}", vaddr);
+                        log_fatal_page_fault_context(
+                            trapframe,
+                            cause,
+                            vaddr,
+                            task.get_id(),
+                            &task.name.read(),
+                            task.vm_manager.get_asid(),
+                        );
+                        panic!(
+                            "Failed to map page for load/store page fault at vaddr: {:#x}",
+                            vaddr
+                        );
                     }
                 }
 
@@ -69,11 +269,10 @@ pub fn arch_exception_handler(trapframe: &mut Trapframe, cause: usize) {
                 }
                 vaddr = (vaddr + 4) & !0b11; // Align to the next 4-byte boundary
             }
-        },
+        }
         _ => {
             print_traplog(trapframe);
             panic!("Unhandled exception: {}", cause);
-            
         }
     }
 }

@@ -3,7 +3,8 @@
 //! This module provides memory mapping functionality for handles that support
 //! memory mapping operations.
 
-use crate::syscall::{syscall6, syscall2, Syscall};
+use crate::handle::Handle;
+use crate::syscall::{Syscall, syscall2, syscall6};
 
 /// Memory mapping protection flags (PROT_*)
 pub mod prot {
@@ -29,33 +30,47 @@ pub mod flags {
     pub const ANONYMOUS: usize = 0x20;
 }
 
-/// Memory map a handle into the current process's address space
-///
-/// # Arguments
-/// * `handle` - Handle to the KernelObject that supports memory mapping
-/// * `addr` - Preferred virtual address (0 = let kernel choose)
-/// * `length` - Length of the mapping in bytes
-/// * `prot` - Protection flags (combination of prot::* constants)
-/// * `flags` - Mapping flags (combination of flags::* constants)
-/// * `offset` - Offset within the object to start mapping from
-///
-/// # Returns
-/// * `Ok(address)` - Virtual address where the mapping was created
-/// * `Err(())` - Mapping failed
-///
-/// # Examples
-/// ```no_run
-/// use scarlet_std::handle::capability::memory_mapping::{mmap, prot, flags};
-/// 
-/// // Map a file handle with read/write permissions
-/// let addr = mmap(file_handle, 0, 4096, prot::READ | prot::WRITE, flags::PRIVATE, 0)?;
-/// ```
-pub fn mmap(handle: u32, addr: usize, length: usize, prot: usize, flags: usize, offset: usize) -> Result<usize, ()> {
-    let result = syscall6(Syscall::MemoryMap, handle as usize, addr, length, prot, flags, offset);
-    if result == usize::MAX {
-        Err(())
-    } else {
-        Ok(result)
+/// Memory mapping operations capability
+pub struct MemoryMappingOps<'a> {
+    handle: &'a Handle,
+}
+
+impl<'a> MemoryMappingOps<'a> {
+    /// Create MemoryMappingOps from a Handle reference.
+    ///
+    /// This is crate-internal to prevent bypassing `Handle::as_memory_mapping` validation.
+    pub(crate) fn from_handle(handle: &'a Handle) -> Self {
+        Self { handle }
+    }
+
+    /// Memory map this handle into the current process's address space.
+    pub fn mmap(
+        &self,
+        addr: usize,
+        length: usize,
+        prot: usize,
+        flags: usize,
+        offset: usize,
+    ) -> Result<usize, ()> {
+        let result = syscall6(
+            Syscall::MemoryMap,
+            self.handle.as_raw() as usize,
+            addr,
+            length,
+            prot,
+            flags,
+            offset,
+        );
+        if result == usize::MAX {
+            Err(())
+        } else {
+            Ok(result)
+        }
+    }
+
+    /// Unmap a memory region from the current process's address space.
+    pub fn munmap(addr: usize, length: usize) -> Result<(), ()> {
+        munmap(addr, length)
     }
 }
 
@@ -72,7 +87,7 @@ pub fn mmap(handle: u32, addr: usize, length: usize, prot: usize, flags: usize, 
 /// # Examples
 /// ```no_run
 /// use scarlet_std::handle::capability::memory_mapping::munmap;
-/// 
+///
 /// // Unmap a previously mapped region
 /// munmap(mapped_addr, 4096)?;
 /// ```

@@ -1,9 +1,38 @@
 use core::any::Any;
 
 use super::Device;
+use crate::object::capability::selectable::{
+    ReadyInterest, ReadySet, SelectWaitOutcome, Selectable,
+};
 use crate::object::capability::{ControlOps, MemoryMappingOps};
 
 extern crate alloc;
+
+/// OS/ABI-agnostic TTY control interface
+///
+/// This trait intentionally avoids Linux/POSIX terms and numbers.
+/// ABI adapters (e.g., abi/linux) should translate their own termios/ioctl
+/// to these neutral controls.
+pub trait TtyControl {
+    /// Enable or disable local echo.
+    fn set_echo(&self, enabled: bool);
+    /// Returns whether local echo is enabled.
+    fn is_echo_enabled(&self) -> bool;
+
+    /// Enable or disable canonical (line) mode.
+    fn set_canonical(&self, enabled: bool);
+    /// Returns whether canonical (line) mode is enabled.
+    fn is_canonical(&self) -> bool;
+
+    /// Set terminal window size in character cells.
+    fn set_winsize(&self, cols: u16, rows: u16);
+    /// Get terminal window size in character cells.
+    fn get_winsize(&self) -> (u16, u16);
+}
+
+/// Composite endpoint trait for TTY devices (byte stream + neutral controls)
+pub trait TtyDeviceEndpoint: CharDevice + TtyControl {}
+impl<T: CharDevice + TtyControl> TtyDeviceEndpoint for T {}
 
 /// Seek operations for character device positioning
 #[derive(Debug, Clone, Copy)]
@@ -17,40 +46,40 @@ pub enum SeekFrom {
 }
 
 /// Character device interface
-/// 
+///
 /// This trait defines the interface for character devices.
 /// It provides methods for querying device information and handling character I/O operations.
 /// Uses internal mutability for thread-safe shared access.
 pub trait CharDevice: Device {
     /// Read a single byte from the device
-    /// 
+    ///
     /// For blocking devices (like TTY), this method will block until data is available.
     /// For non-blocking devices, this returns None if no data is available.
-    /// 
+    ///
     /// # Returns
-    /// 
+    ///
     /// The byte read from the device, or None if no data is available
     fn read_byte(&self) -> Option<u8>;
-    
+
     /// Write a single byte to the device
-    /// 
+    ///
     /// # Arguments
-    /// 
+    ///
     /// * `byte` - The byte to write to the device
-    /// 
+    ///
     /// # Returns
-    /// 
+    ///
     /// Result indicating success or failure
     fn write_byte(&self, byte: u8) -> Result<(), &'static str>;
-    
+
     /// Read multiple bytes from the device
-    /// 
+    ///
     /// # Arguments
-    /// 
+    ///
     /// * `buffer` - The buffer to read data into
-    /// 
+    ///
     /// # Returns
-    /// 
+    ///
     /// The number of bytes actually read
     fn read(&self, buffer: &mut [u8]) -> usize {
         let mut bytes_read = 0;
@@ -64,15 +93,15 @@ pub trait CharDevice: Device {
         }
         bytes_read
     }
-    
+
     /// Write multiple bytes to the device
-    /// 
+    ///
     /// # Arguments
-    /// 
+    ///
     /// * `buffer` - The buffer containing data to write
-    /// 
+    ///
     /// # Returns
-    /// 
+    ///
     /// Result containing the number of bytes written or an error
     fn write(&self, buffer: &[u8]) -> Result<usize, &'static str> {
         let mut bytes_written = 0;
@@ -82,56 +111,56 @@ pub trait CharDevice: Device {
         }
         Ok(bytes_written)
     }
-    
+
     /// Check if the device is ready for reading
     fn can_read(&self) -> bool;
-    
+
     /// Check if the device is ready for writing
     fn can_write(&self) -> bool;
-    
+
     /// Read data from a specific position in the device
-    /// 
+    ///
     /// Default implementation falls back to sequential read for stream devices.
     /// Devices that support random access (like framebuffer, memory devices) should override this.
-    /// 
+    ///
     /// # Arguments
-    /// 
+    ///
     /// * `position` - Byte offset to read from
     /// * `buffer` - Buffer to read data into
-    /// 
+    ///
     /// # Returns
-    /// 
+    ///
     /// Result containing the number of bytes read or an error
     fn read_at(&self, _position: u64, buffer: &mut [u8]) -> Result<usize, &'static str> {
         // Default: use sequential read for stream devices
         Ok(self.read(buffer))
     }
-    
+
     /// Write data to a specific position in the device
-    /// 
+    ///
     /// Default implementation falls back to sequential write for stream devices.
     /// Devices that support random access (like framebuffer, memory devices) should override this.
-    /// 
+    ///
     /// # Arguments
-    /// 
+    ///
     /// * `position` - Byte offset to write to
     /// * `buffer` - Buffer containing data to write
-    /// 
+    ///
     /// # Returns
-    /// 
+    ///
     /// Result containing the number of bytes written or an error
     fn write_at(&self, _position: u64, buffer: &[u8]) -> Result<usize, &'static str> {
         // Default: use sequential write for stream devices
         self.write(buffer)
     }
-    
+
     /// Check if this device supports seek operations
-    /// 
+    ///
     /// Default implementation returns false for stream devices.
     /// Devices that support seeking should override this.
-    /// 
+    ///
     /// # Returns
-    /// 
+    ///
     /// True if the device supports seek operations
     fn can_seek(&self) -> bool {
         false
@@ -149,15 +178,15 @@ pub struct GenericCharDevice {
 
 impl GenericCharDevice {
     pub fn new(
-        device_name: &'static str, 
+        device_name: &'static str,
         read_fn: fn() -> Option<u8>,
         write_fn: fn(u8) -> Result<(), &'static str>,
         can_read_fn: fn() -> bool,
         can_write_fn: fn() -> bool,
     ) -> Self {
-        Self { 
-            device_name, 
-            read_fn, 
+        Self {
+            device_name,
+            read_fn,
             write_fn,
             can_read_fn,
             can_write_fn,
@@ -177,11 +206,11 @@ impl Device for GenericCharDevice {
     fn as_any(&self) -> &dyn Any {
         self
     }
-    
+
     fn as_any_mut(&mut self) -> &mut dyn Any {
         self
     }
-    
+
     fn as_char_device(&self) -> Option<&dyn CharDevice> {
         Some(self)
     }
@@ -213,21 +242,53 @@ impl ControlOps for GenericCharDevice {
 }
 
 impl MemoryMappingOps for GenericCharDevice {
-    fn get_mapping_info(&self, _offset: usize, _length: usize) 
-                       -> Result<(usize, usize, bool), &'static str> {
+    fn get_mapping_info(
+        &self,
+        _offset: usize,
+        _length: usize,
+    ) -> Result<(usize, usize, bool), &'static str> {
         Err("Memory mapping not supported by this character device")
     }
-    
+
     fn on_mapped(&self, _vaddr: usize, _paddr: usize, _length: usize, _offset: usize) {
         // Generic character devices don't support memory mapping
     }
-    
+
     fn on_unmapped(&self, _vaddr: usize, _length: usize) {
         // Generic character devices don't support memory mapping
     }
-    
+
     fn supports_mmap(&self) -> bool {
         false
+    }
+}
+
+impl Selectable for GenericCharDevice {
+    fn current_ready(&self, interest: ReadyInterest) -> ReadySet {
+        let mut set = ReadySet::none();
+        if interest.read {
+            set.read = self.can_read();
+        }
+        if interest.write {
+            set.write = self.can_write();
+        }
+        if interest.except {
+            set.except = false;
+        }
+        set
+    }
+
+    fn wait_until_ready(
+        &self,
+        _interest: ReadyInterest,
+        _trapframe: &mut crate::arch::Trapframe,
+        _timeout_ticks: Option<u64>,
+    ) -> SelectWaitOutcome {
+        SelectWaitOutcome::Ready
+    }
+
+    fn is_nonblocking(&self) -> bool {
+        true
     }
 }
 

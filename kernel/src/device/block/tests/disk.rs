@@ -1,5 +1,5 @@
-use alloc::vec::Vec;
 use crate::device::block::request::BlockIORequestType;
+use alloc::vec::Vec;
 
 use super::*;
 
@@ -11,10 +11,11 @@ pub struct TestDisk {
 
 static mut TEST_DISK: Option<TestDisk> = None;
 
-
 impl TestDisk {
     pub fn new() -> Self {
-        Self { buffer: vec![0; SECTOR_SIZE * NUM_OF_SECTORS] }
+        Self {
+            buffer: vec![0; SECTOR_SIZE * NUM_OF_SECTORS],
+        }
     }
 
     pub fn write(&mut self, sector: usize, data: &[u8]) -> Result<(), &'static str> {
@@ -43,7 +44,6 @@ impl TestDisk {
 
     #[allow(static_mut_refs)]
     pub fn get_device() -> GenericBlockDevice {
-
         unsafe {
             if TEST_DISK.is_none() {
                 TEST_DISK = Some(TestDisk::new());
@@ -56,15 +56,13 @@ impl TestDisk {
             let disk = unsafe { TEST_DISK.as_mut().unwrap() };
 
             match request.request_type {
-                BlockIORequestType::Read => {
-                    match disk.read(sector, count * SECTOR_SIZE) {
-                        Ok(data) => {
-                            request.buffer = data;
-                            Ok(())
-                        }
-                        Err(e) => Err(e),
+                BlockIORequestType::Read => match disk.read(sector, count * SECTOR_SIZE) {
+                    Ok(data) => {
+                        request.buffer = data;
+                        Ok(())
                     }
-                }
+                    Err(e) => Err(e),
+                },
                 BlockIORequestType::Write => {
                     disk.write(sector, &request.buffer[..count * SECTOR_SIZE])
                 }

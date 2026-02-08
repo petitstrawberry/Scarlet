@@ -4,7 +4,7 @@
 //! enabling kernel tasks to yield execution and resume later at the same point.
 
 use crate::arch::KernelContext;
-use core::arch::{asm, naked_asm};
+use core::arch::naked_asm;
 
 /// Switch from the current kernel context to the next kernel context
 ///
@@ -30,13 +30,11 @@ pub unsafe extern "C" fn switch_to(prev_ctx: *mut KernelContext, next_ctx: *cons
     naked_asm!(
         // Save current context (prev_ctx)
         // a0 = prev_ctx, a1 = next_ctx
-        
+
         // Save stack pointer
         "sd sp, 0(a0)",
-        
         // Save return address
         "sd ra, 8(a0)",
-        
         // Save callee-saved registers s0-s11
         "sd s0, 16(a0)",
         "sd s1, 24(a0)",
@@ -50,14 +48,11 @@ pub unsafe extern "C" fn switch_to(prev_ctx: *mut KernelContext, next_ctx: *cons
         "sd s9, 88(a0)",
         "sd s10, 96(a0)",
         "sd s11, 104(a0)",
-        
         // Restore next context (next_ctx)
         // Load stack pointer
         "ld sp, 0(a1)",
-        
         // Load return address
         "ld ra, 8(a1)",
-        
         // Load callee-saved registers s0-s11
         "ld s0, 16(a1)",
         "ld s1, 24(a1)",
@@ -71,7 +66,6 @@ pub unsafe extern "C" fn switch_to(prev_ctx: *mut KernelContext, next_ctx: *cons
         "ld s9, 88(a1)",
         "ld s10, 96(a1)",
         "ld s11, 104(a1)",
-        
         // Return to the saved return address
         // This will either:
         // - Return to the original caller (first time)
@@ -93,32 +87,16 @@ pub fn init_kernel_context(ctx: &mut KernelContext, entry_point: fn(), stack_top
     // Set up initial state for first-time execution
     ctx.sp = stack_top;
     ctx.ra = entry_point as u64;
-    
+
     // Clear all saved registers
     ctx.s = [0; 12];
-}
-
-/// Wrapper function for safe context switching
-///
-/// This provides a safe interface to the low-level switch_to function.
-///
-/// # Arguments
-/// * `prev_ctx` - Mutable reference to store the current context
-/// * `next_ctx` - Reference to the context to switch to
-///
-/// # Safety
-/// Both contexts must have valid stack pointers and be properly initialized.
-pub fn kernel_switch_to(prev_ctx: &mut KernelContext, next_ctx: &KernelContext) {
-    unsafe {
-        switch_to(prev_ctx as *mut KernelContext, next_ctx as *const KernelContext);
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloc::boxed::Box;
     use crate::environment::TASK_KERNEL_STACK_SIZE;
+    use alloc::boxed::Box;
 
     /// Test kernel context initialization
     #[test_case]
@@ -126,13 +104,13 @@ mod tests {
         let mut ctx = KernelContext::new();
         let stack = Box::new([0u8; TASK_KERNEL_STACK_SIZE]);
         let stack_top = stack.as_ptr() as u64 + TASK_KERNEL_STACK_SIZE as u64;
-        
+
         fn test_entry() {
             // Test entry point
         }
-        
+
         init_kernel_context(&mut ctx, test_entry, stack_top);
-        
+
         assert_eq!(ctx.sp, stack_top);
         assert_eq!(ctx.ra, test_entry as u64);
         assert_eq!(ctx.s, [0; 12]);

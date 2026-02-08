@@ -2,7 +2,7 @@
 //!
 //! This module implements the TransparentExecutor, which provides unified
 //! exec API for all ABIs in Scarlet OS.
-//! 
+//!
 //! The TransparentExecutor enables:
 //! - Unified exec processing for all ABIs
 //! - Binary format detection and ABI delegation
@@ -18,7 +18,7 @@
 
 pub mod executor;
 
-#[cfg(test)]
+#[cfg(all(test, target_arch = "riscv64"))]
 mod tests;
 
 // TODO: Update VFS tests to use new API after refactoring

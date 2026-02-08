@@ -1,6 +1,5 @@
 //! Cross-VFS Bind Mount Tests
 
-
 #[test_case]
 fn test_cross_vfs_bind_mount_basic() {
     use crate::fs::FileType;
@@ -10,26 +9,32 @@ fn test_cross_vfs_bind_mount_basic() {
     // Create the source VFS and prepare a directory and file
     let source_vfs = Arc::new(VfsManager::new());
     source_vfs.create_dir("/srcdir").unwrap();
-    source_vfs.create_file("/srcdir/file.txt", FileType::RegularFile).unwrap();
+    source_vfs
+        .create_file("/srcdir/file.txt", FileType::RegularFile)
+        .unwrap();
 
     // Create the target VFS
     let target_vfs = Arc::new(VfsManager::new());
     target_vfs.create_dir("/mnt").unwrap();
-    target_vfs.create_file("/root_file.txt", FileType::RegularFile).unwrap();
+    target_vfs
+        .create_file("/root_file.txt", FileType::RegularFile)
+        .unwrap();
 
     // Perform cross-vfs bind mount
-    target_vfs.bind_mount_from(
-        &source_vfs,
-        "/srcdir",
-        "/mnt",
-    ).expect("cross-vfs bind mount failed");
+    target_vfs
+        .bind_mount_from(&source_vfs, "/srcdir", "/mnt")
+        .expect("cross-vfs bind mount failed");
 
     // Check if files under the bind mount can be accessed from the target side
-    let (entry, _) = target_vfs.resolve_path("/mnt/file.txt").expect("resolve_path failed");
+    let (entry, _) = target_vfs
+        .resolve_path("/mnt/file.txt")
+        .expect("resolve_path failed");
     assert_eq!(entry.name(), "file.txt");
 
     // Check that .. from the bind mount root does not escape ("/mnt/.." should return to the parent on the target side)
-    let (entry, _) = target_vfs.resolve_path("/mnt/../root_file.txt").expect("resolve_path failed");
+    let (entry, _) = target_vfs
+        .resolve_path("/mnt/../root_file.txt")
+        .expect("resolve_path failed");
     assert_eq!(entry.name(), "root_file.txt");
 }
 
@@ -43,12 +48,18 @@ fn test_cross_vfs_bind_mount_file_create_delete() {
     source_vfs.create_dir("/srcdir").unwrap();
     let target_vfs = Arc::new(VfsManager::new());
     target_vfs.create_dir("/mnt").unwrap();
-    target_vfs.bind_mount_from(&source_vfs, "/srcdir", "/mnt").unwrap();
+    target_vfs
+        .bind_mount_from(&source_vfs, "/srcdir", "/mnt")
+        .unwrap();
 
     // Create file from target side
-    target_vfs.create_file("/mnt/newfile.txt", FileType::RegularFile).unwrap();
+    target_vfs
+        .create_file("/mnt/newfile.txt", FileType::RegularFile)
+        .unwrap();
     // Should be visible from source side
-    let (entry, _) = source_vfs.resolve_path("/srcdir/newfile.txt").expect("file not visible from source");
+    let (entry, _) = source_vfs
+        .resolve_path("/srcdir/newfile.txt")
+        .expect("file not visible from source");
     assert_eq!(entry.name(), "newfile.txt");
 
     // Delete file from source side
@@ -66,13 +77,19 @@ fn test_cross_vfs_bind_mount_recursive() {
     let source_vfs = Arc::new(VfsManager::new());
     source_vfs.create_dir("/a").unwrap();
     source_vfs.create_dir("/a/b").unwrap();
-    source_vfs.create_file("/a/b/file.txt", FileType::RegularFile).unwrap();
+    source_vfs
+        .create_file("/a/b/file.txt", FileType::RegularFile)
+        .unwrap();
     let target_vfs = Arc::new(VfsManager::new());
     target_vfs.create_dir("/mnt").unwrap();
-    target_vfs.bind_mount_from(&source_vfs, "/a", "/mnt").unwrap();
+    target_vfs
+        .bind_mount_from(&source_vfs, "/a", "/mnt")
+        .unwrap();
 
     // Recursively access file
-    let (entry, _) = target_vfs.resolve_path("/mnt/b/file.txt").expect("recursive bind mount failed");
+    let (entry, _) = target_vfs
+        .resolve_path("/mnt/b/file.txt")
+        .expect("recursive bind mount failed");
     assert_eq!(entry.name(), "file.txt");
 }
 
@@ -86,8 +103,12 @@ fn test_cross_vfs_bind_mount_multiple() {
     let source2 = Arc::new(VfsManager::new());
     source1.create_dir("/d1").unwrap();
     source2.create_dir("/d2").unwrap();
-    source1.create_file("/d1/f1", FileType::RegularFile).unwrap();
-    source2.create_file("/d2/f2", FileType::RegularFile).unwrap();
+    source1
+        .create_file("/d1/f1", FileType::RegularFile)
+        .unwrap();
+    source2
+        .create_file("/d2/f2", FileType::RegularFile)
+        .unwrap();
     let target = Arc::new(VfsManager::new());
     target.create_dir("/mnt1").unwrap();
     target.create_dir("/mnt2").unwrap();
@@ -110,10 +131,14 @@ fn test_cross_vfs_bind_mount_parent_traversal() {
     source.create_file("/d/f", FileType::RegularFile).unwrap();
     let target = Arc::new(VfsManager::new());
     target.create_dir("/mnt").unwrap();
-    target.create_file("/outside", FileType::RegularFile).unwrap();
+    target
+        .create_file("/outside", FileType::RegularFile)
+        .unwrap();
     target.bind_mount_from(&source, "/d", "/mnt").unwrap();
     // .. from inside bind mount should not escape to source VFS
-    let (e, _) = target.resolve_path("/mnt/../outside").expect("parent traversal failed");
+    let (e, _) = target
+        .resolve_path("/mnt/../outside")
+        .expect("parent traversal failed");
     assert_eq!(e.name(), "outside");
     // .. from inside bind mount root should not escape to source VFS
     assert!(target.resolve_path("/mnt/../../d/f").is_err());

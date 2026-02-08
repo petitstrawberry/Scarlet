@@ -8,6 +8,21 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
+    - name: Free Disk Space (Ubuntu)
+      uses: jlumbroso/free-disk-space@main
+      with:
+        # this might remove tools that are actually needed,
+        # if set to "true" but frees about 6 GB
+        tool-cache: false
+        
+        # all of these default to true, but feel free to set to
+        # "false" if necessary for your workflow
+        android: true
+        dotnet: true
+        haskell: true
+        large-packages: true
+        docker-images: true
+        swap-storage: true
     - uses: actions/checkout@v4
     # Dockerfile と関連ファイルのハッシュを計算
     - name: Generate Docker cache key
@@ -31,7 +46,7 @@ jobs:
       if: steps.docker-cache.outputs.cache-hit == 'true'
       run: docker load < /tmp/docker-image
     - name: Build documentation
-      run: docker run -v $PWD:/workspaces/Scarlet scarlet-dev cargo make doc
+      run: docker run -v $PWD:/workspaces/Scarlet scarlet-dev cargo make doc-riscv64
     - name: Remove lock file
       run: docker run -v $PWD:/workspaces/Scarlet scarlet-dev rm kernel/target/riscv64gc-unknown-none-elf/doc/.lock
     - name: Add CNAME file

@@ -1,0 +1,11 @@
+[package]
+name = "sws_protocol"
+version = "0.16.0"
+edition = "2024"
+
+[dependencies]
+scarlet_std = { path = "../std" }
+
+[lib]
+name = "sws_protocol"
+path = "src/lib.rs"

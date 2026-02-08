@@ -1,8 +1,14 @@
-use core::any::Any;
 use alloc::vec::Vec;
+use core::any::Any;
 use spin::Mutex;
 
-use super::{CharDevice, super::{Device, DeviceType}};
+use super::{
+    super::{Device, DeviceType},
+    CharDevice,
+};
+use crate::object::capability::selectable::{
+    ReadyInterest, ReadySet, SelectWaitOutcome, Selectable,
+};
 use crate::object::capability::{ControlOps, MemoryMappingOps};
 
 /// Mock character device for testing
@@ -57,11 +63,11 @@ impl Device for MockCharDevice {
     fn as_any(&self) -> &dyn Any {
         self
     }
-    
+
     fn as_any_mut(&mut self) -> &mut dyn Any {
         self
     }
-    
+
     fn as_char_device(&self) -> Option<&dyn CharDevice> {
         Some(self)
     }
@@ -101,8 +107,11 @@ impl ControlOps for MockCharDevice {
 }
 
 impl MemoryMappingOps for MockCharDevice {
-    fn get_mapping_info(&self, _offset: usize, _length: usize) 
-                       -> Result<(usize, usize, bool), &'static str> {
+    fn get_mapping_info(
+        &self,
+        _offset: usize,
+        _length: usize,
+    ) -> Result<(usize, usize, bool), &'static str> {
         Err("Memory mapping not supported by mock character device")
     }
 
@@ -116,5 +125,35 @@ impl MemoryMappingOps for MockCharDevice {
 
     fn supports_mmap(&self) -> bool {
         false
+    }
+}
+
+impl Selectable for MockCharDevice {
+    fn current_ready(&self, interest: ReadyInterest) -> ReadySet {
+        let mut set = ReadySet::none();
+        if interest.read {
+            set.read = self.can_read();
+        }
+        if interest.write {
+            set.write = self.can_write();
+        }
+        if interest.except {
+            set.except = false;
+        }
+        set
+    }
+
+    fn wait_until_ready(
+        &self,
+        _interest: ReadyInterest,
+        _trapframe: &mut crate::arch::Trapframe,
+        _timeout_ticks: Option<u64>,
+    ) -> SelectWaitOutcome {
+        // Mock: do not actually block
+        SelectWaitOutcome::Ready
+    }
+
+    fn is_nonblocking(&self) -> bool {
+        true
     }
 }

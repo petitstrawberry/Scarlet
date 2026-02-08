@@ -2,7 +2,7 @@
 opt-level = 0
 
 [profile.test]
-opt-level = 0
+opt-level = 3
 
 [target.riscv64gc-unknown-none-elf]
 # Use different runners for different contexts
@@ -10,8 +10,23 @@ opt-level = 0
 # For tests, use test.sh (this will be overridden by CARGO_TARGET_RISCV64GC_UNKNOWN_NONE_ELF_RUNNER for tests)
 runner = "tools/run.sh"
 
+[target.aarch64-unknown-none]
+rustflags = ["-T", "lds/aarch64_qemu_virt.ld"]
+runner = "tools/run_aarch64.sh"
+
+[target.aarch64-unknown-none-elf]
+# Use different runners for different contexts
+# For normal runs, use run_aarch64.sh
+# For tests, use test_aarch64.sh (this will be overridden by CARGO_TARGET_AARCH64_UNKNOWN_NONE_ELF_RUNNER for tests)
+runner = "tools/run_aarch64.sh"
+rustflags = [
+	"-C", "no-vectorize-loops",
+	"-C", "no-vectorize-slp",
+]
+
 [build]
 target = "targets/riscv64gc-unknown-none-elf.json"
+# target = "targets/aarch64-unknown-none-elf.json"
 
 [unstable]
 build-std = ["core", "compiler_builtins", "alloc"]

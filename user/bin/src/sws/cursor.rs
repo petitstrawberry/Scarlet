@@ -1,0 +1,221 @@
+//! Cursor management module
+
+use framebuffer::Framebuffer;
+
+/// Cursor bitmap - simple 0/1/2 format
+const CURSOR_WIDTH: usize = 16;
+const CURSOR_HEIGHT: usize = 24;
+
+/// Cursor color (white)
+const CURSOR_COLOR: [u8; 4] = [255, 255, 255, 255]; // BGRA
+/// Cursor border color (black)
+const CURSOR_BORDER: [u8; 4] = [0, 0, 0, 255]; // BGRA
+
+/// Arrow cursor bitmap (16x24 pixels)
+/// 0 = transparent (don't draw), 1 = white (CURSOR_COLOR), 2 = black border (CURSOR_BORDER)
+const CURSOR_BITMAP: [[u8; CURSOR_WIDTH]; CURSOR_HEIGHT] = [
+    [2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+    [2, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+    [2, 1, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+    [2, 1, 1, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+    [2, 1, 1, 1, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+    [2, 1, 1, 1, 1, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+    [2, 1, 1, 1, 1, 1, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+    [2, 1, 1, 1, 1, 1, 1, 2, 0, 0, 0, 0, 0, 0, 0, 0],
+    [2, 1, 1, 1, 1, 1, 1, 1, 2, 0, 0, 0, 0, 0, 0, 0],
+    [2, 1, 1, 1, 1, 1, 1, 1, 1, 2, 0, 0, 0, 0, 0, 0],
+    [2, 1, 1, 1, 1, 1, 1, 1, 1, 1, 2, 0, 0, 0, 0, 0],
+    [2, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 2, 0, 0, 0, 0],
+    [2, 1, 1, 1, 1, 1, 1, 2, 2, 2, 2, 2, 0, 0, 0, 0],
+    [2, 1, 1, 1, 1, 1, 1, 2, 0, 0, 0, 0, 0, 0, 0, 0],
+    [2, 1, 1, 2, 2, 1, 1, 1, 2, 0, 0, 0, 0, 0, 0, 0],
+    [2, 1, 2, 0, 0, 2, 1, 1, 2, 0, 0, 0, 0, 0, 0, 0],
+    [2, 2, 0, 0, 0, 0, 2, 1, 1, 2, 0, 0, 0, 0, 0, 0],
+    [0, 0, 0, 0, 0, 0, 2, 1, 1, 2, 0, 0, 0, 0, 0, 0],
+    [0, 0, 0, 0, 0, 0, 0, 2, 1, 1, 2, 0, 0, 0, 0, 0],
+    [0, 0, 0, 0, 0, 0, 0, 2, 1, 1, 2, 0, 0, 0, 0, 0],
+    [0, 0, 0, 0, 0, 0, 0, 0, 2, 1, 1, 2, 0, 0, 0, 0],
+    [0, 0, 0, 0, 0, 0, 0, 0, 2, 1, 2, 0, 0, 0, 0, 0],
+    [0, 0, 0, 0, 0, 0, 0, 0, 0, 2, 2, 0, 0, 0, 0, 0],
+    [0, 0, 0, 0, 0, 0, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0],
+];
+
+/// Cursor state
+pub struct Cursor {
+    pub x: i32,
+    pub y: i32,
+    prev_x: i32,
+    prev_y: i32,
+    pub width: u32,
+    pub height: u32,
+    needs_redraw: bool,
+}
+
+impl Cursor {
+    /// Create a new cursor
+    pub fn new() -> Self {
+        Self {
+            x: 0,
+            y: 0,
+            prev_x: 0,
+            prev_y: 0,
+            width: CURSOR_WIDTH as u32,
+            height: CURSOR_HEIGHT as u32,
+            needs_redraw: true,
+        }
+    }
+
+    /// Set cursor position directly (absolute positioning)
+    pub fn set_position(&mut self, x: i32, y: i32, screen_width: u32, screen_height: u32) -> bool {
+        let old_x = self.x;
+        let old_y = self.y;
+        self.x = x.max(0).min(screen_width as i32 - 1);
+        self.y = y.max(0).min(screen_height as i32 - 1);
+        let moved = old_x != self.x || old_y != self.y;
+        if moved {
+            self.needs_redraw = true;
+        }
+        moved
+    }
+
+    /// Update cursor position with bounds checking (relative movement)
+    pub fn update_position(
+        &mut self,
+        dx: i32,
+        dy: i32,
+        screen_width: u32,
+        screen_height: u32,
+    ) -> bool {
+        let old_x = self.x;
+        let old_y = self.y;
+        self.x = (self.x + dx).max(0).min(screen_width as i32 - 1);
+        self.y = (self.y + dy).max(0).min(screen_height as i32 - 1);
+        let moved = old_x != self.x || old_y != self.y;
+        if moved {
+            self.needs_redraw = true;
+        }
+        moved
+    }
+
+    /// Check if cursor needs redraw
+    pub fn needs_redraw(&self) -> bool {
+        self.needs_redraw
+    }
+
+    /// Mark cursor as redrawn
+    pub fn mark_drawn(&mut self) {
+        self.needs_redraw = false;
+        self.prev_x = self.x;
+        self.prev_y = self.y;
+    }
+
+    /// Draw cursor from bitmap
+    pub fn draw(&self, fb: &mut Framebuffer) {
+        let cx = self.x as u32;
+        let cy = self.y as u32;
+
+        for y in 0..CURSOR_HEIGHT {
+            for x in 0..CURSOR_WIDTH {
+                let pixel = CURSOR_BITMAP[y][x];
+                // Skip transparent pixels (0)
+                if pixel == 0 {
+                    continue;
+                }
+
+                let px = cx.saturating_add(x as u32);
+                let py = cy.saturating_add(y as u32);
+
+                let color = if pixel == 2 {
+                    CURSOR_BORDER
+                } else {
+                    CURSOR_COLOR
+                };
+
+                let _ = fb.write_pixel(px, py, color);
+            }
+        }
+    }
+
+    /// Draw cursor directly to a buffer (for compositing)
+    pub fn draw_to_buffer(
+        &self,
+        buffer: &mut [u8],
+        screen_width: u32,
+        screen_height: u32,
+        bytes_per_pixel: u32,
+    ) {
+        let stride = screen_width * bytes_per_pixel;
+        self.draw_to_buffer_direct(buffer, screen_width, screen_height, bytes_per_pixel, stride);
+    }
+
+    /// Draw cursor directly to a buffer with custom stride
+    pub fn draw_to_buffer_direct(
+        &self,
+        buffer: &mut [u8],
+        screen_width: u32,
+        screen_height: u32,
+        bytes_per_pixel: u32,
+        stride: u32,
+    ) {
+        let cx = self.x;
+        let cy = self.y;
+
+        for y in 0..CURSOR_HEIGHT {
+            for x in 0..CURSOR_WIDTH {
+                let pixel = CURSOR_BITMAP[y][x];
+                // Skip transparent pixels (0)
+                if pixel == 0 {
+                    continue;
+                }
+
+                let screen_x = cx + x as i32;
+                let screen_y = cy + y as i32;
+
+                // Bounds check
+                if screen_x < 0
+                    || screen_x >= screen_width as i32
+                    || screen_y < 0
+                    || screen_y >= screen_height as i32
+                {
+                    continue;
+                }
+
+                let offset =
+                    ((screen_y as u32 * stride) + (screen_x as u32 * bytes_per_pixel)) as usize;
+
+                let color = if pixel == 2 {
+                    CURSOR_BORDER
+                } else {
+                    CURSOR_COLOR
+                };
+
+                if offset + 4 <= buffer.len() {
+                    buffer[offset] = color[0]; // B
+                    buffer[offset + 1] = color[1]; // G
+                    buffer[offset + 2] = color[2]; // R
+                    buffer[offset + 3] = color[3]; // A
+                }
+            }
+        }
+    }
+
+    /// Clear previous cursor by restoring saved pixels
+    pub fn clear_prev(&self, fb: &mut Framebuffer, _bg_color: [u8; 4]) {
+        // This is now a no-op since we redraw the dirty region
+    }
+
+    /// Get the dirty region that needs redrawing (union of prev and current cursor)
+    pub fn get_dirty_region(&self) -> (i32, i32, u32, u32) {
+        let min_x = self.prev_x.min(self.x);
+        let min_y = self.prev_y.min(self.y);
+        let max_x = (self.prev_x + self.width as i32).max(self.x + self.width as i32);
+        let max_y = (self.prev_y + self.height as i32).max(self.y + self.height as i32);
+        (min_x, min_y, (max_x - min_x) as u32, (max_y - min_y) as u32)
+    }
+
+    /// Update prev position to current
+    pub fn update_prev(&mut self) {
+        self.prev_x = self.x;
+        self.prev_y = self.y;
+    }
+}

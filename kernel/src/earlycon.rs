@@ -1,10 +1,10 @@
 //! Early console for generic architecture.
-//! 
+//!
 //! This module provides a simple early console interface for the kernel. It is
 //! used to print messages before the kernel heap is initialized.
 //!
 //! The early console is architecture-specific and must be implemented for each
-//! architecture. 
+//! architecture.
 
 use core::fmt::Write;
 

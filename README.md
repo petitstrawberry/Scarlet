@@ -4,9 +4,10 @@
   
 **A kernel in Rust designed to provide a universal, multi-ABI container runtime.**
 
-[![Version](https://img.shields.io/badge/version-0.15.0-blue.svg)](https://github.com/petitstrawberry/Scarlet)
+[![Version](https://img.shields.io/badge/version-0.16.0-blue.svg)](https://github.com/petitstrawberry/Scarlet)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![RISC-V](https://img.shields.io/badge/arch-RISC--V%2064-green)](https://riscv.org/)
+[![AArch64](https://img.shields.io/badge/arch-AArch64-orange)](https://www.arm.com/)
 [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/petitstrawberry/Scarlet)
 
 </div>
@@ -21,8 +22,8 @@ Scarlet is an operating system kernel written in Rust that implements native ABI
 
 ```bash
 # Get started with Docker (recommended)
-docker build -t scarlet-build .
-docker run -it --rm scarlet-build bash -c "cargo make build && cargo make run"
+docker build -t scarlet-dev .
+docker run -it --rm -v $(pwd):/workspaces/Scarlet scarlet-dev bash -c "cargo make run-riscv64"
 
 # Once Scarlet boots, you'll see:
 Login successful for user: root
@@ -34,7 +35,6 @@ Scarlet Shell (Interactive Mode)
 Hello, world!
 PID  = 5
 PPID = 3
-
 # Enter xv6 environment (experimental ABI):
 # xv6
 xv6 container
@@ -53,38 +53,57 @@ PID  = 10
 PPID = 9
 ```
 
-### Multi-ABI Vision (Extended Goals)
+### Run Linux Userspace Demo (Partial Linux ABI)
+
+See [Linux ABI Demo instructions](docs/abi/linux/demo.md) for detailed instructions on building and running the Linux userspace demo.
 
 ```bash
-# Current: Cross-ABI execution already works!
-(xv6)$ /scarlet/system/scarlet/bin/hello | cat    # ✅ Working now
-
-# Future goal: Full Linux ABI integration
-(scarlet)$ scarlet_cat /etc/passwd | linux_grep "root" | xv6_wc -l
-1
-
-# Complete vision: All ABIs in one seamless environment:
-# - scarlet_cat: Scarlet Native binary using Scarlet syscalls
-# - linux_grep: Linux binary with native Linux ABI implementation
-# - xv6_wc: xv6 binary through native xv6 ABI implementation
-# All communicating seamlessly via unified pipe system!
+# Quick summary (inside scarlet-dev container):
+# For RISC-V (default)
+bash tools/linux/build_buildroot.sh
+bash tools/linux/build_user_programs.sh
+bash tools/linux/deploy_rootfs.sh
+cargo make run-riscv64
 ```
 
-This demonstrates **real Cross-ABI execution** - the xv6 environment can execute Scarlet native binaries and pipe their output through xv6 utilities! This proves that true multi-ABI functionality is already working.
+These commands rebuild the Buildroot-based Linux rootfs (providing standard utilities via BusyBox) and optional demo binaries, showcasing the initial Linux ABI support alongside Scarlet and xv6.
+
+### Cross-ABI Execution Showcase
+
+Scarlet allows binaries from different operating systems to coexist and communicate via standard Unix pipes. This is not virtualization—it is a unified kernel handling multiple ABIs natively.
+
+```bash
+# ✅ Working Now: xv6 shell executing a Scarlet native binary
+# The output from 'hello' (Scarlet ABI) is piped to 'cat' (xv6 ABI)
+(xv6)$ /scarlet/system/scarlet/bin/hello | cat
+Hello, world!
+PID  = 10
+PPID = 9
+
+# 🚧 In Progress: Linux ABI Integration
+# We are expanding this capability to include Linux binaries (via BusyBox):
+(scarlet)$ scarlet_cat /etc/passwd | /system/linux-riscv64/bin/busybox grep "root" | xv6_wc -l
+```
+
+This interoperability is possible because all ABIs share the same underlying kernel objects (VFS, pipes, task structures). The goal is a seamless environment where you can use the best tool for the job, regardless of which OS it was originally written for.
 
 > **Current Status**: 
 > - ✅ **Scarlet Native ABI**: Fully implemented with interactive shell
 > - 🧪 **xv6 RISC-V 64-bit ABI**: Working with Cross-ABI execution capabilities!
+> - 🧩 **Linux RISC-V 64-bit ABI (partial)**: Buildroot-based userland demo available; syscall coverage expanding
 > - ✅ **Cross-ABI Pipes**: Already functional between xv6 and Scarlet environments
-> - 🚧 **Linux ABI**: Under development (planned for future releases)
+
 
 ## Key Features
 
 - **Multi-ABI Support**: Transparent execution of binaries from different operating systems
+- **Runtime Delegation**: Execute binaries via userland runtimes (Wasm, emulators, etc.) - [Details](docs/runtime-delegation.md)
+- **Service Management**: Stem daemon (stemd) provides systemd-like service management with dependency resolution - [Details](docs/stemd.md)
 - **Container Runtime**: Complete filesystem isolation with namespace support
 - **Dynamic Linking**: Native dynamic linker support for shared libraries and position-independent executables
 - **Advanced VFS**: Modern virtual filesystem with ext2, FAT32, overlay, bind mount, and device file support
 - **Graphics Support**: Framebuffer device support with graphics hardware abstraction
+- **Windowing / UI (in progress)**: SWS protocol + client libraries - [Protocol](docs/sws_ipc_protocol.md), [sws-client](docs/sws_client.md), [scarlet-ui](docs/scarlet_ui.md)
 - **System Integration**: TTY devices, interrupt handling, and comprehensive device management
 - **Task Management**: Full task lifecycle with environment variables and IPC pipes
 - **Event System**: Advanced IPC with event-driven communication and synchronization
@@ -105,27 +124,51 @@ Scarlet's Multi-ABI support is built around a modular ABI implementation system:
 
 - **Scarlet Native**: ✅ Complete - Direct kernel interface with optimal performance
 - **xv6 RISC-V 64-bit**: 🧪 Experimental - Largely implemented with core functionality available
-  - ✅ File operations (open, close, read, write, etc.)
-  - ✅ Process management (fork, exec, wait, exit)
-  - ✅ Memory management (sbrk)
-  - ✅ Inter-process communication (pipes)
-  - ✅ Device operations (mknod, console integration)
-- **Linux Compatibility**: 🚧 In Development - Full POSIX syscall implementation planned
+- **Linux RISC-V 64-bit (partial)**: 🧩 Early userland demo via Buildroot rootfs; syscall surface expanding toward full POSIX support
 
 This architecture enables true containerization where applications from different operating systems can coexist and communicate without modification.
 
-### Experimental Features
+### ABI Implementation Details
 
-The xv6 RISC-V 64-bit ABI implementation is currently available as an experimental feature:
+#### xv6 RISC-V 64-bit (Experimental)
+
+The xv6 ABI implementation is currently available as an experimental feature:
 
 - **Testing Ready**: Core functionality is stable and ready for testing
 - **Binary Compatibility**: Included xv6 binaries (`cat`, `grep`, `wc`, `sh`, etc.) work correctly
 - **Cross-ABI Communication**: Pipes and IPC work seamlessly with other ABI implementations
 - **Production Note**: While functional, this is an experimental implementation subject to changes
 
+#### Linux ABI (Partial)
+
+The Linux ABI implementation is currently in active development:
+
+- **Userspace Support**: Runs simple static binaries and Buildroot/BusyBox environments.
+- **Syscall Coverage**: Basic file I/O, process management, and memory operations are implemented.
+- **Limitations**: Many advanced syscalls (networking, complex signals) are stubbed or missing. See [`docs/abi/linux/status.md`](docs/abi/linux/status.md) for the compatibility matrix.
+
 ## Architecture Support
 
-Currently supports RISC-V 64-bit architecture with plans for additional architectures. The kernel includes hardware abstraction layers for interrupt handling, memory management, graphics/framebuffer support, and device drivers.
+Scarlet supports multiple CPU architectures with a unified codebase:
+
+- **RISC-V 64-bit** - Primary development platform, fully supported
+- **AArch64 (ARM 64-bit)** - In development, basic support available
+
+The kernel includes hardware abstraction layers for interrupt handling, memory management, graphics/framebuffer support, and device drivers that work across both architectures.
+
+### Building for Different Architectures
+
+```bash
+# RISC-V (default)
+cargo make build
+cargo make run-riscv64
+
+# AArch64
+ARCH=aarch64 cargo make build
+cargo make run-aarch64
+```
+
+See [Multi-Architecture Support documentation](docs/multi-architecture.md) for detailed information on cross-architecture development.
 
 ## Filesystem Support
 
@@ -156,9 +199,9 @@ docker build -t scarlet-dev .
 docker run -it --rm -v $(pwd):/workspaces/Scarlet scarlet-dev
 
 # Common commands:
-cargo make build && cargo make run    # Build and run
-cargo make test                       # Run tests  
-cargo make debug                      # Debug with GDB
+cargo make run-riscv64                        # Build (release) and run (RISC-V)
+cargo make test-riscv64               # Run tests (RISC-V)
+cargo make debug-riscv64              # Debug with GDB
 ```
 
 ### Local Development
@@ -168,27 +211,28 @@ Requirements: Rust nightly, `cargo-make`, `qemu`, RISC-V toolchain
 ### Build Commands
 
 ```bash
-# Full build (recommended for first time)
-cargo make build
+# Full build (RISC-V, debug)
+cargo make build-riscv64
 
 # Individual components
-cargo make build-kernel    # Kernel only
-cargo make build-userlib   # User space library
-cargo make build-userbin   # User programs
-cargo make build-initramfs # Initial RAM filesystem
+cargo make build-kernel-debug-riscv64     # Kernel only
+cargo make build-userlib-debug-riscv64    # User space library
+cargo make build-userbin-debug-riscv64    # User programs
+cargo make build-initramfs-debug-riscv64  # Initial RAM filesystem
+cargo make build-rootfs-riscv64           # Root filesystem image
 
 # Clean build artifacts
-cargo make clean
+cargo make clean-riscv64
 ```
 
 ### Testing and Debugging
 
 ```bash
 # Run all tests
-cargo make test
+cargo make test-riscv64
 
 # Debug kernel with GDB
-cargo make debug
+cargo make debug-riscv64
 # Then in another terminal: gdb and connect to :1234
 ```
 
@@ -199,7 +243,11 @@ Contributions are welcome! Please feel free to submit a Pull Request.
 ## Documentation
 
 For more detailed information about the Scarlet kernel, visit our documentation:
-[Scarlet Documentation](https://docs.scarlet.ichigo.dev/kernel)
+- [Scarlet Documentation](https://docs.scarlet.ichigo.dev/kernel)
+- [Linux ABI Demo](docs/abi/linux/demo.md)
+- [Linux userspace artifacts (Buildroot + optional binaries)](docs/abi/linux/userspace-artifacts.md)
+- [Linux rootfs deployment guide](docs/abi/linux/deployment.md)
+- [Linux ABI support status and roadmap](docs/abi/linux/status.md)
 
 ### Generating Documentation
 
@@ -207,7 +255,7 @@ To generate the documentation, run:
 
 ```bash
 # Generate documentation
-cargo make doc             # Generate docs for all components
+cargo make doc-riscv64      # Generate docs for all components (RISC-V)
 cargo make doc-kernel      # Generate kernel docs only
 cargo make doc-userlib     # Generate user library docs only
 ```

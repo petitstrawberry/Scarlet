@@ -2,7 +2,7 @@
 mod tests {
     use crate::fs::drivers::tmpfs::TmpFS;
     use crate::fs::vfs_v2::manager::VfsManager;
-    use crate::fs::{FileType, FileSystemErrorKind};
+    use crate::fs::{FileSystemErrorKind, FileType};
     use alloc::string::ToString;
 
     /// Test basic hard link creation and functionality
@@ -13,8 +13,9 @@ mod tests {
         let vfs = VfsManager::new_with_root(tmpfs);
 
         // Create a test file
-        vfs.create_file("/testfile.txt", FileType::RegularFile).unwrap();
-        
+        vfs.create_file("/testfile.txt", FileType::RegularFile)
+            .unwrap();
+
         // Write some content to the file
         let file = vfs.open("/testfile.txt", 0x02).unwrap(); // Write mode
         if let crate::object::KernelObject::File(file_obj) = file {
@@ -22,20 +23,24 @@ mod tests {
         }
 
         // Create a hard link
-        vfs.create_hardlink("/testfile.txt", "/hardlink.txt").unwrap();
+        vfs.create_hardlink("/testfile.txt", "/hardlink.txt")
+            .unwrap();
 
         // Verify both files exist and have the same content
         let original = vfs.open("/testfile.txt", 0x01).unwrap(); // Read mode
         let hardlink = vfs.open("/hardlink.txt", 0x01).unwrap(); // Read mode
 
-        if let (crate::object::KernelObject::File(orig_obj), crate::object::KernelObject::File(link_obj)) = 
-            (original, hardlink) {
+        if let (
+            crate::object::KernelObject::File(orig_obj),
+            crate::object::KernelObject::File(link_obj),
+        ) = (original, hardlink)
+        {
             let mut orig_buf = [0u8; 64];
             let mut link_buf = [0u8; 64];
-            
+
             let orig_len = orig_obj.read(&mut orig_buf).unwrap();
             let link_len = link_obj.read(&mut link_buf).unwrap();
-            
+
             assert_eq!(orig_len, link_len);
             assert_eq!(&orig_buf[..orig_len], &link_buf[..link_len]);
         }
@@ -48,7 +53,8 @@ mod tests {
         let vfs = VfsManager::new_with_root(tmpfs);
 
         // Create file and hardlink
-        vfs.create_file("/original.txt", FileType::RegularFile).unwrap();
+        vfs.create_file("/original.txt", FileType::RegularFile)
+            .unwrap();
         vfs.create_hardlink("/original.txt", "/link.txt").unwrap();
 
         // Write through the hardlink
@@ -75,7 +81,7 @@ mod tests {
 
         // Create a file
         vfs.create_file("/file.txt", FileType::RegularFile).unwrap();
-        
+
         // Get initial metadata
         let (entry, _) = vfs.mount_tree.resolve_path("/file.txt").unwrap();
         let initial_metadata = entry.node().metadata().unwrap();
@@ -83,14 +89,14 @@ mod tests {
 
         // Create hardlink
         vfs.create_hardlink("/file.txt", "/link1.txt").unwrap();
-        
+
         // Check link count increased
         let updated_metadata = entry.node().metadata().unwrap();
         assert_eq!(updated_metadata.link_count, 2);
 
         // Create another hardlink
         vfs.create_hardlink("/file.txt", "/link2.txt").unwrap();
-        
+
         // Check link count increased again
         let final_metadata = entry.node().metadata().unwrap();
         assert_eq!(final_metadata.link_count, 3);
@@ -118,8 +124,10 @@ mod tests {
         }
 
         // Create a file and try to link to existing name
-        vfs.create_file("/original.txt", FileType::RegularFile).unwrap();
-        vfs.create_file("/existing.txt", FileType::RegularFile).unwrap();
+        vfs.create_file("/original.txt", FileType::RegularFile)
+            .unwrap();
+        vfs.create_file("/existing.txt", FileType::RegularFile)
+            .unwrap();
         let result = vfs.create_hardlink("/original.txt", "/existing.txt");
         assert!(result.is_err());
         if let Err(e) = result {
@@ -135,7 +143,8 @@ mod tests {
 
         // Create directory structure
         vfs.create_file("/subdir", FileType::Directory).unwrap();
-        vfs.create_file("/subdir/file.txt", FileType::RegularFile).unwrap();
+        vfs.create_file("/subdir/file.txt", FileType::RegularFile)
+            .unwrap();
         vfs.create_file("/another", FileType::Directory).unwrap();
 
         // Write some content
@@ -145,20 +154,24 @@ mod tests {
         }
 
         // Create hardlink in different directory
-        vfs.create_hardlink("/subdir/file.txt", "/another/hardlink.txt").unwrap();
+        vfs.create_hardlink("/subdir/file.txt", "/another/hardlink.txt")
+            .unwrap();
 
         // Verify content is accessible from both paths
         let orig = vfs.open("/subdir/file.txt", 0x01).unwrap();
         let link = vfs.open("/another/hardlink.txt", 0x01).unwrap();
 
-        if let (crate::object::KernelObject::File(orig_obj), crate::object::KernelObject::File(link_obj)) = 
-            (orig, link) {
+        if let (
+            crate::object::KernelObject::File(orig_obj),
+            crate::object::KernelObject::File(link_obj),
+        ) = (orig, link)
+        {
             let mut orig_buf = [0u8; 32];
             let mut link_buf = [0u8; 32];
-            
+
             let orig_len = orig_obj.read(&mut orig_buf).unwrap();
             let link_len = link_obj.read(&mut link_buf).unwrap();
-            
+
             assert_eq!(orig_len, link_len);
             assert_eq!(&orig_buf[..orig_len], b"Subdirectory file");
             assert_eq!(&orig_buf[..orig_len], &link_buf[..link_len]);
@@ -172,8 +185,10 @@ mod tests {
         let vfs = VfsManager::new_with_root(tmpfs);
 
         // Create file and hardlink
-        vfs.create_file("/original.txt", FileType::RegularFile).unwrap();
-        vfs.create_hardlink("/original.txt", "/hardlink.txt").unwrap();
+        vfs.create_file("/original.txt", FileType::RegularFile)
+            .unwrap();
+        vfs.create_hardlink("/original.txt", "/hardlink.txt")
+            .unwrap();
 
         // Get metadata for both
         let (orig_entry, _) = vfs.mount_tree.resolve_path("/original.txt").unwrap();
@@ -184,10 +199,10 @@ mod tests {
 
         // Should have same file ID (same underlying file)
         assert_eq!(orig_metadata.file_id, link_metadata.file_id);
-        
+
         // Should have same size
         assert_eq!(orig_metadata.size, link_metadata.size);
-        
+
         // Both should show link count of 2
         assert_eq!(orig_metadata.link_count, 2);
         assert_eq!(link_metadata.link_count, 2);
@@ -199,34 +214,40 @@ mod tests {
     #[test_case]
     fn test_symlink_basic() {
         use crate::fs::vfs_v2::manager::PathResolutionOptions;
-        
+
         let tmpfs = TmpFS::new(0);
         let vfs = VfsManager::new_with_root(tmpfs);
 
         // Create a target file
-        vfs.create_file("/target.txt", FileType::RegularFile).unwrap();
-        
+        vfs.create_file("/target.txt", FileType::RegularFile)
+            .unwrap();
+
         // Create symbolic link
         vfs.create_symlink("/symlink.txt", "/target.txt").unwrap();
-        
+
         // Use no_follow option to get the symlink itself, not the target
-        let (symlink_entry, _) = vfs.resolve_path_with_options("/symlink.txt", &PathResolutionOptions::no_follow()).unwrap();
+        let (symlink_entry, _) = vfs
+            .resolve_path_with_options("/symlink.txt", &PathResolutionOptions::no_follow())
+            .unwrap();
         let symlink_node = symlink_entry.node();
-        
+
         // Debug output
         let metadata = symlink_node.metadata().unwrap();
         crate::early_println!("Debug: symlink metadata: {:?}", metadata);
         let file_type = symlink_node.file_type().unwrap();
         crate::early_println!("Debug: symlink file_type: {:?}", file_type);
-        
+
         // Verify it's a symbolic link
         assert!(symlink_node.is_symlink().unwrap());
-        assert!(matches!(symlink_node.file_type().unwrap(), FileType::SymbolicLink(_)));
-        
+        assert!(matches!(
+            symlink_node.file_type().unwrap(),
+            FileType::SymbolicLink(_)
+        ));
+
         // Read the target
         let target = symlink_node.read_link().unwrap();
         assert_eq!(target, "/target.txt");
-        
+
         // Also test that normal resolution follows the symlink
         let (target_entry, _) = vfs.resolve_path("/symlink.txt").unwrap();
         let target_node = target_entry.node();
@@ -237,28 +258,35 @@ mod tests {
     #[test_case]
     fn test_symlink_relative_path() {
         use crate::fs::vfs_v2::manager::PathResolutionOptions;
-        
+
         let tmpfs = TmpFS::new(0);
         let vfs = VfsManager::new_with_root(tmpfs);
 
         // Create directory and file
         vfs.create_file("/subdir", FileType::Directory).unwrap();
-        vfs.create_file("/subdir/target.txt", FileType::RegularFile).unwrap();
-        
+        vfs.create_file("/subdir/target.txt", FileType::RegularFile)
+            .unwrap();
+
         // Create symbolic link with relative path
-        vfs.create_symlink("/subdir/link_to_target.txt", "target.txt").unwrap();
-        
+        vfs.create_symlink("/subdir/link_to_target.txt", "target.txt")
+            .unwrap();
+
         // Use no_follow to get the symlink itself
-        let (symlink_entry, _) = vfs.resolve_path_with_options("/subdir/link_to_target.txt", &PathResolutionOptions::no_follow()).unwrap();
+        let (symlink_entry, _) = vfs
+            .resolve_path_with_options(
+                "/subdir/link_to_target.txt",
+                &PathResolutionOptions::no_follow(),
+            )
+            .unwrap();
         let symlink_node = symlink_entry.node();
-        
+
         // Verify it's a symbolic link
         assert!(symlink_node.is_symlink().unwrap());
-        
+
         // Read the target
         let target = symlink_node.read_link().unwrap();
         assert_eq!(target, "target.txt");
-        
+
         // Test that normal resolution follows the symlink
         let (target_entry, _) = vfs.resolve_path("/subdir/link_to_target.txt").unwrap();
         let target_node = target_entry.node();
@@ -269,17 +297,19 @@ mod tests {
     #[test_case]
     fn test_symlink_metadata() {
         use crate::fs::vfs_v2::manager::PathResolutionOptions;
-        
+
         let tmpfs = TmpFS::new(0);
         let vfs = VfsManager::new_with_root(tmpfs);
 
         let target_path = "/some/long/target/path.txt".to_string();
-        
+
         // Create symbolic link
         vfs.create_symlink("/symlink.txt", &target_path).unwrap();
-        
+
         // Use no_follow to get the symlink itself
-        let (symlink_entry, _) = vfs.resolve_path_with_options("/symlink.txt", &PathResolutionOptions::no_follow()).unwrap();
+        let (symlink_entry, _) = vfs
+            .resolve_path_with_options("/symlink.txt", &PathResolutionOptions::no_follow())
+            .unwrap();
         let symlink_node = symlink_entry.node();
         let metadata = symlink_node.metadata().unwrap();
 
@@ -299,7 +329,8 @@ mod tests {
         let vfs = VfsManager::new_with_root(tmpfs);
 
         // Test creating symlink with existing name
-        vfs.create_file("/existing.txt", FileType::RegularFile).unwrap();
+        vfs.create_file("/existing.txt", FileType::RegularFile)
+            .unwrap();
         let result = vfs.create_symlink("/existing.txt", "/target.txt");
         assert!(result.is_err());
         if let Err(e) = result {
@@ -320,9 +351,10 @@ mod tests {
         let vfs = VfsManager::new_with_root(tmpfs);
 
         // Create regular file
-        vfs.create_file("/regular.txt", FileType::RegularFile).unwrap();
+        vfs.create_file("/regular.txt", FileType::RegularFile)
+            .unwrap();
         let (file_entry, _) = vfs.mount_tree.resolve_path("/regular.txt").unwrap();
-        
+
         // Try to read link from regular file
         let result = file_entry.node().read_link();
         assert!(result.is_err());
@@ -333,7 +365,7 @@ mod tests {
         // Create directory
         vfs.create_file("/dir", FileType::Directory).unwrap();
         let (dir_entry, _) = vfs.mount_tree.resolve_path("/dir").unwrap();
-        
+
         // Try to read link from directory
         let result = dir_entry.node().read_link();
         assert!(result.is_err());
@@ -346,12 +378,12 @@ mod tests {
     #[test_case]
     fn test_symlink_removal() {
         use crate::fs::vfs_v2::manager::PathResolutionOptions;
-        
+
         let tmpfs = TmpFS::new(1024); // Limited memory to test cleanup
         let vfs = VfsManager::new_with_root(tmpfs);
 
         let target_path = "/very/long/target/path/for/memory/test.txt".to_string();
-        
+
         // Create symbolic link
         let create_result = vfs.create_symlink("/symlink.txt", &target_path);
         if let Err(ref e) = create_result {
@@ -360,7 +392,8 @@ mod tests {
         create_result.unwrap();
 
         // Verify symlink was created
-        let symlink_result = vfs.resolve_path_with_options("/symlink.txt", &PathResolutionOptions::no_follow());
+        let symlink_result =
+            vfs.resolve_path_with_options("/symlink.txt", &PathResolutionOptions::no_follow());
         if let Err(ref e) = symlink_result {
             crate::println!("Debug: Resolve symlink failed with error: {:?}", e);
             // Try to list root directory to see what's there
@@ -374,7 +407,10 @@ mod tests {
                 Err(e) => crate::println!("Debug: Failed to read root directory: {:?}", e),
             }
         }
-        assert!(symlink_result.is_ok(), "Symlink should exist after creation");
+        assert!(
+            symlink_result.is_ok(),
+            "Symlink should exist after creation"
+        );
 
         // Remove the symlink
         let remove_result = vfs.remove("/symlink.txt");
@@ -392,22 +428,29 @@ mod tests {
     #[test_case]
     fn test_symlink_subdirectories() {
         use crate::fs::vfs_v2::manager::PathResolutionOptions;
-        
+
         let tmpfs = TmpFS::new(0);
         let vfs = VfsManager::new_with_root(tmpfs);
 
         // Create directory structure
         vfs.create_file("/dir1", FileType::Directory).unwrap();
         vfs.create_file("/dir2", FileType::Directory).unwrap();
-        vfs.create_file("/dir1/target.txt", FileType::RegularFile).unwrap();
+        vfs.create_file("/dir1/target.txt", FileType::RegularFile)
+            .unwrap();
 
         // Create symlink in different directory
-        vfs.create_symlink("/dir2/link_to_target.txt", "/dir1/target.txt").unwrap();
-        
+        vfs.create_symlink("/dir2/link_to_target.txt", "/dir1/target.txt")
+            .unwrap();
+
         // Use no_follow to get the symlink itself, not the target
-        let (symlink_entry, _) = vfs.resolve_path_with_options("/dir2/link_to_target.txt", &PathResolutionOptions::no_follow()).unwrap();
+        let (symlink_entry, _) = vfs
+            .resolve_path_with_options(
+                "/dir2/link_to_target.txt",
+                &PathResolutionOptions::no_follow(),
+            )
+            .unwrap();
         let symlink_node = symlink_entry.node();
-        
+
         // Verify it's a symlink and get target
         assert!(symlink_node.is_symlink().unwrap());
         let target = symlink_node.read_link().unwrap();
@@ -418,101 +461,136 @@ mod tests {
     #[test_case]
     fn test_symlink_direct_tmpfs() {
         use crate::fs::vfs_v2::core::FileSystemOperations;
-        
+
         let tmpfs = TmpFS::new(0);
         let root_node = tmpfs.root_node();
-        
+
         // Create symbolic link directly through TmpFS
-        let symlink_node = tmpfs.create(
-            &root_node,
-            &"symlink.txt".to_string(),
-            FileType::SymbolicLink("/target.txt".to_string()),
-            0o644,
-        ).unwrap();
-        
+        let symlink_node = tmpfs
+            .create(
+                &root_node,
+                &"symlink.txt".to_string(),
+                FileType::SymbolicLink("/target.txt".to_string()),
+                0o644,
+            )
+            .unwrap();
+
         // Debug output
         let metadata = symlink_node.metadata().unwrap();
         crate::early_println!("Debug: direct tmpfs symlink metadata: {:?}", metadata);
         let file_type = symlink_node.file_type().unwrap();
         crate::early_println!("Debug: direct tmpfs symlink file_type: {:?}", file_type);
-        
+
         // Verify it's a symbolic link
         assert!(symlink_node.is_symlink().unwrap());
-        assert!(matches!(symlink_node.file_type().unwrap(), FileType::SymbolicLink(_)));
-        
+        assert!(matches!(
+            symlink_node.file_type().unwrap(),
+            FileType::SymbolicLink(_)
+        ));
+
         // Read the target
         let target = symlink_node.read_link().unwrap();
         assert_eq!(target, "/target.txt");
     }
 
     /// Test removing files through symlink directories (ensuring intermediate symlinks are followed)
-    #[test_case] 
+    #[test_case]
     fn test_remove_through_symlink_directory() {
         use crate::fs::vfs_v2::manager::PathResolutionOptions;
-        
+
         let tmpfs = TmpFS::new(0);
         let vfs = VfsManager::new_with_root(tmpfs);
 
         // Create directory structure: /real_dir/file.txt
         vfs.create_dir("/real_dir").unwrap();
-        vfs.create_file("/real_dir/file.txt", FileType::RegularFile).unwrap();
-        
+        vfs.create_file("/real_dir/file.txt", FileType::RegularFile)
+            .unwrap();
+
         // Create symlink to directory: /symlink_dir -> /real_dir
         vfs.create_symlink("/symlink_dir", "/real_dir").unwrap();
-        
+
         // Verify we can access file through symlink directory
         let (file_through_symlink, _) = vfs.resolve_path("/symlink_dir/file.txt").unwrap();
-        assert_eq!(file_through_symlink.node().file_type().unwrap(), FileType::RegularFile);
-        
+        assert_eq!(
+            file_through_symlink.node().file_type().unwrap(),
+            FileType::RegularFile
+        );
+
         // Remove file through symlink directory path
         // This should follow the intermediate symlink (/symlink_dir) but remove the actual file
         vfs.remove("/symlink_dir/file.txt").unwrap();
-        
+
         // Verify file is removed from real directory
         let result = vfs.resolve_path("/real_dir/file.txt");
-        assert!(result.is_err(), "File should be removed from real directory");
-        
+        assert!(
+            result.is_err(),
+            "File should be removed from real directory"
+        );
+
         // Verify symlink directory still exists
-        let (symlink_dir, _) = vfs.resolve_path_with_options("/symlink_dir", &PathResolutionOptions::no_follow()).unwrap();
-        assert!(symlink_dir.node().is_symlink().unwrap(), "Symlink directory should still exist");
+        let (symlink_dir, _) = vfs
+            .resolve_path_with_options("/symlink_dir", &PathResolutionOptions::no_follow())
+            .unwrap();
+        assert!(
+            symlink_dir.node().is_symlink().unwrap(),
+            "Symlink directory should still exist"
+        );
     }
 
     /// Test removing a symlink when it's the final component of a path through symlink directories
     #[test_case]
     fn test_remove_symlink_through_symlink_directory() {
         use crate::fs::vfs_v2::manager::PathResolutionOptions;
-        
+
         let tmpfs = TmpFS::new(0);
         let vfs = VfsManager::new_with_root(tmpfs);
 
         // Create directory structure
         vfs.create_dir("/real_dir").unwrap();
-        vfs.create_file("/real_dir/target.txt", FileType::RegularFile).unwrap();
-        
-        // Create symlink to directory: /symlink_dir -> /real_dir  
+        vfs.create_file("/real_dir/target.txt", FileType::RegularFile)
+            .unwrap();
+
+        // Create symlink to directory: /symlink_dir -> /real_dir
         vfs.create_symlink("/symlink_dir", "/real_dir").unwrap();
-        
+
         // Create symlink inside the real directory: /real_dir/link_to_target -> target.txt
-        vfs.create_symlink("/real_dir/link_to_target", "target.txt").unwrap();
-        
+        vfs.create_symlink("/real_dir/link_to_target", "target.txt")
+            .unwrap();
+
         // Verify we can access the symlink through symlink directory
-        let (symlink_through_dir, _) = vfs.resolve_path_with_options("/symlink_dir/link_to_target", &PathResolutionOptions::no_follow()).unwrap();
+        let (symlink_through_dir, _) = vfs
+            .resolve_path_with_options(
+                "/symlink_dir/link_to_target",
+                &PathResolutionOptions::no_follow(),
+            )
+            .unwrap();
         assert!(symlink_through_dir.node().is_symlink().unwrap());
-        
+
         // Remove the symlink through symlink directory path
         // This should follow /symlink_dir but remove the symlink /real_dir/link_to_target
         vfs.remove("/symlink_dir/link_to_target").unwrap();
-        
+
         // Verify symlink is removed from real directory
-        let result = vfs.resolve_path_with_options("/real_dir/link_to_target", &PathResolutionOptions::no_follow());
-        assert!(result.is_err(), "Symlink should be removed from real directory");
-        
+        let result = vfs.resolve_path_with_options(
+            "/real_dir/link_to_target",
+            &PathResolutionOptions::no_follow(),
+        );
+        assert!(
+            result.is_err(),
+            "Symlink should be removed from real directory"
+        );
+
         // Verify target file still exists
         let (target_file, _) = vfs.resolve_path("/real_dir/target.txt").unwrap();
-        assert_eq!(target_file.node().file_type().unwrap(), FileType::RegularFile);
-        
+        assert_eq!(
+            target_file.node().file_type().unwrap(),
+            FileType::RegularFile
+        );
+
         // Verify symlink directory still exists
-        let (symlink_dir, _) = vfs.resolve_path_with_options("/symlink_dir", &PathResolutionOptions::no_follow()).unwrap();
+        let (symlink_dir, _) = vfs
+            .resolve_path_with_options("/symlink_dir", &PathResolutionOptions::no_follow())
+            .unwrap();
         assert!(symlink_dir.node().is_symlink().unwrap());
     }
 
@@ -524,21 +602,28 @@ mod tests {
 
         // Create directory structure
         vfs.create_dir("/real_dir").unwrap();
-        
+
         // Create symlink to directory: /symlink_dir -> /real_dir
         vfs.create_symlink("/symlink_dir", "/real_dir").unwrap();
-        
+
         // Create file through symlink directory
-        vfs.create_file("/symlink_dir/new_file.txt", FileType::RegularFile).unwrap();
-        
+        vfs.create_file("/symlink_dir/new_file.txt", FileType::RegularFile)
+            .unwrap();
+
         // Verify file exists in real directory
         let (file_in_real, _) = vfs.resolve_path("/real_dir/new_file.txt").unwrap();
-        assert_eq!(file_in_real.node().file_type().unwrap(), FileType::RegularFile);
-        
+        assert_eq!(
+            file_in_real.node().file_type().unwrap(),
+            FileType::RegularFile
+        );
+
         // Verify file is accessible through symlink
         let (file_through_symlink, _) = vfs.resolve_path("/symlink_dir/new_file.txt").unwrap();
-        assert_eq!(file_through_symlink.node().file_type().unwrap(), FileType::RegularFile);
-        
+        assert_eq!(
+            file_through_symlink.node().file_type().unwrap(),
+            FileType::RegularFile
+        );
+
         // Both paths should resolve to the same node
         assert_eq!(file_in_real.node().id(), file_through_symlink.node().id());
     }
@@ -551,17 +636,18 @@ mod tests {
 
         // Create directory and file
         vfs.create_dir("/real_dir").unwrap();
-        vfs.create_file("/real_dir/data.txt", FileType::RegularFile).unwrap();
-        
+        vfs.create_file("/real_dir/data.txt", FileType::RegularFile)
+            .unwrap();
+
         // Create symlink to directory
         vfs.create_symlink("/symlink_dir", "/real_dir").unwrap();
-        
+
         // Write data through symlink path
         let write_file = vfs.open("/symlink_dir/data.txt", 0x02).unwrap(); // Write mode
         if let crate::object::KernelObject::File(file_obj) = write_file {
             file_obj.write(b"Hello through symlink!").unwrap();
         }
-        
+
         // Read data through real path
         let read_file = vfs.open("/real_dir/data.txt", 0x01).unwrap(); // Read mode
         if let crate::object::KernelObject::File(file_obj) = read_file {
@@ -569,7 +655,7 @@ mod tests {
             let bytes_read = file_obj.read(&mut buffer).unwrap();
             assert_eq!(&buffer[..bytes_read], b"Hello through symlink!");
         }
-        
+
         // Read data through symlink path as well
         let read_symlink = vfs.open("/symlink_dir/data.txt", 0x01).unwrap();
         if let crate::object::KernelObject::File(file_obj) = read_symlink {
@@ -583,27 +669,32 @@ mod tests {
     #[test_case]
     fn test_file_symlink_removal() {
         use crate::fs::vfs_v2::manager::PathResolutionOptions;
-        
+
         let tmpfs = TmpFS::new(0);
         let vfs = VfsManager::new_with_root(tmpfs);
 
         // Create target file
-        vfs.create_file("/target.txt", FileType::RegularFile).unwrap();
-        
+        vfs.create_file("/target.txt", FileType::RegularFile)
+            .unwrap();
+
         // Create symlink to file
-        vfs.create_symlink("/file_symlink.txt", "/target.txt").unwrap();
-        
+        vfs.create_symlink("/file_symlink.txt", "/target.txt")
+            .unwrap();
+
         // Verify symlink exists
-        let (symlink, _) = vfs.resolve_path_with_options("/file_symlink.txt", &PathResolutionOptions::no_follow()).unwrap();
+        let (symlink, _) = vfs
+            .resolve_path_with_options("/file_symlink.txt", &PathResolutionOptions::no_follow())
+            .unwrap();
         assert!(symlink.node().is_symlink().unwrap());
-        
+
         // Remove the symlink (not the target)
         vfs.remove("/file_symlink.txt").unwrap();
-        
+
         // Verify symlink is gone
-        let result = vfs.resolve_path_with_options("/file_symlink.txt", &PathResolutionOptions::no_follow());
+        let result =
+            vfs.resolve_path_with_options("/file_symlink.txt", &PathResolutionOptions::no_follow());
         assert!(result.is_err(), "Symlink should be removed");
-        
+
         // Verify target file still exists
         let (target, _) = vfs.resolve_path("/target.txt").unwrap();
         assert_eq!(target.node().file_type().unwrap(), FileType::RegularFile);
@@ -616,17 +707,19 @@ mod tests {
         let vfs = VfsManager::new_with_root(tmpfs);
 
         // Create target file
-        vfs.create_file("/target.txt", FileType::RegularFile).unwrap();
-        
+        vfs.create_file("/target.txt", FileType::RegularFile)
+            .unwrap();
+
         // Create symlink to file
-        vfs.create_symlink("/file_symlink.txt", "/target.txt").unwrap();
-        
+        vfs.create_symlink("/file_symlink.txt", "/target.txt")
+            .unwrap();
+
         // Write data through symlink
         let write_file = vfs.open("/file_symlink.txt", 0x02).unwrap(); // Write mode
         if let crate::object::KernelObject::File(file_obj) = write_file {
             file_obj.write(b"Data via file symlink").unwrap();
         }
-        
+
         // Read data through target file
         let read_target = vfs.open("/target.txt", 0x01).unwrap(); // Read mode
         if let crate::object::KernelObject::File(file_obj) = read_target {
@@ -634,14 +727,14 @@ mod tests {
             let bytes_read = file_obj.read(&mut buffer).unwrap();
             assert_eq!(&buffer[..bytes_read], b"Data via file symlink");
         }
-        
+
         // Write more data through target file (truncate first to overwrite)
-        let write_target = vfs.open("/target.txt", 0x02).unwrap(); // Write mode  
+        let write_target = vfs.open("/target.txt", 0x02).unwrap(); // Write mode
         if let crate::object::KernelObject::File(file_obj) = write_target {
             file_obj.truncate(0).unwrap(); // Clear the file first
             file_obj.write(b"Additional data").unwrap();
         }
-        
+
         // Read updated data through symlink
         let read_symlink = vfs.open("/file_symlink.txt", 0x01).unwrap(); // Read mode
         if let crate::object::KernelObject::File(file_obj) = read_symlink {
@@ -660,22 +753,27 @@ mod tests {
         // Create nested directory structure
         vfs.create_dir("/level1").unwrap();
         vfs.create_dir("/level1/level2").unwrap();
-        vfs.create_file("/level1/level2/deep_file.txt", FileType::RegularFile).unwrap();
-        
+        vfs.create_file("/level1/level2/deep_file.txt", FileType::RegularFile)
+            .unwrap();
+
         // Create symlinks at different levels
         vfs.create_symlink("/link_level1", "/level1").unwrap();
         vfs.create_symlink("/level1/link_level2", "level2").unwrap(); // Relative path
-        
+
         // Access file through multiple symlinks: /link_level1/link_level2/deep_file.txt
-        let (deep_file, _) = vfs.resolve_path("/link_level1/link_level2/deep_file.txt").unwrap();
+        let (deep_file, _) = vfs
+            .resolve_path("/link_level1/link_level2/deep_file.txt")
+            .unwrap();
         assert_eq!(deep_file.node().file_type().unwrap(), FileType::RegularFile);
-        
+
         // Write data through nested symlink path
-        let write_file = vfs.open("/link_level1/link_level2/deep_file.txt", 0x02).unwrap();
+        let write_file = vfs
+            .open("/link_level1/link_level2/deep_file.txt", 0x02)
+            .unwrap();
         if let crate::object::KernelObject::File(file_obj) = write_file {
             file_obj.write(b"Deep symlink data").unwrap();
         }
-        
+
         // Read data through real path
         let read_file = vfs.open("/level1/level2/deep_file.txt", 0x01).unwrap();
         if let crate::object::KernelObject::File(file_obj) = read_file {
@@ -683,12 +781,72 @@ mod tests {
             let bytes_read = file_obj.read(&mut buffer).unwrap();
             assert_eq!(&buffer[..bytes_read], b"Deep symlink data");
         }
-        
+
         // Create new file through nested symlink path
-        vfs.create_file("/link_level1/link_level2/new_deep_file.txt", FileType::RegularFile).unwrap();
-        
+        vfs.create_file(
+            "/link_level1/link_level2/new_deep_file.txt",
+            FileType::RegularFile,
+        )
+        .unwrap();
+
         // Verify file exists in real location
-        let (new_file, _) = vfs.resolve_path("/level1/level2/new_deep_file.txt").unwrap();
+        let (new_file, _) = vfs
+            .resolve_path("/level1/level2/new_deep_file.txt")
+            .unwrap();
         assert_eq!(new_file.node().file_type().unwrap(), FileType::RegularFile);
+    }
+
+    /// Test socket file creation and integration with VFS
+    #[test_case]
+    fn test_socket_file_creation() {
+        use crate::fs::SocketFileInfo;
+        use crate::network::{NetworkManager, SocketProtocol, SocketType, local::LocalSocket};
+        use alloc::sync::Arc;
+
+        // Initialize network manager
+        let network_manager = NetworkManager::init();
+
+        // Create TmpFS and VFS manager
+        let tmpfs = TmpFS::new(0); // Unlimited memory
+        let vfs = VfsManager::new_with_root(tmpfs);
+
+        // Create a local socket
+        let socket = Arc::new(LocalSocket::new(
+            SocketType::Stream,
+            SocketProtocol::Default,
+        ));
+
+        // Register socket with network manager
+        let socket_id = 1001; // Use a specific socket ID
+        network_manager
+            .register_socket_with_id(
+                socket_id,
+                socket.clone() as Arc<dyn crate::network::SocketObject>,
+            )
+            .unwrap();
+
+        // Create socket file in VFS
+        let socket_file_type = FileType::Socket(SocketFileInfo { socket_id });
+        vfs.create_file("/my_socket.sock", socket_file_type)
+            .unwrap();
+
+        // Verify socket file exists and has correct type
+        let (socket_entry, _) = vfs.resolve_path("/my_socket.sock").unwrap();
+        let socket_node = socket_entry.node();
+
+        match socket_node.file_type().unwrap() {
+            FileType::Socket(info) => {
+                assert_eq!(info.socket_id, socket_id);
+            }
+            other => panic!("Expected Socket file type, got {:?}", other),
+        }
+
+        // Open the socket file
+        let socket_file = vfs.open("/my_socket.sock", 0x02).unwrap(); // Write mode
+
+        // Verify it's a file object
+        assert!(matches!(socket_file, crate::object::KernelObject::File(_)));
+
+        crate::early_println!("[Test] Socket VFS integration test passed!");
     }
 }

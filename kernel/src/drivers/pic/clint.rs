@@ -3,16 +3,26 @@
 //! The CLINT manages CPU-local interrupts such as timer interrupts and
 //! software interrupts in RISC-V systems.
 
-use crate::{device::{manager::{DeviceManager, DriverPriority}, platform::{resource::PlatformDeviceResourceType, PlatformDeviceDriver, PlatformDeviceInfo}}, driver_initcall, interrupt::{
-    controllers::{LocalInterruptController, LocalInterruptType}, CpuId, InterruptError, InterruptManager, InterruptResult
-}};
+use crate::{
+    device::{
+        manager::{DeviceManager, DriverPriority},
+        platform::{
+            resource::PlatformDeviceResourceType, PlatformDeviceDriver, PlatformDeviceInfo,
+        },
+    },
+    driver_initcall,
+    interrupt::{
+        controllers::{LocalInterruptController, LocalInterruptType},
+        CpuId, InterruptError, InterruptManager, InterruptResult,
+    },
+};
 use alloc::{boxed::Box, vec};
 use core::ptr::{read_volatile, write_volatile};
 
 /// CLINT register offsets (relative to base address)
-const CLINT_MSIP_OFFSET: usize = 0x0000;     // Software interrupt pending
+const CLINT_MSIP_OFFSET: usize = 0x0000; // Software interrupt pending
 const CLINT_MTIMECMP_OFFSET: usize = 0x4000; // Timer compare registers
-const CLINT_MTIME_OFFSET: usize = 0xBFF8;    // Timer value
+const CLINT_MTIME_OFFSET: usize = 0xBFF8; // Timer value
 
 /// CLINT register stride per CPU
 const CLINT_MSIP_STRIDE: usize = 4;
@@ -27,22 +37,26 @@ pub struct Clint {
     base_addr: usize,
     /// Maximum number of CPUs this CLINT supports
     max_cpus: CpuId,
+    /// Cached timebase frequency in Hz
+    timebase_frequency_hz: u64,
 }
 
 impl Clint {
     /// Create a new CLINT instance
-    /// 
+    ///
     /// # Arguments
-    /// 
+    ///
     /// * `base_addr` - Physical base address of the CLINT
     /// * `max_cpus` - Maximum number of CPUs supported
-    /// 
+    /// * `timebase_frequency_hz` - Timebase frequency in Hz
+    ///
     /// The base address is used to calculate all register addresses using
     /// relative offsets defined in the CLINT specification.
-    pub fn new(base_addr: usize, max_cpus: CpuId) -> Self {
+    pub fn new(base_addr: usize, max_cpus: CpuId, timebase_frequency_hz: u64) -> Self {
         Self {
             base_addr,
             max_cpus: max_cpus.min(MAX_CPUS),
+            timebase_frequency_hz,
         }
     }
 
@@ -78,7 +92,7 @@ impl LocalInterruptController for Clint {
 
         // Clear software interrupt
         self.clear_software_interrupt(cpu_id)?;
-        
+
         // Set timer to maximum value (effectively disable)
         self.set_timer(cpu_id, u64::MAX)?;
 
@@ -86,7 +100,11 @@ impl LocalInterruptController for Clint {
     }
 
     /// Enable a specific local interrupt type for a CPU
-    fn enable_interrupt(&mut self, cpu_id: CpuId, interrupt_type: LocalInterruptType) -> InterruptResult<()> {
+    fn enable_interrupt(
+        &mut self,
+        cpu_id: CpuId,
+        interrupt_type: LocalInterruptType,
+    ) -> InterruptResult<()> {
         self.validate_cpu_id(cpu_id)?;
 
         match interrupt_type {
@@ -108,7 +126,11 @@ impl LocalInterruptController for Clint {
     }
 
     /// Disable a specific local interrupt type for a CPU
-    fn disable_interrupt(&mut self, cpu_id: CpuId, interrupt_type: LocalInterruptType) -> InterruptResult<()> {
+    fn disable_interrupt(
+        &mut self,
+        cpu_id: CpuId,
+        interrupt_type: LocalInterruptType,
+    ) -> InterruptResult<()> {
         self.validate_cpu_id(cpu_id)?;
 
         match interrupt_type {
@@ -136,15 +158,12 @@ impl LocalInterruptController for Clint {
         match interrupt_type {
             LocalInterruptType::Timer => {
                 let current_time = self.get_time();
-                let compare_time = unsafe {
-                    read_volatile(self.mtimecmp_addr(cpu_id) as *const u64)
-                };
+                let compare_time =
+                    unsafe { read_volatile(self.mtimecmp_addr(cpu_id) as *const u64) };
                 current_time >= compare_time
             }
             LocalInterruptType::Software => {
-                let msip = unsafe {
-                    read_volatile(self.msip_addr(cpu_id) as *const u32)
-                };
+                let msip = unsafe { read_volatile(self.msip_addr(cpu_id) as *const u32) };
                 (msip & 1) != 0
             }
             LocalInterruptType::External => false, // Not managed by CLINT
@@ -152,7 +171,11 @@ impl LocalInterruptController for Clint {
     }
 
     /// Clear a pending local interrupt for a CPU
-    fn clear_interrupt(&mut self, cpu_id: CpuId, interrupt_type: LocalInterruptType) -> InterruptResult<()> {
+    fn clear_interrupt(
+        &mut self,
+        cpu_id: CpuId,
+        interrupt_type: LocalInterruptType,
+    ) -> InterruptResult<()> {
         self.validate_cpu_id(cpu_id)?;
 
         match interrupt_type {
@@ -161,12 +184,8 @@ impl LocalInterruptController for Clint {
                 let current_time = self.get_time();
                 self.set_timer(cpu_id, current_time + 1000000) // 1M cycles in future
             }
-            LocalInterruptType::Software => {
-                self.clear_software_interrupt(cpu_id)
-            }
-            LocalInterruptType::External => {
-                Err(InterruptError::NotSupported)
-            }
+            LocalInterruptType::Software => self.clear_software_interrupt(cpu_id),
+            LocalInterruptType::External => Err(InterruptError::NotSupported),
         }
     }
 
@@ -203,19 +222,17 @@ impl LocalInterruptController for Clint {
 
         // Set the timer compare register to the specified time using SBI
         crate::arch::riscv64::instruction::sbi::sbi_set_timer(time);
-        
+
         Ok(())
     }
 
     /// Get current timer value
     fn get_time(&self) -> u64 {
-        unsafe {
-            read_volatile(self.mtime_addr() as *const u64)
-        }
+        unsafe { read_volatile(self.mtime_addr() as *const u64) }
     }
 
     fn get_timer_frequency_hz(&self) -> u64 {
-        10_000_000 // Fixed frequency for QEMU virt platform... It may get from FDT.
+        self.timebase_frequency_hz
     }
 }
 
@@ -229,26 +246,43 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
     }
 
     // Get memory region resource (res_type == PlatformDeviceResourceType::MEM)
-    let mem_res = res.iter()
+    let mem_res = res
+        .iter()
         .find(|r| r.res_type == PlatformDeviceResourceType::MEM)
         .ok_or("Memory resource not found")?;
-    
+
     let base_addr = mem_res.start as usize;
 
+    // Read the timebase frequency once from device tree
+    // Prefer the timebase frequency provided by the device tree.
+    // Fallback keeps QEMU virt default (10MHz) working even if FDT is unavailable.
+    let timebase_frequency_hz =
+        crate::arch::riscv64::fdt::timebase_frequency_hz_from_fdt().unwrap_or(10_000_000);
+
     // Create CLINT controller
-    let mut controller = Box::new(Clint::new(base_addr, 4)); // Example: 4 CPUs for QEMU virt
-    
+    let mut controller = Box::new(Clint::new(base_addr, 4, timebase_frequency_hz)); // Example: 4 CPUs for QEMU virt
+
     // Initialize CLINT (Currently only initializes for CPU 0)
     if let Err(e) = controller.init(0) {
-        crate::early_println!("[interrupt] Failed to initialize CLINT for CPU {}: {}", 0, e);
+        crate::early_println!(
+            "[interrupt] Failed to initialize CLINT for CPU {}: {}",
+            0,
+            e
+        );
         return Err("Failed to initialize CLINT");
     }
 
     // Register with InterruptManager instead of DeviceManager
-    match InterruptManager::global().lock().register_local_controller_for_range(controller, 0..4) {
+    match InterruptManager::global()
+        .lock()
+        .register_local_controller_for_range(controller, 0..4)
+    {
         Ok(_) => {
-            crate::early_println!("[interrupt] CLINT registered at base address: {:#x}", base_addr);
-        },
+            crate::early_println!(
+                "[interrupt] CLINT registered at base address: {:#x}",
+                base_addr
+            );
+        }
         Err(e) => {
             crate::early_println!("[interrupt] Failed to register CLINT: {}", e);
             return Err("Failed to register CLINT");
@@ -270,11 +304,10 @@ fn register_driver() {
         vec!["sifive,clint0", "riscv,clint0"],
     );
     // Register the driver with the kernel
-    DeviceManager::get_mut_manager().register_driver(Box::new(driver), DriverPriority::Critical);
+    DeviceManager::get_manager().register_driver(Box::new(driver), DriverPriority::Critical);
 }
 
 driver_initcall!(register_driver);
-
 
 #[cfg(test)]
 mod tests {
@@ -282,24 +315,24 @@ mod tests {
 
     #[test_case]
     fn test_clint_creation() {
-        let clint = Clint::new(0x200_0000, 4);
+        let clint = Clint::new(0x200_0000, 4, 10_000_000);
         assert_eq!(clint.max_cpus, 4);
     }
 
     #[test_case]
     fn test_address_calculation() {
-        let clint = Clint::new(0x200_0000, 4);
-        
+        let clint = Clint::new(0x200_0000, 4, 10_000_000);
+
         // Test MSIP addresses
         assert_eq!(clint.msip_addr(0), 0x200_0000);
         assert_eq!(clint.msip_addr(1), 0x200_0004);
         assert_eq!(clint.msip_addr(3), 0x200_000C);
-        
+
         // Test MTIMECMP addresses
         assert_eq!(clint.mtimecmp_addr(0), 0x200_4000);
         assert_eq!(clint.mtimecmp_addr(1), 0x200_4008);
         assert_eq!(clint.mtimecmp_addr(3), 0x200_4018);
-        
+
         // Test MTIME address
         assert_eq!(clint.mtime_addr(), 0x200_BFF8);
     }
@@ -307,28 +340,28 @@ mod tests {
     #[test_case]
     fn test_different_base_address() {
         // Test with different base address to ensure base_addr is properly used
-        let clint = Clint::new(0x300_0000, 4);
-        
+        let clint = Clint::new(0x300_0000, 4, 10_000_000);
+
         // Test MSIP addresses with different base
         assert_eq!(clint.msip_addr(0), 0x300_0000);
         assert_eq!(clint.msip_addr(1), 0x300_0004);
-        
+
         // Test MTIMECMP addresses with different base
         assert_eq!(clint.mtimecmp_addr(0), 0x300_4000);
         assert_eq!(clint.mtimecmp_addr(1), 0x300_4008);
-        
+
         // Test MTIME address with different base
         assert_eq!(clint.mtime_addr(), 0x300_BFF8);
     }
 
     #[test_case]
     fn test_validation() {
-        let clint = Clint::new(0x200_0000, 4);
-        
+        let clint = Clint::new(0x200_0000, 4, 10_000_000);
+
         // Valid CPU IDs should pass
         assert!(clint.validate_cpu_id(0).is_ok());
         assert!(clint.validate_cpu_id(3).is_ok());
-        
+
         // Invalid CPU IDs should fail
         assert!(clint.validate_cpu_id(4).is_err());
         assert!(clint.validate_cpu_id(100).is_err());

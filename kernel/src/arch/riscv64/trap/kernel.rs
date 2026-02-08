@@ -2,22 +2,25 @@ use core::arch::naked_asm;
 use core::{arch::asm, mem::transmute};
 
 use crate::arch::trap::print_traplog;
-use crate::arch::{get_cpu, Trapframe};
-use crate::println;
+use crate::arch::{Trapframe, get_cpu};
+use crate::environment::PAGE_SIZE;
+use crate::object::capability::memory_mapping::{AccessKind, AccessOp};
+use crate::sched::scheduler::get_scheduler;
 use crate::vm::get_kernel_vm_manager;
 
 #[unsafe(export_name = "_kernel_trap_entry")]
 #[unsafe(naked)]
 pub extern "C" fn _kernel_trap_entry() {
     unsafe {
-        naked_asm!("
+        naked_asm!(
+            "
         .option norvc
         .option norelax
         .align 8
                 /* Disable the interrupt */
                 csrci   sstatus, 0x2
                 /* Decrease the stack pointer */
-                addi    sp, sp, -280
+                addi    sp, sp, -288
                 /* Save the context of the current hart */
                 sd      x0, 0(sp)
                 sd      x1, 8(sp)
@@ -97,7 +100,7 @@ pub extern "C" fn _kernel_trap_entry() {
                 ld     x31, 248(sp)
 
                 /* Increase the stack pointer */
-                addi   sp, sp, 280
+                addi   sp, sp, 288
 
                 sret
             "
@@ -108,8 +111,6 @@ pub extern "C" fn _kernel_trap_entry() {
 #[unsafe(export_name = "arch_kernel_trap_handler")]
 pub extern "C" fn arch_kernel_trap_handler(addr: usize) {
     let trapframe: &mut Trapframe = unsafe { transmute(addr) };
-    let cpu = get_cpu();
-    trapframe.hartid = cpu.hartid;
 
     let cause: usize;
     unsafe {
@@ -134,15 +135,20 @@ fn arch_kernel_exception_handler(trapframe: &mut Trapframe, cause: usize) {
             let vaddr = trapframe.epc as usize;
             let manager = get_kernel_vm_manager();
             match manager.search_memory_map(vaddr) {
-                Some(mmap) => {
-                    match manager.get_root_page_table() {
-                        Some(root_page_table) => {
-                            let paddr = mmap.get_paddr(vaddr).unwrap();
-                            root_page_table.map(manager.get_asid(), vaddr, paddr, mmap.permissions);
-                        }
-                        None => panic!("Root page table is not found"),
+                Some(mmap) => match manager.get_root_page_table() {
+                    Some(root_page_table) => {
+                        let paddr = mmap.get_paddr(vaddr).unwrap();
+                        root_page_table.map(
+                            manager.get_asid(),
+                            vaddr,
+                            paddr,
+                            mmap.permissions,
+                            true,
+                            false,
+                        );
                     }
-                }
+                    None => panic!("Root page table is not found"),
+                },
                 None => panic!("Not found memory map matched with vaddr: {:#x}", vaddr),
             }
         }
@@ -153,22 +159,49 @@ fn arch_kernel_exception_handler(trapframe: &mut Trapframe, cause: usize) {
                 asm!("csrr {}, stval", out(reg) vaddr);
             }
 
+            // Detect kernel stack overflow via guard-page hit
+            if let Some(task) = get_scheduler().get_current_task(get_cpu().get_cpuid()) {
+                if let Some((_slot, base)) = task.get_kernel_stack_window_base() {
+                    if vaddr >= base && vaddr < base + PAGE_SIZE {
+                        print_traplog(trapframe);
+                        panic!(
+                            "Kernel stack overflow detected: guard page hit at vaddr={:#x} (base={:#x})",
+                            vaddr, base
+                        );
+                    }
+                }
+            }
+
             // For kernel addresses, check if they are valid
             let manager = get_kernel_vm_manager();
             loop {
                 crate::println!("[kernel] Handling page fault at vaddr: {:#x}", vaddr);
-                
+
                 // Additional validation for suspicious addresses
                 if vaddr == 0 || vaddr == usize::MAX {
                     print_traplog(trapframe);
                     panic!("Invalid memory access at vaddr: {:#x}", vaddr);
                 }
-                
-                match manager.lazy_map_page(vaddr) {
+
+                let op = if cause == 13 {
+                    AccessOp::Load
+                } else {
+                    AccessOp::Store
+                };
+                let access = AccessKind {
+                    op,
+                    vaddr,
+                    size: None,
+                };
+
+                match manager.lazy_map_page_with(access) {
                     Ok(_) => (),
                     Err(_) => {
                         print_traplog(trapframe);
-                        panic!("Not found memory map matched with kernel vaddr: {:#x}", vaddr);
+                        panic!(
+                            "Not found memory map matched with kernel vaddr: {:#x}",
+                            vaddr
+                        );
                     }
                 }
                 crate::println!("Mapped page at vaddr: {:#x}", vaddr);
@@ -179,7 +212,7 @@ fn arch_kernel_exception_handler(trapframe: &mut Trapframe, cause: usize) {
                 }
                 vaddr = (vaddr + 4) & !0b11; // Align to the next 4-byte boundary
             }
-        },
+        }
         _ => {
             print_traplog(trapframe);
             panic!("Unhandled exception: {}", cause);

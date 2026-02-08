@@ -1,11 +1,20 @@
 [package]
 name = "scarlet_std"
-version = "0.15.0"
+version = "0.16.0"
 edition = "2024"
 
 [lib]
 name = "scarlet_std"
 path = "src/lib.rs"
 
+[features]
+# Enables allocator overlap/invariant checks even in release builds.
+alloc_debug = []
+
+[dependencies]
+talc = { version = "4.4", default-features = false, features = ["lock_api"] }
+spin = { version = "0.10.0", default-features = false, features = ["lock_api", "mutex", "spin_mutex"] }
+hashbrown = "0.15"
+
 [build]
-target = "../../../targets/riscv64-unknown-scarlet.json" 
+target = "../../../targets/riscv64gc-unknown-scarlet-elf.json" 

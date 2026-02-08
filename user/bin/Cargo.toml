@@ -1,7 +1,13 @@
 [package]
 name = "userprogram"
-version = "0.15.0"
+version = "0.16.0"
 edition = "2024"
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"
 
 [[bin]]
 name = "init"
@@ -13,11 +19,15 @@ path = "src/login.rs"
 
 [[bin]]
 name = "sh"
-path = "src/sh.rs"
+path = "src/sh/main.rs"
 
 [[bin]]
 name = "ls"
 path = "src/ls.rs"
+
+[[bin]]
+name = "rm"
+path = "src/rm.rs"
 
 [[bin]]
 name = "hello"
@@ -43,6 +53,118 @@ path = "src/cat.rs"
 name = "fb_test"
 path = "src/fb_test.rs"
 
+ [[bin]]
+ name = "socket_server"
+ path = "src/socket_server.rs"
+
+ [[bin]]
+ name = "udp_server"
+ path = "src/udp_server.rs"
+
+ [[bin]]
+ name = "udp_client"
+ path = "src/udp_client.rs"
+
+[[bin]]
+name = "socket_client"
+path = "src/socket_client.rs"
+
+[[bin]]
+name = "socket_pair"
+path = "src/socket_pair.rs"
+
+[[bin]]
+name = "ping"
+path = "src/ping.rs"
+
+[[bin]]
+name = "netcfg"
+path = "src/netcfg.rs"
+
+[[bin]]
+name = "tcp_client"
+path = "src/tcp_client.rs"
+
+[[bin]]
+name = "tcp_server"
+path = "src/tcp_server.rs"
+
+[[bin]]
+name = "httpd"
+path = "src/httpd.rs"
+
+[[bin]]
+name = "sws"
+path = "src/sws/main.rs"
+
+[[bin]]
+name = "container_demo"
+path = "src/container_demo.rs"
+
+[[bin]]
+name = "socket_handle_transfer_demo"
+path = "src/socket_handle_transfer_demo.rs"
+test = false
+
+# [[bin]]
+# name = "ui_demo"
+# path = "src/ui_demo.rs"
+
+[[bin]]
+name = "stemd"
+path = "src/stemd/main.rs"
+
+[[bin]]
+name = "sbusd"
+path = "src/sbusd/main.rs"
+
+[[bin]]
+name = "slint_demo"
+path = "src/slint_demo.rs"
+
+[[bin]]
+name = "scarlet_desktop"
+path = "src/scarlet_desktop/main.rs"
+
+[[bin]]
+name = "scarlet_desktop_background"
+path = "src/scarlet_desktop/background/main.rs"
+
+[[bin]]
+name = "scarlet_desktop_taskbar"
+path = "src/scarlet_desktop/taskbar/scarlet_ui.rs"
+
+[[bin]]
+name = "ui-demo"
+path = "src/ui_demo.rs"
+
+[[bin]]
+name = "wayland_bridge"
+path = "src/wayland_bridge/main.rs"
+
+[[bin]]
+name = "settings"
+path = "src/settings.rs"
+
 [dependencies]
-scarlet_std = { path = "../lib/std" }
+scarlet_std = { path = "../lib/std", features = ["alloc_debug"] }
 framebuffer = { path = "../lib/framebuffer" }
+sws_protocol = { path = "../lib/sws_protocol" }
+sws-client = { path = "../lib/sws-client" }
+scarlet-ui = { path = "../lib/scarlet-ui" }
+scarlet-ui-macros = { path = "../lib/scarlet-ui-macros" }
+slint-scarlet = { path = "../lib/slint-scarlet" }
+scarlet-desktop-config = { path = "../lib/scarlet-desktop-config" }
+sbus = { path = "../lib/sbus" }
+sbus-client = { path = "../lib/sbus-client" }
+serde = { version = "1.0", default-features = false, features = ["alloc", "derive"] }
+serde-json-core = { package = "serde-json-core", version = "0.6", default-features = false }
+slint = { version = "1.14", default-features = false, features = [
+    "unsafe-single-threaded",
+    "renderer-software",
+    "libm",
+    "compat-1-2"
+] }
+
+[build-dependencies]
+slint-build = "1.14"

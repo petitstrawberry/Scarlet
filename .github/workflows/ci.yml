@@ -13,6 +13,22 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+    - name: Free Disk Space (Ubuntu)
+      uses: jlumbroso/free-disk-space@main
+      with:
+        # this might remove tools that are actually needed,
+        # if set to "true" but frees about 6 GB
+        tool-cache: false
+        
+        # all of these default to true, but feel free to set to
+        # "false" if necessary for your workflow
+        android: true
+        dotnet: true
+        haskell: true
+        large-packages: true
+        docker-images: true
+        swap-storage: true
+
     - uses: actions/checkout@v4
     
     # Dockerfile と関連ファイルのハッシュを計算
@@ -40,9 +56,19 @@ jobs:
       if: steps.docker-cache.outputs.cache-hit == 'true'
       run: docker load < /tmp/docker-image
 
-    - name: Build scarlet kernel 
-      run: docker run -v $PWD:/workspaces/Scarlet scarlet-dev cargo make build
+    - name: Run formatting check
+      run: docker run -v $PWD:/workspaces/Scarlet scarlet-dev cargo make fmt-check
+
+    - name: Build scarlet kernel (riscv64)
+      run: docker run -v $PWD:/workspaces/Scarlet scarlet-dev cargo make build-riscv64
       
-    - name: Test scarlet kernel
-      run: docker run -v $PWD:/workspaces/Scarlet scarlet-dev cargo make test
-      timeout-minutes: 5
+    - name: Test scarlet kernel (riscv64)
+      run: docker run -v $PWD:/workspaces/Scarlet scarlet-dev cargo make test-riscv64
+      timeout-minutes: 10
+
+    - name: Build scarlet kernel (aarch64)
+      run: docker run -v $PWD:/workspaces/Scarlet scarlet-dev cargo make build-aarch64
+      
+    - name: Test scarlet kernel (aarch64)
+      run: docker run -v $PWD:/workspaces/Scarlet scarlet-dev cargo make test-aarch64
+      timeout-minutes: 10

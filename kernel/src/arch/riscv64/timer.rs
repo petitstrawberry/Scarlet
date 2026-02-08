@@ -1,13 +1,13 @@
 use core::arch::asm;
 
-use crate::{arch::{get_cpu, instruction::sbi::sbi_set_timer}, environment::RISCV_STIMER_FREQ, interrupt::InterruptManager};
+use crate::{arch::get_cpu, interrupt::InterruptManager};
 
 pub type ArchTimer = Stimer;
 
 pub struct Stimer {
     pub next_event: u64,
     pub running: bool,
-    frequency: u64
+    frequency: u64,
 }
 
 impl Stimer {
@@ -25,7 +25,7 @@ impl Stimer {
         Stimer {
             next_event: 0,
             running: false,
-            frequency: freq
+            frequency: freq,
         }
     }
 

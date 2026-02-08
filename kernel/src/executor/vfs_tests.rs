@@ -95,7 +95,7 @@ fn test_vfs_inheritance_abi_switch() {
     task.set_base_vfs(Arc::new(vfs));
     
     // Test ABI module VFS setup
-    let abi = crate::abi::AbiRegistry::instantiate("scarlet").unwrap();
+    let abi = crate::abi::AbiRegistry::instantiate(ScarletAbi::name()).unwrap();
     
     // Test setup_abi_vfs with base VFS
     let abi_vfs = abi.setup_abi_vfs(task.get_base_vfs().unwrap()).unwrap();

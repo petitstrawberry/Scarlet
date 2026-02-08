@@ -1,5 +1,4 @@
-use crate::arch::Trapframe;
-use crate::sched::scheduler::get_scheduler;
+use crate::arch::{Trapframe, get_cpu};
 use crate::interrupt::InterruptManager;
 
 /// RISC-V S-mode interrupt causes
@@ -25,24 +24,25 @@ fn handle_software_interrupt() {
 }
 
 /// Handle timer interrupt from CLINT
-fn handle_timer_interrupt(_trapframe: &mut Trapframe) {
+fn handle_timer_interrupt(trapframe: &mut Trapframe) {
     // Increment the global tick counter
-    crate::timer::tick();
+    crate::timer::tick(trapframe);
 }
 
 /// Handle external interrupt from PLIC
 fn handle_external_interrupt(trapframe: &mut Trapframe) {
-    let cpu_id = trapframe.get_cpuid() as u32;
+    let cpu_id = get_cpu().get_cpuid() as u32;
 
     // Claim and handle external interrupt through PLIC
-    match InterruptManager::with_manager(|mgr| {
-        mgr.claim_and_handle_external_interrupt(cpu_id)
-    }) {
+    match InterruptManager::with_manager(|mgr| mgr.claim_and_handle_external_interrupt(cpu_id)) {
         Ok(Some(interrupt_id)) => {
             // crate::early_println!("[interrupt] Handled external interrupt {} on CPU {}", interrupt_id, cpu_id);
         }
         Ok(None) => {
-            crate::early_println!("[interrupt] No pending external interrupt on CPU {}", cpu_id);
+            crate::early_println!(
+                "[interrupt] No pending external interrupt on CPU {}",
+                cpu_id
+            );
         }
         Err(e) => {
             crate::early_println!("[interrupt] Failed to handle external interrupt: {}", e);
