@@ -51,10 +51,11 @@ mod integration_tests {
         let fb_resource = graphics_manager.get_framebuffer("fb0").unwrap();
         assert_eq!(fb_resource.source_device_id, 0);
         assert_eq!(fb_resource.logical_name, "fb0");
-        assert_eq!(fb_resource.config.width, 1024);
-        assert_eq!(fb_resource.config.height, 768);
-        assert_eq!(fb_resource.config.format, PixelFormat::BGRA8888);
-        assert_eq!(fb_resource.physical_addr, fb_addr);
+        let config = fb_resource.get_config();
+        assert_eq!(config.width, 1024);
+        assert_eq!(config.height, 768);
+        assert_eq!(config.format, PixelFormat::BGRA8888);
+        assert_eq!(fb_resource.get_physical_addr(), fb_addr);
         assert_eq!(fb_resource.size, 1024 * 768 * 4);
     }
 
@@ -170,7 +171,7 @@ mod integration_tests {
 
         assert_eq!(fb0.source_device_id, device_id1);
         assert_eq!(fb1.source_device_id, device_id2);
-        assert_ne!(fb0.physical_addr, fb1.physical_addr);
+        assert_ne!(fb0.get_physical_addr(), fb1.get_physical_addr());
         assert_ne!(fb0.size, fb1.size); // Different resolutions
 
         // Test character devices for both framebuffers
@@ -248,14 +249,13 @@ mod integration_tests {
 
         // Test FramebufferCharDevice with invalid framebuffer
         let invalid_config = FramebufferConfig::new(10, 10, PixelFormat::RGB888);
-        let invalid_resource = Arc::new(FramebufferResource {
-            source_device_id: 0,
-            logical_name: "invalid".to_string(),
-            config: invalid_config.clone(),
-            physical_addr: 0, // Invalid address
-            size: invalid_config.size(),
-            created_char_device_id: RwLock::new(None),
-        });
+        let invalid_resource = Arc::new(FramebufferResource::new(
+            0,
+            "invalid".to_string(),
+            invalid_config.clone(),
+            0, // Invalid address
+            invalid_config.size(),
+        ));
 
         let char_device = FramebufferCharDevice::new(invalid_resource);
         assert!(!char_device.can_read());
