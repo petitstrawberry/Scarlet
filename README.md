@@ -4,7 +4,7 @@
   
 **A kernel in Rust designed to provide a universal, multi-ABI container runtime.**
 
-[![Version](https://img.shields.io/badge/version-0.15.0-blue.svg)](https://github.com/petitstrawberry/Scarlet)
+[![Version](https://img.shields.io/badge/version-0.16.0-blue.svg)](https://github.com/petitstrawberry/Scarlet)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![RISC-V](https://img.shields.io/badge/arch-RISC--V%2064-green)](https://riscv.org/)
 [![AArch64](https://img.shields.io/badge/arch-AArch64-orange)](https://www.arm.com/)
@@ -152,7 +152,7 @@ The Linux ABI implementation is currently in active development:
 Scarlet supports multiple CPU architectures with a unified codebase:
 
 - **RISC-V 64-bit** - Primary development platform, fully supported
-- **AArch64 (ARM 64-bit)** - Experimental supported
+- **AArch64 (ARM 64-bit)** - In development, basic support available
 
 The kernel includes hardware abstraction layers for interrupt handling, memory management, graphics/framebuffer support, and device drivers that work across both architectures.
 

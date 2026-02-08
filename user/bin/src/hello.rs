@@ -32,5 +32,5 @@ fn main() -> i32 {
     println!("Hello, world!");
     println!("PID  = {}", std::task::getpid());
     println!("PPID = {}", std::task::getppid());
-    return 0;
+    0
 }

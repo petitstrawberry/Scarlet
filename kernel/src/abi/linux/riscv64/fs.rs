@@ -674,7 +674,7 @@ pub fn sys_openat(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize
                     // Initialize file status flags (e.g., O_NONBLOCK) from open flags
                     let mut status_flags: u32 = 0;
                     if (flags & O_NONBLOCK) != 0 {
-                        status_flags |= (O_NONBLOCK as u32);
+                        status_flags |= O_NONBLOCK as u32;
                     }
                     let _ = abi.set_file_status_flags(fd, status_flags);
 

@@ -10,8 +10,7 @@ extern crate scarlet_std as std;
 use std::env;
 use std::println;
 use std::socket::{
-    DatagramOps, Inet4SocketAddress, Socket, SocketAddress, SocketDomain, SocketProtocol,
-    SocketType,
+    DatagramOps, Inet4SocketAddress, Socket, SocketDomain, SocketProtocol, SocketType,
 };
 
 #[unsafe(no_mangle)]

@@ -84,6 +84,12 @@ pub struct Builder {
     name: Option<&'static str>,
 }
 
+impl Default for Builder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Builder {
     pub fn new() -> Self {
         Builder { name: None }

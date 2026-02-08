@@ -3,11 +3,10 @@
 
 extern crate scarlet_std as std;
 
-use std::{println, string::String, vec::Vec};
+use std::println;
 
 use std::env;
 use std::fs;
-use std::task::exit;
 
 #[unsafe(no_mangle)]
 fn main() -> i32 {

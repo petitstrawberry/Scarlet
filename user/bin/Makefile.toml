@@ -22,6 +22,11 @@ description = "Run clippy for all user programs"
 command = "cargo"
 args = ["clippy", "--", "-D", "warnings"]
 
+[tasks.clippy-fix]
+description = "Run clippy with auto-fix for all user programs"
+command = "cargo"
+args = ["clippy", "--fix", "--allow-dirty", "--allow-staged", "--", "-D", "warnings"]
+
 [tasks.build]
 description = "Build all user programs with OSABI=83 (debug mode)"
 dependencies = ["build-only-debug", "set-osabi-debug", "split-debug-symbols"]

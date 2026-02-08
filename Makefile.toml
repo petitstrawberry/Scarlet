@@ -385,3 +385,29 @@ description = "Clean rootfs.img"
 cwd = "mkfs"
 command = "sh"
 args = ["clean_rootfs.sh"]
+
+[tasks.clippy-fix-riscv64]
+description = "Run clippy with auto-fix for all components (RISC-V)"
+dependencies = ["clippy-fix-kernel", "clippy-fix-userlib", "clippy-fix-userbin"]
+
+[tasks.clippy-fix-aarch64]
+description = "Run clippy with auto-fix for all components (AArch64)"
+dependencies = ["clippy-fix-kernel", "clippy-fix-userlib", "clippy-fix-userbin"]
+
+[tasks.clippy-fix-kernel]
+description = "Run clippy with auto-fix for kernel"
+cwd = "kernel"
+command = "cargo"
+args = ["clippy", "--fix", "--allow-dirty", "--allow-staged", "--", "-D", "warnings", "-W", "unused_imports", "-W", "empty_line_after_doc_comments"]
+
+[tasks.clippy-fix-userlib]
+description = "Run clippy with auto-fix for user libraries"
+cwd = "user/lib"
+command = "cargo"
+args = ["make", "clippy-fix"]
+
+[tasks.clippy-fix-userbin]
+description = "Run clippy with auto-fix for user programs"
+cwd = "user/bin"
+command = "cargo"
+args = ["make", "clippy-fix"]

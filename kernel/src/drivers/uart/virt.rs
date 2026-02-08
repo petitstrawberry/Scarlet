@@ -19,7 +19,6 @@ use crate::{
         },
     },
     driver_initcall,
-    drivers::uart,
     interrupt::{InterruptId, InterruptManager},
     object::capability::{ControlOps, MemoryMappingOps, Selectable},
     traits::serial::Serial,

@@ -106,29 +106,29 @@ fn main() -> i32 {
     };
 
     let mut failed = false;
-    if let Some(ip) = ip {
-        if let Err(_) = set_interface_ipv4(iface, ip) {
-            println!("netcfg: failed to set ip (iface not found?)");
-            failed = true;
-        }
+    if let Some(ip) = ip
+        && set_interface_ipv4(iface, ip).is_err()
+    {
+        println!("netcfg: failed to set ip (iface not found?)");
+        failed = true;
     }
-    if let Some(mask) = mask {
-        if let Err(_) = set_netmask(mask) {
-            println!("netcfg: failed to set mask");
-            failed = true;
-        }
+    if let Some(mask) = mask
+        && set_netmask(mask).is_err()
+    {
+        println!("netcfg: failed to set mask");
+        failed = true;
     }
-    if let Some(gw) = gw {
-        if let Err(_) = set_default_gateway(gw) {
-            println!("netcfg: failed to set gateway");
-            failed = true;
-        }
+    if let Some(gw) = gw
+        && set_default_gateway(gw).is_err()
+    {
+        println!("netcfg: failed to set gateway");
+        failed = true;
     }
-    if let Some(dns) = dns {
-        if let Err(_) = set_dns_server(dns) {
-            println!("netcfg: failed to set dns");
-            failed = true;
-        }
+    if let Some(dns) = dns
+        && set_dns_server(dns).is_err()
+    {
+        println!("netcfg: failed to set dns");
+        failed = true;
     }
 
     if failed { 1 } else { 0 }

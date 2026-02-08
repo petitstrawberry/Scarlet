@@ -13,7 +13,6 @@ use core::sync::atomic::{AtomicU64, Ordering};
 extern crate alloc;
 use alloc::collections::BinaryHeap;
 use alloc::sync::{Arc, Weak};
-use alloc::vec::Vec;
 use core::cmp::Ordering as CmpOrdering;
 
 pub struct KernelTimer {

@@ -22,7 +22,7 @@ checksum = "d9c4f5dac5e15c24eb999c26181a6ca40b39fe946cbe4c263c7209467bc83af2"
 
 [[package]]
 name = "framebuffer"
-version = "0.15.0"
+version = "0.16.0"
 dependencies = [
  "scarlet_std",
 ]
@@ -49,7 +49,7 @@ dependencies = [
 
 [[package]]
 name = "scarlet_std"
-version = "0.15.0"
+version = "0.16.0"
 dependencies = [
  "hashbrown",
  "spin",

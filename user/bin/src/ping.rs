@@ -36,13 +36,13 @@ pub extern "C" fn main(_argc: isize, _argv: *const *const u8) -> isize {
     let dest = Inet4SocketAddress::new(dest, 0);
     let payload = b"scarlet";
 
-    if let Err(_) = socket.connect_inet(dest) {
+    if socket.connect_inet(dest).is_err() {
         println!("[ping] connect failed");
         return 1;
     }
 
-    if let Ok(mut stream) = socket.as_stream() {
-        if let Err(_) = stream.write(payload) {
+    if let Ok(stream) = socket.as_stream() {
+        if stream.write(payload).is_err() {
             println!("[ping] send failed (check netcfg)");
             return 1;
         }
@@ -52,7 +52,7 @@ pub extern "C" fn main(_argc: isize, _argv: *const *const u8) -> isize {
     }
 
     let mut buf = [0u8; 64];
-    if let Err(_) = socket.set_nonblocking(true) {
+    if socket.set_nonblocking(true).is_err() {
         println!("[ping] recv failed");
         return 1;
     }
@@ -60,7 +60,7 @@ pub extern "C" fn main(_argc: isize, _argv: *const *const u8) -> isize {
     let mut n = 0usize;
     let mut got_reply = false;
     for _ in 0..200 {
-        if let Ok(mut stream) = socket.as_stream() {
+        if let Ok(stream) = socket.as_stream() {
             match stream.read(&mut buf) {
                 Ok(read) => {
                     n = read;

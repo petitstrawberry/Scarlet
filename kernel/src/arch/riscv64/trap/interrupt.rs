@@ -1,6 +1,5 @@
 use crate::arch::{Trapframe, get_cpu};
 use crate::interrupt::InterruptManager;
-use crate::sched::scheduler::get_scheduler;
 
 /// RISC-V S-mode interrupt causes
 const SUPERVISOR_SOFTWARE_INTERRUPT: usize = 1;

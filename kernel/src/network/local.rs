@@ -34,8 +34,7 @@ use super::{
 use crate::ipc::StreamIpcOps;
 use crate::object::KernelObject;
 use crate::object::capability::{
-    CloneOps, ControlOps, ReadyInterest, ReadySet, SelectWaitOutcome, Selectable, StreamError,
-    StreamOps,
+    ControlOps, ReadyInterest, ReadySet, SelectWaitOutcome, Selectable, StreamError, StreamOps,
 };
 use crate::sync::Waker;
 

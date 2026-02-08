@@ -405,7 +405,7 @@ fn restore_raw_mode() {
         let _ = stdin_handle.control(SCTL_TTY_SET_CANONICAL, 0); // raw mode (non-canonical)
         let _ = stdin_handle.control(SCTL_TTY_SET_ECHO, 0); // echo disabled
         let _ = stdin_handle.control(SCTL_TTY_SET_KBMODE, KB_XLATE); // keyboard mode
-        let read_policy = (0 << 16) | 1; // min=1, timeout=0
+        let read_policy = 1; // min=1, timeout=0
         let _ = stdin_handle.control(SCTL_TTY_SET_READ_POLICY, read_policy);
         core::mem::forget(stdin_handle); // Don't close stdin
     }
@@ -536,10 +536,8 @@ fn execute_single_command(cmd: &Command, is_background: bool) -> i32 {
                 .collect();
             let env_refs: Vec<&str> = env_strings.iter().map(|s| s.as_str()).collect();
 
-            if is_builtin {
-                if let Some(code) = handle_builtin_command(program, args) {
-                    exit(code);
-                }
+            if is_builtin && let Some(code) = handle_builtin_command(program, args) {
+                exit(code);
             }
 
             if execve(&executable_path, &arg_refs, &env_refs) != 0 {
@@ -633,7 +631,7 @@ fn execute_pipeline(pipeline: &Pipeline) -> i32 {
                 // Set up stdin from previous pipe
                 if i > 0 {
                     // Not the first command - read from previous pipe
-                    if let Err(_) = pipes[i - 1].0.set_role(2) {
+                    if pipes[i - 1].0.set_role(2).is_err() {
                         // stdin role
                         exit(1);
                     }
@@ -642,7 +640,7 @@ fn execute_pipeline(pipeline: &Pipeline) -> i32 {
                 // Set up stdout to next pipe
                 if i < num_commands - 1 {
                     // Not the last command - write to next pipe
-                    if let Err(_) = pipes[i].1.set_role(3) {
+                    if pipes[i].1.set_role(3).is_err() {
                         // stdout role
                         exit(1);
                     }
@@ -739,7 +737,7 @@ fn interactive_shell() -> i32 {
 
     // Initialize line editor with raw mode enabled
     let mut editor = line_editor::LineEditor::new("# ");
-    if let Err(_) = editor.set_raw_mode(true) {
+    if editor.set_raw_mode(true).is_err() {
         println!("Warning: Failed to enable raw mode, falling back to canonical mode");
     }
 
@@ -944,18 +942,18 @@ fn handle_builtin_command(program: &str, args: &[String]) -> Option<i32> {
             unsafe {
                 let jobs_ptr = core::ptr::addr_of_mut!(JOB_LIST_ARRAY);
                 for i in 0..MAX_JOBS {
-                    if let Some(job) = &(*jobs_ptr)[i] {
-                        if job.job_id == job_id {
-                            let job_copy = job.clone();
-                            (*jobs_ptr)[i] = None; // Remove from list
-                            println!("{}", job_copy.command);
-                            let (_, status) = waitpid(job_copy.pid, 0);
-                            return Some(status);
-                        }
+                    if let Some(job) = &(*jobs_ptr)[i]
+                        && job.job_id == job_id
+                    {
+                        let job_copy = job.clone();
+                        (*jobs_ptr)[i] = None; // Remove from list
+                        println!("{}", job_copy.command);
+                        let (_, status) = waitpid(job_copy.pid, 0);
+                        return Some(status);
                     }
                 }
                 println!("fg: {}: no such job", job_id);
-                return Some(1);
+                Some(1)
             }
         }
         "bg" => {

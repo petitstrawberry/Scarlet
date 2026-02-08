@@ -216,9 +216,7 @@ impl Fat32DirectoryEntry {
     }
 
     /// Get the filename as a string (8.3 format)
-    pub fn filename(&self) -> alloc::string::String {
-        use alloc::string::String;
-
+    pub fn filename(&self) -> String {
         // Handle special cases
         if self.name[0] == 0x05 {
             // This represents a filename starting with 0xE5
@@ -462,7 +460,7 @@ const _: () = assert!(mem::size_of::<Fat32FsInfo>() == 512);
 ///
 /// This module provides high-level, easy-to-use representations of FAT32 data
 /// for internal use within the filesystem implementation.
-
+///
 /// Internal representation of a FAT32 directory entry for Scarlet's use
 ///
 /// This structure combines SFN and LFN information into a single, easy-to-use format.

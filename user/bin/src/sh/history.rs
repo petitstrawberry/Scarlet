@@ -48,10 +48,10 @@ impl History {
             return;
         }
 
-        if let Some(last) = self.entries.last() {
-            if last == &cmd {
-                return;
-            }
+        if let Some(last) = self.entries.last()
+            && last == &cmd
+        {
+            return;
         }
 
         self.entries.push(cmd);

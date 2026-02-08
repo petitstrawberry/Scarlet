@@ -9,7 +9,6 @@ extern crate alloc;
 extern crate scarlet_std;
 extern crate scarlet_ui_macros;
 
-use alloc::boxed::Box;
 use core::f32;
 
 use scarlet_desktop_config::BackgroundStyle;
@@ -176,7 +175,7 @@ fn appearance_page(
     style_gradient: bool,
     style_solid: bool,
     highlight: Color,
-    border: Color,
+    _border: Color,
     app: SettingsApp,
 ) -> impl View {
     vstack! {
@@ -525,8 +524,8 @@ impl Application for SettingsApp {
                         app.clone()
                     )
                 }),
-                NavigationLink::new("Network", Icon::Search, || network_page()),
-                NavigationLink::new("About", Icon::Info, || about_page()),
+                NavigationLink::new("Network", Icon::Search, network_page),
+                NavigationLink::new("About", Icon::Info, about_page),
             }
             .sidebar_width(150.0)
             .frame(f32::INFINITY, f32::INFINITY),

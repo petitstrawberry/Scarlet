@@ -132,7 +132,7 @@ impl Handle {
             0, // mode (unused for now)
         );
 
-        HandleError::from_syscall_result(result).and_then(|raw| Handle::from_kernel_raw(raw))
+        HandleError::from_syscall_result(result).and_then(Handle::from_kernel_raw)
     }
 
     /// Create a Handle from a raw handle value

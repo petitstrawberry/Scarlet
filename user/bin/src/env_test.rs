@@ -97,7 +97,7 @@ fn run_parent_test() -> i32 {
         0 => {
             // Child process - exec the same program with different args/env
             println!("Child: About to execve with args: {:?}", child_args);
-            if execve(&"/bin/env_test", &child_args, &child_env) != 0 {
+            if execve("/bin/env_test", &child_args, &child_env) != 0 {
                 println!("execve failed");
                 std::task::exit(1);
             }
@@ -106,7 +106,7 @@ fn run_parent_test() -> i32 {
         }
         -1 => {
             println!("Fork failed");
-            return 1;
+            1
         }
         child_pid => {
             println!("Parent: Child process created with PID {}", child_pid);
@@ -118,10 +118,10 @@ fn run_parent_test() -> i32 {
 
             if exit_status == 0 {
                 println!("execve test completed successfully");
-                return 0;
+                0
             } else {
                 println!("Child process failed with exit status {}", exit_status);
-                return 1;
+                1
             }
         }
     }
@@ -136,8 +136,8 @@ fn main() -> i32 {
 
     // Check if this is a child process (spawned by execve)
     if args.len() > 1 && args[1] == CHILD_MARKER {
-        return run_child_test();
+        run_child_test()
     } else {
-        return run_parent_test();
+        run_parent_test()
     }
 }

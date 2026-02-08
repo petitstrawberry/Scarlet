@@ -8,7 +8,7 @@ use alloc::{alloc::alloc_zeroed, vec::Vec};
 use core::{
     alloc::Layout,
     mem::{self},
-    sync::atomic::{compiler_fence, fence},
+    sync::atomic::compiler_fence,
 };
 
 // struct RawVirtQueue {

@@ -425,7 +425,7 @@ impl Default for HandleTable {
 ///     }
 /// )?;
 /// ```
-
+///
 /// Clone implementation creates a shallow copy (Arc clone).
 /// This means the cloned HandleTable shares the same underlying data.
 /// Use `deep_clone()` to create an independent copy.

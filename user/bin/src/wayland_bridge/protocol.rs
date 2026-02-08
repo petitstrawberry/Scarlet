@@ -11,7 +11,6 @@
 //!   - size includes the header (8 bytes minimum)
 //! - Arguments follow the header based on message signature
 
-use std::ipc::SharedMemory;
 use std::vec::Vec;
 
 /// Wayland message header (8 bytes)
@@ -167,7 +166,7 @@ impl WaylandArg {
                 bytes.extend_from_slice(s);
                 bytes.push(0); // Null terminator
                 // Pad to 4-byte boundary
-                while bytes.len() % 4 != 0 {
+                while !bytes.len().is_multiple_of(4) {
                     bytes.push(0);
                 }
             }
@@ -176,7 +175,7 @@ impl WaylandArg {
                 bytes.extend_from_slice(&len.to_ne_bytes());
                 bytes.extend_from_slice(a);
                 // Pad to 4-byte boundary
-                while bytes.len() % 4 != 0 {
+                while !bytes.len().is_multiple_of(4) {
                     bytes.push(0);
                 }
             }

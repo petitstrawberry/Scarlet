@@ -30,11 +30,11 @@ use registry::Registry;
 use shm::ShmManager;
 use std::collections::BTreeMap;
 use std::env;
-use std::handle::capability::memory_mapping::{self, flags};
+use std::handle::capability::memory_mapping::flags;
 use std::io::{Read, Write};
 use std::ipc::{SharedMemory, permissions};
 use std::socket::Socket;
-use std::string::{String, ToString};
+use std::string::String;
 use std::sync::{Arc, Mutex as StdMutex};
 use std::thread;
 use std::time::Duration;
@@ -502,7 +502,7 @@ impl WaylandBridge {
                 }
             }
             EV_KEY => {
-                if code >= BTN_MOUSE_MIN && code <= BTN_MOUSE_MAX {
+                if (BTN_MOUSE_MIN..=BTN_MOUSE_MAX).contains(&code) {
                     if code == BTN_LEFT {
                         self.left_button_down = value != 0;
                     }
@@ -537,13 +537,12 @@ impl WaylandBridge {
             _ => {}
         }
 
-        if pointer_event_sent {
-            if let Some(pointer_id) = pointer_event_id {
-                if self.pointer_frame_supported(pointer_id) {
-                    let frame_msg = WaylandMessage::new(pointer_id, input::pointer_event::FRAME);
-                    messages.push(frame_msg);
-                }
-            }
+        if pointer_event_sent
+            && let Some(pointer_id) = pointer_event_id
+            && self.pointer_frame_supported(pointer_id)
+        {
+            let frame_msg = WaylandMessage::new(pointer_id, input::pointer_event::FRAME);
+            messages.push(frame_msg);
         }
 
         self.queue_input_messages(messages);
@@ -597,15 +596,15 @@ impl WaylandBridge {
                         code,
                         value,
                     } => {
-                        if let Some(surface_id) = self.surface_id_for_window(window_id) {
-                            if external_client_id != surface_id {
-                                bridge_log!(
-                                    "[Bridge] EXTENSION_INPUT_EVENT client mismatch: window={} external_client_id={} surface_id={}",
-                                    window_id,
-                                    external_client_id,
-                                    surface_id
-                                );
-                            }
+                        if let Some(surface_id) = self.surface_id_for_window(window_id)
+                            && external_client_id != surface_id
+                        {
+                            bridge_log!(
+                                "[Bridge] EXTENSION_INPUT_EVENT client mismatch: window={} external_client_id={} surface_id={}",
+                                window_id,
+                                external_client_id,
+                                surface_id
+                            );
                         }
                         self.handle_sws_input_event(window_id, time, type_, code, value);
                     }
@@ -829,15 +828,13 @@ impl WaylandBridge {
                 .map(|(buffer_id, should_send)| (Some(buffer_id), should_send))
                 .unwrap_or((None, false));
 
-            if let (Some(buffer_id), true) = (buffer_id_opt, should_send) {
-                if self
+            if let (Some(buffer_id), true) = (buffer_id_opt, should_send)
+                && self
                     .send_extension_attach_buffer(wl_surface_id, window_id, buffer_id)
                     .is_ok()
-                {
-                    if let Some(surface) = self.surface_manager.get_surface_mut(wl_surface_id) {
-                        surface.last_attached_buffer = Some(buffer_id);
-                    }
-                }
+                && let Some(surface) = self.surface_manager.get_surface_mut(wl_surface_id)
+            {
+                surface.last_attached_buffer = Some(buffer_id);
             }
         }
 
@@ -950,15 +947,13 @@ impl WaylandBridge {
                 .map(|(buffer_id, should_send)| (Some(buffer_id), should_send))
                 .unwrap_or((None, false));
 
-            if let (Some(buffer_id), true) = (buffer_id_opt, should_send) {
-                if self
+            if let (Some(buffer_id), true) = (buffer_id_opt, should_send)
+                && self
                     .send_extension_attach_buffer(wl_surface_id, window_id, buffer_id)
                     .is_ok()
-                {
-                    if let Some(surface) = self.surface_manager.get_surface_mut(wl_surface_id) {
-                        surface.last_attached_buffer = Some(buffer_id);
-                    }
-                }
+                && let Some(surface) = self.surface_manager.get_surface_mut(wl_surface_id)
+            {
+                surface.last_attached_buffer = Some(buffer_id);
             }
         }
 
@@ -1094,15 +1089,14 @@ impl WaylandBridge {
             )?;
             sent_any = true;
 
-            if let Some(surface) = self.surface_manager.get_surface_mut(pending.surface_id) {
-                if !surface.pending_release.is_empty() {
-                    let mut release_msgs = Vec::new();
-                    for buffer_id in surface.pending_release.drain(..) {
-                        release_msgs
-                            .push(WaylandMessage::new(buffer_id, shm::buffer_event::RELEASE));
-                    }
-                    self.queue_input_messages(release_msgs);
+            if let Some(surface) = self.surface_manager.get_surface_mut(pending.surface_id)
+                && !surface.pending_release.is_empty()
+            {
+                let mut release_msgs = Vec::new();
+                for buffer_id in surface.pending_release.drain(..) {
+                    release_msgs.push(WaylandMessage::new(buffer_id, shm::buffer_event::RELEASE));
                 }
+                self.queue_input_messages(release_msgs);
             }
         }
 
@@ -1548,25 +1542,22 @@ impl WaylandBridge {
                                 .get(&response.header.object_id)
                                 .map(|iface| iface == "wl_keyboard")
                                 .unwrap_or(false);
-                            if is_keyboard {
-                                if let Some(shm) = self.keymap_shm.as_ref() {
-                                    match client
-                                        .send_handle_and_data(shm.as_handle(), &response_bytes)
-                                    {
-                                        Ok(()) => {
-                                            if is_debug_enabled() {
-                                                bridge_log!(
-                                                    "[Bridge] KEYMAP sent with handle successfully"
-                                                );
-                                            }
-                                            continue;
-                                        }
-                                        Err(e) => {
+                            if is_keyboard && let Some(shm) = self.keymap_shm.as_ref() {
+                                match client.send_handle_and_data(shm.as_handle(), &response_bytes)
+                                {
+                                    Ok(()) => {
+                                        if is_debug_enabled() {
                                             bridge_log!(
-                                                "[Bridge] Failed to send KEYMAP with handle: {:?}, falling back",
-                                                e
+                                                "[Bridge] KEYMAP sent with handle successfully"
                                             );
                                         }
+                                        continue;
+                                    }
+                                    Err(e) => {
+                                        bridge_log!(
+                                            "[Bridge] Failed to send KEYMAP with handle: {:?}, falling back",
+                                            e
+                                        );
                                     }
                                 }
                             }
@@ -2040,34 +2031,31 @@ impl WaylandBridge {
                         Self::compute_damage_rect(&surface.damage, surface.width, surface.height);
                     surface.commit();
                     let current_buffer = surface.buffer_id;
-                    if let Some(prev_buffer) = surface.swap_committed_buffer(current_buffer) {
-                        if current_buffer != Some(prev_buffer)
-                            && self.objects.get(&prev_buffer).is_some()
-                        {
-                            release_buffers.push(prev_buffer);
-                        }
+                    if let Some(prev_buffer) = surface.swap_committed_buffer(current_buffer)
+                        && current_buffer != Some(prev_buffer)
+                        && self.objects.get(&prev_buffer).is_some()
+                    {
+                        release_buffers.push(prev_buffer);
                     }
                     if !release_buffers.is_empty() {
-                        surface.pending_release.extend(release_buffers.drain(..));
+                        surface.pending_release.append(&mut release_buffers);
                     }
                 }
 
-                if !buffer_present {
-                    if let Some((xdg_surface_id, toplevel_id_opt)) = self
+                if !buffer_present
+                    && let Some((xdg_surface_id, toplevel_id_opt)) = self
                         .xdg_shell_manager
                         .get_xdg_surface_ids_by_wl_surface(surface_id)
-                    {
-                        if let Some(toplevel_id) = toplevel_id_opt {
-                            let needs_configure = self
-                                .xdg_shell_manager
-                                .get_xdg_surface(xdg_surface_id)
-                                .map(|surface| surface.last_configure_serial.is_none())
-                                .unwrap_or(false);
-                            if needs_configure {
-                                let serial = self.allocate_serial();
-                                configure_state = Some((xdg_surface_id, toplevel_id, serial));
-                            }
-                        }
+                    && let Some(toplevel_id) = toplevel_id_opt
+                {
+                    let needs_configure = self
+                        .xdg_shell_manager
+                        .get_xdg_surface(xdg_surface_id)
+                        .map(|surface| surface.last_configure_serial.is_none())
+                        .unwrap_or(false);
+                    if needs_configure {
+                        let serial = self.allocate_serial();
+                        configure_state = Some((xdg_surface_id, toplevel_id, serial));
                     }
                 }
 
@@ -2102,10 +2090,10 @@ impl WaylandBridge {
                             surface_size.1,
                         );
                     }
-                    if self.surface_to_window.contains_key(&surface_id) {
-                        if let Err(e) = self.update_sws_window(surface_id, damage_rect) {
-                            bridge_log!("[Bridge] Failed to update SWS window: {}", e);
-                        }
+                    if self.surface_to_window.contains_key(&surface_id)
+                        && let Err(e) = self.update_sws_window(surface_id, damage_rect)
+                    {
+                        bridge_log!("[Bridge] Failed to update SWS window: {}", e);
                     }
                     if self.focused_surface.is_none() {
                         self.queue_focus_events(surface_id);
@@ -2456,10 +2444,9 @@ impl WaylandBridge {
             xdg_shell::xdg_toplevel_request::DESTROY => {
                 bridge_log!("[Bridge] xdg_toplevel.destroy");
                 if let Some(wl_surface_id) = self.xdg_shell_manager.clear_toplevel(xdg_toplevel_id)
+                    && let Some(surface) = self.surface_manager.get_surface_mut(wl_surface_id)
                 {
-                    if let Some(surface) = self.surface_manager.get_surface_mut(wl_surface_id) {
-                        surface.role = None;
-                    }
+                    surface.role = None;
                 }
                 self.objects
                     .insert(xdg_toplevel_id, String::from("xdg_toplevel_dead"));
@@ -2471,23 +2458,21 @@ impl WaylandBridge {
             }
             xdg_shell::xdg_toplevel_request::SET_TITLE => {
                 bridge_log!("[Bridge] xdg_toplevel.set_title");
-                if let Some((title, _)) = Self::parse_string(payload, 0) {
-                    if let Some((toplevel, _)) =
+                if let Some((title, _)) = Self::parse_string(payload, 0)
+                    && let Some((toplevel, _)) =
                         self.xdg_shell_manager.get_toplevel_mut(xdg_toplevel_id)
-                    {
-                        toplevel.title = Some(title);
-                    }
+                {
+                    toplevel.title = Some(title);
                 }
                 Ok(Vec::new())
             }
             xdg_shell::xdg_toplevel_request::SET_APP_ID => {
                 bridge_log!("[Bridge] xdg_toplevel.set_app_id");
-                if let Some((app_id, _)) = Self::parse_string(payload, 0) {
-                    if let Some((toplevel, _)) =
+                if let Some((app_id, _)) = Self::parse_string(payload, 0)
+                    && let Some((toplevel, _)) =
                         self.xdg_shell_manager.get_toplevel_mut(xdg_toplevel_id)
-                    {
-                        toplevel.app_id = Some(app_id);
-                    }
+                {
+                    toplevel.app_id = Some(app_id);
                 }
                 Ok(Vec::new())
             }
@@ -2698,14 +2683,12 @@ impl WaylandBridge {
                 if surface_id == 0 {
                     self.cursor_surface_id = None;
                 } else {
-                    if let Some(prev) = self.cursor_surface_id {
-                        if prev != surface_id {
-                            if let Some(surface) = self.surface_manager.get_surface_mut(prev) {
-                                if surface.role == Some(surface::SurfaceRole::Cursor) {
-                                    surface.role = None;
-                                }
-                            }
-                        }
+                    if let Some(prev) = self.cursor_surface_id
+                        && prev != surface_id
+                        && let Some(surface) = self.surface_manager.get_surface_mut(prev)
+                        && surface.role == Some(surface::SurfaceRole::Cursor)
+                    {
+                        surface.role = None;
                     }
                     self.cursor_surface_id = Some(surface_id);
                     if let Some(surface) = self.surface_manager.get_surface_mut(surface_id) {
@@ -2846,7 +2829,7 @@ impl WaylandBridge {
                 }
             };
 
-            if let Err(_) = sws_socket.connect("/tmp/sws.sock") {
+            if sws_socket.connect("/tmp/sws.sock").is_err() {
                 bridge_log!("[Input Thread] Failed to connect to SWS");
                 return;
             }
@@ -2924,7 +2907,7 @@ impl WaylandBridge {
                                     // ABS_Y
                                     current_y = value;
                                     bridge_log!("[Input Thread] Updated Y position: {}", current_y);
-                                } else if code >= 0x100 && code <= 0x104 {
+                                } else if (0x100..=0x104).contains(&code) {
                                     // Mouse buttons (BTN_LEFT, BTN_RIGHT, etc.)
                                     for (id, interface) in objects_guard.iter() {
                                         if interface == "wl_pointer" {
@@ -3051,11 +3034,9 @@ fn main() -> i32 {
                         return;
                     }
 
-                    if enable_input {
-                        if let Err(e) = bridge.spawn_input_thread() {
-                            bridge_log!("[Bridge] Failed to spawn input thread: {}", e);
-                            return;
-                        }
+                    if enable_input && let Err(e) = bridge.spawn_input_thread() {
+                        bridge_log!("[Bridge] Failed to spawn input thread: {}", e);
+                        return;
                     }
 
                     if let Err(e) = bridge.handle_client(client) {

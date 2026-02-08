@@ -14,8 +14,9 @@ pub struct ThemeColors {
     pub highlight: Option<[u8; 3]>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum BackgroundStyle {
+    #[default]
     GradientLines,
     Gradient,
     Solid,
@@ -37,12 +38,6 @@ impl BackgroundStyle {
             BackgroundStyle::Gradient => "gradient",
             BackgroundStyle::Solid => "solid",
         }
-    }
-}
-
-impl Default for BackgroundStyle {
-    fn default() -> Self {
-        BackgroundStyle::GradientLines
     }
 }
 
@@ -218,7 +213,7 @@ impl ConfigParser {
 
         let mut acc: u32 = 0;
         for ch in s.bytes() {
-            if !(b'0'..=b'9').contains(&ch) {
+            if !ch.is_ascii_digit() {
                 return None;
             }
             let digit = (ch - b'0') as u32;

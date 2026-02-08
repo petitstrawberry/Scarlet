@@ -220,10 +220,10 @@ fn parse_tokens(tokens: &[Token]) -> Result<Pipeline, ParseError> {
             Token::Word(word) => {
                 if expect_redirect_target {
                     // This word is the target of a redirect
-                    if let Some(cmd) = current_command.as_mut() {
-                        if let Some(rtype) = redirect_type.take() {
-                            cmd.redirects.push((rtype, word.clone()));
-                        }
+                    if let Some(cmd) = current_command.as_mut()
+                        && let Some(rtype) = redirect_type.take()
+                    {
+                        cmd.redirects.push((rtype, word.clone()));
                     }
                     expect_redirect_target = false;
                 } else if let Some(cmd) = current_command.as_mut() {

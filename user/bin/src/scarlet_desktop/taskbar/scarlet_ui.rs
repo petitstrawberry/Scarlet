@@ -80,15 +80,9 @@ impl TaskBarApp {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Default)]
 struct MenuTree {
     items: Vec<TaskMenuItem>,
-}
-
-impl Default for MenuTree {
-    fn default() -> Self {
-        Self { items: Vec::new() }
-    }
 }
 
 #[derive(Clone)]
@@ -212,7 +206,7 @@ fn build_menu_tree(app_name: &str, menu_titles: &str) -> MenuTree {
             "[TaskBar] Non-JSON menu_titles: orig_len={}, cleaned_len={}, first_byte={:?}",
             menu_titles.len(),
             cleaned.len(),
-            trimmed.as_bytes().get(0).copied()
+            trimmed.as_bytes().first().copied()
         );
         items.extend(trimmed.split('|').map(|s| TaskMenuItem {
             id: s.to_string(),
@@ -416,18 +410,18 @@ fn build_menu_items(
                     // Handle system menu items
                     if item_id == "system_settings" {
                         // Launch Settings via stemd
-                        if let Ok(mut stream) = std::socket::Socket::new() {
-                            if stream.connect("/tmp/stemd.sock").is_ok() {
-                                let app_id = b"org.scarlet-os.desktop.settings";
-                                let exec_path = b"";
-                                let mut msg = alloc::vec::Vec::new();
-                                msg.push(0x01); // LAUNCH_OR_FOCUS command
-                                msg.extend_from_slice(&(app_id.len() as u32).to_le_bytes());
-                                msg.extend_from_slice(app_id);
-                                msg.extend_from_slice(&(exec_path.len() as u32).to_le_bytes());
-                                msg.extend_from_slice(exec_path);
-                                let _ = stream.write(&msg);
-                            }
+                        if let Ok(mut stream) = std::socket::Socket::new()
+                            && stream.connect("/tmp/stemd.sock").is_ok()
+                        {
+                            let app_id = b"org.scarlet-os.desktop.settings";
+                            let exec_path = b"";
+                            let mut msg = alloc::vec::Vec::new();
+                            msg.push(0x01); // LAUNCH_OR_FOCUS command
+                            msg.extend_from_slice(&(app_id.len() as u32).to_le_bytes());
+                            msg.extend_from_slice(app_id);
+                            msg.extend_from_slice(&(exec_path.len() as u32).to_le_bytes());
+                            msg.extend_from_slice(exec_path);
+                            let _ = stream.write(&msg);
                         }
                         return;
                     }
@@ -570,19 +564,19 @@ impl Application for TaskBarApp {
             hstack! {
                 build_menu_bar_view(&menu_tree.items, active_window_id, self.open_menu_index.clone()),
                 Spacer::new(),
-                Text::new(&format!("Mem {}%", mem))
+                Text::new(format!("Mem {}%", mem))
                     .font_size(12.0)
                     .color(Color::rgb(0.280, 0.280, 0.310)),
                 Text::new("•")
                     .font_size(12.0)
                     .color(Color::rgb(0.600, 0.600, 0.630)),
-                Text::new(&format!("CPU {}%", cpu))
+                Text::new(format!("CPU {}%", cpu))
                     .font_size(12.0)
                     .color(Color::rgb(0.280, 0.280, 0.310)),
                 Text::new("•")
                     .font_size(12.0)
                     .color(Color::rgb(0.600, 0.600, 0.630)),
-                Text::new(&format!("Up {:02}:{:02}", mins, secs))
+                Text::new(format!("Up {:02}:{:02}", mins, secs))
                     .font_size(12.0)
                     .color(Color::rgb(0.280, 0.280, 0.310)),
             }
@@ -661,71 +655,70 @@ impl TaskBarApp {
                     last_open_index = open_index;
                 }
 
-                if let Some(index) = open_index {
-                    if let Some(item) = menu_tree_value.items.get(index) {
-                        if !item.children.is_empty() {
-                            if popup_renderer.is_none() {
-                                let (items, _height) = build_menu_items(
-                                    &item.children,
-                                    active_window_id_popup.get(),
-                                    open_menu_index_popup.clone(),
-                                );
-                                let item_height = 28.0;
-                                let menu_width = 220.0;
-                                let renderer =
-                                    PopupMenuRenderer::new(items, item_height, menu_width);
-                                let size = renderer.size();
-                                let width = size.width as u32;
-                                let height = size.height as u32;
-                                popup_renderer = Some(renderer);
-                                needs_render = true;
+                if let Some(index) = open_index
+                    && let Some(item) = menu_tree_value.items.get(index)
+                {
+                    if !item.children.is_empty() {
+                        if popup_renderer.is_none() {
+                            let (items, _height) = build_menu_items(
+                                &item.children,
+                                active_window_id_popup.get(),
+                                open_menu_index_popup.clone(),
+                            );
+                            let item_height = 28.0;
+                            let menu_width = 220.0;
+                            let renderer = PopupMenuRenderer::new(items, item_height, menu_width);
+                            let size = renderer.size();
+                            let width = size.width as u32;
+                            let height = size.height as u32;
+                            popup_renderer = Some(renderer);
+                            needs_render = true;
 
-                                let bar_height = 40;
-                                let popup_x = menu_bar_popup_x(&menu_tree_value.items, index);
-                                let _surface_id = match popup_surface_id {
-                                    Some(id) => id,
-                                    None => {
-                                        match conn.create_surface_with_type_and_policies_at(
-                                            "org.scarlet-os.popup.menu",
-                                            "Menu",
-                                            "",
-                                            width,
-                                            height,
-                                            window_types::ALWAYS_ON_TOP,
-                                            false,
-                                            true,
-                                            false,
-                                            popup_x as i32,
-                                            bar_height as i32,
-                                        ) {
-                                            Ok(id) => {
-                                                popup_surface_id = Some(id);
-                                                popup_surface_id_popup.set(Some(id));
-                                                id
-                                            }
-                                            Err(e) => {
-                                                println!(
-                                                    "[TaskBar] Failed to create menu popup: {:?}",
-                                                    e
-                                                );
-                                                popup_renderer = None;
-                                                last_open_index = None;
-                                                std::thread::sleep(Duration::from_millis(16));
-                                                continue;
-                                            }
+                            let bar_height = 40;
+                            let popup_x = menu_bar_popup_x(&menu_tree_value.items, index);
+                            let _surface_id = match popup_surface_id {
+                                Some(id) => id,
+                                None => {
+                                    match conn.create_surface_with_type_and_policies_at(
+                                        "org.scarlet-os.popup.menu",
+                                        "Menu",
+                                        "",
+                                        width,
+                                        height,
+                                        window_types::ALWAYS_ON_TOP,
+                                        false,
+                                        true,
+                                        false,
+                                        popup_x as i32,
+                                        bar_height,
+                                    ) {
+                                        Ok(id) => {
+                                            popup_surface_id = Some(id);
+                                            popup_surface_id_popup.set(Some(id));
+                                            id
+                                        }
+                                        Err(e) => {
+                                            println!(
+                                                "[TaskBar] Failed to create menu popup: {:?}",
+                                                e
+                                            );
+                                            popup_renderer = None;
+                                            last_open_index = None;
+                                            std::thread::sleep(Duration::from_millis(16));
+                                            continue;
                                         }
                                     }
-                                };
-                            }
-                        } else {
-                            if let Some(surface_id) = popup_surface_id.take() {
-                                let _ = conn.destroy_surface(surface_id);
-                            }
-                            popup_surface_id_popup.set(None);
-                            popup_renderer = None;
-                            last_open_index = None;
-                            open_menu_index_popup.set(None);
+                                }
+                            };
                         }
+                    } else {
+                        if let Some(surface_id) = popup_surface_id.take() {
+                            let _ = conn.destroy_surface(surface_id);
+                        }
+                        popup_surface_id_popup.set(None);
+                        popup_renderer = None;
+                        last_open_index = None;
+                        open_menu_index_popup.set(None);
                     }
                 }
 
@@ -777,12 +770,11 @@ impl TaskBarApp {
                                 }
                                 (sws::event::event_type::EV_SYN, _) => {
                                     if pending_move {
-                                        if let Some(renderer) = popup_renderer.as_mut() {
-                                            if renderer
+                                        if let Some(renderer) = popup_renderer.as_mut()
+                                            && renderer
                                                 .handle_move(pointer_x as f32, pointer_y as f32)
-                                            {
-                                                needs_render = true;
-                                            }
+                                        {
+                                            needs_render = true;
                                         }
                                         pending_move = false;
                                     }
@@ -799,23 +791,22 @@ impl TaskBarApp {
                         (popup_renderer.as_mut(), popup_surface_id)
                     {
                         renderer.render();
-                        if let Some(buffer) = renderer.buffer() {
-                            if let Some(surface) = conn.surface_mut(surface_id) {
-                                let src = buffer.as_slice();
-                                let src_bytes = unsafe {
-                                    core::slice::from_raw_parts(
-                                        src.as_ptr() as *const u8,
-                                        src.len() * 4,
-                                    )
-                                };
-                                surface.with_buffer(|dst, w, h| {
-                                    let len =
-                                        (w as usize).saturating_mul(h as usize).saturating_mul(4);
-                                    let copy_len = len.min(dst.len()).min(src_bytes.len());
-                                    dst[..copy_len].copy_from_slice(&src_bytes[..copy_len]);
-                                });
-                                let _ = conn.commit(surface_id);
-                            }
+                        if let Some(buffer) = renderer.buffer()
+                            && let Some(surface) = conn.surface_mut(surface_id)
+                        {
+                            let src = buffer.as_slice();
+                            let src_bytes = unsafe {
+                                core::slice::from_raw_parts(
+                                    src.as_ptr() as *const u8,
+                                    src.len() * 4,
+                                )
+                            };
+                            surface.with_buffer(|dst, w, h| {
+                                let len = (w as usize).saturating_mul(h as usize).saturating_mul(4);
+                                let copy_len = len.min(dst.len()).min(src_bytes.len());
+                                dst[..copy_len].copy_from_slice(&src_bytes[..copy_len]);
+                            });
+                            let _ = conn.commit(surface_id);
                         }
                     }
                     needs_render = false;

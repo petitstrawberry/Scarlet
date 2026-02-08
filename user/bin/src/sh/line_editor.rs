@@ -104,7 +104,7 @@ impl LineEditor {
             // Format: ((timeout_ms as u32) << 16) | (min_ready_bytes as u32)
             if enabled {
                 // Raw mode: min=1 byte, timeout=0ms (return immediately when data available)
-                let read_policy = (0 << 16) | 1;
+                let read_policy = 1;
                 if handle
                     .control(SCTL_TTY_SET_READ_POLICY, read_policy as usize)
                     .is_err()
@@ -116,7 +116,7 @@ impl LineEditor {
             } else {
                 // Canonical mode: restore default policy
                 // min=1, timeout=0 is reasonable for canonical too
-                let read_policy = (0 << 16) | 1;
+                let read_policy = 1;
                 if handle
                     .control(SCTL_TTY_SET_READ_POLICY, read_policy as usize)
                     .is_err()
@@ -252,7 +252,7 @@ impl LineEditor {
                 // Ctrl-C
                 EditorAction::Interrupt
             }
-            c if c >= '\x20' && c <= '\x7e' => {
+            c if ('\x20'..='\x7e').contains(&c) => {
                 // Printable character
                 self.buffer.insert(self.cursor, c);
                 self.cursor += 1;
@@ -348,7 +348,7 @@ impl LineEditor {
                 self.handle_tab_completion();
                 EditorAction::Continue
             }
-            c if c >= ' ' && c <= '~' => {
+            c if (' '..='~').contains(&c) => {
                 // Printable ASCII
                 self.insert_char(c);
                 EditorAction::Continue
@@ -622,7 +622,7 @@ impl LineEditor {
 
         if matches.len() == 1 {
             // Single match - complete it
-            let completion = &matches[0][prefix_len..];
+            let _completion = &matches[0][prefix_len..];
 
             // Remove old word and insert new completion
             for _ in 0..prefix_len {
@@ -650,7 +650,7 @@ impl LineEditor {
                     print!("\n");
                 }
             }
-            if matches.len() % 5 != 0 {
+            if !matches.len().is_multiple_of(5) {
                 print!("\n");
             }
 

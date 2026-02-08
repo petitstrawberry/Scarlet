@@ -113,7 +113,7 @@ fn handle_client(client_id: usize, socket: Arc<Mutex<Socket>>) {
 
     // Set non-blocking mode
     {
-        let mut sock = socket.lock();
+        let sock = socket.lock();
         if let Err(e) = sock.set_nonblocking(true) {
             println!("[Client {}] Failed to set non-blocking: {:?}", client_id, e);
             return;
@@ -249,7 +249,7 @@ fn handle_message(
                 let clients = CLIENTS.lock();
                 if let Some(dest_socket) = clients.get(&service.client_id) {
                     // Generate a serial number for this call
-                    let serial = {
+                    let _serial = {
                         let mut s = NEXT_SERIAL.lock();
                         let serial = *s;
                         *s = s.wrapping_add(1);

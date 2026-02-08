@@ -5,7 +5,6 @@
 
 extern crate alloc;
 
-use alloc::boxed::Box;
 use alloc::collections::VecDeque;
 use alloc::string::String;
 use core::any::Any;

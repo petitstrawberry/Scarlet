@@ -4,7 +4,7 @@
 //! enabling the filesystem to be registered with the VFS manager
 //! and created from block devices.
 
-use alloc::{boxed::Box, sync::Arc, vec};
+use alloc::sync::Arc;
 
 use crate::{
     device::block::BlockDevice,
@@ -86,6 +86,8 @@ impl FileSystemDriver for Fat32Driver {
 
 #[cfg(test)]
 mod tests {
+    use alloc::vec;
+
     use super::*;
     use crate::device::block::mockblk::MockBlockDevice;
 
