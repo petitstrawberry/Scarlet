@@ -106,8 +106,8 @@ use crate::object::handle::syscall::{
 use crate::task::syscall::{
     sys_brk, sys_clone, sys_create_namespace, sys_execve, sys_execve_abi, sys_exit, sys_exit_group,
     sys_get_tls, sys_getchar, sys_getpid, sys_getppid, sys_putchar, sys_register_abi_zone,
-    sys_sbrk, sys_set_tid_address, sys_set_tls, sys_sleep, sys_unregister_abi_zone, sys_waitpid,
-    sys_yield,
+    sys_sbrk, sys_set_tid_address, sys_set_tls, sys_shutdown, sys_sleep, sys_unregister_abi_zone,
+    sys_waitpid, sys_yield,
 };
 
 #[macro_use]
@@ -250,6 +250,9 @@ syscall_table! {
     NetworkListInterfaces = 914 => sys_network_list_interfaces, // List network interfaces
 
     // === Task Event Operations ===
+
+    // === System Control Operations ===
+    Shutdown = 1000 => sys_shutdown,          // Shutdown the system gracefully
 
     // === Debug/Profiler Operations ===
     ProfilerDump = 999 => sys_profiler_dump, // Dump profiler statistics (debug only)

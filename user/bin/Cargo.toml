@@ -150,6 +150,10 @@ path = "src/wayland_bridge/main.rs"
 name = "settings"
 path = "src/settings.rs"
 
+[[bin]]
+name = "shutdown"
+path = "src/shutdown.rs"
+
 [dependencies]
 scarlet_std = { path = "../lib/std", features = ["alloc_debug"] }
 framebuffer = { path = "../lib/framebuffer" }
