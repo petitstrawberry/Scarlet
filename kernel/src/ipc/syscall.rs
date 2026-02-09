@@ -925,48 +925,18 @@ pub fn sys_event_mask(trapframe: &mut Trapframe) -> usize {
 /// Returns:
 /// - Does not return normally (switches context)
 /// - usize::MAX on error
-/// Restore context saved by `invoke_user_handler` and resume the interrupted code.
-///
-/// The signal frame layout (set up by `ScarletAbi::invoke_user_handler`):
-/// ```text
-///   [sp + 0]:   trampoline code (8 bytes)
-///   [sp + 8]:   event subtype (8 bytes)
-///   [sp + 16]:  event content type (8 bytes)
-///   [sp + 24]:  saved regs[0..31] (256 bytes)
-///   [sp + 280]: saved epc (8 bytes)
-/// ```
-///
-/// After restoration the trapframe reflects the pre-signal state and execution
-/// resumes transparently.  The syscall does **not** advance PC because the
-/// restored `epc` already points to the correct instruction.
+/// Restore context saved by `ScarletAbi::invoke_user_handler` and resume
+/// the interrupted code.  Delegates to the arch-specific `ScarletAbi::event_return`.
 pub fn sys_event_return(trapframe: &mut Trapframe) -> usize {
     let task = match mytask() {
         Some(task) => task,
         None => return usize::MAX,
     };
 
-    let frame_base = trapframe.regs.reg[2]; // current SP points to signal frame
-
-    unsafe {
-        // Restore saved registers
-        for i in 0..32 {
-            let paddr = match task.vm_manager.translate_vaddr(frame_base + 24 + i * 8) {
-                Some(p) => p,
-                None => return usize::MAX,
-            };
-            trapframe.regs.reg[i] = *(paddr as *const usize);
-        }
-
-        // Restore saved epc
-        let paddr = match task.vm_manager.translate_vaddr(frame_base + 280) {
-            Some(p) => p,
-            None => return usize::MAX,
-        };
-        trapframe.epc = *(paddr as *const u64);
+    match crate::abi::scarlet::ScarletAbi::event_return(trapframe, &task) {
+        Ok(()) => 0,
+        Err(_) => usize::MAX,
     }
-
-    // SP is already restored from saved regs (reg[2]), no PC increment needed
-    0
 }
 
 /// Helper function to convert subtype number to ProcessControlType

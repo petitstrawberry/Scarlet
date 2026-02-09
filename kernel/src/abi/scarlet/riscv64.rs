@@ -541,6 +541,45 @@ impl ScarletAbi {
         Ok(())
     }
 
+    /// Restore context saved by `invoke_user_handler` (syscall 643 — event_return).
+    ///
+    /// Reads the signal frame from the current user stack pointer and restores
+    /// all 32 general-purpose registers plus `epc`.  After this the trapframe
+    /// reflects the pre-signal state and execution resumes transparently.
+    ///
+    /// # Signal frame layout (RISC-V)
+    /// ```text
+    ///   [sp + 0]:   trampoline code (8 bytes)
+    ///   [sp + 8]:   event subtype   (8 bytes)
+    ///   [sp + 16]:  content type    (8 bytes)
+    ///   [sp + 24]:  saved regs[0..31] (256 bytes)
+    ///   [sp + 280]: saved epc       (8 bytes)
+    /// ```
+    pub fn event_return(
+        trapframe: &mut crate::arch::Trapframe,
+        task: &crate::task::Task,
+    ) -> Result<(), &'static str> {
+        let frame_base = trapframe.regs.reg[2]; // SP points to signal frame
+
+        unsafe {
+            for i in 0..32 {
+                let paddr = task
+                    .vm_manager
+                    .translate_vaddr(frame_base + 24 + i * 8)
+                    .ok_or("Failed to translate signal frame address")?;
+                trapframe.regs.reg[i] = *(paddr as *const usize);
+            }
+
+            let paddr = task
+                .vm_manager
+                .translate_vaddr(frame_base + 280)
+                .ok_or("Failed to translate signal frame address")?;
+            trapframe.epc = *(paddr as *const u64);
+        }
+
+        Ok(())
+    }
+
     /// Process any pending events (called when mask changes)
     pub fn process_pending_events(&mut self, task: &crate::task::Task) -> Result<(), &'static str> {
         // We must not drop events that are still blocked; they should remain pending
