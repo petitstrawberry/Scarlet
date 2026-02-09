@@ -30,6 +30,7 @@ pub mod cmd {
     pub const LAUNCH_OR_FOCUS: u8 = 0x01;
     pub const REGISTER_APP: u8 = 0x02;
     pub const UNREGISTER_APP: u8 = 0x03;
+    pub const SHUTDOWN: u8 = 0x04;
 }
 
 /// Build LAUNCH_OR_FOCUS command payload

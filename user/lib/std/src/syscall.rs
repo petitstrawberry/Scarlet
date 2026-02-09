@@ -113,6 +113,9 @@ pub enum Syscall {
 
     // === Debug/Profiler Operations ===
     ProfilerDump = 999, // Dump profiler statistics (debug only)
+
+    // === System Control Operations ===
+    Shutdown = 1000, // Shutdown the system gracefully
 }
 
 pub fn syscall0(syscall: Syscall) -> usize {

@@ -59,7 +59,7 @@ use crate::task::Task;
 ///       (e.g., state: Mutex<TaskState>, time_slice: Mutex<usize>) and change
 ///       TaskPool to use Arc<Task> for safe sharing across threads/contexts.
 ///       This would also eliminate the fixed-size limitation.
-const MAX_TASKS: usize = 1024;
+pub const MAX_TASKS: usize = 1024;
 
 /// Global task pool storing all tasks
 /// Using spin::Once with Box-ed tasks array to avoid large stack usage.
@@ -295,7 +295,7 @@ impl TaskPool {
     /// - Only removing tasks from zombie_queue (already exited)
     /// - Never removing the currently running task
     /// - Ensuring the task is not in ready/blocked queues before removal
-    fn remove_task(&self, task_id: usize) -> Option<Task> {
+    pub(crate) fn remove_task(&self, task_id: usize) -> Option<Task> {
         if task_id >= MAX_TASKS {
             return None;
         }
@@ -775,6 +775,29 @@ impl Scheduler {
         // Remove from task pool (this frees all task resources)
         if let Some(_task) = get_task_pool().remove_task(task_id) {
             crate::println!("[Scheduler] Cleaned up zombie task {}", task_id);
+        }
+    }
+
+    pub fn remove_task_from_queues(&mut self, task_id: usize) {
+        for cpu_id in 0..MAX_NUM_CPUS {
+            if let Some(pos) = self.ready_queue[cpu_id]
+                .iter()
+                .position(|&id| id == task_id)
+            {
+                self.ready_queue[cpu_id].remove(pos);
+            }
+            if let Some(pos) = self.blocked_queue[cpu_id]
+                .iter()
+                .position(|&id| id == task_id)
+            {
+                self.blocked_queue[cpu_id].remove(pos);
+            }
+            if let Some(pos) = self.zombie_queue[cpu_id]
+                .iter()
+                .position(|&id| id == task_id)
+            {
+                self.zombie_queue[cpu_id].remove(pos);
+            }
         }
     }
 
