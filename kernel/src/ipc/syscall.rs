@@ -724,3 +724,209 @@ pub fn sys_socket_recv_handle_and_data(trapframe: &mut Trapframe) -> usize {
 
     data.len()
 }
+
+// === Scarlet Native Event Handling System Calls ===
+
+/// Register a user-space event handler for Scarlet Native ABI
+///
+/// Arguments:
+/// - content_type: u8 (0=ProcessControl, 1=Message, 2=Notification, 3=Custom)
+/// - handler_addr: usize (user-space function address)
+/// - synchronous: u32 (0=async, 1=sync)
+/// - is_default: u32 (0=specific handler, 1=default handler)
+///
+/// Returns:
+/// - 0 on success
+/// - usize::MAX on error
+pub fn sys_event_handler_register_native(trapframe: &mut Trapframe) -> usize {
+    let task = match mytask() {
+        Some(task) => task,
+        None => return usize::MAX,
+    };
+
+    let content_type = trapframe.get_arg(0) as u8;
+    let handler_addr = trapframe.get_arg(1);
+    let synchronous = trapframe.get_arg(2) != 0;
+    let is_default = trapframe.get_arg(3) != 0;
+    trapframe.increment_pc_next(task);
+
+    // Use with_default_abi_mut to access ScarletAbi
+    let result = task.with_default_abi_mut(|abi, _task| {
+        // Check if this is a ScarletAbi
+        if let Some(scarlet_abi) = abi
+            .as_any_mut()
+            .downcast_mut::<crate::abi::scarlet::ScarletAbi>()
+        {
+            if is_default {
+                scarlet_abi.set_default_event_handler(handler_addr, synchronous);
+            } else {
+                scarlet_abi.register_event_handler(content_type, handler_addr, synchronous);
+            }
+            Ok(())
+        } else {
+            Err("Not a Scarlet Native ABI")
+        }
+    });
+
+    match result {
+        Ok(()) => 0,
+        Err(_) => usize::MAX,
+    }
+}
+
+/// Unregister a user-space event handler
+///
+/// Arguments:
+/// - content_type: u8 (handler to unregister)
+///
+/// Returns:
+/// - 0 on success
+/// - usize::MAX on error
+pub fn sys_event_handler_unregister_native(trapframe: &mut Trapframe) -> usize {
+    let task = match mytask() {
+        Some(task) => task,
+        None => return usize::MAX,
+    };
+
+    let content_type = trapframe.get_arg(0) as u8;
+    trapframe.increment_pc_next(task);
+
+    let result = task.with_default_abi_mut(|abi, _task| {
+        if let Some(scarlet_abi) = abi
+            .as_any_mut()
+            .downcast_mut::<crate::abi::scarlet::ScarletAbi>()
+        {
+            scarlet_abi.unregister_event_handler(content_type);
+            Ok(())
+        } else {
+            Err("Not a Scarlet Native ABI")
+        }
+    });
+
+    match result {
+        Ok(()) => 0,
+        Err(_) => usize::MAX,
+    }
+}
+
+/// Set event mask for blocking events
+///
+/// Arguments:
+/// - operation: u32 (0=block, 1=unblock, 2=set_all, 3=clear_all)
+/// - event_kind: u32 (0=ProcessControl, 1=Notification, 2=All)
+/// - event_subtype: u32 (specific ProcessControl type or 0 for all)
+///
+/// Returns:
+/// - 0 on success
+/// - usize::MAX on error
+pub fn sys_event_mask(trapframe: &mut Trapframe) -> usize {
+    let task = match mytask() {
+        Some(task) => task,
+        None => return usize::MAX,
+    };
+
+    let operation = trapframe.get_arg(0) as u32;
+    let event_kind = trapframe.get_arg(1) as u32;
+    let event_subtype = trapframe.get_arg(2) as u32;
+    trapframe.increment_pc_next(task);
+
+    let result = task.with_default_abi_mut(|abi, _task| {
+        if let Some(scarlet_abi) = abi
+            .as_any_mut()
+            .downcast_mut::<crate::abi::scarlet::ScarletAbi>()
+        {
+            match operation {
+                0 => {
+                    // Block
+                    match event_kind {
+                        0 => {
+                            // ProcessControl
+                            let ptype = subtype_to_process_control(event_subtype);
+                            scarlet_abi.event_mask.block_process_control(ptype);
+                        }
+                        2 => {
+                            // All
+                            scarlet_abi.event_mask.block_all();
+                        }
+                        _ => {}
+                    }
+                }
+                1 => {
+                    // Unblock
+                    match event_kind {
+                        0 => {
+                            // ProcessControl
+                            let ptype = subtype_to_process_control(event_subtype);
+                            scarlet_abi.event_mask.unblock_process_control(ptype);
+                        }
+                        2 => {
+                            // All
+                            scarlet_abi.event_mask.unblock_all();
+                        }
+                        _ => {}
+                    }
+                    // Process any pending events that are now unblocked
+                    let _ = scarlet_abi.process_pending_events(_task);
+                }
+                2 => {
+                    // Set all (block all)
+                    scarlet_abi.event_mask.block_all();
+                }
+                3 => {
+                    // Clear all (unblock all)
+                    scarlet_abi.event_mask.unblock_all();
+                    let _ = scarlet_abi.process_pending_events(_task);
+                }
+                _ => return Err("Invalid operation"),
+            }
+            Ok(())
+        } else {
+            Err("Not a Scarlet Native ABI")
+        }
+    });
+
+    match result {
+        Ok(()) => 0,
+        Err(_) => usize::MAX,
+    }
+}
+
+/// Return from event handler (restores saved context)
+///
+/// This should be called by the event handler trampoline
+/// to return control to the interrupted code.
+///
+/// Returns:
+/// - Does not return normally (switches context)
+/// - usize::MAX on error
+pub fn sys_event_return(trapframe: &mut Trapframe) -> usize {
+    let task = match mytask() {
+        Some(task) => task,
+        None => return usize::MAX,
+    };
+
+    // TODO: Implement context restoration
+    // This requires saving the original context when invoking the handler
+    // and restoring it here.
+
+    trapframe.increment_pc_next(task);
+    0
+}
+
+/// Helper function to convert subtype number to ProcessControlType
+fn subtype_to_process_control(subtype: u32) -> ProcessControlType {
+    match subtype {
+        0 => ProcessControlType::Terminate,
+        1 => ProcessControlType::Kill,
+        2 => ProcessControlType::Stop,
+        3 => ProcessControlType::Continue,
+        4 => ProcessControlType::Interrupt,
+        5 => ProcessControlType::Quit,
+        6 => ProcessControlType::Hangup,
+        7 => ProcessControlType::ChildExit,
+        8 => ProcessControlType::PipeBroken,
+        9 => ProcessControlType::Alarm,
+        10 => ProcessControlType::IoReady,
+        n => ProcessControlType::User(n - 11),
+    }
+}

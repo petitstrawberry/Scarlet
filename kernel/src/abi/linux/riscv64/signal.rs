@@ -224,6 +224,23 @@ impl SignalState {
     }
 }
 
+/// Linux sigaction structure (simplified)
+/// This matches the Linux sigaction layout for RISC-V
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct Sigaction {
+    /// Signal handler address (or SIG_DFL, SIG_IGN)
+    pub handler: usize,
+    /// Signal flags
+    pub flags: u64,
+    /// Signal mask to apply during handler execution
+    pub mask: u64,
+}
+
+/// Special handler values
+pub const SIG_DFL: usize = 0; // Default action
+pub const SIG_IGN: usize = 1; // Ignore signal
+
 /// Linux rt_sigaction system call implementation
 ///
 /// int rt_sigaction(int signum, const struct sigaction *act, struct sigaction *oldact, size_t sigsetsize);
@@ -240,7 +257,7 @@ pub fn sys_rt_sigaction(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) ->
         Some(sig) => sig,
         None => {
             trapframe.set_return_value(!0usize); // -1 (EINVAL)
-            trapframe.increment_pc_next(&task);
+            trapframe.increment_pc_next(task);
             return !0usize;
         }
     };
@@ -249,25 +266,57 @@ pub fn sys_rt_sigaction(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) ->
 
     // Get old action if requested
     if oldact_ptr != 0 {
-        let old_action = signal_state.get_handler(signal);
-        // TODO: Copy old action to user space (requires memory copying functionality)
-        // For now, just acknowledge the request
-        let _ = old_action;
+        if let Some(paddr) = task.vm_manager.translate_vaddr(oldact_ptr) {
+            let old_action = signal_state.get_handler(signal);
+            let old_sigaction = sigaction_to_linux(old_action);
+            unsafe {
+                core::ptr::write(paddr as *mut Sigaction, old_sigaction);
+            }
+        }
     }
 
     // Set new action if provided
     if act_ptr != 0 {
-        // TODO: Read sigaction structure from user space
-        // For now, we'll implement a simplified version that just sets ignore/default
-        // In a real implementation, this would read the sigaction struct from user memory
-
-        // For demonstration, assume user wants to ignore the signal
-        signal_state.set_handler(signal, SignalAction::Ignore);
+        if let Some(paddr) = task.vm_manager.translate_vaddr(act_ptr) {
+            let new_sigaction = unsafe { core::ptr::read(paddr as *const Sigaction) };
+            let new_action = linux_to_sigaction(new_sigaction);
+            signal_state.set_handler(signal, new_action);
+        }
     }
 
     trapframe.set_return_value(0);
-    trapframe.increment_pc_next(&task);
+    trapframe.increment_pc_next(task);
     0
+}
+
+/// Convert internal SignalAction to Linux sigaction
+fn sigaction_to_linux(action: SignalAction) -> Sigaction {
+    match action {
+        SignalAction::Ignore => Sigaction {
+            handler: SIG_IGN,
+            flags: 0,
+            mask: 0,
+        },
+        SignalAction::Custom(addr) => Sigaction {
+            handler: addr,
+            flags: 0,
+            mask: 0,
+        },
+        _ => Sigaction {
+            handler: SIG_DFL,
+            flags: 0,
+            mask: 0,
+        },
+    }
+}
+
+/// Convert Linux sigaction to internal SignalAction
+fn linux_to_sigaction(sigaction: Sigaction) -> SignalAction {
+    match sigaction.handler {
+        SIG_DFL => SignalAction::Terminate, // Default is terminate
+        SIG_IGN => SignalAction::Ignore,
+        addr => SignalAction::Custom(addr),
+    }
 }
 
 /// Linux rt_sigprocmask system call implementation
@@ -285,38 +334,48 @@ pub fn sys_rt_sigprocmask(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) 
 
     // Save old mask if requested
     if oldset_ptr != 0 {
-        let old_mask = signal_state.blocked.raw();
-        // TODO: Copy old mask to user space
-        // For now, just acknowledge the request
-        let _ = old_mask;
+        if let Some(paddr) = task.vm_manager.translate_vaddr(oldset_ptr) {
+            let old_mask = signal_state.blocked.raw();
+            unsafe {
+                core::ptr::write(paddr as *mut u64, old_mask);
+            }
+        }
     }
 
     // Modify mask if new set is provided
     if set_ptr != 0 {
-        // TODO: Read sigset_t from user space
-        // For now, implement a simplified version
+        if let Some(paddr) = task.vm_manager.translate_vaddr(set_ptr) {
+            let new_mask = unsafe { core::ptr::read(paddr as *const u64) };
+            let mut new_signal_mask = SignalMask::new();
+            new_signal_mask.set_raw(new_mask);
 
-        // SIG_BLOCK = 0, SIG_UNBLOCK = 1, SIG_SETMASK = 2
-        match how {
-            0 => { // SIG_BLOCK
-                // TODO: Read mask from user space and add to blocked signals
-            }
-            1 => { // SIG_UNBLOCK
-                // TODO: Read mask from user space and remove from blocked signals
-            }
-            2 => { // SIG_SETMASK
-                // TODO: Read mask from user space and set as blocked signals
-            }
-            _ => {
-                trapframe.set_return_value(!0usize); // -1 (EINVAL)
-                trapframe.increment_pc_next(&task);
-                return !0usize;
+            // SIG_BLOCK = 0, SIG_UNBLOCK = 1, SIG_SETMASK = 2
+            match how {
+                0 => {
+                    // SIG_BLOCK: Add new_mask to current blocked signals
+                    let current = signal_state.blocked.raw();
+                    signal_state.blocked.set_raw(current | new_mask);
+                }
+                1 => {
+                    // SIG_UNBLOCK: Remove new_mask from current blocked signals
+                    let current = signal_state.blocked.raw();
+                    signal_state.blocked.set_raw(current & !new_mask);
+                }
+                2 => {
+                    // SIG_SETMASK: Replace blocked signals with new_mask
+                    signal_state.blocked = new_signal_mask;
+                }
+                _ => {
+                    trapframe.set_return_value(!0usize); // -1 (EINVAL)
+                    trapframe.increment_pc_next(task);
+                    return !0usize;
+                }
             }
         }
     }
 
     trapframe.set_return_value(0);
-    trapframe.increment_pc_next(&task);
+    trapframe.increment_pc_next(task);
     0
 }
 
