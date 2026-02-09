@@ -59,6 +59,27 @@ struct NetworkSetIpv4Request {
     addr: [u8; 4],
 }
 
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct NetworkInterfaceInfo {
+    name: [u8; 32],
+    ip_address: [u8; 4],
+    mac_address: [u8; 6],
+    ip_set: u8,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct NetworkStatus {
+    gateway: [u8; 4],
+    gateway_set: u8,
+    dns_server: [u8; 4],
+    dns_set: u8,
+    netmask: [u8; 4],
+    interface_count: u32,
+    interfaces_ptr: usize,
+}
+
 fn read_user_string(ptr: usize, len: usize) -> Option<String> {
     let task = mytask()?;
     if len == 0 {
@@ -180,32 +201,74 @@ pub fn sys_network_list_interfaces(tf: &mut Trapframe) -> usize {
     };
     tf.increment_pc_next(task);
 
-    let buf_ptr = tf.get_arg(0);
-    let buf_len = tf.get_arg(1);
-    if buf_ptr == 0 || buf_len == 0 {
+    let status_ptr = tf.get_arg(0);
+    let interfaces_ptr = tf.get_arg(1);
+    let max_interfaces = tf.get_arg(2);
+
+    if status_ptr == 0 || interfaces_ptr == 0 || max_interfaces == 0 {
         return usize::MAX;
     }
 
-    let buf_addr = match task.vm_manager.translate_vaddr(buf_ptr) {
-        Some(addr) => addr as *mut u8,
+    let status_addr = match task.vm_manager.translate_vaddr(status_ptr) {
+        Some(addr) => addr as *mut NetworkStatus,
         None => return usize::MAX,
     };
 
-    let interfaces = crate::network::get_network_manager().list_interfaces();
-    let mut output = String::new();
-    for (idx, name) in interfaces.iter().enumerate() {
-        if idx > 0 {
-            output.push('\n');
+    let interfaces_addr = match task.vm_manager.translate_vaddr(interfaces_ptr) {
+        Some(addr) => addr as *mut NetworkInterfaceInfo,
+        None => return usize::MAX,
+    };
+
+    let network_manager = crate::network::get_network_manager();
+    let interface_names = network_manager.list_interfaces();
+    let config = network_manager.get_config();
+
+    let mut status = NetworkStatus {
+        gateway: config.default_gateway.map_or([0u8; 4], |ip| ip.as_bytes()),
+        gateway_set: config.default_gateway.map_or(0, |_| 1),
+        dns_server: config.dns_server.map_or([0u8; 4], |ip| ip.as_bytes()),
+        dns_set: config.dns_server.map_or(0, |_| 1),
+        netmask: config.subnet_mask.as_bytes(),
+        interface_count: 0,
+        interfaces_ptr: interfaces_ptr as usize,
+    };
+
+    let mut interfaces = Vec::new();
+    for name in &interface_names {
+        if interfaces.len() >= max_interfaces as usize {
+            break;
         }
-        output.push_str(name);
+
+        if let Some(iface) = network_manager.get_interface(name) {
+            let ip = iface.ip_address().map_or([0u8; 4], |ip| ip.as_bytes());
+            let mac = iface.mac_address().clone();
+
+            let mut name_buf = [0u8; 32];
+            let name_bytes = name.as_bytes();
+            let copy_len = name_bytes.len().min(32);
+            name_buf[..copy_len].copy_from_slice(&name_bytes[..copy_len]);
+
+            interfaces.push(NetworkInterfaceInfo {
+                name: name_buf,
+                ip_address: ip,
+                mac_address: *mac.as_bytes(),
+                ip_set: iface.ip_address().map_or(0, |_| 1),
+            });
+        }
     }
 
-    let bytes = output.as_bytes();
-    let copy_len = bytes.len().min(buf_len);
+    status.interface_count = interfaces.len() as u32;
+
     unsafe {
-        core::ptr::copy_nonoverlapping(bytes.as_ptr(), buf_addr, copy_len);
+        core::ptr::write(status_addr, status);
+        if !interfaces_addr.is_null() && !interfaces.is_empty() {
+            for (idx, info) in interfaces.iter().enumerate() {
+                core::ptr::write(interfaces_addr.add(idx), *info);
+            }
+        }
     }
-    copy_len
+
+    0
 }
 
 /// System call: Create a new socket

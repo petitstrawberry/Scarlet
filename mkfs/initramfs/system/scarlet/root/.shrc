@@ -3,10 +3,7 @@
 
 # Set environment variables
 export PATH=/scarlet/system/scarlet/bin
-
 export LD_LIBRARY_PATH=/scarlet/system/linux-riscv64/usr/lib:/scarlet/system/linux-riscv64/lib
-
-netcfg --iface veth0 --ip 10.0.2.15 --mask 255.255.255.0 --gw 10.0.2.2
 
 echo "Welcome to Scarlet Shell!"
 echo "PATH is set to: $PATH"
