@@ -6,14 +6,15 @@
 #![no_std]
 #![no_main]
 
+extern crate alloc;
 extern crate scarlet_std as std;
 
 use std::{
     env,
     fs::File,
     network::{
-        Ipv4Address, list_interfaces, set_default_gateway, set_dns_server, set_interface_ipv4,
-        set_netmask,
+        Ipv4Address, NetworkStatus, list_interfaces, set_default_gateway, set_dns_server,
+        set_interface_ipv4, set_netmask,
     },
     println,
     string::{String, ToString},
@@ -317,14 +318,21 @@ fn main() -> i32 {
         return 0;
     }
 
-    let mut buffer = [0u8; 256];
-    match list_interfaces(&mut buffer) {
-        Ok(len) if len > 0 => {
-            if let Ok(text) = core::str::from_utf8(&buffer[..len]) {
-                println!("netcfgd: Available interfaces:\n{}", text);
+    match list_interfaces() {
+        Ok((_status, interfaces)) => {
+            println!("netcfgd: Available interfaces:");
+            for info in &interfaces {
+                let name_bytes = &info.name;
+                let null_pos = name_bytes
+                    .iter()
+                    .position(|&b| b == 0)
+                    .unwrap_or(name_bytes.len());
+                let name = core::str::from_utf8(&name_bytes[..null_pos]).unwrap_or("(invalid)");
+
+                println!("  - {}", name);
             }
         }
-        _ => {}
+        Err(_) => {}
     }
 
     let mut failed_count = 0;
