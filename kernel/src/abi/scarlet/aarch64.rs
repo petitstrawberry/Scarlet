@@ -12,6 +12,7 @@ use alloc::{
     sync::Arc,
     vec::Vec,
 };
+use core::sync::atomic::Ordering;
 
 use crate::{
     arch::{Trapframe, vm},
@@ -19,6 +20,7 @@ use crate::{
     fs::{
         FileSystemError, FileSystemErrorKind, SeekFrom, VfsManager, drivers::overlayfs::OverlayFS,
     },
+    ipc::event::{Event, EventContent, EventPriority, ProcessControlType},
     register_abi,
     syscall::syscall_handler,
     task::elf_loader::{
@@ -30,12 +32,160 @@ use crate::{
 
 use crate::abi::AbiModule;
 
-#[derive(Clone, Copy)]
+/// Maximum number of pending events that can be queued
+/// When this limit is reached, oldest events are dropped
+const MAX_PENDING_EVENTS: usize = 1024;
+
+/// Event handler function pointer type (user-space address)
+pub type EventHandler = usize;
+
+/// Event handler registration entry
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct EventHandlerEntry {
+    /// Handler function address in user space
+    pub handler: EventHandler,
+    /// Whether this handler should be called synchronously
+    pub synchronous: bool,
+}
+
+/// Event mask for filtering/blocking events
+#[derive(Debug, Clone, Default)]
+pub struct EventMask {
+    /// Blocked event content types (ProcessControl types)
+    pub blocked_process_control: u32,
+    /// Blocked notification types
+    pub blocked_notifications: u64,
+    /// Blocked custom event namespaces
+    pub blocked_namespaces: Vec<String>,
+    /// Block all events flag
+    pub block_all: bool,
+}
+
+impl EventMask {
+    /// Create a new empty event mask (no events blocked)
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Block all events
+    pub fn block_all(&mut self) {
+        self.block_all = true;
+    }
+
+    /// Unblock all events
+    pub fn unblock_all(&mut self) {
+        self.block_all = false;
+        self.blocked_process_control = 0;
+        self.blocked_notifications = 0;
+        self.blocked_namespaces.clear();
+    }
+
+    /// Block a specific ProcessControlType
+    pub fn block_process_control(&mut self, ptype: ProcessControlType) {
+        let bit = match ptype {
+            ProcessControlType::Terminate => 0,
+            ProcessControlType::Kill => 1,
+            ProcessControlType::Stop => 2,
+            ProcessControlType::Continue => 3,
+            ProcessControlType::Interrupt => 4,
+            ProcessControlType::Quit => 5,
+            ProcessControlType::Hangup => 6,
+            ProcessControlType::ChildExit => 7,
+            ProcessControlType::PipeBroken => 8,
+            ProcessControlType::Alarm => 9,
+            ProcessControlType::IoReady => 10,
+            ProcessControlType::User(n) => {
+                // Constrain user signals to 0-20 to avoid collisions
+                // User signals beyond 20 are treated as 20
+                11 + n.min(20)
+            }
+        };
+        self.blocked_process_control |= 1 << bit;
+    }
+
+    /// Unblock a specific ProcessControlType
+    pub fn unblock_process_control(&mut self, ptype: ProcessControlType) {
+        let bit = match ptype {
+            ProcessControlType::Terminate => 0,
+            ProcessControlType::Kill => 1,
+            ProcessControlType::Stop => 2,
+            ProcessControlType::Continue => 3,
+            ProcessControlType::Interrupt => 4,
+            ProcessControlType::Quit => 5,
+            ProcessControlType::Hangup => 6,
+            ProcessControlType::ChildExit => 7,
+            ProcessControlType::PipeBroken => 8,
+            ProcessControlType::Alarm => 9,
+            ProcessControlType::IoReady => 10,
+            ProcessControlType::User(n) => {
+                // Constrain user signals to 0-20 to avoid collisions
+                // User signals beyond 20 are treated as 20
+                11 + n.min(20)
+            }
+        };
+        self.blocked_process_control &= !(1 << bit);
+    }
+
+    /// Check if a ProcessControlType is blocked
+    pub fn is_process_control_blocked(&self, ptype: ProcessControlType) -> bool {
+        if self.block_all {
+            return true;
+        }
+        let bit = match ptype {
+            ProcessControlType::Terminate => 0,
+            ProcessControlType::Kill => 1,
+            ProcessControlType::Stop => 2,
+            ProcessControlType::Continue => 3,
+            ProcessControlType::Interrupt => 4,
+            ProcessControlType::Quit => 5,
+            ProcessControlType::Hangup => 6,
+            ProcessControlType::ChildExit => 7,
+            ProcessControlType::PipeBroken => 8,
+            ProcessControlType::Alarm => 9,
+            ProcessControlType::IoReady => 10,
+            ProcessControlType::User(n) => {
+                // Constrain user signals to 0-20 to avoid collisions
+                // User signals beyond 20 are treated as 20
+                11 + n.min(20)
+            }
+        };
+        (self.blocked_process_control & (1 << bit)) != 0
+    }
+
+    /// Check if an event content is blocked
+    pub fn is_blocked(&self, content: &EventContent) -> bool {
+        if self.block_all {
+            return true;
+        }
+        match content {
+            EventContent::ProcessControl(ptype) => self.is_process_control_blocked(*ptype),
+            EventContent::Notification(ntype) => {
+                let bit = *ntype as u64;
+                (self.blocked_notifications & (1 << bit)) != 0
+            }
+            EventContent::Custom { namespace, .. } => {
+                self.blocked_namespaces.iter().any(|ns| ns == namespace)
+            }
+            _ => false,
+        }
+    }
+}
+
+/// Scarlet Native ABI state
+#[derive(Clone)]
 pub struct ScarletAbi {
     /// TLS (Thread Local Storage) pointer for this task
     pub tls_pointer: Option<usize>,
     /// clear_child_tid pointer for thread exit notification (Linux-compatible)
     pub clear_child_tid_ptr: Option<usize>,
+    /// Event handler table: EventContent discriminant -> handler entry
+    pub event_handlers: BTreeMap<u8, EventHandlerEntry>,
+    /// Default handler for unhandled events (None = ignore)
+    pub default_event_handler: Option<EventHandlerEntry>,
+    /// Event mask for blocking events
+    pub event_mask: EventMask,
+    /// Pending events that were blocked (stored for later delivery)
+    pub pending_events: Vec<Event>,
 }
 
 impl Default for ScarletAbi {
@@ -43,7 +193,311 @@ impl Default for ScarletAbi {
         Self {
             tls_pointer: None,
             clear_child_tid_ptr: None,
+            event_handlers: BTreeMap::new(),
+            default_event_handler: None,
+            event_mask: EventMask::new(),
+            pending_events: Vec::new(),
         }
+    }
+}
+
+impl ScarletAbi {
+    /// Get the TLS pointer for this task
+    pub fn tls_pointer(&self) -> Option<usize> {
+        self.tls_pointer
+    }
+
+    /// Set the TLS pointer for this task
+    pub fn set_tls_pointer(&mut self, ptr: usize) {
+        self.tls_pointer = Some(ptr);
+    }
+
+    /// Clear the TLS pointer for this task
+    pub fn clear_tls_pointer(&mut self) {
+        self.tls_pointer = None;
+    }
+
+    /// Set the clear_child_tid pointer for thread exit notification
+    pub fn set_clear_child_tid(&mut self, ptr: usize) {
+        self.clear_child_tid_ptr = Some(ptr);
+    }
+
+    /// Handle task exit with TLS cleanup (Linux-compatible)
+    pub fn on_task_exit(&mut self, task: &crate::task::Task) {
+        // Linux-compatible behavior: write 0 to clear_child_tid and futex wake
+        if let Some(ptr) = self.clear_child_tid_ptr {
+            if let Some(paddr) = task.vm_manager.translate_vaddr(ptr) {
+                unsafe {
+                    *(paddr as *mut i32) = 0;
+                }
+            }
+            // Note: Futex wake for clear_child_tid is handled by the Linux ABI's
+            // on_task_exit implementation. For Scarlet Native, we just clear the value.
+        }
+    }
+
+    /// Register an event handler for a specific event content type
+    pub fn register_event_handler(
+        &mut self,
+        content_type: u8,
+        handler: EventHandler,
+        synchronous: bool,
+    ) {
+        self.event_handlers.insert(
+            content_type,
+            EventHandlerEntry {
+                handler,
+                synchronous,
+            },
+        );
+    }
+
+    /// Unregister an event handler for a specific event content type
+    pub fn unregister_event_handler(&mut self, content_type: u8) {
+        self.event_handlers.remove(&content_type);
+    }
+
+    /// Set the default event handler for unhandled events
+    pub fn set_default_event_handler(&mut self, handler: EventHandler, synchronous: bool) {
+        self.default_event_handler = Some(EventHandlerEntry {
+            handler,
+            synchronous,
+        });
+    }
+
+    /// Clear the default event handler
+    pub fn clear_default_event_handler(&mut self) {
+        self.default_event_handler = None;
+    }
+
+    /// Get the event handler for a specific event content type
+    fn get_event_handler(&self, content: &EventContent) -> Option<EventHandlerEntry> {
+        let content_type = content_type_discriminant(content);
+        self.event_handlers
+            .get(&content_type)
+            .copied()
+            .or(self.default_event_handler)
+    }
+
+    /// Handle an incoming event (called by EventManager)
+    pub fn handle_incoming_event(
+        &mut self,
+        event: Event,
+        task: &crate::task::Task,
+    ) -> Result<(), &'static str> {
+        // Check if event is blocked by mask
+        if self.event_mask.is_blocked(&event.content) {
+            // Store in pending queue for later delivery when unblocked
+            // Enforce maximum queue length to prevent unbounded memory growth
+            if self.pending_events.len() >= MAX_PENDING_EVENTS {
+                // Drop oldest event (FIFO overflow policy)
+                self.pending_events.remove(0);
+                crate::early_println!(
+                    "[ScarletAbi] Warning: Pending event queue overflow, dropping oldest event"
+                );
+            }
+            self.pending_events.push(event);
+            return Ok(());
+        }
+
+        // Process the event immediately
+        self.process_event(event, task)
+    }
+
+    /// Process a single event
+    fn process_event(&self, event: Event, task: &crate::task::Task) -> Result<(), &'static str> {
+        match &event.content {
+            EventContent::ProcessControl(ptype) => self.handle_process_control_event(*ptype, task),
+            EventContent::Message { .. } => {
+                // Message events require a handler
+                if let Some(handler) = self.get_event_handler(&event.content) {
+                    self.invoke_user_handler(handler, event, task)
+                } else {
+                    Ok(()) // No handler, ignore
+                }
+            }
+            EventContent::Notification(ntype) => self.handle_notification_event(*ntype, task),
+            EventContent::Custom { .. } => {
+                if let Some(handler) = self.get_event_handler(&event.content) {
+                    self.invoke_user_handler(handler, event, task)
+                } else {
+                    Ok(())
+                }
+            }
+        }
+    }
+
+    /// Handle process control events
+    fn handle_process_control_event(
+        &self,
+        ptype: ProcessControlType,
+        task: &crate::task::Task,
+    ) -> Result<(), &'static str> {
+        match ptype {
+            ProcessControlType::Terminate | ProcessControlType::Kill => {
+                // Exit the task with appropriate status
+                let exit_code = match ptype {
+                    ProcessControlType::Kill => 128 + 9,       // SIGKILL-like
+                    ProcessControlType::Terminate => 128 + 15, // SIGTERM-like
+                    _ => 1,
+                };
+                task.exit(exit_code);
+                Ok(())
+            }
+            ProcessControlType::Stop => {
+                // Set task state to blocked
+                task.set_state(crate::task::TaskState::Blocked(
+                    crate::task::BlockedType::Interruptible,
+                ));
+                Ok(())
+            }
+            ProcessControlType::Continue => {
+                // Resume the task if it was stopped
+                let current_state = task.get_state();
+                if matches!(current_state, crate::task::TaskState::Blocked(_)) {
+                    task.set_state(crate::task::TaskState::Ready);
+                }
+                Ok(())
+            }
+            ProcessControlType::Interrupt => {
+                // Call handler if registered, otherwise default action
+                if let Some(handler) = self.get_event_handler(&EventContent::ProcessControl(ptype))
+                {
+                    self.invoke_user_handler(
+                        handler,
+                        Event::direct_process_control(
+                            task.get_id() as u32,
+                            ptype,
+                            EventPriority::High,
+                            true,
+                        ),
+                        task,
+                    )
+                } else {
+                    // Default: terminate with SIGINT-like exit code
+                    task.exit(128 + 2);
+                    Ok(())
+                }
+            }
+            _ => {
+                // Other control types: call handler if registered
+                if let Some(handler) = self.get_event_handler(&EventContent::ProcessControl(ptype))
+                {
+                    self.invoke_user_handler(
+                        handler,
+                        Event::direct_process_control(
+                            task.get_id() as u32,
+                            ptype,
+                            EventPriority::Normal,
+                            false,
+                        ),
+                        task,
+                    )
+                } else {
+                    Ok(())
+                }
+            }
+        }
+    }
+
+    /// Handle notification events
+    fn handle_notification_event(
+        &self,
+        ntype: crate::ipc::event::NotificationType,
+        task: &crate::task::Task,
+    ) -> Result<(), &'static str> {
+        // Check if there's a handler registered
+        if let Some(handler) = self.get_event_handler(&EventContent::Notification(ntype)) {
+            self.invoke_user_handler(
+                handler,
+                Event::notification_to_task(task.get_id() as u32, ntype),
+                task,
+            )
+        } else {
+            // Default handling for specific notifications
+            match ntype {
+                crate::ipc::event::NotificationType::TaskCompleted => {
+                    // Wake up parent if waiting
+                    if let Some(parent_id) = task.get_parent_id() {
+                        crate::task::wake_task_waiters(task.get_id());
+                        crate::task::wake_parent_waiters(parent_id);
+                    }
+                }
+                _ => {}
+            }
+            Ok(())
+        }
+    }
+
+    /// Invoke a user-space event handler
+    ///
+    /// **NOTE**: Handler invocation is not yet implemented. This function currently
+    /// only logs the handler that would be invoked and returns success. User code
+    /// should not rely on handlers being called until context saving/restoration
+    /// is fully implemented.
+    ///
+    /// In a full implementation, this would:
+    /// 1. Save current context
+    /// 2. Set up handler arguments on user stack
+    /// 3. Jump to user handler
+    /// 4. Set up return trampoline
+    fn invoke_user_handler(
+        &self,
+        handler: EventHandlerEntry,
+        event: Event,
+        task: &crate::task::Task,
+    ) -> Result<(), &'static str> {
+        crate::early_println!(
+            "[ScarletAbi] Would invoke handler at {:#x} for event {:?} (invocation not yet implemented)",
+            handler.handler,
+            event.content
+        );
+
+        // TODO: Implement user handler invocation with proper context switching
+        // This requires setting up the trapframe to jump to user handler
+        // and saving the return address for sigreturn-like functionality
+
+        Ok(())
+    }
+
+    /// Process any pending events (called when mask changes)
+    pub fn process_pending_events(&mut self, task: &crate::task::Task) -> Result<(), &'static str> {
+        // We must not drop events that are still blocked; they should remain pending
+        // until the event mask allows them to be delivered.
+
+        // First, separate events into blocked and unblocked
+        let mut still_blocked: Vec<Event> = Vec::new();
+        let mut events_to_process: Vec<Event> = Vec::new();
+
+        for event in self.pending_events.drain(..) {
+            if self.event_mask.is_blocked(&event.content) {
+                // Keep blocked events pending for future processing
+                still_blocked.push(event);
+            } else {
+                // Queue for processing
+                events_to_process.push(event);
+            }
+        }
+
+        // Restore the blocked events as the new pending queue
+        self.pending_events = still_blocked;
+
+        // Now process unblocked events
+        for event in events_to_process {
+            self.process_event(event, task)?;
+        }
+
+        Ok(())
+    }
+}
+
+/// Get the discriminant value for an EventContent variant
+fn content_type_discriminant(content: &EventContent) -> u8 {
+    match content {
+        EventContent::ProcessControl(_) => 0,
+        EventContent::Message { .. } => 1,
+        EventContent::Notification(_) => 2,
+        EventContent::Custom { .. } => 3,
     }
 }
 
@@ -57,7 +511,7 @@ impl AbiModule for ScarletAbi {
     }
 
     fn clone_boxed(&self) -> Box<dyn AbiModule + Send + Sync> {
-        Box::new(*self) // ScarletAbi is Copy, so we can dereference and copy
+        Box::new(self.clone()) // ScarletAbi is Copy, so we can dereference and copy
     }
 
     fn handle_syscall(&mut self, trapframe: &mut Trapframe) -> Result<usize, &'static str> {
@@ -185,12 +639,9 @@ impl AbiModule for ScarletAbi {
         // Get file object from KernelObject::File
         match file_object.as_file() {
             Some(file_obj) => {
-                task.text_size
-                    .store(0, core::sync::atomic::Ordering::SeqCst);
-                task.data_size
-                    .store(0, core::sync::atomic::Ordering::SeqCst);
-                task.stack_size
-                    .store(0, core::sync::atomic::Ordering::SeqCst);
+                task.text_size.store(0, Ordering::SeqCst);
+                task.data_size.store(0, Ordering::SeqCst);
+                task.stack_size.store(0, Ordering::SeqCst);
                 task.brk
                     .store(usize::MAX, core::sync::atomic::Ordering::SeqCst);
 
@@ -223,6 +674,7 @@ impl AbiModule for ScarletAbi {
                         root_page_table.unmap_all();
 
                         // Setup the new memory environment
+                        vm::setup_trampoline_for_user(&task.vm_manager);
                         let stack_pointer = setup_user_stack(task).1;
 
                         // Handle different execution modes
@@ -267,7 +719,7 @@ impl AbiModule for ScarletAbi {
                         task.vcpu.lock().reset_iregs();
                         task.vcpu.lock().set_sp(stack_pointer);
 
-                        // Setup argv/envp on stack following Unix conventions
+                        // Setup argv/envp on stack following Unix and AArch64 conventions
                         let (adjusted_sp, argv_ptr) =
                             self.setup_arguments_on_stack(task, argv, envp, stack_pointer)?;
                         task.vcpu.lock().set_sp(adjusted_sp);
@@ -518,9 +970,9 @@ impl AbiModule for ScarletAbi {
         }
     }
 
-    fn on_task_exit(&mut self, _task: &crate::task::Task) {
+    fn on_task_exit(&mut self, task: &crate::task::Task) {
         // Delegate to the implementation method
-        self.handle_task_exit(_task);
+        self.on_task_exit(task);
     }
 
     fn set_tls_pointer(&mut self, ptr: usize) {
@@ -535,6 +987,19 @@ impl AbiModule for ScarletAbi {
         self.clear_child_tid_ptr = Some(ptr);
     }
 
+    fn handle_event(
+        &mut self,
+        event: crate::ipc::Event,
+        _target_task_id: u32,
+    ) -> Result<(), &'static str> {
+        // Get the current task to process the event
+        if let Some(task) = crate::task::mytask() {
+            self.handle_incoming_event(event, task)
+        } else {
+            Err("No current task to handle event")
+        }
+    }
+
     fn as_any(&self) -> &dyn core::any::Any {
         self
     }
@@ -545,20 +1010,6 @@ impl AbiModule for ScarletAbi {
 }
 
 impl ScarletAbi {
-    /// Handle task exit with TLS cleanup (Linux-compatible)
-    pub fn handle_task_exit(&mut self, task: &crate::task::Task) {
-        // Linux-compatible behavior: write 0 to clear_child_tid and futex wake
-        if let Some(ptr) = self.clear_child_tid_ptr {
-            if let Some(paddr) = task.vm_manager.translate_vaddr(ptr) {
-                unsafe {
-                    *(paddr as *mut i32) = 0;
-                }
-            }
-            // Note: Futex wake for clear_child_tid is handled by the Linux ABI's
-            // on_task_exit implementation. For Scarlet Native, we just clear the value.
-        }
-    }
-
     /// Setup argc, argv, and envp on the user stack following Unix conventions
     ///
     /// Standard Unix stack layout (from high to low addresses):
