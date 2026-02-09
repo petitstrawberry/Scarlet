@@ -890,6 +890,14 @@ impl AbiModule for LinuxRiscv64Abi {
         self.thread_state.tgid = _task.get_id();
         Ok(())
     }
+
+    fn as_any(&self) -> &dyn core::any::Any {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn core::any::Any {
+        self
+    }
 }
 
 syscall_table! {

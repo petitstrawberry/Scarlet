@@ -266,22 +266,30 @@ pub fn sys_rt_sigaction(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) ->
 
     // Get old action if requested
     if oldact_ptr != 0 {
-        if let Some(paddr) = task.vm_manager.translate_vaddr(oldact_ptr) {
-            let old_action = signal_state.get_handler(signal);
-            let old_sigaction = sigaction_to_linux(old_action);
-            unsafe {
-                core::ptr::write(paddr as *mut Sigaction, old_sigaction);
-            }
+        let Some(paddr) = task.vm_manager.translate_vaddr(oldact_ptr) else {
+            // Invalid user pointer for oldact: return EFAULT
+            trapframe.set_return_value(!0usize);
+            trapframe.increment_pc_next(task);
+            return !0usize; // -EFAULT
+        };
+        let old_action = signal_state.get_handler(signal);
+        let old_sigaction = sigaction_to_linux(old_action);
+        unsafe {
+            core::ptr::write(paddr as *mut Sigaction, old_sigaction);
         }
     }
 
     // Set new action if provided
     if act_ptr != 0 {
-        if let Some(paddr) = task.vm_manager.translate_vaddr(act_ptr) {
-            let new_sigaction = unsafe { core::ptr::read(paddr as *const Sigaction) };
-            let new_action = linux_to_sigaction(new_sigaction);
-            signal_state.set_handler(signal, new_action);
-        }
+        let Some(paddr) = task.vm_manager.translate_vaddr(act_ptr) else {
+            // Invalid user pointer for act: return EFAULT
+            trapframe.set_return_value(!0usize);
+            trapframe.increment_pc_next(task);
+            return !0usize; // -EFAULT
+        };
+        let new_sigaction = unsafe { core::ptr::read(paddr as *const Sigaction) };
+        let new_action = linux_to_sigaction(new_sigaction, signal);
+        signal_state.set_handler(signal, new_action);
     }
 
     trapframe.set_return_value(0);
@@ -311,9 +319,9 @@ fn sigaction_to_linux(action: SignalAction) -> Sigaction {
 }
 
 /// Convert Linux sigaction to internal SignalAction
-fn linux_to_sigaction(sigaction: Sigaction) -> SignalAction {
+fn linux_to_sigaction(sigaction: Sigaction, signal: LinuxSignal) -> SignalAction {
     match sigaction.handler {
-        SIG_DFL => SignalAction::Terminate, // Default is terminate
+        SIG_DFL => signal.default_action(), // Restore per-signal default action
         SIG_IGN => SignalAction::Ignore,
         addr => SignalAction::Custom(addr),
     }
@@ -334,42 +342,50 @@ pub fn sys_rt_sigprocmask(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) 
 
     // Save old mask if requested
     if oldset_ptr != 0 {
-        if let Some(paddr) = task.vm_manager.translate_vaddr(oldset_ptr) {
-            let old_mask = signal_state.blocked.raw();
-            unsafe {
-                core::ptr::write(paddr as *mut u64, old_mask);
-            }
+        let Some(paddr) = task.vm_manager.translate_vaddr(oldset_ptr) else {
+            // Invalid user pointer for oldset: return EFAULT
+            trapframe.set_return_value(!0usize);
+            trapframe.increment_pc_next(task);
+            return !0usize; // -EFAULT
+        };
+        let old_mask = signal_state.blocked.raw();
+        unsafe {
+            core::ptr::write(paddr as *mut u64, old_mask);
         }
     }
 
     // Modify mask if new set is provided
     if set_ptr != 0 {
-        if let Some(paddr) = task.vm_manager.translate_vaddr(set_ptr) {
-            let new_mask = unsafe { core::ptr::read(paddr as *const u64) };
-            let mut new_signal_mask = SignalMask::new();
-            new_signal_mask.set_raw(new_mask);
+        let Some(paddr) = task.vm_manager.translate_vaddr(set_ptr) else {
+            // Invalid user pointer for set: return EFAULT
+            trapframe.set_return_value(!0usize);
+            trapframe.increment_pc_next(task);
+            return !0usize; // -EFAULT
+        };
+        let new_mask = unsafe { core::ptr::read(paddr as *const u64) };
+        let mut new_signal_mask = SignalMask::new();
+        new_signal_mask.set_raw(new_mask);
 
-            // SIG_BLOCK = 0, SIG_UNBLOCK = 1, SIG_SETMASK = 2
-            match how {
-                0 => {
-                    // SIG_BLOCK: Add new_mask to current blocked signals
-                    let current = signal_state.blocked.raw();
-                    signal_state.blocked.set_raw(current | new_mask);
-                }
-                1 => {
-                    // SIG_UNBLOCK: Remove new_mask from current blocked signals
-                    let current = signal_state.blocked.raw();
-                    signal_state.blocked.set_raw(current & !new_mask);
-                }
-                2 => {
-                    // SIG_SETMASK: Replace blocked signals with new_mask
-                    signal_state.blocked = new_signal_mask;
-                }
-                _ => {
-                    trapframe.set_return_value(!0usize); // -1 (EINVAL)
-                    trapframe.increment_pc_next(task);
-                    return !0usize;
-                }
+        // SIG_BLOCK = 0, SIG_UNBLOCK = 1, SIG_SETMASK = 2
+        match how {
+            0 => {
+                // SIG_BLOCK: Add new_mask to current blocked signals
+                let current = signal_state.blocked.raw();
+                signal_state.blocked.set_raw(current | new_mask);
+            }
+            1 => {
+                // SIG_UNBLOCK: Remove new_mask from current blocked signals
+                let current = signal_state.blocked.raw();
+                signal_state.blocked.set_raw(current & !new_mask);
+            }
+            2 => {
+                // SIG_SETMASK: Replace blocked signals with new_mask
+                signal_state.blocked = new_signal_mask;
+            }
+            _ => {
+                trapframe.set_return_value(!0usize); // -1 (EINVAL)
+                trapframe.increment_pc_next(task);
+                return !0usize;
             }
         }
     }
