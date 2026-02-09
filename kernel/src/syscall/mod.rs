@@ -83,10 +83,11 @@ use crate::fs::vfs_v2::syscall::{
     sys_vfs_open, sys_vfs_readlink, sys_vfs_remove, sys_vfs_truncate,
 };
 use crate::ipc::syscall::{
-    sys_event_channel_create, sys_event_handler_register, sys_event_publish, sys_event_send_direct,
-    sys_event_subscribe, sys_event_unsubscribe, sys_pipe, sys_shared_memory_create,
-    sys_shared_memory_resize, sys_socket_recv_handle, sys_socket_recv_handle_and_data,
-    sys_socket_send_handle, sys_socket_send_handle_and_data,
+    sys_event_channel_create, sys_event_handler_register, sys_event_handler_register_native,
+    sys_event_handler_unregister_native, sys_event_mask, sys_event_publish, sys_event_return,
+    sys_event_send_direct, sys_event_subscribe, sys_event_unsubscribe, sys_pipe,
+    sys_shared_memory_create, sys_shared_memory_resize, sys_socket_recv_handle,
+    sys_socket_recv_handle_and_data, sys_socket_send_handle, sys_socket_send_handle_and_data,
 };
 use crate::network::syscall::{
     sys_network_list_interfaces, sys_network_set_dns, sys_network_set_gateway,
@@ -223,6 +224,12 @@ syscall_table! {
     SocketRecvHandle = 631 => sys_socket_recv_handle,          // Receive kernel object handle from socket
     SocketSendHandleAndData = 632 => sys_socket_send_handle_and_data, // Send handle and data atomically
     SocketRecvHandleAndData = 633 => sys_socket_recv_handle_and_data, // Receive handle and data atomically
+
+    // Scarlet Native Event Handling
+    EventHandlerRegisterNative = 640 => sys_event_handler_register_native,   // Register event handler (Scarlet Native)
+    EventHandlerUnregisterNative = 641 => sys_event_handler_unregister_native, // Unregister event handler (Scarlet Native)
+    EventMask = 642 => sys_event_mask,                                       // Set event mask (Scarlet Native)
+    EventReturn = 643 => sys_event_return,                                   // Return from event handler (Scarlet Native)
 
 
     // === Memory Mapping Operations ===
