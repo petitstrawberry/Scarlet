@@ -295,7 +295,7 @@ impl TaskPool {
     /// - Only removing tasks from zombie_queue (already exited)
     /// - Never removing the currently running task
     /// - Ensuring the task is not in ready/blocked queues before removal
-    pub fn remove_task(&self, task_id: usize) -> Option<Task> {
+    pub(crate) fn remove_task(&self, task_id: usize) -> Option<Task> {
         if task_id >= MAX_TASKS {
             return None;
         }
