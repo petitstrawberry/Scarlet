@@ -464,20 +464,28 @@ impl ScarletAbi {
     pub fn process_pending_events(&mut self, task: &crate::task::Task) -> Result<(), &'static str> {
         // We must not drop events that are still blocked; they should remain pending
         // until the event mask allows them to be delivered.
+        
+        // First, separate events into blocked and unblocked
         let mut still_blocked: Vec<Event> = Vec::new();
+        let mut events_to_process: Vec<Event> = Vec::new();
 
         for event in self.pending_events.drain(..) {
             if self.event_mask.is_blocked(&event.content) {
                 // Keep blocked events pending for future processing
                 still_blocked.push(event);
             } else {
-                // Process unblocked events immediately
-                self.process_event(event, task)?;
+                // Queue for processing
+                events_to_process.push(event);
             }
         }
 
         // Restore the blocked events as the new pending queue
         self.pending_events = still_blocked;
+
+        // Now process unblocked events
+        for event in events_to_process {
+            self.process_event(event, task)?;
+        }
 
         Ok(())
     }

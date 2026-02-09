@@ -345,7 +345,7 @@ impl AbiModule for LinuxRiscv64Abi {
     }
 
     fn handle_event(
-        &self,
+        &mut self,
         event: crate::ipc::Event,
         target_task_id: u32,
     ) -> Result<(), &'static str> {
