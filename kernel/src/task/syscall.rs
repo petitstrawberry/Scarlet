@@ -821,10 +821,7 @@ pub fn sys_shutdown(trapframe: &mut Trapframe) -> usize {
     // proper capability checks (e.g., CAP_SYS_BOOT equivalent or handle-based authorization)
     let task_id = task.get_id();
     if task_id != 1 {
-        crate::println!(
-            "[SHUTDOWN] Shutdown rejected: task {} is not authorized (only PID 1 allowed)",
-            task_id
-        );
+        crate::println!("[SHUTDOWN] Shutdown rejected: insufficient privileges");
         return SYSCALL_ERROR; // Return error
     }
 
