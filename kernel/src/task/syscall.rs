@@ -825,7 +825,7 @@ pub fn sys_shutdown(trapframe: &mut Trapframe) -> usize {
             "[SHUTDOWN] Shutdown rejected: task {} is not authorized (only PID 1 allowed)",
             task_id
         );
-        return usize::MAX; // Return error
+        return SYSCALL_ERROR; // Return error
     }
 
     let shutdown_type = trapframe.get_arg(0); // 0 = poweroff, 1 = reboot
