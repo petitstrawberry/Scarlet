@@ -14,13 +14,13 @@ use alloc::{
 use spin::RwLock;
 
 use crate::device::{
+    Device, DeviceType,
     char::CharDevice,
     graphics::{
-        manager::{FramebufferResource, GraphicsManager},
         DumbBufferCapable, FramebufferConfig, GraphicsDevice, PageFlipCapable, PixelFormat,
+        manager::{FramebufferResource, GraphicsManager},
     },
     manager::DeviceManager,
-    Device, DeviceType,
 };
 use crate::object::capability::{ControlOps, MemoryMappingOps, Selectable};
 
