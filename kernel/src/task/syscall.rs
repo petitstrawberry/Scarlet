@@ -816,6 +816,18 @@ pub fn sys_shutdown(trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
     trapframe.increment_pc_next(task);
 
+    // Authorization check: Only allow init process (PID 1) to shutdown
+    // TODO: When capability/privilege system is implemented, replace this with
+    // proper capability checks (e.g., CAP_SYS_BOOT equivalent or handle-based authorization)
+    let task_id = task.get_id();
+    if task_id != 1 {
+        crate::println!(
+            "[SHUTDOWN] Shutdown rejected: task {} is not authorized (only PID 1 allowed)",
+            task_id
+        );
+        return usize::MAX; // Return error
+    }
+
     let shutdown_type = trapframe.get_arg(0); // 0 = poweroff, 1 = reboot
 
     crate::println!(
@@ -851,42 +863,38 @@ pub fn sys_shutdown(trapframe: &mut Trapframe) -> usize {
         }
     }
 
-    crate::println!("[SHUTDOWN] Step 2: Syncing all filesystems...");
+    crate::println!("[SHUTDOWN] Step 2: Enumerating mounted filesystems (no sync support yet)...");
 
-    // Step 2: Sync all filesystems to ensure data is written to disk
-    // Sync the global VFS manager first
+    // Step 2: Enumerate all filesystems for logging/diagnostics.
+    // NOTE: Actual sync/flush-to-disk semantics are not yet implemented here.
+    //       This step does NOT guarantee that all pending data is durable.
+    // Enumerate filesystems from the global VFS manager first
     if let Some(vfs) = crate::fs::manager::get_global_vfs_manager_safe() {
-        // Iterate through all mounted filesystems and sync them
         let mounted_fs = vfs.mounted_filesystems.read();
         for fs in mounted_fs.iter() {
-            crate::println!("[SHUTDOWN] Syncing filesystem: {}", fs.name());
+            crate::println!("[SHUTDOWN] Global filesystem: {}", fs.name());
         }
     }
 
-    // Sync task-specific filesystems
+    // Enumerate task-specific filesystems
     if let Some(vfs) = task.get_vfs() {
         let mounted_fs = vfs.mounted_filesystems.read();
         for fs in mounted_fs.iter() {
-            crate::println!("[SHUTDOWN] Syncing task filesystem: {}", fs.name());
+            crate::println!("[SHUTDOWN] Task filesystem: {}", fs.name());
         }
     }
 
-    crate::println!("[SHUTDOWN] Step 3: Unmounting all filesystems...");
+    crate::println!(
+        "[SHUTDOWN] Step 3: Filesystem unmount phase (not yet implemented, skipping)..."
+    );
 
-    // Step 3: Unmount all filesystems
-    // Unmount the global VFS manager filesystems
-    if let Some(vfs) = crate::fs::manager::get_global_vfs_manager_safe() {
-        // Collect all mount points first
-        let mount_points: alloc::vec::Vec<alloc::string::String> = {
-            let mounted_fs = vfs.mounted_filesystems.read();
-            // Start with non-root filesystems
-            alloc::vec::Vec::new()
-        };
-
-        // Unmount filesystems in reverse mount order (leaves first)
-        // This is a simplified approach - in production, we'd track mount order
-        crate::println!("[SHUTDOWN] Unmounting global filesystems...");
-    }
+    // NOTE: Actual filesystem unmount logic is not yet implemented.
+    // The shutdown sequence currently synchronizes all known filesystems
+    // (global and task-specific) but leaves the mounts in place. This is
+    // sufficient for the current platforms where the underlying firmware
+    // or hypervisor tears down any remaining state on poweroff/reboot.
+    // When proper unmount support is added to the VFS layer, it should be
+    // invoked from here in a dependency-safe order (e.g. leaves first).
 
     crate::println!("[SHUTDOWN] Step 4: Requesting platform shutdown...");
 

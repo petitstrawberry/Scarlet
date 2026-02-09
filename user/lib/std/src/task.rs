@@ -602,6 +602,7 @@ pub fn pipe() -> Result<(crate::handle::Handle, crate::handle::Handle), i32> {
 }
 
 /// Shutdown types for the system
+#[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub enum ShutdownType {
     /// Power off the system
