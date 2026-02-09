@@ -889,7 +889,7 @@ pub fn sys_shutdown(trapframe: &mut Trapframe) -> usize {
     );
 
     // NOTE: Actual filesystem unmount logic is not yet implemented.
-    // The shutdown sequence currently synchronizes all known filesystems
+    // The shutdown sequence currently enumerates all known filesystems
     // (global and task-specific) but leaves the mounts in place. This is
     // sufficient for the current platforms where the underlying firmware
     // or hypervisor tears down any remaining state on poweroff/reboot.
