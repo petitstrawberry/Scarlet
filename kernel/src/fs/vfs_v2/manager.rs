@@ -1311,3 +1311,8 @@ pub fn get_global_vfs_manager() -> Arc<VfsManager> {
         .expect("global VFS manager not initialized")
         .clone()
 }
+
+/// Retrieve the global VFS manager safely (returns None if not initialized)
+pub fn get_global_vfs_manager_safe() -> Option<Arc<VfsManager>> {
+    GLOBAL_VFS_MANAGER.get().map(|mgr| mgr.clone())
+}

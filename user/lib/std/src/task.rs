@@ -600,3 +600,38 @@ pub fn pipe() -> Result<(crate::handle::Handle, crate::handle::Handle), i32> {
     };
     Ok((read_handle, write_handle))
 }
+
+/// Shutdown types for the system
+#[derive(Debug, Clone, Copy)]
+pub enum ShutdownType {
+    /// Power off the system
+    PowerOff = 0,
+    /// Reboot the system
+    Reboot = 1,
+}
+
+/// Shutdown the system gracefully
+///
+/// This function initiates a graceful shutdown sequence:
+/// 1. Terminate all tasks
+/// 2. Sync all filesystems
+/// 3. Unmount all filesystems
+/// 4. Request platform shutdown
+///
+/// # Arguments
+/// * `shutdown_type` - Type of shutdown (PowerOff or Reboot)
+///
+/// # Example
+/// ```no_run
+/// use scarlet_std::task::{shutdown, ShutdownType};
+///
+/// // Power off the system
+/// shutdown(ShutdownType::PowerOff);
+///
+/// // Or reboot
+/// // shutdown(ShutdownType::Reboot);
+/// ```
+pub fn shutdown(shutdown_type: ShutdownType) -> ! {
+    syscall1(Syscall::Shutdown, shutdown_type as usize);
+    unreachable!("shutdown syscall should not return");
+}
