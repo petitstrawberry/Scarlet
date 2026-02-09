@@ -13,8 +13,8 @@ use std::{
     env,
     fs::File,
     network::{
-        Ipv4Address, NetworkStatus, list_interfaces, set_default_gateway, set_dns_server,
-        set_interface_ipv4, set_netmask,
+        Ipv4Address, list_interfaces, set_default_gateway, set_dns_server, set_interface_ipv4,
+        set_netmask,
     },
     println,
     string::{String, ToString},
@@ -97,22 +97,22 @@ impl ConfigParser {
                                 name = Self::unquote(value);
                             }
                             "address" => {
-                                if let Some(v) = Self::unquote(value).parse::<String>().ok() {
+                                if let Ok(v) = Self::unquote(value).parse::<String>() {
                                     address = parse_ipv4(&v);
                                 }
                             }
                             "netmask" => {
-                                if let Some(v) = Self::unquote(value).parse::<String>().ok() {
+                                if let Ok(v) = Self::unquote(value).parse::<String>() {
                                     netmask = parse_ipv4(&v);
                                 }
                             }
                             "gateway" => {
-                                if let Some(v) = Self::unquote(value).parse::<String>().ok() {
+                                if let Ok(v) = Self::unquote(value).parse::<String>() {
                                     gateway = parse_ipv4(&v);
                                 }
                             }
                             "dns" => {
-                                if let Some(v) = Self::unquote(value).parse::<String>().ok() {
+                                if let Ok(v) = Self::unquote(value).parse::<String>() {
                                     dns = parse_ipv4(&v);
                                 }
                             }
@@ -318,21 +318,18 @@ fn main() -> i32 {
         return 0;
     }
 
-    match list_interfaces() {
-        Ok((_status, interfaces)) => {
-            println!("netcfgd: Available interfaces:");
-            for info in &interfaces {
-                let name_bytes = &info.name;
-                let null_pos = name_bytes
-                    .iter()
-                    .position(|&b| b == 0)
-                    .unwrap_or(name_bytes.len());
-                let name = core::str::from_utf8(&name_bytes[..null_pos]).unwrap_or("(invalid)");
+    if let Ok((_status, interfaces)) = list_interfaces() {
+        println!("netcfgd: Available interfaces:");
+        for info in &interfaces {
+            let name_bytes = &info.name;
+            let null_pos = name_bytes
+                .iter()
+                .position(|&b| b == 0)
+                .unwrap_or(name_bytes.len());
+            let name = core::str::from_utf8(&name_bytes[..null_pos]).unwrap_or("(invalid)");
 
-                println!("  - {}", name);
-            }
+            println!("  - {}", name);
         }
-        Err(_) => {}
     }
 
     let mut failed_count = 0;

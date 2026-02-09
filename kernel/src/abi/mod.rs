@@ -386,7 +386,7 @@ pub trait AbiModule: Send + Sync + 'static {
     /// * `Ok(())` if the event was successfully handled
     /// * `Err(message)` if event delivery failed
     fn handle_event(
-        &self,
+        &mut self,
         _event: crate::ipc::Event,
         _target_task_id: u32,
     ) -> Result<(), &'static str> {
@@ -416,6 +416,22 @@ pub trait AbiModule: Send + Sync + 'static {
     /// should override this method.
     fn set_clear_child_tid(&mut self, _ptr: usize) {
         // Default: do nothing
+    }
+
+    /// Get a reference to Any for downcasting
+    ///
+    /// This allows code to downcast the AbiModule to a concrete type
+    /// to access ABI-specific functionality.
+    fn as_any(&self) -> &dyn core::any::Any {
+        panic!("as_any not implemented for this ABI")
+    }
+
+    /// Get a mutable reference to Any for downcasting
+    ///
+    /// This allows code to downcast the AbiModule to a concrete type
+    /// to access ABI-specific functionality.
+    fn as_any_mut(&mut self) -> &mut dyn core::any::Any {
+        panic!("as_any_mut not implemented for this ABI")
     }
 }
 
