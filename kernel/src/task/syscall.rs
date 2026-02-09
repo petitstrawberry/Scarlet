@@ -816,13 +816,12 @@ pub fn sys_shutdown(trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
     trapframe.increment_pc_next(task);
 
-    // Authorization check: Only allow init process (PID 1) to shutdown
-    // TODO: When capability/privilege system is implemented, replace this with
-    // proper capability checks (e.g., CAP_SYS_BOOT equivalent or handle-based authorization)
-    let task_id = task.get_id();
-    if task_id != 1 {
-        crate::println!("[SHUTDOWN] Shutdown rejected: insufficient privileges");
-        return SYSCALL_ERROR; // Return error
+    // Authorization: Only the init thread group (tgid=1) can shutdown
+    // This allows any thread in the init process (including IPC threads) to shutdown
+    let tgid = task.get_tgid();
+    if tgid != 1 {
+        crate::println!("[SHUTDOWN] Rejected: tgid={}", tgid);
+        return SYSCALL_ERROR;
     }
 
     let shutdown_type = trapframe.get_arg(0); // 0 = poweroff, 1 = reboot

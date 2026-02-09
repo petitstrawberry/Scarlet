@@ -956,16 +956,14 @@ fn ipc_thread() {
                                 let _ = stream.write(error_msg.as_bytes());
                             }
                         } else if buffer[0] == cmd::SHUTDOWN {
-                            // Handle SHUTDOWN command
                             println!("stemd: Received SHUTDOWN command");
 
-                            // Send response before starting shutdown
                             let response = "OK: Shutting down\n";
                             let _ = stream.write(response.as_bytes());
 
-                            // Spawn shutdown handler in a separate thread
-                            // to avoid blocking IPC thread
-                            let _ = thread::spawn(handle_shutdown);
+                            // Shutdown must be called from main thread (PID 1)
+                            // to pass kernel authorization check
+                            handle_shutdown();
                         } else {
                             // Try to parse command as UTF-8 text
                             match core::str::from_utf8(&buffer[..n]) {
@@ -1466,27 +1464,6 @@ fn main() -> i32 {
     println!("stemd: Stem Daemon starting...");
     println!("stemd: PID={}", std::task::getpid());
 
-    let started_by_init = std::task::getppid() == 1;
-
-    // If stemd is started manually from an interactive shell, don't keep the shell
-    // blocked. Fork once and let the parent exit immediately.
-    if !started_by_init {
-        match fork() {
-            0 => {
-                // child continues as daemon
-                try_attach_stdio_to_null();
-            }
-            -1 => {
-                println!("stemd: Failed to daemonize (fork failed)");
-                return 1;
-            }
-            pid => {
-                println!("stemd: Daemonized (PID={})", pid);
-                return 0;
-            }
-        }
-    }
-
     // Read configuration.
     // Note: current filesystem layout copies userland under `/system/scarlet`,
     // so configs may live under `/system/scarlet/etc` instead of `/etc`.
@@ -1652,16 +1629,6 @@ tty = "/dev/tty0"
         // Skip stemd itself (we're already running!)
         if service.name == "stemd" {
             println!("stemd: Skipping stemd (already running as PID 1)");
-            continue;
-        }
-
-        // Avoid stealing an interactive TTY when stemd is started manually from a shell.
-        // TTY-bound services (like login/getty equivalents) should normally be started by init.
-        if !started_by_init && service.tty.is_some() {
-            println!(
-                "stemd: Skipping tty service '{}' (not started by init)",
-                service.name
-            );
             continue;
         }
 
