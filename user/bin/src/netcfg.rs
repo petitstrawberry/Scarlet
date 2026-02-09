@@ -5,8 +5,8 @@ extern crate scarlet_std as std;
 
 use std::env;
 use std::network::{
-    Ipv4Address, NetworkInterfaceInfo, NetworkStatus, list_interfaces, set_default_gateway,
-    set_dns_server, set_interface_ipv4, set_netmask,
+    Ipv4Address, list_interfaces, set_default_gateway, set_dns_server, set_interface_ipv4,
+    set_netmask,
 };
 use std::println;
 

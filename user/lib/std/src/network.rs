@@ -6,7 +6,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use crate::handle::HandleError;
-use crate::syscall::{Syscall, syscall1, syscall2, syscall3};
+use crate::syscall::{Syscall, syscall1, syscall3};
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
@@ -105,7 +105,7 @@ pub fn list_interfaces() -> Result<(NetworkStatus, Vec<NetworkInterfaceInfo>), H
             .iter()
             .position(|&b| b == 0)
             .unwrap_or(name_bytes.len());
-        let name = match core::str::from_utf8(&name_bytes[..null_pos]) {
+        let _name = match core::str::from_utf8(&name_bytes[..null_pos]) {
             Ok(s) => String::from(s),
             Err(_) => String::new(),
         };
