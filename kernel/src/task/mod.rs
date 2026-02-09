@@ -356,8 +356,10 @@ pub struct Task {
     pub task_type: TaskType,
     pub entry: usize,
     parent_id: Option<usize>,
-    /// Thread Group ID (TGID)
-    tgid: usize,
+    /// Thread Group ID (TGID) - identifies tasks in the same thread group
+    thread_group_id: usize,
+    /// Task Group ID - for job control and signal delivery (e.g., pipeline members)
+    task_group_id: AtomicUsize,
     pub max_stack_size: usize,
     pub max_data_size: usize,
     pub max_text_size: usize,
@@ -522,7 +524,8 @@ impl Task {
             task_type,
             entry: 0,
             parent_id: None,
-            tgid: 0,
+            thread_group_id: 0,
+            task_group_id: AtomicUsize::new(0),
             max_stack_size: DEAFAULT_MAX_TASK_STACK_SIZE,
             max_data_size: DEAFAULT_MAX_TASK_DATA_SIZE,
             max_text_size: DEAFAULT_MAX_TASK_TEXT_SIZE,
@@ -596,11 +599,20 @@ impl Task {
     /// Set the task ID (used by TaskPool during task addition)
     pub fn set_id(&mut self, id: usize) {
         self.id = id;
-        // For new tasks, initialize TGID to equal ID (thread group leader)
-        // This will be overridden in clone_task for CLONE_VM threads
-        if self.tgid == 0 {
-            self.tgid = id;
+        if self.thread_group_id == 0 {
+            self.thread_group_id = id;
         }
+        if self.task_group_id.load(Ordering::SeqCst) == 0 {
+            self.task_group_id.store(id, Ordering::SeqCst);
+        }
+    }
+
+    pub fn get_task_group_id(&self) -> usize {
+        self.task_group_id.load(Ordering::SeqCst)
+    }
+
+    pub fn set_task_group_id(&self, task_group_id: usize) {
+        self.task_group_id.store(task_group_id, Ordering::SeqCst);
     }
 
     /// Set the namespace ID (used by TaskPool during task addition)
@@ -661,20 +673,12 @@ impl Task {
     /// For standalone tasks (no CLONE_VM), TGID equals the task ID.
     ///
     /// # Returns
-    /// The thread group ID
-    pub fn get_tgid(&self) -> usize {
-        self.tgid
+    pub fn get_thread_group_id(&self) -> usize {
+        self.thread_group_id
     }
 
-    /// Set the Thread Group ID (TGID)
-    ///
-    /// This is used internally when cloning tasks with CLONE_VM to make
-    /// the child thread share the parent's thread group.
-    ///
-    /// # Arguments
-    /// * `tgid` - New thread group ID
-    pub fn set_tgid(&mut self, tgid: usize) {
-        self.tgid = tgid;
+    pub fn set_thread_group_id(&mut self, thread_group_id: usize) {
+        self.thread_group_id = thread_group_id;
     }
 
     /// Set the task state
@@ -1474,9 +1478,9 @@ impl Task {
         // Otherwise, child becomes a new thread group leader (TGID will be set to its own ID)
         // This matches Linux CLONE_THREAD semantics
         if flags.is_set(CloneFlagsDef::Thread) {
-            // Thread: share parent's TGID (join existing thread group)
-            child.tgid = self.tgid;
-        } // else: new process, TGID will be set to child's ID in set_id()
+            // Thread: share parent's thread group ID
+            child.thread_group_id = self.thread_group_id;
+        } // else: new task group, thread_group_id will be set to child's ID in set_id()
 
         Ok(child)
     }
@@ -1541,31 +1545,31 @@ impl Task {
     /// * `status` - The exit status for all tasks in the group
     ///
     /// # Behavior
-    /// - Terminates all tasks with the same TGID
+    /// - Terminates all tasks with the same thread group ID
     /// - The calling task is set to Zombie/Terminated
     /// - Other tasks in the group are forcefully terminated
     pub fn exit_group(&self, status: i32) {
-        let tgid = self.tgid;
+        let thread_group_id = self.thread_group_id;
         let my_id = self.id;
 
         // Get all task IDs in the system
         let scheduler = get_scheduler();
         let all_task_ids = scheduler.get_all_task_ids();
 
-        // Terminate all tasks with the same TGID (except self)
+        // Terminate all tasks with the same thread group ID (except self)
         for task_id in all_task_ids {
             if task_id == my_id {
                 continue; // Skip self
             }
 
             if let Some(task) = scheduler.get_task_by_id(task_id) {
-                if task.get_tgid() == tgid {
+                if task.get_thread_group_id() == thread_group_id {
                     // Terminate this thread group member
                     crate::println!(
-                        "[exit_group] Task {} terminating sibling task {} (TGD={})",
+                        "[exit_group] Task {} terminating sibling task {} (thread_group_id={})",
                         my_id,
                         task_id,
-                        tgid
+                        thread_group_id
                     );
                     // Set state to Terminated directly (bypass normal exit)
                     // Use unsafe to modify state through immutable reference
