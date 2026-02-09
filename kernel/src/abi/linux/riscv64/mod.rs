@@ -349,42 +349,45 @@ impl AbiModule for LinuxRiscv64Abi {
         event: crate::ipc::Event,
         target_task_id: u32,
     ) -> Result<(), &'static str> {
-        // Convert event to signal if applicable
         if let Some(signal) = signal::handle_event_to_signal(&event) {
             let scheduler = crate::sched::scheduler::get_scheduler();
             let target_task = scheduler
                 .get_task_by_id(target_task_id as usize)
                 .ok_or("Target task not found")?;
 
-            // Check if this is a fatal signal that should terminate immediately
-            match signal {
-                signal::LinuxSignal::SIGKILL
-                | signal::LinuxSignal::SIGTERM
-                | signal::LinuxSignal::SIGINT => {
-                    // Fatal signals: terminate task immediately
-                    let exit_code = 128 + (signal as i32); // Standard Unix exit code for signals
-                    crate::early_println!(
-                        "Linux ABI: Terminating task {} due to signal {} (exit code {})",
-                        target_task.get_id(),
-                        signal as u32,
-                        exit_code
-                    );
+            let action = {
+                let signal_state = self.signal_state.lock();
+                signal_state.get_handler(signal)
+            };
+
+            match action {
+                signal::SignalAction::Custom(handler_addr) => {
+                    let trapframe = target_task.get_trapframe();
+                    signal::setup_signal_handler(trapframe, handler_addr, signal);
+                }
+                signal::SignalAction::Ignore => {}
+                signal::SignalAction::ForceTerminate => {
+                    let exit_code = 128 + (signal as i32);
                     target_task.exit(exit_code);
                 }
-                _ => {
-                    // Other signals: add to pending (for future handler implementation)
-                    let mut signal_state = self.signal_state.lock();
-                    signal_state.add_pending(signal);
-                    crate::early_println!(
-                        "Linux ABI: Added signal {} to pending for task {}",
-                        signal as u32,
-                        target_task_id
-                    );
+                signal::SignalAction::Terminate => {
+                    let exit_code = 128 + (signal as i32);
+                    target_task.exit(exit_code);
+                }
+                signal::SignalAction::Stop => {
+                    target_task.set_state(crate::task::TaskState::Blocked(
+                        crate::task::BlockedType::Interruptible,
+                    ));
+                }
+                signal::SignalAction::Continue => {
+                    let current_state = target_task.get_state();
+                    if matches!(current_state, crate::task::TaskState::Blocked(_)) {
+                        target_task.set_state(crate::task::TaskState::Ready);
+                    }
                 }
             }
         }
 
-        // For non-signal events, just acknowledge
         Ok(())
     }
 
@@ -955,6 +958,7 @@ syscall_table! {
     ClockGetres = 114 => time::sys_clock_getres,
     RtSigaction = 134 => signal::sys_rt_sigaction,
     RtSigprocmask = 135 => signal::sys_rt_sigprocmask,
+    RtSigreturn = 139 => signal::sys_rt_sigreturn,
     SetGid = 144 => proc::sys_setgid,
     SetUid = 146 => proc::sys_setuid,
     SetPgid = 154 => proc::sys_setpgid,

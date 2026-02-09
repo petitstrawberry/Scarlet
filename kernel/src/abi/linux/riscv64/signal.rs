@@ -488,24 +488,64 @@ pub fn process_pending_signals_with_state(
     }
 }
 
-/// Enhanced signal handler setup with proper context saving
-fn setup_signal_handler(trapframe: &mut Trapframe, handler_addr: usize, signal: LinuxSignal) {
-    // TODO: Complete signal handler setup
-    // 1. Save current trapframe on user stack
-    // 2. Set up signal stack frame
-    // 3. Set up signal handler arguments
-    // 4. Set up return address to signal return trampoline
+/// Set up user-space signal handler execution with context save/restore.
+///
+/// Signal frame layout on user stack (RISC-V, simplified `rt_sigframe`):
+/// ```text
+///   [frame_base + 0]:   trampoline (li a7, 139; ecall) — rt_sigreturn
+///   [frame_base + 8]:   signal number
+///   [frame_base + 16]:  saved regs[0..31] (256 bytes)
+///   [frame_base + 272]: saved epc (8 bytes)
+/// ```
+pub fn setup_signal_handler(trapframe: &mut Trapframe, handler_addr: usize, signal: LinuxSignal) {
+    let mut sp = trapframe.regs.reg[2];
 
-    // For now, basic setup:
-    // Set up arguments for signal handler: handler(signal_number)
-    trapframe.set_arg(0, signal as usize);
+    // trampoline(8) + signo(8) + regs(32×8) + epc(8) = 280
+    const SIGNAL_FRAME_SIZE: usize = 8 + 8 + (32 * 8) + 8;
+    sp -= SIGNAL_FRAME_SIZE;
+    sp &= !0xF;
 
-    // Jump to signal handler
+    let frame_base = sp;
+
+    let task = match mytask() {
+        Some(t) => t,
+        None => return,
+    };
+
+    unsafe {
+        // Trampoline: addi a7, x0, 139 (0x08b00893) + ecall (0x00000073)
+        let paddr = match task.vm_manager.translate_vaddr(frame_base) {
+            Some(p) => p,
+            None => return,
+        };
+        *(paddr as *mut u32) = 0x08b00893; // addi a7, x0, 139
+        *((paddr as *mut u32).add(1)) = 0x00000073; // ecall
+
+        let paddr = match task.vm_manager.translate_vaddr(frame_base + 8) {
+            Some(p) => p,
+            None => return,
+        };
+        *(paddr as *mut usize) = signal as usize;
+
+        for i in 0..32 {
+            let paddr = match task.vm_manager.translate_vaddr(frame_base + 16 + i * 8) {
+                Some(p) => p,
+                None => return,
+            };
+            *(paddr as *mut usize) = trapframe.regs.reg[i];
+        }
+
+        let paddr = match task.vm_manager.translate_vaddr(frame_base + 272) {
+            Some(p) => p,
+            None => return,
+        };
+        *(paddr as *mut u64) = trapframe.epc;
+    }
+
     trapframe.epc = handler_addr as u64;
-
-    // TODO: Implement signal return mechanism
-    // - Set up return address to rt_sigreturn trampoline
-    // - Save original context for restoration
+    trapframe.regs.reg[2] = sp;
+    trapframe.regs.reg[10] = signal as usize; // a0 = signal number
+    trapframe.regs.reg[1] = frame_base; // ra = trampoline (rt_sigreturn)
 }
 
 /// Handle fatal signals that should terminate immediately
@@ -540,6 +580,51 @@ pub fn is_fatal_signal(signal: LinuxSignal) -> bool {
         signal,
         LinuxSignal::SIGKILL | LinuxSignal::SIGTERM | LinuxSignal::SIGINT
     )
+}
+
+/// Linux sys_rt_sigreturn — Restore context saved by `setup_signal_handler`.
+///
+/// Reads the signal frame from the current user stack pointer and restores
+/// all 32 general-purpose registers plus `epc`.  The frame layout matches
+/// what `setup_signal_handler` wrote:
+///
+/// ```text
+///   [sp + 0]:   trampoline (8 bytes, ignored here)
+///   [sp + 8]:   signal number (8 bytes, ignored here)
+///   [sp + 16]:  saved regs[0..31] (256 bytes)
+///   [sp + 272]: saved epc (8 bytes)
+/// ```
+///
+/// After restoration the task resumes at the instruction that was
+/// interrupted by the signal.
+pub fn sys_rt_sigreturn(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
+    let task = match mytask() {
+        Some(t) => t,
+        None => return usize::MAX,
+    };
+
+    let frame_base = trapframe.regs.reg[2]; // SP points to signal frame
+
+    unsafe {
+        // Restore all 32 general-purpose registers
+        for i in 0..32 {
+            let paddr = match task.vm_manager.translate_vaddr(frame_base + 16 + i * 8) {
+                Some(p) => p,
+                None => return usize::MAX,
+            };
+            trapframe.regs.reg[i] = *(paddr as *const usize);
+        }
+
+        // Restore epc (program counter at time of signal)
+        let paddr = match task.vm_manager.translate_vaddr(frame_base + 272) {
+            Some(p) => p,
+            None => return usize::MAX,
+        };
+        trapframe.epc = *(paddr as *const u64);
+    }
+
+    // Return value is irrelevant — a0 was already restored from the frame.
+    0
 }
 
 /// Linux sys_tkill - Send a signal to a specific thread

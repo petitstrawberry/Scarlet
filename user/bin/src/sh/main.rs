@@ -306,7 +306,9 @@ fn execute_command(program: &str, args: &[String]) -> i32 {
             1
         }
         pid => {
+            set_foreground_group(pid as usize);
             let (_, status) = waitpid(pid, 0);
+            set_foreground_group(std::task::getpid() as usize);
             status
         }
     }
@@ -388,6 +390,7 @@ const SCTL_TTY_SET_ECHO: u32 = 0x5354_0001;
 const SCTL_TTY_SET_CANONICAL: u32 = 0x5354_0003;
 const SCTL_TTY_SET_READ_POLICY: u32 = 0x5354_0007;
 const SCTL_TTY_SET_KBMODE: u32 = 0x5354_000C;
+const SCTL_TTY_SET_FOREGROUND_GROUP: u32 = 0x5354_000E;
 const KB_XLATE: usize = 0;
 
 /// Restore TTY to canonical mode before executing external commands
@@ -408,6 +411,13 @@ fn restore_raw_mode() {
         let read_policy = 1; // min=1, timeout=0
         let _ = stdin_handle.control(SCTL_TTY_SET_READ_POLICY, read_policy);
         core::mem::forget(stdin_handle); // Don't close stdin
+    }
+}
+
+fn set_foreground_group(task_group_id: usize) {
+    if let Ok(stdin_handle) = unsafe { Handle::from_raw(0) } {
+        let _ = stdin_handle.control(SCTL_TTY_SET_FOREGROUND_GROUP, task_group_id);
+        core::mem::forget(stdin_handle);
     }
 }
 
@@ -564,7 +574,11 @@ fn execute_single_command(cmd: &Command, is_background: bool) -> i32 {
                 // Return immediately to shell prompt
                 0
             } else {
+                // Set foreground group to child so Ctrl+C targets it
+                set_foreground_group(pid as usize);
                 let (_, status) = waitpid(pid, 0);
+                // Restore foreground group to shell
+                set_foreground_group(std::task::getpid() as usize);
                 // Restore raw mode for shell after foreground command completes
                 restore_raw_mode();
                 status
@@ -692,10 +706,14 @@ fn execute_pipeline(pipeline: &Pipeline) -> i32 {
 
     // Wait for all children
     let mut last_status = 0;
+    // Set foreground group to first child in pipeline
+    set_foreground_group(pids[0] as usize);
     for pid in pids {
         let (_, status) = waitpid(pid, 0);
         last_status = status;
     }
+    // Restore foreground group to shell
+    set_foreground_group(std::task::getpid() as usize);
 
     // Restore raw mode for shell after pipeline completes
     restore_raw_mode();
@@ -711,6 +729,9 @@ fn interactive_shell() -> i32 {
 
     // Initialize job list
     init_jobs();
+
+    // Set shell as foreground group on the TTY
+    set_foreground_group(std::task::getpid() as usize);
 
     // Try to execute .shrc on startup
     execute_shrc();

@@ -431,31 +431,112 @@ impl ScarletAbi {
 
     /// Invoke a user-space event handler
     ///
-    /// **NOTE**: Handler invocation is not yet implemented. This function currently
-    /// only logs the handler that would be invoked and returns success. User code
-    /// should not rely on handlers being called until context saving/restoration
-    /// is fully implemented.
+    /// Sets up the user stack with a signal frame that preserves the interrupted
+    /// context, then modifies the trapframe to jump to the registered handler.
+    /// When the handler returns, it executes the `event_return` syscall
+    /// (embedded in the trampoline) which restores the original context.
     ///
-    /// In a full implementation, this would:
-    /// 1. Save current context
-    /// 2. Set up handler arguments on user stack
-    /// 3. Jump to user handler
-    /// 4. Set up return trampoline
+    /// # Signal frame layout on user stack (high to low):
+    ///
+    /// ```text
+    /// +--------------------------+  <- original SP
+    /// |   saved epc (8 bytes)    |
+    /// |   saved regs[0..31]      |  (32 × 8 = 256 bytes)
+    /// |   event content type (8) |
+    /// |   event subtype    (8)   |
+    /// |   trampoline code  (8)   |  <- ecall for syscall 643 (event_return)
+    /// +--------------------------+  <- new SP (16-byte aligned)
+    /// ```
+    ///
+    /// # Arguments passed to handler
+    /// - a0: event content type discriminant (0=ProcessControl, 1=Message, etc.)
+    /// - a1: event subtype (e.g. ProcessControlType discriminant)
+    /// - a2: pointer to saved context on stack (for advanced handlers)
     fn invoke_user_handler(
         &self,
         handler: EventHandlerEntry,
         event: Event,
         task: &crate::task::Task,
     ) -> Result<(), &'static str> {
-        crate::early_println!(
-            "[ScarletAbi] Would invoke handler at {:#x} for event {:?} (invocation not yet implemented)",
-            handler.handler,
-            event.content
-        );
+        let trapframe = task.get_trapframe();
 
-        // TODO: Implement user handler invocation with proper context switching
-        // This requires setting up the trapframe to jump to user handler
-        // and saving the return address for sigreturn-like functionality
+        let (content_type, subtype) = match &event.content {
+            EventContent::ProcessControl(ptype) => {
+                let sub = match ptype {
+                    ProcessControlType::Terminate => 0,
+                    ProcessControlType::Kill => 1,
+                    ProcessControlType::Stop => 2,
+                    ProcessControlType::Continue => 3,
+                    ProcessControlType::Interrupt => 4,
+                    ProcessControlType::Quit => 5,
+                    ProcessControlType::Hangup => 6,
+                    ProcessControlType::ChildExit => 7,
+                    ProcessControlType::PipeBroken => 8,
+                    ProcessControlType::Alarm => 9,
+                    ProcessControlType::IoReady => 10,
+                    ProcessControlType::User(id) => 256 + *id as usize,
+                };
+                (0usize, sub)
+            }
+            EventContent::Message { .. } => (1usize, 0usize),
+            EventContent::Notification(ntype) => (2usize, *ntype as usize),
+            EventContent::Custom { event_id, .. } => (3usize, *event_id as usize),
+        };
+
+        let mut sp = trapframe.regs.reg[2];
+
+        // trampoline(8) + subtype(8) + content_type(8) + regs(32×8) + epc(8) = 288
+        const SIGNAL_FRAME_SIZE: usize = 8 + 8 + 8 + (32 * 8) + 8;
+        sp -= SIGNAL_FRAME_SIZE;
+        sp &= !0xF;
+
+        let frame_base = sp;
+
+        // Trampoline: addi a7, x0, 643 (0x28300893) + ecall (0x00000073)
+        let trampoline_instr_0: u32 = 0x28300893;
+        let trampoline_instr_1: u32 = 0x00000073;
+
+        unsafe {
+            let paddr = task
+                .vm_manager
+                .translate_vaddr(frame_base)
+                .ok_or("Failed to translate signal frame address")?;
+            *(paddr as *mut u32) = trampoline_instr_0;
+            *((paddr as *mut u32).add(1)) = trampoline_instr_1;
+
+            let paddr = task
+                .vm_manager
+                .translate_vaddr(frame_base + 8)
+                .ok_or("Failed to translate signal frame address")?;
+            *(paddr as *mut usize) = subtype;
+
+            let paddr = task
+                .vm_manager
+                .translate_vaddr(frame_base + 16)
+                .ok_or("Failed to translate signal frame address")?;
+            *(paddr as *mut usize) = content_type;
+
+            for i in 0..32 {
+                let paddr = task
+                    .vm_manager
+                    .translate_vaddr(frame_base + 24 + i * 8)
+                    .ok_or("Failed to translate signal frame address")?;
+                *(paddr as *mut usize) = trapframe.regs.reg[i];
+            }
+
+            let paddr = task
+                .vm_manager
+                .translate_vaddr(frame_base + 280)
+                .ok_or("Failed to translate signal frame address")?;
+            *(paddr as *mut u64) = trapframe.epc;
+        }
+
+        trapframe.epc = handler.handler as u64;
+        trapframe.regs.reg[2] = sp;
+        trapframe.regs.reg[10] = content_type;
+        trapframe.regs.reg[11] = subtype;
+        trapframe.regs.reg[12] = frame_base + 24;
+        trapframe.regs.reg[1] = frame_base;
 
         Ok(())
     }
