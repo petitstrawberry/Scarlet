@@ -166,6 +166,11 @@ pub fn register_event_handler(
 ) -> EventResult<()> {
     use crate::syscall::{Syscall, syscall4};
 
+    // Validate content_type range (0-3)
+    if content_type > 3 {
+        return Err(EventError::InvalidEventType);
+    }
+
     let result = syscall4(
         Syscall::EventHandlerRegister,
         content_type as usize,

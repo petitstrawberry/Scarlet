@@ -32,6 +32,10 @@ use crate::{
 
 use crate::abi::AbiModule;
 
+/// Maximum number of pending events that can be queued
+/// When this limit is reached, oldest events are dropped
+const MAX_PENDING_EVENTS: usize = 1024;
+
 /// Event handler function pointer type (user-space address)
 pub type EventHandler = usize;
 
@@ -90,7 +94,11 @@ impl EventMask {
             ProcessControlType::PipeBroken => 8,
             ProcessControlType::Alarm => 9,
             ProcessControlType::IoReady => 10,
-            ProcessControlType::User(n) => 11 + (n % 21), // Map user signals to bits 11-31
+            ProcessControlType::User(n) => {
+                // Constrain user signals to 0-20 to avoid collisions
+                // User signals beyond 20 are treated as 20
+                11 + n.min(20)
+            }
         };
         self.blocked_process_control |= 1 << bit;
     }
@@ -109,7 +117,11 @@ impl EventMask {
             ProcessControlType::PipeBroken => 8,
             ProcessControlType::Alarm => 9,
             ProcessControlType::IoReady => 10,
-            ProcessControlType::User(n) => 11 + (n % 21),
+            ProcessControlType::User(n) => {
+                // Constrain user signals to 0-20 to avoid collisions
+                // User signals beyond 20 are treated as 20
+                11 + n.min(20)
+            }
         };
         self.blocked_process_control &= !(1 << bit);
     }
@@ -131,7 +143,11 @@ impl EventMask {
             ProcessControlType::PipeBroken => 8,
             ProcessControlType::Alarm => 9,
             ProcessControlType::IoReady => 10,
-            ProcessControlType::User(n) => 11 + (n % 21),
+            ProcessControlType::User(n) => {
+                // Constrain user signals to 0-20 to avoid collisions
+                // User signals beyond 20 are treated as 20
+                11 + n.min(20)
+            }
         };
         (self.blocked_process_control & (1 << bit)) != 0
     }
@@ -272,6 +288,14 @@ impl ScarletAbi {
         // Check if event is blocked by mask
         if self.event_mask.is_blocked(&event.content) {
             // Store in pending queue for later delivery when unblocked
+            // Enforce maximum queue length to prevent unbounded memory growth
+            if self.pending_events.len() >= MAX_PENDING_EVENTS {
+                // Drop oldest event (FIFO overflow policy)
+                self.pending_events.remove(0);
+                crate::early_println!(
+                    "[ScarletAbi] Warning: Pending event queue overflow, dropping oldest event"
+                );
+            }
             self.pending_events.push(event);
             return Ok(());
         }
@@ -406,20 +430,25 @@ impl ScarletAbi {
     }
 
     /// Invoke a user-space event handler
+    ///
+    /// **NOTE**: Handler invocation is not yet implemented. This function currently
+    /// only logs the handler that would be invoked and returns success. User code
+    /// should not rely on handlers being called until context saving/restoration
+    /// is fully implemented.
+    ///
+    /// In a full implementation, this would:
+    /// 1. Save current context
+    /// 2. Set up handler arguments on user stack
+    /// 3. Jump to user handler
+    /// 4. Set up return trampoline
     fn invoke_user_handler(
         &self,
         handler: EventHandlerEntry,
         event: Event,
         task: &crate::task::Task,
     ) -> Result<(), &'static str> {
-        // For now, just log the invocation
-        // In a full implementation, this would:
-        // 1. Save current context
-        // 2. Set up handler arguments on user stack
-        // 3. Jump to user handler
-        // 4. Set up return trampoline
         crate::early_println!(
-            "[ScarletAbi] Would invoke handler at {:#x} for event {:?}",
+            "[ScarletAbi] Would invoke handler at {:#x} for event {:?} (invocation not yet implemented)",
             handler.handler,
             event.content
         );
@@ -433,12 +462,27 @@ impl ScarletAbi {
 
     /// Process any pending events (called when mask changes)
     pub fn process_pending_events(&mut self, task: &crate::task::Task) -> Result<(), &'static str> {
-        let events_to_process: Vec<Event> = self
-            .pending_events
-            .drain(..)
-            .filter(|e| !self.event_mask.is_blocked(&e.content))
-            .collect();
+        // We must not drop events that are still blocked; they should remain pending
+        // until the event mask allows them to be delivered.
 
+        // First, separate events into blocked and unblocked
+        let mut still_blocked: Vec<Event> = Vec::new();
+        let mut events_to_process: Vec<Event> = Vec::new();
+
+        for event in self.pending_events.drain(..) {
+            if self.event_mask.is_blocked(&event.content) {
+                // Keep blocked events pending for future processing
+                still_blocked.push(event);
+            } else {
+                // Queue for processing
+                events_to_process.push(event);
+            }
+        }
+
+        // Restore the blocked events as the new pending queue
+        self.pending_events = still_blocked;
+
+        // Now process unblocked events
         for event in events_to_process {
             self.process_event(event, task)?;
         }
@@ -944,19 +988,13 @@ impl AbiModule for ScarletAbi {
     }
 
     fn handle_event(
-        &self,
+        &mut self,
         event: crate::ipc::Event,
         _target_task_id: u32,
     ) -> Result<(), &'static str> {
         // Get the current task to process the event
         if let Some(task) = crate::task::mytask() {
-            // SAFETY: We need to access the ABI mutably but we're in an immutable context
-            // This is safe because handle_event is called from process_pending_events
-            // which is called from the scheduler when the task is not running on another CPU
-            unsafe {
-                let abi_ptr = self as *const Self as *mut Self;
-                (*abi_ptr).handle_incoming_event(event, task)
-            }
+            self.handle_incoming_event(event, task)
         } else {
             Err("No current task to handle event")
         }

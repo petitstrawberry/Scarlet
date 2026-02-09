@@ -748,6 +748,13 @@ pub fn sys_event_handler_register_native(trapframe: &mut Trapframe) -> usize {
     let handler_addr = trapframe.get_arg(1);
     let synchronous = trapframe.get_arg(2) != 0;
     let is_default = trapframe.get_arg(3) != 0;
+
+    // Validate content_type range (0-3) and non-null handler address
+    if content_type > 3 || handler_addr == 0 {
+        trapframe.increment_pc_next(task);
+        return usize::MAX;
+    }
+
     trapframe.increment_pc_next(task);
 
     // Use with_default_abi_mut to access ScarletAbi
@@ -814,7 +821,12 @@ pub fn sys_event_handler_unregister_native(trapframe: &mut Trapframe) -> usize {
 /// Arguments:
 /// - operation: u32 (0=block, 1=unblock, 2=set_all, 3=clear_all)
 /// - event_kind: u32 (0=ProcessControl, 1=Notification, 2=All)
-/// - event_subtype: u32 (specific ProcessControl type or 0 for all)
+/// - event_subtype: u32 (specific ProcessControl type; interpreted as a concrete
+///   `ProcessControlType` value when `event_kind == 0`)
+///
+/// Notes:
+/// - To affect all events, use `event_kind = 2` (All) and/or operations 2/3
+///   (`set_all` / `clear_all`). There is no special "0 for all" subtype value.
 ///
 /// Returns:
 /// - 0 on success
@@ -848,7 +860,14 @@ pub fn sys_event_mask(trapframe: &mut Trapframe) -> usize {
                             // All
                             scarlet_abi.event_mask.block_all();
                         }
-                        _ => {}
+                        1 => {
+                            // Notification masking not yet implemented
+                            return Err("Notification masking not implemented");
+                        }
+                        _ => {
+                            // Unknown event kind
+                            return Err("Invalid event_kind");
+                        }
                     }
                 }
                 1 => {
@@ -863,7 +882,14 @@ pub fn sys_event_mask(trapframe: &mut Trapframe) -> usize {
                             // All
                             scarlet_abi.event_mask.unblock_all();
                         }
-                        _ => {}
+                        1 => {
+                            // Notification unmasking not yet implemented
+                            return Err("Notification masking not implemented");
+                        }
+                        _ => {
+                            // Unknown event kind
+                            return Err("Invalid event_kind");
+                        }
                     }
                     // Process any pending events that are now unblocked
                     let _ = scarlet_abi.process_pending_events(_task);
@@ -905,12 +931,17 @@ pub fn sys_event_return(trapframe: &mut Trapframe) -> usize {
         None => return usize::MAX,
     };
 
-    // TODO: Implement context restoration
-    // This requires saving the original context when invoking the handler
-    // and restoring it here.
+    // Context restoration is not yet implemented. To avoid continuing
+    // execution with an invalid or unrestored context, this syscall
+    // currently always returns an error.
+    //
+    // Once context saving/restoration is implemented, this function
+    // should restore the saved context and transfer control back to
+    // the interrupted code instead of returning.
+    let _ = trapframe;
 
     trapframe.increment_pc_next(task);
-    0
+    usize::MAX
 }
 
 /// Helper function to convert subtype number to ProcessControlType

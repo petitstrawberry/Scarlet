@@ -386,7 +386,7 @@ pub trait AbiModule: Send + Sync + 'static {
     /// * `Ok(())` if the event was successfully handled
     /// * `Err(message)` if event delivery failed
     fn handle_event(
-        &self,
+        &mut self,
         _event: crate::ipc::Event,
         _target_task_id: u32,
     ) -> Result<(), &'static str> {

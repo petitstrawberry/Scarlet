@@ -345,7 +345,7 @@ impl AbiModule for LinuxRiscv64Abi {
     }
 
     fn handle_event(
-        &self,
+        &mut self,
         event: crate::ipc::Event,
         target_task_id: u32,
     ) -> Result<(), &'static str> {
@@ -889,6 +889,14 @@ impl AbiModule for LinuxRiscv64Abi {
         // Initialize TGID for the task at ABI attach time
         self.thread_state.tgid = _task.get_id();
         Ok(())
+    }
+
+    fn as_any(&self) -> &dyn core::any::Any {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn core::any::Any {
+        self
     }
 }
 

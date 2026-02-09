@@ -534,6 +534,14 @@ impl AbiModule for ScarletAbi {
     fn set_clear_child_tid(&mut self, ptr: usize) {
         self.clear_child_tid_ptr = Some(ptr);
     }
+
+    fn as_any(&self) -> &dyn core::any::Any {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn core::any::Any {
+        self
+    }
 }
 
 impl ScarletAbi {
