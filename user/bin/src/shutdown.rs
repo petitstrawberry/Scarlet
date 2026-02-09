@@ -5,7 +5,6 @@ extern crate scarlet_std as std;
 
 use std::println;
 use std::socket::Socket;
-use std::string::ToString;
 use std::task::exit;
 
 #[unsafe(no_mangle)]
