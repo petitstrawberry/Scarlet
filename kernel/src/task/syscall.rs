@@ -816,9 +816,9 @@ pub fn sys_shutdown(trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
     trapframe.increment_pc_next(task);
 
-    // Authorization: Only the init thread group (tgid=1) can shutdown
+    // Authorization: Only the init thread group id = 1 can shutdown
     // This allows any thread in the init process (including IPC threads) to shutdown
-    let tgid = task.get_tgid();
+    let tgid = task.get_thread_group_id();
     if tgid != 1 {
         crate::println!("[SHUTDOWN] Rejected: tgid={}", tgid);
         return SYSCALL_ERROR;
