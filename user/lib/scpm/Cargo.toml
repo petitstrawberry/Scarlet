@@ -1,0 +1,9 @@
+[package]
+name = "scpm"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+scarlet_std = { path = "../std", features = ["alloc_debug"] }
+serde = { version = "1.0", default-features = false, features = ["alloc", "derive"] }
+serde-json-core = { package = "serde-json-core", version = "0.6", default-features = false }
