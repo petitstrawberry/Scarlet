@@ -5,3 +5,5 @@ edition = "2024"
 
 [dependencies]
 scarlet_std = { path = "../std", features = ["alloc_debug"] }
+miniz_oxide = { version = "0.7", default-features = false, features = ["with-alloc"] }
+tar-no-std = "0.4"

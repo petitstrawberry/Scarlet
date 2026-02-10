@@ -1,8 +1,10 @@
 use crate::package::PackageMetadata;
 use crate::{Error, Result};
 use alloc::{format, string::String, string::ToString, vec::Vec};
+use miniz_oxide::inflate::decompress_to_vec_zlib_with_limit;
 use scarlet_std::fs::{self, File};
 use scarlet_std::io::Write;
+use tar_no_std::TarArchiveRef;
 
 #[derive(Debug)]
 pub struct TarEntry {
@@ -23,9 +25,69 @@ pub struct PackageArchive {
 
 impl PackageArchive {
     pub fn from_bytes(data: &[u8]) -> Result<Self> {
-        let mut entries = Vec::new();
-        let metadata = PackageMetadata::default();
+        // Decompress gzip data
+        let decompressed = decompress_gzip(data)?;
 
+        let mut entries = Vec::new();
+        let mut metadata: Option<PackageMetadata> = None;
+
+        // Parse tar archive
+        let archive = TarArchiveRef::new(&decompressed).map_err(|e| {
+            Error::InvalidPackageFormat(format!("Failed to parse tar archive: {:?}", e))
+        })?;
+
+        // Iterate through tar entries
+        for entry in archive.entries() {
+            let name = entry
+                .filename()
+                .as_str()
+                .map_err(|_| Error::IoError("Invalid UTF-8 in filename".into()))?
+                .to_string();
+
+            let size = entry.size() as u64;
+            let header = entry.posix_header();
+            let mode = header
+                .mode
+                .to_flags()
+                .map(|f| f.bits() as u32)
+                .unwrap_or(0o644);
+
+            // Determine file type
+            let typeflag = header
+                .typeflag
+                .try_to_type_flag()
+                .map_err(|_| Error::IoError("Invalid type flag".into()))?;
+            let is_file = matches!(
+                typeflag,
+                tar_no_std::TypeFlag::REGTYPE | tar_no_std::TypeFlag::AREGTYPE
+            );
+            let is_dir = typeflag == tar_no_std::TypeFlag::DIRTYPE;
+            let is_symlink = typeflag == tar_no_std::TypeFlag::SYMTYPE;
+
+            // Read file data
+            let data = if is_file {
+                let entry_data = entry.data().to_vec();
+                // Parse package.toml if found
+                if name == "package.toml" {
+                    metadata = Some(parse_package_toml(&entry_data)?);
+                }
+                entry_data
+            } else {
+                Vec::new()
+            };
+
+            entries.push(TarEntry {
+                name,
+                mode,
+                size,
+                is_file,
+                is_dir,
+                is_symlink,
+                data,
+            });
+        }
+
+        let metadata = metadata.unwrap_or_else(|| PackageMetadata::default());
         Ok(PackageArchive { metadata, entries })
     }
 
@@ -130,6 +192,87 @@ impl PackageArchive {
 
         Ok(installed_files)
     }
+}
+
+/// Decompress gzip data
+fn decompress_gzip(data: &[u8]) -> Result<Vec<u8>> {
+    // Check gzip magic number
+    if data.len() < 10 {
+        return Err(Error::IoError("Gzip data too short".into()));
+    }
+
+    if data[0] != 0x1f || data[1] != 0x8b {
+        return Err(Error::IoError("Invalid gzip magic number".into()));
+    }
+
+    // Skip gzip header (10 bytes) and decompress
+    let deflate_data = &data[10..];
+    decompress_to_vec_zlib_with_limit(deflate_data, 100 * 1024 * 1024)
+        .map_err(|e| Error::IoError(format!("Decompression failed: {:?}", e)))
+}
+
+/// Parse package.toml from bytes
+fn parse_package_toml(data: &[u8]) -> Result<PackageMetadata> {
+    let toml_str = core::str::from_utf8(data)
+        .map_err(|_| Error::IoError("package.toml is not valid UTF-8".into()))?;
+
+    let mut metadata = PackageMetadata::default();
+    let mut current_section: Option<String> = None;
+
+    for line in toml_str.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+
+        // Section header
+        if line.starts_with('[') && line.ends_with(']') {
+            current_section = Some(String::from(&line[1..line.len() - 1]));
+            continue;
+        }
+
+        // Key-value pair
+        if let Some((key, value)) = line.split_once('=') {
+            let key = key.trim();
+            let value = value.trim().trim_matches('"');
+
+            match (current_section.as_deref(), key) {
+                (Some("package"), "name") => metadata.name = value.to_string(),
+                (Some("package"), "version") => metadata.version = value.to_string(),
+                (Some("package"), "description") => metadata.description = value.to_string(),
+                (Some("package"), "author") => metadata.author = Some(value.to_string()),
+                (Some("package"), "binaries") => {
+                    // Parse array format: ["item1", "item2"]
+                    for item in value.split(',') {
+                        let item = item
+                            .trim()
+                            .trim_matches('[')
+                            .trim_matches(']')
+                            .trim_matches('"');
+                        if !item.is_empty() {
+                            metadata.binaries.push(item.to_string());
+                        }
+                    }
+                }
+                (Some("package"), "libraries") => {
+                    for item in value.split(',') {
+                        let item = item
+                            .trim()
+                            .trim_matches('[')
+                            .trim_matches(']')
+                            .trim_matches('"');
+                        if !item.is_empty() {
+                            metadata.libraries.push(item.to_string());
+                        }
+                    }
+                }
+                (Some("bin"), "name") => metadata.bin_name = value.to_string(),
+                _ => {}
+            }
+        }
+    }
+
+    Ok(metadata)
 }
 
 fn get_parent_path(path: &str) -> Option<&str> {
