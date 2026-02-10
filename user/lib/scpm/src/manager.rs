@@ -1,10 +1,11 @@
 //! Package manager core operations
 
 use crate::archive::PackageArchive;
-use crate::package::PackageMetadata;
+use crate::package::{Package, PackageMetadata};
 use crate::repository::Repository;
-use crate::{Config, Error, Package, RepoEntry, RepositoryIndex, Result};
+use crate::{Config, Error, RepoEntry, RepositoryIndex, Result};
 use alloc::{format, string::String, string::ToString, vec::Vec};
+use scarlet_std::fs::{self, File};
 
 #[allow(dead_code)]
 pub struct PackageManager {
@@ -76,16 +77,41 @@ impl PackageManager {
         Ok(())
     }
 
-    pub fn install_from_bytes(&mut self, name: &str, data: &[u8]) -> Result<()> {
-        let _archive = PackageArchive::from_bytes(data)?;
-        Err(Error::InstallationFailed(String::from(
-            "File-based installation not yet implemented",
-        )))
+    pub fn install_from_bytes(&mut self, _name: &str, data: &[u8]) -> Result<()> {
+        let archive = PackageArchive::from_bytes(data)?;
+        let mut metadata = archive.metadata.clone();
+        let pkg_name = metadata.name.clone();
+
+        if self.is_installed(&pkg_name) {
+            return Err(Error::PackageAlreadyInstalled(pkg_name.clone()));
+        }
+
+        for dep in &metadata.dependencies {
+            if !self.is_installed(&dep.name) {
+                return Err(Error::DependencyError(format!(
+                    "Missing dependency: {}",
+                    dep.name
+                )));
+            }
+        }
+
+        let installed_files = archive.extract_root("scarlet")?;
+        metadata.installed_files = installed_files;
+
+        self.installed_packages.push(metadata);
+        self.save_registry()?;
+
+        Ok(())
     }
 
     pub fn remove(&mut self, name: &str) -> Result<()> {
-        if !self.is_installed(name) {
-            return Err(Error::PackageNotFound(name.to_string()));
+        let package = self
+            .get_installed(name)
+            .ok_or(Error::PackageNotFound(name.to_string()))?;
+
+        for file_path in &package.installed_files {
+            let _ = fs::remove_file(file_path);
+            let _ = fs::remove_directory(file_path);
         }
 
         self.installed_packages.retain(|p| p.name != name);

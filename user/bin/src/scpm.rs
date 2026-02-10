@@ -9,6 +9,8 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use std::env;
+use std::fs::File;
+use std::io::Read;
 use std::println;
 
 use scpm::PackageManager;
@@ -66,8 +68,40 @@ fn cmd_install(args: &[String]) {
         println!("Error: Package path required");
         return;
     }
-    println!("Installing from: {}", args[0]);
-    println!("Not yet implemented.");
+
+    let package_path = &args[0];
+    let mut file = match File::open(package_path) {
+        Ok(f) => f,
+        Err(e) => {
+            println!("Error opening package file: {:?}", e);
+            return;
+        }
+    };
+
+    let mut data = Vec::new();
+    let mut buffer = [0u8; 8192];
+
+    loop {
+        match file.read(&mut buffer) {
+            Ok(bytes_read) => {
+                if bytes_read == 0 {
+                    break;
+                }
+                data.extend_from_slice(&buffer[..bytes_read]);
+            }
+            Err(e) => {
+                println!("Error reading package file: {:?}", e);
+                return;
+            }
+        }
+    }
+
+    let mut manager = PackageManager::with_default_config();
+    let package_name = String::from("package");
+    match manager.install_from_bytes(&package_name, &data) {
+        Ok(()) => println!("Package installed successfully"),
+        Err(e) => println!("Error installing package: {}", e),
+    }
 }
 
 fn cmd_remove(args: &[String]) {

@@ -1,11 +1,9 @@
 //! Package metadata and structure
 
-#[allow(unused_imports)]
 use alloc::{format, string::String, vec::Vec};
-use serde::{Deserialize, Serialize};
 
 /// Package metadata from package.toml
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PackageMetadata {
     /// Package name
     pub name: String,
@@ -17,6 +15,8 @@ pub struct PackageMetadata {
     pub author: Option<String>,
     /// Homepage URL
     pub homepage: Option<String>,
+    /// Primary binary name (for single-binary packages)
+    pub bin_name: String,
     /// List of binaries to install
     pub binaries: Vec<String>,
     /// Optional shared libraries
@@ -27,10 +27,46 @@ pub struct PackageMetadata {
     pub architecture: String,
     /// License
     pub license: Option<String>,
+    /// List of installed files (tracked after installation)
+    pub installed_files: Vec<String>,
+}
+
+impl Default for PackageMetadata {
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            version: String::new(),
+            description: String::new(),
+            author: None,
+            homepage: None,
+            bin_name: String::new(),
+            binaries: Vec::new(),
+            libraries: Vec::new(),
+            dependencies: Vec::new(),
+            architecture: String::from("any"),
+            license: None,
+            installed_files: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileSpec {
+    pub path: String,
+    pub file_type: FileType,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FileType {
+    Binary,
+    Library,
+    Config,
+    Data,
+    Other,
 }
 
 /// Package dependency specification
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Dependency {
     /// Package name
     pub name: String,
