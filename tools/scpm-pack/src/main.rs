@@ -152,7 +152,7 @@ fn init_package(
     fs::create_dir_all(package_dir.join("lib"))
         .map_err(|e| format!("Failed to create lib directory: {}", e))?;
 
-    let mut metadata = PackageMetadata {
+    let metadata = PackageMetadata {
         name: name.to_string(),
         version: version.to_string(),
         description: description.unwrap_or("").to_string(),
@@ -164,61 +164,6 @@ fn init_package(
         architecture: arch.to_string(),
         license: None,
     };
-
-    // Parse files section for dpkg-style file list
-    for line in toml_content.lines() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        if let Some((key, value)) = line.split_once('=') {
-            let key = key.trim();
-            let value = value.trim().trim_matches('"');
-
-            if key == "files" {
-                // Parse files list: "path1", "path2", ...
-                for file_path in value.split(',') {
-                    let file_path = file_path.trim();
-                    if !file_path.is_empty() {
-                        // Store as simple string for now (could be improved to struct)
-                        metadata
-                            .installed_files
-                            .push(format!("/{}", file_path.trim()));
-                    }
-                }
-            } else {
-                // Preserve existing sections
-                match (current_section.as_deref(), key) {
-                    (Some("package"), "name") => metadata.name = value.to_string(),
-                    (Some("package"), "version") => metadata.version = value.to_string(),
-                    (Some("package"), "description") => metadata.description = value.to_string(),
-                    (Some("package"), "author") => metadata.author = Some(value.to_string()),
-                    (Some("bin"), "name") => {
-                        if metadata.bin_name.is_empty() {
-                            metadata.bin_name = value.to_string();
-                        } else {
-                            metadata.binaries.push(value.to_string());
-                        }
-                    }
-                    (Some("package"), "binaries") => metadata.binaries.push(value.to_string()),
-                    _ => {}
-                }
-            }
-        }
-    }
-
-    let toml_content = toml::to_string_pretty(&metadata)
-        .map_err(|e| format!("Failed to serialize metadata: {}", e))?;
-    let mut file = File::create(&metadata_path)
-        .map_err(|e| format!("Failed to create package.toml: {}", e))?;
-    file.write_all(toml_content.as_bytes())
-        .map_err(|e| format!("Failed to write to package.toml: {}", e))?;
-
-    println!("Initialized package: {}", name);
-    println!("  Directory: {}", dir);
-    println!("  Metadata: package.toml");
-    println!("  Binaries dir: bin/");
-    println!("  Libraries dir: lib/");
 
     let toml_content = toml::to_string_pretty(&metadata)
         .map_err(|e| format!("Failed to serialize metadata: {}", e))?;
