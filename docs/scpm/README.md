@@ -1,44 +1,51 @@
 # SCPM (Scarlet Package Manager)
 
-SCPM is a minimal package manager for the Scarlet operating system.
+SCPM is a simple package manager for Scarlet OS.
 
 ## Architecture
 
 ### Components
 
-- **Library** (`user/lib/scpm/`) - Core package management functionality
+- **Library** (`user/lib/scpm/`) - Core functionality (package management, archive extraction)
 - **CLI** (`user/bin/src/scpm.rs`) - Command-line interface
-- **Builder** (`tools/scpm-pack/`) - Host-side package builder tool
+- **Builder** (`tools/scpm-pack/`) - Host-side package creation tool
 
-### Package Format
+## Package Format
 
-SCPM packages use `.scarlet` archive format (tar.gz) containing:
+SCPM packages use `.scarlet` format (tar.gz):
 
 ```
-package.toml          # Package metadata
-bin/                  # Executable binaries
-lib/                  # Shared libraries (optional)
+package-0.1.0.scarlet (tar.gz)
+├── package.toml          # Metadata (auto-parsed)
+├── bin/                  # Executables
+│   └── hello
+├── lib/                  # Shared libraries
+└── ...                   # Other files
 ```
 
-### Package Metadata (package.toml)
+### package.toml
 
 ```toml
+[package]
 name = "hello"
 version = "0.1.0"
 description = "Hello World example package"
 author = "Scarlet Team"
-architecture = "riscv64"  # or "aarch64", or "any"
+architecture = "riscv64"  # "riscv64", "aarch64", "any"
 binaries = ["hello"]
-dependencies = []  # List of required packages
+libraries = []
+dependencies = []
 ```
 
-### Storage Layout
+### File Placement
+
+During installation, files under the `scarlet/` directory are extracted to the system root:
 
 ```
-/var/scpm/
-  ├── installed/          # Registry of installed packages
-  ├── cache/             # Downloaded package archives
-  └── repository/        # Package repository index
+scarlet/                  # Prefix in package
+├── bin/hello            → /bin/hello
+├── lib/libtest.so       → /lib/libtest.so
+└── etc/config.conf      → /etc/config.conf
 ```
 
 ## Usage
@@ -52,97 +59,115 @@ scpm list
 # Show package information
 scpm info hello
 
-# Install a package
+# Install package
 scpm install hello-0.1.0.scarlet
 
-# Remove a package
+# Remove package
 scpm remove hello
 
-# Search for packages
+# Search packages
 scpm search editor
-
-# Update repository
-scpm update
 ```
 
-### Host Machine (Package Building)
+### Host Machine (Package Creation)
 
 ```bash
-# Initialize a new package
+# Build
 cd tools/scpm-pack
 cargo build --release
 
-./target/release/scpm-pack init hello --dir ./hello
+# Initialize new package
+./target/release/scpm-pack init hello \
+  --dir ./hello \
+  --description "Test package" \
+  --author "Developer"
+
+# Place binaries
+cp /path/to/hello ./hello/bin/
 
 # Build package
-./target/release/scpm-pack build ./hello
-# Creates: hello-0.1.0.scarlet
+./target/release/scpm-pack build ./hello --output hello-0.1.0.scarlet
 ```
 
 ## Library API
 
 ```rust
-use scpm::{Config, PackageManager, Package, PackageMetadata};
+use scpm::{PackageManager, PackageMetadata};
 
-// Create package manager with default configuration
+// Create package manager with default config
 let manager = PackageManager::with_default_config();
 
-// Check if package is installed
+// Check if installed
 if manager.is_installed("hello") {
-    println!("Package is installed");
+    println!("Installed!");
 }
 
-// Get package information
+// Get package info
 if let Some(pkg) = manager.get_installed("hello") {
     println!("Version: {}", pkg.version);
 }
 
-// List all installed packages
-for pkg in manager.list_installed() {
-    println!("{} - {}", pkg.name, pkg.version);
-}
+// Install from bytes
+let data = std::fs::read("package.scarlet")?;
+manager.install_from_bytes("package", &data)?;
 ```
 
 ## Implementation Status
 
-### Completed
-- [x] Core library types (Config, Error, Package, PackageMetadata)
+### Completed ✅
+- [x] Core library types (PackageMetadata, PackageArchive)
 - [x] Package manager operations (install, remove, list, info)
-- [x] Repository support (search, fetch)
-- [x] Archive operations (PackageArchive stub)
-- [x] Host-side package builder (init, build)
-- [x] Build configuration integration
+- [x] tar.gz archive extraction (miniz_oxide + tar-no-std)
+- [x] File extraction and placement (scarlet/ → system root)
+- [x] Installed file tracking
+- [x] Overwrite prevention
+- [x] Host-side package builder
+- [x] CLI binary
 
-### Pending
-- [ ] Archive extraction and installation
-- [ ] Binary and library deployment
-- [ ] Repository file I/O operations
-- [ ] Network repository support (HTTP fetch)
-- [ ] CLI binary re-enable (serde no_std compatibility fix)
+### Not Implemented 📋
+- [ ] Remote repository support (HTTP fetch)
+- [ ] Dependency resolution
+- [ ] Configuration file management (conffiles)
+- [ ] Upgrade handling
+- [ ] Database persistence (currently in-memory only)
 
-## Development Notes
+## Technical Details
 
-### No_std Considerations
+### Dependencies
 
-The SCPM library uses `no_std` and runs in the Scarlet user-space environment:
+```toml
+[dependencies]
+scarlet_std = { path = "../std" }
+miniz_oxide = { version = "0.7", features = ["with-alloc"] }
+tar-no-std = "0.4"
+```
 
-- Uses `scarlet_std` instead of `std`
-- Uses `alloc` for dynamic allocations
-- No serde serialization in CLI (uses custom parsing)
-- Simple string-based configuration parsing
+### No_std Environment
 
-### Serde No_std Issue
+- Uses `scarlet_std` (replaces standard library)
+- Dynamic memory allocation with `alloc`
+- Custom TOML parser (no serde)
 
-The CLI binary is currently disabled in `user/bin/Cargo.toml` due to serde's `no_std` compatibility issues. The library builds successfully but the CLI cannot use serde for parsing.
+### Archive Processing Flow
 
-**Solutions to consider:**
-1. Use a custom TOML parser (simple string parsing like `scarlet-desktop-config`)
-2. Implement proper package metadata parsing
-3. Re-enable CLI once serialization is working
+1. **gzip decompression** - deflate expansion with miniz_oxide
+2. **tar parsing** - entry traversal with tar-no-std
+3. **Metadata extraction** - parse package.toml
+4. **File placement** - extract scarlet/ contents to system root
 
-### Reference Examples
+## Design Principles
 
-See existing Scarlet binaries for patterns:
-- `user/bin/src/settings.rs` - Simple TOML parsing without serde
-- `user/bin/src/netcfgd/main.rs` - Custom config parser
-- `user/bin/src/stemd/main.rs` - Service management patterns
+### Simplicity
+- Minimal dependencies
+- Clear package structure
+- Maintainable code
+
+### Safety
+- Prevent overwriting existing files
+- Track installed files
+- Atomic operations (future)
+
+### Extensibility
+- Plugin format (.deb compatibility considered)
+- Declarative hook scripts
+- Remote repository support

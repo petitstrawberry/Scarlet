@@ -2,20 +2,35 @@
 
 ## Overview
 
-SCPM packages are distributed as `.scarlet` archive files containing package metadata and payload files.
+SCPM packages are distributed as `.scarlet` archive files (tar.gz) containing package metadata and payload files.
 
 ## Archive Structure
 
-A `.scarlet` file is a tar.gz archive with the following structure:
+A `.scarlet` file is a **tar.gz** archive with the following structure:
 
 ```
 hello-1.0.0.scarlet  (tar.gz)
 ├── package.toml          # Required: Package metadata
-├── bin/                   # Optional: Executable binaries
-│   └── hello             # Binary files to install
-└── lib/                   # Optional: Shared libraries
-    └── libhello.so       # Library files (.so files)
+├── bin/                  # Optional: Executable binaries
+│   └── hello
+├── lib/                  # Optional: Shared libraries
+│   └── libhello.so
+└── ...                   # Other files (config, data, etc.)
 ```
+
+### File Installation Mapping
+
+During installation, files under `scarlet/` directory prefix are extracted to the system root:
+
+```
+scarlet/                  # Package internal prefix
+├── bin/hello            → /bin/hello
+├── lib/libhello.so      → /lib/libhello.so
+├── etc/config.conf      → /etc/config.conf
+└── usr/share/data/      → /usr/share/data/
+```
+
+**Note**: Currently, the `scarlet/` prefix is optional. The package extracts files matching the prefix to system root. Files without the prefix are also extracted relative to root.
 
 ## Package Metadata (package.toml)
 
@@ -53,31 +68,30 @@ version = ">=1.0.0"
 
 ## Installation Behavior
 
-### Binary Installation
+### File Extraction
 
-Binaries from `bin/` are installed to `/usr/local/bin/` with executable permissions:
+1. **Archive Parsing**: The `.scarlet` file (tar.gz) is decompressed and parsed
+2. **Metadata Reading**: `package.toml` is automatically parsed during extraction
+3. **File Deployment**: Files are extracted from `scarlet/` prefix to system root
+4. **Tracking**: All installed files are recorded in `PackageMetadata.installed_files`
 
-1. Copy binary to `/usr/local/bin/<binary_name>`
-2. Set executable permissions (`0o755`)
-3. No conflicts with existing files allowed (overwrite)
+### Safety Features
 
-### Library Installation
+- **Overwrite Prevention**: Installation fails if target file already exists
+- **Permission Preservation**: File modes from tar header are preserved
+- **Atomic Installation**: Files are tracked for complete removal
 
-Libraries from `lib/` are installed to `/usr/local/lib/`:
+### Example Installation Flow
 
-1. Copy library to `/usr/local/lib/<lib_name>`
-2. No conflicts allowed (overwrite)
-
-### Registry Management
-
-Installed packages are tracked in `/var/scpm/registry.toml`:
-
-```toml
-[[installed]]
-name = "hello"
-version = "1.0.0"
-installed_at = 2024-01-01T00:00:00Z
-files = ["/usr/local/bin/hello"]
+```
+1. Read hello-1.0.0.scarlet
+2. Decompress gzip → tar
+3. Parse tar entries:
+   - package.toml → metadata
+   - scarlet/bin/hello → /bin/hello
+   - scarlet/lib/libhello.so → /lib/libhello.so
+4. Record installed files:
+   installed_files = ["/bin/hello", "/lib/libhello.so"]
 ```
 
 ## Repository Format
@@ -105,7 +119,25 @@ version = "1.0.0"
 description = "Hello World example"
 architecture = "any"
 binaries = ["hello"]
-dependencies = []
+```
+
+### Package with Configuration
+
+```
+myapp-1.0.0.scarlet
+├── package.toml
+├── scarlet/
+│   ├── bin/myapp
+│   └── etc/myapp/config.conf
+```
+
+```toml
+# package.toml
+name = "myapp"
+version = "1.0.0"
+description = "My application"
+architecture = "riscv64"
+binaries = ["myapp"]
 ```
 
 ### Package with Dependencies
@@ -157,23 +189,34 @@ binaries = []
 
 ## Security Considerations
 
-### Package Signing
-- Currently not implemented (planned feature)
-- SHA256 checksums recommended for verification
+### Package Verification
+- SHA256 checksums recommended
+- Package signing (planned)
 
-### Dependency Validation
-- Dependency versions are constraints only (not strictly enforced in current implementation)
-- Circular dependencies must be detected and prevented
+### Safety
+- Overwrite prevention by default
+- File ownership tracking
+- Complete removal on uninstall
 
-## Compatibility Notes
+## Technical Details
 
-### Scarlet OS Integration
-- Uses `/var/scpm/` for data storage
-- Binaries installed to `/usr/local/bin/`
-- Libraries installed to `/usr/local/lib/`
-- Environment variables not currently supported
+### Archive Processing
 
-### no_std Environment
-- Packages must be compatible with Scarlet's `no_std` environment
-- Dynamic linking is supported via `dlopen` (future feature)
-- Static linking preferred for now
+SCPM uses these libraries for archive handling:
+- **miniz_oxide**: gzip decompression
+- **tar-no-std**: tar archive parsing
+
+### File Type Detection
+
+From tar header typeflag:
+- Regular file (`REGTYPE`, `AREGTYPE`) → Installed as-is
+- Directory (`DIRTYPE`) → Created with `fs::create_directory`
+- Symlink (`SYMTYPE`) → Created with `fs::create_symlink`
+
+### Metadata Parsing
+
+Custom TOML parser (no serde):
+- Line-by-line parsing
+- Section support (`[package]`, `[bin]`)
+- Simple key-value pairs
+- Array parsing for binaries/libraries

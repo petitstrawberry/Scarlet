@@ -53,11 +53,13 @@ pub struct PackageMetadata {
     pub description: String,
     pub author: Option<String>,
     pub homepage: Option<String>,
+    pub bin_name: String,
     pub binaries: Vec<String>,
     pub libraries: Vec<String>,
     pub dependencies: Vec<Dependency>,
     pub architecture: String,
     pub license: Option<String>,
+    pub installed_files: Vec<String>,  // Tracked after installation
 }
 ```
 
@@ -153,19 +155,30 @@ impl RepositoryIndex {
 
 ### PackageArchive
 
-Archive operations for .scarlet packages.
+Archive operations for .scarlet packages (tar.gz format).
 
 ```rust
+pub struct TarEntry {
+    pub name: String,
+    pub mode: u32,
+    pub size: u64,
+    pub is_file: bool,
+    pub is_dir: bool,
+    pub is_symlink: bool,
+    pub data: Vec<u8>,
+}
+
 pub struct PackageArchive {
     pub metadata: PackageMetadata,
-    pub binaries: Vec<(String, Vec<u8>)>,
-    pub libraries: Vec<(String, Vec<u8>)>,
+    pub entries: Vec<TarEntry>,
 }
 
 impl PackageArchive {
     pub fn from_bytes(data: &[u8]) -> Result<Self>;
-    pub fn extract_binary(&self, name: &str) -> Result<&[u8]>;
-    pub fn extract_library(&self, name: &str) -> Result<&[u8]>;
+    pub fn get_binary(&self, name: &str) -> Result<&[u8]>;
+    pub fn get_library(&self, name: &str) -> Result<&[u8]>;
+    pub fn extract_to(&self, dest_dir: &str) -> Result<()>;
+    pub fn extract_root(&self, root_prefix: &str) -> Result<Vec<String>>;
 }
 ```
 
@@ -175,17 +188,11 @@ impl PackageArchive {
 
 ```rust
 use scarlet_std as std;
-use scpm::{PackageManager, Package, PackageMetadata};
+use scpm::PackageManager;
 
 fn main() {
     // Create package manager with default config
     let mut manager = PackageManager::with_default_config();
-    
-    // Load existing registry
-    match manager.load_registry() {
-        Ok(()) => println!("Registry loaded"),
-        Err(e) => println!("Error: {}", e),
-    }
     
     // Check if package is installed
     if manager.is_installed("hello") {
@@ -193,23 +200,9 @@ fn main() {
         return;
     }
     
-    // Create package metadata
-    let metadata = PackageMetadata {
-        name: String::from("hello"),
-        version: String::from("1.0.0"),
-        description: String::from("Hello World package"),
-        author: Some(String::from("Example Author")),
-        homepage: None,
-        binaries: vec![String::from("hello")],
-        libraries: vec![],
-        dependencies: vec![],
-        architecture: String::from("riscv64"),
-        license: None,
-    };
-    
-    // Install package
-    let package = Package::new(metadata);
-    match manager.install(package) {
+    // Install package from .scarlet file
+    let package_data = std::fs::read("hello-1.0.0.scarlet")?;
+    match manager.install_from_bytes("hello", &package_data) {
         Ok(()) => println!("Package installed successfully"),
         Err(e) => println!("Installation failed: {}", e),
     }
@@ -218,6 +211,14 @@ fn main() {
     println!("\nInstalled packages:");
     for pkg in manager.list_installed() {
         println!("  {} - {}", pkg.name, pkg.version);
+    }
+    
+    // Show installed files
+    if let Some(pkg) = manager.get_installed("hello") {
+        println!("\nInstalled files:");
+        for file in &pkg.installed_files {
+            println!("  {}", file);
+        }
     }
 }
 ```
