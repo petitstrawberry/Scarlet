@@ -210,16 +210,26 @@ impl PackageManager {
                 pkg.version,
                 pkg.installed_files.len()
             );
-            if !pkg.installed_files.is_empty() {
-                content.push_str(&format!("{}:{}\n", pkg.name, pkg.version));
-                for file in &pkg.installed_files {
-                    content.push_str(&format!(" {}\n", file.as_str()));
-                }
+            content.push_str(&format!("{}:{}\n", pkg.name, pkg.version));
+            for file in &pkg.installed_files {
+                content.push_str(&format!(" {}\n", file.as_str()));
             }
         }
 
-        crate::debug_log!("[SCPM] Creating /var/scpm directory");
-        let _ = fs::create_directory("/var/scpm");
+        if File::open("/var/scpm").is_err() {
+            crate::debug_log!("[SCPM] /var/scpm does not exist, creating it");
+            let _ = fs::create_directory("/var/scpm");
+        }
+
+        // Remove existing registry file before creating a new one
+        match fs::remove_file(registry_path) {
+            Ok(_) => {
+                crate::debug_log!("[SCPM] Existing registry file removed");
+            }
+            Err(e) => {
+                crate::debug_log!("[SCPM] No existing registry file to remove: {:?}", e);
+            }
+        }
 
         crate::debug_log!("[SCPM] Creating registry file at {}", registry_path);
         let mut file = match File::create(registry_path) {

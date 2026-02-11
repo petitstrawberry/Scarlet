@@ -601,7 +601,7 @@ fn test_overlayfs_nested_mnt_bind_mounts() {
     let (mnt_entry, mnt_mp) = lower_mgr.mount_tree.resolve_path("/mnt").unwrap();
     // Check mnt_mp has child mount
     let children = &mnt_mp.children;
-    assert!(children.read().values().any(|c| c.path == "child"));
+    assert!(children.read().values().any(|c| *c.path.read() == "child"));
 
     // Upper layer is an empty TmpFS
     let upper = TmpFS::new(0);

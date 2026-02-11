@@ -743,7 +743,7 @@ fn interactive_shell() -> i32 {
     // HOME/.sh_history
     let history_file = match std::env::var("HOME") {
         Some(home) => format!("{}/.sh_history", home),
-        None => String::from(".sh_history"),
+        None => String::from("/root/.sh_history"),
     };
 
     // Try to load history from file

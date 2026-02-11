@@ -11,22 +11,22 @@ use crate::object::capability::selectable::{
     ReadyInterest, ReadySet, SelectWaitOutcome, Selectable,
 };
 use crate::{
-    DeviceManager,
     environment::PAGE_SIZE,
     fs::{
-        DeviceFileInfo, FileMetadata, FileObject, FilePermission, FileSystemError,
-        FileSystemErrorKind, FileType, SeekFrom, SocketFileInfo, vfs_v2::cache::PageCacheCapable,
+        vfs_v2::cache::PageCacheCapable, DeviceFileInfo, FileMetadata, FileObject, FilePermission,
+        FileSystemError, FileSystemErrorKind, FileType, SeekFrom, SocketFileInfo,
     },
     mem::{
         page::allocate_boxed_pages,
         page_cache::{PageCacheManager, PageIndex},
     },
     object::capability::{ControlOps, MemoryMappingOps, StreamError, StreamOps},
+    DeviceManager,
 };
 
 use super::{
-    Ext2FileSystem,
     structures::{EXT2_S_IFDIR, EXT2_S_IFMT, EXT2_S_IFREG},
+    Ext2FileSystem,
 };
 use crate::fs::vfs_v2::core::{FileSystemOperations, VfsNode};
 
@@ -1053,7 +1053,13 @@ impl crate::object::capability::selectable::Selectable for Ext2FileObject {
 
 impl Drop for Ext2FileObject {
     fn drop(&mut self) {
-        let _ = self.sync_to_disk();
+        if let Err(e) = self.sync_to_disk() {
+            crate::early_println!(
+                "[ext2] Drop: sync_to_disk failed for inode {}: {:?}",
+                self.inode_number,
+                e
+            );
+        }
         #[cfg(test)]
         crate::early_println!(
             "[ext2] Drop: File object dropped for inode {}",

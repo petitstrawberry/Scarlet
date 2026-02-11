@@ -173,7 +173,8 @@ pub fn sys_vfs_truncate(trapframe: &mut Trapframe) -> usize {
         None => return usize::MAX, // VFS not initialized
     };
 
-    let file_obj = match vfs.open(&path_str, 0x1) { // O_WRONLY: truncate is a write operation
+    let file_obj = match vfs.open(&path_str, 0x1) {
+        // O_WRONLY: truncate is a write operation
         Ok(obj) => obj,
         Err(_) => return usize::MAX,
     };
@@ -593,13 +594,9 @@ fn pivot_root_in_place(
             })?;
     let new_root_mount = detached;
 
-    unsafe {
-        let mut_ptr =
-            Arc::as_ptr(&new_root_mount) as *mut crate::fs::vfs_v2::mount_tree::MountPoint;
-        (*mut_ptr).parent = None;
-        (*mut_ptr).parent_entry = None;
-        (*mut_ptr).path = "/".to_string();
-    }
+    *new_root_mount.parent.write() = None;
+    *new_root_mount.parent_entry.write() = None;
+    *new_root_mount.path.write() = "/".to_string();
 
     vfs.mount_tree.replace_root(new_root_mount);
 
@@ -678,15 +675,12 @@ pub fn sys_vfs_change_directory(trapframe: &mut Trapframe) -> usize {
                     task_name,
                     entry.name(),
                     entry.node().id(),
-                    mp.path,
+                    mp.path.read(),
                     vfs.build_absolute_path(entry, mp)
                 );
             }
             None => {
-                crate::early_println!(
-                    "[chdir] BEFORE task={} cwd=None",
-                    task_name
-                );
+                crate::early_println!("[chdir] BEFORE task={} cwd=None", task_name);
             }
         }
     }
@@ -713,7 +707,7 @@ pub fn sys_vfs_change_directory(trapframe: &mut Trapframe) -> usize {
                                 task_name,
                                 e.name(),
                                 e.node().id(),
-                                mp.path,
+                                mp.path.read(),
                                 vfs.build_absolute_path(e, mp)
                             );
                         }

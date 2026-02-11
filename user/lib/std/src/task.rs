@@ -225,7 +225,7 @@ pub fn execve(path: &str, argv: &[&str], envp: &[&str]) -> i32 {
         path_ptr,
         argv_ptr_array as usize,
         envp_ptr_array as usize,
-         0 as usize,
+        0 as usize,
     );
 
     // If the syscall fails, we need to free the allocated memory

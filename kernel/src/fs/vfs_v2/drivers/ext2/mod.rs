@@ -32,18 +32,18 @@ use alloc::{
 };
 use core::{any::Any, mem};
 use hashbrown::HashMap;
-use spin::{Mutex, rwlock::RwLock};
+use spin::{rwlock::RwLock, Mutex};
 
 use crate::{
-    DeviceManager,
     device::block::BlockDevice,
     driver_initcall,
     fs::{
-        FileObject, FileSystemError, FileSystemErrorKind, FileType, SocketFileInfo,
-        get_fs_driver_manager, params::FileSystemParams,
+        get_fs_driver_manager, params::FileSystemParams, FileObject, FileSystemError,
+        FileSystemErrorKind, FileType, SocketFileInfo,
     },
     profile_scope,
     task::mytask,
+    DeviceManager,
 };
 
 use super::super::{
@@ -303,6 +303,9 @@ pub struct Ext2FileSystem {
     inode_cache: Mutex<InodeLruCache>,
     /// LRU cached blocks
     block_cache: Mutex<BlockLruCache>,
+    /// Per-inode locks to serialize directory-mutating operations on the same inode,
+    /// preventing concurrent read-modify-write races on directory blocks
+    inode_locks: Mutex<BTreeMap<u32, Arc<Mutex<()>>>>,
 }
 
 /// Node in doubly-linked list for O(1) LRU operations for inodes
@@ -778,6 +781,7 @@ impl Ext2FileSystem {
             next_file_id: Mutex::new(2), // Start from 2, root is 1
             inode_cache: Mutex::new(InodeLruCache::new(8192)),
             block_cache: Mutex::new(BlockLruCache::new(8192)),
+            inode_locks: Mutex::new(BTreeMap::new()),
         });
 
         // Set filesystem reference in root node
@@ -821,6 +825,14 @@ impl Ext2FileSystem {
                 "Device ID not resolved in parameters",
             ))
         }
+    }
+
+    fn get_inode_lock(&self, inode_num: u32) -> Arc<Mutex<()>> {
+        let mut locks = self.inode_locks.lock();
+        locks
+            .entry(inode_num)
+            .or_insert_with(|| Arc::new(Mutex::new(())))
+            .clone()
     }
 
     /// Read an inode from disk
@@ -988,10 +1000,8 @@ impl Ext2FileSystem {
                 }
 
                 let entry = Ext2DirectoryEntry::from_bytes(&block_data[offset..])?;
-                if entry.entry.inode == 0 {
-                    // In ext2, an inode of 0 can mean an unused entry, but not necessarily the end.
-                    // The record length should still be valid.
-                    let rec_len = entry.entry.rec_len;
+                if entry.entry.get_inode() == 0 {
+                    let rec_len = entry.entry.get_rec_len();
                     if rec_len == 0 {
                         break;
                     }
@@ -999,7 +1009,7 @@ impl Ext2FileSystem {
                     continue;
                 }
 
-                let rec_len = entry.entry.rec_len;
+                let rec_len = entry.entry.get_rec_len();
                 entries.push(entry);
                 offset += rec_len as usize;
 
@@ -1626,27 +1636,8 @@ impl Ext2FileSystem {
         block_data[dotdot_offset + 8] = b'.';
         block_data[dotdot_offset + 9] = b'.';
 
-        // Write the block to disk
-        let block_sector = self.block_to_sector(block_number as u64);
-        let request = Box::new(crate::device::block::request::BlockIORequest {
-            request_type: crate::device::block::request::BlockIORequestType::Write,
-            sector: block_sector as usize,
-            sector_count: (self.block_size / 512) as usize,
-            head: 0,
-            cylinder: 0,
-            buffer: block_data,
-        });
-
-        // Submit write request
-        self.block_device.enqueue_request(request);
-        let results = self.block_device.process_requests();
-
-        if results.is_empty() || results[0].result.is_err() {
-            return Err(FileSystemError::new(
-                FileSystemErrorKind::InvalidData,
-                "Failed to write directory block",
-            ));
-        }
+        // Write the block to disk using cached method to keep block cache consistent
+        self.write_block_cached(block_number as u64, &block_data)?;
 
         // Update the directory inode to point to this block and set size
         let mut dir_inode = self.read_inode(dir_inode_number)?;
@@ -1848,6 +1839,12 @@ impl Ext2FileSystem {
                         FileSystemErrorKind::IoError,
                         "Failed to write bitmap or BGD",
                     ));
+                }
+
+                {
+                    let mut cache = self.block_cache.lock();
+                    cache.remove(bgd.block_bitmap as u64);
+                    cache.remove(bgd_block as u64);
                 }
 
                 // Update superblock (separate for now - could be batched too)
@@ -2065,6 +2062,12 @@ impl Ext2FileSystem {
                         FileSystemErrorKind::IoError,
                         "Failed to write bitmap or BGD",
                     ));
+                }
+
+                {
+                    let mut cache = self.block_cache.lock();
+                    cache.remove(bgd.block_bitmap as u64);
+                    cache.remove(bgd_block as u64);
                 }
 
                 // Update superblock (batch this in the future)
@@ -2397,6 +2400,8 @@ impl Ext2FileSystem {
                 if let Some(result) = results.first() {
                     match &result.result {
                         Ok(_) => {
+                            self.block_cache.lock().remove(bgd.inode_bitmap as u64);
+
                             // Update group descriptor to reflect one less free inode
                             let mut bgd = Ext2BlockGroupDescriptor::from_bytes(&bgd_data)?;
                             let current_free_inodes = u16::from_le(bgd.free_inodes_count);
@@ -2515,6 +2520,7 @@ impl Ext2FileSystem {
             let mut offset = 0;
             let mut last_entry_offset = 0;
             let mut last_entry_rec_len = 0;
+            let mut found_entries = false;
 
             while offset < self.block_size as usize {
                 if offset + 8 > block_data.len() {
@@ -2528,30 +2534,66 @@ impl Ext2FileSystem {
                     break; // Invalid entry
                 }
 
+                // Validate rec_len: must be 4-byte aligned, at least 8 bytes,
+                // and must not extend beyond the block boundary
+                if rec_len < 8
+                    || (rec_len & 3) != 0
+                    || offset + rec_len as usize > self.block_size as usize
+                {
+                    // Corrupted directory entry detected — skip this block
+                    break;
+                }
+
                 last_entry_offset = offset;
                 last_entry_rec_len = rec_len as usize;
+                found_entries = true;
 
                 offset += rec_len as usize;
             }
 
             // Calculate actual space used by the last entry
-            if last_entry_offset > 0 {
+            if found_entries {
+                // Re-validate last_entry_rec_len before using it for slice arithmetic
+                if last_entry_rec_len > self.block_size as usize
+                    || last_entry_offset + last_entry_rec_len > self.block_size as usize
+                {
+                    // Corrupted: rec_len exceeds block boundary — skip this block
+                    continue;
+                }
+
                 let last_entry =
                     Ext2DirectoryEntryRaw::from_bytes(&block_data[last_entry_offset..])?;
-                let actual_last_entry_len = ((8 + last_entry.get_name_len() as usize + 3) / 4) * 4;
+                let actual_last_entry_len = if last_entry.get_inode() == 0 {
+                    // ext2: inode=0 marks a deleted entry whose entire rec_len is reclaimable
+                    0
+                } else {
+                    ((8 + last_entry.get_name_len() as usize + 3) / 4) * 4
+                };
+
+                // Guard: actual_last_entry_len must not exceed last_entry_rec_len
+                if actual_last_entry_len > last_entry_rec_len {
+                    continue; // Corrupted entry — skip this block
+                }
+
                 let available_space = last_entry_rec_len - actual_last_entry_len;
 
                 if available_space >= entry_total_len {
                     // We have space! Adjust the last entry's rec_len and add our entry
 
-                    // Update last entry's rec_len to its actual size
-                    let actual_rec_len_bytes = (actual_last_entry_len as u16).to_le_bytes();
-                    block_data[last_entry_offset + 4] = actual_rec_len_bytes[0];
-                    block_data[last_entry_offset + 5] = actual_rec_len_bytes[1];
+                    if actual_last_entry_len > 0 {
+                        // Update last entry's rec_len to its actual size
+                        let actual_rec_len_bytes = (actual_last_entry_len as u16).to_le_bytes();
+                        block_data[last_entry_offset + 4] = actual_rec_len_bytes[0];
+                        block_data[last_entry_offset + 5] = actual_rec_len_bytes[1];
+                    }
 
                     // Add our new entry
                     let new_entry_offset = last_entry_offset + actual_last_entry_len;
                     let remaining_space = last_entry_rec_len - actual_last_entry_len;
+
+                    // Zero the entire region first to prevent stale data from
+                    // deleted entries being parsed as phantom directory entries
+                    block_data[new_entry_offset..new_entry_offset + remaining_space].fill(0);
 
                     // Write new entry header
                     let child_inode_bytes = child_inode.to_le_bytes();
@@ -2577,11 +2619,27 @@ impl Ext2FileSystem {
         }
 
         // If we get here, we couldn't find space in existing blocks
-        // In a full implementation, we would allocate a new block for the directory
-        Err(FileSystemError::new(
-            FileSystemErrorKind::NoSpace,
-            "No space available in directory for new entry",
-        ))
+        let new_block_num = self.allocate_block()?;
+        let mut new_block_data = vec![0u8; self.block_size as usize];
+
+        let child_inode_bytes = child_inode.to_le_bytes();
+        let rec_len_bytes = (self.block_size as u16).to_le_bytes();
+        new_block_data[0..4].copy_from_slice(&child_inode_bytes);
+        new_block_data[4..6].copy_from_slice(&rec_len_bytes);
+        new_block_data[6] = entry_name_len;
+        new_block_data[7] = ext2_file_type;
+        new_block_data[8..8 + entry_name_len as usize].copy_from_slice(name.as_bytes());
+
+        self.write_block_cached(new_block_num, &new_block_data)?;
+
+        let mut parent_dir_inode = self.read_inode(parent_inode)?;
+        let logical_block = parent_dir_inode.get_size() as u64 / self.block_size as u64;
+        self.set_inode_block(&mut parent_dir_inode, logical_block, new_block_num as u32)?;
+        parent_dir_inode.size += self.block_size;
+        parent_dir_inode.blocks += (self.block_size / 512).to_le();
+        self.write_inode(parent_inode, &parent_dir_inode)?;
+
+        Ok(())
     }
 
     /// Remove a directory entry from a parent directory
@@ -2628,8 +2686,12 @@ impl Ext2FileSystem {
                 };
 
                 let rec_len = entry.get_rec_len();
-                if rec_len == 0 {
-                    break; // Invalid entry
+                if rec_len == 0
+                    || rec_len < 8
+                    || (rec_len & 3) != 0
+                    || offset + rec_len as usize > self.block_size as usize
+                {
+                    break;
                 }
 
                 let name_len = entry.get_name_len() as usize;
@@ -2637,9 +2699,7 @@ impl Ext2FileSystem {
                     let entry_name_bytes = &block_data[offset + 8..offset + 8 + name_len];
                     if let Ok(entry_name) = core::str::from_utf8(entry_name_bytes) {
                         if entry_name == *name {
-                            // Found the entry to remove!
                             if let Some(prev_offset) = prev_entry_offset {
-                                // Extend the previous entry's rec_len to cover this entry
                                 let prev_entry =
                                     Ext2DirectoryEntryRaw::from_bytes(&block_data[prev_offset..])?;
                                 let new_rec_len = prev_entry.get_rec_len() + rec_len;
@@ -2648,11 +2708,13 @@ impl Ext2FileSystem {
                                 block_data[prev_offset + 4] = new_rec_len_bytes[0];
                                 block_data[prev_offset + 5] = new_rec_len_bytes[1];
                             } else {
-                                // This is the first entry in the block, mark it as free by setting inode to 0
                                 block_data[offset..offset + 4].fill(0);
                             }
 
-                            // Write the updated block back to disk using cached method
+                            block_data[offset..offset + 4].fill(0);
+                            block_data[offset + 6] = 0;
+                            block_data[offset + 7] = 0;
+
                             self.write_block_cached(block_num, &block_data)?;
                             return Ok(());
                         }
@@ -2805,6 +2867,9 @@ impl Ext2FileSystem {
             ));
         }
 
+        // Invalidate cached inode bitmap block so subsequent reads see updated bitmap
+        self.block_cache.lock().remove(inode_bitmap_block as u64);
+
         // Update block group descriptor statistics
         bgd.set_free_inodes_count(bgd.get_free_inodes_count() + 1);
         if is_directory {
@@ -2841,6 +2906,9 @@ impl Ext2FileSystem {
                 "No response from BGD write",
             ));
         }
+
+        // Invalidate cached BGD block
+        self.block_cache.lock().remove(bgd_block as u64);
 
         self.clear_inode_on_disk(inode_number)?;
 
@@ -3293,6 +3361,9 @@ impl Ext2FileSystem {
             ));
         }
 
+        // Invalidate cached block bitmap so subsequent reads see updated bitmap
+        self.block_cache.lock().remove(block_bitmap_block as u64);
+
         // Update block group descriptor
         bgd.set_free_blocks_count(bgd.get_free_blocks_count() + 1);
 
@@ -3329,6 +3400,9 @@ impl Ext2FileSystem {
                 "No response from BGD write",
             ));
         }
+
+        // Invalidate cached BGD block
+        self.block_cache.lock().remove(bgd_block as u64);
 
         Ok(())
     }
@@ -4620,6 +4694,10 @@ impl FileSystemOperations for Ext2FileSystem {
             Err(e) => return Err(e),
         }
 
+        // Acquire per-inode lock to serialize directory mutations on this parent
+        let inode_lock = self.get_inode_lock(ext2_parent.inode_number());
+        let _guard = inode_lock.lock();
+
         // Check if the entry already exists
         if self.check_entry_exists(ext2_parent.inode_number(), name)? {
             return Err(FileSystemError::new(
@@ -4868,6 +4946,10 @@ impl FileSystemOperations for Ext2FileSystem {
             }
             Err(e) => return Err(e),
         }
+
+        // Acquire per-inode lock to serialize directory mutations on this parent
+        let inode_lock = self.get_inode_lock(ext2_parent.inode_number());
+        let _guard = inode_lock.lock();
 
         // Try to lookup the file to ensure it exists and get its inode number
         let node = self.lookup(parent, name)?;

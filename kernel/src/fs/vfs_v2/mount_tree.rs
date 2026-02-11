@@ -78,15 +78,15 @@ pub struct MountPoint {
     /// Type of mount
     pub mount_type: MountType,
     /// Mount path (relative to parent mount)
-    pub path: String,
+    pub path: RwLock<String>,
     /// Root entry of the mounted filesystem
     pub root: VfsEntryRef,
     /// Strong reference to the mounted filesystem (Regular mounts only)
     pub filesystem: Option<Arc<dyn FileSystemOperations>>,
     /// Parent mount (weak reference to avoid cycles)
-    pub parent: Option<Weak<MountPoint>>,
+    pub parent: RwLock<Option<Weak<MountPoint>>>,
     /// Parent entry (strong reference to the VFS entry at the mount point to ensure it stays alive)
-    pub parent_entry: Option<VfsEntryRef>,
+    pub parent_entry: RwLock<Option<VfsEntryRef>>,
     /// Child mounts: shared map of VfsEntry ID to MountPoint
     pub children: Arc<RwLock<BTreeMap<u64, Arc<MountPoint>>>>,
 }
@@ -101,11 +101,11 @@ impl MountPoint {
         Arc::new(Self {
             id: MountId::new(),
             mount_type: MountType::Regular,
-            path,
+            path: RwLock::new(path),
             root,
             filesystem: Some(filesystem),
-            parent: None,
-            parent_entry: None,
+            parent: RwLock::new(None),
+            parent_entry: RwLock::new(None),
             children: Arc::new(RwLock::new(BTreeMap::new())),
         })
     }
@@ -115,11 +115,11 @@ impl MountPoint {
         Arc::new(Self {
             id: MountId::new(),
             mount_type: MountType::Bind,
-            path,
+            path: RwLock::new(path),
             root: source,
             filesystem: None,
-            parent: None,
-            parent_entry: None,
+            parent: RwLock::new(None),
+            parent_entry: RwLock::new(None),
             children: Arc::new(RwLock::new(BTreeMap::new())),
         })
     }
@@ -141,23 +141,23 @@ impl MountPoint {
             mount_type: MountType::Overlay {
                 layers: layers.clone(),
             },
-            path,
+            path: RwLock::new(path),
             root,
             filesystem: None,
-            parent: None,
-            parent_entry: None,
+            parent: RwLock::new(None),
+            parent_entry: RwLock::new(None),
             children: Arc::new(RwLock::new(BTreeMap::new())),
         }))
     }
 
     /// Get the parent mount point
     pub fn get_parent(&self) -> Option<Arc<MountPoint>> {
-        self.parent.as_ref().and_then(|weak| weak.upgrade())
+        self.parent.read().as_ref().and_then(|weak| weak.upgrade())
     }
 
     /// Check if this is the root mount
     pub fn is_root_mount(&self) -> bool {
-        self.parent.is_none()
+        self.parent.read().is_none()
     }
 
     /// Get child mount by VfsEntry
@@ -172,13 +172,8 @@ impl MountPoint {
         entry: &VfsEntryRef,
         child: Arc<MountPoint>,
     ) -> VfsResult<()> {
-        // Set parent reference in child
-        let mut_child: *const MountPoint = Arc::as_ptr(&child);
-        unsafe {
-            let mut_child = mut_child as *mut MountPoint;
-            (*mut_child).parent = Some(Arc::downgrade(self));
-            (*mut_child).parent_entry = Some(entry.clone());
-        }
+        *child.parent.write() = Some(Arc::downgrade(self));
+        *child.parent_entry.write() = Some(entry.clone());
         let key = entry.node().id();
         self.children.write().insert(key, child);
         Ok(())
@@ -331,14 +326,19 @@ impl MountTree {
 
     /// Check if an entry is a source for a bind mount
     pub fn is_bind_source(&self, entry_to_check: &VfsEntryRef) -> bool {
-        let node_to_check = entry_to_check.node();
-        let node_id = node_to_check.id();
+        let node_id = entry_to_check.node().id();
+        self.is_bind_source_in_mount(&self.root_mount.read(), node_id)
+    }
 
-        let fs_ptr_to_check = match node_to_check.filesystem().and_then(|w| w.upgrade()) {
-            Some(fs) => Arc::as_ptr(&fs) as *const (),
-            None => return false,
-        };
-
+    fn is_bind_source_in_mount(&self, mount: &Arc<MountPoint>, node_id: u64) -> bool {
+        if mount.is_bind_mount() && mount.root.node().id() == node_id {
+            return true;
+        }
+        for child in mount.children.read().values() {
+            if self.is_bind_source_in_mount(child, node_id) {
+                return true;
+            }
+        }
         false
     }
 
@@ -348,8 +348,8 @@ impl MountTree {
         entry_to_check: &VfsEntryRef,
         mount_point_to_check: &Arc<MountPoint>,
     ) -> bool {
-        // self.is_mount_point(entry_to_check, mount_point_to_check) || self.is_bind_source(entry_to_check)
         self.is_mount_point(entry_to_check, mount_point_to_check)
+            || self.is_bind_source(entry_to_check)
     }
 
     /// Unmount a filesystem
@@ -521,7 +521,7 @@ impl MountTree {
                 if is_at_mount_root {
                     let parent_info = current_mount
                         .get_parent()
-                        .zip(current_mount.parent_entry.clone());
+                        .zip(current_mount.parent_entry.read().clone());
                     match parent_info {
                         Some((parent_mount, parent_entry)) => {
                             current_mount = parent_mount;
@@ -533,6 +533,14 @@ impl MountTree {
                     }
                 } else {
                     current_entry = self.resolve_component(current_entry, &component)?;
+                }
+
+                // After '..' resolution, check if we landed on a child mount point
+                if !is_final_component || !resolve_mount {
+                    if let Some(child_mount) = current_mount.get_child(&current_entry) {
+                        current_mount = child_mount;
+                        current_entry = current_mount.root.clone();
+                    }
                 }
             } else {
                 // Regular path traversal with symlink handling based on options
@@ -641,7 +649,7 @@ impl MountTree {
 
         while let Some(mount) = current {
             if !mount.is_root_mount() {
-                components.push(mount.path.clone());
+                components.push(mount.path.read().clone());
                 current = mount.get_parent();
             } else {
                 break;
