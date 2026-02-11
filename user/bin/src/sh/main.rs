@@ -1050,8 +1050,11 @@ fn handle_builtin_command(program: &str, args: &[String]) -> Option<i32> {
 
             match std::fs::change_directory(target_dir) {
                 Ok(()) => {
-                    // Success - update PWD environment variable
-                    std::env::set_var("PWD", target_dir);
+                    // Success - update PWD environment variable with kernel-resolved absolute path
+                    match std::fs::get_cwd_path() {
+                        Ok(resolved_path) => std::env::set_var("PWD", &resolved_path),
+                        Err(_) => std::env::set_var("PWD", target_dir),
+                    }
                     Some(0)
                 }
                 Err(_) => {

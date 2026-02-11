@@ -97,7 +97,7 @@ pub fn sys_vfs_open(trapframe: &mut Trapframe) -> usize {
         Some(vfs) => vfs,
         None => return usize::MAX, // VFS not initialized
     };
-    let file_obj = vfs.open(&path_str, 0);
+    let file_obj = vfs.open(&path_str, _flags as u32);
     match file_obj {
         Ok(kernel_obj) => {
             // Use simplified handle role classification
@@ -173,7 +173,7 @@ pub fn sys_vfs_truncate(trapframe: &mut Trapframe) -> usize {
         None => return usize::MAX, // VFS not initialized
     };
 
-    let file_obj = match vfs.open(&path_str, 0) {
+    let file_obj = match vfs.open(&path_str, 0x1) { // O_WRONLY: truncate is a write operation
         Ok(obj) => obj,
         Err(_) => return usize::MAX,
     };
@@ -666,20 +666,81 @@ pub fn sys_vfs_change_directory(trapframe: &mut Trapframe) -> usize {
         Err(_) => return usize::MAX,
     };
 
+    let task_name = task.name.read().clone();
+
+    // Dump actual cwd state before chdir
+    {
+        let cwd_guard = vfs.cwd.read();
+        match &*cwd_guard {
+            Some((entry, mp)) => {
+                crate::early_println!(
+                    "[chdir] BEFORE task={} cwd_entry_name='{}' cwd_entry_id={} mount_path='{}' built_path='{}'",
+                    task_name,
+                    entry.name(),
+                    entry.node().id(),
+                    mp.path,
+                    vfs.build_absolute_path(entry, mp)
+                );
+            }
+            None => {
+                crate::early_println!(
+                    "[chdir] BEFORE task={} cwd=None",
+                    task_name
+                );
+            }
+        }
+    }
+
+    crate::early_println!(
+        "[chdir] task={} requested='{}' absolute='{}'",
+        task_name,
+        path,
+        absolute_path
+    );
+
     // Check if the path exists and is a directory
     match vfs.resolve_path(&absolute_path) {
         Ok((entry, _mount_point)) => {
             if entry.node().file_type().unwrap() == FileType::Directory {
                 // Update the current working directory via VfsManager
                 match vfs.set_cwd_by_path(&absolute_path) {
-                    Ok(()) => 0,          // Success
-                    Err(_) => usize::MAX, // Failed to set cwd
+                    Ok(()) => {
+                        // Dump actual cwd state after chdir
+                        let cwd_guard = vfs.cwd.read();
+                        if let Some((e, mp)) = &*cwd_guard {
+                            crate::early_println!(
+                                "[chdir] AFTER task={} cwd_entry_name='{}' cwd_entry_id={} mount_path='{}' built_path='{}'",
+                                task_name,
+                                e.name(),
+                                e.node().id(),
+                                mp.path,
+                                vfs.build_absolute_path(e, mp)
+                            );
+                        }
+                        0
+                    }
+                    Err(e) => {
+                        crate::early_println!(
+                            "[chdir] task={} FAIL set_cwd_by_path error={:?}",
+                            task_name,
+                            e
+                        );
+                        usize::MAX
+                    }
                 }
             } else {
                 usize::MAX // Not a directory
             }
         }
-        Err(_) => return usize::MAX, // Path resolution error
+        Err(e) => {
+            crate::early_println!(
+                "[chdir] task={} FAIL resolve_path '{}' error={:?}",
+                task_name,
+                absolute_path,
+                e
+            );
+            usize::MAX // Path resolution error
+        }
     }
 }
 

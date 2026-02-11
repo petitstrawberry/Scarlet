@@ -1287,12 +1287,29 @@ impl VfsManager {
     /// # Returns
     /// An absolute path string
     pub fn resolve_path_to_absolute(&self, path: &str) -> String {
-        if path.starts_with('/') {
-            // Already absolute path
+        let raw = if path.starts_with('/') {
             path.to_string()
         } else {
             // Relative path - combine with current working directory
             self.get_cwd_path() + "/" + path
+        };
+
+        // Normalize the path: resolve `.`, `..`, and duplicate slashes
+        let mut components: Vec<&str> = Vec::new();
+        for component in raw.split('/') {
+            match component {
+                "" | "." => {} // Skip empty (duplicate slashes) and current dir
+                ".." => {
+                    components.pop(); // Go up one level
+                }
+                c => components.push(c),
+            }
+        }
+
+        if components.is_empty() {
+            "/".to_string()
+        } else {
+            alloc::format!("/{}", components.join("/"))
         }
     }
 }
