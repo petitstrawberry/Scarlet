@@ -306,6 +306,8 @@ pub struct Ext2FileSystem {
     /// Per-inode locks to serialize directory-mutating operations on the same inode,
     /// preventing concurrent read-modify-write races on directory blocks
     inode_locks: Mutex<BTreeMap<u32, Arc<Mutex<()>>>>,
+    /// Global lock to serialize block allocation operations
+    allocation_lock: Mutex<()>,
 }
 
 /// Node in doubly-linked list for O(1) LRU operations for inodes
@@ -782,6 +784,7 @@ impl Ext2FileSystem {
             inode_cache: Mutex::new(InodeLruCache::new(8192)),
             block_cache: Mutex::new(BlockLruCache::new(8192)),
             inode_locks: Mutex::new(BTreeMap::new()),
+            allocation_lock: Mutex::new(()),
         });
 
         // Set filesystem reference in root node
@@ -833,6 +836,17 @@ impl Ext2FileSystem {
             .entry(inode_num)
             .or_insert_with(|| Arc::new(Mutex::new(())))
             .clone()
+    }
+
+    /// Execute a closure while holding the allocation lock.
+    /// This ensures bitmap read-modify-write operations are atomic.
+    #[inline]
+    fn with_allocation_lock<F, T>(&self, f: F) -> T
+    where
+        F: FnOnce() -> T,
+    {
+        let _guard = self.allocation_lock.lock();
+        f()
     }
 
     /// Read an inode from disk
@@ -1601,8 +1615,19 @@ impl Ext2FileSystem {
     ) -> Result<(), FileSystemError> {
         profile_scope!("ext2::initialize_directory");
 
+        crate::early_println!(
+            "[ext2] initialize_directory: dir={}, parent={}",
+            dir_inode_number,
+            parent_inode_number
+        );
+
         // Allocate a block for the directory
         let block_number = self.allocate_block()?;
+        crate::early_println!(
+            "[ext2] initialize_directory: allocated block {} for dir {}",
+            block_number,
+            dir_inode_number
+        );
 
         // Create directory entries for . and ..
         let block_size = self.block_size as usize;
@@ -1654,28 +1679,33 @@ impl Ext2FileSystem {
     fn allocate_block(&self) -> Result<u64, FileSystemError> {
         profile_scope!("ext2::allocate_block");
 
-        // Try to allocate from any available group
-        let total_groups = (self.superblock.blocks_count + self.superblock.blocks_per_group - 1)
-            / self.superblock.blocks_per_group;
+        self.with_allocation_lock(|| {
+            // Try to allocate from any available group
+            let total_groups = (self.superblock.blocks_count + self.superblock.blocks_per_group
+                - 1)
+                / self.superblock.blocks_per_group;
 
-        for group in 0..total_groups {
-            match self.allocate_block_in_group(group) {
-                Ok(block_num) => return Ok(block_num),
-                Err(FileSystemError {
-                    kind: FileSystemErrorKind::NoSpace,
-                    ..
-                }) => {
-                    // Try next group
-                    continue;
+            for group in 0..total_groups {
+                match self.allocate_block_in_group(group) {
+                    Ok(block_num) => {
+                        return Ok(block_num);
+                    }
+                    Err(FileSystemError {
+                        kind: FileSystemErrorKind::NoSpace,
+                        ..
+                    }) => {
+                        // Try next group
+                        continue;
+                    }
+                    Err(e) => return Err(e),
                 }
-                Err(e) => return Err(e),
             }
-        }
 
-        Err(FileSystemError::new(
-            FileSystemErrorKind::NoSpace,
-            "No free blocks available in any group",
-        ))
+            Err(FileSystemError::new(
+                FileSystemErrorKind::NoSpace,
+                "No free blocks available in any group",
+            ))
+        })
     }
 
     /// Allocate a block in a specific group - OPTIMIZED VERSION  
@@ -1734,7 +1764,13 @@ impl Ext2FileSystem {
         }
 
         // Read block bitmap
-        let bitmap_sector = self.block_to_sector(bgd.block_bitmap as u64);
+        let bitmap_block = u32::from_le(bgd.block_bitmap);
+        let bitmap_sector = self.block_to_sector(bitmap_block as u64);
+        crate::early_println!(
+            "[ext2] allocate_block_in_group: Reading bitmap from block {} (sector {})",
+            bitmap_block,
+            bitmap_sector
+        );
         let request = Box::new(crate::device::block::request::BlockIORequest {
             request_type: crate::device::block::request::BlockIORequestType::Read,
             sector: bitmap_sector as usize,
@@ -1749,7 +1785,15 @@ impl Ext2FileSystem {
 
         let mut bitmap_data = if let Some(result) = results.first() {
             match &result.result {
-                Ok(_) => result.request.buffer.clone(),
+                Ok(_) => {
+                    let data = result.request.buffer.clone();
+                    crate::early_println!(
+                        "[ext2] allocate_block_in_group: Read bitmap[738]={:02x} from sector {}",
+                        data[738],
+                        bitmap_sector
+                    );
+                    data
+                }
                 Err(_) => {
                     return Err(FileSystemError::new(
                         FileSystemErrorKind::IoError,
@@ -1788,8 +1832,19 @@ impl Ext2FileSystem {
 
             // Check if bit is free (0)
             if (bitmap_data[byte_index] & (1 << bit_index)) == 0 {
+                crate::early_println!(
+                    "[ext2] allocate_block_in_group: Found free block {} (byte={}, bit={}, bitmap[byte]={:02x})",
+                    block_num,
+                    byte_index,
+                    bit_index,
+                    bitmap_data[byte_index]
+                );
                 // OPTIMIZATION: Batch bitmap + BGD updates
                 bitmap_data[byte_index] |= 1 << bit_index;
+                crate::early_println!(
+                    "[ext2] allocate_block_in_group: After set, bitmap[byte]={:02x}",
+                    bitmap_data[byte_index]
+                );
 
                 #[cfg(test)]
                 crate::early_println!(
@@ -1798,6 +1853,11 @@ impl Ext2FileSystem {
                 );
 
                 // Enqueue bitmap write
+                crate::early_println!(
+                    "[ext2] allocate_block_in_group: Writing bitmap[738]={:02x} to sector {}",
+                    bitmap_data[738],
+                    bitmap_sector
+                );
                 let bitmap_write = Box::new(crate::device::block::request::BlockIORequest {
                     request_type: crate::device::block::request::BlockIORequestType::Write,
                     sector: bitmap_sector as usize,
@@ -1828,11 +1888,22 @@ impl Ext2FileSystem {
                 self.block_device.enqueue_request(bgd_write);
 
                 // Process both writes in one batch
-                #[cfg(test)]
                 crate::early_println!(
-                    "[ext2] allocate_block_in_group: Processing 2 writes in batch (bitmap + BGD)"
+                    "[ext2] allocate_block_in_group: Writing bitmap+BGD for block {}",
+                    block_num
                 );
                 let write_results = self.block_device.process_requests();
+                crate::early_println!(
+                    "[ext2] allocate_block_in_group: Processed {} requests",
+                    write_results.len()
+                );
+                for (i, r) in write_results.iter().enumerate() {
+                    crate::early_println!(
+                        "[ext2] allocate_block_in_group: Request {} result: {:?}",
+                        i,
+                        r.result
+                    );
+                }
 
                 if write_results.len() != 2 || write_results.iter().any(|r| r.result.is_err()) {
                     return Err(FileSystemError::new(
@@ -1840,6 +1911,10 @@ impl Ext2FileSystem {
                         "Failed to write bitmap or BGD",
                     ));
                 }
+                crate::early_println!(
+                    "[ext2] allocate_block_in_group: Write complete for block {}",
+                    block_num
+                );
 
                 {
                     let mut cache = self.block_cache.lock();
@@ -2100,96 +2175,97 @@ impl Ext2FileSystem {
             return Ok(Vec::new());
         }
 
-        // If only one block is needed, use regular allocation
-        if count == 1 {
-            let block = self.allocate_block()?;
-            return Ok(vec![block]);
-        }
+        self.with_allocation_lock(|| {
+            // If only one block is needed, use regular allocation
+            if count == 1 {
+                let block = self.allocate_block_in_group(0)?;
+                return Ok(vec![block]);
+            }
 
-        // Calculate number of groups
-        let group_count = (self.superblock.blocks_count + self.superblock.blocks_per_group - 1)
-            / self.superblock.blocks_per_group;
+            // Calculate number of groups
+            let group_count = (self.superblock.blocks_count + self.superblock.blocks_per_group - 1)
+                / self.superblock.blocks_per_group;
 
-        // Strategy 1: Try to allocate full contiguous blocks in each group
-        for group in 0..group_count {
-            match self.allocate_blocks_contiguous_in_group(group, count) {
-                Ok(blocks) => {
-                    #[cfg(test)]
-                    crate::early_println!(
-                        "ext2: Allocated {} contiguous blocks starting at {} in group {}",
-                        count,
-                        blocks[0],
-                        group
-                    );
-                    return Ok(blocks);
-                }
-                Err(FileSystemError {
-                    kind: crate::fs::FileSystemErrorKind::NoSpace,
-                    ..
-                }) => {
-                    // Continue to next group
-                    continue;
-                }
-                Err(e) => {
-                    // Other errors should be propagated
-                    return Err(e);
+            // Strategy 1: Try to allocate full contiguous blocks in each group
+            for group in 0..group_count {
+                match self.allocate_blocks_contiguous_in_group(group, count) {
+                    Ok(blocks) => {
+                        #[cfg(test)]
+                        crate::early_println!(
+                            "ext2: Allocated {} contiguous blocks starting at {} in group {}",
+                            count,
+                            blocks[0],
+                            group
+                        );
+                        return Ok(blocks);
+                    }
+                    Err(FileSystemError {
+                        kind: crate::fs::FileSystemErrorKind::NoSpace,
+                        ..
+                    }) => {
+                        // Continue to next group
+                        continue;
+                    }
+                    Err(e) => {
+                        // Other errors should be propagated
+                        return Err(e);
+                    }
                 }
             }
-        }
 
-        // Strategy 2: Try partial contiguous allocation (split into chunks)
-        if count >= 6 {
-            // Restored to original threshold for stability
-            crate::early_println!(
-                "ext2: Full contiguous allocation failed, trying partial contiguous allocation"
-            );
-            let mut allocated_blocks = Vec::new();
-            let mut remaining = count;
+            // Strategy 2: Try partial contiguous allocation (split into chunks)
+            if count >= 6 {
+                // Restored to original threshold for stability
+                crate::early_println!(
+                    "ext2: Full contiguous allocation failed, trying partial contiguous allocation"
+                );
+                let mut allocated_blocks = Vec::new();
+                let mut remaining = count;
 
-            // Try to allocate in decreasing chunk sizes
-            let chunk_sizes = [count / 2, count / 3, count / 4, 8, 4]; // Reasonable chunk sizes
+                // Try to allocate in decreasing chunk sizes
+                let chunk_sizes = [count / 2, count / 3, count / 4, 8, 4]; // Reasonable chunk sizes
 
-            for &chunk_size in &chunk_sizes {
-                if chunk_size == 0 || chunk_size >= remaining {
-                    continue;
-                }
+                for &chunk_size in &chunk_sizes {
+                    if chunk_size == 0 || chunk_size >= remaining {
+                        continue;
+                    }
 
-                while remaining >= chunk_size {
-                    let mut allocated_chunk = false;
+                    while remaining >= chunk_size {
+                        let mut allocated_chunk = false;
 
-                    // Try each group for this chunk size
-                    for group in 0..group_count {
-                        match self.allocate_blocks_contiguous_in_group(group, chunk_size) {
-                            Ok(mut chunk_blocks) => {
-                                #[cfg(test)]
-                                crate::early_println!(
-                                    "ext2: Allocated {} contiguous blocks (chunk) starting at {} in group {}",
-                                    chunk_size,
-                                    chunk_blocks[0],
-                                    group
-                                );
-                                allocated_blocks.append(&mut chunk_blocks);
-                                remaining -= chunk_size;
-                                allocated_chunk = true;
-                                break;
-                            }
-                            Err(FileSystemError {
-                                kind: crate::fs::FileSystemErrorKind::NoSpace,
-                                ..
-                            }) => {
-                                continue; // Try next group
-                            }
-                            Err(e) => {
-                                // Cleanup and return error
-                                for &block in &allocated_blocks {
-                                    if let Err(free_err) = self.free_block(block as u32) {
-                                        crate::early_println!(
-                                            "ext2: Failed to free block {} during cleanup: {:?}",
-                                            block,
-                                            free_err
-                                        );
-                                    }
+                        // Try each group for this chunk size
+                        for group in 0..group_count {
+                            match self.allocate_blocks_contiguous_in_group(group, chunk_size) {
+                                Ok(mut chunk_blocks) => {
+                                    #[cfg(test)]
+                                    crate::early_println!(
+                                        "ext2: Allocated {} contiguous blocks (chunk) starting at {} in group {}",
+                                        chunk_size,
+                                        chunk_blocks[0],
+                                        group
+                                    );
+                                    allocated_blocks.append(&mut chunk_blocks);
+                                    remaining -= chunk_size;
+                                    allocated_chunk = true;
+                                    break;
                                 }
+                                Err(FileSystemError {
+                                    kind: crate::fs::FileSystemErrorKind::NoSpace,
+                                    ..
+                                }) => {
+                                    continue; // Try next group
+                                }
+                                Err(e) => {
+                                    // Cleanup and return error
+                                    for &block in &allocated_blocks {
+                                        if let Err(free_err) = self.free_block_unlocked(block as u32) {
+                                            crate::early_println!(
+                                                "ext2: Failed to free block {} during cleanup: {:?}",
+                                                block,
+                                                free_err
+                                            );
+                                        }
+                                    }
                                 return Err(e);
                             }
                         }
@@ -2218,12 +2294,12 @@ impl Ext2FileSystem {
                 );
 
                 for _ in 0..remaining {
-                    match self.allocate_block() {
+                    match self.allocate_block_in_group(0) {
                         Ok(block) => allocated_blocks.push(block),
                         Err(e) => {
                             // Cleanup all allocated blocks
                             for &allocated_block in &allocated_blocks {
-                                if let Err(free_err) = self.free_block(allocated_block as u32) {
+                                if let Err(free_err) = self.free_block_unlocked(allocated_block as u32) {
                                     crate::early_println!(
                                         "ext2: Failed to free block {} during cleanup: {:?}",
                                         allocated_block,
@@ -2245,7 +2321,7 @@ impl Ext2FileSystem {
 
             // Cleanup partial allocations if we couldn't complete
             for &block in &allocated_blocks {
-                if let Err(free_err) = self.free_block(block as u32) {
+                if let Err(free_err) = self.free_block_unlocked(block as u32) {
                     crate::early_println!(
                         "ext2: Failed to free block {} during cleanup: {:?}",
                         block,
@@ -2262,12 +2338,12 @@ impl Ext2FileSystem {
         );
         let mut blocks = Vec::new();
         for _ in 0..count {
-            match self.allocate_block() {
+            match self.allocate_block_in_group(0) {
                 Ok(block) => blocks.push(block),
                 Err(e) => {
                     // If individual allocation fails, we need to free the blocks we already allocated
                     for &allocated_block in &blocks {
-                        if let Err(free_err) = self.free_block(allocated_block as u32) {
+                        if let Err(free_err) = self.free_block_unlocked(allocated_block as u32) {
                             crate::early_println!(
                                 "ext2: Failed to free block {} during cleanup: {:?}",
                                 allocated_block,
@@ -2283,156 +2359,161 @@ impl Ext2FileSystem {
         #[cfg(test)]
         crate::early_println!("ext2: Allocated {} blocks individually as fallback", count);
         Ok(blocks)
+        })
     }
 
     /// Allocate a new inode using proper bitmap management
     fn allocate_inode(&self) -> Result<u32, FileSystemError> {
         profile_scope!("ext2::allocate_inode");
-        // For now, allocate from Group 0
-        // Based on dumpe2fs: Group 0 free inodes: 30-2048
-        let group = 0;
 
-        // Read block group descriptor for group 0
-        let bgd_block = if self.block_size == 1024 { 2 } else { 1 }; // BGD in block 1 or 2
-        let bgd_block_sector = self.block_to_sector(bgd_block);
+        self.with_allocation_lock(|| {
+            // For now, allocate from Group 0
+            // Based on dumpe2fs: Group 0 free inodes: 30-2048
+            let group = 0;
 
-        let request = Box::new(crate::device::block::request::BlockIORequest {
-            request_type: crate::device::block::request::BlockIORequestType::Read,
-            sector: bgd_block_sector,
-            sector_count: (self.block_size / 512) as usize,
-            head: 0,
-            cylinder: 0,
-            buffer: vec![0u8; self.block_size as usize],
-        });
+            // Read block group descriptor for group 0
+            let bgd_block = if self.block_size == 1024 { 2 } else { 1 }; // BGD in block 1 or 2
+            let bgd_block_sector = self.block_to_sector(bgd_block);
 
-        self.block_device.enqueue_request(request);
-        let results = self.block_device.process_requests();
+            let request = Box::new(crate::device::block::request::BlockIORequest {
+                request_type: crate::device::block::request::BlockIORequestType::Read,
+                sector: bgd_block_sector,
+                sector_count: (self.block_size / 512) as usize,
+                head: 0,
+                cylinder: 0,
+                buffer: vec![0u8; self.block_size as usize],
+            });
 
-        let bgd_data = if let Some(result) = results.first() {
-            match &result.result {
-                Ok(_) => result.request.buffer.clone(),
-                Err(_) => {
-                    return Err(FileSystemError::new(
-                        FileSystemErrorKind::IoError,
-                        "Failed to read block group descriptor",
-                    ));
-                }
-            }
-        } else {
-            return Err(FileSystemError::new(
-                FileSystemErrorKind::IoError,
-                "No result from block device read",
-            ));
-        };
+            self.block_device.enqueue_request(request);
+            let results = self.block_device.process_requests();
 
-        let bgd = Ext2BlockGroupDescriptor::from_bytes(&bgd_data)?;
-
-        // Check if there are free inodes
-        if bgd.free_inodes_count == 0 {
-            return Err(FileSystemError::new(
-                FileSystemErrorKind::NoSpace,
-                "No free inodes in group 0",
-            ));
-        }
-
-        // Read inode bitmap
-        let bitmap_sector = self.block_to_sector(bgd.inode_bitmap as u64);
-        let request = Box::new(crate::device::block::request::BlockIORequest {
-            request_type: crate::device::block::request::BlockIORequestType::Read,
-            sector: bitmap_sector as usize,
-            sector_count: (self.block_size / 512) as usize,
-            head: 0,
-            cylinder: 0,
-            buffer: vec![0u8; self.block_size as usize],
-        });
-
-        self.block_device.enqueue_request(request);
-        let results = self.block_device.process_requests();
-
-        let mut bitmap_data = if let Some(result) = results.first() {
-            match &result.result {
-                Ok(_) => result.request.buffer.clone(),
-                Err(_) => {
-                    return Err(FileSystemError::new(
-                        FileSystemErrorKind::IoError,
-                        "Failed to read inode bitmap",
-                    ));
-                }
-            }
-        } else {
-            return Err(FileSystemError::new(
-                FileSystemErrorKind::IoError,
-                "No result from block device read",
-            ));
-        };
-
-        // Find first free inode in bitmap
-        // Start from inode 30 (which corresponds to bit 29 since inodes are 1-based but bitmap is 0-based)
-        let start_inode = 30;
-        let start_bit = start_inode - 1; // Convert to 0-based bit index
-
-        for bit in start_bit..self.superblock.inodes_per_group {
-            let byte_index = (bit / 8) as usize;
-            let bit_index = bit % 8;
-
-            if byte_index >= bitmap_data.len() {
-                break;
-            }
-
-            // Check if bit is free (0)
-            if (bitmap_data[byte_index] & (1 << bit_index)) == 0 {
-                // Mark inode as used (set bit to 1)
-                bitmap_data[byte_index] |= 1 << bit_index;
-
-                // Write back bitmap
-                let request = Box::new(crate::device::block::request::BlockIORequest {
-                    request_type: crate::device::block::request::BlockIORequestType::Write,
-                    sector: bitmap_sector as usize,
-                    sector_count: (self.block_size / 512) as usize,
-                    head: 0,
-                    cylinder: 0,
-                    buffer: bitmap_data,
-                });
-
-                self.block_device.enqueue_request(request);
-                let results = self.block_device.process_requests();
-
-                if let Some(result) = results.first() {
-                    match &result.result {
-                        Ok(_) => {
-                            self.block_cache.lock().remove(bgd.inode_bitmap as u64);
-
-                            // Update group descriptor to reflect one less free inode
-                            let mut bgd = Ext2BlockGroupDescriptor::from_bytes(&bgd_data)?;
-                            let current_free_inodes = u16::from_le(bgd.free_inodes_count);
-                            bgd.free_inodes_count = (current_free_inodes.saturating_sub(1)).to_le();
-                            self.update_group_descriptor(group, &bgd)?;
-
-                            // Update superblock free inodes count
-                            self.update_superblock_counts(0, -1, 0)?;
-                        }
-                        Err(_) => {
-                            return Err(FileSystemError::new(
-                                FileSystemErrorKind::IoError,
-                                "Failed to write inode bitmap",
-                            ));
-                        }
+            let bgd_data = if let Some(result) = results.first() {
+                match &result.result {
+                    Ok(_) => result.request.buffer.clone(),
+                    Err(_) => {
+                        return Err(FileSystemError::new(
+                            FileSystemErrorKind::IoError,
+                            "Failed to read block group descriptor",
+                        ));
                     }
                 }
+            } else {
+                return Err(FileSystemError::new(
+                    FileSystemErrorKind::IoError,
+                    "No result from block device read",
+                ));
+            };
 
-                let allocated_inode = bit + 1; // Convert back to 1-based inode number
+            let bgd = Ext2BlockGroupDescriptor::from_bytes(&bgd_data)?;
 
-                // Debug: Allocated inode (disabled to reduce log noise)
-                // crate::early_println!("EXT2: Allocated inode {} (bit {})", allocated_inode, bit);
-
-                return Ok(allocated_inode);
+            // Check if there are free inodes
+            if bgd.free_inodes_count == 0 {
+                return Err(FileSystemError::new(
+                    FileSystemErrorKind::NoSpace,
+                    "No free inodes in group 0",
+                ));
             }
-        }
 
-        Err(FileSystemError::new(
-            FileSystemErrorKind::NoSpace,
-            "No free inodes found",
-        ))
+            // Read inode bitmap
+            let bitmap_sector = self.block_to_sector(bgd.inode_bitmap as u64);
+            let request = Box::new(crate::device::block::request::BlockIORequest {
+                request_type: crate::device::block::request::BlockIORequestType::Read,
+                sector: bitmap_sector as usize,
+                sector_count: (self.block_size / 512) as usize,
+                head: 0,
+                cylinder: 0,
+                buffer: vec![0u8; self.block_size as usize],
+            });
+
+            self.block_device.enqueue_request(request);
+            let results = self.block_device.process_requests();
+
+            let mut bitmap_data = if let Some(result) = results.first() {
+                match &result.result {
+                    Ok(_) => result.request.buffer.clone(),
+                    Err(_) => {
+                        return Err(FileSystemError::new(
+                            FileSystemErrorKind::IoError,
+                            "Failed to read inode bitmap",
+                        ));
+                    }
+                }
+            } else {
+                return Err(FileSystemError::new(
+                    FileSystemErrorKind::IoError,
+                    "No result from block device read",
+                ));
+            };
+
+            // Find first free inode in bitmap
+            // Start from inode 30 (which corresponds to bit 29 since inodes are 1-based but bitmap is 0-based)
+            let start_inode = 30;
+            let start_bit = start_inode - 1; // Convert to 0-based bit index
+
+            for bit in start_bit..self.superblock.inodes_per_group {
+                let byte_index = (bit / 8) as usize;
+                let bit_index = bit % 8;
+
+                if byte_index >= bitmap_data.len() {
+                    break;
+                }
+
+                // Check if bit is free (0)
+                if (bitmap_data[byte_index] & (1 << bit_index)) == 0 {
+                    // Mark inode as used (set bit to 1)
+                    bitmap_data[byte_index] |= 1 << bit_index;
+
+                    // Write back bitmap
+                    let request = Box::new(crate::device::block::request::BlockIORequest {
+                        request_type: crate::device::block::request::BlockIORequestType::Write,
+                        sector: bitmap_sector as usize,
+                        sector_count: (self.block_size / 512) as usize,
+                        head: 0,
+                        cylinder: 0,
+                        buffer: bitmap_data,
+                    });
+
+                    self.block_device.enqueue_request(request);
+                    let results = self.block_device.process_requests();
+
+                    if let Some(result) = results.first() {
+                        match &result.result {
+                            Ok(_) => {
+                                self.block_cache.lock().remove(bgd.inode_bitmap as u64);
+
+                                // Update group descriptor to reflect one less free inode
+                                let mut bgd = Ext2BlockGroupDescriptor::from_bytes(&bgd_data)?;
+                                let current_free_inodes = u16::from_le(bgd.free_inodes_count);
+                                bgd.free_inodes_count =
+                                    (current_free_inodes.saturating_sub(1)).to_le();
+                                self.update_group_descriptor(group, &bgd)?;
+
+                                // Update superblock free inodes count
+                                self.update_superblock_counts(0, -1, 0)?;
+                            }
+                            Err(_) => {
+                                return Err(FileSystemError::new(
+                                    FileSystemErrorKind::IoError,
+                                    "Failed to write inode bitmap",
+                                ));
+                            }
+                        }
+                    }
+
+                    let allocated_inode = bit + 1; // Convert back to 1-based inode number
+
+                    // Debug: Allocated inode (disabled to reduce log noise)
+                    // crate::early_println!("EXT2: Allocated inode {} (bit {})", allocated_inode, bit);
+
+                    return Ok(allocated_inode);
+                }
+            }
+
+            Err(FileSystemError::new(
+                FileSystemErrorKind::NoSpace,
+                "No free inodes found",
+            ))
+        })
     }
 
     /// Check if a file/directory already exists in the parent directory
@@ -2735,193 +2816,195 @@ impl Ext2FileSystem {
 
     /// Free an inode and update bitmaps and metadata
     fn free_inode(&self, inode_number: u32) -> Result<(), FileSystemError> {
-        // Read the inode first to get its data blocks and determine if it's a directory
-        let inode = self.read_inode(inode_number)?;
-        let is_directory = inode.is_dir();
-        let blocks_to_free = self.get_inode_data_blocks(&inode)?;
+        self.with_allocation_lock(|| {
+            // Read the inode first to get its data blocks and determine if it's a directory
+            let inode = self.read_inode(inode_number)?;
+            let is_directory = inode.is_dir();
+            let blocks_to_free = self.get_inode_data_blocks(&inode)?;
 
-        // Free all data blocks used by this inode
-        for block_num in blocks_to_free {
-            // Debug: Freeing data block (disabled to reduce log noise)
-            // crate::early_println!("EXT2: Freeing data block {}", block_num);
-            self.free_block(block_num)?;
-        }
-
-        // Calculate which block group contains this inode
-        let group = (inode_number - 1) / self.superblock.get_inodes_per_group();
-        let local_inode = (inode_number - 1) % self.superblock.get_inodes_per_group();
-
-        // Read block group descriptor to find inode bitmap location
-        let bgd_block = (group * mem::size_of::<Ext2BlockGroupDescriptor>() as u32)
-            / self.block_size
-            + if self.block_size == 1024 { 2 } else { 1 };
-        let bgd_block_sector = self.block_to_sector(bgd_block as u64);
-
-        let request = Box::new(crate::device::block::request::BlockIORequest {
-            request_type: crate::device::block::request::BlockIORequestType::Read,
-            sector: bgd_block_sector as usize,
-            sector_count: (self.block_size / 512) as usize,
-            head: 0,
-            cylinder: 0,
-            buffer: vec![0u8; self.block_size as usize],
-        });
-
-        self.block_device.enqueue_request(request);
-        let results = self.block_device.process_requests();
-
-        let mut bgd_data = if let Some(result) = results.first() {
-            match &result.result {
-                Ok(_) => result.request.buffer.clone(),
-                Err(_) => {
-                    return Err(FileSystemError::new(
-                        FileSystemErrorKind::IoError,
-                        "Failed to read block group descriptor",
-                    ));
-                }
+            // Free all data blocks used by this inode
+            for block_num in blocks_to_free {
+                // Debug: Freeing data block (disabled to reduce log noise)
+                // crate::early_println!("EXT2: Freeing data block {}", block_num);
+                self.free_block_unlocked(block_num)?;
             }
-        } else {
-            return Err(FileSystemError::new(
-                FileSystemErrorKind::IoError,
-                "No result from block device read",
-            ));
-        };
 
-        let bgd_offset =
-            (group * mem::size_of::<Ext2BlockGroupDescriptor>() as u32) % self.block_size;
-        let mut bgd = Ext2BlockGroupDescriptor::from_bytes(&bgd_data[bgd_offset as usize..])?;
+            // Calculate which block group contains this inode
+            let group = (inode_number - 1) / self.superblock.get_inodes_per_group();
+            let local_inode = (inode_number - 1) % self.superblock.get_inodes_per_group();
 
-        // Read the inode bitmap
-        let inode_bitmap_block = bgd.get_inode_bitmap();
-        let bitmap_sector = self.block_to_sector(inode_bitmap_block as u64);
+            // Read block group descriptor to find inode bitmap location
+            let bgd_block = (group * mem::size_of::<Ext2BlockGroupDescriptor>() as u32)
+                / self.block_size
+                + if self.block_size == 1024 { 2 } else { 1 };
+            let bgd_block_sector = self.block_to_sector(bgd_block as u64);
 
-        let request = Box::new(crate::device::block::request::BlockIORequest {
-            request_type: crate::device::block::request::BlockIORequestType::Read,
-            sector: bitmap_sector as usize,
-            sector_count: (self.block_size / 512) as usize,
-            head: 0,
-            cylinder: 0,
-            buffer: vec![0u8; self.block_size as usize],
-        });
+            let request = Box::new(crate::device::block::request::BlockIORequest {
+                request_type: crate::device::block::request::BlockIORequestType::Read,
+                sector: bgd_block_sector as usize,
+                sector_count: (self.block_size / 512) as usize,
+                head: 0,
+                cylinder: 0,
+                buffer: vec![0u8; self.block_size as usize],
+            });
 
-        self.block_device.enqueue_request(request);
-        let results = self.block_device.process_requests();
+            self.block_device.enqueue_request(request);
+            let results = self.block_device.process_requests();
 
-        let mut bitmap_data = if let Some(result) = results.first() {
-            match &result.result {
-                Ok(_) => result.request.buffer.clone(),
-                Err(_) => {
-                    return Err(FileSystemError::new(
-                        FileSystemErrorKind::IoError,
-                        "Failed to read inode bitmap",
-                    ));
+            let mut bgd_data = if let Some(result) = results.first() {
+                match &result.result {
+                    Ok(_) => result.request.buffer.clone(),
+                    Err(_) => {
+                        return Err(FileSystemError::new(
+                            FileSystemErrorKind::IoError,
+                            "Failed to read block group descriptor",
+                        ));
+                    }
                 }
-            }
-        } else {
-            return Err(FileSystemError::new(
-                FileSystemErrorKind::IoError,
-                "No result from block device read",
-            ));
-        };
+            } else {
+                return Err(FileSystemError::new(
+                    FileSystemErrorKind::IoError,
+                    "No result from block device read",
+                ));
+            };
 
-        // Clear the bit for this inode (mark as free)
-        let byte_index = (local_inode / 8) as usize;
-        let bit_index = (local_inode % 8) as u8;
+            let bgd_offset =
+                (group * mem::size_of::<Ext2BlockGroupDescriptor>() as u32) % self.block_size;
+            let mut bgd = Ext2BlockGroupDescriptor::from_bytes(&bgd_data[bgd_offset as usize..])?;
 
-        if byte_index >= bitmap_data.len() {
-            return Err(FileSystemError::new(
-                FileSystemErrorKind::InvalidData,
-                "Inode bitmap index out of bounds",
-            ));
-        }
+            // Read the inode bitmap
+            let inode_bitmap_block = bgd.get_inode_bitmap();
+            let bitmap_sector = self.block_to_sector(inode_bitmap_block as u64);
 
-        // Clear the bit (0 = free, 1 = used in ext2)
-        bitmap_data[byte_index] &= !(1 << bit_index);
+            let request = Box::new(crate::device::block::request::BlockIORequest {
+                request_type: crate::device::block::request::BlockIORequestType::Read,
+                sector: bitmap_sector as usize,
+                sector_count: (self.block_size / 512) as usize,
+                head: 0,
+                cylinder: 0,
+                buffer: vec![0u8; self.block_size as usize],
+            });
 
-        // Write the updated bitmap back to disk
-        let write_request = Box::new(crate::device::block::request::BlockIORequest {
-            request_type: crate::device::block::request::BlockIORequestType::Write,
-            sector: bitmap_sector as usize,
-            sector_count: (self.block_size / 512) as usize,
-            head: 0,
-            cylinder: 0,
-            buffer: bitmap_data,
-        });
+            self.block_device.enqueue_request(request);
+            let results = self.block_device.process_requests();
 
-        self.block_device.enqueue_request(write_request);
-        let write_results = self.block_device.process_requests();
-
-        if let Some(write_result) = write_results.first() {
-            match &write_result.result {
-                Ok(_) => {}
-                Err(_) => {
-                    return Err(FileSystemError::new(
-                        FileSystemErrorKind::IoError,
-                        "Failed to write inode to disk",
-                    ));
+            let mut bitmap_data = if let Some(result) = results.first() {
+                match &result.result {
+                    Ok(_) => result.request.buffer.clone(),
+                    Err(_) => {
+                        return Err(FileSystemError::new(
+                            FileSystemErrorKind::IoError,
+                            "Failed to read inode bitmap",
+                        ));
+                    }
                 }
+            } else {
+                return Err(FileSystemError::new(
+                    FileSystemErrorKind::IoError,
+                    "No result from block device read",
+                ));
+            };
+
+            // Clear the bit for this inode (mark as free)
+            let byte_index = (local_inode / 8) as usize;
+            let bit_index = (local_inode % 8) as u8;
+
+            if byte_index >= bitmap_data.len() {
+                return Err(FileSystemError::new(
+                    FileSystemErrorKind::InvalidData,
+                    "Inode bitmap index out of bounds",
+                ));
             }
-        } else {
-            return Err(FileSystemError::new(
-                FileSystemErrorKind::IoError,
-                "No result from inode write",
-            ));
-        }
 
-        // Invalidate cached inode bitmap block so subsequent reads see updated bitmap
-        self.block_cache.lock().remove(inode_bitmap_block as u64);
+            // Clear the bit (0 = free, 1 = used in ext2)
+            bitmap_data[byte_index] &= !(1 << bit_index);
 
-        // Update block group descriptor statistics
-        bgd.set_free_inodes_count(bgd.get_free_inodes_count() + 1);
-        if is_directory {
-            bgd.set_used_dirs_count(bgd.get_used_dirs_count().saturating_sub(1));
-        }
+            // Write the updated bitmap back to disk
+            let write_request = Box::new(crate::device::block::request::BlockIORequest {
+                request_type: crate::device::block::request::BlockIORequestType::Write,
+                sector: bitmap_sector as usize,
+                sector_count: (self.block_size / 512) as usize,
+                head: 0,
+                cylinder: 0,
+                buffer: bitmap_data,
+            });
 
-        // Write updated block group descriptor
-        bgd.write_to_bytes(&mut bgd_data[bgd_offset as usize..]);
-        let write_bgd_request = Box::new(crate::device::block::request::BlockIORequest {
-            request_type: crate::device::block::request::BlockIORequestType::Write,
-            sector: bgd_block_sector as usize,
-            sector_count: (self.block_size / 512) as usize,
-            head: 0,
-            cylinder: 0,
-            buffer: bgd_data,
-        });
+            self.block_device.enqueue_request(write_request);
+            let write_results = self.block_device.process_requests();
 
-        self.block_device.enqueue_request(write_bgd_request);
-        let bgd_write_results = self.block_device.process_requests();
-
-        if let Some(bgd_write_result) = bgd_write_results.first() {
-            match &bgd_write_result.result {
-                Ok(_) => {}
-                Err(_) => {
-                    return Err(FileSystemError::new(
-                        FileSystemErrorKind::IoError,
-                        "Failed to write updated block group descriptor",
-                    ));
+            if let Some(write_result) = write_results.first() {
+                match &write_result.result {
+                    Ok(_) => {}
+                    Err(_) => {
+                        return Err(FileSystemError::new(
+                            FileSystemErrorKind::IoError,
+                            "Failed to write inode to disk",
+                        ));
+                    }
                 }
+            } else {
+                return Err(FileSystemError::new(
+                    FileSystemErrorKind::IoError,
+                    "No result from inode write",
+                ));
             }
-        } else {
-            return Err(FileSystemError::new(
-                FileSystemErrorKind::IoError,
-                "No response from BGD write",
-            ));
-        }
 
-        // Invalidate cached BGD block
-        self.block_cache.lock().remove(bgd_block as u64);
+            // Invalidate cached inode bitmap block so subsequent reads see updated bitmap
+            self.block_cache.lock().remove(inode_bitmap_block as u64);
 
-        self.clear_inode_on_disk(inode_number)?;
+            // Update block group descriptor statistics
+            bgd.set_free_inodes_count(bgd.get_free_inodes_count() + 1);
+            if is_directory {
+                bgd.set_used_dirs_count(bgd.get_used_dirs_count().saturating_sub(1));
+            }
 
-        // Update superblock statistics
-        self.update_superblock_free_counts(0, 1)?;
+            // Write updated block group descriptor
+            bgd.write_to_bytes(&mut bgd_data[bgd_offset as usize..]);
+            let write_bgd_request = Box::new(crate::device::block::request::BlockIORequest {
+                request_type: crate::device::block::request::BlockIORequestType::Write,
+                sector: bgd_block_sector as usize,
+                sector_count: (self.block_size / 512) as usize,
+                head: 0,
+                cylinder: 0,
+                buffer: bgd_data,
+            });
 
-        // Remove from inode cache if present
-        {
-            let mut cache = self.inode_cache.lock();
-            cache.remove(inode_number);
-        }
+            self.block_device.enqueue_request(write_bgd_request);
+            let bgd_write_results = self.block_device.process_requests();
 
-        Ok(())
+            if let Some(bgd_write_result) = bgd_write_results.first() {
+                match &bgd_write_result.result {
+                    Ok(_) => {}
+                    Err(_) => {
+                        return Err(FileSystemError::new(
+                            FileSystemErrorKind::IoError,
+                            "Failed to write updated block group descriptor",
+                        ));
+                    }
+                }
+            } else {
+                return Err(FileSystemError::new(
+                    FileSystemErrorKind::IoError,
+                    "No response from BGD write",
+                ));
+            }
+
+            // Invalidate cached BGD block
+            self.block_cache.lock().remove(bgd_block as u64);
+
+            self.clear_inode_on_disk(inode_number)?;
+
+            // Update superblock statistics
+            self.update_superblock_free_counts(0, 1)?;
+
+            // Remove from inode cache if present
+            {
+                let mut cache = self.inode_cache.lock();
+                cache.remove(inode_number);
+            }
+
+            Ok(())
+        })
     }
 
     fn clear_inode_on_disk(&self, inode_number: u32) -> Result<(), FileSystemError> {
@@ -3235,8 +3318,8 @@ impl Ext2FileSystem {
         Ok(blocks)
     }
 
-    /// Free a block and update bitmaps
-    fn free_block(&self, block_number: u32) -> Result<(), FileSystemError> {
+    /// Free a block and update bitmaps (internal, assumes lock is held)
+    fn free_block_unlocked(&self, block_number: u32) -> Result<(), FileSystemError> {
         if block_number == 0 {
             return Ok(()); // Block 0 is not a valid block
         }
@@ -3405,6 +3488,11 @@ impl Ext2FileSystem {
         self.block_cache.lock().remove(bgd_block as u64);
 
         Ok(())
+    }
+
+    /// Free a block and update bitmaps
+    fn free_block(&self, block_number: u32) -> Result<(), FileSystemError> {
+        self.with_allocation_lock(|| self.free_block_unlocked(block_number))
     }
 
     /// Set the block number for a logical block within an inode
@@ -4130,6 +4218,12 @@ impl Ext2FileSystem {
             let block_num = block_nums[0];
             let mut cache = self.block_cache.lock();
             if let Some(data) = cache.get(block_num) {
+                if block_num == 1019 {
+                    crate::early_println!(
+                        "[ext2] read_blocks_cached: Returning CACHED bitmap[738]={:02x}",
+                        data[738]
+                    );
+                }
                 return Ok(vec![data]);
             }
             drop(cache);
