@@ -98,19 +98,40 @@ fn build_package(package_dir: &str, output: Option<String>) -> Result<(), String
         return Err(format!("package.toml not found in '{}'", package_dir));
     }
 
-    let metadata: PackageMetadata = {
-        let mut file = File::open(&metadata_file)
-            .map_err(|e| format!("Failed to open package.toml: {}", e))?;
-        let mut content = String::new();
-        file.read_to_string(&mut content)
-            .map_err(|e| format!("Failed to read package.toml: {}", e))?;
-        toml::from_str(&content).map_err(|e| format!("Failed to parse package.toml: {}", e))?
-    };
+    let mut file =
+        File::open(&metadata_file).map_err(|e| format!("Failed to open package.toml: {}", e))?;
+    let mut content = String::new();
+    file.read_to_string(&mut content)
+        .map_err(|e| format!("Failed to read package.toml: {}", e))?;
 
-    let output_file =
-        output.unwrap_or_else(|| format!("{}-{}.scarlet", metadata.name, metadata.version));
+    let name = content
+        .lines()
+        .find(|line| {
+            let line = line.trim();
+            line.starts_with("name") || (line.starts_with("[package]") && false)
+        })
+        .and_then(|line| line.split_once('='))
+        .map(|(_, v)| v.trim().trim_matches('"').to_string())
+        .unwrap_or_else(|| {
+            content
+                .lines()
+                .skip_while(|l| !l.trim().starts_with("name"))
+                .next()
+                .and_then(|line| line.split_once('='))
+                .map(|(_, v)| v.trim().trim_matches('"').to_string())
+                .unwrap_or_else(|| String::from("unknown"))
+        });
 
-    println!("Building package: {}-{}", metadata.name, metadata.version);
+    let version = content
+        .lines()
+        .find(|line| line.trim().starts_with("version"))
+        .and_then(|line| line.split_once('='))
+        .map(|(_, v)| v.trim().trim_matches('"').to_string())
+        .unwrap_or_else(|| String::from("0.0.0"));
+
+    let output_file = output.unwrap_or_else(|| format!("{}-{}.scarlet", name, version));
+
+    println!("Building package: {}-{}", name, version);
     println!("Output: {}", output_file);
 
     let output_path = PathBuf::from(&output_file);
@@ -147,10 +168,8 @@ fn init_package(
         return Err(format!("Directory '{}' already exists", dir));
     }
 
-    fs::create_dir_all(package_dir.join("bin"))
-        .map_err(|e| format!("Failed to create bin directory: {}", e))?;
-    fs::create_dir_all(package_dir.join("lib"))
-        .map_err(|e| format!("Failed to create lib directory: {}", e))?;
+    fs::create_dir_all(package_dir)
+        .map_err(|e| format!("Failed to create package directory: {}", e))?;
 
     let metadata = PackageMetadata {
         name: name.to_string(),
@@ -165,8 +184,20 @@ fn init_package(
         license: None,
     };
 
-    let toml_content = toml::to_string_pretty(&metadata)
-        .map_err(|e| format!("Failed to serialize metadata: {}", e))?;
+    let mut toml_content = String::from("[package]\n");
+    toml_content.push_str(&format!("name = \"{}\"\n", name));
+    toml_content.push_str(&format!("version = \"{}\"\n", version));
+    toml_content.push_str(&format!(
+        "description = \"{}\"\n",
+        description.unwrap_or("")
+    ));
+    if let Some(ref author) = author {
+        toml_content.push_str(&format!("author = \"{}\"\n", author));
+    }
+    toml_content.push_str(&format!("architecture = \"{}\"\n", arch));
+    toml_content.push_str("binaries = []\n");
+    toml_content.push_str("libraries = []\n");
+    toml_content.push_str("dependencies = []\n");
 
     let metadata_path = package_dir.join("package.toml");
     let mut file = File::create(&metadata_path)
@@ -177,8 +208,7 @@ fn init_package(
     println!("Initialized package: {}", name);
     println!("  Directory: {}", dir);
     println!("  Metadata: package.toml");
-    println!("  Binaries dir: bin/");
-    println!("  Libraries dir: lib/");
+    println!("  Content: scarlet/");
 
     Ok(())
 }

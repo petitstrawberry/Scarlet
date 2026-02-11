@@ -29,8 +29,7 @@ fn print_help() {
     println!("  help                 Show this help message");
 }
 
-fn cmd_list(_args: &[String]) {
-    let manager = PackageManager::with_default_config();
+fn cmd_list(_args: &[String], manager: &PackageManager) {
     let installed = manager.list_installed();
 
     if installed.is_empty() {
@@ -43,13 +42,12 @@ fn cmd_list(_args: &[String]) {
     }
 }
 
-fn cmd_info(args: &[String]) {
+fn cmd_info(args: &[String], manager: &PackageManager) {
     if args.is_empty() {
         println!("Error: Package name required");
         return;
     }
 
-    let manager = PackageManager::with_default_config();
     let name = &args[0];
 
     match manager.get_installed(name) {
@@ -63,7 +61,7 @@ fn cmd_info(args: &[String]) {
     }
 }
 
-fn cmd_install(args: &[String]) {
+fn cmd_install(args: &[String], manager: &mut PackageManager) {
     if args.is_empty() {
         println!("Error: Package path required");
         return;
@@ -96,29 +94,44 @@ fn cmd_install(args: &[String]) {
         }
     }
 
-    let mut manager = PackageManager::with_default_config();
     let package_name = String::from("package");
+    println!("Installing package from: {}", package_path);
     match manager.install_from_bytes(&package_name, &data) {
-        Ok(()) => println!("Package installed successfully"),
+        Ok(()) => {
+            let installed = manager.list_installed();
+            if let Some(pkg) = installed.last() {
+                println!(
+                    "Package installed successfully: {}-{}",
+                    pkg.name, pkg.version
+                );
+                println!("Files installed: {}", pkg.installed_files.len());
+            }
+        }
         Err(e) => println!("Error installing package: {}", e),
     }
 }
 
-fn cmd_remove(args: &[String]) {
+fn cmd_remove(args: &[String], manager: &mut PackageManager) {
     if args.is_empty() {
         println!("Error: Package name required");
         return;
     }
-    println!("Removing: {}", args[0]);
-    println!("Not yet implemented.");
+
+    let package_name = &args[0];
+
+    println!("Removing: {}", package_name);
+    match manager.remove(package_name) {
+        Ok(()) => println!("Package removed successfully"),
+        Err(e) => println!("Error removing package: {}", e),
+    }
 }
 
-fn run_command(cmd: &str, args: &[String]) {
+fn run_command(cmd: &str, args: &[String], manager: &mut PackageManager) {
     match cmd {
-        "install" => cmd_install(args),
-        "remove" => cmd_remove(args),
-        "list" => cmd_list(args),
-        "info" => cmd_info(args),
+        "install" => cmd_install(args, manager),
+        "remove" => cmd_remove(args, manager),
+        "list" => cmd_list(args, manager),
+        "info" => cmd_info(args, manager),
         "search" => println!("Repository not yet implemented."),
         "help" | "--help" | "-h" => print_help(),
         "--version" | "-v" => println!("SCPM v0.1.0"),
@@ -135,6 +148,7 @@ fn main() -> i32 {
         return 0;
     }
 
-    run_command(&args[1], &args[2..]);
+    let mut manager = PackageManager::with_default_config();
+    run_command(&args[1], &args[2..], &mut manager);
     0
 }

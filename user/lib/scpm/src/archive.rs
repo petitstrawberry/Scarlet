@@ -1,7 +1,7 @@
 use crate::package::PackageMetadata;
 use crate::{Error, Result};
 use alloc::{format, string::String, string::ToString, vec::Vec};
-use miniz_oxide::inflate::decompress_to_vec_zlib_with_limit;
+use miniz_oxide::inflate::decompress_to_vec;
 use scarlet_std::fs::{self, File};
 use scarlet_std::io::Write;
 use tar_no_std::TarArchiveRef;
@@ -67,8 +67,8 @@ impl PackageArchive {
             // Read file data
             let data = if is_file {
                 let entry_data = entry.data().to_vec();
-                // Parse package.toml if found
-                if name == "package.toml" {
+                // Parse package.toml if found (handle both "./package.toml" and "package.toml")
+                if name == "package.toml" || name.ends_with("/package.toml") {
                     metadata = Some(parse_package_toml(&entry_data)?);
                 }
                 entry_data
@@ -197,7 +197,7 @@ impl PackageArchive {
 /// Decompress gzip data
 fn decompress_gzip(data: &[u8]) -> Result<Vec<u8>> {
     // Check gzip magic number
-    if data.len() < 10 {
+    if data.len() < 18 {
         return Err(Error::IoError("Gzip data too short".into()));
     }
 
@@ -205,9 +205,50 @@ fn decompress_gzip(data: &[u8]) -> Result<Vec<u8>> {
         return Err(Error::IoError("Invalid gzip magic number".into()));
     }
 
-    // Skip gzip header (10 bytes) and decompress
-    let deflate_data = &data[10..];
-    decompress_to_vec_zlib_with_limit(deflate_data, 100 * 1024 * 1024)
+    // Gzip header parsing
+    let compression_method = data[2];
+    if compression_method != 8 {
+        return Err(Error::IoError(
+            "Unsupported compression method (only deflate)".into(),
+        ));
+    }
+
+    let flags = data[3];
+    let mut offset = 10;
+
+    // Skip extra fields (FLG.FEXTRA)
+    if flags & 0x04 != 0 {
+        if offset + 2 > data.len() {
+            return Err(Error::IoError("Invalid extra field length".into()));
+        }
+        let xlen = (data[offset] as usize) | ((data[offset + 1] as usize) << 8);
+        offset += 2 + xlen;
+    }
+
+    // Skip original filename (FLG.FNAME)
+    if flags & 0x08 != 0 {
+        while offset < data.len() && data[offset] != 0 {
+            offset += 1;
+        }
+        offset += 1;
+    }
+
+    // Skip comment (FLG.FCOMMENT)
+    if flags & 0x10 != 0 {
+        while offset < data.len() && data[offset] != 0 {
+            offset += 1;
+        }
+        offset += 1;
+    }
+
+    // Skip header CRC (FLG.FHCRC)
+    if flags & 0x02 != 0 {
+        offset += 2;
+    }
+
+    // Decompress deflate data (last 8 bytes are CRC32 and ISIZE)
+    let deflate_data = &data[offset..data.len() - 8];
+    decompress_to_vec(deflate_data)
         .map_err(|e| Error::IoError(format!("Decompression failed: {:?}", e)))
 }
 
@@ -217,7 +258,7 @@ fn parse_package_toml(data: &[u8]) -> Result<PackageMetadata> {
         .map_err(|_| Error::IoError("package.toml is not valid UTF-8".into()))?;
 
     let mut metadata = PackageMetadata::default();
-    let mut current_section: Option<String> = None;
+    let mut in_package_section = false;
 
     for line in toml_str.lines() {
         let line = line.trim();
@@ -227,7 +268,13 @@ fn parse_package_toml(data: &[u8]) -> Result<PackageMetadata> {
 
         // Section header
         if line.starts_with('[') && line.ends_with(']') {
-            current_section = Some(String::from(&line[1..line.len() - 1]));
+            let section = &line[1..line.len() - 1];
+            in_package_section = section == "package";
+            continue;
+        }
+
+        // Only parse keys from [package] section
+        if !in_package_section {
             continue;
         }
 
@@ -236,12 +283,13 @@ fn parse_package_toml(data: &[u8]) -> Result<PackageMetadata> {
             let key = key.trim();
             let value = value.trim().trim_matches('"');
 
-            match (current_section.as_deref(), key) {
-                (Some("package"), "name") => metadata.name = value.to_string(),
-                (Some("package"), "version") => metadata.version = value.to_string(),
-                (Some("package"), "description") => metadata.description = value.to_string(),
-                (Some("package"), "author") => metadata.author = Some(value.to_string()),
-                (Some("package"), "binaries") => {
+            match key {
+                "name" => metadata.name = value.to_string(),
+                "version" => metadata.version = value.to_string(),
+                "description" => metadata.description = value.to_string(),
+                "author" => metadata.author = Some(value.to_string()),
+                "architecture" => metadata.architecture = value.to_string(),
+                "binaries" => {
                     // Parse array format: ["item1", "item2"]
                     for item in value.split(',') {
                         let item = item
@@ -254,7 +302,7 @@ fn parse_package_toml(data: &[u8]) -> Result<PackageMetadata> {
                         }
                     }
                 }
-                (Some("package"), "libraries") => {
+                "libraries" => {
                     for item in value.split(',') {
                         let item = item
                             .trim()
@@ -266,7 +314,6 @@ fn parse_package_toml(data: &[u8]) -> Result<PackageMetadata> {
                         }
                     }
                 }
-                (Some("bin"), "name") => metadata.bin_name = value.to_string(),
                 _ => {}
             }
         }

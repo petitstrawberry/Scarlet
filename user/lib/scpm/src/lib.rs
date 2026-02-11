@@ -11,6 +11,15 @@ extern crate scarlet_std as std;
 
 use alloc::{format, string::String, string::ToString, vec::Vec};
 
+#[macro_export]
+macro_rules! debug_log {
+    ($($arg:tt)*) => {
+        {
+            $crate::std::println!($($arg)*);
+        }
+    };
+}
+
 pub mod archive;
 pub mod config;
 pub mod error;
