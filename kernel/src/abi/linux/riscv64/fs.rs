@@ -2011,12 +2011,42 @@ pub fn sys_ioctl(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize 
         None => return usize::MAX, // Invalid handle
     };
 
+    // Dispatch hypervisor (KVM) ioctls before capability-based routing
+    #[cfg(feature = "hypervisor")]
+    match &kernel_object {
+        crate::object::KernelObject::HypervisorVm(vm) => {
+            return match crate::abi::linux::device::kvm::handle_vm_ioctl(request, arg, vm, abi) {
+                Ok(Some(ret)) => ret,
+                Ok(None) => errno::to_result(errno::ENOTTY),
+                Err(_) => errno::to_result(errno::EINVAL),
+            };
+        }
+        crate::object::KernelObject::HypervisorVcpu(vcpu) => {
+            return match crate::abi::linux::device::kvm::handle_vcpu_ioctl(request, arg, vcpu) {
+                Ok(Some(ret)) => ret,
+                Ok(None) => errno::to_result(errno::ENOTTY),
+                Err(_) => errno::to_result(errno::EINVAL),
+            };
+        }
+        _ => {}
+    }
+
     // Determine device capabilities for per-device translation
     let mut caps: Option<&'static [DeviceCapability]> = None;
     if let Some(file_obj) = kernel_object.as_file() {
         if let Ok(metadata) = file_obj.metadata() {
             if let FileType::CharDevice(info) = metadata.file_type {
                 if let Some(dev) = DeviceManager::get_manager().get_device(info.device_id) {
+                    #[cfg(feature = "hypervisor")]
+                    if dev.name() == crate::abi::linux::device::kvm::KVM_DEVICE_NAME {
+                        return match crate::abi::linux::device::kvm::handle_system_ioctl(
+                            request, arg, abi,
+                        ) {
+                            Ok(Some(ret)) => ret,
+                            Ok(None) => errno::to_result(errno::ENOTTY),
+                            Err(_) => errno::to_result(errno::EINVAL),
+                        };
+                    }
                     caps = Some(dev.capabilities());
                 }
             }

@@ -58,4 +58,12 @@ impl VcpuObject {
     pub fn set_pc(&self, pc: u64) {
         self.state.lock().arch.set_pc(pc);
     }
+
+    pub fn get_gpr(&self, index: usize) -> u64 {
+        self.state.lock().arch.get_gpr(index)
+    }
+
+    pub fn set_gpr(&self, index: usize, value: u64) {
+        self.state.lock().arch.set_gpr(index, value);
+    }
 }

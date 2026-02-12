@@ -78,6 +78,20 @@ impl GuestRegisters {
     pub fn new() -> Self {
         Self { regs: [0; 32] }
     }
+
+    /// Get a general-purpose register by index (0..31)
+    pub fn get_gpr(&self, index: usize) -> u64 {
+        self.regs[index]
+    }
+
+    /// Set a general-purpose register by index (0..31)
+    ///
+    /// Setting x0 is silently ignored (hardwired zero).
+    pub fn set_gpr(&mut self, index: usize, value: u64) {
+        if index != 0 {
+            self.regs[index] = value;
+        }
+    }
 }
 
 impl Default for GuestRegisters {
@@ -120,5 +134,19 @@ impl ArchVcpu {
 
     pub fn set_pc(&mut self, pc: u64) {
         self.guest_state.pc = pc;
+    }
+
+    /// Get a general-purpose register by index (0..31)
+    pub fn get_gpr(&self, index: usize) -> u64 {
+        self.guest_state.gprs[index]
+    }
+
+    /// Set a general-purpose register by index (0..31)
+    ///
+    /// Setting x0 is silently ignored (hardwired zero).
+    pub fn set_gpr(&mut self, index: usize, value: u64) {
+        if index != 0 {
+            self.guest_state.gprs[index] = value;
+        }
     }
 }
