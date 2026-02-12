@@ -31,21 +31,6 @@ impl Default for UserEntryOptions {
     }
 }
 
-/// Configure architecture-specific state for the upcoming return to user mode.
-///
-/// This is intended to be called immediately before the final trampoline/exit
-/// jump that performs `sret`/`eret`.
-pub fn configure_user_entry(trapframe: &mut Trapframe, options: UserEntryOptions) {
-    #[cfg(target_arch = "riscv64")]
-    {
-        riscv64::configure_user_entry(trapframe, options)
-    }
-    #[cfg(target_arch = "aarch64")]
-    {
-        aarch64::configure_user_entry(trapframe, options)
-    }
-}
-
 pub mod user_context;
 
 pub use user_context::{
@@ -61,27 +46,3 @@ pub use riscv64::*;
 pub mod aarch64;
 #[cfg(target_arch = "aarch64")]
 pub use aarch64::*;
-
-// Re-export kernel context for architecture-independent use
-#[cfg(target_arch = "riscv64")]
-pub use riscv64::context::KernelContext;
-
-#[cfg(target_arch = "aarch64")]
-pub use aarch64::context::KernelContext;
-
-// Re-export FPU context and functions for architecture-independent use
-#[cfg(target_arch = "riscv64")]
-pub use riscv64::fpu;
-
-#[cfg(target_arch = "aarch64")]
-pub use aarch64::fpu;
-
-/// Architecture-specific hypervisor support
-#[cfg(feature = "hypervisor")]
-pub mod hv {
-    #[cfg(target_arch = "riscv64")]
-    pub use crate::arch::riscv64::hv::*;
-
-    #[cfg(target_arch = "aarch64")]
-    pub use crate::arch::aarch64::hv::*;
-}
