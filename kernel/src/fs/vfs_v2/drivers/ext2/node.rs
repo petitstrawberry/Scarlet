@@ -1053,7 +1053,13 @@ impl crate::object::capability::selectable::Selectable for Ext2FileObject {
 
 impl Drop for Ext2FileObject {
     fn drop(&mut self) {
-        let _ = self.sync_to_disk();
+        if let Err(e) = self.sync_to_disk() {
+            crate::early_println!(
+                "[ext2] Drop: sync_to_disk failed for inode {}: {:?}",
+                self.inode_number,
+                e
+            );
+        }
         #[cfg(test)]
         crate::early_println!(
             "[ext2] Drop: File object dropped for inode {}",

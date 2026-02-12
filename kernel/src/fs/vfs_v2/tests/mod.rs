@@ -42,7 +42,7 @@ fn test_mount_point_creation() {
     let mount_point = MountPoint::new_regular("/mnt".to_string(), entry.clone(), tmpfs.clone());
 
     // Test properties
-    assert_eq!(mount_point.path, "/mnt");
+    assert_eq!(*mount_point.path.read(), "/mnt");
     assert!(matches!(mount_point.mount_type, MountType::Regular));
 }
 

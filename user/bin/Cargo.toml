@@ -158,8 +158,13 @@ path = "src/settings.rs"
 name = "shutdown"
 path = "src/shutdown.rs"
 
+[[bin]]
+name = "scpm"
+path = "src/scpm.rs"
+
 [dependencies]
 scarlet_std = { path = "../lib/std", features = ["alloc_debug"] }
+scpm = { path = "../lib/scpm" }
 framebuffer = { path = "../lib/framebuffer" }
 sws_protocol = { path = "../lib/sws_protocol" }
 sws-client = { path = "../lib/sws-client" }

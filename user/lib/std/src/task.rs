@@ -220,11 +220,12 @@ pub fn execve(path: &str, argv: &[&str], envp: &[&str]) -> i32 {
     };
     let (envp_ptr_array, envp_len) = create_ptr_array_box(envp_ptrs);
 
-    let res = syscall3(
+    let res = syscall4(
         Syscall::Execve,
         path_ptr,
         argv_ptr_array as usize,
         envp_ptr_array as usize,
+        0_usize,
     );
 
     // If the syscall fails, we need to free the allocated memory
@@ -281,12 +282,13 @@ pub fn execve_abi(path: &str, argv: &[&str], envp: &[&str], abi: &str) -> i32 {
     let abi_boxed_slice_len = abi_boxed_slice.len();
     let abi_ptr = Box::into_raw(abi_boxed_slice) as *const u8 as usize;
 
-    let res = syscall4(
+    let res = syscall5(
         Syscall::ExecveABI,
         path_ptr,
         argv_ptr_array as usize,
         envp_ptr_array as usize,
         abi_ptr,
+        0_usize,
     );
 
     let _ = unsafe {

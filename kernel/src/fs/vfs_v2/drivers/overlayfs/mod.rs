@@ -778,11 +778,22 @@ impl FileSystemOperations for OverlayFS {
                 "/"
             };
             let parent_name = parent_path.split('/').last().unwrap_or("/");
+            let parent_file_id = self
+                .get_metadata_for_path(parent_path)
+                .map(|m| m.file_id)
+                .unwrap_or_else(|_| {
+                    // Deterministic fallback from path hash
+                    let mut hash: u64 = 5381;
+                    for byte in parent_path.bytes() {
+                        hash = hash.wrapping_mul(33).wrapping_add(byte as u64);
+                    }
+                    hash
+                });
             let node = OverlayNode::new(
                 parent_name.to_string(),
                 parent_path.to_string(),
                 FileType::Directory,
-                0,
+                parent_file_id,
             );
             if let Some(ref fs) = *overlay_parent.overlay_fs.read() {
                 node.set_overlay_fs(Arc::clone(fs));
@@ -1135,8 +1146,9 @@ impl FileSystemOperations for OverlayFS {
                     })?;
                 if let Ok(lower_entries) = fs.readdir(&lower_node) {
                     for entry in lower_entries {
-                        // Skip . .. entries
-                        if entry.name == "." || entry.name == ".." {
+                        // Skip . .. entries and whiteout files
+                        if entry.name == "." || entry.name == ".." || entry.name.starts_with(".wh.")
+                        {
                             continue;
                         }
                         let entry_full_path = if overlay_node.path == "/" {

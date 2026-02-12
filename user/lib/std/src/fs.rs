@@ -281,8 +281,20 @@ impl OpenOptions {
             }
         }
 
-        // Currently, we don't support any flags that require special handling
-        let flags = 0;
+        // Construct open flags from options
+        // Flag values match POSIX-style constants used by the kernel:
+        //   O_RDONLY = 0x0, O_WRONLY = 0x1, O_RDWR = 0x2
+        //   O_APPEND = 0x400, O_TRUNC = 0x200
+        let flags = if self.read && self.write {
+            0x2 // O_RDWR
+        } else if self.write || self.append {
+            0x1 // O_WRONLY
+        } else {
+            0x0 // O_RDONLY
+        };
+
+        let flags = if self.append { flags | 0x400 } else { flags };
+        let flags = if self.truncate { flags | 0x200 } else { flags };
 
         // Use Handle::open and wrap in File
         let handle = Handle::open(path.as_ref(), flags)
