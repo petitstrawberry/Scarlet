@@ -1,8 +1,6 @@
 //! Package repository support
 
-use crate::package::PackageMetadata;
-use crate::{Error, Result};
-use alloc::{format, string::String, vec::Vec};
+use alloc::{string::String, vec::Vec};
 
 /// Repository index entry
 #[derive(Debug, Clone)]
@@ -47,6 +45,12 @@ impl Repository {
 #[derive(Debug)]
 pub struct RepositoryIndex {
     pub repositories: Vec<Repository>,
+}
+
+impl Default for RepositoryIndex {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl RepositoryIndex {

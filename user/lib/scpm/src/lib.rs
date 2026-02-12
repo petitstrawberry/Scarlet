@@ -9,8 +9,6 @@
 extern crate alloc;
 extern crate scarlet_std as std;
 
-use alloc::{format, string::String, string::ToString, vec::Vec};
-
 const DEBUG: bool = false;
 
 #[macro_export]

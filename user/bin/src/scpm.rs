@@ -4,7 +4,6 @@
 extern crate alloc;
 extern crate scarlet_std as std;
 
-use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 

@@ -3,7 +3,6 @@ use crate::{Error, Result};
 use alloc::{format, string::String, string::ToString, vec::Vec};
 use miniz_oxide::inflate::decompress_to_vec;
 use scarlet_std::fs::{self, File};
-use scarlet_std::io::Write;
 use tar_no_std::TarArchiveRef;
 
 #[derive(Debug)]
@@ -87,7 +86,7 @@ impl PackageArchive {
             });
         }
 
-        let metadata = metadata.unwrap_or_else(|| PackageMetadata::default());
+        let metadata = metadata.unwrap_or_default();
         Ok(PackageArchive { metadata, entries })
     }
 

@@ -225,7 +225,7 @@ pub fn execve(path: &str, argv: &[&str], envp: &[&str]) -> i32 {
         path_ptr,
         argv_ptr_array as usize,
         envp_ptr_array as usize,
-        0 as usize,
+        0_usize,
     );
 
     // If the syscall fails, we need to free the allocated memory
@@ -288,7 +288,7 @@ pub fn execve_abi(path: &str, argv: &[&str], envp: &[&str], abi: &str) -> i32 {
         argv_ptr_array as usize,
         envp_ptr_array as usize,
         abi_ptr,
-        0 as usize,
+        0_usize,
     );
 
     let _ = unsafe {

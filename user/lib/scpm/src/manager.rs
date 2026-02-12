@@ -14,15 +14,12 @@ impl ScpmLock {
     fn lock() -> Result<Self> {
         let lock_path = "/var/scpm/scpm.lock";
 
-        match File::open(lock_path) {
-            Ok(_) => {
-                return Err(Error::IoError(
-                    "SCPM is busy. If you believe this is an error, \
-                    manually remove /var/scpm/scpm.lock"
-                        .into(),
-                ));
-            }
-            Err(_) => {}
+        if let Ok(_) = File::open(lock_path) {
+            return Err(Error::IoError(
+                "SCPM is busy. If you believe this is an error, \
+                manually remove /var/scpm/scpm.lock"
+                    .into(),
+            ));
         }
 
         let _ = fs::create_directory("/var");
@@ -53,12 +50,11 @@ pub struct PackageManager {
 
 impl PackageManager {
     pub fn new(config: Config) -> Self {
-        let manager = Self {
+        Self {
             config,
             installed_packages: Vec::new(),
             repository: RepositoryIndex::new(),
-        };
-        manager
+        }
     }
 
     pub fn with_default_config() -> Self {
