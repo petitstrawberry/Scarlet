@@ -11,11 +11,15 @@ extern crate scarlet_std as std;
 
 use alloc::{format, string::String, string::ToString, vec::Vec};
 
+const DEBUG: bool = false;
+
 #[macro_export]
 macro_rules! debug_log {
     ($($arg:tt)*) => {
         {
-            $crate::std::println!($($arg)*);
+            if cfg!(debug_assertions) && $crate::DEBUG {
+                $crate::std::println!($($arg)*);
+            }
         }
     };
 }

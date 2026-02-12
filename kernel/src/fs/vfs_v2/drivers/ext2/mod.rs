@@ -1618,87 +1618,6 @@ impl Ext2FileSystem {
         }
     }
 
-    /// Initialize a new directory with . and .. entries
-    fn initialize_directory(
-        &self,
-        dir_inode_number: u32,
-        parent_inode_number: u32,
-    ) -> Result<(), FileSystemError> {
-        profile_scope!("ext2::initialize_directory");
-
-        crate::early_println!(
-            "[ext2] initialize_directory: dir={}, parent={}",
-            dir_inode_number,
-            parent_inode_number
-        );
-
-        // IMPORTANT: Invalidate inode cache to ensure we read fresh inode data
-        // This prevents using stale cached inode data from previous operations
-        self.inode_cache.lock().remove(dir_inode_number);
-
-        // Allocate a block for the directory
-        let block_number = self.allocate_block()?;
-        crate::early_println!(
-            "[ext2] initialize_directory: allocated block {} for dir {}",
-            block_number,
-            dir_inode_number
-        );
-
-        // Create directory entries for . and ..
-        let block_size = self.block_size as usize;
-        let mut block_data = vec![0u8; block_size];
-
-        // Create "." entry
-        let dot_entry_size = 12; // 4 (inode) + 2 (rec_len) + 1 (name_len) + 1 (file_type) + 1 (name) + 3 (padding)
-        let dot_inode = dir_inode_number.to_le_bytes();
-        let dot_rec_len = dot_entry_size as u16;
-        let dot_name_len = 1u8;
-        let dot_file_type = 2u8; // Directory
-
-        block_data[0..4].copy_from_slice(&dot_inode);
-        block_data[4..6].copy_from_slice(&dot_rec_len.to_le_bytes());
-        block_data[6] = dot_name_len;
-        block_data[7] = dot_file_type;
-        block_data[8] = b'.';
-
-        // Create ".." entry - takes up the rest of block
-        let dotdot_offset = dot_entry_size;
-        let dotdot_rec_len = (block_size - dotdot_offset) as u16;
-        let dotdot_name_len = 2u8;
-        let dotdot_file_type = 2u8; // Directory
-        let dotdot_inode = parent_inode_number.to_le_bytes();
-
-        block_data[dotdot_offset..dotdot_offset + 4].copy_from_slice(&dotdot_inode);
-        block_data[dotdot_offset + 4..dotdot_offset + 6]
-            .copy_from_slice(&dotdot_rec_len.to_le_bytes());
-        block_data[dotdot_offset + 6] = dotdot_name_len;
-        block_data[dotdot_offset + 7] = dotdot_file_type;
-        block_data[dotdot_offset + 8] = b'.';
-        block_data[dotdot_offset + 9] = b'.';
-
-        // Write block to disk using cached method to keep block cache consistent
-        self.write_block_cached(block_number as u64, &block_data)?;
-
-        // Create inode with correct block number and size
-        // IMPORTANT: Build inode directly instead of calling read_inode to avoid cache issues
-        let mut dir_inode = Ext2Inode::empty();
-        dir_inode.block[0] = block_number as u32;
-        dir_inode.size = block_size as u32;
-        dir_inode.blocks = (self.block_size / 512).to_le();
-        dir_inode.mode = 0o40755u16.to_le(); // Directory permissions
-        dir_inode.uid = 0u16.to_le();
-        dir_inode.gid = 0u16.to_le();
-        dir_inode.links_count = 2u16.to_le();
-        dir_inode.atime = 0u32.to_le();
-        dir_inode.ctime = 0u32.to_le();
-        dir_inode.mtime = 0u32.to_le();
-        dir_inode.flags = 0u32.to_le();
-
-        self.write_inode(dir_inode_number, &dir_inode)?;
-
-        Ok(())
-    }
-
     /// Allocate a new data block using proper bitmap management
     fn allocate_block(&self) -> Result<u64, FileSystemError> {
         profile_scope!("ext2::allocate_block");
@@ -1792,11 +1711,11 @@ impl Ext2FileSystem {
         // Read block bitmap
         let bitmap_block = u32::from_le(bgd.block_bitmap);
         let bitmap_sector = self.block_to_sector(bitmap_block as u64);
-        crate::early_println!(
-            "[ext2] allocate_block_in_group: Reading bitmap from block {} (sector {})",
-            bitmap_block,
-            bitmap_sector
-        );
+        // crate::early_println!(
+        //     "[ext2] allocate_block_in_group: Reading bitmap from block {} (sector {})",
+        //     bitmap_block,
+        //     bitmap_sector
+        // );
         let request = Box::new(crate::device::block::request::BlockIORequest {
             request_type: crate::device::block::request::BlockIORequestType::Read,
             sector: bitmap_sector as usize,
@@ -1813,11 +1732,11 @@ impl Ext2FileSystem {
             match &result.result {
                 Ok(_) => {
                     let data = result.request.buffer.clone();
-                    crate::early_println!(
-                        "[ext2] allocate_block_in_group: Read bitmap[738]={:02x} from sector {}",
-                        data[738],
-                        bitmap_sector
-                    );
+                    // crate::early_println!(
+                    //     "[ext2] allocate_block_in_group: Read bitmap[738]={:02x} from sector {}",
+                    //     data[738],
+                    //     bitmap_sector
+                    // );
                     data
                 }
                 Err(_) => {
@@ -1861,19 +1780,19 @@ impl Ext2FileSystem {
 
             // Check if bit is free (0)
             if (bitmap_data[byte_index] & (1 << bit_index)) == 0 {
-                crate::early_println!(
-                    "[ext2] allocate_block_in_group: Found free block {} (byte={}, bit={}, bitmap[byte]={:02x})",
-                    block_num,
-                    byte_index,
-                    bit_index,
-                    bitmap_data[byte_index]
-                );
+                // crate::early_println!(
+                //     "[ext2] allocate_block_in_group: Found free block {} (byte={}, bit={}, bitmap[byte]={:02x})",
+                //     block_num,
+                //     byte_index,
+                //     bit_index,
+                //     bitmap_data[byte_index]
+                // );
                 // OPTIMIZATION: Batch bitmap + BGD updates
                 bitmap_data[byte_index] |= 1 << bit_index;
-                crate::early_println!(
-                    "[ext2] allocate_block_in_group: After set, bitmap[byte]={:02x}",
-                    bitmap_data[byte_index]
-                );
+                // crate::early_println!(
+                //     "[ext2] allocate_block_in_group: After set, bitmap[byte]={:02x}",
+                //     bitmap_data[byte_index]
+                // );
 
                 #[cfg(test)]
                 crate::early_println!(
@@ -1882,11 +1801,11 @@ impl Ext2FileSystem {
                 );
 
                 // Enqueue bitmap write
-                crate::early_println!(
-                    "[ext2] allocate_block_in_group: Writing bitmap[738]={:02x} to sector {}",
-                    bitmap_data[738],
-                    bitmap_sector
-                );
+                // crate::early_println!(
+                //     "[ext2] allocate_block_in_group: Writing bitmap[738]={:02x} to sector {}",
+                //     bitmap_data[738],
+                //     bitmap_sector
+                // );
                 let bitmap_write = Box::new(crate::device::block::request::BlockIORequest {
                     request_type: crate::device::block::request::BlockIORequestType::Write,
                     sector: bitmap_sector as usize,
@@ -1917,22 +1836,22 @@ impl Ext2FileSystem {
                 self.block_device.enqueue_request(bgd_write);
 
                 // Process both writes in one batch
-                crate::early_println!(
-                    "[ext2] allocate_block_in_group: Writing bitmap+BGD for block {}",
-                    block_num
-                );
+                // crate::early_println!(
+                //     "[ext2] allocate_block_in_group: Writing bitmap+BGD for block {}",
+                //     block_num
+                // );
                 let write_results = self.block_device.process_requests();
-                crate::early_println!(
-                    "[ext2] allocate_block_in_group: Processed {} requests",
-                    write_results.len()
-                );
-                for (i, r) in write_results.iter().enumerate() {
-                    crate::early_println!(
-                        "[ext2] allocate_block_in_group: Request {} result: {:?}",
-                        i,
-                        r.result
-                    );
-                }
+                // crate::early_println!(
+                //     "[ext2] allocate_block_in_group: Processed {} requests",
+                //     write_results.len()
+                // );
+                // for (i, r) in write_results.iter().enumerate() {
+                //     crate::early_println!(
+                //         "[ext2] allocate_block_in_group: Request {} result: {:?}",
+                //         i,
+                //         r.result
+                //     );
+                // }
 
                 // Check each result individually to detect partial failures
                 if write_results.len() != 2 {
@@ -1954,10 +1873,10 @@ impl Ext2FileSystem {
                     ));
                 }
 
-                crate::early_println!(
-                    "[ext2] allocate_block_in_group: Write complete for block {}",
-                    block_num
-                );
+                // crate::early_println!(
+                //     "[ext2] allocate_block_in_group: Write complete for block {}",
+                //     block_num
+                // );
 
                 {
                     let mut cache = self.block_cache.lock();
@@ -2324,21 +2243,21 @@ impl Ext2FileSystem {
                 }
 
                 if remaining == 0 {
-                    crate::early_println!(
-                        "ext2: Successfully allocated {} blocks using partial contiguous strategy",
-                        count
-                    );
+                    // crate::early_println!(
+                    //     "ext2: Successfully allocated {} blocks using partial contiguous strategy",
+                    //     count
+                    // );
                     return Ok(allocated_blocks);
                 }
             }
 
             // If we have some blocks allocated but not all, continue with individual allocation for remainder
             if !allocated_blocks.is_empty() && remaining > 0 {
-                crate::early_println!(
-                    "ext2: Partial contiguous allocation successful ({} blocks), using individual allocation for remaining {} blocks",
-                    allocated_blocks.len(),
-                    remaining
-                );
+                // crate::early_println!(
+                //     "ext2: Partial contiguous allocation successful ({} blocks), using individual allocation for remaining {} blocks",
+                //     allocated_blocks.len(),
+                //     remaining
+                // );
 
                 for _ in 0..remaining {
                     match self.allocate_block_in_group(0) {
@@ -2359,10 +2278,10 @@ impl Ext2FileSystem {
                     }
                 }
 
-                crate::early_println!(
-                    "ext2: Hybrid allocation completed: {} blocks total",
-                    allocated_blocks.len()
-                );
+                // crate::early_println!(
+                //     "ext2: Hybrid allocation completed: {} blocks total",
+                //     allocated_blocks.len()
+                // );
                 return Ok(allocated_blocks);
             }
 
@@ -2379,10 +2298,10 @@ impl Ext2FileSystem {
         }
 
         // Strategy 3: Fall back to individual block allocation as last resort
-        crate::early_println!(
-            "ext2: All contiguous strategies failed for {} blocks, falling back to individual allocation",
-            count
-        );
+        // crate::early_println!(
+        //     "ext2: All contiguous strategies failed for {} blocks, falling back to individual allocation",
+        //     count
+        // );
         let mut blocks = Vec::new();
         for _ in 0..count {
             match self.allocate_block_in_group(0) {
@@ -4285,12 +4204,6 @@ impl Ext2FileSystem {
             let block_num = block_nums[0];
             let mut cache = self.block_cache.lock();
             if let Some(data) = cache.get(block_num) {
-                if block_num == 1019 {
-                    crate::early_println!(
-                        "[ext2] read_blocks_cached: Returning CACHED bitmap[738]={:02x}",
-                        data[738]
-                    );
-                }
                 return Ok(vec![data]);
             }
             drop(cache);
@@ -4620,8 +4533,8 @@ impl Ext2FileSystem {
         let inode_cache = self.inode_cache.lock();
         let block_cache = self.block_cache.lock();
 
-        inode_cache.print_stats("Inode");
-        block_cache.print_stats("Block");
+        // inode_cache.print_stats("Inode");
+        // block_cache.print_stats("Block");
     }
 }
 
@@ -4996,11 +4909,11 @@ impl FileSystemOperations for Ext2FileSystem {
         if matches!(file_type, FileType::Directory) {
             // Allocate a block for the directory
             let block_number = self.allocate_block()?;
-            crate::early_println!(
-                "[ext2] create: allocated block {} for new dir inode {}",
-                block_number,
-                new_inode_number
-            );
+            // crate::early_println!(
+            //     "[ext2] create: allocated block {} for new dir inode {}",
+            //     block_number,
+            //     new_inode_number
+            // );
 
             // Create directory entries for . and ..
             let block_size = self.block_size as usize;
