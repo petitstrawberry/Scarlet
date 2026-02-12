@@ -343,9 +343,15 @@ impl KernelObject {
                 None
             }
             #[cfg(feature = "hypervisor")]
-            KernelObject::HypervisorVm(_) => None,
+            KernelObject::HypervisorVm(vm) => {
+                let control_ops: &dyn ControlOps = vm.as_ref();
+                Some(control_ops)
+            }
             #[cfg(feature = "hypervisor")]
-            KernelObject::HypervisorVcpu(_) => None,
+            KernelObject::HypervisorVcpu(vcpu) => {
+                let control_ops: &dyn ControlOps = vcpu.as_ref();
+                Some(control_ops)
+            }
         }
     }
 

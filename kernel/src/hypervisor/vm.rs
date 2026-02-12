@@ -8,6 +8,24 @@ use spin::Mutex;
 use crate::arch::hv::ArchVm;
 use crate::hypervisor::memory::{MemorySlot, MemorySlotFlags, MemorySlotManager};
 use crate::hypervisor::vcpu::{VcpuId, VcpuObject};
+use crate::object::capability::ControlOps;
+use crate::task::mytask;
+
+/// Scarlet Native VM control commands (via HandleControl)
+pub mod vm_ctl {
+    pub const SCTL_VM_SET_MEMORY_REGION: u32 = 0x01;
+    pub const SCTL_VM_GET_VCPU_COUNT: u32 = 0x02;
+}
+
+/// Userspace-facing memory region descriptor (C ABI)
+#[repr(C)]
+pub struct ScarletVmMemoryRegion {
+    pub slot_id: u32,
+    pub flags: u32,
+    pub guest_phys_addr: u64,
+    pub memory_size: u64,
+    pub host_phys_addr: u64,
+}
 
 pub type VmId = u32;
 
@@ -109,5 +127,55 @@ impl VmObject {
 
     pub fn vcpu_count(&self) -> usize {
         self.state.lock().vcpus.len()
+    }
+}
+
+impl ControlOps for VmObject {
+    fn control(&self, command: u32, arg: usize) -> Result<i32, &'static str> {
+        use vm_ctl::*;
+
+        match command {
+            SCTL_VM_SET_MEMORY_REGION => {
+                if arg == 0 {
+                    return Err("Invalid argument pointer");
+                }
+
+                let target_ptr = if let Some(current_task) = mytask() {
+                    current_task
+                        .vm_manager
+                        .translate_vaddr(arg)
+                        .ok_or("Invalid user pointer")?
+                } else {
+                    arg
+                };
+
+                // SAFETY: pointer was translated from a valid user mapping
+                let region = unsafe { core::ptr::read(target_ptr as *const ScarletVmMemoryRegion) };
+
+                let flags = MemorySlotFlags {
+                    readonly: (region.flags & 1) != 0,
+                };
+
+                self.set_memory_region(
+                    region.slot_id,
+                    region.guest_phys_addr,
+                    region.memory_size,
+                    region.host_phys_addr,
+                    flags,
+                )?;
+
+                Ok(0)
+            }
+            SCTL_VM_GET_VCPU_COUNT => Ok(self.vcpu_count() as i32),
+            _ => Err("Unsupported VM control command"),
+        }
+    }
+
+    fn supported_control_commands(&self) -> Vec<(u32, &'static str)> {
+        use vm_ctl::*;
+        alloc::vec![
+            (SCTL_VM_SET_MEMORY_REGION, "Set memory region"),
+            (SCTL_VM_GET_VCPU_COUNT, "Get vCPU count"),
+        ]
     }
 }
