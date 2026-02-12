@@ -11,14 +11,15 @@ use alloc::string::String;
 use alloc::sync::Arc;
 use core::any::Any;
 
+#[cfg(target_arch = "riscv64")]
 use crate::abi::linux::riscv64::LinuxRiscv64Abi;
 use crate::device::manager::DeviceManager;
 use crate::device::{Device, DeviceType};
 use crate::hypervisor::memory::MemorySlotFlags;
 use crate::hypervisor::{VcpuRef, VmObject, VmRef};
-use crate::object::KernelObject;
 use crate::object::capability::selectable::{SelectWaitOutcome, Selectable};
 use crate::object::capability::{ControlOps, MemoryMappingOps};
+use crate::object::KernelObject;
 use crate::task::mytask;
 
 // ---------------------------------------------------------------------------
@@ -26,16 +27,19 @@ use crate::task::mytask;
 // ---------------------------------------------------------------------------
 
 #[cfg(target_arch = "riscv64")]
-mod riscv64;
+pub mod riscv64;
 #[cfg(target_arch = "riscv64")]
 pub use riscv64 as arch;
 
 #[cfg(target_arch = "aarch64")]
-mod aarch64;
+pub mod aarch64;
 #[cfg(target_arch = "aarch64")]
 pub use aarch64 as arch;
 
-pub use arch::KvmRegs;
+#[cfg(target_arch = "aarch64")]
+pub use aarch64::KvmRegs;
+#[cfg(target_arch = "riscv64")]
+pub use riscv64::KvmRegs;
 
 // ---------------------------------------------------------------------------
 // Linux KVM ioctl numbers (include/uapi/linux/kvm.h)
@@ -145,6 +149,7 @@ pub struct KvmRunFailEntry {
 // System-level (/dev/kvm) ioctl dispatcher
 // ---------------------------------------------------------------------------
 
+#[cfg(target_arch = "riscv64")]
 pub fn handle_system_ioctl(
     request: u32,
     _arg: usize,
@@ -174,6 +179,7 @@ pub fn handle_system_ioctl(
 // VM-level ioctl dispatcher
 // ---------------------------------------------------------------------------
 
+#[cfg(target_arch = "riscv64")]
 pub fn handle_vm_ioctl(
     request: u32,
     arg: usize,

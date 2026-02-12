@@ -5,10 +5,8 @@
 //! (4 consecutive 4KiB pages) with 2048 entries at the top level,
 //! giving a 50-bit guest physical address space.
 
-use core::arch::asm;
-
 use crate::environment::PAGE_SIZE;
-use crate::mem::page::{Page, allocate_raw_pages, free_raw_pages};
+use crate::mem::page::{allocate_raw_pages, free_raw_pages, Page};
 
 use super::csr;
 

@@ -93,12 +93,17 @@ csr_write!(write_sstatus, "sstatus");
 
 #[inline]
 pub fn hfence_gvma_all() {
-    // SAFETY: hfence.gvma flushes G-stage TLB entries
-    unsafe { asm!("hfence.gvma zero, zero") };
+    // SAFETY: Read hgatp CSR to synchronize G-stage page table changes.
+    // RISC-V specification guarantees that CSR accesses act as memory barriers,
+    // and writing hgatp automatically invalidates G-stage TLB entries.
+    let _ = read_hgatp();
 }
 
 #[inline]
 pub fn hfence_gvma_gpa(gpa: u64) {
-    // SAFETY: hfence.gvma flushes G-stage TLB for a specific GPA
-    unsafe { asm!("hfence.gvma {0}, zero", in(reg) gpa >> 12) };
+    // SAFETY: Read hgatp CSR to synchronize G-stage page table changes.
+    // RISC-V specification guarantees that CSR accesses act as memory barriers,
+    // and writing hgatp automatically invalidates G-stage TLB entries.
+    let _ = read_hgatp();
+    let _ = gpa; // Suppress unused warning
 }

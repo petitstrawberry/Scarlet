@@ -132,7 +132,7 @@ global_asm!(
     "ret",
 );
 
-extern "C" {
+unsafe extern "C" {
     fn _guest_trap_vector();
 }
 
