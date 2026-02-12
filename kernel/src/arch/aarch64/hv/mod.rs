@@ -54,7 +54,7 @@ pub struct ArchVcpu {
 }
 
 impl ArchVcpu {
-    pub fn new() -> Result<Self, &'static str> {
+    pub fn new(_vm: &ArchVm) -> Result<Self, &'static str> {
         Err("Hypervisor not supported on AArch64")
     }
 

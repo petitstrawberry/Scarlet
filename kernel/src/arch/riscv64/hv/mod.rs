@@ -1,44 +1,76 @@
 //! RISC-V H-extension hypervisor support
 //!
-//! This module provides hardware-assisted virtualization using the
-//! RISC-V Hypervisor extension. The kernel runs in HS-mode
-//! and manages guests in VS/VU-mode.
+//! Hardware-assisted virtualization using the RISC-V Hypervisor extension.
+//! The kernel runs in HS-mode and manages guests in VS/VU-mode.
 
+pub mod csr;
+pub mod gstage;
+pub mod switch;
+pub mod vmexit;
+
+use core::sync::atomic::{AtomicU16, Ordering};
+
+use crate::environment::PAGE_SIZE;
 use crate::hypervisor::exit::VmExit;
 use crate::hypervisor::memory::MemorySlotFlags;
 
-/// Architecture-specific VM state for RISC-V
+use gstage::GStagePageTable;
+use switch::GuestState;
+
+static NEXT_VMID: AtomicU16 = AtomicU16::new(1);
+
+fn alloc_vmid() -> u16 {
+    NEXT_VMID.fetch_add(1, Ordering::Relaxed)
+}
+
 pub struct ArchVm {
-    // G-stage page table root (Sv48x4) — to be implemented
+    gstage: GStagePageTable,
+    vmid: u16,
 }
 
 impl ArchVm {
-    /// Create a new architecture-specific VM context
     pub fn new() -> Result<Self, &'static str> {
-        Ok(Self {})
+        let gstage = GStagePageTable::new()?;
+        let vmid = alloc_vmid();
+        Ok(Self { gstage, vmid })
     }
 
-    /// Map a guest physical address region in the G-stage page table
     pub fn map_memory(
         &mut self,
-        _guest_phys_addr: u64,
-        _host_phys_addr: u64,
-        _size: u64,
-        _flags: MemorySlotFlags,
+        guest_phys_addr: u64,
+        host_phys_addr: u64,
+        size: u64,
+        flags: MemorySlotFlags,
     ) -> Result<(), &'static str> {
+        let page_size = PAGE_SIZE as u64;
+        let num_pages = (size + page_size - 1) / page_size;
+        for i in 0..num_pages {
+            let gpa = guest_phys_addr + i * page_size;
+            let hpa = host_phys_addr + i * page_size;
+            self.gstage.map_page(gpa, hpa, flags.readonly)?;
+        }
+        self.gstage.flush_tlb();
         Ok(())
     }
 
-    /// Unmap a guest physical address region from the G-stage page table
-    pub fn unmap_memory(&mut self, _guest_phys_addr: u64, _size: u64) -> Result<(), &'static str> {
+    pub fn unmap_memory(&mut self, guest_phys_addr: u64, size: u64) -> Result<(), &'static str> {
+        let page_size = PAGE_SIZE as u64;
+        let num_pages = (size + page_size - 1) / page_size;
+        for i in 0..num_pages {
+            let gpa = guest_phys_addr + i * page_size;
+            self.gstage.unmap_page(gpa)?;
+        }
+        self.gstage.flush_tlb();
         Ok(())
+    }
+
+    pub fn hgatp_value(&self) -> u64 {
+        self.gstage.hgatp_value(self.vmid)
     }
 }
 
-/// Guest general-purpose registers
 #[derive(Debug, Clone)]
 pub struct GuestRegisters {
-    /// x0-x31
     pub regs: [u64; 32],
 }
 
@@ -54,43 +86,39 @@ impl Default for GuestRegisters {
     }
 }
 
-/// Architecture-specific vCPU state for RISC-V
 pub struct ArchVcpu {
-    guest_regs: GuestRegisters,
-    guest_pc: u64,
+    guest_state: GuestState,
+    hgatp: u64,
 }
 
 impl ArchVcpu {
-    /// Create a new architecture-specific vCPU context
-    pub fn new() -> Result<Self, &'static str> {
+    pub fn new(vm: &ArchVm) -> Result<Self, &'static str> {
         Ok(Self {
-            guest_regs: GuestRegisters::new(),
-            guest_pc: 0,
+            guest_state: GuestState::new(),
+            hgatp: vm.hgatp_value(),
         })
     }
 
-    /// Enter guest execution and return on VM exit
     pub fn run(&mut self) -> Result<VmExit, &'static str> {
-        Err("Guest execution not yet implemented")
+        let exit_info = switch::guest_enter(&mut self.guest_state, self.hgatp);
+        Ok(exit_info.decode())
     }
 
-    /// Get guest general-purpose registers
     pub fn get_regs(&self) -> GuestRegisters {
-        self.guest_regs.clone()
+        let mut regs = GuestRegisters::new();
+        regs.regs.copy_from_slice(&self.guest_state.gprs);
+        regs
     }
 
-    /// Set guest general-purpose registers
     pub fn set_regs(&mut self, regs: &GuestRegisters) {
-        self.guest_regs = regs.clone();
+        self.guest_state.gprs.copy_from_slice(&regs.regs);
     }
 
-    /// Get the guest program counter
     pub fn get_pc(&self) -> u64 {
-        self.guest_pc
+        self.guest_state.pc
     }
 
-    /// Set the guest program counter
     pub fn set_pc(&mut self, pc: u64) {
-        self.guest_pc = pc;
+        self.guest_state.pc = pc;
     }
 }

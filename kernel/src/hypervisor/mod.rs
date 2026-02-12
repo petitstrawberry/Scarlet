@@ -16,14 +16,13 @@ pub mod vm;
 pub use error::HypervisorError;
 pub use exit::VmExit;
 pub use memory::{MemorySlot, MemorySlotFlags, MemorySlotManager};
-pub use vcpu::Vcpu;
-pub use vm::Vm;
+pub use vcpu::VcpuObject;
+pub use vm::VmObject;
 
 use alloc::sync::Arc;
-use spin::Mutex;
 
-/// Type alias for a shared reference to a VM
-pub type VmRef = Arc<Mutex<Vm>>;
+/// Type alias for a shared reference to a VM (internal mutability)
+pub type VmRef = Arc<VmObject>;
 
-/// Type alias for a shared reference to a vCPU
-pub type VcpuRef = Arc<Mutex<Vcpu>>;
+/// Type alias for a shared reference to a vCPU (internal mutability)
+pub type VcpuRef = Arc<VcpuObject>;
