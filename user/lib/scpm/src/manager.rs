@@ -123,12 +123,13 @@ impl PackageManager {
         let mut current_pkg_index: Option<usize> = None;
         let mut line_count = 0;
 
-        for line in content_str.lines() {
+        for raw_line in content_str.lines() {
             line_count += 1;
-            let line = line.trim();
+            let line = raw_line.trim_end();
+            let trimmed = line.trim_start();
             crate::debug_log!("[SCPM] Processing line {}: '{}'", line_count, line);
 
-            if line.is_empty() || line.starts_with('#') {
+            if trimmed.is_empty() || trimmed.starts_with('#') {
                 crate::debug_log!("[SCPM]   Skipping empty/comment line");
                 continue;
             }
@@ -136,7 +137,7 @@ impl PackageManager {
             if line.starts_with(' ') {
                 crate::debug_log!("[SCPM]   Found file entry");
                 if let Some(idx) = current_pkg_index {
-                    let file_path = line[1..].trim();
+                    let file_path = trimmed;
                     crate::debug_log!(
                         "[SCPM]   Adding file '{}' to package at index {}",
                         file_path,
@@ -146,9 +147,9 @@ impl PackageManager {
                         pkg.installed_files.push(file_path.to_string());
                     }
                 }
-            } else if line.contains(':') {
+            } else if trimmed.contains(':') {
                 crate::debug_log!("[SCPM]   Found package entry");
-                let parts: Vec<&str> = line.splitn(2, ':').collect();
+                let parts: Vec<&str> = trimmed.splitn(2, ':').collect();
                 if parts.len() < 2 {
                     crate::debug_log!("[SCPM]   Invalid format, skipping");
                     continue;
@@ -339,8 +340,13 @@ impl PackageManager {
             .get_installed(name)
             .ok_or(Error::PackageNotFound(name.to_string()))?;
 
-        for file_path in &package.installed_files {
-            let _ = fs::remove_file(file_path);
+        let mut paths = package.installed_files.clone();
+        paths.sort_by(|a, b| b.len().cmp(&a.len()));
+
+        for file_path in &paths {
+            if fs::remove_file(file_path).is_ok() {
+                continue;
+            }
             let _ = fs::remove_directory(file_path);
         }
 
