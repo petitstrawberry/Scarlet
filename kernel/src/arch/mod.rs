@@ -75,3 +75,13 @@ pub use riscv64::fpu;
 
 #[cfg(target_arch = "aarch64")]
 pub use aarch64::fpu;
+
+/// Architecture-specific hypervisor support
+#[cfg(feature = "hypervisor")]
+pub mod hv {
+    #[cfg(target_arch = "riscv64")]
+    pub use crate::arch::riscv64::hv::*;
+
+    #[cfg(target_arch = "aarch64")]
+    pub use crate::arch::aarch64::hv::*;
+}

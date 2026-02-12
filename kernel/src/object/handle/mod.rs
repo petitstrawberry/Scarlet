@@ -152,6 +152,10 @@ impl HandleTable {
                 // Counter is used for event notification (IPC)
                 HandleType::IpcChannel
             }
+            #[cfg(feature = "hypervisor")]
+            KernelObject::HypervisorVm(_) => HandleType::Regular,
+            #[cfg(feature = "hypervisor")]
+            KernelObject::HypervisorVcpu(_) => HandleType::Regular,
         };
 
         HandleMetadata {
@@ -377,6 +381,10 @@ impl HandleTable {
                 readable,
                 writable,
             )),
+            #[cfg(feature = "hypervisor")]
+            KernelObject::HypervisorVm(_) => None,
+            #[cfg(feature = "hypervisor")]
+            KernelObject::HypervisorVcpu(_) => None,
         }
     }
 

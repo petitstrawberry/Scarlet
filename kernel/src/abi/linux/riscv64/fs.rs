@@ -2837,6 +2837,10 @@ pub fn sys_ftruncate(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> us
                     crate::object::KernelObject::SharedMemory(_) => "SharedMemory",
                     #[cfg(feature = "network")]
                     crate::object::KernelObject::Socket(_) => "Socket",
+                    #[cfg(feature = "hypervisor")]
+                    crate::object::KernelObject::HypervisorVm(_) => "HypervisorVm",
+                    #[cfg(feature = "hypervisor")]
+                    crate::object::KernelObject::HypervisorVcpu(_) => "HypervisorVcpu",
                 };
                 crate::println!(
                     "sys_ftruncate: fd={} kind={} path={:?} len={} err={:?}",
@@ -3795,6 +3799,14 @@ pub fn sys_ppoll(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize 
                         }
                         crate::object::KernelObject::SharedMemory(_) => {
                             kind = "shmem";
+                        }
+                        #[cfg(feature = "hypervisor")]
+                        crate::object::KernelObject::HypervisorVm(_) => {
+                            kind = "hypervisor_vm";
+                        }
+                        #[cfg(feature = "hypervisor")]
+                        crate::object::KernelObject::HypervisorVcpu(_) => {
+                            kind = "hypervisor_vcpu";
                         }
                     }
                 }

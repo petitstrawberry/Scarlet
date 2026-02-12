@@ -259,6 +259,8 @@ pub mod earlycon;
 pub mod environment;
 pub mod executor;
 pub mod fs;
+#[cfg(feature = "hypervisor")]
+pub mod hypervisor;
 pub mod initcall;
 pub mod interrupt;
 pub mod ipc;
