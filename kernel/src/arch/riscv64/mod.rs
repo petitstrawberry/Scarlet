@@ -539,7 +539,7 @@ pub fn get_cpu() -> &'static mut Riscv64 {
 
 pub fn set_next_mode(mode: Mode) {
     match mode {
-        Mode::User => {
+        Mode::User | Mode::GuestUser => {
             unsafe {
                 // sstatus.spp = 0 (U-mode)
                 let mut sstatus: usize;
@@ -554,7 +554,7 @@ pub fn set_next_mode(mode: Mode) {
                 );
             }
         }
-        Mode::Kernel => {
+        Mode::Kernel | Mode::GuestKernel => {
             unsafe {
                 // sstatus.spp = 1 (S-mode)
                 let mut sstatus: usize;

@@ -8,14 +8,9 @@ use crate::arch::Trapframe;
 
 use super::IntRegisters;
 use super::fpu::{FpuContext, VectorContext};
+use crate::arch::Mode;
 
 use alloc::boxed::Box;
-
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum Mode {
-    User,
-    Kernel,
-}
 
 #[derive(Debug, Clone)]
 pub struct Vcpu {

@@ -3,10 +3,11 @@
 //! Hardware-assisted virtualization using the RISC-V Hypervisor extension.
 //! The kernel runs in HS-mode and manages guests in VS/VU-mode.
 
-pub mod csr;
-pub mod gstage;
-pub mod switch;
-pub mod vmexit;
+mod csr;
+mod mmu;
+mod switch;
+mod trap;
+mod vmexit;
 
 use core::sync::atomic::{AtomicU16, Ordering};
 
@@ -14,7 +15,7 @@ use crate::environment::PAGE_SIZE;
 use crate::hypervisor::exit::VmExit;
 use crate::hypervisor::memory::MemorySlotFlags;
 
-use gstage::GStagePageTable;
+use mmu::GuestRoot;
 use switch::GuestState;
 
 static NEXT_VMID: AtomicU16 = AtomicU16::new(1);
@@ -24,15 +25,15 @@ fn alloc_vmid() -> u16 {
 }
 
 pub struct ArchVm {
-    gstage: GStagePageTable,
+    guest_root: GuestRoot,
     vmid: u16,
 }
 
 impl ArchVm {
     pub fn new() -> Result<Self, &'static str> {
-        let gstage = GStagePageTable::new()?;
+        let guest_root = GuestRoot::new()?;
         let vmid = alloc_vmid();
-        Ok(Self { gstage, vmid })
+        Ok(Self { guest_root, vmid })
     }
 
     pub fn map_memory(
@@ -47,9 +48,9 @@ impl ArchVm {
         for i in 0..num_pages {
             let gpa = guest_phys_addr + i * page_size;
             let hpa = host_phys_addr + i * page_size;
-            self.gstage.map_page(gpa, hpa, flags.readonly)?;
+            self.guest_root.map_page(gpa, hpa, flags.readonly)?;
         }
-        self.gstage.flush_tlb();
+        self.guest_root.flush_tlb();
         Ok(())
     }
 
@@ -58,15 +59,20 @@ impl ArchVm {
         let num_pages = (size + page_size - 1) / page_size;
         for i in 0..num_pages {
             let gpa = guest_phys_addr + i * page_size;
-            self.gstage.unmap_page(gpa)?;
+            self.guest_root.unmap_page(gpa)?;
         }
-        self.gstage.flush_tlb();
+        self.guest_root.flush_tlb();
         Ok(())
     }
 
-    pub fn hgatp_value(&self) -> u64 {
-        self.gstage.hgatp_value(self.vmid)
+    fn guest_root_token(&self) -> Result<u64, &'static str> {
+        self.guest_root.root_token(self.vmid)
     }
+}
+
+pub fn set_guest_root_pagetable(guest_root_token: u64) -> Result<(), &'static str> {
+    csr::write_hgatp(guest_root_token);
+    Ok(())
 }
 
 #[derive(Debug, Clone)]
@@ -102,20 +108,20 @@ impl Default for GuestRegisters {
 
 pub struct ArchVcpu {
     guest_state: GuestState,
-    hgatp: u64,
+    guest_root_token: u64,
 }
 
 impl ArchVcpu {
     pub fn new(vm: &ArchVm) -> Result<Self, &'static str> {
         Ok(Self {
             guest_state: GuestState::new(),
-            hgatp: vm.hgatp_value(),
+            guest_root_token: vm.guest_root_token()?,
         })
     }
 
     pub fn run(&mut self) -> Result<VmExit, &'static str> {
-        let exit_info = switch::guest_enter(&mut self.guest_state, self.hgatp);
-        Ok(exit_info.decode())
+        let exit_info = switch::guest_enter(&mut self.guest_state, self.guest_root_token);
+        Ok(trap::guest_trap_handler(&exit_info))
     }
 
     pub fn get_regs(&self) -> GuestRegisters {

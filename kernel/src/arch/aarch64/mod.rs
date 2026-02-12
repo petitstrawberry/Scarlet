@@ -471,11 +471,11 @@ pub fn get_current_cpu_id() -> usize {
     (mpidr & 0xFF) as usize
 }
 
-pub fn set_next_mode(mode: vcpu::Mode) {
+pub fn set_next_mode(_mode: vcpu::Mode) {
     // AArch64 return mode is currently chosen in the trampoline (`_user_trap_exit`).
     // Keep this as a no-op so shared scheduler code can call it without
     // architecture-specific branching or noisy TODO logs.
-    let _ = mode;
+    let _ = _mode;
 }
 
 /// Memory barrier for device/MMIO (I/O) operations.

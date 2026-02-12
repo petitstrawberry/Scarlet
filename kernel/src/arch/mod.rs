@@ -17,6 +17,14 @@ pub enum UserReturnIrqPolicy {
     Disable,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Mode {
+    User,
+    Kernel,
+    GuestUser,
+    GuestKernel,
+}
+
 /// Options applied right before returning to user mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct UserEntryOptions {

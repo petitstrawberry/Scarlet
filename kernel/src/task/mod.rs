@@ -281,6 +281,7 @@ impl AtomicTaskState {
 pub enum TaskType {
     Kernel,
     User,
+    Vcpu,
 }
 
 /// ABI Zone structure holding a memory range with an owned ABI module.
@@ -548,6 +549,7 @@ impl Task {
             vcpu: Mutex::new(Vcpu::new(match task_type {
                 TaskType::Kernel => crate::arch::vcpu::Mode::Kernel,
                 TaskType::User => crate::arch::vcpu::Mode::User,
+                TaskType::Vcpu => crate::arch::vcpu::Mode::GuestKernel,
             })),
             kernel_context: Mutex::new(KernelContext::new()),
             vm_manager: VirtualMemoryManager::new(),
@@ -580,6 +582,11 @@ impl Task {
                 /* Set sp to the top of the user stack */
                 self.vcpu.lock().set_sp(USER_STACK_END);
                 /* PC will be set when loading the ELF binary */
+            }
+            TaskType::Vcpu => {
+                user_kernel_vm_init(self);
+                /* Set sp to the top of the kernel stack */
+                self.vcpu.lock().set_sp(KERNEL_VM_STACK_END + 1);
             }
         }
 

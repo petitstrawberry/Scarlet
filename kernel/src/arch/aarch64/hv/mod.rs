@@ -6,12 +6,20 @@
 use crate::hypervisor::exit::VmExit;
 use crate::hypervisor::memory::MemorySlotFlags;
 
+mod mmu;
+use mmu::GuestRoot;
+
 /// Architecture-specific VM state for AArch64 (stub)
-pub struct ArchVm {}
+pub struct ArchVm {
+    _guest_root: GuestRoot,
+}
 
 impl ArchVm {
     pub fn new() -> Result<Self, &'static str> {
-        Err("Hypervisor not supported on AArch64")
+        let guest_root = GuestRoot::new()?;
+        Ok(Self {
+            _guest_root: guest_root,
+        })
     }
 
     pub fn map_memory(
@@ -27,6 +35,10 @@ impl ArchVm {
     pub fn unmap_memory(&mut self, _guest_phys_addr: u64, _size: u64) -> Result<(), &'static str> {
         Err("Hypervisor not supported on AArch64")
     }
+}
+
+pub fn set_guest_root_pagetable(_guest_root_token: u64) -> Result<(), &'static str> {
+    Err("Hypervisor not supported on AArch64")
 }
 
 /// Guest general-purpose registers
@@ -61,6 +73,7 @@ impl Default for GuestRegisters {
 pub struct ArchVcpu {
     guest_regs: GuestRegisters,
     guest_pc: u64,
+    _guest_root_token: u64,
 }
 
 impl ArchVcpu {

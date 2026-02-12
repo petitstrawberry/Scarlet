@@ -136,13 +136,7 @@ unsafe extern "C" {
     fn _guest_trap_vector();
 }
 
-/// Enter guest and return on guest trap with exit info.
-///
-/// # Safety
-///
-/// Must be called from HS-mode with H-extension. `hgatp` must reference
-/// a valid G-stage page table. `guest.pc` must be mapped in the G-stage table.
-pub fn guest_enter(guest: &mut GuestState, hgatp: u64) -> VmExitInfo {
+pub(super) fn guest_enter(guest: &mut GuestState, guest_root_token: u64) -> VmExitInfo {
     // Save host stvec and redirect to our guest trap vector
     let saved_stvec: u64;
     unsafe { asm!("csrr {}, stvec", out(reg) saved_stvec) };
@@ -167,7 +161,7 @@ pub fn guest_enter(guest: &mut GuestState, hgatp: u64) -> VmExitInfo {
 
     csr::write_sepc(guest.pc);
 
-    csr::write_hgatp(hgatp);
+    csr::write_hgatp(guest_root_token);
     csr::hfence_gvma_all();
 
     // sstatus: SPP=0 (→ VS-mode), SPIE=1 (interrupts enabled in guest)
