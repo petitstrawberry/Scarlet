@@ -9,8 +9,8 @@ use alloc::sync::Arc;
 use crate::{
     device::block::BlockDevice,
     fs::{
-        params::FileSystemParams, FileSystemDriver, FileSystemError, FileSystemErrorKind,
-        FileSystemType,
+        FileSystemDriver, FileSystemError, FileSystemErrorKind, FileSystemType,
+        params::FileSystemParams,
     },
 };
 
