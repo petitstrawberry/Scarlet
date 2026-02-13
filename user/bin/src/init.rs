@@ -10,7 +10,7 @@ use std::{
     },
     handle::Handle,
     println,
-    task::{EXECVE_FORCE_ABI_REBUILD, execve_with_flags, exit, fork, getpid, waitpid},
+    task::{EXECVE_FORCE_ABI_REBUILD, execve_with_flags, getpid},
 };
 
 // Global variables for standard I/O handles to hold references
@@ -407,7 +407,7 @@ fn copy_symlink(src: &str, dest: &str) -> bool {
 fn main() -> i32 {
     // Initialize the device filesystem
     if setup_devfs().is_err() {
-        exit(-1); // Exit if we cannot set up the device filesystem
+        return -1;
     }
 
     // Set up standard input, output, and error
@@ -450,72 +450,29 @@ fn main() -> i32 {
 
     // std::profiler::dump_profiler_stats();
 
-    println!("init: Starting stem daemon (stemd)...");
+    println!("init: Transforming into stem daemon (stemd)...");
 
-    match fork() {
-        0 => {
-            // Child process: Execute stemd
-            // After pivot_root, try the most likely locations for stemd binary
-            let stemd_paths = [
-                "/system/scarlet/bin/stemd",
-                "/scarlet/system/scarlet/bin/stemd", // In new root (copied from initramfs)
-                "/old_root/system/scarlet/bin/stemd", // In old root (original initramfs)
-            ];
+    let stemd_paths = [
+        "/system/scarlet/bin/stemd",
+        "/scarlet/system/scarlet/bin/stemd",
+        "/old_root/system/scarlet/bin/stemd",
+    ];
 
-            for stemd_path in &stemd_paths {
-                println!("init: Trying to execute stemd at: {}", stemd_path);
+    for stemd_path in &stemd_paths {
+        println!("init: Trying to execute stemd at: {}", stemd_path);
 
-                // Try to open the file first to see if it exists
-                match File::open(stemd_path) {
-                    Ok(_) => {
-                        println!("init: stemd binary exists at {}", stemd_path);
-                    }
-                    Err(_) => {
-                        println!("init: stemd binary not found at {}", stemd_path);
-                        continue;
-                    }
-                }
-
-                if execve_with_flags(stemd_path, &[stemd_path], &[], EXECVE_FORCE_ABI_REBUILD) == 0
-                {
-                    // This should not be reached if execve succeeds
-                    break;
-                } else {
-                    println!(
-                        "init: Failed to execve {} (binary exists but execve failed)",
-                        stemd_path
-                    );
-                }
+        match File::open(stemd_path) {
+            Ok(_) => println!("init: stemd binary exists at {}", stemd_path),
+            Err(_) => {
+                println!("init: stemd binary not found at {}", stemd_path);
+                continue;
             }
-
-            println!("init: All stemd paths failed, exiting child process");
-            exit(-1);
         }
-        -1 => {
-            println!("init: Failed to clone");
-            loop {}
-        }
-        pid => {
-            println!("init: stemd created, child PID: {}", pid);
 
-            let res = loop {
-                let res = waitpid(pid, 0);
-                if res.0 < 0 {
-                    // Any child process exits
-                    continue;
-                }
-                break res; // Exit loop on success
-            };
-
-            println!(
-                "init: Child process (PID={}) exited with status: {}",
-                res.0, res.1
-            );
-            if res.1 != 0 {
-                println!("init: Child process exited with error");
-            }
-            println!("init: System shutdown - all processes terminated");
-            loop {}
-        }
+        let _ = execve_with_flags(stemd_path, &[stemd_path], &[], EXECVE_FORCE_ABI_REBUILD);
+        println!("init: Failed to execve {}", stemd_path);
     }
+
+    println!("init: All stemd paths failed, halting system");
+    loop {}
 }

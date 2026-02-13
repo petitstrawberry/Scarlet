@@ -32,6 +32,15 @@ fn print_usage() {
         "Usage: netcfg --iface <name> [--ip <addr>] [--mask <addr>] [--gw <addr>] [--dns <addr>]"
     );
     println!("       netcfg --list");
+    println!();
+    println!("Options:");
+    println!("  --iface <name>  Interface name (required for configuration)");
+    println!("  --ip <addr>     Set IPv4 address");
+    println!("  --mask <addr>    Set netmask");
+    println!("  --gw <addr>      Set default gateway");
+    println!("  --dns <addr>     Set DNS server");
+    println!("  --list           Show network configuration (interfaces, IP, gateway, DNS, MAC)");
+    println!("  --help, -h       Show this help message");
 }
 
 #[unsafe(no_mangle)]
@@ -47,18 +56,81 @@ fn main() -> i32 {
     while i < args.len() {
         match args[i].as_str() {
             "--list" => {
-                let mut buffer = [0u8; 256];
-                match list_interfaces(&mut buffer) {
-                    Ok(len) if len > 0 => {
-                        if let Ok(text) = core::str::from_utf8(&buffer[..len]) {
-                            println!("{}", text);
+                match list_interfaces() {
+                    Ok((status, interfaces)) => {
+                        if status.gateway_set == 1 {
+                            println!(
+                                "Gateway: {}.{}.{}.{}",
+                                status.gateway[0],
+                                status.gateway[1],
+                                status.gateway[2],
+                                status.gateway[3]
+                            );
+                        } else {
+                            println!("Gateway: (none)");
                         }
-                    }
-                    Ok(_) => {
-                        println!("(no interfaces)");
+
+                        if status.dns_set == 1 {
+                            println!(
+                                "DNS: {}.{}.{}.{}",
+                                status.dns_server[0],
+                                status.dns_server[1],
+                                status.dns_server[2],
+                                status.dns_server[3]
+                            );
+                        } else {
+                            println!("DNS: (none)");
+                        }
+
+                        println!(
+                            "Netmask: {}.{}.{}.{}",
+                            status.netmask[0],
+                            status.netmask[1],
+                            status.netmask[2],
+                            status.netmask[3]
+                        );
+                        println!();
+
+                        if interfaces.is_empty() {
+                            println!("(no interfaces)");
+                            return 0;
+                        }
+
+                        for info in &interfaces {
+                            let name_bytes = &info.name;
+                            let null_pos = name_bytes
+                                .iter()
+                                .position(|&b| b == 0)
+                                .unwrap_or(name_bytes.len());
+                            let name = core::str::from_utf8(&name_bytes[..null_pos])
+                                .unwrap_or("(invalid)");
+
+                            println!("Interface: {}", name);
+                            if info.ip_set == 1 {
+                                println!(
+                                    "  IP: {}.{}.{}.{}",
+                                    info.ip_address[0],
+                                    info.ip_address[1],
+                                    info.ip_address[2],
+                                    info.ip_address[3]
+                                );
+                            } else {
+                                println!("  IP: (none)");
+                            }
+                            println!(
+                                "  MAC: {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+                                info.mac_address[0],
+                                info.mac_address[1],
+                                info.mac_address[2],
+                                info.mac_address[3],
+                                info.mac_address[4],
+                                info.mac_address[5]
+                            );
+                        }
                     }
                     Err(_) => {
                         println!("netcfg: failed to list interfaces");
+                        return 1;
                     }
                 }
                 return 0;

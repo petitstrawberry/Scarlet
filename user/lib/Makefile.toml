@@ -7,11 +7,11 @@ skip_core_tasks = true
 
 [tasks.fmt]
 description = "Format all user library code"
-dependencies = ["fmt-std", "fmt-framebuffer", "fmt-sws-protocol", "fmt-scarlet-desktop-config"]
+dependencies = ["fmt-std", "fmt-framebuffer", "fmt-sws-protocol", "fmt-scarlet-desktop-config", "fmt-scpm"]
 
 [tasks.fmt-check]
 description = "Check formatting for all user library code"
-dependencies = ["fmt-std-check", "fmt-framebuffer-check", "fmt-sws-protocol-check", "fmt-scarlet-desktop-config-check"]
+dependencies = ["fmt-std-check", "fmt-framebuffer-check", "fmt-sws-protocol-check", "fmt-scpm-check"]
 
 [tasks.fmt-std-check]
 description = "Check formatting for user library std code"
@@ -55,9 +55,15 @@ cwd = "scarlet-desktop-config"
 command = "cargo"
 args = ["fmt"]
 
-[tasks.fmt-scarlet-desktop-config-check]
-description = "Check formatting for user library scarlet-desktop-config code"
-cwd = "scarlet-desktop-config"
+[tasks.fmt-scpm]
+description = "Format user library scpm code"
+cwd = "scpm"
+command = "cargo"
+args = ["fmt"]
+
+[tasks.fmt-scpm-check]
+description = "Check formatting for user library scpm code"
+cwd = "scpm"
 command = "cargo"
 args = ["fmt", "--", "--check"]
 
@@ -71,7 +77,8 @@ script = [
     "cd std && cargo build --target ../../targets/riscv64gc-unknown-scarlet-elf.json",
     "cd ../framebuffer && cargo build --target ../../targets/riscv64gc-unknown-scarlet-elf.json",
     "cd ../sws_protocol && cargo build --target ../../targets/riscv64gc-unknown-scarlet-elf.json",
-    "cd ../scarlet-desktop-config && cargo build --target ../../targets/riscv64gc-unknown-scarlet-elf.json"
+    "cd ../scarlet-desktop-config && cargo build --target ../../targets/riscv64gc-unknown-scarlet-elf.json",
+    "cd ../scpm && cargo build --target ../../targets/riscv64gc-unknown-scarlet-elf.json"
 ]
 
 [tasks.build-userlib-release]
@@ -80,7 +87,8 @@ script = [
     "cd std && cargo build --release --target ../../targets/riscv64gc-unknown-scarlet-elf.json",
     "cd ../framebuffer && cargo build --release --target ../../targets/riscv64gc-unknown-scarlet-elf.json",
     "cd ../sws_protocol && cargo build --release --target ../../targets/riscv64gc-unknown-scarlet-elf.json",
-    "cd ../scarlet-desktop-config && cargo build --release --target ../../targets/riscv64gc-unknown-scarlet-elf.json"
+    "cd ../scarlet-desktop-config && cargo build --release --target ../../targets/riscv64gc-unknown-scarlet-elf.json",
+    "cd ../scpm && cargo build --release --target ../../targets/riscv64gc-unknown-scarlet-elf.json"
 ]
 
 [tasks.build-userlib-debug-aarch64]
@@ -89,7 +97,8 @@ script = [
     "cd std && cargo build --target ../../targets/aarch64-unknown-scarlet-elf.json",
     "cd ../framebuffer && cargo build --target ../../targets/aarch64-unknown-scarlet-elf.json",
     "cd ../sws_protocol && cargo build --target ../../targets/aarch64-unknown-scarlet-elf.json",
-    "cd ../scarlet-desktop-config && cargo build --target ../../targets/aarch64-unknown-scarlet-elf.json"
+    "cd ../scarlet-desktop-config && cargo build --target ../../targets/aarch64-unknown-scarlet-elf.json",
+    "cd ../scpm && cargo build --target ../../targets/aarch64-unknown-scarlet-elf.json"
 ]
 
 [tasks.build-userlib-release-aarch64]
@@ -98,7 +107,8 @@ script = [
     "cd std && cargo build --release --target ../../targets/aarch64-unknown-scarlet-elf.json",
     "cd ../framebuffer && cargo build --release --target ../../targets/aarch64-unknown-scarlet-elf.json",
     "cd ../sws_protocol && cargo build --release --target ../../targets/aarch64-unknown-scarlet-elf.json",
-    "cd ../scarlet-desktop-config && cargo build --release --target ../../targets/aarch64-unknown-scarlet-elf.json"
+    "cd ../scarlet-desktop-config && cargo build --release --target ../../targets/aarch64-unknown-scarlet-elf.json",
+    "cd ../scpm && cargo build --release --target ../../targets/aarch64-unknown-scarlet-elf.json"
 ]
 
 [tasks.clean]
@@ -107,7 +117,8 @@ script = [
     "cd std && cargo clean",
     "cd ../framebuffer && cargo clean",
     "cd ../sws_protocol && cargo clean",
-    "cd ../scarlet-desktop-config && cargo clean"
+    "cd ../scarlet-desktop-config && cargo clean",
+    "cd ../scpm && cargo clean"
 ]
 
 [tasks.test]
@@ -116,7 +127,8 @@ script = [
     "cd std && cargo test",
     "cd ../framebuffer && cargo test",
     "cd ../sws_protocol && cargo test",
-    "cd ../scarlet-desktop-config && cargo test"
+    "cd ../scarlet-desktop-config && cargo test",
+    "cd ../scpm && cargo test"
 ]
 
 [tasks.doc]
@@ -125,12 +137,13 @@ script = [
     "cd std && cargo doc --no-deps",
     "cd ../framebuffer && cargo doc --no-deps",
     "cd ../sws_protocol && cargo doc --no-deps",
-    "cd ../scarlet-desktop-config && cargo doc --no-deps"
+    "cd ../scarlet-desktop-config && cargo doc --no-deps",
+    "cd ../scpm && cargo doc --no-deps"
 ]
 
 [tasks.clippy]
 description = "Run clippy for all user libraries"
-dependencies = ["clippy-std", "clippy-framebuffer", "clippy-sws-protocol", "clippy-scarlet-desktop-config"]
+dependencies = ["clippy-std", "clippy-framebuffer", "clippy-sws-protocol", "clippy-scarlet-desktop-config", "clippy-scpm"]
 
 [tasks.clippy-std]
 description = "Run clippy for user library std code"
@@ -156,9 +169,15 @@ cwd = "scarlet-desktop-config"
 command = "cargo"
 args = ["clippy", "--", "-D", "warnings"]
 
+[tasks.clippy-scpm]
+description = "Run clippy for user library scpm code"
+cwd = "scpm"
+command = "cargo"
+args = ["clippy", "--", "-D", "warnings"]
+
 [tasks.clippy-fix]
 description = "Run clippy with auto-fix for all user libraries"
-dependencies = ["clippy-fix-std", "clippy-fix-framebuffer", "clippy-fix-sws-protocol", "clippy-fix-scarlet-desktop-config"]
+dependencies = ["clippy-fix-std", "clippy-fix-framebuffer", "clippy-fix-sws-protocol", "clippy-fix-scarlet-desktop-config", "clippy-fix-scpm"]
 
 [tasks.clippy-fix-std]
 description = "Run clippy with auto-fix for user library std code"
@@ -181,5 +200,11 @@ args = ["clippy", "--fix", "--allow-dirty", "--allow-staged", "--", "-D", "warni
 [tasks.clippy-fix-scarlet-desktop-config]
 description = "Run clippy with auto-fix for user library scarlet-desktop-config code"
 cwd = "scarlet-desktop-config"
+command = "cargo"
+args = ["clippy", "--fix", "--allow-dirty", "--allow-staged", "--", "-D", "warnings"]
+
+[tasks.clippy-fix-scpm]
+description = "Run clippy with auto-fix for user library scpm code"
+cwd = "scpm"
 command = "cargo"
 args = ["clippy", "--fix", "--allow-dirty", "--allow-staged", "--", "-D", "warnings"]

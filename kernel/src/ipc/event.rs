@@ -493,7 +493,7 @@ impl TaskEventQueue {
     }
 
     /// Add event to queue, returns true if this was the first event (0->1 transition)
-    fn enqueue(&mut self, event: Event) -> bool {
+    pub fn enqueue(&mut self, event: Event) -> bool {
         let was_empty = self.total_count == 0;
         let priority = event.metadata.priority;
 

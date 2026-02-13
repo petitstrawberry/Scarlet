@@ -83,10 +83,11 @@ use crate::fs::vfs_v2::syscall::{
     sys_vfs_open, sys_vfs_readlink, sys_vfs_remove, sys_vfs_truncate,
 };
 use crate::ipc::syscall::{
-    sys_event_channel_create, sys_event_handler_register, sys_event_publish, sys_event_send_direct,
-    sys_event_subscribe, sys_event_unsubscribe, sys_pipe, sys_shared_memory_create,
-    sys_shared_memory_resize, sys_socket_recv_handle, sys_socket_recv_handle_and_data,
-    sys_socket_send_handle, sys_socket_send_handle_and_data,
+    sys_event_channel_create, sys_event_handler_register, sys_event_handler_register_native,
+    sys_event_handler_unregister_native, sys_event_mask, sys_event_publish, sys_event_return,
+    sys_event_send_direct, sys_event_subscribe, sys_event_unsubscribe, sys_pipe,
+    sys_shared_memory_create, sys_shared_memory_resize, sys_socket_recv_handle,
+    sys_socket_recv_handle_and_data, sys_socket_send_handle, sys_socket_send_handle_and_data,
 };
 use crate::network::syscall::{
     sys_network_list_interfaces, sys_network_set_dns, sys_network_set_gateway,
@@ -106,8 +107,8 @@ use crate::object::handle::syscall::{
 use crate::task::syscall::{
     sys_brk, sys_clone, sys_create_namespace, sys_execve, sys_execve_abi, sys_exit, sys_exit_group,
     sys_get_tls, sys_getchar, sys_getpid, sys_getppid, sys_putchar, sys_register_abi_zone,
-    sys_sbrk, sys_set_tid_address, sys_set_tls, sys_sleep, sys_unregister_abi_zone, sys_waitpid,
-    sys_yield,
+    sys_sbrk, sys_set_tid_address, sys_set_tls, sys_shutdown, sys_sleep, sys_unregister_abi_zone,
+    sys_waitpid, sys_yield,
 };
 
 #[macro_use]
@@ -224,6 +225,12 @@ syscall_table! {
     SocketSendHandleAndData = 632 => sys_socket_send_handle_and_data, // Send handle and data atomically
     SocketRecvHandleAndData = 633 => sys_socket_recv_handle_and_data, // Receive handle and data atomically
 
+    // Scarlet Native Event Handling
+    EventHandlerRegisterNative = 640 => sys_event_handler_register_native,   // Register event handler (Scarlet Native)
+    EventHandlerUnregisterNative = 641 => sys_event_handler_unregister_native, // Unregister event handler (Scarlet Native)
+    EventMask = 642 => sys_event_mask,                                       // Set event mask (Scarlet Native)
+    EventReturn = 643 => sys_event_return,                                   // Return from event handler (Scarlet Native)
+
 
     // === Memory Mapping Operations ===
     MemoryMap = 700 => sys_memory_map,     // Memory map operation (mmap)
@@ -250,6 +257,9 @@ syscall_table! {
     NetworkListInterfaces = 914 => sys_network_list_interfaces, // List network interfaces
 
     // === Task Event Operations ===
+
+    // === System Control Operations ===
+    Shutdown = 1000 => sys_shutdown,          // Shutdown the system gracefully
 
     // === Debug/Profiler Operations ===
     ProfilerDump = 999 => sys_profiler_dump, // Dump profiler statistics (debug only)

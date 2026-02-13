@@ -122,25 +122,19 @@ pub enum GraphicsResponse {
 
 /// Graphics device interface
 ///
-/// This trait defines the minimal interface for graphics devices.
-/// It provides fbdev-equivalent basic operations for framebuffer management.
-/// OS-specific features (like DRM) are provided through separate capability traits.
+/// This trait defines the interface for graphics devices.
+/// It provides methods for framebuffer management and display operations.
 pub trait GraphicsDevice: Device {
     /// Get the device display name
     fn get_display_name(&self) -> &'static str;
 
-    /// Get current framebuffer configuration
-    /// This returns the current scanout buffer configuration which may change
-    /// after page flips or mode changes.
+    /// Get framebuffer configuration
     fn get_framebuffer_config(&self) -> Result<FramebufferConfig, &'static str>;
 
-    /// Get current framebuffer memory address
-    /// Returns the physical address of the current front buffer.
-    /// This address may change after a page flip operation.
+    /// Get framebuffer memory address
     fn get_framebuffer_address(&self) -> Result<usize, &'static str>;
 
     /// Flush framebuffer region to display
-    /// Ensures that writes to the framebuffer are visible to the display controller.
     fn flush_framebuffer(
         &self,
         x: u32,
@@ -151,77 +145,6 @@ pub trait GraphicsDevice: Device {
 
     /// Initialize the graphics device (idempotent)
     fn init_graphics(&self) -> Result<(), &'static str>;
-}
-
-/// Capability trait for devices that support page flipping
-///
-/// Page flipping allows changing the displayed buffer without tearing.
-/// Devices that implement this trait can switch between front and back buffers.
-pub trait PageFlipCapable: GraphicsDevice {
-    /// Check if page flip is currently possible
-    fn can_page_flip(&self) -> bool;
-
-    /// Queue a page flip to display the specified buffer
-    ///
-    /// # Arguments
-    /// * `fb_id` - Identifier of the framebuffer to display
-    /// * `crtc_id` - CRTC identifier (display controller)
-    ///
-    /// # Returns
-    /// Ok if the flip was queued successfully. The actual flip happens asynchronously
-    /// during the next vblank period.
-    fn page_flip(&self, fb_id: u32, crtc_id: u32) -> Result<(), &'static str>;
-
-    /// Get the current back buffer address for rendering
-    /// Returns None if there's no back buffer available.
-    fn get_back_buffer_address(&self) -> Option<usize>;
-
-    /// Swap front and back buffers (synchronous operation)
-    /// This is a simpler alternative to page_flip for devices that don't
-    /// support async flipping.
-    fn swap_buffers(&self) -> Result<(), &'static str>;
-}
-
-/// Capability trait for devices that support dumb buffers
-///
-/// Dumb buffers are simple CPU-accessible buffers that can be used as
-/// framebuffers. They are typically used for basic display without 3D acceleration.
-pub trait DumbBufferCapable: GraphicsDevice {
-    /// Create a dumb buffer with specified dimensions
-    ///
-    /// # Arguments
-    /// * `width` - Width in pixels
-    /// * `height` - Height in pixels
-    /// * `bpp` - Bits per pixel
-    ///
-    /// # Returns
-    /// A handle to the created dumb buffer
-    fn create_dumb_buffer(
-        &self,
-        width: u32,
-        height: u32,
-        bpp: u32,
-    ) -> Result<DumbBufferHandle, &'static str>;
-
-    /// Destroy a previously created dumb buffer
-    fn destroy_dumb_buffer(&self, handle: DumbBufferHandle) -> Result<(), &'static str>;
-
-    /// Map a dumb buffer for CPU access
-    /// Returns the kernel virtual address for accessing the buffer.
-    fn map_dumb_buffer(&self, handle: DumbBufferHandle) -> Result<usize, &'static str>;
-
-    /// Unmap a dumb buffer
-    fn unmap_dumb_buffer(&self, handle: DumbBufferHandle) -> Result<(), &'static str>;
-}
-
-/// Handle to a dumb buffer
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct DumbBufferHandle {
-    pub id: u32,
-    pub width: u32,
-    pub height: u32,
-    pub pitch: u32,
-    pub size: u64,
 }
 
 /// A generic implementation of a graphics device

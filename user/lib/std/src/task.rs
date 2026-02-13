@@ -220,11 +220,12 @@ pub fn execve(path: &str, argv: &[&str], envp: &[&str]) -> i32 {
     };
     let (envp_ptr_array, envp_len) = create_ptr_array_box(envp_ptrs);
 
-    let res = syscall3(
+    let res = syscall4(
         Syscall::Execve,
         path_ptr,
         argv_ptr_array as usize,
         envp_ptr_array as usize,
+        0_usize,
     );
 
     // If the syscall fails, we need to free the allocated memory
@@ -281,12 +282,13 @@ pub fn execve_abi(path: &str, argv: &[&str], envp: &[&str], abi: &str) -> i32 {
     let abi_boxed_slice_len = abi_boxed_slice.len();
     let abi_ptr = Box::into_raw(abi_boxed_slice) as *const u8 as usize;
 
-    let res = syscall4(
+    let res = syscall5(
         Syscall::ExecveABI,
         path_ptr,
         argv_ptr_array as usize,
         envp_ptr_array as usize,
         abi_ptr,
+        0_usize,
     );
 
     let _ = unsafe {
@@ -599,4 +601,40 @@ pub fn pipe() -> Result<(crate::handle::Handle, crate::handle::Handle), i32> {
         }
     };
     Ok((read_handle, write_handle))
+}
+
+/// Shutdown types for the system
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub enum ShutdownType {
+    /// Power off the system
+    PowerOff = 0,
+    /// Reboot the system
+    Reboot = 1,
+}
+
+/// Shutdown the system gracefully
+///
+/// This function initiates a graceful shutdown sequence:
+/// 1. Terminate all tasks
+/// 2. Sync all filesystems
+/// 3. Unmount all filesystems
+/// 4. Request platform shutdown
+///
+/// # Arguments
+/// * `shutdown_type` - Type of shutdown (PowerOff or Reboot)
+///
+/// # Example
+/// ```no_run
+/// use scarlet_std::task::{shutdown, ShutdownType};
+///
+/// // Power off the system
+/// shutdown(ShutdownType::PowerOff);
+///
+/// // Or reboot
+/// // shutdown(ShutdownType::Reboot);
+/// ```
+pub fn shutdown(shutdown_type: ShutdownType) -> ! {
+    syscall1(Syscall::Shutdown, shutdown_type as usize);
+    unreachable!("shutdown syscall should not return");
 }

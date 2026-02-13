@@ -91,3 +91,197 @@ pub mod permissions {
     /// Read and write permissions
     pub const READ_WRITE: usize = READ | WRITE;
 }
+
+// === Scarlet Native Event System ===
+
+/// Event handler function type
+pub type EventHandler = extern "C" fn(event_info: &EventInfo);
+
+/// Event information structure
+#[repr(C)]
+pub struct EventInfo {
+    pub content_type: u8,
+    pub content_data: [u64; 4],
+}
+
+/// Error type for event operations
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EventError {
+    SyscallFailed,
+    InvalidHandler,
+    InvalidEventType,
+}
+
+pub type EventResult<T> = core::result::Result<T, EventError>;
+
+/// Event content types
+pub mod event_types {
+    pub const PROCESS_CONTROL: u8 = 0;
+    pub const MESSAGE: u8 = 1;
+    pub const NOTIFICATION: u8 = 2;
+    pub const CUSTOM: u8 = 3;
+}
+
+/// Process control types
+pub mod process_control {
+    pub const TERMINATE: u32 = 0;
+    pub const KILL: u32 = 1;
+    pub const STOP: u32 = 2;
+    pub const CONTINUE: u32 = 3;
+    pub const INTERRUPT: u32 = 4;
+    pub const QUIT: u32 = 5;
+    pub const HANGUP: u32 = 6;
+    pub const CHILD_EXIT: u32 = 7;
+    pub const PIPE_BROKEN: u32 = 8;
+    pub const ALARM: u32 = 9;
+    pub const IO_READY: u32 = 10;
+    pub const USER_START: u32 = 11;
+}
+
+/// Event mask operations
+pub mod mask_ops {
+    pub const BLOCK: u32 = 0;
+    pub const UNBLOCK: u32 = 1;
+    pub const BLOCK_ALL: u32 = 2;
+    pub const CLEAR_ALL: u32 = 3;
+}
+
+/// Event mask kinds
+pub mod mask_kinds {
+    pub const PROCESS_CONTROL: u32 = 0;
+    pub const NOTIFICATION: u32 = 1;
+    pub const ALL: u32 = 2;
+}
+
+/// Register an event handler for a specific event content type
+///
+/// # Arguments
+/// * `content_type` - Event content type (0=ProcessControl, 1=Message, 2=Notification, 3=Custom)
+/// * `handler` - Handler function address
+/// * `synchronous` - If true, handler is called synchronously
+pub fn register_event_handler(
+    content_type: u8,
+    handler: EventHandler,
+    synchronous: bool,
+) -> EventResult<()> {
+    use crate::syscall::{Syscall, syscall4};
+
+    // Validate content_type range (0-3)
+    if content_type > 3 {
+        return Err(EventError::InvalidEventType);
+    }
+
+    let result = syscall4(
+        Syscall::EventHandlerRegister,
+        content_type as usize,
+        handler as usize,
+        synchronous as usize,
+        0, // is_default = false
+    );
+
+    if result == usize::MAX {
+        Err(EventError::SyscallFailed)
+    } else {
+        Ok(())
+    }
+}
+
+/// Register a default event handler for unhandled events
+pub fn register_default_handler(handler: EventHandler, synchronous: bool) -> EventResult<()> {
+    use crate::syscall::{Syscall, syscall4};
+
+    let result = syscall4(
+        Syscall::EventHandlerRegister,
+        0, // content_type doesn't matter for default
+        handler as usize,
+        synchronous as usize,
+        1, // is_default = true
+    );
+
+    if result == usize::MAX {
+        Err(EventError::SyscallFailed)
+    } else {
+        Ok(())
+    }
+}
+
+/// Unregister an event handler for a specific event content type
+pub fn unregister_event_handler(content_type: u8) -> EventResult<()> {
+    use crate::syscall::{Syscall, syscall1};
+
+    let result = syscall1(Syscall::EventHandlerUnregister, content_type as usize);
+
+    if result == usize::MAX {
+        Err(EventError::SyscallFailed)
+    } else {
+        Ok(())
+    }
+}
+
+/// Set event mask to block specific events
+pub fn event_mask_block(kind: u32, subtype: u32) -> EventResult<()> {
+    use crate::syscall::{Syscall, syscall3};
+
+    let result = syscall3(
+        Syscall::EventMask,
+        mask_ops::BLOCK as usize,
+        kind as usize,
+        subtype as usize,
+    );
+
+    if result == usize::MAX {
+        Err(EventError::SyscallFailed)
+    } else {
+        Ok(())
+    }
+}
+
+/// Set event mask to unblock specific events
+pub fn event_mask_unblock(kind: u32, subtype: u32) -> EventResult<()> {
+    use crate::syscall::{Syscall, syscall3};
+
+    let result = syscall3(
+        Syscall::EventMask,
+        mask_ops::UNBLOCK as usize,
+        kind as usize,
+        subtype as usize,
+    );
+
+    if result == usize::MAX {
+        Err(EventError::SyscallFailed)
+    } else {
+        Ok(())
+    }
+}
+
+/// Block all events
+pub fn event_mask_block_all() -> EventResult<()> {
+    use crate::syscall::{Syscall, syscall1};
+
+    let result = syscall1(Syscall::EventMask, mask_ops::BLOCK_ALL as usize);
+
+    if result == usize::MAX {
+        Err(EventError::SyscallFailed)
+    } else {
+        Ok(())
+    }
+}
+
+/// Unblock all events
+pub fn event_mask_clear_all() -> EventResult<()> {
+    use crate::syscall::{Syscall, syscall1};
+
+    let result = syscall1(Syscall::EventMask, mask_ops::CLEAR_ALL as usize);
+
+    if result == usize::MAX {
+        Err(EventError::SyscallFailed)
+    } else {
+        Ok(())
+    }
+}
+
+/// Return from event handler (should be called by handler trampoline)
+pub fn event_return() {
+    use crate::syscall::Syscall;
+    crate::arch::arch_syscall0(Syscall::EventReturn);
+}

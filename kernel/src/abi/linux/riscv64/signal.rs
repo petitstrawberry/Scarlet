@@ -224,6 +224,23 @@ impl SignalState {
     }
 }
 
+/// Linux sigaction structure (simplified)
+/// This matches the Linux sigaction layout for RISC-V
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct Sigaction {
+    /// Signal handler address (or SIG_DFL, SIG_IGN)
+    pub handler: usize,
+    /// Signal flags
+    pub flags: u64,
+    /// Signal mask to apply during handler execution
+    pub mask: u64,
+}
+
+/// Special handler values
+pub const SIG_DFL: usize = 0; // Default action
+pub const SIG_IGN: usize = 1; // Ignore signal
+
 /// Linux rt_sigaction system call implementation
 ///
 /// int rt_sigaction(int signum, const struct sigaction *act, struct sigaction *oldact, size_t sigsetsize);
@@ -240,7 +257,7 @@ pub fn sys_rt_sigaction(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) ->
         Some(sig) => sig,
         None => {
             trapframe.set_return_value(!0usize); // -1 (EINVAL)
-            trapframe.increment_pc_next(&task);
+            trapframe.increment_pc_next(task);
             return !0usize;
         }
     };
@@ -249,25 +266,65 @@ pub fn sys_rt_sigaction(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) ->
 
     // Get old action if requested
     if oldact_ptr != 0 {
+        let Some(paddr) = task.vm_manager.translate_vaddr(oldact_ptr) else {
+            // Invalid user pointer for oldact: return EFAULT
+            trapframe.set_return_value(!0usize);
+            trapframe.increment_pc_next(task);
+            return !0usize; // -EFAULT
+        };
         let old_action = signal_state.get_handler(signal);
-        // TODO: Copy old action to user space (requires memory copying functionality)
-        // For now, just acknowledge the request
-        let _ = old_action;
+        let old_sigaction = sigaction_to_linux(old_action);
+        unsafe {
+            core::ptr::write(paddr as *mut Sigaction, old_sigaction);
+        }
     }
 
     // Set new action if provided
     if act_ptr != 0 {
-        // TODO: Read sigaction structure from user space
-        // For now, we'll implement a simplified version that just sets ignore/default
-        // In a real implementation, this would read the sigaction struct from user memory
-
-        // For demonstration, assume user wants to ignore the signal
-        signal_state.set_handler(signal, SignalAction::Ignore);
+        let Some(paddr) = task.vm_manager.translate_vaddr(act_ptr) else {
+            // Invalid user pointer for act: return EFAULT
+            trapframe.set_return_value(!0usize);
+            trapframe.increment_pc_next(task);
+            return !0usize; // -EFAULT
+        };
+        let new_sigaction = unsafe { core::ptr::read(paddr as *const Sigaction) };
+        let new_action = linux_to_sigaction(new_sigaction, signal);
+        signal_state.set_handler(signal, new_action);
     }
 
     trapframe.set_return_value(0);
-    trapframe.increment_pc_next(&task);
+    trapframe.increment_pc_next(task);
     0
+}
+
+/// Convert internal SignalAction to Linux sigaction
+fn sigaction_to_linux(action: SignalAction) -> Sigaction {
+    match action {
+        SignalAction::Ignore => Sigaction {
+            handler: SIG_IGN,
+            flags: 0,
+            mask: 0,
+        },
+        SignalAction::Custom(addr) => Sigaction {
+            handler: addr,
+            flags: 0,
+            mask: 0,
+        },
+        _ => Sigaction {
+            handler: SIG_DFL,
+            flags: 0,
+            mask: 0,
+        },
+    }
+}
+
+/// Convert Linux sigaction to internal SignalAction
+fn linux_to_sigaction(sigaction: Sigaction, signal: LinuxSignal) -> SignalAction {
+    match sigaction.handler {
+        SIG_DFL => signal.default_action(), // Restore per-signal default action
+        SIG_IGN => SignalAction::Ignore,
+        addr => SignalAction::Custom(addr),
+    }
 }
 
 /// Linux rt_sigprocmask system call implementation
@@ -285,38 +342,56 @@ pub fn sys_rt_sigprocmask(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) 
 
     // Save old mask if requested
     if oldset_ptr != 0 {
+        let Some(paddr) = task.vm_manager.translate_vaddr(oldset_ptr) else {
+            // Invalid user pointer for oldset: return EFAULT
+            trapframe.set_return_value(!0usize);
+            trapframe.increment_pc_next(task);
+            return !0usize; // -EFAULT
+        };
         let old_mask = signal_state.blocked.raw();
-        // TODO: Copy old mask to user space
-        // For now, just acknowledge the request
-        let _ = old_mask;
+        unsafe {
+            core::ptr::write(paddr as *mut u64, old_mask);
+        }
     }
 
     // Modify mask if new set is provided
     if set_ptr != 0 {
-        // TODO: Read sigset_t from user space
-        // For now, implement a simplified version
+        let Some(paddr) = task.vm_manager.translate_vaddr(set_ptr) else {
+            // Invalid user pointer for set: return EFAULT
+            trapframe.set_return_value(!0usize);
+            trapframe.increment_pc_next(task);
+            return !0usize; // -EFAULT
+        };
+        let new_mask = unsafe { core::ptr::read(paddr as *const u64) };
+        let mut new_signal_mask = SignalMask::new();
+        new_signal_mask.set_raw(new_mask);
 
         // SIG_BLOCK = 0, SIG_UNBLOCK = 1, SIG_SETMASK = 2
         match how {
-            0 => { // SIG_BLOCK
-                // TODO: Read mask from user space and add to blocked signals
+            0 => {
+                // SIG_BLOCK: Add new_mask to current blocked signals
+                let current = signal_state.blocked.raw();
+                signal_state.blocked.set_raw(current | new_mask);
             }
-            1 => { // SIG_UNBLOCK
-                // TODO: Read mask from user space and remove from blocked signals
+            1 => {
+                // SIG_UNBLOCK: Remove new_mask from current blocked signals
+                let current = signal_state.blocked.raw();
+                signal_state.blocked.set_raw(current & !new_mask);
             }
-            2 => { // SIG_SETMASK
-                // TODO: Read mask from user space and set as blocked signals
+            2 => {
+                // SIG_SETMASK: Replace blocked signals with new_mask
+                signal_state.blocked = new_signal_mask;
             }
             _ => {
                 trapframe.set_return_value(!0usize); // -1 (EINVAL)
-                trapframe.increment_pc_next(&task);
+                trapframe.increment_pc_next(task);
                 return !0usize;
             }
         }
     }
 
     trapframe.set_return_value(0);
-    trapframe.increment_pc_next(&task);
+    trapframe.increment_pc_next(task);
     0
 }
 
@@ -413,24 +488,64 @@ pub fn process_pending_signals_with_state(
     }
 }
 
-/// Enhanced signal handler setup with proper context saving
-fn setup_signal_handler(trapframe: &mut Trapframe, handler_addr: usize, signal: LinuxSignal) {
-    // TODO: Complete signal handler setup
-    // 1. Save current trapframe on user stack
-    // 2. Set up signal stack frame
-    // 3. Set up signal handler arguments
-    // 4. Set up return address to signal return trampoline
+/// Set up user-space signal handler execution with context save/restore.
+///
+/// Signal frame layout on user stack (RISC-V, simplified `rt_sigframe`):
+/// ```text
+///   [frame_base + 0]:   trampoline (li a7, 139; ecall) — rt_sigreturn
+///   [frame_base + 8]:   signal number
+///   [frame_base + 16]:  saved regs[0..31] (256 bytes)
+///   [frame_base + 272]: saved epc (8 bytes)
+/// ```
+pub fn setup_signal_handler(trapframe: &mut Trapframe, handler_addr: usize, signal: LinuxSignal) {
+    let mut sp = trapframe.regs.reg[2];
 
-    // For now, basic setup:
-    // Set up arguments for signal handler: handler(signal_number)
-    trapframe.set_arg(0, signal as usize);
+    // trampoline(8) + signo(8) + regs(32×8) + epc(8) = 280
+    const SIGNAL_FRAME_SIZE: usize = 8 + 8 + (32 * 8) + 8;
+    sp -= SIGNAL_FRAME_SIZE;
+    sp &= !0xF;
 
-    // Jump to signal handler
+    let frame_base = sp;
+
+    let task = match mytask() {
+        Some(t) => t,
+        None => return,
+    };
+
+    unsafe {
+        // Trampoline: addi a7, x0, 139 (0x08b00893) + ecall (0x00000073)
+        let paddr = match task.vm_manager.translate_vaddr(frame_base) {
+            Some(p) => p,
+            None => return,
+        };
+        *(paddr as *mut u32) = 0x08b00893; // addi a7, x0, 139
+        *((paddr as *mut u32).add(1)) = 0x00000073; // ecall
+
+        let paddr = match task.vm_manager.translate_vaddr(frame_base + 8) {
+            Some(p) => p,
+            None => return,
+        };
+        *(paddr as *mut usize) = signal as usize;
+
+        for i in 0..32 {
+            let paddr = match task.vm_manager.translate_vaddr(frame_base + 16 + i * 8) {
+                Some(p) => p,
+                None => return,
+            };
+            *(paddr as *mut usize) = trapframe.regs.reg[i];
+        }
+
+        let paddr = match task.vm_manager.translate_vaddr(frame_base + 272) {
+            Some(p) => p,
+            None => return,
+        };
+        *(paddr as *mut u64) = trapframe.epc;
+    }
+
     trapframe.epc = handler_addr as u64;
-
-    // TODO: Implement signal return mechanism
-    // - Set up return address to rt_sigreturn trampoline
-    // - Save original context for restoration
+    trapframe.regs.reg[2] = sp;
+    trapframe.regs.reg[10] = signal as usize; // a0 = signal number
+    trapframe.regs.reg[1] = frame_base; // ra = trampoline (rt_sigreturn)
 }
 
 /// Handle fatal signals that should terminate immediately
@@ -465,6 +580,51 @@ pub fn is_fatal_signal(signal: LinuxSignal) -> bool {
         signal,
         LinuxSignal::SIGKILL | LinuxSignal::SIGTERM | LinuxSignal::SIGINT
     )
+}
+
+/// Linux sys_rt_sigreturn — Restore context saved by `setup_signal_handler`.
+///
+/// Reads the signal frame from the current user stack pointer and restores
+/// all 32 general-purpose registers plus `epc`.  The frame layout matches
+/// what `setup_signal_handler` wrote:
+///
+/// ```text
+///   [sp + 0]:   trampoline (8 bytes, ignored here)
+///   [sp + 8]:   signal number (8 bytes, ignored here)
+///   [sp + 16]:  saved regs[0..31] (256 bytes)
+///   [sp + 272]: saved epc (8 bytes)
+/// ```
+///
+/// After restoration the task resumes at the instruction that was
+/// interrupted by the signal.
+pub fn sys_rt_sigreturn(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
+    let task = match mytask() {
+        Some(t) => t,
+        None => return usize::MAX,
+    };
+
+    let frame_base = trapframe.regs.reg[2]; // SP points to signal frame
+
+    unsafe {
+        // Restore all 32 general-purpose registers
+        for i in 0..32 {
+            let paddr = match task.vm_manager.translate_vaddr(frame_base + 16 + i * 8) {
+                Some(p) => p,
+                None => return usize::MAX,
+            };
+            trapframe.regs.reg[i] = *(paddr as *const usize);
+        }
+
+        // Restore epc (program counter at time of signal)
+        let paddr = match task.vm_manager.translate_vaddr(frame_base + 272) {
+            Some(p) => p,
+            None => return usize::MAX,
+        };
+        trapframe.epc = *(paddr as *const u64);
+    }
+
+    // Return value is irrelevant — a0 was already restored from the frame.
+    0
 }
 
 /// Linux sys_tkill - Send a signal to a specific thread

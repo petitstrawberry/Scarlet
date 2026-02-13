@@ -328,14 +328,14 @@ impl VfsManager {
                     "deep-clone: orphan mount (missing parent)",
                 )
             })?;
-            let parent_entry = mount.parent_entry.as_ref().ok_or_else(|| {
+            let parent_entry = mount.parent_entry.read().clone().ok_or_else(|| {
                 FileSystemError::new(
                     FileSystemErrorKind::InvalidPath,
                     "deep-clone: orphan mount (missing parent_entry)",
                 )
             })?;
 
-            namespace_path_of_entry(&parent_mount, parent_entry)
+            namespace_path_of_entry(&parent_mount, &parent_entry)
         }
 
         fn namespace_path_of_entry(
@@ -555,11 +555,8 @@ impl VfsManager {
         // Create a new MountPoint for the bind mount
         let bind_mount = MountPoint::new_bind(target_entry.name().clone(), source_entry);
         // Set parent/parent_entry
-        unsafe {
-            let mut_ptr = Arc::as_ptr(&bind_mount) as *mut MountPoint;
-            (*mut_ptr).parent = Some(Arc::downgrade(&target_mount_point));
-            (*mut_ptr).parent_entry = Some(target_entry.clone());
-        }
+        *bind_mount.parent.write() = Some(Arc::downgrade(&target_mount_point));
+        *bind_mount.parent_entry.write() = Some(target_entry.clone());
         // NOTE: Do not clone mount-children from the source mount point.
         // Cloning `MountPoint` children across VFS instances leaves their `parent` weak refs
         // pointing at the source tree, which can later be dropped (e.g. during pivot_root),
@@ -1237,10 +1234,8 @@ impl VfsManager {
             let filename = normalized[last_slash + 1..].to_string();
             Ok((parent, filename))
         } else {
-            Err(FileSystemError::new(
-                FileSystemErrorKind::InvalidPath,
-                "Invalid path format",
-            ))
+            // No slash found — treat as a bare filename relative to current directory
+            Ok((".".to_string(), normalized))
         }
     }
 
@@ -1287,12 +1282,29 @@ impl VfsManager {
     /// # Returns
     /// An absolute path string
     pub fn resolve_path_to_absolute(&self, path: &str) -> String {
-        if path.starts_with('/') {
-            // Already absolute path
+        let raw = if path.starts_with('/') {
             path.to_string()
         } else {
             // Relative path - combine with current working directory
             self.get_cwd_path() + "/" + path
+        };
+
+        // Normalize the path: resolve `.`, `..`, and duplicate slashes
+        let mut components: Vec<&str> = Vec::new();
+        for component in raw.split('/') {
+            match component {
+                "" | "." => {} // Skip empty (duplicate slashes) and current dir
+                ".." => {
+                    components.pop(); // Go up one level
+                }
+                c => components.push(c),
+            }
+        }
+
+        if components.is_empty() {
+            "/".to_string()
+        } else {
+            alloc::format!("/{}", components.join("/"))
         }
     }
 }
@@ -1310,4 +1322,9 @@ pub fn get_global_vfs_manager() -> Arc<VfsManager> {
         .get()
         .expect("global VFS manager not initialized")
         .clone()
+}
+
+/// Retrieve the global VFS manager safely (returns None if not initialized)
+pub fn get_global_vfs_manager_safe() -> Option<Arc<VfsManager>> {
+    GLOBAL_VFS_MANAGER.get().map(|mgr| mgr.clone())
 }

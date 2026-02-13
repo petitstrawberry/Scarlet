@@ -1,0 +1,5 @@
+# Stem Daemon Configuration File
+
+[service.netcfgd]
+exec = "/bin/netcfgd"
+depends = ["sbusd"]

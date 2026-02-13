@@ -75,6 +75,12 @@ pub enum Syscall {
     SharedMemoryCreate = 620, // Create shared memory region
     SharedMemoryResize = 621, // Resize shared memory region
 
+    // Event System (Scarlet Native)
+    EventHandlerRegister = 640,   // Register event handler
+    EventHandlerUnregister = 641, // Unregister event handler
+    EventMask = 642,              // Set event mask
+    EventReturn = 643,            // Return from event handler
+
     // Socket Handle Transfer (similar to SCM_RIGHTS)
     SocketSendHandle = 630,        // Send kernel object handle through socket
     SocketRecvHandle = 631,        // Receive kernel object handle from socket
@@ -107,6 +113,9 @@ pub enum Syscall {
 
     // === Debug/Profiler Operations ===
     ProfilerDump = 999, // Dump profiler statistics (debug only)
+
+    // === System Control Operations ===
+    Shutdown = 1000, // Shutdown the system gracefully
 }
 
 pub fn syscall0(syscall: Syscall) -> usize {

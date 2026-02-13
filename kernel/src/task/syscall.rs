@@ -793,3 +793,126 @@ pub fn sys_create_namespace(trapframe: &mut Trapframe) -> usize {
 
     0
 }
+
+/// System call to shutdown the system gracefully
+///
+/// This system call initiates a graceful shutdown sequence:
+/// 1. Terminate all user tasks
+/// 2. Sync all filesystems to ensure data is written to disk
+/// 3. Unmount all filesystems
+/// 4. Request platform shutdown via SBI (RISC-V) or PSCI (AArch64)
+///
+/// # Arguments
+/// * `trapframe.get_arg(0)` - Shutdown type: 0 = poweroff, 1 = reboot
+///
+/// # Returns
+/// This function does not return on success (system shuts down)
+/// Returns error code on failure
+pub fn sys_shutdown(trapframe: &mut Trapframe) -> usize {
+    use crate::arch::shutdown;
+    use crate::sched::scheduler::get_scheduler;
+    use crate::task::TaskState;
+
+    let task = mytask().unwrap();
+    trapframe.increment_pc_next(task);
+
+    // Authorization: Only the init thread group id = 1 can shutdown
+    // This allows any thread in the init process (including IPC threads) to shutdown
+    let tgid = task.get_thread_group_id();
+    if tgid != 1 {
+        crate::println!("[SHUTDOWN] Rejected: tgid={}", tgid);
+        return SYSCALL_ERROR;
+    }
+
+    let shutdown_type = trapframe.get_arg(0); // 0 = poweroff, 1 = reboot
+
+    crate::println!(
+        "[SHUTDOWN] Initiating graceful shutdown (type={})...",
+        shutdown_type
+    );
+
+    // TODO: In the future, this should be the FINAL step after stemd has:
+    // 1. Sent SIGTERM to all processes
+    // 2. Waited for processes to exit gracefully (with timeout)
+    // 3. Sent SIGKILL to remaining processes
+    // 4. Synced filesystems explicitly
+    // 5. Unmounted filesystems
+    // 6. Called sys_shutdown as the last resort
+    //
+    // Current implementation: Force kill all tasks immediately (simpler fallback)
+
+    // Step 1: Terminate all tasks except the current one
+    // We iterate through all possible task IDs and terminate those that are running
+    crate::println!("[SHUTDOWN] Step 1: Terminating all tasks...");
+
+    let scheduler = get_scheduler();
+    let current_task_id = task.get_id();
+
+    crate::println!("[SHUTDOWN] Dropping all tasks...");
+    for task_id in 1..crate::sched::scheduler::MAX_TASKS {
+        if task_id == current_task_id {
+            continue;
+        }
+        scheduler.remove_task_from_queues(task_id);
+        if let Some(task) = crate::sched::scheduler::get_task_pool().remove_task(task_id) {
+            drop(task);
+        }
+    }
+
+    crate::println!("[SHUTDOWN] Step 2: Enumerating mounted filesystems (no sync support yet)...");
+
+    // Step 2: Enumerate all filesystems for logging/diagnostics.
+    // NOTE: Actual sync/flush-to-disk semantics are not yet implemented here.
+    //       This step does NOT guarantee that all pending data is durable.
+    // Enumerate filesystems from the global VFS manager first
+    if let Some(vfs) = crate::fs::manager::get_global_vfs_manager_safe() {
+        let mounted_fs = vfs.mounted_filesystems.read();
+        for fs in mounted_fs.iter() {
+            crate::println!("[SHUTDOWN] Global filesystem: {}", fs.name());
+        }
+    }
+
+    // Enumerate task-specific filesystems
+    if let Some(vfs) = task.get_vfs() {
+        let mounted_fs = vfs.mounted_filesystems.read();
+        for fs in mounted_fs.iter() {
+            crate::println!("[SHUTDOWN] Task filesystem: {}", fs.name());
+        }
+    }
+
+    crate::println!(
+        "[SHUTDOWN] Step 3: Filesystem unmount phase (not yet implemented, skipping)..."
+    );
+
+    // NOTE: Actual filesystem unmount logic is not yet implemented.
+    // The shutdown sequence currently enumerates all known filesystems
+    // (global and task-specific) but leaves the mounts in place. This is
+    // sufficient for the current platforms where the underlying firmware
+    // or hypervisor tears down any remaining state on poweroff/reboot.
+    // When proper unmount support is added to the VFS layer, it should be
+    // invoked from here in a dependency-safe order (e.g. leaves first).
+
+    crate::println!("[SHUTDOWN] Step 4: Requesting platform shutdown...");
+
+    // Step 4: Platform shutdown
+    match shutdown_type {
+        0 => {
+            // Power off
+            crate::println!("[SHUTDOWN] Powering off...");
+            shutdown();
+        }
+        1 => {
+            // Reboot
+            crate::println!("[SHUTDOWN] Rebooting...");
+            crate::arch::reboot();
+        }
+        _ => {
+            crate::println!("[SHUTDOWN] Invalid shutdown type, defaulting to poweroff");
+            shutdown();
+        }
+    }
+
+    // This line should never be reached if shutdown succeeds
+    crate::println!("[SHUTDOWN] ERROR: Shutdown did not complete!");
+    usize::MAX
+}

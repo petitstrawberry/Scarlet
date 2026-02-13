@@ -35,8 +35,6 @@ use crate::device::{
 };
 
 /// Framebuffer resource extracted from graphics devices
-///
-/// The framebuffer address is dynamic and may change after page flip operations.
 #[derive(Debug)]
 pub struct FramebufferResource {
     /// DeviceManager's device id
@@ -44,10 +42,14 @@ pub struct FramebufferResource {
     /// Logical name for user access (e.g., "fb0")
     pub logical_name: String,
     /// Framebuffer configuration (resolution, format, etc.)
-    pub config: RwLock<FramebufferConfig>,
+    pub config: FramebufferConfig,
     /// Physical memory address of the framebuffer
-    physical_addr: RwLock<usize>,
-    /// Size of the allocated framebuffer memory in bytes (page-aligned)
+    pub physical_addr: usize,
+    /// Size of the allocated framebuffer memory in bytes (page-aligned).
+    /// This is the actual allocated size, which may be larger than the logical
+    /// framebuffer size (config.size()) due to page alignment requirements.
+    /// Use this size for memory mapping operations.
+    /// For the logical pixel data size, use config.size() instead.
     pub size: usize,
     /// ID of the created /dev/fbX character device (if any)
     pub created_char_device_id: RwLock<Option<usize>>,
@@ -65,31 +67,11 @@ impl FramebufferResource {
         Self {
             source_device_id,
             logical_name,
-            config: RwLock::new(config),
-            physical_addr: RwLock::new(physical_addr),
+            config,
+            physical_addr,
             size,
             created_char_device_id: RwLock::new(None),
         }
-    }
-
-    /// Get the current framebuffer physical address
-    pub fn get_physical_addr(&self) -> usize {
-        *self.physical_addr.read()
-    }
-
-    /// Update the framebuffer physical address
-    pub fn update_physical_addr(&self, addr: usize) {
-        *self.physical_addr.write() = addr;
-    }
-
-    /// Get the current framebuffer configuration
-    pub fn get_config(&self) -> FramebufferConfig {
-        self.config.read().clone()
-    }
-
-    /// Update the framebuffer configuration
-    pub fn update_config(&self, config: FramebufferConfig) {
-        *self.config.write() = config;
     }
 }
 
@@ -397,12 +379,24 @@ impl GraphicsManager {
             return None;
         }
 
+        // Read byte from framebuffer memory
         unsafe {
-            let fb_ptr = fb_resource.get_physical_addr() as *const u8;
+            let fb_ptr = fb_resource.physical_addr as *const u8;
             Some(*fb_ptr.add(position))
         }
     }
 
+    /// Write a single byte to the specified framebuffer
+    ///
+    /// # Arguments
+    ///
+    /// * `fb_name` - The logical name of the framebuffer
+    /// * `position` - The position to write to
+    /// * `byte` - The byte to write
+    ///
+    /// # Returns
+    ///
+    /// Result indicating success or failure
     pub fn write_byte_to_framebuffer(
         &self,
         fb_name: &str,
@@ -417,14 +411,26 @@ impl GraphicsManager {
             return Err("Position beyond framebuffer size");
         }
 
+        // Write byte to framebuffer memory
         unsafe {
-            let fb_ptr = fb_resource.get_physical_addr() as *mut u8;
+            let fb_ptr = fb_resource.physical_addr as *mut u8;
             *fb_ptr.add(position) = byte;
         }
 
         Ok(())
     }
 
+    /// Read multiple bytes from the specified framebuffer
+    ///
+    /// # Arguments
+    ///
+    /// * `fb_name` - The logical name of the framebuffer
+    /// * `position` - The starting position to read from
+    /// * `buffer` - The buffer to read data into
+    ///
+    /// # Returns
+    ///
+    /// The number of bytes actually read
     pub fn read_framebuffer(&self, fb_name: &str, position: usize, buffer: &mut [u8]) -> usize {
         let fb_resource = match self.get_framebuffer(fb_name) {
             Some(resource) => resource,
@@ -438,8 +444,12 @@ impl GraphicsManager {
             return 0;
         }
 
+        // Read bytes from framebuffer memory.
+        //
+        // NOTE: For QEMU+HVF, avoid memcpy-style accesses that may VM-exit as
+        // EC_DATAABORT without ISV and abort the host (assert(isv)).
         unsafe {
-            let fb_ptr = fb_resource.get_physical_addr() as *const u8;
+            let fb_ptr = fb_resource.physical_addr as *const u8;
             let src = fb_ptr.add(position);
             for i in 0..bytes_to_read {
                 buffer[i] = core::ptr::read_volatile(src.add(i));
@@ -449,6 +459,17 @@ impl GraphicsManager {
         bytes_to_read
     }
 
+    /// Write multiple bytes to the specified framebuffer
+    ///
+    /// # Arguments
+    ///
+    /// * `fb_name` - The logical name of the framebuffer
+    /// * `position` - The starting position to write to
+    /// * `buffer` - The buffer containing data to write
+    ///
+    /// # Returns
+    ///
+    /// Result containing the number of bytes written or an error
     pub fn write_framebuffer(
         &self,
         fb_name: &str,
@@ -466,8 +487,10 @@ impl GraphicsManager {
             return Err("No space available in framebuffer");
         }
 
+        // Write bytes to framebuffer memory.
+        // See note in read_framebuffer() about QEMU+HVF and ISV.
         unsafe {
-            let fb_ptr = fb_resource.get_physical_addr() as *mut u8;
+            let fb_ptr = fb_resource.physical_addr as *mut u8;
             let dst = fb_ptr.add(position);
             for i in 0..bytes_to_write {
                 core::ptr::write_volatile(dst.add(i), buffer[i]);
@@ -542,10 +565,9 @@ mod tests {
 
         assert_eq!(resource.source_device_id, 0);
         assert_eq!(resource.logical_name, "fb0");
-        let config = resource.get_config();
-        assert_eq!(config.width, 1024);
-        assert_eq!(config.height, 768);
-        assert_eq!(resource.get_physical_addr(), 0x80000000);
+        assert_eq!(resource.config.width, 1024);
+        assert_eq!(resource.config.height, 768);
+        assert_eq!(resource.physical_addr, 0x80000000);
         assert_eq!(resource.size, 1024 * 768 * 4);
         assert_eq!(*resource.created_char_device_id.read(), None);
     }
@@ -592,10 +614,9 @@ mod tests {
         let fb = manager.get_framebuffer("fb0").unwrap();
         assert_eq!(fb.source_device_id, 0);
         assert_eq!(fb.logical_name, "fb0");
-        let config = fb.get_config();
-        assert_eq!(config.width, 800);
-        assert_eq!(config.height, 600);
-        assert_eq!(fb.get_physical_addr(), 0x90000000);
+        assert_eq!(fb.config.width, 800);
+        assert_eq!(fb.config.height, 600);
+        assert_eq!(fb.physical_addr, 0x90000000);
         let page_aligned_size = (800 * 600 * 4 + crate::environment::PAGE_SIZE - 1)
             & !(crate::environment::PAGE_SIZE - 1);
         assert_eq!(fb.size, page_aligned_size);
@@ -644,7 +665,7 @@ mod tests {
 
         assert_eq!(fb0.source_device_id, 1);
         assert_eq!(fb1.source_device_id, 2);
-        assert_ne!(fb0.get_physical_addr(), fb1.get_physical_addr());
+        assert_ne!(fb0.physical_addr, fb1.physical_addr);
     }
 
     #[test_case]

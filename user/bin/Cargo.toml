@@ -82,6 +82,10 @@ name = "netcfg"
 path = "src/netcfg.rs"
 
 [[bin]]
+name = "netcfgd"
+path = "src/netcfgd/main.rs"
+
+[[bin]]
 name = "tcp_client"
 path = "src/tcp_client.rs"
 
@@ -143,11 +147,24 @@ name = "wayland_bridge"
 path = "src/wayland_bridge/main.rs"
 
 [[bin]]
+name = "event_demo"
+path = "src/event_demo.rs"
+
+[[bin]]
 name = "settings"
 path = "src/settings.rs"
 
+[[bin]]
+name = "shutdown"
+path = "src/shutdown.rs"
+
+[[bin]]
+name = "scpm"
+path = "src/scpm.rs"
+
 [dependencies]
 scarlet_std = { path = "../lib/std", features = ["alloc_debug"] }
+scpm = { path = "../lib/scpm" }
 framebuffer = { path = "../lib/framebuffer" }
 sws_protocol = { path = "../lib/sws_protocol" }
 sws-client = { path = "../lib/sws-client" }

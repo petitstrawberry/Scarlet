@@ -810,6 +810,24 @@ fn resolve_dependencies(services: &[Service]) -> Vec<Service> {
     sorted
 }
 
+fn handle_shutdown() {
+    use std::task::{ShutdownType, shutdown};
+    println!("stemd: Initiating system shutdown...");
+
+    // TODO: Implement proper shutdown sequence:
+    // 1. Stop all services in reverse dependency order
+    // 2. Send SIGTERM to all child processes
+    // 3. Wait for processes to exit gracefully (with timeout)
+    // 4. Send SIGKILL to remaining processes
+    // 5. Sync all filesystems (call sync() on all open files)
+    // 6. Unmount all filesystems
+    // 7. Finally call kernel shutdown syscall
+    //
+    // Currently: Directly call kernel shutdown (simpler fallback)
+
+    shutdown(ShutdownType::PowerOff);
+}
+
 /// IPC thread: accept commands via socket
 fn ipc_thread() {
     println!("stemd: IPC thread started");
@@ -937,6 +955,15 @@ fn ipc_thread() {
                                 let error_msg = "ERROR: Malformed LAUNCH_OR_FOCUS command\n";
                                 let _ = stream.write(error_msg.as_bytes());
                             }
+                        } else if buffer[0] == cmd::SHUTDOWN {
+                            println!("stemd: Received SHUTDOWN command");
+
+                            let response = "OK: Shutting down\n";
+                            let _ = stream.write(response.as_bytes());
+
+                            // Shutdown must be called from main thread (PID 1)
+                            // to pass kernel authorization check
+                            handle_shutdown();
                         } else {
                             // Try to parse command as UTF-8 text
                             match core::str::from_utf8(&buffer[..n]) {
@@ -946,7 +973,14 @@ fn ipc_thread() {
                                     // Process command (simplified)
                                     let response = match cmd.trim() {
                                         "status" => "stemd is running\n",
-                                        "help" => "Commands: status, help, launch_or_focus\n",
+                                        "help" => {
+                                            "Commands: status, help, launch_or_focus, shutdown\n"
+                                        }
+                                        "shutdown" => {
+                                            // Handle text-based shutdown command too
+                                            let _ = thread::spawn(handle_shutdown);
+                                            "OK: Shutting down\n"
+                                        }
                                         _ => "Unknown command\n",
                                     };
 
@@ -1430,27 +1464,6 @@ fn main() -> i32 {
     println!("stemd: Stem Daemon starting...");
     println!("stemd: PID={}", std::task::getpid());
 
-    let started_by_init = std::task::getppid() == 1;
-
-    // If stemd is started manually from an interactive shell, don't keep the shell
-    // blocked. Fork once and let the parent exit immediately.
-    if !started_by_init {
-        match fork() {
-            0 => {
-                // child continues as daemon
-                try_attach_stdio_to_null();
-            }
-            -1 => {
-                println!("stemd: Failed to daemonize (fork failed)");
-                return 1;
-            }
-            pid => {
-                println!("stemd: Daemonized (PID={})", pid);
-                return 0;
-            }
-        }
-    }
-
     // Read configuration.
     // Note: current filesystem layout copies userland under `/system/scarlet`,
     // so configs may live under `/system/scarlet/etc` instead of `/etc`.
@@ -1616,16 +1629,6 @@ tty = "/dev/tty0"
         // Skip stemd itself (we're already running!)
         if service.name == "stemd" {
             println!("stemd: Skipping stemd (already running as PID 1)");
-            continue;
-        }
-
-        // Avoid stealing an interactive TTY when stemd is started manually from a shell.
-        // TTY-bound services (like login/getty equivalents) should normally be started by init.
-        if !started_by_init && service.tty.is_some() {
-            println!(
-                "stemd: Skipping tty service '{}' (not started by init)",
-                service.name
-            );
             continue;
         }
 

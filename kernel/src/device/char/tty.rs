@@ -50,6 +50,10 @@ pub mod tty_ctl {
     pub const SCTL_TTY_SET_KBMODE: u32 = 0x5354_000C;
     /// Get keyboard mode (0=XLATE, 1=MEDIUMRAW, 2=RAW)
     pub const SCTL_TTY_GET_KBMODE: u32 = 0x5354_000D;
+    /// Set foreground task group ID (arg = task_group_id)
+    pub const SCTL_TTY_SET_FOREGROUND_GROUP: u32 = 0x5354_000E;
+    /// Get foreground task group ID (ret = task_group_id, or -1 if none)
+    pub const SCTL_TTY_GET_FOREGROUND_GROUP: u32 = 0x5354_000F;
 }
 use tty_ctl::*;
 
@@ -144,6 +148,7 @@ pub struct TtyDevice {
     esc_state: Mutex<u8>,
     // Per-device non-blocking I/O flag (shared by all FDs referencing this TTY)
     nonblocking: AtomicBool,
+    foreground_task_group_id: Mutex<Option<usize>>,
 }
 
 impl TtyDevice {
@@ -164,6 +169,7 @@ impl TtyDevice {
             kb_mode: core::sync::atomic::AtomicU8::new(0),
             esc_state: Mutex::new(0),
             nonblocking: AtomicBool::new(false),
+            foreground_task_group_id: Mutex::new(None),
         }
     }
 
@@ -234,6 +240,48 @@ impl TtyDevice {
     /// Current buffered input length (for diagnostics / readiness debugging)
     pub fn input_len(&self) -> usize {
         self.input_buffer.lock().len()
+    }
+
+    pub fn set_foreground_task_group_id(&self, task_group_id: usize) {
+        *self.foreground_task_group_id.lock() = Some(task_group_id);
+    }
+
+    pub fn get_foreground_task_group_id(&self) -> Option<usize> {
+        *self.foreground_task_group_id.lock()
+    }
+
+    fn send_interrupt_to_foreground(&self) {
+        use crate::ipc::event::{Event, EventPriority, ProcessControlType};
+        use crate::task::{BlockedType, TaskState};
+
+        if let Some(task_group_id) = self.get_foreground_task_group_id() {
+            let scheduler = crate::sched::scheduler::get_scheduler();
+            let task_ids = scheduler.get_all_task_ids();
+
+            let mut tasks_to_wake = alloc::vec::Vec::new();
+
+            for task_id in task_ids {
+                if let Some(task) = scheduler.get_task_by_id(task_id) {
+                    if task.get_task_group_id() == task_group_id {
+                        let event = Event::direct_process_control(
+                            task_id as u32,
+                            ProcessControlType::Interrupt,
+                            EventPriority::High,
+                            true,
+                        );
+                        task.event_queue.lock().enqueue(event);
+
+                        if task.get_state() == TaskState::Blocked(BlockedType::Interruptible) {
+                            tasks_to_wake.push(task_id);
+                        }
+                    }
+                }
+            }
+
+            for task_id in tasks_to_wake {
+                scheduler.wake_task(task_id);
+            }
+        }
     }
 
     /// Read readiness for select/poll semantics.
@@ -314,7 +362,6 @@ impl TtyDevice {
                     drop(input_buffer);
                     self.input_waker.wake_all();
                 }
-                // Ctrl-C (ETX) — policy deferred to ABI layer; no signal delivery here
                 0x03 => {
                     if self.echo_enabled.load(Ordering::Relaxed) {
                         self.echo_char('^' as u8);
@@ -322,6 +369,7 @@ impl TtyDevice {
                         self.echo_char('\r' as u8);
                         self.echo_char('\n' as u8);
                     }
+                    self.send_interrupt_to_foreground();
                 }
                 // Ctrl-Z (SUB) placeholder
                 0x1A => {
@@ -1165,6 +1213,14 @@ impl ControlOps for TtyDevice {
                 Ok(0)
             }
             SCTL_TTY_GET_KBMODE => Ok(self.kb_mode.load(Ordering::Relaxed) as i32),
+            SCTL_TTY_SET_FOREGROUND_GROUP => {
+                self.set_foreground_task_group_id(arg);
+                Ok(0)
+            }
+            SCTL_TTY_GET_FOREGROUND_GROUP => match self.get_foreground_task_group_id() {
+                Some(id) => Ok(id as i32),
+                None => Ok(-1),
+            },
             _ => Err("Unsupported control command for TTY device"),
         }
     }

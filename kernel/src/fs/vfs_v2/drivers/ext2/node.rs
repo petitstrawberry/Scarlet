@@ -239,7 +239,14 @@ impl Ext2FileObject {
 
         let on_disk = ext2_fs
             .read_inode(self.inode_number)
-            .map_err(|_| StreamError::IoError)?
+            .map_err(|e| {
+                crate::early_println!(
+                    "[ext2] sync_to_disk: read_inode failed for inode {}: {:?}",
+                    self.inode_number,
+                    e
+                );
+                StreamError::IoError
+            })?
             .size as usize;
         let eff_size = match *self.size_override.lock() {
             Some(ov) => core::cmp::max(on_disk, ov),
@@ -266,7 +273,14 @@ impl Ext2FileObject {
                             .read_page_content(self.inode_number, page_index, paddr)
                             .map_err(|_| "io error")
                     })
-                    .map_err(|_| StreamError::IoError)?
+                    .map_err(|_| {
+                        crate::early_println!(
+                            "[ext2] sync_to_disk: pin_or_load failed for inode {} page {}",
+                            self.inode_number,
+                            page_index
+                        );
+                        StreamError::IoError
+                    })?
             };
 
             unsafe {
@@ -280,7 +294,15 @@ impl Ext2FileObject {
 
         ext2_fs
             .write_file_content(self.inode_number, &buffer)
-            .map_err(|_| StreamError::IoError)?;
+            .map_err(|e| {
+                crate::early_println!(
+                    "[ext2] sync_to_disk: write_file_content failed for inode {} (size {}): {:?}",
+                    self.inode_number,
+                    eff_size,
+                    e
+                );
+                StreamError::IoError
+            })?;
 
         *self.size_override.lock() = None;
         *self.dirty.lock() = false;
@@ -1053,7 +1075,13 @@ impl crate::object::capability::selectable::Selectable for Ext2FileObject {
 
 impl Drop for Ext2FileObject {
     fn drop(&mut self) {
-        let _ = self.sync_to_disk();
+        if let Err(e) = self.sync_to_disk() {
+            crate::early_println!(
+                "[ext2] Drop: sync_to_disk failed for inode {}: {:?}",
+                self.inode_number,
+                e
+            );
+        }
         #[cfg(test)]
         crate::early_println!(
             "[ext2] Drop: File object dropped for inode {}",
