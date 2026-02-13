@@ -222,7 +222,7 @@ pub enum FileSystemErrorKind {
     FileExists,
 }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 pub struct FileSystemError {
     pub kind: FileSystemErrorKind,
     pub message: String,
