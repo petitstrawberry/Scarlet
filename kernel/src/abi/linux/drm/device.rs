@@ -3,23 +3,13 @@
 //! This module provides a Linux-compatible DRM device that maps
 //! DRM ioctls to Scarlet's generic graphics device traits.
 
-use alloc::{
-    boxed::Box,
-    collections::BTreeMap,
-    format,
-    string::{String, ToString},
-    sync::Arc,
-    vec::Vec,
-};
+use alloc::{collections::BTreeMap, format, string::String, sync::Arc, vec::Vec};
 use spin::RwLock;
 
 use crate::device::{
     Device, DeviceType,
     char::CharDevice,
-    graphics::{
-        DumbBufferCapable, FramebufferConfig, GraphicsDevice, PageFlipCapable, PixelFormat,
-        manager::{FramebufferResource, GraphicsManager},
-    },
+    graphics::manager::{FramebufferResource, GraphicsManager},
     manager::DeviceManager,
 };
 use crate::object::capability::{ControlOps, MemoryMappingOps, Selectable};
@@ -42,6 +32,7 @@ pub struct DrmDevice {
 
 /// Information about a dumb buffer
 #[derive(Debug, Clone)]
+#[allow(dead_code)] // Fields used for DRM buffer tracking
 struct DumbBufferInfo {
     handle: u32,
     width: u32,
@@ -127,7 +118,7 @@ impl DrmDevice {
             None => return Err("Framebuffer not found"),
         };
 
-        let config = fb_resource.get_config();
+        let config = &fb_resource.config;
 
         let resources = DrmModeCardRes {
             fb_id_ptr: 0,
@@ -166,7 +157,7 @@ impl DrmDevice {
                 None => return Err("Framebuffer not found"),
             };
 
-            let config = fb_resource.get_config();
+            let config = &fb_resource.config;
 
             crtc.fb_id = 1; // Default framebuffer ID
             crtc.x = 0;
@@ -207,7 +198,7 @@ impl DrmDevice {
             let req = core::ptr::read(user_ptr);
 
             let handle = self.alloc_handle();
-            let pitch = req.width * ((req.bpp + 7) / 8);
+            let pitch = req.width * req.bpp.div_ceil(8);
             let size = (pitch * req.height) as u64;
 
             let info = DumbBufferInfo {
