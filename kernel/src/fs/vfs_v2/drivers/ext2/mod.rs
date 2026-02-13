@@ -1628,7 +1628,23 @@ impl Ext2FileSystem {
                 - 1)
                 / self.superblock.blocks_per_group;
 
+            #[cfg(test)]
+            {
+                let blocks_count = self.superblock.blocks_count;
+                let blocks_per_group = self.superblock.blocks_per_group;
+
+                crate::early_println!(
+                    "[ext2] allocate_block: total_groups={}, blocks_count={}, blocks_per_group={}",
+                    total_groups,
+                    blocks_count,
+                    blocks_per_group
+                );
+            }
+
             for group in 0..total_groups {
+                #[cfg(test)]
+                crate::early_println!("[ext2] allocate_block: trying group {}", group);
+
                 match self.allocate_block_in_group(group) {
                     Ok(block_num) => {
                         return Ok(block_num);
@@ -1638,9 +1654,22 @@ impl Ext2FileSystem {
                         ..
                     }) => {
                         // Try next group
+                        #[cfg(test)]
+                        crate::early_println!(
+                            "[ext2] allocate_block: group {} full, trying next",
+                            group
+                        );
                         continue;
                     }
-                    Err(e) => return Err(e),
+                    Err(e) => {
+                        #[cfg(test)]
+                        crate::early_println!(
+                            "[ext2] allocate_block: group {} error: {:?}",
+                            group,
+                            e
+                        );
+                        return Err(e);
+                    }
                 }
             }
 
@@ -2142,10 +2171,19 @@ impl Ext2FileSystem {
         }
 
         self.with_allocation_lock(|| {
-            // If only one block is needed, use regular allocation
             if count == 1 {
-                let block = self.allocate_block_in_group(0)?;
-                return Ok(vec![block]);
+                let total_groups = (self.superblock.blocks_count + self.superblock.blocks_per_group - 1)
+                    / self.superblock.blocks_per_group;
+
+                for group in 0..total_groups {
+                    if let Ok(block) = self.allocate_block_in_group(group) {
+                        return Ok(vec![block]);
+                    }
+                }
+                return Err(FileSystemError::new(
+                    FileSystemErrorKind::NoSpace,
+                    "No free blocks available",
+                ));
             }
 
             // Calculate number of groups
