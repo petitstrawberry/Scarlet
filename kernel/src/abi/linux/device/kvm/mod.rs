@@ -288,23 +288,19 @@ fn write_vm_exit(kvm_run: &mut KvmRun, exit: &crate::hypervisor::VmExit) {
     };
 
     match exit {
-        VmExit::MmioRead { addr, size } => {
+        VmExit::MmioRead { addr, size, reg: _ } => {
             kvm_run.exit_reason = KVM_EXIT_MMIO;
-            // SAFETY: writing to the mmio variant of the union
             let mmio = unsafe { &mut kvm_run.exit_data.mmio };
             mmio.phys_addr = *addr;
             mmio.len = *size as u32;
             mmio.is_write = 0;
         }
-        VmExit::MmioWrite { addr, size, data } => {
+        VmExit::MmioWrite { addr, size, reg: _ } => {
             kvm_run.exit_reason = KVM_EXIT_MMIO;
             let mmio = unsafe { &mut kvm_run.exit_data.mmio };
             mmio.phys_addr = *addr;
             mmio.len = *size as u32;
             mmio.is_write = 1;
-            let bytes = data.to_le_bytes();
-            let copy_len = (*size as usize).min(8);
-            mmio.data[..copy_len].copy_from_slice(&bytes[..copy_len]);
         }
         VmExit::Hlt => {
             kvm_run.exit_reason = KVM_EXIT_HLT;

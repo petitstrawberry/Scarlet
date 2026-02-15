@@ -70,6 +70,40 @@ impl GuestVcpu {
         trapframe.epc = self.pc;
     }
 
+    pub fn save(&mut self, trapframe: &Trapframe) {
+        self.iregs = trapframe.regs;
+        self.pc = trapframe.epc;
+        self.csrs = GuestCsrState::save();
+    }
+
+    pub fn get_mmio_data(&self, reg: u8, size: u8) -> u64 {
+        if reg == 0 {
+            return 0;
+        }
+        let val = self.get_gpr(reg as usize);
+        match size {
+            1 => val & 0xFF,
+            2 => val & 0xFFFF,
+            4 => val & 0xFFFFFFFF,
+            _ => val,
+        }
+    }
+
+    pub fn set_mmio_data(&mut self, reg: u8, size: u8, data: u64) {
+        if reg == 0 {
+            return;
+        }
+        let mask = match size {
+            1 => 0xFF,
+            2 => 0xFFFF,
+            4 => 0xFFFFFFFF,
+            _ => !0,
+        };
+        let old = self.get_gpr(reg as usize);
+        let new = (old & !mask) | (data & mask);
+        self.set_gpr(reg as usize, new);
+    }
+
     pub fn set_pc(&mut self, pc: u64) {
         self.pc = pc;
     }

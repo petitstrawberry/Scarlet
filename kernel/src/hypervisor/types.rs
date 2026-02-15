@@ -11,8 +11,8 @@ pub enum InterruptType {
 
 #[derive(Debug, Clone, Copy)]
 pub enum VmExit {
-    MmioRead { addr: u64, size: u8 },
-    MmioWrite { addr: u64, size: u8, data: u64 },
+    MmioRead { addr: u64, size: u8, reg: u8 },
+    MmioWrite { addr: u64, size: u8, reg: u8 },
     Hlt,
     Shutdown,
     FailEntry { hardware_entry_failure_reason: u64 },
@@ -40,8 +40,9 @@ pub struct MmioInfo {
     pub address: u64,
     pub data: u64,
     pub size: u8,
+    pub reg: u8,
     pub is_write: bool,
-    pub _padding: [u8; 6],
+    pub _padding: [u8; 5],
 }
 
 #[repr(C)]
@@ -53,13 +54,11 @@ pub struct VcpuExit {
     pub fail_code: u64,
 }
 
-impl VmExit {}
-
 impl VcpuExit {
     pub fn from_vmexit(exit: &VmExit) -> Self {
         match exit {
-            VmExit::MmioRead { addr, size } => Self::mmio_read(*addr, *size),
-            VmExit::MmioWrite { addr, size, data } => Self::mmio_write(*addr, *size, *data),
+            VmExit::MmioRead { addr, size, reg } => Self::mmio_read(*addr, *size, *reg),
+            VmExit::MmioWrite { addr, size, reg } => Self::mmio_write(*addr, *size, *reg),
             VmExit::Hlt => Self::new(VcpuExitReason::Hlt),
             VmExit::Shutdown => Self::new(VcpuExitReason::Shutdown),
             VmExit::FailEntry {
@@ -85,12 +84,13 @@ impl VcpuExit {
         }
     }
 
-    pub fn mmio_read(address: u64, size: u8) -> Self {
+    pub fn mmio_read(address: u64, size: u8, reg: u8) -> Self {
         Self {
             reason: VcpuExitReason::MmioRead,
             mmio: MmioInfo {
                 address,
                 size,
+                reg,
                 is_write: false,
                 ..Default::default()
             },
@@ -98,13 +98,13 @@ impl VcpuExit {
         }
     }
 
-    pub fn mmio_write(address: u64, size: u8, data: u64) -> Self {
+    pub fn mmio_write(address: u64, size: u8, reg: u8) -> Self {
         Self {
             reason: VcpuExitReason::MmioWrite,
             mmio: MmioInfo {
                 address,
-                data,
                 size,
+                reg,
                 is_write: true,
                 ..Default::default()
             },

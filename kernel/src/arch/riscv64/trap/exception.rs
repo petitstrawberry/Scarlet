@@ -287,18 +287,18 @@ pub fn arch_exception_handler(trapframe: &mut Trapframe, cause: usize) {
                     // If the address is aligned, we can stop
                     break;
                 }
-                vaddr = (vaddr + 4) & !0b11; // Align to the next 4-byte boundary
+                vaddr = (vaddr + 4) & !0b11;
             }
         }
-        // Hypervisor traps (e.g., guest page faults)
         #[cfg(feature = "hypervisor")]
-        /* Guest instruction page fault */
         INSTRUCTION_GUEST_PAGE_FAULT
         | LOAD_GUEST_PAGE_FAULT
         | STORE_GUEST_PAGE_FAULT
         | ECALL_FROM_VS_MODE => {
-            use crate::arch::hv::trap::guest_trap_handler;
-            guest_trap_handler(trapframe, cause);
+            use crate::arch::hv::switch::arch_guest_trap_exit;
+            unsafe {
+                arch_guest_trap_exit(trapframe as *mut _ as *mut u8);
+            }
         }
         _ => {
             print_traplog(trapframe);
