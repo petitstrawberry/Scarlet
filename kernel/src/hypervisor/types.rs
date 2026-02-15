@@ -1,18 +1,17 @@
 //! Shared hypervisor types for User/Kernel interface
+//!
+//! This module defines the data structures used for communication between
+//! the kernel hypervisor and userspace VMM (Violet).
 
+/// VM exit reason for userspace.
+/// These are the only exit reasons that get forwarded to userspace.
 #[derive(Debug, Clone)]
 pub enum VmExit {
-    Hlt,
-    Shutdown,
-    FirmwareCall,
-    SystemEvent { event_type: u64 },
-    FailEntry { hardware_entry_failure_reason: u64 },
-    InstPageFault { gpa: u64 },
-    LoadPageFault { gpa: u64, size: u8 },
-    StorePageFault { gpa: u64, size: u8, data: u64 },
-    IllegalInstruction { gpa: u64, instruction: Option<u32> },
     MmioRead { addr: u64, size: u8 },
     MmioWrite { addr: u64, size: u8, data: u64 },
+    Hlt,
+    Shutdown,
+    FailEntry { hardware_entry_failure_reason: u64 },
     InternalError,
     Unknown(u64),
 }
@@ -50,6 +49,8 @@ pub struct VcpuExit {
     pub fail_code: u64,
 }
 
+impl VmExit {}
+
 impl VcpuExit {
     pub fn from_vmexit(exit: &VmExit) -> Self {
         match exit {
@@ -70,7 +71,6 @@ impl VcpuExit {
                 fail_code: *code,
                 ..Default::default()
             },
-            _ => Self::new(VcpuExitReason::Unknown),
         }
     }
 
@@ -106,9 +106,5 @@ impl VcpuExit {
             },
             ..Default::default()
         }
-    }
-
-    pub fn needs_userspace(&self) -> bool {
-        !matches!(self.reason, VcpuExitReason::Io)
     }
 }

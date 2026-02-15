@@ -18,17 +18,18 @@ pub struct GuestCsrState {
     pub sstatus: u64,
 }
 
+#[repr(C)]
 #[derive(Debug, Clone)]
 pub struct GuestVcpu {
     pub iregs: IntRegisters,
+    pub csrs: GuestCsrState,
+    pub pc: u64,
     pub fpu: FpuContext,
     pub fpu_used: bool,
     pub vector: Option<Box<VectorContext>>,
     pub vector_used: bool,
-    pc: u64,
-    asid: usize,
-    mode: Mode,
-    pub csrs: GuestCsrState,
+    pub asid: usize,
+    pub mode: Mode,
     pub vm_id: u32,
     pub vcpu_id: u32,
 }

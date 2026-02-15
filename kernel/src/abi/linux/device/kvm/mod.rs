@@ -312,12 +312,6 @@ fn write_vm_exit(kvm_run: &mut KvmRun, exit: &crate::hypervisor::VmExit) {
         VmExit::Shutdown => {
             kvm_run.exit_reason = KVM_EXIT_SHUTDOWN;
         }
-        VmExit::SystemEvent { event_type } => {
-            kvm_run.exit_reason = KVM_EXIT_SYSTEM_EVENT;
-            let se = unsafe { &mut kvm_run.exit_data.system_event };
-            se.event_type = *event_type as u32;
-            se.ndata = 0;
-        }
         VmExit::FailEntry {
             hardware_entry_failure_reason,
         } => {

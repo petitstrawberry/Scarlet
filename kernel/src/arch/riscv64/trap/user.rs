@@ -4,7 +4,7 @@ use core::{arch::asm, mem::transmute};
 use super::exception::arch_exception_handler;
 use super::interrupt::arch_interrupt_handler;
 
-use crate::arch::{Mode, Trapframe, get_kernel_trapvector_paddr, set_trapvector};
+use crate::arch::{self, Mode, Trapframe, get_kernel_trapvector_paddr, set_trapvector};
 use crate::task::mytask;
 
 #[unsafe(link_section = ".trampoline.text")]
@@ -180,8 +180,12 @@ pub extern "C" fn arch_user_trap_handler(addr: usize) -> ! {
     let trapframe: &mut Trapframe = unsafe { transmute(addr) };
     set_trapvector(get_kernel_trapvector_paddr());
 
-    // let cpu = crate::arch::get_cpu();
-    // crate::early_println!("CPU: {:#x?}", cpu);
+    // Check for guest trap first - bypasses _user_trap_exit
+    if arch::hv::guest_trap_handler(trapframe) {
+        unsafe {
+            arch::hv::arch_guest_trap_exit(trapframe as *mut Trapframe as *mut u8);
+        }
+    }
 
     let cause: usize;
     unsafe {
@@ -192,22 +196,7 @@ pub extern "C" fn arch_user_trap_handler(addr: usize) -> ! {
     }
 
     let interrupt = cause & 0x8000000000000000 != 0;
-    let is_guest = mytask()
-        .map(|task| {
-            matches!(
-                task.vcpu.lock().get_mode(),
-                Mode::GuestKernel | Mode::GuestUser
-            )
-        })
-        .unwrap_or(false);
-
-    if is_guest {
-        if interrupt {
-            crate::arch::hv::guest_trap_handler(trapframe, cause & !0x8000000000000000, true);
-        } else {
-            crate::arch::hv::guest_trap_handler(trapframe, cause, false);
-        }
-    } else if interrupt {
+    if interrupt {
         arch_interrupt_handler(trapframe, cause & !0x8000000000000000);
     } else {
         arch_exception_handler(trapframe, cause);

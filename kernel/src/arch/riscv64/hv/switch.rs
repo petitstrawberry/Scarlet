@@ -4,13 +4,28 @@ use core::arch::naked_asm;
 
 use super::GuestVcpu;
 
-unsafe extern "C" {
-    fn run_guest_loop_return();
+mod offset {
+    // GuestVcpu offsets (must match struct layout)
+    pub const IREGS: usize = 0;
+    pub const CSRS: usize = 256;
+    pub const CSRS_SSCRATCH: usize = CSRS + 0;
+    pub const CSRS_SEPC: usize = CSRS + 8;
+    pub const CSRS_SCAUSE: usize = CSRS + 16;
+    pub const CSRS_STVAL: usize = CSRS + 24;
+    pub const CSRS_SATP: usize = CSRS + 32;
+    pub const CSRS_SSTATUS: usize = CSRS + 40;
+    pub const PC: usize = CSRS + 48;
+
+    // Riscv64 offsets
+    pub const RISCV64_KERNEL_STACK: usize = 24;
 }
 
+/// Enter guest execution.
+/// a0 = &GuestVcpu, a1 = &Riscv64
 #[unsafe(naked)]
-pub unsafe extern "C" fn run_guest_loop(_vcpu: *const GuestVcpu) {
+pub unsafe extern "C" fn run_guest_loop(_vcpu: *const GuestVcpu, _arch: *mut u8) {
     naked_asm!(
+        // Save host callee-saved registers
         "addi sp, sp, -104",
         "sd ra, 0(sp)",
         "sd s0, 8(sp)",
@@ -25,54 +40,77 @@ pub unsafe extern "C" fn run_guest_loop(_vcpu: *const GuestVcpu) {
         "sd s9, 80(sp)",
         "sd s10, 88(sp)",
         "sd s11, 96(sp)",
-        "ld t0, 0(a0)",
+
+        "sd sp, {kernel_stack}(a1)",
+
+        "ld t0, {csrs_sscratch}(a0)",
         "csrw vsscratch, t0",
-        "ld t0, 8(a0)",
+        "ld t0, {csrs_sepc}(a0)",
         "csrw vsepc, t0",
-        "ld t0, 24(a0)",
+        "ld t0, {csrs_satp}(a0)",
         "csrw vsatp, t0",
-        "ld t0, 32(a0)",
+        "ld t0, {csrs_sstatus}(a0)",
         "csrw vsstatus, t0",
-        "ld t0, 40(a0)",
-        "csrw hstatus, t0",
-        "ld x1, 104(a0)",
-        "ld x2, 112(a0)",
-        "ld x3, 120(a0)",
-        "ld x4, 128(a0)",
-        "ld x5, 136(a0)",
-        "ld x6, 144(a0)",
-        "ld x7, 152(a0)",
-        "ld x8, 160(a0)",
-        "ld x9, 168(a0)",
-        "ld x10, 176(a0)",
-        "ld x11, 184(a0)",
-        "ld x12, 192(a0)",
-        "ld x13, 200(a0)",
-        "ld x14, 208(a0)",
-        "ld x15, 216(a0)",
-        "ld x16, 224(a0)",
-        "ld x17, 232(a0)",
-        "ld x18, 240(a0)",
-        "ld x19, 248(a0)",
-        "ld x20, 256(a0)",
-        "ld x21, 264(a0)",
-        "ld x22, 272(a0)",
-        "ld x23, 280(a0)",
-        "ld x24, 288(a0)",
-        "ld x25, 296(a0)",
-        "ld x26, 304(a0)",
-        "ld x27, 312(a0)",
-        "ld x28, 320(a0)",
-        "ld x29, 328(a0)",
-        "ld x30, 336(a0)",
-        "ld x31, 344(a0)",
-        "ld t0, 352(a0)",
+
+        // Restore guest GPRs (from GuestVcpu.iregs)
+        "ld x1, 8(a0)",
+        "ld x2, 16(a0)",
+        "ld x3, 24(a0)",
+        "ld x4, 32(a0)",
+        "ld x5, 40(a0)",
+        "ld x6, 48(a0)",
+        "ld x7, 56(a0)",
+        "ld x8, 64(a0)",
+        "ld x9, 72(a0)",
+        "ld x10, 80(a0)",
+        "ld x11, 88(a0)",
+        "ld x12, 96(a0)",
+        "ld x13, 104(a0)",
+        "ld x14, 112(a0)",
+        "ld x15, 120(a0)",
+        "ld x16, 128(a0)",
+        "ld x17, 136(a0)",
+        "ld x18, 144(a0)",
+        "ld x19, 152(a0)",
+        "ld x20, 160(a0)",
+        "ld x21, 168(a0)",
+        "ld x22, 176(a0)",
+        "ld x23, 184(a0)",
+        "ld x24, 192(a0)",
+        "ld x25, 200(a0)",
+        "ld x26, 208(a0)",
+        "ld x27, 216(a0)",
+        "ld x28, 224(a0)",
+        "ld x29, 232(a0)",
+        "ld x30, 240(a0)",
+        "ld x31, 248(a0)",
+
+        // Load pc into sepc
+        "ld t0, {pc}(a0)",
         "csrw sepc, t0",
+
+        // Enable guest mode and enter
         "li t0, 0x80",
         "csrs hstatus, t0",
         "sret",
+
+        // Return path
+        "j run_guest_loop_return",
+
+        kernel_stack = const offset::RISCV64_KERNEL_STACK,
+        csrs_sscratch = const offset::CSRS_SSCRATCH,
+        csrs_sepc = const offset::CSRS_SEPC,
+        csrs_satp = const offset::CSRS_SATP,
+        csrs_sstatus = const offset::CSRS_SSTATUS,
+        pc = const offset::PC,
+    );
+}
+
+#[unsafe(naked)]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn run_guest_loop_return() {
+    naked_asm!(
         ".global run_guest_loop_return",
-        "run_guest_loop_return:",
         "ld ra, 0(sp)",
         "ld s0, 8(sp)",
         "ld s1, 16(sp)",
@@ -91,6 +129,13 @@ pub unsafe extern "C" fn run_guest_loop(_vcpu: *const GuestVcpu) {
     );
 }
 
+/// Exit from guest trap directly to kernel (run_guest_loop caller).
+/// a0 = trapframe pointer
+#[unsafe(naked)]
+pub unsafe extern "C" fn arch_guest_trap_exit(_trapframe: *mut u8) -> ! {
+    naked_asm!("addi sp, a0, 272", "j run_guest_loop_return",);
+}
+
 pub fn run_guest_loop_return_addr() -> usize {
-    unsafe { run_guest_loop_return as usize }
+    run_guest_loop_return as usize
 }
