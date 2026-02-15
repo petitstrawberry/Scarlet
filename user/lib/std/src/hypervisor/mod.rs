@@ -8,7 +8,7 @@ use crate::syscall::{Syscall, syscall2, syscall3};
 
 /// Create a new VM, returns handle
 pub fn vm_create() -> Result<u32, ()> {
-    let ret = syscall2(Syscall::HypervisorVmCreate as usize, 0, 0);
+    let ret = syscall2(Syscall::HypervisorVmCreate, 0, 0);
     if ret == usize::MAX {
         Err(())
     } else {
@@ -19,7 +19,7 @@ pub fn vm_create() -> Result<u32, ()> {
 /// Create a vCPU on an existing VM
 pub fn vcpu_create(vm_handle: u32, vcpu_id: u32) -> Result<u32, ()> {
     let ret = syscall2(
-        Syscall::HypervisorVcpuCreate as usize,
+        Syscall::HypervisorVcpuCreate,
         vm_handle as usize,
         vcpu_id as usize,
     );
@@ -33,7 +33,7 @@ pub fn vcpu_create(vm_handle: u32, vcpu_id: u32) -> Result<u32, ()> {
 /// Run a vCPU until exit
 pub fn vcpu_run(vcpu_handle: u32, exit: &mut VcpuExit) -> Result<(), ()> {
     let ret = syscall3(
-        Syscall::VcpuRun as usize,
+        Syscall::VcpuRun,
         vcpu_handle as usize,
         exit as *mut VcpuExit as usize,
         0,
@@ -67,7 +67,7 @@ pub struct VmMemoryRegion {
 /// Control a VM handle via HandleControl
 pub fn vm_control(vm_handle: u32, command: u32, arg: usize) -> Result<i32, ()> {
     let ret = syscall3(
-        Syscall::HandleControl as usize,
+        Syscall::HandleControl,
         vm_handle as usize,
         command as usize,
         arg,
@@ -82,7 +82,7 @@ pub fn vm_control(vm_handle: u32, command: u32, arg: usize) -> Result<i32, ()> {
 /// Control a vCPU handle via HandleControl
 pub fn vcpu_control(vcpu_handle: u32, command: u32, arg: usize) -> Result<i32, ()> {
     let ret = syscall3(
-        Syscall::HandleControl as usize,
+        Syscall::HandleControl,
         vcpu_handle as usize,
         command as usize,
         arg,

@@ -9,7 +9,7 @@ pub enum InterruptType {
     External,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub enum VmExit {
     MmioRead { addr: u64, size: u8 },
     MmioWrite { addr: u64, size: u8, data: u64 },

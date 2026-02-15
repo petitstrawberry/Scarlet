@@ -3,8 +3,9 @@
 //! Mirror of kernel types in `kernel/src/hypervisor/types.rs`.
 
 #[repr(C)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum VcpuExitReason {
+    #[default]
     Unknown = 0,
     Io = 1,
     MmioRead = 2,
@@ -13,12 +14,6 @@ pub enum VcpuExitReason {
     Shutdown = 5,
     FailEntry = 6,
     InternalError = 7,
-}
-
-impl Default for VcpuExitReason {
-    fn default() -> Self {
-        Self::Unknown
-    }
 }
 
 #[repr(C)]

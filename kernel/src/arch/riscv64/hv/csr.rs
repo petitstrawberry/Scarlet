@@ -2,6 +2,8 @@
 
 use core::arch::asm;
 
+use crate::arch::hv::csr;
+
 macro_rules! csr_read {
     ($name:ident, $csr:literal) => {
         pub fn $name() -> u64 {
@@ -32,12 +34,31 @@ macro_rules! csr_write {
     };
 }
 
+// H-extension CSRs
+
+// HS-mode registers
 csr_read!(read_hstatus, "hstatus");
 csr_write!(write_hstatus, "hstatus");
 
 csr_read!(read_hgatp, "hgatp");
 csr_write!(write_hgatp, "hgatp");
 
+csr_read!(read_hgeie, "hgeie");
+csr_write!(write_hgeie, "hgeie");
+
+csr_read!(read_hgeip, "hgeip");
+csr_write!(write_hgeip, "hgeip");
+
+csr_read!(read_hideleg, "hideleg");
+csr_write!(write_hideleg, "hideleg");
+
+csr_read!(read_hedeleg, "hedeleg");
+csr_write!(write_hedeleg, "hedeleg");
+
+csr_read!(read_htval, "htval");
+csr_read!(read_htinst, "htinst");
+
+// Virtual supervisor CSRs (for guest state)
 csr_read!(read_vsscratch, "vsscratch");
 csr_write!(write_vsscratch, "vsscratch");
 
@@ -56,14 +77,84 @@ csr_write!(write_vsatp, "vsatp");
 csr_read!(read_vsstatus, "vsstatus");
 csr_write!(write_vsstatus, "vsstatus");
 
-csr_read!(read_htval, "htval");
-csr_read!(read_htinst, "htinst");
+csr_read!(read_vsie, "vsie");
+csr_write!(write_vsie, "vsie");
 
+csr_read!(read_vsip, "vsip");
+csr_write!(write_vsip, "vsip");
+
+// Non-H-extension CSRs that we need to access in the hypervisor
 csr_read!(read_scause, "scause");
 csr_read!(read_stval, "stval");
 
-pub fn clear_hstatus_spv() {
-    let mut hstatus = read_hstatus();
-    hstatus &= !super::HSTATUS_SPV;
-    write_hstatus(hstatus);
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct GuestCsrState {
+    pub sscratch: u64,
+    pub sepc: u64,
+    pub scause: u64,
+    pub stval: u64,
+    pub satp: u64,
+    pub sstatus: u64,
+    pub sie: u64,
+    pub sip: u64,
+}
+
+impl GuestCsrState {
+    pub fn save() -> Self {
+        Self {
+            sscratch: read_vsscratch(),
+            sepc: read_vsepc(),
+            scause: read_vscause(),
+            stval: read_vstval(),
+            satp: read_vsatp(),
+            sstatus: read_vsstatus(),
+            sie: read_vsie(),
+            sip: read_vsip(),
+        }
+    }
+
+    pub fn restore(&self) {
+        write_vsscratch(self.sscratch);
+        write_vsepc(self.sepc);
+        write_vscause(self.scause);
+        write_vstval(self.stval);
+        write_vsatp(self.satp);
+        write_vsstatus(self.sstatus);
+        write_vsie(self.sie);
+        write_vsip(self.sip);
+    }
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct HypervisorCsrState {
+    pub hstatus: u64,
+    pub hgatp: u64,
+    pub hgeie: u64,
+    pub hgeip: u64,
+    pub hideleg: u64,
+    pub hedeleg: u64,
+}
+
+impl HypervisorCsrState {
+    pub fn save() -> Self {
+        Self {
+            hstatus: read_hstatus(),
+            hgatp: read_hgatp(),
+            hgeie: read_hgeie(),
+            hgeip: read_hgeip(),
+            hideleg: read_hideleg(),
+            hedeleg: read_hedeleg(),
+        }
+    }
+
+    pub fn restore(&self) {
+        write_hstatus(self.hstatus);
+        write_hgatp(self.hgatp);
+        write_hgeie(self.hgeie);
+        write_hgeip(self.hgeip);
+        write_hideleg(self.hideleg);
+        write_hedeleg(self.hedeleg);
+    }
 }

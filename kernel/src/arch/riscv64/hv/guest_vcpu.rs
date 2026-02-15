@@ -1,37 +1,30 @@
 //! Guest VCPU state for Type-2 hypervisor
 
+use crate::arch::hv::csr::GuestCsrState;
 use crate::arch::riscv64::fpu::{FpuContext, VectorContext};
 use crate::arch::riscv64::{IntRegisters, Mode, Trapframe};
+use crate::arch::vcpu::Vcpu;
+use crate::hypervisor::VmExit;
 use alloc::boxed::Box;
 
 use super::csr;
 use super::reg_index::reg;
 
 #[repr(C)]
-#[derive(Debug, Clone, Copy, Default)]
-pub struct GuestCsrState {
-    pub sscratch: u64,
-    pub sepc: u64,
-    pub scause: u64,
-    pub stval: u64,
-    pub satp: u64,
-    pub sstatus: u64,
-}
-
-#[repr(C)]
 #[derive(Debug, Clone)]
 pub struct GuestVcpu {
-    pub iregs: IntRegisters,
-    pub csrs: GuestCsrState,
-    pub pc: u64,
-    pub fpu: FpuContext,
-    pub fpu_used: bool,
-    pub vector: Option<Box<VectorContext>>,
-    pub vector_used: bool,
-    pub asid: usize,
-    pub mode: Mode,
-    pub vm_id: u32,
-    pub vcpu_id: u32,
+    iregs: IntRegisters,
+    csrs: GuestCsrState,
+    pc: u64,
+    fpu: FpuContext,
+    fpu_used: bool,
+    vector: Option<Box<VectorContext>>,
+    vector_used: bool,
+    asid: usize,
+    mode: Mode,
+    vm_id: u32,
+    vcpu_id: u32,
+    exit_reason: Option<VmExit>,
 }
 
 impl GuestVcpu {
@@ -48,12 +41,28 @@ impl GuestVcpu {
             csrs: GuestCsrState::default(),
             vm_id,
             vcpu_id,
+            exit_reason: None,
         }
     }
 
-    pub fn store(&mut self, trapframe: &Trapframe) {
-        self.iregs = trapframe.regs;
-        self.pc = trapframe.epc;
+    pub fn store(&mut self, vcpu: &Vcpu) {
+        self.iregs = vcpu.iregs;
+        #[cfg(feature = "user-fpu")]
+        {
+            self.fpu_used = vcpu.fpu_used;
+            if vcpu.fpu_used {
+                self.fpu = vcpu.fpu.clone();
+            }
+        }
+        #[cfg(feature = "user-vector")]
+        {
+            self.vector_used = vcpu.vector_used;
+            if vcpu.vector_used {
+                self.vector = vcpu.vector.clone();
+            }
+        }
+        self.pc = vcpu.get_pc();
+        self.mode = vcpu.get_mode();
     }
 
     pub fn switch(&mut self, trapframe: &mut Trapframe) {
@@ -78,6 +87,10 @@ impl GuestVcpu {
     }
     pub fn set_mode(&mut self, mode: Mode) {
         self.mode = mode;
+    }
+
+    pub fn get_exit_reason(&self) -> Option<VmExit> {
+        self.exit_reason
     }
 
     pub fn get_gpr(&self, index: usize) -> u64 {
@@ -169,7 +182,7 @@ impl GuestVcpu {
         }
     }
 
-    pub fn save_csrs(&mut self) {
+    fn save_csrs(&mut self) {
         self.csrs.sscratch = csr::read_vsscratch();
         self.csrs.sepc = csr::read_vsepc();
         self.csrs.scause = csr::read_vscause();
@@ -178,7 +191,7 @@ impl GuestVcpu {
         self.csrs.sstatus = csr::read_vsstatus();
     }
 
-    pub fn restore_csrs(&self) {
+    fn restore_csrs(&self) {
         csr::write_vsscratch(self.csrs.sscratch);
         csr::write_vsepc(self.csrs.sepc);
         csr::write_vscause(self.csrs.scause);

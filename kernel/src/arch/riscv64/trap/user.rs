@@ -4,6 +4,7 @@ use core::{arch::asm, mem::transmute};
 use super::exception::arch_exception_handler;
 use super::interrupt::arch_interrupt_handler;
 
+use crate::arch::trap::prev_mode;
 use crate::arch::{self, Mode, Trapframe, get_kernel_trapvector_paddr, set_trapvector};
 use crate::task::mytask;
 
@@ -182,20 +183,13 @@ pub extern "C" fn arch_user_trap_handler(addr: usize) -> ! {
 
     #[cfg(feature = "hypervisor")]
     {
-        // HypervisorVCPUタスクの場合, S(HS)-modeから移動するモードがVS-modeかVU-modeか判断できないので, 
         if crate::arch::hv::trap::is_from_guest() {
             if let Some(task) = mytask() {
-                use crate::arch::trap::prev_mode;
-
                 let mode = match prev_mode() {
                     // from VU-mode
-                    PRIV_U_MODE => {
-                        Mode::GuestUser
-                    }
+                    PRIV_U_MODE => Mode::GuestUser,
                     // from VS-mode
-                    PRIV_S_MODE => {
-                        Mode::GuestKernel
-                    }
+                    PRIV_S_MODE => Mode::GuestKernel,
                     _ => {
                         panic!("Invalid previous mode in guest trap: {}", prev_mode());
                     }
@@ -203,6 +197,25 @@ pub extern "C" fn arch_user_trap_handler(addr: usize) -> ! {
 
                 task.vcpu.lock().set_mode(mode);
             }
+        } else {
+            if let Some(task) = mytask() {
+                let mode = match prev_mode() {
+                    PRIV_U_MODE => Mode::User,
+                    PRIV_S_MODE => Mode::Kernel,
+                    _ => panic!("Invalid previous mode in user trap: {}", prev_mode()),
+                };
+                task.vcpu.lock().set_mode(mode);
+            }
+        }
+    }
+    #[cfg(not(feature = "hypervisor"))]
+    {
+        if let Some(task) = mytask() {
+            let mode = match prev_mode() {
+                PRIV_U_MODE => Mode::User,
+                PRIV_S_MODE => Mode::Kernel,
+                _ => panic!("Invalid previous mode in user trap: {}", prev_mode()),
+            };
         }
     }
 

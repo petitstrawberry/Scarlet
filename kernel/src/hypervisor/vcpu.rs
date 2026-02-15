@@ -4,13 +4,15 @@ use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
 use spin::Mutex;
 
-use crate::arch::get_cpu;
-use crate::arch::hv::guest_vcpu::GuestVcpu;
+use crate::arch::hv::guest_vcpu::{self, GuestVcpu};
+use crate::arch::hv::switch::run_guest_loop;
+use crate::arch::{get_cpu, set_next_mode, set_trapvector};
 use crate::hypervisor::memory::MemorySlot;
 use crate::hypervisor::trap::{AccessType, TrapType, VmTrapInfo};
 use crate::hypervisor::types::{InterruptType, VmExit};
 use crate::object::capability::ControlOps;
 use crate::task::mytask;
+use crate::vm::get_trampoline_trap_vector;
 
 pub type VcpuId = u32;
 
@@ -67,9 +69,31 @@ impl VcpuObject {
 
     pub fn run(&self) -> Result<VmExit, &'static str> {
         let _vm = self.vm.upgrade().ok_or("VM no longer exists")?;
-        let _arch = get_cpu();
+
         let task = mytask().ok_or("No current task")?;
         let mode = self.state.lock().guest.get_mode();
+        task.vcpu.lock().set_mode(mode);
+        // Set up next mode and trap vector for guest execution
+        set_next_mode(mode);
+        set_trapvector(get_trampoline_trap_vector());
+
+        // Run the guest loop, which will return on VM exit
+        let arch = get_cpu();
+        unsafe {
+            run_guest_loop(
+                &self.state.lock().guest as *const GuestVcpu,
+                arch as *const _ as *mut u8,
+            )
+        };
+
+        // After returning from run_guest_loop, we can read the exit reason from the guest state
+        let exit_reason = self
+            .state
+            .lock()
+            .guest
+            .get_exit_reason()
+            .ok_or("Failed to get exit reason")?;
+        Ok(exit_reason)
     }
 
     pub fn get_reg(&self, index: u32) -> Result<u64, &'static str> {

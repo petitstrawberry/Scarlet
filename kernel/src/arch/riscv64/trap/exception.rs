@@ -293,10 +293,10 @@ pub fn arch_exception_handler(trapframe: &mut Trapframe, cause: usize) {
         // Hypervisor traps (e.g., guest page faults)
         #[cfg(feature = "hypervisor")]
         /* Guest instruction page fault */
-        INSTRUCTION_GUEST_PAGE_FAULT | 
-        LOAD_GUEST_PAGE_FAULT | 
-        STORE_GUEST_PAGE_FAULT |
-        ECALL_FROM_VS_MODE => {
+        INSTRUCTION_GUEST_PAGE_FAULT
+        | LOAD_GUEST_PAGE_FAULT
+        | STORE_GUEST_PAGE_FAULT
+        | ECALL_FROM_VS_MODE => {
             use crate::arch::hv::trap::guest_trap_handler;
             guest_trap_handler(trapframe, cause);
         }

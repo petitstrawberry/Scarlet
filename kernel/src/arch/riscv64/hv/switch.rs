@@ -2,8 +2,13 @@
 
 use core::arch::naked_asm;
 
-use crate::arch::hv::guest_vcpu::GuestVcpu;
-
+use crate::arch::{
+    Trapframe,
+    hv::{
+        csr::{GuestCsrState, HypervisorCsrState},
+        guest_vcpu::GuestVcpu,
+    },
+};
 
 mod offset {
     // GuestVcpu offsets (must match struct layout)
@@ -139,4 +144,36 @@ pub unsafe extern "C" fn arch_guest_trap_exit(_trapframe: *mut u8) -> ! {
 
 pub fn run_guest_loop_return_addr() -> usize {
     run_guest_loop_return as usize
+}
+
+pub struct HypervisorSwitchData {
+    hypervisor_csrs: HypervisorCsrState,
+}
+
+impl HypervisorSwitchData {
+    pub fn save() -> Self {
+        HypervisorSwitchData {
+            hypervisor_csrs: HypervisorCsrState::save(),
+        }
+    }
+
+    pub fn restore(&self) {
+        self.hypervisor_csrs.restore();
+    }
+}
+
+pub struct VcpuSwitchData {
+    guest_csrs: GuestCsrState,
+}
+
+impl VcpuSwitchData {
+    pub fn save() -> Self {
+        VcpuSwitchData {
+            guest_csrs: GuestCsrState::save(),
+        }
+    }
+
+    pub fn restore(&self) {
+        self.guest_csrs.restore();
+    }
 }

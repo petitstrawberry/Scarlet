@@ -603,9 +603,39 @@ impl Scheduler {
                 let current_task = self.get_task_by_id(current_task_id).unwrap();
                 current_task.vcpu.lock().store(trapframe);
 
-                // Perform kernel context switch
-                self.kernel_context_switch(cpu_id, current_task_id, next_task_id);
-                // NOTE: After this point, the current task will not execute until it is scheduled again
+                #[cfg(feature = "hypervisor")]
+                {
+                    let (guest_vcpu_switch_data, hypervisor_switch_data) =
+                        match current_task.vcpu.lock().get_mode() {
+                            crate::arch::Mode::GuestKernel | crate::arch::Mode::GuestUser => {
+                                use crate::arch::hv::switch::HypervisorSwitchData;
+                                use crate::arch::hv::switch::VcpuSwitchData;
+
+                                (
+                                    Some(VcpuSwitchData::save()),
+                                    Some(HypervisorSwitchData::save()),
+                                )
+                            }
+                            _ => (None, None),
+                        };
+
+                    // Perform kernel context switch
+                    self.kernel_context_switch(cpu_id, current_task_id, next_task_id);
+                    // NOTE: After this point, the current task will not execute until it is scheduled again
+
+                    if let Some(guest_vcpu_switch_data) = guest_vcpu_switch_data {
+                        guest_vcpu_switch_data.restore();
+                    }
+                    if let Some(hypervisor_switch_data) = hypervisor_switch_data {
+                        hypervisor_switch_data.restore();
+                    }
+                }
+                #[cfg(not(feature = "hypervisor"))]
+                {
+                    // Perform kernel context switch
+                    self.kernel_context_switch(cpu_id, current_task_id, next_task_id);
+                    // NOTE: After this point, the current task will not execute until it is scheduled again
+                }
 
                 // Restore trapframe of same task
                 let current_task = self.get_task_by_id(current_task_id).unwrap();
@@ -867,9 +897,20 @@ impl Scheduler {
             }
 
             if !from_ctx_ptr.is_null() && !to_ctx_ptr.is_null() {
+                #[cfg(feature = "hypervisor")]
+                let guest_vcpu_switch_data = crate::arch::hv::switch::VcpuSwitchData::save();
+                #[cfg(feature = "hypervisor")]
+                let hypervisor_switch_data = crate::arch::hv::switch::HypervisorSwitchData::save();
+
                 // Perform kernel context switch
                 unsafe {
                     crate::arch::switch::switch_to(from_ctx_ptr, to_ctx_ptr);
+                }
+
+                #[cfg(feature = "hypervisor")]
+                {
+                    guest_vcpu_switch_data.restore();
+                    hypervisor_switch_data.restore();
                 }
 
                 // Execution resumes here when this task is rescheduled

@@ -1,6 +1,6 @@
 //! RISC-V KVM register conversion
 
-use crate::arch::hv::reg;
+use crate::arch::hv::reg_index::reg;
 use crate::hypervisor::VcpuRef;
 
 #[repr(C)]

@@ -538,66 +538,58 @@ pub fn get_cpu() -> &'static mut Riscv64 {
 
 pub fn set_next_mode(mode: Mode) {
     match mode {
-        Mode::User => {
-            unsafe {
-                let mut sstatus: usize;
-                asm!(
-                    "csrr {sstatus}, sstatus",
-                    sstatus = out(reg) sstatus,
-                );
-                sstatus &= !(1 << 8);
-                asm!(
-                    "csrw sstatus, {sstatus}",
-                    sstatus = in(reg) sstatus,
-                );
-                asm!("csrc hstatus, {0}", in(reg) (1u64 << 7));
-            }
-        }
-        Mode::Kernel => {
-            unsafe {
-                let mut sstatus: usize;
-                asm!(
-                    "csrr {sstatus}, sstatus",
-                    sstatus = out(reg) sstatus,
-                );
-                sstatus |= 1 << 8;
-                asm!(
-                    "csrw sstatus, {sstatus}",
-                    sstatus = in(reg) sstatus,
-                );
-                asm!("csrc hstatus, {0}", in(reg) (1u64 << 7));
-            }
-        }
-        Mode::GuestUser => {
-            unsafe {
-                let mut sstatus: usize;
-                asm!(
-                    "csrr {sstatus}, sstatus",
-                    sstatus = out(reg) sstatus,
-                );
-                sstatus &= !(1 << 8);
-                asm!(
-                    "csrw sstatus, {sstatus}",
-                    sstatus = in(reg) sstatus,
-                );
-                asm!("csrs hstatus, {0}", in(reg) (1u64 << 7));
-            }
-        }
-        Mode::GuestKernel => {
-            unsafe {
-                let mut sstatus: usize;
-                asm!(
-                    "csrr {sstatus}, sstatus",
-                    sstatus = out(reg) sstatus,
-                );
-                sstatus |= 1 << 8;
-                asm!(
-                    "csrw sstatus, {sstatus}",
-                    sstatus = in(reg) sstatus,
-                );
-                asm!("csrs hstatus, {0}", in(reg) (1u64 << 7));
-            }
-        }
+        Mode::User => unsafe {
+            let mut sstatus: usize;
+            asm!(
+                "csrr {sstatus}, sstatus",
+                sstatus = out(reg) sstatus,
+            );
+            sstatus &= !(1 << 8);
+            asm!(
+                "csrw sstatus, {sstatus}",
+                sstatus = in(reg) sstatus,
+            );
+            asm!("csrc hstatus, {0}", in(reg) (1u64 << 7));
+        },
+        Mode::Kernel => unsafe {
+            let mut sstatus: usize;
+            asm!(
+                "csrr {sstatus}, sstatus",
+                sstatus = out(reg) sstatus,
+            );
+            sstatus |= 1 << 8;
+            asm!(
+                "csrw sstatus, {sstatus}",
+                sstatus = in(reg) sstatus,
+            );
+            asm!("csrc hstatus, {0}", in(reg) (1u64 << 7));
+        },
+        Mode::GuestUser => unsafe {
+            let mut sstatus: usize;
+            asm!(
+                "csrr {sstatus}, sstatus",
+                sstatus = out(reg) sstatus,
+            );
+            sstatus &= !(1 << 8);
+            asm!(
+                "csrw sstatus, {sstatus}",
+                sstatus = in(reg) sstatus,
+            );
+            asm!("csrs hstatus, {0}", in(reg) (1u64 << 7));
+        },
+        Mode::GuestKernel => unsafe {
+            let mut sstatus: usize;
+            asm!(
+                "csrr {sstatus}, sstatus",
+                sstatus = out(reg) sstatus,
+            );
+            sstatus |= 1 << 8;
+            asm!(
+                "csrw sstatus, {sstatus}",
+                sstatus = in(reg) sstatus,
+            );
+            asm!("csrs hstatus, {0}", in(reg) (1u64 << 7));
+        },
     }
 }
 
