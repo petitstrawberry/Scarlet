@@ -105,7 +105,13 @@ impl VcpuObject {
     }
 
     fn map_guest_page(&self, slot: &MemorySlot, gpa: u64) {
-        // TODO: Implement Second Stage Page Table mapping
+        let vm = match self.vm.upgrade() {
+            Some(vm) => vm,
+            None => return,
+        };
+        let hpa = slot.gpa_to_hpa(gpa);
+        let writable = !slot.flags.readonly;
+        let _ = vm.map_stage2_page(gpa, hpa, writable);
     }
 
     fn handle_firmware_call(&self) -> Result<(), &'static str> {

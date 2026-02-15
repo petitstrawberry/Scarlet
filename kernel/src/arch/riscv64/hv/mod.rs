@@ -68,18 +68,3 @@ pub fn guest_trap_handler(trapframe: &mut Trapframe) -> bool {
 
     true
 }
-
-pub fn set_guest_root_pagetable(token: u64) {
-    use core::arch::asm;
-    unsafe {
-        asm!("csrw hgatp, {0}", in(reg) token);
-        asm!("hfence.gvma zero, zero");
-    }
-}
-
-pub fn set_guest_asid(asid: usize) {
-    use core::arch::asm;
-    unsafe {
-        asm!("csrw asid, {0}", in(reg) asid);
-    }
-}

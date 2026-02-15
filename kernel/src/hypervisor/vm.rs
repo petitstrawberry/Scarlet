@@ -5,11 +5,11 @@ use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU32, Ordering};
 use spin::Mutex;
 
+use crate::arch::vm::{alloc_virtual_address_space, get_root_pagetable};
 use crate::object::capability::ControlOps;
 use crate::task::mytask;
 
 use super::memory::{MemorySlot, MemorySlotFlags, MemorySlotManager};
-use super::types::VmExit;
 use super::vcpu::VcpuObject;
 
 pub type VmId = u32;
@@ -31,6 +31,7 @@ pub struct ScarletVmMemoryRegion {
 struct VmState {
     vcpus: Vec<Arc<VcpuObject>>,
     memory_slots: MemorySlotManager,
+    vmid: u16,
 }
 
 pub struct VmObject {
@@ -40,11 +41,13 @@ pub struct VmObject {
 
 impl VmObject {
     pub fn new(id: VmId) -> Result<Self, &'static str> {
+        let vmid = alloc_virtual_address_space();
         Ok(Self {
             id,
             state: Mutex::new(VmState {
                 vcpus: Vec::new(),
                 memory_slots: MemorySlotManager::new(),
+                vmid,
             }),
         })
     }
@@ -99,6 +102,19 @@ impl VmObject {
 
     pub fn find_memory_slot(&self, gpa: u64) -> Option<MemorySlot> {
         self.state.lock().memory_slots.find_slot(gpa).cloned()
+    }
+
+    pub fn map_stage2_page(&self, gpa: u64, hpa: u64, writable: bool) -> Result<(), &'static str> {
+        let state = self.state.lock();
+        let pagetable = get_root_pagetable(state.vmid).ok_or("No page table")?;
+        crate::arch::hv::mmu::map_stage2_page(pagetable, gpa, hpa, writable)
+    }
+
+    pub fn set_guest_root_pagetable(&self) {
+        let state = self.state.lock();
+        if let Some(pagetable) = get_root_pagetable(state.vmid) {
+            crate::arch::hv::mmu::set_guest_root_pagetable(pagetable, state.vmid);
+        }
     }
 }
 
