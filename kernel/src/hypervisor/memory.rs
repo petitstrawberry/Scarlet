@@ -16,6 +16,16 @@ pub struct MemorySlot {
     pub flags: MemorySlotFlags,
 }
 
+impl MemorySlot {
+    pub fn contains_gpa(&self, gpa: u64) -> bool {
+        gpa >= self.guest_phys_addr && gpa < self.guest_phys_addr + self.memory_size
+    }
+
+    pub fn gpa_to_hpa(&self, gpa: u64) -> u64 {
+        self.host_phys_addr + (gpa - self.guest_phys_addr)
+    }
+}
+
 pub struct MemorySlotManager {
     slots: alloc::vec::Vec<MemorySlot>,
 }
@@ -38,6 +48,10 @@ impl MemorySlotManager {
             }
         }
         Ok(())
+    }
+
+    pub fn find_slot(&self, gpa: u64) -> Option<&MemorySlot> {
+        self.slots.iter().find(|s| s.contains_gpa(gpa))
     }
 }
 

@@ -9,6 +9,7 @@ use crate::object::capability::ControlOps;
 use crate::task::mytask;
 
 use super::memory::{MemorySlot, MemorySlotFlags, MemorySlotManager};
+use super::types::VmExit;
 use super::vcpu::VcpuObject;
 
 pub type VmId = u32;
@@ -70,6 +71,15 @@ impl VmObject {
         self.state.lock().vcpus.len()
     }
 
+    pub fn get_vcpu(&self, vcpu_id: super::vcpu::VcpuId) -> Option<Arc<VcpuObject>> {
+        self.state
+            .lock()
+            .vcpus
+            .iter()
+            .find(|v| v.id() == vcpu_id)
+            .cloned()
+    }
+
     pub fn set_memory_region(
         &self,
         slot_id: u32,
@@ -85,6 +95,10 @@ impl VmObject {
             host_phys_addr,
             flags,
         })
+    }
+
+    pub fn find_memory_slot(&self, gpa: u64) -> Option<MemorySlot> {
+        self.state.lock().memory_slots.find_slot(gpa).cloned()
     }
 }
 

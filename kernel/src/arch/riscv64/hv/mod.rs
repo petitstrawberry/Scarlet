@@ -7,7 +7,9 @@ pub mod reg_index;
 pub mod switch;
 pub mod trap;
 
-pub use guest_vcpu::{GuestCsrState, GuestVcpu};
+pub use guest_vcpu::{
+    GuestCsrState, GuestVcpu, clear_current_guest_vcpu, current_guest_vcpu, set_current_guest_vcpu,
+};
 pub use reg_index::reg;
 pub use switch::{arch_guest_trap_exit, run_guest_loop, run_guest_loop_return_addr};
 pub use trap::RiscvTrapInfo;

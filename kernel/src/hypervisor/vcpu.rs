@@ -4,11 +4,13 @@ use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
 use spin::Mutex;
 
+use crate::arch::get_cpu;
+use crate::arch::hv::{GuestVcpu, get_last_trap_info, run_guest_loop};
+use crate::hypervisor::memory::MemorySlot;
+use crate::hypervisor::trap::{AccessType, TrapType, VmTrapInfo};
+use crate::hypervisor::types::VmExit;
 use crate::object::capability::ControlOps;
 use crate::task::mytask;
-
-use super::VmExit;
-use crate::arch::hv::GuestVcpu;
 
 pub type VcpuId = u32;
 
@@ -49,8 +51,66 @@ impl VcpuObject {
     pub fn id(&self) -> VcpuId {
         self.id
     }
+
     pub fn run(&self) -> Result<VmExit, &'static str> {
-        Err("vcpu run not implemented")
+        let vm = self.vm.upgrade().ok_or("VM no longer exists")?;
+        let arch = get_cpu();
+
+        loop {
+            {
+                let mut state = self.state.lock();
+                state.guest.restore_csrs();
+                unsafe {
+                    crate::arch::hv::set_current_guest_vcpu(&mut state.guest as *mut GuestVcpu);
+                }
+                unsafe {
+                    run_guest_loop(&state.guest as *const GuestVcpu, arch as *mut _ as *mut u8);
+                }
+            }
+
+            let trap_info = get_last_trap_info().ok_or("No trap info")?;
+
+            match trap_info.trap_type() {
+                TrapType::PageFault => {
+                    let gpa = trap_info.gpa();
+                    if let Some(slot) = vm.find_memory_slot(gpa) {
+                        self.map_guest_page(&slot, gpa);
+                        continue;
+                    } else {
+                        return Ok(match trap_info.access_type() {
+                            AccessType::Write => VmExit::MmioWrite {
+                                addr: gpa,
+                                size: trap_info.access_size(),
+                                data: 0,
+                            },
+                            _ => VmExit::MmioRead {
+                                addr: gpa,
+                                size: trap_info.access_size(),
+                            },
+                        });
+                    }
+                }
+                TrapType::Halt => return Ok(VmExit::Hlt),
+                TrapType::TimerInterrupt => continue,
+                TrapType::FirmwareCall => {
+                    self.handle_firmware_call()?;
+                    continue;
+                }
+                TrapType::ExternalInterrupt => continue,
+                TrapType::Unknown => {
+                    return Ok(VmExit::Unknown(trap_info.raw_cause()));
+                }
+            }
+        }
+    }
+
+    fn map_guest_page(&self, slot: &MemorySlot, gpa: u64) {
+        // TODO: Implement Second Stage Page Table mapping
+    }
+
+    fn handle_firmware_call(&self) -> Result<(), &'static str> {
+        // TODO: Implement SBI handling
+        Ok(())
     }
 
     pub fn get_reg(&self, index: u32) -> Result<u64, &'static str> {
