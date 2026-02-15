@@ -1,11 +1,8 @@
 //! RISC-V KVM register conversion
-//!
-//! Maps between the Scarlet hypervisor's GuestRegisters (index-based) and
-//! Linux KVM's `struct kvm_regs` in RISC-V ptrace order.
 
+use crate::arch::hv::reg;
 use crate::hypervisor::VcpuRef;
 
-/// `struct kvm_regs` for RISC-V in Linux ptrace order
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct KvmRegs {
@@ -43,63 +40,52 @@ pub struct KvmRegs {
     pub t6: u64,
 }
 
-/// RISC-V register index → KvmRegs field mapping (ptrace order).
-///
-/// Index 0 (x0) is hardwired zero and excluded from the mapping.
-const PTRACE_GPR_ORDER: [usize; 31] = [
-    1,  // ra
-    2,  // sp
-    3,  // gp
-    4,  // tp
-    5,  // t0
-    6,  // t1
-    7,  // t2
-    8,  // s0/fp
-    9,  // s1
-    10, // a0
-    11, // a1
-    12, // a2
-    13, // a3
-    14, // a4
-    15, // a5
-    16, // a6
-    17, // a7
-    18, // s2
-    19, // s3
-    20, // s4
-    21, // s5
-    22, // s6
-    23, // s7
-    24, // s8
-    25, // s9
-    26, // s10
-    27, // s11
-    28, // t3
-    29, // t4
-    30, // t5
-    31, // t6
+const PTRACE_REG_INDEX: [u32; 32] = [
+    reg::PC,
+    reg::RA,
+    reg::SP,
+    reg::GP,
+    reg::TP,
+    reg::T0,
+    reg::T1,
+    reg::T2,
+    reg::S0,
+    reg::S1,
+    reg::A0,
+    reg::A1,
+    reg::A2,
+    reg::A3,
+    reg::A4,
+    reg::A5,
+    reg::A6,
+    reg::A7,
+    reg::S2,
+    reg::S3,
+    reg::S4,
+    reg::S5,
+    reg::S6,
+    reg::S7,
+    reg::S8,
+    reg::S9,
+    reg::S10,
+    reg::S11,
+    reg::T3,
+    reg::T4,
+    reg::T5,
+    reg::T6,
 ];
 
-/// Read vCPU registers into a Linux KvmRegs struct.
 pub fn read_regs_to_kvm(vcpu: &VcpuRef) -> KvmRegs {
     let mut buf = [0u64; 32];
-    buf[0] = vcpu.get_pc();
-    for (slot, &reg_idx) in PTRACE_GPR_ORDER.iter().enumerate() {
-        buf[slot + 1] = vcpu.get_gpr(reg_idx);
+    for (slot, &idx) in PTRACE_REG_INDEX.iter().enumerate() {
+        buf[slot] = vcpu.get_reg(idx).unwrap_or(0);
     }
-
-    // SAFETY: KvmRegs is repr(C) with 32 consecutive u64 fields,
-    // identical in layout to [u64; 32].
     unsafe { core::mem::transmute(buf) }
 }
 
-/// Write a Linux KvmRegs struct into the vCPU registers.
 pub fn write_kvm_to_regs(vcpu: &VcpuRef, kvm_regs: &KvmRegs) {
-    // SAFETY: same layout reasoning as read_regs_to_kvm.
     let buf: &[u64; 32] = unsafe { core::mem::transmute(kvm_regs) };
-
-    vcpu.set_pc(buf[0]);
-    for (slot, &reg_idx) in PTRACE_GPR_ORDER.iter().enumerate() {
-        vcpu.set_gpr(reg_idx, buf[slot + 1]);
+    for (&idx, &val) in PTRACE_REG_INDEX.iter().zip(buf.iter()) {
+        let _ = vcpu.set_reg(idx, val);
     }
 }

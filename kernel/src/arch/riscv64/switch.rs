@@ -3,7 +3,7 @@
 //! This module provides low-level context switching functionality for RISC-V,
 //! enabling kernel tasks to yield execution and resume later at the same point.
 
-use crate::arch::KernelContext;
+use crate::arch::context::KernelContext;
 use core::arch::naked_asm;
 
 /// Switch from the current kernel context to the next kernel context

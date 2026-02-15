@@ -281,7 +281,6 @@ impl AtomicTaskState {
 pub enum TaskType {
     Kernel,
     User,
-    Vcpu { vm_id: usize, vcpu_id: usize },
 }
 
 /// ABI Zone structure holding a memory range with an owned ABI module.
@@ -537,7 +536,6 @@ impl Task {
             stack_size: AtomicUsize::new(0),
             data_size: AtomicUsize::new(0),
             text_size: AtomicUsize::new(0),
-            guest_root_token: AtomicU64::new(0),
             exit_status: AtomicI32::new(i32::MIN),
             brk: Arc::new(AtomicUsize::new(usize::MAX)),
             // RwLock fields
@@ -550,7 +548,6 @@ impl Task {
             vcpu: Mutex::new(Vcpu::new(match task_type {
                 TaskType::Kernel => crate::arch::Mode::Kernel,
                 TaskType::User => crate::arch::Mode::User,
-                TaskType::Vcpu => crate::arch::Mode::GuestKernel,
             })),
             kernel_context: Mutex::new(KernelContext::new()),
             vm_manager: VirtualMemoryManager::new(),
@@ -583,11 +580,6 @@ impl Task {
                 /* Set sp to the top of the user stack */
                 self.vcpu.lock().set_sp(USER_STACK_END);
                 /* PC will be set when loading the ELF binary */
-            }
-            TaskType::Vcpu => {
-                user_kernel_vm_init(self);
-                /* Set sp to the top of the kernel stack */
-                self.vcpu.lock().set_sp(KERNEL_VM_STACK_END + 1);
             }
         }
 
@@ -1297,9 +1289,6 @@ impl Task {
                     // CLONE_VM: share the same address space via Arc<VirtualMemoryManager>
                     child.vm_manager = self.vm_manager.clone();
                 }
-            }
-            TaskType::Vcpu => {
-                child.init();
             }
         }
 

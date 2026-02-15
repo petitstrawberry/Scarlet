@@ -921,17 +921,6 @@ impl Scheduler {
         let next_mode = task.vcpu.lock().get_mode();
         set_next_mode(next_mode);
 
-        let _ = crate::arch::hv::configure_guest_mode(next_mode);
-
-        if let TaskType::Vcpu = task.task_type {
-            if let Some(token) = task.get_guest_root_token() {
-                let _ = crate::arch::hv::set_guest_root_pagetable(token);
-            } else {
-                let _ = crate::arch::hv::set_guest_root_pagetable(0);
-            }
-        } else {
-            let _ = crate::arch::hv::set_guest_root_pagetable(0);
-        }
         // Setup trap vector
         set_trapvector(get_trampoline_trap_vector());
 

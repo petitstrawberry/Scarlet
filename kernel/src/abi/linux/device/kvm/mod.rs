@@ -160,7 +160,9 @@ pub fn handle_system_ioctl(
 
         KVM_CREATE_VM => {
             let task = mytask().ok_or(())?;
-            let vm = VmObject::new().map_err(|_| ())?;
+            let vm = crate::hypervisor::vm::GLOBAL_VM_MANAGER
+                .create_vm()
+                .map_err(|_| ())?;
             let kernel_obj = KernelObject::HypervisorVm(vm);
             let handle = task.handle_table.insert(kernel_obj).map_err(|_| ())?;
             let fd = abi.allocate_fd(handle).map_err(|_| ())?;
