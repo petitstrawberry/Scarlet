@@ -180,10 +180,29 @@ pub extern "C" fn arch_user_trap_handler(addr: usize) -> ! {
     let trapframe: &mut Trapframe = unsafe { transmute(addr) };
     set_trapvector(get_kernel_trapvector_paddr());
 
-    // Check for guest trap first - bypasses _user_trap_exit
-    if arch::hv::guest_trap_handler(trapframe) {
-        unsafe {
-            arch::hv::arch_guest_trap_exit(trapframe as *mut Trapframe as *mut u8);
+    #[cfg(feature = "hypervisor")]
+    {
+        // HypervisorVCPUタスクの場合, S(HS)-modeから移動するモードがVS-modeかVU-modeか判断できないので, 
+        if crate::arch::hv::trap::is_from_guest() {
+            if let Some(task) = mytask() {
+                use crate::arch::trap::prev_mode;
+
+                let mode = match prev_mode() {
+                    // from VU-mode
+                    PRIV_U_MODE => {
+                        Mode::GuestUser
+                    }
+                    // from VS-mode
+                    PRIV_S_MODE => {
+                        Mode::GuestKernel
+                    }
+                    _ => {
+                        panic!("Invalid previous mode in guest trap: {}", prev_mode());
+                    }
+                };
+
+                task.vcpu.lock().set_mode(mode);
+            }
         }
     }
 

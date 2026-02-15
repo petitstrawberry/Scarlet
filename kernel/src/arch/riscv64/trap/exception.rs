@@ -38,10 +38,30 @@ fn log_fatal_page_fault_context(
     );
 }
 
+const INSTRUCTION_ADDRESS_MISALIGNED: usize = 0;
+const INSTRUCTION_ACCESS_FAULT: usize = 1;
+const ILLEGAL_INSTRUCTION: usize = 2;
+const BREAKPOINT: usize = 3;
+const LOAD_ADDRESS_MISALIGNED: usize = 4;
+const LOAD_ACCESS_FAULT: usize = 5;
+const STORE_ADDRESS_MISALIGNED: usize = 6;
+const STORE_ACCESS_FAULT: usize = 7;
+const ECALL_FROM_U_MODE: usize = 8;
+const ECALL_FROM_HS_MODE: usize = 9;
+const ECALL_FROM_VS_MODE: usize = 10;
+const ECALL_FROM_M_MODE: usize = 11;
+const INSTRUCTION_PAGE_FAULT: usize = 12;
+const LOAD_PAGE_FAULT: usize = 13;
+const STORE_PAGE_FAULT: usize = 15;
+const INSTRUCTION_GUEST_PAGE_FAULT: usize = 20;
+const LOAD_GUEST_PAGE_FAULT: usize = 21;
+const VIRTUAL_INSTRUCTION: usize = 22;
+const STORE_GUEST_PAGE_FAULT: usize = 23;
+
 pub fn arch_exception_handler(trapframe: &mut Trapframe, cause: usize) {
     match cause {
         /* Illegal instruction (used for lazy FP/Vector enable) */
-        2 => {
+        ILLEGAL_INSTRUCTION => {
             let task = get_scheduler()
                 .get_current_task(get_cpu().get_cpuid())
                 .unwrap();
@@ -170,7 +190,7 @@ pub fn arch_exception_handler(trapframe: &mut Trapframe, cause: usize) {
             );
         }
         /* Environment call from U-mode */
-        8 => {
+        ECALL_FROM_U_MODE => {
             /* Execute SystemCall */
             match syscall_dispatcher(trapframe) {
                 Ok(ret) => {
@@ -185,7 +205,7 @@ pub fn arch_exception_handler(trapframe: &mut Trapframe, cause: usize) {
             }
         }
         /* Instruction page fault */
-        12 => {
+        INSTRUCTION_PAGE_FAULT => {
             let mut vaddr = trapframe.epc as usize;
             let task = get_scheduler()
                 .get_current_task(get_cpu().get_cpuid())
@@ -224,7 +244,7 @@ pub fn arch_exception_handler(trapframe: &mut Trapframe, cause: usize) {
             }
         }
         /* Load/Store page fault */
-        13 | 15 => {
+        LOAD_PAGE_FAULT | STORE_PAGE_FAULT => {
             let mut vaddr;
             unsafe {
                 asm!("csrr {}, stval", out(reg) vaddr);
@@ -234,7 +254,7 @@ pub fn arch_exception_handler(trapframe: &mut Trapframe, cause: usize) {
                 .unwrap();
             use crate::object::capability::memory_mapping::{AccessKind, AccessOp};
             loop {
-                let op = if cause == 13 {
+                let op = if cause == LOAD_PAGE_FAULT {
                     AccessOp::Load
                 } else {
                     AccessOp::Store
@@ -269,6 +289,16 @@ pub fn arch_exception_handler(trapframe: &mut Trapframe, cause: usize) {
                 }
                 vaddr = (vaddr + 4) & !0b11; // Align to the next 4-byte boundary
             }
+        }
+        // Hypervisor traps (e.g., guest page faults)
+        #[cfg(feature = "hypervisor")]
+        /* Guest instruction page fault */
+        INSTRUCTION_GUEST_PAGE_FAULT | 
+        LOAD_GUEST_PAGE_FAULT | 
+        STORE_GUEST_PAGE_FAULT |
+        ECALL_FROM_VS_MODE => {
+            use crate::arch::hv::trap::guest_trap_handler;
+            guest_trap_handler(trapframe, cause);
         }
         _ => {
             print_traplog(trapframe);

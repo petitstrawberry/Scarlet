@@ -62,6 +62,10 @@ impl Vcpu {
         self.mode
     }
 
+    pub fn set_mode(&mut self, mode: Mode) {
+        self.mode = mode;
+    }
+
     pub fn reset_iregs(&mut self) {
         self.iregs = IntRegisters::new();
     }

@@ -3,8 +3,12 @@
 //! This module defines the data structures used for communication between
 //! the kernel hypervisor and userspace VMM (Violet).
 
-/// VM exit reason for userspace.
-/// These are the only exit reasons that get forwarded to userspace.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InterruptType {
+    Timer,
+    External,
+}
+
 #[derive(Debug, Clone)]
 pub enum VmExit {
     MmioRead { addr: u64, size: u8 },

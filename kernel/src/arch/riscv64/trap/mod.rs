@@ -38,3 +38,14 @@ pub fn print_traplog(tf: &Trapframe) {
     early_println!("satp: 0x{:x}", satp);
     early_println!("sscratch: 0x{:x}", sscratch);
 }
+
+pub const PRIV_U_MODE: usize = 0;
+pub const PRIV_S_MODE: usize = 1;
+
+pub fn prev_mode() -> usize {
+    let status: usize;
+    unsafe {
+        asm!("csrr {}, sstatus", out(reg) status);
+    }
+    (status >> 8) & 0b1
+}

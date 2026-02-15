@@ -2,7 +2,8 @@
 
 use core::arch::naked_asm;
 
-use super::GuestVcpu;
+use crate::arch::hv::guest_vcpu::GuestVcpu;
+
 
 mod offset {
     // GuestVcpu offsets (must match struct layout)

@@ -44,7 +44,7 @@ impl GuestVcpu {
             vector_used: false,
             pc: 0,
             asid: 0,
-            mode: Mode::GuestUser,
+            mode: Mode::GuestKernel,
             csrs: GuestCsrState::default(),
             vm_id,
             vcpu_id,
@@ -198,18 +198,4 @@ impl GuestVcpu {
         other.mode = self.mode;
         other.csrs = self.csrs;
     }
-}
-
-static mut CURRENT_GUEST_VCPU: *mut GuestVcpu = core::ptr::null_mut();
-
-pub unsafe fn current_guest_vcpu() -> &'static mut GuestVcpu {
-    &mut *CURRENT_GUEST_VCPU
-}
-
-pub unsafe fn set_current_guest_vcpu(vcpu: *mut GuestVcpu) {
-    CURRENT_GUEST_VCPU = vcpu;
-}
-
-pub unsafe fn clear_current_guest_vcpu() {
-    CURRENT_GUEST_VCPU = core::ptr::null_mut();
 }

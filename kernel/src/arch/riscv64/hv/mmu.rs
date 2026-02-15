@@ -3,6 +3,7 @@
 use core::arch::asm;
 
 use crate::arch::vm::mmu::PageTable;
+use crate::hypervisor::types::InterruptType;
 
 pub fn hfence_gvma_all() {
     unsafe {

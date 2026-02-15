@@ -5,10 +5,10 @@ use alloc::vec::Vec;
 use spin::Mutex;
 
 use crate::arch::get_cpu;
-use crate::arch::hv::{GuestVcpu, get_last_trap_info, run_guest_loop};
+use crate::arch::hv::guest_vcpu::GuestVcpu;
 use crate::hypervisor::memory::MemorySlot;
 use crate::hypervisor::trap::{AccessType, TrapType, VmTrapInfo};
-use crate::hypervisor::types::VmExit;
+use crate::hypervisor::types::{InterruptType, VmExit};
 use crate::object::capability::ControlOps;
 use crate::task::mytask;
 
@@ -18,6 +18,7 @@ pub mod vcpu_ctl {
     pub const RUN: u32 = 0x01;
     pub const GET_ONE_REG: u32 = 0x02;
     pub const SET_ONE_REG: u32 = 0x03;
+    pub const INJECT_INTERRUPT: u32 = 0x04;
 }
 
 #[repr(C)]
@@ -29,6 +30,8 @@ pub struct VcpuOneReg {
 
 struct VcpuState {
     guest: GuestVcpu,
+    pending_timer_irq: bool,
+    pending_external_irq: bool,
 }
 
 pub struct VcpuObject {
@@ -43,6 +46,8 @@ impl VcpuObject {
             id,
             state: Mutex::new(VcpuState {
                 guest: GuestVcpu::new(0, id),
+                pending_timer_irq: false,
+                pending_external_irq: false,
             }),
             vm,
         }))
@@ -52,71 +57,19 @@ impl VcpuObject {
         self.id
     }
 
-    pub fn run(&self) -> Result<VmExit, &'static str> {
-        let vm = self.vm.upgrade().ok_or("VM no longer exists")?;
-        let arch = get_cpu();
-
-        loop {
-            {
-                let mut state = self.state.lock();
-                state.guest.restore_csrs();
-                unsafe {
-                    crate::arch::hv::set_current_guest_vcpu(&mut state.guest as *mut GuestVcpu);
-                }
-                unsafe {
-                    run_guest_loop(&state.guest as *const GuestVcpu, arch as *mut _ as *mut u8);
-                }
-            }
-
-            let trap_info = get_last_trap_info().ok_or("No trap info")?;
-
-            match trap_info.trap_type() {
-                TrapType::PageFault => {
-                    let gpa = trap_info.gpa();
-                    if let Some(slot) = vm.find_memory_slot(gpa) {
-                        self.map_guest_page(&slot, gpa);
-                        continue;
-                    } else {
-                        return Ok(match trap_info.access_type() {
-                            AccessType::Write => VmExit::MmioWrite {
-                                addr: gpa,
-                                size: trap_info.access_size(),
-                                data: 0,
-                            },
-                            _ => VmExit::MmioRead {
-                                addr: gpa,
-                                size: trap_info.access_size(),
-                            },
-                        });
-                    }
-                }
-                TrapType::Halt => return Ok(VmExit::Hlt),
-                TrapType::TimerInterrupt => continue,
-                TrapType::FirmwareCall => {
-                    self.handle_firmware_call()?;
-                    continue;
-                }
-                TrapType::ExternalInterrupt => continue,
-                TrapType::Unknown => {
-                    return Ok(VmExit::Unknown(trap_info.raw_cause()));
-                }
-            }
+    pub fn inject_interrupt(&self, irq_type: InterruptType) {
+        let mut state = self.state.lock();
+        match irq_type {
+            InterruptType::Timer => state.pending_timer_irq = true,
+            InterruptType::External => state.pending_external_irq = true,
         }
     }
 
-    fn map_guest_page(&self, slot: &MemorySlot, gpa: u64) {
-        let vm = match self.vm.upgrade() {
-            Some(vm) => vm,
-            None => return,
-        };
-        let hpa = slot.gpa_to_hpa(gpa);
-        let writable = !slot.flags.readonly;
-        let _ = vm.map_stage2_page(gpa, hpa, writable);
-    }
-
-    fn handle_firmware_call(&self) -> Result<(), &'static str> {
-        // TODO: Implement SBI handling
-        Ok(())
+    pub fn run(&self) -> Result<VmExit, &'static str> {
+        let _vm = self.vm.upgrade().ok_or("VM no longer exists")?;
+        let _arch = get_cpu();
+        let task = mytask().ok_or("No current task")?;
+        let mode = self.state.lock().guest.get_mode();
     }
 
     pub fn get_reg(&self, index: u32) -> Result<u64, &'static str> {
