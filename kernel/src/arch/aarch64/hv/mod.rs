@@ -41,6 +41,10 @@ pub fn set_guest_root_pagetable(_guest_root_token: u64) -> Result<(), &'static s
     Err("Hypervisor not supported on AArch64")
 }
 
+pub fn configure_guest_mode(_mode: crate::arch::Mode) -> Result<(), &'static str> {
+    Err("Hypervisor not supported on AArch64")
+}
+
 /// Guest general-purpose registers
 #[derive(Debug, Clone)]
 pub struct GuestRegisters {

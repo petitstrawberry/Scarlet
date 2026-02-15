@@ -17,6 +17,7 @@ pub enum UserReturnIrqPolicy {
     Disable,
 }
 
+#[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Mode {
     User,

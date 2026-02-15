@@ -4,7 +4,8 @@ use core::{arch::asm, mem::transmute};
 use super::exception::arch_exception_handler;
 use super::interrupt::arch_interrupt_handler;
 
-use crate::arch::{Trapframe, get_kernel_trapvector_paddr, set_trapvector};
+use crate::arch::{Mode, Trapframe, get_kernel_trapvector_paddr, set_trapvector};
+use crate::task::mytask;
 
 #[unsafe(link_section = ".trampoline.text")]
 #[unsafe(export_name = "_user_trap_entry")]
@@ -191,15 +192,28 @@ pub extern "C" fn arch_user_trap_handler(addr: usize) -> ! {
     }
 
     let interrupt = cause & 0x8000000000000000 != 0;
-    if interrupt {
+    let is_guest = mytask()
+        .map(|task| {
+            matches!(
+                task.vcpu.lock().get_mode(),
+                Mode::GuestKernel | Mode::GuestUser
+            )
+        })
+        .unwrap_or(false);
+
+    if is_guest {
+        if interrupt {
+            crate::arch::hv::guest_trap_handler(trapframe, cause & !0x8000000000000000, true);
+        } else {
+            crate::arch::hv::guest_trap_handler(trapframe, cause, false);
+        }
+    } else if interrupt {
         arch_interrupt_handler(trapframe, cause & !0x8000000000000000);
     } else {
-        // crate::println!("Entering exception handler for cause: {}", cause);
         arch_exception_handler(trapframe, cause);
-        // crate::println!("Exiting exception handler for cause: {}", cause);
     }
     // Jump directly to user trap exit via trampoline
-    arch_switch_to_user_space(trapframe);
+    arch_switch_to_user_or_guest(trapframe);
 }
 
 /// Switch to user space using the trampoline mechanism
@@ -212,8 +226,8 @@ pub extern "C" fn arch_user_trap_handler(addr: usize) -> ! {
 ///
 /// This function is marked as `noreturn` because it will not return to the caller.
 /// It will jump to the user trap exit handler, which will then return to user space.
-#[unsafe(export_name = "arch_switch_to_user_space")]
-pub fn arch_switch_to_user_space(trapframe: &mut Trapframe) -> ! {
+#[unsafe(export_name = "arch_switch_to_user_or_guest")]
+pub fn arch_switch_to_user_or_guest(trapframe: &mut Trapframe) -> ! {
     let addr = trapframe as *mut Trapframe as usize;
 
     // Configure the upcoming user return. This affects sstatus.SPIE, not the current kernel SIE.

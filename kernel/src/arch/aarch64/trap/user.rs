@@ -249,8 +249,8 @@ pub extern "C" fn _user_trap_exit(_trapframe: &mut Trapframe) -> ! {
     }
 }
 
-#[unsafe(export_name = "arch_switch_to_user_space")]
-pub fn arch_switch_to_user_space(trapframe: &mut Trapframe) -> ! {
+#[unsafe(export_name = "arch_switch_to_user_or_guest")]
+pub fn arch_switch_to_user_or_guest(trapframe: &mut Trapframe) -> ! {
     let addr = trapframe as *mut Trapframe as usize;
 
     crate::arch::configure_user_entry(
@@ -292,5 +292,5 @@ pub extern "C" fn arch_user_trap_handler(trapframe: &mut Trapframe, trap_kind: u
         arch_exception_handler(trapframe, trap_kind);
     }
 
-    arch_switch_to_user_space(trapframe);
+    arch_switch_to_user_or_guest(trapframe);
 }

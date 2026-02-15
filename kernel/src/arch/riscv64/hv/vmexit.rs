@@ -52,23 +52,18 @@ impl VmExitInfo {
 
         match cause_code {
             // Ecall from VS-mode
-            csr::CAUSE_ECALL_FROM_VS => VmExit::SystemEvent {
-                event_type: self.stval,
-            },
+            csr::CAUSE_ECALL_FROM_VS => VmExit::FirmwareCall,
             // Instruction guest-page fault
             csr::CAUSE_GUEST_INST_PAGE_FAULT => {
                 let fault_gpa = self.fault_gpa();
-                VmExit::MmioRead {
-                    addr: fault_gpa,
-                    size: 0, // instruction fetch — size not easily known
-                }
+                VmExit::InstPageFault { gpa: fault_gpa }
             }
             // Load guest-page fault
             csr::CAUSE_GUEST_LOAD_PAGE_FAULT => {
                 let fault_gpa = self.fault_gpa();
                 let size = self.access_size();
-                VmExit::MmioRead {
-                    addr: fault_gpa,
+                VmExit::LoadPageFault {
+                    gpa: fault_gpa,
                     size,
                 }
             }
@@ -78,8 +73,8 @@ impl VmExitInfo {
             csr::CAUSE_GUEST_STORE_PAGE_FAULT => {
                 let fault_gpa = self.fault_gpa();
                 let size = self.access_size();
-                VmExit::MmioWrite {
-                    addr: fault_gpa,
+                VmExit::StorePageFault {
+                    gpa: fault_gpa,
                     size,
                     data: 0, // actual data must be decoded from the faulting instruction
                 }

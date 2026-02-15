@@ -1,3 +1,4 @@
+use super::Mode;
 use core::arch::asm;
 use core::mem::transmute;
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -6,7 +7,6 @@ use trap::kernel::_kernel_trap_entry;
 use trap::kernel::arch_kernel_trap_handler;
 use trap::user::_user_trap_entry;
 use trap::user::arch_user_trap_handler;
-use vcpu::Mode;
 
 use crate::arch::instruction::Instruction;
 use crate::arch::vm::get_root_pagetable;
@@ -238,7 +238,7 @@ pub fn first_switch_to_user(task: &mut Task) -> ! {
     set_trapvector(crate::vm::get_trampoline_trap_vector());
 
     // Final transition via trampoline exit path.
-    crate::arch::riscv64::trap::user::arch_switch_to_user_space(task.get_trapframe())
+    crate::arch::riscv64::trap::user::arch_switch_to_user_or_guest(task.get_trapframe())
 }
 
 /// Returns the device memory areas for RISC-V QEMU virt platform.

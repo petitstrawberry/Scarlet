@@ -39,10 +39,11 @@ use alloc::{boxed::Box, collections::vec_deque::VecDeque, string::ToString};
 
 use crate::print;
 use crate::println;
+use crate::task::TaskType;
 use crate::{
     arch::{
         Arch, Trapframe, get_cpu, get_user_trap_handler, instruction::idle, set_next_mode,
-        set_trapvector, trap::user::arch_switch_to_user_space,
+        set_trapvector, trap::user::arch_switch_to_user_or_guest,
     },
     environment::MAX_NUM_CPUS,
     task::{TaskState, new_kernel_task, wake_parent_waiters, wake_task_waiters},
@@ -614,7 +615,7 @@ impl Scheduler {
                 let next_task = self.get_task_by_id(next_task_id).unwrap();
                 // crate::println!("[SCHED] Setting up task {} for execution", next_task_id);
                 Self::setup_task_execution(get_cpu(), next_task);
-                arch_switch_to_user_space(next_task.get_trapframe()); // Force switch to user space
+                arch_switch_to_user_or_guest(next_task.get_trapframe()); // Force switch to user / guest space
             }
         }
 
@@ -623,7 +624,7 @@ impl Scheduler {
             // Process pending events before dispatching task
             let _ = current_task.process_pending_events();
         }
-        // Schedule returns - trap handler will call arch_switch_to_user_space()
+        // Schedule returns - trap handler will call arch_switch_to_user_or_guest()
     }
 
     /// Start the scheduler and return the first runnable task ID (if any).
@@ -843,8 +844,8 @@ impl Scheduler {
         // crate::println!("[SCHED] CPU{}: Switching kernel context from Task {} to Task {}", cpu_id, from_task_id, to_task_id);
         if from_task_id != to_task_id {
             // Find tasks in all queues (ready, blocked, zombie)
-            let mut from_ctx_ptr: *mut crate::arch::KernelContext = core::ptr::null_mut();
-            let mut to_ctx_ptr: *const crate::arch::KernelContext = core::ptr::null();
+            let mut from_ctx_ptr: *mut crate::arch::context::KernelContext = core::ptr::null_mut();
+            let mut to_ctx_ptr: *const crate::arch::context::KernelContext = core::ptr::null();
 
             {
                 if let Some(from_task) = TaskPool::get_task_mut(from_task_id) {
@@ -917,7 +918,20 @@ impl Scheduler {
 
         cpu.set_trap_handler(get_user_trap_handler());
         cpu.set_next_address_space(task.vm_manager.get_asid());
-        set_next_mode(task.vcpu.lock().get_mode());
+        let next_mode = task.vcpu.lock().get_mode();
+        set_next_mode(next_mode);
+
+        let _ = crate::arch::hv::configure_guest_mode(next_mode);
+
+        if let TaskType::Vcpu = task.task_type {
+            if let Some(token) = task.get_guest_root_token() {
+                let _ = crate::arch::hv::set_guest_root_pagetable(token);
+            } else {
+                let _ = crate::arch::hv::set_guest_root_pagetable(0);
+            }
+        } else {
+            let _ = crate::arch::hv::set_guest_root_pagetable(0);
+        }
         // Setup trap vector
         set_trapvector(get_trampoline_trap_vector());
 

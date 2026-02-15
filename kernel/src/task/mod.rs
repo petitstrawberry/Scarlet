@@ -21,8 +21,8 @@ use crate::abi::{AbiModule, scarlet::ScarletAbi};
 use crate::sync::waker::Waker;
 use crate::{
     arch::{
-        KernelContext, Trapframe, get_cpu, trap::user::arch_switch_to_user_space, vcpu::Vcpu,
-        vm::alloc_virtual_address_space,
+        Trapframe, context::KernelContext, get_cpu, trap::user::arch_switch_to_user_or_guest,
+        vcpu::Vcpu, vm::alloc_virtual_address_space,
     },
     environment::{
         DEAFAULT_MAX_TASK_DATA_SIZE, DEAFAULT_MAX_TASK_STACK_SIZE, DEAFAULT_MAX_TASK_TEXT_SIZE,
@@ -42,7 +42,7 @@ use crate::{
 };
 use alloc::collections::BTreeMap;
 use core::ops::Range;
-use core::sync::atomic::{AtomicI32, AtomicU8, AtomicU32, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicI32, AtomicU8, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use spin::Once;
 
 /// Global registry of task-specific wakers for waitpid
@@ -281,7 +281,7 @@ impl AtomicTaskState {
 pub enum TaskType {
     Kernel,
     User,
-    Vcpu,
+    Vcpu { vm_id: usize, vcpu_id: usize },
 }
 
 /// ABI Zone structure holding a memory range with an owned ABI module.
@@ -537,7 +537,8 @@ impl Task {
             stack_size: AtomicUsize::new(0),
             data_size: AtomicUsize::new(0),
             text_size: AtomicUsize::new(0),
-            exit_status: AtomicI32::new(i32::MIN), // i32::MIN represents None
+            guest_root_token: AtomicU64::new(0),
+            exit_status: AtomicI32::new(i32::MIN),
             brk: Arc::new(AtomicUsize::new(usize::MAX)),
             // RwLock fields
             name: RwLock::new(name),
@@ -547,9 +548,9 @@ impl Task {
             software_timers_handlers: RwLock::new(Vec::new()),
             // Mutex fields
             vcpu: Mutex::new(Vcpu::new(match task_type {
-                TaskType::Kernel => crate::arch::vcpu::Mode::Kernel,
-                TaskType::User => crate::arch::vcpu::Mode::User,
-                TaskType::Vcpu => crate::arch::vcpu::Mode::GuestKernel,
+                TaskType::Kernel => crate::arch::Mode::Kernel,
+                TaskType::User => crate::arch::Mode::User,
+                TaskType::Vcpu => crate::arch::Mode::GuestKernel,
             })),
             kernel_context: Mutex::new(KernelContext::new()),
             vm_manager: VirtualMemoryManager::new(),
@@ -1297,6 +1298,9 @@ impl Task {
                     child.vm_manager = self.vm_manager.clone();
                 }
             }
+            TaskType::Vcpu => {
+                child.init();
+            }
         }
 
         if !flags.is_set(CloneFlagsDef::Vm) {
@@ -2008,7 +2012,7 @@ pub fn task_initial_kernel_entrypoint() -> ! {
             .unwrap()
     };
     Scheduler::setup_task_execution(cpu, current_task);
-    arch_switch_to_user_space(current_task.get_trapframe());
+    arch_switch_to_user_or_guest(current_task.get_trapframe());
 }
 
 #[cfg(test)]
