@@ -12,8 +12,6 @@ pub mod boot;
 pub mod context;
 pub mod earlycon;
 pub mod fpu;
-#[cfg(feature = "hypervisor")]
-pub mod hv;
 pub mod instruction;
 pub mod interrupt;
 pub mod kernel;
