@@ -11,7 +11,7 @@ use crate::arch::hv::switch::{resume_guest_loop, run_guest_loop};
 #[cfg(all(feature = "hypervisor", target_arch = "riscv64"))]
 use crate::arch::hv::trap::{arch_guest_trap_handler, clear_guest_mode};
 #[cfg(target_arch = "riscv64")]
-use crate::arch::{get_cpu, set_next_mode, set_trapvector};
+use crate::arch::{get_cpu, set_arch, set_next_mode, set_trapvector};
 #[cfg(not(target_arch = "riscv64"))]
 use crate::arch::{Mode, Trapframe};
 #[cfg(all(feature = "hypervisor", target_arch = "riscv64"))]
@@ -127,6 +127,17 @@ impl VcpuObject {
             let vm = self.vm.upgrade().ok_or("VM no longer exists")?;
 
             let task = mytask().ok_or("No current task")?;
+            let cpu = get_cpu();
+            let cpu_id = cpu.get_cpuid();
+            set_arch(crate::vm::get_trampoline_arch(cpu_id));
+            let kernel_sp = if let Some((_slot, base)) = task.get_kernel_stack_window_base() {
+                (base + crate::environment::PAGE_SIZE + crate::environment::TASK_KERNEL_STACK_SIZE)
+                    as u64
+            } else {
+                task.get_kernel_stack_bottom_paddr()
+            };
+            cpu.set_kernel_stack(kernel_sp);
+            cpu.set_next_address_space(crate::vm::get_kernel_vm_manager().get_asid());
             let mode = self.state.lock().guest.get_mode();
             task.vcpu.lock().set_mode(mode);
             set_next_mode(mode);
@@ -135,16 +146,18 @@ impl VcpuObject {
             crate::early_println!("[VcpuObject::run] setting guest root pagetable");
             vm.set_guest_root_pagetable();
 
-            let arch = get_cpu();
             crate::early_println!("[VcpuObject::run] calling run_guest_loop");
             unsafe {
                 run_guest_loop(
                     &self.state.lock().guest as *const GuestVcpu,
-                    arch as *const _ as *mut u8,
+                    cpu as *const _ as *mut u8,
                 )
             };
 
-            crate::early_println!("[VcpuObject::run] entered guest loop, waiting for exit");
+            crate::early_println!(
+                "[VcpuObject::run] returned from run_guest_loop, entering trap handling loop"
+            );
+
             loop {
                 let trapframe = task.get_trapframe();
 
@@ -209,6 +222,7 @@ impl ControlOps for VcpuObject {
         match command {
             vcpu_ctl::RUN => Err("Use sys_shv_vcpu_run"),
             vcpu_ctl::GET_ONE_REG => {
+                crate::early_println!("[VcpuObject::control] GET_ONE_REG index={}", arg);
                 let value = self.get_reg(arg as u32)?;
                 Ok(value as i32)
             }
