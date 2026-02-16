@@ -46,8 +46,9 @@ csr_write!(write_hgatp, "hgatp");
 csr_read!(read_hgeie, "hgeie");
 csr_write!(write_hgeie, "hgeie");
 
+// hgeip is read-only (Hypervisor Guest External Interrupt Pending)
+// Writing to it causes an illegal instruction trap
 csr_read!(read_hgeip, "hgeip");
-csr_write!(write_hgeip, "hgeip");
 
 csr_read!(read_hideleg, "hideleg");
 csr_write!(write_hideleg, "hideleg");
@@ -132,7 +133,6 @@ pub struct HypervisorCsrState {
     pub hstatus: u64,
     pub hgatp: u64,
     pub hgeie: u64,
-    pub hgeip: u64,
     pub hideleg: u64,
     pub hedeleg: u64,
 }
@@ -143,7 +143,6 @@ impl HypervisorCsrState {
             hstatus: read_hstatus(),
             hgatp: read_hgatp(),
             hgeie: read_hgeie(),
-            hgeip: read_hgeip(),
             hideleg: read_hideleg(),
             hedeleg: read_hedeleg(),
         }
@@ -153,7 +152,6 @@ impl HypervisorCsrState {
         write_hstatus(self.hstatus);
         write_hgatp(self.hgatp);
         write_hgeie(self.hgeie);
-        write_hgeip(self.hgeip);
         write_hideleg(self.hideleg);
         write_hedeleg(self.hedeleg);
     }
