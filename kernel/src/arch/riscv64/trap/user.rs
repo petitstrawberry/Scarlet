@@ -181,15 +181,15 @@ pub extern "C" fn arch_user_trap_handler(addr: usize) -> ! {
     let trapframe: &mut Trapframe = unsafe { transmute(addr) };
     set_trapvector(get_kernel_trapvector_paddr());
 
-    #[cfg(feature = "hypervisor")]
+    #[cfg(all(feature = "hypervisor", target_arch = "riscv64"))]
     {
         if crate::arch::hv::trap::is_from_guest() {
             if let Some(task) = mytask() {
                 let mode = match prev_mode() {
                     // from VU-mode
-                    PRIV_U_MODE => Mode::GuestUser,
+                    arch::riscv64::trap::PRIV_U_MODE => Mode::GuestUser,
                     // from VS-mode
-                    PRIV_S_MODE => Mode::GuestKernel,
+                    arch::riscv64::trap::PRIV_S_MODE => Mode::GuestKernel,
                     _ => {
                         panic!("Invalid previous mode in guest trap: {}", prev_mode());
                     }
@@ -200,20 +200,20 @@ pub extern "C" fn arch_user_trap_handler(addr: usize) -> ! {
         } else {
             if let Some(task) = mytask() {
                 let mode = match prev_mode() {
-                    PRIV_U_MODE => Mode::User,
-                    PRIV_S_MODE => Mode::Kernel,
+                    arch::riscv64::trap::PRIV_U_MODE => Mode::User,
+                    arch::riscv64::trap::PRIV_S_MODE => Mode::Kernel,
                     _ => panic!("Invalid previous mode in user trap: {}", prev_mode()),
                 };
                 task.vcpu.lock().set_mode(mode);
             }
         }
     }
-    #[cfg(not(feature = "hypervisor"))]
+    #[cfg(not(all(feature = "hypervisor", target_arch = "riscv64")))]
     {
         if let Some(task) = mytask() {
             let mode = match prev_mode() {
-                PRIV_U_MODE => Mode::User,
-                PRIV_S_MODE => Mode::Kernel,
+                arch::riscv64::trap::PRIV_U_MODE => Mode::User,
+                arch::riscv64::trap::PRIV_S_MODE => Mode::Kernel,
                 _ => panic!("Invalid previous mode in user trap: {}", prev_mode()),
             };
         }

@@ -4,7 +4,6 @@ use crate::arch::hv::csr::GuestCsrState;
 use crate::arch::riscv64::fpu::{FpuContext, VectorContext};
 use crate::arch::riscv64::{IntRegisters, Mode, Trapframe};
 use crate::arch::vcpu::Vcpu;
-use crate::hypervisor::VmExit;
 use alloc::boxed::Box;
 
 use super::csr;
@@ -24,7 +23,6 @@ pub struct GuestVcpu {
     mode: Mode,
     vm_id: u32,
     vcpu_id: u32,
-    exit_reason: Option<VmExit>,
 }
 
 impl GuestVcpu {
@@ -41,7 +39,6 @@ impl GuestVcpu {
             csrs: GuestCsrState::default(),
             vm_id,
             vcpu_id,
-            exit_reason: None,
         }
     }
 
@@ -121,10 +118,6 @@ impl GuestVcpu {
     }
     pub fn set_mode(&mut self, mode: Mode) {
         self.mode = mode;
-    }
-
-    pub fn get_exit_reason(&self) -> Option<VmExit> {
-        self.exit_reason
     }
 
     pub fn get_gpr(&self, index: usize) -> u64 {

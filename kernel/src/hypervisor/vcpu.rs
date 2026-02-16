@@ -4,14 +4,22 @@ use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
 use spin::Mutex;
 
+#[cfg(all(feature = "hypervisor", target_arch = "riscv64"))]
 use crate::arch::hv::guest_vcpu::GuestVcpu;
+#[cfg(all(feature = "hypervisor", target_arch = "riscv64"))]
 use crate::arch::hv::switch::{resume_guest_loop, run_guest_loop};
+#[cfg(all(feature = "hypervisor", target_arch = "riscv64"))]
 use crate::arch::hv::trap::{arch_guest_trap_handler, clear_guest_mode};
+#[cfg(not(target_arch = "riscv64"))]
+use crate::arch::{Mode, Trapframe};
+#[cfg(target_arch = "riscv64")]
 use crate::arch::{get_cpu, set_next_mode, set_trapvector};
+#[cfg(all(feature = "hypervisor", target_arch = "riscv64"))]
 use crate::hypervisor::memory::MemorySlot;
 use crate::hypervisor::types::{InterruptType, VmExit};
 use crate::object::capability::ControlOps;
 use crate::task::mytask;
+#[cfg(target_arch = "riscv64")]
 use crate::vm::get_trampoline_trap_vector;
 
 pub type VcpuId = u32;
@@ -28,6 +36,45 @@ pub struct VcpuOneReg {
     pub index: u32,
     pub _padding: u32,
     pub value: u64,
+}
+
+#[cfg(not(target_arch = "riscv64"))]
+#[derive(Debug, Clone)]
+struct GuestVcpu {
+    mode: Mode,
+}
+
+#[cfg(not(target_arch = "riscv64"))]
+impl GuestVcpu {
+    fn new(_vm_id: u32, _vcpu_id: u32) -> Self {
+        Self {
+            mode: Mode::GuestKernel,
+        }
+    }
+
+    fn get_mode(&self) -> Mode {
+        self.mode
+    }
+
+    fn set_mode(&mut self, mode: Mode) {
+        self.mode = mode;
+    }
+
+    fn save(&mut self, _trapframe: &Trapframe) {}
+
+    fn get_mmio_data(&self, _reg: u8, _size: u8) -> u64 {
+        0
+    }
+
+    fn set_mmio_data(&mut self, _reg: u8, _size: u8, _data: u64) {}
+
+    fn get_reg(&self, _index: u32) -> Result<u64, &'static str> {
+        Err("Guest registers are not supported on this architecture")
+    }
+
+    fn set_reg(&mut self, _index: u32, _value: u64) -> Result<(), &'static str> {
+        Err("Guest registers are not supported on this architecture")
+    }
 }
 
 struct VcpuState {
@@ -68,61 +115,61 @@ impl VcpuObject {
     }
 
     pub fn run(&self) -> Result<VmExit, &'static str> {
-        let vm = self.vm.upgrade().ok_or("VM no longer exists")?;
+        #[cfg(not(target_arch = "riscv64"))]
+        {
+            return Err("Hypervisor guest run is only supported on riscv64");
+        }
 
-        let task = mytask().ok_or("No current task")?;
-        let mode = self.state.lock().guest.get_mode();
-        task.vcpu.lock().set_mode(mode);
-        set_next_mode(mode);
-        set_trapvector(get_trampoline_trap_vector());
+        #[cfg(target_arch = "riscv64")]
+        {
+            let vm = self.vm.upgrade().ok_or("VM no longer exists")?;
 
-        vm.set_guest_root_pagetable();
+            let task = mytask().ok_or("No current task")?;
+            let mode = self.state.lock().guest.get_mode();
+            task.vcpu.lock().set_mode(mode);
+            set_next_mode(mode);
+            set_trapvector(get_trampoline_trap_vector());
 
-        let arch = get_cpu();
-        unsafe {
-            run_guest_loop(
-                &self.state.lock().guest as *const GuestVcpu,
-                arch as *const _ as *mut u8,
-            )
-        };
+            vm.set_guest_root_pagetable();
 
-        loop {
-            let trapframe = task.get_trapframe();
+            let arch = get_cpu();
+            unsafe {
+                run_guest_loop(
+                    &self.state.lock().guest as *const GuestVcpu,
+                    arch as *const _ as *mut u8,
+                )
+            };
 
-            match arch_guest_trap_handler(trapframe, &vm) {
-                Some(exit) => {
-                    clear_guest_mode();
-                    self.state.lock().guest.save(trapframe);
+            loop {
+                let trapframe = task.get_trapframe();
 
-                    let mmio_data = match &exit {
-                        VmExit::MmioWrite { reg, size, .. } => {
-                            Some(self.state.lock().guest.get_mmio_data(*reg, *size))
+                match arch_guest_trap_handler(trapframe, &vm) {
+                    Some(exit) => {
+                        clear_guest_mode();
+                        self.state.lock().guest.save(trapframe);
+
+                        if let VmExit::MmioWrite {
+                            addr,
+                            size,
+                            reg,
+                            data: _,
+                        } = exit
+                        {
+                            let data = self.state.lock().guest.get_mmio_data(reg, size);
+                            return Ok(VmExit::MmioWrite {
+                                addr,
+                                size,
+                                reg,
+                                data,
+                            });
                         }
-                        _ => None,
-                    };
 
-                    if let Some(data) = mmio_data {
-                        return Ok(VmExit::MmioWrite {
-                            addr: match &exit {
-                                VmExit::MmioWrite { addr, .. } => *addr,
-                                _ => 0,
-                            },
-                            size: match &exit {
-                                VmExit::MmioWrite { size, .. } => *size,
-                                _ => 0,
-                            },
-                            reg: match &exit {
-                                VmExit::MmioWrite { reg, .. } => *reg,
-                                _ => 0,
-                            },
-                        });
+                        return Ok(exit);
                     }
-
-                    return Ok(exit);
+                    None => unsafe {
+                        resume_guest_loop(trapframe as *mut _);
+                    },
                 }
-                None => unsafe {
-                    resume_guest_loop(trapframe as *mut _);
-                },
             }
         }
     }
@@ -154,7 +201,7 @@ fn translate_user_ptr(arg: usize) -> Result<usize, &'static str> {
 impl ControlOps for VcpuObject {
     fn control(&self, command: u32, arg: usize) -> Result<i32, &'static str> {
         match command {
-            vcpu_ctl::RUN => Err("Use sys_vcpu_run"),
+            vcpu_ctl::RUN => Err("Use sys_shv_vcpu_run"),
             vcpu_ctl::GET_ONE_REG => {
                 let value = self.get_reg(arg as u32)?;
                 Ok(value as i32)

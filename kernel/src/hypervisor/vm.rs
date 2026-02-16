@@ -107,13 +107,33 @@ impl VmObject {
     pub fn map_stage2_page(&self, gpa: u64, hpa: u64, writable: bool) -> Result<(), &'static str> {
         let state = self.state.lock();
         let pagetable = get_root_pagetable(state.vmid).ok_or("No page table")?;
-        crate::arch::hv::mmu::map_stage2_page(pagetable, gpa, hpa, writable)
+        #[cfg(target_arch = "riscv64")]
+        {
+            crate::arch::hv::mmu::map_stage2_page(pagetable, gpa, hpa, writable)
+        }
+
+        #[cfg(not(target_arch = "riscv64"))]
+        {
+            let _ = pagetable;
+            let _ = gpa;
+            let _ = hpa;
+            let _ = writable;
+            Err("Stage-2 mapping is only supported on riscv64")
+        }
     }
 
     pub fn set_guest_root_pagetable(&self) {
         let state = self.state.lock();
         if let Some(pagetable) = get_root_pagetable(state.vmid) {
-            crate::arch::hv::mmu::set_guest_root_pagetable(pagetable, state.vmid);
+            #[cfg(target_arch = "riscv64")]
+            {
+                crate::arch::hv::mmu::set_guest_root_pagetable(pagetable, state.vmid);
+            }
+            #[cfg(not(target_arch = "riscv64"))]
+            {
+                let _ = pagetable;
+                let _ = state.vmid;
+            }
         }
     }
 }

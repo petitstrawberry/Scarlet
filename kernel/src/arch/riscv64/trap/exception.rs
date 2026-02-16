@@ -290,7 +290,7 @@ pub fn arch_exception_handler(trapframe: &mut Trapframe, cause: usize) {
                 vaddr = (vaddr + 4) & !0b11;
             }
         }
-        #[cfg(feature = "hypervisor")]
+        #[cfg(all(feature = "hypervisor", target_arch = "riscv64"))]
         INSTRUCTION_GUEST_PAGE_FAULT
         | LOAD_GUEST_PAGE_FAULT
         | STORE_GUEST_PAGE_FAULT

@@ -170,6 +170,10 @@ pub unsafe extern "C" fn arch_guest_trap_exit(_trapframe: *mut u8) {
     );
 }
 
+pub struct VcpuSwitchData {
+    guest_csrs: GuestCsrState,
+}
+
 pub struct HypervisorSwitchData {
     hypervisor_csrs: HypervisorCsrState,
 }
@@ -184,10 +188,6 @@ impl HypervisorSwitchData {
     pub fn restore(&self) {
         self.hypervisor_csrs.restore();
     }
-}
-
-pub struct VcpuSwitchData {
-    guest_csrs: GuestCsrState,
 }
 
 impl VcpuSwitchData {

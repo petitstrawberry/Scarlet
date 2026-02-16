@@ -132,9 +132,7 @@ fn sys_profiler_dump(tf: &mut Trapframe) -> usize {
     0
 }
 
-use crate::hypervisor::syscall::{
-    sys_hypervisor_vcpu_create, sys_hypervisor_vm_create, sys_vcpu_run,
-};
+use crate::hypervisor::syscall::{sys_shv_vcpu_create, sys_shv_vcpu_run, sys_shv_vm_create};
 
 syscall_table! {
     Invalid = 0 => |_: &mut Trapframe| {
@@ -269,7 +267,7 @@ syscall_table! {
     ProfilerDump = 999 => sys_profiler_dump, // Dump profiler statistics (debug only)
 
     // === Hypervisor Operations (Scarlet Native) ===
-    HypervisorVmCreate = 1100 => sys_hypervisor_vm_create,
-    HypervisorVcpuCreate = 1101 => sys_hypervisor_vcpu_create,
-    VcpuRun = 1102 => sys_vcpu_run,
+    ShvVmCreate = 1100 => sys_shv_vm_create,
+    ShvVcpuCreate = 1101 => sys_shv_vcpu_create,
+    ShvVcpuRun = 1102 => sys_shv_vcpu_run,
 }

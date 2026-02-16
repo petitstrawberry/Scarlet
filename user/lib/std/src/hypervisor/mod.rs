@@ -8,7 +8,7 @@ use crate::syscall::{Syscall, syscall2, syscall3};
 
 /// Create a new VM, returns handle
 pub fn vm_create() -> Result<u32, ()> {
-    let ret = syscall2(Syscall::HypervisorVmCreate, 0, 0);
+    let ret = syscall2(Syscall::ShvVmCreate, 0, 0);
     if ret == usize::MAX {
         Err(())
     } else {
@@ -18,11 +18,7 @@ pub fn vm_create() -> Result<u32, ()> {
 
 /// Create a vCPU on an existing VM
 pub fn vcpu_create(vm_handle: u32, vcpu_id: u32) -> Result<u32, ()> {
-    let ret = syscall2(
-        Syscall::HypervisorVcpuCreate,
-        vm_handle as usize,
-        vcpu_id as usize,
-    );
+    let ret = syscall2(Syscall::ShvVcpuCreate, vm_handle as usize, vcpu_id as usize);
     if ret == usize::MAX {
         Err(())
     } else {
@@ -32,11 +28,10 @@ pub fn vcpu_create(vm_handle: u32, vcpu_id: u32) -> Result<u32, ()> {
 
 /// Run a vCPU until exit
 pub fn vcpu_run(vcpu_handle: u32, exit: &mut VcpuExit) -> Result<(), ()> {
-    let ret = syscall3(
-        Syscall::VcpuRun,
+    let ret = syscall2(
+        Syscall::ShvVcpuRun,
         vcpu_handle as usize,
         exit as *mut VcpuExit as usize,
-        0,
     );
     if ret == usize::MAX { Err(()) } else { Ok(()) }
 }

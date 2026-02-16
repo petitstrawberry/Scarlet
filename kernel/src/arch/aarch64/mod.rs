@@ -469,7 +469,7 @@ pub fn get_current_cpu_id() -> usize {
     (mpidr & 0xFF) as usize
 }
 
-pub fn set_next_mode(_mode: vcpu::Mode) {
+pub fn set_next_mode(_mode: crate::arch::Mode) {
     // AArch64 return mode is currently chosen in the trampoline (`_user_trap_exit`).
     // Keep this as a no-op so shared scheduler code can call it without
     // architecture-specific branching or noisy TODO logs.
@@ -676,7 +676,7 @@ mod tests {
     /// Test architecture-specific features for AArch64
     #[test_case]
     fn test_aarch64_specific_features() {
-        use crate::arch::aarch64::vcpu::Mode;
+        use crate::arch::Mode;
 
         // Test mode switching
         set_next_mode(Mode::Kernel);

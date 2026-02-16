@@ -295,12 +295,18 @@ fn write_vm_exit(kvm_run: &mut KvmRun, exit: &crate::hypervisor::VmExit) {
             mmio.len = *size as u32;
             mmio.is_write = 0;
         }
-        VmExit::MmioWrite { addr, size, reg: _ } => {
+        VmExit::MmioWrite {
+            addr,
+            size,
+            reg: _,
+            data,
+        } => {
             kvm_run.exit_reason = KVM_EXIT_MMIO;
             let mmio = unsafe { &mut kvm_run.exit_data.mmio };
             mmio.phys_addr = *addr;
             mmio.len = *size as u32;
             mmio.is_write = 1;
+            mmio.data[..core::mem::size_of::<u64>()].copy_from_slice(&data.to_le_bytes());
         }
         VmExit::Hlt => {
             kvm_run.exit_reason = KVM_EXIT_HLT;

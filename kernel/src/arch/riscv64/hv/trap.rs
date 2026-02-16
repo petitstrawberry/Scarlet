@@ -3,6 +3,7 @@
 use core::arch::asm;
 
 use crate::arch::Trapframe;
+use crate::arch::hv::csr;
 use crate::hypervisor::VmObject;
 use crate::hypervisor::types::VmExit;
 
@@ -106,7 +107,7 @@ fn decode_mmio() -> Option<MmioDecode> {
 }
 
 pub fn arch_guest_trap_handler(trapframe: &mut Trapframe, vm: &VmObject) -> Option<VmExit> {
-    let cause = trapframe.regs.reg[17];
+    let cause = (csr::read_scause() & 0x7fff_ffff_ffff_ffff) as usize;
 
     match cause {
         CAUSE_INST_GUEST_PAGE_FAULT
@@ -133,6 +134,7 @@ pub fn arch_guest_trap_handler(trapframe: &mut Trapframe, vm: &VmObject) -> Opti
                             addr: gpa,
                             size,
                             reg,
+                            data: 0,
                         }
                     } else {
                         VmExit::MmioRead {

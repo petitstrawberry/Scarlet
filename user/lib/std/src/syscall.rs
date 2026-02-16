@@ -118,9 +118,9 @@ pub enum Syscall {
     Shutdown = 1000, // Shutdown the system gracefully
 
     // === Hypervisor Operations ===
-    HypervisorVmCreate = 1100,
-    HypervisorVcpuCreate = 1101,
-    VcpuRun = 1102,
+    ShvVmCreate = 1100,
+    ShvVcpuCreate = 1101,
+    ShvVcpuRun = 1102,
 }
 
 pub fn syscall0(syscall: Syscall) -> usize {

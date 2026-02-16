@@ -11,11 +11,22 @@ pub enum InterruptType {
 
 #[derive(Debug, Clone, Copy)]
 pub enum VmExit {
-    MmioRead { addr: u64, size: u8, reg: u8 },
-    MmioWrite { addr: u64, size: u8, reg: u8 },
+    MmioRead {
+        addr: u64,
+        size: u8,
+        reg: u8,
+    },
+    MmioWrite {
+        addr: u64,
+        size: u8,
+        reg: u8,
+        data: u64,
+    },
     Hlt,
     Shutdown,
-    FailEntry { hardware_entry_failure_reason: u64 },
+    FailEntry {
+        hardware_entry_failure_reason: u64,
+    },
     InternalError,
     Unknown(u64),
 }
@@ -58,7 +69,12 @@ impl VcpuExit {
     pub fn from_vmexit(exit: &VmExit) -> Self {
         match exit {
             VmExit::MmioRead { addr, size, reg } => Self::mmio_read(*addr, *size, *reg),
-            VmExit::MmioWrite { addr, size, reg } => Self::mmio_write(*addr, *size, *reg),
+            VmExit::MmioWrite {
+                addr,
+                size,
+                reg,
+                data,
+            } => Self::mmio_write(*addr, *size, *reg, *data),
             VmExit::Hlt => Self::new(VcpuExitReason::Hlt),
             VmExit::Shutdown => Self::new(VcpuExitReason::Shutdown),
             VmExit::FailEntry {
@@ -98,11 +114,12 @@ impl VcpuExit {
         }
     }
 
-    pub fn mmio_write(address: u64, size: u8, reg: u8) -> Self {
+    pub fn mmio_write(address: u64, size: u8, reg: u8, data: u64) -> Self {
         Self {
             reason: VcpuExitReason::MmioWrite,
             mmio: MmioInfo {
                 address,
+                data,
                 size,
                 reg,
                 is_write: true,

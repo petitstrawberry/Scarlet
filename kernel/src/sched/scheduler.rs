@@ -603,7 +603,7 @@ impl Scheduler {
                 let current_task = self.get_task_by_id(current_task_id).unwrap();
                 current_task.vcpu.lock().store(trapframe);
 
-                #[cfg(feature = "hypervisor")]
+                #[cfg(all(feature = "hypervisor", target_arch = "riscv64"))]
                 {
                     let (guest_vcpu_switch_data, hypervisor_switch_data) =
                         match current_task.vcpu.lock().get_mode() {
@@ -623,14 +623,14 @@ impl Scheduler {
                     self.kernel_context_switch(cpu_id, current_task_id, next_task_id);
                     // NOTE: After this point, the current task will not execute until it is scheduled again
 
-                    if let Some(guest_vcpu_switch_data) = guest_vcpu_switch_data {
+                    if let Some(guest_vcpu_switch_data) = guest_vcpu_switch_data.as_ref() {
                         guest_vcpu_switch_data.restore();
                     }
-                    if let Some(hypervisor_switch_data) = hypervisor_switch_data {
+                    if let Some(hypervisor_switch_data) = hypervisor_switch_data.as_ref() {
                         hypervisor_switch_data.restore();
                     }
                 }
-                #[cfg(not(feature = "hypervisor"))]
+                #[cfg(not(all(feature = "hypervisor", target_arch = "riscv64")))]
                 {
                     // Perform kernel context switch
                     self.kernel_context_switch(cpu_id, current_task_id, next_task_id);
@@ -897,9 +897,9 @@ impl Scheduler {
             }
 
             if !from_ctx_ptr.is_null() && !to_ctx_ptr.is_null() {
-                #[cfg(feature = "hypervisor")]
+                #[cfg(all(feature = "hypervisor", target_arch = "riscv64"))]
                 let guest_vcpu_switch_data = crate::arch::hv::switch::VcpuSwitchData::save();
-                #[cfg(feature = "hypervisor")]
+                #[cfg(all(feature = "hypervisor", target_arch = "riscv64"))]
                 let hypervisor_switch_data = crate::arch::hv::switch::HypervisorSwitchData::save();
 
                 // Perform kernel context switch
@@ -907,7 +907,7 @@ impl Scheduler {
                     crate::arch::switch::switch_to(from_ctx_ptr, to_ctx_ptr);
                 }
 
-                #[cfg(feature = "hypervisor")]
+                #[cfg(all(feature = "hypervisor", target_arch = "riscv64"))]
                 {
                     guest_vcpu_switch_data.restore();
                     hypervisor_switch_data.restore();
