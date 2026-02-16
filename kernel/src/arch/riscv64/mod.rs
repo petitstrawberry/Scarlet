@@ -434,6 +434,14 @@ pub fn set_trapvector(addr: usize) {
     }
 }
 
+pub fn get_trapvector() -> usize {
+    let stvec: usize;
+    unsafe {
+        asm!("csrr {}, stvec", out(reg) stvec);
+    }
+    stvec
+}
+
 pub fn set_arch(addr: usize) {
     unsafe {
         asm!("
