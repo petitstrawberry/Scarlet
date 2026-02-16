@@ -3,7 +3,7 @@ use core::panic;
 
 use crate::abi::syscall_dispatcher;
 use crate::arch::trap::print_traplog;
-use crate::arch::{Trapframe, get_cpu};
+use crate::arch::{get_cpu, Trapframe};
 use crate::println;
 use crate::sched::scheduler::get_scheduler;
 use crate::task::mytask;
@@ -295,6 +295,7 @@ pub fn arch_exception_handler(trapframe: &mut Trapframe, cause: usize) {
         | LOAD_GUEST_PAGE_FAULT
         | STORE_GUEST_PAGE_FAULT
         | ECALL_FROM_VS_MODE => {
+            crate::early_println!("[exception] guest trap: cause={}", cause);
             use crate::arch::hv::switch::arch_guest_trap_exit;
             unsafe {
                 arch_guest_trap_exit(trapframe as *mut _ as *mut u8);

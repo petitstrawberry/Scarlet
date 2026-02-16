@@ -5,7 +5,7 @@ use super::exception::arch_exception_handler;
 use super::interrupt::arch_interrupt_handler;
 
 use crate::arch::trap::prev_mode;
-use crate::arch::{self, Mode, Trapframe, get_kernel_trapvector_paddr, set_trapvector};
+use crate::arch::{self, get_kernel_trapvector_paddr, set_trapvector, Mode, Trapframe};
 use crate::task::mytask;
 
 #[unsafe(link_section = ".trampoline.text")]
@@ -183,7 +183,10 @@ pub extern "C" fn arch_user_trap_handler(addr: usize) -> ! {
 
     #[cfg(all(feature = "hypervisor", target_arch = "riscv64"))]
     {
-        if crate::arch::hv::trap::is_from_guest() {
+        let from_guest = crate::arch::hv::trap::is_from_guest();
+        // crate::early_println!("[trap_handler] from_guest={}", from_guest);
+
+        if from_guest {
             if let Some(task) = mytask() {
                 let mode = match prev_mode() {
                     // from VU-mode

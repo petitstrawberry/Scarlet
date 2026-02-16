@@ -3,8 +3,8 @@
 use crate::arch::Trapframe;
 use crate::hypervisor::types::VcpuExit;
 use crate::hypervisor::vm::GLOBAL_VM_MANAGER;
-use crate::object::KernelObject;
 use crate::object::handle::HandleMetadata;
+use crate::object::KernelObject;
 use crate::task::mytask;
 
 pub const SYSCALL_SHV_VM_CREATE: usize = 1100;
@@ -81,6 +81,8 @@ pub fn sys_shv_vcpu_create(trapframe: &mut Trapframe) -> usize {
 /// a0 = vcpu_handle, a1 = exit_ptr (userspace pointer to VcpuExit)
 /// Returns 0 on success, usize::MAX on error.
 pub fn sys_shv_vcpu_run(trapframe: &mut Trapframe) -> usize {
+    crate::early_println!("[sys_shv_vcpu_run] called, handle={}", trapframe.get_arg(0));
+
     let task = match mytask() {
         Some(t) => t,
         None => return usize::MAX,
@@ -121,11 +123,18 @@ pub fn sys_shv_vcpu_run(trapframe: &mut Trapframe) -> usize {
         _ => return usize::MAX,
     };
 
+    crate::early_println!("[sys_shv_vcpu_run] calling vcpu.run()");
+
     // Run the vCPU
     let vm_exit = match vcpu.run() {
         Ok(exit) => exit,
-        Err(_) => return usize::MAX,
+        Err(e) => {
+            crate::early_println!("[sys_shv_vcpu_run] vcpu.run() failed: {}", e);
+            return usize::MAX;
+        }
     };
+
+    crate::early_println!("[sys_shv_vcpu_run] vcpu.run() returned: {:?}", vm_exit);
 
     // Convert VmExit to VcpuExit and write to user space
     let vcpu_exit = VcpuExit::from_vmexit(&vm_exit);

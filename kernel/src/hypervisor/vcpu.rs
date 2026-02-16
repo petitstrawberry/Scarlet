@@ -10,10 +10,10 @@ use crate::arch::hv::guest_vcpu::GuestVcpu;
 use crate::arch::hv::switch::{resume_guest_loop, run_guest_loop};
 #[cfg(all(feature = "hypervisor", target_arch = "riscv64"))]
 use crate::arch::hv::trap::{arch_guest_trap_handler, clear_guest_mode};
-#[cfg(not(target_arch = "riscv64"))]
-use crate::arch::{Mode, Trapframe};
 #[cfg(target_arch = "riscv64")]
 use crate::arch::{get_cpu, set_next_mode, set_trapvector};
+#[cfg(not(target_arch = "riscv64"))]
+use crate::arch::{Mode, Trapframe};
 #[cfg(all(feature = "hypervisor", target_arch = "riscv64"))]
 use crate::hypervisor::memory::MemorySlot;
 use crate::hypervisor::types::{InterruptType, VmExit};
@@ -122,6 +122,8 @@ impl VcpuObject {
 
         #[cfg(target_arch = "riscv64")]
         {
+            crate::early_println!("[VcpuObject::run] starting");
+
             let vm = self.vm.upgrade().ok_or("VM no longer exists")?;
 
             let task = mytask().ok_or("No current task")?;
@@ -130,9 +132,11 @@ impl VcpuObject {
             set_next_mode(mode);
             set_trapvector(get_trampoline_trap_vector());
 
+            crate::early_println!("[VcpuObject::run] setting guest root pagetable");
             vm.set_guest_root_pagetable();
 
             let arch = get_cpu();
+            crate::early_println!("[VcpuObject::run] calling run_guest_loop");
             unsafe {
                 run_guest_loop(
                     &self.state.lock().guest as *const GuestVcpu,
@@ -140,11 +144,13 @@ impl VcpuObject {
                 )
             };
 
+            crate::early_println!("[VcpuObject::run] entered guest loop, waiting for exit");
             loop {
                 let trapframe = task.get_trapframe();
 
                 match arch_guest_trap_handler(trapframe, &vm) {
                     Some(exit) => {
+                        crate::early_println!("[VcpuObject::run] got exit: {:?}", exit);
                         clear_guest_mode();
                         self.state.lock().guest.save(trapframe);
 
