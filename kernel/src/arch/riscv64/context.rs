@@ -19,13 +19,9 @@ use crate::vm::vmem::MemoryArea;
 #[repr(C, align(16))]
 #[derive(Debug, Clone)]
 pub struct KernelContext {
-    /// Stack pointer
     pub sp: u64,
-    /// Return address
     pub ra: u64,
-    /// Saved registers s0-s11 (callee-saved)
     pub s: [u64; 12],
-    /// Kernel stack pages for this context (page-aligned, contiguous)
     pub kernel_stack: Box<[Page]>,
 }
 
@@ -47,7 +43,7 @@ impl KernelContext {
         let trapframe_addr = (stack_top - trapframe_size) & !(trapframe_align - 1);
 
         Self {
-            sp: trapframe_addr, // Reserve aligned space for trapframe
+            sp: trapframe_addr,
             ra: crate::task::task_initial_kernel_entrypoint as u64,
             s: [0; 12],
             kernel_stack,

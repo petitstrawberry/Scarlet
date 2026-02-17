@@ -10,10 +10,10 @@ use crate::arch::hv::guest_vcpu::GuestVcpu;
 use crate::arch::hv::switch::{resume_guest_loop, run_guest_loop};
 #[cfg(all(feature = "hypervisor", target_arch = "riscv64"))]
 use crate::arch::hv::trap::{arch_guest_trap_handler, clear_guest_mode};
-#[cfg(target_arch = "riscv64")]
-use crate::arch::{get_cpu, set_arch, set_next_mode, set_trapvector};
 #[cfg(not(target_arch = "riscv64"))]
 use crate::arch::{Mode, Trapframe};
+#[cfg(target_arch = "riscv64")]
+use crate::arch::{get_cpu, set_arch, set_next_mode, set_trapvector};
 #[cfg(all(feature = "hypervisor", target_arch = "riscv64"))]
 use crate::hypervisor::memory::MemorySlot;
 use crate::hypervisor::types::{InterruptType, VmExit};
@@ -141,7 +141,10 @@ impl VcpuObject {
 
             crate::early_println!(
                 "[VcpuObject::run] arch_vaddr={:#x} kstack_slot={} kstack_base={:#x} kernel_sp={:#x}",
-                arch_vaddr, kstack_slot, kstack_base, kernel_sp
+                arch_vaddr,
+                kstack_slot,
+                kstack_base,
+                kernel_sp
             );
 
             cpu.set_next_address_space(crate::vm::get_kernel_vm_manager().get_asid());

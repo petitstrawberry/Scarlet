@@ -288,8 +288,28 @@ impl Riscv64 {
         addr
     }
 
+    pub fn get_kernel_stack(&self) -> u64 {
+        self.kernel_stack
+    }
+
     pub fn set_kernel_stack(&mut self, initial_top: u64) {
         self.kernel_stack = initial_top;
+    }
+
+    pub fn get_kernel_trap(&self) -> u64 {
+        self.kernel_trap
+    }
+
+    pub fn set_kernel_trap(&mut self, addr: u64) {
+        self.kernel_trap = addr;
+    }
+
+    pub fn get_satp(&self) -> u64 {
+        self.satp
+    }
+
+    pub fn set_satp(&mut self, val: u64) {
+        self.satp = val;
     }
 
     pub fn set_trap_handler(&mut self, addr: usize) {

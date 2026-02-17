@@ -6,7 +6,7 @@ use super::interrupt::arch_interrupt_handler;
 
 use crate::arch::trap::prev_mode;
 use crate::arch::{
-    self, get_kernel_trapvector_paddr, get_trapvector, set_trapvector, Mode, Trapframe,
+    self, Mode, Trapframe, get_kernel_trapvector_paddr, get_trapvector, set_trapvector,
 };
 use crate::task::mytask;
 

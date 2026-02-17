@@ -605,30 +605,38 @@ impl Scheduler {
 
                 #[cfg(all(feature = "hypervisor", target_arch = "riscv64"))]
                 {
-                    let (guest_vcpu_switch_data, hypervisor_switch_data) =
-                        match current_task.vcpu.lock().get_mode() {
-                            crate::arch::Mode::GuestKernel | crate::arch::Mode::GuestUser => {
-                                use crate::arch::hv::switch::HypervisorSwitchData;
-                                use crate::arch::hv::switch::VcpuSwitchData;
+                    // let (guest_vcpu_switch_data, hypervisor_switch_data) =
+                    //     match current_task.vcpu.lock().get_mode() {
+                    //         crate::arch::Mode::GuestKernel | crate::arch::Mode::GuestUser => {
+                    //             use crate::arch::hv::switch::HypervisorSwitchData;
+                    //             use crate::arch::hv::switch::VcpuSwitchData;
 
-                                (
-                                    Some(VcpuSwitchData::save()),
-                                    Some(HypervisorSwitchData::save()),
-                                )
-                            }
-                            _ => (None, None),
-                        };
+                    //             (
+                    //                 Some(VcpuSwitchData::save()),
+                    //                 Some(HypervisorSwitchData::save()),
+                    //             )
+                    //         }
+                    //         _ => (None, None),
+                    //     };
+
+                    use crate::arch::hv::switch::{HypervisorSwitchData, VcpuSwitchData};
+
+                    let guest_vcpu_switch_data = VcpuSwitchData::save();
+                    let hypervisor_switch_data = HypervisorSwitchData::save();
 
                     // Perform kernel context switch
                     self.kernel_context_switch(cpu_id, current_task_id, next_task_id);
                     // NOTE: After this point, the current task will not execute until it is scheduled again
 
-                    if let Some(guest_vcpu_switch_data) = guest_vcpu_switch_data.as_ref() {
-                        guest_vcpu_switch_data.restore();
-                    }
-                    if let Some(hypervisor_switch_data) = hypervisor_switch_data.as_ref() {
-                        hypervisor_switch_data.restore();
-                    }
+                    // if let Some(guest_vcpu_switch_data) = guest_vcpu_switch_data.as_ref() {
+                    //     guest_vcpu_switch_data.restore();
+                    // }
+                    // if let Some(hypervisor_switch_data) = hypervisor_switch_data.as_ref() {
+                    //     hypervisor_switch_data.restore();
+                    // }
+
+                    guest_vcpu_switch_data.restore();
+                    hypervisor_switch_data.restore();
                 }
                 #[cfg(not(all(feature = "hypervisor", target_arch = "riscv64")))]
                 {
@@ -637,9 +645,11 @@ impl Scheduler {
                     // NOTE: After this point, the current task will not execute until it is scheduled again
                 }
 
-                // Restore trapframe of same task
+                // Restore vcpu state and set mode
                 let current_task = self.get_task_by_id(current_task_id).unwrap();
-                Self::setup_task_execution(get_cpu(), current_task);
+                let trapframe = current_task.get_trapframe();
+                current_task.vcpu.lock().switch(trapframe);
+                set_next_mode(current_task.vcpu.lock().get_mode());
             } else {
                 // No current task (e.g., first scheduling), just switch to next task
                 let next_task = self.get_task_by_id(next_task_id).unwrap();
@@ -897,6 +907,16 @@ impl Scheduler {
             }
 
             if !from_ctx_ptr.is_null() && !to_ctx_ptr.is_null() {
+                // Save current hardware state to local variables (preserved on stack)
+                let cpu = get_cpu();
+                let saved_kernel_stack = cpu.get_kernel_stack();
+                let saved_kernel_trap = cpu.get_kernel_trap();
+                let saved_satp = cpu.get_satp();
+                let saved_stvec: u64;
+                unsafe {
+                    core::arch::asm!("csrr {0}, stvec", out(reg) saved_stvec);
+                }
+
                 #[cfg(all(feature = "hypervisor", target_arch = "riscv64"))]
                 let guest_vcpu_switch_data = crate::arch::hv::switch::VcpuSwitchData::save();
                 #[cfg(all(feature = "hypervisor", target_arch = "riscv64"))]
@@ -911,6 +931,15 @@ impl Scheduler {
                 {
                     guest_vcpu_switch_data.restore();
                     hypervisor_switch_data.restore();
+                }
+
+                // Restore hardware state from local variables
+                let cpu = get_cpu();
+                cpu.set_kernel_stack(saved_kernel_stack);
+                cpu.set_kernel_trap(saved_kernel_trap);
+                cpu.set_satp(saved_satp);
+                unsafe {
+                    core::arch::asm!("csrw stvec, {0}", in(reg) saved_stvec);
                 }
 
                 // Execution resumes here when this task is rescheduled
