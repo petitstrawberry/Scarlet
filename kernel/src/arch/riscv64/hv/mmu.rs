@@ -22,11 +22,14 @@ pub fn map_stage2_page(
     gpa: u64,
     hpa: u64,
     writable: bool,
+    asid: u16,
 ) -> Result<(), &'static str> {
     let gpa = gpa & !0xfff;
     let hpa = hpa & !0xfff;
 
-    let pte = pagetable.walk(gpa as usize, true, 0).ok_or("walk failed")?;
+    let pte = pagetable
+        .walk(gpa as usize, true, asid)
+        .ok_or("walk failed")?;
 
     let ppn = (hpa as usize >> 12) & 0xffff_ffff_fff;
     pte.clear_all();

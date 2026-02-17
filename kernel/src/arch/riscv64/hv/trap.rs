@@ -2,12 +2,13 @@
 
 use core::arch::asm;
 
-use crate::arch::Trapframe;
 use crate::arch::hv::csr;
-use crate::hypervisor::VmObject;
+use crate::arch::Trapframe;
 use crate::hypervisor::types::VmExit;
+use crate::hypervisor::VmObject;
 
-pub const HSTATUS_SPV: u64 = 1 << 8;
+pub const HSTATUS_SPV: u64 = 1 << 7;
+pub const HSTATUS_SPVP: u64 = 1 << 8;
 
 pub const CAUSE_ECALL_FROM_VS: usize = 10;
 pub const CAUSE_INST_GUEST_PAGE_FAULT: usize = 20;
@@ -20,14 +21,14 @@ pub fn is_from_guest() -> bool {
     unsafe {
         asm!("csrr {0}, hstatus", out(reg) hstatus);
     }
-    (hstatus & HSTATUS_SPV) != 0
+    (hstatus & HSTATUS_SPVP) != 0
 }
 
 pub fn clear_guest_mode() {
     let mut hstatus: u64;
     unsafe {
         asm!("csrr {0}, hstatus", out(reg) hstatus);
-        hstatus &= !HSTATUS_SPV;
+        hstatus &= !(HSTATUS_SPV | HSTATUS_SPVP);
         asm!("csrw hstatus, {0}", in(reg) hstatus);
     }
 }

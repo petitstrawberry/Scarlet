@@ -3,11 +3,11 @@
 use core::arch::naked_asm;
 
 use crate::arch::{
-    Trapframe,
     hv::{
         csr::{GuestCsrState, HypervisorCsrState},
         guest_vcpu::GuestVcpu,
     },
+    Trapframe,
 };
 
 mod offset {
@@ -17,7 +17,7 @@ mod offset {
     pub const CSRS_SEPC: usize = CSRS + 8;
     pub const CSRS_SATP: usize = CSRS + 32;
     pub const CSRS_SSTATUS: usize = CSRS + 40;
-    pub const PC: usize = CSRS + 48;
+    pub const PC: usize = CSRS + 64; // Fixed: was CSRS + 48, but GuestCsrState is 64 bytes
     pub const RISCV64_KERNEL_STACK: usize = 24;
 }
 
@@ -30,7 +30,7 @@ mod tf_offset {
 }
 
 #[unsafe(naked)]
-pub unsafe extern "C" fn run_guest_loop(_vcpu: *const GuestVcpu, _arch: *mut u8) {
+pub unsafe extern "C" fn run_guest_loop(_vcpu: *const GuestVcpu, _arch: usize) {
     naked_asm!(
         "addi sp, sp, -104",
         "sd ra, 0(sp)",
@@ -90,10 +90,10 @@ pub unsafe extern "C" fn run_guest_loop(_vcpu: *const GuestVcpu, _arch: *mut u8)
         "ld x30, 240(t2)",
         "ld x31, 248(t2)",
 
-        "ld t0, {pc}(t2)",
+        "ld t0, 320(t2)",
         "csrw sepc, t0",
 
-        "li t0, 0x100",
+        "li t0, 0x80",
         "csrs hstatus, t0",
 
         "ld x5, 40(t2)",
@@ -106,7 +106,6 @@ pub unsafe extern "C" fn run_guest_loop(_vcpu: *const GuestVcpu, _arch: *mut u8)
         csrs_sepc = const offset::CSRS_SEPC,
         csrs_satp = const offset::CSRS_SATP,
         csrs_sstatus = const offset::CSRS_SSTATUS,
-        pc = const offset::PC,
     );
 }
 
