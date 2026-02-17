@@ -43,7 +43,7 @@ use crate::task::TaskType;
 use crate::{
     arch::{
         Arch, Trapframe, get_cpu, get_user_trap_handler, instruction::idle, set_next_mode,
-        set_trapvector, trap::user::arch_switch_to_user_or_guest,
+        set_trapvector, trap::user::arch_switch_to_user,
     },
     environment::MAX_NUM_CPUS,
     task::{TaskState, new_kernel_task, wake_parent_waiters, wake_task_waiters},
@@ -645,7 +645,7 @@ impl Scheduler {
                 let next_task = self.get_task_by_id(next_task_id).unwrap();
                 // crate::println!("[SCHED] Setting up task {} for execution", next_task_id);
                 Self::setup_task_execution(get_cpu(), next_task);
-                arch_switch_to_user_or_guest(next_task.get_trapframe()); // Force switch to user / guest space
+                arch_switch_to_user(next_task.get_trapframe()); // Force switch to user / guest space
             }
         }
 
@@ -654,7 +654,7 @@ impl Scheduler {
             // Process pending events before dispatching task
             let _ = current_task.process_pending_events();
         }
-        // Schedule returns - trap handler will call arch_switch_to_user_or_guest()
+        // Schedule returns - trap handler will call arch_switch_to_user()
     }
 
     /// Start the scheduler and return the first runnable task ID (if any).

@@ -237,7 +237,7 @@ pub fn first_switch_to_user(task: &mut Task) -> ! {
     set_trapvector(crate::vm::get_trampoline_trap_vector());
 
     // Final transition via trampoline exit path.
-    crate::arch::riscv64::trap::user::arch_switch_to_user_or_guest(task.get_trapframe())
+    crate::arch::riscv64::trap::user::arch_switch_to_user(task.get_trapframe())
 }
 
 /// Returns the device memory areas for RISC-V QEMU virt platform.
@@ -374,6 +374,10 @@ impl Trapframe {
 
 pub fn get_user_trapvector_paddr() -> usize {
     _user_trap_entry as usize
+}
+
+pub fn get_guest_trapvector_paddr() -> usize {
+    trap::user::_guest_trap_entry as usize
 }
 
 pub fn get_kernel_trapvector_paddr() -> usize {

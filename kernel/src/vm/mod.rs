@@ -443,6 +443,15 @@ pub fn get_trampoline_trap_vector() -> usize {
         .expect("Trampoline is not initialized")
 }
 
+#[cfg(target_arch = "riscv64")]
+pub fn get_guest_trapvector_trampoline() -> usize {
+    let trampoline_base = get_trampoline_trap_vector();
+    let user_entry = crate::arch::get_user_trapvector_paddr();
+    let guest_entry = crate::arch::get_guest_trapvector_paddr();
+    let offset = guest_entry.wrapping_sub(user_entry);
+    trampoline_base.wrapping_add(offset)
+}
+
 pub fn set_trampoline_arch(cpu_id: usize, arch: usize) {
     let mut trampolines = TRAMPOLINE_ARCH.lock();
     trampolines[cpu_id] = Some(arch);

@@ -3,8 +3,8 @@
 use crate::arch::Trapframe;
 use crate::hypervisor::types::VcpuExit;
 use crate::hypervisor::vm::GLOBAL_VM_MANAGER;
-use crate::object::handle::HandleMetadata;
 use crate::object::KernelObject;
+use crate::object::handle::HandleMetadata;
 use crate::task::mytask;
 
 pub const SYSCALL_SHV_VM_CREATE: usize = 1100;

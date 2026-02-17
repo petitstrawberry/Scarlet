@@ -21,8 +21,8 @@ use crate::abi::{AbiModule, scarlet::ScarletAbi};
 use crate::sync::waker::Waker;
 use crate::{
     arch::{
-        Trapframe, context::KernelContext, get_cpu, trap::user::arch_switch_to_user_or_guest,
-        vcpu::Vcpu, vm::alloc_virtual_address_space,
+        Trapframe, context::KernelContext, get_cpu, trap::user::arch_switch_to_user, vcpu::Vcpu,
+        vm::alloc_virtual_address_space,
     },
     environment::{
         DEAFAULT_MAX_TASK_DATA_SIZE, DEAFAULT_MAX_TASK_STACK_SIZE, DEAFAULT_MAX_TASK_TEXT_SIZE,
@@ -2001,7 +2001,7 @@ pub fn task_initial_kernel_entrypoint() -> ! {
             .unwrap()
     };
     Scheduler::setup_task_execution(cpu, current_task);
-    arch_switch_to_user_or_guest(current_task.get_trapframe());
+    arch_switch_to_user(current_task.get_trapframe());
 }
 
 #[cfg(test)]

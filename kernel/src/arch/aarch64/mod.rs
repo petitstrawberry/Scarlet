@@ -120,7 +120,7 @@ pub fn first_switch_to_user(task: &mut Task) -> ! {
     }
 
     // Compute trampoline exit target.
-    let trap_exit_offset = crate::arch::aarch64::trap::user::_user_trap_exit as usize
+    let trap_exit_offset = crate::arch::aarch64::trap::user::_switch_to_user as usize
         - crate::arch::aarch64::trap::user::_user_trap_entry as usize;
     let trampoline_base = crate::vm::get_trampoline_trap_vector();
     let trap_exit_addr = trampoline_base + trap_exit_offset;
@@ -470,7 +470,7 @@ pub fn get_current_cpu_id() -> usize {
 }
 
 pub fn set_next_mode(_mode: crate::arch::Mode) {
-    // AArch64 return mode is currently chosen in the trampoline (`_user_trap_exit`).
+    // AArch64 return mode is currently chosen in the trampoline (`_switch_to_user`).
     // Keep this as a no-op so shared scheduler code can call it without
     // architecture-specific branching or noisy TODO logs.
     let _ = _mode;
