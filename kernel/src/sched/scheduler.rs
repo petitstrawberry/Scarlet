@@ -37,6 +37,8 @@ use core::panic;
 
 use alloc::{boxed::Box, collections::vec_deque::VecDeque, string::ToString};
 
+use crate::arch::ArchCpuState;
+use crate::arch::get_trapvector;
 use crate::print;
 use crate::println;
 use crate::task::TaskType;
@@ -909,13 +911,8 @@ impl Scheduler {
             if !from_ctx_ptr.is_null() && !to_ctx_ptr.is_null() {
                 // Save current hardware state to local variables (preserved on stack)
                 let cpu = get_cpu();
-                let saved_kernel_stack = cpu.get_kernel_stack();
-                let saved_kernel_trap = cpu.get_kernel_trap();
-                let saved_satp = cpu.get_satp();
-                let saved_stvec: u64;
-                unsafe {
-                    core::arch::asm!("csrr {0}, stvec", out(reg) saved_stvec);
-                }
+                let saved_arch_cpu_state = ArchCpuState::save(cpu);
+                let saved_trapvector = get_trapvector();
 
                 #[cfg(all(feature = "hypervisor", target_arch = "riscv64"))]
                 let guest_vcpu_switch_data = crate::arch::hv::switch::VcpuSwitchData::save();
@@ -935,12 +932,8 @@ impl Scheduler {
 
                 // Restore hardware state from local variables
                 let cpu = get_cpu();
-                cpu.set_kernel_stack(saved_kernel_stack);
-                cpu.set_kernel_trap(saved_kernel_trap);
-                cpu.set_satp(saved_satp);
-                unsafe {
-                    core::arch::asm!("csrw stvec, {0}", in(reg) saved_stvec);
-                }
+                saved_arch_cpu_state.restore(cpu);
+                set_trapvector(saved_trapvector);
 
                 // Execution resumes here when this task is rescheduled
                 if let Some(from_task) = TaskPool::get_task_mut(from_task_id) {

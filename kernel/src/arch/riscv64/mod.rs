@@ -265,6 +265,7 @@ pub struct Riscv64 {
     satp: u64,         // offset: 16
     kernel_stack: u64, // offset: 24
     kernel_trap: u64,  // offset: 32
+    guest_trapframe_ptr: u64, // offset: 40
 }
 
 impl Riscv64 {
@@ -275,6 +276,7 @@ impl Riscv64 {
             kernel_stack: 0,
             kernel_trap: 0,
             satp: 0,
+            guest_trapframe_ptr: 0,
         }
     }
 
@@ -296,21 +298,13 @@ impl Riscv64 {
         self.kernel_stack = initial_top;
     }
 
-    pub fn get_kernel_trap(&self) -> u64 {
-        self.kernel_trap
-    }
+    // pub fn get_satp(&self) -> u64 {
+    //     self.satp
+    // }
 
-    pub fn set_kernel_trap(&mut self, addr: u64) {
-        self.kernel_trap = addr;
-    }
-
-    pub fn get_satp(&self) -> u64 {
-        self.satp
-    }
-
-    pub fn set_satp(&mut self, val: u64) {
-        self.satp = val;
-    }
+    // pub fn set_satp(&mut self, val: u64) {
+    //     self.satp = val;
+    // }
 
     pub fn set_trap_handler(&mut self, addr: usize) {
         self.kernel_trap = addr as u64;
@@ -327,6 +321,32 @@ impl Riscv64 {
         unsafe { &mut CPUS[self.hartid as usize] }
     }
 }
+
+pub struct ArchCpuState {
+    kernel_stack: u64,
+    trap_handler: u64,
+    satp: u64,
+    guest_trapframe_ptr: u64,
+}
+
+impl ArchCpuState {
+    pub fn save(cpu: &Riscv64) -> Self {
+        ArchCpuState {
+            kernel_stack: cpu.kernel_stack,
+            trap_handler: cpu.kernel_trap,
+            satp: cpu.satp,
+            guest_trapframe_ptr: cpu.guest_trapframe_ptr,
+        }
+    }
+
+    pub fn restore(&self, cpu: &mut Riscv64) {
+        cpu.kernel_stack = self.kernel_stack;
+        cpu.kernel_trap = self.trap_handler;
+        cpu.satp = self.satp;
+        cpu.guest_trapframe_ptr = self.guest_trapframe_ptr;
+    }
+}
+
 
 #[repr(C, align(16))]
 #[derive(Debug, Clone)]
