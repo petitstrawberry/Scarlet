@@ -30,7 +30,10 @@ mod tf_offset {
 }
 
 #[unsafe(naked)]
-pub unsafe extern "C" fn run_guest_loop(_vcpu: *const GuestVcpu, _arch: usize) {
+pub unsafe extern "C" fn run_guest_loop(
+    _vcpu: *const GuestVcpu,
+    _arch: usize,
+) -> *mut crate::arch::Trapframe {
     naked_asm!(
         "addi sp, sp, -104",
         "sd ra, 0(sp)",
@@ -170,6 +173,7 @@ pub unsafe extern "C" fn arch_guest_trap_exit(_trapframe: *mut u8) {
         "ld s10, 88(sp)",
         "ld s11, 96(sp)",
         "addi sp, sp, 104",
+        "addi a0, sp, -272",
         "ret",
         kernel_stack = const offset::RISCV64_KERNEL_STACK,
     );

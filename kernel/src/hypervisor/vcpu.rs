@@ -187,21 +187,23 @@ impl VcpuObject {
                     core::ptr::read((guest_ptr_for_run as *const u8).add(320) as *const u64);
                 crate::early_println!("[VcpuObject::run] PC at byte 320 = {:#x}", pc_at_320);
             }
-            unsafe { run_guest_loop(guest_ptr_for_run, arch_vaddr) };
+            let guest_tf_ptr: *mut crate::arch::Trapframe =
+                unsafe { run_guest_loop(guest_ptr_for_run, arch_vaddr) };
+
+            let mut trapframe_copy = unsafe { (*guest_tf_ptr).clone() };
 
             crate::early_println!(
-                "[VcpuObject::run] returned from run_guest_loop, entering trap handling loop"
+                "[VcpuObject::run] returned from run_guest_loop, trapframe={:#x}",
+                guest_tf_ptr as usize
             );
 
             loop {
-                let trapframe = task.get_trapframe();
-
-                match arch_guest_trap_handler(trapframe, &vm) {
+                match arch_guest_trap_handler(&mut trapframe_copy, &vm) {
                     Some(exit) => {
                         crate::arch::set_trapvector(crate::vm::get_trampoline_trap_vector());
                         crate::early_println!("[VcpuObject::run] got exit: {:?}", exit);
                         clear_guest_mode();
-                        self.state.lock().guest.save(trapframe);
+                        self.state.lock().guest.save(&mut trapframe_copy);
 
                         if let VmExit::MmioWrite {
                             addr,
@@ -222,7 +224,10 @@ impl VcpuObject {
                         return Ok(exit);
                     }
                     None => unsafe {
-                        resume_guest_loop(trapframe as *mut _);
+                        // Write back to original location before resuming
+                        core::ptr::write(guest_tf_ptr, trapframe_copy.clone());
+                        let new_tf_ptr = run_guest_loop(guest_ptr_for_run, arch_vaddr);
+                        trapframe_copy = (*new_tf_ptr).clone();
                     },
                 }
             }
