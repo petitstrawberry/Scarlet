@@ -129,6 +129,7 @@ pub fn alloc_virtual_address_space_for_stage2() -> u16 {
             asid_table[word_idx] |= 1 << bit_pos;
             let asid = (word_idx * 64 + bit_pos) as u16;
             let ptr = allocate_raw_pages_aligned(4, 16384) as *mut PageTable;
+            assert!(ptr as usize % 16384 == 0, "Allocated page table is not 16KiB aligned");
             if ptr.is_null() {
                 panic!("Failed to allocate 16KiB aligned root page table");
             }

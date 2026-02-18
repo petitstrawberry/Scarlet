@@ -5,7 +5,10 @@ use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU32, Ordering};
 use spin::Mutex;
 
-use crate::arch::vm::{alloc_virtual_address_space_for_stage2, get_root_pagetable};
+use crate::arch::hv::mmu::{
+    alloc_vmid, free_stage2, get_stage2_root, init_stage2, map_stage2_page_new,
+    set_guest_root_stage2, verify_hgatp_stage2, Stage2PageTable,
+};
 use crate::object::capability::ControlOps;
 use crate::task::mytask;
 
@@ -39,9 +42,18 @@ pub struct VmObject {
     state: Mutex<VmState>,
 }
 
+impl Drop for VmObject {
+    fn drop(&mut self) {
+        let vmid = self.state.lock().vmid;
+        free_stage2(vmid);
+    }
+}
+
 impl VmObject {
     pub fn new(id: VmId) -> Result<Self, &'static str> {
-        let vmid = alloc_virtual_address_space_for_stage2();
+        let vmid = alloc_vmid();
+        init_stage2(vmid)?;
+
         Ok(Self {
             id,
             state: Mutex::new(VmState {
@@ -114,50 +126,47 @@ impl VmObject {
         gpa: u64,
         hpa: u64,
         writable: bool,
-        accessed: bool,
-        dirty: bool,
+        _accessed: bool,
+        _dirty: bool,
     ) -> Result<(), &'static str> {
         let state = self.state.lock();
-        let pagetable = get_root_pagetable(state.vmid).ok_or("No page table")?;
-        let vmid = state.vmid;
         #[cfg(target_arch = "riscv64")]
         {
-            crate::arch::hv::mmu::map_stage2_page(
-                pagetable, gpa, hpa, writable, accessed, dirty, vmid,
-            )
+            let root = get_stage2_root(state.vmid).ok_or("No Stage2 root")?;
+            let root = unsafe { &mut *root };
+            map_stage2_page_new(root, gpa, hpa, writable, state.vmid)
         }
 
         #[cfg(not(target_arch = "riscv64"))]
         {
-            let _ = pagetable;
             let _ = gpa;
             let _ = hpa;
             let _ = writable;
-            let _ = vmid;
             Err("Stage-2 mapping is only supported on riscv64")
         }
     }
 
     pub fn set_guest_root_pagetable(&self) {
         let state = self.state.lock();
-        if let Some(pagetable) = get_root_pagetable(state.vmid) {
-            #[cfg(target_arch = "riscv64")]
-            {
-                crate::arch::hv::mmu::set_guest_root_pagetable(pagetable, state.vmid);
+        #[cfg(target_arch = "riscv64")]
+        {
+            if let Some(root) = get_stage2_root(state.vmid) {
+                let root = unsafe { &*root };
+                set_guest_root_stage2(root, state.vmid);
             }
-            #[cfg(not(target_arch = "riscv64"))]
-            {
-                let _ = pagetable;
-                let _ = state.vmid;
-            }
+        }
+        #[cfg(not(target_arch = "riscv64"))]
+        {
+            let _ = state;
         }
     }
 
     #[cfg(target_arch = "riscv64")]
     pub fn verify_guest_root_pagetable(&self) {
         let state = self.state.lock();
-        if let Some(pagetable) = get_root_pagetable(state.vmid) {
-            crate::arch::hv::mmu::verify_hgatp(pagetable, state.vmid);
+        if let Some(root) = get_stage2_root(state.vmid) {
+            let root = unsafe { &*root };
+            verify_hgatp_stage2(root, state.vmid);
         }
     }
 }
