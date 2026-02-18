@@ -3,11 +3,11 @@
 use core::arch::naked_asm;
 
 use crate::arch::{
+    Trapframe,
     hv::{
         csr::{GuestCsrState, HypervisorCsrState},
         guest_vcpu::GuestVcpu,
     },
-    Trapframe,
 };
 
 mod offset {

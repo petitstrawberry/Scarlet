@@ -10,10 +10,10 @@ use crate::arch::hv::guest_vcpu::GuestVcpu;
 use crate::arch::hv::switch::{resume_guest_loop, run_guest_loop};
 #[cfg(all(feature = "hypervisor", target_arch = "riscv64"))]
 use crate::arch::hv::trap::{arch_guest_trap_handler, clear_guest_mode};
-#[cfg(target_arch = "riscv64")]
-use crate::arch::{get_cpu, set_arch, set_next_mode, set_trapvector};
 #[cfg(not(target_arch = "riscv64"))]
 use crate::arch::{Mode, Trapframe};
+#[cfg(target_arch = "riscv64")]
+use crate::arch::{get_cpu, set_arch, set_next_mode, set_trapvector};
 #[cfg(all(feature = "hypervisor", target_arch = "riscv64"))]
 use crate::hypervisor::memory::MemorySlot;
 use crate::hypervisor::types::{InterruptType, VmExit};
@@ -165,33 +165,19 @@ impl VcpuObject {
             vm.verify_guest_root_pagetable();
 
             crate::early_println!("[VcpuObject::run] calling run_guest_loop");
-            {
-                let state = self.state.lock();
-                crate::early_println!("[VcpuObject::run] guest PC={:#x}", state.guest.get_pc());
-                let guest_ptr = &state.guest as *const GuestVcpu;
-                crate::early_println!("[VcpuObject::run] guest_ptr={:#x}", guest_ptr as usize);
-                unsafe {
-                    let pc_at_offset = core::ptr::read((guest_ptr as *const u64).add(40));
-                    crate::early_println!(
-                        "[VcpuObject::run] PC at offset 320 = {:#x}",
-                        pc_at_offset
-                    );
-                }
-            }
-            let arch_vaddr: usize;
-            unsafe {
-                core::arch::asm!("csrr {0}, sscratch", out(reg) arch_vaddr);
-            }
-            let guest_ptr_for_run = &self.state.lock().guest as *const GuestVcpu;
+            let mut state = self.state.lock();
+            crate::early_println!("[VcpuObject::run] guest PC={:#x}", state.guest.get_pc());
+            let guest_ptr_for_run = &state.guest as *const GuestVcpu;
             crate::early_println!(
                 "[VcpuObject::run] guest_ptr_for_run={:#x}",
                 guest_ptr_for_run as usize
             );
+
+            let arch_vaddr: usize;
             unsafe {
-                let pc_at_320 =
-                    core::ptr::read((guest_ptr_for_run as *const u8).add(320) as *const u64);
-                crate::early_println!("[VcpuObject::run] PC at byte 320 = {:#x}", pc_at_320);
+                core::arch::asm!("csrr {0}, sscratch", out(reg) arch_vaddr);
             }
+
             let mut guest_tf = Trapframe::new();
 
             unsafe { run_guest_loop(&mut guest_tf, guest_ptr_for_run, arch_vaddr) };
@@ -207,7 +193,7 @@ impl VcpuObject {
                         crate::arch::set_trapvector(crate::vm::get_trampoline_trap_vector());
                         crate::early_println!("[VcpuObject::run] got exit: {:?}", exit);
                         clear_guest_mode();
-                        self.state.lock().guest.save(&mut guest_tf);
+                        state.guest.save(&mut guest_tf);
 
                         if let VmExit::MmioWrite {
                             addr,
@@ -216,7 +202,7 @@ impl VcpuObject {
                             data: _,
                         } = exit
                         {
-                            let data = self.state.lock().guest.get_mmio_data(reg, size);
+                            let data = state.guest.get_mmio_data(reg, size);
                             return Ok(VmExit::MmioWrite {
                                 addr,
                                 size,

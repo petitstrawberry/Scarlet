@@ -2,10 +2,10 @@
 
 use core::arch::asm;
 
-use crate::arch::hv::csr;
 use crate::arch::Trapframe;
-use crate::hypervisor::types::VmExit;
+use crate::arch::hv::csr;
 use crate::hypervisor::VmObject;
+use crate::hypervisor::types::VmExit;
 
 pub const HSTATUS_SPV: u64 = 1 << 7;
 pub const HSTATUS_SPVP: u64 = 1 << 8;

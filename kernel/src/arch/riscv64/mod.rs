@@ -260,11 +260,11 @@ static mut CPUS: [Riscv64; MAX_NUM_CPUS] = [const { Riscv64::new(0) }; MAX_NUM_C
 #[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct Riscv64 {
-    scratch: u64,      // offeset: 0
-    pub hartid: u64,   // offset: 8
-    satp: u64,         // offset: 16
-    kernel_stack: u64, // offset: 24
-    kernel_trap: u64,  // offset: 32
+    scratch: u64,             // offeset: 0
+    pub hartid: u64,          // offset: 8
+    satp: u64,                // offset: 16
+    kernel_stack: u64,        // offset: 24
+    kernel_trap: u64,         // offset: 32
     guest_trapframe_ptr: u64, // offset: 40
 }
 
@@ -346,7 +346,6 @@ impl ArchCpuState {
         cpu.guest_trapframe_ptr = self.guest_trapframe_ptr;
     }
 }
-
 
 #[repr(C, align(16))]
 #[derive(Debug, Clone)]

@@ -6,8 +6,8 @@ use core::sync::atomic::{AtomicU32, Ordering};
 use spin::Mutex;
 
 use crate::arch::hv::mmu::{
-    alloc_vmid, free_stage2, get_stage2_root, init_stage2, map_stage2_page_new,
-    set_guest_root_stage2, verify_hgatp_stage2, Stage2PageTable,
+    Stage2PageTable, alloc_vmid, free_stage2, get_stage2_root, init_stage2, map_stage2_page_new,
+    set_guest_root_stage2, verify_hgatp_stage2,
 };
 use crate::object::capability::ControlOps;
 use crate::task::mytask;

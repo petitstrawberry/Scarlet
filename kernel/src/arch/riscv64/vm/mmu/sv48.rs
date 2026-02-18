@@ -21,7 +21,7 @@ impl PageTableEntry {
 
     pub fn get_ppn(&self) -> usize {
         ((self.entry >> 10) & 0x3ffffffffff) as usize // Mask to get the PPN bits (44 bits)
-                                                      // (self.entry >> 10) as usize
+        // (self.entry >> 10) as usize
     }
 
     pub fn get_flags(&self) -> u64 {

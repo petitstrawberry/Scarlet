@@ -18,9 +18,9 @@ use spin::RwLock;
 
 use crate::mem::page::{allocate_raw_pages, allocate_raw_pages_aligned};
 
+use crate::arch::Arch;
 use crate::arch::get_cpu;
 use crate::arch::get_user_trapvector_paddr;
-use crate::arch::Arch;
 use crate::early_println;
 use crate::environment::{KERNEL_KSTACK_REGION_END, KERNEL_KSTACK_REGION_START, TRAMPOLINE_VA_END};
 use crate::vm::manager::VirtualMemoryManager;
@@ -129,7 +129,10 @@ pub fn alloc_virtual_address_space_for_stage2() -> u16 {
             asid_table[word_idx] |= 1 << bit_pos;
             let asid = (word_idx * 64 + bit_pos) as u16;
             let ptr = allocate_raw_pages_aligned(4, 16384) as *mut PageTable;
-            assert!(ptr as usize % 16384 == 0, "Allocated page table is not 16KiB aligned");
+            assert!(
+                ptr as usize % 16384 == 0,
+                "Allocated page table is not 16KiB aligned"
+            );
             if ptr.is_null() {
                 panic!("Failed to allocate 16KiB aligned root page table");
             }
