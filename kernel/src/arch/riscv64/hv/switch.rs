@@ -3,11 +3,11 @@
 use core::arch::naked_asm;
 
 use crate::arch::{
-    Trapframe,
     hv::{
         csr::{GuestCsrState, HypervisorCsrState},
         guest_vcpu::GuestVcpu,
     },
+    Trapframe,
 };
 
 mod offset {
@@ -19,6 +19,7 @@ mod offset {
     pub const CSRS_SSTATUS: usize = CSRS + 40;
     pub const PC: usize = CSRS + 64; // Fixed: was CSRS + 48, but GuestCsrState is 64 bytes
     pub const RISCV64_KERNEL_STACK: usize = 24;
+    pub const GUEST_TRAPFRAME_PTR: usize = 40;
 }
 
 mod tf_offset {
@@ -31,9 +32,10 @@ mod tf_offset {
 
 #[unsafe(naked)]
 pub unsafe extern "C" fn run_guest_loop(
+    _trapframe: *const Trapframe,
     _vcpu: *const GuestVcpu,
     _arch: usize,
-) -> *mut crate::arch::Trapframe {
+) {
     naked_asm!(
         "addi sp, sp, -104",
         "sd ra, 0(sp)",
@@ -51,8 +53,9 @@ pub unsafe extern "C" fn run_guest_loop(
         "sd s11, 96(sp)",
 
         "sd sp, {kernel_stack}(a1)",
+        "sd a0, {guest_trapframe_ptr}(a1)",
 
-        "mv t2, a0",
+        "mv t2, a1",
 
         "ld t0, {csrs_sscratch}(t2)",
         "csrw vsscratch, t0",
@@ -105,6 +108,7 @@ pub unsafe extern "C" fn run_guest_loop(
         "sret",
 
         kernel_stack = const offset::RISCV64_KERNEL_STACK,
+        guest_trapframe_ptr = const offset::GUEST_TRAPFRAME_PTR,
         csrs_sscratch = const offset::CSRS_SSCRATCH,
         csrs_sepc = const offset::CSRS_SEPC,
         csrs_satp = const offset::CSRS_SATP,
@@ -173,7 +177,6 @@ pub unsafe extern "C" fn arch_guest_trap_exit(_trapframe: *mut u8) {
         "ld s10, 88(sp)",
         "ld s11, 96(sp)",
         "addi sp, sp, 104",
-        "addi a0, sp, -272",
         "ret",
         kernel_stack = const offset::RISCV64_KERNEL_STACK,
     );

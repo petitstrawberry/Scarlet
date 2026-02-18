@@ -175,19 +175,13 @@ pub extern "C" fn _guest_trap_entry() {
         .option norvc
         .option norelax
         .align 8
-                /* Disable the interrupt */
-                csrci   sstatus, 0x2
-
                 /* Save a0 to sscratch and load the Riscv64 struct pointer */
                 csrrw   a0, sscratch, a0
                 /* Store sp to Riscv64.scratch */
                 sd      sp, 0(a0)
 
-                /* Load kernel stack pointer from Riscv64.kernel_stack */
-                ld      sp, 24(a0)
-
-                /* Allocate space on the kernel stack for saving user context */
-                addi    sp, sp, -272 /* sizeof(Trapframe) = 272 bytes */
+                /* Load kernel guest trapframe pointer from Riscv64.guest_trapframe_ptr */
+                ld      sp, 40(a0)
 
                 /* Save the context of the current hart */
                 sd      x0, 0(sp)
@@ -242,10 +236,21 @@ pub extern "C" fn _guest_trap_entry() {
 
                 /* Pass the trapframe pointer as the first argument */
                 mv      a0, sp
+
+                /* Load the kernel stack pointer from Riscv64.kernel_stack */
+                ld      sp, 24(a0)
+                
+                /* Save a0 on stack */
+                addi    sp, sp, -8
+                sd      a0, 0(sp)
+
                 jalr    ra, t1, 0 // Riscv64.kernel_trap(a0: &mut Trapframe)
 
                 /* Return from Rust handler - restore trapframe and sret */
-                mv      a0, sp
+                /* Load trapframe pointer from stack */
+                ld      a0, 0(sp)
+                addi    sp, sp, 8
+
                 /* epc */
                 ld     t0, 256(a0)
                 csrw   sepc, t0

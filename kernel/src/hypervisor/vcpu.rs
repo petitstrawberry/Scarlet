@@ -122,6 +122,8 @@ impl VcpuObject {
 
         #[cfg(target_arch = "riscv64")]
         {
+            use crate::arch::Trapframe;
+
             crate::early_println!("[VcpuObject::run] starting");
 
             let vm = self.vm.upgrade().ok_or("VM no longer exists")?;
@@ -187,23 +189,22 @@ impl VcpuObject {
                     core::ptr::read((guest_ptr_for_run as *const u8).add(320) as *const u64);
                 crate::early_println!("[VcpuObject::run] PC at byte 320 = {:#x}", pc_at_320);
             }
-            let guest_tf_ptr: *mut crate::arch::Trapframe =
-                unsafe { run_guest_loop(guest_ptr_for_run, arch_vaddr) };
+            let mut guest_tf = Trapframe::new();
 
-            let mut trapframe_copy = unsafe { (*guest_tf_ptr).clone() };
+            unsafe { run_guest_loop(&mut guest_tf, guest_ptr_for_run, arch_vaddr) };
 
             crate::early_println!(
-                "[VcpuObject::run] returned from run_guest_loop, trapframe={:#x}",
-                guest_tf_ptr as usize
+                "[VcpuObject::run] returned from run_guest_loop, trapframe={:?}",
+                guest_tf
             );
 
             loop {
-                match arch_guest_trap_handler(&mut trapframe_copy, &vm) {
+                match arch_guest_trap_handler(&mut guest_tf, &vm) {
                     Some(exit) => {
                         crate::arch::set_trapvector(crate::vm::get_trampoline_trap_vector());
                         crate::early_println!("[VcpuObject::run] got exit: {:?}", exit);
                         clear_guest_mode();
-                        self.state.lock().guest.save(&mut trapframe_copy);
+                        self.state.lock().guest.save(&mut guest_tf);
 
                         if let VmExit::MmioWrite {
                             addr,
@@ -225,9 +226,7 @@ impl VcpuObject {
                     }
                     None => unsafe {
                         // Write back to original location before resuming
-                        core::ptr::write(guest_tf_ptr, trapframe_copy.clone());
-                        let new_tf_ptr = run_guest_loop(guest_ptr_for_run, arch_vaddr);
-                        trapframe_copy = (*new_tf_ptr).clone();
+                        run_guest_loop(&mut guest_tf, guest_ptr_for_run, arch_vaddr);
                     },
                 }
             }
