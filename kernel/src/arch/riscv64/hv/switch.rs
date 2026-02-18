@@ -52,8 +52,8 @@ pub unsafe extern "C" fn run_guest_loop(
         "sd s10, 88(sp)",
         "sd s11, 96(sp)",
 
-        "sd sp, {kernel_stack}(a1)",
-        "sd a0, {guest_trapframe_ptr}(a1)",
+        "sd sp, {kernel_stack}(a2)",
+        "sd a0, {guest_trapframe_ptr}(a2)",
 
         "mv t2, a1",
 
