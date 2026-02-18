@@ -5,7 +5,7 @@ use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU32, Ordering};
 use spin::Mutex;
 
-use crate::arch::vm::{alloc_virtual_address_space, get_root_pagetable};
+use crate::arch::vm::{alloc_virtual_address_space_for_stage2, get_root_pagetable};
 use crate::object::capability::ControlOps;
 use crate::task::mytask;
 
@@ -41,7 +41,7 @@ pub struct VmObject {
 
 impl VmObject {
     pub fn new(id: VmId) -> Result<Self, &'static str> {
-        let vmid = alloc_virtual_address_space();
+        let vmid = alloc_virtual_address_space_for_stage2();
         Ok(Self {
             id,
             state: Mutex::new(VmState {
@@ -88,14 +88,19 @@ impl VmObject {
         slot_id: u32,
         guest_phys_addr: u64,
         memory_size: u64,
-        host_phys_addr: u64,
+        host_vaddr: u64,
         flags: MemorySlotFlags,
     ) -> Result<(), &'static str> {
+        let task = crate::task::mytask().ok_or("No current task")?;
+        let host_paddr = task
+            .vm_manager
+            .translate_vaddr(host_vaddr as usize)
+            .ok_or("Failed to translate host_vaddr")? as u64;
         self.state.lock().memory_slots.set_slot(MemorySlot {
             slot_id,
             guest_phys_addr,
             memory_size,
-            host_phys_addr,
+            host_phys_addr: host_paddr,
             flags,
         })
     }
@@ -104,13 +109,22 @@ impl VmObject {
         self.state.lock().memory_slots.find_slot(gpa).cloned()
     }
 
-    pub fn map_stage2_page(&self, gpa: u64, hpa: u64, writable: bool) -> Result<(), &'static str> {
+    pub fn map_stage2_page(
+        &self,
+        gpa: u64,
+        hpa: u64,
+        writable: bool,
+        accessed: bool,
+        dirty: bool,
+    ) -> Result<(), &'static str> {
         let state = self.state.lock();
         let pagetable = get_root_pagetable(state.vmid).ok_or("No page table")?;
         let vmid = state.vmid;
         #[cfg(target_arch = "riscv64")]
         {
-            crate::arch::hv::mmu::map_stage2_page(pagetable, gpa, hpa, writable, vmid)
+            crate::arch::hv::mmu::map_stage2_page(
+                pagetable, gpa, hpa, writable, accessed, dirty, vmid,
+            )
         }
 
         #[cfg(not(target_arch = "riscv64"))]
@@ -136,6 +150,14 @@ impl VmObject {
                 let _ = pagetable;
                 let _ = state.vmid;
             }
+        }
+    }
+
+    #[cfg(target_arch = "riscv64")]
+    pub fn verify_guest_root_pagetable(&self) {
+        let state = self.state.lock();
+        if let Some(pagetable) = get_root_pagetable(state.vmid) {
+            crate::arch::hv::mmu::verify_hgatp(pagetable, state.vmid);
         }
     }
 }

@@ -10,10 +10,10 @@ use crate::arch::hv::guest_vcpu::GuestVcpu;
 use crate::arch::hv::switch::{resume_guest_loop, run_guest_loop};
 #[cfg(all(feature = "hypervisor", target_arch = "riscv64"))]
 use crate::arch::hv::trap::{arch_guest_trap_handler, clear_guest_mode};
-#[cfg(not(target_arch = "riscv64"))]
-use crate::arch::{Mode, Trapframe};
 #[cfg(target_arch = "riscv64")]
 use crate::arch::{get_cpu, set_arch, set_next_mode, set_trapvector};
+#[cfg(not(target_arch = "riscv64"))]
+use crate::arch::{Mode, Trapframe};
 #[cfg(all(feature = "hypervisor", target_arch = "riscv64"))]
 use crate::hypervisor::memory::MemorySlot;
 use crate::hypervisor::types::{InterruptType, VmExit};
@@ -161,6 +161,9 @@ impl VcpuObject {
             crate::early_println!("[VcpuObject::run] setting guest root pagetable");
             vm.set_guest_root_pagetable();
 
+            #[cfg(target_arch = "riscv64")]
+            vm.verify_guest_root_pagetable();
+
             crate::early_println!("[VcpuObject::run] calling run_guest_loop");
             {
                 let state = self.state.lock();
@@ -225,8 +228,25 @@ impl VcpuObject {
                         return Ok(exit);
                     }
                     None => unsafe {
-                        // Write back to original location before resuming
+                        crate::early_println!("[VcpuObject::run] guest mode={:?}", mode);
+                        let guest_tv = get_guest_trapvector_trampoline();
+                        crate::early_println!(
+                            "[VcpuObject::run] guest trap vector={:#x}",
+                            guest_tv
+                        );
+                        set_trapvector(guest_tv);
+
+                        vm.set_guest_root_pagetable();
+
+                        #[cfg(target_arch = "riscv64")]
+                        vm.verify_guest_root_pagetable();
+
                         run_guest_loop(&mut guest_tf, guest_ptr_for_run, arch_vaddr);
+
+                        crate::early_println!(
+                            "[VcpuObject::run] resumed guest loop, trapframe={:?}",
+                            guest_tf
+                        );
                     },
                 }
             }

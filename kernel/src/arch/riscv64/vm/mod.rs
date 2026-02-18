@@ -16,11 +16,11 @@ use mmu::PageTable;
 use spin::Once;
 use spin::RwLock;
 
-use crate::mem::page::allocate_raw_pages;
+use crate::mem::page::{allocate_raw_pages, allocate_raw_pages_aligned};
 
-use crate::arch::Arch;
 use crate::arch::get_cpu;
 use crate::arch::get_user_trapvector_paddr;
+use crate::arch::Arch;
 use crate::early_println;
 use crate::environment::{KERNEL_KSTACK_REGION_END, KERNEL_KSTACK_REGION_START, TRAMPOLINE_VA_END};
 use crate::vm::manager::VirtualMemoryManager;
@@ -101,13 +101,11 @@ pub fn alloc_virtual_address_space() -> u16 {
     for word_idx in 0..(NUM_OF_ASID / 64) {
         let word = asid_table[word_idx];
         if word != u64::MAX {
-            // Check if there is a free ASID in this word
-            let bit_pos = (!word).trailing_zeros() as usize; // Find the first free bit (Must be < 64)
-            asid_table[word_idx] |= 1 << bit_pos; // Mark this ASID as used
-            let asid = (word_idx * 64 + bit_pos) as u16; // Calculate the ASID
+            let bit_pos = (!word).trailing_zeros() as usize;
+            asid_table[word_idx] |= 1 << bit_pos;
+            let asid = (word_idx * 64 + bit_pos) as u16;
             let root_pagetable_ptr = Box::into_raw(new_boxed_pagetable());
             let mut page_tables = get_page_tables().write();
-            // Insert the new root page table into the HashMap
             unsafe {
                 page_tables.insert(asid, vec![Box::from_raw(root_pagetable_ptr)]);
             }
@@ -116,7 +114,30 @@ pub fn alloc_virtual_address_space() -> u16 {
                 panic!("Failed to allocate a new root page table");
             }
 
-            return asid; // Return the allocated ASID
+            return asid;
+        }
+    }
+    panic!("No available root page table");
+}
+
+pub fn alloc_virtual_address_space_for_stage2() -> u16 {
+    let mut asid_table = get_asid_tables().write();
+    for word_idx in 0..(NUM_OF_ASID / 64) {
+        let word = asid_table[word_idx];
+        if word != u64::MAX {
+            let bit_pos = (!word).trailing_zeros() as usize;
+            asid_table[word_idx] |= 1 << bit_pos;
+            let asid = (word_idx * 64 + bit_pos) as u16;
+            let ptr = allocate_raw_pages_aligned(4, 16384) as *mut PageTable;
+            if ptr.is_null() {
+                panic!("Failed to allocate 16KiB aligned root page table");
+            }
+            let root_pagetable_ptr = unsafe { Box::from_raw(ptr) };
+            let mut page_tables = get_page_tables().write();
+            unsafe {
+                page_tables.insert(asid, vec![root_pagetable_ptr]);
+            }
+            return asid;
         }
     }
     panic!("No available root page table");

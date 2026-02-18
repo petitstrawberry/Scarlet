@@ -30,6 +30,19 @@ pub fn allocate_raw_pages(num_of_pages: usize) -> *mut Page {
     Box::into_raw(boxed_pages) as *mut Page
 }
 
+/// Allocates a number of pages with custom alignment.
+///
+/// # Arguments
+/// * `num_of_pages` - The number of pages to allocate
+/// * `align` - The alignment in bytes (must be a power of 2 and >= PAGE_SIZE)
+///
+/// # Returns
+/// A pointer to the allocated pages with the specified alignment.
+pub fn allocate_raw_pages_aligned(num_of_pages: usize, align: usize) -> *mut Page {
+    let boxed_pages = allocate_boxed_pages_aligned(num_of_pages, align);
+    Box::into_raw(boxed_pages) as *mut Page
+}
+
 /// Frees a number of pages.
 ///
 /// # Arguments
@@ -52,7 +65,7 @@ pub fn free_raw_pages(pages: *mut Page, num_of_pages: usize) {
 ///
 pub fn allocate_boxed_pages(num_of_pages: usize) -> Box<[Page]> {
     // Allocate raw memory and initialize it
-    use alloc::alloc::{Layout, alloc_zeroed};
+    use alloc::alloc::{alloc_zeroed, Layout};
     use core::ptr;
 
     let layout = Layout::array::<Page>(num_of_pages).expect("Layout calculation failed");
@@ -64,6 +77,24 @@ pub fn allocate_boxed_pages(num_of_pages: usize) -> Box<[Page]> {
         }
 
         // Convert raw pointer to Box<[Page]>
+        let slice = ptr::slice_from_raw_parts_mut(ptr, num_of_pages);
+        Box::from_raw(slice)
+    }
+}
+
+pub fn allocate_boxed_pages_aligned(num_of_pages: usize, align: usize) -> Box<[Page]> {
+    use alloc::alloc::{alloc_zeroed, Layout};
+    use core::ptr;
+
+    let size = num_of_pages * PAGE_SIZE;
+    let layout = Layout::from_size_align(size, align).expect("Layout calculation failed");
+
+    unsafe {
+        let ptr = alloc_zeroed(layout) as *mut Page;
+        if ptr.is_null() {
+            alloc::alloc::handle_alloc_error(layout);
+        }
+
         let slice = ptr::slice_from_raw_parts_mut(ptr, num_of_pages);
         Box::from_raw(slice)
     }
