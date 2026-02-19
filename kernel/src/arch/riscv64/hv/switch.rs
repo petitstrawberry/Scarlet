@@ -38,7 +38,7 @@ pub unsafe extern "C" fn arch_run_guest_loop(
     _arch: *const Arch,
 ) {
     naked_asm!(
-        "addi sp, sp, -104",
+        "addi sp, sp, -112",
         "sd ra, 0(sp)",
         "sd s0, 8(sp)",
         "sd s1, 16(sp)",
@@ -53,11 +53,13 @@ pub unsafe extern "C" fn arch_run_guest_loop(
         "sd s10, 88(sp)",
         "sd s11, 96(sp)",
 
+        "ld t0, {kernel_stack}(a2)",
+        "sd t0, 104(sp)",
+
         "sd sp, {kernel_stack}(a2)",
         "sd a0, {guest_trapframe_ptr}(a2)",
 
         "mv t2, a1",
-
         "ld t0, {csrs_sscratch}(t2)",
         "csrw vsscratch, t0",
         "ld t0, {csrs_sepc}(t2)",
@@ -135,8 +137,9 @@ pub unsafe extern "C" fn arch_guest_trap_exit() {
         "ld s9, 80(sp)",
         "ld s10, 88(sp)",
         "ld s11, 96(sp)",
-        "addi sp, sp, 104",
-        "sd sp, {kernel_stack}(a0)",
+        "ld t0, 104(sp)",
+        "sd t0, {kernel_stack}(a0)",
+        "addi sp, sp, 112",
         "ret",
         kernel_stack = const offset::RISCV64_KERNEL_STACK,
     );

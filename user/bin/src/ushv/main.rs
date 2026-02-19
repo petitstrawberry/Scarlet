@@ -119,7 +119,7 @@ fn run_vcpu_loop(vcpu: &mut Vcpu, devices: &mut DeviceEmulator) {
 
         match exit.reason {
             VcpuExitReason::MmioRead => {
-                let result = devices.handle_mmio_read(exit.mmio.address, exit.mmio.size);
+                let _result = devices.handle_mmio_read(exit.mmio.address, exit.mmio.size);
                 // println!(
                 //     "[ushv] MMIO read: addr={:#x}, size={}, data={:#x}",
                 //     exit.mmio.address, exit.mmio.size, result

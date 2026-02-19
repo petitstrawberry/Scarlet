@@ -633,7 +633,6 @@ impl Scheduler {
                     // if let Some(hypervisor_switch_data) = hypervisor_switch_data.as_ref() {
                     //     hypervisor_switch_data.restore();
                     // }
-
                 }
                 #[cfg(not(all(feature = "hypervisor", target_arch = "riscv64")))]
                 {

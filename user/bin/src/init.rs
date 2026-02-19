@@ -52,6 +52,11 @@ fn setup_new_root() -> bool {
     // 2. Create necessary directories in the new root
     println!("init: Creating necessary directories in new root");
 
+    let _ = create_directory("/mnt/newroot/system");
+    let _ = create_directory("/mnt/newroot/data");
+    let _ = create_directory("/mnt/newroot/data/config");
+    let _ = create_directory("/mnt/newroot/data/config/scarlet");
+
     // 3. Copy essential binaries (update paths based on actual initramfs structure)
     // Copy from the actual location in initramfs
     // copy_dir("/bin", "/mnt/newroot/bin");

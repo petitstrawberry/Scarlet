@@ -8,7 +8,7 @@ use spin::Mutex;
 #[cfg(all(feature = "hypervisor", target_arch = "riscv64"))]
 use crate::arch::hv::guest_vcpu::GuestVcpu;
 #[cfg(all(feature = "hypervisor", target_arch = "riscv64"))]
-use crate::arch::hv::switch::{arch_run_guest_loop};
+use crate::arch::hv::switch::arch_run_guest_loop;
 #[cfg(all(feature = "hypervisor", target_arch = "riscv64"))]
 use crate::arch::hv::trap::{arch_guest_trap_handler, clear_guest_mode};
 use crate::arch::{Arch, Trapframe};
