@@ -1,9 +1,11 @@
 extern crate alloc;
 
 use alloc::boxed::Box;
+use alloc::string::String;
+use alloc::vec;
 use scarlet_std::sync::Mutex;
 
-use crate::device::MmioDevice;
+use crate::device::{DeviceFdt, FdtNodeInfo, FdtValue, MmioDevice};
 
 pub struct PlicConfig {
     pub base: u64,
@@ -277,6 +279,14 @@ impl MmioDevice for Plic {
             self.write_priority(source, data as u32);
         }
     }
+
+    fn as_any(&self) -> &dyn core::any::Any {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn core::any::Any {
+        self
+    }
 }
 
 impl Default for Plic {
@@ -334,5 +344,33 @@ impl MmioDevice for PlicDevice {
 
     fn write(&mut self, offset: u64, size: u8, data: u64) {
         self.inner.lock().write(offset, size, data)
+    }
+
+    fn as_any(&self) -> &dyn core::any::Any {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn core::any::Any {
+        self
+    }
+}
+
+impl DeviceFdt for PlicDevice {
+    fn fdt_node(&self) -> Option<FdtNodeInfo> {
+        let inner = self.inner.lock();
+        Some(FdtNodeInfo {
+            name: alloc::format!("plic@{:x}", inner.config.base),
+            compatible: String::from("sifive,plic-1.0.0"),
+            reg: vec![(inner.config.base, 0x600000)],
+            interrupts: vec![],
+            interrupt_parent: None,
+            extra: vec![
+                (String::from("#interrupt-cells"), FdtValue::U32(1)),
+                (
+                    String::from("riscv,ndev"),
+                    FdtValue::U32((inner.config.num_sources - 1) as u32),
+                ),
+            ],
+        })
     }
 }

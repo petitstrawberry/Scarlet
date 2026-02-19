@@ -178,6 +178,7 @@ slint-scarlet = { path = "../lib/slint-scarlet" }
 scarlet-desktop-config = { path = "../lib/scarlet-desktop-config" }
 sbus = { path = "../lib/sbus" }
 sbus-client = { path = "../lib/sbus-client" }
+vm-fdt = { version = "0.3", default-features = false, features = ["alloc"] }
 serde = { version = "1.0", default-features = false, features = ["alloc", "derive"] }
 serde-json-core = { package = "serde-json-core", version = "0.6", default-features = false }
 slint = { version = "1.14", default-features = false, features = [

@@ -14,11 +14,10 @@ mod device;
 mod devices;
 mod firmware;
 
-use device::DeviceEmulator;
+use device::{DeviceEmulator, MmioDevice};
 use devices::plic::{PlicConfig, PlicDevice};
 use devices::uart::Ns16550a;
 use firmware::{Firmware, FirmwareAction, sbi::SbiFirmware};
-use scarlet_std::hypervisor::irq_type;
 
 const GUEST_MEMORY_SIZE: u64 = 16 * 1024 * 1024;
 const GUEST_ENTRY_POINT: u64 = 0x80000000;

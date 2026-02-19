@@ -1,6 +1,9 @@
 extern crate alloc;
 
-use crate::device::MmioDevice;
+use alloc::string::String;
+use alloc::vec;
+
+use crate::device::{DeviceFdt, FdtNodeInfo, FdtValue, MmioDevice};
 use scarlet_std::print;
 
 const THR: u64 = 0x00;
@@ -19,7 +22,7 @@ const LSR_RX_READY: u8 = 0x01;
 
 pub struct Ns16550a {
     base: u64,
-    size: u64,
+    irq: u32,
     lcr: u8,
     lsr: u8,
     scr: u8,
@@ -29,7 +32,17 @@ impl Ns16550a {
     pub fn new(base: u64) -> Self {
         Self {
             base,
-            size: 0x1000,
+            irq: 10,
+            lcr: 0,
+            lsr: LSR_TX_EMPTY,
+            scr: 0,
+        }
+    }
+
+    pub fn with_irq(base: u64, irq: u32) -> Self {
+        Self {
+            base,
+            irq,
             lcr: 0,
             lsr: LSR_TX_EMPTY,
             scr: 0,
@@ -43,7 +56,7 @@ impl MmioDevice for Ns16550a {
     }
 
     fn size(&self) -> u64 {
-        self.size
+        0x1000
     }
 
     fn read(&mut self, offset: u64, _size: u8) -> u64 {
@@ -81,5 +94,26 @@ impl MmioDevice for Ns16550a {
             }
             _ => {}
         }
+    }
+
+    fn as_any(&self) -> &dyn core::any::Any {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn core::any::Any {
+        self
+    }
+}
+
+impl DeviceFdt for Ns16550a {
+    fn fdt_node(&self) -> Option<FdtNodeInfo> {
+        Some(FdtNodeInfo {
+            name: alloc::format!("serial@{:x}", self.base),
+            compatible: String::from("ns16550a"),
+            reg: vec![(self.base, 0x100)],
+            interrupts: vec![self.irq],
+            interrupt_parent: None,
+            extra: vec![(String::from("clock-frequency"), FdtValue::U32(3686400))],
+        })
     }
 }
