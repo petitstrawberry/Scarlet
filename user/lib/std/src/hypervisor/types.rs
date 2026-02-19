@@ -14,6 +14,7 @@ pub enum VcpuExitReason {
     Shutdown = 5,
     FailEntry = 6,
     InternalError = 7,
+    FirmwareCall = 8,
 }
 
 #[repr(C)]

@@ -12,9 +12,11 @@ use scarlet_std::println;
 
 mod device;
 mod devices;
+mod firmware;
 
 use device::DeviceEmulator;
 use devices::uart::Ns16550a;
+use firmware::{Firmware, FirmwareAction, sbi::SbiFirmware};
 
 const GUEST_MEMORY_SIZE: u64 = 16 * 1024 * 1024;
 const GUEST_ENTRY_POINT: u64 = 0x80000000;
@@ -100,14 +102,16 @@ fn main() -> i32 {
     devices.register(Ns16550a::new(UART_BASE));
     println!("[ushv] Registered UART at {:#x}", UART_BASE);
 
+    let mut firmware = SbiFirmware::new();
+
     println!("[ushv] Starting vCPU run loop...");
-    run_vcpu_loop(&mut vcpu, &mut devices);
+    run_vcpu_loop(&mut vcpu, &mut devices, &mut firmware);
 
     println!("[ushv] VM terminated");
     0
 }
 
-fn run_vcpu_loop(vcpu: &mut Vcpu, devices: &mut DeviceEmulator) {
+fn run_vcpu_loop(vcpu: &mut Vcpu, devices: &mut DeviceEmulator, firmware: &mut dyn Firmware) {
     loop {
         let exit = match vcpu.run() {
             Ok(exit) => exit,
@@ -120,17 +124,15 @@ fn run_vcpu_loop(vcpu: &mut Vcpu, devices: &mut DeviceEmulator) {
         match exit.reason {
             VcpuExitReason::MmioRead => {
                 let _result = devices.handle_mmio_read(exit.mmio.address, exit.mmio.size);
-                // println!(
-                //     "[ushv] MMIO read: addr={:#x}, size={}, data={:#x}",
-                //     exit.mmio.address, exit.mmio.size, result
-                // );
             }
             VcpuExitReason::MmioWrite => {
                 devices.handle_mmio_write(exit.mmio.address, exit.mmio.size, exit.mmio.data);
-                // println!(
-                //     "[ushv] MMIO write: addr={:#x}, size={}, data={:#x}",
-                //     exit.mmio.address, exit.mmio.size, exit.mmio.data
-                // );
+            }
+            VcpuExitReason::FirmwareCall => {
+                if firmware.handle(vcpu) == FirmwareAction::Shutdown {
+                    println!("[ushv] Guest requested shutdown");
+                    return;
+                }
             }
             VcpuExitReason::Hlt => {
                 println!("[ushv] Guest halted");

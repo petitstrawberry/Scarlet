@@ -45,6 +45,14 @@ pub mod vcpu_ctl {
 }
 
 pub mod reg {
+    pub const A0: u32 = 10;
+    pub const A1: u32 = 11;
+    pub const A2: u32 = 12;
+    pub const A3: u32 = 13;
+    pub const A4: u32 = 14;
+    pub const A5: u32 = 15;
+    pub const A6: u32 = 16;
+    pub const A7: u32 = 17;
     pub const PC: u32 = 32;
 }
 
@@ -153,6 +161,11 @@ impl Vcpu {
         let mut exit = VcpuExit::default();
         vcpu_run(self.handle, &mut exit)?;
         Ok(exit)
+    }
+
+    pub fn get_reg(&mut self, index: u32) -> Result<u64, ()> {
+        let result = vcpu_control(self.handle, vcpu_ctl::GET_ONE_REG, index as usize)?;
+        Ok(result as u64)
     }
 
     pub fn set_reg(&mut self, index: u32, value: u64) -> Result<(), ()> {
