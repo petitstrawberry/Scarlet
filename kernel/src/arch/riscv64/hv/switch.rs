@@ -118,52 +118,10 @@ pub unsafe extern "C" fn arch_run_guest_loop(
 }
 
 #[unsafe(naked)]
-pub unsafe extern "C" fn resume_guest_loop(_trapframe: *mut Trapframe) {
-    naked_asm!(
-        "ld x1, {x1}(a0)",
-        "ld x3, 24(a0)",
-        "ld x4, 32(a0)",
-        "ld x5, 40(a0)",
-        "ld x6, 48(a0)",
-        "ld x7, 56(a0)",
-        "ld x8, 64(a0)",
-        "ld x9, 72(a0)",
-        "ld x10, 80(a0)",
-        "ld x11, 88(a0)",
-        "ld x12, 96(a0)",
-        "ld x13, 104(a0)",
-        "ld x14, 112(a0)",
-        "ld x15, 120(a0)",
-        "ld x16, 128(a0)",
-        "ld x17, 136(a0)",
-        "ld x18, 144(a0)",
-        "ld x19, 152(a0)",
-        "ld x20, 160(a0)",
-        "ld x21, 168(a0)",
-        "ld x22, 176(a0)",
-        "ld x23, 184(a0)",
-        "ld x24, 192(a0)",
-        "ld x25, 200(a0)",
-        "ld x26, 208(a0)",
-        "ld x27, 216(a0)",
-        "ld x28, 224(a0)",
-        "ld x29, 232(a0)",
-        "ld x30, 240(a0)",
-        "ld x31, 248(a0)",
-        "ld t0, {epc}(a0)",
-        "csrw sepc, t0",
-        "sret",
-
-        x1 = const tf_offset::X1,
-        epc = const tf_offset::EPC,
-    );
-}
-
-#[unsafe(naked)]
 pub unsafe extern "C" fn arch_guest_trap_exit() {
     naked_asm!(
-        "csrr sp, sscratch",
-        "ld sp, {kernel_stack}(sp)",
+        "csrr a0, sscratch",
+        "ld sp, {kernel_stack}(a0)",
         "ld ra, 0(sp)",
         "ld s0, 8(sp)",
         "ld s1, 16(sp)",
@@ -178,6 +136,7 @@ pub unsafe extern "C" fn arch_guest_trap_exit() {
         "ld s10, 88(sp)",
         "ld s11, 96(sp)",
         "addi sp, sp, 104",
+        "sd sp, {kernel_stack}(a0)",
         "ret",
         kernel_stack = const offset::RISCV64_KERNEL_STACK,
     );
