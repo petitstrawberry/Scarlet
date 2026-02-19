@@ -36,12 +36,24 @@ pub fn vcpu_run(vcpu_handle: u32, exit: &mut VcpuExit) -> Result<(), ()> {
 pub mod vm_ctl {
     pub const SET_MEMORY_REGION: u32 = 0x01;
     pub const GET_VCPU_COUNT: u32 = 0x02;
+    pub const SET_FAST_PATH: u32 = 0x03;
+}
+
+pub mod fast_path {
+    pub const TIMER: u32 = 0x01;
 }
 
 pub mod vcpu_ctl {
     pub const RUN: u32 = 0x01;
     pub const GET_ONE_REG: u32 = 0x02;
     pub const SET_ONE_REG: u32 = 0x03;
+    pub const INJECT_INTERRUPT: u32 = 0x04;
+}
+
+pub mod irq_type {
+    pub const SOFTWARE: usize = 0;
+    pub const TIMER: usize = 1;
+    pub const EXTERNAL: usize = 2;
 }
 
 pub mod reg {
@@ -143,6 +155,11 @@ impl Vm {
     pub fn handle(&self) -> u32 {
         self.handle
     }
+
+    pub fn set_fast_path(&self, flags: u32) -> Result<(), ()> {
+        vm_control(self.handle, vm_ctl::SET_FAST_PATH, flags as usize)?;
+        Ok(())
+    }
 }
 
 impl Drop for Vm {
@@ -188,6 +205,11 @@ impl Vcpu {
 
     pub fn vm_handle(&self) -> u32 {
         self.vm_handle
+    }
+
+    pub fn inject_interrupt(&self, irq_type: usize) -> Result<(), ()> {
+        vcpu_control(self.handle, vcpu_ctl::INJECT_INTERRUPT, irq_type)?;
+        Ok(())
     }
 }
 

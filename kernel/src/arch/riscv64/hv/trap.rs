@@ -6,6 +6,7 @@ use crate::arch::Trapframe;
 use crate::arch::hv::csr;
 use crate::hypervisor::VmObject;
 use crate::hypervisor::types::VmExit;
+use crate::hypervisor::vm::fast_path_flags;
 
 pub const HSTATUS_SPV: u64 = 1 << 7;
 pub const HSTATUS_SPVP: u64 = 1 << 8;
@@ -15,6 +16,9 @@ pub const CAUSE_INST_GUEST_PAGE_FAULT: usize = 20;
 pub const CAUSE_LOAD_GUEST_PAGE_FAULT: usize = 21;
 pub const CAUSE_VIRTUAL_INSTRUCTION: usize = 22;
 pub const CAUSE_STORE_GUEST_PAGE_FAULT: usize = 23;
+
+const SBI_EXT_TIMER: u64 = 0x54494D45;
+const SBI_TIMER_SET_TIMER: u64 = 0;
 
 pub fn is_from_guest() -> bool {
     let hstatus: u64;

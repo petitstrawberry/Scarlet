@@ -81,6 +81,7 @@ impl GuestVcpu {
 
 struct VcpuState {
     guest: GuestVcpu,
+    pending_software_irq: bool,
     pending_timer_irq: bool,
     pending_external_irq: bool,
 }
@@ -97,6 +98,7 @@ impl VcpuObject {
             id,
             state: Mutex::new(VcpuState {
                 guest: GuestVcpu::new(0, id),
+                pending_software_irq: false,
                 pending_timer_irq: false,
                 pending_external_irq: false,
             }),
@@ -111,6 +113,7 @@ impl VcpuObject {
     pub fn inject_interrupt(&self, irq_type: InterruptType) {
         let mut state = self.state.lock();
         match irq_type {
+            InterruptType::Software => state.pending_software_irq = true,
             InterruptType::Timer => state.pending_timer_irq = true,
             InterruptType::External => state.pending_external_irq = true,
         }
@@ -295,6 +298,16 @@ impl ControlOps for VcpuObject {
                 self.set_reg(one_reg.index, one_reg.value)?;
                 Ok(0)
             }
+            vcpu_ctl::INJECT_INTERRUPT => {
+                let irq_type = match arg {
+                    0 => InterruptType::Software,
+                    1 => InterruptType::Timer,
+                    2 => InterruptType::External,
+                    _ => return Err("Invalid interrupt type"),
+                };
+                self.inject_interrupt(irq_type);
+                Ok(0)
+            }
             _ => Err("Unsupported vCPU control command"),
         }
     }
@@ -304,6 +317,7 @@ impl ControlOps for VcpuObject {
             (vcpu_ctl::RUN, "Run vCPU"),
             (vcpu_ctl::GET_ONE_REG, "Get one register"),
             (vcpu_ctl::SET_ONE_REG, "Set one register"),
+            (vcpu_ctl::INJECT_INTERRUPT, "Inject interrupt"),
         ]
     }
 }

@@ -20,6 +20,11 @@ pub type VmId = u32;
 pub mod vm_ctl {
     pub const SET_MEMORY_REGION: u32 = 0x01;
     pub const GET_VCPU_COUNT: u32 = 0x02;
+    pub const SET_FAST_PATH: u32 = 0x03;
+}
+
+pub mod fast_path_flags {
+    pub const TIMER: u32 = 0x01;
 }
 
 #[repr(C)]
@@ -35,6 +40,7 @@ struct VmState {
     vcpus: Vec<Arc<VcpuObject>>,
     memory_slots: MemorySlotManager,
     vmid: u16,
+    fast_path_flags: u32,
 }
 
 pub struct VmObject {
@@ -60,6 +66,7 @@ impl VmObject {
                 vcpus: Vec::new(),
                 memory_slots: MemorySlotManager::new(),
                 vmid,
+                fast_path_flags: 0,
             }),
         })
     }
@@ -84,6 +91,14 @@ impl VmObject {
 
     pub fn vcpu_count(&self) -> usize {
         self.state.lock().vcpus.len()
+    }
+
+    pub fn has_fast_path(&self, flag: u32) -> bool {
+        (self.state.lock().fast_path_flags & flag) != 0
+    }
+
+    pub fn set_fast_path_flags(&self, flags: u32) {
+        self.state.lock().fast_path_flags = flags;
     }
 
     pub fn get_vcpu(&self, vcpu_id: super::vcpu::VcpuId) -> Option<Arc<VcpuObject>> {
@@ -194,6 +209,10 @@ impl ControlOps for VmObject {
                 Ok(0)
             }
             vm_ctl::GET_VCPU_COUNT => Ok(self.vcpu_count() as i32),
+            vm_ctl::SET_FAST_PATH => {
+                self.set_fast_path_flags(arg as u32);
+                Ok(0)
+            }
             _ => Err("Unsupported VM control command"),
         }
     }
@@ -201,7 +220,8 @@ impl ControlOps for VmObject {
     fn supported_control_commands(&self) -> Vec<(u32, &'static str)> {
         alloc::vec![
             (vm_ctl::SET_MEMORY_REGION, "Set memory region"),
-            (vm_ctl::GET_VCPU_COUNT, "Get vCPU count")
+            (vm_ctl::GET_VCPU_COUNT, "Get vCPU count"),
+            (vm_ctl::SET_FAST_PATH, "Set fast path flags"),
         ]
     }
 }

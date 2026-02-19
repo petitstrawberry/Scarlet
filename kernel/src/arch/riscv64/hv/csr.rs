@@ -87,6 +87,9 @@ csr_write!(write_vsip, "vsip");
 csr_read!(read_hvip, "hvip");
 csr_write!(write_hvip, "hvip");
 
+csr_read!(read_vstimecmp, "vstimecmp");
+csr_write!(write_vstimecmp, "vstimecmp");
+
 // Non-H-extension CSRs that we need to access in the hypervisor
 csr_read!(read_scause, "scause");
 csr_read!(read_stval, "stval");
