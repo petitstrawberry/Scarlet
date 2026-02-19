@@ -280,18 +280,18 @@ impl ControlOps for VcpuObject {
         match command {
             vcpu_ctl::RUN => Err("Use sys_shv_vcpu_run"),
             vcpu_ctl::GET_ONE_REG => {
-                crate::early_println!("[VcpuObject::control] GET_ONE_REG index={}", arg);
+                // crate::early_println!("[VcpuObject::control] GET_ONE_REG index={}", arg);
                 let value = self.get_reg(arg as u32)?;
                 Ok(value as i32)
             }
             vcpu_ctl::SET_ONE_REG => {
                 let target_ptr = translate_user_ptr(arg)?;
                 let one_reg = unsafe { core::ptr::read(target_ptr as *const VcpuOneReg) };
-                crate::early_println!(
-                    "[SET_ONE_REG] index={} value={:#x}",
-                    one_reg.index,
-                    one_reg.value
-                );
+                // crate::early_println!(
+                //     "[SET_ONE_REG] index={} value={:#x}",
+                //     one_reg.index,
+                //     one_reg.value
+                // );
                 self.set_reg(one_reg.index, one_reg.value)?;
                 Ok(0)
             }
