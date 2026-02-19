@@ -15,12 +15,15 @@ mod devices;
 mod firmware;
 
 use device::DeviceEmulator;
+use devices::plic::{PlicConfig, PlicDevice};
 use devices::uart::Ns16550a;
 use firmware::{Firmware, FirmwareAction, sbi::SbiFirmware};
+use scarlet_std::hypervisor::irq_type;
 
 const GUEST_MEMORY_SIZE: u64 = 16 * 1024 * 1024;
 const GUEST_ENTRY_POINT: u64 = 0x80000000;
 const UART_BASE: u64 = 0x10000000;
+const UART_IRQ: u32 = 10;
 
 #[unsafe(no_mangle)]
 fn main() -> i32 {
@@ -101,6 +104,11 @@ fn main() -> i32 {
     let mut devices = DeviceEmulator::new();
     devices.register(Ns16550a::new(UART_BASE));
     println!("[ushv] Registered UART at {:#x}", UART_BASE);
+
+    let plic = PlicDevice::new(PlicConfig::qemu_virt());
+    let plic_base = plic.base();
+    devices.register(plic);
+    println!("[ushv] Registered PLIC at {:#x}", plic_base);
 
     let mut firmware = SbiFirmware::new();
 
