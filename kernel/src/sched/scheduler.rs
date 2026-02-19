@@ -649,7 +649,7 @@ impl Scheduler {
 
                 // Restore vcpu state and set mode
                 let current_task = self.get_task_by_id(current_task_id).unwrap();
-                let trapframe = current_task.get_trapframe();
+                // let trapframe = current_task.get_trapframe();
                 current_task.vcpu.lock().switch(trapframe);
                 set_next_mode(current_task.vcpu.lock().get_mode());
             } else {

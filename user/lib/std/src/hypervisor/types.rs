@@ -37,7 +37,7 @@ impl MmioInfo {
 #[derive(Debug, Clone, Copy)]
 pub struct VcpuExit {
     pub reason: VcpuExitReason,
-    pub _padding: u32,
+    pub epc: u64,
     pub mmio: MmioInfo,
     pub fail_code: u64,
 }
@@ -46,7 +46,7 @@ impl Default for VcpuExit {
     fn default() -> Self {
         Self {
             reason: VcpuExitReason::Unknown,
-            _padding: 0,
+            epc: 0,
             mmio: MmioInfo::default(),
             fail_code: 0,
         }

@@ -12,11 +12,13 @@ pub enum InterruptType {
 #[derive(Debug, Clone, Copy)]
 pub enum VmExit {
     MmioRead {
+        epc: u64,
         addr: u64,
         size: u8,
         reg: u8,
     },
     MmioWrite {
+        epc: u64,
         addr: u64,
         size: u8,
         reg: u8,
@@ -60,7 +62,7 @@ pub struct MmioInfo {
 #[derive(Debug, Clone, Copy, Default)]
 pub struct VcpuExit {
     pub reason: VcpuExitReason,
-    pub _padding: u32,
+    pub epc: u64,
     pub mmio: MmioInfo,
     pub fail_code: u64,
 }
@@ -68,13 +70,19 @@ pub struct VcpuExit {
 impl VcpuExit {
     pub fn from_vmexit(exit: &VmExit) -> Self {
         match exit {
-            VmExit::MmioRead { addr, size, reg } => Self::mmio_read(*addr, *size, *reg),
+            VmExit::MmioRead {
+                epc,
+                addr,
+                size,
+                reg,
+            } => Self::mmio_read(*epc, *addr, *size, *reg),
             VmExit::MmioWrite {
+                epc,
                 addr,
                 size,
                 reg,
                 data,
-            } => Self::mmio_write(*addr, *size, *reg, *data),
+            } => Self::mmio_write(*epc, *addr, *size, *reg, *data),
             VmExit::Hlt => Self::new(VcpuExitReason::Hlt),
             VmExit::Shutdown => Self::new(VcpuExitReason::Shutdown),
             VmExit::FailEntry {
@@ -100,9 +108,10 @@ impl VcpuExit {
         }
     }
 
-    pub fn mmio_read(address: u64, size: u8, reg: u8) -> Self {
+    pub fn mmio_read(epc: u64, address: u64, size: u8, reg: u8) -> Self {
         Self {
             reason: VcpuExitReason::MmioRead,
+            epc,
             mmio: MmioInfo {
                 address,
                 size,
@@ -114,9 +123,10 @@ impl VcpuExit {
         }
     }
 
-    pub fn mmio_write(address: u64, size: u8, reg: u8, data: u64) -> Self {
+    pub fn mmio_write(epc: u64, address: u64, size: u8, reg: u8, data: u64) -> Self {
         Self {
             reason: VcpuExitReason::MmioWrite,
+            epc,
             mmio: MmioInfo {
                 address,
                 data,

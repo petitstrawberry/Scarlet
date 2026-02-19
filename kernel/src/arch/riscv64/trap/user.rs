@@ -234,22 +234,25 @@ pub extern "C" fn _guest_trap_entry() {
                 /* Load the function pointer from Riscv64.kernel_trap */
                 ld      t1, 32(a0)
 
-                /* Pass the trapframe pointer as the first argument */
-                mv      a0, sp
+                /* Save trapframe pointer in t2 before changing sp */
+                mv      t2, sp
 
                 /* Load the kernel stack pointer from Riscv64.kernel_stack */
                 ld      sp, 24(a0)
                 
-                /* Save a0 on stack */
-                addi    sp, sp, -8
-                sd      a0, 0(sp)
+                /* Save a0 (trapframe ptr) on stack */
+                addi    sp, sp, -16
+                sd      t2, 0(sp)
+
+                /* Pass trapframe pointer as first argument */
+                mv      a0, t2
 
                 jalr    ra, t1, 0 // Riscv64.kernel_trap(a0: &mut Trapframe)
 
                 /* Return from Rust handler - restore trapframe and sret */
                 /* Load trapframe pointer from stack */
                 ld      a0, 0(sp)
-                addi    sp, sp, 8
+                addi    sp, sp, 16
 
                 /* epc */
                 ld     t0, 256(a0)

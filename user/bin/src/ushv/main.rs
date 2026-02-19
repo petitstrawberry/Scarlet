@@ -120,17 +120,17 @@ fn run_vcpu_loop(vcpu: &mut Vcpu, devices: &mut DeviceEmulator) {
         match exit.reason {
             VcpuExitReason::MmioRead => {
                 let result = devices.handle_mmio_read(exit.mmio.address, exit.mmio.size);
-                println!(
-                    "[ushv] MMIO read: addr={:#x}, size={}, data={:#x}",
-                    exit.mmio.address, exit.mmio.size, result
-                );
+                // println!(
+                //     "[ushv] MMIO read: addr={:#x}, size={}, data={:#x}",
+                //     exit.mmio.address, exit.mmio.size, result
+                // );
             }
             VcpuExitReason::MmioWrite => {
                 devices.handle_mmio_write(exit.mmio.address, exit.mmio.size, exit.mmio.data);
-                println!(
-                    "[ushv] MMIO write: addr={:#x}, size={}, data={:#x}",
-                    exit.mmio.address, exit.mmio.size, exit.mmio.data
-                );
+                // println!(
+                //     "[ushv] MMIO write: addr={:#x}, size={}, data={:#x}",
+                //     exit.mmio.address, exit.mmio.size, exit.mmio.data
+                // );
             }
             VcpuExitReason::Hlt => {
                 println!("[ushv] Guest halted");

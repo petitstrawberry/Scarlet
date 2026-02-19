@@ -297,7 +297,7 @@ pub fn arch_exception_handler(trapframe: &mut Trapframe, cause: usize) {
         | ECALL_FROM_VS_MODE => {
             use crate::arch::hv::switch::arch_guest_trap_exit;
             unsafe {
-                arch_guest_trap_exit(trapframe as *mut _ as *mut u8);
+                arch_guest_trap_exit();
             }
         }
         _ => {

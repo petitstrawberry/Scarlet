@@ -1,10 +1,13 @@
 //! Hypervisor system calls
 
+use core::sync::atomic::compiler_fence;
+
 use crate::arch::Trapframe;
 use crate::hypervisor::types::VcpuExit;
 use crate::hypervisor::vm::GLOBAL_VM_MANAGER;
 use crate::object::KernelObject;
 use crate::object::handle::HandleMetadata;
+use crate::println;
 use crate::task::mytask;
 
 pub const SYSCALL_SHV_VM_CREATE: usize = 1100;
@@ -81,7 +84,7 @@ pub fn sys_shv_vcpu_create(trapframe: &mut Trapframe) -> usize {
 /// a0 = vcpu_handle, a1 = exit_ptr (userspace pointer to VcpuExit)
 /// Returns 0 on success, usize::MAX on error.
 pub fn sys_shv_vcpu_run(trapframe: &mut Trapframe) -> usize {
-    crate::early_println!("[sys_shv_vcpu_run] called, handle={}", trapframe.get_arg(0));
+    // crate::early_println!("[sys_shv_vcpu_run] called, handle={}", trapframe.get_arg(0));
 
     let task = match mytask() {
         Some(t) => t,
@@ -93,6 +96,7 @@ pub fn sys_shv_vcpu_run(trapframe: &mut Trapframe) -> usize {
 
     // Increment PC to avoid infinite loop
     trapframe.increment_pc_next(task);
+    compiler_fence(core::sync::atomic::Ordering::SeqCst);
 
     let exit_size = core::mem::size_of::<VcpuExit>();
     let exit_size_minus_one = match exit_size.checked_sub(1) {
@@ -123,7 +127,9 @@ pub fn sys_shv_vcpu_run(trapframe: &mut Trapframe) -> usize {
         _ => return usize::MAX,
     };
 
-    crate::early_println!("[sys_shv_vcpu_run] calling vcpu.run()");
+    // crate::early_println!("[sys_shv_vcpu_run] calling vcpu.run()");
+
+    // println!("[sys_shv_vcpu_run] before vcpu.run(), trapframe_addr={:x}, trapframe={:?}", trapframe as *const _ as usize, trapframe);
 
     // Run the vCPU
     let vm_exit = match vcpu.run() {
@@ -134,7 +140,8 @@ pub fn sys_shv_vcpu_run(trapframe: &mut Trapframe) -> usize {
         }
     };
 
-    crate::early_println!("[sys_shv_vcpu_run] vcpu.run() returned: {:?}", vm_exit);
+    // println!("[sys_shv_vcpu_run] after vcpu.run(), vm_exit={:?}", vm_exit);
+    // println!("[sys_shv_vcpu_run] trapframe_addr={:x}, trapframe={:?}", trapframe as *const _ as usize, trapframe);
 
     // Convert VmExit to VcpuExit and write to user space
     let vcpu_exit = VcpuExit::from_vmexit(&vm_exit);

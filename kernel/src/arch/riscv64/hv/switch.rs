@@ -3,7 +3,7 @@
 use core::arch::naked_asm;
 
 use crate::arch::{
-    Trapframe,
+    Arch, Trapframe,
     hv::{
         csr::{GuestCsrState, HypervisorCsrState},
         guest_vcpu::GuestVcpu,
@@ -31,10 +31,11 @@ mod tf_offset {
 }
 
 #[unsafe(naked)]
-pub unsafe extern "C" fn run_guest_loop(
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn arch_run_guest_loop(
     _trapframe: *const Trapframe,
     _vcpu: *const GuestVcpu,
-    _arch: usize,
+    _arch: *const Arch,
 ) {
     naked_asm!(
         "addi sp, sp, -104",
@@ -159,10 +160,10 @@ pub unsafe extern "C" fn resume_guest_loop(_trapframe: *mut Trapframe) {
 }
 
 #[unsafe(naked)]
-pub unsafe extern "C" fn arch_guest_trap_exit(_trapframe: *mut u8) {
+pub unsafe extern "C" fn arch_guest_trap_exit() {
     naked_asm!(
-        "csrr t0, sscratch",
-        "ld sp, {kernel_stack}(t0)",
+        "csrr sp, sscratch",
+        "ld sp, {kernel_stack}(sp)",
         "ld ra, 0(sp)",
         "ld s0, 8(sp)",
         "ld s1, 16(sp)",
