@@ -472,11 +472,11 @@ pub fn arch_switch_to_user(trapframe: &mut Trapframe) -> ! {
     let switch_to_user_addr = trampoline_base.wrapping_add(switch_to_user_offset);
     set_trapvector(trampoline_base);
 
-    crate::early_println!(
-        "switch_to_user_addr: {:#x}, trapframe: {:#x}",
-        switch_to_user_addr,
-        addr
-    );
+    // crate::early_println!(
+    //     "switch_to_user_addr: {:#x}, trapframe: {:#x}",
+    //     switch_to_user_addr,
+    //     addr
+    // );
 
     unsafe {
         asm!(
