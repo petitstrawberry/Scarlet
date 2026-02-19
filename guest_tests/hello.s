@@ -2,23 +2,27 @@
 .global _start
 
 .equ UART_BASE, 0x10000000
+.equ SBI_LEGACY_PUTCHAR, 0x01
+.equ SBI_SRST, 0x53525354
 
 _start:
-    # Print "Hello from guest!"
-    la a0, message
+    la s0, message
 1:
-    lb t0, 0(a0)
-    beqz t0, 2f
-    li t1, UART_BASE
-    sb t0, 0(t1)
-    addi a0, a0, 1
+    lb a0, 0(s0)
+    beqz a0, 2f
+    li a7, SBI_LEGACY_PUTCHAR
+    ecall
+    addi s0, s0, 1
     j 1b
 2:
-    # Infinite loop (shutdown)
+    li a7, SBI_SRST
+    li a0, 0
+    li a1, 0
+    ecall
 3:
     wfi
     j 3b
 
 .section .rodata
 message:
-    .asciz "Hello from guest!\n"
+    .asciz "Hello from guest via SBI!\n"
