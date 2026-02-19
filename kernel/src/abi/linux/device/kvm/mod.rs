@@ -317,6 +317,9 @@ fn write_vm_exit(kvm_run: &mut KvmRun, exit: &crate::hypervisor::VmExit) {
         VmExit::Hlt => {
             kvm_run.exit_reason = KVM_EXIT_HLT;
         }
+        VmExit::FirmwareCall { epc: _ } => {
+            kvm_run.exit_reason = KVM_EXIT_RISCV_SBI;
+        }
         VmExit::Shutdown => {
             kvm_run.exit_reason = KVM_EXIT_SHUTDOWN;
         }

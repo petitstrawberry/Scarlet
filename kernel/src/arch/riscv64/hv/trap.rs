@@ -259,7 +259,11 @@ pub fn arch_guest_trap_handler(trapframe: &mut Trapframe, vm: &VmObject) -> Opti
                 }
             }
         }
-        CAUSE_ECALL_FROM_VS => Some(VmExit::Hlt),
+        CAUSE_ECALL_FROM_VS => {
+            let epc = csr::read_sepc();
+            trapframe.epc = epc.wrapping_add(4);
+            Some(VmExit::FirmwareCall { epc })
+        }
         CAUSE_VIRTUAL_INSTRUCTION => Some(VmExit::Hlt),
         _ => Some(VmExit::Unknown(cause as u64)),
     }

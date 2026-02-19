@@ -24,6 +24,9 @@ pub enum VmExit {
         reg: u8,
         data: u64,
     },
+    FirmwareCall {
+        epc: u64,
+    },
     Hlt,
     Shutdown,
     FailEntry {
@@ -45,6 +48,7 @@ pub enum VcpuExitReason {
     Shutdown = 5,
     FailEntry = 6,
     InternalError = 7,
+    FirmwareCall = 8,
 }
 
 #[repr(C)]
@@ -83,6 +87,11 @@ impl VcpuExit {
                 reg,
                 data,
             } => Self::mmio_write(*epc, *addr, *size, *reg, *data),
+            VmExit::FirmwareCall { epc } => Self {
+                reason: VcpuExitReason::FirmwareCall,
+                epc: *epc,
+                ..Default::default()
+            },
             VmExit::Hlt => Self::new(VcpuExitReason::Hlt),
             VmExit::Shutdown => Self::new(VcpuExitReason::Shutdown),
             VmExit::FailEntry {
