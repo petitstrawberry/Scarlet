@@ -2,6 +2,7 @@ extern crate alloc;
 
 use alloc::sync::Arc;
 use core::time::Duration;
+use scarlet_std::println;
 use scarlet_std::sync::Mutex;
 use scarlet_std::thread;
 
@@ -21,6 +22,13 @@ impl TimerState {
     }
 
     pub fn set_timer(&mut self, stime_value: u64) {
+        let current = read_time();
+        println!(
+            "[timer] set_timer: target={}, current={}, delta={}",
+            stime_value,
+            current,
+            stime_value as i64 - current as i64
+        );
         self.next_timer = Some(stime_value);
     }
 
@@ -40,6 +48,7 @@ pub fn start_timer_thread(state: Arc<Mutex<TimerState>>) {
 }
 
 fn timer_loop(state: Arc<Mutex<TimerState>>) {
+    let mut fired_count = 0;
     loop {
         let current_time = read_time();
 
@@ -58,6 +67,11 @@ fn timer_loop(state: Arc<Mutex<TimerState>>) {
         };
 
         if should_fire {
+            fired_count += 1;
+            println!(
+                "[timer] firing interrupt #{} at time {}",
+                fired_count, current_time
+            );
             if let Some(handle) = vcpu_handle {
                 inject_timer_interrupt(handle);
             }

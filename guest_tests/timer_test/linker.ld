@@ -3,7 +3,7 @@ ENTRY(_start)
 
 MEMORY
 {
-    RAM (rwx) : ORIGIN = 0x80000000, LENGTH = 16M
+    RAM (rwx) : ORIGIN = 0x80000000, LENGTH = 1M
 }
 
 SECTIONS
@@ -29,4 +29,9 @@ SECTIONS
         *(COMMON)
         __bss_end = .;
     } > RAM
+
+    /DISCARD/ : {
+        *(.eh_frame)
+        *(.comment)
+    }
 }
