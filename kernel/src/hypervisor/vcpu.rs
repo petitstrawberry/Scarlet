@@ -5,6 +5,8 @@ use alloc::task;
 use alloc::vec::Vec;
 use spin::Mutex;
 
+#[cfg(target_arch = "riscv64")]
+use crate::arch::get_cpu;
 #[cfg(all(feature = "hypervisor", target_arch = "riscv64"))]
 use crate::arch::hv::guest_vcpu::GuestVcpu;
 #[cfg(all(feature = "hypervisor", target_arch = "riscv64"))]
@@ -12,16 +14,12 @@ use crate::arch::hv::switch::arch_run_guest_loop;
 #[cfg(all(feature = "hypervisor", target_arch = "riscv64"))]
 use crate::arch::hv::trap::{arch_guest_trap_handler, clear_guest_mode};
 use crate::arch::{Arch, Trapframe};
-#[cfg(not(target_arch = "riscv64"))]
-use crate::arch::{Mode, Trapframe};
-#[cfg(target_arch = "riscv64")]
-use crate::arch::{get_cpu, set_arch, set_next_mode, set_trapvector};
+use crate::arch::{Mode, set_next_mode, set_trapvector};
 #[cfg(all(feature = "hypervisor", target_arch = "riscv64"))]
 use crate::hypervisor::memory::MemorySlot;
 use crate::hypervisor::types::{InterruptType, VmExit};
 use crate::object::capability::ControlOps;
 use crate::task::mytask;
-#[cfg(target_arch = "riscv64")]
 use crate::vm::{get_guest_trapvector_trampoline, get_trampoline_trap_vector};
 
 pub type VcpuId = u32;
@@ -243,15 +241,12 @@ impl VcpuObject {
 
 fn setup_for_guest(task: &crate::task::Task, vcpu: &VcpuState, vm: &super::vm::VmObject) {
     let mode = vcpu.guest.get_mode();
-    // crate::early_println!("[VcpuObject::run] guest mode={:?}", mode);
     set_next_mode(mode);
 
     let guest_tv = get_guest_trapvector_trampoline();
-    // crate::early_println!("[VcpuObject::run] guest trap vector={:#x}", guest_tv);
     set_trapvector(guest_tv);
     task.vcpu.lock().set_mode(mode);
 
-    // crate::early_println!("[VcpuObject::run] setting guest root pagetable");
     vm.set_guest_root_pagetable();
 }
 

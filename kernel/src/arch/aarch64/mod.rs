@@ -12,6 +12,7 @@ pub mod boot;
 pub mod context;
 pub mod earlycon;
 pub mod fpu;
+pub mod hv;
 pub mod instruction;
 pub mod interrupt;
 pub mod kernel;
@@ -329,6 +330,10 @@ pub fn get_user_trapvector_paddr() -> usize {
     trap::user::_user_trap_entry as usize
 }
 
+pub fn get_guest_trapvector_paddr() -> usize {
+    todo!("get_guest_trapvector_paddr not implemented for aarch64")
+}
+
 pub fn get_kernel_trapvector_paddr() -> usize {
     trap::kernel::_kernel_trap_entry as usize
 }
@@ -379,6 +384,18 @@ pub fn set_trapvector(addr: usize) {
             options(nostack)
         );
     }
+}
+
+pub fn get_trapvector() -> usize {
+    let vbar: usize;
+    unsafe {
+        asm!(
+            "mrs {0}, vbar_el1",
+            out(reg) vbar,
+            options(nostack)
+        );
+    }
+    vbar
 }
 
 /// Apply user-entry options for the upcoming `eret`.
@@ -666,6 +683,28 @@ pub fn reboot() -> ! {
         unsafe {
             asm!("wfi");
         }
+    }
+}
+
+pub struct ArchCpuState {
+    kernel_stack: u64,
+    kernel_trap: u64,
+    ttbr0: u64,
+}
+
+impl ArchCpuState {
+    pub fn save(cpu: &Aarch64) -> Self {
+        ArchCpuState {
+            kernel_stack: cpu.kernel_stack,
+            kernel_trap: cpu.kernel_trap,
+            ttbr0: cpu.ttbr0,
+        }
+    }
+
+    pub fn restore(&self, cpu: &mut Aarch64) {
+        cpu.kernel_stack = self.kernel_stack;
+        cpu.kernel_trap = self.kernel_trap;
+        cpu.ttbr0 = self.ttbr0;
     }
 }
 

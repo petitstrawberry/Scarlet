@@ -37,19 +37,25 @@ use core::panic;
 
 use alloc::{boxed::Box, collections::vec_deque::VecDeque, string::ToString};
 
+#[cfg(target_arch = "riscv64")]
 use crate::arch::ArchCpuState;
+#[cfg(target_arch = "riscv64")]
 use crate::arch::get_trapvector;
 use crate::print;
 use crate::println;
 use crate::task::TaskType;
 use crate::{
     arch::{
-        Arch, Trapframe, get_cpu, get_user_trap_handler, instruction::idle, set_next_mode,
-        set_trapvector, trap::user::arch_switch_to_user,
+        Arch, Trapframe, get_cpu, get_user_trap_handler, instruction::idle,
+        trap::user::arch_switch_to_user,
     },
     environment::MAX_NUM_CPUS,
     task::{TaskState, new_kernel_task, wake_parent_waiters, wake_task_waiters},
     timer::get_kernel_timer,
+};
+#[cfg(target_arch = "riscv64")]
+use crate::{
+    arch::{set_next_mode, set_trapvector},
     vm::get_trampoline_trap_vector,
 };
 
@@ -645,6 +651,7 @@ impl Scheduler {
                 let current_task = self.get_task_by_id(current_task_id).unwrap();
                 // let trapframe = current_task.get_trapframe();
                 current_task.vcpu.lock().switch(trapframe);
+                #[cfg(target_arch = "riscv64")]
                 set_next_mode(current_task.vcpu.lock().get_mode());
             } else {
                 // No current task (e.g., first scheduling), just switch to next task
@@ -903,31 +910,38 @@ impl Scheduler {
             }
 
             if !from_ctx_ptr.is_null() && !to_ctx_ptr.is_null() {
-                // Save current hardware state to local variables (preserved on stack)
-                let cpu = get_cpu();
-                let saved_arch_cpu_state = ArchCpuState::save(cpu);
-                let saved_trapvector = get_trapvector();
-
-                #[cfg(all(feature = "hypervisor", target_arch = "riscv64"))]
-                let guest_vcpu_switch_data = crate::arch::hv::switch::VcpuSwitchData::save();
-                #[cfg(all(feature = "hypervisor", target_arch = "riscv64"))]
-                let hypervisor_switch_data = crate::arch::hv::switch::HypervisorSwitchData::save();
-
-                // Perform kernel context switch
-                unsafe {
-                    crate::arch::switch::switch_to(from_ctx_ptr, to_ctx_ptr);
-                }
-
-                #[cfg(all(feature = "hypervisor", target_arch = "riscv64"))]
+                #[cfg(target_arch = "riscv64")]
                 {
-                    guest_vcpu_switch_data.restore();
-                    hypervisor_switch_data.restore();
-                }
+                    let cpu = get_cpu();
+                    let saved_arch_cpu_state = ArchCpuState::save(cpu);
+                    let saved_trapvector = get_trapvector();
 
-                // Restore hardware state from local variables
-                let cpu = get_cpu();
-                saved_arch_cpu_state.restore(cpu);
-                set_trapvector(saved_trapvector);
+                    #[cfg(all(feature = "hypervisor", target_arch = "riscv64"))]
+                    let guest_vcpu_switch_data = crate::arch::hv::switch::VcpuSwitchData::save();
+                    #[cfg(all(feature = "hypervisor", target_arch = "riscv64"))]
+                    let hypervisor_switch_data =
+                        crate::arch::hv::switch::HypervisorSwitchData::save();
+
+                    unsafe {
+                        crate::arch::switch::switch_to(from_ctx_ptr, to_ctx_ptr);
+                    }
+
+                    #[cfg(all(feature = "hypervisor", target_arch = "riscv64"))]
+                    {
+                        guest_vcpu_switch_data.restore();
+                        hypervisor_switch_data.restore();
+                    }
+
+                    let cpu = get_cpu();
+                    saved_arch_cpu_state.restore(cpu);
+                    set_trapvector(saved_trapvector);
+                }
+                #[cfg(not(target_arch = "riscv64"))]
+                {
+                    unsafe {
+                        crate::arch::switch::switch_to(from_ctx_ptr, to_ctx_ptr);
+                    }
+                }
 
                 // Execution resumes here when this task is rescheduled
                 if let Some(from_task) = TaskPool::get_task_mut(from_task_id) {
@@ -976,9 +990,10 @@ impl Scheduler {
         cpu.set_trap_handler(get_user_trap_handler());
         cpu.set_next_address_space(task.vm_manager.get_asid());
         let next_mode = task.vcpu.lock().get_mode();
+        #[cfg(target_arch = "riscv64")]
         set_next_mode(next_mode);
 
-        // Setup trap vector
+        #[cfg(target_arch = "riscv64")]
         set_trapvector(get_trampoline_trap_vector());
 
         // crate::early_println!("[SCHED]   after  CPU {:#x?}", cpu);

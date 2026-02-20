@@ -1,5 +1,5 @@
 use super::{Firmware, FirmwareAction};
-use scarlet_std::hypervisor::{Vcpu, reg};
+use scarlet_std::hypervisor::{Vcpu, arch::reg};
 
 // TODO: SBI v2.0/v3.0 Required Extensions Implementation Status
 //

@@ -4,6 +4,7 @@ mod dtb;
 
 use alloc::boxed::Box;
 use alloc::string::String;
+use alloc::vec;
 use alloc::vec::Vec;
 
 use crate::device::MmioDevice;
@@ -149,7 +150,7 @@ impl Machine {
 
     pub fn get_plic_mut(&mut self) -> Option<&mut PlicDevice> {
         for dev in &mut self.devices {
-            if let Some(plic) = dev.as_any().downcast_mut::<PlicDevice>() {
+            if let Some(plic) = dev.as_any_mut().downcast_mut::<PlicDevice>() {
                 return Some(plic);
             }
         }
