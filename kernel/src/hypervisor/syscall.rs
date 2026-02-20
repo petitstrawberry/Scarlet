@@ -4,7 +4,7 @@ use core::sync::atomic::compiler_fence;
 
 use crate::arch::Trapframe;
 use crate::hypervisor::types::VcpuExit;
-use crate::hypervisor::vm::GLOBAL_VM_MANAGER;
+use crate::hypervisor::vm::{GLOBAL_VM_MANAGER, VmObject};
 use crate::object::KernelObject;
 use crate::object::handle::HandleMetadata;
 use crate::println;
@@ -64,7 +64,7 @@ pub fn sys_shv_vcpu_create(trapframe: &mut Trapframe) -> usize {
     };
 
     // Create a new vCPU on the VM
-    let vcpu = match vm.create_vcpu(vcpu_id) {
+    let vcpu = match VmObject::create_vcpu(&*vm, vcpu_id) {
         Ok(vcpu) => vcpu,
         Err(_) => return usize::MAX,
     };

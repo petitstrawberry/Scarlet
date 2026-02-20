@@ -1,5 +1,3 @@
-//! Hypervisor subsystem (Type-2 architecture)
-
 extern crate alloc;
 
 pub mod memory;
@@ -16,5 +14,5 @@ pub use vm::VmObject;
 
 use alloc::sync::Arc;
 
-pub type VmRef = Arc<VmObject>;
-pub type VcpuRef = Arc<VcpuObject>;
+pub type VmRef = Arc<crate::arch::hv::Vm>;
+pub type VcpuRef = Arc<dyn VcpuObject>;

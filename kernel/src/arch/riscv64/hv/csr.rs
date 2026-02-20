@@ -87,6 +87,12 @@ csr_write!(write_vsip, "vsip");
 csr_read!(read_hvip, "hvip");
 csr_write!(write_hvip, "hvip");
 
+csr_read!(read_hcounteren, "hcounteren");
+csr_write!(write_hcounteren, "hcounteren");
+
+csr_read!(read_htimedelta, "htimedelta");
+csr_write!(write_htimedelta, "htimedelta");
+
 csr_read!(read_vstimecmp, "vstimecmp");
 csr_write!(write_vstimecmp, "vstimecmp");
 
@@ -142,6 +148,9 @@ pub struct HypervisorCsrState {
     pub hgeie: u64,
     pub hideleg: u64,
     pub hedeleg: u64,
+    pub hcounteren: u64,
+    pub htimedelta: u64,
+    pub hvip: u64,
 }
 
 impl HypervisorCsrState {
@@ -152,6 +161,9 @@ impl HypervisorCsrState {
             hgeie: read_hgeie(),
             hideleg: read_hideleg(),
             hedeleg: read_hedeleg(),
+            hcounteren: read_hcounteren(),
+            htimedelta: read_htimedelta(),
+            hvip: read_hvip(),
         }
     }
 
@@ -161,5 +173,8 @@ impl HypervisorCsrState {
         write_hgeie(self.hgeie);
         write_hideleg(self.hideleg);
         write_hedeleg(self.hedeleg);
+        write_hcounteren(self.hcounteren);
+        write_htimedelta(self.htimedelta);
+        write_hvip(self.hvip);
     }
 }
