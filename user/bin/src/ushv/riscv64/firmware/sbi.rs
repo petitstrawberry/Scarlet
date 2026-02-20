@@ -129,7 +129,7 @@ impl Firmware for SbiFirmware {
 impl SbiFirmware {
     fn handle_base(&mut self, function: u64, a0: u64) -> ((i64, u64), FirmwareAction) {
         let ret = match function {
-            fid::base::GET_SPEC_VERSION => (error::SUCCESS, (2 << 24) | 0),
+            fid::base::GET_SPEC_VERSION => (error::SUCCESS, (2 << 24)),
             fid::base::GET_IMPL_ID => (error::SUCCESS, 4),
             fid::base::GET_IMPL_VERSION => (error::SUCCESS, 0),
             fid::base::PROBE_EXTENSION => self.probe_extension(a0),
@@ -228,7 +228,7 @@ impl SbiFirmware {
     ) -> ((i64, u64), FirmwareAction) {
         match function {
             fid::srst::SYSTEM_RESET => match reset_type {
-                0 | 1 | 2 => ((error::SUCCESS, 0), FirmwareAction::Shutdown),
+                0..=2 => ((error::SUCCESS, 0), FirmwareAction::Shutdown),
                 _ => ((error::NOT_SUPPORTED, 0), FirmwareAction::Continue),
             },
             _ => ((error::NOT_SUPPORTED, 0), FirmwareAction::Continue),

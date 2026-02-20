@@ -1,6 +1,5 @@
 extern crate alloc;
 
-use alloc::string::String;
 use alloc::vec::Vec;
 use vm_fdt::{Error, FdtWriter};
 
@@ -105,12 +104,10 @@ impl<'a> DtbGenerator<'a> {
             } else if let Some(any_ref) = device
                 .as_any()
                 .downcast_ref::<crate::devices::plic::PlicDevice>()
-            {
-                if let Some(node_info) =
+                && let Some(node_info) =
                     <crate::devices::plic::PlicDevice as DeviceFdt>::fdt_node(any_ref)
-                {
-                    self.add_device_node(fdt, &node_info)?;
-                }
+            {
+                self.add_device_node(fdt, &node_info)?;
             }
         }
 

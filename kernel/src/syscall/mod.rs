@@ -132,7 +132,29 @@ fn sys_profiler_dump(tf: &mut Trapframe) -> usize {
     0
 }
 
+#[cfg(feature = "hypervisor")]
 use crate::hypervisor::syscall::{sys_shv_vcpu_create, sys_shv_vcpu_run, sys_shv_vm_create};
+
+#[cfg(not(feature = "hypervisor"))]
+fn sys_shv_vm_create(tf: &mut Trapframe) -> usize {
+    use crate::task::mytask;
+    tf.increment_pc_next(mytask().unwrap());
+    usize::MAX
+}
+
+#[cfg(not(feature = "hypervisor"))]
+fn sys_shv_vcpu_create(tf: &mut Trapframe) -> usize {
+    use crate::task::mytask;
+    tf.increment_pc_next(mytask().unwrap());
+    usize::MAX
+}
+
+#[cfg(not(feature = "hypervisor"))]
+fn sys_shv_vcpu_run(tf: &mut Trapframe) -> usize {
+    use crate::task::mytask;
+    tf.increment_pc_next(mytask().unwrap());
+    usize::MAX
+}
 
 syscall_table! {
     Invalid = 0 => |_: &mut Trapframe| {

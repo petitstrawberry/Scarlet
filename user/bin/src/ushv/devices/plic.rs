@@ -36,7 +36,7 @@ impl PlicConfig {
     }
 
     pub fn size(&self) -> u64 {
-        let enable_size = ((self.num_sources + 31) / 32 * 4) as u64;
+        let enable_size = (self.num_sources.div_ceil(32) * 4) as u64;
         let enable_total = enable_size * self.num_contexts as u64;
         0x200000 + (self.num_contexts as u64 * 0x1000) + enable_total
     }
@@ -67,7 +67,7 @@ impl Plic {
     pub fn new(config: PlicConfig) -> Self {
         let num_sources = config.num_sources;
         let num_contexts = config.num_contexts;
-        let num_words = (num_sources + 31) / 32;
+        let num_words = num_sources.div_ceil(32);
 
         Self {
             priority: alloc::vec![0u32; num_sources],
@@ -111,7 +111,7 @@ impl Plic {
         let threshold = self.threshold[context];
         let mut best_id: u32 = 0;
         let mut best_prio: u32 = 0;
-        let num_words = (self.config.num_sources + 31) / 32;
+        let num_words = self.config.num_sources.div_ceil(32);
 
         for word in 0..num_words {
             let pending = self.pending[word];
@@ -152,7 +152,7 @@ impl Plic {
     }
 
     fn read_pending(&self, word: u32) -> u32 {
-        let num_words = (self.config.num_sources + 31) / 32;
+        let num_words = self.config.num_sources.div_ceil(32);
         if word as usize >= num_words {
             return 0;
         }
@@ -160,7 +160,7 @@ impl Plic {
     }
 
     fn read_enable(&self, context: u32, word: u32) -> u32 {
-        let num_words = (self.config.num_sources + 31) / 32;
+        let num_words = self.config.num_sources.div_ceil(32);
         if context as usize >= self.config.num_contexts || word as usize >= num_words {
             return 0;
         }
@@ -168,7 +168,7 @@ impl Plic {
     }
 
     fn write_enable(&mut self, context: u32, word: u32, value: u32) {
-        let num_words = (self.config.num_sources + 31) / 32;
+        let num_words = self.config.num_sources.div_ceil(32);
         if context as usize >= self.config.num_contexts || word as usize >= num_words {
             return;
         }
