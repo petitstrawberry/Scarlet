@@ -200,6 +200,16 @@ fn run_vcpu_loop(vcpu: &mut Vcpu, machine: &mut Machine, firmware: &mut dyn Firm
                     return;
                 }
             }
+            VcpuExitReason::VirtualInstruction => {
+                println!("[ushv] Virtual instruction at epc={:#x}", exit.epc);
+            }
+            VcpuExitReason::IllegalInstruction => {
+                println!("[ushv] Illegal instruction at epc={:#x}", exit.epc);
+                return;
+            }
+            VcpuExitReason::Breakpoint => {
+                println!("[ushv] Breakpoint at epc={:#x}", exit.epc);
+            }
             VcpuExitReason::Hlt => {
                 println!("[ushv] Guest halted");
             }

@@ -3,16 +3,16 @@
 use core::arch::asm;
 
 use crate::arch::Trapframe;
-use crate::arch::hv::csr;
+use crate::arch::hv::csr::{self, read_htinst};
 use crate::arch::hv::vm::Riscv64VmObject;
 use crate::hypervisor::types::VmExit;
-use crate::hypervisor::vm::fast_path_flags;
 
+const CAUSE_BREAKPOINT: usize = 3;
+const CAUSE_ECALL_FROM_VS: usize = 10;
 const CAUSE_INST_GUEST_PAGE_FAULT: usize = 20;
 const CAUSE_LOAD_GUEST_PAGE_FAULT: usize = 21;
+const CAUSE_VIRTUAL_INSTRUCTION: usize = 22;
 const CAUSE_STORE_GUEST_PAGE_FAULT: usize = 23;
-const CAUSE_ECALL_FROM_VS: usize = 18;
-const CAUSE_VIRTUAL_INSTRUCTION: usize = 19;
 
 fn get_gpa() -> u64 {
     let stval = csr::read_stval();
@@ -143,15 +143,15 @@ pub fn arch_guest_trap_handler(trapframe: &mut Trapframe, vm: &Riscv64VmObject) 
             match vm.find_memory_slot(gpa) {
                 Some(slot) => {
                     let hpa = slot.gpa_to_hpa(gpa);
-                    // crate::early_println!("[guest pf] slot found: hpa={:#x}", hpa);
+                    crate::early_println!("[guest pf] slot found: hpa={:#x}", hpa);
 
-                    unsafe {
-                        let code = core::ptr::read(hpa as *const u32);
-                        // crate::early_println!("[guest pf] code at hpa: {:#x}", code);
-                    }
+                    // unsafe {
+                    //     let code = core::ptr::read(hpa as *const u32);
+                    //     crate::early_println!("[guest pf] code at hpa: {:#x}", code);
+                    // }
 
                     let writable = !slot.flags.readonly;
-                    let result = vm.map_stage2_page(gpa, hpa, writable);
+                    let _result = vm.map_stage2_page(gpa, hpa, writable);
                     // crate::early_println!("[guest pf] map_stage2_page result={:?}", result);
                     None
                 }
@@ -191,7 +191,11 @@ pub fn arch_guest_trap_handler(trapframe: &mut Trapframe, vm: &Riscv64VmObject) 
             trapframe.epc = epc.wrapping_add(4);
             Some(VmExit::FirmwareCall { epc })
         }
-        CAUSE_VIRTUAL_INSTRUCTION => Some(VmExit::Hlt),
+        CAUSE_VIRTUAL_INSTRUCTION => Some(VmExit::VirtualInstruction {
+            epc: trapframe.epc,
+            inst: Some(read_htinst() as u32),
+            inst_len: Some(4),
+        }),
         _ => Some(VmExit::Unknown(cause as u64)),
     }
 }

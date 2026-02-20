@@ -15,6 +15,9 @@ pub enum VcpuExitReason {
     FailEntry = 6,
     InternalError = 7,
     FirmwareCall = 8,
+    VirtualInstruction = 9,
+    IllegalInstruction = 10,
+    Breakpoint = 11,
 }
 
 #[repr(C)]
@@ -35,11 +38,21 @@ impl MmioInfo {
 }
 
 #[repr(C)]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct InstructionInfo {
+    pub inst: u32,
+    pub inst_len: u8,
+    pub has_inst: bool,
+    pub _padding: [u8; 6],
+}
+
+#[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct VcpuExit {
     pub reason: VcpuExitReason,
     pub epc: u64,
     pub mmio: MmioInfo,
+    pub inst: InstructionInfo,
     pub fail_code: u64,
 }
 
@@ -49,6 +62,7 @@ impl Default for VcpuExit {
             reason: VcpuExitReason::Unknown,
             epc: 0,
             mmio: MmioInfo::default(),
+            inst: InstructionInfo::default(),
             fail_code: 0,
         }
     }

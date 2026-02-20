@@ -74,6 +74,8 @@ const KVM_API_VERSION: usize = 12;
 #[allow(dead_code)]
 pub const KVM_EXIT_UNKNOWN: u32 = 0;
 #[allow(dead_code)]
+pub const KVM_EXIT_DEBUG: u32 = 4;
+#[allow(dead_code)]
 pub const KVM_EXIT_HLT: u32 = 5;
 pub const KVM_EXIT_MMIO: u32 = 6;
 pub const KVM_EXIT_SHUTDOWN: u32 = 8;
@@ -335,6 +337,23 @@ fn write_vm_exit(kvm_run: &mut KvmRun, exit: &crate::hypervisor::VmExit) {
         }
         VmExit::Unknown(_) => {
             kvm_run.exit_reason = KVM_EXIT_UNKNOWN;
+        }
+        VmExit::VirtualInstruction {
+            epc: _,
+            inst: _,
+            inst_len: _,
+        } => {
+            kvm_run.exit_reason = KVM_EXIT_RISCV_SBI;
+        }
+        VmExit::IllegalInstruction {
+            epc: _,
+            inst: _,
+            inst_len: _,
+        } => {
+            kvm_run.exit_reason = KVM_EXIT_INTERNAL_ERROR;
+        }
+        VmExit::Breakpoint { epc: _ } => {
+            kvm_run.exit_reason = KVM_EXIT_DEBUG;
         }
     }
 }
