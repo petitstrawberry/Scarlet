@@ -255,21 +255,6 @@ impl Riscv64VmObject {
         }
     }
 
-    fn create_vcpu_impl(
-        &self,
-        vcpu_id: VcpuId,
-        vm_arc: &Arc<Riscv64VmObject>,
-    ) -> Result<Arc<dyn VcpuObject>, &'static str> {
-        for existing in &self.state.lock().vcpus {
-            if existing.id() == vcpu_id {
-                return Err("vCPU ID already exists");
-            }
-        }
-        let vcpu = Riscv64VcpuObject::new(vcpu_id, vm_arc);
-        self.state.lock().vcpus.push(vcpu.clone());
-        Ok(vcpu)
-    }
-
     pub fn vcpu_count(&self) -> usize {
         self.state.lock().vcpus.len()
     }
@@ -311,11 +296,18 @@ impl VmObject for Riscv64VmObject {
         self.id
     }
 
-    fn create_vcpu(&self, vcpu_id: VcpuId) -> Result<Arc<dyn VcpuObject>, &'static str> {
-        let vm_arc = crate::hypervisor::vm::GLOBAL_VM_MANAGER
-            .get_vm_by_id(self.id)
-            .ok_or("VM not found in manager")?;
-        self.create_vcpu_impl(vcpu_id, &vm_arc)
+    fn create_vcpu(self: &Arc<Self>, vcpu_id: VcpuId) -> Result<Arc<dyn VcpuObject>, &'static str> {
+        {
+            let state = self.state.lock();
+            for existing in &state.vcpus {
+                if existing.id() == vcpu_id {
+                    return Err("vCPU ID already exists");
+                }
+            }
+        }
+        let vcpu = Riscv64VcpuObject::new(vcpu_id, self);
+        self.state.lock().vcpus.push(vcpu.clone());
+        Ok(vcpu)
     }
 
     fn set_memory_region(

@@ -34,7 +34,7 @@ pub struct ScarletVmMemoryRegion {
 pub trait VmObject: ControlOps + Send + Sync {
     fn id(&self) -> VmId;
     fn create_vcpu(
-        &self,
+        self: &Arc<Self>,
         vcpu_id: super::vcpu::VcpuId,
     ) -> Result<Arc<dyn VcpuObject>, &'static str>;
     fn set_memory_region(

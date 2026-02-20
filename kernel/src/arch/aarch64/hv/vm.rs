@@ -38,7 +38,10 @@ impl VmObject for Aarch64VmObject {
         self.id
     }
 
-    fn create_vcpu(&self, _vcpu_id: VcpuId) -> Result<Arc<dyn VcpuObject>, &'static str> {
+    fn create_vcpu(
+        self: &Arc<Self>,
+        _vcpu_id: VcpuId,
+    ) -> Result<Arc<dyn VcpuObject>, &'static str> {
         todo!("create_vcpu not implemented for aarch64")
     }
 

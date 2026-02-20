@@ -64,7 +64,7 @@ pub fn sys_shv_vcpu_create(trapframe: &mut Trapframe) -> usize {
     };
 
     // Create a new vCPU on the VM
-    let vcpu = match VmObject::create_vcpu(&*vm, vcpu_id) {
+    let vcpu = match VmObject::create_vcpu(&vm, vcpu_id) {
         Ok(vcpu) => vcpu,
         Err(_) => return usize::MAX,
     };
