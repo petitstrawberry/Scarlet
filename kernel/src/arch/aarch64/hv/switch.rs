@@ -1,4 +1,4 @@
-use crate::arch::Trapframe;
+use crate::arch::{Arch, Trapframe};
 
 use super::guest_vcpu::GuestVcpu;
 use super::sysreg::{GuestSystemRegs, HypervisorSystemRegs};
@@ -35,7 +35,11 @@ impl VcpuSwitchData {
     }
 }
 
-pub extern "C" fn arch_run_guest_loop(_trapframe: *const Trapframe, _vcpu: *const GuestVcpu) -> ! {
+pub unsafe extern "C" fn arch_run_guest_loop(
+    _trapframe: *const Trapframe,
+    _vcpu: *const GuestVcpu,
+    _arch: *const Arch,
+) {
     todo!("arch_run_guest_loop not implemented for aarch64")
 }
 
