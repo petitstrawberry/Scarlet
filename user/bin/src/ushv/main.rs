@@ -4,6 +4,8 @@
 extern crate alloc;
 extern crate scarlet_std;
 
+use scarlet_std::println;
+
 #[cfg(target_arch = "riscv64")]
 mod riscv64;
 
@@ -11,6 +13,8 @@ mod riscv64;
 mod device;
 #[cfg(target_arch = "riscv64")]
 mod devices;
+#[cfg(target_arch = "riscv64")]
+mod machine;
 
 #[cfg(target_arch = "riscv64")]
 #[unsafe(no_mangle)]

@@ -1,5 +1,8 @@
 use super::{Firmware, FirmwareAction};
+use crate::riscv64::timer::TimerState;
+use alloc::sync::Arc;
 use scarlet_std::hypervisor::{Vcpu, arch::reg};
+use scarlet_std::sync::Mutex;
 
 // TODO: SBI v2.0/v3.0 Required Extensions Implementation Status
 //
@@ -91,11 +94,17 @@ mod hsm_state {
     pub const STOP_PENDING: u64 = 3;
 }
 
-pub struct SbiFirmware;
+pub struct SbiFirmware {
+    timer_state: Option<Arc<Mutex<TimerState>>>,
+}
 
 impl SbiFirmware {
     pub fn new() -> Self {
-        Self
+        Self { timer_state: None }
+    }
+
+    pub fn set_timer_state(&mut self, state: Arc<Mutex<TimerState>>) {
+        self.timer_state = Some(state);
     }
 }
 
@@ -111,7 +120,7 @@ impl Firmware for SbiFirmware {
             eid::BASE => self.handle_base(function, a0),
             eid::LEGACY_PUTCHAR => self.handle_legacy_putchar(a0),
             eid::LEGACY_GETCHAR => ((error::FAILED, 0), FirmwareAction::Continue),
-            eid::TIMER => self.handle_timer(function),
+            eid::TIMER => self.handle_timer(function, a0),
             eid::IPI => self.handle_ipi(function),
             eid::RFENCE => self.handle_rfence(function),
             eid::HSM => self.handle_hsm(function, a0, a1, a2),
@@ -155,12 +164,14 @@ impl SbiFirmware {
         ((error::SUCCESS, 0), FirmwareAction::Continue)
     }
 
-    fn handle_timer(&mut self, function: u64) -> ((i64, u64), FirmwareAction) {
-        // TODO(TIMER): Program guest timer via vstimecmp CSR
-        // - Read stime_value from a0
-        // - Set vstimecmp to trigger VS-mode timer interrupt
+    fn handle_timer(&mut self, function: u64, a0: u64) -> ((i64, u64), FirmwareAction) {
         match function {
-            fid::timer::SET_TIMER => ((error::SUCCESS, 0), FirmwareAction::Continue),
+            fid::timer::SET_TIMER => {
+                if let Some(ref timer_state) = self.timer_state {
+                    timer_state.lock().set_timer(a0);
+                }
+                ((error::SUCCESS, 0), FirmwareAction::Continue)
+            }
             _ => ((error::NOT_SUPPORTED, 0), FirmwareAction::Continue),
         }
     }

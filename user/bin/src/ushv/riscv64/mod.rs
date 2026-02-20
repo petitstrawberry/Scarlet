@@ -1,21 +1,23 @@
 extern crate alloc;
 
 use alloc::string::String;
+use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
 use scarlet_std::hypervisor::{Vcpu, VcpuExitReason, Vm, arch::reg};
 use scarlet_std::println;
+use scarlet_std::sync::Mutex;
 
 pub mod firmware;
-pub mod machine;
+pub mod timer;
 
-use crate::device::DeviceEmulator;
 use crate::devices::plic::{PlicConfig, PlicDevice};
 use crate::devices::uart::Ns16550a;
+use crate::machine::{DtbGenerator, Machine, MachineConfig};
 use firmware::{Firmware, FirmwareAction, sbi::SbiFirmware};
-use machine::{DtbGenerator, Machine, MachineConfig};
+use timer::{TimerState, start_timer_thread};
 
-const GUEST_MEMORY_SIZE: u64 = 128 * 1024 * 1024;
+const GUEST_MEMORY_SIZE: u64 = 16 * 1024 * 1024;
 const GUEST_ENTRY_POINT: u64 = 0x80000000;
 
 pub fn run() -> i32 {
@@ -78,7 +80,20 @@ pub fn run() -> i32 {
     }
 
     let mut machine = Machine::new(MachineConfig::qemu_virt());
-    machine.build();
+
+    let uart = Ns16550a::new(0x10000000);
+    println!("[ushv] Registered UART at 0x10000000");
+    machine.register(uart);
+
+    let plic = PlicDevice::new(PlicConfig {
+        base: 0x0C000000,
+        num_sources: 128,
+        num_contexts: 2,
+        num_priorities: 7,
+    });
+    println!("[ushv] Registered PLIC at 0x0C000000");
+    machine.register(plic);
+
     println!(
         "[ushv] Built machine with {} devices",
         machine.devices().len()
@@ -116,6 +131,11 @@ pub fn run() -> i32 {
     };
     println!("[ushv] vCPU created with handle {}", vcpu.handle());
 
+    let timer_state = Arc::new(Mutex::new(TimerState::new()));
+    timer_state.lock().set_vcpu_handle(vcpu.handle());
+    start_timer_thread(Arc::clone(&timer_state));
+    println!("[ushv] Timer thread started");
+
     println!("[ushv] Setting entry point to {:#x}", GUEST_ENTRY_POINT);
     if vcpu.set_reg(reg::PC, GUEST_ENTRY_POINT).is_err() {
         println!("[ushv] Failed to set entry point");
@@ -136,33 +156,11 @@ pub fn run() -> i32 {
         hartid, guest_dtb_addr
     );
 
-    let mut devices = DeviceEmulator::new();
-    for dev_config in &machine.config().devices {
-        match &dev_config.device_type {
-            machine::DeviceType::Uart => {
-                devices.register(Ns16550a::new(dev_config.base));
-                println!("[ushv] Registered UART at {:#x}", dev_config.base);
-            }
-            machine::DeviceType::Plic {
-                num_sources,
-                num_contexts,
-            } => {
-                let plic = PlicDevice::new(PlicConfig {
-                    base: dev_config.base,
-                    num_sources: *num_sources,
-                    num_contexts: *num_contexts,
-                    num_priorities: 7,
-                });
-                println!("[ushv] Registered PLIC at {:#x}", dev_config.base);
-                devices.register(plic);
-            }
-        }
-    }
-
     let mut firmware = SbiFirmware::new();
+    firmware.set_timer_state(Arc::clone(&timer_state));
 
     println!("[ushv] Starting vCPU run loop...");
-    run_vcpu_loop(&mut vcpu, &mut devices, &mut firmware);
+    run_vcpu_loop(&mut vcpu, &mut machine, &mut firmware);
 
     println!("[ushv] VM terminated");
     0
@@ -179,7 +177,7 @@ fn generate_dtb(machine: &Machine) -> Option<Vec<u8>> {
     }
 }
 
-fn run_vcpu_loop(vcpu: &mut Vcpu, devices: &mut DeviceEmulator, firmware: &mut dyn Firmware) {
+fn run_vcpu_loop(vcpu: &mut Vcpu, machine: &mut Machine, firmware: &mut dyn Firmware) {
     loop {
         let exit = match vcpu.run() {
             Ok(exit) => exit,
@@ -191,10 +189,10 @@ fn run_vcpu_loop(vcpu: &mut Vcpu, devices: &mut DeviceEmulator, firmware: &mut d
 
         match exit.reason {
             VcpuExitReason::MmioRead => {
-                let _result = devices.handle_mmio_read(exit.mmio.address, exit.mmio.size);
+                let _result = machine.handle_mmio_read(exit.mmio.address, exit.mmio.size);
             }
             VcpuExitReason::MmioWrite => {
-                devices.handle_mmio_write(exit.mmio.address, exit.mmio.size, exit.mmio.data);
+                machine.handle_mmio_write(exit.mmio.address, exit.mmio.size, exit.mmio.data);
             }
             VcpuExitReason::FirmwareCall => {
                 if firmware.handle(vcpu) == FirmwareAction::Shutdown {

@@ -2,6 +2,7 @@ extern crate alloc;
 
 use alloc::string::String;
 use alloc::vec;
+use scarlet_std::sync::RwLock;
 
 use crate::device::{DeviceFdt, FdtNodeInfo, FdtValue, MmioDevice};
 use scarlet_std::print;
@@ -20,7 +21,7 @@ const SCR: u64 = 0x07;
 const LSR_TX_EMPTY: u8 = 0x20;
 const LSR_RX_READY: u8 = 0x01;
 
-pub struct Ns16550a {
+struct UartInner {
     base: u64,
     irq: u32,
     lcr: u8,
@@ -28,18 +29,8 @@ pub struct Ns16550a {
     scr: u8,
 }
 
-impl Ns16550a {
-    pub fn new(base: u64) -> Self {
-        Self {
-            base,
-            irq: 10,
-            lcr: 0,
-            lsr: LSR_TX_EMPTY,
-            scr: 0,
-        }
-    }
-
-    pub fn with_irq(base: u64, irq: u32) -> Self {
+impl UartInner {
+    fn new(base: u64, irq: u32) -> Self {
         Self {
             base,
             irq,
@@ -50,9 +41,27 @@ impl Ns16550a {
     }
 }
 
+pub struct Ns16550a {
+    inner: RwLock<UartInner>,
+}
+
+impl Ns16550a {
+    pub fn new(base: u64) -> Self {
+        Self {
+            inner: RwLock::new(UartInner::new(base, 10)),
+        }
+    }
+
+    pub fn with_irq(base: u64, irq: u32) -> Self {
+        Self {
+            inner: RwLock::new(UartInner::new(base, irq)),
+        }
+    }
+}
+
 impl MmioDevice for Ns16550a {
     fn base(&self) -> u64 {
-        self.base
+        self.inner.read().base
     }
 
     fn size(&self) -> u64 {
@@ -60,24 +69,26 @@ impl MmioDevice for Ns16550a {
     }
 
     fn read(&mut self, offset: u64, _size: u8) -> u64 {
+        let mut inner = self.inner.write();
         match offset {
             RBR => {
-                self.lsr &= !LSR_RX_READY;
+                inner.lsr &= !LSR_RX_READY;
                 0
             }
             IER => 0,
             IIR => 0x01,
-            LCR => self.lcr as u64,
+            LCR => inner.lcr as u64,
             MCR => 0,
-            LSR => self.lsr as u64,
+            LSR => inner.lsr as u64,
             MSR => 0,
-            SCR => self.scr as u64,
+            SCR => inner.scr as u64,
             _ => 0,
         }
     }
 
     fn write(&mut self, offset: u64, _size: u8, data: u64) {
         let byte = data as u8;
+        let mut inner = self.inner.write();
 
         match offset {
             THR => {
@@ -86,11 +97,11 @@ impl MmioDevice for Ns16550a {
             IER => {}
             FCR => {}
             LCR => {
-                self.lcr = byte;
+                inner.lcr = byte;
             }
             MCR => {}
             SCR => {
-                self.scr = byte;
+                inner.scr = byte;
             }
             _ => {}
         }
@@ -107,11 +118,12 @@ impl MmioDevice for Ns16550a {
 
 impl DeviceFdt for Ns16550a {
     fn fdt_node(&self) -> Option<FdtNodeInfo> {
+        let inner = self.inner.read();
         Some(FdtNodeInfo {
-            name: alloc::format!("serial@{:x}", self.base),
+            name: alloc::format!("serial@{:x}", inner.base),
             compatible: String::from("ns16550a"),
-            reg: vec![(self.base, 0x100)],
-            interrupts: vec![self.irq],
+            reg: vec![(inner.base, 0x100)],
+            interrupts: vec![inner.irq],
             interrupt_parent: None,
             extra: vec![(String::from("clock-frequency"), FdtValue::U32(3686400))],
         })
