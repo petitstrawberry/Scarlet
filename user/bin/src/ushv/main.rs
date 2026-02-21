@@ -4,8 +4,6 @@
 extern crate alloc;
 extern crate scarlet_std;
 
-use scarlet_std::println;
-
 #[cfg(target_arch = "riscv64")]
 mod riscv64;
 

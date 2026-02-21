@@ -122,7 +122,8 @@ pub fn first_switch_to_user(task: &mut Task) -> ! {
     }
 
     // Compute trampoline exit target.
-    let trap_exit_offset = (crate::arch::aarch64::trap::user::_switch_to_user as usize).wrapping_sub(crate::arch::aarch64::trap::user::_user_trap_entry as usize);
+    let trap_exit_offset = (crate::arch::aarch64::trap::user::_switch_to_user as usize)
+        .wrapping_sub(crate::arch::aarch64::trap::user::_user_trap_entry as usize);
     let trampoline_base = crate::vm::get_trampoline_trap_vector();
     let trap_exit_addr = trampoline_base.wrapping_add(trap_exit_offset);
 
