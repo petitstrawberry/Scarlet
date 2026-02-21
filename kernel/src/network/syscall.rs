@@ -43,6 +43,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use crate::arch::Trapframe;
+use crate::library::std::usercopy::{copy_from_user, copy_to_user};
 use crate::network::{
     Inet4SocketAddress, Ipv4Address, LocalSocketAddress, NetworkManager, ShutdownHow,
     SocketAddress, SocketDomain, SocketObject, SocketProtocol, SocketType, local::LocalSocket,
@@ -85,24 +86,23 @@ fn read_user_string(ptr: usize, len: usize) -> Option<String> {
     if len == 0 {
         return None;
     }
-    let addr = task.vm_manager.translate_vaddr(ptr)? as *const u8;
     if len > 256 {
         return None;
     }
     let mut bytes = Vec::with_capacity(len);
-    unsafe {
-        for i in 0..len {
-            bytes.push(*addr.add(i));
-        }
+    bytes.resize(len, 0);
+    if copy_from_user(task, ptr, &mut bytes).is_err() {
+        return None;
     }
     String::from_utf8(bytes).ok()
 }
 
 fn read_user_ipv4(ptr: usize) -> Option<Ipv4Address> {
     let task = mytask()?;
-    let addr = task.vm_manager.translate_vaddr(ptr)? as *const u8;
-    unsafe {
-        let bytes = [*addr, *addr.add(1), *addr.add(2), *addr.add(3)];
+    let mut bytes = [0u8; 4];
+    if copy_from_user(task, ptr, &mut bytes).is_err() {
+        None
+    } else {
         Some(Ipv4Address::from_bytes(bytes))
     }
 }
@@ -115,12 +115,12 @@ pub fn sys_network_set_ipv4(tf: &mut Trapframe) -> usize {
     tf.increment_pc_next(task);
 
     let req_ptr = tf.get_arg(0);
-    let req_addr = match task.vm_manager.translate_vaddr(req_ptr) {
-        Some(addr) => addr as *const NetworkSetIpv4Request,
-        None => return usize::MAX,
-    };
-
-    let req = unsafe { *req_addr };
+    let mut req_bytes = [0u8; core::mem::size_of::<NetworkSetIpv4Request>()];
+    if copy_from_user(task, req_ptr, &mut req_bytes).is_err() {
+        return usize::MAX;
+    }
+    let req =
+        unsafe { core::ptr::read_unaligned(req_bytes.as_ptr() as *const NetworkSetIpv4Request) };
     let iface = match read_user_string(req.iface_ptr, req.iface_len) {
         Some(name) => name,
         None => return usize::MAX,
@@ -209,16 +209,6 @@ pub fn sys_network_list_interfaces(tf: &mut Trapframe) -> usize {
         return usize::MAX;
     }
 
-    let status_addr = match task.vm_manager.translate_vaddr(status_ptr) {
-        Some(addr) => addr as *mut NetworkStatus,
-        None => return usize::MAX,
-    };
-
-    let interfaces_addr = match task.vm_manager.translate_vaddr(interfaces_ptr) {
-        Some(addr) => addr as *mut NetworkInterfaceInfo,
-        None => return usize::MAX,
-    };
-
     let network_manager = crate::network::get_network_manager();
     let interface_names = network_manager.list_interfaces();
     let config = network_manager.get_config();
@@ -259,11 +249,27 @@ pub fn sys_network_list_interfaces(tf: &mut Trapframe) -> usize {
 
     status.interface_count = interfaces.len() as u32;
 
-    unsafe {
-        core::ptr::write(status_addr, status);
-        if !interfaces_addr.is_null() && !interfaces.is_empty() {
-            for (idx, info) in interfaces.iter().enumerate() {
-                core::ptr::write(interfaces_addr.add(idx), *info);
+    let status_bytes = unsafe {
+        core::slice::from_raw_parts(
+            (&status as *const NetworkStatus).cast::<u8>(),
+            core::mem::size_of::<NetworkStatus>(),
+        )
+    };
+    if copy_to_user(task, status_ptr, status_bytes).is_err() {
+        return usize::MAX;
+    }
+
+    if !interfaces.is_empty() {
+        let item_size = core::mem::size_of::<NetworkInterfaceInfo>();
+        for (idx, info) in interfaces.iter().enumerate() {
+            let info_bytes = unsafe {
+                core::slice::from_raw_parts(
+                    (info as *const NetworkInterfaceInfo).cast::<u8>(),
+                    item_size,
+                )
+            };
+            if copy_to_user(task, interfaces_ptr + idx * item_size, info_bytes).is_err() {
+                return usize::MAX;
             }
         }
     }
@@ -442,34 +448,29 @@ pub fn sys_socket_bind(tf: &mut Trapframe) -> usize {
         _ => return usize::MAX,
     };
 
-    // Translate pointer to physical address
-    let path_physical = match task.vm_manager.translate_vaddr(path_ptr) {
-        Some(addr) => addr as *const u8,
-        None => return usize::MAX,
-    };
-
     if path_len == core::mem::size_of::<Inet4SocketAddress>() {
-        let addr = unsafe { *(path_physical as *const Inet4SocketAddress) };
+        let mut addr_bytes = [0u8; core::mem::size_of::<Inet4SocketAddress>()];
+        if copy_from_user(task, path_ptr, &mut addr_bytes).is_err() {
+            return usize::MAX;
+        }
+        let addr =
+            unsafe { core::ptr::read_unaligned(addr_bytes.as_ptr() as *const Inet4SocketAddress) };
         if socket_arc.bind(&SocketAddress::Inet(addr)).is_err() {
             return usize::MAX;
         }
         return 0;
     }
 
-    // Read path string from user space (up to path_len bytes)
-    let path = unsafe {
-        let mut bytes = alloc::vec::Vec::with_capacity(path_len.min(108)); // Socket path limit
-        for i in 0..path_len.min(108) {
-            let byte = *path_physical.add(i);
-            if byte == 0 {
-                break;
-            }
-            bytes.push(byte);
-        }
-        match alloc::string::String::from_utf8(bytes) {
-            Ok(s) => s,
-            Err(_) => return usize::MAX,
-        }
+    let mut path_bytes = vec![0u8; path_len.min(108)];
+    if copy_from_user(task, path_ptr, &mut path_bytes).is_err() {
+        return usize::MAX;
+    }
+    if let Some(pos) = path_bytes.iter().position(|&b| b == 0) {
+        path_bytes.truncate(pos);
+    }
+    let path = match alloc::string::String::from_utf8(path_bytes) {
+        Ok(s) => s,
+        Err(_) => return usize::MAX,
     };
 
     // Bind the socket to the path
@@ -622,34 +623,29 @@ pub fn sys_socket_connect(tf: &mut Trapframe) -> usize {
         _ => return usize::MAX,
     };
 
-    // Translate pointer to physical address
-    let path_physical = match task.vm_manager.translate_vaddr(path_ptr) {
-        Some(addr) => addr as *const u8,
-        None => return usize::MAX,
-    };
-
     if path_len == core::mem::size_of::<Inet4SocketAddress>() {
-        let addr = unsafe { *(path_physical as *const Inet4SocketAddress) };
+        let mut addr_bytes = [0u8; core::mem::size_of::<Inet4SocketAddress>()];
+        if copy_from_user(task, path_ptr, &mut addr_bytes).is_err() {
+            return usize::MAX;
+        }
+        let addr =
+            unsafe { core::ptr::read_unaligned(addr_bytes.as_ptr() as *const Inet4SocketAddress) };
         if socket.connect(&SocketAddress::Inet(addr)).is_err() {
             return usize::MAX;
         }
         return 0;
     }
 
-    // Read path string from user space (up to path_len bytes)
-    let path = unsafe {
-        let mut bytes = alloc::vec::Vec::with_capacity(path_len.min(108)); // Socket path limit
-        for i in 0..path_len.min(108) {
-            let byte = *path_physical.add(i);
-            if byte == 0 {
-                break;
-            }
-            bytes.push(byte);
-        }
-        match alloc::string::String::from_utf8(bytes) {
-            Ok(s) => s,
-            Err(_) => return usize::MAX,
-        }
+    let mut path_bytes = vec![0u8; path_len.min(108)];
+    if copy_from_user(task, path_ptr, &mut path_bytes).is_err() {
+        return usize::MAX;
+    }
+    if let Some(pos) = path_bytes.iter().position(|&b| b == 0) {
+        path_bytes.truncate(pos);
+    }
+    let path = match alloc::string::String::from_utf8(path_bytes) {
+        Ok(s) => s,
+        Err(_) => return usize::MAX,
     };
 
     // Create socket address and connect
@@ -775,12 +771,6 @@ pub fn sys_socketpair(tf: &mut Trapframe) -> usize {
 
     let array_ptr = tf.get_arg(0);
 
-    // Validate pointer (check if we can write 2 usizes = 16 bytes)
-    let array_vaddr = match task.vm_manager.translate_vaddr(array_ptr) {
-        Some(addr) => addr as *mut usize,
-        None => return usize::MAX,
-    };
-
     // Create a connected socket pair using LocalSocket::create_connected_pair
     let (socket1, socket2) = LocalSocket::create_connected_pair(
         String::from("socketpair:0"),
@@ -816,10 +806,15 @@ pub fn sys_socketpair(tf: &mut Trapframe) -> usize {
         }
     };
 
-    // Write handle IDs to user space array
-    unsafe {
-        array_vaddr.write(handle1);
-        array_vaddr.add(1).write(handle2);
+    let mut out = [0u8; core::mem::size_of::<usize>() * 2];
+    let first = handle1.to_le_bytes();
+    let second = handle2.to_le_bytes();
+    out[..core::mem::size_of::<usize>()].copy_from_slice(&first);
+    out[core::mem::size_of::<usize>()..].copy_from_slice(&second);
+    if copy_to_user(task, array_ptr, &out).is_err() {
+        let _ = task.handle_table.remove(handle1 as u32);
+        let _ = task.handle_table.remove(handle2 as u32);
+        return usize::MAX;
     }
 
     0
@@ -912,12 +907,6 @@ pub fn sys_socket_recvfrom(tf: &mut Trapframe) -> usize {
     let buf_len = tf.get_arg(2);
     let addr_ptr = tf.get_arg(3);
 
-    // Validate buffer pointer
-    let buf_vaddr = match task.vm_manager.translate_vaddr(buf_ptr) {
-        Some(addr) => addr as *mut u8,
-        None => return usize::MAX,
-    };
-
     // Get the socket from handle table
     let socket = match task.handle_table.get(handle_id) {
         Some(KernelObject::Socket(socket)) => socket.clone(),
@@ -930,28 +919,30 @@ pub fn sys_socket_recvfrom(tf: &mut Trapframe) -> usize {
     // Receive datagram
     match socket.recvfrom(&mut temp_buf, 0) {
         Ok((len, addr)) => {
-            // Copy data to user buffer
-            unsafe {
-                core::ptr::copy_nonoverlapping(temp_buf.as_ptr(), buf_vaddr, len);
+            if copy_to_user(task, buf_ptr, &temp_buf[..len]).is_err() {
+                return usize::MAX;
             }
 
             // Store sender address if pointer is provided
             if addr_ptr != 0 {
-                if let Some(addr_vaddr) = task.vm_manager.translate_vaddr(addr_ptr) {
-                    unsafe {
-                        match addr {
-                            SocketAddress::Inet(inet) => {
-                                let addr_bytes = inet.addr;
-                                let port_bytes = inet.port.to_be_bytes();
-                                let ptr = addr_vaddr as *mut u8;
-                                *ptr = 2; // AF_INET
-                                *ptr.add(1) = 0;
-                                core::ptr::copy_nonoverlapping(addr_bytes.as_ptr(), ptr.add(2), 4);
-                                core::ptr::copy_nonoverlapping(port_bytes.as_ptr(), ptr.add(6), 2);
-                            }
-                            _ => {}
+                match addr {
+                    SocketAddress::Inet(inet) => {
+                        let port_bytes = inet.port.to_be_bytes();
+                        let sockaddr = [
+                            2,
+                            0,
+                            inet.addr[0],
+                            inet.addr[1],
+                            inet.addr[2],
+                            inet.addr[3],
+                            port_bytes[0],
+                            port_bytes[1],
+                        ];
+                        if copy_to_user(task, addr_ptr, &sockaddr).is_err() {
+                            return usize::MAX;
                         }
                     }
+                    _ => {}
                 }
             }
 
@@ -998,14 +989,10 @@ pub fn sys_socket_sendto(tf: &mut Trapframe) -> usize {
     let buf_len = tf.get_arg(2);
     let addr_ptr = tf.get_arg(3);
 
-    // Validate buffer pointer
-    let buf_vaddr = match task.vm_manager.translate_vaddr(buf_ptr) {
-        Some(addr) => addr as *const u8,
-        None => return usize::MAX,
-    };
-
-    // Read data from user buffer
-    let data: Vec<u8> = unsafe { core::slice::from_raw_parts(buf_vaddr, buf_len).to_vec() };
+    let mut data = vec![0u8; buf_len];
+    if copy_from_user(task, buf_ptr, &mut data).is_err() {
+        return usize::MAX;
+    }
 
     // Get the socket from handle table
     let socket = match task.handle_table.get(handle_id) {
@@ -1015,23 +1002,17 @@ pub fn sys_socket_sendto(tf: &mut Trapframe) -> usize {
 
     // Parse destination address
     let addr = if addr_ptr != 0 {
-        match task.vm_manager.translate_vaddr(addr_ptr) {
-            Some(addr_vaddr) => {
-                unsafe {
-                    let ptr = addr_vaddr as *const u8;
-                    let family = *ptr;
-                    match family {
-                        2 => {
-                            // AF_INET
-                            let ip_bytes = [*ptr.add(2), *ptr.add(3), *ptr.add(4), *ptr.add(5)];
-                            let port = u16::from_be_bytes([*ptr.add(6), *ptr.add(7)]);
-                            SocketAddress::Inet(Inet4SocketAddress::new(ip_bytes, port))
-                        }
-                        _ => return usize::MAX,
-                    }
-                }
+        let mut sockaddr = [0u8; 8];
+        if copy_from_user(task, addr_ptr, &mut sockaddr).is_err() {
+            return usize::MAX;
+        }
+        match sockaddr[0] {
+            2 => {
+                let ip_bytes = [sockaddr[2], sockaddr[3], sockaddr[4], sockaddr[5]];
+                let port = u16::from_be_bytes([sockaddr[6], sockaddr[7]]);
+                SocketAddress::Inet(Inet4SocketAddress::new(ip_bytes, port))
             }
-            None => return usize::MAX,
+            _ => return usize::MAX,
         }
     } else {
         return usize::MAX;

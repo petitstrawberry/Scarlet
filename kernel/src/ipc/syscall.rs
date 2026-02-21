@@ -11,11 +11,12 @@ use crate::{
     ipc::pipe::UnidirectionalPipe,
     ipc::shared_memory::SharedMemory,
     library::std::string::parse_c_string_from_userspace,
+    library::std::usercopy::{copy_from_user, copy_to_user},
     object::KernelObject,
     object::capability::EventSubscriber,
     task::mytask,
 };
-use alloc::{string::ToString, sync::Arc};
+use alloc::{string::ToString, sync::Arc, vec};
 
 /// sys_pipe - Create a pipe pair
 ///
@@ -39,12 +40,6 @@ pub fn sys_pipe(trapframe: &mut Trapframe) -> usize {
 
     // Increment PC to avoid infinite loop if pipe creation fails
     trapframe.increment_pc_next(task);
-
-    // Translate the pointer to get access to the pipefd array
-    let pipefd_vaddr = match task.vm_manager.translate_vaddr(pipefd_ptr) {
-        Some(addr) => addr as *mut u32,
-        None => return usize::MAX, // Invalid pointer
-    };
 
     // Create pipe pair with default buffer size (4KB)
     const DEFAULT_PIPE_BUFFER_SIZE: usize = 4096;
@@ -85,10 +80,13 @@ pub fn sys_pipe(trapframe: &mut Trapframe) -> usize {
         }
     };
 
-    // Write the handles to user space
-    unsafe {
-        *pipefd_vaddr = read_handle;
-        *pipefd_vaddr.add(1) = write_handle;
+    let mut out = [0u8; core::mem::size_of::<u32>() * 2];
+    out[..core::mem::size_of::<u32>()].copy_from_slice(&read_handle.to_le_bytes());
+    out[core::mem::size_of::<u32>()..].copy_from_slice(&write_handle.to_le_bytes());
+    if copy_to_user(task, pipefd_ptr, &out).is_err() {
+        let _ = task.handle_table.remove(read_handle);
+        let _ = task.handle_table.remove(write_handle);
+        return usize::MAX;
     }
 
     0 // Success
@@ -625,20 +623,17 @@ pub fn sys_socket_send_handle_and_data(trapframe: &mut Trapframe) -> usize {
         }
     }
 
-    let data_addr = match task.vm_manager.translate_vaddr(data_ptr) {
-        Some(addr) => addr,
-        None => return usize::MAX, // Invalid pointer
-    };
-
     // Limit data size to prevent DoS attacks
     const MAX_SEND_SIZE: usize = 65536; // 64 KB max
     let data_len = data_len.min(MAX_SEND_SIZE);
 
-    // Read data from userspace
-    let data = unsafe { core::slice::from_raw_parts(data_addr as *const u8, data_len) };
+    let mut data = vec![0u8; data_len];
+    if copy_from_user(task, data_ptr, &mut data).is_err() {
+        return usize::MAX;
+    }
 
     // Send the handle and data atomically
-    match local_socket.send_handle_and_data(object, data) {
+    match local_socket.send_handle_and_data(object, &data) {
         Ok(()) => 0,
         Err(_) => usize::MAX,
     }
@@ -702,23 +697,15 @@ pub fn sys_socket_recv_handle_and_data(trapframe: &mut Trapframe) -> usize {
 
     // Write the handle value to userspace
     if handle_ptr != 0 {
-        let handle_addr = match task.vm_manager.translate_vaddr(handle_ptr) {
-            Some(addr) => addr as *mut u32,
-            None => return usize::MAX,
-        };
-        unsafe {
-            *handle_addr = new_handle;
+        if copy_to_user(task, handle_ptr, &new_handle.to_le_bytes()).is_err() {
+            return usize::MAX;
         }
     }
 
     // Write the data to userspace
     if !data.is_empty() && data_ptr != 0 {
-        let data_addr = match task.vm_manager.translate_vaddr(data_ptr) {
-            Some(addr) => addr as *mut u8,
-            None => return usize::MAX,
-        };
-        unsafe {
-            core::ptr::copy_nonoverlapping(data.as_ptr(), data_addr, data.len());
+        if copy_to_user(task, data_ptr, &data).is_err() {
+            return usize::MAX;
         }
     }
 

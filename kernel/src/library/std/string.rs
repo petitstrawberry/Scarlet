@@ -1,6 +1,8 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
+use crate::library::std::usercopy::copy_from_user;
+
 #[derive(Debug, PartialEq)]
 pub enum StringConversionError {
     NullPointer,
@@ -47,14 +49,22 @@ pub fn parse_c_string_from_userspace(
     if ptr == 0 {
         return Err(StringConversionError::NullPointer);
     }
+    if max_len == 0 {
+        return Ok(String::new());
+    }
 
-    let c_str_ptr = task
-        .vm_manager
-        .translate_vaddr(ptr)
-        .ok_or(StringConversionError::TranslationError)? as *const u8;
+    let mut bytes = Vec::new();
+    for i in 0..max_len {
+        let mut byte = [0u8; 1];
+        copy_from_user(task, ptr + i, &mut byte)
+            .map_err(|_| StringConversionError::TranslationError)?;
+        if byte[0] == 0 {
+            break;
+        }
+        bytes.push(byte[0]);
+    }
 
-    let (string, _) = cstring_to_string(c_str_ptr, max_len)?;
-    Ok(string)
+    String::from_utf8(bytes).map_err(|_| StringConversionError::Utf8Error)
 }
 
 /// Parse an array of string pointers (char **) from user space
@@ -68,28 +78,29 @@ pub fn parse_string_array_from_userspace(
         return Ok(Vec::new());
     }
 
-    let ptr_array = task
-        .vm_manager
-        .translate_vaddr(array_ptr)
-        .ok_or(StringConversionError::TranslationError)? as *const usize;
-
     let mut strings = Vec::new();
     let mut i = 0;
 
-    unsafe {
-        loop {
-            let str_ptr = *ptr_array.add(i);
-            if str_ptr == 0 {
-                break; // Null pointer terminates the array
-            }
+    loop {
+        let mut raw_ptr = [0u8; core::mem::size_of::<usize>()];
+        copy_from_user(
+            task,
+            array_ptr + i * core::mem::size_of::<usize>(),
+            &mut raw_ptr,
+        )
+        .map_err(|_| StringConversionError::TranslationError)?;
+        let str_ptr = usize::from_le_bytes(raw_ptr);
 
-            let string = parse_c_string_from_userspace(task, str_ptr, max_string_len)?;
-            strings.push(string);
-            i += 1;
+        if str_ptr == 0 {
+            break;
+        }
 
-            if i > max_strings {
-                return Err(StringConversionError::TooManyStrings);
-            }
+        let string = parse_c_string_from_userspace(task, str_ptr, max_string_len)?;
+        strings.push(string);
+        i += 1;
+
+        if i > max_strings {
+            return Err(StringConversionError::TooManyStrings);
         }
     }
 
