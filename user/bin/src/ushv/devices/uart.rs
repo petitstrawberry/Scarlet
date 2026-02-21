@@ -4,7 +4,7 @@ use alloc::string::String;
 use alloc::vec;
 use scarlet_std::sync::RwLock;
 
-use crate::device::{DeviceFdt, FdtNodeInfo, FdtValue, MmioDevice};
+use crate::device::{DeviceFdt, FdtNodeInfo, FdtValue, IrqLine, MmioDevice};
 use scarlet_std::print;
 
 const THR: u64 = 0x00;
@@ -24,6 +24,7 @@ const LSR_RX_READY: u8 = 0x01;
 struct UartInner {
     base: u64,
     irq: u32,
+    irq_out: Option<IrqLine>,
     lcr: u8,
     lsr: u8,
     scr: u8,
@@ -34,6 +35,7 @@ impl UartInner {
         Self {
             base,
             irq,
+            irq_out: None,
             lcr: 0,
             lsr: LSR_TX_EMPTY,
             scr: 0,
@@ -57,6 +59,18 @@ impl Ns16550a {
             inner: RwLock::new(UartInner::new(base, irq)),
         }
     }
+
+    pub fn set_irq_out(&self, irq_line: IrqLine) {
+        self.inner.write().irq_out = Some(irq_line);
+    }
+
+    pub fn trigger_rx(&self) {
+        let mut inner = self.inner.write();
+        inner.lsr |= LSR_RX_READY;
+        if let Some(ref irq_out) = inner.irq_out {
+            irq_out.set(true);
+        }
+    }
 }
 
 impl MmioDevice for Ns16550a {
@@ -73,6 +87,9 @@ impl MmioDevice for Ns16550a {
         match offset {
             RBR => {
                 inner.lsr &= !LSR_RX_READY;
+                if let Some(ref irq_out) = inner.irq_out {
+                    irq_out.set(false);
+                }
                 0
             }
             IER => 0,

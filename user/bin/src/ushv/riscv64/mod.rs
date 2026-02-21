@@ -11,9 +11,10 @@ use scarlet_std::sync::Mutex;
 pub mod firmware;
 pub mod timer;
 
+use crate::device::IrqLine;
 use crate::devices::plic::{PlicConfig, PlicDevice};
 use crate::devices::uart::Ns16550a;
-use crate::machine::{DtbGenerator, Machine, MachineConfig};
+use crate::machine::{DtbGenerator, Machine, MachineConfig, VcpuIrqSink};
 use firmware::{Firmware, FirmwareAction, sbi::SbiFirmware};
 use timer::{TimerState, start_timer_thread};
 
@@ -80,9 +81,17 @@ pub fn run() -> i32 {
         return 1;
     }
 
-    let uart = Ns16550a::new(0x10000000);
-    println!("[ushv] Registered UART at 0x10000000");
-    machine.register(uart);
+    println!("[ushv] Creating vCPU 0...");
+    let mut vcpu = match vm.create_vcpu(0) {
+        Ok(vcpu) => vcpu,
+        Err(()) => {
+            println!("[ushv] Failed to create vCPU");
+            return 1;
+        }
+    };
+    println!("[ushv] vCPU created with handle {}", vcpu.handle());
+
+    machine.set_vcpu_handle(vcpu.handle());
 
     let plic = PlicDevice::new(PlicConfig {
         base: 0x0C000000,
@@ -90,8 +99,18 @@ pub fn run() -> i32 {
         num_contexts: 2,
         num_priorities: 7,
     });
+
+    let vcpu_irq = IrqLine::new(Arc::new(VcpuIrqSink::new(vcpu.handle())));
+    plic.set_irq_out(1, vcpu_irq);
+
     println!("[ushv] Registered PLIC at 0x0C000000");
+
+    let uart = Ns16550a::new(0x10000000);
+    uart.set_irq_out(plic.get_irq_in(10));
+    println!("[ushv] Registered UART at 0x10000000");
+
     machine.register(plic);
+    machine.register(uart);
 
     println!(
         "[ushv] Built machine with {} devices",
@@ -119,16 +138,6 @@ pub fn run() -> i32 {
         );
     }
     println!("[ushv] DTB placed at guest address {:#x}", guest_dtb_addr);
-
-    println!("[ushv] Creating vCPU 0...");
-    let mut vcpu = match vm.create_vcpu(0) {
-        Ok(vcpu) => vcpu,
-        Err(()) => {
-            println!("[ushv] Failed to create vCPU");
-            return 1;
-        }
-    };
-    println!("[ushv] vCPU created with handle {}", vcpu.handle());
 
     let timer_state = Arc::new(Mutex::new(TimerState::new()));
     timer_state.lock().set_vcpu_handle(vcpu.handle());

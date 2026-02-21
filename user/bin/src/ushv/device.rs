@@ -34,3 +34,22 @@ pub enum FdtValue {
 pub trait DeviceFdt {
     fn fdt_node(&self) -> Option<FdtNodeInfo>;
 }
+
+pub trait IrqSink: Send + Sync {
+    fn set_level(&self, level: bool);
+}
+
+#[derive(Clone)]
+pub struct IrqLine {
+    sink: alloc::sync::Arc<dyn IrqSink>,
+}
+
+impl IrqLine {
+    pub fn new(sink: alloc::sync::Arc<dyn IrqSink>) -> Self {
+        Self { sink }
+    }
+
+    pub fn set(&self, level: bool) {
+        self.sink.set_level(level);
+    }
+}

@@ -1,11 +1,11 @@
 extern crate alloc;
 
-use alloc::boxed::Box;
 use alloc::string::String;
+use alloc::sync::Arc;
 use alloc::vec;
 use scarlet_std::sync::Mutex;
 
-use crate::device::{DeviceFdt, FdtNodeInfo, FdtValue, MmioDevice};
+use crate::device::{DeviceFdt, FdtNodeInfo, FdtValue, IrqLine, IrqSink, MmioDevice};
 
 pub struct PlicConfig {
     pub base: u64,
@@ -59,8 +59,7 @@ pub struct Plic {
     enable: alloc::vec::Vec<alloc::vec::Vec<u32>>,
     threshold: alloc::vec::Vec<u32>,
     claimed: alloc::vec::Vec<u32>,
-    on_claim: Option<Box<dyn Fn(u32) + Send>>,
-    on_complete: Option<Box<dyn Fn(u32) + Send>>,
+    irq_out: alloc::vec::Vec<Option<IrqLine>>,
 }
 
 impl Plic {
@@ -75,9 +74,8 @@ impl Plic {
             enable: alloc::vec![alloc::vec![0u32; num_words]; num_contexts],
             threshold: alloc::vec![0u32; num_contexts],
             claimed: alloc::vec![0u32; num_words],
+            irq_out: alloc::vec![None; num_contexts],
             config,
-            on_claim: None,
-            on_complete: None,
         }
     }
 
@@ -88,6 +86,7 @@ impl Plic {
         let word = (source / 32) as usize;
         let bit = source % 32;
         self.pending[word] |= 1 << bit;
+        self.update_irq();
     }
 
     pub fn clear_pending(&mut self, source: u32) {
@@ -97,14 +96,22 @@ impl Plic {
         let word = (source / 32) as usize;
         let bit = source % 32;
         self.pending[word] &= !(1 << bit);
+        self.update_irq();
     }
 
-    pub fn set_on_claim<F: Fn(u32) + Send + 'static>(&mut self, f: F) {
-        self.on_claim = Some(Box::new(f));
+    pub fn set_irq_out(&mut self, context: usize, irq: IrqLine) {
+        if context < self.config.num_contexts {
+            self.irq_out[context] = Some(irq);
+        }
     }
 
-    pub fn set_on_complete<F: Fn(u32) + Send + 'static>(&mut self, f: F) {
-        self.on_complete = Some(Box::new(f));
+    fn update_irq(&self) {
+        for ctx in 0..self.config.num_contexts {
+            if let Some(ref irq_out) = self.irq_out[ctx] {
+                let best_id = self.highest_pending(ctx);
+                irq_out.set(best_id > 0);
+            }
+        }
     }
 
     fn highest_pending(&self, context: usize) -> u32 {
@@ -149,6 +156,7 @@ impl Plic {
             return;
         }
         self.priority[source as usize] = value & self.config.num_priorities;
+        self.update_irq();
     }
 
     fn read_pending(&self, word: u32) -> u32 {
@@ -173,6 +181,7 @@ impl Plic {
             return;
         }
         self.enable[context as usize][word as usize] = value;
+        self.update_irq();
     }
 
     fn read_threshold(&self, context: u32) -> u32 {
@@ -187,6 +196,7 @@ impl Plic {
             return;
         }
         self.threshold[context as usize] = value & self.config.num_priorities;
+        self.update_irq();
     }
 
     fn read_claim(&mut self, context: u32) -> u32 {
@@ -199,9 +209,7 @@ impl Plic {
             let bit = id % 32;
             self.pending[word] &= !(1 << bit);
             self.claimed[word] |= 1 << bit;
-            if let Some(ref f) = self.on_claim {
-                f(id);
-            }
+            self.update_irq();
         }
         id
     }
@@ -216,9 +224,7 @@ impl Plic {
         let word = (id / 32) as usize;
         let bit = id % 32;
         self.claimed[word] &= !(1 << bit);
-        if let Some(ref f) = self.on_complete {
-            f(id);
-        }
+        self.update_irq();
     }
 }
 
@@ -295,14 +301,30 @@ impl Default for Plic {
     }
 }
 
+#[derive(Clone)]
 pub struct PlicDevice {
-    inner: Mutex<Plic>,
+    inner: Arc<Mutex<Plic>>,
+}
+
+struct PlicIrqSink {
+    plic: PlicDevice,
+    source: u32,
+}
+
+impl IrqSink for PlicIrqSink {
+    fn set_level(&self, level: bool) {
+        if level {
+            self.plic.set_pending(self.source);
+        } else {
+            self.plic.clear_pending(self.source);
+        }
+    }
 }
 
 impl PlicDevice {
     pub fn new(config: PlicConfig) -> Self {
         Self {
-            inner: Mutex::new(Plic::new(config)),
+            inner: Arc::new(Mutex::new(Plic::new(config))),
         }
     }
 
@@ -314,12 +336,15 @@ impl PlicDevice {
         self.inner.lock().clear_pending(source);
     }
 
-    pub fn set_on_claim<F: Fn(u32) + Send + 'static>(&self, f: F) {
-        self.inner.lock().set_on_claim(f);
+    pub fn get_irq_in(&self, source: u32) -> IrqLine {
+        IrqLine::new(Arc::new(PlicIrqSink {
+            plic: self.clone(),
+            source,
+        }))
     }
 
-    pub fn set_on_complete<F: Fn(u32) + Send + 'static>(&self, f: F) {
-        self.inner.lock().set_on_complete(f);
+    pub fn set_irq_out(&self, context: usize, irq: IrqLine) {
+        self.inner.lock().set_irq_out(context, irq);
     }
 }
 

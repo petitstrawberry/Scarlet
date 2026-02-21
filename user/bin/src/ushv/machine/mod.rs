@@ -7,7 +7,7 @@ use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 
-use crate::device::MmioDevice;
+use crate::device::{IrqSink, MmioDevice};
 
 pub use dtb::DtbGenerator;
 
@@ -53,9 +53,36 @@ impl MachineConfig {
     }
 }
 
+pub struct VcpuIrqSink {
+    vcpu_handle: u32,
+}
+
+impl VcpuIrqSink {
+    pub fn new(vcpu_handle: u32) -> Self {
+        Self { vcpu_handle }
+    }
+}
+
+impl IrqSink for VcpuIrqSink {
+    fn set_level(&self, level: bool) {
+        if level {
+            use scarlet_std::syscall::{Syscall, syscall3};
+            const VCPU_CTL_INJECT_INTERRUPT: u32 = 0x04;
+            const IRQ_TYPE_EXTERNAL: usize = 2;
+            let _ = syscall3(
+                Syscall::HandleControl,
+                self.vcpu_handle as usize,
+                VCPU_CTL_INJECT_INTERRUPT as usize,
+                IRQ_TYPE_EXTERNAL,
+            );
+        }
+    }
+}
+
 pub struct Machine {
     config: MachineConfig,
     devices: Vec<Box<dyn MmioDevice>>,
+    vcpu_handle: Option<u32>,
 }
 
 impl Machine {
@@ -63,7 +90,12 @@ impl Machine {
         Self {
             devices: Vec::new(),
             config,
+            vcpu_handle: None,
         }
+    }
+
+    pub fn set_vcpu_handle(&mut self, handle: u32) {
+        self.vcpu_handle = Some(handle);
     }
 
     pub fn register<D: MmioDevice + 'static>(&mut self, device: D) {
