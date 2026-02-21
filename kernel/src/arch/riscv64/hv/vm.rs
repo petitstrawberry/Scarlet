@@ -15,7 +15,7 @@ use super::mmu::{
 };
 use super::switch::arch_run_guest_loop;
 use super::trap::arch_guest_trap_handler;
-use crate::arch::hv::csr::HypervisorCsrState;
+use crate::arch::hv::csr::{self, HypervisorCsrState};
 use crate::arch::{Arch, Trapframe, set_next_mode, set_trapvector};
 use crate::hypervisor::memory::{MemorySlot, MemorySlotFlags, MemorySlotManager};
 use crate::hypervisor::types::{InterruptType, VmExit};
@@ -60,7 +60,6 @@ impl Riscv64VcpuObject {
             let state = vm.state.lock();
             // Initialize the H-extension CSRs for this vCPU based on the VM's initial state
             state.riscv_state.restore();
-            print!("state: {:#?}", state.riscv_state);
         }
     }
 
@@ -173,10 +172,16 @@ impl VcpuObject for Riscv64VcpuObject {
         let mut guest_tf = Trapframe::new();
 
         self.setup_for_guest(task, &mut vcpu.guest, &vm);
+        // crate::println!("[vCPU {}] Guest VCPU: {:#?}", self.id, vcpu.guest);
         unsafe { arch_run_guest_loop(&mut guest_tf, &vcpu.guest, arch) };
 
         loop {
+            vcpu.guest.save(&guest_tf);
+
+            // crate::println!("[vCPU {}] Returned to host, VS CSRs: vsie={:#x}, vstvec={:#x}", self.id, csr::read_vsie(), csr::read_vstvec());
+
             self.inject_pending_interrupts();
+
 
             match arch_guest_trap_handler(&mut guest_tf, &vm) {
                 Some(exit) => {
@@ -204,6 +209,7 @@ impl VcpuObject for Riscv64VcpuObject {
                 }
                 None => {
                     vcpu.guest.save(&guest_tf);
+                    // crate::println!("[vCPU {}] Guest VCPU: {:#?}", self.id, vcpu.guest);
                     self.setup_for_guest(task, &mut vcpu.guest, &vm);
                     unsafe { arch_run_guest_loop(&mut guest_tf, &vcpu.guest, arch) };
                 }

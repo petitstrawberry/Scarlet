@@ -40,6 +40,8 @@ pub fn init_hv_per_cpu(cpu_id: usize) {
         "[shv] Initializing RISC-V H-extension CSRs for CPU {}",
         cpu_id
     );
+
+    // HS-mode CSRs
     write_hstatus(0x0); // Clear HSTATUS to start with a clean slate
     write_hcounteren(0x2); // Enable guest access to the time register (rdtime)
     write_hgatp(0); // Start with no guest page tables mapped
@@ -63,13 +65,8 @@ pub fn init_hv_per_cpu(cpu_id: usize) {
 
     write_hgeie(0); // Disable all guest external interrupts by default (When Scarlet supports AIA, we can enable specific interrupts here)
 
-    // Enable the delegated virtual interrupts
-    write_hie(
-        1 << INTERRUPT_VIRTUAL_SUPERVISOR_SOFTWARE
-            | 1 << INTERRUPT_VIRTUAL_SUPERVISOR_TIMER
-            | 1 << INTERRUPT_VIRTUAL_SUPERVISOR_EXTERNAL,
-    );
-
+    // Disable all hypervisor interrupts for now
+    write_hie(0);
     write_hvip(0); // Clear any pending virtual interrupts
 
     // VS-mode CSRs

@@ -55,6 +55,12 @@ pub fn arch_guest_trap_handler(trapframe: &mut Trapframe, vm: &Riscv64VmObject) 
     let cause = (scause & 0x7fff_ffff_ffff_ffff) as usize;
 
     if is_interrupt {
+        let vstvec = csr::read_vstvec();
+        // crate::println!(
+        //     "[guest trap] Interrupt with epc: {:#x}, vstvec={:#x}",
+        //     trapframe.epc, vstvec
+        // );
+
         if cause == SUPERVISOR_TIMER_INTERRUPT {
             tick(trapframe);
             return None;

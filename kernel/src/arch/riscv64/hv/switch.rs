@@ -3,11 +3,11 @@
 use core::arch::naked_asm;
 
 use crate::arch::{
-    Arch, Trapframe,
     hv::{
         csr::{GuestCsrState, HypervisorCsrState},
         guest_vcpu::GuestVcpu,
     },
+    Arch, Trapframe,
 };
 
 mod offset {
@@ -15,8 +15,13 @@ mod offset {
     pub const CSRS: usize = 256;
     pub const CSRS_SSCRATCH: usize = CSRS + 0;
     pub const CSRS_SEPC: usize = CSRS + 8;
+    pub const CSRS_SCAUSE: usize = CSRS + 16;
+    pub const CSRS_STVAL: usize = CSRS + 24;
+    pub const CSRS_STVEC: usize = CSRS + 32;
     pub const CSRS_SATP: usize = CSRS + 40;
     pub const CSRS_SSTATUS: usize = CSRS + 48;
+    pub const CSRS_SIE: usize = CSRS + 56;
+    pub const CSRS_SIP: usize = CSRS + 64;
     pub const PC: usize = CSRS + 72;
     pub const RISCV64_KERNEL_STACK: usize = 24;
     pub const GUEST_TRAPFRAME_PTR: usize = 40;
@@ -64,10 +69,20 @@ pub unsafe extern "C" fn arch_run_guest_loop(
         "csrw vsscratch, t0",
         "ld t0, {csrs_sepc}(t2)",
         "csrw vsepc, t0",
+        "ld t0, {csrs_scause}(t2)",
+        "csrw vscause, t0",
+        "ld t0, {csrs_stval}(t2)",
+        "csrw vstval, t0",
+        "ld t0, {csrs_stvec}(t2)",
+        "csrw vstvec, t0",
         "ld t0, {csrs_satp}(t2)",
         "csrw vsatp, t0",
         "ld t0, {csrs_sstatus}(t2)",
         "csrw vsstatus, t0",
+        "ld t0, {csrs_sie}(t2)",
+        "csrw vsie, t0",
+        "ld t0, {csrs_sip}(t2)",
+        "csrw vsip, t0",
 
         "ld x1, 8(t2)",
         "ld x2, 16(t2)",
@@ -114,8 +129,13 @@ pub unsafe extern "C" fn arch_run_guest_loop(
         guest_trapframe_ptr = const offset::GUEST_TRAPFRAME_PTR,
         csrs_sscratch = const offset::CSRS_SSCRATCH,
         csrs_sepc = const offset::CSRS_SEPC,
+        csrs_scause = const offset::CSRS_SCAUSE,
+        csrs_stval = const offset::CSRS_STVAL,
+        csrs_stvec = const offset::CSRS_STVEC,
         csrs_satp = const offset::CSRS_SATP,
         csrs_sstatus = const offset::CSRS_SSTATUS,
+        csrs_sie = const offset::CSRS_SIE,
+        csrs_sip = const offset::CSRS_SIP,
     );
 }
 
