@@ -17,7 +17,6 @@ use crate::machine::{DtbGenerator, Machine, MachineConfig};
 use firmware::{Firmware, FirmwareAction, sbi::SbiFirmware};
 use timer::{TimerState, start_timer_thread};
 
-const GUEST_MEMORY_SIZE: u64 = 16 * 1024 * 1024;
 const GUEST_ENTRY_POINT: u64 = 0x80000000;
 
 pub fn run() -> i32 {
@@ -52,8 +51,10 @@ pub fn run() -> i32 {
     };
     println!("[ushv] VM created with handle {}", vm.handle());
 
+    let mut machine = Machine::new(MachineConfig::qemu_virt());
+    let guest_memory_size = machine.config().memory_size;
     let guest_phys_base = GUEST_ENTRY_POINT;
-    let host_addr = allocate_guest_memory(GUEST_MEMORY_SIZE as usize);
+    let host_addr = allocate_guest_memory(guest_memory_size as usize);
     if host_addr == 0 {
         println!("[ushv] Failed to allocate guest memory");
         return 1;
@@ -69,17 +70,15 @@ pub fn run() -> i32 {
 
     println!(
         "[ushv] Adding memory region: guest={:#x}, size={:#x}",
-        guest_phys_base, GUEST_MEMORY_SIZE
+        guest_phys_base, guest_memory_size
     );
     if vm
-        .add_memory_region(0, guest_phys_base, GUEST_MEMORY_SIZE, host_addr as u64)
+        .add_memory_region(0, guest_phys_base, guest_memory_size, host_addr as u64)
         .is_err()
     {
         println!("[ushv] Failed to add memory region");
         return 1;
     }
-
-    let mut machine = Machine::new(MachineConfig::qemu_virt());
 
     let uart = Ns16550a::new(0x10000000);
     println!("[ushv] Registered UART at 0x10000000");
@@ -109,7 +108,7 @@ pub fn run() -> i32 {
     println!("[ushv] Generated DTB: {} bytes", dtb_blob.len());
 
     let dtb_size_aligned = (dtb_blob.len() + 7) & !7;
-    let guest_dtb_addr = GUEST_ENTRY_POINT + GUEST_MEMORY_SIZE - dtb_size_aligned as u64;
+    let guest_dtb_addr = GUEST_ENTRY_POINT + guest_memory_size - dtb_size_aligned as u64;
     let host_dtb_offset = (guest_dtb_addr - GUEST_ENTRY_POINT) as usize;
 
     unsafe {
