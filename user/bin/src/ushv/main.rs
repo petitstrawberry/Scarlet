@@ -23,6 +23,7 @@ fn main() -> i32 {
 #[cfg(not(target_arch = "riscv64"))]
 #[unsafe(no_mangle)]
 fn main() -> i32 {
+    use scarlet_std::println;
     println!("[ushv] Unsupported architecture");
     1
 }

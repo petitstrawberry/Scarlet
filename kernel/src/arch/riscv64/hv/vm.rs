@@ -4,7 +4,10 @@ use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
 use spin::Mutex;
 
-use super::csr::{read_hcounteren, read_htimedelta, write_hcounteren, write_htimedelta};
+use super::csr::{
+    read_hcounteren, read_htimedelta, write_hcounteren, write_hedeleg, write_hideleg,
+    write_htimedelta,
+};
 use super::guest_vcpu::GuestVcpu;
 use super::mmu::{
     alloc_vmid, free_stage2, get_stage2_root, init_stage2, map_stage2_page_new,
@@ -24,6 +27,8 @@ use crate::vm::{get_guest_trapvector_trampoline, get_trampoline_trap_vector};
 pub struct RiscvVmState {
     hcounteren: u64,
     htimedelta: u64,
+    hedeleg: u64,
+    hideleg: u64,
 }
 
 impl RiscvVmState {
@@ -31,6 +36,8 @@ impl RiscvVmState {
         Self {
             hcounteren: 0x02,
             htimedelta: 0,
+            hedeleg: !0,
+            hideleg: !0,
         }
     }
 
@@ -42,6 +49,8 @@ impl RiscvVmState {
     pub fn apply(&self) {
         write_hcounteren(self.hcounteren);
         write_htimedelta(self.htimedelta);
+        write_hedeleg(self.hedeleg);
+        write_hideleg(self.hideleg);
     }
 }
 
@@ -85,7 +94,7 @@ impl Riscv64VcpuObject {
     fn setup_for_guest(
         &self,
         task: &crate::task::Task,
-        vcpu: &VcpuInternalState,
+        vcpu: &mut VcpuInternalState,
         vm: &Riscv64VmObject,
     ) {
         let mode = vcpu.guest.get_mode();
@@ -96,6 +105,33 @@ impl Riscv64VcpuObject {
         task.vcpu.lock().set_mode(mode);
 
         vm.set_guest_root_pagetable();
+
+        self.inject_pending_interrupts(vcpu);
+    }
+
+    fn inject_pending_interrupts(&self, vcpu: &mut VcpuInternalState) {
+        use super::csr::{read_hvip, write_hvip};
+
+        let mut hvip = read_hvip();
+
+        const VSSIP: u64 = 1 << 2;
+        const VSTIP: u64 = 1 << 6;
+        const VSEIP: u64 = 1 << 10;
+
+        if vcpu.pending_software_irq {
+            hvip |= VSSIP;
+            vcpu.pending_software_irq = false;
+        }
+        if vcpu.pending_timer_irq {
+            hvip |= VSTIP;
+            vcpu.pending_timer_irq = false;
+        }
+        if vcpu.pending_external_irq {
+            hvip |= VSEIP;
+            vcpu.pending_external_irq = false;
+        }
+
+        write_hvip(hvip);
     }
 
     /// Prepares the current task to run the guest and saves the guest state back to the vCPU object.
@@ -144,7 +180,7 @@ impl VcpuObject for Riscv64VcpuObject {
 
         let mut guest_tf = Trapframe::new();
 
-        self.setup_for_guest(task, &vcpu, &vm);
+        self.setup_for_guest(task, &mut vcpu, &vm);
         unsafe { arch_run_guest_loop(&mut guest_tf, &vcpu.guest, arch) };
 
         loop {
@@ -174,7 +210,7 @@ impl VcpuObject for Riscv64VcpuObject {
                 }
                 None => {
                     vcpu.guest.save(&guest_tf);
-                    self.setup_for_guest(task, &vcpu, &vm);
+                    self.setup_for_guest(task, &mut vcpu, &vm);
                     unsafe { arch_run_guest_loop(&mut guest_tf, &vcpu.guest, arch) };
                 }
             }
