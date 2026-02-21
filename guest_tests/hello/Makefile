@@ -3,7 +3,7 @@ LD = riscv64-linux-gnu-ld
 OBJCOPY = riscv64-linux-gnu-objcopy
 
 CFLAGS = -march=rv64gc -mabi=lp64d
-LDFLAGS = -T linker.ld
+LDFLAGS = -T hello.lds
 
 all: hello.bin
 
