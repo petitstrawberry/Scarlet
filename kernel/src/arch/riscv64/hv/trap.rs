@@ -72,13 +72,22 @@ pub fn arch_guest_trap_handler(trapframe: &mut Trapframe, vm: &Riscv64VmObject) 
     //     read_stval(),
     //     read_htval()
     // );
+    // crate::early_println!("[guest trap] cause={}", cause);
 
     match cause {
         CAUSE_INST_GUEST_PAGE_FAULT
         | CAUSE_LOAD_GUEST_PAGE_FAULT
         | CAUSE_STORE_GUEST_PAGE_FAULT => {
-            let gpa = get_gpa();
-            // crate::early_println!("[guest pf] cause={} gpa={:#x}", cause, gpa);
+            let stval = csr::read_stval();
+            let htval = csr::read_htval();
+            let gpa = (htval << 2) | (stval & 0x3);
+            // crate::early_println!(
+            //     "[guest pf] cause={} stval={:#x} htval={:#x} gpa={:#x}",
+            //     cause,
+            //     stval,
+            //     htval,
+            //     gpa
+            // );
 
             let hgatp = csr::read_hgatp();
             let root_ppn = hgatp & 0xffff_ffff_fff;
@@ -143,7 +152,6 @@ pub fn arch_guest_trap_handler(trapframe: &mut Trapframe, vm: &Riscv64VmObject) 
             match vm.find_memory_slot(gpa) {
                 Some(slot) => {
                     let hpa = slot.gpa_to_hpa(gpa);
-                    crate::early_println!("[guest pf] slot found: hpa={:#x}", hpa);
 
                     // unsafe {
                     //     let code = core::ptr::read(hpa as *const u32);
@@ -156,7 +164,7 @@ pub fn arch_guest_trap_handler(trapframe: &mut Trapframe, vm: &Riscv64VmObject) 
                     None
                 }
                 None => {
-                    // crate::early_println!("[guest pf] no slot found, treating as MMIO");
+                    // crate::early_println!("[guest pf] no slot for gpa={:#x}", get_gpa());
                     let mmio = decode_mmio();
                     let (inst_len, size, reg) = match mmio {
                         Some(m) => (m.inst_len, m.size, m.reg),
@@ -189,6 +197,13 @@ pub fn arch_guest_trap_handler(trapframe: &mut Trapframe, vm: &Riscv64VmObject) 
         CAUSE_ECALL_FROM_VS => {
             let epc = csr::read_sepc();
             trapframe.epc = epc.wrapping_add(4);
+            // crate::early_println!(
+            //     "[ecall] sepc={:#x} a0={:#x} a1={:#x} a2={:#x}",
+            //     epc,
+            //     trapframe.regs.reg[10],
+            //     trapframe.regs.reg[11],
+            //     trapframe.regs.reg[12]
+            // );
             Some(VmExit::FirmwareCall { epc })
         }
         CAUSE_VIRTUAL_INSTRUCTION => Some(VmExit::VirtualInstruction {

@@ -189,7 +189,15 @@ fn run_vcpu_loop(vcpu: &mut Vcpu, machine: &mut Machine, firmware: &mut dyn Firm
 
         match exit.reason {
             VcpuExitReason::MmioRead => {
-                let _result = machine.handle_mmio_read(exit.mmio.address, exit.mmio.size);
+                let result = machine.handle_mmio_read(exit.mmio.address, exit.mmio.size);
+                let masked = mask_mmio_value(result, exit.mmio.size);
+                if exit.mmio.reg != 0 && vcpu.set_reg(exit.mmio.reg as u32, masked).is_err() {
+                    println!(
+                        "[ushv] Failed to write MMIO read result to reg x{}",
+                        exit.mmio.reg
+                    );
+                    return;
+                }
             }
             VcpuExitReason::MmioWrite => {
                 machine.handle_mmio_write(exit.mmio.address, exit.mmio.size, exit.mmio.data);
@@ -201,7 +209,7 @@ fn run_vcpu_loop(vcpu: &mut Vcpu, machine: &mut Machine, firmware: &mut dyn Firm
                 }
             }
             VcpuExitReason::VirtualInstruction => {
-                println!("[ushv] Virtual instruction at epc={:#x}", exit.epc);
+                // println!("[ushv] Virtual instruction at epc={:#x}", exit.epc);
             }
             VcpuExitReason::IllegalInstruction => {
                 println!("[ushv] Illegal instruction at epc={:#x}", exit.epc);
@@ -226,12 +234,21 @@ fn run_vcpu_loop(vcpu: &mut Vcpu, machine: &mut Machine, firmware: &mut dyn Firm
                 return;
             }
             VcpuExitReason::Io => {
-                println!("[ushv] I/O exit");
+                // println!("[ushv] I/O exit");
             }
             VcpuExitReason::Unknown => {
                 println!("[ushv] Unknown exit reason");
             }
         }
+    }
+}
+
+fn mask_mmio_value(value: u64, size: u8) -> u64 {
+    match size {
+        1 => value & 0xff,
+        2 => value & 0xffff,
+        4 => value & 0xffff_ffff,
+        _ => value,
     }
 }
 

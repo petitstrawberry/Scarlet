@@ -129,8 +129,22 @@ impl Firmware for SbiFirmware {
             _ => ((error::NOT_SUPPORTED, 0), FirmwareAction::Continue),
         };
 
-        let _ = vcpu.set_reg(reg::A0, error as u64);
-        let _ = vcpu.set_reg(reg::A1, value);
+        match extension {
+            eid::LEGACY_PUTCHAR => {
+                // Legacy SBI putchar has no structured (a0=error, a1=value) return.
+                // Preserve argument registers to avoid breaking guests that keep
+                // temporary values in caller-saved registers around ecall.
+            }
+            eid::LEGACY_GETCHAR => {
+                // Legacy SBI getchar returns value in a0.
+                let _ = vcpu.set_reg(reg::A0, value);
+            }
+            _ => {
+                // SBI v0.2+ convention: a0=error, a1=value
+                let _ = vcpu.set_reg(reg::A0, error as u64);
+                let _ = vcpu.set_reg(reg::A1, value);
+            }
+        }
         action
     }
 }

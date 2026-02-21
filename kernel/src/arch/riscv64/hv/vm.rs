@@ -98,6 +98,7 @@ impl Riscv64VcpuObject {
         vm.set_guest_root_pagetable();
     }
 
+    /// Prepares the current task to run the guest and saves the guest state back to the vCPU object.
     fn prepare_normal_task_and_save_guest(
         &self,
         task: &crate::task::Task,
@@ -142,6 +143,14 @@ impl VcpuObject for Riscv64VcpuObject {
         let task = mytask().ok_or("No current task")?;
 
         let mut guest_tf = Trapframe::new();
+        // let pc = vcpu.guest.get_pc();
+        // crate::early_println!(
+        //     "[vcpu run] pc={:#x} a0={:#x} a1={:#x} a2={:#x}",
+        //     pc,
+        //     vcpu.guest.get_gpr(10),
+        //     vcpu.guest.get_gpr(11),
+        //     vcpu.guest.get_gpr(12)
+        // );
 
         self.setup_for_guest(task, &vcpu, &vm);
         unsafe { arch_run_guest_loop(&mut guest_tf, &vcpu.guest, arch) };
@@ -172,6 +181,7 @@ impl VcpuObject for Riscv64VcpuObject {
                     return Ok(exit);
                 }
                 None => {
+                    vcpu.guest.save(&guest_tf);
                     self.setup_for_guest(task, &vcpu, &vm);
                     unsafe { arch_run_guest_loop(&mut guest_tf, &vcpu.guest, arch) };
                 }
