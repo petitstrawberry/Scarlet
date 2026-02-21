@@ -78,16 +78,7 @@ pub fn arch_guest_trap_handler(trapframe: &mut Trapframe, vm: &Riscv64VmObject) 
         CAUSE_INST_GUEST_PAGE_FAULT
         | CAUSE_LOAD_GUEST_PAGE_FAULT
         | CAUSE_STORE_GUEST_PAGE_FAULT => {
-            let stval = csr::read_stval();
-            let htval = csr::read_htval();
-            let gpa = (htval << 2) | (stval & 0x3);
-            // crate::early_println!(
-            //     "[guest pf] cause={} stval={:#x} htval={:#x} gpa={:#x}",
-            //     cause,
-            //     stval,
-            //     htval,
-            //     gpa
-            // );
+            let gpa = get_gpa();
 
             let hgatp = csr::read_hgatp();
             let root_ppn = hgatp & 0xffff_ffff_fff;
@@ -153,18 +144,11 @@ pub fn arch_guest_trap_handler(trapframe: &mut Trapframe, vm: &Riscv64VmObject) 
                 Some(slot) => {
                     let hpa = slot.gpa_to_hpa(gpa);
 
-                    // unsafe {
-                    //     let code = core::ptr::read(hpa as *const u32);
-                    //     crate::early_println!("[guest pf] code at hpa: {:#x}", code);
-                    // }
-
                     let writable = !slot.flags.readonly;
                     let _result = vm.map_stage2_page(gpa, hpa, writable);
-                    // crate::early_println!("[guest pf] map_stage2_page result={:?}", result);
                     None
                 }
                 None => {
-                    // crate::early_println!("[guest pf] no slot for gpa={:#x}", get_gpa());
                     let mmio = decode_mmio();
                     let (inst_len, size, reg) = match mmio {
                         Some(m) => (m.inst_len, m.size, m.reg),
@@ -197,13 +181,6 @@ pub fn arch_guest_trap_handler(trapframe: &mut Trapframe, vm: &Riscv64VmObject) 
         CAUSE_ECALL_FROM_VS => {
             let epc = csr::read_sepc();
             trapframe.epc = epc.wrapping_add(4);
-            // crate::early_println!(
-            //     "[ecall] sepc={:#x} a0={:#x} a1={:#x} a2={:#x}",
-            //     epc,
-            //     trapframe.regs.reg[10],
-            //     trapframe.regs.reg[11],
-            //     trapframe.regs.reg[12]
-            // );
             Some(VmExit::FirmwareCall { epc })
         }
         CAUSE_VIRTUAL_INSTRUCTION => Some(VmExit::VirtualInstruction {
