@@ -122,17 +122,16 @@ pub fn first_switch_to_user(task: &mut Task) -> ! {
     }
 
     // Compute trampoline exit target.
-    let trap_exit_offset = crate::arch::aarch64::trap::user::_switch_to_user as usize
-        - crate::arch::aarch64::trap::user::_user_trap_entry as usize;
+    let trap_exit_offset = (crate::arch::aarch64::trap::user::_switch_to_user as usize).wrapping_sub(crate::arch::aarch64::trap::user::_user_trap_entry as usize);
     let trampoline_base = crate::vm::get_trampoline_trap_vector();
-    let trap_exit_addr = trampoline_base + trap_exit_offset;
+    let trap_exit_addr = trampoline_base.wrapping_add(trap_exit_offset);
 
     // Program per-CPU arch pointer and VBAR to the trampoline right before the jump.
     let cpu_id = get_current_cpu_id();
     set_arch(crate::vm::get_trampoline_arch(cpu_id));
     set_trapvector(trampoline_base);
 
-    let trapframe_addr = kernel_sp as usize - core::mem::size_of::<Trapframe>();
+    let trapframe_addr = (kernel_sp as usize).wrapping_sub(core::mem::size_of::<Trapframe>());
 
     // Final transition must not touch the stack after switching SP.
     unsafe {
