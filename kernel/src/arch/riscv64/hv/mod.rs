@@ -62,7 +62,14 @@ pub fn init_hv_per_cpu(cpu_id: usize) {
     );
 
     write_hgeie(0); // Disable all guest external interrupts by default (When Scarlet supports AIA, we can enable specific interrupts here)
-    write_hie(0); // Disable all hypervisor interrupts until we set up specific ones
+
+    // Enable the delegated virtual interrupts
+    write_hie(
+        1 << INTERRUPT_VIRTUAL_SUPERVISOR_SOFTWARE
+            | 1 << INTERRUPT_VIRTUAL_SUPERVISOR_TIMER
+            | 1 << INTERRUPT_VIRTUAL_SUPERVISOR_EXTERNAL,
+    );
+
     write_hvip(0); // Clear any pending virtual interrupts
 
     // VS-mode CSRs
