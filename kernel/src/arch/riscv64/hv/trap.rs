@@ -6,8 +6,10 @@ use crate::arch::Trapframe;
 use crate::arch::hv::csr::{self, read_htinst};
 use crate::arch::hv::vm::Riscv64VmObject;
 use crate::hypervisor::types::VmExit;
+use crate::timer::tick;
 
 const CAUSE_BREAKPOINT: usize = 3;
+const SUPERVISOR_TIMER_INTERRUPT: usize = 5;
 const CAUSE_ECALL_FROM_VS: usize = 10;
 const CAUSE_INST_GUEST_PAGE_FAULT: usize = 20;
 const CAUSE_LOAD_GUEST_PAGE_FAULT: usize = 21;
@@ -48,7 +50,17 @@ fn decode_mmio() -> Option<MmioDecode> {
 }
 
 pub fn arch_guest_trap_handler(trapframe: &mut Trapframe, vm: &Riscv64VmObject) -> Option<VmExit> {
-    let cause = (csr::read_scause() & 0x7fff_ffff_ffff_ffff) as usize;
+    let scause = csr::read_scause();
+    let is_interrupt = (scause & 0x8000_0000_0000_0000) != 0;
+    let cause = (scause & 0x7fff_ffff_ffff_ffff) as usize;
+
+    if is_interrupt {
+        if cause == SUPERVISOR_TIMER_INTERRUPT {
+            tick(trapframe);
+            return None;
+        }
+        return Some(VmExit::Unknown(scause));
+    }
 
     // crate::early_println!(
     //     "[guest trap] cause={} scause={:#x}",

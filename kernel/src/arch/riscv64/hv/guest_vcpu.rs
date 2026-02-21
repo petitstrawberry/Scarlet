@@ -1,6 +1,6 @@
 //! Guest VCPU state for Type-2 hypervisor
 
-use crate::arch::hv::csr::GuestCsrState;
+use crate::arch::hv::csr::{GuestCsrState, write_hstatus, write_vsatp};
 use crate::arch::riscv64::fpu::{FpuContext, VectorContext};
 use crate::arch::riscv64::{IntRegisters, Mode, Trapframe};
 use crate::arch::vcpu::Vcpu;
@@ -142,6 +142,7 @@ impl GuestVcpu {
             reg::SEPC => Ok(self.csrs.sepc),
             reg::SCAUSE => Ok(self.csrs.scause),
             reg::STVAL => Ok(self.csrs.stval),
+            reg::STVEC => Ok(self.csrs.stvec),
             reg::SATP => Ok(self.csrs.satp),
             reg::SSCRATCH => Ok(self.csrs.sscratch),
             i if reg::IS_FREG(i) => {
@@ -190,6 +191,10 @@ impl GuestVcpu {
                 self.csrs.stval = value;
                 Ok(())
             }
+            reg::STVEC => {
+                self.csrs.stvec = value;
+                Ok(())
+            }
             reg::SATP => {
                 self.csrs.satp = value;
                 Ok(())
@@ -216,22 +221,8 @@ impl GuestVcpu {
         }
     }
 
-    fn save_csrs(&mut self) {
-        self.csrs.sscratch = csr::read_vsscratch();
-        self.csrs.sepc = csr::read_vsepc();
-        self.csrs.scause = csr::read_vscause();
-        self.csrs.stval = csr::read_vstval();
-        self.csrs.satp = csr::read_vsatp();
-        self.csrs.sstatus = csr::read_vsstatus();
-    }
-
-    fn restore_csrs(&self) {
-        csr::write_vsscratch(self.csrs.sscratch);
-        csr::write_vsepc(self.csrs.sepc);
-        csr::write_vscause(self.csrs.scause);
-        csr::write_vstval(self.csrs.stval);
-        csr::write_vsatp(self.csrs.satp);
-        csr::write_vsstatus(self.csrs.sstatus);
+    pub fn init_csrs(&self) {
+        self.csrs.restore();
     }
 
     pub fn clone_to(&self, other: &mut GuestVcpu) {

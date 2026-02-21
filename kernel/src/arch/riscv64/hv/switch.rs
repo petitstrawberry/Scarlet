@@ -15,9 +15,9 @@ mod offset {
     pub const CSRS: usize = 256;
     pub const CSRS_SSCRATCH: usize = CSRS + 0;
     pub const CSRS_SEPC: usize = CSRS + 8;
-    pub const CSRS_SATP: usize = CSRS + 32;
-    pub const CSRS_SSTATUS: usize = CSRS + 40;
-    pub const PC: usize = CSRS + 64; // Fixed: was CSRS + 48, but GuestCsrState is 64 bytes
+    pub const CSRS_SATP: usize = CSRS + 40;
+    pub const CSRS_SSTATUS: usize = CSRS + 48;
+    pub const PC: usize = CSRS + 72;
     pub const RISCV64_KERNEL_STACK: usize = 24;
     pub const GUEST_TRAPFRAME_PTR: usize = 40;
 }
@@ -99,7 +99,7 @@ pub unsafe extern "C" fn arch_run_guest_loop(
         "ld x30, 240(t2)",
         "ld x31, 248(t2)",
 
-        "ld t0, 320(t2)",
+        "ld t0, 328(t2)",
         "csrw sepc, t0",
 
         "li t0, 0x80",

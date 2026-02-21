@@ -2,11 +2,11 @@ extern crate alloc;
 
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use spin::Mutex;
 
 use super::csr::{
-    read_hcounteren, read_htimedelta, write_hcounteren, write_hedeleg, write_hideleg,
-    write_htimedelta,
+    write_hcounteren, write_hedeleg, write_hgeie, write_hideleg, write_htimedelta, write_hvip,
 };
 use super::guest_vcpu::GuestVcpu;
 use super::mmu::{
@@ -15,62 +15,30 @@ use super::mmu::{
 };
 use super::switch::arch_run_guest_loop;
 use super::trap::arch_guest_trap_handler;
+use crate::arch::hv::csr::HypervisorCsrState;
 use crate::arch::{Arch, Trapframe, set_next_mode, set_trapvector};
 use crate::hypervisor::memory::{MemorySlot, MemorySlotFlags, MemorySlotManager};
 use crate::hypervisor::types::{InterruptType, VmExit};
 use crate::hypervisor::vcpu::{VcpuId, VcpuObject};
 use crate::hypervisor::vm::{ScarletVmMemoryRegion, VmId, VmObject, vm_ctl};
+use crate::library::std::print;
 use crate::object::capability::ControlOps;
 use crate::task::mytask;
 use crate::vm::{get_guest_trapvector_trampoline, get_trampoline_trap_vector};
+use crate::{hypervisor, print};
 
-pub struct RiscvVmState {
-    hcounteren: u64,
-    htimedelta: u64,
-    hedeleg: u64,
-    hideleg: u64,
-}
-
-impl RiscvVmState {
-    pub fn new() -> Self {
-        Self {
-            hcounteren: 0x02,
-            htimedelta: 0,
-            hedeleg: !0,
-            hideleg: !0,
-        }
-    }
-
-    pub fn save(&mut self) {
-        self.hcounteren = read_hcounteren();
-        self.htimedelta = read_htimedelta();
-    }
-
-    pub fn apply(&self) {
-        write_hcounteren(self.hcounteren);
-        write_htimedelta(self.htimedelta);
-        write_hedeleg(self.hedeleg);
-        write_hideleg(self.hideleg);
-    }
-}
-
-impl Default for RiscvVmState {
-    fn default() -> Self {
-        Self::new()
-    }
-}
+pub type RiscvVmState = HypervisorCsrState;
 
 pub struct Riscv64VcpuObject {
     id: VcpuId,
     vm: Weak<Riscv64VmObject>,
     state: Mutex<VcpuInternalState>,
+    pending_irqs: AtomicU64,
+    first_run: AtomicBool,
 }
 
 struct VcpuInternalState {
     guest: GuestVcpu,
-    pending_software_irq: bool,
-    pending_timer_irq: bool,
-    pending_external_irq: bool,
 }
 
 impl Riscv64VcpuObject {
@@ -79,12 +47,21 @@ impl Riscv64VcpuObject {
             id,
             vm: Arc::downgrade(vm),
             state: Mutex::new(VcpuInternalState {
-                guest: GuestVcpu::new(0, id),
-                pending_software_irq: false,
-                pending_timer_irq: false,
-                pending_external_irq: false,
+                guest: GuestVcpu::new(vm.id(), id),
             }),
+            pending_irqs: AtomicU64::new(0),
+            first_run: AtomicBool::new(true),
         })
+    }
+
+    fn init_on_first_hart(&self, vcpu: &mut GuestVcpu, vm: &Riscv64VmObject) {
+        if self.first_run.swap(false, Ordering::AcqRel) {
+            vcpu.init_csrs();
+            let state = vm.state.lock();
+            // Initialize the H-extension CSRs for this vCPU based on the VM's initial state
+            state.riscv_state.restore();
+            print!("state: {:#?}", state.riscv_state);
+        }
     }
 
     pub fn vm_id(&self) -> VmId {
@@ -94,10 +71,11 @@ impl Riscv64VcpuObject {
     fn setup_for_guest(
         &self,
         task: &crate::task::Task,
-        vcpu: &mut VcpuInternalState,
+        vcpu: &mut GuestVcpu,
         vm: &Riscv64VmObject,
     ) {
-        let mode = vcpu.guest.get_mode();
+        self.init_on_first_hart(vcpu, vm);
+        let mode = vcpu.get_mode();
         set_next_mode(mode);
 
         let guest_tv = get_guest_trapvector_trampoline();
@@ -105,11 +83,9 @@ impl Riscv64VcpuObject {
         task.vcpu.lock().set_mode(mode);
 
         vm.set_guest_root_pagetable();
-
-        self.inject_pending_interrupts(vcpu);
     }
 
-    fn inject_pending_interrupts(&self, vcpu: &mut VcpuInternalState) {
+    fn inject_pending_interrupts(&self) {
         use super::csr::{read_hvip, write_hvip};
 
         let mut hvip = read_hvip();
@@ -118,17 +94,25 @@ impl Riscv64VcpuObject {
         const VSTIP: u64 = 1 << 6;
         const VSEIP: u64 = 1 << 10;
 
-        if vcpu.pending_software_irq {
+        let pending = self.pending_irqs.swap(0, Ordering::AcqRel);
+        if pending > 0 {
+            crate::println!("[vCPU {}] Checking pending interrupts", self.id);
+            crate::println!(
+                "[vCPU {}] Current HVIP: {:#x}, pending: {:#x}",
+                self.id,
+                hvip,
+                pending
+            );
+        }
+
+        if (pending & VSSIP) != 0 {
             hvip |= VSSIP;
-            vcpu.pending_software_irq = false;
         }
-        if vcpu.pending_timer_irq {
+        if (pending & VSTIP) != 0 {
             hvip |= VSTIP;
-            vcpu.pending_timer_irq = false;
         }
-        if vcpu.pending_external_irq {
+        if (pending & VSEIP) != 0 {
             hvip |= VSEIP;
-            vcpu.pending_external_irq = false;
         }
 
         write_hvip(hvip);
@@ -138,11 +122,11 @@ impl Riscv64VcpuObject {
     fn prepare_normal_task_and_save_guest(
         &self,
         task: &crate::task::Task,
-        vcpu: &mut VcpuInternalState,
+        vcpu: &mut GuestVcpu,
         guest_tf: &Trapframe,
     ) {
         let mut task_vcpu = task.vcpu.lock();
-        vcpu.guest.save(guest_tf);
+        vcpu.save(guest_tf);
         task_vcpu.set_mode(crate::arch::Mode::User);
         set_next_mode(task_vcpu.get_mode());
         set_trapvector(get_trampoline_trap_vector());
@@ -155,12 +139,20 @@ impl VcpuObject for Riscv64VcpuObject {
     }
 
     fn inject_interrupt(&self, irq_type: InterruptType) {
-        let mut state = self.state.lock();
-        match irq_type {
-            InterruptType::Software => state.pending_software_irq = true,
-            InterruptType::Timer => state.pending_timer_irq = true,
-            InterruptType::External => state.pending_external_irq = true,
-        }
+        let bit = match irq_type {
+            InterruptType::Software => 1 << 2,
+            InterruptType::Timer => 1 << 6,
+            InterruptType::External => 1 << 10,
+        };
+
+        crate::println!(
+            "[vCPU {}] Injecting interrupt: {:?} (bit {})",
+            self.id,
+            irq_type,
+            bit
+        );
+
+        self.pending_irqs.fetch_or(bit, Ordering::Release);
     }
 
     fn get_reg(&self, index: u32) -> Result<u64, &'static str> {
@@ -180,13 +172,15 @@ impl VcpuObject for Riscv64VcpuObject {
 
         let mut guest_tf = Trapframe::new();
 
-        self.setup_for_guest(task, &mut vcpu, &vm);
+        self.setup_for_guest(task, &mut vcpu.guest, &vm);
         unsafe { arch_run_guest_loop(&mut guest_tf, &vcpu.guest, arch) };
 
         loop {
+            self.inject_pending_interrupts();
+
             match arch_guest_trap_handler(&mut guest_tf, &vm) {
                 Some(exit) => {
-                    self.prepare_normal_task_and_save_guest(task, &mut vcpu, &mut guest_tf);
+                    self.prepare_normal_task_and_save_guest(task, &mut vcpu.guest, &mut guest_tf);
 
                     if let VmExit::MmioWrite {
                         epc,
@@ -210,7 +204,7 @@ impl VcpuObject for Riscv64VcpuObject {
                 }
                 None => {
                     vcpu.guest.save(&guest_tf);
-                    self.setup_for_guest(task, &mut vcpu, &vm);
+                    self.setup_for_guest(task, &mut vcpu.guest, &vm);
                     unsafe { arch_run_guest_loop(&mut guest_tf, &vcpu.guest, arch) };
                 }
             }
@@ -282,7 +276,6 @@ impl Riscv64VmObject {
             let root = unsafe { &*root };
             set_guest_root_stage2(root, state.vmid);
         }
-        state.riscv_state.apply();
     }
 
     pub fn verify_guest_root_pagetable(&self) {

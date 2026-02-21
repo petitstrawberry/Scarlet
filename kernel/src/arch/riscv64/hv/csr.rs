@@ -40,6 +40,12 @@ macro_rules! csr_write {
 csr_read!(read_hstatus, "hstatus");
 csr_write!(write_hstatus, "hstatus");
 
+csr_read!(read_hcounteren, "hcounteren");
+csr_write!(write_hcounteren, "hcounteren");
+
+csr_read!(read_htimedelta, "htimedelta");
+csr_write!(write_htimedelta, "htimedelta");
+
 csr_read!(read_hgatp, "hgatp");
 csr_write!(write_hgatp, "hgatp");
 
@@ -55,6 +61,15 @@ csr_write!(write_hideleg, "hideleg");
 
 csr_read!(read_hedeleg, "hedeleg");
 csr_write!(write_hedeleg, "hedeleg");
+
+csr_read!(read_hvip, "hvip");
+csr_write!(write_hvip, "hvip");
+
+csr_read!(read_hip, "hip");
+// csr_write!(write_hip, "hip");
+
+csr_read!(read_hie, "hie");
+csr_write!(write_hie, "hie");
 
 csr_read!(read_htval, "htval");
 csr_read!(read_htinst, "htinst");
@@ -72,6 +87,9 @@ csr_write!(write_vscause, "vscause");
 csr_read!(read_vstval, "vstval");
 csr_write!(write_vstval, "vstval");
 
+csr_read!(read_vstvec, "vstvec");
+csr_write!(write_vstvec, "vstvec");
+
 csr_read!(read_vsatp, "vsatp");
 csr_write!(write_vsatp, "vsatp");
 
@@ -83,15 +101,6 @@ csr_write!(write_vsie, "vsie");
 
 csr_read!(read_vsip, "vsip");
 csr_write!(write_vsip, "vsip");
-
-csr_read!(read_hvip, "hvip");
-csr_write!(write_hvip, "hvip");
-
-csr_read!(read_hcounteren, "hcounteren");
-csr_write!(write_hcounteren, "hcounteren");
-
-csr_read!(read_htimedelta, "htimedelta");
-csr_write!(write_htimedelta, "htimedelta");
 
 csr_read!(read_vstimecmp, "vstimecmp");
 csr_write!(write_vstimecmp, "vstimecmp");
@@ -108,6 +117,7 @@ pub struct GuestCsrState {
     pub sepc: u64,
     pub scause: u64,
     pub stval: u64,
+    pub stvec: u64,
     pub satp: u64,
     pub sstatus: u64,
     pub sie: u64,
@@ -121,6 +131,7 @@ impl GuestCsrState {
             sepc: read_vsepc(),
             scause: read_vscause(),
             stval: read_vstval(),
+            stvec: read_vstvec(),
             satp: read_vsatp(),
             sstatus: read_vsstatus(),
             sie: read_vsie(),
@@ -133,6 +144,7 @@ impl GuestCsrState {
         write_vsepc(self.sepc);
         write_vscause(self.scause);
         write_vstval(self.stval);
+        write_vstvec(self.stvec);
         write_vsatp(self.satp);
         write_vsstatus(self.sstatus);
         write_vsie(self.sie);
@@ -143,37 +155,48 @@ impl GuestCsrState {
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Default)]
 pub struct HypervisorCsrState {
-    pub hstatus: u64,
     pub hgatp: u64,
-    pub hgeie: u64,
-    pub hideleg: u64,
-    pub hedeleg: u64,
-    pub hcounteren: u64,
     pub htimedelta: u64,
     pub hvip: u64,
+    // Fiexed values for these CSRs to ensure correct hypervisor behavior
+    // pub hideleg: u64,
+    // pub hedeleg: u64,
+    // pub hgeie: u64,
+    // pub hcounteren: u64,
 }
 
 impl HypervisorCsrState {
-    pub fn save() -> Self {
+    pub fn new() -> Self {
         Self {
-            hstatus: read_hstatus(),
-            hgatp: read_hgatp(),
-            hgeie: read_hgeie(),
-            hideleg: read_hideleg(),
-            hedeleg: read_hedeleg(),
-            hcounteren: read_hcounteren(),
-            htimedelta: read_htimedelta(),
-            hvip: read_hvip(),
+            hgatp: 0,
+            htimedelta: 0,
+            hvip: 0,
+            // hideleg: !0, // Delegate all interrupts to guest mode by default
+            // hedeleg: !0, // Delegate all exceptions to guest mode by default
+            // hgeie: 0, // Disable all guest external interrupts by default (When Scarlet supports AIA, we can enable specific interrupts here)
+            // hcounteren: 0x2, // Enable guest access to the time register (rdtime)
         }
     }
 
+    pub fn save() -> Self {
+        let state = Self {
+            hgatp: read_hgatp(),
+            // hideleg: read_hideleg(),
+            // hedeleg: read_hedeleg(),
+            // hcounteren: read_hcounteren(),
+            // hgeie: read_hgeie(),
+            htimedelta: read_htimedelta(),
+            hvip: read_hvip(),
+        };
+        state
+    }
+
     pub fn restore(&self) {
-        write_hstatus(self.hstatus);
         write_hgatp(self.hgatp);
-        write_hgeie(self.hgeie);
-        write_hideleg(self.hideleg);
-        write_hedeleg(self.hedeleg);
-        write_hcounteren(self.hcounteren);
+        // write_hideleg(self.hideleg);
+        // write_hedeleg(self.hedeleg);
+        // write_hgeie(self.hgeie);
+        // write_hcounteren(self.hcounteren);
         write_htimedelta(self.htimedelta);
         write_hvip(self.hvip);
     }

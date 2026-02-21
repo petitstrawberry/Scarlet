@@ -17,3 +17,11 @@ use crate::hypervisor::vm::VmId;
 pub fn create_vm(id: VmId) -> Result<Arc<Vm>, &'static str> {
     Ok(Arc::new(vm::Vm::new(id)))
 }
+
+pub fn arch_init_hv() {
+    crate::println!("[shv] Initializing AArch64 hypervisor support (Not implemented yet)");
+}
+
+pub fn init_hv_per_cpu(cpu_id: usize) {
+    // crate::println!("[shv] Initializing AArch64 CSRs for CPU {}", cpu_id);
+}
