@@ -1252,15 +1252,31 @@ impl ScarletAbi {
         vaddr: usize,
         data: &[u8],
     ) -> Result<(), &'static str> {
-        match task.vm_manager.translate_vaddr(vaddr) {
-            Some(paddr) => {
-                unsafe {
-                    core::ptr::copy_nonoverlapping(data.as_ptr(), paddr as *mut u8, data.len());
+        let mut written = 0usize;
+        while written < data.len() {
+            let current_vaddr = vaddr + written;
+            let page_off = current_vaddr & (crate::environment::PAGE_SIZE - 1);
+            let chunk_len = core::cmp::min(
+                data.len() - written,
+                crate::environment::PAGE_SIZE - page_off,
+            );
+
+            match task.vm_manager.translate_vaddr(current_vaddr) {
+                Some(paddr) => {
+                    unsafe {
+                        core::ptr::copy_nonoverlapping(
+                            data[written..written + chunk_len].as_ptr(),
+                            paddr as *mut u8,
+                            chunk_len,
+                        );
+                    }
+                    written += chunk_len;
                 }
-                Ok(())
+                None => return Err("Failed to translate virtual address for stack write"),
             }
-            None => Err("Failed to translate virtual address for stack write"),
         }
+
+        Ok(())
     }
 
     /// Write a null-terminated string to stack memory
