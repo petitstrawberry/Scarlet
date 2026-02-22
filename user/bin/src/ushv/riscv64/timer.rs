@@ -2,11 +2,23 @@ extern crate alloc;
 
 use alloc::sync::Arc;
 use core::time::Duration;
+use scarlet_std::handle::Handle;
+use scarlet_std::hypervisor::Vcpu;
+use scarlet_std::io::Read;
 use scarlet_std::sync::Mutex;
 use scarlet_std::thread;
 
+use crate::devices::uart::Ns16550a;
+
 pub const TIMER_IRQ_TYPE: usize = 1;
-const TIMEBASE_FREQ: u64 = 10_000_000; // 10 MHz
+pub const EXTERNAL_IRQ_TYPE: usize = 2;
+const TIMEBASE_FREQ: u64 = 10_000_000;
+
+const SCTL_TTY_SET_CANONICAL: u32 = 0x01;
+const SCTL_TTY_SET_ECHO: u32 = 0x02;
+const SCTL_TTY_SET_KBMODE: u32 = 0x03;
+const SCTL_TTY_SET_READ_POLICY: u32 = 0x04;
+const KB_XLATE: usize = 0x01;
 
 pub struct TimerState {
     next_timer: Option<u64>,
@@ -48,6 +60,50 @@ pub fn start_timer_thread(state: Arc<Mutex<TimerState>>) {
     });
 }
 
+pub fn start_uart_thread(uart: Ns16550a, vcpu: Arc<Vcpu>) {
+    thread::spawn(move || {
+        uart_loop(uart, vcpu);
+    });
+}
+
+fn set_raw_mode() {
+    if let Ok(stdin_handle) = unsafe { Handle::from_raw(0) } {
+        let _ = stdin_handle.control(SCTL_TTY_SET_CANONICAL, 0);
+        let _ = stdin_handle.control(SCTL_TTY_SET_ECHO, 0);
+        let _ = stdin_handle.control(SCTL_TTY_SET_KBMODE, KB_XLATE);
+        let _ = stdin_handle.control(SCTL_TTY_SET_READ_POLICY, 1);
+        core::mem::forget(stdin_handle);
+    }
+}
+
+fn uart_loop(uart: Ns16550a, vcpu: Arc<Vcpu>) {
+    set_raw_mode();
+
+    let stdin = scarlet_std::io::stdin();
+    let mut buf = [0u8; 1];
+
+    loop {
+        match stdin.read(&mut buf) {
+            Ok(1) => {
+                uart.trigger_rx_with_byte(buf[0]);
+                let _ = vcpu.inject_interrupt(EXTERNAL_IRQ_TYPE);
+            }
+            _ => {}
+        }
+    }
+}
+
+fn inject_timer_interrupt(vcpu_handle: u32) {
+    use scarlet_std::syscall::{Syscall, syscall3};
+    const VCPU_CTL_INJECT_INTERRUPT: u32 = 0x04;
+    let _ = syscall3(
+        Syscall::HandleControl,
+        vcpu_handle as usize,
+        VCPU_CTL_INJECT_INTERRUPT as usize,
+        TIMER_IRQ_TYPE,
+    );
+}
+
 fn timer_loop(state: Arc<Mutex<TimerState>>) {
     loop {
         let sleep_duration = {
@@ -74,17 +130,6 @@ fn timer_loop(state: Arc<Mutex<TimerState>>) {
             thread::sleep(sleep_duration);
         }
     }
-}
-
-fn inject_timer_interrupt(vcpu_handle: u32) {
-    use scarlet_std::syscall::{Syscall, syscall3};
-    const VCPU_CTL_INJECT_INTERRUPT: u32 = 0x04;
-    let _ = syscall3(
-        Syscall::HandleControl,
-        vcpu_handle as usize,
-        VCPU_CTL_INJECT_INTERRUPT as usize,
-        TIMER_IRQ_TYPE,
-    );
 }
 
 fn read_time() -> u64 {

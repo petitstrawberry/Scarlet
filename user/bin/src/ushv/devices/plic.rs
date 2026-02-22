@@ -3,7 +3,7 @@ extern crate alloc;
 use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec;
-use scarlet_std::sync::Mutex;
+use scarlet_std::{println, sync::Mutex};
 
 use crate::device::{DeviceFdt, FdtNodeInfo, FdtValue, IrqLine, IrqSink, MmioDevice};
 
@@ -83,6 +83,7 @@ impl Plic {
         if source == 0 || source as usize >= self.config.num_sources {
             return;
         }
+        println!("[PLIC] set_pending: source={}", source);
         let word = (source / 32) as usize;
         let bit = source % 32;
         self.pending[word] |= 1 << bit;
@@ -109,6 +110,12 @@ impl Plic {
         for ctx in 0..self.config.num_contexts {
             if let Some(ref irq_out) = self.irq_out[ctx] {
                 let best_id = self.highest_pending(ctx);
+                println!(
+                    "[PLIC] update_irq: ctx={}, best_id={}, asserting={}",
+                    ctx,
+                    best_id,
+                    best_id > 0
+                );
                 irq_out.set(best_id > 0);
             }
         }
@@ -313,6 +320,10 @@ struct PlicIrqSink {
 
 impl IrqSink for PlicIrqSink {
     fn set_level(&self, level: bool) {
+        println!(
+            "[PLIC] PlicIrqSink::set_level: source={}, level={}",
+            self.source, level
+        );
         if level {
             self.plic.set_pending(self.source);
         } else {

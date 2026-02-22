@@ -16,7 +16,7 @@ use crate::devices::plic::{PlicConfig, PlicDevice};
 use crate::devices::uart::Ns16550a;
 use crate::machine::{DtbGenerator, Machine, MachineConfig, VcpuIrqSink};
 use firmware::{Firmware, FirmwareAction, sbi::SbiFirmware};
-use timer::{TimerState, start_timer_thread};
+use timer::{TimerState, start_timer_thread, start_uart_thread};
 
 const GUEST_ENTRY_POINT: u64 = 0x80000000;
 
@@ -82,7 +82,7 @@ pub fn run() -> i32 {
     }
 
     println!("[ushv] Creating vCPU 0...");
-    let mut vcpu = match vm.create_vcpu(0) {
+    let vcpu = match vm.create_vcpu(0) {
         Ok(vcpu) => vcpu,
         Err(()) => {
             println!("[ushv] Failed to create vCPU");
@@ -91,6 +91,7 @@ pub fn run() -> i32 {
     };
     println!("[ushv] vCPU created with handle {}", vcpu.handle());
 
+    let vcpu = Arc::new(vcpu);
     machine.set_vcpu_handle(vcpu.handle());
 
     let plic = PlicDevice::new(PlicConfig {
@@ -108,6 +109,8 @@ pub fn run() -> i32 {
     let uart = Ns16550a::new(0x10000000);
     uart.set_irq_out(plic.get_irq_in(10));
     println!("[ushv] Registered UART at 0x10000000");
+
+    let uart_for_thread = uart.clone_inner();
 
     machine.register(plic);
     machine.register(uart);
@@ -144,6 +147,9 @@ pub fn run() -> i32 {
     start_timer_thread(Arc::clone(&timer_state));
     println!("[ushv] Timer thread started");
 
+    start_uart_thread(uart_for_thread, Arc::clone(&vcpu));
+    println!("[ushv] UART thread started");
+
     println!("[ushv] Setting entry point to {:#x}", GUEST_ENTRY_POINT);
     if vcpu.set_reg(reg::PC, GUEST_ENTRY_POINT).is_err() {
         println!("[ushv] Failed to set entry point");
@@ -168,7 +174,7 @@ pub fn run() -> i32 {
     firmware.set_timer_state(Arc::clone(&timer_state));
 
     println!("[ushv] Starting vCPU run loop...");
-    run_vcpu_loop(&mut vcpu, &mut machine, &mut firmware);
+    run_vcpu_loop(&vcpu, &mut machine, &mut firmware);
 
     println!("[ushv] VM terminated");
     0
@@ -185,7 +191,7 @@ fn generate_dtb(machine: &Machine) -> Option<Vec<u8>> {
     }
 }
 
-fn run_vcpu_loop(vcpu: &mut Vcpu, machine: &mut Machine, firmware: &mut dyn Firmware) {
+fn run_vcpu_loop(vcpu: &Vcpu, machine: &mut Machine, firmware: &mut dyn Firmware) {
     loop {
         let exit = match vcpu.run() {
             Ok(exit) => exit,

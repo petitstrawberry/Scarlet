@@ -163,19 +163,35 @@ pub struct Vcpu {
     vm_handle: u32,
 }
 
+// Vcpu is safe to send between threads and share because:
+// - Internal state is just u32 handles
+// - Kernel provides thread-safe access to vCPU operations
+// - All methods use &self (immutable borrows)
+unsafe impl Send for Vcpu {}
+unsafe impl Sync for Vcpu {}
+
+impl Clone for Vcpu {
+    fn clone(&self) -> Self {
+        Self {
+            handle: self.handle,
+            vm_handle: self.vm_handle,
+        }
+    }
+}
+
 impl Vcpu {
-    pub fn run(&mut self) -> Result<VcpuExit, ()> {
+    pub fn run(&self) -> Result<VcpuExit, ()> {
         let mut exit = VcpuExit::default();
         vcpu_run(self.handle, &mut exit)?;
         Ok(exit)
     }
 
-    pub fn get_reg(&mut self, index: u32) -> Result<u64, ()> {
+    pub fn get_reg(&self, index: u32) -> Result<u64, ()> {
         let result = vcpu_control(self.handle, vcpu_ctl::GET_ONE_REG, index as usize)?;
         Ok(result as u64)
     }
 
-    pub fn set_reg(&mut self, index: u32, value: u64) -> Result<(), ()> {
+    pub fn set_reg(&self, index: u32, value: u64) -> Result<(), ()> {
         let one_reg = VcpuOneReg {
             index,
             _padding: 0,

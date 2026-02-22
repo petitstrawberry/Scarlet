@@ -1,7 +1,7 @@
 use super::{Firmware, FirmwareAction};
 use crate::riscv64::timer::TimerState;
 use alloc::sync::Arc;
-use scarlet_std::hypervisor::{Vcpu, arch::reg};
+use scarlet_std::hypervisor::{arch::reg, Vcpu};
 use scarlet_std::sync::Mutex;
 
 // TODO: SBI v2.0/v3.0 Required Extensions Implementation Status
@@ -109,7 +109,7 @@ impl SbiFirmware {
 }
 
 impl Firmware for SbiFirmware {
-    fn handle(&mut self, vcpu: &mut Vcpu) -> FirmwareAction {
+    fn handle(&mut self, vcpu: &Vcpu) -> FirmwareAction {
         let extension = vcpu.get_reg(reg::A7).unwrap_or(0);
         let function = vcpu.get_reg(reg::A6).unwrap_or(0);
         let a0 = vcpu.get_reg(reg::A0).unwrap_or(0);
@@ -182,7 +182,7 @@ impl SbiFirmware {
         &mut self,
         function: u64,
         a0: u64,
-        vcpu: &mut Vcpu,
+        vcpu: &Vcpu,
     ) -> ((i64, u64), FirmwareAction) {
         match function {
             fid::timer::SET_TIMER => {

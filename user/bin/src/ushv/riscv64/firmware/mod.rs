@@ -10,5 +10,5 @@ pub enum FirmwareAction {
 }
 
 pub trait Firmware {
-    fn handle(&mut self, vcpu: &mut Vcpu) -> FirmwareAction;
+    fn handle(&mut self, vcpu: &Vcpu) -> FirmwareAction;
 }

@@ -1,8 +1,9 @@
 extern crate alloc;
 
 use alloc::string::String;
+use alloc::sync::Arc;
 use alloc::vec;
-use scarlet_std::sync::RwLock;
+use scarlet_std::{println, sync::RwLock};
 
 use crate::device::{DeviceFdt, FdtNodeInfo, FdtValue, IrqLine, MmioDevice};
 use scarlet_std::print;
@@ -28,6 +29,7 @@ struct UartInner {
     lcr: u8,
     lsr: u8,
     scr: u8,
+    rx_byte: Option<u8>,
 }
 
 impl UartInner {
@@ -39,33 +41,55 @@ impl UartInner {
             lcr: 0,
             lsr: LSR_TX_EMPTY,
             scr: 0,
+            rx_byte: None,
         }
     }
 }
 
 pub struct Ns16550a {
-    inner: RwLock<UartInner>,
+    inner: Arc<RwLock<UartInner>>,
 }
 
 impl Ns16550a {
     pub fn new(base: u64) -> Self {
         Self {
-            inner: RwLock::new(UartInner::new(base, 10)),
+            inner: Arc::new(RwLock::new(UartInner::new(base, 10))),
         }
     }
 
     pub fn with_irq(base: u64, irq: u32) -> Self {
         Self {
-            inner: RwLock::new(UartInner::new(base, irq)),
+            inner: Arc::new(RwLock::new(UartInner::new(base, irq))),
+        }
+    }
+
+    pub fn clone_inner(&self) -> Self {
+        Self {
+            inner: Arc::clone(&self.inner),
         }
     }
 
     pub fn set_irq_out(&self, irq_line: IrqLine) {
+        println!("[UART] set_irq_out: irq_line set");
         self.inner.write().irq_out = Some(irq_line);
     }
 
     pub fn trigger_rx(&self) {
         let mut inner = self.inner.write();
+        inner.lsr |= LSR_RX_READY;
+        println!(
+            "[UART] trigger_rx: lsr={:#x}, irq_out={}",
+            inner.lsr,
+            inner.irq_out.is_some()
+        );
+        if let Some(ref irq_out) = inner.irq_out {
+            irq_out.set(true);
+        }
+    }
+
+    pub fn trigger_rx_with_byte(&self, byte: u8) {
+        let mut inner = self.inner.write();
+        inner.rx_byte = Some(byte);
         inner.lsr |= LSR_RX_READY;
         if let Some(ref irq_out) = inner.irq_out {
             irq_out.set(true);
@@ -90,7 +114,7 @@ impl MmioDevice for Ns16550a {
                 if let Some(ref irq_out) = inner.irq_out {
                     irq_out.set(false);
                 }
-                0
+                inner.rx_byte.take().unwrap_or(0) as u64
             }
             IER => 0,
             IIR => 0x01,
