@@ -4,7 +4,7 @@ use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
-use scarlet_std::hypervisor::{arch::reg, Vcpu, VcpuExitReason, Vm};
+use scarlet_std::hypervisor::{Vcpu, VcpuExitReason, Vm, arch::reg};
 use scarlet_std::println;
 use scarlet_std::sync::Mutex;
 
@@ -15,8 +15,8 @@ use crate::device::IrqLine;
 use crate::devices::plic::{PlicConfig, PlicDevice};
 use crate::devices::uart::Ns16550a;
 use crate::machine::{DtbGenerator, Machine, MachineConfig, VcpuIrqSink};
-use firmware::{sbi::SbiFirmware, Firmware, FirmwareAction};
-use timer::{start_timer_thread, start_uart_thread, TimerState};
+use firmware::{Firmware, FirmwareAction, sbi::SbiFirmware};
+use timer::{TimerState, start_timer_thread, start_uart_thread};
 
 const GUEST_ENTRY_POINT: u64 = 0x80000000;
 

@@ -4,7 +4,7 @@
 //! memory mapping operations.
 
 use crate::handle::Handle;
-use crate::syscall::{syscall2, syscall6, Syscall};
+use crate::syscall::{Syscall, syscall2, syscall6};
 
 /// Memory mapping protection flags (PROT_*)
 pub mod prot {
