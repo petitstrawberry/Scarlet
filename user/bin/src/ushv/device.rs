@@ -4,13 +4,12 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::any::Any;
 
-pub trait MmioDevice {
+pub trait MmioDevice: Send + Sync {
     fn base(&self) -> u64;
     fn size(&self) -> u64;
-    fn read(&mut self, offset: u64, size: u8) -> u64;
-    fn write(&mut self, offset: u64, size: u8, data: u64);
+    fn read(&self, offset: u64, size: u8) -> u64;
+    fn write(&self, offset: u64, size: u8, data: u64);
     fn as_any(&self) -> &dyn Any;
-    fn as_any_mut(&mut self) -> &mut dyn Any;
 }
 
 pub struct FdtNodeInfo {

@@ -111,10 +111,6 @@ impl Machine {
         &self.devices
     }
 
-    pub fn devices_mut(&mut self) -> &mut [Box<dyn MmioDevice>] {
-        &mut self.devices
-    }
-
     pub fn config(&self) -> &MachineConfig {
         &self.config
     }
@@ -130,7 +126,7 @@ impl Machine {
         None
     }
 
-    pub fn handle_mmio_read(&mut self, addr: u64, size: u8) -> u64 {
+    pub fn handle_mmio_read(&self, addr: u64, size: u8) -> u64 {
         if let Some((idx, offset)) = self.find_device(addr) {
             self.devices[idx].read(offset, size)
         } else {
@@ -138,7 +134,7 @@ impl Machine {
         }
     }
 
-    pub fn handle_mmio_write(&mut self, addr: u64, size: u8, data: u64) {
+    pub fn handle_mmio_write(&self, addr: u64, size: u8, data: u64) {
         if let Some((idx, offset)) = self.find_device(addr) {
             self.devices[idx].write(offset, size, data);
         }
