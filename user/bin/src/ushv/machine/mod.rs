@@ -66,10 +66,6 @@ impl VcpuIrqSink {
 
 impl IrqSink for VcpuIrqSink {
     fn set_level(&self, level: bool) {
-        println!(
-            "[VcpuIrqSink] set_level: vcpu_handle={}, level={}",
-            self.vcpu_handle, level
-        );
         if level {
             use scarlet_std::syscall::{Syscall, syscall3};
             const VCPU_CTL_INJECT_INTERRUPT: u32 = 0x04;

@@ -4,7 +4,7 @@ use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec;
 use core::sync::atomic::{AtomicU32, Ordering};
-use scarlet_std::sync::RwLock;
+use scarlet_std::{println, sync::RwLock};
 
 use crate::device::{DeviceFdt, FdtNodeInfo, FdtValue, IrqLine, IrqSink, MmioDevice};
 

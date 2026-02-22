@@ -119,11 +119,12 @@ impl MmioDevice for Ns16550a {
                 if let Some(ref irq_out) = *self.irq_out.read() {
                     irq_out.set(false);
                 }
-                if self.rx_valid.swap(false, Ordering::Acquire) {
-                    self.rx_byte.load(Ordering::Relaxed) as u64
+                let byte = if self.rx_valid.swap(false, Ordering::Acquire) {
+                    self.rx_byte.load(Ordering::Relaxed)
                 } else {
                     0
-                }
+                };
+                byte as u64
             }
             IER => 0,
             IIR => 0x01,

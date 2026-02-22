@@ -2,9 +2,9 @@
 
 use core::arch::asm;
 
-use crate::arch::Trapframe;
 use crate::arch::hv::csr::{self, read_htinst};
 use crate::arch::hv::vm::Riscv64VmObject;
+use crate::arch::Trapframe;
 use crate::hypervisor::types::VmExit;
 use crate::timer::tick;
 
@@ -47,6 +47,56 @@ fn decode_mmio() -> Option<MmioDecode> {
         size,
         reg,
     })
+}
+
+fn fetch_guest_inst(gpa: u64) -> u32 {
+    let sepc = csr::read_sepc();
+    unsafe {
+        let ptr = sepc as *const u32;
+        if ptr.align_offset(4) == 0 {
+            core::ptr::read_volatile(ptr)
+        } else {
+            let b0 = core::ptr::read_volatile(sepc as *const u8) as u32;
+            let b1 = core::ptr::read_volatile((sepc + 1) as *const u8) as u32;
+            let b2 = core::ptr::read_volatile((sepc + 2) as *const u8) as u32;
+            let b3 = core::ptr::read_volatile((sepc + 3) as *const u8) as u32;
+            b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)
+        }
+    }
+}
+
+fn decode_load_store_inst(inst: u32) -> Option<(u8, u8, bool, u8)> {
+    let opcode = inst & 0x7f;
+
+    match opcode {
+        0b0100011 => {
+            let funct3 = (inst >> 12) & 0x7;
+            let rs2 = ((inst >> 20) & 0x1f) as u8;
+            let size = match funct3 {
+                0b000 => 1,
+                0b001 => 2,
+                0b010 => 4,
+                0b011 => 8,
+                _ => return None,
+            };
+            Some((size, 0, true, rs2))
+        }
+        0b0000011 => {
+            let funct3 = (inst >> 12) & 0x7;
+            let rd = ((inst >> 7) & 0x1f) as u8;
+            let size = match funct3 {
+                0b000 => 1,
+                0b001 => 2,
+                0b010 => 4,
+                0b011 => 8,
+                0b100 => 1,
+                0b101 => 2,
+                _ => return None,
+            };
+            Some((size, rd, false, rd))
+        }
+        _ => None,
+    }
 }
 
 pub fn arch_guest_trap_handler(trapframe: &mut Trapframe, vm: &Riscv64VmObject) -> Option<VmExit> {
@@ -167,23 +217,40 @@ pub fn arch_guest_trap_handler(trapframe: &mut Trapframe, vm: &Riscv64VmObject) 
                     None
                 }
                 None => {
-                    let mmio = decode_mmio();
-                    let (inst_len, size, reg) = match mmio {
-                        Some(m) => (m.inst_len, m.size, m.reg),
-                        None => (4, 8, 0),
+                    let is_write = cause == CAUSE_STORE_GUEST_PAGE_FAULT;
+
+                    let (inst_len, size, reg, data) = if let Some(m) = decode_mmio() {
+                        let data = if is_write && m.reg != 0 {
+                            trapframe.regs.reg[m.reg as usize] as u64
+                        } else {
+                            0
+                        };
+                        (m.inst_len, m.size, m.reg, data)
+                    } else {
+                        let inst = fetch_guest_inst(gpa);
+                        if let Some((sz, _base_reg, is_st, data_reg)) = decode_load_store_inst(inst)
+                        {
+                            let data = if is_st && data_reg != 0 {
+                                trapframe.regs.reg[data_reg as usize] as u64
+                            } else {
+                                0
+                            };
+                            (4, sz, data_reg, data)
+                        } else {
+                            (4, 8, 0, 0)
+                        }
                     };
 
                     let epc = csr::read_sepc();
                     trapframe.epc = epc.wrapping_add(inst_len as u64);
 
-                    let is_write = cause == CAUSE_STORE_GUEST_PAGE_FAULT;
                     Some(if is_write {
                         VmExit::MmioWrite {
                             epc,
                             addr: gpa,
                             size,
-                            reg,
-                            data: 0,
+                            reg: 0,
+                            data,
                         }
                     } else {
                         VmExit::MmioRead {
