@@ -4,7 +4,7 @@ use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
-use scarlet_std::hypervisor::{Vcpu, VcpuExitReason, Vm, arch::reg};
+use scarlet_std::hypervisor::{arch::reg, Vcpu, VcpuExitReason, Vm};
 use scarlet_std::println;
 use scarlet_std::sync::Mutex;
 
@@ -15,8 +15,8 @@ use crate::device::IrqLine;
 use crate::devices::plic::{PlicConfig, PlicDevice};
 use crate::devices::uart::Ns16550a;
 use crate::machine::{DtbGenerator, Machine, MachineConfig, VcpuIrqSink};
-use firmware::{Firmware, FirmwareAction, sbi::SbiFirmware};
-use timer::{TimerState, start_timer_thread, start_uart_thread};
+use firmware::{sbi::SbiFirmware, Firmware, FirmwareAction};
+use timer::{start_timer_thread, start_uart_thread, TimerState};
 
 const GUEST_ENTRY_POINT: u64 = 0x80000000;
 
@@ -291,21 +291,7 @@ fn load_guest_image(path: &str) -> Option<Vec<u8>> {
 }
 
 fn allocate_guest_memory(size: usize) -> usize {
-    use scarlet_std::syscall::{Syscall, syscall6};
+    use scarlet_std::handle::capability::memory_mapping::{flags, mmap_anonymous, prot};
 
-    const PROT_READ: usize = 0x1;
-    const PROT_WRITE: usize = 0x2;
-    const MAP_ANONYMOUS: usize = 0x20;
-    const MAP_PRIVATE: usize = 0x2;
-
-    let addr = syscall6(
-        Syscall::MemoryMap,
-        0,
-        0,
-        size,
-        PROT_READ | PROT_WRITE,
-        MAP_PRIVATE | MAP_ANONYMOUS,
-        0,
-    );
-    if addr == usize::MAX { 0 } else { addr }
+    mmap_anonymous(0, size, prot::READ | prot::WRITE, flags::PRIVATE).unwrap_or(0)
 }
