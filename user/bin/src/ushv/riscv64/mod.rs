@@ -120,6 +120,8 @@ pub fn run() -> i32 {
         machine.devices().len()
     );
 
+    let machine = Arc::new(machine);
+
     let dtb_blob = match generate_dtb(&machine) {
         Some(blob) => blob,
         None => {
@@ -174,7 +176,7 @@ pub fn run() -> i32 {
     firmware.set_timer_state(Arc::clone(&timer_state));
 
     println!("[ushv] Starting vCPU run loop...");
-    run_vcpu_loop(&vcpu, &mut machine, &mut firmware);
+    run_vcpu_loop(&vcpu, &machine, &mut firmware);
 
     println!("[ushv] VM terminated");
     0

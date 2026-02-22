@@ -90,6 +90,12 @@ pub struct Machine {
     vcpu_handle: Option<u32>,
 }
 
+// SAFETY: Machine is safe to send/share because:
+// - config and vcpu_handle are plain data
+// - devices contains Box<dyn MmioDevice> where MmioDevice: Send + Sync
+unsafe impl Send for Machine {}
+unsafe impl Sync for Machine {}
+
 impl Machine {
     pub fn new(config: MachineConfig) -> Self {
         Self {
