@@ -235,73 +235,6 @@ impl Plic {
     }
 }
 
-impl MmioDevice for Plic {
-    fn base(&self) -> u64 {
-        self.config.base
-    }
-
-    fn size(&self) -> u64 {
-        self.config.size()
-    }
-
-    fn read(&mut self, offset: u64, _size: u8) -> u64 {
-        if offset >= CONTEXT_BASE {
-            let ctx_offset = offset - CONTEXT_BASE;
-            let context = (ctx_offset / CONTEXT_STRIDE) as u32;
-            let reg_offset = ctx_offset % CONTEXT_STRIDE;
-
-            match reg_offset {
-                THRESHOLD_OFFSET => self.read_threshold(context) as u64,
-                CLAIM_OFFSET => self.read_claim(context) as u64,
-                _ => 0,
-            }
-        } else if offset >= ENABLE_BASE {
-            let enable_offset = offset - ENABLE_BASE;
-            let context = (enable_offset / ENABLE_STRIDE) as u32;
-            let word = ((enable_offset % ENABLE_STRIDE) / 4) as u32;
-            self.read_enable(context, word) as u64
-        } else if offset >= PENDING_BASE {
-            let word = ((offset - PENDING_BASE) / 4) as u32;
-            self.read_pending(word) as u64
-        } else if offset >= PRIORITY_BASE {
-            let source = ((offset - PRIORITY_BASE) / 4) as u32;
-            self.read_priority(source) as u64
-        } else {
-            0
-        }
-    }
-
-    fn write(&mut self, offset: u64, _size: u8, data: u64) {
-        if offset >= CONTEXT_BASE {
-            let ctx_offset = offset - CONTEXT_BASE;
-            let context = (ctx_offset / CONTEXT_STRIDE) as u32;
-            let reg_offset = ctx_offset % CONTEXT_STRIDE;
-
-            match reg_offset {
-                THRESHOLD_OFFSET => self.write_threshold(context, data as u32),
-                CLAIM_OFFSET => self.write_complete(context, data as u32),
-                _ => {}
-            }
-        } else if offset >= ENABLE_BASE {
-            let enable_offset = offset - ENABLE_BASE;
-            let context = (enable_offset / ENABLE_STRIDE) as u32;
-            let word = ((enable_offset % ENABLE_STRIDE) / 4) as u32;
-            self.write_enable(context, word, data as u32);
-        } else if offset >= PRIORITY_BASE {
-            let source = ((offset - PRIORITY_BASE) / 4) as u32;
-            self.write_priority(source, data as u32);
-        }
-    }
-
-    fn as_any(&self) -> &dyn core::any::Any {
-        self
-    }
-
-    fn as_any_mut(&mut self) -> &mut dyn core::any::Any {
-        self
-    }
-}
-
 impl Default for Plic {
     fn default() -> Self {
         Self::new(PlicConfig::default())
@@ -367,26 +300,65 @@ impl Default for PlicDevice {
 
 impl MmioDevice for PlicDevice {
     fn base(&self) -> u64 {
-        self.inner.lock().base()
+        self.inner.lock().config.base
     }
 
     fn size(&self) -> u64 {
-        self.inner.lock().size()
+        self.inner.lock().config.size()
     }
 
-    fn read(&mut self, offset: u64, size: u8) -> u64 {
-        self.inner.lock().read(offset, size)
+    fn read(&self, offset: u64, _size: u8) -> u64 {
+        let mut plic = self.inner.lock();
+        if offset >= CONTEXT_BASE {
+            let ctx_offset = offset - CONTEXT_BASE;
+            let context = (ctx_offset / CONTEXT_STRIDE) as u32;
+            let reg_offset = ctx_offset % CONTEXT_STRIDE;
+
+            match reg_offset {
+                THRESHOLD_OFFSET => plic.read_threshold(context) as u64,
+                CLAIM_OFFSET => plic.read_claim(context) as u64,
+                _ => 0,
+            }
+        } else if offset >= ENABLE_BASE {
+            let enable_offset = offset - ENABLE_BASE;
+            let context = (enable_offset / ENABLE_STRIDE) as u32;
+            let word = ((enable_offset % ENABLE_STRIDE) / 4) as u32;
+            plic.read_enable(context, word) as u64
+        } else if offset >= PENDING_BASE {
+            let word = ((offset - PENDING_BASE) / 4) as u32;
+            plic.read_pending(word) as u64
+        } else if offset >= PRIORITY_BASE {
+            let source = ((offset - PRIORITY_BASE) / 4) as u32;
+            plic.read_priority(source) as u64
+        } else {
+            0
+        }
     }
 
-    fn write(&mut self, offset: u64, size: u8, data: u64) {
-        self.inner.lock().write(offset, size, data)
+    fn write(&self, offset: u64, _size: u8, data: u64) {
+        let mut plic = self.inner.lock();
+        if offset >= CONTEXT_BASE {
+            let ctx_offset = offset - CONTEXT_BASE;
+            let context = (ctx_offset / CONTEXT_STRIDE) as u32;
+            let reg_offset = ctx_offset % CONTEXT_STRIDE;
+
+            match reg_offset {
+                THRESHOLD_OFFSET => plic.write_threshold(context, data as u32),
+                CLAIM_OFFSET => plic.write_complete(context, data as u32),
+                _ => {}
+            }
+        } else if offset >= ENABLE_BASE {
+            let enable_offset = offset - ENABLE_BASE;
+            let context = (enable_offset / ENABLE_STRIDE) as u32;
+            let word = ((enable_offset % ENABLE_STRIDE) / 4) as u32;
+            plic.write_enable(context, word, data as u32);
+        } else if offset >= PRIORITY_BASE {
+            let source = ((offset - PRIORITY_BASE) / 4) as u32;
+            plic.write_priority(source, data as u32);
+        }
     }
 
     fn as_any(&self) -> &dyn core::any::Any {
-        self
-    }
-
-    fn as_any_mut(&mut self) -> &mut dyn core::any::Any {
         self
     }
 }

@@ -106,7 +106,7 @@ impl MmioDevice for Ns16550a {
         0x1000
     }
 
-    fn read(&mut self, offset: u64, _size: u8) -> u64 {
+    fn read(&self, offset: u64, _size: u8) -> u64 {
         let mut inner = self.inner.write();
         match offset {
             RBR => {
@@ -127,7 +127,7 @@ impl MmioDevice for Ns16550a {
         }
     }
 
-    fn write(&mut self, offset: u64, _size: u8, data: u64) {
+    fn write(&self, offset: u64, _size: u8, data: u64) {
         let byte = data as u8;
         let mut inner = self.inner.write();
 
@@ -149,10 +149,6 @@ impl MmioDevice for Ns16550a {
     }
 
     fn as_any(&self) -> &dyn core::any::Any {
-        self
-    }
-
-    fn as_any_mut(&mut self) -> &mut dyn core::any::Any {
         self
     }
 }

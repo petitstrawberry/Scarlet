@@ -191,7 +191,7 @@ fn generate_dtb(machine: &Machine) -> Option<Vec<u8>> {
     }
 }
 
-fn run_vcpu_loop(vcpu: &Vcpu, machine: &mut Machine, firmware: &mut dyn Firmware) {
+fn run_vcpu_loop(vcpu: &Vcpu, machine: &Machine, firmware: &mut dyn Firmware) {
     loop {
         let exit = match vcpu.run() {
             Ok(exit) => exit,
