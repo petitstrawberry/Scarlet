@@ -49,6 +49,7 @@ pub mod vcpu_ctl {
     pub const GET_ONE_REG: u32 = 0x02;
     pub const SET_ONE_REG: u32 = 0x03;
     pub const INJECT_INTERRUPT: u32 = 0x04;
+    pub const CLEAR_INTERRUPT: u32 = 0x05;
 }
 
 pub mod irq_type {
@@ -198,6 +199,11 @@ impl Vcpu {
 
     pub fn inject_interrupt(&self, irq_type: usize) -> Result<(), ()> {
         vcpu_control(self.handle, vcpu_ctl::INJECT_INTERRUPT, irq_type)?;
+        Ok(())
+    }
+
+    pub fn clear_interrupt(&self, irq_type: usize) -> Result<(), ()> {
+        vcpu_control(self.handle, vcpu_ctl::CLEAR_INTERRUPT, irq_type)?;
         Ok(())
     }
 }

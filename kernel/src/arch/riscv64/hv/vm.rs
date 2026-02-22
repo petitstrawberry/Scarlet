@@ -33,7 +33,9 @@ pub struct Riscv64VcpuObject {
     id: VcpuId,
     vm: Weak<Riscv64VmObject>,
     state: Mutex<VcpuInternalState>,
-    pending_irqs: AtomicU64,
+    irqs_pending: AtomicU64,
+    irqs_pending_mask: AtomicU64,
+    last_hvip: AtomicU64,
     first_run: AtomicBool,
 }
 
@@ -49,7 +51,9 @@ impl Riscv64VcpuObject {
             state: Mutex::new(VcpuInternalState {
                 guest: GuestVcpu::new(vm.id(), id),
             }),
-            pending_irqs: AtomicU64::new(0),
+            irqs_pending: AtomicU64::new(0),
+            irqs_pending_mask: AtomicU64::new(0),
+            last_hvip: AtomicU64::new(0),
             first_run: AtomicBool::new(true),
         })
     }
@@ -87,34 +91,38 @@ impl Riscv64VcpuObject {
     fn inject_pending_interrupts(&self) {
         use super::csr::{read_hvip, write_hvip};
 
-        let mut hvip = read_hvip();
-
-        const VSSIP: u64 = 1 << 2;
-        const VSTIP: u64 = 1 << 6;
-        const VSEIP: u64 = 1 << 10;
-
-        let pending = self.pending_irqs.swap(0, Ordering::AcqRel);
-        if pending > 0 {
-            crate::println!("[vCPU {}] Checking pending interrupts", self.id);
-            crate::println!(
-                "[vCPU {}] Current HVIP: {:#x}, pending: {:#x}",
-                self.id,
-                hvip,
-                pending
-            );
+        let mask = self.irqs_pending_mask.swap(0, Ordering::AcqRel);
+        if mask == 0 {
+            return;
         }
 
-        if (pending & VSSIP) != 0 {
-            hvip |= VSSIP;
-        }
-        if (pending & VSTIP) != 0 {
-            hvip |= VSTIP;
-        }
-        if (pending & VSEIP) != 0 {
-            hvip |= VSEIP;
-        }
+        let pending = self.irqs_pending.load(Ordering::Acquire);
+        let val = pending & mask;
 
-        write_hvip(hvip);
+        let hvip = read_hvip();
+        let new_hvip = (hvip & !mask) | val;
+
+        self.last_hvip.store(new_hvip, Ordering::Release);
+        write_hvip(new_hvip);
+    }
+
+    fn sync_interrupts(&self) {
+        use super::csr::read_hvip;
+
+        let hvip = read_hvip();
+        let last_hvip = self.last_hvip.load(Ordering::Acquire);
+        let pending = self.irqs_pending.load(Ordering::Acquire);
+
+        let vs_bits = (1u64 << 2) | (1u64 << 6) | (1u64 << 10);
+        let changed = last_hvip ^ hvip;
+        let guest_cleared = last_hvip & !hvip & changed & vs_bits;
+
+        if guest_cleared != 0 {
+            self.irqs_pending
+                .fetch_and(!guest_cleared, Ordering::Release);
+            self.irqs_pending_mask
+                .fetch_or(guest_cleared, Ordering::Release);
+        }
     }
 
     /// Prepares the current task to run the guest and saves the guest state back to the vCPU object.
@@ -144,14 +152,33 @@ impl VcpuObject for Riscv64VcpuObject {
             InterruptType::External => 1 << 10,
         };
 
+        self.irqs_pending.fetch_or(bit, Ordering::Release);
+        self.irqs_pending_mask.fetch_or(bit, Ordering::Release);
+
         crate::println!(
             "[vCPU {}] Injecting interrupt: {:?} (bit {})",
             self.id,
             irq_type,
             bit
         );
+    }
 
-        self.pending_irqs.fetch_or(bit, Ordering::Release);
+    fn clear_interrupt(&self, irq_type: InterruptType) {
+        let bit = match irq_type {
+            InterruptType::Software => 1 << 2,
+            InterruptType::Timer => 1 << 6,
+            InterruptType::External => 1 << 10,
+        };
+
+        self.irqs_pending.fetch_and(!bit, Ordering::AcqRel);
+        self.irqs_pending_mask.fetch_or(bit, Ordering::Release);
+
+        crate::println!(
+            "[vCPU {}] Cleared interrupt: {:?} (bit {})",
+            self.id,
+            irq_type,
+            bit
+        );
     }
 
     fn get_reg(&self, index: u32) -> Result<u64, &'static str> {
@@ -171,6 +198,9 @@ impl VcpuObject for Riscv64VcpuObject {
 
         let mut guest_tf = Trapframe::new();
 
+        self.sync_interrupts();
+        self.inject_pending_interrupts();
+
         self.setup_for_guest(task, &mut vcpu.guest, &vm);
         // crate::println!("[vCPU {}] Guest VCPU: {:#?}", self.id, vcpu.guest);
         unsafe { arch_run_guest_loop(&mut guest_tf, &vcpu.guest, arch) };
@@ -178,10 +208,9 @@ impl VcpuObject for Riscv64VcpuObject {
         loop {
             vcpu.guest.save(&guest_tf);
 
-            // crate::println!("[vCPU {}] Returned to host, VS CSRs: vsie={:#x}, vstvec={:#x}", self.id, csr::read_vsie(), csr::read_vstvec());
+            self.sync_interrupts();
 
             self.inject_pending_interrupts();
-
 
             match arch_guest_trap_handler(&mut guest_tf, &vm) {
                 Some(exit) => {
@@ -436,6 +465,16 @@ impl ControlOps for Riscv64VcpuObject {
                 self.inject_interrupt(irq_type);
                 Ok(0)
             }
+            vcpu_ctl::CLEAR_INTERRUPT => {
+                let irq_type = match arg {
+                    0 => InterruptType::Software,
+                    1 => InterruptType::Timer,
+                    2 => InterruptType::External,
+                    _ => return Err("Invalid interrupt type"),
+                };
+                self.clear_interrupt(irq_type);
+                Ok(0)
+            }
             _ => Err("Unsupported vCPU control command"),
         }
     }
@@ -446,6 +485,7 @@ impl ControlOps for Riscv64VcpuObject {
             (vcpu_ctl::GET_ONE_REG, "Get one register"),
             (vcpu_ctl::SET_ONE_REG, "Set one register"),
             (vcpu_ctl::INJECT_INTERRUPT, "Inject interrupt"),
+            (vcpu_ctl::CLEAR_INTERRUPT, "Clear interrupt"),
         ]
     }
 }

@@ -120,7 +120,7 @@ impl Firmware for SbiFirmware {
             eid::BASE => self.handle_base(function, a0),
             eid::LEGACY_PUTCHAR => self.handle_legacy_putchar(a0),
             eid::LEGACY_GETCHAR => ((error::FAILED, 0), FirmwareAction::Continue),
-            eid::TIMER => self.handle_timer(function, a0),
+            eid::TIMER => self.handle_timer(function, a0, vcpu),
             eid::IPI => self.handle_ipi(function),
             eid::RFENCE => self.handle_rfence(function),
             eid::HSM => self.handle_hsm(function, a0, a1, a2),
@@ -178,9 +178,15 @@ impl SbiFirmware {
         ((error::SUCCESS, 0), FirmwareAction::Continue)
     }
 
-    fn handle_timer(&mut self, function: u64, a0: u64) -> ((i64, u64), FirmwareAction) {
+    fn handle_timer(
+        &mut self,
+        function: u64,
+        a0: u64,
+        vcpu: &mut Vcpu,
+    ) -> ((i64, u64), FirmwareAction) {
         match function {
             fid::timer::SET_TIMER => {
+                vcpu.clear_interrupt(crate::riscv64::timer::TIMER_IRQ_TYPE);
                 if let Some(ref timer_state) = self.timer_state {
                     timer_state.lock().set_timer(a0);
                 }

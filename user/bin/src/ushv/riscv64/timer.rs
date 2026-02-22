@@ -5,7 +5,7 @@ use core::time::Duration;
 use scarlet_std::sync::Mutex;
 use scarlet_std::thread;
 
-const IRQ_TYPE_TIMER: usize = 1;
+pub const TIMER_IRQ_TYPE: usize = 1;
 const TIMEBASE_FREQ: u64 = 10_000_000; // 10 MHz
 
 pub struct TimerState {
@@ -83,7 +83,7 @@ fn inject_timer_interrupt(vcpu_handle: u32) {
         Syscall::HandleControl,
         vcpu_handle as usize,
         VCPU_CTL_INJECT_INTERRUPT as usize,
-        IRQ_TYPE_TIMER,
+        TIMER_IRQ_TYPE,
     );
 }
 

@@ -16,6 +16,7 @@ pub mod vcpu_ctl {
     pub const GET_ONE_REG: u32 = 0x02;
     pub const SET_ONE_REG: u32 = 0x03;
     pub const INJECT_INTERRUPT: u32 = 0x04;
+    pub const CLEAR_INTERRUPT: u32 = 0x05;
 }
 
 #[repr(C)]
@@ -28,6 +29,7 @@ pub struct VcpuOneReg {
 pub trait VcpuObject: ControlOps + Send + Sync {
     fn id(&self) -> VcpuId;
     fn inject_interrupt(&self, irq_type: InterruptType);
+    fn clear_interrupt(&self, irq_type: InterruptType);
     fn get_reg(&self, index: u32) -> Result<u64, &'static str>;
     fn set_reg(&self, index: u32, value: u64) -> Result<(), &'static str>;
     fn run(&self) -> Result<crate::hypervisor::VmExit, &'static str>;
