@@ -23,10 +23,7 @@ pub fn sys_stream_read(trapframe: &mut Trapframe) -> usize {
     };
 
     let handle = trapframe.get_arg(0) as u32;
-    let buf_ptr = match task.vm_manager.translate_vaddr(trapframe.get_arg(1)) {
-        Some(ptr) => ptr as *mut u8,
-        None => return usize::MAX, // Invalid buffer pointer
-    };
+    let buf_vaddr = trapframe.get_arg(1);
     let count = trapframe.get_arg(2) as usize;
 
     // Increment PC to avoid infinite loop if read fails
@@ -44,16 +41,26 @@ pub fn sys_stream_read(trapframe: &mut Trapframe) -> usize {
         None => return usize::MAX, // Object doesn't support stream operations
     };
 
-    // Perform read operation (may block)
-    let buffer = unsafe { core::slice::from_raw_parts_mut(buf_ptr, count) };
-    match stream.read(buffer) {
+    // Allocate kernel buffer and read into it
+    let mut kernel_buf = alloc::vec![0u8; count];
+    let bytes_read = match stream.read(&mut kernel_buf) {
         Ok(n) => n,
         Err(super::StreamError::WouldBlock) => {
             // Return EAGAIN error code (negative value indicates error)
-            (-(11i32)) as usize
+            return (-(11i32)) as usize;
         }
-        Err(_) => usize::MAX,
+        Err(_) => return usize::MAX,
+    };
+
+    // Copy to user space using copy_to_user (handles page boundaries)
+    if bytes_read > 0 {
+        use crate::library::std::usercopy::copy_to_user;
+        if copy_to_user(&task, buf_vaddr, &kernel_buf[..bytes_read]).is_err() {
+            return usize::MAX;
+        }
     }
+
+    bytes_read
 }
 
 /// System call for writing to a KernelObject with StreamOps capability
