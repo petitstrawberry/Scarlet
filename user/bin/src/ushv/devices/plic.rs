@@ -4,6 +4,7 @@ use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec;
 use core::sync::atomic::{AtomicU32, Ordering};
+use scarlet_std::sync::RwLock;
 
 use crate::device::{DeviceFdt, FdtNodeInfo, FdtValue, IrqLine, IrqSink, MmioDevice};
 
@@ -52,22 +53,14 @@ const CONTEXT_STRIDE: u64 = 0x1000;
 const THRESHOLD_OFFSET: u64 = 0x0000;
 const CLAIM_OFFSET: u64 = 0x0004;
 
-/// PLIC with lock-free pending register access.
-///
-/// Concurrency:
-/// - MMIO thread: read/write all registers (including pending read)
-/// - IrqSink: write pending only
-///
-/// pending[] uses AtomicU32 for lock-free concurrent access.
-/// Other fields are MMIO-only, no locking needed.
 pub struct Plic {
     config: PlicConfig,
-    priority: alloc::vec::Vec<u32>,
+    priority: alloc::vec::Vec<AtomicU32>,
     pending: alloc::vec::Vec<AtomicU32>,
-    enable: alloc::vec::Vec<alloc::vec::Vec<u32>>,
-    threshold: alloc::vec::Vec<u32>,
-    claimed: alloc::vec::Vec<u32>,
-    irq_out: alloc::vec::Vec<Option<IrqLine>>,
+    enable: alloc::vec::Vec<alloc::vec::Vec<AtomicU32>>,
+    threshold: alloc::vec::Vec<AtomicU32>,
+    claimed: alloc::vec::Vec<AtomicU32>,
+    irq_out: RwLock<alloc::vec::Vec<Option<IrqLine>>>,
 }
 
 impl Plic {
@@ -77,12 +70,14 @@ impl Plic {
         let num_words = num_sources.div_ceil(32);
 
         Self {
-            priority: alloc::vec![0u32; num_sources],
+            priority: (0..num_sources).map(|_| AtomicU32::new(0)).collect(),
             pending: (0..num_words).map(|_| AtomicU32::new(0)).collect(),
-            enable: alloc::vec![alloc::vec![0u32; num_words]; num_contexts],
-            threshold: alloc::vec![0u32; num_contexts],
-            claimed: alloc::vec![0u32; num_words],
-            irq_out: alloc::vec![None; num_contexts],
+            enable: (0..num_contexts)
+                .map(|_| (0..num_words).map(|_| AtomicU32::new(0)).collect())
+                .collect(),
+            threshold: (0..num_contexts).map(|_| AtomicU32::new(0)).collect(),
+            claimed: (0..num_words).map(|_| AtomicU32::new(0)).collect(),
+            irq_out: RwLock::new(alloc::vec![None; num_contexts]),
             config,
         }
     }
@@ -107,15 +102,17 @@ impl Plic {
         self.update_irq();
     }
 
-    pub fn set_irq_out(&mut self, context: usize, irq: IrqLine) {
+    pub fn set_irq_out(&self, context: usize, irq: IrqLine) {
+        let mut irq_out = self.irq_out.write();
         if context < self.config.num_contexts {
-            self.irq_out[context] = Some(irq);
+            irq_out[context] = Some(irq);
         }
     }
 
     fn update_irq(&self) {
+        let irq_out = self.irq_out.read();
         for ctx in 0..self.config.num_contexts {
-            if let Some(ref irq_out) = self.irq_out[ctx] {
+            if let Some(ref irq_out) = irq_out[ctx] {
                 let best_id = self.highest_pending(ctx);
                 irq_out.set(best_id > 0);
             }
@@ -123,14 +120,14 @@ impl Plic {
     }
 
     fn highest_pending(&self, context: usize) -> u32 {
-        let threshold = self.threshold[context];
+        let threshold = self.threshold[context].load(Ordering::Relaxed);
         let mut best_id: u32 = 0;
         let mut best_prio: u32 = 0;
         let num_words = self.config.num_sources.div_ceil(32);
 
         for word in 0..num_words {
             let pending = self.pending[word].load(Ordering::Acquire);
-            let enabled = self.enable[context][word];
+            let enabled = self.enable[context][word].load(Ordering::Relaxed);
             let active = pending & enabled;
 
             if active == 0 {
@@ -142,7 +139,7 @@ impl Plic {
                     continue;
                 }
                 let id = (word * 32 + bit) as u32;
-                let prio = self.priority[id as usize];
+                let prio = self.priority[id as usize].load(Ordering::Relaxed);
                 if prio > threshold && (best_id == 0 || prio > best_prio) {
                     best_id = id;
                     best_prio = prio;
@@ -156,14 +153,14 @@ impl Plic {
         if source as usize >= self.config.num_sources {
             return 0;
         }
-        self.priority[source as usize]
+        self.priority[source as usize].load(Ordering::Relaxed)
     }
 
-    fn write_priority(&mut self, source: u32, value: u32) {
+    fn write_priority(&self, source: u32, value: u32) {
         if source as usize >= self.config.num_sources || source == 0 {
             return;
         }
-        self.priority[source as usize] = value & self.config.num_priorities;
+        self.priority[source as usize].store(value & self.config.num_priorities, Ordering::Relaxed);
         self.update_irq();
     }
 
@@ -180,15 +177,15 @@ impl Plic {
         if context as usize >= self.config.num_contexts || word as usize >= num_words {
             return 0;
         }
-        self.enable[context as usize][word as usize]
+        self.enable[context as usize][word as usize].load(Ordering::Relaxed)
     }
 
-    fn write_enable(&mut self, context: u32, word: u32, value: u32) {
+    fn write_enable(&self, context: u32, word: u32, value: u32) {
         let num_words = self.config.num_sources.div_ceil(32);
         if context as usize >= self.config.num_contexts || word as usize >= num_words {
             return;
         }
-        self.enable[context as usize][word as usize] = value;
+        self.enable[context as usize][word as usize].store(value, Ordering::Relaxed);
         self.update_irq();
     }
 
@@ -196,18 +193,19 @@ impl Plic {
         if context as usize >= self.config.num_contexts {
             return 0;
         }
-        self.threshold[context as usize]
+        self.threshold[context as usize].load(Ordering::Relaxed)
     }
 
-    fn write_threshold(&mut self, context: u32, value: u32) {
+    fn write_threshold(&self, context: u32, value: u32) {
         if context as usize >= self.config.num_contexts {
             return;
         }
-        self.threshold[context as usize] = value & self.config.num_priorities;
+        self.threshold[context as usize]
+            .store(value & self.config.num_priorities, Ordering::Relaxed);
         self.update_irq();
     }
 
-    fn read_claim(&mut self, context: u32) -> u32 {
+    fn read_claim(&self, context: u32) -> u32 {
         if context as usize >= self.config.num_contexts {
             return 0;
         }
@@ -216,13 +214,13 @@ impl Plic {
             let word = (id / 32) as usize;
             let bit = id % 32;
             self.pending[word].fetch_and(!(1 << bit), Ordering::Release);
-            self.claimed[word] |= 1 << bit;
+            self.claimed[word].fetch_or(1 << bit, Ordering::Relaxed);
             self.update_irq();
         }
         id
     }
 
-    fn write_complete(&mut self, context: u32, id: u32) {
+    fn write_complete(&self, context: u32, id: u32) {
         if context as usize >= self.config.num_contexts
             || id == 0
             || id as usize >= self.config.num_sources
@@ -231,7 +229,7 @@ impl Plic {
         }
         let word = (id / 32) as usize;
         let bit = id % 32;
-        self.claimed[word] &= !(1 << bit);
+        self.claimed[word].fetch_and(!(1 << bit), Ordering::Relaxed);
         self.update_irq();
     }
 }
@@ -285,9 +283,7 @@ impl PlicDevice {
     }
 
     pub fn set_irq_out(&self, context: usize, irq: IrqLine) {
-        Arc::get_mut(&mut self.inner.clone())
-            .unwrap_or_else(|| panic!("set_irq_out must be called before sharing"))
-            .set_irq_out(context, irq);
+        self.inner.set_irq_out(context, irq);
     }
 }
 
@@ -314,9 +310,7 @@ impl MmioDevice for PlicDevice {
 
             match reg_offset {
                 THRESHOLD_OFFSET => self.inner.read_threshold(context) as u64,
-                CLAIM_OFFSET => Arc::get_mut(&mut self.inner.clone())
-                    .unwrap()
-                    .read_claim(context) as u64,
+                CLAIM_OFFSET => self.inner.read_claim(context) as u64,
                 _ => 0,
             }
         } else if offset >= ENABLE_BASE {
@@ -342,26 +336,18 @@ impl MmioDevice for PlicDevice {
             let reg_offset = ctx_offset % CONTEXT_STRIDE;
 
             match reg_offset {
-                THRESHOLD_OFFSET => Arc::get_mut(&mut self.inner.clone())
-                    .unwrap()
-                    .write_threshold(context, data as u32),
-                CLAIM_OFFSET => Arc::get_mut(&mut self.inner.clone())
-                    .unwrap()
-                    .write_complete(context, data as u32),
+                THRESHOLD_OFFSET => self.inner.write_threshold(context, data as u32),
+                CLAIM_OFFSET => self.inner.write_complete(context, data as u32),
                 _ => {}
             }
         } else if offset >= ENABLE_BASE {
             let enable_offset = offset - ENABLE_BASE;
             let context = (enable_offset / ENABLE_STRIDE) as u32;
             let word = ((enable_offset % ENABLE_STRIDE) / 4) as u32;
-            Arc::get_mut(&mut self.inner.clone())
-                .unwrap()
-                .write_enable(context, word, data as u32);
+            self.inner.write_enable(context, word, data as u32);
         } else if offset >= PRIORITY_BASE {
             let source = ((offset - PRIORITY_BASE) / 4) as u32;
-            Arc::get_mut(&mut self.inner.clone())
-                .unwrap()
-                .write_priority(source, data as u32);
+            self.inner.write_priority(source, data as u32);
         }
     }
 
