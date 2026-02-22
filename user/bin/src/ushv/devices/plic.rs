@@ -3,7 +3,7 @@ extern crate alloc;
 use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec;
-use scarlet_std::{println, sync::Mutex};
+use core::sync::atomic::{AtomicU32, Ordering};
 
 use crate::device::{DeviceFdt, FdtNodeInfo, FdtValue, IrqLine, IrqSink, MmioDevice};
 
@@ -52,10 +52,18 @@ const CONTEXT_STRIDE: u64 = 0x1000;
 const THRESHOLD_OFFSET: u64 = 0x0000;
 const CLAIM_OFFSET: u64 = 0x0004;
 
+/// PLIC with lock-free pending register access.
+///
+/// Concurrency:
+/// - MMIO thread: read/write all registers (including pending read)
+/// - IrqSink: write pending only
+///
+/// pending[] uses AtomicU32 for lock-free concurrent access.
+/// Other fields are MMIO-only, no locking needed.
 pub struct Plic {
     config: PlicConfig,
     priority: alloc::vec::Vec<u32>,
-    pending: alloc::vec::Vec<u32>,
+    pending: alloc::vec::Vec<AtomicU32>,
     enable: alloc::vec::Vec<alloc::vec::Vec<u32>>,
     threshold: alloc::vec::Vec<u32>,
     claimed: alloc::vec::Vec<u32>,
@@ -70,7 +78,7 @@ impl Plic {
 
         Self {
             priority: alloc::vec![0u32; num_sources],
-            pending: alloc::vec![0u32; num_words],
+            pending: (0..num_words).map(|_| AtomicU32::new(0)).collect(),
             enable: alloc::vec![alloc::vec![0u32; num_words]; num_contexts],
             threshold: alloc::vec![0u32; num_contexts],
             claimed: alloc::vec![0u32; num_words],
@@ -79,24 +87,23 @@ impl Plic {
         }
     }
 
-    pub fn set_pending(&mut self, source: u32) {
+    pub fn set_pending(&self, source: u32) {
         if source == 0 || source as usize >= self.config.num_sources {
             return;
         }
-        println!("[PLIC] set_pending: source={}", source);
         let word = (source / 32) as usize;
         let bit = source % 32;
-        self.pending[word] |= 1 << bit;
+        self.pending[word].fetch_or(1 << bit, Ordering::Release);
         self.update_irq();
     }
 
-    pub fn clear_pending(&mut self, source: u32) {
+    pub fn clear_pending(&self, source: u32) {
         if source == 0 || source as usize >= self.config.num_sources {
             return;
         }
         let word = (source / 32) as usize;
         let bit = source % 32;
-        self.pending[word] &= !(1 << bit);
+        self.pending[word].fetch_and(!(1 << bit), Ordering::Release);
         self.update_irq();
     }
 
@@ -110,12 +117,6 @@ impl Plic {
         for ctx in 0..self.config.num_contexts {
             if let Some(ref irq_out) = self.irq_out[ctx] {
                 let best_id = self.highest_pending(ctx);
-                println!(
-                    "[PLIC] update_irq: ctx={}, best_id={}, asserting={}",
-                    ctx,
-                    best_id,
-                    best_id > 0
-                );
                 irq_out.set(best_id > 0);
             }
         }
@@ -128,7 +129,7 @@ impl Plic {
         let num_words = self.config.num_sources.div_ceil(32);
 
         for word in 0..num_words {
-            let pending = self.pending[word];
+            let pending = self.pending[word].load(Ordering::Acquire);
             let enabled = self.enable[context][word];
             let active = pending & enabled;
 
@@ -171,7 +172,7 @@ impl Plic {
         if word as usize >= num_words {
             return 0;
         }
-        self.pending[word as usize]
+        self.pending[word as usize].load(Ordering::Acquire)
     }
 
     fn read_enable(&self, context: u32, word: u32) -> u32 {
@@ -214,7 +215,7 @@ impl Plic {
         if id != 0 {
             let word = (id / 32) as usize;
             let bit = id % 32;
-            self.pending[word] &= !(1 << bit);
+            self.pending[word].fetch_and(!(1 << bit), Ordering::Release);
             self.claimed[word] |= 1 << bit;
             self.update_irq();
         }
@@ -243,7 +244,7 @@ impl Default for Plic {
 
 #[derive(Clone)]
 pub struct PlicDevice {
-    inner: Arc<Mutex<Plic>>,
+    inner: Arc<Plic>,
 }
 
 struct PlicIrqSink {
@@ -253,14 +254,10 @@ struct PlicIrqSink {
 
 impl IrqSink for PlicIrqSink {
     fn set_level(&self, level: bool) {
-        println!(
-            "[PLIC] PlicIrqSink::set_level: source={}, level={}",
-            self.source, level
-        );
         if level {
-            self.plic.set_pending(self.source);
+            self.plic.inner.set_pending(self.source);
         } else {
-            self.plic.clear_pending(self.source);
+            self.plic.inner.clear_pending(self.source);
         }
     }
 }
@@ -268,16 +265,16 @@ impl IrqSink for PlicIrqSink {
 impl PlicDevice {
     pub fn new(config: PlicConfig) -> Self {
         Self {
-            inner: Arc::new(Mutex::new(Plic::new(config))),
+            inner: Arc::new(Plic::new(config)),
         }
     }
 
     pub fn set_pending(&self, source: u32) {
-        self.inner.lock().set_pending(source);
+        self.inner.set_pending(source);
     }
 
     pub fn clear_pending(&self, source: u32) {
-        self.inner.lock().clear_pending(source);
+        self.inner.clear_pending(source);
     }
 
     pub fn get_irq_in(&self, source: u32) -> IrqLine {
@@ -288,7 +285,9 @@ impl PlicDevice {
     }
 
     pub fn set_irq_out(&self, context: usize, irq: IrqLine) {
-        self.inner.lock().set_irq_out(context, irq);
+        Arc::get_mut(&mut self.inner.clone())
+            .unwrap_or_else(|| panic!("set_irq_out must be called before sharing"))
+            .set_irq_out(context, irq);
     }
 }
 
@@ -300,61 +299,69 @@ impl Default for PlicDevice {
 
 impl MmioDevice for PlicDevice {
     fn base(&self) -> u64 {
-        self.inner.lock().config.base
+        self.inner.config.base
     }
 
     fn size(&self) -> u64 {
-        self.inner.lock().config.size()
+        self.inner.config.size()
     }
 
     fn read(&self, offset: u64, _size: u8) -> u64 {
-        let mut plic = self.inner.lock();
         if offset >= CONTEXT_BASE {
             let ctx_offset = offset - CONTEXT_BASE;
             let context = (ctx_offset / CONTEXT_STRIDE) as u32;
             let reg_offset = ctx_offset % CONTEXT_STRIDE;
 
             match reg_offset {
-                THRESHOLD_OFFSET => plic.read_threshold(context) as u64,
-                CLAIM_OFFSET => plic.read_claim(context) as u64,
+                THRESHOLD_OFFSET => self.inner.read_threshold(context) as u64,
+                CLAIM_OFFSET => Arc::get_mut(&mut self.inner.clone())
+                    .unwrap()
+                    .read_claim(context) as u64,
                 _ => 0,
             }
         } else if offset >= ENABLE_BASE {
             let enable_offset = offset - ENABLE_BASE;
             let context = (enable_offset / ENABLE_STRIDE) as u32;
             let word = ((enable_offset % ENABLE_STRIDE) / 4) as u32;
-            plic.read_enable(context, word) as u64
+            self.inner.read_enable(context, word) as u64
         } else if offset >= PENDING_BASE {
             let word = ((offset - PENDING_BASE) / 4) as u32;
-            plic.read_pending(word) as u64
+            self.inner.read_pending(word) as u64
         } else if offset >= PRIORITY_BASE {
             let source = ((offset - PRIORITY_BASE) / 4) as u32;
-            plic.read_priority(source) as u64
+            self.inner.read_priority(source) as u64
         } else {
             0
         }
     }
 
     fn write(&self, offset: u64, _size: u8, data: u64) {
-        let mut plic = self.inner.lock();
         if offset >= CONTEXT_BASE {
             let ctx_offset = offset - CONTEXT_BASE;
             let context = (ctx_offset / CONTEXT_STRIDE) as u32;
             let reg_offset = ctx_offset % CONTEXT_STRIDE;
 
             match reg_offset {
-                THRESHOLD_OFFSET => plic.write_threshold(context, data as u32),
-                CLAIM_OFFSET => plic.write_complete(context, data as u32),
+                THRESHOLD_OFFSET => Arc::get_mut(&mut self.inner.clone())
+                    .unwrap()
+                    .write_threshold(context, data as u32),
+                CLAIM_OFFSET => Arc::get_mut(&mut self.inner.clone())
+                    .unwrap()
+                    .write_complete(context, data as u32),
                 _ => {}
             }
         } else if offset >= ENABLE_BASE {
             let enable_offset = offset - ENABLE_BASE;
             let context = (enable_offset / ENABLE_STRIDE) as u32;
             let word = ((enable_offset % ENABLE_STRIDE) / 4) as u32;
-            plic.write_enable(context, word, data as u32);
+            Arc::get_mut(&mut self.inner.clone())
+                .unwrap()
+                .write_enable(context, word, data as u32);
         } else if offset >= PRIORITY_BASE {
             let source = ((offset - PRIORITY_BASE) / 4) as u32;
-            plic.write_priority(source, data as u32);
+            Arc::get_mut(&mut self.inner.clone())
+                .unwrap()
+                .write_priority(source, data as u32);
         }
     }
 
@@ -365,18 +372,17 @@ impl MmioDevice for PlicDevice {
 
 impl DeviceFdt for PlicDevice {
     fn fdt_node(&self) -> Option<FdtNodeInfo> {
-        let inner = self.inner.lock();
         Some(FdtNodeInfo {
-            name: alloc::format!("plic@{:x}", inner.config.base),
+            name: alloc::format!("plic@{:x}", self.inner.config.base),
             compatible: String::from("sifive,plic-1.0.0"),
-            reg: vec![(inner.config.base, 0x600000)],
+            reg: vec![(self.inner.config.base, 0x600000)],
             interrupts: vec![],
             interrupt_parent: None,
             extra: vec![
                 (String::from("#interrupt-cells"), FdtValue::U32(1)),
                 (
                     String::from("riscv,ndev"),
-                    FdtValue::U32((inner.config.num_sources - 1) as u32),
+                    FdtValue::U32((self.inner.config.num_sources - 1) as u32),
                 ),
             ],
         })

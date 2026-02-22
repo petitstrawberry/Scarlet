@@ -60,7 +60,7 @@ pub fn start_timer_thread(state: Arc<Mutex<TimerState>>) {
     });
 }
 
-pub fn start_uart_thread(uart: Ns16550a, vcpu: Arc<Vcpu>) {
+pub fn start_uart_thread(uart: Arc<Ns16550a>, vcpu: Arc<Vcpu>) {
     thread::spawn(move || {
         uart_loop(uart, vcpu);
     });
@@ -76,7 +76,7 @@ fn set_raw_mode() {
     }
 }
 
-fn uart_loop(uart: Ns16550a, vcpu: Arc<Vcpu>) {
+fn uart_loop(uart: Arc<Ns16550a>, vcpu: Arc<Vcpu>) {
     set_raw_mode();
 
     let stdin = scarlet_std::io::stdin();

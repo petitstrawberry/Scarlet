@@ -3,7 +3,8 @@ extern crate alloc;
 use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec;
-use scarlet_std::{println, sync::RwLock};
+use core::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use scarlet_std::sync::RwLock;
 
 use crate::device::{DeviceFdt, FdtNodeInfo, FdtValue, IrqLine, MmioDevice};
 use scarlet_std::print;
@@ -22,76 +23,81 @@ const SCR: u64 = 0x07;
 const LSR_TX_EMPTY: u8 = 0x20;
 const LSR_RX_READY: u8 = 0x01;
 
-struct UartInner {
+/// NS16550A UART with lock-free register access.
+///
+/// Concurrency:
+/// - MMIO thread: read/write all registers
+/// - UART input thread: write rx_byte, set lsr RX_READY, trigger irq
+///
+/// Atomic fields handle the race between these threads without locks.
+pub struct Ns16550a {
     base: u64,
     irq: u32,
-    irq_out: Option<IrqLine>,
-    lcr: u8,
-    lsr: u8,
-    scr: u8,
-    rx_byte: Option<u8>,
-}
-
-impl UartInner {
-    fn new(base: u64, irq: u32) -> Self {
-        Self {
-            base,
-            irq,
-            irq_out: None,
-            lcr: 0,
-            lsr: LSR_TX_EMPTY,
-            scr: 0,
-            rx_byte: None,
-        }
-    }
-}
-
-pub struct Ns16550a {
-    inner: Arc<RwLock<UartInner>>,
+    lsr: AtomicU8,
+    rx_byte: AtomicU8,
+    rx_valid: AtomicBool,
+    lcr: AtomicU8,
+    scr: AtomicU8,
+    /// Set once during init, read thereafter. RwLock for the one-time write.
+    irq_out: RwLock<Option<IrqLine>>,
 }
 
 impl Ns16550a {
     pub fn new(base: u64) -> Self {
         Self {
-            inner: Arc::new(RwLock::new(UartInner::new(base, 10))),
+            base,
+            irq: 10,
+            lsr: AtomicU8::new(LSR_TX_EMPTY),
+            rx_byte: AtomicU8::new(0),
+            rx_valid: AtomicBool::new(false),
+            lcr: AtomicU8::new(0),
+            scr: AtomicU8::new(0),
+            irq_out: RwLock::new(None),
         }
     }
 
     pub fn with_irq(base: u64, irq: u32) -> Self {
         Self {
-            inner: Arc::new(RwLock::new(UartInner::new(base, irq))),
+            base,
+            irq,
+            lsr: AtomicU8::new(LSR_TX_EMPTY),
+            rx_byte: AtomicU8::new(0),
+            rx_valid: AtomicBool::new(false),
+            lcr: AtomicU8::new(0),
+            scr: AtomicU8::new(0),
+            irq_out: RwLock::new(None),
         }
     }
 
-    pub fn clone_inner(&self) -> Self {
-        Self {
-            inner: Arc::clone(&self.inner),
-        }
+    pub fn clone_inner(&self) -> Arc<Self> {
+        Arc::new(Self {
+            base: self.base,
+            irq: self.irq,
+            lsr: AtomicU8::new(self.lsr.load(Ordering::Relaxed)),
+            rx_byte: AtomicU8::new(self.rx_byte.load(Ordering::Relaxed)),
+            rx_valid: AtomicBool::new(self.rx_valid.load(Ordering::Relaxed)),
+            lcr: AtomicU8::new(self.lcr.load(Ordering::Relaxed)),
+            scr: AtomicU8::new(self.scr.load(Ordering::Relaxed)),
+            irq_out: RwLock::new(self.irq_out.read().clone()),
+        })
     }
 
     pub fn set_irq_out(&self, irq_line: IrqLine) {
-        println!("[UART] set_irq_out: irq_line set");
-        self.inner.write().irq_out = Some(irq_line);
+        *self.irq_out.write() = Some(irq_line);
     }
 
     pub fn trigger_rx(&self) {
-        let mut inner = self.inner.write();
-        inner.lsr |= LSR_RX_READY;
-        println!(
-            "[UART] trigger_rx: lsr={:#x}, irq_out={}",
-            inner.lsr,
-            inner.irq_out.is_some()
-        );
-        if let Some(ref irq_out) = inner.irq_out {
+        self.lsr.fetch_or(LSR_RX_READY, Ordering::Release);
+        if let Some(ref irq_out) = *self.irq_out.read() {
             irq_out.set(true);
         }
     }
 
     pub fn trigger_rx_with_byte(&self, byte: u8) {
-        let mut inner = self.inner.write();
-        inner.rx_byte = Some(byte);
-        inner.lsr |= LSR_RX_READY;
-        if let Some(ref irq_out) = inner.irq_out {
+        self.rx_byte.store(byte, Ordering::Relaxed);
+        self.rx_valid.store(true, Ordering::Relaxed);
+        self.lsr.fetch_or(LSR_RX_READY, Ordering::Release);
+        if let Some(ref irq_out) = *self.irq_out.read() {
             irq_out.set(true);
         }
     }
@@ -99,7 +105,7 @@ impl Ns16550a {
 
 impl MmioDevice for Ns16550a {
     fn base(&self) -> u64 {
-        self.inner.read().base
+        self.base
     }
 
     fn size(&self) -> u64 {
@@ -107,30 +113,31 @@ impl MmioDevice for Ns16550a {
     }
 
     fn read(&self, offset: u64, _size: u8) -> u64 {
-        let mut inner = self.inner.write();
         match offset {
             RBR => {
-                inner.lsr &= !LSR_RX_READY;
-                if let Some(ref irq_out) = inner.irq_out {
+                self.lsr.fetch_and(!LSR_RX_READY, Ordering::Acquire);
+                if let Some(ref irq_out) = *self.irq_out.read() {
                     irq_out.set(false);
                 }
-                inner.rx_byte.take().unwrap_or(0) as u64
+                if self.rx_valid.swap(false, Ordering::Acquire) {
+                    self.rx_byte.load(Ordering::Relaxed) as u64
+                } else {
+                    0
+                }
             }
             IER => 0,
             IIR => 0x01,
-            LCR => inner.lcr as u64,
+            LCR => self.lcr.load(Ordering::Relaxed) as u64,
             MCR => 0,
-            LSR => inner.lsr as u64,
+            LSR => self.lsr.load(Ordering::Acquire) as u64,
             MSR => 0,
-            SCR => inner.scr as u64,
+            SCR => self.scr.load(Ordering::Relaxed) as u64,
             _ => 0,
         }
     }
 
     fn write(&self, offset: u64, _size: u8, data: u64) {
         let byte = data as u8;
-        let mut inner = self.inner.write();
-
         match offset {
             THR => {
                 print!("{}", byte as char);
@@ -138,11 +145,11 @@ impl MmioDevice for Ns16550a {
             IER => {}
             FCR => {}
             LCR => {
-                inner.lcr = byte;
+                self.lcr.store(byte, Ordering::Relaxed);
             }
             MCR => {}
             SCR => {
-                inner.scr = byte;
+                self.scr.store(byte, Ordering::Relaxed);
             }
             _ => {}
         }
@@ -155,12 +162,11 @@ impl MmioDevice for Ns16550a {
 
 impl DeviceFdt for Ns16550a {
     fn fdt_node(&self) -> Option<FdtNodeInfo> {
-        let inner = self.inner.read();
         Some(FdtNodeInfo {
-            name: alloc::format!("serial@{:x}", inner.base),
+            name: alloc::format!("serial@{:x}", self.base),
             compatible: String::from("ns16550a"),
-            reg: vec![(inner.base, 0x100)],
-            interrupts: vec![inner.irq],
+            reg: vec![(self.base, 0x100)],
+            interrupts: vec![self.irq],
             interrupt_parent: None,
             extra: vec![(String::from("clock-frequency"), FdtValue::U32(3686400))],
         })
