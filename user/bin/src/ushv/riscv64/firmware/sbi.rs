@@ -14,7 +14,7 @@ use scarlet_std::sync::Mutex;
 // RFENCE     | ⚠️ Stub     | TODO: Execute actual fence instructions on target harts
 // HSM        | ⚠️ Partial  | TODO: HART_START, HART_SUSPEND need multi-vcpu support
 // SRST       | ✅ Done     | Shutdown/reboot works
-// DBCN       | ⚠️ Partial  | TODO: WRITE/READ need guest memory access
+// DBCN       | ✅ Partial  | WRITE_BYTE and WRITE implemented, READ not implemented
 // PMU        | ❌ Missing  | Optional - performance counters
 // STA        | ❌ Missing  | Optional - steal time accounting
 // CPPC       | ❌ Missing  | Optional - collaborative processor performance
@@ -96,15 +96,29 @@ mod hsm_state {
 
 pub struct SbiFirmware {
     timer_state: Option<Arc<Mutex<TimerState>>>,
+    guest_mem_base: u64,
+    guest_mem_host_addr: u64,
+    guest_mem_size: u64,
 }
 
 impl SbiFirmware {
     pub fn new() -> Self {
-        Self { timer_state: None }
+        Self {
+            timer_state: None,
+            guest_mem_base: 0,
+            guest_mem_host_addr: 0,
+            guest_mem_size: 0,
+        }
     }
 
     pub fn set_timer_state(&mut self, state: Arc<Mutex<TimerState>>) {
         self.timer_state = Some(state);
+    }
+
+    pub fn set_guest_memory(&mut self, guest_base: u64, host_addr: u64, size: u64) {
+        self.guest_mem_base = guest_base;
+        self.guest_mem_host_addr = host_addr;
+        self.guest_mem_size = size;
     }
 }
 
@@ -270,8 +284,8 @@ impl SbiFirmware {
         &mut self,
         function: u64,
         a0: u64,
-        _a1: u64,
-        _a2: u64,
+        a1: u64,
+        a2: u64,
     ) -> ((i64, u64), FirmwareAction) {
         match function {
             fid::dbcn::WRITE_BYTE => {
@@ -279,9 +293,40 @@ impl SbiFirmware {
                 scarlet_std::print!("{}", ch);
                 ((error::SUCCESS, 0), FirmwareAction::Continue)
             }
-            fid::dbcn::WRITE | fid::dbcn::READ => {
-                ((error::NOT_SUPPORTED, 0), FirmwareAction::Continue)
+            fid::dbcn::WRITE => {
+                let num_bytes = a0 as usize;
+                let guest_addr = a1 | (a2 << 32);
+
+                if self.guest_mem_host_addr == 0 || self.guest_mem_size == 0 {
+                    return ((error::NOT_SUPPORTED, 0), FirmwareAction::Continue);
+                }
+
+                if guest_addr < self.guest_mem_base {
+                    return ((error::INVALID_ADDRESS, 0), FirmwareAction::Continue);
+                }
+
+                let offset = guest_addr - self.guest_mem_base;
+                if offset >= self.guest_mem_size {
+                    return ((error::INVALID_ADDRESS, 0), FirmwareAction::Continue);
+                }
+
+                let available = (self.guest_mem_size - offset) as usize;
+                let to_write = num_bytes.min(available);
+
+                let host_addr = self.guest_mem_host_addr + offset;
+
+                let mut written = 0usize;
+                for i in 0..to_write {
+                    unsafe {
+                        let byte = core::ptr::read_volatile((host_addr + i as u64) as *const u8);
+                        scarlet_std::print!("{}", byte as char);
+                        written += 1;
+                    }
+                }
+
+                ((error::SUCCESS, written as u64), FirmwareAction::Continue)
             }
+            fid::dbcn::READ => ((error::NOT_SUPPORTED, 0), FirmwareAction::Continue),
             _ => ((error::NOT_SUPPORTED, 0), FirmwareAction::Continue),
         }
     }

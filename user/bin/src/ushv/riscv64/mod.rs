@@ -174,6 +174,7 @@ pub fn run() -> i32 {
 
     let mut firmware = SbiFirmware::new();
     firmware.set_timer_state(Arc::clone(&timer_state));
+    firmware.set_guest_memory(GUEST_ENTRY_POINT, host_addr as u64, guest_memory_size);
 
     println!("[ushv] Starting vCPU run loop...");
     run_vcpu_loop(&vcpu, &machine, &mut firmware);
