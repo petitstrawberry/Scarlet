@@ -94,7 +94,7 @@ fn uart_loop(uart: Arc<Ns16550a>, vcpu: Arc<Vcpu>) {
 }
 
 fn inject_timer_interrupt(vcpu_handle: u32) {
-    use scarlet_std::syscall::{syscall3, Syscall};
+    use scarlet_std::syscall::{Syscall, syscall3};
     const VCPU_CTL_INJECT_INTERRUPT: u32 = 0x04;
     let _ = syscall3(
         Syscall::HandleControl,
