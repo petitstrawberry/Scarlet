@@ -7,7 +7,7 @@ use core::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use scarlet_std::sync::RwLock;
 
 use crate::device::{DeviceFdt, FdtNodeInfo, FdtValue, IrqLine, MmioDevice};
-use scarlet_std::print;
+use scarlet_std::{print, println};
 
 const THR: u64 = 0x00;
 const RBR: u64 = 0x00;
@@ -97,6 +97,11 @@ impl Ns16550a {
         self.rx_byte.store(byte, Ordering::Relaxed);
         self.rx_valid.store(true, Ordering::Relaxed);
         self.lsr.fetch_or(LSR_RX_READY, Ordering::Release);
+        print!(
+            "[UART] trigger_rx_with_byte(byte={:#x}) irq_out={}\n",
+            byte,
+            self.irq_out.read().is_some()
+        );
         if let Some(ref irq_out) = *self.irq_out.read() {
             irq_out.set(true);
         }
@@ -171,5 +176,33 @@ impl DeviceFdt for Ns16550a {
             interrupt_parent: None,
             extra: vec![(String::from("clock-frequency"), FdtValue::U32(3686400))],
         })
+    }
+}
+
+impl DeviceFdt for Arc<Ns16550a> {
+    fn fdt_node(&self) -> Option<FdtNodeInfo> {
+        (**self).fdt_node()
+    }
+}
+
+impl MmioDevice for Arc<Ns16550a> {
+    fn base(&self) -> u64 {
+        (**self).base()
+    }
+
+    fn size(&self) -> u64 {
+        (**self).size()
+    }
+
+    fn read(&self, offset: u64, size: u8) -> u64 {
+        (**self).read(offset, size)
+    }
+
+    fn write(&self, offset: u64, size: u8, data: u64) {
+        (**self).write(offset, size, data)
+    }
+
+    fn as_any(&self) -> &dyn core::any::Any {
+        self
     }
 }

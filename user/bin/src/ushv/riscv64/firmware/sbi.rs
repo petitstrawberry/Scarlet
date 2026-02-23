@@ -1,7 +1,7 @@
 use super::{Firmware, FirmwareAction};
 use crate::riscv64::timer::TimerState;
 use alloc::sync::Arc;
-use scarlet_std::hypervisor::{Vcpu, arch::reg};
+use scarlet_std::hypervisor::{arch::reg, Vcpu};
 use scarlet_std::sync::Mutex;
 
 // TODO: SBI v2.0/v3.0 Required Extensions Implementation Status

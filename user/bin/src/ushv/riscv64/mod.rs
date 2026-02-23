@@ -4,7 +4,7 @@ use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
-use scarlet_std::hypervisor::{Vcpu, VcpuExitReason, Vm, arch::reg};
+use scarlet_std::hypervisor::{arch::reg, Vcpu, VcpuExitReason, Vm};
 use scarlet_std::println;
 use scarlet_std::sync::Mutex;
 
@@ -15,8 +15,8 @@ use crate::device::IrqLine;
 use crate::devices::plic::{PlicConfig, PlicDevice};
 use crate::devices::uart::Ns16550a;
 use crate::machine::{DtbGenerator, Machine, MachineConfig, VcpuIrqSink};
-use firmware::{Firmware, FirmwareAction, sbi::SbiFirmware};
-use timer::{TimerState, start_timer_thread, start_uart_thread};
+use firmware::{sbi::SbiFirmware, Firmware, FirmwareAction};
+use timer::{start_timer_thread, start_uart_thread, TimerState};
 
 const GUEST_ENTRY_POINT: u64 = 0x80000000;
 
@@ -106,11 +106,11 @@ pub fn run() -> i32 {
 
     println!("[ushv] Registered PLIC at 0x0C000000");
 
-    let uart = Ns16550a::new(0x10000000);
+    let uart = Arc::new(Ns16550a::new(0x10000000));
     uart.set_irq_out(plic.get_irq_in(10));
     println!("[ushv] Registered UART at 0x10000000");
 
-    let uart_for_thread = uart.clone_inner();
+    let uart_for_thread = Arc::clone(&uart);
 
     machine.register(plic);
     machine.register(uart);
@@ -210,6 +210,12 @@ fn run_vcpu_loop(vcpu: &Vcpu, machine: &Machine, firmware: &mut dyn Firmware) {
                 if exit.mmio.address >= 0xc201000 && exit.mmio.address < 0xc202000 {
                     println!(
                         "[MMIO] PLIC read addr={:#x} result={:#x} reg={}",
+                        exit.mmio.address, masked, exit.mmio.reg
+                    );
+                }
+                if exit.mmio.address >= 0x10000000 && exit.mmio.address < 0x10000100 {
+                    println!(
+                        "[MMIO] UART read addr={:#x} result={:#x} reg={}",
                         exit.mmio.address, masked, exit.mmio.reg
                     );
                 }

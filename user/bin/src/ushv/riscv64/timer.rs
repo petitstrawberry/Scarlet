@@ -5,6 +5,7 @@ use core::time::Duration;
 use scarlet_std::handle::Handle;
 use scarlet_std::hypervisor::Vcpu;
 use scarlet_std::io::Read;
+use scarlet_std::println;
 use scarlet_std::sync::Mutex;
 use scarlet_std::thread;
 
@@ -18,7 +19,7 @@ const SCTL_TTY_SET_ECHO: u32 = 0x5354_0001;
 const SCTL_TTY_SET_CANONICAL: u32 = 0x5354_0003;
 const SCTL_TTY_SET_READ_POLICY: u32 = 0x5354_0007;
 const SCTL_TTY_SET_KBMODE: u32 = 0x5354_000C;
-const KB_XLATE: usize = 0x01;
+const KB_XLATE: usize = 0;
 
 pub struct TimerState {
     next_timer: Option<u64>,
@@ -94,7 +95,7 @@ fn uart_loop(uart: Arc<Ns16550a>, vcpu: Arc<Vcpu>) {
 }
 
 fn inject_timer_interrupt(vcpu_handle: u32) {
-    use scarlet_std::syscall::{Syscall, syscall3};
+    use scarlet_std::syscall::{syscall3, Syscall};
     const VCPU_CTL_INJECT_INTERRUPT: u32 = 0x04;
     let _ = syscall3(
         Syscall::HandleControl,

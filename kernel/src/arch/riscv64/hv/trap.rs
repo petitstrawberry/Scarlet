@@ -2,9 +2,9 @@
 
 use core::arch::asm;
 
-use crate::arch::Trapframe;
 use crate::arch::hv::csr::{self, read_htinst};
 use crate::arch::hv::vm::Riscv64VmObject;
+use crate::arch::Trapframe;
 use crate::hypervisor::types::VmExit;
 use crate::timer::tick;
 
@@ -96,11 +96,14 @@ fn decode_mmio() -> Option<MmioDecode> {
     })
 }
 
-fn fetch_guest_inst(_gpa: u64) -> u32 {
-    // Cannot safely read guest memory from hypervisor context.
-    // Return 0 to indicate we couldn't fetch the instruction.
-    // The caller should use htinst instead when available.
-    0
+fn fetch_guest_inst(sepc: u64, vm: &Riscv64VmObject) -> u32 {
+    if let Some(slot) = vm.find_memory_slot(sepc) {
+        let hpa = slot.gpa_to_hpa(sepc);
+        let inst_ptr = hpa as *const u32;
+        unsafe { core::ptr::read_volatile(inst_ptr) }
+    } else {
+        0
+    }
 }
 
 fn decode_load_store_inst(inst: u32) -> Option<(u8, u8, bool, u8)> {
@@ -274,19 +277,17 @@ pub fn arch_guest_trap_handler(trapframe: &mut Trapframe, vm: &Riscv64VmObject) 
                         );
                         (m.inst_len, m.size, m.rd, data)
                     } else {
-                        crate::early_println!("[MMIO] decode_mmio failed, using fallback");
-                        let inst = fetch_guest_inst(gpa);
-                        if let Some((sz, _base_reg, is_st, data_reg)) = decode_load_store_inst(inst)
-                        {
+                        let sepc = csr::read_sepc();
+                        let inst = fetch_guest_inst(sepc, vm);
+                        if let Some((sz, rd, is_st, data_reg)) = decode_load_store_inst(inst) {
                             let data = if is_st && data_reg != 0 {
                                 trapframe.regs.reg[data_reg as usize] as u64
                             } else {
                                 0
                             };
-                            (4, sz, data_reg, data)
+                            (4, sz, rd, data)
                         } else {
-                            crate::early_println!("[MMIO] fallback decode failed!");
-                            (4, 8, 0, 0)
+                            (4, 1, 10, 0)
                         }
                     };
 
