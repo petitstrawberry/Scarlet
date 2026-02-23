@@ -1,5 +1,6 @@
 extern crate alloc;
 
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 use vm_fdt::{Error, FdtWriter};
 
@@ -8,14 +9,11 @@ use crate::device::{DeviceFdt, MmioDevice};
 
 pub struct DtbGenerator<'a> {
     config: &'a MachineConfig,
-    devices: &'a [alloc::boxed::Box<dyn MmioDevice>],
+    devices: &'a [Arc<dyn MmioDevice>],
 }
 
 impl<'a> DtbGenerator<'a> {
-    pub fn new(
-        config: &'a MachineConfig,
-        devices: &'a [alloc::boxed::Box<dyn MmioDevice>],
-    ) -> Self {
+    pub fn new(config: &'a MachineConfig, devices: &'a [Arc<dyn MmioDevice>]) -> Self {
         Self { config, devices }
     }
 

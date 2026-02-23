@@ -94,12 +94,12 @@ pub fn run() -> i32 {
     let vcpu = Arc::new(vcpu);
     machine.set_vcpu_handle(vcpu.handle());
 
-    let plic = PlicDevice::new(PlicConfig {
+    let plic = Arc::new(PlicDevice::new(PlicConfig {
         base: 0x0C000000,
         num_sources: 128,
         num_contexts: 2,
         num_priorities: 7,
-    });
+    }));
 
     let vcpu_irq = IrqLine::new(Arc::new(VcpuIrqSink::new(vcpu.handle())));
     plic.set_irq_out(1, vcpu_irq);

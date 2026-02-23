@@ -174,31 +174,3 @@ impl DeviceFdt for Ns16550a {
         })
     }
 }
-
-impl DeviceFdt for Arc<Ns16550a> {
-    fn fdt_node(&self) -> Option<FdtNodeInfo> {
-        (**self).fdt_node()
-    }
-}
-
-impl MmioDevice for Arc<Ns16550a> {
-    fn base(&self) -> u64 {
-        (**self).base()
-    }
-
-    fn size(&self) -> u64 {
-        (**self).size()
-    }
-
-    fn read(&self, offset: u64, size: u8) -> u64 {
-        (**self).read(offset, size)
-    }
-
-    fn write(&self, offset: u64, size: u8, data: u64) {
-        (**self).write(offset, size, data)
-    }
-
-    fn as_any(&self) -> &dyn core::any::Any {
-        self
-    }
-}

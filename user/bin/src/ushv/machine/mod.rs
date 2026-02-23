@@ -4,6 +4,7 @@ mod dtb;
 
 use alloc::boxed::Box;
 use alloc::string::String;
+use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
 use scarlet_std::println;
@@ -92,13 +93,13 @@ impl IrqSink for VcpuIrqSink {
 
 pub struct Machine {
     config: MachineConfig,
-    devices: Vec<Box<dyn MmioDevice>>,
+    devices: Vec<Arc<dyn MmioDevice>>,
     vcpu_handle: Option<u32>,
 }
 
 // SAFETY: Machine is safe to send/share because:
 // - config and vcpu_handle are plain data
-// - devices contains Box<dyn MmioDevice> where MmioDevice: Send + Sync
+// - devices contains Arc<dyn MmioDevice> where MmioDevice: Send + Sync
 unsafe impl Send for Machine {}
 unsafe impl Sync for Machine {}
 
@@ -115,11 +116,11 @@ impl Machine {
         self.vcpu_handle = Some(handle);
     }
 
-    pub fn register<D: MmioDevice + 'static>(&mut self, device: D) {
-        self.devices.push(Box::new(device));
+    pub fn register<D: MmioDevice + 'static>(&mut self, device: Arc<D>) {
+        self.devices.push(device);
     }
 
-    pub fn devices(&self) -> &[Box<dyn MmioDevice>] {
+    pub fn devices(&self) -> &[Arc<dyn MmioDevice>] {
         &self.devices
     }
 
