@@ -97,11 +97,7 @@ impl Ns16550a {
         self.rx_byte.store(byte, Ordering::Relaxed);
         self.rx_valid.store(true, Ordering::Relaxed);
         self.lsr.fetch_or(LSR_RX_READY, Ordering::Release);
-        print!(
-            "[UART] trigger_rx_with_byte(byte={:#x}) irq_out={}\n",
-            byte,
-            self.irq_out.read().is_some()
-        );
+        // print!("[UART] trigger_rx_with_byte(byte={:#x}) irq_out={}\n", byte, self.irq_out.read().is_some());
         if let Some(ref irq_out) = *self.irq_out.read() {
             irq_out.set(true);
         }

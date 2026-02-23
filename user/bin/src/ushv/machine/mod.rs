@@ -67,12 +67,11 @@ impl VcpuIrqSink {
 impl IrqSink for VcpuIrqSink {
     fn set_level(&self, level: bool) {
         use scarlet_std::syscall::{Syscall, syscall3};
-        use scarlet_std::print;
         const VCPU_CTL_INJECT_INTERRUPT: u32 = 0x04;
         const VCPU_CTL_CLEAR_INTERRUPT: u32 = 0x05;
         const IRQ_TYPE_EXTERNAL: usize = 2;
-        
-        print!("[VcpuIrqSink] set_level({}) handle={}\n", level, self.vcpu_handle);
+
+        // print!("[VcpuIrqSink] set_level({}) handle={}\n", level, self.vcpu_handle);
         if level {
             let _ = syscall3(
                 Syscall::HandleControl,

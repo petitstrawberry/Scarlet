@@ -4,7 +4,7 @@ use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
-use scarlet_std::hypervisor::{arch::reg, Vcpu, VcpuExitReason, Vm};
+use scarlet_std::hypervisor::{Vcpu, VcpuExitReason, Vm, arch::reg};
 use scarlet_std::println;
 use scarlet_std::sync::Mutex;
 
@@ -15,8 +15,8 @@ use crate::device::IrqLine;
 use crate::devices::plic::{PlicConfig, PlicDevice};
 use crate::devices::uart::Ns16550a;
 use crate::machine::{DtbGenerator, Machine, MachineConfig, VcpuIrqSink};
-use firmware::{sbi::SbiFirmware, Firmware, FirmwareAction};
-use timer::{start_timer_thread, start_uart_thread, TimerState};
+use firmware::{Firmware, FirmwareAction, sbi::SbiFirmware};
+use timer::{TimerState, start_timer_thread, start_uart_thread};
 
 const GUEST_ENTRY_POINT: u64 = 0x80000000;
 
@@ -207,18 +207,7 @@ fn run_vcpu_loop(vcpu: &Vcpu, machine: &Machine, firmware: &mut dyn Firmware) {
             VcpuExitReason::MmioRead => {
                 let result = machine.handle_mmio_read(exit.mmio.address, exit.mmio.size);
                 let masked = mask_mmio_value(result, exit.mmio.size);
-                if exit.mmio.address >= 0xc201000 && exit.mmio.address < 0xc202000 {
-                    println!(
-                        "[MMIO] PLIC read addr={:#x} result={:#x} reg={}",
-                        exit.mmio.address, masked, exit.mmio.reg
-                    );
-                }
-                if exit.mmio.address >= 0x10000000 && exit.mmio.address < 0x10000100 {
-                    println!(
-                        "[MMIO] UART read addr={:#x} result={:#x} reg={}",
-                        exit.mmio.address, masked, exit.mmio.reg
-                    );
-                }
+
                 if exit.mmio.reg != 0 && vcpu.set_reg(exit.mmio.reg as u32, masked).is_err() {
                     println!(
                         "[ushv] Failed to write MMIO read result to reg x{}",

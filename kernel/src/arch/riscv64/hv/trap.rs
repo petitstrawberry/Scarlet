@@ -2,9 +2,9 @@
 
 use core::arch::asm;
 
+use crate::arch::Trapframe;
 use crate::arch::hv::csr::{self, read_htinst};
 use crate::arch::hv::vm::Riscv64VmObject;
-use crate::arch::Trapframe;
 use crate::hypervisor::types::VmExit;
 use crate::timer::tick;
 
@@ -164,7 +164,7 @@ pub fn arch_guest_trap_handler(trapframe: &mut Trapframe, vm: &Riscv64VmObject) 
     //     cause,
     //     csr::read_scause()
     // );
-    crate::early_println!("[guest trap] cause={} is_interrupt={}", cause, is_interrupt);
+    // crate::early_println!("[guest trap] cause={} is_interrupt={}", cause, is_interrupt);
     // crate::early_println!(
     //     "[guest trap] hstatus={:#x} hgatp={:#x}",
     //     csr::read_hstatus(),
@@ -256,11 +256,11 @@ pub fn arch_guest_trap_handler(trapframe: &mut Trapframe, vm: &Riscv64VmObject) 
 
                     let writable = !slot.flags.readonly;
                     let _result = vm.map_stage2_page(gpa, hpa, writable);
-                    crate::early_println!("[guest pf] mapped RAM gpa={:#x}", gpa);
+                    // crate::early_println!("[guest pf] mapped RAM gpa={:#x}", gpa);
                     None
                 }
                 None => {
-                    crate::early_println!("[guest pf] MMIO gpa={:#x}", gpa);
+                    // crate::early_println!("[guest pf] MMIO gpa={:#x}", gpa);
                     let is_write = cause == CAUSE_STORE_GUEST_PAGE_FAULT;
 
                     let (inst_len, size, reg, data) = if let Some(m) = decode_mmio() {
@@ -269,12 +269,12 @@ pub fn arch_guest_trap_handler(trapframe: &mut Trapframe, vm: &Riscv64VmObject) 
                         } else {
                             0
                         };
-                        crate::early_println!(
-                            "[MMIO] decoded: len={} size={} reg={}",
-                            m.inst_len,
-                            m.size,
-                            m.rd
-                        );
+                        // crate::early_println!(
+                        //     "[MMIO] decoded: len={} size={} reg={}",
+                        //     m.inst_len,
+                        //     m.size,
+                        //     m.rd
+                        // );
                         (m.inst_len, m.size, m.rd, data)
                     } else {
                         let sepc = csr::read_sepc();
@@ -293,12 +293,12 @@ pub fn arch_guest_trap_handler(trapframe: &mut Trapframe, vm: &Riscv64VmObject) 
 
                     let epc = csr::read_sepc();
                     trapframe.epc = epc.wrapping_add(inst_len as u64);
-                    crate::early_println!(
-                        "[MMIO] exit: epc={:#x}->{:#x} addr={:#x}",
-                        epc,
-                        trapframe.epc,
-                        gpa
-                    );
+                    // crate::early_println!(
+                    //     "[MMIO] exit: epc={:#x}->{:#x} addr={:#x}",
+                    //     epc,
+                    //     trapframe.epc,
+                    //     gpa
+                    // );
 
                     Some(if is_write {
                         VmExit::MmioWrite {
@@ -328,7 +328,7 @@ pub fn arch_guest_trap_handler(trapframe: &mut Trapframe, vm: &Riscv64VmObject) 
             let htinst = read_htinst();
             let inst = htinst as u32;
 
-            crate::early_println!("[virt_inst] ENTER htinst={:#x}", htinst);
+            // crate::early_println!("[virt_inst] ENTER htinst={:#x}", htinst);
 
             let hvip = csr::read_hvip();
             let vsie = csr::read_vsie();
@@ -340,18 +340,18 @@ pub fn arch_guest_trap_handler(trapframe: &mut Trapframe, vm: &Riscv64VmObject) 
             let active = pending & enabled;
             let sie_enabled = (vsstatus & 0x02) != 0;
 
-            crate::early_println!(
-                "[virt_inst] hvip={:#x} vsie={:#x} vsstatus={:#x} active={:#x} sie={}",
-                hvip,
-                vsie,
-                vsstatus,
-                active,
-                sie_enabled
-            );
+            // crate::early_println!(
+            //     "[virt_inst] hvip={:#x} vsie={:#x} vsstatus={:#x} active={:#x} sie={}",
+            //     hvip,
+            //     vsie,
+            //     vsstatus,
+            //     active,
+            //     sie_enabled
+            // );
 
             if active != 0 && sie_enabled {
                 let epc = csr::read_sepc();
-                crate::early_println!("[virt_inst] taking interrupt, advancing PC");
+                // crate::early_println!("[virt_inst] taking interrupt, advancing PC");
                 trapframe.epc = epc.wrapping_add(4);
                 return None;
             }

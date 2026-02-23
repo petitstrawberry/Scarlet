@@ -90,11 +90,7 @@ impl Plic {
         let word = (source / 32) as usize;
         let bit = source % 32;
         self.pending[word].fetch_or(1 << bit, Ordering::Release);
-        print!(
-            "[PLIC] set_pending({}) pending[0]={:#x}\n",
-            source,
-            self.pending[0].load(Ordering::Relaxed)
-        );
+        // print!("[PLIC] set_pending({}) pending[0]={:#x}\n", source, self.pending[0].load(Ordering::Relaxed));
         self.update_irq();
     }
 
@@ -105,11 +101,7 @@ impl Plic {
         let word = (source / 32) as usize;
         let bit = source % 32;
         self.pending[word].fetch_and(!(1 << bit), Ordering::Release);
-        print!(
-            "[PLIC] clear_pending({}) pending[0]={:#x}\n",
-            source,
-            self.pending[0].load(Ordering::Relaxed)
-        );
+        // print!("[PLIC] clear_pending({}) pending[0]={:#x}\n", source, self.pending[0].load(Ordering::Relaxed));
         self.update_irq();
     }
 
@@ -126,10 +118,7 @@ impl Plic {
             if let Some(ref irq_out) = irq_out[ctx] {
                 let best_id = self.highest_pending(ctx);
                 let level = best_id > 0;
-                print!(
-                    "[PLIC] update_irq ctx={} best_id={} -> set_level({})\n",
-                    ctx, best_id, level
-                );
+                // print!("[PLIC] update_irq ctx={} best_id={} -> set_level({})\n", ctx, best_id, level);
                 irq_out.set(level);
             }
         }
@@ -162,10 +151,7 @@ impl Plic {
                 }
             }
         }
-        print!(
-            "[PLIC] highest_pending(ctx={}, threshold={}, best_id={}, best_prio={})\n",
-            context, threshold, best_id, best_prio
-        );
+        // print!("[PLIC] highest_pending(ctx={}, threshold={}, best_id={}, best_prio={})\n", context, threshold, best_id, best_prio);
         best_id
     }
 
@@ -182,7 +168,7 @@ impl Plic {
         }
         let val = value & self.config.num_priorities;
         self.priority[source as usize].store(val, Ordering::Relaxed);
-        print!("[PLIC] write_priority(source={}, val={})\n", source, val);
+        // print!("[PLIC] write_priority(source={}, val={})\n", source, val);
         self.update_irq();
     }
 
@@ -208,10 +194,7 @@ impl Plic {
             return;
         }
         self.enable[context as usize][word as usize].store(value, Ordering::Relaxed);
-        print!(
-            "[PLIC] write_enable(ctx={}, word={}, val={:#x})\n",
-            context, word, value
-        );
+        // print!("[PLIC] write_enable(ctx={}, word={}, val={:#x})\n", context, word, value);
         self.update_irq();
     }
 
@@ -228,7 +211,7 @@ impl Plic {
         }
         let val = value & self.config.num_priorities;
         self.threshold[context as usize].store(val, Ordering::Relaxed);
-        print!("[PLIC] write_threshold(ctx={}, val={})\n", context, val);
+        // print!("[PLIC] write_threshold(ctx={}, val={})\n", context, val);
         self.update_irq();
     }
 
@@ -237,13 +220,7 @@ impl Plic {
             return 0;
         }
         let id = self.highest_pending(context as usize);
-        print!(
-            "[PLIC] read_claim(ctx={}) -> id={} pending[0]={:#x} enabled[0]={:#x}\n",
-            context,
-            id,
-            self.pending[0].load(Ordering::Relaxed),
-            self.enable[context as usize][0].load(Ordering::Relaxed)
-        );
+        // print!("[PLIC] read_claim(ctx={}) -> id={} pending[0]={:#x} enabled[0]={:#x}\n", context, id, self.pending[0].load(Ordering::Relaxed), self.enable[context as usize][0].load(Ordering::Relaxed));
         if id != 0 {
             let word = (id / 32) as usize;
             let bit = id % 32;
@@ -264,7 +241,7 @@ impl Plic {
         let word = (id / 32) as usize;
         let bit = id % 32;
         self.claimed[word].fetch_and(!(1 << bit), Ordering::Relaxed);
-        print!("[PLIC] write_complete(ctx={}, id={})\n", context, id);
+        // print!("[PLIC] write_complete(ctx={}, id={})\n", context, id);
         self.update_irq();
     }
 }
