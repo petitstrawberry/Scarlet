@@ -210,6 +210,13 @@ impl Plic {
             return 0;
         }
         let id = self.highest_pending(context as usize);
+        println!(
+            "[PLIC] read_claim ctx={} -> id={} pending[0]={:#x} enabled[0]={:#x}",
+            context,
+            id,
+            self.pending[0].load(Ordering::Acquire),
+            self.enable[context as usize][0].load(Ordering::Relaxed)
+        );
         if id != 0 {
             let word = (id / 32) as usize;
             let bit = id % 32;

@@ -42,7 +42,7 @@ pub fn init_hv_per_cpu(cpu_id: usize) {
     );
 
     // HS-mode CSRs
-    write_hstatus(0x0); // Clear HSTATUS to start with a clean slate
+    write_hstatus(0x0);
     write_hcounteren(0x2); // Enable guest access to the time register (rdtime)
     write_hgatp(0); // Start with no guest page tables mapped
 

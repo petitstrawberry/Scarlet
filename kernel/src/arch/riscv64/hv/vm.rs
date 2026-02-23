@@ -102,6 +102,15 @@ impl Riscv64VcpuObject {
         let hvip = read_hvip();
         let new_hvip = (hvip & !mask) | val;
 
+        crate::early_println!(
+            "[inject_pending] mask={:#x} pending={:#x} val={:#x} hvip={:#x}->new_hvip={:#x}",
+            mask,
+            pending,
+            val,
+            hvip,
+            new_hvip
+        );
+
         self.last_hvip.store(new_hvip, Ordering::Release);
         write_hvip(new_hvip);
     }
@@ -154,13 +163,6 @@ impl VcpuObject for Riscv64VcpuObject {
 
         self.irqs_pending.fetch_or(bit, Ordering::Release);
         self.irqs_pending_mask.fetch_or(bit, Ordering::Release);
-
-        crate::println!(
-            "[vCPU {}] Injecting interrupt: {:?} (bit {})",
-            self.id,
-            irq_type,
-            bit
-        );
     }
 
     fn clear_interrupt(&self, irq_type: InterruptType) {
@@ -172,13 +174,6 @@ impl VcpuObject for Riscv64VcpuObject {
 
         self.irqs_pending.fetch_and(!bit, Ordering::AcqRel);
         self.irqs_pending_mask.fetch_or(bit, Ordering::Release);
-
-        crate::println!(
-            "[vCPU {}] Cleared interrupt: {:?} (bit {})",
-            self.id,
-            irq_type,
-            bit
-        );
     }
 
     fn get_reg(&self, index: u32) -> Result<u64, &'static str> {
@@ -202,7 +197,6 @@ impl VcpuObject for Riscv64VcpuObject {
         self.inject_pending_interrupts();
 
         self.setup_for_guest(task, &mut vcpu.guest, &vm);
-        // crate::println!("[vCPU {}] Guest VCPU: {:#?}", self.id, vcpu.guest);
         unsafe { arch_run_guest_loop(&mut guest_tf, &vcpu.guest, arch) };
 
         loop {

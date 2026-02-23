@@ -207,6 +207,12 @@ fn run_vcpu_loop(vcpu: &Vcpu, machine: &Machine, firmware: &mut dyn Firmware) {
             VcpuExitReason::MmioRead => {
                 let result = machine.handle_mmio_read(exit.mmio.address, exit.mmio.size);
                 let masked = mask_mmio_value(result, exit.mmio.size);
+                if exit.mmio.address >= 0xc201000 && exit.mmio.address < 0xc202000 {
+                    println!(
+                        "[MMIO] PLIC read addr={:#x} result={:#x} reg={}",
+                        exit.mmio.address, masked, exit.mmio.reg
+                    );
+                }
                 if exit.mmio.reg != 0 && vcpu.set_reg(exit.mmio.reg as u32, masked).is_err() {
                     println!(
                         "[ushv] Failed to write MMIO read result to reg x{}",
