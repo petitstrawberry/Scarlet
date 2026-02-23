@@ -16,3 +16,7 @@ mkfs/initramfs/system/scarlet/root/scarlet_kernel.bin
 # Build artifacts
 tools/guest/*.o
 tools/guest/*.elf
+
+# Guest kernel binaries (large files)
+mkfs/initramfs/system/scarlet/root/scarlet-kernel.bin
+mkfs/initramfs/system/scarlet/root/simple_guest.bin

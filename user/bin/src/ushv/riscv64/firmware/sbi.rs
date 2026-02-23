@@ -1,7 +1,7 @@
 use super::{Firmware, FirmwareAction};
 use crate::riscv64::timer::TimerState;
 use alloc::sync::Arc;
-use scarlet_std::hypervisor::{arch::reg, Vcpu};
+use scarlet_std::hypervisor::{Vcpu, arch::reg};
 use scarlet_std::sync::Mutex;
 
 // TODO: SBI v2.0/v3.0 Required Extensions Implementation Status
@@ -270,8 +270,8 @@ impl SbiFirmware {
         &mut self,
         function: u64,
         a0: u64,
-        a1: u64,
-        a2: u64,
+        _a1: u64,
+        _a2: u64,
     ) -> ((i64, u64), FirmwareAction) {
         match function {
             fid::dbcn::WRITE_BYTE => {
@@ -279,35 +279,9 @@ impl SbiFirmware {
                 scarlet_std::print!("{}", ch);
                 ((error::SUCCESS, 0), FirmwareAction::Continue)
             }
-            fid::dbcn::WRITE => {
-                // a0 = num_bytes, a1 = guest_phys_addr_lo, a2 = guest_phys_addr_hi
-                let num_bytes = a0 as usize;
-                let guest_addr = a1; // For 32-bit guest addresses, a2 is 0
-
-                // Read from guest memory and print
-                // We need to access the guest's physical memory
-                // For now, we'll implement a simple version that works with the memory region
-                let mut printed = 0usize;
-
-                // The guest memory starts at 0x80000000 and is mapped by ushv
-                // We can try to read directly from the host virtual address
-                // But we need to know the host address mapping
-
-                // For simplicity, we'll just read byte by byte
-                // This is a basic implementation - a proper one would use the VM's memory mapping
-                const GUEST_PHYS_BASE: u64 = 0x80000000;
-
-                if guest_addr >= GUEST_PHYS_BASE {
-                    // This is within guest RAM - we can try to read it
-                    // The host address should be available from the VM setup
-                    // For now, return success with 0 bytes written
-                    // A full implementation would need access to the host memory mapping
-                    printed = 0;
-                }
-
-                ((error::SUCCESS, printed as u64), FirmwareAction::Continue)
+            fid::dbcn::WRITE | fid::dbcn::READ => {
+                ((error::NOT_SUPPORTED, 0), FirmwareAction::Continue)
             }
-            fid::dbcn::READ => ((error::NOT_SUPPORTED, 0), FirmwareAction::Continue),
             _ => ((error::NOT_SUPPORTED, 0), FirmwareAction::Continue),
         }
     }
