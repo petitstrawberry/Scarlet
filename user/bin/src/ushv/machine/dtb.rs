@@ -41,6 +41,10 @@ impl<'a> DtbGenerator<'a> {
         if let Some(ref stdout) = self.config.stdout_path {
             fdt.property_string("stdout-path", stdout)?;
         }
+        if let (Some(base), Some(size)) = (self.config.initrd_base, self.config.initrd_size) {
+            fdt.property_u64("linux,initrd-start", base)?;
+            fdt.property_u64("linux,initrd-end", base + size)?;
+        }
         fdt.end_node(chosen)?;
         Ok(())
     }

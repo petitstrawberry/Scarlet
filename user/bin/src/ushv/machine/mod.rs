@@ -31,6 +31,8 @@ pub struct MachineConfig {
     pub stdout_path: Option<String>,
     pub num_vcpus: usize,
     pub cpus: Vec<CpuInfo>,
+    pub initrd_base: Option<u64>,
+    pub initrd_size: Option<u64>,
 }
 
 impl MachineConfig {
@@ -41,7 +43,7 @@ impl MachineConfig {
             address_cells: 2,
             size_cells: 2,
             memory_base: 0x80000000,
-            memory_size: 128 * 1024 * 1024,
+            memory_size: 256 * 1024 * 1024,
             timebase_frequency: 10000000,
             bootargs: String::from("console=ttyS0"),
             stdout_path: Some(String::from("/soc/serial@10000000")),
@@ -51,7 +53,14 @@ impl MachineConfig {
                 isa: String::from("rv64imafdc"),
                 mmu_type: String::from("riscv,sv48"),
             }],
+            initrd_base: None,
+            initrd_size: None,
         }
+    }
+
+    pub fn set_initrd(&mut self, base: u64, size: u64) {
+        self.initrd_base = Some(base);
+        self.initrd_size = Some(size);
     }
 }
 
@@ -126,6 +135,10 @@ impl Machine {
 
     pub fn config(&self) -> &MachineConfig {
         &self.config
+    }
+
+    pub fn config_mut(&mut self) -> &mut MachineConfig {
+        &mut self.config
     }
 
     fn find_device(&self, addr: u64) -> Option<(usize, u64)> {

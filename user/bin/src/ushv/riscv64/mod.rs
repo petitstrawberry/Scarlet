@@ -4,7 +4,7 @@ use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
-use scarlet_std::hypervisor::{Vcpu, VcpuExitReason, Vm, arch::reg};
+use scarlet_std::hypervisor::{arch::reg, Vcpu, VcpuExitReason, Vm};
 use scarlet_std::println;
 use scarlet_std::sync::Mutex;
 
@@ -15,8 +15,8 @@ use crate::device::IrqLine;
 use crate::devices::plic::{PlicConfig, PlicDevice};
 use crate::devices::uart::Ns16550a;
 use crate::machine::{DtbGenerator, Machine, MachineConfig, VcpuIrqSink};
-use firmware::{Firmware, FirmwareAction, sbi::SbiFirmware};
-use timer::{TimerState, start_timer_thread, start_uart_thread};
+use firmware::{sbi::SbiFirmware, Firmware, FirmwareAction};
+use timer::{start_timer_thread, start_uart_thread, TimerState};
 
 const GUEST_ENTRY_POINT: u64 = 0x84000000;
 
@@ -25,12 +25,13 @@ pub fn run() -> i32 {
 
     let args = parse_args();
     if args.is_empty() {
-        println!("Usage: ushv <guest_image>");
+        println!("Usage: ushv <guest_image> [-i <initramfs>]");
         println!("  guest_image: Path to guest kernel binary");
+        println!("  -i, --initrd <path>: Path to initramfs (optional)");
         return 1;
     }
 
-    let image_path = &args[0];
+    let (image_path, initrd_path) = parse_options(&args);
     println!("[ushv] Loading guest image: {}", image_path);
 
     let guest_image = match load_guest_image(image_path) {
@@ -41,6 +42,14 @@ pub fn run() -> i32 {
         }
     };
     println!("[ushv] Image size: {} bytes", guest_image.len());
+
+    let initrd_image = initrd_path.and_then(|p| {
+        println!("[ushv] Loading initramfs: {}", p);
+        load_guest_image(p)
+    });
+    if let Some(ref initrd) = initrd_image {
+        println!("[ushv] Initramfs size: {} bytes", initrd.len());
+    }
 
     println!("[ushv] Creating VM...");
     let vm = match Vm::create() {
@@ -68,6 +77,31 @@ pub fn run() -> i32 {
             guest_image.len(),
         );
     }
+
+    // Copy initramfs to guest memory (place after kernel, aligned to 4KB)
+    let initrd_guest_base = if let Some(ref initrd) = initrd_image {
+        let kernel_end = guest_phys_base + (guest_image.len() as u64);
+        let initrd_base = (kernel_end + 0xfff) & !0xfff;
+        let initrd_offset = (initrd_base - guest_phys_base) as usize;
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                initrd.as_ptr(),
+                (host_addr + initrd_offset) as *mut u8,
+                initrd.len(),
+            );
+        }
+        println!(
+            "[ushv] Initramfs placed at {:#x}, size {} bytes",
+            initrd_base,
+            initrd.len()
+        );
+        machine
+            .config_mut()
+            .set_initrd(initrd_base, initrd.len() as u64);
+        Some(initrd_base)
+    } else {
+        None
+    };
 
     println!(
         "[ushv] Adding memory region: guest={:#x}, size={:#x}",
@@ -277,6 +311,26 @@ fn parse_args() -> Vec<String> {
     } else {
         Vec::new()
     }
+}
+
+fn parse_options(args: &[String]) -> (&str, Option<&str>) {
+    let mut image_path: Option<&str> = None;
+    let mut initrd_path: Option<&str> = None;
+    let mut i = 0;
+    while i < args.len() {
+        if (args[i] == "-i" || args[i] == "--initrd") && i + 1 < args.len() {
+            initrd_path = Some(&args[i + 1]);
+            i += 2;
+        } else if args[i].starts_with("-") {
+            i += 1;
+        } else if image_path.is_none() {
+            image_path = Some(&args[i]);
+            i += 1;
+        } else {
+            i += 1;
+        }
+    }
+    (image_path.unwrap_or(""), initrd_path)
 }
 
 fn load_guest_image(path: &str) -> Option<Vec<u8>> {
