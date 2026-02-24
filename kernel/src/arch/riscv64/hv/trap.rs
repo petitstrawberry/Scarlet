@@ -2,9 +2,9 @@
 
 use core::arch::asm;
 
-use crate::arch::Trapframe;
 use crate::arch::hv::csr::{self, read_htinst};
 use crate::arch::hv::vm::Riscv64VmObject;
+use crate::arch::Trapframe;
 use crate::hypervisor::types::VmExit;
 use crate::timer::tick;
 
@@ -44,49 +44,11 @@ fn decode_mmio() -> Option<MmioDecode> {
     let rd = ((htinst >> 7) & 0x1f) as u8;
     let rs2 = ((htinst >> 20) & 0x1f) as u8;
 
-    // QEMU sometimes doesn't set the transformation bit (bit 1) correctly for
-    // compressed instructions. As a workaround, check if the htinst value
-    // looks like a valid 32-bit RISC-V instruction by checking the opcode.
-    // Standard 32-bit opcodes have bits[1:0]=11, but htinst already stripped
-    // those. Valid opcodes are in specific ranges.
-    // If htinst doesn't look like a valid 32-bit instruction, assume compressed.
-    let sepc = csr::read_sepc();
-    let opcode = htinst & 0x7f;
-    let is_valid_32bit = matches!(
-        opcode,
-        0x03 | 0x07
-            | 0x0f
-            | 0x13
-            | 0x17
-            | 0x1b
-            | 0x23
-            | 0x27
-            | 0x2b
-            | 0x33
-            | 0x37
-            | 0x3b
-            | 0x43
-            | 0x47
-            | 0x4b
-            | 0x53
-            | 0x57
-            | 0x63
-            | 0x67
-            | 0x6b
-            | 0x73
-            | 0x77
-            | 0x7b
-            | 0x7f
-    );
-
-    // Use transformation bit if set, otherwise use opcode validity check
-    let inst_len = if (htinst & 0x2) != 0 {
-        2 // Explicitly marked as transformed from 16-bit
-    } else if (htinst & 0x1) != 0 && is_valid_32bit {
-        4 // Valid 32-bit native instruction
-    } else {
-        2 // Assume compressed for ambiguous cases
-    };
+    // Instruction length is determined by lowest 2 bits of htinst
+    // bits[1:0] = 0b11 -> 32-bit instruction
+    // bits[1:0] = 0b01 -> 16-bit compressed instruction
+    // bits[1:0] = 0b00 -> pseudo-instruction
+    let inst_len = if (htinst & 0x3) == 0x3 { 4 } else { 2 };
 
     Some(MmioDecode {
         inst_len,
@@ -106,37 +68,75 @@ fn fetch_guest_inst(sepc: u64, vm: &Riscv64VmObject) -> u32 {
     }
 }
 
-fn decode_load_store_inst(inst: u32) -> Option<(u8, u8, bool, u8)> {
-    let opcode = inst & 0x7f;
+fn decode_load_store_inst(inst: u32) -> Option<(u8, u8, bool, u8, u32)> {
+    // Check for compressed instruction (16-bit)
+    if (inst & 0x3) != 0x3 {
+        // Compressed instruction
+        let c_inst = inst as u16;
+        let opcode = c_inst & 0x3;
+        let funct3 = (c_inst >> 13) & 0x7;
+        let rd = ((c_inst >> 7) & 0x7) as u8; // rd/rs2 for compressed
 
-    match opcode {
-        0b0100011 => {
-            let funct3 = (inst >> 12) & 0x7;
-            let rs2 = ((inst >> 20) & 0x1f) as u8;
-            let size = match funct3 {
-                0b000 => 1,
-                0b001 => 2,
-                0b010 => 4,
-                0b011 => 8,
-                _ => return None,
-            };
-            Some((size, 0, true, rs2))
+        match (opcode, funct3) {
+            // C.LW (load word, 32-bit)
+            (0b00, 0b010) => Some((4, rd + 8, false, rd + 8, 2)), // rd is s0-s7 (x8-x15)
+            // C.LD (load doubleword, 64-bit)
+            (0b00, 0b011) => Some((8, rd + 8, false, rd + 8, 2)),
+            // C.SW (store word)
+            (0b10, 0b110) => Some((4, 0, true, rd + 8, 2)),
+            // C.SD (store doubleword)
+            (0b10, 0b111) => Some((8, 0, true, rd + 8, 2)),
+            // C.LWSP (load word from stack pointer)
+            (0b10, 0b010) => {
+                let rd = ((c_inst >> 7) & 0x1f) as u8;
+                if rd == 0 {
+                    return None;
+                } // Reserved
+                Some((4, rd, false, rd, 2))
+            }
+            // C.LDSP (load doubleword from stack pointer)
+            (0b10, 0b011) => {
+                let rd = ((c_inst >> 7) & 0x1f) as u8;
+                if rd == 0 {
+                    return None;
+                }
+                Some((8, rd, false, rd, 2))
+            }
+            _ => None,
         }
-        0b0000011 => {
-            let funct3 = (inst >> 12) & 0x7;
-            let rd = ((inst >> 7) & 0x1f) as u8;
-            let size = match funct3 {
-                0b000 => 1,
-                0b001 => 2,
-                0b010 => 4,
-                0b011 => 8,
-                0b100 => 1,
-                0b101 => 2,
-                _ => return None,
-            };
-            Some((size, rd, false, rd))
+    } else {
+        // 32-bit instruction
+        let opcode = inst & 0x7f;
+
+        match opcode {
+            0b0100011 => {
+                let funct3 = (inst >> 12) & 0x7;
+                let rs2 = ((inst >> 20) & 0x1f) as u8;
+                let size = match funct3 {
+                    0b000 => 1,
+                    0b001 => 2,
+                    0b010 => 4,
+                    0b011 => 8,
+                    _ => return None,
+                };
+                Some((size, 0, true, rs2, 4))
+            }
+            0b0000011 => {
+                let funct3 = (inst >> 12) & 0x7;
+                let rd = ((inst >> 7) & 0x1f) as u8;
+                let size = match funct3 {
+                    0b000 => 1,
+                    0b001 => 2,
+                    0b010 => 4,
+                    0b011 => 8,
+                    0b100 => 1,
+                    0b101 => 2,
+                    _ => return None,
+                };
+                Some((size, rd, false, rd, 4))
+            }
+            _ => None,
         }
-        _ => None,
     }
 }
 
@@ -279,13 +279,15 @@ pub fn arch_guest_trap_handler(trapframe: &mut Trapframe, vm: &Riscv64VmObject) 
                     } else {
                         let sepc = csr::read_sepc();
                         let inst = fetch_guest_inst(sepc, vm);
-                        if let Some((sz, rd, is_st, data_reg)) = decode_load_store_inst(inst) {
+                        if let Some((sz, rd, is_st, data_reg, inst_len)) =
+                            decode_load_store_inst(inst)
+                        {
                             let data = if is_st && data_reg != 0 {
                                 trapframe.regs.reg[data_reg as usize] as u64
                             } else {
                                 0
                             };
-                            (4, sz, rd, data)
+                            (inst_len, sz, rd, data)
                         } else {
                             (4, 1, 10, 0)
                         }
