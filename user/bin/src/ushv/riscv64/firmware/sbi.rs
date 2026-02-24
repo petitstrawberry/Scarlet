@@ -295,7 +295,7 @@ impl SbiFirmware {
             }
             fid::dbcn::WRITE => {
                 let num_bytes = a0 as usize;
-                let guest_addr = a1 | (a2 << 32);
+                let guest_addr = (a1 | (a2 << 32)) & 0xffffffff;
 
                 if self.guest_mem_host_addr == 0 || self.guest_mem_size == 0 {
                     return ((error::NOT_SUPPORTED, 0), FirmwareAction::Continue);
