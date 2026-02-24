@@ -4,7 +4,7 @@ use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
-use scarlet_std::hypervisor::{Vcpu, VcpuExitReason, Vm, arch::reg};
+use scarlet_std::hypervisor::{arch::reg, Vcpu, VcpuExitReason, Vm};
 use scarlet_std::println;
 use scarlet_std::sync::Mutex;
 
@@ -15,8 +15,8 @@ use crate::device::IrqLine;
 use crate::devices::plic::{PlicConfig, PlicDevice};
 use crate::devices::uart::Ns16550a;
 use crate::machine::{DtbGenerator, Machine, MachineConfig, VcpuIrqSink};
-use firmware::{Firmware, FirmwareAction, sbi::SbiFirmware};
-use timer::{TimerState, start_timer_thread, start_uart_thread};
+use firmware::{sbi::SbiFirmware, Firmware, FirmwareAction};
+use timer::{start_timer_thread, start_uart_thread, TimerState};
 
 const GUEST_ENTRY_POINT: u64 = 0x84000000;
 
@@ -25,13 +25,14 @@ pub fn run() -> i32 {
 
     let args = parse_args();
     if args.is_empty() {
-        println!("Usage: ushv <guest_image> [-i <initramfs>]");
+        println!("Usage: ushv <guest_image> [-i <initramfs>] [-m <memory_mb>]");
         println!("  guest_image: Path to guest kernel binary");
         println!("  -i, --initrd <path>: Path to initramfs (optional)");
+        println!("  -m, --memory <size>: Guest memory size in MB (default: 256)");
         return 1;
     }
 
-    let (image_path, initrd_path) = parse_options(&args);
+    let (image_path, initrd_path, memory_mb) = parse_options(&args);
     println!("[ushv] Loading guest image: {}", image_path);
 
     let guest_image = match load_guest_image(image_path) {
@@ -61,7 +62,9 @@ pub fn run() -> i32 {
     };
     println!("[ushv] VM created with handle {}", vm.handle());
 
-    let mut machine = Machine::new(MachineConfig::qemu_virt());
+    let mut config = MachineConfig::qemu_virt();
+    config.memory_size = (memory_mb as u64) * 1024 * 1024;
+    let mut machine = Machine::new(config);
     let guest_memory_size = machine.config().memory_size;
     let guest_phys_base = GUEST_ENTRY_POINT;
     let host_addr = allocate_guest_memory(guest_memory_size as usize);
@@ -313,13 +316,17 @@ fn parse_args() -> Vec<String> {
     }
 }
 
-fn parse_options(args: &[String]) -> (&str, Option<&str>) {
+fn parse_options(args: &[String]) -> (&str, Option<&str>, usize) {
     let mut image_path: Option<&str> = None;
     let mut initrd_path: Option<&str> = None;
+    let mut memory_mb: usize = 256;
     let mut i = 0;
     while i < args.len() {
         if (args[i] == "-i" || args[i] == "--initrd") && i + 1 < args.len() {
             initrd_path = Some(&args[i + 1]);
+            i += 2;
+        } else if (args[i] == "-m" || args[i] == "--memory") && i + 1 < args.len() {
+            memory_mb = args[i + 1].parse().unwrap_or(256);
             i += 2;
         } else if args[i].starts_with("-") {
             i += 1;
@@ -330,7 +337,7 @@ fn parse_options(args: &[String]) -> (&str, Option<&str>) {
             i += 1;
         }
     }
-    (image_path.unwrap_or(""), initrd_path)
+    (image_path.unwrap_or(""), initrd_path, memory_mb)
 }
 
 fn load_guest_image(path: &str) -> Option<Vec<u8>> {
