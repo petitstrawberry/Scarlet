@@ -18,7 +18,7 @@ use crate::machine::{DtbGenerator, Machine, MachineConfig, VcpuIrqSink};
 use firmware::{Firmware, FirmwareAction, sbi::SbiFirmware};
 use timer::{TimerState, start_timer_thread, start_uart_thread};
 
-const GUEST_ENTRY_POINT: u64 = 0x80000000;
+const GUEST_ENTRY_POINT: u64 = 0x84000000;
 
 pub fn run() -> i32 {
     println!("[ushv] Starting U-SHV Emulator");
