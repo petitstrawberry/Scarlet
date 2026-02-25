@@ -1,6 +1,7 @@
 use super::Mode;
 use core::arch::asm;
 use core::mem::transmute;
+use core::panic;
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use instruction::sbi::sbi_system_reset;
 use trap::kernel::_kernel_trap_entry;
@@ -601,6 +602,7 @@ pub fn set_next_mode(mode: Mode) {
                 "csrw sstatus, {sstatus}",
                 sstatus = in(reg) sstatus,
             );
+            #[cfg(feature = "hypervisor")]
             asm!("csrc hstatus, {0}", in(reg) (1u64 << 7));
         },
         Mode::Kernel => unsafe {
@@ -614,33 +616,42 @@ pub fn set_next_mode(mode: Mode) {
                 "csrw sstatus, {sstatus}",
                 sstatus = in(reg) sstatus,
             );
+            #[cfg(feature = "hypervisor")]
             asm!("csrc hstatus, {0}", in(reg) (1u64 << 7));
         },
         Mode::GuestUser => unsafe {
-            let mut sstatus: usize;
-            asm!(
-                "csrr {sstatus}, sstatus",
-                sstatus = out(reg) sstatus,
-            );
-            sstatus &= !(1 << 8);
-            asm!(
-                "csrw sstatus, {sstatus}",
-                sstatus = in(reg) sstatus,
-            );
-            asm!("csrs hstatus, {0}", in(reg) (1u64 << 7));
+            if cfg!(feature = "hypervisor") {
+                let mut sstatus: usize;
+                asm!(
+                    "csrr {sstatus}, sstatus",
+                    sstatus = out(reg) sstatus,
+                );
+                sstatus &= !(1 << 8);
+                asm!(
+                    "csrw sstatus, {sstatus}",
+                    sstatus = in(reg) sstatus,
+                );
+                asm!("csrs hstatus, {0}", in(reg) (1u64 << 7));
+            } else {
+                panic!("Guest mode not supported without hypervisor feature");
+            }
         },
         Mode::GuestKernel => unsafe {
-            let mut sstatus: usize;
-            asm!(
-                "csrr {sstatus}, sstatus",
-                sstatus = out(reg) sstatus,
-            );
-            sstatus |= 1 << 8;
-            asm!(
-                "csrw sstatus, {sstatus}",
-                sstatus = in(reg) sstatus,
-            );
-            asm!("csrs hstatus, {0}", in(reg) (1u64 << 7));
+            if cfg!(feature = "hypervisor") {
+                let mut sstatus: usize;
+                asm!(
+                    "csrr {sstatus}, sstatus",
+                    sstatus = out(reg) sstatus,
+                );
+                sstatus |= 1 << 8;
+                asm!(
+                    "csrw sstatus, {sstatus}",
+                    sstatus = in(reg) sstatus,
+                );
+                asm!("csrs hstatus, {0}", in(reg) (1u64 << 7));
+            } else {
+                panic!("Guest mode not supported without hypervisor feature");
+            }
         },
     }
 }

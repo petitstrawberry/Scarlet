@@ -384,7 +384,7 @@ pub extern "C" fn arch_user_trap_handler(addr: usize) {
     let saved_stvec = get_trapvector();
     set_trapvector(get_kernel_trapvector_paddr());
 
-    #[cfg(all(feature = "hypervisor", target_arch = "riscv64"))]
+    #[cfg(feature = "hypervisor")]
     {
         let from_guest = crate::arch::hv::trap::is_from_guest();
         // crate::early_println!("[trap_handler] from_guest={}", from_guest);
