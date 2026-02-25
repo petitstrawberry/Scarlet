@@ -25,14 +25,22 @@ pub fn run() -> i32 {
 
     let args = parse_args();
     if args.is_empty() {
-        println!("Usage: ushv <guest_image> [-i <initramfs>] [-m <memory_mb>]");
-        println!("  guest_image: Path to guest kernel binary");
-        println!("  -i, --initrd <path>: Path to initramfs (optional)");
-        println!("  -m, --memory <size>: Guest memory size in MB (default: 256)");
+        print_usage();
         return 1;
     }
 
-    let (image_path, initrd_path, memory_mb) = parse_options(&args);
+    let (image_path, initrd_path, memory_mb, show_help) = parse_options(&args);
+    if show_help {
+        print_usage();
+        return 0;
+    }
+
+    if image_path.is_empty() {
+        println!("[ushv] Error: guest_image is required");
+        print_usage();
+        return 1;
+    }
+
     println!("[ushv] Loading guest image: {}", image_path);
 
     let guest_image = match load_guest_image(image_path) {
@@ -316,13 +324,17 @@ fn parse_args() -> Vec<String> {
     }
 }
 
-fn parse_options(args: &[String]) -> (&str, Option<&str>, usize) {
+fn parse_options(args: &[String]) -> (&str, Option<&str>, usize, bool) {
     let mut image_path: Option<&str> = None;
     let mut initrd_path: Option<&str> = None;
     let mut memory_mb: usize = 256;
+    let mut show_help = false;
     let mut i = 0;
     while i < args.len() {
-        if (args[i] == "-i" || args[i] == "--initrd") && i + 1 < args.len() {
+        if args[i] == "-h" || args[i] == "--help" {
+            show_help = true;
+            i += 1;
+        } else if (args[i] == "-i" || args[i] == "--initrd") && i + 1 < args.len() {
             initrd_path = Some(&args[i + 1]);
             i += 2;
         } else if (args[i] == "-m" || args[i] == "--memory") && i + 1 < args.len() {
@@ -337,7 +349,19 @@ fn parse_options(args: &[String]) -> (&str, Option<&str>, usize) {
             i += 1;
         }
     }
-    (image_path.unwrap_or(""), initrd_path, memory_mb)
+    (image_path.unwrap_or(""), initrd_path, memory_mb, show_help)
+}
+
+fn print_usage() {
+    println!("Usage: ushv <guest_image> [options]");
+    println!();
+    println!("Options:");
+    println!("  -i, --initrd <path>  Path to initramfs (optional)");
+    println!("  -m, --memory <size>  Guest memory size in MB (default: 256)");
+    println!("  -h, --help           Show this help message");
+    println!();
+    println!("Arguments:");
+    println!("  guest_image          Path to guest kernel binary");
 }
 
 fn load_guest_image(path: &str) -> Option<Vec<u8>> {
