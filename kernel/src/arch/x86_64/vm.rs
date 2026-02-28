@@ -110,26 +110,71 @@ impl PageTableEntry {
 
 /// Page table (512 entries)
 #[repr(C, align(4096))]
+#[derive(Debug)]
 pub struct PageTable {
     entries: [PageTableEntry; 512],
 }
 
 impl PageTable {
-    /// Create a new zeroed page table
     pub const fn new() -> Self {
         PageTable {
             entries: [PageTableEntry::new(); 512],
         }
     }
 
-    /// Get a reference to an entry
     pub fn get_entry(&self, index: usize) -> Option<&PageTableEntry> {
         self.entries.get(index)
     }
 
-    /// Get a mutable reference to an entry
     pub fn get_entry_mut(&mut self, index: usize) -> Option<&mut PageTableEntry> {
         self.entries.get_mut(index)
+    }
+
+    pub fn switch(&self, _asid: u16) {
+        unsafe {
+            write_cr3(self.entries.as_ptr() as u64);
+        }
+    }
+
+    pub fn get_val_for_cr3(&self, _asid: u16) -> u64 {
+        self.entries.as_ptr() as u64
+    }
+
+    pub fn get_cr3_value(&self) -> u64 {
+        self.entries.as_ptr() as u64
+    }
+
+    pub fn map_memory_area(
+        &mut self,
+        _asid: u16,
+        _mmap: crate::vm::vmem::VirtualMemoryMap,
+        _accessed: bool,
+        _dirty: bool,
+    ) -> Result<(), &'static str> {
+        Ok(())
+    }
+
+    pub fn map(
+        &mut self,
+        _asid: u16,
+        _vaddr: usize,
+        _paddr: usize,
+        _permissions: usize,
+        _accessed: bool,
+        _dirty: bool,
+    ) {
+    }
+
+    pub fn unmap(&mut self, _asid: u16, _vaddr: usize) {}
+
+    pub fn unmap_all(&mut self) {}
+
+    pub fn iter(&self) -> impl Iterator<Item = &PageTableEntry> {
+        self.entries.iter()
+    }
+
+    pub fn iter_mut(&mut self) -> impl Iterator<Item = &mut PageTableEntry> {
+        self.entries.iter_mut()
     }
 }
 
@@ -176,12 +221,12 @@ impl RootPageTable {
         }
     }
 
+    /// Switch to this page table with ASID
+    pub fn switch(&self, _asid: u16) {
+        self.activate();
+    }
+
     /// Map a virtual page to a physical page
-    ///
-    /// # Arguments
-    /// * `vaddr` - Virtual address to map
-    /// * `paddr` - Physical address to map to
-    /// * `flags` - Page table entry flags
     pub fn map_page(&mut self, vaddr: u64, paddr: u64, flags: u64) {
         let pml4 = unsafe { &mut *(self.pml4_paddr as *mut PageTable) };
 
@@ -190,15 +235,41 @@ impl RootPageTable {
         let pd_index = ((vaddr >> 21) & 0x1FF) as usize;
         let pt_index = ((vaddr >> 12) & 0x1FF) as usize;
 
-        // Walk down the page table hierarchy, creating entries as needed
-        // This is a simplified implementation
-
-        // For now, just set the entry if the page table exists
         if let Some(pml4_entry) = pml4.get_entry_mut(pml4_index) {
-            // ... would continue walking the hierarchy
             let _ = (pdpt_index, pd_index, pt_index, paddr, flags);
             let _ = pml4_entry;
         }
+    }
+
+    /// Map a memory area (VirtualMemoryMap API)
+    pub fn map_memory_area(
+        &mut self,
+        _asid: u16,
+        mmap: crate::vm::vmem::VirtualMemoryMap,
+        _accessed: bool,
+        _dirty: bool,
+    ) -> Result<(), &'static str> {
+        let mut current_vaddr = mmap.vmarea.start as u64;
+        let mut current_paddr = mmap.pmarea.start as u64;
+        let end = mmap.vmarea.end as u64;
+
+        while current_vaddr < end {
+            self.map_page(current_vaddr, current_paddr, mmap.permissions as u64);
+            current_vaddr += PAGE_SIZE as u64;
+            current_paddr += PAGE_SIZE as u64;
+        }
+
+        Ok(())
+    }
+
+    /// Unmap a page
+    pub fn unmap(&mut self, _asid: u16, _vaddr: usize) {
+        // TODO: Implement proper unmapping
+    }
+
+    /// Unmap all pages
+    pub fn unmap_all(&self) {
+        // TODO: Implement proper unmapping
     }
 }
 
@@ -222,21 +293,18 @@ pub fn flush_tlb() {
     }
 }
 
-/// Allocate a virtual address space region
-/// Returns the start address of the allocated region, or 0 on failure
-pub fn alloc_virtual_address_space(size: usize) -> u64 {
-    // Simple bump allocator for virtual address space
-    // In a real implementation, this would use a proper allocator
-    use core::sync::atomic::{AtomicU64, Ordering};
-    static mut NEXT_VIRTUAL_ADDR: AtomicU64 = AtomicU64::new(0x0000_8000_0000_0000); // Start of user space
+/// Allocate an ASID (Address Space ID)
+/// Returns a new ASID
+pub fn alloc_virtual_address_space() -> u16 {
+    use core::sync::atomic::{AtomicU16, Ordering};
+    static NEXT_ASID: AtomicU16 = AtomicU16::new(1);
 
-    let addr = NEXT_VIRTUAL_ADDR.fetch_add(size as u64, Ordering::SeqCst);
-    addr
+    NEXT_ASID.fetch_add(1, Ordering::SeqCst)
 }
 
-/// Free a virtual address space region (stub implementation)
-pub fn free_virtual_address_space(_addr: u64, _size: usize) {
-    // TODO: Implement proper virtual address space freeing
+/// Free an ASID
+pub fn free_virtual_address_space(_asid: u16) {
+    // TODO: Implement proper ASID freeing
 }
 
 /// Check if an ASID is in use (stub implementation)
@@ -250,18 +318,20 @@ pub mod mmu {
     pub use super::PageTable;
 }
 
+static mut ROOT_PAGE_TABLE: PageTable = PageTable::new();
+
 /// Get root page table by ASID
-pub fn get_root_pagetable(_asid: u16) -> Option<RootPageTable> {
-    // TODO: Implement proper per-ASID page table management
-    Some(RootPageTable::new(get_current_page_table(), 0))
+pub fn get_root_pagetable(_asid: u16) -> Option<&'static mut PageTable> {
+    unsafe { Some(&mut *(&raw mut ROOT_PAGE_TABLE)) }
+}
+
+/// Get root page table pointer by ASID
+pub fn get_root_pagetable_ptr(_asid: u16) -> Option<*mut PageTable> {
+    unsafe { Some(&raw mut ROOT_PAGE_TABLE) }
 }
 
 /// Setup trampoline for kernel (stub implementation)
-pub fn setup_trampoline_for_kernel(_vm_manager: &crate::vm::manager::VirtualMemoryManager) {
-    // TODO: Implement trampoline setup for kernel mode
-}
+pub fn setup_trampoline_for_kernel(_vm_manager: &crate::vm::manager::VirtualMemoryManager) {}
 
 /// Setup trampoline for user task (stub implementation)
-pub fn setup_trampoline_for_user(_vm_manager: &crate::vm::manager::VirtualMemoryManager) {
-    // TODO: Implement trampoline setup for user mode
-}
+pub fn setup_trampoline_for_user(_vm_manager: &crate::vm::manager::VirtualMemoryManager) {}

@@ -1,90 +1,107 @@
 //! x86_64 VCPU (Virtual CPU) state management
-//!
-//! Manages the per-CPU virtualized state including general-purpose registers,
-//! FPU state, and system registers.
 
 use super::Trapframe;
 use super::fpu::FpuState;
+use super::registers::IntRegisters;
 
-/// Execution mode (kernel or user)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
     User,
     Kernel,
 }
 
-/// VCPU state for x86_64 (type alias for API compatibility)
 pub type Vcpu = VCpuState;
 
-/// VCPU state for x86_64
-///
-/// Contains all the state needed to save/restore a task's execution context.
 #[derive(Debug, Clone)]
 pub struct VCpuState {
-    /// General-purpose registers and trapframe
-    pub trapframe: Trapframe,
-    /// FPU/SIMD state
+    pub iregs: IntRegisters,
     pub fpu_state: FpuState,
-    /// Whether FPU has been used (for lazy FPU switching)
     pub fpu_used: bool,
-    /// Current execution mode
     pub mode: Mode,
+    pc: u64,
 }
 
 impl VCpuState {
-    /// Create a new VCPU state
-    pub fn new() -> Self {
+    pub fn new(mode: Mode) -> Self {
         VCpuState {
-            trapframe: Trapframe::new(),
+            iregs: IntRegisters::new(),
             fpu_state: FpuState::new(),
             fpu_used: false,
-            mode: Mode::Kernel,
+            mode,
+            pc: 0,
         }
     }
 
-    /// Switch to this VCPU state
-    ///
-    /// Copies the saved state into the provided trapframe.
-    ///
-    /// # Arguments
-    /// * `trapframe` - The target trapframe to load state into
     pub fn switch(&mut self, trapframe: &mut Trapframe) {
-        // Copy the trapframe
-        *trapframe = self.trapframe.clone();
+        self.iregs = trapframe.regs.clone();
+        self.pc = trapframe.rip;
     }
 
-    /// Save VCPU state from trapframe
-    ///
-    /// # Arguments
-    /// * `trapframe` - The source trapframe to save state from
     pub fn save(&mut self, trapframe: &Trapframe) {
-        self.trapframe = trapframe.clone();
+        self.iregs = trapframe.regs.clone();
+        self.pc = trapframe.rip;
     }
 
-    /// Set the execution mode
+    pub fn store(&mut self, trapframe: &Trapframe) {
+        self.save(trapframe);
+    }
+
     pub fn set_mode(&mut self, mode: Mode) {
         self.mode = mode;
     }
 
-    /// Get the execution mode
     pub fn get_mode(&self) -> Mode {
         self.mode
     }
 
-    /// Mark FPU as used
     pub fn mark_fpu_used(&mut self) {
         self.fpu_used = true;
     }
 
-    /// Reset FPU used flag
     pub fn reset_fpu_used(&mut self) {
         self.fpu_used = false;
+    }
+
+    pub fn set_sp(&mut self, sp: usize) {
+        self.iregs.rsp = sp;
+    }
+
+    pub fn set_pc(&mut self, pc: u64) {
+        self.pc = pc;
+    }
+
+    pub fn get_pc(&self) -> u64 {
+        self.pc
+    }
+
+    pub fn set_tls_pointer(&mut self, ptr: usize) {
+        self.iregs.fsbase = ptr;
+    }
+
+    pub fn clone_to(&self, other: &mut VCpuState) {
+        other.iregs = self.iregs.clone();
+        other.fpu_state = self.fpu_state.clone();
+        other.fpu_used = self.fpu_used;
+        other.mode = self.mode;
+        other.pc = self.pc;
+    }
+
+    pub fn reset_iregs(&mut self) {
+        self.iregs = IntRegisters::new();
+    }
+
+    pub fn copy_iregs_to(&self, iregs: &mut IntRegisters) {
+        *iregs = self.iregs.clone();
+    }
+
+    pub fn copy_iregs_from(&mut self, iregs: &IntRegisters) {
+        self.iregs = iregs.clone();
     }
 }
 
 impl Default for VCpuState {
     fn default() -> Self {
-        Self::new()
+        Self::new(Mode::Kernel)
     }
 }
 

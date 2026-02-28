@@ -111,6 +111,26 @@ script = [
     "cd ../scpm && cargo build --release --target ../../targets/aarch64-unknown-scarlet-elf.json"
 ]
 
+[tasks.build-userlib-debug-x86_64]
+description = "Build all user libraries for x86_64 in debug mode"
+script = [
+    "cd std && cargo build --target ../../targets/x86_64-unknown-scarlet-elf.json",
+    "cd ../framebuffer && cargo build --target ../../targets/x86_64-unknown-scarlet-elf.json",
+    "cd ../sws_protocol && cargo build --target ../../targets/x86_64-unknown-scarlet-elf.json",
+    "cd ../scarlet-desktop-config && cargo build --target ../../targets/x86_64-unknown-scarlet-elf.json",
+    "cd ../scpm && cargo build --target ../../targets/x86_64-unknown-scarlet-elf.json"
+]
+
+[tasks.build-userlib-release-x86_64]
+description = "Build all user libraries for x86_64 in release mode"
+script = [
+    "cd std && cargo build --release --target ../../targets/x86_64-unknown-scarlet-elf.json",
+    "cd ../framebuffer && cargo build --release --target ../../targets/x86_64-unknown-scarlet-elf.json",
+    "cd ../sws_protocol && cargo build --release --target ../../targets/x86_64-unknown-scarlet-elf.json",
+    "cd ../scarlet-desktop-config && cargo build --release --target ../../targets/x86_64-unknown-scarlet-elf.json",
+    "cd ../scpm && cargo build --release --target ../../targets/x86_64-unknown-scarlet-elf.json"
+]
+
 [tasks.clean]
 description = "Clean all user library build artifacts"
 script = [

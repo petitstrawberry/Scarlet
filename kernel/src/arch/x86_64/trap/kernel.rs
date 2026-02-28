@@ -2,21 +2,14 @@
 //!
 //! Handles traps/interrupts that occur while executing in kernel mode
 
-use core::arch::asm;
+use core::arch::naked_asm;
 
 use super::super::Trapframe;
 
-/// Kernel trap entry point (from assembly)
-#[no_mangle]
-pub static _kernel_trap_entry: u64 = _kernel_trap_entry as u64;
-
-/// Kernel trap entry point function
-///
-/// This is called when a trap occurs while in kernel mode (Ring 0).
-#[naked]
-pub unsafe extern "sysv64" fn _kernel_trap_entry_impl() {
-    asm!(
-        // Save all general-purpose registers
+/// Kernel trap entry point (naked function wrapper)
+#[unsafe(naked)]
+pub unsafe extern "sysv64" fn _kernel_trap_entry() {
+    naked_asm!(
         "push rax",
         "push rbx",
         "push rcx",
@@ -32,33 +25,23 @@ pub unsafe extern "sysv64" fn _kernel_trap_entry_impl() {
         "push r13",
         "push r14",
         "push r15",
-
-        // Save segment registers
         "mov ax, ds",
         "push rax",
         "mov ax, es",
         "push rax",
         "push fs",
         "push gs",
-
-        // Load kernel data segments
         "mov ax, 0x10",
         "mov ds, ax",
         "mov es, ax",
-
-        // Call the actual handler
         "mov rdi, rsp",
-        "call {}",
-
-        // Restore segment registers
+        "call {handler}",
         "pop gs",
         "pop fs",
         "pop rax",
         "mov es, ax",
         "pop rax",
         "mov ds, ax",
-
-        // Restore general-purpose registers
         "pop r15",
         "pop r14",
         "pop r13",
@@ -74,32 +57,16 @@ pub unsafe extern "sysv64" fn _kernel_trap_entry_impl() {
         "pop rcx",
         "pop rbx",
         "pop rax",
-
         "iretq",
-        options(noreturn),
-        sym arch_kernel_trap_handler,
+        handler = sym arch_kernel_trap_handler,
     );
 }
 
 /// Actual kernel trap handler
-///
-/// # Arguments
-/// * `regs` - Pointer to the saved registers on the stack
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn arch_kernel_trap_handler(regs: &mut Trapframe) {
-    // Get the interrupt vector if this is an interrupt
-    let _vector = 0; // Would be determined from the interrupt frame
-
-    // Acknowledge the interrupt
     super::super::interrupt::eoi();
-
-    // Handle the interrupt
-    // In a full implementation, this would:
-    // 1. Determine the interrupt source
-    // 2. Call the appropriate handler
-    // 3. Return
-
-    let _ = regs; // Suppress unused warning
+    let _ = regs;
 }
 
 /// Load the IDT with kernel trap vectors
@@ -107,7 +74,7 @@ pub fn load_idt() {
     super::init_idt();
 }
 
-/// Get the kernel trap vector address (for use in other parts of the kernel)
-pub const fn get_kernel_trap_entry() -> usize {
+/// Get the kernel trap vector address
+pub fn get_kernel_trap_entry() -> usize {
     _kernel_trap_entry as usize
 }

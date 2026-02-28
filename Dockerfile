@@ -8,20 +8,21 @@ ENV DEBIAN_FRONTEND noninteractive
 
 # Install dependencies and tools
 RUN apt update && \
-	apt install -y build-essential autoconf automake autotools-dev curl bc git device-tree-compiler vim python3 python3-venv gdb-multiarch gcc-riscv64-linux-gnu gcc-aarch64-linux-gnu cpio libncurses5-dev libncursesw5-dev \
-    mtools dosfstools sleuthkit libslirp-dev
+	apt install -y build-essential autoconf automake autotools-dev curl bc git device-tree-compiler vim python3 python3-venv gdb-multiarch gcc-riscv64-linux-gnu gcc-aarch64-linux-gnu gcc-x86-64-linux-gnu binutils-x86-64-linux-gnu cpio libncurses5-dev libncursesw5-dev \
+    mtools dosfstools sleuthkit libslirp-dev ovmf grub-efi-amd64-signed grub-efi-amd64 grub2-common parted e2fsprogs xorriso
 
 # # # Install QEMU
 # RUN apt install -y qemu-system-riscv64
 
 RUN apt update && \
-    apt install -y pkg-config libglib2.0-dev libmount-dev python3 python3-venv python3-pip python3-dev git libssl-dev libffi-dev build-essential automake libfreetype6-dev libtheora-dev libtool libvorbis-dev pkg-config texinfo zlib1g-dev unzip cmake yasm libx264-dev libmp3lame-dev libopus-dev libvorbis-dev libxcb1-dev libxcb-shm0-dev libxcb-xfixes0-dev pkg-config texinfo wget zlib1g-dev ninja-build libpixman-1-dev libcapstone-dev
+    apt install -y pkg-config libglib2.0-dev libmount-dev python3 python3-venv python3-pip python3-dev git libssl-dev libffi-dev build-essential automake libfreetype6-dev libtheora-dev libtool libvorbis-dev pkg-config texinfo zlib1g-dev unzip cmake yasm libx264-dev libmp3lame-dev libopus-dev libvorbis-dev libxcb1-dev libxcb-shm0-dev libxcb-xfixes0-dev pkg-config texinfo wget zlib1g-dev ninja-build libpixman-1-dev
+
 RUN cd /opt && \
     wget https://download.qemu.org/qemu-10.1.2.tar.xz && \
 	tar xvJf qemu-10.1.2.tar.xz && \
 	rm qemu-10.1.2.tar.xz && \
 	cd qemu-10.1.2 && \
-    ./configure --target-list=riscv32-softmmu,riscv64-softmmu,aarch64-softmmu --prefix=/opt --enable-slirp --python=/usr/bin/python3 --enable-debug --enable-capstone && \
+    ./configure --target-list=riscv32-softmmu,riscv64-softmmu,aarch64-softmmu,x86_64-softmmu --prefix=/opt --enable-slirp --python=/usr/bin/python3 --enable-debug && \
 	make -j 8 && \
 	make install
 
@@ -47,7 +48,8 @@ RUN curl https://sh.rustup.rs -sSf | sh -s -- -y && \
     rustup install nightly-2025-12-31 && \
     rustup component add rust-src --toolchain nightly-2025-12-31 && \
     rustup target add riscv64gc-unknown-none-elf && \
-    rustup target add aarch64-unknown-none
+    rustup target add aarch64-unknown-none && \
+    rustup target add x86_64-unknown-none
 
 # Install cargo tools
 RUN cargo install cargo-make

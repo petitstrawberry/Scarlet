@@ -366,7 +366,7 @@ pub fn set_next_mode(mode: vcpu::Mode) {
 }
 
 /// Set trap vector (load IDT)
-pub fn set_trapvector() {
+pub fn set_trapvector(_addr: usize) {
     trap::kernel::load_idt();
 }
 

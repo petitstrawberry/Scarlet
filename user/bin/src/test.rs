@@ -25,6 +25,14 @@ pub extern "C" fn _entry() {
             b main
     ",
     );
+
+    #[cfg(target_arch = "x86_64")]
+    naked_asm!(
+        "
+    .align 16
+            jmp main
+    ",
+    );
 }
 
 #[panic_handler]

@@ -107,12 +107,18 @@ pub fn kernel_switch_in_user_fpu(vcpu: &mut crate::arch::vcpu::VCpuState) {
     }
 }
 
-/// Save user vector state (stub for x86_64 - handled by FPU save)
-pub fn kernel_switch_out_user_vector(_vcpu: &mut crate::arch::vcpu::VCpuState) {
-    // Vector state is included in FXSAVE on x86_64
+pub fn kernel_switch_out_user_vector(
+    _cpu_id: usize,
+    _task_id: usize,
+    vcpu: &mut crate::arch::vcpu::VCpuState,
+) {
+    kernel_switch_out_user_fpu(vcpu);
 }
 
-/// Restore user vector state (stub for x86_64 - handled by FPU restore)
-pub fn kernel_switch_in_user_vector(_vcpu: &mut crate::arch::vcpu::VCpuState) {
-    // Vector state is included in FXRSTOR on x86_64
+pub fn kernel_switch_in_user_vector(
+    _cpu_id: usize,
+    _task_id: usize,
+    vcpu: &mut crate::arch::vcpu::VCpuState,
+) {
+    kernel_switch_in_user_fpu(vcpu);
 }

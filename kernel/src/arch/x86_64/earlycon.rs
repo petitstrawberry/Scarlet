@@ -1,22 +1,38 @@
 //! x86_64 early console support using VGA text mode and serial port
-//!
-//! x86_64 QEMU typically supports VGA text mode at 0xB8000
-//! This provides early debugging output before the full driver system is ready.
 
+use core::arch::asm;
 use core::ptr::{read_volatile, write_volatile};
 
 const VGA_BUFFER: usize = 0xB8000;
 const VGA_WIDTH: usize = 80;
 const VGA_HEIGHT: usize = 25;
 
-// Serial port for QEMU (COM1)
-const SERIAL_PORT: u16 = 0x3F8;
-const SERIAL_LSR: u16 = 0x3FD; // Line Status Register
-const SERIAL_THR: u16 = 0x3F8; // Transmit Holding Register
-const SERIAL_LSR_THRE: u8 = 0x20; // Transmit Holding Register Empty
+const SERIAL_LSR: u16 = 0x3FD;
+const SERIAL_THR: u16 = 0x3F8;
+const SERIAL_LSR_THRE: u8 = 0x20;
 
 static mut CURSOR_ROW: usize = 0;
 static mut CURSOR_COL: usize = 0;
+
+unsafe fn inb(port: u16) -> u8 {
+    let value: u8;
+    asm!(
+        "in al, dx",
+        in("dx") port,
+        out("al") value,
+        options(nostack, nomem)
+    );
+    value
+}
+
+unsafe fn outb(port: u16, value: u8) {
+    asm!(
+        "out dx, al",
+        in("dx") port,
+        in("al") value,
+        options(nostack, nomem)
+    );
+}
 
 /// Color codes for VGA text mode
 #[allow(dead_code)]
@@ -145,11 +161,11 @@ fn vga_put_byte(byte: u8) {
 fn serial_put_byte(byte: u8) {
     unsafe {
         // Wait for transmit holding register to be empty
-        while (read_volatile(SERIAL_LSR as *const u8) & SERIAL_LSR_THRE) == 0 {
+        while (inb(SERIAL_LSR) & SERIAL_LSR_THRE) == 0 {
             core::hint::spin_loop();
         }
         // Write byte to transmit holding register
-        write_volatile(SERIAL_THR as *mut u8, byte);
+        outb(SERIAL_THR, byte);
     }
 }
 

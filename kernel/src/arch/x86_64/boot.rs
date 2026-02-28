@@ -1,19 +1,34 @@
 //! x86_64 boot code
-//!
-//! Handles early boot initialization for x86_64, including:
-//! - Setting up the kernel stack
-//! - Initializing the GDT
-//! - Setting up page tables
-//! - Jumping to the kernel main
 
 use core::arch::asm;
 
 use crate::arch::x86_64::earlycon::init_earlycon;
-use crate::arch::x86_64::instruction::{read_cr3, read_cr4, write_cr3, write_cr4};
-use crate::arch::x86_64::mmio;
 use crate::early_println;
 
+#[repr(C, align(8))]
+struct Multiboot2Header {
+    magic: u32,
+    architecture: u32,
+    header_length: u32,
+    checksum: u32,
+    end_tag: [u32; 2],
+}
+
+#[unsafe(link_section = ".head.text")]
+#[used]
+static MULTIBOOT2_HEADER: Multiboot2Header = Multiboot2Header {
+    magic: 0xE85250D6,
+    architecture: 0,
+    header_length: core::mem::size_of::<Multiboot2Header>() as u32,
+    checksum: !(0xE85250D6u32
+        .wrapping_add(0)
+        .wrapping_add(core::mem::size_of::<Multiboot2Header>() as u32))
+    .wrapping_add(1),
+    end_tag: [0, 8],
+};
+
 /// GDT entry structure
+#[derive(Clone, Copy)]
 #[repr(C, packed)]
 struct GdtEntry {
     limit_low: u16,
@@ -148,15 +163,15 @@ fn init_gdt() {
 
         // TSS descriptor (would be filled in with TSS address)
         GDT[5].limit_low = (core::mem::size_of::<TaskStateSegment>() - 1) as u16;
-        GDT[5].base_low = (&TSS as *const _ as u64) as u16;
-        GDT[5].base_mid = ((&TSS as *const _ as u64) >> 16) as u8;
+        GDT[5].base_low = (&raw const TSS as u64) as u16;
+        GDT[5].base_mid = ((&raw const TSS as u64) >> 16) as u8;
         GDT[5].access = 0x89; // Present, Ring 0, TSS, Available
         GDT[5].flags_limit_high = 0x00;
-        GDT[5].base_high = ((&TSS as *const _ as u64) >> 24) as u8;
+        GDT[5].base_high = ((&raw const TSS as u64) >> 24) as u8;
 
         let gdt_ptr = GdtPointer {
             limit: (core::mem::size_of::<[GdtEntry; 6]>() - 1) as u16,
-            base: &GDT as *const _ as u64,
+            base: &raw const GDT as u64,
         };
 
         asm!(

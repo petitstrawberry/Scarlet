@@ -124,6 +124,11 @@ pub fn read_current_count() -> u32 {
 pub struct ArchTimer;
 
 impl ArchTimer {
+    /// Create a new ArchTimer instance
+    pub fn new() -> Self {
+        ArchTimer
+    }
+
     /// Initialize the timer for the given CPU
     pub fn init(&self, cpu_id: usize) {
         let _ = cpu_id;
@@ -148,5 +153,22 @@ impl ArchTimer {
     /// Acknowledge timer interrupt
     pub fn ack(&self) {
         ack();
+    }
+
+    /// Start the timer (alias for start_periodic)
+    pub fn start(&self) {
+        // Use default interval
+        self.start_periodic(1000); // 1ms default
+    }
+
+    /// Set timer interval in microseconds
+    pub fn set_interval_us(&self, interval_us: u64) {
+        self.start_periodic(interval_us);
+    }
+
+    /// Get current time in microseconds
+    pub fn get_time_us(&self) -> u64 {
+        // Convert ticks to microseconds (assuming ~1GHz bus freq)
+        get_ticks() * 1000
     }
 }

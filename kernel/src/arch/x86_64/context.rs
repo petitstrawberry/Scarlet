@@ -2,14 +2,9 @@
 //!
 //! Manages kernel stack switching and context saving/restoring
 
-use core::arch::asm;
+use core::arch::naked_asm;
 
 /// Kernel context for x86_64
-///
-/// Saved registers during context switch:
-/// - All callee-saved registers: RBX, RBP, R12, R13, R14, R15
-/// - Return address (RIP) pushed by call
-/// - Stack pointer (RSP)
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct KernelContext {
@@ -20,6 +15,7 @@ pub struct KernelContext {
     r14: u64,
     r15: u64,
     rip: u64,
+    rsp: u64,
 }
 
 impl KernelContext {
@@ -32,14 +28,10 @@ impl KernelContext {
             r14: 0,
             r15: 0,
             rip: 0,
+            rsp: 0,
         }
     }
 
-    /// Create a new kernel context for a task
-    ///
-    /// # Safety
-    ///
-    /// The entry function must be valid and the stack must be properly aligned.
     pub unsafe fn new_context(entry: usize, stack_top: usize) -> Self {
         KernelContext {
             rbx: 0,
@@ -49,44 +41,54 @@ impl KernelContext {
             r14: 0,
             r15: 0,
             rip: entry as u64,
+            rsp: stack_top as u64,
         }
+    }
+
+    pub fn set_sp(&mut self, sp: u64) {
+        self.rsp = sp;
+    }
+
+    pub fn get_kernel_stack_memory_area_paddr(&self) -> crate::vm::vmem::MemoryArea {
+        crate::vm::vmem::MemoryArea {
+            start: self.rsp as usize,
+            end: self.rsp as usize + crate::environment::TASK_KERNEL_STACK_SIZE,
+        }
+    }
+
+    pub fn get_kernel_stack_bottom_paddr(&self) -> u64 {
+        self.rsp
+    }
+
+    pub fn get_kernel_stack_memory_area(&self) -> crate::vm::vmem::MemoryArea {
+        self.get_kernel_stack_memory_area_paddr()
     }
 }
 
 /// Switch from current kernel context to next kernel context
-///
-/// # Safety
-///
-/// Both contexts must be valid and properly initialized.
-#[naked]
-#[inline(always)]
-pub unsafe extern "sysv64" fn switch(current: &mut KernelContext, next: &KernelContext) {
-    asm!(
-        // Save callee-saved registers
+#[unsafe(naked)]
+pub unsafe extern "sysv64" fn switch(_current: &mut KernelContext, _next: &KernelContext) {
+    naked_asm!(
         "push rbx",
         "push rbp",
         "push r12",
         "push r13",
         "push r14",
         "push r15",
-        // Save current RSP to current context
         "mov [rdi + 0x00], rbx",
         "mov [rdi + 0x08], rbp",
         "mov [rdi + 0x10], r12",
         "mov [rdi + 0x18], r13",
         "mov [rdi + 0x20], r14",
         "mov [rdi + 0x28], r15",
-        "mov [rdi + 0x30], rax", // Return address
-        // Load next context
+        "mov [rdi + 0x30], rax",
         "mov rbx, [rsi + 0x00]",
         "mov rbp, [rsi + 0x08]",
         "mov r12, [rsi + 0x10]",
         "mov r13, [rsi + 0x18]",
         "mov r14, [rsi + 0x20]",
         "mov r15, [rsi + 0x28]",
-        // Load return address to RAX
         "mov rax, [rsi + 0x30]",
-        // Restore callee-saved registers
         "pop r15",
         "pop r14",
         "pop r13",
@@ -94,7 +96,6 @@ pub unsafe extern "sysv64" fn switch(current: &mut KernelContext, next: &KernelC
         "pop rbp",
         "pop rbx",
         "ret",
-        options(noreturn)
     );
 }
 

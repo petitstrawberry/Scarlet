@@ -184,13 +184,19 @@ pub fn mfence() {
 /// CPUID instruction
 #[inline(always)]
 pub fn cpuid(eax: u32, ecx: u32) -> (u32, u32, u32, u32) {
-    let (eax_res, ebx_res, ecx_res, edx_res);
+    let eax_res: u32;
+    let ebx_res: u32;
+    let ecx_res: u32;
+    let edx_res: u32;
     unsafe {
         asm!(
+            "push rbx",
             "cpuid",
+            "mov {0}, ebx",
+            "pop rbx",
+            out(reg) ebx_res,
             inlateout("eax") eax => eax_res,
             inlateout("ecx") ecx => ecx_res,
-            out("ebx") ebx_res,
             out("edx") edx_res,
         );
     }

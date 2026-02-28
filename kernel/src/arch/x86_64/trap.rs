@@ -105,7 +105,7 @@ pub fn init_idt() {
         // Load IDT
         let idt_ptr = IdtPointer {
             limit: (core::mem::size_of::<[IdtEntry; IDT_ENTRIES]>() - 1) as u16,
-            base: &IDT as *const _ as u64,
+            base: &raw const IDT as u64,
         };
 
         asm!(
@@ -281,10 +281,10 @@ pub fn unlock_kernel_trap() {
 }
 
 // Dummy symbols for trampoline linking
-#[no_mangle]
+#[unsafe(no_mangle)]
 #[used]
 pub static _kernel_trap_entry: u64 = 0;
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 #[used]
 pub static _user_trap_entry: u64 = 0;

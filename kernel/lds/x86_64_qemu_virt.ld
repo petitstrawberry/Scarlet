@@ -2,36 +2,35 @@ OUTPUT_ARCH("x86_64")
 ENTRY(_start)
 
 /*
- * Memory layout for x86_64 QEMU:
- * Kernel is loaded by the bootloader at 1MB (0x100000)
- * This avoids the reserved lower 1MB of memory
+ * Higher-half kernel address space for x86_64.
+ * Limine requires the kernel to be loaded in higher half (above 4GB).
  */
+KERNEL_VMA = 0xFFFFFFFF80000000;
+KERNEL_LMA = 0x100000;
+
 MEMORY {
   RAM (rwx) : ORIGIN = 0x100000, LENGTH = 128M
 }
 
 /* Define sections */
 SECTIONS {
-. = ORIGIN(RAM);
+    . = KERNEL_VMA;
     __KERNEL_SPACE_START = .;
 
-    /* Kernel entry point */
-    .head : {
+    .head : AT(ADDR(.head) - KERNEL_VMA + KERNEL_LMA) {
         KEEP(*(.head.text))
         *(.text.arch_start_kernel .text._entry)
-    } > RAM
+    }
 
-    /* Init code */
-    .init : {
+    .init : AT(ADDR(.init) - KERNEL_VMA + KERNEL_LMA) {
         *(.init .init.*)
         . = ALIGN(16);
-    } > RAM
+    }
 
-    /* Text section */
-    .text : {
+    .text : AT(ADDR(.text) - KERNEL_VMA + KERNEL_LMA) {
         *(.text .text.*)
         . = ALIGN(16);
-    } > RAM
+    }
 
     /* Initcall table */
     .initcall : {
@@ -61,20 +60,6 @@ SECTIONS {
     /* Read-only data */
     .rodata : {
         *(.rodata .rodata.*)
-        . = ALIGN(16);
-    } > RAM
-
-    /* Read-only data after trampoline (string literals, etc.) */
-    .rodata AFTER_TRAMPOLINE : {
-        *(.rodata.str1.1)
-        *(.rodata.str1.4)
-        *(.rodata.str1.8)
-        . = ALIGN(16);
-    } > RAM
-
-    /* Global offset table (for PIC code) */
-    .got : {
-        *(.got .got.*)
         . = ALIGN(16);
     } > RAM
 

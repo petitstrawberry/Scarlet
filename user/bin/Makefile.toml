@@ -261,6 +261,113 @@ for binary_path in "${DIST_DIR}"/*; do
 done
 '''
 
+[tasks.build-x86_64]
+description = "Build all user programs for x86_64 with OSABI=83 (debug mode)"
+dependencies = ["build-only-debug-x86_64", "set-osabi-debug-x86_64", "split-debug-symbols-x86_64"]
+
+[tasks.build-release-x86_64]
+description = "Build all user programs for x86_64 with OSABI=83 (release mode)"
+dependencies = ["build-only-release-x86_64", "set-osabi-release-x86_64"]
+
+[tasks.build-only-debug-x86_64]
+description = "Build user programs for x86_64 in debug mode without OSABI setting (internal)"
+env = { "DIST_DIR" = "dist/x86_64", "TARGET_SPEC" = "../targets/x86_64-unknown-scarlet-elf.json" }
+script = [
+    'rm -rf "${DIST_DIR}" && mkdir -p "${DIST_DIR}"',
+    'cargo build --target "${TARGET_SPEC}" --out-dir "${DIST_DIR}"'
+]
+
+[tasks.build-only-release-x86_64]
+description = "Build user programs for x86_64 in release mode without OSABI setting (internal)"
+env = { "DIST_DIR" = "dist/x86_64", "TARGET_SPEC" = "../targets/x86_64-unknown-scarlet-elf.json" }
+script = [
+    'rm -rf "${DIST_DIR}" && mkdir -p "${DIST_DIR}"',
+    'cargo build --release --target "${TARGET_SPEC}" --out-dir "${DIST_DIR}"'
+]
+
+[tasks.set-osabi-debug-x86_64]
+description = "Set OSABI to 83 for all user program binaries (x86_64 debug)"
+env = { "DIST_DIR" = "dist/x86_64" }
+dependencies = ["build-only-debug-x86_64"]
+script = '''
+echo "Setting OSABI to ${OSABI_VALUE} for user programs..."
+if [ ! -d "${DIST_DIR}" ]; then
+    echo "Error: ${DIST_DIR} directory not found"
+    exit 1
+fi
+
+for binary_path in "${DIST_DIR}"/*; do
+    if [ -f "${binary_path}" ] && [ -x "${binary_path}" ]; then
+        binary=$(basename "${binary_path}")
+        echo "Setting OSABI for ${binary}"
+        python3 ./set_osabi.py "${binary_path}" ${OSABI_VALUE}
+    fi
+done
+
+binary_count=$(find "${DIST_DIR}" -type f -executable | wc -l)
+if [ "$binary_count" -eq 0 ]; then
+    echo "Warning: No executable binaries found in ${DIST_DIR}"
+fi
+'''
+
+[tasks.set-osabi-release-x86_64]
+description = "Set OSABI to 83 for all user program binaries (x86_64 release)"
+env = { "DIST_DIR" = "dist/x86_64" }
+dependencies = ["build-only-release-x86_64"]
+script = '''
+echo "Setting OSABI to ${OSABI_VALUE} for user programs..."
+if [ ! -d "${DIST_DIR}" ]; then
+    echo "Error: ${DIST_DIR} directory not found"
+    exit 1
+fi
+
+for binary_path in "${DIST_DIR}"/*; do
+    if [ -f "${binary_path}" ] && [ -x "${binary_path}" ]; then
+        binary=$(basename "${binary_path}")
+        echo "Setting OSABI for ${binary}"
+        python3 ./set_osabi.py "${binary_path}" ${OSABI_VALUE}
+    fi
+done
+
+binary_count=$(find "${DIST_DIR}" -type f -executable | wc -l)
+if [ "$binary_count" -eq 0 ]; then
+    echo "Warning: No executable binaries found in ${DIST_DIR}"
+fi
+'''
+
+[tasks.split-debug-symbols-x86_64]
+description = "Split debug symbols for user programs (x86_64 debug)"
+env = { "DEBUG_DIR" = "dist/x86_64.debug", "DIST_DIR" = "dist/x86_64" }
+script = '''
+if [ ! -d "${DIST_DIR}" ]; then
+    echo "Error: ${DIST_DIR} directory not found"
+    exit 1
+fi
+
+if command -v llvm-objcopy >/dev/null 2>&1; then
+    OBJCOPY=llvm-objcopy
+elif command -v x86_64-linux-gnu-objcopy >/dev/null 2>&1; then
+    OBJCOPY=x86_64-linux-gnu-objcopy
+elif command -v objcopy >/dev/null 2>&1; then
+    OBJCOPY=objcopy
+else
+    echo "Error: objcopy not found for x86_64"
+    exit 1
+fi
+
+mkdir -p "${DEBUG_DIR}"
+
+for binary_path in "${DIST_DIR}"/*; do
+    if [ -f "${binary_path}" ] && [ -x "${binary_path}" ]; then
+        binary=$(basename "${binary_path}")
+        debug_file="${DEBUG_DIR}/${binary}.debug"
+        "$OBJCOPY" --only-keep-debug "${binary_path}" "${debug_file}"
+        "$OBJCOPY" --strip-debug --strip-unneeded "${binary_path}"
+        "$OBJCOPY" --add-gnu-debuglink="${debug_file}" "${binary_path}"
+    fi
+done
+'''
+
 [tasks.clean]
 description = "Clean build artifacts"
 command = "cargo"
