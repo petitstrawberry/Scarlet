@@ -8,7 +8,7 @@
 
 use core::arch::asm;
 
-use crate::arch::x86_64::earlycon::{init_earlycon, early_println};
+use crate::arch::x86_64::earlycon::{early_println, init_earlycon};
 use crate::arch::x86_64::instruction::{read_cr3, read_cr4, write_cr3, write_cr4};
 use crate::arch::x86_64::mmio;
 

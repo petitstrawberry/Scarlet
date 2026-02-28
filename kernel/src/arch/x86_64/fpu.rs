@@ -71,7 +71,7 @@ pub fn set_user_fpu_enabled(enabled: bool) {
         if enabled {
             // Clear EM and MP, set TS
             cr0 &= !(1 << 1); // Clear EM
-            cr0 |= 1 << 3;    // Set MP (monitor coprocessor)
+            cr0 |= 1 << 3; // Set MP (monitor coprocessor)
             cr0 &= !(1 << 2); // Clear TS (task switched)
         } else {
             // Set TS to trap on FPU use

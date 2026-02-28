@@ -16,7 +16,10 @@ use core::arch::asm;
 /// # Safety
 /// Both contexts must be valid and properly initialized.
 #[naked]
-pub unsafe extern "sysv64" fn context_switch(prev: &mut super::context::KernelContext, next: &super::context::KernelContext) {
+pub unsafe extern "sysv64" fn context_switch(
+    prev: &mut super::context::KernelContext,
+    next: &super::context::KernelContext,
+) {
     asm!(
         // Save callee-saved registers
         "push rbx",
@@ -25,13 +28,10 @@ pub unsafe extern "sysv64" fn context_switch(prev: &mut super::context::KernelCo
         "push r13",
         "push r14",
         "push r15",
-
         // Save stack pointer to previous context
         "mov [rdi], rsp",
-
         // Load stack pointer from next context
         "mov rsp, [rsi]",
-
         // Restore callee-saved registers
         "pop r15",
         "pop r14",
@@ -39,7 +39,6 @@ pub unsafe extern "sysv64" fn context_switch(prev: &mut super::context::KernelCo
         "pop r12",
         "pop rbp",
         "pop rbx",
-
         "ret",
         options(noreturn)
     );

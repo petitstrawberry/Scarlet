@@ -3,8 +3,8 @@
 //! Manages the per-CPU virtualized state including general-purpose registers,
 //! FPU state, and system registers.
 
-use super::fpu::FpuState;
 use super::Trapframe;
+use super::fpu::FpuState;
 
 /// Execution mode (kernel or user)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

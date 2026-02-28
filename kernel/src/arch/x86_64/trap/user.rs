@@ -88,11 +88,9 @@ pub unsafe extern "sysv64" fn _user_trap_exit_impl() {
         "pop rcx",
         "pop rbx",
         "pop rax",
-
         // Restore user segments
         // Pop error code (if present)
         "add rsp, 8",
-
         // Restore RSP, RFLAGS, CS, RIP, SS
         "iretq",
         options(noreturn),
@@ -141,14 +139,15 @@ extern "C" fn arch_user_trap_handler(trapframe: &mut Trapframe) {
 /// # Safety
 /// The trapframe must be valid and properly initialized.
 #[naked]
-pub unsafe extern "sysv64" fn x86_64_first_switch_to_user_naked(trapframe_addr: usize, trap_exit_addr: usize) {
+pub unsafe extern "sysv64" fn x86_64_first_switch_to_user_naked(
+    trapframe_addr: usize,
+    trap_exit_addr: usize,
+) {
     asm!(
         // Set up kernel stack pointer
         "mov r15, rdi", // Save trapframe addr
-
         // Load trapframe pointer
         "mov rsp, rdi",
-
         // Restore user registers
         "pop r15",
         "pop r14",
@@ -165,34 +164,27 @@ pub unsafe extern "sysv64" fn x86_64_first_switch_to_user_naked(trapframe_addr: 
         "pop rcx",
         "pop rbx",
         "pop rax",
-
         // Load user segments
         // We need to set up the user GDT entries first
         "mov rcx, 0x23", // User data segment (RPL=3)
         "mov ds, rcx",
         "mov es, rcx",
-
         // Get user RSP from trapframe
         "mov rcx, [rsp + 15*8]", // RSP is at offset 15 (after all regs)
-
         // Get user RIP from trapframe
-        "mov r9, [rsp + 16*8]", // RIP
+        "mov r9, [rsp + 16*8]",  // RIP
         "mov r10, [rsp + 17*8]", // RFLAGS
-
         // Set user RSP
         "mov rsp, rcx",
-
         // Swap to user code segment and jump to user RIP
-        "push rdx", // Save rdx temporarily
+        "push rdx",  // Save rdx temporarily
         "push 0x1B", // User code segment (RPL=3)
         "push r9",   // User RIP
         "push r10",  // User RFLAGS
         "push 0x23", // User data segment
         "push rcx",  // User RSP
-
         // Restore rdx
         "pop rdx",
-
         "iretq",
         options(noreturn),
     );

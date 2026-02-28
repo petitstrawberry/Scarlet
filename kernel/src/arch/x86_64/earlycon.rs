@@ -78,8 +78,20 @@ fn vga_put_byte(byte: u8) {
     let color = vga_entry_color(VgaColor::LightGrey, VgaColor::Black);
 
     match byte {
-        b'\n' => {
-            unsafe {
+        b'\n' => unsafe {
+            CURSOR_COL = 0;
+            if CURSOR_ROW < VGA_HEIGHT - 1 {
+                CURSOR_ROW += 1;
+            } else {
+                vga_scroll_up();
+            }
+        },
+        b'\r' => unsafe {
+            CURSOR_COL = 0;
+        },
+        b'\t' => unsafe {
+            CURSOR_COL = (CURSOR_COL + 8) & !7;
+            if CURSOR_COL >= VGA_WIDTH {
                 CURSOR_COL = 0;
                 if CURSOR_ROW < VGA_HEIGHT - 1 {
                     CURSOR_ROW += 1;
@@ -87,23 +99,7 @@ fn vga_put_byte(byte: u8) {
                     vga_scroll_up();
                 }
             }
-        }
-        b'\r' => {
-            unsafe { CURSOR_COL = 0; }
-        }
-        b'\t' => {
-            unsafe {
-                CURSOR_COL = (CURSOR_COL + 8) & !7;
-                if CURSOR_COL >= VGA_WIDTH {
-                    CURSOR_COL = 0;
-                    if CURSOR_ROW < VGA_HEIGHT - 1 {
-                        CURSOR_ROW += 1;
-                    } else {
-                        vga_scroll_up();
-                    }
-                }
-            }
-        }
+        },
         0x20..=0x7E | 0xA0.. => {
             vga_write_char(byte, color);
             unsafe {

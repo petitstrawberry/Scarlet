@@ -69,7 +69,6 @@ pub unsafe extern "sysv64" fn switch(current: &mut KernelContext, next: &KernelC
         "push r13",
         "push r14",
         "push r15",
-
         // Save current RSP to current context
         "mov [rdi + 0x00], rbx",
         "mov [rdi + 0x08], rbp",
@@ -78,7 +77,6 @@ pub unsafe extern "sysv64" fn switch(current: &mut KernelContext, next: &KernelC
         "mov [rdi + 0x20], r14",
         "mov [rdi + 0x28], r15",
         "mov [rdi + 0x30], rax", // Return address
-
         // Load next context
         "mov rbx, [rsi + 0x00]",
         "mov rbp, [rsi + 0x08]",
@@ -86,10 +84,8 @@ pub unsafe extern "sysv64" fn switch(current: &mut KernelContext, next: &KernelC
         "mov r13, [rsi + 0x18]",
         "mov r14, [rsi + 0x20]",
         "mov r15, [rsi + 0x28]",
-
         // Load return address to RAX
         "mov rax, [rsi + 0x30]",
-
         // Restore callee-saved registers
         "pop r15",
         "pop r14",
@@ -97,7 +93,6 @@ pub unsafe extern "sysv64" fn switch(current: &mut KernelContext, next: &KernelC
         "pop r12",
         "pop rbp",
         "pop rbx",
-
         "ret",
         options(noreturn)
     );
@@ -108,10 +103,6 @@ pub unsafe extern "sysv64" fn switch(current: &mut KernelContext, next: &KernelC
 /// # Safety
 ///
 /// The stack must be valid and properly aligned.
-pub unsafe fn init_task_context(
-    context: &mut KernelContext,
-    entry: usize,
-    _stack_top: usize,
-) {
+pub unsafe fn init_task_context(context: &mut KernelContext, entry: usize, _stack_top: usize) {
     *context = KernelContext::new_context(entry, _stack_top);
 }

@@ -2,7 +2,6 @@
 //!
 //! Provides IDT setup and trap entry/exit handlers for kernel and user mode
 
-pub mod exception;
 pub mod kernel;
 pub mod user;
 
@@ -89,8 +88,7 @@ pub fn init_idt() {
         for i in 0..32 {
             let handler = exception_handler as u64;
             IDT[i].set_handler(
-                handler,
-                0x08, // Kernel code segment
+                handler, 0x08, // Kernel code segment
                 0x8E, // Present, DPL=0, Type=Interrupt Gate
             );
         }
@@ -99,8 +97,7 @@ pub fn init_idt() {
         for i in 32..256 {
             let handler = interrupt_handler as u64;
             IDT[i].set_handler(
-                handler,
-                0x08, // Kernel code segment
+                handler, 0x08, // Kernel code segment
                 0x8E, // Present, DPL=0, Type=Interrupt Gate
             );
         }
@@ -276,7 +273,10 @@ static KERNEL_TRAP_LOCK: AtomicU32 = AtomicU32::new(0);
 
 /// Acquire the kernel trap lock
 pub fn lock_kernel_trap() {
-    while KERNEL_TRAP_LOCK.compare_exchange(0, 1, Ordering::Acquire, Ordering::Relaxed).is_err() {
+    while KERNEL_TRAP_LOCK
+        .compare_exchange(0, 1, Ordering::Acquire, Ordering::Relaxed)
+        .is_err()
+    {
         core::hint::spin_loop();
     }
 }
