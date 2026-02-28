@@ -6,9 +6,68 @@ use core::arch::asm;
 
 use super::super::Trapframe;
 
+/// User trap entry point (naked function wrapper)
+#[naked]
+pub unsafe extern "sysv64" fn _user_trap_entry() {
+    asm!(
+        // Save all general-purpose registers
+        "push rax",
+        "push rbx",
+        "push rcx",
+        "push rdx",
+        "push rsi",
+        "push rdi",
+        "push rbp",
+        "push r8",
+        "push r9",
+        "push r10",
+        "push r11",
+        "push r12",
+        "push r13",
+        "push r14",
+        "push r15",
+        // Call handler
+        "mov rdi, rsp",
+        "call {}",
+        // Restore registers
+        "pop r15",
+        "pop r14",
+        "pop r13",
+        "pop r12",
+        "pop r11",
+        "pop r10",
+        "pop r9",
+        "pop r8",
+        "pop rbp",
+        "pop rdi",
+        "pop rsi",
+        "pop rdx",
+        "pop rcx",
+        "pop rbx",
+        "pop rax",
+        // Jump to exit
+        "jmp {}",
+        sym arch_user_trap_handler,
+        sym _user_trap_exit,
+        options(noreturn),
+    );
+}
+
+/// User trap exit point
+#[naked]
+pub unsafe extern "sysv64" fn _user_trap_exit() {
+    asm!(
+        // Skip error code
+        "add rsp, 8",
+        // Return to user mode
+        "iretq",
+        options(noreturn),
+    );
+}
+
 /// User trap entry point (from assembly trampoline)
-#[no_mangle]
-pub static _user_trap_entry: u64 = _user_trap_entry as u64;
+#[allow(static_mut_refs)]
+pub static _user_trap_entry_addr: u64 = _user_trap_entry as usize as u64;
 
 /// User trap entry point function
 ///
@@ -102,7 +161,7 @@ pub unsafe extern "sysv64" fn _user_trap_exit_impl() {
 /// # Arguments
 /// * `trapframe` - Pointer to the saved trapframe
 #[no_mangle]
-extern "C" fn arch_user_trap_handler(trapframe: &mut Trapframe) {
+pub extern "C" fn arch_user_trap_handler(trapframe: &mut Trapframe) {
     use crate::sched::scheduler;
 
     // Acknowledge interrupt if applicable
@@ -188,4 +247,12 @@ pub unsafe extern "sysv64" fn x86_64_first_switch_to_user_naked(
         "iretq",
         options(noreturn),
     );
+}
+
+/// Switch to user space (called from scheduler)
+///
+/// This function performs the context switch to user mode.
+pub fn arch_switch_to_user_space(_trapframe: &mut Trapframe) {
+    // This is typically done via the trap return path
+    // The actual switch happens in _user_trap_exit via iretq
 }

@@ -111,7 +111,7 @@ pub fn init_idt() {
         asm!(
             "lidt [{}]",
             in(reg) &idt_ptr,
-            options(nostack, memory)
+            options(nostack)
         );
     }
 }

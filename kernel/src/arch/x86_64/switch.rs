@@ -4,6 +4,17 @@
 
 use core::arch::asm;
 
+/// Switch to a new task context (wrapper for API compatibility)
+///
+/// # Safety
+/// Both contexts must be valid and properly initialized.
+pub unsafe fn switch_to(
+    prev: *mut super::context::KernelContext,
+    next: *const super::context::KernelContext,
+) {
+    context_switch(&mut *prev, &*next);
+}
+
 /// Switch to a new task context
 ///
 /// This function performs a context switch from the current task

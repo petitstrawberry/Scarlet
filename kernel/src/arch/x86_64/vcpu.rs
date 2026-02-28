@@ -13,6 +13,9 @@ pub enum Mode {
     Kernel,
 }
 
+/// VCPU state for x86_64 (type alias for API compatibility)
+pub type Vcpu = VCpuState;
+
 /// VCPU state for x86_64
 ///
 /// Contains all the state needed to save/restore a task's execution context.

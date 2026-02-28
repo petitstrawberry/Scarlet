@@ -2,6 +2,8 @@
 //!
 //! Handles traps/interrupts that occur while executing in kernel mode
 
+use core::arch::asm;
+
 use super::super::Trapframe;
 
 /// Kernel trap entry point (from assembly)
@@ -84,9 +86,7 @@ pub unsafe extern "sysv64" fn _kernel_trap_entry_impl() {
 /// # Arguments
 /// * `regs` - Pointer to the saved registers on the stack
 #[no_mangle]
-extern "C" fn arch_kernel_trap_handler(regs: &mut Trapframe) {
-    use crate::drivers::pic::LocalApic;
-
+pub extern "C" fn arch_kernel_trap_handler(regs: &mut Trapframe) {
     // Get the interrupt vector if this is an interrupt
     let _vector = 0; // Would be determined from the interrupt frame
 

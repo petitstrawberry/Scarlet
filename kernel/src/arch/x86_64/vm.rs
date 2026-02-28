@@ -221,3 +221,47 @@ pub fn flush_tlb() {
         write_cr3(cr3);
     }
 }
+
+/// Allocate a virtual address space region
+/// Returns the start address of the allocated region, or 0 on failure
+pub fn alloc_virtual_address_space(size: usize) -> u64 {
+    // Simple bump allocator for virtual address space
+    // In a real implementation, this would use a proper allocator
+    use core::sync::atomic::{AtomicU64, Ordering};
+    static mut NEXT_VIRTUAL_ADDR: AtomicU64 = AtomicU64::new(0x0000_8000_0000_0000); // Start of user space
+
+    let addr = NEXT_VIRTUAL_ADDR.fetch_add(size as u64, Ordering::SeqCst);
+    addr
+}
+
+/// Free a virtual address space region (stub implementation)
+pub fn free_virtual_address_space(_addr: u64, _size: usize) {
+    // TODO: Implement proper virtual address space freeing
+}
+
+/// Check if an ASID is in use (stub implementation)
+pub fn is_asid_used(_asid: u16) -> bool {
+    // TODO: Implement proper ASID tracking
+    false
+}
+
+/// Page table module
+pub mod mmu {
+    pub use super::PageTable;
+}
+
+/// Get root page table by ASID
+pub fn get_root_pagetable(_asid: u16) -> Option<RootPageTable> {
+    // TODO: Implement proper per-ASID page table management
+    Some(RootPageTable::new(get_current_page_table(), 0))
+}
+
+/// Setup trampoline for kernel (stub implementation)
+pub fn setup_trampoline_for_kernel(_vm_manager: &crate::vm::manager::VirtualMemoryManager) {
+    // TODO: Implement trampoline setup for kernel mode
+}
+
+/// Setup trampoline for user task (stub implementation)
+pub fn setup_trampoline_for_user(_vm_manager: &crate::vm::manager::VirtualMemoryManager) {
+    // TODO: Implement trampoline setup for user mode
+}

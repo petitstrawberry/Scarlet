@@ -92,3 +92,27 @@ pub fn get_user_fpu_enabled() -> bool {
 pub fn fpu_enabled() -> bool {
     unsafe { USER_FPU_ENABLED }
 }
+
+/// Save user FPU state during context switch out
+pub fn kernel_switch_out_user_fpu(vcpu: &mut crate::arch::vcpu::VCpuState) {
+    if vcpu.fpu_used {
+        fpu_save(&mut vcpu.fpu_state);
+    }
+}
+
+/// Restore user FPU state during context switch in
+pub fn kernel_switch_in_user_fpu(vcpu: &mut crate::arch::vcpu::VCpuState) {
+    if vcpu.fpu_used {
+        fpu_restore(&vcpu.fpu_state);
+    }
+}
+
+/// Save user vector state (stub for x86_64 - handled by FPU save)
+pub fn kernel_switch_out_user_vector(_vcpu: &mut crate::arch::vcpu::VCpuState) {
+    // Vector state is included in FXSAVE on x86_64
+}
+
+/// Restore user vector state (stub for x86_64 - handled by FPU restore)
+pub fn kernel_switch_in_user_vector(_vcpu: &mut crate::arch::vcpu::VCpuState) {
+    // Vector state is included in FXRSTOR on x86_64
+}

@@ -2,7 +2,7 @@
 //!
 //! Provides the main kernel entry function for x86_64
 
-use crate::arch::x86_64::earlycon::early_println;
+use crate::early_println;
 
 /// Kernel main entry point for x86_64
 ///

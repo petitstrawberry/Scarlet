@@ -51,3 +51,51 @@ pub fn write_u32(addr: usize, value: u32) {
 pub fn write_u64(addr: usize, value: u64) {
     unsafe { write_volatile(addr as *mut u64, value) }
 }
+
+/// Alias for read_u8 (API compatibility)
+#[inline(always)]
+pub fn read8(addr: usize) -> u8 {
+    read_u8(addr)
+}
+
+/// Alias for read_u16 (API compatibility)
+#[inline(always)]
+pub fn read16(addr: usize) -> u16 {
+    read_u16(addr)
+}
+
+/// Alias for read_u32 (API compatibility)
+#[inline(always)]
+pub fn read32(addr: usize) -> u32 {
+    read_u32(addr)
+}
+
+/// Alias for read_u64 (API compatibility)
+#[inline(always)]
+pub fn read64(addr: usize) -> u64 {
+    read_u64(addr)
+}
+
+/// Alias for write_u8 (API compatibility)
+#[inline(always)]
+pub fn write8(addr: usize, value: u8) {
+    write_u8(addr, value)
+}
+
+/// Alias for write_u16 (API compatibility)
+#[inline(always)]
+pub fn write16(addr: usize, value: u16) {
+    write_u16(addr, value)
+}
+
+/// Alias for write_u32 (API compatibility)
+#[inline(always)]
+pub fn write32(addr: usize, value: u32) {
+    write_u32(addr, value)
+}
+
+/// Alias for write_u64 (API compatibility)
+#[inline(always)]
+pub fn write64(addr: usize, value: u64) {
+    write_u64(addr, value)
+}

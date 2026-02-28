@@ -119,3 +119,34 @@ pub fn handle_interrupt() {
 pub fn read_current_count() -> u32 {
     lapic_read(LAPIC_TIMER_CUR)
 }
+
+/// Architecture-specific timer interface
+pub struct ArchTimer;
+
+impl ArchTimer {
+    /// Initialize the timer for the given CPU
+    pub fn init(&self, cpu_id: usize) {
+        let _ = cpu_id;
+        init();
+    }
+
+    /// Get the current tick count
+    pub fn get_ticks(&self) -> u64 {
+        get_ticks()
+    }
+
+    /// Start periodic timer with interval in microseconds
+    pub fn start_periodic(&self, interval_us: u64) {
+        start(interval_us);
+    }
+
+    /// Stop the timer
+    pub fn stop(&self) {
+        stop();
+    }
+
+    /// Acknowledge timer interrupt
+    pub fn ack(&self) {
+        ack();
+    }
+}

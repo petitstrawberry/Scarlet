@@ -14,6 +14,10 @@ mod arch;
 #[path = "environment/riscv64.rs"]
 mod arch;
 
+#[cfg(target_arch = "x86_64")]
+#[path = "environment/x86_64.rs"]
+mod arch;
+
 pub use arch::*;
 pub use common::*;
 

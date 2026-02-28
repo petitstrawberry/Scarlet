@@ -1,14 +1,19 @@
-//! x86_64 early console support using VGA text mode
+//! x86_64 early console support using VGA text mode and serial port
 //!
 //! x86_64 QEMU typically supports VGA text mode at 0xB8000
 //! This provides early debugging output before the full driver system is ready.
 
-use core::arch::asm;
-use core::fmt;
+use core::ptr::{read_volatile, write_volatile};
 
 const VGA_BUFFER: usize = 0xB8000;
 const VGA_WIDTH: usize = 80;
 const VGA_HEIGHT: usize = 25;
+
+// Serial port for QEMU (COM1)
+const SERIAL_PORT: u16 = 0x3F8;
+const SERIAL_LSR: u16 = 0x3FD; // Line Status Register
+const SERIAL_THR: u16 = 0x3F8; // Transmit Holding Register
+const SERIAL_LSR_THRE: u8 = 0x20; // Transmit Holding Register Empty
 
 static mut CURSOR_ROW: usize = 0;
 static mut CURSOR_COL: usize = 0;
@@ -47,7 +52,7 @@ fn vga_write_char(c: u8, color: u8) {
     let offset = (unsafe { CURSOR_ROW } * VGA_WIDTH) + unsafe { CURSOR_COL };
     unsafe {
         let vga_buffer = VGA_BUFFER as *mut u16;
-        *vga_buffer.add(offset) = vga_entry(c, color);
+        write_volatile(vga_buffer.add(offset), vga_entry(c, color));
     }
 }
 
@@ -59,13 +64,17 @@ fn vga_scroll_up() {
             for col in 0..VGA_WIDTH {
                 let src = row * VGA_WIDTH + col;
                 let dst = (row - 1) * VGA_WIDTH + col;
-                *vga_buffer.add(dst) = *vga_buffer.add(src);
+                let val = read_volatile(vga_buffer.add(src));
+                write_volatile(vga_buffer.add(dst), val);
             }
         }
         // Clear last row
         let color = vga_entry_color(VgaColor::LightGrey, VgaColor::Black);
         for col in 0..VGA_WIDTH {
-            *vga_buffer.add((VGA_HEIGHT - 1) * VGA_WIDTH + col) = vga_entry(b' ', color);
+            write_volatile(
+                vga_buffer.add((VGA_HEIGHT - 1) * VGA_WIDTH + col),
+                vga_entry(b' ', color),
+            );
         }
         // Move cursor up
         if CURSOR_ROW > 0 {
@@ -132,40 +141,40 @@ fn vga_put_byte(byte: u8) {
     }
 }
 
-pub struct EarlyWriter;
-
-impl fmt::Write for EarlyWriter {
-    fn write_str(&mut self, s: &str) -> fmt::Result {
-        for byte in s.bytes() {
-            vga_put_byte(byte);
+/// Write a byte to serial port (using port I/O)
+fn serial_put_byte(byte: u8) {
+    unsafe {
+        // Wait for transmit holding register to be empty
+        while (read_volatile(SERIAL_LSR as *const u8) & SERIAL_LSR_THRE) == 0 {
+            core::hint::spin_loop();
         }
-        Ok(())
+        // Write byte to transmit holding register
+        write_volatile(SERIAL_THR as *mut u8, byte);
     }
 }
 
-/// Print to the early console (VGA text mode)
-#[macro_export]
-macro_rules! early_print {
-    ($($arg:tt)*) => ({
-        use core::fmt::Write;
-        let _ = write!($crate::arch::x86_64::earlycon::EarlyWriter, $($arg)*);
-    });
+/// Early console putchar function for x86_64
+///
+/// This function provides character output during early boot before
+/// the full driver is initialized. It outputs to both VGA and serial.
+///
+/// # Arguments
+/// * `c` - Character to output
+pub fn early_putc(c: u8) {
+    // Output to VGA
+    vga_put_byte(c);
+    // Also output to serial for QEMU -debug mode
+    serial_put_byte(c);
 }
 
-/// Print to the early console with newline
-#[macro_export]
-macro_rules! early_println {
-    () => ($crate::early_print!("\n"));
-    ($($arg:tt)*) => ($crate::early_print!("{}\n", format_args!($($arg)*)));
-}
-
+/// Initialize early console
 pub fn init_earlycon() {
-    // Clear screen
+    // Clear VGA screen
     unsafe {
         let vga_buffer = VGA_BUFFER as *mut u16;
         let color = vga_entry_color(VgaColor::LightGrey, VgaColor::Black);
         for i in 0..(VGA_WIDTH * VGA_HEIGHT) {
-            *vga_buffer.add(i) = vga_entry(b' ', color);
+            write_volatile(vga_buffer.add(i), vga_entry(b' ', color));
         }
         CURSOR_ROW = 0;
         CURSOR_COL = 0;
@@ -175,30 +184,4 @@ pub fn init_earlycon() {
 /// Check if early console is available
 pub fn is_earlycon_available() -> bool {
     true // VGA is always available on x86_64
-}
-
-/// Serial port output for QEMU (optional, more portable)
-const SERIAL_PORT: u16 = 0x3F8;
-
-fn serial_put_byte(byte: u8) {
-    unsafe {
-        // Wait for transmit buffer empty
-        asm!(
-            "1: in al, dx",
-            "test al, 0x20",
-            "jz 1b",
-            "2: out dx, al",
-            in("dx") SERIAL_PORT + 5u16, // LSR
-            inlateout("al") 0u8 => _,
-            in("dx") SERIAL_PORT, // THR
-            in("al") byte,
-            options(nostack)
-        );
-    }
-}
-
-/// Output byte to both VGA and serial
-pub fn earlycon_put_byte(byte: u8) {
-    vga_put_byte(byte);
-    serial_put_byte(byte);
 }

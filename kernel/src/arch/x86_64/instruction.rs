@@ -196,3 +196,11 @@ pub fn cpuid(eax: u32, ecx: u32) -> (u32, u32, u32, u32) {
     }
     (eax_res, ebx_res, ecx_res, edx_res)
 }
+
+/// Halt the CPU until an interrupt occurs
+#[inline(always)]
+pub fn idle() {
+    unsafe {
+        asm!("hlt", options(nostack));
+    }
+}

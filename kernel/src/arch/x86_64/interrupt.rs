@@ -99,3 +99,39 @@ pub fn are_enabled() -> bool {
     }
     (rflags & 0x200) != 0
 }
+
+/// Enable external interrupts (alias for enable())
+pub fn enable_external_interrupts() {
+    enable()
+}
+
+/// Enable interrupts (alias for API compatibility)
+pub fn enable_interrupts() {
+    enable()
+}
+
+/// Disable interrupts (alias for API compatibility)
+pub fn disable_interrupts() {
+    disable()
+}
+
+/// Check if interrupts are enabled (alias for API compatibility)
+pub fn are_interrupts_enabled() -> bool {
+    are_enabled()
+}
+
+/// Execute a closure with interrupts disabled
+pub fn with_interrupts_disabled<F, R>(f: F) -> R
+where
+    F: FnOnce() -> R,
+{
+    let was_enabled = are_enabled();
+    if was_enabled {
+        disable();
+    }
+    let result = f();
+    if was_enabled {
+        enable();
+    }
+    result
+}

@@ -365,6 +365,11 @@ pub fn set_next_mode(mode: vcpu::Mode) {
     // x86_64 doesn't need explicit mode switching like RISC-V
 }
 
+/// Set trap vector (load IDT)
+pub fn set_trapvector() {
+    trap::kernel::load_idt();
+}
+
 /// Memory barrier for device/MMIO (I/O) operations.
 #[inline(always)]
 pub fn io_mb() {
@@ -467,11 +472,13 @@ pub fn shutdown_with_code(exit_code: u32) -> ! {
 pub fn reboot() -> ! {
     early_println!("[x86_64] Reboot requested");
     unsafe {
-        // Triple fault to reset
+        // Create an invalid IDT pointer to cause triple fault
+        let null_idt: u16 = 0;
         asm!(
-            "lidt [idt_ptr]",
+            "lidt [{idt_ptr}]",
             "int3",
-            idt_ptr = in(reg) &0u16 as *const u16,
+            idt_ptr = in(reg) &null_idt as *const u16,
+            options(nostack)
         );
     }
     loop {
