@@ -41,6 +41,10 @@ dependencies = ["clippy-kernel", "clippy-userlib", "clippy-userbin"]
 description = "Run clippy for all components (AArch64)"
 dependencies = ["clippy-kernel", "clippy-userlib", "clippy-userbin"]
 
+[tasks.clippy-x86_64]
+description = "Run clippy for all components (x86_64)"
+dependencies = ["clippy-kernel", "clippy-userlib", "clippy-userbin"]
+
 [tasks.clippy-kernel]
 description = "Run clippy for kernel"
 cwd = "kernel"
@@ -84,6 +88,10 @@ dependencies = ["build-debug-riscv64"]
 description = "Build all components (AArch64, debug)"
 dependencies = ["build-debug-aarch64"]
 
+[tasks.build-x86_64]
+description = "Build all components (x86_64, debug)"
+dependencies = ["build-debug-x86_64"]
+
 [tasks.build-debug-riscv64]
 description = "Build all components in debug mode (RISC-V)"
 dependencies = ["build-kernel-debug-riscv64", "build-userlib-debug-riscv64", "build-userbin-debug-riscv64", "build-initramfs-debug-riscv64", "build-rootfs-riscv64"]
@@ -100,6 +108,14 @@ dependencies = ["build-kernel-debug-aarch64", "build-userlib-debug-aarch64", "bu
 description = "Build all components in release mode (AArch64)"
 dependencies = ["build-kernel-release-aarch64", "build-userlib-release-aarch64", "build-userbin-release-aarch64", "build-initramfs-release-aarch64", "build-rootfs-aarch64"]
 
+[tasks.build-debug-x86_64]
+description = "Build all components in debug mode (x86_64)"
+dependencies = ["build-kernel-debug-x86_64", "build-userlib-debug-x86_64", "build-userbin-debug-x86_64", "build-initramfs-debug-x86_64", "build-rootfs-x86_64"]
+
+[tasks.build-release-x86_64]
+description = "Build all components in release mode (x86_64)"
+dependencies = ["build-kernel-release-x86_64", "build-userlib-release-x86_64", "build-userbin-release-x86_64", "build-initramfs-release-x86_64", "build-rootfs-x86_64"]
+
 [tasks.build-kernel-riscv64]
 description = "Build the kernel (RISC-V, debug)"
 dependencies = ["build-kernel-debug-riscv64"]
@@ -107,6 +123,10 @@ dependencies = ["build-kernel-debug-riscv64"]
 [tasks.build-kernel-aarch64]
 description = "Build the kernel (AArch64, debug)"
 dependencies = ["build-kernel-debug-aarch64"]
+
+[tasks.build-kernel-x86_64]
+description = "Build the kernel (x86_64, debug)"
+dependencies = ["build-kernel-debug-x86_64"]
 
 [tasks.build-kernel-debug-riscv64]
 description = "Build the kernel in debug mode (RISC-V)"
@@ -132,6 +152,18 @@ cwd = "kernel"
 command = "cargo"
 args = ["build", "--release", "--target", "targets/aarch64-unknown-none-elf.json"]
 
+[tasks.build-kernel-debug-x86_64]
+description = "Build the kernel in debug mode (x86_64)"
+cwd = "kernel"
+command = "cargo"
+args = ["build", "--target", "targets/x86_64-unknown-none-elf.json"]
+
+[tasks.build-kernel-release-x86_64]
+description = "Build the kernel in release mode (x86_64)"
+cwd = "kernel"
+command = "cargo"
+args = ["build", "--release", "--target", "targets/x86_64-unknown-none-elf.json"]
+
 [tasks.build-userlib-debug-riscv64]
 description = "Build user libraries for RISC-V in debug mode"
 cwd = "user/lib"
@@ -156,6 +188,18 @@ cwd = "user/lib"
 command = "cargo"
 args = ["make", "build-userlib-release-aarch64"]
 
+[tasks.build-userlib-debug-x86_64]
+description = "Build user libraries for x86_64 in debug mode"
+cwd = "user/lib"
+command = "cargo"
+args = ["make", "build-userlib-debug-x86_64"]
+
+[tasks.build-userlib-release-x86_64]
+description = "Build user libraries for x86_64 in release mode"
+cwd = "user/lib"
+command = "cargo"
+args = ["make", "build-userlib-release-x86_64"]
+
 [tasks.build-userlib-riscv64]
 description = "Build user libraries (RISC-V, debug)"
 dependencies = ["build-userlib-debug-riscv64"]
@@ -163,6 +207,10 @@ dependencies = ["build-userlib-debug-riscv64"]
 [tasks.build-userlib-aarch64]
 description = "Build user libraries (AArch64, debug)"
 dependencies = ["build-userlib-debug-aarch64"]
+
+[tasks.build-userlib-x86_64]
+description = "Build user libraries (x86_64, debug)"
+dependencies = ["build-userlib-debug-x86_64"]
 
 [tasks.build-userbin-debug-riscv64]
 description = "Build user programs for RISC-V in debug mode"
@@ -192,6 +240,20 @@ command = "cargo"
 args = ["make", "build-release-aarch64"]
 dependencies = ["build-userlib-release-aarch64"]
 
+[tasks.build-userbin-debug-x86_64]
+description = "Build user programs for x86_64 in debug mode"
+cwd = "user/bin"
+command = "cargo"
+args = ["make", "build-x86_64"]
+dependencies = ["build-userlib-debug-x86_64"]
+
+[tasks.build-userbin-release-x86_64]
+description = "Build user programs for x86_64 in release mode"
+cwd = "user/bin"
+command = "cargo"
+args = ["make", "build-release-x86_64"]
+dependencies = ["build-userlib-release-x86_64"]
+
 [tasks.build-userbin-riscv64]
 description = "Build user programs (RISC-V, debug)"
 dependencies = ["build-userbin-debug-riscv64"]
@@ -199,6 +261,10 @@ dependencies = ["build-userbin-debug-riscv64"]
 [tasks.build-userbin-aarch64]
 description = "Build user programs (AArch64, debug)"
 dependencies = ["build-userbin-debug-aarch64"]
+
+[tasks.build-userbin-x86_64]
+description = "Build user programs (x86_64, debug)"
+dependencies = ["build-userbin-debug-x86_64"]
 
 [tasks.clean]
 description = "Clean all build artifacts"
@@ -230,6 +296,10 @@ dependencies = ["test-kernel-riscv64"]
 description = "Run tests (AArch64)"
 dependencies = ["test-kernel-aarch64"]
 
+[tasks.test-x86_64]
+description = "Run tests (x86_64)"
+dependencies = ["test-kernel-x86_64"]
+
 [tasks.test-kernel-riscv64]
 description = "Run kernel tests (RISC-V)"
 cwd = "kernel"
@@ -246,6 +316,14 @@ command = "cargo"
 args = ["test", "--target", "targets/aarch64-unknown-none-elf.json"]
 dependencies = ["build-initramfs-debug-aarch64"]
 
+[tasks.test-kernel-x86_64]
+description = "Run kernel tests (x86_64)"
+cwd = "kernel"
+env = { "CARGO_TARGET_X86_64_UNKNOWN_NONE_ELF_RUNNER" = "tools/test_x86_64.sh" }
+command = "cargo"
+args = ["test", "--target", "targets/x86_64-unknown-none-elf.json"]
+dependencies = ["build-initramfs-debug-x86_64"]
+
 [tasks.run-riscv64]
 description = "Run the kernel in release mode (RISC-V)"
 cwd = "kernel"
@@ -259,6 +337,13 @@ cwd = "kernel"
 command = "cargo"
 args = ["run", "--release", "--target", "targets/aarch64-unknown-none-elf.json"]
 dependencies = ["build-release-aarch64"]
+
+[tasks.run-x86_64]
+description = "Run the kernel in release mode (x86_64)"
+cwd = "kernel"
+command = "cargo"
+args = ["run", "--release", "--target", "targets/x86_64-unknown-none-elf.json"]
+dependencies = ["build-release-x86_64"]
 
 [tasks.run-debug-riscv64]
 description = "Run the kernel in debug mode (RISC-V)"
@@ -274,6 +359,13 @@ command = "cargo"
 args = ["run", "--target", "targets/aarch64-unknown-none-elf.json"]
 dependencies = ["build-debug-aarch64"]
 
+[tasks.run-debug-x86_64]
+description = "Run the kernel in debug mode (x86_64)"
+cwd = "kernel"
+command = "cargo"
+args = ["run", "--target", "targets/x86_64-unknown-none-elf.json"]
+dependencies = ["build-debug-x86_64"]
+
 [tasks.debug-riscv64]
 description = "Run the kernel in debug mode (RISC-V)"
 cwd = "kernel"
@@ -287,6 +379,13 @@ cwd = "kernel"
 command = "./tools/run_aarch64.sh"
 args = ["--debug", "target/aarch64-unknown-none-elf/debug/kernel"]
 dependencies = ["build-debug-aarch64"]
+
+[tasks.debug-x86_64]
+description = "Run the kernel in debug mode (x86_64)"
+cwd = "kernel"
+command = "./tools/run_x86_64.sh"
+args = ["--debug", "target/x86_64-unknown-none-elf/debug/kernel"]
+dependencies = ["build-debug-x86_64"]
 
 [tasks.debug-test-riscv64]
 description = "Run kernel tests in debug mode with gdb (RISC-V)"
@@ -304,12 +403,24 @@ command = "cargo"
 args = ["test", "--target", "targets/aarch64-unknown-none-elf.json", "--", "--debug"]
 dependencies = ["build-initramfs-debug-aarch64"]
 
+[tasks.debug-test-x86_64]
+description = "Run kernel tests in debug mode with gdb (x86_64)"
+cwd = "kernel"
+env = { "CARGO_TARGET_X86_64_UNKNOWN_NONE_ELF_RUNNER" = "tools/test_x86_64.sh" }
+command = "cargo"
+args = ["test", "--target", "targets/x86_64-unknown-none-elf.json", "--", "--debug"]
+dependencies = ["build-initramfs-debug-x86_64"]
+
 [tasks.doc-riscv64]
 description = "Generate documentation for all components (RISC-V)"
 dependencies = ["doc-kernel", "doc-userlib"]
 
 [tasks.doc-aarch64]
 description = "Generate documentation for all components (AArch64)"
+dependencies = ["doc-kernel", "doc-userlib"]
+
+[tasks.doc-x86_64]
+description = "Generate documentation for all components (x86_64)"
 dependencies = ["doc-kernel", "doc-userlib"]
 
 [tasks.doc-kernel]
@@ -335,6 +446,17 @@ dependencies = ["build-userbin-debug-aarch64"]
 description = "Create AArch64 initramfs archive (debug)"
 dependencies = ["build-initramfs-debug-aarch64"]
 
+[tasks.build-initramfs-debug-x86_64]
+description = "Create x86_64 initramfs archive (debug)"
+cwd = "mkfs"
+command = "sh"
+args = ["make_initramfs.sh", "x86_64"]
+dependencies = ["build-userbin-debug-x86_64"]
+
+[tasks.build-initramfs-x86_64]
+description = "Create x86_64 initramfs archive (debug)"
+dependencies = ["build-initramfs-debug-x86_64"]
+
 [tasks.build-initramfs-debug-riscv64]
 description = "Create RISC-V initramfs archive (debug)"
 cwd = "mkfs"
@@ -352,6 +474,13 @@ cwd = "mkfs"
 command = "sh"
 args = ["make_initramfs.sh", "aarch64"]
 dependencies = ["build-userbin-release-aarch64"]
+
+[tasks.build-initramfs-release-x86_64]
+description = "Create x86_64 initramfs archive (release)"
+cwd = "mkfs"
+command = "sh"
+args = ["make_initramfs.sh", "x86_64"]
+dependencies = ["build-userbin-release-x86_64"]
 
 [tasks.build-initramfs-release-riscv64]
 description = "Create RISC-V initramfs archive (release)"
@@ -380,6 +509,13 @@ command = "sh"
 args = ["make_rootfs.sh"]
 condition = { files_not_exist = ["dist/rootfs.img"] }
 
+[tasks.build-rootfs-x86_64]
+description = "Create rootfs.img if it doesn't exist (x86_64)"
+cwd = "mkfs"
+command = "sh"
+args = ["make_rootfs.sh"]
+condition = { files_not_exist = ["dist/rootfs.img"] }
+
 [tasks.clean-rootfs]
 description = "Clean rootfs.img"
 cwd = "mkfs"
@@ -392,6 +528,10 @@ dependencies = ["clippy-fix-kernel", "clippy-fix-userlib", "clippy-fix-userbin"]
 
 [tasks.clippy-fix-aarch64]
 description = "Run clippy with auto-fix for all components (AArch64)"
+dependencies = ["clippy-fix-kernel", "clippy-fix-userlib", "clippy-fix-userbin"]
+
+[tasks.clippy-fix-x86_64]
+description = "Run clippy with auto-fix for all components (x86_64)"
 dependencies = ["clippy-fix-kernel", "clippy-fix-userlib", "clippy-fix-userbin"]
 
 [tasks.clippy-fix-kernel]

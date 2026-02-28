@@ -24,9 +24,17 @@ rustflags = [
 	"-C", "no-vectorize-slp",
 ]
 
+[target.x86_64-unknown-none-elf]
+runner = "tools/run_x86_64.sh"
+rustflags = [
+	"-C", "no-vectorize-loops",
+	"-C", "no-vectorize-slp",
+]
+
 [build]
 target = "targets/riscv64gc-unknown-none-elf.json"
 # target = "targets/aarch64-unknown-none-elf.json"
+# target = "targets/x86_64-unknown-none-elf.json"
 
 [unstable]
 build-std = ["core", "compiler_builtins", "alloc"]
