@@ -188,7 +188,7 @@ fn init_gdt() {
 ///
 /// # Safety
 /// This function must only be called once during boot.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn _start() -> ! {
     // Disable interrupts
     asm!("cli", options(nostack));

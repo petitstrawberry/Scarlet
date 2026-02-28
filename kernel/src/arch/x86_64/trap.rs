@@ -5,7 +5,7 @@
 pub mod kernel;
 pub mod user;
 
-use core::arch::asm;
+use core::arch::{asm, naked_asm};
 use core::sync::atomic::{AtomicU32, Ordering};
 
 use crate::arch::x86_64::registers::IntRegisters;
@@ -117,105 +117,99 @@ pub fn init_idt() {
 }
 
 /// Common exception handler entry point
-#[naked]
+#[unsafe(naked)]
 extern "x86-interrupt" fn exception_handler(_frame: &mut ExceptionStackFrame) {
-    unsafe {
-        asm!(
-            // Save all general purpose registers
-            "push rax",
-            "push rbx",
-            "push rcx",
-            "push rdx",
-            "push rsi",
-            "push rdi",
-            "push rbp",
-            "push r8",
-            "push r9",
-            "push r10",
-            "push r11",
-            "push r12",
-            "push r13",
-            "push r14",
-            "push r15",
+    naked_asm!(
+        // Save all general purpose registers
+        "push rax",
+        "push rbx",
+        "push rcx",
+        "push rdx",
+        "push rsi",
+        "push rdi",
+        "push rbp",
+        "push r8",
+        "push r9",
+        "push r10",
+        "push r11",
+        "push r12",
+        "push r13",
+        "push r14",
+        "push r15",
 
-            // Save error code from stack (pushed by CPU for some exceptions)
-            "mov rsi, [rsp + 15*8]", // RSI points to error code location
+        // Save error code from stack (pushed by CPU for some exceptions)
+        "mov rsi, [rsp + 15*8]",
 
-            // Call the actual handler
-            "mov rdi, rsp",
-            "call {}",
+        // Call the actual handler
+        "mov rdi, rsp",
+        "call {handler}",
 
-            // Restore registers
-            "pop r15",
-            "pop r14",
-            "pop r13",
-            "pop r12",
-            "pop r11",
-            "pop r10",
-            "pop r9",
-            "pop r8",
-            "pop rbp",
-            "pop rdi",
-            "pop rsi",
-            "pop rdx",
-            "pop rcx",
-            "pop rbx",
-            "pop rax",
+        // Restore registers
+        "pop r15",
+        "pop r14",
+        "pop r13",
+        "pop r12",
+        "pop r11",
+        "pop r10",
+        "pop r9",
+        "pop r8",
+        "pop rbp",
+        "pop rdi",
+        "pop rsi",
+        "pop rdx",
+        "pop rcx",
+        "pop rbx",
+        "pop rax",
 
-            // Clean up error code if present (6 bytes for error code + 8 bytes for RIP)
-            "add rsp, 8",
+        // Clean up error code if present (6 bytes for error code + 8 bytes for RIP)
+        "add rsp, 8",
 
-            "iretq",
-            options(noreturn),
-            sym handle_exception,
-        );
-    }
+        "iretq",
+        handler = sym handle_exception,
+    );
 }
 
 /// Common interrupt handler entry point
-#[naked]
+#[unsafe(naked)]
 extern "x86-interrupt" fn interrupt_handler(_frame: &mut ExceptionStackFrame) {
-    unsafe {
-        asm!(
-            "push rax",
-            "push rbx",
-            "push rcx",
-            "push rdx",
-            "push rsi",
-            "push rdi",
-            "push rbp",
-            "push r8",
-            "push r9",
-            "push r10",
-            "push r11",
-            "push r12",
-            "push r13",
-            "push r14",
-            "push r15",
+    naked_asm!(
+        "push rax",
+        "push rbx",
+        "push rcx",
+        "push rdx",
+        "push rsi",
+        "push rdi",
+        "push rbp",
+        "push r8",
+        "push r9",
+        "push r10",
+        "push r11",
+        "push r12",
+        "push r13",
+        "push r14",
+        "push r15",
 
-            "call {}",
+        "call {handler}",
 
-            "pop r15",
-            "pop r14",
-            "pop r13",
-            "pop r12",
-            "pop r11",
-            "pop r10",
-            "pop r9",
-            "pop r8",
-            "pop rbp",
-            "pop rdi",
-            "pop rsi",
-            "pop rdx",
-            "pop rcx",
-            "pop rbx",
-            "pop rax",
+        "pop r15",
+        "pop r14",
+        "pop r13",
+        "pop r12",
+        "pop r11",
+        "pop r10",
+        "pop r9",
+        "pop r8",
+        "pop rbp",
+        "pop rdi",
+        "pop rsi",
+        "pop rdx",
+        "pop rcx",
+        "pop rbx",
+        "pop rax",
 
-            "iretq",
-            options(noreturn),
-            sym handle_interrupt,
-        );
-    }
+        "iretq",
+        handler = sym handle_interrupt,
+    );
 }
 
 /// Actual exception handling logic

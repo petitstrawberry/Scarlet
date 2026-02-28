@@ -250,6 +250,7 @@
 #![feature(custom_test_frameworks)]
 #![test_runner(crate::test::test_runner)]
 #![reexport_test_harness_main = "test_main"]
+#![cfg_attr(target_arch = "x86_64", feature(abi_x86_interrupt))]
 
 pub mod abi;
 pub mod arch;
