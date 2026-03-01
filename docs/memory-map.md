@@ -57,9 +57,9 @@ RISC-V Kernel VA (shared PT)
                        │ Kernel image (VA=PA)           │  __KERNEL_SPACE_END
                        │   .init .text .rodata .data    │
                        │   .bss .trampoline (phys)      │
-0x????_????_????_????  ├────────────────────────────────┤  __KERNEL_SPACE_START
+0x0000_0000_8400_0000  ├────────────────────────────────┤  __KERNEL_SPACE_START
                        │ (gap - bootloader/FDT)         │
-0x????_????_????_????  └────────────────────────────────┘  DRAM_START
+0x0000_0000_8000_0000  └────────────────────────────────┘  DRAM_START (QEMU virt)
 ```
 
 ### User Page Table
@@ -111,9 +111,9 @@ AArch64 Kernel VA (TTBR1)
                        │ Kernel image (VA=PA)           │  __KERNEL_SPACE_END
                        │   .head .init .text .rodata    │
                        │   .data .bss .trampoline (phys)│
-0x????_????_????_????  ├────────────────────────────────┤  __KERNEL_SPACE_START
+0x0000_0000_4020_0000  ├────────────────────────────────┤  __KERNEL_SPACE_START
                        │ (gap - bootloader/DTB)         │
-0x????_????_????_????  └────────────────────────────────┘  DRAM_START
+0x0000_0000_4000_0000  └────────────────────────────────┘  DRAM_START
 ```
 
 ### User Page Table (TTBR0)
