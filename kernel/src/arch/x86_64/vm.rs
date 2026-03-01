@@ -11,6 +11,7 @@ use crate::arch::x86_64::instruction::{read_cr3, write_cr3};
 /// Page size constants
 pub const PAGE_SIZE: usize = 4096;
 pub const PAGE_SHIFT: usize = 12;
+pub const KERNEL_VA_BASE: usize = 0xffff_ffff_8000_0000;
 
 /// Page table entry flags
 pub mod flags {
@@ -147,22 +148,72 @@ impl PageTable {
     pub fn map_memory_area(
         &mut self,
         _asid: u16,
-        _mmap: crate::vm::vmem::VirtualMemoryMap,
+        mmap: crate::vm::vmem::VirtualMemoryMap,
         _accessed: bool,
         _dirty: bool,
     ) -> Result<(), &'static str> {
+        let mut current_vaddr = mmap.vmarea.start as u64;
+        let mut current_paddr = mmap.pmarea.start as u64;
+        let end = mmap.vmarea.end as u64;
+
+        while current_vaddr <= end {
+            self.map(
+                _asid,
+                current_vaddr as usize,
+                current_paddr as usize,
+                mmap.permissions,
+                _accessed,
+                _dirty,
+            );
+            current_vaddr = match current_vaddr.checked_add(PAGE_SIZE as u64) {
+                Some(addr) => addr,
+                None => break,
+            };
+            current_paddr = match current_paddr.checked_add(PAGE_SIZE as u64) {
+                Some(addr) => addr,
+                None => break,
+            };
+        }
+
         Ok(())
     }
 
     pub fn map(
         &mut self,
         _asid: u16,
-        _vaddr: usize,
-        _paddr: usize,
-        _permissions: usize,
+        vaddr: usize,
+        paddr: usize,
+        permissions: usize,
         _accessed: bool,
         _dirty: bool,
     ) {
+        let pml4 = self as *mut PageTable;
+        let vaddr = vaddr as u64;
+        let paddr = paddr as u64;
+
+        let pml4_index = ((vaddr >> 39) & 0x1FF) as usize;
+        let pdpt_index = ((vaddr >> 30) & 0x1FF) as usize;
+        let pd_index = ((vaddr >> 21) & 0x1FF) as usize;
+        let pt_index = ((vaddr >> 12) & 0x1FF) as usize;
+
+        let pml4 = unsafe { &mut *pml4 };
+        let pdpt = ensure_table(pml4, pml4_index);
+        let pd = ensure_table(pdpt, pdpt_index);
+        let pt = ensure_table(pd, pd_index);
+
+        if let Some(pte) = pt.get_entry_mut(pt_index) {
+            pte.set_addr(paddr);
+            pte.set_present(true);
+            if permissions & crate::vm::vmem::VirtualMemoryPermission::Write as usize != 0 {
+                pte.set_writable(true);
+            }
+            if permissions & crate::vm::vmem::VirtualMemoryPermission::User as usize != 0 {
+                pte.set_user(true);
+            }
+            if permissions & crate::vm::vmem::VirtualMemoryPermission::Execute as usize == 0 {
+                pte.set_no_execute(true);
+            }
+        }
     }
 
     pub fn unmap(&mut self, _asid: u16, _vaddr: usize) {}
@@ -187,6 +238,27 @@ pub struct RootPageTable {
     pml4_paddr: u64,
     /// ASID (address space ID) for this page table
     asid: u16,
+}
+
+fn ensure_table<'a>(table: &'a mut PageTable, index: usize) -> &'a mut PageTable {
+    if let Some(entry) = table.get_entry_mut(index) {
+        if !entry.is_present() {
+            let page = crate::mem::page::allocate_raw_pages(1) as *mut PageTable;
+            if page.is_null() {
+                panic!("Failed to allocate page table");
+            }
+            unsafe {
+                core::ptr::write_bytes(page as *mut u8, 0, PAGE_SIZE);
+            }
+            entry.set_addr(page as u64);
+            entry.set_present(true);
+            entry.set_writable(true);
+        }
+        let next = entry.addr() as *mut PageTable;
+        unsafe { &mut *next }
+    } else {
+        panic!("Invalid page table index");
+    }
 }
 
 impl RootPageTable {
@@ -235,9 +307,22 @@ impl RootPageTable {
         let pd_index = ((vaddr >> 21) & 0x1FF) as usize;
         let pt_index = ((vaddr >> 12) & 0x1FF) as usize;
 
-        if let Some(pml4_entry) = pml4.get_entry_mut(pml4_index) {
-            let _ = (pdpt_index, pd_index, pt_index, paddr, flags);
-            let _ = pml4_entry;
+        let pdpt = ensure_table(pml4, pml4_index);
+        let pd = ensure_table(pdpt, pdpt_index);
+        let pt = ensure_table(pd, pd_index);
+
+        if let Some(pte) = pt.get_entry_mut(pt_index) {
+            pte.set_addr(paddr);
+            pte.set_present(true);
+            if flags & crate::vm::vmem::VirtualMemoryPermission::Write as u64 != 0 {
+                pte.set_writable(true);
+            }
+            if flags & crate::vm::vmem::VirtualMemoryPermission::User as u64 != 0 {
+                pte.set_user(true);
+            }
+            if flags & crate::vm::vmem::VirtualMemoryPermission::Execute as u64 == 0 {
+                pte.set_no_execute(true);
+            }
         }
     }
 
@@ -253,10 +338,16 @@ impl RootPageTable {
         let mut current_paddr = mmap.pmarea.start as u64;
         let end = mmap.vmarea.end as u64;
 
-        while current_vaddr < end {
+        while current_vaddr <= end {
             self.map_page(current_vaddr, current_paddr, mmap.permissions as u64);
-            current_vaddr += PAGE_SIZE as u64;
-            current_paddr += PAGE_SIZE as u64;
+            current_vaddr = match current_vaddr.checked_add(PAGE_SIZE as u64) {
+                Some(addr) => addr,
+                None => break,
+            };
+            current_paddr = match current_paddr.checked_add(PAGE_SIZE as u64) {
+                Some(addr) => addr,
+                None => break,
+            };
         }
 
         Ok(())

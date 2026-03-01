@@ -8,12 +8,12 @@ use vmem::MemoryArea;
 use vmem::VirtualMemoryMap;
 use vmem::VirtualMemoryPermission;
 
-use crate::arch::Arch;
 use crate::arch::get_device_memory_areas;
 use crate::arch::get_kernel_trapvector_paddr;
 use crate::arch::set_trapvector;
 use crate::arch::vm::alloc_virtual_address_space;
 use crate::arch::vm::get_root_pagetable;
+use crate::arch::Arch;
 use crate::early_println;
 use crate::environment::KERNEL_VM_STACK_SIZE;
 use crate::environment::KERNEL_VM_STACK_START;
@@ -21,8 +21,8 @@ use crate::environment::MAX_NUM_CPUS;
 use crate::environment::PAGE_SIZE;
 use crate::environment::USER_STACK_END;
 use crate::environment::{
-    KERNEL_KSTACK_REGION_END, KERNEL_KSTACK_REGION_START, KERNEL_KSTACK_SLOT_SIZE,
-    KERNEL_KSTACK_SLOTS, TASK_KERNEL_STACK_SIZE,
+    KERNEL_KSTACK_REGION_END, KERNEL_KSTACK_REGION_START, KERNEL_KSTACK_SLOTS,
+    KERNEL_KSTACK_SLOT_SIZE, TASK_KERNEL_STACK_SIZE,
 };
 use crate::sched::scheduler::get_scheduler;
 use crate::task::Task;
@@ -55,18 +55,22 @@ pub fn kernel_vm_init(kernel_area: MemoryArea) {
     manager.set_asid(asid);
 
     /* Map kernel space */
-    let kernel_start = kernel_area.start;
+    let kernel_start = kernel_area.start & !(PAGE_SIZE - 1);
     let kernel_end = kernel_area.end;
+    let kernel_end_aligned = (kernel_end + 1 + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
+    let kernel_end_aligned = kernel_end_aligned.saturating_sub(1);
 
     let kernel_area = MemoryArea {
         start: kernel_start,
-        end: kernel_end,
+        end: kernel_end_aligned,
     };
     KERNEL_AREA.call_once(|| kernel_area);
 
+    let kernel_pmarea = crate::arch::kernel_phys_memory_area(kernel_area);
+
     let kernel_map = VirtualMemoryMap {
         vmarea: kernel_area,
-        pmarea: kernel_area,
+        pmarea: kernel_pmarea,
         permissions: VirtualMemoryPermission::Read as usize
             | VirtualMemoryPermission::Write as usize
             | VirtualMemoryPermission::Execute as usize,

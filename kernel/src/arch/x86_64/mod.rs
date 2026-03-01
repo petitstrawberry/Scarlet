@@ -234,6 +234,16 @@ pub fn get_kernel_trapvector_paddr() -> usize {
     trap::kernel::_kernel_trap_entry as usize
 }
 
+pub fn kernel_phys_memory_area(
+    kernel_area: crate::vm::vmem::MemoryArea,
+) -> crate::vm::vmem::MemoryArea {
+    let kernel_phys_base = crate::arch::x86_64::boot::kernel_phys_base();
+    let kernel_va_base = crate::arch::x86_64::vm::KERNEL_VA_BASE;
+    let start = kernel_area.start - kernel_va_base + kernel_phys_base;
+    let end = kernel_area.end - kernel_va_base + kernel_phys_base;
+    crate::vm::vmem::MemoryArea::new(start, end)
+}
+
 pub fn get_kernel_trap_handler() -> usize {
     trap::kernel::arch_kernel_trap_handler as usize
 }

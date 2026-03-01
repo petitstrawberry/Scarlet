@@ -379,6 +379,13 @@ pub fn get_kernel_trapvector_paddr() -> usize {
     _kernel_trap_entry as usize
 }
 
+pub fn kernel_phys_memory_area(
+    kernel_area: crate::vm::vmem::MemoryArea,
+) -> crate::vm::vmem::MemoryArea {
+    // RISC-V uses direct mapping for kernel VA=PA
+    kernel_area
+}
+
 pub fn get_kernel_trap_handler() -> usize {
     arch_kernel_trap_handler as usize
 }

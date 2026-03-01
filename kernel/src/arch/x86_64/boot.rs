@@ -5,15 +5,16 @@ use core::mem::transmute;
 use core::ptr;
 
 use crate::arch::x86_64::earlycon::init_earlycon;
-use crate::arch::x86_64::{CPUS, X86_64, trap_init};
+use crate::arch::x86_64::{trap_init, CPUS, X86_64};
+use crate::environment::PAGE_SIZE;
 use crate::mem::init_bss;
 use crate::vm::vmem::MemoryArea;
-use crate::{BootInfo, DeviceSource, start_kernel};
-use limine::BaseRevision;
+use crate::{start_kernel, BootInfo, DeviceSource};
 use limine::request::{
     HhdmRequest, KernelAddressRequest, MemoryMapRequest, ModuleRequest, RequestsEndMarker,
     RequestsStartMarker,
 };
+use limine::BaseRevision;
 
 /// Define the start and end markers for Limine requests.
 #[used]
@@ -183,6 +184,7 @@ fn init_gdt() {
 
 static mut BOOT_INFO_STORAGE: BootInfo = unsafe { core::mem::zeroed() };
 static mut HHDM_OFFSET: usize = 0;
+static mut KERNEL_PHYS_BASE: usize = 0;
 
 fn serial_putc(c: u8) {
     unsafe {
@@ -260,6 +262,9 @@ pub extern "C" fn kmain() -> ! {
         .get_response()
         .expect("KernelAddressRequest not answered by bootloader");
     let kernel_phys_base = kernel_addr.physical_base() as usize;
+    unsafe {
+        KERNEL_PHYS_BASE = kernel_phys_base;
+    }
     let kernel_virt_base = kernel_addr.virtual_base() as usize;
 
     serial_puts(b"[x86_64] Kernel physical base: ");
@@ -292,16 +297,60 @@ pub extern "C" fn kmain() -> ! {
     print_hex(usable_memory.end as u64);
     serial_puts(b"\n");
 
-    // Relocate initramfs into usable_memory (same strategy as RISC-V/AArch64)
-    let relocated_initramfs = relocate_initramfs_from_module(&mut usable_memory);
+    // Relocate initramfs to usable_memory.start (same as RISC-V/AArch64)
+    let module = &MODULE_REQUEST
+        .get_response()
+        .and_then(|r| r.modules().first().copied())
+        .expect("No initramfs module available");
+    let src_addr = module.addr() as usize;
+    let size = module.size() as usize;
 
-    if let Some(ref area) = relocated_initramfs {
-        serial_puts(b"[x86_64] Relocated initramfs: ");
-        print_hex(area.start as u64);
-        serial_puts(b" - ");
-        print_hex(area.end as u64);
-        serial_puts(b"\n");
+    serial_puts(b"[x86_64] Relocating initramfs from: ");
+    print_hex(src_addr as u64);
+    serial_puts(b" to: ");
+    print_hex(usable_memory.start as u64);
+    serial_puts(b" size: ");
+    print_hex(size as u64);
+    serial_puts(b"\n");
+
+    // Copy initramfs to usable_memory.start using ptr::copy_nonoverlapping (same as RISC-V/AArch64)
+    let dst_addr = usable_memory.start;
+    if dst_addr + size > usable_memory.end {
+        panic!("Insufficient memory for initramfs relocation");
     }
+
+    unsafe {
+        let chunk_size = 4096;
+        let mut src = src_addr as *const u8;
+        let mut dst = dst_addr as *mut u8;
+        let mut remaining = size;
+
+        while remaining > 0 {
+            let copy_size = if remaining > chunk_size {
+                chunk_size
+            } else {
+                remaining
+            };
+            ptr::copy_nonoverlapping(src, dst, copy_size);
+
+            src = src.add(copy_size);
+            dst = dst.add(copy_size);
+            remaining -= copy_size;
+
+            core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    let initramfs_area = Some(MemoryArea::new(dst_addr, dst_addr + size - 1));
+
+    serial_puts(b"[x86_64] Relocated initramfs to: ");
+    print_hex(dst_addr as u64);
+    serial_puts(b" - ");
+    print_hex((dst_addr + size - 1) as u64);
+    serial_puts(b"\n");
+
+    // Advance usable_memory.start past the relocated initramfs (8-byte aligned, same as RISC-V/AArch64)
+    usable_memory.start = (dst_addr + size + 7) & !7;
 
     serial_puts(b"[x86_64] Usable memory after initramfs: ");
     print_hex(usable_memory.start as u64);
@@ -341,12 +390,7 @@ pub extern "C" fn kmain() -> ! {
     print_hex(usable_memory.end as u64);
     serial_puts(b"\n");
 
-    serial_puts(b"[x86_64] relocated_initramfs is_some=");
-    if relocated_initramfs.is_some() {
-        serial_puts(b"true\n");
-    } else {
-        serial_puts(b"false\n");
-    }
+    serial_puts(b"[x86_64] relocated_initramfs is_some=false\n");
 
     serial_puts(b"[x86_64] About to construct BootInfo struct directly...\n");
 
@@ -382,7 +426,7 @@ pub extern "C" fn kmain() -> ! {
         serial_puts(b"[x86_64]   field addr=");
         print_hex(initramfs_ptr as u64);
         serial_puts(b"\n");
-        core::ptr::write_volatile(initramfs_ptr, relocated_initramfs);
+        core::ptr::write_volatile(initramfs_ptr, initramfs_area);
 
         serial_puts(b"[x86_64] Writing cmdline...\n");
         core::ptr::write_volatile(&raw mut (*storage).cmdline, None);
@@ -482,8 +526,8 @@ fn relocate_initramfs_from_module(usable_memory: &mut MemoryArea) -> Option<Memo
     print_hex(size as u64);
     serial_puts(b"\n");
 
-    // Ensure proper 8-byte alignment for destination
-    let aligned_addr = (usable_memory.start + 7) & !7;
+    // Ensure proper page alignment for destination
+    let aligned_addr = (usable_memory.start + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
 
     // Validate destination memory bounds
     if aligned_addr + size > usable_memory.end {
@@ -494,7 +538,7 @@ fn relocate_initramfs_from_module(usable_memory: &mut MemoryArea) -> Option<Memo
     // Create the new memory area
     let new_area = MemoryArea::new(aligned_addr, aligned_addr + size - 1);
 
-    // Copy in 4KB chunks (same approach as initramfs.rs)
+    // Copy in 4KB chunks without SSE (rep movsb)
     core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst);
 
     let chunk_size = 4096;
@@ -509,18 +553,23 @@ fn relocate_initramfs_from_module(usable_memory: &mut MemoryArea) -> Option<Memo
             } else {
                 remaining
             };
-            ptr::copy_nonoverlapping(src, dst, copy_size);
 
-            src = src.add(copy_size);
-            dst = dst.add(copy_size);
+            core::arch::asm!(
+                "rep movsb",
+                inout("rcx") copy_size => _,
+                inout("rsi") src => src,
+                inout("rdi") dst => dst,
+                options(nostack, preserves_flags)
+            );
+
             remaining -= copy_size;
 
             core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst);
         }
     }
 
-    // Advance usable_memory past the relocated initramfs (8-byte aligned)
-    usable_memory.start = (aligned_addr + size + 7) & !7;
+    // Advance usable_memory past the relocated initramfs (page aligned)
+    usable_memory.start = (aligned_addr + size + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
 
     Some(new_area)
 }
@@ -542,4 +591,8 @@ pub fn hhdm_phys_to_virt(phys: usize) -> usize {
 
 pub fn hhdm_offset() -> usize {
     unsafe { HHDM_OFFSET }
+}
+
+pub fn kernel_phys_base() -> usize {
+    unsafe { KERNEL_PHYS_BASE }
 }
