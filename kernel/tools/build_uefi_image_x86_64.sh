@@ -45,6 +45,8 @@ MTOOLS_SKIP_CHECK=1 mcopy -i "$DISK_IMAGE" "$LIMINE_DIR/bin/BOOTX64.EFI" ::/EFI/
 TMP_CONF=$(mktemp)
 cat > "$TMP_CONF" << 'EOF'
 timeout: 3
+verbose: yes
+serial: yes
 
 /Scarlet
     protocol: limine

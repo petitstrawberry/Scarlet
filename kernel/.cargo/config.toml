@@ -29,6 +29,7 @@ runner = "tools/run_x86_64.sh"
 rustflags = [
 	"-C", "no-vectorize-loops",
 	"-C", "no-vectorize-slp",
+	"-C", "link-arg=-Tlds/x86_64_qemu_virt.ld",
 ]
 
 [build]

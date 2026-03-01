@@ -1,33 +1,54 @@
-//! x86_64 boot code
+//! x86_64 boot code using Limine protocol
 
 use core::arch::asm;
+use core::mem::transmute;
 
 use crate::arch::x86_64::earlycon::init_earlycon;
+use crate::arch::x86_64::{CPUS, X86_64, trap_init};
 use crate::early_println;
-
-#[repr(C, align(8))]
-struct Multiboot2Header {
-    magic: u32,
-    architecture: u32,
-    header_length: u32,
-    checksum: u32,
-    end_tag: [u32; 2],
-}
-
-#[unsafe(link_section = ".head.text")]
-#[used]
-static MULTIBOOT2_HEADER: Multiboot2Header = Multiboot2Header {
-    magic: 0xE85250D6,
-    architecture: 0,
-    header_length: core::mem::size_of::<Multiboot2Header>() as u32,
-    checksum: !(0xE85250D6u32
-        .wrapping_add(0)
-        .wrapping_add(core::mem::size_of::<Multiboot2Header>() as u32))
-    .wrapping_add(1),
-    end_tag: [0, 8],
+use crate::mem::init_bss;
+use crate::vm::vmem::MemoryArea;
+use crate::{BootInfo, DeviceSource, start_kernel};
+use limine::BaseRevision;
+use limine::request::{
+    FramebufferRequest, HhdmRequest, KernelAddressRequest, MemoryMapRequest, ModuleRequest,
+    RequestsEndMarker, RequestsStartMarker,
 };
 
-/// GDT entry structure
+/// Define the start and end markers for Limine requests.
+#[used]
+#[unsafe(link_section = ".requests_start_marker")]
+static _START_MARKER: RequestsStartMarker = RequestsStartMarker::new();
+
+/// Sets the base revision to the latest revision supported by the crate.
+#[used]
+#[unsafe(link_section = ".requests")]
+static BASE_REVISION: BaseRevision = BaseRevision::new();
+
+#[used]
+#[unsafe(link_section = ".requests")]
+static HHDM_REQUEST: HhdmRequest = HhdmRequest::new();
+
+#[used]
+#[unsafe(link_section = ".requests")]
+static MEMORY_MAP_REQUEST: MemoryMapRequest = MemoryMapRequest::new();
+
+#[used]
+#[unsafe(link_section = ".requests")]
+static MODULE_REQUEST: ModuleRequest = ModuleRequest::new();
+
+#[used]
+#[unsafe(link_section = ".requests")]
+static FRAMEBUFFER_REQUEST: FramebufferRequest = FramebufferRequest::new();
+
+#[used]
+#[unsafe(link_section = ".requests")]
+static KERNEL_ADDRESS_REQUEST: KernelAddressRequest = KernelAddressRequest::new();
+
+#[used]
+#[unsafe(link_section = ".requests_end_marker")]
+static _END_MARKER: RequestsEndMarker = RequestsEndMarker::new();
+
 #[derive(Clone, Copy)]
 #[repr(C, packed)]
 struct GdtEntry {
@@ -39,14 +60,12 @@ struct GdtEntry {
     base_high: u8,
 }
 
-/// GDT pointer structure
 #[repr(C, packed)]
 struct GdtPointer {
     limit: u16,
     base: u64,
 }
 
-/// TSS structure for x86_64
 #[repr(C, packed)]
 struct TaskStateSegment {
     reserved0: u32,
@@ -66,10 +85,7 @@ struct TaskStateSegment {
     iomap_base: u16,
 }
 
-/// Global GDT (6 entries)
 static mut GDT: [GdtEntry; 6] = [GdtEntry::new(); 6];
-
-/// Global TSS
 static mut TSS: TaskStateSegment = TaskStateSegment::new();
 
 impl GdtEntry {
@@ -86,38 +102,26 @@ impl GdtEntry {
 
     fn set_kernel_code(&mut self) {
         self.limit_low = 0xFFFF;
-        self.base_low = 0;
-        self.base_mid = 0;
-        self.access = 0x9A; // Present, Ring 0, Code, Executable, Readable
-        self.flags_limit_high = 0xAF; // 64-bit, 4KB granular
-        self.base_high = 0;
+        self.access = 0x9A;
+        self.flags_limit_high = 0xAF;
     }
 
     fn set_kernel_data(&mut self) {
         self.limit_low = 0xFFFF;
-        self.base_low = 0;
-        self.base_mid = 0;
-        self.access = 0x92; // Present, Ring 0, Data, Writable
-        self.flags_limit_high = 0xCF; // 64-bit, 4KB granular
-        self.base_high = 0;
+        self.access = 0x92;
+        self.flags_limit_high = 0xCF;
     }
 
     fn set_user_code(&mut self) {
         self.limit_low = 0xFFFF;
-        self.base_low = 0;
-        self.base_mid = 0;
-        self.access = 0xFA; // Present, Ring 3, Code, Executable, Readable
-        self.flags_limit_high = 0xAF; // 64-bit, 4KB granular
-        self.base_high = 0;
+        self.access = 0xFA;
+        self.flags_limit_high = 0xAF;
     }
 
     fn set_user_data(&mut self) {
         self.limit_low = 0xFFFF;
-        self.base_low = 0;
-        self.base_mid = 0;
-        self.access = 0xF2; // Present, Ring 3, Data, Writable
-        self.flags_limit_high = 0xCF; // 64-bit, 4KB granular
-        self.base_high = 0;
+        self.access = 0xF2;
+        self.flags_limit_high = 0xCF;
     }
 }
 
@@ -143,29 +147,18 @@ impl TaskStateSegment {
     }
 }
 
-/// Initialize the GDT
 fn init_gdt() {
     unsafe {
-        // Null descriptor
         GDT[0] = GdtEntry::new();
-
-        // Kernel code segment (0x08)
         GDT[1].set_kernel_code();
-
-        // Kernel data segment (0x10)
         GDT[2].set_kernel_data();
-
-        // User code segment (0x1B)
         GDT[3].set_user_code();
-
-        // User data segment (0x23)
         GDT[4].set_user_data();
 
-        // TSS descriptor (would be filled in with TSS address)
         GDT[5].limit_low = (core::mem::size_of::<TaskStateSegment>() - 1) as u16;
         GDT[5].base_low = (&raw const TSS as u64) as u16;
         GDT[5].base_mid = ((&raw const TSS as u64) >> 16) as u8;
-        GDT[5].access = 0x89; // Present, Ring 0, TSS, Available
+        GDT[5].access = 0x89;
         GDT[5].flags_limit_high = 0x00;
         GDT[5].base_high = ((&raw const TSS as u64) >> 24) as u8;
 
@@ -180,7 +173,6 @@ fn init_gdt() {
             options(nostack)
         );
 
-        // Reload segment registers
         asm!(
             "mov ax, 0x10",
             "mov ds, ax",
@@ -193,52 +185,145 @@ fn init_gdt() {
     }
 }
 
-/// Early boot entry point
-///
-/// This is called from the bootloader (e.g., GRUB, Limine) in long mode.
-/// The bootloader should have already:
-/// - Set up 64-bit long mode
-/// - Set up identity-mapped page tables
-/// - Loaded the kernel at the correct address
-///
-/// # Safety
-/// This function must only be called once during boot.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn _start() -> ! {
-    // Disable interrupts
-    asm!("cli", options(nostack));
+pub extern "C" fn kmain() -> ! {
+    // Direct serial output to verify kmain is being called
+    unsafe {
+        const SERIAL_THR: u16 = 0x3F8;
+        const SERIAL_LSR: u16 = 0x3FD;
+        const SERIAL_LSR_THRE: u8 = 0x20;
 
-    // Initialize early console
+        // Wait for transmit ready
+        while {
+            let lsr: u8;
+            core::arch::asm!(
+                "in al, dx",
+                in("dx") SERIAL_LSR,
+                out("al") lsr,
+                options(nostack, nomem)
+            );
+            (lsr & SERIAL_LSR_THRE) == 0
+        } {
+            core::hint::spin_loop();
+        }
+
+        // Output 'K' to indicate kmain started
+        core::arch::asm!(
+            "out dx, al",
+            in("dx") SERIAL_THR,
+            in("al") b'K',
+            options(nostack, nomem)
+        );
+    }
+
+    // All limine requests must also be referenced, otherwise they may be removed by the linker.
+    assert!(BASE_REVISION.is_supported());
+
+    init_bss();
+
     init_earlycon();
-    early_println!("[x86_64] Booting Scarlet kernel...");
+    early_println!("[x86_64] Scarlet kernel starting via Limine...");
 
-    // Initialize GDT
     init_gdt();
     early_println!("[x86_64] GDT initialized");
 
-    // Initialize kernel heap and other subsystems...
-    // (This would be done in the main kernel initialization)
+    let hhdm_offset = HHDM_REQUEST.get_response().map(|r| r.offset()).unwrap_or(0);
+    early_println!("[x86_64] HHDM offset: {:#x}", hhdm_offset);
 
-    // Jump to kernel main
-    early_println!("[x86_64] Jumping to kernel main...");
-
-    // For now, just halt
-    loop {
-        asm!("hlt", options(nostack));
+    if let Some(addr_resp) = KERNEL_ADDRESS_REQUEST.get_response() {
+        early_println!(
+            "[x86_64] Kernel physical: {:#x}, virtual: {:#x}",
+            addr_resp.physical_base(),
+            addr_resp.virtual_base()
+        );
     }
+
+    let (usable_start, usable_end) = find_usable_memory();
+    early_println!(
+        "[x86_64] Usable memory: {:#x} - {:#x}",
+        usable_start,
+        usable_end
+    );
+
+    let initramfs = find_initramfs();
+
+    let cpu_id = 0;
+    early_println!("[x86_64] CPU {}: Initializing...", cpu_id);
+    let x86_64: &mut X86_64 = unsafe { transmute(&CPUS[cpu_id] as *const _ as usize) };
+    x86_64.cpuid = cpu_id as u64;
+    trap_init(x86_64);
+
+    let boot_info = BootInfo::new(
+        cpu_id,
+        1,
+        MemoryArea::new(usable_start, usable_end),
+        initramfs,
+        None,
+        DeviceSource::None,
+    );
+
+    early_println!("[x86_64] Calling start_kernel...");
+    start_kernel(&boot_info);
 }
 
-/// Get the BSP (Bootstrap Processor) CPU ID
+fn find_usable_memory() -> (usize, usize) {
+    let memmap = match MEMORY_MAP_REQUEST.get_response() {
+        Some(r) => r,
+        None => {
+            early_println!("[x86_64] Warning: No memory map from Limine, using fallback");
+            return (0x100000, 0x8000000);
+        }
+    };
+
+    let mut best_start: u64 = 0;
+    let mut best_size: u64 = 0;
+
+    for entry in memmap.entries() {
+        if entry.entry_type == limine::memory_map::EntryType::USABLE && entry.length > best_size {
+            best_start = entry.base;
+            best_size = entry.length;
+        }
+    }
+
+    if best_size == 0 {
+        early_println!("[x86_64] Warning: No usable memory found, using fallback");
+        return (0x100000, 0x8000000);
+    }
+
+    (best_start as usize, (best_start + best_size - 1) as usize)
+}
+
+fn find_initramfs() -> Option<MemoryArea> {
+    let response = MODULE_REQUEST.get_response()?;
+    let modules = response.modules();
+
+    for module in modules {
+        let cmdline = module.string().to_str().unwrap_or("");
+
+        if cmdline.contains("initramfs") {
+            early_println!(
+                "[x86_64] Found initramfs module at {:#x}, size {} bytes",
+                module.addr() as usize,
+                module.size()
+            );
+            return Some(MemoryArea::new(
+                module.addr() as usize,
+                module.addr() as usize + module.size() as usize - 1,
+            ));
+        }
+    }
+
+    early_println!("[x86_64] No initramfs module found");
+    None
+}
+
 pub fn get_bsp_id() -> u8 {
-    // On x86_64, the BSP always starts with APIC ID 0 in simple configurations
     0
 }
 
-/// Initialize the kernel stack for the current CPU
 pub fn init_kernel_stack(cpu_id: usize, stack_top: usize) {
     unsafe {
-        // Update TSS RSP0 with kernel stack top
         TSS.rsp0 = stack_top as u64;
     }
-    let _ = cpu_id; // Suppress unused warning
+    let _ = cpu_id;
 }

@@ -4,5 +4,6 @@
         "user/lib/std/Cargo.toml",
         "user/lib/framebuffer/Cargo.toml",
         "user/bin/Cargo.toml",
-    ]
+    ],
+    "remote.localPortHost": "allInterfaces"
 }

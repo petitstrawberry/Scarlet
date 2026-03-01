@@ -20,6 +20,7 @@ cargo make build-initramfs-debug-riscv64   # Initial RAM filesystem
 # Release builds
 cargo make build-release-riscv64
 cargo make build-release-aarch64
+cargo make build-release-x86_64
 
 # Clean all build artifacts
 cargo make clean
@@ -31,6 +32,7 @@ cargo make clean
 # Run kernel in release mode
 cargo make run-riscv64
 cargo make run-aarch64
+cargo make run-x86_64
 
 # Run kernel in debug mode
 cargo make run-debug-riscv64
@@ -90,11 +92,11 @@ cargo make debug-test-riscv64
 
 ### Project Structure
 
-- **Kernel**: `kernel/` - No std, bare-metal RISC-V/AArch64 kernel
+- **Kernel**: `kernel/` - No std, bare-metal RISC-V/AArch64/x86_64 kernel
 - **User Library**: `user/lib/std/` - Scarlet standard library (no_std)
 - **User Programs**: `user/bin/` - User space binaries
 - **Build System**: Uses `cargo-make` (Makefile.toml)
-- **Architectures**: RISC-V 64-bit (primary), AArch64 (experimental)
+- **Architectures**: RISC-V 64-bit (primary), AArch64 (experimental), x86_64 (Limine/UEFI boot)
 
 ### Rust Edition
 
@@ -254,7 +256,7 @@ fn test_alloc_free_desc() {
 1. Run tests: `cargo make test-riscv64` (and aarch64)
 2. Run clippy: `cargo make clippy-riscv64`
 3. Check format: `cargo make fmt-check`
-4. Build targets: `cargo make build-riscv64` and `cargo make build-aarch64`
+4. Build targets: `cargo make build-riscv64`, `cargo make build-aarch64`, and `cargo make build-x86_64`
 5. Write/update documentation
 6. Commit frequently with descriptive messages
 
@@ -262,7 +264,7 @@ fn test_alloc_free_desc() {
 
 - **Safety First**: Leverage Rust's safety guarantees
 - **No Std Compatibility**: Kernel and std lib must work without std
-- **Multi-Arch**: Code should work on both RISC-V and AArch64
+- **Multi-Arch**: Code should work on RISC-V, AArch64, and x86_64
 - **Documentation**: Public APIs must be documented
 - **Testing**: Test critical paths and new features
 - **CI/CD**: All checks must pass in GitHub Actions

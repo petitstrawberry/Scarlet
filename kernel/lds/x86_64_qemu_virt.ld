@@ -1,102 +1,81 @@
-OUTPUT_ARCH("x86_64")
-ENTRY(_start)
+OUTPUT_FORMAT(elf64-x86-64)
+ENTRY(kmain)
 
-/*
- * Higher-half kernel address space for x86_64.
- * Limine requires the kernel to be loaded in higher half (above 4GB).
- */
-KERNEL_VMA = 0xFFFFFFFF80000000;
-KERNEL_LMA = 0x100000;
-
-MEMORY {
-  RAM (rwx) : ORIGIN = 0x100000, LENGTH = 128M
+PHDRS
+{
+    text   PT_LOAD FLAGS(5);  /* R_X */
+    rodata PT_LOAD FLAGS(4);  /* R__ */
+    data   PT_LOAD FLAGS(6);  /* RW_ */
 }
 
-/* Define sections */
-SECTIONS {
-    . = KERNEL_VMA;
+SECTIONS
+{
+    . = 0xffffffff80000000;
     __KERNEL_SPACE_START = .;
 
-    .head : AT(ADDR(.head) - KERNEL_VMA + KERNEL_LMA) {
-        KEEP(*(.head.text))
-        *(.text.arch_start_kernel .text._entry)
-    }
-
-    .init : AT(ADDR(.init) - KERNEL_VMA + KERNEL_LMA) {
-        *(.init .init.*)
-        . = ALIGN(16);
-    }
-
-    .text : AT(ADDR(.text) - KERNEL_VMA + KERNEL_LMA) {
+    /* Code segment - executable */
+    .text : ALIGN(4K) {
         *(.text .text.*)
-        . = ALIGN(16);
-    }
+        *(.ltext .ltext.*)
+    } :text
 
-    /* Initcall table */
-    .initcall : {
-      __INITCALL_START = .;
-      __INITCALL_EARLY_START = .;
-      *(.initcall.early)
-      __INITCALL_EARLY_END = .;
-      __INITCALL_DRIVER_START = .;
-      *(.initcall.driver)
-      __INITCALL_DRIVER_END = .;
-      __INITCALL_LATE_START = .;
-      *(.initcall.late)
-      __INITCALL_LATE_END = .;
-      __INITCALL_END = .;
-      . = ALIGN(16);
-    } > RAM
+    . = ALIGN(4K);
 
-    /* Trampoline code */
-    .trampoline : {
-      . = ALIGN(4096);
-      __TRAMPOLINE_START = .;
-      *(.trampoline .trampoline.*)
-      . = ALIGN(4096);
-      __TRAMPOLINE_END = .;
-    } > RAM
-
-    /* Read-only data */
-    .rodata : {
+    /* Read-only data segment */
+    .rodata : ALIGN(4K) {
         *(.rodata .rodata.*)
-        . = ALIGN(16);
-    } > RAM
+        *(.lrodata .lrodata.*)
+        
+        __INITCALL_EARLY_START = .;
+        *(.initcall.early .initcall.early.*)
+        __INITCALL_EARLY_END = .;
+        
+        __INITCALL_DRIVER_START = .;
+        *(.initcall.driver .initcall.driver.*)
+        __INITCALL_DRIVER_END = .;
+        
+        __INITCALL_LATE_START = .;
+        *(.initcall.late .initcall.late.*)
+        __INITCALL_LATE_END = .;
+        
+        __INITCALL_START = .;
+        *(.initcall .initcall.*)
+        __INITCALL_END = .;
+    } :rodata
 
-    /* Data section */
-    .data : {
+    . = ALIGN(4K);
+
+    /* Read-write data segment */
+    .data : ALIGN(4K) {
         *(.data .data.*)
-        . = ALIGN(16);
-    } > RAM
+        *(.ldata .ldata.*)
+        
+        KEEP(*(.requests_start_marker))
+        KEEP(*(.requests))
+        KEEP(*(.requests_end_marker))
+    } :data
 
-    /* BSS section */
-    .bss (NOLOAD) : {
-      __BSS_START = .;
-      *(.bss .bss.*)
-      *(COMMON)
-      . = ALIGN(4096);
-      __BSS_END = .;
-    } > RAM
+    .trampoline : ALIGN(4K) {
+        __TRAMPOLINE_START = .;
+        *(.trampoline .trampoline.*)
+        __TRAMPOLINE_END = .;
+    } :data
 
-    /* Reserved space for FDT */
-    .fdt_reserved : {
-      . = ALIGN(4096);
-      __FDT_RESERVED_START = .;
-      . += 256K; /* Reserve 256KiB for FDT relocation */
-      __FDT_RESERVED_END = .;
-    } > RAM
+    .bss (NOLOAD) : ALIGN(4K) {
+        __BSS_START = .;
+        *(.bss .bss.*)
+        *(.lbss .lbss.*)
+        *(COMMON)
+        __BSS_END = .;
+    } :data
 
-    /* Kernel stack */
-    .stack (NOLOAD) : {
-      __STACK_START = .;
-      . += 64K; /* 64KB kernel stack */
-      __STACK_END = .;
-    } > RAM
-
-    /* End of kernel space */
     __KERNEL_SPACE_END = .;
 
-    /* Discard unwind tables and other debug info */
+    /* Metadata sections - not loaded */
+    .symtab : { *(.symtab) }
+    .strtab : { *(.strtab) }
+    .shstrtab : { *(.shstrtab) }
+
     /DISCARD/ : {
         *(.eh_frame*)
         *(.note .note.*)

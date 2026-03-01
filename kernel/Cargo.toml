@@ -13,6 +13,7 @@ slab_allocator_rs = "1.0.2"
 spin = "0.10.0"
 hashbrown = "0.16.0"
 lazy_static = { version = "1.4.0", features = ["spin_no_std"], optional = true }
+limine = "0.5.0"
 
 [features]
 default = ["network", "user-fpu", "user-vector"]
