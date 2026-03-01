@@ -368,6 +368,7 @@ pub enum DeviceSource {
 ///     // ...
 /// }
 /// ```
+#[repr(C)]
 pub struct BootInfo {
     /// CPU/Hart ID of the boot processor
     /// Used for multicore initialization and per-CPU data structures
@@ -512,28 +513,119 @@ impl BootInfo {
 /// enters normal kernel operation mode.
 #[unsafe(no_mangle)]
 pub extern "C" fn start_kernel(boot_info: &BootInfo) -> ! {
+    early_println!("[Scarlet Kernel] start_kernel entered");
+    early_println!(
+        "[Scarlet Kernel] boot_info at {:#x}",
+        boot_info as *const _ as usize
+    );
+
+    early_println!("[Scarlet Kernel] Reading cpu_id...");
     let cpu_id = boot_info.cpu_id;
+    early_println!("[Scarlet Kernel] cpu_id = {}", cpu_id);
     let cpu_count = boot_info.cpu_count;
+    early_println!("[Scarlet Kernel] cpu_count = {}", cpu_count);
 
     early_println!("[Scarlet Kernel] Hello, I'm Scarlet kernel!");
     early_println!("[Scarlet Kernel] Boot on CPU {}", cpu_id);
     early_println!("[Scarlet Kernel] Detected {} CPU(s)", cpu_count);
-    /* Use usable memory area from BootInfo */
-    let usable_area = boot_info.usable_memory;
+
+    early_println!("[Scarlet Kernel] Reading usable_memory directly...");
     early_println!(
-        "[Scarlet Kernel] Usable memory area : {:#x} - {:#x}",
+        "[Scarlet Kernel] usable_memory offset={}",
+        core::mem::offset_of!(BootInfo, usable_memory)
+    );
+
+    let usable_area = unsafe {
+        let ptr = boot_info as *const BootInfo;
+        let usable_ptr = (ptr as *const u8).add(core::mem::offset_of!(BootInfo, usable_memory))
+            as *const MemoryArea;
+        early_println!(
+            "[Scarlet Kernel] usable_memory ptr={:#x}",
+            usable_ptr as usize
+        );
+        early_println!("[Scarlet Kernel] Reading start...");
+        let start = core::ptr::read_volatile(&(*usable_ptr).start);
+        early_println!("[Scarlet Kernel] start={:#x}", start);
+        early_println!("[Scarlet Kernel] Reading end...");
+        let end = core::ptr::read_volatile(&(*usable_ptr).end);
+        early_println!("[Scarlet Kernel] end={:#x}", end);
+        MemoryArea::new(start, end)
+    };
+    early_println!(
+        "[Scarlet Kernel] start={:#x}, end={:#x}",
         usable_area.start,
         usable_area.end
     );
 
-    /* Handle initramfs if available in BootInfo */
-    if let Some(initramfs_area) = boot_info.initramfs {
+    early_println!(
+        "[Scarlet Kernel] Checking initramfs at offset {}...",
+        core::mem::offset_of!(BootInfo, initramfs)
+    );
+    let initramfs_ptr = unsafe {
+        (boot_info as *const BootInfo as *const u8).add(core::mem::offset_of!(BootInfo, initramfs))
+    };
+    early_println!(
+        "[Scarlet Kernel] initramfs_ptr={:#x}",
+        initramfs_ptr as usize
+    );
+
+    let (d0, d1, d2, d3) = unsafe {
+        (
+            core::ptr::read_volatile(initramfs_ptr),
+            core::ptr::read_volatile(initramfs_ptr.add(1)),
+            core::ptr::read_volatile(initramfs_ptr.add(2)),
+            core::ptr::read_volatile(initramfs_ptr.add(3)),
+        )
+    };
+    early_println!(
+        "[Scarlet Kernel] initramfs discriminant: {:02x} {:02x} {:02x} {:02x}",
+        d0,
+        d1,
+        d2,
+        d3
+    );
+
+    let (start_lo, start_hi, end_lo, end_hi) = unsafe {
+        (
+            core::ptr::read_volatile(initramfs_ptr.add(8) as *const u32),
+            core::ptr::read_volatile(initramfs_ptr.add(12) as *const u32),
+            core::ptr::read_volatile(initramfs_ptr.add(16) as *const u32),
+            core::ptr::read_volatile(initramfs_ptr.add(20) as *const u32),
+        )
+    };
+    early_println!(
+        "[Scarlet Kernel] initramfs MemoryArea: start={:#x}{:08x}, end={:#x}{:08x}",
+        start_hi,
+        start_lo,
+        end_hi,
+        end_lo
+    );
+
+    early_println!("[Scarlet Kernel] About to read boot_info.initramfs...");
+
+    let initramfs_area = unsafe {
+        let disc = core::ptr::read_volatile(initramfs_ptr as *const u64);
+        early_println!("[Scarlet Kernel] discriminant as u64: {:#x}", disc);
+        if disc != 0 {
+            let start = core::ptr::read_volatile(initramfs_ptr.add(8) as *const usize);
+            let end = core::ptr::read_volatile(initramfs_ptr.add(16) as *const usize);
+            early_println!(
+                "[Scarlet Kernel] Read via ptr: start={:#x}, end={:#x}",
+                start,
+                end
+            );
+            Some(MemoryArea::new(start, end))
+        } else {
+            None
+        }
+    };
+
+    if let Some(area) = initramfs_area {
         early_println!(
             "[Scarlet Kernel] InitramFS available: {:#x} - {:#x}",
-            initramfs_area.start,
-            initramfs_area.end
+            area.start,
+            area.end
         );
-        // Note: initramfs already relocated by arch-specific boot code
     } else {
         early_println!("[Scarlet Kernel] No initramfs found");
     }

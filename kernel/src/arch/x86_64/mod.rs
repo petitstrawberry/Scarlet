@@ -244,14 +244,24 @@ pub fn get_user_trap_handler() -> usize {
 
 #[allow(static_mut_refs)]
 fn trap_init(x86_64: &mut X86_64) {
+    crate::early_println!("[x86_64] trap_init: getting stack...");
     let trap_stack_start = unsafe { KERNEL_STACK.start() };
     let stack_size = STACK_SIZE;
 
+    crate::early_println!("[x86_64] trap_init: calculating trap_stack...");
     let trap_stack = trap_stack_start + stack_size * (x86_64.cpuid + 1) as usize;
     x86_64.kernel_stack = trap_stack as u64;
     x86_64.kernel_trap = get_user_trap_handler() as u64;
 
-    // Store pointer to CPU struct in GS base (kernel mode)
+    crate::early_println!("[x86_64] trap_init: enabling FSGSBASE...");
+    unsafe {
+        let mut cr4: u64;
+        asm!("mov {}, cr4", out(reg) cr4);
+        cr4 |= 1 << 16; // FSGSBASE
+        asm!("mov cr4, {}", in(reg) cr4);
+    }
+
+    crate::early_println!("[x86_64] trap_init: setting GS base...");
     let scratch_addr = x86_64 as *const _ as usize;
     unsafe {
         asm!(
@@ -260,11 +270,12 @@ fn trap_init(x86_64: &mut X86_64) {
         );
     }
 
-    // Enable FPU for kernel use (save/restore), trap user by default
+    crate::early_println!("[x86_64] trap_init: enabling FPU...");
     fpu::set_user_fpu_enabled(false);
 
-    // Load IDT with kernel trap vectors
+    crate::early_println!("[x86_64] trap_init: loading IDT...");
     trap::kernel::load_idt();
+    crate::early_println!("[x86_64] trap_init: done");
 }
 
 /// x86_64-only: perform the very first transition into a runnable user task.

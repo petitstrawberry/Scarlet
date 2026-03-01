@@ -77,7 +77,7 @@ TEMP_OUTPUT=$(mktemp)
 
 qemu-system-x86_64 \
     -machine q35 \
-    -cpu qemu64 \
+    -cpu Haswell \
     -m 512M \
     -drive if=pflash,format=raw,readonly=on,file="$OVMF_CODE" \
     -drive file="$DISK_IMAGE",format=raw,if=none,id=boot \
