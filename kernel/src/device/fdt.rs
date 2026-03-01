@@ -536,6 +536,7 @@ pub fn create_bootinfo_from_fdt(cpu_id: usize, relocated_fdt_addr: usize) -> Boo
     BootInfo::new(
         cpu_id,
         cpu_count,
+        dram_area,
         usable_memory,
         relocated_initramfs,
         cmdline,

@@ -8,12 +8,12 @@ use vmem::MemoryArea;
 use vmem::VirtualMemoryMap;
 use vmem::VirtualMemoryPermission;
 
+use crate::arch::Arch;
 use crate::arch::get_device_memory_areas;
 use crate::arch::get_kernel_trapvector_paddr;
 use crate::arch::set_trapvector;
 use crate::arch::vm::alloc_virtual_address_space;
 use crate::arch::vm::get_root_pagetable;
-use crate::arch::Arch;
 use crate::early_println;
 use crate::environment::KERNEL_VM_STACK_SIZE;
 use crate::environment::KERNEL_VM_STACK_START;
@@ -21,8 +21,8 @@ use crate::environment::MAX_NUM_CPUS;
 use crate::environment::PAGE_SIZE;
 use crate::environment::USER_STACK_END;
 use crate::environment::{
-    KERNEL_KSTACK_REGION_END, KERNEL_KSTACK_REGION_START, KERNEL_KSTACK_SLOTS,
-    KERNEL_KSTACK_SLOT_SIZE, TASK_KERNEL_STACK_SIZE,
+    KERNEL_KSTACK_REGION_END, KERNEL_KSTACK_REGION_START, KERNEL_KSTACK_SLOT_SIZE,
+    KERNEL_KSTACK_SLOTS, TASK_KERNEL_STACK_SIZE,
 };
 use crate::sched::scheduler::get_scheduler;
 use crate::task::Task;
@@ -41,23 +41,22 @@ pub fn get_kernel_vm_manager() -> &'static VirtualMemoryManager {
 }
 
 static KERNEL_AREA: Once<MemoryArea> = Once::new();
-/* Initialize MMU and enable paging */
-#[allow(static_mut_refs)]
-pub fn kernel_vm_init(kernel_area: MemoryArea) {
+static DRAM_AREA: Once<MemoryArea> = Once::new();
+
+pub fn kernel_vm_init(kernel_area: MemoryArea, dram_area: MemoryArea) {
     let manager = get_kernel_vm_manager();
 
     #[cfg(any(debug_assertions, test))]
     early_println!("[vm] kernel_vm_init: start");
 
-    let asid = alloc_virtual_address_space(); /* Kernel ASID */
+    let asid = alloc_virtual_address_space();
     let root_page_table = get_root_pagetable(asid).unwrap();
 
     manager.set_asid(asid);
 
-    /* Map kernel space */
+    // Align kernel area
     let kernel_start = kernel_area.start & !(PAGE_SIZE - 1);
-    let kernel_end = kernel_area.end;
-    let kernel_end_aligned = (kernel_end + 1 + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
+    let kernel_end_aligned = (kernel_area.end + PAGE_SIZE) & !(PAGE_SIZE - 1);
     let kernel_end_aligned = kernel_end_aligned.saturating_sub(1);
 
     let kernel_area = MemoryArea {
@@ -66,18 +65,29 @@ pub fn kernel_vm_init(kernel_area: MemoryArea) {
     };
     KERNEL_AREA.call_once(|| kernel_area);
 
-    let kernel_pmarea = crate::arch::kernel_phys_memory_area(kernel_area);
+    // Align DRAM area
+    let dram_start = dram_area.start & !(PAGE_SIZE - 1);
+    let dram_end_aligned = (dram_area.end + PAGE_SIZE) & !(PAGE_SIZE - 1);
+    let dram_end_aligned = dram_end_aligned.saturating_sub(1);
 
+    let dram_area = MemoryArea {
+        start: dram_start,
+        end: dram_end_aligned,
+    };
+    DRAM_AREA.call_once(|| dram_area);
+
+    // Map kernel area
+    let kernel_pmarea = crate::arch::kernel_phys_memory_area(kernel_area);
     let kernel_map = VirtualMemoryMap {
         vmarea: kernel_area,
         pmarea: kernel_pmarea,
         permissions: VirtualMemoryPermission::Read as usize
             | VirtualMemoryPermission::Write as usize
             | VirtualMemoryPermission::Execute as usize,
-        is_shared: true, // Kernel memory should be shared across all processes
+        is_shared: true,
         owner: None,
     };
-    get_kernel_vm_manager()
+    manager
         .add_memory_map(kernel_map.clone())
         .map_err(|e| panic!("Failed to add kernel memory map: {}", e))
         .unwrap();
@@ -87,6 +97,69 @@ pub fn kernel_vm_init(kernel_area: MemoryArea) {
         .map_err(|e| panic!("Failed to map kernel memory area: {}", e))
         .unwrap();
 
+    early_println!(
+        "DRAM area                 : {:#018x} - {:#018x}",
+        dram_area.start,
+        dram_area.end
+    );
+    // Map DRAM area with overlap detection
+    let dram_offset = crate::arch::get_dram_window_offset();
+
+    let dram_regions = if dram_area.end < kernel_area.start {
+        alloc::vec![dram_area]
+    } else if dram_area.start > kernel_area.end {
+        alloc::vec![dram_area]
+    } else {
+        let mut regions = alloc::vec![];
+
+        if dram_area.start < kernel_area.start {
+            regions.push(MemoryArea {
+                start: dram_area.start,
+                end: kernel_area.start - 1,
+            });
+        }
+
+        if dram_area.end > kernel_area.end {
+            regions.push(MemoryArea {
+                start: kernel_area.end + 1,
+                end: dram_area.end,
+            });
+        }
+
+        regions
+    };
+
+    for region in dram_regions {
+        let vm_start = dram_offset + region.start;
+        let vm_end = dram_offset + region.end;
+
+        let dram_map = VirtualMemoryMap {
+            vmarea: MemoryArea {
+                start: vm_start,
+                end: vm_end,
+            },
+            pmarea: region,
+            permissions: VirtualMemoryPermission::Read as usize
+                | VirtualMemoryPermission::Write as usize,
+            is_shared: true,
+            owner: None,
+        };
+        manager
+            .add_memory_map(dram_map.clone())
+            .map_err(|e| panic!("Failed to add DRAM memory map: {}", e))
+            .unwrap();
+        root_page_table
+            .map_memory_area(asid, dram_map, true, true)
+            .map_err(|e| panic!("Failed to map DRAM memory area: {}", e))
+            .unwrap();
+
+        early_println!(
+            "DRAM region mapped        : {:#018x} - {:#018x}",
+            vm_start,
+            vm_end
+        );
+    }
+
     // Map device memory areas (architecture-specific)
     for dev_area in get_device_memory_areas() {
         let dev_map = VirtualMemoryMap {
@@ -94,10 +167,10 @@ pub fn kernel_vm_init(kernel_area: MemoryArea) {
             pmarea: dev_area,
             permissions: VirtualMemoryPermission::Read as usize
                 | VirtualMemoryPermission::Write as usize,
-            is_shared: true, // Device memory should be shared
+            is_shared: true,
             owner: None,
         };
-        get_kernel_vm_manager()
+        manager
             .add_memory_map(dev_map.clone())
             .map_err(|e| panic!("Failed to add device memory map: {}", e))
             .unwrap();

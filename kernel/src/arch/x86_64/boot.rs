@@ -5,16 +5,16 @@ use core::mem::transmute;
 use core::ptr;
 
 use crate::arch::x86_64::earlycon::init_earlycon;
-use crate::arch::x86_64::{trap_init, CPUS, X86_64};
+use crate::arch::x86_64::{CPUS, X86_64, trap_init};
 use crate::environment::PAGE_SIZE;
 use crate::mem::init_bss;
 use crate::vm::vmem::MemoryArea;
-use crate::{start_kernel, BootInfo, DeviceSource};
+use crate::{BootInfo, DeviceSource, start_kernel};
+use limine::BaseRevision;
 use limine::request::{
     HhdmRequest, KernelAddressRequest, MemoryMapRequest, ModuleRequest, RequestsEndMarker,
     RequestsStartMarker,
 };
-use limine::BaseRevision;
 
 /// Define the start and end markers for Limine requests.
 #[used]
@@ -360,6 +360,13 @@ pub extern "C" fn kmain() -> ! {
 
     let heap_hhdm = usable_memory;
 
+    let dram_area = find_dram_area(hhdm);
+    serial_puts(b"[x86_64] DRAM area (HHDM): ");
+    print_hex(dram_area.start as u64);
+    serial_puts(b" - ");
+    print_hex(dram_area.end as u64);
+    serial_puts(b"\n");
+
     // Initialize CPU and traps
     let cpu_id = 0;
     let x86_64: &mut X86_64 = unsafe { transmute(&CPUS[cpu_id] as *const _ as usize) };
@@ -368,75 +375,28 @@ pub extern "C" fn kmain() -> ! {
     trap_init(x86_64);
     serial_puts(b"[x86_64] trap_init: done\n");
 
-    // Enable SSE for kernel use: trap_init sets CR0.TS which traps SSE instructions.
-    // The compiler may generate SSE (movups, etc.) so we must clear TS.
     unsafe {
         let mut cr0: u64;
         core::arch::asm!("mov {}, cr0", out(reg) cr0);
-        cr0 &= !(1u64 << 2); // Clear TS
+        cr0 &= !(1u64 << 2);
         core::arch::asm!("mov cr0, {}", in(reg) cr0);
         crate::arch::x86_64::fpu::init_fpu();
     }
 
     serial_puts(b"[x86_64] Building BootInfo...\n");
 
-    serial_puts(b"[x86_64] cpu_id=");
-    print_hex(cpu_id as u64);
-    serial_puts(b"\n");
+    let boot_info = BootInfo::new(
+        cpu_id,
+        1,
+        dram_area,
+        heap_hhdm,
+        initramfs_area,
+        None,
+        DeviceSource::None,
+    );
 
-    serial_puts(b"[x86_64] usable_memory.start=");
-    print_hex(usable_memory.start as u64);
-    serial_puts(b" end=");
-    print_hex(usable_memory.end as u64);
-    serial_puts(b"\n");
-
-    serial_puts(b"[x86_64] relocated_initramfs is_some=false\n");
-
-    serial_puts(b"[x86_64] About to construct BootInfo struct directly...\n");
-
-    unsafe {
-        let storage = &raw mut BOOT_INFO_STORAGE;
-        serial_puts(b"[x86_64] BOOT_INFO_STORAGE addr=");
-        print_hex(storage as u64);
-        serial_puts(b"\n");
-
-        serial_puts(b"[x86_64] Writing cpu_id...\n");
-        let cpu_id_ptr = &raw mut (*storage).cpu_id;
-        serial_puts(b"[x86_64]   field addr=");
-        print_hex(cpu_id_ptr as u64);
-        serial_puts(b"\n");
-        core::ptr::write_volatile(cpu_id_ptr, cpu_id);
-
-        serial_puts(b"[x86_64] Writing cpu_count...\n");
-        let cpu_count_ptr = &raw mut (*storage).cpu_count;
-        serial_puts(b"[x86_64]   field addr=");
-        print_hex(cpu_count_ptr as u64);
-        serial_puts(b"\n");
-        core::ptr::write_volatile(cpu_count_ptr, 1);
-
-        serial_puts(b"[x86_64] Writing usable_memory...\n");
-        let usable_memory_ptr = &raw mut (*storage).usable_memory;
-        serial_puts(b"[x86_64]   field addr=");
-        print_hex(usable_memory_ptr as u64);
-        serial_puts(b"\n");
-        core::ptr::write_volatile(usable_memory_ptr, heap_hhdm);
-
-        serial_puts(b"[x86_64] Writing initramfs...\n");
-        let initramfs_ptr = &raw mut (*storage).initramfs;
-        serial_puts(b"[x86_64]   field addr=");
-        print_hex(initramfs_ptr as u64);
-        serial_puts(b"\n");
-        core::ptr::write_volatile(initramfs_ptr, initramfs_area);
-
-        serial_puts(b"[x86_64] Writing cmdline...\n");
-        core::ptr::write_volatile(&raw mut (*storage).cmdline, None);
-
-        serial_puts(b"[x86_64] Writing device_source...\n");
-        core::ptr::write_volatile(&raw mut (*storage).device_source, DeviceSource::None);
-
-        serial_puts(b"[x86_64] BootInfo stored. Calling start_kernel...\n");
-        start_kernel(&*storage);
-    }
+    serial_puts(b"[x86_64] BootInfo created. Calling start_kernel...\n");
+    start_kernel(&boot_info);
 }
 
 /// Find the best usable memory region that starts at or after `kernel_phys_end`.
@@ -459,24 +419,20 @@ fn find_usable_memory_after_kernel(kernel_phys_end: usize, hhdm: usize) -> Memor
         }
 
         let entry_start = entry.base as usize;
-        let entry_end = (entry.base + entry.length) as usize; // exclusive
+        let entry_end = (entry.base + entry.length) as usize;
 
-        // Determine the effective start: skip over the kernel if it overlaps
         let effective_start = if kernel_phys_end > entry_start && kernel_phys_end < entry_end {
-            // Kernel ends within this entry; start after the kernel
             kernel_phys_end
         } else if entry_start >= kernel_phys_end {
-            // Entry is entirely after the kernel
             entry_start
         } else {
-            // Entry is entirely before kernel_phys_end; skip it
             continue;
         };
 
         let size = entry_end - effective_start;
         if size > best_size {
             best_start = effective_start;
-            best_end = entry_end - 1; // inclusive
+            best_end = entry_end - 1;
             best_size = size;
         }
     }
@@ -488,8 +444,41 @@ fn find_usable_memory_after_kernel(kernel_phys_end: usize, hhdm: usize) -> Memor
         }
     }
 
-    // Convert physical addresses to HHDM virtual addresses
     MemoryArea::new(best_start + hhdm, best_end + hhdm)
+}
+
+fn find_dram_area(hhdm: usize) -> MemoryArea {
+    let memmap = MEMORY_MAP_REQUEST
+        .get_response()
+        .expect("MemoryMapRequest not answered by bootloader");
+
+    let mut dram_start: usize = usize::MAX;
+    let mut dram_end: usize = 0;
+
+    for entry in memmap.entries() {
+        if entry.entry_type != limine::memory_map::EntryType::USABLE {
+            continue;
+        }
+
+        let entry_start = entry.base as usize;
+        let entry_end = (entry.base + entry.length) as usize;
+
+        if entry_start < dram_start {
+            dram_start = entry_start;
+        }
+        if entry_end > dram_end {
+            dram_end = entry_end;
+        }
+    }
+
+    if dram_start == usize::MAX {
+        serial_puts(b"[x86_64] FATAL: No DRAM found\n");
+        loop {
+            core::hint::spin_loop();
+        }
+    }
+
+    MemoryArea::new(dram_start + hhdm, dram_end - 1 + hhdm)
 }
 
 /// Relocate the initramfs (Limine module) to the start of usable_memory.

@@ -244,6 +244,10 @@ pub fn kernel_phys_memory_area(
     crate::vm::vmem::MemoryArea::new(start, end)
 }
 
+pub fn get_dram_window_offset() -> usize {
+    crate::arch::x86_64::boot::hhdm_offset()
+}
+
 pub fn get_kernel_trap_handler() -> usize {
     trap::kernel::arch_kernel_trap_handler as usize
 }

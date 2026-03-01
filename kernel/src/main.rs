@@ -296,7 +296,7 @@ use crate::{
 };
 use arch::get_cpu;
 use core::sync::atomic::{Ordering, fence};
-use mem::{__KERNEL_SPACE_START, allocator::init_heap};
+use mem::{__KERNEL_SPACE_END, __KERNEL_SPACE_START, allocator::init_heap};
 use sched::scheduler::get_scheduler;
 use task::{elf_loader::load_elf_into_task, new_user_task};
 use timer::get_kernel_timer;
@@ -376,6 +376,9 @@ pub struct BootInfo {
     /// Number of CPUs detected at runtime (from FDT)
     /// Used to drive SMP initialization and per-CPU resource sizing
     pub cpu_count: usize,
+    /// DRAM area (entire physical memory region)
+    /// Used for kernel virtual memory initialization
+    pub dram_area: MemoryArea,
     /// Usable memory area available for kernel allocation
     /// Excludes reserved regions, firmware areas, and kernel image
     pub usable_memory: MemoryArea,
@@ -407,6 +410,7 @@ impl BootInfo {
     pub fn new(
         cpu_id: usize,
         cpu_count: usize,
+        dram_area: MemoryArea,
         usable_memory: MemoryArea,
         initramfs: Option<MemoryArea>,
         cmdline: Option<&'static str>,
@@ -415,6 +419,7 @@ impl BootInfo {
         Self {
             cpu_id,
             cpu_count,
+            dram_area,
             usable_memory,
             initramfs,
             cmdline,
@@ -568,7 +573,9 @@ pub extern "C" fn start_kernel(boot_info: &BootInfo) -> ! {
 
     early_println!("[Scarlet Kernel] Initializing Virtual Memory...");
     let kernel_start = unsafe { &__KERNEL_SPACE_START as *const usize as usize };
-    kernel_vm_init(MemoryArea::new(kernel_start, usable_area.end));
+    let kernel_end = unsafe { &__KERNEL_SPACE_END as *const usize as usize };
+    let kernel_area = MemoryArea::new(kernel_start, kernel_end);
+    kernel_vm_init(kernel_area, boot_info.dram_area);
     /* After this point, we can use the heap and virtual memory */
     /* We will also be restricted to the kernel address space */
 

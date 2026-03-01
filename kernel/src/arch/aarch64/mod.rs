@@ -336,8 +336,11 @@ pub fn get_kernel_trapvector_paddr() -> usize {
 pub fn kernel_phys_memory_area(
     kernel_area: crate::vm::vmem::MemoryArea,
 ) -> crate::vm::vmem::MemoryArea {
-    // AArch64 uses direct mapping for kernel VA=PA
     kernel_area
+}
+
+pub fn get_dram_window_offset() -> usize {
+    0
 }
 
 pub fn get_kernel_trap_handler() -> usize {
