@@ -49,17 +49,24 @@ static TICKS: AtomicU64 = AtomicU64::new(0);
 /// Read Local APIC register
 #[inline(always)]
 fn lapic_read(offset: usize) -> u32 {
-    mmio::read_u32(LAPIC_BASE + offset)
+    mmio::read_u32(crate::arch::x86_64::boot::hhdm_phys_to_virt(LAPIC_BASE) + offset)
 }
 
 /// Write Local APIC register
 #[inline(always)]
 fn lapic_write(offset: usize, value: u32) {
-    mmio::write_u32(LAPIC_BASE + offset, value);
+    mmio::write_u32(
+        crate::arch::x86_64::boot::hhdm_phys_to_virt(LAPIC_BASE) + offset,
+        value,
+    );
 }
 
 /// Initialize the Local APIC timer
 pub fn init() {
+    crate::early_println!(
+        "[x86_64 timer] lapic base virt={:#x}",
+        crate::arch::x86_64::boot::hhdm_phys_to_virt(LAPIC_BASE)
+    );
     // Mask the timer initially
     let mut lvt = lapic_read(LAPIC_TIMER_LVT);
     lvt |= 0x10000; // Mask bit

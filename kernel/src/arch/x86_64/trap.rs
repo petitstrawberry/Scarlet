@@ -8,8 +8,6 @@ pub mod user;
 use core::arch::{asm, naked_asm};
 use core::sync::atomic::{AtomicU32, Ordering};
 
-use crate::arch::x86_64::registers::IntRegisters;
-
 /// IDT entry structure
 #[repr(C, packed)]
 #[derive(Debug, Clone, Copy)]
@@ -84,14 +82,38 @@ static mut INTERRUPT_HANDLERS: [Option<InterruptHandler>; 256] = [None; 256];
 /// Initialize the IDT with trap handlers
 pub fn init_idt() {
     unsafe {
-        // Set up exception handlers (0-31)
-        for i in 0..32 {
-            let handler = exception_handler as u64;
-            IDT[i].set_handler(
-                handler, 0x08, // Kernel code segment
-                0x8E, // Present, DPL=0, Type=Interrupt Gate
-            );
-        }
+        IDT[0].set_handler(exc_divide_error as u64, 0x08, 0x8E);
+        IDT[1].set_handler(exc_debug as u64, 0x08, 0x8E);
+        IDT[2].set_handler(exc_nmi as u64, 0x08, 0x8E);
+        IDT[3].set_handler(exc_breakpoint as u64, 0x08, 0x8E);
+        IDT[4].set_handler(exc_overflow as u64, 0x08, 0x8E);
+        IDT[5].set_handler(exc_bound_range as u64, 0x08, 0x8E);
+        IDT[6].set_handler(exc_invalid_opcode as u64, 0x08, 0x8E);
+        IDT[7].set_handler(exc_device_not_available as u64, 0x08, 0x8E);
+        IDT[8].set_handler(exc_double_fault as u64, 0x08, 0x8E);
+        IDT[9].set_handler(exc_coprocessor_overrun as u64, 0x08, 0x8E);
+        IDT[10].set_handler(exc_invalid_tss as u64, 0x08, 0x8E);
+        IDT[11].set_handler(exc_segment_not_present as u64, 0x08, 0x8E);
+        IDT[12].set_handler(exc_stack_segment as u64, 0x08, 0x8E);
+        IDT[13].set_handler(exc_general_protection as u64, 0x08, 0x8E);
+        IDT[14].set_handler(exc_page_fault as u64, 0x08, 0x8E);
+        IDT[15].set_handler(exc_spurious_interrupt as u64, 0x08, 0x8E);
+        IDT[16].set_handler(exc_x87_fpu_error as u64, 0x08, 0x8E);
+        IDT[17].set_handler(exc_alignment_check as u64, 0x08, 0x8E);
+        IDT[18].set_handler(exc_machine_check as u64, 0x08, 0x8E);
+        IDT[19].set_handler(exc_simd_fpu as u64, 0x08, 0x8E);
+        IDT[20].set_handler(exc_virtualization as u64, 0x08, 0x8E);
+        IDT[21].set_handler(exc_control_protection as u64, 0x08, 0x8E);
+        IDT[22].set_handler(exc_reserved_22 as u64, 0x08, 0x8E);
+        IDT[23].set_handler(exc_reserved_23 as u64, 0x08, 0x8E);
+        IDT[24].set_handler(exc_reserved_24 as u64, 0x08, 0x8E);
+        IDT[25].set_handler(exc_reserved_25 as u64, 0x08, 0x8E);
+        IDT[26].set_handler(exc_reserved_26 as u64, 0x08, 0x8E);
+        IDT[27].set_handler(exc_reserved_27 as u64, 0x08, 0x8E);
+        IDT[28].set_handler(exc_hypervisor_injection as u64, 0x08, 0x8E);
+        IDT[29].set_handler(exc_vmm_communication as u64, 0x08, 0x8E);
+        IDT[30].set_handler(exc_security_exception as u64, 0x08, 0x8E);
+        IDT[31].set_handler(exc_reserved_31 as u64, 0x08, 0x8E);
 
         // Set up interrupt handlers (32-255)
         for i in 32..256 {
@@ -116,58 +138,54 @@ pub fn init_idt() {
     }
 }
 
-/// Common exception handler entry point
-#[unsafe(naked)]
-extern "x86-interrupt" fn exception_handler(_frame: &mut ExceptionStackFrame) {
-    naked_asm!(
-        // Save all general purpose registers
-        "push rax",
-        "push rbx",
-        "push rcx",
-        "push rdx",
-        "push rsi",
-        "push rdi",
-        "push rbp",
-        "push r8",
-        "push r9",
-        "push r10",
-        "push r11",
-        "push r12",
-        "push r13",
-        "push r14",
-        "push r15",
-
-        // Save error code from stack (pushed by CPU for some exceptions)
-        "mov rsi, [rsp + 15*8]",
-
-        // Call the actual handler
-        "mov rdi, rsp",
-        "call {handler}",
-
-        // Restore registers
-        "pop r15",
-        "pop r14",
-        "pop r13",
-        "pop r12",
-        "pop r11",
-        "pop r10",
-        "pop r9",
-        "pop r8",
-        "pop rbp",
-        "pop rdi",
-        "pop rsi",
-        "pop rdx",
-        "pop rcx",
-        "pop rbx",
-        "pop rax",
-
-        // Clean up error code if present (6 bytes for error code + 8 bytes for RIP)
-        "add rsp, 8",
-
-        "iretq",
-        handler = sym handle_exception,
-    );
+macro_rules! exception_handler_no_code {
+    ($name:ident, $vec:expr) => {
+        extern "x86-interrupt" fn $name(frame: &mut ExceptionStackFrame) {
+            handle_exception($vec, frame, None);
+        }
+    };
 }
+
+macro_rules! exception_handler_with_code {
+    ($name:ident, $vec:expr) => {
+        extern "x86-interrupt" fn $name(frame: &mut ExceptionStackFrame, error_code: u64) {
+            handle_exception($vec, frame, Some(error_code));
+        }
+    };
+}
+
+exception_handler_no_code!(exc_divide_error, 0);
+exception_handler_no_code!(exc_debug, 1);
+exception_handler_no_code!(exc_nmi, 2);
+exception_handler_no_code!(exc_breakpoint, 3);
+exception_handler_no_code!(exc_overflow, 4);
+exception_handler_no_code!(exc_bound_range, 5);
+exception_handler_no_code!(exc_invalid_opcode, 6);
+exception_handler_no_code!(exc_device_not_available, 7);
+exception_handler_with_code!(exc_double_fault, 8);
+exception_handler_no_code!(exc_coprocessor_overrun, 9);
+exception_handler_with_code!(exc_invalid_tss, 10);
+exception_handler_with_code!(exc_segment_not_present, 11);
+exception_handler_with_code!(exc_stack_segment, 12);
+exception_handler_with_code!(exc_general_protection, 13);
+exception_handler_with_code!(exc_page_fault, 14);
+exception_handler_no_code!(exc_spurious_interrupt, 15);
+exception_handler_no_code!(exc_x87_fpu_error, 16);
+exception_handler_with_code!(exc_alignment_check, 17);
+exception_handler_no_code!(exc_machine_check, 18);
+exception_handler_no_code!(exc_simd_fpu, 19);
+exception_handler_no_code!(exc_virtualization, 20);
+exception_handler_with_code!(exc_control_protection, 21);
+exception_handler_no_code!(exc_reserved_22, 22);
+exception_handler_no_code!(exc_reserved_23, 23);
+exception_handler_no_code!(exc_reserved_24, 24);
+exception_handler_no_code!(exc_reserved_25, 25);
+exception_handler_no_code!(exc_reserved_26, 26);
+exception_handler_no_code!(exc_reserved_27, 27);
+exception_handler_no_code!(exc_hypervisor_injection, 28);
+exception_handler_with_code!(exc_vmm_communication, 29);
+exception_handler_no_code!(exc_security_exception, 30);
+exception_handler_no_code!(exc_reserved_31, 31);
 
 /// Common interrupt handler entry point
 #[unsafe(naked)]
@@ -213,13 +231,75 @@ extern "x86-interrupt" fn interrupt_handler(_frame: &mut ExceptionStackFrame) {
 }
 
 /// Actual exception handling logic
-extern "C" fn handle_exception(_regs: &mut IntRegisters) {
-    // In a real implementation, this would:
-    // 1. Determine which exception occurred
-    // 2. Call the appropriate handler
-    // 3. Possibly terminate the task or fix the issue
+fn handle_exception(vector: u8, frame: &mut ExceptionStackFrame, error_code: Option<u64>) {
+    unsafe {
+        let serial_putc_trap = |c: u8| {
+            loop {
+                let lsr: u8;
+                asm!(
+                    "in al, dx",
+                    in("dx") 0x3FDu16,
+                    out("al") lsr,
+                    options(nostack, nomem)
+                );
+                if (lsr & 0x20) != 0 {
+                    break;
+                }
+            }
+            asm!(
+                "out dx, al",
+                in("dx") 0x3F8u16,
+                in("al") c,
+                options(nostack, nomem)
+            );
+        };
+        let puts = |s: &[u8]| {
+            for &b in s {
+                if b == b'\n' {
+                    serial_putc_trap(b'\r');
+                }
+                serial_putc_trap(b);
+            }
+        };
+        let print_hex_val = |val: u64| {
+            let hex = b"0123456789abcdef";
+            let mut buf = [b'0'; 16];
+            let mut v = val;
+            for i in (0..16).rev() {
+                buf[i] = hex[(v & 0xf) as usize];
+                v >>= 4;
+            }
+            puts(b"0x");
+            puts(&buf);
+        };
 
-    // For now, just halt
+        puts(b"\n!!! EXCEPTION !!!\n");
+        puts(b"  vector=");
+        print_hex_val(vector as u64);
+        puts(b"\n  RIP=");
+        print_hex_val(frame.rip);
+        puts(b"\n  CS=");
+        print_hex_val(frame.cs);
+        puts(b"\n  RSP=");
+        print_hex_val(frame.rsp);
+        puts(b"\n  SS=");
+        print_hex_val(frame.ss);
+        if let Some(code) = error_code {
+            puts(b"\n  error_code=");
+            print_hex_val(code);
+        }
+        puts(b"\n");
+
+        if vector == exception::PAGE_FAULT {
+            let cr2: u64;
+            asm!("mov {}, cr2", out(reg) cr2);
+            puts(b"  CR2=");
+            print_hex_val(cr2);
+            puts(b"\n");
+        }
+    }
+
+    // Halt
     loop {
         unsafe {
             asm!("hlt");

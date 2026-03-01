@@ -26,20 +26,24 @@ SECTIONS
         *(.rodata .rodata.*)
         *(.lrodata .lrodata.*)
         
+        . = ALIGN(8);
         __INITCALL_EARLY_START = .;
-        *(.initcall.early .initcall.early.*)
+        KEEP(*(.initcall.early .initcall.early.*))
         __INITCALL_EARLY_END = .;
         
+        . = ALIGN(8);
         __INITCALL_DRIVER_START = .;
-        *(.initcall.driver .initcall.driver.*)
+        KEEP(*(.initcall.driver .initcall.driver.*))
         __INITCALL_DRIVER_END = .;
         
+        . = ALIGN(8);
         __INITCALL_LATE_START = .;
-        *(.initcall.late .initcall.late.*)
+        KEEP(*(.initcall.late .initcall.late.*))
         __INITCALL_LATE_END = .;
         
+        . = ALIGN(8);
         __INITCALL_START = .;
-        *(.initcall .initcall.*)
+        KEEP(*(.initcall .initcall.*))
         __INITCALL_END = .;
     } :rodata
 

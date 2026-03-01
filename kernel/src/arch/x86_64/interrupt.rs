@@ -51,28 +51,44 @@ pub fn init_pic() {
 /// Initialize Local APIC
 pub fn init_lapic() {
     // Enable Local APIC by setting SVR bit 8
-    let mut svr = mmio::read_u32(LAPIC_BASE + LAPIC_SVR);
+    let mut svr =
+        mmio::read_u32(crate::arch::x86_64::boot::hhdm_phys_to_virt(LAPIC_BASE) + LAPIC_SVR);
     svr |= 0x100; // Enable bit
-    mmio::write_u32(LAPIC_BASE + LAPIC_SVR, svr);
+    mmio::write_u32(
+        crate::arch::x86_64::boot::hhdm_phys_to_virt(LAPIC_BASE) + LAPIC_SVR,
+        svr,
+    );
 }
 
 /// End of Interrupt - acknowledge interrupt to Local APIC
 pub fn eoi() {
-    mmio::write_u32(LAPIC_BASE + LAPIC_EOI, 0);
+    mmio::write_u32(
+        crate::arch::x86_64::boot::hhdm_phys_to_virt(LAPIC_BASE) + LAPIC_EOI,
+        0,
+    );
 }
 
 /// Send IPI (Inter-Processor Interrupt)
 pub fn send_ipi(cpu_id: u8, vector: u8) {
     // ICR2: Destination
     let icr2 = ((cpu_id as u32) << 24) & 0xFF_0000;
-    mmio::write_u32(LAPIC_BASE + LAPIC_ICR2, icr2);
+    mmio::write_u32(
+        crate::arch::x86_64::boot::hhdm_phys_to_virt(LAPIC_BASE) + LAPIC_ICR2,
+        icr2,
+    );
 
     // ICR1: Vector and delivery mode
     let icr1 = (vector as u32) | 0x4000; // Fixed delivery mode
-    mmio::write_u32(LAPIC_BASE + LAPIC_ICR1, icr1);
+    mmio::write_u32(
+        crate::arch::x86_64::boot::hhdm_phys_to_virt(LAPIC_BASE) + LAPIC_ICR1,
+        icr1,
+    );
 
     // Wait for delivery
-    while mmio::read_u32(LAPIC_BASE + LAPIC_ICR1) & 0x1000 != 0 {
+    while mmio::read_u32(crate::arch::x86_64::boot::hhdm_phys_to_virt(LAPIC_BASE) + LAPIC_ICR1)
+        & 0x1000
+        != 0
+    {
         core::hint::spin_loop();
     }
 }
