@@ -5,16 +5,16 @@ use core::mem::transmute;
 use core::ptr;
 
 use crate::arch::x86_64::earlycon::init_earlycon;
-use crate::arch::x86_64::{CPUS, X86_64, trap_init};
+use crate::arch::x86_64::{trap_init, CPUS, X86_64};
 use crate::environment::PAGE_SIZE;
 use crate::mem::init_bss;
 use crate::vm::vmem::MemoryArea;
-use crate::{BootInfo, DeviceSource, start_kernel};
-use limine::BaseRevision;
+use crate::{start_kernel, BootInfo, DeviceSource};
 use limine::request::{
     HhdmRequest, KernelAddressRequest, MemoryMapRequest, ModuleRequest, RequestsEndMarker,
     RequestsStartMarker,
 };
+use limine::BaseRevision;
 
 /// Define the start and end markers for Limine requests.
 #[used]
@@ -278,7 +278,6 @@ pub extern "C" fn kmain() -> ! {
     let kernel_virt_start = unsafe { &crate::mem::__KERNEL_SPACE_START as *const usize as usize };
     let kernel_virt_end = unsafe { &crate::mem::__KERNEL_SPACE_END as *const usize as usize };
     let kernel_size = kernel_virt_end - kernel_virt_start;
-    // Align kernel physical end to page boundary
     let kernel_phys_end = (kernel_phys_base + kernel_size + 0xFFF) & !0xFFF;
 
     serial_puts(b"[x86_64] Kernel size: ");
@@ -288,8 +287,24 @@ pub extern "C" fn kmain() -> ! {
     print_hex(kernel_phys_end as u64);
     serial_puts(b"\n");
 
-    // Find usable memory region after the kernel's physical footprint
-    let mut usable_memory = find_usable_memory_after_kernel(kernel_phys_end, hhdm);
+    let module = &MODULE_REQUEST
+        .get_response()
+        .and_then(|r| r.modules().first().copied())
+        .expect("No initramfs module available");
+    let initramfs_addr = module.addr() as usize;
+    let initramfs_size = module.size() as usize;
+    let initramfs_phys_start = initramfs_addr - hhdm;
+
+    serial_puts(b"[x86_64] Initramfs at (HHDM): ");
+    print_hex(initramfs_addr as u64);
+    serial_puts(b" phys: ");
+    print_hex(initramfs_phys_start as u64);
+    serial_puts(b" size: ");
+    print_hex(initramfs_size as u64);
+    serial_puts(b"\n");
+
+    let usable_memory =
+        find_usable_memory_after_kernel(kernel_phys_end, initramfs_phys_start, hhdm);
 
     serial_puts(b"[x86_64] Usable memory (HHDM): ");
     print_hex(usable_memory.start as u64);
@@ -297,71 +312,20 @@ pub extern "C" fn kmain() -> ! {
     print_hex(usable_memory.end as u64);
     serial_puts(b"\n");
 
-    // Relocate initramfs to usable_memory.start (same as RISC-V/AArch64)
-    let module = &MODULE_REQUEST
-        .get_response()
-        .and_then(|r| r.modules().first().copied())
-        .expect("No initramfs module available");
-    let src_addr = module.addr() as usize;
-    let size = module.size() as usize;
-
-    serial_puts(b"[x86_64] Relocating initramfs from: ");
-    print_hex(src_addr as u64);
-    serial_puts(b" to: ");
-    print_hex(usable_memory.start as u64);
-    serial_puts(b" size: ");
-    print_hex(size as u64);
-    serial_puts(b"\n");
-
-    // Copy initramfs to usable_memory.start using ptr::copy_nonoverlapping (same as RISC-V/AArch64)
-    let dst_addr = usable_memory.start;
-    if dst_addr + size > usable_memory.end {
-        panic!("Insufficient memory for initramfs relocation");
-    }
-
-    unsafe {
-        let chunk_size = 4096;
-        let mut src = src_addr as *const u8;
-        let mut dst = dst_addr as *mut u8;
-        let mut remaining = size;
-
-        while remaining > 0 {
-            let copy_size = if remaining > chunk_size {
-                chunk_size
-            } else {
-                remaining
-            };
-            ptr::copy_nonoverlapping(src, dst, copy_size);
-
-            src = src.add(copy_size);
-            dst = dst.add(copy_size);
-            remaining -= copy_size;
-
-            core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst);
-        }
-    }
-
-    let initramfs_area = Some(MemoryArea::new(dst_addr, dst_addr + size - 1));
-
-    serial_puts(b"[x86_64] Relocated initramfs to: ");
-    print_hex(dst_addr as u64);
-    serial_puts(b" - ");
-    print_hex((dst_addr + size - 1) as u64);
-    serial_puts(b"\n");
-
-    // Advance usable_memory.start past the relocated initramfs (8-byte aligned, same as RISC-V/AArch64)
-    usable_memory.start = (dst_addr + size + 7) & !7;
-
-    serial_puts(b"[x86_64] Usable memory after initramfs: ");
-    print_hex(usable_memory.start as u64);
-    serial_puts(b" - ");
-    print_hex(usable_memory.end as u64);
-    serial_puts(b"\n");
+    let initramfs_area = Some(MemoryArea::new(
+        initramfs_addr,
+        initramfs_addr + initramfs_size - 1,
+    ));
 
     let heap_hhdm = usable_memory;
 
-    let dram_area = find_dram_area(hhdm);
-    serial_puts(b"[x86_64] DRAM area (HHDM): ");
+    let mut dram_area = find_dram_area(hhdm);
+    let initramfs_phys_end = initramfs_phys_start + initramfs_size;
+    if initramfs_phys_end > dram_area.end {
+        dram_area.end = initramfs_phys_end;
+    }
+
+    serial_puts(b"[x86_64] DRAM area (physical): ");
     print_hex(dram_area.start as u64);
     serial_puts(b" - ");
     print_hex(dram_area.end as u64);
@@ -404,7 +368,11 @@ pub extern "C" fn kmain() -> ! {
 /// Scans Limine's memory map for USABLE entries. If a USABLE entry contains
 /// `kernel_phys_end`, the region is trimmed to start after the kernel.
 /// Returns the largest available region as a MemoryArea in HHDM virtual space.
-fn find_usable_memory_after_kernel(kernel_phys_end: usize, hhdm: usize) -> MemoryArea {
+fn find_usable_memory_after_kernel(
+    kernel_phys_end: usize,
+    initramfs_phys_start: usize,
+    hhdm: usize,
+) -> MemoryArea {
     let memmap = MEMORY_MAP_REQUEST
         .get_response()
         .expect("MemoryMapRequest not answered by bootloader");
@@ -429,10 +397,17 @@ fn find_usable_memory_after_kernel(kernel_phys_end: usize, hhdm: usize) -> Memor
             continue;
         };
 
-        let size = entry_end - effective_start;
+        let effective_end =
+            if initramfs_phys_start > effective_start && initramfs_phys_start < entry_end {
+                initramfs_phys_start
+            } else {
+                entry_end
+            };
+
+        let size = effective_end - effective_start;
         if size > best_size {
             best_start = effective_start;
-            best_end = entry_end - 1;
+            best_end = effective_end - 1;
             best_size = size;
         }
     }
@@ -447,7 +422,7 @@ fn find_usable_memory_after_kernel(kernel_phys_end: usize, hhdm: usize) -> Memor
     MemoryArea::new(best_start + hhdm, best_end + hhdm)
 }
 
-fn find_dram_area(hhdm: usize) -> MemoryArea {
+fn find_dram_area(_hhdm: usize) -> MemoryArea {
     let memmap = MEMORY_MAP_REQUEST
         .get_response()
         .expect("MemoryMapRequest not answered by bootloader");
@@ -478,7 +453,9 @@ fn find_dram_area(hhdm: usize) -> MemoryArea {
         }
     }
 
-    MemoryArea::new(dram_start + hhdm, dram_end - 1 + hhdm)
+    // Return PHYSICAL addresses (not HHDM) - kernel_vm_init expects physical
+    // and will add dram_window_offset (HHDM) to compute virtual addresses
+    MemoryArea::new(dram_start, dram_end - 1)
 }
 
 /// Relocate the initramfs (Limine module) to the start of usable_memory.
