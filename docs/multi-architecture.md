@@ -202,12 +202,14 @@ QEMU virt machine device trees:
 
 ## Key Differences Between Architectures
 
+> **Note**: For detailed virtual memory layout and HHDM design, see [memory-map.md](memory-map.md).
+
 ### RISC-V 64
 
 - Register naming: `x0-x31`, `pc`, CSRs
 - Calling convention: `a0-a7` (args), `t0-t6` (temp), `s0-s11` (saved)
 - Privilege levels: M-mode, S-mode, U-mode
-- Page table: Sv39 (3-level paging)
+- Page table: Sv48 (4-level paging, 48-bit VA)
 - Interrupt handling: PLIC (Platform-Level Interrupt Controller)
 
 ### AArch64
