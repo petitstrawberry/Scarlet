@@ -11,6 +11,7 @@ use crate::mem::page::{allocate_raw_pages, free_raw_pages};
 use crate::object::capability::memory_mapping::{
     AccessKind, MemoryMappingOps, ResolveFaultError, ResolveFaultResult,
 };
+use crate::vm::addr::{phys_to_virt, virt_to_phys};
 use crate::vm::vmem::VirtualMemoryMap;
 
 const LOG_SHARED_MEMORY_RESIZE: bool = false;
@@ -103,7 +104,7 @@ impl SharedMemory {
         if pages.is_null() {
             return Err("Failed to allocate physical memory for shared memory");
         }
-        let paddr = pages as usize;
+        let paddr = virt_to_phys(pages as usize);
 
         let state = SharedMemoryState::new(paddr, aligned_size, permissions, true);
         let id = format!("shmem_{:#x}", paddr);
@@ -189,7 +190,7 @@ impl SharedMemoryObject for SharedMemory {
         if copy_size > 0 {
             unsafe {
                 core::ptr::copy_nonoverlapping(
-                    state.paddr as *const u8,
+                    phys_to_virt(state.paddr) as *const u8,
                     pages as *mut u8,
                     copy_size,
                 );
@@ -202,12 +203,12 @@ impl SharedMemoryObject for SharedMemory {
             if state.mapping_count > 0 {
                 state.stale_pages.push((old_paddr, old_pages));
             } else {
-                let old_ptr = old_paddr as *mut crate::mem::page::Page;
+                let old_ptr = phys_to_virt(old_paddr) as *mut crate::mem::page::Page;
                 free_raw_pages(old_ptr, old_pages);
             }
         }
 
-        state.paddr = pages as usize;
+        state.paddr = virt_to_phys(pages as usize);
         state.size = aligned_size;
         state.capacity = aligned_size;
 
@@ -289,7 +290,7 @@ impl MemoryMappingOps for SharedMemory {
                 if pages == 0 {
                     continue;
                 }
-                let ptr = paddr as *mut crate::mem::page::Page;
+                let ptr = phys_to_virt(paddr) as *mut crate::mem::page::Page;
                 free_raw_pages(ptr, pages);
             }
         }
@@ -359,13 +360,13 @@ impl Drop for SharedMemory {
         // Only free the physical pages if this object owns them
         if state.owns_memory {
             let num_pages = (state.capacity + PAGE_SIZE - 1) / PAGE_SIZE;
-            let pages_ptr = state.paddr as *mut crate::mem::page::Page;
+            let pages_ptr = phys_to_virt(state.paddr) as *mut crate::mem::page::Page;
             free_raw_pages(pages_ptr, num_pages);
             for (paddr, pages) in &state.stale_pages {
                 if *pages == 0 {
                     continue;
                 }
-                let pages_ptr = *paddr as *mut crate::mem::page::Page;
+                let pages_ptr = phys_to_virt(*paddr) as *mut crate::mem::page::Page;
                 free_raw_pages(pages_ptr, *pages);
             }
         }

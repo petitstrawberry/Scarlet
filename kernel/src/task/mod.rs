@@ -35,6 +35,7 @@ use crate::{
     sched::scheduler::{Scheduler, get_scheduler},
     timer::{TimerHandler, add_timer, get_tick},
     vm::{
+        addr::{phys_to_virt, virt_to_phys},
         manager::VirtualMemoryManager,
         user_kernel_vm_init, user_vm_init,
         vmem::{MemoryArea, VirtualMemoryMap, VirtualMemoryRegion},
@@ -806,7 +807,7 @@ impl Task {
 
         let pages = allocate_raw_pages(num_of_pages);
         let size = num_of_pages * PAGE_SIZE;
-        let paddr = pages as usize;
+        let paddr = virt_to_phys(pages as usize);
         let mmap = VirtualMemoryMap {
             pmarea: MemoryArea {
                 start: paddr,
@@ -1335,7 +1336,7 @@ impl Task {
                         let permissions = mmap.permissions;
                         let pages = allocate_raw_pages(num_pages);
                         let size = num_pages * PAGE_SIZE;
-                        let paddr = pages as usize;
+                        let paddr = virt_to_phys(pages as usize);
                         let new_mmap = VirtualMemoryMap {
                             pmarea: MemoryArea {
                                 start: paddr,
@@ -1352,8 +1353,8 @@ impl Task {
 
                         // Copy original contents page-by-page
                         for i in 0..num_pages {
-                            let src_page_addr = mmap.pmarea.start + i * PAGE_SIZE;
-                            let dst_page_addr = new_mmap.pmarea.start + i * PAGE_SIZE;
+                            let src_page_addr = phys_to_virt(mmap.pmarea.start + i * PAGE_SIZE);
+                            let dst_page_addr = phys_to_virt(new_mmap.pmarea.start + i * PAGE_SIZE);
                             unsafe {
                                 core::ptr::copy_nonoverlapping(
                                     src_page_addr as *const u8,
@@ -2011,6 +2012,7 @@ mod tests {
     use core::sync::atomic::Ordering;
 
     use crate::task::CloneFlags;
+    use crate::vm::addr::{phys_to_virt, virt_to_phys};
 
     #[test_case]
     fn test_set_brk() {
@@ -2226,8 +2228,8 @@ mod tests {
 
         // Verify the data was copied correctly
         unsafe {
-            let parent_ptr = parent_paddr as *const u8;
-            let child_ptr = child_mmap.pmarea.start as *const u8;
+            let parent_ptr = phys_to_virt(parent_paddr) as *const u8;
+            let child_ptr = phys_to_virt(child_mmap.pmarea.start) as *const u8;
 
             // Check that physical addresses are different (separate memory)
             assert_ne!(
@@ -2245,11 +2247,11 @@ mod tests {
 
         // Verify that modifying parent's memory doesn't affect child's memory
         unsafe {
-            let parent_ptr = mmap.pmarea.start as *mut u8;
+            let parent_ptr = phys_to_virt(mmap.pmarea.start) as *mut u8;
             let original_value = *parent_ptr;
             *parent_ptr = 0xFF; // Modify first byte in parent
 
-            let child_ptr = child_mmap.pmarea.start as *const u8;
+            let child_ptr = phys_to_virt(child_mmap.pmarea.start) as *const u8;
             let child_first_byte = *child_ptr;
 
             // Child's first byte should still be the original value
@@ -2405,7 +2407,7 @@ mod tests {
         let shared_vaddr = 0x5000;
         let num_pages = 1;
         let pages = allocate_raw_pages(num_pages);
-        let paddr = pages as usize;
+        let paddr = virt_to_phys(pages as usize);
 
         let shared_mmap = VirtualMemoryMap {
             pmarea: MemoryArea {
@@ -2431,7 +2433,7 @@ mod tests {
         // Write test data to shared memory
         let test_data: [u8; 8] = [0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF, 0x11, 0x22];
         unsafe {
-            let shared_ptr = paddr as *mut u8;
+            let shared_ptr = phys_to_virt(paddr) as *mut u8;
             core::ptr::copy_nonoverlapping(test_data.as_ptr(), shared_ptr, test_data.len());
         }
 
