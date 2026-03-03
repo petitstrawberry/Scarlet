@@ -51,26 +51,50 @@ The key insight is the separation of **ephemeral trap frames** (stack-based) fro
 
 #### Phase 1: User Space Entry
 ```rust
-// user/lib/std/src/hypervisor.rs (NEW)
-pub fn vcpu_loop(vcpu_handle: u32) -> Result<(), HypervisorError> {
+// user/lib/std/src/hypervisor/mod.rs
+pub fn vcpu_loop(vcpu: &Vcpu) -> Result<(), ()> {
     loop {
-        let mut exit: VcpuExit = VcpuExit::default();
-        sys_shv_vcpu_run(vcpu_handle, &mut exit)?;
+        let exit = vcpu.run()?;
         
-        match exit {
-            VcpuExit::Mmio(info) => {
-                handle_mmio(&info)?;
+        match exit.reason {
+            VcpuExitReason::MmioRead | VcpuExitReason::MmioWrite => {
+                handle_mmio(&exit)?;
             }
-            VcpuExit::Shutdown => break,
-            VcpuExit::Hlt => break,
-            VcpuExit::Unknown(code) => {
-                log::warn!("Unknown VM exit: {:#x}", code);
+            VcpuExitReason::Shutdown => break,
+            VcpuExitReason::Hlt => break,
+            VcpuExitReason::Unknown => {
+                log::warn!("Unknown VM exit: {:#x}", exit.fail_code);
             }
-            VcpuExit::Io => {
+            VcpuExitReason::Io => {
                 // Timer handled by kernel, just continue
             }
+            VcpuExitReason::FirmwareCall => {
+                handle_firmware_call(&exit)?;
+            }
+            VcpuExitReason::VirtualInstruction => {
+                handle_virtual_instruction(&exit)?;
+            }
+            _ => {}
         }
     }
+    Ok(())
+}
+
+fn handle_mmio(exit: &VcpuExit) -> Result<(), ()> {
+    if exit.mmio.is_write {
+        // Handle MMIO write
+        let addr = exit.mmio.address;
+        let data = exit.mmio.data;
+        let size = exit.mmio.size;
+        // ... device emulation ...
+    } else {
+        // Handle MMIO read - write result to guest register
+        let addr = exit.mmio.address;
+        let size = exit.mmio.size;
+        let value = emulate_mmio_read(addr, size)?;
+        vcpu.set_reg(exit.mmio.reg, value)?;
+    }
+    // Advance PC past the MMIO instruction
     Ok(())
 }
 ```
@@ -79,11 +103,35 @@ pub fn vcpu_loop(vcpu_handle: u32) -> Result<(), HypervisorError> {
 ```rust
 // kernel/src/hypervisor/syscall.rs
 pub fn sys_shv_vcpu_run(trapframe: &mut Trapframe) -> usize {
+    let task = match mytask() {
+        Some(t) => t,
+        None => return usize::MAX,
+    };
+
     let vcpu_handle = trapframe.get_arg(0) as u32;
     let exit_ptr = trapframe.get_arg(1);
     
-    let task = mytask().ok_or(usize::MAX)?;
     trapframe.increment_pc_next(task);
+    
+    // Validate exit_ptr bounds
+    let exit_size = core::mem::size_of::<VcpuExit>();
+    let exit_end = match exit_ptr.checked_add(exit_size - 1) {
+        Some(end) => end,
+        None => return usize::MAX,
+    };
+    let exit_map = match task.vm_manager.search_memory_map(exit_ptr) {
+        Some(map) => map,
+        None => return usize::MAX,
+    };
+    if exit_end > exit_map.vmarea.end {
+        return usize::MAX;
+    }
+
+    // Translate the exit pointer to kernel address
+    let exit_kaddr = match task.vm_manager.translate_vaddr(exit_ptr) {
+        Some(addr) => addr,
+        None => return usize::MAX,
+    };
     
     // Get vCPU from handle table
     let vcpu = match task.handle_table.get(vcpu_handle) {
@@ -91,17 +139,16 @@ pub fn sys_shv_vcpu_run(trapframe: &mut Trapframe) -> usize {
         _ => return usize::MAX,
     };
 
+    // Run the vCPU
     let vm_exit = match vcpu.run() {
         Ok(exit) => exit,
         Err(_) => return usize::MAX,
     };
 
+    // Convert VmExit to VcpuExit and write to user space
     let exit = VcpuExit::from_vmexit(&vm_exit);
     unsafe {
-        core::ptr::write(
-            task.vm_manager.translate_vaddr(exit_ptr)? as *mut VcpuExit,
-            exit,
-        );
+        core::ptr::write(exit_kaddr as *mut VcpuExit, exit);
     }
     0
 }
@@ -116,22 +163,26 @@ pub fn sys_shv_vcpu_run(trapframe: &mut Trapframe) -> usize {
 These structures are `#[repr(C)]` and shared between kernel and userspace.
 
 ```rust
-// kernel/src/hypervisor/types.rs (NEW)
+// kernel/src/hypervisor/types.rs
 // user/lib/std/src/hypervisor/types.rs (mirror)
 
 /// VM exit reason codes
 #[repr(C)]
-#[derive(Debug, Clone, Copy, Default)]
-pub enum VcpuExitReason: u32 {
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum VcpuExitReason {
     #[default]
     Unknown = 0,
-    Io = 1,           // Kernel handled (timer, etc.)
+    Io = 1,              // Kernel handled (timer, etc.)
     MmioRead = 2,
     MmioWrite = 3,
     Hlt = 4,
     Shutdown = 5,
     FailEntry = 6,
     InternalError = 7,
+    FirmwareCall = 8,    // SBI/BIOS firmware call (e.g., ECALL from VS-mode)
+    VirtualInstruction = 9,  // Virtual instruction trap (WFI, etc.)
+    IllegalInstruction = 10, // Illegal instruction in guest
+    Breakpoint = 11,     // Breakpoint exception
 }
 
 /// MMIO access information
@@ -146,13 +197,24 @@ pub struct MmioInfo {
     pub _padding: [u8; 5],
 }
 
-/// VM exit information returned to userspace
+/// Instruction information for virtual/illegal instruction exits
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Default)]
+pub struct InstructionInfo {
+    pub inst: u32,
+    pub inst_len: u8,
+    pub has_inst: bool,
+    pub _padding: [u8; 6],
+}
+
+/// VM exit information returned to userspace
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
 pub struct VcpuExit {
     pub reason: VcpuExitReason,
-    pub _padding: u32,
+    pub epc: u64,           // Guest program counter at exit
     pub mmio: MmioInfo,
+    pub inst: InstructionInfo,  // Instruction info for instruction exits
     pub fail_code: u64,
 }
 ```
@@ -162,57 +224,86 @@ pub struct VcpuExit {
 Following the existing `Vcpu` struct pattern in `kernel/src/arch/riscv64/vcpu/mod.rs`:
 
 ```rust
-// kernel/src/arch/riscv64/hv/guest_vcpu.rs (NEW)
-
-use crate::arch::riscv64::IntRegisters;
-use crate::arch::riscv64::fpu::{FpuContext, VectorContext};
-use crate::arch::Mode;
-use crate::arch::Trapframe;
-use alloc::boxed::Box;
+// kernel/src/arch/riscv64/hv/csr.rs
 
 /// Guest CSR state (VS-mode CSRs that must be saved/restored)
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Default)]
 pub struct GuestCsrState {
-    pub vsscratch: u64,
-    pub vsepc: u64,
-    pub vscause: u64,
-    pub vstval: u64,
-    pub vsatp: u64,
-    pub vsstatus: u64,
-    // H-extension state
-    pub hstatus: u64,
+    pub sscratch: u64,
+    pub sepc: u64,
+    pub scause: u64,
+    pub stval: u64,
+    pub stvec: u64,
+    pub satp: u64,
+    pub sstatus: u64,
+    pub sie: u64,
+    pub sip: u64,
 }
 
+impl GuestCsrState {
+    /// Save guest CSRs from VS-mode hardware registers
+    pub fn save() -> Self {
+        Self {
+            sscratch: read_vsscratch(),
+            sepc: read_vsepc(),
+            scause: read_vscause(),
+            stval: read_vstval(),
+            stvec: read_vstvec(),
+            satp: read_vsatp(),
+            sstatus: read_vsstatus(),
+            sie: read_vsie(),
+            sip: read_vsip(),
+        }
+    }
+
+    /// Restore guest CSRs to VS-mode hardware registers
+    pub fn restore(&self) {
+        write_vsscratch(self.sscratch);
+        write_vsepc(self.sepc);
+        write_vscause(self.scause);
+        write_vstval(self.stval);
+        write_vstvec(self.stvec);
+        write_vsatp(self.satp);
+        write_vsstatus(self.sstatus);
+        write_vsie(self.sie);
+        write_vsip(self.sip);
+    }
+}
+
+/// Hypervisor CSR state (HS-mode CSRs for context switching between VMs)
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct HypervisorCsrState {
+    pub hgatp: u64,
+    pub htimedelta: u64,
+    pub hvip: u64,
+}
+```
+
+```rust
+// kernel/src/arch/riscv64/hv/guest_vcpu.rs
+
+use crate::arch::riscv64::IntRegisters;
+use crate::arch::riscv64::fpu::{FpuContext, VectorContext};
+use crate::arch::riscv64::{Mode, Trapframe};
+use alloc::boxed::Box;
+
 /// Guest VCPU state - follows existing Vcpu struct pattern
-///
-/// This mirrors the existing `Vcpu` structure but adds guest-specific
-/// CSR state for hypervisor support.
+#[repr(C)]
 #[derive(Debug, Clone)]
 pub struct GuestVcpu {
-    // ===== Following existing Vcpu pattern =====
-    /// General-purpose registers
-    pub iregs: IntRegisters,
-    /// Floating-point register context
-    pub fpu: FpuContext,
-    pub fpu_used: bool,
-    /// Vector register context
-    pub vector: Option<Box<VectorContext>>,
-    pub vector_used: bool,
-    /// Program counter
+    iregs: IntRegisters,
+    csrs: GuestCsrState,
     pc: u64,
-    /// Address space ID for guest
+    fpu: FpuContext,
+    fpu_used: bool,
+    vector: Option<Box<VectorContext>>,
+    vector_used: bool,
     asid: usize,
-    /// Execution mode (GuestUser or GuestKernel)
     mode: Mode,
-    
-    // ===== Guest-specific additions =====
-    /// Guest CSR state (VS-mode CSRs)
-    pub guest_csrs: GuestCsrState,
-    /// VM ID this VCPU belongs to
-    pub vm_id: u32,
-    /// VCPU ID within the VM
-    pub vcpu_id: u32,
+    vm_id: u32,
+    vcpu_id: u32,
 }
 
 impl GuestVcpu {
@@ -225,54 +316,32 @@ impl GuestVcpu {
             vector_used: false,
             pc: 0,
             asid: 0,
-            mode: Mode::GuestUser,
-            guest_csrs: GuestCsrState::default(),
+            mode: Mode::GuestKernel,
+            csrs: GuestCsrState::default(),
             vm_id,
             vcpu_id,
         }
     }
     
-    /// Store guest state from trapframe (following existing Vcpu pattern)
-    pub fn store(&mut self, trapframe: &Trapframe) {
+    /// Save guest state from trapframe and CSRs
+    pub fn save(&mut self, trapframe: &Trapframe) {
         self.iregs = trapframe.regs;
         self.pc = trapframe.epc;
+        self.csrs = GuestCsrState::save();
     }
     
-    /// Switch to guest state into trapframe (following existing Vcpu pattern)
+    /// Switch to guest state into trapframe
     pub fn switch(&mut self, trapframe: &mut Trapframe) {
         trapframe.regs = self.iregs;
         trapframe.epc = self.pc;
     }
     
-    pub fn set_pc(&mut self, pc: u64) {
-        self.pc = pc;
+    /// Initialize CSRs for guest entry
+    pub fn init_csrs(&self) {
+        self.csrs.restore();
     }
     
-    pub fn get_pc(&self) -> u64 {
-        self.pc
-    }
-    
-    pub fn get_mode(&self) -> Mode {
-        self.mode
-    }
-    
-    /// Save guest CSRs from hardware
-    pub fn save_csrs(&mut self) {
-        self.guest_csrs.vsscratch = csr::read_vsscratch();
-        self.guest_csrs.vsepc = csr::read_vsepc();
-        self.guest_csrs.vsatp = csr::read_vsatp();
-        self.guest_csrs.vsstatus = csr::read_vsstatus();
-        self.guest_csrs.hstatus = csr::read_hstatus();
-    }
-    
-    /// Restore guest CSRs to hardware
-    pub fn restore_csrs(&self) {
-        csr::write_vsscratch(self.guest_csrs.vsscratch);
-        csr::write_vsepc(self.guest_csrs.vsepc);
-        csr::write_vsatp(self.guest_csrs.vsatp);
-        csr::write_vsstatus(self.guest_csrs.vsstatus);
-        csr::write_hstatus(self.guest_csrs.hstatus);
-    }
+    // ... register access methods ...
 }
 ```
 
@@ -294,11 +363,62 @@ pub struct Vcpu {
 }
 ```
 
-`GuestVcpu` follows this pattern exactly for the common fields, making it familiar and consistent with the codebase. The only addition is:
-- `guest_csrs: GuestCsrState` - VS-mode CSR persistence
-- `vm_id` / `vcpu_id` - Metadata for handle lookup
+`GuestVcpu` follows this pattern for the common fields. The key differences are:
+- `csrs: GuestCsrState` - VS-mode CSR persistence (field name is `csrs`, not `guest_csrs`)
+- `vm_id` / `vcpu_id` - Metadata for VM association
+- `mode` defaults to `Mode::GuestKernel` (not `GuestUser`)
 
-### 2.4 Host Context Handling
+### 2.4 Kernel-Internal VmExit Type
+
+The kernel uses an internal `VmExit` enum to represent exit reasons before converting to the shared `VcpuExit` structure:
+
+```rust
+// kernel/src/hypervisor/types.rs
+
+#[derive(Debug, Clone, Copy)]
+pub enum VmExit {
+    MmioRead {
+        epc: u64,
+        addr: u64,
+        size: u8,
+        reg: u8,
+    },
+    MmioWrite {
+        epc: u64,
+        addr: u64,
+        size: u8,
+        reg: u8,
+        data: u64,
+    },
+    FirmwareCall {
+        epc: u64,
+    },
+    VirtualInstruction {
+        epc: u64,
+        inst: Option<u32>,
+        inst_len: Option<u8>,
+    },
+    IllegalInstruction {
+        epc: u64,
+        inst: Option<u32>,
+        inst_len: Option<u8>,
+    },
+    Breakpoint {
+        epc: u64,
+    },
+    Hlt,
+    Shutdown,
+    FailEntry {
+        hardware_entry_failure_reason: u64,
+    },
+    InternalError,
+    Unknown(u64),
+}
+```
+
+The `VcpuExit::from_vmexit()` function converts `VmExit` to the userspace-visible `VcpuExit` structure.
+
+### 2.5 Host Context Handling
 
 **No separate `HostContext` struct is needed.** The host's callee-saved registers (ra, s0-s11) are naturally saved on the stack by the standard function call convention:
 
@@ -415,7 +535,7 @@ pub enum Syscall {
     ShvVcpuRun = 1102,
 }
 
-// user/lib/std/src/hypervisor.rs
+// user/lib/std/src/hypervisor/mod.rs
 pub fn vm_create() -> Result<u32, ()> {
     let ret = syscall2(Syscall::ShvVmCreate, 0, 0);
     if ret == usize::MAX {
@@ -445,6 +565,82 @@ pub fn vcpu_run(vcpu_handle: u32, exit: &mut VcpuExit) -> Result<(), ()> {
         exit as *mut VcpuExit as usize,
     );
     if ret == usize::MAX { Err(()) } else { Ok(()) }
+}
+```
+
+### 4.5 Control Operations via HandleControl
+
+In addition to dedicated syscalls, VM and VCPU control operations use the unified `HandleControl` syscall (similar to ioctl):
+
+```rust
+// VM control commands
+pub mod vm_ctl {
+    pub const SET_MEMORY_REGION: u32 = 0x01;
+    pub const GET_VCPU_COUNT: u32 = 0x02;
+    pub const SET_FAST_PATH: u32 = 0x03;
+}
+
+// VCPU control commands
+pub mod vcpu_ctl {
+    pub const RUN: u32 = 0x01;
+    pub const GET_ONE_REG: u32 = 0x02;
+    pub const SET_ONE_REG: u32 = 0x03;
+    pub const INJECT_INTERRUPT: u32 = 0x04;
+    pub const CLEAR_INTERRUPT: u32 = 0x05;
+}
+
+// Fast path flags for kernel-internal handling
+pub mod fast_path {
+    pub const TIMER: u32 = 0x01;
+}
+
+#[repr(C)]
+pub struct VmMemoryRegion {
+    pub slot_id: u32,
+    pub flags: u32,
+    pub guest_phys_addr: u64,
+    pub memory_size: u64,
+    pub host_phys_addr: u64,
+}
+
+#[repr(C)]
+pub struct VcpuOneReg {
+    pub index: u32,
+    pub _padding: u32,
+    pub value: u64,
+}
+
+pub fn vm_control(vm_handle: u32, command: u32, arg: usize) -> Result<i32, ()>;
+pub fn vcpu_control(vcpu_handle: u32, command: u32, arg: usize) -> Result<i32, ()>;
+```
+
+### 4.6 High-Level API Wrappers
+
+The userspace library provides convenient `Vm` and `Vcpu` structs:
+
+```rust
+pub struct Vm {
+    handle: u32,
+}
+
+impl Vm {
+    pub fn create() -> Result<Self, ()>;
+    pub fn create_vcpu(&self, vcpu_id: u32) -> Result<Vcpu, ()>;
+    pub fn add_memory_region(&self, slot_id: u32, guest_phys_addr: u64, size: u64, host_addr: u64) -> Result<(), ()>;
+    pub fn set_fast_path(&self, flags: u32) -> Result<(), ()>;
+}
+
+pub struct Vcpu {
+    handle: u32,
+    vm_handle: u32,
+}
+
+impl Vcpu {
+    pub fn run(&self) -> Result<VcpuExit, ()>;
+    pub fn get_reg(&self, index: u32) -> Result<u64, ()>;
+    pub fn set_reg(&self, index: u32, value: u64) -> Result<(), ()>;
+    pub fn inject_interrupt(&self, irq_type: usize) -> Result<(), ()>;
+    pub fn clear_interrupt(&self, irq_type: usize) -> Result<(), ()>;
 }
 ```
 
@@ -495,4 +691,10 @@ pub fn vcpu_run(vcpu_handle: u32, exit: &mut VcpuExit) -> Result<(), ()> {
 
 - RISC-V H-extension specification
 - KVM API design patterns
-- Existing Scarlet hypervisor code: `kernel/src/hypervisor/`, `kernel/src/arch/riscv64/hv/`
+- Scarlet hypervisor implementation:
+  - `kernel/src/hypervisor/` - Core hypervisor subsystem
+  - `kernel/src/arch/riscv64/hv/` - RISC-V H-extension support
+  - `kernel/src/arch/aarch64/hv/` - AArch64 virtualization support (experimental)
+  - `user/lib/std/src/hypervisor/` - Userspace hypervisor library
+  - `user/bin/src/ushv/` - U-SHV userspace VMM implementation
+- Guest test programs: `guest_tests/`
