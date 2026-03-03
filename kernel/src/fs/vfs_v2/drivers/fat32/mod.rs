@@ -31,12 +31,12 @@ use alloc::{
     vec::Vec,
 };
 use core::{any::Any, fmt::Debug, mem};
-use spin::{Mutex, rwlock::RwLock};
+use spin::{rwlock::RwLock, Mutex};
 
 use crate::{
     device::block::BlockDevice,
     driver_initcall,
-    fs::{FileObject, FileSystemError, FileSystemErrorKind, FileType, get_fs_driver_manager},
+    fs::{get_fs_driver_manager, FileObject, FileSystemError, FileSystemErrorKind, FileType},
 };
 
 use super::super::core::{DirectoryEntryInternal, FileSystemId, FileSystemOperations, VfsNode};

@@ -9,7 +9,7 @@ use spin::Mutex;
 
 use alloc::sync::Arc;
 
-use super::{Device, DeviceType, manager::DeviceManager};
+use super::{manager::DeviceManager, Device, DeviceType};
 use crate::object::capability::selectable::Selectable;
 use crate::object::capability::{ControlOps, MemoryMappingOps};
 

@@ -3,7 +3,7 @@ use core::panic;
 
 use crate::abi::syscall_dispatcher;
 use crate::arch::trap::print_traplog;
-use crate::arch::{Trapframe, get_cpu};
+use crate::arch::{get_cpu, Trapframe};
 use crate::println;
 use crate::sched::scheduler::get_scheduler;
 use crate::task::mytask;

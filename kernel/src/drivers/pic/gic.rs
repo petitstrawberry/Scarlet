@@ -8,13 +8,13 @@ use crate::{
     device::{
         manager::{DeviceManager, DriverPriority},
         platform::{
-            PlatformDeviceDriver, PlatformDeviceInfo, resource::PlatformDeviceResourceType,
+            resource::PlatformDeviceResourceType, PlatformDeviceDriver, PlatformDeviceInfo,
         },
     },
     driver_initcall, early_initcall,
     interrupt::{
-        CpuId, InterruptError, InterruptId, InterruptManager, InterruptResult, Priority,
         controllers::{ExternalInterruptController, LocalInterruptType},
+        CpuId, InterruptError, InterruptId, InterruptManager, InterruptResult, Priority,
     },
 };
 use alloc::{boxed::Box, vec};

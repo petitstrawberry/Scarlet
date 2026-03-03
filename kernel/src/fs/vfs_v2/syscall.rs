@@ -37,7 +37,7 @@ use alloc::{string::String, string::ToString, sync::Arc, vec::Vec};
 
 use crate::{arch::Trapframe, fs::FileType, library::std::string::cstring_to_string, task::mytask};
 
-use crate::fs::{MAX_PATH_LENGTH, VfsManager};
+use crate::fs::{VfsManager, MAX_PATH_LENGTH};
 
 /// Open a file or directory using VFS (VfsOpen)
 ///

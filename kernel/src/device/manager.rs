@@ -50,9 +50,9 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use spin::mutex::Mutex;
 
-use crate::device::platform::PlatformDeviceInfo;
 use crate::device::platform::resource::PlatformDeviceResource;
 use crate::device::platform::resource::PlatformDeviceResourceType;
+use crate::device::platform::PlatformDeviceInfo;
 use crate::early_println;
 
 use super::Device;
@@ -703,7 +703,7 @@ impl DeviceManager {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::device::{GenericDevice, platform::*};
+    use crate::device::{platform::*, GenericDevice};
     use alloc::vec;
 
     #[cfg(target_arch = "riscv64")]

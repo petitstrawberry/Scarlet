@@ -8,7 +8,7 @@ use alloc::boxed::Box;
 use core::arch::naked_asm;
 
 use crate::arch::Trapframe;
-use crate::mem::page::{Page, allocate_boxed_pages};
+use crate::mem::page::{allocate_boxed_pages, Page};
 use crate::vm::vmem::MemoryArea;
 
 /// Kernel context for RISC-V 64-bit

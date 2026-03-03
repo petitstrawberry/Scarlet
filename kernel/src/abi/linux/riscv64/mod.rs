@@ -25,11 +25,11 @@ use crate::{
     arch::{self, IntRegisters, Trapframe},
     early_initcall,
     fs::{
-        FileSystemError, FileSystemErrorKind, SeekFrom, VfsManager, drivers::overlayfs::OverlayFS,
+        drivers::overlayfs::OverlayFS, FileSystemError, FileSystemErrorKind, SeekFrom, VfsManager,
     },
     register_abi,
     task::elf_loader::{
-        ExecutionMode, LoadStrategy, LoadTarget, analyze_and_load_elf_with_strategy,
+        analyze_and_load_elf_with_strategy, ExecutionMode, LoadStrategy, LoadTarget,
     },
     vm::setup_user_stack,
 };
@@ -158,7 +158,7 @@ impl LinuxRiscv64Abi {
             if let Some(handle) = self.fd_to_handle[fd].take() {
                 self.fd_flags[fd] = 0; // Clear flags when removing fd
                 self.file_status_flags[fd] = 0; // Clear status flags as well
-                // Add the freed fd back to the free list for reuse (O(1))
+                                                // Add the freed fd back to the free list for reuse (O(1))
                 self.free_fds.push(fd);
                 Some(handle)
             } else {

@@ -13,7 +13,7 @@ use crate::{
     sched::scheduler::get_scheduler,
     task::mytask,
     time::current_time,
-    timer::{TimerHandler, add_timer, cancel_timer, get_tick, ns_to_ticks, ticks_to_ns},
+    timer::{add_timer, cancel_timer, get_tick, ns_to_ticks, ticks_to_ns, TimerHandler},
 };
 use alloc::sync::{Arc, Weak};
 use spin::Mutex;
@@ -654,7 +654,7 @@ pub fn sys_nanosleep(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> u
     // Convert nanoseconds to kernel ticks
     let ticks = ns_to_ticks(ns as u64);
     trapframe.set_return_value(0); // Set return value to 0 (success)
-    // Sleep the current task for the specified ticks
+                                   // Sleep the current task for the specified ticks
     task.sleep(trapframe, ticks);
     // If sleep is successful, this will not be reached. If interrupted, return -EINTR (not implemented)
     0

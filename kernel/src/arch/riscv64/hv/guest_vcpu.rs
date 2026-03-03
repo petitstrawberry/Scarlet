@@ -1,6 +1,6 @@
 //! Guest VCPU state for Type-2 hypervisor
 
-use crate::arch::hv::csr::{GuestCsrState, write_hstatus, write_vsatp};
+use crate::arch::hv::csr::{write_hstatus, write_vsatp, GuestCsrState};
 use crate::arch::riscv64::fpu::{FpuContext, VectorContext};
 use crate::arch::riscv64::{IntRegisters, Mode, Trapframe};
 use crate::arch::vcpu::Vcpu;

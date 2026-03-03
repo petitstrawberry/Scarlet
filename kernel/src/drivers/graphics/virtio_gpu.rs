@@ -11,16 +11,16 @@ use spin::{Mutex, RwLock};
 
 use crate::{
     device::{
-        Device, DeviceType,
         graphics::{FramebufferConfig, GraphicsDevice, PixelFormat},
+        Device, DeviceType,
     },
     drivers::virtio::{
         device::VirtioDevice,
         queue::{DescriptorFlag, VirtQueue},
     },
-    mem::page::{Page, allocate_raw_pages},
+    mem::page::{allocate_raw_pages, Page},
     object::capability::{ControlOps, MemoryMappingOps, Selectable},
-    timer::{TimerHandler, add_timer, get_tick, ms_to_ticks},
+    timer::{add_timer, get_tick, ms_to_ticks, TimerHandler},
 };
 use core::ptr;
 
@@ -442,7 +442,7 @@ impl VirtioGpuDeviceCore {
             Box::from_raw(core::ptr::slice_from_raw_parts_mut(fb_pages_ptr, fb_pages))
         });
         self.attach_backing_to_resource(resource_id, fb_addr, fb_size)?; // Attach backing memory to the resource
-        // Set scanout to use this framebuffer
+                                                                         // Set scanout to use this framebuffer
         let scanout_cmd = VirtioGpuSetScanout {
             hdr: VirtioGpuCtrlHdr {
                 hdr_type: VIRTIO_GPU_CMD_SET_SCANOUT,

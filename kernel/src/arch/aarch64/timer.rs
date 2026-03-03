@@ -7,7 +7,7 @@ use core::arch::asm;
 use crate::{
     arch::get_cpu,
     arch::interrupt,
-    interrupt::{InterruptManager, controllers::LocalInterruptType},
+    interrupt::{controllers::LocalInterruptType, InterruptManager},
 };
 
 pub fn timer_init() {

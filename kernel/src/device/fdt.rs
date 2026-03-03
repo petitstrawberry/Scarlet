@@ -382,7 +382,11 @@ impl<'a> FdtManager<'a> {
             count += 1;
         }
 
-        if count == 0 { None } else { Some(count) }
+        if count == 0 {
+            None
+        } else {
+            Some(count)
+        }
     }
 }
 

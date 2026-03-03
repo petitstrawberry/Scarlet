@@ -5,10 +5,10 @@
 
 use core::any::Any;
 
-use crate::object::capability::Selectable;
 use crate::object::capability::control::ControlOps;
 use crate::object::capability::memory_mapping::MemoryMappingOps;
 use crate::object::capability::stream::{StreamError, StreamOps};
+use crate::object::capability::Selectable;
 
 pub mod syscall;
 

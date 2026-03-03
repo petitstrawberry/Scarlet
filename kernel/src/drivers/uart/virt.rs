@@ -7,7 +7,6 @@ use spin::{Mutex, RwLock};
 
 use crate::{
     device::{
-        Device, DeviceInfo, DeviceType,
         char::CharDevice,
         events::{
             DeviceEventEmitter, DeviceEventListener, EventCapableDevice, InputEvent,
@@ -15,8 +14,9 @@ use crate::{
         },
         manager::{DeviceManager, DriverPriority},
         platform::{
-            PlatformDeviceDriver, PlatformDeviceInfo, resource::PlatformDeviceResourceType,
+            resource::PlatformDeviceResourceType, PlatformDeviceDriver, PlatformDeviceInfo,
         },
+        Device, DeviceInfo, DeviceType,
     },
     driver_initcall,
     interrupt::{InterruptId, InterruptManager},

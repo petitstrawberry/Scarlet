@@ -800,7 +800,7 @@ mod tests {
     #[test_case]
     fn test_socket_file_creation() {
         use crate::fs::SocketFileInfo;
-        use crate::network::{NetworkManager, SocketProtocol, SocketType, local::LocalSocket};
+        use crate::network::{local::LocalSocket, NetworkManager, SocketProtocol, SocketType};
         use alloc::sync::Arc;
 
         // Initialize network manager

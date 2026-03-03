@@ -16,11 +16,11 @@ use super::mmu::{
 use super::switch::arch_run_guest_loop;
 use super::trap::arch_guest_trap_handler;
 use crate::arch::hv::csr::{self, HypervisorCsrState};
-use crate::arch::{Arch, Trapframe, set_next_mode, set_trapvector};
+use crate::arch::{set_next_mode, set_trapvector, Arch, Trapframe};
 use crate::hypervisor::memory::{MemorySlot, MemorySlotFlags, MemorySlotManager};
 use crate::hypervisor::types::{InterruptType, VmExit};
 use crate::hypervisor::vcpu::{VcpuId, VcpuObject};
-use crate::hypervisor::vm::{ScarletVmMemoryRegion, VmId, VmObject, vm_ctl};
+use crate::hypervisor::vm::{vm_ctl, ScarletVmMemoryRegion, VmId, VmObject};
 use crate::library::std::print;
 use crate::object::capability::ControlOps;
 use crate::task::mytask;
@@ -413,7 +413,7 @@ fn translate_user_ptr(arg: usize) -> Result<usize, &'static str> {
         .ok_or("Invalid user pointer")
 }
 
-use crate::hypervisor::vcpu::{VcpuOneReg, vcpu_ctl};
+use crate::hypervisor::vcpu::{vcpu_ctl, VcpuOneReg};
 
 impl ControlOps for Riscv64VcpuObject {
     fn control(&self, command: u32, arg: usize) -> Result<i32, &'static str> {
