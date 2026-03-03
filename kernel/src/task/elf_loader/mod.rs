@@ -44,6 +44,7 @@ use crate::environment::PAGE_SIZE;
 use crate::fs::{FileObject, SeekFrom};
 use crate::mem::page::{allocate_raw_pages, free_raw_pages};
 use crate::task::{ManagedPage, Task};
+use crate::vm::addr::phys_to_virt;
 use crate::vm::vmem::{MemoryArea, VirtualMemoryMap, VirtualMemoryPermission, VirtualMemoryRegion};
 use alloc::boxed::Box;
 use alloc::string::{String, ToString};
@@ -1057,7 +1058,7 @@ fn load_elf_into_task_static(
                     Some(paddr) => unsafe {
                         core::ptr::copy_nonoverlapping(
                             segment_data.as_ptr(),
-                            paddr as *mut u8,
+                            phys_to_virt(paddr) as *mut u8,
                             ph.p_filesz as usize,
                         );
                     },
@@ -1152,7 +1153,7 @@ fn load_program_headers_into_memory(
         Some(paddr) => unsafe {
             core::ptr::copy_nonoverlapping(
                 phdr_data.as_ptr(),
-                paddr as *mut u8,
+                phys_to_virt(paddr) as *mut u8,
                 phdr_table_size as usize,
             );
         },
@@ -1341,7 +1342,7 @@ pub fn setup_auxiliary_vector_on_stack(
         // Translate to physical address and write
         match task.vm_manager.translate_vaddr(vaddr) {
             Some(paddr) => unsafe {
-                let ptr = paddr as *mut AuxVec;
+                let ptr = phys_to_virt(paddr) as *mut AuxVec;
                 ptr.write(*entry);
             },
             None => {

@@ -35,6 +35,7 @@ use crate::drivers::virtio::features::{
     VIRTIO_F_ANY_LAYOUT, VIRTIO_RING_F_EVENT_IDX, VIRTIO_RING_F_INDIRECT_DESC,
 };
 use crate::object::capability::{MemoryMappingOps, Selectable};
+use crate::vm::addr::virt_to_phys;
 use crate::{
     device::block::{
         BlockDevice,
@@ -773,7 +774,7 @@ impl VirtioDevice for VirtioBlockDevice {
         }
 
         let virtqueues = self.virtqueues.lock();
-        Some(virtqueues[queue_idx].get_raw_ptr() as u64)
+        Some(virt_to_phys(virtqueues[queue_idx].get_raw_ptr() as usize) as u64)
     }
 
     fn get_queue_driver_addr(&self, queue_idx: usize) -> Option<u64> {
@@ -782,7 +783,7 @@ impl VirtioDevice for VirtioBlockDevice {
         }
 
         let virtqueues = self.virtqueues.lock();
-        Some(virtqueues[queue_idx].avail.flags as *const _ as u64)
+        Some(virt_to_phys(virtqueues[queue_idx].avail.flags as *const _ as usize) as u64)
     }
 
     fn get_queue_device_addr(&self, queue_idx: usize) -> Option<u64> {
@@ -791,7 +792,7 @@ impl VirtioDevice for VirtioBlockDevice {
         }
 
         let virtqueues = self.virtqueues.lock();
-        Some(virtqueues[queue_idx].used.flags as *const _ as u64)
+        Some(virt_to_phys(virtqueues[queue_idx].used.flags as *const _ as usize) as u64)
     }
 }
 
