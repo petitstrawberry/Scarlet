@@ -37,17 +37,21 @@ use core::panic;
 
 use alloc::{boxed::Box, collections::vec_deque::VecDeque, string::ToString};
 
+use crate::arch::ArchCpuState;
+use crate::arch::get_trapvector;
+use crate::arch::set_next_mode;
 use crate::print;
 use crate::println;
+use crate::task::TaskType;
+use crate::{arch::set_trapvector, vm::get_trampoline_trap_vector};
 use crate::{
     arch::{
-        Arch, Trapframe, get_cpu, get_user_trap_handler, instruction::idle, set_next_mode,
-        set_trapvector, trap::user::arch_switch_to_user_space,
+        Arch, Trapframe, get_cpu, get_user_trap_handler, instruction::idle,
+        trap::user::arch_switch_to_user,
     },
     environment::MAX_NUM_CPUS,
     task::{TaskState, new_kernel_task, wake_parent_waiters, wake_task_waiters},
     timer::get_kernel_timer,
-    vm::get_trampoline_trap_vector,
 };
 
 use crate::task::Task;
@@ -602,19 +606,53 @@ impl Scheduler {
                 let current_task = self.get_task_by_id(current_task_id).unwrap();
                 current_task.vcpu.lock().store(trapframe);
 
-                // Perform kernel context switch
-                self.kernel_context_switch(cpu_id, current_task_id, next_task_id);
-                // NOTE: After this point, the current task will not execute until it is scheduled again
+                #[cfg(all(feature = "hypervisor", target_arch = "riscv64"))]
+                {
+                    // let (guest_vcpu_switch_data, hypervisor_switch_data) =
+                    //     match current_task.vcpu.lock().get_mode() {
+                    //         crate::arch::Mode::GuestKernel | crate::arch::Mode::GuestUser => {
+                    //             use crate::arch::hv::switch::HypervisorSwitchData;
+                    //             use crate::arch::hv::switch::VcpuSwitchData;
 
-                // Restore trapframe of same task
+                    //             (
+                    //                 Some(VcpuSwitchData::save()),
+                    //                 Some(HypervisorSwitchData::save()),
+                    //             )
+                    //         }
+                    //         _ => (None, None),
+                    //     };
+
+                    use crate::arch::hv::switch::{HypervisorSwitchData, VcpuSwitchData};
+
+                    // Perform kernel context switch
+                    self.kernel_context_switch(cpu_id, current_task_id, next_task_id);
+                    // NOTE: After this point, the current task will not execute until it is scheduled again
+
+                    // if let Some(guest_vcpu_switch_data) = guest_vcpu_switch_data.as_ref() {
+                    //     guest_vcpu_switch_data.restore();
+                    // }
+                    // if let Some(hypervisor_switch_data) = hypervisor_switch_data.as_ref() {
+                    //     hypervisor_switch_data.restore();
+                    // }
+                }
+                #[cfg(not(all(feature = "hypervisor", target_arch = "riscv64")))]
+                {
+                    // Perform kernel context switch
+                    self.kernel_context_switch(cpu_id, current_task_id, next_task_id);
+                    // NOTE: After this point, the current task will not execute until it is scheduled again
+                }
+
+                // Restore vcpu state and set mode
                 let current_task = self.get_task_by_id(current_task_id).unwrap();
-                Self::setup_task_execution(get_cpu(), current_task);
+                // let trapframe = current_task.get_trapframe();
+                current_task.vcpu.lock().switch(trapframe);
+                set_next_mode(current_task.vcpu.lock().get_mode());
             } else {
                 // No current task (e.g., first scheduling), just switch to next task
                 let next_task = self.get_task_by_id(next_task_id).unwrap();
                 // crate::println!("[SCHED] Setting up task {} for execution", next_task_id);
                 Self::setup_task_execution(get_cpu(), next_task);
-                arch_switch_to_user_space(next_task.get_trapframe()); // Force switch to user space
+                arch_switch_to_user(next_task.get_trapframe()); // Force switch to user / guest space
             }
         }
 
@@ -623,7 +661,7 @@ impl Scheduler {
             // Process pending events before dispatching task
             let _ = current_task.process_pending_events();
         }
-        // Schedule returns - trap handler will call arch_switch_to_user_space()
+        // Schedule returns - trap handler will call arch_switch_to_user()
     }
 
     /// Start the scheduler and return the first runnable task ID (if any).
@@ -843,8 +881,8 @@ impl Scheduler {
         // crate::println!("[SCHED] CPU{}: Switching kernel context from Task {} to Task {}", cpu_id, from_task_id, to_task_id);
         if from_task_id != to_task_id {
             // Find tasks in all queues (ready, blocked, zombie)
-            let mut from_ctx_ptr: *mut crate::arch::KernelContext = core::ptr::null_mut();
-            let mut to_ctx_ptr: *const crate::arch::KernelContext = core::ptr::null();
+            let mut from_ctx_ptr: *mut crate::arch::context::KernelContext = core::ptr::null_mut();
+            let mut to_ctx_ptr: *const crate::arch::context::KernelContext = core::ptr::null();
 
             {
                 if let Some(from_task) = TaskPool::get_task_mut(from_task_id) {
@@ -866,11 +904,28 @@ impl Scheduler {
             }
 
             if !from_ctx_ptr.is_null() && !to_ctx_ptr.is_null() {
-                // Perform kernel context switch
+                let cpu = get_cpu();
+                let saved_arch_cpu_state = ArchCpuState::save(cpu);
+                let saved_trapvector = get_trapvector();
+
+                #[cfg(feature = "hypervisor")]
+                let guest_vcpu_switch_data = crate::arch::hv::switch::VcpuSwitchData::save();
+                #[cfg(feature = "hypervisor")]
+                let hypervisor_switch_data = crate::arch::hv::switch::HypervisorSwitchData::save();
+
                 unsafe {
                     crate::arch::switch::switch_to(from_ctx_ptr, to_ctx_ptr);
                 }
 
+                #[cfg(feature = "hypervisor")]
+                {
+                    guest_vcpu_switch_data.restore();
+                    hypervisor_switch_data.restore();
+                }
+
+                let cpu = get_cpu();
+                saved_arch_cpu_state.restore(cpu);
+                set_trapvector(saved_trapvector);
                 // Execution resumes here when this task is rescheduled
                 if let Some(from_task) = TaskPool::get_task_mut(from_task_id) {
                     #[cfg(feature = "user-fpu")]
@@ -917,8 +972,9 @@ impl Scheduler {
 
         cpu.set_trap_handler(get_user_trap_handler());
         cpu.set_next_address_space(task.vm_manager.get_asid());
-        set_next_mode(task.vcpu.lock().get_mode());
-        // Setup trap vector
+        let next_mode = task.vcpu.lock().get_mode();
+        set_next_mode(next_mode);
+
         set_trapvector(get_trampoline_trap_vector());
 
         // crate::early_println!("[SCHED]   after  CPU {:#x?}", cpu);

@@ -92,11 +92,13 @@ This interoperability is possible because all ABIs share the same underlying ker
 > - 🧪 **xv6 RISC-V 64-bit ABI**: Working with Cross-ABI execution capabilities!
 > - 🧩 **Linux RISC-V 64-bit ABI (partial)**: Buildroot-based userland demo available; syscall coverage expanding
 > - ✅ **Cross-ABI Pipes**: Already functional between xv6 and Scarlet environments
+> - 🧪 **Built-in Hypervisor (SHV)**: RISC-V H-extension (experimental, many features missing); AArch64 not implemented - [Status](docs/hypervisor/status.md)
 
 
 ## Key Features
 
 - **Multi-ABI Support**: Transparent execution of binaries from different operating systems
+- **Built-in Hypervisor (SHV)**: Type-2 virtual machine monitor with RISC-V H-extension and AArch64 virtualization support - [Design](docs/hypervisor/type2-design.md)
 - **Runtime Delegation**: Execute binaries via userland runtimes (Wasm, emulators, etc.) - [Details](docs/runtime-delegation.md)
 - **Service Management**: Stem daemon (stemd) provides systemd-like service management with dependency resolution - [Details](docs/stemd.md)
 - **Container Runtime**: Complete filesystem isolation with namespace support

@@ -34,7 +34,7 @@ pub unsafe extern "C" fn aarch64_first_switch_to_user_naked(
     );
 }
 
-#[unsafe(link_section = ".trampoline.text")]
+#[unsafe(link_section = ".trampoline.text.0")]
 #[unsafe(export_name = "_user_trap_entry")]
 #[unsafe(naked)]
 pub extern "C" fn _user_trap_entry() {
@@ -178,10 +178,10 @@ pub extern "C" fn _user_trap_entry() {
     }
 }
 
-#[unsafe(link_section = ".trampoline.text")]
-#[unsafe(export_name = "_user_trap_exit")]
+#[unsafe(link_section = ".trampoline.text.1")]
+#[unsafe(export_name = "_switch_to_user")]
 #[unsafe(naked)]
-pub extern "C" fn _user_trap_exit(_trapframe: &mut Trapframe) -> ! {
+pub extern "C" fn _switch_to_user(_trapframe: &mut Trapframe) -> ! {
     unsafe {
         naked_asm!(
             r#"
@@ -249,8 +249,8 @@ pub extern "C" fn _user_trap_exit(_trapframe: &mut Trapframe) -> ! {
     }
 }
 
-#[unsafe(export_name = "arch_switch_to_user_space")]
-pub fn arch_switch_to_user_space(trapframe: &mut Trapframe) -> ! {
+#[unsafe(export_name = "arch_switch_to_user")]
+pub fn arch_switch_to_user(trapframe: &mut Trapframe) -> ! {
     let addr = trapframe as *mut Trapframe as usize;
 
     crate::arch::configure_user_entry(
@@ -260,10 +260,11 @@ pub fn arch_switch_to_user_space(trapframe: &mut Trapframe) -> ! {
         },
     );
 
-    // Calculate the address of _user_trap_exit in the trampoline
-    let trap_exit_offset = _user_trap_exit as usize - _user_trap_entry as usize;
+    // Calculate the address of _switch_to_user in the trampoline
+    let trap_exit_offset = (_switch_to_user as *const () as usize)
+        .wrapping_sub(_user_trap_entry as *const () as usize);
     let trampoline_base = get_trampoline_trap_vector();
-    let trap_exit_addr = trampoline_base + trap_exit_offset;
+    let trap_exit_addr = trampoline_base.wrapping_add(trap_exit_offset);
     set_trapvector(trampoline_base);
 
     unsafe {
@@ -292,5 +293,5 @@ pub extern "C" fn arch_user_trap_handler(trapframe: &mut Trapframe, trap_kind: u
         arch_exception_handler(trapframe, trap_kind);
     }
 
-    arch_switch_to_user_space(trapframe);
+    arch_switch_to_user(trapframe);
 }

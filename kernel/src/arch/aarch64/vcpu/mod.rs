@@ -6,12 +6,7 @@ use crate::arch::Trapframe;
 
 use super::IntRegisters;
 use super::fpu::FpuContext;
-
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum Mode {
-    User,
-    Kernel,
-}
+use crate::arch::Mode;
 
 #[derive(Debug, Clone)]
 pub struct Vcpu {
@@ -32,8 +27,8 @@ pub struct Vcpu {
 impl Vcpu {
     pub fn new(mode: Mode) -> Self {
         let initial_pc = match mode {
-            Mode::User => 0x10000,
-            Mode::Kernel => 0,
+            Mode::User | Mode::GuestUser => 0x10000,
+            Mode::Kernel | Mode::GuestKernel => 0,
         };
         Vcpu {
             iregs: IntRegisters::new(),
@@ -68,6 +63,10 @@ impl Vcpu {
 
     pub fn get_mode(&self) -> Mode {
         self.mode
+    }
+
+    pub fn set_mode(&mut self, mode: Mode) {
+        self.mode = mode;
     }
 
     pub fn reset_iregs(&mut self) {

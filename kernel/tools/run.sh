@@ -83,7 +83,7 @@ TEMP_OUTPUT=$(mktemp)
 qemu-system-riscv64 \
     -machine virt \
     -bios default \
-    -m 4G \
+    -m 8G \
     -nographic \
     -serial mon:stdio \
     --no-reboot \

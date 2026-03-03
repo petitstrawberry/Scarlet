@@ -100,6 +100,7 @@ pub mod env;
 pub mod ffi;
 pub mod fs;
 pub mod handle;
+pub mod hypervisor;
 pub mod io;
 pub mod ipc;
 pub mod network;

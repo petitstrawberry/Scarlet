@@ -9,6 +9,7 @@ use core::sync::atomic::{AtomicBool, Ordering};
 
 extern crate alloc;
 pub use alloc::sync::Arc;
+pub use spin::RwLock;
 
 // reexport other sync primitives if needed
 mod export {

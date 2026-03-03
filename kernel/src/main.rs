@@ -259,6 +259,8 @@ pub mod earlycon;
 pub mod environment;
 pub mod executor;
 pub mod fs;
+#[cfg(feature = "hypervisor")]
+pub mod hypervisor;
 pub mod initcall;
 pub mod interrupt;
 pub mod ipc;
@@ -689,6 +691,12 @@ pub extern "C" fn start_kernel(boot_info: &BootInfo) -> ! {
         }
     }
 
+    #[cfg(feature = "hypervisor")]
+    {
+        crate::hypervisor::init_hv();
+        crate::hypervisor::init_hv_per_cpu(cpu_id);
+    }
+
     /* Make init task */
     early_println!("[boot] Creating initial user task...");
     let mut task = new_user_task("init".to_string(), 0);
@@ -769,6 +777,11 @@ pub extern "C" fn start_kernel(boot_info: &BootInfo) -> ! {
 #[unsafe(no_mangle)]
 pub extern "C" fn start_ap(cpu_id: usize) {
     println!("[Scarlet Kernel] CPU {} is up and running", cpu_id);
+
+    #[cfg(feature = "hypervisor")]
+    {
+        crate::hypervisor::init_hv_per_cpu(cpu_id);
+    }
 
     loop {}
 }

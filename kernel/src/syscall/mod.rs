@@ -132,6 +132,30 @@ fn sys_profiler_dump(tf: &mut Trapframe) -> usize {
     0
 }
 
+#[cfg(feature = "hypervisor")]
+use crate::hypervisor::syscall::{sys_shv_vcpu_create, sys_shv_vcpu_run, sys_shv_vm_create};
+
+#[cfg(not(feature = "hypervisor"))]
+fn sys_shv_vm_create(tf: &mut Trapframe) -> usize {
+    use crate::task::mytask;
+    tf.increment_pc_next(mytask().unwrap());
+    usize::MAX
+}
+
+#[cfg(not(feature = "hypervisor"))]
+fn sys_shv_vcpu_create(tf: &mut Trapframe) -> usize {
+    use crate::task::mytask;
+    tf.increment_pc_next(mytask().unwrap());
+    usize::MAX
+}
+
+#[cfg(not(feature = "hypervisor"))]
+fn sys_shv_vcpu_run(tf: &mut Trapframe) -> usize {
+    use crate::task::mytask;
+    tf.increment_pc_next(mytask().unwrap());
+    usize::MAX
+}
+
 syscall_table! {
     Invalid = 0 => |_: &mut Trapframe| {
         0
@@ -263,4 +287,9 @@ syscall_table! {
 
     // === Debug/Profiler Operations ===
     ProfilerDump = 999 => sys_profiler_dump, // Dump profiler statistics (debug only)
+
+    // === Hypervisor Operations (Scarlet Native) ===
+    ShvVmCreate = 1100 => sys_shv_vm_create,
+    ShvVcpuCreate = 1101 => sys_shv_vcpu_create,
+    ShvVcpuRun = 1102 => sys_shv_vcpu_run,
 }

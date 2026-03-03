@@ -95,6 +95,7 @@ cargo make debug-test-riscv64
 - **User Programs**: `user/bin/` - User space binaries
 - **Build System**: Uses `cargo-make` (Makefile.toml)
 - **Architectures**: RISC-V 64-bit (primary), AArch64 (experimental)
+- **Hypervisor**: `kernel/src/hypervisor/` - SHV kernel subsystem; `user/bin/src/ushv/` - U-SHV userspace VMM
 
 ### Rust Edition
 
@@ -219,6 +220,15 @@ fn test_alloc_free_desc() {
 - Use `static` with proper interior mutability (e.g., `Mutex`)
 - Feature flags in `[features]` section of Cargo.toml
 - Architecture-specific code in `arch/` module
+
+### Feature Flags
+
+The kernel uses feature flags to enable optional functionality:
+
+- `hypervisor`: Enable built-in hypervisor (SHV) support for RISC-V H-extension and AArch64 virtualization
+- `user-fpu`: Enable FPU support for user tasks
+- `user-vector`: Enable vector extension support for user tasks
+- `profiler`: Enable profiling support
 
 ### Memory Management
 

@@ -12,6 +12,8 @@ pub mod boot;
 pub mod context;
 pub mod earlycon;
 pub mod fpu;
+#[cfg(feature = "hypervisor")]
+pub mod hv;
 pub mod instruction;
 pub mod interrupt;
 pub mod kernel;
@@ -120,17 +122,17 @@ pub fn first_switch_to_user(task: &mut Task) -> ! {
     }
 
     // Compute trampoline exit target.
-    let trap_exit_offset = crate::arch::aarch64::trap::user::_user_trap_exit as usize
-        - crate::arch::aarch64::trap::user::_user_trap_entry as usize;
+    let trap_exit_offset = (crate::arch::aarch64::trap::user::_switch_to_user as usize)
+        .wrapping_sub(crate::arch::aarch64::trap::user::_user_trap_entry as usize);
     let trampoline_base = crate::vm::get_trampoline_trap_vector();
-    let trap_exit_addr = trampoline_base + trap_exit_offset;
+    let trap_exit_addr = trampoline_base.wrapping_add(trap_exit_offset);
 
     // Program per-CPU arch pointer and VBAR to the trampoline right before the jump.
     let cpu_id = get_current_cpu_id();
     set_arch(crate::vm::get_trampoline_arch(cpu_id));
     set_trapvector(trampoline_base);
 
-    let trapframe_addr = kernel_sp as usize - core::mem::size_of::<Trapframe>();
+    let trapframe_addr = (kernel_sp as usize).wrapping_sub(core::mem::size_of::<Trapframe>());
 
     // Final transition must not touch the stack after switching SP.
     unsafe {
@@ -329,6 +331,10 @@ pub fn get_user_trapvector_paddr() -> usize {
     trap::user::_user_trap_entry as usize
 }
 
+pub fn get_guest_trapvector_paddr() -> usize {
+    todo!("get_guest_trapvector_paddr not implemented for aarch64")
+}
+
 pub fn get_kernel_trapvector_paddr() -> usize {
     trap::kernel::_kernel_trap_entry as usize
 }
@@ -379,6 +385,18 @@ pub fn set_trapvector(addr: usize) {
             options(nostack)
         );
     }
+}
+
+pub fn get_trapvector() -> usize {
+    let vbar: usize;
+    unsafe {
+        asm!(
+            "mrs {0}, vbar_el1",
+            out(reg) vbar,
+            options(nostack)
+        );
+    }
+    vbar
 }
 
 /// Apply user-entry options for the upcoming `eret`.
@@ -469,11 +487,11 @@ pub fn get_current_cpu_id() -> usize {
     (mpidr & 0xFF) as usize
 }
 
-pub fn set_next_mode(mode: vcpu::Mode) {
-    // AArch64 return mode is currently chosen in the trampoline (`_user_trap_exit`).
+pub fn set_next_mode(_mode: crate::arch::Mode) {
+    // AArch64 return mode is currently chosen in the trampoline (`_switch_to_user`).
     // Keep this as a no-op so shared scheduler code can call it without
     // architecture-specific branching or noisy TODO logs.
-    let _ = mode;
+    let _ = _mode;
 }
 
 /// Memory barrier for device/MMIO (I/O) operations.
@@ -669,6 +687,28 @@ pub fn reboot() -> ! {
     }
 }
 
+pub struct ArchCpuState {
+    kernel_stack: u64,
+    kernel_trap: u64,
+    ttbr0: u64,
+}
+
+impl ArchCpuState {
+    pub fn save(cpu: &Aarch64) -> Self {
+        ArchCpuState {
+            kernel_stack: cpu.kernel_stack,
+            kernel_trap: cpu.kernel_trap,
+            ttbr0: cpu.ttbr0,
+        }
+    }
+
+    pub fn restore(&self, cpu: &mut Aarch64) {
+        cpu.kernel_stack = self.kernel_stack;
+        cpu.kernel_trap = self.kernel_trap;
+        cpu.ttbr0 = self.ttbr0;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -676,7 +716,7 @@ mod tests {
     /// Test architecture-specific features for AArch64
     #[test_case]
     fn test_aarch64_specific_features() {
-        use crate::arch::aarch64::vcpu::Mode;
+        use crate::arch::Mode;
 
         // Test mode switching
         set_next_mode(Mode::Kernel);

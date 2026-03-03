@@ -99,3 +99,31 @@ pub fn munmap(addr: usize, length: usize) -> Result<(), ()> {
         Ok(())
     }
 }
+
+/// Map anonymous memory into the current process's address space.
+///
+/// # Arguments
+/// * `addr` - Hint for the address (0 for any)
+/// * `length` - Length of the mapping
+/// * `prot` - Protection flags (prot::* constants)
+/// * `flags` - Mapping flags (flags::* constants, ANONYMOUS is always added)
+///
+/// # Returns
+/// * `Ok(addr)` - Address of the mapping
+/// * `Err(())` - Mapping failed
+pub fn mmap_anonymous(addr: usize, length: usize, prot: usize, flags: usize) -> Result<usize, ()> {
+    let result = syscall6(
+        Syscall::MemoryMap,
+        0,
+        addr,
+        length,
+        prot,
+        flags | flags::ANONYMOUS,
+        0,
+    );
+    if result == usize::MAX {
+        Err(())
+    } else {
+        Ok(result)
+    }
+}

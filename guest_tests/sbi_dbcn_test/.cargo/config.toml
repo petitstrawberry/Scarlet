@@ -1,0 +1,8 @@
+[build]
+target = "riscv64gc-unknown-none-elf.json"
+
+[target.riscv64gc-unknown-none-elf]
+rustflags = ["-C", "link-arg=-Tlink.ld"]
+
+[unstable]
+build-std = ["core", "compiler_builtins"]

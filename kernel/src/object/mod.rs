@@ -19,6 +19,9 @@ use capability::{CloneOps, ControlOps, MemoryMappingOps, Selectable, StreamOps};
 #[cfg(feature = "network")]
 use crate::network::SocketObject;
 
+#[cfg(feature = "hypervisor")]
+use crate::hypervisor;
+
 /// Unified representation of all kernel-managed resources
 ///
 /// Note: Debug is not implemented for KernelObject because it contains
@@ -32,6 +35,10 @@ pub enum KernelObject {
     #[cfg(feature = "network")]
     Socket(Arc<dyn SocketObject>),
     SharedMemory(Arc<dyn SharedMemoryObject>),
+    #[cfg(feature = "hypervisor")]
+    HypervisorVm(hypervisor::VmRef),
+    #[cfg(feature = "hypervisor")]
+    HypervisorVcpu(hypervisor::VcpuRef),
     // Future variants will be added here:
     // MessageQueue(Arc<dyn MessageQueueObject>),
     // CharDevice(Arc<dyn CharDevice>),
@@ -110,6 +117,10 @@ impl KernelObject {
                 // Shared memory doesn't provide stream operations
                 None
             }
+            #[cfg(feature = "hypervisor")]
+            KernelObject::HypervisorVm(_) => None,
+            #[cfg(feature = "hypervisor")]
+            KernelObject::HypervisorVcpu(_) => None,
         }
     }
 
@@ -147,6 +158,10 @@ impl KernelObject {
                 // Shared memory doesn't provide stream IPC operations
                 None
             }
+            #[cfg(feature = "hypervisor")]
+            KernelObject::HypervisorVm(_) => None,
+            #[cfg(feature = "hypervisor")]
+            KernelObject::HypervisorVcpu(_) => None,
         }
     }
 
@@ -183,6 +198,10 @@ impl KernelObject {
                 // Shared memory doesn't provide file operations
                 None
             }
+            #[cfg(feature = "hypervisor")]
+            KernelObject::HypervisorVm(_) => None,
+            #[cfg(feature = "hypervisor")]
+            KernelObject::HypervisorVcpu(_) => None,
         }
     }
 
@@ -218,6 +237,10 @@ impl KernelObject {
                 // Shared memory doesn't provide pipe operations
                 None
             }
+            #[cfg(feature = "hypervisor")]
+            KernelObject::HypervisorVm(_) => None,
+            #[cfg(feature = "hypervisor")]
+            KernelObject::HypervisorVcpu(_) => None,
         }
     }
 
@@ -279,6 +302,10 @@ impl KernelObject {
                 // Shared memory doesn't implement CloneOps, use Arc::clone directly
                 None
             }
+            #[cfg(feature = "hypervisor")]
+            KernelObject::HypervisorVm(_) => None,
+            #[cfg(feature = "hypervisor")]
+            KernelObject::HypervisorVcpu(_) => None,
         }
     }
 
@@ -314,6 +341,16 @@ impl KernelObject {
             KernelObject::SharedMemory(_) => {
                 // Shared memory doesn't provide control operations
                 None
+            }
+            #[cfg(feature = "hypervisor")]
+            KernelObject::HypervisorVm(vm) => {
+                let control_ops: &dyn ControlOps = vm.as_ref();
+                Some(control_ops)
+            }
+            #[cfg(feature = "hypervisor")]
+            KernelObject::HypervisorVcpu(vcpu) => {
+                let control_ops: &dyn ControlOps = vcpu.as_ref();
+                Some(control_ops)
             }
         }
     }
@@ -352,6 +389,10 @@ impl KernelObject {
                 let memory_mapping_ops: &dyn MemoryMappingOps = shared_memory.as_ref();
                 Some(memory_mapping_ops)
             }
+            #[cfg(feature = "hypervisor")]
+            KernelObject::HypervisorVm(_) => None,
+            #[cfg(feature = "hypervisor")]
+            KernelObject::HypervisorVcpu(_) => None,
         }
     }
 
@@ -391,6 +432,10 @@ impl KernelObject {
                 let weak_shmem = Arc::downgrade(shared_memory);
                 Some(weak_shmem)
             }
+            #[cfg(feature = "hypervisor")]
+            KernelObject::HypervisorVm(_) => None,
+            #[cfg(feature = "hypervisor")]
+            KernelObject::HypervisorVcpu(_) => None,
         }
     }
 
@@ -446,6 +491,10 @@ impl KernelObject {
             KernelObject::EventChannel(_) => None,
             KernelObject::EventSubscription(_) => None,
             KernelObject::SharedMemory(_) => None,
+            #[cfg(feature = "hypervisor")]
+            KernelObject::HypervisorVm(_) => None,
+            #[cfg(feature = "hypervisor")]
+            KernelObject::HypervisorVcpu(_) => None,
         }
     }
 
@@ -474,6 +523,10 @@ impl KernelObject {
             KernelObject::SharedMemory(shared_memory) => {
                 KernelObject::SharedMemory(Arc::clone(shared_memory))
             }
+            #[cfg(feature = "hypervisor")]
+            KernelObject::HypervisorVm(vm) => KernelObject::HypervisorVm(Arc::clone(vm)),
+            #[cfg(feature = "hypervisor")]
+            KernelObject::HypervisorVcpu(vcpu) => KernelObject::HypervisorVcpu(Arc::clone(vcpu)),
         }
     }
 }
@@ -499,6 +552,12 @@ impl Clone for KernelObject {
                 }
                 KernelObject::SharedMemory(shared_memory) => {
                     KernelObject::SharedMemory(Arc::clone(shared_memory))
+                }
+                #[cfg(feature = "hypervisor")]
+                KernelObject::HypervisorVm(vm) => KernelObject::HypervisorVm(Arc::clone(vm)),
+                #[cfg(feature = "hypervisor")]
+                KernelObject::HypervisorVcpu(vcpu) => {
+                    KernelObject::HypervisorVcpu(Arc::clone(vcpu))
                 }
             }
         }

@@ -112,7 +112,7 @@ dependencies = ["build-kernel-debug-aarch64"]
 description = "Build the kernel in debug mode (RISC-V)"
 cwd = "kernel"
 command = "cargo"
-args = ["build", "--target", "targets/riscv64gc-unknown-none-elf.json"]
+args = ["build", "--target", "targets/riscv64gc-unknown-none-elf.json", "--features", "hypervisor"]
 
 [tasks.build-kernel-debug-aarch64]
 description = "Build the kernel in debug mode (AArch64)"
@@ -124,7 +124,7 @@ args = ["build", "--target", "targets/aarch64-unknown-none-elf.json"]
 description = "Build the kernel in release mode (RISC-V)"
 cwd = "kernel"
 command = "cargo"
-args = ["build", "--release", "--target", "targets/riscv64gc-unknown-none-elf.json"]
+args = ["build", "--release", "--target", "targets/riscv64gc-unknown-none-elf.json", "--features", "hypervisor"]
 
 [tasks.build-kernel-release-aarch64]
 description = "Build the kernel in release mode (AArch64)"

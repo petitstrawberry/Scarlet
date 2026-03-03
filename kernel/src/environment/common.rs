@@ -10,10 +10,7 @@ pub const DEAFAULT_MAX_TASK_DATA_SIZE: usize = 0xffff_ffff_ffff_ffff; // Unlimit
 pub const DEAFAULT_MAX_TASK_TEXT_SIZE: usize = 0xffff_ffff_ffff_ffff; // Unlimited
 
 // Per-task kernel stack configuration
-#[cfg(not(any(debug_assertions, test)))]
-pub const TASK_KERNEL_STACK_SIZE: usize = 0x4000; // 16KiB per task
-#[cfg(any(debug_assertions, test))]
-pub const TASK_KERNEL_STACK_SIZE: usize = 0x8000; // 32KiB per task
+pub const TASK_KERNEL_STACK_SIZE: usize = 0x10000;
 
 // Number of slots available for concurrent tasks
 pub const KERNEL_KSTACK_SLOTS: usize = 256;

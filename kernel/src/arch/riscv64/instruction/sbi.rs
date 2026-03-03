@@ -102,6 +102,10 @@ pub fn sbi_set_timer(stime_value: u64) {
     let _ = sbi_call(Extension::Timer, 0, stime_value as usize, 0);
 }
 
+pub fn sbi_send_ipi(hart_mask: usize, hart_mask_base: usize) {
+    let _ = sbi_call(Extension::Ipi, 0, hart_mask, hart_mask_base);
+}
+
 pub fn sbi_system_reset(reset_type: u32, reset_reason: u32) -> ! {
     let _ = sbi_call(
         Extension::Srst,

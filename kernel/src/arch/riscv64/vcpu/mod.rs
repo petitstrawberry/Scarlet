@@ -8,14 +8,9 @@ use crate::arch::Trapframe;
 
 use super::IntRegisters;
 use super::fpu::{FpuContext, VectorContext};
+use crate::arch::Mode;
 
 use alloc::boxed::Box;
-
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum Mode {
-    User,
-    Kernel,
-}
 
 #[derive(Debug, Clone)]
 pub struct Vcpu {
@@ -65,6 +60,10 @@ impl Vcpu {
 
     pub fn get_mode(&self) -> Mode {
         self.mode
+    }
+
+    pub fn set_mode(&mut self, mode: Mode) {
+        self.mode = mode;
     }
 
     pub fn reset_iregs(&mut self) {

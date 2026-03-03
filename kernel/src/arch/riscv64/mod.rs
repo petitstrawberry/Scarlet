@@ -1,12 +1,13 @@
+use super::Mode;
 use core::arch::asm;
 use core::mem::transmute;
+use core::panic;
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use instruction::sbi::sbi_system_reset;
 use trap::kernel::_kernel_trap_entry;
 use trap::kernel::arch_kernel_trap_handler;
 use trap::user::_user_trap_entry;
 use trap::user::arch_user_trap_handler;
-use vcpu::Mode;
 
 use crate::arch::instruction::Instruction;
 use crate::arch::vm::get_root_pagetable;
@@ -21,6 +22,8 @@ pub mod context;
 pub mod earlycon;
 pub mod fdt;
 pub mod fpu;
+#[cfg(feature = "hypervisor")]
+pub mod hv;
 pub mod instruction;
 pub mod interrupt;
 pub mod kernel;
@@ -236,7 +239,7 @@ pub fn first_switch_to_user(task: &mut Task) -> ! {
     set_trapvector(crate::vm::get_trampoline_trap_vector());
 
     // Final transition via trampoline exit path.
-    crate::arch::riscv64::trap::user::arch_switch_to_user_space(task.get_trapframe())
+    crate::arch::riscv64::trap::user::arch_switch_to_user(task.get_trapframe())
 }
 
 /// Returns the device memory areas for RISC-V QEMU virt platform.
@@ -259,11 +262,12 @@ static mut CPUS: [Riscv64; MAX_NUM_CPUS] = [const { Riscv64::new(0) }; MAX_NUM_C
 #[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct Riscv64 {
-    scratch: u64,      // offeset: 0
-    pub hartid: u64,   // offset: 8
-    satp: u64,         // offset: 16
-    kernel_stack: u64, // offset: 24
-    kernel_trap: u64,  // offset: 32
+    scratch: u64,             // offeset: 0
+    pub hartid: u64,          // offset: 8
+    satp: u64,                // offset: 16
+    kernel_stack: u64,        // offset: 24
+    kernel_trap: u64,         // offset: 32
+    guest_trapframe_ptr: u64, // offset: 40
 }
 
 impl Riscv64 {
@@ -274,6 +278,7 @@ impl Riscv64 {
             kernel_stack: 0,
             kernel_trap: 0,
             satp: 0,
+            guest_trapframe_ptr: 0,
         }
     }
 
@@ -287,9 +292,21 @@ impl Riscv64 {
         addr
     }
 
+    pub fn get_kernel_stack(&self) -> u64 {
+        self.kernel_stack
+    }
+
     pub fn set_kernel_stack(&mut self, initial_top: u64) {
         self.kernel_stack = initial_top;
     }
+
+    // pub fn get_satp(&self) -> u64 {
+    //     self.satp
+    // }
+
+    // pub fn set_satp(&mut self, val: u64) {
+    //     self.satp = val;
+    // }
 
     pub fn set_trap_handler(&mut self, addr: usize) {
         self.kernel_trap = addr as u64;
@@ -304,6 +321,31 @@ impl Riscv64 {
 
     pub fn as_paddr_cpu(&mut self) -> &mut Riscv64 {
         unsafe { &mut CPUS[self.hartid as usize] }
+    }
+}
+
+pub struct ArchCpuState {
+    kernel_stack: u64,
+    trap_handler: u64,
+    satp: u64,
+    guest_trapframe_ptr: u64,
+}
+
+impl ArchCpuState {
+    pub fn save(cpu: &Riscv64) -> Self {
+        ArchCpuState {
+            kernel_stack: cpu.kernel_stack,
+            trap_handler: cpu.kernel_trap,
+            satp: cpu.satp,
+            guest_trapframe_ptr: cpu.guest_trapframe_ptr,
+        }
+    }
+
+    pub fn restore(&self, cpu: &mut Riscv64) {
+        cpu.kernel_stack = self.kernel_stack;
+        cpu.kernel_trap = self.trap_handler;
+        cpu.satp = self.satp;
+        cpu.guest_trapframe_ptr = self.guest_trapframe_ptr;
     }
 }
 
@@ -375,6 +417,10 @@ pub fn get_user_trapvector_paddr() -> usize {
     _user_trap_entry as usize
 }
 
+pub fn get_guest_trapvector_paddr() -> usize {
+    trap::user::_guest_trap_entry as usize
+}
+
 pub fn get_kernel_trapvector_paddr() -> usize {
     _kernel_trap_entry as usize
 }
@@ -431,6 +477,14 @@ pub fn set_trapvector(addr: usize) {
         in(reg) addr,
         );
     }
+}
+
+pub fn get_trapvector() -> usize {
+    let stvec: usize;
+    unsafe {
+        asm!("csrr {}, stvec", out(reg) stvec);
+    }
+    stvec
 }
 
 pub fn set_arch(addr: usize) {
@@ -537,36 +591,68 @@ pub fn get_cpu() -> &'static mut Riscv64 {
 
 pub fn set_next_mode(mode: Mode) {
     match mode {
-        Mode::User => {
-            unsafe {
-                // sstatus.spp = 0 (U-mode)
+        Mode::User => unsafe {
+            let mut sstatus: usize;
+            asm!(
+                "csrr {sstatus}, sstatus",
+                sstatus = out(reg) sstatus,
+            );
+            sstatus &= !(1 << 8);
+            asm!(
+                "csrw sstatus, {sstatus}",
+                sstatus = in(reg) sstatus,
+            );
+            #[cfg(feature = "hypervisor")]
+            asm!("csrc hstatus, {0}", in(reg) (1u64 << 7));
+        },
+        Mode::Kernel => unsafe {
+            let mut sstatus: usize;
+            asm!(
+                "csrr {sstatus}, sstatus",
+                sstatus = out(reg) sstatus,
+            );
+            sstatus |= 1 << 8;
+            asm!(
+                "csrw sstatus, {sstatus}",
+                sstatus = in(reg) sstatus,
+            );
+            #[cfg(feature = "hypervisor")]
+            asm!("csrc hstatus, {0}", in(reg) (1u64 << 7));
+        },
+        Mode::GuestUser => unsafe {
+            if cfg!(feature = "hypervisor") {
                 let mut sstatus: usize;
                 asm!(
                     "csrr {sstatus}, sstatus",
                     sstatus = out(reg) sstatus,
                 );
-                sstatus &= !(1 << 8); // Clear SPP bit
+                sstatus &= !(1 << 8);
                 asm!(
                     "csrw sstatus, {sstatus}",
                     sstatus = in(reg) sstatus,
                 );
+                asm!("csrs hstatus, {0}", in(reg) (1u64 << 7));
+            } else {
+                panic!("Guest mode not supported without hypervisor feature");
             }
-        }
-        Mode::Kernel => {
-            unsafe {
-                // sstatus.spp = 1 (S-mode)
+        },
+        Mode::GuestKernel => unsafe {
+            if cfg!(feature = "hypervisor") {
                 let mut sstatus: usize;
                 asm!(
                     "csrr {sstatus}, sstatus",
                     sstatus = out(reg) sstatus,
                 );
-                sstatus |= 1 << 8; // Set SPP bit
+                sstatus |= 1 << 8;
                 asm!(
                     "csrw sstatus, {sstatus}",
                     sstatus = in(reg) sstatus,
                 );
+                asm!("csrs hstatus, {0}", in(reg) (1u64 << 7));
+            } else {
+                panic!("Guest mode not supported without hypervisor feature");
             }
-        }
+        },
     }
 }
 

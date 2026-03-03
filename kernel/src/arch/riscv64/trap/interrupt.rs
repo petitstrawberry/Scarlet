@@ -25,6 +25,17 @@ fn handle_software_interrupt() {
 
 /// Handle timer interrupt from CLINT
 fn handle_timer_interrupt(trapframe: &mut Trapframe) {
+    #[cfg(feature = "hypervisor")]
+    {
+        if crate::arch::hv::trap::is_from_guest() {
+            use crate::arch::hv::switch::arch_guest_trap_exit;
+            unsafe {
+                arch_guest_trap_exit();
+            }
+            unreachable!();
+        }
+    }
+
     // Increment the global tick counter
     crate::timer::tick(trapframe);
 }

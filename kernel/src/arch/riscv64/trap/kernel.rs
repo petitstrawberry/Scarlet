@@ -6,7 +6,7 @@ use crate::arch::{Trapframe, get_cpu};
 use crate::environment::PAGE_SIZE;
 use crate::object::capability::memory_mapping::{AccessKind, AccessOp};
 use crate::sched::scheduler::get_scheduler;
-use crate::vm::get_kernel_vm_manager;
+use crate::vm::{get_kernel_vm_manager, vmem::VirtualMemoryPermission};
 
 #[unsafe(export_name = "_kernel_trap_entry")]
 #[unsafe(naked)]
@@ -133,6 +133,7 @@ fn arch_kernel_exception_handler(trapframe: &mut Trapframe, cause: usize) {
         /* Instruction page fault */
         12 => {
             let vaddr = trapframe.epc as usize;
+            crate::early_println!("[kernel trap] inst page fault at {:#x}", vaddr);
             let manager = get_kernel_vm_manager();
             match manager.search_memory_map(vaddr) {
                 Some(mmap) => match manager.get_root_page_table() {
@@ -160,14 +161,54 @@ fn arch_kernel_exception_handler(trapframe: &mut Trapframe, cause: usize) {
             }
 
             // Detect kernel stack overflow via guard-page hit
+            // Also handle kstack window accesses that might not have VMA
             if let Some(task) = get_scheduler().get_current_task(get_cpu().get_cpuid()) {
+                crate::println!(
+                    "[kpf] task found, checking kstack window for vaddr={:#x}",
+                    vaddr
+                );
                 if let Some((_slot, base)) = task.get_kernel_stack_window_base() {
-                    if vaddr >= base && vaddr < base + PAGE_SIZE {
+                    crate::println!("[kpf] kstack window base={:#x}", base);
+                    let kstack_start = base + crate::environment::PAGE_SIZE;
+                    let kstack_end = kstack_start + crate::environment::TASK_KERNEL_STACK_SIZE;
+                    crate::println!(
+                        "[kpf] kstack_start={:#x}, kstack_end={:#x}, vaddr={:#x}",
+                        kstack_start,
+                        kstack_end,
+                        vaddr
+                    );
+
+                    // Guard page hit
+                    if vaddr >= base && vaddr < kstack_start {
                         print_traplog(trapframe);
                         panic!(
                             "Kernel stack overflow detected: guard page hit at vaddr={:#x} (base={:#x})",
                             vaddr, base
                         );
+                    }
+
+                    // Kstack window access - map it directly
+                    // Also handle kernel_sp (one past end) since trap entry might touch it
+                    if vaddr >= kstack_start && vaddr <= kstack_end {
+                        let manager = get_kernel_vm_manager();
+                        if let Some(root_page_table) = manager.get_root_page_table() {
+                            let kernel_stack_area = task.get_kernel_stack_memory_area_paddr();
+                            let page_offset =
+                                (vaddr - kstack_start) & !(crate::environment::PAGE_SIZE - 1);
+                            let page_paddr = kernel_stack_area.start + page_offset;
+                            let page_vaddr = vaddr & !(crate::environment::PAGE_SIZE - 1);
+                            root_page_table.map(
+                                manager.get_asid(),
+                                page_vaddr,
+                                page_paddr,
+                                VirtualMemoryPermission::Read as usize
+                                    | VirtualMemoryPermission::Write as usize,
+                                true,
+                                false,
+                            );
+                            crate::println!("Mapped kstack page at vaddr: {:#x}", page_vaddr);
+                            return;
+                        }
                     }
                 }
             }
