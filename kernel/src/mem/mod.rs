@@ -6,6 +6,7 @@
 pub mod allocator;
 pub mod page;
 pub mod page_cache;
+pub mod pmm;
 
 use alloc::{boxed::Box, vec};
 

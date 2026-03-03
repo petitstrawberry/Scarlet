@@ -6,6 +6,7 @@ version = 4
 name = "Scarlet"
 version = "0.16.0"
 dependencies = [
+ "buddy_system_allocator 0.12.0",
  "fdt",
  "hashbrown",
  "lazy_static",
@@ -32,6 +33,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d44d578cadd17312c75e7d0ef489361f160ace58f7139aa32001fee1a51b89b5"
 dependencies = [
  "spin 0.9.8",
+]
+
+[[package]]
+name = "buddy_system_allocator"
+version = "0.12.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b672b945a3e4f4f40bfd4cd5ee07df9e796a42254ce7cd6d2599ad969244c44a"
+dependencies = [
+ "spin 0.10.0",
 ]
 
 [[package]]
@@ -94,7 +104,7 @@ version = "1.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "31a8e8ee8bbe463a97fb0d7bbd5a539a84923b5561f6e151f49895c349693669"
 dependencies = [
- "buddy_system_allocator",
+ "buddy_system_allocator 0.9.1",
  "spin 0.9.8",
 ]
 
