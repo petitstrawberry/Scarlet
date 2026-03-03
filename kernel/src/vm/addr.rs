@@ -6,28 +6,35 @@
 //!
 //! # Usage
 //!
-//! ```rust
+//! ```rust,ignore
 //! use crate::vm::addr::{virt_to_phys, phys_to_virt};
+//!
+//! // Example virtual address
+//! let vaddr: usize = 0x1000;
 //!
 //! // Convert virtual address to physical address
 //! let paddr = virt_to_phys(vaddr);
 //!
-//! // Convert physical address to virtual address
-//! let vaddr = phys_to_virt(paddr);
+//! // Convert physical address back to virtual address
+//! let vaddr_back = phys_to_virt(paddr);
 //! ```
 
 /// Converts a virtual address to a physical address.
+///
+/// **Note:** This function is specifically intended for addresses in the
+/// HHDM (Higher Half Direct Map) / direct-map region. It is **not** valid
+/// for arbitrary kernel virtual addresses (e.g., kernel image mappings).
 ///
 /// Currently assumes identity mapping (VA == PA).
 /// When Higher Half Kernel is enabled, this will subtract HHDM_OFFSET.
 ///
 /// # Arguments
 ///
-/// * `vaddr` - Virtual address to convert
+/// * `vaddr` - Virtual address in the direct-map region to convert
 ///
 /// # Returns
 ///
-/// Physical address corresponding to the given virtual address
+/// Physical address corresponding to the given direct-map virtual address
 #[inline(always)]
 pub const fn virt_to_phys(vaddr: usize) -> usize {
     // Identity mapping: VA == PA
@@ -38,6 +45,10 @@ pub const fn virt_to_phys(vaddr: usize) -> usize {
 
 /// Converts a physical address to a virtual address.
 ///
+/// **Note:** This function is specifically intended for producing addresses in
+/// the HHDM (Higher Half Direct Map) / direct-map region. It is **not** valid
+/// for obtaining arbitrary kernel virtual addresses (e.g., kernel image VAs).
+///
 /// Currently assumes identity mapping (VA == PA).
 /// When Higher Half Kernel is enabled, this will add HHDM_OFFSET.
 ///
@@ -47,7 +58,7 @@ pub const fn virt_to_phys(vaddr: usize) -> usize {
 ///
 /// # Returns
 ///
-/// Virtual address corresponding to the given physical address
+/// Direct-map virtual address corresponding to the given physical address
 #[inline(always)]
 pub const fn phys_to_virt(paddr: usize) -> usize {
     // Identity mapping: VA == PA
@@ -141,20 +152,35 @@ impl PhysAddr {
     }
 
     /// Returns true if the address is aligned to the given boundary.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `align` is 0 or not a power of two.
     #[inline(always)]
     pub const fn is_aligned(&self, align: usize) -> bool {
-        self.0 % align == 0
+        assert!(align != 0 && align.is_power_of_two());
+        self.0 & (align - 1) == 0
     }
 
     /// Returns the address aligned down to the given boundary.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `align` is 0 or not a power of two.
     #[inline(always)]
     pub const fn align_down(&self, align: usize) -> Self {
+        assert!(align != 0 && align.is_power_of_two());
         Self::new(self.0 & !(align - 1))
     }
 
     /// Returns the address aligned up to the given boundary.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `align` is 0 or not a power of two.
     #[inline(always)]
     pub const fn align_up(&self, align: usize) -> Self {
+        assert!(align != 0 && align.is_power_of_two());
         Self::new((self.0 + align - 1) & !(align - 1))
     }
 }
@@ -185,22 +211,79 @@ impl VirtAddr {
         PhysAddr::new(virt_to_phys(self.0))
     }
 
-    /// Returns true if the address is aligned to the given boundary.
+    /// Returns `true` if the address is aligned to the given boundary.
+    ///
+    /// # Parameters
+    ///
+    /// * `align` - Alignment in bytes. Must be non-zero and a power of two.
+    ///
+    /// If `align` is zero or not a power of two, this function:
+    ///
+    /// * Returns `false` in release builds.
+    /// * Triggers a debug assertion in debug builds and returns `false`.
     #[inline(always)]
     pub const fn is_aligned(&self, align: usize) -> bool {
-        self.0 % align == 0
+        if !Self::is_valid_align(align) {
+            debug_assert!(
+                false,
+                "VirtAddr::is_aligned called with invalid alignment (must be non-zero power of two)",
+            );
+            return false;
+        }
+        (self.0 & (align - 1)) == 0
     }
 
     /// Returns the address aligned down to the given boundary.
+    ///
+    /// # Parameters
+    ///
+    /// * `align` - Alignment in bytes. Must be non-zero and a power of two.
+    ///
+    /// If `align` is zero or not a power of two, this function:
+    ///
+    /// * Returns the original address in release builds.
+    /// * Triggers a debug assertion in debug builds and returns the original address.
     #[inline(always)]
     pub const fn align_down(&self, align: usize) -> Self {
+        if !Self::is_valid_align(align) {
+            debug_assert!(
+                false,
+                "VirtAddr::align_down called with invalid alignment (must be non-zero power of two)",
+            );
+            return *self;
+        }
         Self::new(self.0 & !(align - 1))
     }
 
     /// Returns the address aligned up to the given boundary.
+    ///
+    /// # Parameters
+    ///
+    /// * `align` - Alignment in bytes. Must be non-zero and a power of two.
+    ///
+    /// If `align` is zero or not a power of two, this function:
+    ///
+    /// * Returns the original address in release builds.
+    /// * Triggers a debug assertion in debug builds and returns the original address.
     #[inline(always)]
     pub const fn align_up(&self, align: usize) -> Self {
+        if !Self::is_valid_align(align) {
+            debug_assert!(
+                false,
+                "VirtAddr::align_up called with invalid alignment (must be non-zero power of two)",
+            );
+            return *self;
+        }
         Self::new((self.0 + align - 1) & !(align - 1))
+    }
+
+    /// Returns `true` if an alignment value is valid for use with
+    /// [`VirtAddr::is_aligned`], [`VirtAddr::align_down`], and [`VirtAddr::align_up`].
+    ///
+    /// A valid alignment is non-zero and a power of two.
+    #[inline(always)]
+    const fn is_valid_align(align: usize) -> bool {
+        align != 0 && align.is_power_of_two()
     }
 }
 
