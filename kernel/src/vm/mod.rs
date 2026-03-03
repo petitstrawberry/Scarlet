@@ -3,6 +3,12 @@
 //! This module provides the virtual memory abstraction for the kernel. It
 //! includes functions for managing virtual address spaces.
 
+pub mod addr;
+pub mod manager;
+pub mod vmem;
+
+pub use addr::{PhysAddr, VirtAddr, phys_to_virt, virt_to_phys};
+
 use manager::VirtualMemoryManager;
 use vmem::MemoryArea;
 use vmem::VirtualMemoryMap;
@@ -30,9 +36,6 @@ use core::sync::atomic::Ordering;
 use spin::{Mutex, Once};
 
 extern crate alloc;
-
-pub mod manager;
-pub mod vmem;
 
 static KERNEL_VM_MANAGER: Once<VirtualMemoryManager> = Once::new();
 

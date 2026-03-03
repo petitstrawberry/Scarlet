@@ -6,7 +6,7 @@ set -euo pipefail
 #  ARCH - target architecture (riscv64 or aarch64), defaults to riscv64
 
 : "${ARCH:=riscv64}"
-: "${BUILDROOT_DIR:=/opt/buildroot-${ARCH}}"
+: "${BUILDROOT_DIR:=/opt/buildroot}"
 : "${PREBUILT_DIR:=/opt/prebuilt}"
 : "${WORKDIR:=/opt}"
 

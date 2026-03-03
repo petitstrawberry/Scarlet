@@ -13,6 +13,7 @@ pub struct TarEntry {
     pub is_file: bool,
     pub is_dir: bool,
     pub is_symlink: bool,
+    pub link_target: Option<String>,
     pub data: Vec<u8>,
 }
 
@@ -75,6 +76,16 @@ impl PackageArchive {
                 Vec::new()
             };
 
+            // Read symlink target from header linkname field
+            let link_target = if is_symlink {
+                match header.linkname.as_str() {
+                    Ok(linkname) if !linkname.is_empty() => Some(String::from(linkname)),
+                    _ => None,
+                }
+            } else {
+                None
+            };
+
             entries.push(TarEntry {
                 name,
                 mode,
@@ -82,6 +93,7 @@ impl PackageArchive {
                 is_file,
                 is_dir,
                 is_symlink,
+                link_target,
                 data,
             });
         }
@@ -136,8 +148,9 @@ impl PackageArchive {
             } else if entry.is_dir {
                 let _ = fs::create_directory(&full_path);
             } else if entry.is_symlink {
-                let target = String::from_utf8_lossy(&entry.data).to_string();
-                let _ = fs::create_symlink(&full_path, &target);
+                if let Some(ref target) = entry.link_target {
+                    let _ = fs::create_symlink(&full_path, target);
+                }
             }
         }
 
@@ -183,9 +196,10 @@ impl PackageArchive {
                 let _ = fs::create_directory(&full_path);
                 installed_files.push(full_path.clone());
             } else if entry.is_symlink {
-                let target = String::from_utf8_lossy(&entry.data).to_string();
-                let _ = fs::create_symlink(&full_path, &target);
-                installed_files.push(full_path.clone());
+                if let Some(ref target) = entry.link_target {
+                    let _ = fs::create_symlink(&full_path, target);
+                    installed_files.push(full_path.clone());
+                }
             }
         }
 

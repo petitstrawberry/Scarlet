@@ -1,4 +1,3 @@
-use std::env;
 use std::fs::{self, File};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
@@ -7,7 +6,7 @@ use std::process;
 use clap::{Parser, Subcommand};
 use flate2::write::GzEncoder;
 use flate2::Compression;
-use tar::Builder;
+use tar::{Builder, Header};
 
 #[derive(Parser)]
 #[command(name = "scpm-pack")]
@@ -140,7 +139,8 @@ fn build_package(package_dir: &str, output: Option<String>) -> Result<(), String
     let encoder = GzEncoder::new(output_tar_gz, Compression::default());
     let mut tar = Builder::new(encoder);
 
-    tar.append_dir_all(".", package_path)
+    // Custom recursive function handles symlinks without following them
+    add_dir_to_archive(&mut tar, package_path, "")
         .map_err(|e| format!("Failed to add files to archive: {}", e))?;
 
     let encoder = tar
@@ -151,6 +151,69 @@ fn build_package(package_dir: &str, output: Option<String>) -> Result<(), String
         .map_err(|e| format!("Failed to compress archive: {}", e))?;
 
     println!("Package built successfully!");
+
+    Ok(())
+}
+
+/// Recursively add directory contents to tar archive, handling symlinks without following them
+fn add_dir_to_archive<W: std::io::Write>(
+    tar: &mut Builder<W>,
+    base_path: &Path,
+    archive_prefix: &str,
+) -> io::Result<()> {
+    let entries = fs::read_dir(base_path)?;
+
+    for entry in entries {
+        let entry = entry?;
+        let path = entry.path();
+        let file_name = entry.file_name();
+        let archive_path = if archive_prefix.is_empty() {
+            file_name.to_string_lossy().to_string()
+        } else {
+            format!("{}/{}", archive_prefix, file_name.to_string_lossy())
+        };
+
+        let metadata = entry.metadata()?;
+        let file_type = metadata.file_type();
+
+        if file_type.is_symlink() {
+            let link_target = fs::read_link(&path)?;
+            let mut header = Header::new_gnu();
+            header.set_size(0);
+            header.set_entry_type(tar::EntryType::Symlink);
+            header.set_link_name(&link_target)?;
+            header.set_mode(0o777);
+            header.set_mtime(
+                metadata
+                    .modified()?
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs(),
+            );
+            header.set_uid(0);
+            header.set_gid(0);
+            tar.append_data(&mut header, &archive_path, std::io::empty())?;
+        } else if file_type.is_dir() {
+            let mut header = Header::new_gnu();
+            header.set_size(0);
+            header.set_entry_type(tar::EntryType::Directory);
+            header.set_mode(0o755);
+            header.set_mtime(
+                metadata
+                    .modified()?
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs(),
+            );
+            header.set_uid(0);
+            header.set_gid(0);
+            tar.append_data(&mut header, &archive_path, std::io::empty())?;
+
+            add_dir_to_archive(tar, &path, &archive_path)?;
+        } else if file_type.is_file() {
+            tar.append_path_with_name(&path, &archive_path)?;
+        }
+    }
 
     Ok(())
 }

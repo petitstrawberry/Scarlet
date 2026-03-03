@@ -35,6 +35,7 @@ use crate::network::config::apply_pending_ip_for_interface;
 use crate::network::ethernet_interface::EthernetNetworkInterface;
 use crate::network::get_network_manager;
 use crate::object::capability::{MemoryMappingOps, Selectable};
+use crate::vm::addr::{phys_to_virt, virt_to_phys};
 use crate::{
     device::network::{
         DevicePacket, EthernetDevice, MacAddress, NetworkDevice, NetworkInterfaceConfig,
@@ -452,7 +453,7 @@ impl VirtioNetDevice {
 
         // Process all completed RX descriptors
         while let Some((desc_idx, used_len)) = rx_queue.pop_used() {
-            let buffer_addr = rx_queue.desc[desc_idx].addr as *mut u8;
+            let buffer_addr = phys_to_virt(rx_queue.desc[desc_idx].addr as usize) as *mut u8;
             let buffer_len = rx_queue.desc[desc_idx].len as usize;
             let used_len = core::cmp::min(used_len as usize, buffer_len);
 
@@ -718,7 +719,7 @@ impl VirtioDevice for VirtioNetDevice {
         }
 
         let virtqueues = self.virtqueues.lock();
-        Some(virtqueues[queue_idx].get_raw_ptr() as u64)
+        Some(virt_to_phys(virtqueues[queue_idx].get_raw_ptr() as usize) as u64)
     }
 
     fn get_queue_driver_addr(&self, queue_idx: usize) -> Option<u64> {
@@ -727,7 +728,7 @@ impl VirtioDevice for VirtioNetDevice {
         }
 
         let virtqueues = self.virtqueues.lock();
-        Some(virtqueues[queue_idx].avail.flags as *const _ as u64)
+        Some(virt_to_phys(virtqueues[queue_idx].avail.flags as *const _ as usize) as u64)
     }
 
     fn get_queue_device_addr(&self, queue_idx: usize) -> Option<u64> {
@@ -736,7 +737,7 @@ impl VirtioDevice for VirtioNetDevice {
         }
 
         let virtqueues = self.virtqueues.lock();
-        Some(virtqueues[queue_idx].used.flags as *const _ as u64)
+        Some(virt_to_phys(virtqueues[queue_idx].used.flags as *const _ as usize) as u64)
     }
 }
 

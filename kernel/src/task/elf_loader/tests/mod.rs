@@ -4,6 +4,7 @@
 
 use crate::fs::{FileType, SeekFrom, TmpFSParams, VfsManager, drivers::tmpfs::TmpFS};
 use crate::task::new_user_task;
+use crate::vm::addr::phys_to_virt;
 
 use super::*;
 
@@ -237,7 +238,7 @@ fn test_load_elf() {
     // Read the instruction at the entry point
     let instruction: u32;
     unsafe {
-        instruction = core::ptr::read(paddr as *const u32);
+        instruction = core::ptr::read(phys_to_virt(paddr) as *const u32);
     }
 
     // Expected instruction at the entry point (e.g., a jump instruction)
@@ -414,7 +415,7 @@ fn test_load_elf_bss_zeroed() {
     for i in 0..bss_size {
         let byte: u8;
         unsafe {
-            byte = core::ptr::read((paddr + i) as *const u8);
+            byte = core::ptr::read(phys_to_virt(paddr + i) as *const u8);
         }
         assert_eq!(
             byte, 0,
