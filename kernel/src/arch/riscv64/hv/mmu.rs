@@ -1,6 +1,6 @@
 //! Guest MMU management for RISC-V H-extension
 
-use alloc::alloc::{Layout, alloc_zeroed, dealloc};
+use alloc::alloc::{alloc_zeroed, dealloc, Layout};
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 use core::arch::asm;
@@ -8,6 +8,7 @@ use hashbrown::HashMap;
 use spin::{Once, RwLock};
 
 use crate::arch::vm::mmu::{PageTable, PageTableEntry};
+use crate::vm::addr::virt_to_phys;
 
 const PAGE_SIZE: usize = 4096;
 const STAGE2_ROOT_SIZE: usize = 16384;
@@ -104,7 +105,7 @@ pub fn read_hgatp() -> u64 {
 
 pub fn verify_hgatp_stage2(expected_pagetable: &Stage2PageTable, vmid: u16) {
     let hgatp = read_hgatp();
-    let expected_ppn = expected_pagetable as *const _ as usize >> 12;
+    let expected_ppn = virt_to_phys(expected_pagetable as *const _ as usize) >> 12;
     let actual_ppn = hgatp & 0xffff_ffff_fff;
     let actual_vmid = (hgatp >> 44) & 0xffff;
 
@@ -117,7 +118,7 @@ pub fn verify_hgatp_stage2(expected_pagetable: &Stage2PageTable, vmid: u16) {
 }
 
 pub fn set_guest_root_stage2(pagetable: &Stage2PageTable, vmid: u16) {
-    let ppn = pagetable as *const _ as usize >> 12;
+    let ppn = virt_to_phys(pagetable as *const _ as usize) >> 12;
     let token = (9u64 << 60) | ((vmid as u64) << 44) | (ppn as u64);
     // crate::early_println!(
     //     "[set_guest_root_stage2] ppn={:#x} vmid={} token={:#x}",
@@ -153,7 +154,7 @@ pub fn walk_stage2(
         if new_table.is_null() {
             return None;
         }
-        pte.set_ppn(new_table as usize >> 12);
+        pte.set_ppn(virt_to_phys(new_table as usize) >> 12);
         pte.validate();
     }
     current_table = (pte.get_ppn() << 12) as *mut PageTableEntry;
@@ -175,7 +176,7 @@ pub fn walk_stage2(
             if new_table.is_null() {
                 return None;
             }
-            pte.set_ppn(new_table as usize >> 12);
+            pte.set_ppn(virt_to_phys(new_table as usize) >> 12);
             pte.validate();
         }
         current_table = (pte.get_ppn() << 12) as *mut PageTableEntry;
