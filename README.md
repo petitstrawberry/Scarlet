@@ -92,7 +92,7 @@ This interoperability is possible because all ABIs share the same underlying ker
 > - 🧪 **xv6 RISC-V 64-bit ABI**: Working with Cross-ABI execution capabilities!
 > - 🧩 **Linux RISC-V 64-bit ABI (partial)**: Buildroot-based userland demo available; syscall coverage expanding
 > - ✅ **Cross-ABI Pipes**: Already functional between xv6 and Scarlet environments
-> - 🧪 **Built-in Hypervisor (SHV)**: RISC-V H-extension with Stage-2 MMU, SBI firmware support; AArch64 experimental
+> - 🧪 **Built-in Hypervisor (SHV)**: RISC-V H-extension (experimental, many features missing); AArch64 not implemented - [Status](docs/hypervisor/status.md)
 
 
 ## Key Features

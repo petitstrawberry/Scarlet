@@ -13,8 +13,8 @@
 //!
 //! # Supported Architectures
 //!
-//! - **RISC-V 64-bit**: Full H-extension support (primary)
-//! - **AArch64**: Basic virtualization support (experimental)
+//! - **RISC-V 64-bit**: H-extension support (experimental, many features missing)
+//! - **AArch64**: Not implemented (stub code only)
 //!
 //! # Key Components
 //!
