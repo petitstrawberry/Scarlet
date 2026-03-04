@@ -14,7 +14,7 @@ use alloc::{
     vec::Vec,
 };
 use core::{any::Any, fmt::Debug};
-use spin::{rwlock::RwLock, Mutex};
+use spin::{Mutex, rwlock::RwLock};
 
 use crate::device::manager::DeviceManager;
 use crate::environment::PAGE_SIZE;
@@ -24,9 +24,9 @@ use crate::{
     device::{Device, DeviceType},
     driver_initcall,
     fs::{
-        get_fs_driver_manager, vfs_v2::cache::PageCacheCapable, DeviceFileInfo, FileMetadata,
-        FileObject, FilePermission, FileSystemDriver, FileSystemError, FileSystemErrorKind,
-        FileType, SocketFileInfo,
+        DeviceFileInfo, FileMetadata, FileObject, FilePermission, FileSystemDriver,
+        FileSystemError, FileSystemErrorKind, FileType, SocketFileInfo, get_fs_driver_manager,
+        vfs_v2::cache::PageCacheCapable,
     },
     mem::{page::allocate_boxed_pages, page_cache::PageCacheManager},
     object::capability::MemoryMappingOps,

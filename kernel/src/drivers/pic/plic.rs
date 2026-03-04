@@ -5,17 +5,17 @@
 
 use crate::{
     device::{
+        DeviceInfo,
         fdt::FdtManager,
         manager::{DeviceManager, DriverPriority},
         platform::{
-            resource::PlatformDeviceResourceType, PlatformDeviceDriver, PlatformDeviceInfo,
+            PlatformDeviceDriver, PlatformDeviceInfo, resource::PlatformDeviceResourceType,
         },
-        DeviceInfo,
     },
     early_initcall,
     interrupt::{
-        controllers::ExternalInterruptController, CpuId, InterruptError, InterruptId,
-        InterruptManager, InterruptResult, Priority,
+        CpuId, InterruptError, InterruptId, InterruptManager, InterruptResult, Priority,
+        controllers::ExternalInterruptController,
     },
 };
 use alloc::{boxed::Box, vec, vec::Vec};

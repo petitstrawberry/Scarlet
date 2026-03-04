@@ -17,9 +17,9 @@ use crate::device::manager::DeviceManager;
 use crate::device::{Device, DeviceType};
 use crate::hypervisor::memory::MemorySlotFlags;
 use crate::hypervisor::{VcpuRef, VmObject, VmRef};
+use crate::object::KernelObject;
 use crate::object::capability::selectable::{SelectWaitOutcome, Selectable};
 use crate::object::capability::{ControlOps, MemoryMappingOps};
-use crate::object::KernelObject;
 use crate::task::mytask;
 
 // ---------------------------------------------------------------------------

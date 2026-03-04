@@ -22,10 +22,10 @@ use crate::object::capability::{ControlOps, StreamError, StreamOps};
 use crate::{
     driver_initcall,
     fs::{
+        FileSystemDriver, FileSystemType,
         core::DirectoryEntryInternal,
         get_fs_driver_manager,
         vfs_v2::core::{FileSystemId, FileSystemOperations, VfsNode},
-        FileSystemDriver, FileSystemType,
     },
     object::capability::MemoryMappingOps,
     vm::vmem::MemoryArea,

@@ -24,10 +24,10 @@ use crate::library::std::string::{
     parse_c_string_from_userspace, parse_string_array_from_userspace,
 };
 
-use crate::arch::{get_cpu, Trapframe};
+use crate::arch::{Trapframe, get_cpu};
 use crate::sched::scheduler::get_scheduler;
 use crate::task::{
-    get_parent_waitpid_waker, get_waitpid_waker, CloneFlags, CloneFlagsDef, WaitError,
+    CloneFlags, CloneFlagsDef, WaitError, get_parent_waitpid_waker, get_waitpid_waker,
 };
 use crate::timer::ns_to_ticks;
 

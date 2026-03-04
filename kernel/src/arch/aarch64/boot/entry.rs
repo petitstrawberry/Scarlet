@@ -14,12 +14,12 @@ use core::arch::asm;
 
 use crate::{
     arch::{
-        aarch64::{trap_init, CPUS},
         Aarch64,
+        aarch64::{CPUS, trap_init},
     },
     device::fdt::{create_bootinfo_from_fdt, init_fdt, relocate_fdt},
     environment::STACK_SIZE,
-    mem::{init_bss, __FDT_RESERVED_START},
+    mem::{__FDT_RESERVED_START, init_bss},
     start_kernel,
 };
 

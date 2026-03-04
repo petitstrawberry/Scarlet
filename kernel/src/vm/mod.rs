@@ -7,19 +7,19 @@ pub mod addr;
 pub mod manager;
 pub mod vmem;
 
-pub use addr::{phys_to_virt, virt_to_phys, PhysAddr, VirtAddr};
+pub use addr::{PhysAddr, VirtAddr, phys_to_virt, virt_to_phys};
 
 use manager::VirtualMemoryManager;
 use vmem::MemoryArea;
 use vmem::VirtualMemoryMap;
 use vmem::VirtualMemoryPermission;
 
+use crate::arch::Arch;
 use crate::arch::get_device_memory_areas;
 use crate::arch::get_kernel_trapvector_paddr;
 use crate::arch::set_trapvector;
 use crate::arch::vm::alloc_virtual_address_space;
 use crate::arch::vm::get_root_pagetable;
-use crate::arch::Arch;
 use crate::early_println;
 use crate::environment::KERNEL_VM_STACK_SIZE;
 use crate::environment::KERNEL_VM_STACK_START;
@@ -27,8 +27,8 @@ use crate::environment::MAX_NUM_CPUS;
 use crate::environment::PAGE_SIZE;
 use crate::environment::USER_STACK_END;
 use crate::environment::{
-    KERNEL_KSTACK_REGION_END, KERNEL_KSTACK_REGION_START, KERNEL_KSTACK_SLOTS,
-    KERNEL_KSTACK_SLOT_SIZE, TASK_KERNEL_STACK_SIZE,
+    KERNEL_KSTACK_REGION_END, KERNEL_KSTACK_REGION_START, KERNEL_KSTACK_SLOT_SIZE,
+    KERNEL_KSTACK_SLOTS, TASK_KERNEL_STACK_SIZE,
 };
 use crate::sched::scheduler::get_scheduler;
 use crate::task::Task;

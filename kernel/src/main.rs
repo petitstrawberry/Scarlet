@@ -288,7 +288,8 @@ use alloc::string::ToString;
 use device::manager::{DeviceManager, DriverPriority};
 use environment::PAGE_SIZE;
 use initcall::{call_initcalls, driver::driver_initcall_call, early::early_initcall_call};
-use slab_allocator_rs::MIN_HEAP_SIZE;
+
+const MIN_HEAP_SIZE: usize = 32 * 1024;
 
 use crate::{
     device::graphics::manager::GraphicsManager,
@@ -296,8 +297,11 @@ use crate::{
     interrupt::InterruptManager,
 };
 use arch::get_cpu;
-use core::sync::atomic::{fence, Ordering};
-use mem::{allocator::init_heap, __KERNEL_SPACE_START};
+use core::sync::atomic::{Ordering, fence};
+use mem::{
+    __KERNEL_SPACE_START,
+    allocator::{add_heap_region, init_heap},
+};
 use sched::scheduler::get_scheduler;
 use task::{elf_loader::load_elf_into_task, new_user_task};
 use timer::get_kernel_timer;
@@ -549,14 +553,17 @@ pub extern "C" fn start_kernel(boot_info: &BootInfo) -> ! {
     }
 
     early_println!("[Scarlet Kernel] Allocating heap from PMM...");
-    let heap_size = ((usable_area.end - pmm_start_aligned + 1) / 4).max(MIN_HEAP_SIZE * 2);
+    const MAX_HEAP_SIZE: usize = 512 * 1024 * 1024;
+    let heap_size = ((usable_area.end - pmm_start_aligned + 1) / 2)
+        .min(MAX_HEAP_SIZE)
+        .max(MIN_HEAP_SIZE * 4);
     let heap_size = (heap_size + MIN_HEAP_SIZE - 1) / MIN_HEAP_SIZE * MIN_HEAP_SIZE;
     let heap_pages = (heap_size + PAGE_SIZE - 1) / PAGE_SIZE;
     let heap_start = mem::pmm::alloc_pages(heap_pages).expect("Failed to allocate heap from PMM");
     let heap_end = heap_start + heap_size - 1;
 
     early_println!("[Scarlet Kernel] Initializing heap...");
-    init_heap(MemoryArea::new(heap_start, heap_end));
+    unsafe { init_heap(heap_start, heap_size) };
 
     fence(Ordering::SeqCst);
     early_println!(

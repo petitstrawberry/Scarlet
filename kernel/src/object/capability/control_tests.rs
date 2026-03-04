@@ -5,15 +5,15 @@
 
 use crate::{
     device::{
+        Device,
         graphics::{
+            FramebufferConfig, GenericGraphicsDevice, PixelFormat,
             framebuffer_device::{
-                framebuffer_commands, FbFixScreenInfo, FbVarScreenInfo, FramebufferCharDevice,
+                FbFixScreenInfo, FbVarScreenInfo, FramebufferCharDevice, framebuffer_commands,
             },
             manager::GraphicsManager,
-            FramebufferConfig, GenericGraphicsDevice, PixelFormat,
         },
         manager::DeviceManager,
-        Device,
     },
     object::capability::ControlOps,
 };

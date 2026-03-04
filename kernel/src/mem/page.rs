@@ -65,7 +65,7 @@ pub fn free_raw_pages(pages: *mut Page, num_of_pages: usize) {
 ///
 pub fn allocate_boxed_pages(num_of_pages: usize) -> Box<[Page]> {
     // Allocate raw memory and initialize it
-    use alloc::alloc::{alloc_zeroed, Layout};
+    use alloc::alloc::{Layout, alloc_zeroed};
     use core::ptr;
 
     let layout = Layout::array::<Page>(num_of_pages).expect("Layout calculation failed");
@@ -83,7 +83,7 @@ pub fn allocate_boxed_pages(num_of_pages: usize) -> Box<[Page]> {
 }
 
 pub fn allocate_boxed_pages_aligned(num_of_pages: usize, align: usize) -> Box<[Page]> {
-    use alloc::alloc::{alloc_zeroed, Layout};
+    use alloc::alloc::{Layout, alloc_zeroed};
     use core::ptr;
 
     let size = num_of_pages * PAGE_SIZE;

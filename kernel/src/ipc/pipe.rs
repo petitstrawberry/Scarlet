@@ -10,11 +10,11 @@ use alloc::{collections::VecDeque, format, string::String, sync::Arc};
 use spin::Mutex;
 
 use super::{IpcError, StreamIpcOps};
+use crate::object::KernelObject;
 use crate::object::capability::selectable::{
     ReadyInterest, ReadySet, SelectWaitOutcome, Selectable,
 };
 use crate::object::capability::{CloneOps, StreamError, StreamOps};
-use crate::object::KernelObject;
 use crate::sync::waker::Waker;
 
 /// Pipe-specific operations

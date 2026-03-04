@@ -2,8 +2,8 @@
 
 use super::*;
 use crate::early_println;
-use crate::fs::get_fs_driver_manager;
 use crate::fs::FileSystemType;
+use crate::fs::get_fs_driver_manager;
 use crate::{device::block::mockblk::MockBlockDevice, fs::FileSystemDriver};
 use alloc::{boxed::Box, format, sync::Arc, vec::Vec};
 

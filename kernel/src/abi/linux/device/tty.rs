@@ -7,7 +7,7 @@ use crate::device::char::tty::tty_ctl::{
     SCTL_TTY_GET_KBMODE, SCTL_TTY_GET_WINSIZE, SCTL_TTY_SET_KBMODE, SCTL_TTY_SET_WINSIZE,
 };
 use crate::{
-    device::{manager::DeviceManager, DeviceCapability},
+    device::{DeviceCapability, manager::DeviceManager},
     fs::FileType,
     object::KernelObject,
     task::mytask,

@@ -2,12 +2,12 @@ use core::{arch::naked_asm, mem::transmute};
 
 use crate::{
     arch::{
-        riscv64::{trap_init, CPUS},
         Riscv64,
+        riscv64::{CPUS, trap_init},
     },
     device::fdt::{create_bootinfo_from_fdt, init_fdt, relocate_fdt},
     environment::STACK_SIZE,
-    mem::{init_bss, __FDT_RESERVED_START},
+    mem::{__FDT_RESERVED_START, init_bss},
     start_kernel,
 };
 

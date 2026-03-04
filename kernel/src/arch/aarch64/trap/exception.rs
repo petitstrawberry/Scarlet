@@ -7,7 +7,7 @@ use core::arch::asm;
 use core::panic;
 
 use crate::abi::syscall_dispatcher;
-use crate::arch::{get_cpu, Trapframe};
+use crate::arch::{Trapframe, get_cpu};
 use crate::object::capability::memory_mapping::{AccessKind, AccessOp};
 use crate::sched::scheduler::get_scheduler;
 use crate::task::mytask;

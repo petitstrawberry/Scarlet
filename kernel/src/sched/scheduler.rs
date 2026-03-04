@@ -37,20 +37,20 @@ use core::panic;
 
 use alloc::{boxed::Box, collections::vec_deque::VecDeque, string::ToString};
 
+use crate::arch::ArchCpuState;
 use crate::arch::get_trapvector;
 use crate::arch::set_next_mode;
-use crate::arch::ArchCpuState;
 use crate::print;
 use crate::println;
 use crate::task::TaskType;
 use crate::{arch::set_trapvector, vm::get_trampoline_trap_vector};
 use crate::{
     arch::{
-        get_cpu, get_user_trap_handler, instruction::idle, trap::user::arch_switch_to_user, Arch,
-        Trapframe,
+        Arch, Trapframe, get_cpu, get_user_trap_handler, instruction::idle,
+        trap::user::arch_switch_to_user,
     },
     environment::MAX_NUM_CPUS,
-    task::{new_kernel_task, wake_parent_waiters, wake_task_waiters, TaskState},
+    task::{TaskState, new_kernel_task, wake_parent_waiters, wake_task_waiters},
     timer::get_kernel_timer,
 };
 

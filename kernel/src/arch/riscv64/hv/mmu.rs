@@ -1,6 +1,6 @@
 //! Guest MMU management for RISC-V H-extension
 
-use alloc::alloc::{alloc_zeroed, dealloc, Layout};
+use alloc::alloc::{Layout, alloc_zeroed, dealloc};
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 use core::arch::asm;

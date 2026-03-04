@@ -45,11 +45,11 @@ use alloc::vec::Vec;
 use crate::arch::Trapframe;
 use crate::library::std::usercopy::{copy_from_user, copy_to_user};
 use crate::network::{
-    local::LocalSocket, Inet4SocketAddress, Ipv4Address, LocalSocketAddress, NetworkManager,
-    ShutdownHow, SocketAddress, SocketDomain, SocketObject, SocketProtocol, SocketType,
+    Inet4SocketAddress, Ipv4Address, LocalSocketAddress, NetworkManager, ShutdownHow,
+    SocketAddress, SocketDomain, SocketObject, SocketProtocol, SocketType, local::LocalSocket,
 };
-use crate::object::handle::{AccessMode, HandleMetadata, HandleType};
 use crate::object::KernelObject;
+use crate::object::handle::{AccessMode, HandleMetadata, HandleType};
 use crate::task::mytask;
 
 #[repr(C)]

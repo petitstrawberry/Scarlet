@@ -8,7 +8,7 @@ use alloc::string::String;
 use spin::Mutex;
 
 use crate::network::ipv4::{Ipv4Address, Ipv4AddressInfo};
-use crate::network::{get_network_manager, NetworkManager};
+use crate::network::{NetworkManager, get_network_manager};
 
 #[derive(Debug, Default)]
 struct PendingNetworkConfig {

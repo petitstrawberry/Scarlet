@@ -11,11 +11,11 @@
 use alloc::{string::String, string::ToString, sync::Arc};
 use spin::Mutex;
 
+use crate::object::KernelObject;
 use crate::object::capability::selectable::{
     ReadyInterest, ReadySet, SelectWaitOutcome, Selectable,
 };
 use crate::object::capability::{CloneOps, StreamError, StreamOps};
-use crate::object::KernelObject;
 use crate::sync::waker::Waker;
 
 /// Internal state of a counter

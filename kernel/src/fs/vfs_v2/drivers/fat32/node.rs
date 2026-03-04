@@ -12,7 +12,7 @@ use alloc::{
     vec::Vec,
 };
 use core::{any::Any, fmt::Debug};
-use spin::{rwlock::RwLock, Mutex};
+use spin::{Mutex, rwlock::RwLock};
 
 use crate::fs::{
     FileMetadata, FileObject, FilePermission, FileSystemError, FileSystemErrorKind, FileType,

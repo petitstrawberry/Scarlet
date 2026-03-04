@@ -21,9 +21,9 @@ use spin::RwLock;
 use crate::device::network::DevicePacket;
 use crate::device::network::MacAddress;
 use crate::early_println;
+use crate::network::NetworkInterface;
 use crate::network::protocol_stack::{LayerContext, NetworkLayer, NetworkLayerStats};
 use crate::network::socket::SocketError;
-use crate::network::NetworkInterface;
 
 /// Ethernet frame header (14 bytes)
 #[derive(Debug, Clone, Copy)]

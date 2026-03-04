@@ -201,9 +201,9 @@ mod tests {
 
     #[test_case]
     fn test_pci_bus_virtio_integration() {
+        use crate::device::DeviceDriver;
         use crate::device::pci::device::PciDeviceInfo;
         use crate::device::pci::driver::{PciDeviceDriver, PciDeviceId};
-        use crate::device::DeviceDriver;
 
         // Simulate a PCI bus with virtio devices
         let pci_bus = PciBus::new(0x3000_0000, 0x1000_0000);

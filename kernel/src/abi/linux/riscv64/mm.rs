@@ -1,7 +1,7 @@
 use crate::{
     abi::linux::riscv64::{
-        errno::{self, to_result},
         LinuxRiscv64Abi,
+        errno::{self, to_result},
     },
     arch::Trapframe,
     environment::PAGE_SIZE,

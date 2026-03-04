@@ -8,7 +8,7 @@ extern crate alloc;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use super::config::{vendor, PciConfig};
+use super::config::{PciConfig, vendor};
 use super::device::PciDeviceInfo;
 use super::{PciAddress, PciBus};
 use crate::early_println;

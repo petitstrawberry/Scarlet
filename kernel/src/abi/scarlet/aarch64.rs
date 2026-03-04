@@ -15,17 +15,17 @@ use alloc::{
 use core::sync::atomic::Ordering;
 
 use crate::{
-    arch::{vm, Trapframe},
+    arch::{Trapframe, vm},
     early_initcall,
     fs::{
-        drivers::overlayfs::OverlayFS, FileSystemError, FileSystemErrorKind, SeekFrom, VfsManager,
+        FileSystemError, FileSystemErrorKind, SeekFrom, VfsManager, drivers::overlayfs::OverlayFS,
     },
     ipc::event::{Event, EventContent, EventPriority, ProcessControlType},
     register_abi,
     syscall::syscall_handler,
     task::elf_loader::{
-        analyze_and_load_elf_with_strategy, build_auxiliary_vector,
-        setup_auxiliary_vector_on_stack, ExecutionMode, LoadStrategy, LoadTarget,
+        ExecutionMode, LoadStrategy, LoadTarget, analyze_and_load_elf_with_strategy,
+        build_auxiliary_vector, setup_auxiliary_vector_on_stack,
     },
     vm::setup_user_stack,
 };
@@ -880,7 +880,7 @@ impl AbiModule for ScarletAbi {
         elf_type: u16,
         target: crate::task::elf_loader::LoadTarget,
     ) -> Option<u64> {
-        use crate::task::elf_loader::{LoadTarget, ET_DYN};
+        use crate::task::elf_loader::{ET_DYN, LoadTarget};
 
         // Scarlet Native ABI uses standard Linux-style memory layout
         if elf_type == ET_DYN {

@@ -136,9 +136,11 @@ fn test_framebuffer_drawing_operations() {
     }
 
     // Flush the framebuffer
-    assert!(device
-        .flush_framebuffer(0, 0, config.width, config.height)
-        .is_ok());
+    assert!(
+        device
+            .flush_framebuffer(0, 0, config.width, config.height)
+            .is_ok()
+    );
 
     // Verify the pattern was drawn correctly
     unsafe {

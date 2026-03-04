@@ -29,9 +29,9 @@ use hashbrown::HashMap;
 use spin::{Mutex, RwLock};
 
 use crate::device::{
+    DeviceType,
     graphics::{FramebufferConfig, GraphicsDevice},
     manager::{DeviceManager, SharedDevice},
-    DeviceType,
 };
 
 /// Framebuffer resource extracted from graphics devices
@@ -545,10 +545,10 @@ mod test_utils {
 mod tests {
     use super::*;
     use crate::device::{
-        graphics::{
-            manager::GraphicsManager, FramebufferConfig, GenericGraphicsDevice, PixelFormat,
-        },
         Device,
+        graphics::{
+            FramebufferConfig, GenericGraphicsDevice, PixelFormat, manager::GraphicsManager,
+        },
     };
     use alloc::{string::ToString, sync::Arc};
 
@@ -641,12 +641,16 @@ mod tests {
         let shared_device2: SharedDevice = Arc::new(device2);
 
         // Register both devices
-        assert!(manager
-            .register_framebuffer_from_device(1, shared_device1)
-            .is_ok());
-        assert!(manager
-            .register_framebuffer_from_device(2, shared_device2)
-            .is_ok());
+        assert!(
+            manager
+                .register_framebuffer_from_device(1, shared_device1)
+                .is_ok()
+        );
+        assert!(
+            manager
+                .register_framebuffer_from_device(2, shared_device2)
+                .is_ok()
+        );
 
         // Check registration
         assert_eq!(manager.get_framebuffer_count(), 2);

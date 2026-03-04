@@ -58,9 +58,9 @@ const ELFMAG: [u8; 4] = [0x7F, b'E', b'L', b'F'];
 // ELF Class
 // const ELFCLASS32: u8 = 1; // 32-bit
 const ELFCLASS64: u8 = 2; // 64-bit
-                          // ELF Data Endian
+// ELF Data Endian
 const ELFDATA2LSB: u8 = 1; // Little Endian
-                           // const ELFDATA2MSB: u8 = 2; // Big Endian
+// const ELFDATA2MSB: u8 = 2; // Big Endian
 
 // ELF File Type
 pub const ET_EXEC: u16 = 2; // Executable file

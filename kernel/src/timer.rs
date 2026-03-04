@@ -4,8 +4,8 @@
 //! managing the system timer and scheduling tasks based on time intervals.
 //!
 
-use crate::arch::timer::ArchTimer;
 use crate::arch::Trapframe;
+use crate::arch::timer::ArchTimer;
 use crate::environment::MAX_NUM_CPUS;
 use crate::sched::scheduler::get_scheduler;
 use core::cell::UnsafeCell;

@@ -1,4 +1,4 @@
-use alloc::alloc::{alloc_zeroed, dealloc, Layout};
+use alloc::alloc::{Layout, alloc_zeroed, dealloc};
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 use hashbrown::HashMap;

@@ -243,7 +243,7 @@ impl InterruptManager {
     /// enabled the desired interrupt lines in the controller.
     pub fn enable_cpu_interrupts(&mut self) {
         enable_external_interrupts(); // Enable external interrupts
-                                      // Timer interrupts are disabled by default, enable them if needed by scheduler or other components
+        // Timer interrupts are disabled by default, enable them if needed by scheduler or other components
     }
 
     // Note: We intentionally do not provide a one-shot `init()` here.

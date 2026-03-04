@@ -1,9 +1,9 @@
 use crate::{
-    arch::{get_cpu, Trapframe},
+    arch::{Trapframe, get_cpu},
     fs::FileType,
     library::std::string::cstring_to_string,
     sched::scheduler::get_scheduler,
-    task::{get_parent_waitpid_waker, mytask, CloneFlags, WaitError},
+    task::{CloneFlags, WaitError, get_parent_waitpid_waker, mytask},
 };
 use alloc::string::{String, ToString};
 

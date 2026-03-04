@@ -1,7 +1,7 @@
 use alloc::{boxed::Box, sync::Arc, vec, vec::Vec};
 use spin::RwLock;
 
-use crate::object::{introspection, KernelObject};
+use crate::object::{KernelObject, introspection};
 
 pub mod syscall;
 

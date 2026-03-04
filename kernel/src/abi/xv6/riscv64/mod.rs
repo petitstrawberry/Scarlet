@@ -20,17 +20,17 @@ use proc::{sys_exit, sys_fork, sys_getpid, sys_sleep, sys_wait};
 
 use crate::{
     abi::{
+        AbiModule,
         xv6::riscv64::{
             file::{sys_close, sys_fstat, sys_link, sys_mkdir, sys_read, sys_unlink},
             pipe::sys_pipe,
             proc::{sys_chdir, sys_sbrk},
         },
-        AbiModule,
     },
     arch::{self, IntRegisters},
     early_initcall,
     fs::{
-        drivers::overlayfs::OverlayFS, FileSystemError, FileSystemErrorKind, SeekFrom, VfsManager,
+        FileSystemError, FileSystemErrorKind, SeekFrom, VfsManager, drivers::overlayfs::OverlayFS,
     },
     register_abi,
     task::elf_loader::load_elf_into_task,
