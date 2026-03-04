@@ -34,6 +34,8 @@ use crate::device::{Device, DeviceType};
 use crate::drivers::virtio::features::{
     VIRTIO_F_ANY_LAYOUT, VIRTIO_RING_F_EVENT_IDX, VIRTIO_RING_F_INDIRECT_DESC,
 };
+use crate::environment::PAGE_SIZE;
+use crate::mem::page::PageAllocation;
 use crate::object::capability::{MemoryMappingOps, Selectable};
 use crate::vm::addr::virt_to_phys;
 use crate::{
@@ -181,19 +183,20 @@ impl VirtioBlockDevice {
             reserved: 0,
             sector: req.sector as u64,
         });
-        let data = vec![0u8; req.buffer.len()].into_boxed_slice();
+
+        // Allocate data buffer from PMM for DMA
+        let data_pages = (req.buffer.len() + PAGE_SIZE - 1) / PAGE_SIZE;
+        let data_alloc = PageAllocation::new(data_pages).ok_or("Failed to allocate data buffer")?;
+
         let status = Box::new(0u8);
 
-        // Cast pages to appropriate types
         let header_ptr = Box::into_raw(header);
-        let data_ptr = Box::into_raw(data) as *mut [u8];
+        let data_ptr = data_alloc.as_ptr() as *mut u8;
         let status_ptr = Box::into_raw(status);
 
         defer! {
-            // Deallocate memory after use
             unsafe {
                 drop(Box::from_raw(header_ptr));
-                drop(Box::from_raw(data_ptr));
                 drop(Box::from_raw(status_ptr));
             }
         }
@@ -243,9 +246,7 @@ impl VirtioBlockDevice {
         virtqueues[0].desc[header_desc].next = data_desc as u16;
 
         // Set up data descriptor
-        let data_phys = crate::vm::get_kernel_vm_manager()
-            .translate_vaddr(data_ptr as *mut u8 as usize)
-            .ok_or("Failed to translate data vaddr")?;
+        let data_phys = data_alloc.as_paddr();
         virtqueues[0].desc[data_desc].addr = data_phys as u64;
         virtqueues[0].desc[data_desc].len = req.buffer.len() as u32;
 
