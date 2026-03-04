@@ -8,7 +8,7 @@ use crate::early_println;
 use crate::environment::PAGE_SIZE;
 use crate::vm::vmem::MemoryArea;
 
-const HEAP_EXPAND_PAGES: usize = 64;
+const HEAP_EXPAND_PAGES: usize = 4096;
 
 struct DynamicHeapHandler;
 
@@ -23,22 +23,18 @@ impl OomHandler for DynamicHeapHandler {
                 let size = pages_needed * PAGE_SIZE;
                 let span = Span::from_base_size(start as *mut u8, size);
                 match unsafe { talc.claim(span) } {
-                    Ok(_) => {
-                        early_println!(
-                            "[Heap] Expanded by {} pages ({} KB) at {:#x}",
-                            pages_needed,
-                            size / 1024,
-                            start
-                        );
-                        Ok(())
-                    }
+                    Ok(_) => Ok(()),
                     Err(_) => {
                         crate::mem::pmm::free_pages(start, pages_needed);
                         Err(())
                     }
                 }
             }
-            None => Err(()),
+            None => {
+                early_println!("[OOM] PMM allocation failed for {} pages", pages_needed);
+                crate::mem::pmm::debug_free_counts();
+                Err(())
+            }
         }
     }
 }

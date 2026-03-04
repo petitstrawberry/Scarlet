@@ -450,7 +450,27 @@ pub fn add_region(area: MemoryArea) -> Result<(), &'static str> {
 }
 
 pub fn alloc_pages(pages: usize) -> Option<usize> {
-    PMM.lock().alloc(pages)
+    let result = PMM.lock().alloc(pages);
+    if result.is_none() {
+        crate::early_println!("[PMM] alloc_pages({}) failed. Free counts:", pages);
+        let pmm = PMM.lock();
+        for region in &pmm.regions {
+            if region.active {
+                for order in 0..=MAX_ORDER {
+                    let nr = region.free_area[order].nr_free;
+                    if nr > 0 {
+                        crate::early_println!(
+                            "  order {}: {} blocks ({} pages)",
+                            order,
+                            nr,
+                            nr * (1usize << order)
+                        );
+                    }
+                }
+            }
+        }
+    }
+    result
 }
 
 pub fn free_pages(paddr: usize, pages: usize) {
@@ -467,6 +487,26 @@ pub fn free_frame(paddr: usize) {
 
 pub fn stats() -> (usize, usize) {
     PMM.lock().stats()
+}
+
+pub fn debug_free_counts() {
+    let pmm = PMM.lock();
+    for region in &pmm.regions {
+        if region.active {
+            early_println!("[PMM Debug] Region {:#x}:", region.mem_start);
+            for order in 0..=MAX_ORDER {
+                let nr = region.free_area[order].nr_free;
+                if nr > 0 {
+                    early_println!(
+                        "  order {}: {} blocks ({} pages)",
+                        order,
+                        nr,
+                        nr * (1usize << order)
+                    );
+                }
+            }
+        }
+    }
 }
 
 fn align_up(addr: usize, align: usize) -> usize {

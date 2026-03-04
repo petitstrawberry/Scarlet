@@ -4,6 +4,7 @@ use alloc::boxed::Box;
 use core::fmt;
 
 use crate::environment::PAGE_SIZE;
+use crate::vm::addr::{phys_to_virt, virt_to_phys};
 
 #[repr(C, align(4096))]
 #[derive(Clone, Debug)]
@@ -131,7 +132,7 @@ pub struct PageAllocation {
 }
 
 impl PageAllocation {
-    /// Allocate a contiguous block of pages.
+    /// Allocate a contiguous block of pages directly from PMM.
     ///
     /// # Arguments
     /// * `count` - Number of pages to allocate
@@ -142,17 +143,19 @@ impl PageAllocation {
         if count == 0 {
             return None;
         }
-        let ptr = allocate_raw_pages(count);
-        if ptr.is_null() {
-            None
-        } else {
-            Some(Self { ptr, count })
-        }
+        let paddr = crate::mem::pmm::alloc_pages(count)?;
+        let vaddr = phys_to_virt(paddr) as *mut Page;
+        Some(Self { ptr: vaddr, count })
     }
 
     /// Get a pointer to the first page.
     pub fn as_ptr(&self) -> *mut Page {
         self.ptr
+    }
+
+    /// Get the physical address of the first page.
+    pub fn as_paddr(&self) -> usize {
+        virt_to_phys(self.ptr as usize)
     }
 
     /// Get the number of pages.
@@ -188,7 +191,7 @@ impl PageAllocation {
     ///
     /// # Safety
     /// `ptr` must point to a valid allocation of `count` pages
-    /// that was previously obtained from `allocate_raw_pages`.
+    /// that was previously obtained from PMM.
     pub unsafe fn from_raw(ptr: *mut Page, count: usize) -> Self {
         debug_assert!(!ptr.is_null());
         debug_assert!(count > 0);
@@ -199,9 +202,8 @@ impl PageAllocation {
 impl Drop for PageAllocation {
     fn drop(&mut self) {
         if !self.ptr.is_null() && self.count > 0 {
-            unsafe {
-                free_raw_pages(self.ptr, self.count);
-            }
+            let paddr = virt_to_phys(self.ptr as usize);
+            crate::mem::pmm::free_pages(paddr, self.count);
         }
     }
 }

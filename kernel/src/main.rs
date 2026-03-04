@@ -553,7 +553,7 @@ pub extern "C" fn start_kernel(boot_info: &BootInfo) -> ! {
     }
 
     early_println!("[Scarlet Kernel] Allocating initial heap from PMM...");
-    let heap_size = MIN_HEAP_SIZE * 4;
+    let heap_size = 512 * 1024 * 1024;
     let heap_pages = heap_size / PAGE_SIZE;
     let heap_start = mem::pmm::alloc_pages(heap_pages).expect("Failed to allocate heap from PMM");
     let heap_end = heap_start + heap_size - 1;
