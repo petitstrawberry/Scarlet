@@ -30,7 +30,9 @@ use crate::device::events::InterruptCapableDevice;
 use crate::device::{Device, DeviceType};
 use crate::drivers::virtio::features::VIRTIO_F_ANY_LAYOUT;
 use crate::drivers::virtio::features::VIRTIO_RING_F_INDIRECT_DESC;
+use crate::environment::PAGE_SIZE;
 use crate::interrupt::InterruptId;
+use crate::mem::page::PageAllocation;
 use crate::network::config::apply_pending_ip_for_interface;
 use crate::network::ethernet_interface::EthernetNetworkInterface;
 use crate::network::get_network_manager;
@@ -150,7 +152,7 @@ pub struct VirtioNetDevice {
     features: RwLock<u32>,
     stats: Mutex<NetworkStats>,
     initialized: Mutex<bool>,
-    rx_buffers: Mutex<Vec<Box<[u8]>>>,
+    rx_buffers: Mutex<Vec<PageAllocation>>,
     interrupt_id: Mutex<Option<InterruptId>>,
     interface_name: Mutex<Option<String>>,
 }
@@ -311,10 +313,11 @@ impl VirtioNetDevice {
             let packet_size = 1514; // Standard Ethernet frame size
             let total_size = hdr_size + packet_size;
 
-            // Allocate single contiguous buffer - this is the standard approach
-            let buffer = vec![0u8; total_size];
-            let buffer_box = buffer.into_boxed_slice();
-            let buffer_ptr = Box::into_raw(buffer_box);
+            // Allocate from PMM for DMA
+            let pages_needed = (total_size + PAGE_SIZE - 1) / PAGE_SIZE;
+            let buffer_alloc =
+                PageAllocation::new(pages_needed).ok_or("Failed to allocate RX buffer from PMM")?;
+            let buffer_ptr = buffer_alloc.as_ptr() as *mut u8;
 
             // Allocate single descriptor for the entire receive buffer
             let desc_idx = rx_queue
@@ -322,9 +325,7 @@ impl VirtioNetDevice {
                 .ok_or("Failed to allocate RX descriptor")?;
 
             // Setup descriptor - device writes virtio-net header + packet data here
-            let buffer_phys = crate::vm::get_kernel_vm_manager()
-                .translate_vaddr(buffer_ptr as *mut u8 as usize)
-                .ok_or("Failed to translate RX buffer vaddr")?;
+            let buffer_phys = buffer_alloc.as_paddr();
             rx_queue.desc[desc_idx].addr = buffer_phys as u64;
             rx_queue.desc[desc_idx].len = total_size as u32;
             rx_queue.desc[desc_idx].flags = DescriptorFlag::Write as u16; // Device writes
@@ -333,16 +334,11 @@ impl VirtioNetDevice {
             // Add to available ring
             if let Err(e) = rx_queue.push(desc_idx) {
                 rx_queue.free_desc(desc_idx);
-                unsafe {
-                    drop(Box::from_raw(buffer_ptr));
-                }
                 return Err(e);
             }
 
-            // Store buffer pointer for cleanup
-            self.rx_buffers
-                .lock()
-                .push(unsafe { Box::from_raw(buffer_ptr) });
+            // Store buffer allocation for cleanup
+            self.rx_buffers.lock().push(buffer_alloc);
         }
 
         // Notify device about available RX buffers
@@ -363,8 +359,11 @@ impl VirtioNetDevice {
 
         crate::early_println!("[virtio-net] TX: payload={} bytes", packet.len);
 
-        // Create single buffer with header first, followed by packet data
-        let mut combined_buffer = vec![0u8; total_size];
+        // Allocate from PMM for DMA
+        let pages_needed = (total_size + PAGE_SIZE - 1) / PAGE_SIZE;
+        let buffer_alloc =
+            PageAllocation::new(pages_needed).ok_or("Failed to allocate TX buffer from PMM")?;
+        let buffer_ptr = buffer_alloc.as_ptr() as *mut u8;
 
         // Fill header at the beginning
         let header = VirtioNetHdrBasic::new();
@@ -373,15 +372,14 @@ impl VirtioNetDevice {
                 &header as *const VirtioNetHdrBasic as *const u8,
                 hdr_size,
             );
-            combined_buffer[..hdr_size].copy_from_slice(header_bytes);
+            core::ptr::copy_nonoverlapping(header_bytes.as_ptr(), buffer_ptr, hdr_size);
+            // Copy packet data after header
+            core::ptr::copy_nonoverlapping(
+                packet.data.as_ptr(),
+                buffer_ptr.add(hdr_size),
+                packet.len,
+            );
         }
-
-        // Copy packet data after header
-        combined_buffer[hdr_size..].copy_from_slice(&packet.data[..packet.len]);
-
-        // Convert to stable memory allocation
-        let buffer_box = combined_buffer.into_boxed_slice();
-        let buffer_ptr = Box::into_raw(buffer_box);
 
         let result = {
             let mut virtqueues = self.virtqueues.lock();
@@ -393,9 +391,7 @@ impl VirtioNetDevice {
                 .ok_or("Failed to allocate TX descriptor")?;
 
             // Setup descriptor for the combined buffer (device readable)
-            let buffer_phys = crate::vm::get_kernel_vm_manager()
-                .translate_vaddr(buffer_ptr as *mut u8 as usize)
-                .ok_or("Failed to translate TX buffer vaddr")?;
+            let buffer_phys = buffer_alloc.as_paddr();
             tx_queue.desc[desc_idx].addr = buffer_phys as u64;
             tx_queue.desc[desc_idx].len = total_size as u32;
             tx_queue.desc[desc_idx].flags = 0; // No flags, single descriptor
@@ -428,10 +424,7 @@ impl VirtioNetDevice {
             result
         };
 
-        // Cleanup memory
-        unsafe {
-            drop(Box::from_raw(buffer_ptr));
-        }
+        // buffer_alloc is automatically dropped here
 
         // Update statistics if transmission succeeded
         if result.is_ok() {
