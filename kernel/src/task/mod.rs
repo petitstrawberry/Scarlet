@@ -30,7 +30,7 @@ use crate::{
     },
     fs::VfsManager,
     ipc::{EventContent, event::ProcessControlType},
-    mem::page::{Page, allocate_raw_pages, free_boxed_page},
+    mem::page::{Page, allocate_raw_pages, free_raw_pages},
     object::handle::HandleTable,
     sched::scheduler::{Scheduler, get_scheduler},
     timer::{TimerHandler, add_timer, get_tick},
@@ -430,10 +430,27 @@ pub struct Task {
     pub events_enabled: Mutex<bool>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct ManagedPage {
     pub vaddr: usize,
-    pub page: Box<Page>,
+    pub page: *mut Page,
+}
+
+impl Clone for ManagedPage {
+    fn clone(&self) -> Self {
+        Self {
+            vaddr: self.vaddr,
+            page: self.page,
+        }
+    }
+}
+
+unsafe impl Send for ManagedPage {}
+
+impl ManagedPage {
+    pub unsafe fn from_raw(vaddr: usize, page: *mut Page) -> Self {
+        Self { vaddr, page }
+    }
 }
 
 pub enum CloneFlagsDef {
@@ -826,9 +843,9 @@ impl Task {
             .map_err(|e| panic!("Failed to add memory map: {}", e))?;
 
         for i in 0..num_of_pages {
-            let page = unsafe { Box::from_raw(pages.wrapping_add(i)) };
+            let page = unsafe { pages.wrapping_add(i) };
             let vaddr = mmap.vmarea.start + i * PAGE_SIZE;
-            self.add_managed_page(ManagedPage { vaddr, page });
+            self.add_managed_page(unsafe { ManagedPage::from_raw(vaddr, page) });
         }
 
         Ok(mmap)
@@ -897,7 +914,9 @@ impl Task {
                     // free_raw_pages((mmap.pmarea.start + offset) as *mut Page, 1);
 
                     if let Some(free_page) = self.remove_managed_page(vaddr) {
-                        free_boxed_page(free_page.page);
+                        unsafe {
+                            free_raw_pages(free_page.page, 1);
+                        }
                     }
 
                     // println!("Freed pages : {:#x} - {:#x}", vaddr, vaddr + PAGE_SIZE - 1);
@@ -1086,7 +1105,7 @@ impl Task {
             if page.vaddr == vaddr {
                 return Some(ManagedPage {
                     vaddr: page.vaddr,
-                    page: page.page.clone(),
+                    page: page.page,
                 });
             }
         }
@@ -1362,9 +1381,11 @@ impl Task {
                                     PAGE_SIZE,
                                 );
                             }
-                            child.add_managed_page(ManagedPage {
-                                vaddr: new_mmap.vmarea.start + i * PAGE_SIZE,
-                                page: unsafe { Box::from_raw(pages.wrapping_add(i)) },
+                            child.add_managed_page(unsafe {
+                                ManagedPage::from_raw(
+                                    new_mmap.vmarea.start + i * PAGE_SIZE,
+                                    pages.wrapping_add(i),
+                                )
                             });
                         }
 

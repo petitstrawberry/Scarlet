@@ -1077,11 +1077,21 @@ fn load_elf_into_task_static(
     })?;
 
     // Return entry point adjusted for base address
+    crate::println!(
+        "[ELF Loader] base_address={:#x}, e_entry={:#x}, needs_relocation={}",
+        base_address,
+        header.e_entry,
+        needs_relocation
+    );
     let final_entry_point = if needs_relocation {
         base_address + header.e_entry
     } else {
         header.e_entry
     };
+    crate::println!(
+        "[ELF Loader] final_entry_point before validation: {:#x}",
+        final_entry_point
+    );
 
     // Validate that the entry point is actually mapped
     let entry_vaddr = final_entry_point as usize;
@@ -1294,9 +1304,8 @@ fn map_elf_segment(
 
     // Manage segment page in the task
     for i in 0..num_of_pages {
-        task.add_managed_page(ManagedPage {
-            vaddr: vaddr + i * PAGE_SIZE,
-            page: unsafe { Box::from_raw(pages.wrapping_add(i)) },
+        task.add_managed_page(unsafe {
+            ManagedPage::from_raw(vaddr + i * PAGE_SIZE, pages.wrapping_add(i))
         });
     }
 

@@ -416,9 +416,8 @@ pub fn sys_mmap(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
                 for i in 0..num_pages {
                     let page_vaddr = final_vaddr + i * crate::environment::PAGE_SIZE;
                     let page_ptr = unsafe { (pages as *mut crate::mem::page::Page).add(i) };
-                    task.add_managed_page(crate::task::ManagedPage {
-                        vaddr: page_vaddr,
-                        page: unsafe { Box::from_raw(page_ptr) },
+                    task.add_managed_page(unsafe {
+                        crate::task::ManagedPage::from_raw(page_vaddr, page_ptr)
                     });
                 }
 
@@ -667,9 +666,8 @@ fn handle_anonymous_mapping(
             for i in 0..num_pages {
                 let page_vaddr = final_vaddr + i * crate::environment::PAGE_SIZE;
                 let page_ptr = unsafe { (pages as *mut crate::mem::page::Page).add(i) };
-                task.add_managed_page(crate::task::ManagedPage {
-                    vaddr: page_vaddr,
-                    page: unsafe { Box::from_raw(page_ptr) },
+                task.add_managed_page(unsafe {
+                    crate::task::ManagedPage::from_raw(page_vaddr, page_ptr)
                 });
             }
 
