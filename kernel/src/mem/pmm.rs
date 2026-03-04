@@ -32,17 +32,21 @@ impl ListHead {
     }
 
     unsafe fn add(&mut self, new: *mut ListHead) {
-        (*new).next = self.next;
-        (*new).prev = self as *mut ListHead;
-        (*self.next).prev = new;
+        unsafe {
+            (*new).next = self.next;
+            (*new).prev = self as *mut ListHead;
+            (*self.next).prev = new;
+        }
         self.next = new;
     }
 
     unsafe fn remove(&mut self, entry: *mut ListHead) {
-        (*(*entry).next).prev = (*entry).prev;
-        (*(*entry).prev).next = (*entry).next;
-        (*entry).next = entry;
-        (*entry).prev = entry;
+        unsafe {
+            (*(*entry).next).prev = (*entry).prev;
+            (*(*entry).prev).next = (*entry).next;
+            (*entry).next = entry;
+            (*entry).prev = entry;
+        }
     }
 }
 

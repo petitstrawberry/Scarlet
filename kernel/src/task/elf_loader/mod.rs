@@ -44,7 +44,7 @@ use crate::environment::PAGE_SIZE;
 use crate::fs::{FileObject, SeekFrom};
 use crate::mem::page::{allocate_raw_pages, free_raw_pages};
 use crate::task::{ManagedPage, Task};
-use crate::vm::addr::phys_to_virt;
+use crate::vm::addr::{phys_to_virt, virt_to_phys};
 use crate::vm::vmem::{MemoryArea, VirtualMemoryMap, VirtualMemoryPermission, VirtualMemoryRegion};
 use alloc::boxed::Box;
 use alloc::string::{String, ToString};
@@ -1082,6 +1082,45 @@ fn load_elf_into_task_static(
     } else {
         header.e_entry
     };
+
+    // Validate that the entry point is actually mapped
+    let entry_vaddr = final_entry_point as usize;
+    if task.vm_manager.translate_vaddr(entry_vaddr).is_none() {
+        // Entry point is not mapped - try to fix it by checking if e_entry
+        // falls within a PT_LOAD segment
+        let mut fixed_entry = None;
+        for_each_program_header(header, file_obj, |_i, ph| {
+            if ph.p_type == PT_LOAD {
+                let seg_start = ph.p_vaddr;
+                let seg_end = ph.p_vaddr.saturating_add(ph.p_memsz);
+                if header.e_entry >= seg_start && header.e_entry < seg_end {
+                    // Entry point is inside this segment - calculate the actual virtual address
+                    let seg_load_addr = base_address + ph.p_vaddr;
+                    let entry_offset = header.e_entry - ph.p_vaddr;
+                    fixed_entry = Some((seg_load_addr + entry_offset) as u64);
+                    return Ok(false); // Stop iteration
+                }
+            }
+            Ok(true) // Continue iteration
+        })?;
+
+        if let Some(fixed) = fixed_entry {
+            crate::println!(
+                "[ELF Loader] Fixed entry point from {:#x} to {:#x}",
+                final_entry_point,
+                fixed
+            );
+            return Ok(fixed);
+        } else {
+            return Err(ElfLoaderError {
+                message: format!(
+                    "Entry point {:#x} is not mapped and not within any loaded segment",
+                    final_entry_point
+                ),
+            });
+        }
+    }
+
     Ok(final_entry_point)
 }
 
@@ -1231,9 +1270,11 @@ fn map_elf_segment(
     if ptr.is_null() {
         return Err("Failed to allocate memory");
     }
+    // Convert kernel virtual address to physical address for pmarea
+    let pm_start = virt_to_phys(ptr as usize);
     let pmarea = MemoryArea {
-        start: ptr as usize,
-        end: (ptr as usize) + size - 1,
+        start: pm_start,
+        end: pm_start + size - 1,
     };
 
     // Create memory mapping
