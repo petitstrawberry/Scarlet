@@ -5,7 +5,7 @@
 //! its own binary format and conversion logic.
 
 use crate::arch::Trapframe;
-use crate::task::ManagedPage;
+use crate::mem::page::PageAllocation;
 use crate::vm::vmem::VirtualMemoryMap;
 use crate::{fs::manager::get_global_vfs_manager, task::Task};
 use alloc::{
@@ -23,7 +23,7 @@ use core::sync::atomic::Ordering;
 /// restored if execve fails. Includes memory state, metadata, and trapframe.
 #[derive(Debug)]
 struct TaskStateBackup {
-    managed_pages: Vec<ManagedPage>,
+    page_allocations: Vec<PageAllocation>,
     vm_mapping: Vec<VirtualMemoryMap>,
     text_size: usize,
     data_size: usize,
@@ -33,19 +33,13 @@ struct TaskStateBackup {
 }
 
 impl TaskStateBackup {
-    /// Create a backup of the current task state including trapframe
-    ///
-    /// This creates a complete snapshot that can be restored if exec fails.
     fn create_backup(task: &Task, trapframe: &Trapframe) -> Self {
-        // Move managed pages to backup (avoiding clone)
-        let mut backup_pages = Vec::new();
-        backup_pages.append(&mut *task.managed_pages.write());
+        let backup_pages = task.page_allocations.read().clone();
 
-        // Backup VM mapping - collect iterator into Vec for storage
         let backup_vm_mapping = task.vm_manager.remove_all_memory_maps().collect();
 
         Self {
-            managed_pages: backup_pages,
+            page_allocations: backup_pages,
             vm_mapping: backup_vm_mapping,
             text_size: task.text_size.load(Ordering::SeqCst),
             data_size: task.data_size.load(Ordering::SeqCst),
@@ -55,24 +49,16 @@ impl TaskStateBackup {
         }
     }
 
-    /// Restore task state from backup including trapframe
-    ///
-    /// This restores the complete task state from a previous backup,
-    /// ensuring full rollback on exec failure.
     fn restore_to_task(self, task: &Task, trapframe: &mut Trapframe) -> Result<(), &'static str> {
-        // Restore managed pages
-        *task.managed_pages.write() = self.managed_pages;
+        *task.page_allocations.write() = self.page_allocations;
 
-        // Restore VM mapping
         task.vm_manager.restore_memory_maps(self.vm_mapping)?;
 
-        // Restore sizes and name
         task.text_size.store(self.text_size, Ordering::SeqCst);
         task.data_size.store(self.data_size, Ordering::SeqCst);
         task.stack_size.store(self.stack_size, Ordering::SeqCst);
         *task.name.write() = self.name;
 
-        // Restore trapframe
         *trapframe = self.trapframe;
 
         Ok(())

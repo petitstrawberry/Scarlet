@@ -7,7 +7,7 @@
 
 use crate::arch::Trapframe;
 use crate::environment::PAGE_SIZE;
-use crate::mem::page::allocate_raw_pages;
+use crate::mem::page::PageAllocation;
 use crate::task::mytask;
 use crate::vm::vmem::{MemoryArea, VirtualMemoryMap};
 use alloc::boxed::Box;
@@ -137,12 +137,14 @@ pub fn sys_memory_map(trapframe: &mut Trapframe) -> usize {
         perm
     } | 0x08; // Access from user space
 
-    // If this is a private file-backed mapping, allocate private pages and copy
     let is_map_private_flag = (flags & MAP_PRIVATE) != 0;
     if is_map_private_flag && !is_shared {
-        // Allocate private pages
-        let pages = allocate_raw_pages(num_pages);
-        let pages_ptr = pages as usize;
+        let page_alloc = crate::mem::page::PageAllocation::new(num_pages);
+        if page_alloc.is_none() {
+            return usize::MAX;
+        }
+        let page_alloc = page_alloc.unwrap();
+        let pages_ptr = page_alloc.as_ptr() as usize;
         let private_pmarea = MemoryArea::new(pages_ptr, pages_ptr + aligned_length - 1);
 
         let mut vm_map =
@@ -158,7 +160,6 @@ pub fn sys_memory_map(trapframe: &mut Trapframe) -> usize {
                 {
                     Some(addr) => addr,
                     None => {
-                        crate::mem::page::free_raw_pages(pages, num_pages);
                         return usize::MAX;
                     }
                 };
@@ -166,7 +167,6 @@ pub fn sys_memory_map(trapframe: &mut Trapframe) -> usize {
                 vm_map =
                     VirtualMemoryMap::new(private_pmarea, vmarea, final_permissions, false, None);
                 if task.vm_manager.add_memory_map(vm_map.clone()).is_err() {
-                    crate::mem::page::free_raw_pages(pages, num_pages);
                     return usize::MAX;
                 }
             }
@@ -176,12 +176,10 @@ pub fn sys_memory_map(trapframe: &mut Trapframe) -> usize {
             match task.vm_manager.add_memory_map_fixed(vm_map.clone()) {
                 Ok(removed) => removed,
                 Err(_) => {
-                    crate::mem::page::free_raw_pages(pages, num_pages);
                     return usize::MAX;
                 }
             }
         } else {
-            // Non-fixed path already inserted the map via add_memory_map above.
             Vec::new()
         };
 
@@ -200,39 +198,16 @@ pub fn sys_memory_map(trapframe: &mut Trapframe) -> usize {
                 }
             }
 
-            // Clean up removed managed pages
-            for removed_map in removed_mappings {
-                if !removed_map.is_shared {
-                    let mapping_start = removed_map.vmarea.start;
-                    let mapping_end = removed_map.vmarea.end;
-                    let num_removed_pages =
-                        (mapping_end - mapping_start + 1 + PAGE_SIZE - 1) / PAGE_SIZE;
-                    for i in 0..num_removed_pages {
-                        let page_vaddr = mapping_start + i * PAGE_SIZE;
-                        if let Some(_managed_page) = task.remove_managed_page(page_vaddr) {
-                            // freed when dropped
-                        }
-                    }
-                }
-            }
-
             // Copy contents from object paddr to private pages
             for i in 0..num_pages {
                 let src = (paddr + i * PAGE_SIZE) as *const u8;
-                let dst_page = unsafe { (pages as *mut crate::mem::page::Page).add(i) } as *mut u8;
+                let dst_page = unsafe { page_alloc.as_ptr().add(i) } as *mut u8;
                 unsafe {
                     core::ptr::copy_nonoverlapping(src, dst_page, PAGE_SIZE);
                 }
             }
 
-            // Add managed pages to task
-            for i in 0..num_pages {
-                let page_vaddr = chosen_vaddr + i * crate::environment::PAGE_SIZE;
-                let page_ptr = unsafe { (pages as *mut crate::mem::page::Page).add(i) };
-                task.add_managed_page(unsafe {
-                    crate::task::ManagedPage::from_raw(page_vaddr, page_ptr)
-                });
-            }
+            task.page_allocations.write().push(page_alloc);
 
             return chosen_vaddr;
         }
@@ -286,19 +261,16 @@ pub fn sys_memory_map(trapframe: &mut Trapframe) -> usize {
                 }
             }
 
-            // Then, handle managed page cleanup (MMU cleanup is already handled by VmManager.add_memory_map_fixed)
+            // Then, handle page allocation cleanup for private mappings
             for removed_map in removed_mappings {
-                // Remove managed pages only for private mappings
                 if !removed_map.is_shared {
-                    let mapping_start = removed_map.vmarea.start;
-                    let mapping_end = removed_map.vmarea.end;
-                    let num_pages = (mapping_end - mapping_start + 1 + PAGE_SIZE - 1) / PAGE_SIZE;
-
-                    for i in 0..num_pages {
-                        let page_vaddr = mapping_start + i * PAGE_SIZE;
-                        if let Some(_managed_page) = task.remove_managed_page(page_vaddr) {
-                            // The managed page is automatically freed when dropped
-                        }
+                    let pm_start = removed_map.pmarea.start;
+                    let mut allocs = task.page_allocations.write();
+                    if let Some(pos) = allocs
+                        .iter()
+                        .position(|pa| pa.as_ptr() as usize == pm_start)
+                    {
+                        allocs.remove(pos);
                     }
                 }
             }
@@ -309,7 +281,6 @@ pub fn sys_memory_map(trapframe: &mut Trapframe) -> usize {
     }
 }
 
-/// Handle anonymous memory mapping
 fn handle_anonymous_mapping(
     task: &crate::task::Task,
     vaddr: usize,
@@ -318,27 +289,26 @@ fn handle_anonymous_mapping(
     prot: usize,
     flags: usize,
 ) -> usize {
-    // For anonymous mappings, decide shared/private based on flags
     let is_shared = (flags & MAP_SHARED) != 0;
     let is_map_fixed = (flags & MAP_FIXED) != 0;
 
-    // For anonymous mappings, allocate physical memory directly
-    let pages = allocate_raw_pages(num_pages);
-    let pages_ptr = pages as usize;
+    let page_alloc = match PageAllocation::new(num_pages) {
+        Some(pa) => pa,
+        None => return usize::MAX,
+    };
+    let pages_ptr = page_alloc.as_ptr() as usize;
 
-    // Convert protection flags to kernel permissions
-    let mut permissions = 0x08; // Access from user space
+    let mut permissions = 0x08;
     if (prot & PROT_READ) != 0 {
-        permissions |= 0x1; // Readable
+        permissions |= 0x1;
     }
     if (prot & PROT_WRITE) != 0 {
-        permissions |= 0x2; // Writable
+        permissions |= 0x2;
     }
     if (prot & PROT_EXEC) != 0 {
-        permissions |= 0x4; // Executable
+        permissions |= 0x4;
     }
 
-    // Determine final address (0 means kernel chooses)
     let mut chosen_vaddr = vaddr;
     if chosen_vaddr == 0 {
         chosen_vaddr = match task
@@ -346,94 +316,58 @@ fn handle_anonymous_mapping(
             .find_unmapped_area(aligned_length, PAGE_SIZE)
         {
             Some(addr) => addr,
-            None => {
-                crate::mem::page::free_raw_pages(pages, num_pages);
-                return usize::MAX;
-            }
+            None => return usize::MAX,
         };
-    } else {
-        if chosen_vaddr % PAGE_SIZE != 0 {
-            crate::mem::page::free_raw_pages(pages, num_pages);
-            return usize::MAX;
-        }
+    } else if chosen_vaddr % PAGE_SIZE != 0 {
+        return usize::MAX;
     }
 
-    // Create memory areas
     let vmarea = MemoryArea::new(chosen_vaddr, chosen_vaddr + aligned_length - 1);
     let pmarea = MemoryArea::new(pages_ptr, pages_ptr + aligned_length - 1);
-
-    // Create virtual memory map
-    let vm_map = VirtualMemoryMap::new(pmarea, vmarea, permissions, is_shared, None); // Anonymous mappings have no owner
+    let vm_map = VirtualMemoryMap::new(pmarea, vmarea, permissions, is_shared, None);
 
     if !is_map_fixed {
-        // Treat chosen_vaddr as hint; if it overlaps, fall back once.
         if task.vm_manager.add_memory_map(vm_map.clone()).is_err() {
             chosen_vaddr = match task
                 .vm_manager
                 .find_unmapped_area(aligned_length, PAGE_SIZE)
             {
                 Some(addr) => addr,
-                None => {
-                    crate::mem::page::free_raw_pages(pages, num_pages);
-                    return usize::MAX;
-                }
+                None => return usize::MAX,
             };
             let vmarea = MemoryArea::new(chosen_vaddr, chosen_vaddr + aligned_length - 1);
             let retry_map = VirtualMemoryMap::new(pmarea, vmarea, permissions, is_shared, None);
             if task.vm_manager.add_memory_map(retry_map).is_err() {
-                crate::mem::page::free_raw_pages(pages, num_pages);
                 return usize::MAX;
             }
         }
     } else {
-        match task.vm_manager.add_memory_map_fixed(vm_map) {
-            Ok(removed_mappings) => {
-                // First, process notifications for object owners
-                for removed_map in &removed_mappings {
-                    if removed_map.is_shared {
-                        if let Some(owner_weak) = &removed_map.owner {
-                            if let Some(owner) = owner_weak.upgrade() {
-                                owner.on_unmapped(
-                                    removed_map.vmarea.start,
-                                    removed_map.vmarea.size(),
-                                );
-                            }
-                        }
-                    }
-                }
-
-                // Then, handle managed page cleanup (MMU cleanup is already handled by VmManager.add_memory_map_fixed)
-                for removed_map in removed_mappings {
-                    // Remove managed pages only for private mappings
-                    if !removed_map.is_shared {
-                        let mapping_start = removed_map.vmarea.start;
-                        let mapping_end = removed_map.vmarea.end;
-                        let num_removed_pages =
-                            (mapping_end - mapping_start + 1 + PAGE_SIZE - 1) / PAGE_SIZE;
-
-                        for i in 0..num_removed_pages {
-                            let page_vaddr = mapping_start + i * PAGE_SIZE;
-                            if let Some(_managed_page) = task.remove_managed_page(page_vaddr) {
-                                // The managed page is automatically freed when dropped
-                            }
-                        }
-                    }
+        let removed_mappings = match task.vm_manager.add_memory_map_fixed(vm_map) {
+            Ok(maps) => maps,
+            Err(_) => return usize::MAX,
+        };
+        for removed_map in &removed_mappings {
+            if removed_map.is_shared {
+                if let Some(owner) = removed_map.owner.as_ref().and_then(|w| w.upgrade()) {
+                    owner.on_unmapped(removed_map.vmarea.start, removed_map.vmarea.size());
                 }
             }
-            Err(_) => {
-                crate::mem::page::free_raw_pages(pages, num_pages);
-                return usize::MAX;
+        }
+        for removed_map in removed_mappings {
+            if !removed_map.is_shared {
+                let pm_start = removed_map.pmarea.start;
+                let mut allocs = task.page_allocations.write();
+                if let Some(pos) = allocs
+                    .iter()
+                    .position(|pa| pa.as_ptr() as usize == pm_start)
+                {
+                    allocs.remove(pos);
+                }
             }
         }
     }
 
-    // Add managed pages for the new anonymous mapping
-    for i in 0..num_pages {
-        let page_vaddr = chosen_vaddr + i * crate::environment::PAGE_SIZE;
-        let page_ptr = unsafe { (pages as *mut crate::mem::page::Page).add(i) };
-        task.add_managed_page(unsafe { crate::task::ManagedPage::from_raw(page_vaddr, page_ptr) });
-    }
-
+    task.page_allocations.write().push(page_alloc);
     chosen_vaddr
 }
 
@@ -474,20 +408,14 @@ pub fn sys_memory_unmap(trapframe: &mut Trapframe) -> usize {
             }
         }
 
-        // Remove managed pages only for private mappings
-        // Shared mappings should not have their physical pages freed here
-        // as they might be used by other processes
-        // (MMU cleanup is already handled by VmManager.remove_memory_map_by_addr)
         if !removed_map.is_shared {
-            let mapping_start = removed_map.vmarea.start;
-            let mapping_end = removed_map.vmarea.end;
-            let num_pages = (mapping_end - mapping_start + 1 + PAGE_SIZE - 1) / PAGE_SIZE;
-
-            for i in 0..num_pages {
-                let page_vaddr = mapping_start + i * PAGE_SIZE;
-                if let Some(_managed_page) = task.remove_managed_page(page_vaddr) {
-                    // The managed page is automatically freed when dropped
-                }
+            let pm_start = removed_map.pmarea.start;
+            let mut allocs = task.page_allocations.write();
+            if let Some(pos) = allocs
+                .iter()
+                .position(|pa| pa.as_ptr() as usize == pm_start)
+            {
+                allocs.remove(pos);
             }
         }
 

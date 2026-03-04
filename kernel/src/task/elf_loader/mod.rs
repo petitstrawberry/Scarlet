@@ -42,8 +42,7 @@
 
 use crate::environment::PAGE_SIZE;
 use crate::fs::{FileObject, SeekFrom};
-use crate::mem::page::{allocate_raw_pages, free_raw_pages};
-use crate::task::{ManagedPage, Task};
+use crate::task::Task;
 use crate::vm::addr::{phys_to_virt, virt_to_phys};
 use crate::vm::vmem::{MemoryArea, VirtualMemoryMap, VirtualMemoryPermission, VirtualMemoryRegion};
 use alloc::boxed::Box;
@@ -1273,41 +1272,29 @@ fn map_elf_segment(
         return Err("Memory area overlaps with existing mapping");
     }
 
-    // Allocate physical memory
     let num_of_pages = (size + PAGE_SIZE - 1) / PAGE_SIZE;
-    let pages = allocate_raw_pages(num_of_pages);
-    let ptr = pages as *mut u8;
-    if ptr.is_null() {
-        return Err("Failed to allocate memory");
-    }
-    // Convert kernel virtual address to physical address for pmarea
+    let page_alloc =
+        crate::mem::page::PageAllocation::new(num_of_pages).ok_or("Failed to allocate memory")?;
+    let ptr = page_alloc.as_ptr() as *mut u8;
     let pm_start = virt_to_phys(ptr as usize);
     let pmarea = MemoryArea {
         start: pm_start,
         end: pm_start + size - 1,
     };
 
-    // Create memory mapping
     let map = VirtualMemoryMap {
         vmarea,
         pmarea,
         permissions,
-        is_shared: false, // User program memory should not be shared
+        is_shared: false,
         owner: None,
     };
 
-    // Add to VM manager
     if let Err(e) = task.vm_manager.add_memory_map(map) {
-        free_raw_pages(pages, num_of_pages);
         return Err(e);
     }
 
-    // Manage segment page in the task
-    for i in 0..num_of_pages {
-        task.add_managed_page(unsafe {
-            ManagedPage::from_raw(vaddr + i * PAGE_SIZE, pages.wrapping_add(i))
-        });
-    }
+    task.page_allocations.write().push(page_alloc);
 
     Ok(())
 }
