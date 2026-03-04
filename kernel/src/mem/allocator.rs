@@ -2,14 +2,50 @@ use core::alloc::{GlobalAlloc, Layout};
 use core::sync::atomic::{AtomicUsize, Ordering};
 
 use spin::Mutex;
-use talc::{ErrOnOom, Span, Talc, Talck};
+use talc::{OomHandler, Span, Talc, Talck};
 
 use crate::early_println;
+use crate::environment::PAGE_SIZE;
 use crate::vm::vmem::MemoryArea;
+
+const HEAP_EXPAND_PAGES: usize = 64;
+
+struct DynamicHeapHandler;
+
+impl OomHandler for DynamicHeapHandler {
+    fn handle_oom(talc: &mut Talc<Self>, layout: Layout) -> Result<(), ()> {
+        let required_size = layout.size().max(HEAP_EXPAND_PAGES * PAGE_SIZE);
+        let pages_needed = (required_size + PAGE_SIZE - 1) / PAGE_SIZE;
+
+        let addr = crate::mem::pmm::alloc_pages(pages_needed);
+        match addr {
+            Some(start) => {
+                let size = pages_needed * PAGE_SIZE;
+                let span = Span::from_base_size(start as *mut u8, size);
+                match unsafe { talc.claim(span) } {
+                    Ok(_) => {
+                        early_println!(
+                            "[Heap] Expanded by {} pages ({} KB) at {:#x}",
+                            pages_needed,
+                            size / 1024,
+                            start
+                        );
+                        Ok(())
+                    }
+                    Err(_) => {
+                        crate::mem::pmm::free_pages(start, pages_needed);
+                        Err(())
+                    }
+                }
+            }
+            None => Err(()),
+        }
+    }
+}
 
 #[global_allocator]
 #[unsafe(link_section = ".data")]
-static ALLOCATOR: Talck<Mutex<()>, ErrOnOom> = Talc::new(ErrOnOom).lock();
+static ALLOCATOR: Talck<Mutex<()>, DynamicHeapHandler> = Talc::new(DynamicHeapHandler).lock();
 
 static ALLOCATED_COUNT: AtomicUsize = AtomicUsize::new(0);
 static ALLOCATED_BYTES: AtomicUsize = AtomicUsize::new(0);
