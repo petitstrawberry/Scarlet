@@ -237,6 +237,14 @@ impl BuddyRegion {
             order += 1;
         }
 
+        self.alloc_from_order(order)
+    }
+
+    fn alloc_from_order(&mut self, order: usize) -> Option<usize> {
+        if order > MAX_ORDER || !self.active {
+            return None;
+        }
+
         let mut current_order = order;
         while current_order <= MAX_ORDER && self.free_area[current_order].free_list.is_empty() {
             current_order += 1;
@@ -385,6 +393,17 @@ impl PmmInner {
         None
     }
 
+    fn alloc_from_order(&mut self, order: usize) -> Option<usize> {
+        for region in &mut self.regions {
+            if region.active {
+                if let Some(addr) = region.alloc_from_order(order) {
+                    return Some(addr);
+                }
+            }
+        }
+        None
+    }
+
     fn free(&mut self, paddr: usize, pages: usize) {
         for region in &mut self.regions {
             if region.contains(paddr) {
@@ -450,27 +469,23 @@ pub fn add_region(area: MemoryArea) -> Result<(), &'static str> {
 }
 
 pub fn alloc_pages(pages: usize) -> Option<usize> {
-    let result = PMM.lock().alloc(pages);
-    if result.is_none() {
-        crate::early_println!("[PMM] alloc_pages({}) failed. Free counts:", pages);
-        let pmm = PMM.lock();
-        for region in &pmm.regions {
-            if region.active {
-                for order in 0..=MAX_ORDER {
-                    let nr = region.free_area[order].nr_free;
-                    if nr > 0 {
-                        crate::early_println!(
-                            "  order {}: {} blocks ({} pages)",
-                            order,
-                            nr,
-                            nr * (1usize << order)
-                        );
-                    }
-                }
-            }
-        }
+    PMM.lock().alloc(pages)
+}
+
+pub fn alloc_pages_aligned(pages: usize, align_pages: usize) -> Option<usize> {
+    if align_pages == 0 || align_pages == 1 {
+        return alloc_pages(pages);
     }
-    result
+
+    let order = if align_pages.is_power_of_two() {
+        align_pages.trailing_zeros() as usize
+    } else {
+        align_pages.next_power_of_two().trailing_zeros() as usize
+    };
+
+    let needed_order = order.max(pages.next_power_of_two().trailing_zeros() as usize);
+
+    PMM.lock().alloc_from_order(needed_order)
 }
 
 pub fn free_pages(paddr: usize, pages: usize) {
@@ -487,26 +502,6 @@ pub fn free_frame(paddr: usize) {
 
 pub fn stats() -> (usize, usize) {
     PMM.lock().stats()
-}
-
-pub fn debug_free_counts() {
-    let pmm = PMM.lock();
-    for region in &pmm.regions {
-        if region.active {
-            early_println!("[PMM Debug] Region {:#x}:", region.mem_start);
-            for order in 0..=MAX_ORDER {
-                let nr = region.free_area[order].nr_free;
-                if nr > 0 {
-                    early_println!(
-                        "  order {}: {} blocks ({} pages)",
-                        order,
-                        nr,
-                        nr * (1usize << order)
-                    );
-                }
-            }
-        }
-    }
 }
 
 fn align_up(addr: usize, align: usize) -> usize {

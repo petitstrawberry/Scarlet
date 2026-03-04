@@ -1076,21 +1076,21 @@ fn load_elf_into_task_static(
     })?;
 
     // Return entry point adjusted for base address
-    crate::println!(
-        "[ELF Loader] base_address={:#x}, e_entry={:#x}, needs_relocation={}",
-        base_address,
-        header.e_entry,
-        needs_relocation
-    );
+    // crate::println!(
+    //     "[ELF Loader] base_address={:#x}, e_entry={:#x}, needs_relocation={}",
+    //     base_address,
+    //     header.e_entry,
+    //     needs_relocation
+    // );
     let final_entry_point = if needs_relocation {
         base_address + header.e_entry
     } else {
         header.e_entry
     };
-    crate::println!(
-        "[ELF Loader] final_entry_point before validation: {:#x}",
-        final_entry_point
-    );
+    // crate::println!(
+    //     "[ELF Loader] final_entry_point before validation: {:#x}",
+    //     final_entry_point
+    // );
 
     // Validate that the entry point is actually mapped
     let entry_vaddr = final_entry_point as usize;
@@ -1114,11 +1114,11 @@ fn load_elf_into_task_static(
         })?;
 
         if let Some(fixed) = fixed_entry {
-            crate::println!(
-                "[ELF Loader] Fixed entry point from {:#x} to {:#x}",
-                final_entry_point,
-                fixed
-            );
+            // crate::println!(
+            //     "[ELF Loader] Fixed entry point from {:#x} to {:#x}",
+            //     final_entry_point,
+            //     fixed
+            // );
             return Ok(fixed);
         } else {
             return Err(ElfLoaderError {

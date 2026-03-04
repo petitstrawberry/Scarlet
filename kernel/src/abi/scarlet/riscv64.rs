@@ -801,10 +801,10 @@ impl AbiModule for ScarletAbi {
                         match elf_result.mode {
                             ExecutionMode::Static => {
                                 // Static linking - direct execution
-                                crate::println!(
-                                    "[Scarlet ABI] Setting entry point to {:#x} (from ELF result)",
-                                    elf_result.entry_point
-                                );
+                                // crate::println!(
+                                //     "[Scarlet ABI] Setting entry point to {:#x} (from ELF result)",
+                                //     elf_result.entry_point
+                                // );
                                 task.set_entry_point(elf_result.entry_point as usize);
                             }
                             ExecutionMode::Dynamic {
@@ -856,12 +856,12 @@ impl AbiModule for ScarletAbi {
 
                         // Switch to the new task
                         let pc_before_switch = task.vcpu.lock().get_pc();
-                        crate::println!("[Scarlet ABI] PC before switch: {:#x}", pc_before_switch);
+                        // crate::println!("[Scarlet ABI] PC before switch: {:#x}", pc_before_switch);
                         task.vcpu.lock().switch(trapframe);
-                        crate::println!(
-                            "[Scarlet ABI] Trapframe EPC after switch: {:#x}",
-                            trapframe.epc
-                        );
+                        // crate::println!(
+                        //     "[Scarlet ABI] Trapframe EPC after switch: {:#x}",
+                        //     trapframe.epc
+                        // );
                         Ok(())
                     }
                     Err(e) => {

@@ -20,19 +20,35 @@ impl Page {
     }
 }
 
-/// Allocates a number of pages.
+/// Allocates a number of pages from PMM.
 ///
 /// # Arguments
 /// * `num_of_pages` - The number of pages to allocate
 ///
 /// # Returns
-/// A pointer to the allocated pages.
+/// A pointer to the allocated pages, or null if allocation failed.
 pub fn allocate_raw_pages(num_of_pages: usize) -> *mut Page {
-    let boxed_pages = allocate_boxed_pages(num_of_pages);
-    Box::into_raw(boxed_pages) as *mut Page
+    if num_of_pages == 0 {
+        return core::ptr::null_mut();
+    }
+
+    let paddr = match crate::mem::pmm::alloc_pages(num_of_pages) {
+        Some(addr) => addr,
+        None => return core::ptr::null_mut(),
+    };
+
+    // Identity mapping: VA = PA
+    let vaddr = phys_to_virt(paddr) as *mut Page;
+
+    // Zero-initialize the pages
+    unsafe {
+        core::ptr::write_bytes(vaddr as *mut u8, 0, num_of_pages * PAGE_SIZE);
+    }
+
+    vaddr
 }
 
-/// Allocates a number of pages with custom alignment.
+/// Allocates a number of pages with custom alignment from PMM.
 ///
 /// # Arguments
 /// * `num_of_pages` - The number of pages to allocate
@@ -41,32 +57,56 @@ pub fn allocate_raw_pages(num_of_pages: usize) -> *mut Page {
 /// # Returns
 /// A pointer to the allocated pages with the specified alignment.
 pub fn allocate_raw_pages_aligned(num_of_pages: usize, align: usize) -> *mut Page {
-    let boxed_pages = allocate_boxed_pages_aligned(num_of_pages, align);
-    Box::into_raw(boxed_pages) as *mut Page
+    if num_of_pages == 0 {
+        return core::ptr::null_mut();
+    }
+
+    let align_pages = align / PAGE_SIZE;
+    let paddr = match crate::mem::pmm::alloc_pages_aligned(num_of_pages, align_pages) {
+        Some(addr) => addr,
+        None => return core::ptr::null_mut(),
+    };
+
+    let vaddr = phys_to_virt(paddr) as *mut Page;
+
+    unsafe {
+        core::ptr::write_bytes(vaddr as *mut u8, 0, num_of_pages * PAGE_SIZE);
+    }
+
+    vaddr
 }
 
-/// Frees a number of pages.
+/// Frees a number of pages back to PMM.
 ///
 /// # Arguments
 /// * `pages` - A pointer to the pages to free
 /// * `num_of_pages` - The number of pages to free
 pub fn free_raw_pages(pages: *mut Page, num_of_pages: usize) {
-    unsafe {
-        let boxed_pages = Box::from_raw(core::ptr::slice_from_raw_parts_mut(pages, num_of_pages));
-        free_boxed_pages(boxed_pages);
+    if pages.is_null() || num_of_pages == 0 {
+        return;
     }
+
+    let paddr = virt_to_phys(pages as usize);
+    crate::mem::pmm::free_pages(paddr, num_of_pages);
 }
 
-/// Allocates a number of pages and returns them as a boxed slice.
+/// Allocates a number of pages from the heap and returns them as a boxed slice.
+/// Note: This uses the global heap allocator, not PMM.
+/// For PMM-backed allocations, use `PageAllocation::new()` instead.
 ///
 /// # Arguments
 /// * `num_of_pages` - The number of pages to allocate
-///  
+///
 /// # Returns
 /// A boxed slice of the allocated pages.
 ///
+/// # Panics
+/// Panics if allocation fails.
+#[deprecated(
+    since = "0.1.0",
+    note = "This function uses the global heap allocator. Use PageAllocation::new() for PMM-backed allocations instead."
+)]
 pub fn allocate_boxed_pages(num_of_pages: usize) -> Box<[Page]> {
-    // Allocate raw memory and initialize it
     use alloc::alloc::{Layout, alloc_zeroed};
     use core::ptr;
 
@@ -78,12 +118,27 @@ pub fn allocate_boxed_pages(num_of_pages: usize) -> Box<[Page]> {
             alloc::alloc::handle_alloc_error(layout);
         }
 
-        // Convert raw pointer to Box<[Page]>
         let slice = ptr::slice_from_raw_parts_mut(ptr, num_of_pages);
         Box::from_raw(slice)
     }
 }
 
+/// Allocates aligned pages from the heap and returns them as a boxed slice.
+/// Note: This uses the global heap allocator, not PMM.
+///
+/// # Arguments
+/// * `num_of_pages` - The number of pages to allocate
+/// * `align` - The alignment in bytes
+///
+/// # Returns
+/// A boxed slice of the allocated pages.
+///
+/// # Panics
+/// Panics if allocation fails.
+#[deprecated(
+    since = "0.1.0",
+    note = "This function uses the global heap allocator. Use allocate_raw_pages_aligned() with PageAllocation for PMM-backed allocations instead."
+)]
 pub fn allocate_boxed_pages_aligned(num_of_pages: usize, align: usize) -> Box<[Page]> {
     use alloc::alloc::{Layout, alloc_zeroed};
     use core::ptr;
@@ -103,26 +158,20 @@ pub fn allocate_boxed_pages_aligned(num_of_pages: usize, align: usize) -> Box<[P
 }
 
 /// Frees a boxed slice of pages.
-///
-/// # Arguments
-/// * `pages` - A boxed slice of pages to free
-///
-pub fn free_boxed_pages(pages: Box<[Page]>) {
+/// Note: The Box will be automatically freed to the heap when dropped.
+pub fn free_boxed_pages(_pages: Box<[Page]>) {
     // The Box will be automatically freed when it goes out of scope
-    drop(pages);
+    drop(_pages);
 }
 
 /// Frees a boxed page.
-///
-/// # Arguments
-/// * `page` - A boxed page to free
-///
-pub fn free_boxed_page(page: Box<Page>) {
+/// Note: The Box will be automatically freed to the heap when dropped.
+pub fn free_boxed_page(_page: Box<Page>) {
     // The Box will be automatically freed when it goes out of scope
-    drop(page);
+    drop(_page);
 }
 
-/// A RAII wrapper for contiguous page allocations.
+/// A RAII wrapper for contiguous page allocations directly from PMM.
 ///
 /// This struct owns a contiguous block of pages and automatically frees them
 /// when dropped. This prevents memory leaks and ensures safe cleanup.
@@ -143,9 +192,13 @@ impl PageAllocation {
         if count == 0 {
             return None;
         }
-        let paddr = crate::mem::pmm::alloc_pages(count)?;
-        let vaddr = phys_to_virt(paddr) as *mut Page;
-        Some(Self { ptr: vaddr, count })
+
+        let ptr = allocate_raw_pages(count);
+        if ptr.is_null() {
+            None
+        } else {
+            Some(Self { ptr, count })
+        }
     }
 
     /// Get a pointer to the first page.
@@ -202,8 +255,7 @@ impl PageAllocation {
 impl Drop for PageAllocation {
     fn drop(&mut self) {
         if !self.ptr.is_null() && self.count > 0 {
-            let paddr = virt_to_phys(self.ptr as usize);
-            crate::mem::pmm::free_pages(paddr, self.count);
+            free_raw_pages(self.ptr, self.count);
         }
     }
 }

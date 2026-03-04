@@ -8,7 +8,7 @@ use crate::early_println;
 use crate::environment::PAGE_SIZE;
 use crate::vm::vmem::MemoryArea;
 
-const HEAP_EXPAND_PAGES: usize = 4096;
+const HEAP_EXPAND_PAGES: usize = 1024;
 
 struct DynamicHeapHandler;
 
@@ -30,11 +30,7 @@ impl OomHandler for DynamicHeapHandler {
                     }
                 }
             }
-            None => {
-                early_println!("[OOM] PMM allocation failed for {} pages", pages_needed);
-                crate::mem::pmm::debug_free_counts();
-                Err(())
-            }
+            None => Err(()),
         }
     }
 }
@@ -53,7 +49,6 @@ static ALLOCATED_BYTES: AtomicUsize = AtomicUsize::new(0);
 pub unsafe fn init_heap(start: usize, size: usize) {
     let span = Span::from_base_size(start as *mut u8, size);
     ALLOCATOR.lock().claim(span).unwrap();
-    early_println!("Heap initialized: {:#x} - {:#x}", start, start + size - 1);
 }
 
 /// Add an additional heap region
