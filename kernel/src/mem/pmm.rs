@@ -430,7 +430,7 @@ static PMM: Mutex<PmmInner> = Mutex::new(PmmInner::new());
 
 pub unsafe fn init(area: MemoryArea) {
     early_println!(
-        "[PMM] Initializing buddy system (Linux-style) with region: {:#x} - {:#x}",
+        "[PMM] Initializing buddy system with region: {:#x} - {:#x}",
         area.start,
         area.end
     );
