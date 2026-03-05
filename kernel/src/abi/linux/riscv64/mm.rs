@@ -180,6 +180,7 @@ pub fn sys_mmap(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
         const PAGES_PER_ALLOC: usize = 16;
         let num_allocs = (num_pages + PAGES_PER_ALLOC - 1) / PAGES_PER_ALLOC;
         let mut page_allocs: Vec<PageAllocation> = Vec::with_capacity(num_allocs);
+        let mut vm_maps: Vec<VirtualMemoryMap> = Vec::with_capacity(num_allocs);
 
         for alloc_idx in 0..num_allocs {
             let pages_in_this_alloc = if alloc_idx == num_allocs - 1 {
@@ -188,102 +189,119 @@ pub fn sys_mmap(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
                 PAGES_PER_ALLOC
             };
 
-            match PageAllocation::new(pages_in_this_alloc) {
-                Some(alloc) => page_allocs.push(alloc),
+            let alloc = match PageAllocation::new(pages_in_this_alloc) {
+                Some(a) => a,
                 None => {
+                    drop(page_allocs);
+                    return to_result(errno::ENOMEM);
+                }
+            };
+
+            let chunk_vaddr = final_vaddr + alloc_idx * PAGES_PER_ALLOC * PAGE_SIZE;
+            let chunk_vmarea = MemoryArea::new(
+                chunk_vaddr,
+                chunk_vaddr + pages_in_this_alloc * PAGE_SIZE - 1,
+            );
+            let chunk_pmarea = MemoryArea::new(
+                alloc.as_paddr(),
+                alloc.as_paddr() + pages_in_this_alloc * PAGE_SIZE - 1,
+            );
+
+            page_allocs.push(alloc);
+            vm_maps.push(VirtualMemoryMap::new(
+                chunk_pmarea,
+                chunk_vmarea,
+                final_permissions,
+                false,
+                None,
+            ));
+        }
+
+        let mut removed_mappings_opt: Option<Vec<VirtualMemoryMap>> = None;
+
+        for vm_map in &vm_maps {
+            let result = if is_fixed {
+                task.vm_manager
+                    .add_memory_map_fixed(vm_map.clone())
+                    .map(|removed| Some(removed))
+            } else {
+                task.vm_manager.add_memory_map(vm_map.clone()).map(|_| None)
+            };
+
+            match result {
+                Ok(removed) => {
+                    if let Some(rm) = removed {
+                        if removed_mappings_opt.is_none() {
+                            removed_mappings_opt = Some(Vec::new());
+                        }
+                        removed_mappings_opt.as_mut().unwrap().extend(rm);
+                    }
+                }
+                Err(_) => {
                     drop(page_allocs);
                     return to_result(errno::ENOMEM);
                 }
             }
         }
 
-        let pages_ptr = page_allocs[0].as_ptr() as usize;
-        let private_pmarea = MemoryArea::new(pages_ptr, pages_ptr + aligned_length - 1);
-
-        let vm_map = VirtualMemoryMap::new(private_pmarea, vmarea, final_permissions, false, None);
-
-        let map_result = if is_fixed {
-            task.vm_manager
-                .add_memory_map_fixed(vm_map)
-                .map(|removed| Some(removed))
-        } else {
-            task.vm_manager.add_memory_map(vm_map).map(|_| None)
-        };
-
-        match map_result {
-            Ok(removed_mappings_opt) => {
-                if let Some(removed_mappings) = &removed_mappings_opt {
-                    for removed_map in removed_mappings {
-                        if removed_map.is_shared {
-                            if let Some(owner_weak) = &removed_map.owner {
-                                if let Some(owner) = owner_weak.upgrade() {
-                                    owner.on_unmapped(
-                                        removed_map.vmarea.start,
-                                        removed_map.vmarea.size(),
-                                    );
-                                }
-                            }
+        if let Some(ref removed_mappings) = removed_mappings_opt {
+            for removed_map in removed_mappings {
+                if removed_map.is_shared {
+                    if let Some(owner_weak) = &removed_map.owner {
+                        if let Some(owner) = owner_weak.upgrade() {
+                            owner.on_unmapped(removed_map.vmarea.start, removed_map.vmarea.size());
                         }
                     }
                 }
-
-                if let Some(removed_mappings) = removed_mappings_opt {
-                    for removed_map in removed_mappings {
-                        if !removed_map.is_shared {
-                            let pm_start = removed_map.pmarea.start;
-                            let pm_end = removed_map.pmarea.end;
-                            let mut allocs = task.page_allocations.write();
-                            let mut retained = Vec::new();
-                            for alloc in allocs.drain(..) {
-                                let alloc_start = alloc.as_paddr();
-                                let alloc_end = alloc_start + alloc.len() * PAGE_SIZE - 1;
-                                if alloc_start >= pm_start && alloc_end <= pm_end {
-                                    drop(alloc);
-                                } else {
-                                    retained.push(alloc);
-                                }
-                            }
-                            *allocs = retained;
-                        }
-                    }
-                }
-
-                let mut page_idx = 0;
-                for alloc in &page_allocs {
-                    unsafe {
-                        core::ptr::write_bytes(
-                            alloc.as_ptr() as *mut u8,
-                            0u8,
-                            alloc.len() * PAGE_SIZE,
-                        );
-                    }
-                    if ok_len > 0 {
-                        let copy_start = page_idx * PAGE_SIZE;
-                        let copy_end = copy_start + alloc.len() * PAGE_SIZE;
-                        if copy_start < ok_len {
-                            let to_copy =
-                                core::cmp::min(ok_len - copy_start, alloc.len() * PAGE_SIZE);
-                            unsafe {
-                                core::ptr::copy_nonoverlapping(
-                                    (paddr + copy_start) as *const u8,
-                                    alloc.as_ptr() as *mut u8,
-                                    to_copy,
-                                );
-                            }
-                        }
-                    }
-                    page_idx += alloc.len();
-                }
-
-                task.page_allocations.write().extend(page_allocs);
-
-                final_vaddr
-            }
-            Err(_) => {
-                drop(page_allocs);
-                to_result(errno::ENOMEM)
             }
         }
+
+        if let Some(removed_mappings) = removed_mappings_opt {
+            for removed_map in removed_mappings {
+                if !removed_map.is_shared {
+                    let pm_start = removed_map.pmarea.start;
+                    let pm_end = removed_map.pmarea.end;
+                    let mut allocs = task.page_allocations.write();
+                    let mut retained = Vec::new();
+                    for alloc in allocs.drain(..) {
+                        let alloc_start = alloc.as_paddr();
+                        let alloc_end = alloc_start + alloc.len() * PAGE_SIZE - 1;
+                        if alloc_start >= pm_start && alloc_end <= pm_end {
+                            drop(alloc);
+                        } else {
+                            retained.push(alloc);
+                        }
+                    }
+                    *allocs = retained;
+                }
+            }
+        }
+
+        let mut page_idx = 0;
+        for alloc in &page_allocs {
+            unsafe {
+                core::ptr::write_bytes(alloc.as_ptr() as *mut u8, 0u8, alloc.len() * PAGE_SIZE);
+            }
+            if ok_len > 0 {
+                let copy_start = page_idx * PAGE_SIZE;
+                let copy_end = copy_start + alloc.len() * PAGE_SIZE;
+                if copy_start < ok_len {
+                    let to_copy = core::cmp::min(ok_len - copy_start, alloc.len() * PAGE_SIZE);
+                    unsafe {
+                        core::ptr::copy_nonoverlapping(
+                            (paddr + copy_start) as *const u8,
+                            alloc.as_ptr() as *mut u8,
+                            to_copy,
+                        );
+                    }
+                }
+            }
+            page_idx += alloc.len();
+        }
+
+        task.page_allocations.write().extend(page_allocs);
+
+        final_vaddr
     } else {
         // Shared or object-backed mapping path
         if paddr == 0 && ok_len == 0 {

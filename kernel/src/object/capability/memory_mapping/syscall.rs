@@ -142,6 +142,7 @@ pub fn sys_memory_map(trapframe: &mut Trapframe) -> usize {
         const PAGES_PER_ALLOC: usize = 16;
         let num_allocs = (num_pages + PAGES_PER_ALLOC - 1) / PAGES_PER_ALLOC;
         let mut page_allocs: Vec<crate::mem::page::PageAllocation> = Vec::with_capacity(num_allocs);
+        let mut vm_maps: Vec<VirtualMemoryMap> = Vec::with_capacity(num_allocs);
 
         for alloc_idx in 0..num_allocs {
             let pages_in_this_alloc = if alloc_idx == num_allocs - 1 {
@@ -150,59 +151,79 @@ pub fn sys_memory_map(trapframe: &mut Trapframe) -> usize {
                 PAGES_PER_ALLOC
             };
 
-            match crate::mem::page::PageAllocation::new(pages_in_this_alloc) {
-                Some(alloc) => page_allocs.push(alloc),
+            let alloc = match crate::mem::page::PageAllocation::new(pages_in_this_alloc) {
+                Some(a) => a,
                 None => {
                     drop(page_allocs);
                     return usize::MAX;
                 }
-            }
+            };
+
+            let chunk_vaddr = final_vaddr + alloc_idx * PAGES_PER_ALLOC * PAGE_SIZE;
+            let chunk_vmarea = MemoryArea::new(
+                chunk_vaddr,
+                chunk_vaddr + pages_in_this_alloc * PAGE_SIZE - 1,
+            );
+            let chunk_pmarea = MemoryArea::new(
+                alloc.as_paddr(),
+                alloc.as_paddr() + pages_in_this_alloc * PAGE_SIZE - 1,
+            );
+
+            page_allocs.push(alloc);
+            vm_maps.push(VirtualMemoryMap::new(
+                chunk_pmarea,
+                chunk_vmarea,
+                final_permissions,
+                false,
+                None,
+            ));
         }
 
-        let first_alloc_ptr = page_allocs[0].as_ptr() as usize;
-        let private_pmarea = MemoryArea::new(first_alloc_ptr, first_alloc_ptr + aligned_length - 1);
-
-        let mut vm_map =
-            VirtualMemoryMap::new(private_pmarea, vmarea, final_permissions, false, None);
-
-        // For non-MAP_FIXED, treat vaddr as a hint: if it overlaps, pick a new area.
         let mut chosen_vaddr = final_vaddr;
-        if !is_map_fixed {
-            if task.vm_manager.add_memory_map(vm_map.clone()).is_err() {
-                chosen_vaddr = match task
-                    .vm_manager
-                    .find_unmapped_area(aligned_length, PAGE_SIZE)
-                {
-                    Some(addr) => addr,
-                    None => {
+        let mut removed_mappings: Vec<VirtualMemoryMap> = Vec::new();
+
+        for vm_map in &vm_maps {
+            if !is_map_fixed {
+                if task.vm_manager.add_memory_map(vm_map.clone()).is_err() {
+                    chosen_vaddr = match task
+                        .vm_manager
+                        .find_unmapped_area(aligned_length, PAGE_SIZE)
+                    {
+                        Some(addr) => addr,
+                        None => {
+                            drop(page_allocs);
+                            return usize::MAX;
+                        }
+                    };
+                    let offset = vm_map.vmarea.start - final_vaddr;
+                    let new_vmarea = MemoryArea::new(
+                        chosen_vaddr + offset,
+                        chosen_vaddr + offset + vm_map.vmarea.size() - 1,
+                    );
+                    let new_map = VirtualMemoryMap::new(
+                        vm_map.pmarea,
+                        new_vmarea,
+                        final_permissions,
+                        false,
+                        None,
+                    );
+                    if task.vm_manager.add_memory_map(new_map).is_err() {
                         drop(page_allocs);
                         return usize::MAX;
                     }
-                };
-                let vmarea = MemoryArea::new(chosen_vaddr, chosen_vaddr + aligned_length - 1);
-                vm_map =
-                    VirtualMemoryMap::new(private_pmarea, vmarea, final_permissions, false, None);
-                if task.vm_manager.add_memory_map(vm_map.clone()).is_err() {
-                    drop(page_allocs);
-                    return usize::MAX;
+                }
+            } else if is_map_fixed {
+                match task.vm_manager.add_memory_map_fixed(vm_map.clone()) {
+                    Ok(removed) => removed_mappings.extend(removed),
+                    Err(_) => {
+                        drop(page_allocs);
+                        return usize::MAX;
+                    }
                 }
             }
         }
 
-        let removed_mappings: Vec<VirtualMemoryMap> = if is_map_fixed {
-            match task.vm_manager.add_memory_map_fixed(vm_map.clone()) {
-                Ok(removed) => removed,
-                Err(_) => {
-                    drop(page_allocs);
-                    return usize::MAX;
-                }
-            }
-        } else {
-            Vec::new()
-        };
-
         {
-            // Notify owners of removed maps (only for shared mappings)
             for removed_map in &removed_mappings {
                 if removed_map.is_shared {
                     if let Some(owner_weak) = &removed_map.owner {
@@ -213,7 +234,6 @@ pub fn sys_memory_map(trapframe: &mut Trapframe) -> usize {
                 }
             }
 
-            // Copy contents from object paddr to private pages
             let mut page_idx = 0;
             for alloc in &page_allocs {
                 for local_idx in 0..alloc.len() {
@@ -226,9 +246,7 @@ pub fn sys_memory_map(trapframe: &mut Trapframe) -> usize {
                 }
             }
 
-            // Store all allocations
             task.page_allocations.write().extend(page_allocs);
-
             return chosen_vaddr;
         }
     }
