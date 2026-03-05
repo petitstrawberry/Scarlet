@@ -4,11 +4,10 @@
 //! It handles saving and restoring callee-saved registers when switching
 //! between kernel threads.
 
-use alloc::boxed::Box;
 use core::arch::naked_asm;
 
 use crate::arch::Trapframe;
-use crate::mem::page::{Page, allocate_boxed_pages};
+use crate::mem::page::PageAllocation;
 use crate::vm::vmem::MemoryArea;
 
 /// Kernel context for RISC-V 64-bit
@@ -17,12 +16,12 @@ use crate::vm::vmem::MemoryArea;
 /// function calls and context switches in kernel mode, as well as
 /// the kernel stack information.
 #[repr(C, align(16))]
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct KernelContext {
     pub sp: u64,
     pub ra: u64,
     pub s: [u64; 12],
-    pub kernel_stack: Box<[Page]>,
+    pub kernel_stack: PageAllocation,
 }
 
 impl KernelContext {
@@ -31,9 +30,9 @@ impl KernelContext {
     /// # Returns
     /// A new KernelContext with allocated kernel stack ready for scheduling
     pub fn new() -> Self {
-        // Allocate page-aligned contiguous pages for the kernel stack
+        // Allocate page-aligned kernel stack from PMM
         let num_pages = crate::environment::TASK_KERNEL_STACK_SIZE / crate::environment::PAGE_SIZE;
-        let kernel_stack = allocate_boxed_pages(num_pages);
+        let kernel_stack = PageAllocation::new(num_pages).expect("Failed to allocate kernel stack");
         let stack_top = kernel_stack.as_ptr() as u64
             + (kernel_stack.len() * crate::environment::PAGE_SIZE) as u64;
 
@@ -52,14 +51,16 @@ impl KernelContext {
 
     /// Get the bottom of the kernel stack
     pub fn get_kernel_stack_bottom_paddr(&self) -> u64 {
-        (self.kernel_stack.as_ptr() as u64)
+        self.kernel_stack.as_paddr() as u64
             + (self.kernel_stack.len() as u64 * crate::environment::PAGE_SIZE as u64)
     }
 
     pub fn get_kernel_stack_memory_area_paddr(&self) -> MemoryArea {
         MemoryArea::new(
-            self.kernel_stack.as_ptr() as usize,
-            (self.get_kernel_stack_bottom_paddr() as usize) - 1,
+            self.kernel_stack.as_paddr(),
+            self.kernel_stack.as_paddr()
+                + (self.kernel_stack.len() * crate::environment::PAGE_SIZE)
+                - 1,
         )
     }
 
