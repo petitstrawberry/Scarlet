@@ -25,6 +25,8 @@ use crate::drivers::virtio::{
     device::VirtioDevice,
     queue::{DescriptorFlag, VirtQueue},
 };
+use crate::environment::PAGE_SIZE;
+use crate::mem::page::PageAllocation;
 use crate::random::EntropySource;
 
 // Default buffer size for random data
@@ -101,20 +103,16 @@ impl VirtioRngDevice {
         let mut virtqueues = self.virtqueues.lock();
         let queue = &mut virtqueues[0];
 
-        // Allocate a buffer to receive random data
-        let mut data_buffer: Box<[u8]> = vec![0u8; RNG_BUFFER_SIZE].into_boxed_slice();
-        let data_ptr = data_buffer.as_mut_ptr();
-
-        // Get physical address
-        let data_phys = crate::vm::get_kernel_vm_manager()
-            .translate_vaddr(data_ptr as usize)
-            .ok_or("Failed to translate data vaddr")?;
+        // Allocate buffer from PMM for DMA
+        let buffer_alloc =
+            PageAllocation::new(1).ok_or("Failed to allocate RNG buffer from PMM")?;
+        let data_ptr = buffer_alloc.as_ptr() as *mut u8;
 
         // Allocate descriptor for the data buffer (device writable)
         let desc_idx = queue.alloc_desc().ok_or("No available descriptors")?;
 
         // Set up the descriptor
-        queue.desc[desc_idx].addr = data_phys as u64;
+        queue.desc[desc_idx].addr = buffer_alloc.as_paddr() as u64;
         queue.desc[desc_idx].len = RNG_BUFFER_SIZE as u32;
         queue.desc[desc_idx].flags = DescriptorFlag::Write as u16;
         queue.desc[desc_idx].next = 0;
@@ -148,17 +146,17 @@ impl VirtioRngDevice {
         }
 
         // Copy data to internal buffer
-        // Note: Using descriptor length as fallback. The VirtIO spec indicates
-        // the used ring's len field contains the actual bytes written, but the
-        // current VirtQueue API doesn't expose it from pop().
         let bytes_received = queue.desc[desc_idx].len as usize;
         let mut buffer = self.buffer.lock();
-        for i in 0..bytes_received.min(RNG_BUFFER_SIZE) {
-            buffer.push_back(data_buffer[i]);
+        unsafe {
+            for i in 0..bytes_received.min(RNG_BUFFER_SIZE) {
+                buffer.push_back(*data_ptr.add(i));
+            }
         }
 
         // Free the descriptor
         queue.free_desc(desc_idx);
+        // buffer_alloc is automatically dropped here
 
         Ok(bytes_received)
     }
