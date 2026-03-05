@@ -51,9 +51,12 @@ impl ListHead {
     }
 }
 
+const PAGE_FLAG_BUDDY: u8 = 1 << 0;
+
 struct Page {
     lru: ListHead,
     order: u8,
+    flags: u8,
 }
 
 unsafe impl Send for Page {}
@@ -63,6 +66,7 @@ impl Page {
         Self {
             lru: ListHead::new(),
             order: 0,
+            flags: 0,
         }
     }
 }
@@ -154,6 +158,7 @@ impl BuddyRegion {
                 let page = self.pages.add(i);
                 (*page).lru.init();
                 (*page).order = 0;
+                (*page).flags = 0;
             }
 
             for i in 0..=MAX_ORDER {
@@ -192,6 +197,7 @@ impl BuddyRegion {
     unsafe fn add_to_free_list(&mut self, page_idx: usize, order: usize) {
         let page = self.pages.add(page_idx);
         (*page).order = order as u8;
+        (*page).flags |= PAGE_FLAG_BUDDY;
 
         let free_list = &mut self.free_area[order].free_list as *mut ListHead;
         (*free_list).add(&mut (*page).lru as *mut ListHead);
@@ -201,6 +207,7 @@ impl BuddyRegion {
     unsafe fn del_from_free_list(&mut self, page: *mut Page, order: usize) {
         let free_list = &mut self.free_area[order].free_list as *mut ListHead;
         (*free_list).remove(&mut (*page).lru as *mut ListHead);
+        (*page).flags &= !PAGE_FLAG_BUDDY;
         self.free_area[order].nr_free -= 1;
     }
 
@@ -225,7 +232,7 @@ impl BuddyRegion {
     }
 
     unsafe fn page_is_buddy(&self, page: *const Page, order: usize) -> bool {
-        (*page).order == order as u8 && !(*page).lru.is_empty()
+        (*page).order == order as u8 && ((*page).flags & PAGE_FLAG_BUDDY) != 0
     }
 
     fn alloc(&mut self, pages: usize) -> Option<usize> {
