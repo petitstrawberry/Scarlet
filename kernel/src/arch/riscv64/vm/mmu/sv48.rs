@@ -297,6 +297,26 @@ impl PageTable {
         }
     }
 
+    /// Translate a virtual address to a physical address by walking the page table.
+    ///
+    /// # Arguments
+    ///
+    /// * `vaddr` - The virtual address to translate
+    ///
+    /// # Returns
+    ///
+    /// The physical address if the mapping exists, or `None` if unmapped.
+    pub fn translate(&mut self, vaddr: usize) -> Option<usize> {
+        let pte = self.walk(vaddr, false, 0)?;
+        if pte.is_valid() && pte.is_leaf() {
+            let ppn = pte.get_ppn();
+            let page_offset = vaddr & 0xfff;
+            Some((ppn << 12) | page_offset)
+        } else {
+            None
+        }
+    }
+
     pub fn unmap(&mut self, _asid: u16, vaddr: usize) {
         // Check if the virtual address is properly canonicalized for Sv48
         let canonical_check = (vaddr >> 47) & 1;
