@@ -10,6 +10,7 @@ use crate::{
     vm::vmem::{MemoryArea, VirtualMemoryMap},
 };
 use alloc::boxed::Box;
+use alloc::vec::Vec;
 
 pub fn sys_mmap(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
     // Linux mmap constants
@@ -175,14 +176,28 @@ pub fn sys_mmap(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
         final_permissions |= 0x08; // Access from user space (only if not PROT_NONE)
     }
 
-    // If this is a file-backed private mapping, allocate private pages now and copy contents
     if is_map_private_flag && !is_shared {
-        // Allocate pages for the private copy using PageAllocation
-        let mut page_alloc = match PageAllocation::new(num_pages) {
-            Some(pa) => pa,
-            None => return to_result(errno::ENOMEM),
-        };
-        let pages_ptr = page_alloc.as_ptr() as usize;
+        const PAGES_PER_ALLOC: usize = 16;
+        let num_allocs = (num_pages + PAGES_PER_ALLOC - 1) / PAGES_PER_ALLOC;
+        let mut page_allocs: Vec<PageAllocation> = Vec::with_capacity(num_allocs);
+
+        for alloc_idx in 0..num_allocs {
+            let pages_in_this_alloc = if alloc_idx == num_allocs - 1 {
+                num_pages - alloc_idx * PAGES_PER_ALLOC
+            } else {
+                PAGES_PER_ALLOC
+            };
+
+            match PageAllocation::new(pages_in_this_alloc) {
+                Some(alloc) => page_allocs.push(alloc),
+                None => {
+                    drop(page_allocs);
+                    return to_result(errno::ENOMEM);
+                }
+            }
+        }
+
+        let pages_ptr = page_allocs[0].as_ptr() as usize;
         let private_pmarea = MemoryArea::new(pages_ptr, pages_ptr + aligned_length - 1);
 
         let vm_map = VirtualMemoryMap::new(private_pmarea, vmarea, final_permissions, false, None);
@@ -197,7 +212,6 @@ pub fn sys_mmap(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
 
         match map_result {
             Ok(removed_mappings_opt) => {
-                // Notify owners for any removed mappings (only shared ones)
                 if let Some(removed_mappings) = &removed_mappings_opt {
                     for removed_map in removed_mappings {
                         if removed_map.is_shared {
@@ -213,52 +227,60 @@ pub fn sys_mmap(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
                     }
                 }
 
-                // Clean up page allocations from removed mappings
                 if let Some(removed_mappings) = removed_mappings_opt {
                     for removed_map in removed_mappings {
                         if !removed_map.is_shared {
                             let pm_start = removed_map.pmarea.start;
-                            let pm_size = removed_map.pmarea.size();
+                            let pm_end = removed_map.pmarea.end;
                             let mut allocs = task.page_allocations.write();
-                            if let Some(pos) = allocs.iter().position(|pa| {
-                                let alloc_start = pa.as_paddr();
-                                let alloc_end = alloc_start + pa.len() * PAGE_SIZE;
-                                pm_start >= alloc_start && pm_start < alloc_end
-                            }) {
-                                let page_alloc = allocs.remove(pos);
-                                let alloc_start = page_alloc.as_paddr();
-                                let alloc_size = page_alloc.len() * PAGE_SIZE;
-                                if pm_start != alloc_start || pm_size < alloc_size {
-                                    allocs.push(page_alloc);
+                            let mut retained = Vec::new();
+                            for alloc in allocs.drain(..) {
+                                let alloc_start = alloc.as_paddr();
+                                let alloc_end = alloc_start + alloc.len() * PAGE_SIZE - 1;
+                                if alloc_start >= pm_start && alloc_end <= pm_end {
+                                    drop(alloc);
+                                } else {
+                                    retained.push(alloc);
                                 }
                             }
+                            *allocs = retained;
                         }
                     }
                 }
 
-                // Zero-initialize entire region, then copy only the mappable portion (ok_len)
-                unsafe {
-                    core::ptr::write_bytes(page_alloc.as_ptr() as *mut u8, 0u8, aligned_length);
-                }
-                if ok_len > 0 {
-                    let copy_len = core::cmp::min(ok_len, aligned_length);
+                let mut page_idx = 0;
+                for alloc in &page_allocs {
                     unsafe {
-                        core::ptr::copy_nonoverlapping(
-                            paddr as *const u8,
-                            page_alloc.as_ptr() as *mut u8,
-                            copy_len,
+                        core::ptr::write_bytes(
+                            alloc.as_ptr() as *mut u8,
+                            0u8,
+                            alloc.len() * PAGE_SIZE,
                         );
                     }
+                    if ok_len > 0 {
+                        let copy_start = page_idx * PAGE_SIZE;
+                        let copy_end = copy_start + alloc.len() * PAGE_SIZE;
+                        if copy_start < ok_len {
+                            let to_copy =
+                                core::cmp::min(ok_len - copy_start, alloc.len() * PAGE_SIZE);
+                            unsafe {
+                                core::ptr::copy_nonoverlapping(
+                                    (paddr + copy_start) as *const u8,
+                                    alloc.as_ptr() as *mut u8,
+                                    to_copy,
+                                );
+                            }
+                        }
+                    }
+                    page_idx += alloc.len();
                 }
 
-                // Store the allocation so it will be freed on task exit
-                task.page_allocations.write().push(page_alloc);
+                task.page_allocations.write().extend(page_allocs);
 
                 final_vaddr
             }
             Err(_) => {
-                // Drop page_alloc to free pages
-                drop(page_alloc);
+                drop(page_allocs);
                 to_result(errno::ENOMEM)
             }
         }

@@ -139,13 +139,28 @@ pub fn sys_memory_map(trapframe: &mut Trapframe) -> usize {
 
     let is_map_private_flag = (flags & MAP_PRIVATE) != 0;
     if is_map_private_flag && !is_shared {
-        let page_alloc = crate::mem::page::PageAllocation::new(num_pages);
-        if page_alloc.is_none() {
-            return usize::MAX;
+        const PAGES_PER_ALLOC: usize = 16;
+        let num_allocs = (num_pages + PAGES_PER_ALLOC - 1) / PAGES_PER_ALLOC;
+        let mut page_allocs: Vec<crate::mem::page::PageAllocation> = Vec::with_capacity(num_allocs);
+
+        for alloc_idx in 0..num_allocs {
+            let pages_in_this_alloc = if alloc_idx == num_allocs - 1 {
+                num_pages - alloc_idx * PAGES_PER_ALLOC
+            } else {
+                PAGES_PER_ALLOC
+            };
+
+            match crate::mem::page::PageAllocation::new(pages_in_this_alloc) {
+                Some(alloc) => page_allocs.push(alloc),
+                None => {
+                    drop(page_allocs);
+                    return usize::MAX;
+                }
+            }
         }
-        let page_alloc = page_alloc.unwrap();
-        let pages_ptr = page_alloc.as_ptr() as usize;
-        let private_pmarea = MemoryArea::new(pages_ptr, pages_ptr + aligned_length - 1);
+
+        let first_alloc_ptr = page_allocs[0].as_ptr() as usize;
+        let private_pmarea = MemoryArea::new(first_alloc_ptr, first_alloc_ptr + aligned_length - 1);
 
         let mut vm_map =
             VirtualMemoryMap::new(private_pmarea, vmarea, final_permissions, false, None);
@@ -160,6 +175,7 @@ pub fn sys_memory_map(trapframe: &mut Trapframe) -> usize {
                 {
                     Some(addr) => addr,
                     None => {
+                        drop(page_allocs);
                         return usize::MAX;
                     }
                 };
@@ -167,6 +183,7 @@ pub fn sys_memory_map(trapframe: &mut Trapframe) -> usize {
                 vm_map =
                     VirtualMemoryMap::new(private_pmarea, vmarea, final_permissions, false, None);
                 if task.vm_manager.add_memory_map(vm_map.clone()).is_err() {
+                    drop(page_allocs);
                     return usize::MAX;
                 }
             }
@@ -176,6 +193,7 @@ pub fn sys_memory_map(trapframe: &mut Trapframe) -> usize {
             match task.vm_manager.add_memory_map_fixed(vm_map.clone()) {
                 Ok(removed) => removed,
                 Err(_) => {
+                    drop(page_allocs);
                     return usize::MAX;
                 }
             }
@@ -184,9 +202,6 @@ pub fn sys_memory_map(trapframe: &mut Trapframe) -> usize {
         };
 
         {
-            // For private mappings the new mapping uses private pages and the object
-            // does not own those pages; avoid calling on_mapped for the object.
-
             // Notify owners of removed maps (only for shared mappings)
             for removed_map in &removed_mappings {
                 if removed_map.is_shared {
@@ -199,15 +214,20 @@ pub fn sys_memory_map(trapframe: &mut Trapframe) -> usize {
             }
 
             // Copy contents from object paddr to private pages
-            for i in 0..num_pages {
-                let src = (paddr + i * PAGE_SIZE) as *const u8;
-                let dst_page = unsafe { page_alloc.as_ptr().add(i) } as *mut u8;
-                unsafe {
-                    core::ptr::copy_nonoverlapping(src, dst_page, PAGE_SIZE);
+            let mut page_idx = 0;
+            for alloc in &page_allocs {
+                for local_idx in 0..alloc.len() {
+                    let src = (paddr + page_idx * PAGE_SIZE) as *const u8;
+                    let dst_page = unsafe { alloc.as_ptr().add(local_idx) } as *mut u8;
+                    unsafe {
+                        core::ptr::copy_nonoverlapping(src, dst_page, PAGE_SIZE);
+                    }
+                    page_idx += 1;
                 }
             }
 
-            task.page_allocations.write().push(page_alloc);
+            // Store all allocations
+            task.page_allocations.write().extend(page_allocs);
 
             return chosen_vaddr;
         }
@@ -424,22 +444,21 @@ pub fn sys_memory_unmap(trapframe: &mut Trapframe) -> usize {
 
         if !removed_map.is_shared {
             let pm_start = removed_map.pmarea.start;
-            let pm_size = removed_map.pmarea.size();
+            let pm_end = removed_map.pmarea.end;
             let mut allocs = task.page_allocations.write();
 
-            if let Some(pos) = allocs.iter().position(|pa| {
-                let alloc_start = pa.as_paddr();
-                let alloc_end = alloc_start + pa.len() * PAGE_SIZE;
-                pm_start >= alloc_start && pm_start < alloc_end
-            }) {
-                let page_alloc = allocs.remove(pos);
-                let alloc_start = page_alloc.as_paddr();
-                let alloc_size = page_alloc.len() * PAGE_SIZE;
+            let mut retained = Vec::new();
+            for alloc in allocs.drain(..) {
+                let alloc_start = alloc.as_paddr();
+                let alloc_end = alloc_start + alloc.len() * PAGE_SIZE - 1;
 
-                if pm_start != alloc_start || pm_size < alloc_size {
-                    allocs.push(page_alloc);
+                if alloc_start >= pm_start && alloc_end <= pm_end {
+                    drop(alloc);
+                } else {
+                    retained.push(alloc);
                 }
             }
+            *allocs = retained;
         }
 
         0
