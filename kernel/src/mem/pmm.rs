@@ -1,3 +1,4 @@
+use alloc::vec::Vec;
 use spin::Mutex;
 
 use crate::early_println;
@@ -468,13 +469,16 @@ pub fn add_region(area: MemoryArea) -> Result<(), &'static str> {
     PMM.lock().add_region(start, size)
 }
 
-pub fn alloc_pages(pages: usize) -> Option<usize> {
+/// Allocate contiguous physical pages.
+/// Required for DMA, kernel stacks, and other hardware-visible buffers.
+pub fn alloc_contiguous_pages(pages: usize) -> Option<usize> {
     PMM.lock().alloc(pages)
 }
 
-pub fn alloc_pages_aligned(pages: usize, align_pages: usize) -> Option<usize> {
+/// Allocate aligned contiguous physical pages.
+pub fn alloc_contiguous_pages_aligned(pages: usize, align_pages: usize) -> Option<usize> {
     if align_pages == 0 || align_pages == 1 {
-        return alloc_pages(pages);
+        return alloc_contiguous_pages(pages);
     }
 
     let order = if align_pages.is_power_of_two() {
@@ -488,16 +492,43 @@ pub fn alloc_pages_aligned(pages: usize, align_pages: usize) -> Option<usize> {
     PMM.lock().alloc_from_order(needed_order)
 }
 
-pub fn free_pages(paddr: usize, pages: usize) {
+/// Allocate individual pages (may be non-contiguous).
+/// Suitable for task memory where physical contiguity is not required.
+pub fn alloc_individual_pages(count: usize) -> Option<Vec<usize>> {
+    let mut pages = Vec::with_capacity(count);
+    for _ in 0..count {
+        match PMM.lock().alloc(1) {
+            Some(paddr) => pages.push(paddr),
+            None => {
+                // Cleanup on failure
+                for paddr in pages {
+                    PMM.lock().free(paddr, 1);
+                }
+                return None;
+            }
+        }
+    }
+    Some(pages)
+}
+
+/// Free contiguous pages.
+pub fn free_contiguous_pages(paddr: usize, pages: usize) {
     PMM.lock().free(paddr, pages);
 }
 
+/// Free individual pages.
+pub fn free_individual_pages(pages: &[usize]) {
+    for &paddr in pages {
+        PMM.lock().free(paddr, 1);
+    }
+}
+
 pub fn alloc_frame() -> Option<usize> {
-    alloc_pages(1)
+    alloc_contiguous_pages(1)
 }
 
 pub fn free_frame(paddr: usize) {
-    free_pages(paddr, 1);
+    free_contiguous_pages(paddr, 1);
 }
 
 pub fn stats() -> (usize, usize) {
@@ -530,7 +561,7 @@ mod tests {
         assert_eq!(frame % PAGE_SIZE, 0);
 
         // Test multi-page allocation
-        let addr = alloc_pages(4);
+        let addr = alloc_contiguous_pages(4);
         assert!(addr.is_some());
         let addr = addr.unwrap();
         assert_eq!(addr % PAGE_SIZE, 0);
@@ -542,6 +573,6 @@ mod tests {
 
         // Free allocations
         free_frame(frame);
-        free_pages(addr, 4);
+        free_contiguous_pages(addr, 4);
     }
 }

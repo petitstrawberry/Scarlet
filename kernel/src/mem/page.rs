@@ -1,6 +1,7 @@
 extern crate alloc;
 
 use alloc::boxed::Box;
+use alloc::vec::Vec;
 use core::fmt;
 
 use crate::environment::PAGE_SIZE;
@@ -32,7 +33,7 @@ pub fn allocate_raw_pages(num_of_pages: usize) -> *mut Page {
         return core::ptr::null_mut();
     }
 
-    let paddr = match crate::mem::pmm::alloc_pages(num_of_pages) {
+    let paddr = match crate::mem::pmm::alloc_contiguous_pages(num_of_pages) {
         Some(addr) => addr,
         None => return core::ptr::null_mut(),
     };
@@ -62,7 +63,7 @@ pub fn allocate_raw_pages_aligned(num_of_pages: usize, align: usize) -> *mut Pag
     }
 
     let align_pages = align / PAGE_SIZE;
-    let paddr = match crate::mem::pmm::alloc_pages_aligned(num_of_pages, align_pages) {
+    let paddr = match crate::mem::pmm::alloc_contiguous_pages_aligned(num_of_pages, align_pages) {
         Some(addr) => addr,
         None => return core::ptr::null_mut(),
     };
@@ -87,7 +88,7 @@ pub fn free_raw_pages(pages: *mut Page, num_of_pages: usize) {
     }
 
     let paddr = virt_to_phys(pages as usize);
-    crate::mem::pmm::free_pages(paddr, num_of_pages);
+    crate::mem::pmm::free_contiguous_pages(paddr, num_of_pages);
 }
 
 /// Allocates a number of pages from the heap and returns them as a boxed slice.
@@ -171,23 +172,15 @@ pub fn free_boxed_page(_page: Box<Page>) {
     drop(_page);
 }
 
-/// A RAII wrapper for contiguous page allocations directly from PMM.
-///
-/// This struct owns a contiguous block of pages and automatically frees them
-/// when dropped. This prevents memory leaks and ensures safe cleanup.
-pub struct PageAllocation {
+pub struct ContiguousPages {
     ptr: *mut Page,
     count: usize,
 }
 
-impl PageAllocation {
-    /// Allocate a contiguous block of pages directly from PMM.
-    ///
-    /// # Arguments
-    /// * `count` - Number of pages to allocate
-    ///
-    /// # Returns
-    /// Some(PageAllocation) on success, None on failure
+#[deprecated(note = "Use `ContiguousPages` instead")]
+pub type PageAllocation = ContiguousPages;
+
+impl ContiguousPages {
     pub fn new(count: usize) -> Option<Self> {
         if count == 0 {
             return None;
@@ -264,7 +257,7 @@ impl PageAllocation {
     }
 }
 
-impl Drop for PageAllocation {
+impl Drop for ContiguousPages {
     fn drop(&mut self) {
         if !self.ptr.is_null() && self.count > 0 {
             free_raw_pages(self.ptr, self.count);
@@ -272,13 +265,12 @@ impl Drop for PageAllocation {
     }
 }
 
-// SAFETY: PageAllocation owns the memory and frees it on drop
-unsafe impl Send for PageAllocation {}
-unsafe impl Sync for PageAllocation {}
+unsafe impl Send for ContiguousPages {}
+unsafe impl Sync for ContiguousPages {}
 
-impl Clone for PageAllocation {
+impl Clone for ContiguousPages {
     fn clone(&self) -> Self {
-        let new_alloc = Self::new(self.count).expect("Failed to clone PageAllocation");
+        let new_alloc = Self::new(self.count).expect("Failed to clone ContiguousPages");
         unsafe {
             core::ptr::copy_nonoverlapping(
                 self.ptr as *const u8,
@@ -290,11 +282,48 @@ impl Clone for PageAllocation {
     }
 }
 
-impl fmt::Debug for PageAllocation {
+impl fmt::Debug for ContiguousPages {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("PageAllocation")
+        f.debug_struct("ContiguousPages")
             .field("ptr", &self.ptr)
             .field("count", &self.count)
             .finish()
+    }
+}
+
+pub struct TaskPages {
+    pages: Vec<usize>,
+}
+
+impl TaskPages {
+    pub fn new(count: usize) -> Option<Self> {
+        crate::mem::pmm::alloc_individual_pages(count).map(|pages| Self { pages })
+    }
+
+    pub fn page_paddr(&self, index: usize) -> Option<usize> {
+        self.pages.get(index).copied()
+    }
+
+    pub fn len(&self) -> usize {
+        self.pages.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.pages.is_empty()
+    }
+
+    pub fn free_range(&mut self, offset: usize, count: usize) {
+        if offset >= self.pages.len() {
+            return;
+        }
+        let end = (offset + count).min(self.pages.len());
+        let to_free: Vec<usize> = self.pages.drain(offset..end).collect();
+        crate::mem::pmm::free_individual_pages(&to_free);
+    }
+}
+
+impl Drop for TaskPages {
+    fn drop(&mut self) {
+        crate::mem::pmm::free_individual_pages(&self.pages);
     }
 }

@@ -17,7 +17,7 @@ impl OomHandler for DynamicHeapHandler {
         let required_size = layout.size().max(HEAP_EXPAND_PAGES * PAGE_SIZE);
         let pages_needed = (required_size + PAGE_SIZE - 1) / PAGE_SIZE;
 
-        let addr = crate::mem::pmm::alloc_pages(pages_needed);
+        let addr = crate::mem::pmm::alloc_contiguous_pages(pages_needed);
         match addr {
             Some(start) => {
                 let size = pages_needed * PAGE_SIZE;
@@ -25,7 +25,7 @@ impl OomHandler for DynamicHeapHandler {
                 match unsafe { talc.claim(span) } {
                     Ok(_) => Ok(()),
                     Err(_) => {
-                        crate::mem::pmm::free_pages(start, pages_needed);
+                        crate::mem::pmm::free_contiguous_pages(start, pages_needed);
                         Err(())
                     }
                 }

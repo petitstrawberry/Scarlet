@@ -617,40 +617,46 @@ pub fn sys_munmap(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usiz
         return usize::MAX; // -EINVAL
     }
 
-    // Remove the mapping regardless of whether it's anonymous or object-based
-    if let Some(removed_map) = task.vm_manager.remove_memory_map_by_addr(vaddr) {
+    // Remove the mapping range, splitting existing mappings if necessary
+    let removed_maps = task.vm_manager.remove_memory_map_range(vaddr, length);
+
+    if removed_maps.is_empty() {
+        return usize::MAX; // No mappings found in the specified range
+    }
+
+    // Notify the object owners and clean up page allocations
+    for removed_map in &removed_maps {
         // Notify the object owner if available (for object-based mappings)
         if let Some(owner_weak) = &removed_map.owner {
             if removed_map.is_shared {
                 if let Some(owner) = owner_weak.upgrade() {
-                    owner.on_unmapped(vaddr, length);
+                    owner.on_unmapped(removed_map.vmarea.start, removed_map.vmarea.size());
                 }
             }
         }
 
-        // Remove page allocations only for private mappings
+        // Clean up private page allocations that are fully contained
         if !removed_map.is_shared {
             let pm_start = removed_map.pmarea.start;
-            let pm_size = removed_map.pmarea.size();
+            let pm_end = removed_map.pmarea.end;
             let mut allocs = task.page_allocations.write();
-            if let Some(pos) = allocs.iter().position(|pa| {
-                let alloc_start = pa.as_paddr();
-                let alloc_end = alloc_start + pa.len() * PAGE_SIZE;
-                pm_start >= alloc_start && pm_start < alloc_end
-            }) {
-                let page_alloc = allocs.remove(pos);
-                let alloc_start = page_alloc.as_paddr();
-                let alloc_size = page_alloc.len() * PAGE_SIZE;
-                if pm_start != alloc_start || pm_size < alloc_size {
-                    allocs.push(page_alloc);
+
+            let mut retained = Vec::new();
+            for alloc in allocs.drain(..) {
+                let alloc_start = alloc.as_paddr();
+                let alloc_end = alloc_start + alloc.len() * PAGE_SIZE - 1;
+
+                if alloc_start >= pm_start && alloc_end <= pm_end {
+                    drop(alloc);
+                } else {
+                    retained.push(alloc);
                 }
             }
+            *allocs = retained;
         }
-
-        0
-    } else {
-        usize::MAX // No mapping found at this address
     }
+
+    0
 }
 
 // TODO: Migrate object-backed MAP_PRIVATE mappings to delayed Copy-On-Write (COW).
