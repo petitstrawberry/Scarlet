@@ -1,6 +1,7 @@
 extern crate alloc;
 
 use alloc::boxed::Box;
+use alloc::vec::Vec;
 use core::fmt;
 
 use crate::environment::PAGE_SIZE;
@@ -249,6 +250,122 @@ impl PageAllocation {
         debug_assert!(!ptr.is_null());
         debug_assert!(count > 0);
         Self { ptr, count }
+    }
+
+    /// Split the allocation at the given page offset.
+    ///
+    /// Consumes self and returns two optional allocations:
+    /// - Left: pages [0, at) - `at` pages total
+    /// - Right: pages [at, count) - `count - at` pages total
+    ///
+    /// # Returns
+    /// - `(None, Some(right))` if `at == 0`
+    /// - `(Some(left), None)` if `at >= count`
+    /// - `(Some(left), Some(right))` otherwise
+    ///
+    /// # Example
+    /// ```
+    /// let alloc = PageAllocation::new(10).unwrap();
+    /// let (left, right) = alloc.split_at(3);
+    /// // left has 3 pages, right has 7 pages
+    /// ```
+    pub fn split_at(self, at: usize) -> (Option<Self>, Option<Self>) {
+        if at == 0 {
+            return (None, Some(self));
+        }
+
+        if at >= self.count {
+            return (Some(self), None);
+        }
+
+        let left_count = at;
+        let right_count = self.count - at;
+
+        let left_ptr = self.ptr;
+        let right_ptr = unsafe { self.ptr.add(at) };
+
+        let _ = self.into_raw();
+
+        let left = unsafe { Self::from_raw(left_ptr, left_count) };
+        let right = unsafe { Self::from_raw(right_ptr, right_count) };
+
+        (Some(left), Some(right))
+    }
+
+    /// Get the virtual address of the first page.
+    pub fn as_vaddr(&self) -> usize {
+        self.ptr as usize
+    }
+
+    /// Check if a given physical address range overlaps with this allocation.
+    ///
+    /// # Arguments
+    /// * `paddr` - Physical address to check
+    /// * `len` - Length in bytes
+    pub fn contains_paddr_range(&self, paddr: usize, len: usize) -> bool {
+        let self_paddr = self.as_paddr();
+        let self_end = self_paddr + self.count * PAGE_SIZE;
+        let range_end = paddr + len;
+
+        paddr < self_end && range_end > self_paddr
+    }
+
+    /// Remove a sub-range from this allocation and return the remaining parts.
+    ///
+    /// This is useful for munmap operations where a partial range of a larger
+    /// allocation is being unmapped.
+    ///
+    /// # Arguments
+    /// * `offset_pages` - Page offset within this allocation to start removing
+    /// * `count_pages` - Number of pages to remove
+    ///
+    /// # Returns
+    /// A tuple of:
+    /// - Vector of remaining allocations (0, 1, or 2 allocations)
+    /// - The removed allocation (if any)
+    pub fn extract_range(
+        self,
+        offset_pages: usize,
+        count_pages: usize,
+    ) -> (Vec<Self>, Option<Self>) {
+        if offset_pages >= self.count || count_pages == 0 {
+            return (alloc::vec![self], None);
+        }
+
+        let end_offset = (offset_pages + count_pages).min(self.count);
+        let actual_count = end_offset - offset_pages;
+
+        if offset_pages == 0 && actual_count >= self.count {
+            return (Vec::new(), Some(self));
+        }
+
+        let mut remaining = Vec::new();
+
+        // Left: [0, offset_pages)
+        // Middle (extracted): [offset_pages, end_offset)
+        // Right: [end_offset, self.count)
+
+        let left_count = offset_pages;
+        let right_count = self.count - end_offset;
+
+        let base_ptr = self.ptr;
+        let extracted_ptr = unsafe { base_ptr.add(offset_pages) };
+        let extracted = unsafe { Self::from_raw(extracted_ptr, actual_count) };
+
+        let _ = self.into_raw();
+
+        if left_count > 0 {
+            let left = unsafe { Self::from_raw(base_ptr, left_count) };
+            remaining.push(left);
+        }
+
+        if right_count > 0 {
+            let right_ptr = unsafe { base_ptr.add(end_offset) };
+            let right = unsafe { Self::from_raw(right_ptr, right_count) };
+            remaining.push(right);
+        }
+
+        (remaining, Some(extracted))
     }
 }
 

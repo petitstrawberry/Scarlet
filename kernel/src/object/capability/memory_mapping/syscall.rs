@@ -265,12 +265,19 @@ pub fn sys_memory_map(trapframe: &mut Trapframe) -> usize {
             for removed_map in removed_mappings {
                 if !removed_map.is_shared {
                     let pm_start = removed_map.pmarea.start;
+                    let pm_size = removed_map.pmarea.size();
                     let mut allocs = task.page_allocations.write();
-                    if let Some(pos) = allocs
-                        .iter()
-                        .position(|pa| pa.as_ptr() as usize == pm_start)
-                    {
-                        allocs.remove(pos);
+                    if let Some(pos) = allocs.iter().position(|pa| {
+                        let alloc_start = pa.as_paddr();
+                        let alloc_end = alloc_start + pa.len() * PAGE_SIZE;
+                        pm_start >= alloc_start && pm_start < alloc_end
+                    }) {
+                        let page_alloc = allocs.remove(pos);
+                        let alloc_start = page_alloc.as_paddr();
+                        let alloc_size = page_alloc.len() * PAGE_SIZE;
+                        if pm_start != alloc_start || pm_size < alloc_size {
+                            allocs.push(page_alloc);
+                        }
                     }
                 }
             }
@@ -356,12 +363,19 @@ fn handle_anonymous_mapping(
         for removed_map in removed_mappings {
             if !removed_map.is_shared {
                 let pm_start = removed_map.pmarea.start;
+                let pm_size = removed_map.pmarea.size();
                 let mut allocs = task.page_allocations.write();
-                if let Some(pos) = allocs
-                    .iter()
-                    .position(|pa| pa.as_ptr() as usize == pm_start)
-                {
-                    allocs.remove(pos);
+                if let Some(pos) = allocs.iter().position(|pa| {
+                    let alloc_start = pa.as_paddr();
+                    let alloc_end = alloc_start + pa.len() * PAGE_SIZE;
+                    pm_start >= alloc_start && pm_start < alloc_end
+                }) {
+                    let page_alloc = allocs.remove(pos);
+                    let alloc_start = page_alloc.as_paddr();
+                    let alloc_size = page_alloc.len() * PAGE_SIZE;
+                    if pm_start != alloc_start || pm_size < alloc_size {
+                        allocs.push(page_alloc);
+                    }
                 }
             }
         }
@@ -410,12 +424,21 @@ pub fn sys_memory_unmap(trapframe: &mut Trapframe) -> usize {
 
         if !removed_map.is_shared {
             let pm_start = removed_map.pmarea.start;
+            let pm_size = removed_map.pmarea.size();
             let mut allocs = task.page_allocations.write();
-            if let Some(pos) = allocs
-                .iter()
-                .position(|pa| pa.as_ptr() as usize == pm_start)
-            {
-                allocs.remove(pos);
+
+            if let Some(pos) = allocs.iter().position(|pa| {
+                let alloc_start = pa.as_paddr();
+                let alloc_end = alloc_start + pa.len() * PAGE_SIZE;
+                pm_start >= alloc_start && pm_start < alloc_end
+            }) {
+                let page_alloc = allocs.remove(pos);
+                let alloc_start = page_alloc.as_paddr();
+                let alloc_size = page_alloc.len() * PAGE_SIZE;
+
+                if pm_start != alloc_start || pm_size < alloc_size {
+                    allocs.push(page_alloc);
+                }
             }
         }
 
