@@ -5,7 +5,7 @@ use crate::{
     },
     arch::Trapframe,
     environment::PAGE_SIZE,
-    mem::page::PageAllocation,
+    mem::page::TaskPages,
     task::mytask,
     vm::vmem::{MemoryArea, VirtualMemoryMap},
 };
@@ -179,7 +179,7 @@ pub fn sys_mmap(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
     if is_map_private_flag && !is_shared {
         const PAGES_PER_ALLOC: usize = 16;
         let num_allocs = (num_pages + PAGES_PER_ALLOC - 1) / PAGES_PER_ALLOC;
-        let mut page_allocs: Vec<PageAllocation> = Vec::with_capacity(num_allocs);
+        let mut page_allocs: Vec<TaskPages> = Vec::with_capacity(num_allocs);
         let mut vm_maps: Vec<VirtualMemoryMap> = Vec::with_capacity(num_allocs);
 
         for alloc_idx in 0..num_allocs {
@@ -189,7 +189,7 @@ pub fn sys_mmap(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
                 PAGES_PER_ALLOC
             };
 
-            let alloc = match PageAllocation::new(pages_in_this_alloc) {
+            let alloc = match TaskPages::new(pages_in_this_alloc) {
                 Some(a) => a,
                 None => {
                     drop(page_allocs);
@@ -202,19 +202,23 @@ pub fn sys_mmap(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
                 chunk_vaddr,
                 chunk_vaddr + pages_in_this_alloc * PAGE_SIZE - 1,
             );
-            let chunk_pmarea = MemoryArea::new(
-                alloc.as_paddr(),
-                alloc.as_paddr() + pages_in_this_alloc * PAGE_SIZE - 1,
-            );
 
             page_allocs.push(alloc);
-            vm_maps.push(VirtualMemoryMap::new(
-                chunk_pmarea,
-                chunk_vmarea,
-                final_permissions,
-                false,
-                None,
-            ));
+            for page_idx_in_alloc in 0..pages_in_this_alloc {
+                let page_vaddr = chunk_vaddr + page_idx_in_alloc * PAGE_SIZE;
+                let page_vmarea = MemoryArea::new(page_vaddr, page_vaddr + PAGE_SIZE - 1);
+                let page_paddr = page_allocs[alloc_idx]
+                    .page_paddr(page_idx_in_alloc)
+                    .unwrap();
+                let page_pmarea = MemoryArea::new(page_paddr, page_paddr + PAGE_SIZE - 1);
+                vm_maps.push(VirtualMemoryMap::new(
+                    page_pmarea,
+                    page_vmarea,
+                    final_permissions,
+                    false,
+                    None,
+                ));
+            }
         }
 
         let mut removed_mappings_opt: Option<Vec<VirtualMemoryMap>> = None;
@@ -279,27 +283,30 @@ pub fn sys_mmap(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
 
         let mut page_idx = 0;
         for alloc in &page_allocs {
-            unsafe {
-                core::ptr::write_bytes(alloc.as_ptr() as *mut u8, 0u8, alloc.len() * PAGE_SIZE);
-            }
-            if ok_len > 0 {
-                let copy_start = page_idx * PAGE_SIZE;
-                let copy_end = copy_start + alloc.len() * PAGE_SIZE;
-                if copy_start < ok_len {
-                    let to_copy = core::cmp::min(ok_len - copy_start, alloc.len() * PAGE_SIZE);
-                    unsafe {
-                        core::ptr::copy_nonoverlapping(
-                            (paddr + copy_start) as *const u8,
-                            alloc.as_ptr() as *mut u8,
-                            to_copy,
-                        );
+            for local_idx in 0..alloc.len() {
+                let dst_paddr = alloc.page_paddr(local_idx).unwrap();
+                let dst_vaddr = crate::vm::addr::phys_to_virt(dst_paddr);
+                unsafe {
+                    core::ptr::write_bytes(dst_vaddr as *mut u8, 0u8, PAGE_SIZE);
+                }
+                if ok_len > 0 {
+                    let copy_start = page_idx * PAGE_SIZE;
+                    if copy_start < ok_len {
+                        let to_copy = core::cmp::min(ok_len - copy_start, PAGE_SIZE);
+                        unsafe {
+                            core::ptr::copy_nonoverlapping(
+                                (paddr + copy_start) as *const u8,
+                                dst_vaddr as *mut u8,
+                                to_copy,
+                            );
+                        }
                     }
                 }
+                page_idx += 1;
             }
-            page_idx += alloc.len();
         }
 
-        task.page_allocations.write().extend(page_allocs);
+        task.task_pages.write().extend(page_allocs);
 
         final_vaddr
     } else {
@@ -433,12 +440,10 @@ fn handle_anonymous_mapping(
         }
     };
 
-    // For anonymous mappings, allocate physical memory directly using PageAllocation
-    let mut page_alloc = match PageAllocation::new(num_pages) {
-        Some(pa) => pa,
+    let mut task_pages = match TaskPages::new(num_pages) {
+        Some(tp) => tp,
         None => return to_result(errno::ENOMEM),
     };
-    let pages_ptr = page_alloc.as_ptr() as usize;
 
     // Convert protection flags to kernel permissions
     let mut permissions = 0;
@@ -455,59 +460,68 @@ fn handle_anonymous_mapping(
         }
     }
 
-    // Create memory areas
-    let vmarea = MemoryArea::new(final_vaddr, final_vaddr + aligned_length - 1);
-    let pmarea = MemoryArea::new(pages_ptr, pages_ptr + aligned_length - 1);
-
-    // Create virtual memory map
-    let vm_map = VirtualMemoryMap::new(pmarea, vmarea, permissions, is_shared, None); // Anonymous mappings have no owner
+    let mut vm_maps: Vec<VirtualMemoryMap> = Vec::with_capacity(num_pages);
+    for page_idx in 0..num_pages {
+        let page_vaddr = final_vaddr + page_idx * PAGE_SIZE;
+        let page_vmarea = MemoryArea::new(page_vaddr, page_vaddr + PAGE_SIZE - 1);
+        let page_paddr = task_pages.page_paddr(page_idx).unwrap();
+        let page_pmarea = MemoryArea::new(page_paddr, page_paddr + PAGE_SIZE - 1);
+        vm_maps.push(VirtualMemoryMap::new(
+            page_pmarea,
+            page_vmarea,
+            permissions,
+            is_shared,
+            None,
+        ));
+    }
 
     // Use add_memory_map_fixed for both FIXED and non-FIXED mappings to handle overlaps consistently
-    match task.vm_manager.add_memory_map_fixed(vm_map) {
-        Ok(removed_mappings) => {
-            // First, process notifications for object owners
-            for removed_map in &removed_mappings {
-                if removed_map.is_shared {
-                    if let Some(owner_weak) = &removed_map.owner {
-                        if let Some(owner) = owner_weak.upgrade() {
-                            owner.on_unmapped(removed_map.vmarea.start, removed_map.vmarea.size());
-                        }
-                    }
-                }
+    let mut removed_mappings: Vec<VirtualMemoryMap> = Vec::new();
+    for vm_map in &vm_maps {
+        match task.vm_manager.add_memory_map_fixed(vm_map.clone()) {
+            Ok(removed) => removed_mappings.extend(removed),
+            Err(_) => {
+                drop(task_pages);
+                return to_result(errno::ENOMEM);
             }
-
-            // Then, handle page allocation cleanup (MMU cleanup is already handled by VmManager.add_memory_map_fixed)
-            for removed_map in removed_mappings {
-                if !removed_map.is_shared {
-                    let pm_start = removed_map.pmarea.start;
-                    let pm_size = removed_map.pmarea.size();
-                    let mut allocs = task.page_allocations.write();
-                    if let Some(pos) = allocs.iter().position(|pa| {
-                        let alloc_start = pa.as_paddr();
-                        let alloc_end = alloc_start + pa.len() * PAGE_SIZE;
-                        pm_start >= alloc_start && pm_start < alloc_end
-                    }) {
-                        let page_alloc = allocs.remove(pos);
-                        let alloc_start = page_alloc.as_paddr();
-                        let alloc_size = page_alloc.len() * PAGE_SIZE;
-                        if pm_start != alloc_start || pm_size < alloc_size {
-                            allocs.push(page_alloc);
-                        }
-                    }
-                }
-            }
-
-            // Store the allocation so it will be freed on task exit
-            task.page_allocations.write().push(page_alloc);
-
-            final_vaddr
-        }
-        Err(_) => {
-            // Drop allocated pages on error to avoid leak
-            drop(page_alloc);
-            to_result(errno::ENOMEM)
         }
     }
+
+    // First, process notifications for object owners
+    for removed_map in &removed_mappings {
+        if removed_map.is_shared {
+            if let Some(owner_weak) = &removed_map.owner {
+                if let Some(owner) = owner_weak.upgrade() {
+                    owner.on_unmapped(removed_map.vmarea.start, removed_map.vmarea.size());
+                }
+            }
+        }
+    }
+
+    // Then, handle page allocation cleanup (MMU cleanup is already handled by VmManager.add_memory_map_fixed)
+    for removed_map in removed_mappings {
+        if !removed_map.is_shared {
+            let pm_start = removed_map.pmarea.start;
+            let pm_end = removed_map.pmarea.end;
+            let mut allocs = task.task_pages.write();
+            let mut retained = Vec::new();
+            for alloc in allocs.drain(..) {
+                let first_paddr = alloc.page_paddr(0).unwrap();
+                let last_paddr = alloc.page_paddr(alloc.len() - 1).unwrap();
+                if first_paddr >= pm_start && last_paddr <= pm_end {
+                    drop(alloc);
+                } else {
+                    retained.push(alloc);
+                }
+            }
+            *allocs = retained;
+        }
+    }
+
+    // Store the allocation so it will be freed on task exit
+    task.task_pages.write().push(task_pages);
+
+    final_vaddr
 }
 
 pub fn sys_mprotect(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {

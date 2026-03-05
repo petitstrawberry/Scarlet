@@ -389,6 +389,7 @@ pub struct Task {
     /// List of child task IDs
     pub children: RwLock<Vec<usize>>,
     pub page_allocations: RwLock<Vec<PageAllocation>>,
+    pub task_pages: RwLock<Vec<crate::mem::page::TaskPages>>,
     /// Virtual File System Manager
     ///
     /// # Usage Patterns
@@ -536,6 +537,7 @@ impl Task {
             name: RwLock::new(name),
             children: RwLock::new(Vec::new()),
             page_allocations: RwLock::new(Vec::new()),
+            task_pages: RwLock::new(Vec::new()),
             vfs: RwLock::new(None),
             software_timers_handlers: RwLock::new(Vec::new()),
             // Mutex fields
