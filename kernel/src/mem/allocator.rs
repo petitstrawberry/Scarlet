@@ -1,12 +1,9 @@
-use core::alloc::{GlobalAlloc, Layout};
-use core::sync::atomic::{AtomicUsize, Ordering};
+use core::alloc::Layout;
 
 use spin::Mutex;
 use talc::{OomHandler, Span, Talc, Talck};
 
-use crate::early_println;
 use crate::environment::PAGE_SIZE;
-use crate::vm::vmem::MemoryArea;
 
 const HEAP_EXPAND_PAGES: usize = 1024;
 
@@ -39,9 +36,6 @@ impl OomHandler for DynamicHeapHandler {
 #[unsafe(link_section = ".data")]
 static ALLOCATOR: Talck<Mutex<()>, DynamicHeapHandler> = Talc::new(DynamicHeapHandler).lock();
 
-static ALLOCATED_COUNT: AtomicUsize = AtomicUsize::new(0);
-static ALLOCATED_BYTES: AtomicUsize = AtomicUsize::new(0);
-
 /// Initialize heap with the given memory region
 ///
 /// # Safety
@@ -65,20 +59,5 @@ pub unsafe fn add_heap_region(start: usize, size: usize) -> Result<(), &'static 
 }
 
 pub fn heap_stats() -> (usize, usize) {
-    (
-        ALLOCATED_COUNT.load(Ordering::SeqCst),
-        ALLOCATED_BYTES.load(Ordering::SeqCst),
-    )
-}
-
-pub fn init_heap_by_area(area: MemoryArea) {
-    let size = area.size();
-    if size == 0 {
-        early_println!("Heap size is zero, skipping initialization.");
-        return;
-    }
-
-    unsafe {
-        init_heap(area.start, size);
-    }
+    (0, 0)
 }

@@ -241,8 +241,12 @@ impl BuddyRegion {
         }
 
         let mut order = 0;
-        while (1usize << order) < pages && order <= MAX_ORDER {
+        while (1usize << order) < pages && order < MAX_ORDER {
             order += 1;
+        }
+
+        if (1usize << order) < pages {
+            return None;
         }
 
         self.alloc_from_order(order)
@@ -295,8 +299,12 @@ impl BuddyRegion {
         }
 
         let mut order = 0;
-        while (1usize << order) < pages && order <= MAX_ORDER {
+        while (1usize << order) < pages && order < MAX_ORDER {
             order += 1;
+        }
+
+        if (1usize << order) < pages {
+            return;
         }
 
         let mut page_idx = self.addr_to_pfn(paddr);
