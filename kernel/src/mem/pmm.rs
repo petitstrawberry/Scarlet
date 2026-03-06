@@ -132,6 +132,21 @@ impl BuddyRegion {
         }
     }
 
+    /// Initialize a buddy region covering the physical address range `[start, start + size)`.
+    ///
+    /// # Embedded metadata design
+    ///
+    /// The `Page` metadata array is placed at the **beginning** of the region itself
+    /// (i.e., `self.pages = self.mem_start as *mut Page`).  The first `pages_needed`
+    /// pages (PFNs 0 .. pages_needed - 1) are **implicitly reserved**: they hold the
+    /// metadata and are never inserted into a free list.  Only PFNs starting at
+    /// `pages_needed` are made available to the allocator.
+    ///
+    /// This means:
+    /// - No external storage is required for the per-page metadata.
+    /// - The metadata region must not be freed or allocated from external code.
+    /// - `page_count` covers the full region including the metadata pages, so
+    ///   `self.pages.add(i)` is valid for any `i < page_count`.
     fn init(&mut self, start: usize, size: usize) {
         self.mem_start = align_up(start, PAGE_SIZE);
         self.mem_size = align_down(size, PAGE_SIZE);

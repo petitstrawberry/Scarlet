@@ -34,7 +34,13 @@ struct TaskStateBackup {
 
 impl TaskStateBackup {
     fn create_backup(task: &Task, trapframe: &Trapframe) -> Self {
-        let backup_pages = task.page_allocations.read().clone();
+        // Move all page allocations out of the task into the backup, leaving an empty Vec
+        // inside the task. This preserves move-based semantics and avoids allocating new
+        // physical pages via Clone.
+        let backup_pages = {
+            let mut pages_guard = task.page_allocations.write();
+            core::mem::take(&mut *pages_guard)
+        };
 
         let backup_vm_mapping = task.vm_manager.remove_all_memory_maps().collect();
 

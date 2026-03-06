@@ -388,7 +388,17 @@ pub struct Task {
     pub name: RwLock<String>,
     /// List of child task IDs
     pub children: RwLock<Vec<usize>>,
+    /// Contiguous page allocations (PMM-backed, auto-freed on drop).
+    ///
+    /// Each entry is a `ContiguousPages` RAII wrapper that returns its pages to the
+    /// buddy-system PMM when dropped. Used for ELF segment and anonymous mappings
+    /// that require physically contiguous memory.
     pub page_allocations: RwLock<Vec<ContiguousPages>>,
+    /// Non-contiguous individual page allocations (PMM-backed, auto-freed on drop).
+    ///
+    /// Each entry is a `TaskPages` RAII wrapper holding a list of individual
+    /// physical page addresses. Used for anonymous private mappings where
+    /// physical contiguity is not required and partial reclaim on unmap is needed.
     pub task_pages: RwLock<Vec<crate::mem::page::TaskPages>>,
     /// Virtual File System Manager
     ///
