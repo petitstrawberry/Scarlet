@@ -472,7 +472,6 @@ pub fn sys_memory_unmap(trapframe: &mut Trapframe) -> usize {
             }
         }
 
-        // Clean up private page allocations that are fully contained
         if !removed_map.is_shared {
             let pm_start = removed_map.pmarea.start;
             let pm_end = removed_map.pmarea.end;
@@ -490,6 +489,17 @@ pub fn sys_memory_unmap(trapframe: &mut Trapframe) -> usize {
                 }
             }
             *allocs = retained;
+        }
+
+        if !removed_map.is_shared {
+            let pm_start = removed_map.pmarea.start;
+            let pm_end = removed_map.pmarea.end;
+            let mut task_pages_allocs = task.task_pages.write();
+
+            for alloc in task_pages_allocs.iter_mut() {
+                let _ = alloc.reclaim_paddr_range(pm_start, pm_end);
+            }
+            task_pages_allocs.retain(|alloc| !alloc.is_empty());
         }
     }
 

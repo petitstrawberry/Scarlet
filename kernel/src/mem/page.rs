@@ -320,6 +320,50 @@ impl TaskPages {
         let to_free: Vec<usize> = self.pages.drain(offset..end).collect();
         crate::mem::pmm::free_individual_pages(&to_free);
     }
+
+    pub fn reclaim_paddr_range(&mut self, start: usize, end: usize) -> usize {
+        if self.pages.is_empty() {
+            return 0;
+        }
+
+        let mut to_free = Vec::new();
+        self.pages.retain(|&paddr| {
+            let page_end = paddr.saturating_add(PAGE_SIZE - 1);
+            let in_range = paddr >= start && page_end <= end;
+            if in_range {
+                to_free.push(paddr);
+                false
+            } else {
+                true
+            }
+        });
+
+        let freed = to_free.len();
+        if freed > 0 {
+            crate::mem::pmm::free_individual_pages(&to_free);
+        }
+        freed
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test_case]
+    fn task_pages_reclaim_paddr_range_reclaims_only_covered_pages() {
+        let mut pages = TaskPages::new(4).expect("TaskPages allocation failed");
+        let p0 = pages.page_paddr(0).unwrap();
+        let p1 = pages.page_paddr(1).unwrap();
+
+        let start = core::cmp::min(p0, p1);
+        let end = core::cmp::max(p0, p1) + PAGE_SIZE - 1;
+
+        let before = pages.len();
+        let freed = pages.reclaim_paddr_range(start, end);
+        assert!(freed >= 1);
+        assert!(pages.len() < before);
+    }
 }
 
 impl Drop for TaskPages {
