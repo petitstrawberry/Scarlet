@@ -32,7 +32,7 @@ use crate::drivers::virtio::features::VIRTIO_F_ANY_LAYOUT;
 use crate::drivers::virtio::features::VIRTIO_RING_F_INDIRECT_DESC;
 use crate::environment::PAGE_SIZE;
 use crate::interrupt::InterruptId;
-use crate::mem::page::PageAllocation;
+use crate::mem::page::ContiguousPages;
 use crate::network::config::apply_pending_ip_for_interface;
 use crate::network::ethernet_interface::EthernetNetworkInterface;
 use crate::network::get_network_manager;
@@ -152,7 +152,7 @@ pub struct VirtioNetDevice {
     features: RwLock<u32>,
     stats: Mutex<NetworkStats>,
     initialized: Mutex<bool>,
-    rx_buffers: Mutex<Vec<PageAllocation>>,
+    rx_buffers: Mutex<Vec<ContiguousPages>>,
     interrupt_id: Mutex<Option<InterruptId>>,
     interface_name: Mutex<Option<String>>,
 }
@@ -315,8 +315,8 @@ impl VirtioNetDevice {
 
             // Allocate from PMM for DMA
             let pages_needed = (total_size + PAGE_SIZE - 1) / PAGE_SIZE;
-            let buffer_alloc =
-                PageAllocation::new(pages_needed).ok_or("Failed to allocate RX buffer from PMM")?;
+            let buffer_alloc = ContiguousPages::new(pages_needed)
+                .ok_or("Failed to allocate RX buffer from PMM")?;
             let buffer_ptr = buffer_alloc.as_ptr() as *mut u8;
 
             // Allocate single descriptor for the entire receive buffer
@@ -362,7 +362,7 @@ impl VirtioNetDevice {
         // Allocate from PMM for DMA
         let pages_needed = (total_size + PAGE_SIZE - 1) / PAGE_SIZE;
         let buffer_alloc =
-            PageAllocation::new(pages_needed).ok_or("Failed to allocate TX buffer from PMM")?;
+            ContiguousPages::new(pages_needed).ok_or("Failed to allocate TX buffer from PMM")?;
         let buffer_ptr = buffer_alloc.as_ptr() as *mut u8;
 
         // Fill header at the beginning

@@ -28,7 +28,7 @@ use crate::{
         FileSystemError, FileSystemErrorKind, FileType, SocketFileInfo, get_fs_driver_manager,
         vfs_v2::cache::PageCacheCapable,
     },
-    mem::{page::PageAllocation, page_cache::PageCacheManager},
+    mem::{page::ContiguousPages, page_cache::PageCacheManager},
     object::capability::MemoryMappingOps,
 };
 
@@ -728,7 +728,7 @@ pub struct TmpFileObject {
     /// Optional socket reference for socket files
     socket_ref: Option<Arc<dyn crate::network::SocketObject>>,
     /// Page-aligned backing for private mmap operations
-    mmap_backing: RwLock<Option<PageAllocation>>,
+    mmap_backing: RwLock<Option<ContiguousPages>>,
     /// Byte length of the mmap backing (file size snapshot)
     mmap_backing_len: Mutex<usize>,
     /// Active mmap ranges keyed by starting virtual address
@@ -830,7 +830,7 @@ impl TmpFileObject {
             .map(|buf| buf.len() < num_pages)
             .unwrap_or(true);
         if needs_alloc {
-            *backing_guard = Some(PageAllocation::new(num_pages).ok_or(StreamError::IoError)?);
+            *backing_guard = Some(ContiguousPages::new(num_pages).ok_or(StreamError::IoError)?);
         }
 
         let backing = backing_guard.as_mut().expect("mmap backing missing");

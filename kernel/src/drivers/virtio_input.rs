@@ -22,7 +22,7 @@ use crate::drivers::virtio::device::{DeviceStatus, Register, VirtioDevice};
 use crate::drivers::virtio::queue::{DescriptorFlag, VirtQueue};
 use crate::early_println;
 use crate::environment::PAGE_SIZE;
-use crate::mem::page::PageAllocation;
+use crate::mem::page::ContiguousPages;
 
 /// VirtIO Input event structure (matches Linux virtio_input_event)
 #[repr(C)]
@@ -68,7 +68,7 @@ pub struct VirtioInputDevice {
     statusq: Mutex<VirtQueue<'static>>, // Status queue (driver -> device)
     event_device: Arc<EventDevice>,
     initialized: Mutex<bool>,
-    event_buffer_alloc: Mutex<Option<PageAllocation>>, // Single page for all event buffers
+    event_buffer_alloc: Mutex<Option<ContiguousPages>>, // Single page for all event buffers
     interrupt_id: Mutex<Option<u32>>,
 }
 
@@ -309,7 +309,7 @@ impl VirtioInputDevice {
 
         // Allocate single page from PMM for all event buffers
         let buffer_alloc =
-            PageAllocation::new(1).ok_or("Failed to allocate event buffer page from PMM")?;
+            ContiguousPages::new(1).ok_or("Failed to allocate event buffer page from PMM")?;
         let buffer_base = buffer_alloc.as_ptr() as *mut u8;
         let buffer_phys = buffer_alloc.as_paddr();
 

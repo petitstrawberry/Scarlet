@@ -58,7 +58,7 @@ pub fn get_pagetable(ptr: *mut PageTable) -> Option<&'static mut PageTable> {
     }
 }
 
-fn new_boxetable() -> *mut PageTable {
+fn new_pagetable() -> *mut PageTable {
     let ptr = allocate_raw_pages(1) as *mut PageTable;
     if ptr.is_null() {
         panic!("Failed to allocate a new page table");
@@ -86,7 +86,7 @@ fn free_pagetable(ptr: *mut PageTable) {
 ///
 #[allow(static_mut_refs)]
 pub unsafe fn new_raw_pagetable(asid: u16) -> *mut PageTable {
-    let ptr = new_boxetable();
+    let ptr = new_pagetable();
 
     let mut page_tables = get_page_tables().write();
     match page_tables.get_mut(&asid) {
@@ -107,7 +107,7 @@ pub fn alloc_virtual_address_space() -> u16 {
             let bit_pos = (!word).trailing_zeros() as usize;
             asid_table[word_idx] |= 1 << bit_pos;
             let asid = (word_idx * 64 + bit_pos) as u16;
-            let root_pagetable_ptr = new_boxetable();
+            let root_pagetable_ptr = new_pagetable();
             let mut page_tables = get_page_tables().write();
             page_tables.insert(asid, vec![root_pagetable_ptr as usize]);
 

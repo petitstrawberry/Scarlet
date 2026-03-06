@@ -26,7 +26,7 @@ use crate::drivers::virtio::{
     queue::{DescriptorFlag, VirtQueue},
 };
 use crate::environment::PAGE_SIZE;
-use crate::mem::page::PageAllocation;
+use crate::mem::page::ContiguousPages;
 use crate::random::EntropySource;
 
 // Default buffer size for random data
@@ -105,7 +105,7 @@ impl VirtioRngDevice {
 
         // Allocate buffer from PMM for DMA
         let buffer_alloc =
-            PageAllocation::new(1).ok_or("Failed to allocate RNG buffer from PMM")?;
+            ContiguousPages::new(1).ok_or("Failed to allocate RNG buffer from PMM")?;
         let data_ptr = buffer_alloc.as_ptr() as *mut u8;
 
         // Allocate descriptor for the data buffer (device writable)

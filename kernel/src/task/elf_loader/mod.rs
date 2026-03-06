@@ -1274,7 +1274,7 @@ fn map_elf_segment(
 
     let num_of_pages = (size + PAGE_SIZE - 1) / PAGE_SIZE;
     let page_alloc =
-        crate::mem::page::PageAllocation::new(num_of_pages).ok_or("Failed to allocate memory")?;
+        crate::mem::page::ContiguousPages::new(num_of_pages).ok_or("Failed to allocate memory")?;
     let ptr = page_alloc.as_ptr() as *mut u8;
     let pm_start = virt_to_phys(ptr as usize);
     let pmarea = MemoryArea {

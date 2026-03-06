@@ -5,7 +5,7 @@
 //! its own binary format and conversion logic.
 
 use crate::arch::Trapframe;
-use crate::mem::page::PageAllocation;
+use crate::mem::page::ContiguousPages;
 use crate::vm::vmem::VirtualMemoryMap;
 use crate::{fs::manager::get_global_vfs_manager, task::Task};
 use alloc::{
@@ -23,7 +23,7 @@ use core::sync::atomic::Ordering;
 /// restored if execve fails. Includes memory state, metadata, and trapframe.
 #[derive(Debug)]
 struct TaskStateBackup {
-    page_allocations: Vec<PageAllocation>,
+    page_allocations: Vec<ContiguousPages>,
     vm_mapping: Vec<VirtualMemoryMap>,
     text_size: usize,
     data_size: usize,

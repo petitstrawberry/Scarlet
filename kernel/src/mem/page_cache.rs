@@ -37,7 +37,7 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 use spin::RwLock;
 
 use crate::fs::vfs_v2::cache::CacheId;
-use crate::mem::page::PageAllocation;
+use crate::mem::page::ContiguousPages;
 
 /// Page index within a file (0, 1, 2, ...)
 pub type PageIndex = u64;
@@ -48,7 +48,7 @@ pub type PhysicalAddress = usize;
 /// Entry in the page cache representing a single cached page
 pub struct PageCacheEntry {
     /// Page allocation from PMM (owns the memory)
-    allocation: PageAllocation,
+    allocation: ContiguousPages,
     /// Pin count - number of active short-term accesses
     /// Pages with pin_count > 0 cannot be evicted
     pin_count: AtomicUsize,
@@ -58,7 +58,7 @@ pub struct PageCacheEntry {
 
 impl PageCacheEntry {
     /// Create a new page cache entry
-    fn new(allocation: PageAllocation) -> Self {
+    fn new(allocation: ContiguousPages) -> Self {
         Self {
             allocation,
             pin_count: AtomicUsize::new(0),
@@ -162,7 +162,7 @@ impl PageCacheManager {
 
         // Slow path: allocate new page from PMM and load content (may race; acceptable)
         let allocation =
-            PageAllocation::new(1).ok_or("Failed to allocate page from PMM for cache")?;
+            ContiguousPages::new(1).ok_or("Failed to allocate page from PMM for cache")?;
         let paddr = allocation.as_paddr();
 
         // Call loader to fill the page with content

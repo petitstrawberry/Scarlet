@@ -35,7 +35,7 @@ use crate::drivers::virtio::features::{
     VIRTIO_F_ANY_LAYOUT, VIRTIO_RING_F_EVENT_IDX, VIRTIO_RING_F_INDIRECT_DESC,
 };
 use crate::environment::PAGE_SIZE;
-use crate::mem::page::PageAllocation;
+use crate::mem::page::ContiguousPages;
 use crate::object::capability::{MemoryMappingOps, Selectable};
 use crate::vm::addr::virt_to_phys;
 use crate::{
@@ -186,7 +186,8 @@ impl VirtioBlockDevice {
 
         // Allocate data buffer from PMM for DMA
         let data_pages = (req.buffer.len() + PAGE_SIZE - 1) / PAGE_SIZE;
-        let data_alloc = PageAllocation::new(data_pages).ok_or("Failed to allocate data buffer")?;
+        let data_alloc =
+            ContiguousPages::new(data_pages).ok_or("Failed to allocate data buffer")?;
 
         let status = Box::new(0u8);
 
@@ -417,8 +418,8 @@ impl VirtioBlockDevice {
             usize,
             usize,
             *mut VirtioBlkReqHeader,
-            PageAllocation,
-            PageAllocation,
+            ContiguousPages,
+            ContiguousPages,
         )> = Vec::new();
 
         // Lock the virtqueues for the entire batch
@@ -438,7 +439,7 @@ impl VirtioBlockDevice {
 
             // Allocate data buffer from PMM for DMA
             let data_pages = (req.buffer.len() + PAGE_SIZE - 1) / PAGE_SIZE;
-            let data_alloc = match PageAllocation::new(data_pages) {
+            let data_alloc = match ContiguousPages::new(data_pages) {
                 Some(alloc) => alloc,
                 None => {
                     results[idx] = Err("Failed to allocate data buffer");
@@ -447,7 +448,7 @@ impl VirtioBlockDevice {
             };
 
             // Allocate status buffer from PMM (1 page is plenty for a single byte)
-            let status_alloc = match PageAllocation::new(1) {
+            let status_alloc = match ContiguousPages::new(1) {
                 Some(alloc) => alloc,
                 None => {
                     results[idx] = Err("Failed to allocate status buffer");
@@ -489,7 +490,7 @@ impl VirtioBlockDevice {
                 virtqueues[0].desc[header_desc].flags = DescriptorFlag::Next as u16;
                 virtqueues[0].desc[header_desc].next = data_desc as u16;
 
-                // Use physical address directly from PageAllocation for DMA
+                // Use physical address directly from ContiguousPages for DMA
                 let data_phys = data_alloc.as_paddr();
                 virtqueues[0].desc[data_desc].addr = data_phys as u64;
                 virtqueues[0].desc[data_desc].len = req.buffer.len() as u32;
@@ -506,7 +507,7 @@ impl VirtioBlockDevice {
 
                 virtqueues[0].desc[data_desc].next = status_desc as u16;
 
-                // Use physical address directly from PageAllocation for DMA
+                // Use physical address directly from ContiguousPages for DMA
                 let status_phys = status_alloc.as_paddr();
                 virtqueues[0].desc[status_desc].addr = status_phys as u64;
                 virtqueues[0].desc[status_desc].len = 1;
@@ -514,7 +515,7 @@ impl VirtioBlockDevice {
 
                 // Submit the request
                 if virtqueues[0].push(header_desc).is_ok() {
-                    // Store PageAllocations to keep them alive until completion
+                    // Store ContiguousPagess to keep them alive until completion
                     // The allocations will be dropped when removed from request_data
                     request_data.push((
                         idx,
@@ -526,7 +527,7 @@ impl VirtioBlockDevice {
                         status_alloc,
                     ));
                 } else {
-                    // Clean up on push failure - descriptors freed, PageAllocations dropped automatically
+                    // Clean up on push failure - descriptors freed, ContiguousPagess dropped automatically
                     virtqueues[0].free_desc(status_desc);
                     virtqueues[0].free_desc(data_desc);
                     virtqueues[0].free_desc(header_desc);
@@ -543,7 +544,7 @@ impl VirtioBlockDevice {
                     batch_size
                 );
 
-                // Clean up on descriptor allocation failure - PageAllocations dropped automatically
+                // Clean up on descriptor allocation failure - ContiguousPagess dropped automatically
                 unsafe {
                     drop(Box::from_raw(header_ptr));
                 }
@@ -610,8 +611,8 @@ impl VirtioBlockDevice {
                         usize,
                         usize,
                         *mut VirtioBlkReqHeader,
-                        PageAllocation,
-                        PageAllocation,
+                        ContiguousPages,
+                        ContiguousPages,
                     ) = request_data[data_index];
                     let status_ptr = status_alloc.as_ptr() as *mut u8;
                     let data_ptr = data_alloc.as_ptr() as *mut u8;
@@ -646,7 +647,7 @@ impl VirtioBlockDevice {
                     unsafe {
                         drop(Box::from_raw(header_ptr));
                     }
-                    // PageAllocations will be dropped when we remove from request_data
+                    // ContiguousPagess will be dropped when we remove from request_data
                     processed_indices.push(data_index);
                 } else {
                     // Unexpected descriptor - this shouldn't happen but handle gracefully
@@ -658,7 +659,7 @@ impl VirtioBlockDevice {
             }
         }
 
-        // Clean up request_data - remove processed entries to drop PageAllocations
+        // Clean up request_data - remove processed entries to drop ContiguousPagess
         // Sort in reverse order so we can remove without affecting other indices
         processed_indices.sort_unstable_by(|a: &usize, b: &usize| b.cmp(a));
         for index in processed_indices {

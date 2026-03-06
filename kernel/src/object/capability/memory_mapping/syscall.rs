@@ -7,7 +7,7 @@
 
 use crate::arch::Trapframe;
 use crate::environment::PAGE_SIZE;
-use crate::mem::page::PageAllocation;
+use crate::mem::page::ContiguousPages;
 use crate::task::mytask;
 use crate::vm::vmem::{MemoryArea, VirtualMemoryMap};
 use alloc::boxed::Box;
@@ -358,7 +358,7 @@ fn handle_anonymous_mapping(
     let is_shared = (flags & MAP_SHARED) != 0;
     let is_map_fixed = (flags & MAP_FIXED) != 0;
 
-    let page_alloc = match PageAllocation::new(num_pages) {
+    let page_alloc = match ContiguousPages::new(num_pages) {
         Some(pa) => pa,
         None => return usize::MAX,
     };

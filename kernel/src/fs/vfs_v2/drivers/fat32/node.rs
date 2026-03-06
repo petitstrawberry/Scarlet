@@ -23,7 +23,7 @@ use crate::object::capability::{ControlOps, MemoryMappingOps, StreamError, Strea
 use crate::environment::PAGE_SIZE;
 use crate::fs::vfs_v2::cache::PageCacheCapable;
 use crate::fs::vfs_v2::core::{FileSystemOperations, VfsNode};
-use crate::mem::{page::PageAllocation, page_cache::PageCacheManager};
+use crate::mem::{page::ContiguousPages, page_cache::PageCacheManager};
 
 /// FAT32 filesystem node
 ///
@@ -189,7 +189,7 @@ pub struct Fat32FileObject {
     /// File-level dirty flag to avoid unnecessary writeback
     dirty: Mutex<bool>,
     /// Page-aligned backing for mmap operations (lazy initialized)
-    mmap_backing: RwLock<Option<PageAllocation>>,
+    mmap_backing: RwLock<Option<ContiguousPages>>,
     /// Byte length of the mmap backing (file size snapshot)
     mmap_backing_len: Mutex<usize>,
     /// Active mmap ranges keyed by starting virtual address
@@ -354,7 +354,7 @@ impl Fat32FileObject {
             .map(|buf| buf.len() < num_pages)
             .unwrap_or(true);
         if needs_alloc {
-            *backing_guard = Some(PageAllocation::new(num_pages).ok_or(StreamError::IoError)?);
+            *backing_guard = Some(ContiguousPages::new(num_pages).ok_or(StreamError::IoError)?);
         }
 
         let backing = backing_guard.as_mut().expect("mmap backing missing");

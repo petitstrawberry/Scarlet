@@ -93,7 +93,7 @@ pub fn free_raw_pages(pages: *mut Page, num_of_pages: usize) {
 
 /// Allocates a number of pages from the heap and returns them as a boxed slice.
 /// Note: This uses the global heap allocator, not PMM.
-/// For PMM-backed allocations, use `PageAllocation::new()` instead.
+/// For PMM-backed allocations, use `ContiguousPages::new()` instead.
 ///
 /// # Arguments
 /// * `num_of_pages` - The number of pages to allocate
@@ -105,7 +105,7 @@ pub fn free_raw_pages(pages: *mut Page, num_of_pages: usize) {
 /// Panics if allocation fails.
 #[deprecated(
     since = "0.1.0",
-    note = "This function uses the global heap allocator. Use PageAllocation::new() for PMM-backed allocations instead."
+    note = "This function uses the global heap allocator. Use ContiguousPages::new() for PMM-backed allocations instead."
 )]
 pub fn allocate_boxed_pages(num_of_pages: usize) -> Box<[Page]> {
     use alloc::alloc::{Layout, alloc_zeroed};
@@ -138,7 +138,7 @@ pub fn allocate_boxed_pages(num_of_pages: usize) -> Box<[Page]> {
 /// Panics if allocation fails.
 #[deprecated(
     since = "0.1.0",
-    note = "This function uses the global heap allocator. Use allocate_raw_pages_aligned() with PageAllocation for PMM-backed allocations instead."
+    note = "This function uses the global heap allocator. Use allocate_raw_pages_aligned() with ContiguousPages for PMM-backed allocations instead."
 )]
 pub fn allocate_boxed_pages_aligned(num_of_pages: usize, align: usize) -> Box<[Page]> {
     use alloc::alloc::{Layout, alloc_zeroed};
@@ -176,9 +176,6 @@ pub struct ContiguousPages {
     ptr: *mut Page,
     count: usize,
 }
-
-#[deprecated(note = "Use `ContiguousPages` instead")]
-pub type PageAllocation = ContiguousPages;
 
 impl ContiguousPages {
     pub fn new(count: usize) -> Option<Self> {

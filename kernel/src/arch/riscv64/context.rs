@@ -7,7 +7,7 @@
 use core::arch::naked_asm;
 
 use crate::arch::Trapframe;
-use crate::mem::page::PageAllocation;
+use crate::mem::page::ContiguousPages;
 use crate::vm::vmem::MemoryArea;
 
 /// Kernel context for RISC-V 64-bit
@@ -21,7 +21,7 @@ pub struct KernelContext {
     pub sp: u64,
     pub ra: u64,
     pub s: [u64; 12],
-    pub kernel_stack: PageAllocation,
+    pub kernel_stack: ContiguousPages,
 }
 
 impl KernelContext {
@@ -32,7 +32,8 @@ impl KernelContext {
     pub fn new() -> Self {
         // Allocate page-aligned kernel stack from PMM
         let num_pages = crate::environment::TASK_KERNEL_STACK_SIZE / crate::environment::PAGE_SIZE;
-        let kernel_stack = PageAllocation::new(num_pages).expect("Failed to allocate kernel stack");
+        let kernel_stack =
+            ContiguousPages::new(num_pages).expect("Failed to allocate kernel stack");
         let stack_top = kernel_stack.as_ptr() as u64
             + (kernel_stack.len() * crate::environment::PAGE_SIZE) as u64;
 

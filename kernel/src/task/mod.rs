@@ -30,7 +30,7 @@ use crate::{
     },
     fs::VfsManager,
     ipc::{EventContent, event::ProcessControlType},
-    mem::page::PageAllocation,
+    mem::page::ContiguousPages,
     object::handle::HandleTable,
     sched::scheduler::{Scheduler, get_scheduler},
     timer::{TimerHandler, add_timer, get_tick},
@@ -388,7 +388,7 @@ pub struct Task {
     pub name: RwLock<String>,
     /// List of child task IDs
     pub children: RwLock<Vec<usize>>,
-    pub page_allocations: RwLock<Vec<PageAllocation>>,
+    pub page_allocations: RwLock<Vec<ContiguousPages>>,
     pub task_pages: RwLock<Vec<crate::mem::page::TaskPages>>,
     /// Virtual File System Manager
     ///
@@ -800,7 +800,7 @@ impl Task {
             return Err("Address is not page aligned");
         }
 
-        let page_alloc = PageAllocation::new(num_of_pages).ok_or("Failed to allocate pages")?;
+        let page_alloc = ContiguousPages::new(num_of_pages).ok_or("Failed to allocate pages")?;
         let size = num_of_pages * PAGE_SIZE;
         let paddr = virt_to_phys(page_alloc.as_ptr() as usize);
         let mmap = VirtualMemoryMap {
@@ -1264,7 +1264,7 @@ impl Task {
                     } else {
                         // Private memory regions: allocate new pages and copy contents
                         let permissions = mmap.permissions;
-                        let page_alloc = PageAllocation::new(num_pages)
+                        let page_alloc = ContiguousPages::new(num_pages)
                             .ok_or("Failed to allocate pages for clone")?;
                         let size = num_pages * PAGE_SIZE;
                         let paddr = virt_to_phys(page_alloc.as_ptr() as usize);

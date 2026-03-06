@@ -8,7 +8,7 @@ use alloc::boxed::Box;
 use core::arch::naked_asm;
 
 use crate::arch::Trapframe;
-use crate::mem::page::{Page, PageAllocation};
+use crate::mem::page::{ContiguousPages, Page};
 use crate::vm::vmem::MemoryArea;
 
 /// Kernel context for AArch64
@@ -28,7 +28,7 @@ pub struct KernelContext {
     /// Callee-saved registers X19-X28
     pub x: [u64; 10],
     /// Kernel stack for this context (page-aligned, allocated from PMM)
-    pub kernel_stack: PageAllocation,
+    pub kernel_stack: ContiguousPages,
 }
 
 impl KernelContext {
@@ -39,7 +39,8 @@ impl KernelContext {
     pub fn new() -> Self {
         // Allocate page-aligned kernel stack from PMM
         let num_pages = crate::environment::TASK_KERNEL_STACK_SIZE / crate::environment::PAGE_SIZE;
-        let kernel_stack = PageAllocation::new(num_pages).expect("Failed to allocate kernel stack");
+        let kernel_stack =
+            ContiguousPages::new(num_pages).expect("Failed to allocate kernel stack");
         let stack_top = kernel_stack.as_ptr() as u64
             + (kernel_stack.len() * crate::environment::PAGE_SIZE) as u64;
 

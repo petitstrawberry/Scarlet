@@ -18,7 +18,7 @@ use crate::{
         device::VirtioDevice,
         queue::{DescriptorFlag, VirtQueue},
     },
-    mem::page::{Page, PageAllocation, allocate_raw_pages},
+    mem::page::{ContiguousPages, Page, allocate_raw_pages},
     object::capability::{ControlOps, MemoryMappingOps, Selectable},
     timer::{TimerHandler, add_timer, get_tick, ms_to_ticks},
 };
@@ -152,8 +152,8 @@ pub struct VirtioGpuDeviceCore {
     display_info: RwLock<Option<VirtioGpuRespDisplayInfo>>,
     framebuffer_addr: RwLock<Option<usize>>,
     shadow_framebuffer_addr: RwLock<Option<usize>>,
-    framebuffer_alloc: RwLock<Option<PageAllocation>>,
-    shadow_framebuffer_alloc: RwLock<Option<PageAllocation>>,
+    framebuffer_alloc: RwLock<Option<ContiguousPages>>,
+    shadow_framebuffer_alloc: RwLock<Option<ContiguousPages>>,
     resource_id: Mutex<u32>,
     initialized: Mutex<bool>,
     // Track resources and their associated memory
@@ -433,7 +433,7 @@ impl VirtioGpuDeviceCore {
         let fb_size = (width * height * 4) as usize;
         let fb_pages = (fb_size + 4095) / 4096;
         let fb_alloc =
-            PageAllocation::new(fb_pages).ok_or("Failed to allocate framebuffer memory")?;
+            ContiguousPages::new(fb_pages).ok_or("Failed to allocate framebuffer memory")?;
         let fb_addr = fb_alloc.as_paddr();
         self.framebuffer_alloc.write().replace(fb_alloc);
         self.attach_backing_to_resource(resource_id, fb_addr, fb_size)?; // Attach backing memory to the resource
@@ -463,13 +463,15 @@ impl VirtioGpuDeviceCore {
         *self.framebuffer_addr.write() = Some(fb_addr);
         // Allocate shadow framebuffer
         let shadow_alloc =
-            PageAllocation::new(fb_pages).ok_or("Failed to allocate shadow framebuffer memory")?;
+            ContiguousPages::new(fb_pages).ok_or("Failed to allocate shadow framebuffer memory")?;
         let shadow_addr = shadow_alloc.as_paddr();
         self.shadow_framebuffer_alloc.write().replace(shadow_alloc);
         // Initialize shadow framebuffer with the contents of the framebuffer
         let fb_size = fb_size as usize;
         unsafe {
-            ptr::copy_nonoverlapping(fb_addr as *const u8, shadow_addr as *mut u8, fb_size);
+            let fb_virt = crate::vm::addr::phys_to_virt(fb_addr) as *const u8;
+            let shadow_virt = crate::vm::addr::phys_to_virt(shadow_addr) as *mut u8;
+            ptr::copy_nonoverlapping(fb_virt, shadow_virt, fb_size);
         }
         *self.shadow_framebuffer_addr.write() = Some(shadow_addr);
         Ok(())
