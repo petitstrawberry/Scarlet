@@ -687,6 +687,9 @@ impl VirtualMemoryManager {
     /// The translated physical address. Returns None if no mapping exists for the address
     pub fn translate_vaddr(&self, vaddr: usize) -> Option<usize> {
         if let Some(map) = self.search_memory_map(vaddr) {
+            if map.pmarea.start == 0 {
+                return None;
+            }
             // Calculate offset within the memory area
             let offset = vaddr - map.vmarea.start;
             // Calculate and return physical address
@@ -1945,5 +1948,59 @@ mod tests {
         // Translation should now fail as the memory map is removed
         let translated_addr_after_unmap = manager.translate_vaddr(0x1500);
         assert!(translated_addr_after_unmap.is_none());
+    }
+
+    #[test_case]
+    fn test_translate_vaddr_returns_none_for_unbacked_map() {
+        let manager = VirtualMemoryManager::new();
+        let map = VirtualMemoryMap {
+            vmarea: MemoryArea {
+                start: 0x2000,
+                end: 0x2fff,
+            },
+            pmarea: MemoryArea {
+                start: 0,
+                end: PAGE_SIZE - 1,
+            },
+            permissions: 0,
+            is_shared: false,
+            owner: None,
+        };
+
+        assert!(manager.add_memory_map(map).is_ok());
+        assert!(manager.translate_vaddr(0x2000).is_none());
+    }
+
+    #[test_case]
+    fn test_remove_memory_map_range_split_left_and_right_segments() {
+        let manager = VirtualMemoryManager::new();
+        let map = VirtualMemoryMap::new(
+            MemoryArea {
+                start: 0x8000_0000,
+                end: 0x8000_3fff,
+            },
+            MemoryArea {
+                start: 0x4000,
+                end: 0x7fff,
+            },
+            0o644,
+            false,
+            None,
+        );
+        manager.add_memory_map(map).unwrap();
+
+        let removed = manager.remove_memory_map_range(0x5000, PAGE_SIZE * 2);
+        assert_eq!(removed.len(), 1);
+        assert_eq!(removed[0].vmarea.start, 0x5000);
+        assert_eq!(removed[0].vmarea.end, 0x6fff);
+
+        assert_eq!(manager.memmap_len(), 2);
+        let left = manager.search_memory_map(0x4fff).unwrap();
+        assert_eq!(left.vmarea.start, 0x4000);
+        assert_eq!(left.vmarea.end, 0x4fff);
+
+        let right = manager.search_memory_map(0x7000).unwrap();
+        assert_eq!(right.vmarea.start, 0x7000);
+        assert_eq!(right.vmarea.end, 0x7fff);
     }
 }
