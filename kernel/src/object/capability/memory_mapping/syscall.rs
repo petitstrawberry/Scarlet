@@ -13,6 +13,39 @@ use crate::vm::vmem::{MemoryArea, VirtualMemoryMap};
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 
+fn reclaim_private_removed_mapping(task: &crate::task::Task, removed_map: &VirtualMemoryMap) {
+    if removed_map.is_shared {
+        return;
+    }
+
+    let pm_start = removed_map.pmarea.start;
+    let pm_end = removed_map.pmarea.end;
+
+    {
+        let mut allocs = task.page_allocations.write();
+        let mut retained = Vec::new();
+        for alloc in allocs.drain(..) {
+            let alloc_start = alloc.as_paddr();
+            let alloc_end = alloc_start + alloc.len() * PAGE_SIZE - 1;
+
+            if alloc_start >= pm_start && alloc_end <= pm_end {
+                drop(alloc);
+            } else {
+                retained.push(alloc);
+            }
+        }
+        *allocs = retained;
+    }
+
+    {
+        let mut task_pages_allocs = task.task_pages.write();
+        for alloc in task_pages_allocs.iter_mut() {
+            let _ = alloc.reclaim_paddr_range(pm_start, pm_end);
+        }
+        task_pages_allocs.retain(|alloc| !alloc.is_empty());
+    }
+}
+
 // Memory mapping flags (MAP_*)
 #[allow(dead_code)]
 const MAP_SHARED: usize = 0x01;
@@ -304,25 +337,8 @@ pub fn sys_memory_map(trapframe: &mut Trapframe) -> usize {
                 }
             }
 
-            // Then, handle page allocation cleanup for private mappings
             for removed_map in removed_mappings {
-                if !removed_map.is_shared {
-                    let pm_start = removed_map.pmarea.start;
-                    let pm_size = removed_map.pmarea.size();
-                    let mut allocs = task.page_allocations.write();
-                    if let Some(pos) = allocs.iter().position(|pa| {
-                        let alloc_start = pa.as_paddr();
-                        let alloc_end = alloc_start + pa.len() * PAGE_SIZE;
-                        pm_start >= alloc_start && pm_start < alloc_end
-                    }) {
-                        let page_alloc = allocs.remove(pos);
-                        let alloc_start = page_alloc.as_paddr();
-                        let alloc_size = page_alloc.len() * PAGE_SIZE;
-                        if pm_start != alloc_start || pm_size < alloc_size {
-                            allocs.push(page_alloc);
-                        }
-                    }
-                }
+                reclaim_private_removed_mapping(task, &removed_map);
             }
 
             final_vaddr
@@ -404,23 +420,7 @@ fn handle_anonymous_mapping(
             }
         }
         for removed_map in removed_mappings {
-            if !removed_map.is_shared {
-                let pm_start = removed_map.pmarea.start;
-                let pm_size = removed_map.pmarea.size();
-                let mut allocs = task.page_allocations.write();
-                if let Some(pos) = allocs.iter().position(|pa| {
-                    let alloc_start = pa.as_paddr();
-                    let alloc_end = alloc_start + pa.len() * PAGE_SIZE;
-                    pm_start >= alloc_start && pm_start < alloc_end
-                }) {
-                    let page_alloc = allocs.remove(pos);
-                    let alloc_start = page_alloc.as_paddr();
-                    let alloc_size = page_alloc.len() * PAGE_SIZE;
-                    if pm_start != alloc_start || pm_size < alloc_size {
-                        allocs.push(page_alloc);
-                    }
-                }
-            }
+            reclaim_private_removed_mapping(task, &removed_map);
         }
     }
 
@@ -472,35 +472,7 @@ pub fn sys_memory_unmap(trapframe: &mut Trapframe) -> usize {
             }
         }
 
-        if !removed_map.is_shared {
-            let pm_start = removed_map.pmarea.start;
-            let pm_end = removed_map.pmarea.end;
-            let mut allocs = task.page_allocations.write();
-
-            let mut retained = Vec::new();
-            for alloc in allocs.drain(..) {
-                let alloc_start = alloc.as_paddr();
-                let alloc_end = alloc_start + alloc.len() * PAGE_SIZE - 1;
-
-                if alloc_start >= pm_start && alloc_end <= pm_end {
-                    drop(alloc);
-                } else {
-                    retained.push(alloc);
-                }
-            }
-            *allocs = retained;
-        }
-
-        if !removed_map.is_shared {
-            let pm_start = removed_map.pmarea.start;
-            let pm_end = removed_map.pmarea.end;
-            let mut task_pages_allocs = task.task_pages.write();
-
-            for alloc in task_pages_allocs.iter_mut() {
-                let _ = alloc.reclaim_paddr_range(pm_start, pm_end);
-            }
-            task_pages_allocs.retain(|alloc| !alloc.is_empty());
-        }
+        reclaim_private_removed_mapping(task, removed_map);
     }
 
     0
