@@ -8,7 +8,7 @@ opt-level = 3
 runner = "tools/run.sh"
 
 [target.aarch64-unknown-none]
-rustflags = ["-T", "lds/aarch64_qemu_virt.ld"]
+rustflags = ["-T", "lds/aarch64_limine.ld"]
 runner = "tools/run_aarch64.sh"
 
 [target.aarch64-unknown-none-elf]

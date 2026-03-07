@@ -9,8 +9,8 @@ LIMINE_VERSION="${LIMINE_VERSION:-10.8.2}"
 LIMINE_SRC_DIR="$DIST_DIR/limine-${LIMINE_VERSION}"
 BOOT_IMAGE="$DIST_DIR/limine-aarch64-boot.img"
 KERNEL_ELF="${KERNEL_ELF:-../kernel/target/aarch64-unknown-none-elf/debug/kernel}"
-KERNEL_IMAGE="$DIST_DIR/scarlet-kernel-aarch64.bin"
 INITRAMFS_PATH="${INITRAMFS_PATH:-$DIST_DIR/initramfs-aarch64.cpio}"
+ROOTFS_IMAGE="${ROOTFS_IMAGE:-$DIST_DIR/rootfs.img}"
 CONFIG_PATH="$DIST_DIR/limine-aarch64.conf"
 IMAGE_SLACK_MB="${IMAGE_SLACK_MB:-32}"
 LIMINE_CMDLINE="${LIMINE_CMDLINE:-}"
@@ -55,7 +55,6 @@ align_up_mb() {
 mkdir -p "$DIST_DIR"
 
 require_command make
-require_command aarch64-linux-gnu-objcopy
 require_command mformat
 require_command mmd
 require_command mcopy
@@ -67,17 +66,16 @@ ensure_limine_source
 
 require_file "$LIMINE_SRC_DIR/BOOTAA64.EFI"
 
-aarch64-linux-gnu-objcopy -O binary "$KERNEL_ELF" "$KERNEL_IMAGE"
-
 {
     printf '%s\n' 'timeout: 0'
     printf '%s\n' 'serial: yes'
     printf '%s\n' 'verbose: yes'
     printf '\n'
     printf '%s\n' '/Scarlet AArch64 (Limine)'
-    printf '%s\n' '    protocol: linux'
-    printf '%s\n' '    kernel_path: boot():/scarlet/scarlet-kernel-aarch64.bin'
-    printf '%s\n' '    module_path: boot():/scarlet/initramfs-aarch64.cpio'
+    printf '%s\n' '    protocol: limine'
+    printf '%s\n' '    path: boot():/boot/kernel'
+    printf '%s\n' '    module_path: boot():/boot/initramfs-aarch64.cpio'
+    printf '%s\n' '    module_string: initramfs'
     if [ -n "$LIMINE_CMDLINE" ]; then
         printf '    cmdline: %s\n' "$LIMINE_CMDLINE"
     else
@@ -87,7 +85,7 @@ aarch64-linux-gnu-objcopy -O binary "$KERNEL_ELF" "$KERNEL_IMAGE"
 
 payload_bytes=$(file_size_bytes "$LIMINE_SRC_DIR/BOOTAA64.EFI")
 payload_bytes=$((payload_bytes + $(file_size_bytes "$CONFIG_PATH")))
-payload_bytes=$((payload_bytes + $(file_size_bytes "$KERNEL_IMAGE")))
+payload_bytes=$((payload_bytes + $(file_size_bytes "$KERNEL_ELF")))
 payload_bytes=$((payload_bytes + $(file_size_bytes "$INITRAMFS_PATH")))
 
 required_image_size_mb=$(align_up_mb $((payload_bytes + IMAGE_SLACK_MB * 1024 * 1024)))
@@ -105,14 +103,18 @@ fi
 
 rm -f "$BOOT_IMAGE"
 dd if=/dev/zero of="$BOOT_IMAGE" bs=1M count="$boot_image_size_mb" >/dev/null 2>&1
-mformat -i "$BOOT_IMAGE" -F -v SCARLET_EFI ::
+mformat -i "$BOOT_IMAGE" -F -v SCARLET_AA ::
 mmd -i "$BOOT_IMAGE" ::/EFI
 mmd -i "$BOOT_IMAGE" ::/EFI/BOOT
-mmd -i "$BOOT_IMAGE" ::/scarlet
+mmd -i "$BOOT_IMAGE" ::/boot
 
 mcopy -i "$BOOT_IMAGE" "$LIMINE_SRC_DIR/BOOTAA64.EFI" ::/EFI/BOOT/BOOTAA64.EFI
 mcopy -i "$BOOT_IMAGE" "$CONFIG_PATH" ::/EFI/BOOT/limine.conf
-mcopy -i "$BOOT_IMAGE" "$KERNEL_IMAGE" ::/scarlet/scarlet-kernel-aarch64.bin
-mcopy -i "$BOOT_IMAGE" "$INITRAMFS_PATH" ::/scarlet/initramfs-aarch64.cpio
+mcopy -i "$BOOT_IMAGE" "$KERNEL_ELF" ::/boot/kernel
+mcopy -i "$BOOT_IMAGE" "$INITRAMFS_PATH" ::/boot/initramfs-aarch64.cpio
+mcopy -i "$BOOT_IMAGE" - <<'EOF' ::/startup.nsh
+FS0:
+EFI\BOOT\BOOTAA64.EFI
+EOF
 
 echo "Created Limine AArch64 boot image: $BOOT_IMAGE"

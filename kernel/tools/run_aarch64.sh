@@ -51,6 +51,14 @@ PROJECT_ROOT="$(cd "$SCRIPT_DIR" && cd .. && cd .. && pwd)"
 BOOT_IMAGE="$PROJECT_ROOT/mkfs/dist/limine-aarch64-boot.img"
 ROOTFS_IMAGE="$PROJECT_ROOT/mkfs/dist/rootfs.img"
 
+if [ ! -f "$KERNEL_PATH" ]; then
+    echo "Error: kernel binary not found at $KERNEL_PATH"
+    exit 1
+fi
+
+echo "Rebuilding Limine AArch64 boot image from $KERNEL_PATH"
+KERNEL_ELF="$KERNEL_PATH" sh "$PROJECT_ROOT/mkfs/make_limine_aarch64_image.sh"
+
 QEMU_DEBUG_ARGS=""
 
 # Optional QEMU debug logging
@@ -85,13 +93,12 @@ fi
 
 TEMP_OUTPUT=$(mktemp)
 
-find_efi_firmware() {
+find_efi_code() {
     local candidate
     for candidate in \
-        /usr/share/qemu-efi-aarch64/QEMU_EFI.fd \
         /usr/share/AAVMF/AAVMF_CODE.fd \
-        /usr/share/AAVMF/AAVMF32_CODE.fd \
-        /usr/share/edk2/aarch64/QEMU_EFI.fd; do
+        /usr/share/AAVMF/AAVMF_CODE.no-secboot.fd \
+        /usr/share/qemu-efi-aarch64/QEMU_EFI.fd; do
         if [ -f "$candidate" ]; then
             printf '%s\n' "$candidate"
             return 0
@@ -100,10 +107,43 @@ find_efi_firmware() {
     return 1
 }
 
-EFI_FIRMWARE="$(find_efi_firmware || true)"
-if [ -z "$EFI_FIRMWARE" ]; then
-    echo "Error: AArch64 EFI firmware not found."
+find_efi_vars_template() {
+    local candidate
+    for candidate in \
+        /usr/share/AAVMF/AAVMF_VARS.fd \
+        /usr/share/AAVMF/AAVMF_VARS.ms.fd \
+        /usr/share/AAVMF/AAVMF_VARS.snakeoil.fd; do
+        if [ -f "$candidate" ]; then
+            printf '%s\n' "$candidate"
+            return 0
+        fi
+    done
+    return 1
+}
+
+EFI_CODE="$(find_efi_code || true)"
+EFI_VARS_TEMPLATE="$(find_efi_vars_template || true)"
+EFI_VARS_PERSISTENT="$PROJECT_ROOT/mkfs/dist/AAVMF_VARS.fd"
+
+if [ -z "$EFI_CODE" ]; then
+    echo "Error: AArch64 EFI firmware code image not found."
     exit 1
+fi
+
+if [ -z "$EFI_VARS_TEMPLATE" ]; then
+    echo "Error: AArch64 EFI vars template not found."
+    exit 1
+fi
+
+if [ "${SCARLET_EFI_VARS_PERSIST:-0}" = "1" ] || [ "${SCARLET_EFI_VARS_PERSIST:-}" = "true" ]; then
+    EFI_VARS_RUNTIME="$EFI_VARS_PERSISTENT"
+    if [ ! -f "$EFI_VARS_RUNTIME" ]; then
+        cp "$EFI_VARS_TEMPLATE" "$EFI_VARS_RUNTIME"
+    fi
+else
+    EFI_VARS_RUNTIME="$(mktemp "$PROJECT_ROOT/mkfs/dist/AAVMF_VARS.run.XXXXXX.fd")"
+    cp "$EFI_VARS_TEMPLATE" "$EFI_VARS_RUNTIME"
+    trap 'rm -f "$EFI_VARS_RUNTIME"' EXIT
 fi
 
 qemu-system-aarch64 \
@@ -113,13 +153,14 @@ qemu-system-aarch64 \
     -nographic \
     -serial mon:stdio \
     --no-reboot \
-    -bios "$EFI_FIRMWARE" \
+    -drive if=pflash,format=raw,unit=0,file="$EFI_CODE",readonly=on \
+    -drive if=pflash,format=raw,unit=1,file="$EFI_VARS_RUNTIME" \
     -global virtio-mmio.force-legacy=false \
     -drive id=boot,file="$BOOT_IMAGE",format=raw,if=none \
     -device virtio-blk-device,drive=boot,bus=virtio-mmio-bus.0 \
     -drive id=rootfs,file="$ROOTFS_IMAGE",format=raw,if=none \
     -device virtio-blk-device,drive=rootfs,bus=virtio-mmio-bus.1 \
-    -display vnc=:0 \
+    -display none \
     -device virtio-gpu-device,bus=virtio-mmio-bus.2 \
     -netdev user,id=net0 \
     -device virtio-net-device,netdev=net0,bus=virtio-mmio-bus.3 \
