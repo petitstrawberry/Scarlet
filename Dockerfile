@@ -9,7 +9,7 @@ ENV DEBIAN_FRONTEND noninteractive
 # Install dependencies and tools
 RUN apt update && \
 	apt install -y build-essential autoconf automake autotools-dev curl bc git device-tree-compiler vim python3 python3-venv gdb-multiarch gcc-riscv64-linux-gnu gcc-aarch64-linux-gnu cpio libncurses5-dev libncursesw5-dev \
-    mtools dosfstools sleuthkit libslirp-dev qemu-efi-aarch64
+    mtools dosfstools sleuthkit libslirp-dev qemu-efi-riscv64 qemu-efi-aarch64
 
 # # # Install QEMU
 # RUN apt install -y qemu-system-riscv64
