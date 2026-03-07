@@ -1,6 +1,6 @@
 OUTPUT_ARCH("riscv")
 OUTPUT_FORMAT(elf64-littleriscv)
-ENTRY(_entry);
+ENTRY(arch_start_kernel);
 
 PHDRS {
   limine_requests PT_LOAD FLAGS(4);
@@ -21,10 +21,7 @@ SECTIONS {
     } :limine_requests
 
     . = ALIGN(CONSTANT(MAXPAGESIZE));
-    .init : {
-        *(.init .init.*)
-        *(.text.arch_start_kernel .text._entry)
-    } :text
+    .init : { *(.init .init.*) } :text
 
     .text : { *(.text .text.*) } :text
 
