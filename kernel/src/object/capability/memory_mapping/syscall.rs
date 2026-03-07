@@ -7,13 +7,15 @@
 
 use crate::arch::Trapframe;
 use crate::environment::PAGE_SIZE;
-use crate::mem::page::ContiguousPages;
+use crate::mem::page::TaskPages;
 use crate::task::mytask;
 use crate::vm::vmem::{MemoryArea, VirtualMemoryMap};
-use alloc::boxed::Box;
 use alloc::vec::Vec;
 
-fn reclaim_private_removed_mapping(task: &crate::task::Task, removed_map: &VirtualMemoryMap) {
+pub(crate) fn reclaim_private_removed_mapping(
+    task: &crate::task::Task,
+    removed_map: &VirtualMemoryMap,
+) {
     if removed_map.is_shared {
         return;
     }
@@ -358,11 +360,45 @@ fn handle_anonymous_mapping(
     let is_shared = (flags & MAP_SHARED) != 0;
     let is_map_fixed = (flags & MAP_FIXED) != 0;
 
-    let page_alloc = match ContiguousPages::new(num_pages) {
-        Some(pa) => pa,
+    // Determine the final virtual address for the mapping.
+    // If vaddr is 0, find an unmapped area; otherwise use the hint or fixed address.
+    let final_vaddr = if vaddr == 0 {
+        match task
+            .vm_manager
+            .find_unmapped_area(aligned_length, PAGE_SIZE)
+        {
+            Some(addr) => addr,
+            None => return usize::MAX,
+        }
+    } else if vaddr % PAGE_SIZE != 0 {
+        return usize::MAX;
+    } else if !is_map_fixed {
+        // Non-fixed: treat vaddr as a hint; pick a fresh area if it overlaps.
+        let vaddr_end = vaddr + aligned_length - 1;
+        let has_overlap = task.vm_manager.with_memmaps(|mm| {
+            mm.values()
+                .any(|map| !(vaddr_end < map.vmarea.start || vaddr > map.vmarea.end))
+        });
+        if has_overlap {
+            match task
+                .vm_manager
+                .find_unmapped_area(aligned_length, PAGE_SIZE)
+            {
+                Some(addr) => addr,
+                None => return usize::MAX,
+            }
+        } else {
+            vaddr
+        }
+    } else {
+        vaddr
+    };
+
+    // Use individual pages so that partial unmaps can reclaim only the freed pages.
+    let task_pages = match TaskPages::new(num_pages) {
+        Some(tp) => tp,
         None => return usize::MAX,
     };
-    let pages_ptr = page_alloc.as_ptr() as usize;
 
     let mut permissions = 0x08;
     if (prot & PROT_READ) != 0 {
@@ -375,57 +411,50 @@ fn handle_anonymous_mapping(
         permissions |= 0x4;
     }
 
-    let mut chosen_vaddr = vaddr;
-    if chosen_vaddr == 0 {
-        chosen_vaddr = match task
-            .vm_manager
-            .find_unmapped_area(aligned_length, PAGE_SIZE)
-        {
-            Some(addr) => addr,
-            None => return usize::MAX,
-        };
-    } else if chosen_vaddr % PAGE_SIZE != 0 {
-        return usize::MAX;
+    // Build one VM map per page using the correct physical address of each page.
+    let mut vm_maps: Vec<VirtualMemoryMap> = Vec::with_capacity(num_pages);
+    for page_idx in 0..num_pages {
+        let page_vaddr = final_vaddr + page_idx * PAGE_SIZE;
+        let page_vmarea = MemoryArea::new(page_vaddr, page_vaddr + PAGE_SIZE - 1);
+        let page_paddr = task_pages
+            .page_paddr(page_idx)
+            .expect("page_idx is within 0..num_pages which equals task_pages.len()");
+        let page_pmarea = MemoryArea::new(page_paddr, page_paddr + PAGE_SIZE - 1);
+        vm_maps.push(VirtualMemoryMap::new(
+            page_pmarea,
+            page_vmarea,
+            permissions,
+            is_shared,
+            None,
+        ));
     }
 
-    let vmarea = MemoryArea::new(chosen_vaddr, chosen_vaddr + aligned_length - 1);
-    let pmarea = MemoryArea::new(pages_ptr, pages_ptr + aligned_length - 1);
-    let vm_map = VirtualMemoryMap::new(pmarea, vmarea, permissions, is_shared, None);
-
-    if !is_map_fixed {
-        if task.vm_manager.add_memory_map(vm_map.clone()).is_err() {
-            chosen_vaddr = match task
-                .vm_manager
-                .find_unmapped_area(aligned_length, PAGE_SIZE)
-            {
-                Some(addr) => addr,
-                None => return usize::MAX,
-            };
-            let vmarea = MemoryArea::new(chosen_vaddr, chosen_vaddr + aligned_length - 1);
-            let retry_map = VirtualMemoryMap::new(pmarea, vmarea, permissions, is_shared, None);
-            if task.vm_manager.add_memory_map(retry_map).is_err() {
+    // Insert all per-page maps; for non-fixed mappings the address was already chosen
+    // above, so add_memory_map_fixed handles overlap removal uniformly.
+    let mut removed_mappings: Vec<VirtualMemoryMap> = Vec::new();
+    for vm_map in &vm_maps {
+        match task.vm_manager.add_memory_map_fixed(vm_map.clone()) {
+            Ok(removed) => removed_mappings.extend(removed),
+            Err(_) => {
+                drop(task_pages);
                 return usize::MAX;
             }
         }
-    } else {
-        let removed_mappings = match task.vm_manager.add_memory_map_fixed(vm_map) {
-            Ok(maps) => maps,
-            Err(_) => return usize::MAX,
-        };
-        for removed_map in &removed_mappings {
-            if removed_map.is_shared {
-                if let Some(owner) = removed_map.owner.as_ref().and_then(|w| w.upgrade()) {
-                    owner.on_unmapped(removed_map.vmarea.start, removed_map.vmarea.size());
-                }
-            }
-        }
-        for removed_map in removed_mappings {
-            reclaim_private_removed_mapping(task, &removed_map);
-        }
     }
 
-    task.page_allocations.write().push(page_alloc);
-    chosen_vaddr
+    for removed_map in &removed_mappings {
+        if removed_map.is_shared {
+            if let Some(owner) = removed_map.owner.as_ref().and_then(|w| w.upgrade()) {
+                owner.on_unmapped(removed_map.vmarea.start, removed_map.vmarea.size());
+            }
+        }
+    }
+    for removed_map in removed_mappings {
+        reclaim_private_removed_mapping(task, &removed_map);
+    }
+
+    task.task_pages.write().push(task_pages);
+    final_vaddr
 }
 
 /// System call for unmapping memory from a KernelObject or anonymous mapping

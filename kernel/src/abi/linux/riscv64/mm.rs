@@ -6,43 +6,11 @@ use crate::{
     arch::Trapframe,
     environment::PAGE_SIZE,
     mem::page::TaskPages,
+    object::capability::memory_mapping::syscall::reclaim_private_removed_mapping,
     task::mytask,
     vm::vmem::{MemoryArea, VirtualMemoryMap},
 };
-use alloc::boxed::Box;
 use alloc::vec::Vec;
-
-fn reclaim_private_removed_mapping(task: &crate::task::Task, removed_map: &VirtualMemoryMap) {
-    if removed_map.is_shared {
-        return;
-    }
-
-    let pm_start = removed_map.pmarea.start;
-    let pm_end = removed_map.pmarea.end;
-
-    {
-        let mut allocs = task.page_allocations.write();
-        let mut retained = Vec::new();
-        for alloc in allocs.drain(..) {
-            let alloc_start = alloc.as_paddr();
-            let alloc_end = alloc_start + alloc.len() * PAGE_SIZE - 1;
-            if alloc_start >= pm_start && alloc_end <= pm_end {
-                drop(alloc);
-            } else {
-                retained.push(alloc);
-            }
-        }
-        *allocs = retained;
-    }
-
-    {
-        let mut task_pages_allocs = task.task_pages.write();
-        for alloc in task_pages_allocs.iter_mut() {
-            let _ = alloc.reclaim_paddr_range(pm_start, pm_end);
-        }
-        task_pages_allocs.retain(|alloc| !alloc.is_empty());
-    }
-}
 
 pub fn sys_mmap(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
     // Linux mmap constants
