@@ -11,10 +11,11 @@ use crate::object::capability::selectable::{
     ReadyInterest, ReadySet, SelectWaitOutcome, Selectable,
 };
 use crate::{
+    DeviceManager,
     environment::PAGE_SIZE,
     fs::{
-        vfs_v2::cache::PageCacheCapable, DeviceFileInfo, FileMetadata, FileObject, FilePermission,
-        FileSystemError, FileSystemErrorKind, FileType, SeekFrom, SocketFileInfo,
+        DeviceFileInfo, FileMetadata, FileObject, FilePermission, FileSystemError,
+        FileSystemErrorKind, FileType, SeekFrom, SocketFileInfo, vfs_v2::cache::PageCacheCapable,
     },
     mem::{
         page::ContiguousPages,
@@ -22,12 +23,11 @@ use crate::{
     },
     object::capability::{ControlOps, MemoryMappingOps, StreamError, StreamOps},
     vm::addr::phys_to_virt,
-    DeviceManager,
 };
 
 use super::{
-    structures::{EXT2_S_IFDIR, EXT2_S_IFMT, EXT2_S_IFREG},
     Ext2FileSystem,
+    structures::{EXT2_S_IFDIR, EXT2_S_IFMT, EXT2_S_IFREG},
 };
 use crate::fs::vfs_v2::core::{FileSystemOperations, VfsNode};
 

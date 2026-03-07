@@ -31,12 +31,12 @@ use alloc::{
     vec::Vec,
 };
 use core::{any::Any, fmt::Debug, mem};
-use spin::{rwlock::RwLock, Mutex};
+use spin::{Mutex, rwlock::RwLock};
 
 use crate::{
     device::block::BlockDevice,
     driver_initcall,
-    fs::{get_fs_driver_manager, FileObject, FileSystemError, FileSystemErrorKind, FileType},
+    fs::{FileObject, FileSystemError, FileSystemErrorKind, FileType, get_fs_driver_manager},
 };
 
 use super::super::core::{DirectoryEntryInternal, FileSystemId, FileSystemOperations, VfsNode};
@@ -731,7 +731,7 @@ impl Fat32FileSystem {
             current_cluster = fat_entry;
         }
 
-        let mut page_ptr = paddr as *mut u8;
+        let mut page_ptr = phys_to_virt(paddr) as *mut u8;
         let mut bytes_written = 0usize;
         let mut cluster_offset = offset_in_cluster;
 

@@ -4,9 +4,9 @@ use core::sync::atomic::compiler_fence;
 
 use crate::arch::Trapframe;
 use crate::hypervisor::types::VcpuExit;
-use crate::hypervisor::vm::{VmObject, GLOBAL_VM_MANAGER};
-use crate::object::handle::HandleMetadata;
+use crate::hypervisor::vm::{GLOBAL_VM_MANAGER, VmObject};
 use crate::object::KernelObject;
+use crate::object::handle::HandleMetadata;
 use crate::println;
 use crate::task::mytask;
 

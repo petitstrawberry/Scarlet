@@ -20,15 +20,15 @@ use alloc::{vec, vec::Vec};
 use crate::device::network::DevicePacket;
 use crate::drivers::network::virtio_net::VirtioNetDevice;
 use crate::network::arp::{ArpCacheEntry, ArpEntryState, ArpLayer, ArpPacket};
-use crate::network::ethernet::{ether_type, EthernetHeader, EthernetLayer};
+use crate::network::ethernet::{EthernetHeader, EthernetLayer, ether_type};
 use crate::network::ethernet_interface::EthernetNetworkInterface;
-use crate::network::icmp::{code, message_type, IcmpEcho, IcmpHeader, IcmpLayer};
-use crate::network::ipv4::{protocol, Ipv4Address, Ipv4Header, Ipv4Layer};
+use crate::network::icmp::{IcmpEcho, IcmpHeader, IcmpLayer, code, message_type};
+use crate::network::ipv4::{Ipv4Address, Ipv4Header, Ipv4Layer, protocol};
 use crate::network::socket::SocketError;
 use crate::network::socket::{SocketAddress, SocketControl, SocketObject, SocketState};
-use crate::network::tcp::{tcp_flags, TcpHeader};
+use crate::network::tcp::{TcpHeader, tcp_flags};
 use crate::network::udp::{UdpHeader, UdpLayer, UdpSocket};
-use crate::network::{get_network_manager, LayerContext, NetworkInterface, NetworkLayer};
+use crate::network::{LayerContext, NetworkInterface, NetworkLayer, get_network_manager};
 
 /// Base MMIO address for virtio devices on RISC-V virt machine
 const VIRTIO_MMIO_BASE: usize = 0x10001000;
@@ -64,8 +64,8 @@ const TEST_TIMEOUT_MS: u64 = 5000;
 ///
 /// Creates VirtIO-net devices at known MMIO addresses and registers
 /// them with the network interface manager.
-fn init_test_interfaces(
-) -> Result<(Arc<dyn NetworkInterface>, Arc<dyn NetworkInterface>), &'static str> {
+fn init_test_interfaces()
+-> Result<(Arc<dyn NetworkInterface>, Arc<dyn NetworkInterface>), &'static str> {
     // Create VirtIO network interfaces at known MMIO addresses
     let net0_device = Arc::new(VirtioNetDevice::new(NET0_MMIO_ADDR));
     let net1_device = Arc::new(VirtioNetDevice::new(NET1_MMIO_ADDR));

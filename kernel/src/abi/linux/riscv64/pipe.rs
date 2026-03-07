@@ -3,9 +3,8 @@
 
 use crate::{
     abi::linux::riscv64::{
-        errno,
+        LinuxRiscv64Abi, errno,
         fs::{FD_CLOEXEC, O_CLOEXEC, O_NONBLOCK},
-        LinuxRiscv64Abi,
     },
     arch::Trapframe,
     ipc::UnidirectionalPipe,

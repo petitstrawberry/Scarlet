@@ -20,11 +20,12 @@ use core::any::Any;
 use spin::RwLock;
 
 use crate::device::{
-    char::CharDevice, graphics::manager::FramebufferResource, manager::DeviceManager, Device,
-    DeviceType,
+    Device, DeviceType, char::CharDevice, graphics::manager::FramebufferResource,
+    manager::DeviceManager,
 };
 use crate::object::capability::selectable::Selectable;
 use crate::object::capability::{ControlOps, MemoryMappingOps};
+use crate::vm::addr::phys_to_virt;
 
 /// Linux framebuffer ioctl command constants
 /// These provide compatibility with Linux framebuffer applications
@@ -375,7 +376,7 @@ impl CharDevice for FramebufferCharDevice {
         // causes QEMU's HVF backend to abort (assert(isv)). Use byte-wise volatile
         // accesses to keep the trapped instruction decodable.
         unsafe {
-            let fb_ptr = fb_resource.physical_addr as *const u8;
+            let fb_ptr = phys_to_virt(fb_resource.physical_addr) as *const u8;
             let src_ptr = fb_ptr.add(start_pos);
 
             for i in 0..to_read {
@@ -417,7 +418,7 @@ impl CharDevice for FramebufferCharDevice {
         // Write data to framebuffer memory.
         // See note in read_at() about QEMU+HVF and ISV.
         unsafe {
-            let fb_ptr = fb_resource.physical_addr as *mut u8;
+            let fb_ptr = phys_to_virt(fb_resource.physical_addr) as *mut u8;
             let dst_ptr = fb_ptr.add(start_pos);
 
             for i in 0..to_write {
@@ -485,11 +486,7 @@ impl MemoryMappingOps for FramebufferCharDevice {
             return Err("Requested length exceeds available framebuffer size");
         }
 
-        // FramebufferResource stores a kernel virtual address for CPU access.
-        // Convert it to a physical address for user mmap.
-        let kva = fb_resource.physical_addr + offset;
-        let paddr = crate::vm::get_kernel_vm_manager().translate_to_phys(kva)
-            .ok_or("Failed to translate framebuffer address")?;
+        let paddr = fb_resource.physical_addr + offset;
         let permissions = 0x3; // Read and Write
         let is_shared = true; // Framebuffer mappings are shared
 
@@ -641,7 +638,8 @@ impl FramebufferCharDevice {
         let target_ptr = if let Some(current_task) = crate::task::mytask() {
             // User space: translate virtual address to physical
             current_task
-                .vm_manager.translate_to_kva(arg)
+                .vm_manager
+                .translate_to_kva(arg)
                 .ok_or("Invalid user pointer - not mapped")?
         } else {
             // Kernel space: use pointer directly
@@ -670,7 +668,8 @@ impl FramebufferCharDevice {
         let target_ptr = if let Some(current_task) = crate::task::mytask() {
             // User space: translate virtual address to physical
             current_task
-                .vm_manager.translate_to_kva(arg)
+                .vm_manager
+                .translate_to_kva(arg)
                 .ok_or("Invalid user pointer - not mapped")?
         } else {
             // Kernel space: use pointer directly
@@ -798,10 +797,10 @@ impl FramebufferCharDevice {
 mod tests {
     use super::*;
     use crate::device::{
-        graphics::{
-            manager::GraphicsManager, FramebufferConfig, GenericGraphicsDevice, PixelFormat,
-        },
         Device,
+        graphics::{
+            FramebufferConfig, GenericGraphicsDevice, PixelFormat, manager::GraphicsManager,
+        },
     };
     use alloc::{string::ToString, sync::Arc};
     use spin::RwLock;
@@ -844,7 +843,7 @@ mod tests {
         let fb_size = config.size();
         let fb_pages = (fb_size + 4095) / 4096;
         let fb_addr = crate::mem::page::allocate_raw_pages(fb_pages) as usize;
-        test_device.set_framebuffer_address(fb_addr);
+        test_device.set_framebuffer_address(crate::vm::addr::virt_to_phys(fb_addr));
 
         let shared_device: Arc<dyn Device> = Arc::new(test_device);
 
@@ -900,7 +899,7 @@ mod tests {
         let fb_size = config.size(); // 10 * 10 * 3 = 300 bytes
         let fb_pages = (fb_size + 4095) / 4096;
         let fb_addr = crate::mem::page::allocate_raw_pages(fb_pages) as usize;
-        test_device.set_framebuffer_address(fb_addr);
+        test_device.set_framebuffer_address(crate::vm::addr::virt_to_phys(fb_addr));
 
         let shared_device: Arc<dyn Device> = Arc::new(test_device);
         let device_manager = DeviceManager::get_manager();
@@ -1001,7 +1000,7 @@ mod tests {
 
             let fb_pages = (fb_size + 4095) / 4096;
             let fb_addr = crate::mem::page::allocate_raw_pages(fb_pages) as usize;
-            test_device.set_framebuffer_address(fb_addr);
+            test_device.set_framebuffer_address(crate::vm::addr::virt_to_phys(fb_addr));
 
             let shared_device: Arc<dyn Device> = Arc::new(test_device);
             let device_manager = DeviceManager::get_manager();
@@ -1062,7 +1061,7 @@ mod tests {
         let fb_size = config.size();
         let fb_pages = (fb_size + 4095) / 4096;
         let fb_addr = crate::mem::page::allocate_raw_pages(fb_pages) as usize;
-        test_device.set_framebuffer_address(fb_addr);
+        test_device.set_framebuffer_address(crate::vm::addr::virt_to_phys(fb_addr));
 
         let shared_device: Arc<dyn Device> = Arc::new(test_device);
         let device_manager = DeviceManager::get_manager();
@@ -1122,7 +1121,7 @@ mod tests {
         let fb_size = config.size();
         let fb_pages = (fb_size + 4095) / 4096;
         let fb_addr = crate::mem::page::allocate_raw_pages(fb_pages) as usize;
-        test_device.set_framebuffer_address(fb_addr);
+        test_device.set_framebuffer_address(crate::vm::addr::virt_to_phys(fb_addr));
 
         let shared_device: Arc<dyn Device> = Arc::new(test_device);
         let device_manager = DeviceManager::get_manager();
@@ -1169,7 +1168,7 @@ mod tests {
         let fb_size = config.size(); // 256 * 256 * 4 = 262,144 bytes
         let fb_pages = (fb_size + 4095) / 4096;
         let fb_addr = crate::mem::page::allocate_raw_pages(fb_pages) as usize;
-        test_device.set_framebuffer_address(fb_addr);
+        test_device.set_framebuffer_address(crate::vm::addr::virt_to_phys(fb_addr));
 
         let shared_device: Arc<dyn Device> = Arc::new(test_device);
         let device_manager = DeviceManager::get_manager();
@@ -1230,7 +1229,7 @@ mod tests {
         let fb_size = config.size(); // 16 * 16 * 3 = 768 bytes
         let fb_pages = (fb_size + 4095) / 4096;
         let fb_addr = crate::mem::page::allocate_raw_pages(fb_pages) as usize;
-        test_device.set_framebuffer_address(fb_addr);
+        test_device.set_framebuffer_address(crate::vm::addr::virt_to_phys(fb_addr));
 
         let shared_device: Arc<dyn Device> = Arc::new(test_device);
         let device_manager = DeviceManager::get_manager();
@@ -1308,7 +1307,7 @@ mod tests {
         let fb_size = config.size();
         let fb_pages = (fb_size + 4095) / 4096;
         let fb_addr = crate::mem::page::allocate_raw_pages(fb_pages) as usize;
-        test_device.set_framebuffer_address(fb_addr);
+        test_device.set_framebuffer_address(crate::vm::addr::virt_to_phys(fb_addr));
 
         let shared_device: Arc<dyn Device> = Arc::new(test_device);
         let device_manager = DeviceManager::get_manager();
@@ -1344,7 +1343,7 @@ mod tests {
         let result = fb_device.get_mapping_info(0, fb_pages * 4096);
         assert!(result.is_ok());
         let (paddr, permissions, is_shared) = result.unwrap();
-        assert_eq!(paddr, fb_addr);
+        assert_eq!(paddr, crate::vm::addr::virt_to_phys(fb_addr));
         assert_eq!(permissions, 0x3); // Read and Write
         assert!(is_shared);
 
@@ -1382,7 +1381,7 @@ mod tests {
         let fb_size = config.size();
         let fb_pages = (fb_size + 4095) / 4096;
         let fb_addr = crate::mem::page::allocate_raw_pages(fb_pages) as usize;
-        test_device.set_framebuffer_address(fb_addr);
+        test_device.set_framebuffer_address(crate::vm::addr::virt_to_phys(fb_addr));
 
         let shared_device: Arc<dyn Device> = Arc::new(test_device);
         let device_manager = DeviceManager::get_manager();
@@ -1426,7 +1425,7 @@ mod tests {
         let result = char_device.get_mapping_info(0, fb_pages * 4096);
         assert!(result.is_ok());
         let (paddr, permissions, is_shared) = result.unwrap();
-        assert_eq!(paddr, fb_addr);
+        assert_eq!(paddr, crate::vm::addr::virt_to_phys(fb_addr));
         assert_eq!(permissions, 0x3);
         assert!(is_shared);
     }

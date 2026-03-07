@@ -12,7 +12,7 @@ use alloc::{
     vec::Vec,
 };
 use core::{any::Any, fmt::Debug};
-use spin::{rwlock::RwLock, Mutex};
+use spin::{Mutex, rwlock::RwLock};
 
 use crate::fs::{
     FileMetadata, FileObject, FilePermission, FileSystemError, FileSystemErrorKind, FileType,
@@ -269,7 +269,11 @@ impl Fat32FileObject {
                         let current_cluster = self.node.cluster();
                         if current_cluster == 0 {
                             unsafe {
-                                core::ptr::write_bytes(paddr as *mut u8, 0, PAGE_SIZE);
+                                core::ptr::write_bytes(
+                                    phys_to_virt(paddr) as *mut u8,
+                                    0,
+                                    PAGE_SIZE,
+                                );
                             }
                             return Ok(());
                         }
@@ -279,11 +283,12 @@ impl Fat32FileObject {
                         let start = page_index as usize * PAGE_SIZE;
                         let len = core::cmp::min(PAGE_SIZE, data.len().saturating_sub(start));
                         unsafe {
-                            core::ptr::write_bytes(paddr as *mut u8, 0, PAGE_SIZE);
+                            let page_ptr = phys_to_virt(paddr) as *mut u8;
+                            core::ptr::write_bytes(page_ptr, 0, PAGE_SIZE);
                             if len > 0 {
                                 core::ptr::copy_nonoverlapping(
                                     data.as_ptr().add(start),
-                                    paddr as *mut u8,
+                                    page_ptr,
                                     len,
                                 );
                             }
@@ -786,7 +791,7 @@ impl FileObject for Fat32FileObject {
                 .map_err(|_| StreamError::IoError)?;
 
             unsafe {
-                let src = (pinned.paddr() as *const u8).add(offset_in_page);
+                let src = (phys_to_virt(pinned.paddr()) as *const u8).add(offset_in_page);
                 let remaining_in_page = PAGE_SIZE - offset_in_page;
                 let remaining_file = file_size - (off + total_read);
                 let remaining_buf = buffer.len() - total_read;
@@ -837,7 +842,7 @@ impl FileObject for Fat32FileObject {
                 .map_err(|_| StreamError::IoError)?;
 
             unsafe {
-                let dst = (pinned.paddr() as *mut u8).add(page_off);
+                let dst = (phys_to_virt(pinned.paddr()) as *mut u8).add(page_off);
                 let src = buffer.as_ptr().add(written);
                 core::ptr::copy_nonoverlapping(src, dst, chunk);
             }

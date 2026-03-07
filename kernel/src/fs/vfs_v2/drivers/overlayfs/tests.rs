@@ -2,11 +2,11 @@
 
 use super::super::tmpfs::TmpFS;
 use super::OverlayFS;
-use crate::fs::mount_tree::MountPoint;
 use crate::fs::FileSystemOperations;
 use crate::fs::FileType;
 use crate::fs::SeekFrom;
 use crate::fs::VfsEntry;
+use crate::fs::mount_tree::MountPoint;
 use alloc::string::ToString;
 use alloc::sync::Arc;
 use alloc::vec;
@@ -356,9 +356,11 @@ fn test_overlayfs_read_only() {
 
     // Should not be able to create
     let root = overlay.root_node();
-    assert!(overlay
-        .create(&root, &"newfile".to_string(), FileType::RegularFile, 0o644)
-        .is_err());
+    assert!(
+        overlay
+            .create(&root, &"newfile".to_string(), FileType::RegularFile, 0o644)
+            .is_err()
+    );
 }
 
 #[test_case]
@@ -493,9 +495,11 @@ fn test_overlayfs_lower_mount_visibility_and_whiteout() {
     assert!(overlay.lookup(&root, &"file_in_mount".to_string()).is_err());
     // Confirm that a whiteout file was created in the upper layer
     let upper_root = upper.root_node();
-    assert!(upper
-        .lookup(&upper_root, &".wh.file_in_mount".to_string())
-        .is_ok());
+    assert!(
+        upper
+            .lookup(&upper_root, &".wh.file_in_mount".to_string())
+            .is_ok()
+    );
 }
 
 #[test_case]

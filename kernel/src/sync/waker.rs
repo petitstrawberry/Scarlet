@@ -153,7 +153,7 @@ impl Waker {
         }
 
         if let Some(ticks) = timeout_ticks {
-            use crate::timer::{add_timer, cancel_timer, get_tick, TimerHandler};
+            use crate::timer::{TimerHandler, add_timer, cancel_timer, get_tick};
             use alloc::sync::Arc;
             use core::sync::atomic::{AtomicBool, Ordering};
 

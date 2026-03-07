@@ -15,17 +15,17 @@ use alloc::{
 use core::sync::atomic::Ordering;
 
 use crate::{
-    arch::{vm, Trapframe},
+    arch::{Trapframe, vm},
     early_initcall,
     fs::{
-        drivers::overlayfs::OverlayFS, FileSystemError, FileSystemErrorKind, SeekFrom, VfsManager,
+        FileSystemError, FileSystemErrorKind, SeekFrom, VfsManager, drivers::overlayfs::OverlayFS,
     },
     ipc::event::{Event, EventContent, EventPriority, ProcessControlType},
     register_abi,
     syscall::syscall_handler,
     task::elf_loader::{
-        analyze_and_load_elf_with_strategy, build_auxiliary_vector,
-        setup_auxiliary_vector_on_stack, ExecutionMode, LoadStrategy, LoadTarget,
+        ExecutionMode, LoadStrategy, LoadTarget, analyze_and_load_elf_with_strategy,
+        build_auxiliary_vector, setup_auxiliary_vector_on_stack,
     },
     vm::setup_user_stack,
 };
@@ -497,37 +497,43 @@ impl ScarletAbi {
 
         unsafe {
             let paddr = task
-                .vm_manager.translate_to_kva(frame_base)
+                .vm_manager
+                .translate_to_kva(frame_base)
                 .ok_or("Failed to translate signal frame address")?;
             *(paddr as *mut u32) = trampoline_instr_0;
             *((paddr as *mut u32).add(1)) = trampoline_instr_1;
 
             let paddr = task
-                .vm_manager.translate_to_kva(frame_base + 8)
+                .vm_manager
+                .translate_to_kva(frame_base + 8)
                 .ok_or("Failed to translate signal frame address")?;
             *(paddr as *mut usize) = subtype;
 
             let paddr = task
-                .vm_manager.translate_to_kva(frame_base + 16)
+                .vm_manager
+                .translate_to_kva(frame_base + 16)
                 .ok_or("Failed to translate signal frame address")?;
             *(paddr as *mut usize) = content_type;
 
             for i in 0..31 {
                 let paddr = task
-                    .vm_manager.translate_to_kva(frame_base + 24 + i * 8)
+                    .vm_manager
+                    .translate_to_kva(frame_base + 24 + i * 8)
                     .ok_or("Failed to translate signal frame address")?;
                 *(paddr as *mut usize) = trapframe.regs.reg[i];
             }
 
             // saved elr at frame_base + 24 + 248 = frame_base + 272
             let paddr = task
-                .vm_manager.translate_to_kva(frame_base + 272)
+                .vm_manager
+                .translate_to_kva(frame_base + 272)
                 .ok_or("Failed to translate signal frame address")?;
             *(paddr as *mut u64) = trapframe.elr;
 
             // saved sp at frame_base + 280
             let paddr = task
-                .vm_manager.translate_to_kva(frame_base + 280)
+                .vm_manager
+                .translate_to_kva(frame_base + 280)
                 .ok_or("Failed to translate signal frame address")?;
             *(paddr as *mut u64) = trapframe.sp;
         }
@@ -562,18 +568,21 @@ impl ScarletAbi {
         unsafe {
             for i in 0..31 {
                 let paddr = task
-                    .vm_manager.translate_to_kva(frame_base + 24 + i * 8)
+                    .vm_manager
+                    .translate_to_kva(frame_base + 24 + i * 8)
                     .ok_or("Failed to translate signal frame address")?;
                 trapframe.regs.reg[i] = *(paddr as *const usize);
             }
 
             let paddr = task
-                .vm_manager.translate_to_kva(frame_base + 272)
+                .vm_manager
+                .translate_to_kva(frame_base + 272)
                 .ok_or("Failed to translate signal frame address")?;
             trapframe.elr = *(paddr as *const u64);
 
             let paddr = task
-                .vm_manager.translate_to_kva(frame_base + 280)
+                .vm_manager
+                .translate_to_kva(frame_base + 280)
                 .ok_or("Failed to translate signal frame address")?;
             trapframe.sp = *(paddr as *const u64);
         }
@@ -871,7 +880,7 @@ impl AbiModule for ScarletAbi {
         elf_type: u16,
         target: crate::task::elf_loader::LoadTarget,
     ) -> Option<u64> {
-        use crate::task::elf_loader::{LoadTarget, ET_DYN};
+        use crate::task::elf_loader::{ET_DYN, LoadTarget};
 
         // Scarlet Native ABI uses standard Linux-style memory layout
         if elf_type == ET_DYN {

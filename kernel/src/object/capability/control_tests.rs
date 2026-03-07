@@ -5,15 +5,15 @@
 
 use crate::{
     device::{
+        Device,
         graphics::{
+            FramebufferConfig, GenericGraphicsDevice, PixelFormat,
             framebuffer_device::{
-                framebuffer_commands, FbFixScreenInfo, FbVarScreenInfo, FramebufferCharDevice,
+                FbFixScreenInfo, FbVarScreenInfo, FramebufferCharDevice, framebuffer_commands,
             },
             manager::GraphicsManager,
-            FramebufferConfig, GenericGraphicsDevice, PixelFormat,
         },
         manager::DeviceManager,
-        Device,
     },
     object::capability::ControlOps,
 };
@@ -38,7 +38,7 @@ mod tests {
         let fb_size = config.size();
         let fb_pages = (fb_size + 4095) / 4096;
         let fb_addr = crate::mem::page::allocate_raw_pages(fb_pages) as usize;
-        test_device.set_framebuffer_address(fb_addr);
+        test_device.set_framebuffer_address(crate::vm::addr::virt_to_phys(fb_addr));
 
         let shared_device: Arc<dyn Device> = Arc::new(test_device);
 
@@ -102,7 +102,7 @@ mod tests {
         let fb_size = config.size();
         let fb_pages = (fb_size + 4095) / 4096;
         let fb_addr = crate::mem::page::allocate_raw_pages(fb_pages) as usize;
-        test_device.set_framebuffer_address(fb_addr);
+        test_device.set_framebuffer_address(crate::vm::addr::virt_to_phys(fb_addr));
 
         let shared_device: Arc<dyn Device> = Arc::new(test_device);
 

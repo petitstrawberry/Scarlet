@@ -2,7 +2,7 @@ use super::super::*;
 use super::mock::MockTaskFileObject;
 use crate::fs::{FileType, SeekFrom};
 use crate::object::handle::HandleTable;
-use crate::task::{new_user_task, CloneFlags};
+use crate::task::{CloneFlags, new_user_task};
 use alloc::format;
 use alloc::string::ToString;
 use alloc::sync::Arc;

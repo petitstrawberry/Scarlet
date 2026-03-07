@@ -2,9 +2,8 @@
 //!
 //! Tests for ELF binary loading and execution, including integration with VFS manager for filesystem-based executable loading in isolated namespaces.
 
-use crate::fs::{drivers::tmpfs::TmpFS, FileType, SeekFrom, TmpFSParams, VfsManager};
+use crate::fs::{FileType, SeekFrom, TmpFSParams, VfsManager, drivers::tmpfs::TmpFS};
 use crate::task::new_user_task;
-use crate::vm::addr::phys_to_virt;
 
 use super::*;
 
@@ -223,9 +222,9 @@ fn test_load_elf() {
     // Load the ELF file into the task
     let entry_point = load_elf_into_task(file, &mut task).expect("Failed to load ELF file");
 
-    // Translate the entry point virtual address to a physical address
-    let paddr = task
-        .vm_manager.translate_to_kva(entry_point as usize)
+    let kaddr = task
+        .vm_manager
+        .translate_to_kva(entry_point as usize)
         .expect(
             format!(
                 "Failed to translate entry point address: {:#x}",
@@ -237,7 +236,7 @@ fn test_load_elf() {
     // Read the instruction at the entry point
     let instruction: u32;
     unsafe {
-        instruction = core::ptr::read(phys_to_virt(paddr) as *const u32);
+        instruction = core::ptr::read(kaddr as *const u32);
     }
 
     // Expected instruction at the entry point (e.g., a jump instruction)
@@ -407,14 +406,15 @@ fn test_load_elf_bss_zeroed() {
     // Verify that the .bss section is zeroed
     let bss_start = 0x1000; // Virtual address of .bss section (aligned to PAGE_SIZE)
     let bss_size = 0x2000; // Size of .bss section (2 * PAGE_SIZE)
-    let paddr = task
-        .vm_manager.translate_to_kva(bss_start)
+    let kaddr = task
+        .vm_manager
+        .translate_to_kva(bss_start)
         .expect("Failed to translate .bss start address");
 
     for i in 0..bss_size {
         let byte: u8;
         unsafe {
-            byte = core::ptr::read(phys_to_virt(paddr + i) as *const u8);
+            byte = core::ptr::read((kaddr + i) as *const u8);
         }
         assert_eq!(
             byte, 0,

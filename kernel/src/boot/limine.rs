@@ -1,20 +1,21 @@
+#![cfg(target_arch = "riscv64")]
 #![allow(dead_code)]
 
+use limine::BaseRevision;
 use limine::memory_map::{Entry, EntryType};
 use limine::paging;
 use limine::request::{
     BspHartidRequest, DeviceTreeBlobRequest, ExecutableAddressRequest, HhdmRequest,
     MemoryMapRequest, ModuleRequest, PagingModeRequest, RequestsEndMarker, RequestsStartMarker,
 };
-use limine::BaseRevision;
 
-use crate::device::fdt::{init_fdt, relocate_fdt, FdtManager};
+use crate::device::fdt::{FdtManager, init_fdt, relocate_fdt};
 use crate::environment::STACK_SIZE;
-use crate::mem::init_bss;
 use crate::mem::KERNEL_STACK;
+use crate::mem::init_bss;
 use crate::vm::addr::{init_limine_addressing, phys_to_virt, virt_to_phys};
 use crate::vm::vmem::MemoryArea;
-use crate::{start_kernel, BootInfo, DeviceSource};
+use crate::{BootInfo, DeviceSource, start_kernel};
 
 static mut EARLY_BOOTINFO: Option<BootInfo> = None;
 

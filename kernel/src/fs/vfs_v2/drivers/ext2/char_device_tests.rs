@@ -6,7 +6,7 @@
 #[cfg(test)]
 mod tests {
     use crate::{
-        device::{char::CharDevice, Device, DeviceType},
+        device::{Device, DeviceType, char::CharDevice},
         fs::{DeviceFileInfo, FileObject, FileType},
         object::capability::{ControlOps, MemoryMappingOps, Selectable},
     };

@@ -29,10 +29,11 @@ use hashbrown::HashMap;
 use spin::{Mutex, RwLock};
 
 use crate::device::{
+    DeviceType,
     graphics::{FramebufferConfig, GraphicsDevice},
     manager::{DeviceManager, SharedDevice},
-    DeviceType,
 };
+use crate::vm::addr::phys_to_virt;
 
 /// Framebuffer resource extracted from graphics devices
 #[derive(Debug)]
@@ -405,7 +406,7 @@ impl GraphicsManager {
 
         // Read byte from framebuffer memory
         unsafe {
-            let fb_ptr = fb_resource.physical_addr as *const u8;
+            let fb_ptr = phys_to_virt(fb_resource.physical_addr) as *const u8;
             Some(*fb_ptr.add(position))
         }
     }
@@ -437,7 +438,7 @@ impl GraphicsManager {
 
         // Write byte to framebuffer memory
         unsafe {
-            let fb_ptr = fb_resource.physical_addr as *mut u8;
+            let fb_ptr = phys_to_virt(fb_resource.physical_addr) as *mut u8;
             *fb_ptr.add(position) = byte;
         }
 
@@ -473,7 +474,7 @@ impl GraphicsManager {
         // NOTE: For QEMU+HVF, avoid memcpy-style accesses that may VM-exit as
         // EC_DATAABORT without ISV and abort the host (assert(isv)).
         unsafe {
-            let fb_ptr = fb_resource.physical_addr as *const u8;
+            let fb_ptr = phys_to_virt(fb_resource.physical_addr) as *const u8;
             let src = fb_ptr.add(position);
             for i in 0..bytes_to_read {
                 buffer[i] = core::ptr::read_volatile(src.add(i));
@@ -514,7 +515,7 @@ impl GraphicsManager {
         // Write bytes to framebuffer memory.
         // See note in read_framebuffer() about QEMU+HVF and ISV.
         unsafe {
-            let fb_ptr = fb_resource.physical_addr as *mut u8;
+            let fb_ptr = phys_to_virt(fb_resource.physical_addr) as *mut u8;
             let dst = fb_ptr.add(position);
             for i in 0..bytes_to_write {
                 core::ptr::write_volatile(dst.add(i), buffer[i]);
@@ -569,10 +570,10 @@ mod test_utils {
 mod tests {
     use super::*;
     use crate::device::{
-        graphics::{
-            manager::GraphicsManager, FramebufferConfig, GenericGraphicsDevice, PixelFormat,
-        },
         Device,
+        graphics::{
+            FramebufferConfig, GenericGraphicsDevice, PixelFormat, manager::GraphicsManager,
+        },
     };
     use alloc::{string::ToString, sync::Arc};
 
@@ -665,12 +666,16 @@ mod tests {
         let shared_device2: SharedDevice = Arc::new(device2);
 
         // Register both devices
-        assert!(manager
-            .register_framebuffer_from_device(1, shared_device1)
-            .is_ok());
-        assert!(manager
-            .register_framebuffer_from_device(2, shared_device2)
-            .is_ok());
+        assert!(
+            manager
+                .register_framebuffer_from_device(1, shared_device1)
+                .is_ok()
+        );
+        assert!(
+            manager
+                .register_framebuffer_from_device(2, shared_device2)
+                .is_ok()
+        );
 
         // Check registration
         assert_eq!(manager.get_framebuffer_count(), 2);

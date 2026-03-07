@@ -35,13 +35,14 @@ use alloc::{
 use core::any::Any;
 use spin::RwLock;
 
-use crate::device::{manager::DeviceManager, Device, DeviceType};
+use crate::device::{Device, DeviceType, manager::DeviceManager};
 use crate::object::capability::{ControlOps, StreamError, StreamOps};
 use crate::{
     driver_initcall,
     fs::{
-        get_fs_driver_manager, DeviceFileInfo, FileMetadata, FileObject, FilePermission,
-        FileSystemDriver, FileSystemError, FileSystemErrorKind, FileSystemType, FileType, SeekFrom,
+        DeviceFileInfo, FileMetadata, FileObject, FilePermission, FileSystemDriver,
+        FileSystemError, FileSystemErrorKind, FileSystemType, FileType, SeekFrom,
+        get_fs_driver_manager,
     },
     object::capability::MemoryMappingOps,
 };
@@ -979,7 +980,7 @@ driver_initcall!(register_driver);
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::device::{manager::DeviceManager, GenericDevice};
+    use crate::device::{GenericDevice, manager::DeviceManager};
     use alloc::sync::Arc;
 
     #[test_case]

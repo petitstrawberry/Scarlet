@@ -11,11 +11,11 @@ use alloc::{boxed::Box, format, string::ToString, sync::Arc, vec};
 use crate::{
     arch::io_mb,
     device::{
+        Device,
         manager::{DeviceManager, DriverPriority},
         platform::{
-            resource::PlatformDeviceResourceType, PlatformDeviceDriver, PlatformDeviceInfo,
+            PlatformDeviceDriver, PlatformDeviceInfo, resource::PlatformDeviceResourceType,
         },
-        Device,
     },
     driver_initcall,
     drivers::{

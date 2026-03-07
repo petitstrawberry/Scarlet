@@ -112,5 +112,9 @@ mcopy -i "$BOOT_IMAGE" "$LIMINE_SRC_DIR/BOOTRISCV64.EFI" ::/EFI/BOOT/BOOTRISCV64
 mcopy -i "$BOOT_IMAGE" "$CONFIG_PATH" ::/EFI/BOOT/limine.conf
 mcopy -i "$BOOT_IMAGE" "$KERNEL_ELF" ::/boot/kernel
 mcopy -i "$BOOT_IMAGE" "$INITRAMFS_PATH" ::/boot/initramfs-riscv64.cpio
+mcopy -i "$BOOT_IMAGE" - <<'EOF' ::/startup.nsh
+FS0:
+EFI\BOOT\BOOTRISCV64.EFI
+EOF
 
 echo "Created Limine RISC-V boot image: $BOOT_IMAGE"

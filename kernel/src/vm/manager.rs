@@ -1941,7 +1941,7 @@ mod tests {
         // For testing, we can't directly check MMU state, so we verify by translating the address
         let translated_addr = manager.translate_to_kva(0x1500);
         assert!(translated_addr.is_some());
-        assert_eq!(translated_addr.unwrap() & !(PAGE_SIZE - 1), 0x1000); // Should be page-aligned
+        assert_eq!(translated_addr.unwrap() & (PAGE_SIZE - 1), 0x500);
 
         // Test unmapping functionality by removing the memory map
         // This also unmaps from MMU due to our implementation

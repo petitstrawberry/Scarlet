@@ -1,13 +1,13 @@
 use crate::ipc::IpcError;
 use crate::object::capability::StreamError;
 use crate::{
-    abi::linux::riscv64::errno,
-    abi::linux::riscv64::fs::{IoVec, FD_CLOEXEC, O_NONBLOCK},
     abi::linux::riscv64::LinuxRiscv64Abi,
+    abi::linux::riscv64::errno,
+    abi::linux::riscv64::fs::{FD_CLOEXEC, IoVec, O_NONBLOCK},
     arch::Trapframe,
-    network::{local::LocalSocket, NetworkManager, SocketDomain, SocketProtocol, SocketType},
-    object::capability::selectable::Selectable,
+    network::{NetworkManager, SocketDomain, SocketProtocol, SocketType, local::LocalSocket},
     object::KernelObject,
+    object::capability::selectable::Selectable,
     sched::scheduler::get_scheduler,
     task::mytask,
 };
@@ -1496,29 +1496,29 @@ pub fn sys_sendto(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize
     };
 
     // Translate buffer pointer
-    let buf_paddr = match task.vm_manager.translate_to_kva(buf_ptr) {
+    let buf_kaddr = match task.vm_manager.translate_to_kva(buf_ptr) {
         Some(addr) => addr,
         None => return errno::to_result(errno::EFAULT),
     };
 
-    let data = unsafe { core::slice::from_raw_parts(buf_paddr as *const u8, len) };
+    let data = unsafe { core::slice::from_raw_parts(buf_kaddr as *const u8, len) };
 
     // Parse destination address if provided
     let dest_addr = if dest_addr_ptr != 0 && addrlen > 0 {
-        let addr_paddr = match task.vm_manager.translate_to_kva(dest_addr_ptr) {
+        let addr_kaddr = match task.vm_manager.translate_to_kva(dest_addr_ptr) {
             Some(addr) => addr,
             None => return errno::to_result(errno::EFAULT),
         };
 
         // Read address family
-        let sa_family = unsafe { *(addr_paddr as *const u16) };
+        let sa_family = unsafe { *(addr_kaddr as *const u16) };
 
         match sa_family {
             AF_INET_U16 => {
                 if addrlen < size_of::<SockaddrIn>() as u32 {
                     return errno::to_result(errno::EINVAL);
                 }
-                let sockaddr = unsafe { *(addr_paddr as *const SockaddrIn) };
+                let sockaddr = unsafe { *(addr_kaddr as *const SockaddrIn) };
                 let port = u16::from_be(sockaddr.sin_port);
                 let addr_bytes = sockaddr.sin_addr.to_be_bytes();
                 crate::network::SocketAddress::Inet(crate::network::Inet4SocketAddress::new(
@@ -1592,12 +1592,12 @@ pub fn sys_recvfrom(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usi
     };
 
     // Translate buffer pointer
-    let buf_paddr = match task.vm_manager.translate_to_kva(buf_ptr) {
+    let buf_kaddr = match task.vm_manager.translate_to_kva(buf_ptr) {
         Some(addr) => addr,
         None => return errno::to_result(errno::EFAULT),
     };
 
-    let buffer = unsafe { core::slice::from_raw_parts_mut(buf_paddr as *mut u8, len) };
+    let buffer = unsafe { core::slice::from_raw_parts_mut(buf_kaddr as *mut u8, len) };
 
     // Check for non-blocking mode
     let nonblocking = (flags & (MSG_DONTWAIT as u32)) != 0

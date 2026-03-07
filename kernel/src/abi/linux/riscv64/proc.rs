@@ -1,8 +1,8 @@
 use crate::{
     abi::linux::riscv64::LinuxRiscv64Abi,
-    arch::{get_cpu, Trapframe},
+    arch::{Trapframe, get_cpu},
     sched::scheduler::get_scheduler,
-    task::{mytask, CloneFlags},
+    task::{CloneFlags, mytask},
 };
 
 // /// VFS v2 helper function for path absolutization
@@ -252,11 +252,7 @@ pub fn sys_getpid(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usiz
     // Return TGID for Linux semantics; fallback to Task ID if unset
     let tgid = _abi.thread_state().tgid;
     trapframe.increment_pc_next(task);
-    if tgid != 0 {
-        tgid
-    } else {
-        task.get_id()
-    }
+    if tgid != 0 { tgid } else { task.get_id() }
 }
 
 pub fn sys_getppid(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
@@ -561,7 +557,7 @@ pub fn sys_clone(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize 
     let ret = match parent_task.clone_task(cflags) {
         Ok(mut child_task) => {
             child_task.vcpu.lock().iregs.reg[10] = 0; // a0 = 0 in child
-                                                      // If child_stack is provided, set child's user SP
+            // If child_stack is provided, set child's user SP
             if child_stack != 0 {
                 child_task.vcpu.lock().set_sp(child_stack);
             }
@@ -591,7 +587,8 @@ pub fn sys_clone(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize 
             // Handle parent TID store when CLONE_PARENT_SETTID is requested
             if (flags & CLONE_PARENT_SETTID) != 0 && !parent_tid_ptr.is_null() {
                 if let Some(paddr) = parent_task
-                    .vm_manager.translate_to_kva(parent_tid_ptr as usize)
+                    .vm_manager
+                    .translate_to_kva(parent_tid_ptr as usize)
                 {
                     unsafe {
                         *(paddr as *mut i32) = child_id as i32;
@@ -604,7 +601,8 @@ pub fn sys_clone(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize 
                 if let Some(paddr) = get_scheduler()
                     .get_task_by_id(child_id)
                     .unwrap()
-                    .vm_manager.translate_to_kva(child_tid_ptr as usize)
+                    .vm_manager
+                    .translate_to_kva(child_tid_ptr as usize)
                 {
                     unsafe {
                         *(paddr as *mut i32) = child_id as i32;
@@ -698,7 +696,7 @@ pub fn sys_setuid(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usiz
 /// - ENOSYS: unsupported operation (process groups)
 /// - EPERM: no current task context
 pub fn sys_wait4(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
-    use crate::task::{get_parent_waitpid_waker, WaitError};
+    use crate::task::{WaitError, get_parent_waitpid_waker};
 
     let task = match mytask() {
         Some(t) => t,

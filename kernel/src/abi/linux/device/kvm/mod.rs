@@ -17,9 +17,9 @@ use crate::device::manager::DeviceManager;
 use crate::device::{Device, DeviceType};
 use crate::hypervisor::memory::MemorySlotFlags;
 use crate::hypervisor::{VcpuRef, VmObject, VmRef};
+use crate::object::KernelObject;
 use crate::object::capability::selectable::{SelectWaitOutcome, Selectable};
 use crate::object::capability::{ControlOps, MemoryMappingOps};
-use crate::object::KernelObject;
 use crate::task::mytask;
 
 // ---------------------------------------------------------------------------
@@ -212,7 +212,8 @@ pub fn handle_vm_ioctl(
             };
 
             let host_phys = task
-                .vm_manager.translate_to_phys(region.userspace_addr as usize)
+                .vm_manager
+                .translate_to_phys(region.userspace_addr as usize)
                 .ok_or(())? as u64;
 
             vm.set_memory_region(

@@ -1,6 +1,6 @@
+use crate::fs::FileType;
 /// Advanced VFS v2 tests for complex scenarios
 use crate::fs::vfs_v2::{drivers::tmpfs::TmpFS, manager::VfsManager};
-use crate::fs::FileType;
 
 #[test_case]
 fn test_basic_bind_mount() {

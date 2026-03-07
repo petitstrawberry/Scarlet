@@ -486,7 +486,8 @@ pub fn sys_openat(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize
     let task = mytask().unwrap();
     let dirfd = trapframe.get_arg(0) as i32;
     let path_ptr = task
-        .vm_manager.translate_to_kva(trapframe.get_arg(1))
+        .vm_manager
+        .translate_to_kva(trapframe.get_arg(1))
         .unwrap() as *const u8;
     let flags = trapframe.get_arg(2) as i32;
 
@@ -793,7 +794,8 @@ pub fn sys_read(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
     let fd = trapframe.get_arg(0) as usize;
     let buf_ptr = task
-        .vm_manager.translate_to_kva(trapframe.get_arg(1))
+        .vm_manager
+        .translate_to_kva(trapframe.get_arg(1))
         .unwrap() as *mut u8;
     let count = trapframe.get_arg(2) as usize;
 
@@ -916,7 +918,8 @@ pub fn sys_write(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize 
     let task = mytask().unwrap();
     let fd = trapframe.get_arg(0) as usize;
     let buf_ptr = task
-        .vm_manager.translate_to_kva(trapframe.get_arg(1))
+        .vm_manager
+        .translate_to_kva(trapframe.get_arg(1))
         .unwrap() as *const u8;
     let count = trapframe.get_arg(2) as usize;
 
@@ -1424,10 +1427,12 @@ pub fn sys_newfstatat(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> u
     let task = mytask().unwrap();
     let dirfd = trapframe.get_arg(0) as i32;
     let path_ptr = task
-        .vm_manager.translate_to_kva(trapframe.get_arg(1))
+        .vm_manager
+        .translate_to_kva(trapframe.get_arg(1))
         .unwrap() as *const u8;
     let stat_ptr = task
-        .vm_manager.translate_to_kva(trapframe.get_arg(2))
+        .vm_manager
+        .translate_to_kva(trapframe.get_arg(2))
         .unwrap() as *mut u8;
     let flags = trapframe.get_arg(3) as i32;
 
@@ -1692,7 +1697,8 @@ pub fn sys_mkdir(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize
     trapframe.increment_pc_next(task);
 
     let path_ptr = task
-        .vm_manager.translate_to_kva(trapframe.get_arg(0))
+        .vm_manager
+        .translate_to_kva(trapframe.get_arg(0))
         .unwrap() as *const u8;
     let path = match get_path_str_v2(path_ptr) {
         Ok(p) => to_absolute_path_v2(&task, &p).unwrap(),
@@ -1713,7 +1719,8 @@ pub fn sys_unlink(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usiz
     trapframe.increment_pc_next(task);
 
     let path_ptr = task
-        .vm_manager.translate_to_kva(trapframe.get_arg(0))
+        .vm_manager
+        .translate_to_kva(trapframe.get_arg(0))
         .unwrap() as *const u8;
     let path = match cstring_to_string(path_ptr, MAX_PATH_LENGTH) {
         Ok((p, _)) => to_absolute_path_v2(&task, &p).unwrap(),
@@ -1734,10 +1741,12 @@ pub fn sys_link(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize 
     trapframe.increment_pc_next(task);
 
     let src_path_ptr = task
-        .vm_manager.translate_to_kva(trapframe.get_arg(0))
+        .vm_manager
+        .translate_to_kva(trapframe.get_arg(0))
         .unwrap() as *const u8;
     let dst_path_ptr = task
-        .vm_manager.translate_to_kva(trapframe.get_arg(1))
+        .vm_manager
+        .translate_to_kva(trapframe.get_arg(1))
         .unwrap() as *const u8;
 
     let src_path = match cstring_to_string(src_path_ptr, MAX_PATH_LENGTH) {
@@ -2598,7 +2607,8 @@ pub fn sys_getdents64(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> u
     let task = mytask().unwrap();
     let fd = trapframe.get_arg(0) as usize;
     let buf_ptr = task
-        .vm_manager.translate_to_kva(trapframe.get_arg(1))
+        .vm_manager
+        .translate_to_kva(trapframe.get_arg(1))
         .unwrap() as *mut u8;
     let buf_size = trapframe.get_arg(2) as usize;
     trapframe.increment_pc_next(task);

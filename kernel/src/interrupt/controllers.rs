@@ -65,7 +65,7 @@ pub trait ExternalInterruptController: Send + Sync {
 
     /// Enable a specific interrupt for a CPU
     fn enable_interrupt(&mut self, interrupt_id: InterruptId, cpu_id: CpuId)
-        -> InterruptResult<()>;
+    -> InterruptResult<()>;
 
     /// Disable a specific interrupt for a CPU
     fn disable_interrupt(

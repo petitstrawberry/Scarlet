@@ -24,10 +24,10 @@ use crate::library::std::string::{
     parse_c_string_from_userspace, parse_string_array_from_userspace,
 };
 
-use crate::arch::{get_cpu, Trapframe};
+use crate::arch::{Trapframe, get_cpu};
 use crate::sched::scheduler::get_scheduler;
 use crate::task::{
-    get_parent_waitpid_waker, get_waitpid_waker, CloneFlags, CloneFlagsDef, WaitError,
+    CloneFlags, CloneFlagsDef, WaitError, get_parent_waitpid_waker, get_waitpid_waker,
 };
 use crate::timer::ns_to_ticks;
 
@@ -420,7 +420,8 @@ pub fn sys_waitpid(trapframe: &mut Trapframe) -> usize {
                         // Child has exited, return the status
                         if status_ptr != core::ptr::null_mut() {
                             let status_ptr = task
-                                .vm_manager.translate_to_kva(status_ptr as usize)
+                                .vm_manager
+                                .translate_to_kva(status_ptr as usize)
                                 .unwrap() as *mut i32;
                             unsafe {
                                 *status_ptr = status;
@@ -477,7 +478,8 @@ pub fn sys_waitpid(trapframe: &mut Trapframe) -> usize {
                 // Child has exited, return the status
                 if status_ptr != core::ptr::null_mut() {
                     let status_ptr = task
-                        .vm_manager.translate_to_kva(status_ptr as usize)
+                        .vm_manager
+                        .translate_to_kva(status_ptr as usize)
                         .unwrap() as *mut i32;
                     unsafe {
                         *status_ptr = status;

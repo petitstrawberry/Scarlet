@@ -11,13 +11,13 @@ use crate::{
     device::{
         manager::{DeviceManager, DriverPriority},
         platform::{
-            resource::PlatformDeviceResourceType, PlatformDeviceDriver, PlatformDeviceInfo,
+            PlatformDeviceDriver, PlatformDeviceInfo, resource::PlatformDeviceResourceType,
         },
     },
     early_initcall,
     interrupt::{
-        controllers::ExternalInterruptController, CpuId, InterruptError, InterruptId,
-        InterruptManager, InterruptResult, Priority,
+        CpuId, InterruptError, InterruptId, InterruptManager, InterruptResult, Priority,
+        controllers::ExternalInterruptController,
     },
 };
 

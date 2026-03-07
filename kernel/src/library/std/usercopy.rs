@@ -23,13 +23,14 @@ pub fn copy_from_user(
         let current_vaddr = user_addr + copied;
         let page_off = current_vaddr & (PAGE_SIZE - 1);
         let chunk_len = core::cmp::min(dst.len() - copied, PAGE_SIZE - page_off);
-        let paddr = task
-            .vm_manager.translate_to_kva(current_vaddr)
+        let kaddr = task
+            .vm_manager
+            .translate_to_kva(current_vaddr)
             .ok_or(UserCopyError::TranslationError)?;
 
         unsafe {
             core::ptr::copy_nonoverlapping(
-                paddr as *const u8,
+                kaddr as *const u8,
                 dst[copied..copied + chunk_len].as_mut_ptr(),
                 chunk_len,
             );
@@ -58,14 +59,15 @@ pub fn copy_to_user(
         let current_vaddr = user_addr + copied;
         let page_off = current_vaddr & (PAGE_SIZE - 1);
         let chunk_len = core::cmp::min(src.len() - copied, PAGE_SIZE - page_off);
-        let paddr = task
-            .vm_manager.translate_to_kva(current_vaddr)
+        let kaddr = task
+            .vm_manager
+            .translate_to_kva(current_vaddr)
             .ok_or(UserCopyError::TranslationError)?;
 
         unsafe {
             core::ptr::copy_nonoverlapping(
                 src[copied..copied + chunk_len].as_ptr(),
-                paddr as *mut u8,
+                kaddr as *mut u8,
                 chunk_len,
             );
         }

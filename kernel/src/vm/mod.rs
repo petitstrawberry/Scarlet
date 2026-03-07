@@ -7,19 +7,19 @@ pub mod addr;
 pub mod manager;
 pub mod vmem;
 
-pub use addr::{phys_to_virt, virt_to_phys, PhysAddr, VirtAddr};
+pub use addr::{PhysAddr, VirtAddr, phys_to_virt, virt_to_phys};
 
 use manager::VirtualMemoryManager;
 use vmem::MemoryArea;
 use vmem::VirtualMemoryMap;
 use vmem::VirtualMemoryPermission;
 
+use crate::arch::Arch;
 use crate::arch::get_device_memory_areas;
 use crate::arch::get_kernel_trapvector_paddr;
 use crate::arch::set_trapvector;
 use crate::arch::vm::alloc_virtual_address_space;
 use crate::arch::vm::get_root_pagetable;
-use crate::arch::Arch;
 use crate::early_println;
 use crate::environment::KERNEL_VM_STACK_SIZE;
 use crate::environment::KERNEL_VM_STACK_START;
@@ -27,8 +27,8 @@ use crate::environment::MAX_NUM_CPUS;
 use crate::environment::PAGE_SIZE;
 use crate::environment::USER_STACK_END;
 use crate::environment::{
-    KERNEL_KSTACK_REGION_END, KERNEL_KSTACK_REGION_START, KERNEL_KSTACK_SLOTS,
-    KERNEL_KSTACK_SLOT_SIZE, TASK_KERNEL_STACK_SIZE,
+    KERNEL_KSTACK_REGION_END, KERNEL_KSTACK_REGION_START, KERNEL_KSTACK_SLOT_SIZE,
+    KERNEL_KSTACK_SLOTS, TASK_KERNEL_STACK_SIZE,
 };
 use crate::sched::scheduler::get_scheduler;
 use crate::task::Task;
@@ -83,9 +83,13 @@ pub fn kernel_vm_init(
         start: addr::kernel_virt_to_phys(kernel_area.start),
         end: addr::kernel_virt_to_phys(kernel_area.end),
     };
+    let direct_map_phys_area = MemoryArea {
+        start: align_down(direct_map_area.start, PAGE_SIZE),
+        end: align_up(direct_map_area.end + 1, PAGE_SIZE) - 1,
+    };
     let hhdm_area = MemoryArea {
-        start: phys_to_virt(direct_map_area.start),
-        end: phys_to_virt(direct_map_area.end),
+        start: phys_to_virt(direct_map_phys_area.start),
+        end: phys_to_virt(direct_map_phys_area.end),
     };
 
     KERNEL_AREA.call_once(|| kernel_area);
@@ -112,7 +116,7 @@ pub fn kernel_vm_init(
 
     let hhdm_map = VirtualMemoryMap {
         vmarea: hhdm_area,
-        pmarea: direct_map_area,
+        pmarea: direct_map_phys_area,
         permissions: VirtualMemoryPermission::Read as usize
             | VirtualMemoryPermission::Write as usize,
         is_shared: true,
@@ -144,14 +148,16 @@ pub fn kernel_vm_init(
             is_shared: true,
             owner: None,
         };
-        get_kernel_vm_manager()
-            .add_memory_map(initramfs_map.clone())
-            .map_err(|e| panic!("Failed to add initramfs memory map: {}", e))
-            .unwrap();
-        root_page_table
-            .map_memory_area(asid, initramfs_map, true, true)
-            .map_err(|e| panic!("Failed to map initramfs memory area: {}", e))
-            .unwrap();
+        if initramfs_hhdm_area.start < hhdm_area.start || initramfs_hhdm_area.end > hhdm_area.end {
+            get_kernel_vm_manager()
+                .add_memory_map(initramfs_map.clone())
+                .map_err(|e| panic!("Failed to add initramfs memory map: {}", e))
+                .unwrap();
+            root_page_table
+                .map_memory_area(asid, initramfs_map, true, true)
+                .map_err(|e| panic!("Failed to map initramfs memory area: {}", e))
+                .unwrap();
+        }
     }
 
     // Map device memory areas (architecture-specific)

@@ -1,9 +1,9 @@
 use crate::{
-    arch::{get_cpu, Trapframe},
+    arch::{Trapframe, get_cpu},
     fs::FileType,
     library::std::string::cstring_to_string,
     sched::scheduler::get_scheduler,
-    task::{get_parent_waitpid_waker, mytask, CloneFlags, WaitError},
+    task::{CloneFlags, WaitError, get_parent_waitpid_waker, mytask},
 };
 use alloc::string::{String, ToString};
 
@@ -100,7 +100,8 @@ pub fn sys_wait(
                     // Child has exited, return the status
                     if status_ptr != core::ptr::null_mut() {
                         let status_ptr = task
-                            .vm_manager.translate_to_kva(status_ptr as usize)
+                            .vm_manager
+                            .translate_to_kva(status_ptr as usize)
                             .unwrap() as *mut i32;
                         unsafe {
                             *status_ptr = status;
@@ -175,7 +176,8 @@ pub fn sys_chdir(
     trapframe.increment_pc_next(task);
 
     let path_ptr = task
-        .vm_manager.translate_to_kva(trapframe.get_arg(0) as usize)
+        .vm_manager
+        .translate_to_kva(trapframe.get_arg(0) as usize)
         .unwrap() as *const u8;
     let path = match get_path_str_v2(path_ptr) {
         Ok(p) => match to_absolute_path_v2(&task, &p) {

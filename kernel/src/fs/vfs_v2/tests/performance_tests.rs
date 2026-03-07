@@ -4,8 +4,8 @@
 use alloc::{format, string::String, sync::Arc, vec::Vec};
 
 use crate::fs::{
-    vfs_v2::{drivers::tmpfs::TmpFS, manager::VfsManager},
     FileType,
+    vfs_v2::{drivers::tmpfs::TmpFS, manager::VfsManager},
 };
 
 /// Test basic performance - multiple file creation and lookup

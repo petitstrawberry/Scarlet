@@ -16,11 +16,11 @@ use mmu::PageTable;
 use spin::Once;
 use spin::RwLock;
 
-use crate::mem::page::{allocate_raw_pages, allocate_raw_pages_aligned, free_raw_pages, Page};
+use crate::mem::page::{Page, allocate_raw_pages, allocate_raw_pages_aligned, free_raw_pages};
 
+use crate::arch::Arch;
 use crate::arch::get_cpu;
 use crate::arch::get_user_trapvector_paddr;
-use crate::arch::Arch;
 use crate::early_println;
 use crate::environment::{KERNEL_KSTACK_REGION_END, KERNEL_KSTACK_REGION_START, TRAMPOLINE_VA_END};
 use crate::vm::addr::kernel_virt_to_phys;

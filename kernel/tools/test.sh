@@ -26,6 +26,9 @@ done
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR" && cd .. && cd .. && pwd)"
 INITRAMFS_PATH="$PROJECT_ROOT/mkfs/dist/initramfs-riscv64.cpio"
+BOOT_IMAGE="$PROJECT_ROOT/mkfs/dist/limine-riscv64-boot.img"
+EFI_CODE="/usr/share/qemu-efi-riscv64/RISCV_VIRT_CODE.fd"
+EFI_VARS="$PROJECT_ROOT/mkfs/dist/RISCV_VIRT_VARS.fd"
 
 echo "Test runner starting..."
 
@@ -51,6 +54,7 @@ if [ -n "$KERNEL_BINARY" ]; then
     LINK_PATH="$(dirname "$KERNEL_BINARY")/../test-kernel"
     ln -sf "$KERNEL_BINARY" "$LINK_PATH"
     echo "Created symbolic link: $LINK_PATH -> $KERNEL_BINARY"
+    KERNEL_ELF="$KERNEL_BINARY" sh "$PROJECT_ROOT/mkfs/make_limine_riscv64_image.sh"
 fi
 
 if [ "$DEBUG_MODE" = true ]; then
@@ -83,16 +87,34 @@ if [ -n "$QEMU_DEBUG_FLAGS" ]; then
     QEMU_DEBUG_ARGS="-d $QEMU_DEBUG_FLAGS -D $QEMU_DEBUG_LOG"
 fi
 
+if [ ! -f "$BOOT_IMAGE" ]; then
+    echo "Error: Limine boot image not found at $BOOT_IMAGE"
+    exit 1
+fi
+
+if [ ! -f "$EFI_CODE" ]; then
+    echo "Error: RISC-V EFI firmware not found at $EFI_CODE"
+    exit 1
+fi
+
+if [ ! -f "$EFI_VARS" ]; then
+    cp /usr/share/qemu-efi-riscv64/RISCV_VIRT_VARS.fd "$EFI_VARS"
+fi
+
 if [ "$DEBUG_MODE" = true ]; then
     # Debug mode: start with gdb server
     qemu-system-riscv64 \
-        -machine virt \
+        -machine virt,acpi=off \
         -bios default \
         -m 4G \
         -nographic \
         -serial mon:stdio \
         --no-reboot \
+        -drive if=pflash,format=raw,unit=0,file="$EFI_CODE",readonly=on \
+        -drive if=pflash,format=raw,unit=1,file="$EFI_VARS" \
         -global virtio-mmio.force-legacy=false \
+        -drive id=boot,file="$BOOT_IMAGE",format=raw,if=none \
+        -device virtio-blk-pci,drive=boot,bus=pcie.0 \
         -drive id=x0,file="$KERNEL_DIR/fat32-test.img",format=raw,if=none \
         -device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
         -drive id=x1,file="$KERNEL_DIR/ext2-test.img",format=raw,if=none \
@@ -108,22 +130,24 @@ if [ "$DEBUG_MODE" = true ]; then
         -device virtio-keyboard-device,bus=virtio-mmio-bus.6 \
         -device virtio-mouse-device,bus=virtio-mmio-bus.7 \
         -netdev user,id=pci-net0 \
-        -device virtio-net-pci,netdev=pci-net0,mac=52:54:00:AB:CD:EF \
-        -initrd "$INITRAMFS_PATH" \
+        -device virtio-net-pci,netdev=pci-net0,mac=52:54:00:AB:CD:EF,bus=pcie.0 \
         -gdb tcp::12345 -S \
         $QEMU_DEBUG_ARGS \
-        -kernel "$KERNEL_BINARY" | tee "$TEMP_OUTPUT"
+        | tee "$TEMP_OUTPUT"
 else
     # Normal test mode
     qemu-system-riscv64 \
-        -machine virt \
-        -cpu rv64,v=true,vlen=256 \
+        -machine virt,acpi=off \
         -bios default \
         -m 4G \
         -nographic \
         -serial mon:stdio \
         --no-reboot \
+        -drive if=pflash,format=raw,unit=0,file="$EFI_CODE",readonly=on \
+        -drive if=pflash,format=raw,unit=1,file="$EFI_VARS" \
         -global virtio-mmio.force-legacy=false \
+        -drive id=boot,file="$BOOT_IMAGE",format=raw,if=none \
+        -device virtio-blk-pci,drive=boot,bus=pcie.0 \
         -drive id=x0,file="$KERNEL_DIR/fat32-test.img",format=raw,if=none \
         -device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
         -drive id=x1,file="$KERNEL_DIR/ext2-test.img",format=raw,if=none \
@@ -139,10 +163,9 @@ else
         -device virtio-keyboard-device,bus=virtio-mmio-bus.6 \
         -device virtio-mouse-device,bus=virtio-mmio-bus.7 \
         -netdev user,id=pci-net0 \
-        -device virtio-net-pci,netdev=pci-net0,mac=52:54:00:AB:CD:EF \
-        -initrd "$INITRAMFS_PATH" \
+        -device virtio-net-pci,netdev=pci-net0,mac=52:54:00:AB:CD:EF,bus=pcie.0 \
         $QEMU_DEBUG_ARGS \
-        -kernel "$KERNEL_BINARY" | tee "$TEMP_OUTPUT"
+        | tee "$TEMP_OUTPUT"
 fi
 
 # Capture QEMU exit code

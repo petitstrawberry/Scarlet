@@ -32,18 +32,18 @@ use alloc::{
 };
 use core::{any::Any, mem};
 use hashbrown::HashMap;
-use spin::{rwlock::RwLock, Mutex};
+use spin::{Mutex, rwlock::RwLock};
 
 use crate::{
+    DeviceManager,
     device::block::BlockDevice,
     driver_initcall,
     fs::{
-        get_fs_driver_manager, params::FileSystemParams, FileObject, FileSystemError,
-        FileSystemErrorKind, FileType, SocketFileInfo,
+        FileObject, FileSystemError, FileSystemErrorKind, FileType, SocketFileInfo,
+        get_fs_driver_manager, params::FileSystemParams,
     },
     profile_scope,
     task::mytask,
-    DeviceManager,
 };
 
 use super::super::{

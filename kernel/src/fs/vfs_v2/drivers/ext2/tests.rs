@@ -13,8 +13,8 @@ use crate::{
     drivers::block::virtio_blk::VirtioBlockDevice,
     early_println,
     fs::{
-        get_fs_driver_manager, FileSystemError, FileSystemErrorKind, FileSystemType, FileType,
-        SocketFileInfo,
+        FileSystemError, FileSystemErrorKind, FileSystemType, FileType, SocketFileInfo,
+        get_fs_driver_manager,
     },
     object::capability::StreamOps,
 };

@@ -299,7 +299,7 @@ use crate::{
     interrupt::InterruptManager,
 };
 use arch::get_cpu;
-use core::sync::atomic::{fence, Ordering};
+use core::sync::atomic::{Ordering, fence};
 use mem::allocator::{add_heap_region, init_heap};
 use sched::scheduler::get_scheduler;
 use task::new_user_task;

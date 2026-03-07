@@ -14,7 +14,7 @@ use core::arch::{asm, naked_asm};
 use super::exception::arch_exception_handler;
 use super::interrupt::arch_irq_handler;
 use crate::arch::{
-    get_current_cpu_id, get_kernel_trapvector_paddr, set_arch, set_trapvector, Trapframe,
+    Trapframe, get_current_cpu_id, get_kernel_trapvector_paddr, set_arch, set_trapvector,
 };
 use crate::vm::get_trampoline_trap_vector;
 

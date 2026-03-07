@@ -40,8 +40,8 @@ use crate::object::capability::{MemoryMappingOps, Selectable};
 use crate::vm::addr::virt_to_phys;
 use crate::{
     device::block::{
-        request::{BlockIORequest, BlockIORequestType, BlockIOResult},
         BlockDevice,
+        request::{BlockIORequest, BlockIORequestType, BlockIOResult},
     },
     drivers::virtio::{
         device::VirtioDevice,
@@ -53,7 +53,7 @@ use crate::{
 // VirtIO Block Request Type
 const VIRTIO_BLK_T_IN: u32 = 0; // Read
 const VIRTIO_BLK_T_OUT: u32 = 1; // Write
-                                 // const VIRTIO_BLK_T_FLUSH: u32 = 4;  // Flush
+// const VIRTIO_BLK_T_FLUSH: u32 = 4;  // Flush
 
 // VirtIO Block Status Codes
 const VIRTIO_BLK_S_OK: u8 = 0;
@@ -238,7 +238,8 @@ impl VirtioBlockDevice {
         };
 
         // Set up header descriptor
-        let header_phys = crate::vm::get_kernel_vm_manager().translate_to_phys(header_ptr as usize)
+        let header_phys = crate::vm::get_kernel_vm_manager()
+            .translate_to_phys(header_ptr as usize)
             .ok_or("Failed to translate header vaddr")?;
         virtqueues[0].desc[header_desc].addr = header_phys as u64;
         virtqueues[0].desc[header_desc].len = mem::size_of::<VirtioBlkReqHeader>() as u32;
@@ -264,7 +265,8 @@ impl VirtioBlockDevice {
         virtqueues[0].desc[data_desc].next = status_desc as u16;
 
         // Set up status descriptor
-        let status_phys = crate::vm::get_kernel_vm_manager().translate_to_phys(status_ptr as usize)
+        let status_phys = crate::vm::get_kernel_vm_manager()
+            .translate_to_phys(status_ptr as usize)
             .ok_or("Failed to translate status vaddr")?;
         virtqueues[0].desc[status_desc].addr = status_phys as u64;
         virtqueues[0].desc[status_desc].len = 1;
@@ -472,7 +474,8 @@ impl VirtioBlockDevice {
                 virtqueues[0].alloc_desc(),
             ) {
                 // Set up descriptors
-                let header_phys = match crate::vm::get_kernel_vm_manager().translate_to_phys(header_ptr as usize)
+                let header_phys = match crate::vm::get_kernel_vm_manager()
+                    .translate_to_phys(header_ptr as usize)
                 {
                     Some(phys) => phys,
                     None => {

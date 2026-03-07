@@ -1,6 +1,6 @@
 //! AArch64 interrupt trap handling
 
-use crate::arch::{get_cpu, Trapframe};
+use crate::arch::{Trapframe, get_cpu};
 use crate::interrupt::InterruptManager;
 
 /// Handle an IRQ taken at EL1.

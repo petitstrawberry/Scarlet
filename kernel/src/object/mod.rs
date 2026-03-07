@@ -8,11 +8,11 @@ pub mod handle;
 pub mod introspection;
 
 use crate::fs::FileObject;
+use crate::ipc::StreamIpcOps;
 use crate::ipc::counter::{Counter, CounterObject};
 use crate::ipc::event::{EventChannelObject, EventSubscriptionObject};
 use crate::ipc::pipe::PipeObject;
 use crate::ipc::shared_memory::SharedMemoryObject;
-use crate::ipc::StreamIpcOps;
 use alloc::sync::Arc;
 use capability::{CloneOps, ControlOps, MemoryMappingOps, Selectable, StreamOps};
 

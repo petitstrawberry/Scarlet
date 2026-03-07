@@ -11,16 +11,16 @@ use spin::{Mutex, RwLock};
 
 use crate::{
     device::{
-        graphics::{FramebufferConfig, GraphicsDevice, PixelFormat},
         Device, DeviceType,
+        graphics::{FramebufferConfig, GraphicsDevice, PixelFormat},
     },
     drivers::virtio::{
         device::VirtioDevice,
         queue::{DescriptorFlag, VirtQueue},
     },
-    mem::page::{allocate_raw_pages, ContiguousPages, Page},
+    mem::page::{ContiguousPages, Page, allocate_raw_pages},
     object::capability::{ControlOps, MemoryMappingOps, Selectable},
-    timer::{add_timer, get_tick, ms_to_ticks, TimerHandler},
+    timer::{TimerHandler, add_timer, get_tick, ms_to_ticks},
     vm::addr::virt_to_phys,
 };
 use core::ptr;
@@ -242,7 +242,8 @@ impl VirtioGpuDeviceCore {
         let cmd_desc_ptr =
             &mut control_queue.desc[cmd_desc] as *mut crate::drivers::virtio::queue::Descriptor;
         let cmd_virt_addr = cmd as *const T as usize;
-        let cmd_phys_addr = crate::vm::get_kernel_vm_manager().translate_to_phys(cmd_virt_addr)
+        let cmd_phys_addr = crate::vm::get_kernel_vm_manager()
+            .translate_to_phys(cmd_virt_addr)
             .ok_or("Failed to translate cmd vaddr to paddr")?;
         unsafe {
             core::ptr::write_volatile(&mut (*cmd_desc_ptr).addr, cmd_phys_addr as u64);
@@ -255,7 +256,8 @@ impl VirtioGpuDeviceCore {
         let resp_desc_ptr =
             &mut control_queue.desc[resp_desc] as *mut crate::drivers::virtio::queue::Descriptor;
         let resp_virt_addr = resp_buffer.as_mut_ptr() as usize;
-        let resp_phys_addr = crate::vm::get_kernel_vm_manager().translate_to_phys(resp_virt_addr)
+        let resp_phys_addr = crate::vm::get_kernel_vm_manager()
+            .translate_to_phys(resp_virt_addr)
             .ok_or("Failed to translate resp_buffer vaddr to paddr")?;
         unsafe {
             core::ptr::write_volatile(&mut (*resp_desc_ptr).addr, resp_phys_addr as u64);
@@ -436,7 +438,7 @@ impl VirtioGpuDeviceCore {
         let fb_addr = fb_alloc.as_paddr();
         self.framebuffer_alloc.write().replace(fb_alloc);
         self.attach_backing_to_resource(resource_id, fb_addr, fb_size)?; // Attach backing memory to the resource
-                                                                         // Set scanout to use this framebuffer
+        // Set scanout to use this framebuffer
         let scanout_cmd = VirtioGpuSetScanout {
             hdr: VirtioGpuCtrlHdr {
                 hdr_type: VIRTIO_GPU_CMD_SET_SCANOUT,
@@ -880,7 +882,7 @@ mod tests {
 
         // Write some test pattern to framebuffer
         unsafe {
-            let fb_ptr = fb_addr as *mut u32;
+            let fb_ptr = crate::vm::addr::phys_to_virt(fb_addr) as *mut u32;
             let pixel_count = (config.width * config.height) as usize;
 
             // Fill with a gradient pattern
@@ -917,7 +919,7 @@ mod tests {
 
         // Verify some pixels were written correctly
         unsafe {
-            let fb_ptr = fb_addr as *mut u32;
+            let fb_ptr = crate::vm::addr::phys_to_virt(fb_addr) as *mut u32;
 
             // Check top-left corner (should be mostly blue)
             let top_left = *fb_ptr;
@@ -950,7 +952,7 @@ mod tests {
         let set_pixel = |x: u32, y: u32, color: u32| {
             if x < config.width && y < config.height {
                 unsafe {
-                    let fb_ptr = fb_addr as *mut u32;
+                    let fb_ptr = crate::vm::addr::phys_to_virt(fb_addr) as *mut u32;
                     let pixel_index = (y * config.width + x) as usize;
                     *fb_ptr.add(pixel_index) = color;
                 }
@@ -981,7 +983,7 @@ mod tests {
 
         // Verify some of the drawn pixels
         unsafe {
-            let fb_ptr = fb_addr as *mut u32;
+            let fb_ptr = crate::vm::addr::phys_to_virt(fb_addr) as *mut u32;
 
             // Check red line
             let red_pixel_index = (100 * config.width + 50) as usize;
@@ -1017,7 +1019,7 @@ mod tests {
                     let py = y + dy;
                     if px < config.width && py < config.height {
                         unsafe {
-                            let fb_ptr = fb_addr as *mut u32;
+                            let fb_ptr = crate::vm::addr::phys_to_virt(fb_addr) as *mut u32;
                             let pixel_index = (py * config.width + px) as usize;
                             *fb_ptr.add(pixel_index) = color;
                         }
@@ -1028,7 +1030,7 @@ mod tests {
 
         // Clear framebuffer with black
         unsafe {
-            let fb_ptr = fb_addr as *mut u32;
+            let fb_ptr = crate::vm::addr::phys_to_virt(fb_addr) as *mut u32;
             let pixel_count = (config.width * config.height) as usize;
             for i in 0..pixel_count {
                 *fb_ptr.add(i) = 0xFF000000; // Black with full alpha
@@ -1047,7 +1049,7 @@ mod tests {
 
         // Verify the rectangles were drawn correctly
         unsafe {
-            let fb_ptr = fb_addr as *mut u32;
+            let fb_ptr = crate::vm::addr::phys_to_virt(fb_addr) as *mut u32;
 
             // Check red rectangle center
             let red_center_index = ((50 + 37) * config.width + (50 + 50)) as usize;
@@ -1089,7 +1091,7 @@ mod tests {
                     // Top edge
                     if y < config.height {
                         unsafe {
-                            let fb_ptr = fb_addr as *mut u32;
+                            let fb_ptr = crate::vm::addr::phys_to_virt(fb_addr) as *mut u32;
                             let pixel_index = (y * config.width + px) as usize;
                             *fb_ptr.add(pixel_index) = color;
                         }
@@ -1098,7 +1100,7 @@ mod tests {
                     let bottom_y = y + height - 1;
                     if bottom_y < config.height {
                         unsafe {
-                            let fb_ptr = fb_addr as *mut u32;
+                            let fb_ptr = crate::vm::addr::phys_to_virt(fb_addr) as *mut u32;
                             let pixel_index = (bottom_y * config.width + px) as usize;
                             *fb_ptr.add(pixel_index) = color;
                         }
@@ -1113,7 +1115,7 @@ mod tests {
                     // Left edge
                     if x < config.width {
                         unsafe {
-                            let fb_ptr = fb_addr as *mut u32;
+                            let fb_ptr = crate::vm::addr::phys_to_virt(fb_addr) as *mut u32;
                             let pixel_index = (py * config.width + x) as usize;
                             *fb_ptr.add(pixel_index) = color;
                         }
@@ -1122,7 +1124,7 @@ mod tests {
                     let right_x = x + width - 1;
                     if right_x < config.width {
                         unsafe {
-                            let fb_ptr = fb_addr as *mut u32;
+                            let fb_ptr = crate::vm::addr::phys_to_virt(fb_addr) as *mut u32;
                             let pixel_index = (py * config.width + right_x) as usize;
                             *fb_ptr.add(pixel_index) = color;
                         }
@@ -1133,7 +1135,7 @@ mod tests {
 
         // Clear framebuffer
         unsafe {
-            let fb_ptr = fb_addr as *mut u32;
+            let fb_ptr = crate::vm::addr::phys_to_virt(fb_addr) as *mut u32;
             let pixel_count = (config.width * config.height) as usize;
             for i in 0..pixel_count {
                 *fb_ptr.add(i) = 0xFF000000; // Black
@@ -1151,7 +1153,7 @@ mod tests {
 
         // Verify borders
         unsafe {
-            let fb_ptr = fb_addr as *mut u32;
+            let fb_ptr = crate::vm::addr::phys_to_virt(fb_addr) as *mut u32;
 
             // Check red border corners
             let top_left_red = *fb_ptr.add((10 * config.width + 10) as usize);
@@ -1185,7 +1187,7 @@ mod tests {
 
         // Test various pixel format interpretations
         unsafe {
-            let fb_ptr = fb_addr as *mut u32;
+            let fb_ptr = crate::vm::addr::phys_to_virt(fb_addr) as *mut u32;
 
             // Test pure colors in BGRA format
             let test_colors = [
@@ -1225,7 +1227,7 @@ mod tests {
 
         // Test partial transparency (though VirtIO GPU might not support it fully)
         unsafe {
-            let fb_ptr = fb_addr as *mut u32;
+            let fb_ptr = crate::vm::addr::phys_to_virt(fb_addr) as *mut u32;
             let semi_transparent_red = 0x800000FF; // 50% transparent red
             let pixel_index = (100 * config.width + 100) as usize;
             *fb_ptr.add(pixel_index) = semi_transparent_red;
@@ -1258,7 +1260,7 @@ mod tests {
 
         // Write a test pattern and verify the flush process
         unsafe {
-            let fb_ptr = fb_addr as *mut u32;
+            let fb_ptr = crate::vm::addr::phys_to_virt(fb_addr) as *mut u32;
 
             // Write a simple checkerboard pattern
             for y in 0..config.height.min(100) {
@@ -1304,7 +1306,7 @@ mod tests {
 
         // Write some data and flush to verify resource association
         unsafe {
-            let fb_ptr = fb_addr as *mut u32;
+            let fb_ptr = crate::vm::addr::phys_to_virt(fb_addr) as *mut u32;
             // Write a diagonal line pattern
             for i in 0..config.width.min(config.height).min(500) {
                 let pixel_index = (i * config.width + i) as usize;

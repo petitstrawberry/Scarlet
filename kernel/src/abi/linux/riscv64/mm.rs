@@ -1,7 +1,7 @@
 use crate::{
     abi::linux::riscv64::{
-        errno::{self, to_result},
         LinuxRiscv64Abi,
+        errno::{self, to_result},
     },
     arch::Trapframe,
     environment::PAGE_SIZE,
@@ -280,7 +280,7 @@ pub fn sys_mmap(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
                         let to_copy = core::cmp::min(ok_len - copy_start, PAGE_SIZE);
                         unsafe {
                             core::ptr::copy_nonoverlapping(
-                                (paddr + copy_start) as *const u8,
+                                crate::vm::addr::phys_to_virt(paddr + copy_start) as *const u8,
                                 dst_vaddr as *mut u8,
                                 to_copy,
                             );

@@ -17,23 +17,23 @@ use alloc::{
 use core::{cell::UnsafeCell, sync::atomic};
 use spin::{Mutex, RwLock};
 
-use crate::abi::{scarlet::ScarletAbi, AbiModule};
+use crate::abi::{AbiModule, scarlet::ScarletAbi};
 use crate::sync::waker::Waker;
 use crate::{
     arch::{
-        context::KernelContext, get_cpu, trap::user::arch_switch_to_user, vcpu::Vcpu,
-        vm::alloc_virtual_address_space, Trapframe,
+        Trapframe, context::KernelContext, get_cpu, trap::user::arch_switch_to_user, vcpu::Vcpu,
+        vm::alloc_virtual_address_space,
     },
     environment::{
         DEAFAULT_MAX_TASK_DATA_SIZE, DEAFAULT_MAX_TASK_STACK_SIZE, DEAFAULT_MAX_TASK_TEXT_SIZE,
         KERNEL_VM_STACK_END, PAGE_SIZE, USER_STACK_END,
     },
     fs::VfsManager,
-    ipc::{event::ProcessControlType, EventContent},
+    ipc::{EventContent, event::ProcessControlType},
     mem::page::ContiguousPages,
     object::handle::HandleTable,
-    sched::scheduler::{get_scheduler, Scheduler},
-    timer::{add_timer, get_tick, TimerHandler},
+    sched::scheduler::{Scheduler, get_scheduler},
+    timer::{TimerHandler, add_timer, get_tick},
     vm::{
         addr::{phys_to_virt, virt_to_phys},
         manager::VirtualMemoryManager,
@@ -43,7 +43,7 @@ use crate::{
 };
 use alloc::collections::BTreeMap;
 use core::ops::Range;
-use core::sync::atomic::{AtomicI32, AtomicU32, AtomicU64, AtomicU8, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicI32, AtomicU8, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use spin::Once;
 
 /// Global registry of task-specific wakers for waitpid
@@ -2049,7 +2049,7 @@ mod tests {
         // Write test data to parent's memory
         let test_data: [u8; 8] = [0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC, 0xDE, 0xF0];
         unsafe {
-            let dst_ptr = mmap.pmarea.start as *mut u8;
+            let dst_ptr = phys_to_virt(mmap.pmarea.start) as *mut u8;
             core::ptr::copy_nonoverlapping(test_data.as_ptr(), dst_ptr, test_data.len());
         }
 
@@ -2246,7 +2246,8 @@ mod tests {
             0x99, 0x00,
         ];
         unsafe {
-            let stack_ptr = (stack_mmap.pmarea.start + crate::environment::PAGE_SIZE) as *mut u8;
+            let stack_ptr =
+                phys_to_virt(stack_mmap.pmarea.start + crate::environment::PAGE_SIZE) as *mut u8;
             core::ptr::copy_nonoverlapping(
                 stack_test_data.as_ptr(),
                 stack_ptr,
@@ -2278,9 +2279,10 @@ mod tests {
         // Verify that stack content was copied correctly
         unsafe {
             let parent_stack_ptr =
-                (stack_mmap.pmarea.start + crate::environment::PAGE_SIZE) as *const u8;
+                phys_to_virt(stack_mmap.pmarea.start + crate::environment::PAGE_SIZE) as *const u8;
             let child_stack_ptr =
-                (child_stack_mmap.pmarea.start + crate::environment::PAGE_SIZE) as *const u8;
+                phys_to_virt(child_stack_mmap.pmarea.start + crate::environment::PAGE_SIZE)
+                    as *const u8;
 
             // Check that physical addresses are different (separate memory)
             assert_ne!(
@@ -2303,12 +2305,13 @@ mod tests {
         // Verify that modifying parent's stack doesn't affect child's stack
         unsafe {
             let parent_stack_ptr =
-                (stack_mmap.pmarea.start + crate::environment::PAGE_SIZE) as *mut u8;
+                phys_to_virt(stack_mmap.pmarea.start + crate::environment::PAGE_SIZE) as *mut u8;
             let original_value = *parent_stack_ptr;
             *parent_stack_ptr = 0xFE; // Modify first byte in parent stack
 
             let child_stack_ptr =
-                (child_stack_mmap.pmarea.start + crate::environment::PAGE_SIZE) as *const u8;
+                phys_to_virt(child_stack_mmap.pmarea.start + crate::environment::PAGE_SIZE)
+                    as *const u8;
             let child_first_byte = *child_stack_ptr;
 
             // Child's first byte should still be the original value
@@ -2408,11 +2411,11 @@ mod tests {
 
         // Verify that modifying shared memory from child affects parent
         unsafe {
-            let child_shared_ptr = child_shared_mmap.pmarea.start as *mut u8;
+            let child_shared_ptr = phys_to_virt(child_shared_mmap.pmarea.start) as *mut u8;
             let original_value = *child_shared_ptr;
             *child_shared_ptr = 0xFF; // Modify first byte through child reference
 
-            let parent_shared_ptr = shared_mmap.pmarea.start as *const u8;
+            let parent_shared_ptr = phys_to_virt(shared_mmap.pmarea.start) as *const u8;
             let parent_first_byte = *parent_shared_ptr;
 
             // Parent should see the change made by child (shared memory)
@@ -2427,8 +2430,8 @@ mod tests {
 
         // Verify that the shared data content is accessible from both
         unsafe {
-            let child_ptr = child_shared_mmap.pmarea.start as *const u8;
-            let parent_ptr = shared_mmap.pmarea.start as *const u8;
+            let child_ptr = phys_to_virt(child_shared_mmap.pmarea.start) as *const u8;
+            let parent_ptr = phys_to_virt(shared_mmap.pmarea.start) as *const u8;
 
             // Check that the data content is identical and accessible from both
             for i in 0..test_data.len() {

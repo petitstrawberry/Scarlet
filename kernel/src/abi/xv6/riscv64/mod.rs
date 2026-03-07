@@ -20,17 +20,17 @@ use proc::{sys_exit, sys_fork, sys_getpid, sys_sleep, sys_wait};
 
 use crate::{
     abi::{
+        AbiModule,
         xv6::riscv64::{
             file::{sys_close, sys_fstat, sys_link, sys_mkdir, sys_read, sys_unlink},
             pipe::sys_pipe,
             proc::{sys_chdir, sys_sbrk},
         },
-        AbiModule,
     },
     arch::{self, IntRegisters},
     early_initcall,
     fs::{
-        drivers::overlayfs::OverlayFS, FileSystemError, FileSystemErrorKind, SeekFrom, VfsManager,
+        FileSystemError, FileSystemErrorKind, SeekFrom, VfsManager, drivers::overlayfs::OverlayFS,
     },
     register_abi,
     task::elf_loader::load_elf_into_task,
@@ -281,7 +281,8 @@ impl AbiModule for Xv6Riscv64Abi {
                         // Push the addresses of the arguments onto the stack
                         unsafe {
                             let translated_stack_pointer =
-                                task.vm_manager.translate_to_kva(stack_pointer).unwrap() as *mut u64;
+                                task.vm_manager.translate_to_kva(stack_pointer).unwrap()
+                                    as *mut u64;
                             for (i, &arg_ptr) in arg_ptrs.iter().enumerate() {
                                 *(translated_stack_pointer.add(i)) = arg_ptr;
                             }

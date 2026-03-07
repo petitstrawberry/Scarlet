@@ -33,9 +33,9 @@ pub fn relocate_initramfs(usable_area: &mut MemoryArea) -> Result<MemoryArea, &'
         return Err("Invalid initramfs source address");
     }
 
-    // Ensure proper 8-byte alignment for destination
+    let page_size = crate::environment::PAGE_SIZE;
     let raw_ptr = usable_area.start as *mut u8;
-    let aligned_ptr = ((raw_ptr as usize + 7) & !7) as *mut u8;
+    let aligned_ptr = ((raw_ptr as usize + page_size - 1) & !(page_size - 1)) as *mut u8;
     let aligned_addr = aligned_ptr as usize;
 
     // Validate destination memory bounds
@@ -73,8 +73,7 @@ pub fn relocate_initramfs(usable_area: &mut MemoryArea) -> Result<MemoryArea, &'
         }
     }
 
-    // Update usable_area start AFTER copying, with alignment
-    usable_area.start = (aligned_addr + size + 7) & !7;
+    usable_area.start = (aligned_addr + size + page_size - 1) & !(page_size - 1);
 
     Ok(new_area)
 }

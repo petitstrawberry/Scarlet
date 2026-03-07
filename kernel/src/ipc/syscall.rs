@@ -12,8 +12,8 @@ use crate::{
     ipc::shared_memory::SharedMemory,
     library::std::string::parse_c_string_from_userspace,
     library::std::usercopy::{copy_from_user, copy_to_user},
-    object::capability::EventSubscriber,
     object::KernelObject,
+    object::capability::EventSubscriber,
     task::mytask,
 };
 use alloc::{string::ToString, sync::Arc, vec};

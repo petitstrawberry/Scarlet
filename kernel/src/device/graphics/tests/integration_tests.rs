@@ -9,14 +9,14 @@ mod integration_tests {
     use spin::RwLock;
 
     use crate::device::{
+        Device, DeviceType,
         char::CharDevice,
         graphics::{
+            FramebufferConfig, GenericGraphicsDevice, PixelFormat,
             framebuffer_device::FramebufferCharDevice,
             manager::{FramebufferResource, GraphicsManager},
-            FramebufferConfig, GenericGraphicsDevice, PixelFormat,
         },
         manager::DeviceManager,
-        Device, DeviceType,
     };
 
     #[test_case]
@@ -33,7 +33,7 @@ mod integration_tests {
         let fb_size = config.size();
         let fb_pages = (fb_size + 4095) / 4096;
         let fb_addr = crate::mem::page::allocate_raw_pages(fb_pages) as usize;
-        test_device.set_framebuffer_address(fb_addr);
+        test_device.set_framebuffer_address(crate::vm::addr::virt_to_phys(fb_addr));
 
         let shared_device: Arc<dyn Device> = Arc::new(test_device);
 
@@ -54,7 +54,10 @@ mod integration_tests {
         assert_eq!(fb_resource.config.width, 1024);
         assert_eq!(fb_resource.config.height, 768);
         assert_eq!(fb_resource.config.format, PixelFormat::BGRA8888);
-        assert_eq!(fb_resource.physical_addr, fb_addr);
+        assert_eq!(
+            fb_resource.physical_addr,
+            crate::vm::addr::virt_to_phys(fb_addr)
+        );
         assert_eq!(fb_resource.size, 1024 * 768 * 4);
     }
 
@@ -71,7 +74,7 @@ mod integration_tests {
         let fb_size = config.size();
         let fb_pages = (fb_size + 4095) / 4096;
         let fb_addr = crate::mem::page::allocate_raw_pages(fb_pages) as usize;
-        test_device.set_framebuffer_address(fb_addr);
+        test_device.set_framebuffer_address(crate::vm::addr::virt_to_phys(fb_addr));
 
         let shared_device: Arc<dyn Device> = Arc::new(test_device);
 
@@ -126,7 +129,7 @@ mod integration_tests {
         device1.set_framebuffer_config(config1.clone());
         let fb_addr1 =
             crate::mem::page::allocate_raw_pages((config1.size() + 4095) / 4096) as usize;
-        device1.set_framebuffer_address(fb_addr1);
+        device1.set_framebuffer_address(crate::vm::addr::virt_to_phys(fb_addr1));
         let shared_device1: Arc<dyn Device> = Arc::new(device1);
 
         // Create second framebuffer device
@@ -135,7 +138,7 @@ mod integration_tests {
         device2.set_framebuffer_config(config2.clone());
         let fb_addr2 =
             crate::mem::page::allocate_raw_pages((config2.size() + 4095) / 4096) as usize;
-        device2.set_framebuffer_address(fb_addr2);
+        device2.set_framebuffer_address(crate::vm::addr::virt_to_phys(fb_addr2));
         let shared_device2: Arc<dyn Device> = Arc::new(device2);
 
         // Register devices with DeviceManager first
@@ -146,12 +149,16 @@ mod integration_tests {
             device_manager.register_device_with_name("gpu-2".to_string(), shared_device2.clone());
 
         // Register both devices with GraphicsManager
-        assert!(graphics_manager
-            .register_framebuffer_from_device(device_id1, shared_device1)
-            .is_ok());
-        assert!(graphics_manager
-            .register_framebuffer_from_device(device_id2, shared_device2)
-            .is_ok());
+        assert!(
+            graphics_manager
+                .register_framebuffer_from_device(device_id1, shared_device1)
+                .is_ok()
+        );
+        assert!(
+            graphics_manager
+                .register_framebuffer_from_device(device_id2, shared_device2)
+                .is_ok()
+        );
 
         // Verify both framebuffers are registered
         assert_eq!(graphics_manager.get_framebuffer_count(), 2);
@@ -202,7 +209,7 @@ mod integration_tests {
         let config = FramebufferConfig::new(800, 600, PixelFormat::RGB888);
         device.set_framebuffer_config(config.clone());
         let fb_addr = crate::mem::page::allocate_raw_pages((config.size() + 4095) / 4096) as usize;
-        device.set_framebuffer_address(fb_addr);
+        device.set_framebuffer_address(crate::vm::addr::virt_to_phys(fb_addr));
         let shared_device: Arc<dyn Device> = Arc::new(device);
 
         // Register device with DeviceManager first
@@ -275,7 +282,7 @@ mod integration_tests {
         let config = FramebufferConfig::new(2, 2, PixelFormat::RGB565); // 8 bytes total
         device.set_framebuffer_config(config.clone());
         let fb_addr = crate::mem::page::allocate_raw_pages(1) as usize; // One page
-        device.set_framebuffer_address(fb_addr);
+        device.set_framebuffer_address(crate::vm::addr::virt_to_phys(fb_addr));
         let shared_device: Arc<dyn Device> = Arc::new(device);
 
         // Register device with DeviceManager first
@@ -348,7 +355,7 @@ mod integration_tests {
         let config = FramebufferConfig::new(100, 100, PixelFormat::RGBA8888);
         device.set_framebuffer_config(config.clone());
         let fb_addr = crate::mem::page::allocate_raw_pages((config.size() + 4095) / 4096) as usize;
-        device.set_framebuffer_address(fb_addr);
+        device.set_framebuffer_address(crate::vm::addr::virt_to_phys(fb_addr));
         let shared_device: Arc<dyn Device> = Arc::new(device);
 
         // Register device with DeviceManager first
@@ -436,7 +443,7 @@ mod integration_tests {
             device.set_framebuffer_config(config.clone());
             let fb_addr =
                 crate::mem::page::allocate_raw_pages((config.size() + 4095) / 4096) as usize;
-            device.set_framebuffer_address(fb_addr);
+            device.set_framebuffer_address(crate::vm::addr::virt_to_phys(fb_addr));
             let shared_device: Arc<dyn Device> = Arc::new(device);
 
             // Register device with DeviceManager first
@@ -635,9 +642,11 @@ mod integration_tests {
         assert_eq!(middle_pixel[3], 0xFF); // Full alpha
 
         // Verify we can't write beyond framebuffer boundary
-        assert!(fb_char_device
-            .write_at(expected_total_bytes as u64, &[0xFF])
-            .is_err());
+        assert!(
+            fb_char_device
+                .write_at(expected_total_bytes as u64, &[0xFF])
+                .is_err()
+        );
 
         // Test read/write capabilities at valid position
         assert!(fb_char_device.can_read());

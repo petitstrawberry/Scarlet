@@ -358,37 +358,36 @@ mod tests {
 
     #[test_case]
     fn test_identity_mapping_virt_to_phys() {
-        let vaddr = 0x80000000usize;
+        let vaddr = phys_to_virt(0x80000000usize);
         let paddr = virt_to_phys(vaddr);
-        assert_eq!(paddr, vaddr);
+        assert_eq!(paddr, 0x80000000usize);
     }
 
     #[test_case]
     fn test_identity_mapping_phys_to_virt() {
         let paddr = 0x80000000usize;
         let vaddr = phys_to_virt(paddr);
-        assert_eq!(vaddr, paddr);
+        assert_eq!(virt_to_phys(vaddr), paddr);
     }
 
     #[test_case]
     fn test_roundtrip_conversion() {
-        let original = 0x80001234usize;
-        let paddr = virt_to_phys(original);
-        let vaddr = phys_to_virt(paddr);
-        assert_eq!(vaddr, original);
+        let original_paddr = 0x80001234usize;
+        let vaddr = phys_to_virt(original_paddr);
+        let paddr = virt_to_phys(vaddr);
+        assert_eq!(paddr, original_paddr);
     }
 
     #[test_case]
     fn test_phys_addr_type() {
         let paddr = PhysAddr::new(0x80000000);
         assert_eq!(paddr.as_usize(), 0x80000000);
-        assert_eq!(paddr.to_virt().as_usize(), 0x80000000);
+        assert_eq!(paddr.to_virt().to_phys().as_usize(), 0x80000000);
     }
 
     #[test_case]
     fn test_virt_addr_type() {
-        let vaddr = VirtAddr::new(0x80000000);
-        assert_eq!(vaddr.as_usize(), 0x80000000);
+        let vaddr = VirtAddr::new(phys_to_virt(0x80000000));
         assert_eq!(vaddr.to_phys().as_usize(), 0x80000000);
     }
 
