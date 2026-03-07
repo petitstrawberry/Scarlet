@@ -111,13 +111,12 @@ mkfs/rootfs/system/
 ```bash
 cargo make debug-riscv64      # Debug mode
 cargo make debug-test-riscv64 # Test mode
-cargo make run-limine-riscv64 # Limine-based boot path
+cargo make run-riscv64        # Limine-based boot path
 ```
 
 Or manually:
 ```bash
 bash kernel/tools/run.sh
-bash kernel/tools/run_limine_riscv64.sh
 ```
 
 ### AArch64
@@ -125,13 +124,12 @@ bash kernel/tools/run_limine_riscv64.sh
 ```bash
 cargo make debug-aarch64      # Debug mode
 cargo make debug-test-aarch64 # Test mode
-cargo make run-limine-aarch64 # Limine-based boot path
+cargo make run-aarch64        # Limine-based boot path
 ```
 
 Or manually:
 ```bash
 bash kernel/tools/run_aarch64.sh
-bash kernel/tools/run_limine_aarch64.sh
 ```
 
 ## Testing

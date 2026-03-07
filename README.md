@@ -169,7 +169,7 @@ cargo make run-riscv64
 
 # RISC-V via Limine
 cargo make build-limine-riscv64
-cargo make run-limine-riscv64
+cargo make run-riscv64
 
 # AArch64
 ARCH=aarch64 cargo make build
@@ -246,7 +246,7 @@ cargo make debug-riscv64
 # Then in another terminal: gdb and connect to :1234
 
 # Run the Limine-based RISC-V image
-cargo make run-limine-riscv64
+cargo make run-riscv64
 ```
 
 ## Contributing

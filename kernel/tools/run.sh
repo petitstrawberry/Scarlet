@@ -51,7 +51,8 @@ PROJECT_ROOT="$(cd "$SCRIPT_DIR" && cd .. && cd .. && pwd)"
 BOOT_IMAGE="$PROJECT_ROOT/mkfs/dist/limine-riscv64-boot.img"
 ROOTFS_IMAGE="$PROJECT_ROOT/mkfs/dist/rootfs.img"
 EFI_CODE="/usr/share/qemu-efi-riscv64/RISCV_VIRT_CODE.fd"
-EFI_VARS="$PROJECT_ROOT/mkfs/dist/RISCV_VIRT_VARS.fd"
+EFI_VARS_TEMPLATE="/usr/share/qemu-efi-riscv64/RISCV_VIRT_VARS.fd"
+EFI_VARS_PERSISTENT="$PROJECT_ROOT/mkfs/dist/RISCV_VIRT_VARS.fd"
 
 QEMU_DEBUG_ARGS=""
 
@@ -92,8 +93,20 @@ if [ ! -f "$EFI_CODE" ]; then
     exit 1
 fi
 
-if [ ! -f "$EFI_VARS" ]; then
-    cp /usr/share/qemu-efi-riscv64/RISCV_VIRT_VARS.fd "$EFI_VARS"
+if [ ! -f "$EFI_VARS_TEMPLATE" ]; then
+    echo "Error: RISC-V EFI VARS template not found at $EFI_VARS_TEMPLATE"
+    exit 1
+fi
+
+if [ "${SCARLET_EFI_VARS_PERSIST:-0}" = "1" ] || [ "${SCARLET_EFI_VARS_PERSIST:-}" = "true" ]; then
+    EFI_VARS_RUNTIME="$EFI_VARS_PERSISTENT"
+    if [ ! -f "$EFI_VARS_RUNTIME" ]; then
+        cp "$EFI_VARS_TEMPLATE" "$EFI_VARS_RUNTIME"
+    fi
+else
+    EFI_VARS_RUNTIME="$(mktemp "$PROJECT_ROOT/mkfs/dist/RISCV_VIRT_VARS.run.XXXXXX.fd")"
+    cp "$EFI_VARS_TEMPLATE" "$EFI_VARS_RUNTIME"
+    trap 'rm -f "$EFI_VARS_RUNTIME"' EXIT
 fi
 
 qemu-system-riscv64 \
@@ -104,19 +117,19 @@ qemu-system-riscv64 \
     --no-reboot \
     -bios default \
     -drive if=pflash,format=raw,unit=0,file="$EFI_CODE",readonly=on \
-    -drive if=pflash,format=raw,unit=1,file="$EFI_VARS" \
+    -drive if=pflash,format=raw,unit=1,file="$EFI_VARS_RUNTIME" \
     -global virtio-mmio.force-legacy=false \
     -drive id=boot,file="$BOOT_IMAGE",format=raw,if=none \
-    -device virtio-blk-device,drive=boot,bus=virtio-mmio-bus.0 \
+    -device virtio-blk-pci,drive=boot,bus=pcie.0 \
     -drive id=rootfs,file="$ROOTFS_IMAGE",format=raw,if=none \
-    -device virtio-blk-device,drive=rootfs,bus=virtio-mmio-bus.1 \
+    -device virtio-blk-device,drive=rootfs,bus=virtio-mmio-bus.0 \
     -display vnc=:0 \
-    -device virtio-gpu-device,bus=virtio-mmio-bus.2 \
+    -device virtio-gpu-device,bus=virtio-mmio-bus.1 \
     -netdev user,id=net0,hostfwd=tcp::8080-:8080,hostfwd=udp::8080-:8080,hostfwd=udp::1234-:1234 \
-    -device virtio-net-device,netdev=net0,bus=virtio-mmio-bus.3 \
-    -device virtio-keyboard-device,bus=virtio-mmio-bus.4 \
-    -device virtio-mouse-device,bus=virtio-mmio-bus.5 \
-    -device virtio-rng-device,bus=virtio-mmio-bus.6 \
+    -device virtio-net-device,netdev=net0,bus=virtio-mmio-bus.2 \
+    -device virtio-keyboard-device,bus=virtio-mmio-bus.3 \
+    -device virtio-mouse-device,bus=virtio-mmio-bus.4 \
+    -device virtio-rng-device,bus=virtio-mmio-bus.5 \
     $QEMU_DEBUG_ARGS \
     $DEBUG_FLAGS | tee "$TEMP_OUTPUT"
 

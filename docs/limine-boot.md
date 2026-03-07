@@ -25,7 +25,7 @@ This produces `mkfs/dist/limine-riscv64-boot.img` and refreshes the matching ini
 ## Run it
 
 ```bash
-cargo make run-limine-riscv64
+cargo make run-riscv64
 ```
 
 For debugging:
