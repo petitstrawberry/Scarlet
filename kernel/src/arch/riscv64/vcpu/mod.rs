@@ -6,8 +6,8 @@
 
 use crate::arch::Trapframe;
 
-use super::IntRegisters;
 use super::fpu::{FpuContext, VectorContext};
+use super::IntRegisters;
 use crate::arch::Mode;
 
 use alloc::boxed::Box;

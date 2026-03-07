@@ -253,6 +253,7 @@
 
 pub mod abi;
 pub mod arch;
+pub mod boot;
 pub mod device;
 pub mod drivers;
 pub mod earlycon;
@@ -293,19 +294,17 @@ const MIN_HEAP_SIZE: usize = 32 * 1024;
 
 use crate::{
     device::graphics::manager::GraphicsManager,
+    executor::executor::TransparentExecutor,
     fs::{drivers::initramfs::init_initramfs, vfs_v2::manager::init_global_vfs_manager},
     interrupt::InterruptManager,
 };
 use arch::get_cpu;
-use core::sync::atomic::{Ordering, fence};
-use mem::{
-    __KERNEL_SPACE_START,
-    allocator::{add_heap_region, init_heap},
-};
+use core::sync::atomic::{fence, Ordering};
+use mem::allocator::{add_heap_region, init_heap};
 use sched::scheduler::get_scheduler;
-use task::{elf_loader::load_elf_into_task, new_user_task};
+use task::new_user_task;
 use timer::get_kernel_timer;
-use vm::{kernel_vm_init, vmem::MemoryArea};
+use vm::{kernel_vm_init, phys_to_virt, vmem::MemoryArea};
 
 /// A panic handler is required in Rust, this is probably the most basic one possible
 #[cfg(not(test))]
@@ -380,12 +379,12 @@ pub struct BootInfo {
     /// Number of CPUs detected at runtime (from FDT)
     /// Used to drive SMP initialization and per-CPU resource sizing
     pub cpu_count: usize,
-    /// Usable memory area available for kernel allocation
-    /// Excludes reserved regions, firmware areas, and kernel image
     pub usable_memory: MemoryArea,
-    /// Optional initramfs memory area if available
-    /// Contains initial root filesystem for early userspace programs
+    pub direct_map_area: MemoryArea,
+    pub usable_memory_phys: MemoryArea,
+    pub direct_map_area_phys: MemoryArea,
     pub initramfs: Option<MemoryArea>,
+    pub initramfs_phys: Option<MemoryArea>,
     /// Optional kernel command line parameters
     /// Boot arguments passed by bootloader for kernel configuration
     pub cmdline: Option<&'static str>,
@@ -412,7 +411,11 @@ impl BootInfo {
         cpu_id: usize,
         cpu_count: usize,
         usable_memory: MemoryArea,
+        direct_map_area: MemoryArea,
+        usable_memory_phys: MemoryArea,
+        direct_map_area_phys: MemoryArea,
         initramfs: Option<MemoryArea>,
+        initramfs_phys: Option<MemoryArea>,
         cmdline: Option<&'static str>,
         device_source: DeviceSource,
     ) -> Self {
@@ -420,7 +423,11 @@ impl BootInfo {
             cpu_id,
             cpu_count,
             usable_memory,
+            direct_map_area,
+            usable_memory_phys,
+            direct_map_area_phys,
             initramfs,
+            initramfs_phys,
             cmdline,
             device_source,
         }
@@ -525,39 +532,47 @@ pub extern "C" fn start_kernel(boot_info: &BootInfo) -> ! {
     early_println!("[Scarlet Kernel] Detected {} CPU(s)", cpu_count);
     /* Use usable memory area from BootInfo */
     let usable_area = boot_info.usable_memory;
+    let direct_map_area = boot_info.direct_map_area;
+    let usable_area_phys = boot_info.usable_memory_phys;
+    let direct_map_area_phys = boot_info.direct_map_area_phys;
     early_println!(
         "[Scarlet Kernel] Usable memory area : {:#x} - {:#x}",
         usable_area.start,
         usable_area.end
     );
+    early_println!(
+        "[Scarlet Kernel] Direct-map area    : {:#x} - {:#x}",
+        direct_map_area.start,
+        direct_map_area.end
+    );
 
     /* Handle initramfs if available in BootInfo */
-    let pmm_start = if let Some(initramfs_area) = boot_info.initramfs {
+    if let Some(initramfs_area) = boot_info.initramfs {
         early_println!(
             "[Scarlet Kernel] InitramFS available: {:#x} - {:#x}",
             initramfs_area.start,
             initramfs_area.end
         );
-        initramfs_area.end + 1
     } else {
         early_println!("[Scarlet Kernel] No initramfs found");
-        usable_area.start
-    };
+    }
 
     early_println!("[Scarlet Kernel] Initializing PMM...");
-    let pmm_start_aligned = (pmm_start + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
-    if pmm_start_aligned < usable_area.end {
+    let pmm_start_aligned = (usable_area_phys.start + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
+    if pmm_start_aligned < usable_area_phys.end {
         unsafe {
-            mem::pmm::init(MemoryArea::new(pmm_start_aligned, usable_area.end));
+            mem::pmm::init(MemoryArea::new(pmm_start_aligned, usable_area_phys.end));
         }
     }
 
     early_println!("[Scarlet Kernel] Allocating initial heap from PMM...");
     let heap_size = 512 * 1024 * 1024;
     let heap_pages = heap_size / PAGE_SIZE;
-    let heap_start =
+    let heap_start_phys =
         mem::pmm::alloc_contiguous_pages(heap_pages).expect("Failed to allocate heap from PMM");
-    let heap_end = heap_start + heap_size - 1;
+    let heap_end_phys = heap_start_phys + heap_size - 1;
+    let heap_start = phys_to_virt(heap_start_phys);
+    let heap_end = phys_to_virt(heap_end_phys);
 
     early_println!("[Scarlet Kernel] Initializing heap...");
     unsafe { init_heap(heap_start, heap_size) };
@@ -583,8 +598,11 @@ pub extern "C" fn start_kernel(boot_info: &BootInfo) -> ! {
     driver_initcall_call();
 
     early_println!("[Scarlet Kernel] Initializing Virtual Memory...");
-    let kernel_start = unsafe { &__KERNEL_SPACE_START as *const usize as usize };
-    kernel_vm_init(MemoryArea::new(kernel_start, usable_area.end));
+    kernel_vm_init(
+        usable_area_phys,
+        direct_map_area_phys,
+        boot_info.initramfs_phys,
+    );
     /* After this point, we can use the heap and virtual memory */
     /* We will also be restricted to the kernel address space */
 
@@ -725,26 +743,17 @@ pub extern "C" fn start_kernel(boot_info: &BootInfo) -> ! {
         .unwrap()
         .set_cwd_by_path("/")
         .expect("Failed to set initial working directory");
-    let file_obj = match task
-        .vfs
-        .read()
-        .as_ref()
-        .unwrap()
-        .open("/system/scarlet/bin/init", 0)
-    {
-        Ok(kernel_obj) => kernel_obj,
-        Err(e) => {
-            panic!("Failed to open init file: {:?}", e);
-        }
-    };
-    // file_obj is already a KernelObject::File
-    let file_ref = match file_obj.as_file() {
-        Some(file) => file,
-        None => panic!("Failed to get file reference"),
-    };
+    let init_argv = ["/system/scarlet/bin/init"];
 
-    match load_elf_into_task(file_ref, &mut task) {
-        Ok(entry_point) => {
+    match TransparentExecutor::execute_binary(
+        "/system/scarlet/bin/init",
+        &init_argv,
+        &[],
+        &task,
+        task.get_trapframe(),
+        false,
+    ) {
+        Ok(()) => {
             task.vm_manager.memmaps_iter_with(|maps| {
                 for map in maps {
                     early_println!(
@@ -756,7 +765,7 @@ pub extern "C" fn start_kernel(boot_info: &BootInfo) -> ! {
             });
             early_println!(
                 "[Scarlet Kernel] Init ELF loaded with entry point at {:#x}",
-                entry_point
+                task.vcpu.lock().get_pc()
             );
             early_println!("[Scarlet Kernel] Successfully loaded init ELF into task");
             early_println!("[Scarlet Kernel] Adding init task to scheduler...");

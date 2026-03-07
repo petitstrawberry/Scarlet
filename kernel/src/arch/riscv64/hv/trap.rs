@@ -2,9 +2,9 @@
 
 use core::arch::asm;
 
-use crate::arch::Trapframe;
 use crate::arch::hv::csr::{self, read_htinst};
 use crate::arch::hv::vm::Riscv64VmObject;
+use crate::arch::Trapframe;
 use crate::hypervisor::types::VmExit;
 use crate::timer::tick;
 

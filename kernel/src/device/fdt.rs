@@ -382,7 +382,11 @@ impl<'a> FdtManager<'a> {
             count += 1;
         }
 
-        if count == 0 { None } else { Some(count) }
+        if count == 0 {
+            None
+        } else {
+            Some(count)
+        }
     }
 }
 
@@ -537,6 +541,10 @@ pub fn create_bootinfo_from_fdt(cpu_id: usize, relocated_fdt_addr: usize) -> Boo
         cpu_id,
         cpu_count,
         usable_memory,
+        usable_memory,
+        usable_memory,
+        usable_memory,
+        relocated_initramfs,
         relocated_initramfs,
         cmdline,
         DeviceSource::Fdt(relocated_fdt_addr),

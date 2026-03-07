@@ -1,4 +1,4 @@
-use crate::arch::{Trapframe, get_cpu};
+use crate::arch::{get_cpu, Trapframe};
 use crate::interrupt::InterruptManager;
 
 /// RISC-V S-mode interrupt causes

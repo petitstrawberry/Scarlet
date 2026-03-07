@@ -16,7 +16,7 @@ use crate::object::capability::selectable::{
 use crate::object::capability::{ControlOps, MemoryMappingOps};
 use crate::sync::waker::Waker;
 use crate::task::mytask;
-use crate::timer::{TimerHandler, add_timer, cancel_timer, get_tick};
+use crate::timer::{add_timer, cancel_timer, get_tick, TimerHandler};
 use alloc::collections::VecDeque;
 use alloc::sync::Arc;
 use core::any::Any;
@@ -234,7 +234,11 @@ impl TtyDevice {
 
         // After wake: cancel timer if still queued and decide reason
         cancel_timer(timer_id);
-        if self.can_read() { false } else { true }
+        if self.can_read() {
+            false
+        } else {
+            true
+        }
     }
 
     /// Current buffered input length (for diagnostics / readiness debugging)

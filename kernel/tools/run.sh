@@ -1,5 +1,7 @@
 #!/bin/bash
 
+set -o pipefail
+
 # Check for debug mode environment variable or command line argument
 DEBUG_MODE=${SCARLET_DEBUG_MODE:-false}
 KERNEL_PATH=""
@@ -44,10 +46,12 @@ else
     DEBUG_FLAGS=""
 fi
 
-# Find the project root by looking for Makefile.toml
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR" && cd .. && cd .. && pwd)"
-INITRAMFS_PATH="$PROJECT_ROOT/mkfs/dist/initramfs-riscv64.cpio"
+BOOT_IMAGE="$PROJECT_ROOT/mkfs/dist/limine-riscv64-boot.img"
+ROOTFS_IMAGE="$PROJECT_ROOT/mkfs/dist/rootfs.img"
+EFI_CODE="/usr/share/qemu-efi-riscv64/RISCV_VIRT_CODE.fd"
+EFI_VARS="$PROJECT_ROOT/mkfs/dist/RISCV_VIRT_VARS.fd"
 
 QEMU_DEBUG_ARGS=""
 
@@ -71,40 +75,52 @@ if [ -n "$QEMU_DEBUG_FLAGS" ]; then
     QEMU_DEBUG_ARGS="-d $QEMU_DEBUG_FLAGS -D $QEMU_DEBUG_LOG"
 fi
 
-CMDLINE_ARGS=()
-if [ -n "${SCARLET_CMDLINE:-}" ]; then
-    CMDLINE_ARGS=(-append "${SCARLET_CMDLINE}")
-fi
-
-# Create temporary file for capturing output
 TEMP_OUTPUT=$(mktemp)
 
-# Run QEMU and capture output
+if [ ! -f "$BOOT_IMAGE" ]; then
+    echo "Error: Limine boot image not found at $BOOT_IMAGE"
+    exit 1
+fi
+
+if [ ! -f "$ROOTFS_IMAGE" ]; then
+    echo "Error: rootfs image not found at $ROOTFS_IMAGE"
+    exit 1
+fi
+
+if [ ! -f "$EFI_CODE" ]; then
+    echo "Error: RISC-V EFI firmware not found at $EFI_CODE"
+    exit 1
+fi
+
+if [ ! -f "$EFI_VARS" ]; then
+    cp /usr/share/qemu-efi-riscv64/RISCV_VIRT_VARS.fd "$EFI_VARS"
+fi
+
 qemu-system-riscv64 \
-    -machine virt \
-    -bios default \
+    -machine virt,acpi=off \
     -m 8G \
     -nographic \
     -serial mon:stdio \
     --no-reboot \
+    -bios default \
+    -drive if=pflash,format=raw,unit=0,file="$EFI_CODE",readonly=on \
+    -drive if=pflash,format=raw,unit=1,file="$EFI_VARS" \
     -global virtio-mmio.force-legacy=false \
-    -drive id=x0,file=../mkfs/dist/rootfs.img,format=raw,if=none \
-    -device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
+    -drive id=boot,file="$BOOT_IMAGE",format=raw,if=none \
+    -device virtio-blk-device,drive=boot,bus=virtio-mmio-bus.0 \
+    -drive id=rootfs,file="$ROOTFS_IMAGE",format=raw,if=none \
+    -device virtio-blk-device,drive=rootfs,bus=virtio-mmio-bus.1 \
     -display vnc=:0 \
-    -device virtio-gpu-device,bus=virtio-mmio-bus.1 \
+    -device virtio-gpu-device,bus=virtio-mmio-bus.2 \
     -netdev user,id=net0,hostfwd=tcp::8080-:8080,hostfwd=udp::8080-:8080,hostfwd=udp::1234-:1234 \
-    -device virtio-net-device,netdev=net0,bus=virtio-mmio-bus.2 \
-    -device virtio-keyboard-device,bus=virtio-mmio-bus.3 \
-    -device virtio-mouse-device,bus=virtio-mmio-bus.4 \
-    -device virtio-rng-device,bus=virtio-mmio-bus.5 \
-    "${CMDLINE_ARGS[@]}" \
+    -device virtio-net-device,netdev=net0,bus=virtio-mmio-bus.3 \
+    -device virtio-keyboard-device,bus=virtio-mmio-bus.4 \
+    -device virtio-mouse-device,bus=virtio-mmio-bus.5 \
+    -device virtio-rng-device,bus=virtio-mmio-bus.6 \
     $QEMU_DEBUG_ARGS \
-    $DEBUG_FLAGS \
-    -initrd "$INITRAMFS_PATH" \
-    -kernel "$KERNEL_PATH" | tee "$TEMP_OUTPUT"
+    $DEBUG_FLAGS | tee "$TEMP_OUTPUT"
 
-# Capture QEMU exit code
-QEMU_EXIT_CODE=$?
+QEMU_EXIT_CODE=${PIPESTATUS[0]}
 
 # In debug mode, don't check for test patterns since we're debugging
 if [ "$DEBUG_MODE" = "true" ]; then

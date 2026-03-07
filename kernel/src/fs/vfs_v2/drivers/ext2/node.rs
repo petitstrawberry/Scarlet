@@ -11,22 +11,23 @@ use crate::object::capability::selectable::{
     ReadyInterest, ReadySet, SelectWaitOutcome, Selectable,
 };
 use crate::{
-    DeviceManager,
     environment::PAGE_SIZE,
     fs::{
-        DeviceFileInfo, FileMetadata, FileObject, FilePermission, FileSystemError,
-        FileSystemErrorKind, FileType, SeekFrom, SocketFileInfo, vfs_v2::cache::PageCacheCapable,
+        vfs_v2::cache::PageCacheCapable, DeviceFileInfo, FileMetadata, FileObject, FilePermission,
+        FileSystemError, FileSystemErrorKind, FileType, SeekFrom, SocketFileInfo,
     },
     mem::{
         page::ContiguousPages,
         page_cache::{PageCacheManager, PageIndex},
     },
     object::capability::{ControlOps, MemoryMappingOps, StreamError, StreamOps},
+    vm::addr::phys_to_virt,
+    DeviceManager,
 };
 
 use super::{
-    Ext2FileSystem,
     structures::{EXT2_S_IFDIR, EXT2_S_IFMT, EXT2_S_IFREG},
+    Ext2FileSystem,
 };
 use crate::fs::vfs_v2::core::{FileSystemOperations, VfsNode};
 
@@ -285,7 +286,7 @@ impl Ext2FileObject {
 
             unsafe {
                 core::ptr::copy_nonoverlapping(
-                    pinned.paddr() as *const u8,
+                    phys_to_virt(pinned.paddr()) as *const u8,
                     buffer.as_mut_ptr().add(start),
                     len,
                 );
@@ -364,7 +365,7 @@ impl Ext2FileObject {
                 .map_err(|_| StreamError::IoError)?;
             unsafe {
                 core::ptr::copy_nonoverlapping(
-                    pinned.paddr() as *const u8,
+                    phys_to_virt(pinned.paddr()) as *const u8,
                     backing_ptr.add(page_index * PAGE_SIZE),
                     PAGE_SIZE,
                 );
@@ -439,7 +440,7 @@ impl StreamOps for Ext2FileObject {
                 .map_err(|_| StreamError::IoError)?;
 
             unsafe {
-                let page_ptr = pinned.paddr() as *const u8;
+                let page_ptr = phys_to_virt(pinned.paddr()) as *const u8;
                 let src = page_ptr.add(page_offset);
                 let dst = buffer.as_mut_ptr().add(buf_offset);
                 core::ptr::copy_nonoverlapping(src, dst, bytes_in_page);
@@ -493,7 +494,7 @@ impl StreamOps for Ext2FileObject {
                 .map_err(|_| StreamError::IoError)?;
 
             unsafe {
-                let dst = (pinned.paddr() as *mut u8).add(page_off);
+                let dst = (phys_to_virt(pinned.paddr()) as *mut u8).add(page_off);
                 let src = buffer.as_ptr().add(buf_offset);
                 core::ptr::copy_nonoverlapping(src, dst, chunk);
             }
@@ -830,7 +831,7 @@ impl FileObject for Ext2FileObject {
                 .map_err(|_| StreamError::IoError)?;
 
             unsafe {
-                let src = (pinned.paddr() as *const u8).add(offset_in_page);
+                let src = (phys_to_virt(pinned.paddr()) as *const u8).add(offset_in_page);
                 let remaining_in_page = PAGE_SIZE - offset_in_page;
                 let remaining_file = file_size - (off + total_read);
                 let remaining_buf = buffer.len() - total_read;
@@ -880,7 +881,7 @@ impl FileObject for Ext2FileObject {
                 .map_err(|_| StreamError::IoError)?;
 
             unsafe {
-                let dst = (pinned.paddr() as *mut u8).add(page_off);
+                let dst = (phys_to_virt(pinned.paddr()) as *mut u8).add(page_off);
                 let src = buffer.as_ptr().add(written);
                 core::ptr::copy_nonoverlapping(src, dst, chunk);
             }
@@ -949,7 +950,7 @@ impl FileObject for Ext2FileObject {
                     .map_err(|_| StreamError::IoError)?;
                 unsafe {
                     core::ptr::copy_nonoverlapping(
-                        pinned.paddr() as *const u8,
+                        phys_to_virt(pinned.paddr()) as *const u8,
                         buffer.as_mut_ptr().add(start),
                         len,
                     );

@@ -80,7 +80,7 @@ pub fn sys_stream_write(trapframe: &mut Trapframe) -> usize {
     };
 
     let handle = trapframe.get_arg(0) as u32;
-    let buf_ptr = match task.vm_manager.translate_vaddr(trapframe.get_arg(1)) {
+    let buf_ptr = match task.vm_manager.translate_to_kva(trapframe.get_arg(1)) {
         Some(ptr) => ptr as *const u8,
         None => return usize::MAX, // Invalid buffer pointer
     };

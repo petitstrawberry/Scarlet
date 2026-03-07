@@ -17,23 +17,23 @@ use alloc::{
 use core::{cell::UnsafeCell, sync::atomic};
 use spin::{Mutex, RwLock};
 
-use crate::abi::{AbiModule, scarlet::ScarletAbi};
+use crate::abi::{scarlet::ScarletAbi, AbiModule};
 use crate::sync::waker::Waker;
 use crate::{
     arch::{
-        Trapframe, context::KernelContext, get_cpu, trap::user::arch_switch_to_user, vcpu::Vcpu,
-        vm::alloc_virtual_address_space,
+        context::KernelContext, get_cpu, trap::user::arch_switch_to_user, vcpu::Vcpu,
+        vm::alloc_virtual_address_space, Trapframe,
     },
     environment::{
         DEAFAULT_MAX_TASK_DATA_SIZE, DEAFAULT_MAX_TASK_STACK_SIZE, DEAFAULT_MAX_TASK_TEXT_SIZE,
         KERNEL_VM_STACK_END, PAGE_SIZE, USER_STACK_END,
     },
     fs::VfsManager,
-    ipc::{EventContent, event::ProcessControlType},
+    ipc::{event::ProcessControlType, EventContent},
     mem::page::ContiguousPages,
     object::handle::HandleTable,
-    sched::scheduler::{Scheduler, get_scheduler},
-    timer::{TimerHandler, add_timer, get_tick},
+    sched::scheduler::{get_scheduler, Scheduler},
+    timer::{add_timer, get_tick, TimerHandler},
     vm::{
         addr::{phys_to_virt, virt_to_phys},
         manager::VirtualMemoryManager,
@@ -43,7 +43,7 @@ use crate::{
 };
 use alloc::collections::BTreeMap;
 use core::ops::Range;
-use core::sync::atomic::{AtomicI32, AtomicU8, AtomicU32, AtomicU64, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicI32, AtomicU32, AtomicU64, AtomicU8, AtomicUsize, Ordering};
 use spin::Once;
 
 /// Global registry of task-specific wakers for waitpid

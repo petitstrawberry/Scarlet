@@ -181,7 +181,7 @@ pub mod syscall {
 pub use crate::object::capability::file::{FileObject, SeekFrom};
 
 use crate::{
-    device::{DeviceType, block::BlockDevice},
+    device::{block::BlockDevice, DeviceType},
     vm::vmem::MemoryArea,
 };
 use alloc::{
@@ -587,7 +587,7 @@ pub trait FileSystemDriver: Send + Sync {
         options: &str,
     ) -> Result<Arc<dyn crate::fs::vfs_v2::core::FileSystemOperations>, FileSystemError> {
         let _ = options; // Suppress unused parameter warning
-        // Default implementation falls back to create()
+                         // Default implementation falls back to create()
         self.create()
     }
 

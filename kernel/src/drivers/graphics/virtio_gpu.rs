@@ -11,16 +11,17 @@ use spin::{Mutex, RwLock};
 
 use crate::{
     device::{
-        Device, DeviceType,
         graphics::{FramebufferConfig, GraphicsDevice, PixelFormat},
+        Device, DeviceType,
     },
     drivers::virtio::{
         device::VirtioDevice,
         queue::{DescriptorFlag, VirtQueue},
     },
-    mem::page::{ContiguousPages, Page, allocate_raw_pages},
+    mem::page::{allocate_raw_pages, ContiguousPages, Page},
     object::capability::{ControlOps, MemoryMappingOps, Selectable},
-    timer::{TimerHandler, add_timer, get_tick, ms_to_ticks},
+    timer::{add_timer, get_tick, ms_to_ticks, TimerHandler},
+    vm::addr::virt_to_phys,
 };
 use core::ptr;
 
@@ -241,8 +242,7 @@ impl VirtioGpuDeviceCore {
         let cmd_desc_ptr =
             &mut control_queue.desc[cmd_desc] as *mut crate::drivers::virtio::queue::Descriptor;
         let cmd_virt_addr = cmd as *const T as usize;
-        let cmd_phys_addr = crate::vm::get_kernel_vm_manager()
-            .translate_vaddr(cmd_virt_addr)
+        let cmd_phys_addr = crate::vm::get_kernel_vm_manager().translate_to_phys(cmd_virt_addr)
             .ok_or("Failed to translate cmd vaddr to paddr")?;
         unsafe {
             core::ptr::write_volatile(&mut (*cmd_desc_ptr).addr, cmd_phys_addr as u64);
@@ -255,8 +255,7 @@ impl VirtioGpuDeviceCore {
         let resp_desc_ptr =
             &mut control_queue.desc[resp_desc] as *mut crate::drivers::virtio::queue::Descriptor;
         let resp_virt_addr = resp_buffer.as_mut_ptr() as usize;
-        let resp_phys_addr = crate::vm::get_kernel_vm_manager()
-            .translate_vaddr(resp_virt_addr)
+        let resp_phys_addr = crate::vm::get_kernel_vm_manager().translate_to_phys(resp_virt_addr)
             .ok_or("Failed to translate resp_buffer vaddr to paddr")?;
         unsafe {
             core::ptr::write_volatile(&mut (*resp_desc_ptr).addr, resp_phys_addr as u64);
@@ -437,7 +436,7 @@ impl VirtioGpuDeviceCore {
         let fb_addr = fb_alloc.as_paddr();
         self.framebuffer_alloc.write().replace(fb_alloc);
         self.attach_backing_to_resource(resource_id, fb_addr, fb_size)?; // Attach backing memory to the resource
-        // Set scanout to use this framebuffer
+                                                                         // Set scanout to use this framebuffer
         let scanout_cmd = VirtioGpuSetScanout {
             hdr: VirtioGpuCtrlHdr {
                 hdr_type: VIRTIO_GPU_CMD_SET_SCANOUT,
@@ -600,7 +599,7 @@ impl VirtioDevice for VirtioGpuDeviceCore {
         }
 
         let virtqueues = self.virtqueues.lock();
-        Some(virtqueues[queue_idx].desc.as_ptr() as u64)
+        Some(virt_to_phys(virtqueues[queue_idx].desc.as_ptr() as usize) as u64)
     }
 
     fn get_queue_driver_addr(&self, queue_idx: usize) -> Option<u64> {
@@ -609,7 +608,7 @@ impl VirtioDevice for VirtioGpuDeviceCore {
         }
 
         let virtqueues = self.virtqueues.lock();
-        Some(virtqueues[queue_idx].avail.flags as *const u16 as u64)
+        Some(virt_to_phys(virtqueues[queue_idx].avail.flags as *const u16 as usize) as u64)
     }
 
     fn get_queue_device_addr(&self, queue_idx: usize) -> Option<u64> {
@@ -618,7 +617,7 @@ impl VirtioDevice for VirtioGpuDeviceCore {
         }
 
         let virtqueues = self.virtqueues.lock();
-        Some(virtqueues[queue_idx].used.flags as *const u16 as u64)
+        Some(virt_to_phys(virtqueues[queue_idx].used.flags as *const u16 as usize) as u64)
     }
 
     fn get_supported_features(&self, _device_features: u32) -> u32 {
@@ -740,18 +739,23 @@ impl GraphicsDevice for VirtioGpuDevice {
             let core = self.core.lock();
             let mut initialized = core.initialized.lock();
             if *initialized {
+                crate::early_println!("[virtio-gpu] init_graphics: already initialized");
                 return Ok(());
             }
             *initialized = true;
         }
 
-        // crate::early_println!("[Virtio GPU] Initializing graphics subsystem for device at {:#x}", self.base_addr);
+        crate::early_println!("[virtio-gpu] init_graphics: get_display_info");
 
         // Get display information
         self.core.lock().get_display_info_internal()?;
 
+        crate::early_println!("[virtio-gpu] init_graphics: setup_framebuffer");
+
         // Set up framebuffer
         self.core.lock().setup_framebuffer()?;
+
+        crate::early_println!("[virtio-gpu] init_graphics: add timer handler");
 
         let handler: Arc<dyn TimerHandler> = Arc::new(FramebufferUpdateHandler {
             device: self.core.clone(),
@@ -762,7 +766,7 @@ impl GraphicsDevice for VirtioGpuDevice {
         // Store handler via interior mutability
         *self.handler.write() = Some(handler);
 
-        // crate::early_println!("[Virtio GPU] Graphics subsystem initialization completed");
+        crate::early_println!("[virtio-gpu] init_graphics: done");
         Ok(())
     }
 }

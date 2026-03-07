@@ -108,7 +108,7 @@ pub fn free_raw_pages(pages: *mut Page, num_of_pages: usize) {
     note = "This function uses the global heap allocator. Use ContiguousPages::new() for PMM-backed allocations instead."
 )]
 pub fn allocate_boxed_pages(num_of_pages: usize) -> Box<[Page]> {
-    use alloc::alloc::{Layout, alloc_zeroed};
+    use alloc::alloc::{alloc_zeroed, Layout};
     use core::ptr;
 
     let layout = Layout::array::<Page>(num_of_pages).expect("Layout calculation failed");
@@ -141,7 +141,7 @@ pub fn allocate_boxed_pages(num_of_pages: usize) -> Box<[Page]> {
     note = "This function uses the global heap allocator. Use allocate_raw_pages_aligned() with ContiguousPages for PMM-backed allocations instead."
 )]
 pub fn allocate_boxed_pages_aligned(num_of_pages: usize, align: usize) -> Box<[Page]> {
-    use alloc::alloc::{Layout, alloc_zeroed};
+    use alloc::alloc::{alloc_zeroed, Layout};
     use core::ptr;
 
     let size = num_of_pages * PAGE_SIZE;

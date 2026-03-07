@@ -19,7 +19,7 @@ use spin::RwLock;
 
 use crate::early_println;
 use crate::network::protocol_stack::{
-    LayerContext, NetworkLayer, NetworkLayerStats, get_network_manager,
+    get_network_manager, LayerContext, NetworkLayer, NetworkLayerStats,
 };
 use crate::network::socket::SocketError;
 

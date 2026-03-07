@@ -16,13 +16,14 @@ use mmu::PageTable;
 use spin::Once;
 use spin::RwLock;
 
-use crate::mem::page::{Page, allocate_raw_pages, allocate_raw_pages_aligned, free_raw_pages};
+use crate::mem::page::{allocate_raw_pages, allocate_raw_pages_aligned, free_raw_pages, Page};
 
-use crate::arch::Arch;
 use crate::arch::get_cpu;
 use crate::arch::get_user_trapvector_paddr;
+use crate::arch::Arch;
 use crate::early_println;
 use crate::environment::{KERNEL_KSTACK_REGION_END, KERNEL_KSTACK_REGION_START, TRAMPOLINE_VA_END};
+use crate::vm::addr::kernel_virt_to_phys;
 use crate::vm::manager::VirtualMemoryManager;
 use crate::vm::vmem::{MemoryArea, VirtualMemoryMap, VirtualMemoryPermission};
 
@@ -199,15 +200,17 @@ pub fn get_root_pagetable(asid: u16) -> Option<&'static mut PageTable> {
 }
 
 fn setup_trampoline_at_end(manager: &VirtualMemoryManager, trampoline_vaddr_end: usize) {
-    let trampoline_start = unsafe { &__TRAMPOLINE_START as *const usize as usize };
-    let trampoline_end = unsafe { &__TRAMPOLINE_END as *const usize as usize } - 1;
+    let trampoline_start =
+        kernel_virt_to_phys(unsafe { &__TRAMPOLINE_START as *const usize as usize });
+    let trampoline_end =
+        kernel_virt_to_phys(unsafe { &__TRAMPOLINE_END as *const usize as usize }) - 1;
     let trampoline_size = trampoline_end - trampoline_start;
 
     let arch = get_cpu().as_paddr_cpu();
     let trampoline_vaddr_start = trampoline_vaddr_end - trampoline_size;
 
-    let trap_entry_paddr = get_user_trapvector_paddr();
-    let arch_paddr = arch as *const Arch as usize;
+    let trap_entry_paddr = kernel_virt_to_phys(get_user_trapvector_paddr());
+    let arch_paddr = kernel_virt_to_phys(arch as *const Arch as usize);
     let trap_entry_offset = trap_entry_paddr - trampoline_start;
     let arch_offset = arch_paddr - trampoline_start;
 

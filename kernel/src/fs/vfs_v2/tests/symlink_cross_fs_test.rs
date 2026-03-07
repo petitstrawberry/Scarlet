@@ -6,11 +6,11 @@
 //! - /foo/bar exists
 //! - Opening /symlink/bar, reading content, and writing to /tmp/bar fails
 
-use crate::fs::FileType;
 use crate::fs::vfs_v2::{
     drivers::{cpiofs::CpioFS, tmpfs::TmpFS},
     manager::{PathResolutionOptions, VfsManager},
 };
+use crate::fs::FileType;
 use alloc::{string::ToString, vec::Vec};
 
 #[test_case]
@@ -32,12 +32,10 @@ fn test_symlink_cross_filesystem_file_operations() {
     let (symlink_entry, _) = vfs
         .resolve_path_with_options("/symlink", &PathResolutionOptions::no_follow())
         .expect("Failed to resolve symlink");
-    assert!(
-        symlink_entry
-            .node()
-            .is_symlink()
-            .expect("Failed to check if symlink")
-    );
+    assert!(symlink_entry
+        .node()
+        .is_symlink()
+        .expect("Failed to check if symlink"));
 
     let target = symlink_entry
         .node()

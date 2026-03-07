@@ -1,13 +1,13 @@
 use crate::ipc::IpcError;
 use crate::object::capability::StreamError;
 use crate::{
-    abi::linux::riscv64::LinuxRiscv64Abi,
     abi::linux::riscv64::errno,
-    abi::linux::riscv64::fs::{FD_CLOEXEC, IoVec, O_NONBLOCK},
+    abi::linux::riscv64::fs::{IoVec, FD_CLOEXEC, O_NONBLOCK},
+    abi::linux::riscv64::LinuxRiscv64Abi,
     arch::Trapframe,
-    network::{NetworkManager, SocketDomain, SocketProtocol, SocketType, local::LocalSocket},
-    object::KernelObject,
+    network::{local::LocalSocket, NetworkManager, SocketDomain, SocketProtocol, SocketType},
     object::capability::selectable::Selectable,
+    object::KernelObject,
     sched::scheduler::get_scheduler,
     task::mytask,
 };
@@ -293,7 +293,7 @@ pub fn sys_bind(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
     };
 
     // Translate address pointer to physical
-    let addr_paddr = match task.vm_manager.translate_vaddr(addr_ptr) {
+    let addr_paddr = match task.vm_manager.translate_to_kva(addr_ptr) {
         Some(addr) => addr,
         None => {
             crate::early_println!("[linux socket] bind bad addr {:x}", addr_ptr);
@@ -583,7 +583,7 @@ pub fn sys_connect(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usiz
         }
     };
 
-    let addr_paddr = match task.vm_manager.translate_vaddr(addr_ptr) {
+    let addr_paddr = match task.vm_manager.translate_to_kva(addr_ptr) {
         Some(addr) => addr,
         None => {
             crate::early_println!("[linux socket] connect bad addr {:x}", addr_ptr);
@@ -700,8 +700,8 @@ pub fn sys_getsockname(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> 
     };
 
     let (addr_paddr, addrlen_paddr) = match (
-        task.vm_manager.translate_vaddr(addr_ptr),
-        task.vm_manager.translate_vaddr(addrlen_ptr),
+        task.vm_manager.translate_to_kva(addr_ptr),
+        task.vm_manager.translate_to_kva(addrlen_ptr),
     ) {
         (Some(addr), Some(len)) => (addr, len),
         _ => {
@@ -801,8 +801,8 @@ pub fn sys_getpeername(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> 
     };
 
     let (addr_paddr, addrlen_paddr) = match (
-        task.vm_manager.translate_vaddr(addr_ptr),
-        task.vm_manager.translate_vaddr(addrlen_ptr),
+        task.vm_manager.translate_to_kva(addr_ptr),
+        task.vm_manager.translate_to_kva(addrlen_ptr),
     ) {
         (Some(addr), Some(len)) => (addr, len),
         _ => {
@@ -894,8 +894,8 @@ pub fn sys_getsockopt(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> 
 
     // Mock implementation - write minimal valid data and return success
     if let (Some(optval_paddr), Some(optlen_paddr)) = (
-        task.vm_manager.translate_vaddr(optval_ptr),
-        task.vm_manager.translate_vaddr(optlen_ptr),
+        task.vm_manager.translate_to_kva(optval_ptr),
+        task.vm_manager.translate_to_kva(optlen_ptr),
     ) {
         unsafe {
             // Read the provided length
@@ -995,7 +995,7 @@ pub fn sys_sendmsg(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usiz
             .map(|f| ((f as i32) & O_NONBLOCK) != 0)
             .unwrap_or(false);
 
-    let msg_addr = match task.vm_manager.translate_vaddr(msg_ptr) {
+    let msg_addr = match task.vm_manager.translate_to_kva(msg_ptr) {
         Some(addr) => addr as *const LinuxMsghdr,
         None => {
             crate::early_println!("[linux socket] sendmsg bad msg ptr {:x}", msg_ptr);
@@ -1019,7 +1019,7 @@ pub fn sys_sendmsg(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usiz
         return errno::to_result(errno::EINVAL);
     }
 
-    let iovec_addr = match task.vm_manager.translate_vaddr(msg.msg_iov as usize) {
+    let iovec_addr = match task.vm_manager.translate_to_kva(msg.msg_iov as usize) {
         Some(addr) => addr as *const IoVec,
         None => {
             crate::early_println!("[linux socket] sendmsg bad iov ptr {:x}", msg.msg_iov);
@@ -1041,7 +1041,7 @@ pub fn sys_sendmsg(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usiz
         };
 
         if let Some(local_socket) = LocalSocket::from_socket_object(&socket_arc) {
-            let cmsg_addr = match task.vm_manager.translate_vaddr(msg.msg_control as usize) {
+            let cmsg_addr = match task.vm_manager.translate_to_kva(msg.msg_control as usize) {
                 Some(addr) => addr as *const LinuxCmsghdr,
                 None => {
                     crate::early_println!(
@@ -1131,7 +1131,7 @@ pub fn sys_sendmsg(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usiz
             continue;
         }
 
-        let buf_addr = match task.vm_manager.translate_vaddr(iovec.iov_base as usize) {
+        let buf_addr = match task.vm_manager.translate_to_kva(iovec.iov_base as usize) {
             Some(addr) => addr as *const u8,
             None => {
                 crate::early_println!(
@@ -1229,7 +1229,7 @@ pub fn sys_recvmsg(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usiz
             .map(|f| ((f as i32) & O_NONBLOCK) != 0)
             .unwrap_or(false);
 
-    let msg_addr = match task.vm_manager.translate_vaddr(msg_ptr) {
+    let msg_addr = match task.vm_manager.translate_to_kva(msg_ptr) {
         Some(addr) => addr as *mut LinuxMsghdr,
         None => {
             crate::early_println!("[linux socket] recvmsg bad msg ptr {:x}", msg_ptr);
@@ -1260,7 +1260,7 @@ pub fn sys_recvmsg(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usiz
         return errno::to_result(errno::EINVAL);
     }
 
-    let iovec_addr = match task.vm_manager.translate_vaddr(msg.msg_iov as usize) {
+    let iovec_addr = match task.vm_manager.translate_to_kva(msg.msg_iov as usize) {
         Some(addr) => addr as *const IoVec,
         None => {
             crate::early_println!("[linux socket] recvmsg bad iov ptr {:x}", msg.msg_iov);
@@ -1365,7 +1365,7 @@ pub fn sys_recvmsg(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usiz
                 continue;
             }
 
-            let buf_addr = match task.vm_manager.translate_vaddr(iovec.iov_base as usize) {
+            let buf_addr = match task.vm_manager.translate_to_kva(iovec.iov_base as usize) {
                 Some(addr) => addr as *mut u8,
                 None => return errno::to_result(errno::EFAULT),
             };
@@ -1388,7 +1388,7 @@ pub fn sys_recvmsg(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usiz
                 continue;
             }
 
-            let buf_addr = match task.vm_manager.translate_vaddr(iovec.iov_base as usize) {
+            let buf_addr = match task.vm_manager.translate_to_kva(iovec.iov_base as usize) {
                 Some(addr) => addr as *mut u8,
                 None => {
                     return errno::to_result(errno::EFAULT);
@@ -1423,7 +1423,7 @@ pub fn sys_recvmsg(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usiz
     }
 
     if let Some(fd_value) = pending_fd {
-        let cmsg_addr = match task.vm_manager.translate_vaddr(msg.msg_control as usize) {
+        let cmsg_addr = match task.vm_manager.translate_to_kva(msg.msg_control as usize) {
             Some(addr) => addr as *mut LinuxCmsghdr,
             None => return errno::to_result(errno::EFAULT),
         };
@@ -1496,7 +1496,7 @@ pub fn sys_sendto(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize
     };
 
     // Translate buffer pointer
-    let buf_paddr = match task.vm_manager.translate_vaddr(buf_ptr) {
+    let buf_paddr = match task.vm_manager.translate_to_kva(buf_ptr) {
         Some(addr) => addr,
         None => return errno::to_result(errno::EFAULT),
     };
@@ -1505,7 +1505,7 @@ pub fn sys_sendto(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize
 
     // Parse destination address if provided
     let dest_addr = if dest_addr_ptr != 0 && addrlen > 0 {
-        let addr_paddr = match task.vm_manager.translate_vaddr(dest_addr_ptr) {
+        let addr_paddr = match task.vm_manager.translate_to_kva(dest_addr_ptr) {
             Some(addr) => addr,
             None => return errno::to_result(errno::EFAULT),
         };
@@ -1592,7 +1592,7 @@ pub fn sys_recvfrom(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usi
     };
 
     // Translate buffer pointer
-    let buf_paddr = match task.vm_manager.translate_vaddr(buf_ptr) {
+    let buf_paddr = match task.vm_manager.translate_to_kva(buf_ptr) {
         Some(addr) => addr,
         None => return errno::to_result(errno::EFAULT),
     };
@@ -1627,7 +1627,7 @@ pub fn sys_recvfrom(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usi
         Ok((n, src_addr)) => {
             // Store source address if requested
             if src_addr_ptr != 0 && addrlen_ptr != 0 {
-                let addrlen_paddr = match task.vm_manager.translate_vaddr(addrlen_ptr) {
+                let addrlen_paddr = match task.vm_manager.translate_to_kva(addrlen_ptr) {
                     Some(addr) => addr as *mut u32,
                     None => return errno::to_result(errno::EFAULT),
                 };
@@ -1637,7 +1637,7 @@ pub fn sys_recvfrom(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usi
                 match src_addr {
                     crate::network::SocketAddress::Inet(inet) => {
                         if provided_len >= size_of::<SockaddrIn>() as u32 {
-                            let addr_paddr = match task.vm_manager.translate_vaddr(src_addr_ptr) {
+                            let addr_paddr = match task.vm_manager.translate_to_kva(src_addr_ptr) {
                                 Some(addr) => addr as *mut SockaddrIn,
                                 None => return errno::to_result(errno::EFAULT),
                             };
@@ -1722,7 +1722,7 @@ pub fn sys_socketpair(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> u
     }
 
     // Translate sv pointer (needs to write 2 i32 values)
-    let sv_paddr = match task.vm_manager.translate_vaddr(sv_ptr) {
+    let sv_paddr = match task.vm_manager.translate_to_kva(sv_ptr) {
         Some(addr) => addr as *mut i32,
         None => return errno::to_result(errno::EFAULT),
     };

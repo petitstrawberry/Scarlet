@@ -14,9 +14,9 @@ use alloc::{string::String, sync::Arc};
 use core::any::Any;
 
 use crate::{
-    device::{self, Device, DeviceType, char::CharDevice, manager::DeviceManager},
+    device::{self, char::CharDevice, manager::DeviceManager, Device, DeviceType},
     driver_initcall,
-    object::capability::{ControlOps, MemoryMappingOps, selectable::Selectable},
+    object::capability::{selectable::Selectable, ControlOps, MemoryMappingOps},
 };
 
 pub struct NullDevice;

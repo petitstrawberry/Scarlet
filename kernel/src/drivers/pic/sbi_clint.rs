@@ -9,8 +9,8 @@ use alloc::boxed::Box;
 use crate::{
     early_initcall,
     interrupt::{
-        CpuId, InterruptError, InterruptManager, InterruptResult,
         controllers::{LocalInterruptController, LocalInterruptType},
+        CpuId, InterruptError, InterruptManager, InterruptResult,
     },
 };
 

@@ -46,6 +46,7 @@ use crate::{
     environment::PAGE_SIZE,
 };
 
+use super::addr::phys_to_virt;
 use super::vmem::{MemoryArea, VirtualMemoryMap};
 
 #[derive(Debug, Clone)]
@@ -674,18 +675,11 @@ impl VirtualMemoryManager {
         }
     }
 
-    /// Translate a virtual address to physical address
-    ///
-    /// This method uses efficient search with caching for optimal performance.
-    ///
-    /// # Arguments
-    ///
-    /// * `vaddr` - The virtual address to translate
-    ///
-    /// # Returns
-    ///
-    /// The translated physical address. Returns None if no mapping exists for the address
-    pub fn translate_vaddr(&self, vaddr: usize) -> Option<usize> {
+    pub fn translate_to_kva(&self, vaddr: usize) -> Option<usize> {
+        self.translate_to_phys(vaddr).map(phys_to_virt)
+    }
+
+    pub fn translate_to_phys(&self, vaddr: usize) -> Option<usize> {
         if let Some(map) = self.search_memory_map(vaddr) {
             if map.pmarea.start == 0 {
                 return None;
@@ -697,6 +691,14 @@ impl VirtualMemoryManager {
         } else {
             None
         }
+    }
+
+    pub fn translate_vaddr(&self, vaddr: usize) -> Option<usize> {
+        self.translate_to_kva(vaddr)
+    }
+
+    pub fn translate_vaddr_to_phys(&self, vaddr: usize) -> Option<usize> {
+        self.translate_to_phys(vaddr)
     }
 
     /// Gets the mmap base address
@@ -1937,7 +1939,7 @@ mod tests {
 
         // The page should now be mapped in the MMU
         // For testing, we can't directly check MMU state, so we verify by translating the address
-        let translated_addr = manager.translate_vaddr(0x1500);
+        let translated_addr = manager.translate_to_kva(0x1500);
         assert!(translated_addr.is_some());
         assert_eq!(translated_addr.unwrap() & !(PAGE_SIZE - 1), 0x1000); // Should be page-aligned
 
@@ -1946,7 +1948,7 @@ mod tests {
         manager.remove_memory_map_by_addr(0x1500);
 
         // Translation should now fail as the memory map is removed
-        let translated_addr_after_unmap = manager.translate_vaddr(0x1500);
+        let translated_addr_after_unmap = manager.translate_to_kva(0x1500);
         assert!(translated_addr_after_unmap.is_none());
     }
 

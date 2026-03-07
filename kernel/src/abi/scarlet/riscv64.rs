@@ -15,17 +15,17 @@ use alloc::{
 use core::sync::atomic::Ordering;
 
 use crate::{
-    arch::{Trapframe, vm},
+    arch::{vm, Trapframe},
     early_initcall,
     fs::{
-        FileSystemError, FileSystemErrorKind, SeekFrom, VfsManager, drivers::overlayfs::OverlayFS,
+        drivers::overlayfs::OverlayFS, FileSystemError, FileSystemErrorKind, SeekFrom, VfsManager,
     },
     ipc::event::{Event, EventContent, EventPriority, ProcessControlType},
     register_abi,
     syscall::syscall_handler,
     task::elf_loader::{
-        ExecutionMode, LoadStrategy, LoadTarget, analyze_and_load_elf_with_strategy,
-        build_auxiliary_vector, setup_auxiliary_vector_on_stack,
+        analyze_and_load_elf_with_strategy, build_auxiliary_vector,
+        setup_auxiliary_vector_on_stack, ExecutionMode, LoadStrategy, LoadTarget,
     },
     vm::setup_user_stack,
 };
@@ -226,7 +226,7 @@ impl ScarletAbi {
     pub fn on_task_exit(&mut self, task: &crate::task::Task) {
         // Linux-compatible behavior: write 0 to clear_child_tid and futex wake
         if let Some(ptr) = self.clear_child_tid_ptr {
-            if let Some(paddr) = task.vm_manager.translate_vaddr(ptr) {
+            if let Some(paddr) = task.vm_manager.translate_to_kva(ptr) {
                 unsafe {
                     *(paddr as *mut i32) = 0;
                 }
@@ -498,35 +498,30 @@ impl ScarletAbi {
 
         unsafe {
             let paddr = task
-                .vm_manager
-                .translate_vaddr(frame_base)
+                .vm_manager.translate_to_kva(frame_base)
                 .ok_or("Failed to translate signal frame address")?;
             *(paddr as *mut u32) = trampoline_instr_0;
             *((paddr as *mut u32).add(1)) = trampoline_instr_1;
 
             let paddr = task
-                .vm_manager
-                .translate_vaddr(frame_base + 8)
+                .vm_manager.translate_to_kva(frame_base + 8)
                 .ok_or("Failed to translate signal frame address")?;
             *(paddr as *mut usize) = subtype;
 
             let paddr = task
-                .vm_manager
-                .translate_vaddr(frame_base + 16)
+                .vm_manager.translate_to_kva(frame_base + 16)
                 .ok_or("Failed to translate signal frame address")?;
             *(paddr as *mut usize) = content_type;
 
             for i in 0..32 {
                 let paddr = task
-                    .vm_manager
-                    .translate_vaddr(frame_base + 24 + i * 8)
+                    .vm_manager.translate_to_kva(frame_base + 24 + i * 8)
                     .ok_or("Failed to translate signal frame address")?;
                 *(paddr as *mut usize) = trapframe.regs.reg[i];
             }
 
             let paddr = task
-                .vm_manager
-                .translate_vaddr(frame_base + 280)
+                .vm_manager.translate_to_kva(frame_base + 280)
                 .ok_or("Failed to translate signal frame address")?;
             *(paddr as *mut u64) = trapframe.epc;
         }
@@ -564,15 +559,13 @@ impl ScarletAbi {
         unsafe {
             for i in 0..32 {
                 let paddr = task
-                    .vm_manager
-                    .translate_vaddr(frame_base + 24 + i * 8)
+                    .vm_manager.translate_to_kva(frame_base + 24 + i * 8)
                     .ok_or("Failed to translate signal frame address")?;
                 trapframe.regs.reg[i] = *(paddr as *const usize);
             }
 
             let paddr = task
-                .vm_manager
-                .translate_vaddr(frame_base + 280)
+                .vm_manager.translate_to_kva(frame_base + 280)
                 .ok_or("Failed to translate signal frame address")?;
             trapframe.epc = *(paddr as *const u64);
         }
@@ -848,6 +841,21 @@ impl AbiModule for ScarletAbi {
                             self.setup_arguments_on_stack(task, argv, envp, stack_pointer)?;
                         task.vcpu.lock().set_sp(adjusted_sp);
 
+                        crate::early_println!(
+                            "[scarlet-abi] adjusted_sp={:#x} argv_ptr={:#x}",
+                            adjusted_sp,
+                            argv_ptr
+                        );
+                        crate::early_println!(
+                            "[scarlet-abi] sp->pa={:#x} argv->pa={:#x}",
+                            task.vm_manager
+                                .translate_to_phys(adjusted_sp)
+                                .unwrap_or(usize::MAX),
+                            task.vm_manager
+                                .translate_to_phys(argv_ptr)
+                                .unwrap_or(usize::MAX)
+                        );
+
                         // Set RISC-V calling convention registers
                         // a0 (reg[10]) = argc
                         // a1 (reg[11]) = argv pointer
@@ -880,7 +888,7 @@ impl AbiModule for ScarletAbi {
         elf_type: u16,
         target: crate::task::elf_loader::LoadTarget,
     ) -> Option<u64> {
-        use crate::task::elf_loader::{ET_DYN, LoadTarget};
+        use crate::task::elf_loader::{LoadTarget, ET_DYN};
 
         // Scarlet Native ABI uses standard Linux-style memory layout
         if elf_type == ET_DYN {
@@ -1261,12 +1269,12 @@ impl ScarletAbi {
                 crate::environment::PAGE_SIZE - page_off,
             );
 
-            match task.vm_manager.translate_vaddr(current_vaddr) {
-                Some(paddr) => {
+            match task.vm_manager.translate_to_kva(current_vaddr) {
+                Some(kaddr) => {
                     unsafe {
                         core::ptr::copy_nonoverlapping(
                             data[written..written + chunk_len].as_ptr(),
-                            paddr as *mut u8,
+                            kaddr as *mut u8,
                             chunk_len,
                         );
                     }

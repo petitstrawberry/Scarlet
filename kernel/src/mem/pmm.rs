@@ -3,6 +3,7 @@ use spin::Mutex;
 
 use crate::early_println;
 use crate::environment::PAGE_SIZE;
+use crate::vm::phys_to_virt;
 use crate::vm::vmem::MemoryArea;
 
 const MAX_ORDER: usize = 22;
@@ -166,7 +167,7 @@ impl BuddyRegion {
             return;
         }
 
-        self.pages = self.mem_start as *mut Page;
+        self.pages = phys_to_virt(self.mem_start) as *mut Page;
 
         unsafe {
             for i in 0..self.page_count {

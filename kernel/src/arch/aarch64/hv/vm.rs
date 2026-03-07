@@ -6,7 +6,7 @@ use spin::Mutex;
 
 use crate::hypervisor::memory::MemorySlotFlags;
 use crate::hypervisor::vcpu::{VcpuId, VcpuObject};
-use crate::hypervisor::vm::{VmId, VmObject, vm_ctl};
+use crate::hypervisor::vm::{vm_ctl, VmId, VmObject};
 use crate::object::capability::ControlOps;
 
 struct VmInternalState {

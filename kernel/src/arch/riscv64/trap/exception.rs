@@ -3,7 +3,7 @@ use core::panic;
 
 use crate::abi::syscall_dispatcher;
 use crate::arch::trap::print_traplog;
-use crate::arch::{Trapframe, get_cpu};
+use crate::arch::{get_cpu, Trapframe};
 use crate::println;
 use crate::sched::scheduler::get_scheduler;
 use crate::task::mytask;
@@ -84,7 +84,7 @@ pub fn arch_exception_handler(trapframe: &mut Trapframe, cause: usize) {
             // If stval doesn't contain the instruction, try to fetch it from the task's
             // mapped user code via the VM translation.
             if inst == 0 {
-                if let Some(paddr) = task.vm_manager.translate_vaddr(trapframe.epc as usize) {
+                if let Some(paddr) = task.vm_manager.translate_to_kva(trapframe.epc as usize) {
                     inst = crate::arch::instruction::Instruction::fetch(paddr).raw as usize;
                 }
             }

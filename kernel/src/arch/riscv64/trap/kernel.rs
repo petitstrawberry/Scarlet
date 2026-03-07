@@ -2,7 +2,7 @@ use core::arch::naked_asm;
 use core::{arch::asm, mem::transmute};
 
 use crate::arch::trap::print_traplog;
-use crate::arch::{Trapframe, get_cpu};
+use crate::arch::{get_cpu, Trapframe};
 use crate::environment::PAGE_SIZE;
 use crate::object::capability::memory_mapping::{AccessKind, AccessOp};
 use crate::sched::scheduler::get_scheduler;

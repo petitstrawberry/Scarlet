@@ -57,9 +57,9 @@ const ELFMAG: [u8; 4] = [0x7F, b'E', b'L', b'F'];
 // ELF Class
 // const ELFCLASS32: u8 = 1; // 32-bit
 const ELFCLASS64: u8 = 2; // 64-bit
-// ELF Data Endian
+                          // ELF Data Endian
 const ELFDATA2LSB: u8 = 1; // Little Endian
-// const ELFDATA2MSB: u8 = 2; // Big Endian
+                           // const ELFDATA2MSB: u8 = 2; // Big Endian
 
 // ELF File Type
 pub const ET_EXEC: u16 = 2; // Executable file
@@ -1053,11 +1053,11 @@ fn load_elf_into_task_static(
                 //     crate::println!("  data: {}", hex_str);
                 // }
 
-                match task.vm_manager.translate_vaddr(target_vaddr) {
-                    Some(paddr) => unsafe {
+                match task.vm_manager.translate_to_kva(target_vaddr) {
+                    Some(kaddr) => unsafe {
                         core::ptr::copy_nonoverlapping(
                             segment_data.as_ptr(),
-                            phys_to_virt(paddr) as *mut u8,
+                            kaddr as *mut u8,
                             ph.p_filesz as usize,
                         );
                     },
@@ -1094,7 +1094,7 @@ fn load_elf_into_task_static(
 
     // Validate that the entry point is actually mapped
     let entry_vaddr = final_entry_point as usize;
-    if task.vm_manager.translate_vaddr(entry_vaddr).is_none() {
+    if task.vm_manager.translate_to_kva(entry_vaddr).is_none() {
         // Entry point is not mapped - try to fix it by checking if e_entry
         // falls within a PT_LOAD segment
         let mut fixed_entry = None;
@@ -1197,11 +1197,11 @@ fn load_program_headers_into_memory(
     })?;
 
     // Copy program headers to task memory
-    match task.vm_manager.translate_vaddr(phdr_vaddr as usize) {
-        Some(paddr) => unsafe {
+    match task.vm_manager.translate_to_kva(phdr_vaddr as usize) {
+        Some(kaddr) => unsafe {
             core::ptr::copy_nonoverlapping(
                 phdr_data.as_ptr(),
-                phys_to_virt(paddr) as *mut u8,
+                kaddr as *mut u8,
                 phdr_table_size as usize,
             );
         },
@@ -1377,9 +1377,9 @@ pub fn setup_auxiliary_vector_on_stack(
         let vaddr = auxv_start + offset;
 
         // Translate to physical address and write
-        match task.vm_manager.translate_vaddr(vaddr) {
-            Some(paddr) => unsafe {
-                let ptr = phys_to_virt(paddr) as *mut AuxVec;
+        match task.vm_manager.translate_to_kva(vaddr) {
+            Some(kaddr) => unsafe {
+                let ptr = kaddr as *mut AuxVec;
                 ptr.write(*entry);
             },
             None => {
@@ -1450,7 +1450,7 @@ fn load_elf_segment_at_address(
         let data_offset = (segment_addr as usize) - mapping_start;
         let target_vaddr = mapping_start + data_offset;
 
-        match task.vm_manager.translate_vaddr(target_vaddr) {
+        match task.vm_manager.translate_to_kva(target_vaddr) {
             Some(paddr) => unsafe {
                 core::ptr::copy_nonoverlapping(
                     segment_data.as_ptr(),

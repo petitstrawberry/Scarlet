@@ -20,7 +20,7 @@
   },
   "panic-strategy": "abort",
   "pre-link-args": {
-      "ld.lld": ["-T", "lds/riscv64_qemu_virt.ld"]
+      "ld.lld": ["-T", "lds/riscv64_limine.ld"]
     },
   "relocation-model": "static",
   "supported-sanitizers": [

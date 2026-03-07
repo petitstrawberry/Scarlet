@@ -20,8 +20,8 @@ use core::any::Any;
 use spin::RwLock;
 
 use crate::device::{
-    Device, DeviceType, char::CharDevice, graphics::manager::FramebufferResource,
-    manager::DeviceManager,
+    char::CharDevice, graphics::manager::FramebufferResource, manager::DeviceManager, Device,
+    DeviceType,
 };
 use crate::object::capability::selectable::Selectable;
 use crate::object::capability::{ControlOps, MemoryMappingOps};
@@ -488,8 +488,7 @@ impl MemoryMappingOps for FramebufferCharDevice {
         // FramebufferResource stores a kernel virtual address for CPU access.
         // Convert it to a physical address for user mmap.
         let kva = fb_resource.physical_addr + offset;
-        let paddr = crate::vm::get_kernel_vm_manager()
-            .translate_vaddr(kva)
+        let paddr = crate::vm::get_kernel_vm_manager().translate_to_phys(kva)
             .ok_or("Failed to translate framebuffer address")?;
         let permissions = 0x3; // Read and Write
         let is_shared = true; // Framebuffer mappings are shared
@@ -642,8 +641,7 @@ impl FramebufferCharDevice {
         let target_ptr = if let Some(current_task) = crate::task::mytask() {
             // User space: translate virtual address to physical
             current_task
-                .vm_manager
-                .translate_vaddr(arg)
+                .vm_manager.translate_to_kva(arg)
                 .ok_or("Invalid user pointer - not mapped")?
         } else {
             // Kernel space: use pointer directly
@@ -672,8 +670,7 @@ impl FramebufferCharDevice {
         let target_ptr = if let Some(current_task) = crate::task::mytask() {
             // User space: translate virtual address to physical
             current_task
-                .vm_manager
-                .translate_vaddr(arg)
+                .vm_manager.translate_to_kva(arg)
                 .ok_or("Invalid user pointer - not mapped")?
         } else {
             // Kernel space: use pointer directly
@@ -775,7 +772,7 @@ impl FramebufferCharDevice {
 
         // Translate user-space pointer if available
         let target_ptr = if let Some(current_task) = crate::task::mytask() {
-            match current_task.vm_manager.translate_vaddr(arg) {
+            match current_task.vm_manager.translate_to_kva(arg) {
                 Some(p) => p,
                 None => return Ok(-14), // EFAULT
             }
@@ -801,10 +798,10 @@ impl FramebufferCharDevice {
 mod tests {
     use super::*;
     use crate::device::{
-        Device,
         graphics::{
-            FramebufferConfig, GenericGraphicsDevice, PixelFormat, manager::GraphicsManager,
+            manager::GraphicsManager, FramebufferConfig, GenericGraphicsDevice, PixelFormat,
         },
+        Device,
     };
     use alloc::{string::ToString, sync::Arc};
     use spin::RwLock;

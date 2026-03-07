@@ -3,8 +3,9 @@
 
 use crate::{
     abi::linux::riscv64::{
-        LinuxRiscv64Abi, errno,
+        errno,
         fs::{FD_CLOEXEC, O_CLOEXEC, O_NONBLOCK},
+        LinuxRiscv64Abi,
     },
     arch::Trapframe,
     ipc::UnidirectionalPipe,
@@ -30,7 +31,7 @@ pub fn sys_pipe2(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize 
         return errno::to_result(errno::EINVAL);
     }
 
-    let pipefd_ptr = match task.vm_manager.translate_vaddr(pipefd_user) {
+    let pipefd_ptr = match task.vm_manager.translate_to_kva(pipefd_user) {
         Some(ptr) => ptr as *mut u32,
         None => return errno::to_result(errno::EFAULT),
     };

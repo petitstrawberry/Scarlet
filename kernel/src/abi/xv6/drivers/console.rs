@@ -2,7 +2,7 @@ use core::any::Any;
 
 use crate::object::capability::selectable::Selectable;
 use crate::{
-    device::{Device, DeviceType, char::CharDevice, manager::DeviceManager},
+    device::{char::CharDevice, manager::DeviceManager, Device, DeviceType},
     object::capability::{ControlOps, MemoryMappingOps},
 };
 

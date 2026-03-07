@@ -35,6 +35,10 @@ impl IntRegisters {
 
     pub fn get_arg(&self, index: usize) -> usize {
         // AArch64 syscall arguments: X0-X7
-        if index < 8 { self.reg[index] } else { 0 }
+        if index < 8 {
+            self.reg[index]
+        } else {
+            0
+        }
     }
 }

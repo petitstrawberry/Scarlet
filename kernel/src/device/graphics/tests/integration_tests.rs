@@ -9,14 +9,14 @@ mod integration_tests {
     use spin::RwLock;
 
     use crate::device::{
-        Device, DeviceType,
         char::CharDevice,
         graphics::{
-            FramebufferConfig, GenericGraphicsDevice, PixelFormat,
             framebuffer_device::FramebufferCharDevice,
             manager::{FramebufferResource, GraphicsManager},
+            FramebufferConfig, GenericGraphicsDevice, PixelFormat,
         },
         manager::DeviceManager,
+        Device, DeviceType,
     };
 
     #[test_case]
@@ -146,16 +146,12 @@ mod integration_tests {
             device_manager.register_device_with_name("gpu-2".to_string(), shared_device2.clone());
 
         // Register both devices with GraphicsManager
-        assert!(
-            graphics_manager
-                .register_framebuffer_from_device(device_id1, shared_device1)
-                .is_ok()
-        );
-        assert!(
-            graphics_manager
-                .register_framebuffer_from_device(device_id2, shared_device2)
-                .is_ok()
-        );
+        assert!(graphics_manager
+            .register_framebuffer_from_device(device_id1, shared_device1)
+            .is_ok());
+        assert!(graphics_manager
+            .register_framebuffer_from_device(device_id2, shared_device2)
+            .is_ok());
 
         // Verify both framebuffers are registered
         assert_eq!(graphics_manager.get_framebuffer_count(), 2);
@@ -639,11 +635,9 @@ mod integration_tests {
         assert_eq!(middle_pixel[3], 0xFF); // Full alpha
 
         // Verify we can't write beyond framebuffer boundary
-        assert!(
-            fb_char_device
-                .write_at(expected_total_bytes as u64, &[0xFF])
-                .is_err()
-        );
+        assert!(fb_char_device
+            .write_at(expected_total_bytes as u64, &[0xFF])
+            .is_err());
 
         // Test read/write capabilities at valid position
         assert!(fb_char_device.can_read());

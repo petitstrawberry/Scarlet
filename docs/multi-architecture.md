@@ -111,11 +111,13 @@ mkfs/rootfs/system/
 ```bash
 cargo make debug-riscv64      # Debug mode
 cargo make debug-test-riscv64 # Test mode
+cargo make run-limine-riscv64 # Limine-based boot path
 ```
 
 Or manually:
 ```bash
 bash kernel/tools/run.sh
+bash kernel/tools/run_limine_riscv64.sh
 ```
 
 ### AArch64
@@ -123,11 +125,13 @@ bash kernel/tools/run.sh
 ```bash
 cargo make debug-aarch64      # Debug mode
 cargo make debug-test-aarch64 # Test mode
+cargo make run-limine-aarch64 # Limine-based boot path
 ```
 
 Or manually:
 ```bash
 bash kernel/tools/run_aarch64.sh
+bash kernel/tools/run_limine_aarch64.sh
 ```
 
 ## Testing
@@ -199,6 +203,8 @@ QEMU virt machine device trees:
 
 - `virt-riscv64.dts` / `virt-riscv64.dtb` - RISC-V device tree
 - `virt-aarch64.dts` - AArch64 device tree (generated on-the-fly by QEMU)
+
+The Limine AArch64 workflow materializes the generated QEMU `virt` DTB into `mkfs/dist/virt-aarch64-limine.dtb` so Scarlet can keep using its existing FDT-based `BootInfo` handoff.
 
 ## Key Differences Between Architectures
 

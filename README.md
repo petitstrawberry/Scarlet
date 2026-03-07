@@ -156,6 +156,8 @@ Scarlet supports multiple CPU architectures with a unified codebase:
 - **RISC-V 64-bit** - Primary development platform, fully supported
 - **AArch64 (ARM 64-bit)** - In development, basic support available
 
+Scarlet is migrating its boot flow to **Limine**, with `riscv64` now serving as the primary higher-half boot path. See [Limine Boot Path](docs/limine-boot.md).
+
 The kernel includes hardware abstraction layers for interrupt handling, memory management, graphics/framebuffer support, and device drivers that work across both architectures.
 
 ### Building for Different Architectures
@@ -164,6 +166,10 @@ The kernel includes hardware abstraction layers for interrupt handling, memory m
 # RISC-V (default)
 cargo make build
 cargo make run-riscv64
+
+# RISC-V via Limine
+cargo make build-limine-riscv64
+cargo make run-limine-riscv64
 
 # AArch64
 ARCH=aarch64 cargo make build
@@ -210,6 +216,8 @@ cargo make debug-riscv64              # Debug with GDB
 
 Requirements: Rust nightly, `cargo-make`, `qemu`, RISC-V toolchain
 
+For the Limine workflows, the development environment needs the appropriate UEFI firmware packages (`qemu-efi-riscv64`, `qemu-efi-aarch64`). The provided Docker image should include them after rebuild.
+
 ### Build Commands
 
 ```bash
@@ -236,6 +244,9 @@ cargo make test-riscv64
 # Debug kernel with GDB
 cargo make debug-riscv64
 # Then in another terminal: gdb and connect to :1234
+
+# Run the Limine-based RISC-V image
+cargo make run-limine-riscv64
 ```
 
 ## Contributing
@@ -250,6 +261,7 @@ For more detailed information about the Scarlet kernel, visit our documentation:
 - [Linux userspace artifacts (Buildroot + optional binaries)](docs/abi/linux/userspace-artifacts.md)
 - [Linux rootfs deployment guide](docs/abi/linux/deployment.md)
 - [Linux ABI support status and roadmap](docs/abi/linux/status.md)
+- [Limine Boot Path](docs/limine-boot.md)
 
 ### Generating Documentation
 

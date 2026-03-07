@@ -1,7 +1,7 @@
 use crate::{
     abi::linux::riscv64::{
-        LinuxRiscv64Abi,
         errno::{self, to_result},
+        LinuxRiscv64Abi,
     },
     arch::Trapframe,
     environment::PAGE_SIZE,
@@ -507,7 +507,7 @@ pub fn sys_mprotect(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> us
     // Check if all pages in the range are mapped
     for i in 0..num_pages {
         let page_addr = addr + i * PAGE_SIZE;
-        if task.vm_manager.translate_vaddr(page_addr).is_none() {
+        if task.vm_manager.translate_to_kva(page_addr).is_none() {
             return usize::MAX; // -ENOMEM
         }
     }

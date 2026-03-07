@@ -4,8 +4,8 @@
 
 use crate::arch::Trapframe;
 
-use super::IntRegisters;
 use super::fpu::FpuContext;
+use super::IntRegisters;
 use crate::arch::Mode;
 
 #[derive(Debug, Clone)]

@@ -4,9 +4,9 @@ use core::sync::atomic::compiler_fence;
 
 use crate::arch::Trapframe;
 use crate::hypervisor::types::VcpuExit;
-use crate::hypervisor::vm::{GLOBAL_VM_MANAGER, VmObject};
-use crate::object::KernelObject;
+use crate::hypervisor::vm::{VmObject, GLOBAL_VM_MANAGER};
 use crate::object::handle::HandleMetadata;
+use crate::object::KernelObject;
 use crate::println;
 use crate::task::mytask;
 
@@ -116,7 +116,7 @@ pub fn sys_shv_vcpu_run(trapframe: &mut Trapframe) -> usize {
     }
 
     // Translate the exit pointer to kernel address
-    let exit_kaddr = match task.vm_manager.translate_vaddr(exit_ptr) {
+    let exit_kaddr = match task.vm_manager.translate_to_kva(exit_ptr) {
         Some(addr) => addr,
         None => return usize::MAX,
     };

@@ -12,7 +12,7 @@ use alloc::{
     vec::Vec,
 };
 use core::{any::Any, fmt::Debug};
-use spin::{Mutex, rwlock::RwLock};
+use spin::{rwlock::RwLock, Mutex};
 
 use crate::fs::{
     FileMetadata, FileObject, FilePermission, FileSystemError, FileSystemErrorKind, FileType,
@@ -24,6 +24,7 @@ use crate::environment::PAGE_SIZE;
 use crate::fs::vfs_v2::cache::PageCacheCapable;
 use crate::fs::vfs_v2::core::{FileSystemOperations, VfsNode};
 use crate::mem::{page::ContiguousPages, page_cache::PageCacheManager};
+use crate::vm::addr::phys_to_virt;
 
 /// FAT32 filesystem node
 ///
@@ -294,7 +295,7 @@ impl Fat32FileObject {
 
             unsafe {
                 core::ptr::copy_nonoverlapping(
-                    pinned.paddr() as *const u8,
+                    phys_to_virt(pinned.paddr()) as *const u8,
                     buffer.as_mut_ptr().add(start),
                     len,
                 );
@@ -384,7 +385,7 @@ impl Fat32FileObject {
                 .map_err(|_| StreamError::IoError)?;
             unsafe {
                 core::ptr::copy_nonoverlapping(
-                    pinned.paddr() as *const u8,
+                    phys_to_virt(pinned.paddr()) as *const u8,
                     backing_ptr.add(page_index * PAGE_SIZE),
                     PAGE_SIZE,
                 );
@@ -489,7 +490,7 @@ impl StreamOps for Fat32FileObject {
                 .map_err(|_| StreamError::IoError)?;
 
             unsafe {
-                let src = (pinned.paddr() as *const u8).add(offset_in_page);
+                let src = (phys_to_virt(pinned.paddr()) as *const u8).add(offset_in_page);
                 let remaining_in_page = PAGE_SIZE - offset_in_page;
                 let remaining_file = file_size - pos;
                 let remaining_buf = buffer.len() - total_read;
@@ -542,7 +543,7 @@ impl StreamOps for Fat32FileObject {
                 .map_err(|_| StreamError::IoError)?;
 
             unsafe {
-                let dst = (pinned.paddr() as *mut u8).add(page_off);
+                let dst = (phys_to_virt(pinned.paddr()) as *mut u8).add(page_off);
                 let src = buffer.as_ptr().add(written);
                 core::ptr::copy_nonoverlapping(src, dst, chunk);
             }
@@ -904,7 +905,7 @@ impl FileObject for Fat32FileObject {
                     .map_err(|_| StreamError::IoError)?;
                 unsafe {
                     core::ptr::copy_nonoverlapping(
-                        pinned.paddr() as *const u8,
+                        phys_to_virt(pinned.paddr()) as *const u8,
                         buffer.as_mut_ptr().add(start),
                         len,
                     );

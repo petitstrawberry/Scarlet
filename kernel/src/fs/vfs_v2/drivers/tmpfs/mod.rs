@@ -14,7 +14,7 @@ use alloc::{
     vec::Vec,
 };
 use core::{any::Any, fmt::Debug};
-use spin::{Mutex, rwlock::RwLock};
+use spin::{rwlock::RwLock, Mutex};
 
 use crate::device::manager::DeviceManager;
 use crate::environment::PAGE_SIZE;
@@ -24,12 +24,13 @@ use crate::{
     device::{Device, DeviceType},
     driver_initcall,
     fs::{
-        DeviceFileInfo, FileMetadata, FileObject, FilePermission, FileSystemDriver,
-        FileSystemError, FileSystemErrorKind, FileType, SocketFileInfo, get_fs_driver_manager,
-        vfs_v2::cache::PageCacheCapable,
+        get_fs_driver_manager, vfs_v2::cache::PageCacheCapable, DeviceFileInfo, FileMetadata,
+        FileObject, FilePermission, FileSystemDriver, FileSystemError, FileSystemErrorKind,
+        FileType, SocketFileInfo,
     },
     mem::{page::ContiguousPages, page_cache::PageCacheManager},
     object::capability::MemoryMappingOps,
+    vm::addr::phys_to_virt,
 };
 
 use super::super::core::{DirectoryEntryInternal, FileSystemId, FileSystemOperations, VfsNode};
@@ -842,14 +843,14 @@ impl TmpFileObject {
             let pinned = PageCacheManager::global()
                 .pin_or_load(cache_id, page_index as u64, |paddr| {
                     unsafe {
-                        core::ptr::write_bytes(paddr as *mut u8, 0, PAGE_SIZE);
+                        core::ptr::write_bytes(phys_to_virt(paddr) as *mut u8, 0, PAGE_SIZE);
                     }
                     Ok(())
                 })
                 .map_err(|_| StreamError::IoError)?;
             unsafe {
                 core::ptr::copy_nonoverlapping(
-                    pinned.paddr() as *const u8,
+                    phys_to_virt(pinned.paddr()) as *const u8,
                     backing_ptr.add(page_index * PAGE_SIZE),
                     PAGE_SIZE,
                 );
@@ -948,7 +949,7 @@ impl TmpFileObject {
             let pinned = PageCacheManager::global()
                 .pin_or_load(cache_id, page_index, |paddr| {
                     unsafe {
-                        core::ptr::write_bytes(paddr as *mut u8, 0, PAGE_SIZE);
+                        core::ptr::write_bytes(phys_to_virt(paddr) as *mut u8, 0, PAGE_SIZE);
                     }
                     Ok(())
                 })
@@ -957,7 +958,7 @@ impl TmpFileObject {
                 })?;
 
             unsafe {
-                let src = (pinned.paddr() as *const u8).add(offset_in_page);
+                let src = (phys_to_virt(pinned.paddr()) as *const u8).add(offset_in_page);
                 let remaining_in_page = PAGE_SIZE - offset_in_page;
                 let remaining_file = (file_size - pos) as usize;
                 let remaining_buf = buffer.len() - total_read;
@@ -1059,7 +1060,7 @@ impl TmpFileObject {
             let pinned = PageCacheManager::global()
                 .pin_or_load(cache_id, page_index, |paddr| {
                     unsafe {
-                        core::ptr::write_bytes(paddr as *mut u8, 0, PAGE_SIZE);
+                        core::ptr::write_bytes(phys_to_virt(paddr) as *mut u8, 0, PAGE_SIZE);
                     }
                     Ok(())
                 })
@@ -1385,7 +1386,7 @@ impl FileObject for TmpFileObject {
                 .map_err(|_| StreamError::IoError)?;
 
             unsafe {
-                let src = (pinned.paddr() as *const u8).add(offset_in_page);
+                let src = (phys_to_virt(pinned.paddr()) as *const u8).add(offset_in_page);
                 let remaining_in_page = PAGE_SIZE - offset_in_page;
                 let remaining_file = file_size - (offset + total_read);
                 let remaining_buf = buffer.len() - total_read;
@@ -1420,14 +1421,14 @@ impl FileObject for TmpFileObject {
             let pinned = PageCacheManager::global()
                 .pin_or_load(cache_id, page_index, |paddr| {
                     unsafe {
-                        core::ptr::write_bytes(paddr as *mut u8, 0, PAGE_SIZE);
+                        core::ptr::write_bytes(phys_to_virt(paddr) as *mut u8, 0, PAGE_SIZE);
                     }
                     Ok(())
                 })
                 .map_err(|_| StreamError::IoError)?;
 
             unsafe {
-                let dst = (pinned.paddr() as *mut u8).add(page_off);
+                let dst = (phys_to_virt(pinned.paddr()) as *mut u8).add(page_off);
                 let src = buffer.as_ptr().add(written);
                 core::ptr::copy_nonoverlapping(src, dst, chunk);
             }
@@ -1512,14 +1513,14 @@ impl FileObject for TmpFileObject {
                 let pinned = PageCacheManager::global()
                     .pin_or_load(cache_id, page_index as u64, |paddr| {
                         unsafe {
-                            core::ptr::write_bytes(paddr as *mut u8, 0, PAGE_SIZE);
+                            core::ptr::write_bytes(phys_to_virt(paddr) as *mut u8, 0, PAGE_SIZE);
                         }
                         Ok(())
                     })
                     .map_err(|_| StreamError::IoError)?;
 
                 unsafe {
-                    let base = pinned.paddr() as *mut u8;
+                    let base = phys_to_virt(pinned.paddr()) as *mut u8;
                     if page_index == start_page && tail_offset != 0 {
                         core::ptr::write_bytes(base.add(tail_offset), 0, PAGE_SIZE - tail_offset);
                     } else {

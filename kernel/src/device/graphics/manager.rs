@@ -29,9 +29,9 @@ use hashbrown::HashMap;
 use spin::{Mutex, RwLock};
 
 use crate::device::{
-    DeviceType,
     graphics::{FramebufferConfig, GraphicsDevice},
     manager::{DeviceManager, SharedDevice},
+    DeviceType,
 };
 
 /// Framebuffer resource extracted from graphics devices
@@ -138,7 +138,7 @@ impl GraphicsManager {
         let device_manager = DeviceManager::get_manager();
         let device_count = device_manager.get_devices_count();
 
-        for device_id in 0..device_count {
+        for device_id in 1..=device_count {
             core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
 
             let device = match device_manager.get_device(device_id) {
@@ -186,14 +186,34 @@ impl GraphicsManager {
             .as_graphics_device()
             .ok_or("Device is not a graphics device")?;
 
+        crate::early_println!(
+            "[GraphicsManager] Initializing graphics device {}",
+            device_id
+        );
+
         // Initialize the graphics device if needed via trait (no downcast)
         graphics_device.init_graphics()?;
+        crate::early_println!(
+            "[GraphicsManager] Graphics device {} initialized",
+            device_id
+        );
 
         // Extract framebuffer configuration
         let config = graphics_device.get_framebuffer_config()?;
+        crate::early_println!(
+            "[GraphicsManager] Graphics device {} config {}x{}",
+            device_id,
+            config.width,
+            config.height
+        );
 
         // Extract framebuffer address
         let physical_addr = graphics_device.get_framebuffer_address()?;
+        crate::early_println!(
+            "[GraphicsManager] Graphics device {} framebuffer paddr={:#x}",
+            device_id,
+            physical_addr
+        );
 
         // Calculate framebuffer size
         // The logical size is what the pixels actually use
@@ -238,6 +258,10 @@ impl GraphicsManager {
         );
 
         // Automatically create and register the character device
+        crate::early_println!(
+            "[GraphicsManager] Creating framebuffer char device for {}",
+            logical_name
+        );
         if let Err(e) = self.create_framebuffer_char_device(&logical_name) {
             crate::early_println!(
                 "[GraphicsManager] Warning: Failed to create character device for {}: {}",
@@ -545,10 +569,10 @@ mod test_utils {
 mod tests {
     use super::*;
     use crate::device::{
-        Device,
         graphics::{
-            FramebufferConfig, GenericGraphicsDevice, PixelFormat, manager::GraphicsManager,
+            manager::GraphicsManager, FramebufferConfig, GenericGraphicsDevice, PixelFormat,
         },
+        Device,
     };
     use alloc::{string::ToString, sync::Arc};
 
@@ -641,16 +665,12 @@ mod tests {
         let shared_device2: SharedDevice = Arc::new(device2);
 
         // Register both devices
-        assert!(
-            manager
-                .register_framebuffer_from_device(1, shared_device1)
-                .is_ok()
-        );
-        assert!(
-            manager
-                .register_framebuffer_from_device(2, shared_device2)
-                .is_ok()
-        );
+        assert!(manager
+            .register_framebuffer_from_device(1, shared_device1)
+            .is_ok());
+        assert!(manager
+            .register_framebuffer_from_device(2, shared_device2)
+            .is_ok());
 
         // Check registration
         assert_eq!(manager.get_framebuffer_count(), 2);

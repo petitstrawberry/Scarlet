@@ -9,7 +9,7 @@
 use crate::{
     arch::Trapframe,
     fs::VfsManager,
-    task::{CloneFlags, mytask},
+    task::{mytask, CloneFlags},
 };
 use alloc::{
     boxed::Box,

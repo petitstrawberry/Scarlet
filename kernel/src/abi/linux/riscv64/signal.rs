@@ -266,7 +266,7 @@ pub fn sys_rt_sigaction(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) ->
 
     // Get old action if requested
     if oldact_ptr != 0 {
-        let Some(paddr) = task.vm_manager.translate_vaddr(oldact_ptr) else {
+        let Some(paddr) = task.vm_manager.translate_to_kva(oldact_ptr) else {
             // Invalid user pointer for oldact: return EFAULT
             trapframe.set_return_value(!0usize);
             trapframe.increment_pc_next(task);
@@ -281,7 +281,7 @@ pub fn sys_rt_sigaction(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) ->
 
     // Set new action if provided
     if act_ptr != 0 {
-        let Some(paddr) = task.vm_manager.translate_vaddr(act_ptr) else {
+        let Some(paddr) = task.vm_manager.translate_to_kva(act_ptr) else {
             // Invalid user pointer for act: return EFAULT
             trapframe.set_return_value(!0usize);
             trapframe.increment_pc_next(task);
@@ -342,7 +342,7 @@ pub fn sys_rt_sigprocmask(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) 
 
     // Save old mask if requested
     if oldset_ptr != 0 {
-        let Some(paddr) = task.vm_manager.translate_vaddr(oldset_ptr) else {
+        let Some(paddr) = task.vm_manager.translate_to_kva(oldset_ptr) else {
             // Invalid user pointer for oldset: return EFAULT
             trapframe.set_return_value(!0usize);
             trapframe.increment_pc_next(task);
@@ -356,7 +356,7 @@ pub fn sys_rt_sigprocmask(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) 
 
     // Modify mask if new set is provided
     if set_ptr != 0 {
-        let Some(paddr) = task.vm_manager.translate_vaddr(set_ptr) else {
+        let Some(paddr) = task.vm_manager.translate_to_kva(set_ptr) else {
             // Invalid user pointer for set: return EFAULT
             trapframe.set_return_value(!0usize);
             trapframe.increment_pc_next(task);
@@ -514,28 +514,28 @@ pub fn setup_signal_handler(trapframe: &mut Trapframe, handler_addr: usize, sign
 
     unsafe {
         // Trampoline: addi a7, x0, 139 (0x08b00893) + ecall (0x00000073)
-        let paddr = match task.vm_manager.translate_vaddr(frame_base) {
+        let paddr = match task.vm_manager.translate_to_kva(frame_base) {
             Some(p) => p,
             None => return,
         };
         *(paddr as *mut u32) = 0x08b00893; // addi a7, x0, 139
         *((paddr as *mut u32).add(1)) = 0x00000073; // ecall
 
-        let paddr = match task.vm_manager.translate_vaddr(frame_base + 8) {
+        let paddr = match task.vm_manager.translate_to_kva(frame_base + 8) {
             Some(p) => p,
             None => return,
         };
         *(paddr as *mut usize) = signal as usize;
 
         for i in 0..32 {
-            let paddr = match task.vm_manager.translate_vaddr(frame_base + 16 + i * 8) {
+            let paddr = match task.vm_manager.translate_to_kva(frame_base + 16 + i * 8) {
                 Some(p) => p,
                 None => return,
             };
             *(paddr as *mut usize) = trapframe.regs.reg[i];
         }
 
-        let paddr = match task.vm_manager.translate_vaddr(frame_base + 272) {
+        let paddr = match task.vm_manager.translate_to_kva(frame_base + 272) {
             Some(p) => p,
             None => return,
         };
@@ -608,7 +608,7 @@ pub fn sys_rt_sigreturn(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -
     unsafe {
         // Restore all 32 general-purpose registers
         for i in 0..32 {
-            let paddr = match task.vm_manager.translate_vaddr(frame_base + 16 + i * 8) {
+            let paddr = match task.vm_manager.translate_to_kva(frame_base + 16 + i * 8) {
                 Some(p) => p,
                 None => return usize::MAX,
             };
@@ -616,7 +616,7 @@ pub fn sys_rt_sigreturn(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -
         }
 
         // Restore epc (program counter at time of signal)
-        let paddr = match task.vm_manager.translate_vaddr(frame_base + 272) {
+        let paddr = match task.vm_manager.translate_to_kva(frame_base + 272) {
             Some(p) => p,
             None => return usize::MAX,
         };

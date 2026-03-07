@@ -50,8 +50,8 @@ use crate::fs::vfs_v2::core::{
 };
 use crate::fs::vfs_v2::mount_tree::MountPoint;
 use crate::fs::{
-    FileMetadata, FileObject, FileSystemDriver, FileSystemError, FileSystemErrorKind, FileType,
-    SeekFrom, VfsManager, get_fs_driver_manager,
+    get_fs_driver_manager, FileMetadata, FileObject, FileSystemDriver, FileSystemError,
+    FileSystemErrorKind, FileType, SeekFrom, VfsManager,
 };
 use crate::object::capability::{ControlOps, MemoryMappingOps, StreamError, StreamOps};
 use crate::vm::vmem::MemoryArea;
@@ -878,7 +878,7 @@ impl FileSystemOperations for OverlayFS {
 
         // Check if this is a write operation
         let is_write_operation = (flags & 0x3) != 0; // O_WRONLY=1, O_RDWR=2
-        // If writing to a file that exists only in lower layer, copy it up first
+                                                     // If writing to a file that exists only in lower layer, copy it up first
         if is_write_operation && self.file_exists_in_lower_only(&overlay_node_ref.path) {
             self.copy_up(&overlay_node_ref.path)?;
         }

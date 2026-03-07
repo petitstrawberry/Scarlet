@@ -32,18 +32,18 @@ use alloc::{
 };
 use core::{any::Any, mem};
 use hashbrown::HashMap;
-use spin::{Mutex, rwlock::RwLock};
+use spin::{rwlock::RwLock, Mutex};
 
 use crate::{
-    DeviceManager,
     device::block::BlockDevice,
     driver_initcall,
     fs::{
-        FileObject, FileSystemError, FileSystemErrorKind, FileType, SocketFileInfo,
-        get_fs_driver_manager, params::FileSystemParams,
+        get_fs_driver_manager, params::FileSystemParams, FileObject, FileSystemError,
+        FileSystemErrorKind, FileType, SocketFileInfo,
     },
     profile_scope,
     task::mytask,
+    DeviceManager,
 };
 
 use super::super::{
@@ -1350,6 +1350,7 @@ impl Ext2FileSystem {
         paddr: usize,
     ) -> Result<(), FileSystemError> {
         use crate::environment::PAGE_SIZE;
+        use crate::vm::addr::phys_to_virt;
 
         profile_scope!("ext2::read_page_content");
 
@@ -1359,7 +1360,7 @@ impl Ext2FileSystem {
 
         // Clear the page first
         unsafe {
-            core::ptr::write_bytes(paddr as *mut u8, 0, PAGE_SIZE);
+            core::ptr::write_bytes(phys_to_virt(paddr) as *mut u8, 0, PAGE_SIZE);
         }
 
         // If page is beyond EOF, return zeros
@@ -1387,7 +1388,7 @@ impl Ext2FileSystem {
         // Get block numbers
         let block_nums = self.get_inode_blocks(&inode, start_block, num_blocks)?;
 
-        let mut page_ptr = paddr as *mut u8;
+        let mut page_ptr = phys_to_virt(paddr) as *mut u8;
         let mut bytes_written = 0usize;
 
         for (i, &block_num) in block_nums.iter().enumerate() {

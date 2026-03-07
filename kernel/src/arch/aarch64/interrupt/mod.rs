@@ -5,7 +5,7 @@
 use core::arch::asm;
 
 use crate::arch::get_cpu;
-use crate::interrupt::{InterruptManager, controllers::LocalInterruptType};
+use crate::interrupt::{controllers::LocalInterruptType, InterruptManager};
 
 pub fn interrupt_init() {
     // TODO: Initialize AArch64 interrupts

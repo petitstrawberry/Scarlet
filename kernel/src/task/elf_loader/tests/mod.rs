@@ -2,7 +2,7 @@
 //!
 //! Tests for ELF binary loading and execution, including integration with VFS manager for filesystem-based executable loading in isolated namespaces.
 
-use crate::fs::{FileType, SeekFrom, TmpFSParams, VfsManager, drivers::tmpfs::TmpFS};
+use crate::fs::{drivers::tmpfs::TmpFS, FileType, SeekFrom, TmpFSParams, VfsManager};
 use crate::task::new_user_task;
 use crate::vm::addr::phys_to_virt;
 
@@ -225,8 +225,7 @@ fn test_load_elf() {
 
     // Translate the entry point virtual address to a physical address
     let paddr = task
-        .vm_manager
-        .translate_vaddr(entry_point as usize)
+        .vm_manager.translate_to_kva(entry_point as usize)
         .expect(
             format!(
                 "Failed to translate entry point address: {:#x}",
@@ -409,8 +408,7 @@ fn test_load_elf_bss_zeroed() {
     let bss_start = 0x1000; // Virtual address of .bss section (aligned to PAGE_SIZE)
     let bss_size = 0x2000; // Size of .bss section (2 * PAGE_SIZE)
     let paddr = task
-        .vm_manager
-        .translate_vaddr(bss_start)
+        .vm_manager.translate_to_kva(bss_start)
         .expect("Failed to translate .bss start address");
 
     for i in 0..bss_size {

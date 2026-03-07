@@ -10,13 +10,13 @@ use alloc::vec::Vec;
 use spin::{Mutex, RwLock};
 
 use crate::early_println;
-use crate::network::Ipv4Address;
 use crate::network::protocol_stack::get_network_manager;
 use crate::network::protocol_stack::{LayerContext, NetworkLayer, NetworkLayerStats, SocketConfig};
 use crate::network::socket::{
     Inet4SocketAddress, SocketAddress, SocketControl, SocketError, SocketObject, SocketProtocol,
     SocketState, SocketType,
 };
+use crate::network::Ipv4Address;
 use crate::object::capability::selectable::Selectable;
 
 /// Helper function to get local IP address bytes from the default interface

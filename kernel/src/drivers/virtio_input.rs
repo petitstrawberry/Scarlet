@@ -8,6 +8,7 @@
 
 extern crate alloc;
 
+use crate::vm::addr::virt_to_phys;
 use alloc::boxed::Box;
 use alloc::string::ToString;
 use alloc::sync::Arc;
@@ -504,24 +505,24 @@ impl VirtioDevice for VirtioInputDevice {
 
     fn get_queue_desc_addr(&self, queue_idx: usize) -> Option<u64> {
         match queue_idx {
-            0 => Some(self.eventq.lock().get_raw_ptr() as u64),
-            1 => Some(self.statusq.lock().get_raw_ptr() as u64),
+            0 => Some(virt_to_phys(self.eventq.lock().get_raw_ptr() as usize) as u64),
+            1 => Some(virt_to_phys(self.statusq.lock().get_raw_ptr() as usize) as u64),
             _ => None,
         }
     }
 
     fn get_queue_driver_addr(&self, queue_idx: usize) -> Option<u64> {
         match queue_idx {
-            0 => Some(self.eventq.lock().avail.flags as *const _ as u64),
-            1 => Some(self.statusq.lock().avail.flags as *const _ as u64),
+            0 => Some(virt_to_phys(self.eventq.lock().avail.flags as *const _ as usize) as u64),
+            1 => Some(virt_to_phys(self.statusq.lock().avail.flags as *const _ as usize) as u64),
             _ => None,
         }
     }
 
     fn get_queue_device_addr(&self, queue_idx: usize) -> Option<u64> {
         match queue_idx {
-            0 => Some(self.eventq.lock().used.flags as *const _ as u64),
-            1 => Some(self.statusq.lock().used.flags as *const _ as u64),
+            0 => Some(virt_to_phys(self.eventq.lock().used.flags as *const _ as usize) as u64),
+            1 => Some(virt_to_phys(self.statusq.lock().used.flags as *const _ as usize) as u64),
             _ => None,
         }
     }

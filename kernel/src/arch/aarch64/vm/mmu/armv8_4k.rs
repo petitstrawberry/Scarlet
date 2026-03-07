@@ -291,7 +291,8 @@ impl PageTable {
 
     /// Get TTBR value (like RISC-V's get_val_for_satp())
     pub fn get_val_for_ttbr(&self, asid: u16) -> u64 {
-        let baddr = (self as *const _ as u64) & 0xffffffffffff;
+        let baddr = (crate::vm::addr::kernel_virt_to_phys(self as *const _ as usize) as u64)
+            & 0xffffffffffff;
         let asid_val = (asid as u64) << 48;
         baddr | asid_val
     }

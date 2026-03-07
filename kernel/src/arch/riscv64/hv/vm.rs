@@ -16,11 +16,11 @@ use super::mmu::{
 use super::switch::arch_run_guest_loop;
 use super::trap::arch_guest_trap_handler;
 use crate::arch::hv::csr::{self, HypervisorCsrState};
-use crate::arch::{Arch, Trapframe, set_next_mode, set_trapvector};
+use crate::arch::{set_next_mode, set_trapvector, Arch, Trapframe};
 use crate::hypervisor::memory::{MemorySlot, MemorySlotFlags, MemorySlotManager};
 use crate::hypervisor::types::{InterruptType, VmExit};
 use crate::hypervisor::vcpu::{VcpuId, VcpuObject};
-use crate::hypervisor::vm::{ScarletVmMemoryRegion, VmId, VmObject, vm_ctl};
+use crate::hypervisor::vm::{vm_ctl, ScarletVmMemoryRegion, VmId, VmObject};
 use crate::library::std::print;
 use crate::object::capability::ControlOps;
 use crate::task::mytask;
@@ -318,8 +318,7 @@ impl Riscv64VmObject {
     ) -> Result<(), &'static str> {
         let task = mytask().ok_or("No current task")?;
         let host_paddr = task
-            .vm_manager
-            .translate_vaddr(host_vaddr as usize)
+            .vm_manager.translate_to_kva(host_vaddr as usize)
             .ok_or("Failed to translate host_vaddr")? as u64;
         self.state.lock().memory_slots.set_slot(MemorySlot {
             slot_id,
@@ -368,8 +367,7 @@ impl ControlOps for Riscv64VmObject {
             vm_ctl::SET_MEMORY_REGION => {
                 let task = mytask().ok_or("No current task")?;
                 let target_ptr = task
-                    .vm_manager
-                    .translate_vaddr(arg)
+                    .vm_manager.translate_to_kva(arg)
                     .ok_or("Invalid user pointer")?;
                 let region = unsafe { core::ptr::read(target_ptr as *const ScarletVmMemoryRegion) };
                 let flags = MemorySlotFlags {
@@ -408,12 +406,11 @@ fn translate_user_ptr(arg: usize) -> Result<usize, &'static str> {
     }
     mytask()
         .ok_or("No current task")?
-        .vm_manager
-        .translate_vaddr(arg)
+        .vm_manager.translate_to_kva(arg)
         .ok_or("Invalid user pointer")
 }
 
-use crate::hypervisor::vcpu::{VcpuOneReg, vcpu_ctl};
+use crate::hypervisor::vcpu::{vcpu_ctl, VcpuOneReg};
 
 impl ControlOps for Riscv64VcpuObject {
     fn control(&self, command: u32, arg: usize) -> Result<i32, &'static str> {

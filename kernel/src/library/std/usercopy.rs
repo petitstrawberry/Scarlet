@@ -24,8 +24,7 @@ pub fn copy_from_user(
         let page_off = current_vaddr & (PAGE_SIZE - 1);
         let chunk_len = core::cmp::min(dst.len() - copied, PAGE_SIZE - page_off);
         let paddr = task
-            .vm_manager
-            .translate_vaddr(current_vaddr)
+            .vm_manager.translate_to_kva(current_vaddr)
             .ok_or(UserCopyError::TranslationError)?;
 
         unsafe {
@@ -60,8 +59,7 @@ pub fn copy_to_user(
         let page_off = current_vaddr & (PAGE_SIZE - 1);
         let chunk_len = core::cmp::min(src.len() - copied, PAGE_SIZE - page_off);
         let paddr = task
-            .vm_manager
-            .translate_vaddr(current_vaddr)
+            .vm_manager.translate_to_kva(current_vaddr)
             .ok_or(UserCopyError::TranslationError)?;
 
         unsafe {
