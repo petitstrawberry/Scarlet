@@ -21,6 +21,8 @@ use crate::device::manager::DeviceManager;
 use crate::drivers::virtio::device::{DeviceStatus, Register, VirtioDevice};
 use crate::drivers::virtio::queue::{DescriptorFlag, VirtQueue};
 use crate::early_println;
+use crate::environment::PAGE_SIZE;
+use crate::mem::page::ContiguousPages;
 
 /// VirtIO Input event structure (matches Linux virtio_input_event)
 #[repr(C)]
@@ -66,7 +68,7 @@ pub struct VirtioInputDevice {
     statusq: Mutex<VirtQueue<'static>>, // Status queue (driver -> device)
     event_device: Arc<EventDevice>,
     initialized: Mutex<bool>,
-    event_buffers: Mutex<Vec<Box<[u8]>>>,
+    event_buffer_alloc: Mutex<Option<ContiguousPages>>, // Single page for all event buffers
     interrupt_id: Mutex<Option<u32>>,
 }
 
@@ -145,7 +147,7 @@ impl VirtioInputDevice {
             statusq: Mutex::new(VirtQueue::new(8)),
             event_device: Arc::new(EventDevice::new("input")),
             initialized: Mutex::new(false),
-            event_buffers: Mutex::new(Vec::new()),
+            event_buffer_alloc: Mutex::new(None),
             interrupt_id: Mutex::new(None),
         };
 
@@ -175,7 +177,7 @@ impl VirtioInputDevice {
             statusq: Mutex::new(VirtQueue::new(8)),
             event_device: event_device.clone(),
             initialized: Mutex::new(false),
-            event_buffers: Mutex::new(Vec::new()),
+            event_buffer_alloc: Mutex::new(None),
             interrupt_id: Mutex::new(None),
         };
 
@@ -303,27 +305,26 @@ impl VirtioInputDevice {
     /// Prefill event queue with receive buffers
     fn prefill_event_queue(&mut self) -> Result<(), &'static str> {
         let queue_size = 8;
-        let mut buffers = self.event_buffers.lock();
         let mut eventq = self.eventq.lock();
 
-        for _ in 0..queue_size {
-            // Allocate buffer for VirtioInputEvent
-            let buffer: Box<[u8]> = vec![0u8; VirtioInputEvent::size()].into_boxed_slice();
-            let buffer_ptr = Box::into_raw(buffer);
-            let buffer_addr = buffer_ptr as *mut u8 as usize;
+        // Allocate single page from PMM for all event buffers
+        let buffer_alloc =
+            ContiguousPages::new(1).ok_or("Failed to allocate event buffer page from PMM")?;
+        let buffer_base = buffer_alloc.as_ptr() as *mut u8;
+        let buffer_phys = buffer_alloc.as_paddr();
+
+        for i in 0..queue_size {
+            // Calculate offset within the page for this event
+            let offset = i * VirtioInputEvent::size();
+            let buffer_ptr = unsafe { buffer_base.add(offset) };
 
             // Allocate descriptor
             let desc_idx = eventq
                 .alloc_desc()
                 .ok_or("Failed to allocate event queue descriptor")?;
 
-            // Translate virtual address to physical
-            let buffer_phys = crate::vm::get_kernel_vm_manager()
-                .translate_vaddr(buffer_addr)
-                .ok_or("Failed to translate event buffer vaddr")?;
-
             // Setup descriptor - device writes events here
-            eventq.desc[desc_idx].addr = buffer_phys as u64;
+            eventq.desc[desc_idx].addr = (buffer_phys + offset) as u64;
             eventq.desc[desc_idx].len = VirtioInputEvent::size() as u32;
             eventq.desc[desc_idx].flags = DescriptorFlag::Write as u16; // Device writes
             eventq.desc[desc_idx].next = 0; // No chaining
@@ -332,10 +333,10 @@ impl VirtioInputDevice {
             eventq
                 .push(desc_idx)
                 .map_err(|_| "Failed to push descriptor to event queue")?;
-
-            // Store buffer pointer for cleanup
-            buffers.push(unsafe { Box::from_raw(buffer_ptr) });
         }
+
+        // Store the allocation for cleanup
+        *self.event_buffer_alloc.lock() = Some(buffer_alloc);
 
         // Notify device that buffers are available
         self.write32_register(Register::QueueNotify, 0);

@@ -16,7 +16,7 @@ use mmu::PageTable;
 use spin::Once;
 use spin::RwLock;
 
-use crate::mem::page::{allocate_raw_pages, allocate_raw_pages_aligned};
+use crate::mem::page::{Page, allocate_raw_pages, allocate_raw_pages_aligned, free_raw_pages};
 
 use crate::arch::Arch;
 use crate::arch::get_cpu;
@@ -43,9 +43,9 @@ fn get_asid_tables() -> &'static RwLock<Box<[u64]>> {
     })
 }
 // static mut ROOT_PAGE_TABLES: Lazy<RwLock<HashMap<u16, *mut PageTable>>> = Lazy::new(|| RwLock::new(HashMap::new()));
-static PAGE_TABLES: Once<RwLock<HashMap<u16, Vec<Box<PageTable>>>>> = Once::new();
+static PAGE_TABLES: Once<RwLock<HashMap<u16, Vec<usize>>>> = Once::new();
 
-fn get_page_tables() -> &'static RwLock<HashMap<u16, Vec<Box<PageTable>>>> {
+fn get_page_tables() -> &'static RwLock<HashMap<u16, Vec<usize>>> {
     PAGE_TABLES.call_once(|| RwLock::new(HashMap::new()))
 }
 
@@ -58,12 +58,18 @@ pub fn get_pagetable(ptr: *mut PageTable) -> Option<&'static mut PageTable> {
     }
 }
 
-fn new_boxed_pagetable() -> Box<PageTable> {
+fn new_pagetable() -> *mut PageTable {
     let ptr = allocate_raw_pages(1) as *mut PageTable;
     if ptr.is_null() {
         panic!("Failed to allocate a new page table");
     }
-    unsafe { Box::from_raw(ptr) }
+    ptr
+}
+
+fn free_pagetable(ptr: *mut PageTable) {
+    if !ptr.is_null() {
+        free_raw_pages(ptr as *mut Page, 1);
+    }
 }
 
 /// Allocates a new raw page table for the given ASID.
@@ -80,15 +86,12 @@ fn new_boxed_pagetable() -> Box<PageTable> {
 ///
 #[allow(static_mut_refs)]
 pub unsafe fn new_raw_pagetable(asid: u16) -> *mut PageTable {
-    let boxed_pagetable = new_boxed_pagetable();
-    let ptr = boxed_pagetable.as_ref() as *const PageTable as *mut PageTable;
+    let ptr = new_pagetable();
 
-    // Store the boxed page table in HashMap for proper lifecycle management
     let mut page_tables = get_page_tables().write();
     match page_tables.get_mut(&asid) {
-        Some(vec) => vec.push(boxed_pagetable),
+        Some(vec) => vec.push(ptr as usize),
         None => {
-            // This should not happen if ASID allocation is correct
             panic!("ASID {} not found in page tables", asid);
         }
     }
@@ -104,11 +107,9 @@ pub fn alloc_virtual_address_space() -> u16 {
             let bit_pos = (!word).trailing_zeros() as usize;
             asid_table[word_idx] |= 1 << bit_pos;
             let asid = (word_idx * 64 + bit_pos) as u16;
-            let root_pagetable_ptr = Box::into_raw(new_boxed_pagetable());
+            let root_pagetable_ptr = new_pagetable();
             let mut page_tables = get_page_tables().write();
-            unsafe {
-                page_tables.insert(asid, vec![Box::from_raw(root_pagetable_ptr)]);
-            }
+            page_tables.insert(asid, vec![root_pagetable_ptr as usize]);
 
             if root_pagetable_ptr.is_null() {
                 panic!("Failed to allocate a new root page table");
@@ -129,18 +130,15 @@ pub fn alloc_virtual_address_space_for_stage2() -> u16 {
             asid_table[word_idx] |= 1 << bit_pos;
             let asid = (word_idx * 64 + bit_pos) as u16;
             let ptr = allocate_raw_pages_aligned(4, 16384) as *mut PageTable;
+            if ptr.is_null() {
+                panic!("Failed to allocate 16KiB aligned root page table");
+            }
             assert!(
                 ptr as usize % 16384 == 0,
                 "Allocated page table is not 16KiB aligned"
             );
-            if ptr.is_null() {
-                panic!("Failed to allocate 16KiB aligned root page table");
-            }
-            let root_pagetable_ptr = unsafe { Box::from_raw(ptr) };
             let mut page_tables = get_page_tables().write();
-            unsafe {
-                page_tables.insert(asid, vec![root_pagetable_ptr]);
-            }
+            page_tables.insert(asid, vec![ptr as usize]);
             return asid;
         }
     }
@@ -157,8 +155,12 @@ pub fn free_virtual_address_space(asid: u16) {
             panic!("ASID {} is already free", asid);
         }
         let mut page_tables = get_page_tables().write();
-        page_tables.remove(&(asid as u16)); // Remove the page table associated with this ASID
-        asid_table[word_idx] &= !(1 << bit_pos); // Mark this ASID as free
+        if let Some(tables) = page_tables.remove(&(asid as u16)) {
+            for addr in tables {
+                free_pagetable(addr as *mut PageTable);
+            }
+        }
+        asid_table[word_idx] &= !(1 << bit_pos);
     } else {
         panic!("Invalid ASID: {}", asid);
     }
@@ -178,10 +180,8 @@ pub fn is_asid_used(asid: u16) -> bool {
 
 pub fn get_root_pagetable_ptr(asid: u16) -> Option<*mut PageTable> {
     if is_asid_used(asid) {
-        let page_tabels = get_page_tables().read();
-        // Root page table is always at index 0 for each ASID
-        let root_page_table = page_tabels.get(&asid)?[0].as_ref();
-        Some(root_page_table as *const PageTable as *mut PageTable)
+        let page_tables = get_page_tables().read();
+        page_tables.get(&asid).map(|vec| vec[0] as *mut PageTable)
     } else {
         None
     }

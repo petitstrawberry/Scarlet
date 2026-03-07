@@ -283,7 +283,12 @@ pub fn setup_trampoline_for_task_kstack_window(task: &Task) -> Result<(), &'stat
     // Physical (identity) address range of the task's kernel stack
     let km_area = task.get_kernel_stack_memory_area_paddr();
     let paddr_start = km_area.start;
-    let paddr_end = paddr_start + TASK_KERNEL_STACK_SIZE - 1;
+    let paddr_end = km_area.end;
+
+    // Ensure page alignment
+    if paddr_start % PAGE_SIZE != 0 || (paddr_end + 1 - paddr_start) % PAGE_SIZE != 0 {
+        return Err("Kernel stack memory area is not page-aligned");
+    }
 
     // Virtual window (skip guard page at the bottom)
     let vaddr_start = base + crate::environment::PAGE_SIZE;

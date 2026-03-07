@@ -381,7 +381,8 @@ fn test_load_elf_bss_zeroed() {
     elf_data[16] = 0x2; // e_type
     elf_data[18] = 0xF3; // e_machine
     elf_data[20] = 0x1; // e_version
-    elf_data[24] = 0x0; // e_entry
+    elf_data[24] = 0x00;
+    elf_data[25] = 0x10; // e_entry = 0x1000 (start of .bss section)
     elf_data[32] = 0x40; // e_phoff
     elf_data[54] = 0x38; // e_phentsize
     elf_data[56] = 0x1; // e_phnum

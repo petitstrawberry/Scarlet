@@ -1,22 +1,21 @@
-use alloc::alloc::{Layout, alloc_zeroed, dealloc};
-use alloc::boxed::Box;
 use alloc::vec::Vec;
 use hashbrown::HashMap;
 use spin::{Once, RwLock};
 
 use crate::arch::vm::mmu::{PageTable, PageTableEntry};
+use crate::mem::page::{allocate_raw_pages, free_raw_pages};
 
 const PAGE_SIZE: usize = 4096;
 const STAGE2_ROOT_SIZE: usize = PAGE_SIZE;
 
 static STAGE2_ROOTS: Once<RwLock<HashMap<u16, usize>>> = Once::new();
-static STAGE2_TABLES: Once<RwLock<HashMap<u16, Vec<Box<PageTable>>>>> = Once::new();
+static STAGE2_TABLES: Once<RwLock<HashMap<u16, Vec<usize>>>> = Once::new();
 
 fn get_stage2_roots() -> &'static RwLock<HashMap<u16, usize>> {
     STAGE2_ROOTS.call_once(|| RwLock::new(HashMap::new()))
 }
 
-fn get_stage2_tables() -> &'static RwLock<HashMap<u16, Vec<Box<PageTable>>>> {
+fn get_stage2_tables() -> &'static RwLock<HashMap<u16, Vec<usize>>> {
     STAGE2_TABLES.call_once(|| RwLock::new(HashMap::new()))
 }
 
@@ -36,12 +35,16 @@ pub fn init_stage2(vmid: u16) -> Result<(), &'static str> {
 }
 
 pub fn free_stage2(vmid: u16) {
-    get_stage2_tables().write().remove(&vmid);
-    if let Some(root) = get_stage2_roots().write().remove(&vmid) {
-        let layout = Layout::from_size_align(STAGE2_ROOT_SIZE, STAGE2_ROOT_SIZE).unwrap();
-        unsafe {
-            dealloc(root as *mut u8, layout);
+    if let Some(tables) = get_stage2_tables().write().remove(&vmid) {
+        for addr in tables {
+            free_raw_pages(addr as *mut crate::mem::page::Page, 1);
         }
+    }
+    if let Some(root) = get_stage2_roots().write().remove(&vmid) {
+        free_raw_pages(
+            root as *mut crate::mem::page::Page,
+            STAGE2_ROOT_SIZE / PAGE_SIZE,
+        );
     }
 }
 
@@ -67,22 +70,18 @@ impl Stage2PageTable {
 }
 
 fn allocate_stage2_root() -> *mut Stage2PageTable {
-    let layout = Layout::from_size_align(STAGE2_ROOT_SIZE, STAGE2_ROOT_SIZE).unwrap();
-    unsafe { alloc_zeroed(layout) as *mut Stage2PageTable }
+    allocate_raw_pages(STAGE2_ROOT_SIZE / PAGE_SIZE) as *mut Stage2PageTable
 }
 
 fn allocate_stage2_table(vmid: u16) -> *mut PageTable {
-    let layout = Layout::from_size_align(PAGE_SIZE, PAGE_SIZE).unwrap();
-    let ptr = unsafe { alloc_zeroed(layout) as *mut PageTable };
+    let ptr = allocate_raw_pages(1) as *mut PageTable;
     if ptr.is_null() {
         return ptr;
     }
-    let boxed = unsafe { Box::from_raw(ptr) };
-    let raw = boxed.as_ref() as *const PageTable as *mut PageTable;
     if let Some(vec) = get_stage2_tables().write().get_mut(&vmid) {
-        vec.push(boxed);
+        vec.push(ptr as usize);
     }
-    raw
+    ptr
 }
 
 pub fn verify_hgatp_stage2(_expected_pagetable: &Stage2PageTable, _vmid: u16) {

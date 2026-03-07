@@ -245,6 +245,142 @@ impl VirtualMemoryManager {
         }
     }
 
+    /// Removes a range of memory maps by virtual address range.
+    /// Splits existing mappings if they partially overlap with the range.
+    ///
+    /// # Arguments
+    /// * `vaddr` - The starting virtual address of the range to remove
+    /// * `len` - The length of the range to remove
+    ///
+    /// # Returns
+    /// A vector of removed memory maps (only the parts that were fully within the range)
+    pub fn remove_memory_map_range(&self, vaddr: usize, len: usize) -> Vec<VirtualMemoryMap> {
+        if len == 0 {
+            return Vec::new();
+        }
+
+        let remove_start = vaddr;
+        let remove_end = vaddr + len - 1;
+        let mut removed_maps = Vec::new();
+        let mut mappings_to_add = Vec::new();
+
+        let mut g = self.inner.write();
+
+        // Find all mappings that overlap with the removal range
+        let overlapping_keys: alloc::vec::Vec<usize> = g
+            .memmap
+            .range(..)
+            .filter_map(|(start_addr, existing_map)| {
+                let existing_start = existing_map.vmarea.start;
+                let existing_end = existing_map.vmarea.end;
+                if remove_start <= existing_end && remove_end >= existing_start {
+                    Some(*start_addr)
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        for key in overlapping_keys {
+            if let Some(existing_map) = g.memmap.remove(&key) {
+                let existing_start = existing_map.vmarea.start;
+                let existing_end = existing_map.vmarea.end;
+
+                // Calculate the overlap (intersection) part
+                let overlap_start = core::cmp::max(remove_start, existing_start);
+                let overlap_end = core::cmp::min(remove_end, existing_end);
+
+                if overlap_start <= overlap_end {
+                    // Create a map for the removed (overlapping) portion
+                    let pm_offset = overlap_start - existing_start;
+                    let removed_portion = VirtualMemoryMap {
+                        vmarea: MemoryArea {
+                            start: overlap_start,
+                            end: overlap_end,
+                        },
+                        pmarea: MemoryArea {
+                            start: existing_map.pmarea.start + pm_offset,
+                            end: existing_map.pmarea.start
+                                + pm_offset
+                                + (overlap_end - overlap_start),
+                        },
+                        permissions: existing_map.permissions,
+                        is_shared: existing_map.is_shared,
+                        owner: existing_map.owner.clone(),
+                    };
+                    removed_maps.push(removed_portion);
+                }
+
+                // Case 1: Removal range completely contains the existing mapping
+                if remove_start <= existing_start && remove_end >= existing_end {
+                    // Remove entire existing mapping (already removed above)
+                    continue;
+                }
+
+                // Case 2: Partial overlap - keep the part before the removal range
+                if existing_start < remove_start {
+                    let before_map = VirtualMemoryMap {
+                        vmarea: MemoryArea {
+                            start: existing_start,
+                            end: remove_start - 1,
+                        },
+                        pmarea: MemoryArea {
+                            start: existing_map.pmarea.start,
+                            end: existing_map.pmarea.start + (remove_start - existing_start) - 1,
+                        },
+                        permissions: existing_map.permissions,
+                        is_shared: existing_map.is_shared,
+                        owner: existing_map.owner.clone(),
+                    };
+                    mappings_to_add.push(before_map);
+                }
+
+                // Case 3: Partial overlap - keep the part after the removal range
+                if existing_end > remove_end {
+                    let after_offset = (remove_end + 1) - existing_start;
+                    let after_map = VirtualMemoryMap {
+                        vmarea: MemoryArea {
+                            start: remove_end + 1,
+                            end: existing_end,
+                        },
+                        pmarea: MemoryArea {
+                            start: existing_map.pmarea.start + after_offset,
+                            end: existing_map.pmarea.end,
+                        },
+                        permissions: existing_map.permissions,
+                        is_shared: existing_map.is_shared,
+                        owner: existing_map.owner.clone(),
+                    };
+                    mappings_to_add.push(after_map);
+                }
+            }
+        }
+
+        // Re-add the preserved portions
+        for map in mappings_to_add {
+            g.memmap.insert(map.vmarea.start, map);
+        }
+
+        // Clear cache if it might be affected
+        if let Some((_, _, cache_key)) = g.last_search_cache {
+            if let Some(cached_map) = g.memmap.get(&cache_key) {
+                let cache_end = cached_map.vmarea.end;
+                if remove_start <= cache_end && remove_end >= cache_key {
+                    g.last_search_cache = None;
+                }
+            } else {
+                g.last_search_cache = None;
+            }
+        }
+
+        drop(g);
+
+        // Unmap the removed range from MMU
+        self.unmap_range_from_mmu(remove_start, remove_end);
+
+        removed_maps
+    }
+
     /// Removes all memory maps.
     ///
     /// # Returns
@@ -551,6 +687,9 @@ impl VirtualMemoryManager {
     /// The translated physical address. Returns None if no mapping exists for the address
     pub fn translate_vaddr(&self, vaddr: usize) -> Option<usize> {
         if let Some(map) = self.search_memory_map(vaddr) {
+            if map.pmarea.start == 0 {
+                return None;
+            }
             // Calculate offset within the memory area
             let offset = vaddr - map.vmarea.start;
             // Calculate and return physical address
@@ -1809,5 +1948,59 @@ mod tests {
         // Translation should now fail as the memory map is removed
         let translated_addr_after_unmap = manager.translate_vaddr(0x1500);
         assert!(translated_addr_after_unmap.is_none());
+    }
+
+    #[test_case]
+    fn test_translate_vaddr_returns_none_for_unbacked_map() {
+        let manager = VirtualMemoryManager::new();
+        let map = VirtualMemoryMap {
+            vmarea: MemoryArea {
+                start: 0x2000,
+                end: 0x2fff,
+            },
+            pmarea: MemoryArea {
+                start: 0,
+                end: PAGE_SIZE - 1,
+            },
+            permissions: 0,
+            is_shared: false,
+            owner: None,
+        };
+
+        assert!(manager.add_memory_map(map).is_ok());
+        assert!(manager.translate_vaddr(0x2000).is_none());
+    }
+
+    #[test_case]
+    fn test_remove_memory_map_range_split_left_and_right_segments() {
+        let manager = VirtualMemoryManager::new();
+        let map = VirtualMemoryMap::new(
+            MemoryArea {
+                start: 0x8000_0000,
+                end: 0x8000_3fff,
+            },
+            MemoryArea {
+                start: 0x4000,
+                end: 0x7fff,
+            },
+            0o644,
+            false,
+            None,
+        );
+        manager.add_memory_map(map).unwrap();
+
+        let removed = manager.remove_memory_map_range(0x5000, PAGE_SIZE * 2);
+        assert_eq!(removed.len(), 1);
+        assert_eq!(removed[0].vmarea.start, 0x5000);
+        assert_eq!(removed[0].vmarea.end, 0x6fff);
+
+        assert_eq!(manager.memmap_len(), 2);
+        let left = manager.search_memory_map(0x4fff).unwrap();
+        assert_eq!(left.vmarea.start, 0x4000);
+        assert_eq!(left.vmarea.end, 0x4fff);
+
+        let right = manager.search_memory_map(0x7000).unwrap();
+        assert_eq!(right.vmarea.start, 0x7000);
+        assert_eq!(right.vmarea.end, 0x7fff);
     }
 }

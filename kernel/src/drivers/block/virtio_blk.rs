@@ -34,6 +34,8 @@ use crate::device::{Device, DeviceType};
 use crate::drivers::virtio::features::{
     VIRTIO_F_ANY_LAYOUT, VIRTIO_RING_F_EVENT_IDX, VIRTIO_RING_F_INDIRECT_DESC,
 };
+use crate::environment::PAGE_SIZE;
+use crate::mem::page::ContiguousPages;
 use crate::object::capability::{MemoryMappingOps, Selectable};
 use crate::vm::addr::virt_to_phys;
 use crate::{
@@ -181,19 +183,21 @@ impl VirtioBlockDevice {
             reserved: 0,
             sector: req.sector as u64,
         });
-        let data = vec![0u8; req.buffer.len()].into_boxed_slice();
+
+        // Allocate data buffer from PMM for DMA
+        let data_pages = (req.buffer.len() + PAGE_SIZE - 1) / PAGE_SIZE;
+        let data_alloc =
+            ContiguousPages::new(data_pages).ok_or("Failed to allocate data buffer")?;
+
         let status = Box::new(0u8);
 
-        // Cast pages to appropriate types
         let header_ptr = Box::into_raw(header);
-        let data_ptr = Box::into_raw(data) as *mut [u8];
+        let data_ptr = data_alloc.as_ptr() as *mut u8;
         let status_ptr = Box::into_raw(status);
 
         defer! {
-            // Deallocate memory after use
             unsafe {
                 drop(Box::from_raw(header_ptr));
-                drop(Box::from_raw(data_ptr));
                 drop(Box::from_raw(status_ptr));
             }
         }
@@ -243,9 +247,7 @@ impl VirtioBlockDevice {
         virtqueues[0].desc[header_desc].next = data_desc as u16;
 
         // Set up data descriptor
-        let data_phys = crate::vm::get_kernel_vm_manager()
-            .translate_vaddr(data_ptr as *mut u8 as usize)
-            .ok_or("Failed to translate data vaddr")?;
+        let data_phys = data_alloc.as_paddr();
         virtqueues[0].desc[data_desc].addr = data_phys as u64;
         virtqueues[0].desc[data_desc].len = req.buffer.len() as u32;
 
@@ -410,7 +412,15 @@ impl VirtioBlockDevice {
 
         let batch_size = requests.len();
         let mut results = vec![Err("Not processed"); batch_size];
-        let mut request_data = Vec::new();
+        let mut request_data: Vec<(
+            usize,
+            usize,
+            usize,
+            usize,
+            *mut VirtioBlkReqHeader,
+            ContiguousPages,
+            ContiguousPages,
+        )> = Vec::new();
 
         // Lock the virtqueues for the entire batch
         let mut virtqueues = self.virtqueues.lock();
@@ -426,21 +436,34 @@ impl VirtioBlockDevice {
                 reserved: 0,
                 sector: req.sector as u64,
             });
-            let data = vec![0u8; req.buffer.len()].into_boxed_slice();
-            let status = Box::new(0u8);
+
+            // Allocate data buffer from PMM for DMA
+            let data_pages = (req.buffer.len() + PAGE_SIZE - 1) / PAGE_SIZE;
+            let data_alloc = match ContiguousPages::new(data_pages) {
+                Some(alloc) => alloc,
+                None => {
+                    results[idx] = Err("Failed to allocate data buffer");
+                    continue;
+                }
+            };
+
+            // Allocate status buffer from PMM (1 page is plenty for a single byte)
+            let status_alloc = match ContiguousPages::new(1) {
+                Some(alloc) => alloc,
+                None => {
+                    results[idx] = Err("Failed to allocate status buffer");
+                    continue;
+                }
+            };
 
             let header_ptr = Box::into_raw(header);
-            let data_ptr = Box::into_raw(data) as *mut [u8];
-            let status_ptr = Box::into_raw(status);
+            let data_ptr = data_alloc.as_ptr() as *mut u8;
+            let status_ptr = status_alloc.as_ptr() as *mut u8;
 
             // Copy data for write requests
             if let BlockIORequestType::Write = req.request_type {
                 unsafe {
-                    core::ptr::copy_nonoverlapping(
-                        req.buffer.as_ptr(),
-                        data_ptr as *mut u8,
-                        req.buffer.len(),
-                    );
+                    core::ptr::copy_nonoverlapping(req.buffer.as_ptr(), data_ptr, req.buffer.len());
                 }
             }
 
@@ -467,18 +490,8 @@ impl VirtioBlockDevice {
                 virtqueues[0].desc[header_desc].flags = DescriptorFlag::Next as u16;
                 virtqueues[0].desc[header_desc].next = data_desc as u16;
 
-                let data_phys = match crate::vm::get_kernel_vm_manager()
-                    .translate_vaddr(data_ptr as *mut u8 as usize)
-                {
-                    Some(phys) => phys,
-                    None => {
-                        virtqueues[0].free_desc(status_desc);
-                        virtqueues[0].free_desc(data_desc);
-                        virtqueues[0].free_desc(header_desc);
-                        results[idx] = Err("Failed to translate data vaddr");
-                        continue;
-                    }
-                };
+                // Use physical address directly from ContiguousPages for DMA
+                let data_phys = data_alloc.as_paddr();
                 virtqueues[0].desc[data_desc].addr = data_phys as u64;
                 virtqueues[0].desc[data_desc].len = req.buffer.len() as u32;
 
@@ -494,51 +507,32 @@ impl VirtioBlockDevice {
 
                 virtqueues[0].desc[data_desc].next = status_desc as u16;
 
-                let status_phys =
-                    match crate::vm::get_kernel_vm_manager().translate_vaddr(status_ptr as usize) {
-                        Some(phys) => phys,
-                        None => {
-                            virtqueues[0].free_desc(status_desc);
-                            virtqueues[0].free_desc(data_desc);
-                            virtqueues[0].free_desc(header_desc);
-                            results[idx] = Err("Failed to translate status vaddr");
-                            continue;
-                        }
-                    };
+                // Use physical address directly from ContiguousPages for DMA
+                let status_phys = status_alloc.as_paddr();
                 virtqueues[0].desc[status_desc].addr = status_phys as u64;
                 virtqueues[0].desc[status_desc].len = 1;
                 virtqueues[0].desc[status_desc].flags |= DescriptorFlag::Write as u16;
 
                 // Submit the request
                 if virtqueues[0].push(header_desc).is_ok() {
-                    // use crate::early_println;
-                    // early_println!("[virtio-blk] Submitting request: req_idx={}, header_desc={}, data_desc={}, status_desc={}",
-                    //     idx, header_desc, data_desc, status_desc);
-                    // early_println!("[virtio-blk]   h_addr=0x{:x}, h_len={}, h_flags=0x{:x}",
-                    //     virtqueues[0].desc[header_desc].addr, virtqueues[0].desc[header_desc].len, virtqueues[0].desc[header_desc].flags);
-                    // early_println!("[virtio-blk]   d_addr=0x{:x}, d_len={}, d_flags=0x{:x}",
-                    //     virtqueues[0].desc[data_desc].addr, virtqueues[0].desc[data_desc].len, virtqueues[0].desc[data_desc].flags);
-                    // early_println!("[virtio-blk]   s_addr=0x{:x}, s_len={}, s_flags=0x{:x}",
-                    //     virtqueues[0].desc[status_desc].addr, virtqueues[0].desc[status_desc].len, virtqueues[0].desc[status_desc].flags);
-
+                    // Store ContiguousPagess to keep them alive until completion
+                    // The allocations will be dropped when removed from request_data
                     request_data.push((
                         idx,
                         header_desc,
                         data_desc,
                         status_desc,
                         header_ptr,
-                        data_ptr,
-                        status_ptr,
+                        data_alloc,
+                        status_alloc,
                     ));
                 } else {
-                    // Clean up on push failure
+                    // Clean up on push failure - descriptors freed, ContiguousPagess dropped automatically
                     virtqueues[0].free_desc(status_desc);
                     virtqueues[0].free_desc(data_desc);
                     virtqueues[0].free_desc(header_desc);
                     unsafe {
                         drop(Box::from_raw(header_ptr));
-                        drop(Box::from_raw(data_ptr));
-                        drop(Box::from_raw(status_ptr));
                     }
                     results[idx] = Err("Failed to submit request");
                 }
@@ -550,11 +544,9 @@ impl VirtioBlockDevice {
                     batch_size
                 );
 
-                // Clean up on descriptor allocation failure
+                // Clean up on descriptor allocation failure - ContiguousPagess dropped automatically
                 unsafe {
                     drop(Box::from_raw(header_ptr));
-                    drop(Box::from_raw(data_ptr));
-                    drop(Box::from_raw(status_ptr));
                 }
                 results[idx] = Err("Virtqueue descriptor allocation failed - queue may be full");
             }
@@ -567,41 +559,21 @@ impl VirtioBlockDevice {
         }
 
         // Second pass: Wait for all completions (true batch processing)
+        // Build a map from header_desc to index in request_data for O(1) lookup
         use alloc::collections::BTreeMap;
-        let mut pending_requests: BTreeMap<
-            usize,
-            (
-                usize,
-                usize,
-                usize,
-                *mut VirtioBlkReqHeader,
-                *mut [u8],
-                *mut u8,
-            ),
-        > = BTreeMap::new();
-
-        // Map descriptor IDs to request data
-        for (req_idx, header_desc, data_desc, status_desc, header_ptr, data_ptr, status_ptr) in
-            request_data
-        {
-            pending_requests.insert(
-                header_desc,
-                (
-                    req_idx,
-                    data_desc,
-                    status_desc,
-                    header_ptr,
-                    data_ptr,
-                    status_ptr,
-                ),
-            );
+        let mut pending_requests: BTreeMap<usize, usize> = BTreeMap::new();
+        for (index, request) in request_data.iter().enumerate() {
+            let header_desc = request.1;
+            pending_requests.insert(header_desc, index);
         }
+
+        // Track which indices have been processed for cleanup
+        let mut processed_indices = Vec::new();
 
         // Process all completions until everything is done
         while !pending_requests.is_empty() {
             // Read status before polling to check if device entered a FAILED state
             let status = self.read32_register(crate::drivers::virtio::device::Register::Status);
-            // crate::early_println!("[virtio-blk] Polling for completion. Device status = 0x{:x}", status);
 
             // Wait for something to complete, but also check for device failure.
             while virtqueues[0].is_busy() {
@@ -624,9 +596,27 @@ impl VirtioBlockDevice {
 
             // Process all completed requests in this round
             while let Some(desc_idx) = virtqueues[0].pop() {
-                if let Some((req_idx, data_desc, status_desc, header_ptr, data_ptr, status_ptr)) =
-                    pending_requests.remove(&desc_idx)
-                {
+                if let Some(data_index) = pending_requests.remove(&desc_idx) {
+                    let (
+                        req_idx,
+                        _header_desc,
+                        data_desc,
+                        status_desc,
+                        header_ptr,
+                        ref data_alloc,
+                        ref status_alloc,
+                    ): (
+                        usize,
+                        usize,
+                        usize,
+                        usize,
+                        *mut VirtioBlkReqHeader,
+                        ContiguousPages,
+                        ContiguousPages,
+                    ) = request_data[data_index];
+                    let status_ptr = status_alloc.as_ptr() as *mut u8;
+                    let data_ptr = data_alloc.as_ptr() as *mut u8;
+
                     // Check status
                     let status_val = unsafe { core::ptr::read_volatile(status_ptr) };
                     results[req_idx] = match status_val {
@@ -650,15 +640,15 @@ impl VirtioBlockDevice {
                         _ => Err("Unknown error"),
                     };
 
-                    // Clean up descriptors and memory for this completed request
+                    // Clean up descriptors for this completed request
                     virtqueues[0].free_desc(status_desc);
                     virtqueues[0].free_desc(data_desc);
                     virtqueues[0].free_desc(desc_idx); // header_desc
                     unsafe {
                         drop(Box::from_raw(header_ptr));
-                        drop(Box::from_raw(data_ptr));
-                        drop(Box::from_raw(status_ptr));
                     }
+                    // ContiguousPagess will be dropped when we remove from request_data
+                    processed_indices.push(data_index);
                 } else {
                     // Unexpected descriptor - this shouldn't happen but handle gracefully
                     crate::early_println!(
@@ -667,6 +657,13 @@ impl VirtioBlockDevice {
                     );
                 }
             }
+        }
+
+        // Clean up request_data - remove processed entries to drop ContiguousPagess
+        // Sort in reverse order so we can remove without affecting other indices
+        processed_indices.sort_unstable_by(|a: &usize, b: &usize| b.cmp(a));
+        for index in processed_indices {
+            request_data.remove(index);
         }
 
         results

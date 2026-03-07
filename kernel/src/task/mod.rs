@@ -30,7 +30,7 @@ use crate::{
     },
     fs::VfsManager,
     ipc::{EventContent, event::ProcessControlType},
-    mem::page::{Page, allocate_raw_pages, free_boxed_page},
+    mem::page::ContiguousPages,
     object::handle::HandleTable,
     sched::scheduler::{Scheduler, get_scheduler},
     timer::{TimerHandler, add_timer, get_tick},
@@ -388,8 +388,18 @@ pub struct Task {
     pub name: RwLock<String>,
     /// List of child task IDs
     pub children: RwLock<Vec<usize>>,
-    /// Managed pages (auto-freed on termination)
-    pub managed_pages: RwLock<Vec<ManagedPage>>,
+    /// Contiguous page allocations (PMM-backed, auto-freed on drop).
+    ///
+    /// Each entry is a `ContiguousPages` RAII wrapper that returns its pages to the
+    /// buddy-system PMM when dropped. Used for ELF segment and anonymous mappings
+    /// that require physically contiguous memory.
+    pub page_allocations: RwLock<Vec<ContiguousPages>>,
+    /// Non-contiguous individual page allocations (PMM-backed, auto-freed on drop).
+    ///
+    /// Each entry is a `TaskPages` RAII wrapper holding a list of individual
+    /// physical page addresses. Used for anonymous private mappings where
+    /// physical contiguity is not required and partial reclaim on unmap is needed.
+    pub task_pages: RwLock<Vec<crate::mem::page::TaskPages>>,
     /// Virtual File System Manager
     ///
     /// # Usage Patterns
@@ -428,12 +438,6 @@ pub struct Task {
     pub event_queue: Mutex<crate::ipc::event::TaskEventQueue>,
     /// Event processing enabled flag
     pub events_enabled: Mutex<bool>,
-}
-
-#[derive(Debug, Clone)]
-pub struct ManagedPage {
-    pub vaddr: usize,
-    pub page: Box<Page>,
 }
 
 pub enum CloneFlagsDef {
@@ -542,7 +546,8 @@ impl Task {
             // RwLock fields
             name: RwLock::new(name),
             children: RwLock::new(Vec::new()),
-            managed_pages: RwLock::new(Vec::new()),
+            page_allocations: RwLock::new(Vec::new()),
+            task_pages: RwLock::new(Vec::new()),
             vfs: RwLock::new(None),
             software_timers_handlers: RwLock::new(Vec::new()),
             // Mutex fields
@@ -805,9 +810,9 @@ impl Task {
             return Err("Address is not page aligned");
         }
 
-        let pages = allocate_raw_pages(num_of_pages);
+        let page_alloc = ContiguousPages::new(num_of_pages).ok_or("Failed to allocate pages")?;
         let size = num_of_pages * PAGE_SIZE;
-        let paddr = virt_to_phys(pages as usize);
+        let paddr = virt_to_phys(page_alloc.as_ptr() as usize);
         let mmap = VirtualMemoryMap {
             pmarea: MemoryArea {
                 start: paddr,
@@ -818,18 +823,14 @@ impl Task {
                 end: vaddr + size - 1,
             },
             permissions,
-            is_shared: false, // Default to not shared for task-allocated pages
+            is_shared: false,
             owner: None,
         };
         self.vm_manager
             .add_memory_map(mmap.clone())
             .map_err(|e| panic!("Failed to add memory map: {}", e))?;
 
-        for i in 0..num_of_pages {
-            let page = unsafe { Box::from_raw(pages.wrapping_add(i)) };
-            let vaddr = mmap.vmarea.start + i * PAGE_SIZE;
-            self.add_managed_page(ManagedPage { vaddr, page });
-        }
+        self.page_allocations.write().push(page_alloc);
 
         Ok(mmap)
     }
@@ -893,14 +894,6 @@ impl Task {
                         // println!("Removed map : {:#x} - {:#x}", mmap.vmarea.start, mmap.vmarea.end);
                         // println!("Re added map: {:#x} - {:#x}", mmap2.vmarea.start, mmap2.vmarea.end);
                     }
-                    // let offset = vaddr - mmap.vmarea.start;
-                    // free_raw_pages((mmap.pmarea.start + offset) as *mut Page, 1);
-
-                    if let Some(free_page) = self.remove_managed_page(vaddr) {
-                        free_boxed_page(free_page.page);
-                    }
-
-                    // println!("Freed pages : {:#x} - {:#x}", vaddr, vaddr + PAGE_SIZE - 1);
                 }
                 None => {}
             }
@@ -1057,59 +1050,6 @@ impl Task {
             owner: None,
         };
         Ok(mmap)
-    }
-
-    /// Add pages to the task
-    ///
-    /// # Arguments
-    /// * `pages` - The managed page to add
-    ///
-    /// # Note
-    /// Pages added as ManagedPage of the Task will be automatically freed when the Task is terminated.
-    /// So, you must not free them by calling free_raw_pages/free_boxed_pages manually.
-    ///
-    pub fn add_managed_page(&self, pages: ManagedPage) {
-        self.managed_pages.write().push(pages);
-    }
-
-    /// Get managed page
-    ///
-    /// # Arguments
-    /// * `vaddr` - The virtual address of the page
-    ///
-    /// # Returns
-    /// The managed page if found, otherwise None
-    ///
-    fn get_managed_page(&self, vaddr: usize) -> Option<ManagedPage> {
-        let pages = self.managed_pages.read();
-        for page in pages.iter() {
-            if page.vaddr == vaddr {
-                return Some(ManagedPage {
-                    vaddr: page.vaddr,
-                    page: page.page.clone(),
-                });
-            }
-        }
-        None
-    }
-
-    /// Remove managed page
-    ///
-    /// # Arguments
-    /// * `vaddr` - The virtual address of the page
-    ///
-    /// # Returns
-    /// The removed managed page if found, otherwise None
-    ///
-    pub fn remove_managed_page(&self, vaddr: usize) -> Option<crate::task::ManagedPage> {
-        let mut pages = self.managed_pages.write();
-        for i in 0..pages.len() {
-            if pages[i].vaddr == vaddr {
-                let page = pages.remove(i);
-                return Some(page);
-            }
-        }
-        None
     }
 
     // Set the entry point
@@ -1334,9 +1274,10 @@ impl Task {
                     } else {
                         // Private memory regions: allocate new pages and copy contents
                         let permissions = mmap.permissions;
-                        let pages = allocate_raw_pages(num_pages);
+                        let page_alloc = ContiguousPages::new(num_pages)
+                            .ok_or("Failed to allocate pages for clone")?;
                         let size = num_pages * PAGE_SIZE;
-                        let paddr = virt_to_phys(pages as usize);
+                        let paddr = virt_to_phys(page_alloc.as_ptr() as usize);
                         let new_mmap = VirtualMemoryMap {
                             pmarea: MemoryArea {
                                 start: paddr,
@@ -1351,22 +1292,18 @@ impl Task {
                             owner: mmap.owner.clone(),
                         };
 
-                        // Copy original contents page-by-page
-                        for i in 0..num_pages {
-                            let src_page_addr = phys_to_virt(mmap.pmarea.start + i * PAGE_SIZE);
-                            let dst_page_addr = phys_to_virt(new_mmap.pmarea.start + i * PAGE_SIZE);
-                            unsafe {
-                                core::ptr::copy_nonoverlapping(
-                                    src_page_addr as *const u8,
-                                    dst_page_addr as *mut u8,
-                                    PAGE_SIZE,
-                                );
-                            }
-                            child.add_managed_page(ManagedPage {
-                                vaddr: new_mmap.vmarea.start + i * PAGE_SIZE,
-                                page: unsafe { Box::from_raw(pages.wrapping_add(i)) },
-                            });
+                        // Copy original contents
+                        unsafe {
+                            let src_start = phys_to_virt(mmap.pmarea.start);
+                            let dst_start = phys_to_virt(paddr);
+                            core::ptr::copy_nonoverlapping(
+                                src_start as *const u8,
+                                dst_start as *mut u8,
+                                size,
+                            );
                         }
+
+                        child.page_allocations.write().push(page_alloc);
 
                         child
                             .vm_manager
@@ -1886,7 +1823,6 @@ impl WaitError {
 
 impl Drop for Task {
     fn drop(&mut self) {
-        // Best-effort teardown of kernel stack window mapping
         crate::vm::teardown_trampoline_for_task_kstack_window(self);
     }
 }
@@ -2146,7 +2082,7 @@ mod tests {
         let child_pc = child_task.vcpu.lock().get_pc();
         let child_entry = child_task.entry;
         let child_state = child_task.state.load(Ordering::SeqCst);
-        let child_managed_pages_len = child_task.managed_pages.read().len();
+        let child_page_allocations_len = child_task.page_allocations.read().len();
 
         // Add both tasks to scheduler to establish parent-child relationship
         let scheduler = crate::sched::scheduler::get_scheduler();
@@ -2270,10 +2206,10 @@ mod tests {
         // Verify state was copied
         assert_eq!(child_state, parent_state);
 
-        // Verify that both tasks have the correct number of managed pages
+        // Verify that both tasks have the correct number of page allocations
         assert!(
-            child_managed_pages_len >= num_pages,
-            "Child should have at least the test pages in managed pages"
+            child_page_allocations_len >= num_pages,
+            "Child should have at least the test pages in page allocations"
         );
     }
 
@@ -2546,9 +2482,9 @@ mod tests {
             parent.vm_manager.memmap_len()
         );
 
-        // Managed pages are per-task; child should not acquire new managed pages
+        // Page allocations are per-task; child should not acquire new page allocations
         // when sharing VM (physical memory isn't privately managed by the child)
-        assert!(child.managed_pages.read().len() <= parent.managed_pages.read().len());
+        assert!(child.page_allocations.read().len() <= parent.page_allocations.read().len());
     }
 
     #[test_case]

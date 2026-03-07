@@ -288,7 +288,8 @@ use alloc::string::ToString;
 use device::manager::{DeviceManager, DriverPriority};
 use environment::PAGE_SIZE;
 use initcall::{call_initcalls, driver::driver_initcall_call, early::early_initcall_call};
-use slab_allocator_rs::MIN_HEAP_SIZE;
+
+const MIN_HEAP_SIZE: usize = 32 * 1024;
 
 use crate::{
     device::graphics::manager::GraphicsManager,
@@ -297,7 +298,10 @@ use crate::{
 };
 use arch::get_cpu;
 use core::sync::atomic::{Ordering, fence};
-use mem::{__KERNEL_SPACE_START, allocator::init_heap};
+use mem::{
+    __KERNEL_SPACE_START,
+    allocator::{add_heap_region, init_heap},
+};
 use sched::scheduler::get_scheduler;
 use task::{elf_loader::load_elf_into_task, new_user_task};
 use timer::get_kernel_timer;
@@ -528,23 +532,35 @@ pub extern "C" fn start_kernel(boot_info: &BootInfo) -> ! {
     );
 
     /* Handle initramfs if available in BootInfo */
-    if let Some(initramfs_area) = boot_info.initramfs {
+    let pmm_start = if let Some(initramfs_area) = boot_info.initramfs {
         early_println!(
             "[Scarlet Kernel] InitramFS available: {:#x} - {:#x}",
             initramfs_area.start,
             initramfs_area.end
         );
-        // Note: initramfs already relocated by arch-specific boot code
+        initramfs_area.end + 1
     } else {
         early_println!("[Scarlet Kernel] No initramfs found");
+        usable_area.start
+    };
+
+    early_println!("[Scarlet Kernel] Initializing PMM...");
+    let pmm_start_aligned = (pmm_start + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
+    if pmm_start_aligned < usable_area.end {
+        unsafe {
+            mem::pmm::init(MemoryArea::new(pmm_start_aligned, usable_area.end));
+        }
     }
 
-    /* Initialize heap with the usable memory area */
-    early_println!("[Scarlet Kernel] Initializing heap...");
-    let heap_start = (usable_area.start + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
-    let heap_size = ((usable_area.end - heap_start + 1) / MIN_HEAP_SIZE) * MIN_HEAP_SIZE;
+    early_println!("[Scarlet Kernel] Allocating initial heap from PMM...");
+    let heap_size = 512 * 1024 * 1024;
+    let heap_pages = heap_size / PAGE_SIZE;
+    let heap_start =
+        mem::pmm::alloc_contiguous_pages(heap_pages).expect("Failed to allocate heap from PMM");
     let heap_end = heap_start + heap_size - 1;
-    init_heap(MemoryArea::new(heap_start, heap_end));
+
+    early_println!("[Scarlet Kernel] Initializing heap...");
+    unsafe { init_heap(heap_start, heap_size) };
 
     fence(Ordering::SeqCst);
     early_println!(

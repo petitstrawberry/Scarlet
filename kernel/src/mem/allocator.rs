@@ -1,79 +1,63 @@
-use core::alloc::GlobalAlloc;
-use core::sync::atomic::{AtomicUsize, Ordering};
+use core::alloc::Layout;
 
-use slab_allocator_rs::LockedHeap;
+use spin::Mutex;
+use talc::{OomHandler, Span, Talc, Talck};
 
-use crate::early_println;
-use crate::vm::vmem::MemoryArea;
+use crate::environment::PAGE_SIZE;
+
+const HEAP_EXPAND_PAGES: usize = 1024;
+
+struct DynamicHeapHandler;
+
+impl OomHandler for DynamicHeapHandler {
+    fn handle_oom(talc: &mut Talc<Self>, layout: Layout) -> Result<(), ()> {
+        let required_size = layout.size().max(HEAP_EXPAND_PAGES * PAGE_SIZE);
+        let pages_needed = (required_size + PAGE_SIZE - 1) / PAGE_SIZE;
+
+        let addr = crate::mem::pmm::alloc_contiguous_pages(pages_needed);
+        match addr {
+            Some(start) => {
+                let size = pages_needed * PAGE_SIZE;
+                let span = Span::from_base_size(start as *mut u8, size);
+                match unsafe { talc.claim(span) } {
+                    Ok(_) => Ok(()),
+                    Err(_) => {
+                        crate::mem::pmm::free_contiguous_pages(start, pages_needed);
+                        Err(())
+                    }
+                }
+            }
+            None => Err(()),
+        }
+    }
+}
 
 #[global_allocator]
-// Keep the allocator state out of .bss to avoid relying on late-bss pages being
-// accessible on all accelerators (e.g. HVF). The value is still initialized to
-// the same zero state.
 #[unsafe(link_section = ".data")]
-static ALLOCATOR: Allocator = Allocator::new();
+static ALLOCATOR: Talck<Mutex<()>, DynamicHeapHandler> = Talc::new(DynamicHeapHandler).lock();
 
-struct Allocator {
-    // inner: Option<Talck<spin::Mutex<()>, ClaimOnOom>>,
-    inner: spin::Once<LockedHeap>,
-    allocated_count: AtomicUsize,
-    allocated_bytes: AtomicUsize,
+/// Initialize heap with the given memory region
+///
+/// # Safety
+/// The memory region [start, start + size) must be valid and not used elsewhere
+pub unsafe fn init_heap(start: usize, size: usize) {
+    let span = Span::from_base_size(start as *mut u8, size);
+    ALLOCATOR.lock().claim(span).unwrap();
 }
 
-unsafe impl GlobalAlloc for Allocator {
-    unsafe fn alloc(&self, layout: core::alloc::Layout) -> *mut u8 {
-        if let Some(inner) = self.inner.get() {
-            // early_println!("Allocating {} bytes with alignment {}", layout.size(), layout.align());
-            let ptr = unsafe { inner.alloc(layout) };
-            // early_println!("Allocated {} bytes at {:?}", layout.size(), ptr);
-            self.allocated_count.fetch_add(1, Ordering::SeqCst);
-            self.allocated_bytes
-                .fetch_add(layout.size(), Ordering::SeqCst);
-            // early_println!("Total allocations: {}, Total bytes allocated: {}", self.allocated_count.load(Ordering::SeqCst), self.allocated_bytes.load(Ordering::SeqCst));
-            return ptr;
-        }
-        panic!("Allocator not initialized, cannot allocate memory.");
-    }
-
-    unsafe fn dealloc(&self, ptr: *mut u8, layout: core::alloc::Layout) {
-        if let Some(inner) = self.inner.get() {
-            unsafe { inner.dealloc(ptr, layout) }
-            // early_println!("Deallocated {} bytes at {:?}", layout.size(), ptr);
-            self.allocated_count.fetch_sub(1, Ordering::SeqCst);
-            self.allocated_bytes
-                .fetch_sub(layout.size(), Ordering::SeqCst);
-            return;
-        }
-        panic!("Allocator not initialized, cannot deallocate memory.");
-    }
+/// Add an additional heap region
+///
+/// # Safety
+/// The memory region [start, start + size) must be valid and not used elsewhere
+pub unsafe fn add_heap_region(start: usize, size: usize) -> Result<(), &'static str> {
+    let span = Span::from_base_size(start as *mut u8, size);
+    ALLOCATOR
+        .lock()
+        .claim(span)
+        .map(|_| ())
+        .map_err(|_| "Failed to claim region")
 }
 
-impl Allocator {
-    pub const fn new() -> Self {
-        Allocator {
-            inner: spin::Once::new(),
-            allocated_count: AtomicUsize::new(0),
-            allocated_bytes: AtomicUsize::new(0),
-        }
-    }
-
-    pub unsafe fn init(&self, start: usize, size: usize) {
-        let _ = self
-            .inner
-            .call_once(|| unsafe { LockedHeap::new(start, size) });
-    }
-}
-
-pub fn init_heap(area: MemoryArea) {
-    let size = area.size();
-    if size == 0 {
-        early_println!("Heap size is zero, skipping initialization.");
-        return;
-    }
-
-    unsafe {
-        ALLOCATOR.init(area.start, size);
-    }
-
-    early_println!("Heap initialized: {:#x} - {:#x}", area.start, area.end);
+pub fn heap_stats() -> (usize, usize) {
+    (0, 0)
 }

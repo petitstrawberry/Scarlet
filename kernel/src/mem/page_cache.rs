@@ -37,7 +37,7 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 use spin::RwLock;
 
 use crate::fs::vfs_v2::cache::CacheId;
-use crate::mem::page::allocate_boxed_pages;
+use crate::mem::page::ContiguousPages;
 
 /// Page index within a file (0, 1, 2, ...)
 pub type PageIndex = u64;
@@ -47,8 +47,8 @@ pub type PhysicalAddress = usize;
 
 /// Entry in the page cache representing a single cached page
 pub struct PageCacheEntry {
-    /// Physical address of the cached page
-    paddr: PhysicalAddress,
+    /// Page allocation from PMM (owns the memory)
+    allocation: ContiguousPages,
     /// Pin count - number of active short-term accesses
     /// Pages with pin_count > 0 cannot be evicted
     pin_count: AtomicUsize,
@@ -58,9 +58,9 @@ pub struct PageCacheEntry {
 
 impl PageCacheEntry {
     /// Create a new page cache entry
-    fn new(paddr: PhysicalAddress) -> Self {
+    fn new(allocation: ContiguousPages) -> Self {
         Self {
-            paddr,
+            allocation,
             pin_count: AtomicUsize::new(0),
             is_dirty: AtomicUsize::new(0),
         }
@@ -69,7 +69,7 @@ impl PageCacheEntry {
     /// Get the physical address
     #[inline]
     pub fn paddr(&self) -> PhysicalAddress {
-        self.paddr
+        self.allocation.as_paddr()
     }
 
     /// Increment pin count
@@ -160,10 +160,10 @@ impl PageCacheManager {
             return Ok(entry.paddr());
         }
 
-        // Slow path: allocate new page and load content (may race; acceptable)
-        let mut boxed_pages = allocate_boxed_pages(1);
-        let page_ptr = boxed_pages.as_mut_ptr();
-        let paddr = page_ptr as PhysicalAddress;
+        // Slow path: allocate new page from PMM and load content (may race; acceptable)
+        let allocation =
+            ContiguousPages::new(1).ok_or("Failed to allocate page from PMM for cache")?;
+        let paddr = allocation.as_paddr();
 
         // Call loader to fill the page with content
         loader(paddr)?;
@@ -177,12 +177,9 @@ impl PageCacheManager {
         }
 
         // Create cache entry with pin_count = 1 and insert
-        let entry = PageCacheEntry::new(paddr);
+        let entry = PageCacheEntry::new(allocation);
         entry.pin();
         map.insert(key, entry);
-
-        // Leak the box to prevent deallocation - we manage it manually now
-        core::mem::forget(boxed_pages);
 
         Ok(paddr)
     }

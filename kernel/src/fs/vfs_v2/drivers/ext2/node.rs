@@ -18,7 +18,7 @@ use crate::{
         FileSystemErrorKind, FileType, SeekFrom, SocketFileInfo, vfs_v2::cache::PageCacheCapable,
     },
     mem::{
-        page::allocate_boxed_pages,
+        page::ContiguousPages,
         page_cache::{PageCacheManager, PageIndex},
     },
     object::capability::{ControlOps, MemoryMappingOps, StreamError, StreamOps},
@@ -185,7 +185,7 @@ pub struct Ext2FileObject {
     /// Weak reference to the filesystem
     filesystem: RwLock<Option<Weak<dyn FileSystemOperations>>>,
     /// Page-aligned backing for mmap operations (lazy initialized)
-    mmap_backing: RwLock<Option<Box<[crate::mem::page::Page]>>>,
+    mmap_backing: RwLock<Option<ContiguousPages>>,
     /// Byte length of the mmap backing (file size snapshot)
     mmap_backing_len: Mutex<usize>,
     /// Active mmap ranges keyed by starting virtual address
@@ -335,7 +335,7 @@ impl Ext2FileObject {
             .map(|buf| buf.len() < num_pages)
             .unwrap_or(true);
         if needs_alloc {
-            *backing_guard = Some(allocate_boxed_pages(num_pages));
+            *backing_guard = Some(ContiguousPages::new(num_pages).ok_or(StreamError::IoError)?);
         }
 
         let backing = backing_guard.as_mut().expect("mmap backing missing");
@@ -353,7 +353,7 @@ impl Ext2FileObject {
             .ok_or(StreamError::NotSupported)?;
 
         let cache_id = self.cache_id();
-        let backing_ptr = backing.as_mut_ptr() as *mut u8;
+        let backing_ptr = backing.as_ptr() as *mut u8;
         for page_index in 0..num_pages {
             let pinned = PageCacheManager::global()
                 .pin_or_load(cache_id, page_index as u64, |paddr| {

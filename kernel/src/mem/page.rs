@@ -1,8 +1,11 @@
 extern crate alloc;
 
 use alloc::boxed::Box;
+use alloc::vec::Vec;
+use core::fmt;
 
 use crate::environment::PAGE_SIZE;
+use crate::vm::addr::{phys_to_virt, virt_to_phys};
 
 #[repr(C, align(4096))]
 #[derive(Clone, Debug)]
@@ -18,19 +21,35 @@ impl Page {
     }
 }
 
-/// Allocates a number of pages.
+/// Allocates a number of pages from PMM.
 ///
 /// # Arguments
 /// * `num_of_pages` - The number of pages to allocate
 ///
 /// # Returns
-/// A pointer to the allocated pages.
+/// A pointer to the allocated pages, or null if allocation failed.
 pub fn allocate_raw_pages(num_of_pages: usize) -> *mut Page {
-    let boxed_pages = allocate_boxed_pages(num_of_pages);
-    Box::into_raw(boxed_pages) as *mut Page
+    if num_of_pages == 0 {
+        return core::ptr::null_mut();
+    }
+
+    let paddr = match crate::mem::pmm::alloc_contiguous_pages(num_of_pages) {
+        Some(addr) => addr,
+        None => return core::ptr::null_mut(),
+    };
+
+    // Identity mapping: VA = PA
+    let vaddr = phys_to_virt(paddr) as *mut Page;
+
+    // Zero-initialize the pages
+    unsafe {
+        core::ptr::write_bytes(vaddr as *mut u8, 0, num_of_pages * PAGE_SIZE);
+    }
+
+    vaddr
 }
 
-/// Allocates a number of pages with custom alignment.
+/// Allocates a number of pages with custom alignment from PMM.
 ///
 /// # Arguments
 /// * `num_of_pages` - The number of pages to allocate
@@ -39,32 +58,56 @@ pub fn allocate_raw_pages(num_of_pages: usize) -> *mut Page {
 /// # Returns
 /// A pointer to the allocated pages with the specified alignment.
 pub fn allocate_raw_pages_aligned(num_of_pages: usize, align: usize) -> *mut Page {
-    let boxed_pages = allocate_boxed_pages_aligned(num_of_pages, align);
-    Box::into_raw(boxed_pages) as *mut Page
+    if num_of_pages == 0 {
+        return core::ptr::null_mut();
+    }
+
+    let align_pages = align / PAGE_SIZE;
+    let paddr = match crate::mem::pmm::alloc_contiguous_pages_aligned(num_of_pages, align_pages) {
+        Some(addr) => addr,
+        None => return core::ptr::null_mut(),
+    };
+
+    let vaddr = phys_to_virt(paddr) as *mut Page;
+
+    unsafe {
+        core::ptr::write_bytes(vaddr as *mut u8, 0, num_of_pages * PAGE_SIZE);
+    }
+
+    vaddr
 }
 
-/// Frees a number of pages.
+/// Frees a number of pages back to PMM.
 ///
 /// # Arguments
 /// * `pages` - A pointer to the pages to free
 /// * `num_of_pages` - The number of pages to free
 pub fn free_raw_pages(pages: *mut Page, num_of_pages: usize) {
-    unsafe {
-        let boxed_pages = Box::from_raw(core::ptr::slice_from_raw_parts_mut(pages, num_of_pages));
-        free_boxed_pages(boxed_pages);
+    if pages.is_null() || num_of_pages == 0 {
+        return;
     }
+
+    let paddr = virt_to_phys(pages as usize);
+    crate::mem::pmm::free_contiguous_pages(paddr, num_of_pages);
 }
 
-/// Allocates a number of pages and returns them as a boxed slice.
+/// Allocates a number of pages from the heap and returns them as a boxed slice.
+/// Note: This uses the global heap allocator, not PMM.
+/// For PMM-backed allocations, use `ContiguousPages::new()` instead.
 ///
 /// # Arguments
 /// * `num_of_pages` - The number of pages to allocate
-///  
+///
 /// # Returns
 /// A boxed slice of the allocated pages.
 ///
+/// # Panics
+/// Panics if allocation fails.
+#[deprecated(
+    since = "0.1.0",
+    note = "This function uses the global heap allocator. Use ContiguousPages::new() for PMM-backed allocations instead."
+)]
 pub fn allocate_boxed_pages(num_of_pages: usize) -> Box<[Page]> {
-    // Allocate raw memory and initialize it
     use alloc::alloc::{Layout, alloc_zeroed};
     use core::ptr;
 
@@ -76,12 +119,27 @@ pub fn allocate_boxed_pages(num_of_pages: usize) -> Box<[Page]> {
             alloc::alloc::handle_alloc_error(layout);
         }
 
-        // Convert raw pointer to Box<[Page]>
         let slice = ptr::slice_from_raw_parts_mut(ptr, num_of_pages);
         Box::from_raw(slice)
     }
 }
 
+/// Allocates aligned pages from the heap and returns them as a boxed slice.
+/// Note: This uses the global heap allocator, not PMM.
+///
+/// # Arguments
+/// * `num_of_pages` - The number of pages to allocate
+/// * `align` - The alignment in bytes
+///
+/// # Returns
+/// A boxed slice of the allocated pages.
+///
+/// # Panics
+/// Panics if allocation fails.
+#[deprecated(
+    since = "0.1.0",
+    note = "This function uses the global heap allocator. Use allocate_raw_pages_aligned() with ContiguousPages for PMM-backed allocations instead."
+)]
 pub fn allocate_boxed_pages_aligned(num_of_pages: usize, align: usize) -> Box<[Page]> {
     use alloc::alloc::{Layout, alloc_zeroed};
     use core::ptr;
@@ -101,21 +159,212 @@ pub fn allocate_boxed_pages_aligned(num_of_pages: usize, align: usize) -> Box<[P
 }
 
 /// Frees a boxed slice of pages.
-///
-/// # Arguments
-/// * `pages` - A boxed slice of pages to free
-///
-pub fn free_boxed_pages(pages: Box<[Page]>) {
+/// Note: The Box will be automatically freed to the heap when dropped.
+pub fn free_boxed_pages(_pages: Box<[Page]>) {
     // The Box will be automatically freed when it goes out of scope
-    drop(pages);
+    drop(_pages);
 }
 
 /// Frees a boxed page.
-///
-/// # Arguments
-/// * `page` - A boxed page to free
-///
-pub fn free_boxed_page(page: Box<Page>) {
+/// Note: The Box will be automatically freed to the heap when dropped.
+pub fn free_boxed_page(_page: Box<Page>) {
     // The Box will be automatically freed when it goes out of scope
-    drop(page);
+    drop(_page);
+}
+
+pub struct ContiguousPages {
+    ptr: *mut Page,
+    count: usize,
+}
+
+impl ContiguousPages {
+    pub fn new(count: usize) -> Option<Self> {
+        if count == 0 {
+            return None;
+        }
+
+        let ptr = allocate_raw_pages(count);
+        if ptr.is_null() {
+            None
+        } else {
+            Some(Self { ptr, count })
+        }
+    }
+
+    /// Get a pointer to the first page.
+    pub fn as_ptr(&self) -> *mut Page {
+        self.ptr
+    }
+
+    /// Get the physical address of the first page.
+    pub fn as_paddr(&self) -> usize {
+        virt_to_phys(self.ptr as usize)
+    }
+
+    /// Get the number of pages.
+    pub fn len(&self) -> usize {
+        self.count
+    }
+
+    /// Check if empty (always false for valid allocations).
+    pub fn is_empty(&self) -> bool {
+        self.count == 0
+    }
+
+    /// Get a pointer to a specific page.
+    ///
+    /// # Safety
+    /// `index` must be less than `count`.
+    pub unsafe fn page_ptr(&self, index: usize) -> *mut Page {
+        debug_assert!(index < self.count);
+        self.ptr.add(index)
+    }
+
+    /// Convert to raw parts (ptr, count) without freeing.
+    ///
+    /// After calling this, the caller is responsible for freeing the memory.
+    pub fn into_raw(self) -> (*mut Page, usize) {
+        let ptr = self.ptr;
+        let count = self.count;
+        core::mem::forget(self);
+        (ptr, count)
+    }
+
+    /// Create from raw parts.
+    ///
+    /// # Safety
+    /// `ptr` must point to a valid allocation of `count` pages
+    /// that was previously obtained from PMM.
+    pub unsafe fn from_raw(ptr: *mut Page, count: usize) -> Self {
+        debug_assert!(!ptr.is_null());
+        debug_assert!(count > 0);
+        Self { ptr, count }
+    }
+
+    pub fn as_vaddr(&self) -> usize {
+        self.ptr as usize
+    }
+
+    pub fn contains_paddr_range(&self, paddr: usize, len: usize) -> bool {
+        let self_paddr = self.as_paddr();
+        let self_end = self_paddr + self.count * PAGE_SIZE;
+        let range_end = paddr + len;
+
+        paddr < self_end && range_end > self_paddr
+    }
+}
+
+impl Drop for ContiguousPages {
+    fn drop(&mut self) {
+        if !self.ptr.is_null() && self.count > 0 {
+            free_raw_pages(self.ptr, self.count);
+        }
+    }
+}
+
+unsafe impl Send for ContiguousPages {}
+unsafe impl Sync for ContiguousPages {}
+
+impl Clone for ContiguousPages {
+    fn clone(&self) -> Self {
+        let new_alloc = Self::new(self.count).expect("Failed to clone ContiguousPages");
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                self.ptr as *const u8,
+                new_alloc.ptr as *mut u8,
+                self.count * PAGE_SIZE,
+            );
+        }
+        new_alloc
+    }
+}
+
+impl fmt::Debug for ContiguousPages {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ContiguousPages")
+            .field("ptr", &self.ptr)
+            .field("count", &self.count)
+            .finish()
+    }
+}
+
+pub struct TaskPages {
+    pages: Vec<usize>,
+}
+
+impl TaskPages {
+    pub fn new(count: usize) -> Option<Self> {
+        crate::mem::pmm::alloc_individual_pages(count).map(|pages| Self { pages })
+    }
+
+    pub fn page_paddr(&self, index: usize) -> Option<usize> {
+        self.pages.get(index).copied()
+    }
+
+    pub fn len(&self) -> usize {
+        self.pages.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.pages.is_empty()
+    }
+
+    pub fn free_range(&mut self, offset: usize, count: usize) {
+        if offset >= self.pages.len() {
+            return;
+        }
+        let end = (offset + count).min(self.pages.len());
+        let to_free: Vec<usize> = self.pages.drain(offset..end).collect();
+        crate::mem::pmm::free_individual_pages(&to_free);
+    }
+
+    pub fn reclaim_paddr_range(&mut self, start: usize, end: usize) -> usize {
+        if self.pages.is_empty() {
+            return 0;
+        }
+
+        let mut to_free = Vec::new();
+        self.pages.retain(|&paddr| {
+            let page_end = paddr.saturating_add(PAGE_SIZE - 1);
+            let in_range = paddr >= start && page_end <= end;
+            if in_range {
+                to_free.push(paddr);
+                false
+            } else {
+                true
+            }
+        });
+
+        let freed = to_free.len();
+        if freed > 0 {
+            crate::mem::pmm::free_individual_pages(&to_free);
+        }
+        freed
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test_case]
+    fn task_pages_reclaim_paddr_range_reclaims_only_covered_pages() {
+        let mut pages = TaskPages::new(4).expect("TaskPages allocation failed");
+        let p0 = pages.page_paddr(0).unwrap();
+        let p1 = pages.page_paddr(1).unwrap();
+
+        let start = core::cmp::min(p0, p1);
+        let end = core::cmp::max(p0, p1) + PAGE_SIZE - 1;
+
+        let before = pages.len();
+        let freed = pages.reclaim_paddr_range(start, end);
+        assert!(freed >= 1);
+        assert!(pages.len() < before);
+    }
+}
+
+impl Drop for TaskPages {
+    fn drop(&mut self) {
+        crate::mem::pmm::free_individual_pages(&self.pages);
+    }
 }
