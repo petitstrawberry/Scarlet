@@ -135,6 +135,11 @@ impl DeviceManager {
         }
     }
 
+    #[cfg(test)]
+    pub const fn new_for_test() -> Self {
+        Self::new()
+    }
+
     pub fn get_manager() -> &'static DeviceManager {
         &MANAGER
     }

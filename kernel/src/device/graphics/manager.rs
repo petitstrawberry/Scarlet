@@ -30,7 +30,7 @@ use spin::{Mutex, RwLock};
 
 use crate::device::{
     DeviceType,
-    graphics::{FramebufferConfig, GraphicsDevice},
+    graphics::FramebufferConfig,
     manager::{DeviceManager, SharedDevice},
 };
 use crate::vm::addr::phys_to_virt;
@@ -109,8 +109,10 @@ pub struct GraphicsManager {
     /// Framebuffer resources mapped by logical name
     framebuffers: Mutex<Option<HashMap<String, Arc<FramebufferResource>>>>,
     /// Multi-display configuration (future use)
+    #[allow(dead_code)]
     display_configs: Mutex<Vec<DisplayConfiguration>>,
     /// Active mmap regions (future use)
+    #[allow(dead_code)]
     active_mappings: Mutex<Vec<MmapRegion>>,
 }
 
@@ -181,6 +183,19 @@ impl GraphicsManager {
         &self,
         device_id: usize,
         device: SharedDevice,
+    ) -> Result<(), &'static str> {
+        self.register_framebuffer_from_device_with_manager(
+            device_id,
+            device,
+            DeviceManager::get_manager(),
+        )
+    }
+
+    fn register_framebuffer_from_device_with_manager(
+        &self,
+        device_id: usize,
+        device: SharedDevice,
+        device_manager: &DeviceManager,
     ) -> Result<(), &'static str> {
         // Cast to graphics device
         let graphics_device = device
@@ -263,7 +278,9 @@ impl GraphicsManager {
             "[GraphicsManager] Creating framebuffer char device for {}",
             logical_name
         );
-        if let Err(e) = self.create_framebuffer_char_device(&logical_name) {
+        if let Err(e) =
+            self.create_framebuffer_char_device_with_manager(&logical_name, device_manager)
+        {
             crate::early_println!(
                 "[GraphicsManager] Warning: Failed to create character device for {}: {}",
                 logical_name,
@@ -272,6 +289,16 @@ impl GraphicsManager {
         }
 
         Ok(())
+    }
+
+    #[cfg(test)]
+    pub fn register_framebuffer_from_device_with_device_manager(
+        &self,
+        device_id: usize,
+        device: SharedDevice,
+        device_manager: &DeviceManager,
+    ) -> Result<(), &'static str> {
+        self.register_framebuffer_from_device_with_manager(device_id, device, device_manager)
     }
 
     /// Get a framebuffer resource by logical name
@@ -326,9 +353,15 @@ impl GraphicsManager {
     ///
     /// Result indicating success or failure
     pub fn create_framebuffer_char_device(&self, fb_name: &str) -> Result<(), &'static str> {
-        use crate::device::{
-            graphics::framebuffer_device::FramebufferCharDevice, manager::DeviceManager,
-        };
+        self.create_framebuffer_char_device_with_manager(fb_name, DeviceManager::get_manager())
+    }
+
+    fn create_framebuffer_char_device_with_manager(
+        &self,
+        fb_name: &str,
+        device_manager: &DeviceManager,
+    ) -> Result<(), &'static str> {
+        use crate::device::graphics::framebuffer_device::FramebufferCharDevice;
         use alloc::sync::Arc;
 
         // Get framebuffer resource
@@ -342,10 +375,13 @@ impl GraphicsManager {
         };
 
         // Create the character device
+        #[cfg(test)]
+        let fb_char_device =
+            FramebufferCharDevice::new_with_device_manager(fb_resource, device_manager);
+        #[cfg(not(test))]
         let fb_char_device = FramebufferCharDevice::new(fb_resource);
 
         // Register with DeviceManager (this will automatically publish to DevFS)
-        let device_manager = DeviceManager::get_manager();
         let device_id =
             device_manager.register_device_with_name(fb_name.to_string(), Arc::new(fb_char_device));
 
@@ -357,6 +393,15 @@ impl GraphicsManager {
             fb_name
         );
         Ok(())
+    }
+
+    #[cfg(test)]
+    pub fn create_framebuffer_char_device_with_device_manager(
+        &self,
+        fb_name: &str,
+        device_manager: &DeviceManager,
+    ) -> Result<(), &'static str> {
+        self.create_framebuffer_char_device_with_manager(fb_name, device_manager)
     }
 
     /// Update the character device ID for a framebuffer resource
@@ -555,25 +600,13 @@ mod test_utils {
     pub fn create_test_graphics_manager() -> GraphicsManager {
         GraphicsManager::new()
     }
-
-    /// Setup a clean GraphicsManager for testing
-    /// This clears the global singleton and returns a reference to it
-    /// ensuring each test starts with a clean state
-    pub fn setup_clean_global_graphics_manager() -> &'static GraphicsManager {
-        let manager = GraphicsManager::get_manager();
-        manager.clear_for_test();
-        manager
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::device::{
-        Device,
-        graphics::{
-            FramebufferConfig, GenericGraphicsDevice, PixelFormat, manager::GraphicsManager,
-        },
+    use crate::device::graphics::{
+        FramebufferConfig, GenericGraphicsDevice, PixelFormat, manager::GraphicsManager,
     };
     use alloc::{string::ToString, sync::Arc};
 
@@ -615,7 +648,8 @@ mod tests {
 
     #[test_case]
     fn test_framebuffer_registration() {
-        let mut manager = test_utils::create_test_graphics_manager();
+        let manager = test_utils::create_test_graphics_manager();
+        let device_manager = DeviceManager::new_for_test();
 
         // Create a test graphics device
         let mut device = GenericGraphicsDevice::new("test-gpu");
@@ -626,7 +660,11 @@ mod tests {
         let shared_device: SharedDevice = Arc::new(device);
 
         // Register the device
-        let result = manager.register_framebuffer_from_device(0, shared_device);
+        let result = manager.register_framebuffer_from_device_with_device_manager(
+            0,
+            shared_device,
+            &device_manager,
+        );
         assert!(result.is_ok());
 
         // Check that framebuffer was registered
@@ -649,7 +687,8 @@ mod tests {
 
     #[test_case]
     fn test_multiple_framebuffer_registration() {
-        let mut manager = test_utils::create_test_graphics_manager();
+        let manager = test_utils::create_test_graphics_manager();
+        let device_manager = DeviceManager::new_for_test();
 
         // Create first device
         let mut device1 = GenericGraphicsDevice::new("test-gpu1");
@@ -668,12 +707,20 @@ mod tests {
         // Register both devices
         assert!(
             manager
-                .register_framebuffer_from_device(1, shared_device1)
+                .register_framebuffer_from_device_with_device_manager(
+                    1,
+                    shared_device1,
+                    &device_manager,
+                )
                 .is_ok()
         );
         assert!(
             manager
-                .register_framebuffer_from_device(2, shared_device2)
+                .register_framebuffer_from_device_with_device_manager(
+                    2,
+                    shared_device2,
+                    &device_manager,
+                )
                 .is_ok()
         );
 
@@ -695,7 +742,8 @@ mod tests {
 
     #[test_case]
     fn test_char_device_id_assignment() {
-        let mut manager = test_utils::create_test_graphics_manager();
+        let manager = test_utils::create_test_graphics_manager();
+        let device_manager = DeviceManager::new_for_test();
 
         // Create and register a device
         let mut device = GenericGraphicsDevice::new("test-gpu");
@@ -705,7 +753,7 @@ mod tests {
         let shared_device: SharedDevice = Arc::new(device);
 
         manager
-            .register_framebuffer_from_device(0, shared_device)
+            .register_framebuffer_from_device_with_device_manager(0, shared_device, &device_manager)
             .unwrap();
 
         // Set character device ID

@@ -19,10 +19,13 @@ mod integration_tests {
         manager::DeviceManager,
     };
 
+    fn setup_test_managers() -> (GraphicsManager, DeviceManager) {
+        (GraphicsManager::new(), DeviceManager::new_for_test())
+    }
+
     #[test_case]
     fn test_graphics_manager_basic_integration() {
-        // Create a test GraphicsManager instance (separate from singleton)
-        let mut graphics_manager = GraphicsManager::new();
+        let (graphics_manager, device_manager) = setup_test_managers();
 
         // Create a mock VirtIO GPU-like device
         let mut test_device = GenericGraphicsDevice::new("test-virtio-gpu");
@@ -38,7 +41,11 @@ mod integration_tests {
         let shared_device: Arc<dyn Device> = Arc::new(test_device);
 
         // Register the device with GraphicsManager
-        let result = graphics_manager.register_framebuffer_from_device(0, shared_device);
+        let result = graphics_manager.register_framebuffer_from_device_with_device_manager(
+            0,
+            shared_device,
+            &device_manager,
+        );
         assert!(result.is_ok(), "Failed to register framebuffer device");
 
         // Verify the framebuffer was registered
@@ -63,9 +70,7 @@ mod integration_tests {
 
     #[test_case]
     fn test_framebuffer_char_device_integration() {
-        // Setup clean graphics manager for this test
-        let graphics_manager = GraphicsManager::get_manager();
-        graphics_manager.clear_for_test();
+        let (graphics_manager, device_manager) = setup_test_managers();
 
         let mut test_device = GenericGraphicsDevice::new("test-gpu");
         let config = FramebufferConfig::new(640, 480, PixelFormat::RGBA8888);
@@ -79,13 +84,16 @@ mod integration_tests {
         let shared_device: Arc<dyn Device> = Arc::new(test_device);
 
         // Register device with DeviceManager first (this is what happens in real kernel)
-        let device_manager = DeviceManager::get_manager();
         let device_id =
             device_manager.register_device_with_name("test-gpu".to_string(), shared_device.clone());
 
         // Then register framebuffer with GraphicsManager
         graphics_manager
-            .register_framebuffer_from_device(device_id, shared_device)
+            .register_framebuffer_from_device_with_device_manager(
+                device_id,
+                shared_device,
+                &device_manager,
+            )
             .unwrap();
 
         // Get the framebuffer resource that was created
@@ -94,7 +102,8 @@ mod integration_tests {
             .expect("Framebuffer should exist");
 
         // Create FramebufferCharDevice
-        let char_device = FramebufferCharDevice::new(fb_resource);
+        let char_device =
+            FramebufferCharDevice::new_with_device_manager(fb_resource, &device_manager);
 
         // Test device properties
         assert_eq!(char_device.device_type(), DeviceType::Char);
@@ -119,9 +128,7 @@ mod integration_tests {
 
     #[test_case]
     fn test_multiple_framebuffer_management() {
-        // Setup clean graphics manager for this test
-        let graphics_manager = GraphicsManager::get_manager();
-        graphics_manager.clear_for_test();
+        let (graphics_manager, device_manager) = setup_test_managers();
 
         // Create first framebuffer device
         let mut device1 = GenericGraphicsDevice::new("gpu-1");
@@ -142,7 +149,6 @@ mod integration_tests {
         let shared_device2: Arc<dyn Device> = Arc::new(device2);
 
         // Register devices with DeviceManager first
-        let device_manager = DeviceManager::get_manager();
         let device_id1 =
             device_manager.register_device_with_name("gpu-1".to_string(), shared_device1.clone());
         let device_id2 =
@@ -151,12 +157,20 @@ mod integration_tests {
         // Register both devices with GraphicsManager
         assert!(
             graphics_manager
-                .register_framebuffer_from_device(device_id1, shared_device1)
+                .register_framebuffer_from_device_with_device_manager(
+                    device_id1,
+                    shared_device1,
+                    &device_manager,
+                )
                 .is_ok()
         );
         assert!(
             graphics_manager
-                .register_framebuffer_from_device(device_id2, shared_device2)
+                .register_framebuffer_from_device_with_device_manager(
+                    device_id2,
+                    shared_device2,
+                    &device_manager,
+                )
                 .is_ok()
         );
 
@@ -177,8 +191,10 @@ mod integration_tests {
         assert_ne!(fb0.size, fb1.size); // Different resolutions
 
         // Test character devices for both framebuffers
-        let char_device0 = FramebufferCharDevice::new(fb0.clone());
-        let char_device1 = FramebufferCharDevice::new(fb1.clone());
+        let char_device0 =
+            FramebufferCharDevice::new_with_device_manager(fb0.clone(), &device_manager);
+        let char_device1 =
+            FramebufferCharDevice::new_with_device_manager(fb1.clone(), &device_manager);
 
         // Write different patterns to each framebuffer
         let pattern0 = [0x10, 0x20, 0x30, 0x40];
@@ -200,9 +216,7 @@ mod integration_tests {
 
     #[test_case]
     fn test_char_device_id_assignment() {
-        // Setup clean graphics manager for this test
-        let graphics_manager = GraphicsManager::get_manager();
-        graphics_manager.clear_for_test();
+        let (graphics_manager, device_manager) = setup_test_managers();
 
         // Register a device
         let mut device = GenericGraphicsDevice::new("test-gpu");
@@ -213,13 +227,16 @@ mod integration_tests {
         let shared_device: Arc<dyn Device> = Arc::new(device);
 
         // Register device with DeviceManager first
-        let device_manager = DeviceManager::get_manager();
         let device_id =
             device_manager.register_device_with_name("test-gpu".to_string(), shared_device.clone());
 
         // Then register with GraphicsManager
         graphics_manager
-            .register_framebuffer_from_device(device_id, shared_device)
+            .register_framebuffer_from_device_with_device_manager(
+                device_id,
+                shared_device,
+                &device_manager,
+            )
             .unwrap();
 
         // Character device should be automatically created and registered
@@ -273,9 +290,7 @@ mod integration_tests {
 
     #[test_case]
     fn test_framebuffer_boundary_conditions() {
-        // Setup clean graphics manager for this test
-        let graphics_manager = GraphicsManager::get_manager();
-        graphics_manager.clear_for_test();
+        let (graphics_manager, device_manager) = setup_test_managers();
 
         // Create a very small framebuffer
         let mut device = GenericGraphicsDevice::new("small-gpu");
@@ -286,13 +301,16 @@ mod integration_tests {
         let shared_device: Arc<dyn Device> = Arc::new(device);
 
         // Register device with DeviceManager first
-        let device_manager = DeviceManager::get_manager();
         let device_id = device_manager
             .register_device_with_name("small-gpu".to_string(), shared_device.clone());
 
         // Then register with GraphicsManager
         graphics_manager
-            .register_framebuffer_from_device(device_id, shared_device)
+            .register_framebuffer_from_device_with_device_manager(
+                device_id,
+                shared_device,
+                &device_manager,
+            )
             .unwrap();
 
         // Get the framebuffer name that was assigned to this specific device
@@ -311,7 +329,8 @@ mod integration_tests {
         let fb_resource = graphics_manager
             .get_framebuffer(&fb_name)
             .expect("Framebuffer should exist");
-        let char_device = FramebufferCharDevice::new(fb_resource);
+        let char_device =
+            FramebufferCharDevice::new_with_device_manager(fb_resource, &device_manager);
 
         // Fill the entire framebuffer using write_at
         let data = [0xFF; 10]; // More than framebuffer size
@@ -346,9 +365,7 @@ mod integration_tests {
         use crate::fs::{DeviceFileInfo, FileType};
         use crate::object::capability::StreamOps;
 
-        // Setup clean graphics manager for this test
-        let graphics_manager = GraphicsManager::get_manager();
-        graphics_manager.clear_for_test();
+        let (graphics_manager, device_manager) = setup_test_managers();
 
         // Create a test framebuffer device
         let mut device = GenericGraphicsDevice::new("devfs-test-gpu");
@@ -359,13 +376,16 @@ mod integration_tests {
         let shared_device: Arc<dyn Device> = Arc::new(device);
 
         // Register device with DeviceManager first
-        let device_manager = DeviceManager::get_manager();
         let device_id = device_manager
             .register_device_with_name("devfs-test-gpu".to_string(), shared_device.clone());
 
         // Register with GraphicsManager
         graphics_manager
-            .register_framebuffer_from_device(device_id, shared_device)
+            .register_framebuffer_from_device_with_device_manager(
+                device_id,
+                shared_device,
+                &device_manager,
+            )
             .unwrap();
 
         // Get the framebuffer and its character device ID
@@ -373,7 +393,7 @@ mod integration_tests {
         let char_device_id = fb_resource.created_char_device_id.read().unwrap();
 
         // Create DevFS filesystem
-        let _devfs = DevFS::new();
+        let _devfs = DevFS::new_with_device_manager(&device_manager);
 
         // Create a DevFileObject directly for the framebuffer device
         let device_file_info = DeviceFileInfo {
@@ -391,8 +411,13 @@ mod integration_tests {
         ));
 
         // Create the DevFileObject
-        let dev_file_object =
-            DevFileObject::new(dev_node, char_device_id, DeviceType::Char).unwrap();
+        let dev_file_object = DevFileObject::new_with_device_manager(
+            dev_node,
+            char_device_id,
+            DeviceType::Char,
+            &device_manager,
+        )
+        .unwrap();
 
         // Test writing through DevFS
         let test_pattern = [0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF];
@@ -404,7 +429,8 @@ mod integration_tests {
 
         // Note: For DevFS, we need to use the underlying character device for reading
         // since DevFileObject manages its own position
-        let char_device = FramebufferCharDevice::new(fb_resource.clone());
+        let char_device =
+            FramebufferCharDevice::new_with_device_manager(fb_resource.clone(), &device_manager);
         let bytes_read = char_device.read_at(0, &mut read_buffer).unwrap();
         assert_eq!(bytes_read, 6);
         assert_eq!(read_buffer, test_pattern);
@@ -425,11 +451,7 @@ mod integration_tests {
 
     #[test_case]
     fn test_devfs_integration_with_device_manager() {
-        // Setup clean managers for this test
-        let graphics_manager = GraphicsManager::get_manager();
-        graphics_manager.clear_for_test();
-
-        let device_manager = DeviceManager::get_manager();
+        let (graphics_manager, device_manager) = setup_test_managers();
 
         // Create multiple framebuffer devices
         let device_names = ["devfs-test-gpu-0", "devfs-test-gpu-1", "devfs-test-gpu-2"];
@@ -452,7 +474,11 @@ mod integration_tests {
 
             // Then register with GraphicsManager
             graphics_manager
-                .register_framebuffer_from_device(device_id, shared_device)
+                .register_framebuffer_from_device_with_device_manager(
+                    device_id,
+                    shared_device,
+                    &device_manager,
+                )
                 .unwrap();
         }
 
@@ -466,7 +492,7 @@ mod integration_tests {
         use crate::fs::{DeviceFileInfo, FileType};
         use crate::object::capability::StreamOps;
 
-        let _devfs = DevFS::new();
+        let _devfs = DevFS::new_with_device_manager(&device_manager);
 
         for (idx, fb_name) in fb_names.iter().enumerate() {
             let fb_resource = graphics_manager.get_framebuffer(fb_name).unwrap();
@@ -487,8 +513,13 @@ mod integration_tests {
             ));
 
             // Create a new DevFileObject for each framebuffer to ensure independent position management
-            let dev_file_object =
-                DevFileObject::new(dev_node, char_device_id, DeviceType::Char).unwrap();
+            let dev_file_object = DevFileObject::new_with_device_manager(
+                dev_node,
+                char_device_id,
+                DeviceType::Char,
+                &device_manager,
+            )
+            .unwrap();
 
             // Write unique pattern to each framebuffer
             let pattern = [0x10 + idx as u8, 0x20 + idx as u8, 0x30 + idx as u8];
@@ -497,7 +528,10 @@ mod integration_tests {
 
             // Verify the write using direct character device access at position 0
             // Since each DevFileObject starts writing from position 0
-            let char_device = FramebufferCharDevice::new(fb_resource.clone());
+            let char_device = FramebufferCharDevice::new_with_device_manager(
+                fb_resource.clone(),
+                &device_manager,
+            );
             let mut read_buffer = [0u8; 3];
             let bytes_read = char_device.read_at(0, &mut read_buffer).unwrap();
             assert_eq!(bytes_read, 3);
@@ -508,9 +542,7 @@ mod integration_tests {
     #[test_case]
     #[cfg(target_arch = "riscv64")]
     fn test_dev_fb0_gradient_drawing() {
-        // Setup clean graphics manager for this test
-        let graphics_manager = GraphicsManager::get_manager();
-        graphics_manager.clear_for_test();
+        let (graphics_manager, device_manager) = setup_test_managers();
 
         // Create a VirtIO GPU device suitable for gradient drawing
         use crate::device::graphics::GraphicsDevice;
@@ -518,7 +550,7 @@ mod integration_tests {
 
         // Use a mock VirtIO GPU base address for testing
         let virtio_gpu_base_addr = 0x10002000; // Typical VirtIO GPU address
-        let mut device = VirtioGpuDevice::new(virtio_gpu_base_addr);
+        let device = VirtioGpuDevice::new(virtio_gpu_base_addr);
 
         // Try to initialize the VirtIO GPU graphics capabilities
         device
@@ -532,13 +564,16 @@ mod integration_tests {
         let shared_device = Arc::new(device);
 
         // Register device with DeviceManager first
-        let device_manager = DeviceManager::get_manager();
         let device_id = device_manager
             .register_device_with_name("gradient-gpu".to_string(), shared_device.clone());
 
         // Then register with GraphicsManager
         graphics_manager
-            .register_framebuffer_from_device(device_id, shared_device)
+            .register_framebuffer_from_device_with_device_manager(
+                device_id,
+                shared_device,
+                &device_manager,
+            )
             .unwrap();
 
         // Get the framebuffer resource
@@ -547,7 +582,8 @@ mod integration_tests {
             .expect("Framebuffer should exist");
 
         // Create FramebufferCharDevice representing /dev/fb0
-        let fb_char_device = FramebufferCharDevice::new(fb_resource.clone());
+        let fb_char_device =
+            FramebufferCharDevice::new_with_device_manager(fb_resource.clone(), &device_manager);
 
         // Verify device properties
         assert_eq!(fb_char_device.device_type(), DeviceType::Char);

@@ -241,6 +241,8 @@ pub struct FramebufferCharDevice {
     fb_resource: Arc<FramebufferResource>,
     /// Track mappings for testing purposes  
     mappings: RwLock<BTreeMap<usize, MockMapping>>, // virtual_start -> MockMapping
+    #[cfg(test)]
+    device_manager_addr: Option<usize>,
 }
 
 impl FramebufferCharDevice {
@@ -257,7 +259,34 @@ impl FramebufferCharDevice {
         Self {
             fb_resource,
             mappings: RwLock::new(BTreeMap::new()),
+            #[cfg(test)]
+            device_manager_addr: None,
         }
+    }
+
+    #[cfg(test)]
+    pub fn new_with_device_manager(
+        fb_resource: Arc<FramebufferResource>,
+        device_manager: &DeviceManager,
+    ) -> Self {
+        Self {
+            fb_resource,
+            mappings: RwLock::new(BTreeMap::new()),
+            device_manager_addr: Some(device_manager as *const DeviceManager as usize),
+        }
+    }
+
+    #[cfg(test)]
+    fn device_manager(&self) -> &DeviceManager {
+        match self.device_manager_addr {
+            Some(device_manager_addr) => unsafe { &*(device_manager_addr as *const DeviceManager) },
+            None => DeviceManager::get_manager(),
+        }
+    }
+
+    #[cfg(not(test))]
+    fn device_manager(&self) -> &DeviceManager {
+        DeviceManager::get_manager()
     }
 
     /// Get the framebuffer name this device represents
@@ -733,7 +762,7 @@ impl FramebufferCharDevice {
     /// from framebuffer contents. This method handles such updates.
     fn trigger_display_update(&self) -> Result<(), &'static str> {
         // Try to get the source graphics device to trigger a display update
-        let device_manager = DeviceManager::get_manager();
+        let device_manager = self.device_manager();
         if let Some(device) = device_manager.get_device(self.fb_resource.source_device_id) {
             // Check if the device supports graphics operations
             if let Some(graphics_device) = device.as_graphics_device() {
@@ -805,12 +834,9 @@ mod tests {
     use alloc::{string::ToString, sync::Arc};
     use spin::RwLock;
 
-    /// Test utility to setup a clean global GraphicsManager for each test
-    fn setup_clean_graphics_manager() -> &'static GraphicsManager {
-        let manager = GraphicsManager::get_manager();
-        // Clear any existing state from previous tests
-        manager.clear_for_test();
-        manager
+    /// Test utility to create isolated managers for each test.
+    fn setup_test_managers() -> (GraphicsManager, DeviceManager) {
+        (GraphicsManager::new(), DeviceManager::new_for_test())
     }
 
     #[test_case]
@@ -833,8 +859,7 @@ mod tests {
 
     #[test_case]
     fn test_framebuffer_char_device_read_write_at() {
-        // Setup clean graphics manager for this test
-        let graphics_manager = setup_clean_graphics_manager();
+        let (graphics_manager, device_manager) = setup_test_managers();
         let mut test_device = GenericGraphicsDevice::new("test-gpu-read-write");
         let config = FramebufferConfig::new(100, 100, PixelFormat::RGBA8888);
         test_device.set_framebuffer_config(config.clone());
@@ -848,13 +873,16 @@ mod tests {
         let shared_device: Arc<dyn Device> = Arc::new(test_device);
 
         // Register device with DeviceManager first
-        let device_manager = DeviceManager::get_manager();
         let device_id = device_manager
             .register_device_with_name("test-gpu-read-write".to_string(), shared_device.clone());
 
         // Then register with GraphicsManager
         graphics_manager
-            .register_framebuffer_from_device(device_id, shared_device)
+            .register_framebuffer_from_device_with_device_manager(
+                device_id,
+                shared_device,
+                &device_manager,
+            )
             .unwrap();
 
         // Get the framebuffer resource that was assigned to this specific device
@@ -874,7 +902,8 @@ mod tests {
                 .get_framebuffer(fb_name)
                 .expect("Framebuffer should exist")
         };
-        let char_device = FramebufferCharDevice::new(fb_resource);
+        let char_device =
+            FramebufferCharDevice::new_with_device_manager(fb_resource, &device_manager);
 
         // Test write_at operation
         let test_data = [0x12, 0x34, 0x56, 0x78];
@@ -890,8 +919,7 @@ mod tests {
 
     #[test_case]
     fn test_framebuffer_char_device_boundaries() {
-        // Setup clean graphics manager for this test
-        let graphics_manager = setup_clean_graphics_manager();
+        let (graphics_manager, device_manager) = setup_test_managers();
         let mut test_device = GenericGraphicsDevice::new("test-gpu-boundaries");
         let config = FramebufferConfig::new(10, 10, PixelFormat::RGB888); // Small 10x10 framebuffer
         test_device.set_framebuffer_config(config.clone());
@@ -902,11 +930,14 @@ mod tests {
         test_device.set_framebuffer_address(crate::vm::addr::virt_to_phys(fb_addr));
 
         let shared_device: Arc<dyn Device> = Arc::new(test_device);
-        let device_manager = DeviceManager::get_manager();
         let device_id = device_manager
             .register_device_with_name("test-gpu-boundaries".to_string(), shared_device.clone());
         graphics_manager
-            .register_framebuffer_from_device(device_id, shared_device)
+            .register_framebuffer_from_device_with_device_manager(
+                device_id,
+                shared_device,
+                &device_manager,
+            )
             .unwrap();
 
         let fb_resource = {
@@ -925,7 +956,8 @@ mod tests {
                 .get_framebuffer(fb_name)
                 .expect("Framebuffer should exist")
         };
-        let char_device = FramebufferCharDevice::new(fb_resource);
+        let char_device =
+            FramebufferCharDevice::new_with_device_manager(fb_resource, &device_manager);
 
         // First, clear the framebuffer by writing zeros
         let zero_buffer = vec![0u8; fb_size];
@@ -989,7 +1021,7 @@ mod tests {
             (PixelFormat::RGBA8888, 4),
             (PixelFormat::BGRA8888, 4),
         ] {
-            let graphics_manager = setup_clean_graphics_manager();
+            let (graphics_manager, device_manager) = setup_test_managers();
             let mut test_device = GenericGraphicsDevice::new("test-gpu-pixel-format");
             let config = FramebufferConfig::new(4, 4, pixel_format); // 4x4 pixels
             test_device.set_framebuffer_config(config.clone());
@@ -1003,13 +1035,16 @@ mod tests {
             test_device.set_framebuffer_address(crate::vm::addr::virt_to_phys(fb_addr));
 
             let shared_device: Arc<dyn Device> = Arc::new(test_device);
-            let device_manager = DeviceManager::get_manager();
             let device_id = device_manager.register_device_with_name(
                 alloc::format!("test-gpu-{:?}", pixel_format),
                 shared_device.clone(),
             );
             graphics_manager
-                .register_framebuffer_from_device(device_id, shared_device)
+                .register_framebuffer_from_device_with_device_manager(
+                    device_id,
+                    shared_device,
+                    &device_manager,
+                )
                 .unwrap();
 
             let fb_resource = {
@@ -1028,7 +1063,8 @@ mod tests {
                     .get_framebuffer(fb_name)
                     .expect("Framebuffer should exist")
             };
-            let char_device = FramebufferCharDevice::new(fb_resource);
+            let char_device =
+                FramebufferCharDevice::new_with_device_manager(fb_resource, &device_manager);
 
             // Test writing a single pixel
             let pixel_data = match expected_bpp {
@@ -1053,7 +1089,7 @@ mod tests {
     #[test_case]
     fn test_framebuffer_char_device_capabilities() {
         // Test with valid framebuffer
-        let graphics_manager = setup_clean_graphics_manager();
+        let (graphics_manager, device_manager) = setup_test_managers();
         let mut test_device = GenericGraphicsDevice::new("test-gpu-caps");
         let config = FramebufferConfig::new(100, 100, PixelFormat::RGBA8888);
         test_device.set_framebuffer_config(config.clone());
@@ -1064,11 +1100,14 @@ mod tests {
         test_device.set_framebuffer_address(crate::vm::addr::virt_to_phys(fb_addr));
 
         let shared_device: Arc<dyn Device> = Arc::new(test_device);
-        let device_manager = DeviceManager::get_manager();
         let device_id = device_manager
             .register_device_with_name("test-gpu-caps".to_string(), shared_device.clone());
         graphics_manager
-            .register_framebuffer_from_device(device_id, shared_device)
+            .register_framebuffer_from_device_with_device_manager(
+                device_id,
+                shared_device,
+                &device_manager,
+            )
             .unwrap();
 
         let fb_resource = {
@@ -1087,7 +1126,8 @@ mod tests {
                 .get_framebuffer(fb_name)
                 .expect("Framebuffer should exist")
         };
-        let char_device = FramebufferCharDevice::new(fb_resource);
+        let char_device =
+            FramebufferCharDevice::new_with_device_manager(fb_resource, &device_manager);
 
         // Test capabilities
         assert!(char_device.can_read());
@@ -1113,7 +1153,7 @@ mod tests {
 
     #[test_case]
     fn test_framebuffer_char_device_unsupported_methods() {
-        let graphics_manager = setup_clean_graphics_manager();
+        let (graphics_manager, device_manager) = setup_test_managers();
         let mut test_device = GenericGraphicsDevice::new("test-gpu-unsupported");
         let config = FramebufferConfig::new(10, 10, PixelFormat::RGB888);
         test_device.set_framebuffer_config(config.clone());
@@ -1124,11 +1164,14 @@ mod tests {
         test_device.set_framebuffer_address(crate::vm::addr::virt_to_phys(fb_addr));
 
         let shared_device: Arc<dyn Device> = Arc::new(test_device);
-        let device_manager = DeviceManager::get_manager();
         let device_id = device_manager
             .register_device_with_name("test-gpu-unsupported".to_string(), shared_device.clone());
         graphics_manager
-            .register_framebuffer_from_device(device_id, shared_device)
+            .register_framebuffer_from_device_with_device_manager(
+                device_id,
+                shared_device,
+                &device_manager,
+            )
             .unwrap();
 
         let fb_resource = {
@@ -1147,7 +1190,8 @@ mod tests {
                 .get_framebuffer(fb_name)
                 .expect("Framebuffer should exist")
         };
-        let char_device = FramebufferCharDevice::new(fb_resource);
+        let char_device =
+            FramebufferCharDevice::new_with_device_manager(fb_resource, &device_manager);
 
         // Test that read_byte returns None (unsupported)
         assert_eq!(char_device.read_byte(), None);
@@ -1160,7 +1204,7 @@ mod tests {
 
     #[test_case]
     fn test_framebuffer_char_device_large_operations() {
-        let graphics_manager = setup_clean_graphics_manager();
+        let (graphics_manager, device_manager) = setup_test_managers();
         let mut test_device = GenericGraphicsDevice::new("test-gpu-large");
         let config = FramebufferConfig::new(256, 256, PixelFormat::RGBA8888);
         test_device.set_framebuffer_config(config.clone());
@@ -1171,11 +1215,14 @@ mod tests {
         test_device.set_framebuffer_address(crate::vm::addr::virt_to_phys(fb_addr));
 
         let shared_device: Arc<dyn Device> = Arc::new(test_device);
-        let device_manager = DeviceManager::get_manager();
         let device_id = device_manager
             .register_device_with_name("test-gpu-large".to_string(), shared_device.clone());
         graphics_manager
-            .register_framebuffer_from_device(device_id, shared_device)
+            .register_framebuffer_from_device_with_device_manager(
+                device_id,
+                shared_device,
+                &device_manager,
+            )
             .unwrap();
 
         let fb_resource = {
@@ -1194,7 +1241,8 @@ mod tests {
                 .get_framebuffer(fb_name)
                 .expect("Framebuffer should exist")
         };
-        let char_device = FramebufferCharDevice::new(fb_resource);
+        let char_device =
+            FramebufferCharDevice::new_with_device_manager(fb_resource, &device_manager);
 
         // Test large write operation
         let large_data = vec![0x55u8; 4096]; // 4KB
@@ -1221,7 +1269,7 @@ mod tests {
 
     #[test_case]
     fn test_framebuffer_char_device_pattern_operations() {
-        let graphics_manager = setup_clean_graphics_manager();
+        let (graphics_manager, device_manager) = setup_test_managers();
         let mut test_device = GenericGraphicsDevice::new("test-gpu-pattern");
         let config = FramebufferConfig::new(16, 16, PixelFormat::RGB888);
         test_device.set_framebuffer_config(config.clone());
@@ -1232,11 +1280,14 @@ mod tests {
         test_device.set_framebuffer_address(crate::vm::addr::virt_to_phys(fb_addr));
 
         let shared_device: Arc<dyn Device> = Arc::new(test_device);
-        let device_manager = DeviceManager::get_manager();
         let device_id = device_manager
             .register_device_with_name("test-gpu-pattern".to_string(), shared_device.clone());
         graphics_manager
-            .register_framebuffer_from_device(device_id, shared_device)
+            .register_framebuffer_from_device_with_device_manager(
+                device_id,
+                shared_device,
+                &device_manager,
+            )
             .unwrap();
 
         let fb_resource = {
@@ -1255,7 +1306,8 @@ mod tests {
                 .get_framebuffer(fb_name)
                 .expect("Framebuffer should exist")
         };
-        let char_device = FramebufferCharDevice::new(fb_resource);
+        let char_device =
+            FramebufferCharDevice::new_with_device_manager(fb_resource, &device_manager);
 
         // Test checkerboard pattern
         for y in 0..16 {
@@ -1299,7 +1351,7 @@ mod tests {
     fn test_framebuffer_memory_mapping_ops() {
         use crate::object::capability::MemoryMappingOps;
 
-        let graphics_manager = setup_clean_graphics_manager();
+        let (graphics_manager, device_manager) = setup_test_managers();
         let mut test_device = GenericGraphicsDevice::new("test-mmap-ops");
         let config = FramebufferConfig::new(4, 4, PixelFormat::RGBA8888);
         test_device.set_framebuffer_config(config.clone());
@@ -1310,11 +1362,14 @@ mod tests {
         test_device.set_framebuffer_address(crate::vm::addr::virt_to_phys(fb_addr));
 
         let shared_device: Arc<dyn Device> = Arc::new(test_device);
-        let device_manager = DeviceManager::get_manager();
         let device_id = device_manager
             .register_device_with_name("test-mmap-ops-device".to_string(), shared_device.clone());
         graphics_manager
-            .register_framebuffer_from_device(device_id, shared_device)
+            .register_framebuffer_from_device_with_device_manager(
+                device_id,
+                shared_device,
+                &device_manager,
+            )
             .unwrap();
 
         let fb_resource = {
@@ -1334,7 +1389,8 @@ mod tests {
                 .expect("Framebuffer should exist")
         };
 
-        let fb_device = FramebufferCharDevice::new(fb_resource.clone());
+        let fb_device =
+            FramebufferCharDevice::new_with_device_manager(fb_resource.clone(), &device_manager);
 
         // Test supports_mmap
         assert!(fb_device.supports_mmap());
@@ -1373,7 +1429,7 @@ mod tests {
 
     #[test_case]
     fn test_framebuffer_mapping_basic_ops() {
-        let graphics_manager = setup_clean_graphics_manager();
+        let (graphics_manager, device_manager) = setup_test_managers();
         let mut test_device = GenericGraphicsDevice::new("test-mapping-basic");
         let config = FramebufferConfig::new(4, 4, PixelFormat::RGBA8888);
         test_device.set_framebuffer_config(config.clone());
@@ -1384,13 +1440,16 @@ mod tests {
         test_device.set_framebuffer_address(crate::vm::addr::virt_to_phys(fb_addr));
 
         let shared_device: Arc<dyn Device> = Arc::new(test_device);
-        let device_manager = DeviceManager::get_manager();
         let device_id = device_manager.register_device_with_name(
             "test-mapping-basic-device".to_string(),
             shared_device.clone(),
         );
         graphics_manager
-            .register_framebuffer_from_device(device_id, shared_device)
+            .register_framebuffer_from_device_with_device_manager(
+                device_id,
+                shared_device,
+                &device_manager,
+            )
             .unwrap();
 
         let fb_resource = {
@@ -1410,7 +1469,8 @@ mod tests {
                 .expect("Framebuffer should exist")
         };
 
-        let char_device = FramebufferCharDevice::new(fb_resource);
+        let char_device =
+            FramebufferCharDevice::new_with_device_manager(fb_resource, &device_manager);
 
         // Test that mappings are initially empty
         {

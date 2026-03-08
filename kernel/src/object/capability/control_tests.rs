@@ -8,9 +8,7 @@ use crate::{
         Device,
         graphics::{
             FramebufferConfig, GenericGraphicsDevice, PixelFormat,
-            framebuffer_device::{
-                FbFixScreenInfo, FbVarScreenInfo, FramebufferCharDevice, framebuffer_commands,
-            },
+            framebuffer_device::{FramebufferCharDevice, framebuffer_commands},
             manager::GraphicsManager,
         },
         manager::DeviceManager,
@@ -23,11 +21,13 @@ use alloc::{string::ToString, sync::Arc};
 mod tests {
     use super::*;
 
+    fn setup_test_managers() -> (GraphicsManager, DeviceManager) {
+        (GraphicsManager::new(), DeviceManager::new_for_test())
+    }
+
     #[test_case]
     fn test_framebuffer_control_ops_basic() {
-        // Setup clean graphics manager
-        let graphics_manager = GraphicsManager::get_manager();
-        graphics_manager.clear_for_test();
+        let (graphics_manager, device_manager) = setup_test_managers();
 
         // Create a test graphics device
         let mut test_device = GenericGraphicsDevice::new("test-fb-basic-control");
@@ -43,14 +43,16 @@ mod tests {
         let shared_device: Arc<dyn Device> = Arc::new(test_device);
 
         // Register device with DeviceManager
-        let device_manager = DeviceManager::get_manager();
-        device_manager.clear_for_test();
         let device_id = device_manager
             .register_device_with_name("test-fb-basic-control".to_string(), shared_device.clone());
 
         // Register with GraphicsManager (this should create the character device)
         graphics_manager
-            .register_framebuffer_from_device(device_id, shared_device)
+            .register_framebuffer_from_device_with_device_manager(
+                device_id,
+                shared_device,
+                &device_manager,
+            )
             .unwrap();
 
         // Get the framebuffer resource
@@ -70,7 +72,8 @@ mod tests {
                 .get_framebuffer(fb_name)
                 .expect("Framebuffer should exist")
         };
-        let fb_device = FramebufferCharDevice::new(fb_resource);
+        let fb_device =
+            FramebufferCharDevice::new_with_device_manager(fb_resource, &device_manager);
 
         // Test that control operations work properly
         let commands = fb_device.supported_control_commands();
@@ -90,9 +93,7 @@ mod tests {
     fn test_control_ops_error_propagation() {
         // Test that control operations properly handle error cases
 
-        // Setup clean graphics manager
-        let graphics_manager = GraphicsManager::get_manager();
-        graphics_manager.clear_for_test();
+        let (graphics_manager, device_manager) = setup_test_managers();
 
         // Create a framebuffer device
         let mut test_device = GenericGraphicsDevice::new("test-fb-errors-control");
@@ -107,12 +108,14 @@ mod tests {
         let shared_device: Arc<dyn Device> = Arc::new(test_device);
 
         // Register device
-        let device_manager = DeviceManager::get_manager();
-        device_manager.clear_for_test();
         let device_id = device_manager
             .register_device_with_name("test-fb-errors-control".to_string(), shared_device.clone());
         graphics_manager
-            .register_framebuffer_from_device(device_id, shared_device)
+            .register_framebuffer_from_device_with_device_manager(
+                device_id,
+                shared_device,
+                &device_manager,
+            )
             .unwrap();
 
         // Get the framebuffer resource
@@ -132,7 +135,8 @@ mod tests {
                 .get_framebuffer(fb_name)
                 .expect("Framebuffer should exist")
         };
-        let fb_device = FramebufferCharDevice::new(fb_resource);
+        let fb_device =
+            FramebufferCharDevice::new_with_device_manager(fb_resource, &device_manager);
 
         // Test error cases
 
