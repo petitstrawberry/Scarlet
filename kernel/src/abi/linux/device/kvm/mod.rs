@@ -203,7 +203,7 @@ pub fn handle_vm_ioctl(
 
         KVM_SET_USER_MEMORY_REGION => {
             let task = mytask().ok_or(())?;
-            let paddr = task.vm_manager.translate_vaddr(arg).ok_or(())?;
+            let paddr = task.vm_manager.translate_to_phys(arg).ok_or(())?;
             // SAFETY: caller guarantees arg points to a valid KvmUserspaceMemoryRegion
             let region = unsafe { &*(paddr as *const KvmUserspaceMemoryRegion) };
 
@@ -213,7 +213,7 @@ pub fn handle_vm_ioctl(
 
             let host_phys = task
                 .vm_manager
-                .translate_vaddr(region.userspace_addr as usize)
+                .translate_to_phys(region.userspace_addr as usize)
                 .ok_or(())? as u64;
 
             vm.set_memory_region(
@@ -243,7 +243,7 @@ pub fn handle_vcpu_ioctl(request: u32, arg: usize, vcpu: &VcpuRef) -> Result<Opt
 
             if arg != 0 {
                 let task = mytask().ok_or(())?;
-                let paddr = task.vm_manager.translate_vaddr(arg).ok_or(())?;
+                let paddr = task.vm_manager.translate_to_phys(arg).ok_or(())?;
                 // SAFETY: caller guarantees arg points to a valid KvmRun
                 let kvm_run = unsafe { &mut *(paddr as *mut KvmRun) };
                 write_vm_exit(kvm_run, &exit);
@@ -257,7 +257,7 @@ pub fn handle_vcpu_ioctl(request: u32, arg: usize, vcpu: &VcpuRef) -> Result<Opt
                 return Err(());
             }
             let task = mytask().ok_or(())?;
-            let paddr = task.vm_manager.translate_vaddr(arg).ok_or(())?;
+            let paddr = task.vm_manager.translate_to_phys(arg).ok_or(())?;
             let kvm_regs = unsafe { &mut *(paddr as *mut KvmRegs) };
             *kvm_regs = arch::read_regs_to_kvm(vcpu);
             Ok(Some(0))
@@ -268,7 +268,7 @@ pub fn handle_vcpu_ioctl(request: u32, arg: usize, vcpu: &VcpuRef) -> Result<Opt
                 return Err(());
             }
             let task = mytask().ok_or(())?;
-            let paddr = task.vm_manager.translate_vaddr(arg).ok_or(())?;
+            let paddr = task.vm_manager.translate_to_phys(arg).ok_or(())?;
             let kvm_regs = unsafe { &*(paddr as *const KvmRegs) };
             arch::write_kvm_to_regs(vcpu, kvm_regs);
             Ok(Some(0))
@@ -419,12 +419,7 @@ impl MemoryMappingOps for KvmSystemDevice {
 fn register_kvm_device() {
     let dm = DeviceManager::get_manager();
     let dev: Arc<dyn Device> = Arc::new(KvmSystemDevice);
-    let id = dm.register_device_with_name(String::from(KVM_DEVICE_NAME), dev);
-    crate::early_println!(
-        "KVM device registered as '{}' with ID: {}",
-        KVM_DEVICE_NAME,
-        id
-    );
+    let _id = dm.register_device_with_name(String::from(KVM_DEVICE_NAME), dev);
 }
 
 crate::driver_initcall!(register_kvm_device);

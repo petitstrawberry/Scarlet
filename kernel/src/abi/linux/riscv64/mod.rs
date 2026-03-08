@@ -23,11 +23,10 @@ use self::time::PosixTimer;
 use crate::{
     abi::AbiModule,
     arch::{self, IntRegisters, Trapframe},
-    early_initcall,
     fs::{
         FileSystemError, FileSystemErrorKind, SeekFrom, VfsManager, drivers::overlayfs::OverlayFS,
     },
-    register_abi,
+    late_initcall, register_abi,
     task::elf_loader::{
         ExecutionMode, LoadStrategy, LoadTarget, analyze_and_load_elf_with_strategy,
     },
@@ -431,7 +430,7 @@ impl AbiModule for LinuxRiscv64Abi {
         // No pthread/TLS structure probing at exit; user space owns pthread list.
         // Linux semantics: if clear_child_tid is set, write 0 and FUTEX_WAKE.
         if let Some(ptr) = self.thread_state.clear_child_tid_ptr {
-            if let Some(paddr) = task.vm_manager.translate_vaddr(ptr) {
+            if let Some(paddr) = task.vm_manager.translate_to_kva(ptr) {
                 unsafe {
                     *(paddr as *mut i32) = 0;
                 }
@@ -586,8 +585,8 @@ impl AbiModule for LinuxRiscv64Abi {
                             sp -= 96;
                             // Zero out the reserved space
                             unsafe {
-                                let paddr = task.vm_manager.translate_vaddr(sp).unwrap();
-                                let slice = core::slice::from_raw_parts_mut(paddr as *mut u8, 96);
+                                let kaddr = task.vm_manager.translate_to_kva(sp).unwrap();
+                                let slice = core::slice::from_raw_parts_mut(kaddr as *mut u8, 96);
                                 slice.fill(0);
                             }
                         }
@@ -599,8 +598,8 @@ impl AbiModule for LinuxRiscv64Abi {
                             sp -= len;
                             let vaddr = sp;
                             unsafe {
-                                let paddr = task.vm_manager.translate_vaddr(vaddr).unwrap();
-                                let slice = core::slice::from_raw_parts_mut(paddr as *mut u8, len);
+                                let kaddr = task.vm_manager.translate_to_kva(vaddr).unwrap();
+                                let slice = core::slice::from_raw_parts_mut(kaddr as *mut u8, len);
                                 slice[..len - 1].copy_from_slice(arg.as_bytes());
                                 slice[len - 1] = 0; // Null terminator
                             }
@@ -625,8 +624,8 @@ impl AbiModule for LinuxRiscv64Abi {
                             sp -= len;
                             let vaddr = sp;
                             unsafe {
-                                let paddr = task.vm_manager.translate_vaddr(vaddr).unwrap();
-                                let slice = core::slice::from_raw_parts_mut(paddr as *mut u8, len);
+                                let kaddr = task.vm_manager.translate_to_kva(vaddr).unwrap();
+                                let slice = core::slice::from_raw_parts_mut(kaddr as *mut u8, len);
                                 slice[..len - 1].copy_from_slice(env.as_bytes());
                                 slice[len - 1] = 0; // Null terminator
                             }
@@ -660,7 +659,7 @@ impl AbiModule for LinuxRiscv64Abi {
                         // --- 1. Argument count (argc) ---
                         let argc = argv.len() as u64;
                         unsafe {
-                            *(task.vm_manager.translate_vaddr(current_pos).unwrap() as *mut u64) =
+                            *(task.vm_manager.translate_to_kva(current_pos).unwrap() as *mut u64) =
                                 argc;
                         }
                         current_pos += 8;
@@ -668,14 +667,14 @@ impl AbiModule for LinuxRiscv64Abi {
                         // --- 2. Argument pointer array (argv) ---
                         for &arg_vaddr in arg_vaddrs.iter() {
                             unsafe {
-                                *(task.vm_manager.translate_vaddr(current_pos).unwrap()
+                                *(task.vm_manager.translate_to_kva(current_pos).unwrap()
                                     as *mut u64) = arg_vaddr;
                             }
                             current_pos += 8;
                         }
                         // NULL terminator for argv
                         unsafe {
-                            *(task.vm_manager.translate_vaddr(current_pos).unwrap() as *mut u64) =
+                            *(task.vm_manager.translate_to_kva(current_pos).unwrap() as *mut u64) =
                                 0;
                         }
                         current_pos += 8;
@@ -683,14 +682,14 @@ impl AbiModule for LinuxRiscv64Abi {
                         // --- 3. Environment pointer array (envp) ---
                         for &env_vaddr in env_vaddrs.iter() {
                             unsafe {
-                                *(task.vm_manager.translate_vaddr(current_pos).unwrap()
+                                *(task.vm_manager.translate_to_kva(current_pos).unwrap()
                                     as *mut u64) = env_vaddr;
                             }
                             current_pos += 8;
                         }
                         // NULL terminator for envp
                         unsafe {
-                            *(task.vm_manager.translate_vaddr(current_pos).unwrap() as *mut u64) =
+                            *(task.vm_manager.translate_to_kva(current_pos).unwrap() as *mut u64) =
                                 0;
                         }
                         current_pos += 8;
@@ -701,7 +700,7 @@ impl AbiModule for LinuxRiscv64Abi {
                             // crate::println!("  auxv[{}]: type={:#x} value={:#x} @ sp={:#x}",
                             //     i, auxv_entry.a_type, auxv_entry.a_val, current_pos);
                             unsafe {
-                                let paddr = task.vm_manager.translate_vaddr(current_pos).unwrap()
+                                let paddr = task.vm_manager.translate_to_kva(current_pos).unwrap()
                                     as *mut u64;
                                 *paddr = auxv_entry.a_type;
                                 *(paddr.add(1)) = auxv_entry.a_val;
@@ -1025,4 +1024,4 @@ fn register_linux_abi() {
     register_abi!(LinuxRiscv64Abi);
 }
 
-early_initcall!(register_linux_abi);
+late_initcall!(register_linux_abi);

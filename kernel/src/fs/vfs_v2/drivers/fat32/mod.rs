@@ -703,10 +703,11 @@ impl Fat32FileSystem {
         paddr: usize,
     ) -> Result<(), FileSystemError> {
         use crate::environment::PAGE_SIZE;
+        use crate::vm::addr::phys_to_virt;
 
         if start_cluster < 2 {
             unsafe {
-                core::ptr::write_bytes(paddr as *mut u8, 0, PAGE_SIZE);
+                core::ptr::write_bytes(phys_to_virt(paddr) as *mut u8, 0, PAGE_SIZE);
             }
             return Ok(());
         }
@@ -718,7 +719,7 @@ impl Fat32FileSystem {
         let offset_in_cluster = page_offset % cluster_size;
 
         unsafe {
-            core::ptr::write_bytes(paddr as *mut u8, 0, PAGE_SIZE);
+            core::ptr::write_bytes(phys_to_virt(paddr) as *mut u8, 0, PAGE_SIZE);
         }
 
         let mut current_cluster = start_cluster;
@@ -730,7 +731,7 @@ impl Fat32FileSystem {
             current_cluster = fat_entry;
         }
 
-        let mut page_ptr = paddr as *mut u8;
+        let mut page_ptr = phys_to_virt(paddr) as *mut u8;
         let mut bytes_written = 0usize;
         let mut cluster_offset = offset_in_cluster;
 

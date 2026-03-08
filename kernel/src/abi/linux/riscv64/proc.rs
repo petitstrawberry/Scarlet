@@ -332,7 +332,7 @@ pub fn sys_prlimit64(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> u
 
     // If old_rlim is requested, write some reasonable default values
     if old_rlim_ptr != 0 {
-        if let Some(old_rlim_paddr) = task.vm_manager.translate_vaddr(old_rlim_ptr) {
+        if let Some(old_rlim_paddr) = task.vm_manager.translate_to_kva(old_rlim_ptr) {
             unsafe {
                 // Write a simple rlimit structure with high limits
                 // struct rlimit { rlim_t rlim_cur; rlim_t rlim_max; }
@@ -455,7 +455,7 @@ pub fn sys_uname(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize
     trapframe.increment_pc_next(task);
 
     // Translate user space pointer
-    let buf_vaddr = match task.vm_manager.translate_vaddr(buf_ptr) {
+    let buf_vaddr = match task.vm_manager.translate_to_kva(buf_ptr) {
         Some(addr) => addr as *mut UtsName,
         None => return usize::MAX, // Invalid address
     };
@@ -588,7 +588,7 @@ pub fn sys_clone(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize 
             if (flags & CLONE_PARENT_SETTID) != 0 && !parent_tid_ptr.is_null() {
                 if let Some(paddr) = parent_task
                     .vm_manager
-                    .translate_vaddr(parent_tid_ptr as usize)
+                    .translate_to_kva(parent_tid_ptr as usize)
                 {
                     unsafe {
                         *(paddr as *mut i32) = child_id as i32;
@@ -602,7 +602,7 @@ pub fn sys_clone(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize 
                     .get_task_by_id(child_id)
                     .unwrap()
                     .vm_manager
-                    .translate_vaddr(child_tid_ptr as usize)
+                    .translate_to_kva(child_tid_ptr as usize)
                 {
                     unsafe {
                         *(paddr as *mut i32) = child_id as i32;
@@ -725,7 +725,7 @@ pub fn sys_wait4(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize
                     Ok(status) => {
                         // Child has exited, return the status
                         if wstatus != core::ptr::null_mut() {
-                            match task.vm_manager.translate_vaddr(wstatus as usize) {
+                            match task.vm_manager.translate_to_kva(wstatus as usize) {
                                 Some(phys_addr) => {
                                     let status_ptr = phys_addr as *mut i32;
                                     unsafe {
@@ -782,7 +782,7 @@ pub fn sys_wait4(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize
                 Ok(status) => {
                     // Child has exited, return the status
                     if wstatus != core::ptr::null_mut() {
-                        match task.vm_manager.translate_vaddr(wstatus as usize) {
+                        match task.vm_manager.translate_to_kva(wstatus as usize) {
                             Some(phys_addr) => {
                                 let status_ptr = phys_addr as *mut i32;
                                 unsafe {

@@ -57,7 +57,7 @@ pub fn sys_vfs_open(trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
     let path_ptr = task
         .vm_manager
-        .translate_vaddr(trapframe.get_arg(0))
+        .translate_to_kva(trapframe.get_arg(0))
         .unwrap() as *const u8;
     let _flags = trapframe.get_arg(1) as i32;
     let _mode = trapframe.get_arg(2) as i32;
@@ -152,7 +152,7 @@ pub fn sys_vfs_truncate(trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
     let path_ptr = task
         .vm_manager
-        .translate_vaddr(trapframe.get_arg(0))
+        .translate_to_kva(trapframe.get_arg(0))
         .unwrap() as *const u8;
     let length = trapframe.get_arg(1) as u64;
 
@@ -205,7 +205,7 @@ pub fn sys_vfs_create_file(trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
     let path_ptr = task
         .vm_manager
-        .translate_vaddr(trapframe.get_arg(0))
+        .translate_to_kva(trapframe.get_arg(0))
         .unwrap() as *const u8;
     let _mode = trapframe.get_arg(1) as i32;
 
@@ -248,7 +248,7 @@ pub fn sys_vfs_create_directory(trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
     let path_ptr = task
         .vm_manager
-        .translate_vaddr(trapframe.get_arg(0))
+        .translate_to_kva(trapframe.get_arg(0))
         .unwrap() as *const u8;
 
     trapframe.increment_pc_next(task);
@@ -294,22 +294,22 @@ pub fn sys_fs_mount(trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
     let source_ptr = task
         .vm_manager
-        .translate_vaddr(trapframe.get_arg(0))
+        .translate_to_kva(trapframe.get_arg(0))
         .unwrap() as *const u8;
     let target_ptr = task
         .vm_manager
-        .translate_vaddr(trapframe.get_arg(1))
+        .translate_to_kva(trapframe.get_arg(1))
         .unwrap() as *const u8;
     let fstype_ptr = task
         .vm_manager
-        .translate_vaddr(trapframe.get_arg(2))
+        .translate_to_kva(trapframe.get_arg(2))
         .unwrap() as *const u8;
     let flags = trapframe.get_arg(3) as u32;
     let data_ptr = if trapframe.get_arg(4) == 0 {
         core::ptr::null()
     } else {
         task.vm_manager
-            .translate_vaddr(trapframe.get_arg(4))
+            .translate_to_kva(trapframe.get_arg(4))
             .unwrap() as *const u8
     };
 
@@ -428,7 +428,7 @@ pub fn sys_fs_umount(trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
     let target_ptr = task
         .vm_manager
-        .translate_vaddr(trapframe.get_arg(0))
+        .translate_to_kva(trapframe.get_arg(0))
         .unwrap() as *const u8;
     let _flags = trapframe.get_arg(1) as u32; // Reserved for future use
 
@@ -502,11 +502,11 @@ pub fn sys_fs_pivot_root(trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
     let new_root_ptr = task
         .vm_manager
-        .translate_vaddr(trapframe.get_arg(0))
+        .translate_to_kva(trapframe.get_arg(0))
         .unwrap() as *const u8;
     let old_root_ptr = task
         .vm_manager
-        .translate_vaddr(trapframe.get_arg(1))
+        .translate_to_kva(trapframe.get_arg(1))
         .unwrap() as *const u8;
 
     trapframe.increment_pc_next(&task);
@@ -639,7 +639,7 @@ pub fn sys_vfs_change_directory(trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
     let path_ptr = task
         .vm_manager
-        .translate_vaddr(trapframe.get_arg(0))
+        .translate_to_kva(trapframe.get_arg(0))
         .unwrap() as *const u8;
 
     // Increment PC to avoid infinite loop if chdir fails
@@ -670,7 +670,7 @@ pub fn sys_vfs_change_directory(trapframe: &mut Trapframe) -> usize {
         let cwd_guard = vfs.cwd.read();
         match &*cwd_guard {
             Some((entry, mp)) => {
-                crate::early_println!(
+                crate::println!(
                     "[chdir] BEFORE task={} cwd_entry_name='{}' cwd_entry_id={} mount_path='{}' built_path='{}'",
                     task_name,
                     entry.name(),
@@ -680,12 +680,12 @@ pub fn sys_vfs_change_directory(trapframe: &mut Trapframe) -> usize {
                 );
             }
             None => {
-                crate::early_println!("[chdir] BEFORE task={} cwd=None", task_name);
+                crate::println!("[chdir] BEFORE task={} cwd=None", task_name);
             }
         }
     }
 
-    crate::early_println!(
+    crate::println!(
         "[chdir] task={} requested='{}' absolute='{}'",
         task_name,
         path,
@@ -702,7 +702,7 @@ pub fn sys_vfs_change_directory(trapframe: &mut Trapframe) -> usize {
                         // Dump actual cwd state after chdir
                         let cwd_guard = vfs.cwd.read();
                         if let Some((e, mp)) = &*cwd_guard {
-                            crate::early_println!(
+                            crate::println!(
                                 "[chdir] AFTER task={} cwd_entry_name='{}' cwd_entry_id={} mount_path='{}' built_path='{}'",
                                 task_name,
                                 e.name(),
@@ -714,7 +714,7 @@ pub fn sys_vfs_change_directory(trapframe: &mut Trapframe) -> usize {
                         0
                     }
                     Err(e) => {
-                        crate::early_println!(
+                        crate::println!(
                             "[chdir] task={} FAIL set_cwd_by_path error={:?}",
                             task_name,
                             e
@@ -727,7 +727,7 @@ pub fn sys_vfs_change_directory(trapframe: &mut Trapframe) -> usize {
             }
         }
         Err(e) => {
-            crate::early_println!(
+            crate::println!(
                 "[chdir] task={} FAIL resolve_path '{}' error={:?}",
                 task_name,
                 absolute_path,
@@ -758,7 +758,7 @@ pub fn sys_vfs_remove(trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
     let path_ptr = task
         .vm_manager
-        .translate_vaddr(trapframe.get_arg(0))
+        .translate_to_kva(trapframe.get_arg(0))
         .unwrap() as *const u8;
 
     // Increment PC to avoid infinite loop if remove fails
@@ -812,11 +812,11 @@ pub fn sys_vfs_create_symlink(trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
     let symlink_path_ptr = task
         .vm_manager
-        .translate_vaddr(trapframe.get_arg(0))
+        .translate_to_kva(trapframe.get_arg(0))
         .unwrap() as *const u8;
     let target_path_ptr = task
         .vm_manager
-        .translate_vaddr(trapframe.get_arg(1))
+        .translate_to_kva(trapframe.get_arg(1))
         .unwrap() as *const u8;
 
     trapframe.increment_pc_next(task);
@@ -866,11 +866,11 @@ pub fn sys_vfs_readlink(trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
     let symlink_path_ptr = task
         .vm_manager
-        .translate_vaddr(trapframe.get_arg(0))
+        .translate_to_kva(trapframe.get_arg(0))
         .unwrap() as *const u8;
     let buffer_ptr = task
         .vm_manager
-        .translate_vaddr(trapframe.get_arg(1))
+        .translate_to_kva(trapframe.get_arg(1))
         .unwrap() as *mut u8;
     let buffer_size = trapframe.get_arg(2);
 
@@ -944,7 +944,7 @@ pub fn sys_vfs_get_cwd_path(trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
     let buffer_ptr = task
         .vm_manager
-        .translate_vaddr(trapframe.get_arg(0))
+        .translate_to_kva(trapframe.get_arg(0))
         .unwrap() as *mut u8;
     let buffer_size = trapframe.get_arg(1);
 

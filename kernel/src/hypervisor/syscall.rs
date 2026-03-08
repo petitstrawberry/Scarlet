@@ -84,7 +84,7 @@ pub fn sys_shv_vcpu_create(trapframe: &mut Trapframe) -> usize {
 /// a0 = vcpu_handle, a1 = exit_ptr (userspace pointer to VcpuExit)
 /// Returns 0 on success, usize::MAX on error.
 pub fn sys_shv_vcpu_run(trapframe: &mut Trapframe) -> usize {
-    // crate::early_println!("[sys_shv_vcpu_run] called, handle={}", trapframe.get_arg(0));
+    // crate::println!("[sys_shv_vcpu_run] called, handle={}", trapframe.get_arg(0));
 
     let task = match mytask() {
         Some(t) => t,
@@ -116,7 +116,7 @@ pub fn sys_shv_vcpu_run(trapframe: &mut Trapframe) -> usize {
     }
 
     // Translate the exit pointer to kernel address
-    let exit_kaddr = match task.vm_manager.translate_vaddr(exit_ptr) {
+    let exit_kaddr = match task.vm_manager.translate_to_kva(exit_ptr) {
         Some(addr) => addr,
         None => return usize::MAX,
     };
@@ -127,7 +127,7 @@ pub fn sys_shv_vcpu_run(trapframe: &mut Trapframe) -> usize {
         _ => return usize::MAX,
     };
 
-    // crate::early_println!("[sys_shv_vcpu_run] calling vcpu.run()");
+    // crate::println!("[sys_shv_vcpu_run] calling vcpu.run()");
 
     // println!("[sys_shv_vcpu_run] before vcpu.run(), trapframe_addr={:x}, trapframe={:?}", trapframe as *const _ as usize, trapframe);
 
@@ -135,7 +135,7 @@ pub fn sys_shv_vcpu_run(trapframe: &mut Trapframe) -> usize {
     let vm_exit = match vcpu.run() {
         Ok(exit) => exit,
         Err(e) => {
-            crate::early_println!("[sys_shv_vcpu_run] vcpu.run() failed: {}", e);
+            crate::println!("[sys_shv_vcpu_run] vcpu.run() failed: {}", e);
             return usize::MAX;
         }
     };

@@ -86,19 +86,19 @@ dependencies = ["build-debug-aarch64"]
 
 [tasks.build-debug-riscv64]
 description = "Build all components in debug mode (RISC-V)"
-dependencies = ["build-kernel-debug-riscv64", "build-userlib-debug-riscv64", "build-userbin-debug-riscv64", "build-initramfs-debug-riscv64", "build-rootfs-riscv64"]
+dependencies = ["build-kernel-debug-riscv64", "build-userlib-debug-riscv64", "build-userbin-debug-riscv64", "build-initramfs-debug-riscv64", "build-rootfs-riscv64", "build-boot-image-riscv64"]
 
 [tasks.build-release-riscv64]
 description = "Build all components in release mode (RISC-V)"
-dependencies = ["build-kernel-release-riscv64", "build-userlib-release-riscv64", "build-userbin-release-riscv64", "build-initramfs-release-riscv64", "build-rootfs-riscv64"]
+dependencies = ["build-kernel-release-riscv64", "build-userlib-release-riscv64", "build-userbin-release-riscv64", "build-initramfs-release-riscv64", "build-rootfs-riscv64", "build-boot-image-riscv64-release"]
 
 [tasks.build-debug-aarch64]
 description = "Build all components in debug mode (AArch64)"
-dependencies = ["build-kernel-debug-aarch64", "build-userlib-debug-aarch64", "build-userbin-debug-aarch64", "build-initramfs-debug-aarch64", "build-rootfs-aarch64"]
+dependencies = ["build-kernel-debug-aarch64", "build-userlib-debug-aarch64", "build-userbin-debug-aarch64", "build-initramfs-debug-aarch64", "build-rootfs-aarch64", "build-boot-image-aarch64"]
 
 [tasks.build-release-aarch64]
 description = "Build all components in release mode (AArch64)"
-dependencies = ["build-kernel-release-aarch64", "build-userlib-release-aarch64", "build-userbin-release-aarch64", "build-initramfs-release-aarch64", "build-rootfs-aarch64"]
+dependencies = ["build-kernel-release-aarch64", "build-userlib-release-aarch64", "build-userbin-release-aarch64", "build-initramfs-release-aarch64", "build-rootfs-aarch64", "build-boot-image-aarch64-release"]
 
 [tasks.build-kernel-riscv64]
 description = "Build the kernel (RISC-V, debug)"
@@ -202,7 +202,7 @@ dependencies = ["build-userbin-debug-aarch64"]
 
 [tasks.clean]
 description = "Clean all build artifacts"
-dependencies = ["clean-kernel", "clean-userlib", "clean-userbin", "clean-initramfs", "clean-rootfs"]
+dependencies = ["clean-kernel", "clean-userlib", "clean-userbin", "clean-initramfs", "clean-rootfs", "clean-boot-image-riscv64", "clean-boot-image-aarch64"]
 
 [tasks.clean-kernel]
 description = "Clean kernel build artifacts"
@@ -360,6 +360,36 @@ command = "sh"
 args = ["make_initramfs.sh", "riscv64"]
 dependencies = ["build-userbin-release-riscv64"]
 
+[tasks.build-boot-image-riscv64]
+description = "Create boot image (RISC-V, debug kernel)"
+cwd = "mkfs"
+command = "sh"
+args = ["make_limine_riscv64_image.sh"]
+dependencies = ["build-kernel-debug-riscv64", "build-initramfs-debug-riscv64", "build-rootfs-riscv64"]
+
+[tasks.build-boot-image-riscv64-release]
+description = "Create boot image (RISC-V, release kernel)"
+cwd = "mkfs"
+command = "sh"
+args = ["make_limine_riscv64_image.sh"]
+env = { "KERNEL_ELF" = "../kernel/target/riscv64gc-unknown-none-elf/release/kernel" }
+dependencies = ["build-kernel-release-riscv64", "build-initramfs-release-riscv64", "build-rootfs-riscv64"]
+
+[tasks.build-boot-image-aarch64]
+description = "Create boot image (AArch64, debug kernel)"
+cwd = "mkfs"
+command = "sh"
+args = ["make_limine_aarch64_image.sh"]
+dependencies = ["build-kernel-debug-aarch64", "build-initramfs-debug-aarch64", "build-rootfs-aarch64"]
+
+[tasks.build-boot-image-aarch64-release]
+description = "Create boot image (AArch64, release kernel)"
+cwd = "mkfs"
+command = "sh"
+args = ["make_limine_aarch64_image.sh"]
+env = { "KERNEL_ELF" = "../kernel/target/aarch64-unknown-none-elf/release/kernel" }
+dependencies = ["build-kernel-release-aarch64", "build-initramfs-release-aarch64", "build-rootfs-aarch64"]
+
 [tasks.clean-initramfs]
 description = "Clean initramfs archive"
 cwd = "mkfs"
@@ -385,6 +415,18 @@ description = "Clean rootfs.img"
 cwd = "mkfs"
 command = "sh"
 args = ["clean_rootfs.sh"]
+
+[tasks.clean-boot-image-riscv64]
+description = "Clean boot image artifacts (RISC-V)"
+cwd = "mkfs"
+command = "sh"
+args = ["clean_limine_riscv64.sh"]
+
+[tasks.clean-boot-image-aarch64]
+description = "Clean boot image artifacts (AArch64)"
+cwd = "mkfs"
+command = "sh"
+args = ["clean_limine_aarch64.sh"]
 
 [tasks.clippy-fix-riscv64]
 description = "Run clippy with auto-fix for all components (RISC-V)"

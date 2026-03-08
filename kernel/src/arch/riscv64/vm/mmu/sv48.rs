@@ -3,6 +3,7 @@ use core::result::Result;
 
 use crate::arch::vm::new_raw_pagetable;
 use crate::environment::PAGE_SIZE;
+use crate::vm::addr::{kernel_virt_to_phys, phys_to_virt};
 use crate::vm::vmem::VirtualMemoryMap;
 use crate::vm::vmem::VirtualMemoryPermission;
 
@@ -143,7 +144,7 @@ impl PageTable {
     pub fn get_val_for_satp(&self, asid: u16) -> u64 {
         let asid = asid as usize;
         let mode = 9;
-        let ppn = self as *const _ as usize >> 12;
+        let ppn = kernel_virt_to_phys(self as *const _ as usize) >> 12;
         (mode << 60 | asid << 44 | ppn) as u64
     }
 
@@ -274,7 +275,7 @@ impl PageTable {
                         return None; // Fail because it's an invalid state.
                     }
                     // If not a leaf, it's a pointer to the next level table.
-                    pagetable = (pte.get_ppn() << 12) as *mut PageTable;
+                    pagetable = phys_to_virt(pte.get_ppn() << 12) as *mut PageTable;
                 } else {
                     if !alloc {
                         return None;
@@ -285,7 +286,7 @@ impl PageTable {
                         return None;
                     }
                     pte.clear_all(); // Clear the entry
-                    pte.set_ppn(new_table as usize >> 12);
+                    pte.set_ppn(kernel_virt_to_phys(new_table as usize) >> 12);
                     pte.validate();
                     pagetable = new_table;
                 }

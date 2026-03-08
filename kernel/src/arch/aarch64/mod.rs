@@ -92,7 +92,7 @@ pub fn first_switch_to_user(task: &mut Task) -> ! {
         panic!("Task has no kernel stack window");
     };
 
-    crate::early_println!(
+    crate::println!(
         "[aarch64] CPU {}: First switch to user task PID {} with kernel SP {:#x}",
         crate::arch::get_current_cpu_id(),
         task.get_id(),

@@ -84,7 +84,7 @@ pub fn arch_exception_handler(trapframe: &mut Trapframe, cause: usize) {
             // If stval doesn't contain the instruction, try to fetch it from the task's
             // mapped user code via the VM translation.
             if inst == 0 {
-                if let Some(paddr) = task.vm_manager.translate_vaddr(trapframe.epc as usize) {
+                if let Some(paddr) = task.vm_manager.translate_to_kva(trapframe.epc as usize) {
                     inst = crate::arch::instruction::Instruction::fetch(paddr).raw as usize;
                 }
             }

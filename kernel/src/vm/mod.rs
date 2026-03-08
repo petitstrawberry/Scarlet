@@ -38,6 +38,15 @@ use spin::{Mutex, Once};
 extern crate alloc;
 
 static KERNEL_VM_MANAGER: Once<VirtualMemoryManager> = Once::new();
+static HHDM_AREA: Once<MemoryArea> = Once::new();
+
+fn align_down(addr: usize, align: usize) -> usize {
+    addr & !(align - 1)
+}
+
+fn align_up(addr: usize, align: usize) -> usize {
+    (addr + align - 1) & !(align - 1)
+}
 
 pub fn get_kernel_vm_manager() -> &'static VirtualMemoryManager {
     KERNEL_VM_MANAGER.call_once(|| VirtualMemoryManager::new())
@@ -46,7 +55,11 @@ pub fn get_kernel_vm_manager() -> &'static VirtualMemoryManager {
 static KERNEL_AREA: Once<MemoryArea> = Once::new();
 /* Initialize MMU and enable paging */
 #[allow(static_mut_refs)]
-pub fn kernel_vm_init(kernel_area: MemoryArea) {
+pub fn kernel_vm_init(
+    usable_area: MemoryArea,
+    direct_map_area: MemoryArea,
+    initramfs_area: Option<MemoryArea>,
+) {
     let manager = get_kernel_vm_manager();
 
     #[cfg(any(debug_assertions, test))]
@@ -57,19 +70,34 @@ pub fn kernel_vm_init(kernel_area: MemoryArea) {
 
     manager.set_asid(asid);
 
-    /* Map kernel space */
-    let kernel_start = kernel_area.start;
-    let kernel_end = kernel_area.end;
+    unsafe extern "C" {
+        static __KERNEL_SPACE_START: usize;
+        static __KERNEL_SPACE_END: usize;
+    }
 
     let kernel_area = MemoryArea {
-        start: kernel_start,
-        end: kernel_end,
+        start: unsafe { &__KERNEL_SPACE_START as *const usize as usize },
+        end: unsafe { &__KERNEL_SPACE_END as *const usize as usize } - 1,
     };
+    let kernel_phys_area = MemoryArea {
+        start: addr::kernel_virt_to_phys(kernel_area.start),
+        end: addr::kernel_virt_to_phys(kernel_area.end),
+    };
+    let direct_map_phys_area = MemoryArea {
+        start: align_down(direct_map_area.start, PAGE_SIZE),
+        end: align_up(direct_map_area.end + 1, PAGE_SIZE) - 1,
+    };
+    let hhdm_area = MemoryArea {
+        start: phys_to_virt(direct_map_phys_area.start),
+        end: phys_to_virt(direct_map_phys_area.end),
+    };
+
     KERNEL_AREA.call_once(|| kernel_area);
+    HHDM_AREA.call_once(|| hhdm_area);
 
     let kernel_map = VirtualMemoryMap {
         vmarea: kernel_area,
-        pmarea: kernel_area,
+        pmarea: kernel_phys_area,
         permissions: VirtualMemoryPermission::Read as usize
             | VirtualMemoryPermission::Write as usize
             | VirtualMemoryPermission::Execute as usize,
@@ -85,6 +113,52 @@ pub fn kernel_vm_init(kernel_area: MemoryArea) {
         .map_memory_area(asid, kernel_map, true, true)
         .map_err(|e| panic!("Failed to map kernel memory area: {}", e))
         .unwrap();
+
+    let hhdm_map = VirtualMemoryMap {
+        vmarea: hhdm_area,
+        pmarea: direct_map_phys_area,
+        permissions: VirtualMemoryPermission::Read as usize
+            | VirtualMemoryPermission::Write as usize,
+        is_shared: true,
+        owner: None,
+    };
+    get_kernel_vm_manager()
+        .add_memory_map(hhdm_map.clone())
+        .map_err(|e| panic!("Failed to add HHDM memory map: {}", e))
+        .unwrap();
+    root_page_table
+        .map_memory_area(asid, hhdm_map, true, true)
+        .map_err(|e| panic!("Failed to map HHDM memory area: {}", e))
+        .unwrap();
+
+    if let Some(initramfs_area) = initramfs_area {
+        let initramfs_phys_area = MemoryArea {
+            start: align_down(initramfs_area.start, PAGE_SIZE),
+            end: align_up(initramfs_area.end + 1, PAGE_SIZE) - 1,
+        };
+        let initramfs_hhdm_area = MemoryArea {
+            start: phys_to_virt(initramfs_phys_area.start),
+            end: phys_to_virt(initramfs_phys_area.end),
+        };
+        let initramfs_map = VirtualMemoryMap {
+            vmarea: initramfs_hhdm_area,
+            pmarea: initramfs_phys_area,
+            permissions: VirtualMemoryPermission::Read as usize
+                | VirtualMemoryPermission::Write as usize,
+            is_shared: true,
+            owner: None,
+        };
+        if initramfs_hhdm_area.start < hhdm_area.start || initramfs_hhdm_area.end > hhdm_area.end {
+            get_kernel_vm_manager()
+                .add_memory_map(initramfs_map.clone())
+                .map_err(|e| panic!("Failed to add initramfs memory map: {}", e))
+                .unwrap();
+            root_page_table
+                .map_memory_area(asid, initramfs_map, true, true)
+                .map_err(|e| panic!("Failed to map initramfs memory area: {}", e))
+                .unwrap();
+        }
+    }
 
     // Map device memory areas (architecture-specific)
     for dev_area in get_device_memory_areas() {
@@ -110,6 +184,11 @@ pub fn kernel_vm_init(kernel_area: MemoryArea) {
         "Kernel space mapped       : {:#018x} - {:#018x}",
         kernel_area.start,
         kernel_area.end
+    );
+    early_println!(
+        "HHDM mapped               : {:#018x} - {:#018x}",
+        hhdm_area.start,
+        hhdm_area.end
     );
     for dev_area in get_device_memory_areas() {
         early_println!(
@@ -166,10 +245,14 @@ pub fn user_kernel_vm_init(task: &Task) {
     task.vm_manager.set_asid(asid);
 
     let kernel_area = *KERNEL_AREA.get().expect("KERNEL_AREA not initialized");
+    let hhdm_area = *HHDM_AREA.get().expect("HHDM_AREA not initialized");
 
     let kernel_map = VirtualMemoryMap {
         vmarea: kernel_area,
-        pmarea: kernel_area,
+        pmarea: MemoryArea::new(
+            addr::kernel_virt_to_phys(kernel_area.start),
+            addr::kernel_virt_to_phys(kernel_area.end),
+        ),
         permissions: VirtualMemoryPermission::Read as usize
             | VirtualMemoryPermission::Write as usize
             | VirtualMemoryPermission::Execute as usize,
@@ -188,6 +271,26 @@ pub fn user_kernel_vm_init(task: &Task) {
         .map_err(|e| {
             panic!("Failed to map kernel memory area: {}", e);
         })
+        .unwrap();
+
+    let hhdm_map = VirtualMemoryMap {
+        vmarea: hhdm_area,
+        pmarea: MemoryArea::new(
+            addr::virt_to_phys(hhdm_area.start),
+            addr::virt_to_phys(hhdm_area.end),
+        ),
+        permissions: VirtualMemoryPermission::Read as usize
+            | VirtualMemoryPermission::Write as usize,
+        is_shared: true,
+        owner: None,
+    };
+    task.vm_manager
+        .add_memory_map(hhdm_map.clone())
+        .map_err(|e| panic!("Failed to add HHDM memory map: {}", e))
+        .unwrap();
+    root_page_table
+        .map_memory_area(asid, hhdm_map, true, true)
+        .map_err(|e| panic!("Failed to map HHDM memory area: {}", e))
         .unwrap();
     task.data_size.store(kernel_area.end + 1, Ordering::SeqCst);
 
@@ -337,7 +440,7 @@ pub fn setup_trampoline_for_task_kstack_window(task: &Task) -> Result<(), &'stat
     });
 
     #[cfg(any(debug_assertions, test))]
-    crate::early_println!(
+    crate::println!(
         "Mapped kernel stack window for Task (allocating): slot {} {:#x} - {:#x}",
         slot_idx,
         base,

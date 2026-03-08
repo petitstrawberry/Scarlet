@@ -116,7 +116,7 @@ pub fn sys_open(
     let task = mytask().unwrap();
     let path_ptr = task
         .vm_manager
-        .translate_vaddr(trapframe.get_arg(0))
+        .translate_to_kva(trapframe.get_arg(0))
         .unwrap() as *const u8;
     let mode = trapframe.get_arg(1) as i32;
 
@@ -240,7 +240,7 @@ pub fn sys_read(
     let fd = trapframe.get_arg(0) as usize;
     let buf_ptr = task
         .vm_manager
-        .translate_vaddr(trapframe.get_arg(1))
+        .translate_to_kva(trapframe.get_arg(1))
         .unwrap() as *mut u8;
     let count = trapframe.get_arg(2) as usize;
 
@@ -322,7 +322,7 @@ pub fn sys_write(
     let fd = trapframe.get_arg(0) as usize;
     let buf_ptr = task
         .vm_manager
-        .translate_vaddr(trapframe.get_arg(1))
+        .translate_to_kva(trapframe.get_arg(1))
         .unwrap() as *const u8;
     let count = trapframe.get_arg(2) as usize;
 
@@ -403,7 +403,7 @@ pub fn sys_mknod(
     trapframe.increment_pc_next(task);
     let name_ptr = task
         .vm_manager
-        .translate_vaddr(trapframe.get_arg(0))
+        .translate_to_kva(trapframe.get_arg(0))
         .unwrap() as *const u8;
     let name = get_path_str_v2(name_ptr).unwrap();
     let path = to_absolute_path_v2(&task, &name).unwrap();
@@ -444,7 +444,7 @@ pub fn sys_fstat(
 
     let stat_ptr = task
         .vm_manager
-        .translate_vaddr(trapframe.get_arg(1) as usize)
+        .translate_to_kva(trapframe.get_arg(1) as usize)
         .expect("sys_fstat: Failed to translate stat pointer") as *mut Stat;
 
     // Get handle from XV6 fd
@@ -499,7 +499,7 @@ pub fn sys_mkdir(
 
     let path_ptr = task
         .vm_manager
-        .translate_vaddr(trapframe.get_arg(0))
+        .translate_to_kva(trapframe.get_arg(0))
         .unwrap() as *const u8;
     let path = match get_path_str_v2(path_ptr) {
         Ok(p) => to_absolute_path_v2(&task, &p).unwrap(),
@@ -523,7 +523,7 @@ pub fn sys_unlink(
 
     let path_ptr = task
         .vm_manager
-        .translate_vaddr(trapframe.get_arg(0))
+        .translate_to_kva(trapframe.get_arg(0))
         .unwrap() as *const u8;
     let path = match cstring_to_string(path_ptr, MAX_PATH_LENGTH) {
         Ok((p, _)) => to_absolute_path_v2(&task, &p).unwrap(),
@@ -547,11 +547,11 @@ pub fn sys_link(
 
     let src_path_ptr = task
         .vm_manager
-        .translate_vaddr(trapframe.get_arg(0))
+        .translate_to_kva(trapframe.get_arg(0))
         .unwrap() as *const u8;
     let dst_path_ptr = task
         .vm_manager
-        .translate_vaddr(trapframe.get_arg(1))
+        .translate_to_kva(trapframe.get_arg(1))
         .unwrap() as *const u8;
 
     let src_path = match cstring_to_string(src_path_ptr, MAX_PATH_LENGTH) {

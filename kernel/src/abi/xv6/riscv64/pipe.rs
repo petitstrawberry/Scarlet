@@ -9,7 +9,7 @@ pub fn sys_pipe(
 
     let pipefd_ptr = task
         .vm_manager
-        .translate_vaddr(trapframe.get_arg(0))
+        .translate_to_kva(trapframe.get_arg(0))
         .expect("Invalid pipefd pointer");
     let pipefd = unsafe { &mut *(pipefd_ptr as *mut [u32; 2]) };
 

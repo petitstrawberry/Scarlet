@@ -333,7 +333,7 @@ pub fn sys_timer_create(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) ->
         return errno::to_result(errno::EFAULT);
     }
 
-    let timerid_paddr = match task.vm_manager.translate_vaddr(timerid_ptr) {
+    let timerid_paddr = match task.vm_manager.translate_to_kva(timerid_ptr) {
         Some(ptr) => ptr as *mut u64,
         None => return errno::to_result(errno::EFAULT),
     };
@@ -344,7 +344,7 @@ pub fn sys_timer_create(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) ->
     let mut sigev_value = 0u64;
 
     if sevp_ptr != 0 {
-        let sevp_paddr = match task.vm_manager.translate_vaddr(sevp_ptr) {
+        let sevp_paddr = match task.vm_manager.translate_to_kva(sevp_ptr) {
             Some(addr) => addr,
             None => return errno::to_result(errno::EFAULT),
         };
@@ -424,7 +424,7 @@ pub fn sys_timer_settime(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -
         None => return errno::to_result(errno::EINVAL),
     };
 
-    let new_value_paddr = match task.vm_manager.translate_vaddr(new_value_ptr) {
+    let new_value_paddr = match task.vm_manager.translate_to_kva(new_value_ptr) {
         Some(addr) => addr,
         None => return errno::to_result(errno::EFAULT),
     };
@@ -441,7 +441,7 @@ pub fn sys_timer_settime(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -
     };
 
     if old_value_ptr != 0 {
-        let old_value_paddr = match task.vm_manager.translate_vaddr(old_value_ptr) {
+        let old_value_paddr = match task.vm_manager.translate_to_kva(old_value_ptr) {
             Some(addr) => addr as *mut ItimerSpec,
             None => return errno::to_result(errno::EFAULT),
         };
@@ -482,7 +482,7 @@ pub fn sys_timer_gettime(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -
         None => return errno::to_result(errno::EINVAL),
     };
 
-    let setting_paddr = match task.vm_manager.translate_vaddr(setting_ptr) {
+    let setting_paddr = match task.vm_manager.translate_to_kva(setting_ptr) {
         Some(addr) => addr as *mut ItimerSpec,
         None => return errno::to_result(errno::EFAULT),
     };
@@ -564,7 +564,7 @@ pub fn sys_clock_gettime(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) 
 
     trapframe.increment_pc_next(&task);
 
-    let timespec_ptr = match task.vm_manager.translate_vaddr(trapframe.get_arg(1)) {
+    let timespec_ptr = match task.vm_manager.translate_to_kva(trapframe.get_arg(1)) {
         Some(ptr) => ptr as *mut TimeSpec,   // a1
         None => return (-14_isize) as usize, // -EFAULT
     };
@@ -639,7 +639,7 @@ pub fn sys_nanosleep(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> u
     // Get user pointer to requested timespec
     let rqtp_ptr = trapframe.get_arg(0);
     let _rmtp_ptr = trapframe.get_arg(1);
-    let rqtp = match task.vm_manager.translate_vaddr(rqtp_ptr) {
+    let rqtp = match task.vm_manager.translate_to_kva(rqtp_ptr) {
         Some(ptr) => unsafe { &*(ptr as *const TimeSpec) },
         None => return (-14_isize) as usize, // -EFAULT
     };
@@ -688,7 +688,7 @@ pub fn sys_clock_getres(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -
 
     // If res pointer is provided, write resolution
     if res_ptr != 0 {
-        if let Some(res_paddr) = task.vm_manager.translate_vaddr(res_ptr) {
+        if let Some(res_paddr) = task.vm_manager.translate_to_kva(res_ptr) {
             unsafe {
                 // Write timespec structure with nanosecond resolution
                 // struct timespec { long tv_sec; long tv_nsec; }

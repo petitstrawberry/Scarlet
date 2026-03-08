@@ -1700,7 +1700,7 @@ impl Task {
                 let queue = self.event_queue.lock();
                 if !queue.is_empty() {
                     // Log that we're deferring events to next cycle
-                    // crate::early_println!("Task {}: Deferring {} events to next scheduler cycle",
+                    // crate::println!("Task {}: Deferring {} events to next scheduler cycle",
                     //                      self.id, queue.len());
                 }
             }
@@ -2049,7 +2049,7 @@ mod tests {
         // Write test data to parent's memory
         let test_data: [u8; 8] = [0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC, 0xDE, 0xF0];
         unsafe {
-            let dst_ptr = mmap.pmarea.start as *mut u8;
+            let dst_ptr = phys_to_virt(mmap.pmarea.start) as *mut u8;
             core::ptr::copy_nonoverlapping(test_data.as_ptr(), dst_ptr, test_data.len());
         }
 
@@ -2246,7 +2246,8 @@ mod tests {
             0x99, 0x00,
         ];
         unsafe {
-            let stack_ptr = (stack_mmap.pmarea.start + crate::environment::PAGE_SIZE) as *mut u8;
+            let stack_ptr =
+                phys_to_virt(stack_mmap.pmarea.start + crate::environment::PAGE_SIZE) as *mut u8;
             core::ptr::copy_nonoverlapping(
                 stack_test_data.as_ptr(),
                 stack_ptr,
@@ -2278,9 +2279,10 @@ mod tests {
         // Verify that stack content was copied correctly
         unsafe {
             let parent_stack_ptr =
-                (stack_mmap.pmarea.start + crate::environment::PAGE_SIZE) as *const u8;
+                phys_to_virt(stack_mmap.pmarea.start + crate::environment::PAGE_SIZE) as *const u8;
             let child_stack_ptr =
-                (child_stack_mmap.pmarea.start + crate::environment::PAGE_SIZE) as *const u8;
+                phys_to_virt(child_stack_mmap.pmarea.start + crate::environment::PAGE_SIZE)
+                    as *const u8;
 
             // Check that physical addresses are different (separate memory)
             assert_ne!(
@@ -2303,12 +2305,13 @@ mod tests {
         // Verify that modifying parent's stack doesn't affect child's stack
         unsafe {
             let parent_stack_ptr =
-                (stack_mmap.pmarea.start + crate::environment::PAGE_SIZE) as *mut u8;
+                phys_to_virt(stack_mmap.pmarea.start + crate::environment::PAGE_SIZE) as *mut u8;
             let original_value = *parent_stack_ptr;
             *parent_stack_ptr = 0xFE; // Modify first byte in parent stack
 
             let child_stack_ptr =
-                (child_stack_mmap.pmarea.start + crate::environment::PAGE_SIZE) as *const u8;
+                phys_to_virt(child_stack_mmap.pmarea.start + crate::environment::PAGE_SIZE)
+                    as *const u8;
             let child_first_byte = *child_stack_ptr;
 
             // Child's first byte should still be the original value
@@ -2408,11 +2411,11 @@ mod tests {
 
         // Verify that modifying shared memory from child affects parent
         unsafe {
-            let child_shared_ptr = child_shared_mmap.pmarea.start as *mut u8;
+            let child_shared_ptr = phys_to_virt(child_shared_mmap.pmarea.start) as *mut u8;
             let original_value = *child_shared_ptr;
             *child_shared_ptr = 0xFF; // Modify first byte through child reference
 
-            let parent_shared_ptr = shared_mmap.pmarea.start as *const u8;
+            let parent_shared_ptr = phys_to_virt(shared_mmap.pmarea.start) as *const u8;
             let parent_first_byte = *parent_shared_ptr;
 
             // Parent should see the change made by child (shared memory)
@@ -2427,8 +2430,8 @@ mod tests {
 
         // Verify that the shared data content is accessible from both
         unsafe {
-            let child_ptr = child_shared_mmap.pmarea.start as *const u8;
-            let parent_ptr = shared_mmap.pmarea.start as *const u8;
+            let child_ptr = phys_to_virt(child_shared_mmap.pmarea.start) as *const u8;
+            let parent_ptr = phys_to_virt(shared_mmap.pmarea.start) as *const u8;
 
             // Check that the data content is identical and accessible from both
             for i in 0..test_data.len() {

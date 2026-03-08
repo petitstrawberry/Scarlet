@@ -522,7 +522,7 @@ pub fn sys_socket_bind(tf: &mut Trapframe) -> usize {
     // we treat VFS file creation as optional and don't fail the bind operation
     if let Err(e) = vfs.create_file(&path, socket_file_type) {
         // Log the error for debugging but continue - socket is still usable
-        crate::early_println!(
+        crate::println!(
             "[socket_bind] Warning: Failed to create VFS socket file at '{}': {:?}",
             path,
             e

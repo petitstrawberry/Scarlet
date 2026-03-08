@@ -1,8 +1,6 @@
 //! Address translation utilities for virtual memory management.
 //!
 //! This module provides functions for converting between physical and virtual addresses.
-//! Currently, it assumes identity mapping (VA == PA), but is designed to be extended
-//! for Higher Half Kernel + HHDM (Higher Half Direct Mapping) in the future.
 //!
 //! # Usage
 //!
@@ -19,27 +17,75 @@
 //! let vaddr_back = phys_to_virt(paddr);
 //! ```
 
-/// Converts a virtual address to a physical address.
-///
-/// **Note:** This function is specifically intended for addresses in the
-/// HHDM (Higher Half Direct Map) / direct-map region. It is **not** valid
-/// for arbitrary kernel virtual addresses (e.g., kernel image mappings).
-///
-/// Currently assumes identity mapping (VA == PA).
-/// When Higher Half Kernel is enabled, this will subtract HHDM_OFFSET.
-///
-/// # Arguments
-///
-/// * `vaddr` - Virtual address in the direct-map region to convert
-///
-/// # Returns
-///
-/// Physical address corresponding to the given direct-map virtual address
+use spin::Once;
+
+#[derive(Clone, Copy, Debug)]
+struct AddressLayout {
+    hhdm_offset: usize,
+    kernel_phys_base: usize,
+    kernel_virt_base: usize,
+    kernel_image_size: usize,
+}
+
+impl AddressLayout {
+    #[inline(always)]
+    fn kernel_virt_end(&self) -> usize {
+        self.kernel_virt_base + self.kernel_image_size
+    }
+
+    #[inline(always)]
+    fn kernel_phys_end(&self) -> usize {
+        self.kernel_phys_base + self.kernel_image_size
+    }
+
+    #[inline(always)]
+    fn contains_kernel_virt(&self, vaddr: usize) -> bool {
+        vaddr >= self.kernel_virt_base && vaddr < self.kernel_virt_end()
+    }
+
+    #[inline(always)]
+    fn contains_hhdm_virt(&self, vaddr: usize) -> bool {
+        vaddr >= self.hhdm_offset
+    }
+}
+
+static ADDRESS_LAYOUT: Once<AddressLayout> = Once::new();
+
 #[inline(always)]
-pub const fn virt_to_phys(vaddr: usize) -> usize {
-    // Identity mapping: VA == PA
-    // Future: When Higher Half is enabled, this will be:
-    // vaddr - HHDM_OFFSET
+fn layout() -> Option<&'static AddressLayout> {
+    ADDRESS_LAYOUT.get()
+}
+
+pub fn init_limine_addressing(
+    hhdm_offset: usize,
+    kernel_phys_base: usize,
+    kernel_virt_base: usize,
+    kernel_image_size: usize,
+) {
+    ADDRESS_LAYOUT.call_once(|| AddressLayout {
+        hhdm_offset,
+        kernel_phys_base,
+        kernel_virt_base,
+        kernel_image_size,
+    });
+}
+
+#[inline(always)]
+pub fn address_translation_ready() -> bool {
+    layout().is_some()
+}
+
+/// Converts a virtual address to a physical address.
+#[inline(always)]
+pub fn virt_to_phys(vaddr: usize) -> usize {
+    if let Some(layout) = layout() {
+        if layout.contains_kernel_virt(vaddr) {
+            return layout.kernel_phys_base + (vaddr - layout.kernel_virt_base);
+        }
+        if layout.contains_hhdm_virt(vaddr) {
+            return vaddr - layout.hhdm_offset;
+        }
+    }
     vaddr
 }
 
@@ -60,10 +106,15 @@ pub const fn virt_to_phys(vaddr: usize) -> usize {
 ///
 /// Direct-map virtual address corresponding to the given physical address
 #[inline(always)]
-pub const fn phys_to_virt(paddr: usize) -> usize {
-    // Identity mapping: VA == PA
-    // Future: When Higher Half is enabled, this will be:
-    // paddr + HHDM_OFFSET
+pub fn phys_to_virt(paddr: usize) -> usize {
+    if let Some(layout) = layout() {
+        return paddr.checked_add(layout.hhdm_offset).unwrap_or_else(|| {
+            panic!(
+                "phys_to_virt overflow: paddr={:#x} hhdm_offset={:#x}",
+                paddr, layout.hhdm_offset
+            )
+        });
+    }
     paddr
 }
 
@@ -80,7 +131,7 @@ pub const fn phys_to_virt(paddr: usize) -> usize {
 ///
 /// Virtual address that can be used to access the physical memory
 #[inline(always)]
-pub const fn phys_to_kernel_virt(paddr: usize) -> usize {
+pub fn phys_to_kernel_virt(paddr: usize) -> usize {
     phys_to_virt(paddr)
 }
 
@@ -97,8 +148,18 @@ pub const fn phys_to_kernel_virt(paddr: usize) -> usize {
 ///
 /// Physical address corresponding to the given kernel virtual address
 #[inline(always)]
-pub const fn kernel_virt_to_phys(vaddr: usize) -> usize {
+pub fn kernel_virt_to_phys(vaddr: usize) -> usize {
     virt_to_phys(vaddr)
+}
+
+#[inline(always)]
+pub fn phys_to_kernel_image_virt(paddr: usize) -> usize {
+    if let Some(layout) = layout() {
+        if paddr >= layout.kernel_phys_base && paddr < layout.kernel_phys_end() {
+            return layout.kernel_virt_base + (paddr - layout.kernel_phys_base);
+        }
+    }
+    paddr
 }
 
 /// Checks if the given virtual address is in the direct mapping region.
@@ -114,10 +175,10 @@ pub const fn kernel_virt_to_phys(vaddr: usize) -> usize {
 ///
 /// `true` if the address is in the direct mapping region
 #[inline(always)]
-pub const fn is_direct_mapped(_vaddr: usize) -> bool {
-    // With identity mapping, all addresses are direct mapped
-    // Future: When Higher Half is enabled:
-    // vaddr >= HHDM_OFFSET && vaddr < HHDM_OFFSET + MAX_PHYSICAL_MEMORY
+pub fn is_direct_mapped(vaddr: usize) -> bool {
+    if let Some(layout) = layout() {
+        return layout.contains_hhdm_virt(vaddr);
+    }
     true
 }
 
@@ -147,7 +208,7 @@ impl PhysAddr {
 
     /// Converts this physical address to a virtual address.
     #[inline(always)]
-    pub const fn to_virt(&self) -> VirtAddr {
+    pub fn to_virt(&self) -> VirtAddr {
         VirtAddr::new(phys_to_virt(self.0))
     }
 
@@ -207,7 +268,7 @@ impl VirtAddr {
 
     /// Converts this virtual address to a physical address.
     #[inline(always)]
-    pub const fn to_phys(&self) -> PhysAddr {
+    pub fn to_phys(&self) -> PhysAddr {
         PhysAddr::new(virt_to_phys(self.0))
     }
 
@@ -297,37 +358,36 @@ mod tests {
 
     #[test_case]
     fn test_identity_mapping_virt_to_phys() {
-        let vaddr = 0x80000000usize;
+        let vaddr = phys_to_virt(0x80000000usize);
         let paddr = virt_to_phys(vaddr);
-        assert_eq!(paddr, vaddr);
+        assert_eq!(paddr, 0x80000000usize);
     }
 
     #[test_case]
     fn test_identity_mapping_phys_to_virt() {
         let paddr = 0x80000000usize;
         let vaddr = phys_to_virt(paddr);
-        assert_eq!(vaddr, paddr);
+        assert_eq!(virt_to_phys(vaddr), paddr);
     }
 
     #[test_case]
     fn test_roundtrip_conversion() {
-        let original = 0x80001234usize;
-        let paddr = virt_to_phys(original);
-        let vaddr = phys_to_virt(paddr);
-        assert_eq!(vaddr, original);
+        let original_paddr = 0x80001234usize;
+        let vaddr = phys_to_virt(original_paddr);
+        let paddr = virt_to_phys(vaddr);
+        assert_eq!(paddr, original_paddr);
     }
 
     #[test_case]
     fn test_phys_addr_type() {
         let paddr = PhysAddr::new(0x80000000);
         assert_eq!(paddr.as_usize(), 0x80000000);
-        assert_eq!(paddr.to_virt().as_usize(), 0x80000000);
+        assert_eq!(paddr.to_virt().to_phys().as_usize(), 0x80000000);
     }
 
     #[test_case]
     fn test_virt_addr_type() {
-        let vaddr = VirtAddr::new(0x80000000);
-        assert_eq!(vaddr.as_usize(), 0x80000000);
+        let vaddr = VirtAddr::new(phys_to_virt(0x80000000));
         assert_eq!(vaddr.to_phys().as_usize(), 0x80000000);
     }
 

@@ -98,7 +98,7 @@ pub fn handle_ioctl(
             // Always return KB_101
             let task = mytask().ok_or(())?;
             let vaddr = arg as usize;
-            if let Some(paddr) = task.vm_manager.translate_vaddr(vaddr) {
+            if let Some(paddr) = task.vm_manager.translate_to_kva(vaddr) {
                 unsafe { *(paddr as *mut u32) = KB_101; }
                 Ok(Some(0))
             } else {
@@ -153,7 +153,7 @@ pub fn handle_ioctl(
                     t.c_cc[VEOF] = 0x04; // Ctrl-D
                     let task = mytask().ok_or(())?;
                     let vaddr = arg as usize;
-                    if let Some(paddr) = task.vm_manager.translate_vaddr(vaddr) {
+                    if let Some(paddr) = task.vm_manager.translate_to_kva(vaddr) {
                         unsafe { core::ptr::write(paddr as *mut LinuxTermios, t); }
                         Ok(Some(0))
                     } else { Err(()) }
@@ -161,7 +161,7 @@ pub fn handle_ioctl(
                 _ => {
                     let task = mytask().ok_or(())?;
                     let vaddr = arg as usize;
-                    if let Some(paddr) = task.vm_manager.translate_vaddr(vaddr) {
+                    if let Some(paddr) = task.vm_manager.translate_to_kva(vaddr) {
                         let t = unsafe { core::ptr::read(paddr as *const LinuxTermios) };
                         let canonical_new = (t.c_lflag & 0x0000_0002) != 0;
                         let echo_new = (t.c_lflag & 0x0000_0008) != 0;
@@ -192,7 +192,7 @@ pub fn handle_ioctl(
             struct VtStat { v_active: u16, v_signal: u16, v_state: u16 }
             let task = mytask().ok_or(())?;
             let vaddr = arg as usize;
-            if let Some(paddr) = task.vm_manager.translate_vaddr(vaddr) {
+            if let Some(paddr) = task.vm_manager.translate_to_kva(vaddr) {
                 let state = VtStat { v_active: 1, v_signal: 0, v_state: 1 << 1 };
                 unsafe { core::ptr::write(paddr as *mut VtStat, state); }
                 Ok(Some(0))
@@ -230,7 +230,7 @@ pub fn handle_ioctl(
             // Write VT number into user pointer
             let task = mytask().ok_or(())?;
             let vaddr = arg as usize;
-            if let Some(paddr) = task.vm_manager.translate_vaddr(vaddr) {
+            if let Some(paddr) = task.vm_manager.translate_to_kva(vaddr) {
                 unsafe { *(paddr as *mut i32) = 1; }
                 Ok(Some(0))
             } else {
@@ -255,7 +255,7 @@ pub fn handle_ioctl(
             // Linux struct vt_mode has several fields; we write zeros as a benign default
             let task = mytask().ok_or(())?;
             let vaddr = arg as usize;
-            if let Some(paddr) = task.vm_manager.translate_vaddr(vaddr) {
+            if let Some(paddr) = task.vm_manager.translate_to_kva(vaddr) {
                 // Write 8 bytes of zeros (enough for minimal fields on common ABIs)
                 unsafe { core::ptr::write_bytes(paddr as *mut u8, 0, 8); }
                 Ok(Some(0))
@@ -338,7 +338,7 @@ pub fn handle_ioctl(
 
             let task = mytask().ok_or(())?;
             let vaddr = arg as usize;
-            if let Some(paddr) = task.vm_manager.translate_vaddr(vaddr) {
+            if let Some(paddr) = task.vm_manager.translate_to_kva(vaddr) {
                 let (cols, rows) = if let Some(control_ops) = kernel_object.as_control() {
                     match control_ops.control(SCTL_TTY_GET_WINSIZE, 0) {
                         Ok(packed) => {
@@ -368,7 +368,7 @@ pub fn handle_ioctl(
 
             let task = mytask().ok_or(())?;
             let vaddr = arg as usize;
-            if let Some(paddr) = task.vm_manager.translate_vaddr(vaddr) {
+            if let Some(paddr) = task.vm_manager.translate_to_kva(vaddr) {
                 let ws = unsafe { core::ptr::read(paddr as *const Winsize) };
                 if let Some(control_ops) = kernel_object.as_control() {
                     let packed = ((ws.ws_col as usize) << 16) | (ws.ws_row as usize);
@@ -387,7 +387,7 @@ pub fn handle_ioctl(
             if LOG_TTY_IOCTL { crate::println!("[tty_ioctl] KDGETMODE"); }
             let task = mytask().ok_or(())?;
             let vaddr = arg as usize;
-            if let Some(paddr) = task.vm_manager.translate_vaddr(vaddr) {
+            if let Some(paddr) = task.vm_manager.translate_to_kva(vaddr) {
                 unsafe { *(paddr as *mut u32) = KD_TEXT; }
                 Ok(Some(0))
             } else {
@@ -443,7 +443,7 @@ pub fn handle_ioctl(
                         let task = mytask().ok_or(())?;
                         let mode: u32 = match v as u32 { 0 => K_XLATE, 1 => K_MEDIUMRAW, 2 => K_RAW, _ => K_RAW };
                         let vaddr = arg as usize;
-                        if let Some(paddr) = task.vm_manager.translate_vaddr(vaddr) {
+                        if let Some(paddr) = task.vm_manager.translate_to_kva(vaddr) {
                             unsafe { *(paddr as *mut u32) = mode; }
                             Ok(Some(0))
                         } else { Ok(Some((-14_isize) as usize)) }
@@ -578,7 +578,7 @@ pub fn handle_ioctl(
 
             let task = mytask().ok_or(())?;
             let vaddr = arg as usize;
-            if let Some(paddr) = task.vm_manager.translate_vaddr(vaddr) {
+            if let Some(paddr) = task.vm_manager.translate_to_kva(vaddr) {
                 unsafe {
                     let mut e = core::ptr::read(paddr as *const KbEntry);
                     let idx = e.kb_index as usize;

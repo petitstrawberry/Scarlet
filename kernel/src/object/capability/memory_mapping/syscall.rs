@@ -276,7 +276,8 @@ pub fn sys_memory_map(trapframe: &mut Trapframe) -> usize {
             let mut page_idx = 0;
             for alloc in &page_allocs {
                 for local_idx in 0..alloc.len() {
-                    let src = (paddr + page_idx * PAGE_SIZE) as *const u8;
+                    let src =
+                        crate::vm::addr::phys_to_virt(paddr + page_idx * PAGE_SIZE) as *const u8;
                     let dst_paddr = alloc.page_paddr(local_idx).unwrap();
                     let dst_vaddr = crate::vm::addr::phys_to_virt(dst_paddr);
                     unsafe {

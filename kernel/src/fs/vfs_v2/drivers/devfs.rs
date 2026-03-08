@@ -61,6 +61,8 @@ pub struct DevFS {
     root: RwLock<Arc<DevNode>>,
     /// Filesystem name
     name: String,
+    #[cfg(test)]
+    device_manager_addr: Option<usize>,
 }
 
 impl DevFS {
@@ -71,15 +73,45 @@ impl DevFS {
             fs_id: FileSystemId::new(),
             root: RwLock::new(Arc::clone(&root)),
             name: "devfs".to_string(),
+            #[cfg(test)]
+            device_manager_addr: None,
         });
         let fs_weak = Arc::downgrade(&(fs.clone() as Arc<dyn FileSystemOperations>));
         root.set_filesystem(fs_weak);
         fs
     }
 
+    #[cfg(test)]
+    pub fn new_with_device_manager(device_manager: &DeviceManager) -> Arc<Self> {
+        let root = Arc::new(DevNode::new_directory("/".to_string()));
+        root.set_device_manager(device_manager);
+        let fs = Arc::new(Self {
+            fs_id: FileSystemId::new(),
+            root: RwLock::new(Arc::clone(&root)),
+            name: "devfs".to_string(),
+            device_manager_addr: Some(device_manager as *const DeviceManager as usize),
+        });
+        let fs_weak = Arc::downgrade(&(fs.clone() as Arc<dyn FileSystemOperations>));
+        root.set_filesystem(fs_weak);
+        fs
+    }
+
+    #[cfg(test)]
+    fn device_manager(&self) -> &DeviceManager {
+        match self.device_manager_addr {
+            Some(device_manager_addr) => unsafe { &*(device_manager_addr as *const DeviceManager) },
+            None => DeviceManager::get_manager(),
+        }
+    }
+
+    #[cfg(not(test))]
+    fn device_manager(&self) -> &DeviceManager {
+        DeviceManager::get_manager()
+    }
+
     /// Populate the filesystem with current devices from DeviceManager
     fn populate_devices(&self) -> Result<(), FileSystemError> {
-        let device_manager = DeviceManager::get_manager();
+        let device_manager = self.device_manager();
         let root = self.root.read();
 
         // Clear existing devices (for dynamic updates)
@@ -120,6 +152,8 @@ impl DevFS {
                     if let Some(fs_ref) = root.filesystem() {
                         device_node.set_filesystem(fs_ref);
                     }
+                    #[cfg(test)]
+                    device_node.set_device_manager(device_manager);
 
                     root.add_child(device_name, device_node)?;
                 }
@@ -245,6 +279,8 @@ pub struct DevNode {
     children: RwLock<BTreeMap<String, Arc<DevNode>>>,
     /// Reference to filesystem
     filesystem: RwLock<Option<Weak<dyn FileSystemOperations>>>,
+    #[cfg(test)]
+    device_manager_addr: RwLock<Option<usize>>,
 }
 
 impl Clone for DevNode {
@@ -255,6 +291,8 @@ impl Clone for DevNode {
             file_id: self.file_id,
             children: RwLock::new(self.children.read().clone()),
             filesystem: RwLock::new(self.filesystem.read().clone()),
+            #[cfg(test)]
+            device_manager_addr: RwLock::new(*self.device_manager_addr.read()),
         }
     }
 }
@@ -268,6 +306,8 @@ impl DevNode {
             file_id: 0, // Root directory ID
             children: RwLock::new(BTreeMap::new()),
             filesystem: RwLock::new(None),
+            #[cfg(test)]
+            device_manager_addr: RwLock::new(None),
         }
     }
 
@@ -279,12 +319,19 @@ impl DevNode {
             file_id,
             children: RwLock::new(BTreeMap::new()),
             filesystem: RwLock::new(None),
+            #[cfg(test)]
+            device_manager_addr: RwLock::new(None),
         }
     }
 
     /// Set filesystem reference
     pub fn set_filesystem(&self, fs: Weak<dyn FileSystemOperations>) {
         *self.filesystem.write() = Some(fs);
+    }
+
+    #[cfg(test)]
+    pub fn set_device_manager(&self, device_manager: &DeviceManager) {
+        *self.device_manager_addr.write() = Some(device_manager as *const DeviceManager as usize);
     }
 
     /// Add a child node
@@ -357,6 +404,15 @@ impl DevNode {
         match self.file_type {
             FileType::CharDevice(device_info) | FileType::BlockDevice(device_info) => {
                 // Create a device file object that can handle device operations
+                #[cfg(test)]
+                if let Some(device_manager_addr) = *self.device_manager_addr.read() {
+                    return Ok(Arc::new(DevFileObject::new_with_device_manager(
+                        Arc::new(self.clone()),
+                        device_info.device_id,
+                        device_info.device_type,
+                        unsafe { &*(device_manager_addr as *const DeviceManager) },
+                    )?));
+                }
                 Ok(Arc::new(DevFileObject::new(
                     Arc::new(self.clone()),
                     device_info.device_id,
@@ -435,8 +491,17 @@ impl DevFileObject {
         device_id: usize,
         device_type: DeviceType,
     ) -> Result<Self, FileSystemError> {
+        Self::new_with_manager(node, device_id, device_type, DeviceManager::get_manager())
+    }
+
+    fn new_with_manager(
+        node: Arc<DevNode>,
+        device_id: usize,
+        device_type: DeviceType,
+        device_manager: &DeviceManager,
+    ) -> Result<Self, FileSystemError> {
         // Try to get the device from DeviceManager by ID
-        match DeviceManager::get_manager().get_device(device_id) {
+        match device_manager.get_device(device_id) {
             Some(device_guard) => Ok(Self {
                 node,
                 position: RwLock::new(0),
@@ -449,6 +514,16 @@ impl DevFileObject {
                 format!("Device with ID {} not found in DeviceManager", device_id),
             )),
         }
+    }
+
+    #[cfg(test)]
+    pub fn new_with_device_manager(
+        node: Arc<DevNode>,
+        device_id: usize,
+        device_type: DeviceType,
+        device_manager: &DeviceManager,
+    ) -> Result<Self, FileSystemError> {
+        Self::new_with_manager(node, device_id, device_type, device_manager)
     }
 
     /// Read from the underlying device at current position
@@ -697,7 +772,7 @@ impl FileObject for DevFileObject {
                     position.saturating_sub((-offset) as u64)
                 }
             }
-            SeekFrom::End(offset) => {
+            SeekFrom::End(_offset) => {
                 // For devices, we can't easily determine the "end" position
                 // Most devices don't have a fixed size, so seeking from end is not meaningful
                 // We'll treat this as an error for now

@@ -16,12 +16,11 @@ use core::sync::atomic::Ordering;
 
 use crate::{
     arch::{Trapframe, vm},
-    early_initcall,
     fs::{
         FileSystemError, FileSystemErrorKind, SeekFrom, VfsManager, drivers::overlayfs::OverlayFS,
     },
     ipc::event::{Event, EventContent, EventPriority, ProcessControlType},
-    register_abi,
+    late_initcall, register_abi,
     syscall::syscall_handler,
     task::elf_loader::{
         ExecutionMode, LoadStrategy, LoadTarget, analyze_and_load_elf_with_strategy,
@@ -226,7 +225,7 @@ impl ScarletAbi {
     pub fn on_task_exit(&mut self, task: &crate::task::Task) {
         // Linux-compatible behavior: write 0 to clear_child_tid and futex wake
         if let Some(ptr) = self.clear_child_tid_ptr {
-            if let Some(paddr) = task.vm_manager.translate_vaddr(ptr) {
+            if let Some(paddr) = task.vm_manager.translate_to_kva(ptr) {
                 unsafe {
                     *(paddr as *mut i32) = 0;
                 }
@@ -292,7 +291,7 @@ impl ScarletAbi {
             if self.pending_events.len() >= MAX_PENDING_EVENTS {
                 // Drop oldest event (FIFO overflow policy)
                 self.pending_events.remove(0);
-                crate::early_println!(
+                crate::println!(
                     "[ScarletAbi] Warning: Pending event queue overflow, dropping oldest event"
                 );
             }
@@ -499,34 +498,34 @@ impl ScarletAbi {
         unsafe {
             let paddr = task
                 .vm_manager
-                .translate_vaddr(frame_base)
+                .translate_to_kva(frame_base)
                 .ok_or("Failed to translate signal frame address")?;
             *(paddr as *mut u32) = trampoline_instr_0;
             *((paddr as *mut u32).add(1)) = trampoline_instr_1;
 
             let paddr = task
                 .vm_manager
-                .translate_vaddr(frame_base + 8)
+                .translate_to_kva(frame_base + 8)
                 .ok_or("Failed to translate signal frame address")?;
             *(paddr as *mut usize) = subtype;
 
             let paddr = task
                 .vm_manager
-                .translate_vaddr(frame_base + 16)
+                .translate_to_kva(frame_base + 16)
                 .ok_or("Failed to translate signal frame address")?;
             *(paddr as *mut usize) = content_type;
 
             for i in 0..32 {
                 let paddr = task
                     .vm_manager
-                    .translate_vaddr(frame_base + 24 + i * 8)
+                    .translate_to_kva(frame_base + 24 + i * 8)
                     .ok_or("Failed to translate signal frame address")?;
                 *(paddr as *mut usize) = trapframe.regs.reg[i];
             }
 
             let paddr = task
                 .vm_manager
-                .translate_vaddr(frame_base + 280)
+                .translate_to_kva(frame_base + 280)
                 .ok_or("Failed to translate signal frame address")?;
             *(paddr as *mut u64) = trapframe.epc;
         }
@@ -565,14 +564,14 @@ impl ScarletAbi {
             for i in 0..32 {
                 let paddr = task
                     .vm_manager
-                    .translate_vaddr(frame_base + 24 + i * 8)
+                    .translate_to_kva(frame_base + 24 + i * 8)
                     .ok_or("Failed to translate signal frame address")?;
                 trapframe.regs.reg[i] = *(paddr as *const usize);
             }
 
             let paddr = task
                 .vm_manager
-                .translate_vaddr(frame_base + 280)
+                .translate_to_kva(frame_base + 280)
                 .ok_or("Failed to translate signal frame address")?;
             trapframe.epc = *(paddr as *const u64);
         }
@@ -847,6 +846,21 @@ impl AbiModule for ScarletAbi {
                         let (adjusted_sp, argv_ptr) =
                             self.setup_arguments_on_stack(task, argv, envp, stack_pointer)?;
                         task.vcpu.lock().set_sp(adjusted_sp);
+
+                        // crate::println!(
+                        //     "[scarlet-abi] adjusted_sp={:#x} argv_ptr={:#x}",
+                        //     adjusted_sp,
+                        //     argv_ptr
+                        // );
+                        // crate::println!(
+                        //     "[scarlet-abi] sp->pa={:#x} argv->pa={:#x}",
+                        //     task.vm_manager
+                        //         .translate_to_phys(adjusted_sp)
+                        //         .unwrap_or(usize::MAX),
+                        //     task.vm_manager
+                        //         .translate_to_phys(argv_ptr)
+                        //         .unwrap_or(usize::MAX)
+                        // );
 
                         // Set RISC-V calling convention registers
                         // a0 (reg[10]) = argc
@@ -1261,12 +1275,12 @@ impl ScarletAbi {
                 crate::environment::PAGE_SIZE - page_off,
             );
 
-            match task.vm_manager.translate_vaddr(current_vaddr) {
-                Some(paddr) => {
+            match task.vm_manager.translate_to_kva(current_vaddr) {
+                Some(kaddr) => {
                     unsafe {
                         core::ptr::copy_nonoverlapping(
                             data[written..written + chunk_len].as_ptr(),
-                            paddr as *mut u8,
+                            kaddr as *mut u8,
                             chunk_len,
                         );
                     }
@@ -1349,4 +1363,4 @@ fn register_scarlet_abi() {
     register_abi!(ScarletAbi);
 }
 
-early_initcall!(register_scarlet_abi);
+late_initcall!(register_scarlet_abi);

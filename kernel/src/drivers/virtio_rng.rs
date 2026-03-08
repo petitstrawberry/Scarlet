@@ -18,6 +18,7 @@
 //! from the host. Random bytes are fetched in batches and buffered internally
 //! to minimize virtqueue operations when requests are made.
 
+use crate::vm::addr::virt_to_phys;
 use alloc::{boxed::Box, collections::VecDeque, vec};
 use spin::{Mutex, RwLock};
 
@@ -75,7 +76,7 @@ impl VirtioRngDevice {
                 features
             }
             Err(e) => {
-                crate::early_println!("[VirtIO RNG] Failed to initialize: {}", e);
+                crate::println!("[VirtIO RNG] Failed to initialize: {}", e);
                 0
             }
         };
@@ -83,7 +84,7 @@ impl VirtioRngDevice {
         // Store negotiated features
         *device.features.write() = negotiated_features;
 
-        crate::early_println!(
+        crate::println!(
             "[VirtIO RNG] Device initialized with features: 0x{:x}",
             negotiated_features
         );
@@ -173,7 +174,7 @@ impl VirtioRngDevice {
         if buffer.is_empty() {
             drop(buffer); // Release lock before filling
             if let Err(e) = self.fill_buffer() {
-                crate::early_println!("[VirtIO RNG] Failed to fill buffer: {}", e);
+                crate::println!("[VirtIO RNG] Failed to fill buffer: {}", e);
                 return None;
             }
             buffer = self.buffer.lock();
@@ -236,7 +237,7 @@ impl VirtioDevice for VirtioRngDevice {
             return None;
         }
         let virtqueues = self.virtqueues.lock();
-        Some(virtqueues[queue_idx].get_raw_ptr() as u64)
+        Some(virt_to_phys(virtqueues[queue_idx].get_raw_ptr() as usize) as u64)
     }
 
     fn get_queue_driver_addr(&self, queue_idx: usize) -> Option<u64> {
@@ -244,7 +245,7 @@ impl VirtioDevice for VirtioRngDevice {
             return None;
         }
         let virtqueues = self.virtqueues.lock();
-        Some(virtqueues[queue_idx].avail.flags as *const _ as u64)
+        Some(virt_to_phys(virtqueues[queue_idx].avail.flags as *const _ as usize) as u64)
     }
 
     fn get_queue_device_addr(&self, queue_idx: usize) -> Option<u64> {
@@ -252,7 +253,7 @@ impl VirtioDevice for VirtioRngDevice {
             return None;
         }
         let virtqueues = self.virtqueues.lock();
-        Some(virtqueues[queue_idx].used.flags as *const _ as u64)
+        Some(virt_to_phys(virtqueues[queue_idx].used.flags as *const _ as usize) as u64)
     }
 
     fn get_supported_features(&self, _device_features: u32) -> u32 {

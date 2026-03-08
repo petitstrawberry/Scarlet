@@ -102,7 +102,7 @@ impl Riscv64VcpuObject {
         let hvip = read_hvip();
         let new_hvip = (hvip & !mask) | val;
 
-        // crate::early_println!(
+        // crate::println!(
         //     "[inject_pending] mask={:#x} pending={:#x} val={:#x} hvip={:#x}->new_hvip={:#x}",
         //     mask,
         //     pending,
@@ -319,7 +319,7 @@ impl Riscv64VmObject {
         let task = mytask().ok_or("No current task")?;
         let host_paddr = task
             .vm_manager
-            .translate_vaddr(host_vaddr as usize)
+            .translate_to_kva(host_vaddr as usize)
             .ok_or("Failed to translate host_vaddr")? as u64;
         self.state.lock().memory_slots.set_slot(MemorySlot {
             slot_id,
@@ -369,7 +369,7 @@ impl ControlOps for Riscv64VmObject {
                 let task = mytask().ok_or("No current task")?;
                 let target_ptr = task
                     .vm_manager
-                    .translate_vaddr(arg)
+                    .translate_to_kva(arg)
                     .ok_or("Invalid user pointer")?;
                 let region = unsafe { core::ptr::read(target_ptr as *const ScarletVmMemoryRegion) };
                 let flags = MemorySlotFlags {
@@ -409,7 +409,7 @@ fn translate_user_ptr(arg: usize) -> Result<usize, &'static str> {
     mytask()
         .ok_or("No current task")?
         .vm_manager
-        .translate_vaddr(arg)
+        .translate_to_kva(arg)
         .ok_or("Invalid user pointer")
 }
 

@@ -22,7 +22,7 @@ unsafe extern "Rust" {
 
 #[unsafe(link_section = ".init")]
 #[unsafe(export_name = "_start")]
-pub fn _start(a0: usize, a1: usize) -> ! {
+pub extern "C" fn _start(a0: usize, a1: usize) -> ! {
     // Get argc and argv from RISC-V calling convention registers
     // a0 = argc, a1 = argv (set by kernel's ScarletAbi)
     let argc = a0;

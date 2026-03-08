@@ -36,7 +36,7 @@ pub fn sys_handle_query(trapframe: &mut Trapframe) -> usize {
     trapframe.increment_pc_next(task);
 
     // Translate the pointer to get access to the info structure
-    let info_vaddr = match task.vm_manager.translate_vaddr(info_ptr) {
+    let info_vaddr = match task.vm_manager.translate_to_kva(info_ptr) {
         Some(addr) => addr as *mut KernelObjectInfo,
         None => return usize::MAX, // Invalid pointer
     };

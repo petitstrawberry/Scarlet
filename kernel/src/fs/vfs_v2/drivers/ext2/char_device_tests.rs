@@ -131,19 +131,19 @@ mod tests {
 
     #[test_case]
     fn test_ext2_char_device_create_and_open() {
-        crate::early_println!("[test] Testing ext2 character device creation and open");
+        crate::println!("[test] Testing ext2 character device creation and open");
 
         // Actual tests can only be executed in an environment where
         // the device manager and ext2 filesystem are initialized.
         // This test functions as a compilation test to ensure syntax
         // and trait implementations are correct.
 
-        crate::early_println!("[test] ext2 character device test completed successfully");
+        crate::println!("[test] ext2 character device test completed successfully");
     }
 
     #[test_case]
     fn test_ext2_char_device_file_object_creation() {
-        crate::early_println!("[test] Testing ext2 character device file object creation");
+        crate::println!("[test] Testing ext2 character device file object creation");
 
         // Test creation of DeviceFileInfo
         let device_info = DeviceFileInfo {
@@ -168,14 +168,12 @@ mod tests {
             _ => panic!("Expected CharDevice file type"),
         }
 
-        crate::early_println!(
-            "[test] ext2 character device file object test completed successfully"
-        );
+        crate::println!("[test] ext2 character device file object test completed successfully");
     }
 
     #[test_case]
     fn test_ext2_char_device_file_type_conversion() {
-        crate::early_println!("[test] Testing ext2 character device file type conversion");
+        crate::println!("[test] Testing ext2 character device file type conversion");
 
         // Test conversion from ext2 inode to character device FileType
         let mut inode = crate::fs::vfs_v2::drivers::ext2::structures::Ext2Inode::empty();
@@ -188,6 +186,6 @@ mod tests {
 
         // Creating filesystem requires actual block device,
         // so we only test struct creation here
-        crate::early_println!("[test] ext2 character device file type conversion test completed");
+        crate::println!("[test] ext2 character device file type conversion test completed");
     }
 }

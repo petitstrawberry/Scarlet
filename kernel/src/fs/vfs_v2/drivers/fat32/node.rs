@@ -24,6 +24,7 @@ use crate::environment::PAGE_SIZE;
 use crate::fs::vfs_v2::cache::PageCacheCapable;
 use crate::fs::vfs_v2::core::{FileSystemOperations, VfsNode};
 use crate::mem::{page::ContiguousPages, page_cache::PageCacheManager};
+use crate::vm::addr::phys_to_virt;
 
 /// FAT32 filesystem node
 ///
@@ -268,7 +269,11 @@ impl Fat32FileObject {
                         let current_cluster = self.node.cluster();
                         if current_cluster == 0 {
                             unsafe {
-                                core::ptr::write_bytes(paddr as *mut u8, 0, PAGE_SIZE);
+                                core::ptr::write_bytes(
+                                    phys_to_virt(paddr) as *mut u8,
+                                    0,
+                                    PAGE_SIZE,
+                                );
                             }
                             return Ok(());
                         }
@@ -278,11 +283,12 @@ impl Fat32FileObject {
                         let start = page_index as usize * PAGE_SIZE;
                         let len = core::cmp::min(PAGE_SIZE, data.len().saturating_sub(start));
                         unsafe {
-                            core::ptr::write_bytes(paddr as *mut u8, 0, PAGE_SIZE);
+                            let page_ptr = phys_to_virt(paddr) as *mut u8;
+                            core::ptr::write_bytes(page_ptr, 0, PAGE_SIZE);
                             if len > 0 {
                                 core::ptr::copy_nonoverlapping(
                                     data.as_ptr().add(start),
-                                    paddr as *mut u8,
+                                    page_ptr,
                                     len,
                                 );
                             }
@@ -294,7 +300,7 @@ impl Fat32FileObject {
 
             unsafe {
                 core::ptr::copy_nonoverlapping(
-                    pinned.paddr() as *const u8,
+                    phys_to_virt(pinned.paddr()) as *const u8,
                     buffer.as_mut_ptr().add(start),
                     len,
                 );
@@ -384,7 +390,7 @@ impl Fat32FileObject {
                 .map_err(|_| StreamError::IoError)?;
             unsafe {
                 core::ptr::copy_nonoverlapping(
-                    pinned.paddr() as *const u8,
+                    phys_to_virt(pinned.paddr()) as *const u8,
                     backing_ptr.add(page_index * PAGE_SIZE),
                     PAGE_SIZE,
                 );
@@ -409,12 +415,12 @@ impl Fat32FileObject {
             self.parent_cluster
         };
 
-        // crate::early_println!("[FAT32] Debug: parent_cluster={}, actual_parent_cluster={}, updating file with cluster={}, size={}",
+        // crate::println!("[FAT32] Debug: parent_cluster={}, actual_parent_cluster={}, updating file with cluster={}, size={}",
         //                        self.parent_cluster, actual_parent_cluster, cluster, size);
 
         // Create updated directory entry
         let filename = self.node.name.read().clone();
-        // crate::early_println!("[FAT32] Debug: Updating directory entry for filename: '{}'", filename);
+        // crate::println!("[FAT32] Debug: Updating directory entry for filename: '{}'", filename);
 
         let dir_entry =
             crate::fs::vfs_v2::drivers::fat32::structures::Fat32DirectoryEntry::new_file(
@@ -426,11 +432,11 @@ impl Fat32FileObject {
         // Write the updated directory entry
         match fat32_fs.update_directory_entry(actual_parent_cluster, &filename, &dir_entry) {
             Ok(()) => {
-                // crate::early_println!("[FAT32] Debug: Successfully updated directory entry");
+                // crate::println!("[FAT32] Debug: Successfully updated directory entry");
                 Ok(())
             }
             Err(e) => {
-                crate::early_println!("[FAT32] Error: Failed to update directory entry: {:?}", e);
+                crate::println!("[FAT32] Error: Failed to update directory entry: {:?}", e);
                 Err(StreamError::IoError)
             }
         }
@@ -489,7 +495,7 @@ impl StreamOps for Fat32FileObject {
                 .map_err(|_| StreamError::IoError)?;
 
             unsafe {
-                let src = (pinned.paddr() as *const u8).add(offset_in_page);
+                let src = (phys_to_virt(pinned.paddr()) as *const u8).add(offset_in_page);
                 let remaining_in_page = PAGE_SIZE - offset_in_page;
                 let remaining_file = file_size - pos;
                 let remaining_buf = buffer.len() - total_read;
@@ -542,7 +548,7 @@ impl StreamOps for Fat32FileObject {
                 .map_err(|_| StreamError::IoError)?;
 
             unsafe {
-                let dst = (pinned.paddr() as *mut u8).add(page_off);
+                let dst = (phys_to_virt(pinned.paddr()) as *mut u8).add(page_off);
                 let src = buffer.as_ptr().add(written);
                 core::ptr::copy_nonoverlapping(src, dst, chunk);
             }
@@ -785,7 +791,7 @@ impl FileObject for Fat32FileObject {
                 .map_err(|_| StreamError::IoError)?;
 
             unsafe {
-                let src = (pinned.paddr() as *const u8).add(offset_in_page);
+                let src = (phys_to_virt(pinned.paddr()) as *const u8).add(offset_in_page);
                 let remaining_in_page = PAGE_SIZE - offset_in_page;
                 let remaining_file = file_size - (off + total_read);
                 let remaining_buf = buffer.len() - total_read;
@@ -836,7 +842,7 @@ impl FileObject for Fat32FileObject {
                 .map_err(|_| StreamError::IoError)?;
 
             unsafe {
-                let dst = (pinned.paddr() as *mut u8).add(page_off);
+                let dst = (phys_to_virt(pinned.paddr()) as *mut u8).add(page_off);
                 let src = buffer.as_ptr().add(written);
                 core::ptr::copy_nonoverlapping(src, dst, chunk);
             }
@@ -904,7 +910,7 @@ impl FileObject for Fat32FileObject {
                     .map_err(|_| StreamError::IoError)?;
                 unsafe {
                     core::ptr::copy_nonoverlapping(
-                        pinned.paddr() as *const u8,
+                        phys_to_virt(pinned.paddr()) as *const u8,
                         buffer.as_mut_ptr().add(start),
                         len,
                     );

@@ -30,7 +30,7 @@ pub fn sys_pipe2(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize 
         return errno::to_result(errno::EINVAL);
     }
 
-    let pipefd_ptr = match task.vm_manager.translate_vaddr(pipefd_user) {
+    let pipefd_ptr = match task.vm_manager.translate_to_kva(pipefd_user) {
         Some(ptr) => ptr as *mut u32,
         None => return errno::to_result(errno::EFAULT),
     };

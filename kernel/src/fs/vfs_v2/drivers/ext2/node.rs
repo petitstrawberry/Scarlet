@@ -22,6 +22,7 @@ use crate::{
         page_cache::{PageCacheManager, PageIndex},
     },
     object::capability::{ControlOps, MemoryMappingOps, StreamError, StreamOps},
+    vm::addr::phys_to_virt,
 };
 
 use super::{
@@ -240,7 +241,7 @@ impl Ext2FileObject {
         let on_disk = ext2_fs
             .read_inode(self.inode_number)
             .map_err(|e| {
-                crate::early_println!(
+                crate::println!(
                     "[ext2] sync_to_disk: read_inode failed for inode {}: {:?}",
                     self.inode_number,
                     e
@@ -274,7 +275,7 @@ impl Ext2FileObject {
                             .map_err(|_| "io error")
                     })
                     .map_err(|_| {
-                        crate::early_println!(
+                        crate::println!(
                             "[ext2] sync_to_disk: pin_or_load failed for inode {} page {}",
                             self.inode_number,
                             page_index
@@ -285,7 +286,7 @@ impl Ext2FileObject {
 
             unsafe {
                 core::ptr::copy_nonoverlapping(
-                    pinned.paddr() as *const u8,
+                    phys_to_virt(pinned.paddr()) as *const u8,
                     buffer.as_mut_ptr().add(start),
                     len,
                 );
@@ -295,7 +296,7 @@ impl Ext2FileObject {
         ext2_fs
             .write_file_content(self.inode_number, &buffer)
             .map_err(|e| {
-                crate::early_println!(
+                crate::println!(
                     "[ext2] sync_to_disk: write_file_content failed for inode {} (size {}): {:?}",
                     self.inode_number,
                     eff_size,
@@ -364,7 +365,7 @@ impl Ext2FileObject {
                 .map_err(|_| StreamError::IoError)?;
             unsafe {
                 core::ptr::copy_nonoverlapping(
-                    pinned.paddr() as *const u8,
+                    phys_to_virt(pinned.paddr()) as *const u8,
                     backing_ptr.add(page_index * PAGE_SIZE),
                     PAGE_SIZE,
                 );
@@ -439,7 +440,7 @@ impl StreamOps for Ext2FileObject {
                 .map_err(|_| StreamError::IoError)?;
 
             unsafe {
-                let page_ptr = pinned.paddr() as *const u8;
+                let page_ptr = phys_to_virt(pinned.paddr()) as *const u8;
                 let src = page_ptr.add(page_offset);
                 let dst = buffer.as_mut_ptr().add(buf_offset);
                 core::ptr::copy_nonoverlapping(src, dst, bytes_in_page);
@@ -493,7 +494,7 @@ impl StreamOps for Ext2FileObject {
                 .map_err(|_| StreamError::IoError)?;
 
             unsafe {
-                let dst = (pinned.paddr() as *mut u8).add(page_off);
+                let dst = (phys_to_virt(pinned.paddr()) as *mut u8).add(page_off);
                 let src = buffer.as_ptr().add(buf_offset);
                 core::ptr::copy_nonoverlapping(src, dst, chunk);
             }
@@ -830,7 +831,7 @@ impl FileObject for Ext2FileObject {
                 .map_err(|_| StreamError::IoError)?;
 
             unsafe {
-                let src = (pinned.paddr() as *const u8).add(offset_in_page);
+                let src = (phys_to_virt(pinned.paddr()) as *const u8).add(offset_in_page);
                 let remaining_in_page = PAGE_SIZE - offset_in_page;
                 let remaining_file = file_size - (off + total_read);
                 let remaining_buf = buffer.len() - total_read;
@@ -880,7 +881,7 @@ impl FileObject for Ext2FileObject {
                 .map_err(|_| StreamError::IoError)?;
 
             unsafe {
-                let dst = (pinned.paddr() as *mut u8).add(page_off);
+                let dst = (phys_to_virt(pinned.paddr()) as *mut u8).add(page_off);
                 let src = buffer.as_ptr().add(written);
                 core::ptr::copy_nonoverlapping(src, dst, chunk);
             }
@@ -949,7 +950,7 @@ impl FileObject for Ext2FileObject {
                     .map_err(|_| StreamError::IoError)?;
                 unsafe {
                     core::ptr::copy_nonoverlapping(
-                        pinned.paddr() as *const u8,
+                        phys_to_virt(pinned.paddr()) as *const u8,
                         buffer.as_mut_ptr().add(start),
                         len,
                     );
@@ -1076,14 +1077,14 @@ impl crate::object::capability::selectable::Selectable for Ext2FileObject {
 impl Drop for Ext2FileObject {
     fn drop(&mut self) {
         if let Err(e) = self.sync_to_disk() {
-            crate::early_println!(
+            crate::println!(
                 "[ext2] Drop: sync_to_disk failed for inode {}: {:?}",
                 self.inode_number,
                 e
             );
         }
         #[cfg(test)]
-        crate::early_println!(
+        crate::println!(
             "[ext2] Drop: File object dropped for inode {}",
             self.inode_number
         );
@@ -1432,7 +1433,7 @@ impl Ext2CharDeviceFileObject {
 impl StreamOps for Ext2CharDeviceFileObject {
     fn read(&self, buffer: &mut [u8]) -> Result<usize, StreamError> {
         #[cfg(test)]
-        crate::early_println!(
+        crate::println!(
             "[ext2] CharDevice read: device_id={}",
             self.device_info.device_id
         );
@@ -1442,7 +1443,7 @@ impl StreamOps for Ext2CharDeviceFileObject {
             .get_device(self.device_info.device_id)
             .ok_or_else(|| {
                 #[cfg(test)]
-                crate::early_println!(
+                crate::println!(
                     "[ext2] CharDevice: Device with ID {} not found in DeviceManager",
                     self.device_info.device_id
                 );
@@ -1450,7 +1451,7 @@ impl StreamOps for Ext2CharDeviceFileObject {
             })?;
 
         #[cfg(test)]
-        crate::early_println!(
+        crate::println!(
             "[ext2] CharDevice: Found device with ID {}",
             self.device_info.device_id
         );
@@ -1458,19 +1459,19 @@ impl StreamOps for Ext2CharDeviceFileObject {
         // Try to cast to CharDevice
         if let Some(char_device) = device.as_char_device() {
             #[cfg(test)]
-            crate::early_println!("[ext2] CharDevice: Successfully cast to CharDevice");
+            crate::println!("[ext2] CharDevice: Successfully cast to CharDevice");
             // Use the CharDevice read method
             Ok(char_device.read(buffer))
         } else {
             #[cfg(test)]
-            crate::early_println!("[ext2] CharDevice: Device is not a CharDevice");
+            crate::println!("[ext2] CharDevice: Device is not a CharDevice");
             Err(StreamError::NotSupported)
         }
     }
 
     fn write(&self, buffer: &[u8]) -> Result<usize, StreamError> {
         #[cfg(test)]
-        crate::early_println!(
+        crate::println!(
             "[ext2] CharDevice write: device_id={}, buffer_len={}",
             self.device_info.device_id,
             buffer.len()
@@ -1481,7 +1482,7 @@ impl StreamOps for Ext2CharDeviceFileObject {
             .get_device(self.device_info.device_id)
             .ok_or_else(|| {
                 #[cfg(test)]
-                crate::early_println!(
+                crate::println!(
                     "[ext2] CharDevice: Device with ID {} not found in DeviceManager",
                     self.device_info.device_id
                 );
@@ -1489,7 +1490,7 @@ impl StreamOps for Ext2CharDeviceFileObject {
             })?;
 
         #[cfg(test)]
-        crate::early_println!(
+        crate::println!(
             "[ext2] CharDevice: Found device with ID {}",
             self.device_info.device_id
         );
@@ -1497,16 +1498,16 @@ impl StreamOps for Ext2CharDeviceFileObject {
         // Try to cast to CharDevice
         if let Some(char_device) = device.as_char_device() {
             #[cfg(test)]
-            crate::early_println!("[ext2] CharDevice: Successfully cast to CharDevice");
+            crate::println!("[ext2] CharDevice: Successfully cast to CharDevice");
             // Use the CharDevice write method
             char_device.write(buffer).map_err(|_err| {
                 #[cfg(test)]
-                crate::early_println!("[ext2] CharDevice write error");
+                crate::println!("[ext2] CharDevice write error");
                 StreamError::IoError
             })
         } else {
             #[cfg(test)]
-            crate::early_println!("[ext2] CharDevice: Device is not a CharDevice");
+            crate::println!("[ext2] CharDevice: Device is not a CharDevice");
             Err(StreamError::NotSupported)
         }
     }

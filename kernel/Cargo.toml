@@ -13,6 +13,8 @@ talc = "4.4"
 spin = "0.10.0"
 hashbrown = "0.16.0"
 lazy_static = { version = "1.4.0", features = ["spin_no_std"], optional = true }
+limine = "0.5"
+font8x8 = { version = "0.3", default-features = false, features = ["unicode"] }
 
 [features]
 default = ["network", "user-fpu", "user-vector", "hypervisor"]

@@ -487,7 +487,7 @@ pub fn sys_openat(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize
     let dirfd = trapframe.get_arg(0) as i32;
     let path_ptr = task
         .vm_manager
-        .translate_vaddr(trapframe.get_arg(1))
+        .translate_to_kva(trapframe.get_arg(1))
         .unwrap() as *const u8;
     let flags = trapframe.get_arg(2) as i32;
 
@@ -795,7 +795,7 @@ pub fn sys_read(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
     let fd = trapframe.get_arg(0) as usize;
     let buf_ptr = task
         .vm_manager
-        .translate_vaddr(trapframe.get_arg(1))
+        .translate_to_kva(trapframe.get_arg(1))
         .unwrap() as *mut u8;
     let count = trapframe.get_arg(2) as usize;
 
@@ -919,7 +919,7 @@ pub fn sys_write(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize 
     let fd = trapframe.get_arg(0) as usize;
     let buf_ptr = task
         .vm_manager
-        .translate_vaddr(trapframe.get_arg(1))
+        .translate_to_kva(trapframe.get_arg(1))
         .unwrap() as *const u8;
     let count = trapframe.get_arg(2) as usize;
 
@@ -981,7 +981,7 @@ pub fn sys_pread64(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usiz
         return 0;
     }
 
-    let buf_ptr = match task.vm_manager.translate_vaddr(buf_addr) {
+    let buf_ptr = match task.vm_manager.translate_to_kva(buf_addr) {
         Some(ptr) => ptr as *mut u8,
         None => {
             trapframe.increment_pc_next(task);
@@ -1070,7 +1070,7 @@ pub fn sys_pwrite64(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usi
         return 0;
     }
 
-    let buf_ptr = match task.vm_manager.translate_vaddr(buf_addr) {
+    let buf_ptr = match task.vm_manager.translate_to_kva(buf_addr) {
         Some(ptr) => ptr as *const u8,
         None => {
             trapframe.increment_pc_next(task);
@@ -1212,7 +1212,7 @@ pub fn sys_writev(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize
         .unwrap_or(false);
 
     // Translate and validate iovec array pointer
-    let iovec_vaddr = match task.vm_manager.translate_vaddr(iovec_ptr) {
+    let iovec_vaddr = match task.vm_manager.translate_to_kva(iovec_ptr) {
         Some(addr) => addr as *const IoVec,
         None => return usize::MAX, // Invalid address
     };
@@ -1233,7 +1233,7 @@ pub fn sys_writev(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize
         }
 
         // Translate buffer address
-        let buf_vaddr = match task.vm_manager.translate_vaddr(iovec.iov_base as usize) {
+        let buf_vaddr = match task.vm_manager.translate_to_kva(iovec.iov_base as usize) {
             Some(addr) => addr as *const u8,
             None => return usize::MAX, // Invalid buffer address
         };
@@ -1428,11 +1428,11 @@ pub fn sys_newfstatat(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> u
     let dirfd = trapframe.get_arg(0) as i32;
     let path_ptr = task
         .vm_manager
-        .translate_vaddr(trapframe.get_arg(1))
+        .translate_to_kva(trapframe.get_arg(1))
         .unwrap() as *const u8;
     let stat_ptr = task
         .vm_manager
-        .translate_vaddr(trapframe.get_arg(2))
+        .translate_to_kva(trapframe.get_arg(2))
         .unwrap() as *mut u8;
     let flags = trapframe.get_arg(3) as i32;
 
@@ -1540,7 +1540,7 @@ pub fn sys_statx(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize 
     let pathname_ptr = trapframe.get_arg(1);
     let flags = trapframe.get_arg(2) as u32;
     let mask = trapframe.get_arg(3) as u32;
-    let statx_ptr = match task.vm_manager.translate_vaddr(trapframe.get_arg(4)) {
+    let statx_ptr = match task.vm_manager.translate_to_kva(trapframe.get_arg(4)) {
         Some(ptr) => ptr as *mut LinuxStatx,
         None => return errno::to_result(errno::EFAULT),
     };
@@ -1698,7 +1698,7 @@ pub fn sys_mkdir(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize
 
     let path_ptr = task
         .vm_manager
-        .translate_vaddr(trapframe.get_arg(0))
+        .translate_to_kva(trapframe.get_arg(0))
         .unwrap() as *const u8;
     let path = match get_path_str_v2(path_ptr) {
         Ok(p) => to_absolute_path_v2(&task, &p).unwrap(),
@@ -1720,7 +1720,7 @@ pub fn sys_unlink(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usiz
 
     let path_ptr = task
         .vm_manager
-        .translate_vaddr(trapframe.get_arg(0))
+        .translate_to_kva(trapframe.get_arg(0))
         .unwrap() as *const u8;
     let path = match cstring_to_string(path_ptr, MAX_PATH_LENGTH) {
         Ok((p, _)) => to_absolute_path_v2(&task, &p).unwrap(),
@@ -1742,11 +1742,11 @@ pub fn sys_link(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize 
 
     let src_path_ptr = task
         .vm_manager
-        .translate_vaddr(trapframe.get_arg(0))
+        .translate_to_kva(trapframe.get_arg(0))
         .unwrap() as *const u8;
     let dst_path_ptr = task
         .vm_manager
-        .translate_vaddr(trapframe.get_arg(1))
+        .translate_to_kva(trapframe.get_arg(1))
         .unwrap() as *const u8;
 
     let src_path = match cstring_to_string(src_path_ptr, MAX_PATH_LENGTH) {
@@ -1794,12 +1794,12 @@ pub fn sys_linkat(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize
     };
 
     let olddirfd = trapframe.get_arg(0) as i32;
-    let oldpath_ptr = match task.vm_manager.translate_vaddr(trapframe.get_arg(1)) {
+    let oldpath_ptr = match task.vm_manager.translate_to_kva(trapframe.get_arg(1)) {
         Some(ptr) => ptr as *const u8,
         None => return usize::MAX,
     };
     let newdirfd = trapframe.get_arg(2) as i32;
-    let newpath_ptr = match task.vm_manager.translate_vaddr(trapframe.get_arg(3)) {
+    let newpath_ptr = match task.vm_manager.translate_to_kva(trapframe.get_arg(3)) {
         Some(ptr) => ptr as *const u8,
         None => return usize::MAX,
     };
@@ -2608,7 +2608,7 @@ pub fn sys_getdents64(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> u
     let fd = trapframe.get_arg(0) as usize;
     let buf_ptr = task
         .vm_manager
-        .translate_vaddr(trapframe.get_arg(1))
+        .translate_to_kva(trapframe.get_arg(1))
         .unwrap() as *mut u8;
     let buf_size = trapframe.get_arg(2) as usize;
     trapframe.increment_pc_next(task);
@@ -2708,7 +2708,7 @@ pub fn sys_readv(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize 
         .get_file_status_flags(fd)
         .map(|f| ((f as i32) & O_NONBLOCK) != 0)
         .unwrap_or(false);
-    let iovec_vaddr = match task.vm_manager.translate_vaddr(iovec_ptr) {
+    let iovec_vaddr = match task.vm_manager.translate_to_kva(iovec_ptr) {
         Some(addr) => addr as *mut IoVec,
         None => return usize::MAX,
     };
@@ -2721,7 +2721,7 @@ pub fn sys_readv(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize 
         if iovec.iov_len == 0 {
             continue;
         }
-        let buf_vaddr = match task.vm_manager.translate_vaddr(iovec.iov_base as usize) {
+        let buf_vaddr = match task.vm_manager.translate_to_kva(iovec.iov_base as usize) {
             Some(addr) => addr as *mut u8,
             None => return usize::MAX,
         };
@@ -2899,7 +2899,7 @@ pub fn sys_faccessat(_abi: &mut LinuxRiscv64Abi, trapframe: &mut crate::arch::Tr
     trapframe.increment_pc_next(task);
 
     let dirfd = trapframe.get_arg(0) as i32;
-    let path_ptr = match task.vm_manager.translate_vaddr(trapframe.get_arg(1)) {
+    let path_ptr = match task.vm_manager.translate_to_kva(trapframe.get_arg(1)) {
         Some(ptr) => ptr as *const u8,
         None => return usize::MAX,
     };
@@ -2934,7 +2934,7 @@ pub fn sys_faccessat2(_abi: &mut LinuxRiscv64Abi, trapframe: &mut crate::arch::T
     trapframe.increment_pc_next(task);
 
     let dirfd = trapframe.get_arg(0) as i32;
-    let path_ptr = match task.vm_manager.translate_vaddr(trapframe.get_arg(1)) {
+    let path_ptr = match task.vm_manager.translate_to_kva(trapframe.get_arg(1)) {
         Some(ptr) => ptr as *const u8,
         None => return usize::MAX,
     };
@@ -2968,7 +2968,7 @@ pub fn sys_mkdirat(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usi
     };
     trapframe.increment_pc_next(task);
     let dirfd = trapframe.get_arg(0) as i32;
-    let path_ptr = match task.vm_manager.translate_vaddr(trapframe.get_arg(1)) {
+    let path_ptr = match task.vm_manager.translate_to_kva(trapframe.get_arg(1)) {
         Some(ptr) => ptr as *const u8,
         None => return usize::MAX,
     };
@@ -3017,7 +3017,7 @@ pub fn sys_newfstat(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usi
     };
 
     let fd = trapframe.get_arg(0) as i32;
-    let stat_ptr = match task.vm_manager.translate_vaddr(trapframe.get_arg(1)) {
+    let stat_ptr = match task.vm_manager.translate_to_kva(trapframe.get_arg(1)) {
         Some(ptr) => ptr as *mut u8,
         None => return usize::MAX,
     };
@@ -3124,7 +3124,7 @@ pub fn sys_unlinkat(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usi
     };
 
     let dirfd = trapframe.get_arg(0) as i32;
-    let path_ptr = match task.vm_manager.translate_vaddr(trapframe.get_arg(1)) {
+    let path_ptr = match task.vm_manager.translate_to_kva(trapframe.get_arg(1)) {
         Some(ptr) => ptr as *const u8,
         None => return usize::MAX,
     };
@@ -3431,15 +3431,15 @@ pub fn sys_pselect6(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usi
     let mut in_write: u64 = 0;
     let mut in_except: u64 = 0;
     if readfds_ptr != 0 {
-        let kptr = task.vm_manager.translate_vaddr(readfds_ptr).unwrap() as *const u64;
+        let kptr = task.vm_manager.translate_to_kva(readfds_ptr).unwrap() as *const u64;
         unsafe { in_read = core::ptr::read_unaligned(kptr) };
     }
     if writefds_ptr != 0 {
-        let kptr = task.vm_manager.translate_vaddr(writefds_ptr).unwrap() as *const u64;
+        let kptr = task.vm_manager.translate_to_kva(writefds_ptr).unwrap() as *const u64;
         unsafe { in_write = core::ptr::read_unaligned(kptr) };
     }
     if exceptfds_ptr != 0 {
-        let kptr = task.vm_manager.translate_vaddr(exceptfds_ptr).unwrap() as *const u64;
+        let kptr = task.vm_manager.translate_to_kva(exceptfds_ptr).unwrap() as *const u64;
         unsafe { in_except = core::ptr::read_unaligned(kptr) };
     }
 
@@ -3451,7 +3451,7 @@ pub fn sys_pselect6(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usi
     }
     let mut timeout_ticks: Option<u64> = None;
     if timeout_ptr != 0 {
-        let kptr = task.vm_manager.translate_vaddr(timeout_ptr).unwrap() as *const LinuxTimespec;
+        let kptr = task.vm_manager.translate_to_kva(timeout_ptr).unwrap() as *const LinuxTimespec;
         let ts = unsafe { core::ptr::read_unaligned(kptr) };
         // Zero timeout behaves as poll
         if ts.tv_sec == 0 && ts.tv_nsec == 0 {
@@ -3596,15 +3596,15 @@ pub fn sys_pselect6(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usi
 
     // Write back fd_sets with results
     if readfds_ptr != 0 {
-        let kptr = task.vm_manager.translate_vaddr(readfds_ptr).unwrap() as *mut u64;
+        let kptr = task.vm_manager.translate_to_kva(readfds_ptr).unwrap() as *mut u64;
         unsafe { core::ptr::write_unaligned(kptr, out_read) };
     }
     if writefds_ptr != 0 {
-        let kptr = task.vm_manager.translate_vaddr(writefds_ptr).unwrap() as *mut u64;
+        let kptr = task.vm_manager.translate_to_kva(writefds_ptr).unwrap() as *mut u64;
         unsafe { core::ptr::write_unaligned(kptr, out_write) };
     }
     if exceptfds_ptr != 0 {
-        let kptr = task.vm_manager.translate_vaddr(exceptfds_ptr).unwrap() as *mut u64;
+        let kptr = task.vm_manager.translate_to_kva(exceptfds_ptr).unwrap() as *mut u64;
         unsafe { core::ptr::write_unaligned(kptr, out_except) };
     }
 
@@ -3661,7 +3661,7 @@ pub fn sys_ppoll(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize 
     if fds_ptr == 0 {
         return usize::MAX;
     }
-    let kptr = match task.vm_manager.translate_vaddr(fds_ptr) {
+    let kptr = match task.vm_manager.translate_to_kva(fds_ptr) {
         Some(p) => p as *mut PollFd,
         None => return usize::MAX,
     };
@@ -3677,7 +3677,7 @@ pub fn sys_ppoll(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize 
     }
     let mut timeout_ticks: Option<u64> = None;
     if timeout_ptr != 0 {
-        let tsp = match task.vm_manager.translate_vaddr(timeout_ptr) {
+        let tsp = match task.vm_manager.translate_to_kva(timeout_ptr) {
             Some(p) => p as *const LinuxTimespec,
             None => return usize::MAX,
         };
@@ -4132,7 +4132,7 @@ pub fn sys_readlinkat(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> u
     let target_bytes = target.as_bytes();
     let copy_len = core::cmp::min(target_bytes.len(), bufsiz);
 
-    let user_buf = match task.vm_manager.translate_vaddr(buf_ptr) {
+    let user_buf = match task.vm_manager.translate_to_kva(buf_ptr) {
         Some(addr) => addr as *mut u8,
         None => return errno::to_result(errno::EFAULT),
     };
@@ -4165,7 +4165,7 @@ pub fn sys_getrandom(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> u
         return 0;
     }
 
-    let user_buf = match task.vm_manager.translate_vaddr(buf_ptr) {
+    let user_buf = match task.vm_manager.translate_to_kva(buf_ptr) {
         Some(addr) => addr as *mut u8,
         None => return errno::to_result(errno::EFAULT),
     };
@@ -4228,7 +4228,7 @@ pub fn sys_getcwd(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usiz
     }
 
     // Translate user buffer address
-    let user_buf = match task.vm_manager.translate_vaddr(buf_ptr) {
+    let user_buf = match task.vm_manager.translate_to_kva(buf_ptr) {
         Some(addr) => addr as *mut u8,
         None => return usize::MAX, // EFAULT - invalid buffer address
     };
@@ -4259,7 +4259,7 @@ pub fn sys_chdir(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize
         None => return usize::MAX,
     };
 
-    let path_ptr = match task.vm_manager.translate_vaddr(trapframe.get_arg(0)) {
+    let path_ptr = match task.vm_manager.translate_to_kva(trapframe.get_arg(0)) {
         Some(ptr) => ptr as *const u8,
         None => return usize::MAX,
     };
@@ -4357,12 +4357,12 @@ pub fn sys_renameat2(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> u
     };
 
     let olddirfd = trapframe.get_arg(0) as i32;
-    let oldpath_ptr = match task.vm_manager.translate_vaddr(trapframe.get_arg(1)) {
+    let oldpath_ptr = match task.vm_manager.translate_to_kva(trapframe.get_arg(1)) {
         Some(ptr) => ptr as *const u8,
         None => return usize::MAX,
     };
     let newdirfd = trapframe.get_arg(2) as i32;
-    let newpath_ptr = match task.vm_manager.translate_vaddr(trapframe.get_arg(3)) {
+    let newpath_ptr = match task.vm_manager.translate_to_kva(trapframe.get_arg(3)) {
         Some(ptr) => ptr as *const u8,
         None => return usize::MAX,
     };

@@ -159,16 +159,16 @@ impl GuestVcpu {
     }
 
     pub fn set_reg(&mut self, index: u32, value: u64) -> Result<(), &'static str> {
-        // crate::early_println!("[GuestVcpu::set_reg] index={} value={:#x}", index, value);
+        // crate::println!("[GuestVcpu::set_reg] index={} value={:#x}", index, value);
         match index {
             reg::PC => {
                 self.pc = value;
-                // crate::early_println!("[GuestVcpu::set_reg] PC set to {:#x}", self.pc);
+                // crate::println!("[GuestVcpu::set_reg] PC set to {:#x}", self.pc);
                 Ok(())
             }
             i if i < 32 => {
                 self.iregs.reg[i as usize] = value as usize;
-                // crate::early_println!(
+                // crate::println!(
                 //     "[GuestVcpu::set_reg] reg[{}] = {:#x}",
                 //     i,
                 //     self.iregs.reg[i as usize]

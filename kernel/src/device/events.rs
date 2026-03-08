@@ -64,7 +64,7 @@ impl DeviceEventEmitter {
                 }
                 true // Keep alive
             } else {
-                crate::early_println!(
+                crate::println!(
                     "Removing dead listener for event type: {}",
                     event.event_type()
                 );

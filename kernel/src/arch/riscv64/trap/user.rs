@@ -387,7 +387,7 @@ pub extern "C" fn arch_user_trap_handler(addr: usize) {
     #[cfg(feature = "hypervisor")]
     {
         let from_guest = crate::arch::hv::trap::is_from_guest();
-        // crate::early_println!("[trap_handler] from_guest={}", from_guest);
+        // crate::println!("[trap_handler] from_guest={}", from_guest);
 
         if from_guest {
             if let Some(task) = mytask() {
@@ -472,7 +472,7 @@ pub fn arch_switch_to_user(trapframe: &mut Trapframe) -> ! {
     let switch_to_user_addr = trampoline_base.wrapping_add(switch_to_user_offset);
     set_trapvector(trampoline_base);
 
-    // crate::early_println!(
+    // crate::println!(
     //     "switch_to_user_addr: {:#x}, trapframe: {:#x}",
     //     switch_to_user_addr,
     //     addr

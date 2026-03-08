@@ -1,6 +1,6 @@
 use super::Mode;
 use core::arch::asm;
-use core::mem::transmute;
+use core::arch::naked_asm;
 use core::panic;
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use instruction::sbi::sbi_system_reset;
@@ -208,7 +208,7 @@ pub fn first_switch_to_user(task: &mut Task) -> ! {
         panic!("Task has no kernel stack window");
     };
 
-    crate::early_println!(
+    crate::println!(
         "[riscv64] CPU {}: First switch to user task PID {} with kernel SP {:#x}",
         crate::arch::get_cpu().get_cpuid(),
         task.get_id(),
@@ -399,7 +399,7 @@ impl Trapframe {
     ///
     pub fn increment_pc_next(&mut self, task: &Task) {
         let instruction =
-            Instruction::fetch(task.vm_manager.translate_vaddr(self.epc as usize).unwrap());
+            Instruction::fetch(task.vm_manager.translate_to_kva(self.epc as usize).unwrap());
         let len = instruction.len();
         if len == 0 {
             debug_assert!(len > 0, "Invalid instruction length: {}", len);
@@ -434,7 +434,7 @@ pub fn get_user_trap_handler() -> usize {
 }
 
 #[allow(static_mut_refs)]
-fn trap_init(riscv: &mut Riscv64) {
+pub(crate) fn trap_init(riscv: &mut Riscv64) {
     let trap_stack_start = unsafe { KERNEL_STACK.start() };
     let stack_size = STACK_SIZE;
 
@@ -442,6 +442,13 @@ fn trap_init(riscv: &mut Riscv64) {
     riscv.kernel_stack = trap_stack as u64;
     riscv.kernel_trap = arch_kernel_trap_handler as u64;
     let scratch_addr = riscv as *const _ as usize;
+
+    early_println!(
+        "[riscv64] trap_init: hart={} trap_stack={:#x} scratch={:#x}",
+        riscv.hartid,
+        trap_stack,
+        scratch_addr
+    );
 
     let sie: usize = 0x20;
     unsafe {
@@ -457,16 +464,40 @@ fn trap_init(riscv: &mut Riscv64) {
         );
     }
 
+    early_println!("[riscv64] trap_init: trap CSRs installed");
+
     // Enable FPU for user-space and kernel access
     fpu::enable_fpu();
+    early_println!("[riscv64] trap_init: FPU enabled");
 
     // Enable Vector extension for user-space and kernel access
     fpu::enable_vector();
+    early_println!("[riscv64] trap_init: Vector enabled");
 
     // early_println!("Trap stack area    : {:#x} - {:#x}", trap_stack - stack_size, trap_stack - 1);
     // early_println!("Trap stack size    : {:#x}", stack_size);
     // early_println!("Trap stack pointer : {:#x}", trap_stack);
     // early_println!("Scratch address    : {:#x}", scratch_addr);
+}
+
+pub(crate) fn init_boot_cpu(cpu_id: usize) {
+    early_println!("[riscv64] init_boot_cpu: cpu_id={}", cpu_id);
+    let riscv = unsafe { &mut *(&raw mut CPUS[cpu_id]) };
+    early_println!(
+        "[riscv64] init_boot_cpu: cpu struct={:#x}",
+        riscv as *mut _ as usize
+    );
+    trap_init(riscv);
+    early_println!("[riscv64] init_boot_cpu: done");
+}
+
+#[unsafe(naked)]
+pub unsafe extern "C" fn switch_stack_and_jump(
+    _entry: usize,
+    _arg0: usize,
+    _stack_top: usize,
+) -> ! {
+    naked_asm!("mv t0, a0", "mv a0, a1", "mv sp, a2", "jr t0",);
 }
 
 pub fn set_trapvector(addr: usize) {
@@ -586,7 +617,7 @@ pub fn get_cpu() -> &'static mut Riscv64 {
         out(reg) scratch,
         );
     }
-    unsafe { transmute(scratch) }
+    unsafe { &mut *(scratch as *mut Riscv64) }
 }
 
 pub fn set_next_mode(mode: Mode) {

@@ -78,7 +78,7 @@ pub fn sys_futex(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize
     match cmd {
         FUTEX_WAIT | FUTEX_WAIT_BITSET => {
             // Validate user address and expected value
-            let paddr = match task.vm_manager.translate_vaddr(uaddr) {
+            let paddr = match task.vm_manager.translate_to_kva(uaddr) {
                 Some(pa) => pa,
                 None => return super::errno::to_result(super::errno::EFAULT),
             };

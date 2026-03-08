@@ -223,6 +223,8 @@ for binary_path in "${DIST_DIR}"/*; do
     if [ -f "${binary_path}" ] && [ -x "${binary_path}" ]; then
         binary=$(basename "${binary_path}")
         debug_file="${DEBUG_DIR}/${binary}.debug"
+        # Break hardlink created by cargo --out-dir to avoid modifying target/
+        cp "${binary_path}" "${binary_path}.tmp" && mv "${binary_path}.tmp" "${binary_path}"
         "$OBJCOPY" --only-keep-debug "${binary_path}" "${debug_file}"
         "$OBJCOPY" --strip-debug --strip-unneeded "${binary_path}"
         "$OBJCOPY" --add-gnu-debuglink="${debug_file}" "${binary_path}"
@@ -254,6 +256,8 @@ for binary_path in "${DIST_DIR}"/*; do
     if [ -f "${binary_path}" ] && [ -x "${binary_path}" ]; then
         binary=$(basename "${binary_path}")
         debug_file="${DEBUG_DIR}/${binary}.debug"
+        # Break hardlink created by cargo --out-dir to avoid modifying target/
+        cp "${binary_path}" "${binary_path}.tmp" && mv "${binary_path}.tmp" "${binary_path}"
         "$OBJCOPY" --only-keep-debug "${binary_path}" "${debug_file}"
         "$OBJCOPY" --strip-debug --strip-unneeded "${binary_path}"
         "$OBJCOPY" --add-gnu-debuglink="${debug_file}" "${binary_path}"

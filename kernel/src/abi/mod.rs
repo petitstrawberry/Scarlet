@@ -462,7 +462,7 @@ impl AbiRegistry {
     where
         T: AbiModule + Default + 'static,
     {
-        crate::early_println!("Registering ABI module: {}", T::name());
+        crate::println!("Registering ABI module: {}", T::name());
         let mut registry = Self::global().lock();
         registry
             .factories
