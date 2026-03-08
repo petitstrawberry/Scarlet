@@ -847,20 +847,20 @@ impl AbiModule for ScarletAbi {
                             self.setup_arguments_on_stack(task, argv, envp, stack_pointer)?;
                         task.vcpu.lock().set_sp(adjusted_sp);
 
-                        crate::println!(
-                            "[scarlet-abi] adjusted_sp={:#x} argv_ptr={:#x}",
-                            adjusted_sp,
-                            argv_ptr
-                        );
-                        crate::println!(
-                            "[scarlet-abi] sp->pa={:#x} argv->pa={:#x}",
-                            task.vm_manager
-                                .translate_to_phys(adjusted_sp)
-                                .unwrap_or(usize::MAX),
-                            task.vm_manager
-                                .translate_to_phys(argv_ptr)
-                                .unwrap_or(usize::MAX)
-                        );
+                        // crate::println!(
+                        //     "[scarlet-abi] adjusted_sp={:#x} argv_ptr={:#x}",
+                        //     adjusted_sp,
+                        //     argv_ptr
+                        // );
+                        // crate::println!(
+                        //     "[scarlet-abi] sp->pa={:#x} argv->pa={:#x}",
+                        //     task.vm_manager
+                        //         .translate_to_phys(adjusted_sp)
+                        //         .unwrap_or(usize::MAX),
+                        //     task.vm_manager
+                        //         .translate_to_phys(argv_ptr)
+                        //         .unwrap_or(usize::MAX)
+                        // );
 
                         // Set RISC-V calling convention registers
                         // a0 (reg[10]) = argc
