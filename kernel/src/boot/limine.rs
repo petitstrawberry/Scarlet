@@ -2,7 +2,7 @@ use limine::BaseRevision;
 use limine::memory_map::{Entry, EntryType};
 use limine::request::{
     DeviceTreeBlobRequest, ExecutableAddressRequest, FramebufferRequest, HhdmRequest,
-    MemoryMapRequest, ModuleRequest, PagingModeRequest, RequestsEndMarker, RequestsStartMarker,
+    MemoryMapRequest, ModuleRequest, RequestsEndMarker, RequestsStartMarker,
 };
 
 use crate::vm::addr::virt_to_phys;
@@ -19,10 +19,6 @@ pub(crate) static BASE_REVISION: BaseRevision = BaseRevision::new();
 #[unsafe(link_section = ".limine_requests")]
 #[used]
 pub(crate) static HHDM_REQUEST: HhdmRequest = HhdmRequest::new();
-
-#[unsafe(link_section = ".limine_requests")]
-#[used]
-pub(crate) static PAGING_MODE_REQUEST: PagingModeRequest = PagingModeRequest::new();
 
 #[unsafe(link_section = ".limine_requests")]
 #[used]
