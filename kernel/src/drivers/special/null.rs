@@ -100,7 +100,7 @@ fn register_null_device() {
     let dev: Arc<dyn Device> = Arc::new(NullDevice);
     // Register with explicit name: "null"
     let id = dm.register_device_with_name(String::from("null"), dev);
-    crate::early_println!("Null device registered as 'null' with ID: {}", id);
+    crate::println!("Null device registered as 'null' with ID: {}", id);
 }
 
 driver_initcall!(register_null_device);

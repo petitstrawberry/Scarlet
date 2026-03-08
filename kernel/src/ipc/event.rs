@@ -873,7 +873,7 @@ impl EventManager {
         match policy {
             FailurePolicy::Ignore => { /* do nothing */ }
             FailurePolicy::Log => {
-                crate::early_println!(
+                crate::println!(
                     "[EventManager] Delivery failure: {:?}, sender={:?}, delivery={:?}",
                     err,
                     sender,
@@ -894,15 +894,12 @@ impl EventManager {
                     let _ = self.deliver_to_task(sid, notice);
                 } else {
                     // Fall back to logging when there is no sender
-                    crate::early_println!(
-                        "[EventManager] Delivery failure without sender: {:?}",
-                        err
-                    );
+                    crate::println!("[EventManager] Delivery failure without sender: {:?}", err);
                 }
             }
             FailurePolicy::SystemEvent => {
                 // For now, log the failure to avoid recursive broadcasts. Can be expanded later.
-                crate::early_println!(
+                crate::println!(
                     "[EventManager] SystemEvent policy: delivery failure: {:?}, sender={:?}",
                     err,
                     sender

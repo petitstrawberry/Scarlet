@@ -60,7 +60,7 @@ pub fn init_from_fdt() {
     FLAGS.store(flags, Ordering::Release);
 
     // Keep this log short; it is useful when bringing up new boards.
-    crate::early_println!(
+    crate::println!(
         "[userctx] enabled: user-fpu={} user-vector={}",
         user_fpu_enabled(),
         user_vector_enabled()

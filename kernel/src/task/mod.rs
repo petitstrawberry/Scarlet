@@ -1700,7 +1700,7 @@ impl Task {
                 let queue = self.event_queue.lock();
                 if !queue.is_empty() {
                     // Log that we're deferring events to next cycle
-                    // crate::early_println!("Task {}: Deferring {} events to next scheduler cycle",
+                    // crate::println!("Task {}: Deferring {} events to next scheduler cycle",
                     //                      self.id, queue.len());
                 }
             }

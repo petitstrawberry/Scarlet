@@ -233,9 +233,9 @@ mod tests {
 
         // Debug output
         let metadata = symlink_node.metadata().unwrap();
-        crate::early_println!("Debug: symlink metadata: {:?}", metadata);
+        crate::println!("Debug: symlink metadata: {:?}", metadata);
         let file_type = symlink_node.file_type().unwrap();
-        crate::early_println!("Debug: symlink file_type: {:?}", file_type);
+        crate::println!("Debug: symlink file_type: {:?}", file_type);
 
         // Verify it's a symbolic link
         assert!(symlink_node.is_symlink().unwrap());
@@ -477,9 +477,9 @@ mod tests {
 
         // Debug output
         let metadata = symlink_node.metadata().unwrap();
-        crate::early_println!("Debug: direct tmpfs symlink metadata: {:?}", metadata);
+        crate::println!("Debug: direct tmpfs symlink metadata: {:?}", metadata);
         let file_type = symlink_node.file_type().unwrap();
-        crate::early_println!("Debug: direct tmpfs symlink file_type: {:?}", file_type);
+        crate::println!("Debug: direct tmpfs symlink file_type: {:?}", file_type);
 
         // Verify it's a symbolic link
         assert!(symlink_node.is_symlink().unwrap());
@@ -847,6 +847,6 @@ mod tests {
         // Verify it's a file object
         assert!(matches!(socket_file, crate::object::KernelObject::File(_)));
 
-        crate::early_println!("[Test] Socket VFS integration test passed!");
+        crate::println!("[Test] Socket VFS integration test passed!");
     }
 }

@@ -88,7 +88,7 @@ impl RandomManager {
     pub fn register_entropy_source(source: Arc<dyn EntropySource>) {
         let manager = Self::instance();
         let mut sources = manager.sources.lock();
-        crate::early_println!("[Random] Registering entropy source: {}", source.name());
+        crate::println!("[Random] Registering entropy source: {}", source.name());
         sources.push(source);
     }
 
@@ -116,7 +116,7 @@ impl RandomManager {
                 let bytes_to_add = bytes_read.min(available_space);
 
                 if bytes_to_add < bytes_read {
-                    crate::early_println!(
+                    crate::println!(
                         "[Random] Pool full, discarding {} entropy bytes",
                         bytes_read - bytes_to_add
                     );

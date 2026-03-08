@@ -112,7 +112,7 @@ pub fn verify_hgatp_stage2(expected_pagetable: &Stage2PageTable, vmid: u16) {
     let actual_ppn = hgatp & 0xffff_ffff_fff;
     let actual_vmid = (hgatp >> 44) & 0xffff;
 
-    crate::early_println!(
+    crate::println!(
         "[verify_hgatp_stage2] expected_ppn={:#x} actual_ppn={:#x} vmid={}",
         expected_ppn,
         actual_ppn,
@@ -123,7 +123,7 @@ pub fn verify_hgatp_stage2(expected_pagetable: &Stage2PageTable, vmid: u16) {
 pub fn set_guest_root_stage2(pagetable: &Stage2PageTable, vmid: u16) {
     let ppn = virt_to_phys(pagetable as *const _ as usize) >> 12;
     let token = (9u64 << 60) | ((vmid as u64) << 44) | (ppn as u64);
-    // crate::early_println!(
+    // crate::println!(
     //     "[set_guest_root_stage2] ppn={:#x} vmid={} token={:#x}",
     //     ppn,
     //     vmid,
@@ -145,7 +145,7 @@ pub fn walk_stage2(
     let vpn3 = (gpa >> 39) & 0x7ff;
     let pte = unsafe { &mut *current_table.add(vpn3) };
 
-    // crate::early_println!(
+    // crate::println!(
     //     "[walk_stage2] L3 vpn={} pte={:#x} valid={}",
     //     vpn3,
     //     pte.entry,
@@ -166,7 +166,7 @@ pub fn walk_stage2(
         let vpn = (gpa >> (12 + 9 * level)) & 0x1ff;
         let pte = unsafe { &mut *current_table.add(vpn) };
 
-        // crate::early_println!(
+        // crate::println!(
         //     "[walk_stage2] L{} vpn={} pte={:#x} valid={}",
         //     level,
         //     vpn,
@@ -187,7 +187,7 @@ pub fn walk_stage2(
 
     let vpn = (gpa >> 12) & 0x1ff;
     let final_pte = unsafe { current_table.add(vpn) };
-    // crate::early_println!(
+    // crate::println!(
     //     "[walk_stage2] L0 vpn={} pte={:#x}",
     //     vpn,
     //     unsafe { *final_pte }.entry
@@ -205,7 +205,7 @@ pub fn map_stage2_page_new(
     let gpa = gpa as usize & !0xfff;
     let hpa = hpa as usize & !0xfff;
 
-    // crate::early_println!("[map_stage2_new] gpa={:#x} hpa={:#x}", gpa, hpa);
+    // crate::println!("[map_stage2_new] gpa={:#x} hpa={:#x}", gpa, hpa);
 
     let pte = walk_stage2(pagetable, gpa, vmid).ok_or("walk failed")?;
 
@@ -223,7 +223,7 @@ pub fn map_stage2_page_new(
         (*pte).entry |= (ppn as u64) << 10;
     }
 
-    // crate::early_println!("[map_stage2_new] pte={:#x}", unsafe { *pte }.entry);
+    // crate::println!("[map_stage2_new] pte={:#x}", unsafe { *pte }.entry);
     hfence_gvma_all();
     Ok(())
 }

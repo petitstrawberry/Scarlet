@@ -125,7 +125,7 @@ pub struct TaskPool {
 
 impl TaskPool {
     fn new() -> Self {
-        crate::early_println!("[SCHED] TaskPool::new() starting...");
+        crate::println!("[SCHED] TaskPool::new() starting...");
 
         // Allocate uninitialized Box array directly on heap
         // No stack usage, no Vec overhead
@@ -141,7 +141,7 @@ impl TaskPool {
         // SAFETY: All elements have been initialized with None
         let tasks: Box<[Option<Task>; MAX_TASKS]> = unsafe { core::mem::transmute(tasks) };
 
-        crate::early_println!("[SCHED] TaskPool created (heap allocation, stable pointers)");
+        crate::println!("[SCHED] TaskPool created (heap allocation, stable pointers)");
 
         TaskPool {
             tasks: spin::Mutex::new(tasks),
@@ -545,7 +545,7 @@ impl Scheduler {
     /// Called every timer tick. Decrements the current task's time_slice.
     /// If time_slice reaches 0, triggers a reschedule.
     pub fn on_tick(&mut self, cpu_id: usize, trapframe: &mut Trapframe) {
-        // crate::early_println!("[SCHED] CPU{}: on_tick called", cpu_id);
+        // crate::println!("[SCHED] CPU{}: on_tick called", cpu_id);
         if let Some(task_id) = self.get_current_task_id(cpu_id) {
             if let Some(task) = TaskPool::get_task_mut(task_id) {
                 let current_slice = task.time_slice.load(core::sync::atomic::Ordering::SeqCst);
@@ -555,7 +555,7 @@ impl Scheduler {
                 }
                 let new_slice = task.time_slice.load(core::sync::atomic::Ordering::SeqCst);
                 if new_slice == 0 {
-                    // crate::early_println!(
+                    // crate::println!(
                     //     "[SCHED] CPU{}: Time slice expired for Task {}",
                     //     cpu_id,
                     //     task_id
@@ -945,10 +945,10 @@ impl Scheduler {
     /// * `cpu` - The CPU architecture state
     /// * `task` - The task to setup for execution
     pub fn setup_task_execution(cpu: &mut Arch, task: &mut Task) {
-        // crate::early_println!("[SCHED] Setting up Task {} for execution", task.get_id());
-        // crate::early_println!("[SCHED]   before CPU {:#x?}", cpu);
+        // crate::println!("[SCHED] Setting up Task {} for execution", task.get_id());
+        // crate::println!("[SCHED]   before CPU {:#x?}", cpu);
         // let trapframe = cpu.get_trapframe();
-        // crate::early_println!("[SCHED]   before Trapframe {:#x?}", trapframe);
+        // crate::println!("[SCHED]   before Trapframe {:#x?}", trapframe);
 
         // Prefer the high-VA kernel stack window if available
         let sp = if let Some((_slot, base)) = task.get_kernel_stack_window_base() {
@@ -959,7 +959,7 @@ impl Scheduler {
             task.get_kernel_stack_bottom_paddr()
         };
 
-        // crate::early_println!("[SCHED]   Setting kernel stack to {:#x}", sp);
+        // crate::println!("[SCHED]   Setting kernel stack to {:#x}", sp);
         cpu.set_kernel_stack(sp);
 
         // Handle trapframe and vcpu switching - use raw pointer to avoid borrow checker issues
@@ -977,8 +977,8 @@ impl Scheduler {
 
         set_trapvector(get_trampoline_trap_vector());
 
-        // crate::early_println!("[SCHED]   after  CPU {:#x?}", cpu);
-        // crate::early_println!("[SCHED]   after  Trapframe {:#x?}", cpu.get_trapframe());
+        // crate::println!("[SCHED]   after  CPU {:#x?}", cpu);
+        // crate::println!("[SCHED]   after  Trapframe {:#x?}", cpu.get_trapframe());
 
         // Note: User context (VCPU) will be restored in schedule() after run() returns
     }

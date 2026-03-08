@@ -209,7 +209,7 @@ impl TransparentExecutor {
         if result.is_err() {
             if let Err(restore_err) = backup.restore_to_task(task, trapframe) {
                 // Log restore error but don't override original error
-                crate::early_println!(
+                crate::println!(
                     "Warning: Failed to restore task state after exec failure: {}",
                     restore_err
                 );

@@ -292,7 +292,7 @@ impl ScarletAbi {
             if self.pending_events.len() >= MAX_PENDING_EVENTS {
                 // Drop oldest event (FIFO overflow policy)
                 self.pending_events.remove(0);
-                crate::early_println!(
+                crate::println!(
                     "[ScarletAbi] Warning: Pending event queue overflow, dropping oldest event"
                 );
             }
@@ -848,12 +848,12 @@ impl AbiModule for ScarletAbi {
                             self.setup_arguments_on_stack(task, argv, envp, stack_pointer)?;
                         task.vcpu.lock().set_sp(adjusted_sp);
 
-                        crate::early_println!(
+                        crate::println!(
                             "[scarlet-abi] adjusted_sp={:#x} argv_ptr={:#x}",
                             adjusted_sp,
                             argv_ptr
                         );
-                        crate::early_println!(
+                        crate::println!(
                             "[scarlet-abi] sp->pa={:#x} argv->pa={:#x}",
                             task.vm_manager
                                 .translate_to_phys(adjusted_sp)

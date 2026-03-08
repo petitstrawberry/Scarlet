@@ -292,7 +292,7 @@ impl ScarletAbi {
             if self.pending_events.len() >= MAX_PENDING_EVENTS {
                 // Drop oldest event (FIFO overflow policy)
                 self.pending_events.remove(0);
-                crate::early_println!(
+                crate::println!(
                     "[ScarletAbi] Warning: Pending event queue overflow, dropping oldest event"
                 );
             }

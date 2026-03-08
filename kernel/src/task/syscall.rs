@@ -624,12 +624,12 @@ pub fn sys_register_abi_zone(trapframe: &mut Trapframe) -> usize {
     let abi_name = match parse_c_string_from_userspace(task, abi_name_ptr, MAX_ABI_LENGTH) {
         Ok(name) => name,
         Err(_) => {
-            crate::early_println!("[syscall] Failed to parse ABI name from user space");
+            crate::println!("[syscall] Failed to parse ABI name from user space");
             return usize::MAX; // -1
         }
     };
 
-    crate::early_println!(
+    crate::println!(
         "[syscall] Registering ABI zone: start={:#x}, len={:#x}, abi={}",
         start,
         len,
@@ -640,7 +640,7 @@ pub fn sys_register_abi_zone(trapframe: &mut Trapframe) -> usize {
     let abi = match crate::abi::AbiRegistry::instantiate(&abi_name) {
         Some(abi) => abi,
         None => {
-            crate::early_println!("[syscall] ABI '{}' not found in registry", abi_name);
+            crate::println!("[syscall] ABI '{}' not found in registry", abi_name);
             return usize::MAX; // -1
         }
     };
@@ -657,7 +657,7 @@ pub fn sys_register_abi_zone(trapframe: &mut Trapframe) -> usize {
         task.abi_zones.get_mut().insert(start, zone);
     }
 
-    crate::early_println!("[syscall] Successfully registered ABI zone");
+    crate::println!("[syscall] Successfully registered ABI zone");
     0
 }
 
@@ -675,18 +675,18 @@ pub fn sys_unregister_abi_zone(trapframe: &mut Trapframe) -> usize {
 
     trapframe.increment_pc_next(task);
 
-    crate::early_println!("[syscall] Unregistering ABI zone at start={:#x}", start);
+    crate::println!("[syscall] Unregistering ABI zone at start={:#x}", start);
 
     // Remove the ABI zone from the map
     // SAFETY: This is the currently executing task on this hart
     let result = unsafe { task.abi_zones.get_mut().remove(&start) };
     match result {
         Some(_) => {
-            crate::early_println!("[syscall] Successfully unregistered ABI zone");
+            crate::println!("[syscall] Successfully unregistered ABI zone");
             0
         }
         None => {
-            crate::early_println!("[syscall] ABI zone not found at start={:#x}", start);
+            crate::println!("[syscall] ABI zone not found at start={:#x}", start);
             usize::MAX // -1
         }
     }
@@ -733,13 +733,13 @@ pub fn sys_create_namespace(trapframe: &mut Trapframe) -> usize {
         match parse_c_string_from_userspace(task, name_ptr, 64) {
             Ok(s) => s,
             Err(_) => {
-                crate::early_println!("[syscall] Failed to parse namespace name");
+                crate::println!("[syscall] Failed to parse namespace name");
                 return SYSCALL_ERROR;
             }
         }
     };
 
-    crate::early_println!(
+    crate::println!(
         "[syscall] Creating namespace '{}' with flags={:#x}",
         name,
         flags
@@ -749,7 +749,7 @@ pub fn sys_create_namespace(trapframe: &mut Trapframe) -> usize {
     if flags & NS_CREATE_TASK != 0 {
         let new_task_ns = TaskNamespace::new_child(task.get_namespace().clone(), name.clone());
         task.set_namespace(new_task_ns);
-        crate::early_println!("[syscall] Created task namespace '{}'", name);
+        crate::println!("[syscall] Created task namespace '{}'", name);
     }
 
     // Create VFS namespace if requested
@@ -764,7 +764,7 @@ pub fn sys_create_namespace(trapframe: &mut Trapframe) -> usize {
         let new_vfs = match VfsManager::clone_mount_namespace_deep(&source_vfs) {
             Ok(vfs) => vfs,
             Err(e) => {
-                crate::early_println!(
+                crate::println!(
                     "[syscall] Failed to clone VFS namespace '{}': {}",
                     name,
                     e.message
@@ -778,17 +778,17 @@ pub fn sys_create_namespace(trapframe: &mut Trapframe) -> usize {
         let _ = new_vfs.set_cwd_by_path(&cwd_path);
 
         task.set_vfs(new_vfs);
-        crate::early_println!("[syscall] Created VFS namespace '{}'", name);
+        crate::println!("[syscall] Created VFS namespace '{}'", name);
     }
 
     // Future: Network namespace
     if flags & NS_CREATE_NET != 0 {
-        crate::early_println!("[syscall] Network namespace not yet implemented");
+        crate::println!("[syscall] Network namespace not yet implemented");
     }
 
     // Future: IPC namespace
     if flags & NS_CREATE_IPC != 0 {
-        crate::early_println!("[syscall] IPC namespace not yet implemented");
+        crate::println!("[syscall] IPC namespace not yet implemented");
     }
 
     0

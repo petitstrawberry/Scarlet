@@ -420,7 +420,7 @@ fn register_kvm_device() {
     let dm = DeviceManager::get_manager();
     let dev: Arc<dyn Device> = Arc::new(KvmSystemDevice);
     let id = dm.register_device_with_name(String::from(KVM_DEVICE_NAME), dev);
-    crate::early_println!(
+    crate::println!(
         "KVM device registered as '{}' with ID: {}",
         KVM_DEVICE_NAME,
         id

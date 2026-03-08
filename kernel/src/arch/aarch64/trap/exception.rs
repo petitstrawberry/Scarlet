@@ -115,7 +115,7 @@ pub fn arch_exception_handler(trapframe: &mut Trapframe, trap_kind: usize) {
         _ => "UnknownKind",
     };
 
-    // crate::early_println!(
+    // crate::println!(
     //     "[trap] kind={}({}) ESR={:#x} EC={:?} ISS={:#x} FSC={:#x} WnR={} FAR={:#x} ELR={:#x} SCTLR={:#x} M={} DAIF={:#x} CurrentEL={:#x}(EL{}) SPSR={:#x} SP_EL0={:#x} KernelSP={:#x} ISR_EL1={:#x}",
     //     trap_kind,
     //     kind_str,
@@ -160,7 +160,7 @@ pub fn arch_exception_handler(trapframe: &mut Trapframe, trap_kind: usize) {
         ExceptionClass::SvcAarch64 => {
             // Minimal syscall trace for debugging AArch64 SVC path.
             // AArch64 syscall number: x8, args: x0-x5.
-            // crate::early_println!(
+            // crate::println!(
             //     "[syscall/aarch64] nr={} x0={:#x} x1={:#x} x2={:#x} x3={:#x} x4={:#x} x5={:#x} sp={:#x} elr={:#x}",
             //     trapframe.get_syscall_number(),
             //     trapframe.get_arg(0),
@@ -175,7 +175,7 @@ pub fn arch_exception_handler(trapframe: &mut Trapframe, trap_kind: usize) {
             // panic!("AArch64 syscall handler not implemented");
             match syscall_dispatcher(trapframe) {
                 Ok(ret) => {
-                    // crate::early_println!("[syscall/aarch64] -> ret={:#x}", ret);
+                    // crate::println!("[syscall/aarch64] -> ret={:#x}", ret);
                     trapframe.set_return_value(ret);
                 }
                 Err(msg) => {
@@ -203,7 +203,7 @@ pub fn arch_exception_handler(trapframe: &mut Trapframe, trap_kind: usize) {
         ExceptionClass::InstructionAbortSameEl => {
             let far = get_far_el1();
             print_trap_info(trapframe, esr);
-            crate::early_println!("Kernel instruction abort at FAR={:#x}", far);
+            crate::println!("Kernel instruction abort at FAR={:#x}", far);
             loop {
                 unsafe { asm!("wfi") }
             }
@@ -213,7 +213,7 @@ pub fn arch_exception_handler(trapframe: &mut Trapframe, trap_kind: usize) {
         ExceptionClass::DataAbortSameEl => {
             let far = get_far_el1();
             print_trap_info(trapframe, esr);
-            crate::early_println!("Kernel data abort at FAR={:#x}", far);
+            crate::println!("Kernel data abort at FAR={:#x}", far);
             loop {
                 unsafe { asm!("wfi") }
             }
@@ -225,7 +225,7 @@ pub fn arch_exception_handler(trapframe: &mut Trapframe, trap_kind: usize) {
         _ => {
             print_trap_info(trapframe, esr);
 
-            crate::early_println!(
+            crate::println!(
                 "[trap] unhandled exception: kind={}({}) ESR={:#x} FAR={:#x} ELR={:#x}",
                 trap_kind,
                 kind_str,
@@ -358,20 +358,20 @@ fn print_trap_info(trapframe: &Trapframe, esr: u64) {
     let fsc = iss & 0x3f;
 
     // NOTE: Use early_println to avoid depending on heap/locking during faults.
-    crate::early_println!("=== Trap Info ===");
-    crate::early_println!("ESR_EL1: {:#018x} (EC={:#x}, FSC={:#x})", esr, ec, fsc);
-    crate::early_println!("FAR_EL1: {:#018x}", far);
-    crate::early_println!("ELR_EL1: {:#018x}", trapframe.elr);
+    crate::println!("=== Trap Info ===");
+    crate::println!("ESR_EL1: {:#018x} (EC={:#x}, FSC={:#x})", esr, ec, fsc);
+    crate::println!("FAR_EL1: {:#018x}", far);
+    crate::println!("ELR_EL1: {:#018x}", trapframe.elr);
 
     // Print first 8 general registers
-    crate::early_println!(
+    crate::println!(
         "x0={:#x} x1={:#x} x2={:#x} x3={:#x}",
         trapframe.regs.reg[0],
         trapframe.regs.reg[1],
         trapframe.regs.reg[2],
         trapframe.regs.reg[3]
     );
-    crate::early_println!(
+    crate::println!(
         "x4={:#x} x5={:#x} x6={:#x} x7={:#x}",
         trapframe.regs.reg[4],
         trapframe.regs.reg[5],

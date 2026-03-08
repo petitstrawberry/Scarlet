@@ -28,7 +28,7 @@ pub fn arch_irq_handler(trapframe: &mut Trapframe) {
             }
         }
         Err(e) => {
-            crate::early_println!(
+            crate::println!(
                 "[aarch64][irq] failed to claim/handle external interrupt: {}",
                 e
             );

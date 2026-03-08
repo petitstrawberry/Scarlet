@@ -297,13 +297,13 @@ pub fn ticks_to_ns(ticks: u64) -> u64 {
 //     impl TimerHandler for TestHandler {
 //         #[allow(static_mut_refs)]
 //         fn on_timer_expired(&self, context: usize) {
-//             crate::early_println!("[Software Timer] Test timer expired with context: {}", context);
+//             crate::println!("[Software Timer] Test timer expired with context: {}", context);
 //             if let Some(handler) = unsafe { TEST_HANDLER.clone() } {
-//                 crate::early_println!("[Software Timer] Test handler is still available.");
+//                 crate::println!("[Software Timer] Test handler is still available.");
 //                 let handler = handler.clone();
 //                 add_timer(get_tick() + 100, &handler, context);
 //             } else {
-//                 crate::early_println!("[Software Timer] Test handler is no longer available.");
+//                 crate::println!("[Software Timer] Test handler is no longer available.");
 //             }
 //         }
 //     }
@@ -311,7 +311,7 @@ pub fn ticks_to_ns(ticks: u64) -> u64 {
 //     let handler: Arc<dyn TimerHandler>  = Arc::new(TestHandler);
 //     let target_tick = get_tick() + 100; // 100 ticks from now
 //     let id = add_timer(target_tick, &handler, 42);
-//     crate::early_println!("Test timer registered with ID: {}, tick: {}", id, target_tick);
+//     crate::println!("Test timer registered with ID: {}, tick: {}", id, target_tick);
 //     unsafe {
 //         TEST_HANDLER = Some(handler);
 //     }

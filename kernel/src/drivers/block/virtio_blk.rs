@@ -355,7 +355,7 @@ impl VirtioBlockDevice {
         const MAX_BATCH_SIZE: usize = 10;
 
         if requests.len() > MAX_BATCH_SIZE {
-            crate::early_println!(
+            crate::println!(
                 "[virtio_blk] WARNING: Batch size {} exceeds safe limit {}, processing in chunks",
                 requests.len(),
                 MAX_BATCH_SIZE
@@ -399,7 +399,7 @@ impl VirtioBlockDevice {
                 let total_requests: usize = sizes.iter().sum();
                 let avg_batch_size = total_requests as f64 / sizes.len() as f64;
                 let single_requests = sizes.iter().filter(|&&size| size == 1).count();
-                crate::early_println!(
+                crate::println!(
                     "[virtio_blk] Batch stats: {} calls, avg_batch={:.2}, single_req={}/{} ({:.1}%)",
                     sizes.len(),
                     avg_batch_size,
@@ -539,7 +539,7 @@ impl VirtioBlockDevice {
                 }
             } else {
                 // Descriptor allocation failure - should be very rare with 256 queue size
-                crate::early_println!(
+                crate::println!(
                     "[virtio_blk] ERROR: Failed to allocate descriptors for request {} (batch size: {})",
                     idx,
                     batch_size
@@ -555,7 +555,7 @@ impl VirtioBlockDevice {
 
         // Notify the device once for all requests
         if !request_data.is_empty() {
-            // crate::early_println!("[virtio-blk] Notifying queue 0 for {} requests", request_data.len());
+            // crate::println!("[virtio-blk] Notifying queue 0 for {} requests", request_data.len());
             self.notify(0);
         }
 
@@ -580,14 +580,14 @@ impl VirtioBlockDevice {
             while virtqueues[0].is_busy() {
                 let status = self.read32_register(crate::drivers::virtio::device::Register::Status);
                 if crate::drivers::virtio::device::DeviceStatus::DeviceNeedReset.is_set(status) {
-                    crate::early_println!(
+                    crate::println!(
                         "[virtio-blk] ERROR: Device entered NEEDS_RESET state during poll. Aborting. Status=0x{:x}",
                         status
                     );
                     break;
                 }
                 if crate::drivers::virtio::device::DeviceStatus::Failed.is_set(status) {
-                    crate::early_println!(
+                    crate::println!(
                         "[virtio-blk] ERROR: Device entered FAILED state during poll. Aborting. Status=0x{:x}",
                         status
                     );
@@ -652,7 +652,7 @@ impl VirtioBlockDevice {
                     processed_indices.push(data_index);
                 } else {
                     // Unexpected descriptor - this shouldn't happen but handle gracefully
-                    crate::early_println!(
+                    crate::println!(
                         "[virtio-blk] Warning: Unexpected descriptor completion: {}",
                         desc_idx
                     );

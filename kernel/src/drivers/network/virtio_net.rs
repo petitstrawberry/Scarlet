@@ -194,7 +194,7 @@ impl VirtioNetDevice {
         // `virtio: bogus descriptor or out of resources` when it tries to
         // deliver packets to a ready virtio-net device.
         if let Err(e) = device.init_network() {
-            crate::early_println!(
+            crate::println!(
                 "[virtio-net] Warning: failed to initialize RX buffers early: {}",
                 e
             );
@@ -221,7 +221,7 @@ impl VirtioNetDevice {
                     {
                         if let Ok(mac) = self.get_mac_address() {
                             eth.register_interface(name, mac, interface.clone());
-                            crate::early_println!(
+                            crate::println!(
                                 "[virtio-net] Registered {} with EthernetLayer (MAC: {:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X})",
                                 name,
                                 mac.as_bytes()[0],
@@ -234,17 +234,17 @@ impl VirtioNetDevice {
                         }
                     }
                 } else {
-                    crate::early_println!(
+                    crate::println!(
                         "[virtio-net] Warning: EthernetLayer not initialized, {} not registered with protocol stack",
                         name
                     );
                 }
 
                 apply_pending_ip_for_interface(name);
-                crate::early_println!("[virtio-net] Registered interface {}", name);
+                crate::println!("[virtio-net] Registered interface {}", name);
             }
             Err(e) => {
-                crate::early_println!("[virtio-net] Failed to register interface {}: {}", name, e);
+                crate::println!("[virtio-net] Failed to register interface {}: {}", name, e);
             }
         }
     }
@@ -357,7 +357,7 @@ impl VirtioNetDevice {
         let hdr_size = mem::size_of::<VirtioNetHdrBasic>();
         let total_size = hdr_size + packet.len;
 
-        crate::early_println!("[virtio-net] TX: payload={} bytes", packet.len);
+        crate::println!("[virtio-net] TX: payload={} bytes", packet.len);
 
         // Allocate from PMM for DMA
         let pages_needed = (total_size + PAGE_SIZE - 1) / PAGE_SIZE;
@@ -457,7 +457,7 @@ impl VirtioNetDevice {
                     let packet_data_ptr = buffer_addr.add(frame_offset);
                     let packet_len = used_len.saturating_sub(frame_offset);
 
-                    crate::early_println!(
+                    crate::println!(
                         "[virtio-net] RX: used_len={} payload={} bytes",
                         used_len,
                         packet_len
@@ -589,20 +589,20 @@ impl InterruptCapableDevice for VirtioNetDevice {
         if isr == 0 {
             return Ok(());
         }
-        crate::early_println!("[virtio-net] Interrupt received, ISR=0x{:x}", isr);
+        crate::println!("[virtio-net] Interrupt received, ISR=0x{:x}", isr);
         self.write32_register(Register::InterruptAck, isr & 0x03);
 
         loop {
             let packets = self.process_received_packets().unwrap_or_default();
-            crate::early_println!("[virtio-net] Processed {} packets", packets.len());
+            crate::println!("[virtio-net] Processed {} packets", packets.len());
             if packets.is_empty() {
                 break;
             }
 
             let interface_name = self.interface_name.lock().clone();
-            crate::early_println!("[virtio-net] Interface name: {:?}", interface_name);
+            crate::println!("[virtio-net] Interface name: {:?}", interface_name);
             if let Some(name) = interface_name {
-                crate::early_println!(
+                crate::println!(
                     "[virtio-net] Forwarding {} packets to interface {}",
                     packets.len(),
                     name
@@ -610,19 +610,19 @@ impl InterruptCapableDevice for VirtioNetDevice {
                 let manager = crate::network::get_network_manager();
                 let mut inbound = 0usize;
                 for (i, packet) in packets.iter().enumerate() {
-                    crate::early_println!("[virtio-net] Packet {}: {} bytes", i, packet.len);
+                    crate::println!("[virtio-net] Packet {}: {} bytes", i, packet.len);
                     if packet.len >= 14 {
                         let eth_type = u16::from_be_bytes([packet.data[12], packet.data[13]]);
-                        crate::early_println!("[virtio-net]   EtherType: 0x{:04X}", eth_type);
+                        crate::println!("[virtio-net]   EtherType: 0x{:04X}", eth_type);
                         if eth_type == 0x0800 {
                             inbound += 1;
                         }
                     }
                     manager.handle_received_packet(&name, &packet);
                 }
-                crate::early_println!("[virtio-net] Forwarded IPv4 packets: {}", inbound);
+                crate::println!("[virtio-net] Forwarded IPv4 packets: {}", inbound);
             } else {
-                crate::early_println!("[virtio-net] No interface name set!");
+                crate::println!("[virtio-net] No interface name set!");
             }
         }
 
@@ -933,11 +933,11 @@ mod tests {
         match result {
             Ok(_) => {
                 // TX completed successfully
-                crate::early_println!("[virtio-net test] TX completed successfully");
+                crate::println!("[virtio-net test] TX completed successfully");
             }
             Err(e) => {
                 // TX timed out or failed - acceptable in test environment
-                crate::early_println!("[virtio-net test] TX result: {}", e);
+                crate::println!("[virtio-net test] TX result: {}", e);
             }
         }
     }
@@ -953,7 +953,7 @@ mod tests {
             let packet = DevicePacket::with_data(test_data);
 
             let result = device.transmit_packet(&packet);
-            crate::early_println!(
+            crate::println!(
                 "[virtio-net test] Packet {} TX result: {:?}",
                 i,
                 result.is_ok()
@@ -978,7 +978,7 @@ mod tests {
         assert!(device2.get_mac_address().is_ok());
         assert!(device3.get_mac_address().is_ok());
 
-        crate::early_println!("[virtio-net test] Multiple devices created successfully");
+        crate::println!("[virtio-net test] Multiple devices created successfully");
 
         // Test sending packet on each device
         let test_data = vec![0x45, 0x00, 0x00, 0x3c];
@@ -988,7 +988,7 @@ mod tests {
         let _result2 = device2.transmit_packet(&packet);
         let _result3 = device3.transmit_packet(&packet);
 
-        crate::early_println!("[virtio-net test] Transmitted packets on all 3 devices");
+        crate::println!("[virtio-net test] Transmitted packets on all 3 devices");
     }
 
     #[test_case]
@@ -998,8 +998,8 @@ mod tests {
         let device_net1 = VirtioNetDevice::new(0x10004000); // net1 - hub device 1
         let device_net2 = VirtioNetDevice::new(0x10005000); // net2 - hub device 2
 
-        crate::early_println!("[virtio-net test] Testing bidirectional hub communication");
-        crate::early_println!(
+        crate::println!("[virtio-net test] Testing bidirectional hub communication");
+        crate::println!(
             "[virtio-net test] Device net1: {:#x}, Device net2: {:#x}",
             device_net1.get_base_addr(),
             device_net2.get_base_addr()
@@ -1009,7 +1009,7 @@ mod tests {
         let net1_initial_stats = device_net1.get_stats();
         let net2_initial_stats = device_net2.get_stats();
 
-        crate::early_println!(
+        crate::println!(
             "[virtio-net test] Initial stats - net1: TX:{}, RX:{} | net2: TX:{}, RX:{}",
             net1_initial_stats.tx_packets,
             net1_initial_stats.rx_packets,
@@ -1022,60 +1022,60 @@ mod tests {
         let packet_net2_to_net1 = DevicePacket::with_data(vec![0x05, 0x06, 0x07, 0x08, 0xBB]); // net2->net1
 
         // Test 1: Send packet from net1 to net2
-        crate::early_println!("[virtio-net test] Sending packet from net1 to net2...");
+        crate::println!("[virtio-net test] Sending packet from net1 to net2...");
         let result1 = device_net1.transmit_packet(&packet_net1_to_net2);
-        crate::early_println!(
+        crate::println!(
             "[virtio-net test] net1->net2 TX result: {:?}",
             result1.is_ok()
         );
 
         // Test 2: Send packet from net2 to net1
-        crate::early_println!("[virtio-net test] Sending packet from net2 to net1...");
+        crate::println!("[virtio-net test] Sending packet from net2 to net1...");
         let result2 = device_net2.transmit_packet(&packet_net2_to_net1);
-        crate::early_println!(
+        crate::println!(
             "[virtio-net test] net2->net1 TX result: {:?}",
             result2.is_ok()
         );
 
         // Test 3: Check for received packets on both devices
-        crate::early_println!("[virtio-net test] Checking for received packets...");
+        crate::println!("[virtio-net test] Checking for received packets...");
 
         let received_on_net1 = device_net1.receive_packets();
         let received_on_net2 = device_net2.receive_packets();
 
         match received_on_net1 {
             Ok(packets) => {
-                crate::early_println!("[virtio-net test] net1 received {} packets", packets.len());
+                crate::println!("[virtio-net test] net1 received {} packets", packets.len());
                 for (i, packet) in packets.iter().enumerate() {
-                    crate::early_println!(
+                    crate::println!(
                         "[virtio-net test] net1 RX packet {}: {} bytes",
                         i,
                         packet.len
                     );
                 }
             }
-            Err(e) => crate::early_println!("[virtio-net test] net1 RX error: {}", e),
+            Err(e) => crate::println!("[virtio-net test] net1 RX error: {}", e),
         }
 
         match received_on_net2 {
             Ok(packets) => {
-                crate::early_println!("[virtio-net test] net2 received {} packets", packets.len());
+                crate::println!("[virtio-net test] net2 received {} packets", packets.len());
                 for (i, packet) in packets.iter().enumerate() {
-                    crate::early_println!(
+                    crate::println!(
                         "[virtio-net test] net2 RX packet {}: {} bytes",
                         i,
                         packet.len
                     );
                 }
             }
-            Err(e) => crate::early_println!("[virtio-net test] net2 RX error: {}", e),
+            Err(e) => crate::println!("[virtio-net test] net2 RX error: {}", e),
         }
 
         // Check final statistics
         let net1_final_stats = device_net1.get_stats();
         let net2_final_stats = device_net2.get_stats();
 
-        crate::early_println!(
+        crate::println!(
             "[virtio-net test] Final stats - net1: TX:{}, RX:{} | net2: TX:{}, RX:{}",
             net1_final_stats.tx_packets,
             net1_final_stats.rx_packets,
@@ -1087,19 +1087,19 @@ mod tests {
         let net1_tx_delta = net1_final_stats.tx_packets - net1_initial_stats.tx_packets;
         let net2_tx_delta = net2_final_stats.tx_packets - net2_initial_stats.tx_packets;
 
-        crate::early_println!(
+        crate::println!(
             "[virtio-net test] TX deltas - net1: +{}, net2: +{}",
             net1_tx_delta,
             net2_tx_delta
         );
-        crate::early_println!("[virtio-net test] Bidirectional hub communication test completed");
+        crate::println!("[virtio-net test] Bidirectional hub communication test completed");
     }
 
     #[test_case]
     fn test_virtio_net_device_enumeration() {
         // Test that we can properly enumerate and differentiate multiple devices
         // This helps verify that the device manager properly detects all virtio-net devices
-        crate::early_println!(
+        crate::println!(
             "[virtio-net test] Testing device enumeration for multiple virtio-net devices"
         );
 
@@ -1115,7 +1115,7 @@ mod tests {
             let mtu_result = device.get_mtu();
             let link_status = device.is_link_up();
 
-            crate::early_println!(
+            crate::println!(
                 "[virtio-net test] Device {}: addr={:#x}, MAC={:?}, MTU={:?}, link={}",
                 i,
                 base_addr,
@@ -1125,7 +1125,7 @@ mod tests {
             );
         }
 
-        crate::early_println!("[virtio-net test] Device enumeration test completed");
+        crate::println!("[virtio-net test] Device enumeration test completed");
     }
 
     #[test_case]
@@ -1147,12 +1147,12 @@ mod tests {
         ];
         let test_packet = DevicePacket::with_data(test_packet_data);
 
-        crate::early_println!("[virtio-net test] Sending test packet from sender device...");
+        crate::println!("[virtio-net test] Sending test packet from sender device...");
         let tx_result = sender_mut.transmit_packet(&test_packet);
-        crate::early_println!("[virtio-net test] TX result: {:?}", tx_result.is_ok());
+        crate::println!("[virtio-net test] TX result: {:?}", tx_result.is_ok());
 
         // Poll for received packets with multiple attempts
-        crate::early_println!("[virtio-net test] Polling for received packets...");
+        crate::println!("[virtio-net test] Polling for received packets...");
         let mut total_received = 0;
 
         for attempt in 0..5 {
@@ -1160,7 +1160,7 @@ mod tests {
             match rx_result {
                 Ok(packets) => {
                     if !packets.is_empty() {
-                        crate::early_println!(
+                        crate::println!(
                             "[virtio-net test] Attempt {}: Received {} packets",
                             attempt,
                             packets.len()
@@ -1168,7 +1168,7 @@ mod tests {
                         total_received += packets.len();
 
                         for (i, packet) in packets.iter().enumerate() {
-                            crate::early_println!(
+                            crate::println!(
                                 "[virtio-net test] RX packet {}: {} bytes",
                                 i,
                                 packet.len
@@ -1179,24 +1179,20 @@ mod tests {
                                     && packet.data[packet.data.len() - 8..packet.data.len()]
                                         == [0xDE, 0xAD, 0xBE, 0xEF, 0xCA, 0xFE, 0xBA, 0xBE];
                                 if has_magic {
-                                    crate::early_println!(
-                                        "[virtio-net test] Found our test packet!"
-                                    );
+                                    crate::println!("[virtio-net test] Found our test packet!");
                                 }
                             }
                         }
                     } else {
-                        crate::early_println!(
+                        crate::println!(
                             "[virtio-net test] Attempt {}: No packets received",
                             attempt
                         );
                     }
                 }
-                Err(e) => crate::early_println!(
-                    "[virtio-net test] RX error on attempt {}: {}",
-                    attempt,
-                    e
-                ),
+                Err(e) => {
+                    crate::println!("[virtio-net test] RX error on attempt {}: {}", attempt, e)
+                }
             }
 
             // Small delay between polling attempts (in a real system, this would be interrupt-driven)
@@ -1205,7 +1201,7 @@ mod tests {
             }
         }
 
-        crate::early_println!(
+        crate::println!(
             "[virtio-net test] Total received packets: {}",
             total_received
         );
@@ -1214,7 +1210,7 @@ mod tests {
         let sender_stats = sender_mut.get_stats();
         let receiver_stats = receiver_mut.get_stats();
 
-        crate::early_println!(
+        crate::println!(
             "[virtio-net test] Final stats - sender: TX:{}, RX:{} | receiver: TX:{}, RX:{}",
             sender_stats.tx_packets,
             sender_stats.rx_packets,
@@ -1222,13 +1218,13 @@ mod tests {
             receiver_stats.rx_packets
         );
 
-        crate::early_println!("[virtio-net test] Hub loopback with polling test completed");
+        crate::println!("[virtio-net test] Hub loopback with polling test completed");
     }
 
     #[test_case]
     fn test_virtio_net_qemu_network_configuration() {
         // Test that verifies our understanding of QEMU network setup
-        crate::early_println!("[virtio-net test] Testing QEMU network configuration understanding");
+        crate::println!("[virtio-net test] Testing QEMU network configuration understanding");
 
         // Expected device configuration based on test.sh setup:
         // -device virtio-net-device,netdev=net0,mac=52:54:00:12:34:56,bus=virtio-mmio-bus.2
@@ -1250,7 +1246,7 @@ mod tests {
         ];
 
         for (name, device, expected_addr) in &devices {
-            crate::early_println!("[virtio-net test] Testing device {}", name);
+            crate::println!("[virtio-net test] Testing device {}", name);
 
             assert_eq!(device.get_base_addr(), *expected_addr);
 
@@ -1259,7 +1255,7 @@ mod tests {
             let config_result = device.get_interface_config();
             let link_status = device.is_link_up();
 
-            crate::early_println!(
+            crate::println!(
                 "[virtio-net test] {} - base_addr: {:#x}, MAC: {}, MTU: {}, config: {}, link: {}",
                 name,
                 device.get_base_addr(),
@@ -1276,10 +1272,8 @@ mod tests {
             // Note: link status may vary depending on QEMU setup, so we don't assert it
         }
 
-        crate::early_println!("[virtio-net test] QEMU network configuration test completed");
-        crate::early_println!("[virtio-net test] Net0 (user): TX-only, external connectivity");
-        crate::early_println!(
-            "[virtio-net test] Net1, Net2 (hub): Bidirectional, internal loopback"
-        );
+        crate::println!("[virtio-net test] QEMU network configuration test completed");
+        crate::println!("[virtio-net test] Net0 (user): TX-only, external connectivity");
+        crate::println!("[virtio-net test] Net1, Net2 (hub): Bidirectional, internal loopback");
     }
 }

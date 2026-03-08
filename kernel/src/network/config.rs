@@ -172,7 +172,7 @@ pub fn set_interface_ip_with_mask(
                 // (For now, just add - in future could track and replace)
                 ipv4.add_address(name, addr_info);
 
-                crate::early_println!(
+                crate::println!(
                     "[network] {} IP set to {}.{}.{}.{}/{}",
                     name,
                     ip.0[0],
@@ -182,10 +182,10 @@ pub fn set_interface_ip_with_mask(
                     netmask_to_prefix(netmask)
                 );
             } else {
-                crate::early_println!("[network] set {} IP failed: no IPv4 layer", name);
+                crate::println!("[network] set {} IP failed: no IPv4 layer", name);
             }
         } else {
-            crate::early_println!("[network] set {} IP failed: no IP layer", name);
+            crate::println!("[network] set {} IP failed: no IP layer", name);
         }
         return Ok(());
     }

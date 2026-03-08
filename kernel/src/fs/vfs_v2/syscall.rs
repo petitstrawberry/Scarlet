@@ -670,7 +670,7 @@ pub fn sys_vfs_change_directory(trapframe: &mut Trapframe) -> usize {
         let cwd_guard = vfs.cwd.read();
         match &*cwd_guard {
             Some((entry, mp)) => {
-                crate::early_println!(
+                crate::println!(
                     "[chdir] BEFORE task={} cwd_entry_name='{}' cwd_entry_id={} mount_path='{}' built_path='{}'",
                     task_name,
                     entry.name(),
@@ -680,12 +680,12 @@ pub fn sys_vfs_change_directory(trapframe: &mut Trapframe) -> usize {
                 );
             }
             None => {
-                crate::early_println!("[chdir] BEFORE task={} cwd=None", task_name);
+                crate::println!("[chdir] BEFORE task={} cwd=None", task_name);
             }
         }
     }
 
-    crate::early_println!(
+    crate::println!(
         "[chdir] task={} requested='{}' absolute='{}'",
         task_name,
         path,
@@ -702,7 +702,7 @@ pub fn sys_vfs_change_directory(trapframe: &mut Trapframe) -> usize {
                         // Dump actual cwd state after chdir
                         let cwd_guard = vfs.cwd.read();
                         if let Some((e, mp)) = &*cwd_guard {
-                            crate::early_println!(
+                            crate::println!(
                                 "[chdir] AFTER task={} cwd_entry_name='{}' cwd_entry_id={} mount_path='{}' built_path='{}'",
                                 task_name,
                                 e.name(),
@@ -714,7 +714,7 @@ pub fn sys_vfs_change_directory(trapframe: &mut Trapframe) -> usize {
                         0
                     }
                     Err(e) => {
-                        crate::early_println!(
+                        crate::println!(
                             "[chdir] task={} FAIL set_cwd_by_path error={:?}",
                             task_name,
                             e
@@ -727,7 +727,7 @@ pub fn sys_vfs_change_directory(trapframe: &mut Trapframe) -> usize {
             }
         }
         Err(e) => {
-            crate::early_println!(
+            crate::println!(
                 "[chdir] task={} FAIL resolve_path '{}' error={:?}",
                 task_name,
                 absolute_path,

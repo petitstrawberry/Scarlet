@@ -18,7 +18,7 @@ pub fn arch_interrupt_handler(trapframe: &mut Trapframe, cause: usize) {
 /// Handle software interrupt (IPI)
 /// TODO: Implement inter-processor interrupt handling
 fn handle_software_interrupt() {
-    crate::early_println!("[interrupt] Software interrupt received - TODO: implement IPI");
+    crate::println!("[interrupt] Software interrupt received - TODO: implement IPI");
     // TODO: CLINT software interrupt handling
     // TODO: Inter-processor interrupt (IPI) support
 }
@@ -47,22 +47,22 @@ fn handle_external_interrupt(trapframe: &mut Trapframe) {
     // Claim and handle external interrupt through PLIC
     match InterruptManager::with_manager(|mgr| mgr.claim_and_handle_external_interrupt(cpu_id)) {
         Ok(Some(interrupt_id)) => {
-            // crate::early_println!("[interrupt] Handled external interrupt {} on CPU {}", interrupt_id, cpu_id);
+            // crate::println!("[interrupt] Handled external interrupt {} on CPU {}", interrupt_id, cpu_id);
         }
         Ok(None) => {
-            crate::early_println!(
+            crate::println!(
                 "[interrupt] No pending external interrupt on CPU {}",
                 cpu_id
             );
         }
         Err(e) => {
-            crate::early_println!("[interrupt] Failed to handle external interrupt: {}", e);
+            crate::println!("[interrupt] Failed to handle external interrupt: {}", e);
         }
     }
 }
 
 /// Handle unknown interrupt
 fn handle_unknown_interrupt(trapframe: &mut Trapframe, cause: usize) {
-    crate::early_println!("[interrupt] Unknown interrupt trapframe: {:x?}", trapframe);
+    crate::println!("[interrupt] Unknown interrupt trapframe: {:x?}", trapframe);
     panic!("Unknown interrupt cause: {}", cause);
 }

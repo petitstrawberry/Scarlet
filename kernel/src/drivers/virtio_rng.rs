@@ -76,7 +76,7 @@ impl VirtioRngDevice {
                 features
             }
             Err(e) => {
-                crate::early_println!("[VirtIO RNG] Failed to initialize: {}", e);
+                crate::println!("[VirtIO RNG] Failed to initialize: {}", e);
                 0
             }
         };
@@ -84,7 +84,7 @@ impl VirtioRngDevice {
         // Store negotiated features
         *device.features.write() = negotiated_features;
 
-        crate::early_println!(
+        crate::println!(
             "[VirtIO RNG] Device initialized with features: 0x{:x}",
             negotiated_features
         );
@@ -174,7 +174,7 @@ impl VirtioRngDevice {
         if buffer.is_empty() {
             drop(buffer); // Release lock before filling
             if let Err(e) = self.fill_buffer() {
-                crate::early_println!("[VirtIO RNG] Failed to fill buffer: {}", e);
+                crate::println!("[VirtIO RNG] Failed to fill buffer: {}", e);
                 return None;
             }
             buffer = self.buffer.lock();

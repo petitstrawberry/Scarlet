@@ -198,45 +198,45 @@ impl Ext2Params {
 
     /// Create ext2 filesystem from these parameters
     pub fn create_filesystem(&mut self) -> Result<Arc<Ext2FileSystem>, FileSystemError> {
-        // crate::early_println!("[EXT2] Creating filesystem from parameters");
+        // crate::println!("[EXT2] Creating filesystem from parameters");
 
         // First resolve device path to device_id if not already resolved
         if self.device_id.is_none() {
-            // crate::early_println!("[EXT2] Resolving device path: {:?}", self.device_path);
+            // crate::println!("[EXT2] Resolving device path: {:?}", self.device_path);
             self.resolve_device()?;
         }
 
         // Get device_id (should be resolved by now)
         let device_id = self.device_id.ok_or_else(|| {
-            // crate::early_println!("[EXT2] Error: Device ID not resolved");
+            // crate::println!("[EXT2] Error: Device ID not resolved");
             FileSystemError::new(FileSystemErrorKind::DeviceError, "Device ID not resolved")
         })?;
 
-        // crate::early_println!("[EXT2] Using device ID: {}", device_id);
+        // crate::println!("[EXT2] Using device ID: {}", device_id);
 
         // Get device from DeviceManager
         let device = DeviceManager::get_manager()
             .get_device(device_id)
             .ok_or_else(|| {
-                // crate::early_println!("[EXT2] Error: Device with ID {} not found", device_id);
+                // crate::println!("[EXT2] Error: Device with ID {} not found", device_id);
                 FileSystemError::new(
                     FileSystemErrorKind::DeviceError,
                     format!("Device with ID {} not found", device_id),
                 )
             })?;
 
-        // crate::early_println!("[EXT2] Found device, converting to block device");
+        // crate::println!("[EXT2] Found device, converting to block device");
 
         // Convert to block device using the new into_block_device() method
         let block_device = device.into_block_device().ok_or_else(|| {
-            // crate::early_println!("[EXT2] Error: Device is not a block device");
+            // crate::println!("[EXT2] Error: Device is not a block device");
             FileSystemError::new(
                 FileSystemErrorKind::DeviceError,
                 "Device is not a block device",
             )
         })?;
 
-        // crate::early_println!("[EXT2] Successfully converted to block device, creating filesystem");
+        // crate::println!("[EXT2] Successfully converted to block device, creating filesystem");
 
         // Create ext2 filesystem using existing method
         Ext2FileSystem::new(block_device)
@@ -519,7 +519,7 @@ impl InodeLruCache {
         } else {
             0
         };
-        crate::early_println!(
+        crate::println!(
             "[ext2] {} Cache Stats: hits={}, misses={}, size={}, hit_rate={}%",
             cache_name,
             self.hits,
@@ -715,7 +715,7 @@ impl BlockLruCache {
         } else {
             0
         };
-        crate::early_println!(
+        crate::println!(
             "[ext2] {} Cache Stats: hits={}, misses={}, size={}, hit_rate={}%",
             cache_name,
             self.hits,
@@ -912,7 +912,7 @@ impl Ext2FileSystem {
         let inode_offset = (local_inode * inode_size) % self.block_size;
 
         #[cfg(test)]
-        crate::early_println!(
+        crate::println!(
             "[ext2] read_inode: Reading inode {} from block {}, offset {}, inode_size={}",
             inode_num,
             inode_block,
@@ -1599,7 +1599,7 @@ impl Ext2FileSystem {
                     Ok(())
                 }
                 Err(e) => {
-                    crate::early_println!(
+                    crate::println!(
                         "[ext2] write_inode: Failed to write inode {} to block {}: {:?}",
                         inode_number,
                         target_block,
@@ -1634,7 +1634,7 @@ impl Ext2FileSystem {
                 let blocks_count = self.superblock.blocks_count;
                 let blocks_per_group = self.superblock.blocks_per_group;
 
-                crate::early_println!(
+                crate::println!(
                     "[ext2] allocate_block: total_groups={}, blocks_count={}, blocks_per_group={}",
                     total_groups,
                     blocks_count,
@@ -1644,7 +1644,7 @@ impl Ext2FileSystem {
 
             for group in 0..total_groups {
                 #[cfg(test)]
-                crate::early_println!("[ext2] allocate_block: trying group {}", group);
+                crate::println!("[ext2] allocate_block: trying group {}", group);
 
                 match self.allocate_block_in_group(group) {
                     Ok(block_num) => {
@@ -1656,19 +1656,12 @@ impl Ext2FileSystem {
                     }) => {
                         // Try next group
                         #[cfg(test)]
-                        crate::early_println!(
-                            "[ext2] allocate_block: group {} full, trying next",
-                            group
-                        );
+                        crate::println!("[ext2] allocate_block: group {} full, trying next", group);
                         continue;
                     }
                     Err(e) => {
                         #[cfg(test)]
-                        crate::early_println!(
-                            "[ext2] allocate_block: group {} error: {:?}",
-                            group,
-                            e
-                        );
+                        crate::println!("[ext2] allocate_block: group {} error: {:?}", group, e);
                         return Err(e);
                     }
                 }
@@ -1686,7 +1679,7 @@ impl Ext2FileSystem {
         profile_scope!("ext2::allocate_block_in_group");
 
         #[cfg(test)]
-        crate::early_println!(
+        crate::println!(
             "[ext2] allocate_block_in_group: Starting OPTIMIZED allocation for group {}",
             group
         );
@@ -1741,7 +1734,7 @@ impl Ext2FileSystem {
         // Read block bitmap
         let bitmap_block = u32::from_le(bgd.block_bitmap);
         let bitmap_sector = self.block_to_sector(bitmap_block as u64);
-        // crate::early_println!(
+        // crate::println!(
         //     "[ext2] allocate_block_in_group: Reading bitmap from block {} (sector {})",
         //     bitmap_block,
         //     bitmap_sector
@@ -1762,7 +1755,7 @@ impl Ext2FileSystem {
             match &result.result {
                 Ok(_) => {
                     let data = result.request.buffer.clone();
-                    // crate::early_println!(
+                    // crate::println!(
                     //     "[ext2] allocate_block_in_group: Read bitmap[738]={:02x} from sector {}",
                     //     data[738],
                     //     bitmap_sector
@@ -1810,7 +1803,7 @@ impl Ext2FileSystem {
 
             // Check if bit is free (0)
             if (bitmap_data[byte_index] & (1 << bit_index)) == 0 {
-                // crate::early_println!(
+                // crate::println!(
                 //     "[ext2] allocate_block_in_group: Found free block {} (byte={}, bit={}, bitmap[byte]={:02x})",
                 //     block_num,
                 //     byte_index,
@@ -1819,19 +1812,19 @@ impl Ext2FileSystem {
                 // );
                 // OPTIMIZATION: Batch bitmap + BGD updates
                 bitmap_data[byte_index] |= 1 << bit_index;
-                // crate::early_println!(
+                // crate::println!(
                 //     "[ext2] allocate_block_in_group: After set, bitmap[byte]={:02x}",
                 //     bitmap_data[byte_index]
                 // );
 
                 #[cfg(test)]
-                crate::early_println!(
+                crate::println!(
                     "[ext2] allocate_block_in_group: Found free block {}, batching metadata updates",
                     block_num
                 );
 
                 // Enqueue bitmap write
-                // crate::early_println!(
+                // crate::println!(
                 //     "[ext2] allocate_block_in_group: Writing bitmap[738]={:02x} to sector {}",
                 //     bitmap_data[738],
                 //     bitmap_sector
@@ -1866,17 +1859,17 @@ impl Ext2FileSystem {
                 self.block_device.enqueue_request(bgd_write);
 
                 // Process both writes in one batch
-                // crate::early_println!(
+                // crate::println!(
                 //     "[ext2] allocate_block_in_group: Writing bitmap+BGD for block {}",
                 //     block_num
                 // );
                 let write_results = self.block_device.process_requests();
-                // crate::early_println!(
+                // crate::println!(
                 //     "[ext2] allocate_block_in_group: Processed {} requests",
                 //     write_results.len()
                 // );
                 // for (i, r) in write_results.iter().enumerate() {
-                //     crate::early_println!(
+                //     crate::println!(
                 //         "[ext2] allocate_block_in_group: Request {} result: {:?}",
                 //         i,
                 //         r.result
@@ -1903,7 +1896,7 @@ impl Ext2FileSystem {
                     ));
                 }
 
-                // crate::early_println!(
+                // crate::println!(
                 //     "[ext2] allocate_block_in_group: Write complete for block {}",
                 //     block_num
                 // );
@@ -1918,7 +1911,7 @@ impl Ext2FileSystem {
                 self.update_superblock_counts(-1, 0, 0)?;
 
                 #[cfg(test)]
-                crate::early_println!(
+                crate::println!(
                     "[ext2] allocate_block_in_group: Successfully allocated block {} (OPTIMIZED: reduced I/O ops)",
                     block_num
                 );
@@ -1941,7 +1934,7 @@ impl Ext2FileSystem {
         profile_scope!("ext2::allocate_blocks_contiguous_in_group");
 
         #[cfg(test)]
-        crate::early_println!(
+        crate::println!(
             "[ext2] allocate_blocks_contiguous_in_group: Starting allocation for {} blocks in group {}",
             count,
             group
@@ -2081,7 +2074,7 @@ impl Ext2FileSystem {
                 }
 
                 #[cfg(test)]
-                crate::early_println!(
+                crate::println!(
                     "[ext2] allocate_blocks_contiguous_in_group: Found {} contiguous blocks starting at {}, batching updates",
                     count,
                     start_block
@@ -2122,7 +2115,7 @@ impl Ext2FileSystem {
 
                 // Process both writes in one batch
                 #[cfg(test)]
-                crate::early_println!(
+                crate::println!(
                     "[ext2] allocate_blocks_contiguous_in_group: Processing 2 writes in batch for {} blocks",
                     count
                 );
@@ -2145,7 +2138,7 @@ impl Ext2FileSystem {
                 self.update_superblock_counts(-(count as i32), 0, 0)?;
 
                 #[cfg(test)]
-                crate::early_println!(
+                crate::println!(
                     "[ext2] allocate_blocks_contiguous_in_group: Successfully allocated {} blocks starting at {} (MAJOR OPTIMIZATION: reduced from {} to ~3 I/O ops)",
                     count,
                     start_block,
@@ -2196,7 +2189,7 @@ impl Ext2FileSystem {
                 match self.allocate_blocks_contiguous_in_group(group, count) {
                     Ok(blocks) => {
                         #[cfg(test)]
-                        crate::early_println!(
+                        crate::println!(
                             "ext2: Allocated {} contiguous blocks starting at {} in group {}",
                             count,
                             blocks[0],
@@ -2221,7 +2214,7 @@ impl Ext2FileSystem {
             // Strategy 2: Try partial contiguous allocation (split into chunks)
             if count >= 6 {
                 // Restored to original threshold for stability
-                crate::early_println!(
+                crate::println!(
                     "ext2: Full contiguous allocation failed, trying partial contiguous allocation"
                 );
                 let mut allocated_blocks = Vec::new();
@@ -2243,7 +2236,7 @@ impl Ext2FileSystem {
                             match self.allocate_blocks_contiguous_in_group(group, chunk_size) {
                                 Ok(mut chunk_blocks) => {
                                     #[cfg(test)]
-                                    crate::early_println!(
+                                    crate::println!(
                                         "ext2: Allocated {} contiguous blocks (chunk) starting at {} in group {}",
                                         chunk_size,
                                         chunk_blocks[0],
@@ -2264,7 +2257,7 @@ impl Ext2FileSystem {
                                     // Cleanup and return error
                                     for &block in &allocated_blocks {
                                         if let Err(free_err) = self.free_block_unlocked(block as u32) {
-                                            crate::early_println!(
+                                            crate::println!(
                                                 "ext2: Failed to free block {} during cleanup: {:?}",
                                                 block,
                                                 free_err
@@ -2282,7 +2275,7 @@ impl Ext2FileSystem {
                 }
 
                 if remaining == 0 {
-                    // crate::early_println!(
+                    // crate::println!(
                     //     "ext2: Successfully allocated {} blocks using partial contiguous strategy",
                     //     count
                     // );
@@ -2292,7 +2285,7 @@ impl Ext2FileSystem {
 
             // If we have some blocks allocated but not all, continue with individual allocation for remainder
             if !allocated_blocks.is_empty() && remaining > 0 {
-                // crate::early_println!(
+                // crate::println!(
                 //     "ext2: Partial contiguous allocation successful ({} blocks), using individual allocation for remaining {} blocks",
                 //     allocated_blocks.len(),
                 //     remaining
@@ -2305,7 +2298,7 @@ impl Ext2FileSystem {
                             // Cleanup all allocated blocks
                             for &allocated_block in &allocated_blocks {
                                 if let Err(free_err) = self.free_block_unlocked(allocated_block as u32) {
-                                    crate::early_println!(
+                                    crate::println!(
                                         "ext2: Failed to free block {} during cleanup: {:?}",
                                         allocated_block,
                                         free_err
@@ -2317,7 +2310,7 @@ impl Ext2FileSystem {
                     }
                 }
 
-                // crate::early_println!(
+                // crate::println!(
                 //     "ext2: Hybrid allocation completed: {} blocks total",
                 //     allocated_blocks.len()
                 // );
@@ -2327,7 +2320,7 @@ impl Ext2FileSystem {
             // Cleanup partial allocations if we couldn't complete
             for &block in &allocated_blocks {
                 if let Err(free_err) = self.free_block_unlocked(block as u32) {
-                    crate::early_println!(
+                    crate::println!(
                         "ext2: Failed to free block {} during cleanup: {:?}",
                         block,
                         free_err
@@ -2337,7 +2330,7 @@ impl Ext2FileSystem {
         }
 
         // Strategy 3: Fall back to individual block allocation as last resort
-        // crate::early_println!(
+        // crate::println!(
         //     "ext2: All contiguous strategies failed for {} blocks, falling back to individual allocation",
         //     count
         // );
@@ -2349,7 +2342,7 @@ impl Ext2FileSystem {
                     // If individual allocation fails, we need to free the blocks we already allocated
                     for &allocated_block in &blocks {
                         if let Err(free_err) = self.free_block_unlocked(allocated_block as u32) {
-                            crate::early_println!(
+                            crate::println!(
                                 "ext2: Failed to free block {} during cleanup: {:?}",
                                 allocated_block,
                                 free_err
@@ -2362,7 +2355,7 @@ impl Ext2FileSystem {
         }
 
         #[cfg(test)]
-        crate::early_println!("ext2: Allocated {} blocks individually as fallback", count);
+        crate::println!("ext2: Allocated {} blocks individually as fallback", count);
         Ok(blocks)
         })
     }
@@ -2508,7 +2501,7 @@ impl Ext2FileSystem {
                     let allocated_inode = bit + 1; // Convert back to 1-based inode number
 
                     // Debug: Allocated inode (disabled to reduce log noise)
-                    // crate::early_println!("EXT2: Allocated inode {} (bit {})", allocated_inode, bit);
+                    // crate::println!("EXT2: Allocated inode {} (bit {})", allocated_inode, bit);
 
                     return Ok(allocated_inode);
                 }
@@ -2830,7 +2823,7 @@ impl Ext2FileSystem {
             // Free all data blocks used by this inode
             for block_num in blocks_to_free {
                 // Debug: Freeing data block (disabled to reduce log noise)
-                // crate::early_println!("EXT2: Freeing data block {}", block_num);
+                // crate::println!("EXT2: Freeing data block {}", block_num);
                 self.free_block_unlocked(block_num)?;
             }
 
@@ -3028,7 +3021,7 @@ impl Ext2FileSystem {
         profile_scope!("ext2::write_file_content");
 
         #[cfg(test)]
-        crate::early_println!(
+        crate::println!(
             "[ext2] write_file_content: inode={}, content_len={}",
             inode_num,
             content.len()
@@ -3045,7 +3038,7 @@ impl Ext2FileSystem {
         };
 
         #[cfg(test)]
-        crate::early_println!("[ext2] write_file_content: blocks_needed={}", blocks_needed);
+        crate::println!("[ext2] write_file_content: blocks_needed={}", blocks_needed);
 
         // Allocate blocks as needed
         let mut block_list = Vec::new();
@@ -3076,7 +3069,7 @@ impl Ext2FileSystem {
                         current_count = 0;
                     }
                     #[cfg(test)]
-                    crate::early_println!(
+                    crate::println!(
                         "[ext2] write_file_content: reusing existing block {} for logical block {}",
                         existing_block,
                         block_idx
@@ -3095,7 +3088,7 @@ impl Ext2FileSystem {
                 if count >= 3 {
                     // Use multi-block allocation for 3+ blocks for better efficiency
                     #[cfg(test)]
-                    crate::early_println!(
+                    crate::println!(
                         "[ext2] write_file_content: using multi-block allocation for {} blocks starting at logical block {}",
                         count,
                         start_idx
@@ -3114,7 +3107,7 @@ impl Ext2FileSystem {
                         block_list[logical_idx] = block_num;
 
                         #[cfg(test)]
-                        crate::early_println!(
+                        crate::println!(
                             "[ext2] write_file_content: multi-allocated block {} for logical block {}",
                             block_num,
                             logical_idx
@@ -3127,7 +3120,7 @@ impl Ext2FileSystem {
                         let new_block = self.allocate_block()?;
 
                         #[cfg(test)]
-                        crate::early_println!(
+                        crate::println!(
                             "[ext2] write_file_content: individually allocated block {} for logical block {}",
                             new_block,
                             logical_idx
@@ -3168,7 +3161,7 @@ impl Ext2FileSystem {
                 .copy_from_slice(&content[content_offset..content_offset + bytes_to_write]);
 
             #[cfg(test)]
-            crate::early_println!(
+            crate::println!(
                 "[ext2] write_file_content: preparing block {} ({} bytes) for batch write",
                 block_num,
                 bytes_to_write
@@ -3184,7 +3177,7 @@ impl Ext2FileSystem {
         // Write all content blocks in one batch
         if !write_blocks.is_empty() {
             #[cfg(test)]
-            crate::early_println!(
+            crate::println!(
                 "[ext2] write_file_content: batch writing {} content blocks",
                 write_blocks.len()
             );
@@ -3807,7 +3800,7 @@ impl Ext2FileSystem {
         // Batch allocate all needed indirect blocks
         let allocated_indirect_blocks = if needed_indirect_blocks > 0 {
             #[cfg(test)]
-            crate::early_println!(
+            crate::println!(
                 "[ext2] set_inode_blocks_simple_batch: Pre-allocating {} indirect blocks",
                 needed_indirect_blocks
             );
@@ -3819,7 +3812,7 @@ impl Ext2FileSystem {
         let mut indirect_block_index = 0;
 
         for &(logical_block, block_number) in assignments {
-            // crate::early_println!("[ext2] DEBUG: Processing assignment: logical_block={}, block_number={}", logical_block, block_number);
+            // crate::println!("[ext2] DEBUG: Processing assignment: logical_block={}, block_number={}", logical_block, block_number);
 
             if logical_block < 12 {
                 // Direct blocks - immediate update
@@ -3857,7 +3850,7 @@ impl Ext2FileSystem {
                             .insert(indirect_block, vec![0u8; self.block_size as usize]);
                     } else {
                         // Existing block, read from disk
-                        // crate::early_println!("[ext2] DEBUG: Reading indirect block {} for caching", indirect_block);
+                        // crate::println!("[ext2] DEBUG: Reading indirect block {} for caching", indirect_block);
                         let data = self.read_block_cached(indirect_block as u64)?;
                         indirect_blocks_cache.insert(indirect_block, data);
                     }
@@ -3879,7 +3872,7 @@ impl Ext2FileSystem {
 
                 // Check for underflow before calculation
                 if logical_block < double_base {
-                    crate::early_println!(
+                    crate::println!(
                         "[ext2] ERROR: Double indirect block calculation would underflow: logical_block={}, double_base={}",
                         logical_block,
                         double_base
@@ -3894,7 +3887,7 @@ impl Ext2FileSystem {
                 let first_indirect_index = double_offset / blocks_per_indirect as u64;
                 let second_indirect_index = double_offset % blocks_per_indirect as u64;
 
-                // crate::early_println!("[ext2] DEBUG: Double indirect calculation: logical_block={}, double_offset={}, first_idx={}, second_idx={}",
+                // crate::println!("[ext2] DEBUG: Double indirect calculation: logical_block={}, double_offset={}, first_idx={}, second_idx={}",
                 //                       logical_block, double_offset, first_indirect_index, second_indirect_index);
 
                 // Ensure double indirect block exists
@@ -3925,7 +3918,7 @@ impl Ext2FileSystem {
                         double_indirect_cache
                             .insert(double_indirect_block, vec![0u8; self.block_size as usize]);
                     } else {
-                        // crate::early_println!("[ext2] DEBUG: Reading double indirect block {} for caching", double_indirect_block);
+                        // crate::println!("[ext2] DEBUG: Reading double indirect block {} for caching", double_indirect_block);
                         let data = self.read_block_cached(double_indirect_block as u64)?;
                         double_indirect_cache.insert(double_indirect_block, data);
                     }
@@ -3981,7 +3974,7 @@ impl Ext2FileSystem {
                         indirect_blocks_cache
                             .insert(first_indirect_block, vec![0u8; self.block_size as usize]);
                     } else {
-                        // crate::early_println!("[ext2] DEBUG: Reading first-level indirect block {} for caching", first_indirect_block);
+                        // crate::println!("[ext2] DEBUG: Reading first-level indirect block {} for caching", first_indirect_block);
                         let data = self.read_block_cached(first_indirect_block as u64)?;
                         indirect_blocks_cache.insert(first_indirect_block, data);
                     }
@@ -3996,7 +3989,7 @@ impl Ext2FileSystem {
                 }
             } else {
                 // Triple indirect and beyond - fall back to individual calls
-                // crate::early_println!("[ext2] DEBUG: Fallback to individual set_inode_block for logical_block {} (triple indirect)", logical_block);
+                // crate::println!("[ext2] DEBUG: Fallback to individual set_inode_block for logical_block {} (triple indirect)", logical_block);
                 self.set_inode_block(inode, logical_block, block_number)?;
             }
         }
@@ -4008,9 +4001,9 @@ impl Ext2FileSystem {
 
             // Add single and first-level indirect blocks
             for (block_num, data) in indirect_blocks_cache {
-                // crate::early_println!("[ext2] DEBUG: Adding indirect block {} to write batch", block_num);
+                // crate::println!("[ext2] DEBUG: Adding indirect block {} to write batch", block_num);
                 if block_num as u64 > (1u64 << 32) {
-                    // crate::early_println!("[ext2] ERROR: Invalid indirect block number: {}", block_num);
+                    // crate::println!("[ext2] ERROR: Invalid indirect block number: {}", block_num);
                     return Err(FileSystemError::new(
                         FileSystemErrorKind::InvalidData,
                         "Invalid indirect block number",
@@ -4021,9 +4014,9 @@ impl Ext2FileSystem {
 
             // Add double indirect blocks
             for (block_num, data) in double_indirect_cache {
-                // crate::early_println!("[ext2] DEBUG: Adding double indirect block {} to write batch", block_num);
+                // crate::println!("[ext2] DEBUG: Adding double indirect block {} to write batch", block_num);
                 if block_num as u64 > (1u64 << 32) {
-                    // crate::early_println!("[ext2] ERROR: Invalid double indirect block number: {}", block_num);
+                    // crate::println!("[ext2] ERROR: Invalid double indirect block number: {}", block_num);
                     return Err(FileSystemError::new(
                         FileSystemErrorKind::InvalidData,
                         "Invalid double indirect block number",
@@ -4032,11 +4025,11 @@ impl Ext2FileSystem {
                 write_blocks.insert(block_num as u64, data);
             }
 
-            // crate::early_println!("[ext2] DEBUG: Batch writing {} indirect blocks (single + double indirect)", write_blocks.len());
+            // crate::println!("[ext2] DEBUG: Batch writing {} indirect blocks (single + double indirect)", write_blocks.len());
             self.write_blocks_cached(&write_blocks)?;
         }
 
-        // crate::early_println!("[ext2] set_inode_blocks_simple_batch: completed {} assignments, {} batched writes",
+        // crate::println!("[ext2] set_inode_blocks_simple_batch: completed {} assignments, {} batched writes",
         //     assignments.len(), batched_writes);
         Ok(())
     }
@@ -4167,7 +4160,7 @@ impl Ext2FileSystem {
             superblock_data[12..16].copy_from_slice(&bytes);
 
             // Debug: Updated free_blocks_count (disabled to reduce log noise)
-            // crate::early_println!("EXT2: Updated free_blocks_count: {} -> {} (delta: {})",
+            // crate::println!("EXT2: Updated free_blocks_count: {} -> {} (delta: {})",
             //                       current, new_count, block_delta);
         }
 
@@ -4187,7 +4180,7 @@ impl Ext2FileSystem {
             superblock_data[16..20].copy_from_slice(&bytes);
 
             // Debug: Updated free_inodes_count (disabled to reduce log noise)
-            // crate::early_println!("EXT2: Updated free_inodes_count: {} -> {} (delta: {})",
+            // crate::println!("EXT2: Updated free_inodes_count: {} -> {} (delta: {})",
             //                       current, new_count, inode_delta);
         }
 
@@ -4208,7 +4201,7 @@ impl Ext2FileSystem {
             match &write_result.result {
                 Ok(_) => {
                     // Debug: Superblock successfully updated (disabled to reduce log noise)
-                    // crate::early_println!("EXT2: Superblock successfully updated");
+                    // crate::println!("EXT2: Superblock successfully updated");
                     Ok(())
                 }
                 Err(_) => Err(FileSystemError::new(
@@ -4417,7 +4410,7 @@ impl Ext2FileSystem {
         }
 
         #[cfg(test)]
-        crate::early_println!(
+        crate::println!(
             "[ext2] write_blocks_cached: {} blocks to write",
             blocks.len()
         );
@@ -4426,7 +4419,7 @@ impl Ext2FileSystem {
         for (block_num, _) in blocks.iter() {
             if *block_num > (1u64 << 32) {
                 // Check for very large values that could be negative casts
-                crate::early_println!(
+                crate::println!(
                     "[ext2] ERROR: Invalid block number detected: {} (0x{:x})",
                     block_num,
                     block_num
@@ -4477,7 +4470,7 @@ impl Ext2FileSystem {
 
         // Process all enqueued requests in one batch
         #[cfg(test)]
-        crate::early_println!(
+        crate::println!(
             "[ext2] write_blocks_cached: Processing {} requests in batch",
             request_ranges.len()
         );
@@ -4523,7 +4516,7 @@ impl Ext2FileSystem {
     fn block_to_sector(&self, block_num: u64) -> usize {
         // Validate block number range
         if block_num > (1u64 << 32) {
-            crate::early_println!(
+            crate::println!(
                 "[ext2] ERROR: block_to_sector called with invalid block_num: {} (0x{:x})",
                 block_num,
                 block_num
@@ -4537,7 +4530,7 @@ impl Ext2FileSystem {
         // Check for reasonable upper bound (e.g., filesystem shouldn't have more than 2^30 blocks)
         if block_num > (1u64 << 30) {
             #[cfg(test)]
-            crate::early_println!(
+            crate::println!(
                 "[ext2] WARNING: block_to_sector called with very large block_num: {}",
                 block_num
             );
@@ -4691,17 +4684,17 @@ impl FileSystemOperations for Ext2FileSystem {
         _flags: u32,
     ) -> Result<Arc<dyn FileObject>, FileSystemError> {
         #[cfg(test)]
-        crate::early_println!("[ext2] open: Starting open operation");
+        crate::println!("[ext2] open: Starting open operation");
 
         let file_type = node.file_type()?;
 
         #[cfg(test)]
-        crate::early_println!("[ext2] open: File type = {:?}", file_type);
+        crate::println!("[ext2] open: File type = {:?}", file_type);
 
         match file_type {
             FileType::RegularFile => {
                 #[cfg(test)]
-                crate::early_println!("[ext2] open: Opening regular file");
+                crate::println!("[ext2] open: Opening regular file");
 
                 let ext2_node = node.as_any().downcast_ref::<Ext2Node>().ok_or_else(|| {
                     FileSystemError::new(
@@ -4723,7 +4716,7 @@ impl FileSystemOperations for Ext2FileSystem {
             }
             FileType::Directory => {
                 #[cfg(test)]
-                crate::early_println!("[ext2] open: Opening directory");
+                crate::println!("[ext2] open: Opening directory");
 
                 let ext2_node = node.as_any().downcast_ref::<Ext2Node>().ok_or_else(|| {
                     FileSystemError::new(
@@ -4745,7 +4738,7 @@ impl FileSystemOperations for Ext2FileSystem {
             }
             FileType::CharDevice(device_info) => {
                 #[cfg(test)]
-                crate::early_println!(
+                crate::println!(
                     "[ext2] Opening character device file: device_id={}",
                     device_info.device_id
                 );
@@ -4765,13 +4758,13 @@ impl FileSystemOperations for Ext2FileSystem {
                 }
 
                 #[cfg(test)]
-                crate::early_println!("[ext2] Character device file object created successfully");
+                crate::println!("[ext2] Character device file object created successfully");
 
                 Ok(char_device_obj)
             }
             _ => {
                 #[cfg(test)]
-                crate::early_println!("[ext2] open: Unsupported file type: {:?}", file_type);
+                crate::println!("[ext2] open: Unsupported file type: {:?}", file_type);
 
                 Err(FileSystemError::new(
                     FileSystemErrorKind::NotSupported,
@@ -4948,7 +4941,7 @@ impl FileSystemOperations for Ext2FileSystem {
         if matches!(file_type, FileType::Directory) {
             // Allocate a block for the directory
             let block_number = self.allocate_block()?;
-            // crate::early_println!(
+            // crate::println!(
             //     "[ext2] create: allocated block {} for new dir inode {}",
             //     block_number,
             //     new_inode_number

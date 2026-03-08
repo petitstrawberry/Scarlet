@@ -102,7 +102,7 @@ impl Riscv64VcpuObject {
         let hvip = read_hvip();
         let new_hvip = (hvip & !mask) | val;
 
-        // crate::early_println!(
+        // crate::println!(
         //     "[inject_pending] mask={:#x} pending={:#x} val={:#x} hvip={:#x}->new_hvip={:#x}",
         //     mask,
         //     pending,
