@@ -454,17 +454,45 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
         .filter(|r| matches!(r.res_type, PlatformDeviceResourceType::MEM))
         .collect();
 
-    let dist_base_addr = match mem_resources.get(0) {
-        Some(resource) => resource.start as usize,
+    let dist_paddr = match mem_resources.get(0) {
+        Some(resource) => resource.start,
         None => return Err("No memory resource found for GIC distributor"),
     };
+    let dist_size = mem_resources
+        .get(0)
+        .map(|r| r.end - r.start + 1)
+        .unwrap_or(0x10000);
+
+    // Map GIC distributor MMIO region.
+    let dist_base_addr = crate::vm::ioremap(dist_paddr, dist_size).map_err(|e| {
+        crate::early_println!(
+            "[interrupt] GIC dist ioremap({:#x}, {:#x}) failed: {}",
+            dist_paddr,
+            dist_size,
+            e
+        );
+        e
+    })?;
 
     // Prefer the second MEM region for the CPU interface.
     // Fallback: common GICv2 layout uses dist + 0x10000.
-    let cpu_base_addr = mem_resources
-        .get(1)
-        .map(|resource| resource.start as usize)
-        .unwrap_or(dist_base_addr + 0x10000);
+    let cpu_base_addr = if let Some(cpu_res) = mem_resources.get(1) {
+        let cpu_paddr = cpu_res.start;
+        let cpu_size = cpu_res.end - cpu_res.start + 1;
+        crate::vm::ioremap(cpu_paddr, cpu_size).map_err(|e| {
+            crate::early_println!(
+                "[interrupt] GIC cpu ioremap({:#x}, {:#x}) failed: {}",
+                cpu_paddr,
+                cpu_size,
+                e
+            );
+            crate::vm::iounmap(dist_base_addr);
+            e
+        })?
+    } else {
+        // Fallback: map the CPU interface immediately after the distributor.
+        dist_base_addr + 0x10000
+    };
 
     // TODO: Parse actual interrupt count and CPU count from device tree
     let max_interrupts = 256; // Typical value

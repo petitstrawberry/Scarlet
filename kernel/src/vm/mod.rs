@@ -4,10 +4,12 @@
 //! includes functions for managing virtual address spaces.
 
 pub mod addr;
+pub mod ioremap;
 pub mod manager;
 pub mod vmem;
 
 pub use addr::{PhysAddr, VirtAddr, phys_to_virt, virt_to_phys};
+pub use ioremap::{ioremap, iounmap};
 
 use manager::VirtualMemoryManager;
 use vmem::MemoryArea;
@@ -15,7 +17,6 @@ use vmem::VirtualMemoryMap;
 use vmem::VirtualMemoryPermission;
 
 use crate::arch::Arch;
-use crate::arch::get_device_memory_areas;
 use crate::arch::get_kernel_trapvector_paddr;
 use crate::arch::set_trapvector;
 use crate::arch::vm::alloc_virtual_address_space;
@@ -160,26 +161,6 @@ pub fn kernel_vm_init(
         }
     }
 
-    // Map device memory areas (architecture-specific)
-    for dev_area in get_device_memory_areas() {
-        let dev_map = VirtualMemoryMap {
-            vmarea: dev_area,
-            pmarea: dev_area,
-            permissions: VirtualMemoryPermission::Read as usize
-                | VirtualMemoryPermission::Write as usize,
-            is_shared: true, // Device memory should be shared
-            owner: None,
-        };
-        get_kernel_vm_manager()
-            .add_memory_map(dev_map.clone())
-            .map_err(|e| panic!("Failed to add device memory map: {}", e))
-            .unwrap();
-        root_page_table
-            .map_memory_area(asid, dev_map.clone(), true, true)
-            .map_err(|e| panic!("Failed to map device memory area: {}", e))
-            .unwrap();
-    }
-
     early_println!(
         "Kernel space mapped       : {:#018x} - {:#018x}",
         kernel_area.start,
@@ -190,13 +171,6 @@ pub fn kernel_vm_init(
         hhdm_area.start,
         hhdm_area.end
     );
-    for dev_area in get_device_memory_areas() {
-        early_println!(
-            "Device space mapped       : {:#018x} - {:#018x}",
-            dev_area.start,
-            dev_area.end
-        );
-    }
 
     #[cfg(any(debug_assertions, test))]
     early_println!("[vm] kernel_vm_init: setup_trampoline_for_kernel...");
@@ -209,6 +183,17 @@ pub fn kernel_vm_init(
     #[cfg(any(debug_assertions, test))]
     early_println!("[vm] kernel_vm_init: switch (ttbr0/arch-dependent)...");
     root_page_table.switch(manager.get_asid());
+
+    // Initialize the ioremap subsystem now that the kernel VM manager and heap
+    // are ready.  Device drivers call ioremap() to map their MMIO regions
+    // dynamically instead of relying on a static identity mapping.
+    ioremap::ioremap_init();
+
+    early_println!(
+        "IOREMAP region            : {:#018x} - {:#018x}",
+        crate::environment::IOREMAP_START,
+        crate::environment::IOREMAP_END,
+    );
 
     #[cfg(any(debug_assertions, test))]
     early_println!("[vm] kernel_vm_init: done");
@@ -298,22 +283,6 @@ pub fn user_kernel_vm_init(task: &Task) {
     task.allocate_stack_pages(KERNEL_VM_STACK_START, KERNEL_VM_STACK_SIZE / PAGE_SIZE)
         .map_err(|e| panic!("Failed to allocate kernel stack pages: {}", e))
         .unwrap();
-
-    // Map device memory areas (architecture-specific)
-    for dev_area in get_device_memory_areas() {
-        let dev_map = VirtualMemoryMap {
-            vmarea: dev_area,
-            pmarea: dev_area,
-            permissions: VirtualMemoryPermission::Read as usize
-                | VirtualMemoryPermission::Write as usize,
-            is_shared: true, // Device memory should be shared
-            owner: None,
-        };
-        task.vm_manager
-            .add_memory_map(dev_map)
-            .map_err(|e| panic!("Failed to add device memory map: {}", e))
-            .unwrap();
-    }
 
     crate::arch::vm::setup_trampoline_for_user(&task.vm_manager);
 

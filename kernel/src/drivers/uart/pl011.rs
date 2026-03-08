@@ -342,8 +342,16 @@ fn pl011_probe(device_info: &PlatformDeviceInfo) -> Result<(), &'static str> {
         .find(|r| r.res_type == PlatformDeviceResourceType::MEM)
         .ok_or("No memory resource found for PL011")?;
 
-    let base_addr = memory_resource.start;
-    crate::early_println!("PL011 base address: 0x{:x}", base_addr);
+    let paddr = memory_resource.start;
+    let size = memory_resource.end - memory_resource.start + 1;
+    crate::early_println!("PL011 paddr: {:#x}, size: {:#x}", paddr, size);
+
+    // Map the PL011's physical MMIO region into the kernel virtual address space.
+    let base_addr = crate::vm::ioremap(paddr, size).map_err(|e| {
+        crate::early_println!("PL011 ioremap({:#x}, {:#x}) failed: {}", paddr, size, e);
+        e
+    })?;
+    crate::early_println!("PL011 base address (virt): {:#x}", base_addr);
 
     let uart = Arc::new(Pl011Uart::new(base_addr));
 

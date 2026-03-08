@@ -251,7 +251,19 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
         .find(|r| r.res_type == PlatformDeviceResourceType::MEM)
         .ok_or("Memory resource not found")?;
 
-    let base_addr = mem_res.start as usize;
+    let paddr = mem_res.start;
+    let size = mem_res.end - mem_res.start + 1;
+
+    // Map the CLINT's physical MMIO region into the kernel virtual address space.
+    let base_addr = crate::vm::ioremap(paddr, size).map_err(|e| {
+        crate::early_println!(
+            "[interrupt] CLINT ioremap({:#x}, {:#x}) failed: {}",
+            paddr,
+            size,
+            e
+        );
+        e
+    })?;
 
     // Read the timebase frequency once from device tree
     // Prefer the timebase frequency provided by the device tree.

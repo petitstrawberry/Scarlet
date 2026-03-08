@@ -438,15 +438,44 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
         .filter(|r| matches!(r.res_type, PlatformDeviceResourceType::MEM))
         .collect();
 
-    let dist_base_addr = mem_resources
+    let dist_paddr = mem_resources
         .get(0)
-        .map(|r| r.start as usize)
+        .map(|r| r.start)
         .ok_or("No memory resource found for GICv3 distributor")?;
+    let dist_size = mem_resources
+        .get(0)
+        .map(|r| r.end - r.start + 1)
+        .unwrap_or(0x10000);
 
-    let redist_base_addr = mem_resources
+    let redist_paddr = mem_resources
         .get(1)
-        .map(|r| r.start as usize)
+        .map(|r| r.start)
         .ok_or("No memory resource found for GICv3 redistributor")?;
+    let redist_size = mem_resources
+        .get(1)
+        .map(|r| r.end - r.start + 1)
+        .unwrap_or(0x20000);
+
+    // Map distributor and redistributor MMIO regions into the kernel virtual address space.
+    let dist_base_addr = crate::vm::ioremap(dist_paddr, dist_size).map_err(|e| {
+        crate::early_println!(
+            "[interrupt] GICv3 dist ioremap({:#x}, {:#x}) failed: {}",
+            dist_paddr,
+            dist_size,
+            e
+        );
+        e
+    })?;
+    let redist_base_addr = crate::vm::ioremap(redist_paddr, redist_size).map_err(|e| {
+        crate::early_println!(
+            "[interrupt] GICv3 redist ioremap({:#x}, {:#x}) failed: {}",
+            redist_paddr,
+            redist_size,
+            e
+        );
+        crate::vm::iounmap(dist_base_addr);
+        e
+    })?;
 
     let max_interrupts = gicd_max_interrupt_id(dist_base_addr);
     // PlatformDeviceInfo doesn't expose CPU topology here; current bring-up is single-core.
