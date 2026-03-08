@@ -548,8 +548,11 @@ mod integration_tests {
         use crate::device::graphics::GraphicsDevice;
         use crate::drivers::graphics::virtio_gpu::VirtioGpuDevice;
 
-        // Use a mock VirtIO GPU base address for testing
-        let virtio_gpu_base_addr = 0x10002000; // Typical VirtIO GPU address
+        // Use a mock VirtIO GPU base address for testing (ioremap to get a virtual address)
+        let virtio_gpu_paddr = 0x10002000usize; // Typical VirtIO GPU physical address
+        let virtio_gpu_base_addr =
+            crate::vm::ioremap(virtio_gpu_paddr, crate::environment::PAGE_SIZE)
+                .expect("ioremap should succeed for VirtIO GPU integration test");
         let device = VirtioGpuDevice::new(virtio_gpu_base_addr);
 
         // Try to initialize the VirtIO GPU graphics capabilities

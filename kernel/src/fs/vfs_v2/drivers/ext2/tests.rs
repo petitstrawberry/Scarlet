@@ -22,6 +22,12 @@ use alloc::{format, string::ToString, sync::Arc, vec, vec::Vec};
 
 use super::*;
 
+#[cfg(target_arch = "riscv64")]
+fn map_ext2_blk() -> usize {
+    crate::vm::ioremap(0x10006000, crate::environment::PAGE_SIZE)
+        .expect("ioremap should succeed for ext2 virtio-blk test device")
+}
+
 #[test_case]
 fn test_ext2_driver_registration() {
     let fs_driver_manager = get_fs_driver_manager();
@@ -605,7 +611,7 @@ fn test_ext2_virtio_blk_filesystem() {
     // early_println!("[Test] Testing ext2 with virtio-blk...");
 
     // Create a virtio-blk device for testing ext2 image on bus.5
-    let base_addr = 0x10006000; // Standard virtio-blk address for QEMU bus.5
+    let base_addr = map_ext2_blk();
     let virtio_device = VirtioBlockDevice::new(base_addr);
 
     // early_println!("[Test] Created virtio-blk device: {}", virtio_device.get_disk_name());
@@ -675,7 +681,7 @@ fn test_ext2_virtio_blk_file_operations() {
     // early_println!("[Test] Testing ext2 file operations with virtio-blk...");
 
     // Create a virtio-blk device for testing
-    let base_addr = 0x10006000; // Standard virtio-blk address for QEMU bus.5
+    let base_addr = map_ext2_blk();
     let virtio_device = VirtioBlockDevice::new(base_addr);
 
     // early_println!("[Test] Created virtio-blk device: {}", virtio_device.get_disk_name());
@@ -843,7 +849,7 @@ fn test_ext2_virtio_blk_write_operations() {
     early_println!("[Test] Starting ext2 virtio-blk write operations test...");
 
     // Create a virtio-blk device for testing
-    let base_addr = 0x10006000; // Standard virtio-blk address for QEMU bus.5
+    let base_addr = map_ext2_blk();
     let virtio_dev = VirtioBlockDevice::new(base_addr);
 
     // Register the ext2 driver if not already registered
@@ -1112,7 +1118,7 @@ fn test_ext2_virtio_blk_delete_operations() {
     early_println!("[Test] Starting ext2 delete operations test...");
 
     // Create a virtio-blk device for testing
-    let base_addr = 0x10006000; // Standard virtio-blk address for QEMU bus.5
+    let base_addr = map_ext2_blk();
     let virtio_dev = VirtioBlockDevice::new(base_addr);
 
     // Register the ext2 driver if not already registered
@@ -1481,7 +1487,7 @@ fn test_ext2_virtio_blk_symlink_operations() {
     let fs_driver_manager = get_fs_driver_manager();
 
     // Get VirtIO block device for ext2-test.img
-    let base_addr = 0x10006000; // Standard virtio-blk address for QEMU bus.5
+    let base_addr = map_ext2_blk();
     let virtio_device = VirtioBlockDevice::new(base_addr);
     let block_device_arc = Arc::new(virtio_device);
 
@@ -1692,7 +1698,7 @@ fn test_ext2_virtio_blk_symlink_edge_cases() {
     let fs_driver_manager = get_fs_driver_manager();
 
     // Get VirtIO block device for ext2-test.img
-    let base_addr = 0x10006000; // Standard virtio-blk address for QEMU bus.5
+    let base_addr = map_ext2_blk();
     let virtio_device = VirtioBlockDevice::new(base_addr);
     let block_device_arc = Arc::new(virtio_device);
 
@@ -1862,7 +1868,7 @@ fn test_ext2_device_file_creation() {
     let fs_driver_manager = get_fs_driver_manager();
 
     // Get VirtIO block device for ext2-test.img
-    let base_addr = 0x10006000; // Standard virtio-blk address for QEMU bus.5
+    let base_addr = map_ext2_blk();
     let virtio_device = VirtioBlockDevice::new(base_addr);
     let block_device_arc = Arc::new(virtio_device);
 

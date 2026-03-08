@@ -1,6 +1,12 @@
 //! Tests for FAT32 filesystem implementation
 
 use super::*;
+
+#[cfg(target_arch = "riscv64")]
+fn map_fat32_blk() -> usize {
+    crate::vm::ioremap(0x10001000, crate::environment::PAGE_SIZE)
+        .expect("ioremap should succeed for fat32 virtio-blk test device")
+}
 use crate::early_println;
 use crate::fs::FileSystemType;
 use crate::fs::get_fs_driver_manager;
@@ -485,7 +491,7 @@ fn test_fat32_virtio_blk_filesystem() {
     early_println!("[Test] Testing FAT32 with virtio-blk...");
 
     // Create a VirtioBlockDevice directly (test environment)
-    let base_addr = 0x10001000; // Standard virtio-blk address for QEMU
+    let base_addr = map_fat32_blk();
     let virtio_device = VirtioBlockDevice::new(base_addr);
 
     early_println!(
@@ -570,7 +576,7 @@ fn test_fat32_virtio_blk_file_operations() {
     early_println!("[Test] Testing FAT32 file operations with virtio-blk...");
 
     // Create a VirtioBlockDevice directly (test environment)
-    let base_addr = 0x10001000; // Standard virtio-blk address for QEMU
+    let base_addr = map_fat32_blk();
     let virtio_device = VirtioBlockDevice::new(base_addr);
 
     early_println!(
@@ -783,7 +789,7 @@ fn test_fat32_virtio_blk_write_operations() {
     early_println!("[Test] Starting FAT32 virtio-blk write operations test...");
 
     // Create a virtio-blk device for testing
-    let base_addr = 0x10001000; // Example base address
+    let base_addr = map_fat32_blk();
     let virtio_dev = crate::drivers::block::virtio_blk::VirtioBlockDevice::new(base_addr);
 
     // Register the FAT32 driver if not already registered
