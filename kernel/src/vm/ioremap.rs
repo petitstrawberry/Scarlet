@@ -78,7 +78,11 @@ impl IoremapAllocatorInner {
 
         // Bump allocation.
         let va = self.next;
-        if va.checked_add(size).map(|end| end > self.end).unwrap_or(true) {
+        if va
+            .checked_add(size)
+            .map(|end| end > self.end)
+            .unwrap_or(true)
+        {
             return None; // Out of virtual address space.
         }
         self.next = va + size;
@@ -207,9 +211,7 @@ pub fn iounmap(vaddr: usize) {
     let km = get_kernel_vm_manager();
     if let Some(map) = km.remove_memory_map_by_addr(vaddr) {
         if let Some(alloc_guard) = IOREMAP_ALLOCATOR.get() {
-            alloc_guard
-                .lock()
-                .free(map.vmarea.start, map.vmarea.size());
+            alloc_guard.lock().free(map.vmarea.start, map.vmarea.size());
         }
     }
 }

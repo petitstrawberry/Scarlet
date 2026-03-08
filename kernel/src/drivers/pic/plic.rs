@@ -422,7 +422,12 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
 
     // Map the PLIC's physical MMIO region into the kernel virtual address space.
     let base_addr = crate::vm::ioremap(paddr, size).map_err(|e| {
-        crate::early_println!("[interrupt] PLIC ioremap({:#x}, {:#x}) failed: {}", paddr, size, e);
+        crate::early_println!(
+            "[interrupt] PLIC ioremap({:#x}, {:#x}) failed: {}",
+            paddr,
+            size,
+            e
+        );
         e
     })?;
 

@@ -1259,7 +1259,12 @@ mod tests {
             crate::println!("[virtio-net test] Testing device {}", name);
 
             // Verify the device has a valid non-zero base address (ioremap'd VA).
-            assert_ne!(device.get_base_addr(), 0, "{} should have valid base addr", name);
+            assert_ne!(
+                device.get_base_addr(),
+                0,
+                "{} should have valid base addr",
+                name
+            );
 
             let mac_result = device.get_mac_address();
             let mtu_result = device.get_mtu();
