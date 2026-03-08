@@ -232,13 +232,8 @@ pub struct PageTable {
 impl PageTable {
     #[inline(always)]
     fn is_canonical_48(vaddr: usize) -> bool {
-        // For 48-bit VA, bits[63:48] must be all 0 when bit47=0, or all 1 when bit47=1.
-        let sign = (vaddr >> 47) & 1;
-        if sign == 0 {
-            (vaddr >> 48) == 0
-        } else {
-            (vaddr >> 48) == 0xffff
-        }
+        let upper = vaddr >> 48;
+        upper == 0 || upper == 0xffff
     }
 
     pub fn new() -> Self {

@@ -645,17 +645,17 @@ pub extern "C" fn start_kernel(boot_info: &BootInfo) -> ! {
     fence(Ordering::SeqCst);
 
     /* After this point, we can use the device manager */
-    /* Serial console also works */
+    /* Serial console also works not earlyconsole, so we can use normal println! from here on */
 
     /* Initialize Graphics Manager and discover graphics devices */
-    early_println!("[Scarlet Kernel] Initializing graphics subsystem...");
+    println!("[Scarlet Kernel] Initializing graphics subsystem...");
 
     // Add extra safety measures for optimized builds
     fence(Ordering::SeqCst); // Ensure device population is complete before proceeding
 
     // Verify that devices are actually registered before attempting graphics initialization
     let device_count = DeviceManager::get_manager().get_devices_count();
-    early_println!(
+    println!(
         "[Scarlet Kernel] Found {} devices before graphics initialization",
         device_count
     );
@@ -663,9 +663,7 @@ pub extern "C" fn start_kernel(boot_info: &BootInfo) -> ! {
     if device_count > 0 {
         GraphicsManager::get_manager().discover_graphics_devices();
     } else {
-        early_println!(
-            "[Scarlet Kernel] Warning: No devices found, skipping graphics initialization"
-        );
+        println!("[Scarlet Kernel] Warning: No devices found, skipping graphics initialization");
     }
 
     fence(Ordering::SeqCst); // Ensure graphics devices are discovered before proceeding
@@ -674,9 +672,9 @@ pub extern "C" fn start_kernel(boot_info: &BootInfo) -> ! {
     test_main();
 
     /* Initcalls */
-    early_println!("[boot] entering initcalls");
+    println!("[boot] entering initcalls");
     call_initcalls();
-    early_println!("[boot] leaving initcalls");
+    println!("[boot] leaving initcalls");
 
     fence(Ordering::SeqCst); // Ensure all initcalls are completed before proceeding
 
@@ -687,19 +685,19 @@ pub extern "C" fn start_kernel(boot_info: &BootInfo) -> ! {
     fence(Ordering::SeqCst); // Ensure interrupt manager is initialized before proceeding
 
     /* Initialize timer */
-    early_println!("[boot] Initializing timer...");
+    println!("[boot] Initializing timer...");
     // Initialize timer for the boot CPU (from BootInfo)
     get_kernel_timer().init(boot_info.cpu_id);
 
     fence(Ordering::SeqCst); // Ensure timer is initialized before proceeding
 
     /* Initialize scheduler */
-    early_println!("[boot] Initializing scheduler...");
+    println!("[boot] Initializing scheduler...");
     let scheduler = get_scheduler();
     fence(Ordering::SeqCst); // Ensure scheduler is initialized before proceeding
 
     /* Initialize global VFS */
-    early_println!("[boot] Initializing global VFS...");
+    println!("[boot] Initializing global VFS...");
     let manager = init_global_vfs_manager();
 
     /* Initialize initramfs from BootInfo if available */
@@ -733,7 +731,7 @@ pub extern "C" fn start_kernel(boot_info: &BootInfo) -> ! {
     }
 
     /* Make init task */
-    early_println!("[boot] Creating initial user task...");
+    println!("[boot] Creating initial user task...");
     let mut task = new_user_task("init".to_string(), 0);
 
     task.init();
@@ -757,34 +755,33 @@ pub extern "C" fn start_kernel(boot_info: &BootInfo) -> ! {
         Ok(()) => {
             task.vm_manager.memmaps_iter_with(|maps| {
                 for map in maps {
-                    early_println!(
+                    println!(
                         "[Scarlet Kernel] Task memory map: {:#x} - {:#x}",
-                        map.vmarea.start,
-                        map.vmarea.end
+                        map.vmarea.start, map.vmarea.end
                     );
                 }
             });
-            early_println!(
+            println!(
                 "[Scarlet Kernel] Init ELF loaded with entry point at {:#x}",
                 task.vcpu.lock().get_pc()
             );
-            early_println!("[Scarlet Kernel] Successfully loaded init ELF into task");
-            early_println!("[Scarlet Kernel] Adding init task to scheduler...");
+            println!("[Scarlet Kernel] Successfully loaded init ELF into task");
+            println!("[Scarlet Kernel] Adding init task to scheduler...");
             let cpu_id = get_cpu().get_cpuid();
-            early_println!("[Scarlet Kernel] cpu_id for init task: {}", cpu_id);
+            println!("[Scarlet Kernel] cpu_id for init task: {}", cpu_id);
             get_scheduler().add_task(task, cpu_id);
-            early_println!("[Scarlet Kernel] Init task added to scheduler");
+            println!("[Scarlet Kernel] Init task added to scheduler");
         }
-        Err(e) => early_println!("[Scarlet Kernel] Error loading ELF into task: {:?}", e),
+        Err(e) => println!("[Scarlet Kernel] Error loading ELF into task: {:?}", e),
     }
 
-    early_println!("[Scarlet Kernel] About to fence before scheduler start...");
+    println!("[Scarlet Kernel] About to fence before scheduler start...");
     fence(Ordering::SeqCst); // Ensure task is added to scheduler before proceeding
-    early_println!("[Scarlet Kernel] Fence complete; about to print scheduler start...");
+    println!("[Scarlet Kernel] Fence complete; about to print scheduler start...");
 
-    // Use early_println here to avoid any potential console lock issues.
-    early_println!("[Scarlet Kernel] Scheduler will start...");
-    early_println!("[Scarlet Kernel] Calling start_scheduler()...");
+    // Use println here to avoid any potential console lock issues.
+    println!("[Scarlet Kernel] Scheduler will start...");
+    println!("[Scarlet Kernel] Calling start_scheduler()...");
 
     let next_task_id = scheduler.start_scheduler();
     if let Some(next_task_id) = next_task_id {
@@ -794,7 +791,7 @@ pub extern "C" fn start_kernel(boot_info: &BootInfo) -> ! {
         crate::arch::first_switch_to_user(next_task);
     }
 
-    early_println!("[Scarlet Kernel] No runnable task; entering idle loop");
+    println!("[Scarlet Kernel] No runnable task; entering idle loop");
     loop {
         crate::arch::instruction::idle();
     }

@@ -11,6 +11,7 @@ use crate::device::fdt::FdtManager;
 use crate::early_println;
 use crate::fs::FileSystemError;
 use crate::fs::VfsManager;
+use crate::println;
 use crate::vm::vmem::MemoryArea;
 use alloc::format;
 use alloc::string::{String, ToString};
@@ -93,7 +94,7 @@ fn mount_initramfs(
         unsafe { core::slice::from_raw_parts(initramfs.start as *const u8, initramfs.size()) };
     let fs = crate::fs::vfs_v2::drivers::cpiofs::CpioFS::new("initramfs".to_string(), cpio_data)?;
     manager.mount(fs, "/", 0)?;
-    early_println!("[InitRamFS] Successfully mounted initramfs at root directory");
+    println!("[InitRamFS] Successfully mounted initramfs at root directory");
     Ok(())
 }
 
