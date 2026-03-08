@@ -175,26 +175,48 @@ pub const fn phys_to_virt(paddr: usize) -> usize {
 | Device DMA address | Already PA | `desc.addr = translate_vaddr(vaddr)` (returns PA) |
 | Free raw pages | `phys_to_virt()` | `free_raw_pages(phys_to_virt(paddr), n)` |
 
-## Transition Plan
+## IOREMAP Region
 
-### Current State
-- Identity mapping: `VA == PA`
-- `virt_to_phys()` and `phys_to_virt()` are identity functions
-- All conversion calls are in place
+The IOREMAP region provides virtual address space for dynamically mapping physical device MMIO regions at runtime.  Unlike the legacy approach of statically identity-mapping device memory (VA == PA) at boot, drivers now call `ioremap(paddr, size)` to obtain a kernel virtual address for their MMIO registers.  `iounmap(vaddr)` releases the mapping when the device is removed.
 
-### Target State
-- Higher Half Kernel with HHDM
-- Kernel linked at `KERNEL_BASE` (VMA) but loaded at physical address (LMA)
-- Boot code establishes HHDM mapping before jumping to kernel proper
-- `virt_to_phys()` and `phys_to_virt()` apply `HHDM_OFFSET`
+```
+          IOREMAP Region (both RISC-V and AArch64)
 
-### Migration Steps
+  0xFFFF_C000_3FFF_FFFF ──── IOREMAP_END
+                              │
+                              │  IOREMAP Region (1 GiB)
+                              │  Dynamically-allocated device MMIO mappings
+                              │  (Linux-style ioremap)
+                              │
+  0xFFFF_C000_0000_0000 ──── IOREMAP_START
+```
 
-1. **Update linker scripts** - Set kernel VMA to higher half address
-2. **Update `addr.rs`** - Add `HHDM_OFFSET` constant and implement real translation
-3. **Update boot code** - Create early page tables with HHDM mapping
-4. **Update `kernel_vm_init()`** - Set `vmarea != pmarea` using HHDM offset
-5. **Test thoroughly** - Verify all 527+ tests still pass
+### Constants
+
+```rust
+pub const IOREMAP_START: usize = 0xFFFF_C000_0000_0000;
+pub const IOREMAP_END:   usize = 0xFFFF_C000_3FFF_FFFF; // 1 GiB
+```
+
+These constants are shared between RISC-V and AArch64 since the region falls in the same canonical gap between `HHDM_END` (`0xFFFF_BFFF_FFFF_FFFF`) and the kernel image (`0xFFFF_FFFF_8000_0000`).
+
+### API
+
+```rust
+/// Map a physical MMIO region into the kernel virtual address space.
+pub fn ioremap(paddr: usize, size: usize) -> Result<usize, &'static str>;
+
+/// Unmap a previously ioremap'd region.
+pub fn iounmap(vaddr: usize);
+```
+
+### Design
+
+- The allocator uses a bump pointer with a first-fit free list for reuse.
+- `ioremap_init()` is called once at the end of `kernel_vm_init()`.
+- Each mapping is registered in the kernel `VirtualMemoryManager` so that
+  `translate_to_phys()` and page-fault handlers see it correctly.
+- Page table entries are installed (and TLB flushed) via the normal `map_memory_area` path.
 
 ## References
 
