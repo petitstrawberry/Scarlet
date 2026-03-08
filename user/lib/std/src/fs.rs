@@ -1133,7 +1133,11 @@ pub fn parse_dir_entry(buf: &[u8]) -> Option<DirectoryEntryRaw> {
         return None;
     }
 
-    unsafe { Some(*(buf.as_ptr() as *const DirectoryEntryRaw)) }
+    unsafe {
+        Some(core::ptr::read_unaligned(
+            buf.as_ptr() as *const DirectoryEntryRaw
+        ))
+    }
 }
 
 /// List all files and directories in a directory

@@ -20,6 +20,7 @@ static mut EARLY_BOOTINFO: MaybeUninit<BootInfo> = MaybeUninit::uninit();
 pub extern "C" fn arch_start_kernel() -> ! {
     init_bss();
     mask_exceptions();
+    prepare_el1_runtime();
 
     let hhdm = response(HHDM_REQUEST.get_response(), "hhdm");
     let executable = response(
@@ -127,52 +128,13 @@ fn mask_exceptions() {
 
 #[inline(always)]
 fn prepare_el1_runtime() {
-    let current_el = {
-        let value: u64;
-        unsafe {
-            asm!("mrs {0}, CurrentEL", out(reg) value, options(nostack));
-        }
-        ((value >> 2) & 0x3) as usize
-    };
-    if current_el == 2 {
-        unsafe {
-            asm!(
-                "mov x0, #(1 << 31)",
-                "orr x0, x0, #(1 << 4)",
-                "orr x0, x0, #(1 << 3)",
-                "msr hcr_el2, x0",
-                "isb",
-                "mov x0, sp",
-                "msr sp_el1, x0",
-                "mov x0, #(1 << 0)",
-                "orr x0, x0, #(1 << 1)",
-                "orr x0, x0, #(1 << 8)",
-                "orr x0, x0, #(1 << 9)",
-                "msr cnthctl_el2, x0",
-                "msr cntvoff_el2, xzr",
-                "mov x0, #0x3c5",
-                "msr spsr_el2, x0",
-                "adr x0, 2f",
-                "msr elr_el2, x0",
-                "eret",
-                "2:",
-                out("x0") _,
-                options(nostack)
-            );
-        }
-    } else if current_el != 1 {
-        panic!(
-            "Limine entered AArch64 kernel at unsupported EL{}",
-            current_el
-        );
-    }
-
     unsafe {
         asm!(
-            "mov x0, #(3 << 20)",
-            "msr cpacr_el1, x0",
+            "mov {tmp}, sp",
+            "msr spsel, #1",
+            "mov sp, {tmp}",
             "isb",
-            out("x0") _,
+            tmp = lateout(reg) _,
             options(nostack)
         );
     }
