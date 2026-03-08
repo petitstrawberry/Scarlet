@@ -160,7 +160,7 @@ fi
 qemu-system-aarch64 \
     -machine virt,gic-version=3,acpi=off \
     -cpu cortex-a57 \
-    -m 2G \
+    -m 8G \
     -nographic \
     -serial mon:stdio \
     --no-reboot \
