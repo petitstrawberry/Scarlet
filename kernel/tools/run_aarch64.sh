@@ -5,6 +5,8 @@ set -o pipefail
 # Check for debug mode environment variable or command line argument
 DEBUG_MODE=${SCARLET_DEBUG_MODE:-false}
 KERNEL_PATH=""
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+KERNEL_DIR="$(dirname "$SCRIPT_DIR")"
 
 # Parse command line arguments
 while [[ $# -gt 0 ]]; do
@@ -23,9 +25,6 @@ done
 
 # If no kernel path provided, try to find the default build
 if [ -z "$KERNEL_PATH" ]; then
-    SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-    KERNEL_DIR="$(dirname "$SCRIPT_DIR")"
-    
     if [ "$DEBUG_MODE" = "true" ]; then
         KERNEL_PATH="$KERNEL_DIR/target/aarch64-unknown-none-elf/debug/kernel"
     else
@@ -38,6 +37,16 @@ if [ -z "$KERNEL_PATH" ]; then
     fi
 fi
 
+if [ "${KERNEL_PATH#/}" = "$KERNEL_PATH" ]; then
+    case "$KERNEL_PATH" in
+        target/*)
+            KERNEL_PATH="$KERNEL_DIR/$KERNEL_PATH"
+            ;;
+        *)
+            ;;
+    esac
+fi
+
 if [ "$DEBUG_MODE" = "true" ]; then
     echo "Starting qemu-system-aarch64 in debug mode with gdb server..."
     DEBUG_FLAGS="-gdb tcp::12345 -S"
@@ -46,7 +55,6 @@ else
     DEBUG_FLAGS=""
 fi
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR" && cd .. && cd .. && pwd)"
 BOOT_IMAGE="$PROJECT_ROOT/mkfs/dist/limine-aarch64-boot.img"
 ROOTFS_IMAGE="$PROJECT_ROOT/mkfs/dist/rootfs.img"
@@ -57,7 +65,10 @@ if [ ! -f "$KERNEL_PATH" ]; then
 fi
 
 echo "Rebuilding Limine AArch64 boot image from $KERNEL_PATH"
-KERNEL_ELF="$KERNEL_PATH" sh "$PROJECT_ROOT/mkfs/make_limine_aarch64_image.sh"
+if ! KERNEL_ELF="$KERNEL_PATH" sh "$PROJECT_ROOT/mkfs/make_limine_aarch64_image.sh"; then
+    echo "Error: failed to rebuild Limine AArch64 boot image"
+    exit 1
+fi
 
 QEMU_DEBUG_ARGS=""
 

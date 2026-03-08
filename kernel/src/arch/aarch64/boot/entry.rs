@@ -2,15 +2,15 @@ use core::arch::{asm, naked_asm};
 use core::mem::MaybeUninit;
 
 use crate::boot::limine::{
-    DTB_REQUEST, EXECUTABLE_ADDRESS_REQUEST, HHDM_REQUEST, MEMMAP_REQUEST, MODULE_REQUEST,
     ensure_base_revision_supported, module_area, reserve_front, response, select_usable_region,
+    DTB_REQUEST, EXECUTABLE_ADDRESS_REQUEST, HHDM_REQUEST, MEMMAP_REQUEST, MODULE_REQUEST,
 };
-use crate::device::fdt::{FdtManager, init_fdt, relocate_fdt};
+use crate::device::fdt::{init_fdt, relocate_fdt, FdtManager};
 use crate::environment::STACK_SIZE;
-use crate::mem::{KERNEL_STACK, init_bss};
+use crate::mem::{init_bss, KERNEL_STACK};
 use crate::vm::addr::{init_limine_addressing, phys_to_virt};
 use crate::vm::vmem::MemoryArea;
-use crate::{BootInfo, DeviceSource, start_ap, start_kernel};
+use crate::{start_ap, start_kernel, BootInfo, DeviceSource};
 
 static mut EARLY_BOOTINFO: MaybeUninit<BootInfo> = MaybeUninit::uninit();
 
@@ -96,7 +96,7 @@ pub extern "C" fn arch_start_kernel() -> ! {
 
     unsafe {
         let stack_top = (&raw const KERNEL_STACK) as *const _ as usize + STACK_SIZE * (cpu_id + 1);
-        EARLY_BOOTINFO.write(bootinfo);
+        (&raw mut EARLY_BOOTINFO).write(MaybeUninit::new(bootinfo));
         let bootinfo_ptr = (&raw const EARLY_BOOTINFO).cast::<BootInfo>();
         switch_stack_and_jump(
             start_kernel as *const () as usize,
