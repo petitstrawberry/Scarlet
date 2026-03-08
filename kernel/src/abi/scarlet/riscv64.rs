@@ -16,12 +16,11 @@ use core::sync::atomic::Ordering;
 
 use crate::{
     arch::{Trapframe, vm},
-    early_initcall,
     fs::{
         FileSystemError, FileSystemErrorKind, SeekFrom, VfsManager, drivers::overlayfs::OverlayFS,
     },
     ipc::event::{Event, EventContent, EventPriority, ProcessControlType},
-    register_abi,
+    late_initcall, register_abi,
     syscall::syscall_handler,
     task::elf_loader::{
         ExecutionMode, LoadStrategy, LoadTarget, analyze_and_load_elf_with_strategy,
@@ -1364,4 +1363,4 @@ fn register_scarlet_abi() {
     register_abi!(ScarletAbi);
 }
 
-early_initcall!(register_scarlet_abi);
+late_initcall!(register_scarlet_abi);

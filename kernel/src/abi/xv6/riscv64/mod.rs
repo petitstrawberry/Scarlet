@@ -28,11 +28,10 @@ use crate::{
         },
     },
     arch::{self, IntRegisters},
-    early_initcall,
     fs::{
         FileSystemError, FileSystemErrorKind, SeekFrom, VfsManager, drivers::overlayfs::OverlayFS,
     },
-    register_abi,
+    late_initcall, register_abi,
     task::elf_loader::load_elf_into_task,
     vm::setup_user_stack,
 };
@@ -489,4 +488,4 @@ fn register_xv6_abi() {
     register_abi!(Xv6Riscv64Abi);
 }
 
-early_initcall!(register_xv6_abi);
+late_initcall!(register_xv6_abi);

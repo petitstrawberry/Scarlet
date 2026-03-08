@@ -23,11 +23,10 @@ use self::time::PosixTimer;
 use crate::{
     abi::AbiModule,
     arch::{self, IntRegisters, Trapframe},
-    early_initcall,
     fs::{
         FileSystemError, FileSystemErrorKind, SeekFrom, VfsManager, drivers::overlayfs::OverlayFS,
     },
-    register_abi,
+    late_initcall, register_abi,
     task::elf_loader::{
         ExecutionMode, LoadStrategy, LoadTarget, analyze_and_load_elf_with_strategy,
     },
@@ -1025,4 +1024,4 @@ fn register_linux_abi() {
     register_abi!(LinuxRiscv64Abi);
 }
 
-early_initcall!(register_linux_abi);
+late_initcall!(register_linux_abi);
