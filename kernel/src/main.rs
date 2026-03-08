@@ -257,6 +257,7 @@ pub mod boot;
 pub mod device;
 pub mod drivers;
 pub mod earlycon;
+pub mod earlyfb;
 pub mod environment;
 pub mod executor;
 pub mod fs;

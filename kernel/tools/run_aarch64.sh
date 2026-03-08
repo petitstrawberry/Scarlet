@@ -171,7 +171,7 @@ qemu-system-aarch64 \
     -device virtio-blk-device,drive=boot,bus=virtio-mmio-bus.0 \
     -drive id=rootfs,file="$ROOTFS_IMAGE",format=raw,if=none \
     -device virtio-blk-device,drive=rootfs,bus=virtio-mmio-bus.1 \
-    -display none \
+    -display vnc=:0 \
     -device virtio-gpu-device,bus=virtio-mmio-bus.2 \
     -netdev user,id=net0 \
     -device virtio-net-device,netdev=net0,bus=virtio-mmio-bus.3 \

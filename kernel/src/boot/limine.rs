@@ -1,8 +1,8 @@
 use limine::BaseRevision;
 use limine::memory_map::{Entry, EntryType};
 use limine::request::{
-    DeviceTreeBlobRequest, ExecutableAddressRequest, HhdmRequest, MemoryMapRequest, ModuleRequest,
-    RequestsEndMarker, RequestsStartMarker,
+    DeviceTreeBlobRequest, ExecutableAddressRequest, FramebufferRequest, HhdmRequest,
+    MemoryMapRequest, ModuleRequest, PagingModeRequest, RequestsEndMarker, RequestsStartMarker,
 };
 
 use crate::vm::addr::virt_to_phys;
@@ -22,6 +22,10 @@ pub(crate) static HHDM_REQUEST: HhdmRequest = HhdmRequest::new();
 
 #[unsafe(link_section = ".limine_requests")]
 #[used]
+pub(crate) static PAGING_MODE_REQUEST: PagingModeRequest = PagingModeRequest::new();
+
+#[unsafe(link_section = ".limine_requests")]
+#[used]
 pub(crate) static EXECUTABLE_ADDRESS_REQUEST: ExecutableAddressRequest =
     ExecutableAddressRequest::new();
 
@@ -32,6 +36,10 @@ pub(crate) static MEMMAP_REQUEST: MemoryMapRequest = MemoryMapRequest::new();
 #[unsafe(link_section = ".limine_requests")]
 #[used]
 pub(crate) static DTB_REQUEST: DeviceTreeBlobRequest = DeviceTreeBlobRequest::new();
+
+#[unsafe(link_section = ".limine_requests")]
+#[used]
+pub(crate) static FRAMEBUFFER_REQUEST: FramebufferRequest = FramebufferRequest::new();
 
 #[unsafe(link_section = ".limine_requests")]
 #[used]

@@ -12,6 +12,7 @@ use core::result::Result;
 
 use crate::arch::vm::new_raw_pagetable;
 use crate::environment::PAGE_SIZE;
+use crate::vm::addr::{phys_to_virt, virt_to_phys};
 use crate::vm::vmem::VirtualMemoryMap;
 use crate::vm::vmem::VirtualMemoryPermission;
 
@@ -291,8 +292,7 @@ impl PageTable {
 
     /// Get TTBR value (like RISC-V's get_val_for_satp())
     pub fn get_val_for_ttbr(&self, asid: u16) -> u64 {
-        let baddr = (crate::vm::addr::kernel_virt_to_phys(self as *const _ as usize) as u64)
-            & 0xffffffffffff;
+        let baddr = (virt_to_phys(self as *const _ as usize) as u64) & 0xffffffffffff;
         let asid_val = (asid as u64) << 48;
         baddr | asid_val
     }
@@ -434,7 +434,7 @@ impl PageTable {
                     if !pte.is_table() {
                         return None; // Block entry not supported
                     }
-                    pagetable = (pte.get_ppn() << 12) as *mut PageTable;
+                    pagetable = phys_to_virt(pte.get_ppn() << 12) as *mut PageTable;
                 } else {
                     if !alloc {
                         return None;
@@ -445,7 +445,7 @@ impl PageTable {
                         return None;
                     }
                     pte.clear_all();
-                    pte.set_ppn(new_table as usize >> 12);
+                    pte.set_ppn(virt_to_phys(new_table as usize) >> 12);
                     pte.set_table();
 
                     // Ensure the parent table PTE update is visible to the walker.
