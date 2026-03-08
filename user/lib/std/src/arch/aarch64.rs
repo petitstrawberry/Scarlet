@@ -21,7 +21,7 @@ unsafe extern "Rust" {
 }
 #[unsafe(link_section = ".init")]
 #[unsafe(export_name = "_start")]
-pub fn _start(x0: usize, x1: usize) -> ! {
+pub extern "C" fn _start(x0: usize, x1: usize) -> ! {
     // Get argc and argv from AArch64 calling convention registers
     // x0 = argc, x1 = argv (set by kernel's ScarletAbi)
     let argc = x0;
