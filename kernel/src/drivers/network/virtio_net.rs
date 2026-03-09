@@ -827,14 +827,24 @@ mod tests {
     use super::*;
     use alloc::vec;
 
+    /// Map a VirtIO MMIO device at `paddr` for use in tests.
+    /// Returns the ioremap'd virtual address.
+    fn map_net(paddr: usize) -> usize {
+        crate::vm::ioremap(paddr, crate::environment::PAGE_SIZE)
+            .expect("ioremap should succeed for VirtIO Net test device")
+    }
+
     #[test_case]
     fn test_virtio_net_device_creation() {
-        let device = VirtioNetDevice::new(0x10003000);
-        assert_eq!(device.get_base_addr(), 0x10003000);
+        let vaddr = map_net(0x10003000);
+        let device = VirtioNetDevice::new(vaddr);
+        // get_base_addr returns the ioremap'd virtual address.
+        assert_eq!(device.get_base_addr(), vaddr);
         assert_eq!(device.get_virtqueue_count(), 2);
         assert_eq!(device.device_type(), DeviceType::Network);
         assert_eq!(device.name(), "virtio-net");
         assert_eq!(device.get_interface_name(), "virtio-net");
+        crate::vm::iounmap(vaddr);
     }
 
     #[test_case]
@@ -851,7 +861,7 @@ mod tests {
 
     #[test_case]
     fn test_virtio_net_device_config() {
-        let device = VirtioNetDevice::new(0x10003000);
+        let device = VirtioNetDevice::new(map_net(0x10003000));
 
         // Device should have default configuration after creation
         assert!(device.get_mac_address().is_ok());
@@ -865,7 +875,7 @@ mod tests {
 
     #[test_case]
     fn test_virtio_net_initialization() {
-        let mut device = VirtioNetDevice::new(0x10003000);
+        let mut device = VirtioNetDevice::new(map_net(0x10003000));
 
         // Test network initialization
         assert!(device.init_network().is_ok());
@@ -876,7 +886,7 @@ mod tests {
 
     #[test_case]
     fn test_virtio_net_link_status() {
-        let device = VirtioNetDevice::new(0x10003000);
+        let device = VirtioNetDevice::new(map_net(0x10003000));
 
         // Link status depends on device configuration
         // In test environment, this may vary
@@ -886,7 +896,7 @@ mod tests {
 
     #[test_case]
     fn test_virtio_net_statistics() {
-        let mut device = VirtioNetDevice::new(0x10003000);
+        let mut device = VirtioNetDevice::new(map_net(0x10003000));
         device.init_network().unwrap();
 
         let initial_stats = device.get_stats();
@@ -911,7 +921,7 @@ mod tests {
 
     #[test_case]
     fn test_virtio_net_promiscuous_mode() {
-        let device = VirtioNetDevice::new(0x10003000);
+        let device = VirtioNetDevice::new(map_net(0x10003000));
 
         // Should succeed (no-op in current implementation)
         assert!(device.set_promiscuous_mode(true).is_ok());
@@ -920,7 +930,7 @@ mod tests {
 
     #[test_case]
     fn test_virtio_net_tx_functionality() {
-        let device = VirtioNetDevice::new(0x10003000);
+        let device = VirtioNetDevice::new(map_net(0x10003000));
 
         // Create a test packet
         let test_data = vec![0x45, 0x00, 0x00, 0x3c]; // Simple IP header start
@@ -944,7 +954,7 @@ mod tests {
 
     #[test_case]
     fn test_virtio_net_tx_with_multiple_packets() {
-        let device = VirtioNetDevice::new(0x10003000);
+        let device = VirtioNetDevice::new(map_net(0x10003000));
 
         // Test multiple packet transmission
         for i in 0..3 {
@@ -964,14 +974,14 @@ mod tests {
     #[test_case]
     fn test_virtio_net_multiple_devices() {
         // Test creating multiple devices (simulating net0, net1, net2)
-        let device1 = VirtioNetDevice::new(0x10003000); // net0 - user netdev
-        let device2 = VirtioNetDevice::new(0x10004000); // net1 - hub netdev
-        let device3 = VirtioNetDevice::new(0x10005000); // net2 - hub netdev
+        let device1 = VirtioNetDevice::new(map_net(0x10003000)); // net0 - user netdev
+        let device2 = VirtioNetDevice::new(map_net(0x10004000)); // net1 - hub netdev
+        let device3 = VirtioNetDevice::new(map_net(0x10005000)); // net2 - hub netdev
 
-        // Verify each device has unique base addresses
-        assert_eq!(device1.get_base_addr(), 0x10003000);
-        assert_eq!(device2.get_base_addr(), 0x10004000);
-        assert_eq!(device3.get_base_addr(), 0x10005000);
+        // Verify each device has a unique ioremap'd virtual address.
+        assert_ne!(device1.get_base_addr(), device2.get_base_addr());
+        assert_ne!(device2.get_base_addr(), device3.get_base_addr());
+        assert_ne!(device1.get_base_addr(), device3.get_base_addr());
 
         // All devices should have proper configuration
         assert!(device1.get_mac_address().is_ok());
@@ -995,8 +1005,8 @@ mod tests {
     fn test_virtio_net_bidirectional_hub_communication() {
         // Test hub-connected devices for bidirectional communication
         // This simulates the actual QEMU setup with hub networking
-        let device_net1 = VirtioNetDevice::new(0x10004000); // net1 - hub device 1
-        let device_net2 = VirtioNetDevice::new(0x10005000); // net2 - hub device 2
+        let device_net1 = VirtioNetDevice::new(map_net(0x10004000)); // net1 - hub device 1
+        let device_net2 = VirtioNetDevice::new(map_net(0x10005000)); // net2 - hub device 2
 
         crate::println!("[virtio-net test] Testing bidirectional hub communication");
         crate::println!(
@@ -1104,9 +1114,9 @@ mod tests {
         );
 
         let devices = [
-            VirtioNetDevice::new(0x10003000), // bus.2 - net0 (user)
-            VirtioNetDevice::new(0x10004000), // bus.3 - net1 (hub)
-            VirtioNetDevice::new(0x10005000), // bus.4 - net2 (hub)
+            VirtioNetDevice::new(map_net(0x10003000)), // bus.2 - net0 (user)
+            VirtioNetDevice::new(map_net(0x10004000)), // bus.3 - net1 (hub)
+            VirtioNetDevice::new(map_net(0x10005000)), // bus.4 - net2 (hub)
         ];
 
         for (i, device) in devices.iter().enumerate() {
@@ -1131,8 +1141,8 @@ mod tests {
     #[test_case]
     fn test_virtio_net_hub_loopback_with_polling() {
         // Initialize both devices for network operations
-        let mut sender_mut = VirtioNetDevice::new(0x10004000);
-        let mut receiver_mut = VirtioNetDevice::new(0x10005000);
+        let mut sender_mut = VirtioNetDevice::new(map_net(0x10004000));
+        let mut receiver_mut = VirtioNetDevice::new(map_net(0x10005000));
 
         let _ = sender_mut.init_network();
         let _ = receiver_mut.init_network();
@@ -1234,21 +1244,27 @@ mod tests {
         // -netdev hubport,id=net1,hubid=0
         // -netdev hubport,id=net2,hubid=0
 
-        let device_net0 = VirtioNetDevice::new(0x10003000); // bus.2 -> user netdev
-        let device_net1 = VirtioNetDevice::new(0x10004000); // bus.3 -> hub netdev
-        let device_net2 = VirtioNetDevice::new(0x10005000); // bus.4 -> hub netdev
+        let device_net0 = VirtioNetDevice::new(map_net(0x10003000)); // bus.2 -> user netdev
+        let device_net1 = VirtioNetDevice::new(map_net(0x10004000)); // bus.3 -> hub netdev
+        let device_net2 = VirtioNetDevice::new(map_net(0x10005000)); // bus.4 -> hub netdev
 
-        // Verify all devices are properly configured
+        // Verify all devices are properly configured with distinct ioremap'd addresses.
         let devices = [
-            ("net0", &device_net0, 0x10003000),
-            ("net1", &device_net1, 0x10004000),
-            ("net2", &device_net2, 0x10005000),
+            ("net0", &device_net0),
+            ("net1", &device_net1),
+            ("net2", &device_net2),
         ];
 
-        for (name, device, expected_addr) in &devices {
+        for (name, device) in &devices {
             crate::println!("[virtio-net test] Testing device {}", name);
 
-            assert_eq!(device.get_base_addr(), *expected_addr);
+            // Verify the device has a valid non-zero base address (ioremap'd VA).
+            assert_ne!(
+                device.get_base_addr(),
+                0,
+                "{} should have valid base addr",
+                name
+            );
 
             let mac_result = device.get_mac_address();
             let mtu_result = device.get_mtu();

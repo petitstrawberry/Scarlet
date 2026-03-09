@@ -849,22 +849,32 @@ pub mod tests {
     use super::*;
     use alloc::vec;
 
+    /// Physical address of the VirtIO Block device on QEMU RISC-V virt.
+    const VIRTIO_BLK_PADDR: usize = 0x10001000;
+
+    /// Map the VirtIO Block MMIO region for use in tests.
+    fn map_blk() -> usize {
+        crate::vm::ioremap(VIRTIO_BLK_PADDR, crate::environment::PAGE_SIZE)
+            .expect("ioremap should succeed for VirtIO Block test device")
+    }
+
     #[test_case]
     fn test_virtio_block_device_init() {
-        let base_addr = 0x10001000; // Example base address
-        let device = VirtioBlockDevice::new(base_addr);
+        let vaddr = map_blk();
+        let device = VirtioBlockDevice::new(vaddr);
 
         assert_eq!(device.get_disk_name(), "virtio-blk");
         assert_eq!(
             device.get_disk_size(),
             (*device.capacity.read() * *device.sector_size.read() as u64) as usize
         );
+        crate::vm::iounmap(vaddr);
     }
 
     #[test_case]
     fn test_virtio_block_device() {
-        let base_addr = 0x10001000; // Example base address
-        let device = VirtioBlockDevice::new(base_addr);
+        let vaddr = map_blk();
+        let device = VirtioBlockDevice::new(vaddr);
 
         assert_eq!(device.get_disk_name(), "virtio-blk");
         assert_eq!(
@@ -900,5 +910,6 @@ pub mod tests {
             assert_eq!(buffer[510], 0x55);
             assert_eq!(buffer[511], 0xAA);
         }
+        crate::vm::iounmap(vaddr);
     }
 }

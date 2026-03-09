@@ -344,8 +344,16 @@ fn uart_probe(device_info: &PlatformDeviceInfo) -> Result<(), &'static str> {
         .find(|r| r.res_type == PlatformDeviceResourceType::MEM)
         .ok_or("No memory resource found for UART")?;
 
-    let base_addr = memory_resource.start;
-    crate::early_println!("UART base address: 0x{:x}", base_addr);
+    let paddr = memory_resource.start;
+    let size = memory_resource.end - memory_resource.start + 1;
+    crate::early_println!("UART paddr: {:#x}, size: {:#x}", paddr, size);
+
+    // Map the UART's physical MMIO region into the kernel virtual address space.
+    let base_addr = crate::vm::ioremap(paddr, size).map_err(|e| {
+        crate::early_println!("UART ioremap({:#x}, {:#x}) failed: {}", paddr, size, e);
+        e
+    })?;
+    crate::early_println!("UART base address (virt): {:#x}", base_addr);
 
     // Create UART instance
     let uart = Arc::new(Uart::new(base_addr));

@@ -829,43 +829,62 @@ impl TimerHandler for FramebufferUpdateHandler {
 mod tests {
     use super::*;
 
+    /// Physical address of the VirtIO GPU device on QEMU RISC-V virt.
+    const VIRTIO_GPU_PADDR: usize = 0x10002000;
+
+    /// Map the VirtIO GPU MMIO region for use in tests.
+    /// Returns the virtual address to pass to `VirtioGpuDevice::new`.
+    fn map_gpu() -> usize {
+        crate::vm::ioremap(VIRTIO_GPU_PADDR, crate::environment::PAGE_SIZE)
+            .expect("ioremap should succeed for VirtIO GPU test device")
+    }
+
     #[test_case]
     fn test_virtio_gpu_device_creation() {
-        let device = VirtioGpuDevice::new(0x10002000);
-        assert_eq!(device.core.lock().get_base_addr(), 0x10002000);
+        let vaddr = map_gpu();
+        let device = VirtioGpuDevice::new(vaddr);
+        // The stored base address is the virtual (ioremap'd) address, not the physical one.
+        assert_eq!(device.core.lock().get_base_addr(), vaddr);
         assert_eq!(device.core.lock().get_virtqueue_count(), 2);
         assert_eq!(device.device_type(), DeviceType::Graphics);
         assert_eq!(device.name(), "virtio-gpu");
         assert_eq!(device.core.lock().get_display_name(), "virtio-gpu");
+        crate::vm::iounmap(vaddr);
     }
 
     #[test_case]
     fn test_virtio_gpu_resource_id_generation() {
-        let device = VirtioGpuDevice::new(0x10002000);
+        let vaddr = map_gpu();
+        let device = VirtioGpuDevice::new(vaddr);
         assert_eq!(device.core.lock().next_resource_id(), 1);
         assert_eq!(device.core.lock().next_resource_id(), 2);
         assert_eq!(device.core.lock().next_resource_id(), 3);
+        crate::vm::iounmap(vaddr);
     }
 
     #[test_case]
     fn test_virtio_gpu_before_init() {
-        let device = VirtioGpuDevice::new(0x10002000);
-        // Should fail before initialization
+        let vaddr = map_gpu();
+        let device = VirtioGpuDevice::new(vaddr);
+        // Should fail before explicit graphics initialization
         assert!(device.get_framebuffer_config().is_err());
         assert!(device.get_framebuffer_address().is_err());
+        crate::vm::iounmap(vaddr);
     }
 
     #[cfg(target_arch = "riscv64")]
     #[test_case]
     fn test_virtio_gpu_init_graphics() {
-        let mut device = VirtioGpuDevice::new(0x10002000);
+        let vaddr = map_gpu();
+        let mut device = VirtioGpuDevice::new(vaddr);
         device.init_graphics().unwrap();
     }
 
     #[cfg(target_arch = "riscv64")]
     #[test_case]
     fn test_virtio_gpu_framebuffer_operations() {
-        let mut device = VirtioGpuDevice::new(0x10002000);
+        let vaddr = map_gpu();
+        let mut device = VirtioGpuDevice::new(vaddr);
 
         // Initialize the device
         device.init_graphics().unwrap();
@@ -942,7 +961,8 @@ mod tests {
     #[cfg(target_arch = "riscv64")]
     #[test_case]
     fn test_virtio_gpu_pixel_drawing() {
-        let mut device = VirtioGpuDevice::new(0x10002000);
+        let vaddr = map_gpu();
+        let mut device = VirtioGpuDevice::new(vaddr);
         device.init_graphics().unwrap();
 
         let config = device.get_framebuffer_config().unwrap();
@@ -1005,7 +1025,8 @@ mod tests {
     #[cfg(target_arch = "riscv64")]
     #[test_case]
     fn test_virtio_gpu_rectangle_drawing() {
-        let mut device = VirtioGpuDevice::new(0x10002000);
+        let vaddr = map_gpu();
+        let mut device = VirtioGpuDevice::new(vaddr);
         device.init_graphics().unwrap();
 
         let config = device.get_framebuffer_config().unwrap();
@@ -1076,7 +1097,8 @@ mod tests {
     #[cfg(target_arch = "riscv64")]
     #[test_case]
     fn test_virtio_gpu_border_drawing() {
-        let mut device = VirtioGpuDevice::new(0x10002000);
+        let vaddr = map_gpu();
+        let mut device = VirtioGpuDevice::new(vaddr);
         device.init_graphics().unwrap();
 
         let config = device.get_framebuffer_config().unwrap();
@@ -1179,7 +1201,8 @@ mod tests {
     #[cfg(target_arch = "riscv64")]
     #[test_case]
     fn test_virtio_gpu_pixel_format_verification() {
-        let mut device = VirtioGpuDevice::new(0x10002000);
+        let vaddr = map_gpu();
+        let mut device = VirtioGpuDevice::new(vaddr);
         device.init_graphics().unwrap();
 
         let config = device.get_framebuffer_config().unwrap();
@@ -1242,7 +1265,8 @@ mod tests {
     #[cfg(target_arch = "riscv64")]
     #[test_case]
     fn test_virtio_gpu_command_flow_verification() {
-        let mut device = VirtioGpuDevice::new(0x10002000);
+        let vaddr = map_gpu();
+        let mut device = VirtioGpuDevice::new(vaddr);
 
         // Test device initialization and command flow
         crate::early_println!("[Test] Starting VirtIO GPU command flow verification");
@@ -1291,7 +1315,8 @@ mod tests {
     #[cfg(target_arch = "riscv64")]
     #[test_case]
     fn test_virtio_gpu_resource_management() {
-        let mut device = VirtioGpuDevice::new(0x10002000);
+        let vaddr = map_gpu();
+        let mut device = VirtioGpuDevice::new(vaddr);
         device.init_graphics().unwrap();
 
         // Test that resource IDs are managed correctly
