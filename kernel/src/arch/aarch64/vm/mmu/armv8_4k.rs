@@ -11,7 +11,7 @@ use core::arch::asm;
 use core::result::Result;
 
 use crate::arch::vm::new_raw_pagetable;
-use crate::environment::PAGE_SIZE;
+use crate::environment::{IOREMAP_END, IOREMAP_START, PAGE_SIZE};
 use crate::vm::addr::{phys_to_virt, virt_to_phys};
 use crate::vm::vmem::VirtualMemoryMap;
 use crate::vm::vmem::VirtualMemoryPermission;
@@ -357,11 +357,8 @@ impl PageTable {
         pte.set_page();
         pte.set_ppn(paddr >> 12);
 
-        // Determine memory type
         let is_user = VirtualMemoryPermission::User.contained_in(permissions);
-        let is_device = !VirtualMemoryPermission::Execute.contained_in(permissions)
-            && !is_user
-            && !VirtualMemoryPermission::Read.contained_in(permissions);
+        let is_device = !is_user && (IOREMAP_START..=IOREMAP_END).contains(&vaddr);
 
         if is_device {
             pte.set_memory_attr(MemoryAttribute::Device as u8);

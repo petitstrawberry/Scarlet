@@ -490,8 +490,18 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
             e
         })?
     } else {
-        // Fallback: map the CPU interface immediately after the distributor.
-        dist_base_addr + 0x10000
+        let cpu_paddr = dist_paddr + 0x10000;
+        let cpu_size = 0x10000;
+        crate::vm::ioremap(cpu_paddr, cpu_size).map_err(|e| {
+            crate::early_println!(
+                "[interrupt] GIC cpu fallback ioremap({:#x}, {:#x}) failed: {}",
+                cpu_paddr,
+                cpu_size,
+                e
+            );
+            crate::vm::iounmap(dist_base_addr);
+            e
+        })?
     };
 
     // TODO: Parse actual interrupt count and CPU count from device tree
