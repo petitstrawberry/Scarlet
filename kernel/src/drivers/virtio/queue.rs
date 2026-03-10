@@ -316,7 +316,7 @@ impl<'a> VirtQueue<'a> {
 
         // *self.avail.idx = (*self.avail.idx).wrapping_add(1);
 
-        let new_idx = self.avail.idx.wrapping_add(1);
+        let new_idx = unsafe { core::ptr::read_volatile(self.avail.idx) }.wrapping_add(1);
         unsafe {
             core::ptr::write_volatile(self.avail.idx, new_idx);
         }
