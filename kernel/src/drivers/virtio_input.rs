@@ -8,7 +8,7 @@
 
 extern crate alloc;
 
-use crate::vm::addr::virt_to_phys;
+use crate::vm::addr::{phys_to_virt, virt_to_phys};
 use alloc::boxed::Box;
 use alloc::string::ToString;
 use alloc::sync::Arc;
@@ -261,9 +261,9 @@ impl VirtioInputDevice {
         eventq.init();
 
         // Set queue addresses
-        let desc_addr = eventq.get_raw_ptr() as u64;
-        let driver_addr = eventq.avail.flags as *const _ as u64;
-        let device_addr = eventq.used.flags as *const _ as u64;
+        let desc_addr = virt_to_phys(eventq.get_raw_ptr() as usize) as u64;
+        let driver_addr = virt_to_phys(eventq.avail.flags as *const _ as usize) as u64;
+        let device_addr = virt_to_phys(eventq.used.flags as *const _ as usize) as u64;
 
         self.write32_register(Register::QueueDescLow, desc_addr as u32);
         self.write32_register(Register::QueueDescHigh, (desc_addr >> 32) as u32);
@@ -286,9 +286,9 @@ impl VirtioInputDevice {
             let mut statusq = self.statusq.lock();
             statusq.init();
 
-            let desc_addr = statusq.get_raw_ptr() as u64;
-            let driver_addr = statusq.avail.flags as *const _ as u64;
-            let device_addr = statusq.used.flags as *const _ as u64;
+            let desc_addr = virt_to_phys(statusq.get_raw_ptr() as usize) as u64;
+            let driver_addr = virt_to_phys(statusq.avail.flags as *const _ as usize) as u64;
+            let device_addr = virt_to_phys(statusq.used.flags as *const _ as usize) as u64;
 
             self.write32_register(Register::QueueDescLow, desc_addr as u32);
             self.write32_register(Register::QueueDescHigh, (desc_addr >> 32) as u32);
@@ -311,14 +311,11 @@ impl VirtioInputDevice {
         // Allocate single page from PMM for all event buffers
         let buffer_alloc =
             ContiguousPages::new(1).ok_or("Failed to allocate event buffer page from PMM")?;
-        let buffer_base = buffer_alloc.as_ptr() as *mut u8;
         let buffer_phys = buffer_alloc.as_paddr();
 
         for i in 0..queue_size {
             // Calculate offset within the page for this event
             let offset = i * VirtioInputEvent::size();
-            let buffer_ptr = unsafe { buffer_base.add(offset) };
-
             // Allocate descriptor
             let desc_idx = eventq
                 .alloc_desc()
@@ -383,10 +380,9 @@ impl VirtioInputDevice {
                 continue;
             }
 
-            // Read the VirtIO event directly from physical address
-            // Note: In identity-mapped kernel space, physical == virtual
+            let buffer_vaddr = phys_to_virt(buffer_addr as usize);
             let virtio_event =
-                unsafe { core::ptr::read_volatile(buffer_addr as *const VirtioInputEvent) };
+                unsafe { core::ptr::read_volatile(buffer_vaddr as *const VirtioInputEvent) };
 
             // Convert to Scarlet event and push to EventDevice
             self.event_device
@@ -573,6 +569,6 @@ impl crate::device::events::InterruptCapableDevice for VirtioInputDevice {
     }
 
     fn interrupt_id(&self) -> Option<crate::interrupt::InterruptId> {
-        None
+        *self.interrupt_id.lock()
     }
 }
