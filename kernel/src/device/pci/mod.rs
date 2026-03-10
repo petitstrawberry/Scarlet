@@ -270,6 +270,7 @@ mod tests {
             0x0001,
             0x0B,
             0x01,
+            None,
             "virtio_net",
             1,
         );
@@ -287,6 +288,7 @@ mod tests {
             0x0002,
             0x0B,
             0x01,
+            None,
             "virtio_blk",
             2,
         );

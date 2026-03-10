@@ -193,6 +193,7 @@ mod tests {
             0x0000,
             0x0B,
             0x01,
+            None,
             "pci_device",
             1,
         );
@@ -235,6 +236,7 @@ mod tests {
             0x0000,
             0x0B,
             0x01,
+            None,
             "pci_device",
             1,
         );
@@ -263,6 +265,7 @@ mod tests {
             0x0000,
             0x0B,
             0x01,
+            None,
             "pci_device",
             1,
         );
@@ -346,6 +349,7 @@ mod tests {
             0x0001,
             0x0B,
             0x01,
+            None,
             "virtio_pci_device",
             1,
         );
@@ -367,6 +371,7 @@ mod tests {
             0x0002,
             0x0B,
             0x01,
+            None,
             "virtio_pci_device",
             2,
         );
@@ -388,6 +393,7 @@ mod tests {
             0x0000,
             0x0B,
             0x01,
+            None,
             "intel_device",
             3,
         );
@@ -433,6 +439,7 @@ mod tests {
             0x0001,
             0x0B,
             0x01,
+            None,
             "virtio_net",
             1,
         );

@@ -130,6 +130,9 @@ qemu-system-riscv64 \
     -device virtio-keyboard-device,bus=virtio-mmio-bus.3 \
     -device virtio-mouse-device,bus=virtio-mmio-bus.4 \
     -device virtio-rng-device,bus=virtio-mmio-bus.5 \
+    -device qemu-xhci,id=xhci,bus=pcie.0 \
+    -device usb-kbd,bus=xhci.0 \
+    -device usb-mouse,bus=xhci.0 \
     $QEMU_DEBUG_ARGS \
     $DEBUG_FLAGS | tee "$TEMP_OUTPUT"
 

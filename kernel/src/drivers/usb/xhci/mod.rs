@@ -1482,6 +1482,7 @@ mod tests {
             0,
             11,
             1,
+            None,
             "xhci-controller",
             1,
         )

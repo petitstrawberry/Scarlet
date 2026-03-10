@@ -308,6 +308,7 @@ mod tests {
             0x0000,
             0x0B,
             0x01,
+            None,
             "pci_device",
             1,
         );
@@ -332,6 +333,7 @@ mod tests {
             0x0000,
             0x0B,
             0x01,
+            None,
             "pci_device",
             1,
         );

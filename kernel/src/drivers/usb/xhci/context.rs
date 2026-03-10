@@ -225,7 +225,7 @@ impl InputContext {
     fn default_max_packet(speed: u8) -> u16 {
         match speed {
             speed::LOW => 8,
-            speed::FULL => 64,
+            speed::FULL => 8,
             speed::HIGH => 64,
             speed::SUPER => 512,
             _ => 64,
