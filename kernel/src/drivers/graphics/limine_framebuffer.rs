@@ -68,7 +68,7 @@ impl LimineFramebufferDevice {
         let format = pixel_format_from_info(&info)?;
         let minimum_pitch = info.width * format.bytes_per_pixel() as u32;
         if info.pitch < minimum_pitch {
-            return Err("Limine framebuffer pitch is smaller than the logical width");
+            return Err("Limine framebuffer pitch is smaller than the minimum required pitch");
         }
 
         Ok(Self {
@@ -211,6 +211,7 @@ mod tests {
     #[test_case]
     fn test_limine_framebuffer_supports_rgba8888() {
         let info = sample_info(800 * 4, 32, 0, 8, 16);
+        let expected_paddr = crate::vm::addr::virt_to_phys(info.addr);
         let device = LimineFramebufferDevice::new(info).expect("RGBA8888 should be supported");
 
         assert_eq!(
@@ -224,7 +225,7 @@ mod tests {
             device
                 .get_framebuffer_address()
                 .expect("Framebuffer address should be available"),
-            crate::vm::addr::virt_to_phys(info.addr)
+            expected_paddr
         );
     }
 
