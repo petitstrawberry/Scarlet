@@ -1,4 +1,5 @@
 use limine::BaseRevision;
+use limine::framebuffer::MemoryModel;
 use limine::memory_map::{Entry, EntryType};
 use limine::request::{
     DeviceTreeBlobRequest, ExecutableAddressRequest, FramebufferRequest, HhdmRequest,
@@ -86,6 +87,45 @@ pub(crate) fn module_area(
     let start = virt_to_phys(file.addr() as usize);
     let end = start + file.size() as usize - 1;
     Some(MemoryArea::new(start, end))
+}
+
+/// Limine framebuffer metadata exported for later graphics initialization.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LimineFramebufferInfo {
+    pub addr: usize,
+    pub width: u32,
+    pub height: u32,
+    pub pitch: u32,
+    pub bpp: u16,
+    pub red_mask_size: u8,
+    pub red_mask_shift: u8,
+    pub green_mask_size: u8,
+    pub green_mask_shift: u8,
+    pub blue_mask_size: u8,
+    pub blue_mask_shift: u8,
+}
+
+/// Returns the first Limine framebuffer in a kernel-friendly representation.
+pub fn framebuffer_info() -> Option<LimineFramebufferInfo> {
+    let response = FRAMEBUFFER_REQUEST.get_response()?;
+    let framebuffer = response.framebuffers().next()?;
+    if framebuffer.memory_model() != MemoryModel::RGB {
+        return None;
+    }
+
+    Some(LimineFramebufferInfo {
+        addr: framebuffer.addr() as usize,
+        width: framebuffer.width() as u32,
+        height: framebuffer.height() as u32,
+        pitch: framebuffer.pitch() as u32,
+        bpp: framebuffer.bpp(),
+        red_mask_size: framebuffer.red_mask_size(),
+        red_mask_shift: framebuffer.red_mask_shift(),
+        green_mask_size: framebuffer.green_mask_size(),
+        green_mask_shift: framebuffer.green_mask_shift(),
+        blue_mask_size: framebuffer.blue_mask_size(),
+        blue_mask_shift: framebuffer.blue_mask_shift(),
+    })
 }
 
 fn align_up(addr: usize, align: usize) -> usize {

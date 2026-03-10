@@ -2,4 +2,5 @@
 //!
 //! This module contains graphics device drivers for the Scarlet kernel.
 
+pub mod limine_framebuffer;
 pub mod virtio_gpu;

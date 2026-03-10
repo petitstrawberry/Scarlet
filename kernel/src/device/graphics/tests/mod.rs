@@ -22,6 +22,16 @@ fn test_framebuffer_config() {
 }
 
 #[test_case]
+fn test_framebuffer_config_with_stride() {
+    let config = FramebufferConfig::with_stride(800, 600, PixelFormat::BGRA8888, 4096);
+    assert_eq!(config.width, 800);
+    assert_eq!(config.height, 600);
+    assert_eq!(config.format, PixelFormat::BGRA8888);
+    assert_eq!(config.stride, 4096);
+    assert_eq!(config.size(), 4096 * 600);
+}
+
+#[test_case]
 fn test_generic_graphics_device() {
     let mut device = GenericGraphicsDevice::new("test-display");
     assert_eq!(device.get_display_name(), "test-display");

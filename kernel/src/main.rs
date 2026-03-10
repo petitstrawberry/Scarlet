@@ -650,6 +650,13 @@ pub extern "C" fn start_kernel(boot_info: &BootInfo) -> ! {
     /* Initialize Graphics Manager and discover graphics devices */
     println!("[Scarlet Kernel] Initializing graphics subsystem...");
 
+    if let Err(e) = crate::drivers::graphics::limine_framebuffer::register_boot_framebuffer() {
+        println!(
+            "[Scarlet Kernel] Warning: Failed to register Limine framebuffer: {}",
+            e
+        );
+    }
+
     // Add extra safety measures for optimized builds
     fence(Ordering::SeqCst); // Ensure device population is complete before proceeding
 

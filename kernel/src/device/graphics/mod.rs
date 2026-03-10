@@ -71,7 +71,16 @@ pub struct FramebufferConfig {
 impl FramebufferConfig {
     /// Create a new framebuffer configuration
     pub fn new(width: u32, height: u32, format: PixelFormat) -> Self {
-        let stride = width * format.bytes_per_pixel() as u32;
+        Self::with_stride(
+            width,
+            height,
+            format,
+            width * format.bytes_per_pixel() as u32,
+        )
+    }
+
+    /// Create a new framebuffer configuration with an explicit stride
+    pub fn with_stride(width: u32, height: u32, format: PixelFormat, stride: u32) -> Self {
         Self {
             width,
             height,
