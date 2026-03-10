@@ -109,6 +109,7 @@ pub struct PciDeviceInfo {
     interrupt_line: u8,
     /// Interrupt pin
     interrupt_pin: u8,
+    routed_irq: Option<u32>,
     /// Device name (generated from vendor/device ID)
     name: &'static str,
     /// Unique device ID in the system
@@ -142,6 +143,7 @@ impl PciDeviceInfo {
         subsystem_id: u16,
         interrupt_line: u8,
         interrupt_pin: u8,
+        routed_irq: Option<u32>,
         name: &'static str,
         id: usize,
     ) -> Self {
@@ -155,6 +157,7 @@ impl PciDeviceInfo {
             subsystem_id,
             interrupt_line,
             interrupt_pin,
+            routed_irq,
             name,
             id,
         }
@@ -223,6 +226,10 @@ impl PciDeviceInfo {
     /// Get the interrupt pin
     pub fn interrupt_pin(&self) -> u8 {
         self.interrupt_pin
+    }
+
+    pub fn routed_irq(&self) -> Option<u32> {
+        self.routed_irq
     }
 
     /// Check if device matches vendor and device ID

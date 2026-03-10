@@ -190,7 +190,7 @@ pub fn ioremap(paddr: usize, size: usize) -> Result<usize, &'static str> {
     let vaddr = alloc_va + offset;
 
     crate::early_println!(
-        "[ioremap] paddr={:#x} → vaddr={:#x} (size={:#x})",
+        "[ioremap] paddr={:#x} -> vaddr={:#x} (size={:#x})",
         paddr,
         vaddr,
         size

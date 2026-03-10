@@ -131,6 +131,9 @@ if [ "$DEBUG_MODE" = true ]; then
         -device virtio-mouse-device,bus=virtio-mmio-bus.7 \
         -netdev user,id=pci-net0 \
         -device virtio-net-pci,netdev=pci-net0,mac=52:54:00:AB:CD:EF,bus=pcie.0 \
+        -device qemu-xhci,id=xhci,bus=pcie.0 \
+        -device usb-kbd,bus=xhci.0 \
+        -device usb-mouse,bus=xhci.0 \
         -gdb tcp::12345 -S \
         $QEMU_DEBUG_ARGS \
         | tee "$TEMP_OUTPUT"
@@ -164,6 +167,9 @@ else
         -device virtio-mouse-device,bus=virtio-mmio-bus.7 \
         -netdev user,id=pci-net0 \
         -device virtio-net-pci,netdev=pci-net0,mac=52:54:00:AB:CD:EF,bus=pcie.0 \
+        -device qemu-xhci,id=xhci,bus=pcie.0 \
+        -device usb-kbd,bus=xhci.0 \
+        -device usb-mouse,bus=xhci.0 \
         $QEMU_DEBUG_ARGS \
         | tee "$TEMP_OUTPUT"
 fi

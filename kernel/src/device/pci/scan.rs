@@ -24,13 +24,57 @@ pub struct PciScanner<'a> {
 }
 
 impl<'a> PciScanner<'a> {
+    fn read_be_u32(bytes: &[u8]) -> Option<u32> {
+        if bytes.len() < 4 {
+            return None;
+        }
+        Some(u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
+    }
+
+    fn routed_irq_for(&self, addr: &PciAddress, interrupt_pin: u8) -> Option<u32> {
+        if interrupt_pin == 0 {
+            return None;
+        }
+
+        let fdt = crate::device::fdt::FdtManager::get_manager().get_fdt()?;
+        let soc = fdt.find_node("/soc")?;
+        let pci_node = soc.children().find(|node| {
+            node.name.starts_with("pci@")
+                || node
+                    .compatible()
+                    .map(|compat| compat.all().any(|entry| entry == "pci-host-ecam-generic"))
+                    .unwrap_or(false)
+        })?;
+
+        let mask = pci_node.property("interrupt-map-mask")?.value;
+        let map = pci_node.property("interrupt-map")?.value;
+        if mask.len() < 16 {
+            return None;
+        }
+
+        let child_addr_mask = Self::read_be_u32(&mask[0..4])?;
+        let child_pin_mask = Self::read_be_u32(&mask[12..16])?;
+        let child_addr = ((addr.device as u32) << 11) & child_addr_mask;
+        let child_pin = (interrupt_pin as u32) & child_pin_mask;
+
+        for chunk in map.chunks_exact(24) {
+            let map_addr = Self::read_be_u32(&chunk[0..4])? & child_addr_mask;
+            let map_pin = Self::read_be_u32(&chunk[12..16])? & child_pin_mask;
+            if map_addr == child_addr && map_pin == child_pin {
+                return Self::read_be_u32(&chunk[20..24]);
+            }
+        }
+
+        None
+    }
+
     /// Create a new PCI scanner
     ///
     /// # Arguments
     ///
     /// * `bus` - Reference to the PCI bus manager
     pub fn new(bus: &'a PciBus) -> Self {
-        let config = PciConfig::new(bus.ecam_base());
+        let config = PciConfig::new(bus.ecam_vaddr().expect("Failed to map PCI ECAM"));
         Self { config, bus }
     }
 
@@ -143,6 +187,7 @@ impl<'a> PciScanner<'a> {
         let interrupt_pin = self
             .config
             .read_u8(&addr, super::config::offset::INTERRUPT_PIN);
+        let routed_irq = self.routed_irq_for(&addr, interrupt_pin);
 
         // Generate device name
         // In a real implementation, this would use a static string pool
@@ -159,6 +204,7 @@ impl<'a> PciScanner<'a> {
             subsystem_id,
             interrupt_line,
             interrupt_pin,
+            routed_irq,
             name,
             *id_counter,
         );
@@ -244,6 +290,42 @@ impl PciBus {
                 device.vendor_id(),
                 device.device_id()
             );
+        }
+    }
+
+    /// Scan the PCI bus and probe discovered devices using registered PCI drivers.
+    pub fn scan_and_probe_registered_drivers(&self) {
+        use crate::device::DeviceDriver;
+        use crate::device::manager::{DeviceManager, DriverPriority};
+
+        self.scan();
+
+        let devices = self.devices();
+        early_println!("Probing {} PCI devices", devices.len());
+
+        let manager = DeviceManager::get_manager();
+        let drivers = manager.borrow_drivers().lock();
+
+        for priority in [
+            DriverPriority::Critical,
+            DriverPriority::Core,
+            DriverPriority::Standard,
+            DriverPriority::Late,
+        ] {
+            if let Some(driver_list) = drivers.get(&priority) {
+                for driver in driver_list.iter() {
+                    for device in &devices {
+                        match DeviceDriver::probe(&**driver, device) {
+                            Ok(()) => early_println!(
+                                "Successfully probed PCI device {} with driver {}",
+                                device.name(),
+                                driver.name()
+                            ),
+                            Err(_) => {}
+                        }
+                    }
+                }
+            }
         }
     }
 }

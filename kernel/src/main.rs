@@ -287,7 +287,9 @@ pub mod test;
 
 extern crate alloc;
 use alloc::string::ToString;
+use device::fdt::FdtManager;
 use device::manager::{DeviceManager, DriverPriority};
+use device::pci::PciBus;
 use environment::PAGE_SIZE;
 use initcall::{call_initcalls, driver::driver_initcall_call, early::early_initcall_call};
 
@@ -642,6 +644,42 @@ pub extern "C" fn start_kernel(boot_info: &BootInfo) -> ! {
             DriverPriority::Late,
         ]),
     );
+
+    if let Some(fdt) = FdtManager::get_manager().get_fdt() {
+        let mut pci_ecam = None;
+
+        if let Some(soc) = fdt.find_node("/soc") {
+            for child in soc.children() {
+                let is_pci_host = child.name.starts_with("pci@")
+                    || child
+                        .compatible()
+                        .map(|compat| compat.all().any(|entry| entry == "pci-host-ecam-generic"))
+                        .unwrap_or(false);
+
+                if !is_pci_host {
+                    continue;
+                }
+
+                if let Some(regions) = child.reg() {
+                    for region in regions {
+                        if let Some(size) = region.size {
+                            pci_ecam = Some((region.starting_address as usize, size));
+                            break;
+                        }
+                    }
+                }
+
+                if pci_ecam.is_some() {
+                    break;
+                }
+            }
+        }
+
+        if let Some((ecam_base, ecam_size)) = pci_ecam {
+            let pci_bus = PciBus::new(ecam_base, ecam_size);
+            pci_bus.scan_and_probe_registered_drivers();
+        }
+    }
     fence(Ordering::SeqCst);
 
     /* After this point, we can use the device manager */
