@@ -115,9 +115,13 @@ impl MemoryMappingOps for LimineFramebufferDevice {
         Err("Memory mapping not supported by Limine framebuffer device")
     }
 
-    fn on_mapped(&self, _vaddr: usize, _paddr: usize, _length: usize, _offset: usize) {}
+    fn on_mapped(&self, _vaddr: usize, _paddr: usize, _length: usize, _offset: usize) {
+        // The boot framebuffer is exposed through the framebuffer character device instead.
+    }
 
-    fn on_unmapped(&self, _vaddr: usize, _length: usize) {}
+    fn on_unmapped(&self, _vaddr: usize, _length: usize) {
+        // The boot framebuffer is exposed through the framebuffer character device instead.
+    }
 
     fn supports_mmap(&self) -> bool {
         false
@@ -221,6 +225,34 @@ mod tests {
                 .get_framebuffer_address()
                 .expect("Framebuffer address should be available"),
             crate::vm::addr::virt_to_phys(info.addr)
+        );
+    }
+
+    #[test_case]
+    fn test_limine_framebuffer_supports_rgb888() {
+        let info = sample_info(800 * 3, 24, 0, 8, 16);
+        let device = LimineFramebufferDevice::new(info).expect("RGB888 should be supported");
+
+        assert_eq!(
+            device
+                .get_framebuffer_config()
+                .expect("Framebuffer config should be available")
+                .format,
+            PixelFormat::RGB888
+        );
+    }
+
+    #[test_case]
+    fn test_limine_framebuffer_supports_rgb565() {
+        let info = sample_info(800 * 2, 16, 11, 5, 0);
+        let device = LimineFramebufferDevice::new(info).expect("RGB565 should be supported");
+
+        assert_eq!(
+            device
+                .get_framebuffer_config()
+                .expect("Framebuffer config should be available")
+                .format,
+            PixelFormat::RGB565
         );
     }
 

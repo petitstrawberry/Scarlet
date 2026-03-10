@@ -105,18 +105,18 @@ pub struct LimineFramebufferInfo {
     pub blue_mask_shift: u8,
 }
 
-fn framebuffer_info_from_raw(
+fn filter_rgb_framebuffer(
     is_rgb: bool,
     info: LimineFramebufferInfo,
 ) -> Option<LimineFramebufferInfo> {
     if is_rgb { Some(info) } else { None }
 }
 
-/// Returns the first Limine framebuffer in a kernel-friendly representation.
+/// Returns the first RGB Limine framebuffer in a kernel-friendly representation.
 pub fn framebuffer_info() -> Option<LimineFramebufferInfo> {
     let response = FRAMEBUFFER_REQUEST.get_response()?;
     let framebuffer = response.framebuffers().next()?;
-    framebuffer_info_from_raw(
+    filter_rgb_framebuffer(
         framebuffer.memory_model() == MemoryModel::RGB,
         LimineFramebufferInfo {
             addr: framebuffer.addr() as usize,
@@ -154,7 +154,7 @@ pub(crate) fn reserve_front(area: MemoryArea, reserved_bytes: usize) -> MemoryAr
 
 #[cfg(test)]
 mod tests {
-    use super::{LimineFramebufferInfo, framebuffer_info_from_raw};
+    use super::{LimineFramebufferInfo, filter_rgb_framebuffer};
 
     fn sample_framebuffer_info() -> LimineFramebufferInfo {
         LimineFramebufferInfo {
@@ -175,13 +175,13 @@ mod tests {
     #[test_case]
     fn test_framebuffer_info_from_raw_accepts_rgb() {
         let info = sample_framebuffer_info();
-        assert_eq!(framebuffer_info_from_raw(true, info), Some(info));
+        assert_eq!(filter_rgb_framebuffer(true, info), Some(info));
     }
 
     #[test_case]
     fn test_framebuffer_info_from_raw_rejects_non_rgb() {
         assert_eq!(
-            framebuffer_info_from_raw(false, sample_framebuffer_info()),
+            filter_rgb_framebuffer(false, sample_framebuffer_info()),
             None
         );
     }
