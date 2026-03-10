@@ -1,0 +1,27 @@
+[profile.dev]
+opt-level = 3
+
+[profile.test]
+opt-level = 3
+
+[target.aarch64-unknown-none]
+rustflags = ["-T", "lds/aarch64_limine.ld"]
+runner = "tools/run_aarch64.sh"
+
+[target.aarch64-unknown-none-elf]
+# Use different runners for different contexts
+# For normal runs, use run_aarch64.sh
+# For tests, use test_aarch64.sh (this will be overridden by CARGO_TARGET_AARCH64_UNKNOWN_NONE_ELF_RUNNER for tests)
+runner = "tools/run_aarch64.sh"
+rustflags = [
+	"-C", "no-vectorize-loops",
+	"-C", "no-vectorize-slp",
+]
+
+[build]
+target = "targets/aarch64-unknown-none-elf.json"
+
+[unstable]
+build-std = ["core", "compiler_builtins", "alloc"]
+build-std-features = ["compiler-builtins-mem"]
+unstable-options = true

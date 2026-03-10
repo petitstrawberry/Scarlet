@@ -1,11 +1,11 @@
 [package]
-name = "Scarlet"
+name = "scarlet"
 version = "0.16.0"
 edition = "2024"
 
-[[bin]]
-name = "kernel"
-path = "src/main.rs"
+[lib]
+name = "scarlet"
+path = "src/lib.rs"
 
 [dependencies]
 fdt = "0.1.5"

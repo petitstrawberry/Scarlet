@@ -1,19 +1,24 @@
+#![no_std]
+#![no_main]
+
+extern crate scarlet;
+
 use core::arch::naked_asm;
 
-use crate::environment::STACK_SIZE;
+use scarlet::environment::STACK_SIZE;
 
 use limine::paging;
 use limine::request::{BspHartidRequest, PagingModeRequest};
 
-use crate::boot::limine::{
+use scarlet::boot::limine::{
     DTB_REQUEST, EXECUTABLE_ADDRESS_REQUEST, HHDM_REQUEST, MEMMAP_REQUEST, MODULE_REQUEST,
     ensure_base_revision_supported, module_area, reserve_front, response, select_usable_region,
 };
-use crate::device::fdt::{FdtManager, init_fdt, relocate_fdt};
-use crate::mem::{KERNEL_STACK, init_bss};
-use crate::vm::addr::{init_limine_addressing, phys_to_virt};
-use crate::vm::vmem::MemoryArea;
-use crate::{BootInfo, DeviceSource, start_kernel};
+use scarlet::device::fdt::{FdtManager, init_fdt, relocate_fdt};
+use scarlet::mem::{KERNEL_STACK, init_bss};
+use scarlet::vm::addr::{init_limine_addressing, phys_to_virt};
+use scarlet::vm::vmem::MemoryArea;
+use scarlet::{BootInfo, DeviceSource, start_kernel};
 
 static mut EARLY_BOOTINFO: Option<BootInfo> = None;
 
@@ -89,12 +94,12 @@ pub fn arch_start_kernel() -> ! {
         .get_fdt()
         .and_then(|fdt| fdt.chosen().bootargs());
 
-    crate::early_println!(
+    scarlet::early_println!(
         "[limine] bootinfo usable_memory={:#x}..={:#x}",
         usable_memory.start,
         usable_memory.end
     );
-    crate::early_println!("[limine] before init_user_context_from_fdt");
+    scarlet::early_println!("[limine] before init_user_context_from_fdt");
     let bootinfo = BootInfo::new(
         bsp.bsp_hartid() as usize,
         cpu_count,
@@ -108,17 +113,17 @@ pub fn arch_start_kernel() -> ! {
         DeviceSource::Fdt(relocated_fdt.start),
     );
 
-    crate::arch::init_user_context_from_fdt();
-    crate::early_println!("[limine] before init_boot_cpu");
-    crate::arch::riscv64::init_boot_cpu(bootinfo.cpu_id);
-    crate::early_println!("[limine] before stack handoff");
+    scarlet::arch::init_user_context_from_fdt();
+    scarlet::early_println!("[limine] before init_boot_cpu");
+    scarlet::arch::riscv64::boot::init_boot_cpu(bootinfo.cpu_id);
+    scarlet::early_println!("[limine] before stack handoff");
 
     unsafe {
         let stack_top = (&raw const KERNEL_STACK) as *const _ as usize + STACK_SIZE;
         EARLY_BOOTINFO = Some(bootinfo);
         let bootinfo_ptr =
             (&raw const EARLY_BOOTINFO) as *const Option<BootInfo> as *const BootInfo;
-        crate::arch::riscv64::switch_stack_and_jump(
+        scarlet::arch::riscv64::switch_stack_and_jump(
             start_kernel as *const () as usize,
             bootinfo_ptr as usize,
             stack_top,

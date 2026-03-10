@@ -245,7 +245,6 @@
 //! are under development and will be available in future releases.*
 
 #![no_std]
-#![no_main]
 #![feature(used_with_arg)]
 #![feature(custom_test_frameworks)]
 #![test_runner(crate::test::test_runner)]

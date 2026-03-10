@@ -1,0 +1,12 @@
+[package]
+name = "riscv64-limine-bsp"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "riscv64-limine"
+path = "src/main.rs"
+
+[dependencies]
+scarlet = { path = "../../kernel" }
+limine = "0.5"

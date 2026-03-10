@@ -1,16 +1,21 @@
+#![no_std]
+#![no_main]
+
+extern crate scarlet;
+
 use core::arch::{asm, naked_asm};
 use core::mem::MaybeUninit;
 
-use crate::boot::limine::{
+use scarlet::boot::limine::{
     DTB_REQUEST, EXECUTABLE_ADDRESS_REQUEST, HHDM_REQUEST, MEMMAP_REQUEST, MODULE_REQUEST,
     ensure_base_revision_supported, module_area, reserve_front, response, select_usable_region,
 };
-use crate::device::fdt::{FdtManager, init_fdt, relocate_fdt};
-use crate::environment::STACK_SIZE;
-use crate::mem::{KERNEL_STACK, init_bss};
-use crate::vm::addr::{init_limine_addressing, phys_to_virt};
-use crate::vm::vmem::MemoryArea;
-use crate::{BootInfo, DeviceSource, start_ap, start_kernel};
+use scarlet::device::fdt::{FdtManager, init_fdt, relocate_fdt};
+use scarlet::environment::STACK_SIZE;
+use scarlet::mem::{KERNEL_STACK, init_bss};
+use scarlet::vm::addr::{init_limine_addressing, phys_to_virt};
+use scarlet::vm::vmem::MemoryArea;
+use scarlet::{BootInfo, DeviceSource, start_ap, start_kernel};
 use core::sync::atomic::compiler_fence;
 
 static mut EARLY_BOOTINFO: MaybeUninit<BootInfo> = MaybeUninit::uninit();
@@ -45,7 +50,7 @@ pub extern "C" fn arch_start_kernel() -> ! {
         executable.virtual_base() as usize,
         kernel_end - kernel_start,
     );
-    crate::arch::aarch64::early_console_init();
+    scarlet::arch::aarch64::early_console_init();
 
     compiler_fence(core::sync::atomic::Ordering::SeqCst);
 
@@ -95,8 +100,8 @@ pub extern "C" fn arch_start_kernel() -> ! {
         DeviceSource::Fdt(relocated_fdt.start),
     );
 
-    crate::arch::init_user_context_from_fdt();
-    crate::arch::aarch64::init_arch(cpu_id);
+    scarlet::arch::init_user_context_from_fdt();
+    scarlet::arch::aarch64::init_arch(cpu_id);
 
     unsafe {
         let stack_top = (&raw const KERNEL_STACK) as *const _ as usize + STACK_SIZE * (cpu_id + 1);
