@@ -105,27 +105,33 @@ pub struct LimineFramebufferInfo {
     pub blue_mask_shift: u8,
 }
 
+fn framebuffer_info_from_raw(
+    is_rgb: bool,
+    info: LimineFramebufferInfo,
+) -> Option<LimineFramebufferInfo> {
+    if is_rgb { Some(info) } else { None }
+}
+
 /// Returns the first Limine framebuffer in a kernel-friendly representation.
 pub fn framebuffer_info() -> Option<LimineFramebufferInfo> {
     let response = FRAMEBUFFER_REQUEST.get_response()?;
     let framebuffer = response.framebuffers().next()?;
-    if framebuffer.memory_model() != MemoryModel::RGB {
-        return None;
-    }
-
-    Some(LimineFramebufferInfo {
-        addr: framebuffer.addr() as usize,
-        width: framebuffer.width() as u32,
-        height: framebuffer.height() as u32,
-        pitch: framebuffer.pitch() as u32,
-        bpp: framebuffer.bpp(),
-        red_mask_size: framebuffer.red_mask_size(),
-        red_mask_shift: framebuffer.red_mask_shift(),
-        green_mask_size: framebuffer.green_mask_size(),
-        green_mask_shift: framebuffer.green_mask_shift(),
-        blue_mask_size: framebuffer.blue_mask_size(),
-        blue_mask_shift: framebuffer.blue_mask_shift(),
-    })
+    framebuffer_info_from_raw(
+        framebuffer.memory_model() == MemoryModel::RGB,
+        LimineFramebufferInfo {
+            addr: framebuffer.addr() as usize,
+            width: framebuffer.width() as u32,
+            height: framebuffer.height() as u32,
+            pitch: framebuffer.pitch() as u32,
+            bpp: framebuffer.bpp(),
+            red_mask_size: framebuffer.red_mask_size(),
+            red_mask_shift: framebuffer.red_mask_shift(),
+            green_mask_size: framebuffer.green_mask_size(),
+            green_mask_shift: framebuffer.green_mask_shift(),
+            blue_mask_size: framebuffer.blue_mask_size(),
+            blue_mask_shift: framebuffer.blue_mask_shift(),
+        },
+    )
 }
 
 fn align_up(addr: usize, align: usize) -> usize {
@@ -144,4 +150,39 @@ pub(crate) fn reserve_front(area: MemoryArea, reserved_bytes: usize) -> MemoryAr
     }
 
     MemoryArea::new(reserved_end, area.end)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{LimineFramebufferInfo, framebuffer_info_from_raw};
+
+    fn sample_framebuffer_info() -> LimineFramebufferInfo {
+        LimineFramebufferInfo {
+            addr: 0x1234_5000,
+            width: 1024,
+            height: 768,
+            pitch: 4096,
+            bpp: 32,
+            red_mask_size: 8,
+            red_mask_shift: 16,
+            green_mask_size: 8,
+            green_mask_shift: 8,
+            blue_mask_size: 8,
+            blue_mask_shift: 0,
+        }
+    }
+
+    #[test_case]
+    fn test_framebuffer_info_from_raw_accepts_rgb() {
+        let info = sample_framebuffer_info();
+        assert_eq!(framebuffer_info_from_raw(true, info), Some(info));
+    }
+
+    #[test_case]
+    fn test_framebuffer_info_from_raw_rejects_non_rgb() {
+        assert_eq!(
+            framebuffer_info_from_raw(false, sample_framebuffer_info()),
+            None
+        );
+    }
 }

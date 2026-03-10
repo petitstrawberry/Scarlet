@@ -220,13 +220,19 @@ mod tests {
             device
                 .get_framebuffer_address()
                 .expect("Framebuffer address should be available"),
-            info.addr
+            crate::vm::addr::virt_to_phys(info.addr)
         );
     }
 
     #[test_case]
     fn test_limine_framebuffer_rejects_unknown_formats() {
         let info = sample_info(800 * 3, 24, 16, 8, 0);
+        assert!(LimineFramebufferDevice::new(info).is_err());
+    }
+
+    #[test_case]
+    fn test_limine_framebuffer_rejects_too_small_pitch() {
+        let info = sample_info(800 * 4 - 4, 32, 16, 8, 0);
         assert!(LimineFramebufferDevice::new(info).is_err());
     }
 }
