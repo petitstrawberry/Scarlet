@@ -304,8 +304,8 @@ impl<'a> VirtQueue<'a> {
         // Using the architecture-provided I/O barrier is conservative but safe for virtio.
         crate::arch::io_mb();
 
-        let ring_ptr =
-            &mut self.avail.ring[(*self.avail.idx as usize) % self.avail.size] as *mut u16;
+        let cur_idx = unsafe { core::ptr::read_volatile(self.avail.idx) };
+        let ring_ptr = &mut self.avail.ring[(cur_idx as usize) % self.avail.size] as *mut u16;
 
         unsafe {
             core::ptr::write_volatile(ring_ptr, desc_idx as u16);
@@ -316,7 +316,7 @@ impl<'a> VirtQueue<'a> {
 
         // *self.avail.idx = (*self.avail.idx).wrapping_add(1);
 
-        let new_idx = unsafe { core::ptr::read_volatile(self.avail.idx) }.wrapping_add(1);
+        let new_idx = cur_idx.wrapping_add(1);
         unsafe {
             core::ptr::write_volatile(self.avail.idx, new_idx);
         }
