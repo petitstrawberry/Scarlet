@@ -1,0 +1,393 @@
+# `scarlet-config.toml` Specification
+
+## Overview
+
+`scarlet-config.toml` is the source of truth for Scarlet build composition.
+
+It should be understood as a **full resolved `.config`-style file** in the Kconfig sense: every meaningful build option is written out explicitly, including options that are disabled.
+
+Its job is to describe:
+
+- which BSP target is being built
+- which kernel crate/version is the core
+- which kernel features are enabled or disabled
+- which module options are enabled or disabled
+- the resolved source choice for the kernel and module inputs
+
+The build tool reads this file and generates the BSP-local `.scarlet/scarlet-modules` crate before invoking Cargo.
+
+## Design Principles
+
+The format follows these rules:
+
+1. **Full-Config Principle** — all effective build choices should be visible in the file
+2. **No hidden module selection** — enabled modules are declared explicitly
+3. **Full enumeration** — disabled options stay visible instead of disappearing
+4. **Kernel stays core** — the file composes around the kernel crate instead of replacing it
+5. **Resolved source provenance** — local path, `crates.io`, and git sourcing should be explicit in the config when they affect the resolved build
+6. **Registry-owned metadata** — module conflicts, requirements, descriptions, and dependency meaning belong to the registry/catalog side
+7. **Tool-owned expansion** — the build tool may derive generated artifacts from the file plus registry data, but not hidden semantic defaults
+
+## File Location
+
+Recommended location:
+
+```text
+<project-root>/scarlet-config.toml
+```
+
+In the intended model, `<project-root>` means the **BSP project root**.
+
+Example:
+
+```text
+my-board-project/
+├─ scarlet-config.toml
+├─ Cargo.toml
+├─ src/main.rs
+└─ .scarlet/
+```
+
+The current Scarlet repository may still keep prototype BSPs under `bsp/`, but that is an implementation detail of the in-tree development environment, not the intended user-facing project model.
+
+## Top-Level Structure
+
+```toml
+config_version = 1
+
+[project]
+name = "scarlet-qemu-riscv64"
+
+[board]
+name = "riscv64-limine"
+target = "riscv64gc-unknown-none-elf"
+target_json = "kernel/targets/riscv64gc-unknown-none-elf.json"
+
+[kernel]
+package = "scarlet"
+source = { version = "0.16.0" }
+
+[kernel.features]
+network = true
+user-fpu = true
+user-vector = true
+hypervisor = true
+limine = true
+profiler = false
+
+[modules]
+"scarlet-driver-pl011" = { version = "0.1.0", registry = "crates-io", enabled = true }
+"scarlet-abi-linux" = { path = "modules/abi/linux", enabled = true }
+"community-net-stack" = { git = "https://github.com/org/net", rev = "abc123", enabled = false }
+```
+
+## `config_version`
+
+```toml
+config_version = 1
+```
+
+- Required
+- Integer
+- Used by the build tool to validate schema compatibility
+
+If the schema changes incompatibly in the future, this number must increase.
+
+## `[project]`
+
+```toml
+[project]
+name = "scarlet-qemu-riscv64"
+```
+
+### Fields
+
+- `name` — required string used as a human-readable project/configuration name
+
+This field is for tooling, logs, generated metadata, and diagnostics. It does not need to match any Cargo package name.
+
+## `[board]`
+
+```toml
+[board]
+name = "riscv64-limine"
+target = "riscv64gc-unknown-none-elf"
+target_json = "kernel/targets/riscv64gc-unknown-none-elf.json"
+```
+
+### Fields
+
+- `name` — required string identifying the board/BSP profile
+- `target` — required Rust target triple or custom target base name
+- `target_json` — required path to the target JSON used by Cargo
+
+### Purpose
+
+This section tells the build tool which BSP profile to prepare and which Cargo target configuration to invoke.
+
+The build tool generates into the current BSP project root:
+
+```text
+<project-root>/.scarlet/scarlet-modules/
+```
+
+## `[kernel]`
+
+```toml
+[kernel]
+package = "scarlet"
+source = { version = "0.16.0" }
+```
+
+### Fields
+
+- `package` — required package/crate identity of the kernel core
+- `source` — required inline table describing where the kernel crate comes from
+
+### Rules
+
+- `source` must use exactly one supported source form
+- `package` should remain `scarlet` while the kernel crate is still the stable core crate
+
+### Supported kernel source forms
+
+The kernel should support the same broad acquisition modes as modules.
+
+For the intended user-facing model, a registry-compatible version source is the simplest default example.
+For the current in-tree Scarlet development repository, a local path source remains the normal prototype shape.
+
+#### Registry-like source
+
+```toml
+[kernel]
+package = "scarlet"
+source = { version = "0.16.0" }
+```
+
+Use when the kernel is distributed through a registry-compatible packaging flow.
+
+#### Local path source
+
+```toml
+[kernel]
+package = "scarlet"
+source = { path = "../vendor/scarlet/kernel" }
+```
+
+Use for vendored or checked-out local development.
+
+#### Git source
+
+```toml
+[kernel]
+package = "scarlet"
+source = { git = "https://github.com/scarlet-os/scarlet", rev = "v0.16.0" }
+```
+
+Use when the BSP project should fetch the kernel from an online repository.
+
+The exact publication mechanics may evolve, but the config format should already permit this source form.
+
+## `[kernel.features]`
+
+```toml
+[kernel.features]
+network = true
+user-fpu = true
+user-vector = true
+hypervisor = true
+limine = true
+profiler = false
+```
+
+### Purpose
+
+This table explicitly captures kernel feature state.
+
+### Rules
+
+- every known build-relevant kernel feature should appear explicitly
+- values are booleans
+- omitted features should be treated as schema errors, not as silent defaults, once the format is stabilized
+
+This section exists to prevent feature state from being hidden in ad hoc Cargo invocation flags.
+
+## `[modules]`
+
+`[modules]` should look like normal Cargo dependencies as much as possible.
+
+Each key is a module option name, and each value is an inline table that uses ordinary dependency source fields plus an explicit `enabled` flag.
+
+Example:
+
+```toml
+[modules]
+"scarlet-driver-pl011" = { version = "0.1.0", registry = "crates-io", enabled = true }
+"scarlet-driver-ns16550" = { version = "0.2.0", registry = "crates-io", enabled = false }
+"scarlet-abi-linux" = { path = "modules/abi/linux", enabled = true }
+"community-net-stack" = { git = "https://github.com/org/net", rev = "abc123", enabled = false }
+```
+
+This keeps the file readable, keeps local / `crates.io` / git sources visibly distinct, and still preserves the `.config` property that disabled options remain explicitly present.
+
+### Module entry fields
+
+Each module entry must contain:
+
+- `enabled = true | false`
+- exactly one normal Cargo-like source form:
+  - `version = "..."` together with an explicit `registry = "crates-io"` or another named registry
+  - `path = "..."`
+  - `git = "..."` with an accompanying selector such as `rev`, `branch`, or `tag`
+
+Optional fields may follow Cargo dependency conventions when needed, such as `package = "..."` for renamed packages or `features = [...]` / `default-features = false`.
+
+#### `enabled`
+
+`enabled` records the resolved on/off state for that module option.
+
+If `enabled = true`, the option is eligible for emission into the generated `.scarlet/scarlet-modules` crate.
+
+If `enabled = false`, the option stays visible in the config but is not emitted into the generated dependency graph.
+
+This explicit false state is central to the `.config`-style model.
+
+Explicit `false` should be treated as authoritative.
+
+That means if an enabled module option depends on another option that is explicitly `enabled = false`, the build tool must report a configuration error instead of silently enabling the dependency.
+
+### What does **not** belong here
+
+The following should live in the module registry/catalog, not inline in `scarlet-config.toml`:
+
+- package descriptions
+- conflict declarations
+- required kernel features
+- dependency edges between modules
+- UI/menu grouping metadata
+
+The config file records the resolved state. The registry/catalog describes what each option means.
+
+## Generated Output Mapping
+
+For each `enabled = true` module, the build tool looks up its registry/catalog definition and writes the corresponding dependency into the BSP-local generated crate.
+
+Conceptually:
+
+```text
+scarlet-config.toml
+  -> filter enabled modules
+  -> read dependency-like module entries
+  -> resolve module definitions from registry/catalog
+  -> convert resolved sources into Cargo dependencies
+  -> generate <project-root>/.scarlet/scarlet-modules/Cargo.toml
+  -> generate <project-root>/.scarlet/scarlet-modules/src/lib.rs
+```
+
+Example generated dependency mapping:
+
+```toml
+[dependencies]
+scarlet-driver-pl011 = { version = "0.1.0" }
+scarlet-abi-linux = { path = "../../../modules/abi/linux" }
+```
+
+## Validation Rules
+
+The build tool should validate at least the following:
+
+1. `config_version` is supported
+2. project root is writable for `.scarlet/scarlet-modules` generation
+3. `board.target_json` exists
+4. `kernel` has a usable source (`version`, `git`, or `path`)
+5. every configured module option exists in the selected registry/catalog
+6. every module entry contains an explicit `enabled` field
+7. every module entry uses exactly one valid Cargo-like source form
+8. every `version = "..."` entry also specifies an explicit `registry`
+9. every enabled module resolves to a valid Cargo dependency
+10. registry-defined requirements are satisfied
+11. registry-defined conflicts do not produce an invalid configuration
+12. if an enabled option depends on an explicitly disabled option, the build fails with a clear validation error
+13. the generated dependency graph must successfully resolve under Cargo metadata inspection
+
+### Validation layers
+
+Validation should happen in two layers:
+
+1. **Config/catalog validation**
+   - check option existence
+   - check conflicts
+   - check explicit-OFF rules
+   - check high-level requirements from the registry/catalog
+2. **Cargo graph validation**
+   - run `cargo metadata` against the BSP project after `.scarlet/scarlet-modules` is generated
+   - inspect the resolved package and feature graph
+   - fail if Cargo resolution exposes feature or dependency breakage that the higher-level registry checks did not catch
+
+The registry/catalog explains intended relationships, but Cargo's resolved graph is the final truth for actual dependency and feature interactions.
+
+### Explicit-OFF dependency rule
+
+`enabled = false` is not just informational. It is an intentional user choice.
+
+So the resolver must follow this rule:
+
+- if option `A = true` depends on option `B`
+- and `B = false` is written explicitly in `scarlet-config.toml`
+- then resolution fails with an error
+
+The tool must not silently flip `B` back to `true`.
+
+This preserves the meaning of a full `.config`-style file.
+
+## Minimal Example
+
+```toml
+config_version = 1
+
+[project]
+name = "qemu-riscv64-dev"
+
+[board]
+name = "riscv64-limine"
+target = "riscv64gc-unknown-none-elf"
+target_json = "kernel/targets/riscv64gc-unknown-none-elf.json"
+
+[kernel]
+package = "scarlet"
+source = { version = "0.16.0" }
+
+[kernel.features]
+network = true
+user-fpu = true
+user-vector = true
+hypervisor = false
+limine = true
+profiler = false
+
+[modules]
+"scarlet-driver-pl011" = { version = "0.1.0", registry = "crates-io", enabled = true }
+"scarlet-abi-linux" = { version = "0.1.0", registry = "crates-io", enabled = true }
+"scarlet-driver-ns16550" = { version = "0.2.0", registry = "crates-io", enabled = false }
+```
+
+For the in-tree Scarlet development repository, the same resolved option set may coexist with local-path registry entries during development.
+
+## Non-Goals
+
+This format does not currently attempt to describe:
+
+- runtime-loadable modules
+- per-module arbitrary build scripts in config
+- complete Cargo profile settings
+- user-space package composition
+
+Those can be layered on later if needed, but they should not blur the core responsibility of this file: build-time kernel/module composition.
+
+## Summary
+
+`scarlet-config.toml` is the declarative contract between Scarlet's build tool and its generated BSP-local module aggregation crate.
+
+In one sentence:
+
+> the file says what the system should be built from, and the tool turns that into `.scarlet/scarlet-modules` for the chosen BSP.
