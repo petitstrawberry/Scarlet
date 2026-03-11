@@ -5,7 +5,7 @@ extern crate scarlet;
 
 use core::arch::naked_asm;
 
-use scarlet::environment::STACK_SIZE;
+use scarlet::{environment::STACK_SIZE, start_ap};
 
 #[unsafe(link_section = ".init")]
 #[unsafe(no_mangle)]
@@ -23,16 +23,17 @@ pub extern "C" fn _entry_ap() {
         .option norvc
         .option norelax
         .align 8
-                li      t0, {}
+                li      t0, {stack_size}
                 mv      t1, a0
                 addi    t1, t1, 1
-                mul     t1, t1, a0          
+                mul     t1, t1, t0
                 la      sp, KERNEL_STACK
-                add     sp, sp, t0
+                add     sp, sp, t1
 
                 // Use indirect jump to avoid JAL range limitation
-                la      t0, start_ap
+                la      t0, {start_ap}
                 jr      t0
-        ", const STACK_SIZE
+        ", stack_size = const STACK_SIZE,
+           start_ap = sym start_ap,
     );
 }
