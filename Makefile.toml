@@ -63,13 +63,13 @@ args = ["clippy", "--", "-D", "warnings"]
 description = "Run clippy for RISC-V BSP"
 cwd = "bsp/riscv64-limine"
 command = "cargo"
-args = ["clippy", "--target", "targets/riscv64gc-unknown-none-elf.json", "--", "-D", "warnings"]
+args = ["clippy", "--target", "../../kernel/targets/riscv64gc-unknown-none-elf.json", "--", "-D", "warnings"]
 
 [tasks.clippy-bsp-aarch64]
 description = "Run clippy for AArch64 BSP"
 cwd = "bsp/aarch64-limine"
 command = "cargo"
-args = ["clippy", "--target", "targets/aarch64-unknown-none-elf.json", "--", "-D", "warnings"]
+args = ["clippy", "--target", "../../kernel/targets/aarch64-unknown-none-elf.json", "--", "-D", "warnings"]
 
 [tasks.clippy-userlib]
 description = "Run clippy for user libraries by calling sub Makefile.toml"
@@ -148,25 +148,25 @@ dependencies = ["build-kernel-debug-aarch64"]
 description = "Build the kernel in debug mode (RISC-V)"
 cwd = "bsp/riscv64-limine"
 command = "cargo"
-args = ["build", "--target", "targets/riscv64gc-unknown-none-elf.json"]
+args = ["build", "--target", "../../kernel/targets/riscv64gc-unknown-none-elf.json"]
 
 [tasks.build-kernel-debug-aarch64]
 description = "Build the kernel in debug mode (AArch64)"
 cwd = "bsp/aarch64-limine"
 command = "cargo"
-args = ["build", "--target", "targets/aarch64-unknown-none-elf.json"]
+args = ["build", "--target", "../../kernel/targets/aarch64-unknown-none-elf.json"]
 
 [tasks.build-kernel-release-riscv64]
 description = "Build the kernel in release mode (RISC-V)"
 cwd = "bsp/riscv64-limine"
 command = "cargo"
-args = ["build", "--release", "--target", "targets/riscv64gc-unknown-none-elf.json"]
+args = ["build", "--release", "--target", "../../kernel/targets/riscv64gc-unknown-none-elf.json"]
 
 [tasks.build-kernel-release-aarch64]
 description = "Build the kernel in release mode (AArch64)"
 cwd = "bsp/aarch64-limine"
 command = "cargo"
-args = ["build", "--release", "--target", "targets/aarch64-unknown-none-elf.json"]
+args = ["build", "--release", "--target", "../../kernel/targets/aarch64-unknown-none-elf.json"]
 
 [tasks.build-userlib-debug-riscv64]
 description = "Build user libraries for RISC-V in debug mode"
@@ -298,28 +298,28 @@ dependencies = ["build-initramfs-debug-aarch64"]
 description = "Run the kernel in release mode (RISC-V)"
 cwd = "bsp/riscv64-limine"
 command = "cargo"
-args = ["run", "--release", "--target", "targets/riscv64gc-unknown-none-elf.json"]
+args = ["run", "--release", "--target", "../../kernel/targets/riscv64gc-unknown-none-elf.json"]
 dependencies = ["build-release-riscv64"]
 
 [tasks.run-aarch64]
 description = "Run the kernel in release mode (AArch64)"
 cwd = "bsp/aarch64-limine"
 command = "cargo"
-args = ["run", "--release", "--target", "targets/aarch64-unknown-none-elf.json"]
+args = ["run", "--release", "--target", "../../kernel/targets/aarch64-unknown-none-elf.json"]
 dependencies = ["build-release-aarch64"]
 
 [tasks.run-debug-riscv64]
 description = "Run the kernel in debug mode (RISC-V)"
 cwd = "bsp/riscv64-limine"
 command = "cargo"
-args = ["run", "--target", "targets/riscv64gc-unknown-none-elf.json"]
+args = ["run", "--target", "../../kernel/targets/riscv64gc-unknown-none-elf.json"]
 dependencies = ["build-debug-riscv64"]
 
 [tasks.run-debug-aarch64]
 description = "Run the kernel in debug mode (AArch64)"
 cwd = "bsp/aarch64-limine"
 command = "cargo"
-args = ["run", "--target", "targets/aarch64-unknown-none-elf.json"]
+args = ["run", "--target", "../../kernel/targets/aarch64-unknown-none-elf.json"]
 dependencies = ["build-debug-aarch64"]
 
 [tasks.debug-riscv64]
@@ -494,13 +494,13 @@ args = ["clippy", "--fix", "--allow-dirty", "--allow-staged", "--", "-D", "warni
 description = "Run clippy with auto-fix for RISC-V BSP"
 cwd = "bsp/riscv64-limine"
 command = "cargo"
-args = ["clippy", "--fix", "--target", "targets/riscv64gc-unknown-none-elf.json", "--allow-dirty", "--allow-staged", "--", "-D", "warnings"]
+args = ["clippy", "--fix", "--target", "../../kernel/targets/riscv64gc-unknown-none-elf.json", "--allow-dirty", "--allow-staged", "--", "-D", "warnings"]
 
 [tasks.clippy-fix-bsp-aarch64]
 description = "Run clippy with auto-fix for AArch64 BSP"
 cwd = "bsp/aarch64-limine"
 command = "cargo"
-args = ["clippy", "--fix", "--target", "targets/aarch64-unknown-none-elf.json", "--allow-dirty", "--allow-staged", "--", "-D", "warnings"]
+args = ["clippy", "--fix", "--target", "../../kernel/targets/aarch64-unknown-none-elf.json", "--allow-dirty", "--allow-staged", "--", "-D", "warnings"]
 
 [tasks.clippy-fix-userlib]
 description = "Run clippy with auto-fix for user libraries"
