@@ -4,9 +4,8 @@ version = "0.1.0"
 edition = "2024"
 
 [[bin]]
-name = "aarch64-limine"
+name = "scarlet"
 path = "src/main.rs"
 
 [dependencies]
 scarlet = { path = "../../kernel" }
-limine = "0.5"
