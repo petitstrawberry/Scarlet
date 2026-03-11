@@ -27,13 +27,13 @@ if [ -z "$KERNEL_PATH" ]; then
     KERNEL_DIR="$(dirname "$SCRIPT_DIR")"
     
     if [ "$DEBUG_MODE" = "true" ]; then
-        KERNEL_PATH="$KERNEL_DIR/target/riscv64gc-unknown-none-elf/debug/riscv64-limine"
+        KERNEL_PATH="$KERNEL_DIR/target/riscv64gc-unknown-none-elf/debug/scarlet"
     else
         # For release mode or default run
-        if [ -f "$KERNEL_DIR/target/riscv64gc-unknown-none-elf/release/riscv64-limine" ]; then
-            KERNEL_PATH="$KERNEL_DIR/target/riscv64gc-unknown-none-elf/release/riscv64-limine"
+        if [ -f "$KERNEL_DIR/target/riscv64gc-unknown-none-elf/release/scarlet" ]; then
+            KERNEL_PATH="$KERNEL_DIR/target/riscv64gc-unknown-none-elf/release/scarlet"
         else
-            KERNEL_PATH="$KERNEL_DIR/target/riscv64gc-unknown-none-elf/debug/riscv64-limine"
+            KERNEL_PATH="$KERNEL_DIR/target/riscv64gc-unknown-none-elf/debug/scarlet"
         fi
     fi
 fi

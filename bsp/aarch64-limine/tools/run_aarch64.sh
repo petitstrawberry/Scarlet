@@ -26,13 +26,13 @@ done
 # If no kernel path provided, try to find the default build
 if [ -z "$KERNEL_PATH" ]; then
     if [ "$DEBUG_MODE" = "true" ]; then
-        KERNEL_PATH="$KERNEL_DIR/target/aarch64-unknown-none-elf/debug/aarch64-limine"
+        KERNEL_PATH="$KERNEL_DIR/target/aarch64-unknown-none-elf/debug/scarlet"
     else
         # For release mode or default run
-        if [ -f "$KERNEL_DIR/target/aarch64-unknown-none-elf/release/aarch64-limine" ]; then
-            KERNEL_PATH="$KERNEL_DIR/target/aarch64-unknown-none-elf/release/aarch64-limine"
+        if [ -f "$KERNEL_DIR/target/aarch64-unknown-none-elf/release/scarlet" ]; then
+            KERNEL_PATH="$KERNEL_DIR/target/aarch64-unknown-none-elf/release/scarlet"
         else
-            KERNEL_PATH="$KERNEL_DIR/target/aarch64-unknown-none-elf/debug/aarch64-limine"
+            KERNEL_PATH="$KERNEL_DIR/target/aarch64-unknown-none-elf/debug/scarlet"
         fi
     fi
 fi

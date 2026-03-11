@@ -326,14 +326,14 @@ dependencies = ["build-debug-aarch64"]
 description = "Run the kernel in debug mode (RISC-V)"
 cwd = "bsp/riscv64-limine"
 command = "./tools/run.sh"
-args = ["--debug", "target/riscv64gc-unknown-none-elf/debug/riscv64-limine"]
+args = ["--debug", "target/riscv64gc-unknown-none-elf/debug/scarlet"]
 dependencies = ["build-debug-riscv64"]
 
 [tasks.debug-aarch64]
 description = "Run the kernel in debug mode (AArch64)"
 cwd = "bsp/aarch64-limine"
 command = "./tools/run_aarch64.sh"
-args = ["--debug", "target/aarch64-unknown-none-elf/debug/aarch64-limine"]
+args = ["--debug", "target/aarch64-unknown-none-elf/debug/scarlet"]
 dependencies = ["build-debug-aarch64"]
 
 [tasks.debug-test-riscv64]
@@ -420,7 +420,7 @@ description = "Create boot image (RISC-V, release kernel)"
 cwd = "mkfs"
 command = "sh"
 args = ["make_limine_riscv64_image.sh"]
-env = { "KERNEL_ELF" = "../bsp/riscv64-limine/target/riscv64gc-unknown-none-elf/release/riscv64-limine" }
+env = { "KERNEL_ELF" = "../bsp/riscv64-limine/target/riscv64gc-unknown-none-elf/release/scarlet" }
 dependencies = ["build-kernel-release-riscv64", "build-initramfs-release-riscv64", "build-rootfs-riscv64"]
 
 [tasks.build-boot-image-aarch64]
@@ -435,7 +435,7 @@ description = "Create boot image (AArch64, release kernel)"
 cwd = "mkfs"
 command = "sh"
 args = ["make_limine_aarch64_image.sh"]
-env = { "KERNEL_ELF" = "../bsp/aarch64-limine/target/aarch64-unknown-none-elf/release/aarch64-limine" }
+env = { "KERNEL_ELF" = "../bsp/aarch64-limine/target/aarch64-unknown-none-elf/release/scarlet" }
 dependencies = ["build-kernel-release-aarch64", "build-initramfs-release-aarch64", "build-rootfs-aarch64"]
 
 [tasks.clean-initramfs]
