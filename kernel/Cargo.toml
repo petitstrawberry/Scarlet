@@ -6,6 +6,7 @@ edition = "2024"
 [lib]
 name = "scarlet"
 path = "src/lib.rs"
+doctest = false
 
 [dependencies]
 fdt = "0.1.5"
