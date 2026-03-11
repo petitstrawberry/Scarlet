@@ -21,7 +21,7 @@ if [ "$1" = "--test" ]; then
     cd "$KERNEL_DIR"
     
     # Find the most recent test binary
-    TEST_BINARY=$(find target/riscv64gc-unknown-none-elf/debug/deps -name "*Scarlet*" -type f -executable -newer target/riscv64gc-unknown-none-elf/debug/kernel 2>/dev/null | head -1)
+    TEST_BINARY=$(find target/riscv64gc-unknown-none-elf/debug/deps -name "*scarlet*" -type f -executable -newer target/riscv64gc-unknown-none-elf/debug/riscv64-limine 2>/dev/null | head -1)
     
     if [ -n "$TEST_BINARY" ]; then
         echo "Using test binary: $TEST_BINARY"
@@ -34,7 +34,7 @@ if [ "$1" = "--test" ]; then
     fi
 else
     echo "Regular kernel mode"
-    KERNEL_BINARY="$KERNEL_DIR/target/riscv64gc-unknown-none-elf/debug/kernel"
+    KERNEL_BINARY="$KERNEL_DIR/target/riscv64gc-unknown-none-elf/debug/riscv64-limine"
     
     if [ -f "$KERNEL_BINARY" ]; then
         gdb-multiarch "$KERNEL_BINARY" \

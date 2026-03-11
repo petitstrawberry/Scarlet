@@ -1,6 +1,15 @@
 use core::arch::asm;
 
-use crate::{arch::{Riscv64, fpu, riscv64::CPUS, trap::kernel::{_kernel_trap_entry, arch_kernel_trap_handler}}, early_println, environment::STACK_SIZE, mem::KERNEL_STACK};
+use crate::{
+    arch::{
+        Riscv64, fpu,
+        riscv64::CPUS,
+        trap::kernel::{_kernel_trap_entry, arch_kernel_trap_handler},
+    },
+    early_println,
+    environment::STACK_SIZE,
+    mem::KERNEL_STACK,
+};
 
 pub fn init_boot_cpu(cpu_id: usize) {
     early_println!("[riscv64] init_boot_cpu: cpu_id={}", cpu_id);
@@ -12,7 +21,6 @@ pub fn init_boot_cpu(cpu_id: usize) {
     trap_init(riscv);
     early_println!("[riscv64] init_boot_cpu: done");
 }
-
 
 #[allow(static_mut_refs)]
 pub(crate) fn trap_init(riscv: &mut Riscv64) {

@@ -27,13 +27,13 @@ if [ -z "$KERNEL_PATH" ]; then
     KERNEL_DIR="$(dirname "$SCRIPT_DIR")"
     
     if [ "$DEBUG_MODE" = "true" ]; then
-        KERNEL_PATH="$KERNEL_DIR/target/riscv64gc-unknown-none-elf/debug/kernel"
+        KERNEL_PATH="$KERNEL_DIR/target/riscv64gc-unknown-none-elf/debug/riscv64-limine"
     else
         # For release mode or default run
-        if [ -f "$KERNEL_DIR/target/riscv64gc-unknown-none-elf/release/kernel" ]; then
-            KERNEL_PATH="$KERNEL_DIR/target/riscv64gc-unknown-none-elf/release/kernel"
+        if [ -f "$KERNEL_DIR/target/riscv64gc-unknown-none-elf/release/riscv64-limine" ]; then
+            KERNEL_PATH="$KERNEL_DIR/target/riscv64gc-unknown-none-elf/release/riscv64-limine"
         else
-            KERNEL_PATH="$KERNEL_DIR/target/riscv64gc-unknown-none-elf/debug/kernel"
+            KERNEL_PATH="$KERNEL_DIR/target/riscv64gc-unknown-none-elf/debug/riscv64-limine"
         fi
     fi
 fi
@@ -85,6 +85,17 @@ fi
 
 if [ ! -f "$ROOTFS_IMAGE" ]; then
     echo "Error: rootfs image not found at $ROOTFS_IMAGE"
+    exit 1
+fi
+
+if [ ! -f "$KERNEL_PATH" ]; then
+    echo "Error: kernel binary not found at $KERNEL_PATH"
+    exit 1
+fi
+
+echo "Rebuilding Limine RISC-V boot image from $KERNEL_PATH"
+if ! KERNEL_ELF="$KERNEL_PATH" sh "$PROJECT_ROOT/mkfs/make_limine_riscv64_image.sh"; then
+    echo "Error: failed to rebuild Limine RISC-V boot image"
     exit 1
 fi
 

@@ -22,8 +22,7 @@ pub static HHDM_REQUEST: HhdmRequest = HhdmRequest::new();
 
 #[unsafe(link_section = ".limine_requests")]
 #[used]
-pub static EXECUTABLE_ADDRESS_REQUEST: ExecutableAddressRequest =
-    ExecutableAddressRequest::new();
+pub static EXECUTABLE_ADDRESS_REQUEST: ExecutableAddressRequest = ExecutableAddressRequest::new();
 
 #[unsafe(link_section = ".limine_requests")]
 #[used]
