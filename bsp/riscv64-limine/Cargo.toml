@@ -9,4 +9,3 @@ path = "src/main.rs"
 
 [dependencies]
 scarlet = { path = "../../kernel" }
-limine = "0.5"

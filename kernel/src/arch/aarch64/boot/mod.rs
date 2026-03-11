@@ -4,6 +4,9 @@
 //! This module provides the entry points and initialization code for
 //! starting the kernel on AArch64 systems.
 
+#[cfg(feature = "limine")]
+pub mod limine;
+
 /// Initialize AArch64-specific boot components
 ///
 /// This function is called during kernel initialization to set up

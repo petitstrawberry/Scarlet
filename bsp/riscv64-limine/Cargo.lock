@@ -71,7 +71,6 @@ dependencies = [
 name = "riscv64-limine-bsp"
 version = "0.1.0"
 dependencies = [
- "limine",
  "scarlet",
 ]
 
