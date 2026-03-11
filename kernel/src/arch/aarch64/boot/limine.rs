@@ -1,37 +1,26 @@
-use core::arch::naked_asm;
-
-use crate::environment::STACK_SIZE;
-
-use limine::paging;
-use limine::request::{BspHartidRequest, PagingModeRequest};
+use core::arch::{asm, naked_asm};
+use core::mem::MaybeUninit;
 
 use crate::boot::limine::{
     DTB_REQUEST, EXECUTABLE_ADDRESS_REQUEST, HHDM_REQUEST, MEMMAP_REQUEST, MODULE_REQUEST,
     ensure_base_revision_supported, module_area, reserve_front, response, select_usable_region,
 };
 use crate::device::fdt::{FdtManager, init_fdt, relocate_fdt};
+use crate::environment::STACK_SIZE;
 use crate::mem::{KERNEL_STACK, init_bss};
 use crate::vm::addr::{init_limine_addressing, phys_to_virt};
 use crate::vm::vmem::MemoryArea;
-use crate::{BootInfo, DeviceSource, start_kernel};
+use crate::{BootInfo, DeviceSource, start_ap, start_kernel};
+use core::sync::atomic::compiler_fence;
 
-static mut EARLY_BOOTINFO: Option<BootInfo> = None;
-
-#[unsafe(link_section = ".limine_requests")]
-#[used]
-static RISCV_BSP_HARTID_REQUEST: BspHartidRequest = BspHartidRequest::new();
-
-#[unsafe(link_section = ".limine_requests")]
-#[used]
-static PAGING_MODE_REQUEST: PagingModeRequest = PagingModeRequest::new()
-    .with_mode(paging::Mode::SV48)
-    .with_max_mode(paging::Mode::SV48)
-    .with_min_mode(paging::Mode::SV48);
+static mut EARLY_BOOTINFO: MaybeUninit<BootInfo> = MaybeUninit::uninit();
 
 #[unsafe(link_section = ".init")]
 #[unsafe(no_mangle)]
-pub fn arch_start_kernel() -> ! {
+pub extern "C" fn limine_entry() -> ! {
     init_bss();
+    mask_exceptions();
+    prepare_el1_runtime();
 
     let hhdm = response(HHDM_REQUEST.get_response(), "hhdm");
     let executable = response(
@@ -40,7 +29,6 @@ pub fn arch_start_kernel() -> ! {
     );
     let memmap = response(MEMMAP_REQUEST.get_response(), "memmap");
     let dtb = response(DTB_REQUEST.get_response(), "dtb");
-    let bsp = response(RISCV_BSP_HARTID_REQUEST.get_response(), "riscv-bsp-hartid");
 
     ensure_base_revision_supported();
 
@@ -57,6 +45,9 @@ pub fn arch_start_kernel() -> ! {
         executable.virtual_base() as usize,
         kernel_end - kernel_start,
     );
+    crate::arch::aarch64::early_console_init();
+
+    compiler_fence(core::sync::atomic::Ordering::SeqCst);
 
     if executable.virtual_base() as usize != kernel_start {
         panic!(
@@ -66,7 +57,8 @@ pub fn arch_start_kernel() -> ! {
         );
     }
 
-    init_fdt(dtb.dtb_ptr() as usize);
+    let dtb_ptr = dtb.dtb_ptr() as usize;
+    init_fdt(dtb_ptr);
 
     let usable_region = select_usable_region(memmap.entries());
     let relocated_fdt = relocate_fdt(phys_to_virt(usable_region.start) as *mut u8);
@@ -88,15 +80,10 @@ pub fn arch_start_kernel() -> ! {
     let cmdline = fdt_manager
         .get_fdt()
         .and_then(|fdt| fdt.chosen().bootargs());
+    let cpu_id = current_cpu_id();
 
-    crate::early_println!(
-        "[limine] bootinfo usable_memory={:#x}..={:#x}",
-        usable_memory.start,
-        usable_memory.end
-    );
-    crate::early_println!("[limine] before init_user_context_from_fdt");
     let bootinfo = BootInfo::new(
-        bsp.bsp_hartid() as usize,
+        cpu_id,
         cpu_count,
         usable_memory,
         direct_map_area,
@@ -109,16 +96,13 @@ pub fn arch_start_kernel() -> ! {
     );
 
     crate::arch::init_user_context_from_fdt();
-    crate::early_println!("[limine] before init_boot_cpu");
-    crate::arch::riscv64::init_boot_cpu(bootinfo.cpu_id);
-    crate::early_println!("[limine] before stack handoff");
+    crate::arch::aarch64::init_arch(cpu_id);
 
     unsafe {
-        let stack_top = (&raw const KERNEL_STACK) as *const _ as usize + STACK_SIZE;
-        EARLY_BOOTINFO = Some(bootinfo);
-        let bootinfo_ptr =
-            (&raw const EARLY_BOOTINFO) as *const Option<BootInfo> as *const BootInfo;
-        crate::arch::riscv64::switch_stack_and_jump(
+        let stack_top = (&raw const KERNEL_STACK) as *const _ as usize + STACK_SIZE * (cpu_id + 1);
+        (&raw mut EARLY_BOOTINFO).write(MaybeUninit::new(bootinfo));
+        let bootinfo_ptr = (&raw const EARLY_BOOTINFO).cast::<BootInfo>();
+        switch_stack_and_jump(
             start_kernel as *const () as usize,
             bootinfo_ptr as usize,
             stack_top,
@@ -126,26 +110,41 @@ pub fn arch_start_kernel() -> ! {
     }
 }
 
-/// Entry point for the secondary cores
-#[unsafe(link_section = ".init")]
-#[unsafe(export_name = "_entry_ap")]
-#[unsafe(naked)]
-pub extern "C" fn _entry_ap() {
-    naked_asm!("
-        .attribute arch, \"rv64gc\"
-        .option norvc
-        .option norelax
-        .align 8
-                li      t0, {}
-                mv      t1, a0
-                addi    t1, t1, 1
-                mul     t1, t1, a0          
-                la      sp, KERNEL_STACK
-                add     sp, sp, t0
+#[inline(always)]
+fn current_cpu_id() -> usize {
+    let mpidr: usize;
+    unsafe {
+        asm!("mrs {0}, mpidr_el1", out(reg) mpidr, options(nostack));
+    }
+    mpidr & 0xff
+}
 
-                // Use indirect jump to avoid JAL range limitation
-                la      t0, start_ap
-                jr      t0
-        ", const STACK_SIZE
-    );
+#[inline(always)]
+fn mask_exceptions() {
+    unsafe {
+        asm!("msr daifset, #0xf", options(nostack));
+    }
+}
+
+#[inline(always)]
+fn prepare_el1_runtime() {
+    unsafe {
+        asm!(
+            "mov {tmp}, sp",
+            "msr spsel, #1",
+            "mov sp, {tmp}",
+            "isb",
+            tmp = lateout(reg) _,
+            options(nostack)
+        );
+    }
+}
+
+#[unsafe(naked)]
+pub unsafe extern "C" fn switch_stack_and_jump(
+    _entry: usize,
+    _arg0: usize,
+    _stack_top: usize,
+) -> ! {
+    naked_asm!("mov x9, x0", "mov x0, x1", "mov sp, x2", "br x9",);
 }

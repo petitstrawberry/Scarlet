@@ -4,6 +4,8 @@
         "user/lib/std/Cargo.toml",
         "user/lib/framebuffer/Cargo.toml",
         "user/bin/Cargo.toml",
+        "bsp/riscv64-limine/Cargo.toml",
+        "bsp/aarch64-limine/Cargo.toml"
     ],
     "remote.localPortHost": "allInterfaces"
 }
