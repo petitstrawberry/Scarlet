@@ -126,7 +126,7 @@ kernel executes existing initcall pipeline
 - Validate kernel source info for registry / git / path acquisition
 - Validate that all configured module options exist in the selected registry/catalog
 - Validate that each module entry uses exactly one valid dependency-style source form plus an explicit `enabled` field
-- Validate that every version-based module entry explicitly names its registry
+- Validate that version-based module entries use the default registry unless an explicit non-default registry is specified
 - Validate registry-defined feature requirements and module conflicts
 - Validate that no enabled option depends on another option explicitly set to `false`
 - Validate the generated graph with `cargo metadata` after synthesis

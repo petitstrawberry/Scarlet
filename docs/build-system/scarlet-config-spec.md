@@ -76,7 +76,7 @@ limine = true
 profiler = false
 
 [modules]
-"scarlet-driver-pl011" = { version = "0.1.0", registry = "crates-io", enabled = true }
+"scarlet-driver-pl011" = { version = "0.1.0", enabled = true }
 "scarlet-abi-linux" = { path = "modules/abi/linux", enabled = true }
 "community-net-stack" = { git = "https://github.com/org/net", rev = "abc123", enabled = false }
 ```
@@ -222,8 +222,8 @@ Example:
 
 ```toml
 [modules]
-"scarlet-driver-pl011" = { version = "0.1.0", registry = "crates-io", enabled = true }
-"scarlet-driver-ns16550" = { version = "0.2.0", registry = "crates-io", enabled = false }
+"scarlet-driver-pl011" = { version = "0.1.0", enabled = true }
+"scarlet-driver-ns16550" = { version = "0.2.0", enabled = false }
 "scarlet-abi-linux" = { path = "modules/abi/linux", enabled = true }
 "community-net-stack" = { git = "https://github.com/org/net", rev = "abc123", enabled = false }
 ```
@@ -236,7 +236,8 @@ Each module entry must contain:
 
 - `enabled = true | false`
 - exactly one normal Cargo-like source form:
-  - `version = "..."` together with an explicit `registry = "crates-io"` or another named registry
+  - `version = "..."` for the default registry
+  - `version = "...", registry = "..."` for a non-default registry
   - `path = "..."`
   - `git = "..."` with an accompanying selector such as `rev`, `branch`, or `tag`
 
@@ -303,12 +304,11 @@ The build tool should validate at least the following:
 5. every configured module option exists in the selected registry/catalog
 6. every module entry contains an explicit `enabled` field
 7. every module entry uses exactly one valid Cargo-like source form
-8. every `version = "..."` entry also specifies an explicit `registry`
-9. every enabled module resolves to a valid Cargo dependency
-10. registry-defined requirements are satisfied
-11. registry-defined conflicts do not produce an invalid configuration
-12. if an enabled option depends on an explicitly disabled option, the build fails with a clear validation error
-13. the generated dependency graph must successfully resolve under Cargo metadata inspection
+8. every enabled module resolves to a valid Cargo dependency
+9. registry-defined requirements are satisfied
+10. registry-defined conflicts do not produce an invalid configuration
+11. if an enabled option depends on an explicitly disabled option, the build fails with a clear validation error
+12. the generated dependency graph must successfully resolve under Cargo metadata inspection
 
 ### Validation layers
 
@@ -366,9 +366,9 @@ limine = true
 profiler = false
 
 [modules]
-"scarlet-driver-pl011" = { version = "0.1.0", registry = "crates-io", enabled = true }
-"scarlet-abi-linux" = { version = "0.1.0", registry = "crates-io", enabled = true }
-"scarlet-driver-ns16550" = { version = "0.2.0", registry = "crates-io", enabled = false }
+"scarlet-driver-pl011" = { version = "0.1.0", enabled = true }
+"scarlet-abi-linux" = { version = "0.1.0", enabled = true }
+"scarlet-driver-ns16550" = { version = "0.2.0", enabled = false }
 ```
 
 For the in-tree Scarlet development repository, the same resolved option set may coexist with local-path registry entries during development.
