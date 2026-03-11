@@ -13,7 +13,6 @@ pub extern "C" fn arch_start_kernel() -> ! {
     scarlet::arch::aarch64::boot::limine::limine_entry()
 }
 
-
 #[unsafe(link_section = ".init")]
 #[unsafe(export_name = "_entry_ap")]
 #[unsafe(naked)]

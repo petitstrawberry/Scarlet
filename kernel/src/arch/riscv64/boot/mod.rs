@@ -1,5 +1,7 @@
 #[cfg(feature = "limine")]
 pub mod limine;
+#[cfg(test)]
+pub mod test;
 
 use core::arch::asm;
 

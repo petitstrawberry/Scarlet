@@ -1,7 +1,6 @@
 use core::arch::{asm, naked_asm};
 use core::mem::MaybeUninit;
 
-use core::sync::atomic::compiler_fence;
 use crate::boot::limine::{
     DTB_REQUEST, EXECUTABLE_ADDRESS_REQUEST, HHDM_REQUEST, MEMMAP_REQUEST, MODULE_REQUEST,
     ensure_base_revision_supported, module_area, reserve_front, response, select_usable_region,
@@ -12,6 +11,7 @@ use crate::mem::{KERNEL_STACK, init_bss};
 use crate::vm::addr::{init_limine_addressing, phys_to_virt};
 use crate::vm::vmem::MemoryArea;
 use crate::{BootInfo, DeviceSource, start_ap, start_kernel};
+use core::sync::atomic::compiler_fence;
 
 static mut EARLY_BOOTINFO: MaybeUninit<BootInfo> = MaybeUninit::uninit();
 

@@ -6,6 +6,8 @@
 
 #[cfg(feature = "limine")]
 pub mod limine;
+#[cfg(test)]
+pub mod test;
 
 /// Initialize AArch64-specific boot components
 ///

@@ -38,6 +38,10 @@ if [ -z "$KERNEL_PATH" ]; then
     fi
 fi
 
+if [ -n "$KERNEL_PATH" ] && [ -f "$KERNEL_PATH" ]; then
+    KERNEL_PATH="$(realpath "$KERNEL_PATH")"
+fi
+
 if [ "$DEBUG_MODE" = "true" ]; then
     echo "Starting qemu in debug mode with gdb server..."
     DEBUG_FLAGS="-gdb tcp::12345 -S"
