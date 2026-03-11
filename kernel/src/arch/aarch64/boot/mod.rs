@@ -4,12 +4,10 @@
 //! This module provides the entry points and initialization code for
 //! starting the kernel on AArch64 systems.
 
-mod early_mmu;
-mod entry;
-
-// Re-export the entry points for the linker
-pub use early_mmu::*;
-pub use entry::*;
+#[cfg(feature = "limine")]
+pub mod limine;
+#[cfg(test)]
+pub mod test;
 
 /// Initialize AArch64-specific boot components
 ///
