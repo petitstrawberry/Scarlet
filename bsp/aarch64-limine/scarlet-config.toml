@@ -1,0 +1,24 @@
+config_version = 1
+
+[project]
+name = "scarlet-aarch64-limine"
+
+[board]
+name = "aarch64-limine"
+target = "aarch64-unknown-none-elf"
+target_json = "../../kernel/targets/aarch64-unknown-none-elf.json"
+
+[kernel]
+package = "scarlet"
+source = { path = "../../kernel" }
+
+[kernel.features]
+network = true
+user-fpu = true
+user-vector = true
+hypervisor = true
+limine = true
+profiler = false
+
+[modules]
+"scarlet-module-prototype" = { path = "../modules/scarlet-module-prototype", enabled = true }

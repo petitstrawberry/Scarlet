@@ -39,6 +39,7 @@ However, the target developer experience is BSP-rooted:
 - [BSP-Local Generated Modules Architecture](./bsp-local-generated-modules.md)
 - [`scarlet-config.toml` Specification](./scarlet-config-spec.md)
 - [Implementation Plan](./implementation-plan.md)
+- [`cargo-scarlet` Prototype](./cargo-scarlet-prototype.md)
 
 ## Design Summary
 

@@ -9,3 +9,4 @@ path = "src/main.rs"
 
 [dependencies]
 scarlet = { path = "../../kernel" }
+scarlet_modules = { package = "scarlet-modules", path = ".scarlet/scarlet-modules" }
