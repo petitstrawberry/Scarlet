@@ -21,4 +21,4 @@ limine = true
 profiler = false
 
 [modules]
-"scarlet-module-prototype" = { path = "../modules/scarlet-module-prototype", enabled = true }
+"scarlet-module-prototype" = { path = "../../modules/scarlet-module-prototype", enabled = true }

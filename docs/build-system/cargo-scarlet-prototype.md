@@ -35,8 +35,8 @@ Scarlet/
 │  │  ├─ src/main.rs
 │  │  └─ .scarlet/
 │  │     └─ scarlet-modules/
-│  └─ modules/
-│     └─ scarlet-module-prototype/
+├─ modules/
+│  └─ scarlet-module-prototype/
 ```
 
 ## Commands
@@ -95,7 +95,7 @@ Example:
 
 ```toml
 [modules]
-"scarlet-module-prototype" = { path = "../modules/scarlet-module-prototype", enabled = true }
+"scarlet-module-prototype" = { path = "../../modules/scarlet-module-prototype", enabled = true }
 ```
 
 ### Generated output
@@ -124,7 +124,7 @@ Current intentional limitations:
 - registry/catalog semantics are not fully implemented yet
 - conflict/requirement logic is documented but not fully enforced in code yet
 - the generator currently trusts dependency-style module entries directly
-- the prototype currently ships with a tiny local sample module crate under `bsp/modules/`
+- the prototype currently ships with a tiny local sample module crate under top-level `modules/`
 
 ## Intended Next Steps
 
