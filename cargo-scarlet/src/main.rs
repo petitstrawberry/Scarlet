@@ -299,6 +299,14 @@ fn render_generated_manifest(
     manifest.push_str("[lib]\npath = \"src/lib.rs\"\n\n");
     manifest.push_str("[dependencies]\n");
 
+    let kernel_spec = render_kernel_dependency_spec(project_root, &config.kernel)?;
+    writeln!(
+        &mut manifest,
+        "scarlet = {{ {kernel_spec}, default-features = false, features = [{}] }}",
+        render_enabled_kernel_features(&config.kernel.features)
+    )
+    .map_err(|error| format!("failed to render kernel dependency: {error}"))?;
+
     for (name, module) in &config.modules {
         if !module.enabled {
             continue;
@@ -311,6 +319,51 @@ fn render_generated_manifest(
     }
 
     Ok(manifest)
+}
+
+fn render_kernel_dependency_spec(
+    project_root: &Path,
+    kernel: &KernelConfig,
+) -> Result<String, String> {
+    let mut parts = Vec::new();
+
+    if let Some(version) = &kernel.source.version {
+        parts.push(format!("version = \"{version}\""));
+        if let Some(registry) = &kernel.source.registry {
+            parts.push(format!("registry = \"{registry}\""));
+        }
+    }
+
+    if let Some(path) = &kernel.source.path {
+        let absolute = project_root.join(path);
+        let generated_root = project_root.join(".scarlet/scarlet-modules");
+        let relative = pathdiff(&absolute, &generated_root)?;
+        parts.push(format!("path = \"{}\"", relative.display()));
+    }
+
+    if let Some(git) = &kernel.source.git {
+        parts.push(format!("git = \"{git}\""));
+    }
+    if let Some(rev) = &kernel.source.rev {
+        parts.push(format!("rev = \"{rev}\""));
+    }
+    if let Some(branch) = &kernel.source.branch {
+        parts.push(format!("branch = \"{branch}\""));
+    }
+    if let Some(tag) = &kernel.source.tag {
+        parts.push(format!("tag = \"{tag}\""));
+    }
+
+    Ok(parts.join(", "))
+}
+
+fn render_enabled_kernel_features(features: &BTreeMap<String, bool>) -> String {
+    features
+        .iter()
+        .filter(|(_, enabled)| **enabled)
+        .map(|(name, _)| format!("\"{name}\""))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 fn render_dependency_spec(project_root: &Path, module: &ModuleConfig) -> Result<String, String> {
@@ -369,6 +422,8 @@ fn render_generated_lib(config: &ScarletConfig) -> String {
         "// config-fingerprint: {}",
         config_fingerprint(config)
     );
+    let _ = writeln!(&mut source, "pub use scarlet;");
+    let _ = writeln!(&mut source);
     let _ = writeln!(&mut source, "#[inline(never)]");
     let _ = writeln!(&mut source, "pub fn force_link() {{");
 

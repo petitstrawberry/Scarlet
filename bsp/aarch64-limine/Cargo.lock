@@ -6,7 +6,6 @@ version = 4
 name = "aarch64-limine-bsp"
 version = "0.1.0"
 dependencies = [
- "scarlet",
  "scarlet-modules",
 ]
 
@@ -95,6 +94,7 @@ version = "0.1.0"
 name = "scarlet-modules"
 version = "0.1.0"
 dependencies = [
+ "scarlet",
  "scarlet-module-prototype",
 ]
 

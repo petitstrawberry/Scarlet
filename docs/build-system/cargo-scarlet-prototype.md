@@ -102,6 +102,8 @@ Example:
 
 The generated `scarlet-modules` crate:
 
+- owns the configured `scarlet` kernel dependency and kernel feature set
+- re-exports that kernel as `scarlet_modules::scarlet`
 - depends on all enabled module entries
 - emits a `force_link()` function
 - calls `module_crate::force_link()` for each enabled module
@@ -112,6 +114,7 @@ Each BSP now has:
 
 - a static dependency on `.scarlet/scarlet-modules`
 - a call to `scarlet_modules::force_link()` in `arch_start_kernel()`
+- kernel entry access through `scarlet_modules::scarlet`
 
 This keeps the generated module aggregation crate on a guaranteed-linked path without changing the kernel boot contract.
 
