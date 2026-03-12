@@ -61,12 +61,6 @@ enum Commands {
     Init {
         #[arg(long)]
         project: PathBuf,
-        #[arg(long)]
-        board: String,
-        #[arg(long, default_value = "../../kernel")]
-        kernel_path: String,
-        #[arg(long, default_value = "../../modules/scarlet-module-prototype")]
-        module_path: String,
     },
 }
 
@@ -138,7 +132,7 @@ fn main() -> ExitCode {
 }
 
 fn run() -> Result<(), String> {
-    let cli = Cli::parse();
+    let cli = Cli::parse_from(normalized_args());
     match cli.command {
         Commands::Generate { project } => {
             generate(&project)?;
@@ -178,35 +172,27 @@ fn run() -> Result<(), String> {
             let config = generate(&project)?;
             cargo_command(&project, &config, "run", target, release, &extra_args)
         }
-        Commands::Init {
-            project,
-            board,
-            kernel_path,
-            module_path,
-        } => init_project(&project, &board, &kernel_path, &module_path),
+        Commands::Init { project } => init_project(&project),
     }
 }
 
-fn init_project(
-    project: &Path,
-    board: &str,
-    kernel_path: &str,
-    module_path: &str,
-) -> Result<(), String> {
+fn normalized_args() -> Vec<String> {
+    let mut args = std::env::args().collect::<Vec<_>>();
+    if args.get(1).is_some_and(|arg| arg == "scarlet") {
+        args.remove(1);
+    }
+    args
+}
+
+fn init_project(project: &Path) -> Result<(), String> {
     let project = normalize_output_path(project)?;
     ensure_init_target_is_valid(&project)?;
 
     fs::create_dir_all(project.join(".scarlet"))
         .map_err(|error| format!("failed to create {}: {error}", project.display()))?;
-    fs::create_dir_all(project.join(".cargo"))
-        .map_err(|error| format!("failed to create {}: {error}", project.display()))?;
 
-    let scarlet_config = render_init_config(board, kernel_path, module_path)?;
-    let cargo_config = render_init_cargo_config(board)?;
     let gitignore = ".scarlet\ntarget\n";
 
-    write_if_changed(&project.join("scarlet-config.toml"), &scarlet_config)?;
-    write_if_changed(&project.join(".cargo/config.toml"), &cargo_config)?;
     append_gitignore_entry(&project.join(".gitignore"), gitignore)?;
 
     Ok(())
@@ -283,36 +269,6 @@ fn cargo_command(
         Ok(())
     } else {
         Err(format!("cargo {subcommand} failed with status {status}"))
-    }
-}
-
-fn render_init_config(board: &str, kernel_path: &str, module_path: &str) -> Result<String, String> {
-    let (target, target_json) = match board {
-        "riscv64-limine" => (
-            "riscv64gc-unknown-none-elf",
-            "../../kernel/targets/riscv64gc-unknown-none-elf.json",
-        ),
-        "aarch64-limine" => (
-            "aarch64-unknown-none-elf",
-            "../../kernel/targets/aarch64-unknown-none-elf.json",
-        ),
-        _ => return Err(format!("unsupported board `{board}` for init template")),
-    };
-
-    Ok(format!(
-        "config_version = 1\n\n[project]\nname = \"scarlet-{board}\"\n\n[board]\nname = \"{board}\"\ntarget = \"{target}\"\ntarget_json = \"{target_json}\"\n\n[kernel]\npackage = \"scarlet\"\nsource = {{ path = \"{kernel_path}\" }}\n\n[kernel.features]\nnetwork = true\nuser-fpu = true\nuser-vector = true\nhypervisor = true\nlimine = true\nprofiler = false\n\n[modules]\n\"scarlet-module-prototype\" = {{ path = \"{module_path}\", enabled = true }}\n"
-    ))
-}
-
-fn render_init_cargo_config(board: &str) -> Result<String, String> {
-    match board {
-        "riscv64-limine" => Ok(String::from(
-            "[profile.dev]\nopt-level = 3\n\n[profile.test]\nopt-level = 3\n\n[target.riscv64gc-unknown-none-elf]\nrunner = \"../../bsp/riscv64-limine/tools/run.sh\"\n\n[build]\ntarget = \"../../kernel/targets/riscv64gc-unknown-none-elf.json\"\n\n[unstable]\nbuild-std = [\"core\", \"compiler_builtins\", \"alloc\"]\nbuild-std-features = [\"compiler-builtins-mem\"]\nunstable-options = true\n",
-        )),
-        "aarch64-limine" => Ok(String::from(
-            "[profile.dev]\nopt-level = 3\n\n[profile.test]\nopt-level = 3\n\n[target.aarch64-unknown-none]\nrustflags = [\"-T\", \"lds/aarch64_limine.ld\"]\nrunner = \"../../bsp/aarch64-limine/tools/run_aarch64.sh\"\n\n[target.aarch64-unknown-none-elf]\nrunner = \"../../bsp/aarch64-limine/tools/run_aarch64.sh\"\nrustflags = [\n\t\"-C\", \"no-vectorize-loops\",\n\t\"-C\", \"no-vectorize-slp\",\n]\n\n[build]\ntarget = \"../../kernel/targets/aarch64-unknown-none-elf.json\"\n\n[unstable]\nbuild-std = [\"core\", \"compiler_builtins\", \"alloc\"]\nbuild-std-features = [\"compiler-builtins-mem\"]\nunstable-options = true\n",
-        )),
-        _ => Err(format!("unsupported board `{board}` for init cargo config")),
     }
 }
 

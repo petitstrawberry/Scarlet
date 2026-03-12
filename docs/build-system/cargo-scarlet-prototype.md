@@ -98,29 +98,18 @@ cargo run --manifest-path cargo-scarlet/Cargo.toml -- run --project bsp/riscv64-
 ### Initialize Scarlet build-system files inside an existing project
 
 ```bash
-cargo run --manifest-path cargo-scarlet/Cargo.toml -- init --project /tmp/my-board-project --board riscv64-limine
-```
-
-You can also override the prototype local paths explicitly:
-
-```bash
-cargo run --manifest-path cargo-scarlet/Cargo.toml -- init \
-  --project /tmp/my-board-project \
-  --board riscv64-limine \
-  --kernel-path ../../kernel \
-  --module-path ../../modules/scarlet-module-prototype
+cargo run --manifest-path cargo-scarlet/Cargo.toml -- init --project /tmp/my-board-project
 ```
 
 This now assumes `/tmp/my-board-project` already exists as a board/BSP project.
 
 `init` adds or updates only the Scarlet build-system support files:
 
-- `scarlet-config.toml`
-- `.cargo/config.toml`
 - `.gitignore` entries for `.scarlet` and `target`
+- the `.scarlet/` working directory
 
-It does **not** generate the board-specific project template itself.
-Board templates are expected to come from a separately managed repository or other project scaffolding flow.
+It does **not** generate the board-specific project template or board configuration itself.
+Board templates and `scarlet-config.toml` contents are expected to come from a separately managed repository or other project scaffolding flow.
 
 ### Repository-local wrapper for future `cargo scarlet` usage
 
