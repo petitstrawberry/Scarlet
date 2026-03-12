@@ -610,6 +610,28 @@ fn config_fingerprint(config: &ScarletConfig) -> String {
         config.kernel.package,
     );
 
+    if let Some(version) = &config.kernel.source.version {
+        let _ = write!(&mut fingerprint, ";ks:version={version}");
+    }
+    if let Some(path) = &config.kernel.source.path {
+        let _ = write!(&mut fingerprint, ";ks:path={path}");
+    }
+    if let Some(git) = &config.kernel.source.git {
+        let _ = write!(&mut fingerprint, ";ks:git={git}");
+    }
+    if let Some(rev) = &config.kernel.source.rev {
+        let _ = write!(&mut fingerprint, ";ks:rev={rev}");
+    }
+    if let Some(branch) = &config.kernel.source.branch {
+        let _ = write!(&mut fingerprint, ";ks:branch={branch}");
+    }
+    if let Some(tag) = &config.kernel.source.tag {
+        let _ = write!(&mut fingerprint, ";ks:tag={tag}");
+    }
+    if let Some(registry) = &config.kernel.source.registry {
+        let _ = write!(&mut fingerprint, ";ks:registry={registry}");
+    }
+
     for (name, feature_enabled) in &config.kernel.features {
         let _ = write!(&mut fingerprint, ";kf:{name}={feature_enabled}");
     }
@@ -643,13 +665,24 @@ fn config_fingerprint(config: &ScarletConfig) -> String {
 }
 
 fn metadata_check(project: &Path, target: &str) -> Result<(), String> {
+    // `--filter-platform` expects a target triple, not a JSON path. If `target`
+    // looks like a custom target JSON file, derive the triple from its file stem.
+    let filter_platform = if target.ends_with(".json") {
+        Path::new(target)
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or(target)
+    } else {
+        target
+    };
+
     let mut command = Command::new("cargo");
     command
         .arg("metadata")
         .arg("--format-version")
         .arg("1")
         .arg("--filter-platform")
-        .arg(target)
+        .arg(filter_platform)
         .current_dir(project);
 
     eprintln!(
