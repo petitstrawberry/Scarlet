@@ -119,16 +119,14 @@ Long-term, the build tool should be able to materialize or resolve the kernel de
 
 The build tool reads the BSP project's `scarlet-config.toml` and generates `.scarlet/scarlet-modules/` before any Cargo command runs.
 
-Crucially, `scarlet-config.toml` should be treated as a **full resolved `.config`-style file**. It is not the place where users describe every package's metadata, constraints, or dependency semantics by hand.
+Crucially, `scarlet-config.toml` should be treated as a **full resolved `.config`-style file**.
 
-Instead:
+In the MVP:
 
 - the config records the explicit resolved state of all available options
 - the config records module source provenance inline using dependency-like entries under `[modules]`
-- the module registry/catalog defines metadata such as conflicts, requirements, descriptions, and dependency/source mapping
-- the build tool combines the two and then validates the generated graph with Cargo metadata
-
-If the registry says an enabled option depends on another option that the config explicitly marks `enabled = false`, the build tool should fail fast with a validation error. Explicit OFF must win over automatic dependency closure.
+- the build tool generates the crate directly from those entries
+- contradictions and dependency breakage are checked by `cargo metadata`
 
 The generated crate is responsible for:
 
@@ -153,7 +151,7 @@ scarlet-abi-linux = { version = "0.1.0" }
 my-custom-driver = { path = "../../../drivers/my-custom-driver" }
 ```
 
-Those dependency entries come from build-tool resolution, not from copying free-form package metadata directly out of `scarlet-config.toml`.
+Those dependency entries come directly from the dependency-like entries in `scarlet-config.toml`.
 
 Example generated library:
 
@@ -255,12 +253,11 @@ The build tool is responsible for all config resolution.
 Required behavior:
 
 1. read `scarlet-config.toml`
-2. load the module registry/catalog for the selected board/profile
-3. resolve enabled module options from dependency-like `[modules]` entries into concrete dependency definitions
-4. generate `.scarlet/scarlet-modules/Cargo.toml`
-5. generate `.scarlet/scarlet-modules/src/lib.rs`
-6. run `cargo metadata` against the generated BSP dependency graph and fail on invalid resolution
-7. do this before any Cargo command that touches the BSP project
+2. resolve enabled module options from dependency-like `[modules]` entries into concrete dependency definitions
+3. generate `.scarlet/scarlet-modules/Cargo.toml`
+4. generate `.scarlet/scarlet-modules/src/lib.rs`
+5. run `cargo metadata` against the generated BSP dependency graph and fail on invalid resolution
+6. do this before any Cargo command that touches the BSP project
 
 That includes:
 

@@ -5,7 +5,7 @@ extern crate scarlet_modules;
 
 use core::arch::naked_asm;
 
-use scarlet::{environment::STACK_SIZE, start_ap};
+use scarlet_modules::scarlet::{environment::STACK_SIZE, start_ap};
 
 #[unsafe(link_section = ".init")]
 #[unsafe(no_mangle)]

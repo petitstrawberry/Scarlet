@@ -22,6 +22,14 @@ enum Commands {
         #[arg(long)]
         project: PathBuf,
     },
+    Check {
+        #[arg(long)]
+        project: PathBuf,
+        #[arg(long)]
+        target: Option<String>,
+        #[arg(long)]
+        release: bool,
+    },
     Build {
         #[arg(long)]
         project: PathBuf,
@@ -29,6 +37,32 @@ enum Commands {
         target: Option<String>,
         #[arg(long)]
         release: bool,
+    },
+    Clippy {
+        #[arg(long)]
+        project: PathBuf,
+        #[arg(long)]
+        target: Option<String>,
+        #[arg(long)]
+        release: bool,
+        #[arg(last = true)]
+        extra_args: Vec<String>,
+    },
+    Run {
+        #[arg(long)]
+        project: PathBuf,
+        #[arg(long)]
+        target: Option<String>,
+        #[arg(long)]
+        release: bool,
+        #[arg(last = true)]
+        extra_args: Vec<String>,
+    },
+    Init {
+        #[arg(long)]
+        project: PathBuf,
+        #[arg(long)]
+        board: String,
     },
 }
 
@@ -106,15 +140,64 @@ fn run() -> Result<(), String> {
             generate(&project)?;
             Ok(())
         }
+        Commands::Check {
+            project,
+            target,
+            release,
+        } => {
+            let config = generate(&project)?;
+            cargo_command(&project, &config, "check", target, release, &[])
+        }
         Commands::Build {
             project,
             target,
             release,
         } => {
             let config = generate(&project)?;
-            build_project(&project, &config, target, release)
+            cargo_command(&project, &config, "build", target, release, &[])
         }
+        Commands::Clippy {
+            project,
+            target,
+            release,
+            extra_args,
+        } => {
+            let config = generate(&project)?;
+            cargo_command(&project, &config, "clippy", target, release, &extra_args)
+        }
+        Commands::Run {
+            project,
+            target,
+            release,
+            extra_args,
+        } => {
+            let config = generate(&project)?;
+            cargo_command(&project, &config, "run", target, release, &extra_args)
+        }
+        Commands::Init { project, board } => init_project(&project, &board),
     }
+}
+
+fn init_project(project: &Path, board: &str) -> Result<(), String> {
+    let project = project.to_path_buf();
+    ensure_init_target_is_safe(&project)?;
+
+    fs::create_dir_all(project.join("src"))
+        .map_err(|error| format!("failed to create {}: {error}", project.display()))?;
+    fs::create_dir_all(project.join(".scarlet"))
+        .map_err(|error| format!("failed to create {}: {error}", project.display()))?;
+
+    let cargo_toml = render_init_cargo_toml(board);
+    let main_rs = render_init_main_rs(board)?;
+    let scarlet_config = render_init_config(board)?;
+    let gitignore = ".scarlet\ntarget\n";
+
+    write_if_changed(&project.join("Cargo.toml"), &cargo_toml)?;
+    write_if_changed(&project.join("src/main.rs"), &main_rs)?;
+    write_if_changed(&project.join("scarlet-config.toml"), &scarlet_config)?;
+    write_if_changed(&project.join(".gitignore"), gitignore)?;
+
+    Ok(())
 }
 
 fn generate(project: &Path) -> Result<ScarletConfig, String> {
@@ -141,33 +224,109 @@ fn generate(project: &Path) -> Result<ScarletConfig, String> {
     Ok(config)
 }
 
-fn build_project(
+fn cargo_command(
     project: &Path,
     config: &ScarletConfig,
+    subcommand: &str,
     target: Option<String>,
     release: bool,
+    extra_args: &[String],
 ) -> Result<(), String> {
-    metadata_check(project)?;
+    let resolved_target = target.unwrap_or_else(|| config.board.target_json.clone());
+
+    metadata_check(project, &resolved_target)?;
 
     let mut command = Command::new("cargo");
-    command.arg("build");
+    command.arg(subcommand);
     if release {
         command.arg("--release");
     }
 
-    let resolved_target = target.unwrap_or_else(|| config.board.target_json.clone());
     command.arg("--target").arg(resolved_target);
+
+    if subcommand == "clippy" && !extra_args.iter().any(|arg| arg == "--") {
+        command.arg("--");
+        command.arg("-D");
+        command.arg("warnings");
+    }
+
+    command.args(extra_args);
     command.current_dir(project);
+
+    eprintln!(
+        "cargo-scarlet: running in {} -> cargo {}",
+        project.display(),
+        command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>()
+            .join(" ")
+    );
 
     let status = command
         .status()
-        .map_err(|error| format!("failed to run cargo build: {error}"))?;
+        .map_err(|error| format!("failed to run cargo {subcommand}: {error}"))?;
 
     if status.success() {
         Ok(())
     } else {
-        Err(format!("cargo build failed with status {status}"))
+        Err(format!("cargo {subcommand} failed with status {status}"))
     }
+}
+
+fn ensure_init_target_is_safe(project: &Path) -> Result<(), String> {
+    if !project.exists() {
+        return Ok(());
+    }
+
+    let mut entries = fs::read_dir(project)
+        .map_err(|error| format!("failed to inspect {}: {error}", project.display()))?;
+
+    if entries.next().is_some() {
+        return Err(format!(
+            "refusing to initialize into non-empty directory {}",
+            project.display()
+        ));
+    }
+
+    Ok(())
+}
+
+fn render_init_cargo_toml(board: &str) -> String {
+    let package_name = format!("{board}-bsp");
+    format!(
+        "[package]\nname = \"{package_name}\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n[[bin]]\nname = \"scarlet\"\npath = \"src/main.rs\"\n\n[dependencies]\nscarlet_modules = {{ package = \"scarlet-modules\", path = \".scarlet/scarlet-modules\" }}\n"
+    )
+}
+
+fn render_init_main_rs(board: &str) -> Result<String, String> {
+    match board {
+        "riscv64-limine" => Ok(String::from(
+            "#![no_std]\n#![no_main]\n\nextern crate scarlet_modules;\n\n#[unsafe(link_section = \".init\")]\n#[unsafe(no_mangle)]\npub extern \"C\" fn arch_start_kernel() -> ! {\n    scarlet_modules::force_link();\n    scarlet_modules::scarlet::arch::riscv64::boot::limine::limine_entry()\n}\n",
+        )),
+        "aarch64-limine" => Ok(String::from(
+            "#![no_std]\n#![no_main]\n\nuse core::arch::naked_asm;\nuse scarlet_modules::scarlet::{environment::STACK_SIZE, start_ap};\n\nextern crate scarlet_modules;\n\n#[unsafe(link_section = \".init\")]\n#[unsafe(no_mangle)]\npub extern \"C\" fn arch_start_kernel() -> ! {\n    scarlet_modules::force_link();\n    scarlet_modules::scarlet::arch::aarch64::boot::limine::limine_entry()\n}\n\n#[unsafe(link_section = \".init\")]\n#[unsafe(export_name = \"_entry_ap\")]\n#[unsafe(naked)]\npub extern \"C\" fn _entry_ap() {\n    unsafe {\n        naked_asm!(\n            \"mrs x4, MPIDR_EL1\",\n            \"and x4, x4, #0xFF\",\n            \"mov x2, {stack_size}\",\n            \"adrp x3, KERNEL_STACK\",\n            \"add x3, x3, :lo12:KERNEL_STACK\",\n            \"add x5, x4, #1\",\n            \"mul x5, x5, x2\",\n            \"add x5, x3, x5\",\n            \"and sp, x5, #~0xF\",\n            \"mov x0, x4\",\n            \"bl {start_ap}\",\n            \"1:\",\n            \"wfi\",\n            \"b 1b\",\n            stack_size = const STACK_SIZE,\n            start_ap = sym start_ap,\n        );\n    }\n}\n",
+        )),
+        _ => Err(format!("unsupported board `{board}` for init template")),
+    }
+}
+
+fn render_init_config(board: &str) -> Result<String, String> {
+    let (target, target_json) = match board {
+        "riscv64-limine" => (
+            "riscv64gc-unknown-none-elf",
+            "../../kernel/targets/riscv64gc-unknown-none-elf.json",
+        ),
+        "aarch64-limine" => (
+            "aarch64-unknown-none-elf",
+            "../../kernel/targets/aarch64-unknown-none-elf.json",
+        ),
+        _ => return Err(format!("unsupported board `{board}` for init template")),
+    };
+
+    Ok(format!(
+        "config_version = 1\n\n[project]\nname = \"scarlet-{board}\"\n\n[board]\nname = \"{board}\"\ntarget = \"{target}\"\ntarget_json = \"{target_json}\"\n\n[kernel]\npackage = \"scarlet\"\nsource = {{ path = \"../../kernel\" }}\n\n[kernel.features]\nnetwork = true\nuser-fpu = true\nuser-vector = true\nhypervisor = true\nlimine = true\nprofiler = false\n\n[modules]\n\"scarlet-module-prototype\" = {{ path = \"../../modules/scarlet-module-prototype\", enabled = true }}\n"
+    ))
 }
 
 fn normalize_project_path(path: &Path) -> Result<PathBuf, String> {
@@ -496,12 +655,27 @@ fn config_fingerprint(config: &ScarletConfig) -> String {
     fingerprint
 }
 
-fn metadata_check(project: &Path) -> Result<(), String> {
-    let status = Command::new("cargo")
+fn metadata_check(project: &Path, target: &str) -> Result<(), String> {
+    let mut command = Command::new("cargo");
+    command
         .arg("metadata")
         .arg("--format-version")
         .arg("1")
-        .current_dir(project)
+        .arg("--filter-platform")
+        .arg(target)
+        .current_dir(project);
+
+    eprintln!(
+        "cargo-scarlet: running in {} -> cargo {}",
+        project.display(),
+        command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>()
+            .join(" ")
+    );
+
+    let status = command
         .status()
         .map_err(|error| format!("failed to run cargo metadata: {error}"))?;
 

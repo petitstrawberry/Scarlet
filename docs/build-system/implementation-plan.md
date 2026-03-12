@@ -124,16 +124,12 @@ kernel executes existing initcall pipeline
 - Validate config version
 - Validate board target info
 - Validate kernel source info for registry / git / path acquisition
-- Validate that all configured module options exist in the selected registry/catalog
 - Validate that each module entry uses exactly one valid dependency-style source form plus an explicit `enabled` field
 - Validate that version-based module entries use the default registry unless an explicit non-default registry is specified
-- Validate registry-defined feature requirements and module conflicts
-- Validate that no enabled option depends on another option explicitly set to `false`
 - Validate the generated graph with `cargo metadata` after synthesis
 
 #### B. Resolve module dependencies
 - Resolve kernel dependency source from config
-- Load registry/catalog metadata for the selected board/profile
 - Read dependency-style module entries from `[modules]`
 - Convert resolved kernel/module sources into Cargo dependency entries
 - Filter only `enabled = true` module options into the generated crate

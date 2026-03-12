@@ -72,9 +72,42 @@ This prototype currently does:
 2. run `cargo metadata`
 3. run `cargo build` for the BSP project
 
+### Check through the prototype tool
+
+```bash
+cargo run --manifest-path cargo-scarlet/Cargo.toml -- check --project bsp/riscv64-limine
+```
+
+### Clippy through the prototype tool
+
+```bash
+cargo run --manifest-path cargo-scarlet/Cargo.toml -- clippy --project bsp/riscv64-limine
+```
+
+By default this runs clippy with `-D warnings`.
+
+### Run through the prototype tool
+
+```bash
+cargo run --manifest-path cargo-scarlet/Cargo.toml -- run --project bsp/riscv64-limine --release
+```
+
+### Initialize a BSP-rooted prototype project
+
+```bash
+cargo run --manifest-path cargo-scarlet/Cargo.toml -- init --project /tmp/my-board-project --board riscv64-limine
+```
+
+This creates a minimal BSP-rooted project skeleton with:
+
+- `Cargo.toml`
+- `src/main.rs`
+- `scarlet-config.toml`
+- `.gitignore`
+
 ### Existing `cargo make` integration
 
-The root `Makefile.toml` now includes generator pre-steps for BSP build/clippy tasks.
+The root `Makefile.toml` now routes BSP build/clippy/run tasks through `cargo-scarlet` so generation and metadata validation stay on one path.
 
 So existing flows like these also trigger generation first:
 
@@ -124,14 +157,12 @@ This is a prototype, not the final product.
 
 Current intentional limitations:
 
-- registry/catalog semantics are not fully implemented yet
-- conflict/requirement logic is documented but not fully enforced in code yet
 - the generator currently trusts dependency-style module entries directly
 - the prototype currently ships with a tiny local sample module crate under top-level `modules/`
+- advanced semantic validation is intentionally deferred; the MVP relies on `cargo metadata` for real dependency/feature resolution checks
 
 ## Intended Next Steps
 
 1. move more validation logic from docs into the tool
-2. add registry/catalog-backed conflict and requirement resolution
-3. add nicer diagnostics and richer CLI commands
-4. publish `cargo-scarlet` as a standalone external tool
+2. add nicer diagnostics and richer CLI commands
+3. publish `cargo-scarlet` as a standalone external tool

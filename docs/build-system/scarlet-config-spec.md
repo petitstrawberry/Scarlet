@@ -25,8 +25,8 @@ The format follows these rules:
 3. **Full enumeration** — disabled options stay visible instead of disappearing
 4. **Kernel stays core** — the file composes around the kernel crate instead of replacing it
 5. **Resolved source provenance** — local path, `crates.io`, and git sourcing should be explicit in the config when they affect the resolved build
-6. **Registry-owned metadata** — module conflicts, requirements, descriptions, and dependency meaning belong to the registry/catalog side
-7. **Tool-owned expansion** — the build tool may derive generated artifacts from the file plus registry data, but not hidden semantic defaults
+6. **Cargo-shaped inputs** — modules are described directly with dependency-like entries in the config
+7. **Tool-owned expansion** — the build tool turns those entries into generated Cargo manifests and lets Cargo validate the resolved graph
 
 ## File Location
 
@@ -257,21 +257,17 @@ Explicit `false` should be treated as authoritative.
 
 That means if an enabled module option depends on another option that is explicitly `enabled = false`, the build tool must report a configuration error instead of silently enabling the dependency.
 
-### What does **not** belong here
+### MVP scope
 
-The following should live in the module registry/catalog, not inline in `scarlet-config.toml`:
+For the prototype and MVP, module entries are written directly in `scarlet-config.toml`.
 
-- package descriptions
-- conflict declarations
-- required kernel features
-- dependency edges between modules
-- UI/menu grouping metadata
+That means the file is allowed to carry the dependency source information needed to synthesize `.scarlet/scarlet-modules`.
 
-The config file records the resolved state. The registry/catalog describes what each option means.
+More advanced metadata systems can be added later if needed, but they are not required for the current model.
 
 ## Generated Output Mapping
 
-For each `enabled = true` module, the build tool looks up its registry/catalog definition and writes the corresponding dependency into the BSP-local generated crate.
+For each `enabled = true` module, the build tool writes the corresponding dependency into the BSP-local generated crate.
 
 Conceptually:
 
@@ -279,7 +275,6 @@ Conceptually:
 scarlet-config.toml
   -> filter enabled modules
   -> read dependency-like module entries
-  -> resolve module definitions from registry/catalog
   -> convert resolved sources into Cargo dependencies
   -> generate <project-root>/.scarlet/scarlet-modules/Cargo.toml
   -> generate <project-root>/.scarlet/scarlet-modules/src/lib.rs
@@ -301,44 +296,31 @@ The build tool should validate at least the following:
 2. project root is writable for `.scarlet/scarlet-modules` generation
 3. `board.target_json` exists
 4. `kernel` has a usable source (`version`, `git`, or `path`)
-5. every configured module option exists in the selected registry/catalog
-6. every module entry contains an explicit `enabled` field
-7. every module entry uses exactly one valid Cargo-like source form
-8. every enabled module resolves to a valid Cargo dependency
-9. registry-defined requirements are satisfied
-10. registry-defined conflicts do not produce an invalid configuration
-11. if an enabled option depends on an explicitly disabled option, the build fails with a clear validation error
-12. the generated dependency graph must successfully resolve under Cargo metadata inspection
+5. every module entry contains an explicit `enabled` field
+6. every module entry uses exactly one valid Cargo-like source form
+7. every enabled module resolves to a valid Cargo dependency
+8. the generated dependency graph must successfully resolve under Cargo metadata inspection
 
 ### Validation layers
 
 Validation should happen in two layers:
 
-1. **Config/catalog validation**
-   - check option existence
-   - check conflicts
-   - check explicit-OFF rules
-   - check high-level requirements from the registry/catalog
+1. **Config validation**
+   - check basic schema validity
+   - check `enabled` presence
+   - check valid source forms
 2. **Cargo graph validation**
    - run `cargo metadata` against the BSP project after `.scarlet/scarlet-modules` is generated
    - inspect the resolved package and feature graph
-   - fail if Cargo resolution exposes feature or dependency breakage that the higher-level registry checks did not catch
+   - fail if Cargo resolution exposes dependency or feature breakage
 
-The registry/catalog explains intended relationships, but Cargo's resolved graph is the final truth for actual dependency and feature interactions.
+Cargo's resolved graph is the final truth for actual dependency and feature interactions.
 
-### Explicit-OFF dependency rule
+### Notes on contradictions
 
-`enabled = false` is not just informational. It is an intentional user choice.
+For the MVP, contradictions and dependency breakage should primarily be surfaced by Cargo's own resolver through `cargo metadata`.
 
-So the resolver must follow this rule:
-
-- if option `A = true` depends on option `B`
-- and `B = false` is written explicitly in `scarlet-config.toml`
-- then resolution fails with an error
-
-The tool must not silently flip `B` back to `true`.
-
-This preserves the meaning of a full `.config`-style file.
+That keeps the prototype simple while still validating the real resolved graph.
 
 ## Minimal Example
 
