@@ -302,21 +302,25 @@ dependencies = ["build-initramfs-debug-aarch64"]
 description = "Run the kernel in release mode (RISC-V)"
 command = "cargo"
 args = ["run", "--manifest-path", "cargo-scarlet/Cargo.toml", "--", "run", "--project", "bsp/riscv64-limine", "--release"]
+dependencies = ["build-initramfs-release-riscv64", "build-rootfs-riscv64"]
 
 [tasks.run-aarch64]
 description = "Run the kernel in release mode (AArch64)"
 command = "cargo"
 args = ["run", "--manifest-path", "cargo-scarlet/Cargo.toml", "--", "run", "--project", "bsp/aarch64-limine", "--release"]
+dependencies = ["build-initramfs-release-aarch64", "build-rootfs-aarch64"]
 
 [tasks.run-debug-riscv64]
 description = "Run the kernel in debug mode (RISC-V)"
 command = "cargo"
 args = ["run", "--manifest-path", "cargo-scarlet/Cargo.toml", "--", "run", "--project", "bsp/riscv64-limine"]
+dependencies = ["build-initramfs-debug-riscv64", "build-rootfs-riscv64"]
 
 [tasks.run-debug-aarch64]
 description = "Run the kernel in debug mode (AArch64)"
 command = "cargo"
 args = ["run", "--manifest-path", "cargo-scarlet/Cargo.toml", "--", "run", "--project", "bsp/aarch64-limine"]
+dependencies = ["build-initramfs-debug-aarch64", "build-rootfs-aarch64"]
 
 [tasks.debug-riscv64]
 description = "Run the kernel in debug mode (RISC-V)"
