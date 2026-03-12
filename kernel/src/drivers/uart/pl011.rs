@@ -366,11 +366,16 @@ fn pl011_probe(device_info: &PlatformDeviceInfo) -> Result<(), &'static str> {
     {
         // Translate interrupt ID using metadata if available (for ARM GIC)
         let uart_interrupt_id = if let Some(ref metadata) = irq_resource.irq_metadata {
-            // ARM GIC 3-cell format: translate type + number to actual IRQ
-            // Type 0 = SPI (Shared Peripheral Interrupt): base 32
-            // Type 1 = PPI (Private Peripheral Interrupt): base 16
-            let base = if metadata.irq_type == 0 { 32 } else { 16 };
-            base + metadata.irq_number
+            if crate::drivers::pic::aic::Aic::is_active() {
+                crate::drivers::pic::aic::Aic::translate_interrupt(metadata)
+                    .ok_or("Unsupported Apple AIC interrupt specifier for PL011")?
+            } else {
+                // ARM GIC 3-cell format: translate type + number to actual IRQ
+                // Type 0 = SPI (Shared Peripheral Interrupt): base 32
+                // Type 1 = PPI (Private Peripheral Interrupt): base 16
+                let base = if metadata.irq_type == 0 { 32 } else { 16 };
+                base + metadata.irq_number
+            }
         } else {
             // No metadata: use raw interrupt number (RISC-V PLIC, etc.)
             irq_resource.start as u32

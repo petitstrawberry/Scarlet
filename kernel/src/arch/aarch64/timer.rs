@@ -99,10 +99,12 @@ impl ArchTimer {
             interrupt::enable_core_local_interrupt(LocalInterruptType::Timer)
                 .unwrap_or_else(|e| panic!("Failed to enable local timer interrupt: {e}"));
 
-            interrupt::enable_external_interrupt_line(
-                crate::drivers::pic::arm_generic_timer::CNTV_PPI_IRQ,
-            )
-            .unwrap_or_else(|e| panic!("Failed to enable timer PPI in GIC: {e}"));
+            if !crate::drivers::pic::aic::Aic::is_active() {
+                interrupt::enable_external_interrupt_line(
+                    crate::drivers::pic::arm_generic_timer::CNTV_PPI_IRQ,
+                )
+                .unwrap_or_else(|e| panic!("Failed to enable timer PPI in GIC: {e}"));
+            }
 
             // CRITICAL: Set initialized flag BEFORE unmasking interrupts
             // Otherwise, if an interrupt fires immediately after unmask, it will
@@ -126,10 +128,12 @@ impl ArchTimer {
         InterruptManager::with_manager(|mgr| {
             let cpu_id = get_cpu().get_cpuid() as u32;
             let _ = mgr.disable_local_interrupt(cpu_id, LocalInterruptType::Timer);
-            let _ = mgr.disable_external_interrupt(
-                crate::drivers::pic::arm_generic_timer::CNTV_PPI_IRQ,
-                cpu_id,
-            );
+            if !crate::drivers::pic::aic::Aic::is_active() {
+                let _ = mgr.disable_external_interrupt(
+                    crate::drivers::pic::arm_generic_timer::CNTV_PPI_IRQ,
+                    cpu_id,
+                );
+            }
             let _ = mgr.set_timer(cpu_id, u64::MAX);
         });
     }
