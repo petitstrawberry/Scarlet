@@ -63,6 +63,10 @@ enum Commands {
         project: PathBuf,
         #[arg(long)]
         board: String,
+        #[arg(long, default_value = "../../kernel")]
+        kernel_path: String,
+        #[arg(long, default_value = "../../modules/scarlet-module-prototype")]
+        module_path: String,
     },
 }
 
@@ -174,28 +178,36 @@ fn run() -> Result<(), String> {
             let config = generate(&project)?;
             cargo_command(&project, &config, "run", target, release, &extra_args)
         }
-        Commands::Init { project, board } => init_project(&project, &board),
+        Commands::Init {
+            project,
+            board,
+            kernel_path,
+            module_path,
+        } => init_project(&project, &board, &kernel_path, &module_path),
     }
 }
 
-fn init_project(project: &Path, board: &str) -> Result<(), String> {
-    let project = project.to_path_buf();
-    ensure_init_target_is_safe(&project)?;
+fn init_project(
+    project: &Path,
+    board: &str,
+    kernel_path: &str,
+    module_path: &str,
+) -> Result<(), String> {
+    let project = normalize_output_path(project)?;
+    ensure_init_target_is_valid(&project)?;
 
-    fs::create_dir_all(project.join("src"))
-        .map_err(|error| format!("failed to create {}: {error}", project.display()))?;
     fs::create_dir_all(project.join(".scarlet"))
         .map_err(|error| format!("failed to create {}: {error}", project.display()))?;
+    fs::create_dir_all(project.join(".cargo"))
+        .map_err(|error| format!("failed to create {}: {error}", project.display()))?;
 
-    let cargo_toml = render_init_cargo_toml(board);
-    let main_rs = render_init_main_rs(board)?;
-    let scarlet_config = render_init_config(board)?;
+    let scarlet_config = render_init_config(board, kernel_path, module_path)?;
+    let cargo_config = render_init_cargo_config(board)?;
     let gitignore = ".scarlet\ntarget\n";
 
-    write_if_changed(&project.join("Cargo.toml"), &cargo_toml)?;
-    write_if_changed(&project.join("src/main.rs"), &main_rs)?;
     write_if_changed(&project.join("scarlet-config.toml"), &scarlet_config)?;
-    write_if_changed(&project.join(".gitignore"), gitignore)?;
+    write_if_changed(&project.join(".cargo/config.toml"), &cargo_config)?;
+    append_gitignore_entry(&project.join(".gitignore"), gitignore)?;
 
     Ok(())
 }
@@ -274,44 +286,7 @@ fn cargo_command(
     }
 }
 
-fn ensure_init_target_is_safe(project: &Path) -> Result<(), String> {
-    if !project.exists() {
-        return Ok(());
-    }
-
-    let mut entries = fs::read_dir(project)
-        .map_err(|error| format!("failed to inspect {}: {error}", project.display()))?;
-
-    if entries.next().is_some() {
-        return Err(format!(
-            "refusing to initialize into non-empty directory {}",
-            project.display()
-        ));
-    }
-
-    Ok(())
-}
-
-fn render_init_cargo_toml(board: &str) -> String {
-    let package_name = format!("{board}-bsp");
-    format!(
-        "[package]\nname = \"{package_name}\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n[[bin]]\nname = \"scarlet\"\npath = \"src/main.rs\"\n\n[dependencies]\nscarlet_modules = {{ package = \"scarlet-modules\", path = \".scarlet/scarlet-modules\" }}\n"
-    )
-}
-
-fn render_init_main_rs(board: &str) -> Result<String, String> {
-    match board {
-        "riscv64-limine" => Ok(String::from(
-            "#![no_std]\n#![no_main]\n\nextern crate scarlet_modules;\n\n#[unsafe(link_section = \".init\")]\n#[unsafe(no_mangle)]\npub extern \"C\" fn arch_start_kernel() -> ! {\n    scarlet_modules::force_link();\n    scarlet_modules::scarlet::arch::riscv64::boot::limine::limine_entry()\n}\n",
-        )),
-        "aarch64-limine" => Ok(String::from(
-            "#![no_std]\n#![no_main]\n\nuse core::arch::naked_asm;\nuse scarlet_modules::scarlet::{environment::STACK_SIZE, start_ap};\n\nextern crate scarlet_modules;\n\n#[unsafe(link_section = \".init\")]\n#[unsafe(no_mangle)]\npub extern \"C\" fn arch_start_kernel() -> ! {\n    scarlet_modules::force_link();\n    scarlet_modules::scarlet::arch::aarch64::boot::limine::limine_entry()\n}\n\n#[unsafe(link_section = \".init\")]\n#[unsafe(export_name = \"_entry_ap\")]\n#[unsafe(naked)]\npub extern \"C\" fn _entry_ap() {\n    unsafe {\n        naked_asm!(\n            \"mrs x4, MPIDR_EL1\",\n            \"and x4, x4, #0xFF\",\n            \"mov x2, {stack_size}\",\n            \"adrp x3, KERNEL_STACK\",\n            \"add x3, x3, :lo12:KERNEL_STACK\",\n            \"add x5, x4, #1\",\n            \"mul x5, x5, x2\",\n            \"add x5, x3, x5\",\n            \"and sp, x5, #~0xF\",\n            \"mov x0, x4\",\n            \"bl {start_ap}\",\n            \"1:\",\n            \"wfi\",\n            \"b 1b\",\n            stack_size = const STACK_SIZE,\n            start_ap = sym start_ap,\n        );\n    }\n}\n",
-        )),
-        _ => Err(format!("unsupported board `{board}` for init template")),
-    }
-}
-
-fn render_init_config(board: &str) -> Result<String, String> {
+fn render_init_config(board: &str, kernel_path: &str, module_path: &str) -> Result<String, String> {
     let (target, target_json) = match board {
         "riscv64-limine" => (
             "riscv64gc-unknown-none-elf",
@@ -325,12 +300,53 @@ fn render_init_config(board: &str) -> Result<String, String> {
     };
 
     Ok(format!(
-        "config_version = 1\n\n[project]\nname = \"scarlet-{board}\"\n\n[board]\nname = \"{board}\"\ntarget = \"{target}\"\ntarget_json = \"{target_json}\"\n\n[kernel]\npackage = \"scarlet\"\nsource = {{ path = \"../../kernel\" }}\n\n[kernel.features]\nnetwork = true\nuser-fpu = true\nuser-vector = true\nhypervisor = true\nlimine = true\nprofiler = false\n\n[modules]\n\"scarlet-module-prototype\" = {{ path = \"../../modules/scarlet-module-prototype\", enabled = true }}\n"
+        "config_version = 1\n\n[project]\nname = \"scarlet-{board}\"\n\n[board]\nname = \"{board}\"\ntarget = \"{target}\"\ntarget_json = \"{target_json}\"\n\n[kernel]\npackage = \"scarlet\"\nsource = {{ path = \"{kernel_path}\" }}\n\n[kernel.features]\nnetwork = true\nuser-fpu = true\nuser-vector = true\nhypervisor = true\nlimine = true\nprofiler = false\n\n[modules]\n\"scarlet-module-prototype\" = {{ path = \"{module_path}\", enabled = true }}\n"
     ))
+}
+
+fn render_init_cargo_config(board: &str) -> Result<String, String> {
+    match board {
+        "riscv64-limine" => Ok(String::from(
+            "[profile.dev]\nopt-level = 3\n\n[profile.test]\nopt-level = 3\n\n[target.riscv64gc-unknown-none-elf]\nrunner = \"../../bsp/riscv64-limine/tools/run.sh\"\n\n[build]\ntarget = \"../../kernel/targets/riscv64gc-unknown-none-elf.json\"\n\n[unstable]\nbuild-std = [\"core\", \"compiler_builtins\", \"alloc\"]\nbuild-std-features = [\"compiler-builtins-mem\"]\nunstable-options = true\n",
+        )),
+        "aarch64-limine" => Ok(String::from(
+            "[profile.dev]\nopt-level = 3\n\n[profile.test]\nopt-level = 3\n\n[target.aarch64-unknown-none]\nrustflags = [\"-T\", \"lds/aarch64_limine.ld\"]\nrunner = \"../../bsp/aarch64-limine/tools/run_aarch64.sh\"\n\n[target.aarch64-unknown-none-elf]\nrunner = \"../../bsp/aarch64-limine/tools/run_aarch64.sh\"\nrustflags = [\n\t\"-C\", \"no-vectorize-loops\",\n\t\"-C\", \"no-vectorize-slp\",\n]\n\n[build]\ntarget = \"../../kernel/targets/aarch64-unknown-none-elf.json\"\n\n[unstable]\nbuild-std = [\"core\", \"compiler_builtins\", \"alloc\"]\nbuild-std-features = [\"compiler-builtins-mem\"]\nunstable-options = true\n",
+        )),
+        _ => Err(format!("unsupported board `{board}` for init cargo config")),
+    }
 }
 
 fn normalize_project_path(path: &Path) -> Result<PathBuf, String> {
     fs::canonicalize(path).map_err(|error| format!("failed to resolve {}: {error}", path.display()))
+}
+
+fn normalize_output_path(path: &Path) -> Result<PathBuf, String> {
+    if path.exists() {
+        fs::canonicalize(path)
+            .map_err(|error| format!("failed to resolve {}: {error}", path.display()))
+    } else {
+        let current_dir = std::env::current_dir()
+            .map_err(|error| format!("failed to resolve current directory: {error}"))?;
+        Ok(current_dir.join(path))
+    }
+}
+
+fn ensure_init_target_is_valid(project: &Path) -> Result<(), String> {
+    if !project.exists() {
+        return Err(format!(
+            "init expects an existing project directory: {}",
+            project.display()
+        ));
+    }
+
+    if !project.is_dir() {
+        return Err(format!(
+            "init target is not a directory: {}",
+            project.display()
+        ));
+    }
+
+    Ok(())
 }
 
 fn validate_config(config: &ScarletConfig) -> Result<(), String> {
@@ -608,6 +624,21 @@ fn write_if_changed(path: &Path, contents: &str) -> Result<(), String> {
 
     fs::write(path, contents)
         .map_err(|error| format!("failed to write {}: {error}", path.display()))
+}
+
+fn append_gitignore_entry(path: &Path, entry_block: &str) -> Result<(), String> {
+    let existing = fs::read_to_string(path).unwrap_or_default();
+    if existing.contains(".scarlet") && existing.contains("target") {
+        return Ok(());
+    }
+
+    let mut updated = existing;
+    if !updated.is_empty() && !updated.ends_with('\n') {
+        updated.push('\n');
+    }
+    updated.push_str(entry_block);
+
+    fs::write(path, updated).map_err(|error| format!("failed to write {}: {error}", path.display()))
 }
 
 fn config_fingerprint(config: &ScarletConfig) -> String {

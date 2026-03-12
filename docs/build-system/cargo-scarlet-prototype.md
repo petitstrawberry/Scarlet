@@ -14,6 +14,7 @@ The prototype is intentionally simple:
 - it is a plain binary crate for now
 - it is intended to become publishable later (for example to `crates.io`)
 - it operates on BSP projects under `bsp/`
+- the in-tree `bsp/` projects serve as the current sample/reference projects
 
 ## Prototype Layout
 
@@ -37,6 +38,8 @@ Scarlet/
 │  │     └─ scarlet-modules/
 ├─ modules/
 │  └─ scarlet-module-prototype/
+├─ scripts/
+│  └─ cargo-scarlet
 ```
 
 ## Commands
@@ -92,18 +95,41 @@ By default this runs clippy with `-D warnings`.
 cargo run --manifest-path cargo-scarlet/Cargo.toml -- run --project bsp/riscv64-limine --release
 ```
 
-### Initialize a BSP-rooted prototype project
+### Initialize Scarlet build-system files inside an existing project
 
 ```bash
 cargo run --manifest-path cargo-scarlet/Cargo.toml -- init --project /tmp/my-board-project --board riscv64-limine
 ```
 
-This creates a minimal BSP-rooted project skeleton with:
+You can also override the prototype local paths explicitly:
 
-- `Cargo.toml`
-- `src/main.rs`
+```bash
+cargo run --manifest-path cargo-scarlet/Cargo.toml -- init \
+  --project /tmp/my-board-project \
+  --board riscv64-limine \
+  --kernel-path ../../kernel \
+  --module-path ../../modules/scarlet-module-prototype
+```
+
+This now assumes `/tmp/my-board-project` already exists as a board/BSP project.
+
+`init` adds or updates only the Scarlet build-system support files:
+
 - `scarlet-config.toml`
-- `.gitignore`
+- `.cargo/config.toml`
+- `.gitignore` entries for `.scarlet` and `target`
+
+It does **not** generate the board-specific project template itself.
+Board templates are expected to come from a separately managed repository or other project scaffolding flow.
+
+### Repository-local wrapper for future `cargo scarlet` usage
+
+```bash
+scripts/cargo-scarlet generate --project bsp/riscv64-limine
+scripts/cargo-scarlet check --project bsp/riscv64-limine
+```
+
+This wrapper is a local convenience shim before `cargo-scarlet` is published and installed as a real Cargo subcommand.
 
 ### Existing `cargo make` integration
 
