@@ -7,6 +7,7 @@ use core::arch::asm;
 use crate::{
     arch::get_cpu,
     arch::interrupt,
+    drivers::pic::aic::Aic,
     interrupt::{InterruptManager, controllers::LocalInterruptType},
 };
 
@@ -99,7 +100,7 @@ impl ArchTimer {
             interrupt::enable_core_local_interrupt(LocalInterruptType::Timer)
                 .unwrap_or_else(|e| panic!("Failed to enable local timer interrupt: {e}"));
 
-            if !crate::drivers::pic::aic::Aic::is_active() {
+            if !Aic::is_active() {
                 interrupt::enable_external_interrupt_line(
                     crate::drivers::pic::arm_generic_timer::CNTV_PPI_IRQ,
                 )
@@ -128,7 +129,7 @@ impl ArchTimer {
         InterruptManager::with_manager(|mgr| {
             let cpu_id = get_cpu().get_cpuid() as u32;
             let _ = mgr.disable_local_interrupt(cpu_id, LocalInterruptType::Timer);
-            if !crate::drivers::pic::aic::Aic::is_active() {
+            if !Aic::is_active() {
                 let _ = mgr.disable_external_interrupt(
                     crate::drivers::pic::arm_generic_timer::CNTV_PPI_IRQ,
                     cpu_id,

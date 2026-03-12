@@ -141,7 +141,8 @@ impl Aic {
     }
 
     fn total_interrupt_slots(&self) -> InterruptId {
-        self.max_irq_per_die.saturating_mul(self.num_dies)
+        self.max_irq_per_die
+            .saturating_mul(self.num_dies as InterruptId)
     }
 
     fn validate_cpu_id(&self, cpu_id: CpuId) -> InterruptResult<()> {
@@ -256,7 +257,8 @@ impl Aic {
             return None;
         }
 
-        Some(die * self.max_irq_per_die + local_irq)
+        die.checked_mul(self.max_irq_per_die)
+            .and_then(|base| base.checked_add(local_irq))
     }
 
     fn init_masks(&mut self) {
@@ -552,9 +554,10 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
     );
 
     InterruptManager::with_manager(|manager| {
-        manager
-            .register_external_controller(aic)
-            .map_err(|_| "Failed to register Apple AIC")?;
+        manager.register_external_controller(aic).map_err(|e| {
+            crate::early_println!("[interrupt] Failed to register Apple AIC: {}", e);
+            "Failed to register Apple AIC"
+        })?;
         Ok(())
     })?;
 
