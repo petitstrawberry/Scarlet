@@ -1,11 +1,12 @@
 [package]
-name = "Scarlet"
+name = "scarlet"
 version = "0.16.0"
 edition = "2024"
 
-[[bin]]
-name = "kernel"
-path = "src/main.rs"
+[lib]
+name = "scarlet"
+path = "src/lib.rs"
+doctest = false
 
 [dependencies]
 fdt = "0.1.5"
@@ -17,9 +18,10 @@ limine = "0.5"
 font8x8 = { version = "0.3", default-features = false, features = ["unicode"] }
 
 [features]
-default = ["network", "user-fpu", "user-vector", "hypervisor"]
+default = ["network", "user-fpu", "user-vector", "hypervisor", "limine"]
 profiler = ["dep:lazy_static"]
 network = []
 user-fpu = []
 user-vector = []
 hypervisor = []
+limine = []

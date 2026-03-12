@@ -14,38 +14,37 @@ static LIMINE_REQUESTS_START_MARKER: RequestsStartMarker = RequestsStartMarker::
 
 #[unsafe(link_section = ".limine_requests")]
 #[used]
-pub(crate) static BASE_REVISION: BaseRevision = BaseRevision::new();
+pub static BASE_REVISION: BaseRevision = BaseRevision::new();
 
 #[unsafe(link_section = ".limine_requests")]
 #[used]
-pub(crate) static HHDM_REQUEST: HhdmRequest = HhdmRequest::new();
+pub static HHDM_REQUEST: HhdmRequest = HhdmRequest::new();
 
 #[unsafe(link_section = ".limine_requests")]
 #[used]
-pub(crate) static EXECUTABLE_ADDRESS_REQUEST: ExecutableAddressRequest =
-    ExecutableAddressRequest::new();
+pub static EXECUTABLE_ADDRESS_REQUEST: ExecutableAddressRequest = ExecutableAddressRequest::new();
 
 #[unsafe(link_section = ".limine_requests")]
 #[used]
-pub(crate) static MEMMAP_REQUEST: MemoryMapRequest = MemoryMapRequest::new();
+pub static MEMMAP_REQUEST: MemoryMapRequest = MemoryMapRequest::new();
 
 #[unsafe(link_section = ".limine_requests")]
 #[used]
-pub(crate) static DTB_REQUEST: DeviceTreeBlobRequest = DeviceTreeBlobRequest::new();
+pub static DTB_REQUEST: DeviceTreeBlobRequest = DeviceTreeBlobRequest::new();
 
 #[unsafe(link_section = ".limine_requests")]
 #[used]
-pub(crate) static FRAMEBUFFER_REQUEST: FramebufferRequest = FramebufferRequest::new();
+pub static FRAMEBUFFER_REQUEST: FramebufferRequest = FramebufferRequest::new();
 
 #[unsafe(link_section = ".limine_requests")]
 #[used]
-pub(crate) static MODULE_REQUEST: ModuleRequest = ModuleRequest::new();
+pub static MODULE_REQUEST: ModuleRequest = ModuleRequest::new();
 
 #[unsafe(link_section = ".limine_requests_end")]
 #[used]
 static LIMINE_REQUESTS_END_MARKER: RequestsEndMarker = RequestsEndMarker::new();
 
-pub(crate) fn ensure_base_revision_supported() {
+pub fn ensure_base_revision_supported() {
     if !BASE_REVISION.is_supported() {
         panic!(
             "unsupported Limine base revision: {:?}",
@@ -54,11 +53,11 @@ pub(crate) fn ensure_base_revision_supported() {
     }
 }
 
-pub(crate) fn response<T>(response: Option<&'static T>, name: &str) -> &'static T {
+pub fn response<T>(response: Option<&'static T>, name: &str) -> &'static T {
     response.unwrap_or_else(|| panic!("missing Limine response: {}", name))
 }
 
-pub(crate) fn select_usable_region(memmap: &[&Entry]) -> MemoryArea {
+pub fn select_usable_region(memmap: &[&Entry]) -> MemoryArea {
     let mut best: Option<MemoryArea> = None;
 
     for entry in memmap {
@@ -79,7 +78,7 @@ pub(crate) fn select_usable_region(memmap: &[&Entry]) -> MemoryArea {
     best.expect("no usable Limine memmap region")
 }
 
-pub(crate) fn module_area(
+pub fn module_area(
     module_response: Option<&'static limine::response::ModuleResponse>,
 ) -> Option<MemoryArea> {
     let file = module_response?.modules().first()?;
@@ -92,7 +91,7 @@ fn align_up(addr: usize, align: usize) -> usize {
     (addr + align - 1) & !(align - 1)
 }
 
-pub(crate) fn reserve_front(area: MemoryArea, reserved_bytes: usize) -> MemoryArea {
+pub fn reserve_front(area: MemoryArea, reserved_bytes: usize) -> MemoryArea {
     let reserved_start = align_up(area.start, 4096);
     let reserved_end = align_up(reserved_start + reserved_bytes, 4096);
 
