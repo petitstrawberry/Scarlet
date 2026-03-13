@@ -233,6 +233,10 @@ impl GicV3 {
                 self.redist_sgi_reg_addr(cpu_id, GICR_IPRIORITYR) + timer_ppi as usize,
                 0x80,
             );
+            mmio::write32(
+                self.redist_sgi_reg_addr(cpu_id, GICR_ISENABLER0),
+                1u32 << timer_ppi,
+            );
         }
     }
 
@@ -324,6 +328,23 @@ impl ExternalInterruptController for GicV3 {
         }
 
         Ok(())
+    }
+
+    fn translate_interrupt(
+        &self,
+        interrupt_id: InterruptId,
+        metadata: Option<&crate::device::platform::resource::IrqMetadata>,
+    ) -> InterruptResult<InterruptId> {
+        Ok(match metadata {
+            Some(metadata) => {
+                if metadata.irq_type == 0 {
+                    32 + metadata.irq_number
+                } else {
+                    16 + metadata.irq_number
+                }
+            }
+            None => interrupt_id,
+        })
     }
 
     fn set_priority(

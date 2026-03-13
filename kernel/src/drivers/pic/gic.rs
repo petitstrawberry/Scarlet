@@ -110,7 +110,7 @@ impl Gic {
     /// # Returns
     ///
     /// The actual GIC interrupt ID to use for enabling/registering the interrupt
-    pub fn translate_interrupt(
+    fn translate_irq_metadata(
         &self,
         metadata: &crate::device::platform::resource::IrqMetadata,
     ) -> InterruptId {
@@ -326,6 +326,17 @@ impl ExternalInterruptController for Gic {
         unsafe { mmio::write32(disable_addr, bit) }
 
         Ok(())
+    }
+
+    fn translate_interrupt(
+        &self,
+        interrupt_id: InterruptId,
+        metadata: Option<&crate::device::platform::resource::IrqMetadata>,
+    ) -> InterruptResult<InterruptId> {
+        Ok(match metadata {
+            Some(metadata) => self.translate_irq_metadata(metadata),
+            None => interrupt_id,
+        })
     }
 
     fn set_priority(

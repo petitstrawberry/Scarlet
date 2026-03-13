@@ -477,6 +477,19 @@ impl InterruptManager {
         }
     }
 
+    /// Translate a platform interrupt specifier through the active controller.
+    pub fn translate_external_interrupt(
+        &mut self,
+        interrupt_id: InterruptId,
+        metadata: Option<&crate::device::platform::resource::IrqMetadata>,
+    ) -> InterruptResult<InterruptId> {
+        if let Some(ref mut controller) = self.controllers.external_controller_mut() {
+            controller.translate_interrupt(interrupt_id, metadata)
+        } else {
+            Err(InterruptError::ControllerNotFound)
+        }
+    }
+
     /// Check if local interrupt controller is registered
     pub fn has_local_controller(&self) -> bool {
         self.controllers.has_local_controller()

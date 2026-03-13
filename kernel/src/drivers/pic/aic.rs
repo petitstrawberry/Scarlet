@@ -24,7 +24,6 @@ use crate::{
 };
 
 use alloc::{boxed::Box, vec, vec::Vec};
-use core::sync::atomic::{AtomicBool, Ordering};
 
 /// AIC v1 information register.
 const AIC_INFO: usize = 0x0004;
@@ -50,8 +49,6 @@ const AIC_EVENT_TYPE_SHIFT: u32 = 16;
 const AIC_EVENT_TYPE_MASK: u32 = 0xFF;
 const AIC_EVENT_NUM_MASK: u32 = 0xFFFF;
 const AIC_EVENT_TYPE_IRQ: u32 = 1;
-
-static AIC_ACTIVE: AtomicBool = AtomicBool::new(false);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum AicVersion {
@@ -119,16 +116,11 @@ impl Aic {
         }
     }
 
-    /// Returns whether the Apple AIC driver is active.
-    pub fn is_active() -> bool {
-        AIC_ACTIVE.load(Ordering::Acquire)
-    }
-
     /// Translate Apple AIC device-tree IRQ metadata to a hardware IRQ number.
     ///
     /// AIC uses a GIC-like 3-cell format, but hardware IRQs keep their raw
     /// numbers instead of adding a controller-specific base offset.
-    pub fn translate_interrupt(metadata: &IrqMetadata) -> Option<InterruptId> {
+    fn translate_irq_metadata(metadata: &IrqMetadata) -> Option<InterruptId> {
         if metadata.irq_type == 0 {
             Some(metadata.irq_number)
         } else {
@@ -332,6 +324,19 @@ impl ExternalInterruptController for Aic {
     ) -> InterruptResult<()> {
         let _ = self.interrupt_location(interrupt_id)?;
         Ok(())
+    }
+
+    fn translate_interrupt(
+        &self,
+        interrupt_id: InterruptId,
+        metadata: Option<&IrqMetadata>,
+    ) -> InterruptResult<InterruptId> {
+        match metadata {
+            Some(metadata) => {
+                Self::translate_irq_metadata(metadata).ok_or(InterruptError::NotSupported)
+            }
+            None => Ok(interrupt_id),
+        }
     }
 
     fn get_priority(&self, interrupt_id: InterruptId) -> InterruptResult<Priority> {
@@ -560,13 +565,10 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
         })?;
         Ok(())
     })?;
-
-    AIC_ACTIVE.store(true, Ordering::Release);
     Ok(())
 }
 
 fn remove_fn(_device: &PlatformDeviceInfo) -> Result<(), &'static str> {
-    AIC_ACTIVE.store(false, Ordering::Release);
     Ok(())
 }
 
@@ -604,7 +606,7 @@ mod tests {
             irq_flags: 4,
         };
 
-        assert_eq!(Aic::translate_interrupt(&metadata), Some(42));
+        assert_eq!(Aic::translate_irq_metadata(&metadata), Some(42));
     }
 
     #[test_case]
@@ -615,7 +617,7 @@ mod tests {
             irq_flags: 4,
         };
 
-        assert_eq!(Aic::translate_interrupt(&metadata), None);
+        assert_eq!(Aic::translate_irq_metadata(&metadata), None);
     }
 
     #[test_case]

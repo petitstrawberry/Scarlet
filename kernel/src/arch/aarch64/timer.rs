@@ -7,7 +7,6 @@ use core::arch::asm;
 use crate::{
     arch::get_cpu,
     arch::interrupt,
-    drivers::pic::aic::Aic,
     interrupt::{InterruptManager, controllers::LocalInterruptType},
 };
 
@@ -88,24 +87,18 @@ impl ArchTimer {
         // Program the next event before unmasking interrupts.
         self.set_timer(next);
 
-        // Only perform GIC configuration on first start
+        // Only perform controller-independent interrupt configuration on first start
         if !self.initialized {
             // CRITICAL: Mask IRQs before configuring the interrupt controller to avoid deadlock
             // (an interrupt firing during InterruptManager access could try to re-lock it).
             interrupt::disable_external_interrupts();
 
-            // Enable timer at two levels:
-            // - core-local interrupt (InterruptManager local controller)
-            // - external PPI line in the GIC distributor
+            // Enable the timer at the core-local interrupt source.
+            //
+            // Architectures/controllers that need an additional routing step are
+            // expected to have prepared it during controller initialization.
             interrupt::enable_core_local_interrupt(LocalInterruptType::Timer)
                 .unwrap_or_else(|e| panic!("Failed to enable local timer interrupt: {e}"));
-
-            if !Aic::is_active() {
-                interrupt::enable_external_interrupt_line(
-                    crate::drivers::pic::arm_generic_timer::CNTV_PPI_IRQ,
-                )
-                .unwrap_or_else(|e| panic!("Failed to enable timer PPI in GIC: {e}"));
-            }
 
             // CRITICAL: Set initialized flag BEFORE unmasking interrupts
             // Otherwise, if an interrupt fires immediately after unmask, it will
@@ -129,12 +122,6 @@ impl ArchTimer {
         InterruptManager::with_manager(|mgr| {
             let cpu_id = get_cpu().get_cpuid() as u32;
             let _ = mgr.disable_local_interrupt(cpu_id, LocalInterruptType::Timer);
-            if !Aic::is_active() {
-                let _ = mgr.disable_external_interrupt(
-                    crate::drivers::pic::arm_generic_timer::CNTV_PPI_IRQ,
-                    cpu_id,
-                );
-            }
             let _ = mgr.set_timer(cpu_id, u64::MAX);
         });
     }

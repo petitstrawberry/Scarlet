@@ -2,6 +2,7 @@
 //!
 //! This module defines the basic traits for local and external interrupt controllers.
 
+use crate::device::platform::resource::IrqMetadata;
 use crate::interrupt::InterruptError;
 
 use super::{CpuId, InterruptId, InterruptResult, Priority};
@@ -73,6 +74,18 @@ pub trait ExternalInterruptController: Send + Sync {
         interrupt_id: InterruptId,
         cpu_id: CpuId,
     ) -> InterruptResult<()>;
+
+    /// Translate a Device Tree interrupt specifier into a controller interrupt ID.
+    ///
+    /// Controllers whose firmware format already uses the final interrupt ID can
+    /// keep the default behavior and return the raw interrupt number unchanged.
+    fn translate_interrupt(
+        &self,
+        interrupt_id: InterruptId,
+        _metadata: Option<&IrqMetadata>,
+    ) -> InterruptResult<InterruptId> {
+        Ok(interrupt_id)
+    }
 
     /// Set priority for a specific interrupt
     fn set_priority(
