@@ -47,12 +47,24 @@ if [ "${KERNEL_PATH#/}" = "$KERNEL_PATH" ]; then
     esac
 fi
 
+QEMU_MACHINE="${SCARLET_QEMU_MACHINE:-virt}"
+QEMU_MACHINE_ARGS=()
+QEMU_PLATFORM_ARGS=()
+QEMU_STORAGE_ARGS=()
+QEMU_DISPLAY_ARGS=()
+QEMU_INPUT_ARGS=()
+QEMU_NETWORK_ARGS=()
+QEMU_DEBUG_ARGS=()
+DEBUG_FLAGS=()
+BOOT_IMAGE_SIZE_MB=""
+EFI_VARS_RUNTIME=""
+QEMU_MEMORY="8G"
+
 if [ "$DEBUG_MODE" = "true" ]; then
     echo "Starting qemu-system-aarch64 in debug mode with gdb server..."
-    DEBUG_FLAGS="-gdb tcp::12345 -S"
+    DEBUG_FLAGS=(-gdb tcp::12345 -S)
 else
     echo "Starting qemu-system-aarch64..."
-    DEBUG_FLAGS=""
 fi
 
 PROJECT_ROOT="$(cd "$SCRIPT_DIR" && cd .. && cd .. && cd .. && pwd)"
@@ -63,14 +75,6 @@ if [ ! -f "$KERNEL_PATH" ]; then
     echo "Error: kernel binary not found at $KERNEL_PATH"
     exit 1
 fi
-
-echo "Rebuilding Limine AArch64 boot image from $KERNEL_PATH"
-if ! KERNEL_ELF="$KERNEL_PATH" sh "$PROJECT_ROOT/mkfs/make_limine_aarch64_image.sh"; then
-    echo "Error: failed to rebuild Limine AArch64 boot image"
-    exit 1
-fi
-
-QEMU_DEBUG_ARGS=""
 
 # Optional QEMU debug logging
 # - Enable guest errors: SCARLET_QEMU_GUEST_ERRORS=1
@@ -89,7 +93,7 @@ if [ -n "$QEMU_DEBUG_FLAGS" ]; then
         QEMU_DEBUG_LOG="${SCARLET_QEMU_DEBUG_LOG:-$PROJECT_ROOT/qemu-debug-aarch64.log}"
     fi
     echo "QEMU debug logging enabled (-d $QEMU_DEBUG_FLAGS): $QEMU_DEBUG_LOG"
-    QEMU_DEBUG_ARGS="-d $QEMU_DEBUG_FLAGS -D $QEMU_DEBUG_LOG"
+    QEMU_DEBUG_ARGS=(-d "$QEMU_DEBUG_FLAGS" -D "$QEMU_DEBUG_LOG")
 fi
 
 if [ ! -f "$BOOT_IMAGE" ]; then
@@ -141,45 +145,90 @@ if [ -z "$EFI_CODE" ]; then
     exit 1
 fi
 
-if [ -z "$EFI_VARS_TEMPLATE" ]; then
-    echo "Error: AArch64 EFI vars template not found."
-    exit 1
-fi
+case "$QEMU_MACHINE" in
+    virt)
+        if [ -z "$EFI_VARS_TEMPLATE" ]; then
+            echo "Error: AArch64 EFI vars template not found."
+            exit 1
+        fi
 
-if [ "${SCARLET_EFI_VARS_PERSIST:-0}" = "1" ] || [ "${SCARLET_EFI_VARS_PERSIST:-}" = "true" ]; then
-    EFI_VARS_RUNTIME="$EFI_VARS_PERSISTENT"
-    if [ ! -f "$EFI_VARS_RUNTIME" ]; then
-        cp "$EFI_VARS_TEMPLATE" "$EFI_VARS_RUNTIME"
+        if [ "${SCARLET_EFI_VARS_PERSIST:-0}" = "1" ] || [ "${SCARLET_EFI_VARS_PERSIST:-}" = "true" ]; then
+            EFI_VARS_RUNTIME="$EFI_VARS_PERSISTENT"
+            if [ ! -f "$EFI_VARS_RUNTIME" ]; then
+                cp "$EFI_VARS_TEMPLATE" "$EFI_VARS_RUNTIME"
+            fi
+        else
+            EFI_VARS_RUNTIME="$(mktemp "$PROJECT_ROOT/mkfs/dist/AAVMF_VARS.run.XXXXXX.fd")"
+            cp "$EFI_VARS_TEMPLATE" "$EFI_VARS_RUNTIME"
+            trap 'rm -f "$EFI_VARS_RUNTIME"' EXIT
+        fi
+
+        QEMU_MACHINE_ARGS=(-machine "virt,gic-version=3,acpi=off" -cpu cortex-a57)
+        QEMU_PLATFORM_ARGS=(
+            -drive if=pflash,format=raw,unit=0,file="$EFI_CODE",readonly=on
+            -drive if=pflash,format=raw,unit=1,file="$EFI_VARS_RUNTIME"
+            -global virtio-mmio.force-legacy=false
+        )
+        QEMU_STORAGE_ARGS=(
+            -drive id=boot,file="$BOOT_IMAGE",format=raw,if=none
+            -device virtio-blk-device,drive=boot,bus=virtio-mmio-bus.0
+            -drive id=rootfs,file="$ROOTFS_IMAGE",format=raw,if=none
+            -device virtio-blk-device,drive=rootfs,bus=virtio-mmio-bus.1
+        )
+        QEMU_DISPLAY_ARGS=(-display vnc=:0 -device virtio-gpu-device,bus=virtio-mmio-bus.2)
+        QEMU_NETWORK_ARGS=(-netdev user,id=net0 -device virtio-net-device,netdev=net0,bus=virtio-mmio-bus.3)
+        QEMU_INPUT_ARGS=(
+            -device virtio-keyboard-device,bus=virtio-mmio-bus.4
+            -device virtio-mouse-device,bus=virtio-mmio-bus.5
+            -device virtio-rng-device,bus=virtio-mmio-bus.6
+        )
+        ;;
+    raspi4b)
+        BOOT_IMAGE_SIZE_MB="${SCARLET_QEMU_RASPI4B_BOOT_IMAGE_SIZE_MB:-256}"
+        QEMU_MEMORY="2G"
+        QEMU_MACHINE_ARGS=(-machine raspi4b -cpu cortex-a72)
+        QEMU_PLATFORM_ARGS=(-bios "$EFI_CODE")
+        QEMU_STORAGE_ARGS=(
+            -drive file="$BOOT_IMAGE",format=raw,if=sd
+            -drive id=rootfs,file="$ROOTFS_IMAGE",format=raw,if=none
+            -device usb-storage,drive=rootfs
+        )
+        QEMU_DISPLAY_ARGS=(-display vnc=:0)
+        QEMU_INPUT_ARGS=(-device usb-kbd -device usb-mouse)
+        ;;
+    *)
+        echo "Error: unsupported SCARLET_QEMU_MACHINE '$QEMU_MACHINE' (expected: virt or raspi4b)"
+        exit 1
+        ;;
+esac
+
+echo "Using QEMU machine profile: $QEMU_MACHINE"
+echo "Rebuilding Limine AArch64 boot image from $KERNEL_PATH"
+if [ -n "$BOOT_IMAGE_SIZE_MB" ]; then
+    if ! BOOT_IMAGE_SIZE_MB="$BOOT_IMAGE_SIZE_MB" KERNEL_ELF="$KERNEL_PATH" sh "$PROJECT_ROOT/mkfs/make_limine_aarch64_image.sh"; then
+        echo "Error: failed to rebuild Limine AArch64 boot image"
+        exit 1
     fi
 else
-    EFI_VARS_RUNTIME="$(mktemp "$PROJECT_ROOT/mkfs/dist/AAVMF_VARS.run.XXXXXX.fd")"
-    cp "$EFI_VARS_TEMPLATE" "$EFI_VARS_RUNTIME"
-    trap 'rm -f "$EFI_VARS_RUNTIME"' EXIT
+    if ! KERNEL_ELF="$KERNEL_PATH" sh "$PROJECT_ROOT/mkfs/make_limine_aarch64_image.sh"; then
+        echo "Error: failed to rebuild Limine AArch64 boot image"
+        exit 1
+    fi
 fi
 
 qemu-system-aarch64 \
-    -machine virt,gic-version=3,acpi=off \
-    -cpu cortex-a57 \
-    -m 8G \
+    "${QEMU_MACHINE_ARGS[@]}" \
+    -m "$QEMU_MEMORY" \
     -nographic \
     -serial mon:stdio \
     --no-reboot \
-    -drive if=pflash,format=raw,unit=0,file="$EFI_CODE",readonly=on \
-    -drive if=pflash,format=raw,unit=1,file="$EFI_VARS_RUNTIME" \
-    -global virtio-mmio.force-legacy=false \
-    -drive id=boot,file="$BOOT_IMAGE",format=raw,if=none \
-    -device virtio-blk-device,drive=boot,bus=virtio-mmio-bus.0 \
-    -drive id=rootfs,file="$ROOTFS_IMAGE",format=raw,if=none \
-    -device virtio-blk-device,drive=rootfs,bus=virtio-mmio-bus.1 \
-    -display vnc=:0 \
-    -device virtio-gpu-device,bus=virtio-mmio-bus.2 \
-    -netdev user,id=net0 \
-    -device virtio-net-device,netdev=net0,bus=virtio-mmio-bus.3 \
-    -device virtio-keyboard-device,bus=virtio-mmio-bus.4 \
-    -device virtio-mouse-device,bus=virtio-mmio-bus.5 \
-    -device virtio-rng-device,bus=virtio-mmio-bus.6 \
-    $QEMU_DEBUG_ARGS \
-    $DEBUG_FLAGS | tee "$TEMP_OUTPUT"
+    "${QEMU_PLATFORM_ARGS[@]}" \
+    "${QEMU_STORAGE_ARGS[@]}" \
+    "${QEMU_DISPLAY_ARGS[@]}" \
+    "${QEMU_NETWORK_ARGS[@]}" \
+    "${QEMU_INPUT_ARGS[@]}" \
+    "${QEMU_DEBUG_ARGS[@]}" \
+    "${DEBUG_FLAGS[@]}" | tee "$TEMP_OUTPUT"
 
 # Capture pipeline exit codes (qemu is element 0, tee is element 1)
 QEMU_EXIT_CODE=${PIPESTATUS[0]}
