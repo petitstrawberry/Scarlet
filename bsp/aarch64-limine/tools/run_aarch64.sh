@@ -185,9 +185,12 @@ case "$QEMU_MACHINE" in
         ;;
     raspi4b)
         BOOT_IMAGE_SIZE_MB="${SCARLET_QEMU_RASPI4B_BOOT_IMAGE_SIZE_MB:-256}"
+        # QEMU's raspi4b machine rejects the 8G virt default and expects a 2 GiB board profile.
         QEMU_MEMORY="2G"
         QEMU_MACHINE_ARGS=(-machine raspi4b -cpu cortex-a72)
         QEMU_PLATFORM_ARGS=(-bios "$EFI_CODE")
+        # raspi4b does not expose the virt machine's virtio-mmio network devices.
+        QEMU_NETWORK_ARGS=()
         QEMU_STORAGE_ARGS=(
             -drive file="$BOOT_IMAGE",format=raw,if=sd
             -drive id=rootfs,file="$ROOTFS_IMAGE",format=raw,if=none
