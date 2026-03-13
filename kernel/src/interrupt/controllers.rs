@@ -61,7 +61,12 @@ pub trait LocalInterruptController: Send + Sync {
 /// External interrupt controllers manage interrupts from external devices
 /// and can route them to different CPUs with priority support.
 pub trait ExternalInterruptController: Send + Sync {
-    /// Initialize the external interrupt controller
+    /// Initialize the external interrupt controller.
+    ///
+    /// Controllers that require one-time routing setup for architected local
+    /// interrupt sources (for example, the AArch64 virtual timer delivery path)
+    /// should perform that work here so later timer bring-up can remain
+    /// controller-agnostic.
     fn init(&mut self) -> InterruptResult<()>;
 
     /// Enable a specific interrupt for a CPU
