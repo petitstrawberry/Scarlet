@@ -62,6 +62,9 @@ pub trait LocalInterruptController: Send + Sync {
 /// and can route them to different CPUs with priority support.
 pub trait ExternalInterruptController: Send + Sync {
     /// Initialize the external interrupt controller.
+    ///
+    /// This should perform any one-time hardware setup needed before interrupts
+    /// are enabled through the controller.
     fn init(&mut self) -> InterruptResult<()>;
 
     /// Enable a specific interrupt for a CPU

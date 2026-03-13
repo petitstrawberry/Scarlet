@@ -81,30 +81,37 @@ pub fn disable_core_local_interrupt(source: LocalInterruptType) -> Result<(), &'
     .map_err(|_| "failed to disable core-local interrupt")
 }
 
-/// Enable an external interrupt line (GIC-backed) for the current CPU.
-pub fn enable_external_interrupt_line(interrupt_id: u32) -> Result<(), &'static str> {
+fn with_external_interrupt_line<F>(interrupt_id: u32, f: F) -> Result<(), &'static str>
+where
+    F: FnOnce(&mut InterruptManager, u32, u32) -> crate::interrupt::InterruptResult<()>,
+{
     InterruptManager::with_manager(|mgr| {
         let cpu_id = get_cpu().get_cpuid() as u32;
+        f(mgr, cpu_id, interrupt_id)
+    })
+    .map_err(|_| "failed to configure external interrupt line")
+}
+
+/// Enable an external interrupt line (GIC-backed) for the current CPU.
+pub fn enable_external_interrupt_line(interrupt_id: u32) -> Result<(), &'static str> {
+    with_external_interrupt_line(interrupt_id, |mgr, cpu_id, interrupt_id| {
         if interrupt_id == CNTV_PPI_IRQ {
             mgr.enable_local_timer_interrupt(cpu_id, interrupt_id)
         } else {
             mgr.enable_external_interrupt(interrupt_id, cpu_id)
         }
     })
-    .map_err(|_| "failed to enable external interrupt line")
 }
 
 /// Disable an external interrupt line (GIC-backed) for the current CPU.
 pub fn disable_external_interrupt_line(interrupt_id: u32) -> Result<(), &'static str> {
-    InterruptManager::with_manager(|mgr| {
-        let cpu_id = get_cpu().get_cpuid() as u32;
+    with_external_interrupt_line(interrupt_id, |mgr, cpu_id, interrupt_id| {
         if interrupt_id == CNTV_PPI_IRQ {
             mgr.disable_local_timer_interrupt(cpu_id, interrupt_id)
         } else {
             mgr.disable_external_interrupt(interrupt_id, cpu_id)
         }
     })
-    .map_err(|_| "failed to disable external interrupt line")
 }
 
 /// Unmask the architectural timer interrupt at the timer source.

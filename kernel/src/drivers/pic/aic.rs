@@ -324,6 +324,9 @@ impl ExternalInterruptController for Aic {
         interrupt_id: InterruptId,
     ) -> InterruptResult<()> {
         if interrupt_id == CNTV_PPI_IRQ {
+            // Apple platforms deliver the architected virtual timer without an
+            // AIC-programmable external PPI route, so the generic timer bring-up
+            // should keep its existing call site while AIC treats it as a no-op.
             Ok(())
         } else {
             self.enable_interrupt(interrupt_id, cpu_id)
@@ -336,6 +339,8 @@ impl ExternalInterruptController for Aic {
         interrupt_id: InterruptId,
     ) -> InterruptResult<()> {
         if interrupt_id == CNTV_PPI_IRQ {
+            // See enable_local_timer_interrupt(): there is no corresponding AIC
+            // external line state to tear down for the architected timer path.
             Ok(())
         } else {
             self.disable_interrupt(interrupt_id, cpu_id)
