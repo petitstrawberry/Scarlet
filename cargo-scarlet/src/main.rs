@@ -665,24 +665,13 @@ fn config_fingerprint(config: &ScarletConfig) -> String {
 }
 
 fn metadata_check(project: &Path, target: &str) -> Result<(), String> {
-    // `--filter-platform` expects a target triple, not a JSON path. If `target`
-    // looks like a custom target JSON file, derive the triple from its file stem.
-    let filter_platform = if target.ends_with(".json") {
-        Path::new(target)
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or(target)
-    } else {
-        target
-    };
-
     let mut command = Command::new("cargo");
     command
         .arg("metadata")
         .arg("--format-version")
         .arg("1")
         .arg("--filter-platform")
-        .arg(filter_platform)
+        .arg(target)
         .current_dir(project);
 
     eprintln!(
