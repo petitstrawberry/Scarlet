@@ -10,6 +10,7 @@ dist/
 /kernel/ext2-test.img
 opencode.json
 /tools/scpm-pack/target
+/cargo-scarlet/target
 # Guest kernel images (large files)
 mkfs/initramfs/system/scarlet/root/scarlet_kernel.bin
 

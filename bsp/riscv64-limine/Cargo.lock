@@ -71,7 +71,7 @@ dependencies = [
 name = "riscv64-limine-bsp"
 version = "0.1.0"
 dependencies = [
- "scarlet",
+ "scarlet-modules",
 ]
 
 [[package]]
@@ -84,6 +84,18 @@ dependencies = [
  "limine",
  "spin",
  "talc",
+]
+
+[[package]]
+name = "scarlet-module-prototype"
+version = "0.1.0"
+
+[[package]]
+name = "scarlet-modules"
+version = "0.1.0"
+dependencies = [
+ "scarlet",
+ "scarlet-module-prototype",
 ]
 
 [[package]]
