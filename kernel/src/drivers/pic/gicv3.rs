@@ -30,12 +30,6 @@ const MAX_INTERRUPTS: InterruptId = 1020;
 /// Maximum number of CPUs supported by this implementation.
 const MAX_CPUS: CpuId = 8;
 
-/// GIC base ID for Shared Peripheral Interrupts.
-const GIC_SPI_BASE: InterruptId = 32;
-
-/// GIC base ID for Private Peripheral Interrupts.
-const GIC_PPI_BASE: InterruptId = 16;
-
 // Distributor register offsets (GICD)
 const GICD_CTLR: usize = 0x0000;
 const GICD_TYPER: usize = 0x0004;
@@ -239,13 +233,6 @@ impl GicV3 {
                 self.redist_sgi_reg_addr(cpu_id, GICR_IPRIORITYR) + timer_ppi as usize,
                 0x80,
             );
-            // Keep the architected virtual timer delivery path ready as part of
-            // controller initialization so timer bring-up can stay generic and
-            // only needs to unmask the core-local timer source.
-            mmio::write32(
-                self.redist_sgi_reg_addr(cpu_id, GICR_ISENABLER0),
-                1u32 << timer_ppi,
-            );
         }
     }
 
@@ -337,23 +324,6 @@ impl ExternalInterruptController for GicV3 {
         }
 
         Ok(())
-    }
-
-    fn translate_interrupt(
-        &self,
-        interrupt_id: InterruptId,
-        metadata: Option<&crate::device::platform::resource::IrqMetadata>,
-    ) -> InterruptResult<InterruptId> {
-        Ok(match metadata {
-            Some(metadata) => {
-                if metadata.irq_type == 0 {
-                    GIC_SPI_BASE + metadata.irq_number
-                } else {
-                    GIC_PPI_BASE + metadata.irq_number
-                }
-            }
-            None => interrupt_id,
-        })
     }
 
     fn set_priority(

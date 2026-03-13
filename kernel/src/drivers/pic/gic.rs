@@ -50,12 +50,6 @@ const MAX_INTERRUPTS: InterruptId = 1020;
 /// Maximum number of CPUs supported by this GIC implementation
 const MAX_CPUS: CpuId = 8;
 
-/// GIC base ID for Shared Peripheral Interrupts.
-const GIC_SPI_BASE: InterruptId = 32;
-
-/// GIC base ID for Private Peripheral Interrupts.
-const GIC_PPI_BASE: InterruptId = 16;
-
 /// ARM GIC Implementation
 pub struct Gic {
     /// Base address of the GIC Distributor
@@ -116,7 +110,7 @@ impl Gic {
     /// # Returns
     ///
     /// The actual GIC interrupt ID to use for enabling/registering the interrupt
-    fn translate_irq_from_metadata(
+    pub fn translate_interrupt(
         &self,
         metadata: &crate::device::platform::resource::IrqMetadata,
     ) -> InterruptId {
@@ -125,10 +119,10 @@ impl Gic {
 
         if irq_type == 0 {
             // SPI (Shared Peripheral Interrupt): base at 32
-            GIC_SPI_BASE + irq_number as InterruptId
+            32 + irq_number as InterruptId
         } else {
             // PPI (Private Peripheral Interrupt): base at 16
-            GIC_PPI_BASE + irq_number as InterruptId
+            16 + irq_number as InterruptId
         }
     }
 
@@ -332,17 +326,6 @@ impl ExternalInterruptController for Gic {
         unsafe { mmio::write32(disable_addr, bit) }
 
         Ok(())
-    }
-
-    fn translate_interrupt(
-        &self,
-        interrupt_id: InterruptId,
-        metadata: Option<&crate::device::platform::resource::IrqMetadata>,
-    ) -> InterruptResult<InterruptId> {
-        Ok(match metadata {
-            Some(metadata) => self.translate_irq_from_metadata(metadata),
-            None => interrupt_id,
-        })
     }
 
     fn set_priority(

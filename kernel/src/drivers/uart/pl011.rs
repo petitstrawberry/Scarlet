@@ -365,16 +365,16 @@ fn pl011_probe(device_info: &PlatformDeviceInfo) -> Result<(), &'static str> {
         .find(|r| r.res_type == PlatformDeviceResourceType::IRQ)
     {
         // Translate interrupt ID using metadata if available (for ARM GIC)
-        let uart_interrupt_id = InterruptManager::with_manager(|mgr| {
-            mgr.translate_external_interrupt(
-                irq_resource.start as u32,
-                irq_resource.irq_metadata.as_ref(),
-            )
-        })
-        .map_err(|e| {
-            crate::early_println!("Failed to translate PL011 interrupt: {}", e);
-            "Failed to translate PL011 interrupt"
-        })?;
+        let uart_interrupt_id = if let Some(ref metadata) = irq_resource.irq_metadata {
+            // ARM GIC 3-cell format: translate type + number to actual IRQ
+            // Type 0 = SPI (Shared Peripheral Interrupt): base 32
+            // Type 1 = PPI (Private Peripheral Interrupt): base 16
+            let base = if metadata.irq_type == 0 { 32 } else { 16 };
+            base + metadata.irq_number
+        } else {
+            // No metadata: use raw interrupt number (RISC-V PLIC, etc.)
+            irq_resource.start as u32
+        };
 
         crate::early_println!("PL011 interrupt ID: {}", uart_interrupt_id);
 
