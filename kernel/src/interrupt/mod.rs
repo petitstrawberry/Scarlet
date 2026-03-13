@@ -477,6 +477,34 @@ impl InterruptManager {
         }
     }
 
+    /// Enable delivery for an architected local timer interrupt via the active
+    /// external controller.
+    pub fn enable_local_timer_interrupt(
+        &mut self,
+        cpu_id: CpuId,
+        interrupt_id: InterruptId,
+    ) -> InterruptResult<()> {
+        if let Some(ref mut controller) = self.controllers.external_controller_mut() {
+            controller.enable_local_timer_interrupt(cpu_id, interrupt_id)
+        } else {
+            Err(InterruptError::ControllerNotFound)
+        }
+    }
+
+    /// Disable delivery for an architected local timer interrupt via the active
+    /// external controller.
+    pub fn disable_local_timer_interrupt(
+        &mut self,
+        cpu_id: CpuId,
+        interrupt_id: InterruptId,
+    ) -> InterruptResult<()> {
+        if let Some(ref mut controller) = self.controllers.external_controller_mut() {
+            controller.disable_local_timer_interrupt(cpu_id, interrupt_id)
+        } else {
+            Err(InterruptError::ControllerNotFound)
+        }
+    }
+
     /// Translate a platform interrupt specifier through the active controller.
     pub fn translate_external_interrupt(
         &mut self,

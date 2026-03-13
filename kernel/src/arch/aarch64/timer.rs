@@ -87,18 +87,22 @@ impl ArchTimer {
         // Program the next event before unmasking interrupts.
         self.set_timer(next);
 
-        // Only perform controller-independent interrupt configuration on first start
+        // Only perform timer interrupt delivery configuration on first start
         if !self.initialized {
             // CRITICAL: Mask IRQs before configuring the interrupt controller to avoid deadlock
             // (an interrupt firing during InterruptManager access could try to re-lock it).
             interrupt::disable_external_interrupts();
 
-            // Enable the timer at the core-local interrupt source.
-            //
-            // Architectures/controllers that need an additional routing step are
-            // expected to have prepared it during controller initialization.
+            // Enable timer at two levels:
+            // - core-local interrupt (InterruptManager local controller)
+            // - external timer delivery path in the active interrupt controller
             interrupt::enable_core_local_interrupt(LocalInterruptType::Timer)
                 .unwrap_or_else(|e| panic!("Failed to enable local timer interrupt: {e}"));
+
+            interrupt::enable_external_interrupt_line(
+                crate::drivers::pic::arm_generic_timer::CNTV_PPI_IRQ,
+            )
+            .unwrap_or_else(|e| panic!("Failed to enable timer interrupt delivery: {e}"));
 
             // CRITICAL: Set initialized flag BEFORE unmasking interrupts
             // Otherwise, if an interrupt fires immediately after unmask, it will
@@ -122,6 +126,10 @@ impl ArchTimer {
         InterruptManager::with_manager(|mgr| {
             let cpu_id = get_cpu().get_cpuid() as u32;
             let _ = mgr.disable_local_interrupt(cpu_id, LocalInterruptType::Timer);
+            let _ = mgr.disable_local_timer_interrupt(
+                cpu_id,
+                crate::drivers::pic::arm_generic_timer::CNTV_PPI_IRQ,
+            );
             let _ = mgr.set_timer(cpu_id, u64::MAX);
         });
     }

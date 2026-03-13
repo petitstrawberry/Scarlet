@@ -232,20 +232,6 @@ impl GicV3 {
 
             // Group 1 for SGI/PPI.
             mmio::write32(self.redist_sgi_reg_addr(cpu_id, GICR_IGROUPR0), 0xFFFF_FFFF);
-
-            // Set virtual timer PPI priority to 0x80.
-            let timer_ppi = crate::drivers::pic::arm_generic_timer::CNTV_PPI_IRQ;
-            mmio::write8(
-                self.redist_sgi_reg_addr(cpu_id, GICR_IPRIORITYR) + timer_ppi as usize,
-                0x80,
-            );
-            // Keep the architected virtual timer delivery path ready as part of
-            // controller initialization so timer bring-up can stay generic and
-            // only needs to unmask the core-local timer source.
-            mmio::write32(
-                self.redist_sgi_reg_addr(cpu_id, GICR_ISENABLER0),
-                1u32 << timer_ppi,
-            );
         }
     }
 

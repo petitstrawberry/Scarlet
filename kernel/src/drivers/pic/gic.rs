@@ -197,15 +197,6 @@ impl Gic {
                 mmio::write32(self.dist_reg_addr(GICD_IGROUPR + i * 4), 0xFFFF_FFFF);
             }
 
-            // Pre-enable the virtual timer PPI (ID 27).
-            let timer_ppi = crate::drivers::pic::arm_generic_timer::CNTV_PPI_IRQ;
-            let timer_ppi_bit = 1u32 << timer_ppi;
-            mmio::write32(self.dist_reg_addr(GICD_ISENABLER), timer_ppi_bit);
-
-            // Set timer PPI priority.
-            // For Group 1 non-secure interrupts, use priority 0x80 (bit 7 set).
-            mmio::write8(self.priority_addr(timer_ppi), 0x80);
-
             // Enable the distributor for both Group 0 and Group 1 interrupts.
             // Bit 0 = Enable Group 0, Bit 1 = Enable Group 1.
             // For EL1 non-secure, we need Group 1 enabled (bit 1).

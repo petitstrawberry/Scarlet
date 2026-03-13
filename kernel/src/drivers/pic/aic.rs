@@ -15,6 +15,7 @@ use crate::{
             resource::{IrqMetadata, PlatformDeviceResourceType},
         },
     },
+    drivers::pic::arm_generic_timer::CNTV_PPI_IRQ,
     early_initcall,
     environment::MAX_NUM_CPUS,
     interrupt::{
@@ -315,6 +316,30 @@ impl ExternalInterruptController for Aic {
         self.set_enabled(die, local_irq, false);
         self.mask_interrupt(die, local_irq);
         Ok(())
+    }
+
+    fn enable_local_timer_interrupt(
+        &mut self,
+        cpu_id: CpuId,
+        interrupt_id: InterruptId,
+    ) -> InterruptResult<()> {
+        if interrupt_id == CNTV_PPI_IRQ {
+            Ok(())
+        } else {
+            self.enable_interrupt(interrupt_id, cpu_id)
+        }
+    }
+
+    fn disable_local_timer_interrupt(
+        &mut self,
+        cpu_id: CpuId,
+        interrupt_id: InterruptId,
+    ) -> InterruptResult<()> {
+        if interrupt_id == CNTV_PPI_IRQ {
+            Ok(())
+        } else {
+            self.disable_interrupt(interrupt_id, cpu_id)
+        }
     }
 
     fn set_priority(

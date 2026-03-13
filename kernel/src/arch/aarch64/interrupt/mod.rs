@@ -5,6 +5,7 @@
 use core::arch::asm;
 
 use crate::arch::get_cpu;
+use crate::drivers::pic::arm_generic_timer::CNTV_PPI_IRQ;
 use crate::interrupt::{InterruptManager, controllers::LocalInterruptType};
 
 pub fn interrupt_init() {
@@ -84,7 +85,11 @@ pub fn disable_core_local_interrupt(source: LocalInterruptType) -> Result<(), &'
 pub fn enable_external_interrupt_line(interrupt_id: u32) -> Result<(), &'static str> {
     InterruptManager::with_manager(|mgr| {
         let cpu_id = get_cpu().get_cpuid() as u32;
-        mgr.enable_external_interrupt(interrupt_id, cpu_id)
+        if interrupt_id == CNTV_PPI_IRQ {
+            mgr.enable_local_timer_interrupt(cpu_id, interrupt_id)
+        } else {
+            mgr.enable_external_interrupt(interrupt_id, cpu_id)
+        }
     })
     .map_err(|_| "failed to enable external interrupt line")
 }
@@ -93,7 +98,11 @@ pub fn enable_external_interrupt_line(interrupt_id: u32) -> Result<(), &'static 
 pub fn disable_external_interrupt_line(interrupt_id: u32) -> Result<(), &'static str> {
     InterruptManager::with_manager(|mgr| {
         let cpu_id = get_cpu().get_cpuid() as u32;
-        mgr.disable_external_interrupt(interrupt_id, cpu_id)
+        if interrupt_id == CNTV_PPI_IRQ {
+            mgr.disable_local_timer_interrupt(cpu_id, interrupt_id)
+        } else {
+            mgr.disable_external_interrupt(interrupt_id, cpu_id)
+        }
     })
     .map_err(|_| "failed to disable external interrupt line")
 }
