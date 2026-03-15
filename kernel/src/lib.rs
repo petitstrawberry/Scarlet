@@ -368,7 +368,7 @@ pub enum DeviceSource {
 /// #[no_mangle]
 /// pub extern "C" fn start_kernel(boot_info: &BootInfo) -> ! {
 ///     // Use boot_info for system initialization
-///     let memory = boot_info.usable_memory;
+///     let memory = boot_info.usable_memory_paddr;
 ///     let cpu_id = boot_info.cpu_id;
 ///     // ...
 /// }
@@ -380,12 +380,14 @@ pub struct BootInfo {
     /// Number of CPUs detected at runtime (from FDT)
     /// Used to drive SMP initialization and per-CPU resource sizing
     pub cpu_count: usize,
-    pub usable_memory: MemoryArea,
-    pub direct_map_area: MemoryArea,
-    pub usable_memory_phys: MemoryArea,
-    pub direct_map_area_phys: MemoryArea,
-    pub initramfs: Option<MemoryArea>,
-    pub initramfs_phys: Option<MemoryArea>,
+    /// Physical memory area available for PMM allocation (usable RAM excluding reserved regions)
+    pub usable_memory_paddr: MemoryArea,
+    /// Physical memory area to be mapped into HHDM (direct map)
+    pub direct_map_paddr: MemoryArea,
+    /// Optional initramfs physical memory area
+    pub initramfs_paddr: Option<MemoryArea>,
+    /// HHDM offset: hhdm_va = paddr + hhdm_offset
+    pub hhdm_offset: usize,
     /// Optional kernel command line parameters
     /// Boot arguments passed by bootloader for kernel configuration
     pub cmdline: Option<&'static str>,
@@ -400,8 +402,10 @@ impl BootInfo {
     /// # Arguments
     ///
     /// * `cpu_id` - ID of the boot processor/hart
-    /// * `usable_memory` - Memory area available for kernel allocation
-    /// * `initramfs` - Optional initramfs memory area
+    /// * `usable_memory_paddr` - Physical memory area for PMM allocation
+    /// * `direct_map_paddr` - Physical memory area to map into HHDM
+    /// * `initramfs_paddr` - Optional initramfs physical memory area
+    /// * `hhdm_offset` - HHDM offset for VA = PA + offset
     /// * `cmdline` - Optional kernel command line parameters
     /// * `device_source` - Source of device information for hardware discovery
     ///
@@ -411,24 +415,20 @@ impl BootInfo {
     pub fn new(
         cpu_id: usize,
         cpu_count: usize,
-        usable_memory: MemoryArea,
-        direct_map_area: MemoryArea,
-        usable_memory_phys: MemoryArea,
-        direct_map_area_phys: MemoryArea,
-        initramfs: Option<MemoryArea>,
-        initramfs_phys: Option<MemoryArea>,
+        usable_memory_paddr: MemoryArea,
+        direct_map_paddr: MemoryArea,
+        initramfs_paddr: Option<MemoryArea>,
+        hhdm_offset: usize,
         cmdline: Option<&'static str>,
         device_source: DeviceSource,
     ) -> Self {
         Self {
             cpu_id,
             cpu_count,
-            usable_memory,
-            direct_map_area,
-            usable_memory_phys,
-            direct_map_area_phys,
-            initramfs,
-            initramfs_phys,
+            usable_memory_paddr,
+            direct_map_paddr,
+            initramfs_paddr,
+            hhdm_offset,
             cmdline,
             device_source,
         }
@@ -452,14 +452,13 @@ impl BootInfo {
 
     /// Returns the initramfs memory area if available
     ///
-    /// The initramfs contains an initial root filesystem that can be used
-    /// during early boot before mounting the real root filesystem.
-    ///
-    /// # Returns
-    ///
-    /// Optional memory area containing the initramfs data
-    pub fn get_initramfs(&self) -> Option<MemoryArea> {
-        self.initramfs
+    pub fn get_initramfs_vaddr(&self) -> Option<MemoryArea> {
+        self.initramfs_paddr.map(|area| {
+            MemoryArea::new(
+                crate::vm::addr::phys_to_virt(area.start),
+                crate::vm::addr::phys_to_virt(area.end),
+            )
+        })
     }
 }
 
@@ -531,38 +530,37 @@ pub extern "C" fn start_kernel(boot_info: &BootInfo) -> ! {
     early_println!("[Scarlet Kernel] Hello, I'm Scarlet kernel!");
     early_println!("[Scarlet Kernel] Boot on CPU {}", cpu_id);
     early_println!("[Scarlet Kernel] Detected {} CPU(s)", cpu_count);
-    /* Use usable memory area from BootInfo */
-    let usable_area = boot_info.usable_memory;
-    let direct_map_area = boot_info.direct_map_area;
-    let usable_area_phys = boot_info.usable_memory_phys;
-    let direct_map_area_phys = boot_info.direct_map_area_phys;
+    let usable_memory_paddr = boot_info.usable_memory_paddr;
+    let direct_map_paddr = boot_info.direct_map_paddr;
+    let hhdm_offset = boot_info.hhdm_offset;
     early_println!(
-        "[Scarlet Kernel] Usable memory area : {:#x} - {:#x}",
-        usable_area.start,
-        usable_area.end
+        "[Scarlet Kernel] Usable memory (PA) : {:#x} - {:#x}",
+        usable_memory_paddr.start,
+        usable_memory_paddr.end
     );
     early_println!(
-        "[Scarlet Kernel] Direct-map area    : {:#x} - {:#x}",
-        direct_map_area.start,
-        direct_map_area.end
+        "[Scarlet Kernel] Direct-map (PA)    : {:#x} - {:#x}",
+        direct_map_paddr.start,
+        direct_map_paddr.end
     );
+    early_println!("[Scarlet Kernel] HHDM offset       : {:#x}", hhdm_offset);
 
     /* Handle initramfs if available in BootInfo */
-    if let Some(initramfs_area) = boot_info.initramfs {
+    if let Some(initramfs_paddr) = boot_info.initramfs_paddr {
         early_println!(
-            "[Scarlet Kernel] InitramFS available: {:#x} - {:#x}",
-            initramfs_area.start,
-            initramfs_area.end
+            "[Scarlet Kernel] InitramFS (PA)    : {:#x} - {:#x}",
+            initramfs_paddr.start,
+            initramfs_paddr.end
         );
     } else {
         early_println!("[Scarlet Kernel] No initramfs found");
     }
 
     early_println!("[Scarlet Kernel] Initializing PMM...");
-    let pmm_start_aligned = (usable_area_phys.start + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
-    if pmm_start_aligned < usable_area_phys.end {
+    let pmm_start_aligned = (usable_memory_paddr.start + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
+    if pmm_start_aligned < usable_memory_paddr.end {
         unsafe {
-            mem::pmm::init(MemoryArea::new(pmm_start_aligned, usable_area_phys.end));
+            mem::pmm::init(MemoryArea::new(pmm_start_aligned, usable_memory_paddr.end));
         }
     }
 
@@ -600,9 +598,10 @@ pub extern "C" fn start_kernel(boot_info: &BootInfo) -> ! {
 
     early_println!("[Scarlet Kernel] Initializing Virtual Memory...");
     kernel_vm_init(
-        usable_area_phys,
-        direct_map_area_phys,
-        boot_info.initramfs_phys,
+        usable_memory_paddr,
+        direct_map_paddr,
+        boot_info.initramfs_paddr,
+        hhdm_offset,
     );
     /* After this point, we can use the heap and virtual memory */
     /* We will also be restricted to the kernel address space */
@@ -701,9 +700,13 @@ pub extern "C" fn start_kernel(boot_info: &BootInfo) -> ! {
     let manager = init_global_vfs_manager();
 
     /* Initialize initramfs from BootInfo if available */
-    if let Some(initramfs_area) = boot_info.initramfs {
+    if let Some(initramfs_paddr) = boot_info.initramfs_paddr {
         println!("[Scarlet Kernel] Initializing initramfs from BootInfo...");
-        if let Err(e) = init_initramfs(&manager, initramfs_area) {
+        let initramfs_vaddr = MemoryArea::new(
+            phys_to_virt(initramfs_paddr.start),
+            phys_to_virt(initramfs_paddr.end),
+        );
+        if let Err(e) = init_initramfs(&manager, initramfs_vaddr) {
             println!(
                 "[Scarlet Kernel] Warning: Failed to initialize initramfs: {}",
                 e

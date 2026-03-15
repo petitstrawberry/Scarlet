@@ -61,20 +61,12 @@ pub extern "C" fn limine_entry() -> ! {
     init_fdt(dtb_ptr);
 
     let usable_region = select_usable_region(memmap.entries());
+    let hhdm_offset = hhdm.offset() as usize;
     let relocated_fdt = relocate_fdt(phys_to_virt(usable_region.start) as *mut u8);
     let reserved_bytes = relocated_fdt.size();
-    let usable_memory_phys = reserve_front(usable_region, reserved_bytes);
-    let usable_memory = MemoryArea::new(
-        phys_to_virt(usable_memory_phys.start),
-        phys_to_virt(usable_memory_phys.end),
-    );
-    let direct_map_area = MemoryArea::new(
-        phys_to_virt(usable_region.start),
-        phys_to_virt(usable_region.end),
-    );
-    let initramfs_phys = module_area(MODULE_REQUEST.get_response());
-    let initramfs = initramfs_phys
-        .map(|area| MemoryArea::new(phys_to_virt(area.start), phys_to_virt(area.end)));
+    let usable_memory_paddr = reserve_front(usable_region, reserved_bytes);
+    let direct_map_paddr = usable_region;
+    let initramfs_paddr = module_area(MODULE_REQUEST.get_response());
     let fdt_manager = FdtManager::get_manager();
     let cpu_count = fdt_manager.get_cpu_count().unwrap_or(1);
     let cmdline = fdt_manager
@@ -85,12 +77,10 @@ pub extern "C" fn limine_entry() -> ! {
     let bootinfo = BootInfo::new(
         cpu_id,
         cpu_count,
-        usable_memory,
-        direct_map_area,
-        usable_memory_phys,
-        usable_region,
-        initramfs,
-        initramfs_phys,
+        usable_memory_paddr,
+        direct_map_paddr,
+        initramfs_paddr,
+        hhdm_offset,
         cmdline,
         DeviceSource::Fdt(relocated_fdt.start),
     );

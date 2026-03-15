@@ -57,9 +57,10 @@ static KERNEL_AREA: Once<MemoryArea> = Once::new();
 /* Initialize MMU and enable paging */
 #[allow(static_mut_refs)]
 pub fn kernel_vm_init(
-    usable_area: MemoryArea,
-    direct_map_area: MemoryArea,
-    initramfs_area: Option<MemoryArea>,
+    usable_memory_paddr: MemoryArea,
+    direct_map_paddr: MemoryArea,
+    initramfs_paddr: Option<MemoryArea>,
+    hhdm_offset: usize,
 ) {
     let manager = get_kernel_vm_manager();
 
@@ -85,8 +86,8 @@ pub fn kernel_vm_init(
         end: addr::kernel_virt_to_phys(kernel_area.end),
     };
     let direct_map_phys_area = MemoryArea {
-        start: align_down(direct_map_area.start, PAGE_SIZE),
-        end: align_up(direct_map_area.end + 1, PAGE_SIZE) - 1,
+        start: align_down(direct_map_paddr.start, PAGE_SIZE),
+        end: align_up(direct_map_paddr.end + 1, PAGE_SIZE) - 1,
     };
     let hhdm_area = MemoryArea {
         start: phys_to_virt(direct_map_phys_area.start),
@@ -132,10 +133,10 @@ pub fn kernel_vm_init(
         .map_err(|e| panic!("Failed to map HHDM memory area: {}", e))
         .unwrap();
 
-    if let Some(initramfs_area) = initramfs_area {
+    if let Some(initramfs_paddr) = initramfs_paddr {
         let initramfs_phys_area = MemoryArea {
-            start: align_down(initramfs_area.start, PAGE_SIZE),
-            end: align_up(initramfs_area.end + 1, PAGE_SIZE) - 1,
+            start: align_down(initramfs_paddr.start, PAGE_SIZE),
+            end: align_up(initramfs_paddr.end + 1, PAGE_SIZE) - 1,
         };
         let initramfs_hhdm_area = MemoryArea {
             start: phys_to_virt(initramfs_phys_area.start),

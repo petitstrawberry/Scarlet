@@ -19,6 +19,7 @@ use crate::vm::vmem::VirtualMemoryPermission;
 const SCARLET_MAIR_EL1: u64 = 0x44ff00;
 const SCARLET_TCR_EL1: u64 = 0x1_B510_3510;
 const SCTLR_EL1_ENABLE_MASK: u64 = 1 | (1 << 2) | (1 << 12);
+const DEBUG_DEVICE_FAULT_VA: usize = 0xffff_0008_3afd_b000;
 
 /// Maximum paging levels for AArch64 4KB granule (4 levels: 0-3)
 const MAX_PAGING_LEVEL: usize = 3;
@@ -417,6 +418,19 @@ impl PageTable {
         // Execute permission
         if !VirtualMemoryPermission::Execute.contained_in(permissions) {
             entry |= (1 << 54) | (1 << 53);
+        }
+
+        #[cfg(any(debug_assertions, test))]
+        if vaddr == DEBUG_DEVICE_FAULT_VA {
+            crate::early_println!(
+                "[vm-map] target va={:#x} paddr={:#x} perms={:#x} is_user={} is_device={} entry={:#x}",
+                vaddr,
+                paddr,
+                permissions,
+                is_user,
+                is_device,
+                entry,
+            );
         }
 
         pte.set_entry(entry);
