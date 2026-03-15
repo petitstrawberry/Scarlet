@@ -281,7 +281,7 @@ pub fn setup_trampoline_for_kernel(manager: &VirtualMemoryManager) {
     // (trampoline-managed) TTBR1 address space.
     #[cfg(any(debug_assertions, test))]
     {
-        crate::println!(
+        crate::early_println!(
             "[vm] aarch64 high-va(kstack) region: {:#x}-{:#x}",
             KERNEL_KSTACK_REGION_START,
             KERNEL_KSTACK_REGION_END
@@ -292,13 +292,13 @@ pub fn setup_trampoline_for_kernel(manager: &VirtualMemoryManager) {
 
     // Keep TTBR1 fixed to the kernel page table (trampoline/high-VA live there).
     #[cfg(any(debug_assertions, test))]
-    crate::println!("[vm] setup_trampoline_for_kernel: switch_ttbr1...");
+    crate::early_println!("[vm] setup_trampoline_for_kernel: switch_ttbr1...");
     manager
         .get_root_page_table()
         .expect("Kernel root page table not set")
         .switch_ttbr1(manager.get_asid());
     #[cfg(any(debug_assertions, test))]
-    crate::println!("[vm] setup_trampoline_for_kernel: switch_ttbr1 ok");
+    crate::early_println!("[vm] setup_trampoline_for_kernel: switch_ttbr1 ok");
 }
 
 /// AArch64: trampoline/high-VA live in the fixed TTBR1 kernel mapping.

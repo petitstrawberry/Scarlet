@@ -10,7 +10,7 @@ use crate::environment::STACK_SIZE;
 use crate::mem::{KERNEL_STACK, init_bss};
 use crate::vm::addr::{init_limine_addressing, phys_to_virt};
 use crate::vm::vmem::MemoryArea;
-use crate::{BootInfo, DeviceSource, start_ap, start_kernel};
+use crate::{BootInfo, DeviceSource, early_println, start_ap, start_kernel};
 use core::sync::atomic::compiler_fence;
 
 static mut EARLY_BOOTINFO: MaybeUninit<BootInfo> = MaybeUninit::uninit();
@@ -97,6 +97,13 @@ pub extern "C" fn limine_entry() -> ! {
 
     crate::arch::init_user_context_from_fdt();
     crate::arch::aarch64::init_arch(cpu_id);
+
+    let current_el = unsafe {
+        let el: usize;
+        asm!("mrs {0}, CurrentEL", out(reg) el, options(nostack));
+        el >> 2
+    };
+    early_println!("Current EL: EL{}", current_el);
 
     unsafe {
         let stack_top = (&raw const KERNEL_STACK) as *const _ as usize + STACK_SIZE * (cpu_id + 1);
