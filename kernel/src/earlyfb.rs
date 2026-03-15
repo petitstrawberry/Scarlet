@@ -182,6 +182,10 @@ impl FramebufferConsole {
 
 static EARLY_CONSOLE: Mutex<FramebufferConsole> = Mutex::new(FramebufferConsole::new());
 
+pub fn console_lock_addr() -> usize {
+    &EARLY_CONSOLE as *const _ as usize
+}
+
 pub fn init(framebuffer: &Framebuffer<'_>) {
     let mut console = EARLY_CONSOLE.lock();
     if console.initialized {

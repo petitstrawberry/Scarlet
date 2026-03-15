@@ -117,6 +117,11 @@ impl PageTableEntry {
         self
     }
 
+    pub fn set_entry(&mut self, entry: u64) -> &mut Self {
+        self.entry = entry;
+        self
+    }
+
     // Test helper methods
     pub fn get_flags(&self) -> u64 {
         self.entry & 0xfff
@@ -374,22 +379,25 @@ impl PageTable {
             None => panic!("map: walk() couldn't allocate page-table page"),
         };
 
-        pte.clear_all();
-
-        // Set as L3 page descriptor
-        pte.set_page();
-        pte.set_ppn(paddr >> 12);
-
         let is_user = VirtualMemoryPermission::User.contained_in(permissions);
         let is_device = !is_user && (IOREMAP_START..=IOREMAP_END).contains(&vaddr);
-
-        if is_device {
-            pte.set_memory_attr(MemoryAttribute::Device as u8);
-            pte.set_shareability(Shareability::OuterShareable as u8);
+        let memory_attr = if is_device {
+            MemoryAttribute::Device as u64
         } else {
-            pte.set_memory_attr(MemoryAttribute::Normal as u8);
-            pte.set_shareability(Shareability::InnerShareable as u8);
-        }
+            MemoryAttribute::Normal as u64
+        };
+        let shareability = if is_device {
+            Shareability::OuterShareable as u64
+        } else {
+            Shareability::InnerShareable as u64
+        };
+
+        let mut entry = 0u64;
+        entry |= 0x3;
+        entry |= 1 << 10;
+        entry |= ((paddr >> 12) as u64 & 0xfffffffff) << 12;
+        entry |= memory_attr << 2;
+        entry |= shareability << 8;
 
         // AP[7:6] encoding
         let is_write = VirtualMemoryPermission::Write.contained_in(permissions);
@@ -399,19 +407,19 @@ impl PageTable {
             (false, false) => 0b10,
             (true, false) => 0b11,
         };
-        pte.set_ap(ap);
+        entry |= (ap as u64) << 6;
 
         // nG bit for user pages (ASID-tagged)
         if is_user {
-            pte.set_non_global();
-        } else {
-            pte.set_global();
+            entry |= 1 << 11;
         }
 
         // Execute permission
-        if VirtualMemoryPermission::Execute.contained_in(permissions) {
-            pte.executable();
+        if !VirtualMemoryPermission::Execute.contained_in(permissions) {
+            entry |= (1 << 54) | (1 << 53);
         }
+
+        pte.set_entry(entry);
 
         // Ensure the updated PTE is visible to the hardware table walker.
         crate::arch::aarch64::clean_dcache_to_poc_range(
@@ -624,5 +632,20 @@ mod tests {
         let ttbr_val = page_table.get_val_for_ttbr(asid);
         let expected_asid = ((ttbr_val >> 48) & 0xffff) as u16;
         assert_eq!(expected_asid, asid);
+    }
+
+    #[test_case]
+    fn test_kernel_normal_leaf_encoding() {
+        let mut page_table = PageTable::new();
+        page_table.map(
+            1,
+            0xffff_ffff_8000_0000,
+            0x8000_0000,
+            0x01 | 0x02 | 0x04,
+            true,
+            true,
+        );
+        let pte = page_table.walk(0xffff_ffff_8000_0000, false, 1).unwrap();
+        assert_eq!(pte.entry & 0xfff, 0x707);
     }
 }
