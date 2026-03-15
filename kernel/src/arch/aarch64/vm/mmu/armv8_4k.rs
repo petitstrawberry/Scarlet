@@ -16,6 +16,10 @@ use crate::vm::addr::{phys_to_virt, virt_to_phys};
 use crate::vm::vmem::VirtualMemoryMap;
 use crate::vm::vmem::VirtualMemoryPermission;
 
+const SCARLET_MAIR_EL1: u64 = 0x44ff00;
+const SCARLET_TCR_EL1: u64 = 0x1_B510_3510;
+const SCTLR_EL1_ENABLE_MASK: u64 = 1 | (1 << 2) | (1 << 12);
+
 /// Maximum paging levels for AArch64 4KB granule (4 levels: 0-3)
 const MAX_PAGING_LEVEL: usize = 3;
 
@@ -250,22 +254,40 @@ impl PageTable {
         crate::arch::aarch64::get_cpu().set_kernel_ttbr0(ttbr_val);
 
         unsafe {
-            // Update TTBR0 (user translation base) only.
-            // TTBR1 is managed separately and is expected to stay fixed to the kernel table.
-            asm!(
-                "msr ttbr0_el1, {ttbr}",
-                "isb",
-                "tlbi vmalle1is",
-                "dsb ish",
-                "isb",
-                ttbr = in(reg) ttbr_val,
-            );
-
-            // Enable MMU if not already enabled
             let mut sctlr: u64;
-            asm!("mrs {}, sctlr_el1", out(reg) sctlr);
+            asm!("mrs {sctlr}, sctlr_el1", sctlr = out(reg) sctlr, options(nostack));
             if sctlr & 1 == 0 {
-                init_mmu_registers();
+                asm!(
+                    "msr mair_el1, {mair}",
+                    "msr tcr_el1, {tcr}",
+                    "isb",
+                    "msr ttbr0_el1, {ttbr}",
+                    "isb",
+                    "tlbi vmalle1is",
+                    "dsb ish",
+                    "isb",
+                    "mrs {tmp}, sctlr_el1",
+                    "orr {tmp}, {tmp}, {sctlr_flags}",
+                    "msr sctlr_el1, {tmp}",
+                    "dsb sy",
+                    "isb",
+                    mair = in(reg) SCARLET_MAIR_EL1,
+                    tcr = in(reg) SCARLET_TCR_EL1,
+                    ttbr = in(reg) ttbr_val,
+                    sctlr_flags = in(reg) SCTLR_EL1_ENABLE_MASK,
+                    tmp = lateout(reg) _,
+                    options(nostack),
+                );
+            } else {
+                asm!(
+                    "msr ttbr0_el1, {ttbr}",
+                    "isb",
+                    "tlbi vmalle1is",
+                    "dsb ish",
+                    "isb",
+                    ttbr = in(reg) ttbr_val,
+                    options(nostack),
+                );
             }
         }
     }
@@ -281,6 +303,7 @@ impl PageTable {
                 "dsb ish",
                 "isb",
                 ttbr = in(reg) ttbr_val,
+                options(nostack),
             );
         }
     }
@@ -511,33 +534,57 @@ impl PageTable {
 /// Initialize MMU registers
 pub fn init_mmu_registers() {
     unsafe {
-        // MAIR_EL1: memory attribute configuration
-        // Index 0: Device-nGnRnE (0x00)
-        // Index 1: Normal, Write-Back (0xFF)
-        // Index 2: Normal, Non-Cacheable (0x44)
-        let mair_val: u64 = 0x44ff00;
-        asm!("msr mair_el1, {}", in(reg) mair_val);
+        asm!(
+            "msr mair_el1, {mair}",
+            "msr tcr_el1, {tcr}",
+            "isb",
+            "mrs {tmp}, sctlr_el1",
+            "orr {tmp}, {tmp}, {sctlr_flags}",
+            "msr sctlr_el1, {tmp}",
+            "dsb sy",
+            "isb",
+            mair = in(reg) SCARLET_MAIR_EL1,
+            tcr = in(reg) SCARLET_TCR_EL1,
+            sctlr_flags = in(reg) SCTLR_EL1_ENABLE_MASK,
+            tmp = lateout(reg) _,
+            options(nostack),
+        );
+    }
+}
 
-        // TCR_EL1: Translation Control Register
-        // T0SZ = 16 (48-bit VA for TTBR0)
-        // T1SZ = 16 (48-bit VA for TTBR1)
-        // TG0 = 0b00 (4KB granule for TTBR0)
-        // TG1 = 0b10 (4KB granule for TTBR1)
-        // SH0/SH1 = 0b11 (Inner Shareable)
-        // ORGN0/ORGN1 = 0b01 (Write-Back)
-        // IRGN0/IRGN1 = 0b01 (Write-Back)
-        // IPS = 0b001 (36-bit PA, supports up to 64GB) - bit[34:32]
-        let tcr_val: u64 = 0x1_B510_3510;
-        asm!("msr tcr_el1, {}", in(reg) tcr_val);
-
-        // SCTLR_EL1: System Control Register
+pub fn sync_el1_translation_registers_if_needed() {
+    unsafe {
         let mut sctlr: u64;
-        asm!("mrs {}, sctlr_el1", out(reg) sctlr);
-        sctlr |= 1; // M: MMU enable
-        sctlr |= 1 << 2; // C: Data cache enable
-        sctlr |= 1 << 12; // I: Instruction cache enable
-        asm!("msr sctlr_el1, {}", in(reg) sctlr);
-        asm!("dsb sy", "isb");
+        asm!("mrs {sctlr}, sctlr_el1", sctlr = out(reg) sctlr, options(nostack));
+        if sctlr & 1 == 0 {
+            return;
+        }
+
+        let mut mair: u64;
+        let mut tcr: u64;
+        asm!(
+            "mrs {mair}, mair_el1",
+            "mrs {tcr}, tcr_el1",
+            mair = out(reg) mair,
+            tcr = out(reg) tcr,
+            options(nostack),
+        );
+
+        if mair == SCARLET_MAIR_EL1 && tcr == SCARLET_TCR_EL1 {
+            return;
+        }
+
+        asm!(
+            "msr mair_el1, {mair}",
+            "msr tcr_el1, {tcr}",
+            "isb",
+            "tlbi vmalle1is",
+            "dsb ish",
+            "isb",
+            mair = in(reg) SCARLET_MAIR_EL1,
+            tcr = in(reg) SCARLET_TCR_EL1,
+            options(nostack),
+        );
     }
 }
 

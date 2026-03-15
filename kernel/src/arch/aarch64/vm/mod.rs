@@ -293,6 +293,7 @@ pub fn setup_trampoline_for_kernel(manager: &VirtualMemoryManager) {
     // Keep TTBR1 fixed to the kernel page table (trampoline/high-VA live there).
     #[cfg(any(debug_assertions, test))]
     crate::early_println!("[vm] setup_trampoline_for_kernel: switch_ttbr1...");
+    mmu::sync_el1_translation_registers_if_needed();
     manager
         .get_root_page_table()
         .expect("Kernel root page table not set")
