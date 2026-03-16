@@ -10,8 +10,9 @@ pub mod manager;
 pub mod vmem;
 
 pub use addr::{
-    PhysAddr, VirtAddr, boot_phys_to_virt, get_boot_hhdm_offset, get_hhdm_offset, phys_to_virt,
-    set_hhdm_offset, virt_to_phys,
+    PhysAddr, VirtAddr, boot_phys_to_virt, boot_virt_to_phys, finalize_runtime_memory_layout,
+    get_boot_hhdm_offset, get_current_direct_map_phys_range, get_heap_phys_layout, get_hhdm_offset,
+    phys_to_virt, set_hhdm_offset, transition_kernel_memory_layout, virt_to_phys,
 };
 pub use ioremap::{ioremap, iounmap};
 
@@ -46,6 +47,8 @@ extern crate alloc;
 static KERNEL_VM_MANAGER: Once<VirtualMemoryManager> = Once::new();
 static HHDM_AREA: Once<MemoryArea> = Once::new();
 static KERNEL_HEAP_AREA: Once<MemoryArea> = Once::new();
+static HHDM_PHYS_AREA: Once<MemoryArea> = Once::new();
+static KERNEL_HEAP_PHYS_AREA: Once<MemoryArea> = Once::new();
 
 fn align_down(addr: usize, align: usize) -> usize {
     addr & !(align - 1)
@@ -110,6 +113,8 @@ pub fn kernel_vm_init(
     KERNEL_AREA.call_once(|| kernel_area);
     HHDM_AREA.call_once(|| hhdm_area);
     KERNEL_HEAP_AREA.call_once(|| kernel_heap_area);
+    HHDM_PHYS_AREA.call_once(|| direct_map_phys_area);
+    KERNEL_HEAP_PHYS_AREA.call_once(|| heap_phys_area);
 
     let kernel_map = VirtualMemoryMap {
         vmarea: kernel_area,
@@ -234,6 +239,8 @@ pub fn kernel_vm_init(
 
     #[cfg(any(debug_assertions, test))]
     early_println!("[vm] kernel_vm_init: done");
+
+    finalize_runtime_memory_layout();
 }
 
 pub fn user_vm_init(task: &Task) {
@@ -271,6 +278,12 @@ pub fn user_kernel_vm_init(task: &Task) {
     let kernel_heap_area = *KERNEL_HEAP_AREA
         .get()
         .expect("KERNEL_HEAP_AREA not initialized");
+    let hhdm_phys_area = *HHDM_PHYS_AREA
+        .get()
+        .expect("HHDM_PHYS_AREA not initialized");
+    let kernel_heap_phys_area = *KERNEL_HEAP_PHYS_AREA
+        .get()
+        .expect("KERNEL_HEAP_PHYS_AREA not initialized");
 
     let kernel_map = VirtualMemoryMap {
         vmarea: kernel_area,
@@ -300,10 +313,7 @@ pub fn user_kernel_vm_init(task: &Task) {
 
     let hhdm_map = VirtualMemoryMap {
         vmarea: hhdm_area,
-        pmarea: MemoryArea::new(
-            addr::virt_to_phys(hhdm_area.start),
-            addr::virt_to_phys(hhdm_area.end),
-        ),
+        pmarea: hhdm_phys_area,
         permissions: VirtualMemoryPermission::Read as usize
             | VirtualMemoryPermission::Write as usize,
         is_shared: true,
@@ -320,10 +330,7 @@ pub fn user_kernel_vm_init(task: &Task) {
 
     let heap_map = VirtualMemoryMap {
         vmarea: kernel_heap_area,
-        pmarea: MemoryArea::new(
-            addr::virt_to_phys(kernel_heap_area.start),
-            addr::virt_to_phys(kernel_heap_area.end),
-        ),
+        pmarea: kernel_heap_phys_area,
         permissions: VirtualMemoryPermission::Read as usize
             | VirtualMemoryPermission::Write as usize,
         is_shared: true,

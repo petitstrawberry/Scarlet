@@ -539,7 +539,7 @@ pub fn create_bootinfo_from_fdt(cpu_id: usize, relocated_fdt_addr: usize) -> Boo
         cpu_id,
         cpu_count,
         usable_memory,
-        usable_memory,
+        dram_area,
         relocated_initramfs,
         hhdm_offset,
         cmdline,

@@ -306,7 +306,7 @@ use sched::scheduler::get_scheduler;
 use task::new_user_task;
 use timer::get_kernel_timer;
 use vm::{
-    boot::switch_to_boot_page_table, kernel_vm_init, phys_to_virt, set_hhdm_offset,
+    boot::switch_to_boot_page_table, kernel_vm_init, phys_to_virt, transition_kernel_memory_layout,
     vmem::MemoryArea,
 };
 
@@ -316,7 +316,7 @@ use vm::{
 fn panic(info: &core::panic::PanicInfo) -> ! {
     use arch::instruction::idle;
 
-    crate::println!("[Scarlet Kernel] panic: {}", info);
+    crate::early_println!("[Scarlet Kernel] panic: {}", info);
 
     // if let Some(task) = get_scheduler().get_current_task(get_cpu().get_cpuid()) {
     //     task.exit(1); // Exit the task with error code 1
@@ -580,7 +580,14 @@ pub extern "C" fn start_kernel(boot_info: &BootInfo) -> ! {
     crate::earlyfb::deactivate();
     switch_to_boot_page_table(direct_map_paddr, boot_info.initramfs_paddr, heap_paddr);
 
-    set_hhdm_offset(SCARLET_HHDM_BASE);
+    transition_kernel_memory_layout(
+        SCARLET_HHDM_BASE,
+        direct_map_paddr.start,
+        direct_map_paddr.end,
+        heap_paddr.start,
+        KERNEL_HEAP_BASE,
+        heap_size,
+    );
     mem::pmm::fixup_hhdm_offset(hhdm_offset, SCARLET_HHDM_BASE);
 
     if let DeviceSource::Fdt(relocated_fdt_paddr) = boot_info.device_source {

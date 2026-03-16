@@ -5,7 +5,7 @@ use limine::request::{
     MemoryMapRequest, ModuleRequest, RequestsEndMarker, RequestsStartMarker,
 };
 
-use crate::vm::addr::virt_to_phys;
+use crate::vm::addr::boot_virt_to_phys;
 use crate::vm::vmem::MemoryArea;
 
 #[unsafe(link_section = ".limine_requests_start")]
@@ -78,11 +78,33 @@ pub fn select_usable_region(memmap: &[&Entry]) -> MemoryArea {
     best.expect("no usable Limine memmap region")
 }
 
+pub fn hhdm_physical_span(memmap: &[&Entry]) -> MemoryArea {
+    let mut start = usize::MAX;
+    let mut end = 0usize;
+
+    for entry in memmap {
+        if entry.length == 0 {
+            continue;
+        }
+
+        let entry_start = entry.base as usize;
+        let entry_end = (entry.base + entry.length - 1) as usize;
+        start = start.min(entry_start);
+        end = end.max(entry_end);
+    }
+
+    if start == usize::MAX {
+        panic!("no Limine memmap entries available for HHDM span");
+    }
+
+    MemoryArea::new(start, end)
+}
+
 pub fn module_area(
     module_response: Option<&'static limine::response::ModuleResponse>,
 ) -> Option<MemoryArea> {
     let file = module_response?.modules().first()?;
-    let start = virt_to_phys(file.addr() as usize);
+    let start = boot_virt_to_phys(file.addr() as usize);
     let end = start + file.size() as usize - 1;
     Some(MemoryArea::new(start, end))
 }

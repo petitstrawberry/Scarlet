@@ -1,5 +1,3 @@
-use core::arch::naked_asm;
-
 use crate::environment::STACK_SIZE;
 
 use limine::paging;
@@ -7,12 +5,12 @@ use limine::request::{BspHartidRequest, PagingModeRequest};
 
 use crate::boot::limine::{
     DTB_REQUEST, EXECUTABLE_ADDRESS_REQUEST, HHDM_REQUEST, MEMMAP_REQUEST, MODULE_REQUEST,
-    ensure_base_revision_supported, module_area, reserve_front, response, select_usable_region,
+    ensure_base_revision_supported, hhdm_physical_span, module_area, reserve_front, response,
+    select_usable_region,
 };
 use crate::device::fdt::{FdtManager, init_fdt, relocate_fdt};
 use crate::mem::{KERNEL_STACK, init_bss};
-use crate::vm::addr::{init_limine_addressing, phys_to_virt};
-use crate::vm::vmem::MemoryArea;
+use crate::vm::addr::{init_boot_direct_map_range, init_limine_addressing, phys_to_virt};
 use crate::{BootInfo, DeviceSource, start_kernel};
 
 static mut EARLY_BOOTINFO: Option<BootInfo> = None;
@@ -68,25 +66,20 @@ pub fn limine_entry() -> ! {
     init_fdt(dtb.dtb_ptr() as usize);
 
     let usable_region = select_usable_region(memmap.entries());
+    let hhdm_phys_span = hhdm_physical_span(memmap.entries());
+    init_boot_direct_map_range(hhdm_phys_span.start, hhdm_phys_span.end);
     let hhdm_offset = hhdm.offset() as usize;
     let relocated_fdt = relocate_fdt(phys_to_virt(usable_region.start) as *mut u8);
     let relocated_fdt_paddr = usable_region.start;
     let reserved_bytes = relocated_fdt.size();
     let usable_memory_paddr = reserve_front(usable_region, reserved_bytes);
-    let direct_map_paddr = usable_region;
+    let direct_map_paddr = hhdm_phys_span;
     let initramfs_paddr = module_area(MODULE_REQUEST.get_response());
     let fdt_manager = FdtManager::get_manager();
     let cpu_count = fdt_manager.get_cpu_count().unwrap_or(1);
     let cmdline = fdt_manager
         .get_fdt()
         .and_then(|fdt| fdt.chosen().bootargs());
-
-    crate::early_println!(
-        "[limine] bootinfo usable_memory_paddr={:#x}..={:#x}",
-        usable_memory_paddr.start,
-        usable_memory_paddr.end
-    );
-    crate::early_println!("[limine] before init_user_context_from_fdt");
     let bootinfo = BootInfo::new(
         bsp.bsp_hartid() as usize,
         cpu_count,
@@ -99,9 +92,7 @@ pub fn limine_entry() -> ! {
     );
 
     crate::arch::init_user_context_from_fdt();
-    crate::early_println!("[limine] before init_boot_cpu");
     crate::arch::riscv64::boot::init_boot_cpu(bootinfo.cpu_id);
-    crate::early_println!("[limine] before stack handoff");
 
     unsafe {
         let stack_top = (&raw const KERNEL_STACK) as *const _ as usize + STACK_SIZE;
