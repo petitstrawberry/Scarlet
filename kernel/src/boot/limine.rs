@@ -126,3 +126,19 @@ pub fn reserve_front(area: MemoryArea, reserved_bytes: usize) -> MemoryArea {
 
     MemoryArea::new(reserved_end, area.end)
 }
+
+/// Get framebuffer physical memory area from Limine response.
+///
+/// Returns the framebuffer's physical address range for use in early console
+/// after page table transition.
+pub fn framebuffer_area(
+    fb_response: Option<&'static limine::response::FramebufferResponse>,
+) -> Option<MemoryArea> {
+    let fb = fb_response?.framebuffers().next()?;
+    let addr = fb.addr() as usize;
+    // Calculate size: pitch * height (pitch is bytes per row)
+    let size = fb.pitch() as usize * fb.height() as usize;
+    let start = boot_virt_to_phys(addr);
+    let end = start + size - 1;
+    Some(MemoryArea::new(start, end))
+}

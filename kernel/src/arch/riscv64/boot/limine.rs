@@ -89,6 +89,7 @@ pub fn limine_entry() -> ! {
         hhdm_offset,
         cmdline,
         DeviceSource::Fdt(relocated_fdt_paddr),
+        None, // RISC-V uses SBI debug console, not framebuffer
     );
 
     crate::arch::init_user_context_from_fdt();

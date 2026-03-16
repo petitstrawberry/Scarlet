@@ -2,9 +2,9 @@ use core::arch::{asm, naked_asm};
 use core::mem::MaybeUninit;
 
 use crate::boot::limine::{
-    DTB_REQUEST, EXECUTABLE_ADDRESS_REQUEST, HHDM_REQUEST, MEMMAP_REQUEST, MODULE_REQUEST,
-    ensure_base_revision_supported, hhdm_physical_span, module_area, reserve_front, response,
-    select_usable_region,
+    DTB_REQUEST, EXECUTABLE_ADDRESS_REQUEST, FRAMEBUFFER_REQUEST, HHDM_REQUEST, MEMMAP_REQUEST,
+    MODULE_REQUEST, ensure_base_revision_supported, framebuffer_area, hhdm_physical_span,
+    module_area, reserve_front, response, select_usable_region,
 };
 use crate::device::fdt::{FdtManager, init_fdt, relocate_fdt};
 use crate::environment::STACK_SIZE;
@@ -77,6 +77,7 @@ pub extern "C" fn limine_entry() -> ! {
         .get_fdt()
         .and_then(|fdt| fdt.chosen().bootargs());
     let cpu_id = current_cpu_id();
+    let framebuffer_paddr = framebuffer_area(FRAMEBUFFER_REQUEST.get_response());
 
     let bootinfo = BootInfo::new(
         cpu_id,
@@ -87,6 +88,7 @@ pub extern "C" fn limine_entry() -> ! {
         hhdm_offset,
         cmdline,
         DeviceSource::Fdt(relocated_fdt_paddr),
+        framebuffer_paddr,
     );
 
     crate::arch::init_user_context_from_fdt();

@@ -210,6 +210,7 @@ pub fn switch_to_boot_page_table(
     direct_map_paddr: MemoryArea,
     initramfs_paddr: Option<MemoryArea>,
     heap_paddr: MemoryArea,
+    framebuffer_paddr: Option<MemoryArea>,
 ) {
     unsafe extern "C" {
         static __KERNEL_SPACE_START: usize;
@@ -288,6 +289,27 @@ pub fn switch_to_boot_page_table(
                 root,
                 initramfs_area,
                 initramfs_phys_area,
+                VirtualMemoryPermission::Read as usize | VirtualMemoryPermission::Write as usize,
+            );
+        }
+    }
+
+    if let Some(fb) = framebuffer_paddr {
+        let fb_phys_area = MemoryArea {
+            start: align_down(fb.start, PAGE_SIZE),
+            end: align_up(fb.end + 1, PAGE_SIZE) - 1,
+        };
+        if !is_in_area(direct_map_phys_area, fb_phys_area.start)
+            || !is_in_area(direct_map_phys_area, fb_phys_area.end)
+        {
+            let fb_area = MemoryArea {
+                start: SCARLET_HHDM_BASE + fb_phys_area.start,
+                end: SCARLET_HHDM_BASE + fb_phys_area.end,
+            };
+            boot_map_range(
+                root,
+                fb_area,
+                fb_phys_area,
                 VirtualMemoryPermission::Read as usize | VirtualMemoryPermission::Write as usize,
             );
         }

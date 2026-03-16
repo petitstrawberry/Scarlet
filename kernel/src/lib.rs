@@ -397,6 +397,9 @@ pub struct BootInfo {
     /// Source of device information for hardware discovery
     /// Determines how the kernel will enumerate and initialize devices
     pub device_source: DeviceSource,
+    /// Optional framebuffer physical memory area
+    /// Used for early console output before graphics subsystem initialization
+    pub framebuffer_paddr: Option<MemoryArea>,
 }
 
 impl BootInfo {
@@ -411,6 +414,7 @@ impl BootInfo {
     /// * `hhdm_offset` - HHDM offset for VA = PA + offset
     /// * `cmdline` - Optional kernel command line parameters
     /// * `device_source` - Source of device information for hardware discovery
+    /// * `framebuffer_paddr` - Optional framebuffer physical memory area
     ///
     /// # Returns
     ///
@@ -424,6 +428,7 @@ impl BootInfo {
         hhdm_offset: usize,
         cmdline: Option<&'static str>,
         device_source: DeviceSource,
+        framebuffer_paddr: Option<MemoryArea>,
     ) -> Self {
         Self {
             cpu_id,
@@ -434,6 +439,7 @@ impl BootInfo {
             hhdm_offset,
             cmdline,
             device_source,
+            framebuffer_paddr,
         }
     }
 
@@ -576,9 +582,12 @@ pub extern "C" fn start_kernel(boot_info: &BootInfo) -> ! {
     let heap_paddr = MemoryArea::new(heap_start_phys, heap_end_phys);
 
     early_println!("[Scarlet Kernel] Building Scarlet boot page table...");
-    #[cfg(target_arch = "aarch64")]
-    crate::earlyfb::deactivate();
-    switch_to_boot_page_table(direct_map_paddr, boot_info.initramfs_paddr, heap_paddr);
+    switch_to_boot_page_table(
+        direct_map_paddr,
+        boot_info.initramfs_paddr,
+        heap_paddr,
+        boot_info.framebuffer_paddr,
+    );
 
     transition_kernel_memory_layout(
         SCARLET_HHDM_BASE,
@@ -589,6 +598,7 @@ pub extern "C" fn start_kernel(boot_info: &BootInfo) -> ! {
         heap_size,
     );
     mem::pmm::fixup_hhdm_offset(hhdm_offset, SCARLET_HHDM_BASE);
+    crate::earlyfb::fixup_hhdm_offset(SCARLET_HHDM_BASE);
 
     if let DeviceSource::Fdt(relocated_fdt_paddr) = boot_info.device_source {
         crate::device::fdt::init_fdt(phys_to_virt(relocated_fdt_paddr));
