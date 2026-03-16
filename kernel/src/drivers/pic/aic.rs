@@ -45,7 +45,7 @@ const AIC_INFO: usize = 0x0004;
 const AIC_CONFIG: usize = 0x0010;
 /// AIC WHOAMI register - returns current CPU ID
 const AIC_WHOAMI: usize = 0x2000;
-/// AIC Event register - event type in [31:16], event number in [15:0]
+/// AIC Event register - DIE in [31:24], type in [23:16], number in [15:0]
 const AIC_EVENT: usize = 0x2004;
 /// AIC IPI Send register
 const AIC_IPI_SEND: usize = 0x2008;
@@ -323,6 +323,10 @@ impl ExternalInterruptController for Aic {
         let cpu_id = self.whoami();
         crate::early_println!("[AIC] init: WHOAMI={}", cpu_id);
 
+        // Unmask IPIs for the current CPU so they can be delivered
+        self.unmask_ipis();
+        crate::early_println!("[AIC] init: IPIs unmasked for CPU {}", cpu_id);
+
         Ok(())
     }
 
@@ -423,8 +427,16 @@ impl ExternalInterruptController for Aic {
         let event = unsafe { mmio::read32(self.reg_addr(AIC_EVENT)) };
 
         // Extract event type and number
-        let event_type = (event >> 16) & 0xFFFF;
+        // EVENT format: [31:24]=DIE, [23:16]=TYPE, [15:0]=NUMBER
+        let event_die = (event >> 24) & 0xFF;
+        let event_type = (event >> 16) & 0xFF;
         let event_num = event & 0xFFFF;
+
+        // For AIC v1 (single-die), DIE should always be 0
+        // If DIE is non-zero on v1 hardware, treat as spurious
+        if event_die != 0 {
+            return Ok(None);
+        }
 
         match event_type {
             AIC_EVENT_TYPE_HW => {
