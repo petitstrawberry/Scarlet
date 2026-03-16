@@ -16,13 +16,14 @@ impl OomHandler for DynamicHeapHandler {
 
         let addr = crate::mem::pmm::alloc_contiguous_pages(pages_needed);
         match addr {
-            Some(start) => {
+            Some(start_paddr) => {
                 let size = pages_needed * PAGE_SIZE;
+                let start = crate::vm::phys_to_virt(start_paddr);
                 let span = Span::from_base_size(start as *mut u8, size);
                 match unsafe { talc.claim(span) } {
                     Ok(_) => Ok(()),
                     Err(_) => {
-                        crate::mem::pmm::free_contiguous_pages(start, pages_needed);
+                        crate::mem::pmm::free_contiguous_pages(start_paddr, pages_needed);
                         Err(())
                     }
                 }

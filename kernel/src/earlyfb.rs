@@ -207,3 +207,8 @@ pub fn write_str(s: &str) {
 pub fn is_initialized() -> bool {
     EARLY_CONSOLE.lock().initialized
 }
+
+pub fn deactivate() {
+    let mut console = EARLY_CONSOLE.lock();
+    console.initialized = false;
+}

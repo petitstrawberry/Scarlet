@@ -70,6 +70,7 @@ pub fn limine_entry() -> ! {
     let usable_region = select_usable_region(memmap.entries());
     let hhdm_offset = hhdm.offset() as usize;
     let relocated_fdt = relocate_fdt(phys_to_virt(usable_region.start) as *mut u8);
+    let relocated_fdt_paddr = usable_region.start;
     let reserved_bytes = relocated_fdt.size();
     let usable_memory_paddr = reserve_front(usable_region, reserved_bytes);
     let direct_map_paddr = usable_region;
@@ -94,7 +95,7 @@ pub fn limine_entry() -> ! {
         initramfs_paddr,
         hhdm_offset,
         cmdline,
-        DeviceSource::Fdt(relocated_fdt.start),
+        DeviceSource::Fdt(relocated_fdt_paddr),
     );
 
     crate::arch::init_user_context_from_fdt();

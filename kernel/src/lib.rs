@@ -288,7 +288,7 @@ pub mod test;
 extern crate alloc;
 use alloc::string::ToString;
 use device::manager::{DeviceManager, DriverPriority};
-use environment::PAGE_SIZE;
+use environment::{KERNEL_HEAP_BASE, KERNEL_HEAP_SIZE, PAGE_SIZE, SCARLET_HHDM_BASE};
 use initcall::{call_initcalls, driver::driver_initcall_call, early::early_initcall_call};
 
 const MIN_HEAP_SIZE: usize = 32 * 1024;
@@ -301,11 +301,14 @@ use crate::{
 };
 use arch::get_cpu;
 use core::sync::atomic::{Ordering, fence};
-use mem::allocator::{add_heap_region, init_heap};
+use mem::allocator::init_heap;
 use sched::scheduler::get_scheduler;
 use task::new_user_task;
 use timer::get_kernel_timer;
-use vm::{kernel_vm_init, phys_to_virt, vmem::MemoryArea};
+use vm::{
+    boot::switch_to_boot_page_table, kernel_vm_init, phys_to_virt, set_hhdm_offset,
+    vmem::MemoryArea,
+};
 
 /// A panic handler is required in Rust, this is probably the most basic one possible
 #[cfg(not(test))]
@@ -331,7 +334,7 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
 /// This enum captures the source and relevant parameters for device discovery.
 #[derive(Debug, Clone, Copy)]
 pub enum DeviceSource {
-    /// Flattened Device Tree (FDT) source with relocated FDT address
+    /// Flattened Device Tree (FDT) source
     /// Used by RISC-V, ARM, and other architectures that support device trees
     Fdt(usize),
     /// Unified Extensible Firmware Interface (UEFI) source
@@ -565,22 +568,33 @@ pub extern "C" fn start_kernel(boot_info: &BootInfo) -> ! {
     }
 
     early_println!("[Scarlet Kernel] Allocating initial heap from PMM...");
-    let heap_size = 512 * 1024 * 1024;
+    let heap_size = KERNEL_HEAP_SIZE;
     let heap_pages = heap_size / PAGE_SIZE;
     let heap_start_phys =
         mem::pmm::alloc_contiguous_pages(heap_pages).expect("Failed to allocate heap from PMM");
     let heap_end_phys = heap_start_phys + heap_size - 1;
-    let heap_start = phys_to_virt(heap_start_phys);
-    let heap_end = phys_to_virt(heap_end_phys);
+    let heap_paddr = MemoryArea::new(heap_start_phys, heap_end_phys);
+
+    early_println!("[Scarlet Kernel] Building Scarlet boot page table...");
+    #[cfg(target_arch = "aarch64")]
+    crate::earlyfb::deactivate();
+    switch_to_boot_page_table(direct_map_paddr, boot_info.initramfs_paddr, heap_paddr);
+
+    set_hhdm_offset(SCARLET_HHDM_BASE);
+    mem::pmm::fixup_hhdm_offset(hhdm_offset, SCARLET_HHDM_BASE);
+
+    if let DeviceSource::Fdt(relocated_fdt_paddr) = boot_info.device_source {
+        crate::device::fdt::init_fdt(phys_to_virt(relocated_fdt_paddr));
+    }
 
     early_println!("[Scarlet Kernel] Initializing heap...");
-    unsafe { init_heap(heap_start, heap_size) };
+    unsafe { init_heap(KERNEL_HEAP_BASE, heap_size) };
 
     fence(Ordering::SeqCst);
     early_println!(
         "[Scarlet Kernel] Heap initialized at {:#x} - {:#x}",
-        heap_start,
-        heap_end
+        KERNEL_HEAP_BASE,
+        KERNEL_HEAP_BASE + heap_size - 1
     );
 
     {
@@ -597,12 +611,7 @@ pub extern "C" fn start_kernel(boot_info: &BootInfo) -> ! {
     driver_initcall_call();
 
     early_println!("[Scarlet Kernel] Initializing Virtual Memory...");
-    kernel_vm_init(
-        usable_memory_paddr,
-        direct_map_paddr,
-        boot_info.initramfs_paddr,
-        hhdm_offset,
-    );
+    kernel_vm_init(direct_map_paddr, boot_info.initramfs_paddr, heap_paddr);
     /* After this point, we can use the heap and virtual memory */
     /* We will also be restricted to the kernel address space */
 

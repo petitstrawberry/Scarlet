@@ -2,6 +2,18 @@
 //!
 //! This module provides functions for converting between physical and virtual addresses.
 //!
+//! # Design
+//!
+//! The HHDM (Higher Half Direct Map) offset is stored in an `AtomicUsize` so it can be
+//! updated after the kernel switches from the bootloader's page tables to its own.
+//! During early boot (before the switch), `phys_to_virt` uses the Limine-provided offset.
+//! After switching to Scarlet's own page tables, `set_hhdm_offset()` is called to point
+//! translations at `SCARLET_HHDM_BASE`.
+//!
+//! For pre-switch page table construction code that must NOT go through the runtime
+//! `phys_to_virt` path, use `boot_phys_to_virt` which reads the boot-time offset
+//! directly from the immutable `BOOT_HHDM_OFFSET`.
+//!
 //! # Usage
 //!
 //! ```rust,ignore
@@ -17,17 +29,19 @@
 //! let vaddr_back = phys_to_virt(paddr);
 //! ```
 
+use core::sync::atomic::{AtomicUsize, Ordering};
+
 use spin::Once;
 
+/// Kernel image layout — immutable once set at boot.
 #[derive(Clone, Copy, Debug)]
-struct AddressLayout {
-    hhdm_offset: usize,
+struct KernelLayout {
     kernel_phys_base: usize,
     kernel_virt_base: usize,
     kernel_image_size: usize,
 }
 
-impl AddressLayout {
+impl KernelLayout {
     #[inline(always)]
     fn kernel_virt_end(&self) -> usize {
         self.kernel_virt_base + self.kernel_image_size
@@ -42,50 +56,115 @@ impl AddressLayout {
     fn contains_kernel_virt(&self, vaddr: usize) -> bool {
         vaddr >= self.kernel_virt_base && vaddr < self.kernel_virt_end()
     }
-
-    #[inline(always)]
-    fn contains_hhdm_virt(&self, vaddr: usize) -> bool {
-        vaddr >= self.hhdm_offset
-    }
 }
 
-static ADDRESS_LAYOUT: Once<AddressLayout> = Once::new();
+/// Kernel image layout (linker-placed addresses). Set once at boot, never changes.
+static KERNEL_LAYOUT: Once<KernelLayout> = Once::new();
+
+/// Runtime HHDM offset.  Initially set to the bootloader's value, then updated to
+/// `SCARLET_HHDM_BASE` after the kernel switches to its own page tables.
+///
+/// 0 = not yet initialized (pre-init_limine_addressing).
+static HHDM_OFFSET: AtomicUsize = AtomicUsize::new(0);
+
+/// Boot-time HHDM offset — the value Limine gave us.  Stored once and never modified.
+/// Used by `boot_phys_to_virt` during pre-switch page table construction so that code
+/// does not depend on the mutable `HHDM_OFFSET`.
+static BOOT_HHDM_OFFSET: Once<usize> = Once::new();
 
 #[inline(always)]
-fn layout() -> Option<&'static AddressLayout> {
-    ADDRESS_LAYOUT.get()
+fn kernel_layout() -> Option<&'static KernelLayout> {
+    KERNEL_LAYOUT.get()
 }
 
+/// Initialize address translation with the Limine-provided layout.
+///
+/// Must be called exactly once during early boot, before any `phys_to_virt` calls.
 pub fn init_limine_addressing(
     hhdm_offset: usize,
     kernel_phys_base: usize,
     kernel_virt_base: usize,
     kernel_image_size: usize,
 ) {
-    ADDRESS_LAYOUT.call_once(|| AddressLayout {
-        hhdm_offset,
+    KERNEL_LAYOUT.call_once(|| KernelLayout {
         kernel_phys_base,
         kernel_virt_base,
         kernel_image_size,
     });
+    BOOT_HHDM_OFFSET.call_once(|| hhdm_offset);
+    HHDM_OFFSET.store(hhdm_offset, Ordering::Release);
 }
 
+/// Returns `true` once `init_limine_addressing` has been called.
 #[inline(always)]
 pub fn address_translation_ready() -> bool {
-    layout().is_some()
+    HHDM_OFFSET.load(Ordering::Relaxed) != 0 && kernel_layout().is_some()
+}
+
+/// Update the runtime HHDM offset.
+///
+/// Called exactly once after switching to Scarlet's own page tables, so that subsequent
+/// `phys_to_virt` / `virt_to_phys` calls use the new direct-map base.
+///
+/// # Safety
+///
+/// The caller must ensure that the new page tables are active and the new offset is
+/// correct before calling this.  All existing HHDM-derived pointers (PMM metadata,
+/// etc.) must be fixed up before or after this call.
+pub fn set_hhdm_offset(new_offset: usize) {
+    HHDM_OFFSET.store(new_offset, Ordering::Release);
+}
+
+/// Returns the current runtime HHDM offset.
+#[inline(always)]
+pub fn get_hhdm_offset() -> usize {
+    HHDM_OFFSET.load(Ordering::Acquire)
+}
+
+/// Returns the boot-time (Limine) HHDM offset.
+///
+/// This is the immutable value from the bootloader.  Use this in pre-switch code
+/// (e.g., building Scarlet's own page tables) where you need the original mapping.
+#[inline(always)]
+pub fn get_boot_hhdm_offset() -> usize {
+    *BOOT_HHDM_OFFSET
+        .get()
+        .expect("boot HHDM offset not initialized")
+}
+
+/// Convert physical address to virtual address using the **boot-time** HHDM offset.
+///
+/// This function is for use during pre-switch page table construction ONLY.
+/// It always uses the Limine-provided offset regardless of whether `set_hhdm_offset`
+/// has been called.
+///
+/// After the PT switch, use `phys_to_virt` instead.
+#[inline(always)]
+pub fn boot_phys_to_virt(paddr: usize) -> usize {
+    let offset = get_boot_hhdm_offset();
+    paddr.checked_add(offset).unwrap_or_else(|| {
+        panic!(
+            "boot_phys_to_virt overflow: paddr={:#x} boot_hhdm_offset={:#x}",
+            paddr, offset
+        )
+    })
 }
 
 /// Converts a virtual address to a physical address.
 #[inline(always)]
 pub fn virt_to_phys(vaddr: usize) -> usize {
-    if let Some(layout) = layout() {
-        if layout.contains_kernel_virt(vaddr) {
-            return layout.kernel_phys_base + (vaddr - layout.kernel_virt_base);
-        }
-        if layout.contains_hhdm_virt(vaddr) {
-            return vaddr - layout.hhdm_offset;
+    // Kernel image region — fixed offset, never changes
+    if let Some(kl) = kernel_layout() {
+        if kl.contains_kernel_virt(vaddr) {
+            return kl.kernel_phys_base + (vaddr - kl.kernel_virt_base);
         }
     }
+    // HHDM region
+    let offset = HHDM_OFFSET.load(Ordering::Acquire);
+    if offset != 0 && vaddr >= offset {
+        return vaddr - offset;
+    }
+    // Fallback: identity
     vaddr
 }
 
@@ -94,9 +173,6 @@ pub fn virt_to_phys(vaddr: usize) -> usize {
 /// **Note:** This function is specifically intended for producing addresses in
 /// the HHDM (Higher Half Direct Map) / direct-map region. It is **not** valid
 /// for obtaining arbitrary kernel virtual addresses (e.g., kernel image VAs).
-///
-/// Currently assumes identity mapping (VA == PA).
-/// When Higher Half Kernel is enabled, this will add HHDM_OFFSET.
 ///
 /// # Arguments
 ///
@@ -107,14 +183,16 @@ pub fn virt_to_phys(vaddr: usize) -> usize {
 /// Direct-map virtual address corresponding to the given physical address
 #[inline(always)]
 pub fn phys_to_virt(paddr: usize) -> usize {
-    if let Some(layout) = layout() {
-        return paddr.checked_add(layout.hhdm_offset).unwrap_or_else(|| {
+    let offset = HHDM_OFFSET.load(Ordering::Acquire);
+    if offset != 0 {
+        return paddr.checked_add(offset).unwrap_or_else(|| {
             panic!(
                 "phys_to_virt overflow: paddr={:#x} hhdm_offset={:#x}",
-                paddr, layout.hhdm_offset
+                paddr, offset
             )
         });
     }
+    // Not yet initialized — identity
     paddr
 }
 
@@ -154,18 +232,15 @@ pub fn kernel_virt_to_phys(vaddr: usize) -> usize {
 
 #[inline(always)]
 pub fn phys_to_kernel_image_virt(paddr: usize) -> usize {
-    if let Some(layout) = layout() {
-        if paddr >= layout.kernel_phys_base && paddr < layout.kernel_phys_end() {
-            return layout.kernel_virt_base + (paddr - layout.kernel_phys_base);
+    if let Some(kl) = kernel_layout() {
+        if paddr >= kl.kernel_phys_base && paddr < kl.kernel_phys_end() {
+            return kl.kernel_virt_base + (paddr - kl.kernel_phys_base);
         }
     }
     paddr
 }
 
 /// Checks if the given virtual address is in the direct mapping region.
-///
-/// With identity mapping, all addresses are in the direct mapping region.
-/// When Higher Half is enabled, this will check if the address is in HHDM range.
 ///
 /// # Arguments
 ///
@@ -176,8 +251,9 @@ pub fn phys_to_kernel_image_virt(paddr: usize) -> usize {
 /// `true` if the address is in the direct mapping region
 #[inline(always)]
 pub fn is_direct_mapped(vaddr: usize) -> bool {
-    if let Some(layout) = layout() {
-        return layout.contains_hhdm_virt(vaddr);
+    let offset = HHDM_OFFSET.load(Ordering::Relaxed);
+    if offset != 0 {
+        return vaddr >= offset;
     }
     true
 }
