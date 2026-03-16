@@ -220,19 +220,18 @@ pub fn deactivate() {
 ///
 /// # Arguments
 ///
+/// * `old_hhdm_base` - The bootloader's HHDM base address (from BootInfo.hhdm_offset)
 /// * `new_hhdm_base` - The new HHDM base address (e.g., `SCARLET_HHDM_BASE`)
-pub fn fixup_hhdm_offset(new_hhdm_base: usize) {
+pub fn fixup_hhdm_offset(old_hhdm_base: usize, new_hhdm_base: usize) {
     let mut console = EARLY_CONSOLE.lock();
     if !console.initialized || console.addr == 0 {
         return;
     }
 
-    let limine_hhdm_base = 0xffff_8000_0000_0000usize;
-
     if console.addr >= new_hhdm_base {
         return;
     }
 
-    let paddr = console.addr.saturating_sub(limine_hhdm_base);
+    let paddr = console.addr.saturating_sub(old_hhdm_base);
     console.addr = new_hhdm_base.saturating_add(paddr);
 }

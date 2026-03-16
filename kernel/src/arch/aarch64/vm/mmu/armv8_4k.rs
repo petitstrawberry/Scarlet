@@ -314,6 +314,29 @@ impl PageTable {
         }
     }
 
+    pub fn switch_for_boot(&self, asid: u16) {
+        let ttbr_val = self.get_val_for_ttbr(asid);
+        crate::arch::aarch64::get_cpu().set_kernel_ttbr0(ttbr_val);
+        unsafe {
+            asm!(
+                "msr mair_el1, {mair}",
+                "msr tcr_el1, {tcr}",
+                "isb",
+                "dsb ishst",
+                "msr ttbr1_el1, {ttbr}",
+                "msr ttbr0_el1, {ttbr}",
+                "isb",
+                "tlbi vmalle1is",
+                "dsb ish",
+                "isb",
+                mair = in(reg) SCARLET_MAIR_EL1,
+                tcr = in(reg) SCARLET_TCR_EL1,
+                ttbr = in(reg) ttbr_val,
+                options(nostack),
+            );
+        }
+    }
+
     /// Get TTBR value (like RISC-V's get_val_for_satp())
     pub fn get_val_for_ttbr(&self, asid: u16) -> u64 {
         let baddr = (virt_to_phys(self as *const _ as usize) as u64) & 0xffffffffffff;

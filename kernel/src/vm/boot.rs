@@ -315,14 +315,7 @@ pub fn switch_to_boot_page_table(
         }
     }
 
-    #[cfg(target_arch = "aarch64")]
     unsafe {
-        (*root).switch_ttbr1(BOOT_ASID);
-        (*root).switch(BOOT_ASID);
-    }
-
-    #[cfg(target_arch = "riscv64")]
-    unsafe {
-        (*root).switch(BOOT_ASID);
+        (*root).switch_for_boot(BOOT_ASID);
     }
 }

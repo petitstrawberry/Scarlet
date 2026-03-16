@@ -300,7 +300,7 @@ use crate::{
     interrupt::InterruptManager,
 };
 use arch::get_cpu;
-use core::sync::atomic::{Ordering, fence};
+use core::sync::atomic::{Ordering, compiler_fence, fence};
 use mem::allocator::init_heap;
 use sched::scheduler::get_scheduler;
 use task::new_user_task;
@@ -582,12 +582,22 @@ pub extern "C" fn start_kernel(boot_info: &BootInfo) -> ! {
     let heap_paddr = MemoryArea::new(heap_start_phys, heap_end_phys);
 
     early_println!("[Scarlet Kernel] Building Scarlet boot page table...");
+    // crate::earlyfb::deactivate();
     switch_to_boot_page_table(
         direct_map_paddr,
         boot_info.initramfs_paddr,
         heap_paddr,
         boot_info.framebuffer_paddr,
     );
+
+    // Fix PMM metadata pointers immediately after page table switch
+    // Must be done before any operation that might touch PMM data structures
+    mem::pmm::fixup_hhdm_offset(hhdm_offset, SCARLET_HHDM_BASE);
+
+    fence(Ordering::SeqCst);
+    compiler_fence(Ordering::SeqCst); // Ensure PMM fixup is visible before proceeding
+
+    crate::earlyfb::fixup_hhdm_offset(hhdm_offset, SCARLET_HHDM_BASE);
 
     transition_kernel_memory_layout(
         SCARLET_HHDM_BASE,
@@ -597,8 +607,8 @@ pub extern "C" fn start_kernel(boot_info: &BootInfo) -> ! {
         KERNEL_HEAP_BASE,
         heap_size,
     );
-    mem::pmm::fixup_hhdm_offset(hhdm_offset, SCARLET_HHDM_BASE);
-    crate::earlyfb::fixup_hhdm_offset(SCARLET_HHDM_BASE);
+
+    fence(Ordering::SeqCst);
 
     if let DeviceSource::Fdt(relocated_fdt_paddr) = boot_info.device_source {
         crate::device::fdt::init_fdt(phys_to_virt(relocated_fdt_paddr));
