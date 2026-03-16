@@ -4,11 +4,7 @@
 
 use core::arch::asm;
 
-use crate::{
-    arch::get_cpu,
-    arch::interrupt,
-    interrupt::{InterruptManager, controllers::LocalInterruptType},
-};
+use crate::{arch::get_cpu, arch::interrupt, interrupt::InterruptManager};
 
 pub fn timer_init() {
     // Local controller registration happens via early initcall.
@@ -87,26 +83,20 @@ impl ArchTimer {
         // Program the next event before unmasking interrupts.
         self.set_timer(next);
 
-        // Only perform GIC configuration on first start
+        // Only perform interrupt controller configuration on first start
         if !self.initialized {
             // CRITICAL: Mask IRQs before configuring the interrupt controller to avoid deadlock
             // (an interrupt firing during InterruptManager access could try to re-lock it).
             interrupt::disable_external_interrupts();
 
-            // Enable timer at two levels:
-            // - core-local interrupt (InterruptManager local controller)
-            // - external PPI line in the GIC distributor
-            interrupt::enable_core_local_interrupt(LocalInterruptType::Timer)
-                .unwrap_or_else(|e| panic!("Failed to enable local timer interrupt: {e}"));
-
-            interrupt::enable_external_interrupt_line(
-                crate::drivers::pic::arm_generic_timer::CNTV_PPI_IRQ,
-            )
-            .unwrap_or_else(|e| panic!("Failed to enable timer PPI in GIC: {e}"));
+            // Enable timer interrupt at both local and external controller levels.
+            // This is platform-agnostic: GIC enables PPI 27, AIC gracefully ignores it.
+            interrupt::enable_arch_timer_interrupt()
+                .unwrap_or_else(|e| panic!("Failed to enable timer interrupt: {e}"));
 
             // CRITICAL: Set initialized flag BEFORE unmasking interrupts
             // Otherwise, if an interrupt fires immediately after unmask, it will
-            // see initialized=false and reconfigure GIC again
+            // see initialized=false and reconfigure again
             self.initialized = true;
 
             // Ensure IRQ is unmasked at CPU level (first time only)
@@ -123,13 +113,12 @@ impl ArchTimer {
     pub fn stop(&mut self) {
         self.running = false;
 
+        // Disable timer interrupt at both local and external controller levels.
+        // This is platform-agnostic: GIC disables PPI 27, AIC gracefully ignores it.
+        let _ = interrupt::disable_arch_timer_interrupt();
+
         InterruptManager::with_manager(|mgr| {
             let cpu_id = get_cpu().get_cpuid() as u32;
-            let _ = mgr.disable_local_interrupt(cpu_id, LocalInterruptType::Timer);
-            let _ = mgr.disable_external_interrupt(
-                crate::drivers::pic::arm_generic_timer::CNTV_PPI_IRQ,
-                cpu_id,
-            );
             let _ = mgr.set_timer(cpu_id, u64::MAX);
         });
     }

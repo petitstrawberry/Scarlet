@@ -5,7 +5,7 @@
 use core::arch::asm;
 
 use crate::arch::get_cpu;
-use crate::interrupt::{InterruptManager, controllers::LocalInterruptType};
+use crate::interrupt::{InterruptError, InterruptManager, controllers::LocalInterruptType};
 
 pub fn interrupt_init() {
     // TODO: Initialize AArch64 interrupts
@@ -125,6 +125,65 @@ pub fn disable_timer_source_interrupt() {
         asm!("msr cntv_ctl_el0, {0}", in(reg) ctl, options(nostack));
         asm!("isb", options(nostack));
     }
+}
+
+/// Enable the architectural timer interrupt for the current CPU.
+///
+/// This is a platform-agnostic helper that:
+/// 1. Enables the timer at the local controller level (CNTV_CTL_EL0)
+/// 2. Attempts to enable the timer PPI at the external controller level
+///
+/// On GIC-based systems, the timer uses PPI 27 which must be enabled in the
+/// distributor. On Apple Silicon (AIC), the timer bypasses the AIC entirely
+/// (it's wired to FIQ), so the external enable gracefully fails and is ignored.
+pub fn enable_arch_timer_interrupt() -> Result<(), &'static str> {
+    let cpu_id = get_cpu().get_cpuid() as u32;
+
+    // Enable at local controller level (CNTV_CTL_EL0)
+    InterruptManager::with_manager(|mgr| {
+        mgr.enable_local_interrupt(cpu_id, LocalInterruptType::Timer)
+    })
+    .map_err(|_| "failed to enable local timer interrupt")?;
+
+    // Attempt to enable at external controller level (PPI 27)
+    // This succeeds on GIC, fails gracefully on AIC (timer uses FIQ, not AIC)
+    InterruptManager::with_manager(|mgr| {
+        mgr.enable_external_interrupt(crate::drivers::pic::arm_generic_timer::CNTV_PPI_IRQ, cpu_id)
+    })
+    .or_else(|e| {
+        // InvalidInterruptId means the external controller doesn't have this IRQ
+        // (e.g., AIC where timer bypasses the controller via FIQ)
+        if matches!(e, InterruptError::InvalidInterruptId) {
+            Ok(())
+        } else {
+            Err("failed to enable timer PPI in external controller")
+        }
+    })?;
+
+    Ok(())
+}
+
+/// Disable the architectural timer interrupt for the current CPU.
+pub fn disable_arch_timer_interrupt() -> Result<(), &'static str> {
+    let cpu_id = get_cpu().get_cpuid() as u32;
+
+    InterruptManager::with_manager(|mgr| {
+        mgr.disable_local_interrupt(cpu_id, LocalInterruptType::Timer)
+    })
+    .map_err(|_| "failed to disable local timer interrupt")?;
+
+    InterruptManager::with_manager(|mgr| {
+        mgr.disable_external_interrupt(crate::drivers::pic::arm_generic_timer::CNTV_PPI_IRQ, cpu_id)
+    })
+    .or_else(|e| {
+        if matches!(e, InterruptError::InvalidInterruptId) {
+            Ok(())
+        } else {
+            Err("failed to disable timer PPI in external controller")
+        }
+    })?;
+
+    Ok(())
 }
 
 pub fn with_interrupts_disabled<F, R>(f: F) -> R
