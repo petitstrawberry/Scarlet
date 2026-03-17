@@ -370,6 +370,14 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
             crate::early_println!("[S5L] probe: failed to enable interrupts: {}", e);
         } else {
             crate::early_println!("[S5L] probe: interrupts enabled");
+
+            if let Err(e) = InterruptManager::with_manager(|mgr| {
+                mgr.register_interrupt_device(interrupt_id, uart.clone())
+            }) {
+                crate::early_println!("[S5L] probe: failed to register interrupt device: {}", e);
+            } else {
+                crate::early_println!("[S5L] probe: interrupt device registered");
+            }
         }
     } else {
         crate::early_println!("[S5L] probe: no interrupt resource, polling mode");
