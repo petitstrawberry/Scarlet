@@ -196,6 +196,26 @@ impl DeviceManager {
         });
     }
 
+    fn mem_resource_from_region(
+        region: fdt::standard_nodes::MemoryRegion,
+    ) -> Option<PlatformDeviceResource> {
+        let start = region.starting_address as usize;
+        let size = region.size?;
+
+        if size == 0 {
+            return None;
+        }
+
+        let end = start.checked_add(size - 1)?;
+
+        Some(PlatformDeviceResource {
+            res_type: PlatformDeviceResourceType::MEM,
+            start,
+            end,
+            irq_metadata: None,
+        })
+    }
+
     /// Register a device with the manager
     ///
     /// # Arguments
@@ -511,13 +531,9 @@ impl DeviceManager {
         // Add memory regions
         if let Some(regions) = child.reg() {
             for region in regions {
-                let res = PlatformDeviceResource {
-                    res_type: PlatformDeviceResourceType::MEM,
-                    start: region.starting_address as usize,
-                    end: region.starting_address as usize + region.size.unwrap() - 1,
-                    irq_metadata: None, // No IRQ metadata for memory regions
-                };
-                resources.push(res);
+                if let Some(res) = Self::mem_resource_from_region(region) {
+                    resources.push(res);
+                }
             }
         }
 
@@ -940,5 +956,29 @@ mod tests {
         let manager = DeviceManager::new();
         let device = manager.get_device_by_name("non_existent");
         assert!(device.is_none());
+    }
+
+    #[test_case]
+    fn test_mem_resource_from_region_without_size() {
+        let region = fdt::standard_nodes::MemoryRegion {
+            starting_address: 0x1000 as *const u8,
+            size: None,
+        };
+
+        assert!(DeviceManager::mem_resource_from_region(region).is_none());
+    }
+
+    #[test_case]
+    fn test_mem_resource_from_region_with_size() {
+        let region = fdt::standard_nodes::MemoryRegion {
+            starting_address: 0x1000 as *const u8,
+            size: Some(0x100),
+        };
+
+        let resource = DeviceManager::mem_resource_from_region(region).unwrap();
+        assert_eq!(resource.start, 0x1000);
+        assert_eq!(resource.end, 0x10ff);
+        assert_eq!(resource.res_type, PlatformDeviceResourceType::MEM);
+        assert!(resource.irq_metadata.is_none());
     }
 }
