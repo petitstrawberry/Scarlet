@@ -1157,7 +1157,7 @@ impl Compositor {
         let src = &self.backbuffer[src_off..];
 
         self.framebuffer
-            .write_block_strided(x0 as u32, y0 as u32, w, h, src, stride as usize)
+            .write_block_bgra_strided(x0 as u32, y0 as u32, w, h, src, stride as usize)
             .map_err(|_| "Failed to write backbuffer")?;
 
         self.cursor.mark_drawn();
