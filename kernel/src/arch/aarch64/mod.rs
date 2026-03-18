@@ -92,15 +92,14 @@ pub fn first_switch_to_user(task: &mut Task) -> ! {
         panic!("Task has no kernel stack window");
     };
 
+    // Update trampoline-visible CPU struct.
+    let cpu = crate::arch::get_cpu();
     crate::println!(
         "[aarch64] CPU {}: First switch to user task PID {} with kernel SP {:#x}",
-        crate::arch::get_current_cpu_id(),
+        cpu.get_cpuid(),
         task.get_id(),
         kernel_sp,
     );
-
-    // Update trampoline-visible CPU struct.
-    let cpu = crate::arch::get_cpu();
     cpu.set_kernel_stack(kernel_sp);
     cpu.set_trap_handler(get_user_trap_handler());
     cpu.set_next_address_space(task.vm_manager.get_asid());
@@ -128,7 +127,7 @@ pub fn first_switch_to_user(task: &mut Task) -> ! {
     let trap_exit_addr = trampoline_base.wrapping_add(trap_exit_offset);
 
     // Program per-CPU arch pointer and VBAR to the trampoline right before the jump.
-    let cpu_id = get_current_cpu_id();
+    let cpu_id = cpu.get_cpuid();
     set_arch(crate::vm::get_trampoline_arch(cpu_id));
     set_trapvector(trampoline_base);
 
@@ -420,7 +419,7 @@ pub fn configure_user_entry(trapframe: &mut Trapframe, options: crate::arch::Use
     // Configure EL0 FP/SIMD access for the next user return.
     // DTB-driven runtime gating complements the build-time feature.
     if crate::arch::user_fpu_enabled() {
-        let cpu_id = crate::arch::get_current_cpu_id();
+        let cpu_id = get_cpu().get_cpuid();
         if let Some(task) = crate::sched::scheduler::get_scheduler().get_current_task(cpu_id) {
             crate::arch::fpu::set_user_fpu_enabled(task.vcpu.lock().fpu_used);
         } else {
@@ -472,19 +471,6 @@ pub fn get_cpu() -> &'static mut Aarch64 {
 
     // Kernel context always has access to this mapping.
     return unsafe { transmute(tpidr_el1) };
-}
-
-/// Get current CPU core ID from MPIDR_EL1 register
-pub fn get_current_cpu_id() -> usize {
-    let mpidr: u64;
-    unsafe {
-        asm!(
-            "mrs {0}, MPIDR_EL1",
-            out(reg) mpidr,
-        );
-    }
-    // Extract Aff0 field (bits 7:0) which contains the core ID
-    (mpidr & 0xFF) as usize
 }
 
 pub fn set_next_mode(_mode: crate::arch::Mode) {
@@ -723,7 +709,7 @@ mod tests {
         set_next_mode(Mode::User);
 
         // Test AArch64-specific CPU ID retrieval
-        let cpu_id = get_current_cpu_id();
+        let cpu_id = get_cpu().get_cpuid();
         assert!(
             cpu_id < crate::environment::MAX_NUM_CPUS,
             "AArch64 CPU ID should be within valid range"

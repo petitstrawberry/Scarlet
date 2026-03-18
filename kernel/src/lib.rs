@@ -316,7 +316,7 @@ use vm::{
 fn panic(info: &core::panic::PanicInfo) -> ! {
     use arch::instruction::idle;
 
-    crate::early_println!("[Scarlet Kernel] panic: {}", info);
+    crate::println!("[Scarlet Kernel] panic: {}", info);
 
     // if let Some(task) = get_scheduler().get_current_task(get_cpu().get_cpuid()) {
     //     task.exit(1); // Exit the task with error code 1
