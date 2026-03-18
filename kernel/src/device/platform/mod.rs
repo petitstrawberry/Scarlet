@@ -55,10 +55,48 @@
 pub mod resource;
 
 extern crate alloc;
+use alloc::string::String;
 use alloc::vec::Vec;
 
 use super::*;
 use resource::*;
+
+#[derive(Debug, Clone)]
+pub struct PlatformDeviceProperty {
+    name: String,
+    value: Vec<u8>,
+}
+
+impl PlatformDeviceProperty {
+    pub fn new(name: &str, value: &[u8]) -> Self {
+        Self {
+            name: name.into(),
+            value: value.to_vec(),
+        }
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn value(&self) -> &[u8] {
+        &self.value
+    }
+
+    pub fn as_usize(&self) -> Option<usize> {
+        match self.value.len() {
+            4 => Some(u32::from_be_bytes(self.value.as_slice().try_into().ok()?) as usize),
+            8 => Some(u64::from_be_bytes(self.value.as_slice().try_into().ok()?) as usize),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(&self) -> Option<&str> {
+        core::str::from_utf8(&self.value)
+            .ok()
+            .map(|value| value.trim_end_matches('\0'))
+    }
+}
 
 /// Struct representing platform device information.
 #[derive(Debug)]
@@ -67,6 +105,7 @@ pub struct PlatformDeviceInfo {
     id: usize,
     compatible: Vec<&'static str>,
     resources: Vec<PlatformDeviceResource>,
+    properties: Vec<PlatformDeviceProperty>,
 }
 
 /// Information about a platform device.
@@ -107,12 +146,14 @@ impl PlatformDeviceInfo {
         id: usize,
         compatible: Vec<&'static str>,
         resources: Vec<PlatformDeviceResource>,
+        properties: Vec<PlatformDeviceProperty>,
     ) -> Self {
         Self {
             name,
             id,
             compatible,
             resources,
+            properties,
         }
     }
 
@@ -124,6 +165,16 @@ impl PlatformDeviceInfo {
     ///
     pub fn get_resources(&self) -> &Vec<PlatformDeviceResource> {
         &self.resources
+    }
+
+    pub fn property(&self, name: &str) -> Option<&PlatformDeviceProperty> {
+        self.properties
+            .iter()
+            .find(|property| property.name() == name)
+    }
+
+    pub fn properties(&self) -> &[PlatformDeviceProperty] {
+        &self.properties
     }
 }
 
@@ -200,7 +251,8 @@ mod tests {
 
     #[test_case]
     fn test_probe_success() {
-        let device = PlatformDeviceInfo::new("test_device", 1, vec!["test,compatible"], vec![]);
+        let device =
+            PlatformDeviceInfo::new("test_device", 1, vec!["test,compatible"], vec![], vec![]);
         let driver = PlatformDeviceDriver::new(
             "test_driver",
             |device_info| {

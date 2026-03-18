@@ -51,6 +51,7 @@ use alloc::vec::Vec;
 use spin::mutex::Mutex;
 
 use crate::device::platform::PlatformDeviceInfo;
+use crate::device::platform::PlatformDeviceProperty;
 use crate::device::platform::resource::PlatformDeviceResource;
 use crate::device::platform::resource::PlatformDeviceResourceType;
 use crate::early_println;
@@ -423,9 +424,14 @@ impl DeviceManager {
 
         let mut idx = 0;
 
-        // Process each child node separately to reduce stack usage
         for child in parent_node.children() {
             self.process_single_device_node(child, priority, &mut idx);
+        }
+
+        if let Some(chosen_node) = fdt.find_node("/chosen") {
+            for child in chosen_node.children() {
+                self.process_single_device_node(child, priority, &mut idx);
+            }
         }
     }
 
@@ -458,10 +464,28 @@ impl DeviceManager {
 
         // Build resources separately to reduce stack usage
         let resources = self.build_minimal_resources(&child);
+        let properties = self.build_device_properties(&child);
 
         // Try to match with drivers
         let compatible_vec: alloc::vec::Vec<&str> = compatible_iter.collect();
-        self.try_match_and_probe_device(child, priority, idx, compatible_vec, resources);
+        self.try_match_and_probe_device(
+            child,
+            priority,
+            idx,
+            compatible_vec,
+            resources,
+            properties,
+        );
+    }
+
+    fn build_device_properties(
+        &self,
+        child: &fdt::node::FdtNode,
+    ) -> alloc::vec::Vec<PlatformDeviceProperty> {
+        child
+            .properties()
+            .map(|property| PlatformDeviceProperty::new(property.name, property.value))
+            .collect()
     }
 
     /// Build device resources with minimal stack allocation
@@ -673,6 +697,7 @@ impl DeviceManager {
         idx: &mut usize,
         compatible: alloc::vec::Vec<&str>,
         resources: alloc::vec::Vec<PlatformDeviceResource>,
+        properties: alloc::vec::Vec<PlatformDeviceProperty>,
     ) {
         let drivers = self.drivers.lock();
         if let Some(driver_list) = drivers.get(&priority) {
@@ -695,6 +720,7 @@ impl DeviceManager {
                         *idx,
                         static_compatible,
                         resources,
+                        properties,
                     ));
 
                     match driver.probe(&*device) {
