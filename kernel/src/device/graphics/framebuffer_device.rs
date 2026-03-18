@@ -20,8 +20,8 @@ use core::any::Any;
 use spin::RwLock;
 
 use crate::device::{
-    char::CharDevice, graphics::manager::FramebufferResource, manager::DeviceManager, Device,
-    DeviceType,
+    Device, DeviceType, char::CharDevice, graphics::manager::FramebufferResource,
+    manager::DeviceManager,
 };
 use crate::object::capability::selectable::Selectable;
 use crate::object::capability::{ControlOps, MemoryMappingOps};
@@ -936,10 +936,10 @@ impl FramebufferCharDevice {
 mod tests {
     use super::*;
     use crate::device::{
-        graphics::{
-            manager::GraphicsManager, FramebufferConfig, GenericGraphicsDevice, PixelFormat,
-        },
         Device,
+        graphics::{
+            FramebufferConfig, GenericGraphicsDevice, PixelFormat, manager::GraphicsManager,
+        },
     };
     use alloc::{string::ToString, sync::Arc};
     use spin::RwLock;
