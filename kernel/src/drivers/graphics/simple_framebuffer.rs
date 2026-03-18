@@ -138,12 +138,62 @@ fn property_str<'a>(device: &'a PlatformDeviceInfo, name: &str) -> Result<&'a st
         .ok_or("Missing framebuffer string property")
 }
 
+fn log_probe_properties(device: &PlatformDeviceInfo) {
+    let status = device
+        .property("status")
+        .and_then(|property| property.as_str())
+        .unwrap_or("<missing>");
+    let width = device
+        .property("width")
+        .and_then(|property| property.as_usize());
+    let height = device
+        .property("height")
+        .and_then(|property| property.as_usize());
+    let stride = device
+        .property("stride")
+        .and_then(|property| property.as_usize());
+    let format = device
+        .property("format")
+        .and_then(|property| property.as_str())
+        .unwrap_or("<missing>");
+    let mem_resource = device
+        .get_resources()
+        .iter()
+        .find(|resource| matches!(resource.res_type, PlatformDeviceResourceType::MEM));
+
+    match mem_resource {
+        Some(resource) => crate::println!(
+            "[simplefb] probe name={} compatible={:?} status={} reg={:#x}..={:#x} width={:?} height={:?} stride={:?} format={}",
+            device.name(),
+            device.compatible(),
+            status,
+            resource.start,
+            resource.end,
+            width,
+            height,
+            stride,
+            format,
+        ),
+        None => crate::println!(
+            "[simplefb] probe name={} compatible={:?} status={} reg=<missing> width={:?} height={:?} stride={:?} format={}",
+            device.name(),
+            device.compatible(),
+            status,
+            width,
+            height,
+            stride,
+            format,
+        ),
+    }
+}
+
 fn parse_pixel_format(device: &PlatformDeviceInfo) -> Result<PixelFormat, &'static str> {
     match property_str(device, "format")? {
         "a8r8g8b8" => Ok(PixelFormat::RGBA8888),
         "a8b8g8r8" => Ok(PixelFormat::BGRA8888),
         "x8r8g8b8" => Ok(PixelFormat::XRGB8888),
         "x8b8g8r8" => Ok(PixelFormat::XBGR8888),
+        "x2r10g10b10" => Ok(PixelFormat::XRGB2101010),
         "r8g8b8" => Ok(PixelFormat::RGB888),
         "r5g6b5" => Ok(PixelFormat::RGB565),
         "a1r5g5b5" | "r5g5b5a1" => Ok(PixelFormat::ARGB1555),

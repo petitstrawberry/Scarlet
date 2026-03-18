@@ -651,6 +651,28 @@ impl FramebufferCharDevice {
                     msb_right: 0,
                 };
             }
+            super::PixelFormat::XRGB2101010 => {
+                var_info.red = FbBitfield {
+                    offset: 0,
+                    length: 10,
+                    msb_right: 0,
+                };
+                var_info.green = FbBitfield {
+                    offset: 10,
+                    length: 10,
+                    msb_right: 0,
+                };
+                var_info.blue = FbBitfield {
+                    offset: 20,
+                    length: 10,
+                    msb_right: 0,
+                };
+                var_info.transp = FbBitfield {
+                    offset: 30,
+                    length: 0,
+                    msb_right: 0,
+                };
+            }
             super::PixelFormat::RGB888 => {
                 var_info.red = FbBitfield {
                     offset: 0,
