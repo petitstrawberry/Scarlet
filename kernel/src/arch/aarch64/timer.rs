@@ -85,36 +85,22 @@ impl ArchTimer {
 
         // Only perform interrupt controller configuration on first start
         if !self.initialized {
-            // CRITICAL: Mask IRQs before configuring the interrupt controller to avoid deadlock
-            // (an interrupt firing during InterruptManager access could try to re-lock it).
             interrupt::disable_external_interrupts();
 
-            // Enable timer interrupt at both local and external controller levels.
-            // This is platform-agnostic: GIC enables PPI 27, AIC gracefully ignores it.
             interrupt::enable_arch_timer_interrupt()
                 .unwrap_or_else(|e| panic!("Failed to enable timer interrupt: {e}"));
 
-            // CRITICAL: Set initialized flag BEFORE unmasking interrupts
-            // Otherwise, if an interrupt fires immediately after unmask, it will
-            // see initialized=false and reconfigure again
             self.initialized = true;
 
-            // Ensure IRQ is unmasked at CPU level (first time only)
             interrupt::enable_external_interrupts();
         }
 
-        // Finally, unmask the timer interrupt at the timer source itself.
-        // (This is analogous to a per-source enable bit like RISC-V STIE.)
         interrupt::enable_timer_source_interrupt();
-        // Note: Subsequent calls just update CVAL, no DAIF/GIC manipulation
-        // This prevents nested interrupts during tick handling
     }
 
     pub fn stop(&mut self) {
         self.running = false;
 
-        // Disable timer interrupt at both local and external controller levels.
-        // This is platform-agnostic: GIC disables PPI 27, AIC gracefully ignores it.
         let _ = interrupt::disable_arch_timer_interrupt();
 
         InterruptManager::with_manager(|mgr| {

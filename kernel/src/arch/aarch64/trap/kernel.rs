@@ -186,9 +186,8 @@ pub extern "C" fn _kernel_trap_entry() {
 // 戻り値なし(void)にする = 普通に関数から戻る
 #[unsafe(export_name = "arch_kernel_trap_handler")]
 pub extern "C" fn arch_kernel_trap_handler(trapframe: &mut Trapframe, trap_kind: usize) {
-    if trap_kind == 1 {
-        // IRQ
-        arch_irq_handler(trapframe);
+    if trap_kind == 1 || trap_kind == 2 {
+        arch_irq_handler(trapframe, trap_kind);
     } else {
         // Exception (Sync/SError/FIQ)
         arch_exception_handler(trapframe, trap_kind);

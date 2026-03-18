@@ -365,6 +365,17 @@ impl InterruptManager {
         }
     }
 
+    pub fn is_local_interrupt_pending(
+        &self,
+        cpu_id: CpuId,
+        interrupt_type: controllers::LocalInterruptType,
+    ) -> bool {
+        self.controllers
+            .local_controller_for_cpu(cpu_id)
+            .map(|controller| controller.is_pending(cpu_id, interrupt_type))
+            .unwrap_or(false)
+    }
+
     /// Register a local interrupt controller (e.g., CLINT) for specific CPUs
     pub fn register_local_controller(
         &mut self,

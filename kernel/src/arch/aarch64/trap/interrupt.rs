@@ -8,8 +8,13 @@ use crate::interrupt::InterruptManager;
 /// On QEMU virt (GICv2), the virtual timer arrives as a PPI (typically ID 27).
 /// The generic InterruptManager path will acknowledge+EOI the interrupt, but the
 /// kernel still needs to run the timer tick logic to advance scheduling.
-pub fn arch_irq_handler(trapframe: &mut Trapframe) {
+pub fn arch_irq_handler(trapframe: &mut Trapframe, trap_kind: usize) {
     let cpu_id = get_cpu().get_cpuid() as u32;
+
+    if trap_kind == 2 && crate::arch::interrupt::is_arch_timer_pending() {
+        crate::timer::tick(trapframe);
+        return;
+    }
 
     let claimed =
         InterruptManager::with_manager(|mgr| mgr.claim_and_handle_external_interrupt(cpu_id));
@@ -21,9 +26,7 @@ pub fn arch_irq_handler(trapframe: &mut Trapframe) {
             }
         }
         Ok(None) => {
-            // Fallback: if the architectural timer is pending, run tick.
-            // (This can help when the IRQ path didn't surface through the external controller.)
-            if crate::drivers::pic::arm_generic_timer::ArmGenericTimer::is_timer_pending() {
+            if crate::arch::interrupt::is_arch_timer_pending() {
                 crate::timer::tick(trapframe);
             }
         }

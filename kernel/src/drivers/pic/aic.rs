@@ -575,6 +575,10 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
             .map_err(|_| "Failed to register AIC")
     }) {
         Ok(()) => {
+            crate::arch::interrupt::configure_timer_interrupt_route(
+                crate::arch::interrupt::TimerInterruptRoute::FastInterrupt,
+                None,
+            );
             crate::early_println!("[AIC] probe: AIC registered successfully");
             Ok(())
         }

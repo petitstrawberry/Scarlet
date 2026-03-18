@@ -406,13 +406,16 @@ pub fn configure_user_entry(trapframe: &mut Trapframe, options: crate::arch::Use
 
     // DAIF bits in PSTATE/SPSR: D=9, A=8, I=7, F=6. 1 means masked.
     const DAIF_I: u64 = 1 << 7;
+    const DAIF_F: u64 = 1 << 6;
     match options.irq_policy {
         UserReturnIrqPolicy::Inherit => {}
         UserReturnIrqPolicy::Enable => {
             trapframe.spsr &= !DAIF_I;
+            trapframe.spsr &= !DAIF_F;
         }
         UserReturnIrqPolicy::Disable => {
             trapframe.spsr |= DAIF_I;
+            trapframe.spsr |= DAIF_F;
         }
     }
 
