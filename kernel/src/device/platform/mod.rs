@@ -96,6 +96,21 @@ impl PlatformDeviceProperty {
             .ok()
             .map(|value| value.trim_end_matches('\0'))
     }
+
+    pub fn as_string_list(&self) -> Option<Vec<&str>> {
+        if self.value.is_empty() {
+            return Some(Vec::new());
+        }
+
+        let mut out = Vec::new();
+        for part in self.value.split(|byte| *byte == 0) {
+            if part.is_empty() {
+                continue;
+            }
+            out.push(core::str::from_utf8(part).ok()?);
+        }
+        Some(out)
+    }
 }
 
 /// Struct representing platform device information.

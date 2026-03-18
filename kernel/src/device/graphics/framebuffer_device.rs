@@ -20,8 +20,8 @@ use core::any::Any;
 use spin::RwLock;
 
 use crate::device::{
-    Device, DeviceType, char::CharDevice, graphics::manager::FramebufferResource,
-    manager::DeviceManager,
+    char::CharDevice, graphics::manager::FramebufferResource, manager::DeviceManager, Device,
+    DeviceType,
 };
 use crate::object::capability::selectable::Selectable;
 use crate::object::capability::{ControlOps, MemoryMappingOps};
@@ -653,7 +653,7 @@ impl FramebufferCharDevice {
             }
             super::PixelFormat::XRGB2101010 => {
                 var_info.red = FbBitfield {
-                    offset: 0,
+                    offset: 20,
                     length: 10,
                     msb_right: 0,
                 };
@@ -663,7 +663,7 @@ impl FramebufferCharDevice {
                     msb_right: 0,
                 };
                 var_info.blue = FbBitfield {
-                    offset: 20,
+                    offset: 0,
                     length: 10,
                     msb_right: 0,
                 };
@@ -936,10 +936,10 @@ impl FramebufferCharDevice {
 mod tests {
     use super::*;
     use crate::device::{
-        Device,
         graphics::{
-            FramebufferConfig, GenericGraphicsDevice, PixelFormat, manager::GraphicsManager,
+            manager::GraphicsManager, FramebufferConfig, GenericGraphicsDevice, PixelFormat,
         },
+        Device,
     };
     use alloc::{string::ToString, sync::Arc};
     use spin::RwLock;
