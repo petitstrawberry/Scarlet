@@ -425,20 +425,33 @@ impl DeviceManager {
         let mut idx = 0;
 
         for child in parent_node.children() {
-            self.process_single_device_node(child, priority, &mut idx);
+            self.process_device_subtree(&child, priority, &mut idx);
         }
 
         if let Some(chosen_node) = fdt.find_node("/chosen") {
             for child in chosen_node.children() {
-                self.process_single_device_node(child, priority, &mut idx);
+                self.process_device_subtree(&child, priority, &mut idx);
             }
+        }
+    }
+
+    fn process_device_subtree(
+        &self,
+        node: &fdt::node::FdtNode,
+        priority: DriverPriority,
+        idx: &mut usize,
+    ) {
+        self.process_single_device_node(node, priority, idx);
+
+        for child in node.children() {
+            self.process_device_subtree(&child, priority, idx);
         }
     }
 
     /// Process a single device node with minimal stack usage
     fn process_single_device_node(
         &self,
-        child: fdt::node::FdtNode,
+        child: &fdt::node::FdtNode,
         priority: DriverPriority,
         idx: &mut usize,
     ) {
@@ -692,7 +705,7 @@ impl DeviceManager {
     /// Try to match device with drivers and probe if successful
     fn try_match_and_probe_device(
         &self,
-        child: fdt::node::FdtNode,
+        child: &fdt::node::FdtNode,
         priority: DriverPriority,
         idx: &mut usize,
         compatible: alloc::vec::Vec<&str>,
