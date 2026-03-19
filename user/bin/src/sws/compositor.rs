@@ -2001,6 +2001,76 @@ impl Compositor {
                     self.broadcast_focus_change(window_id);
                 }
 
+                // Auto-configure DESKTOP and TASKBAR windows to match screen dimensions.
+                // The compositor is the authoritative source for screen size, so it enforces
+                // the correct dimensions even if the client requested a different size.
+                match wtype {
+                    super::window::WindowType::Desktop => {
+                        let needs_resize =
+                            width != self.screen_width || height != self.screen_height;
+                        if needs_resize {
+                            println!(
+                                "[Compositor] Auto-resizing DESKTOP window #{} from {}x{} to {}x{}",
+                                window_id, width, height, self.screen_width, self.screen_height
+                            );
+                            self.window_manager.resize_window_in_place(
+                                window_id,
+                                self.screen_width,
+                                self.screen_height,
+                            );
+                            let payload = sws_protocol::payload_window_configure(
+                                window_id,
+                                self.screen_width,
+                                self.screen_height,
+                            );
+                            super::ipc::send_message_to_window(
+                                window_id,
+                                sws_protocol::server_msg::WINDOW_CONFIGURE,
+                                payload.to_vec(),
+                            );
+                        }
+                    }
+                    super::window::WindowType::Taskbar => {
+                        if width != self.screen_width {
+                            println!(
+                                "[Compositor] Auto-resizing TASKBAR window #{} width from {} to {}",
+                                window_id, width, self.screen_width
+                            );
+                            self.window_manager.resize_window_in_place(
+                                window_id,
+                                self.screen_width,
+                                height,
+                            );
+                            let payload = sws_protocol::payload_window_configure(
+                                window_id,
+                                self.screen_width,
+                                height,
+                            );
+                            super::ipc::send_message_to_window(
+                                window_id,
+                                sws_protocol::server_msg::WINDOW_CONFIGURE,
+                                payload.to_vec(),
+                            );
+
+                            let workarea_y = height as i32;
+                            let workarea_height = self.screen_height.saturating_sub(height);
+                            self.workarea =
+                                Some((0, workarea_y, self.screen_width, workarea_height));
+                            self.window_manager.set_workarea(
+                                0,
+                                workarea_y,
+                                self.screen_width,
+                                workarea_height,
+                            );
+                            println!(
+                                "[Compositor] Updated workarea for resized taskbar: y={}, height={}",
+                                workarea_y, workarea_height
+                            );
+                        }
+                    }
+                    _ => {}
+                }
+
                 // Don't trigger redraw yet - wait for client to draw and send UPDATE_BUFFER
                 // self.full_redraw_needed = true;
 
@@ -2737,22 +2807,17 @@ impl Compositor {
                     "[Compositor] GetScreenSize request from client {}",
                     client_id
                 );
-                let width = self.screen_width;
-                let height = self.screen_height;
-                // Send SCREEN_SIZE response to the client
-                // Use the first window (if any) to send the response
-                if let Some(first_window_id) = self.window_manager.get_first_window_id() {
-                    let payload = sws_protocol::payload_screen_size(width, height);
-                    let _ = send_message_to_window(
-                        first_window_id,
-                        sws_protocol::server_msg::SCREEN_SIZE,
-                        payload.to_vec(),
-                    );
-                    println!(
-                        "[Compositor] Sent SCREEN_SIZE: {}x{} to client {} (via window {})",
-                        width, height, client_id, first_window_id
-                    );
-                }
+                let payload =
+                    sws_protocol::payload_screen_size(self.screen_width, self.screen_height);
+                super::ipc::send_message_to_client(
+                    client_id,
+                    sws_protocol::server_msg::SCREEN_SIZE,
+                    payload.to_vec(),
+                );
+                println!(
+                    "[Compositor] Sent SCREEN_SIZE: {}x{} to client {}",
+                    self.screen_width, self.screen_height, client_id
+                );
             }
             IpcEvent::GetWindowList { client_id } => {
                 println!(

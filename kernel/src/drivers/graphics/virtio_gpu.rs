@@ -336,8 +336,8 @@ impl VirtioGpuDeviceCore {
                 r: VirtioGpuRect {
                     x: 0,
                     y: 0,
-                    width: 1024,
-                    height: 768,
+                    width: 1920,
+                    height: 1080,
                 },
                 enabled: 1,
                 flags: 0,
@@ -891,8 +891,8 @@ mod tests {
 
         // Get framebuffer configuration
         let config = device.get_framebuffer_config().unwrap();
-        assert_eq!(config.width, 1024);
-        assert_eq!(config.height, 768);
+        assert_eq!(config.width, 1920);
+        assert_eq!(config.height, 1080);
         assert_eq!(config.format, PixelFormat::BGRA8888);
 
         // Get framebuffer address

@@ -930,6 +930,21 @@ impl WindowManager {
         }
     }
 
+    /// Resize a window in-place (compositor-side only).
+    ///
+    /// Updates the window's internal dimensions without replacing the buffer.
+    /// The client is expected to handle the corresponding WINDOW_CONFIGURE
+    /// message and provide a new buffer via ResizeWindow.
+    pub fn resize_window_in_place(&mut self, id: WindowId, width: u32, height: u32) -> bool {
+        if let Some(w) = self.get_window_mut(id) {
+            w.width = width.max(1);
+            w.height = height.max(1);
+            true
+        } else {
+            false
+        }
+    }
+
     /// Minimize a window (hide from display but keep in window list)
     pub fn minimize_window(&mut self, id: WindowId) -> bool {
         if let Some(w) = self.get_window_mut(id) {

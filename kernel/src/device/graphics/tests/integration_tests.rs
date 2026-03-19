@@ -561,8 +561,8 @@ mod integration_tests {
             .expect("Failed to initialize VirtIO GPU device");
         // Get framebuffer configuration
         let config = device.get_framebuffer_config().unwrap();
-        assert_eq!(config.width, 1024);
-        assert_eq!(config.height, 768);
+        assert_eq!(config.width, 1920);
+        assert_eq!(config.height, 1080);
         assert_eq!(config.format, PixelFormat::BGRA8888);
         let shared_device = Arc::new(device);
 
