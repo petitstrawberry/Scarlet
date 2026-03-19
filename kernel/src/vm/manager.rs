@@ -1057,6 +1057,7 @@ mod tests {
     use crate::arch::vm::alloc_virtual_address_space;
     use crate::environment::PAGE_SIZE;
     use crate::vm::VirtualMemoryMap;
+    use crate::vm::get_current_direct_map_phys_range;
     use crate::vm::{manager::VirtualMemoryManager, vmem::MemoryArea};
 
     #[test_case]
@@ -1919,13 +1920,18 @@ mod tests {
     #[test_case]
     fn test_lazy_mapping_and_unmapping() {
         let manager = VirtualMemoryManager::new();
+        let (dm_phys_start, _) = get_current_direct_map_phys_range();
         let vma = MemoryArea {
             start: 0x1000,
             end: 0x1fff,
         };
+        let pma = MemoryArea {
+            start: dm_phys_start,
+            end: dm_phys_start + 0xfff,
+        };
         let map = VirtualMemoryMap {
             vmarea: vma,
-            pmarea: vma,
+            pmarea: pma,
             permissions: 0o644,
             is_shared: false,
             owner: None,
