@@ -1,244 +1,643 @@
-//! Address translation utilities for virtual memory management.
-//!
-//! This module provides functions for converting between physical and virtual addresses.
-//!
-//! # Usage
-//!
-//! ```rust,ignore
-//! use crate::vm::addr::{virt_to_phys, phys_to_virt};
-//!
-//! // Example virtual address
-//! let vaddr: usize = 0x1000;
-//!
-//! // Convert virtual address to physical address
-//! let paddr = virt_to_phys(vaddr);
-//!
-//! // Convert physical address back to virtual address
-//! let vaddr_back = phys_to_virt(paddr);
-//! ```
+//! Address translation utilities backed by the kernel memory layout.
+
+use core::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 
 use spin::Once;
 
+#[repr(u8)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum KernelMemoryPhase {
+    Uninitialized = 0,
+    Bootloader = 1,
+    BootKernel = 2,
+    Runtime = 3,
+}
+
+impl KernelMemoryPhase {
+    fn from_u8(value: u8) -> Self {
+        match value {
+            1 => Self::Bootloader,
+            2 => Self::BootKernel,
+            3 => Self::Runtime,
+            _ => Self::Uninitialized,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
-struct AddressLayout {
-    hhdm_offset: usize,
-    kernel_phys_base: usize,
-    kernel_virt_base: usize,
-    kernel_image_size: usize,
+struct KernelImageLayout {
+    phys_base: usize,
+    virt_base: usize,
+    size: usize,
 }
 
-impl AddressLayout {
+impl KernelImageLayout {
     #[inline(always)]
-    fn kernel_virt_end(&self) -> usize {
-        self.kernel_virt_base + self.kernel_image_size
+    fn virt_end(&self) -> usize {
+        self.virt_base + self.size
     }
 
     #[inline(always)]
-    fn kernel_phys_end(&self) -> usize {
-        self.kernel_phys_base + self.kernel_image_size
+    fn phys_end(&self) -> usize {
+        self.phys_base + self.size
     }
 
     #[inline(always)]
-    fn contains_kernel_virt(&self, vaddr: usize) -> bool {
-        vaddr >= self.kernel_virt_base && vaddr < self.kernel_virt_end()
+    fn contains_virt(&self, vaddr: usize) -> bool {
+        vaddr >= self.virt_base && vaddr < self.virt_end()
     }
 
     #[inline(always)]
-    fn contains_hhdm_virt(&self, vaddr: usize) -> bool {
-        vaddr >= self.hhdm_offset
+    fn contains_phys(&self, paddr: usize) -> bool {
+        paddr >= self.phys_base && paddr < self.phys_end()
     }
 }
 
-static ADDRESS_LAYOUT: Once<AddressLayout> = Once::new();
+#[derive(Clone, Copy, Debug)]
+struct DirectMapLayout {
+    offset: usize,
+    phys_start: usize,
+    phys_end: usize,
+}
+
+impl DirectMapLayout {
+    #[inline(always)]
+    fn contains_phys(&self, paddr: usize) -> bool {
+        paddr >= self.phys_start && paddr <= self.phys_end
+    }
+
+    #[inline(always)]
+    fn virt_start(&self) -> usize {
+        self.offset + self.phys_start
+    }
+
+    #[inline(always)]
+    fn virt_end(&self) -> usize {
+        self.offset + self.phys_end
+    }
+
+    #[inline(always)]
+    fn contains_virt(&self, vaddr: usize) -> bool {
+        vaddr >= self.virt_start() && vaddr <= self.virt_end()
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct HeapLayout {
+    phys_base: usize,
+    virt_base: usize,
+    size: usize,
+}
+
+impl HeapLayout {
+    #[inline(always)]
+    fn virt_end(&self) -> usize {
+        self.virt_base + self.size
+    }
+
+    #[inline(always)]
+    fn contains_virt(&self, vaddr: usize) -> bool {
+        vaddr >= self.virt_base && vaddr < self.virt_end()
+    }
+}
+
+struct KernelMemoryLayout {
+    phase: AtomicU8,
+    kernel_image: Once<KernelImageLayout>,
+    boot_direct_map_offset: AtomicUsize,
+    current_direct_map_offset: AtomicUsize,
+    boot_direct_map_phys_start: AtomicUsize,
+    boot_direct_map_phys_end: AtomicUsize,
+    current_direct_map_phys_start: AtomicUsize,
+    current_direct_map_phys_end: AtomicUsize,
+    heap_phys_base: AtomicUsize,
+    heap_virt_base: AtomicUsize,
+    heap_size: AtomicUsize,
+}
+
+impl KernelMemoryLayout {
+    const fn new() -> Self {
+        Self {
+            phase: AtomicU8::new(KernelMemoryPhase::Uninitialized as u8),
+            kernel_image: Once::new(),
+            boot_direct_map_offset: AtomicUsize::new(0),
+            current_direct_map_offset: AtomicUsize::new(0),
+            boot_direct_map_phys_start: AtomicUsize::new(0),
+            boot_direct_map_phys_end: AtomicUsize::new(0),
+            current_direct_map_phys_start: AtomicUsize::new(0),
+            current_direct_map_phys_end: AtomicUsize::new(0),
+            heap_phys_base: AtomicUsize::new(0),
+            heap_virt_base: AtomicUsize::new(0),
+            heap_size: AtomicUsize::new(0),
+        }
+    }
+
+    #[inline(always)]
+    fn phase(&self) -> KernelMemoryPhase {
+        KernelMemoryPhase::from_u8(self.phase.load(Ordering::Acquire))
+    }
+
+    fn init_from_limine(
+        &self,
+        hhdm_offset: usize,
+        kernel_phys_base: usize,
+        kernel_virt_base: usize,
+        kernel_image_size: usize,
+    ) {
+        self.kernel_image.call_once(|| KernelImageLayout {
+            phys_base: kernel_phys_base,
+            virt_base: kernel_virt_base,
+            size: kernel_image_size,
+        });
+        self.boot_direct_map_offset
+            .store(hhdm_offset, Ordering::Release);
+        self.current_direct_map_offset
+            .store(hhdm_offset, Ordering::Release);
+        self.phase
+            .store(KernelMemoryPhase::Bootloader as u8, Ordering::Release);
+    }
+
+    fn set_boot_direct_map_range(&self, phys_start: usize, phys_end: usize) {
+        self.boot_direct_map_phys_start
+            .store(phys_start, Ordering::Release);
+        self.boot_direct_map_phys_end
+            .store(phys_end, Ordering::Release);
+
+        if self.phase() == KernelMemoryPhase::Bootloader {
+            self.current_direct_map_phys_start
+                .store(phys_start, Ordering::Release);
+            self.current_direct_map_phys_end
+                .store(phys_end, Ordering::Release);
+        }
+    }
+
+    fn transition_to_boot_kernel(
+        &self,
+        direct_map_offset: usize,
+        direct_map_phys_start: usize,
+        direct_map_phys_end: usize,
+        heap_phys_base: usize,
+        heap_virt_base: usize,
+        heap_size: usize,
+    ) {
+        self.current_direct_map_offset
+            .store(direct_map_offset, Ordering::Release);
+        self.current_direct_map_phys_start
+            .store(direct_map_phys_start, Ordering::Release);
+        self.current_direct_map_phys_end
+            .store(direct_map_phys_end, Ordering::Release);
+        self.heap_phys_base.store(heap_phys_base, Ordering::Release);
+        self.heap_virt_base.store(heap_virt_base, Ordering::Release);
+        self.heap_size.store(heap_size, Ordering::Release);
+        self.phase
+            .store(KernelMemoryPhase::BootKernel as u8, Ordering::Release);
+    }
+
+    fn finalize_runtime(&self) {
+        self.phase
+            .store(KernelMemoryPhase::Runtime as u8, Ordering::Release);
+    }
+
+    #[inline(always)]
+    fn kernel_image(&self) -> &KernelImageLayout {
+        self.kernel_image
+            .get()
+            .expect("kernel image layout not initialized")
+    }
+
+    #[inline(always)]
+    fn boot_direct_map(&self) -> DirectMapLayout {
+        let offset = self.boot_direct_map_offset.load(Ordering::Acquire);
+        let phys_start = self.boot_direct_map_phys_start.load(Ordering::Acquire);
+        let phys_end = self.boot_direct_map_phys_end.load(Ordering::Acquire);
+        assert!(offset != 0, "boot direct-map offset not initialized");
+        assert!(
+            phys_end >= phys_start,
+            "boot direct-map range not initialized"
+        );
+        DirectMapLayout {
+            offset,
+            phys_start,
+            phys_end,
+        }
+    }
+
+    #[inline(always)]
+    fn current_direct_map(&self) -> DirectMapLayout {
+        let offset = self.current_direct_map_offset.load(Ordering::Acquire);
+        let phys_start = self.current_direct_map_phys_start.load(Ordering::Acquire);
+        let phys_end = self.current_direct_map_phys_end.load(Ordering::Acquire);
+        assert!(offset != 0, "current direct-map offset not initialized");
+        assert!(
+            phys_end >= phys_start,
+            "current direct-map range not initialized"
+        );
+        DirectMapLayout {
+            offset,
+            phys_start,
+            phys_end,
+        }
+    }
+
+    #[inline(always)]
+    fn heap_layout(&self) -> Option<HeapLayout> {
+        let size = self.heap_size.load(Ordering::Acquire);
+        if size == 0 {
+            return None;
+        }
+        Some(HeapLayout {
+            phys_base: self.heap_phys_base.load(Ordering::Acquire),
+            virt_base: self.heap_virt_base.load(Ordering::Acquire),
+            size,
+        })
+    }
+
+    fn phys_to_current_virt(&self, paddr: usize) -> usize {
+        let direct_map = self.current_direct_map();
+        assert!(
+            direct_map.contains_phys(paddr),
+            "phys_to_virt: physical address {:#x} is outside current direct-map range {:#x}..={:#x}",
+            paddr,
+            direct_map.phys_start,
+            direct_map.phys_end
+        );
+        paddr
+            .checked_add(direct_map.offset)
+            .unwrap_or_else(|| panic!("phys_to_virt overflow: paddr={:#x}", paddr))
+    }
+
+    fn virt_to_current_phys(&self, vaddr: usize) -> Option<usize> {
+        let kernel_image = self.kernel_image();
+        if kernel_image.contains_virt(vaddr) {
+            return Some(kernel_image.phys_base + (vaddr - kernel_image.virt_base));
+        }
+
+        if let Some(heap) = self.heap_layout() {
+            if heap.contains_virt(vaddr) {
+                return Some(heap.phys_base + (vaddr - heap.virt_base));
+            }
+        }
+
+        let direct_map = self.current_direct_map();
+        if direct_map.contains_virt(vaddr) {
+            return Some(vaddr - direct_map.offset);
+        }
+
+        None
+    }
+
+    fn virt_to_boot_phys(&self, vaddr: usize) -> Option<usize> {
+        let kernel_image = self.kernel_image();
+        if kernel_image.contains_virt(vaddr) {
+            return Some(kernel_image.phys_base + (vaddr - kernel_image.virt_base));
+        }
+
+        let direct_map = self.boot_direct_map();
+        if direct_map.contains_virt(vaddr) {
+            return Some(vaddr - direct_map.offset);
+        }
+
+        None
+    }
+
+    fn phys_to_boot_virt(&self, paddr: usize) -> usize {
+        let direct_map = self.boot_direct_map();
+        assert!(
+            direct_map.contains_phys(paddr),
+            "boot_phys_to_virt: physical address {:#x} is outside boot direct-map range {:#x}..={:#x}",
+            paddr,
+            direct_map.phys_start,
+            direct_map.phys_end
+        );
+        paddr
+            .checked_add(direct_map.offset)
+            .unwrap_or_else(|| panic!("boot_phys_to_virt overflow: paddr={:#x}", paddr))
+    }
+}
+
+static KERNEL_MEMORY_LAYOUT: KernelMemoryLayout = KernelMemoryLayout::new();
 
 #[inline(always)]
-fn layout() -> Option<&'static AddressLayout> {
-    ADDRESS_LAYOUT.get()
+fn layout() -> &'static KernelMemoryLayout {
+    &KERNEL_MEMORY_LAYOUT
 }
 
+/// Initialize address translation from Limine bootloader information.
+///
+/// This must be called early in the boot process (e.g., in `limine_entry`)
+/// before any address translation is performed. It records the HHDM offset
+/// and kernel image layout provided by the bootloader.
+///
+/// # Arguments
+///
+/// * `hhdm_offset` - The HHDM (Higher Half Direct Map) offset from physical addresses
+/// * `kernel_phys_base` - Physical base address of the kernel image
+/// * `kernel_virt_base` - Virtual base address of the kernel image
+/// * `kernel_image_size` - Size of the kernel image in bytes
 pub fn init_limine_addressing(
     hhdm_offset: usize,
     kernel_phys_base: usize,
     kernel_virt_base: usize,
     kernel_image_size: usize,
 ) {
-    ADDRESS_LAYOUT.call_once(|| AddressLayout {
+    layout().init_from_limine(
         hhdm_offset,
         kernel_phys_base,
         kernel_virt_base,
         kernel_image_size,
-    });
+    );
 }
 
+/// Check if address translation is initialized and ready to use.
+///
+/// Returns `true` after `init_limine_addressing()` has been called,
+/// indicating that address translation functions can be safely used.
 #[inline(always)]
 pub fn address_translation_ready() -> bool {
-    layout().is_some()
+    layout().phase() != KernelMemoryPhase::Uninitialized
 }
 
-/// Converts a virtual address to a physical address.
-#[inline(always)]
-pub fn virt_to_phys(vaddr: usize) -> usize {
-    if let Some(layout) = layout() {
-        if layout.contains_kernel_virt(vaddr) {
-            return layout.kernel_phys_base + (vaddr - layout.kernel_virt_base);
-        }
-        if layout.contains_hhdm_virt(vaddr) {
-            return vaddr - layout.hhdm_offset;
-        }
-    }
-    vaddr
-}
-
-/// Converts a physical address to a virtual address.
+/// Set the boot-time direct-map physical address range.
 ///
-/// **Note:** This function is specifically intended for producing addresses in
-/// the HHDM (Higher Half Direct Map) / direct-map region. It is **not** valid
-/// for obtaining arbitrary kernel virtual addresses (e.g., kernel image VAs).
-///
-/// Currently assumes identity mapping (VA == PA).
-/// When Higher Half Kernel is enabled, this will add HHDM_OFFSET.
+/// This defines the physical memory range that is directly mapped
+/// by the bootloader (via HHDM). Should be called during early boot
+/// after `init_limine_addressing()`.
 ///
 /// # Arguments
 ///
-/// * `paddr` - Physical address to convert
+/// * `start` - Start of the direct-mapped physical address range
+/// * `end` - End of the direct-mapped physical address range (inclusive)
+pub fn init_boot_direct_map_range(start: usize, end: usize) {
+    layout().set_boot_direct_map_range(start, end);
+}
+
+/// Transition to the kernel-owned memory layout.
+///
+/// This should be called after switching from the bootloader's page tables
+/// to Scarlet's own page tables. It updates the direct-map and heap
+/// layout information for runtime address translation.
+///
+/// # Arguments
+///
+/// * `direct_map_offset` - HHDM offset for the new page tables
+/// * `direct_map_phys_start` - Start of direct-mapped physical range
+/// * `direct_map_phys_end` - End of direct-mapped physical range (inclusive)
+/// * `heap_phys_base` - Physical base address of the kernel heap
+/// * `heap_virt_base` - Virtual base address of the kernel heap
+/// * `heap_size` - Size of the kernel heap in bytes
+pub fn transition_kernel_memory_layout(
+    direct_map_offset: usize,
+    direct_map_phys_start: usize,
+    direct_map_phys_end: usize,
+    heap_phys_base: usize,
+    heap_virt_base: usize,
+    heap_size: usize,
+) {
+    layout().transition_to_boot_kernel(
+        direct_map_offset,
+        direct_map_phys_start,
+        direct_map_phys_end,
+        heap_phys_base,
+        heap_virt_base,
+        heap_size,
+    );
+}
+
+/// Finalize the memory layout for full runtime operation.
+///
+/// Marks the memory layout as fully initialized. After this call,
+/// the system is in the Runtime phase and all address translation
+/// functions operate in their final configuration.
+pub fn finalize_runtime_memory_layout() {
+    layout().finalize_runtime();
+}
+
+/// Get the current direct-map physical address range.
+///
+/// Returns the physical memory range that is currently direct-mapped
+/// (accessible via HHDM offset).
 ///
 /// # Returns
 ///
-/// Direct-map virtual address corresponding to the given physical address
+/// A tuple of `(start, end)` physical addresses (inclusive).
+pub fn get_current_direct_map_phys_range() -> (usize, usize) {
+    let current = layout().current_direct_map();
+    (current.phys_start, current.phys_end)
+}
+
+/// Get the kernel heap physical layout information.
+///
+/// Returns the heap layout if it has been initialized.
+///
+/// # Returns
+///
+/// `Some((phys_base, virt_base, size))` if heap is initialized,
+/// `None` otherwise.
+pub fn get_heap_phys_layout() -> Option<(usize, usize, usize)> {
+    layout()
+        .heap_layout()
+        .map(|heap| (heap.phys_base, heap.virt_base, heap.size))
+}
+
+/// Set the HHDM (Higher Half Direct Map) offset for address translation.
+///
+/// This updates the offset used for converting between physical and virtual
+/// addresses in the direct-mapped region.
+///
+/// # Arguments
+///
+/// * `new_offset` - The new HHDM offset value
+pub fn set_hhdm_offset(new_offset: usize) {
+    let current = layout().current_direct_map();
+    transition_kernel_memory_layout(
+        new_offset,
+        current.phys_start,
+        current.phys_end,
+        layout()
+            .heap_layout()
+            .map(|heap| heap.phys_base)
+            .unwrap_or(0),
+        layout()
+            .heap_layout()
+            .map(|heap| heap.virt_base)
+            .unwrap_or(0),
+        layout().heap_layout().map(|heap| heap.size).unwrap_or(0),
+    );
+}
+
+/// Get the current HHDM (Higher Half Direct Map) offset.
+///
+/// Returns the offset used for the current runtime address translation.
+#[inline(always)]
+pub fn get_hhdm_offset() -> usize {
+    layout().current_direct_map().offset
+}
+
+/// Get the boot-time HHDM (Higher Half Direct Map) offset.
+///
+/// Returns the offset provided by the bootloader during early boot.
+/// This is used for boot-phase address translation.
+#[inline(always)]
+pub fn get_boot_hhdm_offset() -> usize {
+    layout().boot_direct_map().offset
+}
+
+/// Convert a boot-time physical address to virtual address.
+///
+/// Uses the bootloader-provided HHDM offset. This should only be called
+/// during early boot before transitioning to kernel-owned page tables.
+///
+/// # Panics
+///
+/// Panics if the physical address is outside the boot direct-map range.
+#[inline(always)]
+pub fn boot_phys_to_virt(paddr: usize) -> usize {
+    layout().phys_to_boot_virt(paddr)
+}
+
+/// Convert a virtual address to physical address (runtime).
+///
+/// Uses the current runtime memory layout. This should be called after
+/// the kernel has transitioned to its own page tables.
+///
+/// # Panics
+///
+/// Panics with caller information if the virtual address cannot be mapped
+/// to a physical address in the current layout.
+#[inline(always)]
+#[track_caller]
+pub fn virt_to_phys(vaddr: usize) -> usize {
+    layout().virt_to_current_phys(vaddr).unwrap_or_else(|| {
+        let caller = core::panic::Location::caller();
+        panic!(
+            "virt_to_phys: unmapped kernel virtual address {:#x} (caller: {}:{})",
+            vaddr,
+            caller.file(),
+            caller.line()
+        )
+    })
+}
+
+/// Convert a boot-time virtual address to physical address.
+///
+/// Uses the bootloader-provided memory layout. This should be called
+/// during early boot for addresses provided by the bootloader.
+///
+/// # Panics
+///
+/// Panics with caller information if the virtual address cannot be mapped
+/// to a physical address in the boot layout.
+#[inline(always)]
+#[track_caller]
+pub fn boot_virt_to_phys(vaddr: usize) -> usize {
+    layout().virt_to_boot_phys(vaddr).unwrap_or_else(|| {
+        let caller = core::panic::Location::caller();
+        panic!(
+            "boot_virt_to_phys: unmapped boot virtual address {:#x} (caller: {}:{})",
+            vaddr,
+            caller.file(),
+            caller.line()
+        )
+    })
+}
+
+/// Convert a physical address to virtual address (runtime).
+///
+/// Uses the current runtime memory layout (HHDM offset).
+///
+/// # Panics
+///
+/// Panics if the physical address is outside the current direct-map range.
 #[inline(always)]
 pub fn phys_to_virt(paddr: usize) -> usize {
-    if let Some(layout) = layout() {
-        return paddr.checked_add(layout.hhdm_offset).unwrap_or_else(|| {
-            panic!(
-                "phys_to_virt overflow: paddr={:#x} hhdm_offset={:#x}",
-                paddr, layout.hhdm_offset
-            )
-        });
-    }
-    paddr
+    layout().phys_to_current_virt(paddr)
 }
 
-/// Converts a physical address to a virtual address for kernel use.
+/// Convert a physical address to kernel virtual address.
 ///
-/// This is an alias for `phys_to_virt` but makes the intent clearer
-/// when accessing kernel memory.
-///
-/// # Arguments
-///
-/// * `paddr` - Physical address to convert
-///
-/// # Returns
-///
-/// Virtual address that can be used to access the physical memory
+/// This is an alias for `phys_to_virt()`.
 #[inline(always)]
 pub fn phys_to_kernel_virt(paddr: usize) -> usize {
     phys_to_virt(paddr)
 }
 
-/// Converts a virtual address used by kernel to physical address.
+/// Convert a kernel virtual address to physical address.
 ///
-/// This is an alias for `virt_to_phys` but makes the intent clearer
-/// when dealing with kernel virtual addresses.
-///
-/// # Arguments
-///
-/// * `vaddr` - Kernel virtual address to convert
-///
-/// # Returns
-///
-/// Physical address corresponding to the given kernel virtual address
+/// This is an alias for `virt_to_phys()`.
 #[inline(always)]
 pub fn kernel_virt_to_phys(vaddr: usize) -> usize {
     virt_to_phys(vaddr)
 }
 
+/// Convert a physical address to kernel image virtual address.
+///
+/// Only works for addresses within the kernel image (code/data sections).
+/// For general direct-mapped addresses, use `phys_to_virt()` instead.
+///
+/// # Panics
+///
+/// Panics if the physical address is outside the kernel image range.
 #[inline(always)]
 pub fn phys_to_kernel_image_virt(paddr: usize) -> usize {
-    if let Some(layout) = layout() {
-        if paddr >= layout.kernel_phys_base && paddr < layout.kernel_phys_end() {
-            return layout.kernel_virt_base + (paddr - layout.kernel_phys_base);
-        }
+    let kernel_image = layout().kernel_image();
+    if kernel_image.contains_phys(paddr) {
+        return kernel_image.virt_base + (paddr - kernel_image.phys_base);
     }
-    paddr
+    panic!(
+        "phys_to_kernel_image_virt: physical address {:#x} is outside kernel image range",
+        paddr
+    )
 }
 
-/// Checks if the given virtual address is in the direct mapping region.
+/// Check if a virtual address is in the direct-mapped region.
 ///
-/// With identity mapping, all addresses are in the direct mapping region.
-/// When Higher Half is enabled, this will check if the address is in HHDM range.
-///
-/// # Arguments
-///
-/// * `vaddr` - Virtual address to check
-///
-/// # Returns
-///
-/// `true` if the address is in the direct mapping region
+/// Returns `true` if the address can be translated to physical
+/// via simple HHDM offset subtraction.
 #[inline(always)]
 pub fn is_direct_mapped(vaddr: usize) -> bool {
-    if let Some(layout) = layout() {
-        return layout.contains_hhdm_virt(vaddr);
-    }
-    true
+    layout().current_direct_map().contains_virt(vaddr)
 }
 
-// ============================================================================
-// Type-safe address wrappers (for future use)
-// ============================================================================
-
-/// A physical memory address.
-///
-/// This type provides type safety when working with physical addresses,
-/// preventing accidental mixing with virtual addresses.
+/// A wrapper type representing a physical address.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct PhysAddr(pub usize);
 
 impl PhysAddr {
-    /// Creates a new physical address.
+    /// Create a new `PhysAddr` from a raw address value.
     #[inline(always)]
     pub const fn new(addr: usize) -> Self {
         Self(addr)
     }
 
-    /// Returns the raw address value.
+    /// Return the raw address value.
     #[inline(always)]
     pub const fn as_usize(&self) -> usize {
         self.0
     }
 
-    /// Converts this physical address to a virtual address.
+    /// Convert this physical address to a virtual address.
+    ///
+    /// Uses `phys_to_virt()` for the translation.
     #[inline(always)]
     pub fn to_virt(&self) -> VirtAddr {
         VirtAddr::new(phys_to_virt(self.0))
     }
 
-    /// Returns true if the address is aligned to the given boundary.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `align` is 0 or not a power of two.
+    /// Check if the address is aligned to the given power-of-two alignment.
     #[inline(always)]
     pub const fn is_aligned(&self, align: usize) -> bool {
         assert!(align != 0 && align.is_power_of_two());
         self.0 & (align - 1) == 0
     }
 
-    /// Returns the address aligned down to the given boundary.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `align` is 0 or not a power of two.
+    /// Align the address down to the given power-of-two boundary.
     #[inline(always)]
     pub const fn align_down(&self, align: usize) -> Self {
         assert!(align != 0 && align.is_power_of_two());
         Self::new(self.0 & !(align - 1))
     }
 
-    /// Returns the address aligned up to the given boundary.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `align` is 0 or not a power of two.
+    /// Align the address up to the given power-of-two boundary.
     #[inline(always)]
     pub const fn align_up(&self, align: usize) -> Self {
         assert!(align != 0 && align.is_power_of_two());
@@ -246,161 +645,49 @@ impl PhysAddr {
     }
 }
 
-/// A virtual memory address.
-///
-/// This type provides type safety when working with virtual addresses,
-/// preventing accidental mixing with physical addresses.
+/// A wrapper type representing a virtual address.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct VirtAddr(pub usize);
 
 impl VirtAddr {
-    /// Creates a new virtual address.
+    /// Create a new `VirtAddr` from a raw address value.
     #[inline(always)]
     pub const fn new(addr: usize) -> Self {
         Self(addr)
     }
 
-    /// Returns the raw address value.
+    /// Return the raw address value.
     #[inline(always)]
     pub const fn as_usize(&self) -> usize {
         self.0
     }
 
-    /// Converts this virtual address to a physical address.
+    /// Convert this virtual address to a physical address.
+    ///
+    /// Uses `virt_to_phys()` for the translation.
     #[inline(always)]
     pub fn to_phys(&self) -> PhysAddr {
         PhysAddr::new(virt_to_phys(self.0))
     }
 
-    /// Returns `true` if the address is aligned to the given boundary.
-    ///
-    /// # Parameters
-    ///
-    /// * `align` - Alignment in bytes. Must be non-zero and a power of two.
-    ///
-    /// If `align` is zero or not a power of two, this function:
-    ///
-    /// * Returns `false` in release builds.
-    /// * Triggers a debug assertion in debug builds and returns `false`.
+    /// Check if the address is aligned to the given power-of-two alignment.
     #[inline(always)]
     pub const fn is_aligned(&self, align: usize) -> bool {
-        if !Self::is_valid_align(align) {
-            debug_assert!(
-                false,
-                "VirtAddr::is_aligned called with invalid alignment (must be non-zero power of two)",
-            );
-            return false;
-        }
-        (self.0 & (align - 1)) == 0
+        assert!(align != 0 && align.is_power_of_two());
+        self.0 & (align - 1) == 0
     }
 
-    /// Returns the address aligned down to the given boundary.
-    ///
-    /// # Parameters
-    ///
-    /// * `align` - Alignment in bytes. Must be non-zero and a power of two.
-    ///
-    /// If `align` is zero or not a power of two, this function:
-    ///
-    /// * Returns the original address in release builds.
-    /// * Triggers a debug assertion in debug builds and returns the original address.
+    /// Align the address down to the given power-of-two boundary.
     #[inline(always)]
     pub const fn align_down(&self, align: usize) -> Self {
-        if !Self::is_valid_align(align) {
-            debug_assert!(
-                false,
-                "VirtAddr::align_down called with invalid alignment (must be non-zero power of two)",
-            );
-            return *self;
-        }
+        assert!(align != 0 && align.is_power_of_two());
         Self::new(self.0 & !(align - 1))
     }
 
-    /// Returns the address aligned up to the given boundary.
-    ///
-    /// # Parameters
-    ///
-    /// * `align` - Alignment in bytes. Must be non-zero and a power of two.
-    ///
-    /// If `align` is zero or not a power of two, this function:
-    ///
-    /// * Returns the original address in release builds.
-    /// * Triggers a debug assertion in debug builds and returns the original address.
+    /// Align the address up to the given power-of-two boundary.
     #[inline(always)]
     pub const fn align_up(&self, align: usize) -> Self {
-        if !Self::is_valid_align(align) {
-            debug_assert!(
-                false,
-                "VirtAddr::align_up called with invalid alignment (must be non-zero power of two)",
-            );
-            return *self;
-        }
+        assert!(align != 0 && align.is_power_of_two());
         Self::new((self.0 + align - 1) & !(align - 1))
-    }
-
-    /// Returns `true` if an alignment value is valid for use with
-    /// [`VirtAddr::is_aligned`], [`VirtAddr::align_down`], and [`VirtAddr::align_up`].
-    ///
-    /// A valid alignment is non-zero and a power of two.
-    #[inline(always)]
-    const fn is_valid_align(align: usize) -> bool {
-        align != 0 && align.is_power_of_two()
-    }
-}
-
-// ============================================================================
-// Unit tests
-// ============================================================================
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test_case]
-    fn test_identity_mapping_virt_to_phys() {
-        let vaddr = phys_to_virt(0x80000000usize);
-        let paddr = virt_to_phys(vaddr);
-        assert_eq!(paddr, 0x80000000usize);
-    }
-
-    #[test_case]
-    fn test_identity_mapping_phys_to_virt() {
-        let paddr = 0x80000000usize;
-        let vaddr = phys_to_virt(paddr);
-        assert_eq!(virt_to_phys(vaddr), paddr);
-    }
-
-    #[test_case]
-    fn test_roundtrip_conversion() {
-        let original_paddr = 0x80001234usize;
-        let vaddr = phys_to_virt(original_paddr);
-        let paddr = virt_to_phys(vaddr);
-        assert_eq!(paddr, original_paddr);
-    }
-
-    #[test_case]
-    fn test_phys_addr_type() {
-        let paddr = PhysAddr::new(0x80000000);
-        assert_eq!(paddr.as_usize(), 0x80000000);
-        assert_eq!(paddr.to_virt().to_phys().as_usize(), 0x80000000);
-    }
-
-    #[test_case]
-    fn test_virt_addr_type() {
-        let vaddr = VirtAddr::new(phys_to_virt(0x80000000));
-        assert_eq!(vaddr.to_phys().as_usize(), 0x80000000);
-    }
-
-    #[test_case]
-    fn test_addr_alignment() {
-        let addr = PhysAddr::new(0x80001234);
-        assert!(!addr.is_aligned(0x1000));
-        assert_eq!(addr.align_down(0x1000).as_usize(), 0x80001000);
-        assert_eq!(addr.align_up(0x1000).as_usize(), 0x80002000);
-
-        let aligned = PhysAddr::new(0x80002000);
-        assert!(aligned.is_aligned(0x1000));
-        assert_eq!(aligned.align_down(0x1000).as_usize(), 0x80002000);
-        assert_eq!(aligned.align_up(0x1000).as_usize(), 0x80002000);
     }
 }

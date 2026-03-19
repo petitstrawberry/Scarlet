@@ -136,6 +136,12 @@ impl PageTable {
         }
     }
 
+    /// Switch page table for boot-time initialization.
+    /// On RISC-V, this just calls switch() (no TTBR1 equivalent).
+    pub fn switch_for_boot(&self, asid: u16) {
+        self.switch(asid);
+    }
+
     /// Get the value for the satp register.
     ///
     /// # Note

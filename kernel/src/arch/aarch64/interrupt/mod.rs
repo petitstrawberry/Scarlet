@@ -3,9 +3,47 @@
 //! Interrupt handling for AArch64 architecture.
 
 use core::arch::asm;
+use core::sync::atomic::{AtomicU8, AtomicU32, Ordering};
 
 use crate::arch::get_cpu;
-use crate::interrupt::{InterruptManager, controllers::LocalInterruptType};
+use crate::interrupt::{InterruptError, InterruptManager, controllers::LocalInterruptType};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TimerInterruptRoute {
+    Unknown,
+    ExternalControllerIrq,
+    FastInterrupt,
+}
+
+static TIMER_INTERRUPT_ROUTE: AtomicU8 = AtomicU8::new(TimerInterruptRoute::Unknown as u8);
+static TIMER_EXTERNAL_INTERRUPT_ID: AtomicU32 = AtomicU32::new(u32::MAX);
+
+pub fn configure_timer_interrupt_route(
+    route: TimerInterruptRoute,
+    external_interrupt_id: Option<u32>,
+) {
+    TIMER_INTERRUPT_ROUTE.store(route as u8, Ordering::Relaxed);
+    TIMER_EXTERNAL_INTERRUPT_ID.store(external_interrupt_id.unwrap_or(u32::MAX), Ordering::Relaxed);
+}
+
+pub fn timer_interrupt_route() -> TimerInterruptRoute {
+    match TIMER_INTERRUPT_ROUTE.load(Ordering::Relaxed) {
+        x if x == TimerInterruptRoute::ExternalControllerIrq as u8 => {
+            TimerInterruptRoute::ExternalControllerIrq
+        }
+        x if x == TimerInterruptRoute::FastInterrupt as u8 => TimerInterruptRoute::FastInterrupt,
+        _ => TimerInterruptRoute::Unknown,
+    }
+}
+
+pub fn timer_external_interrupt_id() -> Option<u32> {
+    let interrupt_id = TIMER_EXTERNAL_INTERRUPT_ID.load(Ordering::Relaxed);
+    (interrupt_id != u32::MAX).then_some(interrupt_id)
+}
+
+pub fn is_arch_timer_external_interrupt(interrupt_id: u32) -> bool {
+    timer_external_interrupt_id() == Some(interrupt_id)
+}
 
 pub fn interrupt_init() {
     // TODO: Initialize AArch64 interrupts
@@ -125,6 +163,84 @@ pub fn disable_timer_source_interrupt() {
         asm!("msr cntv_ctl_el0, {0}", in(reg) ctl, options(nostack));
         asm!("isb", options(nostack));
     }
+}
+
+/// Enable the architectural timer interrupt for the current CPU.
+///
+/// This is a platform-agnostic helper that:
+/// 1. Enables the timer at the local controller level (CNTV_CTL_EL0)
+/// 2. Attempts to enable the timer PPI at the external controller level
+///
+/// On GIC-based systems, the timer uses PPI 27 which must be enabled in the
+/// distributor. On Apple Silicon (AIC), the timer bypasses the AIC entirely
+/// (it's wired to FIQ), so the external enable gracefully fails and is ignored.
+pub fn enable_arch_timer_interrupt() -> Result<(), &'static str> {
+    let cpu_id = get_cpu().get_cpuid() as u32;
+
+    // Enable at local controller level (CNTV_CTL_EL0)
+    InterruptManager::with_manager(|mgr| {
+        mgr.enable_local_interrupt(cpu_id, LocalInterruptType::Timer)
+    })
+    .map_err(|_| "failed to enable local timer interrupt")?;
+
+    match timer_interrupt_route() {
+        TimerInterruptRoute::FastInterrupt => {}
+        TimerInterruptRoute::ExternalControllerIrq => {
+            let interrupt_id = timer_external_interrupt_id()
+                .ok_or("external timer interrupt route is not configured")?;
+            InterruptManager::with_manager(|mgr| {
+                mgr.enable_external_interrupt(interrupt_id, cpu_id)
+            })
+            .or_else(|e| {
+                if matches!(e, InterruptError::InvalidInterruptId) {
+                    Ok(())
+                } else {
+                    Err("failed to enable timer PPI in external controller")
+                }
+            })?;
+        }
+        TimerInterruptRoute::Unknown => return Err("timer interrupt route is not configured"),
+    }
+
+    Ok(())
+}
+
+/// Disable the architectural timer interrupt for the current CPU.
+pub fn disable_arch_timer_interrupt() -> Result<(), &'static str> {
+    let cpu_id = get_cpu().get_cpuid() as u32;
+
+    InterruptManager::with_manager(|mgr| {
+        mgr.disable_local_interrupt(cpu_id, LocalInterruptType::Timer)
+    })
+    .map_err(|_| "failed to disable local timer interrupt")?;
+
+    match timer_interrupt_route() {
+        TimerInterruptRoute::FastInterrupt => {}
+        TimerInterruptRoute::ExternalControllerIrq => {
+            let interrupt_id = timer_external_interrupt_id()
+                .ok_or("external timer interrupt route is not configured")?;
+            InterruptManager::with_manager(|mgr| {
+                mgr.disable_external_interrupt(interrupt_id, cpu_id)
+            })
+            .or_else(|e| {
+                if matches!(e, InterruptError::InvalidInterruptId) {
+                    Ok(())
+                } else {
+                    Err("failed to disable timer PPI in external controller")
+                }
+            })?;
+        }
+        TimerInterruptRoute::Unknown => return Err("timer interrupt route is not configured"),
+    }
+
+    Ok(())
+}
+
+pub fn is_arch_timer_pending() -> bool {
+    InterruptManager::with_manager(|mgr| {
+        let cpu_id = get_cpu().get_cpuid() as u32;
+        mgr.is_local_interrupt_pending(cpu_id, LocalInterruptType::Timer)
+    })
 }
 
 pub fn with_interrupts_disabled<F, R>(f: F) -> R

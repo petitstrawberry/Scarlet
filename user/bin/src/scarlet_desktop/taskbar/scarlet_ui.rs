@@ -541,6 +541,11 @@ impl Application for TaskBarApp {
         self.update_menu_for_app(window_id, app_name, &resolved_menu_titles);
     }
 
+    fn on_resize(&mut self, width: u32, _height: u32) {
+        println!("[TaskBar] on_resize: width={}", width);
+        self.screen_width.set(width as f32);
+    }
+
     fn body(&self) -> impl View {
         let cpu = self.cpu_usage.get();
         let mem = self.memory_usage.get();

@@ -503,6 +503,11 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
         Ok(())
     })?;
 
+    crate::arch::interrupt::configure_timer_interrupt_route(
+        crate::arch::interrupt::TimerInterruptRoute::ExternalControllerIrq,
+        Some(crate::drivers::pic::arm_generic_timer::CNTV_PPI_IRQ),
+    );
+
     Ok(())
 }
 

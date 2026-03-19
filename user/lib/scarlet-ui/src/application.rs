@@ -3,20 +3,20 @@
 //! The Application trait provides the main loop and lifecycle management
 //! for ScarletUI applications.
 
-use crate::view::View;
-use crate::geometry::Size;
-use crate::event::Event;
-use crate::platform::{PlatformWindow, SWSPlatformWindow};
-use crate::pipeline::RenderingPipeline;
+use crate::element::{Element, ElementId, LayoutConstraints, UpdateResult, WindowSizeLimits};
 use crate::error::Result;
+use crate::event::Event;
+use crate::geometry::Size;
+use crate::geometry::{Point, Rect};
 use crate::menu_model;
+use crate::pipeline::RenderingPipeline;
+use crate::platform::{PlatformWindow, SWSPlatformWindow};
 use crate::state::StateId;
 use crate::state::SubscriptionId;
-use crate::element::{Element, ElementId, LayoutConstraints, UpdateResult, WindowSizeLimits};
-use crate::geometry::{Point, Rect};
+use crate::view::View;
 use alloc::boxed::Box;
-use alloc::vec::Vec;
 use alloc::string::String;
+use alloc::vec::Vec;
 use core::any::Any;
 use std::println;
 
@@ -48,6 +48,15 @@ pub trait Application: View {
     /// This is used by TaskBar to update its menu bar.
     /// Default implementation does nothing.
     fn on_active_app_changed(&mut self, _window_id: u32, _app_name: &str, _menu_titles: &str) {
+        // Default: do nothing
+    }
+
+    /// Handle window resize event
+    ///
+    /// Called when the window is resized. Applications like TaskBar
+    /// can override this to update their internal state (e.g., screen_width).
+    /// Default implementation does nothing.
+    fn on_resize(&mut self, _width: u32, _height: u32) {
         // Default: do nothing
     }
 
@@ -131,7 +140,7 @@ pub trait Application: View {
                 focus_on_create,
                 active_on_focus,
             )
-                .map_err(|_| crate::error::Error::WindowCreationFailed)?
+            .map_err(|_| crate::error::Error::WindowCreationFailed)?
         } else {
             SWSPlatformWindow::create_with_type_and_menu_and_policies(
                 &app_id,
@@ -178,6 +187,7 @@ pub trait Application: View {
                         let new_size = Size::new(width as f32, height as f32);
                         if platform_window.resize(width, height).is_ok() {
                             pipeline.resize(new_size);
+                            self.on_resize(width, height);
                             if let Some(buffer) = pipeline.render() {
                                 platform_window.present(buffer);
                                 presented_this_cycle = true;
@@ -202,12 +212,15 @@ pub trait Application: View {
                                 if *offset + 4 > data.len() {
                                     return String::new();
                                 }
-                                let len = u32::from_le_bytes(data[*offset..*offset+4].try_into().unwrap()) as usize;
+                                let len = u32::from_le_bytes(
+                                    data[*offset..*offset + 4].try_into().unwrap(),
+                                ) as usize;
                                 *offset += 4;
                                 if *offset + len > data.len() {
                                     return String::new();
                                 }
-                                let s = core::str::from_utf8(&data[*offset..*offset+len]).unwrap_or("");
+                                let s = core::str::from_utf8(&data[*offset..*offset + len])
+                                    .unwrap_or("");
                                 *offset += len;
                                 String::from(s)
                             };
@@ -243,12 +256,15 @@ pub trait Application: View {
                                 if *offset + 4 > data.len() {
                                     return String::new();
                                 }
-                                let len = u32::from_le_bytes(data[*offset..*offset+4].try_into().unwrap()) as usize;
+                                let len = u32::from_le_bytes(
+                                    data[*offset..*offset + 4].try_into().unwrap(),
+                                ) as usize;
                                 *offset += 4;
                                 if *offset + len > data.len() {
                                     return String::new();
                                 }
-                                let s = core::str::from_utf8(&data[*offset..*offset+len]).unwrap_or("");
+                                let s = core::str::from_utf8(&data[*offset..*offset + len])
+                                    .unwrap_or("");
                                 *offset += len;
                                 String::from(s)
                             };

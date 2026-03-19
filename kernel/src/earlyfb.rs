@@ -182,6 +182,10 @@ impl FramebufferConsole {
 
 static EARLY_CONSOLE: Mutex<FramebufferConsole> = Mutex::new(FramebufferConsole::new());
 
+pub fn console_lock_addr() -> usize {
+    &EARLY_CONSOLE as *const _ as usize
+}
+
 pub fn init(framebuffer: &Framebuffer<'_>) {
     let mut console = EARLY_CONSOLE.lock();
     if console.initialized {
@@ -202,4 +206,32 @@ pub fn write_str(s: &str) {
 
 pub fn is_initialized() -> bool {
     EARLY_CONSOLE.lock().initialized
+}
+
+pub fn deactivate() {
+    let mut console = EARLY_CONSOLE.lock();
+    console.initialized = false;
+}
+
+/// Update framebuffer address for the new HHDM offset after page table transition.
+///
+/// This should be called after `transition_kernel_memory_layout()` to update
+/// the framebuffer virtual address to use Scarlet's HHDM instead of Limine's.
+///
+/// # Arguments
+///
+/// * `old_hhdm_base` - The bootloader's HHDM base address (from BootInfo.hhdm_offset)
+/// * `new_hhdm_base` - The new HHDM base address (e.g., `SCARLET_HHDM_BASE`)
+pub fn fixup_hhdm_offset(old_hhdm_base: usize, new_hhdm_base: usize) {
+    let mut console = EARLY_CONSOLE.lock();
+    if !console.initialized || console.addr == 0 {
+        return;
+    }
+
+    if console.addr >= new_hhdm_base {
+        return;
+    }
+
+    let paddr = console.addr.saturating_sub(old_hhdm_base);
+    console.addr = new_hhdm_base.saturating_add(paddr);
 }

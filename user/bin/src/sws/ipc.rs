@@ -1676,27 +1676,10 @@ fn client_thread_main(client_id: usize, mut socket: Socket) {
             }
             Ok(ClientMessageRef::GetScreenSize {}) => {
                 println!(
-                    "[ClientThread {}] GetScreenSize: requesting screen size",
+                    "[ClientThread {}] GetScreenSize: forwarding to compositor",
                     client_id
                 );
-                // Send response directly with default screen size
-                // TODO: Get actual screen size from compositor
-                let screen_width = 1024; // Default fallback
-                let screen_height = 768;
-                let payload = protocol::payload_screen_size(screen_width, screen_height);
-                if let Err(e) =
-                    write_frame(&mut socket, protocol::server_msg::SCREEN_SIZE, &payload)
-                {
-                    println!(
-                        "[ClientThread {}] Failed to send SCREEN_SIZE response: {:?}",
-                        client_id, e
-                    );
-                } else {
-                    println!(
-                        "[ClientThread {}] Sent SCREEN_SIZE: {}x{}",
-                        client_id, screen_width, screen_height
-                    );
-                }
+                push_ipc_event(IpcEvent::GetScreenSize { client_id });
             }
             Ok(ClientMessageRef::GetWindowList {}) => {
                 println!(

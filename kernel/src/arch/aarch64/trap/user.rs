@@ -13,9 +13,7 @@ use core::arch::{asm, naked_asm};
 
 use super::exception::arch_exception_handler;
 use super::interrupt::arch_irq_handler;
-use crate::arch::{
-    Trapframe, get_current_cpu_id, get_kernel_trapvector_paddr, set_arch, set_trapvector,
-};
+use crate::arch::{Trapframe, get_kernel_trapvector_paddr, set_arch, set_trapvector};
 use crate::vm::get_trampoline_trap_vector;
 
 #[unsafe(export_name = "aarch64_first_switch_to_user_naked")]
@@ -287,8 +285,8 @@ pub extern "C" fn arch_user_trap_handler(trapframe: &mut Trapframe, trap_kind: u
     set_trapvector(get_kernel_trapvector_paddr());
 
     // trap_kind is now passed in x1 (argument 2), so no need to read from memory!
-    if trap_kind == 1 {
-        arch_irq_handler(trapframe);
+    if trap_kind == 1 || trap_kind == 2 {
+        arch_irq_handler(trapframe, trap_kind);
     } else {
         arch_exception_handler(trapframe, trap_kind);
     }

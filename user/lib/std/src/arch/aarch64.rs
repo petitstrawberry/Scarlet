@@ -55,6 +55,7 @@ pub fn arch_syscall0(syscall: Syscall) -> usize {
             "svc #0",
             in("x8") syscall as usize,
             out("x0") ret,
+            clobber_abi("C"),
             options(nostack)
         );
     }
@@ -67,7 +68,8 @@ pub fn arch_syscall1(syscall: Syscall, arg1: usize) -> usize {
         asm!(
             "svc #0",
             in("x8") syscall as usize,
-            inout("x0") arg1 => ret,
+            inlateout("x0") arg1 => ret,
+            clobber_abi("C"),
             options(nostack)
         );
     }
@@ -80,8 +82,9 @@ pub fn arch_syscall2(syscall: Syscall, arg1: usize, arg2: usize) -> usize {
         asm!(
             "svc #0",
             in("x8") syscall as usize,
-            inout("x0") arg1 => ret,
+            inlateout("x0") arg1 => ret,
             in("x1") arg2,
+            clobber_abi("C"),
             options(nostack)
         );
     }
@@ -94,9 +97,10 @@ pub fn arch_syscall3(syscall: Syscall, arg1: usize, arg2: usize, arg3: usize) ->
         asm!(
             "svc #0",
             in("x8") syscall as usize,
-            inout("x0") arg1 => ret,
+            inlateout("x0") arg1 => ret,
             in("x1") arg2,
             in("x2") arg3,
+            clobber_abi("C"),
             options(nostack)
         );
     }
@@ -115,10 +119,11 @@ pub fn arch_syscall4(
         asm!(
             "svc #0",
             in("x8") syscall as usize,
-            inout("x0") arg1 => ret,
+            inlateout("x0") arg1 => ret,
             in("x1") arg2,
             in("x2") arg3,
             in("x3") arg4,
+            clobber_abi("C"),
             options(nostack)
         );
     }
@@ -138,11 +143,12 @@ pub fn arch_syscall5(
         asm!(
             "svc #0",
             in("x8") syscall as usize,
-            inout("x0") arg1 => ret,
+            inlateout("x0") arg1 => ret,
             in("x1") arg2,
             in("x2") arg3,
             in("x3") arg4,
             in("x4") arg5,
+            clobber_abi("C"),
             options(nostack)
         );
     }
@@ -163,12 +169,13 @@ pub fn arch_syscall6(
         asm!(
             "svc #0",
             in("x8") syscall as usize,
-            inout("x0") arg1 => ret,
+            inlateout("x0") arg1 => ret,
             in("x1") arg2,
             in("x2") arg3,
             in("x3") arg4,
             in("x4") arg5,
             in("x5") arg6,
+            clobber_abi("C"),
             options(nostack)
         );
     }

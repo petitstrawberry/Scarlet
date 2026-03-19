@@ -11,3 +11,4 @@ pub mod uart;
 pub mod virtio;
 pub mod virtio_input;
 pub mod virtio_rng;
+pub mod watchdog;

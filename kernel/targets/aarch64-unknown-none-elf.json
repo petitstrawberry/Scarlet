@@ -1,20 +1,20 @@
 {
   "arch": "aarch64",
   "code-model": "large",
+  "abi": "softfloat",
   "cpu": "generic",
   "crt-objects-fallback": "false",
   "data-layout": "e-m:e-p270:32:32-p271:32:32-p272:64:64-i8:8:32-i16:16:32-i64:64-i128:128-n32:64-S128-Fn32",
   "eh-frame-header": false,
   "emit-debug-gdb-scripts": false,
-  "features": "+strict-align",
+  "features": "+v8a,+strict-align,-neon",
 
   "linker": "rust-lld",
   "linker-flavor": "gnu-lld",
-  "llvm-target": "aarch64-elf",
-  "llvm-abiname": "lp64",
-  "max-atomic-width": 64,
+  "llvm-target": "aarch64-unknown-none",
+  "max-atomic-width": 128,
   "metadata": {
-    "description": "Bare AArch64 (ARMv8-A ISA)",
+    "description": "Bare AArch64 (ARMv8-A ISA, softfloat)",
     "host_tools": false,
     "std": false,
     "tier": 2
@@ -24,8 +24,11 @@
       "ld.lld": ["-T", "lds/aarch64_limine.ld"]
     },
   "relocation-model": "static",
+  "stack-probes": {
+    "kind": "inline"
+  },
   "supported-sanitizers": [
-    "shadow-call-stack",
+    "kcfi",
     "kernel-address"
   ],
   "target-pointer-width": 64

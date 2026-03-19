@@ -206,6 +206,73 @@ pub struct Framebuffer {
 }
 
 impl Framebuffer {
+    fn bytes_per_pixel(var_info: &FbVarScreenInfo) -> usize {
+        (var_info.bits_per_pixel as usize).div_ceil(8)
+    }
+
+    fn scale_component_to_field(value: u8, field: FbBitfield) -> u32 {
+        if field.length == 0 {
+            return 0;
+        }
+
+        let max = (1u32 << field.length) - 1;
+        let scaled = ((value as u32) * max + 127) / 255;
+
+        if field.msb_right == 0 {
+            scaled
+        } else {
+            scaled.reverse_bits() >> (u32::BITS - field.length)
+        }
+    }
+
+    fn pack_bgra_pixel(color: [u8; 4], var_info: &FbVarScreenInfo) -> u32 {
+        (Self::scale_component_to_field(color[2], var_info.red) << var_info.red.offset)
+            | (Self::scale_component_to_field(color[1], var_info.green) << var_info.green.offset)
+            | (Self::scale_component_to_field(color[0], var_info.blue) << var_info.blue.offset)
+            | (Self::scale_component_to_field(color[3], var_info.transp) << var_info.transp.offset)
+    }
+
+    fn write_packed_pixel_bytes(dst: &mut [u8], color: [u8; 4], var_info: &FbVarScreenInfo) {
+        let bytes_per_pixel = Self::bytes_per_pixel(var_info);
+        let pixel = Self::pack_bgra_pixel(color, var_info).to_le_bytes();
+        dst[..bytes_per_pixel].copy_from_slice(&pixel[..bytes_per_pixel]);
+    }
+
+    fn is_native_bgra8888(var_info: &FbVarScreenInfo) -> bool {
+        var_info.bits_per_pixel == 32
+            && var_info.red.offset == 16
+            && var_info.red.length == 8
+            && var_info.red.msb_right == 0
+            && var_info.green.offset == 8
+            && var_info.green.length == 8
+            && var_info.green.msb_right == 0
+            && var_info.blue.offset == 0
+            && var_info.blue.length == 8
+            && var_info.blue.msb_right == 0
+            && var_info.transp.offset == 24
+            && var_info.transp.length == 8
+            && var_info.transp.msb_right == 0
+    }
+
+    fn populate_line_with_color(
+        line: &mut [u8],
+        width: usize,
+        color: [u8; 4],
+        var_info: &FbVarScreenInfo,
+    ) {
+        let bytes_per_pixel = Self::bytes_per_pixel(var_info);
+        for x in 0..width {
+            let pixel_offset = x * bytes_per_pixel;
+            if pixel_offset + bytes_per_pixel <= line.len() {
+                Self::write_packed_pixel_bytes(
+                    &mut line[pixel_offset..pixel_offset + bytes_per_pixel],
+                    color,
+                    var_info,
+                );
+            }
+        }
+    }
+
     /// Open a framebuffer device
     ///
     /// # Arguments
@@ -356,8 +423,10 @@ impl Framebuffer {
         let var_info = self.get_var_screen_info()?;
         let fix_info = self.get_fix_screen_info()?;
 
-        let bytes_per_pixel = (var_info.bits_per_pixel / 8) as usize;
+        let bytes_per_pixel = Self::bytes_per_pixel(&var_info);
         let line_length = fix_info.line_length as usize;
+        let mut packed_pixel = [0u8; 4];
+        Self::write_packed_pixel_bytes(&mut packed_pixel[..bytes_per_pixel], color, &var_info);
 
         // Calculate pixel offset
         let offset = y as usize * line_length + x as usize * bytes_per_pixel;
@@ -370,8 +439,7 @@ impl Framebuffer {
 
             unsafe {
                 let pixel_ptr = (mapped_addr + offset) as *mut u8;
-                let write_len = bytes_per_pixel.min(4);
-                core::ptr::copy_nonoverlapping(color.as_ptr(), pixel_ptr, write_len);
+                core::ptr::copy_nonoverlapping(packed_pixel.as_ptr(), pixel_ptr, bytes_per_pixel);
             }
         } else {
             // Fallback to file I/O if mmap is not available
@@ -379,9 +447,8 @@ impl Framebuffer {
                 .seek(SeekFrom::Start(offset as u64))
                 .map_err(|_| HandleError::SystemError(-1))?;
 
-            let write_len = bytes_per_pixel.min(4);
             self.file
-                .write(&color[..write_len])
+                .write(&packed_pixel[..bytes_per_pixel])
                 .map_err(|_| HandleError::SystemError(-1))?;
         }
 
@@ -451,7 +518,7 @@ impl Framebuffer {
         let var_info = self.get_var_screen_info()?;
         let fix_info = self.get_fix_screen_info()?;
 
-        let bytes_per_pixel = (var_info.bits_per_pixel / 8) as usize;
+        let bytes_per_pixel = Self::bytes_per_pixel(&var_info);
         let line_length = fix_info.line_length as usize;
         let block_line_bytes = width as usize * bytes_per_pixel;
 
@@ -535,7 +602,7 @@ impl Framebuffer {
         let var_info = self.get_var_screen_info()?;
         let fix_info = self.get_fix_screen_info()?;
 
-        let bytes_per_pixel = (var_info.bits_per_pixel / 8) as usize;
+        let bytes_per_pixel = Self::bytes_per_pixel(&var_info);
         let line_length = fix_info.line_length as usize;
         let block_line_bytes = width as usize * bytes_per_pixel;
 
@@ -593,6 +660,93 @@ impl Framebuffer {
         Ok(())
     }
 
+    pub fn write_block_bgra_strided(
+        &mut self,
+        x: u32,
+        y: u32,
+        width: u32,
+        height: u32,
+        data: &[u8],
+        src_stride_bytes: usize,
+    ) -> HandleResult<()> {
+        if width == 0 || height == 0 {
+            return Ok(());
+        }
+
+        let var_info = self.get_var_screen_info()?;
+        let fix_info = self.get_fix_screen_info()?;
+        let dst_bytes_per_pixel = Self::bytes_per_pixel(&var_info);
+        let line_length = fix_info.line_length as usize;
+        let src_line_bytes = width as usize * 4;
+
+        if Self::is_native_bgra8888(&var_info) {
+            return self.write_block_strided(x, y, width, height, data, src_stride_bytes);
+        }
+
+        if src_stride_bytes < src_line_bytes {
+            return Err(HandleError::InvalidParameter);
+        }
+
+        let required = (height as usize - 1)
+            .saturating_mul(src_stride_bytes)
+            .saturating_add(src_line_bytes);
+        if required > data.len() {
+            return Err(HandleError::InvalidParameter);
+        }
+
+        let mut converted_line = vec![0u8; width as usize * dst_bytes_per_pixel];
+
+        for row in 0..height {
+            let src_off = row as usize * src_stride_bytes;
+            let src_row = &data[src_off..src_off + src_line_bytes];
+
+            for pixel in 0..width as usize {
+                let src_pixel_offset = pixel * 4;
+                let dst_pixel_offset = pixel * dst_bytes_per_pixel;
+                let color = [
+                    src_row[src_pixel_offset],
+                    src_row[src_pixel_offset + 1],
+                    src_row[src_pixel_offset + 2],
+                    src_row[src_pixel_offset + 3],
+                ];
+                Self::write_packed_pixel_bytes(
+                    &mut converted_line[dst_pixel_offset..dst_pixel_offset + dst_bytes_per_pixel],
+                    color,
+                    &var_info,
+                );
+            }
+
+            let dst_y = y + row;
+            let dst_off = (dst_y as usize)
+                .saturating_mul(line_length)
+                .saturating_add((x as usize).saturating_mul(dst_bytes_per_pixel));
+
+            if let Some((mapped_addr, mapped_size)) = self.mapped_buffer {
+                if dst_off.saturating_add(converted_line.len()) > mapped_size {
+                    return Err(HandleError::InvalidParameter);
+                }
+
+                unsafe {
+                    let dst_ptr = (mapped_addr + dst_off) as *mut u8;
+                    core::ptr::copy_nonoverlapping(
+                        converted_line.as_ptr(),
+                        dst_ptr,
+                        converted_line.len(),
+                    );
+                }
+            } else {
+                self.file
+                    .seek(SeekFrom::Start(dst_off as u64))
+                    .map_err(|_| HandleError::SystemError(-1))?;
+                self.file
+                    .write(&converted_line)
+                    .map_err(|_| HandleError::SystemError(-1))?;
+            }
+        }
+
+        Ok(())
+    }
+
     /// Fill the entire screen with a solid color
     ///
     /// # Arguments
@@ -606,20 +760,11 @@ impl Framebuffer {
 
         let width = var_info.xres as usize;
         let height = var_info.yres as usize;
-        let bytes_per_pixel = (var_info.bits_per_pixel / 8) as usize;
         let line_length = fix_info.line_length as usize;
 
         // Create a line buffer filled with the color
         let mut line_buffer = vec![0u8; line_length];
-
-        // Fill line buffer with repeated color pattern
-        for x in 0..width {
-            let pixel_offset = x * bytes_per_pixel;
-            if pixel_offset + bytes_per_pixel <= line_buffer.len() {
-                line_buffer[pixel_offset..pixel_offset + bytes_per_pixel.min(4)]
-                    .copy_from_slice(&color[..bytes_per_pixel.min(4)]);
-            }
-        }
+        Self::populate_line_with_color(&mut line_buffer, width, color, &var_info);
 
         // Write the same line to all rows
         for y in 0..height {
@@ -655,21 +800,14 @@ impl Framebuffer {
         let var_info = self.get_var_screen_info()?;
         let fix_info = self.get_fix_screen_info()?;
 
-        let bytes_per_pixel = (var_info.bits_per_pixel / 8) as usize;
+        let bytes_per_pixel = Self::bytes_per_pixel(&var_info);
         let line_length = fix_info.line_length as usize;
 
         // Create a single-line buffer for the rectangle width.
         let line_bytes = width as usize * bytes_per_pixel;
         let mut line_buffer = vec![0u8; line_bytes];
 
-        // Fill line buffer with repeated color pattern
-        for pixel in 0..width as usize {
-            let pixel_offset = pixel * bytes_per_pixel;
-            if pixel_offset + bytes_per_pixel <= line_buffer.len() {
-                line_buffer[pixel_offset..pixel_offset + bytes_per_pixel.min(4)]
-                    .copy_from_slice(&color[..bytes_per_pixel.min(4)]);
-            }
-        }
+        Self::populate_line_with_color(&mut line_buffer, width as usize, color, &var_info);
 
         if let Some((mapped_addr, mapped_size)) = self.mapped_buffer {
             for row in 0..height {
@@ -719,7 +857,7 @@ impl Framebuffer {
         let var_info = self.get_var_screen_info()?;
         let width = var_info.xres as usize;
         let height = var_info.yres as usize;
-        let bytes_per_pixel = (var_info.bits_per_pixel / 8) as usize;
+        let bytes_per_pixel = Self::bytes_per_pixel(&var_info);
 
         // Create line buffer with horizontal gradient
         let line_bytes = width * bytes_per_pixel;
@@ -742,8 +880,11 @@ impl Framebuffer {
 
             let pixel_offset = x * bytes_per_pixel;
             if pixel_offset + bytes_per_pixel <= line_buffer.len() {
-                line_buffer[pixel_offset..pixel_offset + bytes_per_pixel.min(4)]
-                    .copy_from_slice(&color[..bytes_per_pixel.min(4)]);
+                Self::write_packed_pixel_bytes(
+                    &mut line_buffer[pixel_offset..pixel_offset + bytes_per_pixel],
+                    color,
+                    &var_info,
+                );
             }
         }
 
@@ -771,7 +912,7 @@ impl Framebuffer {
         let var_info = self.get_var_screen_info()?;
         let width = var_info.xres as usize;
         let height = var_info.yres as usize;
-        let bytes_per_pixel = (var_info.bits_per_pixel / 8) as usize;
+        let bytes_per_pixel = Self::bytes_per_pixel(&var_info);
 
         // Create line buffer filled with this color
         let line_bytes = width * bytes_per_pixel;
@@ -794,8 +935,11 @@ impl Framebuffer {
             for x in 0..width {
                 let pixel_offset = x * bytes_per_pixel;
                 if pixel_offset + bytes_per_pixel <= line_buffer.len() {
-                    line_buffer[pixel_offset..pixel_offset + bytes_per_pixel.min(4)]
-                        .copy_from_slice(&color[..bytes_per_pixel.min(4)]);
+                    Self::write_packed_pixel_bytes(
+                        &mut line_buffer[pixel_offset..pixel_offset + bytes_per_pixel],
+                        color,
+                        &var_info,
+                    );
                 }
             }
 
@@ -829,7 +973,7 @@ impl Framebuffer {
         horizontal: bool,
     ) -> HandleResult<()> {
         let var_info = self.get_var_screen_info()?;
-        let bytes_per_pixel = (var_info.bits_per_pixel / 8) as usize;
+        let bytes_per_pixel = Self::bytes_per_pixel(&var_info);
 
         if horizontal {
             // Horizontal gradient: create one line buffer and reuse it
@@ -847,8 +991,11 @@ impl Framebuffer {
 
                 let pixel_offset = px * bytes_per_pixel;
                 if pixel_offset + bytes_per_pixel <= line_buffer.len() {
-                    line_buffer[pixel_offset..pixel_offset + bytes_per_pixel.min(4)]
-                        .copy_from_slice(&color[..bytes_per_pixel.min(4)]);
+                    Self::write_packed_pixel_bytes(
+                        &mut line_buffer[pixel_offset..pixel_offset + bytes_per_pixel],
+                        color,
+                        &var_info,
+                    );
                 }
             }
 
