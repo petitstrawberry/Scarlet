@@ -257,6 +257,7 @@ pub struct Trapframe {
     pub tpidrro_el0: u64,
     // exception information
     pub esr_el1: u64,
+    pub _padding: u64, // must be 304 bytes to match trampoline's sub sp, sp, #304
 }
 
 impl Trapframe {
@@ -269,6 +270,7 @@ impl Trapframe {
             tpidr_el0: 0,
             tpidrro_el0: 0,
             esr_el1: 0,
+            _padding: 0,
         }
     }
 
