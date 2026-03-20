@@ -4,7 +4,6 @@
 //! using ECAM (Enhanced Configuration Access Mechanism).
 
 use super::PciAddress;
-
 /// Standard PCI configuration space offsets
 pub mod offset {
     /// Vendor ID (16-bit)
@@ -81,8 +80,12 @@ impl PciConfig {
     ///
     /// This performs a volatile MMIO read. The caller must ensure the address is valid.
     pub fn read_u32(&self, addr: &PciAddress, offset: usize) -> u32 {
-        let phys_addr = self.config_address(addr, offset);
-        unsafe { core::ptr::read_volatile(phys_addr as *const u32) }
+        let base = self.config_address(addr, offset);
+        let b0 = unsafe { core::ptr::read_volatile(base as *const u8) } as u32;
+        let b1 = unsafe { core::ptr::read_volatile((base + 1) as *const u8) } as u32;
+        let b2 = unsafe { core::ptr::read_volatile((base + 2) as *const u8) } as u32;
+        let b3 = unsafe { core::ptr::read_volatile((base + 3) as *const u8) } as u32;
+        b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)
     }
 
     /// Write a 32-bit value to PCI configuration space
@@ -112,8 +115,10 @@ impl PciConfig {
     ///
     /// The 16-bit value read from configuration space
     pub fn read_u16(&self, addr: &PciAddress, offset: usize) -> u16 {
-        let phys_addr = self.config_address(addr, offset);
-        unsafe { core::ptr::read_volatile(phys_addr as *const u16) }
+        let base = self.config_address(addr, offset);
+        let b0 = unsafe { core::ptr::read_volatile(base as *const u8) } as u16;
+        let b1 = unsafe { core::ptr::read_volatile((base + 1) as *const u8) } as u16;
+        b0 | (b1 << 8)
     }
 
     /// Write a 16-bit value to PCI configuration space
@@ -167,7 +172,7 @@ impl PciConfig {
 
     /// Read class code (24-bit: base class, sub class, interface)
     pub fn read_class_code(&self, addr: &PciAddress) -> u32 {
-        self.read_u32(addr, offset::CLASS_CODE) >> 8
+        self.read_u32(addr, offset::REVISION_ID) >> 8
     }
 
     /// Read header type

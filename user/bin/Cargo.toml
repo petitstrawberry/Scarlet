@@ -151,6 +151,10 @@ name = "event_demo"
 path = "src/event_demo.rs"
 
 [[bin]]
+name = "input_dump"
+path = "src/input_dump.rs"
+
+[[bin]]
 name = "settings"
 path = "src/settings.rs"
 

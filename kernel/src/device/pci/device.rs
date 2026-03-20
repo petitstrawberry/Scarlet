@@ -93,6 +93,8 @@ impl From<u8> for PciClass {
 pub struct PciDeviceInfo {
     /// PCI address (bus, device, function)
     address: PciAddress,
+    /// Virtual base address of the mapped ECAM region used for config access
+    ecam_vaddr: usize,
     /// Vendor ID
     vendor_id: u16,
     /// Device ID
@@ -109,6 +111,7 @@ pub struct PciDeviceInfo {
     interrupt_line: u8,
     /// Interrupt pin
     interrupt_pin: u8,
+    routed_irq: Option<u32>,
     /// Device name (generated from vendor/device ID)
     name: &'static str,
     /// Unique device ID in the system
@@ -134,6 +137,7 @@ impl PciDeviceInfo {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         address: PciAddress,
+        ecam_vaddr: usize,
         vendor_id: u16,
         device_id: u16,
         class_code: u32,
@@ -142,11 +146,13 @@ impl PciDeviceInfo {
         subsystem_id: u16,
         interrupt_line: u8,
         interrupt_pin: u8,
+        routed_irq: Option<u32>,
         name: &'static str,
         id: usize,
     ) -> Self {
         Self {
             address,
+            ecam_vaddr,
             vendor_id,
             device_id,
             class_code,
@@ -155,6 +161,7 @@ impl PciDeviceInfo {
             subsystem_id,
             interrupt_line,
             interrupt_pin,
+            routed_irq,
             name,
             id,
         }
@@ -163,6 +170,11 @@ impl PciDeviceInfo {
     /// Get the PCI address
     pub fn address(&self) -> PciAddress {
         self.address
+    }
+
+    /// Get the mapped ECAM virtual base address
+    pub fn ecam_vaddr(&self) -> usize {
+        self.ecam_vaddr
     }
 
     /// Get the vendor ID
@@ -223,6 +235,10 @@ impl PciDeviceInfo {
     /// Get the interrupt pin
     pub fn interrupt_pin(&self) -> u8 {
         self.interrupt_pin
+    }
+
+    pub fn routed_irq(&self) -> Option<u32> {
+        self.routed_irq
     }
 
     /// Check if device matches vendor and device ID
@@ -293,6 +309,7 @@ mod tests {
         let addr = PciAddress::new(0, 0, 1, 0);
         let device = PciDeviceInfo::new(
             addr,
+            0,
             0x8086, // Intel
             0x1234,
             0x020000, // Network controller
@@ -301,6 +318,7 @@ mod tests {
             0x0000,
             0x0B,
             0x01,
+            None,
             "pci_device",
             1,
         );
@@ -317,6 +335,7 @@ mod tests {
         let addr = PciAddress::new(0, 0, 1, 0);
         let device = PciDeviceInfo::new(
             addr,
+            0,
             0x8086,
             0x1234,
             0x030000, // Display controller
@@ -325,6 +344,7 @@ mod tests {
             0x0000,
             0x0B,
             0x01,
+            None,
             "pci_device",
             1,
         );

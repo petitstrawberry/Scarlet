@@ -66,6 +66,13 @@ fi
 TEMP_OUTPUT=$(mktemp)
 
 QEMU_DEBUG_ARGS=""
+VIRTIO_INPUT_ARGS=""
+
+if [ "${SCARLET_QEMU_DISABLE_VIRTIO_INPUT:-0}" = "1" ] || [ "${SCARLET_QEMU_DISABLE_VIRTIO_INPUT:-}" = "true" ]; then
+    echo "QEMU input configuration: USB HID only (virtio input disabled)"
+else
+    VIRTIO_INPUT_ARGS="-device virtio-keyboard-device,bus=virtio-mmio-bus.6 -device virtio-mouse-device,bus=virtio-mmio-bus.7"
+fi
 
 # Optional QEMU debug logging
 # - Enable guest errors: SCARLET_QEMU_GUEST_ERRORS=1
@@ -127,10 +134,12 @@ if [ "$DEBUG_MODE" = true ]; then
         -device virtio-net-device,netdev=net0,mac=52:54:00:12:34:56,bus=virtio-mmio-bus.2 \
         -device virtio-net-device,netdev=net1,mac=52:54:00:12:34:57,bus=virtio-mmio-bus.3 \
         -device virtio-net-device,netdev=net2,mac=52:54:00:12:34:58,bus=virtio-mmio-bus.4 \
-        -device virtio-keyboard-device,bus=virtio-mmio-bus.6 \
-        -device virtio-mouse-device,bus=virtio-mmio-bus.7 \
+        $VIRTIO_INPUT_ARGS \
         -netdev user,id=pci-net0 \
         -device virtio-net-pci,netdev=pci-net0,mac=52:54:00:AB:CD:EF,bus=pcie.0 \
+        -device qemu-xhci,id=xhci,bus=pcie.0 \
+        -device usb-kbd,bus=xhci.0 \
+        -device usb-mouse,bus=xhci.0 \
         -gdb tcp::12345 -S \
         $QEMU_DEBUG_ARGS \
         | tee "$TEMP_OUTPUT"
@@ -160,10 +169,12 @@ else
         -device virtio-net-device,netdev=net0,mac=52:54:00:12:34:56,bus=virtio-mmio-bus.2 \
         -device virtio-net-device,netdev=net1,mac=52:54:00:12:34:57,bus=virtio-mmio-bus.3 \
         -device virtio-net-device,netdev=net2,mac=52:54:00:12:34:58,bus=virtio-mmio-bus.4 \
-        -device virtio-keyboard-device,bus=virtio-mmio-bus.6 \
-        -device virtio-mouse-device,bus=virtio-mmio-bus.7 \
+        $VIRTIO_INPUT_ARGS \
         -netdev user,id=pci-net0 \
         -device virtio-net-pci,netdev=pci-net0,mac=52:54:00:AB:CD:EF,bus=pcie.0 \
+        -device qemu-xhci,id=xhci,bus=pcie.0 \
+        -device usb-kbd,bus=xhci.0 \
+        -device usb-mouse,bus=xhci.0 \
         $QEMU_DEBUG_ARGS \
         | tee "$TEMP_OUTPUT"
 fi

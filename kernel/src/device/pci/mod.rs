@@ -56,6 +56,9 @@ extern crate alloc;
 use alloc::vec::Vec;
 use spin::mutex::Mutex;
 
+use crate::early_println;
+use crate::vm;
+
 /// PCI device address components
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PciAddress {
@@ -99,6 +102,8 @@ pub struct PciBus {
     ecam_base: usize,
     /// ECAM region size in bytes
     ecam_size: usize,
+    /// Virtual base of the mapped ECAM region
+    ecam_vaddr: Mutex<Option<usize>>,
     /// List of discovered PCI devices
     devices: Mutex<Vec<device::PciDeviceInfo>>,
 }
@@ -118,6 +123,7 @@ impl PciBus {
         Self {
             ecam_base,
             ecam_size,
+            ecam_vaddr: Mutex::new(None),
             devices: Mutex::new(Vec::new()),
         }
     }
@@ -130,6 +136,27 @@ impl PciBus {
     /// Get the ECAM size
     pub const fn ecam_size(&self) -> usize {
         self.ecam_size
+    }
+
+    pub fn ecam_vaddr(&self) -> Result<usize, &'static str> {
+        if let Some(vaddr) = *self.ecam_vaddr.lock() {
+            early_println!(
+                "[PCI] Reusing ECAM mapping {:#x} for paddr {:#x}",
+                vaddr,
+                self.ecam_base
+            );
+            return Ok(vaddr);
+        }
+
+        let vaddr = vm::ioremap(self.ecam_base, self.ecam_size)?;
+        *self.ecam_vaddr.lock() = Some(vaddr);
+        early_println!(
+            "[PCI] ECAM mapped paddr={:#x} -> vaddr={:#x} size={:#x}",
+            self.ecam_base,
+            vaddr,
+            self.ecam_size
+        );
+        Ok(vaddr)
     }
 
     /// Check if a PCI address is within the ECAM region
@@ -235,6 +262,7 @@ mod tests {
         let addr1 = PciAddress::new(0, 0, 1, 0);
         let virtio_net = PciDeviceInfo::new(
             addr1,
+            0x3000_0000,
             0x1AF4,
             0x1000,
             0x020000,
@@ -243,6 +271,7 @@ mod tests {
             0x0001,
             0x0B,
             0x01,
+            None,
             "virtio_net",
             1,
         );
@@ -252,6 +281,7 @@ mod tests {
         let addr2 = PciAddress::new(0, 0, 2, 0);
         let virtio_blk = PciDeviceInfo::new(
             addr2,
+            0x3000_0000,
             0x1AF4,
             0x1001,
             0x010000,
@@ -260,6 +290,7 @@ mod tests {
             0x0002,
             0x0B,
             0x01,
+            None,
             "virtio_blk",
             2,
         );
