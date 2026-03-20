@@ -119,14 +119,12 @@ impl Trb {
         trb
     }
 
-    /// Builds a Normal transfer TRB.
-    pub fn normal_transfer(data_buffer: u64, len: u32, interrupt_on_completion: bool) -> Self {
+    /// Builds a Normal transfer TRB with IOC set.
+    pub fn normal_transfer(data_buffer: u64, len: u32) -> Self {
         let mut trb = Self::new(TrbType::Normal);
         trb.parameter = data_buffer;
         trb.status = len & 0x1ffff;
-        if interrupt_on_completion {
-            trb.control |= 1 << 5;
-        }
+        trb.control |= 1 << 5;
         trb
     }
 

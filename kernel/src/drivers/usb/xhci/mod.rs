@@ -45,6 +45,7 @@ use crate::drivers::usb::xhci::trb::{Trb, TrbType};
 use crate::early_println;
 use crate::interrupt::{InterruptId, InterruptManager};
 use crate::mem::page::ContiguousPages;
+use crate::timer::{TimerHandler, add_timer, get_tick, ms_to_ticks};
 use crate::vm;
 
 const COMMAND_RING_TRBS: usize = 256;
@@ -470,11 +471,9 @@ impl XhciController {
     }
 
     fn setup_dcbaa(&self) -> Result<(), &'static str> {
-        let dcbaa_entries = self.max_slots as usize + 1;
-        let dcbaa_bytes = dcbaa_entries * size_of::<u64>();
-        let dcbaa_pages = dcbaa_bytes.div_ceil(crate::environment::PAGE_SIZE);
+        let dcbaa_pages = self.max_slots as usize + 1;
         let dcbaa = ContiguousPages::new(dcbaa_pages).ok_or("Failed to allocate DCBAA")?;
-
+        early_println!("[xHCI] DCBAA paddr={:#x}", dcbaa.as_paddr());
         unsafe {
             core::ptr::write_bytes(
                 dcbaa.as_vaddr() as *mut u8,
@@ -491,6 +490,7 @@ impl XhciController {
     fn setup_command_ring(&self) -> Result<(), &'static str> {
         let ring = DmaTrbRing::new(COMMAND_RING_TRBS).ok_or("Failed to allocate command ring")?;
         ring.clear();
+        early_println!("[xHCI] Command ring paddr={:#x}", ring.physical_address());
         let crcr = (ring.physical_address() as u64) | u64::from(ring.cycle_state());
         self.operational.write_crcr(crcr);
         *self.cmd_ring.lock() = Some(ring);
@@ -499,6 +499,11 @@ impl XhciController {
 
     fn setup_event_ring(&self) -> Result<(), &'static str> {
         let ring = EventRing::new(EVENT_RING_TRBS).ok_or("Failed to allocate event ring")?;
+        early_println!(
+            "[xHCI] Event ring paddr={:#x} erst_paddr={:#x}",
+            ring.physical_address(),
+            ring.erst_physical_address()
+        );
         unsafe {
             write_volatile(
                 (self.regs.runtime_base + registers::runtime::IR0_ERSTSZ) as *mut u32,
@@ -514,7 +519,7 @@ impl XhciController {
             );
             write_volatile(
                 (self.regs.runtime_base + registers::runtime::IR0_IMAN) as *mut u32,
-                1,
+                (1 << 1) | 1, // IE = bit 1, IP(W1C) = bit 0
             );
         }
         *self.event_ring.lock() = Some(ring);
@@ -524,10 +529,20 @@ impl XhciController {
     pub fn enable_interrupts(&self, interrupt_id: InterruptId) -> Result<(), &'static str> {
         *self.interrupt_id.lock() = Some(interrupt_id);
 
+        let usbcmd = self.operational.read_usbcmd();
+        self.operational.write_usbcmd(usbcmd | (1 << 2)); // INTE = bit 2
+
         let pending = self.operational.read_usbsts();
         if pending & (USBSTS_EVENT_INTERRUPT | USBSTS_PORT_CHANGE_DETECT) != 0 {
             self.operational
                 .write_usbsts(pending & (USBSTS_EVENT_INTERRUPT | USBSTS_PORT_CHANGE_DETECT));
+        }
+
+        unsafe {
+            write_volatile(
+                (self.regs.runtime_base + registers::runtime::IR0_IMAN) as *mut u32,
+                (1 << 1) | 1, // IE = bit 1, clear IP = bit 0
+            );
         }
 
         InterruptManager::with_manager(|mgr| mgr.enable_external_interrupt(interrupt_id, 0))
@@ -535,6 +550,7 @@ impl XhciController {
     }
 
     fn ring_command_doorbell(&self) {
+        crate::arch::mmio_fence();
         unsafe {
             write_volatile(self.regs.doorbell_base as *mut u32, 0);
         }
@@ -714,6 +730,7 @@ impl XhciController {
     }
 
     fn ring_endpoint_doorbell(&self, slot_id: u8, endpoint_id: u8) {
+        crate::arch::mmio_fence();
         let offset = (slot_id as usize) * size_of::<u32>();
         unsafe {
             write_volatile(
@@ -825,7 +842,6 @@ impl XhciController {
         ring.enqueue(Trb::normal_transfer(
             buffer.as_paddr() as u64,
             max_packet as u32,
-            true,
         ))?;
         self.ring_endpoint_doorbell(slot_id, dci);
         Ok(())
@@ -926,15 +942,17 @@ impl XhciController {
                 .iter()
                 .find(|slot| slot.usb_device.slot_id() == slot_id)
                 .ok_or("Unknown slot for endpoint config")?;
+            let device_speed = slot.usb_device.speed();
             let existing_ctx =
                 DeviceContextBuffer::new(slot.device_context.as_vaddr(), self.context_size);
             let mut slot_ctx = core::ptr::read(existing_ctx.slot());
             slot_ctx.set_context_entries(interrupt_dci);
             core::ptr::write(input.slot_mut(), slot_ctx);
+            let xhci_interval = Self::xhci_interval(device_speed, boot.interval);
             let (_, ep_ctx) = InputContext::interrupt_endpoint_context(
                 interrupt_dci,
                 boot.max_packet_size,
-                boot.interval,
+                xhci_interval,
                 interrupt_ring.physical_address() as u64,
                 true,
             );
@@ -997,6 +1015,7 @@ impl XhciController {
         }
 
         self.submit_interrupt_in_transfer(slot_id)?;
+
         Ok(true)
     }
 
@@ -1117,6 +1136,23 @@ impl XhciController {
             ep_num * 2 + 1
         } else {
             ep_num * 2
+        }
+    }
+
+    fn xhci_interval(speed: UsbSpeed, b_interval: u8) -> u8 {
+        match speed {
+            UsbSpeed::High | UsbSpeed::Super | UsbSpeed::SuperPlus => {
+                b_interval.saturating_sub(1).clamp(0, 15)
+            }
+            UsbSpeed::Full | UsbSpeed::Low => {
+                if b_interval == 0 {
+                    0
+                } else {
+                    let ms = b_interval as u32;
+                    let frames_125us = ms * 8;
+                    (32u32 - frames_125us.leading_zeros()).clamp(0, 15) as u8
+                }
+            }
         }
     }
 
@@ -1331,6 +1367,24 @@ fn determine_bar_size(
 /// xHCI driver instance container
 static XHCI_CONTROLLERS: Mutex<Vec<Arc<XhciController>>> = Mutex::new(Vec::new());
 
+struct XhciPollHandler;
+impl TimerHandler for XhciPollHandler {
+    fn on_timer_expired(self: Arc<Self>, _context: usize) {
+        let controllers = XHCI_CONTROLLERS.lock();
+        for ctrl in controllers.iter() {
+            let status = ctrl.operational.read_usbsts();
+            if status & (USBSTS_EVENT_INTERRUPT | USBSTS_PORT_CHANGE_DETECT) != 0 {
+                ctrl.operational
+                    .write_usbsts(status & (USBSTS_EVENT_INTERRUPT | USBSTS_PORT_CHANGE_DETECT));
+                ctrl.process_interrupt_events();
+            }
+        }
+        let handler: Arc<dyn TimerHandler> = self.clone();
+        let expires = crate::timer::get_tick() + crate::timer::ms_to_ticks(500);
+        crate::timer::add_timer(expires, &handler, 0);
+    }
+}
+
 impl InterruptCapableDevice for XhciController {
     fn handle_interrupt(&self) -> crate::interrupt::InterruptResult<()> {
         let status = self.operational.read_usbsts();
@@ -1340,6 +1394,14 @@ impl InterruptCapableDevice for XhciController {
 
         self.operational
             .write_usbsts(status & (USBSTS_EVENT_INTERRUPT | USBSTS_PORT_CHANGE_DETECT));
+
+        unsafe {
+            write_volatile(
+                (self.regs.runtime_base + registers::runtime::IR0_IMAN) as *mut u32,
+                (1 << 1) | 1, // keep IE, clear IP
+            );
+        }
+
         self.process_interrupt_events();
         Ok(())
     }
@@ -1441,6 +1503,10 @@ fn probe_xhci(device: &PciDeviceInfo) -> Result<(), &'static str> {
     // Store controller
     let mut controllers = XHCI_CONTROLLERS.lock();
     controllers.push(controller);
+    drop(controllers);
+
+    let poll_handler: Arc<dyn TimerHandler> = Arc::new(XhciPollHandler);
+    add_timer(get_tick() + ms_to_ticks(1000), &poll_handler, 0);
 
     early_println!("[xHCI] Controller registered successfully");
     Ok(())
@@ -1460,8 +1526,6 @@ fn register_driver() {
     let driver = PciDeviceDriver::new("xhci", id_table, probe_xhci, remove_xhci);
 
     DeviceManager::get_manager().register_driver(Box::new(driver), DriverPriority::Standard);
-
-    early_println!("[xHCI] Driver registered");
 }
 
 driver_initcall!(register_driver);

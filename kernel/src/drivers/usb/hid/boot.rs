@@ -12,7 +12,6 @@ use crate::device::input::key_codes::{
 use crate::device::input::key_values::{KEY_PRESS, KEY_RELEASE};
 use crate::device::input::rel_codes::{REL_X, REL_Y};
 use crate::device::input::syn_codes::SYN_REPORT;
-use crate::early_println;
 
 /// USB HID boot keyboard report layout.
 #[repr(C, packed)]
@@ -75,14 +74,6 @@ impl HidKeyboardDevice {
     }
 
     pub fn handle_report(&mut self, report: KeyboardBootReport) {
-        if report != self.last_report {
-            early_println!(
-                "[usb-hid] keyboard report modifiers={:#x} keys={:02x?}",
-                report.modifiers,
-                report.keys
-            );
-        }
-
         for modifier in [(0x02, KEY_LEFTSHIFT), (0x20, KEY_RIGHTSHIFT)] {
             let was_pressed = (self.last_report.modifiers & modifier.0) != 0;
             let is_pressed = (report.modifiers & modifier.0) != 0;
@@ -135,15 +126,6 @@ impl HidMouseDevice {
     }
 
     pub fn handle_report(&mut self, report: MouseBootReport) {
-        if report != self.last_report {
-            early_println!(
-                "[usb-hid] mouse report buttons={:#x} dx={} dy={}",
-                report.buttons,
-                report.x,
-                report.y
-            );
-        }
-
         for (mask, code) in [(0x01, BTN_LEFT), (0x02, BTN_RIGHT), (0x04, BTN_MIDDLE)] {
             let was_pressed = (self.last_report.buttons & mask) != 0;
             let is_pressed = (report.buttons & mask) != 0;
