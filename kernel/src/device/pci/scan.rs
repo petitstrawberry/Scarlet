@@ -31,6 +31,107 @@ impl<'a> PciScanner<'a> {
         Some(u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
     }
 
+    fn get_u32_prop<'b, 'c>(node: &fdt::node::FdtNode<'b, 'c>, name: &str) -> Option<u32> {
+        let prop = node.property(name)?;
+        Self::read_be_u32(prop.value)
+    }
+
+    fn find_node_by_phandle<'b>(
+        fdt: &'b fdt::Fdt<'b>,
+        phandle: u32,
+    ) -> Option<fdt::node::FdtNode<'b, 'b>> {
+        let mut stack: Vec<fdt::node::FdtNode<'b, 'b>> = Vec::new();
+        stack.push(fdt.find_node("/")?);
+
+        while let Some(node) = stack.pop() {
+            if let Some(p) = Self::get_u32_prop(&node, "phandle") {
+                if p == phandle {
+                    return Some(node);
+                }
+            }
+            if let Some(p) = Self::get_u32_prop(&node, "linux,phandle") {
+                if p == phandle {
+                    return Some(node);
+                }
+            }
+            for child in node.children() {
+                stack.push(child);
+            }
+        }
+
+        None
+    }
+
+    fn decode_parent_irq(parent_irq_cells: &[u32]) -> Option<u32> {
+        match parent_irq_cells.len() {
+            0 => None,
+            3 => parent_irq_cells.get(1).copied(),
+            _ => parent_irq_cells.first().copied(),
+        }
+    }
+
+    fn parse_routed_irq_from_map<F>(
+        mask: &[u8],
+        map: &[u8],
+        child_cells: &[u32],
+        mut parent_cell_counts: F,
+    ) -> Option<u32>
+    where
+        F: FnMut(u32) -> Option<(usize, usize)>,
+    {
+        let child_cell_count = child_cells.len();
+        if child_cell_count == 0 || mask.len() < child_cell_count * 4 {
+            return None;
+        }
+
+        let mut masked_child = alloc::vec![0; child_cell_count];
+        for (index, child_cell) in child_cells.iter().enumerate() {
+            let mask_offset = index * 4;
+            let cell_mask = Self::read_be_u32(&mask[mask_offset..mask_offset + 4])?;
+            masked_child[index] = *child_cell & cell_mask;
+        }
+
+        let mut offset = 0usize;
+        while offset + (child_cell_count + 1) * 4 <= map.len() {
+            let mut masked_map_child = alloc::vec![0; child_cell_count];
+            for index in 0..child_cell_count {
+                let cell_offset = offset + index * 4;
+                let map_cell = Self::read_be_u32(&map[cell_offset..cell_offset + 4])?;
+                let mask_offset = index * 4;
+                let cell_mask = Self::read_be_u32(&mask[mask_offset..mask_offset + 4])?;
+                masked_map_child[index] = map_cell & cell_mask;
+            }
+
+            let phandle_offset = offset + child_cell_count * 4;
+            let phandle = Self::read_be_u32(&map[phandle_offset..phandle_offset + 4])?;
+            let (parent_addr_cells, parent_interrupt_cells) = parent_cell_counts(phandle)?;
+            if parent_interrupt_cells == 0 {
+                return None;
+            }
+
+            let entry_cell_count =
+                child_cell_count + 1 + parent_addr_cells + parent_interrupt_cells;
+            let entry_bytes = entry_cell_count * 4;
+            if offset + entry_bytes > map.len() {
+                return None;
+            }
+
+            if masked_map_child == masked_child {
+                let parent_irq_offset = phandle_offset + 4 + parent_addr_cells * 4;
+                let mut parent_irq_cells = alloc::vec![0; parent_interrupt_cells];
+                for (index, parent_irq_cell) in parent_irq_cells.iter_mut().enumerate() {
+                    let cell_offset = parent_irq_offset + index * 4;
+                    *parent_irq_cell = Self::read_be_u32(&map[cell_offset..cell_offset + 4])?;
+                }
+                return Self::decode_parent_irq(&parent_irq_cells);
+            }
+
+            offset += entry_bytes;
+        }
+
+        None
+    }
+
     fn routed_irq_for(&self, addr: &PciAddress, interrupt_pin: u8) -> Option<u32> {
         if interrupt_pin == 0 {
             return None;
@@ -48,24 +149,26 @@ impl<'a> PciScanner<'a> {
 
         let mask = pci_node.property("interrupt-map-mask")?.value;
         let map = pci_node.property("interrupt-map")?.value;
-        if mask.len() < 16 {
+        let child_addr_cells =
+            Self::get_u32_prop(&pci_node, "#address-cells").unwrap_or(3) as usize;
+        let child_interrupt_cells =
+            Self::get_u32_prop(&pci_node, "#interrupt-cells").unwrap_or(1) as usize;
+        if child_addr_cells == 0 || child_interrupt_cells == 0 {
             return None;
         }
 
-        let child_addr_mask = Self::read_be_u32(&mask[0..4])?;
-        let child_pin_mask = Self::read_be_u32(&mask[12..16])?;
-        let child_addr = ((addr.device as u32) << 11) & child_addr_mask;
-        let child_pin = (interrupt_pin as u32) & child_pin_mask;
+        let child_cell_count = child_addr_cells + child_interrupt_cells;
+        let mut child_cells = alloc::vec![0; child_cell_count];
+        child_cells[0] = ((addr.device as u32) << 11) | ((addr.function as u32) << 8);
+        child_cells[child_addr_cells] = interrupt_pin as u32;
 
-        for chunk in map.chunks_exact(24) {
-            let map_addr = Self::read_be_u32(&chunk[0..4])? & child_addr_mask;
-            let map_pin = Self::read_be_u32(&chunk[12..16])? & child_pin_mask;
-            if map_addr == child_addr && map_pin == child_pin {
-                return Self::read_be_u32(&chunk[20..24]);
-            }
-        }
-
-        None
+        Self::parse_routed_irq_from_map(mask, map, &child_cells, |phandle| {
+            let parent = Self::find_node_by_phandle(fdt, phandle)?;
+            let parent_addr_cells = Self::get_u32_prop(&parent, "#address-cells").unwrap_or(0);
+            let parent_interrupt_cells =
+                Self::get_u32_prop(&parent, "#interrupt-cells").unwrap_or(1);
+            Some((parent_addr_cells as usize, parent_interrupt_cells as usize))
+        })
     }
 
     /// Create a new PCI scanner
@@ -73,9 +176,9 @@ impl<'a> PciScanner<'a> {
     /// # Arguments
     ///
     /// * `bus` - Reference to the PCI bus manager
-    pub fn new(bus: &'a PciBus) -> Self {
-        let config = PciConfig::new(bus.ecam_vaddr().expect("Failed to map PCI ECAM"));
-        Self { config, bus }
+    pub fn new(bus: &'a PciBus) -> Result<Self, &'static str> {
+        let config = PciConfig::new(bus.ecam_vaddr()?);
+        Ok(Self { config, bus })
     }
 
     /// Scan the entire PCI bus tree
@@ -196,6 +299,7 @@ impl<'a> PciScanner<'a> {
 
         let device_info = PciDeviceInfo::new(
             addr,
+            self.bus.ecam_vaddr().ok()?,
             vendor_id,
             device_id,
             class_code,
@@ -253,24 +357,25 @@ impl PciBus {
     ///
     /// This is a convenience method that creates a scanner and performs
     /// the scan, storing discovered devices in the bus manager.
-    pub fn scan(&self) {
-        let scanner = PciScanner::new(self);
+    pub fn scan(&self) -> Result<(), &'static str> {
+        let scanner = PciScanner::new(self)?;
         let devices = scanner.scan();
 
         // Store discovered devices
         for device in devices {
             self.add_device(device);
         }
+        Ok(())
     }
 
     /// Scan the PCI bus and register devices with the DeviceManager
     ///
     /// This scans for PCI devices and registers them with the global
     /// device manager so they can be matched with drivers.
-    pub fn scan_and_register(&self) {
+    pub fn scan_and_register(&self) -> Result<(), &'static str> {
         use crate::device::manager::DeviceManager;
 
-        self.scan();
+        self.scan()?;
 
         let devices = self.devices();
         let device_manager = DeviceManager::get_manager();
@@ -291,20 +396,22 @@ impl PciBus {
                 device.device_id()
             );
         }
+        Ok(())
     }
 
     /// Scan the PCI bus and probe discovered devices using registered PCI drivers.
-    pub fn scan_and_probe_registered_drivers(&self) {
+    pub fn scan_and_probe_registered_drivers(&self) -> Result<(), &'static str> {
         use crate::device::DeviceDriver;
         use crate::device::manager::{DeviceManager, DriverPriority};
 
-        self.scan();
+        self.scan()?;
 
         let devices = self.devices();
         early_println!("Probing {} PCI devices", devices.len());
 
         let manager = DeviceManager::get_manager();
         let drivers = manager.borrow_drivers().lock();
+        let mut claimed_device_ids = Vec::new();
 
         for priority in [
             DriverPriority::Critical,
@@ -315,18 +422,25 @@ impl PciBus {
             if let Some(driver_list) = drivers.get(&priority) {
                 for driver in driver_list.iter() {
                     for device in &devices {
+                        if claimed_device_ids.contains(&device.id()) {
+                            continue;
+                        }
                         match DeviceDriver::probe(&**driver, device) {
-                            Ok(()) => early_println!(
-                                "Successfully probed PCI device {} with driver {}",
-                                device.name(),
-                                driver.name()
-                            ),
+                            Ok(()) => {
+                                claimed_device_ids.push(device.id());
+                                early_println!(
+                                    "Successfully probed PCI device {} with driver {}",
+                                    device.name(),
+                                    driver.name()
+                                );
+                            }
                             Err(_) => {}
                         }
                     }
                 }
             }
         }
+        Ok(())
     }
 }
 
@@ -337,8 +451,51 @@ mod tests {
     #[test_case]
     fn test_pci_scanner_creation() {
         let bus = PciBus::new(0x3000_0000, 0x1000_0000);
-        let _scanner = PciScanner::new(&bus);
+        match PciScanner::new(&bus) {
+            Ok(_) | Err(_) => {}
+        }
         // If we get here without panic, the test passes
+    }
+
+    #[test_case]
+    fn test_parse_routed_irq_from_map_single_cell_parent_irq() {
+        let mask = [
+            0xff, 0xff, 0xff, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x07,
+        ];
+        let map = [
+            0x00, 0x00, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x01, 0x00, 0x00, 0x00, 0x2a, 0x00, 0x00, 0x00, 0x15,
+        ];
+        let child_cells = [0x0000_0800, 0, 0, 1];
+
+        let routed_irq =
+            PciScanner::parse_routed_irq_from_map(&mask, &map, &child_cells, |phandle| {
+                if phandle == 0x2a { Some((0, 1)) } else { None }
+            });
+
+        assert_eq!(routed_irq, Some(0x15));
+    }
+
+    #[test_case]
+    fn test_parse_routed_irq_from_map_three_cell_parent_irq() {
+        let mask = [
+            0xff, 0xff, 0xff, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x07,
+        ];
+        let map = [
+            0x00, 0x00, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x01, 0x00, 0x00, 0x00, 0x33, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01,
+            0x00, 0x00, 0x00, 0x24, 0x00, 0x00, 0x00, 0x04,
+        ];
+        let child_cells = [0x0000_0800, 0, 0, 1];
+
+        let routed_irq =
+            PciScanner::parse_routed_irq_from_map(&mask, &map, &child_cells, |phandle| {
+                if phandle == 0x33 { Some((1, 3)) } else { None }
+            });
+
+        assert_eq!(routed_irq, Some(0x24));
     }
 
     #[test_case]

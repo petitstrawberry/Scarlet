@@ -93,6 +93,8 @@ impl From<u8> for PciClass {
 pub struct PciDeviceInfo {
     /// PCI address (bus, device, function)
     address: PciAddress,
+    /// Virtual base address of the mapped ECAM region used for config access
+    ecam_vaddr: usize,
     /// Vendor ID
     vendor_id: u16,
     /// Device ID
@@ -135,6 +137,7 @@ impl PciDeviceInfo {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         address: PciAddress,
+        ecam_vaddr: usize,
         vendor_id: u16,
         device_id: u16,
         class_code: u32,
@@ -149,6 +152,7 @@ impl PciDeviceInfo {
     ) -> Self {
         Self {
             address,
+            ecam_vaddr,
             vendor_id,
             device_id,
             class_code,
@@ -166,6 +170,11 @@ impl PciDeviceInfo {
     /// Get the PCI address
     pub fn address(&self) -> PciAddress {
         self.address
+    }
+
+    /// Get the mapped ECAM virtual base address
+    pub fn ecam_vaddr(&self) -> usize {
+        self.ecam_vaddr
     }
 
     /// Get the vendor ID
@@ -300,6 +309,7 @@ mod tests {
         let addr = PciAddress::new(0, 0, 1, 0);
         let device = PciDeviceInfo::new(
             addr,
+            0,
             0x8086, // Intel
             0x1234,
             0x020000, // Network controller
@@ -325,6 +335,7 @@ mod tests {
         let addr = PciAddress::new(0, 0, 1, 0);
         let device = PciDeviceInfo::new(
             addr,
+            0,
             0x8086,
             0x1234,
             0x030000, // Display controller

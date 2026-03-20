@@ -17,6 +17,7 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::mem::size_of;
 use core::ptr::{read_unaligned, read_volatile, write_volatile};
+use core::sync::atomic::{Ordering, fence};
 use spin::Mutex;
 
 use crate::device::Device;
@@ -87,14 +88,6 @@ pub const PCI_PROG_IF_XHCI: u8 = 0x30;
 pub const XHCI_CLASS_CODE: u32 = ((PCI_CLASS_SERIAL_BUS as u32) << 16)
     | ((PCI_SUBCLASS_USB as u32) << 8)
     | PCI_PROG_IF_XHCI as u32;
-
-/// Default ECAM base address for QEMU virt machine
-/// TODO: Should be read from FDT/ACPI in production
-#[cfg(target_arch = "riscv64")]
-const DEFAULT_ECAM_BASE: usize = 0x3000_0000;
-
-#[cfg(target_arch = "aarch64")]
-const DEFAULT_ECAM_BASE: usize = 0x4010_0000;
 
 /// Decoded PCI MMIO BAR information.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -471,7 +464,8 @@ impl XhciController {
     }
 
     fn setup_dcbaa(&self) -> Result<(), &'static str> {
-        let dcbaa_pages = self.max_slots as usize + 1;
+        let entries = self.max_slots as usize + 1;
+        let dcbaa_pages = (entries * size_of::<u64>()).div_ceil(crate::environment::PAGE_SIZE);
         let dcbaa = ContiguousPages::new(dcbaa_pages).ok_or("Failed to allocate DCBAA")?;
         early_println!("[xHCI] DCBAA paddr={:#x}", dcbaa.as_paddr());
         unsafe {
@@ -550,7 +544,7 @@ impl XhciController {
     }
 
     fn ring_command_doorbell(&self) {
-        crate::arch::mmio_fence();
+        fence(Ordering::SeqCst);
         unsafe {
             write_volatile(self.regs.doorbell_base as *mut u32, 0);
         }
@@ -730,7 +724,7 @@ impl XhciController {
     }
 
     fn ring_endpoint_doorbell(&self, slot_id: u8, endpoint_id: u8) {
-        crate::arch::mmio_fence();
+        fence(Ordering::SeqCst);
         let offset = (slot_id as usize) * size_of::<u32>();
         unsafe {
             write_volatile(
@@ -1342,26 +1336,46 @@ fn determine_bar_size(
     addr: &crate::device::pci::PciAddress,
     bar_offset: usize,
 ) -> usize {
-    // Save original value
-    let original = config.read_u32(addr, bar_offset);
-
-    // Write all 1s
-    config.write_u32(addr, bar_offset, 0xFFFF_FFFC); // Mask type bits
-
-    // Read back inverted bits indicate size
-    let size_bits = config.read_u32(addr, bar_offset);
-
-    // Restore original
-    config.write_u32(addr, bar_offset, original);
-
-    // Size is the complement of the size bits, plus alignment
-    if size_bits == 0 {
+    let original_low = config.read_u32(addr, bar_offset);
+    if (original_low & 0x1) != 0 {
         return 0;
     }
 
-    // Find the lowest set bit position
-    let size = !(size_bits & !0xF) + 1;
-    size as usize
+    let is_64bit = (original_low & 0x6) == 0x4;
+    let probe_low = (original_low & 0xF) | 0xFFFF_FFF0;
+
+    if is_64bit {
+        let original_high = config.read_u32(addr, bar_offset + 4);
+
+        config.write_u32(addr, bar_offset, probe_low);
+        config.write_u32(addr, bar_offset + 4, 0xFFFF_FFFF);
+
+        let size_low = config.read_u32(addr, bar_offset);
+        let size_high = config.read_u32(addr, bar_offset + 4);
+
+        config.write_u32(addr, bar_offset, original_low);
+        config.write_u32(addr, bar_offset + 4, original_high);
+
+        let mask = ((size_high as u64) << 32) | (u64::from(size_low) & 0xFFFF_FFF0);
+        if mask == 0 {
+            return 0;
+        }
+
+        (!mask).wrapping_add(1) as usize
+    } else {
+        config.write_u32(addr, bar_offset, probe_low);
+
+        let size_low = config.read_u32(addr, bar_offset);
+
+        config.write_u32(addr, bar_offset, original_low);
+
+        let mask = size_low & 0xFFFF_FFF0;
+        if mask == 0 {
+            return 0;
+        }
+
+        (!mask).wrapping_add(1) as usize
+    }
 }
 
 /// xHCI driver instance container
@@ -1419,10 +1433,7 @@ fn probe_xhci(device: &PciDeviceInfo) -> Result<(), &'static str> {
         device.device_id()
     );
 
-    // Create PCI config accessor
-    let ecam_vaddr =
-        vm::ioremap(DEFAULT_ECAM_BASE, 0x1000_0000).map_err(|_| "Failed to map PCI ECAM region")?;
-    let config = PciConfig::new(ecam_vaddr);
+    let config = PciConfig::new(device.ecam_vaddr());
     let addr = device.address();
 
     // Enable bus mastering
@@ -1457,7 +1468,7 @@ fn probe_xhci(device: &PciDeviceInfo) -> Result<(), &'static str> {
     // Map MMIO region
     let mmio_size = if bar_size > 0 { bar_size } else { 0x10000 }; // Default 64KB
     let mmio_vaddr =
-        vm::ioremap(bar.base, mmio_size).map_err(|e| "Failed to map xHCI MMIO region")?;
+        vm::ioremap(bar.base, mmio_size).map_err(|_| "Failed to map xHCI MMIO region")?;
 
     early_println!("[xHCI] MMIO mapped at {:#x}", mmio_vaddr);
 
@@ -1538,6 +1549,7 @@ mod tests {
     fn sample_xhci_device() -> PciDeviceInfo {
         PciDeviceInfo::new(
             PciAddress::new(0, 0, 5, 0),
+            0,
             0x8086,
             0x1e31,
             XHCI_CLASS_CODE,

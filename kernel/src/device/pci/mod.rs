@@ -262,6 +262,7 @@ mod tests {
         let addr1 = PciAddress::new(0, 0, 1, 0);
         let virtio_net = PciDeviceInfo::new(
             addr1,
+            0x3000_0000,
             0x1AF4,
             0x1000,
             0x020000,
@@ -280,6 +281,7 @@ mod tests {
         let addr2 = PciAddress::new(0, 0, 2, 0);
         let virtio_blk = PciDeviceInfo::new(
             addr2,
+            0x3000_0000,
             0x1AF4,
             0x1001,
             0x010000,
