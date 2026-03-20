@@ -712,7 +712,9 @@ pub extern "C" fn start_kernel(boot_info: &BootInfo) -> ! {
 
         if let Some((ecam_base, ecam_size)) = pci_ecam {
             let pci_bus = PciBus::new(ecam_base, ecam_size);
-            pci_bus.scan_and_probe_registered_drivers();
+            if let Err(error) = pci_bus.scan_and_probe_registered_drivers() {
+                println!("[Scarlet Kernel] PCI probe skipped: {}", error);
+            }
         }
     }
     fence(Ordering::SeqCst);

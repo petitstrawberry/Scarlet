@@ -77,7 +77,7 @@ impl DmaTrbRing {
         *index += 1;
 
         if *index == self.usable_capacity() {
-            self.write_link_trb(self.usable_capacity(), cycle)?;
+            self.write_link_trb(self.usable_capacity(), cycle, self.physical_address())?;
             *index = 0;
             *self.cycle_state.lock() = !cycle;
         }
@@ -87,8 +87,7 @@ impl DmaTrbRing {
 
     pub fn enqueue_link(&self, target_paddr: usize) -> Result<(), &'static str> {
         let cycle = *self.cycle_state.lock();
-        self.write_link_trb(self.usable_capacity(), cycle)?;
-        let _ = target_paddr;
+        self.write_link_trb(self.usable_capacity(), cycle, target_paddr)?;
         Ok(())
     }
 
@@ -118,17 +117,22 @@ impl DmaTrbRing {
             }
         }
 
-        let _ = self.write_link_trb(self.usable_capacity(), true);
+        let _ = self.write_link_trb(self.usable_capacity(), true, self.physical_address());
     }
 
-    fn write_link_trb(&self, index: usize, cycle: bool) -> Result<(), &'static str> {
+    fn write_link_trb(
+        &self,
+        index: usize,
+        cycle: bool,
+        target_paddr: usize,
+    ) -> Result<(), &'static str> {
         if index >= self.capacity {
             return Err("Link TRB index out of bounds");
         }
 
         let trb_ptr = unsafe { self.trb_ptr(index) };
         let mut link = Trb {
-            parameter: self.physical_address() as u64,
+            parameter: target_paddr as u64,
             status: 0,
             control: (TrbType::Link as u32) << 10 | (1 << 1),
         };
