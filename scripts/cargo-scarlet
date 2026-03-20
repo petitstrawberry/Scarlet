@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(dirname "$(realpath "$0")")"
+REPO_ROOT="$(dirname "$SCRIPT_DIR")"
+MANIFEST_PATH="$REPO_ROOT/cargo-scarlet/Cargo.toml"
+
+if [[ ! -f "$MANIFEST_PATH" ]]; then
+  echo "scripts/cargo-scarlet: could not find $MANIFEST_PATH" >&2
+  exit 1
+fi
+
+exec cargo run --manifest-path "$MANIFEST_PATH" -- "$@"

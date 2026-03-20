@@ -38,19 +38,28 @@ pub enum PixelFormat {
     RGBA8888,
     /// 32-bit BGRA (8 bits per channel)  
     BGRA8888,
+    XRGB8888,
+    XBGR8888,
+    XRGB2101010,
     /// 24-bit RGB (8 bits per channel)
     RGB888,
     /// 16-bit RGB (5-6-5 bits)
     RGB565,
+    ARGB1555,
+    XRGB1555,
 }
 
 impl PixelFormat {
     /// Get bytes per pixel for this format
     pub fn bytes_per_pixel(&self) -> usize {
         match self {
-            PixelFormat::RGBA8888 | PixelFormat::BGRA8888 => 4,
+            PixelFormat::RGBA8888
+            | PixelFormat::BGRA8888
+            | PixelFormat::XRGB8888
+            | PixelFormat::XBGR8888
+            | PixelFormat::XRGB2101010 => 4,
             PixelFormat::RGB888 => 3,
-            PixelFormat::RGB565 => 2,
+            PixelFormat::RGB565 | PixelFormat::ARGB1555 | PixelFormat::XRGB1555 => 2,
         }
     }
 }

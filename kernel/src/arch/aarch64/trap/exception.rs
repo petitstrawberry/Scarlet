@@ -157,34 +157,16 @@ pub fn arch_exception_handler(trapframe: &mut Trapframe, trap_kind: usize) {
         }
 
         // SVC from AArch64 user mode (syscall)
-        ExceptionClass::SvcAarch64 => {
-            // Minimal syscall trace for debugging AArch64 SVC path.
-            // AArch64 syscall number: x8, args: x0-x5.
-            // crate::println!(
-            //     "[syscall/aarch64] nr={} x0={:#x} x1={:#x} x2={:#x} x3={:#x} x4={:#x} x5={:#x} sp={:#x} elr={:#x}",
-            //     trapframe.get_syscall_number(),
-            //     trapframe.get_arg(0),
-            //     trapframe.get_arg(1),
-            //     trapframe.get_arg(2),
-            //     trapframe.get_arg(3),
-            //     trapframe.get_arg(4),
-            //     trapframe.get_arg(5),
-            //     trapframe.sp,
-            //     trapframe.elr,
-            // );
-            // panic!("AArch64 syscall handler not implemented");
-            match syscall_dispatcher(trapframe) {
-                Ok(ret) => {
-                    // crate::println!("[syscall/aarch64] -> ret={:#x}", ret);
-                    trapframe.set_return_value(ret);
-                }
-                Err(msg) => {
-                    println!("Syscall error: {}", msg);
-                    trapframe.set_return_value(usize::MAX);
-                    trapframe.increment_pc_next(mytask().unwrap());
-                }
+        ExceptionClass::SvcAarch64 => match syscall_dispatcher(trapframe) {
+            Ok(ret) => {
+                trapframe.set_return_value(ret);
             }
-        }
+            Err(msg) => {
+                println!("Syscall error: {}", msg);
+                trapframe.set_return_value(usize::MAX);
+                trapframe.increment_pc_next(mytask().unwrap());
+            }
+        },
 
         // Instruction abort from lower EL
         ExceptionClass::InstructionAbortLowerEl => {

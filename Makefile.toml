@@ -61,15 +61,13 @@ args = ["clippy", "--", "-D", "warnings"]
 
 [tasks.clippy-bsp-riscv64]
 description = "Run clippy for RISC-V BSP"
-cwd = "bsp/riscv64-limine"
 command = "cargo"
-args = ["clippy", "--target", "../../kernel/targets/riscv64gc-unknown-none-elf.json", "--", "-D", "warnings"]
+args = ["run", "--manifest-path", "cargo-scarlet/Cargo.toml", "--", "clippy", "--project", "bsp/riscv64-limine"]
 
 [tasks.clippy-bsp-aarch64]
 description = "Run clippy for AArch64 BSP"
-cwd = "bsp/aarch64-limine"
 command = "cargo"
-args = ["clippy", "--target", "../../kernel/targets/aarch64-unknown-none-elf.json", "--", "-D", "warnings"]
+args = ["run", "--manifest-path", "cargo-scarlet/Cargo.toml", "--", "clippy", "--project", "bsp/aarch64-limine"]
 
 [tasks.clippy-userlib]
 description = "Run clippy for user libraries by calling sub Makefile.toml"
@@ -146,27 +144,33 @@ dependencies = ["build-kernel-debug-aarch64"]
 
 [tasks.build-kernel-debug-riscv64]
 description = "Build the kernel in debug mode (RISC-V)"
-cwd = "bsp/riscv64-limine"
 command = "cargo"
-args = ["build", "--target", "../../kernel/targets/riscv64gc-unknown-none-elf.json"]
+args = ["run", "--manifest-path", "cargo-scarlet/Cargo.toml", "--", "build", "--project", "bsp/riscv64-limine"]
 
 [tasks.build-kernel-debug-aarch64]
 description = "Build the kernel in debug mode (AArch64)"
-cwd = "bsp/aarch64-limine"
 command = "cargo"
-args = ["build", "--target", "../../kernel/targets/aarch64-unknown-none-elf.json"]
+args = ["run", "--manifest-path", "cargo-scarlet/Cargo.toml", "--", "build", "--project", "bsp/aarch64-limine"]
 
 [tasks.build-kernel-release-riscv64]
 description = "Build the kernel in release mode (RISC-V)"
-cwd = "bsp/riscv64-limine"
 command = "cargo"
-args = ["build", "--release", "--target", "../../kernel/targets/riscv64gc-unknown-none-elf.json"]
+args = ["run", "--manifest-path", "cargo-scarlet/Cargo.toml", "--", "build", "--project", "bsp/riscv64-limine", "--release"]
 
 [tasks.build-kernel-release-aarch64]
 description = "Build the kernel in release mode (AArch64)"
-cwd = "bsp/aarch64-limine"
 command = "cargo"
-args = ["build", "--release", "--target", "../../kernel/targets/aarch64-unknown-none-elf.json"]
+args = ["run", "--manifest-path", "cargo-scarlet/Cargo.toml", "--", "build", "--project", "bsp/aarch64-limine", "--release"]
+
+[tasks.generate-bsp-riscv64]
+description = "Generate BSP-local scarlet-modules for RISC-V"
+command = "cargo"
+args = ["run", "--manifest-path", "cargo-scarlet/Cargo.toml", "--", "generate", "--project", "bsp/riscv64-limine"]
+
+[tasks.generate-bsp-aarch64]
+description = "Generate BSP-local scarlet-modules for AArch64"
+command = "cargo"
+args = ["run", "--manifest-path", "cargo-scarlet/Cargo.toml", "--", "generate", "--project", "bsp/aarch64-limine"]
 
 [tasks.build-userlib-debug-riscv64]
 description = "Build user libraries for RISC-V in debug mode"
@@ -296,31 +300,27 @@ dependencies = ["build-initramfs-debug-aarch64"]
 
 [tasks.run-riscv64]
 description = "Run the kernel in release mode (RISC-V)"
-cwd = "bsp/riscv64-limine"
 command = "cargo"
-args = ["run", "--release", "--target", "../../kernel/targets/riscv64gc-unknown-none-elf.json"]
-dependencies = ["build-release-riscv64"]
+args = ["run", "--manifest-path", "cargo-scarlet/Cargo.toml", "--", "run", "--project", "bsp/riscv64-limine", "--release"]
+dependencies = ["build-initramfs-release-riscv64", "build-rootfs-riscv64", "build-boot-image-riscv64-release"]
 
 [tasks.run-aarch64]
 description = "Run the kernel in release mode (AArch64)"
-cwd = "bsp/aarch64-limine"
 command = "cargo"
-args = ["run", "--release", "--target", "../../kernel/targets/aarch64-unknown-none-elf.json"]
-dependencies = ["build-release-aarch64"]
+args = ["run", "--manifest-path", "cargo-scarlet/Cargo.toml", "--", "run", "--project", "bsp/aarch64-limine", "--release"]
+dependencies = ["build-initramfs-release-aarch64", "build-rootfs-aarch64", "build-boot-image-aarch64-release"]
 
 [tasks.run-debug-riscv64]
 description = "Run the kernel in debug mode (RISC-V)"
-cwd = "bsp/riscv64-limine"
 command = "cargo"
-args = ["run", "--target", "../../kernel/targets/riscv64gc-unknown-none-elf.json"]
-dependencies = ["build-debug-riscv64"]
+args = ["run", "--manifest-path", "cargo-scarlet/Cargo.toml", "--", "run", "--project", "bsp/riscv64-limine"]
+dependencies = ["build-initramfs-debug-riscv64", "build-rootfs-riscv64", "build-boot-image-riscv64"]
 
 [tasks.run-debug-aarch64]
 description = "Run the kernel in debug mode (AArch64)"
-cwd = "bsp/aarch64-limine"
 command = "cargo"
-args = ["run", "--target", "../../kernel/targets/aarch64-unknown-none-elf.json"]
-dependencies = ["build-debug-aarch64"]
+args = ["run", "--manifest-path", "cargo-scarlet/Cargo.toml", "--", "run", "--project", "bsp/aarch64-limine"]
+dependencies = ["build-initramfs-debug-aarch64", "build-rootfs-aarch64", "build-boot-image-aarch64"]
 
 [tasks.debug-riscv64]
 description = "Run the kernel in debug mode (RISC-V)"

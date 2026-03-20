@@ -16,6 +16,11 @@ use crate::vm::addr::{phys_to_virt, virt_to_phys};
 use crate::vm::vmem::VirtualMemoryMap;
 use crate::vm::vmem::VirtualMemoryPermission;
 
+const SCARLET_MAIR_EL1: u64 = 0x44ff00;
+const SCARLET_TCR_EL1: u64 = 0x1_B510_3510;
+const SCTLR_EL1_ENABLE_MASK: u64 = 1 | (1 << 2) | (1 << 12);
+const DEBUG_DEVICE_FAULT_VA: usize = 0xffff_0008_3afd_b000;
+
 /// Maximum paging levels for AArch64 4KB granule (4 levels: 0-3)
 const MAX_PAGING_LEVEL: usize = 3;
 
@@ -110,6 +115,11 @@ impl PageTableEntry {
 
     pub fn set_global(&mut self) -> &mut Self {
         self.entry &= !(1 << 11);
+        self
+    }
+
+    pub fn set_entry(&mut self, entry: u64) -> &mut Self {
+        self.entry = entry;
         self
     }
 
@@ -250,22 +260,40 @@ impl PageTable {
         crate::arch::aarch64::get_cpu().set_kernel_ttbr0(ttbr_val);
 
         unsafe {
-            // Update TTBR0 (user translation base) only.
-            // TTBR1 is managed separately and is expected to stay fixed to the kernel table.
-            asm!(
-                "msr ttbr0_el1, {ttbr}",
-                "isb",
-                "tlbi vmalle1is",
-                "dsb ish",
-                "isb",
-                ttbr = in(reg) ttbr_val,
-            );
-
-            // Enable MMU if not already enabled
             let mut sctlr: u64;
-            asm!("mrs {}, sctlr_el1", out(reg) sctlr);
+            asm!("mrs {sctlr}, sctlr_el1", sctlr = out(reg) sctlr, options(nostack));
             if sctlr & 1 == 0 {
-                init_mmu_registers();
+                asm!(
+                    "msr mair_el1, {mair}",
+                    "msr tcr_el1, {tcr}",
+                    "isb",
+                    "msr ttbr0_el1, {ttbr}",
+                    "isb",
+                    "tlbi vmalle1is",
+                    "dsb ish",
+                    "isb",
+                    "mrs {tmp}, sctlr_el1",
+                    "orr {tmp}, {tmp}, {sctlr_flags}",
+                    "msr sctlr_el1, {tmp}",
+                    "dsb sy",
+                    "isb",
+                    mair = in(reg) SCARLET_MAIR_EL1,
+                    tcr = in(reg) SCARLET_TCR_EL1,
+                    ttbr = in(reg) ttbr_val,
+                    sctlr_flags = in(reg) SCTLR_EL1_ENABLE_MASK,
+                    tmp = lateout(reg) _,
+                    options(nostack),
+                );
+            } else {
+                asm!(
+                    "msr ttbr0_el1, {ttbr}",
+                    "isb",
+                    "tlbi vmalle1is",
+                    "dsb ish",
+                    "isb",
+                    ttbr = in(reg) ttbr_val,
+                    options(nostack),
+                );
             }
         }
     }
@@ -281,6 +309,30 @@ impl PageTable {
                 "dsb ish",
                 "isb",
                 ttbr = in(reg) ttbr_val,
+                options(nostack),
+            );
+        }
+    }
+
+    pub fn switch_for_boot(&self, asid: u16) {
+        let ttbr_val = self.get_val_for_ttbr(asid);
+        crate::arch::aarch64::get_cpu().set_kernel_ttbr0(ttbr_val);
+        unsafe {
+            asm!(
+                "msr mair_el1, {mair}",
+                "msr tcr_el1, {tcr}",
+                "isb",
+                "dsb ishst",
+                "msr ttbr1_el1, {ttbr}",
+                "msr ttbr0_el1, {ttbr}",
+                "isb",
+                "tlbi vmalle1is",
+                "dsb ish",
+                "isb",
+                mair = in(reg) SCARLET_MAIR_EL1,
+                tcr = in(reg) SCARLET_TCR_EL1,
+                ttbr = in(reg) ttbr_val,
+                options(nostack),
             );
         }
     }
@@ -351,22 +403,25 @@ impl PageTable {
             None => panic!("map: walk() couldn't allocate page-table page"),
         };
 
-        pte.clear_all();
-
-        // Set as L3 page descriptor
-        pte.set_page();
-        pte.set_ppn(paddr >> 12);
-
         let is_user = VirtualMemoryPermission::User.contained_in(permissions);
         let is_device = !is_user && (IOREMAP_START..=IOREMAP_END).contains(&vaddr);
-
-        if is_device {
-            pte.set_memory_attr(MemoryAttribute::Device as u8);
-            pte.set_shareability(Shareability::OuterShareable as u8);
+        let memory_attr = if is_device {
+            MemoryAttribute::Device as u64
         } else {
-            pte.set_memory_attr(MemoryAttribute::Normal as u8);
-            pte.set_shareability(Shareability::InnerShareable as u8);
-        }
+            MemoryAttribute::Normal as u64
+        };
+        let shareability = if is_device {
+            Shareability::OuterShareable as u64
+        } else {
+            Shareability::InnerShareable as u64
+        };
+
+        let mut entry = 0u64;
+        entry |= 0x3;
+        entry |= 1 << 10;
+        entry |= ((paddr >> 12) as u64 & 0xfffffffff) << 12;
+        entry |= memory_attr << 2;
+        entry |= shareability << 8;
 
         // AP[7:6] encoding
         let is_write = VirtualMemoryPermission::Write.contained_in(permissions);
@@ -376,19 +431,32 @@ impl PageTable {
             (false, false) => 0b10,
             (true, false) => 0b11,
         };
-        pte.set_ap(ap);
+        entry |= (ap as u64) << 6;
 
         // nG bit for user pages (ASID-tagged)
         if is_user {
-            pte.set_non_global();
-        } else {
-            pte.set_global();
+            entry |= 1 << 11;
         }
 
         // Execute permission
-        if VirtualMemoryPermission::Execute.contained_in(permissions) {
-            pte.executable();
+        if !VirtualMemoryPermission::Execute.contained_in(permissions) {
+            entry |= (1 << 54) | (1 << 53);
         }
+
+        #[cfg(any(debug_assertions, test))]
+        if vaddr == DEBUG_DEVICE_FAULT_VA {
+            crate::early_println!(
+                "[vm-map] target va={:#x} paddr={:#x} perms={:#x} is_user={} is_device={} entry={:#x}",
+                vaddr,
+                paddr,
+                permissions,
+                is_user,
+                is_device,
+                entry,
+            );
+        }
+
+        pte.set_entry(entry);
 
         // Ensure the updated PTE is visible to the hardware table walker.
         crate::arch::aarch64::clean_dcache_to_poc_range(
@@ -511,33 +579,57 @@ impl PageTable {
 /// Initialize MMU registers
 pub fn init_mmu_registers() {
     unsafe {
-        // MAIR_EL1: memory attribute configuration
-        // Index 0: Device-nGnRnE (0x00)
-        // Index 1: Normal, Write-Back (0xFF)
-        // Index 2: Normal, Non-Cacheable (0x44)
-        let mair_val: u64 = 0x44ff00;
-        asm!("msr mair_el1, {}", in(reg) mair_val);
+        asm!(
+            "msr mair_el1, {mair}",
+            "msr tcr_el1, {tcr}",
+            "isb",
+            "mrs {tmp}, sctlr_el1",
+            "orr {tmp}, {tmp}, {sctlr_flags}",
+            "msr sctlr_el1, {tmp}",
+            "dsb sy",
+            "isb",
+            mair = in(reg) SCARLET_MAIR_EL1,
+            tcr = in(reg) SCARLET_TCR_EL1,
+            sctlr_flags = in(reg) SCTLR_EL1_ENABLE_MASK,
+            tmp = lateout(reg) _,
+            options(nostack),
+        );
+    }
+}
 
-        // TCR_EL1: Translation Control Register
-        // T0SZ = 16 (48-bit VA for TTBR0)
-        // T1SZ = 16 (48-bit VA for TTBR1)
-        // TG0 = 0b00 (4KB granule for TTBR0)
-        // TG1 = 0b10 (4KB granule for TTBR1)
-        // SH0/SH1 = 0b11 (Inner Shareable)
-        // ORGN0/ORGN1 = 0b01 (Write-Back)
-        // IRGN0/IRGN1 = 0b01 (Write-Back)
-        // IPS = 0b001 (36-bit PA, supports up to 64GB) - bit[34:32]
-        let tcr_val: u64 = 0x1_B510_3510;
-        asm!("msr tcr_el1, {}", in(reg) tcr_val);
-
-        // SCTLR_EL1: System Control Register
+pub fn sync_el1_translation_registers_if_needed() {
+    unsafe {
         let mut sctlr: u64;
-        asm!("mrs {}, sctlr_el1", out(reg) sctlr);
-        sctlr |= 1; // M: MMU enable
-        sctlr |= 1 << 2; // C: Data cache enable
-        sctlr |= 1 << 12; // I: Instruction cache enable
-        asm!("msr sctlr_el1, {}", in(reg) sctlr);
-        asm!("dsb sy", "isb");
+        asm!("mrs {sctlr}, sctlr_el1", sctlr = out(reg) sctlr, options(nostack));
+        if sctlr & 1 == 0 {
+            return;
+        }
+
+        let mut mair: u64;
+        let mut tcr: u64;
+        asm!(
+            "mrs {mair}, mair_el1",
+            "mrs {tcr}, tcr_el1",
+            mair = out(reg) mair,
+            tcr = out(reg) tcr,
+            options(nostack),
+        );
+
+        if mair == SCARLET_MAIR_EL1 && tcr == SCARLET_TCR_EL1 {
+            return;
+        }
+
+        asm!(
+            "msr mair_el1, {mair}",
+            "msr tcr_el1, {tcr}",
+            "isb",
+            "tlbi vmalle1is",
+            "dsb ish",
+            "isb",
+            mair = in(reg) SCARLET_MAIR_EL1,
+            tcr = in(reg) SCARLET_TCR_EL1,
+            options(nostack),
+        );
     }
 }
 
@@ -577,5 +669,20 @@ mod tests {
         let ttbr_val = page_table.get_val_for_ttbr(asid);
         let expected_asid = ((ttbr_val >> 48) & 0xffff) as u16;
         assert_eq!(expected_asid, asid);
+    }
+
+    #[test_case]
+    fn test_kernel_normal_leaf_encoding() {
+        let mut page_table = PageTable::new();
+        page_table.map(
+            1,
+            0xffff_ffff_8000_0000,
+            0x8000_0000,
+            0x01 | 0x02 | 0x04,
+            true,
+            true,
+        );
+        let pte = page_table.walk(0xffff_ffff_8000_0000, false, 1).unwrap();
+        assert_eq!(pte.entry & 0xfff, 0x707);
     }
 }

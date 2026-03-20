@@ -4,6 +4,9 @@ use spin::Mutex;
 
 const FONT_WIDTH: usize = 8;
 const FONT_HEIGHT: usize = 8;
+const FONT_SCALE: usize = 2;
+const GLYPH_WIDTH: usize = FONT_WIDTH * FONT_SCALE;
+const GLYPH_HEIGHT: usize = FONT_HEIGHT * FONT_SCALE;
 
 #[derive(Debug, Clone, Copy)]
 struct FramebufferConsole {
@@ -89,10 +92,10 @@ impl FramebufferConsole {
     }
 
     fn draw_char(&mut self, ch: char) {
-        if self.cursor_x + FONT_WIDTH > self.width {
+        if self.cursor_x + GLYPH_WIDTH > self.width {
             self.new_line();
         }
-        if self.cursor_y + FONT_HEIGHT > self.height {
+        if self.cursor_y + GLYPH_HEIGHT > self.height {
             self.clear_screen();
         }
 
@@ -109,17 +112,24 @@ impl FramebufferConsole {
                 } else {
                     (0x00, 0x00, 0x00)
                 };
-                self.put_pixel(self.cursor_x + col_idx, self.cursor_y + row_idx, r, g, b);
+
+                let base_x = self.cursor_x + (col_idx * FONT_SCALE);
+                let base_y = self.cursor_y + (row_idx * FONT_SCALE);
+                for dy in 0..FONT_SCALE {
+                    for dx in 0..FONT_SCALE {
+                        self.put_pixel(base_x + dx, base_y + dy, r, g, b);
+                    }
+                }
             }
         }
 
-        self.cursor_x += FONT_WIDTH;
+        self.cursor_x += GLYPH_WIDTH;
     }
 
     fn new_line(&mut self) {
         self.cursor_x = 0;
-        self.cursor_y += FONT_HEIGHT;
-        if self.cursor_y + FONT_HEIGHT > self.height {
+        self.cursor_y += GLYPH_HEIGHT;
+        if self.cursor_y + GLYPH_HEIGHT > self.height {
             self.clear_screen();
         }
     }
@@ -172,6 +182,10 @@ impl FramebufferConsole {
 
 static EARLY_CONSOLE: Mutex<FramebufferConsole> = Mutex::new(FramebufferConsole::new());
 
+pub fn console_lock_addr() -> usize {
+    &EARLY_CONSOLE as *const _ as usize
+}
+
 pub fn init(framebuffer: &Framebuffer<'_>) {
     let mut console = EARLY_CONSOLE.lock();
     if console.initialized {
@@ -192,4 +206,32 @@ pub fn write_str(s: &str) {
 
 pub fn is_initialized() -> bool {
     EARLY_CONSOLE.lock().initialized
+}
+
+pub fn deactivate() {
+    let mut console = EARLY_CONSOLE.lock();
+    console.initialized = false;
+}
+
+/// Update framebuffer address for the new HHDM offset after page table transition.
+///
+/// This should be called after `transition_kernel_memory_layout()` to update
+/// the framebuffer virtual address to use Scarlet's HHDM instead of Limine's.
+///
+/// # Arguments
+///
+/// * `old_hhdm_base` - The bootloader's HHDM base address (from BootInfo.hhdm_offset)
+/// * `new_hhdm_base` - The new HHDM base address (e.g., `SCARLET_HHDM_BASE`)
+pub fn fixup_hhdm_offset(old_hhdm_base: usize, new_hhdm_base: usize) {
+    let mut console = EARLY_CONSOLE.lock();
+    if !console.initialized || console.addr == 0 {
+        return;
+    }
+
+    if console.addr >= new_hhdm_base {
+        return;
+    }
+
+    let paddr = console.addr.saturating_sub(old_hhdm_base);
+    console.addr = new_hhdm_base.saturating_add(paddr);
 }

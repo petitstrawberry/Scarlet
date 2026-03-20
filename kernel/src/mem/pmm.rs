@@ -372,6 +372,77 @@ impl BuddyRegion {
     fn total_pages(&self) -> usize {
         self.page_count
     }
+
+    fn fixup_hhdm_offset(&mut self, old_offset: usize, new_offset: usize) {
+        if !self.active || old_offset == new_offset {
+            return;
+        }
+
+        let old_pages_start = self.pages as usize;
+        let new_pages_start = self.mem_start + new_offset;
+        let pages_bytes = self.page_count * core::mem::size_of::<Page>();
+        let old_pages_end = old_pages_start + pages_bytes;
+
+        self.pages = new_pages_start as *mut Page;
+
+        unsafe {
+            for order in 0..=MAX_ORDER {
+                let free_list = &mut self.free_area[order].free_list;
+                free_list.next = adjust_metadata_ptr(
+                    free_list.next,
+                    old_pages_start,
+                    old_pages_end,
+                    old_offset,
+                    new_offset,
+                );
+                free_list.prev = adjust_metadata_ptr(
+                    free_list.prev,
+                    old_pages_start,
+                    old_pages_end,
+                    old_offset,
+                    new_offset,
+                );
+            }
+
+            for i in 0..self.page_count {
+                let page = self.pages.add(i);
+                (*page).lru.next = adjust_metadata_ptr(
+                    (*page).lru.next,
+                    old_pages_start,
+                    old_pages_end,
+                    old_offset,
+                    new_offset,
+                );
+                (*page).lru.prev = adjust_metadata_ptr(
+                    (*page).lru.prev,
+                    old_pages_start,
+                    old_pages_end,
+                    old_offset,
+                    new_offset,
+                );
+            }
+        }
+    }
+}
+
+fn adjust_metadata_ptr(
+    ptr: *mut ListHead,
+    old_pages_start: usize,
+    old_pages_end: usize,
+    old_offset: usize,
+    new_offset: usize,
+) -> *mut ListHead {
+    if ptr.is_null() {
+        return ptr;
+    }
+
+    let addr = ptr as usize;
+    if !(old_pages_start..old_pages_end).contains(&addr) {
+        return ptr;
+    }
+
+    let paddr = addr - old_offset;
+    (paddr + new_offset) as *mut ListHead
 }
 
 struct PmmInner {
@@ -564,6 +635,13 @@ pub fn free_frame(paddr: usize) {
 
 pub fn stats() -> (usize, usize) {
     PMM.lock().stats()
+}
+
+pub fn fixup_hhdm_offset(old_offset: usize, new_offset: usize) {
+    let mut pmm = PMM.lock();
+    for region in &mut pmm.regions {
+        region.fixup_hhdm_offset(old_offset, new_offset);
+    }
 }
 
 fn align_up(addr: usize, align: usize) -> usize {

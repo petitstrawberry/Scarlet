@@ -51,6 +51,7 @@ use alloc::vec::Vec;
 use spin::mutex::Mutex;
 
 use crate::device::platform::PlatformDeviceInfo;
+use crate::device::platform::PlatformDeviceProperty;
 use crate::device::platform::resource::PlatformDeviceResource;
 use crate::device::platform::resource::PlatformDeviceResourceType;
 use crate::early_println;
@@ -142,6 +143,77 @@ impl DeviceManager {
 
     pub fn get_manager() -> &'static DeviceManager {
         &MANAGER
+    }
+
+    fn read_be_u32(bytes: &[u8]) -> Option<u32> {
+        if bytes.len() < 4 {
+            return None;
+        }
+        Some(u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
+    }
+
+    fn get_u32_prop<'a, 'b>(node: &fdt::node::FdtNode<'a, 'b>, name: &str) -> Option<u32> {
+        let prop = node.property(name)?;
+        Self::read_be_u32(prop.value)
+    }
+
+    fn find_node_by_phandle<'a>(
+        fdt: &'a fdt::Fdt<'a>,
+        phandle: u32,
+    ) -> Option<fdt::node::FdtNode<'a, 'a>> {
+        let mut stack: Vec<fdt::node::FdtNode<'a, 'a>> = Vec::new();
+        stack.push(fdt.find_node("/")?);
+
+        while let Some(node) = stack.pop() {
+            if let Some(p) = Self::get_u32_prop(&node, "phandle") {
+                if p == phandle {
+                    return Some(node);
+                }
+            }
+            if let Some(p) = Self::get_u32_prop(&node, "linux,phandle") {
+                if p == phandle {
+                    return Some(node);
+                }
+            }
+            for child in node.children() {
+                stack.push(child);
+            }
+        }
+
+        None
+    }
+
+    fn push_irq_resource(
+        resources: &mut Vec<PlatformDeviceResource>,
+        irq_num: usize,
+        metadata: Option<crate::device::platform::resource::IrqMetadata>,
+    ) {
+        resources.push(PlatformDeviceResource {
+            res_type: PlatformDeviceResourceType::IRQ,
+            start: irq_num,
+            end: irq_num,
+            irq_metadata: metadata,
+        });
+    }
+
+    fn mem_resource_from_region(
+        region: fdt::standard_nodes::MemoryRegion,
+    ) -> Option<PlatformDeviceResource> {
+        let start = region.starting_address as usize;
+        let size = region.size?;
+
+        if size == 0 {
+            return None;
+        }
+
+        let end = start.checked_add(size - 1)?;
+
+        Some(PlatformDeviceResource {
+            res_type: PlatformDeviceResourceType::MEM,
+            start,
+            end,
+            irq_metadata: None,
+        })
     }
 
     /// Register a device with the manager
@@ -372,16 +444,34 @@ impl DeviceManager {
 
         let mut idx = 0;
 
-        // Process each child node separately to reduce stack usage
         for child in parent_node.children() {
-            self.process_single_device_node(child, priority, &mut idx);
+            self.process_device_subtree(&child, priority, &mut idx);
+        }
+
+        if let Some(chosen_node) = fdt.find_node("/chosen") {
+            for child in chosen_node.children() {
+                self.process_device_subtree(&child, priority, &mut idx);
+            }
+        }
+    }
+
+    fn process_device_subtree(
+        &self,
+        node: &fdt::node::FdtNode,
+        priority: DriverPriority,
+        idx: &mut usize,
+    ) {
+        self.process_single_device_node(node, priority, idx);
+
+        for child in node.children() {
+            self.process_device_subtree(&child, priority, idx);
         }
     }
 
     /// Process a single device node with minimal stack usage
     fn process_single_device_node(
         &self,
-        child: fdt::node::FdtNode,
+        child: &fdt::node::FdtNode,
         priority: DriverPriority,
         idx: &mut usize,
     ) {
@@ -407,10 +497,28 @@ impl DeviceManager {
 
         // Build resources separately to reduce stack usage
         let resources = self.build_minimal_resources(&child);
+        let properties = self.build_device_properties(&child);
 
         // Try to match with drivers
         let compatible_vec: alloc::vec::Vec<&str> = compatible_iter.collect();
-        self.try_match_and_probe_device(child, priority, idx, compatible_vec, resources);
+        self.try_match_and_probe_device(
+            child,
+            priority,
+            idx,
+            compatible_vec,
+            resources,
+            properties,
+        );
+    }
+
+    fn build_device_properties(
+        &self,
+        child: &fdt::node::FdtNode,
+    ) -> alloc::vec::Vec<PlatformDeviceProperty> {
+        child
+            .properties()
+            .map(|property| PlatformDeviceProperty::new(property.name, property.value))
+            .collect()
     }
 
     /// Build device resources with minimal stack allocation
@@ -423,126 +531,187 @@ impl DeviceManager {
         // Add memory regions
         if let Some(regions) = child.reg() {
             for region in regions {
-                let res = PlatformDeviceResource {
-                    res_type: PlatformDeviceResourceType::MEM,
-                    start: region.starting_address as usize,
-                    end: region.starting_address as usize + region.size.unwrap() - 1,
-                    irq_metadata: None, // No IRQ metadata for memory regions
-                };
-                resources.push(res);
+                if let Some(res) = Self::mem_resource_from_region(region) {
+                    resources.push(res);
+                }
             }
         }
 
         // Add IRQs
+        let mut parsed_any_irq = false;
+
         if let Some(irqs) = child.interrupts() {
             // Standard path: fdt-rs successfully parsed interrupts
             for irq in irqs {
-                let res = PlatformDeviceResource {
-                    res_type: PlatformDeviceResourceType::IRQ,
-                    start: irq,
-                    end: irq,
-                    irq_metadata: None, // No metadata when fdt-rs handles it
-                };
-                resources.push(res);
+                Self::push_irq_resource(&mut resources, irq, None);
+                parsed_any_irq = true;
             }
-        } else if let Some(prop) = child.property("interrupts") {
-            // Fallback: Parse raw interrupts property when fdt-rs fails
-            // This preserves interrupt controller metadata for later translation
-            let value = prop.value;
+        }
 
-            // Detect cell format based on property length
-            let cell_size = if value.len() % 12 == 0 {
-                3 // 3-cell format (e.g., ARM GIC: <type, number, flags>)
-            } else if value.len() % 8 == 0 {
-                2 // 2-cell format
-            } else if value.len() % 4 == 0 {
-                1 // 1-cell format (just interrupt number)
-            } else {
-                return resources; // Unknown format, skip
-            };
+        if !parsed_any_irq {
+            if let Some(prop) = child.property("interrupts-extended") {
+                if let Some(fdt) = crate::device::fdt::FdtManager::get_manager().get_fdt() {
+                    let bytes = prop.value;
+                    let mut offset = 0usize;
 
-            let num_irqs = value.len() / (cell_size * 4);
+                    while offset + 4 <= bytes.len() {
+                        let phandle = match Self::read_be_u32(&bytes[offset..offset + 4]) {
+                            Some(v) => v,
+                            None => break,
+                        };
+                        offset += 4;
 
-            for i in 0..num_irqs {
-                let offset = i * cell_size * 4;
+                        let intc_node = Self::find_node_by_phandle(fdt, phandle);
+                        let interrupt_cells = intc_node
+                            .as_ref()
+                            .and_then(|n| Self::get_u32_prop(n, "#interrupt-cells"))
+                            .unwrap_or(1) as usize;
 
-                let (irq_num, metadata) = match cell_size {
-                    3 => {
-                        // 3-cell format: <type, number, flags>
-                        let irq_type = u32::from_be_bytes([
-                            value[offset],
-                            value[offset + 1],
-                            value[offset + 2],
-                            value[offset + 3],
-                        ]);
-                        let irq_number = u32::from_be_bytes([
-                            value[offset + 4],
-                            value[offset + 5],
-                            value[offset + 6],
-                            value[offset + 7],
-                        ]);
-                        let irq_flags = u32::from_be_bytes([
-                            value[offset + 8],
-                            value[offset + 9],
-                            value[offset + 10],
-                            value[offset + 11],
-                        ]);
+                        if interrupt_cells == 0 {
+                            break;
+                        }
 
-                        // Store raw number, let interrupt controller translate
-                        (
-                            irq_number as usize,
-                            Some(crate::device::platform::resource::IrqMetadata {
-                                irq_type,
-                                irq_number,
-                                irq_flags,
-                            }),
-                        )
+                        let needed = interrupt_cells.saturating_mul(4);
+                        if offset + needed > bytes.len() {
+                            break;
+                        }
+
+                        let cell0 = Self::read_be_u32(&bytes[offset..offset + 4]).unwrap_or(0);
+                        let cell1 = if interrupt_cells >= 2 {
+                            Self::read_be_u32(&bytes[offset + 4..offset + 8]).unwrap_or(0)
+                        } else {
+                            0
+                        };
+                        let cell2 = if interrupt_cells >= 3 {
+                            Self::read_be_u32(&bytes[offset + 8..offset + 12]).unwrap_or(0)
+                        } else {
+                            0
+                        };
+
+                        let (irq_num, metadata) = match interrupt_cells {
+                            3 => (
+                                cell1 as usize,
+                                Some(crate::device::platform::resource::IrqMetadata {
+                                    irq_type: cell0,
+                                    irq_number: cell1,
+                                    irq_flags: cell2,
+                                }),
+                            ),
+                            2 => (
+                                cell0 as usize,
+                                Some(crate::device::platform::resource::IrqMetadata {
+                                    irq_type: 0,
+                                    irq_number: cell0,
+                                    irq_flags: cell1,
+                                }),
+                            ),
+                            1 => (cell0 as usize, None),
+                            _ => (cell0 as usize, None),
+                        };
+
+                        Self::push_irq_resource(&mut resources, irq_num, metadata);
+                        parsed_any_irq = true;
+                        offset += needed;
                     }
-                    2 => {
-                        // 2-cell format: <number, flags>
-                        let irq_number = u32::from_be_bytes([
-                            value[offset],
-                            value[offset + 1],
-                            value[offset + 2],
-                            value[offset + 3],
-                        ]);
-                        let irq_flags = u32::from_be_bytes([
-                            value[offset + 4],
-                            value[offset + 5],
-                            value[offset + 6],
-                            value[offset + 7],
-                        ]);
+                }
+            }
+        }
 
-                        (
-                            irq_number as usize,
-                            Some(crate::device::platform::resource::IrqMetadata {
-                                irq_type: 0, // No type in 2-cell format
-                                irq_number,
-                                irq_flags,
-                            }),
-                        )
-                    }
-                    1 => {
-                        // 1-cell format: just interrupt number
-                        let irq_number = u32::from_be_bytes([
-                            value[offset],
-                            value[offset + 1],
-                            value[offset + 2],
-                            value[offset + 3],
-                        ]);
+        if !parsed_any_irq {
+            if let Some(prop) = child.property("interrupts") {
+                // Fallback: Parse raw interrupts property when fdt-rs fails
+                // This preserves interrupt controller metadata for later translation
+                let value = prop.value;
 
-                        (irq_number as usize, None)
-                    }
-                    _ => unreachable!(),
+                // Detect cell format based on property length
+                let cell_size = if value.len() % 12 == 0 {
+                    3 // 3-cell format (e.g., ARM GIC: <type, number, flags>)
+                } else if value.len() % 8 == 0 {
+                    2 // 2-cell format
+                } else if value.len() % 4 == 0 {
+                    1 // 1-cell format (just interrupt number)
+                } else {
+                    return resources; // Unknown format, skip
                 };
 
-                let res = PlatformDeviceResource {
-                    res_type: PlatformDeviceResourceType::IRQ,
-                    start: irq_num,
-                    end: irq_num,
-                    irq_metadata: metadata,
-                };
-                resources.push(res);
+                let num_irqs = value.len() / (cell_size * 4);
+
+                for i in 0..num_irqs {
+                    let offset = i * cell_size * 4;
+
+                    let (irq_num, metadata) = match cell_size {
+                        3 => {
+                            // 3-cell format: <type, number, flags>
+                            let irq_type = u32::from_be_bytes([
+                                value[offset],
+                                value[offset + 1],
+                                value[offset + 2],
+                                value[offset + 3],
+                            ]);
+                            let irq_number = u32::from_be_bytes([
+                                value[offset + 4],
+                                value[offset + 5],
+                                value[offset + 6],
+                                value[offset + 7],
+                            ]);
+                            let irq_flags = u32::from_be_bytes([
+                                value[offset + 8],
+                                value[offset + 9],
+                                value[offset + 10],
+                                value[offset + 11],
+                            ]);
+
+                            // Store raw number, let interrupt controller translate
+                            (
+                                irq_number as usize,
+                                Some(crate::device::platform::resource::IrqMetadata {
+                                    irq_type,
+                                    irq_number,
+                                    irq_flags,
+                                }),
+                            )
+                        }
+                        2 => {
+                            // 2-cell format: <number, flags>
+                            let irq_number = u32::from_be_bytes([
+                                value[offset],
+                                value[offset + 1],
+                                value[offset + 2],
+                                value[offset + 3],
+                            ]);
+                            let irq_flags = u32::from_be_bytes([
+                                value[offset + 4],
+                                value[offset + 5],
+                                value[offset + 6],
+                                value[offset + 7],
+                            ]);
+
+                            (
+                                irq_number as usize,
+                                Some(crate::device::platform::resource::IrqMetadata {
+                                    irq_type: 0, // No type in 2-cell format
+                                    irq_number,
+                                    irq_flags,
+                                }),
+                            )
+                        }
+                        1 => {
+                            // 1-cell format: just interrupt number
+                            let irq_number = u32::from_be_bytes([
+                                value[offset],
+                                value[offset + 1],
+                                value[offset + 2],
+                                value[offset + 3],
+                            ]);
+
+                            (irq_number as usize, None)
+                        }
+                        _ => unreachable!(),
+                    };
+
+                    Self::push_irq_resource(&mut resources, irq_num, metadata);
+                    parsed_any_irq = true;
+                }
             }
         }
 
@@ -552,11 +721,12 @@ impl DeviceManager {
     /// Try to match device with drivers and probe if successful
     fn try_match_and_probe_device(
         &self,
-        child: fdt::node::FdtNode,
+        child: &fdt::node::FdtNode,
         priority: DriverPriority,
         idx: &mut usize,
         compatible: alloc::vec::Vec<&str>,
         resources: alloc::vec::Vec<PlatformDeviceResource>,
+        properties: alloc::vec::Vec<PlatformDeviceProperty>,
     ) {
         let drivers = self.drivers.lock();
         if let Some(driver_list) = drivers.get(&priority) {
@@ -579,6 +749,7 @@ impl DeviceManager {
                         *idx,
                         static_compatible,
                         resources,
+                        properties,
                     ));
 
                     match driver.probe(&*device) {
@@ -785,5 +956,29 @@ mod tests {
         let manager = DeviceManager::new();
         let device = manager.get_device_by_name("non_existent");
         assert!(device.is_none());
+    }
+
+    #[test_case]
+    fn test_mem_resource_from_region_without_size() {
+        let region = fdt::standard_nodes::MemoryRegion {
+            starting_address: 0x1000 as *const u8,
+            size: None,
+        };
+
+        assert!(DeviceManager::mem_resource_from_region(region).is_none());
+    }
+
+    #[test_case]
+    fn test_mem_resource_from_region_with_size() {
+        let region = fdt::standard_nodes::MemoryRegion {
+            starting_address: 0x1000 as *const u8,
+            size: Some(0x100),
+        };
+
+        let resource = DeviceManager::mem_resource_from_region(region).unwrap();
+        assert_eq!(resource.start, 0x1000);
+        assert_eq!(resource.end, 0x10ff);
+        assert_eq!(resource.res_type, PlatformDeviceResourceType::MEM);
+        assert!(resource.irq_metadata.is_none());
     }
 }

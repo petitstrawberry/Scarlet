@@ -1,16 +1,17 @@
 #![no_std]
 #![no_main]
 
-extern crate scarlet;
+extern crate scarlet_modules;
 
 use core::arch::naked_asm;
 
-use scarlet::{environment::STACK_SIZE, start_ap};
+use scarlet_modules::scarlet::{environment::STACK_SIZE, start_ap};
 
 #[unsafe(link_section = ".init")]
 #[unsafe(no_mangle)]
 pub extern "C" fn arch_start_kernel() -> ! {
-    scarlet::arch::riscv64::boot::limine::limine_entry()
+    scarlet_modules::force_link();
+    scarlet_modules::scarlet::arch::riscv64::boot::limine::limine_entry()
 }
 
 /// Entry point for the secondary cores

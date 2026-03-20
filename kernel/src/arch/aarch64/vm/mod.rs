@@ -275,13 +275,36 @@ fn setup_trampoline_at_end(manager: &VirtualMemoryManager, trampoline_vaddr_end:
 }
 
 pub fn setup_trampoline_for_kernel(manager: &VirtualMemoryManager) {
+    #[cfg(any(debug_assertions, test))]
+    fn log_early_console_pte(stage: &str, manager: &VirtualMemoryManager) {
+        let console_vaddr = crate::earlyfb::console_lock_addr();
+        let leaf = manager
+            .get_root_page_table()
+            .and_then(|root| root.walk(console_vaddr, false, manager.get_asid()))
+            .map(|pte| pte.entry & 0xfff);
+
+        match leaf {
+            Some(bits) => crate::early_println!(
+                "[vm] {} EARLY_CONSOLE leaf bits: {:#x} (va={:#x})",
+                stage,
+                bits,
+                console_vaddr
+            ),
+            None => crate::early_println!(
+                "[vm] {} EARLY_CONSOLE leaf missing (va={:#x})",
+                stage,
+                console_vaddr
+            ),
+        }
+    }
+
     setup_trampoline_at_end(manager, TRAMPOLINE_VA_END);
 
     // Sanity check: the per-task kernel stack windows are part of the same high-VA
     // (trampoline-managed) TTBR1 address space.
     #[cfg(any(debug_assertions, test))]
     {
-        crate::println!(
+        crate::early_println!(
             "[vm] aarch64 high-va(kstack) region: {:#x}-{:#x}",
             KERNEL_KSTACK_REGION_START,
             KERNEL_KSTACK_REGION_END
@@ -292,13 +315,18 @@ pub fn setup_trampoline_for_kernel(manager: &VirtualMemoryManager) {
 
     // Keep TTBR1 fixed to the kernel page table (trampoline/high-VA live there).
     #[cfg(any(debug_assertions, test))]
-    crate::println!("[vm] setup_trampoline_for_kernel: switch_ttbr1...");
+    crate::early_println!("[vm] setup_trampoline_for_kernel: switch_ttbr1...");
+    #[cfg(any(debug_assertions, test))]
+    log_early_console_pte("pre-switch", manager);
+    mmu::sync_el1_translation_registers_if_needed();
     manager
         .get_root_page_table()
         .expect("Kernel root page table not set")
         .switch_ttbr1(manager.get_asid());
     #[cfg(any(debug_assertions, test))]
-    crate::println!("[vm] setup_trampoline_for_kernel: switch_ttbr1 ok");
+    log_early_console_pte("post-switch", manager);
+    #[cfg(any(debug_assertions, test))]
+    crate::early_println!("[vm] setup_trampoline_for_kernel: switch_ttbr1 ok");
 }
 
 /// AArch64: trampoline/high-VA live in the fixed TTBR1 kernel mapping.

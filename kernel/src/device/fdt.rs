@@ -533,17 +533,18 @@ pub fn create_bootinfo_from_fdt(cpu_id: usize, relocated_fdt_addr: usize) -> Boo
 
     let cpu_count = fdt_manager.get_cpu_count().unwrap_or(1);
 
+    let hhdm_offset = 0xffff_8000_0000_0000_usize;
+
     BootInfo::new(
         cpu_id,
         cpu_count,
         usable_memory,
-        usable_memory,
-        usable_memory,
-        usable_memory,
+        dram_area,
         relocated_initramfs,
-        relocated_initramfs,
+        hhdm_offset,
         cmdline,
         DeviceSource::Fdt(relocated_fdt_addr),
+        None,
     )
 }
 

@@ -607,6 +607,72 @@ impl FramebufferCharDevice {
                     msb_right: 0,
                 };
             }
+            super::PixelFormat::XRGB8888 => {
+                var_info.red = FbBitfield {
+                    offset: 0,
+                    length: 8,
+                    msb_right: 0,
+                };
+                var_info.green = FbBitfield {
+                    offset: 8,
+                    length: 8,
+                    msb_right: 0,
+                };
+                var_info.blue = FbBitfield {
+                    offset: 16,
+                    length: 8,
+                    msb_right: 0,
+                };
+                var_info.transp = FbBitfield {
+                    offset: 24,
+                    length: 0,
+                    msb_right: 0,
+                };
+            }
+            super::PixelFormat::XBGR8888 => {
+                var_info.blue = FbBitfield {
+                    offset: 0,
+                    length: 8,
+                    msb_right: 0,
+                };
+                var_info.green = FbBitfield {
+                    offset: 8,
+                    length: 8,
+                    msb_right: 0,
+                };
+                var_info.red = FbBitfield {
+                    offset: 16,
+                    length: 8,
+                    msb_right: 0,
+                };
+                var_info.transp = FbBitfield {
+                    offset: 24,
+                    length: 0,
+                    msb_right: 0,
+                };
+            }
+            super::PixelFormat::XRGB2101010 => {
+                var_info.red = FbBitfield {
+                    offset: 20,
+                    length: 10,
+                    msb_right: 0,
+                };
+                var_info.green = FbBitfield {
+                    offset: 10,
+                    length: 10,
+                    msb_right: 0,
+                };
+                var_info.blue = FbBitfield {
+                    offset: 0,
+                    length: 10,
+                    msb_right: 0,
+                };
+                var_info.transp = FbBitfield {
+                    offset: 30,
+                    length: 0,
+                    msb_right: 0,
+                };
+            }
             super::PixelFormat::RGB888 => {
                 var_info.red = FbBitfield {
                     offset: 0,
@@ -647,6 +713,50 @@ impl FramebufferCharDevice {
                 };
                 var_info.transp = FbBitfield {
                     offset: 0,
+                    length: 0,
+                    msb_right: 0,
+                };
+            }
+            super::PixelFormat::ARGB1555 => {
+                var_info.red = FbBitfield {
+                    offset: 10,
+                    length: 5,
+                    msb_right: 0,
+                };
+                var_info.green = FbBitfield {
+                    offset: 5,
+                    length: 5,
+                    msb_right: 0,
+                };
+                var_info.blue = FbBitfield {
+                    offset: 0,
+                    length: 5,
+                    msb_right: 0,
+                };
+                var_info.transp = FbBitfield {
+                    offset: 15,
+                    length: 1,
+                    msb_right: 0,
+                };
+            }
+            super::PixelFormat::XRGB1555 => {
+                var_info.red = FbBitfield {
+                    offset: 10,
+                    length: 5,
+                    msb_right: 0,
+                };
+                var_info.green = FbBitfield {
+                    offset: 5,
+                    length: 5,
+                    msb_right: 0,
+                };
+                var_info.blue = FbBitfield {
+                    offset: 0,
+                    length: 5,
+                    msb_right: 0,
+                };
+                var_info.transp = FbBitfield {
+                    offset: 15,
                     length: 0,
                     msb_right: 0,
                 };
