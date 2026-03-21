@@ -26,8 +26,16 @@
 //! # Register Layout
 //!
 //! Each power domain has a single 32-bit register at its offset:
-//! - Bit 0: Power state (0 = on, 1 = off)
-//! - Bit 28: Reset assert (1 = reset asserted)
+//! - Bits [3:0]: PS_TARGET (power state target)
+//! - Bits [7:4]: PS_ACTUAL (current power state)
+//! - Bit [8]: WAS_PWRGATED (set if device was power-gated)
+//! - Bit [9]: WAS_CLKGATED (set if device was clock-gated)
+//! - Bit [10]: DEV_DISABLE
+//! - Bit [11]: PARENT_OFF
+//! - Bits [19:16]: PS_MIN
+//! - Bits [27:24]: PS_AUTO
+//! - Bit [28]: AUTO_ENABLE
+//! - Bit [31]: RESET
 //!
 //! # Usage
 //!
@@ -59,14 +67,29 @@ use crate::{
 // Register Bit Definitions
 // =============================================================================
 
-/// Power state bit: 0 = powered on, 1 = powered off
-const PMGR_PS_TARGET: u32 = 1 << 0;
-/// Power state actual status bit
-const PMGR_PS_ACTUAL: u32 = 1 << 1;
+/// Power state target field (bits [3:0])
+const PMGR_PS_TARGET: u32 = 0xf;
+/// Current power state field (bits [7:4])
+const PMGR_PS_ACTUAL: u32 = 0xf << 4;
+/// Shift amount to extract PS_ACTUAL value
+const PMGR_PS_ACTUAL_SHIFT: u32 = 4;
 /// Reset assert bit
-const PMGR_RESET: u32 = 1 << 28;
-/// Index of this power domain (used as key for lookups)
-const PMGR_IDX_SHIFT: u32 = 16;
+const PMGR_RESET: u32 = 1 << 31;
+/// Auto power management enable
+const PMGR_AUTO_ENABLE: u32 = 1 << 28;
+/// Device was power-gated flag
+const PMGR_WAS_PWRGATED: u32 = 1 << 8;
+/// Device was clock-gated flag
+const PMGR_WAS_CLKGATED: u32 = 1 << 9;
+/// Flags to clear after power state transition
+const PMGR_FLAGS: u32 = PMGR_WAS_CLKGATED | PMGR_WAS_PWRGATED;
+
+/// Power state: fully active
+const PMGR_PS_ACTIVE: u32 = 0xf;
+/// Power state: clock gated
+const PMGR_PS_CLKGATE: u32 = 0x4;
+/// Power state: power gated (off)
+const PMGR_PS_PWRGATE: u32 = 0x0;
 
 // =============================================================================
 // Power Domain Descriptor
@@ -136,27 +159,28 @@ impl PmgrInstance {
 
     /// Enable (power on) a power domain.
     ///
-    /// Clears bit 0 of the power domain register to set target state to ON,
-    /// then polls until actual state matches.
+    /// Sets PS_TARGET to ACTIVE (0xf), clears was-clkgated/was-pwgated flags,
+    /// then polls PS_ACTUAL until it reaches ACTIVE.
     fn enable(&self, domain: &PowerDomain) -> Result<(), &'static str> {
         if domain.always_on {
-            return Ok(()); // Skip always-on domains
-        }
-
-        let reg = self.read_reg(domain);
-        if reg & PMGR_PS_TARGET == 0 {
-            // Already powered on
             return Ok(());
         }
 
-        // Clear power state target bit to request ON
-        self.write_reg(domain, reg & !PMGR_PS_TARGET);
+        let reg = self.read_reg(domain);
+        let actual = (reg & PMGR_PS_ACTUAL) >> PMGR_PS_ACTUAL_SHIFT;
+        if actual == PMGR_PS_ACTIVE {
+            return Ok(());
+        }
 
-        // Poll until actual state is ON (bit 1 = 0 means on)
+        let val = (reg & !PMGR_PS_TARGET) | PMGR_PS_ACTIVE;
+        let val = val & !PMGR_FLAGS;
+        self.write_reg(domain, val);
+
         let mut timeout = 1000;
         loop {
             let val = self.read_reg(domain);
-            if val & PMGR_PS_ACTUAL == 0 {
+            let actual = (val & PMGR_PS_ACTUAL) >> PMGR_PS_ACTUAL_SHIFT;
+            if actual == PMGR_PS_ACTIVE {
                 return Ok(());
             }
             timeout -= 1;
@@ -174,26 +198,26 @@ impl PmgrInstance {
 
     /// Disable (power off) a power domain.
     ///
-    /// Sets bit 0 to request OFF state, then polls until actual state matches.
+    /// Sets PS_TARGET to PWRGATE (0x0), then polls PS_ACTUAL until it reaches PWRGATE.
     fn disable(&self, domain: &PowerDomain) -> Result<(), &'static str> {
         if domain.always_on {
-            return Ok(()); // Skip always-on domains
-        }
-
-        let reg = self.read_reg(domain);
-        if reg & PMGR_PS_TARGET != 0 {
-            // Already powered off
             return Ok(());
         }
 
-        // Set power state target bit to request OFF
-        self.write_reg(domain, reg | PMGR_PS_TARGET);
+        let reg = self.read_reg(domain);
+        let actual = (reg & PMGR_PS_ACTUAL) >> PMGR_PS_ACTUAL_SHIFT;
+        if actual == PMGR_PS_PWRGATE {
+            return Ok(());
+        }
 
-        // Poll until actual state is OFF (bit 1 = 1 means off)
+        let val = reg & !PMGR_PS_TARGET;
+        self.write_reg(domain, val);
+
         let mut timeout = 1000;
         loop {
             let val = self.read_reg(domain);
-            if val & PMGR_PS_ACTUAL != 0 {
+            let actual = (val & PMGR_PS_ACTUAL) >> PMGR_PS_ACTUAL_SHIFT;
+            if actual == PMGR_PS_PWRGATE {
                 return Ok(());
             }
             timeout -= 1;
@@ -224,8 +248,8 @@ impl PmgrInstance {
     /// Check if a power domain is currently powered on.
     fn is_on(&self, domain: &PowerDomain) -> bool {
         let reg = self.read_reg(domain);
-        // Both target and actual should be 0 for powered-on
-        reg & PMGR_PS_TARGET == 0 && reg & PMGR_PS_ACTUAL == 0
+        let actual = (reg & PMGR_PS_ACTUAL) >> PMGR_PS_ACTUAL_SHIFT;
+        actual == PMGR_PS_ACTIVE
     }
 }
 
