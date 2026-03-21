@@ -119,9 +119,11 @@ pub struct DeviceManager {
     device_by_name: Mutex<BTreeMap<String, SharedDevice>>,
     /* Name to ID mapping */
     name_to_id: Mutex<BTreeMap<String, usize>>,
-    /* Device drivers organized by priority */
+    /* Registered device drivers organized by priority */
     drivers: Mutex<BTreeMap<DriverPriority, Vec<Box<dyn DeviceDriver>>>>,
-    /* Next device ID to assign */
+    /* Discovered PCI devices awaiting driver probe */
+    discovered_pci_devices: Mutex<Vec<Arc<dyn DeviceInfo + Send + Sync>>>,
+    /* Next available device ID */
     next_device_id: AtomicUsize,
 }
 
@@ -132,6 +134,7 @@ impl DeviceManager {
             device_by_name: Mutex::new(BTreeMap::new()),
             name_to_id: Mutex::new(BTreeMap::new()),
             drivers: Mutex::new(BTreeMap::new()),
+            discovered_pci_devices: Mutex::new(Vec::new()),
             next_device_id: AtomicUsize::new(1), // Start from 1, reserve 0 for invalid
         }
     }
@@ -900,6 +903,68 @@ impl DeviceManager {
         self.register_driver(driver, DriverPriority::Standard);
     }
 
+    /// Register a discovered PCI device with the DeviceManager.
+    ///
+    /// PCI host controller platform drivers call this after scanning ECAM
+    /// to register discovered PCI devices. The devices will be probed
+    /// against registered PCI drivers when `probe_pci_devices()` is called.
+    ///
+    /// # Arguments
+    ///
+    /// * `device` - The PCI device to register.
+    pub fn register_pci_device(&self, device: Arc<dyn DeviceInfo + Send + Sync>) {
+        let mut discovered = self.discovered_pci_devices.lock();
+        discovered.push(device);
+    }
+
+    /// Probe all discovered PCI devices against registered drivers.
+    ///
+    /// Must be called after all PCI devices have been registered (via
+    /// `register_pci_device()`) and all drivers have been registered.
+    /// Typically called from the init sequence after platform probing.
+    pub fn probe_pci_devices(&self) {
+        let discovered = self.discovered_pci_devices.lock();
+        if discovered.is_empty() {
+            return;
+        }
+
+        let count = discovered.len();
+        early_println!("Probing {} discovered PCI devices...", count);
+
+        // Hold drivers lock during probing. This is safe because PCI driver
+        // probe functions do not re-enter the drivers lock.
+        let drivers = self.drivers.lock();
+
+        for priority in DriverPriority::all() {
+            let driver_list = match drivers.get(priority) {
+                Some(list) if !list.is_empty() => list,
+                _ => continue,
+            };
+
+            let mut claimed_ids: Vec<usize> = Vec::new();
+
+            for driver in driver_list.iter() {
+                for device in discovered.iter() {
+                    if claimed_ids.contains(&device.id()) {
+                        continue;
+                    }
+
+                    match driver.probe(&**device) {
+                        Ok(()) => {
+                            claimed_ids.push(device.id());
+                            early_println!(
+                                "Successfully probed PCI device {} with driver {}",
+                                device.name(),
+                                driver.name()
+                            );
+                        }
+                        Err(_) => {} // Not a match, try next driver
+                    }
+                }
+            }
+        }
+    }
+
     /// Clear all devices and reset the manager state (for testing only)
     ///
     /// This method is only available in test builds and should only be used
@@ -909,10 +974,12 @@ impl DeviceManager {
         let mut devices = self.devices.lock();
         let mut device_by_name = self.device_by_name.lock();
         let mut name_to_id = self.name_to_id.lock();
+        let mut discovered = self.discovered_pci_devices.lock();
 
         devices.clear();
         device_by_name.clear();
         name_to_id.clear();
+        discovered.clear();
         self.next_device_id.store(1, Ordering::SeqCst); // Start from 1, reserve 0 for invalid
     }
 }

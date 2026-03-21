@@ -450,9 +450,9 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
     }
 
     let pci_bus = crate::device::pci::PciBus::new(config_paddr, config_size);
-    match pci_bus.scan_and_probe_registered_drivers() {
-        Ok(()) => early_println!("[apple-pcie] ECAM PCI scan completed"),
-        Err(e) => early_println!("[apple-pcie] ECAM PCI scan failed: {}", e),
+    match pci_bus.scan_and_register() {
+        Ok(()) => early_println!("[apple-pcie] PCI devices registered with DeviceManager"),
+        Err(e) => early_println!("[apple-pcie] PCI scan failed: {}", e),
     }
 
     Ok(())

@@ -712,11 +712,12 @@ pub extern "C" fn start_kernel(boot_info: &BootInfo) -> ! {
 
         if let Some((ecam_base, ecam_size)) = pci_ecam {
             let pci_bus = PciBus::new(ecam_base, ecam_size);
-            if let Err(error) = pci_bus.scan_and_probe_registered_drivers() {
-                println!("[Scarlet Kernel] PCI probe skipped: {}", error);
+            if let Err(error) = pci_bus.scan_and_register() {
+                println!("[Scarlet Kernel] PCI scan skipped: {}", error);
             }
         }
     }
+    DeviceManager::get_manager().probe_pci_devices();
     fence(Ordering::SeqCst);
 
     /* After this point, we can use the device manager */
