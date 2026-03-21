@@ -1426,6 +1426,44 @@ impl InterruptCapableDevice for XhciController {
 }
 
 /// Probe function for xHCI PCI devices
+pub fn bind_xhci_mmio(
+    mmio_vaddr: usize,
+    interrupt: Option<InterruptId>,
+) -> Result<(), &'static str> {
+    early_println!("[xHCI] Binding platform xHCI at {:#x}", mmio_vaddr);
+
+    let controller = Arc::new(XhciController::new(mmio_vaddr)?);
+
+    controller.init()?;
+    controller.start()?;
+
+    match controller.enumerate_ports() {
+        Ok(count) => early_println!("[xHCI] Enumerated {} device(s)", count),
+        Err(error) => early_println!("[xHCI] Enumeration deferred: {}", error),
+    }
+
+    if let Some(interrupt_id) = interrupt {
+        controller.enable_interrupts(interrupt_id)?;
+        InterruptManager::with_manager(|mgr| {
+            mgr.register_interrupt_device(interrupt_id, controller.clone())
+        })
+        .map_err(|_| "Failed to register xHCI interrupt device")?;
+        early_println!("[xHCI] Registered IRQ {}", interrupt_id);
+    } else {
+        early_println!("[xHCI] No interrupt provided for platform controller");
+    }
+
+    let mut controllers = XHCI_CONTROLLERS.lock();
+    controllers.push(controller);
+    drop(controllers);
+
+    let poll_handler: Arc<dyn TimerHandler> = Arc::new(XhciPollHandler);
+    add_timer(get_tick() + ms_to_ticks(1000), &poll_handler, 0);
+
+    early_println!("[xHCI] Platform controller registered successfully");
+    Ok(())
+}
+
 fn probe_xhci(device: &PciDeviceInfo) -> Result<(), &'static str> {
     early_println!(
         "[xHCI] Probing device: {:04x}:{:04x}",
@@ -1472,18 +1510,6 @@ fn probe_xhci(device: &PciDeviceInfo) -> Result<(), &'static str> {
 
     early_println!("[xHCI] MMIO mapped at {:#x}", mmio_vaddr);
 
-    // Create controller instance
-    let controller = Arc::new(XhciController::new(mmio_vaddr)?);
-
-    // Initialize controller
-    controller.init()?;
-    controller.start()?;
-
-    match controller.enumerate_ports() {
-        Ok(count) => early_println!("[xHCI] Enumerated {} device(s)", count),
-        Err(error) => early_println!("[xHCI] Enumeration deferred: {}", error),
-    }
-
     let routed_irq = device.routed_irq();
     let interrupt_line = routed_irq
         .map(|irq| irq as u8)
@@ -1495,32 +1521,19 @@ fn probe_xhci(device: &PciDeviceInfo) -> Result<(), &'static str> {
         interrupt_pin,
         routed_irq
     );
-    if interrupt_line != 0 && interrupt_line != 0xff && interrupt_pin != 0 {
-        let interrupt_id = interrupt_line as InterruptId;
-        controller.enable_interrupts(interrupt_id)?;
-        InterruptManager::with_manager(|mgr| {
-            mgr.register_interrupt_device(interrupt_id, controller.clone())
-        })
-        .map_err(|_| "Failed to register xHCI interrupt device")?;
+    let interrupt_id = if interrupt_line != 0 && interrupt_line != 0xff && interrupt_pin != 0 {
         early_println!(
             "[xHCI] Registered IRQ {} (pin {})",
-            interrupt_id,
+            interrupt_line,
             interrupt_pin
         );
+        Some(interrupt_line as InterruptId)
     } else {
         early_println!("[xHCI] No usable legacy IRQ routing for controller");
-    }
+        None
+    };
 
-    // Store controller
-    let mut controllers = XHCI_CONTROLLERS.lock();
-    controllers.push(controller);
-    drop(controllers);
-
-    let poll_handler: Arc<dyn TimerHandler> = Arc::new(XhciPollHandler);
-    add_timer(get_tick() + ms_to_ticks(1000), &poll_handler, 0);
-
-    early_println!("[xHCI] Controller registered successfully");
-    Ok(())
+    bind_xhci_mmio(mmio_vaddr, interrupt_id)
 }
 
 /// Remove function for xHCI PCI devices
