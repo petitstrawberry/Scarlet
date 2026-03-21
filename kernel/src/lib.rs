@@ -267,6 +267,7 @@ pub mod initcall;
 pub mod interrupt;
 pub mod ipc;
 pub mod library;
+pub mod log;
 pub mod mem;
 #[cfg(feature = "network")]
 pub mod network;

@@ -54,6 +54,18 @@ macro_rules! println {
 }
 
 pub fn _print(args: fmt::Arguments) {
+    struct LogWriter;
+    impl fmt::Write for LogWriter {
+        fn write_str(&mut self, s: &str) -> fmt::Result {
+            for &b in s.as_bytes() {
+                crate::log::write_byte(b);
+            }
+            Ok(())
+        }
+    }
+    let mut log = LogWriter;
+    let _ = log.write_fmt(args);
+
     let manager = DeviceManager::get_manager();
 
     // Helper: write to a specific CharDevice implementation

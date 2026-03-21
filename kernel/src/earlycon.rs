@@ -21,11 +21,6 @@ macro_rules! early_println {
     ($fmt:expr, $($arg:tt)*) => ($crate::early_print!(concat!($fmt, "\n"), $($arg)*));
 }
 
-pub fn print(args: core::fmt::Arguments) {
-    let mut writer = EarlyConsole {};
-    writer.write_fmt(args).unwrap();
-}
-
 struct EarlyConsole;
 
 impl Write for EarlyConsole {
@@ -35,7 +30,13 @@ impl Write for EarlyConsole {
                 early_putc(b'\r');
             }
             early_putc(c);
+            crate::log::write_byte(c);
         }
         Ok(())
     }
+}
+
+pub fn print(args: core::fmt::Arguments) {
+    let mut writer = EarlyConsole {};
+    let _ = writer.write_fmt(args);
 }
