@@ -336,33 +336,6 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
     let config_vaddr =
         crate::vm::ioremap(config_paddr, config_size).map_err(|_| "pcie: config ioremap failed")?;
 
-    if let Some(pd_prop) = device.property("power-domains") {
-        let bytes = pd_prop.value();
-        if bytes.len() >= 4 {
-            let pd_phandle = u32::from_be_bytes(bytes[0..4].try_into().unwrap_or([0; 4]));
-            match crate::drivers::soc::apple_pmgr::pmgr_get_domain_by_phandle(pd_phandle) {
-                Ok(domain) => {
-                    early_println!(
-                        "[apple-pcie] enabling power domain '{}' (phandle={:#x})",
-                        domain.label(),
-                        pd_phandle
-                    );
-                    if let Err(e) = domain.enable() {
-                        early_println!("[apple-pcie] power domain enable failed: {}", e);
-                    }
-                    domain.reset_deassert();
-                }
-                Err(e) => {
-                    early_println!(
-                        "[apple-pcie] power domain lookup failed (phandle={:#x}): {}",
-                        pd_phandle,
-                        e
-                    );
-                }
-            }
-        }
-    }
-
     if let Some(iommu_prop) = device.property("iommu-map") {
         let bytes = iommu_prop.value();
         let entry_size = 16; // rid_base(4) + dart_phandle(4) + sid_base(4) + rid_length(4)

@@ -682,30 +682,16 @@ pub extern "C" fn start_kernel(boot_info: &BootInfo) -> ! {
 
     if let Some(fdt) = FdtManager::get_manager().get_fdt() {
         let mut pci_ecam = None;
-        let mut is_apple_pcie = false;
 
         if let Some(soc) = fdt.find_node("/soc") {
             for child in soc.children() {
                 let is_pci_host = child.name.starts_with("pci@")
                     || child
                         .compatible()
-                        .map(|compat| {
-                            compat.all().any(|entry| {
-                                entry == "pci-host-ecam-generic" || entry.starts_with("apple,pcie")
-                            })
-                        })
+                        .map(|compat| compat.all().any(|entry| entry == "pci-host-ecam-generic"))
                         .unwrap_or(false);
 
                 if !is_pci_host {
-                    continue;
-                }
-
-                if child
-                    .compatible()
-                    .map(|compat| compat.all().any(|entry| entry.starts_with("apple,pcie")))
-                    .unwrap_or(false)
-                {
-                    is_apple_pcie = true;
                     continue;
                 }
 
@@ -724,17 +710,11 @@ pub extern "C" fn start_kernel(boot_info: &BootInfo) -> ! {
             }
         }
 
-        if !is_apple_pcie {
-            if let Some((ecam_base, ecam_size)) = pci_ecam {
-                let pci_bus = PciBus::new(ecam_base, ecam_size);
-                if let Err(error) = pci_bus.scan_and_probe_registered_drivers() {
-                    println!("[Scarlet Kernel] PCI probe skipped: {}", error);
-                }
+        if let Some((ecam_base, ecam_size)) = pci_ecam {
+            let pci_bus = PciBus::new(ecam_base, ecam_size);
+            if let Err(error) = pci_bus.scan_and_probe_registered_drivers() {
+                println!("[Scarlet Kernel] PCI probe skipped: {}", error);
             }
-        } else {
-            println!(
-                "[Scarlet Kernel] Apple PCIe detected — skipping generic ECAM scan (handled by platform driver)"
-            );
         }
     }
     fence(Ordering::SeqCst);

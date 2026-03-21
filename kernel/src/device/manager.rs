@@ -466,10 +466,20 @@ impl DeviceManager {
         idx: &mut usize,
         parent_phandle: Option<u32>,
     ) {
+        let pre_idx = *idx;
         self.process_single_device_node(node, priority, idx, parent_phandle);
 
+        // Use explicit phandle if available, otherwise fall back to the assigned device ID
+        // if probe succeeded (idx was incremented)
         let this_phandle = Self::get_u32_prop(node, "phandle")
-            .or_else(|| Self::get_u32_prop(node, "linux,phandle"));
+            .or_else(|| Self::get_u32_prop(node, "linux,phandle"))
+            .or_else(|| {
+                if *idx > pre_idx {
+                    Some(pre_idx as u32)
+                } else {
+                    None
+                }
+            });
         for child in node.children() {
             self.process_device_subtree(&child, priority, idx, this_phandle);
         }
@@ -483,6 +493,14 @@ impl DeviceManager {
         idx: &mut usize,
         parent_phandle: Option<u32>,
     ) {
+        if let Some(status_prop) = child.property("status") {
+            if let Some(status) = status_prop.as_str() {
+                if status == "disabled" {
+                    return;
+                }
+            }
+        }
+
         let compatible = child.compatible();
         if compatible.is_none() {
             return;
@@ -763,6 +781,17 @@ impl DeviceManager {
                         properties,
                         parent_phandle,
                     ));
+
+                    if let Err(e) =
+                        crate::device::power::PowerManager::enable_device_domains(&*device)
+                    {
+                        crate::early_println!(
+                            "Failed to enable power domains for {} device {}: {}",
+                            priority.description(),
+                            device.name(),
+                            e
+                        );
+                    }
 
                     match driver.probe(&*device) {
                         Ok(_) => {

@@ -51,6 +51,7 @@ use alloc::string::String;
 use alloc::sync::Arc;
 use spin::Mutex;
 
+use crate::device::power::PowerManager;
 use crate::{
     arch::mmio,
     device::{
@@ -96,9 +97,10 @@ const PMGR_PS_PWRGATE: u32 = 0x0;
 // =============================================================================
 
 /// Descriptor for a single power domain, parsed from device tree child node.
-struct PowerDomain {
+struct ApplePmDomain {
     /// Offset of the power domain register within the PMGR MMIO region
     offset: usize,
+    pmgr_phandle: u32,
     /// Human-readable label from device tree
     label: alloc::string::String,
     /// Whether this domain is marked as always-on
@@ -107,11 +109,18 @@ struct PowerDomain {
     index: u32,
 }
 
-impl PowerDomain {
+impl ApplePmDomain {
     /// Create a new power domain descriptor.
-    fn new(offset: usize, index: u32, label: alloc::string::String, always_on: bool) -> Self {
+    fn new(
+        offset: usize,
+        pmgr_phandle: u32,
+        index: u32,
+        label: alloc::string::String,
+        always_on: bool,
+    ) -> Self {
         Self {
             offset,
+            pmgr_phandle,
             label,
             always_on,
             index,
@@ -130,7 +139,7 @@ struct PmgrInstance {
     /// Size of the MMIO region
     size: usize,
     /// Power domains managed by this PMGR block
-    domains: BTreeMap<u32, PowerDomain>,
+    domains: BTreeMap<u32, ApplePmDomain>,
 }
 
 impl PmgrInstance {
@@ -145,14 +154,14 @@ impl PmgrInstance {
 
     /// Read the power domain register.
     #[inline]
-    fn read_reg(&self, domain: &PowerDomain) -> u32 {
+    fn read_reg(&self, domain: &ApplePmDomain) -> u32 {
         // SAFETY: domain.offset is within the MMIO-mapped PMGR region
         unsafe { mmio::read32(self.base_addr + domain.offset) }
     }
 
     /// Write the power domain register.
     #[inline]
-    fn write_reg(&self, domain: &PowerDomain, val: u32) {
+    fn write_reg(&self, domain: &ApplePmDomain, val: u32) {
         // SAFETY: domain.offset is within the MMIO-mapped PMGR region
         unsafe { mmio::write32(self.base_addr + domain.offset, val) }
     }
@@ -161,7 +170,7 @@ impl PmgrInstance {
     ///
     /// Sets PS_TARGET to ACTIVE (0xf), clears was-clkgated/was-pwgated flags,
     /// then polls PS_ACTUAL until it reaches ACTIVE.
-    fn enable(&self, domain: &PowerDomain) -> Result<(), &'static str> {
+    fn enable_domain_local(&self, domain: &ApplePmDomain) -> Result<(), &'static str> {
         if domain.always_on {
             return Ok(());
         }
@@ -199,7 +208,7 @@ impl PmgrInstance {
     /// Disable (power off) a power domain.
     ///
     /// Sets PS_TARGET to PWRGATE (0x0), then polls PS_ACTUAL until it reaches PWRGATE.
-    fn disable(&self, domain: &PowerDomain) -> Result<(), &'static str> {
+    fn disable_domain_local(&self, domain: &ApplePmDomain) -> Result<(), &'static str> {
         if domain.always_on {
             return Ok(());
         }
@@ -234,22 +243,81 @@ impl PmgrInstance {
     }
 
     /// Assert reset on a power domain.
-    fn reset_assert(&self, domain: &PowerDomain) {
+    fn reset_assert_domain_local(&self, domain: &ApplePmDomain) {
         let reg = self.read_reg(domain);
         self.write_reg(domain, reg | PMGR_RESET);
     }
 
     /// Deassert reset on a power domain.
-    fn reset_deassert(&self, domain: &PowerDomain) {
+    fn reset_deassert_domain_local(&self, domain: &ApplePmDomain) {
         let reg = self.read_reg(domain);
         self.write_reg(domain, reg & !PMGR_RESET);
     }
 
     /// Check if a power domain is currently powered on.
-    fn is_on(&self, domain: &PowerDomain) -> bool {
+    fn is_domain_on_local(&self, domain: &ApplePmDomain) -> bool {
         let reg = self.read_reg(domain);
         let actual = (reg & PMGR_PS_ACTUAL) >> PMGR_PS_ACTUAL_SHIFT;
         actual == PMGR_PS_ACTIVE
+    }
+
+    fn with_instance<R>(domain: &ApplePmDomain, f: impl FnOnce(&PmgrInstance) -> R) -> Option<R> {
+        let guard = get_registry()?;
+        let registry = guard.as_ref()?;
+        let instance = registry.instances.get(&domain.pmgr_phandle)?;
+        Some(f(instance))
+    }
+
+    fn enable_domain(domain: &ApplePmDomain) -> Result<(), &'static str> {
+        Self::with_instance(domain, |instance| instance.enable_domain_local(domain))
+            .unwrap_or(Err("pmgr: instance not found"))
+    }
+
+    fn disable_domain(domain: &ApplePmDomain) -> Result<(), &'static str> {
+        Self::with_instance(domain, |instance| instance.disable_domain_local(domain))
+            .unwrap_or(Err("pmgr: instance not found"))
+    }
+
+    fn reset_assert_domain(domain: &ApplePmDomain) {
+        let _ = Self::with_instance(domain, |instance| {
+            instance.reset_assert_domain_local(domain)
+        });
+    }
+
+    fn reset_deassert_domain(domain: &ApplePmDomain) {
+        let _ = Self::with_instance(domain, |instance| {
+            instance.reset_deassert_domain_local(domain)
+        });
+    }
+
+    fn is_domain_on(domain: &ApplePmDomain) -> bool {
+        Self::with_instance(domain, |instance| instance.is_domain_on_local(domain)).unwrap_or(false)
+    }
+}
+
+impl crate::device::power::PowerDomain for ApplePmDomain {
+    fn enable(&self) -> Result<(), &'static str> {
+        PmgrInstance::enable_domain(self)
+    }
+
+    fn disable(&self) -> Result<(), &'static str> {
+        PmgrInstance::disable_domain(self)
+    }
+
+    fn reset_assert(&self) {
+        PmgrInstance::reset_assert_domain(self)
+    }
+
+    fn reset_deassert(&self) {
+        PmgrInstance::reset_deassert_domain(self)
+    }
+
+    fn is_enabled(&self) -> bool {
+        PmgrInstance::is_domain_on(self)
+    }
+
+    fn label(&self) -> &str {
+        &self.label
     }
 }
 
@@ -267,7 +335,7 @@ static PMGR_REGISTRY: Mutex<Option<PmgrRegistry>> = Mutex::new(None);
 /// Holds all registered PMGR instances, keyed by phandle.
 struct PmgrRegistry {
     instances: BTreeMap<u32, Arc<PmgrInstance>>,
-    domain_map: BTreeMap<(u32, u32), Arc<PowerDomain>>,
+    domain_map: BTreeMap<(u32, u32), Arc<ApplePmDomain>>,
     pwrstate_phandles: BTreeMap<u32, (u32, u32)>,
 }
 
@@ -294,33 +362,33 @@ fn get_registry() -> Option<spin::MutexGuard<'static, Option<PmgrRegistry>>> {
 /// Result of a PMGR domain lookup.
 pub struct PmgrDomain {
     inner: Arc<PmgrInstance>,
-    domain: Arc<PowerDomain>,
+    domain: Arc<ApplePmDomain>,
 }
 
 impl PmgrDomain {
     /// Enable (power on) this domain.
     pub fn enable(&self) -> Result<(), &'static str> {
-        self.inner.enable(&self.domain)
+        self.inner.enable_domain_local(&self.domain)
     }
 
     /// Disable (power off) this domain.
     pub fn disable(&self) -> Result<(), &'static str> {
-        self.inner.disable(&self.domain)
+        self.inner.disable_domain_local(&self.domain)
     }
 
     /// Assert reset.
     pub fn reset_assert(&self) {
-        self.inner.reset_assert(&self.domain)
+        self.inner.reset_assert_domain_local(&self.domain)
     }
 
     /// Deassert reset.
     pub fn reset_deassert(&self) {
-        self.inner.reset_deassert(&self.domain)
+        self.inner.reset_deassert_domain_local(&self.domain)
     }
 
     /// Check if powered on.
     pub fn is_on(&self) -> bool {
-        self.inner.is_on(&self.domain)
+        self.inner.is_domain_on_local(&self.domain)
     }
 
     /// Get the label of this domain.
@@ -390,6 +458,8 @@ pub fn pmgr_get_domain_by_phandle(pwrstate_phandle: u32) -> Result<PmgrDomain, &
 // =============================================================================
 
 fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
+    PowerManager::init();
+
     let mem_resource = device
         .get_resources()
         .iter()
@@ -503,7 +573,13 @@ fn pwrstate_probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
         .parent_phandle()
         .ok_or("apple-pmgr-pwrstate: no parent phandle")?;
 
-    let domain = Arc::new(PowerDomain::new(offset, index, label, always_on));
+    let domain = Arc::new(ApplePmDomain::new(
+        offset,
+        parent_phandle,
+        index,
+        label,
+        always_on,
+    ));
     registry
         .domain_map
         .insert((parent_phandle, index), Arc::clone(&domain));
@@ -523,6 +599,10 @@ fn pwrstate_probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
         registry
             .pwrstate_phandles
             .insert(ph, (parent_phandle, index));
+        PowerManager::register_domain(
+            ph,
+            Arc::clone(&domain) as Arc<dyn crate::device::power::PowerDomain>,
+        );
     }
 
     Ok(())

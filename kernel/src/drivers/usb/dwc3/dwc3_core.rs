@@ -15,7 +15,7 @@ pub const DWC3_GEVNTSIZ: usize = 0xc314;
 pub const DWC3_GEVNTCOUNT: usize = 0xc318;
 pub const DWC3_GHWPARAMS1: usize = 0xc440;
 pub const DWC3_GHWPARAMS3: usize = 0xc448;
-pub const DWC3_GSNPSID: usize = 0xc450;
+pub const DWC3_GSNPSID: usize = 0xc120;
 pub const DWC3_GUCTL1: usize = 0xc4c4;
 pub const DWC3_GUSB3PIPEFMT: usize = 0xc660;
 

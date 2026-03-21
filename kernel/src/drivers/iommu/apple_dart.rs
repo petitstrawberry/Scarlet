@@ -126,12 +126,19 @@ impl DartInstance {
         let page_shift = (raw_params1 & DART_PARAMS1_MASK) >> DART_PARAMS1_SHIFT;
         let supports_bypass = raw_params2 & 1 != 0;
 
+        let sid_width = ((raw_params1 >> 20) & 0xf) as u32;
+        let num_streams = if sid_width > 0 && sid_width <= 8 {
+            1u32 << sid_width
+        } else {
+            16
+        };
+
         Self {
             base_addr,
             params: DartParams {
                 page_shift,
                 supports_bypass,
-                num_streams: 256,
+                num_streams,
             },
         }
     }
@@ -430,7 +437,7 @@ fn register_dart_driver() {
         ],
     );
 
-    DeviceManager::get_manager().register_driver(Box::new(driver), DriverPriority::Critical);
+    DeviceManager::get_manager().register_driver(Box::new(driver), DriverPriority::Core);
 }
 
 driver_initcall!(register_dart_driver);

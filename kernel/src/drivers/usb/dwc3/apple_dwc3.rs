@@ -33,8 +33,6 @@ const APPLE_CTRL1_UTMI_REDUCE: u32 = 1 << 1;
 const GCTL_PRTCAPDIR_HOST: u32 = 1 << 12;
 const GUSB2PHYCFG_SUSPHY: u32 = 1 << 6;
 const GUSB3PIPECTL_SUSPHY: u32 = 1 << 17;
-const DCTL_CSFTRST: u32 = 1 << 30;
-const DCTL_RUN_STOP: u32 = 1 << 31;
 
 pub struct AppleDwc3 {
     core: Dwc3Core,
@@ -85,19 +83,6 @@ impl AppleDwc3 {
         // USB3 PIPE: read-modify-write (clear any pending bits)
         let usb3pipectl = self.core.read32(DWC3_GUSB3PIPECTL);
         self.core.write32(DWC3_GUSB3PIPECTL, usb3pipectl);
-
-        // Core soft reset via DCTL
-        let dctl = self.core.read32(0xc704);
-        self.core
-            .write32(0xc704, (dctl | DCTL_CSFTRST) & !DCTL_RUN_STOP);
-        let mut timeout = 100000u32;
-        while self.core.read32(0xc704) & DCTL_CSFTRST != 0 && timeout > 0 {
-            timeout -= 1;
-            core::hint::spin_loop();
-        }
-        if timeout == 0 {
-            early_println!("[apple-dwc3] soft reset timeout");
-        }
 
         // GCTL: set port capability to HOST (bits 13:12 = 01)
         let gctl = self.core.read32(DWC3_GCTL) & !(0x3 << 12);
