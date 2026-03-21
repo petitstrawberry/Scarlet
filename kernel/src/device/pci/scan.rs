@@ -410,7 +410,6 @@ impl PciBus {
         early_println!("Probing {} PCI devices", devices.len());
 
         let manager = DeviceManager::get_manager();
-        let drivers = manager.borrow_drivers().lock();
         let mut claimed_device_ids = Vec::new();
 
         for priority in [
@@ -419,24 +418,53 @@ impl PciBus {
             DriverPriority::Standard,
             DriverPriority::Late,
         ] {
-            if let Some(driver_list) = drivers.get(&priority) {
-                for driver in driver_list.iter() {
+            loop {
+                // Take a snapshot of driver names under this priority.
+                // Lock is released before any probe call to avoid deadlock
+                // if a nested probe re-enters the same spin::Mutex.
+                let driver_names: alloc::vec::Vec<&'static str> = {
+                    let drivers = manager.borrow_drivers().lock();
+                    match drivers.get(&priority) {
+                        Some(list) => list.iter().map(|d| d.name()).collect(),
+                        None => break,
+                    }
+                };
+
+                let mut found_any = false;
+                for driver_name in &driver_names {
                     for device in &devices {
                         if claimed_device_ids.contains(&device.id()) {
                             continue;
                         }
-                        match DeviceDriver::probe(&**driver, device) {
+
+                        let result = {
+                            let drivers = manager.borrow_drivers().lock();
+                            let driver = drivers
+                                .get(&priority)
+                                .and_then(|list| list.iter().find(|d| d.name() == *driver_name));
+                            match driver {
+                                Some(d) => DeviceDriver::probe(&**d, device),
+                                None => break,
+                            }
+                        };
+
+                        found_any = true;
+                        match result {
                             Ok(()) => {
                                 claimed_device_ids.push(device.id());
                                 early_println!(
                                     "Successfully probed PCI device {} with driver {}",
                                     device.name(),
-                                    driver.name()
+                                    driver_name
                                 );
                             }
                             Err(_) => {}
                         }
                     }
+                }
+
+                if !found_any {
+                    break;
                 }
             }
         }
