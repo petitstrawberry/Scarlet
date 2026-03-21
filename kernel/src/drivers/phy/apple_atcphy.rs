@@ -213,7 +213,9 @@ fn register_atcphy_driver() {
         alloc::vec!["apple,t8103-atcphy", "apple,t6000-atcphy",],
     );
 
-    DeviceManager::get_manager().register_driver(Box::new(driver), DriverPriority::Core);
+    // PHY must be registered before DWC3 (Core), so use Critical priority.
+    // PHY nodes appear after USB nodes in Apple FDT, causing probe order issue.
+    DeviceManager::get_manager().register_driver(Box::new(driver), DriverPriority::Critical);
 }
 
 driver_initcall!(register_atcphy_driver);
