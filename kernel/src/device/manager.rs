@@ -445,12 +445,16 @@ impl DeviceManager {
         let mut idx = 0;
 
         for child in parent_node.children() {
-            self.process_device_subtree(&child, priority, &mut idx);
+            let parent_ph = Self::get_u32_prop(&parent_node, "phandle")
+                .or_else(|| Self::get_u32_prop(&parent_node, "linux,phandle"));
+            self.process_device_subtree(&child, priority, &mut idx, parent_ph);
         }
 
         if let Some(chosen_node) = fdt.find_node("/chosen") {
             for child in chosen_node.children() {
-                self.process_device_subtree(&child, priority, &mut idx);
+                let parent_ph = Self::get_u32_prop(&chosen_node, "phandle")
+                    .or_else(|| Self::get_u32_prop(&chosen_node, "linux,phandle"));
+                self.process_device_subtree(&child, priority, &mut idx, parent_ph);
             }
         }
     }
@@ -460,11 +464,14 @@ impl DeviceManager {
         node: &fdt::node::FdtNode,
         priority: DriverPriority,
         idx: &mut usize,
+        parent_phandle: Option<u32>,
     ) {
-        self.process_single_device_node(node, priority, idx);
+        self.process_single_device_node(node, priority, idx, parent_phandle);
 
+        let this_phandle = Self::get_u32_prop(node, "phandle")
+            .or_else(|| Self::get_u32_prop(node, "linux,phandle"));
         for child in node.children() {
-            self.process_device_subtree(&child, priority, idx);
+            self.process_device_subtree(&child, priority, idx, this_phandle);
         }
     }
 
@@ -474,6 +481,7 @@ impl DeviceManager {
         child: &fdt::node::FdtNode,
         priority: DriverPriority,
         idx: &mut usize,
+        parent_phandle: Option<u32>,
     ) {
         let compatible = child.compatible();
         if compatible.is_none() {
@@ -508,6 +516,7 @@ impl DeviceManager {
             compatible_vec,
             resources,
             properties,
+            parent_phandle,
         );
     }
 
@@ -719,6 +728,7 @@ impl DeviceManager {
     }
 
     /// Try to match device with drivers and probe if successful
+    #[allow(clippy::too_many_arguments)]
     fn try_match_and_probe_device(
         &self,
         child: &fdt::node::FdtNode,
@@ -727,6 +737,7 @@ impl DeviceManager {
         compatible: alloc::vec::Vec<&str>,
         resources: alloc::vec::Vec<PlatformDeviceResource>,
         properties: alloc::vec::Vec<PlatformDeviceProperty>,
+        parent_phandle: Option<u32>,
     ) {
         let drivers = self.drivers.lock();
         if let Some(driver_list) = drivers.get(&priority) {
@@ -750,6 +761,7 @@ impl DeviceManager {
                         static_compatible,
                         resources,
                         properties,
+                        parent_phandle,
                     ));
 
                     match driver.probe(&*device) {

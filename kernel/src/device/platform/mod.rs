@@ -121,6 +121,7 @@ pub struct PlatformDeviceInfo {
     compatible: Vec<&'static str>,
     resources: Vec<PlatformDeviceResource>,
     properties: Vec<PlatformDeviceProperty>,
+    parent_phandle: Option<u32>,
 }
 
 /// Information about a platform device.
@@ -162,6 +163,7 @@ impl PlatformDeviceInfo {
         compatible: Vec<&'static str>,
         resources: Vec<PlatformDeviceResource>,
         properties: Vec<PlatformDeviceProperty>,
+        parent_phandle: Option<u32>,
     ) -> Self {
         Self {
             name,
@@ -169,6 +171,7 @@ impl PlatformDeviceInfo {
             compatible,
             resources,
             properties,
+            parent_phandle,
         }
     }
 
@@ -190,6 +193,10 @@ impl PlatformDeviceInfo {
 
     pub fn properties(&self) -> &[PlatformDeviceProperty] {
         &self.properties
+    }
+
+    pub fn parent_phandle(&self) -> Option<u32> {
+        self.parent_phandle
     }
 }
 
@@ -266,8 +273,14 @@ mod tests {
 
     #[test_case]
     fn test_probe_success() {
-        let device =
-            PlatformDeviceInfo::new("test_device", 1, vec!["test,compatible"], vec![], vec![]);
+        let device = PlatformDeviceInfo::new(
+            "test_device",
+            1,
+            vec!["test,compatible"],
+            vec![],
+            vec![],
+            None,
+        );
         let driver = PlatformDeviceDriver::new(
             "test_driver",
             |device_info| {

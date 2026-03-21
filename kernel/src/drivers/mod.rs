@@ -4,8 +4,16 @@
 
 pub mod block;
 pub mod graphics;
+#[cfg(target_arch = "aarch64")]
+pub mod iommu;
 pub mod network;
+#[cfg(target_arch = "aarch64")]
+pub mod pcie;
+#[cfg(target_arch = "aarch64")]
+pub mod phy;
 pub mod pic;
+#[cfg(target_arch = "aarch64")]
+pub mod soc;
 pub mod special;
 pub mod uart;
 pub mod usb;

@@ -7,6 +7,8 @@
 #[cfg(target_arch = "aarch64")]
 pub mod aic;
 #[cfg(target_arch = "aarch64")]
+pub mod apple_msi;
+#[cfg(target_arch = "aarch64")]
 pub mod arm_generic_timer;
 #[cfg(target_arch = "aarch64")]
 pub mod gic;
