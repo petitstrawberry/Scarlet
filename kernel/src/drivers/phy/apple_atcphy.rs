@@ -1,6 +1,7 @@
 //! Apple ATC PHY driver
 //!
 //! Apple Type-C PHY found on Apple Silicon SoCs (t8103/M1).
+//! Supports USB3, DisplayPort, and combined USB3+DP modes.
 
 #![allow(dead_code)]
 
@@ -96,22 +97,120 @@ const PIPEHANDLER_NATIVE_RESET: u32 = 1 << 12;
 const PIPEHANDLER_DUMMY_PHY_EN: u32 = 1 << 15;
 const PIPEHANDLER_NATIVE_POWER_DOWN_MASK: u32 = 0xf;
 
+const PIPEHANDLER_MUX_CTRL_DATA_DP: u32 = 4;
+const PIPEHANDLER_MUX_CTRL_CLK_DP: u32 = 4;
+
+// =============================================================================
+// Hardware Tunable
+// =============================================================================
+
+/// One hardware tunable entry: `[offset, mask, value]` applied to an MMIO region.
+///
+/// The bootloader (m1n1) pre-processes EFUSE calibration data into these
+/// register-level tunables and injects them into the device tree.
+#[derive(Debug, Clone)]
+pub struct HardwareTunable {
+    pub offset: u32,
+    pub mask: u32,
+    pub value: u32,
+}
+
+impl HardwareTunable {
+    /// Parse a tunable array from device tree property bytes.
+    ///
+    /// Property contains big-endian u32 triplets: `[offset, mask, value, ...]`.
+    pub fn parse_from_property(prop_bytes: &[u8]) -> Vec<Self> {
+        let mut tunables = Vec::new();
+        let chunks = prop_bytes.chunks_exact(12);
+        for chunk in chunks {
+            let offset = u32::from_be_bytes(chunk[0..4].try_into().unwrap_or([0; 4]));
+            let mask = u32::from_be_bytes(chunk[4..8].try_into().unwrap_or([0; 4]));
+            let value = u32::from_be_bytes(chunk[8..12].try_into().unwrap_or([0; 4]));
+            tunables.push(Self {
+                offset,
+                mask,
+                value,
+            });
+        }
+        tunables
+    }
+
+    /// Apply this tunable to a 32-bit register read from `base + offset`.
+    pub fn apply(&self, base: usize) {
+        let old = unsafe { mmio::read32(base + self.offset as usize) };
+        let new = (old & !self.mask) | self.value;
+        if new != old {
+            unsafe { mmio::write32(base + self.offset as usize, new) };
+        }
+    }
+}
+
+/// Apply a slice of tunables to an MMIO base.
+pub fn apply_tunables(tunables: &[HardwareTunable], base: usize) {
+    for t in tunables {
+        t.apply(base);
+    }
+}
+
+/// Parse an `apple,tunable-*` property from the device info.
+fn parse_tunable_prop(device: &PlatformDeviceInfo, name: &str) -> Vec<HardwareTunable> {
+    device
+        .property(name)
+        .map(|p| HardwareTunable::parse_from_property(p.value()))
+        .unwrap_or_default()
+}
+
+// =============================================================================
+// ATC PHY Mode
+// =============================================================================
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum AtcPhyMode {
+    Usb3,
+    DisplayPort,
+    Usb3Dp,
+}
+
 // =============================================================================
 // ATC PHY Instance
 // =============================================================================
 
 pub struct AppleAtcPhy {
     core_base: usize,
+    lpdptx_base: Option<usize>,
+    axi2af_base: Option<usize>,
     usb2phy_base: usize,
     pipehandler_base: usize,
+    common_a: Vec<HardwareTunable>,
+    common_b: Vec<HardwareTunable>,
+    axi2af_tunables: Vec<HardwareTunable>,
+    lane0_usb: Vec<HardwareTunable>,
+    lane1_usb: Vec<HardwareTunable>,
+    lane0_dp: Vec<HardwareTunable>,
+    lane1_dp: Vec<HardwareTunable>,
 }
 
 impl AppleAtcPhy {
-    pub fn new(core_base: usize, usb2phy_base: usize, pipehandler_base: usize) -> Self {
+    pub fn new(
+        core_base: usize,
+        lpdptx_base: Option<usize>,
+        axi2af_base: Option<usize>,
+        usb2phy_base: usize,
+        pipehandler_base: usize,
+    ) -> Self {
         Self {
             core_base,
+            lpdptx_base,
+            axi2af_base,
             usb2phy_base,
             pipehandler_base,
+            common_a: Vec::new(),
+            common_b: Vec::new(),
+            axi2af_tunables: Vec::new(),
+            lane0_usb: Vec::new(),
+            lane1_usb: Vec::new(),
+            lane0_dp: Vec::new(),
+            lane1_dp: Vec::new(),
         }
     }
 
@@ -167,6 +266,22 @@ impl AppleAtcPhy {
 
     fn ph_clear32(&self, offset: usize, bits: u32) {
         self.ph_write32(offset, self.ph_read32(offset) & !bits);
+    }
+
+    fn lpdptx_read32(&self, offset: usize) -> u32 {
+        unsafe { mmio::read32(self.lpdptx_base.unwrap() + offset) }
+    }
+
+    fn lpdptx_write32(&self, offset: usize, val: u32) {
+        unsafe { mmio::write32(self.lpdptx_base.unwrap() + offset, val) }
+    }
+
+    fn axi2af_read32(&self, offset: usize) -> u32 {
+        unsafe { mmio::read32(self.axi2af_base.unwrap() + offset) }
+    }
+
+    fn axi2af_write32(&self, offset: usize, val: u32) {
+        unsafe { mmio::write32(self.axi2af_base.unwrap() + offset, val) }
     }
 
     fn poll_core(
@@ -276,6 +391,88 @@ impl AppleAtcPhy {
         self.ph_clear32(PIPEHANDLER_LOCK_REQ, PIPEHANDLER_LOCK_EN);
     }
 
+    fn configure_pipehandler_dp(&self, swap_lanes: bool) {
+        let (lane0, lane1) = if swap_lanes { (1, 0) } else { (0, 1) };
+
+        let nonselected = self.ph_read32(PIPEHANDLER_NONSELECTED_OVERRIDE);
+        self.ph_write32(
+            PIPEHANDLER_NONSELECTED_OVERRIDE,
+            (nonselected & !PIPEHANDLER_NATIVE_POWER_DOWN_MASK) | 3,
+        );
+        self.ph_clear32(PIPEHANDLER_NONSELECTED_OVERRIDE, PIPEHANDLER_NATIVE_RESET);
+
+        // Configure the DP lane
+        let dp_lane = if lane0 == 0 { 0 } else { 1 };
+        let mut mux = self.ph_read32(PIPEHANDLER_MUX_CTRL);
+
+        mux = (mux & !PIPEHANDLER_MUX_CTRL_CLK_MASK) | (PIPEHANDLER_MUX_CTRL_CLK_OFF << 3);
+        self.ph_write32(PIPEHANDLER_MUX_CTRL, mux);
+        self.small_delay();
+
+        mux = (mux & !PIPEHANDLER_MUX_CTRL_DATA_MASK) | PIPEHANDLER_MUX_CTRL_DATA_DP;
+        self.ph_write32(PIPEHANDLER_MUX_CTRL, mux);
+        self.small_delay();
+
+        mux = (mux & !PIPEHANDLER_MUX_CTRL_CLK_MASK) | (PIPEHANDLER_MUX_CTRL_CLK_DP << 3);
+        self.ph_write32(PIPEHANDLER_MUX_CTRL, mux);
+        self.small_delay();
+    }
+
+    fn apply_mode_tunables(&self, mode: AtcPhyMode, swap_lanes: bool) {
+        let (lane0_idx, lane1_idx) = if swap_lanes { (1, 0) } else { (0, 1) };
+
+        apply_tunables(&self.common_a, self.core_base);
+
+        if let Some(axi2af_base) = self.axi2af_base {
+            apply_tunables(&self.axi2af_tunables, axi2af_base);
+        }
+
+        apply_tunables(&self.common_b, self.core_base);
+
+        match mode {
+            AtcPhyMode::Usb3 => {
+                apply_tunables(&self.lane0_usb, self.core_base);
+                apply_tunables(&self.lane1_usb, self.core_base);
+            }
+            AtcPhyMode::DisplayPort => {
+                apply_tunables(
+                    if lane0_idx == 0 {
+                        &self.lane0_dp
+                    } else {
+                        &self.lane1_dp
+                    },
+                    self.core_base,
+                );
+                apply_tunables(
+                    if lane1_idx == 0 {
+                        &self.lane0_dp
+                    } else {
+                        &self.lane1_dp
+                    },
+                    self.core_base,
+                );
+            }
+            AtcPhyMode::Usb3Dp => {
+                apply_tunables(
+                    if lane0_idx == 0 {
+                        &self.lane0_usb
+                    } else {
+                        &self.lane1_usb
+                    },
+                    self.core_base,
+                );
+                apply_tunables(
+                    if lane1_idx == 0 {
+                        &self.lane0_dp
+                    } else {
+                        &self.lane1_dp
+                    },
+                    self.core_base,
+                );
+            }
+        }
+    }
+
     pub fn init(&mut self) -> Result<(), &'static str> {
         early_println!("[apple-atcphy] initializing...");
 
@@ -284,7 +481,36 @@ impl AppleAtcPhy {
         self.configure_crossbar();
         self.configure_pipehandler_usb3();
 
-        early_println!("[apple-atcphy] initialized");
+        early_println!("[apple-atcphy] initialized (USB3 mode)");
+        Ok(())
+    }
+
+    pub fn init_dp(&mut self, mode: AtcPhyMode) -> Result<(), &'static str> {
+        if self.lpdptx_base.is_none() || self.axi2af_base.is_none() {
+            return Err("apple-atcphy: lpdptx/axi2af regions not mapped, cannot init DP");
+        }
+
+        early_println!("[apple-atcphy] initializing in DP mode ({:?})...", mode);
+
+        self.usb2_power_on();
+        self.core_power_on()?;
+        self.configure_crossbar();
+        self.apply_mode_tunables(mode, false);
+
+        match mode {
+            AtcPhyMode::Usb3Dp => {
+                self.configure_pipehandler_usb3();
+                self.configure_pipehandler_dp(false);
+            }
+            AtcPhyMode::DisplayPort => {
+                self.configure_pipehandler_dp(false);
+            }
+            _ => {
+                self.configure_pipehandler_usb3();
+            }
+        }
+
+        early_println!("[apple-atcphy] initialized ({:?} mode)", mode);
         Ok(())
     }
 }
@@ -341,6 +567,12 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
     let core_paddr = mem_resources[0].start;
     let core_size = mem_resources[0].end - mem_resources[0].start + 1;
 
+    let lpdptx_paddr = mem_resources[1].start;
+    let lpdptx_size = mem_resources[1].end - mem_resources[1].start + 1;
+
+    let axi2af_paddr = mem_resources[2].start;
+    let axi2af_size = mem_resources[2].end - mem_resources[2].start + 1;
+
     let usb2phy_paddr = mem_resources[3].start;
     let usb2phy_size = mem_resources[3].end - mem_resources[3].start + 1;
 
@@ -348,21 +580,61 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
     let pipehandler_size = mem_resources[4].end - mem_resources[4].start + 1;
 
     early_println!(
-        "[apple-atcphy] probing {} core={:#x} usb2phy={:#x} pipehandler={:#x}",
+        "[apple-atcphy] probing {} core={:#x} lpdptx={:#x} axi2af={:#x} usb2phy={:#x} ph={:#x}",
         device.name(),
         core_paddr,
+        lpdptx_paddr,
+        axi2af_paddr,
         usb2phy_paddr,
         pipehandler_paddr
     );
 
     let core_base = crate::vm::ioremap(core_paddr, core_size)
         .map_err(|_| "apple-atcphy: ioremap core failed")?;
+    let lpdptx_base = crate::vm::ioremap(lpdptx_paddr, lpdptx_size).ok();
+    let axi2af_base = crate::vm::ioremap(axi2af_paddr, axi2af_size).ok();
     let usb2phy_base = crate::vm::ioremap(usb2phy_paddr, usb2phy_size)
         .map_err(|_| "apple-atcphy: ioremap usb2phy failed")?;
     let pipehandler_base = crate::vm::ioremap(pipehandler_paddr, pipehandler_size)
         .map_err(|_| "apple-atcphy: ioremap pipehandler failed")?;
 
-    let mut phy = AppleAtcPhy::new(core_base, usb2phy_base, pipehandler_base);
+    let mut phy = AppleAtcPhy::new(
+        core_base,
+        lpdptx_base,
+        axi2af_base,
+        usb2phy_base,
+        pipehandler_base,
+    );
+
+    phy.common_a = parse_tunable_prop(device, "apple,tunable-common-a");
+    phy.common_b = parse_tunable_prop(device, "apple,tunable-common-b");
+    phy.axi2af_tunables = parse_tunable_prop(device, "apple,tunable-axi2af");
+    phy.lane0_usb = parse_tunable_prop(device, "apple,tunable-lane0-usb");
+    phy.lane1_usb = parse_tunable_prop(device, "apple,tunable-lane1-usb");
+    phy.lane0_dp = parse_tunable_prop(device, "apple,tunable-lane0-dp");
+    phy.lane1_dp = parse_tunable_prop(device, "apple,tunable-lane1-dp");
+
+    let tunable_count = phy.common_a.len()
+        + phy.common_b.len()
+        + phy.axi2af_tunables.len()
+        + phy.lane0_usb.len()
+        + phy.lane1_usb.len()
+        + phy.lane0_dp.len()
+        + phy.lane1_dp.len();
+    if tunable_count > 0 {
+        early_println!(
+            "[apple-atcphy] loaded {} tunables (common={}/{}, axi2af={}, usb={}/{}, dp={}/{})",
+            tunable_count,
+            phy.common_a.len(),
+            phy.common_b.len(),
+            phy.axi2af_tunables.len(),
+            phy.lane0_usb.len(),
+            phy.lane1_usb.len(),
+            phy.lane0_dp.len(),
+            phy.lane1_dp.len()
+        );
+    }
+
     phy.init()?;
 
     let phandle = device
