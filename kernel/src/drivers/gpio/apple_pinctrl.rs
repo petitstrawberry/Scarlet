@@ -7,9 +7,9 @@ use spin::Mutex;
 
 use crate::arch::mmio::{read32, write32};
 use crate::device::{
-    manager::{DeviceManager, DriverPriority},
-    platform::{resource::PlatformDeviceResourceType, PlatformDeviceDriver, PlatformDeviceInfo},
     DeviceInfo,
+    manager::{DeviceManager, DriverPriority},
+    platform::{PlatformDeviceDriver, PlatformDeviceInfo, resource::PlatformDeviceResourceType},
 };
 use crate::driver_initcall;
 use crate::vm;
