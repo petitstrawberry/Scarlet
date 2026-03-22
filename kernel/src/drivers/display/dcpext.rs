@@ -9,13 +9,13 @@ use core::sync::atomic::{AtomicBool, Ordering};
 
 use spin::Mutex;
 
-use crate::device::graphics::FramebufferConfig;
 use crate::device::graphics::output::DisplayOutput;
+use crate::device::graphics::FramebufferConfig;
 use crate::device::manager::{DeviceManager, DriverPriority};
 use crate::device::platform::resource::PlatformDeviceResourceType;
 use crate::device::platform::{PlatformDeviceDriver, PlatformDeviceInfo};
 use crate::driver_initcall;
-use crate::drivers::iommu::apple_dart::{DartPageTable, get_dart_by_phandle};
+use crate::drivers::iommu::apple_dart::{get_dart_by_phandle, DartPageTable};
 use crate::drivers::soc::apple_afk::AfkEndpoint;
 use crate::drivers::soc::apple_asc::AppleAsc;
 use crate::drivers::soc::apple_epic::EpicEndpoint;
@@ -483,10 +483,38 @@ impl AppleDcpExt {
 }
 
 static DCP_EXT: Mutex<Option<AppleDcpExt>> = Mutex::new(None);
+static DCP_DART_PHANDLE: Mutex<Option<u32>> = Mutex::new(None);
 
 pub fn with_dcpext<R>(f: impl FnOnce(&mut AppleDcpExt) -> R) -> Option<R> {
     let mut guard = DCP_EXT.lock();
     guard.as_mut().map(f)
+}
+
+/// Mirror the bootloader-provided framebuffer (fb0) to external DisplayPort.
+///
+/// This is Phase 1 mirroring — takes the existing framebuffer from m1n1/limine,
+/// DART-maps it, and presents it via the DCPext coprocessor.
+pub fn mirror_boot_fb() -> Result<(), &'static str> {
+    use crate::device::graphics::manager::GraphicsManager;
+
+    let fb = GraphicsManager::get_manager()
+        .get_framebuffer("fb0")
+        .ok_or("apple-dcpext: fb0 not found")?;
+
+    let dart_phandle = DCP_DART_PHANDLE
+        .lock()
+        .ok_or("apple-dcpext: dart phandle not set (probe may not have run)")?;
+
+    let output = DcpextOutput::new(dart_phandle);
+    output.present(&fb.config, fb.physical_addr)?;
+
+    early_println!(
+        "[apple-dcpext] mirrored fb0 {}x{} to dp0",
+        fb.config.width,
+        fb.config.height
+    );
+
+    Ok(())
 }
 
 fn has_mboxes_property(device: &PlatformDeviceInfo) -> bool {
@@ -517,6 +545,17 @@ fn coproc_resource(device: &PlatformDeviceInfo) -> Result<(usize, usize), &'stat
     Ok((paddr, size))
 }
 
+fn parse_iommus_phandle(device: &PlatformDeviceInfo) -> Option<u32> {
+    let prop = device.property("iommus")?;
+    let bytes = prop.value();
+    // iommus = <phandle sid>; each entry is two big-endian u32s
+    if bytes.len() < 8 {
+        return None;
+    }
+    let phandle = u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+    Some(phandle)
+}
+
 fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
     let (coproc_paddr, coproc_size) = coproc_resource(device)?;
 
@@ -537,6 +576,11 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
     dcp.init()?;
 
     *DCP_EXT.lock() = Some(dcp);
+
+    if let Some(phandle) = parse_iommus_phandle(device) {
+        early_println!("[apple-dcpext] dart phandle: {:#x}", phandle);
+        *DCP_DART_PHANDLE.lock() = Some(phandle);
+    }
 
     Ok(())
 }

@@ -755,6 +755,14 @@ pub extern "C" fn start_kernel(boot_info: &BootInfo) -> ! {
 
     fence(Ordering::SeqCst); // Ensure all initcalls are completed before proceeding
 
+    /* Attempt to mirror framebuffer to external DisplayPort (aarch64 only) */
+    #[cfg(target_arch = "aarch64")]
+    {
+        if let Err(e) = crate::drivers::display::dcpext::mirror_boot_fb() {
+            println!("[boot] dp mirror skipped: {}", e);
+        }
+    }
+
     /* Enable CPU interrupt reception (stage 2) */
     println!("[Scarlet Kernel] Enabling CPU interrupts...");
     InterruptManager::get_manager().enable_cpu_interrupts();
