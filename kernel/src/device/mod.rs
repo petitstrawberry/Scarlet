@@ -16,6 +16,7 @@ pub mod network;
 pub mod pci;
 pub mod platform;
 pub mod power;
+pub mod spi;
 
 extern crate alloc;
 use core::any::Any;
