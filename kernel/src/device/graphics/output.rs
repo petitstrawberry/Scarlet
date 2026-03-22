@@ -28,3 +28,29 @@ pub struct DisplayMode {
     pub refresh_rate: u32,
     pub name: String,
 }
+
+pub struct SimpleFbOutput {
+    name: String,
+}
+
+impl SimpleFbOutput {
+    pub fn new(name: &str) -> Self {
+        Self {
+            name: String::from(name),
+        }
+    }
+}
+
+impl DisplayOutput for SimpleFbOutput {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn is_connected(&self) -> bool {
+        true
+    }
+
+    fn present(&self, _config: &FramebufferConfig, _fb_paddr: usize) -> Result<(), &'static str> {
+        Ok(())
+    }
+}

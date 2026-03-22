@@ -5,13 +5,17 @@ extern crate alloc;
 use alloc::boxed::Box;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
+use core::sync::atomic::{AtomicBool, Ordering};
 
 use spin::Mutex;
 
+use crate::device::graphics::FramebufferConfig;
+use crate::device::graphics::output::DisplayOutput;
 use crate::device::manager::{DeviceManager, DriverPriority};
 use crate::device::platform::resource::PlatformDeviceResourceType;
 use crate::device::platform::{PlatformDeviceDriver, PlatformDeviceInfo};
 use crate::driver_initcall;
+use crate::drivers::iommu::apple_dart::{DartPageTable, get_dart_by_phandle};
 use crate::drivers::soc::apple_afk::AfkEndpoint;
 use crate::drivers::soc::apple_asc::AppleAsc;
 use crate::drivers::soc::apple_epic::EpicEndpoint;
@@ -25,6 +29,8 @@ const DCP_IBOOT_EP: u8 = 0x23;
 
 const DCP_ASC_OFFSET: usize = 0x8000;
 const DCP_SERVICE_WAIT_TIMEOUT_US: u64 = 5_000_000;
+const DCP_DVA_OFFSET: u64 = 0xf000_0000;
+const DCP_DART_FB_FLAGS: u64 = 1;
 
 const SYSTEM_SERVICE_PREFIX: &str = "system";
 const DPTX_SERVICE_PREFIX: &str = "AppleDCPDPTXRemotePort";
@@ -49,6 +55,70 @@ const IBOOT_CALL_SET_MODE: u32 = 3;
 const IBOOT_CALL_SWAP_BEGIN: u32 = 4;
 const IBOOT_CALL_SWAP_SET_LAYER: u32 = 5;
 const IBOOT_CALL_SWAP_END: u32 = 6;
+
+pub struct DcpextOutput {
+    dart_phandle: u32,
+    iova_base: usize,
+    page_table: Mutex<Option<DartPageTable>>,
+    connected: AtomicBool,
+}
+
+impl DcpextOutput {
+    pub fn new(dart_phandle: u32) -> Self {
+        Self {
+            dart_phandle,
+            iova_base: 0x1000_0000,
+            page_table: Mutex::new(None),
+            connected: AtomicBool::new(false),
+        }
+    }
+}
+
+impl DisplayOutput for DcpextOutput {
+    fn name(&self) -> &str {
+        "dp0"
+    }
+
+    fn is_connected(&self) -> bool {
+        if let Some(connected) = with_dcpext(|dcp| dcp.hotplug_detect().unwrap_or(false)) {
+            self.connected.store(connected, Ordering::Relaxed);
+            return connected;
+        }
+
+        self.connected.load(Ordering::Relaxed)
+    }
+
+    fn present(&self, config: &FramebufferConfig, fb_paddr: usize) -> Result<(), &'static str> {
+        {
+            let mut pt_guard = self.page_table.lock();
+            if pt_guard.is_none() {
+                let pt = DartPageTable::new()?;
+                let dart = get_dart_by_phandle(self.dart_phandle)
+                    .ok_or("apple-dcpext-output: DART not found")?;
+                dart.enable_translation(0, pt.root_paddr(), 2);
+                *pt_guard = Some(pt);
+            }
+
+            let pt = pt_guard
+                .as_mut()
+                .ok_or("apple-dcpext-output: DART page table unavailable")?;
+            pt.map_contiguous(self.iova_base, fb_paddr, config.size(), DCP_DART_FB_FLAGS)?;
+        }
+
+        let fb_iova = DCP_DVA_OFFSET | self.iova_base as u64;
+
+        with_dcpext(|dcp| {
+            dcp.mirror_framebuffer(
+                fb_paddr as u64,
+                config.width,
+                config.height,
+                config.stride,
+                fb_iova,
+            )
+        })
+        .ok_or("apple-dcpext-output: DCPext not initialized")?
+    }
+}
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
