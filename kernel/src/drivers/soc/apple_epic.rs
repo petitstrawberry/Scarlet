@@ -362,8 +362,20 @@ impl EpicEndpoint {
         command: u32,
         data: &[u8],
     ) -> Result<Vec<u8>, &'static str> {
-        self.send_command(service.channel, group, command, data)?;
-        self.wait_reply(service.channel)
+        self.call_by_channel(service.channel, group, command, data)
+    }
+
+    /// Like [`Self::call`] but accepts a channel number directly,
+    /// avoiding the borrow conflict of passing `&EpicService` alongside `&mut self`.
+    pub fn call_by_channel(
+        &mut self,
+        channel: u32,
+        group: u16,
+        command: u32,
+        data: &[u8],
+    ) -> Result<Vec<u8>, &'static str> {
+        self.send_command(channel, group, command, data)?;
+        self.wait_reply(channel)
     }
 
     /// Send a standard service call without waiting for a reply.
