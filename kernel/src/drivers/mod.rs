@@ -10,6 +10,8 @@ pub mod i2c;
 pub mod iommu;
 pub mod network;
 #[cfg(target_arch = "aarch64")]
+pub mod nvmem;
+#[cfg(target_arch = "aarch64")]
 pub mod pcie;
 #[cfg(target_arch = "aarch64")]
 pub mod phy;
