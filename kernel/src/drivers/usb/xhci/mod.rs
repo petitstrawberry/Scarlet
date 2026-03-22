@@ -411,6 +411,12 @@ impl XhciController {
     /// Reset the xHCI controller
     pub fn reset(&self) -> Result<(), &'static str> {
         let usbcmd = self.operational.read_usbcmd();
+        let usbsts = self.operational.read_usbsts();
+        early_println!(
+            "[xHCI] Before reset: USBCMD={:#x} USBSTS={:#x}",
+            usbcmd,
+            usbsts
+        );
         self.operational.write_usbcmd(usbcmd | 0x2);
 
         let deadline = crate::time::current_time() + 500_000;
@@ -425,6 +431,13 @@ impl XhciController {
         }
 
         if !hcrst_cleared {
+            let usbcmd = self.operational.read_usbcmd();
+            let usbsts = self.operational.read_usbsts();
+            early_println!(
+                "[xHCI] Reset timeout: USBCMD={:#x} USBSTS={:#x}",
+                usbcmd,
+                usbsts
+            );
             return Err("Timeout waiting for xHCI reset");
         }
 

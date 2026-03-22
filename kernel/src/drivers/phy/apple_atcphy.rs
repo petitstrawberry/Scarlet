@@ -38,6 +38,27 @@ const ATCPHY_POWER_PHY_RESET_N: u32 = 1 << 4;
 const ATCPHY_MISC_RESET_N: u32 = 1 << 0;
 const ATCPHY_MISC_LANE_SWAP: u32 = 1 << 2;
 
+const ACIOPHY_CFG0: usize = 0x08;
+const ACIOPHY_CFG0_COMMON_BIG_OV: u32 = 1 << 1;
+const ACIOPHY_CFG0_COMMON_SMALL_OV: u32 = 1 << 3;
+const ACIOPHY_CFG0_COMMON_CLAMP_OV: u32 = 1 << 5;
+const ACIOPHY_CFG0_RX_SMALL_OV: u32 = 0x3 << 8;
+const ACIOPHY_CFG0_RX_BIG_OV: u32 = 0x3 << 12;
+const ACIOPHY_CFG0_RX_CLAMP_OV: u32 = 0x3 << 16;
+
+const ACIOPHY_SLEEP_CTRL: usize = 0x1b0;
+const ACIOPHY_SLEEP_CTRL_TX_BIG_OV: u32 = 0x3 << 2;
+const ACIOPHY_SLEEP_CTRL_TX_SMALL_OV: u32 = 0x3 << 6;
+const ACIOPHY_SLEEP_CTRL_TX_CLAMP_OV: u32 = 0x3 << 10;
+
+const AUSPLL_FSM_CTRL: usize = 0x1014;
+const AUSPLL_APB_CMD_OVERRIDE: usize = 0x2000;
+const AUSPLL_APB_CMD_OVERRIDE_UNK28: u32 = 1 << 28;
+
+const CIO3PLL_CLK_CTRL: usize = 0x2a00;
+const CIO3PLL_CLK_PCLK_EN: u32 = 1 << 1;
+const CIO3PLL_CLK_REFCLK_EN: u32 = 1 << 5;
+
 const ACIOPHY_LANE_MODE: usize = 0x48;
 const ACIOPHY_CROSSBAR: usize = 0x4c;
 const ACIOPHY_CROSSBAR_PROTOCOL_MASK: u32 = 0x1f;
@@ -234,6 +255,11 @@ impl AppleAtcPhy {
 
     fn core_clear32(&self, offset: usize, bits: u32) {
         self.core_write32(offset, self.core_read32(offset) & !bits);
+    }
+
+    fn core_mask32(&self, offset: usize, mask: u32, set: u32) {
+        let old = self.core_read32(offset);
+        self.core_write32(offset, (old & !mask) | set);
     }
 
     fn usb2phy_read32(&self, offset: usize) -> u32 {
@@ -478,8 +504,40 @@ impl AppleAtcPhy {
 
         self.usb2_power_on();
         self.core_power_on()?;
+        self.apply_mode_tunables(AtcPhyMode::Usb3, false);
+
+        self.core_write32(AUSPLL_FSM_CTRL, 0x1fe000);
+        self.core_write32(AUSPLL_APB_CMD_OVERRIDE, AUSPLL_APB_CMD_OVERRIDE_UNK28);
+
+        self.core_set32(ACIOPHY_CFG0, ACIOPHY_CFG0_COMMON_SMALL_OV);
+        crate::time::udelay(10);
+        self.core_set32(ACIOPHY_CFG0, ACIOPHY_CFG0_COMMON_BIG_OV);
+        crate::time::udelay(10);
+        self.core_set32(ACIOPHY_CFG0, ACIOPHY_CFG0_COMMON_CLAMP_OV);
+        crate::time::udelay(10);
+
+        self.core_mask32(ACIOPHY_SLEEP_CTRL, ACIOPHY_SLEEP_CTRL_TX_SMALL_OV, 3 << 6);
+        crate::time::udelay(10);
+        self.core_mask32(ACIOPHY_SLEEP_CTRL, ACIOPHY_SLEEP_CTRL_TX_BIG_OV, 3 << 2);
+        crate::time::udelay(10);
+        self.core_mask32(ACIOPHY_SLEEP_CTRL, ACIOPHY_SLEEP_CTRL_TX_CLAMP_OV, 3 << 10);
+        crate::time::udelay(10);
+
+        self.core_mask32(ACIOPHY_CFG0, ACIOPHY_CFG0_RX_BIG_OV, 3 << 12);
+        crate::time::udelay(10);
+        self.core_mask32(ACIOPHY_CFG0, ACIOPHY_CFG0_RX_SMALL_OV, 3 << 8);
+        crate::time::udelay(10);
+        self.core_mask32(ACIOPHY_CFG0, ACIOPHY_CFG0_RX_CLAMP_OV, 3 << 16);
+        crate::time::udelay(10);
+
         self.configure_crossbar();
+
+        self.core_set32(CIO3PLL_CLK_CTRL, CIO3PLL_CLK_PCLK_EN);
+        self.core_set32(CIO3PLL_CLK_CTRL, CIO3PLL_CLK_REFCLK_EN);
+
         self.configure_pipehandler_usb3();
+
+        self.core_set32(ATCPHY_POWER_CTRL, ATCPHY_POWER_PHY_RESET_N);
 
         early_println!("[apple-atcphy] initialized (USB3 mode)");
         Ok(())

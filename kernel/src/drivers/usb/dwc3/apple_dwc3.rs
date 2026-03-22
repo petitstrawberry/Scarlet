@@ -75,9 +75,9 @@ impl AppleDwc3 {
         let ctrl1 = self.core.read32(DWC3_APPLE_CTRL1) | APPLE_CTRL1_UTMI_REDUCE;
         self.core.write32(DWC3_APPLE_CTRL1, ctrl1);
 
-        // DWC3 core soft reset (before GCTL setup, matching asahi-linux dwc3_core_init)
-        self.core.global_soft_reset();
-        self.core.wait_for_reset()?;
+        // DWC3 core soft reset is SKIPPED in host mode.
+        // In host mode, the xHCI driver handles the controller reset.
+        // See Linux dwc3_core_soft_reset(): returns 0 early for PRTCAP_HOST.
 
         // GCTL: clear SCALEDOWN, set port capability to HOST
         let mut gctl = self.core.read32(DWC3_GCTL);
