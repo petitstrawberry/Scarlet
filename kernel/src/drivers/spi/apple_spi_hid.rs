@@ -16,10 +16,9 @@ use crate::device::input::rel_codes::{REL_X, REL_Y};
 use crate::device::input::syn_codes::SYN_REPORT;
 use crate::device::manager::{DeviceManager, DriverPriority};
 use crate::device::platform::{PlatformDeviceDriver, PlatformDeviceInfo};
-use crate::device::spi::SpiError;
-use crate::device::spi::adapter::SpiAdapter;
+use crate::device::spi::{SpiBus, SpiError, SpiTransfer, SpiTransferFlags};
 use crate::driver_initcall;
-use crate::drivers::spi::apple_spi::get_spi_adapter;
+use crate::early_println;
 use crate::interrupt::{InterruptError, InterruptId, InterruptResult};
 use crate::time::udelay;
 
@@ -109,14 +108,6 @@ const KEY_LEFT: u16 = 105;
 const KEY_DOWN: u16 = 108;
 const KEY_UP: u16 = 103;
 
-fn gpio_direction_output(_pin: u32, _value: bool) {
-    // TODO: use pinctrl driver
-}
-
-fn gpio_set(_pin: u32, _value: bool) {
-    // TODO: use pinctrl driver
-}
-
 fn hid_usage_to_key(usage: u8) -> Option<u16> {
     match usage {
         0x04 => Some(KEY_A),
@@ -194,11 +185,11 @@ fn hid_usage_to_key(usage: u8) -> Option<u16> {
 }
 
 pub struct AppleSpiHidTransport {
-    spi_adapter: Arc<SpiAdapter>,
+    spi_bus: Arc<dyn SpiBus>,
     cs: u8,
     device_id: u8,
     event_device: Arc<EventDevice>,
-    // TODO: irq_id once GPIO/pinctrl interrupt mapping is available
+    spien_gpio: (u32, Option<Arc<dyn crate::device::gpio::GpioController>>),
     irq_id: Option<InterruptId>,
     last_modifiers: Mutex<u8>,
     last_keys: Mutex<[u8; 6]>,
@@ -207,16 +198,18 @@ pub struct AppleSpiHidTransport {
 
 impl AppleSpiHidTransport {
     fn new(
-        spi_adapter: Arc<SpiAdapter>,
+        spi_bus: Arc<dyn SpiBus>,
         cs: u8,
         device_id: u8,
         event_device: Arc<EventDevice>,
+        spien_gpio: (u32, Option<Arc<dyn crate::device::gpio::GpioController>>),
     ) -> Self {
         Self {
-            spi_adapter,
+            spi_bus,
             cs,
             device_id,
             event_device,
+            spien_gpio,
             irq_id: None,
             last_modifiers: Mutex::new(0),
             last_keys: Mutex::new([0; 6]),
@@ -265,15 +258,18 @@ impl AppleSpiHidTransport {
     fn send_packet(&self, packet: &mut [u8; PACKET_SIZE]) -> Result<(), SpiError> {
         let crc = Self::crc16_ccitt(&packet[..254]);
         packet[254..256].copy_from_slice(&crc.to_le_bytes());
-        self.spi_adapter.write(self.cs, packet)?;
+        let mut seg = SpiTransfer::write(self.cs, packet);
+        self.spi_bus.transfer(core::slice::from_mut(&mut seg))?;
         udelay(SPI_DELAY_US);
         Ok(())
     }
 
     fn recv_packet(&self) -> Result<[u8; PACKET_SIZE], SpiError> {
-        let mut packet = [0u8; PACKET_SIZE];
-        self.spi_adapter.read(self.cs, &mut packet)?;
+        let mut seg = SpiTransfer::read(self.cs, PACKET_SIZE);
+        self.spi_bus.transfer(core::slice::from_mut(&mut seg))?;
         udelay(SPI_DELAY_US);
+        let mut packet = [0u8; PACKET_SIZE];
+        packet.copy_from_slice(&seg.data);
         Ok(packet)
     }
 
@@ -337,9 +333,13 @@ impl AppleSpiHidTransport {
     }
 
     fn initialize(&self) -> Result<(), &'static str> {
-        let spien_gpio = 0u32;
-        gpio_direction_output(spien_gpio, true);
-        gpio_set(spien_gpio, true);
+        if let Some(ref gpio) = self.spien_gpio.1 {
+            let pin = self.spien_gpio.0;
+            gpio.set_direction_output(pin, true);
+            gpio.set_value(pin, true);
+        } else {
+            early_println!("apple-spi-hid: no GPIO controller for SPIEN, skipping power-on");
+        }
         udelay(100_000);
 
         self.send_message(DEVICE_MGMT, &BOOT_CMD)
@@ -494,25 +494,48 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
         .map(|v| v as u32)
         .unwrap_or(8_000_000);
 
-    let adapter = get_spi_adapter(0).ok_or("apple-spi-hid: spi bus 0 adapter not found")?;
-    adapter
+    let parent_ph = device
+        .parent_phandle()
+        .ok_or("apple-spi-hid: no parent phandle")?;
+
+    let spi_bus = DeviceManager::get_manager()
+        .get_spi_bus(parent_ph)
+        .ok_or("apple-spi-hid: parent SPI bus not found")?;
+
+    spi_bus
         .set_bus_speed(max_freq)
         .map_err(|_| "apple-spi-hid: failed to set bus speed")?;
+
+    let spien_gpio = device
+        .property("spien-gpios")
+        .and_then(|p| {
+            let data = p.value();
+            if data.len() < 8 {
+                return None;
+            }
+            let phandle = u32::from_be_bytes(data[0..4].try_into().ok()?);
+            let pin = u32::from_be_bytes(data[4..8].try_into().ok()?);
+            let gpio = DeviceManager::get_manager().get_gpio_controller(phandle);
+            Some((pin, gpio))
+        })
+        .unwrap_or((0, None));
 
     let keyboard_event = Arc::new(EventDevice::new("keyboard"));
     let trackpad_event = Arc::new(EventDevice::new("mouse"));
 
     let keyboard = Arc::new(AppleSpiHidTransport::new(
-        adapter.clone(),
+        spi_bus.clone(),
         cs,
         DEVICE_KEYBOARD,
         keyboard_event.clone(),
+        spien_gpio.clone(),
     ));
     let trackpad = Arc::new(AppleSpiHidTransport::new(
-        adapter,
+        spi_bus,
         cs,
         DEVICE_TRACKPAD,
         trackpad_event.clone(),
+        spien_gpio,
     ));
 
     keyboard.initialize()?;

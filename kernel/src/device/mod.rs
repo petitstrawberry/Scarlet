@@ -8,6 +8,7 @@ pub mod block;
 pub mod char;
 pub mod events;
 pub mod fdt;
+pub mod gpio;
 pub mod graphics;
 pub mod i2c;
 pub mod input;
@@ -17,6 +18,7 @@ pub mod pci;
 pub mod platform;
 pub mod power;
 pub mod spi;
+pub mod usb;
 
 extern crate alloc;
 use core::any::Any;

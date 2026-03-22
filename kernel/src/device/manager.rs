@@ -59,6 +59,10 @@ use crate::early_println;
 use super::Device;
 use super::DeviceDriver;
 use super::DeviceInfo;
+use super::gpio::GpioController;
+use super::i2c::I2cBus;
+use super::spi::SpiBus;
+use super::usb::UsbHostController;
 use crate::DeviceSource;
 
 /// Simplified shared device type
@@ -123,6 +127,11 @@ pub struct DeviceManager {
     drivers: Mutex<BTreeMap<DriverPriority, Vec<Box<dyn DeviceDriver>>>>,
     /* Discovered PCI devices awaiting driver probe */
     discovered_pci_devices: Mutex<Vec<Arc<dyn DeviceInfo + Send + Sync>>>,
+    /* Bus controller registries (phandle → bus) */
+    spi_buses: Mutex<BTreeMap<u32, Arc<dyn SpiBus>>>,
+    i2c_buses: Mutex<BTreeMap<u32, Arc<dyn I2cBus>>>,
+    usb_hosts: Mutex<BTreeMap<u32, Arc<dyn UsbHostController>>>,
+    gpio_controllers: Mutex<BTreeMap<u32, Arc<dyn GpioController>>>,
     /* Next available device ID */
     next_device_id: AtomicUsize,
 }
@@ -135,6 +144,10 @@ impl DeviceManager {
             name_to_id: Mutex::new(BTreeMap::new()),
             drivers: Mutex::new(BTreeMap::new()),
             discovered_pci_devices: Mutex::new(Vec::new()),
+            spi_buses: Mutex::new(BTreeMap::new()),
+            i2c_buses: Mutex::new(BTreeMap::new()),
+            usb_hosts: Mutex::new(BTreeMap::new()),
+            gpio_controllers: Mutex::new(BTreeMap::new()),
             next_device_id: AtomicUsize::new(1), // Start from 1, reserve 0 for invalid
         }
     }
@@ -348,6 +361,48 @@ impl DeviceManager {
 
     pub fn borrow_drivers(&self) -> &Mutex<BTreeMap<DriverPriority, Vec<Box<dyn DeviceDriver>>>> {
         &self.drivers
+    }
+
+    pub fn register_spi_bus(&self, phandle: u32, bus: Arc<dyn SpiBus>) {
+        self.spi_buses.lock().insert(phandle, bus);
+    }
+
+    pub fn get_spi_bus(&self, phandle: u32) -> Option<Arc<dyn SpiBus>> {
+        self.spi_buses.lock().get(&phandle).cloned()
+    }
+
+    pub fn register_i2c_bus(&self, phandle: u32, bus: Arc<dyn I2cBus>) {
+        self.i2c_buses.lock().insert(phandle, bus);
+    }
+
+    pub fn get_i2c_bus(&self, phandle: u32) -> Option<Arc<dyn I2cBus>> {
+        self.i2c_buses.lock().get(&phandle).cloned()
+    }
+
+    pub fn register_usb_host(&self, id: u32, host: Arc<dyn UsbHostController>) {
+        self.usb_hosts.lock().insert(id, host);
+    }
+
+    pub fn get_usb_host(&self, id: u32) -> Option<Arc<dyn UsbHostController>> {
+        self.usb_hosts.lock().get(&id).cloned()
+    }
+
+    pub fn register_gpio_controller(&self, phandle: u32, gpio: Arc<dyn GpioController>) {
+        self.gpio_controllers.lock().insert(phandle, gpio);
+    }
+
+    pub fn get_gpio_controller(&self, phandle: u32) -> Option<Arc<dyn GpioController>> {
+        self.gpio_controllers.lock().get(&phandle).cloned()
+    }
+
+    pub fn for_each_usb_host<F>(&self, mut f: F)
+    where
+        F: FnMut(&Arc<dyn UsbHostController>),
+    {
+        let hosts = self.usb_hosts.lock();
+        for ctrl in hosts.values() {
+            f(ctrl);
+        }
     }
 
     /// Populates devices from the FDT (Flattened Device Tree).
@@ -980,6 +1035,10 @@ impl DeviceManager {
         device_by_name.clear();
         name_to_id.clear();
         discovered.clear();
+        self.spi_buses.lock().clear();
+        self.i2c_buses.lock().clear();
+        self.usb_hosts.lock().clear();
+        self.gpio_controllers.lock().clear();
         self.next_device_id.store(1, Ordering::SeqCst); // Start from 1, reserve 0 for invalid
     }
 }

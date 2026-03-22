@@ -8,7 +8,6 @@ use alloc::vec::Vec;
 use spin::Mutex;
 
 use crate::arch::mmio;
-use crate::device::i2c::adapter::I2cAdapter;
 use crate::device::i2c::{I2cAddress, I2cBus, I2cError, I2cMessage, I2cMessageFlags};
 use crate::device::{
     DeviceInfo,
@@ -67,6 +66,7 @@ pub struct AppleI2cController {
     base: usize,
     bus_number: u32,
     inner: Mutex<AppleI2cInner>,
+    transfer_lock: Mutex<()>,
 }
 
 impl AppleI2cController {
@@ -79,6 +79,7 @@ impl AppleI2cController {
                 bus_hz: DEFAULT_BUS_HZ,
                 hw_rev: 0,
             }),
+            transfer_lock: Mutex::new(()),
         };
         controller.init_hardware()?;
         Ok(controller)
@@ -299,6 +300,8 @@ impl I2cBus for AppleI2cController {
             return Err(I2cError::InvalidArg);
         }
 
+        let _guard = self.transfer_lock.lock();
+
         self.clear_fifos();
         self.clear_status();
 
@@ -343,17 +346,6 @@ impl I2cBus for AppleI2cController {
     }
 }
 
-static I2C_ADAPTER_REGISTRY: Mutex<Vec<Arc<I2cAdapter>>> = Mutex::new(Vec::new());
-
-/// Lookup a registered I2C adapter by bus number.
-pub fn get_i2c_adapter(bus: u32) -> Option<Arc<I2cAdapter>> {
-    let guard = I2C_ADAPTER_REGISTRY.lock();
-    guard
-        .iter()
-        .find(|adapter| adapter.bus_number() == bus)
-        .map(Arc::clone)
-}
-
 fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
     let mem_resources: Vec<_> = device
         .get_resources()
@@ -380,12 +372,17 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
         .map(|v| v as u32)
         .unwrap_or(device.id() as u32);
 
+    let phandle = device
+        .property("phandle")
+        .and_then(|p| p.as_usize())
+        .map(|v| v as u32)
+        .ok_or("apple-i2c: no phandle")?;
+
     let controller = AppleI2cController::new(base, bus_number)
         .map_err(|_| "apple-i2c: controller initialization failed")?;
     let bus: Arc<dyn I2cBus> = Arc::new(controller);
-    let adapter = Arc::new(I2cAdapter::new(bus));
 
-    I2C_ADAPTER_REGISTRY.lock().push(adapter);
+    DeviceManager::get_manager().register_i2c_bus(phandle, bus);
     Ok(())
 }
 

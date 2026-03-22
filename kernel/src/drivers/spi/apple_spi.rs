@@ -6,7 +6,6 @@ use alloc::vec::Vec;
 use spin::Mutex;
 
 use crate::arch::mmio;
-use crate::device::spi::adapter::SpiAdapter;
 use crate::device::spi::{SpiBus, SpiError, SpiTransfer, SpiTransferFlags};
 use crate::device::{
     DeviceInfo,
@@ -108,6 +107,7 @@ pub struct AppleSpiController {
     base: usize,
     bus_number: u32,
     inner: Mutex<AppleSpiInner>,
+    transfer_lock: Mutex<()>,
 }
 
 impl AppleSpiController {
@@ -121,6 +121,7 @@ impl AppleSpiController {
                 mode: 0,
                 lsb_first: false,
             }),
+            transfer_lock: Mutex::new(()),
         };
         controller.init_hardware()?;
         Ok(controller)
@@ -421,6 +422,7 @@ impl SpiBus for AppleSpiController {
             return Err(SpiError::InvalidArg);
         }
 
+        let _guard = self.transfer_lock.lock();
         for segment in segments.iter_mut() {
             self.set_cs_active();
             let result = self.transfer_segment(segment);
@@ -442,16 +444,6 @@ impl SpiBus for AppleSpiController {
     fn bus_number(&self) -> u32 {
         self.bus_number
     }
-}
-
-static SPI_ADAPTER_REGISTRY: Mutex<Vec<Arc<SpiAdapter>>> = Mutex::new(Vec::new());
-
-pub fn get_spi_adapter(bus: u32) -> Option<Arc<SpiAdapter>> {
-    let guard = SPI_ADAPTER_REGISTRY.lock();
-    guard
-        .iter()
-        .find(|adapter| adapter.bus_number() == bus)
-        .map(Arc::clone)
 }
 
 fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
@@ -480,12 +472,17 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
         .map(|v| v as u32)
         .unwrap_or(device.id() as u32);
 
+    let phandle = device
+        .property("phandle")
+        .and_then(|p| p.as_usize())
+        .map(|v| v as u32)
+        .ok_or("apple-spi: no phandle")?;
+
     let controller =
         AppleSpiController::new(base, bus_number).map_err(|_| "apple-spi: init failed")?;
     let bus: Arc<dyn SpiBus> = Arc::new(controller);
-    let adapter = Arc::new(SpiAdapter::new(bus));
 
-    SPI_ADAPTER_REGISTRY.lock().push(adapter);
+    DeviceManager::get_manager().register_spi_bus(phandle, bus);
     Ok(())
 }
 

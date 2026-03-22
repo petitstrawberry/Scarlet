@@ -7,8 +7,6 @@ extern crate alloc;
 
 use alloc::vec::Vec;
 
-pub mod adapter;
-
 /// I2C slave address (7-bit or 10-bit).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum I2cAddress {

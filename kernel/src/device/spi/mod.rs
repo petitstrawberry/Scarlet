@@ -7,8 +7,6 @@ extern crate alloc;
 
 use alloc::vec::Vec;
 
-pub mod adapter;
-
 /// SPI chip-select mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SpiCsMode {

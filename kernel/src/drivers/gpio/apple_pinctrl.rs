@@ -8,6 +8,7 @@ use spin::Mutex;
 use crate::arch::mmio::{read32, write32};
 use crate::device::{
     DeviceInfo,
+    gpio::{GpioController, GpioIrqTrigger, GpioPull},
     manager::{DeviceManager, DriverPriority},
     platform::{PlatformDeviceDriver, PlatformDeviceInfo, resource::PlatformDeviceResourceType},
 };
@@ -30,21 +31,6 @@ const IRQ_ENABLE: u32 = 1 << 0;
 const IRQ_IS_LEVEL: u32 = 1 << 1;
 const IRQ_POLARITY: u32 = 1 << 2;
 const IRQ_STATUS: u32 = 1 << 31;
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum GpioPull {
-    None,
-    Down,
-    Up,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum GpioIrqTrigger {
-    RisingEdge,
-    FallingEdge,
-    HighLevel,
-    LowLevel,
-}
 
 pub struct ApplePinctrl {
     base: usize,
@@ -210,10 +196,34 @@ impl ApplePinctrl {
     }
 }
 
-static PINCTRL_REGISTRY: Mutex<Vec<Arc<ApplePinctrl>>> = Mutex::new(Vec::new());
-
-pub fn get_pinctrl(index: usize) -> Option<Arc<ApplePinctrl>> {
-    PINCTRL_REGISTRY.lock().get(index).map(Arc::clone)
+impl GpioController for ApplePinctrl {
+    fn set_direction_output(&self, pin: u32, value: bool) {
+        Self::set_direction_output(self, pin, value)
+    }
+    fn set_direction_input(&self, pin: u32) {
+        Self::set_direction_input(self, pin)
+    }
+    fn set_value(&self, pin: u32, value: bool) {
+        Self::set_value(self, pin, value)
+    }
+    fn get_value(&self, pin: u32) -> bool {
+        Self::get_value(self, pin)
+    }
+    fn set_pull(&self, pin: u32, pull: GpioPull) {
+        Self::set_pull(self, pin, pull)
+    }
+    fn set_function(&self, pin: u32, func: u8) {
+        Self::set_function(self, pin, func)
+    }
+    fn enable_irq(&self, pin: u32, trigger: GpioIrqTrigger) {
+        Self::enable_irq(self, pin, trigger)
+    }
+    fn disable_irq(&self, pin: u32) {
+        Self::disable_irq(self, pin)
+    }
+    fn ack_irq(&self, pin: u32) {
+        Self::ack_irq(self, pin)
+    }
 }
 
 fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
@@ -241,8 +251,14 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
         .and_then(|property| property.as_usize())
         .ok_or("apple-pinctrl: missing apple,npins")? as u32;
 
-    let pinctrl = Arc::new(ApplePinctrl::new(base, npins));
-    PINCTRL_REGISTRY.lock().push(pinctrl);
+    let phandle = device
+        .property("phandle")
+        .and_then(|p| p.as_usize())
+        .map(|v| v as u32)
+        .ok_or("apple-pinctrl: no phandle")?;
+
+    let pinctrl: Arc<dyn GpioController> = Arc::new(ApplePinctrl::new(base, npins));
+    DeviceManager::get_manager().register_gpio_controller(phandle, pinctrl);
 
     Ok(())
 }

@@ -1,7 +1,6 @@
 #![allow(dead_code)]
 
 use alloc::boxed::Box;
-use alloc::sync::Arc;
 use spin::Mutex;
 
 use super::dwc3_core::{
@@ -131,21 +130,6 @@ impl AppleDwc3 {
     }
 }
 
-static DWC3_REGISTRY: Mutex<alloc::vec::Vec<Arc<Mutex<AppleDwc3>>>> =
-    Mutex::new(alloc::vec::Vec::new());
-
-pub fn register_dwc3(dwc3: AppleDwc3) -> u32 {
-    let mut guard = DWC3_REGISTRY.lock();
-    let id = guard.len() as u32;
-    guard.push(Arc::new(Mutex::new(dwc3)));
-    id
-}
-
-pub fn get_dwc3(id: u32) -> Option<Arc<Mutex<AppleDwc3>>> {
-    let guard = DWC3_REGISTRY.lock();
-    guard.get(id as usize).cloned()
-}
-
 fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
     let mem_resource = device
         .get_resources()
@@ -194,9 +178,7 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
     let mut dwc3 = AppleDwc3::new(base_addr, dr_mode);
     dwc3.init()?;
 
-    let _id = register_dwc3(dwc3);
-
-    early_println!("[apple-dwc3] registered (id={})", _id);
+    early_println!("[apple-dwc3] registered");
 
     let is_host = dr_mode == "host" || dr_mode == "otg";
 

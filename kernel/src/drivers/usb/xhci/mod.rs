@@ -17,7 +17,7 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::mem::size_of;
 use core::ptr::{read_unaligned, read_volatile, write_volatile};
-use core::sync::atomic::{Ordering, fence};
+use core::sync::atomic::{AtomicUsize, Ordering, fence};
 use spin::Mutex;
 
 use crate::device::Device;
@@ -26,6 +26,7 @@ use crate::device::manager::{DeviceManager, DriverPriority};
 use crate::device::pci::config::{self, PciConfig};
 use crate::device::pci::device::PciDeviceInfo;
 use crate::device::pci::driver::{PciDeviceDriver, PciDeviceId};
+use crate::device::usb::UsbHostController;
 use crate::driver_initcall;
 use crate::drivers::usb::core::descriptor::{
     ConfigurationDescriptor, DescriptorHeader, DeviceDescriptor, EndpointDescriptor,
@@ -1385,21 +1386,26 @@ fn determine_bar_size(
     }
 }
 
+impl UsbHostController for XhciController {
+    fn poll_events(&self) {
+        let status = self.operational.read_usbsts();
+        if status & (USBSTS_EVENT_INTERRUPT | USBSTS_PORT_CHANGE_DETECT) != 0 {
+            self.operational
+                .write_usbsts(status & (USBSTS_EVENT_INTERRUPT | USBSTS_PORT_CHANGE_DETECT));
+            self.process_interrupt_events();
+        }
+    }
+}
+
 /// xHCI driver instance container
-static XHCI_CONTROLLERS: Mutex<Vec<Arc<XhciController>>> = Mutex::new(Vec::new());
+static NEXT_USB_HOST_ID: AtomicUsize = AtomicUsize::new(1);
 
 struct XhciPollHandler;
 impl TimerHandler for XhciPollHandler {
     fn on_timer_expired(self: Arc<Self>, _context: usize) {
-        let controllers = XHCI_CONTROLLERS.lock();
-        for ctrl in controllers.iter() {
-            let status = ctrl.operational.read_usbsts();
-            if status & (USBSTS_EVENT_INTERRUPT | USBSTS_PORT_CHANGE_DETECT) != 0 {
-                ctrl.operational
-                    .write_usbsts(status & (USBSTS_EVENT_INTERRUPT | USBSTS_PORT_CHANGE_DETECT));
-                ctrl.process_interrupt_events();
-            }
-        }
+        DeviceManager::get_manager().for_each_usb_host(|ctrl| {
+            ctrl.poll_events();
+        });
         let handler: Arc<dyn TimerHandler> = self.clone();
         let expires = crate::timer::get_tick() + crate::timer::ms_to_ticks(500);
         crate::timer::add_timer(expires, &handler, 0);
@@ -1460,9 +1466,9 @@ pub fn bind_xhci_mmio(
         early_println!("[xHCI] No interrupt provided for platform controller");
     }
 
-    let mut controllers = XHCI_CONTROLLERS.lock();
-    controllers.push(controller);
-    drop(controllers);
+    let host_id = NEXT_USB_HOST_ID.fetch_add(1, Ordering::SeqCst) as u32;
+    let host: Arc<dyn UsbHostController> = controller.clone();
+    DeviceManager::get_manager().register_usb_host(host_id, host);
 
     let poll_handler: Arc<dyn TimerHandler> = Arc::new(XhciPollHandler);
     add_timer(get_tick() + ms_to_ticks(1000), &poll_handler, 0);
