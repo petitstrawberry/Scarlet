@@ -4,6 +4,7 @@
 
 pub mod block;
 pub mod display;
+pub mod gpio;
 pub mod graphics;
 pub mod i2c;
 pub mod iommu;
@@ -21,4 +22,3 @@ pub mod virtio;
 pub mod virtio_input;
 pub mod virtio_rng;
 pub mod watchdog;
-pub mod gpio;
