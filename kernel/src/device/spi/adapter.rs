@@ -5,7 +5,7 @@ extern crate alloc;
 use alloc::sync::Arc;
 use spin::Mutex;
 
-use crate::device::spi::{SpiBus, SpiError, SpiTransfer, SpiTransferFlags};
+use crate::device::spi::{SpiBus, SpiError, SpiTransfer};
 
 pub struct SpiAdapter {
     bus: Arc<dyn SpiBus>,

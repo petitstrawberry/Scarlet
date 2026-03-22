@@ -90,7 +90,7 @@ impl SpiTransfer {
     ///
     /// `tx` bytes are sent while `rx` buffer is filled with received data.
     /// The returned transfer has both READ and WRITE flags set.
-    pub fn full_duplex(cs: u8, tx: &[u8], rx_len: usize) -> Self {
+    pub fn full_duplex(cs: u8, tx: &[u8], _rx_len: usize) -> Self {
         Self {
             flags: SpiTransferFlags::READ | SpiTransferFlags::WRITE,
             data: tx.to_vec(),

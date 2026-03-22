@@ -1,7 +1,6 @@
 extern crate alloc;
 
 use alloc::string::String;
-use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::any::Any;
 

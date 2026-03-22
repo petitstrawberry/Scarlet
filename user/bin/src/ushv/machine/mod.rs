@@ -2,12 +2,10 @@ extern crate alloc;
 
 mod dtb;
 
-use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
-use scarlet_std::println;
 
 use crate::device::{IrqSink, MmioDevice};
 
