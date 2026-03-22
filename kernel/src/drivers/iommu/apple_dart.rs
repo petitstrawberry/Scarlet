@@ -323,6 +323,26 @@ impl DartPageTable {
     pub fn root_paddr(&self) -> usize {
         self.root_paddr
     }
+
+    /// Map a physically contiguous region into the DART page table.
+    ///
+    /// Maps `size` bytes starting at `paddr` to the IOVA range starting at `iova`.
+    pub fn map_contiguous(
+        &mut self,
+        iova: usize,
+        paddr: usize,
+        size: usize,
+        flags: u64,
+    ) -> Result<(), &'static str> {
+        let page_size = 1usize << DART_PAGE_SHIFT;
+        let pages = (size + page_size - 1) / page_size;
+
+        for i in 0..pages {
+            self.map_page(iova + i * page_size, paddr + i * page_size, flags)?;
+        }
+
+        Ok(())
+    }
 }
 
 // =============================================================================
