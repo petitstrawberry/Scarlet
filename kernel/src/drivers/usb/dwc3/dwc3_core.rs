@@ -10,9 +10,10 @@ pub const DWC3_GRXTHRCFG: usize = 0xc18c;
 pub const DWC3_GTXTHRCFG: usize = 0xc190;
 pub const DWC3_GUSB3PIPECTL: usize = 0xc2a0;
 pub const DWC3_GUSB2PHYACC: usize = 0xc2c0;
-pub const DWC3_GEVNTADR: usize = 0xc310;
-pub const DWC3_GEVNTSIZ: usize = 0xc314;
-pub const DWC3_GEVNTCOUNT: usize = 0xc318;
+pub const DWC3_GEVNTADRLO: usize = 0xc400;
+pub const DWC3_GEVNTADRHI: usize = 0xc404;
+pub const DWC3_GEVNTSIZ: usize = 0xc408;
+pub const DWC3_GEVNTCOUNT: usize = 0xc40c;
 pub const DWC3_GHWPARAMS1: usize = 0xc440;
 pub const DWC3_GHWPARAMS3: usize = 0xc448;
 pub const DWC3_GSNPSID: usize = 0xc120;
@@ -20,7 +21,12 @@ pub const DWC3_GUCTL1: usize = 0xc4c4;
 pub const DWC3_GUSB3PIPEFMT: usize = 0xc660;
 
 pub const GCTL_CORESOFTRESET: u32 = 1 << 30;
-pub const GCTL_SCALEDOWN: u32 = 1 << 31;
+pub const GCTL_SCALEDOWN_MASK: u32 = 0x3 << 29;
+pub const GCTL_PRTCAP_MASK: u32 = 0x3 << 12;
+pub const GCTL_PRTCAP_HOST: u32 = 1 << 12;
+pub const GCTL_PRTCAPDIR_HOST: u32 = 1 << 12;
+pub const GCTL_DSBLCLKGTNG: u32 = 1 << 0;
+pub const GCTL_SOFITPSYNC: u32 = 1 << 10;
 
 pub const GSBUSCFG0_INCR256B: u32 = 1 << 2;
 pub const GSBUSCFG0_INCR16B: u32 = 1 << 3;
@@ -77,12 +83,11 @@ impl Dwc3Core {
     }
 
     pub fn wait_for_reset(&self) -> Result<(), &'static str> {
-        let mut timeout = 100_000;
-        while timeout > 0 {
+        let deadline = crate::time::current_time() + 1_000_000;
+        while crate::time::current_time() < deadline {
             if self.read32(DWC3_GCTL) & GCTL_CORESOFTRESET == 0 {
                 return Ok(());
             }
-            timeout -= 1;
             core::hint::spin_loop();
         }
         Err("dwc3: global soft reset timeout")

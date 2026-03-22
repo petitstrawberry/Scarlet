@@ -394,56 +394,50 @@ impl XhciController {
     /// Halt the xHCI controller
     pub fn halt(&self) -> Result<(), &'static str> {
         let usbcmd = self.operational.read_usbcmd();
-        // Clear Run/Stop bit (bit 0)
         self.operational.write_usbcmd(usbcmd & !0x1);
 
-        // Wait for HCHalted bit (bit 0 of USBSTS)
-        let mut timeout = 100_000u32;
-        loop {
+        let deadline = crate::time::current_time() + 500_000;
+        while crate::time::current_time() < deadline {
             let usbsts = self.operational.read_usbsts();
             if (usbsts & 0x1) != 0 {
                 early_println!("[xHCI] Controller halted");
                 return Ok(());
             }
-            timeout -= 1;
-            if timeout == 0 {
-                return Err("Timeout waiting for xHCI halt");
-            }
+            core::hint::spin_loop();
         }
+        Err("Timeout waiting for xHCI halt")
     }
 
     /// Reset the xHCI controller
     pub fn reset(&self) -> Result<(), &'static str> {
-        // Set HCRST bit (bit 1) in USBCMD
         let usbcmd = self.operational.read_usbcmd();
         self.operational.write_usbcmd(usbcmd | 0x2);
 
-        // Wait for HCRST bit to clear
-        let mut timeout = 100_000u32;
-        loop {
+        let deadline = crate::time::current_time() + 500_000;
+        let mut hcrst_cleared = false;
+        while crate::time::current_time() < deadline {
             let usbcmd = self.operational.read_usbcmd();
             if (usbcmd & 0x2) == 0 {
+                hcrst_cleared = true;
                 break;
             }
-            timeout -= 1;
-            if timeout == 0 {
-                return Err("Timeout waiting for xHCI reset");
-            }
+            core::hint::spin_loop();
         }
 
-        // Wait for CNR (Controller Not Ready) bit to clear in USBSTS
-        timeout = 100_000;
-        loop {
+        if !hcrst_cleared {
+            return Err("Timeout waiting for xHCI reset");
+        }
+
+        let deadline = crate::time::current_time() + 500_000;
+        while crate::time::current_time() < deadline {
             let usbsts = self.operational.read_usbsts();
             if (usbsts & (1 << 11)) == 0 {
                 early_println!("[xHCI] Controller reset complete");
                 return Ok(());
             }
-            timeout -= 1;
-            if timeout == 0 {
-                return Err("Timeout waiting for xHCI ready after reset");
-            }
+            core::hint::spin_loop();
         }
+        Err("Timeout waiting for xHCI ready after reset")
     }
 
     /// Start the xHCI controller

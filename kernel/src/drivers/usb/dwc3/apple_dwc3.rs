@@ -5,7 +5,10 @@ use alloc::sync::Arc;
 use spin::Mutex;
 
 use super::dwc3_core::{
-    DWC3_GCTL, DWC3_GUSB2PHYACC, DWC3_GUSB2PHYCFG, DWC3_GUSB3PIPECTL, Dwc3Core,
+    DWC3_GCTL, DWC3_GEVNTADRHI, DWC3_GEVNTADRLO, DWC3_GEVNTCOUNT, DWC3_GEVNTSIZ, DWC3_GSBUSCFG0,
+    DWC3_GUSB2PHYACC, DWC3_GUSB2PHYCFG, DWC3_GUSB3PIPECTL, Dwc3Core, GCTL_CORESOFTRESET,
+    GCTL_DSBLCLKGTNG, GCTL_PRTCAP_HOST, GCTL_PRTCAP_MASK, GCTL_SCALEDOWN_MASK, GSBUSCFG0_INCR4B,
+    GSBUSCFG0_INCR8B, GSBUSCFG0_INCR16B, GSBUSCFG0_INCR64B, GSBUSCFG0_INCR256B, GSBUSCFG0_INCRX,
 };
 use crate::{
     device::{
@@ -17,6 +20,7 @@ use crate::{
     },
     driver_initcall, early_println,
     interrupt::InterruptId,
+    mem::pmm,
 };
 
 const DWC3_APPLE_CTRL0: usize = 0xc800;
@@ -71,6 +75,28 @@ impl AppleDwc3 {
         let ctrl1 = self.core.read32(DWC3_APPLE_CTRL1) | APPLE_CTRL1_UTMI_REDUCE;
         self.core.write32(DWC3_APPLE_CTRL1, ctrl1);
 
+        // DWC3 core soft reset (before GCTL setup, matching asahi-linux dwc3_core_init)
+        self.core.global_soft_reset();
+        self.core.wait_for_reset()?;
+
+        // GCTL: clear SCALEDOWN, set port capability to HOST
+        let mut gctl = self.core.read32(DWC3_GCTL);
+        gctl &= !GCTL_SCALEDOWN_MASK;
+        gctl &= !GCTL_PRTCAP_MASK;
+        gctl |= GCTL_PRTCAP_HOST;
+        gctl |= GCTL_DSBLCLKGTNG;
+        self.core.write32(DWC3_GCTL, gctl);
+
+        // GSBUSCFG0: set INCR burst type
+        let buscfg = self.core.read32(DWC3_GSBUSCFG0)
+            | GSBUSCFG0_INCR256B
+            | GSBUSCFG0_INCR16B
+            | GSBUSCFG0_INCR8B
+            | GSBUSCFG0_INCR4B
+            | GSBUSCFG0_INCRX
+            | GSBUSCFG0_INCR64B;
+        self.core.write32(DWC3_GSBUSCFG0, buscfg);
+
         // Apple CIO setup (asahi-linux dwc3_apple_setup_cio)
         self.core.write32(DWC3_APPLE_CIO_LFPS, 0x0f800f80);
         self.core.write32(DWC3_APPLE_CIO_BW_NGT, 0x0fc00fc0);
@@ -84,16 +110,21 @@ impl AppleDwc3 {
         let usb3pipectl = self.core.read32(DWC3_GUSB3PIPECTL);
         self.core.write32(DWC3_GUSB3PIPECTL, usb3pipectl);
 
-        // GCTL: set port capability to HOST (bits 13:12 = 01)
-        let gctl = self.core.read32(DWC3_GCTL) & !(0x3 << 12);
-        self.core.write32(DWC3_GCTL, gctl | GCTL_PRTCAPDIR_HOST);
-
         // Enable suspend PHY on both USB2 and USB3
         let usb2cfg = self.core.read32(DWC3_GUSB2PHYCFG) | GUSB2PHYCFG_SUSPHY;
         self.core.write32(DWC3_GUSB2PHYCFG, usb2cfg);
 
         let usb3cfg = self.core.read32(DWC3_GUSB3PIPECTL) | GUSB3PIPECTL_SUSPHY;
         self.core.write32(DWC3_GUSB3PIPECTL, usb3cfg);
+
+        // Event buffer setup: allocate a 4KB physically contiguous page
+        let evt_buf = pmm::alloc_frame().ok_or("dwc3: failed to alloc event buffer")?;
+        let evt_paddr = evt_buf;
+        self.core.write32(DWC3_GEVNTADRLO, evt_paddr as u32);
+        self.core.write32(DWC3_GEVNTADRHI, (evt_paddr >> 32) as u32);
+        self.core.write32(DWC3_GEVNTSIZ, 0x1000); // 4KB
+        // Clear any stale events
+        self.core.write32(DWC3_GEVNTCOUNT, 0);
 
         early_println!("[apple-dwc3] initialized (dr_mode={})", self.dr_mode);
         Ok(())
@@ -167,7 +198,9 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
 
     early_println!("[apple-dwc3] registered (id={})", _id);
 
-    if dr_mode == "host" {
+    let is_host = dr_mode == "host" || dr_mode == "otg";
+
+    if is_host {
         let irq_resource = device
             .get_resources()
             .iter()
@@ -175,10 +208,11 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
 
         let interrupt_id = irq_resource.map(|r| r.start as InterruptId);
 
-        match crate::drivers::usb::xhci::bind_xhci_mmio(base_addr, interrupt_id) {
-            Ok(()) => early_println!("[apple-dwc3] xHCI bound successfully"),
-            Err(e) => early_println!("[apple-dwc3] xHCI bind failed: {}", e),
-        }
+        crate::drivers::usb::xhci::bind_xhci_mmio(base_addr, interrupt_id).map_err(|e| {
+            early_println!("[apple-dwc3] xHCI bind failed: {}", e);
+            e
+        })?;
+        early_println!("[apple-dwc3] xHCI bound successfully");
     }
 
     Ok(())

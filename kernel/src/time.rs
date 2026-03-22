@@ -33,6 +33,13 @@ pub fn current_time_ns() -> u64 {
     current_time() * 1000
 }
 
+pub fn udelay(us: u64) {
+    let start = current_time();
+    while current_time() - start < us {
+        core::hint::spin_loop();
+    }
+}
+
 /// Convert microseconds to a human-readable format (for debugging)
 pub fn format_time_us(time_us: u64) -> (u64, u64, u64) {
     let seconds = time_us / 1_000_000;
