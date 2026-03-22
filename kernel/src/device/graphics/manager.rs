@@ -28,6 +28,7 @@ use alloc::{
 use hashbrown::HashMap;
 use spin::{Mutex, RwLock};
 
+use super::output::DisplayOutput;
 use crate::device::{
     DeviceType,
     graphics::FramebufferConfig,
@@ -568,6 +569,88 @@ impl GraphicsManager {
         }
 
         Ok(bytes_to_write)
+    }
+
+    /// Present a framebuffer on all connected outputs across all graphics devices.
+    ///
+    /// This is the "mirror" operation — every connected display gets the same content.
+    pub fn mirror_all(&self, fb_name: &str) -> Result<(), &'static str> {
+        let fb = self
+            .get_framebuffer(fb_name)
+            .ok_or("mirror: framebuffer not found")?;
+
+        let device_manager = DeviceManager::get_manager();
+        let device_count = device_manager.get_devices_count();
+
+        let mut presented = 0u32;
+        let mut last_error: Option<&'static str> = None;
+
+        for device_id in 1..=device_count {
+            let device = match device_manager.get_device(device_id) {
+                Some(d) => d,
+                None => continue,
+            };
+
+            let graphics = match device.as_graphics_device() {
+                Some(g) => g,
+                None => continue,
+            };
+
+            let outputs: Vec<&dyn DisplayOutput> = graphics.get_outputs();
+            for output in outputs {
+                if !output.is_connected() {
+                    continue;
+                }
+                match output.present(&fb.config, fb.physical_addr) {
+                    Ok(()) => presented += 1,
+                    Err(e) => {
+                        crate::early_println!(
+                            "[GraphicsManager] mirror failed on '{}': {}",
+                            output.name(),
+                            e
+                        );
+                        last_error = Some(e);
+                    }
+                }
+            }
+        }
+
+        if presented == 0 {
+            return Err(last_error.unwrap_or("mirror: no connected outputs"));
+        }
+
+        Ok(())
+    }
+
+    /// Present a framebuffer on a specific output by name.
+    pub fn mirror_to(&self, fb_name: &str, output_name: &str) -> Result<(), &'static str> {
+        let fb = self
+            .get_framebuffer(fb_name)
+            .ok_or("mirror: framebuffer not found")?;
+
+        let device_manager = DeviceManager::get_manager();
+        let device_count = device_manager.get_devices_count();
+
+        for device_id in 1..=device_count {
+            let device = match device_manager.get_device(device_id) {
+                Some(d) => d,
+                None => continue,
+            };
+
+            let graphics = match device.as_graphics_device() {
+                Some(g) => g,
+                None => continue,
+            };
+
+            let outputs: Vec<&dyn DisplayOutput> = graphics.get_outputs();
+            for output in outputs {
+                if output.name() == output_name {
+                    return output.present(&fb.config, fb.physical_addr);
+                }
+            }
+        }
+
+        Err("mirror: output not found")
     }
 
     /// Clear all framebuffers (for testing only)

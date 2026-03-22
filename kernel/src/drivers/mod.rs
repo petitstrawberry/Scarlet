@@ -3,10 +3,16 @@
 //! This module encapsulates various device drivers for the Scarlet kernel.
 
 pub mod block;
+#[cfg(target_arch = "aarch64")]
+pub mod display;
 pub mod graphics;
+#[cfg(target_arch = "aarch64")]
+pub mod i2c;
 #[cfg(target_arch = "aarch64")]
 pub mod iommu;
 pub mod network;
+#[cfg(target_arch = "aarch64")]
+pub mod nvmem;
 #[cfg(target_arch = "aarch64")]
 pub mod pcie;
 #[cfg(target_arch = "aarch64")]
