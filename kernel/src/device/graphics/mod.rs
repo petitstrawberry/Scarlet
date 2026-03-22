@@ -7,6 +7,7 @@ use alloc::{boxed::Box, vec::Vec};
 use core::any::Any;
 use spin::Mutex;
 
+use self::output::DisplayOutput;
 use alloc::sync::Arc;
 
 use super::{Device, DeviceType, manager::DeviceManager};
@@ -15,6 +16,7 @@ use crate::object::capability::{ControlOps, MemoryMappingOps};
 
 pub mod framebuffer_device;
 pub mod manager;
+pub mod output;
 
 #[cfg(test)]
 mod tests;
@@ -154,6 +156,14 @@ pub trait GraphicsDevice: Device {
 
     /// Initialize the graphics device (idempotent)
     fn init_graphics(&self) -> Result<(), &'static str>;
+
+    /// Get display outputs provided by this device.
+    ///
+    /// Default returns empty — devices that don't support multi-output
+    /// don't need to override this.
+    fn get_outputs(&self) -> Vec<&dyn DisplayOutput> {
+        Vec::new()
+    }
 }
 
 /// A generic implementation of a graphics device
