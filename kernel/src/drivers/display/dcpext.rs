@@ -9,13 +9,13 @@ use core::sync::atomic::{AtomicBool, Ordering};
 
 use spin::Mutex;
 
-use crate::device::graphics::output::DisplayOutput;
 use crate::device::graphics::FramebufferConfig;
+use crate::device::graphics::output::DisplayOutput;
 use crate::device::manager::{DeviceManager, DriverPriority};
 use crate::device::platform::resource::PlatformDeviceResourceType;
 use crate::device::platform::{PlatformDeviceDriver, PlatformDeviceInfo};
 use crate::driver_initcall;
-use crate::drivers::iommu::apple_dart::{get_dart_by_phandle, DartPageTable};
+use crate::drivers::iommu::apple_dart::{DartPageTable, get_dart_by_phandle};
 use crate::drivers::soc::apple_afk::AfkEndpoint;
 use crate::drivers::soc::apple_asc::AppleAsc;
 use crate::drivers::soc::apple_epic::EpicEndpoint;

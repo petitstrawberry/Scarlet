@@ -30,9 +30,9 @@ use spin::{Mutex, RwLock};
 
 use super::output::DisplayOutput;
 use crate::device::{
+    DeviceType,
     graphics::FramebufferConfig,
     manager::{DeviceManager, SharedDevice},
-    DeviceType,
 };
 use crate::vm::addr::phys_to_virt;
 
@@ -689,7 +689,7 @@ mod test_utils {
 mod tests {
     use super::*;
     use crate::device::graphics::{
-        manager::GraphicsManager, FramebufferConfig, GenericGraphicsDevice, PixelFormat,
+        FramebufferConfig, GenericGraphicsDevice, PixelFormat, manager::GraphicsManager,
     };
     use alloc::{string::ToString, sync::Arc};
 
@@ -788,20 +788,24 @@ mod tests {
         let shared_device2: SharedDevice = Arc::new(device2);
 
         // Register both devices
-        assert!(manager
-            .register_framebuffer_from_device_with_device_manager(
-                1,
-                shared_device1,
-                &device_manager,
-            )
-            .is_ok());
-        assert!(manager
-            .register_framebuffer_from_device_with_device_manager(
-                2,
-                shared_device2,
-                &device_manager,
-            )
-            .is_ok());
+        assert!(
+            manager
+                .register_framebuffer_from_device_with_device_manager(
+                    1,
+                    shared_device1,
+                    &device_manager,
+                )
+                .is_ok()
+        );
+        assert!(
+            manager
+                .register_framebuffer_from_device_with_device_manager(
+                    2,
+                    shared_device2,
+                    &device_manager,
+                )
+                .is_ok()
+        );
 
         // Check registration
         assert_eq!(manager.get_framebuffer_count(), 2);
