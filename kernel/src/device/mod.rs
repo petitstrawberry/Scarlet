@@ -9,6 +9,7 @@ pub mod char;
 pub mod events;
 pub mod fdt;
 pub mod graphics;
+pub mod i2c;
 pub mod input;
 pub mod manager;
 pub mod network;

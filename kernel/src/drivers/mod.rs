@@ -5,6 +5,8 @@
 pub mod block;
 pub mod graphics;
 #[cfg(target_arch = "aarch64")]
+pub mod i2c;
+#[cfg(target_arch = "aarch64")]
 pub mod iommu;
 pub mod network;
 #[cfg(target_arch = "aarch64")]
