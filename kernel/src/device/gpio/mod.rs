@@ -1,5 +1,9 @@
 extern crate alloc;
 
+use alloc::sync::Arc;
+
+use crate::device::events::InterruptCapableDevice;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum GpioPull {
     None,
@@ -25,4 +29,12 @@ pub trait GpioController: Send + Sync {
     fn enable_irq(&self, pin: u32, trigger: GpioIrqTrigger);
     fn disable_irq(&self, pin: u32);
     fn ack_irq(&self, pin: u32);
+
+    fn request_irq(
+        &self,
+        pin: u32,
+        trigger: GpioIrqTrigger,
+        handler: Arc<dyn InterruptCapableDevice>,
+    ) -> bool;
+    fn free_irq(&self, pin: u32);
 }

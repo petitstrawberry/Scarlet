@@ -1,6 +1,7 @@
 extern crate alloc;
 
 use alloc::boxed::Box;
+use alloc::collections::BTreeMap;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use spin::Mutex;
@@ -8,11 +9,13 @@ use spin::Mutex;
 use crate::arch::mmio::{read32, write32};
 use crate::device::{
     DeviceInfo,
+    events::InterruptCapableDevice,
     gpio::{GpioController, GpioIrqTrigger, GpioPull},
     manager::{DeviceManager, DriverPriority},
     platform::{PlatformDeviceDriver, PlatformDeviceInfo, resource::PlatformDeviceResourceType},
 };
 use crate::driver_initcall;
+use crate::interrupt::{InterruptError, InterruptId, InterruptManager, InterruptResult};
 use crate::vm;
 
 const REG_DATA_BASE: usize = 0x10_000;
@@ -35,11 +38,18 @@ const IRQ_STATUS: u32 = 1 << 31;
 pub struct ApplePinctrl {
     base: usize,
     npins: u32,
+    parent_irqs: Mutex<Vec<InterruptId>>,
+    irq_handlers: Mutex<BTreeMap<u32, Arc<dyn InterruptCapableDevice>>>,
 }
 
 impl ApplePinctrl {
     pub fn new(base: usize, npins: u32) -> Self {
-        Self { base, npins }
+        Self {
+            base,
+            npins,
+            parent_irqs: Mutex::new(Vec::new()),
+            irq_handlers: Mutex::new(BTreeMap::new()),
+        }
     }
 
     fn is_valid_pin(&self, pin: u32) -> bool {
@@ -194,6 +204,41 @@ impl ApplePinctrl {
 
         self.write_reg(Self::irq_offset(pin), IRQ_STATUS);
     }
+
+    fn register_parent_irqs(
+        pinctrl: &Arc<Self>,
+        device: &PlatformDeviceInfo,
+    ) -> Result<(), &'static str> {
+        let irq_resources: Vec<_> = device
+            .get_resources()
+            .iter()
+            .filter(|r| matches!(r.res_type, PlatformDeviceResourceType::IRQ))
+            .collect();
+
+        if irq_resources.is_empty() {
+            return Err("apple-pinctrl: no IRQ resources for parent interrupt lines");
+        }
+
+        for irq_res in &irq_resources {
+            let irq_id = if let Some(ref md) = irq_res.irq_metadata {
+                md.irq_number
+            } else {
+                irq_res.start as u32
+            };
+
+            InterruptManager::with_manager(|mgr| {
+                mgr.register_interrupt_device(irq_id, pinctrl.clone())
+            })
+            .map_err(|_| "apple-pinctrl: failed to register parent IRQ handler")?;
+
+            InterruptManager::with_manager(|mgr| mgr.enable_external_interrupt(irq_id, 0))
+                .map_err(|_| "apple-pinctrl: failed to enable parent IRQ")?;
+
+            pinctrl.parent_irqs.lock().push(irq_id);
+        }
+
+        Ok(())
+    }
 }
 
 impl GpioController for ApplePinctrl {
@@ -223,6 +268,55 @@ impl GpioController for ApplePinctrl {
     }
     fn ack_irq(&self, pin: u32) {
         Self::ack_irq(self, pin)
+    }
+
+    fn request_irq(
+        &self,
+        pin: u32,
+        trigger: GpioIrqTrigger,
+        handler: Arc<dyn InterruptCapableDevice>,
+    ) -> bool {
+        if !self.is_valid_pin(pin) {
+            return false;
+        }
+
+        self.enable_irq(pin, trigger);
+        self.irq_handlers.lock().insert(pin, handler);
+        true
+    }
+
+    fn free_irq(&self, pin: u32) {
+        if !self.is_valid_pin(pin) {
+            return;
+        }
+
+        self.irq_handlers.lock().remove(&pin);
+        self.disable_irq(pin);
+    }
+}
+
+impl InterruptCapableDevice for ApplePinctrl {
+    fn handle_interrupt(&self) -> InterruptResult<()> {
+        let handlers = self.irq_handlers.lock();
+
+        for pin in 0..self.npins {
+            let reg = self.read_reg(Self::irq_offset(pin));
+            if (reg & IRQ_STATUS) == 0 {
+                continue;
+            }
+
+            if let Some(handler) = handlers.get(&pin) {
+                let _ = handler.handle_interrupt();
+            }
+
+            self.ack_irq(pin);
+        }
+
+        Ok(())
+    }
+
+    fn interrupt_id(&self) -> Option<InterruptId> {
+        self.parent_irqs.lock().first().copied()
     }
 }
 
@@ -257,7 +351,10 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
         .map(|v| v as u32)
         .ok_or("apple-pinctrl: no phandle")?;
 
-    let pinctrl: Arc<dyn GpioController> = Arc::new(ApplePinctrl::new(base, npins));
+    let pinctrl: Arc<ApplePinctrl> = Arc::new(ApplePinctrl::new(base, npins));
+
+    ApplePinctrl::register_parent_irqs(&pinctrl, device)?;
+
     DeviceManager::get_manager().register_gpio_controller(phandle, pinctrl);
 
     Ok(())

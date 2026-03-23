@@ -8,6 +8,7 @@ use spin::Mutex;
 
 use crate::device::DeviceInfo;
 use crate::device::events::InterruptCapableDevice;
+use crate::device::gpio::GpioIrqTrigger;
 use crate::device::input::event_device::EventDevice;
 use crate::device::input::event_types::{EV_KEY, EV_REL, EV_SYN};
 use crate::device::input::key_codes::{BTN_LEFT, BTN_RIGHT};
@@ -190,6 +191,7 @@ pub struct AppleSpiHidTransport {
     device_id: u8,
     event_device: Arc<EventDevice>,
     spien_gpio: (u32, Option<Arc<dyn crate::device::gpio::GpioController>>),
+    irq_gpio: (u32, Option<Arc<dyn crate::device::gpio::GpioController>>),
     irq_id: Option<InterruptId>,
     last_modifiers: Mutex<u8>,
     last_keys: Mutex<[u8; 6]>,
@@ -203,6 +205,7 @@ impl AppleSpiHidTransport {
         device_id: u8,
         event_device: Arc<EventDevice>,
         spien_gpio: (u32, Option<Arc<dyn crate::device::gpio::GpioController>>),
+        irq_gpio: (u32, Option<Arc<dyn crate::device::gpio::GpioController>>),
     ) -> Self {
         Self {
             spi_bus,
@@ -210,6 +213,7 @@ impl AppleSpiHidTransport {
             device_id,
             event_device,
             spien_gpio,
+            irq_gpio,
             irq_id: None,
             last_modifiers: Mutex::new(0),
             last_keys: Mutex::new([0; 6]),
@@ -341,6 +345,10 @@ impl AppleSpiHidTransport {
             early_println!("apple-spi-hid: no GPIO controller for SPIEN, skipping power-on");
         }
         udelay(100_000);
+
+        if let Some(ref gpio) = self.irq_gpio.1 {
+            gpio.set_direction_input(self.irq_gpio.0);
+        }
 
         self.send_message(DEVICE_MGMT, &BOOT_CMD)
             .map_err(|_| "apple-spi-hid: boot command send failed")?;
@@ -520,6 +528,20 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
         })
         .unwrap_or((0, None));
 
+    let irq_gpio = device
+        .property("interrupts-extended")
+        .and_then(|p| {
+            let data = p.value();
+            if data.len() < 12 {
+                return None;
+            }
+            let phandle = u32::from_be_bytes(data[0..4].try_into().ok()?);
+            let pin = u32::from_be_bytes(data[4..8].try_into().ok()?);
+            let gpio = DeviceManager::get_manager().get_gpio_controller(phandle);
+            Some((pin, gpio))
+        })
+        .unwrap_or((0, None));
+
     let keyboard_event = Arc::new(EventDevice::new("keyboard"));
     let trackpad_event = Arc::new(EventDevice::new("mouse"));
 
@@ -529,6 +551,7 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
         DEVICE_KEYBOARD,
         keyboard_event.clone(),
         spien_gpio.clone(),
+        irq_gpio.clone(),
     ));
     let trackpad = Arc::new(AppleSpiHidTransport::new(
         spi_bus,
@@ -536,9 +559,26 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
         DEVICE_TRACKPAD,
         trackpad_event.clone(),
         spien_gpio,
+        irq_gpio,
     ));
 
     keyboard.initialize()?;
+
+    if let Some(ref gpio) = keyboard.irq_gpio.1 {
+        let pin = keyboard.irq_gpio.0;
+        if !gpio.request_irq(pin, GpioIrqTrigger::FallingEdge, keyboard.clone()) {
+            early_println!(
+                "apple-spi-hid: failed to register keyboard IRQ on pin {}",
+                pin
+            );
+        }
+        if !gpio.request_irq(pin, GpioIrqTrigger::FallingEdge, trackpad.clone()) {
+            early_println!(
+                "apple-spi-hid: failed to register trackpad IRQ on pin {}",
+                pin
+            );
+        }
+    }
 
     DeviceManager::get_manager()
         .register_device_with_name(keyboard_event.get_name().to_string(), keyboard_event);
