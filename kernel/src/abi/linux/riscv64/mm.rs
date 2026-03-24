@@ -5,7 +5,7 @@ use crate::{
     },
     arch::Trapframe,
     environment::PAGE_SIZE,
-    mem::page::TaskPages,
+    mem::page::{ContiguousPages, TaskPages},
     object::capability::memory_mapping::syscall::reclaim_private_removed_mapping,
     task::mytask,
     vm::vmem::{MemoryArea, VirtualMemoryMap},
@@ -427,10 +427,11 @@ fn handle_anonymous_mapping(
         }
     };
 
-    let mut task_pages = match TaskPages::new(num_pages) {
-        Some(tp) => tp,
+    let page_alloc = match ContiguousPages::new(num_pages) {
+        Some(alloc) => alloc,
         None => return to_result(errno::ENOMEM),
     };
+    let pages_ptr = page_alloc.as_paddr();
 
     // Convert protection flags to kernel permissions
     let mut permissions = 0;
@@ -447,32 +448,16 @@ fn handle_anonymous_mapping(
         }
     }
 
-    let mut vm_maps: Vec<VirtualMemoryMap> = Vec::with_capacity(num_pages);
-    for page_idx in 0..num_pages {
-        let page_vaddr = final_vaddr + page_idx * PAGE_SIZE;
-        let page_vmarea = MemoryArea::new(page_vaddr, page_vaddr + PAGE_SIZE - 1);
-        let page_paddr = task_pages.page_paddr(page_idx).unwrap();
-        let page_pmarea = MemoryArea::new(page_paddr, page_paddr + PAGE_SIZE - 1);
-        vm_maps.push(VirtualMemoryMap::new(
-            page_pmarea,
-            page_vmarea,
-            permissions,
-            is_shared,
-            None,
-        ));
-    }
+    let vmarea = MemoryArea::new(final_vaddr, final_vaddr + aligned_length - 1);
+    let pmarea = MemoryArea::new(pages_ptr, pages_ptr + aligned_length - 1);
+
+    let vm_map = VirtualMemoryMap::new(pmarea, vmarea, permissions, is_shared, None);
 
     // Use add_memory_map_fixed for both FIXED and non-FIXED mappings to handle overlaps consistently
-    let mut removed_mappings: Vec<VirtualMemoryMap> = Vec::new();
-    for vm_map in &vm_maps {
-        match task.vm_manager.add_memory_map_fixed(vm_map.clone()) {
-            Ok(removed) => removed_mappings.extend(removed),
-            Err(_) => {
-                drop(task_pages);
-                return to_result(errno::ENOMEM);
-            }
-        }
-    }
+    let removed_mappings = match task.vm_manager.add_memory_map_fixed(vm_map) {
+        Ok(removed) => removed,
+        Err(_) => return to_result(errno::ENOMEM),
+    };
 
     // First, process notifications for object owners
     for removed_map in &removed_mappings {
@@ -490,8 +475,7 @@ fn handle_anonymous_mapping(
         reclaim_private_removed_mapping(task, &removed_map);
     }
 
-    // Store the allocation so it will be freed on task exit
-    task.task_pages.write().push(task_pages);
+    task.page_allocations.write().push(page_alloc);
 
     final_vaddr
 }
