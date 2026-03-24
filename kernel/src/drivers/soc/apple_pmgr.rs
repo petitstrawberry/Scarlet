@@ -49,17 +49,18 @@ use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::sync::Arc;
+use alloc::vec::Vec;
 use spin::Mutex;
 
 use crate::device::power::PowerManager;
 use crate::{
     arch::mmio,
     device::{
-        DeviceInfo,
         manager::{DeviceManager, DriverPriority},
         platform::{
-            PlatformDeviceDriver, PlatformDeviceInfo, resource::PlatformDeviceResourceType,
+            resource::PlatformDeviceResourceType, PlatformDeviceDriver, PlatformDeviceInfo,
         },
+        DeviceInfo,
     },
     driver_initcall, early_println,
 };
@@ -98,15 +99,12 @@ const PMGR_PS_PWRGATE: u32 = 0x0;
 
 /// Descriptor for a single power domain, parsed from device tree child node.
 struct ApplePmDomain {
-    /// Offset of the power domain register within the PMGR MMIO region
     offset: usize,
     pmgr_phandle: u32,
-    /// Human-readable label from device tree
     label: alloc::string::String,
-    /// Whether this domain is marked as always-on
     always_on: bool,
-    /// Index of this power domain (derived from reg property, first cell)
     index: u32,
+    parent_phandles: Vec<u32>,
 }
 
 impl ApplePmDomain {
@@ -124,6 +122,7 @@ impl ApplePmDomain {
             label,
             always_on,
             index,
+            parent_phandles: Vec::new(),
         }
     }
 }
@@ -159,17 +158,11 @@ impl PmgrInstance {
         unsafe { mmio::read32(self.base_addr + domain.offset) }
     }
 
-    /// Write the power domain register.
-    #[inline]
     fn write_reg(&self, domain: &ApplePmDomain, val: u32) {
         // SAFETY: domain.offset is within the MMIO-mapped PMGR region
         unsafe { mmio::write32(self.base_addr + domain.offset, val) }
     }
 
-    /// Enable (power on) a power domain.
-    ///
-    /// Sets PS_TARGET to ACTIVE (0xf), clears was-clkgated/was-pwgated flags,
-    /// then polls PS_ACTUAL until it reaches ACTIVE.
     fn enable_domain_local(&self, domain: &ApplePmDomain) -> Result<(), &'static str> {
         if domain.always_on {
             return Ok(());
@@ -269,6 +262,12 @@ impl PmgrInstance {
     }
 
     fn enable_domain(domain: &ApplePmDomain) -> Result<(), &'static str> {
+        for &parent_ph in &domain.parent_phandles {
+            if let Ok(parent) = pmgr_get_domain_by_phandle(parent_ph) {
+                parent.enable()?;
+            }
+        }
+
         Self::with_instance(domain, |instance| instance.enable_domain_local(domain))
             .unwrap_or(Err("pmgr: instance not found"))
     }
@@ -352,7 +351,11 @@ impl PmgrRegistry {
 /// Get a reference to the global PMGR registry.
 fn get_registry() -> Option<spin::MutexGuard<'static, Option<PmgrRegistry>>> {
     let guard = PMGR_REGISTRY.lock();
-    if guard.is_some() { Some(guard) } else { None }
+    if guard.is_some() {
+        Some(guard)
+    } else {
+        None
+    }
 }
 
 // =============================================================================
@@ -556,6 +559,33 @@ fn pwrstate_probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
 
     let always_on = device.property("apple,always-on").is_some();
 
+    let pwrstate_phandle = device
+        .property("phandle")
+        .and_then(|p| p.as_usize())
+        .map(|v| v as u32)
+        .or_else(|| {
+            device
+                .property("linux,phandle")
+                .and_then(|p| p.as_usize())
+                .map(|v| v as u32)
+        });
+
+    let parent_phandles = if let Some(pd_prop) = device.property("power-domains") {
+        let bytes = pd_prop.value();
+        let mut parents = Vec::new();
+        let mut offset = 0usize;
+        while offset + 4 <= bytes.len() {
+            let ph = u32::from_be_bytes(bytes[offset..offset + 4].try_into().unwrap_or([0; 4]));
+            if ph != 0 {
+                parents.push(ph);
+            }
+            offset += 4;
+        }
+        parents
+    } else {
+        Vec::new()
+    };
+
     early_println!(
         "[apple-pmgr] registering domain '{}' at offset={:#x}, index={}, always_on={}",
         label,
@@ -573,27 +603,12 @@ fn pwrstate_probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
         .parent_phandle()
         .ok_or("apple-pmgr-pwrstate: no parent phandle")?;
 
-    let domain = Arc::new(ApplePmDomain::new(
-        offset,
-        parent_phandle,
-        index,
-        label,
-        always_on,
-    ));
+    let mut domain = ApplePmDomain::new(offset, parent_phandle, index, label, always_on);
+    domain.parent_phandles = parent_phandles;
+    let domain = Arc::new(domain);
     registry
         .domain_map
         .insert((parent_phandle, index), Arc::clone(&domain));
-
-    let pwrstate_phandle = device
-        .property("phandle")
-        .and_then(|p| p.as_usize())
-        .map(|v| v as u32)
-        .or_else(|| {
-            device
-                .property("linux,phandle")
-                .and_then(|p| p.as_usize())
-                .map(|v| v as u32)
-        });
 
     if let Some(ph) = pwrstate_phandle {
         registry

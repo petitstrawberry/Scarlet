@@ -40,8 +40,8 @@
 
 extern crate alloc;
 
-use core::sync::atomic::AtomicUsize;
 use core::sync::atomic::Ordering;
+use core::sync::atomic::{AtomicU32, AtomicUsize};
 
 use alloc::boxed::Box;
 use alloc::collections::btree_map::BTreeMap;
@@ -134,6 +134,8 @@ pub struct DeviceManager {
     gpio_controllers: Mutex<BTreeMap<u32, Arc<dyn GpioController>>>,
     /* Next available device ID */
     next_device_id: AtomicUsize,
+    next_auto_phandle: AtomicU32,
+    auto_phandle_cache: Mutex<BTreeMap<usize, u32>>,
 }
 
 impl DeviceManager {
@@ -148,7 +150,9 @@ impl DeviceManager {
             i2c_buses: Mutex::new(BTreeMap::new()),
             usb_hosts: Mutex::new(BTreeMap::new()),
             gpio_controllers: Mutex::new(BTreeMap::new()),
-            next_device_id: AtomicUsize::new(1), // Start from 1, reserve 0 for invalid
+            next_device_id: AtomicUsize::new(1),
+            next_auto_phandle: AtomicU32::new(0x8000),
+            auto_phandle_cache: Mutex::new(BTreeMap::new()),
         }
     }
 
@@ -524,22 +528,40 @@ impl DeviceManager {
         idx: &mut usize,
         parent_phandle: Option<u32>,
     ) {
-        let pre_idx = *idx;
-        self.process_single_device_node(node, priority, idx, parent_phandle);
-
-        // Use explicit phandle if available, otherwise fall back to the assigned device ID
-        // if probe succeeded (idx was incremented)
-        let this_phandle = Self::get_u32_prop(node, "phandle")
+        let has_explicit_phandle = Self::get_u32_prop(node, "phandle")
             .or_else(|| Self::get_u32_prop(node, "linux,phandle"))
-            .or_else(|| {
-                if *idx > pre_idx {
-                    Some(pre_idx as u32)
-                } else {
-                    None
-                }
-            });
+            .is_some();
+
+        let this_phandle = if has_explicit_phandle {
+            Self::get_u32_prop(node, "phandle")
+                .or_else(|| Self::get_u32_prop(node, "linux,phandle"))
+                .unwrap()
+        } else {
+            let node_key = node.name.as_ptr() as usize;
+            let mut cache = self.auto_phandle_cache.lock();
+            if let Some(&cached) = cache.get(&node_key) {
+                cached
+            } else {
+                let ph = self.next_auto_phandle.fetch_add(1, Ordering::Relaxed);
+                cache.insert(node_key, ph);
+                ph
+            }
+        };
+
+        self.process_single_device_node(
+            node,
+            priority,
+            idx,
+            parent_phandle,
+            if has_explicit_phandle {
+                None
+            } else {
+                Some(this_phandle)
+            },
+        );
+
         for child in node.children() {
-            self.process_device_subtree(&child, priority, idx, this_phandle);
+            self.process_device_subtree(&child, priority, idx, Some(this_phandle));
         }
     }
 
@@ -550,6 +572,7 @@ impl DeviceManager {
         priority: DriverPriority,
         idx: &mut usize,
         parent_phandle: Option<u32>,
+        synthetic_phandle: Option<u32>,
     ) {
         if let Some(status_prop) = child.property("status") {
             if let Some(status) = status_prop.as_str() {
@@ -564,10 +587,8 @@ impl DeviceManager {
             return;
         }
 
-        // Minimize stack usage by not collecting all compatible strings at once
         let compatible_iter = compatible.unwrap().all();
 
-        // Check if we have any drivers for this priority level
         let has_drivers = {
             let drivers = self.drivers.lock();
             drivers
@@ -579,9 +600,14 @@ impl DeviceManager {
             return;
         }
 
-        // Build resources separately to reduce stack usage
         let resources = self.build_minimal_resources(&child);
-        let properties = self.build_device_properties(&child);
+        let mut properties = self.build_device_properties(&child);
+
+        if let Some(ph) = synthetic_phandle {
+            let mut bytes = [0u8; 4];
+            bytes.copy_from_slice(&ph.to_be_bytes());
+            properties.insert(0, PlatformDeviceProperty::new("phandle", &bytes));
+        }
 
         // Try to match with drivers
         let compatible_vec: alloc::vec::Vec<&str> = compatible_iter.collect();

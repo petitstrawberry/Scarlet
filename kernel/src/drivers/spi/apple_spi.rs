@@ -8,9 +8,9 @@ use spin::Mutex;
 use crate::arch::mmio;
 use crate::device::spi::{SpiBus, SpiError, SpiTransfer, SpiTransferFlags};
 use crate::device::{
-    DeviceInfo,
     manager::{DeviceManager, DriverPriority},
-    platform::{PlatformDeviceDriver, PlatformDeviceInfo, resource::PlatformDeviceResourceType},
+    platform::{resource::PlatformDeviceResourceType, PlatformDeviceDriver, PlatformDeviceInfo},
+    DeviceInfo,
 };
 use crate::driver_initcall;
 use crate::time;
