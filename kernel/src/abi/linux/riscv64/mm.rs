@@ -8,6 +8,7 @@ use crate::{
     mem::page::{ContiguousPages, TaskPages},
     object::capability::memory_mapping::syscall::reclaim_private_removed_mapping,
     task::mytask,
+    vm::addr::{is_direct_mapped, virt_to_phys},
     vm::vmem::{MemoryArea, VirtualMemoryMap},
 };
 use alloc::vec::Vec;
@@ -91,7 +92,7 @@ pub fn sys_mmap(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
     let owner_name = memory_mappable.mmap_owner_name();
     let should_log = owner_name.contains("xkb");
     let mut ok_len = aligned_length;
-    let (paddr, obj_permissions, _obj_is_shared) = loop {
+    let (mapping_base, obj_permissions, _obj_is_shared) = loop {
         match memory_mappable.get_mapping_info_with(offset, ok_len, is_shared) {
             Ok(info) => break info,
             Err(_e) => {
@@ -105,6 +106,11 @@ pub fn sys_mmap(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
                 }
             }
         }
+    };
+    let paddr = if mapping_base != 0 && is_direct_mapped(mapping_base) {
+        virt_to_phys(mapping_base)
+    } else {
+        mapping_base
     };
 
     // Decide sharing semantics from flags (MAP_SHARED controls sharing)
@@ -514,12 +520,6 @@ pub fn sys_mprotect(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> us
         }
     }
 
-    // Get the original mapping to determine properties
-    let original_mapping = match task.vm_manager.search_memory_map(addr) {
-        Some(map) => map,
-        None => return usize::MAX, // -ENOMEM
-    };
-
     // Convert Linux protection flags to kernel permissions
     let mut new_permissions = 0;
     if prot != 0 {
@@ -535,36 +535,40 @@ pub fn sys_mprotect(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> us
         }
     }
 
-    // For file-backed mappings, check object permissions
-    if let Some(owner_weak) = &original_mapping.owner {
-        if let Some(owner) = owner_weak.upgrade() {
-            let offset = addr - original_mapping.vmarea.start;
-            if let Ok((_, obj_permissions, _)) = owner.get_mapping_info(offset, aligned_length) {
-                if (new_permissions & obj_permissions) != (new_permissions & 0x7) {
-                    return usize::MAX; // -EACCES
+    for i in 0..num_pages {
+        let page_addr = addr + i * PAGE_SIZE;
+        let original_mapping = match task.vm_manager.search_memory_map(page_addr) {
+            Some(map) => map,
+            None => return usize::MAX,
+        };
+
+        if let Some(owner_weak) = &original_mapping.owner {
+            if let Some(owner) = owner_weak.upgrade() {
+                let offset = page_addr - original_mapping.vmarea.start;
+                if let Ok((_, obj_permissions, _)) = owner.get_mapping_info(offset, PAGE_SIZE) {
+                    if (new_permissions & obj_permissions) != (new_permissions & 0x7) {
+                        return usize::MAX;
+                    }
                 }
             }
         }
+
+        let offset_in_mapping = page_addr - original_mapping.vmarea.start;
+        let new_paddr = original_mapping.pmarea.start + offset_in_mapping;
+        let new_map = VirtualMemoryMap::new(
+            MemoryArea::new(new_paddr, new_paddr + PAGE_SIZE - 1),
+            MemoryArea::new(page_addr, page_addr + PAGE_SIZE - 1),
+            new_permissions,
+            original_mapping.is_shared,
+            original_mapping.owner.clone(),
+        );
+
+        if task.vm_manager.add_memory_map_fixed(new_map).is_err() {
+            return usize::MAX;
+        }
     }
 
-    // Calculate physical address for the new mapping
-    let offset_in_mapping = addr - original_mapping.vmarea.start;
-    let new_paddr = original_mapping.pmarea.start + offset_in_mapping;
-
-    // Create the new memory mapping with updated permissions
-    let new_map = VirtualMemoryMap::new(
-        MemoryArea::new(new_paddr, new_paddr + aligned_length - 1),
-        MemoryArea::new(addr, addr + aligned_length - 1),
-        new_permissions,
-        original_mapping.is_shared,
-        original_mapping.owner.clone(),
-    );
-
-    // Use add_memory_map_fixed to handle splitting and overlaps automatically
-    match task.vm_manager.add_memory_map_fixed(new_map) {
-        Ok(_removed_mappings) => 0, // Success
-        Err(_) => usize::MAX,       // -EFAULT
-    }
+    0
 }
 
 pub fn sys_munmap(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
