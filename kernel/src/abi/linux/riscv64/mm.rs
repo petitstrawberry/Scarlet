@@ -73,6 +73,7 @@ pub fn sys_mmap(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
         Some(obj) => obj,
         None => return to_result(errno::EBADF),
     };
+    let file_obj = kernel_obj.as_file();
 
     // Check if object supports MemoryMappingOps
     let memory_mappable = match kernel_obj.as_memory_mappable() {
@@ -278,12 +279,29 @@ pub fn sys_mmap(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
                     let copy_start = page_idx * PAGE_SIZE;
                     if copy_start < ok_len {
                         let to_copy = core::cmp::min(ok_len - copy_start, PAGE_SIZE);
-                        unsafe {
-                            core::ptr::copy_nonoverlapping(
-                                crate::vm::addr::phys_to_virt(paddr + copy_start) as *const u8,
-                                dst_vaddr as *mut u8,
-                                to_copy,
-                            );
+                        if let Some(file_obj) = file_obj {
+                            let read_offset = match offset.checked_add(copy_start) {
+                                Some(read_offset) => read_offset as u64,
+                                None => {
+                                    drop(page_allocs);
+                                    return to_result(errno::EINVAL);
+                                }
+                            };
+                            let dst_slice = unsafe {
+                                core::slice::from_raw_parts_mut(dst_vaddr as *mut u8, to_copy)
+                            };
+                            if file_obj.read_at(read_offset, dst_slice).is_err() {
+                                drop(page_allocs);
+                                return to_result(errno::EIO);
+                            }
+                        } else {
+                            unsafe {
+                                core::ptr::copy_nonoverlapping(
+                                    crate::vm::addr::phys_to_virt(paddr + copy_start) as *const u8,
+                                    dst_vaddr as *mut u8,
+                                    to_copy,
+                                );
+                            }
                         }
                     }
                 }
