@@ -224,6 +224,9 @@ impl PageTable {
             pte.readable();
         }
         if VirtualMemoryPermission::Write.contained_in(permissions) {
+            // RISC-V: W=1 requires R=1 (reserved encoding otherwise).
+            // Ensure readable so the leaf PTE is well-formed.
+            pte.readable();
             pte.writable();
         }
         if VirtualMemoryPermission::Execute.contained_in(permissions) {

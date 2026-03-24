@@ -5,9 +5,10 @@ use crate::{
     },
     arch::Trapframe,
     environment::PAGE_SIZE,
-    mem::page::TaskPages,
+    mem::page::{ContiguousPages, TaskPages},
     object::capability::memory_mapping::syscall::reclaim_private_removed_mapping,
     task::mytask,
+    vm::addr::{is_direct_mapped, virt_to_phys},
     vm::vmem::{MemoryArea, VirtualMemoryMap},
 };
 use alloc::vec::Vec;
@@ -73,6 +74,7 @@ pub fn sys_mmap(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
         Some(obj) => obj,
         None => return to_result(errno::EBADF),
     };
+    let file_obj = kernel_obj.as_file();
 
     // Check if object supports MemoryMappingOps
     let memory_mappable = match kernel_obj.as_memory_mappable() {
@@ -90,7 +92,7 @@ pub fn sys_mmap(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
     let owner_name = memory_mappable.mmap_owner_name();
     let should_log = owner_name.contains("xkb");
     let mut ok_len = aligned_length;
-    let (paddr, obj_permissions, _obj_is_shared) = loop {
+    let (mapping_base, obj_permissions, _obj_is_shared) = loop {
         match memory_mappable.get_mapping_info_with(offset, ok_len, is_shared) {
             Ok(info) => break info,
             Err(_e) => {
@@ -104,6 +106,11 @@ pub fn sys_mmap(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
                 }
             }
         }
+    };
+    let paddr = if mapping_base != 0 && is_direct_mapped(mapping_base) {
+        virt_to_phys(mapping_base)
+    } else {
+        mapping_base
     };
 
     // Decide sharing semantics from flags (MAP_SHARED controls sharing)
@@ -278,12 +285,29 @@ pub fn sys_mmap(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
                     let copy_start = page_idx * PAGE_SIZE;
                     if copy_start < ok_len {
                         let to_copy = core::cmp::min(ok_len - copy_start, PAGE_SIZE);
-                        unsafe {
-                            core::ptr::copy_nonoverlapping(
-                                crate::vm::addr::phys_to_virt(paddr + copy_start) as *const u8,
-                                dst_vaddr as *mut u8,
-                                to_copy,
-                            );
+                        if let Some(file_obj) = file_obj {
+                            let read_offset = match offset.checked_add(copy_start) {
+                                Some(read_offset) => read_offset as u64,
+                                None => {
+                                    drop(page_allocs);
+                                    return to_result(errno::EINVAL);
+                                }
+                            };
+                            let dst_slice = unsafe {
+                                core::slice::from_raw_parts_mut(dst_vaddr as *mut u8, to_copy)
+                            };
+                            if file_obj.read_at(read_offset, dst_slice).is_err() {
+                                drop(page_allocs);
+                                return to_result(errno::EIO);
+                            }
+                        } else {
+                            unsafe {
+                                core::ptr::copy_nonoverlapping(
+                                    crate::vm::addr::phys_to_virt(paddr + copy_start) as *const u8,
+                                    dst_vaddr as *mut u8,
+                                    to_copy,
+                                );
+                            }
                         }
                     }
                 }
@@ -409,10 +433,11 @@ fn handle_anonymous_mapping(
         }
     };
 
-    let mut task_pages = match TaskPages::new(num_pages) {
-        Some(tp) => tp,
+    let page_alloc = match ContiguousPages::new(num_pages) {
+        Some(alloc) => alloc,
         None => return to_result(errno::ENOMEM),
     };
+    let pages_ptr = page_alloc.as_paddr();
 
     // Convert protection flags to kernel permissions
     let mut permissions = 0;
@@ -429,32 +454,16 @@ fn handle_anonymous_mapping(
         }
     }
 
-    let mut vm_maps: Vec<VirtualMemoryMap> = Vec::with_capacity(num_pages);
-    for page_idx in 0..num_pages {
-        let page_vaddr = final_vaddr + page_idx * PAGE_SIZE;
-        let page_vmarea = MemoryArea::new(page_vaddr, page_vaddr + PAGE_SIZE - 1);
-        let page_paddr = task_pages.page_paddr(page_idx).unwrap();
-        let page_pmarea = MemoryArea::new(page_paddr, page_paddr + PAGE_SIZE - 1);
-        vm_maps.push(VirtualMemoryMap::new(
-            page_pmarea,
-            page_vmarea,
-            permissions,
-            is_shared,
-            None,
-        ));
-    }
+    let vmarea = MemoryArea::new(final_vaddr, final_vaddr + aligned_length - 1);
+    let pmarea = MemoryArea::new(pages_ptr, pages_ptr + aligned_length - 1);
+
+    let vm_map = VirtualMemoryMap::new(pmarea, vmarea, permissions, is_shared, None);
 
     // Use add_memory_map_fixed for both FIXED and non-FIXED mappings to handle overlaps consistently
-    let mut removed_mappings: Vec<VirtualMemoryMap> = Vec::new();
-    for vm_map in &vm_maps {
-        match task.vm_manager.add_memory_map_fixed(vm_map.clone()) {
-            Ok(removed) => removed_mappings.extend(removed),
-            Err(_) => {
-                drop(task_pages);
-                return to_result(errno::ENOMEM);
-            }
-        }
-    }
+    let removed_mappings = match task.vm_manager.add_memory_map_fixed(vm_map) {
+        Ok(removed) => removed,
+        Err(_) => return to_result(errno::ENOMEM),
+    };
 
     // First, process notifications for object owners
     for removed_map in &removed_mappings {
@@ -472,8 +481,7 @@ fn handle_anonymous_mapping(
         reclaim_private_removed_mapping(task, &removed_map);
     }
 
-    // Store the allocation so it will be freed on task exit
-    task.task_pages.write().push(task_pages);
+    task.page_allocations.write().push(page_alloc);
 
     final_vaddr
 }
@@ -512,12 +520,6 @@ pub fn sys_mprotect(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> us
         }
     }
 
-    // Get the original mapping to determine properties
-    let original_mapping = match task.vm_manager.search_memory_map(addr) {
-        Some(map) => map,
-        None => return usize::MAX, // -ENOMEM
-    };
-
     // Convert Linux protection flags to kernel permissions
     let mut new_permissions = 0;
     if prot != 0 {
@@ -533,36 +535,40 @@ pub fn sys_mprotect(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> us
         }
     }
 
-    // For file-backed mappings, check object permissions
-    if let Some(owner_weak) = &original_mapping.owner {
-        if let Some(owner) = owner_weak.upgrade() {
-            let offset = addr - original_mapping.vmarea.start;
-            if let Ok((_, obj_permissions, _)) = owner.get_mapping_info(offset, aligned_length) {
-                if (new_permissions & obj_permissions) != (new_permissions & 0x7) {
-                    return usize::MAX; // -EACCES
+    for i in 0..num_pages {
+        let page_addr = addr + i * PAGE_SIZE;
+        let original_mapping = match task.vm_manager.search_memory_map(page_addr) {
+            Some(map) => map,
+            None => return usize::MAX,
+        };
+
+        if let Some(owner_weak) = &original_mapping.owner {
+            if let Some(owner) = owner_weak.upgrade() {
+                let offset = page_addr - original_mapping.vmarea.start;
+                if let Ok((_, obj_permissions, _)) = owner.get_mapping_info(offset, PAGE_SIZE) {
+                    if (new_permissions & obj_permissions) != (new_permissions & 0x7) {
+                        return usize::MAX;
+                    }
                 }
             }
         }
+
+        let offset_in_mapping = page_addr - original_mapping.vmarea.start;
+        let new_paddr = original_mapping.pmarea.start + offset_in_mapping;
+        let new_map = VirtualMemoryMap::new(
+            MemoryArea::new(new_paddr, new_paddr + PAGE_SIZE - 1),
+            MemoryArea::new(page_addr, page_addr + PAGE_SIZE - 1),
+            new_permissions,
+            original_mapping.is_shared,
+            original_mapping.owner.clone(),
+        );
+
+        if task.vm_manager.add_memory_map_fixed(new_map).is_err() {
+            return usize::MAX;
+        }
     }
 
-    // Calculate physical address for the new mapping
-    let offset_in_mapping = addr - original_mapping.vmarea.start;
-    let new_paddr = original_mapping.pmarea.start + offset_in_mapping;
-
-    // Create the new memory mapping with updated permissions
-    let new_map = VirtualMemoryMap::new(
-        MemoryArea::new(new_paddr, new_paddr + aligned_length - 1),
-        MemoryArea::new(addr, addr + aligned_length - 1),
-        new_permissions,
-        original_mapping.is_shared,
-        original_mapping.owner.clone(),
-    );
-
-    // Use add_memory_map_fixed to handle splitting and overlaps automatically
-    match task.vm_manager.add_memory_map_fixed(new_map) {
-        Ok(_removed_mappings) => 0, // Success
-        Err(_) => usize::MAX,       // -EFAULT
-    }
+    0
 }
 
 pub fn sys_munmap(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
