@@ -5,4 +5,5 @@
 //! symbol table, and executing module initialisation functions.
 
 pub mod elf;
+pub mod arch;
 pub mod symbol;
