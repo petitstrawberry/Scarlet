@@ -5,7 +5,6 @@ use core::time::Duration;
 use scarlet_std::handle::Handle;
 use scarlet_std::hypervisor::Vcpu;
 use scarlet_std::io::Read;
-use scarlet_std::println;
 use scarlet_std::sync::Mutex;
 use scarlet_std::thread;
 
@@ -84,12 +83,9 @@ fn uart_loop(uart: Arc<Ns16550a>, vcpu: Arc<Vcpu>) {
     let mut buf = [0u8; 1];
 
     loop {
-        match stdin.read(&mut buf) {
-            Ok(1) => {
-                uart.trigger_rx_with_byte(buf[0]);
-                let _ = vcpu.inject_interrupt(EXTERNAL_IRQ_TYPE);
-            }
-            _ => {}
+        if let Ok(1) = stdin.read(&mut buf) {
+            uart.trigger_rx_with_byte(buf[0]);
+            let _ = vcpu.inject_interrupt(EXTERNAL_IRQ_TYPE);
         }
     }
 }

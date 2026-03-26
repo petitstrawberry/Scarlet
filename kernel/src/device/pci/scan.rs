@@ -6,6 +6,7 @@
 extern crate alloc;
 
 use alloc::string::String;
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 
 use super::config::{PciConfig, vendor};
@@ -371,7 +372,8 @@ impl PciBus {
     /// Scan the PCI bus and register devices with the DeviceManager
     ///
     /// This scans for PCI devices and registers them with the global
-    /// device manager so they can be matched with drivers.
+    /// device manager so they can be matched with drivers via
+    /// `DeviceManager::probe_pci_devices()`.
     pub fn scan_and_register(&self) -> Result<(), &'static str> {
         use crate::device::manager::DeviceManager;
 
@@ -386,59 +388,13 @@ impl PciBus {
         );
 
         for device in devices {
-            let device_name = String::from(device.name());
-            // Note: In a real implementation, we'd wrap the PciDeviceInfo in a
-            // proper Device implementation. For now, this is just the infrastructure.
             early_println!(
                 "  - {} ({:04x}:{:04x})",
-                device_name,
+                device.name(),
                 device.vendor_id(),
                 device.device_id()
             );
-        }
-        Ok(())
-    }
-
-    /// Scan the PCI bus and probe discovered devices using registered PCI drivers.
-    pub fn scan_and_probe_registered_drivers(&self) -> Result<(), &'static str> {
-        use crate::device::DeviceDriver;
-        use crate::device::manager::{DeviceManager, DriverPriority};
-
-        self.scan()?;
-
-        let devices = self.devices();
-        early_println!("Probing {} PCI devices", devices.len());
-
-        let manager = DeviceManager::get_manager();
-        let drivers = manager.borrow_drivers().lock();
-        let mut claimed_device_ids = Vec::new();
-
-        for priority in [
-            DriverPriority::Critical,
-            DriverPriority::Core,
-            DriverPriority::Standard,
-            DriverPriority::Late,
-        ] {
-            if let Some(driver_list) = drivers.get(&priority) {
-                for driver in driver_list.iter() {
-                    for device in &devices {
-                        if claimed_device_ids.contains(&device.id()) {
-                            continue;
-                        }
-                        match DeviceDriver::probe(&**driver, device) {
-                            Ok(()) => {
-                                claimed_device_ids.push(device.id());
-                                early_println!(
-                                    "Successfully probed PCI device {} with driver {}",
-                                    device.name(),
-                                    driver.name()
-                                );
-                            }
-                            Err(_) => {}
-                        }
-                    }
-                }
-            }
+            device_manager.register_pci_device(Arc::new(device));
         }
         Ok(())
     }

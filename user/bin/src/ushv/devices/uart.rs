@@ -7,7 +7,7 @@ use core::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use scarlet_std::sync::RwLock;
 
 use crate::device::{DeviceFdt, FdtNodeInfo, FdtValue, IrqLine, MmioDevice};
-use scarlet_std::{print, println};
+use scarlet_std::print;
 
 const THR: u64 = 0x00;
 const RBR: u64 = 0x00;

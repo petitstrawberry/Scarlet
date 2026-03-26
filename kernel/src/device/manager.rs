@@ -40,8 +40,8 @@
 
 extern crate alloc;
 
-use core::sync::atomic::AtomicUsize;
 use core::sync::atomic::Ordering;
+use core::sync::atomic::{AtomicU32, AtomicUsize};
 
 use alloc::boxed::Box;
 use alloc::collections::btree_map::BTreeMap;
@@ -59,6 +59,10 @@ use crate::early_println;
 use super::Device;
 use super::DeviceDriver;
 use super::DeviceInfo;
+use super::gpio::GpioController;
+use super::i2c::I2cBus;
+use super::spi::SpiBus;
+use super::usb::UsbHostController;
 use crate::DeviceSource;
 
 /// Simplified shared device type
@@ -119,10 +123,19 @@ pub struct DeviceManager {
     device_by_name: Mutex<BTreeMap<String, SharedDevice>>,
     /* Name to ID mapping */
     name_to_id: Mutex<BTreeMap<String, usize>>,
-    /* Device drivers organized by priority */
+    /* Registered device drivers organized by priority */
     drivers: Mutex<BTreeMap<DriverPriority, Vec<Box<dyn DeviceDriver>>>>,
-    /* Next device ID to assign */
+    /* Discovered PCI devices awaiting driver probe */
+    discovered_pci_devices: Mutex<Vec<Arc<dyn DeviceInfo + Send + Sync>>>,
+    /* Bus controller registries (phandle → bus) */
+    spi_buses: Mutex<BTreeMap<u32, Arc<dyn SpiBus>>>,
+    i2c_buses: Mutex<BTreeMap<u32, Arc<dyn I2cBus>>>,
+    usb_hosts: Mutex<BTreeMap<u32, Arc<dyn UsbHostController>>>,
+    gpio_controllers: Mutex<BTreeMap<u32, Arc<dyn GpioController>>>,
+    /* Next available device ID */
     next_device_id: AtomicUsize,
+    next_auto_phandle: AtomicU32,
+    auto_phandle_cache: Mutex<BTreeMap<usize, u32>>,
 }
 
 impl DeviceManager {
@@ -132,7 +145,14 @@ impl DeviceManager {
             device_by_name: Mutex::new(BTreeMap::new()),
             name_to_id: Mutex::new(BTreeMap::new()),
             drivers: Mutex::new(BTreeMap::new()),
-            next_device_id: AtomicUsize::new(1), // Start from 1, reserve 0 for invalid
+            discovered_pci_devices: Mutex::new(Vec::new()),
+            spi_buses: Mutex::new(BTreeMap::new()),
+            i2c_buses: Mutex::new(BTreeMap::new()),
+            usb_hosts: Mutex::new(BTreeMap::new()),
+            gpio_controllers: Mutex::new(BTreeMap::new()),
+            next_device_id: AtomicUsize::new(1),
+            next_auto_phandle: AtomicU32::new(0x8000),
+            auto_phandle_cache: Mutex::new(BTreeMap::new()),
         }
     }
 
@@ -347,6 +367,48 @@ impl DeviceManager {
         &self.drivers
     }
 
+    pub fn register_spi_bus(&self, phandle: u32, bus: Arc<dyn SpiBus>) {
+        self.spi_buses.lock().insert(phandle, bus);
+    }
+
+    pub fn get_spi_bus(&self, phandle: u32) -> Option<Arc<dyn SpiBus>> {
+        self.spi_buses.lock().get(&phandle).cloned()
+    }
+
+    pub fn register_i2c_bus(&self, phandle: u32, bus: Arc<dyn I2cBus>) {
+        self.i2c_buses.lock().insert(phandle, bus);
+    }
+
+    pub fn get_i2c_bus(&self, phandle: u32) -> Option<Arc<dyn I2cBus>> {
+        self.i2c_buses.lock().get(&phandle).cloned()
+    }
+
+    pub fn register_usb_host(&self, id: u32, host: Arc<dyn UsbHostController>) {
+        self.usb_hosts.lock().insert(id, host);
+    }
+
+    pub fn get_usb_host(&self, id: u32) -> Option<Arc<dyn UsbHostController>> {
+        self.usb_hosts.lock().get(&id).cloned()
+    }
+
+    pub fn register_gpio_controller(&self, phandle: u32, gpio: Arc<dyn GpioController>) {
+        self.gpio_controllers.lock().insert(phandle, gpio);
+    }
+
+    pub fn get_gpio_controller(&self, phandle: u32) -> Option<Arc<dyn GpioController>> {
+        self.gpio_controllers.lock().get(&phandle).cloned()
+    }
+
+    pub fn for_each_usb_host<F>(&self, mut f: F)
+    where
+        F: FnMut(&Arc<dyn UsbHostController>),
+    {
+        let hosts = self.usb_hosts.lock();
+        for ctrl in hosts.values() {
+            f(ctrl);
+        }
+    }
+
     /// Populates devices from the FDT (Flattened Device Tree).
     ///
     /// This function searches for the `/soc` node in the FDT and iterates through its children.
@@ -445,12 +507,16 @@ impl DeviceManager {
         let mut idx = 0;
 
         for child in parent_node.children() {
-            self.process_device_subtree(&child, priority, &mut idx);
+            let parent_ph = Self::get_u32_prop(&parent_node, "phandle")
+                .or_else(|| Self::get_u32_prop(&parent_node, "linux,phandle"));
+            self.process_device_subtree(&child, priority, &mut idx, parent_ph);
         }
 
         if let Some(chosen_node) = fdt.find_node("/chosen") {
             for child in chosen_node.children() {
-                self.process_device_subtree(&child, priority, &mut idx);
+                let parent_ph = Self::get_u32_prop(&chosen_node, "phandle")
+                    .or_else(|| Self::get_u32_prop(&chosen_node, "linux,phandle"));
+                self.process_device_subtree(&child, priority, &mut idx, parent_ph);
             }
         }
     }
@@ -460,11 +526,42 @@ impl DeviceManager {
         node: &fdt::node::FdtNode,
         priority: DriverPriority,
         idx: &mut usize,
+        parent_phandle: Option<u32>,
     ) {
-        self.process_single_device_node(node, priority, idx);
+        let has_explicit_phandle = Self::get_u32_prop(node, "phandle")
+            .or_else(|| Self::get_u32_prop(node, "linux,phandle"))
+            .is_some();
+
+        let this_phandle = if has_explicit_phandle {
+            Self::get_u32_prop(node, "phandle")
+                .or_else(|| Self::get_u32_prop(node, "linux,phandle"))
+                .unwrap()
+        } else {
+            let node_key = node.name.as_ptr() as usize;
+            let mut cache = self.auto_phandle_cache.lock();
+            if let Some(&cached) = cache.get(&node_key) {
+                cached
+            } else {
+                let ph = self.next_auto_phandle.fetch_add(1, Ordering::Relaxed);
+                cache.insert(node_key, ph);
+                ph
+            }
+        };
+
+        self.process_single_device_node(
+            node,
+            priority,
+            idx,
+            parent_phandle,
+            if has_explicit_phandle {
+                None
+            } else {
+                Some(this_phandle)
+            },
+        );
 
         for child in node.children() {
-            self.process_device_subtree(&child, priority, idx);
+            self.process_device_subtree(&child, priority, idx, Some(this_phandle));
         }
     }
 
@@ -474,16 +571,24 @@ impl DeviceManager {
         child: &fdt::node::FdtNode,
         priority: DriverPriority,
         idx: &mut usize,
+        parent_phandle: Option<u32>,
+        synthetic_phandle: Option<u32>,
     ) {
+        if let Some(status_prop) = child.property("status") {
+            if let Some(status) = status_prop.as_str() {
+                if status == "disabled" {
+                    return;
+                }
+            }
+        }
+
         let compatible = child.compatible();
         if compatible.is_none() {
             return;
         }
 
-        // Minimize stack usage by not collecting all compatible strings at once
         let compatible_iter = compatible.unwrap().all();
 
-        // Check if we have any drivers for this priority level
         let has_drivers = {
             let drivers = self.drivers.lock();
             drivers
@@ -495,9 +600,14 @@ impl DeviceManager {
             return;
         }
 
-        // Build resources separately to reduce stack usage
         let resources = self.build_minimal_resources(&child);
-        let properties = self.build_device_properties(&child);
+        let mut properties = self.build_device_properties(&child);
+
+        if let Some(ph) = synthetic_phandle {
+            let mut bytes = [0u8; 4];
+            bytes.copy_from_slice(&ph.to_be_bytes());
+            properties.insert(0, PlatformDeviceProperty::new("phandle", &bytes));
+        }
 
         // Try to match with drivers
         let compatible_vec: alloc::vec::Vec<&str> = compatible_iter.collect();
@@ -508,6 +618,7 @@ impl DeviceManager {
             compatible_vec,
             resources,
             properties,
+            parent_phandle,
         );
     }
 
@@ -719,6 +830,7 @@ impl DeviceManager {
     }
 
     /// Try to match device with drivers and probe if successful
+    #[allow(clippy::too_many_arguments)]
     fn try_match_and_probe_device(
         &self,
         child: &fdt::node::FdtNode,
@@ -727,6 +839,7 @@ impl DeviceManager {
         compatible: alloc::vec::Vec<&str>,
         resources: alloc::vec::Vec<PlatformDeviceResource>,
         properties: alloc::vec::Vec<PlatformDeviceProperty>,
+        parent_phandle: Option<u32>,
     ) {
         let drivers = self.drivers.lock();
         if let Some(driver_list) = drivers.get(&priority) {
@@ -750,7 +863,19 @@ impl DeviceManager {
                         static_compatible,
                         resources,
                         properties,
+                        parent_phandle,
                     ));
+
+                    if let Err(e) =
+                        crate::device::power::PowerManager::enable_device_domains(&*device)
+                    {
+                        crate::early_println!(
+                            "Failed to enable power domains for {} device {}: {}",
+                            priority.description(),
+                            device.name(),
+                            e
+                        );
+                    }
 
                     match driver.probe(&*device) {
                         Ok(_) => {
@@ -859,6 +984,68 @@ impl DeviceManager {
         self.register_driver(driver, DriverPriority::Standard);
     }
 
+    /// Register a discovered PCI device with the DeviceManager.
+    ///
+    /// PCI host controller platform drivers call this after scanning ECAM
+    /// to register discovered PCI devices. The devices will be probed
+    /// against registered PCI drivers when `probe_pci_devices()` is called.
+    ///
+    /// # Arguments
+    ///
+    /// * `device` - The PCI device to register.
+    pub fn register_pci_device(&self, device: Arc<dyn DeviceInfo + Send + Sync>) {
+        let mut discovered = self.discovered_pci_devices.lock();
+        discovered.push(device);
+    }
+
+    /// Probe all discovered PCI devices against registered drivers.
+    ///
+    /// Must be called after all PCI devices have been registered (via
+    /// `register_pci_device()`) and all drivers have been registered.
+    /// Typically called from the init sequence after platform probing.
+    pub fn probe_pci_devices(&self) {
+        let discovered = self.discovered_pci_devices.lock();
+        if discovered.is_empty() {
+            return;
+        }
+
+        let count = discovered.len();
+        early_println!("Probing {} discovered PCI devices...", count);
+
+        // Hold drivers lock during probing. This is safe because PCI driver
+        // probe functions do not re-enter the drivers lock.
+        let drivers = self.drivers.lock();
+
+        for priority in DriverPriority::all() {
+            let driver_list = match drivers.get(priority) {
+                Some(list) if !list.is_empty() => list,
+                _ => continue,
+            };
+
+            let mut claimed_ids: Vec<usize> = Vec::new();
+
+            for driver in driver_list.iter() {
+                for device in discovered.iter() {
+                    if claimed_ids.contains(&device.id()) {
+                        continue;
+                    }
+
+                    match driver.probe(&**device) {
+                        Ok(()) => {
+                            claimed_ids.push(device.id());
+                            early_println!(
+                                "Successfully probed PCI device {} with driver {}",
+                                device.name(),
+                                driver.name()
+                            );
+                        }
+                        Err(_) => {} // Not a match, try next driver
+                    }
+                }
+            }
+        }
+    }
+
     /// Clear all devices and reset the manager state (for testing only)
     ///
     /// This method is only available in test builds and should only be used
@@ -868,10 +1055,16 @@ impl DeviceManager {
         let mut devices = self.devices.lock();
         let mut device_by_name = self.device_by_name.lock();
         let mut name_to_id = self.name_to_id.lock();
+        let mut discovered = self.discovered_pci_devices.lock();
 
         devices.clear();
         device_by_name.clear();
         name_to_id.clear();
+        discovered.clear();
+        self.spi_buses.lock().clear();
+        self.i2c_buses.lock().clear();
+        self.usb_hosts.lock().clear();
+        self.gpio_controllers.lock().clear();
         self.next_device_id.store(1, Ordering::SeqCst); // Start from 1, reserve 0 for invalid
     }
 }

@@ -90,7 +90,7 @@ pub fn run() -> i32 {
     }
 
     // Copy initramfs to guest memory (place after kernel, aligned to 4KB)
-    let initrd_guest_base = if let Some(ref initrd) = initrd_image {
+    let _initrd_guest_base = if let Some(ref initrd) = initrd_image {
         let kernel_end = guest_phys_base + (guest_image.len() as u64);
         let initrd_base = (kernel_end + 0xfff) & !0xfff;
         let initrd_offset = (initrd_base - guest_phys_base) as usize;

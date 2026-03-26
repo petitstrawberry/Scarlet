@@ -17,7 +17,7 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::mem::size_of;
 use core::ptr::{read_unaligned, read_volatile, write_volatile};
-use core::sync::atomic::{Ordering, fence};
+use core::sync::atomic::{AtomicUsize, Ordering, fence};
 use spin::Mutex;
 
 use crate::device::Device;
@@ -26,6 +26,7 @@ use crate::device::manager::{DeviceManager, DriverPriority};
 use crate::device::pci::config::{self, PciConfig};
 use crate::device::pci::device::PciDeviceInfo;
 use crate::device::pci::driver::{PciDeviceDriver, PciDeviceId};
+use crate::device::usb::UsbHostController;
 use crate::driver_initcall;
 use crate::drivers::usb::core::descriptor::{
     ConfigurationDescriptor, DescriptorHeader, DeviceDescriptor, EndpointDescriptor,
@@ -394,56 +395,63 @@ impl XhciController {
     /// Halt the xHCI controller
     pub fn halt(&self) -> Result<(), &'static str> {
         let usbcmd = self.operational.read_usbcmd();
-        // Clear Run/Stop bit (bit 0)
         self.operational.write_usbcmd(usbcmd & !0x1);
 
-        // Wait for HCHalted bit (bit 0 of USBSTS)
-        let mut timeout = 100_000u32;
-        loop {
+        let deadline = crate::time::current_time() + 500_000;
+        while crate::time::current_time() < deadline {
             let usbsts = self.operational.read_usbsts();
             if (usbsts & 0x1) != 0 {
                 early_println!("[xHCI] Controller halted");
                 return Ok(());
             }
-            timeout -= 1;
-            if timeout == 0 {
-                return Err("Timeout waiting for xHCI halt");
-            }
+            core::hint::spin_loop();
         }
+        Err("Timeout waiting for xHCI halt")
     }
 
     /// Reset the xHCI controller
     pub fn reset(&self) -> Result<(), &'static str> {
-        // Set HCRST bit (bit 1) in USBCMD
         let usbcmd = self.operational.read_usbcmd();
+        let usbsts = self.operational.read_usbsts();
+        early_println!(
+            "[xHCI] Before reset: USBCMD={:#x} USBSTS={:#x}",
+            usbcmd,
+            usbsts
+        );
         self.operational.write_usbcmd(usbcmd | 0x2);
 
-        // Wait for HCRST bit to clear
-        let mut timeout = 100_000u32;
-        loop {
+        let deadline = crate::time::current_time() + 500_000;
+        let mut hcrst_cleared = false;
+        while crate::time::current_time() < deadline {
             let usbcmd = self.operational.read_usbcmd();
             if (usbcmd & 0x2) == 0 {
+                hcrst_cleared = true;
                 break;
             }
-            timeout -= 1;
-            if timeout == 0 {
-                return Err("Timeout waiting for xHCI reset");
-            }
+            core::hint::spin_loop();
         }
 
-        // Wait for CNR (Controller Not Ready) bit to clear in USBSTS
-        timeout = 100_000;
-        loop {
+        if !hcrst_cleared {
+            let usbcmd = self.operational.read_usbcmd();
+            let usbsts = self.operational.read_usbsts();
+            early_println!(
+                "[xHCI] Reset timeout: USBCMD={:#x} USBSTS={:#x}",
+                usbcmd,
+                usbsts
+            );
+            return Err("Timeout waiting for xHCI reset");
+        }
+
+        let deadline = crate::time::current_time() + 500_000;
+        while crate::time::current_time() < deadline {
             let usbsts = self.operational.read_usbsts();
             if (usbsts & (1 << 11)) == 0 {
                 early_println!("[xHCI] Controller reset complete");
                 return Ok(());
             }
-            timeout -= 1;
-            if timeout == 0 {
-                return Err("Timeout waiting for xHCI ready after reset");
-            }
+            core::hint::spin_loop();
         }
+        Err("Timeout waiting for xHCI ready after reset")
     }
 
     /// Start the xHCI controller
@@ -1378,21 +1386,26 @@ fn determine_bar_size(
     }
 }
 
+impl UsbHostController for XhciController {
+    fn poll_events(&self) {
+        let status = self.operational.read_usbsts();
+        if status & (USBSTS_EVENT_INTERRUPT | USBSTS_PORT_CHANGE_DETECT) != 0 {
+            self.operational
+                .write_usbsts(status & (USBSTS_EVENT_INTERRUPT | USBSTS_PORT_CHANGE_DETECT));
+            self.process_interrupt_events();
+        }
+    }
+}
+
 /// xHCI driver instance container
-static XHCI_CONTROLLERS: Mutex<Vec<Arc<XhciController>>> = Mutex::new(Vec::new());
+static NEXT_USB_HOST_ID: AtomicUsize = AtomicUsize::new(1);
 
 struct XhciPollHandler;
 impl TimerHandler for XhciPollHandler {
     fn on_timer_expired(self: Arc<Self>, _context: usize) {
-        let controllers = XHCI_CONTROLLERS.lock();
-        for ctrl in controllers.iter() {
-            let status = ctrl.operational.read_usbsts();
-            if status & (USBSTS_EVENT_INTERRUPT | USBSTS_PORT_CHANGE_DETECT) != 0 {
-                ctrl.operational
-                    .write_usbsts(status & (USBSTS_EVENT_INTERRUPT | USBSTS_PORT_CHANGE_DETECT));
-                ctrl.process_interrupt_events();
-            }
-        }
+        DeviceManager::get_manager().for_each_usb_host(|ctrl| {
+            ctrl.poll_events();
+        });
         let handler: Arc<dyn TimerHandler> = self.clone();
         let expires = crate::timer::get_tick() + crate::timer::ms_to_ticks(500);
         crate::timer::add_timer(expires, &handler, 0);
@@ -1426,6 +1439,44 @@ impl InterruptCapableDevice for XhciController {
 }
 
 /// Probe function for xHCI PCI devices
+pub fn bind_xhci_mmio(
+    mmio_vaddr: usize,
+    interrupt: Option<InterruptId>,
+) -> Result<(), &'static str> {
+    early_println!("[xHCI] Binding platform xHCI at {:#x}", mmio_vaddr);
+
+    let controller = Arc::new(XhciController::new(mmio_vaddr)?);
+
+    controller.init()?;
+    controller.start()?;
+
+    match controller.enumerate_ports() {
+        Ok(count) => early_println!("[xHCI] Enumerated {} device(s)", count),
+        Err(error) => early_println!("[xHCI] Enumeration deferred: {}", error),
+    }
+
+    if let Some(interrupt_id) = interrupt {
+        controller.enable_interrupts(interrupt_id)?;
+        InterruptManager::with_manager(|mgr| {
+            mgr.register_interrupt_device(interrupt_id, controller.clone())
+        })
+        .map_err(|_| "Failed to register xHCI interrupt device")?;
+        early_println!("[xHCI] Registered IRQ {}", interrupt_id);
+    } else {
+        early_println!("[xHCI] No interrupt provided for platform controller");
+    }
+
+    let host_id = NEXT_USB_HOST_ID.fetch_add(1, Ordering::SeqCst) as u32;
+    let host: Arc<dyn UsbHostController> = controller.clone();
+    DeviceManager::get_manager().register_usb_host(host_id, host);
+
+    let poll_handler: Arc<dyn TimerHandler> = Arc::new(XhciPollHandler);
+    add_timer(get_tick() + ms_to_ticks(1000), &poll_handler, 0);
+
+    early_println!("[xHCI] Platform controller registered successfully");
+    Ok(())
+}
+
 fn probe_xhci(device: &PciDeviceInfo) -> Result<(), &'static str> {
     early_println!(
         "[xHCI] Probing device: {:04x}:{:04x}",
@@ -1472,18 +1523,6 @@ fn probe_xhci(device: &PciDeviceInfo) -> Result<(), &'static str> {
 
     early_println!("[xHCI] MMIO mapped at {:#x}", mmio_vaddr);
 
-    // Create controller instance
-    let controller = Arc::new(XhciController::new(mmio_vaddr)?);
-
-    // Initialize controller
-    controller.init()?;
-    controller.start()?;
-
-    match controller.enumerate_ports() {
-        Ok(count) => early_println!("[xHCI] Enumerated {} device(s)", count),
-        Err(error) => early_println!("[xHCI] Enumeration deferred: {}", error),
-    }
-
     let routed_irq = device.routed_irq();
     let interrupt_line = routed_irq
         .map(|irq| irq as u8)
@@ -1495,32 +1534,19 @@ fn probe_xhci(device: &PciDeviceInfo) -> Result<(), &'static str> {
         interrupt_pin,
         routed_irq
     );
-    if interrupt_line != 0 && interrupt_line != 0xff && interrupt_pin != 0 {
-        let interrupt_id = interrupt_line as InterruptId;
-        controller.enable_interrupts(interrupt_id)?;
-        InterruptManager::with_manager(|mgr| {
-            mgr.register_interrupt_device(interrupt_id, controller.clone())
-        })
-        .map_err(|_| "Failed to register xHCI interrupt device")?;
+    let interrupt_id = if interrupt_line != 0 && interrupt_line != 0xff && interrupt_pin != 0 {
         early_println!(
             "[xHCI] Registered IRQ {} (pin {})",
-            interrupt_id,
+            interrupt_line,
             interrupt_pin
         );
+        Some(interrupt_line as InterruptId)
     } else {
         early_println!("[xHCI] No usable legacy IRQ routing for controller");
-    }
+        None
+    };
 
-    // Store controller
-    let mut controllers = XHCI_CONTROLLERS.lock();
-    controllers.push(controller);
-    drop(controllers);
-
-    let poll_handler: Arc<dyn TimerHandler> = Arc::new(XhciPollHandler);
-    add_timer(get_tick() + ms_to_ticks(1000), &poll_handler, 0);
-
-    early_println!("[xHCI] Controller registered successfully");
-    Ok(())
+    bind_xhci_mmio(mmio_vaddr, interrupt_id)
 }
 
 /// Remove function for xHCI PCI devices

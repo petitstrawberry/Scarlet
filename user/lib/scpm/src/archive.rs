@@ -147,10 +147,10 @@ impl PackageArchive {
                 }
             } else if entry.is_dir {
                 let _ = fs::create_directory(&full_path);
-            } else if entry.is_symlink {
-                if let Some(ref target) = entry.link_target {
-                    let _ = fs::create_symlink(&full_path, target);
-                }
+            } else if entry.is_symlink
+                && let Some(ref target) = entry.link_target
+            {
+                let _ = fs::create_symlink(&full_path, target);
             }
         }
 
@@ -195,11 +195,11 @@ impl PackageArchive {
             } else if entry.is_dir {
                 let _ = fs::create_directory(&full_path);
                 installed_files.push(full_path.clone());
-            } else if entry.is_symlink {
-                if let Some(ref target) = entry.link_target {
-                    let _ = fs::create_symlink(&full_path, target);
-                    installed_files.push(full_path.clone());
-                }
+            } else if entry.is_symlink
+                && let Some(ref target) = entry.link_target
+            {
+                let _ = fs::create_symlink(&full_path, target);
+                installed_files.push(full_path.clone());
             }
         }
 
