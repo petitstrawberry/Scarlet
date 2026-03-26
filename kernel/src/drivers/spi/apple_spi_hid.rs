@@ -606,4 +606,4 @@ fn register_apple_spi_hid_driver() {
     DeviceManager::get_manager().register_driver(Box::new(driver), DriverPriority::Standard);
 }
 
-driver_initcall!(register_apple_spi_hid_driver);
+// driver_initcall!(register_apple_spi_hid_driver);

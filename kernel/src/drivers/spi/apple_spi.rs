@@ -8,9 +8,9 @@ use spin::Mutex;
 use crate::arch::mmio;
 use crate::device::spi::{SpiBus, SpiError, SpiTransfer, SpiTransferFlags};
 use crate::device::{
-    manager::{DeviceManager, DriverPriority},
-    platform::{resource::PlatformDeviceResourceType, PlatformDeviceDriver, PlatformDeviceInfo},
     DeviceInfo,
+    manager::{DeviceManager, DriverPriority},
+    platform::{PlatformDeviceDriver, PlatformDeviceInfo, resource::PlatformDeviceResourceType},
 };
 use crate::driver_initcall;
 use crate::time;
@@ -501,4 +501,8 @@ fn register_apple_spi_driver() {
     DeviceManager::get_manager().register_driver(Box::new(driver), DriverPriority::Core);
 }
 
-driver_initcall!(register_apple_spi_driver);
+// driver_initcall!(register_apple_spi_driver);
+// TODO: Re-enable after kernel probe infrastructure supports:
+//   - Bus error / Data Abort recovery during probe
+//   - Deferred probe for dependency resolution
+//   - PMGR parent domain recursive enable verification

@@ -56,11 +56,11 @@ use crate::device::power::PowerManager;
 use crate::{
     arch::mmio,
     device::{
+        DeviceInfo,
         manager::{DeviceManager, DriverPriority},
         platform::{
-            resource::PlatformDeviceResourceType, PlatformDeviceDriver, PlatformDeviceInfo,
+            PlatformDeviceDriver, PlatformDeviceInfo, resource::PlatformDeviceResourceType,
         },
-        DeviceInfo,
     },
     driver_initcall, early_println,
 };
@@ -351,11 +351,7 @@ impl PmgrRegistry {
 /// Get a reference to the global PMGR registry.
 fn get_registry() -> Option<spin::MutexGuard<'static, Option<PmgrRegistry>>> {
     let guard = PMGR_REGISTRY.lock();
-    if guard.is_some() {
-        Some(guard)
-    } else {
-        None
-    }
+    if guard.is_some() { Some(guard) } else { None }
 }
 
 // =============================================================================
