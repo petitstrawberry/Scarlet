@@ -91,6 +91,7 @@ name = "scarlet-driver-apple-afk"
 version = "0.1.0"
 dependencies = [
  "scarlet",
+ "scarlet-driver-apple-rtkit",
 ]
 
 [[package]]
@@ -141,6 +142,7 @@ name = "scarlet-driver-apple-epic"
 version = "0.1.0"
 dependencies = [
  "scarlet",
+ "scarlet-driver-apple-afk",
 ]
 
 [[package]]
@@ -185,6 +187,7 @@ name = "scarlet-driver-apple-rtkit"
 version = "0.1.0"
 dependencies = [
  "scarlet",
+ "scarlet-driver-apple-asc",
 ]
 
 [[package]]

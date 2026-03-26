@@ -6,11 +6,11 @@ use alloc::sync::Arc;
 use core::arch::asm;
 use core::mem;
 
-use scarlet::drivers::soc::apple_rtkit::{AppleRtkit, RtkitMessage};
 use scarlet::early_println;
 use scarlet::mem::pmm;
 use scarlet::time;
 use scarlet::vm;
+use scarlet_driver_apple_rtkit::{AppleRtkit, RtkitMessage};
 
 // =============================================================================
 // Constants

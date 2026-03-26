@@ -7,9 +7,9 @@ use core::cmp;
 
 use scarlet::sync::Mutex;
 
-use scarlet::drivers::soc::apple_asc::{AppleAsc, AscMessage};
 use scarlet::early_println;
 use scarlet::time;
+use scarlet_driver_apple_asc::{AppleAsc, AscMessage};
 
 /// RTKit message with endpoint and 64-bit payload.
 pub struct RtkitMessage {

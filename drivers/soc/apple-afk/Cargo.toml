@@ -8,3 +8,4 @@ path = "src/lib.rs"
 
 [dependencies]
 scarlet = { path = "../../../kernel" }
+scarlet-driver-apple-rtkit = { path = "../apple-rtkit" }

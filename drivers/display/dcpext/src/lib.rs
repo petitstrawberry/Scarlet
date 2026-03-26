@@ -13,13 +13,13 @@ use scarlet::device::graphics::output::DisplayOutput;
 use scarlet::device::manager::{DeviceManager, DriverPriority};
 use scarlet::device::platform::resource::PlatformDeviceResourceType;
 use scarlet::device::platform::{PlatformDeviceDriver, PlatformDeviceInfo};
-use scarlet::drivers::soc::apple_afk::AfkEndpoint;
-use scarlet::drivers::soc::apple_asc::AppleAsc;
-use scarlet::drivers::soc::apple_epic::EpicEndpoint;
-use scarlet::drivers::soc::apple_rtkit::AppleRtkit;
 use scarlet::early_println;
 use scarlet::vm;
+use scarlet_driver_apple_afk::AfkEndpoint;
+use scarlet_driver_apple_asc::AppleAsc;
 use scarlet_driver_apple_dart::{DartPageTable, get_dart_by_phandle};
+use scarlet_driver_apple_epic::EpicEndpoint;
+use scarlet_driver_apple_rtkit::AppleRtkit;
 
 const DCP_SYSTEM_EP: u8 = 0x20;
 const DCP_DPTX_PORT_EP: u8 = 0x2a;

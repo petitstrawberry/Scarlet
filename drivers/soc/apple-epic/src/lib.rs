@@ -7,12 +7,12 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::mem;
 
-use scarlet::drivers::soc::apple_afk::AfkEndpoint;
 use scarlet::early_println;
 use scarlet::mem::pmm;
 use scarlet::sync::Mutex;
 use scarlet::time;
 use scarlet::vm;
+use scarlet_driver_apple_afk::AfkEndpoint;
 
 // =============================================================================
 // Constants
