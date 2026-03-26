@@ -80,7 +80,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "scarlet-module-prototype"
+name = "scarlet-driver-apple-pinctrl"
 version = "0.1.0"
 dependencies = [
  "scarlet",
