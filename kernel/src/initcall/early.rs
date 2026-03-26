@@ -6,7 +6,7 @@ use crate::early_println;
 macro_rules! early_initcall {
     ($func:ident) => {
         #[unsafe(link_section = ".initcall.early")]
-        #[used(linker)]
+        #[used]
         static __EARLY_INITCALL__: fn() = $func;
     };
 }
