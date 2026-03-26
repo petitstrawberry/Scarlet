@@ -27,6 +27,11 @@ SECTIONS {
       *(.initcall.late)
       __INITCALL_END = .;
     } > RAM
+    .scarlet_ksyms : {
+      __SCARLET_KSYMS_START = .;
+      KEEP(*(.scarlet_ksyms))
+      __SCARLET_KSYMS_END = .;
+    } > RAM
     .trampoline :
     {
       . = ALIGN(0x1000);

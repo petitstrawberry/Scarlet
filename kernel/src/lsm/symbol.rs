@@ -36,7 +36,7 @@ impl SymbolRegistry {
         self.entries
             .iter()
             .find(|(n, _)| n == name)
-            .map(|(_, &addr)| addr)
+            .map(|(_, addr)| *addr)
     }
 
     pub fn len(&self) -> usize {

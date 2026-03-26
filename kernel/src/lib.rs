@@ -267,6 +267,7 @@ pub mod interrupt;
 pub mod ipc;
 pub mod library;
 pub mod log;
+pub mod lsm;
 pub mod mem;
 #[cfg(feature = "network")]
 pub mod network;
@@ -302,7 +303,7 @@ use crate::{
     interrupt::InterruptManager,
 };
 use arch::get_cpu;
-use core::sync::atomic::{Ordering, compiler_fence, fence};
+use core::sync::atomic::{compiler_fence, fence, Ordering};
 use mem::allocator::init_heap;
 use sched::scheduler::get_scheduler;
 use task::new_user_task;

@@ -50,6 +50,13 @@ SECTIONS {
       __INITCALL_END = .;
     } :rodata
 
+    . = ALIGN(8);
+    .scarlet_ksyms : {
+      __SCARLET_KSYMS_START = .;
+      KEEP(*(.scarlet_ksyms))
+      __SCARLET_KSYMS_END = .;
+    } :rodata
+
     . = ALIGN(CONSTANT(MAXPAGESIZE));
     .data : { *(.data .data.*) } :data
 
