@@ -1,0 +1,11 @@
+[package]
+name = "scarlet-driver-apple-spi-hid"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+scarlet = { path = "../../../kernel" }
+scarlet-driver-apple-spi = { path = "../apple-spi" }

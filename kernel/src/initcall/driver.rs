@@ -30,7 +30,7 @@ use crate::early_println;
 macro_rules! driver_initcall {
     ($func:ident) => {
         #[unsafe(link_section = ".initcall.driver")]
-        #[used(linker)]
+        #[used]
         static __DRIVER_INITCALL__: fn() = $func;
     };
 }

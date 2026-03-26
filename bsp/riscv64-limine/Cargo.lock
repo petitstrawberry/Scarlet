@@ -89,6 +89,9 @@ dependencies = [
 [[package]]
 name = "scarlet-module-prototype"
 version = "0.1.0"
+dependencies = [
+ "scarlet",
+]
 
 [[package]]
 name = "scarlet-modules"

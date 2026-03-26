@@ -1,0 +1,11 @@
+[package]
+name = "scarlet-driver-apple-dwc3"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+scarlet = { path = "../../../../kernel" }
+scarlet-driver-apple-atcphy = { path = "../../../phy/apple-atcphy" }

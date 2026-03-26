@@ -11,6 +11,11 @@ dist/
 opencode.json
 /tools/scpm-pack/target
 /cargo-scarlet/target
+/drivers/*/target
+/drivers/*/*/target
+/modules/*/target
+/bsp/*/target
+/bsp/*/.scarlet
 # Guest kernel images (large files)
 mkfs/initramfs/system/scarlet/root/scarlet_kernel.bin
 

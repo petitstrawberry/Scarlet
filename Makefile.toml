@@ -9,11 +9,11 @@ skip_core_tasks = true
 
 [tasks.fmt]
 description = "Format all code"
-dependencies = ["fmt-kernel", "fmt-bsp-riscv64", "fmt-bsp-aarch64", "fmt-userlib", "fmt-userbin"]
+dependencies = ["fmt-kernel", "fmt-bsp-riscv64", "fmt-bsp-aarch64", "fmt-userlib", "fmt-userbin", "fmt-drivers", "fmt-modules"]
 
 [tasks.fmt-check]
 description = "Check formatting (no changes)"
-dependencies = ["fmt-kernel-check", "fmt-bsp-riscv64-check", "fmt-bsp-aarch64-check", "fmt-userlib-check", "fmt-userbin-check"]
+dependencies = ["fmt-kernel-check", "fmt-bsp-riscv64-check", "fmt-bsp-aarch64-check", "fmt-userlib-check", "fmt-userbin-check", "fmt-drivers-check", "fmt-modules-check"]
 
 [tasks.fmt-kernel-check]
 description = "Check kernel formatting"
@@ -44,6 +44,24 @@ description = "Check user program formatting"
 cwd = "user/bin"
 command = "cargo"
 args = ["make", "fmt-check"]
+
+[tasks.fmt-drivers-check]
+description = "Check external driver formatting"
+script = '''
+for dir in $(find drivers -name Cargo.toml -exec dirname {} \;); do
+  echo "Checking $dir"
+  cargo fmt --manifest-path "$dir/Cargo.toml" -- --check || exit 1
+done
+'''
+
+[tasks.fmt-modules-check]
+description = "Check external module formatting"
+script = '''
+for dir in $(find modules -name Cargo.toml -exec dirname {} \;); do
+  echo "Checking $dir"
+  cargo fmt --manifest-path "$dir/Cargo.toml" -- --check || exit 1
+done
+'''
 
 [tasks.clippy-riscv64]
 description = "Run clippy for all components (RISC-V)"
@@ -109,6 +127,24 @@ description = "Format user program code"
 cwd = "user/bin"
 command = "cargo"
 args = ["make", "fmt"]
+
+[tasks.fmt-drivers]
+description = "Format external driver code"
+script = '''
+for dir in $(find drivers -name Cargo.toml -exec dirname {} \;); do
+  echo "Formatting $dir"
+  cargo fmt --manifest-path "$dir/Cargo.toml"
+done
+'''
+
+[tasks.fmt-modules]
+description = "Format external module code"
+script = '''
+for dir in $(find modules -name Cargo.toml -exec dirname {} \;); do
+  echo "Formatting $dir"
+  cargo fmt --manifest-path "$dir/Cargo.toml"
+done
+'''
 
 [tasks.build-riscv64]
 description = "Build all components (RISC-V, debug)"

@@ -1,0 +1,12 @@
+[package]
+name = "scarlet-driver-apple-pcie"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+scarlet = { path = "../../../kernel" }
+scarlet-driver-apple-msi = { path = "../../pic/apple-msi" }
+scarlet-driver-apple-dart = { path = "../../iommu/apple-dart" }
