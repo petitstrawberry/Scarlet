@@ -47,6 +47,16 @@ SECTIONS {
       KEEP(*(.scarlet_ksyms))
       __SCARLET_KSYMS_END = .;
     } > RAM
+    .symtab : {
+      __SYMTAB_START = .;
+      KEEP(*(.symtab))
+      __SYMTAB_END = .;
+    } > RAM
+    .strtab : {
+      __STRTAB_START = .;
+      KEEP(*(.strtab))
+      __STRTAB_END = .;
+    } > RAM
     .trampoline :
     {
       . = ALIGN(0x1000);

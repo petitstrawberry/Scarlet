@@ -142,7 +142,7 @@ const EI_DATA: usize = 5;
 
 const ELF64_EHDR_SIZE: usize = 64;
 const ELF64_SHDR_SIZE: usize = 64;
-const ELF64_SYM_SIZE: usize = 24;
+pub const ELF64_SYM_SIZE: usize = 24;
 const ELF64_RELA_SIZE: usize = 24;
 
 #[derive(Debug, Clone, Copy)]
@@ -291,7 +291,7 @@ fn parse_shdr(
     })
 }
 
-fn parse_sym(
+pub fn parse_symtab_entry(
     data: &[u8],
     offset: usize,
     is_little_endian: bool,
@@ -445,7 +445,7 @@ pub fn parse_reloc_object(data: &[u8]) -> Result<RelocObject, &'static str> {
     let mut symbols = Vec::with_capacity(sym_data.len() / sym_ent_size);
     for idx in 0..(sym_data.len() / sym_ent_size) {
         let off = idx * sym_ent_size;
-        let sym = parse_sym(sym_data, off, is_little_endian)?;
+        let sym = parse_symtab_entry(sym_data, off, is_little_endian)?;
         let bind = sym.st_info >> 4;
         let typ = sym.st_info & 0x0F;
         let name = get_string_at(strtab_data, sym.st_name)?;

@@ -62,6 +62,18 @@ SECTIONS {
       __SCARLET_KSYMS_END = .;
     } :rodata
 
+    .symtab : {
+      __SYMTAB_START = .;
+      KEEP(*(.symtab))
+      __SYMTAB_END = .;
+    } :rodata
+
+    .strtab : {
+      __STRTAB_START = .;
+      KEEP(*(.strtab))
+      __STRTAB_END = .;
+    } :rodata
+
     . = ALIGN(CONSTANT(MAXPAGESIZE));
     .data : {
         *(.data .data.*)
