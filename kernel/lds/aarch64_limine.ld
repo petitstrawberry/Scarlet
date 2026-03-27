@@ -85,7 +85,7 @@ SECTIONS {
     } :data
 
     .lsm_symbols : {
-      *(.lsm_symbols)
+      KEEP(*(.lsm_symbols))
     } :data
 
     __KERNEL_SPACE_END = .;

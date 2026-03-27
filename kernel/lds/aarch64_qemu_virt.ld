@@ -71,6 +71,6 @@ SECTIONS {
       . += 256K; /* Reserve 256KiB for FDT relocation */
       __FDT_RESERVED_END = .;
     } > RAM
-    .lsm_symbols : { *(.lsm_symbols) } > RAM
+    .lsm_symbols : { KEEP(*(.lsm_symbols)) } > RAM
     __KERNEL_SPACE_END = .;
 }

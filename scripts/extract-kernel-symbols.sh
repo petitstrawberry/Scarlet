@@ -18,17 +18,22 @@ nm "$KERNEL_ELF" --defined-only --extern-only -g --no-sort 2>/dev/null | while r
     printf '%s\t%s\n' "$name" "$addr"
 done > /tmp/lsm_syms_$$.txt
 
+SYM_COUNT=$(wc -l < /tmp/lsm_syms_$$.txt)
+
 {
     echo "#[unsafe(link_section = \".lsm_symbols\")]"
-    echo "static KERNEL_SYMBOLS: &[(&'static str, usize)] = &["
+    echo "#[used]"
+    echo "static _FORCE_SECTION: usize = 0;"
+    echo ""
+    echo "static KERNEL_SYMBOLS: [(&'static str, usize); $SYM_COUNT] = ["
     while IFS=$'\t' read -r name addr; do
         printf '    ("%s", 0x%s),\n' "$name" "$addr"
     done < /tmp/lsm_syms_$$.txt
     echo "];"
-    echo
-    echo "pub fn get_kernel_symbols() -> &'static [(&'static str, usize)] { KERNEL_SYMBOLS }"
+    echo ""
+    echo "pub fn get_kernel_symbols() -> &'static [(&'static str, usize)] { &KERNEL_SYMBOLS }"
 } > "$OUTPUT_RS"
 
 rm -f /tmp/lsm_syms_$$.txt
 
-echo "Generated $OUTPUT_RS with $(grep -c '0x' "$OUTPUT_RS" || true) symbols"
+echo "Generated $OUTPUT_RS with $SYM_COUNT symbols"

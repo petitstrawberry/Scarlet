@@ -1,3 +1,6 @@
+#![allow(clippy::all)]
+#![allow(dead_code)]
+
 include!("generated_symbols.rs");
 
 use alloc::string::String;
