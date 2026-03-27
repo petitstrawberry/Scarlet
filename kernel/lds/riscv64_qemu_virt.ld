@@ -9,6 +9,12 @@ MEMORY {
 SECTIONS {
     . = ORIGIN(RAM);
     __KERNEL_SPACE_START = .;
+    PROVIDE(__SCARLET_KSYMS_START = 0);
+    PROVIDE(__SCARLET_KSYMS_END = 0);
+    PROVIDE(__SYMTAB_START = 0);
+    PROVIDE(__SYMTAB_END = 0);
+    PROVIDE(__STRTAB_START = 0);
+    PROVIDE(__STRTAB_END = 0);
     .init : { 
         *(.init .init.*)
         /* Place arch-specific entry points close to init */

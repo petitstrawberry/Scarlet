@@ -303,7 +303,7 @@ use crate::{
     interrupt::InterruptManager,
 };
 use arch::get_cpu;
-use core::sync::atomic::{Ordering, compiler_fence, fence};
+use core::sync::atomic::{compiler_fence, fence, Ordering};
 use mem::allocator::init_heap;
 use sched::scheduler::get_scheduler;
 use task::new_user_task;
@@ -639,6 +639,8 @@ pub extern "C" fn start_kernel(boot_info: &BootInfo) -> ! {
     early_initcall_call();
     fence(Ordering::SeqCst); // Ensure early initcalls are completed before proceeding
     driver_initcall_call();
+
+    lsm::symbol::init_kernel_symbols();
 
     early_println!("[Scarlet Kernel] Initializing Virtual Memory...");
     kernel_vm_init(direct_map_paddr, boot_info.initramfs_paddr, heap_paddr);
