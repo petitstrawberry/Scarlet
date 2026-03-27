@@ -290,7 +290,9 @@ script_runner = "@shell"
 script = '''
 cargo rustc --target ../../kernel/targets/riscv64gc-unknown-none-elf.json -- --emit=obj
 for f in target/riscv64gc-unknown-none-elf/debug/deps/*.o; do
-    [ -f "$f" ] && mv "$f" "$(dirname "$f")/$(basename "$f" | sed 's/-[0-9a-f]*\.o$/.lsm/')"
+    if [ -f "$f" ]; then
+        mv "$f" "$(dirname "$f")/$(basename "$f" | sed 's/-[0-9a-f]*\.o$/.lsm/')"
+    fi
 done
 '''
 
@@ -301,7 +303,9 @@ script_runner = "@shell"
 script = '''
 cargo rustc --target ../../kernel/targets/aarch64-unknown-none-elf.json -- --emit=obj
 for f in target/aarch64-unknown-none-elf/debug/deps/*.o; do
-    [ -f "$f" ] && mv "$f" "$(dirname "$f")/$(basename "$f" | sed 's/-[0-9a-f]*\.o$/.lsm/')"
+    if [ -f "$f" ]; then
+        mv "$f" "$(dirname "$f")/$(basename "$f" | sed 's/-[0-9a-f]*\.o$/.lsm/')"
+    fi
 done
 '''
 
