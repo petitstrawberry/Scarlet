@@ -16,10 +16,6 @@ SECTIONS {
 
     PROVIDE(__SCARLET_KSYMS_START = 0);
     PROVIDE(__SCARLET_KSYMS_END = 0);
-    PROVIDE(__SYMTAB_START = 0);
-    PROVIDE(__SYMTAB_END = 0);
-    PROVIDE(__STRTAB_START = 0);
-    PROVIDE(__STRTAB_END = 0);
 
     .limine_requests : {
         KEEP(*(.limine_requests_start))
@@ -63,11 +59,6 @@ SECTIONS {
       KEEP(*(.scarlet_ksyms))
       __SCARLET_KSYMS_END = .;
     } :rodata
-
-    PROVIDE(__SYMTAB_START = 0);
-    PROVIDE(__SYMTAB_END = 0);
-    PROVIDE(__STRTAB_START = 0);
-    PROVIDE(__STRTAB_END = 0);
 
     . = ALIGN(CONSTANT(MAXPAGESIZE));
     .data : { *(.data .data.*) } :data
