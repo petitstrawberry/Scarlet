@@ -1,6 +1,6 @@
 use crate::lsm::elf::{
-    ParsedSymbol, RelocObject, RelocationEntry, RelocationSection, SHN_UNDEF, STB_GLOBAL,
-    STB_LOCAL, STB_WEAK, STT_SECTION,
+    ParsedSymbol, RelocObject, RelocationEntry, RelocationSection, SHF_ALLOC, SHN_UNDEF,
+    STB_GLOBAL, STB_LOCAL, STB_WEAK, STT_SECTION,
 };
 
 pub const R_RISCV_NONE: u32 = 0;
@@ -33,12 +33,15 @@ pub fn apply_relocations(
 ) -> Result<(), &'static str> {
     for reloc_section in &object.relocation_sections {
         let target_section_index = reloc_section.target_section_index as usize;
+        let target_section = match object.sections.get(target_section_index) {
+            Some(s) => s,
+            None => continue,
+        };
+        if (target_section.sh_flags & SHF_ALLOC) == 0 {
+            continue;
+        }
         let target_base = section_base(section_bases, target_section_index)
             .ok_or("Missing base address for relocation target section")?;
-        let target_section = object
-            .sections
-            .get(target_section_index)
-            .ok_or("Relocation target section out of bounds")?;
         let target_size =
             usize::try_from(target_section.sh_size).map_err(|_| "Section size too large")?;
 
@@ -68,7 +71,7 @@ pub fn apply_relocations(
                         section_bases,
                         symbol_resolver,
                     )?;
-                    let value = to_u64(s_plus_a(s, relocation.r_addend)?)?;
+                    let value = to_u64(s_plus_a(s, relocation.r_addend)?);
                     write_u64_le(place, value);
                 }
                 R_RISCV_BRANCH => {
@@ -364,7 +367,7 @@ fn relocation_location(
 }
 
 fn s_plus_a(s: usize, addend: i64) -> Result<i64, &'static str> {
-    let s_i64 = i64::try_from(s).map_err(|_| "Symbol value does not fit i64")?;
+    let s_i64 = s as u64 as i64;
     s_i64
         .checked_add(addend)
         .ok_or("S + A overflow in relocation")
@@ -372,13 +375,13 @@ fn s_plus_a(s: usize, addend: i64) -> Result<i64, &'static str> {
 
 fn s_plus_a_minus_p(s: usize, addend: i64, p: usize) -> Result<i64, &'static str> {
     let sa = s_plus_a(s, addend)?;
-    let p_i64 = i64::try_from(p).map_err(|_| "P value does not fit i64")?;
+    let p_i64 = p as u64 as i64;
     sa.checked_sub(p_i64)
         .ok_or("S + A - P overflow in relocation")
 }
 
-fn to_u64(value: i64) -> Result<u64, &'static str> {
-    u64::try_from(value).map_err(|_| "Relocation value is negative")
+fn to_u64(value: i64) -> u64 {
+    value as u64
 }
 
 fn hi20(value: i64) -> u32 {

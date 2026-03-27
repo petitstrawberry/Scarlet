@@ -74,6 +74,11 @@ fn section_permissions(flags: u64) -> usize {
 }
 
 #[cfg(target_arch = "riscv64")]
+fn loading_permissions(flags: u64) -> usize {
+    section_permissions(flags) | VirtualMemoryPermission::Write as usize
+}
+
+#[cfg(target_arch = "riscv64")]
 fn round_up_to_page(size: usize) -> usize {
     (size + PAGE_SIZE - 1) & !(PAGE_SIZE - 1)
 }
@@ -93,13 +98,28 @@ fn section_base_for(section_bases: &[(usize, usize)], section_index: usize) -> O
 }
 
 #[cfg(target_arch = "riscv64")]
-fn infer_module_name(object: &elf::RelocObject) -> String {
-    object
-        .symbols
-        .iter()
-        .find(|symbol| symbol.typ == elf::STT_FILE && !symbol.name.is_empty())
-        .map(|symbol| symbol.name.clone())
-        .unwrap_or_else(|| String::from("lsm-module"))
+fn resolve_module_name(object: &elf::RelocObject, section_bases: &[(usize, usize)]) -> String {
+    let name_sym = match object.symbols.iter().find(|s| s.name == "SCARLET_LSM_NAME") {
+        Some(s) => s,
+        None => return String::from("lsm-module"),
+    };
+    let shndx = name_sym.shndx as usize;
+    let base = match section_bases.iter().find(|(idx, _)| *idx == shndx) {
+        Some((_, base)) => *base,
+        None => return String::from("lsm-module"),
+    };
+    let offset = name_sym.value as usize;
+    let ptr = (base + offset) as *const u8;
+    let mut len = 0usize;
+    unsafe {
+        while *ptr.add(len) != 0 && len < 256 {
+            len += 1;
+        }
+    }
+    let bytes = unsafe { core::slice::from_raw_parts(ptr, len) };
+    core::str::from_utf8(bytes)
+        .map(String::from)
+        .unwrap_or_else(|_| String::from("lsm-module"))
 }
 
 #[cfg(target_arch = "riscv64")]
@@ -133,7 +153,7 @@ pub fn load_module(data: &[u8]) -> Result<ModuleHandle, LsmError> {
         }
 
         let base_paddr = virt_to_phys(pages_ptr as usize);
-        let permissions = section_permissions(section.sh_flags);
+        let permissions = loading_permissions(section.sh_flags);
 
         let memory_map = VirtualMemoryMap {
             pmarea: MemoryArea {
@@ -209,7 +229,7 @@ pub fn load_module(data: &[u8]) -> Result<ModuleHandle, LsmError> {
     init_fn().map_err(LsmError::InitFailed)?;
 
     Ok(ModuleHandle {
-        name: infer_module_name(&object),
+        name: resolve_module_name(&object, &section_bases),
         section_bases,
         mapped_ranges,
         initialized: true,
