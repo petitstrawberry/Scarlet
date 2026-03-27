@@ -170,6 +170,10 @@ path = "src/scpm.rs"
 name = "ushv"
 path = "src/ushv/main.rs"
 
+[[bin]]
+name = "lsm_load"
+path = "src/lsm_load.rs"
+
 [dependencies]
 scarlet_std = { path = "../lib/std", features = ["alloc_debug"] }
 scpm = { path = "../lib/scpm" }
