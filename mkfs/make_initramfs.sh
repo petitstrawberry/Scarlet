@@ -33,8 +33,13 @@ for binary_path in "$USER_DIST_DIR"/*; do
 done
 
 # --- Kernel modules (.o files) ---
-MODULES_DIST_DIR="../modules/scarlet-module-lsm-test/target/riscv64gc-unknown-none-elf/debug/deps"
-if [ "$ARCH" = "riscv64" ] && [ -d "$MODULES_DIST_DIR" ]; then
+case "$ARCH" in
+    riscv64) MODULE_TARGET="riscv64gc-unknown-none-elf" ;;
+    aarch64) MODULE_TARGET="aarch64-unknown-none-elf" ;;
+    *)       MODULE_TARGET="" ;;
+esac
+MODULES_DIST_DIR="../modules/scarlet-module-lsm-test/target/${MODULE_TARGET}/debug/deps"
+if [ -n "$MODULE_TARGET" ] && [ -d "$MODULES_DIST_DIR" ]; then
     mkdir -p initramfs/system/scarlet/modules
     rm -f initramfs/system/scarlet/modules/*.o
     for obj_path in "$MODULES_DIST_DIR"/*.o; do

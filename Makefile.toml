@@ -291,10 +291,9 @@ args = ["rustc", "--target", "../../kernel/targets/riscv64gc-unknown-none-elf.js
 
 [tasks.build-modules-debug-aarch64]
 description = "Build kernel modules (.o) for AArch64 in debug mode"
-script_runner = "@shell"
-script = '''
-echo "[modules] LSM module support for aarch64 is not yet implemented"
-'''
+cwd = "modules/scarlet-module-lsm-test"
+command = "cargo"
+args = ["rustc", "--target", "../../kernel/targets/aarch64-unknown-none-elf.json", "--", "--emit=obj"]
 
 [tasks.build-userbin-debug-riscv64]
 description = "Build user programs for RISC-V in debug mode"
@@ -469,7 +468,7 @@ description = "Create AArch64 initramfs archive (debug)"
 cwd = "mkfs"
 command = "sh"
 args = ["make_initramfs.sh", "aarch64"]
-dependencies = ["build-userbin-debug-aarch64"]
+dependencies = ["build-userbin-debug-aarch64", "build-modules-debug-aarch64"]
 
 [tasks.build-initramfs-aarch64]
 description = "Create AArch64 initramfs archive (debug)"
@@ -491,7 +490,7 @@ description = "Create AArch64 initramfs archive (release)"
 cwd = "mkfs"
 command = "sh"
 args = ["make_initramfs.sh", "aarch64"]
-dependencies = ["build-userbin-release-aarch64"]
+dependencies = ["build-userbin-release-aarch64", "build-modules-debug-aarch64"]
 
 [tasks.build-initramfs-release-riscv64]
 description = "Create RISC-V initramfs archive (release)"
