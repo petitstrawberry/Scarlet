@@ -89,6 +89,7 @@ use crate::ipc::syscall::{
     sys_shared_memory_create, sys_shared_memory_resize, sys_socket_recv_handle,
     sys_socket_recv_handle_and_data, sys_socket_send_handle, sys_socket_send_handle_and_data,
 };
+use crate::lsm::syscall::sys_lsm_load;
 use crate::network::syscall::{
     sys_network_list_interfaces, sys_network_set_dns, sys_network_set_gateway,
     sys_network_set_ipv4, sys_network_set_netmask,
@@ -292,4 +293,7 @@ syscall_table! {
     ShvVmCreate = 1100 => sys_shv_vm_create,
     ShvVcpuCreate = 1101 => sys_shv_vcpu_create,
     ShvVcpuRun = 1102 => sys_shv_vcpu_run,
+
+    // === Loadable Module Operations ===
+    LsmLoad = 1200 => sys_lsm_load,
 }

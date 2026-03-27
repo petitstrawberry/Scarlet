@@ -121,6 +121,9 @@ pub enum Syscall {
     ShvVmCreate = 1100,
     ShvVcpuCreate = 1101,
     ShvVcpuRun = 1102,
+
+    // === Loadable Module Operations ===
+    LsmLoad = 1200,
 }
 
 pub fn syscall0(syscall: Syscall) -> usize {
