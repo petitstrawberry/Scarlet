@@ -158,7 +158,7 @@ fn run() -> Result<(), String> {
             output,
         } => {
             if let Some(module_path) = module {
-                build_loadable_module(&module_path, target.as_deref(), output.as_deref())?;
+                build_loadable_module(&module_path, target.as_deref(), output.as_deref(), release)?;
                 Ok(())
             } else {
                 let project = project.ok_or("--project is required when not using --module")?;
@@ -742,6 +742,7 @@ fn build_loadable_module(
     module_path: &Path,
     target: Option<&str>,
     output: Option<&Path>,
+    release: bool,
 ) -> Result<(), String> {
     let target = target.ok_or("--target is required when using --module")?;
     let module_dir = fs::canonicalize(module_path).map_err(|e| {
@@ -778,13 +779,11 @@ fn build_loadable_module(
     );
 
     let mut command = Command::new("cargo");
-    command
-        .arg("rustc")
-        .arg("--target")
-        .arg(&target_path)
-        .arg("--")
-        .arg("--emit=obj")
-        .current_dir(&module_dir);
+    command.arg("rustc").arg("--target").arg(&target_path);
+    if release {
+        command.arg("--release");
+    }
+    command.arg("--").arg("--emit=obj").current_dir(&module_dir);
 
     let status = command
         .status()
@@ -794,7 +793,8 @@ fn build_loadable_module(
         return Err(format!("cargo rustc failed with status {status}"));
     }
 
-    let output_dir = module_dir.join("target").join(&target_triple).join("debug");
+    let profile = if release { "release" } else { "debug" };
+    let output_dir = module_dir.join("target").join(&target_triple).join(profile);
     let deps_dir = output_dir.join("deps");
     let mut built = false;
     for entry in fs::read_dir(&deps_dir)
