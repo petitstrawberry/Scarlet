@@ -38,7 +38,7 @@ case "$ARCH" in
     aarch64) MODULE_TARGET="aarch64-unknown-none-elf" ;;
     *)       MODULE_TARGET="" ;;
 esac
-MODULES_DIST_DIR="../modules/loadable/scarlet-module-lsm-test/target/${MODULE_TARGET}/debug/deps"
+MODULES_DIST_DIR="../modules/loadable/scarlet-module-lsm-test/target/${MODULE_TARGET}/debug"
 if [ -n "$MODULE_TARGET" ] && [ -d "$MODULES_DIST_DIR" ]; then
     mkdir -p initramfs/system/scarlet/modules
     rm -f initramfs/system/scarlet/modules/*.lsm

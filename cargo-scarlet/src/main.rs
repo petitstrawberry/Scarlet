@@ -39,6 +39,8 @@ enum Commands {
         release: bool,
         #[arg(long)]
         module: Option<PathBuf>,
+        #[arg(long)]
+        output: Option<PathBuf>,
     },
     Clippy {
         #[arg(long)]
@@ -153,9 +155,10 @@ fn run() -> Result<(), String> {
             target,
             release,
             module,
+            output,
         } => {
             if let Some(module_path) = module {
-                build_loadable_module(&module_path, target.as_deref())?;
+                build_loadable_module(&module_path, target.as_deref(), output.as_deref())?;
                 Ok(())
             } else {
                 let project = project.ok_or("--project is required when not using --module")?;
@@ -735,7 +738,11 @@ fn pathdiff(path: &Path, base: &Path) -> Result<PathBuf, String> {
     Ok(result)
 }
 
-fn build_loadable_module(module_path: &Path, target: Option<&str>) -> Result<(), String> {
+fn build_loadable_module(
+    module_path: &Path,
+    target: Option<&str>,
+    output: Option<&Path>,
+) -> Result<(), String> {
     let target = target.ok_or("--target is required when using --module")?;
     let module_dir = fs::canonicalize(module_path).map_err(|e| {
         format!(
@@ -810,7 +817,39 @@ fn build_loadable_module(module_path: &Path, target: Option<&str>) -> Result<(),
     }
 
     if !built {
+        for entry in fs::read_dir(&output_dir)
+            .map_err(|e| format!("failed to read {}: {e}", output_dir.display()))?
+        {
+            let entry = entry.map_err(|e| format!("failed to read dir entry: {e}"))?;
+            let path = entry.path();
+            if path.extension().is_some_and(|e| e == "lsm") {
+                built = true;
+                break;
+            }
+        }
+    }
+
+    if !built {
         return Err("no .o files produced by cargo rustc".to_string());
+    }
+
+    if let Some(output) = output {
+        let output_dir = std::env::current_dir()
+            .map_err(|e| format!("failed to get current directory: {e}"))?
+            .join(output);
+        fs::create_dir_all(&output_dir).map_err(|e| format!("failed to create output dir: {e}"))?;
+        for lsm_entry in fs::read_dir(&module_dir.join("target").join(&target_triple).join("debug"))
+            .map_err(|e| format!("failed to read debug dir: {e}"))?
+        {
+            let lsm_entry = lsm_entry.map_err(|e| format!("failed to read dir entry: {e}"))?;
+            let lsm_path = lsm_entry.path();
+            if lsm_path.extension().is_some_and(|e| e == "lsm") {
+                let dest = output_dir.join(lsm_path.file_name().unwrap());
+                fs::copy(&lsm_path, &dest)
+                    .map_err(|e| format!("failed to copy .lsm to output: {e}"))?;
+                eprintln!("cargo-scarlet: copied to {}", dest.display());
+            }
+        }
     }
 
     Ok(())
