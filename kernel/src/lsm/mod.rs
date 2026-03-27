@@ -9,4 +9,4 @@ pub mod elf;
 pub mod loader;
 pub mod symbol;
 
-pub use loader::{load_module, LsmError, ModuleHandle};
+pub use loader::{LsmError, ModuleHandle, load_module};
