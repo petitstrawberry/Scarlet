@@ -35,13 +35,13 @@ pub struct ModuleHandle {
 
 #[cfg(target_arch = "riscv64")]
 const MODULE_VA_START: usize = 0xffffffff90000000;
-#[cfg(target_arch = "riscv64")]
+#[cfg(target_arch = "aarch64")]
+const MODULE_VA_START: usize = 0xffff_ffff90000000;
+
 const MODULE_VA_SIZE: usize = 256 * 1024 * 1024;
 
-#[cfg(target_arch = "riscv64")]
 static MODULE_VA_OFFSET: Mutex<usize> = Mutex::new(0);
 
-#[cfg(target_arch = "riscv64")]
 fn allocate_module_pages(size: usize, alignment: usize) -> Option<usize> {
     let mut offset = MODULE_VA_OFFSET.lock();
     let aligned = (*offset + alignment - 1) & !(alignment - 1);
@@ -52,7 +52,6 @@ fn allocate_module_pages(size: usize, alignment: usize) -> Option<usize> {
     Some(MODULE_VA_START + aligned)
 }
 
-#[cfg(target_arch = "riscv64")]
 fn section_alignment(align: u64) -> usize {
     let raw = usize::try_from(align).ok().unwrap_or(PAGE_SIZE);
     if raw.is_power_of_two() && raw > PAGE_SIZE {
@@ -62,7 +61,6 @@ fn section_alignment(align: u64) -> usize {
     }
 }
 
-#[cfg(target_arch = "riscv64")]
 fn section_permissions(flags: u64) -> usize {
     let mut permissions = VirtualMemoryPermission::Read as usize;
     if (flags & SHF_WRITE) != 0 {
@@ -74,20 +72,28 @@ fn section_permissions(flags: u64) -> usize {
     permissions
 }
 
-#[cfg(target_arch = "riscv64")]
 fn loading_permissions(flags: u64) -> usize {
     section_permissions(flags) | VirtualMemoryPermission::Write as usize
 }
 
-#[cfg(target_arch = "riscv64")]
 fn round_up_to_page(size: usize) -> usize {
     (size + PAGE_SIZE - 1) & !(PAGE_SIZE - 1)
 }
 
 #[cfg(target_arch = "riscv64")]
-fn flush_icache_all() {
+fn flush_icache_all(_mapped_ranges: &[(usize, usize)]) {
     unsafe {
         core::arch::asm!("fence.i", options(nostack));
+    }
+}
+
+#[cfg(target_arch = "aarch64")]
+fn flush_icache_all(mapped_ranges: &[(usize, usize)]) {
+    for &(start, size) in mapped_ranges {
+        crate::arch::aarch64::clean_dcache_to_pou_range(start, size);
+    }
+    unsafe {
+        core::arch::asm!("ic iallu", "dsb ish", "isb", options(nostack));
     }
 }
 
@@ -125,7 +131,6 @@ fn resolve_module_name(object: &elf::RelocObject, section_bases: &[(usize, usize
         .unwrap_or_else(|| String::from("lsm-module"))
 }
 
-#[cfg(target_arch = "riscv64")]
 pub fn load_module(data: &[u8]) -> Result<ModuleHandle, LsmError> {
     let object = elf::parse_reloc_object(data).map_err(LsmError::InvalidElf)?;
 
@@ -216,7 +221,7 @@ pub fn load_module(data: &[u8]) -> Result<ModuleHandle, LsmError> {
     arch::apply_relocations(&object, &section_bases, &symbol_resolver)
         .map_err(LsmError::Relocation)?;
 
-    flush_icache_all();
+    flush_icache_all(&mapped_ranges);
 
     let init_symbol = object
         .symbols
@@ -245,11 +250,4 @@ pub fn load_module(data: &[u8]) -> Result<ModuleHandle, LsmError> {
         mapped_ranges,
         initialized: true,
     })
-}
-
-#[cfg(not(target_arch = "riscv64"))]
-pub fn load_module(_data: &[u8]) -> Result<ModuleHandle, LsmError> {
-    Err(LsmError::InvalidElf(
-        "Loadable Scarlet Module loader currently supports riscv64 only",
-    ))
 }

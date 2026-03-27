@@ -1,5 +1,6 @@
 use crate::lsm::elf::RelocObject;
 
+pub mod aarch64;
 pub mod riscv64;
 
 pub fn apply_relocations(
@@ -14,8 +15,7 @@ pub fn apply_relocations(
 
     #[cfg(target_arch = "aarch64")]
     {
-        let _ = (object, section_bases, symbol_resolver);
-        return Err("AArch64 LSM relocations not yet implemented");
+        return aarch64::apply_relocations(object, section_bases, symbol_resolver);
     }
 
     #[allow(unreachable_code)]
