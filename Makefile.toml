@@ -283,6 +283,19 @@ dependencies = ["build-userlib-debug-riscv64"]
 description = "Build user libraries (AArch64, debug)"
 dependencies = ["build-userlib-debug-aarch64"]
 
+[tasks.build-modules-debug-riscv64]
+description = "Build kernel modules (.o) for RISC-V in debug mode"
+cwd = "modules/scarlet-module-lsm-test"
+command = "cargo"
+args = ["rustc", "--target", "../../kernel/targets/riscv64gc-unknown-none-elf.json", "--", "--emit=obj"]
+
+[tasks.build-modules-debug-aarch64]
+description = "Build kernel modules (.o) for AArch64 in debug mode"
+script_runner = "@shell"
+script = '''
+echo "[modules] LSM module support for aarch64 is not yet implemented"
+'''
+
 [tasks.build-userbin-debug-riscv64]
 description = "Build user programs for RISC-V in debug mode"
 cwd = "user/bin"
@@ -467,7 +480,7 @@ description = "Create RISC-V initramfs archive (debug)"
 cwd = "mkfs"
 command = "sh"
 args = ["make_initramfs.sh", "riscv64"]
-dependencies = ["build-userbin-debug-riscv64"]
+dependencies = ["build-userbin-debug-riscv64", "build-modules-debug-riscv64"]
 
 [tasks.build-initramfs-riscv64]
 description = "Create RISC-V initramfs archive (debug)"

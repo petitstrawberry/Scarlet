@@ -319,7 +319,7 @@ use vm::{
 fn panic(info: &core::panic::PanicInfo) -> ! {
     use arch::instruction::idle;
 
-    crate::println!("[Scarlet Kernel] panic: {}", info);
+    crate::early_println!("[Scarlet Kernel] panic: {}", info);
 
     // if let Some(task) = get_scheduler().get_current_task(get_cpu().get_cpuid()) {
     //     task.exit(1); // Exit the task with error code 1
@@ -640,12 +640,12 @@ pub extern "C" fn start_kernel(boot_info: &BootInfo) -> ! {
     fence(Ordering::SeqCst); // Ensure early initcalls are completed before proceeding
     driver_initcall_call();
 
-    lsm::symbol::init_kernel_symbols();
-
     early_println!("[Scarlet Kernel] Initializing Virtual Memory...");
     kernel_vm_init(direct_map_paddr, boot_info.initramfs_paddr, heap_paddr);
     /* After this point, we can use the heap and virtual memory */
     /* We will also be restricted to the kernel address space */
+
+    lsm::symbol::init_kernel_symbols();
 
     /* Populate devices from BootInfo device source */
     early_println!("[Scarlet Kernel] Populating devices...");

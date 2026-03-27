@@ -21,10 +21,13 @@ done > /tmp/lsm_syms_$$.txt
 SYM_COUNT=$(wc -l < /tmp/lsm_syms_$$.txt)
 
 {
+    echo "#[allow(dead_code)]"
+    echo ""
     echo "#[unsafe(link_section = \".lsm_symbols\")]"
     echo "#[used]"
     echo "static _FORCE_SECTION: usize = 0;"
     echo ""
+    echo "#[allow(dead_code)]"
     echo "static KERNEL_SYMBOLS: [(&'static str, usize); $SYM_COUNT] = ["
     while IFS=$'\t' read -r name addr; do
         printf '    ("%s", 0x%s),\n' "$name" "$addr"

@@ -32,6 +32,19 @@ for binary_path in "$USER_DIST_DIR"/*; do
     fi
 done
 
+# --- Kernel modules (.o files) ---
+MODULES_DIST_DIR="../modules/scarlet-module-lsm-test/target/riscv64gc-unknown-none-elf/debug/deps"
+if [ "$ARCH" = "riscv64" ] && [ -d "$MODULES_DIST_DIR" ]; then
+    mkdir -p initramfs/system/scarlet/modules
+    rm -f initramfs/system/scarlet/modules/*.o
+    for obj_path in "$MODULES_DIST_DIR"/*.o; do
+        if [ -f "$obj_path" ]; then
+            basename=$(basename "$obj_path" | sed 's/-[0-9a-f]*\.o$/.o/')
+            cp "$obj_path" "initramfs/system/scarlet/modules/$basename"
+        fi
+    done
+fi
+
 mkdir -p dist
 cd initramfs || exit 1
 
