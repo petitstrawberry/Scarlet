@@ -27,15 +27,15 @@ pub enum LsmError {
 #[derive(Debug)]
 pub struct ModuleHandle {
     pub name: String,
+    #[allow(dead_code)]
     section_bases: Vec<(usize, usize)>,
+    #[allow(dead_code)]
     mapped_ranges: Vec<(usize, usize)>,
+    #[allow(dead_code)]
     initialized: bool,
 }
 
-#[cfg(target_arch = "riscv64")]
-const MODULE_VA_START: usize = 0xffffffff90000000;
-#[cfg(target_arch = "aarch64")]
-const MODULE_VA_START: usize = 0xffff_ffff90000000;
+use crate::arch::lsm::MODULE_VA_START;
 
 const MODULE_VA_SIZE: usize = 256 * 1024 * 1024;
 

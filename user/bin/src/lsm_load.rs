@@ -5,7 +5,6 @@ extern crate scarlet_std as std;
 
 use std::env;
 use std::println;
-use std::string::String;
 use std::syscall::{Syscall, syscall1};
 use std::vec::Vec;
 

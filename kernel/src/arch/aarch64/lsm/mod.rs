@@ -3,6 +3,8 @@ use crate::lsm::elf::{
     STB_GLOBAL, STB_LOCAL, STB_WEAK, STT_SECTION,
 };
 
+pub const MODULE_VA_START: usize = 0xffffffff81000000;
+
 pub const R_AARCH64_NONE: u32 = 0;
 pub const R_AARCH64_ABS64: u32 = 257;
 pub const R_AARCH64_ABS32: u32 = 258;
@@ -14,9 +16,10 @@ pub const R_AARCH64_LDST8_ABS_LO12_NC: u32 = 278;
 pub const R_AARCH64_JUMP26: u32 = 282;
 pub const R_AARCH64_CALL26: u32 = 283;
 pub const R_AARCH64_MOVW_UABS_G0: u32 = 263;
-pub const R_AARCH64_MOVW_UABS_G1_NC: u32 = 264;
-pub const R_AARCH64_MOVW_UABS_G2_NC: u32 = 265;
-pub const R_AARCH64_MOVW_UABS_G3: u32 = 266;
+pub const R_AARCH64_MOVW_UABS_G0_NC: u32 = 264;
+pub const R_AARCH64_MOVW_UABS_G1_NC: u32 = 266;
+pub const R_AARCH64_MOVW_UABS_G2_NC: u32 = 268;
+pub const R_AARCH64_MOVW_UABS_G3: u32 = 269;
 
 pub fn apply_relocations(
     object: &RelocObject,
@@ -176,6 +179,18 @@ pub fn apply_relocations(
                     )?;
                     let value = to_u64(s_plus_a(s, relocation.r_addend)?);
                     patch_movz_movk(place, ((value >> 16) & 0xFFFF) as u32);
+                }
+
+                R_AARCH64_MOVW_UABS_G0_NC => {
+                    section_write_ok(target_base, target_size, relocation.r_offset, 4)?;
+                    let s = resolve_symbol_value(
+                        object,
+                        relocation.r_sym,
+                        section_bases,
+                        symbol_resolver,
+                    )?;
+                    let value = to_u64(s_plus_a(s, relocation.r_addend)?);
+                    patch_movz_movk(place, ((value >> 0) & 0xFFFF) as u32);
                 }
 
                 R_AARCH64_MOVW_UABS_G0 => {
