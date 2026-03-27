@@ -32,7 +32,7 @@ for binary_path in "$USER_DIST_DIR"/*; do
     fi
 done
 
-# --- Kernel modules (.o files) ---
+# --- Kernel modules (.lsm files) ---
 case "$ARCH" in
     riscv64) MODULE_TARGET="riscv64gc-unknown-none-elf" ;;
     aarch64) MODULE_TARGET="aarch64-unknown-none-elf" ;;
@@ -41,11 +41,10 @@ esac
 MODULES_DIST_DIR="../modules/scarlet-module-lsm-test/target/${MODULE_TARGET}/debug/deps"
 if [ -n "$MODULE_TARGET" ] && [ -d "$MODULES_DIST_DIR" ]; then
     mkdir -p initramfs/system/scarlet/modules
-    rm -f initramfs/system/scarlet/modules/*.o
-    for obj_path in "$MODULES_DIST_DIR"/*.o; do
-        if [ -f "$obj_path" ]; then
-            basename=$(basename "$obj_path" | sed 's/-[0-9a-f]*\.o$/.o/')
-            cp "$obj_path" "initramfs/system/scarlet/modules/$basename"
+    rm -f initramfs/system/scarlet/modules/*.lsm
+    for lsm_path in "$MODULES_DIST_DIR"/*.lsm; do
+        if [ -f "$lsm_path" ]; then
+            cp "$lsm_path" "initramfs/system/scarlet/modules/"
         fi
     done
 fi

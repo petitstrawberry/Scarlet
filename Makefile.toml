@@ -284,16 +284,26 @@ description = "Build user libraries (AArch64, debug)"
 dependencies = ["build-userlib-debug-aarch64"]
 
 [tasks.build-modules-debug-riscv64]
-description = "Build kernel modules (.o) for RISC-V in debug mode"
+description = "Build kernel modules (.lsm) for RISC-V in debug mode"
 cwd = "modules/scarlet-module-lsm-test"
-command = "cargo"
-args = ["rustc", "--target", "../../kernel/targets/riscv64gc-unknown-none-elf.json", "--", "--emit=obj"]
+script_runner = "@shell"
+script = '''
+cargo rustc --target ../../kernel/targets/riscv64gc-unknown-none-elf.json -- --emit=obj
+for f in target/riscv64gc-unknown-none-elf/debug/deps/*.o; do
+    [ -f "$f" ] && mv "$f" "$(dirname "$f")/$(basename "$f" | sed 's/-[0-9a-f]*\.o$/.lsm/')"
+done
+'''
 
 [tasks.build-modules-debug-aarch64]
-description = "Build kernel modules (.o) for AArch64 in debug mode"
+description = "Build kernel modules (.lsm) for AArch64 in debug mode"
 cwd = "modules/scarlet-module-lsm-test"
-command = "cargo"
-args = ["rustc", "--target", "../../kernel/targets/aarch64-unknown-none-elf.json", "--", "--emit=obj"]
+script_runner = "@shell"
+script = '''
+cargo rustc --target ../../kernel/targets/aarch64-unknown-none-elf.json -- --emit=obj
+for f in target/aarch64-unknown-none-elf/debug/deps/*.o; do
+    [ -f "$f" ] && mv "$f" "$(dirname "$f")/$(basename "$f" | sed 's/-[0-9a-f]*\.o$/.lsm/')"
+done
+'''
 
 [tasks.build-userbin-debug-riscv64]
 description = "Build user programs for RISC-V in debug mode"

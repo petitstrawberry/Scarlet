@@ -13,7 +13,7 @@ fn main() -> i32 {
     let args: Vec<std::string::String> = env::args().collect();
 
     if args.len() < 2 {
-        println!("usage: lsm_load <module.o>");
+        println!("usage: lsm_load <module.lsm>");
         return 1;
     }
 
