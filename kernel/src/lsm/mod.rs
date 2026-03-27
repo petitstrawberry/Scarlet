@@ -9,7 +9,22 @@ pub mod loader;
 pub mod symbol;
 pub mod syscall;
 
-pub use loader::{LsmError, ModuleHandle, load_module};
+pub use loader::{LoadedModule, LsmError, list_modules, load_module, unload_module};
+
+#[repr(usize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LsmErrorCode {
+    Success = 0,
+    InvalidPath = 1,
+    InvalidElf = 2,
+    NoMemory = 3,
+    RelocationError = 4,
+    NoInit = 5,
+    InitFailed = 6,
+    BuildInfoMismatch = 7,
+    NotFound = 8,
+    PermissionDenied = 9,
+}
 
 #[unsafe(no_mangle)]
 pub extern "C" fn lsm_print(s: *const u8, len: usize) {

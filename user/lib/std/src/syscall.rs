@@ -124,6 +124,8 @@ pub enum Syscall {
 
     // === Loadable Module Operations ===
     LsmLoad = 1200,
+    LsmUnload = 1201,
+    LsmList = 1202,
 }
 
 pub fn syscall0(syscall: Syscall) -> usize {
