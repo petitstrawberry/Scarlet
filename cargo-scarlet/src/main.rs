@@ -32,11 +32,13 @@ enum Commands {
     },
     Build {
         #[arg(long)]
-        project: PathBuf,
+        project: Option<PathBuf>,
         #[arg(long)]
         target: Option<String>,
         #[arg(long)]
         release: bool,
+        #[arg(long)]
+        module: Option<PathBuf>,
     },
     Clippy {
         #[arg(long)]
@@ -150,9 +152,16 @@ fn run() -> Result<(), String> {
             project,
             target,
             release,
+            module,
         } => {
-            let config = generate(&project)?;
-            cargo_command(&project, &config, "build", target, release, &[])
+            if let Some(module_path) = module {
+                build_loadable_module(&module_path, target.as_deref())?;
+                Ok(())
+            } else {
+                let project = project.ok_or("--project is required when not using --module")?;
+                let config = generate(&project)?;
+                cargo_command(&project, &config, "build", target, release, &[])
+            }
         }
         Commands::Clippy {
             project,
@@ -724,4 +733,98 @@ fn pathdiff(path: &Path, base: &Path) -> Result<PathBuf, String> {
     }
 
     Ok(result)
+}
+
+fn build_loadable_module(module_path: &Path, target: Option<&str>) -> Result<(), String> {
+    let target = target.ok_or("--target is required when using --module")?;
+    let module_dir = fs::canonicalize(module_path).map_err(|e| {
+        format!(
+            "failed to resolve module path {}: {e}",
+            module_path.display()
+        )
+    })?;
+
+    let target_path = if Path::new(target).is_absolute() {
+        PathBuf::from(target)
+    } else {
+        std::env::current_dir()
+            .map_err(|e| format!("failed to get current directory: {e}"))?
+            .join(target)
+    };
+    let target_path = fs::canonicalize(&target_path).map_err(|e| {
+        format!(
+            "failed to resolve target path {}: {e}",
+            target_path.display()
+        )
+    })?;
+
+    let target_triple = target_path
+        .file_stem()
+        .ok_or("target path has no file stem")?
+        .to_string_lossy()
+        .to_string();
+
+    eprintln!(
+        "cargo-scarlet: building loadable module {} (target: {})",
+        module_dir.display(),
+        target_path.display()
+    );
+
+    let mut command = Command::new("cargo");
+    command
+        .arg("rustc")
+        .arg("--target")
+        .arg(&target_path)
+        .arg("--")
+        .arg("--emit=obj")
+        .current_dir(&module_dir);
+
+    let status = command
+        .status()
+        .map_err(|e| format!("failed to run cargo rustc: {e}"))?;
+
+    if !status.success() {
+        return Err(format!("cargo rustc failed with status {status}"));
+    }
+
+    let output_dir = module_dir.join("target").join(&target_triple).join("debug");
+    let deps_dir = output_dir.join("deps");
+    let mut built = false;
+    for entry in fs::read_dir(&deps_dir)
+        .map_err(|e| format!("failed to read {}: {e}", deps_dir.display()))?
+    {
+        let entry = entry.map_err(|e| format!("failed to read dir entry: {e}"))?;
+        let path = entry.path();
+        if let Some(ext) = path.extension() {
+            if ext == "o" {
+                let stem = path.file_stem().unwrap().to_string_lossy();
+                let clean_name = strip_hash_suffix(&stem);
+                let lsm_name = format!("{}.lsm", clean_name);
+                let lsm_path = output_dir.join(&lsm_name);
+                fs::rename(&path, &lsm_path)
+                    .map_err(|e| format!("failed to rename to .lsm: {e}"))?;
+                eprintln!("cargo-scarlet: produced {}", lsm_path.display());
+                built = true;
+            }
+        }
+    }
+
+    if !built {
+        return Err("no .o files produced by cargo rustc".to_string());
+    }
+
+    Ok(())
+}
+
+fn strip_hash_suffix(name: &str) -> String {
+    match name.rfind('-') {
+        Some(pos) => {
+            let suffix = &name[pos + 1..];
+            if suffix.chars().all(|c| c.is_ascii_hexdigit()) && suffix.len() >= 8 {
+                return name[..pos].to_string();
+            }
+        }
+        None => {}
+    }
+    name.to_string()
 }
