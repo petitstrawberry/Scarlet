@@ -4,7 +4,6 @@
 //! into the kernel at runtime, resolving symbols against the kernel's exported
 //! symbol table, and executing module initialisation functions.
 
-pub mod arch;
 pub mod elf;
 pub mod loader;
 pub mod symbol;

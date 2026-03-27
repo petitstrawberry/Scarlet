@@ -84,11 +84,11 @@ SECTIONS {
       __FDT_RESERVED_END = .;
     } :data
 
+    __KERNEL_SPACE_END = .;
+
     .lsm_symbols : {
       KEEP(*(.lsm_symbols))
-    } :data
-
-    __KERNEL_SPACE_END = .;
+    }
 
     /DISCARD/ : {
       *(.eh_frame*)

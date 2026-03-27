@@ -5,7 +5,6 @@ use core::mem;
 use spin::Mutex;
 
 use crate::environment::PAGE_SIZE;
-use crate::lsm::arch;
 use crate::lsm::elf::{
     self, SHF_ALLOC, SHF_EXECINSTR, SHF_WRITE, SHN_UNDEF, SHT_NOBITS, SHT_PROGBITS,
 };
@@ -218,7 +217,7 @@ pub fn load_module(data: &[u8]) -> Result<ModuleHandle, LsmError> {
 
     let symbol_resolver = |name: &str| symbol::get_symbol_registry().lock().lookup(name);
 
-    arch::apply_relocations(&object, &section_bases, &symbol_resolver)
+    crate::arch::lsm::apply_relocations(&object, &section_bases, &symbol_resolver)
         .map_err(LsmError::Relocation)?;
 
     flush_icache_all(&mapped_ranges);
