@@ -188,6 +188,7 @@ script_runner = "@shell"
 script = '''
 cargo run --manifest-path cargo-scarlet/Cargo.toml -- build --project bsp/riscv64-limine
 scripts/extract-kernel-symbols.sh bsp/riscv64-limine/target/riscv64gc-unknown-none-elf/debug/scarlet kernel/src/lsm/generated_symbols.rs
+git update-index --assume-unchanged kernel/src/lsm/generated_symbols.rs
 cargo run --manifest-path cargo-scarlet/Cargo.toml -- build --project bsp/riscv64-limine
 '''
 
@@ -201,7 +202,15 @@ script_runner = "@shell"
 script = '''
 cargo run --manifest-path cargo-scarlet/Cargo.toml -- build --project bsp/aarch64-limine
 scripts/extract-kernel-symbols.sh bsp/aarch64-limine/target/aarch64-unknown-none-elf/debug/scarlet kernel/src/lsm/generated_symbols.rs
+git update-index --assume-unchanged kernel/src/lsm/generated_symbols.rs
 cargo run --manifest-path cargo-scarlet/Cargo.toml -- build --project bsp/aarch64-limine
+'''
+
+[tasks.lsm-untrack-symbols]
+description = "Unmark generated_symbols.rs as assume-unchanged (after editing placeholder)"
+script_runner = "@shell"
+script = '''
+git update-index --no-assume-unchanged kernel/src/lsm/generated_symbols.rs
 '''
 
 [tasks.build-kernel-release-riscv64]
@@ -214,6 +223,7 @@ script_runner = "@shell"
 script = '''
 cargo run --manifest-path cargo-scarlet/Cargo.toml -- build --project bsp/riscv64-limine --release
 scripts/extract-kernel-symbols.sh bsp/riscv64-limine/target/riscv64gc-unknown-none-elf/release/scarlet kernel/src/lsm/generated_symbols.rs
+git update-index --assume-unchanged kernel/src/lsm/generated_symbols.rs
 cargo run --manifest-path cargo-scarlet/Cargo.toml -- build --project bsp/riscv64-limine --release
 '''
 
@@ -227,6 +237,7 @@ script_runner = "@shell"
 script = '''
 cargo run --manifest-path cargo-scarlet/Cargo.toml -- build --project bsp/aarch64-limine --release
 scripts/extract-kernel-symbols.sh bsp/aarch64-limine/target/aarch64-unknown-none-elf/release/scarlet kernel/src/lsm/generated_symbols.rs
+git update-index --assume-unchanged kernel/src/lsm/generated_symbols.rs
 cargo run --manifest-path cargo-scarlet/Cargo.toml -- build --project bsp/aarch64-limine --release
 '''
 
