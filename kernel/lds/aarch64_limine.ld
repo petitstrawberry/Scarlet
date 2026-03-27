@@ -84,6 +84,10 @@ SECTIONS {
       __FDT_RESERVED_END = .;
     } :data
 
+    .lsm_symbols : {
+      *(.lsm_symbols)
+    } :data
+
     __KERNEL_SPACE_END = .;
 
     /DISCARD/ : {

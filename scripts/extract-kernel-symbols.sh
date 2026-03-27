@@ -19,7 +19,8 @@ nm "$KERNEL_ELF" --defined-only --extern-only -g --no-sort 2>/dev/null | while r
 done > /tmp/lsm_syms_$$.txt
 
 {
-    echo "static KERNEL_SYMBOLS: &[(&str, usize)] = &["
+    echo "#[unsafe(link_section = \".lsm_symbols\")]"
+    echo "static KERNEL_SYMBOLS: &[(&'static str, usize)] = &["
     while IFS=$'\t' read -r name addr; do
         printf '    ("%s", 0x%s),\n' "$name" "$addr"
     done < /tmp/lsm_syms_$$.txt
