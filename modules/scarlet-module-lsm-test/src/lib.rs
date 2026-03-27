@@ -6,6 +6,19 @@ use scarlet::early_println;
 pub static SCARLET_LSM_NAME: [u8; 24] = *b"scarlet-module-lsm-test\0";
 
 #[unsafe(no_mangle)]
+pub static SCARLET_LSM_BUILD_INFO: [u8; 72] = {
+    let s = concat!(env!("RUSTC_VERSION"), ";", env!("TARGET"), "\0");
+    let bytes: &[u8] = s.as_bytes();
+    let mut arr = [0u8; 72];
+    let mut i = 0;
+    while i < bytes.len() && i < 72 {
+        arr[i] = bytes[i];
+        i += 1;
+    }
+    arr
+};
+
+#[unsafe(no_mangle)]
 pub extern "C" fn scarlet_lsm_init() -> Result<(), &'static str> {
     early_println!("[lsm-test] Loadable Scarlet Module loaded successfully!");
     Ok(())

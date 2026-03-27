@@ -22,6 +22,7 @@ pub enum LsmError {
     Relocation(&'static str),
     NoInitSymbol,
     InitFailed(&'static str),
+    BuildInfoMismatch,
 }
 
 #[derive(Debug)]
@@ -90,36 +91,38 @@ fn flush_icache_all() {
     }
 }
 
-#[cfg(target_arch = "riscv64")]
 fn section_base_for(section_bases: &[(usize, usize)], section_index: usize) -> Option<usize> {
     section_bases
         .iter()
         .find_map(|(idx, base)| (*idx == section_index).then_some(*base))
 }
 
-#[cfg(target_arch = "riscv64")]
-fn resolve_module_name(object: &elf::RelocObject, section_bases: &[(usize, usize)]) -> String {
-    let name_sym = match object.symbols.iter().find(|s| s.name == "SCARLET_LSM_NAME") {
-        Some(s) => s,
-        None => return String::from("lsm-module"),
-    };
-    let shndx = name_sym.shndx as usize;
-    let base = match section_bases.iter().find(|(idx, _)| *idx == shndx) {
-        Some((_, base)) => *base,
-        None => return String::from("lsm-module"),
-    };
-    let offset = name_sym.value as usize;
+const KERNEL_BUILD_INFO: &str = concat!(env!("RUSTC_VERSION"), ";", env!("TARGET"));
+
+fn read_module_string(
+    object: &elf::RelocObject,
+    section_bases: &[(usize, usize)],
+    symbol_name: &str,
+    max_len: usize,
+) -> Option<String> {
+    let sym = object.symbols.iter().find(|s| s.name == symbol_name)?;
+    let shndx = sym.shndx as usize;
+    let base = section_bases.iter().find(|(idx, _)| *idx == shndx)?.1;
+    let offset = sym.value as usize;
     let ptr = (base + offset) as *const u8;
     let mut len = 0usize;
     unsafe {
-        while *ptr.add(len) != 0 && len < 256 {
+        while *ptr.add(len) != 0 && len < max_len {
             len += 1;
         }
     }
     let bytes = unsafe { core::slice::from_raw_parts(ptr, len) };
-    core::str::from_utf8(bytes)
-        .map(String::from)
-        .unwrap_or_else(|_| String::from("lsm-module"))
+    core::str::from_utf8(bytes).ok().map(String::from)
+}
+
+fn resolve_module_name(object: &elf::RelocObject, section_bases: &[(usize, usize)]) -> String {
+    read_module_string(object, section_bases, "SCARLET_LSM_NAME", 256)
+        .unwrap_or_else(|| String::from("lsm-module"))
 }
 
 #[cfg(target_arch = "riscv64")]
@@ -198,6 +201,14 @@ pub fn load_module(data: &[u8]) -> Result<ModuleHandle, LsmError> {
 
         section_bases.push((section_index, base_vaddr));
         mapped_ranges.push((base_vaddr, mapped_size));
+    }
+
+    let module_build_info =
+        read_module_string(&object, &section_bases, "SCARLET_LSM_BUILD_INFO", 256);
+    if let Some(ref info) = module_build_info {
+        if info != KERNEL_BUILD_INFO {
+            return Err(LsmError::BuildInfoMismatch);
+        }
     }
 
     let symbol_resolver = |name: &str| symbol::get_symbol_registry().lock().lookup(name);
