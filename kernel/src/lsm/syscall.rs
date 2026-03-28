@@ -6,7 +6,7 @@ use crate::arch::Trapframe;
 use crate::fs::MAX_PATH_LENGTH;
 use crate::library::std::string::parse_c_string_from_userspace;
 use crate::library::std::usercopy::copy_to_user;
-use crate::lsm::{LsmError, LsmErrorCode, list_modules, load_module, unload_module};
+use crate::lsm::{list_modules, load_module, unload_module, LsmError, LsmErrorCode};
 use crate::object::capability::stream::StreamOps;
 use crate::task::mytask;
 
@@ -18,6 +18,7 @@ fn map_lsm_error_to_code(err: &LsmError) -> LsmErrorCode {
         LsmError::NoInitSymbol => LsmErrorCode::NoInit,
         LsmError::InitFailed(_) => LsmErrorCode::InitFailed,
         LsmError::BuildInfoMismatch => LsmErrorCode::BuildInfoMismatch,
+        LsmError::MissingDependency(_) => LsmErrorCode::MissingDependency,
         LsmError::NotFound => LsmErrorCode::NotFound,
         LsmError::PermissionDenied => LsmErrorCode::PermissionDenied,
     }
@@ -107,7 +108,9 @@ pub fn sys_lsm_load(trapframe: &mut Trapframe) -> usize {
             LsmErrorCode::Success as usize
         }
         Err(e) => {
-            // crate::println!("[LSM] Failed to load module: {:?}", e);
+            if let LsmError::MissingDependency(dep) = &e {
+                crate::println!("[LSM] missing dependency: {}", dep);
+            }
             map_lsm_error_to_code(&e) as usize
         }
     }

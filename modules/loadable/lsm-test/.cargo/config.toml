@@ -1,0 +1,13 @@
+[target.riscv64gc-unknown-none-elf]
+runner = "true"
+
+[target.aarch64-unknown-none-elf]
+runner = "true"
+
+[profile.dev]
+opt-level = 3
+
+[unstable]
+build-std = ["core", "compiler_builtins", "alloc"]
+build-std-features = ["compiler-builtins-mem"]
+unstable-options = true

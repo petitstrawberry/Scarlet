@@ -752,6 +752,13 @@ fn build_loadable_module(
         )
     })?;
 
+    let module_name = read_module_toml_name(&module_dir).ok_or_else(|| {
+        format!(
+            "failed to read module name from module.toml in {}",
+            module_dir.display()
+        )
+    })?;
+
     let target_path = if Path::new(target).is_absolute() {
         PathBuf::from(target)
     } else {
@@ -796,6 +803,7 @@ fn build_loadable_module(
     let profile = if release { "release" } else { "debug" };
     let output_dir = module_dir.join("target").join(&target_triple).join(profile);
     let deps_dir = output_dir.join("deps");
+    let lsm_filename = format!("{}.lsm", module_name);
     let mut built = false;
     for entry in fs::read_dir(&deps_dir)
         .map_err(|e| format!("failed to read {}: {e}", deps_dir.display()))?
@@ -804,10 +812,7 @@ fn build_loadable_module(
         let path = entry.path();
         if let Some(ext) = path.extension() {
             if ext == "o" {
-                let stem = path.file_stem().unwrap().to_string_lossy();
-                let clean_name = strip_hash_suffix(&stem);
-                let lsm_name = format!("{}.lsm", clean_name);
-                let lsm_path = output_dir.join(&lsm_name);
+                let lsm_path = output_dir.join(&lsm_filename);
                 fs::rename(&path, &lsm_path)
                     .map_err(|e| format!("failed to rename to .lsm: {e}"))?;
                 eprintln!("cargo-scarlet: produced {}", lsm_path.display());
@@ -838,32 +843,31 @@ fn build_loadable_module(
             .map_err(|e| format!("failed to get current directory: {e}"))?
             .join(output);
         fs::create_dir_all(&output_dir).map_err(|e| format!("failed to create output dir: {e}"))?;
-        for lsm_entry in fs::read_dir(&module_dir.join("target").join(&target_triple).join("debug"))
-            .map_err(|e| format!("failed to read debug dir: {e}"))?
-        {
-            let lsm_entry = lsm_entry.map_err(|e| format!("failed to read dir entry: {e}"))?;
-            let lsm_path = lsm_entry.path();
-            if lsm_path.extension().is_some_and(|e| e == "lsm") {
-                let dest = output_dir.join(lsm_path.file_name().unwrap());
-                fs::copy(&lsm_path, &dest)
-                    .map_err(|e| format!("failed to copy .lsm to output: {e}"))?;
-                eprintln!("cargo-scarlet: copied to {}", dest.display());
-            }
-        }
+        let lsm_path = module_dir
+            .join("target")
+            .join(&target_triple)
+            .join(profile)
+            .join(&lsm_filename);
+        let dest = output_dir.join(&lsm_filename);
+        fs::copy(&lsm_path, &dest).map_err(|e| format!("failed to copy .lsm to output: {e}"))?;
+        eprintln!("cargo-scarlet: copied to {}", dest.display());
     }
 
     Ok(())
 }
 
-fn strip_hash_suffix(name: &str) -> String {
-    match name.rfind('-') {
-        Some(pos) => {
-            let suffix = &name[pos + 1..];
-            if suffix.chars().all(|c| c.is_ascii_hexdigit()) && suffix.len() >= 8 {
-                return name[..pos].to_string();
+fn read_module_toml_name(module_dir: &Path) -> Option<String> {
+    let content = fs::read_to_string(module_dir.join("module.toml")).ok()?;
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("name") {
+            if let Some(eq_pos) = trimmed.find('=') {
+                let value = trimmed[eq_pos + 1..].trim();
+                if value.starts_with('"') && value.ends_with('"') && value.len() >= 2 {
+                    return Some(value[1..value.len() - 1].to_string());
+                }
             }
         }
-        None => {}
     }
-    name.to_string()
+    None
 }

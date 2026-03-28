@@ -9,7 +9,7 @@ pub mod loader;
 pub mod symbol;
 pub mod syscall;
 
-pub use loader::{LoadedModule, LsmError, list_modules, load_module, unload_module};
+pub use loader::{list_modules, load_module, unload_module, LoadedModule, LsmError};
 
 #[repr(usize)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -24,6 +24,7 @@ pub enum LsmErrorCode {
     BuildInfoMismatch = 7,
     NotFound = 8,
     PermissionDenied = 9,
+    MissingDependency = 10,
 }
 
 #[unsafe(no_mangle)]

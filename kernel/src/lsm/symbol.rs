@@ -9,8 +9,14 @@ use spin::Mutex;
 
 use crate::early_println;
 
+struct RegistryEntry {
+    name: String,
+    addr: usize,
+    module_id: Option<u64>,
+}
+
 pub struct SymbolRegistry {
-    entries: Vec<(String, usize)>,
+    entries: Vec<RegistryEntry>,
 }
 
 impl SymbolRegistry {
@@ -21,10 +27,32 @@ impl SymbolRegistry {
     }
 
     pub fn lookup(&self, name: &str) -> Option<usize> {
+        self.lookup_module(name).map(|(addr, _)| addr)
+    }
+
+    pub fn lookup_module(&self, name: &str) -> Option<(usize, Option<u64>)> {
+        let normalized = strip_crate_hash(name);
         self.entries
             .iter()
-            .find(|(n, _)| strip_crate_hash(n) == strip_crate_hash(name))
-            .map(|(_, addr)| *addr)
+            .rev()
+            .find(|entry| entry.name == normalized)
+            .map(|entry| (entry.addr, entry.module_id))
+    }
+
+    pub fn register_module_symbols(&mut self, module_id: u64, symbols: &[(String, usize)]) {
+        for (name, addr) in symbols {
+            let normalized = strip_crate_hash(name);
+            self.entries.push(RegistryEntry {
+                name: normalized.into_owned(),
+                addr: *addr,
+                module_id: Some(module_id),
+            });
+        }
+    }
+
+    pub fn unregister_module_symbols(&mut self, module_id: u64) {
+        self.entries
+            .retain(|entry| entry.module_id != Some(module_id));
     }
 
     pub fn len(&self) -> usize {
@@ -79,7 +107,11 @@ pub fn init_kernel_symbols() {
     let mut registry = SYMBOL_REGISTRY.lock();
 
     for &(name, addr) in syms {
-        registry.entries.push((String::from(name), addr));
+        registry.entries.push(RegistryEntry {
+            name: strip_crate_hash(name).into_owned(),
+            addr,
+            module_id: None,
+        });
     }
 
     early_println!(

@@ -6,10 +6,11 @@ use spin::Mutex;
 
 use crate::environment::PAGE_SIZE;
 use crate::lsm::elf::{
-    self, SHF_ALLOC, SHF_EXECINSTR, SHF_WRITE, SHN_UNDEF, SHT_NOBITS, SHT_PROGBITS,
+    self, SHF_ALLOC, SHF_EXECINSTR, SHF_WRITE, SHN_UNDEF, SHT_NOBITS, SHT_PROGBITS, STB_GLOBAL,
+    STB_WEAK,
 };
 use crate::lsm::symbol;
-use crate::mem::page::{Page, allocate_raw_pages, free_raw_pages};
+use crate::mem::page::{allocate_raw_pages, free_raw_pages, Page};
 use crate::vm::addr::virt_to_phys;
 use crate::vm::get_kernel_vm_manager;
 use crate::vm::vmem::{MemoryArea, VirtualMemoryMap, VirtualMemoryPermission};
@@ -22,6 +23,7 @@ pub enum LsmError {
     NoInitSymbol,
     InitFailed(&'static str),
     BuildInfoMismatch,
+    MissingDependency(String),
     NotFound,
     PermissionDenied,
 }
@@ -33,6 +35,7 @@ pub struct LoadedModule {
     pub section_bases: Vec<(usize, usize)>,
     pub mapped_ranges: Vec<(usize, usize)>,
     pub pages_ptrs: Vec<*mut Page>,
+    pub dependencies: Vec<String>,
     pub initialized: bool,
 }
 
@@ -144,6 +147,19 @@ fn resolve_module_name(object: &elf::RelocObject, section_bases: &[(usize, usize
         .unwrap_or_else(|| String::from("lsm-module"))
 }
 
+fn resolve_module_dependencies(
+    object: &elf::RelocObject,
+    section_bases: &[(usize, usize)],
+) -> Vec<String> {
+    let deps = read_module_string(object, section_bases, "SCARLET_LSM_DEPENDS", 1024)
+        .unwrap_or_else(String::new);
+    deps.split(',')
+        .map(str::trim)
+        .filter(|dep| !dep.is_empty())
+        .map(String::from)
+        .collect()
+}
+
 fn rollback_mappings_and_pages(
     mapped_ranges: &[(usize, usize)],
     pages_ptrs: &[*mut Page],
@@ -165,6 +181,15 @@ pub fn unload_module(module_id: u64) -> Result<(), LsmError> {
             .iter()
             .position(|module| module.id == module_id)
             .ok_or(LsmError::NotFound)?;
+        let module_name = registry[pos].name.clone();
+        if registry.iter().any(|module| {
+            module.id != module_id && module.dependencies.iter().any(|dep| dep == &module_name)
+        }) {
+            return Err(LsmError::PermissionDenied);
+        }
+        symbol::get_symbol_registry()
+            .lock()
+            .unregister_module_symbols(module_id);
         registry.remove(pos)
     };
 
@@ -312,6 +337,17 @@ pub fn load_module(data: &[u8]) -> Result<u64, LsmError> {
         }
     }
 
+    let dependencies = resolve_module_dependencies(&object, &section_bases);
+    {
+        let registry = MODULE_REGISTRY.lock();
+        for dep in &dependencies {
+            if !registry.iter().any(|module| module.name == *dep) {
+                rollback_mappings_and_pages(&mapped_ranges, &pages_ptrs, &pages_counts);
+                return Err(LsmError::MissingDependency(dep.clone()));
+            }
+        }
+    }
+
     let symbol_resolver = |name: &str| symbol::get_symbol_registry().lock().lookup(name);
 
     crate::arch::lsm::apply_relocations(&object, &section_bases, &symbol_resolver).map_err(
@@ -396,12 +432,32 @@ pub fn load_module(data: &[u8]) -> Result<u64, LsmError> {
         id
     };
 
+    let exported_symbols: Vec<(String, usize)> = object
+        .symbols
+        .iter()
+        .filter_map(|sym| {
+            if sym.shndx == SHN_UNDEF || (sym.bind != STB_GLOBAL && sym.bind != STB_WEAK) {
+                return None;
+            }
+            let section_index = usize::from(sym.shndx);
+            let base = section_base_for(&section_bases, section_index)?;
+            let offset = usize::try_from(sym.value).ok()?;
+            let addr = base.checked_add(offset)?;
+            Some((sym.name.clone(), addr))
+        })
+        .collect();
+
+    symbol::get_symbol_registry()
+        .lock()
+        .register_module_symbols(module_id, &exported_symbols);
+
     MODULE_REGISTRY.lock().push(LoadedModule {
         id: module_id,
         name: resolve_module_name(&object, &section_bases),
         section_bases,
         mapped_ranges,
         pages_ptrs,
+        dependencies,
         initialized: true,
     });
 
