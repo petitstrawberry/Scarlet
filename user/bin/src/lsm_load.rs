@@ -307,11 +307,20 @@ fn resolve_to_absolute(path: &str) -> String {
     if path.starts_with('/') {
         return path.to_string();
     }
+    if file_exists(path) {
+        let mut abs = String::from("/");
+        abs.push_str(path);
+        return abs;
+    }
     let filename = path.rsplit('/').next().unwrap_or(path);
     for dir in modules_dirs() {
-        let abs = format!("{}/{}", dir, filename);
-        if file_exists(&abs) {
-            return abs;
+        let with_ext = if filename.ends_with(".lsm") {
+            format!("{}/{}", dir, filename)
+        } else {
+            format!("{}/{}.lsm", dir, filename)
+        };
+        if file_exists(&with_ext) {
+            return with_ext;
         }
     }
     path.to_string()
@@ -322,7 +331,8 @@ fn load_module_recursive(
     visiting: &mut Vec<String>,
     loaded: &mut Vec<String>,
 ) -> Result<(), String> {
-    let data = read_file_bytes(module_path)?;
+    let resolved = resolve_to_absolute(module_path);
+    let data = read_file_bytes(&resolved)?;
     let module_name = read_module_name(&data, module_path);
 
     if loaded.iter().any(|name| name == &module_name) {
