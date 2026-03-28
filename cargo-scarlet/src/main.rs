@@ -18,18 +18,6 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Commands {
-    Generate {
-        #[arg(long)]
-        project: PathBuf,
-    },
-    Check {
-        #[arg(long)]
-        project: PathBuf,
-        #[arg(long)]
-        target: Option<String>,
-        #[arg(long)]
-        release: bool,
-    },
     Build {
         #[arg(long)]
         project: Option<PathBuf>,
@@ -41,6 +29,14 @@ enum Commands {
         module: Option<PathBuf>,
         #[arg(long)]
         output: Option<PathBuf>,
+    },
+    Check {
+        #[arg(long)]
+        project: PathBuf,
+        #[arg(long)]
+        target: Option<String>,
+        #[arg(long)]
+        release: bool,
     },
     Clippy {
         #[arg(long)]
@@ -62,9 +58,17 @@ enum Commands {
         #[arg(last = true)]
         extra_args: Vec<String>,
     },
-    Init {
+    New {
         #[arg(long)]
-        project: PathBuf,
+        module: Option<String>,
+        #[arg(long)]
+        bsp: Option<String>,
+        #[arg(long)]
+        kernel_path: Option<PathBuf>,
+        #[arg(long)]
+        kernel_rev: Option<String>,
+        #[arg(long)]
+        target: Option<String>,
     },
 }
 
@@ -138,10 +142,6 @@ fn main() -> ExitCode {
 fn run() -> Result<(), String> {
     let cli = Cli::parse_from(normalized_args());
     match cli.command {
-        Commands::Generate { project } => {
-            generate(&project)?;
-            Ok(())
-        }
         Commands::Check {
             project,
             target,
@@ -184,7 +184,19 @@ fn run() -> Result<(), String> {
             let config = generate(&project)?;
             cargo_command(&project, &config, "run", target, release, &extra_args)
         }
-        Commands::Init { project } => init_project(&project),
+        Commands::New {
+            module,
+            bsp,
+            kernel_path,
+            kernel_rev,
+            target,
+        } => new_scaffold(
+            module,
+            bsp,
+            kernel_path.as_deref(),
+            kernel_rev.as_deref(),
+            target.as_deref(),
+        ),
     }
 }
 
@@ -194,20 +206,6 @@ fn normalized_args() -> Vec<String> {
         args.remove(1);
     }
     args
-}
-
-fn init_project(project: &Path) -> Result<(), String> {
-    let project = normalize_output_path(project)?;
-    ensure_init_target_is_valid(&project)?;
-
-    fs::create_dir_all(project.join(".scarlet"))
-        .map_err(|error| format!("failed to create {}: {error}", project.display()))?;
-
-    let gitignore = ".scarlet\ntarget\n";
-
-    append_gitignore_entry(&project.join(".gitignore"), gitignore)?;
-
-    Ok(())
 }
 
 fn generate(project: &Path) -> Result<ScarletConfig, String> {
@@ -286,35 +284,6 @@ fn cargo_command(
 
 fn normalize_project_path(path: &Path) -> Result<PathBuf, String> {
     fs::canonicalize(path).map_err(|error| format!("failed to resolve {}: {error}", path.display()))
-}
-
-fn normalize_output_path(path: &Path) -> Result<PathBuf, String> {
-    if path.exists() {
-        fs::canonicalize(path)
-            .map_err(|error| format!("failed to resolve {}: {error}", path.display()))
-    } else {
-        let current_dir = std::env::current_dir()
-            .map_err(|error| format!("failed to resolve current directory: {error}"))?;
-        Ok(current_dir.join(path))
-    }
-}
-
-fn ensure_init_target_is_valid(project: &Path) -> Result<(), String> {
-    if !project.exists() {
-        return Err(format!(
-            "init expects an existing project directory: {}",
-            project.display()
-        ));
-    }
-
-    if !project.is_dir() {
-        return Err(format!(
-            "init target is not a directory: {}",
-            project.display()
-        ));
-    }
-
-    Ok(())
 }
 
 fn validate_config(config: &ScarletConfig) -> Result<(), String> {
@@ -594,21 +563,6 @@ fn write_if_changed(path: &Path, contents: &str) -> Result<(), String> {
         .map_err(|error| format!("failed to write {}: {error}", path.display()))
 }
 
-fn append_gitignore_entry(path: &Path, entry_block: &str) -> Result<(), String> {
-    let existing = fs::read_to_string(path).unwrap_or_default();
-    if existing.contains(".scarlet") && existing.contains("target") {
-        return Ok(());
-    }
-
-    let mut updated = existing;
-    if !updated.is_empty() && !updated.ends_with('\n') {
-        updated.push('\n');
-    }
-    updated.push_str(entry_block);
-
-    fs::write(path, updated).map_err(|error| format!("failed to write {}: {error}", path.display()))
-}
-
 fn config_fingerprint(config: &ScarletConfig) -> String {
     let mut fingerprint = String::new();
     let _ = write!(
@@ -870,4 +824,371 @@ fn read_module_toml_name(module_dir: &Path) -> Option<String> {
         }
     }
     None
+}
+
+const KERNEL_GIT_URL: &str = "https://github.com/petitstrawberry/Scarlet";
+const KERNEL_DEFAULT_REV: &str = "v0.17.0";
+
+fn new_scaffold(
+    module: Option<String>,
+    bsp: Option<String>,
+    kernel_path: Option<&Path>,
+    kernel_rev: Option<&str>,
+    target: Option<&str>,
+) -> Result<(), String> {
+    match (module, bsp) {
+        (Some(name), None) => scaffold_module(&name, kernel_path, kernel_rev),
+        (None, Some(name)) => scaffold_bsp(&name, kernel_path, kernel_rev, target),
+        (Some(_), Some(_)) => Err("cannot specify both --module and --bsp".to_string()),
+        (None, None) => Err("specify --module or --bsp".to_string()),
+    }
+}
+
+fn kernel_dependency_spec(
+    kernel_path: Option<&Path>,
+    kernel_rev: Option<&str>,
+    module_dir: &Path,
+) -> Result<String, String> {
+    if let Some(path) = kernel_path {
+        let abs_kernel = fs::canonicalize(path).map_err(|e| format!("{e}: {}", path.display()))?;
+        let abs_module = module_dir.to_path_buf();
+        let rel = pathdiff(&abs_kernel, &abs_module)?;
+        Ok(format!("path = \"{}\"", rel.display()))
+    } else {
+        let rev = kernel_rev.unwrap_or(KERNEL_DEFAULT_REV);
+        Ok(format!("git = \"{KERNEL_GIT_URL}\", rev = \"{rev}\""))
+    }
+}
+
+fn kernel_source_toml(
+    kernel_path: Option<&Path>,
+    kernel_rev: Option<&str>,
+    base_dir: &Path,
+) -> Result<String, String> {
+    if let Some(path) = kernel_path {
+        let abs_kernel = fs::canonicalize(path).map_err(|e| format!("{e}: {}", path.display()))?;
+        let rel = pathdiff(&abs_kernel, base_dir)?;
+        Ok(format!("{{ path = \"{}\" }}", rel.display()))
+    } else {
+        let rev = kernel_rev.unwrap_or(KERNEL_DEFAULT_REV);
+        Ok(format!("{{ git = \"{KERNEL_GIT_URL}\", rev = \"{rev}\" }}"))
+    }
+}
+
+fn scaffold_module(
+    name: &str,
+    kernel_path: Option<&Path>,
+    kernel_rev: Option<&str>,
+) -> Result<(), String> {
+    let module_dir = PathBuf::from(name);
+    let kernel_spec = kernel_dependency_spec(kernel_path, kernel_rev, &module_dir)?;
+    let crate_name = cargo_key_to_rust_identifier(name);
+    let src_dir = module_dir.join("src");
+    let cargo_dir = module_dir.join(".cargo");
+
+    fs::create_dir_all(&src_dir)
+        .map_err(|e| format!("failed to create {}: {e}", src_dir.display()))?;
+    fs::create_dir_all(&cargo_dir)
+        .map_err(|e| format!("failed to create {}: {e}", cargo_dir.display()))?;
+
+    let name_bytes = name.as_bytes();
+    let name_with_null_len = name_bytes.len() + 1;
+
+    let cargo_toml = format!(
+        r#"[package]
+name = "{crate_name}"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+scarlet = {{ {kernel_spec} }}
+"#
+    );
+    let _ = write_if_changed(&module_dir.join("Cargo.toml"), &cargo_toml)?;
+
+    let module_toml = format!(
+        r#"[module]
+name = "{name}"
+depends = []
+"#
+    );
+    let _ = write_if_changed(&module_dir.join("module.toml"), &module_toml)?;
+
+    let build_rs = r#"use std::path::Path;
+
+fn parse_depends(content: &str) -> Vec<String> {
+    let mut deps = Vec::new();
+    let mut rest = content;
+
+    while let Some(depends_pos) = rest.find("depends") {
+        rest = &rest[depends_pos + "depends".len()..];
+        let Some(eq_pos) = rest.find('=') else {
+            break;
+        };
+        rest = &rest[eq_pos + 1..];
+        let Some(open_pos) = rest.find('[') else {
+            break;
+        };
+        rest = &rest[open_pos + 1..];
+        let Some(close_pos) = rest.find(']') else {
+            break;
+        };
+
+        let array = &rest[..close_pos];
+        for item in array.split(',') {
+            let trimmed = item.trim();
+            if trimmed.len() >= 2 && trimmed.starts_with('"') && trimmed.ends_with('"') {
+                deps.push(trimmed[1..trimmed.len() - 1].to_string());
+            }
+        }
+        break;
+    }
+
+    deps
+}
+
+fn main() {
+    let rustc_version = std::env::var("RUSTC").unwrap_or_else(|_| "rustc".to_string());
+    let output = std::process::Command::new(rustc_version)
+        .arg("--version")
+        .output()
+        .expect("failed to run rustc --version");
+    let version = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    println!("cargo:rustc-env=RUSTC_VERSION={version}");
+
+    let target = std::env::var("TARGET").unwrap_or_else(|_| "unknown".to_string());
+    println!("cargo:rustc-env=TARGET={target}");
+
+    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".to_string());
+    let module_toml = Path::new(&manifest_dir).join("module.toml");
+    println!("cargo:rerun-if-changed={}", module_toml.display());
+
+    if module_toml.exists() {
+        let content = std::fs::read_to_string(&module_toml).expect("failed to read module.toml");
+        let depends = parse_depends(&content);
+        println!("cargo:rustc-env=SCARLET_LSM_DEPENDS={}", depends.join(","));
+    } else {
+        println!("cargo:rustc-env=SCARLET_LSM_DEPENDS=");
+    }
+}
+"#;
+    let _ = write_if_changed(&module_dir.join("build.rs"), build_rs)?;
+
+    let lib_rs = format!(
+        r#"#![no_std]
+
+use scarlet::early_println;
+
+#[unsafe(no_mangle)]
+pub static SCARLET_LSM_NAME: [u8; {name_with_null_len}] = *b"{name}\0";
+
+#[unsafe(no_mangle)]
+pub static SCARLET_LSM_BUILD_INFO: [u8; 72] = {{
+    let s = concat!(env!("RUSTC_VERSION"), ";", env!("TARGET"), "\0");
+    let bytes: &[u8] = s.as_bytes();
+    let mut arr = [0u8; 72];
+    let mut i = 0;
+    while i < bytes.len() && i < 72 {{
+        arr[i] = bytes[i];
+        i += 1;
+    }}
+    arr
+}};
+
+#[unsafe(no_mangle)]
+pub static SCARLET_LSM_DEPENDS: [u8; 256] = {{
+    let s = concat!(env!("SCARLET_LSM_DEPENDS"), "\0");
+    let bytes: &[u8] = s.as_bytes();
+    let mut arr = [0u8; 256];
+    let mut i = 0;
+    while i < bytes.len() && i < 256 {{
+        arr[i] = bytes[i];
+        i += 1;
+    }}
+    arr
+}};
+
+#[unsafe(no_mangle)]
+pub extern "C" fn scarlet_lsm_init() -> Result<(), &'static str> {{
+    early_println!("[{name}] loaded!");
+    Ok(())
+}}
+"#
+    );
+    let _ = write_if_changed(&src_dir.join("lib.rs"), &lib_rs)?;
+
+    let cargo_config = r#"[target.riscv64gc-unknown-none-elf]
+runner = "true"
+
+[target.aarch64-unknown-none-elf]
+runner = "true"
+
+[profile.dev]
+opt-level = 3
+
+[unstable]
+build-std = ["core", "compiler_builtins", "alloc"]
+build-std-features = ["compiler-builtins-mem"]
+unstable-options = true
+"#;
+    let _ = write_if_changed(&cargo_dir.join("config.toml"), cargo_config)?;
+
+    let _ = write_if_changed(&module_dir.join(".gitignore"), "target/\n");
+
+    eprintln!("cargo-scarlet: created loadable module '{name}'");
+    Ok(())
+}
+
+fn scaffold_bsp(
+    name: &str,
+    kernel_path: Option<&Path>,
+    kernel_rev: Option<&str>,
+    target: Option<&str>,
+) -> Result<(), String> {
+    let target = target.ok_or("--target is required for BSP")?;
+    let bsp_dir = PathBuf::from(name);
+    let kernel_spec = kernel_dependency_spec(kernel_path, kernel_rev, &bsp_dir)?;
+    let kernel_source = kernel_source_toml(kernel_path, kernel_rev, &bsp_dir)?;
+    let target_json_dir = match kernel_path {
+        Some(p) => {
+            let abs = fs::canonicalize(p).map_err(|e| format!("{e}: {}", p.display()))?;
+            let rel = pathdiff(&abs, &bsp_dir)?;
+            format!("{}/targets/{}", rel.display(), target)
+        }
+        None => format!("../../kernel/targets/{target}"),
+    };
+    let src_dir = bsp_dir.join("src");
+    let lds_dir = bsp_dir.join("lds");
+    let cargo_dir = bsp_dir.join(".cargo");
+    let scarlet_modules_dir = bsp_dir.join(".scarlet/scarlet-modules/src");
+
+    fs::create_dir_all(&src_dir)
+        .map_err(|e| format!("failed to create {}: {e}", src_dir.display()))?;
+    fs::create_dir_all(&lds_dir)
+        .map_err(|e| format!("failed to create {}: {e}", lds_dir.display()))?;
+    fs::create_dir_all(&cargo_dir)
+        .map_err(|e| format!("failed to create {}: {e}", cargo_dir.display()))?;
+    fs::create_dir_all(&scarlet_modules_dir)
+        .map_err(|e| format!("failed to create {}: {e}", scarlet_modules_dir.display()))?;
+
+    let crate_name = cargo_key_to_rust_identifier(name);
+    let main_rs = format!(
+        r#"#![no_std]
+#![no_main]
+
+extern crate scarlet_modules;
+
+use scarlet_modules::scarlet;
+
+#[unsafe(link_section = ".init")]
+#[unsafe(no_mangle)]
+pub extern "C" fn arch_start_kernel() -> ! {{
+    scarlet_modules::force_link();
+    // REQUIRED: implement architecture-specific boot entry
+    // e.g. scarlet_modules::scarlet::arch::riscv64::boot::limine::limine_entry()
+    loop {{}}
+}}
+"#
+    );
+    let _ = write_if_changed(&src_dir.join("main.rs"), &main_rs)?;
+
+    let bsp_cargo_toml = format!(
+        r#"[package]
+name = "{crate_name}"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "scarlet"
+path = "src/main.rs"
+
+[dependencies]
+scarlet_modules = {{ package = "scarlet-modules", path = ".scarlet/scarlet-modules" }}
+"#
+    );
+    let _ = write_if_changed(&bsp_dir.join("Cargo.toml"), &bsp_cargo_toml)?;
+
+    let scarlet_config = format!(
+        r#"config_version = 1
+
+[project]
+name = "scarlet-{name}"
+
+[board]
+name = "{name}"
+target = "{target}"
+target_json = "{target_json_dir}"
+
+[kernel]
+package = "scarlet"
+source = {kernel_source}
+
+[kernel.features]
+
+[modules]
+"#
+    );
+    let _ = write_if_changed(&bsp_dir.join("scarlet-config.toml"), &scarlet_config)?;
+
+    let cargo_config = format!(
+        r#"[profile.dev]
+opt-level = 3
+
+[profile.test]
+opt-level = 3
+
+[build]
+target = "{target_json_dir}"
+
+[unstable]
+build-std = ["core", "compiler_builtins", "alloc"]
+build-std-features = ["compiler-builtins-mem"]
+unstable-options = true
+"#
+    );
+    let _ = write_if_changed(&cargo_dir.join("config.toml"), &cargo_config)?;
+
+    let modules_cargo_toml = format!(
+        r#"# generated by cargo-scarlet
+
+[package]
+name = "scarlet-modules"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+scarlet = {{ {kernel_spec}, default-features = false }}
+"#
+    );
+    let _ = write_if_changed(
+        &bsp_dir.join(".scarlet/scarlet-modules/Cargo.toml"),
+        &modules_cargo_toml,
+    )?;
+
+    let modules_lib_rs = r#"#![no_std]
+
+pub use scarlet;
+
+#[inline(never)]
+pub fn force_link() {}
+"#;
+    let _ = write_if_changed(
+        &bsp_dir.join(".scarlet/scarlet-modules/src/lib.rs"),
+        modules_lib_rs,
+    )?;
+
+    let _ = write_if_changed(&bsp_dir.join(".gitignore"), ".scarlet\ntarget\n");
+
+    eprintln!("cargo-scarlet: created BSP '{name}'");
+    eprintln!("cargo-scarlet: REQUIRED: update .cargo/config.toml with runner");
+    eprintln!("cargo-scarlet: REQUIRED: add linker script to lds/");
+    eprintln!("cargo-scarlet: REQUIRED: implement boot entry in src/main.rs (arch_start_kernel)");
+
+    Ok(())
 }
