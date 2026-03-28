@@ -130,11 +130,17 @@ fn read_module_string(
     let sym = object.symbols.iter().find(|s| s.name == symbol_name)?;
     let shndx = sym.shndx as usize;
     let base = section_bases.iter().find(|(idx, _)| *idx == shndx)?.1;
+    let section_size = object.sections.get(shndx)?.sh_size as usize;
     let offset = sym.value as usize;
+    if offset >= section_size {
+        return None;
+    }
+    let available = section_size - offset;
+    let capped_len = max_len.min(available);
     let ptr = (base + offset) as *const u8;
     let mut len = 0usize;
     unsafe {
-        while *ptr.add(len) != 0 && len < max_len {
+        while len < capped_len && *ptr.add(len) != 0 {
             len += 1;
         }
     }

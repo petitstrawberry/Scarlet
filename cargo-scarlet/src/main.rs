@@ -758,20 +758,60 @@ fn build_loadable_module(
     let output_dir = module_dir.join("target").join(&target_triple).join(profile);
     let deps_dir = output_dir.join("deps");
     let lsm_filename = format!("{}.lsm", module_name);
-    let mut built = false;
+
+    let mut object_files: Vec<std::path::PathBuf> = Vec::new();
     for entry in fs::read_dir(&deps_dir)
         .map_err(|e| format!("failed to read {}: {e}", deps_dir.display()))?
     {
         let entry = entry.map_err(|e| format!("failed to read dir entry: {e}"))?;
         let path = entry.path();
-        if let Some(ext) = path.extension()
-            && ext == "o"
-        {
-            let lsm_path = output_dir.join(&lsm_filename);
-            fs::rename(&path, &lsm_path).map_err(|e| format!("failed to rename to .lsm: {e}"))?;
-            eprintln!("cargo-scarlet: produced {}", lsm_path.display());
-            built = true;
+        if path.extension().is_some_and(|ext| ext == "o") {
+            object_files.push(path);
         }
+    }
+
+    let selected_object = if object_files.is_empty() {
+        None
+    } else if object_files.len() == 1 {
+        Some(object_files.remove(0))
+    } else {
+        let normalized = cargo_key_to_rust_identifier(&module_name);
+        let candidates: Vec<_> = object_files
+            .into_iter()
+            .filter(|path| {
+                path.file_stem()
+                    .and_then(|s| s.to_str())
+                    .map(|stem| stem.starts_with(&normalized))
+                    .unwrap_or(false)
+            })
+            .collect();
+
+        match candidates.len() {
+            0 => {
+                return Err(format!(
+                    "multiple .o files in {}, but none match module name '{}'",
+                    deps_dir.display(),
+                    module_name
+                ));
+            }
+            1 => Some(candidates.into_iter().next().unwrap()),
+            _ => {
+                return Err(format!(
+                    "multiple .o files in {} match module name '{}'; cannot determine which to use",
+                    deps_dir.display(),
+                    module_name
+                ));
+            }
+        }
+    };
+
+    let mut built = false;
+    if let Some(object_path) = selected_object {
+        let lsm_path = output_dir.join(&lsm_filename);
+        fs::rename(&object_path, &lsm_path)
+            .map_err(|e| format!("failed to rename object file to .lsm: {e}"))?;
+        eprintln!("cargo-scarlet: produced {}", lsm_path.display());
+        built = true;
     }
 
     if !built {
