@@ -23,7 +23,33 @@ const LSM_ERROR_MISSING_DEPENDENCY: usize = 10;
 const LSM_LIST_ENTRY_SIZE: usize = 264;
 const LSM_LIST_MAX_MODULES: usize = 128;
 
-const MODULES_DIR: &str = "/scarlet/system/scarlet/modules";
+const DEFAULT_MODULES_DIR: &str = "/scarlet/system/scarlet/modules";
+
+fn modules_dirs() -> Vec<String> {
+    let value = env::var("LSM_MODULES_PATH").unwrap_or_else(|| DEFAULT_MODULES_DIR.to_string());
+    let mut dirs = Vec::new();
+    let mut rest = value.as_str();
+    while !rest.is_empty() {
+        match rest.find(':') {
+            Some(pos) => {
+                if pos > 0 {
+                    dirs.push(rest[..pos].to_string());
+                }
+                rest = &rest[pos + 1..];
+            }
+            None => {
+                if !rest.is_empty() {
+                    dirs.push(rest.to_string());
+                }
+                break;
+            }
+        }
+    }
+    if dirs.is_empty() {
+        dirs.push(DEFAULT_MODULES_DIR.to_string());
+    }
+    dirs
+}
 
 fn read_u16(data: &[u8], offset: usize, little_endian: bool) -> Option<u16> {
     let bytes: [u8; 2] = data.get(offset..offset + 2)?.try_into().ok()?;
@@ -247,7 +273,9 @@ fn list_loaded_module_names() -> Vec<String> {
 fn find_dependency_path(dep_name: &str, origin_path: &str) -> Option<String> {
     let mut candidates = Vec::new();
 
-    candidates.push(format!("{}/{}.lsm", MODULES_DIR, dep_name));
+    for dir in modules_dirs() {
+        candidates.push(format!("{}/{}.lsm", dir, dep_name));
+    }
 
     if let Some(dir) = parent_dir(origin_path) {
         candidates.push(format!("{}/{}.lsm", dir, dep_name));
@@ -259,13 +287,15 @@ fn find_dependency_path(dep_name: &str, origin_path: &str) -> Option<String> {
         }
     }
 
-    if let Ok(entries) = list_directory(MODULES_DIR) {
-        for entry in entries {
-            if !entry.is_file() {
-                continue;
-            }
-            if entry.name == format!("{}.lsm", dep_name) {
-                return Some(format!("{}/{}", MODULES_DIR, entry.name));
+    for dir in modules_dirs() {
+        if let Ok(entries) = list_directory(&dir) {
+            for entry in entries {
+                if !entry.is_file() {
+                    continue;
+                }
+                if entry.name == format!("{}.lsm", dep_name) {
+                    return Some(format!("{}/{}", dir, entry.name));
+                }
             }
         }
     }
@@ -278,9 +308,11 @@ fn resolve_to_absolute(path: &str) -> String {
         return path.to_string();
     }
     let filename = path.rsplit('/').next().unwrap_or(path);
-    let abs = format!("{}/{}", MODULES_DIR, filename);
-    if file_exists(&abs) {
-        return abs;
+    for dir in modules_dirs() {
+        let abs = format!("{}/{}", dir, filename);
+        if file_exists(&abs) {
+            return abs;
+        }
     }
     path.to_string()
 }
