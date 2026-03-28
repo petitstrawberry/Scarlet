@@ -553,10 +553,10 @@ fn render_generated_lib(config: &ScarletConfig) -> String {
 }
 
 fn write_if_changed(path: &Path, contents: &str) -> Result<(), String> {
-    if let Ok(existing) = fs::read_to_string(path) {
-        if existing == contents {
-            return Ok(());
-        }
+    if let Ok(existing) = fs::read_to_string(path)
+        && existing == contents
+    {
+        return Ok(());
     }
 
     fs::write(path, contents)
@@ -764,14 +764,13 @@ fn build_loadable_module(
     {
         let entry = entry.map_err(|e| format!("failed to read dir entry: {e}"))?;
         let path = entry.path();
-        if let Some(ext) = path.extension() {
-            if ext == "o" {
-                let lsm_path = output_dir.join(&lsm_filename);
-                fs::rename(&path, &lsm_path)
-                    .map_err(|e| format!("failed to rename to .lsm: {e}"))?;
-                eprintln!("cargo-scarlet: produced {}", lsm_path.display());
-                built = true;
-            }
+        if let Some(ext) = path.extension()
+            && ext == "o"
+        {
+            let lsm_path = output_dir.join(&lsm_filename);
+            fs::rename(&path, &lsm_path).map_err(|e| format!("failed to rename to .lsm: {e}"))?;
+            eprintln!("cargo-scarlet: produced {}", lsm_path.display());
+            built = true;
         }
     }
 
@@ -814,13 +813,14 @@ fn read_module_toml_name(module_dir: &Path) -> Option<String> {
     let content = fs::read_to_string(module_dir.join("module.toml")).ok()?;
     for line in content.lines() {
         let trimmed = line.trim();
-        if trimmed.starts_with("name") {
-            if let Some(eq_pos) = trimmed.find('=') {
-                let value = trimmed[eq_pos + 1..].trim();
-                if value.starts_with('"') && value.ends_with('"') && value.len() >= 2 {
-                    return Some(value[1..value.len() - 1].to_string());
-                }
-            }
+        if trimmed.starts_with("name")
+            && let Some(eq_pos) = trimmed.find('=')
+            && let Some(value) = trimmed.get(eq_pos + 1..).map(str::trim)
+            && value.starts_with('"')
+            && value.ends_with('"')
+            && value.len() >= 2
+        {
+            return Some(value[1..value.len() - 1].to_string());
         }
     }
     None
@@ -907,7 +907,7 @@ path = "src/lib.rs"
 scarlet = {{ {kernel_spec} }}
 "#
     );
-    let _ = write_if_changed(&module_dir.join("Cargo.toml"), &cargo_toml)?;
+    write_if_changed(&module_dir.join("Cargo.toml"), &cargo_toml)?;
 
     let module_toml = format!(
         r#"[module]
@@ -915,7 +915,7 @@ name = "{name}"
 depends = []
 "#
     );
-    let _ = write_if_changed(&module_dir.join("module.toml"), &module_toml)?;
+    write_if_changed(&module_dir.join("module.toml"), &module_toml)?;
 
     let build_rs = r#"use std::path::Path;
 
@@ -975,7 +975,7 @@ fn main() {
     }
 }
 "#;
-    let _ = write_if_changed(&module_dir.join("build.rs"), build_rs)?;
+    write_if_changed(&module_dir.join("build.rs"), build_rs)?;
 
     let lib_rs = format!(
         r#"#![no_std]
@@ -1018,7 +1018,7 @@ pub extern "C" fn scarlet_lsm_init() -> Result<(), &'static str> {{
 }}
 "#
     );
-    let _ = write_if_changed(&src_dir.join("lib.rs"), &lib_rs)?;
+    write_if_changed(&src_dir.join("lib.rs"), &lib_rs)?;
 
     let cargo_config = r#"[target.riscv64gc-unknown-none-elf]
 runner = "true"
@@ -1034,12 +1034,126 @@ build-std = ["core", "compiler_builtins", "alloc"]
 build-std-features = ["compiler-builtins-mem"]
 unstable-options = true
 "#;
-    let _ = write_if_changed(&cargo_dir.join("config.toml"), cargo_config)?;
+    write_if_changed(&cargo_dir.join("config.toml"), cargo_config)?;
 
     let _ = write_if_changed(&module_dir.join(".gitignore"), "target/\n");
 
     eprintln!("cargo-scarlet: created loadable module '{name}'");
     Ok(())
+}
+
+fn render_bsp_build_rs(kernel_symbols_relative: &str) -> String {
+    let const_line = format!(
+        "const KERNEL_SYMBOLS_RELATIVE: &str = \"{}\";",
+        kernel_symbols_relative
+    );
+
+    format!(
+        r##"use std::path::Path;
+use std::process::Command;
+
+{const_line}
+
+fn main() {{
+    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap();
+    let target = std::env::var("TARGET").unwrap();
+    let profile = std::env::var("PROFILE").unwrap();
+    let target_dir = std::env::var("CARGO_TARGET_DIR")
+        .unwrap_or_else(|_| format!("{{manifest_dir}}/target"));
+
+    let binary_path = format!("{{target_dir}}/{{target}}/{{profile}}/scarlet");
+    let kernel_symbols_path = format!("{{manifest_dir}}/{{KERNEL_SYMBOLS_RELATIVE}}");
+
+    if Path::new(&binary_path).exists() {{
+        extract_symbols(&binary_path, &kernel_symbols_path);
+    }} else {{
+        generate_empty_symbols(&kernel_symbols_path);
+    }}
+}}
+
+fn extract_symbols(binary_path: &str, output_path: &str) {{
+    let output = Command::new("nm")
+        .args(["--defined-only", "--extern-only", "-g", "--no-sort", binary_path])
+        .output()
+        .expect("failed to run nm");
+
+    if !output.status.success() {{
+        eprintln!("cargo-scarlet [build.rs]: nm failed, generating empty symbols");
+        generate_empty_symbols(output_path);
+        return;
+    }}
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut symbols: Vec<(String, String)> = Vec::new();
+
+    for line in stdout.lines() {{
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if parts.len() < 3 {{
+            continue;
+        }}
+        let addr = parts[0];
+        let name = parts[2];
+
+        if name.is_empty() {{
+            continue;
+        }}
+
+        let skip = match name {{
+            "_GLOBAL_OFFSET_TABLE_" | "_DYNAMIC" => true,
+            _ if name.starts_with("__") && name.ends_with("_START") => true,
+            _ if name.starts_with("__") && name.ends_with("_END") => true,
+            _ => false,
+        }};
+
+        if !skip {{
+            symbols.push((name.to_string(), addr.to_string()));
+        }}
+    }}
+
+    let count = symbols.len();
+    let mut content = String::new();
+    content.push_str("#[allow(dead_code)]\n\n");
+    content.push_str("#[unsafe(link_section = \".lsm_symbols\")]\n");
+    content.push_str("#[used]\n");
+    content.push_str("static _FORCE_SECTION: usize = 0;\n\n");
+    content.push_str("#[allow(dead_code)]\n");
+    content.push_str(&format!(
+        "static KERNEL_SYMBOLS: [(&'static str, usize); {{count}}] = [\n"
+    ));
+    for (name, addr) in &symbols {{
+        content.push_str(&format!("    (\"{{name}}\", 0x{{addr}}),\n"));
+    }}
+    content.push_str("];\n\n");
+    content.push_str("pub fn get_kernel_symbols() -> &'static [(&'static str, usize)] {{ &KERNEL_SYMBOLS }}\n");
+
+    write_if_changed(output_path, &content);
+    eprintln!(
+        "cargo-scarlet [build.rs]: extracted {{count}} kernel symbols from {{}}",
+        binary_path
+    );
+}}
+
+fn generate_empty_symbols(output_path: &str) {{
+    let content = "#[allow(dead_code)]\n\n\
+        #[unsafe(link_section = \".lsm_symbols\")]\n\
+        #[used]\n\
+        static _FORCE_SECTION: usize = 0;\n\n\
+        #[allow(dead_code)]\n\
+        static KERNEL_SYMBOLS: [(&'static str, usize); 0] = [];\n\n\
+        pub fn get_kernel_symbols() -> &'static [(&'static str, usize)] {{ &KERNEL_SYMBOLS }}\n";
+    write_if_changed(output_path, content);
+}}
+
+fn write_if_changed(path: &str, contents: &str) {{
+    if let Ok(existing) = std::fs::read_to_string(path) {{
+        if existing == contents {{
+            return;
+        }}
+    }}
+    std::fs::write(path, contents).expect("failed to write generated_symbols.rs");
+}}
+"##
+    )
 }
 
 fn scaffold_bsp(
@@ -1065,6 +1179,18 @@ fn scaffold_bsp(
     let cargo_dir = bsp_dir.join(".cargo");
     let scarlet_modules_dir = bsp_dir.join(".scarlet/scarlet-modules/src");
 
+    let kernel_symbols_relative = match kernel_path {
+        Some(p) => {
+            let abs_kernel = fs::canonicalize(p).map_err(|e| format!("{e}: {}", p.display()))?;
+            let abs_symbols = abs_kernel.join("src/lsm/generated_symbols.rs");
+            let abs_bsp = std::env::current_dir()
+                .map_err(|e| format!("failed to get cwd: {e}"))?
+                .join(&bsp_dir);
+            pathdiff(&abs_symbols, &abs_bsp)?.display().to_string()
+        }
+        None => String::new(),
+    };
+
     fs::create_dir_all(&src_dir)
         .map_err(|e| format!("failed to create {}: {e}", src_dir.display()))?;
     fs::create_dir_all(&lds_dir)
@@ -1075,8 +1201,10 @@ fn scaffold_bsp(
         .map_err(|e| format!("failed to create {}: {e}", scarlet_modules_dir.display()))?;
 
     let crate_name = cargo_key_to_rust_identifier(name);
-    let main_rs = format!(
-        r#"#![no_std]
+
+    let build_rs = render_bsp_build_rs(&kernel_symbols_relative);
+    write_if_changed(&bsp_dir.join("build.rs"), &build_rs)?;
+    let main_rs = r#"#![no_std]
 #![no_main]
 
 extern crate scarlet_modules;
@@ -1092,8 +1220,8 @@ pub extern "C" fn arch_start_kernel() -> ! {{
     loop {{}}
 }}
 "#
-    );
-    let _ = write_if_changed(&src_dir.join("main.rs"), &main_rs)?;
+    .to_string();
+    write_if_changed(&src_dir.join("main.rs"), &main_rs)?;
 
     let bsp_cargo_toml = format!(
         r#"[package]
@@ -1109,7 +1237,7 @@ path = "src/main.rs"
 scarlet_modules = {{ package = "scarlet-modules", path = ".scarlet/scarlet-modules" }}
 "#
     );
-    let _ = write_if_changed(&bsp_dir.join("Cargo.toml"), &bsp_cargo_toml)?;
+    write_if_changed(&bsp_dir.join("Cargo.toml"), &bsp_cargo_toml)?;
 
     let scarlet_config = format!(
         r#"config_version = 1
@@ -1131,7 +1259,7 @@ source = {kernel_source}
 [modules]
 "#
     );
-    let _ = write_if_changed(&bsp_dir.join("scarlet-config.toml"), &scarlet_config)?;
+    write_if_changed(&bsp_dir.join("scarlet-config.toml"), &scarlet_config)?;
 
     let cargo_config = format!(
         r#"[profile.dev]
@@ -1149,7 +1277,7 @@ build-std-features = ["compiler-builtins-mem"]
 unstable-options = true
 "#
     );
-    let _ = write_if_changed(&cargo_dir.join("config.toml"), &cargo_config)?;
+    write_if_changed(&cargo_dir.join("config.toml"), &cargo_config)?;
 
     let modules_cargo_toml = format!(
         r#"# generated by cargo-scarlet
@@ -1166,7 +1294,7 @@ path = "src/lib.rs"
 scarlet = {{ {kernel_spec}, default-features = false }}
 "#
     );
-    let _ = write_if_changed(
+    write_if_changed(
         &bsp_dir.join(".scarlet/scarlet-modules/Cargo.toml"),
         &modules_cargo_toml,
     )?;
@@ -1178,7 +1306,7 @@ pub use scarlet;
 #[inline(never)]
 pub fn force_link() {}
 "#;
-    let _ = write_if_changed(
+    write_if_changed(
         &bsp_dir.join(".scarlet/scarlet-modules/src/lib.rs"),
         modules_lib_rs,
     )?;
