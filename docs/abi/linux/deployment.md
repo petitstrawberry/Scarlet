@@ -145,10 +145,10 @@ Once the rootfs is deployed, you can build the final Scarlet disk image with:
 
 ```bash
 # For RISC-V 64
-cargo make build
+cargo make build-riscv64
 
 # For AArch64
-ARCH=aarch64 cargo make build
+cargo make build-aarch64
 ```
 
 The generated ext2 image includes the deployed Linux rootfs for the selected architecture.

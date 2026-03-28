@@ -179,5 +179,4 @@ When executing an x86-64 Linux binary on RISC-V:
 ## Related Documentation
 
 - [ABI Module System](./abi/)
-- [Transparent Executor](./executor/)
-- [Binary Format Detection](./binary-formats.md)
+- [Linux ABI Status](./abi/linux/status.md)

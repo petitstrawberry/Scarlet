@@ -15,12 +15,12 @@ The architecture is controlled via the `ARCH` environment variable throughout th
 
 ```bash
 # RISC-V 64 (default)
-cargo make build
-cargo make test
+cargo make build-riscv64
+cargo make test-riscv64
 
 # AArch64
-ARCH=aarch64 cargo make build
-ARCH=aarch64 cargo make test
+cargo make build-aarch64
+cargo make test-aarch64
 ```
 
 ## Building for Multiple Architectures
@@ -31,10 +31,10 @@ The kernel build automatically selects the target based on the `ARCH` variable:
 
 ```bash
 # Build RISC-V kernel
-cargo make build
+cargo make build-riscv64
 
 # Build AArch64 kernel
-ARCH=aarch64 cargo make build
+cargo make build-aarch64
 ```
 
 Target specifications are located in `kernel/targets/`:
@@ -138,10 +138,10 @@ Tests are architecture-specific and run on QEMU:
 
 ```bash
 # RISC-V tests
-cargo make test
+cargo make test-riscv64
 
 # AArch64 tests
-ARCH=aarch64 cargo make test
+cargo make test-aarch64
 ```
 
 Test execution:

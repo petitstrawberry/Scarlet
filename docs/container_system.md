@@ -46,7 +46,7 @@ Flags can be combined with bitwise OR.
 Creates a separate PID space:
 
 ```rust
-use scarlet_lib::syscall::{Syscall, syscall2};
+use scarlet_std::syscall::{Syscall, syscall2};
 
 const NS_CREATE_TASK: usize = 0x01;
 

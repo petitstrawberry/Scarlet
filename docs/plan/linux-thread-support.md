@@ -46,8 +46,8 @@
 - Provide placeholders for wait-queues keyed by user addresses; integrate with Scarlet wakers later.
 
 ### E. Testing & Validation
-- Build: `cargo make build` in `scarlet-dev`.
-- Run tests: `cargo make test` (note: `no_std` tests use `#[test_case]`).
+- Build: `cargo make build-riscv64` in `scarlet-dev`.
+- Run tests: `cargo make test-riscv64` (note: `no_std` tests use `#[test_case]`).
 - Manual check: `sys_clone` path returns `-ENOSYS` only for unsupported thread creation flag combos; otherwise proceeds to process cloning as today.
 
 ## Acceptance Criteria

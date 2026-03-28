@@ -182,7 +182,7 @@ The PCI subsystem integrates with the existing DeviceManager:
 The implementation includes comprehensive tests:
 
 ```bash
-cargo make test
+cargo make test-riscv64
 ```
 
 Test coverage includes:

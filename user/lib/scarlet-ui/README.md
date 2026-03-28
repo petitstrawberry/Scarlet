@@ -92,10 +92,7 @@ fn main() {
 
 ## Examples
 
-See the `examples/` directory for complete examples:
-
-- `counter.rs`: Simple counter application
-- `colors.rs`: Color palette demonstration
+See the `examples/` directory in the source tree for complete examples.
 
 ## State Management
 

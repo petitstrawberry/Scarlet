@@ -228,7 +228,14 @@ The kernel uses feature flags to enable optional functionality:
 - `hypervisor`: Enable built-in hypervisor (SHV) support for RISC-V H-extension and AArch64 virtualization
 - `user-fpu`: Enable FPU support for user tasks
 - `user-vector`: Enable vector extension support for user tasks
-- `profiler`: Enable profiling support
+- `profiler`: Enable profiling support (opt-in, pulls in `lazy_static`)
+- `network`: Enable network subsystem
+- `limine`: Enable Limine boot protocol support
+
+The kernel enables `network`, `user-fpu`, `user-vector`, `hypervisor`, and `limine` by default. `profiler` is opt-in.
+
+Additional features in user libraries:
+- `alloc_debug` (in `user/lib/std`): Enable allocator debug logging (enabled by `user/bin` via dependency features)
 
 ### Memory Management
 
