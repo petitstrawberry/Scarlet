@@ -23,6 +23,8 @@ const LSM_ERROR_MISSING_DEPENDENCY: usize = 10;
 const LSM_LIST_ENTRY_SIZE: usize = 264;
 const LSM_LIST_MAX_MODULES: usize = 128;
 
+const MODULES_DIR: &str = "/scarlet/system/scarlet/modules";
+
 fn read_u16(data: &[u8], offset: usize, little_endian: bool) -> Option<u16> {
     let bytes: [u8; 2] = data.get(offset..offset + 2)?.try_into().ok()?;
     Some(if little_endian {
@@ -242,7 +244,7 @@ fn list_loaded_module_names() -> Vec<String> {
 fn find_dependency_path(dep_name: &str, origin_path: &str) -> Option<String> {
     let mut candidates = Vec::new();
 
-    candidates.push(format!("/scarlet/system/scarlet/modules/{}.lsm", dep_name));
+    candidates.push(format!("{}/{}.lsm", MODULES_DIR, dep_name));
 
     if let Some(dir) = parent_dir(origin_path) {
         candidates.push(format!("{}/{}.lsm", dir, dep_name));
@@ -254,18 +256,30 @@ fn find_dependency_path(dep_name: &str, origin_path: &str) -> Option<String> {
         }
     }
 
-    if let Ok(entries) = list_directory("/system/scarlet/modules") {
+    if let Ok(entries) = list_directory(MODULES_DIR) {
         for entry in entries {
             if !entry.is_file() {
                 continue;
             }
             if entry.name == format!("{}.lsm", dep_name) {
-                return Some(format!("/system/scarlet/modules/{}", entry.name));
+                return Some(format!("{}/{}", MODULES_DIR, entry.name));
             }
         }
     }
 
     None
+}
+
+fn resolve_to_absolute(path: &str) -> String {
+    if path.starts_with('/') {
+        return path.to_string();
+    }
+    let filename = path.rsplit('/').next().unwrap_or(path);
+    let abs = format!("{}/{}", MODULES_DIR, filename);
+    if file_exists(&abs) {
+        return abs;
+    }
+    path.to_string()
 }
 
 fn load_module_recursive(
@@ -309,8 +323,9 @@ fn load_module_recursive(
         }
     }
 
-    println!("loading module: {}", module_path);
-    let ret = syscall1(Syscall::LsmLoad, module_path.as_ptr() as usize);
+    let syscall_path = resolve_to_absolute(module_path);
+    println!("loading module: {}", syscall_path);
+    let ret = syscall1(Syscall::LsmLoad, syscall_path.as_ptr() as usize);
     visiting.pop();
 
     if ret == 0 {

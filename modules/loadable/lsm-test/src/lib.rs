@@ -3,7 +3,7 @@
 use scarlet::early_println;
 
 #[unsafe(no_mangle)]
-pub static SCARLET_LSM_NAME: [u8; 24] = *b"scarlet-module-lsm-test\0";
+pub static SCARLET_LSM_NAME: [u8; 9] = *b"lsm-test\0";
 
 #[unsafe(no_mangle)]
 pub static SCARLET_LSM_BUILD_INFO: [u8; 72] = {
