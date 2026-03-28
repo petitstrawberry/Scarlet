@@ -46,18 +46,133 @@ use crate::arch::lsm::MODULE_VA_START;
 
 const MODULE_VA_SIZE: usize = 256 * 1024 * 1024;
 
-static MODULE_VA_OFFSET: Mutex<usize> = Mutex::new(0);
+struct ModuleVaRegion {
+    start: usize,
+    size: usize,
+}
+
+struct ModuleVaAllocator {
+    free_list: Vec<ModuleVaRegion>,
+}
+
+impl ModuleVaAllocator {
+    const fn new() -> Self {
+        Self {
+            free_list: Vec::new(),
+        }
+    }
+
+    fn init(&mut self) {
+        self.free_list.push(ModuleVaRegion {
+            start: 0,
+            size: MODULE_VA_SIZE,
+        });
+    }
+
+    fn allocate(&mut self, size: usize, alignment: usize) -> Option<usize> {
+        let mut best_idx = None;
+        let mut best_waste = usize::MAX;
+
+        for (i, region) in self.free_list.iter().enumerate() {
+            let aligned = (region.start + alignment - 1) & !(alignment - 1);
+            let end = aligned + size;
+            if end > region.start + region.size {
+                continue;
+            }
+            let waste = aligned - region.start;
+            if waste < best_waste {
+                best_waste = waste;
+                best_idx = Some(i);
+                if waste == 0 {
+                    break;
+                }
+            }
+        }
+
+        let idx = best_idx?;
+        let region = &mut self.free_list[idx];
+        let aligned = (region.start + alignment - 1) & !(alignment - 1);
+        let result = MODULE_VA_START + aligned;
+
+        let end = aligned + size;
+        let region_end = region.start + region.size;
+
+        if aligned > region.start && end < region_end {
+            region.size = aligned - region.start;
+            self.free_list.insert(
+                idx + 1,
+                ModuleVaRegion {
+                    start: end,
+                    size: region_end - end,
+                },
+            );
+        } else if aligned > region.start {
+            region.size = aligned - region.start;
+        } else if end < region_end {
+            region.start = end;
+            region.size = region_end - end;
+        } else {
+            self.free_list.remove(idx);
+        }
+
+        Some(result)
+    }
+
+    fn deallocate(&mut self, offset: usize, size: usize) {
+        let start = offset;
+        let end = offset + size;
+
+        let mut merged = false;
+        for region in self.free_list.iter_mut() {
+            if region.start == end {
+                region.start = start;
+                region.size += size;
+                merged = true;
+                break;
+            }
+            if region.start + region.size == start {
+                region.size += size;
+                merged = true;
+                break;
+            }
+        }
+
+        if !merged {
+            self.free_list.push(ModuleVaRegion { start, size });
+        }
+
+        self.free_list.sort_by_key(|r| r.start);
+
+        let mut i = 0;
+        while i + 1 < self.free_list.len() {
+            let current = &self.free_list[i];
+            let next = &self.free_list[i + 1];
+            if current.start + current.size == next.start {
+                self.free_list[i].size += next.size;
+                self.free_list.remove(i + 1);
+            } else {
+                i += 1;
+            }
+        }
+    }
+}
+
+static MODULE_VA_ALLOCATOR: Mutex<ModuleVaAllocator> = Mutex::new(ModuleVaAllocator::new());
 static MODULE_REGISTRY: Mutex<Vec<LoadedModule>> = Mutex::new(Vec::new());
 static NEXT_MODULE_ID: Mutex<u64> = Mutex::new(1);
 
-fn allocate_module_pages(size: usize, alignment: usize) -> Option<usize> {
-    let mut offset = MODULE_VA_OFFSET.lock();
-    let aligned = (*offset + alignment - 1) & !(alignment - 1);
-    if aligned + size > MODULE_VA_SIZE {
-        return None;
+fn allocate_module_va(size: usize, alignment: usize) -> Option<usize> {
+    let mut allocator = MODULE_VA_ALLOCATOR.lock();
+    if allocator.free_list.is_empty() {
+        allocator.init();
     }
-    *offset = aligned + size;
-    Some(MODULE_VA_START + aligned)
+    allocator.allocate(size, alignment)
+}
+
+fn deallocate_module_va(vaddr: usize, size: usize) {
+    let offset = vaddr - MODULE_VA_START;
+    let mut allocator = MODULE_VA_ALLOCATOR.lock();
+    allocator.deallocate(offset, size);
 }
 
 fn section_alignment(align: u64) -> usize {
@@ -200,8 +315,9 @@ pub fn unload_module(module_id: u64) -> Result<(), LsmError> {
     };
 
     let kernel_vm = get_kernel_vm_manager();
-    for &(vaddr, _) in &module.mapped_ranges {
+    for &(vaddr, size) in &module.mapped_ranges {
         let _ = kernel_vm.remove_memory_map_by_addr(vaddr);
+        deallocate_module_va(vaddr, size);
     }
     for (&ptr, &(_, size)) in module.pages_ptrs.iter().zip(module.mapped_ranges.iter()) {
         free_raw_pages(ptr, size / PAGE_SIZE);
@@ -248,7 +364,7 @@ pub fn load_module(data: &[u8]) -> Result<u64, LsmError> {
 
         let mapped_size = round_up_to_page(section_size);
         let alignment = section_alignment(section.sh_addralign);
-        let base_vaddr = match allocate_module_pages(mapped_size, alignment) {
+        let base_vaddr = match allocate_module_va(mapped_size, alignment) {
             Some(vaddr) => vaddr,
             None => {
                 rollback_mappings_and_pages(&mapped_ranges, &pages_ptrs, &pages_counts);
