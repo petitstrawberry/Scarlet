@@ -9,6 +9,8 @@ MEMORY {
 SECTIONS {
     . = ORIGIN(RAM);
     __KERNEL_SPACE_START = .;
+    PROVIDE(__SCARLET_KSYMS_START = 0);
+    PROVIDE(__SCARLET_KSYMS_END = 0);
     .init : { 
         *(.init .init.*)
         /* Place arch-specific entry points close to init */
@@ -26,6 +28,11 @@ SECTIONS {
       __INICALL_LATE_START = .;
       *(.initcall.late)
       __INITCALL_END = .;
+    } > RAM
+    .scarlet_ksyms : {
+      __SCARLET_KSYMS_START = .;
+      KEEP(*(.scarlet_ksyms))
+      __SCARLET_KSYMS_END = .;
     } > RAM
     .trampoline :
     {
@@ -49,5 +56,6 @@ SECTIONS {
       . += 256K; /* Reserve 256KiB for FDT relocation */
       __FDT_RESERVED_END = .;
     } > RAM
+    .lsm_symbols : { KEEP(*(.lsm_symbols)) } > RAM
     __KERNEL_SPACE_END = .;
 }

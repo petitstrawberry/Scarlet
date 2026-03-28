@@ -9,11 +9,11 @@ skip_core_tasks = true
 
 [tasks.fmt]
 description = "Format all code"
-dependencies = ["fmt-kernel", "fmt-bsp-riscv64", "fmt-bsp-aarch64", "fmt-userlib", "fmt-userbin", "fmt-drivers", "fmt-modules"]
+dependencies = ["fmt-kernel", "fmt-bsp-riscv64", "fmt-bsp-aarch64", "fmt-userlib", "fmt-userbin", "fmt-drivers", "fmt-modules", "fmt-cargo-scarlet"]
 
 [tasks.fmt-check]
 description = "Check formatting (no changes)"
-dependencies = ["fmt-kernel-check", "fmt-bsp-riscv64-check", "fmt-bsp-aarch64-check", "fmt-userlib-check", "fmt-userbin-check", "fmt-drivers-check", "fmt-modules-check"]
+dependencies = ["fmt-kernel-check", "fmt-bsp-riscv64-check", "fmt-bsp-aarch64-check", "fmt-userlib-check", "fmt-userbin-check", "fmt-drivers-check", "fmt-modules-check", "fmt-cargo-scarlet-check"]
 
 [tasks.fmt-kernel-check]
 description = "Check kernel formatting"
@@ -146,6 +146,18 @@ for dir in $(find modules -name Cargo.toml -exec dirname {} \;); do
 done
 '''
 
+[tasks.fmt-cargo-scarlet]
+description = "Format cargo-scarlet code"
+cwd = "cargo-scarlet"
+command = "cargo"
+args = ["fmt"]
+
+[tasks.fmt-cargo-scarlet-check]
+description = "Check cargo-scarlet formatting"
+cwd = "cargo-scarlet"
+command = "cargo"
+args = ["fmt", "--", "--check"]
+
 [tasks.build-riscv64]
 description = "Build all components (RISC-V, debug)"
 dependencies = ["build-debug-riscv64"]
@@ -179,24 +191,40 @@ description = "Build the kernel (AArch64, debug)"
 dependencies = ["build-kernel-debug-aarch64"]
 
 [tasks.build-kernel-debug-riscv64]
-description = "Build the kernel in debug mode (RISC-V)"
-command = "cargo"
-args = ["run", "--manifest-path", "cargo-scarlet/Cargo.toml", "--", "build", "--project", "bsp/riscv64-limine"]
+description = "Build the kernel in debug mode (RISC-V) with LSM symbol table"
+script_runner = "@shell"
+script = '''
+cargo run --manifest-path cargo-scarlet/Cargo.toml -- build --project bsp/riscv64-limine
+touch bsp/riscv64-limine/build.rs
+cargo run --manifest-path cargo-scarlet/Cargo.toml -- build --project bsp/riscv64-limine
+'''
 
 [tasks.build-kernel-debug-aarch64]
-description = "Build the kernel in debug mode (AArch64)"
-command = "cargo"
-args = ["run", "--manifest-path", "cargo-scarlet/Cargo.toml", "--", "build", "--project", "bsp/aarch64-limine"]
+description = "Build the kernel in debug mode (AArch64) with LSM symbol table"
+script_runner = "@shell"
+script = '''
+cargo run --manifest-path cargo-scarlet/Cargo.toml -- build --project bsp/aarch64-limine
+touch bsp/aarch64-limine/build.rs
+cargo run --manifest-path cargo-scarlet/Cargo.toml -- build --project bsp/aarch64-limine
+'''
 
 [tasks.build-kernel-release-riscv64]
-description = "Build the kernel in release mode (RISC-V)"
-command = "cargo"
-args = ["run", "--manifest-path", "cargo-scarlet/Cargo.toml", "--", "build", "--project", "bsp/riscv64-limine", "--release"]
+description = "Build the kernel in release mode (RISC-V) with LSM symbol table"
+script_runner = "@shell"
+script = '''
+cargo run --manifest-path cargo-scarlet/Cargo.toml -- build --project bsp/riscv64-limine --release
+touch bsp/riscv64-limine/build.rs
+cargo run --manifest-path cargo-scarlet/Cargo.toml -- build --project bsp/riscv64-limine --release
+'''
 
 [tasks.build-kernel-release-aarch64]
-description = "Build the kernel in release mode (AArch64)"
-command = "cargo"
-args = ["run", "--manifest-path", "cargo-scarlet/Cargo.toml", "--", "build", "--project", "bsp/aarch64-limine", "--release"]
+description = "Build the kernel in release mode (AArch64) with LSM symbol table"
+script_runner = "@shell"
+script = '''
+cargo run --manifest-path cargo-scarlet/Cargo.toml -- build --project bsp/aarch64-limine --release
+touch bsp/aarch64-limine/build.rs
+cargo run --manifest-path cargo-scarlet/Cargo.toml -- build --project bsp/aarch64-limine --release
+'''
 
 [tasks.generate-bsp-riscv64]
 description = "Generate BSP-local scarlet-modules for RISC-V"
@@ -239,6 +267,38 @@ dependencies = ["build-userlib-debug-riscv64"]
 [tasks.build-userlib-aarch64]
 description = "Build user libraries (AArch64, debug)"
 dependencies = ["build-userlib-debug-aarch64"]
+
+[tasks.build-modules-debug-riscv64]
+description = "Build loadable modules (.lsm) for RISC-V in debug mode"
+script_runner = "@shell"
+script = '''
+cargo run --manifest-path cargo-scarlet/Cargo.toml -- build --module modules/loadable/lsm-test --target kernel/targets/riscv64gc-unknown-none-elf.json --output mkfs/dist/modules/riscv64gc-unknown-none-elf
+cargo run --manifest-path cargo-scarlet/Cargo.toml -- build --module modules/loadable/lsm-dep-test --target kernel/targets/riscv64gc-unknown-none-elf.json --output mkfs/dist/modules/riscv64gc-unknown-none-elf
+'''
+
+[tasks.build-modules-debug-aarch64]
+description = "Build loadable modules (.lsm) for AArch64 in debug mode"
+script_runner = "@shell"
+script = '''
+cargo run --manifest-path cargo-scarlet/Cargo.toml -- build --module modules/loadable/lsm-test --target kernel/targets/aarch64-unknown-none-elf.json --output mkfs/dist/modules/aarch64-unknown-none-elf
+cargo run --manifest-path cargo-scarlet/Cargo.toml -- build --module modules/loadable/lsm-dep-test --target kernel/targets/aarch64-unknown-none-elf.json --output mkfs/dist/modules/aarch64-unknown-none-elf
+'''
+
+[tasks.build-modules-release-riscv64]
+description = "Build loadable modules (.lsm) for RISC-V in release mode"
+script_runner = "@shell"
+script = '''
+cargo run --manifest-path cargo-scarlet/Cargo.toml -- build --release --module modules/loadable/lsm-test --target kernel/targets/riscv64gc-unknown-none-elf.json --output mkfs/dist/modules/riscv64gc-unknown-none-elf
+cargo run --manifest-path cargo-scarlet/Cargo.toml -- build --release --module modules/loadable/lsm-dep-test --target kernel/targets/riscv64gc-unknown-none-elf.json --output mkfs/dist/modules/riscv64gc-unknown-none-elf
+'''
+
+[tasks.build-modules-release-aarch64]
+description = "Build loadable modules (.lsm) for AArch64 in release mode"
+script_runner = "@shell"
+script = '''
+cargo run --manifest-path cargo-scarlet/Cargo.toml -- build --release --module modules/loadable/lsm-test --target kernel/targets/aarch64-unknown-none-elf.json --output mkfs/dist/modules/aarch64-unknown-none-elf
+cargo run --manifest-path cargo-scarlet/Cargo.toml -- build --release --module modules/loadable/lsm-dep-test --target kernel/targets/aarch64-unknown-none-elf.json --output mkfs/dist/modules/aarch64-unknown-none-elf
+'''
 
 [tasks.build-userbin-debug-riscv64]
 description = "Build user programs for RISC-V in debug mode"
@@ -413,7 +473,7 @@ description = "Create AArch64 initramfs archive (debug)"
 cwd = "mkfs"
 command = "sh"
 args = ["make_initramfs.sh", "aarch64"]
-dependencies = ["build-userbin-debug-aarch64"]
+dependencies = ["build-userbin-debug-aarch64", "build-modules-debug-aarch64"]
 
 [tasks.build-initramfs-aarch64]
 description = "Create AArch64 initramfs archive (debug)"
@@ -424,7 +484,7 @@ description = "Create RISC-V initramfs archive (debug)"
 cwd = "mkfs"
 command = "sh"
 args = ["make_initramfs.sh", "riscv64"]
-dependencies = ["build-userbin-debug-riscv64"]
+dependencies = ["build-userbin-debug-riscv64", "build-modules-debug-riscv64"]
 
 [tasks.build-initramfs-riscv64]
 description = "Create RISC-V initramfs archive (debug)"
@@ -435,14 +495,14 @@ description = "Create AArch64 initramfs archive (release)"
 cwd = "mkfs"
 command = "sh"
 args = ["make_initramfs.sh", "aarch64"]
-dependencies = ["build-userbin-release-aarch64"]
+dependencies = ["build-userbin-release-aarch64", "build-modules-release-aarch64"]
 
 [tasks.build-initramfs-release-riscv64]
 description = "Create RISC-V initramfs archive (release)"
 cwd = "mkfs"
 command = "sh"
 args = ["make_initramfs.sh", "riscv64"]
-dependencies = ["build-userbin-release-riscv64"]
+dependencies = ["build-userbin-release-riscv64", "build-modules-release-riscv64"]
 
 [tasks.build-boot-image-riscv64]
 description = "Create boot image (RISC-V, debug kernel)"

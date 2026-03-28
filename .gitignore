@@ -14,6 +14,9 @@ opencode.json
 /drivers/*/target
 /drivers/*/*/target
 /modules/*/target
+
+# Auto-generated LSM symbol table
+kernel/src/lsm/generated_symbols.rs
 /bsp/*/target
 /bsp/*/.scarlet
 # Guest kernel images (large files)

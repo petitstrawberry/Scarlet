@@ -14,6 +14,9 @@ SECTIONS {
     . = 0xffffffff80000000;
     __KERNEL_SPACE_START = .;
 
+    PROVIDE(__SCARLET_KSYMS_START = 0);
+    PROVIDE(__SCARLET_KSYMS_END = 0);
+
     .limine_requests : {
         KEEP(*(.limine_requests_start))
         KEEP(*(.limine_requests))
@@ -50,6 +53,13 @@ SECTIONS {
       __INITCALL_END = .;
     } :rodata
 
+    . = ALIGN(8);
+    .scarlet_ksyms : {
+      __SCARLET_KSYMS_START = .;
+      KEEP(*(.scarlet_ksyms))
+      __SCARLET_KSYMS_END = .;
+    } :rodata
+
     . = ALIGN(CONSTANT(MAXPAGESIZE));
     .data : { *(.data .data.*) } :data
 
@@ -68,6 +78,10 @@ SECTIONS {
     } :data
 
     __KERNEL_SPACE_END = .;
+
+    .lsm_symbols : {
+      KEEP(*(.lsm_symbols))
+    }
 
     /DISCARD/ : {
       *(.eh_frame*)

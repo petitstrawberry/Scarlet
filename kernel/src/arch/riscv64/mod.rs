@@ -27,6 +27,7 @@ pub mod hv;
 pub mod instruction;
 pub mod interrupt;
 pub mod kernel;
+pub mod lsm;
 pub mod mmio;
 pub mod registers;
 pub mod switch;
