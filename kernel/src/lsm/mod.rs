@@ -9,7 +9,7 @@ pub mod loader;
 pub mod symbol;
 pub mod syscall;
 
-pub use loader::{list_modules, load_module, unload_module, LoadedModule, LsmError};
+pub use loader::{LoadedModule, LsmError, list_modules, load_module, unload_module};
 
 #[repr(usize)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -6,7 +6,7 @@ use crate::arch::Trapframe;
 use crate::fs::MAX_PATH_LENGTH;
 use crate::library::std::string::parse_c_string_from_userspace;
 use crate::library::std::usercopy::copy_to_user;
-use crate::lsm::{list_modules, load_module, unload_module, LsmError, LsmErrorCode};
+use crate::lsm::{LsmError, LsmErrorCode, list_modules, load_module, unload_module};
 use crate::object::capability::stream::StreamOps;
 use crate::task::mytask;
 

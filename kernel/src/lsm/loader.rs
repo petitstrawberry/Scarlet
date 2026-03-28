@@ -10,7 +10,7 @@ use crate::lsm::elf::{
     STB_WEAK,
 };
 use crate::lsm::symbol;
-use crate::mem::page::{allocate_raw_pages, free_raw_pages, Page};
+use crate::mem::page::{Page, allocate_raw_pages, free_raw_pages};
 use crate::vm::addr::virt_to_phys;
 use crate::vm::get_kernel_vm_manager;
 use crate::vm::vmem::{MemoryArea, VirtualMemoryMap, VirtualMemoryPermission};

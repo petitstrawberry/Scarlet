@@ -5,10 +5,10 @@ extern crate scarlet_std as std;
 
 use std::env;
 use std::fs::{File, list_directory};
-use std::{format, println};
 use std::string::{String, ToString};
 use std::syscall::{Syscall, syscall1, syscall2};
 use std::vec::Vec;
+use std::{format, println};
 
 const ELFCLASS64: u8 = 2;
 const ELFDATA2LSB: u8 = 1;
@@ -118,7 +118,8 @@ fn find_symbol_data<'a>(data: &'a [u8], symbol_name: &str) -> Option<&'a [u8]> {
     let symtab_index = symtab_index?;
     let symtab_shdr_off = section_header_offset(shoff, shentsize, symtab_index)?;
 
-    let symtab_offset = usize::try_from(read_u64(data, symtab_shdr_off + 24, little_endian)?).ok()?;
+    let symtab_offset =
+        usize::try_from(read_u64(data, symtab_shdr_off + 24, little_endian)?).ok()?;
     let symtab_size = usize::try_from(read_u64(data, symtab_shdr_off + 32, little_endian)?).ok()?;
     let symtab_ent_size = {
         let raw = usize::try_from(read_u64(data, symtab_shdr_off + 56, little_endian)?).ok()?;
@@ -128,12 +129,14 @@ fn find_symbol_data<'a>(data: &'a [u8], symbol_name: &str) -> Option<&'a [u8]> {
         return None;
     }
 
-    let strtab_index = usize::try_from(read_u32(data, symtab_shdr_off + 40, little_endian)?).ok()?;
+    let strtab_index =
+        usize::try_from(read_u32(data, symtab_shdr_off + 40, little_endian)?).ok()?;
     if strtab_index >= shnum {
         return None;
     }
     let strtab_shdr_off = section_header_offset(shoff, shentsize, strtab_index)?;
-    let strtab_offset = usize::try_from(read_u64(data, strtab_shdr_off + 24, little_endian)?).ok()?;
+    let strtab_offset =
+        usize::try_from(read_u64(data, strtab_shdr_off + 24, little_endian)?).ok()?;
     let strtab_size = usize::try_from(read_u64(data, strtab_shdr_off + 32, little_endian)?).ok()?;
 
     let strtab = data.get(strtab_offset..strtab_offset.checked_add(strtab_size)?)?;
@@ -310,7 +313,10 @@ fn load_module_recursive(
             Some(path) => path,
             None => {
                 visiting.pop();
-                return Err(format!("dependency {} not found for {}", dep_name, module_name));
+                return Err(format!(
+                    "dependency {} not found for {}",
+                    dep_name, module_name
+                ));
             }
         };
 
