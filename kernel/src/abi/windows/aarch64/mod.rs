@@ -41,7 +41,6 @@ struct WindowsProcessState {
     context_address: u64,
     ntdll_base: u64,
     ntdll_entry_point: u64,
-    ntdll_version: &'static str,
     heap_base: usize,
     heap_current: usize,
     heap_end: usize,
@@ -240,7 +239,6 @@ impl AbiModule for WindowsAarch64Abi {
         state.heap_end = heap_base + heap_size;
         state.ntdll_base = ntdll.image_base;
         state.ntdll_entry_point = ntdll.entry_point;
-        state.ntdll_version = NTDLL_VERSION;
 
         let (_stack_base, stack_top) = vm::setup_user_stack(task);
         let command_line = argv.join(" ");
