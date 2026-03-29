@@ -4,6 +4,7 @@
 
 pub mod elf_loader;
 pub mod namespace;
+pub mod pe_loader;
 pub mod syscall;
 
 extern crate alloc;

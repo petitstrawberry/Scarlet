@@ -32,3 +32,5 @@ mkfs/initramfs/system/scarlet/root/simple_guest.bin
 
 # Linux kernel images (large)
 mkfs/initramfs/system/scarlet/root/linux-image
+
+.DS_Store
