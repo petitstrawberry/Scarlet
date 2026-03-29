@@ -231,6 +231,202 @@ pub fn parse_section_headers(
     Ok(sections)
 }
 
+/// Find an exported function by name in a PE binary's export table.
+///
+/// Returns the RVA of the function, or `None` if not found.
+pub fn find_export_by_name(data: &[u8], name: &str) -> Option<u32> {
+    let export_dir = match get_data_directory(data, IMAGE_DIRECTORY_ENTRY_EXPORT) {
+        Ok(d) => d,
+        Err(_) => return None,
+    };
+    if !export_dir.is_present() {
+        return None;
+    }
+
+    let info = parse_pe_headers(data).ok()?;
+    let sections = parse_section_headers(data, info.number_of_sections).ok()?;
+
+    let dir_offset = rva_to_file_offset(export_dir.virtual_address, &sections)?;
+    if dir_offset + ImageExportDirectory::SIZE > data.len() {
+        return None;
+    }
+
+    let num_names = read_u32(data, dir_offset + 28) as usize;
+    let base_ordinal = read_u32(data, dir_offset + 16);
+    let names_rva = read_u32(data, dir_offset + 32);
+    let ordinals_rva = read_u32(data, dir_offset + 36);
+    let functions_rva = read_u32(data, dir_offset + 28 - 4); // address_of_functions
+
+    let names_offset = rva_to_file_offset(names_rva, &sections)?;
+    let ordinals_offset = rva_to_file_offset(ordinals_rva, &sections)?;
+    let functions_offset = rva_to_file_offset(functions_rva, &sections)?;
+
+    let target = name.as_bytes();
+    for i in 0..num_names {
+        let name_rva_offset = names_offset + i * 4;
+        if name_rva_offset + 4 > data.len() {
+            break;
+        }
+        let name_rva = read_u32(data, name_rva_offset);
+        let name_file_offset = rva_to_file_offset(name_rva, &sections)?;
+
+        if name_file_offset >= data.len() {
+            continue;
+        }
+
+        let name_end = data[name_file_offset..]
+            .iter()
+            .position(|&b| b == 0)
+            .unwrap_or(data.len() - name_file_offset);
+        if &data[name_file_offset..name_file_offset + name_end] == target {
+            let ordinal_offset = ordinals_offset + i * 2;
+            if ordinal_offset + 2 > data.len() {
+                return None;
+            }
+            let ordinal = read_u16(data, ordinal_offset) as usize;
+            let func_offset = functions_offset + ordinal * 4;
+            if func_offset + 4 > data.len() {
+                return None;
+            }
+            let func_rva = read_u32(data, func_offset);
+
+            // Check for forwarder export (RVA points inside export directory)
+            let export_start = export_dir.virtual_address as usize;
+            let export_end = export_start + export_dir.size as usize;
+            if (func_rva as usize) >= export_start && (func_rva as usize) < export_end {
+                // Forwarder — not supported
+                return None;
+            }
+
+            return Some(func_rva);
+        }
+    }
+
+    None
+}
+
+/// Load a PE binary from raw bytes (not a file object) into a task's memory space.
+///
+/// This is used for loading bundled DLLs like ntdll.dll that are embedded in the kernel.
+pub fn load_pe_from_bytes(
+    data: &[u8],
+    task: &Task,
+    preferred_base: Option<u64>,
+) -> Result<PeLoadResult, PeError> {
+    let info = parse_pe_headers(data)?;
+    let sections = parse_section_headers(data, info.number_of_sections)?;
+
+    let base = preferred_base.unwrap_or(info.image_base);
+    let size = align_up(info.image_size as u64, PAGE_SIZE as u64);
+
+    for section in &sections {
+        if section.size_of_raw_data == 0 && section.virtual_size == 0 {
+            continue;
+        }
+
+        let sec_va = base + section.virtual_address as u64;
+        let sec_size = align_up(
+            section.virtual_size.max(section.size_of_raw_data) as u64,
+            PAGE_SIZE as u64,
+        );
+
+        let mut permissions = 0;
+        if section.is_readable() {
+            permissions |= VirtualMemoryPermission::Read as usize;
+        }
+        if section.is_writable() {
+            permissions |= VirtualMemoryPermission::Write as usize;
+        }
+        if section.is_executable() {
+            permissions |= VirtualMemoryPermission::Execute as usize;
+        }
+
+        let num_of_pages = (sec_size as usize).div_ceil(PAGE_SIZE);
+        let page_alloc = ContiguousPages::new(num_of_pages).ok_or(PeError::FileTooSmall)?;
+        let ptr = page_alloc.as_ptr() as *mut u8;
+        let pm_start = virt_to_phys(ptr as usize);
+
+        let vmarea = MemoryArea {
+            start: sec_va as usize,
+            end: (sec_va + sec_size) as usize - 1,
+        };
+        let pmarea = MemoryArea {
+            start: pm_start,
+            end: pm_start + sec_size as usize - 1,
+        };
+        let map = VirtualMemoryMap {
+            vmarea,
+            pmarea,
+            permissions,
+            is_shared: false,
+            owner: None,
+        };
+
+        if task.vm_manager.add_memory_map(map).is_err() {
+            return Err(PeError::FileTooSmall);
+        }
+
+        task.page_allocations.write().push(page_alloc);
+    }
+
+    for section in &sections {
+        if section.size_of_raw_data == 0 {
+            continue;
+        }
+        let raw_offset = section.pointer_to_raw_data as usize;
+        let copy_len = section.size_of_raw_data.min(section.virtual_size) as usize;
+
+        if raw_offset + copy_len > data.len() {
+            return Err(PeError::FileTooSmall);
+        }
+
+        let sec_va = base + section.virtual_address as u64;
+        let remaining =
+            (section.virtual_size as usize).saturating_sub(section.size_of_raw_data as usize);
+
+        for chunk_start in (0..copy_len).step_by(PAGE_SIZE) {
+            let chunk_len = (copy_len - chunk_start).min(PAGE_SIZE);
+            let vaddr = (sec_va + chunk_start as u64) as usize;
+
+            if let Some(kva) = task.vm_manager.translate_to_kva(vaddr) {
+                unsafe {
+                    core::ptr::copy_nonoverlapping(
+                        data[raw_offset + chunk_start..].as_ptr(),
+                        kva as *mut u8,
+                        chunk_len,
+                    );
+                }
+            }
+        }
+
+        for i in 0..remaining {
+            let vaddr = (sec_va + (copy_len + i) as u64) as usize;
+            if let Some(kva) = task.vm_manager.translate_to_kva(vaddr) {
+                unsafe {
+                    *(kva as *mut u8) = 0;
+                }
+            }
+        }
+    }
+
+    if base != info.image_base {
+        let reloc_dir = get_data_directory(data, IMAGE_DIRECTORY_ENTRY_BASERELOC)?;
+        if reloc_dir.is_present() {
+            apply_relocations(data, &sections, base, info.image_base, reloc_dir, task)?;
+        }
+    }
+
+    let entry_point = base + info.entry_point_rva as u64;
+
+    Ok(PeLoadResult {
+        entry_point,
+        image_base: base,
+        image_size: size,
+        is_dll: info.is_dll,
+        subsystem: info.subsystem,
+    })
+}
+
 /// Load a PE binary into a task's memory space.
 ///
 /// Maps PE sections, applies relocations, and returns load info.

@@ -46,9 +46,24 @@ pub struct NtEventObject;
 #[derive(Clone, Copy, Default)]
 pub struct NtTimerObject;
 
-/// NT section object placeholder.
-#[derive(Clone, Copy, Default)]
-pub struct NtSectionObject;
+#[derive(Clone)]
+pub struct NtSectionObject {
+    pub file: Option<Arc<dyn FileObject>>,
+    pub maximum_size: u64,
+    pub section_page_protection: u32,
+    pub allocation_attributes: u32,
+}
+
+impl Default for NtSectionObject {
+    fn default() -> Self {
+        Self {
+            file: None,
+            maximum_size: 0,
+            section_page_protection: 0,
+            allocation_attributes: 0,
+        }
+    }
+}
 
 /// NT keyed mutex object placeholder.
 #[derive(Clone, Copy, Default)]
