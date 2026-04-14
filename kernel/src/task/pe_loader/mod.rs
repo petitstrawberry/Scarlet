@@ -251,15 +251,24 @@ pub fn find_export_by_name(data: &[u8], name: &str) -> Option<u32> {
         return None;
     }
 
-    let num_names = read_u32(data, dir_offset + 28) as usize;
+    let num_names = read_u32(data, dir_offset + 24) as usize;
     let base_ordinal = read_u32(data, dir_offset + 16);
     let names_rva = read_u32(data, dir_offset + 32);
     let ordinals_rva = read_u32(data, dir_offset + 36);
-    let functions_rva = read_u32(data, dir_offset + 28 - 4); // address_of_functions
+    let functions_rva = read_u32(data, dir_offset + 28);
 
-    let names_offset = rva_to_file_offset(names_rva, &sections)?;
-    let ordinals_offset = rva_to_file_offset(ordinals_rva, &sections)?;
-    let functions_offset = rva_to_file_offset(functions_rva, &sections)?;
+    let names_offset = match rva_to_file_offset(names_rva, &sections) {
+        Some(o) => o,
+        None => return None,
+    };
+    let ordinals_offset = match rva_to_file_offset(ordinals_rva, &sections) {
+        Some(o) => o,
+        None => return None,
+    };
+    let functions_offset = match rva_to_file_offset(functions_rva, &sections) {
+        Some(o) => o,
+        None => return None,
+    };
 
     let target = name.as_bytes();
     for i in 0..num_names {
@@ -268,7 +277,10 @@ pub fn find_export_by_name(data: &[u8], name: &str) -> Option<u32> {
             break;
         }
         let name_rva = read_u32(data, name_rva_offset);
-        let name_file_offset = rva_to_file_offset(name_rva, &sections)?;
+        let name_file_offset = match rva_to_file_offset(name_rva, &sections) {
+            Some(off) => off,
+            None => continue,
+        };
 
         if name_file_offset >= data.len() {
             continue;
@@ -305,6 +317,146 @@ pub fn find_export_by_name(data: &[u8], name: &str) -> Option<u32> {
     None
 }
 
+/// Find the ordinal-only export (a function with no name in the name pointer table).
+///
+/// On Windows ARM64 ntdll.dll, `LdrInitializeThunk` is exported only by ordinal
+/// (not by name). This function finds the first function entry that is not referenced
+/// by any ordinal in the name pointer table.
+///
+/// Returns the RVA of the ordinal-only export, or `None` if all exports have names
+/// or if no export directory exists.
+pub fn find_ordinal_only_export(data: &[u8]) -> Option<u32> {
+    let export_dir = match get_data_directory(data, IMAGE_DIRECTORY_ENTRY_EXPORT) {
+        Ok(d) => d,
+        Err(_) => return None,
+    };
+    if !export_dir.is_present() {
+        return None;
+    }
+
+    let info = parse_pe_headers(data).ok()?;
+    let sections = parse_section_headers(data, info.number_of_sections).ok()?;
+
+    let dir_offset = rva_to_file_offset(export_dir.virtual_address, &sections)?;
+    if dir_offset + ImageExportDirectory::SIZE > data.len() {
+        return None;
+    }
+
+    let num_functions = read_u32(data, dir_offset + 20) as usize;
+    let num_names = read_u32(data, dir_offset + 24) as usize;
+    let functions_rva = read_u32(data, dir_offset + 28);
+    let ordinals_rva = read_u32(data, dir_offset + 36);
+
+    let functions_offset = rva_to_file_offset(functions_rva, &sections)?;
+    let ordinals_offset = rva_to_file_offset(ordinals_rva, &sections)?;
+
+    // Collect ordinals referenced by names into a sorted Vec
+    let mut named_ordinals = alloc::vec::Vec::with_capacity(num_names);
+    for i in 0..num_names {
+        let ordinal_offset = ordinals_offset + i * 2;
+        if ordinal_offset + 2 > data.len() {
+            break;
+        }
+        named_ordinals.push(read_u16(data, ordinal_offset) as usize);
+    }
+    named_ordinals.sort_unstable();
+
+    // Walk function indices, skipping those present in the sorted name ordinals
+    let mut name_idx = 0;
+    for func_idx in 0..core::cmp::min(num_functions, 65536) {
+        while name_idx < named_ordinals.len() && named_ordinals[name_idx] < func_idx {
+            name_idx += 1;
+        }
+        if name_idx < named_ordinals.len() && named_ordinals[name_idx] == func_idx {
+            name_idx += 1;
+            continue;
+        }
+
+        let func_offset = functions_offset + func_idx * 4;
+        if func_offset + 4 > data.len() {
+            return None;
+        }
+        let func_rva = read_u32(data, func_offset);
+
+        let export_start = export_dir.virtual_address as usize;
+        let export_end = export_start + export_dir.size as usize;
+        if (func_rva as usize) >= export_start && (func_rva as usize) < export_end {
+            continue;
+        }
+
+        return Some(func_rva);
+    }
+
+    None
+}
+
+/// Map PE headers page(s) into the task's address space.
+///
+/// On Windows, the PE headers (MZ/PE/section table) are always mapped at the image
+/// base as a read-only page. This is required because some exports (notably
+/// `LdrInitializeThunk` in ntdll.dll) have RVA 0, pointing to the headers page.
+fn map_pe_headers(
+    data: &[u8],
+    task: &Task,
+    base: u64,
+    info: &PeHeaderInfo,
+    sections: &[ImageSectionHeader],
+) -> Result<(), PeError> {
+    // Find the lowest section VA to determine headers extent
+    let first_section_va = sections
+        .iter()
+        .map(|s| s.virtual_address as u64)
+        .filter(|&va| va > 0)
+        .min()
+        .unwrap_or(info.image_size as u64);
+
+    if first_section_va == 0 {
+        return Ok(()); // No sections, nothing to do
+    }
+
+    let headers_size = (info.size_of_headers as u64).min(first_section_va);
+    if headers_size == 0 {
+        return Ok(());
+    }
+
+    let headers_pages = (headers_size as usize + PAGE_SIZE - 1) / PAGE_SIZE;
+    let page_alloc = ContiguousPages::new(headers_pages).ok_or(PeError::FileTooSmall)?;
+    let ptr = page_alloc.as_ptr() as *mut u8;
+    let pm_start = virt_to_phys(ptr as usize);
+
+    // Copy PE header bytes into the allocated pages
+    let copy_len = (info.size_of_headers as usize)
+        .min(data.len())
+        .min(headers_pages * PAGE_SIZE);
+    unsafe {
+        core::ptr::copy_nonoverlapping(data.as_ptr(), ptr, copy_len);
+    }
+
+    let vmarea = MemoryArea {
+        start: base as usize,
+        end: (base + (headers_pages as u64) * PAGE_SIZE as u64) as usize - 1,
+    };
+    let pmarea = MemoryArea {
+        start: pm_start,
+        end: pm_start + headers_pages * PAGE_SIZE - 1,
+    };
+    let map = VirtualMemoryMap {
+        vmarea,
+        pmarea,
+        permissions: VirtualMemoryPermission::Read as usize
+            | VirtualMemoryPermission::User as usize,
+        is_shared: false,
+        owner: None,
+    };
+
+    if task.vm_manager.add_memory_map(map).is_err() {
+        return Err(PeError::FileTooSmall);
+    }
+
+    task.page_allocations.write().push(page_alloc);
+    Ok(())
+}
+
 /// Load a PE binary from raw bytes (not a file object) into a task's memory space.
 ///
 /// This is used for loading bundled DLLs like ntdll.dll that are embedded in the kernel.
@@ -316,8 +468,22 @@ pub fn load_pe_from_bytes(
     let info = parse_pe_headers(data)?;
     let sections = parse_section_headers(data, info.number_of_sections)?;
 
-    let base = preferred_base.unwrap_or(info.image_base);
+    let preferred = preferred_base.unwrap_or(info.image_base);
     let size = align_up(info.image_size as u64, PAGE_SIZE as u64);
+
+    let base = if task
+        .vm_manager
+        .search_memory_map(preferred as usize)
+        .is_none()
+    {
+        preferred
+    } else {
+        task.vm_manager
+            .find_unmapped_area(size as usize, PAGE_SIZE)
+            .ok_or(PeError::FileTooSmall)? as u64
+    };
+
+    map_pe_headers(data, task, base, &info, &sections)?;
 
     for section in &sections {
         if section.size_of_raw_data == 0 && section.virtual_size == 0 {
@@ -330,7 +496,7 @@ pub fn load_pe_from_bytes(
             PAGE_SIZE as u64,
         );
 
-        let mut permissions = 0;
+        let mut permissions = VirtualMemoryPermission::User as usize;
         if section.is_readable() {
             permissions |= VirtualMemoryPermission::Read as usize;
         }
@@ -451,13 +617,27 @@ pub fn load_pe_into_task(
     let info = parse_pe_headers(&buf)?;
     let sections = parse_section_headers(&buf, info.number_of_sections)?;
 
-    let base = preferred_base.unwrap_or(info.image_base);
+    let preferred = preferred_base.unwrap_or(info.image_base);
     let size = align_up(info.image_size as u64, PAGE_SIZE as u64);
+
+    let base = if task
+        .vm_manager
+        .search_memory_map(preferred as usize)
+        .is_none()
+    {
+        preferred
+    } else {
+        task.vm_manager
+            .find_unmapped_area(size as usize, PAGE_SIZE)
+            .ok_or(PeError::FileTooSmall)? as u64
+    };
 
     task.text_size.store(0, Ordering::SeqCst);
     task.data_size.store(0, Ordering::SeqCst);
     task.stack_size.store(0, Ordering::SeqCst);
     task.brk.store(usize::MAX, Ordering::SeqCst);
+
+    map_pe_headers(&buf, task, base, &info, &sections)?;
 
     for section in &sections {
         if section.size_of_raw_data == 0 && section.virtual_size == 0 {
@@ -470,7 +650,7 @@ pub fn load_pe_into_task(
             PAGE_SIZE as u64,
         );
 
-        let mut permissions = 0;
+        let mut permissions = VirtualMemoryPermission::User as usize;
         if section.is_readable() {
             permissions |= VirtualMemoryPermission::Read as usize;
         }
@@ -568,16 +748,183 @@ pub fn load_pe_into_task(
     })
 }
 
+/// Apply ARM64 PE base relocations to fix up absolute addresses when the
+/// image is loaded at a different base than its preferred ImageBase.
+///
+/// Walks the `.reloc` section block by block. Each block covers a 4 KiB page
+/// and contains a list of (type, offset) entries that describe how to patch
+/// the loaded image.
 fn apply_relocations(
-    _pe_data: &[u8],
-    _sections: &[ImageSectionHeader],
-    _new_base: u64,
-    _old_base: u64,
-    _reloc_dir: ImageDataDirectory,
-    _task: &Task,
+    pe_data: &[u8],
+    sections: &[ImageSectionHeader],
+    new_base: u64,
+    old_base: u64,
+    reloc_dir: ImageDataDirectory,
+    task: &Task,
 ) -> Result<(), PeError> {
-    // TODO: implement ARM64 relocation processing
-    // For now, if image loads at preferred base, no relocations needed.
-    // Most Windows ARM64 binaries use ASLR and will need this.
+    let delta = (new_base as i64) - (old_base as i64);
+    if delta == 0 {
+        return Ok(());
+    }
+
+    let reloc_file_start =
+        rva_to_file_offset(reloc_dir.virtual_address, sections).ok_or(PeError::RelocationFailed)?;
+    let reloc_file_end = reloc_file_start + reloc_dir.size as usize;
+    if reloc_file_end > pe_data.len() {
+        return Err(PeError::RelocationFailed);
+    }
+
+    let mut offset = reloc_file_start;
+    while offset + ImageBaseRelocation::SIZE <= reloc_file_end {
+        let block_hdr = ImageBaseRelocation {
+            virtual_address: read_u32(pe_data, offset),
+            size_of_block: read_u32(pe_data, offset + 4),
+        };
+
+        if block_hdr.size_of_block == 0 {
+            break;
+        }
+        if block_hdr.size_of_block < ImageBaseRelocation::SIZE as u32 {
+            break;
+        }
+
+        let page_rva = block_hdr.virtual_address;
+        let entry_count = block_hdr.entry_count();
+        let entries_start = offset + ImageBaseRelocation::SIZE;
+
+        for i in 0..entry_count {
+            let entry_off = entries_start + i * 2;
+            if entry_off + 2 > reloc_file_end {
+                break;
+            }
+            let entry = read_u16(pe_data, entry_off);
+            let reloc_type = (entry >> 12) & 0xF;
+            let reloc_offset = (entry & 0xFFF) as u32;
+
+            if reloc_type == IMAGE_REL_ARM64_ABSOLUTE {
+                continue;
+            }
+
+            let target_rva = page_rva + reloc_offset;
+            let target_va = new_base + target_rva as u64;
+
+            let kva = match task.vm_manager.translate_to_kva(target_va as usize) {
+                Some(k) => k,
+                None => continue,
+            };
+
+            match reloc_type {
+                IMAGE_REL_ARM64_ADDR64 => {
+                    let old_val = unsafe { core::ptr::read_volatile(kva as *const u64) };
+                    let new_val = (old_val as i64 + delta) as u64;
+                    unsafe { core::ptr::write_volatile(kva as *mut u64, new_val) };
+                }
+                IMAGE_REL_ARM64_ADDR32NB => {
+                    let new_rva = (target_rva as i64 + delta) as u32;
+                    unsafe { core::ptr::write_volatile(kva as *mut u32, new_rva) };
+                }
+                IMAGE_REL_ARM64_PAGEBASE_REL21 => {
+                    // ADRP: immlo=[30:29], immhi=[23:5], sign-extended 21-bit imm << 12
+                    let insn = unsafe { core::ptr::read_volatile(kva as *const u32) };
+                    let pc_page = target_va & !0xFFFu64;
+                    let immlo = ((insn >> 29) & 0x3) as u64;
+                    let immhi = ((insn >> 5) & 0x7FFFF) as u64;
+                    let imm = (immhi << 2) | immlo;
+                    let imm = if imm & (1 << 20) != 0 {
+                        (imm | !0x1FFFFF) as i64
+                    } else {
+                        imm as i64
+                    };
+                    let original_page = ((old_base + target_rva as u64) & !0xFFFu64)
+                        .wrapping_add((imm << 12) as u64);
+                    let new_page = (original_page as i64 + delta) as u64;
+                    let page_off = (new_page as i64) - (pc_page as i64);
+                    let page_off_shifted = page_off >> 12;
+                    let new_immlo = (page_off_shifted as u64 & 0x3) as u32;
+                    let new_immhi = ((page_off_shifted as u64 >> 2) & 0x7FFFF) as u32;
+                    let new_insn = (insn & !(0x3 << 29) & !(0x7FFFF << 5))
+                        | (new_immlo << 29)
+                        | (new_immhi << 5);
+                    unsafe { core::ptr::write_volatile(kva as *mut u32, new_insn) };
+                }
+                IMAGE_REL_ARM64_PAGEOFFSET_12A => {
+                    // ADD imm12: bits [21:10], add delta's low 12 bits
+                    let insn = unsafe { core::ptr::read_volatile(kva as *const u32) };
+                    let old_imm12 = (insn >> 10) & 0xFFF;
+                    let new_imm12 = ((old_imm12 as i64) + (delta & 0xFFF)) as u32 & 0xFFF;
+                    let new_insn = (insn & !(0xFFF << 10)) | (new_imm12 << 10);
+                    unsafe { core::ptr::write_volatile(kva as *mut u32, new_insn) };
+                }
+                IMAGE_REL_ARM64_PAGEOFFSET_12L => {
+                    // LDR/STR imm12: bits [21:10], scaled by 1<<size ([31:30])
+                    let insn = unsafe { core::ptr::read_volatile(kva as *const u32) };
+                    let old_imm12 = (insn >> 10) & 0xFFF;
+                    let scale = (insn >> 30) & 0x3;
+                    let scale_factor = 1u32 << scale;
+                    let old_byte_offset = old_imm12 * scale_factor;
+                    let new_byte_offset = ((old_byte_offset as i64) + (delta & 0xFFF)) as u32;
+                    let new_imm12 = new_byte_offset / scale_factor;
+                    let new_insn = (insn & !(0xFFF << 10)) | (new_imm12 << 10);
+                    unsafe { core::ptr::write_volatile(kva as *mut u32, new_insn) };
+                }
+                IMAGE_REL_ARM64_PAGEOFFSET_12A => {
+                    // ADD immediate: bits [21:10] = imm12.
+                    // The 12-bit offset into the page stays the same (delta low 12 bits are 0
+                    // for page-aligned bases). But if old_base low 12 != new_base low 12, we
+                    // need to add delta's low 12 bits.
+                    let insn = unsafe { core::ptr::read_volatile(kva as *const u32) };
+                    let old_imm12 = (insn >> 10) & 0xFFF;
+                    // Decode original symbol address from ADRP+ADD pair:
+                    // The ADD's imm12 encodes the page offset.
+                    let new_imm12 = ((old_imm12 as i64) + (delta & 0xFFF)) as u32 & 0xFFF;
+                    let new_insn = (insn & !(0xFFF << 10)) | (new_imm12 << 10);
+                    unsafe { core::ptr::write_volatile(kva as *mut u32, new_insn) };
+                }
+                IMAGE_REL_ARM64_PAGEOFFSET_12L => {
+                    // LDR/STR unsigned offset: bits [21:10] = imm12, scaled by element size.
+                    let insn = unsafe { core::ptr::read_volatile(kva as *const u32) };
+                    let old_imm12 = (insn >> 10) & 0xFFF;
+                    // Scale factor depends on instruction size bits [31:30]:
+                    //   00 = 8-bit, 01 = 16-bit, 10 = 32-bit, 11 = 64-bit
+                    let scale = (insn >> 30) & 0x3;
+                    let scale_factor = 1u32 << scale;
+                    let old_byte_offset = old_imm12 * scale_factor;
+                    let new_byte_offset = ((old_byte_offset as i64) + (delta & 0xFFF)) as u32;
+                    let new_imm12 = new_byte_offset / scale_factor;
+                    let new_insn = (insn & !(0xFFF << 10)) | (new_imm12 << 10);
+                    unsafe { core::ptr::write_volatile(kva as *mut u32, new_insn) };
+                }
+                IMAGE_REL_ARM64_BRANCH26 => {
+                    // B/BL: 26-bit signed immediate in bits [25:0], shifted left 2.
+                    // Offset is PC-relative and does NOT change with base relocation
+                    // since both source and target move by the same delta.
+                    // However, if the target is outside the image, we need to fix it.
+                    // For intra-image branches, no fixup needed.
+                }
+                IMAGE_REL_ARM64_BRANCH19 => {
+                    // B.cond: 19-bit signed offset — same as BRANCH26, intra-image.
+                }
+                IMAGE_REL_ARM64_BRANCH14 => {
+                    // TBZ/TBNZ: 14-bit signed offset — same, intra-image.
+                }
+                IMAGE_REL_ARM64_REL32 => {
+                    // 32-bit PC-relative offset: add delta's low 32 bits.
+                    // Since both PC and target shift by delta, no change needed
+                    // for intra-image references. But for cross-image, fix up.
+                    // We apply delta anyway to be safe.
+                    let old_val = unsafe { core::ptr::read_volatile(kva as *const u32) };
+                    let new_val = ((old_val as i64) + delta) as u32;
+                    unsafe { core::ptr::write_volatile(kva as *mut u32, new_val) };
+                }
+                _ => {
+                    // Unknown relocation type — skip silently.
+                    // ARM64 SECREL, TOKEN, SECTION types are rare in base relocs.
+                }
+            }
+        }
+
+        offset += block_hdr.size_of_block as usize;
+    }
+
     Ok(())
 }

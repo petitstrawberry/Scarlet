@@ -478,6 +478,23 @@ fn main() -> i32 {
         println!("init: Failed to execve {}", stemd_path);
     }
 
-    println!("init: All stemd paths failed, halting system");
+    println!("init: All stemd paths failed, dropping to shell...");
+
+    let sh_paths = [
+        "/system/scarlet/bin/sh",
+        "/scarlet/system/scarlet/bin/sh",
+        "/old_root/system/scarlet/bin/sh",
+    ];
+
+    for sh_path in &sh_paths {
+        match File::open(sh_path) {
+            Ok(_) => {
+                let _ = execve_with_flags(sh_path, &[sh_path], &[], EXECVE_FORCE_ABI_REBUILD);
+            }
+            Err(_) => continue,
+        }
+    }
+
+    println!("init: No shell found, halting");
     loop {}
 }

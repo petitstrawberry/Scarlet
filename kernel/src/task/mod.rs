@@ -827,9 +827,15 @@ impl Task {
             is_shared: false,
             owner: None,
         };
-        self.vm_manager
-            .add_memory_map(mmap.clone())
-            .map_err(|e| panic!("Failed to add memory map: {}", e))?;
+        self.vm_manager.add_memory_map(mmap.clone()).map_err(|e| {
+            panic!(
+                "add_memory_map failed: {} (vaddr={:#x}, end={:#x}, size={:#x})",
+                e,
+                vaddr,
+                vaddr + size - 1,
+                size
+            )
+        })?;
 
         self.page_allocations.write().push(page_alloc);
 

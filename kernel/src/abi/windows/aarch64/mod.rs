@@ -9,12 +9,12 @@ use spin::Mutex;
 
 use crate::abi::AbiModule;
 use crate::abi::windows::error::{
-    STATUS_INVALID_HANDLE, STATUS_INVALID_PARAMETER, STATUS_NOT_IMPLEMENTED,
-    STATUS_OBJECT_NAME_NOT_FOUND, STATUS_SUCCESS,
+    STATUS_INFO_LENGTH_MISMATCH, STATUS_INVALID_HANDLE, STATUS_INVALID_PARAMETER,
+    STATUS_NOT_IMPLEMENTED, STATUS_OBJECT_NAME_NOT_FOUND, STATUS_SUCCESS,
 };
 use crate::abi::windows::object::{
-    NtFileObject, NtObject, NtObjectTable, NtSectionObject, STD_ERROR_HANDLE, STD_INPUT_HANDLE,
-    STD_OUTPUT_HANDLE,
+    NtEventObject, NtFileObject, NtObject, NtObjectTable, NtSectionObject, STD_ERROR_HANDLE,
+    STD_INPUT_HANDLE, STD_OUTPUT_HANDLE,
 };
 use crate::abi::windows::peb;
 use crate::arch::Trapframe;
@@ -28,7 +28,10 @@ use crate::task::namespace::TaskNamespace;
 use crate::task::pe_loader::headers::{
     DOS_MAGIC, DosHeader, IMAGE_FILE_MACHINE_ARM64, PE_SIGNATURE, PE32PLUS_MAGIC,
 };
-use crate::task::pe_loader::{find_export_by_name, load_pe_from_bytes, load_pe_into_task};
+use crate::task::pe_loader::{
+    find_export_by_name, find_ordinal_only_export, load_pe_from_bytes, load_pe_into_task,
+};
+use crate::task::{AbiZone, Task};
 use crate::vm;
 
 pub const ABI_NAME: &str = "windows-aarch64";
@@ -46,8 +49,12 @@ struct WindowsProcessState {
     heap_end: usize,
 }
 
-const NTDLL_IMAGE_BASE: u64 = 0x0000_0000_1800_0000;
-const NT_SYSCALL_NT_CONTINUE: u16 = 0x43;
+const NTDLL_IMAGE_BASE: u64 = 0x0000_0001_8000_0000;
+const WIN_TEB_BASE: usize = 0x0000_0002_0000_0000;
+const WIN_PEB_BASE: usize = 0x0000_0002_0001_0000;
+const WIN_LDR_BASE: usize = 0x0000_0002_0002_0000;
+const WIN_LDR_ENTRIES_BASE: usize = 0x0000_0002_0003_0000;
+const WIN_HEAP_BASE: usize = 0x0000_0002_0004_1000;
 const PAGE_NOACCESS: u32 = 0x01;
 const PAGE_READONLY: u32 = 0x02;
 const PAGE_READWRITE: u32 = 0x04;
@@ -57,6 +64,7 @@ const PAGE_EXECUTE_READ: u32 = 0x20;
 const PAGE_EXECUTE_READWRITE: u32 = 0x40;
 const MEM_COMMIT: u32 = 0x1000;
 const MEM_RESERVE: u32 = 0x2000;
+const MEM_FREE: u32 = 0x10000;
 const MEM_PRIVATE: u32 = 0x20000;
 const MEM_MAPPED: u32 = 0x40000;
 const MEM_IMAGE: u32 = 0x1000000;
@@ -93,50 +101,11 @@ impl AbiModule for WindowsAarch64Abi {
     }
 
     fn handle_syscall(&mut self, trapframe: &mut Trapframe) -> Result<usize, &'static str> {
-        let syscall_number = ((trapframe.esr_el1 >> 5) & 0xFFFF) as u16;
+        let syscall_number = (trapframe.esr_el1 & 0xFFFF) as u16;
         let mut args = [0usize; 8];
         args.copy_from_slice(&trapframe.regs.reg[0..8]);
 
-        let ret = match syscall_number {
-            0x02 => status(STATUS_SUCCESS),
-            0x04 => self.nt_allocate_virtual_memory(args),
-            0x05 => self.nt_free_virtual_memory(args),
-            0x06 => self.nt_close(args[0] as u32),
-            0x09 => status(STATUS_SUCCESS),
-            0x0A => self.nt_read_file(args),
-            0x10 => status(STATUS_SUCCESS),
-            0x11 => status(STATUS_SUCCESS),
-            0x18 => self.nt_create_file(args),
-            0x19 => status(STATUS_SUCCESS),
-            0x1A => self.nt_read_file(args),
-            0x1B => self.nt_write_file(args),
-            0x20 => status(STATUS_SUCCESS),
-            0x23 => self.nt_query_virtual_memory(args),
-            0x25 => status(STATUS_NOT_IMPLEMENTED),
-            0x26 => status(STATUS_SUCCESS),
-            0x28 => self.nt_map_view_of_section(args),
-            NT_SYSCALL_NT_CONTINUE => self.nt_continue(trapframe, args),
-            0x29 => status(STATUS_SUCCESS),
-            0x2A => self.nt_unmap_view_of_section(args),
-            0x2E => self.nt_terminate_process(args),
-            0x35 => status(STATUS_SUCCESS),
-            0x36 => self.rtl_allocate_heap(args),
-            0x37 => self.nt_open_section(args),
-            0x3A => self.nt_write_virtual_memory(args),
-            0x3C => self.nt_get_current_process_id(),
-            0x3D => status(STATUS_SUCCESS),
-            0x3E => status(STATUS_SUCCESS),
-            0x3F => status(STATUS_SUCCESS),
-            0x40 => status(STATUS_SUCCESS),
-            0x4A => self.nt_create_section(args),
-            0x50 => self.nt_protect_virtual_memory(args),
-            0x51 => self.nt_query_section(args),
-            0x55 => status(STATUS_SUCCESS),
-            0x56 => status(STATUS_SUCCESS),
-            0x5A => status(STATUS_SUCCESS),
-            0x5B => status(STATUS_SUCCESS),
-            _ => status(STATUS_NOT_IMPLEMENTED),
-        };
+        let ret = self.dispatch_syscall(syscall_number, args, trapframe);
 
         trapframe.regs.reg[0] = ret;
         Ok(ret)
@@ -215,28 +184,48 @@ impl AbiModule for WindowsAarch64Abi {
         trapframe: &mut Trapframe,
     ) -> Result<(), &'static str> {
         let file = file_object.as_file().ok_or("Invalid file object")?;
+
+        for m in task.vm_manager.remove_all_memory_maps() {
+            task.vm_manager
+                .unmap_range_from_mmu(m.vmarea.start, m.vmarea.end);
+        }
+
         let pe = load_pe_into_task(file, task, None).map_err(|_| "Failed to load PE image")?;
         let ntdll = self.load_ntdll(task)?;
 
-        let ldr_initialize_thunk = ntdll
-            .ldr_initialize_thunk
-            .unwrap_or(ntdll.entry_point)
-            .max(ntdll.entry_point);
+        self.populate_ldr_system_dll_init_block(task, &ntdll)?;
 
-        let heap_size = 1024 * 1024;
-        let heap_base = task
-            .vm_manager
-            .find_unmapped_area(heap_size, PAGE_SIZE)
-            .ok_or("No free address for Windows heap")?;
-        let heap_pages = heap_size / PAGE_SIZE;
-        task.allocate_data_pages(heap_base, heap_pages)?;
+        // Register ABI zones so user-space SVCs from ntdll/exe are routed to this ABI
+        let ntdll_start = NTDLL_IMAGE_BASE as usize;
+        let ntdll_end = (NTDLL_IMAGE_BASE + ntdll.image_size) as usize;
+        unsafe {
+            let abi_zones = task.abi_zones.get_mut();
+            abi_zones.insert(
+                ntdll_start,
+                AbiZone {
+                    range: ntdll_start..ntdll_end,
+                    abi: Box::new(self.clone()),
+                },
+            );
+            if pe.image_size > 0 {
+                let exe_start = pe.image_base as usize;
+                let exe_end = (pe.image_base + pe.image_size) as usize;
+                abi_zones.insert(
+                    exe_start,
+                    AbiZone {
+                        range: exe_start..exe_end,
+                        abi: Box::new(self.clone()),
+                    },
+                );
+            }
+        }
 
         let mut state = self.state.lock();
         state.object_table = NtObjectTable::new();
         state.object_table.register_console_pseudo_handles();
-        state.heap_base = heap_base;
-        state.heap_current = heap_base;
-        state.heap_end = heap_base + heap_size;
+        state.heap_base = 0;
+        state.heap_current = 0;
+        state.heap_end = 0;
         state.ntdll_base = ntdll.image_base;
         state.ntdll_entry_point = ntdll.entry_point;
 
@@ -255,32 +244,41 @@ impl AbiModule for WindowsAarch64Abi {
         write_u64_user(task, sp, command_line_ptr)?;
         sp &= !0xF;
 
+        let ldr_initialize_thunk = ntdll
+            .ldr_initialize_thunk
+            .unwrap_or(ntdll.entry_point)
+            .max(ntdll.entry_point);
+
         let env = peb::initialize_process_environment(
             task,
             pe.image_base,
             pe.entry_point,
             pe.image_size,
-            heap_base as u64,
+            0,
             peb::NtDllData {
                 ldr_data_address: 0,
                 image_entry_address: 0,
                 ntdll_entry_address: ntdll.image_base,
+                ntdll_entry_point: ntdll.entry_point,
             },
             ldr_initialize_thunk,
             sp as u64,
+            WIN_TEB_BASE,
+            WIN_PEB_BASE,
+            WIN_LDR_BASE,
+            WIN_LDR_ENTRIES_BASE,
+            WIN_LDR_ENTRIES_BASE + PAGE_SIZE,
         )?;
         state.peb_address = env.peb_address;
         state.teb_address = env.teb_address;
         state.context_address = env.context_address;
         drop(state);
 
-        crate::println!("[windows-aarch64] PE import resolution is not implemented yet");
-
         let context_ptr = env.context_address;
         trapframe.elr = ldr_initialize_thunk;
         trapframe.sp = context_ptr;
         trapframe.regs.reg[0] = context_ptr as usize;
-        trapframe.regs.reg[1] = 0;
+        trapframe.regs.reg[1] = ntdll.image_base as usize;
         trapframe.tpidr_el0 = env.teb_address;
         trapframe.regs.reg[18] = env.teb_address as usize; // x18 = TEB on ARM64 Windows
 
@@ -292,6 +290,74 @@ impl AbiModule for WindowsAarch64Abi {
             vcpu.set_pc(ldr_initialize_thunk);
         }
 
+        // Verify exe PE headers are readable at image_base
+        {
+            let kva = task.vm_manager.translate_to_kva(pe.image_base as usize);
+            if let Some(kva) = kva {
+                let mz = unsafe { core::ptr::read_volatile(kva as *const u16) };
+                let pe_off = unsafe { core::ptr::read_volatile((kva + 0x3C) as *const u32) };
+                let pe_sig = if (pe_off as usize) + 4 <= PAGE_SIZE {
+                    unsafe { core::ptr::read_volatile((kva + pe_off as usize) as *const u32) }
+                } else {
+                    0
+                };
+                crate::println!(
+                    "[win-abi] exe headers at 0x{:x}: MZ=0x{:04X} e_lfanew=0x{:X} PE_sig=0x{:08X}",
+                    pe.image_base,
+                    mz,
+                    pe_off,
+                    pe_sig
+                );
+            } else {
+                crate::println!(
+                    "[win-abi] WARNING: exe image_base 0x{:x} NOT mapped!",
+                    pe.image_base
+                );
+            }
+
+            // Verify PEB fields
+            if let Some(kva) = task.vm_manager.translate_to_kva(WIN_PEB_BASE) {
+                let image_base = unsafe { core::ptr::read_volatile((kva + 0x10) as *const u64) };
+                let ldr_ptr = unsafe { core::ptr::read_volatile((kva + 0x18) as *const u64) };
+                let proc_params = unsafe { core::ptr::read_volatile((kva + 0x20) as *const u64) };
+                let heap = unsafe { core::ptr::read_volatile((kva + 0x30) as *const u64) };
+                crate::println!(
+                    "[win-abi] PEB: ImageBase=0x{:x} Ldr=0x{:x} ProcParams=0x{:x} Heap=0x{:x}",
+                    image_base,
+                    ldr_ptr,
+                    proc_params,
+                    heap
+                );
+            }
+
+            // Verify TEB fields
+            if let Some(kva) = task.vm_manager.translate_to_kva(WIN_TEB_BASE) {
+                let peb_ptr = unsafe { core::ptr::read_volatile((kva + 0x60) as *const u64) };
+                let self_ptr = unsafe { core::ptr::read_volatile((kva + 0x30) as *const u64) };
+                crate::println!("[win-abi] TEB: Self=0x{:x} PEB=0x{:x}", self_ptr, peb_ptr);
+            }
+
+            // Verify Ldr data
+            if let Some(kva) = task.vm_manager.translate_to_kva(WIN_LDR_BASE) {
+                let init_flag = unsafe { core::ptr::read_volatile((kva + 0x04) as *const u8) };
+                let load_flink = unsafe { core::ptr::read_volatile((kva + 0x10) as *const u64) };
+                let load_blink = unsafe { core::ptr::read_volatile((kva + 0x18) as *const u64) };
+                crate::println!(
+                    "[win-abi] Ldr: Initialized={} LoadFlink=0x{:x} LoadBlink=0x{:x}",
+                    init_flag,
+                    load_flink,
+                    load_blink
+                );
+            }
+        }
+
+        crate::println!(
+            "[win-abi] trapframe set: elr=0x{:x} sp=0x{:x} x0=0x{:x} tpidr_el0=0x{:x}",
+            trapframe.elr,
+            trapframe.sp,
+            trapframe.regs.reg[0],
+            trapframe.tpidr_el0
+        );
         Ok(())
     }
 
@@ -341,21 +407,23 @@ impl AbiModule for WindowsAarch64Abi {
 }
 
 impl WindowsAarch64Abi {
-    fn nt_allocate_virtual_memory(&mut self, args: [usize; 8]) -> usize {
+    fn nt_allocate_virtual_memory(&mut self, base_ptr: usize, size_ptr: usize) -> usize {
         let task = match mytask() {
             Some(task) => task,
             None => return status(STATUS_INVALID_PARAMETER),
         };
 
-        let base_ptr = args[0];
-        let size_ptr = args[1];
         let requested_base = read_u64_user(task, base_ptr).unwrap_or(0) as usize;
-        let requested_size = read_u64_user(task, size_ptr).unwrap_or(PAGE_SIZE as u64) as usize;
-        if requested_size == 0 {
-            return status(STATUS_INVALID_PARAMETER);
-        }
+        let requested_size = read_u64_user(task, size_ptr).unwrap_or(0) as usize;
 
-        let size = align_up(requested_size, PAGE_SIZE);
+        let size = align_up(
+            if requested_size == 0 {
+                PAGE_SIZE
+            } else {
+                requested_size
+            },
+            PAGE_SIZE,
+        );
         let base = if requested_base == 0 {
             match task.vm_manager.find_unmapped_area(size, PAGE_SIZE) {
                 Some(addr) => addr,
@@ -365,29 +433,33 @@ impl WindowsAarch64Abi {
             align_down(requested_base, PAGE_SIZE)
         };
 
-        let pages = size / PAGE_SIZE;
-        if task.allocate_data_pages(base, pages).is_err() {
-            return status(STATUS_INVALID_PARAMETER);
+        // Check if the region is already mapped — MEM_COMMIT on existing reservation is a NOP
+        let already_mapped = (0..size)
+            .step_by(PAGE_SIZE)
+            .any(|off| task.vm_manager.translate_to_kva(base + off).is_some());
+
+        if !already_mapped {
+            let pages = size / PAGE_SIZE;
+            if task.allocate_data_pages(base, pages).is_err() {
+                return status(STATUS_INVALID_PARAMETER);
+            }
         }
 
-        if write_u64_user(task, base_ptr, base as u64).is_err() {
-            return status(STATUS_INVALID_PARAMETER);
-        }
-        if write_u64_user(task, size_ptr, size as u64).is_err() {
+        if write_u64_user(task, base_ptr, base as u64).is_err()
+            || write_u64_user(task, size_ptr, size as u64).is_err()
+        {
             return status(STATUS_INVALID_PARAMETER);
         }
 
         status(STATUS_SUCCESS)
     }
 
-    fn nt_free_virtual_memory(&mut self, args: [usize; 8]) -> usize {
+    fn nt_free_virtual_memory(&mut self, base_ptr: usize, size_ptr: usize) -> usize {
         let task = match mytask() {
             Some(task) => task,
             None => return status(STATUS_INVALID_PARAMETER),
         };
 
-        let base_ptr = args[0];
-        let size_ptr = args[1];
         let base = align_down(
             read_u64_user(task, base_ptr).unwrap_or(0) as usize,
             PAGE_SIZE,
@@ -470,10 +542,10 @@ impl WindowsAarch64Abi {
         };
 
         let handle = args[0] as u32;
-        let buffer_ptr = args[1];
-        let length = args[2];
-        if length == 0 {
-            return status(STATUS_SUCCESS);
+        let buffer_ptr = args[5];
+        let length = args[6];
+        if length == 0 || length > 0x100000 {
+            return status(STATUS_INVALID_PARAMETER);
         }
 
         let file = {
@@ -505,10 +577,10 @@ impl WindowsAarch64Abi {
         };
 
         let handle = args[0] as u32;
-        let buffer_ptr = args[1];
-        let length = args[2];
-        if length == 0 {
-            return status(STATUS_SUCCESS);
+        let buffer_ptr = args[5];
+        let length = args[6];
+        if length == 0 || length > 0x100000 {
+            return status(STATUS_INVALID_PARAMETER);
         }
 
         let mut buffer = Vec::new();
@@ -542,13 +614,12 @@ impl WindowsAarch64Abi {
         status(STATUS_SUCCESS)
     }
 
-    fn nt_terminate_process(&mut self, args: [usize; 8]) -> usize {
+    fn nt_terminate_process(&mut self, exit_status: usize) -> usize {
         let task = match mytask() {
             Some(task) => task,
             None => return status(STATUS_INVALID_PARAMETER),
         };
-        let exit_status = args[1] as i32;
-        task.exit(exit_status);
+        task.exit(exit_status as i32);
         status(STATUS_SUCCESS)
     }
 
@@ -759,15 +830,56 @@ impl WindowsAarch64Abi {
         let return_length_ptr = args[5];
 
         if info_class != 0 {
+            if info_class == 6 {
+                const MEMORY_REGION_INFORMATION_SIZE: usize = 24;
+                if output_len < MEMORY_REGION_INFORMATION_SIZE {
+                    return status(STATUS_INFO_LENGTH_MISMATCH);
+                }
+                let mut out = [0u8; MEMORY_REGION_INFORMATION_SIZE];
+                let aligned_base = align_down(base_address, PAGE_SIZE) as u64;
+                out[0..8].copy_from_slice(&aligned_base.to_le_bytes());
+                out[8..16].copy_from_slice(&PAGE_SIZE.to_le_bytes());
+                out[16..20].copy_from_slice(&0u32.to_le_bytes());
+                out[20..24].copy_from_slice(&(MEM_COMMIT | PAGE_READWRITE).to_le_bytes());
+                if copy_to_user(task, output_buffer, &out).is_err() {
+                    return status(STATUS_INVALID_PARAMETER);
+                }
+                if return_length_ptr != 0 {
+                    let _ = write_u64_user(
+                        task,
+                        return_length_ptr,
+                        MEMORY_REGION_INFORMATION_SIZE as u64,
+                    );
+                }
+                return status(STATUS_SUCCESS);
+            }
             return status(STATUS_NOT_IMPLEMENTED);
         }
 
+        const MEMORY_BASIC_INFORMATION_SIZE: usize = 48;
+
         let map = match task.vm_manager.search_memory_map(base_address) {
             Some(map) => map,
-            None => return status(STATUS_INVALID_PARAMETER),
+            None => {
+                let mut out = [0u8; MEMORY_BASIC_INFORMATION_SIZE];
+                out[0..8]
+                    .copy_from_slice(&(align_down(base_address, PAGE_SIZE) as u64).to_le_bytes());
+                out[8..16]
+                    .copy_from_slice(&(align_down(base_address, PAGE_SIZE) as u64).to_le_bytes());
+                out[24..32].copy_from_slice(&PAGE_SIZE.to_le_bytes());
+                out[32..36].copy_from_slice(&MEM_FREE.to_le_bytes());
+                let _ = copy_to_user(task, output_buffer, &out);
+                if return_length_ptr != 0 {
+                    let _ = write_u64_user(
+                        task,
+                        return_length_ptr,
+                        MEMORY_BASIC_INFORMATION_SIZE as u64,
+                    );
+                }
+                return status(STATUS_SUCCESS);
+            }
         };
 
-        const MEMORY_BASIC_INFORMATION_SIZE: usize = 48;
         if output_len < MEMORY_BASIC_INFORMATION_SIZE {
             return status(STATUS_INVALID_PARAMETER);
         }
@@ -1015,6 +1127,82 @@ impl WindowsAarch64Abi {
         context.x[0] as usize
     }
 
+    /// Populate the `PS_SYSTEM_DLL_INIT_BLOCK` (LdrSystemDllInitBlock) in ntdll's
+    /// mapped memory before calling LdrInitializeThunk. The Windows kernel writes
+    /// initialization data here so ntdll can configure CFG, mitigations, and SCP.
+    fn populate_ldr_system_dll_init_block(
+        &self,
+        task: &crate::task::Task,
+        ntdll: &NtDllLoadResult,
+    ) -> Result<(), &'static str> {
+        let rva = match ntdll.ldr_system_dll_init_block_rva {
+            Some(rva) => rva,
+            None => {
+                crate::println!(
+                    "[win-abi] Skipping LdrSystemDllInitBlock population: export not found"
+                );
+                return Ok(());
+            }
+        };
+
+        let init_block_va = ntdll.image_base + rva as u64;
+
+        // PS_SYSTEM_DLL_INIT_BLOCK_V3 for Windows 11 24H2 (build 26100)
+        // Total size: 0x128 (296 bytes)
+        const INIT_BLOCK_SIZE: usize = 0x128;
+        let mut block = [0u8; INIT_BLOCK_SIZE];
+
+        // Offset 0x00: Size = 0x128
+        block[0..4].copy_from_slice(&(INIT_BLOCK_SIZE as u32).to_le_bytes());
+
+        // Offset 0x10: SystemDllNativeRelocation = ntdll base address
+        block[0x10..0x18].copy_from_slice(&ntdll.image_base.to_le_bytes());
+
+        // Offset 0x98: RngData — non-zero random seed
+        block[0x98..0x9C].copy_from_slice(&0xDEADBEEFu32.to_le_bytes());
+
+        // Offset 0xA0: MitigationOptionsMap (3 × ULONG64 = 24 bytes)
+        // Set CFG enabled (bit 1 of first QWord) and standard mitigations
+        let mitigation_flags: u64 = (1 << 1) | (1 << 2) | (1 << 3) | (1 << 12);
+        block[0xA0..0xA8].copy_from_slice(&mitigation_flags.to_le_bytes());
+        block[0xA8..0xB0].copy_from_slice(&0u64.to_le_bytes());
+        block[0xB0..0xB8].copy_from_slice(&0u64.to_le_bytes());
+
+        // Offset 0xB8: CfgBitMap = NULL (no CFG bitmap; ntdll must handle gracefully)
+        // Offset 0xC0: CfgBitMapSize = 0
+        // Offset 0xC8: Wow64CfgBitMap = NULL
+        // Offset 0xD0: Wow64CfgBitMapSize = 0
+
+        // Offset 0xD8: MitigationAuditOptionsMap (3 × ULONG64 = 24 bytes) — zeroed
+
+        // Offsets 0xF0-0x127: SCP CFG function pointers (24H2) — zeroed/NULL
+        // ScpCfgCheckFunction, ScpCfgCheckESFunction, ScpCfgDispatchFunction,
+        // ScpCfgDispatchESFunction, ScpArm64EcCallCheck, ScpArm64EcCfgCheckFunction,
+        // ScpArm64EcCfgCheckESFunction
+
+        crate::println!(
+            "[win-abi] Writing PS_SYSTEM_DLL_INIT_BLOCK (0x{:x} bytes) at VA 0x{:x}",
+            INIT_BLOCK_SIZE,
+            init_block_va
+        );
+
+        copy_to_user(task, init_block_va as usize, &block)
+            .map_err(|_| "Failed to write LdrSystemDllInitBlock to ntdll memory")?;
+
+        // Verify the write
+        if let Some(kva) = task.vm_manager.translate_to_kva(init_block_va as usize) {
+            let size_field = unsafe { core::ptr::read_volatile(kva as *const u32) };
+            let native_reloc = unsafe { core::ptr::read_volatile((kva + 0x10) as *const u64) };
+            crate::println!(
+                "[win-abi] LdrSystemDllInitBlock verified: Size=0x{:x} NativeReloc=0x{:x}",
+                size_field,
+                native_reloc
+            );
+        }
+
+        Ok(())
+    }
+
     fn load_ntdll(&self, task: &crate::task::Task) -> Result<NtDllLoadResult, &'static str> {
         let vfs = get_vfs_for_task(task).ok_or("No VFS available")?;
         let obj = vfs
@@ -1039,21 +1227,250 @@ impl WindowsAarch64Abi {
         let load = load_pe_from_bytes(ntdll_slice, task, Some(NTDLL_IMAGE_BASE))
             .map_err(|_| "Failed to load ntdll PE image")?;
 
-        let ldr_initialize_thunk = find_export_by_name(ntdll_slice, "LdrInitializeThunk")
-            .map(|rva| load.image_base + rva as u64);
+        let ldr_init_thunk_rva = find_export_by_name(ntdll_slice, "LdrInitializeThunk")
+            .or_else(|| find_ordinal_only_export(ntdll_slice));
+        let ldr_initialize_thunk = ldr_init_thunk_rva.map(|rva| load.image_base + rva as u64);
+        let ldr_system_dll_init_block_rva =
+            find_export_by_name(ntdll_slice, "LdrSystemDllInitBlock");
+
+        if let Some(rva) = ldr_system_dll_init_block_rva {
+            crate::println!(
+                "[win-abi] LdrSystemDllInitBlock found at RVA 0x{:x} (VA 0x{:x})",
+                rva,
+                load.image_base + rva as u64
+            );
+        } else {
+            crate::println!("[win-abi] WARNING: LdrSystemDllInitBlock export NOT found in ntdll");
+        }
 
         Ok(NtDllLoadResult {
             image_base: load.image_base,
+            image_size: load.image_size,
             entry_point: load.entry_point,
             ldr_initialize_thunk,
+            ldr_system_dll_init_block_rva,
         })
+    }
+    /// Dispatch a syscall using the auto-generated syscall table.
+    ///
+    /// Looks up the syscall name by number from `syscall_table::lookup_by_number`,
+    /// then dispatches to the correct handler. Unknown or unimplemented syscalls
+    /// return `STATUS_NOT_IMPLEMENTED` with a trace log.
+    fn dispatch_syscall(
+        &mut self,
+        number: u16,
+        args: [usize; 8],
+        trapframe: &mut Trapframe,
+    ) -> usize {
+        let name = match syscall_table::lookup_by_number(number) {
+            Some(n) => n,
+            None => {
+                crate::println!("[win-abi] unknown syscall 0x{:04X} ({})", number, number);
+                return status(STATUS_NOT_IMPLEMENTED);
+            }
+        };
+
+        crate::println!(
+            "[win-abi] syscall 0x{:04X}: {} (pc=0x{:x})",
+            number,
+            name,
+            trapframe.elr
+        );
+
+        match name {
+            "NtAllocateVirtualMemory" => self.nt_allocate_virtual_memory(args[1], args[3]),
+            "NtAllocateVirtualMemoryEx" => self.nt_allocate_virtual_memory(args[1], args[2]),
+
+            "NtFreeVirtualMemory" => self.nt_free_virtual_memory(args[1], args[2]),
+            "NtClose" => self.nt_close(args[0] as u32),
+            "NtReadFile" => self.nt_read_file(args),
+            "NtCreateFile" => self.nt_create_file(args),
+            "NtWriteFile" => self.nt_write_file(args),
+            "NtQueryVirtualMemory" => self.nt_query_virtual_memory(args),
+            "NtMapViewOfSection" => self.nt_map_view_of_section(args),
+            "NtUnmapViewOfSection" => self.nt_unmap_view_of_section(args),
+            "NtTerminateProcess" => self.nt_terminate_process(args[1]),
+            "NtOpenSection" => self.nt_open_section(args),
+            "NtWriteVirtualMemory" => self.nt_write_virtual_memory(args),
+            "NtCreateSection" => self.nt_create_section(args),
+            "NtProtectVirtualMemory" => self.nt_protect_virtual_memory(args),
+            "NtQuerySection" => self.nt_query_section(args),
+            "NtContinue" => self.nt_continue(trapframe, args),
+
+            "NtCreateEvent" => {
+                let handle = self
+                    .state
+                    .lock()
+                    .object_table
+                    .insert(NtObject::Event(NtEventObject));
+                let task = mytask().unwrap();
+                let _ = write_u64_user(task, args[1], handle as u64);
+                status(STATUS_SUCCESS)
+            }
+            "NtOpenKey" => {
+                let handle = self.state.lock().object_table.insert(NtObject::Null);
+                let task = mytask().unwrap();
+                let _ = write_u64_user(task, args[0], handle as u64);
+                status(STATUS_SUCCESS)
+            }
+            "NtQueryValueKey" => status(STATUS_OBJECT_NAME_NOT_FOUND),
+
+            "NtQueryInformationProcess" => {
+                let task = mytask().unwrap();
+                let info_class = args[1] as u32;
+                let buf = args[2];
+                let len = args[3];
+                if len >= 16 && buf != 0 {
+                    let mut out = [0u8; 16];
+                    out[0..8].copy_from_slice(&(task.get_id() as u64).to_le_bytes());
+                    let _ = copy_to_user(task, buf, &out);
+                }
+                if args[4] != 0 {
+                    let _ = write_u64_user(task, args[4], 16);
+                }
+                status(STATUS_SUCCESS)
+            }
+            "NtQueryPerformanceCounter" => {
+                let task = match mytask() {
+                    Some(t) => t,
+                    None => return status(STATUS_INVALID_PARAMETER),
+                };
+                let buf = args[0];
+                let _len = args[1];
+                if buf != 0 {
+                    let counter = (crate::timer::get_tick() as u64) * 10000;
+                    let _ = write_u64_user(task, buf, counter);
+                }
+                status(STATUS_SUCCESS)
+            }
+
+            "NtQuerySystemInformation" => {
+                let task = match mytask() {
+                    Some(t) => t,
+                    None => return status(STATUS_INVALID_PARAMETER),
+                };
+                let info_class = args[0] as u32;
+                let buf = args[1];
+                let len = args[2];
+                crate::println!("[win-abi] NtQuerySystemInformation class={}", info_class);
+                match info_class {
+                    0x00 => {
+                        // SystemBasicInformation (48 bytes)
+                        if len >= 48 && buf != 0 {
+                            let mut out = [0u8; 48];
+                            out[0..4].copy_from_slice(&0u32.to_le_bytes()); // OemId
+                            out[4..8].copy_from_slice(&(PAGE_SIZE as u32).to_le_bytes()); // PageSize
+                            out[8..16].copy_from_slice(&0x10000u64.to_le_bytes()); // MinAddr
+                            out[16..24].copy_from_slice(&0x7FFFFFFEFFFFu64.to_le_bytes()); // MaxAddr
+                            out[24..32].copy_from_slice(&1u64.to_le_bytes()); // ActiveProcessorMask
+                            out[32..36].copy_from_slice(&1u32.to_le_bytes()); // NumberOfProcessors
+                            out[36..40].copy_from_slice(&0x0FCCu32.to_le_bytes()); // ProcessorType (ARM64)
+                            out[40..44].copy_from_slice(&(64 * 1024u32).to_le_bytes()); // AllocationGranularity
+                            out[44..46].copy_from_slice(&1u16.to_le_bytes()); // ProcessorLevel
+                            out[46..48].copy_from_slice(&0u16.to_le_bytes()); // ProcessorRevision
+                            let _ = copy_to_user(task, buf, &out);
+                        }
+                    }
+                    0x03 => {
+                        // SystemTimeOfDayInformation (32 bytes)
+                        if len >= 16 && buf != 0 {
+                            let mut out = [0u8; 32];
+                            let tick = crate::timer::get_tick() as u64;
+                            let ft = tick * 10000 + 132477120000000000;
+                            out[0..8].copy_from_slice(&ft.to_le_bytes()); // KeBootTime
+                            out[8..16].copy_from_slice(&ft.to_le_bytes()); // KeCurrentTime
+                            let _ = copy_to_user(task, buf, &out);
+                        }
+                    }
+                    0x05 => {
+                        // SystemProcessInformation
+                        // Return STATUS_INFO_LENGTH_MISMATCH to indicate more data needed
+                    }
+                    0x3E => {
+                        // SystemCodeIntegrityInformation (class 62)
+                        // Return minimal 4-byte struct: ULONG flags = 0
+                        if len >= 4 && buf != 0 {
+                            let out = 0u32.to_le_bytes();
+                            let _ = copy_to_user(task, buf, &out);
+                        }
+                    }
+                    _ => {}
+                }
+                status(STATUS_SUCCESS)
+            }
+
+            "NtQuerySystemTime" => {
+                let task = match mytask() {
+                    Some(t) => t,
+                    None => return status(STATUS_INVALID_PARAMETER),
+                };
+                let buf = args[0];
+                if buf != 0 {
+                    let tick = crate::timer::get_tick() as u64;
+                    let ft = tick * 10000 + 132477120000000000;
+                    let _ = write_u64_user(task, buf, ft);
+                }
+                status(STATUS_SUCCESS)
+            }
+
+            "NtQuerySystemInformationEx" => {
+                let task = match mytask() {
+                    Some(t) => t,
+                    None => return status(STATUS_INVALID_PARAMETER),
+                };
+                let info_class = args[0] as u32;
+                let output_buffer = args[3];
+                let output_len = args[4];
+                crate::println!("[win-abi] NtQuerySystemInformationEx class={}", info_class);
+                match info_class {
+                    0x07 => {
+                        // SystemProcessorFeaturesInformation (56 bytes)
+                        if output_len >= 56 && output_buffer != 0 {
+                            let mut out = [0u8; 56];
+                            out[0..4].copy_from_slice(&1u32.to_le_bytes()); // ProcessorFeature
+                            let _ = copy_to_user(task, output_buffer, &out);
+                        }
+                    }
+                    _ => {}
+                }
+                status(STATUS_SUCCESS)
+            }
+
+            "NtWorkerFactoryWorkerReady"
+            | "NtManageHotPatch"
+            | "NtAcceptConnectPort"
+            | "NtRemoveIoCompletion"
+            | "NtQueryObject"
+            | "NtQueryInformationFile"
+            | "NtReleaseMutant"
+            | "NtOpenProcess"
+            | "NtAccessCheckAndAuditAlarm"
+            | "NtQueryDirectoryFile"
+            | "NtQueryAttributesFile"
+            | "NtClearEvent"
+            | "NtReadVirtualMemory"
+            | "NtOpenEvent"
+            | "NtQueryEvent"
+            | "NtDelayExecution"
+            | "NtWaitForMultipleObjects"
+            | "NtTraceEvent"
+            | "NtRaiseHardError" => status(STATUS_SUCCESS),
+
+            _ => {
+                crate::println!("[win-abi] unimplemented syscall 0x{:04X}: {}", number, name);
+                status(STATUS_NOT_IMPLEMENTED)
+            }
+        }
     }
 }
 
 struct NtDllLoadResult {
     image_base: u64,
+    image_size: u64,
     entry_point: u64,
     ldr_initialize_thunk: Option<u64>,
+    /// RVA of the LdrSystemDllInitBlock export in ntdll
+    ldr_system_dll_init_block_rva: Option<u32>,
 }
 
 fn status(code: u32) -> usize {

@@ -16,6 +16,7 @@ pub mod layout {
     pub const PEB_OFFSET_OS_MAJOR: usize = 0x118;
     pub const PEB_OFFSET_OS_MINOR: usize = 0x11C;
     pub const PEB_OFFSET_OS_BUILD: usize = 0x120;
+    pub const PEB_OFFSET_NUMBER_OF_PROCESSORS: usize = 0xB8; // ULONG on 64-bit PEB
 
     pub const TEB_OFFSET_PROCESS_ENVIRONMENT_BLOCK: usize = 0x60;
     pub const TEB_OFFSET_CLIENT_ID: usize = 0x40;
@@ -49,6 +50,7 @@ pub struct NtDllData {
     pub ldr_data_address: u64,
     pub image_entry_address: u64,
     pub ntdll_entry_address: u64,
+    pub ntdll_entry_point: u64,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -93,9 +95,14 @@ pub struct NtdllContext {
 }
 
 impl NtdllContext {
+    pub const CONTEXT_ARM64: u32 = 0x0040_0000;
     pub const CONTEXT_CONTROL: u32 = 0x0000_0001;
     pub const CONTEXT_INTEGER: u32 = 0x0000_0002;
-    pub const CONTEXT_FULL: u32 = Self::CONTEXT_CONTROL | Self::CONTEXT_INTEGER;
+    pub const CONTEXT_FLOATING_POINT: u32 = 0x0000_0004;
+    pub const CONTEXT_FULL: u32 = Self::CONTEXT_ARM64
+        | Self::CONTEXT_CONTROL
+        | Self::CONTEXT_INTEGER
+        | Self::CONTEXT_FLOATING_POINT;
 }
 
 pub fn initialize_process_environment(
@@ -107,35 +114,22 @@ pub fn initialize_process_environment(
     ntdll: NtDllData,
     ldr_initialize_thunk: u64,
     initial_stack_pointer: u64,
+    teb_addr: usize,
+    peb_addr: usize,
+    ldr_addr: usize,
+    exe_entry_addr: usize,
+    ntdll_entry_addr: usize,
 ) -> Result<ProcessEnvironment, &'static str> {
     map_shared_user_data(task)?;
 
-    let teb_addr = task
-        .vm_manager
-        .find_unmapped_area(PAGE_SIZE, PAGE_SIZE)
-        .ok_or("No free address for TEB")?;
-    let peb_addr = task
-        .vm_manager
-        .find_unmapped_area(PAGE_SIZE, PAGE_SIZE)
-        .ok_or("No free address for PEB")?;
-    let ldr_addr = task
-        .vm_manager
-        .find_unmapped_area(PAGE_SIZE, PAGE_SIZE)
-        .ok_or("No free address for PEB_LDR_DATA")?;
-    let exe_entry_addr = task
-        .vm_manager
-        .find_unmapped_area(PAGE_SIZE, PAGE_SIZE)
-        .ok_or("No free address for executable LDR entry")?;
-    let ntdll_entry_addr = task
-        .vm_manager
-        .find_unmapped_area(PAGE_SIZE, PAGE_SIZE)
-        .ok_or("No free address for ntdll LDR entry")?;
-
-    task.allocate_data_pages(teb_addr, 1)?;
+    task.allocate_data_pages(teb_addr, 4)?;
     task.allocate_data_pages(peb_addr, 1)?;
     task.allocate_data_pages(ldr_addr, 1)?;
     task.allocate_data_pages(exe_entry_addr, 1)?;
     task.allocate_data_pages(ntdll_entry_addr, 1)?;
+
+    let proc_params_addr: usize = 0x0000_0002_0004_0000;
+    task.allocate_data_pages(proc_params_addr, 1)?;
 
     let mut teb_buf = [0u8; PAGE_SIZE];
     let mut peb_buf = [0u8; PAGE_SIZE];
@@ -173,11 +167,96 @@ pub fn initialize_process_environment(
 
     write_u64(&mut peb_buf, layout::PEB_OFFSET_LDR, ldr_addr as u64);
     write_u64(&mut peb_buf, layout::PEB_OFFSET_PROCESS_HEAP, process_heap);
-    write_u64(&mut peb_buf, layout::PEB_OFFSET_PROCESS_PARAMETERS, 0);
+    write_u64(
+        &mut peb_buf,
+        layout::PEB_OFFSET_PROCESS_PARAMETERS,
+        proc_params_addr as u64,
+    );
+
+    // Mutant handle at PEB+0x08 — must be non-NULL for loader lock
+    write_u64(&mut peb_buf, 0x08, 0xFFFFFFFFFFFFFFFF);
+
+    let mut params_buf = [0u8; PAGE_SIZE];
+
+    // RTL_USER_PROCESS_PARAMETERS layout (PE32+ / ARM64)
+    write_u32(&mut params_buf, 0x00, PAGE_SIZE as u32); // MaximumLength
+    write_u32(&mut params_buf, 0x04, PAGE_SIZE as u32); // Length
+    write_u32(&mut params_buf, 0x08, 0x6001); // Flags: PPF_NORMALIZED | ?
+    write_u64(&mut params_buf, 0x10, 0); // ConsoleHandle = NULL
+    write_u32(&mut params_buf, 0x18, 0); // ConsoleFlags
+    write_u64(&mut params_buf, 0x20, 0xFFFFFFFFFFFFFFFF); // StandardInput
+    write_u64(&mut params_buf, 0x28, 0xFFFFFFFFFFFFFFFF); // StandardOutput
+    write_u64(&mut params_buf, 0x30, 0xFFFFFFFFFFFFFFFF); // StandardError
+
+    // +0x38: CurrentDirectory (CURDIR = UNICODE_STRING[16] + HANDLE[8] = 24 bytes)
+    // +0x50: DllPath (UNICODE_STRING[16])
+    // +0x60: ImagePathName (UNICODE_STRING[16])
+    // +0x70: CommandLine (UNICODE_STRING[16])
+    // +0x80: Environment (PVOID[8])
+    let strings_base = 0x90usize;
+    let mut string_off = strings_base;
+
+    let cur_dir = b"C:\\";
+    let cur_dir_utf16_len = (cur_dir.len() * 2) as u16;
+    let cur_dir_addr = (proc_params_addr + string_off) as u64;
+    for &b in cur_dir {
+        params_buf[string_off] = b;
+        params_buf[string_off + 1] = 0;
+        string_off += 2;
+    }
+    string_off = (string_off + 7) & !7;
+    write_u16(&mut params_buf, 0x38, cur_dir_utf16_len);
+    write_u16(&mut params_buf, 0x3A, cur_dir_utf16_len);
+    write_u32(&mut params_buf, 0x3C, 0);
+    write_u64(&mut params_buf, 0x40, cur_dir_addr);
+    write_u64(&mut params_buf, 0x48, 0); // CurrentDirectory.Handle
+
+    // DllPath at +0x50 = empty
+    write_u16(&mut params_buf, 0x50, 0);
+    write_u16(&mut params_buf, 0x52, 0);
+    write_u32(&mut params_buf, 0x54, 0);
+    write_u64(&mut params_buf, 0x58, 0);
+
+    // ImagePathName at +0x60
+    let img_path = alloc::format!("C:\\test_exit.exe");
+    let img_path_utf16_len = (img_path.len() * 2) as u16;
+    let img_path_addr = (proc_params_addr + string_off) as u64;
+    for &b in img_path.as_bytes() {
+        params_buf[string_off] = b;
+        params_buf[string_off + 1] = 0;
+        string_off += 2;
+    }
+    string_off = (string_off + 7) & !7;
+    write_u16(&mut params_buf, 0x60, img_path_utf16_len);
+    write_u16(&mut params_buf, 0x62, img_path_utf16_len);
+    write_u32(&mut params_buf, 0x64, 0);
+    write_u64(&mut params_buf, 0x68, img_path_addr);
+
+    // CommandLine at +0x70
+    let cmd_line = alloc::format!("test_exit.exe");
+    let cmd_line_utf16_len = (cmd_line.len() * 2) as u16;
+    let cmd_line_addr = (proc_params_addr + string_off) as u64;
+    for &b in cmd_line.as_bytes() {
+        params_buf[string_off] = b;
+        params_buf[string_off + 1] = 0;
+        string_off += 2;
+    }
+    string_off = (string_off + 7) & !7;
+    write_u16(&mut params_buf, 0x70, cmd_line_utf16_len);
+    write_u16(&mut params_buf, 0x72, cmd_line_utf16_len);
+    write_u32(&mut params_buf, 0x74, 0);
+    write_u64(&mut params_buf, 0x78, cmd_line_addr);
+
+    // Environment at +0x80
+    let env_addr = (proc_params_addr + string_off) as u64;
+    write_u16(&mut params_buf, string_off, 0);
+    write_u16(&mut params_buf, string_off + 2, 0);
+    write_u64(&mut params_buf, 0x80, env_addr);
     write_u64(&mut peb_buf, 0x10, image_base);
     write_u32(&mut peb_buf, layout::PEB_OFFSET_OS_MAJOR, 10);
     write_u32(&mut peb_buf, layout::PEB_OFFSET_OS_MINOR, 0);
-    write_u16(&mut peb_buf, layout::PEB_OFFSET_OS_BUILD, 22621);
+    write_u16(&mut peb_buf, layout::PEB_OFFSET_OS_BUILD, 26100);
+    write_u32(&mut peb_buf, layout::PEB_OFFSET_NUMBER_OF_PROCESSORS, 1);
 
     let load_head = (ldr_addr + layout::PEB_LDR_OFFSET_IN_LOAD_ORDER) as u64;
     let mem_head = (ldr_addr + layout::PEB_LDR_OFFSET_IN_MEMORY_ORDER) as u64;
@@ -211,8 +290,8 @@ pub fn initialize_process_environment(
     write_list_entry(
         &mut ldr_buf,
         layout::PEB_LDR_OFFSET_IN_INIT_ORDER,
-        exe_init,
         ntdll_init,
+        exe_init,
     );
 
     write_list_entry(
@@ -230,8 +309,8 @@ pub fn initialize_process_environment(
     write_list_entry(
         &mut exe_entry_buf,
         layout::LDR_ENTRY_OFFSET_IN_INIT_ORDER_LINKS,
-        ntdll_init,
         init_head,
+        ntdll_init,
     );
     write_u64(
         &mut exe_entry_buf,
@@ -254,7 +333,82 @@ pub fn initialize_process_environment(
         0xF6B1_95A2,
     );
     write_u32(&mut exe_entry_buf, layout::LDR_ENTRY_OFFSET_LOAD_REASON, 0);
+    let exe_name_buf_addr = ntdll_entry_addr + PAGE_SIZE;
+    task.allocate_data_pages(exe_name_buf_addr, 1)?;
+
     write_u16(&mut exe_entry_buf, layout::LDR_ENTRY_OFFSET_LOAD_COUNT, 1);
+
+    fn write_unicode_string_entry(
+        buf: &mut [u8],
+        offset: usize,
+        length: u16,
+        max_length: u16,
+        buffer_addr: u64,
+    ) {
+        write_u16(buf, offset, length);
+        write_u16(buf, offset + 2, max_length);
+        write_u32(buf, offset + 4, 0);
+        write_u64(buf, offset + 8, buffer_addr);
+    }
+
+    let exe_full_name = b"\\System32\\test_exit.exe";
+    let exe_base_name = b"test_exit.exe";
+    let ntdll_full_name = b"\\System32\\ntdll.dll";
+    let ntdll_base_name = b"ntdll.dll";
+
+    let exe_full_name_utf16_len = (exe_full_name.len() * 2) as u16;
+    let exe_base_name_utf16_len = (exe_base_name.len() * 2) as u16;
+    let ntdll_full_name_utf16_len = (ntdll_full_name.len() * 2) as u16;
+    let ntdll_base_name_utf16_len = (ntdll_base_name.len() * 2) as u16;
+
+    let mut name_buf = [0u8; PAGE_SIZE];
+    let mut name_off = 0usize;
+
+    let exe_full_name_addr = (exe_name_buf_addr + name_off) as u64;
+    for &b in exe_full_name {
+        name_buf[name_off] = b;
+        name_buf[name_off + 1] = 0;
+        name_off += 2;
+    }
+    name_off = (name_off + 7) & !7;
+
+    let exe_base_name_addr = (exe_name_buf_addr + name_off) as u64;
+    for &b in exe_base_name {
+        name_buf[name_off] = b;
+        name_buf[name_off + 1] = 0;
+        name_off += 2;
+    }
+    name_off = (name_off + 7) & !7;
+
+    let ntdll_full_name_addr = (exe_name_buf_addr + name_off) as u64;
+    for &b in ntdll_full_name {
+        name_buf[name_off] = b;
+        name_buf[name_off + 1] = 0;
+        name_off += 2;
+    }
+    name_off = (name_off + 7) & !7;
+
+    let ntdll_base_name_addr = (exe_name_buf_addr + name_off) as u64;
+    for &b in ntdll_base_name {
+        name_buf[name_off] = b;
+        name_buf[name_off + 1] = 0;
+        name_off += 2;
+    }
+
+    write_unicode_string_entry(
+        &mut exe_entry_buf,
+        layout::LDR_ENTRY_OFFSET_FULL_DLL_NAME,
+        exe_full_name_utf16_len,
+        exe_full_name_utf16_len,
+        exe_full_name_addr,
+    );
+    write_unicode_string_entry(
+        &mut exe_entry_buf,
+        layout::LDR_ENTRY_OFFSET_BASE_DLL_NAME,
+        exe_base_name_utf16_len,
+        exe_base_name_utf16_len,
+        exe_base_name_addr,
+    );
 
     write_list_entry(
         &mut ntdll_entry_buf,
@@ -271,8 +425,8 @@ pub fn initialize_process_environment(
     write_list_entry(
         &mut ntdll_entry_buf,
         layout::LDR_ENTRY_OFFSET_IN_INIT_ORDER_LINKS,
-        init_head,
         exe_init,
+        init_head,
     );
     write_u64(
         &mut ntdll_entry_buf,
@@ -282,12 +436,12 @@ pub fn initialize_process_environment(
     write_u64(
         &mut ntdll_entry_buf,
         layout::LDR_ENTRY_OFFSET_ENTRY_POINT,
-        ntdll.ntdll_entry_address,
+        ntdll.ntdll_entry_point,
     );
     write_u32(
         &mut ntdll_entry_buf,
         layout::LDR_ENTRY_OFFSET_SIZE_OF_IMAGE,
-        0x0020_0000,
+        0x0043_3000,
     );
     write_u32(
         &mut ntdll_entry_buf,
@@ -301,11 +455,28 @@ pub fn initialize_process_environment(
     );
     write_u16(&mut ntdll_entry_buf, layout::LDR_ENTRY_OFFSET_LOAD_COUNT, 1);
 
+    write_unicode_string_entry(
+        &mut ntdll_entry_buf,
+        layout::LDR_ENTRY_OFFSET_FULL_DLL_NAME,
+        ntdll_full_name_utf16_len,
+        ntdll_full_name_utf16_len,
+        ntdll_full_name_addr,
+    );
+    write_unicode_string_entry(
+        &mut ntdll_entry_buf,
+        layout::LDR_ENTRY_OFFSET_BASE_DLL_NAME,
+        ntdll_base_name_utf16_len,
+        ntdll_base_name_utf16_len,
+        ntdll_base_name_addr,
+    );
+
     write_bytes(task, teb_addr, &teb_buf)?;
     write_bytes(task, peb_addr, &peb_buf)?;
     write_bytes(task, ldr_addr, &ldr_buf)?;
     write_bytes(task, exe_entry_addr, &exe_entry_buf)?;
     write_bytes(task, ntdll_entry_addr, &ntdll_entry_buf)?;
+    write_bytes(task, proc_params_addr, &params_buf)?;
+    write_bytes(task, exe_name_buf_addr, &name_buf)?;
 
     let _ = ntdll.ldr_data_address;
     let _ = ntdll.image_entry_address;
@@ -344,7 +515,7 @@ fn map_shared_user_data(task: &Task) -> Result<(), &'static str> {
             // SAFETY: same mapping guarantees as above.
             *((kva + 0x026C) as *mut u32) = 10;
             *((kva + 0x0270) as *mut u32) = 0;
-            *((kva + 0x0260) as *mut u16) = 22621;
+            *((kva + 0x0260) as *mut u16) = 26100;
         }
     }
     Ok(())
@@ -359,12 +530,14 @@ fn allocate_context_record(
     let mut ctx_sp = (stack_pointer as usize).saturating_sub(layout::CONTEXT_ARM64_SIZE);
     ctx_sp &= !0xF;
 
+    let mut x = [0u64; 31];
+    x[0] = user_entry;
     let context = NtdllContext {
         context_flags: NtdllContext::CONTEXT_FULL,
         cpsr: 0,
-        x: [0; 31],
         sp: stack_pointer,
         pc: user_entry,
+        x,
     };
 
     write_struct(task, ctx_sp, &context)?;
