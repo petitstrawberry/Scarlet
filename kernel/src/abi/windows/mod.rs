@@ -3,6 +3,8 @@ pub mod aarch64;
 
 pub mod error;
 
+pub mod ntdef;
+
 #[cfg(target_arch = "aarch64")]
 pub mod object;
 
