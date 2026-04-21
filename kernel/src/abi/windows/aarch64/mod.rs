@@ -17,6 +17,10 @@ use crate::abi::windows::object::{
     NtEventObject, NtFileObject, NtObject, NtObjectTable, NtSectionObject, STD_ERROR_HANDLE,
     STD_INPUT_HANDLE, STD_OUTPUT_HANDLE,
 };
+use crate::abi::windows::ntdef::{
+    SystemBasicInformation, SystemCodeIntegrityInformation, SystemProcessorFeaturesInformation,
+    SystemTimeOfDayInformation,
+};
 use crate::abi::windows::peb;
 use crate::arch::Trapframe;
 use crate::environment::PAGE_SIZE;
@@ -50,8 +54,6 @@ struct WindowsProcessState {
 const NTDLL_IMAGE_BASE: u64 = 0x0000_0001_8000_0000;
 const WIN_TEB_BASE: usize = 0x0000_0002_0000_0000;
 const WIN_PEB_BASE: usize = 0x0000_0002_0001_0000;
-const WIN_LDR_BASE: usize = 0x0000_0002_0002_0000;
-const WIN_LDR_ENTRIES_BASE: usize = 0x0000_0002_0003_0000;
 const PAGE_NOACCESS: u32 = 0x01;
 const PAGE_READONLY: u32 = 0x02;
 const PAGE_READWRITE: u32 = 0x04;
@@ -253,21 +255,11 @@ impl AbiModule for WindowsAarch64Abi {
             task,
             pe.image_base,
             pe.entry_point,
-            pe.image_size,
             0,
-            peb::NtDllData {
-                ldr_data_address: 0,
-                image_entry_address: 0,
-                ntdll_entry_address: ntdll.image_base,
-                ntdll_entry_point: ntdll.entry_point,
-            },
             ldr_initialize_thunk,
             sp as u64,
             WIN_TEB_BASE,
             WIN_PEB_BASE,
-            WIN_LDR_BASE,
-            WIN_LDR_ENTRIES_BASE,
-            WIN_LDR_ENTRIES_BASE + PAGE_SIZE,
         )?;
         state.peb_address = env.peb_address;
         state.teb_address = env.teb_address;
@@ -335,19 +327,6 @@ impl AbiModule for WindowsAarch64Abi {
                 let peb_ptr = unsafe { core::ptr::read_volatile((kva + 0x60) as *const u64) };
                 let self_ptr = unsafe { core::ptr::read_volatile((kva + 0x30) as *const u64) };
                 crate::println!("[win-abi] TEB: Self=0x{:x} PEB=0x{:x}", self_ptr, peb_ptr);
-            }
-
-            // Verify Ldr data
-            if let Some(kva) = task.vm_manager.translate_to_kva(WIN_LDR_BASE) {
-                let init_flag = unsafe { core::ptr::read_volatile((kva + 0x04) as *const u8) };
-                let load_flink = unsafe { core::ptr::read_volatile((kva + 0x10) as *const u64) };
-                let load_blink = unsafe { core::ptr::read_volatile((kva + 0x18) as *const u64) };
-                crate::println!(
-                    "[win-abi] Ldr: Initialized={} LoadFlink=0x{:x} LoadBlink=0x{:x}",
-                    init_flag,
-                    load_flink,
-                    load_blink
-                );
             }
         }
 
@@ -1314,6 +1293,14 @@ impl WindowsAarch64Abi {
                 let peb_heap = read_u64_user(task, (peb_ptr + 0x30) as usize).unwrap_or(0);
                 let peb_ldr = read_u64_user(task, (peb_ptr + 0x18) as usize).unwrap_or(0);
                 crate::println!("[win-abi]   PEB=0x{:x} ProcessHeap=0x{:x} Ldr=0x{:x}", peb_ptr, peb_heap, peb_ldr);
+                if peb_heap == 0 {
+                    if let Some(kva) = task.vm_manager.translate_to_kva(0x40000000) {
+                        let sig = unsafe { core::ptr::read_volatile((kva + 0x10) as *const u32) };
+                        let h0 = unsafe { core::ptr::read_volatile((kva + 0x00) as *const u64) };
+                        let h8 = unsafe { core::ptr::read_volatile((kva + 0x08) as *const u64) };
+                        crate::println!("[win-abi]   heap@0x40000000: [+0x00]=0x{:x} [+0x08]=0x{:x} [+0x10]=0x{:x} (sig=0xddeeddee?)", h0, h8, sig);
+                    }
+                }
             }
         }
 
@@ -1461,47 +1448,50 @@ impl WindowsAarch64Abi {
                 crate::println!("[win-abi] NtQuerySystemInformation class={}", info_class);
                 match info_class {
                     0x00 => {
-                        // SystemBasicInformation (48 bytes)
-                        if len >= 48 && buf != 0 {
-                            let mut out = [0u8; 48];
-                            out[0..4].copy_from_slice(&0u32.to_le_bytes()); // OemId
-                            out[4..8].copy_from_slice(&(PAGE_SIZE as u32).to_le_bytes()); // PageSize
-                            out[8..16].copy_from_slice(&0x10000u64.to_le_bytes()); // MinAddr
-                            out[16..24].copy_from_slice(&0x7FFFFFFEFFFFu64.to_le_bytes()); // MaxAddr
-                            out[24..32].copy_from_slice(&1u64.to_le_bytes()); // ActiveProcessorMask
-                            out[32..36].copy_from_slice(&1u32.to_le_bytes()); // NumberOfProcessors
-                            out[36..40].copy_from_slice(&0x0FCCu32.to_le_bytes()); // ProcessorType (ARM64)
-                            out[40..44].copy_from_slice(&(64 * 1024u32).to_le_bytes()); // AllocationGranularity
-                            out[44..46].copy_from_slice(&1u16.to_le_bytes()); // ProcessorLevel
-                            out[46..48].copy_from_slice(&0u16.to_le_bytes()); // ProcessorRevision
-                            let _ = copy_to_user(task, buf, &out);
+                        // TODO: NumberOfPhysicalPages should reflect actual memory
+                        if len >= core::mem::size_of::<SystemBasicInformation>() && buf != 0 {
+                            let info = SystemBasicInformation {
+                                timer_resolution: 156250,
+                                page_size: PAGE_SIZE as u32,
+                                number_of_physical_pages: 0x100000,
+                                lowest_physical_page_number: 1,
+                                highest_physical_page_number: 0xFFFFF,
+                                allocation_granularity: 64 * 1024,
+                                minimum_user_mode_address: 0x10000,
+                                maximum_user_mode_address: 0x7FFFFFFEFFFF,
+                                active_processors_affinity_mask: 1,
+                                number_of_processors: 1,
+                                ..Default::default()
+                            };
+                            let _ = copy_to_user(task, buf, struct_as_bytes(&info));
                         }
                     }
                     0x03 => {
-                        // SystemTimeOfDayInformation (32 bytes)
-                        if len >= 16 && buf != 0 {
-                            let mut out = [0u8; 32];
+                        if len >= core::mem::size_of::<SystemTimeOfDayInformation>() && buf != 0 {
                             let tick = crate::timer::get_tick() as u64;
                             let ft = tick * 10000 + 132477120000000000;
-                            out[0..8].copy_from_slice(&ft.to_le_bytes()); // KeBootTime
-                            out[8..16].copy_from_slice(&ft.to_le_bytes()); // KeCurrentTime
-                            let _ = copy_to_user(task, buf, &out);
+                            let info = SystemTimeOfDayInformation {
+                                boot_time: ft,
+                                current_time: ft,
+                                ..Default::default()
+                            };
+                            let _ = copy_to_user(task, buf, struct_as_bytes(&info));
                         }
                     }
-                    0x05 => {
-                        // SystemProcessInformation
-                        // Return STATUS_INFO_LENGTH_MISMATCH to indicate more data needed
-                    }
+                    0x05 => {}
                     0x3E => {
-                        // SystemCodeIntegrityInformation (class 62)
-                        // Return minimal 4-byte struct: ULONG flags = 0
-                        if len >= 4 && buf != 0 {
-                            let out = 0u32.to_le_bytes();
-                            let _ = copy_to_user(task, buf, &out);
+                        if len >= core::mem::size_of::<SystemCodeIntegrityInformation>()
+                            && buf != 0
+                        {
+                            let info = SystemCodeIntegrityInformation::default();
+                            let _ = copy_to_user(task, buf, struct_as_bytes(&info));
                         }
                     }
-                    _ => {}
+                    _ => {
+                        return status(STATUS_NOT_IMPLEMENTED);
+                    }
                 }
+                let _ = (info_class, buf, len);
                 status(STATUS_SUCCESS)
             }
 
@@ -1530,14 +1520,19 @@ impl WindowsAarch64Abi {
                 crate::println!("[win-abi] NtQuerySystemInformationEx class={}", info_class);
                 match info_class {
                     0x07 => {
-                        // SystemProcessorFeaturesInformation (56 bytes)
-                        if output_len >= 56 && output_buffer != 0 {
-                            let mut out = [0u8; 56];
-                            out[0..4].copy_from_slice(&1u32.to_le_bytes()); // ProcessorFeature
-                            let _ = copy_to_user(task, output_buffer, &out);
+                        if output_len >= core::mem::size_of::<SystemProcessorFeaturesInformation>()
+                            && output_buffer != 0
+                        {
+                            let info = SystemProcessorFeaturesInformation {
+                                processor_feature_bits: 1,
+                                ..Default::default()
+                            };
+                            let _ = copy_to_user(task, output_buffer, struct_as_bytes(&info));
                         }
                         status(STATUS_SUCCESS)
                     }
+                    // TODO: class 107 needs proper implementation with real data
+                    0x6B => status(STATUS_SUCCESS),
                     _ => {
                         crate::println!("[win-abi]   NtQuerySystemInformationEx class={} -> STATUS_NOT_IMPLEMENTED", info_class);
                         status(STATUS_NOT_IMPLEMENTED)
@@ -1591,6 +1586,8 @@ impl WindowsAarch64Abi {
 
         if (ret as u32) & 0xC0000000 != 0 {
             crate::println!("[win-abi]   -> ERR 0x{:08x}", ret as u32);
+        } else {
+            crate::println!("[win-abi]   -> OK 0x{:08x}", ret as u32);
         }
 
         ret
@@ -1688,6 +1685,15 @@ fn write_u64_user(
     value: u64,
 ) -> Result<(), &'static str> {
     copy_to_user(task, user_addr, &value.to_le_bytes()).map_err(|_| "copy_to_user failed")
+}
+
+fn struct_as_bytes<T>(val: &T) -> &[u8] {
+    unsafe {
+        core::slice::from_raw_parts(
+            val as *const T as *const u8,
+            core::mem::size_of::<T>(),
+        )
+    }
 }
 
 fn write_u32_user(
