@@ -173,8 +173,32 @@ pub fn initialize_process_environment(
         proc_params_addr as u64,
     );
 
+    // PEB heap config — ntdll reads these via RtlCreateHeap
+    write_u64(&mut peb_buf, 0xC8, 0x100000);  // HeapSegmentReserve
+    write_u64(&mut peb_buf, 0xD0, 0x2000);    // HeapSegmentCommit
+    write_u64(&mut peb_buf, 0xD8, 0x10000);   // HeapDeCommitTotalFreeThreshold
+    write_u64(&mut peb_buf, 0xE0, 0x1000);    // HeapDeCommitFreeBlockThreshold
+    write_u32(&mut peb_buf, 0xE8, 0);          // NumberOfHeaps
+    write_u32(&mut peb_buf, 0xEC, 0x100);     // MaximumNumberOfHeaps
+    write_u64(&mut peb_buf, 0xF0, peb_addr as u64 + layout::PEB_SIZE as u64); // ProcessHeaps
+
     // Mutant handle at PEB+0x08 — must be non-NULL for loader lock
     write_u64(&mut peb_buf, 0x08, 0xFFFFFFFFFFFFFFFF);
+
+    // ApiSetMap at PEB+0x68 — API_SET_NAMESPACE V6 (Windows 10/11)
+    const API_SET_MAP_ADDR: usize = 0x0000_0002_0006_0000;
+    task.allocate_data_pages(API_SET_MAP_ADDR, 1)?;
+    let mut apiset_buf = [0u8; PAGE_SIZE];
+    // API_SET_NAMESPACE (28 bytes, all ULONG):
+    write_u32(&mut apiset_buf, 0x00, 6); // Version = API_SET_SCHEMA_VERSION_V6
+    write_u32(&mut apiset_buf, 0x04, 28); // Size = header size
+    write_u32(&mut apiset_buf, 0x08, 0); // Flags
+    write_u32(&mut apiset_buf, 0x0C, 0); // Count = 0 (empty)
+    write_u32(&mut apiset_buf, 0x10, 28); // EntryOffset (past header)
+    write_u32(&mut apiset_buf, 0x14, 28); // HashOffset (past header)
+    write_u32(&mut apiset_buf, 0x18, 0); // HashFactor
+    write_bytes(task, API_SET_MAP_ADDR, &apiset_buf)?;
+    write_u64(&mut peb_buf, 0x68, API_SET_MAP_ADDR as u64);
 
     let mut params_buf = [0u8; PAGE_SIZE];
 
@@ -211,11 +235,20 @@ pub fn initialize_process_environment(
     write_u64(&mut params_buf, 0x40, cur_dir_addr);
     write_u64(&mut params_buf, 0x48, 0); // CurrentDirectory.Handle
 
-    // DllPath at +0x50 = empty
-    write_u16(&mut params_buf, 0x50, 0);
-    write_u16(&mut params_buf, 0x52, 0);
+    // DllPath at +0x50
+    let dll_path = b"C:\\Windows\\System32";
+    let dll_path_utf16_len = (dll_path.len() * 2) as u16;
+    let dll_path_addr = (proc_params_addr + string_off) as u64;
+    for &b in dll_path {
+        params_buf[string_off] = b;
+        params_buf[string_off + 1] = 0;
+        string_off += 2;
+    }
+    string_off = (string_off + 7) & !7;
+    write_u16(&mut params_buf, 0x50, dll_path_utf16_len);
+    write_u16(&mut params_buf, 0x52, dll_path_utf16_len);
     write_u32(&mut params_buf, 0x54, 0);
-    write_u64(&mut params_buf, 0x58, 0);
+    write_u64(&mut params_buf, 0x58, dll_path_addr);
 
     // ImagePathName at +0x60
     let img_path = alloc::format!("C:\\test_exit.exe");
@@ -516,6 +549,8 @@ fn map_shared_user_data(task: &Task) -> Result<(), &'static str> {
             *((kva + 0x026C) as *mut u32) = 10;
             *((kva + 0x0270) as *mut u32) = 0;
             *((kva + 0x0260) as *mut u16) = 26100;
+            // Cookie for RtlEncodeSystemPointer (0x7FFE0330)
+            *((kva + 0x0330) as *mut u64) = 0xCAFE_BABE_DEAD_BEEFu64;
         }
     }
     Ok(())

@@ -9,8 +9,9 @@ use spin::Mutex;
 
 use crate::abi::AbiModule;
 use crate::abi::windows::error::{
-    STATUS_INFO_LENGTH_MISMATCH, STATUS_INVALID_HANDLE, STATUS_INVALID_PARAMETER,
-    STATUS_NOT_IMPLEMENTED, STATUS_OBJECT_NAME_NOT_FOUND, STATUS_SUCCESS,
+    STATUS_CONFLICTING_ADDRESSES, STATUS_INFO_LENGTH_MISMATCH, STATUS_INVALID_HANDLE,
+    STATUS_INVALID_INFO_CLASS, STATUS_INVALID_PARAMETER, STATUS_NOT_IMPLEMENTED,
+    STATUS_OBJECT_NAME_NOT_FOUND, STATUS_SUCCESS,
 };
 use crate::abi::windows::object::{
     NtEventObject, NtFileObject, NtObject, NtObjectTable, NtSectionObject, STD_ERROR_HANDLE,
@@ -44,9 +45,6 @@ struct WindowsProcessState {
     context_address: u64,
     ntdll_base: u64,
     ntdll_entry_point: u64,
-    heap_base: usize,
-    heap_current: usize,
-    heap_end: usize,
 }
 
 const NTDLL_IMAGE_BASE: u64 = 0x0000_0001_8000_0000;
@@ -54,7 +52,6 @@ const WIN_TEB_BASE: usize = 0x0000_0002_0000_0000;
 const WIN_PEB_BASE: usize = 0x0000_0002_0001_0000;
 const WIN_LDR_BASE: usize = 0x0000_0002_0002_0000;
 const WIN_LDR_ENTRIES_BASE: usize = 0x0000_0002_0003_0000;
-const WIN_HEAP_BASE: usize = 0x0000_0002_0004_1000;
 const PAGE_NOACCESS: u32 = 0x01;
 const PAGE_READONLY: u32 = 0x02;
 const PAGE_READWRITE: u32 = 0x04;
@@ -68,6 +65,7 @@ const MEM_FREE: u32 = 0x10000;
 const MEM_PRIVATE: u32 = 0x20000;
 const MEM_MAPPED: u32 = 0x40000;
 const MEM_IMAGE: u32 = 0x1000000;
+const MEM_REPLACE_PLACEHOLDER: u32 = 0x100000;
 
 #[derive(Clone)]
 pub struct WindowsAarch64Abi {
@@ -102,8 +100,13 @@ impl AbiModule for WindowsAarch64Abi {
 
     fn handle_syscall(&mut self, trapframe: &mut Trapframe) -> Result<usize, &'static str> {
         let syscall_number = (trapframe.esr_el1 & 0xFFFF) as u16;
+        let pc = trapframe.elr as usize;
         let mut args = [0usize; 8];
         args.copy_from_slice(&trapframe.regs.reg[0..8]);
+
+        if pc < 0x180000000 {
+            crate::println!("[win-abi] EXE SYSCALL: pc=0x{:x} num=0x{:x} x0=0x{:x}", pc, syscall_number, args[0]);
+        }
 
         let ret = self.dispatch_syscall(syscall_number, args, trapframe);
 
@@ -223,9 +226,6 @@ impl AbiModule for WindowsAarch64Abi {
         let mut state = self.state.lock();
         state.object_table = NtObjectTable::new();
         state.object_table.register_console_pseudo_handles();
-        state.heap_base = 0;
-        state.heap_current = 0;
-        state.heap_end = 0;
         state.ntdll_base = ntdll.image_base;
         state.ntdll_entry_point = ntdll.entry_point;
 
@@ -407,7 +407,14 @@ impl AbiModule for WindowsAarch64Abi {
 }
 
 impl WindowsAarch64Abi {
-    fn nt_allocate_virtual_memory(&mut self, base_ptr: usize, size_ptr: usize) -> usize {
+    const ALLOCATION_GRANULARITY: usize = 0x1_0000; // 64KB — Windows default
+
+    fn nt_allocate_virtual_memory_ex_impl(
+        &mut self,
+        base_ptr: usize,
+        size_ptr: usize,
+        alloc_type: u32,
+    ) -> usize {
         let task = match mytask() {
             Some(task) => task,
             None => return status(STATUS_INVALID_PARAMETER),
@@ -416,24 +423,40 @@ impl WindowsAarch64Abi {
         let requested_base = read_u64_user(task, base_ptr).unwrap_or(0) as usize;
         let requested_size = read_u64_user(task, size_ptr).unwrap_or(0) as usize;
 
-        let size = align_up(
-            if requested_size == 0 {
-                PAGE_SIZE
+        crate::println!("[win-abi]   NtAllocateVM: base_ptr=0x{:x} size_ptr=0x{:x} req_base=0x{:x} req_size=0x{:x} alloc_type=0x{:x}", base_ptr, size_ptr, requested_base, requested_size, alloc_type);
+
+        let is_replace = alloc_type & MEM_REPLACE_PLACEHOLDER != 0;
+        let has_reserve = alloc_type & MEM_RESERVE != 0;
+
+        let size = if requested_size == 0 {
+            if has_reserve || is_replace {
+                Self::ALLOCATION_GRANULARITY
             } else {
-                requested_size
-            },
-            PAGE_SIZE,
-        );
+                PAGE_SIZE
+            }
+        } else {
+            requested_size
+        };
+        let size = align_up(size, PAGE_SIZE);
+
         let base = if requested_base == 0 {
-            match task.vm_manager.find_unmapped_area(size, PAGE_SIZE) {
+            let align = if has_reserve {
+                Self::ALLOCATION_GRANULARITY
+            } else {
+                PAGE_SIZE
+            };
+            match task.vm_manager.find_unmapped_area(size, align) {
                 Some(addr) => addr,
                 None => return status(STATUS_INVALID_PARAMETER),
             }
+        } else if is_replace && has_reserve {
+            align_down(requested_base, Self::ALLOCATION_GRANULARITY)
         } else {
             align_down(requested_base, PAGE_SIZE)
         };
 
-        // Check if the region is already mapped — MEM_COMMIT on existing reservation is a NOP
+        crate::println!("[win-abi]   NtAllocateVM: allocating base=0x{:x} size=0x{:x}", base, size);
+
         let already_mapped = (0..size)
             .step_by(PAGE_SIZE)
             .any(|off| task.vm_manager.translate_to_kva(base + off).is_some());
@@ -451,7 +474,15 @@ impl WindowsAarch64Abi {
             return status(STATUS_INVALID_PARAMETER);
         }
 
+        let verify_base = read_u64_user(task, base_ptr).unwrap_or(0xDEADDEAD);
+        let verify_size = read_u64_user(task, size_ptr).unwrap_or(0xDEADDEAD);
+        crate::println!("[win-abi]   NtAllocateVM: wrote base=0x{:x} size=0x{:x} readback base=0x{:x} size=0x{:x}", base, size, verify_base, verify_size);
+
         status(STATUS_SUCCESS)
+    }
+
+    fn nt_allocate_virtual_memory(&mut self, base_ptr: usize, size_ptr: usize) -> usize {
+        self.nt_allocate_virtual_memory_ex_impl(base_ptr, size_ptr, MEM_COMMIT | MEM_RESERVE)
     }
 
     fn nt_free_virtual_memory(&mut self, base_ptr: usize, size_ptr: usize) -> usize {
@@ -619,6 +650,7 @@ impl WindowsAarch64Abi {
             Some(task) => task,
             None => return status(STATUS_INVALID_PARAMETER),
         };
+        crate::println!("[win-abi] NtTerminateProcess: status=0x{:x}", exit_status);
         task.exit(exit_status as i32);
         status(STATUS_SUCCESS)
     }
@@ -829,6 +861,8 @@ impl WindowsAarch64Abi {
         let output_len = args[4];
         let return_length_ptr = args[5];
 
+        crate::println!("[win-abi]   NtQueryVirtualMemory: base=0x{:x} class={}", base_address, info_class);
+
         if info_class != 0 {
             if info_class == 6 {
                 const MEMORY_REGION_INFORMATION_SIZE: usize = 24;
@@ -853,7 +887,20 @@ impl WindowsAarch64Abi {
                 }
                 return status(STATUS_SUCCESS);
             }
-            return status(STATUS_NOT_IMPLEMENTED);
+            if info_class == 4 {
+                if output_len < 8 {
+                    return status(STATUS_INFO_LENGTH_MISMATCH);
+                }
+                let out = 0u64.to_le_bytes();
+                if copy_to_user(task, output_buffer, &out).is_err() {
+                    return status(STATUS_INVALID_PARAMETER);
+                }
+                if return_length_ptr != 0 {
+                    let _ = write_u64_user(task, return_length_ptr, 8);
+                }
+                return status(STATUS_SUCCESS);
+            }
+            return status(STATUS_INVALID_INFO_CLASS);
         }
 
         const MEMORY_BASIC_INFORMATION_SIZE: usize = 48;
@@ -897,7 +944,8 @@ impl WindowsAarch64Abi {
         let mem_type = section_type_to_memory_type(map.is_shared, map.owner.is_some());
 
         let mut out = [0u8; MEMORY_BASIC_INFORMATION_SIZE];
-        out[0..8].copy_from_slice(&(map.vmarea.start as u64).to_le_bytes());
+        let base_address_aligned = align_down(base_address, PAGE_SIZE) as u64;
+        out[0..8].copy_from_slice(&base_address_aligned.to_le_bytes());
         out[8..16].copy_from_slice(&(map.vmarea.start as u64).to_le_bytes());
         out[16..20].copy_from_slice(&PAGE_READWRITE.to_le_bytes());
         out[24..32].copy_from_slice(&region_size.to_le_bytes());
@@ -1079,23 +1127,6 @@ impl WindowsAarch64Abi {
         }
     }
 
-    fn rtl_allocate_heap(&mut self, args: [usize; 8]) -> usize {
-        let size = align_up(args[2], 16);
-        if size == 0 {
-            return 0;
-        }
-
-        let mut state = self.state.lock();
-        let current = state.heap_current;
-        let next = current.saturating_add(size);
-        if current == 0 || next > state.heap_end {
-            return 0;
-        }
-
-        state.heap_current = next;
-        current
-    }
-
     fn nt_continue(&mut self, trapframe: &mut Trapframe, args: [usize; 8]) -> usize {
         let task = match mytask() {
             Some(task) => task,
@@ -1162,11 +1193,10 @@ impl WindowsAarch64Abi {
         block[0x98..0x9C].copy_from_slice(&0xDEADBEEFu32.to_le_bytes());
 
         // Offset 0xA0: MitigationOptionsMap (3 × ULONG64 = 24 bytes)
-        // Set CFG enabled (bit 1 of first QWord) and standard mitigations
-        let mitigation_flags: u64 = (1 << 1) | (1 << 2) | (1 << 3) | (1 << 12);
-        block[0xA0..0xA8].copy_from_slice(&mitigation_flags.to_le_bytes());
-        block[0xA8..0xB0].copy_from_slice(&0u64.to_le_bytes());
-        block[0xB0..0xB8].copy_from_slice(&0u64.to_le_bytes());
+        // All zeros — disable CFG and all mitigations so ntdll doesn't attempt
+        // indirect-call validation through uninitialized bitmap/function pointers.
+        // Real Windows enables these only after the kernel has set up the CFG
+        // bitmap and dispatch functions in LdrSystemDllInitBlock.
 
         // Offset 0xB8: CfgBitMap = NULL (no CFG bitmap; ntdll must handle gracefully)
         // Offset 0xC0: CfgBitMapSize = 0
@@ -1271,15 +1301,74 @@ impl WindowsAarch64Abi {
         };
 
         crate::println!(
-            "[win-abi] syscall 0x{:04X}: {} (pc=0x{:x})",
+            "[win-abi] syscall 0x{:04X}: {} (pc=0x{:x} lr=0x{:x})",
             number,
             name,
-            trapframe.elr
+            trapframe.elr,
+            trapframe.regs.reg[30]
         );
 
-        match name {
+        if let Some(task) = mytask() {
+            let peb_ptr = read_u64_user(task, 0x200000060).unwrap_or(0);
+            if peb_ptr != 0 {
+                let peb_heap = read_u64_user(task, (peb_ptr + 0x30) as usize).unwrap_or(0);
+                let peb_ldr = read_u64_user(task, (peb_ptr + 0x18) as usize).unwrap_or(0);
+                crate::println!("[win-abi]   PEB=0x{:x} ProcessHeap=0x{:x} Ldr=0x{:x}", peb_ptr, peb_heap, peb_ldr);
+            }
+        }
+
+        let ret = match name {
             "NtAllocateVirtualMemory" => self.nt_allocate_virtual_memory(args[1], args[3]),
-            "NtAllocateVirtualMemoryEx" => self.nt_allocate_virtual_memory(args[1], args[2]),
+            "NtAllocateVirtualMemoryEx" => {
+                crate::println!("[win-abi]   ExArgs: handle=0x{:x} alloc_type=0x{:x} protect=0x{:x} ext_params=0x{:x} ext_count={}",
+                    args[0], args[3], args[4], args[5], args[6]);
+                let x29 = trapframe.regs.reg[29];
+                let x30 = trapframe.regs.reg[30];
+                let user_sp = trapframe.sp;
+                crate::println!("[win-abi]   fp_trace: x29=0x{:x} x30=0x{:x} sp=0x{:x}", x29, x30, user_sp);
+                if let Some(task) = mytask() {
+                    // Sanity: read PEB+0x30 (ProcessHeap) to verify KVA reads work
+                    if let Some(kva) = task.vm_manager.translate_to_kva(0x200010030) {
+                        let peb_heap = unsafe { core::ptr::read_volatile(kva as *const u64) };
+                        crate::println!("[win-abi]   SANITY: PEB+0x30 (ProcessHeap) via KVA = 0x{:x}", peb_heap);
+                    }
+                    // Dump stack using KVA: x29 points to saved {x29, x30}
+                    for off in (0usize..=0x18).step_by(8) {
+                        let addr = x29.wrapping_sub(0x10) + off;
+                        if let Some(kva) = task.vm_manager.translate_to_kva(addr as usize) {
+                            let val = unsafe { core::ptr::read_volatile(kva as *const u64) };
+                            let rva = val.wrapping_sub(NTDLL_IMAGE_BASE);
+                            let note = if (0x1000..0x3F0000).contains(&rva) { " (code)" } else { "" };
+                            crate::println!("[win-abi]   kva[{:x}]=0x{:x}{}", off, val, note);
+                        } else {
+                            crate::println!("[win-abi]   kva[{:x}]=NO_MAPPING for addr=0x{:x}", off, addr);
+                        }
+                    }
+                    // Also dump from sp (trapframe sp) to see the wrapper's local vars
+                    for off in (0usize..=0x48).step_by(8) {
+                        let addr = user_sp as usize + off;
+                        if let Some(kva) = task.vm_manager.translate_to_kva(addr) {
+                            let val = unsafe { core::ptr::read_volatile(kva as *const u64) };
+                            crate::println!("[win-abi]   sp[+0x{:x}]=0x{:x}", off, val);
+                        }
+                    }
+                }
+                if args[6] > 0 && args[5] != 0 {
+                    let task = match mytask() { Some(t) => t, None => return status(STATUS_INVALID_PARAMETER) };
+                    for i in 0..(args[6] as usize).min(4) {
+                        let param_ptr = args[5] + i * 16;
+                        let param_type = read_u64_user(task, param_ptr).unwrap_or(0xDEAD);
+                        let param_value = read_u64_user(task, param_ptr + 8).unwrap_or(0xDEAD);
+                        crate::println!("[win-abi]   ExtParam[{}]: type=0x{:x} value=0x{:x}", i, param_type, param_value);
+                    }
+                }
+                let alloc_type = args[3] as u32;
+                if alloc_type & MEM_REPLACE_PLACEHOLDER != 0 {
+                    let effective_type = alloc_type & !MEM_REPLACE_PLACEHOLDER;
+                    crate::println!("[win-abi]   MEM_REPLACE_PLACEHOLDER stripped: 0x{:x} -> 0x{:x}", alloc_type, effective_type);
+                }
+                self.nt_allocate_virtual_memory_ex_impl(args[1], args[2], alloc_type)
+            }
 
             "NtFreeVirtualMemory" => self.nt_free_virtual_memory(args[1], args[2]),
             "NtClose" => self.nt_close(args[0] as u32),
@@ -1308,8 +1397,8 @@ impl WindowsAarch64Abi {
                 status(STATUS_SUCCESS)
             }
             "NtOpenKey" => {
-                let handle = self.state.lock().object_table.insert(NtObject::Null);
                 let task = mytask().unwrap();
+                let handle = self.state.lock().object_table.insert(NtObject::Null);
                 let _ = write_u64_user(task, args[0], handle as u64);
                 status(STATUS_SUCCESS)
             }
@@ -1320,13 +1409,30 @@ impl WindowsAarch64Abi {
                 let info_class = args[1] as u32;
                 let buf = args[2];
                 let len = args[3];
-                if len >= 16 && buf != 0 {
-                    let mut out = [0u8; 16];
-                    out[0..8].copy_from_slice(&(task.get_id() as u64).to_le_bytes());
-                    let _ = copy_to_user(task, buf, &out);
-                }
-                if args[4] != 0 {
-                    let _ = write_u64_user(task, args[4], 16);
+                crate::println!("[win-abi]   NtQueryInformationProcess: class={} len={}", info_class, len);
+                match info_class {
+                    0x24 => {
+                        // ProcessCookie (36) — returns a 4-byte ULONG cookie used for
+                        // heap encoding. Must be non-zero. ntdll reads it at RVA 0xBFFFC.
+                        if len >= 4 && buf != 0 {
+                            let cookie = 0xDEADBEEFu32;
+                            let _ = copy_to_user(task, buf, &cookie.to_le_bytes());
+                        }
+                        if args[4] != 0 {
+                            let _ = write_u64_user(task, args[4], 4);
+                        }
+                    }
+                    _ => {
+                        // Default: write PID for ProcessBasicInformation (0), etc.
+                        if len >= 16 && buf != 0 {
+                            let mut out = [0u8; 16];
+                            out[0..8].copy_from_slice(&(task.get_id() as u64).to_le_bytes());
+                            let _ = copy_to_user(task, buf, &out);
+                        }
+                        if args[4] != 0 {
+                            let _ = write_u64_user(task, args[4], 16);
+                        }
+                    }
                 }
                 status(STATUS_SUCCESS)
             }
@@ -1430,14 +1536,21 @@ impl WindowsAarch64Abi {
                             out[0..4].copy_from_slice(&1u32.to_le_bytes()); // ProcessorFeature
                             let _ = copy_to_user(task, output_buffer, &out);
                         }
+                        status(STATUS_SUCCESS)
                     }
-                    _ => {}
+                    _ => {
+                        crate::println!("[win-abi]   NtQuerySystemInformationEx class={} -> STATUS_NOT_IMPLEMENTED", info_class);
+                        status(STATUS_NOT_IMPLEMENTED)
+                    }
                 }
-                status(STATUS_SUCCESS)
+            }
+
+            "NtManageHotPatch" => {
+                crate::println!("[win-abi]   NtManageHotPatch -> STATUS_NOT_IMPLEMENTED");
+                status(STATUS_NOT_IMPLEMENTED)
             }
 
             "NtWorkerFactoryWorkerReady"
-            | "NtManageHotPatch"
             | "NtAcceptConnectPort"
             | "NtRemoveIoCompletion"
             | "NtQueryObject"
@@ -1453,14 +1566,34 @@ impl WindowsAarch64Abi {
             | "NtQueryEvent"
             | "NtDelayExecution"
             | "NtWaitForMultipleObjects"
-            | "NtTraceEvent"
-            | "NtRaiseHardError" => status(STATUS_SUCCESS),
+            | "NtTraceEvent" => status(STATUS_SUCCESS),
+
+            "NtRaiseHardError" => {
+                let error_status = args[0] as u32;
+                crate::println!("[win-abi]   NtRaiseHardError: ErrorStatus=0x{:08x} NumParams={} RespOption={}", error_status, args[1], args[4]);
+                if let Some(task) = mytask() {
+                    if args[1] >= 1 && args[3] != 0 {
+                        let param0 = read_u64_user(task, args[3]).unwrap_or(0xDEAD);
+                        crate::println!("[win-abi]   NtRaiseHardError: param[0]=0x{:x}", param0);
+                    }
+                    if args[5] != 0 {
+                        let _ = write_u32_user(task, args[5], 1); // ResponseReturnToCaller
+                    }
+                }
+                status(STATUS_SUCCESS)
+            }
 
             _ => {
                 crate::println!("[win-abi] unimplemented syscall 0x{:04X}: {}", number, name);
                 status(STATUS_NOT_IMPLEMENTED)
             }
+        };
+
+        if (ret as u32) & 0xC0000000 != 0 {
+            crate::println!("[win-abi]   -> ERR 0x{:08x}", ret as u32);
         }
+
+        ret
     }
 }
 
