@@ -4,6 +4,7 @@ use crate::lsm::elf::{
 };
 
 pub const MODULE_VA_START: usize = 0xffffffff81000000;
+pub const MODULE_ELF_MACHINE: u16 = crate::lsm::elf::EM_AARCH64;
 
 pub const R_AARCH64_NONE: u32 = 0;
 pub const R_AARCH64_ABS64: u32 = 257;
@@ -400,7 +401,7 @@ fn patch_b26(ptr: *mut u8, offset: i64) -> Result<(), &'static str> {
     }
     let imm26 = ((offset >> 2) as u32) & 0x3FFFFFF;
     let instruction = read_u32_le(ptr.cast_const());
-    let patched = (instruction & !(0x3FFFFFF << 6)) | (imm26 << 6);
+    let patched = (instruction & !0x3FFFFFF) | imm26;
     write_u32_le(ptr, patched);
     Ok(())
 }
@@ -412,6 +413,6 @@ fn patch_b26(ptr: *mut u8, offset: i64) -> Result<(), &'static str> {
 /// Bits [21:5] = imm16, bits [20:5] are shared between MOVZ and MOVK.
 fn patch_movz_movk(ptr: *mut u8, imm16: u32) {
     let instruction = read_u32_le(ptr.cast_const());
-    let patched = (instruction & !(0x1FFFF << 5)) | ((imm16 & 0xFFFF) << 5);
+    let patched = (instruction & !(0xFFFF << 5)) | ((imm16 & 0xFFFF) << 5);
     write_u32_le(ptr, patched);
 }

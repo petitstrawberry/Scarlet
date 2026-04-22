@@ -4,6 +4,7 @@ use crate::lsm::elf::{
 };
 
 pub const MODULE_VA_START: usize = 0xffffffff90000000;
+pub const MODULE_ELF_MACHINE: u16 = crate::lsm::elf::EM_RISCV;
 
 pub const R_RISCV_NONE: u32 = 0;
 pub const R_RISCV_32: u32 = 1;
