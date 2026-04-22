@@ -2,21 +2,70 @@
 
 mod bsd_syscalls;
 mod mach_syscalls;
+mod macho_loader;
 mod syscall_table;
 
 use alloc::{
     boxed::Box,
     string::{String, ToString},
+    sync::Arc,
     vec::Vec,
 };
+use core::sync::atomic::Ordering;
 use hashbrown::HashMap;
 
 use crate::{
-    abi::AbiModule, arch::Trapframe, fs::SeekFrom, late_initcall, register_abi, task::mytask,
+    abi::AbiModule,
+    arch::Trapframe,
+    fs::{
+        drivers::overlayfs::OverlayFS, FileSystemError, FileSystemErrorKind, SeekFrom,
+        VfsManager,
+    },
+    late_initcall,
+    register_abi,
+    task::{mytask, CloneFlags},
 };
+#[allow(unused_imports)]
+use crate::ipc::event::{Event, EventContent, EventPriority, ProcessControlType};
 
 const MAX_FDS: usize = 1024;
 const MACH_PORT_NULL: u32 = 0;
+
+// Darwin signal numbers (matching macOS / XNU definitions)
+#[allow(dead_code)]
+const SIGHUP: usize = 1;
+#[allow(dead_code)]
+const SIGINT: usize = 2;
+#[allow(dead_code)]
+const SIGQUIT: usize = 3;
+#[allow(dead_code)]
+const SIGILL: usize = 4;
+#[allow(dead_code)]
+const SIGTRAP: usize = 5;
+#[allow(dead_code)]
+const SIGABRT: usize = 6;
+#[allow(dead_code)]
+const SIGKILL: usize = 9;
+#[allow(dead_code)]
+const SIGBUS: usize = 10;
+#[allow(dead_code)]
+const SIGSEGV: usize = 11;
+#[allow(dead_code)]
+const SIGPIPE: usize = 13;
+#[allow(dead_code)]
+const SIGALRM: usize = 14;
+#[allow(dead_code)]
+const SIGTERM: usize = 15;
+#[allow(dead_code)]
+const SIGSTOP: usize = 17;
+#[allow(dead_code)]
+const SIGCONT: usize = 19;
+#[allow(dead_code)]
+const SIGCHLD: usize = 20;
+#[allow(dead_code)]
+const SIGUSR1: usize = 30;
+#[allow(dead_code)]
+const SIGUSR2: usize = 31;
 
 #[derive(Clone)]
 pub struct DarwinAarch64Abi {
@@ -25,6 +74,12 @@ pub struct DarwinAarch64Abi {
     mach_task_port: u32,
     next_mach_port: u32,
     mach_ports: HashMap<u32, MachPortInfo>,
+    /// Signal handler table: signal number -> handler address (0 = default)
+    signal_handlers: [usize; 32],
+    /// Signal mask: bit N set = signal N is blocked
+    signal_mask: u32,
+    /// Pending signals
+    pending_signals: u32,
 }
 
 #[derive(Clone, Debug)]
@@ -53,11 +108,64 @@ impl Default for DarwinAarch64Abi {
             mach_task_port: 1,
             next_mach_port: 2,
             mach_ports: HashMap::new(),
+            signal_handlers: [0; 32],
+            signal_mask: 0,
+            pending_signals: 0,
         }
     }
 }
 
 impl DarwinAarch64Abi {
+    /// Map ProcessControlType to Darwin signal number
+    fn process_control_to_signal(ptype: ProcessControlType) -> Option<usize> {
+        match ptype {
+            ProcessControlType::Terminate => Some(SIGTERM),
+            ProcessControlType::Kill => Some(SIGKILL),
+            ProcessControlType::Stop => Some(SIGSTOP),
+            ProcessControlType::Continue => Some(SIGCONT),
+            ProcessControlType::Interrupt => Some(SIGINT),
+            ProcessControlType::Quit => Some(SIGQUIT),
+            ProcessControlType::Hangup => Some(SIGHUP),
+            ProcessControlType::ChildExit => Some(SIGCHLD),
+            ProcessControlType::PipeBroken => Some(SIGPIPE),
+            ProcessControlType::Alarm => Some(SIGALRM),
+            ProcessControlType::IoReady => None,
+            ProcessControlType::User(n) => {
+                if n == 0 {
+                    Some(SIGUSR1)
+                } else {
+                    Some(SIGUSR2)
+                }
+            }
+        }
+    }
+
+    fn signal_bit(signal: usize) -> Option<u32> {
+        if (1..32).contains(&signal) {
+            Some(1u32 << signal)
+        } else {
+            None
+        }
+    }
+
+    fn is_signal_blocked(&self, signal: usize) -> bool {
+        Self::signal_bit(signal)
+            .map(|bit| (self.signal_mask & bit) != 0)
+            .unwrap_or(false)
+    }
+
+    fn mark_signal_pending(&mut self, signal: usize) {
+        if let Some(bit) = Self::signal_bit(signal) {
+            self.pending_signals |= bit;
+        }
+    }
+
+    fn clear_pending_signal(&mut self, signal: usize) {
+        if let Some(bit) = Self::signal_bit(signal) {
+            self.pending_signals &= !bit;
+        }
+    }
+
     pub fn allocate_fd(&mut self, handle: u32) -> Result<usize, &'static str> {
         let fd = self.free_fds.pop().ok_or("Too many open files")?;
         self.fd_to_handle[fd] = Some(handle);
@@ -203,6 +311,159 @@ impl DarwinAarch64Abi {
             }
         }
     }
+
+    /// Setup argc, argv, and envp on the user stack following Unix conventions
+    ///
+    /// Standard Unix stack layout (from high to low addresses):
+    /// ```
+    /// [high addresses]
+    /// envp strings (null-terminated)
+    /// argv strings (null-terminated)
+    /// envp[] array (null-terminated pointer array)
+    /// argv[] array (null-terminated pointer array)
+    /// argc (integer)
+    /// [low addresses - returned stack pointer]
+    /// ```
+    ///
+    /// # Arguments
+    /// * `task` - The task to set up arguments for
+    /// * `argv` - Command line arguments
+    /// * `envp` - Environment variables
+    /// * `initial_sp` - Initial stack pointer from setup_user_stack
+    ///
+    /// # Returns
+    /// Tuple of (new stack pointer, argv array pointer)
+    fn setup_arguments_on_stack(
+        &self,
+        task: &crate::task::Task,
+        argv: &[&str],
+        envp: &[&str],
+        initial_sp: usize,
+    ) -> Result<(usize, usize), &'static str> {
+        // Calculate total size needed
+        let argc = argv.len();
+        let envc = envp.len();
+
+        // Calculate string sizes (including null terminators)
+        let argv_strings_size: usize = argv.iter().map(|s| s.len() + 1).sum();
+        let envp_strings_size: usize = envp.iter().map(|s| s.len() + 1).sum();
+
+        // Calculate pointer array sizes (including null terminators)
+        let argv_array_size = (argc + 1) * core::mem::size_of::<usize>(); // +1 for NULL terminator
+        let envp_array_size = (envc + 1) * core::mem::size_of::<usize>(); // +1 for NULL terminator
+        let argc_size = core::mem::size_of::<usize>();
+
+        // Total space needed
+        let total_size =
+            argc_size + argv_array_size + envp_array_size + argv_strings_size + envp_strings_size;
+
+        // Align to 16-byte boundary for ABI compliance
+        let aligned_total_size = (total_size + 15) & !15;
+
+        // Calculate new stack pointer
+        let new_sp = initial_sp - aligned_total_size;
+
+        // Layout from new_sp (low) to initial_sp (high):
+        // argc | argv[] | envp[] | argv_strings | envp_strings
+
+        let mut current_addr = new_sp;
+
+        // 1. Write argc
+        self.write_to_stack_memory(task, current_addr, &argc.to_le_bytes())?;
+        current_addr += argc_size;
+
+        // 2. Save argv array pointer for return value
+        let argv_ptr = current_addr;
+
+        // 3. Calculate string positions first
+        let argv_strings_start = current_addr + argv_array_size + envp_array_size;
+        let envp_strings_start = argv_strings_start + argv_strings_size;
+
+        // 4. Write argv[] array
+        let mut string_addr = argv_strings_start;
+        for i in 0..argc {
+            self.write_to_stack_memory(task, current_addr, &string_addr.to_le_bytes())?;
+            current_addr += core::mem::size_of::<usize>();
+            string_addr += argv[i].len() + 1; // Move to next string position
+        }
+        // NULL terminate argv[]
+        let null_ptr: usize = 0;
+        self.write_to_stack_memory(task, current_addr, &null_ptr.to_le_bytes())?;
+        current_addr += core::mem::size_of::<usize>();
+
+        // 5. Write envp[] array
+        string_addr = envp_strings_start;
+        for i in 0..envc {
+            self.write_to_stack_memory(task, current_addr, &string_addr.to_le_bytes())?;
+            current_addr += core::mem::size_of::<usize>();
+            string_addr += envp[i].len() + 1; // Move to next string position
+        }
+        // NULL terminate envp[]
+        self.write_to_stack_memory(task, current_addr, &null_ptr.to_le_bytes())?;
+        current_addr += core::mem::size_of::<usize>();
+
+        // 6. Write argv strings
+        for arg in argv {
+            self.write_string_to_stack(task, current_addr, arg)?;
+            current_addr += arg.len() + 1; // +1 for null terminator
+        }
+
+        // 7. Write envp strings
+        for env in envp {
+            self.write_string_to_stack(task, current_addr, env)?;
+            current_addr += env.len() + 1; // +1 for null terminator
+        }
+
+        Ok((new_sp, argv_ptr))
+    }
+
+    /// Write bytes to stack memory using virtual memory translation
+    fn write_to_stack_memory(
+        &self,
+        task: &crate::task::Task,
+        vaddr: usize,
+        data: &[u8],
+    ) -> Result<(), &'static str> {
+        let mut written = 0usize;
+        while written < data.len() {
+            let current_vaddr = vaddr + written;
+            let page_off = current_vaddr & (crate::environment::PAGE_SIZE - 1);
+            let chunk_len = core::cmp::min(
+                data.len() - written,
+                crate::environment::PAGE_SIZE - page_off,
+            );
+
+            match task.vm_manager.translate_to_kva(current_vaddr) {
+                Some(paddr) => {
+                    unsafe {
+                        core::ptr::copy_nonoverlapping(
+                            data[written..written + chunk_len].as_ptr(),
+                            paddr as *mut u8,
+                            chunk_len,
+                        );
+                    }
+                    written += chunk_len;
+                }
+                None => return Err("Failed to translate virtual address for stack write"),
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Write a null-terminated string to stack memory
+    fn write_string_to_stack(
+        &self,
+        task: &crate::task::Task,
+        vaddr: usize,
+        string: &str,
+    ) -> Result<(), &'static str> {
+        // Write the string content
+        self.write_to_stack_memory(task, vaddr, string.as_bytes())?;
+        // Write null terminator
+        self.write_to_stack_memory(task, vaddr + string.len(), &[0u8])?;
+        Ok(())
+    }
 }
 
 impl AbiModule for DarwinAarch64Abi {
@@ -295,17 +556,250 @@ impl AbiModule for DarwinAarch64Abi {
     fn execute_binary(
         &self,
         file_object: &crate::object::KernelObject,
-        _argv: &[&str],
-        _envp: &[&str],
-        _task: &crate::task::Task,
-        _trapframe: &mut Trapframe,
+        argv: &[&str],
+        envp: &[&str],
+        task: &crate::task::Task,
+        trapframe: &mut Trapframe,
     ) -> Result<(), &'static str> {
-        crate::println!("[darwin] Mach-O loader not yet implemented");
-        Err("Mach-O loader not implemented")
+        let file_obj = file_object.as_file().ok_or("Invalid file object type")?;
+
+        task.text_size.store(0, Ordering::SeqCst);
+        task.data_size.store(0, Ordering::SeqCst);
+        task.stack_size.store(0, Ordering::SeqCst);
+        task.brk.store(usize::MAX, Ordering::SeqCst);
+
+        let (entry_point, dyld_path) = macho_loader::load_macho_binary(file_obj, task)?;
+
+        if let Some(dyld) = dyld_path {
+            crate::println!("[darwin] Dynamic binary requires dyld: {}", dyld);
+            return Err("Dynamic Mach-O binaries require dyld (Phase 4)");
+        }
+
+        *task.name.write() = argv
+            .first()
+            .map_or("Unnamed Darwin Task".to_string(), |s| s.to_string());
+
+        let root_page_table =
+            crate::arch::vm::get_root_pagetable(task.vm_manager.get_asid()).unwrap();
+        root_page_table.unmap_all();
+
+        crate::arch::vm::setup_trampoline_for_user(&task.vm_manager);
+        let stack_pointer = crate::vm::setup_user_stack(task).1;
+
+        task.set_entry_point(entry_point);
+
+        task.vcpu.lock().reset_iregs();
+        task.vcpu.lock().set_sp(stack_pointer);
+
+        let (adjusted_sp, argv_ptr) =
+            self.setup_arguments_on_stack(task, argv, envp, stack_pointer)?;
+        task.vcpu.lock().set_sp(adjusted_sp);
+
+        task.vcpu.lock().iregs.reg[0] = argv.len();
+        task.vcpu.lock().iregs.reg[1] = argv_ptr;
+
+        task.vcpu.lock().switch(trapframe);
+        Ok(())
     }
 
     fn get_default_cwd(&self) -> &str {
         "/"
+    }
+
+    fn setup_overlay_environment(
+        &self,
+        target_vfs: &Arc<VfsManager>,
+        base_vfs: &Arc<VfsManager>,
+        system_path: &str,
+        config_path: &str,
+    ) -> Result<(), &'static str> {
+        let lower_vfs_list = alloc::vec![(base_vfs, system_path)];
+        let upper_vfs = base_vfs;
+        let fs = match OverlayFS::new_from_paths_and_vfs(
+            Some((upper_vfs, config_path)),
+            lower_vfs_list,
+            "/",
+        ) {
+            Ok(fs) => fs,
+            Err(e) => {
+                crate::println!(
+                    "Failed to create overlay filesystem for Darwin ABI: {}",
+                    e.message
+                );
+                return Err("Failed to create Darwin overlay environment");
+            }
+        };
+
+        match target_vfs.mount(fs, "/", 0) {
+            Ok(()) => Ok(()),
+            Err(e) => {
+                crate::println!(
+                    "Failed to create cross-VFS overlay for Darwin ABI: {}",
+                    e.message
+                );
+                Err("Failed to create Darwin overlay environment")
+            }
+        }
+    }
+
+    fn setup_shared_resources(
+        &self,
+        target_vfs: &Arc<VfsManager>,
+        base_vfs: &Arc<VfsManager>,
+    ) -> Result<(), &'static str> {
+        create_dir_if_not_exists(target_vfs, "/home").map_err(|e| {
+            crate::println!("Failed to create /home directory for Darwin: {}", e.message);
+            "Failed to create /home directory for Darwin"
+        })?;
+        let _ = target_vfs.bind_mount_from(base_vfs, "/home", "/home");
+
+        create_dir_if_not_exists(target_vfs, "/data").map_err(|e| {
+            crate::println!("Failed to create /data directory for Darwin: {}", e.message);
+            "Failed to create /data directory for Darwin"
+        })?;
+        let _ = target_vfs.bind_mount_from(base_vfs, "/data/shared", "/data/shared");
+
+        create_dir_if_not_exists(target_vfs, "/dev").map_err(|e| {
+            crate::println!("Failed to create /dev directory for Darwin: {}", e.message);
+            "Failed to create /dev directory for Darwin"
+        })?;
+        target_vfs.bind_mount_from(base_vfs, "/dev", "/dev").map_err(|e| {
+            crate::println!("Failed to bind mount /dev for Darwin: {}", e.message);
+            "Failed to bind mount /dev for Darwin"
+        })?;
+
+        create_dir_if_not_exists(target_vfs, "/tmp").map_err(|e| {
+            crate::println!("Failed to create /tmp directory for Darwin: {}", e.message);
+            "Failed to create /tmp directory for Darwin"
+        })?;
+        target_vfs.bind_mount_from(base_vfs, "/tmp", "/tmp").map_err(|e| {
+            crate::println!("Failed to bind mount /tmp for Darwin: {}", e.message);
+            "Failed to bind mount /tmp for Darwin"
+        })?;
+
+        create_dir_if_not_exists(target_vfs, "/scarlet").map_err(|e| {
+            crate::println!("Failed to create /scarlet directory for Darwin: {}", e.message);
+            "Failed to create /scarlet directory for Darwin"
+        })?;
+        target_vfs.bind_mount_from(base_vfs, "/", "/scarlet")
+            .map_err(|e| {
+                crate::println!(
+                    "Failed to bind mount Scarlet root to /scarlet for Darwin: {}",
+                    e.message
+                );
+                "Failed to bind mount Scarlet root to /scarlet for Darwin"
+            })?;
+
+        create_dir_if_not_exists(target_vfs, "/Users").ok();
+
+        Ok(())
+    }
+
+    fn on_task_cloned(
+        &mut self,
+        _parent_task: &crate::task::Task,
+        _child_task: &crate::task::Task,
+        _flags: CloneFlags,
+    ) -> Result<(), &'static str> {
+        // DarwinAarch64Abi derives Clone, so the ABI state (fd_to_handle, mach_ports, etc.)
+        // is already cloned by clone_boxed(). The kernel handles the actual task cloning.
+        // No additional work needed at this time.
+        Ok(())
+    }
+
+    fn on_task_exit(&mut self, _task: &crate::task::Task) {
+        // Darwin ABI cleanup on task exit:
+        // - FD table and handle table are cleaned up by the kernel's generic task exit
+        // - Mach ports are cleaned up when the ABI instance is dropped
+        // Minimal cleanup needed for now.
+    }
+
+    fn handle_event(&mut self, event: Event, _target_task_id: u32) -> Result<(), &'static str> {
+        let task = match crate::task::mytask() {
+            Some(t) => t,
+            None => return Err("No current task to handle event"),
+        };
+
+        let _priority = match event.metadata.priority {
+            EventPriority::Low => EventPriority::Low,
+            EventPriority::Normal => EventPriority::Normal,
+            EventPriority::High => EventPriority::High,
+            EventPriority::Critical => EventPriority::Critical,
+        };
+
+        match &event.content {
+            EventContent::ProcessControl(ptype) => {
+                let signal = Self::process_control_to_signal(*ptype);
+                match signal {
+                    Some(sig) if self.is_signal_blocked(sig) && sig != SIGKILL && sig != SIGSTOP => {
+                        self.mark_signal_pending(sig);
+                        Ok(())
+                    }
+                    Some(SIGKILL) | Some(SIGTERM) => {
+                        if let Some(sig) = signal {
+                            self.clear_pending_signal(sig);
+                        }
+                        let exit_code = match signal {
+                            Some(SIGKILL) => 128 + 9,
+                            Some(SIGTERM) => 128 + 15,
+                            _ => 1,
+                        };
+                        task.exit(exit_code);
+                        Ok(())
+                    }
+                    Some(SIGSTOP) => {
+                        self.clear_pending_signal(SIGSTOP);
+                        task.set_state(crate::task::TaskState::Blocked(
+                            crate::task::BlockedType::Interruptible,
+                        ));
+                        Ok(())
+                    }
+                    Some(SIGCONT) => {
+                        self.clear_pending_signal(SIGCONT);
+                        let current_state = task.get_state();
+                        if matches!(current_state, crate::task::TaskState::Blocked(_)) {
+                            task.set_state(crate::task::TaskState::Ready);
+                        }
+                        Ok(())
+                    }
+                    Some(sig) => {
+                        self.clear_pending_signal(sig);
+                        let sig_idx = sig.min(31);
+                        if sig_idx > 0 && self.signal_handlers[sig_idx] != 0 {
+                            let handler = self.signal_handlers[sig_idx];
+                            crate::println!(
+                                "[darwin] Signal {} has handler at {:#x}, but signal frame not yet implemented",
+                                sig,
+                                handler
+                            );
+                            Ok(())
+                        } else {
+                            match sig {
+                                SIGINT | SIGQUIT | SIGABRT | SIGSEGV | SIGTERM => {
+                                    task.exit(128 + sig as i32);
+                                    Ok(())
+                                }
+                                _ => Ok(()),
+                            }
+                        }
+                    }
+                    None => Ok(()),
+                }
+            }
+            EventContent::Notification(ntype) => {
+                match ntype {
+                    crate::ipc::event::NotificationType::TaskCompleted => {
+                        if let Some(parent_id) = task.get_parent_id() {
+                            crate::task::wake_task_waiters(task.get_id());
+                            crate::task::wake_parent_waiters(parent_id);
+                        }
+                    }
+                    _ => {}
+                }
+                Ok(())
+            }
+            _ => Ok(()),
+        }
     }
 
     fn as_any(&self) -> &dyn core::any::Any {
@@ -314,6 +808,19 @@ impl AbiModule for DarwinAarch64Abi {
 
     fn as_any_mut(&mut self) -> &mut dyn core::any::Any {
         self
+    }
+}
+
+fn create_dir_if_not_exists(vfs: &Arc<VfsManager>, path: &str) -> Result<(), FileSystemError> {
+    match vfs.create_dir(path) {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            if e.kind == FileSystemErrorKind::AlreadyExists {
+                Ok(())
+            } else {
+                Err(e)
+            }
+        }
     }
 }
 

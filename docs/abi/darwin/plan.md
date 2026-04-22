@@ -185,22 +185,24 @@ filetype values:
             ┌────────────┴────────────┐
             │                         │
     Static binary?            Dynamic binary?
-    (no LC_LOAD_DYLIB)       (has LC_LOAD_DYLIB)
+    (no LC_LOAD_DYLINKER)    (has LC_LOAD_DYLINKER)
             │                         │
             ▼                         ▼
-    Direct segment map          Phase 1: map segments only
-    + jump to LC_MAIN           (skip dylib resolution)
-                                Phase 4+: minimal dyld stub
-                                    or require static binaries
+    Direct segment map          Load main binary segments
+    + jump to LC_MAIN           + load dyld from LC_LOAD_DYLINKER path
+                                + set up dyld entry with main binary info
+                                dyld handles all library loading
 ```
 
 **Phase 1 approach**: Support only statically-linked Mach-O binaries. Map segments using Scarlet's VMM, set up stack with argv/envp, jump to entry point from `LC_MAIN` or `LC_UNIXTHREAD`.
 
-**Phase 4+ approach**: Minimal dyld replacement that:
-- Maps segments from LC_SEGMENT_64 commands
-- Processes LC_LOAD_DYLIB by mapping those libraries from the Darwin VFS namespace
-- Performs symbol binding (non-lazy first, lazy on fault)
-- Handles relocations from LC_DYLD_INFO
+**Phase 4+ approach**: Load and execute the actual macOS dyld. The kernel's role is identical to Linux's `PT_INTERP` handling:
+- Parse `LC_LOAD_DYLINKER` to get the dyld path (e.g., `/usr/lib/dyld`)
+- Load dyld from the overlay VFS into memory
+- Set up dyld's entry point with the main binary's information
+- dyld performs all dynamic linking using the actual macOS `libSystem.dylib` and other libraries placed in the overlay VFS
+
+Scarlet does NOT implement a dyld replacement. The actual macOS dyld binary, libSystem.dylib, and all framework libraries are placed in the overlay VFS (`/scarlet/system/darwin-aarch64/`) and executed natively.
 
 ---
 
@@ -683,21 +685,26 @@ pub const MACH_TRAP_TABLE: &[MachTrapEntry] = &[
 └─────────────────────────────────────────┘
 ```
 
-### Phase 4: Dynamic Linking (Week 6-8)
+### Phase 4: dyld Loading and Execution (Week 6-8)
 
 ```
 ┌─────────────────────────────────────────┐
-│  Minimal dyld replacement               │
+│  Load actual macOS dyld from VFS        │
 │                                         │
-│  • LC_LOAD_DYLIB resolution             │
-│  • Non-lazy symbol binding              │
-│  • Lazy symbol binding (on fault)       │
-│  • LC_DYLD_INFO processing              │
-│  • OR: require static binaries only     │
+│  • Parse LC_LOAD_DYLINKER (e.g.         │
+│    /usr/lib/dyld)                       │
+│  • Load dyld segments into memory       │
+│  • Pass main binary info to dyld        │
+│  • dyld handles all dynamic linking     │
+│                                         │
+│  Scarlet does NOT implement dyld.       │
+│  The actual macOS dyld binary and       │
+│  libSystem.dylib are placed in the      │
+│  overlay VFS and executed natively.     │
 │                                         │
 │  Testing:                               │
 │  • Dynamically-linked C CLI tools       │
-│  • Simple dylib loading                 │
+│  • libSystem.dylib loading via dyld     │
 └─────────────────────────────────────────┘
 ```
 
