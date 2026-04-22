@@ -641,9 +641,9 @@ impl AbiModule for DarwinAarch64Abi {
                 file_obj.seek(SeekFrom::Start(0)).ok()?;
                 match file_obj.read(&mut magic_buffer) {
                     Ok(n) if n >= 4 => {
-                        if magic_buffer == [0xFE, 0xED, 0xFA, 0xCF] {
+                        if magic_buffer == [0xCF, 0xFA, 0xED, 0xFE] {
                             40
-                        } else if magic_buffer == [0xFE, 0xED, 0xFA, 0xCE] {
+                        } else if magic_buffer == [0xCE, 0xFA, 0xED, 0xFE] {
                             20
                         } else if magic_buffer == [0xCA, 0xFE, 0xBA, 0xBE] {
                             30
@@ -694,11 +694,17 @@ impl AbiModule for DarwinAarch64Abi {
         task.stack_size.store(0, Ordering::SeqCst);
         task.brk.store(usize::MAX, Ordering::SeqCst);
 
+        crate::println!("[darwin] execute_binary: loading Mach-O...");
         let (entry_point, dyld_path, mach_header_addr) =
-            macho_loader::load_macho_binary(file_obj, task)?;
+            macho_loader::load_macho_binary(file_obj, task)
+            .map_err(|e| { crate::println!("[darwin] load_macho_binary FAILED: {}", e); e })?;
+        crate::println!("[darwin] macho OK: entry={:#x} dyld={:?} mh={:#x}", entry_point, dyld_path, mach_header_addr);
 
         if let Some(dyld) = dyld_path {
-            let (dyld_entry, _base_delta) = macho_loader::load_dyld(&dyld, task)?;
+            crate::println!("[darwin] loading dyld from '{}'...", dyld);
+            let (dyld_entry, _base_delta) = macho_loader::load_dyld(&dyld, task)
+                .map_err(|e| { crate::println!("[darwin] load_dyld FAILED: {}", e); e })?;
+            crate::println!("[darwin] dyld OK: entry={:#x} delta={:#x}", dyld_entry, _base_delta);
 
             *task.name.write() = argv
                 .first()
@@ -724,8 +730,8 @@ impl AbiModule for DarwinAarch64Abi {
             {
                 let mut vcpu = task.vcpu.lock();
                 vcpu.set_sp(dyld_sp);
-                vcpu.iregs.reg[0] = argv.len();
-                vcpu.iregs.reg[1] = argv_ptr;
+                vcpu.set_pc(dyld_entry as u64);
+                vcpu.iregs.reg[0] = mach_header_addr;
                 vcpu.switch(trapframe);
             }
 
