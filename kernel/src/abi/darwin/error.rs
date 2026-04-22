@@ -63,6 +63,8 @@ pub const ESHUTDOWN: usize = 58;
 pub const ETIMEDOUT: usize = 60;
 pub const ECONNREFUSED: usize = 61;
 pub const ENOSYS: usize = 78;
+pub const ECHILD: usize = 10;
+pub const EAGAIN: usize = 35;
 
 // Mach kernel return codes
 pub const KERN_SUCCESS: i64 = 0;

@@ -252,8 +252,20 @@ impl DarwinAarch64Abi {
             SYS_getuid => Ok(bsd_syscalls::sys_getuid(self, trapframe)),
             SYS_getgid => Ok(bsd_syscalls::sys_getgid(self, trapframe)),
             SYS_socket => Ok(bsd_syscalls::sys_socket(self, trapframe)),
+            SYS_bind => Ok(bsd_syscalls::sys_bind(self, trapframe)),
+            SYS_connect => Ok(bsd_syscalls::sys_connect(self, trapframe)),
+            SYS_listen => Ok(bsd_syscalls::sys_listen(self, trapframe)),
+            SYS_accept => Ok(bsd_syscalls::sys_accept(self, trapframe)),
+            SYS_sendto => Ok(bsd_syscalls::sys_sendto(self, trapframe)),
+            SYS_recvfrom => Ok(bsd_syscalls::sys_recvfrom(self, trapframe)),
+            SYS_shutdown => Ok(bsd_syscalls::sys_shutdown(self, trapframe)),
             SYS_dup => Ok(bsd_syscalls::sys_dup(self, trapframe)),
             SYS_dup2 => Ok(bsd_syscalls::sys_dup2(self, trapframe)),
+            SYS_wait4 => Ok(bsd_syscalls::sys_wait4(self, trapframe)),
+            SYS_sigaction => Ok(bsd_syscalls::sys_sigaction(self, trapframe)),
+            SYS_fcntl => Ok(bsd_syscalls::sys_fcntl(self, trapframe)),
+            SYS_ioctl => Ok(bsd_syscalls::sys_ioctl(self, trapframe)),
+            SYS_lseek => Ok(bsd_syscalls::sys_lseek(self, trapframe)),
             _ => {
                 crate::println!("[darwin] Unimplemented BSD syscall: {} (0x{:x})", num, num);
                 let task = mytask().unwrap();
@@ -272,10 +284,10 @@ impl DarwinAarch64Abi {
     ) -> Result<usize, &'static str> {
         use syscall_table::*;
         match num {
-            MACH_mach_reply_port | MACH_mach_port_allocate | MACH_task_for_pid => {
+            MACH_mach_reply_port | MACH__kernelrpc_mach_port_allocate_trap | MACH_task_for_pid => {
                 if num == MACH_task_for_pid {
                     Ok(mach_syscalls::sys_task_for_pid(self, trapframe))
-                } else if num == MACH_mach_port_allocate {
+                } else if num == MACH__kernelrpc_mach_port_allocate_trap {
                     Ok(mach_syscalls::sys_mach_port_allocate(self, trapframe))
                 } else {
                     let task = mytask().unwrap();
@@ -286,17 +298,12 @@ impl DarwinAarch64Abi {
                     Ok(port as usize)
                 }
             }
-            MACH_mach_port_deallocate => {
+            MACH__kernelrpc_mach_port_deallocate_trap => {
                 Ok(mach_syscalls::sys_mach_port_deallocate(self, trapframe))
             }
             MACH_mach_msg_trap => Ok(mach_syscalls::sys_mach_msg_trap(self, trapframe)),
-            MACH_vm_allocate => Ok(mach_syscalls::sys_vm_allocate(self, trapframe)),
-            MACH_vm_deallocate => Ok(mach_syscalls::sys_vm_deallocate(self, trapframe)),
-            MACH_mach_vm_allocate => Ok(mach_syscalls::sys_vm_allocate(self, trapframe)),
-            MACH_mach_vm_deallocate => Ok(mach_syscalls::sys_vm_deallocate(self, trapframe)),
-            MACH_thread_create | MACH_thread_create_running => {
-                Ok(mach_syscalls::sys_thread_create(self, trapframe))
-            }
+            MACH__kernelrpc_mach_vm_allocate_trap => Ok(mach_syscalls::sys_vm_allocate(self, trapframe)),
+            MACH__kernelrpc_mach_vm_deallocate_trap => Ok(mach_syscalls::sys_vm_deallocate(self, trapframe)),
             MACH_mach_timebase_info_trap => {
                 Ok(mach_syscalls::sys_mach_timebase_info(self, trapframe))
             }
