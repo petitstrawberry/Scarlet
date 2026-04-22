@@ -3,6 +3,37 @@ use crate::abi::darwin::error::*;
 use crate::arch::Trapframe;
 use crate::task::mytask;
 
+// mach_msg options
+const MACH_SEND_MSG: u32 = 0x01;
+const MACH_RCV_MSG: u32 = 0x02;
+const MACH_SEND_TIMEOUT: u32 = 0x10;
+const MACH_RCV_TIMEOUT: u32 = 0x20;
+const MACH_RCV_LARGE: u32 = 0x40;
+
+// mach_msg return values
+const MACH_MSG_SUCCESS: u32 = 0;
+const MACH_SEND_INVALID_DEST: u32 = 0x10000003;
+const MACH_SEND_TIMED_OUT: u32 = 0x10000004;
+const MACH_RCV_TIMED_OUT: u32 = 0x10000005;
+const MACH_RCV_TOO_LARGE: u32 = 0x10000006;
+const MACH_RCV_INVALID_NAME: u32 = 0x1000000c;
+
+// Mach port right types
+const MACH_PORT_RIGHT_SEND: u32 = 0;
+const MACH_PORT_RIGHT_RECEIVE: u32 = 1;
+const MACH_PORT_RIGHT_SEND_ONCE: u32 = 2;
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct MachMsgHeader {
+    msgh_bits: u32,
+    msgh_size: u32,
+    msgh_remote_port: u32,
+    msgh_local_port: u32,
+    msgh_voucher_port: u32,
+    msgh_id: u32,
+}
+
 pub fn sys_mach_task_self(abi: &mut DarwinAarch64Abi, trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
     trapframe.increment_pc_next(task);
@@ -14,15 +45,203 @@ pub fn sys_mach_msg_trap(abi: &mut DarwinAarch64Abi, trapframe: &mut Trapframe) 
     let task = mytask().unwrap();
     trapframe.increment_pc_next(task);
 
-    crate::println!(
-        "[darwin] mach_msg_trap: unimplemented (x0={:#x}, x1={:#x})",
-        trapframe.get_arg(0),
-        trapframe.get_arg(1)
-    );
+    let msg_ptr = trapframe.get_arg(0);
+    let option = trapframe.get_arg(1) as u32;
+    let send_size = trapframe.get_arg(2) as usize;
+    let rcv_size = trapframe.get_arg(3) as usize;
+    let rcv_name = trapframe.get_arg(4) as u32;
+    let timeout = trapframe.get_arg(5) as u32;
+    let _notify = trapframe.get_arg(6);
 
-    trapframe.spsr |= 1 << 29;
-    trapframe.set_return_value(ENOSYS);
-    usize::MAX
+    let do_send = (option & MACH_SEND_MSG) != 0;
+    let do_receive = (option & MACH_RCV_MSG) != 0;
+    let mut send_header = None;
+
+    if do_send {
+        let header_bytes = read_user_bytes(task, msg_ptr, core::mem::size_of::<MachMsgHeader>());
+        if header_bytes.len() < core::mem::size_of::<MachMsgHeader>() {
+            trapframe.set_return_value(MACH_SEND_INVALID_DEST as usize);
+            return MACH_SEND_INVALID_DEST as usize;
+        }
+
+        let header = mach_msg_header_from_bytes(&header_bytes);
+        if !is_valid_send_port(abi, header.msgh_remote_port) {
+            trapframe.set_return_value(MACH_SEND_INVALID_DEST as usize);
+            return MACH_SEND_INVALID_DEST as usize;
+        }
+
+        if (option & MACH_SEND_TIMEOUT) != 0 && timeout == 0 {
+            trapframe.set_return_value(MACH_SEND_TIMED_OUT as usize);
+            return MACH_SEND_TIMED_OUT as usize;
+        }
+
+        let message_len = header.msgh_size.min(send_size as u32) as usize;
+        let message = read_user_bytes(task, msg_ptr, message_len);
+
+        let event = crate::ipc::event::Event::direct_custom(
+            task.get_id() as u32,
+            alloc::string::String::from("darwin.mach"),
+            header.msgh_remote_port,
+            crate::ipc::event::EventPriority::Normal,
+            true,
+            crate::ipc::event::EventPayload::Bytes(message.clone()),
+        );
+        let _ = crate::ipc::event::EventManager::get_manager().send_event(event);
+        abi.store_mach_message(header.msgh_remote_port, message);
+        send_header = Some(header);
+    }
+
+    if do_receive {
+        if !is_valid_receive_port(abi, rcv_name) {
+            trapframe.set_return_value(MACH_RCV_INVALID_NAME as usize);
+            return MACH_RCV_INVALID_NAME as usize;
+        }
+
+        let Some(message) = abi.take_mach_message(rcv_name) else {
+            if (option & MACH_RCV_TIMEOUT) != 0 || timeout == 0 {
+                trapframe.set_return_value(MACH_RCV_TIMED_OUT as usize);
+                return MACH_RCV_TIMED_OUT as usize;
+            }
+
+            crate::sched::scheduler::get_scheduler().schedule(trapframe);
+            trapframe.set_return_value(MACH_RCV_TIMED_OUT as usize);
+            return MACH_RCV_TIMED_OUT as usize;
+        };
+
+        if message.data.len() > rcv_size {
+            if (option & MACH_RCV_LARGE) != 0 {
+                let mut header =
+                    send_header.unwrap_or_else(|| mach_msg_header_from_message(&message.data));
+                header.msgh_size = message.data.len() as u32;
+                write_user_bytes(task, msg_ptr, mach_msg_header_as_bytes(&header));
+            }
+
+            trapframe.set_return_value(MACH_RCV_TOO_LARGE as usize);
+            return MACH_RCV_TOO_LARGE as usize;
+        }
+
+        write_user_bytes(task, msg_ptr, &message.data);
+    }
+
+    trapframe.set_return_value(MACH_MSG_SUCCESS as usize);
+    MACH_MSG_SUCCESS as usize
+}
+
+fn is_valid_send_port(abi: &DarwinAarch64Abi, port_name: u32) -> bool {
+    if port_name == 0 {
+        return false;
+    }
+
+    abi.mach_ports.get(&port_name).is_some_and(|port| {
+        matches!(
+            port.right,
+            super::MachPortRight::Send
+                | super::MachPortRight::SendReceive
+                | super::MachPortRight::SendOnce
+                | super::MachPortRight::Receive
+        ) || matches!(port.right, super::MachPortRight::Send if MACH_PORT_RIGHT_SEND == 0)
+            || matches!(port.right, super::MachPortRight::Receive if MACH_PORT_RIGHT_RECEIVE == 1)
+            || matches!(port.right, super::MachPortRight::SendOnce if MACH_PORT_RIGHT_SEND_ONCE == 2)
+    })
+}
+
+fn is_valid_receive_port(abi: &DarwinAarch64Abi, port_name: u32) -> bool {
+    if port_name == 0 {
+        return false;
+    }
+
+    abi.mach_ports.get(&port_name).is_some_and(|port| {
+        matches!(
+            port.right,
+            super::MachPortRight::Receive | super::MachPortRight::SendReceive
+        )
+    })
+}
+
+fn mach_msg_header_from_message(data: &[u8]) -> MachMsgHeader {
+    if data.len() >= core::mem::size_of::<MachMsgHeader>() {
+        mach_msg_header_from_bytes(&data[..core::mem::size_of::<MachMsgHeader>()])
+    } else {
+        MachMsgHeader {
+            msgh_bits: 0,
+            msgh_size: data.len() as u32,
+            msgh_remote_port: 0,
+            msgh_local_port: 0,
+            msgh_voucher_port: 0,
+            msgh_id: 0,
+        }
+    }
+}
+
+fn mach_msg_header_from_bytes(bytes: &[u8]) -> MachMsgHeader {
+    MachMsgHeader {
+        msgh_bits: u32::from_ne_bytes(bytes[0..4].try_into().unwrap()),
+        msgh_size: u32::from_ne_bytes(bytes[4..8].try_into().unwrap()),
+        msgh_remote_port: u32::from_ne_bytes(bytes[8..12].try_into().unwrap()),
+        msgh_local_port: u32::from_ne_bytes(bytes[12..16].try_into().unwrap()),
+        msgh_voucher_port: u32::from_ne_bytes(bytes[16..20].try_into().unwrap()),
+        msgh_id: u32::from_ne_bytes(bytes[20..24].try_into().unwrap()),
+    }
+}
+
+fn mach_msg_header_as_bytes(header: &MachMsgHeader) -> &[u8] {
+    unsafe {
+        core::slice::from_raw_parts(
+            (header as *const MachMsgHeader).cast::<u8>(),
+            core::mem::size_of::<MachMsgHeader>(),
+        )
+    }
+}
+
+fn read_user_bytes(task: &crate::task::Task, vaddr: usize, len: usize) -> alloc::vec::Vec<u8> {
+    let mut buffer = alloc::vec![0u8; len];
+    let mut copied = 0;
+
+    while copied < len {
+        let current = vaddr + copied;
+        let page_off = current & (crate::environment::PAGE_SIZE - 1);
+        let chunk = core::cmp::min(crate::environment::PAGE_SIZE - page_off, len - copied);
+
+        let Some(kaddr) = task.vm_manager.translate_to_kva(current) else {
+            buffer.truncate(copied);
+            break;
+        };
+
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                kaddr as *const u8,
+                buffer.as_mut_ptr().add(copied),
+                chunk,
+            );
+        }
+
+        copied += chunk;
+    }
+
+    buffer
+}
+
+fn write_user_bytes(task: &crate::task::Task, vaddr: usize, data: &[u8]) {
+    let mut written = 0;
+
+    while written < data.len() {
+        let current = vaddr + written;
+        let page_off = current & (crate::environment::PAGE_SIZE - 1);
+        let chunk = core::cmp::min(
+            crate::environment::PAGE_SIZE - page_off,
+            data.len() - written,
+        );
+
+        let Some(kaddr) = task.vm_manager.translate_to_kva(current) else {
+            break;
+        };
+
+        unsafe {
+            core::ptr::copy_nonoverlapping(data.as_ptr().add(written), kaddr as *mut u8, chunk);
+        }
+
+        written += chunk;
+    }
 }
 
 pub fn sys_mach_port_allocate(abi: &mut DarwinAarch64Abi, trapframe: &mut Trapframe) -> usize {

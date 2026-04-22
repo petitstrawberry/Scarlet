@@ -1,6 +1,10 @@
-use alloc::{string::{String, ToString}, vec, vec::Vec};
-use core::{mem::size_of, ptr};
+use alloc::{
+    string::{String, ToString},
+    vec,
+    vec::Vec,
+};
 use core::sync::atomic::Ordering;
+use core::{mem::size_of, ptr};
 
 use crate::{
     environment::PAGE_SIZE,
@@ -12,6 +16,7 @@ use crate::{
 
 pub const MH_MAGIC_64: u32 = 0xFEEDFACF;
 pub const MH_EXECUTE: u32 = 0x02;
+pub const MH_DYLINKER: u32 = 0x07;
 pub const CPU_TYPE_ARM64: u32 = 0x0100000C;
 pub const CPU_SUBTYPE_ALL: u32 = 0x00000000;
 
@@ -73,7 +78,7 @@ pub struct EntryPointCommand {
 pub fn load_macho_binary(
     file_obj: &dyn FileObject,
     task: &Task,
-) -> Result<(usize, Option<String>), &'static str> {
+) -> Result<(usize, Option<String>, usize), &'static str> {
     file_obj
         .seek(SeekFrom::Start(0))
         .map_err(|_| "Failed to seek to Mach-O header")?;
@@ -174,6 +179,9 @@ pub fn load_macho_binary(
         map_segment(file_obj, task, segment)?;
     }
 
+    let mach_header_addr =
+        file_offset_to_vaddr(&segments, 0).ok_or("Failed to resolve Mach-O header address")?;
+
     let entry_point = if let Some(entryoff) = entryoff {
         file_offset_to_vaddr(&segments, entryoff).ok_or("Failed to resolve Mach-O entry point")?
     } else if let Some(entry) = unixthread_entry {
@@ -182,7 +190,7 @@ pub fn load_macho_binary(
         return Err("Mach-O binary missing entry point");
     };
 
-    Ok((entry_point, dylinker_path))
+    Ok((entry_point, dylinker_path, mach_header_addr))
 }
 
 fn map_segment(
@@ -199,9 +207,12 @@ fn map_segment(
         return Ok(());
     }
 
-    let segment_vaddr = usize::try_from(segment.vmaddr).map_err(|_| "Mach-O vmaddr out of range")?;
-    let segment_vmsize = usize::try_from(segment.vmsize).map_err(|_| "Mach-O vmsize out of range")?;
-    let segment_filesize = usize::try_from(segment.filesize).map_err(|_| "Mach-O filesize out of range")?;
+    let segment_vaddr =
+        usize::try_from(segment.vmaddr).map_err(|_| "Mach-O vmaddr out of range")?;
+    let segment_vmsize =
+        usize::try_from(segment.vmsize).map_err(|_| "Mach-O vmsize out of range")?;
+    let segment_filesize =
+        usize::try_from(segment.filesize).map_err(|_| "Mach-O filesize out of range")?;
     let segment_fileoff = segment.fileoff;
 
     if segment_filesize > segment_vmsize {
@@ -268,6 +279,258 @@ fn map_segment(
     }
 
     Ok(())
+}
+
+/// Map a Mach-O segment at a relocated base address.
+/// Used for loading dyld which may need to be mapped at a different address.
+pub fn map_segment_with_base(
+    file_obj: &dyn FileObject,
+    task: &Task,
+    segment: &SegmentCommand64,
+    base_delta: i64,
+) -> Result<(), &'static str> {
+    if segment.vmsize == 0 {
+        return Ok(());
+    }
+
+    let permissions = macho_prot_to_scarlet(segment.initprot);
+    if permissions == VirtualMemoryPermission::User as usize && segment.filesize == 0 {
+        return Ok(());
+    }
+
+    let original_vaddr = usize::try_from(segment.vmaddr).map_err(|_| "vmaddr out of range")?;
+    let segment_vaddr = if base_delta >= 0 {
+        original_vaddr
+            .checked_add(base_delta as usize)
+            .ok_or("vmaddr overflow")?
+    } else {
+        original_vaddr
+            .checked_sub((-base_delta) as usize)
+            .ok_or("vmaddr underflow")?
+    };
+    let segment_vmsize = usize::try_from(segment.vmsize).map_err(|_| "vmsize out of range")?;
+    let segment_filesize =
+        usize::try_from(segment.filesize).map_err(|_| "filesize out of range")?;
+    let segment_fileoff = segment.fileoff;
+
+    if segment_filesize > segment_vmsize {
+        return Err("filesize exceeds vmsize");
+    }
+
+    let page_offset = segment_vaddr & (PAGE_SIZE - 1);
+    let mapping_start = segment_vaddr - page_offset;
+    let mapping_size = segment_vmsize
+        .checked_add(page_offset)
+        .ok_or("size overflow")?;
+    let aligned_size = align_up(mapping_size, PAGE_SIZE);
+    let num_pages = aligned_size / PAGE_SIZE;
+
+    let pages = ContiguousPages::new(num_pages).ok_or("Failed to allocate dyld segment pages")?;
+    let paddr = pages.as_paddr();
+    let mmap = VirtualMemoryMap::new(
+        MemoryArea::new(paddr, paddr + aligned_size - 1),
+        MemoryArea::new(mapping_start, mapping_start + aligned_size - 1),
+        permissions,
+        false,
+        None,
+    );
+
+    task.vm_manager.add_memory_map(mmap)?;
+    task.page_allocations.write().push(pages);
+
+    let kva = task
+        .vm_manager
+        .translate_to_kva(mapping_start)
+        .ok_or("Failed to translate dyld segment")?;
+
+    unsafe {
+        ptr::write_bytes(kva as *mut u8, 0, aligned_size);
+    }
+
+    if segment_filesize > 0 {
+        let mut file_data = vec![0u8; segment_filesize];
+        file_obj
+            .seek(SeekFrom::Start(segment_fileoff))
+            .map_err(|_| "Failed to seek to dyld segment")?;
+        read_exact(file_obj, &mut file_data)?;
+
+        let target_kva = task
+            .vm_manager
+            .translate_to_kva(segment_vaddr)
+            .ok_or("Failed to translate dyld segment destination")?;
+
+        unsafe {
+            ptr::copy_nonoverlapping(file_data.as_ptr(), target_kva as *mut u8, segment_filesize);
+        }
+    }
+
+    if permissions & VirtualMemoryPermission::Execute as usize != 0 {
+        task.text_size.fetch_add(aligned_size, Ordering::SeqCst);
+    } else {
+        task.data_size.fetch_add(aligned_size, Ordering::SeqCst);
+    }
+
+    Ok(())
+}
+
+/// Load dyld (the Mach-O dynamic linker) into the task's address space.
+/// Returns (dyld_entry_point, base_delta) where base_delta is the relocation offset.
+pub fn load_dyld(dyld_path: &str, task: &Task) -> Result<(usize, i64), &'static str> {
+    let vfs = task.get_vfs().ok_or("Task VFS not available")?;
+    let file_obj = match vfs.open(dyld_path, 0) {
+        Ok(ko) => ko,
+        Err(_) => {
+            let alt_paths = ["/usr/lib/dyld", "/System/usr/lib/dyld"];
+            let mut found = None;
+            for alt in alt_paths {
+                if let Ok(ko) = vfs.open(alt, 0) {
+                    found = Some(ko);
+                    break;
+                }
+            }
+            found.ok_or("Failed to open dyld from VFS")?
+        }
+    };
+
+    let file_ref = match file_obj {
+        crate::object::KernelObject::File(f) => f,
+        _ => return Err("dyld is not a file object"),
+    };
+    let file_object: &dyn FileObject = file_ref.as_ref();
+
+    file_object
+        .seek(SeekFrom::Start(0))
+        .map_err(|_| "Failed to seek to dyld header")?;
+
+    let mut header_bytes = [0u8; size_of::<MachHeader64>()];
+    read_exact(file_object, &mut header_bytes)?;
+    let header = read_struct::<MachHeader64>(&header_bytes)?;
+
+    if header.magic != MH_MAGIC_64 {
+        return Err("Invalid dyld Mach-O magic");
+    }
+    if header.cputype != CPU_TYPE_ARM64 {
+        return Err("dyld is not ARM64");
+    }
+    if header.filetype != MH_EXECUTE && header.filetype != MH_DYLINKER {
+        return Err("Unsupported dyld Mach-O file type");
+    }
+
+    let mut load_commands = vec![0u8; header.sizeofcmds as usize];
+    read_exact(file_object, &mut load_commands)?;
+
+    let mut segments = Vec::new();
+    let mut entryoff = None;
+    let mut unixthread_entry = None;
+
+    let mut offset = 0usize;
+    for _ in 0..header.ncmds {
+        let command_end = offset
+            .checked_add(size_of::<LoadCommand>())
+            .ok_or("dyld load command overflow")?;
+        if command_end > load_commands.len() {
+            return Err("dyld load command table truncated");
+        }
+
+        let load_cmd = read_struct::<LoadCommand>(&load_commands[offset..command_end])?;
+        let cmdsize = load_cmd.cmdsize as usize;
+        if cmdsize < size_of::<LoadCommand>() {
+            return Err("Invalid dyld load command size");
+        }
+
+        let next_offset = offset
+            .checked_add(cmdsize)
+            .ok_or("dyld load command overflow")?;
+        if next_offset > load_commands.len() {
+            return Err("dyld load command exceeds command table");
+        }
+
+        let command_bytes = &load_commands[offset..next_offset];
+        match load_cmd.cmd {
+            LC_SEGMENT_64 => {
+                if cmdsize >= size_of::<SegmentCommand64>() {
+                    segments.push(read_struct::<SegmentCommand64>(
+                        &command_bytes[..size_of::<SegmentCommand64>()],
+                    )?);
+                }
+            }
+            LC_MAIN => {
+                if cmdsize >= size_of::<EntryPointCommand>() {
+                    let entry_cmd = read_struct::<EntryPointCommand>(
+                        &command_bytes[..size_of::<EntryPointCommand>()],
+                    )?;
+                    entryoff = Some(entry_cmd.entryoff);
+                }
+            }
+            LC_UNIXTHREAD => {
+                if cmdsize >= MIN_UNIXTHREAD_COMMAND_SIZE {
+                    let pc_offset = offset_of_pc_in_unixthread();
+                    unixthread_entry = Some(read_u64(&command_bytes[pc_offset..pc_offset + 8]));
+                }
+            }
+            _ => {}
+        }
+
+        offset = next_offset;
+    }
+
+    if segments.is_empty() {
+        return Err("dyld has no segments");
+    }
+
+    let min_vmaddr = segments
+        .iter()
+        .map(|segment| segment.vmaddr)
+        .min()
+        .ok_or("dyld has no segments")?;
+    let max_vmaddr = segments
+        .iter()
+        .map(|segment| segment.vmaddr.saturating_add(segment.vmsize))
+        .max()
+        .ok_or("dyld has no segments")?;
+    let total_size =
+        usize::try_from(max_vmaddr.saturating_sub(min_vmaddr)).map_err(|_| "dyld size overflow")?;
+    let aligned_total = align_up(total_size, PAGE_SIZE);
+
+    let target_base = task
+        .vm_manager
+        .find_unmapped_area(aligned_total, PAGE_SIZE)
+        .ok_or("No free VM area for dyld")?;
+
+    let base_delta = target_base as i64 - min_vmaddr as i64;
+
+    for segment in &segments {
+        map_segment_with_base(file_object, task, segment, base_delta)?;
+    }
+
+    let dyld_entry = if let Some(off) = entryoff {
+        let original_vaddr =
+            file_offset_to_vaddr(&segments, off).ok_or("Failed to resolve dyld entry point")?;
+        if base_delta >= 0 {
+            original_vaddr
+                .checked_add(base_delta as usize)
+                .ok_or("entry overflow")?
+        } else {
+            original_vaddr
+                .checked_sub((-base_delta) as usize)
+                .ok_or("entry underflow")?
+        }
+    } else if let Some(entry) = unixthread_entry {
+        let original = entry as usize;
+        if base_delta >= 0 {
+            original
+                .checked_add(base_delta as usize)
+                .ok_or("entry overflow")?
+        } else {
+            original
+                .checked_sub((-base_delta) as usize)
+                .ok_or("entry underflow")?
+        }
+    } else {
+        return Err("dyld has no entry point");
+    };
+
+    Ok((dyld_entry, base_delta))
 }
 
 fn macho_prot_to_scarlet(prot: i32) -> usize {
@@ -363,7 +626,8 @@ mod tests {
         // LC_SEGMENT_64 (72 bytes)
         0x19, 0x00, 0x00, 0x00, // cmd = LC_SEGMENT_64
         0x98, 0x00, 0x00, 0x00, // cmdsize = 152
-        0x5f, 0x5f, 0x54, 0x45, 0x58, 0x54, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // segname = "__TEXT"
+        0x5f, 0x5f, 0x54, 0x45, 0x58, 0x54, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, // segname = "__TEXT"
         0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, // vmaddr = 0x100000000
         0x00, 0x00, 0x00, 0x00, 0x00, 0x40, 0x00, 0x00, // vmsize = 16384
         0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // fileoff = 0
@@ -373,8 +637,10 @@ mod tests {
         0x01, 0x00, 0x00, 0x00, // nsects = 1
         0x00, 0x00, 0x00, 0x00, // flags
         // Section __text (80 bytes)
-        0x5f, 0x5f, 0x74, 0x65, 0x78, 0x74, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // sectname = "__text"
-        0x5f, 0x5f, 0x54, 0x45, 0x58, 0x54, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // segname = "__TEXT"
+        0x5f, 0x5f, 0x74, 0x65, 0x78, 0x74, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, // sectname = "__text"
+        0x5f, 0x5f, 0x54, 0x45, 0x58, 0x54, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, // segname = "__TEXT"
         0xd0, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, // addr = 0x1000000d0
         0x14, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // size = 20
         0xd0, 0x00, 0x00, 0x00, // offset = 208
@@ -446,14 +712,18 @@ mod tests {
 
         assert_eq!(header.magic, MH_MAGIC_64, "magic should be MH_MAGIC_64");
         assert_eq!(header.cputype, CPU_TYPE_ARM64, "cputype should be ARM64");
-        assert_eq!(header.cpusubtype, CPU_SUBTYPE_ALL, "cpusubtype should be ALL");
+        assert_eq!(
+            header.cpusubtype, CPU_SUBTYPE_ALL,
+            "cpusubtype should be ALL"
+        );
         assert_eq!(header.filetype, MH_EXECUTE, "filetype should be MH_EXECUTE");
         assert_eq!(header.ncmds, 2, "should have 2 load commands");
     }
 
     #[test]
     fn test_parse_load_commands() {
-        let header = read_struct::<MachHeader64>(&MINIMAL_MACHO_EXIT[..size_of::<MachHeader64>()]).unwrap();
+        let header =
+            read_struct::<MachHeader64>(&MINIMAL_MACHO_EXIT[..size_of::<MachHeader64>()]).unwrap();
         let cmd_start = size_of::<MachHeader64>();
         let cmd_data = &MINIMAL_MACHO_EXIT[cmd_start..cmd_start + header.sizeofcmds as usize];
 
@@ -463,22 +733,31 @@ mod tests {
         let mut entryoff = 0u64;
 
         for _ in 0..header.ncmds {
-            let load_cmd = read_struct::<LoadCommand>(&cmd_data[offset..offset + size_of::<LoadCommand>()]).unwrap();
+            let load_cmd =
+                read_struct::<LoadCommand>(&cmd_data[offset..offset + size_of::<LoadCommand>()])
+                    .unwrap();
             let cmdsize = load_cmd.cmdsize as usize;
             let command_bytes = &cmd_data[offset..offset + cmdsize];
 
             match load_cmd.cmd {
                 LC_SEGMENT_64 => {
                     found_segment = true;
-                    let seg = read_struct::<SegmentCommand64>(&command_bytes[..size_of::<SegmentCommand64>()]).unwrap();
-                    let segname = &seg.segname[..seg.segname.iter().position(|&b| b == 0).unwrap_or(16)];
+                    let seg = read_struct::<SegmentCommand64>(
+                        &command_bytes[..size_of::<SegmentCommand64>()],
+                    )
+                    .unwrap();
+                    let segname =
+                        &seg.segname[..seg.segname.iter().position(|&b| b == 0).unwrap_or(16)];
                     assert_eq!(segname, b"__TEXT", "first segment should be __TEXT");
                     assert_eq!(seg.vmaddr, 0x100000000, "vmaddr should be 0x100000000");
                     assert_eq!(seg.nsects, 1, "should have 1 section");
                 }
                 LC_MAIN => {
                     found_main = true;
-                    let entry_cmd = read_struct::<EntryPointCommand>(&command_bytes[..size_of::<EntryPointCommand>()]).unwrap();
+                    let entry_cmd = read_struct::<EntryPointCommand>(
+                        &command_bytes[..size_of::<EntryPointCommand>()],
+                    )
+                    .unwrap();
                     entryoff = entry_cmd.entryoff;
                 }
                 _ => {}
@@ -493,7 +772,8 @@ mod tests {
 
     #[test]
     fn test_entry_point_resolution() {
-        let header = read_struct::<MachHeader64>(&MINIMAL_MACHO_EXIT[..size_of::<MachHeader64>()]).unwrap();
+        let header =
+            read_struct::<MachHeader64>(&MINIMAL_MACHO_EXIT[..size_of::<MachHeader64>()]).unwrap();
         let cmd_start = size_of::<MachHeader64>();
         let cmd_data = &MINIMAL_MACHO_EXIT[cmd_start..cmd_start + header.sizeofcmds as usize];
 
@@ -502,20 +782,26 @@ mod tests {
 
         let mut offset = 0usize;
         for _ in 0..header.ncmds {
-            let load_cmd = read_struct::<LoadCommand>(&cmd_data[offset..offset + size_of::<LoadCommand>()]).unwrap();
+            let load_cmd =
+                read_struct::<LoadCommand>(&cmd_data[offset..offset + size_of::<LoadCommand>()])
+                    .unwrap();
             let cmdsize = load_cmd.cmdsize as usize;
             let command_bytes = &cmd_data[offset..offset + cmdsize];
 
             match load_cmd.cmd {
                 LC_SEGMENT_64 => {
-                    segments.push(read_struct::<SegmentCommand64>(
-                        &command_bytes[..size_of::<SegmentCommand64>()],
-                    ).unwrap());
+                    segments.push(
+                        read_struct::<SegmentCommand64>(
+                            &command_bytes[..size_of::<SegmentCommand64>()],
+                        )
+                        .unwrap(),
+                    );
                 }
                 LC_MAIN => {
                     let entry_cmd = read_struct::<EntryPointCommand>(
                         &command_bytes[..size_of::<EntryPointCommand>()],
-                    ).unwrap();
+                    )
+                    .unwrap();
                     entryoff = Some(entry_cmd.entryoff);
                 }
                 _ => {}
@@ -524,12 +810,15 @@ mod tests {
         }
 
         let entryoff = entryoff.expect("should have LC_MAIN");
-        let entry_vaddr = file_offset_to_vaddr(&segments, entryoff)
-            .expect("should resolve entry point");
+        let entry_vaddr =
+            file_offset_to_vaddr(&segments, entryoff).expect("should resolve entry point");
 
         // entryoff=208, __TEXT starts at fileoff=0, vmaddr=0x100000000
         // so vaddr = 0x100000000 + 208 = 0x1000000d0
-        assert_eq!(entry_vaddr, 0x1000000d0, "entry point should be 0x1000000d0");
+        assert_eq!(
+            entry_vaddr, 0x1000000d0,
+            "entry point should be 0x1000000d0"
+        );
     }
 
     #[test]
@@ -543,7 +832,10 @@ mod tests {
         ];
 
         let code_in_binary = &MINIMAL_MACHO_EXIT[208..228];
-        assert_eq!(code_in_binary, expected_code, "code should match at offset 208");
+        assert_eq!(
+            code_in_binary, expected_code,
+            "code should match at offset 208"
+        );
     }
 
     #[test]
@@ -552,21 +844,45 @@ mod tests {
 
         // rwx (7) -> Read | Write | Execute | User
         let rwx = macho_prot_to_scarlet(7);
-        assert_eq!(rwx & VirtualMemoryPermission::Read as usize, VirtualMemoryPermission::Read as usize);
-        assert_eq!(rwx & VirtualMemoryPermission::Write as usize, VirtualMemoryPermission::Write as usize);
-        assert_eq!(rwx & VirtualMemoryPermission::Execute as usize, VirtualMemoryPermission::Execute as usize);
-        assert_eq!(rwx & VirtualMemoryPermission::User as usize, VirtualMemoryPermission::User as usize);
+        assert_eq!(
+            rwx & VirtualMemoryPermission::Read as usize,
+            VirtualMemoryPermission::Read as usize
+        );
+        assert_eq!(
+            rwx & VirtualMemoryPermission::Write as usize,
+            VirtualMemoryPermission::Write as usize
+        );
+        assert_eq!(
+            rwx & VirtualMemoryPermission::Execute as usize,
+            VirtualMemoryPermission::Execute as usize
+        );
+        assert_eq!(
+            rwx & VirtualMemoryPermission::User as usize,
+            VirtualMemoryPermission::User as usize
+        );
 
         // r-x (5) -> Read | Execute | User
         let rx = macho_prot_to_scarlet(5);
-        assert_eq!(rx & VirtualMemoryPermission::Read as usize, VirtualMemoryPermission::Read as usize);
+        assert_eq!(
+            rx & VirtualMemoryPermission::Read as usize,
+            VirtualMemoryPermission::Read as usize
+        );
         assert_eq!(rx & VirtualMemoryPermission::Write as usize, 0);
-        assert_eq!(rx & VirtualMemoryPermission::Execute as usize, VirtualMemoryPermission::Execute as usize);
+        assert_eq!(
+            rx & VirtualMemoryPermission::Execute as usize,
+            VirtualMemoryPermission::Execute as usize
+        );
 
         // rw- (3) -> Read | Write | User
         let rw = macho_prot_to_scarlet(3);
-        assert_eq!(rw & VirtualMemoryPermission::Read as usize, VirtualMemoryPermission::Read as usize);
-        assert_eq!(rw & VirtualMemoryPermission::Write as usize, VirtualMemoryPermission::Write as usize);
+        assert_eq!(
+            rw & VirtualMemoryPermission::Read as usize,
+            VirtualMemoryPermission::Read as usize
+        );
+        assert_eq!(
+            rw & VirtualMemoryPermission::Write as usize,
+            VirtualMemoryPermission::Write as usize
+        );
         assert_eq!(rw & VirtualMemoryPermission::Execute as usize, 0);
     }
 
@@ -613,7 +929,9 @@ mod tests {
         let mut offset = 0usize;
         let mut has_dylib = false;
         for _ in 0..header.ncmds {
-            let load_cmd = read_struct::<LoadCommand>(&cmd_data[offset..offset + size_of::<LoadCommand>()]).unwrap();
+            let load_cmd =
+                read_struct::<LoadCommand>(&cmd_data[offset..offset + size_of::<LoadCommand>()])
+                    .unwrap();
             if load_cmd.cmd == LC_LOAD_DYLIB {
                 has_dylib = true;
             }

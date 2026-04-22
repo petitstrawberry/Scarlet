@@ -14,19 +14,17 @@ use alloc::{
 use core::sync::atomic::Ordering;
 use hashbrown::HashMap;
 
+#[allow(unused_imports)]
+use crate::ipc::event::{Event, EventContent, EventPriority, ProcessControlType};
 use crate::{
     abi::AbiModule,
     arch::Trapframe,
     fs::{
-        drivers::overlayfs::OverlayFS, FileSystemError, FileSystemErrorKind, SeekFrom,
-        VfsManager,
+        FileSystemError, FileSystemErrorKind, SeekFrom, VfsManager, drivers::overlayfs::OverlayFS,
     },
-    late_initcall,
-    register_abi,
-    task::{mytask, CloneFlags},
+    late_initcall, register_abi,
+    task::{CloneFlags, mytask},
 };
-#[allow(unused_imports)]
-use crate::ipc::event::{Event, EventContent, EventPriority, ProcessControlType};
 
 const MAX_FDS: usize = 1024;
 const MACH_PORT_NULL: u32 = 0;
@@ -67,6 +65,14 @@ const SIGUSR1: usize = 30;
 #[allow(dead_code)]
 const SIGUSR2: usize = 31;
 
+const SIGNAL_FRAME_SIZE: usize = 4096;
+const SIGNAL_TRAMPOLINE_OFFSET: usize = 0;
+const SIGNAL_SAVED_REGS_OFFSET: usize = 16;
+const SIGNAL_SAVED_SP_OFFSET: usize = SIGNAL_SAVED_REGS_OFFSET + 31 * 8;
+const SIGNAL_SAVED_PC_OFFSET: usize = SIGNAL_SAVED_SP_OFFSET + 8;
+const SIGNAL_SAVED_PSTATE_OFFSET: usize = SIGNAL_SAVED_PC_OFFSET + 8;
+const SIGNAL_FRAME_USED_SIZE: usize = SIGNAL_SAVED_PSTATE_OFFSET + 8;
+
 #[derive(Clone)]
 pub struct DarwinAarch64Abi {
     fd_to_handle: Vec<Option<u32>>,
@@ -74,6 +80,7 @@ pub struct DarwinAarch64Abi {
     mach_task_port: u32,
     next_mach_port: u32,
     mach_ports: HashMap<u32, MachPortInfo>,
+    last_mach_message: Option<MachMessageBuffer>,
     /// Signal handler table: signal number -> handler address (0 = default)
     signal_handlers: [usize; 32],
     /// Signal mask: bit N set = signal N is blocked
@@ -85,6 +92,12 @@ pub struct DarwinAarch64Abi {
 #[derive(Clone, Debug)]
 struct MachPortInfo {
     right: MachPortRight,
+}
+
+#[derive(Clone, Debug)]
+struct MachMessageBuffer {
+    port_name: u32,
+    data: Vec<u8>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -108,6 +121,7 @@ impl Default for DarwinAarch64Abi {
             mach_task_port: 1,
             next_mach_port: 2,
             mach_ports: HashMap::new(),
+            last_mach_message: None,
             signal_handlers: [0; 32],
             signal_mask: 0,
             pending_signals: 0,
@@ -229,6 +243,29 @@ impl DarwinAarch64Abi {
 
     pub fn deallocate_mach_port(&mut self, name: u32) {
         self.mach_ports.remove(&name);
+        if self
+            .last_mach_message
+            .as_ref()
+            .is_some_and(|message| message.port_name == name)
+        {
+            self.last_mach_message = None;
+        }
+    }
+
+    fn store_mach_message(&mut self, port_name: u32, data: Vec<u8>) {
+        self.last_mach_message = Some(MachMessageBuffer { port_name, data });
+    }
+
+    fn take_mach_message(&mut self, port_name: u32) -> Option<MachMessageBuffer> {
+        if self
+            .last_mach_message
+            .as_ref()
+            .is_some_and(|message| message.port_name == port_name)
+        {
+            self.last_mach_message.take()
+        } else {
+            self.last_mach_message.take()
+        }
     }
 
     fn dispatch_bsd_syscall(
@@ -263,9 +300,11 @@ impl DarwinAarch64Abi {
             SYS_dup2 => Ok(bsd_syscalls::sys_dup2(self, trapframe)),
             SYS_wait4 => Ok(bsd_syscalls::sys_wait4(self, trapframe)),
             SYS_sigaction => Ok(bsd_syscalls::sys_sigaction(self, trapframe)),
+            SYS_sigreturn => Ok(bsd_syscalls::sys_sigreturn(self, trapframe)),
             SYS_fcntl => Ok(bsd_syscalls::sys_fcntl(self, trapframe)),
             SYS_ioctl => Ok(bsd_syscalls::sys_ioctl(self, trapframe)),
             SYS_lseek => Ok(bsd_syscalls::sys_lseek(self, trapframe)),
+            SYS_execve => Ok(bsd_syscalls::sys_execve(self, trapframe)),
             _ => {
                 crate::println!("[darwin] Unimplemented BSD syscall: {} (0x{:x})", num, num);
                 let task = mytask().unwrap();
@@ -302,8 +341,12 @@ impl DarwinAarch64Abi {
                 Ok(mach_syscalls::sys_mach_port_deallocate(self, trapframe))
             }
             MACH_mach_msg_trap => Ok(mach_syscalls::sys_mach_msg_trap(self, trapframe)),
-            MACH__kernelrpc_mach_vm_allocate_trap => Ok(mach_syscalls::sys_vm_allocate(self, trapframe)),
-            MACH__kernelrpc_mach_vm_deallocate_trap => Ok(mach_syscalls::sys_vm_deallocate(self, trapframe)),
+            MACH__kernelrpc_mach_vm_allocate_trap => {
+                Ok(mach_syscalls::sys_vm_allocate(self, trapframe))
+            }
+            MACH__kernelrpc_mach_vm_deallocate_trap => {
+                Ok(mach_syscalls::sys_vm_deallocate(self, trapframe))
+            }
             MACH_mach_timebase_info_trap => {
                 Ok(mach_syscalls::sys_mach_timebase_info(self, trapframe))
             }
@@ -473,6 +516,82 @@ impl DarwinAarch64Abi {
     }
 }
 
+/// Set up signal frame on user stack and modify trapframe to call handler.
+/// On Darwin AArch64, the signal handler prototype is:
+///   void handler(int sig, siginfo_t *info, ucontext_t *ctx)
+fn setup_signal_frame(
+    task: &crate::task::Task,
+    trapframe: &mut Trapframe,
+    _abi: &DarwinAarch64Abi,
+    signal: usize,
+    handler: usize,
+) -> Result<(), &'static str> {
+    let sp = (trapframe.sp as usize) & !0xF;
+    let frame_sp = (sp
+        .checked_sub(SIGNAL_FRAME_SIZE)
+        .ok_or("Signal frame stack underflow")?)
+        & !0xF;
+
+    if task.vm_manager.translate_to_kva(frame_sp).is_none()
+        || task
+            .vm_manager
+            .translate_to_kva(frame_sp + SIGNAL_FRAME_USED_SIZE - 1)
+            .is_none()
+    {
+        return Err("Failed to translate signal frame address");
+    }
+
+    unsafe {
+        let trampoline =
+            task.vm_manager
+                .translate_to_kva(frame_sp + SIGNAL_TRAMPOLINE_OFFSET)
+                .ok_or("Failed to translate signal frame address")? as *mut u32;
+        // mov x0, sp
+        *trampoline = 0x910003e0;
+        // mov x16, #184
+        *trampoline.add(1) = 0xd2801710;
+        // movk x16, #0x200, lsl #16
+        *trampoline.add(2) = 0xf2a04010;
+        // svc #0x80
+        *trampoline.add(3) = 0xd4001001;
+
+        for i in 0..31 {
+            let kva = task
+                .vm_manager
+                .translate_to_kva(frame_sp + SIGNAL_SAVED_REGS_OFFSET + i * 8)
+                .ok_or("Failed to translate signal frame address")?;
+            *(kva as *mut u64) = trapframe.regs.reg[i] as u64;
+        }
+
+        let saved_sp = task
+            .vm_manager
+            .translate_to_kva(frame_sp + SIGNAL_SAVED_SP_OFFSET)
+            .ok_or("Failed to translate signal frame address")?;
+        *(saved_sp as *mut u64) = trapframe.sp;
+
+        let saved_pc = task
+            .vm_manager
+            .translate_to_kva(frame_sp + SIGNAL_SAVED_PC_OFFSET)
+            .ok_or("Failed to translate signal frame address")?;
+        *(saved_pc as *mut u64) = trapframe.elr;
+
+        let saved_pstate = task
+            .vm_manager
+            .translate_to_kva(frame_sp + SIGNAL_SAVED_PSTATE_OFFSET)
+            .ok_or("Failed to translate signal frame address")?;
+        *(saved_pstate as *mut u64) = trapframe.spsr;
+    }
+
+    trapframe.regs.reg[0] = signal;
+    trapframe.regs.reg[1] = 0;
+    trapframe.regs.reg[2] = frame_sp;
+    trapframe.regs.reg[30] = frame_sp + SIGNAL_TRAMPOLINE_OFFSET;
+    trapframe.elr = handler as u64;
+    trapframe.sp = frame_sp as u64;
+
+    Ok(())
+}
+
 impl AbiModule for DarwinAarch64Abi {
     fn name() -> &'static str {
         "darwin-aarch64"
@@ -575,11 +694,42 @@ impl AbiModule for DarwinAarch64Abi {
         task.stack_size.store(0, Ordering::SeqCst);
         task.brk.store(usize::MAX, Ordering::SeqCst);
 
-        let (entry_point, dyld_path) = macho_loader::load_macho_binary(file_obj, task)?;
+        let (entry_point, dyld_path, mach_header_addr) =
+            macho_loader::load_macho_binary(file_obj, task)?;
 
         if let Some(dyld) = dyld_path {
-            crate::println!("[darwin] Dynamic binary requires dyld: {}", dyld);
-            return Err("Dynamic Mach-O binaries require dyld (Phase 4)");
+            let (dyld_entry, _base_delta) = macho_loader::load_dyld(&dyld, task)?;
+
+            *task.name.write() = argv
+                .first()
+                .map_or("Unnamed Darwin Task".to_string(), |s| s.to_string());
+
+            let root_page_table =
+                crate::arch::vm::get_root_pagetable(task.vm_manager.get_asid()).unwrap();
+            root_page_table.unmap_all();
+
+            crate::arch::vm::setup_trampoline_for_user(&task.vm_manager);
+            let stack_pointer = crate::vm::setup_user_stack(task).1;
+
+            task.vcpu.lock().reset_iregs();
+            task.vcpu.lock().set_sp(stack_pointer);
+
+            let (adjusted_sp, argv_ptr) =
+                self.setup_arguments_on_stack(task, argv, envp, stack_pointer)?;
+
+            let dyld_sp = (adjusted_sp - core::mem::size_of::<u64>()) & !0xF;
+            self.write_to_stack_memory(task, dyld_sp, &(mach_header_addr as u64).to_le_bytes())?;
+
+            task.set_entry_point(dyld_entry);
+            {
+                let mut vcpu = task.vcpu.lock();
+                vcpu.set_sp(dyld_sp);
+                vcpu.iregs.reg[0] = argv.len();
+                vcpu.iregs.reg[1] = argv_ptr;
+                vcpu.switch(trapframe);
+            }
+
+            return Ok(());
         }
 
         *task.name.write() = argv
@@ -670,25 +820,33 @@ impl AbiModule for DarwinAarch64Abi {
             crate::println!("Failed to create /dev directory for Darwin: {}", e.message);
             "Failed to create /dev directory for Darwin"
         })?;
-        target_vfs.bind_mount_from(base_vfs, "/dev", "/dev").map_err(|e| {
-            crate::println!("Failed to bind mount /dev for Darwin: {}", e.message);
-            "Failed to bind mount /dev for Darwin"
-        })?;
+        target_vfs
+            .bind_mount_from(base_vfs, "/dev", "/dev")
+            .map_err(|e| {
+                crate::println!("Failed to bind mount /dev for Darwin: {}", e.message);
+                "Failed to bind mount /dev for Darwin"
+            })?;
 
         create_dir_if_not_exists(target_vfs, "/tmp").map_err(|e| {
             crate::println!("Failed to create /tmp directory for Darwin: {}", e.message);
             "Failed to create /tmp directory for Darwin"
         })?;
-        target_vfs.bind_mount_from(base_vfs, "/tmp", "/tmp").map_err(|e| {
-            crate::println!("Failed to bind mount /tmp for Darwin: {}", e.message);
-            "Failed to bind mount /tmp for Darwin"
-        })?;
+        target_vfs
+            .bind_mount_from(base_vfs, "/tmp", "/tmp")
+            .map_err(|e| {
+                crate::println!("Failed to bind mount /tmp for Darwin: {}", e.message);
+                "Failed to bind mount /tmp for Darwin"
+            })?;
 
         create_dir_if_not_exists(target_vfs, "/scarlet").map_err(|e| {
-            crate::println!("Failed to create /scarlet directory for Darwin: {}", e.message);
+            crate::println!(
+                "Failed to create /scarlet directory for Darwin: {}",
+                e.message
+            );
             "Failed to create /scarlet directory for Darwin"
         })?;
-        target_vfs.bind_mount_from(base_vfs, "/", "/scarlet")
+        target_vfs
+            .bind_mount_from(base_vfs, "/", "/scarlet")
             .map_err(|e| {
                 crate::println!(
                     "Failed to bind mount Scarlet root to /scarlet for Darwin: {}",
@@ -738,7 +896,9 @@ impl AbiModule for DarwinAarch64Abi {
             EventContent::ProcessControl(ptype) => {
                 let signal = Self::process_control_to_signal(*ptype);
                 match signal {
-                    Some(sig) if self.is_signal_blocked(sig) && sig != SIGKILL && sig != SIGSTOP => {
+                    Some(sig)
+                        if self.is_signal_blocked(sig) && sig != SIGKILL && sig != SIGSTOP =>
+                    {
                         self.mark_signal_pending(sig);
                         Ok(())
                     }
@@ -774,11 +934,8 @@ impl AbiModule for DarwinAarch64Abi {
                         let sig_idx = sig.min(31);
                         if sig_idx > 0 && self.signal_handlers[sig_idx] != 0 {
                             let handler = self.signal_handlers[sig_idx];
-                            crate::println!(
-                                "[darwin] Signal {} has handler at {:#x}, but signal frame not yet implemented",
-                                sig,
-                                handler
-                            );
+                            let trapframe = task.get_trapframe();
+                            setup_signal_frame(task, trapframe, self, sig, handler)?;
                             Ok(())
                         } else {
                             match sig {
@@ -802,6 +959,15 @@ impl AbiModule for DarwinAarch64Abi {
                         }
                     }
                     _ => {}
+                }
+                Ok(())
+            }
+            EventContent::Custom {
+                namespace,
+                event_id,
+            } if namespace == "darwin.mach" => {
+                if let crate::ipc::event::EventPayload::Bytes(bytes) = &event.payload {
+                    self.store_mach_message(*event_id, bytes.clone());
                 }
                 Ok(())
             }

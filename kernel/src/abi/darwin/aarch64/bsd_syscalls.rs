@@ -1,6 +1,10 @@
 use alloc::string::String;
 
 use crate::abi::darwin::aarch64::DarwinAarch64Abi;
+use crate::abi::darwin::aarch64::{
+    SIGNAL_SAVED_PC_OFFSET, SIGNAL_SAVED_PSTATE_OFFSET, SIGNAL_SAVED_REGS_OFFSET,
+    SIGNAL_SAVED_SP_OFFSET,
+};
 use crate::abi::darwin::error::*;
 use crate::abi::darwin::path;
 use crate::arch::Trapframe;
@@ -471,6 +475,8 @@ pub fn sys_dup2(abi: &mut DarwinAarch64Abi, trapframe: &mut Trapframe) -> usize 
 }
 
 pub fn sys_wait4(_abi: &mut DarwinAarch64Abi, trapframe: &mut Trapframe) -> usize {
+    use crate::task::{WaitError, get_parent_waitpid_waker, get_waitpid_waker};
+
     let task = mytask().unwrap();
     trapframe.increment_pc_next(task);
 
@@ -479,10 +485,111 @@ pub fn sys_wait4(_abi: &mut DarwinAarch64Abi, trapframe: &mut Trapframe) -> usiz
     let options = trapframe.get_arg(2) as i32;
     let _rusage_ptr = trapframe.get_arg(3);
 
-    crate::println!("[darwin] wait4 stub: pid={}, options={}", pid, options);
-    trapframe.spsr |= 1 << 29;
-    trapframe.set_return_value(ECHILD);
-    usize::MAX
+    let wnohang = (options & 0x1) != 0;
+
+    let return_error = |trapframe: &mut Trapframe, errno: usize| {
+        trapframe.spsr |= 1 << 29;
+        trapframe.set_return_value(errno);
+        usize::MAX
+    };
+
+    let write_status = |status: i32, trapframe: &mut Trapframe| -> Result<(), usize> {
+        if status_ptr == 0 {
+            return Ok(());
+        }
+
+        let status_bytes = status.to_le_bytes();
+        let mut checked = 0;
+        while checked < status_bytes.len() {
+            let current = status_ptr + checked;
+            let page_off = current & (crate::environment::PAGE_SIZE - 1);
+            let chunk = core::cmp::min(
+                status_bytes.len() - checked,
+                crate::environment::PAGE_SIZE - page_off,
+            );
+
+            if task.vm_manager.translate_to_kva(current).is_none() {
+                return Err(return_error(trapframe, EFAULT));
+            }
+
+            checked += chunk;
+        }
+
+        write_user_bytes(task, status_ptr, &status_bytes);
+        Ok(())
+    };
+
+    if task.get_children().is_empty() {
+        return return_error(trapframe, ECHILD);
+    }
+
+    loop {
+        if pid == -1 {
+            for child_pid in task.get_children() {
+                match task.wait(child_pid) {
+                    Ok(status) => {
+                        if let Err(err) = write_status(status, trapframe) {
+                            return err;
+                        }
+                        trapframe.spsr &= !(1 << 29);
+                        trapframe.set_return_value(child_pid);
+                        return child_pid;
+                    }
+                    Err(WaitError::NoSuchChild(_)) | Err(WaitError::ChildTaskNotFound(_)) => {
+                        continue;
+                    }
+                    Err(WaitError::ChildNotExited(_)) => {
+                        continue;
+                    }
+                }
+            }
+
+            if wnohang {
+                trapframe.spsr &= !(1 << 29);
+                trapframe.set_return_value(0);
+                return 0;
+            }
+
+            let parent_waker = get_parent_waitpid_waker(task.get_id());
+            parent_waker.wait(task.get_id(), task.get_trapframe());
+            continue;
+        }
+
+        if pid > 0 {
+            let child_pid = pid as usize;
+
+            if !task.get_children().contains(&child_pid) {
+                return return_error(trapframe, ECHILD);
+            }
+
+            match task.wait(child_pid) {
+                Ok(status) => {
+                    if let Err(err) = write_status(status, trapframe) {
+                        return err;
+                    }
+                    trapframe.spsr &= !(1 << 29);
+                    trapframe.set_return_value(child_pid);
+                    return child_pid;
+                }
+                Err(WaitError::NoSuchChild(_)) | Err(WaitError::ChildTaskNotFound(_)) => {
+                    return return_error(trapframe, ECHILD);
+                }
+                Err(WaitError::ChildNotExited(_)) => {
+                    if wnohang {
+                        trapframe.spsr &= !(1 << 29);
+                        trapframe.set_return_value(0);
+                        return 0;
+                    }
+
+                    let child_waker = get_waitpid_waker(child_pid);
+                    child_waker.wait(task.get_id(), task.get_trapframe());
+                    continue;
+                }
+            }
+        }
+
+        return return_error(trapframe, EINVAL);
+    }
 }
 
 pub fn sys_sigaction(abi: &mut DarwinAarch64Abi, trapframe: &mut Trapframe) -> usize {
@@ -509,8 +616,14 @@ pub fn sys_sigaction(abi: &mut DarwinAarch64Abi, trapframe: &mut Trapframe) -> u
         let handler_bytes = read_user_bytes(task, act_ptr, core::mem::size_of::<usize>());
         if handler_bytes.len() >= core::mem::size_of::<usize>() {
             let handler = usize::from_le_bytes([
-                handler_bytes[0], handler_bytes[1], handler_bytes[2], handler_bytes[3],
-                handler_bytes[4], handler_bytes[5], handler_bytes[6], handler_bytes[7],
+                handler_bytes[0],
+                handler_bytes[1],
+                handler_bytes[2],
+                handler_bytes[3],
+                handler_bytes[4],
+                handler_bytes[5],
+                handler_bytes[6],
+                handler_bytes[7],
             ]);
             abi.signal_handlers[sig] = handler;
         }
@@ -522,9 +635,71 @@ pub fn sys_sigaction(abi: &mut DarwinAarch64Abi, trapframe: &mut Trapframe) -> u
 
 pub fn sys_sigreturn(_abi: &mut DarwinAarch64Abi, trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
-    trapframe.increment_pc_next(task);
 
-    crate::println!("[darwin] sigreturn stub");
+    let frame_base = trapframe.get_arg(0);
+    if frame_base == 0 {
+        trapframe.spsr |= 1 << 29;
+        trapframe.set_return_value(EINVAL);
+        return usize::MAX;
+    }
+
+    unsafe {
+        for i in 0..31 {
+            let kva = match task
+                .vm_manager
+                .translate_to_kva(frame_base + SIGNAL_SAVED_REGS_OFFSET + i * 8)
+            {
+                Some(kva) => kva,
+                None => {
+                    trapframe.spsr |= 1 << 29;
+                    trapframe.set_return_value(EFAULT);
+                    return usize::MAX;
+                }
+            };
+            trapframe.regs.reg[i] = *(kva as *const usize);
+        }
+
+        let saved_sp = match task
+            .vm_manager
+            .translate_to_kva(frame_base + SIGNAL_SAVED_SP_OFFSET)
+        {
+            Some(kva) => kva,
+            None => {
+                trapframe.spsr |= 1 << 29;
+                trapframe.set_return_value(EFAULT);
+                return usize::MAX;
+            }
+        };
+        trapframe.sp = *(saved_sp as *const u64);
+
+        let saved_pc = match task
+            .vm_manager
+            .translate_to_kva(frame_base + SIGNAL_SAVED_PC_OFFSET)
+        {
+            Some(kva) => kva,
+            None => {
+                trapframe.spsr |= 1 << 29;
+                trapframe.set_return_value(EFAULT);
+                return usize::MAX;
+            }
+        };
+        trapframe.elr = *(saved_pc as *const u64);
+
+        let saved_pstate = match task
+            .vm_manager
+            .translate_to_kva(frame_base + SIGNAL_SAVED_PSTATE_OFFSET)
+        {
+            Some(kva) => kva,
+            None => {
+                trapframe.spsr |= 1 << 29;
+                trapframe.set_return_value(EFAULT);
+                return usize::MAX;
+            }
+        };
+        trapframe.spsr = *(saved_pstate as *const u64);
+    }
+
+    trapframe.spsr &= !(1 << 29);
     trapframe.set_return_value(0);
     0
 }
@@ -993,9 +1168,7 @@ pub fn sys_shutdown(abi: &mut DarwinAarch64Abi, trapframe: &mut Trapframe) -> us
 
 fn write_user_struct<T: Copy>(task: &crate::task::Task, vaddr: usize, data: &T) {
     let size = core::mem::size_of::<T>();
-    let bytes = unsafe {
-        core::slice::from_raw_parts(data as *const T as *const u8, size)
-    };
+    let bytes = unsafe { core::slice::from_raw_parts(data as *const T as *const u8, size) };
     write_user_bytes(task, vaddr, bytes);
 }
 
@@ -1017,17 +1190,27 @@ pub fn sys_mmap(abi: &mut DarwinAarch64Abi, trapframe: &mut Trapframe) -> usize 
     }
 
     let mut scarlet_prot = 0usize;
-    if prot & DARWIN_PROT_READ != 0 { scarlet_prot |= 0x01; }
-    if prot & DARWIN_PROT_WRITE != 0 { scarlet_prot |= 0x02; }
-    if prot & DARWIN_PROT_EXEC != 0 { scarlet_prot |= 0x04; }
+    if prot & DARWIN_PROT_READ != 0 {
+        scarlet_prot |= 0x01;
+    }
+    if prot & DARWIN_PROT_WRITE != 0 {
+        scarlet_prot |= 0x02;
+    }
+    if prot & DARWIN_PROT_EXEC != 0 {
+        scarlet_prot |= 0x04;
+    }
     scarlet_prot |= 0x08;
 
-    let aligned_len = (len + crate::environment::PAGE_SIZE - 1) & !(crate::environment::PAGE_SIZE - 1);
+    let aligned_len =
+        (len + crate::environment::PAGE_SIZE - 1) & !(crate::environment::PAGE_SIZE - 1);
 
     let vaddr = if flags & DARWIN_MAP_FIXED != 0 {
         addr
     } else {
-        match task.vm_manager.find_unmapped_area(aligned_len, crate::environment::PAGE_SIZE) {
+        match task
+            .vm_manager
+            .find_unmapped_area(aligned_len, crate::environment::PAGE_SIZE)
+        {
             Some(a) => a,
             None => {
                 trapframe.spsr |= 1 << 29;
@@ -1059,7 +1242,9 @@ pub fn sys_mmap(abi: &mut DarwinAarch64Abi, trapframe: &mut Trapframe) -> usize 
             Ok(()) => {
                 task.page_allocations.write().push(pages);
                 if let Some(kva) = task.vm_manager.translate_to_kva(vaddr) {
-                    unsafe { core::ptr::write_bytes(kva as *mut u8, 0, aligned_len); }
+                    unsafe {
+                        core::ptr::write_bytes(kva as *mut u8, 0, aligned_len);
+                    }
                 }
                 trapframe.set_return_value(vaddr);
                 vaddr
@@ -1071,34 +1256,351 @@ pub fn sys_mmap(abi: &mut DarwinAarch64Abi, trapframe: &mut Trapframe) -> usize 
             }
         }
     } else {
-        crate::println!("[darwin] File-backed mmap not yet implemented, treating as anonymous");
-        let num_pages = aligned_len / crate::environment::PAGE_SIZE;
-        let pages = match crate::mem::page::ContiguousPages::new(num_pages) {
-            Some(p) => p,
-            None => {
+        if fd == -1 {
+            let num_pages = aligned_len / crate::environment::PAGE_SIZE;
+            let pages = match crate::mem::page::ContiguousPages::new(num_pages) {
+                Some(p) => p,
+                None => {
+                    trapframe.spsr |= 1 << 29;
+                    trapframe.set_return_value(ENOMEM);
+                    return usize::MAX;
+                }
+            };
+            let paddr = pages.as_paddr();
+            let mmap = crate::vm::vmem::VirtualMemoryMap::new(
+                crate::vm::vmem::MemoryArea::new(paddr, paddr + aligned_len - 1),
+                crate::vm::vmem::MemoryArea::new(vaddr, vaddr + aligned_len - 1),
+                scarlet_prot,
+                flags & DARWIN_MAP_SHARED != 0,
+                None,
+            );
+            match task.vm_manager.add_memory_map(mmap) {
+                Ok(()) => {
+                    task.page_allocations.write().push(pages);
+                    trapframe.set_return_value(vaddr);
+                    vaddr
+                }
+                Err(_) => {
+                    trapframe.spsr |= 1 << 29;
+                    trapframe.set_return_value(ENOMEM);
+                    usize::MAX
+                }
+            }
+        } else {
+            use crate::object::capability::memory_mapping::MemoryMappingOps;
+            use crate::vm::addr::{is_direct_mapped, virt_to_phys};
+
+            let handle = match abi.get_handle(fd as usize) {
+                Some(h) => h,
+                None => {
+                    trapframe.spsr |= 1 << 29;
+                    trapframe.set_return_value(EBADF);
+                    return usize::MAX;
+                }
+            };
+
+            let kernel_obj = match task.handle_table.get(handle) {
+                Some(obj) => obj,
+                None => {
+                    trapframe.spsr |= 1 << 29;
+                    trapframe.set_return_value(EBADF);
+                    return usize::MAX;
+                }
+            };
+            let file_obj = kernel_obj.as_file();
+
+            let memory_mappable: &dyn MemoryMappingOps = match kernel_obj.as_memory_mappable() {
+                Some(mappable) => mappable,
+                None => {
+                    trapframe.spsr |= 1 << 29;
+                    trapframe.set_return_value(ENODEV);
+                    return usize::MAX;
+                }
+            };
+
+            if !memory_mappable.supports_mmap() {
                 trapframe.spsr |= 1 << 29;
-                trapframe.set_return_value(ENOMEM);
+                trapframe.set_return_value(ENODEV);
                 return usize::MAX;
             }
-        };
-        let paddr = pages.as_paddr();
-        let mmap = crate::vm::vmem::VirtualMemoryMap::new(
-            crate::vm::vmem::MemoryArea::new(paddr, paddr + aligned_len - 1),
-            crate::vm::vmem::MemoryArea::new(vaddr, vaddr + aligned_len - 1),
-            scarlet_prot,
-            flags & DARWIN_MAP_SHARED != 0,
-            None,
-        );
-        match task.vm_manager.add_memory_map(mmap) {
-            Ok(()) => {
-                task.page_allocations.write().push(pages);
+
+            let is_shared = flags & DARWIN_MAP_SHARED != 0;
+            let mut ok_len = aligned_len;
+            let (mapping_base, obj_permissions, _obj_is_shared) = loop {
+                match memory_mappable.get_mapping_info_with(offset, ok_len, is_shared) {
+                    Ok(info) => break info,
+                    Err(_) => {
+                        if ok_len >= crate::environment::PAGE_SIZE {
+                            ok_len -= crate::environment::PAGE_SIZE;
+                        } else {
+                            ok_len = 0;
+                        }
+                        if ok_len == 0 {
+                            break (0, 0, false);
+                        }
+                    }
+                }
+            };
+
+            let paddr = if mapping_base != 0 && is_direct_mapped(mapping_base) {
+                virt_to_phys(mapping_base)
+            } else {
+                mapping_base
+            };
+
+            let mut prot_mask = 0usize;
+            if prot & DARWIN_PROT_READ != 0 {
+                prot_mask |= 0x01;
+            }
+            if prot & DARWIN_PROT_WRITE != 0 {
+                prot_mask |= 0x02;
+            }
+            if prot & DARWIN_PROT_EXEC != 0 {
+                prot_mask |= 0x04;
+            }
+
+            let is_private = flags & DARWIN_MAP_PRIVATE != 0;
+            let mut final_permissions = if is_private {
+                prot_mask
+            } else {
+                obj_permissions & prot_mask
+            };
+            if prot != DARWIN_PROT_NONE {
+                final_permissions |= 0x08;
+            }
+
+            if is_private && !is_shared {
+                const PAGES_PER_ALLOC: usize = 16;
+
+                let num_pages = aligned_len / crate::environment::PAGE_SIZE;
+                let num_allocs = num_pages.div_ceil(PAGES_PER_ALLOC);
+                let mut page_allocs: alloc::vec::Vec<crate::mem::page::TaskPages> =
+                    alloc::vec::Vec::with_capacity(num_allocs);
+                let mut vm_maps: alloc::vec::Vec<crate::vm::vmem::VirtualMemoryMap> =
+                    alloc::vec::Vec::with_capacity(num_pages);
+
+                for alloc_idx in 0..num_allocs {
+                    let pages_in_this_alloc = if alloc_idx == num_allocs - 1 {
+                        num_pages - alloc_idx * PAGES_PER_ALLOC
+                    } else {
+                        PAGES_PER_ALLOC
+                    };
+
+                    let alloc = match crate::mem::page::TaskPages::new(pages_in_this_alloc) {
+                        Some(a) => a,
+                        None => {
+                            trapframe.spsr |= 1 << 29;
+                            trapframe.set_return_value(ENOMEM);
+                            return usize::MAX;
+                        }
+                    };
+
+                    let chunk_vaddr =
+                        vaddr + alloc_idx * PAGES_PER_ALLOC * crate::environment::PAGE_SIZE;
+                    page_allocs.push(alloc);
+
+                    for page_idx_in_alloc in 0..pages_in_this_alloc {
+                        let page_vaddr =
+                            chunk_vaddr + page_idx_in_alloc * crate::environment::PAGE_SIZE;
+                        let page_vmarea = crate::vm::vmem::MemoryArea::new(
+                            page_vaddr,
+                            page_vaddr + crate::environment::PAGE_SIZE - 1,
+                        );
+                        let page_paddr = page_allocs[alloc_idx]
+                            .page_paddr(page_idx_in_alloc)
+                            .unwrap();
+                        let page_pmarea = crate::vm::vmem::MemoryArea::new(
+                            page_paddr,
+                            page_paddr + crate::environment::PAGE_SIZE - 1,
+                        );
+                        vm_maps.push(crate::vm::vmem::VirtualMemoryMap::new(
+                            page_pmarea,
+                            page_vmarea,
+                            final_permissions,
+                            false,
+                            None,
+                        ));
+                    }
+                }
+
+                let mut removed_mappings_opt: Option<
+                    alloc::vec::Vec<crate::vm::vmem::VirtualMemoryMap>,
+                > = None;
+
+                for vm_map in &vm_maps {
+                    let result = if flags & DARWIN_MAP_FIXED != 0 {
+                        task.vm_manager
+                            .add_memory_map_fixed(vm_map.clone())
+                            .map(Some)
+                    } else {
+                        task.vm_manager.add_memory_map(vm_map.clone()).map(|_| None)
+                    };
+
+                    match result {
+                        Ok(removed) => {
+                            if let Some(rm) = removed {
+                                if removed_mappings_opt.is_none() {
+                                    removed_mappings_opt = Some(alloc::vec::Vec::new());
+                                }
+                                removed_mappings_opt.as_mut().unwrap().extend(rm);
+                            }
+                        }
+                        Err(_) => {
+                            trapframe.spsr |= 1 << 29;
+                            trapframe.set_return_value(ENOMEM);
+                            return usize::MAX;
+                        }
+                    }
+                }
+
+                if let Some(ref removed_mappings) = removed_mappings_opt {
+                    for removed_map in removed_mappings {
+                        if removed_map.is_shared {
+                            if let Some(owner_weak) = &removed_map.owner {
+                                if let Some(owner) = owner_weak.upgrade() {
+                                    owner.on_unmapped(
+                                        removed_map.vmarea.start,
+                                        removed_map.vmarea.size(),
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if let Some(removed_mappings) = removed_mappings_opt {
+                    for removed_map in removed_mappings {
+                        crate::object::capability::memory_mapping::syscall::reclaim_private_removed_mapping(task, &removed_map);
+                    }
+                }
+
+                let mut page_idx = 0;
+                for alloc in &page_allocs {
+                    for local_idx in 0..alloc.len() {
+                        let dst_paddr = alloc.page_paddr(local_idx).unwrap();
+                        let dst_vaddr = crate::vm::addr::phys_to_virt(dst_paddr);
+                        unsafe {
+                            core::ptr::write_bytes(
+                                dst_vaddr as *mut u8,
+                                0,
+                                crate::environment::PAGE_SIZE,
+                            );
+                        }
+
+                        if ok_len > 0 {
+                            let copy_start = page_idx * crate::environment::PAGE_SIZE;
+                            if copy_start < ok_len {
+                                let to_copy = core::cmp::min(
+                                    ok_len - copy_start,
+                                    crate::environment::PAGE_SIZE,
+                                );
+                                if let Some(file_obj) = file_obj {
+                                    let read_offset = match offset.checked_add(copy_start) {
+                                        Some(read_offset) => read_offset as u64,
+                                        None => {
+                                            trapframe.spsr |= 1 << 29;
+                                            trapframe.set_return_value(EINVAL);
+                                            return usize::MAX;
+                                        }
+                                    };
+                                    let dst_slice = unsafe {
+                                        core::slice::from_raw_parts_mut(
+                                            dst_vaddr as *mut u8,
+                                            to_copy,
+                                        )
+                                    };
+                                    if file_obj.read_at(read_offset, dst_slice).is_err() {
+                                        trapframe.spsr |= 1 << 29;
+                                        trapframe.set_return_value(EIO);
+                                        return usize::MAX;
+                                    }
+                                } else if paddr != 0 {
+                                    unsafe {
+                                        core::ptr::copy_nonoverlapping(
+                                            crate::vm::addr::phys_to_virt(paddr + copy_start)
+                                                as *const u8,
+                                            dst_vaddr as *mut u8,
+                                            to_copy,
+                                        );
+                                    }
+                                } else {
+                                    trapframe.spsr |= 1 << 29;
+                                    trapframe.set_return_value(EINVAL);
+                                    return usize::MAX;
+                                }
+                            }
+                        }
+
+                        page_idx += 1;
+                    }
+                }
+
+                task.task_pages.write().extend(page_allocs);
                 trapframe.set_return_value(vaddr);
                 vaddr
-            }
-            Err(_) => {
-                trapframe.spsr |= 1 << 29;
-                trapframe.set_return_value(ENOMEM);
-                usize::MAX
+            } else {
+                if paddr == 0 && ok_len == 0 {
+                    trapframe.spsr |= 1 << 29;
+                    trapframe.set_return_value(EINVAL);
+                    return usize::MAX;
+                }
+
+                let ok_len_aligned =
+                    (ok_len / crate::environment::PAGE_SIZE) * crate::environment::PAGE_SIZE;
+                if ok_len_aligned == 0 {
+                    trapframe.spsr |= 1 << 29;
+                    trapframe.set_return_value(EINVAL);
+                    return usize::MAX;
+                }
+
+                let vm_map = crate::vm::vmem::VirtualMemoryMap::new(
+                    crate::vm::vmem::MemoryArea::new(paddr, paddr + ok_len_aligned - 1),
+                    crate::vm::vmem::MemoryArea::new(vaddr, vaddr + ok_len_aligned - 1),
+                    final_permissions,
+                    is_shared,
+                    kernel_obj.as_memory_mappable_weak(),
+                );
+
+                let map_result = if flags & DARWIN_MAP_FIXED != 0 {
+                    task.vm_manager.add_memory_map_fixed(vm_map).map(Some)
+                } else {
+                    task.vm_manager.add_memory_map(vm_map).map(|_| None)
+                };
+
+                match map_result {
+                    Ok(removed_mappings_opt) => {
+                        memory_mappable.on_mapped(vaddr, paddr, ok_len_aligned, offset);
+
+                        if let Some(removed_mappings) = &removed_mappings_opt {
+                            for removed_map in removed_mappings {
+                                if removed_map.is_shared {
+                                    if let Some(owner_weak) = &removed_map.owner {
+                                        if let Some(owner) = owner_weak.upgrade() {
+                                            owner.on_unmapped(
+                                                removed_map.vmarea.start,
+                                                removed_map.vmarea.size(),
+                                            );
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        if let Some(removed_mappings) = removed_mappings_opt {
+                            for removed_map in removed_mappings {
+                                crate::object::capability::memory_mapping::syscall::reclaim_private_removed_mapping(task, &removed_map);
+                            }
+                        }
+
+                        trapframe.set_return_value(vaddr);
+                        vaddr
+                    }
+                    Err(_) => {
+                        trapframe.spsr |= 1 << 29;
+                        trapframe.set_return_value(ENOMEM);
+                        usize::MAX
+                    }
+                }
             }
         }
     }
@@ -1212,10 +1714,22 @@ pub fn sys_fstat(abi: &mut DarwinAarch64Abi, trapframe: &mut Trapframe) -> usize
                 st_uid: 0,
                 st_gid: 0,
                 st_rdev: 0,
-                st_atimespec: DarwinTimespec { tv_sec: 0, tv_nsec: 0 },
-                st_mtimespec: DarwinTimespec { tv_sec: 0, tv_nsec: 0 },
-                st_ctimespec: DarwinTimespec { tv_sec: 0, tv_nsec: 0 },
-                st_birthtimespec: DarwinTimespec { tv_sec: 0, tv_nsec: 0 },
+                st_atimespec: DarwinTimespec {
+                    tv_sec: 0,
+                    tv_nsec: 0,
+                },
+                st_mtimespec: DarwinTimespec {
+                    tv_sec: 0,
+                    tv_nsec: 0,
+                },
+                st_ctimespec: DarwinTimespec {
+                    tv_sec: 0,
+                    tv_nsec: 0,
+                },
+                st_birthtimespec: DarwinTimespec {
+                    tv_sec: 0,
+                    tv_nsec: 0,
+                },
                 st_size: meta.size as i64,
                 st_blocks: ((meta.size + 511) / 512) as i64,
                 st_blksize: 4096,
@@ -1281,10 +1795,22 @@ fn do_stat(
                 st_uid: 0,
                 st_gid: 0,
                 st_rdev: 0,
-                st_atimespec: DarwinTimespec { tv_sec: 0, tv_nsec: 0 },
-                st_mtimespec: DarwinTimespec { tv_sec: 0, tv_nsec: 0 },
-                st_ctimespec: DarwinTimespec { tv_sec: 0, tv_nsec: 0 },
-                st_birthtimespec: DarwinTimespec { tv_sec: 0, tv_nsec: 0 },
+                st_atimespec: DarwinTimespec {
+                    tv_sec: 0,
+                    tv_nsec: 0,
+                },
+                st_mtimespec: DarwinTimespec {
+                    tv_sec: 0,
+                    tv_nsec: 0,
+                },
+                st_ctimespec: DarwinTimespec {
+                    tv_sec: 0,
+                    tv_nsec: 0,
+                },
+                st_birthtimespec: DarwinTimespec {
+                    tv_sec: 0,
+                    tv_nsec: 0,
+                },
                 st_size: meta.size as i64,
                 st_blocks: ((meta.size + 511) / 512) as i64,
                 st_blksize: 4096,
@@ -1305,14 +1831,72 @@ fn do_stat(
     }
 }
 
+/// Darwin dirent structure for getdirentries
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct DarwinDirent {
+    d_ino: u64,
+    d_seekoff: u64,
+    d_reclen: u16,
+    d_namlen: u16,
+    d_type: u8,
+    d_name: [u8; 0],
+}
+
+impl DarwinDirent {
+    fn file_type(file_type: u8) -> u8 {
+        match file_type {
+            0 => 8,
+            1 => 4,
+            2 => 10,
+            3 => 2,
+            4 => 6,
+            5 => 1,
+            6 => 12,
+            _ => 0,
+        }
+    }
+
+    fn new(entry: &crate::fs::DirectoryEntry, d_seekoff: u64) -> Self {
+        let name_len = entry.name_len as usize;
+        let reclen = (core::mem::size_of::<Self>() + name_len + 1 + 7) & !7;
+        Self {
+            d_ino: entry.file_id,
+            d_seekoff,
+            d_reclen: reclen as u16,
+            d_namlen: name_len as u16,
+            d_type: Self::file_type(entry.file_type),
+            d_name: [],
+        }
+    }
+
+    fn to_bytes(entry: &crate::fs::DirectoryEntry, d_seekoff: u64) -> alloc::vec::Vec<u8> {
+        let dirent = Self::new(entry, d_seekoff);
+        let header_len = core::mem::size_of::<Self>();
+        let name_len = entry.name_len as usize;
+        let mut bytes = alloc::vec![0u8; dirent.d_reclen as usize];
+
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                &dirent as *const Self as *const u8,
+                bytes.as_mut_ptr(),
+                header_len,
+            );
+        }
+        bytes[header_len..header_len + name_len].copy_from_slice(&entry.name[..name_len]);
+        bytes[header_len + name_len] = 0;
+        bytes
+    }
+}
+
 pub fn sys_getdirentries(abi: &mut DarwinAarch64Abi, trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
     trapframe.increment_pc_next(task);
 
     let fd = trapframe.get_arg(0) as usize;
-    let _buf_ptr = trapframe.get_arg(1);
-    let _count = trapframe.get_arg(2);
-    let _basep_ptr = trapframe.get_arg(3);
+    let buf_ptr = trapframe.get_arg(1);
+    let bufsize = trapframe.get_arg(2) as usize;
+    let basep_ptr = trapframe.get_arg(3);
 
     let handle = match abi.get_handle(fd) {
         Some(h) => h,
@@ -1332,8 +1916,8 @@ pub fn sys_getdirentries(abi: &mut DarwinAarch64Abi, trapframe: &mut Trapframe) 
         }
     };
 
-    let _file = match ko.as_file() {
-        Some(f) => f,
+    let stream = match ko.as_stream() {
+        Some(s) => s,
         None => {
             trapframe.spsr |= 1 << 29;
             trapframe.set_return_value(ENOTDIR);
@@ -1341,7 +1925,206 @@ pub fn sys_getdirentries(abi: &mut DarwinAarch64Abi, trapframe: &mut Trapframe) 
         }
     };
 
-    crate::println!("[darwin] getdirentries stub: fd={}", fd);
-    trapframe.set_return_value(0);
-    0
+    let mut dir_buffer = alloc::vec![0u8; core::mem::size_of::<crate::fs::DirectoryEntry>()];
+    let mut written = 0usize;
+    let mut cookie = 0u64;
+
+    loop {
+        match stream.read(&mut dir_buffer) {
+            Ok(n) if n == dir_buffer.len() => {
+                let entry = match crate::fs::DirectoryEntry::parse(&dir_buffer) {
+                    Some(entry) => entry,
+                    None => {
+                        if written == 0 {
+                            trapframe.spsr |= 1 << 29;
+                            trapframe.set_return_value(EIO);
+                            return usize::MAX;
+                        }
+                        break;
+                    }
+                };
+
+                let next_cookie = cookie + 1;
+                let dirent_bytes = DarwinDirent::to_bytes(&entry, next_cookie);
+                if written + dirent_bytes.len() > bufsize {
+                    break;
+                }
+
+                if !dirent_bytes.is_empty() && buf_ptr != 0 {
+                    write_user_bytes(task, buf_ptr + written, &dirent_bytes);
+                }
+                written += dirent_bytes.len();
+                cookie = next_cookie;
+            }
+            Ok(0) => break,
+            Ok(_) => {
+                if written == 0 {
+                    trapframe.spsr |= 1 << 29;
+                    trapframe.set_return_value(EIO);
+                    return usize::MAX;
+                }
+                break;
+            }
+            Err(crate::object::capability::StreamError::EndOfStream) => break,
+            Err(crate::object::capability::StreamError::WouldBlock) => {
+                crate::sched::scheduler::get_scheduler().schedule(trapframe);
+                return usize::MAX;
+            }
+            Err(_) => {
+                if written == 0 {
+                    trapframe.spsr |= 1 << 29;
+                    trapframe.set_return_value(EIO);
+                    return usize::MAX;
+                }
+                break;
+            }
+        }
+    }
+
+    if basep_ptr != 0 {
+        let basep = (cookie as i64).to_ne_bytes();
+        write_user_bytes(task, basep_ptr, &basep);
+    }
+
+    trapframe.set_return_value(written);
+    written
+}
+
+fn resolve_path(task: &crate::task::Task, path: &str) -> Option<String> {
+    let raw_path = if path.starts_with('/') {
+        String::from(path)
+    } else {
+        let cwd = task
+            .get_vfs()
+            .map(|vfs| vfs.get_cwd_path())
+            .unwrap_or_else(|| String::from("/"));
+        if cwd == "/" {
+            let mut full_path = String::from("/");
+            full_path.push_str(path);
+            full_path
+        } else {
+            let mut full_path = String::from(cwd.trim_end_matches('/'));
+            full_path.push('/');
+            full_path.push_str(path);
+            full_path
+        }
+    };
+
+    let mut components = alloc::vec::Vec::new();
+    for component in raw_path.split('/') {
+        match component {
+            "" | "." => {}
+            ".." => {
+                components.pop();
+            }
+            _ => components.push(component),
+        }
+    }
+
+    let mut resolved = String::from("/");
+    if !components.is_empty() {
+        resolved.push_str(&components.join("/"));
+    }
+
+    Some(resolved)
+}
+
+fn parse_string_array(task: &crate::task::Task, ptr: usize) -> Result<alloc::vec::Vec<String>, ()> {
+    if ptr == 0 {
+        return Ok(alloc::vec::Vec::new());
+    }
+
+    let mut strings = alloc::vec::Vec::new();
+    let word_size = core::mem::size_of::<usize>();
+
+    for index in 0..256usize {
+        let entry_addr = ptr + index * word_size;
+        let entry_bytes = read_user_bytes(task, entry_addr, word_size);
+        if entry_bytes.len() != word_size {
+            return Err(());
+        }
+
+        let entry_ptr = usize::from_ne_bytes(entry_bytes.try_into().map_err(|_| ())?);
+        if entry_ptr == 0 {
+            return Ok(strings);
+        }
+
+        strings.push(read_user_cstring(task, entry_ptr)?);
+    }
+
+    Err(())
+}
+
+fn open_executable(task: &crate::task::Task, path: &str) -> Option<KernelObject> {
+    let vfs = task.get_vfs()?;
+    vfs.open(path, 0).ok()
+}
+
+pub fn sys_execve(abi: &mut DarwinAarch64Abi, trapframe: &mut Trapframe) -> usize {
+    let task = mytask().unwrap();
+    trapframe.increment_pc_next(task);
+
+    let path_ptr = trapframe.get_arg(0);
+    let argv_ptr = trapframe.get_arg(1);
+    let envp_ptr = trapframe.get_arg(2);
+
+    let path_str = match read_user_cstring(task, path_ptr) {
+        Ok(s) => s,
+        Err(_) => {
+            trapframe.spsr |= 1 << 29;
+            trapframe.set_return_value(EFAULT);
+            return usize::MAX;
+        }
+    };
+
+    let abs_path = match resolve_path(task, &path_str) {
+        Some(p) => p,
+        None => {
+            trapframe.spsr |= 1 << 29;
+            trapframe.set_return_value(ENOENT);
+            return usize::MAX;
+        }
+    };
+
+    let argv_strings = match parse_string_array(task, argv_ptr) {
+        Ok(v) => v,
+        Err(_) => {
+            trapframe.spsr |= 1 << 29;
+            trapframe.set_return_value(EFAULT);
+            return usize::MAX;
+        }
+    };
+
+    let envp_strings = match parse_string_array(task, envp_ptr) {
+        Ok(v) => v,
+        Err(_) => alloc::vec::Vec::new(),
+    };
+
+    let file_object = match open_executable(task, &abs_path) {
+        Some(obj) => obj,
+        None => {
+            trapframe.spsr |= 1 << 29;
+            trapframe.set_return_value(ENOENT);
+            return usize::MAX;
+        }
+    };
+
+    let argv_refs: alloc::vec::Vec<&str> = argv_strings.iter().map(|s| s.as_str()).collect();
+    let envp_refs: alloc::vec::Vec<&str> = envp_strings.iter().map(|s| s.as_str()).collect();
+
+    match crate::abi::AbiModule::execute_binary(
+        abi,
+        &file_object,
+        &argv_refs,
+        &envp_refs,
+        task,
+        trapframe,
+    ) {
+        Ok(()) => trapframe.get_return_value(),
+        Err(_) => {
+            trapframe.spsr |= 1 << 29;
+            trapframe.set_return_value(ENOEXEC);
+            usize::MAX
+        }
+    }
 }
