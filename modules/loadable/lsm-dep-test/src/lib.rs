@@ -1,6 +1,6 @@
 #![no_std]
 
-use scarlet::early_println;
+use scarlet::println;
 
 #[unsafe(no_mangle)]
 pub static SCARLET_LSM_NAME: [u8; 13] = *b"lsm-dep-test\0";
@@ -33,6 +33,6 @@ pub static SCARLET_LSM_DEPENDS: [u8; 256] = {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn scarlet_lsm_init() -> Result<(), &'static str> {
-    early_println!("[lsm-dep-test] Loadable Scarlet Module with dependency loaded successfully!");
+    println!("[lsm-dep-test] Loadable Scarlet Module with dependency loaded successfully!");
     Ok(())
 }

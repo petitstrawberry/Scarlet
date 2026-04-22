@@ -33,6 +33,9 @@ for binary_path in "$USER_DIST_DIR"/*; do
 done
 
 # --- Kernel modules (.lsm files) ---
+mkdir -p initramfs/system/scarlet/modules
+rm -f initramfs/system/scarlet/modules/*.lsm
+
 case "$ARCH" in
     riscv64) MODULE_TARGET="riscv64gc-unknown-none-elf" ;;
     aarch64) MODULE_TARGET="aarch64-unknown-none-elf" ;;
@@ -40,8 +43,6 @@ case "$ARCH" in
 esac
 MODULES_DIST_DIR="dist/modules/${MODULE_TARGET}"
 if [ -n "$MODULE_TARGET" ] && [ -d "$MODULES_DIST_DIR" ]; then
-    mkdir -p initramfs/system/scarlet/modules
-    rm -f initramfs/system/scarlet/modules/*.lsm
     for lsm_path in "$MODULES_DIST_DIR"/*.lsm; do
         if [ -f "$lsm_path" ]; then
             cp "$lsm_path" "initramfs/system/scarlet/modules/"

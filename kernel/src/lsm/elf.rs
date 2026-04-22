@@ -9,6 +9,9 @@ pub const ELFDATA2MSB: u8 = 2;
 
 pub const ET_REL: u16 = 1;
 
+pub const EM_AARCH64: u16 = 183;
+pub const EM_RISCV: u16 = 243;
+
 pub const SHT_NULL: u32 = 0;
 pub const SHT_PROGBITS: u32 = 1;
 pub const SHT_SYMTAB: u32 = 2;
@@ -125,6 +128,7 @@ pub struct SectionInfo {
 #[derive(Debug, Clone)]
 pub struct RelocObject {
     pub is_little_endian: bool,
+    pub e_machine: u16,
     pub sections: Vec<SectionInfo>,
     pub section_data: Vec<Vec<u8>>,
     pub symbols: Vec<ParsedSymbol>,
@@ -149,6 +153,7 @@ const ELF64_RELA_SIZE: usize = 24;
 #[allow(non_camel_case_types)]
 struct Elf64_Ehdr {
     e_type: u16,
+    e_machine: u16,
     e_shoff: u64,
     e_shentsize: u16,
     e_shnum: u16,
@@ -245,6 +250,8 @@ fn parse_elf_header(data: &[u8]) -> Result<(Elf64_Ehdr, bool), &'static str> {
         return Err("ELF is not relocatable (ET_REL expected)");
     }
 
+    let e_machine = read_u16(data, 18, is_little_endian)?;
+
     let e_shoff = read_u64(data, 40, is_little_endian)?;
     let e_shentsize = read_u16(data, 58, is_little_endian)?;
     let e_shnum = read_u16(data, 60, is_little_endian)?;
@@ -263,6 +270,7 @@ fn parse_elf_header(data: &[u8]) -> Result<(Elf64_Ehdr, bool), &'static str> {
     Ok((
         Elf64_Ehdr {
             e_type,
+            e_machine,
             e_shoff,
             e_shentsize,
             e_shnum,
@@ -519,6 +527,7 @@ pub fn parse_reloc_object(data: &[u8]) -> Result<RelocObject, &'static str> {
 
     Ok(RelocObject {
         is_little_endian,
+        e_machine: ehdr.e_machine,
         sections,
         section_data,
         symbols,

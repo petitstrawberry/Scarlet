@@ -25,6 +25,7 @@ pub enum LsmErrorCode {
     NotFound = 8,
     PermissionDenied = 9,
     MissingDependency = 10,
+    ArchMismatch = 11,
 }
 
 #[unsafe(no_mangle)]

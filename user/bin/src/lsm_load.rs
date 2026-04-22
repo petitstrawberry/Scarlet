@@ -20,6 +20,7 @@ const ELF64_SHDR_SIZE: usize = 64;
 const ELF64_SYM_SIZE: usize = 24;
 
 const LSM_ERROR_MISSING_DEPENDENCY: usize = 10;
+const LSM_ERROR_ARCH_MISMATCH: usize = 11;
 const LSM_LIST_ENTRY_SIZE: usize = 264;
 const LSM_LIST_MAX_MODULES: usize = 128;
 
@@ -387,6 +388,13 @@ fn load_module_recursive(
         return Err(format!(
             "failed to load {}: missing dependency (error {})",
             module_path, ret
+        ));
+    }
+
+    if ret == LSM_ERROR_ARCH_MISMATCH {
+        return Err(format!(
+            "failed to load {}: architecture mismatch",
+            module_path
         ));
     }
 
