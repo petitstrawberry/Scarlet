@@ -2229,16 +2229,16 @@ pub fn sys_getentropy(_abi: &mut DarwinAarch64Abi, trapframe: &mut Trapframe) ->
         return EINVAL;
     }
 
-    if let Some(kva) = task.vm_manager.translate_to_kva(buf) {
-        let bytes = unsafe { core::slice::from_raw_parts_mut(kva as *mut u8, size) };
-        for b in bytes.iter_mut() {
-            *b = 0x42;
+    let entropy = alloc::vec![0x42u8; size];
+    match crate::library::std::usercopy::copy_to_user(&task, buf, &entropy) {
+        Ok(()) => {
+            trapframe.set_return_value(0);
+            0
         }
-        trapframe.set_return_value(0);
-        0
-    } else {
-        trapframe.set_return_value(EFAULT);
-        EFAULT
+        Err(_) => {
+            trapframe.set_return_value(EFAULT);
+            EFAULT
+        }
     }
 }
 
