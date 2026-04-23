@@ -706,6 +706,9 @@ impl AbiModule for DarwinAarch64Abi {
                 .map_err(|e| { crate::println!("[darwin] load_dyld FAILED: {}", e); e })?;
             crate::println!("[darwin] dyld OK: entry={:#x} delta={:#x}", dyld_entry, _base_delta);
 
+            macho_loader::setup_commpage(task)
+                .map_err(|e| { crate::println!("[darwin] setup_commpage FAILED: {}", e); e })?;
+
             *task.name.write() = argv
                 .first()
                 .map_or("Unnamed Darwin Task".to_string(), |s| s.to_string());

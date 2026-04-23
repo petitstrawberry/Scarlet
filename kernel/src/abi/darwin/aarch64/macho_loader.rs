@@ -883,6 +883,78 @@ pub fn load_dyld(dyld_path: &str, task: &Task) -> Result<(usize, i64), &'static 
     Ok((dyld_entry, base_delta))
 }
 
+const COMMPAGE_BASE: usize = 0x0FFFFFC000;
+const COMMPAGE_SIZE: usize = 0x1000;
+const COMMPAGE_SIGNATURE: &[u8; 16] = b"commpage 64-bit\0";
+
+pub fn setup_commpage(task: &Task) -> Result<(), &'static str> {
+    let pages = ContiguousPages::new(1).ok_or("Failed to allocate commpage")?;
+    let paddr = pages.as_paddr();
+
+    let mmap = VirtualMemoryMap::new(
+        MemoryArea::new(paddr, paddr + COMMPAGE_SIZE - 1),
+        MemoryArea::new(COMMPAGE_BASE, COMMPAGE_BASE + COMMPAGE_SIZE - 1),
+        VirtualMemoryPermission::Read as usize | VirtualMemoryPermission::User as usize,
+        false,
+        None,
+    );
+    task.vm_manager.add_memory_map(mmap)?;
+    task.page_allocations.write().push(pages);
+
+    let kva = task
+        .vm_manager
+        .translate_to_kva(COMMPAGE_BASE)
+        .ok_or("Failed to translate commpage")?;
+
+    unsafe {
+        ptr::write_bytes(kva as *mut u8, 0, COMMPAGE_SIZE);
+
+        ptr::copy_nonoverlapping(
+            COMMPAGE_SIGNATURE.as_ptr(),
+            kva as *mut u8,
+            COMMPAGE_SIGNATURE.len(),
+        );
+
+        let cpu_caps_64_offset = 0x010usize;
+        let cpu_caps: u64 = (1u64 << 7)
+            | (1u64 << 8)
+            | (1u64 << 11)
+            | (1u64 << 17)
+            | (1u64 << 40);
+        ptr::write((kva + cpu_caps_64_offset) as *mut u64, cpu_caps);
+
+        let cpu_caps_32_offset = 0x020usize;
+        ptr::write((kva + cpu_caps_32_offset) as *mut u32, cpu_caps as u32);
+
+        let ncpus_offset = 0x022usize;
+        ptr::write((kva + ncpus_offset) as *mut u8, 1);
+
+        let page_shift_64_offset = 0x025usize;
+        ptr::write((kva + page_shift_64_offset) as *mut u8, 12);
+
+        let cache_linesize_offset = 0x026usize;
+        ptr::write((kva + cache_linesize_offset) as *mut u16, 64);
+
+        let active_cpus_offset = 0x034usize;
+        ptr::write((kva + active_cpus_offset) as *mut u8, 1);
+
+        let physical_cpus_offset = 0x035usize;
+        ptr::write((kva + physical_cpus_offset) as *mut u8, 1);
+
+        let logical_cpus_offset = 0x036usize;
+        ptr::write((kva + logical_cpus_offset) as *mut u8, 1);
+
+        let kernel_page_shift_offset = 0x037usize;
+        ptr::write((kva + kernel_page_shift_offset) as *mut u8, 12);
+
+        let version_offset = 0x01Eusize;
+        ptr::write((kva + version_offset) as *mut u16, 3);
+    }
+
+    crate::println!("[darwin] commpage mapped at {:#x}", COMMPAGE_BASE);
+    Ok(())
+}
+
 fn macho_prot_to_scarlet(prot: i32) -> usize {
     let mut perms = 0;
     if prot & 1 != 0 {
