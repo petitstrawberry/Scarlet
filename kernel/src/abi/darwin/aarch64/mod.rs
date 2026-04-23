@@ -78,6 +78,7 @@ pub struct DarwinAarch64Abi {
     fd_to_handle: Vec<Option<u32>>,
     free_fds: Vec<usize>,
     mach_task_port: u32,
+    mach_thread_port: u32,
     next_mach_port: u32,
     mach_ports: HashMap<u32, MachPortInfo>,
     last_mach_message: Option<MachMessageBuffer>,
@@ -118,8 +119,9 @@ impl Default for DarwinAarch64Abi {
         Self {
             fd_to_handle: alloc::vec![None; MAX_FDS],
             free_fds,
-            mach_task_port: 1,
-            next_mach_port: 2,
+            mach_task_port: 0x103,
+            mach_thread_port: 0x307,
+            next_mach_port: 0x309,
             mach_ports: HashMap::new(),
             last_mach_message: None,
             signal_handlers: [0; 32],
@@ -223,6 +225,10 @@ impl DarwinAarch64Abi {
         self.mach_task_port as usize
     }
 
+    pub fn mach_thread_self(&self) -> usize {
+        self.mach_thread_port as usize
+    }
+
     pub fn allocate_mach_port(&mut self, right: u32) -> Result<u32, &'static str> {
         let port_name = self.next_mach_port;
         self.next_mach_port += 1;
@@ -304,7 +310,12 @@ impl DarwinAarch64Abi {
             SYS_fcntl => Ok(bsd_syscalls::sys_fcntl(self, trapframe)),
             SYS_ioctl => Ok(bsd_syscalls::sys_ioctl(self, trapframe)),
             SYS_lseek => Ok(bsd_syscalls::sys_lseek(self, trapframe)),
+            SYS_mprotect => Ok(bsd_syscalls::sys_mprotect(self, trapframe)),
+            SYS_thread_selfid => Ok(bsd_syscalls::sys_thread_selfid(self, trapframe)),
+            SYS_proc_info => Ok(bsd_syscalls::sys_proc_info(self, trapframe)),
             SYS_execve => Ok(bsd_syscalls::sys_execve(self, trapframe)),
+            SYS_getentropy => Ok(bsd_syscalls::sys_getentropy(self, trapframe)),
+            SYS_getlogin => Ok(bsd_syscalls::sys_getlogin(self, trapframe)),
             _ => {
                 crate::println!("[darwin] Unimplemented BSD syscall: {} (0x{:x})", num, num);
                 let task = mytask().unwrap();
@@ -316,6 +327,23 @@ impl DarwinAarch64Abi {
         }
     }
 
+    fn handle_thread_set_tsd_base(&mut self, trapframe: &mut Trapframe) -> Result<usize, &'static str> {
+        let tsd_base = trapframe.regs.reg[0];
+        crate::println!("[darwin] thread_set_tsd_base: x0={:#x}", tsd_base);
+        let task = mytask().unwrap();
+        trapframe.increment_pc_next(task);
+
+        trapframe.tpidr_el0 = tsd_base as u64;
+        trapframe.tpidrro_el0 = tsd_base as u64;
+
+        let mut vcpu = task.vcpu.lock();
+        vcpu.set_tpidr_el0(tsd_base as u64);
+        vcpu.set_tpidrro_el0(tsd_base as u64);
+
+        trapframe.set_return_value(0);
+        Ok(0)
+    }
+
     fn dispatch_mach_syscall(
         &mut self,
         num: i32,
@@ -323,19 +351,20 @@ impl DarwinAarch64Abi {
     ) -> Result<usize, &'static str> {
         use syscall_table::*;
         match num {
-            MACH_mach_reply_port | MACH__kernelrpc_mach_port_allocate_trap | MACH_task_for_pid => {
-                if num == MACH_task_for_pid {
-                    Ok(mach_syscalls::sys_task_for_pid(self, trapframe))
-                } else if num == MACH__kernelrpc_mach_port_allocate_trap {
-                    Ok(mach_syscalls::sys_mach_port_allocate(self, trapframe))
-                } else {
-                    let task = mytask().unwrap();
-                    trapframe.increment_pc_next(task);
-                    let port = self.next_mach_port;
-                    self.next_mach_port += 1;
-                    trapframe.set_return_value(port as usize);
-                    Ok(port as usize)
-                }
+            MACH_mach_reply_port => {
+                let task = mytask().unwrap();
+                trapframe.increment_pc_next(task);
+                let port = self.next_mach_port;
+                self.next_mach_port += 1;
+                crate::println!("[darwin] mach_reply_port: {:#x}", port);
+                trapframe.set_return_value(port as usize);
+                Ok(port as usize)
+            }
+            MACH__kernelrpc_mach_port_allocate_trap => {
+                Ok(mach_syscalls::sys_mach_port_allocate(self, trapframe))
+            }
+            MACH_task_for_pid => {
+                Ok(mach_syscalls::sys_task_for_pid(self, trapframe))
             }
             MACH__kernelrpc_mach_port_deallocate_trap => {
                 Ok(mach_syscalls::sys_mach_port_deallocate(self, trapframe))
@@ -352,6 +381,25 @@ impl DarwinAarch64Abi {
             }
             MACH_clock_get_time => Ok(mach_syscalls::sys_clock_get_time(self, trapframe)),
             MACH_host_page_size => Ok(mach_syscalls::sys_host_page_size(self, trapframe)),
+            MACH_thread_self_trap => {
+                crate::println!("[darwin] mach_thread_self");
+                let task = mytask().unwrap();
+                trapframe.increment_pc_next(task);
+                let port = self.mach_thread_self();
+                trapframe.set_return_value(port);
+                Ok(port)
+            }
+            MACH_task_self_trap => {
+                crate::println!("[darwin] mach_task_self");
+                let task = mytask().unwrap();
+                trapframe.increment_pc_next(task);
+                let port = self.mach_task_self();
+                trapframe.set_return_value(port);
+                Ok(port)
+            }
+            MACH_thread_set_tsd_base => {
+                self.handle_thread_set_tsd_base(trapframe)
+            }
             _ => {
                 crate::println!("[darwin] Unimplemented Mach trap: {}", num);
                 let task = mytask().unwrap();
@@ -610,13 +658,28 @@ impl AbiModule for DarwinAarch64Abi {
         let syscall_num = trapframe.regs.reg[16] as u32;
 
         match svc_imm {
+            // macOS ARM64: svc #0x80 for all syscalls.
+            // x16 sign determines type: negative = Mach trap, positive = BSD syscall.
             0x80 => {
-                let bsd_num = syscall_num & 0xFFFFFF;
-                self.dispatch_bsd_syscall(bsd_num, trapframe)
+                let syscall_num_signed = syscall_num as i32;
+                let result = if syscall_num_signed < 0 {
+                    self.dispatch_mach_syscall(syscall_num_signed, trapframe)
+                } else {
+                    let bsd_num = syscall_num & 0xFFFFFF;
+                    self.dispatch_bsd_syscall(bsd_num, trapframe)
+                };
+                if result.is_ok() {
+                    trapframe.spsr &= !(1 << 29);
+                }
+                result
             }
             0x81 => {
                 let mach_num = syscall_num as i32;
-                self.dispatch_mach_syscall(mach_num, trapframe)
+                let result = self.dispatch_mach_syscall(mach_num, trapframe);
+                if result.is_ok() {
+                    trapframe.spsr &= !(1 << 29);
+                }
+                result
             }
             _ => {
                 crate::println!(

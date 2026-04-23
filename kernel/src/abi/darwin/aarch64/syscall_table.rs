@@ -540,6 +540,8 @@ pub const MACH_mk_timer_arm_leeway_trap: i32 = -95;
 pub const MACH_debug_control_port_for_pid: i32 = -96;
 pub const MACH_iokit_user_client_trap: i32 = -100;
 
+pub const MACH_thread_set_tsd_base: i32 = i32::MIN; // 0x80000000
+
 /// BSD syscall table entry
 pub struct BsdSyscallEntry {
     pub number: u32,

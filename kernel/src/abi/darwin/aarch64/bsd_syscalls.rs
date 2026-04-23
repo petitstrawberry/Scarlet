@@ -1463,10 +1463,68 @@ pub fn sys_mmap(abi: &mut DarwinAarch64Abi, trapframe: &mut Trapframe) -> usize 
                                         removed_map.vmarea.size(),
                                     );
                                 }
-                            }
-                        }
-                    }
-                }
+        }
+    }
+}
+
+pub fn sys_thread_selfid(_abi: &mut DarwinAarch64Abi, trapframe: &mut Trapframe) -> usize {
+    let task = mytask().unwrap();
+    trapframe.increment_pc_next(task);
+    let tid = task.get_id() as u64;
+    crate::println!("[darwin] thread_selfid: tid={:#x}", tid);
+    trapframe.set_return_value(tid as usize);
+    tid as usize
+}
+
+pub fn sys_proc_info(_abi: &mut DarwinAarch64Abi, trapframe: &mut Trapframe) -> usize {
+    let task = mytask().unwrap();
+    trapframe.increment_pc_next(task);
+    trapframe.set_return_value(0);
+    0
+}
+
+pub fn sys_getentropy(_abi: &mut DarwinAarch64Abi, trapframe: &mut Trapframe) -> usize {
+    let task = mytask().unwrap();
+    let buf = trapframe.get_arg(0);
+    let size = trapframe.get_arg(1);
+    trapframe.increment_pc_next(task);
+
+    if size > 256 {
+        trapframe.set_return_value(EINVAL);
+        return EINVAL;
+    }
+
+    if let Some(kva) = task.vm_manager.translate_to_kva(buf) {
+        let bytes = unsafe { core::slice::from_raw_parts_mut(kva as *mut u8, size) };
+        for b in bytes.iter_mut() {
+            *b = 0x42;
+        }
+        trapframe.set_return_value(0);
+        0
+    } else {
+        trapframe.set_return_value(EFAULT);
+        EFAULT
+    }
+}
+
+pub fn sys_getlogin(_abi: &mut DarwinAarch64Abi, trapframe: &mut Trapframe) -> usize {
+    let task = mytask().unwrap();
+    let namebuf = trapframe.get_arg(0);
+    let _namelen = trapframe.get_arg(1);
+    trapframe.increment_pc_next(task);
+
+    let login = b"root\0";
+    if let Some(kva) = task.vm_manager.translate_to_kva(namebuf) {
+        let dst = unsafe { core::slice::from_raw_parts_mut(kva as *mut u8, login.len()) };
+        dst.copy_from_slice(login);
+        trapframe.set_return_value(0);
+        0
+    } else {
+        trapframe.set_return_value(EFAULT);
+        EFAULT
+    }
+}
+                 }
 
                 if let Some(removed_mappings) = removed_mappings_opt {
                     for removed_map in removed_mappings {
@@ -2126,5 +2184,63 @@ pub fn sys_execve(abi: &mut DarwinAarch64Abi, trapframe: &mut Trapframe) -> usiz
             trapframe.set_return_value(ENOEXEC);
             usize::MAX
         }
+    }
+}
+
+pub fn sys_thread_selfid(_abi: &mut DarwinAarch64Abi, trapframe: &mut Trapframe) -> usize {
+    let task = mytask().unwrap();
+    trapframe.increment_pc_next(task);
+    let tid = task.get_id() as u64;
+    crate::println!("[darwin] thread_selfid: tid={:#x}", tid);
+    trapframe.set_return_value(tid as usize);
+    tid as usize
+}
+
+pub fn sys_proc_info(_abi: &mut DarwinAarch64Abi, trapframe: &mut Trapframe) -> usize {
+    let task = mytask().unwrap();
+    trapframe.increment_pc_next(task);
+    trapframe.set_return_value(0);
+    0
+}
+
+pub fn sys_getentropy(_abi: &mut DarwinAarch64Abi, trapframe: &mut Trapframe) -> usize {
+    let task = mytask().unwrap();
+    let buf = trapframe.get_arg(0);
+    let size = trapframe.get_arg(1);
+    trapframe.increment_pc_next(task);
+
+    if size > 256 {
+        trapframe.set_return_value(EINVAL);
+        return EINVAL;
+    }
+
+    if let Some(kva) = task.vm_manager.translate_to_kva(buf) {
+        let bytes = unsafe { core::slice::from_raw_parts_mut(kva as *mut u8, size) };
+        for b in bytes.iter_mut() {
+            *b = 0x42;
+        }
+        trapframe.set_return_value(0);
+        0
+    } else {
+        trapframe.set_return_value(EFAULT);
+        EFAULT
+    }
+}
+
+pub fn sys_getlogin(_abi: &mut DarwinAarch64Abi, trapframe: &mut Trapframe) -> usize {
+    let task = mytask().unwrap();
+    let namebuf = trapframe.get_arg(0);
+    let _namelen = trapframe.get_arg(1);
+    trapframe.increment_pc_next(task);
+
+    let login = b"root\0";
+    if let Some(kva) = task.vm_manager.translate_to_kva(namebuf) {
+        let dst = unsafe { core::slice::from_raw_parts_mut(kva as *mut u8, login.len()) };
+        dst.copy_from_slice(login);
+        trapframe.set_return_value(0);
+        0
+    } else {
+        trapframe.set_return_value(EFAULT);
+        EFAULT
     }
 }

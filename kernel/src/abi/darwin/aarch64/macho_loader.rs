@@ -543,11 +543,6 @@ fn apply_chained_fixups(
         return Err("Unsupported dyld chained fixups version");
     }
 
-    crate::println!(
-        "[darwin] fixups: version={} starts_offset={} imports_offset={} imports_count={}",
-        header.fixups_version, header.starts_offset, header.imports_offset, header.imports_count
-    );
-
     let starts_base = header.starts_offset as usize;
     if starts_base + 4 > fixup_data.len() {
         return Err("Chained fixups starts table out of bounds");
@@ -556,8 +551,6 @@ fn apply_chained_fixups(
     let seg_count = u32::from_le_bytes(
         fixup_data[starts_base..starts_base + 4].try_into().map_err(|_| "bad seg_count")?,
     ) as usize;
-
-    crate::println!("[darwin] fixups: seg_count={}", seg_count);
 
     for seg_idx in 0..seg_count {
         let off_pos = starts_base + 4 + seg_idx * 4;
@@ -584,13 +577,12 @@ fn apply_chained_fixups(
         );
         let page_count = u16::from_le_bytes([seg_data[20], seg_data[21]]) as usize;
 
-        crate::println!(
-            "[darwin] fixups seg[{}]: vmaddr={:#x} page_size={:#x} fmt={} page_count={}",
-            seg_idx, segment_offset, page_size, pointer_format, page_count
-        );
+        // crate::println!(
+        //     "[darwin] fixups seg[{}]: vmaddr={:#x} page_size={:#x} fmt={} page_count={}",
+        //     seg_idx, segment_offset, page_size, pointer_format, page_count
+        // );
 
         if pointer_format != DYLD_CHAINED_PTR_ARM64E_USERLAND24 {
-            crate::println!("[darwin] fixups: unsupported pointer format {}, skipping segment", pointer_format);
             continue;
         }
 
@@ -617,7 +609,6 @@ fn apply_chained_fixups(
                 continue;
             }
             if page_start & DYLD_CHAINED_PTR_START_MULTI != 0 {
-                crate::println!("[darwin] fixups: MULTI page_start at seg {} page {}, skipping", seg_idx, page_idx);
                 continue;
             }
 
@@ -625,10 +616,6 @@ fn apply_chained_fixups(
             let stride: usize = 8;
             let mut chain_offset = page_start as usize * stride;
 
-            crate::println!(
-                "[darwin] fixups: walking chain at page {:#x} start_offset={}",
-                page_addr, chain_offset
-            );
 
             let mut chain_step = 0usize;
             loop {
@@ -636,7 +623,6 @@ fn apply_chained_fixups(
                 let kva = match task.vm_manager.translate_to_kva(entry_addr) {
                     Some(k) => k,
                     None => {
-                        crate::println!("[darwin] fixups: cannot translate {:#x}, stopping chain", entry_addr);
                         break;
                     }
                 };
@@ -647,7 +633,6 @@ fn apply_chained_fixups(
                 let next = ((current_value >> 51) & 0x7FF) as usize;
 
                 if bind_bit != 0 {
-                    crate::println!("[darwin] fixups: unexpected bind at {:#x}, stopping chain", entry_addr);
                     break;
                 }
 
@@ -660,10 +645,10 @@ fn apply_chained_fixups(
                     base_addr.wrapping_add(full_target)
                 };
 
-                crate::println!(
-                    "[darwin] fixups: [{:#x}] {:#x} -> {:#x} (next={})",
-                    entry_addr, current_value, new_value, next
-                );
+                // crate::println!(
+                //     "[darwin] fixups: [{:#x}] {:#x} -> {:#x} (next={})",
+                //     entry_addr, current_value, new_value, next
+                // );
 
                 unsafe { ptr::write(kva as *mut u64, new_value); }
 
@@ -674,7 +659,6 @@ fn apply_chained_fixups(
 
                 chain_step += 1;
                 if chain_step > 4096 {
-                    crate::println!("[darwin] fixups: chain too long at page {:#x}, aborting", page_addr);
                     break;
                 }
             }
@@ -837,7 +821,6 @@ pub fn load_dyld(dyld_path: &str, task: &Task) -> Result<(usize, i64), &'static 
 
     if let Some((dataoff, datasize)) = chained_fixups {
         if datasize > 0 {
-            crate::println!("[darwin] reading chained fixup data: offset={} size={}", dataoff, datasize);
             let mut fixup_buf = vec![0u8; datasize as usize];
             raw_file
                 .seek(SeekFrom::Start(slice_offset + dataoff as u64))
@@ -845,9 +828,7 @@ pub fn load_dyld(dyld_path: &str, task: &Task) -> Result<(usize, i64), &'static 
             read_exact(raw_file, &mut fixup_buf)?;
 
             let base_addr = target_base as u64;
-            crate::println!("[darwin] applying chained fixups with base_addr={:#x} base_delta={:#x}", base_addr, base_delta);
             apply_chained_fixups(task, base_addr, base_delta, &fixup_buf)?;
-            crate::println!("[darwin] chained fixups applied successfully");
         }
     } else {
         crate::println!("[darwin] no LC_DYLD_CHAINED_FIXUPS found in dyld");
@@ -885,15 +866,22 @@ pub fn load_dyld(dyld_path: &str, task: &Task) -> Result<(usize, i64), &'static 
 
 const COMMPAGE_BASE: usize = 0x0FFFFFC000;
 const COMMPAGE_SIZE: usize = 0x1000;
+const COMMPAGE_RO_BASE: usize = 0x0FFFFF4000;
+const SHARED_REGION_BASE: usize = 0x0FFFFF0000;
+const SHARED_REGION_SIZE: usize = 0xD000; // 0x0FFFFF0000 .. 0x0FFFFFD000 (52KB)
 const COMMPAGE_SIGNATURE: &[u8; 16] = b"commpage 64-bit\0";
 
+const COMMPAGE_RW_OFFSET: usize = COMMPAGE_BASE - SHARED_REGION_BASE; // 0xC000
+const COMMPAGE_RO_OFFSET: usize = COMMPAGE_RO_BASE - SHARED_REGION_BASE; // 0x4000
+
 pub fn setup_commpage(task: &Task) -> Result<(), &'static str> {
-    let pages = ContiguousPages::new(1).ok_or("Failed to allocate commpage")?;
+    let num_pages = SHARED_REGION_SIZE / PAGE_SIZE;
+    let pages = ContiguousPages::new(num_pages).ok_or("Failed to allocate shared region")?;
     let paddr = pages.as_paddr();
 
     let mmap = VirtualMemoryMap::new(
-        MemoryArea::new(paddr, paddr + COMMPAGE_SIZE - 1),
-        MemoryArea::new(COMMPAGE_BASE, COMMPAGE_BASE + COMMPAGE_SIZE - 1),
+        MemoryArea::new(paddr, paddr + SHARED_REGION_SIZE - 1),
+        MemoryArea::new(SHARED_REGION_BASE, SHARED_REGION_BASE + SHARED_REGION_SIZE - 1),
         VirtualMemoryPermission::Read as usize | VirtualMemoryPermission::User as usize,
         false,
         None,
@@ -901,17 +889,27 @@ pub fn setup_commpage(task: &Task) -> Result<(), &'static str> {
     task.vm_manager.add_memory_map(mmap)?;
     task.page_allocations.write().push(pages);
 
-    let kva = task
+    let shared_kva = task
         .vm_manager
-        .translate_to_kva(COMMPAGE_BASE)
-        .ok_or("Failed to translate commpage")?;
+        .translate_to_kva(SHARED_REGION_BASE)
+        .ok_or("Failed to translate shared region")?;
 
     unsafe {
-        ptr::write_bytes(kva as *mut u8, 0, COMMPAGE_SIZE);
+        ptr::write_bytes(shared_kva as *mut u8, 0, SHARED_REGION_SIZE);
+    }
 
+    let rw_kva = shared_kva + COMMPAGE_RW_OFFSET;
+    let ro_kva = shared_kva + COMMPAGE_RO_OFFSET;
+
+    unsafe {
         ptr::copy_nonoverlapping(
             COMMPAGE_SIGNATURE.as_ptr(),
-            kva as *mut u8,
+            ro_kva as *mut u8,
+            COMMPAGE_SIGNATURE.len(),
+        );
+        ptr::copy_nonoverlapping(
+            COMMPAGE_SIGNATURE.as_ptr(),
+            rw_kva as *mut u8,
             COMMPAGE_SIGNATURE.len(),
         );
 
@@ -921,38 +919,87 @@ pub fn setup_commpage(task: &Task) -> Result<(), &'static str> {
             | (1u64 << 11)
             | (1u64 << 17)
             | (1u64 << 40);
-        ptr::write((kva + cpu_caps_64_offset) as *mut u64, cpu_caps);
+        ptr::write((ro_kva + cpu_caps_64_offset) as *mut u64, cpu_caps);
+        ptr::write((rw_kva + cpu_caps_64_offset) as *mut u64, cpu_caps);
 
         let cpu_caps_32_offset = 0x020usize;
-        ptr::write((kva + cpu_caps_32_offset) as *mut u32, cpu_caps as u32);
+        ptr::write((ro_kva + cpu_caps_32_offset) as *mut u32, cpu_caps as u32);
+        ptr::write((rw_kva + cpu_caps_32_offset) as *mut u32, cpu_caps as u32);
 
         let ncpus_offset = 0x022usize;
-        ptr::write((kva + ncpus_offset) as *mut u8, 1);
+        ptr::write((ro_kva + ncpus_offset) as *mut u8, 1);
+        ptr::write((rw_kva + ncpus_offset) as *mut u8, 1);
 
         let page_shift_64_offset = 0x025usize;
-        ptr::write((kva + page_shift_64_offset) as *mut u8, 12);
+        ptr::write((ro_kva + page_shift_64_offset) as *mut u8, 12);
+        ptr::write((rw_kva + page_shift_64_offset) as *mut u8, 12);
 
         let cache_linesize_offset = 0x026usize;
-        ptr::write((kva + cache_linesize_offset) as *mut u16, 64);
+        ptr::write((ro_kva + cache_linesize_offset) as *mut u16, 64);
+        ptr::write((rw_kva + cache_linesize_offset) as *mut u16, 64);
 
         let active_cpus_offset = 0x034usize;
-        ptr::write((kva + active_cpus_offset) as *mut u8, 1);
+        ptr::write((ro_kva + active_cpus_offset) as *mut u8, 1);
+        ptr::write((rw_kva + active_cpus_offset) as *mut u8, 1);
 
         let physical_cpus_offset = 0x035usize;
-        ptr::write((kva + physical_cpus_offset) as *mut u8, 1);
+        ptr::write((ro_kva + physical_cpus_offset) as *mut u8, 1);
+        ptr::write((rw_kva + physical_cpus_offset) as *mut u8, 1);
 
         let logical_cpus_offset = 0x036usize;
-        ptr::write((kva + logical_cpus_offset) as *mut u8, 1);
+        ptr::write((ro_kva + logical_cpus_offset) as *mut u8, 1);
+        ptr::write((rw_kva + logical_cpus_offset) as *mut u8, 1);
 
         let kernel_page_shift_offset = 0x037usize;
-        ptr::write((kva + kernel_page_shift_offset) as *mut u8, 12);
+        ptr::write((ro_kva + kernel_page_shift_offset) as *mut u8, 12);
+        ptr::write((rw_kva + kernel_page_shift_offset) as *mut u8, 12);
 
         let version_offset = 0x01Eusize;
-        ptr::write((kva + version_offset) as *mut u16, 3);
+        ptr::write((ro_kva + version_offset) as *mut u16, 3);
+        ptr::write((rw_kva + version_offset) as *mut u16, 3);
     }
 
-    crate::println!("[darwin] commpage mapped at {:#x}", COMMPAGE_BASE);
+    crate::println!(
+        "[darwin] shared region mapped at {:#x} size={:#x} (ro at +{:#x}, rw at +{:#x})",
+        SHARED_REGION_BASE, SHARED_REGION_SIZE, COMMPAGE_RO_OFFSET, COMMPAGE_RW_OFFSET
+    );
     Ok(())
+}
+
+pub fn setup_tls(task: &Task, thread_port: u32) -> Result<usize, &'static str> {
+    let tls_pages = ContiguousPages::new(1).ok_or("Failed to allocate TLS page")?;
+    let paddr = tls_pages.as_paddr();
+
+    let tls_vaddr = task
+        .vm_manager
+        .find_unmapped_area(PAGE_SIZE, PAGE_SIZE)
+        .ok_or("No free VM area for TLS")?;
+
+    let mmap = VirtualMemoryMap::new(
+        MemoryArea::new(paddr, paddr + PAGE_SIZE - 1),
+        MemoryArea::new(tls_vaddr, tls_vaddr + PAGE_SIZE - 1),
+        VirtualMemoryPermission::Read as usize
+            | VirtualMemoryPermission::Write as usize
+            | VirtualMemoryPermission::User as usize,
+        false,
+        None,
+    );
+    task.vm_manager.add_memory_map(mmap)?;
+    task.page_allocations.write().push(tls_pages);
+
+    let kva = task
+        .vm_manager
+        .translate_to_kva(tls_vaddr)
+        .ok_or("Failed to translate TLS page")?;
+
+    unsafe {
+        ptr::write_bytes(kva as *mut u8, 0, PAGE_SIZE);
+        // TSD slot 3 (offset 0x18) = __TSD_MACH_THREAD_SELF
+        ptr::write((kva as *mut u8).add(0x18) as *mut u64, thread_port as u64);
+    }
+
+    crate::println!("[darwin] TLS page at {:#x} (thread_port={})", tls_vaddr, thread_port);
+    Ok(tls_vaddr)
 }
 
 fn macho_prot_to_scarlet(prot: i32) -> usize {
