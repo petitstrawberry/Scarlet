@@ -201,9 +201,28 @@ pub fn arch_exception_handler(trapframe: &mut Trapframe, trap_kind: usize) {
             }
         }
 
-        // Unknown or unhandled exception.
-        // We must stop here: this indicates a real bring-up bug (e.g. unexpected
-        // asynchronous exception path) and masking would hide the root cause.
+        // Unknown exception (EC=0): undefined instruction from EL0.
+        // Try to emulate PAC (Pointer Authentication) branch instructions
+        // used by macOS arm64e binaries (dyld, etc.) on CPUs without ARMv8.3 support.
+        ExceptionClass::Unknown => {
+            if try_emulate_pac_instruction(trapframe) {
+                return;
+            }
+
+            print_trap_info(trapframe, esr);
+            crate::println!(
+                "[trap] unhandled exception: kind={}({}) ESR={:#x} FAR={:#x} ELR={:#x}",
+                trap_kind,
+                kind_str,
+                esr,
+                get_far_el1(),
+                trapframe.elr,
+            );
+            loop {
+                unsafe { asm!("wfi") }
+            }
+        }
+
         _ => {
             print_trap_info(trapframe, esr);
 
@@ -360,4 +379,96 @@ fn print_trap_info(trapframe: &Trapframe, esr: u64) {
         trapframe.regs.reg[6],
         trapframe.regs.reg[7]
     );
+}
+
+/// Authenticated branch (register) instruction detection mask.
+///
+/// ARM64 PAC branch instructions share this encoding pattern:
+///   bits [31:25] = 1101011  (unconditional branch register group)
+///   bit  [24]    = 0
+///   bits [15:12] = 0000
+///   bits [4:0]   = 11111    (distinguishes auth from non-auth variants)
+///
+/// opc (bits [23:21]) identifies the operation:
+///   000 = BRAA/BRAB/BRAAZ/BRABZ  (branch with auth)
+///   001 = BLRAA/BLRAB/BLRAAZ/BLRABZ (branch with link and auth)
+///   010 = RETAA/RETAB            (return with auth)
+const PAC_BRANCH_MASK: u32 = 0xFF00F01F;
+const PAC_BRANCH_VALUE: u32 = 0xD600001F;
+
+/// Try to emulate a PAC (Pointer Authentication) instruction that trapped
+/// as EC=0 (Unknown/Undefined) on a CPU without ARMv8.3 support.
+///
+/// We emulate authenticated branch instructions as their non-authenticated
+/// equivalents (strip pointer authentication, treat as plain branch).
+/// This is safe because we never actually compute PAC codes — the
+/// "authenticated" pointers were never signed in the first place.
+fn try_emulate_pac_instruction(trapframe: &mut Trapframe) -> bool {
+    let task = match get_scheduler().get_current_task(get_cpu().get_cpuid()) {
+        Some(t) => t,
+        None => return false,
+    };
+
+    let elr = trapframe.elr as usize;
+    let kva = match task.vm_manager.translate_to_kva(elr) {
+        Some(a) => a,
+        None => return false,
+    };
+
+    let instr = unsafe { *(kva as *const u32) };
+
+    if !is_pac_branch(instr) {
+        return try_emulate_pac_data_processing(trapframe, instr);
+    }
+
+    let opc = (instr >> 21) & 0x7;
+    let rn = ((instr >> 16) & 0x1F) as usize;
+
+    match opc {
+        // RETAA/RETAB: return with authenticate → treat as RET (ELR = X30/LR)
+        0b010 => {
+            trapframe.elr = trapframe.regs.reg[30] as u64;
+        }
+        // BRAA/BRAB/BRAAZ/BRABZ: branch with auth → treat as BR (ELR = Xn)
+        0b000 => {
+            trapframe.elr = trapframe.regs.reg[rn] as u64;
+        }
+        // BLRAA/BLRAB/BLRAAZ/BLRABZ: branch with link and auth → treat as BLR
+        0b001 => {
+            trapframe.regs.reg[30] = (trapframe.elr + 4) as usize;
+            trapframe.elr = trapframe.regs.reg[rn] as u64;
+        }
+        _ => return false,
+    }
+
+    true
+}
+
+fn is_pac_branch(instr: u32) -> bool {
+    (instr & PAC_BRANCH_MASK) == PAC_BRANCH_VALUE
+}
+
+fn try_emulate_pac_data_processing(trapframe: &mut Trapframe, instr: u32) -> bool {
+    // PAC data-processing instructions share bits [31:21] = 11011010110
+    // 0xDAC00000 mask: all PAC register-register instructions (pacia, pacda, pacdb,
+    // autia, autib, autda, autdb, paciza, xpaci, xpacd, etc.)
+    if (instr & 0xFFE00000) != 0xDAC00000 {
+        return false;
+    }
+
+    let opc = (instr >> 11) & 0xF;
+    // PAC opc values: 0000-0100 (sign/auth), 1000 (xpac)
+    // Non-PAC opcodes in this space (CRC32=0110, CRC32C=0111, etc.) won't trap
+    // on cortex-a57, so we only see PAC instructions here.
+    if opc > 4 && opc != 8 {
+        return false;
+    }
+
+    // All PAC data-processing instructions: NOP (skip, don't modify registers).
+    // Since we never compute PAC codes, pointers are already "unsigned".
+    // PAC sign: leaves pointer unchanged (no code to add)
+    // AUT auth: leaves pointer unchanged (nothing to strip/verify)
+    // XPAC: leaves pointer unchanged (nothing to strip)
+    trapframe.elr += 4;
+    true
 }
