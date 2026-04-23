@@ -316,6 +316,15 @@ impl DarwinAarch64Abi {
             SYS_execve => Ok(bsd_syscalls::sys_execve(self, trapframe)),
             SYS_getentropy => Ok(bsd_syscalls::sys_getentropy(self, trapframe)),
             SYS_getlogin => Ok(bsd_syscalls::sys_getlogin(self, trapframe)),
+            SYS_terminate_with_payload => {
+                Ok(bsd_syscalls::sys_terminate_with_payload(self, trapframe))
+            }
+            SYS_abort_with_payload => Ok(bsd_syscalls::sys_abort_with_payload(self, trapframe)),
+            SYS_crossarch_trap => Ok(bsd_syscalls::sys_crossarch_trap(self, trapframe)),
+            SYS_csrctl => Ok(bsd_syscalls::sys_csrctl(self, trapframe)),
+            SYS_ulock_wait => Ok(bsd_syscalls::sys_ulock_wait(self, trapframe)),
+            SYS_ulock_wake => Ok(bsd_syscalls::sys_ulock_wake(self, trapframe)),
+            SYS_ulock_wait2 => Ok(bsd_syscalls::sys_ulock_wait2(self, trapframe)),
             _ => {
                 crate::println!("[darwin] Unimplemented BSD syscall: {} (0x{:x})", num, num);
                 let task = mytask().unwrap();
@@ -327,9 +336,12 @@ impl DarwinAarch64Abi {
         }
     }
 
-    fn handle_thread_set_tsd_base(&mut self, trapframe: &mut Trapframe) -> Result<usize, &'static str> {
+    fn handle_thread_set_tsd_base(
+        &mut self,
+        trapframe: &mut Trapframe,
+    ) -> Result<usize, &'static str> {
         let tsd_base = trapframe.regs.reg[0];
-        crate::println!("[darwin] thread_set_tsd_base: x0={:#x}", tsd_base);
+        // crate::println!("[darwin] thread_set_tsd_base: x0={:#x}", tsd_base);
         let task = mytask().unwrap();
         trapframe.increment_pc_next(task);
 
@@ -363,9 +375,7 @@ impl DarwinAarch64Abi {
             MACH__kernelrpc_mach_port_allocate_trap => {
                 Ok(mach_syscalls::sys_mach_port_allocate(self, trapframe))
             }
-            MACH_task_for_pid => {
-                Ok(mach_syscalls::sys_task_for_pid(self, trapframe))
-            }
+            MACH_task_for_pid => Ok(mach_syscalls::sys_task_for_pid(self, trapframe)),
             MACH__kernelrpc_mach_port_deallocate_trap => {
                 Ok(mach_syscalls::sys_mach_port_deallocate(self, trapframe))
             }
@@ -376,11 +386,12 @@ impl DarwinAarch64Abi {
             MACH__kernelrpc_mach_vm_deallocate_trap => {
                 Ok(mach_syscalls::sys_vm_deallocate(self, trapframe))
             }
+            MACH__kernelrpc_mach_vm_protect_trap => {
+                Ok(mach_syscalls::sys_vm_protect(self, trapframe))
+            }
             MACH_mach_timebase_info_trap => {
                 Ok(mach_syscalls::sys_mach_timebase_info(self, trapframe))
             }
-            MACH_clock_get_time => Ok(mach_syscalls::sys_clock_get_time(self, trapframe)),
-            MACH_host_page_size => Ok(mach_syscalls::sys_host_page_size(self, trapframe)),
             MACH_thread_self_trap => {
                 crate::println!("[darwin] mach_thread_self");
                 let task = mytask().unwrap();
@@ -397,9 +408,7 @@ impl DarwinAarch64Abi {
                 trapframe.set_return_value(port);
                 Ok(port)
             }
-            MACH_thread_set_tsd_base => {
-                self.handle_thread_set_tsd_base(trapframe)
-            }
+            MACH_thread_set_tsd_base => self.handle_thread_set_tsd_base(trapframe),
             _ => {
                 crate::println!("[darwin] Unimplemented Mach trap: {}", num);
                 let task = mytask().unwrap();
@@ -663,13 +672,27 @@ impl AbiModule for DarwinAarch64Abi {
             0x80 => {
                 let syscall_num_signed = syscall_num as i32;
                 let result = if syscall_num_signed < 0 {
+                    crate::println!("[darwin] mach trap: {:#x}", syscall_num_signed);
                     self.dispatch_mach_syscall(syscall_num_signed, trapframe)
                 } else {
                     let bsd_num = syscall_num & 0xFFFFFF;
+                    crate::println!(
+                        "[darwin] bsd syscall: {:#x} (x16={:#x})",
+                        bsd_num,
+                        syscall_num
+                    );
                     self.dispatch_bsd_syscall(bsd_num, trapframe)
                 };
+                let carry = (trapframe.spsr >> 29) & 1;
+                crate::println!(
+                    "[darwin] syscall result: x0={:#x} carry={}",
+                    trapframe.get_return_value(),
+                    carry
+                );
                 if result.is_ok() {
                     trapframe.spsr &= !(1 << 29);
+                } else {
+                    trapframe.spsr |= 1 << 29;
                 }
                 result
             }
@@ -759,18 +782,33 @@ impl AbiModule for DarwinAarch64Abi {
 
         crate::println!("[darwin] execute_binary: loading Mach-O...");
         let (entry_point, dyld_path, mach_header_addr) =
-            macho_loader::load_macho_binary(file_obj, task)
-            .map_err(|e| { crate::println!("[darwin] load_macho_binary FAILED: {}", e); e })?;
-        crate::println!("[darwin] macho OK: entry={:#x} dyld={:?} mh={:#x}", entry_point, dyld_path, mach_header_addr);
+            macho_loader::load_macho_binary(file_obj, task).map_err(|e| {
+                crate::println!("[darwin] load_macho_binary FAILED: {}", e);
+                e
+            })?;
+        crate::println!(
+            "[darwin] macho OK: entry={:#x} dyld={:?} mh={:#x}",
+            entry_point,
+            dyld_path,
+            mach_header_addr
+        );
 
         if let Some(dyld) = dyld_path {
             crate::println!("[darwin] loading dyld from '{}'...", dyld);
-            let (dyld_entry, _base_delta) = macho_loader::load_dyld(&dyld, task)
-                .map_err(|e| { crate::println!("[darwin] load_dyld FAILED: {}", e); e })?;
-            crate::println!("[darwin] dyld OK: entry={:#x} delta={:#x}", dyld_entry, _base_delta);
+            let (dyld_entry, _base_delta) = macho_loader::load_dyld(&dyld, task).map_err(|e| {
+                crate::println!("[darwin] load_dyld FAILED: {}", e);
+                e
+            })?;
+            crate::println!(
+                "[darwin] dyld OK: entry={:#x} delta={:#x}",
+                dyld_entry,
+                _base_delta
+            );
 
-            macho_loader::setup_commpage(task)
-                .map_err(|e| { crate::println!("[darwin] setup_commpage FAILED: {}", e); e })?;
+            macho_loader::setup_commpage(task).map_err(|e| {
+                crate::println!("[darwin] setup_commpage FAILED: {}", e);
+                e
+            })?;
 
             *task.name.write() = argv
                 .first()

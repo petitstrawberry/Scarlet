@@ -8,8 +8,8 @@
 use core::arch::asm;
 
 use crate::arch::{Trapframe, get_cpu};
-use crate::sched::scheduler::get_scheduler;
 use crate::println;
+use crate::sched::scheduler::get_scheduler;
 
 // --- PAC branch instruction detection ---
 
@@ -148,16 +148,22 @@ fn emulate_rcpc(trapframe: &mut Trapframe, instr: u32, task: &crate::task::Task)
     if is_store {
         // STLLR → plain store
         if is_64bit {
-            unsafe { core::ptr::write_volatile(kva_addr as *mut u64, trapframe.regs.reg[rt] as u64) };
+            unsafe {
+                core::ptr::write_volatile(kva_addr as *mut u64, trapframe.regs.reg[rt] as u64)
+            };
         } else {
-            unsafe { core::ptr::write_volatile(kva_addr as *mut u32, trapframe.regs.reg[rt] as u32) };
+            unsafe {
+                core::ptr::write_volatile(kva_addr as *mut u32, trapframe.regs.reg[rt] as u32)
+            };
         }
     } else {
         // LDAPR → plain load
         if is_64bit {
-            trapframe.regs.reg[rt] = unsafe { core::ptr::read_volatile(kva_addr as *const u64) } as usize;
+            trapframe.regs.reg[rt] =
+                unsafe { core::ptr::read_volatile(kva_addr as *const u64) } as usize;
         } else {
-            trapframe.regs.reg[rt] = unsafe { core::ptr::read_volatile(kva_addr as *const u32) } as usize;
+            trapframe.regs.reg[rt] =
+                unsafe { core::ptr::read_volatile(kva_addr as *const u32) } as usize;
         }
     }
 
@@ -276,7 +282,14 @@ fn do_swp_64(trapframe: &mut Trapframe, rs: usize, rt: usize, addr: usize) {
 
 // --- LDADD/CLR/EOR/SET/SMAX/SMIN/UMAX/UMIN: Rt = [Rn]; [Rn] = [Rn] OP Rs ---
 
-fn do_lse_binop_32(trapframe: &mut Trapframe, opcode: u8, o3: u8, rs: usize, rt: usize, addr: usize) {
+fn do_lse_binop_32(
+    trapframe: &mut Trapframe,
+    opcode: u8,
+    o3: u8,
+    rs: usize,
+    rt: usize,
+    addr: usize,
+) {
     let ptr = addr as *mut u32;
     let old_val = unsafe { core::ptr::read_volatile(ptr) };
     let rs_val = trapframe.regs.reg[rs] as u32;
@@ -297,7 +310,14 @@ fn do_lse_binop_32(trapframe: &mut Trapframe, opcode: u8, o3: u8, rs: usize, rt:
     trapframe.regs.reg[rt] = old_val as usize;
 }
 
-fn do_lse_binop_64(trapframe: &mut Trapframe, opcode: u8, o3: u8, rs: usize, rt: usize, addr: usize) {
+fn do_lse_binop_64(
+    trapframe: &mut Trapframe,
+    opcode: u8,
+    o3: u8,
+    rs: usize,
+    rt: usize,
+    addr: usize,
+) {
     let ptr = addr as *mut u64;
     let old_val = unsafe { core::ptr::read_volatile(ptr) };
     let rs_val = trapframe.regs.reg[rs] as u64;

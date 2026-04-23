@@ -139,7 +139,10 @@ pub fn arch_exception_handler(trapframe: &mut Trapframe, trap_kind: usize) {
             print_trap_info(trapframe, esr);
             crate::println!(
                 "[trap] unhandled: ESR={:#x} EC={:?} FAR={:#x} ELR={:#x}",
-                esr, ec, get_far_el1(), trapframe.elr,
+                esr,
+                ec,
+                get_far_el1(),
+                trapframe.elr,
             );
             loop {
                 unsafe { asm!("wfi") }
@@ -165,7 +168,10 @@ pub fn arch_exception_handler(trapframe: &mut Trapframe, trap_kind: usize) {
             print_trap_info(trapframe, esr);
             crate::println!(
                 "[trap] unhandled: kind={} ESR={:#x} FAR={:#x} ELR={:#x}",
-                trap_kind, esr, get_far_el1(), trapframe.elr,
+                trap_kind,
+                esr,
+                get_far_el1(),
+                trapframe.elr,
             );
             loop {
                 unsafe { asm!("wfi") }
@@ -176,16 +182,71 @@ pub fn arch_exception_handler(trapframe: &mut Trapframe, trap_kind: usize) {
 
 fn handle_brk(trapframe: &mut Trapframe, esr: u64) {
     let imm = (esr & 0xFFFF) as u32;
+    let task = mytask().unwrap();
+
+    if imm == 0xb001 {
+        let x0 = trapframe.regs.reg[0];
+        let x1 = trapframe.regs.reg[1];
+        let lr = trapframe.regs.reg[30];
+        crate::println!("[darwin] dyld halt: x0={:#x} x1={:#x} LR={:#x}", x0, x1, lr);
+
+        if x1 > 0x1000 {
+            if let Some(kva) = task.vm_manager.translate_to_kva(x1) {
+                let bytes = unsafe { core::slice::from_raw_parts(kva as *const u8, 256) };
+                crate::print!("[darwin] halt msg=\"");
+                for &b in bytes.iter() {
+                    if b >= 0x20 && b < 0x7f {
+                        crate::print!("{}", b as char);
+                    } else {
+                        break;
+                    }
+                }
+                crate::println!("\"");
+            } else {
+                crate::println!("[darwin] halt msg: could not translate x1={:#x}", x1);
+            }
+        }
+
+        if x0 > 0x1000 && x0 != x1 {
+            if let Some(kva) = task.vm_manager.translate_to_kva(x0) {
+                let bytes = unsafe { core::slice::from_raw_parts(kva as *const u8, 256) };
+                crate::print!("[darwin] halt x0-str=\"");
+                for &b in bytes.iter() {
+                    if b >= 0x20 && b < 0x7f {
+                        crate::print!("{}", b as char);
+                    } else {
+                        break;
+                    }
+                }
+                crate::println!("\"");
+            }
+        }
+
+        trapframe.increment_pc_next(task);
+        task.exit(128 + 6);
+        return;
+    }
+
     let x0 = trapframe.regs.reg[0];
     let x1 = trapframe.regs.reg[1];
     let lr = trapframe.regs.reg[30];
     let x8 = trapframe.regs.reg[8];
     crate::println!("[darwin] dyld BRK #{:#x} at ELR={:#x}", imm, trapframe.elr);
-    crate::println!("[darwin]   x0={:#x} x1={:#x} LR={:#x} x8={:#x}", x0, x1, lr, x8);
+    crate::println!(
+        "[darwin]   x0={:#x} x1={:#x} LR={:#x} x8={:#x}",
+        x0,
+        x1,
+        lr,
+        x8
+    );
 
     let task = mytask().unwrap();
 
-    crate::println!("[darwin]   TPIDRRO_EL0={:#x} tpidr_el0={:#x}", trapframe.tpidrro_el0, trapframe.tpidr_el0);
+    crate::println!(
+        "[darwin]   TPIDRRO_EL0={:#x} tpidr_el0={:#x}",
+        trapframe.tpidrro_el0,
+        trapframe.tpidr_el0
+    );
     let tpidrro = trapframe.tpidrro_el0 as usize;
     if tpidrro > 0x1000 {
         if let Some(kva) = task.vm_manager.translate_to_kva(tpidrro) {
@@ -324,12 +385,17 @@ fn print_trap_info(trapframe: &Trapframe, esr: u64) {
         trapframe.regs.reg[2],
         trapframe.regs.reg[3]
     );
-    crate::println!("x4={:#x} x5={:#x} x6={:#x} x7={:#x}",
+    crate::println!(
+        "x4={:#x} x5={:#x} x6={:#x} x7={:#x}",
         trapframe.regs.reg[4],
         trapframe.regs.reg[5],
         trapframe.regs.reg[6],
         trapframe.regs.reg[7]
     );
     crate::println!("TPIDR_EL0={:#x}", trapframe.tpidr_el0);
-    crate::println!("x8={:#x} x9={:#x}", trapframe.regs.reg[8], trapframe.regs.reg[9]);
+    crate::println!(
+        "x8={:#x} x9={:#x}",
+        trapframe.regs.reg[8],
+        trapframe.regs.reg[9]
+    );
 }

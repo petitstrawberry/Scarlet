@@ -454,3 +454,17 @@ pub fn sys_host_page_size(abi: &mut DarwinAarch64Abi, trapframe: &mut Trapframe)
     trapframe.set_return_value(KERN_SUCCESS as usize);
     0
 }
+
+pub fn sys_vm_protect(abi: &mut DarwinAarch64Abi, trapframe: &mut Trapframe) -> usize {
+    let task = mytask().unwrap();
+    trapframe.increment_pc_next(task);
+
+    let _target_task = trapframe.get_arg(0);
+    let _address = trapframe.get_arg(1);
+    let _size = trapframe.get_arg(2);
+    let _set_maximum = trapframe.get_arg(3) as i32;
+    let _new_protection = trapframe.get_arg(4) as i32;
+
+    trapframe.set_return_value(KERN_SUCCESS as usize);
+    0
+}

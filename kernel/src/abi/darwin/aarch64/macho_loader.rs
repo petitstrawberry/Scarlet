@@ -135,7 +135,9 @@ struct DyldChainedFixupsHeader {
 /// Given a file object positioned at offset 0, detect fat/universal Mach-O and return
 /// the file offset of the arm64 slice (or 0 if it's already a thin Mach-O).
 fn find_arm64_slice(file_obj: &dyn FileObject) -> Result<u64, &'static str> {
-    file_obj.seek(SeekFrom::Start(0)).map_err(|_| "Failed to seek")?;
+    file_obj
+        .seek(SeekFrom::Start(0))
+        .map_err(|_| "Failed to seek")?;
     let mut magic_buf = [0u8; 4];
     if let Err(e) = read_exact(file_obj, &mut magic_buf) {
         crate::println!("[darwin] find_arm64_slice: failed reading magic: {}", e);
@@ -143,14 +145,20 @@ fn find_arm64_slice(file_obj: &dyn FileObject) -> Result<u64, &'static str> {
     }
     let magic_be = u32::from_be_bytes(magic_buf);
     let magic_le = u32::from_le_bytes(magic_buf);
-    crate::println!("[darwin] find_arm64_slice: magic_be=0x{:x} magic_le=0x{:x}", magic_be, magic_le);
+    crate::println!(
+        "[darwin] find_arm64_slice: magic_be=0x{:x} magic_le=0x{:x}",
+        magic_be,
+        magic_le
+    );
 
     if magic_le == MH_MAGIC_64 {
         return Ok(0);
     }
 
     if magic_be == FAT_MAGIC {
-        file_obj.seek(SeekFrom::Start(0)).map_err(|_| "Failed to seek")?;
+        file_obj
+            .seek(SeekFrom::Start(0))
+            .map_err(|_| "Failed to seek")?;
         let mut fat_header_bytes = [0u8; size_of::<FatHeader>()];
         read_exact(file_obj, &mut fat_header_bytes)?;
         let fat_hdr = read_struct::<FatHeader>(&fat_header_bytes)?;
@@ -174,7 +182,14 @@ fn find_arm64_slice(file_obj: &dyn FileObject) -> Result<u64, &'static str> {
             let cpusubtype = u32::from_be(arch.cpusubtype);
             let offset = u32::from_be(arch.offset);
             let size = u32::from_be(arch.size);
-            crate::println!("[darwin] fat arch[{}]: cputype=0x{:x} subtype=0x{:x} offset={} size={}", i, cputype, cpusubtype, offset, size);
+            crate::println!(
+                "[darwin] fat arch[{}]: cputype=0x{:x} subtype=0x{:x} offset={} size={}",
+                i,
+                cputype,
+                cpusubtype,
+                offset,
+                size
+            );
 
             if cputype == CPU_TYPE_ARM64 {
                 crate::println!("[darwin] Fat binary: arm64 slice at offset {}", offset);
@@ -185,7 +200,9 @@ fn find_arm64_slice(file_obj: &dyn FileObject) -> Result<u64, &'static str> {
     }
 
     if magic_be == FAT_MAGIC_64 {
-        file_obj.seek(SeekFrom::Start(0)).map_err(|_| "Failed to seek")?;
+        file_obj
+            .seek(SeekFrom::Start(0))
+            .map_err(|_| "Failed to seek")?;
         let mut fat_header_bytes = [0u8; size_of::<FatHeader>()];
         read_exact(file_obj, &mut fat_header_bytes)?;
         let fat_hdr = read_struct::<FatHeader>(&fat_header_bytes)?;
@@ -193,7 +210,9 @@ fn find_arm64_slice(file_obj: &dyn FileObject) -> Result<u64, &'static str> {
 
         for i in 0..nfat {
             let arch_off = size_of::<FatHeader>() as u64 + i as u64 * size_of::<FatArch64>() as u64;
-            file_obj.seek(SeekFrom::Start(arch_off)).map_err(|_| "Failed to seek fat arch64")?;
+            file_obj
+                .seek(SeekFrom::Start(arch_off))
+                .map_err(|_| "Failed to seek fat arch64")?;
             let mut arch_bytes = [0u8; size_of::<FatArch64>()];
             read_exact(file_obj, &mut arch_bytes)?;
             let arch = read_struct::<FatArch64>(&arch_bytes)?;
@@ -202,7 +221,10 @@ fn find_arm64_slice(file_obj: &dyn FileObject) -> Result<u64, &'static str> {
 
             if cputype == CPU_TYPE_ARM64 {
                 let slice_offset = u64::from_be(arch.offset);
-                crate::println!("[darwin] Fat64 binary: arm64 slice at offset {}", slice_offset);
+                crate::println!(
+                    "[darwin] Fat64 binary: arm64 slice at offset {}",
+                    slice_offset
+                );
                 return Ok(slice_offset);
             }
         }
@@ -229,7 +251,12 @@ pub fn load_macho_binary(
 
     crate::println!(
         "[darwin] header: magic=0x{:x} cputype=0x{:x} subtype=0x{:x} filetype={} ncmds={} sizeofcmds={}",
-        header.magic, header.cputype, header.cpusubtype, header.filetype, header.ncmds, header.sizeofcmds
+        header.magic,
+        header.cputype,
+        header.cpusubtype,
+        header.filetype,
+        header.ncmds,
+        header.sizeofcmds
     );
 
     if header.magic != MH_MAGIC_64 {
@@ -276,7 +303,11 @@ pub fn load_macho_binary(
         }
 
         let command_bytes = &load_commands[offset..next_offset];
-        crate::println!("[darwin] load cmd 0x{:x} size={}", load_cmd.cmd, load_cmd.cmdsize);
+        crate::println!(
+            "[darwin] load cmd 0x{:x} size={}",
+            load_cmd.cmd,
+            load_cmd.cmdsize
+        );
         match load_cmd.cmd {
             LC_SEGMENT_64 => {
                 if cmdsize < size_of::<SegmentCommand64>() {
@@ -327,7 +358,11 @@ pub fn load_macho_binary(
     for segment in &segments {
         crate::println!(
             "[darwin] mapping segment: vmaddr=0x{:x} vmsize=0x{:x} fileoff=0x{:x} filesize=0x{:x} prot={}",
-            segment.vmaddr, segment.vmsize, segment.fileoff, segment.filesize, segment.initprot
+            segment.vmaddr,
+            segment.vmsize,
+            segment.fileoff,
+            segment.filesize,
+            segment.initprot
         );
         map_segment(file_obj, task, segment, slice_offset)?;
     }
@@ -538,7 +573,9 @@ fn apply_chained_fixups(
         return Err("Chained fixups data too small for header");
     }
 
-    let header = read_struct::<DyldChainedFixupsHeader>(&fixup_data[..size_of::<DyldChainedFixupsHeader>()])?;
+    let header = read_struct::<DyldChainedFixupsHeader>(
+        &fixup_data[..size_of::<DyldChainedFixupsHeader>()],
+    )?;
     if header.fixups_version != 0 {
         return Err("Unsupported dyld chained fixups version");
     }
@@ -549,7 +586,9 @@ fn apply_chained_fixups(
     }
 
     let seg_count = u32::from_le_bytes(
-        fixup_data[starts_base..starts_base + 4].try_into().map_err(|_| "bad seg_count")?,
+        fixup_data[starts_base..starts_base + 4]
+            .try_into()
+            .map_err(|_| "bad seg_count")?,
     ) as usize;
 
     for seg_idx in 0..seg_count {
@@ -558,7 +597,9 @@ fn apply_chained_fixups(
             return Err("Chained fixups seg_info_offset out of bounds");
         }
         let seg_info_offset = u32::from_le_bytes(
-            fixup_data[off_pos..off_pos + 4].try_into().map_err(|_| "bad offset")?,
+            fixup_data[off_pos..off_pos + 4]
+                .try_into()
+                .map_err(|_| "bad offset")?,
         ) as usize;
 
         if seg_info_offset == 0 {
@@ -572,9 +613,8 @@ fn apply_chained_fixups(
         let seg_data = &fixup_data[abs_offset..];
         let page_size = u16::from_le_bytes([seg_data[4], seg_data[5]]);
         let pointer_format = u16::from_le_bytes([seg_data[6], seg_data[7]]);
-        let segment_offset = u64::from_le_bytes(
-            seg_data[8..16].try_into().map_err(|_| "bad seg offset")?,
-        );
+        let segment_offset =
+            u64::from_le_bytes(seg_data[8..16].try_into().map_err(|_| "bad seg offset")?);
         let page_count = u16::from_le_bytes([seg_data[20], seg_data[21]]) as usize;
 
         // crate::println!(
@@ -616,7 +656,6 @@ fn apply_chained_fixups(
             let stride: usize = 8;
             let mut chain_offset = page_start as usize * stride;
 
-
             let mut chain_step = 0usize;
             loop {
                 let entry_addr = page_addr + chain_offset;
@@ -650,7 +689,9 @@ fn apply_chained_fixups(
                 //     entry_addr, current_value, new_value, next
                 // );
 
-                unsafe { ptr::write(kva as *mut u64, new_value); }
+                unsafe {
+                    ptr::write(kva as *mut u64, new_value);
+                }
 
                 if next == 0 {
                     break;
@@ -747,7 +788,11 @@ pub fn load_dyld(dyld_path: &str, task: &Task) -> Result<(usize, i64), &'static 
         }
 
         let command_bytes = &load_commands[offset..next_offset];
-        crate::println!("[darwin] dyld cmd 0x{:x} size={}", load_cmd.cmd, load_cmd.cmdsize);
+        crate::println!(
+            "[darwin] dyld cmd 0x{:x} size={}",
+            load_cmd.cmd,
+            load_cmd.cmdsize
+        );
         match load_cmd.cmd {
             LC_SEGMENT_64 => {
                 if cmdsize >= size_of::<SegmentCommand64>() {
@@ -775,7 +820,11 @@ pub fn load_dyld(dyld_path: &str, task: &Task) -> Result<(usize, i64), &'static 
                     let fc = read_struct::<LinkEditDataCommand>(
                         &command_bytes[..size_of::<LinkEditDataCommand>()],
                     )?;
-                    crate::println!("[darwin] dyld LC_DYLD_CHAINED_FIXUPS: dataoff={} datasize={}", fc.dataoff, fc.datasize);
+                    crate::println!(
+                        "[darwin] dyld LC_DYLD_CHAINED_FIXUPS: dataoff={} datasize={}",
+                        fc.dataoff,
+                        fc.datasize
+                    );
                     chained_fixups = Some((fc.dataoff, fc.datasize));
                 }
             }
@@ -810,11 +859,20 @@ pub fn load_dyld(dyld_path: &str, task: &Task) -> Result<(usize, i64), &'static 
 
     let base_delta = target_base as i64 - min_vmaddr as i64;
 
-    crate::println!("[darwin] dyld min_vmaddr={:#x} target_base={:#x} base_delta={:#x}", min_vmaddr, target_base, base_delta);
+    crate::println!(
+        "[darwin] dyld min_vmaddr={:#x} target_base={:#x} base_delta={:#x}",
+        min_vmaddr,
+        target_base,
+        base_delta
+    );
     for segment in &segments {
         crate::println!(
             "[darwin] dyld seg: vmaddr={:#x} vmsize={:#x} fileoff={:#x} filesize={:#x} prot={}",
-            segment.vmaddr, segment.vmsize, segment.fileoff, segment.filesize, segment.initprot
+            segment.vmaddr,
+            segment.vmsize,
+            segment.fileoff,
+            segment.filesize,
+            segment.initprot
         );
         map_segment_with_base(raw_file, task, segment, base_delta, slice_offset)?;
     }
@@ -881,7 +939,10 @@ pub fn setup_commpage(task: &Task) -> Result<(), &'static str> {
 
     let mmap = VirtualMemoryMap::new(
         MemoryArea::new(paddr, paddr + SHARED_REGION_SIZE - 1),
-        MemoryArea::new(SHARED_REGION_BASE, SHARED_REGION_BASE + SHARED_REGION_SIZE - 1),
+        MemoryArea::new(
+            SHARED_REGION_BASE,
+            SHARED_REGION_BASE + SHARED_REGION_SIZE - 1,
+        ),
         VirtualMemoryPermission::Read as usize | VirtualMemoryPermission::User as usize,
         false,
         None,
@@ -914,11 +975,7 @@ pub fn setup_commpage(task: &Task) -> Result<(), &'static str> {
         );
 
         let cpu_caps_64_offset = 0x010usize;
-        let cpu_caps: u64 = (1u64 << 7)
-            | (1u64 << 8)
-            | (1u64 << 11)
-            | (1u64 << 17)
-            | (1u64 << 40);
+        let cpu_caps: u64 = (1u64 << 7) | (1u64 << 8) | (1u64 << 11) | (1u64 << 17) | (1u64 << 40);
         ptr::write((ro_kva + cpu_caps_64_offset) as *mut u64, cpu_caps);
         ptr::write((rw_kva + cpu_caps_64_offset) as *mut u64, cpu_caps);
 
@@ -961,7 +1018,10 @@ pub fn setup_commpage(task: &Task) -> Result<(), &'static str> {
 
     crate::println!(
         "[darwin] shared region mapped at {:#x} size={:#x} (ro at +{:#x}, rw at +{:#x})",
-        SHARED_REGION_BASE, SHARED_REGION_SIZE, COMMPAGE_RO_OFFSET, COMMPAGE_RW_OFFSET
+        SHARED_REGION_BASE,
+        SHARED_REGION_SIZE,
+        COMMPAGE_RO_OFFSET,
+        COMMPAGE_RW_OFFSET
     );
     Ok(())
 }
@@ -998,7 +1058,11 @@ pub fn setup_tls(task: &Task, thread_port: u32) -> Result<usize, &'static str> {
         ptr::write((kva as *mut u8).add(0x18) as *mut u64, thread_port as u64);
     }
 
-    crate::println!("[darwin] TLS page at {:#x} (thread_port={})", tls_vaddr, thread_port);
+    crate::println!(
+        "[darwin] TLS page at {:#x} (thread_port={})",
+        tls_vaddr,
+        thread_port
+    );
     Ok(tls_vaddr)
 }
 

@@ -1463,68 +1463,83 @@ pub fn sys_mmap(abi: &mut DarwinAarch64Abi, trapframe: &mut Trapframe) -> usize 
                                         removed_map.vmarea.size(),
                                     );
                                 }
-        }
-    }
-}
+                            }
+                        }
+                    }
 
-pub fn sys_thread_selfid(_abi: &mut DarwinAarch64Abi, trapframe: &mut Trapframe) -> usize {
-    let task = mytask().unwrap();
-    trapframe.increment_pc_next(task);
-    let tid = task.get_id() as u64;
-    crate::println!("[darwin] thread_selfid: tid={:#x}", tid);
-    trapframe.set_return_value(tid as usize);
-    tid as usize
-}
+                    pub fn sys_thread_selfid(
+                        _abi: &mut DarwinAarch64Abi,
+                        trapframe: &mut Trapframe,
+                    ) -> usize {
+                        let task = mytask().unwrap();
+                        trapframe.increment_pc_next(task);
+                        let tid = task.get_id() as u64;
+                        crate::println!("[darwin] thread_selfid: tid={:#x}", tid);
+                        trapframe.set_return_value(tid as usize);
+                        tid as usize
+                    }
 
-pub fn sys_proc_info(_abi: &mut DarwinAarch64Abi, trapframe: &mut Trapframe) -> usize {
-    let task = mytask().unwrap();
-    trapframe.increment_pc_next(task);
-    trapframe.set_return_value(0);
-    0
-}
+                    pub fn sys_proc_info(
+                        _abi: &mut DarwinAarch64Abi,
+                        trapframe: &mut Trapframe,
+                    ) -> usize {
+                        let task = mytask().unwrap();
+                        trapframe.increment_pc_next(task);
+                        trapframe.set_return_value(0);
+                        0
+                    }
 
-pub fn sys_getentropy(_abi: &mut DarwinAarch64Abi, trapframe: &mut Trapframe) -> usize {
-    let task = mytask().unwrap();
-    let buf = trapframe.get_arg(0);
-    let size = trapframe.get_arg(1);
-    trapframe.increment_pc_next(task);
+                    pub fn sys_getentropy(
+                        _abi: &mut DarwinAarch64Abi,
+                        trapframe: &mut Trapframe,
+                    ) -> usize {
+                        let task = mytask().unwrap();
+                        let buf = trapframe.get_arg(0);
+                        let size = trapframe.get_arg(1);
+                        trapframe.increment_pc_next(task);
 
-    if size > 256 {
-        trapframe.set_return_value(EINVAL);
-        return EINVAL;
-    }
+                        if size > 256 {
+                            trapframe.set_return_value(EINVAL);
+                            return EINVAL;
+                        }
 
-    if let Some(kva) = task.vm_manager.translate_to_kva(buf) {
-        let bytes = unsafe { core::slice::from_raw_parts_mut(kva as *mut u8, size) };
-        for b in bytes.iter_mut() {
-            *b = 0x42;
-        }
-        trapframe.set_return_value(0);
-        0
-    } else {
-        trapframe.set_return_value(EFAULT);
-        EFAULT
-    }
-}
+                        if let Some(kva) = task.vm_manager.translate_to_kva(buf) {
+                            let bytes =
+                                unsafe { core::slice::from_raw_parts_mut(kva as *mut u8, size) };
+                            for b in bytes.iter_mut() {
+                                *b = 0x42;
+                            }
+                            trapframe.set_return_value(0);
+                            0
+                        } else {
+                            trapframe.set_return_value(EFAULT);
+                            EFAULT
+                        }
+                    }
 
-pub fn sys_getlogin(_abi: &mut DarwinAarch64Abi, trapframe: &mut Trapframe) -> usize {
-    let task = mytask().unwrap();
-    let namebuf = trapframe.get_arg(0);
-    let _namelen = trapframe.get_arg(1);
-    trapframe.increment_pc_next(task);
+                    pub fn sys_getlogin(
+                        _abi: &mut DarwinAarch64Abi,
+                        trapframe: &mut Trapframe,
+                    ) -> usize {
+                        let task = mytask().unwrap();
+                        let namebuf = trapframe.get_arg(0);
+                        let _namelen = trapframe.get_arg(1);
+                        trapframe.increment_pc_next(task);
 
-    let login = b"root\0";
-    if let Some(kva) = task.vm_manager.translate_to_kva(namebuf) {
-        let dst = unsafe { core::slice::from_raw_parts_mut(kva as *mut u8, login.len()) };
-        dst.copy_from_slice(login);
-        trapframe.set_return_value(0);
-        0
-    } else {
-        trapframe.set_return_value(EFAULT);
-        EFAULT
-    }
-}
-                 }
+                        let login = b"root\0";
+                        if let Some(kva) = task.vm_manager.translate_to_kva(namebuf) {
+                            let dst = unsafe {
+                                core::slice::from_raw_parts_mut(kva as *mut u8, login.len())
+                            };
+                            dst.copy_from_slice(login);
+                            trapframe.set_return_value(0);
+                            0
+                        } else {
+                            trapframe.set_return_value(EFAULT);
+                            EFAULT
+                        }
+                    }
+                }
 
                 if let Some(removed_mappings) = removed_mappings_opt {
                     for removed_map in removed_mappings {
@@ -2234,13 +2249,168 @@ pub fn sys_getlogin(_abi: &mut DarwinAarch64Abi, trapframe: &mut Trapframe) -> u
     trapframe.increment_pc_next(task);
 
     let login = b"root\0";
-    if let Some(kva) = task.vm_manager.translate_to_kva(namebuf) {
-        let dst = unsafe { core::slice::from_raw_parts_mut(kva as *mut u8, login.len()) };
-        dst.copy_from_slice(login);
-        trapframe.set_return_value(0);
-        0
-    } else {
-        trapframe.set_return_value(EFAULT);
-        EFAULT
+    match crate::library::std::usercopy::copy_to_user(task, namebuf, login) {
+        Ok(()) => {
+            trapframe.set_return_value(0);
+            0
+        }
+        Err(_) => {
+            trapframe.set_return_value(EFAULT);
+            EFAULT
+        }
     }
+}
+
+pub fn sys_abort_with_payload(_abi: &mut DarwinAarch64Abi, trapframe: &mut Trapframe) -> usize {
+    let reason_namespace = trapframe.regs.reg[0] as u32;
+    let reason_code = trapframe.regs.reg[1] as u64;
+    let reason_string_ptr = trapframe.regs.reg[4];
+
+    let task = mytask().unwrap();
+
+    if reason_string_ptr > 0x1000 {
+        if let Some(kva) = task.vm_manager.translate_to_kva(reason_string_ptr) {
+            let bytes = unsafe { core::slice::from_raw_parts(kva as *const u8, 256) };
+            crate::print!(
+                "[darwin] abort_with_payload: ns={} code={}: \"",
+                reason_namespace,
+                reason_code
+            );
+            for &b in bytes.iter() {
+                if b >= 0x20 && b < 0x7f {
+                    crate::print!("{}", b as char);
+                } else {
+                    break;
+                }
+            }
+            crate::println!("\"");
+        }
+    } else {
+        crate::println!(
+            "[darwin] abort_with_payload: ns={} code={}",
+            reason_namespace,
+            reason_code
+        );
+    }
+
+    trapframe.increment_pc_next(task);
+    task.exit(reason_code as i32);
+    0
+}
+
+pub fn sys_terminate_with_payload(abi: &mut DarwinAarch64Abi, trapframe: &mut Trapframe) -> usize {
+    sys_abort_with_payload(abi, trapframe)
+}
+
+pub fn sys_crossarch_trap(_abi: &mut DarwinAarch64Abi, trapframe: &mut Trapframe) -> usize {
+    let task = mytask().unwrap();
+    trapframe.increment_pc_next(task);
+    trapframe.set_return_value(ENOTSUP);
+    ENOTSUP
+}
+
+pub fn sys_csrctl(_abi: &mut DarwinAarch64Abi, trapframe: &mut Trapframe) -> usize {
+    let task = mytask().unwrap();
+    trapframe.increment_pc_next(task);
+    trapframe.set_return_value(0);
+    0
+}
+
+// XNU bsd/sys/ulock.h opcodes and flags
+const UL_COMPARE_AND_WAIT: u32 = 1;
+const UL_UNFAIR_LOCK: u32 = 2;
+const UL_COMPARE_AND_WAIT_SHARED: u32 = 3;
+const UL_UNFAIR_LOCK64_SHARED: u32 = 4;
+const UL_COMPARE_AND_WAIT64: u32 = 5;
+const UL_COMPARE_AND_WAIT64_SHARED: u32 = 6;
+
+const ULF_NO_ERRNO: u32 = 0x01000000;
+const UL_OPCODE_MASK: u32 = 0x000000FF;
+
+pub fn sys_ulock_wake(_abi: &mut DarwinAarch64Abi, trapframe: &mut Trapframe) -> usize {
+    let task = mytask().unwrap();
+    let operation = trapframe.get_arg(0) as u32;
+    let opcode = operation & UL_OPCODE_MASK;
+    trapframe.increment_pc_next(task);
+
+    match opcode {
+        UL_UNFAIR_LOCK
+        | UL_COMPARE_AND_WAIT
+        | UL_COMPARE_AND_WAIT_SHARED
+        | UL_COMPARE_AND_WAIT64
+        | UL_COMPARE_AND_WAIT64_SHARED
+        | UL_UNFAIR_LOCK64_SHARED => {
+            trapframe.set_return_value(0);
+            0
+        }
+        _ => {
+            trapframe.spsr |= 1 << 29;
+            trapframe.set_return_value(EINVAL);
+            EINVAL
+        }
+    }
+}
+
+pub fn sys_ulock_wait(_abi: &mut DarwinAarch64Abi, trapframe: &mut Trapframe) -> usize {
+    let task = mytask().unwrap();
+    let operation = trapframe.get_arg(0) as u32;
+    let addr = trapframe.get_arg(1);
+    let value = trapframe.get_arg(2);
+    let opcode = operation & UL_OPCODE_MASK;
+    let no_errno = operation & ULF_NO_ERRNO != 0;
+    trapframe.increment_pc_next(task);
+
+    match opcode {
+        UL_UNFAIR_LOCK | UL_COMPARE_AND_WAIT | UL_COMPARE_AND_WAIT_SHARED => {
+            let mut buf = [0u8; 4];
+            match crate::library::std::usercopy::copy_from_user(&task, addr, &mut buf) {
+                Ok(()) => {
+                    trapframe.set_return_value(0);
+                    0
+                }
+                Err(_) => {
+                    if no_errno {
+                        trapframe.set_return_value(!(EFAULT as usize) + 1);
+                    } else {
+                        trapframe.spsr |= 1 << 29;
+                        trapframe.set_return_value(EFAULT);
+                    }
+                    EFAULT
+                }
+            }
+        }
+        UL_COMPARE_AND_WAIT64 | UL_COMPARE_AND_WAIT64_SHARED | UL_UNFAIR_LOCK64_SHARED => {
+            let mut buf = [0u8; 8];
+            match crate::library::std::usercopy::copy_from_user(&task, addr, &mut buf) {
+                Ok(()) => {
+                    trapframe.set_return_value(0);
+                    0
+                }
+                Err(_) => {
+                    if no_errno {
+                        trapframe.set_return_value(!(EFAULT as usize) + 1);
+                    } else {
+                        trapframe.spsr |= 1 << 29;
+                        trapframe.set_return_value(EFAULT);
+                    }
+                    EFAULT
+                }
+            }
+        }
+        _ => {
+            if no_errno {
+                trapframe.set_return_value(!(EINVAL as usize) + 1);
+            } else {
+                trapframe.spsr |= 1 << 29;
+                trapframe.set_return_value(EINVAL);
+            }
+            EINVAL
+        }
+    }
+}
+
+// ulock_wait2 differs from ulock_wait only in 64-bit timeout and extra value2 arg,
+// but the core wait logic is identical. Defer to sys_ulock_wait.
+pub fn sys_ulock_wait2(abi: &mut DarwinAarch64Abi, trapframe: &mut Trapframe) -> usize {
+    sys_ulock_wait(abi, trapframe)
 }

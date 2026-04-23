@@ -293,7 +293,11 @@ impl TransparentExecutor {
     fn open_file(path: &str, task: &Task) -> ExecutorResult<crate::object::KernelObject> {
         if let Some(vfs) = task.get_vfs() {
             let absolute_path = vfs.resolve_path_to_absolute(path);
-            crate::println!("[EXECUTOR] open_file: path='{}' absolute='{}'", path, absolute_path);
+            crate::println!(
+                "[EXECUTOR] open_file: path='{}' absolute='{}'",
+                path,
+                absolute_path
+            );
 
             match vfs.open(&absolute_path, 0) {
                 // O_RDONLY
