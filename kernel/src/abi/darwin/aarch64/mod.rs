@@ -328,6 +328,9 @@ impl DarwinAarch64Abi {
             SYS_ulock_wait => Ok(bsd_syscalls::sys_ulock_wait(self, trapframe)),
             SYS_ulock_wake => Ok(bsd_syscalls::sys_ulock_wake(self, trapframe)),
             SYS_ulock_wait2 => Ok(bsd_syscalls::sys_ulock_wait2(self, trapframe)),
+            SYS_stat => Ok(bsd_syscalls::sys_stat(self, trapframe)),
+            SYS_lstat => Ok(bsd_syscalls::sys_lstat(self, trapframe)),
+            SYS_fstat => Ok(bsd_syscalls::sys_fstat(self, trapframe)),
             _ => {
                 crate::println!("[darwin] Unimplemented BSD syscall: {} (0x{:x})", num, num);
                 let task = mytask().unwrap();

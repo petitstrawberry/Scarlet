@@ -441,7 +441,7 @@ pub fn sys_vm_map(abi: &mut DarwinAarch64Abi, trapframe: &mut Trapframe) -> usiz
     );
 
     let vaddr = if flags & VM_FLAGS_ANYWHERE != 0 || requested_addr == 0 {
-        if requested_addr != 0 {
+        if requested_addr != 0 && task.vm_manager.search_memory_map(requested_addr).is_none() {
             let num_pages = aligned_size / crate::environment::PAGE_SIZE;
             if let Some(pages) = crate::mem::page::ContiguousPages::new(num_pages) {
                 let paddr = pages.as_paddr();
@@ -459,10 +459,7 @@ pub fn sys_vm_map(abi: &mut DarwinAarch64Abi, trapframe: &mut Trapframe) -> usiz
                 );
                 match task.vm_manager.add_memory_map_fixed(mmap) {
                     Ok(_vec) => {
-                        crate::println!(
-                            "[darwin] vm_map: using requested addr {:#x}",
-                            requested_addr
-                        );
+                        crate::println!("[darwin] vm_map: using hint addr {:#x}", requested_addr);
                         if let Some(kva) = task.vm_manager.translate_to_kva(requested_addr) {
                             unsafe {
                                 core::ptr::write_bytes(kva as *mut u8, 0, aligned_size);
@@ -473,11 +470,6 @@ pub fn sys_vm_map(abi: &mut DarwinAarch64Abi, trapframe: &mut Trapframe) -> usiz
                                 unsafe {
                                     *(kaddr as *mut usize) = requested_addr;
                                 }
-                                crate::println!(
-                                    "[darwin] vm_map OK: wrote vaddr={:#x} to addr_ptr={:#x}",
-                                    requested_addr,
-                                    addr_ptr
-                                );
                             }
                         }
                         trapframe.set_return_value(KERN_SUCCESS as usize);
