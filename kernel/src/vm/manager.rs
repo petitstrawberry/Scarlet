@@ -756,7 +756,7 @@ impl VirtualMemoryManager {
         drop(g);
         // Check if there's space after the last memory map
         // For simplicity, we assume a reasonable upper limit for the address space
-        const MAX_USER_ADDR: usize = 0x80000000; // 2GB limit for user space
+        const MAX_USER_ADDR: usize = 0x0000_8000_0000_0000; // 128TB: ARM64 48-bit user VA limit
         if search_addr + aligned_size <= MAX_USER_ADDR {
             Some(search_addr)
         } else {

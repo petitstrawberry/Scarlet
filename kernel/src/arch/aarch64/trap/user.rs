@@ -284,6 +284,8 @@ pub extern "C" fn arch_user_trap_handler(trapframe: &mut Trapframe, trap_kind: u
     // simple kernel trap routine.
     set_trapvector(get_kernel_trapvector_paddr());
 
+    super::exception::check_traced_lock(trapframe, trap_kind);
+
     // trap_kind is now passed in x1 (argument 2), so no need to read from memory!
     if trap_kind == 1 || trap_kind == 2 {
         arch_irq_handler(trapframe, trap_kind);

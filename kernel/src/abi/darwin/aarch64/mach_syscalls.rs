@@ -3,6 +3,10 @@ use crate::abi::darwin::error::*;
 use crate::arch::Trapframe;
 use crate::task::mytask;
 
+// VM flags (from XNU mach/vm_statistics.h)
+const VM_FLAGS_FIXED: i32 = 0x0;
+const VM_FLAGS_ANYWHERE: i32 = 0x1;
+
 // mach_msg options
 const MACH_SEND_MSG: u32 = 0x01;
 const MACH_RCV_MSG: u32 = 0x02;
@@ -297,6 +301,14 @@ pub fn sys_vm_allocate(abi: &mut DarwinAarch64Abi, trapframe: &mut Trapframe) ->
     let size = trapframe.get_arg(2) as usize;
     let _flags = trapframe.get_arg(3) as i32;
 
+    crate::println!(
+        "[darwin] vm_allocate: task={:#x} addr_ptr={:#x} size={:#x} flags={:#x}",
+        _target_task,
+        addr_ptr,
+        size,
+        _flags
+    );
+
     let aligned_size =
         (size + crate::environment::PAGE_SIZE - 1) & !(crate::environment::PAGE_SIZE - 1);
 
@@ -306,9 +318,189 @@ pub fn sys_vm_allocate(abi: &mut DarwinAarch64Abi, trapframe: &mut Trapframe) ->
     {
         Some(addr) => addr,
         None => {
+            crate::println!(
+                "[darwin] vm_allocate: no space for size={:#x}",
+                aligned_size
+            );
             trapframe.set_return_value(KERN_NO_SPACE as usize);
             return usize::MAX;
         }
+    };
+
+    let num_pages = aligned_size / crate::environment::PAGE_SIZE;
+    let pages = match crate::mem::page::ContiguousPages::new(num_pages) {
+        Some(p) => p,
+        None => {
+            crate::println!("[darwin] vm_allocate: no pages for {} pages", num_pages);
+            trapframe.set_return_value(KERN_RESOURCE_SHORTAGE as usize);
+            return usize::MAX;
+        }
+    };
+
+    let paddr = pages.as_paddr();
+    let paddr_end = paddr + aligned_size;
+
+    let mmap = crate::vm::vmem::VirtualMemoryMap::new(
+        crate::vm::vmem::MemoryArea::new(paddr, paddr_end - 1),
+        crate::vm::vmem::MemoryArea::new(vaddr, vaddr + aligned_size - 1),
+        crate::vm::vmem::VirtualMemoryPermission::Read as usize
+            | crate::vm::vmem::VirtualMemoryPermission::Write as usize
+            | crate::vm::vmem::VirtualMemoryPermission::User as usize,
+        false,
+        None,
+    );
+
+    match task.vm_manager.add_memory_map(mmap) {
+        Ok(()) => {
+            if let Some(kva) = task.vm_manager.translate_to_kva(vaddr) {
+                unsafe {
+                    core::ptr::write_bytes(kva as *mut u8, 0, aligned_size);
+                }
+            }
+            if addr_ptr != 0 {
+                match task.vm_manager.translate_to_kva(addr_ptr) {
+                    Some(kaddr) => {
+                        unsafe {
+                            *(kaddr as *mut usize) = vaddr;
+                        }
+                        crate::println!(
+                            "[darwin] vm_allocate OK: wrote vaddr={:#x} to addr_ptr={:#x}",
+                            vaddr,
+                            addr_ptr
+                        );
+                    }
+                    None => {
+                        crate::println!(
+                            "[darwin] vm_allocate WARN: addr_ptr={:#x} not mapped, can't write back vaddr={:#x}",
+                            addr_ptr,
+                            vaddr
+                        );
+                    }
+                }
+            }
+            trapframe.set_return_value(KERN_SUCCESS as usize);
+            0
+        }
+        Err(e) => {
+            crate::println!(
+                "[darwin] vm_allocate FAIL: vaddr={:#x} size={:#x} paddr={:#x} err={}",
+                vaddr,
+                aligned_size,
+                paddr,
+                e
+            );
+            trapframe.set_return_value(KERN_FAILURE as usize);
+            usize::MAX
+        }
+    }
+}
+
+pub fn sys_vm_map(abi: &mut DarwinAarch64Abi, trapframe: &mut Trapframe) -> usize {
+    let task = mytask().unwrap();
+    trapframe.increment_pc_next(task);
+
+    let _target_task = trapframe.get_arg(0);
+    let addr_ptr = trapframe.get_arg(1);
+    let size = trapframe.get_arg(2) as usize;
+    let _mask = trapframe.get_arg(3);
+    let flags = trapframe.get_arg(4) as i32;
+    let _cur_protection = trapframe.get_arg(5);
+
+    crate::println!(
+        "[darwin] vm_map: addr_ptr={:#x} size={:#x} flags={:#x}",
+        addr_ptr,
+        size,
+        flags,
+    );
+
+    if size == 0 {
+        trapframe.set_return_value(KERN_INVALID_ARGUMENT as usize);
+        return usize::MAX;
+    }
+
+    let aligned_size =
+        (size + crate::environment::PAGE_SIZE - 1) & !(crate::environment::PAGE_SIZE - 1);
+
+    let requested_addr = if addr_ptr != 0 {
+        match task.vm_manager.translate_to_kva(addr_ptr) {
+            Some(kaddr) => unsafe { *(kaddr as *const usize) },
+            None => {
+                crate::println!("[darwin] vm_map: addr_ptr {:#x} not mapped", addr_ptr);
+                trapframe.set_return_value(KERN_INVALID_ARGUMENT as usize);
+                return usize::MAX;
+            }
+        }
+    } else {
+        0
+    };
+
+    crate::println!(
+        "[darwin] vm_map: requested_addr={:#x} flags_anywhere={}",
+        requested_addr,
+        flags & VM_FLAGS_ANYWHERE != 0,
+    );
+
+    let vaddr = if flags & VM_FLAGS_ANYWHERE != 0 || requested_addr == 0 {
+        if requested_addr != 0 {
+            let num_pages = aligned_size / crate::environment::PAGE_SIZE;
+            if let Some(pages) = crate::mem::page::ContiguousPages::new(num_pages) {
+                let paddr = pages.as_paddr();
+                let mmap = crate::vm::vmem::VirtualMemoryMap::new(
+                    crate::vm::vmem::MemoryArea::new(paddr, paddr + aligned_size - 1),
+                    crate::vm::vmem::MemoryArea::new(
+                        requested_addr,
+                        requested_addr + aligned_size - 1,
+                    ),
+                    crate::vm::vmem::VirtualMemoryPermission::Read as usize
+                        | crate::vm::vmem::VirtualMemoryPermission::Write as usize
+                        | crate::vm::vmem::VirtualMemoryPermission::User as usize,
+                    false,
+                    None,
+                );
+                match task.vm_manager.add_memory_map_fixed(mmap) {
+                    Ok(_vec) => {
+                        crate::println!(
+                            "[darwin] vm_map: using requested addr {:#x}",
+                            requested_addr
+                        );
+                        if let Some(kva) = task.vm_manager.translate_to_kva(requested_addr) {
+                            unsafe {
+                                core::ptr::write_bytes(kva as *mut u8, 0, aligned_size);
+                            }
+                        }
+                        if addr_ptr != 0 {
+                            if let Some(kaddr) = task.vm_manager.translate_to_kva(addr_ptr) {
+                                unsafe {
+                                    *(kaddr as *mut usize) = requested_addr;
+                                }
+                                crate::println!(
+                                    "[darwin] vm_map OK: wrote vaddr={:#x} to addr_ptr={:#x}",
+                                    requested_addr,
+                                    addr_ptr
+                                );
+                            }
+                        }
+                        trapframe.set_return_value(KERN_SUCCESS as usize);
+                        return 0;
+                    }
+                    Err(_) => {}
+                }
+            }
+        }
+        match task
+            .vm_manager
+            .find_unmapped_area(aligned_size, crate::environment::PAGE_SIZE)
+        {
+            Some(addr) => addr,
+            None => {
+                trapframe.set_return_value(KERN_NO_SPACE as usize);
+                return usize::MAX;
+            }
+        }
+    } else {
+        let aligned = requested_addr & !(crate::environment::PAGE_SIZE - 1);
+        crate::println!("[darwin] vm_map: FIXED at {:#x}", aligned);
+        aligned
     };
 
     let num_pages = aligned_size / crate::environment::PAGE_SIZE;
@@ -321,29 +513,63 @@ pub fn sys_vm_allocate(abi: &mut DarwinAarch64Abi, trapframe: &mut Trapframe) ->
     };
 
     let paddr = pages.as_paddr();
-    let paddr_end = paddr + aligned_size;
 
     let mmap = crate::vm::vmem::VirtualMemoryMap::new(
-        crate::vm::vmem::MemoryArea::new(paddr, paddr_end),
-        crate::vm::vmem::MemoryArea::new(vaddr, vaddr + aligned_size),
-        0x3,
+        crate::vm::vmem::MemoryArea::new(paddr, paddr + aligned_size - 1),
+        crate::vm::vmem::MemoryArea::new(vaddr, vaddr + aligned_size - 1),
+        crate::vm::vmem::VirtualMemoryPermission::Read as usize
+            | crate::vm::vmem::VirtualMemoryPermission::Write as usize
+            | crate::vm::vmem::VirtualMemoryPermission::User as usize,
         false,
         None,
     );
 
-    match task.vm_manager.add_memory_map(mmap) {
+    let result = if flags & VM_FLAGS_ANYWHERE != 0 || requested_addr == 0 {
+        task.vm_manager.add_memory_map(mmap)
+    } else {
+        match task.vm_manager.add_memory_map_fixed(mmap) {
+            Ok(_) => Ok(()),
+            Err(e) => Err(e),
+        }
+    };
+
+    match result {
         Ok(()) => {
+            if let Some(kva) = task.vm_manager.translate_to_kva(vaddr) {
+                unsafe {
+                    core::ptr::write_bytes(kva as *mut u8, 0, aligned_size);
+                }
+            }
             if addr_ptr != 0 {
-                if let Some(kaddr) = task.vm_manager.translate_to_kva(addr_ptr) {
-                    unsafe {
-                        *(kaddr as *mut usize) = vaddr;
+                match task.vm_manager.translate_to_kva(addr_ptr) {
+                    Some(kaddr) => {
+                        unsafe {
+                            *(kaddr as *mut usize) = vaddr;
+                        }
+                        crate::println!(
+                            "[darwin] vm_map OK: wrote vaddr={:#x} to addr_ptr={:#x}",
+                            vaddr,
+                            addr_ptr
+                        );
+                    }
+                    None => {
+                        crate::println!(
+                            "[darwin] vm_map WARN: addr_ptr={:#x} not mapped for write-back",
+                            addr_ptr
+                        );
                     }
                 }
             }
             trapframe.set_return_value(KERN_SUCCESS as usize);
             0
         }
-        Err(_) => {
+        Err(e) => {
+            crate::println!(
+                "[darwin] vm_map FAIL: vaddr={:#x} size={:#x} err={}",
+                vaddr,
+                aligned_size,
+                e
+            );
             trapframe.set_return_value(KERN_FAILURE as usize);
             usize::MAX
         }

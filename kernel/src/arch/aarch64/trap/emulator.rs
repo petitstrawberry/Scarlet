@@ -1,7 +1,8 @@
-//! Instruction emulator for ARM extensions not supported by cortex-a57.
+//! Instruction emulator for ARM extensions not supported by all CPUs.
 //!
 //! Handles:
-//! - PAC (Pointer Authentication, ARMv8.3) → NOP / plain branch
+//! - PAC (Pointer Authentication, ARMv8.3) → TODO: disabled; requires native PAC hardware
+//!   or a complete software model. Re-enable when running on non-PAC hardware (e.g. Pi 4/5).
 //! - LSE atomics (CAS, LDADD, SWP, ARMv8.1) → non-atomic load/store
 //! - LDAPR/STLLR (LO-acquire/LO-release, ARMv8.3-RCpc / ARMv8.4) → plain LDR/STR
 
@@ -35,13 +36,32 @@ pub fn try_emulate_instruction(trapframe: &mut Trapframe) -> bool {
     };
     let instr = unsafe { *(kva as *const u32) };
 
-    // Try each emulator in order
-    if emulate_pac_branch(trapframe, instr) {
-        return true;
+    static ENTRY_COUNT: spin::Mutex<usize> = spin::Mutex::new(0);
+    {
+        let mut c = ENTRY_COUNT.lock();
+        *c += 1;
+        if *c <= 50 {
+            println!(
+                "[emulator] entry #{}: instr={:#010x} elr={:#x}",
+                *c, instr, elr
+            );
+        }
     }
-    if emulate_pac_data_processing(trapframe, instr) {
-        return true;
-    }
+
+    // TODO: PAC emulator disabled — requires native PAC hardware (-cpu max)
+    // or a complete software model. Re-enable for non-PAC hardware (e.g. Pi 4/5).
+    // if emulate_pac_branch(trapframe, instr) {
+    //     if instr == 0xd503237f {
+    //         static PACIBSP_COUNT: spin::Mutex<usize> = spin::Mutex::new(0);
+    //         let mut c = PACIBSP_COUNT.lock();
+    //         *c += 1;
+    //         if *c <= 3 { println!("[emulator] pacibsp emulated as nop, count={}", *c); }
+    //     }
+    //     return true;
+    // }
+    // if emulate_pac_data_processing(trapframe, instr) {
+    //     return true;
+    // }
     if emulate_rcpc(trapframe, instr, &task) {
         return true;
     }
@@ -49,11 +69,27 @@ pub fn try_emulate_instruction(trapframe: &mut Trapframe) -> bool {
         return true;
     }
 
-    println!("[emulator] unhandled instr={:#010x} elr={:#x}", instr, elr);
+    static EMU_COUNT: spin::Mutex<usize> = spin::Mutex::new(0);
+    let mut c = EMU_COUNT.lock();
+    *c += 1;
+    if *c <= 5 || instr != 0xd503237f {
+        println!(
+            "[emulator] unhandled instr={:#010x} elr={:#x} total_unhandled={}",
+            instr, elr, *c
+        );
+    }
     false
 }
 
 // --- PAC authenticated branches ---
+
+fn strip_pac(ptr: u64) -> u64 {
+    if ptr & (1u64 << 55) != 0 {
+        ptr | 0xFFFF_0000_0000_0000
+    } else {
+        ptr & 0x0000_FFFF_FFFF_FFFF
+    }
+}
 
 fn emulate_pac_branch(trapframe: &mut Trapframe, instr: u32) -> bool {
     if (instr & PAC_BRANCH_MASK) != PAC_BRANCH_VALUE {
@@ -77,17 +113,17 @@ fn emulate_pac_branch(trapframe: &mut Trapframe, instr: u32) -> bool {
 
     match opc {
         0b010 => {
-            // RETAA/RETAB → plain RET
-            trapframe.elr = trapframe.regs.reg[30] as u64;
+            // RETAA/RETAB → strip PAC from LR, then RET
+            trapframe.elr = strip_pac(trapframe.regs.reg[30] as u64);
         }
         0b000 => {
-            // BRAA/BRAB/BRAAZ/BRABZ → plain BR
-            trapframe.elr = trapframe.regs.reg[rn] as u64;
+            // BRAA/BRAB/BRAAZ/BRABZ → strip PAC from Rn, then BR
+            trapframe.elr = strip_pac(trapframe.regs.reg[rn] as u64);
         }
         0b001 => {
-            // BLRAA/BLRAB/BLRAAZ/BLRABZ → plain BLR
+            // BLRAA/BLRAB/BLRAAZ/BLRABZ → strip PAC from Rn, then BLR
             trapframe.regs.reg[30] = (trapframe.elr + 4) as usize;
-            trapframe.elr = trapframe.regs.reg[rn] as u64;
+            trapframe.elr = strip_pac(trapframe.regs.reg[rn] as u64);
         }
         _ => return false,
     }
@@ -101,10 +137,24 @@ fn emulate_pac_data_processing(trapframe: &mut Trapframe, instr: u32) -> bool {
         return false;
     }
     let opc = (instr >> 11) & 0xF;
-    if opc > 4 && opc != 8 {
+    if opc > 9 {
         return false;
     }
-    // All PAC data-processing: NOP (pointers are never signed)
+
+    let rd = (instr & 0x1F) as usize;
+
+    match opc {
+        0..=3 => {
+            // PACIA/PACIB/PACDA/PACDB: NOP (can't generate real PAC)
+        }
+        4..=9 => {
+            // AUTIA/AUTIB/AUTDA/AUTDB/XPACI/XPACD: strip PAC from rd
+            let ptr = trapframe.regs.reg[rd] as u64;
+            trapframe.regs.reg[rd] = strip_pac(ptr) as usize;
+        }
+        _ => return false,
+    }
+
     trapframe.elr += 4;
     true
 }
@@ -225,6 +275,22 @@ fn emulate_lse_atomic(trapframe: &mut Trapframe, instr: u32, task: &crate::task:
         }
         0b11000 => {
             // SWP
+            let swp_rs_val = read_reg(trapframe, rs);
+            let swp_old = if is_64bit {
+                unsafe { core::ptr::read_volatile(kva_addr as *const u64) }
+            } else {
+                unsafe { core::ptr::read_volatile(kva_addr as *const u32) as u64 }
+            };
+            println!(
+                "[lse] SWP{} rs={} rt={} rs_val={:#x} old={:#x} addr={:#x} elr={:#x}",
+                if is_64bit { "64" } else { "32" },
+                rs,
+                rt,
+                swp_rs_val,
+                swp_old,
+                user_addr,
+                trapframe.elr
+            );
             if is_64bit {
                 do_swp_64(trapframe, rs, rt, kva_addr);
             } else {
@@ -238,28 +304,38 @@ fn emulate_lse_atomic(trapframe: &mut Trapframe, instr: u32, task: &crate::task:
     true
 }
 
+fn read_reg(tf: &Trapframe, idx: usize) -> usize {
+    if idx == 31 { 0 } else { tf.regs.reg[idx] }
+}
+
+fn write_reg(tf: &mut Trapframe, idx: usize, val: usize) {
+    if idx != 31 {
+        tf.regs.reg[idx] = val;
+    }
+}
+
 // --- CAS: Rs = old[Rn]; if Rs == [Rn] then [Rn] = Rt ---
 
 fn do_cas_32(trapframe: &mut Trapframe, rs: usize, rt: usize, addr: usize) {
     let ptr = addr as *mut u32;
     let old_val = unsafe { core::ptr::read_volatile(ptr) };
-    let rs_val = trapframe.regs.reg[rs] as u32;
-    let rt_val = trapframe.regs.reg[rt] as u32;
+    let rs_val = read_reg(trapframe, rs) as u32;
+    let rt_val = read_reg(trapframe, rt) as u32;
     if old_val == rs_val {
         unsafe { core::ptr::write_volatile(ptr, rt_val) };
     }
-    trapframe.regs.reg[rs] = old_val as usize;
+    write_reg(trapframe, rs, old_val as usize);
 }
 
 fn do_cas_64(trapframe: &mut Trapframe, rs: usize, rt: usize, addr: usize) {
     let ptr = addr as *mut u64;
     let old_val = unsafe { core::ptr::read_volatile(ptr) };
-    let rs_val = trapframe.regs.reg[rs] as u64;
-    let rt_val = trapframe.regs.reg[rt] as u64;
+    let rs_val = read_reg(trapframe, rs) as u64;
+    let rt_val = read_reg(trapframe, rt) as u64;
     if old_val == rs_val {
         unsafe { core::ptr::write_volatile(ptr, rt_val) };
     }
-    trapframe.regs.reg[rs] = old_val as usize;
+    write_reg(trapframe, rs, old_val as usize);
 }
 
 // --- SWP: tmp = [Rn]; [Rn] = Rs; Rs = tmp; Rt = tmp ---
@@ -267,17 +343,17 @@ fn do_cas_64(trapframe: &mut Trapframe, rs: usize, rt: usize, addr: usize) {
 fn do_swp_32(trapframe: &mut Trapframe, rs: usize, rt: usize, addr: usize) {
     let ptr = addr as *mut u32;
     let old_val = unsafe { core::ptr::read_volatile(ptr) };
-    unsafe { core::ptr::write_volatile(ptr, trapframe.regs.reg[rs] as u32) };
-    trapframe.regs.reg[rs] = old_val as usize;
-    trapframe.regs.reg[rt] = old_val as usize;
+    unsafe { core::ptr::write_volatile(ptr, read_reg(trapframe, rs) as u32) };
+    write_reg(trapframe, rs, old_val as usize);
+    write_reg(trapframe, rt, old_val as usize);
 }
 
 fn do_swp_64(trapframe: &mut Trapframe, rs: usize, rt: usize, addr: usize) {
     let ptr = addr as *mut u64;
     let old_val = unsafe { core::ptr::read_volatile(ptr) };
-    unsafe { core::ptr::write_volatile(ptr, trapframe.regs.reg[rs] as u64) };
-    trapframe.regs.reg[rs] = old_val as usize;
-    trapframe.regs.reg[rt] = old_val as usize;
+    unsafe { core::ptr::write_volatile(ptr, read_reg(trapframe, rs) as u64) };
+    write_reg(trapframe, rs, old_val as usize);
+    write_reg(trapframe, rt, old_val as usize);
 }
 
 // --- LDADD/CLR/EOR/SET/SMAX/SMIN/UMAX/UMIN: Rt = [Rn]; [Rn] = [Rn] OP Rs ---
@@ -292,7 +368,7 @@ fn do_lse_binop_32(
 ) {
     let ptr = addr as *mut u32;
     let old_val = unsafe { core::ptr::read_volatile(ptr) };
-    let rs_val = trapframe.regs.reg[rs] as u32;
+    let rs_val = read_reg(trapframe, rs) as u32;
 
     let new_val = match (opcode, o3) {
         (0b000, 0) => old_val.wrapping_add(rs_val),
@@ -307,7 +383,7 @@ fn do_lse_binop_32(
     };
 
     unsafe { core::ptr::write_volatile(ptr, new_val) };
-    trapframe.regs.reg[rt] = old_val as usize;
+    write_reg(trapframe, rt, old_val as usize);
 }
 
 fn do_lse_binop_64(
@@ -320,7 +396,7 @@ fn do_lse_binop_64(
 ) {
     let ptr = addr as *mut u64;
     let old_val = unsafe { core::ptr::read_volatile(ptr) };
-    let rs_val = trapframe.regs.reg[rs] as u64;
+    let rs_val = read_reg(trapframe, rs) as u64;
 
     let new_val = match (opcode, o3) {
         (0b000, 0) => old_val.wrapping_add(rs_val),
@@ -335,5 +411,5 @@ fn do_lse_binop_64(
     };
 
     unsafe { core::ptr::write_volatile(ptr, new_val) };
-    trapframe.regs.reg[rt] = old_val as usize;
+    write_reg(trapframe, rt, old_val as usize);
 }

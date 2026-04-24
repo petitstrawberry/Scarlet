@@ -48,6 +48,8 @@ pub enum ExceptionClass {
     InstructionAbortSameEl = 0x21,
     DataAbortLowerEl = 0x24,
     DataAbortSameEl = 0x25,
+    WatchpointLowerEl = 0x34,
+    SoftwareStep = 0x32,
     Other = 0xFF,
 }
 
@@ -63,6 +65,8 @@ impl From<u64> for ExceptionClass {
             0x21 => ExceptionClass::InstructionAbortSameEl,
             0x24 => ExceptionClass::DataAbortLowerEl,
             0x25 => ExceptionClass::DataAbortSameEl,
+            0x32 => ExceptionClass::SoftwareStep,
+            0x34 => ExceptionClass::WatchpointLowerEl,
             _ => ExceptionClass::Other,
         }
     }
@@ -70,6 +74,17 @@ impl From<u64> for ExceptionClass {
 
 /// Main exception handler
 pub fn arch_exception_handler(trapframe: &mut Trapframe, trap_kind: usize) {
+    // Disable single-step while handling exceptions to prevent re-entrancy
+    unsafe {
+        let mut mdscr: u64;
+        core::arch::asm!("mrs {}, mdscr_el1", out(reg) mdscr);
+        if mdscr & 1 != 0 {
+            mdscr &= !1u64;
+            core::arch::asm!("msr mdscr_el1, {}", in(reg) mdscr);
+            core::arch::asm!("isb");
+        }
+    }
+
     let ec = ExceptionClass::from(trapframe.esr_el1);
     let esr = trapframe.esr_el1;
 
@@ -127,6 +142,99 @@ pub fn arch_exception_handler(trapframe: &mut Trapframe, trap_kind: usize) {
             crate::println!("Kernel data abort at FAR={:#x}", far);
             loop {
                 unsafe { asm!("wfi") }
+            }
+        }
+
+        ExceptionClass::WatchpointLowerEl => {
+            let far = get_far_el1();
+            let wp = (esr >> 5) & 0xF;
+            crate::println!(
+                "[watchpoint] EL0 write to {:#x} at PC={:#x} WP={} x0={:#x} x1={:#x} x2={:#x} x8={:#x} x19={:#x} x20={:#x} LR={:#x}",
+                far,
+                trapframe.elr,
+                wp,
+                trapframe.regs.reg[0],
+                trapframe.regs.reg[1],
+                trapframe.regs.reg[2],
+                trapframe.regs.reg[8],
+                trapframe.regs.reg[19],
+                trapframe.regs.reg[20],
+                trapframe.regs.reg[30],
+            );
+            disable_user_watchpoint();
+        }
+
+        ExceptionClass::SoftwareStep => {
+            let lock_kva = unsafe { SINGLESTEP_LOCK_KVA };
+            if lock_kva == 0 {
+                return;
+            }
+            let lock_val = unsafe { *(lock_kva as *const u32) };
+
+            static STEP_COUNT: spin::Mutex<usize> = spin::Mutex::new(0);
+            let mut sc = STEP_COUNT.lock();
+            *sc += 1;
+
+            let step_num = *sc;
+            drop(sc);
+
+            if step_num % 1000 == 0 {
+                crate::println!(
+                    "[step #{}] tick LOCK={:#x} PC={:#x}",
+                    step_num,
+                    lock_val,
+                    trapframe.elr,
+                );
+            }
+
+            if lock_val != 0x307 && lock_val != 0 {
+                crate::println!(
+                    "[step #{}] *** LOCK={:#x} PC={:#x} x0={:#x} x1={:#x} x2={:#x} x3={:#x} x19={:#x} x20={:#x} LR={:#x}",
+                    step_num,
+                    lock_val,
+                    trapframe.elr,
+                    trapframe.regs.reg[0],
+                    trapframe.regs.reg[1],
+                    trapframe.regs.reg[2],
+                    trapframe.regs.reg[3],
+                    trapframe.regs.reg[19],
+                    trapframe.regs.reg[20],
+                    trapframe.regs.reg[30],
+                );
+                trapframe.spsr &= !(1 << 21);
+                unsafe {
+                    let mut mdscr: u64;
+                    core::arch::asm!("mrs {}, mdscr_el1", out(reg) mdscr);
+                    mdscr &= !1;
+                    core::arch::asm!("msr mdscr_el1, {}", in(reg) mdscr);
+                    SINGLESTEP_LOCK_KVA = 0;
+                }
+                return;
+            }
+
+            if step_num >= 30000 {
+                crate::println!(
+                    "[step] safety limit ({}), disabling SS (KVA kept for trap check)",
+                    step_num
+                );
+                trapframe.spsr &= !(1 << 21);
+                unsafe {
+                    let mut mdscr: u64;
+                    core::arch::asm!("mrs {}, mdscr_el1", out(reg) mdscr);
+                    mdscr &= !1;
+                    core::arch::asm!("msr mdscr_el1, {}", in(reg) mdscr);
+                }
+                return;
+            }
+
+            // Re-enable MDSCR.SS so the next user instruction also steps.
+            // It was cleared at exception entry to prevent re-entrancy in
+            // other exception handlers; here we restore it for continued tracing.
+            unsafe {
+                let mut mdscr: u64;
+                core::arch::asm!("mrs {}, mdscr_el1", out(reg) mdscr);
+                mdscr |= 1;
+                core::arch::asm!("msr mdscr_el1, {}", in(reg) mdscr);
             }
         }
 
@@ -188,7 +296,45 @@ fn handle_brk(trapframe: &mut Trapframe, esr: u64) {
         let x0 = trapframe.regs.reg[0];
         let x1 = trapframe.regs.reg[1];
         let lr = trapframe.regs.reg[30];
+        let tpidr = trapframe.tpidr_el0;
+        let tpidrro = trapframe.tpidrro_el0;
         crate::println!("[darwin] dyld halt: x0={:#x} x1={:#x} LR={:#x}", x0, x1, lr);
+        crate::println!(
+            "[darwin]   x19={:#x} (lock ptr) x2={:#x} (actual_owner)",
+            trapframe.regs.reg[19],
+            trapframe.regs.reg[2]
+        );
+        crate::println!(
+            "[darwin]   TPIDR_EL0={:#x} TPIDRRO_EL0={:#x}",
+            tpidr,
+            tpidrro
+        );
+
+        // Read expected lock owner from [TPIDRRO_EL0 + 0x18]
+        if tpidrro > 0x1000 {
+            if let Some(kva) = task.vm_manager.translate_to_kva(tpidrro as usize + 0x18) {
+                let owner_val = unsafe { *(kva as *const u32) };
+                crate::println!(
+                    "[darwin]   [TPIDRRO+0x18]={:#x} (expected lock owner)",
+                    owner_val
+                );
+            }
+        }
+
+        // Dump 16 bytes of TLS context for lock owner analysis
+        if tpidrro > 0x1000 {
+            if let Some(kva) = task.vm_manager.translate_to_kva(tpidrro as usize) {
+                let tls_bytes = unsafe { core::slice::from_raw_parts(kva as *const u8, 64) };
+                crate::print!("[darwin]   TLS[0..64]=");
+                for (i, b) in tls_bytes.iter().enumerate() {
+                    if i % 8 == 0 {
+                        crate::print!(" ");
+                    }
+                    crate::print!("{:02x}", b);
+                }
+                crate::println!("");
+            }
+        }
 
         if x1 > 0x1000 {
             if let Some(kva) = task.vm_manager.translate_to_kva(x1) {
@@ -301,6 +447,14 @@ fn handle_instruction_fault(trapframe: &mut Trapframe, vaddr: usize) {
 
 /// Handle data page fault (like RISC-V cause 13/15)
 fn handle_data_fault(trapframe: &mut Trapframe, vaddr: usize, is_write: bool) {
+    let esr = get_esr_el1();
+    let dfsc = esr & 0x3f;
+    if is_write && (dfsc >= 0x0d && dfsc <= 0x0f) {
+        if handle_lock_watch_fault(trapframe, vaddr) {
+            return;
+        }
+    }
+
     let task = get_scheduler()
         .get_current_task(get_cpu().get_cpuid())
         .unwrap();
@@ -398,4 +552,232 @@ fn print_trap_info(trapframe: &Trapframe, esr: u64) {
         trapframe.regs.reg[8],
         trapframe.regs.reg[9]
     );
+}
+
+/// Set a hardware write watchpoint on a 4-byte user-space address.
+/// EC=0x34 exception fires when EL0 writes to `addr`.
+pub fn enable_user_write_watchpoint(addr: u64) {
+    unsafe {
+        let dfr0: u64;
+        asm!("mrs {}, id_aa64dfr0_el1", out(reg) dfr0);
+        let wrps = (dfr0 >> 20) & 0xF;
+        let brps = (dfr0 >> 12) & 0xF;
+        println!(
+            "[watchpoint] ID_AA64DFR0={:#x} WRPs={} BRPs={}",
+            dfr0, wrps, brps
+        );
+
+        asm!("msr oslar_el1, xzr");
+        asm!("msr dbgwcr0_el1, xzr");
+        asm!("isb");
+        asm!("msr dbgwvr0_el1, {}", in(reg) addr);
+        // E=1, PAC=00 (any EL), LSC=11 (any access), BAS=00001111 (4 bytes at bits[12:5])
+        let wcr: u64 = (0xFu64 << 5) | (0b11 << 3) | (0b00 << 1) | 1; // = 0x1F9
+        asm!("msr dbgwcr0_el1, {}", in(reg) wcr);
+        let mut mdscr: u64;
+        asm!("mrs {}, mdscr_el1", out(reg) mdscr);
+        mdscr |= 1 << 15; // MDE=1
+        mdscr |= 1 << 13; // KDE=1
+        asm!("msr mdscr_el1, {}", in(reg) mdscr);
+        asm!("isb");
+
+        let verify_wvr: u64;
+        let verify_wcr: u64;
+        let verify_mdscr: u64;
+        asm!("mrs {}, dbgwvr0_el1", out(reg) verify_wvr);
+        asm!("mrs {}, dbgwcr0_el1", out(reg) verify_wcr);
+        asm!("mrs {}, mdscr_el1", out(reg) verify_mdscr);
+        println!(
+            "[watchpoint] set addr={:#x} WVR={:#x} WCR={:#x} MDSCR={:#x}",
+            addr, verify_wvr, verify_wcr, verify_mdscr
+        );
+    }
+}
+
+/// Disable the user watchpoint (clear DBGWCR0_EL1).
+pub fn disable_user_watchpoint() {
+    unsafe {
+        asm!("msr dbgwcr0_el1, xzr");
+        asm!("isb");
+    }
+}
+
+/// Cached kernel virtual address of the lock being traced.
+/// Non-zero means tracing is active. Checked in arch_user_trap_handler
+/// on every exception/IRQ entry to catch lock corruption.
+static mut SINGLESTEP_LOCK_KVA: usize = 0;
+
+/// Check the traced lock value on every trap entry. Called from
+/// arch_user_trap_handler BEFORE the specific handler dispatch.
+pub fn check_traced_lock(trapframe: &Trapframe, trap_kind: usize) {
+    let kva = unsafe { SINGLESTEP_LOCK_KVA };
+    if kva == 0 {
+        return;
+    }
+    let lock_val = unsafe { *(kva as *const u32) };
+    if lock_val == 0x307 || lock_val == 0 {
+        return;
+    }
+
+    let lock_user_va = trapframe.regs.reg[19];
+    let current_kva =
+        crate::task::mytask().and_then(|t| t.vm_manager.translate_to_kva(lock_user_va));
+    let current_phys =
+        crate::task::mytask().and_then(|t| t.vm_manager.translate_to_phys(lock_user_va));
+    let (cached_val, current_val) = {
+        let cv = unsafe { *(kva as *const u32) };
+        let curv = current_kva.map(|ck| unsafe { *(ck as *const u32) });
+        (cv, curv)
+    };
+
+    crate::println!(
+        "[lock_trace] LOCK={:#x} kind={} PC={:#x} x0={:#x} x2={:#x} x19={:#x} LR={:#x}",
+        lock_val,
+        trap_kind,
+        trapframe.elr,
+        trapframe.regs.reg[0],
+        trapframe.regs.reg[2],
+        trapframe.regs.reg[19],
+        trapframe.regs.reg[30],
+    );
+    crate::println!(
+        "[lock_trace] cached_kva={:#x} current_kva={:?} current_phys={:?}",
+        kva,
+        current_kva,
+        current_phys,
+    );
+    crate::println!(
+        "[lock_trace] cached_read={:#x} current_read={:?} same_page={}",
+        cached_val,
+        current_val,
+        current_kva == Some(kva),
+    );
+    unsafe {
+        SINGLESTEP_LOCK_KVA = 0;
+    }
+}
+
+static mut LOCK_WATCH_PAGE_VA: usize = 0;
+
+pub fn enable_lock_page_watch(lock_user_va: usize) {
+    let task = crate::task::mytask().unwrap();
+    let page_va = lock_user_va & !0xfff;
+    let kva = match task.vm_manager.translate_to_kva(lock_user_va) {
+        Some(k) => k,
+        None => return,
+    };
+    unsafe {
+        if SINGLESTEP_LOCK_KVA != 0 {
+            return;
+        }
+        SINGLESTEP_LOCK_KVA = kva;
+    }
+    let root_pt = match task.vm_manager.get_root_page_table() {
+        Some(pt) => pt,
+        None => return,
+    };
+    let pte = match root_pt.walk(page_va, false, task.vm_manager.get_asid()) {
+        Some(pte) => pte,
+        None => return,
+    };
+    if !pte.is_valid() {
+        return;
+    }
+    let old = pte.entry;
+    pte.entry = old & !(1u64 << 6);
+    crate::arch::aarch64::clean_dcache_to_poc_range(
+        &pte.entry as *const u64 as usize,
+        core::mem::size_of::<u64>(),
+    );
+    unsafe {
+        core::arch::asm!("tlbi vmalle1is", "dsb ish", "isb");
+    }
+    unsafe {
+        LOCK_WATCH_PAGE_VA = page_va;
+    }
+    crate::println!(
+        "[lock_watch] PTE {:#x} → RO (was {:#x}, now {:#x}) kva={:#x}",
+        page_va,
+        old,
+        pte.entry,
+        kva
+    );
+}
+
+fn handle_lock_watch_fault(trapframe: &mut Trapframe, far: usize) -> bool {
+    let page_va = unsafe { LOCK_WATCH_PAGE_VA };
+    if page_va == 0 {
+        return false;
+    }
+    if (far & !0xfff) != page_va {
+        return false;
+    }
+
+    let lock_offset = 0x150; // lock is at page_base + 0x150
+    let is_lock = (far & 0xfff) == lock_offset;
+
+    crate::println!(
+        "[lock_watch] WRITE FAULT: FAR={:#x} PC={:#x} lock_write={} x0={:#x} x2={:#x} x19={:#x}",
+        far,
+        trapframe.elr,
+        is_lock,
+        trapframe.regs.reg[0],
+        trapframe.regs.reg[2],
+        trapframe.regs.reg[19],
+    );
+
+    let task = crate::task::mytask().unwrap();
+    let root_pt = match task.vm_manager.get_root_page_table() {
+        Some(pt) => pt,
+        None => return false,
+    };
+    let pte = match root_pt.walk(page_va, false, task.vm_manager.get_asid()) {
+        Some(pte) => pte,
+        None => return false,
+    };
+    let before = pte.entry;
+    pte.entry |= 1u64 << 6;
+    let after = pte.entry;
+    crate::arch::aarch64::clean_dcache_to_poc_range(
+        &pte.entry as *const u64 as usize,
+        core::mem::size_of::<u64>(),
+    );
+    unsafe {
+        core::arch::asm!("tlbi vmalle1is", "dsb ish", "isb");
+    }
+    crate::println!(
+        "[lock_watch] restore RW: PTE before={:#x} after={:#x} ptr={:#x}",
+        before,
+        after,
+        &pte.entry as *const u64 as usize
+    );
+
+    if is_lock {
+        crate::println!(
+            "[lock_watch] *** SMOKING GUN: write to lock from PC={:#x} ***",
+            trapframe.elr
+        );
+        unsafe {
+            LOCK_WATCH_PAGE_VA = 0;
+        }
+    }
+    true
+}
+
+/// Enable software single-step and cache the lock's KVA for cheap per-step checking.
+/// After each user instruction, the SoftwareStep handler reads the lock via the
+/// cached pointer (no task lookup / page-table walk) and logs when the value changes.
+pub fn enable_singlestep_lock_trace(lock_user_va: usize) {
+    let task = crate::task::mytask().unwrap();
+    let kva = match task.vm_manager.translate_to_kva(lock_user_va) {
+        Some(k) => k,
+        None => return,
+    };
+    unsafe {
+        if SINGLESTEP_LOCK_KVA != 0 {
+            return;
+        } // already tracing
+        SINGLESTEP_LOCK_KVA = kva;
+    }
+    crate::println!("[sstep] enabled, lock_kva={:#x}", kva);
 }

@@ -61,6 +61,7 @@ pub const LC_DYLD_CHAINED_FIXUPS: u32 = 0x80000034;
 
 const DYLD_CHAINED_PTR_START_NONE: u16 = 0xFFFF;
 const DYLD_CHAINED_PTR_START_MULTI: u16 = 0x8000;
+const DYLD_CHAINED_PTR_ARM64E: u16 = 1;
 const DYLD_CHAINED_PTR_ARM64E_USERLAND24: u16 = 12;
 
 const ARM_THREAD_STATE64_PC_OFFSET: usize = 272;
@@ -622,7 +623,9 @@ fn apply_chained_fixups(
         //     seg_idx, segment_offset, page_size, pointer_format, page_count
         // );
 
-        if pointer_format != DYLD_CHAINED_PTR_ARM64E_USERLAND24 {
+        if pointer_format != DYLD_CHAINED_PTR_ARM64E
+            && pointer_format != DYLD_CHAINED_PTR_ARM64E_USERLAND24
+        {
             continue;
         }
 
@@ -637,6 +640,8 @@ fn apply_chained_fixups(
                 .checked_sub((-base_delta) as usize)
                 .ok_or("seg_vaddr underflow")?
         };
+
+        let chain_stride: usize = 8;
 
         for page_idx in 0..page_count {
             let ps_pos = 22 + page_idx * 2;
@@ -653,54 +658,85 @@ fn apply_chained_fixups(
             }
 
             let page_addr = seg_vaddr + page_idx * page_size as usize;
-            let stride: usize = 8;
-            let mut chain_offset = page_start as usize * stride;
+            let chain_start = page_start as usize * chain_stride;
 
-            let mut chain_step = 0usize;
+            // Phase 1: Read all chain entries before writing any.
+            // With stride=4 and 8-byte entries, consecutive reads overlap
+            // if we write before advancing. Collecting first avoids corruption.
+            let mut chain_entries: Vec<(usize, u64)> = Vec::new();
+            let mut chain_offset = chain_start;
             loop {
                 let entry_addr = page_addr + chain_offset;
                 let kva = match task.vm_manager.translate_to_kva(entry_addr) {
                     Some(k) => k,
-                    None => {
-                        break;
-                    }
+                    None => break,
                 };
 
-                let current_value = unsafe { ptr::read(kva as *const u64) };
-                let bind_bit = (current_value >> 62) & 1;
-                let auth_bit = (current_value >> 63) & 1;
-                let next = ((current_value >> 51) & 0x7FF) as usize;
+                let value = unsafe { ptr::read(kva as *const u64) };
+                let bind_bit = (value >> 62) & 1;
+                let next = ((value >> 51) & 0x7FF) as usize;
 
-                if bind_bit != 0 {
-                    break;
+                if chain_entries.len() < 10 {
+                    crate::println!(
+                        "[darwin] chain[{}/{}][{}]: addr={:#x} val={:#x} auth={} bind={} next={}",
+                        seg_idx,
+                        page_idx,
+                        chain_entries.len(),
+                        entry_addr,
+                        value,
+                        (value >> 63) & 1,
+                        bind_bit,
+                        next
+                    );
                 }
 
-                let target = current_value & 0xFFFFFFFF;
-                let new_value = if auth_bit != 0 {
+                chain_entries.push((kva, value));
+
+                if bind_bit != 0 || next == 0 {
+                    break;
+                }
+                chain_offset += next * chain_stride;
+                if chain_entries.len() > 4096 {
+                    break;
+                }
+            }
+
+            crate::println!(
+                "[darwin] seg[{}] page[{}]: {} entries",
+                seg_idx,
+                page_idx,
+                chain_entries.len()
+            );
+
+            // Phase 2: Compute and write fixups using saved original values.
+            for (kva, current_value) in &chain_entries {
+                let auth_bit = (*current_value >> 63) & 1;
+
+                let new_value = if pointer_format == DYLD_CHAINED_PTR_ARM64E && auth_bit != 0 {
+                    let target = *current_value & 0xFFFFFFFF;
+                    (base_addr.wrapping_add(target)) & 0x0000_FFFF_FFFF_FFFF
+                } else if pointer_format == DYLD_CHAINED_PTR_ARM64E {
+                    let target43 = *current_value & ((1u64 << 43) - 1);
+                    let high8 = (*current_value >> 43) & 0xFF;
+                    let preferred_vmaddr = (high8 << 56) | target43;
+                    let rebased = if base_delta >= 0 {
+                        preferred_vmaddr.wrapping_add(base_delta as u64)
+                    } else {
+                        preferred_vmaddr.wrapping_sub((-base_delta) as u64)
+                    };
+                    rebased & 0x0000_FFFF_FFFF_FFFF
+                } else if auth_bit != 0 {
+                    let target = *current_value & 0xFFFFFFFF;
                     base_addr.wrapping_add(target)
                 } else {
-                    let high8 = (current_value >> 32) & 0xFF;
+                    let target = *current_value & 0xFFFFFFFF;
+                    let high8 = (*current_value >> 32) & 0xFF;
                     let full_target = (high8 << 56) | target;
                     base_addr.wrapping_add(full_target)
                 };
 
-                // crate::println!(
-                //     "[darwin] fixups: [{:#x}] {:#x} -> {:#x} (next={})",
-                //     entry_addr, current_value, new_value, next
-                // );
-
                 unsafe {
-                    ptr::write(kva as *mut u64, new_value);
-                }
-
-                if next == 0 {
-                    break;
-                }
-                chain_offset += next * stride;
-
-                chain_step += 1;
-                if chain_step > 4096 {
-                    break;
+                    ptr::write(*kva as *mut u64, new_value);
                 }
             }
         }
@@ -922,6 +958,9 @@ pub fn load_dyld(dyld_path: &str, task: &Task) -> Result<(usize, i64), &'static 
     Ok((dyld_entry, base_delta))
 }
 
+pub const DYLD_SHARED_CACHE_BASE: usize = 0x8000_0000;
+const DYLD_SHARED_CACHE_SIZE: usize = 0x0100_0000; // 16 MiB placeholder region for dyld probes
+
 const COMMPAGE_BASE: usize = 0x0FFFFFC000;
 const COMMPAGE_SIZE: usize = 0x1000;
 const COMMPAGE_RO_BASE: usize = 0x0FFFFF4000;
@@ -1024,6 +1063,52 @@ pub fn setup_commpage(task: &Task) -> Result<(), &'static str> {
         COMMPAGE_RW_OFFSET
     );
     Ok(())
+}
+
+pub fn setup_shared_cache_region(task: &Task) -> Result<(), &'static str> {
+    if task
+        .vm_manager
+        .search_memory_map(DYLD_SHARED_CACHE_BASE)
+        .is_some()
+    {
+        return Ok(());
+    }
+
+    let num_pages = DYLD_SHARED_CACHE_SIZE / PAGE_SIZE;
+    let pages =
+        ContiguousPages::new(num_pages).ok_or("Failed to allocate dyld shared cache region")?;
+    let paddr = pages.as_paddr();
+
+    let mmap = VirtualMemoryMap::new(
+        MemoryArea::new(paddr, paddr + DYLD_SHARED_CACHE_SIZE - 1),
+        MemoryArea::new(
+            DYLD_SHARED_CACHE_BASE,
+            DYLD_SHARED_CACHE_BASE + DYLD_SHARED_CACHE_SIZE - 1,
+        ),
+        VirtualMemoryPermission::Read as usize
+            | VirtualMemoryPermission::Write as usize
+            | VirtualMemoryPermission::Execute as usize
+            | VirtualMemoryPermission::User as usize,
+        false,
+        None,
+    );
+    task.vm_manager.add_memory_map(mmap)?;
+    task.page_allocations.write().push(pages);
+
+    let shared_cache_kva = task
+        .vm_manager
+        .translate_to_kva(DYLD_SHARED_CACHE_BASE)
+        .ok_or("Failed to translate dyld shared cache region")?;
+
+    unsafe {
+        ptr::write_bytes(shared_cache_kva as *mut u8, 0, DYLD_SHARED_CACHE_SIZE);
+    }
+
+    Ok(())
+}
+
+pub const fn shared_cache_base() -> usize {
+    DYLD_SHARED_CACHE_BASE
 }
 
 pub fn setup_tls(task: &Task, thread_port: u32) -> Result<usize, &'static str> {

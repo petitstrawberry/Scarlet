@@ -314,6 +314,9 @@ impl DarwinAarch64Abi {
             SYS_thread_selfid => Ok(bsd_syscalls::sys_thread_selfid(self, trapframe)),
             SYS_proc_info => Ok(bsd_syscalls::sys_proc_info(self, trapframe)),
             SYS_execve => Ok(bsd_syscalls::sys_execve(self, trapframe)),
+            SYS_shared_region_check_np => {
+                Ok(bsd_syscalls::sys_shared_region_check_np(self, trapframe))
+            }
             SYS_getentropy => Ok(bsd_syscalls::sys_getentropy(self, trapframe)),
             SYS_getlogin => Ok(bsd_syscalls::sys_getlogin(self, trapframe)),
             SYS_terminate_with_payload => {
@@ -341,7 +344,6 @@ impl DarwinAarch64Abi {
         trapframe: &mut Trapframe,
     ) -> Result<usize, &'static str> {
         let tsd_base = trapframe.regs.reg[0];
-        // crate::println!("[darwin] thread_set_tsd_base: x0={:#x}", tsd_base);
         let task = mytask().unwrap();
         trapframe.increment_pc_next(task);
 
@@ -351,6 +353,16 @@ impl DarwinAarch64Abi {
         let mut vcpu = task.vcpu.lock();
         vcpu.set_tpidr_el0(tsd_base as u64);
         vcpu.set_tpidrro_el0(tsd_base as u64);
+
+        // On real macOS, the kernel pre-populates TSD slot 3 (__TSD_MACH_THREAD_SELF)
+        // with the thread's mach port name. dyld's _mach_init does NOT call mach_thread_self -
+        // it relies on this pre-populated value for os_unfair_lock ownership checks.
+        let thread_port_bytes = self.mach_thread_port.to_ne_bytes();
+        let _ = crate::library::std::usercopy::copy_to_user(
+            &task,
+            tsd_base as usize + 0x18,
+            &thread_port_bytes,
+        );
 
         trapframe.set_return_value(0);
         Ok(0)
@@ -408,7 +420,23 @@ impl DarwinAarch64Abi {
                 trapframe.set_return_value(port);
                 Ok(port)
             }
+            MACH__kernelrpc_mach_vm_map_trap => Ok(mach_syscalls::sys_vm_map(self, trapframe)),
             MACH_thread_set_tsd_base => self.handle_thread_set_tsd_base(trapframe),
+            // ARM64 fast traps (not in mach_trap_table, small negative numbers)
+            FAST_MACH_absolute_time => {
+                let task = mytask().unwrap();
+                trapframe.increment_pc_next(task);
+                let t = crate::arch::aarch64::timer::get_time();
+                trapframe.regs.reg[0] = t as usize;
+                Ok(t as usize)
+            }
+            FAST_MACH_continuous_time => {
+                let task = mytask().unwrap();
+                trapframe.increment_pc_next(task);
+                let t = crate::arch::aarch64::timer::get_time();
+                trapframe.regs.reg[0] = t as usize;
+                Ok(t as usize)
+            }
             _ => {
                 crate::println!("[darwin] Unimplemented Mach trap: {}", num);
                 let task = mytask().unwrap();
@@ -446,34 +474,41 @@ impl DarwinAarch64Abi {
         argv: &[&str],
         envp: &[&str],
         initial_sp: usize,
+        mach_header_addr: usize,
     ) -> Result<(usize, usize), &'static str> {
-        // Calculate total size needed
         let argc = argv.len();
         let envc = envp.len();
 
-        // Calculate string sizes (including null terminators)
         let argv_strings_size: usize = argv.iter().map(|s| s.len() + 1).sum();
         let envp_strings_size: usize = envp.iter().map(|s| s.len() + 1).sum();
 
-        // Calculate pointer array sizes (including null terminators)
-        let argv_array_size = (argc + 1) * core::mem::size_of::<usize>(); // +1 for NULL terminator
-        let envp_array_size = (envc + 1) * core::mem::size_of::<usize>(); // +1 for NULL terminator
+        let argv_array_size = (argc + 1) * core::mem::size_of::<usize>();
+        let envp_array_size = (envc + 1) * core::mem::size_of::<usize>();
         let argc_size = core::mem::size_of::<usize>();
 
-        // Total space needed
-        let total_size =
-            argc_size + argv_array_size + envp_array_size + argv_strings_size + envp_strings_size;
+        // Apple vector: executable_path=argv[0]
+        let apple_strings_size: usize = argv
+            .first()
+            .map_or(0, |s| "executable_path=".len() + s.len() + 1);
+        let apple_array_size = if apple_strings_size > 0 {
+            2 * core::mem::size_of::<usize>() // pointer + NULL
+        } else {
+            core::mem::size_of::<usize>() // just NULL
+        };
 
-        // Align to 16-byte boundary for ABI compliance
+        let total_size = core::mem::size_of::<usize>() // mach_header* at SP+0
+            + argc_size + argv_array_size + envp_array_size
+            + apple_array_size + argv_strings_size + envp_strings_size
+            + apple_strings_size;
+
         let aligned_total_size = (total_size + 15) & !15;
-
-        // Calculate new stack pointer
         let new_sp = initial_sp - aligned_total_size;
 
-        // Layout from new_sp (low) to initial_sp (high):
-        // argc | argv[] | envp[] | argv_strings | envp_strings
-
         let mut current_addr = new_sp;
+
+        // 0. Write mach_header pointer at SP+0 (macOS arm64 convention)
+        self.write_to_stack_memory(task, current_addr, &mach_header_addr.to_le_bytes())?;
+        current_addr += core::mem::size_of::<usize>();
 
         // 1. Write argc
         self.write_to_stack_memory(task, current_addr, &argc.to_le_bytes())?;
@@ -482,18 +517,19 @@ impl DarwinAarch64Abi {
         // 2. Save argv array pointer for return value
         let argv_ptr = current_addr;
 
-        // 3. Calculate string positions first
-        let argv_strings_start = current_addr + argv_array_size + envp_array_size;
+        // 3. Calculate string positions
+        let argv_strings_start =
+            current_addr + argv_array_size + envp_array_size + apple_array_size;
         let envp_strings_start = argv_strings_start + argv_strings_size;
+        let apple_strings_start = envp_strings_start + envp_strings_size;
 
         // 4. Write argv[] array
         let mut string_addr = argv_strings_start;
         for i in 0..argc {
             self.write_to_stack_memory(task, current_addr, &string_addr.to_le_bytes())?;
             current_addr += core::mem::size_of::<usize>();
-            string_addr += argv[i].len() + 1; // Move to next string position
+            string_addr += argv[i].len() + 1;
         }
-        // NULL terminate argv[]
         let null_ptr: usize = 0;
         self.write_to_stack_memory(task, current_addr, &null_ptr.to_le_bytes())?;
         current_addr += core::mem::size_of::<usize>();
@@ -503,22 +539,36 @@ impl DarwinAarch64Abi {
         for i in 0..envc {
             self.write_to_stack_memory(task, current_addr, &string_addr.to_le_bytes())?;
             current_addr += core::mem::size_of::<usize>();
-            string_addr += envp[i].len() + 1; // Move to next string position
+            string_addr += envp[i].len() + 1;
         }
-        // NULL terminate envp[]
         self.write_to_stack_memory(task, current_addr, &null_ptr.to_le_bytes())?;
         current_addr += core::mem::size_of::<usize>();
 
-        // 6. Write argv strings
+        // 6. Write apple[] array
+        if let Some(exe_path) = argv.first() {
+            self.write_to_stack_memory(task, current_addr, &apple_strings_start.to_le_bytes())?;
+            current_addr += core::mem::size_of::<usize>();
+        }
+        self.write_to_stack_memory(task, current_addr, &null_ptr.to_le_bytes())?;
+        current_addr += core::mem::size_of::<usize>();
+
+        // 7. Write argv strings
         for arg in argv {
             self.write_string_to_stack(task, current_addr, arg)?;
-            current_addr += arg.len() + 1; // +1 for null terminator
+            current_addr += arg.len() + 1;
         }
 
-        // 7. Write envp strings
+        // 8. Write envp strings
         for env in envp {
             self.write_string_to_stack(task, current_addr, env)?;
-            current_addr += env.len() + 1; // +1 for null terminator
+            current_addr += env.len() + 1;
+        }
+
+        // 9. Write apple strings
+        if let Some(exe_path) = argv.first() {
+            let apple_str = alloc::format!("executable_path={}", exe_path);
+            self.write_string_to_stack(task, current_addr, &apple_str)?;
+            current_addr += apple_str.len() + 1;
         }
 
         Ok((new_sp, argv_ptr))
@@ -671,24 +721,57 @@ impl AbiModule for DarwinAarch64Abi {
             // x16 sign determines type: negative = Mach trap, positive = BSD syscall.
             0x80 => {
                 let syscall_num_signed = syscall_num as i32;
+
+                // Probe TSD[3] and dyld lock from user memory
+                let task = crate::task::mytask().unwrap();
+                let tpidrro = trapframe.tpidrro_el0 as usize;
+                let tsd3 = if tpidrro > 0x1000 {
+                    task.vm_manager
+                        .translate_to_kva(tpidrro + 0x18)
+                        .map(|kva| unsafe { *(kva as *const u32) })
+                        .unwrap_or(0xDEAD)
+                } else {
+                    0
+                };
+                let lock_addr = 0x40000000 + 0xa9150;
+                let lock_val = task
+                    .vm_manager
+                    .translate_to_kva(lock_addr)
+                    .map(|kva| unsafe { *(kva as *const u32) })
+                    .unwrap_or(0xDEAD);
+                crate::println!(
+                    "[darwin] probe: pc={:#x} x16={:#x} tsd3={:#x} lock={:#x} num={}",
+                    trapframe.elr,
+                    trapframe.regs.reg[16],
+                    tsd3,
+                    lock_val,
+                    syscall_num,
+                );
+
                 let result = if syscall_num_signed < 0 {
-                    crate::println!("[darwin] mach trap: {:#x}", syscall_num_signed);
                     self.dispatch_mach_syscall(syscall_num_signed, trapframe)
                 } else {
-                    let bsd_num = syscall_num & 0xFFFFFF;
-                    crate::println!(
-                        "[darwin] bsd syscall: {:#x} (x16={:#x})",
-                        bsd_num,
-                        syscall_num
-                    );
-                    self.dispatch_bsd_syscall(bsd_num, trapframe)
+                    self.dispatch_bsd_syscall(syscall_num & 0xFFFFFF, trapframe)
                 };
+                let bsd_num = syscall_num & 0xFFFFFF;
                 let carry = (trapframe.spsr >> 29) & 1;
+                let task2 = crate::task::mytask().unwrap();
+                let lock_after = task2
+                    .vm_manager
+                    .translate_to_kva(0x40000000 + 0xa9150)
+                    .map(|kva| unsafe { *(kva as *const u32) })
+                    .unwrap_or(0xDEAD);
                 crate::println!(
-                    "[darwin] syscall result: x0={:#x} carry={}",
+                    "[darwin] result: x0={:#x} carry={} lock_after={:#x} x2={:#x} num={}",
                     trapframe.get_return_value(),
-                    carry
+                    carry,
+                    lock_after,
+                    trapframe.regs.reg[2],
+                    bsd_num,
                 );
+                if bsd_num == syscall_table::SYS_getentropy && lock_after == 0x307 {
+                    crate::arch::aarch64::trap::exception::enable_lock_page_watch(0x400a9150);
+                }
                 if result.is_ok() {
                     trapframe.spsr &= !(1 << 29);
                 } else {
@@ -698,7 +781,19 @@ impl AbiModule for DarwinAarch64Abi {
             }
             0x81 => {
                 let mach_num = syscall_num as i32;
+                crate::println!(
+                    "[darwin] mach81 trap: {:#x} tpidr={:#x} ro={:#x}",
+                    mach_num,
+                    trapframe.tpidr_el0,
+                    trapframe.tpidrro_el0
+                );
                 let result = self.dispatch_mach_syscall(mach_num, trapframe);
+                crate::println!(
+                    "[darwin] mach81 result: x0={:#x} tpidr={:#x} ro={:#x}",
+                    trapframe.get_return_value(),
+                    trapframe.tpidr_el0,
+                    trapframe.tpidrro_el0
+                );
                 if result.is_ok() {
                     trapframe.spsr &= !(1 << 29);
                 }
@@ -805,6 +900,11 @@ impl AbiModule for DarwinAarch64Abi {
                 _base_delta
             );
 
+            macho_loader::setup_shared_cache_region(task).map_err(|e| {
+                crate::println!("[darwin] setup_shared_cache_region FAILED: {}", e);
+                e
+            })?;
+
             macho_loader::setup_commpage(task).map_err(|e| {
                 crate::println!("[darwin] setup_commpage FAILED: {}", e);
                 e
@@ -824,18 +924,34 @@ impl AbiModule for DarwinAarch64Abi {
             task.vcpu.lock().reset_iregs();
             task.vcpu.lock().set_sp(stack_pointer);
 
-            let (adjusted_sp, argv_ptr) =
-                self.setup_arguments_on_stack(task, argv, envp, stack_pointer)?;
+            let (adjusted_sp, _argv_ptr) =
+                self.setup_arguments_on_stack(task, argv, envp, stack_pointer, mach_header_addr)?;
 
-            let dyld_sp = (adjusted_sp - core::mem::size_of::<u64>()) & !0xF;
-            self.write_to_stack_memory(task, dyld_sp, &(mach_header_addr as u64).to_le_bytes())?;
+            // macOS arm64 convention:
+            //   x0 = mach_header* (register, NOT on stack)
+            //   SP = [argc, argv..., NULL, envp..., NULL, apple..., NULL, strings]
+
+            // Pre-allocate TLS page with TSD slot 3 (__TSD_MACH_THREAD_SELF) set to
+            // mach_thread_port. On real macOS, the kernel populates this before the
+            // first user instruction so that os_unfair_lock ownership checks work
+            // from the very start. Without this, TPIDR_EL0=0 causes os_unfair_lock_lock
+            // to read [0+0x18] as the "owner", producing a garbage value that later
+            // mismatches the correct TSD[3]=0x307 set by thread_set_tsd_base.
+            let tls_vaddr = macho_loader::setup_tls(task, self.mach_thread_port).map_err(|e| {
+                crate::println!("[darwin] setup_tls FAILED: {}", e);
+                e
+            })?;
 
             task.set_entry_point(dyld_entry);
             {
                 let mut vcpu = task.vcpu.lock();
-                vcpu.set_sp(dyld_sp);
+                vcpu.set_sp(adjusted_sp);
                 vcpu.set_pc(dyld_entry as u64);
                 vcpu.iregs.reg[0] = mach_header_addr;
+                // Set TPIDR_EL0/TPIDRRO_EL0 to the pre-allocated TLS page so that
+                // TSD slot access (TPIDRRO_EL0 + offset) works from instruction one.
+                vcpu.set_tpidr_el0(tls_vaddr as u64);
+                vcpu.set_tpidrro_el0(tls_vaddr as u64);
                 vcpu.switch(trapframe);
             }
 
@@ -859,7 +975,7 @@ impl AbiModule for DarwinAarch64Abi {
         task.vcpu.lock().set_sp(stack_pointer);
 
         let (adjusted_sp, argv_ptr) =
-            self.setup_arguments_on_stack(task, argv, envp, stack_pointer)?;
+            self.setup_arguments_on_stack(task, argv, envp, stack_pointer, mach_header_addr)?;
         task.vcpu.lock().set_sp(adjusted_sp);
 
         task.vcpu.lock().iregs.reg[0] = argv.len();

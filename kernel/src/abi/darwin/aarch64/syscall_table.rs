@@ -542,6 +542,10 @@ pub const MACH_iokit_user_client_trap: i32 = -100;
 
 pub const MACH_thread_set_tsd_base: i32 = i32::MIN; // 0x80000000
 
+// ARM64 fast traps (not in mach_trap_table, defined in XNU osfmk/arm64/trap.h)
+pub const FAST_MACH_absolute_time: i32 = -3;
+pub const FAST_MACH_continuous_time: i32 = -4;
+
 /// BSD syscall table entry
 pub struct BsdSyscallEntry {
     pub number: u32,

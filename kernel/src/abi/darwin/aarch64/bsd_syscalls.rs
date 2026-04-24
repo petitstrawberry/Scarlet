@@ -3,7 +3,7 @@ use alloc::string::String;
 use crate::abi::darwin::aarch64::DarwinAarch64Abi;
 use crate::abi::darwin::aarch64::{
     SIGNAL_SAVED_PC_OFFSET, SIGNAL_SAVED_PSTATE_OFFSET, SIGNAL_SAVED_REGS_OFFSET,
-    SIGNAL_SAVED_SP_OFFSET,
+    SIGNAL_SAVED_SP_OFFSET, macho_loader,
 };
 use crate::abi::darwin::error::*;
 use crate::abi::darwin::path;
@@ -1238,7 +1238,12 @@ pub fn sys_mmap(abi: &mut DarwinAarch64Abi, trapframe: &mut Trapframe) -> usize 
             flags & DARWIN_MAP_SHARED != 0,
             None,
         );
-        match task.vm_manager.add_memory_map(mmap) {
+        let result = if flags & DARWIN_MAP_FIXED != 0 {
+            task.vm_manager.add_memory_map_fixed(mmap).map(|_| ())
+        } else {
+            task.vm_manager.add_memory_map(mmap)
+        };
+        match result {
             Ok(()) => {
                 task.page_allocations.write().push(pages);
                 if let Some(kva) = task.vm_manager.translate_to_kva(vaddr) {
@@ -1274,7 +1279,12 @@ pub fn sys_mmap(abi: &mut DarwinAarch64Abi, trapframe: &mut Trapframe) -> usize 
                 flags & DARWIN_MAP_SHARED != 0,
                 None,
             );
-            match task.vm_manager.add_memory_map(mmap) {
+            let result = if flags & DARWIN_MAP_FIXED != 0 {
+                task.vm_manager.add_memory_map_fixed(mmap).map(|_| ())
+            } else {
+                task.vm_manager.add_memory_map(mmap)
+            };
+            match result {
                 Ok(()) => {
                     task.page_allocations.write().push(pages);
                     trapframe.set_return_value(vaddr);
@@ -1684,9 +1694,20 @@ pub fn sys_munmap(_abi: &mut DarwinAarch64Abi, trapframe: &mut Trapframe) -> usi
     trapframe.increment_pc_next(task);
 
     let addr = trapframe.get_arg(0);
-    let _len = trapframe.get_arg(1);
+    let len = trapframe.get_arg(1);
 
-    let _ = task.vm_manager.remove_memory_map_by_addr(addr);
+    if len == 0 {
+        trapframe.spsr |= 1 << 29;
+        trapframe.set_return_value(EINVAL);
+        return usize::MAX;
+    }
+
+    let page_size = crate::environment::PAGE_SIZE;
+    let aligned_addr = addr & !(page_size - 1);
+    let aligned_len = (len + page_size - 1) & !(page_size - 1);
+
+    task.vm_manager
+        .remove_memory_map_range(aligned_addr, aligned_len);
     trapframe.set_return_value(0);
     0
 }
@@ -1701,6 +1722,15 @@ pub fn sys_mprotect(_abi: &mut DarwinAarch64Abi, trapframe: &mut Trapframe) -> u
 
     trapframe.set_return_value(0);
     0
+}
+
+pub fn sys_shared_region_check_np(_abi: &mut DarwinAarch64Abi, trapframe: &mut Trapframe) -> usize {
+    let task = mytask().unwrap();
+    trapframe.increment_pc_next(task);
+
+    // No shared region available — return EINVAL per XNU convention
+    trapframe.set_return_value(EINVAL);
+    usize::MAX
 }
 
 pub fn sys_stat(abi: &mut DarwinAarch64Abi, trapframe: &mut Trapframe) -> usize {
@@ -2222,7 +2252,20 @@ pub fn sys_getentropy(_abi: &mut DarwinAarch64Abi, trapframe: &mut Trapframe) ->
     let task = mytask().unwrap();
     let buf = trapframe.get_arg(0);
     let size = trapframe.get_arg(1);
+
+    // Fine-grained lock probe: check after each kernel operation to find
+    // exactly which one corrupts the lock at 0x400a9150.
+    const LOCK_USER_VA: usize = 0x400a9150;
+    let probe_lock = || -> u32 {
+        task.vm_manager
+            .translate_to_kva(LOCK_USER_VA)
+            .map(|kva| unsafe { *(kva as *const u32) })
+            .unwrap_or(0xDEAD)
+    };
+
+    let l_entry = probe_lock();
     trapframe.increment_pc_next(task);
+    let l_inc_pc = probe_lock();
 
     if size > 256 {
         trapframe.set_return_value(EINVAL);
@@ -2230,9 +2273,33 @@ pub fn sys_getentropy(_abi: &mut DarwinAarch64Abi, trapframe: &mut Trapframe) ->
     }
 
     let entropy = alloc::vec![0x42u8; size];
-    match crate::library::std::usercopy::copy_to_user(&task, buf, &entropy) {
+    let l_after_alloc = probe_lock();
+
+    let copy_result = crate::library::std::usercopy::copy_to_user(&task, buf, &entropy);
+    let l_after_copy = probe_lock();
+
+    match copy_result {
         Ok(()) => {
             trapframe.set_return_value(0);
+            let l_after_ret = probe_lock();
+
+            if l_entry != 0x307
+                || l_inc_pc != 0x307
+                || l_after_alloc != 0x307
+                || l_after_copy != 0x307
+                || l_after_ret != 0x307
+            {
+                crate::println!(
+                    "[getentropy] LOCK: entry={:#x} inc_pc={:#x} alloc={:#x} copy={:#x} ret={:#x} buf={:#x} size={:#x}",
+                    l_entry,
+                    l_inc_pc,
+                    l_after_alloc,
+                    l_after_copy,
+                    l_after_ret,
+                    buf,
+                    size,
+                );
+            }
             0
         }
         Err(_) => {
