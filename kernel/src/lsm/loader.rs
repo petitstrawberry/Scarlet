@@ -398,6 +398,7 @@ pub fn load_module(data: &[u8]) -> Result<u64, LsmError> {
                 start: base_vaddr,
                 end: base_vaddr + mapped_size - 1,
             },
+            vm_start: base_vaddr,
             permissions,
             is_shared: true,
             owner: None,

@@ -305,6 +305,7 @@ impl VirtualMemoryManager {
                                 + pm_offset
                                 + (overlap_end - overlap_start),
                         },
+                        vm_start: existing_map.vm_start,
                         permissions: existing_map.permissions,
                         is_shared: existing_map.is_shared,
                         owner: existing_map.owner.clone(),
@@ -329,6 +330,7 @@ impl VirtualMemoryManager {
                             start: existing_map.pmarea.start,
                             end: existing_map.pmarea.start + (remove_start - existing_start) - 1,
                         },
+                        vm_start: existing_map.vm_start,
                         permissions: existing_map.permissions,
                         is_shared: existing_map.is_shared,
                         owner: existing_map.owner.clone(),
@@ -348,6 +350,7 @@ impl VirtualMemoryManager {
                             start: existing_map.pmarea.start + after_offset,
                             end: existing_map.pmarea.end,
                         },
+                        vm_start: existing_map.vm_start,
                         permissions: existing_map.permissions,
                         is_shared: existing_map.is_shared,
                         owner: existing_map.owner.clone(),
@@ -515,44 +518,42 @@ impl VirtualMemoryManager {
         access: crate::object::capability::memory_mapping::AccessKind,
     ) -> Result<(), &'static str> {
         let vaddr = access.vaddr;
-        // Find the memory mapping for this virtual address
         let memory_map = match self.search_memory_map(vaddr) {
             Some(map) => map,
             None => {
-                // Try to find a mapping that contains an address just before this one
-                // which might have an owner that supports dynamic extension
                 return self.try_extend_mapping_for_access(&access);
             }
         };
 
-        // Calculate the page-aligned virtual and physical addresses
         let page_vaddr = vaddr & !(PAGE_SIZE - 1);
-        let offset_in_mapping = page_vaddr - memory_map.vmarea.start;
-        let mut page_paddr = memory_map.pmarea.start + offset_in_mapping;
+        let page_idx = (page_vaddr - memory_map.vm_start) / PAGE_SIZE;
         let mut perms = memory_map.permissions;
 
-        // If there is an owner, allow it to adjust mapping and tell if this is a tail page
-        if let Some(owner_weak) = &memory_map.owner {
+        let page_paddr = if let Some(owner_weak) = &memory_map.owner {
             if let Some(owner) = owner_weak.upgrade() {
-                let owner_name = owner.mmap_owner_name();
-                let _should_log = owner_name.contains("xkb");
-                match owner.resolve_fault(&access, &memory_map) {
+                match owner.resolve_fault(&access, page_idx, memory_map.vm_start) {
                     Ok(res) => {
-                        page_paddr = res.paddr_page_base;
                         if res.is_tail {
-                            // Drop Read and Write for tail page
-                            perms &= !0x1; // Read
-                            perms &= !0x2; // Write
+                            perms &= !0x1;
+                            perms &= !0x2;
+                        }
+                        res.paddr_page_base
+                    }
+                    Err(_) => {
+                        if memory_map.pmarea.start != 0 {
+                            memory_map.pmarea.start + (page_vaddr - memory_map.vmarea.start)
+                        } else {
+                            return Err("Owner failed to resolve fault");
                         }
                     }
-                    Err(_e) => {
-                        return Err("Owner failed to resolve fault");
-                    }
                 }
+            } else {
+                return Err("Owner dropped");
             }
-        }
+        } else {
+            memory_map.pmarea.start + (page_vaddr - memory_map.vmarea.start)
+        };
 
-        // Map this single page to the MMU (not device memory)
         if let Some(root_pagetable) = self.get_root_page_table() {
             root_pagetable.map(
                 self.get_asid(),
@@ -602,7 +603,8 @@ impl VirtualMemoryManager {
                                     size: access.size,
                                 };
 
-                            match owner.resolve_fault(&test_access, map) {
+                            let page_idx = (page_vaddr - map.vm_start) / PAGE_SIZE;
+                            match owner.resolve_fault(&test_access, page_idx, map.vm_start) {
                                 Ok(res) => {
                                     // Owner says this offset is valid - extend vmarea.end
                                     let new_end = page_vaddr + PAGE_SIZE - 1;
@@ -613,12 +615,6 @@ impl VirtualMemoryManager {
                                         owner.mmap_owner_name()
                                     );
                                     map.vmarea.end = new_end;
-
-                                    // Also extend pmarea proportionally
-                                    let pmarea_growth = new_end
-                                        - map.vmarea.start
-                                        - (map.pmarea.end - map.pmarea.start);
-                                    map.pmarea.end += pmarea_growth;
 
                                     found = Some((res.paddr_page_base, map.permissions));
                                     break;
@@ -680,17 +676,28 @@ impl VirtualMemoryManager {
     }
 
     pub fn translate_to_phys(&self, vaddr: usize) -> Option<usize> {
-        if let Some(map) = self.search_memory_map(vaddr) {
-            if map.pmarea.start == 0 {
-                return None;
+        let map = self.search_memory_map(vaddr)?;
+
+        if let Some(owner_weak) = &map.owner {
+            if let Some(owner) = owner_weak.upgrade() {
+                let page_vaddr = vaddr & !(PAGE_SIZE - 1);
+                let page_idx = (page_vaddr - map.vm_start) / PAGE_SIZE;
+                let access = crate::object::capability::memory_mapping::AccessKind {
+                    op: crate::object::capability::memory_mapping::AccessOp::Load,
+                    vaddr,
+                    size: Some(1),
+                };
+                if let Ok(res) = owner.resolve_fault(&access, page_idx, map.vm_start) {
+                    return Some(res.paddr_page_base + (vaddr & (PAGE_SIZE - 1)));
+                }
             }
-            // Calculate offset within the memory area
-            let offset = vaddr - map.vmarea.start;
-            // Calculate and return physical address
-            Some(map.pmarea.start + offset)
-        } else {
-            None
+            if map.pmarea.start != 0 {
+                return Some(map.pmarea.start + (vaddr - map.vmarea.start));
+            }
+            return None;
         }
+
+        Some(map.pmarea.start + (vaddr - map.vmarea.start))
     }
 
     pub fn translate_vaddr(&self, vaddr: usize) -> Option<usize> {
@@ -842,6 +849,7 @@ impl VirtualMemoryManager {
                                 + pm_offset
                                 + (overlap_end - overlap_start),
                         },
+                        vm_start: existing_map.vm_start,
                         permissions: existing_map.permissions,
                         is_shared: existing_map.is_shared,
                         owner: existing_map.owner.clone(),
@@ -867,6 +875,7 @@ impl VirtualMemoryManager {
                             start: existing_map.pmarea.start,
                             end: existing_map.pmarea.start + (new_start - existing_start) - 1,
                         },
+                        vm_start: existing_map.vm_start,
                         permissions: existing_map.permissions,
                         is_shared: existing_map.is_shared,
                         owner: existing_map.owner.clone(),
@@ -886,6 +895,7 @@ impl VirtualMemoryManager {
                             start: existing_map.pmarea.start + after_offset,
                             end: existing_map.pmarea.end,
                         },
+                        vm_start: existing_map.vm_start,
                         permissions: existing_map.permissions,
                         is_shared: existing_map.is_shared,
                         owner: existing_map.owner.clone(),
@@ -970,6 +980,7 @@ impl VirtualMemoryManager {
                             start: prev_memory_map.pmarea.start,
                             end: memory_map.pmarea.end,
                         },
+                        vm_start: prev_memory_map.vm_start,
                         permissions: prev_memory_map.permissions, // Use permissions from first map
                         is_shared: prev_memory_map.is_shared,
                         owner: prev_memory_map.owner.clone(),

@@ -10,6 +10,9 @@ use alloc::sync::Weak;
 ///
 /// * `pmarea` - The physical memory area that is being mapped
 /// * `vmarea` - The virtual memory area where the physical memory is mapped to
+/// * `vm_start` - The original virtual address where this mapping was first created.
+///   Preserved across split operations so that owner-based page fault resolution can
+///   compute correct page indices even after partial unmapping.
 /// * `permissions` - The access permissions for this mapping
 /// * `is_shared` - Whether this mapping is shared between processes
 /// * `owner` - Optional weak reference to the object that created this mapping (None for anonymous mappings)
@@ -17,9 +20,23 @@ use alloc::sync::Weak;
 pub struct VirtualMemoryMap {
     pub pmarea: MemoryArea,
     pub vmarea: MemoryArea,
+    pub vm_start: usize,
     pub permissions: usize,
     pub is_shared: bool,
     pub owner: Option<Weak<dyn MemoryMappingOps>>,
+}
+
+impl Default for VirtualMemoryMap {
+    fn default() -> Self {
+        Self {
+            pmarea: MemoryArea::new(0, 0),
+            vmarea: MemoryArea::new(0, 0),
+            vm_start: 0,
+            permissions: 0,
+            is_shared: false,
+            owner: None,
+        }
+    }
 }
 
 impl VirtualMemoryMap {
@@ -44,25 +61,10 @@ impl VirtualMemoryMap {
         VirtualMemoryMap {
             pmarea,
             vmarea,
+            vm_start: vmarea.start,
             permissions,
             is_shared,
             owner,
-        }
-    }
-
-    /// Returns the physical address corresponding to the given virtual address.
-    ///
-    /// # Arguments
-    /// * `vaddr` - The virtual address to translate
-    ///
-    /// # Returns
-    /// The physical address corresponding to the given virtual address, if it exists.
-    /// If the virtual address is not part of the memory map, `None` is returned.
-    pub fn get_paddr(&self, vaddr: usize) -> Option<usize> {
-        if self.vmarea.start <= vaddr && vaddr <= self.vmarea.end {
-            Some(self.pmarea.start + (vaddr - self.vmarea.start))
-        } else {
-            None
         }
     }
 }

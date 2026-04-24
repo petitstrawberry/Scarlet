@@ -85,24 +85,22 @@ pub trait MemoryMappingOps: Send + Sync {
         alloc::string::String::from("object")
     }
 
-    // Resolve a page fault for a given access. Default: page-base paddr from mapping, not tail.
     fn resolve_fault(
         &self,
         access: &crate::object::capability::memory_mapping::AccessKind,
-        map: &crate::vm::vmem::VirtualMemoryMap,
+        page_idx: usize,
+        vm_start: usize,
     ) -> core::result::Result<
         crate::object::capability::memory_mapping::ResolveFaultResult,
         crate::object::capability::memory_mapping::ResolveFaultError,
     > {
-        let page_vaddr = access.vaddr & !(crate::environment::PAGE_SIZE - 1);
-        let offset_in_mapping = page_vaddr - map.vmarea.start;
-        Ok(
-            crate::object::capability::memory_mapping::ResolveFaultResult {
-                paddr_page_base: map.pmarea.start + offset_in_mapping,
-                is_tail: false,
-            },
-        )
+        let _ = access;
+        let _ = page_idx;
+        let _ = vm_start;
+        Err(crate::object::capability::memory_mapping::ResolveFaultError::Unmapped)
     }
+
+    fn release_pages(&self, _start_page_idx: usize, _page_count: usize) {}
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

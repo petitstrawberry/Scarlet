@@ -695,7 +695,8 @@ impl MemoryMappingOps for Fat32FileObject {
     fn resolve_fault(
         &self,
         access: &crate::object::capability::memory_mapping::AccessKind,
-        map: &crate::vm::vmem::VirtualMemoryMap,
+        _page_idx: usize,
+        vm_start: usize,
     ) -> core::result::Result<
         crate::object::capability::memory_mapping::ResolveFaultResult,
         crate::object::capability::memory_mapping::ResolveFaultError,
@@ -703,7 +704,7 @@ impl MemoryMappingOps for Fat32FileObject {
         let range = self
             .mmap_ranges
             .read()
-            .get(&map.vmarea.start)
+            .get(&vm_start)
             .copied()
             .ok_or(crate::object::capability::memory_mapping::ResolveFaultError::Invalid)?;
         if access.vaddr < range.vaddr_start || access.vaddr > range.vaddr_end {

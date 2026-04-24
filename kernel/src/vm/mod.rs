@@ -119,6 +119,7 @@ pub fn kernel_vm_init(
     let kernel_map = VirtualMemoryMap {
         vmarea: kernel_area,
         pmarea: kernel_phys_area,
+        vm_start: kernel_area.start,
         permissions: VirtualMemoryPermission::Read as usize
             | VirtualMemoryPermission::Write as usize
             | VirtualMemoryPermission::Execute as usize,
@@ -138,6 +139,7 @@ pub fn kernel_vm_init(
     let hhdm_map = VirtualMemoryMap {
         vmarea: hhdm_area,
         pmarea: direct_map_phys_area,
+        vm_start: hhdm_area.start,
         permissions: VirtualMemoryPermission::Read as usize
             | VirtualMemoryPermission::Write as usize,
         is_shared: true,
@@ -155,6 +157,7 @@ pub fn kernel_vm_init(
     let heap_map = VirtualMemoryMap {
         vmarea: kernel_heap_area,
         pmarea: heap_phys_area,
+        vm_start: kernel_heap_area.start,
         permissions: VirtualMemoryPermission::Read as usize
             | VirtualMemoryPermission::Write as usize,
         is_shared: true,
@@ -181,6 +184,7 @@ pub fn kernel_vm_init(
         let initramfs_map = VirtualMemoryMap {
             vmarea: initramfs_hhdm_area,
             pmarea: initramfs_phys_area,
+            vm_start: initramfs_hhdm_area.start,
             permissions: VirtualMemoryPermission::Read as usize
                 | VirtualMemoryPermission::Write as usize,
             is_shared: true,
@@ -291,6 +295,7 @@ pub fn user_kernel_vm_init(task: &Task) {
             addr::kernel_virt_to_phys(kernel_area.start),
             addr::kernel_virt_to_phys(kernel_area.end),
         ),
+        vm_start: kernel_area.start,
         permissions: VirtualMemoryPermission::Read as usize
             | VirtualMemoryPermission::Write as usize
             | VirtualMemoryPermission::Execute as usize,
@@ -314,6 +319,7 @@ pub fn user_kernel_vm_init(task: &Task) {
     let hhdm_map = VirtualMemoryMap {
         vmarea: hhdm_area,
         pmarea: hhdm_phys_area,
+        vm_start: hhdm_area.start,
         permissions: VirtualMemoryPermission::Read as usize
             | VirtualMemoryPermission::Write as usize,
         is_shared: true,
@@ -331,6 +337,7 @@ pub fn user_kernel_vm_init(task: &Task) {
     let heap_map = VirtualMemoryMap {
         vmarea: kernel_heap_area,
         pmarea: kernel_heap_phys_area,
+        vm_start: kernel_heap_area.start,
         permissions: VirtualMemoryPermission::Read as usize
             | VirtualMemoryPermission::Write as usize,
         is_shared: true,
@@ -444,6 +451,7 @@ pub fn setup_trampoline_for_task_kstack_window(task: &Task) -> Result<(), &'stat
             start: paddr_start,
             end: paddr_end,
         },
+        vm_start: vaddr_start,
         permissions: VirtualMemoryPermission::Read as usize
             | VirtualMemoryPermission::Write as usize,
         is_shared: true,

@@ -21,6 +21,7 @@ fn map_lsm_error_to_code(err: &LsmError) -> LsmErrorCode {
         LsmError::MissingDependency(_) => LsmErrorCode::MissingDependency,
         LsmError::NotFound => LsmErrorCode::NotFound,
         LsmError::PermissionDenied => LsmErrorCode::PermissionDenied,
+        LsmError::ArchMismatch => LsmErrorCode::ArchMismatch,
     }
 }
 
