@@ -1,15 +1,22 @@
 use alloc::{
+    collections::BTreeMap,
     string::{String, ToString},
+    sync::Arc,
     vec,
     vec::Vec,
 };
 use core::sync::atomic::Ordering;
 use core::{mem::size_of, ptr};
+use spin::{Mutex, Once};
 
 use crate::{
     environment::PAGE_SIZE,
+    fs::vfs_v2::manager::VfsManager,
     fs::{FileObject, SeekFrom},
     mem::page::ContiguousPages,
+    object::capability::memory_mapping::{
+        AccessKind, MemoryMappingOps, ResolveFaultError, ResolveFaultResult,
+    },
     task::Task,
     vm::vmem::{MemoryArea, VirtualMemoryMap, VirtualMemoryPermission},
 };
@@ -913,18 +920,10 @@ pub fn load_dyld(dyld_path: &str, task: &Task) -> Result<(usize, i64), &'static 
         map_segment_with_base(raw_file, task, segment, base_delta, slice_offset)?;
     }
 
-    if let Some((dataoff, datasize)) = chained_fixups {
-        if datasize > 0 {
-            let mut fixup_buf = vec![0u8; datasize as usize];
-            raw_file
-                .seek(SeekFrom::Start(slice_offset + dataoff as u64))
-                .map_err(|_| "Failed to seek to dyld chained fixups")?;
-            read_exact(raw_file, &mut fixup_buf)?;
-
-            let base_addr = target_base as u64;
-            apply_chained_fixups(task, base_addr, base_delta, &fixup_buf)?;
-        }
-    } else {
+    // Do NOT apply dyld's chained fixups here.
+    // On macOS, dyld processes its own fixups at startup. If the kernel
+    // pre-applies them, dyld will slide them again → double-slide crash.
+    if chained_fixups.is_none() {
         crate::println!("[darwin] no LC_DYLD_CHAINED_FIXUPS found in dyld");
     }
 
@@ -958,8 +957,542 @@ pub fn load_dyld(dyld_path: &str, task: &Task) -> Result<(usize, i64), &'static 
     Ok((dyld_entry, base_delta))
 }
 
-pub const DYLD_SHARED_CACHE_BASE: usize = 0x8000_0000;
-const DYLD_SHARED_CACHE_SIZE: usize = 0x0100_0000; // 16 MiB placeholder region for dyld probes
+pub const DYLD_SHARED_CACHE_BASE: usize = 0x1_8000_0000;
+
+/// Cache header field offsets (we read them directly, no full struct)
+const CACHE_HEADER_MAPPING_WITH_SLIDE_OFFSET: usize = 0x138;
+const CACHE_HEADER_MAPPING_WITH_SLIDE_COUNT: usize = 0x13C;
+const CACHE_HEADER_SHARED_REGION_SIZE: usize = 0xE8;
+
+/// dyld_cache_mapping_and_slide_info - 56 bytes each
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct CacheMappingSlideInfo {
+    address: u64,
+    size: u64,
+    file_offset: u64,
+    slide_info_file_offset: u64,
+    slide_info_file_size: u64,
+    flags: u64,
+    max_prot: u32,
+    init_prot: u32,
+}
+
+const CACHE_MAPPING_AUTH_DATA: u64 = 1;
+
+/// v5 slide info header (at slide_info_file_offset in loaded cache data)
+/// Layout: version(4) page_size(4) page_starts_count(4) _pad(4) value_add(8) page_starts[]
+const SLIDE_INFO5_HEADER_SIZE: usize = 24;
+
+const DYLD_CACHE_SLIDE_V5_PAGE_ATTR_NO_REBASE: u16 = 0xFFFF;
+
+struct SlideInfoMeta {
+    mapping_idx: usize,
+    file_offset: usize,
+    mapping_address: u64,
+    mapping_size: usize,
+    page_size: u32,
+    value_add: u64,
+    page_starts: Vec<u16>,
+}
+
+struct DarwinSharedCache {
+    file: Arc<dyn FileObject>,
+    cache_start: usize,
+    total_size: usize,
+    mapping_count: usize,
+    mappings: [CacheMappingSlideInfo; 8],
+    slide_infos: Vec<SlideInfoMeta>,
+    pages: Mutex<BTreeMap<usize, usize>>,
+}
+
+static SHARED_CACHE: Once<Mutex<Option<Arc<DarwinSharedCache>>>> = Once::new();
+
+impl DarwinSharedCache {
+    fn find_mapping_for_page(&self, page_vaddr: usize) -> Option<(usize, usize, usize)> {
+        for (mapping_idx, mapping) in self.mappings.iter().enumerate().take(self.mapping_count) {
+            let mapping_start = usize::try_from(mapping.address).ok()?;
+            let mapping_size = usize::try_from(mapping.size).ok()?;
+            let mapping_end = mapping_start.checked_add(mapping_size)?;
+            if page_vaddr < mapping_start || page_vaddr >= mapping_end {
+                continue;
+            }
+
+            let offset_in_mapping = page_vaddr - mapping_start;
+            let file_offset = usize::try_from(mapping.file_offset).ok()?;
+            let page_file_offset = file_offset.checked_add(offset_in_mapping)?;
+            return Some((mapping_idx, offset_in_mapping, page_file_offset));
+        }
+
+        if page_vaddr >= self.cache_start && page_vaddr < self.cache_start + self.total_size {
+            let file_offset = page_vaddr - self.cache_start;
+            return Some((self.mapping_count, 0, file_offset));
+        }
+
+        None
+    }
+
+    fn apply_slide_fixups_for_page(&self, page_index: usize, kva: usize) {
+        for si in &self.slide_infos {
+            let mapping_start_page = (si.mapping_address as usize - self.cache_start) / PAGE_SIZE;
+            let mapping_page_count = si.mapping_size / si.page_size as usize;
+
+            if page_index < mapping_start_page
+                || page_index >= mapping_start_page.saturating_add(mapping_page_count)
+            {
+                continue;
+            }
+
+            let local_page_idx = page_index - mapping_start_page;
+            if local_page_idx >= si.page_starts.len() {
+                continue;
+            }
+
+            let page_start = si.page_starts[local_page_idx];
+            if page_start == DYLD_CACHE_SLIDE_V5_PAGE_ATTR_NO_REBASE {
+                continue;
+            }
+
+            let page_data_offset_in_mapping = local_page_idx * si.page_size as usize;
+            let mut delta = (page_start / 8) as usize;
+            let mut loc = kva as *mut u64;
+
+            loop {
+                // SAFETY: `loc` always points within the freshly allocated and loaded page.
+                loc = unsafe { loc.add(delta) };
+                if loc as usize >= kva + PAGE_SIZE {
+                    break;
+                }
+
+                // SAFETY: `loc` has been bounds-checked against the page extent.
+                let raw = unsafe { ptr::read(loc) };
+                let auth_bit = (raw >> 63) & 1;
+                let next;
+
+                if auth_bit == 1 {
+                    let runtime_offset = raw & 0x3FFFFFFFF;
+                    let diversity = (raw >> 34) & 0xFFFF;
+                    let addr_div = (raw >> 50) & 1;
+                    let key_is_data = (raw >> 51) & 1;
+                    next = ((raw >> 52) & 0x7FF) as usize;
+
+                    let target = si.value_add + runtime_offset;
+                    let fixup_vaddr = si.mapping_address
+                        + page_data_offset_in_mapping as u64
+                        + (loc as usize - kva) as u64;
+                    let modifier = if addr_div != 0 {
+                        diversity ^ (fixup_vaddr >> 3)
+                    } else {
+                        diversity
+                    };
+
+                    let signed_ptr = if key_is_data != 0 {
+                        pac_sign_da(target, modifier)
+                    } else {
+                        pac_sign_ia(target, modifier)
+                    };
+                    // SAFETY: `loc` points to an in-page u64 slot being fixed up in place.
+                    unsafe { ptr::write(loc, signed_ptr) };
+                } else {
+                    let runtime_offset = raw & 0x3FFFFFFFF;
+                    let high8 = (raw >> 34) & 0xFF;
+                    next = ((raw >> 44) & 0x7FF) as usize;
+                    let target = si.value_add + runtime_offset;
+                    // SAFETY: `loc` points to an in-page u64 slot being fixed up in place.
+                    unsafe { ptr::write(loc, target | (high8 << 56)) };
+                }
+
+                if next == 0 {
+                    break;
+                }
+                delta = next;
+            }
+        }
+    }
+}
+
+impl MemoryMappingOps for DarwinSharedCache {
+    fn get_mapping_info(
+        &self,
+        _offset: usize,
+        _length: usize,
+    ) -> Result<(usize, usize, bool), &'static str> {
+        let perms = VirtualMemoryPermission::Read as usize
+            | VirtualMemoryPermission::Write as usize
+            | VirtualMemoryPermission::Execute as usize
+            | VirtualMemoryPermission::User as usize;
+        Ok((0, perms, true))
+    }
+
+    fn supports_mmap(&self) -> bool {
+        true
+    }
+
+    fn mmap_owner_name(&self) -> String {
+        String::from("darwin_shared_cache")
+    }
+
+    fn resolve_fault(
+        &self,
+        access: &AccessKind,
+        map: &VirtualMemoryMap,
+    ) -> Result<ResolveFaultResult, ResolveFaultError> {
+        let page_vaddr = access.vaddr & !(PAGE_SIZE - 1);
+        if page_vaddr < self.cache_start
+            || page_vaddr < map.vmarea.start
+            || page_vaddr > map.vmarea.end
+        {
+            return Err(ResolveFaultError::Invalid);
+        }
+
+        let page_index = (page_vaddr - self.cache_start) / PAGE_SIZE;
+
+        {
+            let pages = self.pages.lock();
+            if let Some(&paddr) = pages.get(&page_index) {
+                return Ok(ResolveFaultResult {
+                    paddr_page_base: paddr,
+                    is_tail: false,
+                });
+            }
+        }
+
+        let (_mapping_idx, offset_in_mapping, file_offset) = self
+            .find_mapping_for_page(page_vaddr)
+            .ok_or(ResolveFaultError::Unmapped)?;
+        let mapping_size = if _mapping_idx < self.mapping_count {
+            usize::try_from(self.mappings[_mapping_idx].size)
+                .map_err(|_| ResolveFaultError::Invalid)?
+        } else {
+            PAGE_SIZE
+        };
+
+        let page = ContiguousPages::new(1).ok_or(ResolveFaultError::Unmapped)?;
+        let paddr = page.as_paddr();
+        let kva = crate::vm::addr::phys_to_virt(paddr);
+
+        // SAFETY: `kva` is the HHDM-mapped address for a newly allocated physical page.
+        unsafe {
+            ptr::write_bytes(kva as *mut u8, 0, PAGE_SIZE);
+        }
+
+        let readable = core::cmp::min(PAGE_SIZE, mapping_size.saturating_sub(offset_in_mapping));
+        let mut total_read = 0usize;
+        while total_read < readable {
+            // SAFETY: The destination slice stays within the single allocated page.
+            let dst = unsafe {
+                core::slice::from_raw_parts_mut(
+                    (kva + total_read) as *mut u8,
+                    readable - total_read,
+                )
+            };
+            let n = self
+                .file
+                .read_at((file_offset + total_read) as u64, dst)
+                .unwrap_or(0);
+            if n == 0 {
+                break;
+            }
+            total_read += n;
+        }
+
+        self.apply_slide_fixups_for_page(page_index, kva);
+
+        let mut pages = self.pages.lock();
+        if let Some(&existing) = pages.get(&page_index) {
+            return Ok(ResolveFaultResult {
+                paddr_page_base: existing,
+                is_tail: false,
+            });
+        }
+
+        core::mem::forget(page);
+        pages.insert(page_index, paddr);
+        Ok(ResolveFaultResult {
+            paddr_page_base: paddr,
+            is_tail: false,
+        })
+    }
+}
+
+fn init_shared_cache(vfs: &VfsManager) -> Result<Arc<DarwinSharedCache>, &'static str> {
+    let cache_file_path = "/System/Library/dyld/dyld_shared_cache_arm64e";
+    let file_obj = vfs.open(cache_file_path, 0).map_err(|e| {
+        crate::println!("[darwin] shared cache open failed: {}", e.message);
+        "Cannot open shared cache"
+    })?;
+    let file = match file_obj {
+        crate::object::KernelObject::File(file) => file,
+        _ => return Err("Shared cache is not a file"),
+    };
+
+    let mut header_buf = vec![0u8; 0x800];
+    let mut total_read = 0usize;
+    while total_read < header_buf.len() {
+        let n = file
+            .read_at(total_read as u64, &mut header_buf[total_read..])
+            .unwrap_or(0);
+        if n == 0 {
+            break;
+        }
+        total_read += n;
+    }
+
+    if total_read < 7 || &header_buf[0..7] != b"dyld_v1" {
+        return Err("Invalid shared cache magic");
+    }
+    if total_read < CACHE_HEADER_MAPPING_WITH_SLIDE_COUNT + 4 {
+        return Err("Shared cache header truncated");
+    }
+
+    let mapping_slide_offset = read_u32(
+        &header_buf
+            [CACHE_HEADER_MAPPING_WITH_SLIDE_OFFSET..CACHE_HEADER_MAPPING_WITH_SLIDE_OFFSET + 4],
+    ) as usize;
+    let mapping_slide_count = read_u32(
+        &header_buf
+            [CACHE_HEADER_MAPPING_WITH_SLIDE_COUNT..CACHE_HEADER_MAPPING_WITH_SLIDE_COUNT + 4],
+    ) as usize;
+    let mapping_count = mapping_slide_count.min(8);
+    if mapping_count == 0 {
+        return Err("Shared cache has no mappings");
+    }
+
+    let mappings_end = mapping_slide_offset
+        .checked_add(mapping_count * 56)
+        .ok_or("Shared cache mapping table overflow")?;
+    if mappings_end > total_read || mappings_end > header_buf.len() {
+        return Err("Shared cache mapping table truncated");
+    }
+
+    let mut mappings = [CacheMappingSlideInfo {
+        address: 0,
+        size: 0,
+        file_offset: 0,
+        slide_info_file_offset: 0,
+        slide_info_file_size: 0,
+        flags: 0,
+        max_prot: 0,
+        init_prot: 0,
+    }; 8];
+    for (i, mapping) in mappings.iter_mut().enumerate().take(mapping_count) {
+        let off = mapping_slide_offset + i * 56;
+        let src = &header_buf[off..off + 56];
+        mapping.address = read_u64(&src[0..8]);
+        mapping.size = read_u64(&src[8..16]);
+        mapping.file_offset = read_u64(&src[16..24]);
+        mapping.slide_info_file_offset = read_u64(&src[24..32]);
+        mapping.slide_info_file_size = read_u64(&src[32..40]);
+        mapping.flags = read_u64(&src[40..48]);
+        mapping.max_prot = read_u32(&src[48..52]);
+        mapping.init_prot = read_u32(&src[52..56]);
+    }
+
+    let cache_start =
+        usize::try_from(mappings[0].address).map_err(|_| "Shared cache base out of range")?;
+    let main_cache_end = mappings
+        .iter()
+        .take(mapping_count)
+        .map(|mapping| mapping.address.saturating_add(mapping.size))
+        .max()
+        .ok_or("Shared cache has no mappings")?;
+
+    let shared_region_size = if CACHE_HEADER_SHARED_REGION_SIZE + 8 <= header_buf.len() {
+        read_u64(&header_buf[CACHE_HEADER_SHARED_REGION_SIZE..CACHE_HEADER_SHARED_REGION_SIZE + 8])
+            as usize
+    } else {
+        0
+    };
+
+    let total_size = if shared_region_size > 0 {
+        crate::println!(
+            "[darwin] shared region: main={:#x} region={:#x} (sub-cache extends {:#x} bytes)",
+            usize::try_from(main_cache_end).unwrap_or(0) - cache_start,
+            shared_region_size,
+            shared_region_size - (usize::try_from(main_cache_end).unwrap_or(0) - cache_start),
+        );
+        shared_region_size
+    } else {
+        usize::try_from(main_cache_end)
+            .map_err(|_| "Shared cache end out of range")?
+            .checked_sub(cache_start)
+            .ok_or("Shared cache virtual range underflow")?
+    };
+
+    crate::println!(
+        "[darwin] shared cache: {}MB at {:#x}",
+        total_size / 1024 / 1024,
+        cache_start
+    );
+
+    let mut slide_infos = Vec::new();
+    for (i, mapping) in mappings.iter().enumerate().take(mapping_count) {
+        let si_off = mapping.slide_info_file_offset as usize;
+        let si_size = mapping.slide_info_file_size as usize;
+
+        if si_size == 0 || si_off == 0 {
+            continue;
+        }
+
+        let mut slide_header = vec![0u8; SLIDE_INFO5_HEADER_SIZE];
+        let mut header_read = 0usize;
+        while header_read < slide_header.len() {
+            let n = file
+                .read_at(
+                    (si_off + header_read) as u64,
+                    &mut slide_header[header_read..],
+                )
+                .unwrap_or(0);
+            if n == 0 {
+                break;
+            }
+            header_read += n;
+        }
+        if header_read < slide_header.len() {
+            return Err("Shared cache slide info header truncated");
+        }
+
+        let version = read_u32(&slide_header[0..4]);
+        let page_size = read_u32(&slide_header[4..8]);
+        let page_starts_count = read_u32(&slide_header[8..12]) as usize;
+        let value_add = read_u64(&slide_header[16..24]);
+
+        if version != 5 {
+            return Err("Unsupported shared cache slide info version");
+        }
+        if page_size == 0 {
+            return Err("Shared cache slide info page size is zero");
+        }
+
+        let page_starts_bytes = page_starts_count
+            .checked_mul(size_of::<u16>())
+            .ok_or("Shared cache page_starts overflow")?;
+        if SLIDE_INFO5_HEADER_SIZE + page_starts_bytes > si_size {
+            return Err("Shared cache page_starts truncated");
+        }
+
+        let mut page_starts_raw = vec![0u8; page_starts_bytes];
+        let mut starts_read = 0usize;
+        while starts_read < page_starts_raw.len() {
+            let n = file
+                .read_at(
+                    (si_off + SLIDE_INFO5_HEADER_SIZE + starts_read) as u64,
+                    &mut page_starts_raw[starts_read..],
+                )
+                .unwrap_or(0);
+            if n == 0 {
+                break;
+            }
+            starts_read += n;
+        }
+        if starts_read < page_starts_raw.len() {
+            return Err("Shared cache page_starts read truncated");
+        }
+
+        let mut page_starts = Vec::with_capacity(page_starts_count);
+        for chunk in page_starts_raw.chunks_exact(size_of::<u16>()) {
+            page_starts.push(u16::from_le_bytes([chunk[0], chunk[1]]));
+        }
+
+        crate::println!(
+            "[darwin] slide info [{}]: {} pages, auth_data={}",
+            i,
+            page_starts_count,
+            (mapping.flags & CACHE_MAPPING_AUTH_DATA) != 0
+        );
+
+        slide_infos.push(SlideInfoMeta {
+            mapping_idx: i,
+            file_offset: usize::try_from(mapping.file_offset)
+                .map_err(|_| "Shared cache mapping file offset out of range")?,
+            mapping_address: mapping.address,
+            mapping_size: usize::try_from(mapping.size)
+                .map_err(|_| "Shared cache mapping size out of range")?,
+            page_size,
+            value_add,
+            page_starts,
+        });
+    }
+
+    Ok(Arc::new(DarwinSharedCache {
+        file,
+        cache_start,
+        total_size,
+        mapping_count,
+        mappings,
+        slide_infos,
+        pages: Mutex::new(BTreeMap::new()),
+    }))
+}
+
+pub fn setup_shared_cache_region(task: &Task) -> Result<(), &'static str> {
+    let cache = SHARED_CACHE.call_once(|| {
+        let vfs = task.get_vfs().expect("No VFS");
+        Mutex::new(match init_shared_cache(&vfs) {
+            Ok(cache) => {
+                crate::println!(
+                    "[darwin] shared cache ready: {}MB at {:#x}",
+                    cache.total_size / 1024 / 1024,
+                    cache.cache_start
+                );
+                Some(cache)
+            }
+            Err(e) => {
+                crate::println!("[darwin] shared cache init failed: {}", e);
+                None
+            }
+        })
+    });
+
+    let guard = cache.lock();
+    let cache = guard.as_ref().ok_or("Shared cache not available")?;
+
+    let mmap = VirtualMemoryMap::new(
+        MemoryArea::new(0, PAGE_SIZE - 1),
+        MemoryArea::new(cache.cache_start, cache.cache_start + cache.total_size - 1),
+        VirtualMemoryPermission::Read as usize
+            | VirtualMemoryPermission::Write as usize
+            | VirtualMemoryPermission::Execute as usize
+            | VirtualMemoryPermission::User as usize,
+        true,
+        Some(Arc::downgrade(cache) as alloc::sync::Weak<dyn MemoryMappingOps>),
+    );
+    task.vm_manager.add_memory_map(mmap)?;
+
+    Ok(())
+}
+
+#[inline(always)]
+fn pac_sign_ia(ptr: u64, modifier: u64) -> u64 {
+    let result;
+    unsafe {
+        core::arch::asm!(
+            ".arch armv8.3-a",
+            "pacia {0}, {1}",
+            ".arch armv8-a",
+            inout(reg) ptr => result,
+            in(reg) modifier,
+            options(nostack)
+        )
+    };
+    result
+}
+
+#[inline(always)]
+fn pac_sign_da(ptr: u64, modifier: u64) -> u64 {
+    let result;
+    unsafe {
+        core::arch::asm!(
+            ".arch armv8.3-a",
+            "pacda {0}, {1}",
+            ".arch armv8-a",
+            inout(reg) ptr => result,
+            in(reg) modifier,
+            options(nostack)
+        )
+    };
+    result
+}
 
 const COMMPAGE_BASE: usize = 0x0FFFFFC000;
 const COMMPAGE_SIZE: usize = 0x1000;
@@ -1062,48 +1595,6 @@ pub fn setup_commpage(task: &Task) -> Result<(), &'static str> {
         COMMPAGE_RO_OFFSET,
         COMMPAGE_RW_OFFSET
     );
-    Ok(())
-}
-
-pub fn setup_shared_cache_region(task: &Task) -> Result<(), &'static str> {
-    if task
-        .vm_manager
-        .search_memory_map(DYLD_SHARED_CACHE_BASE)
-        .is_some()
-    {
-        return Ok(());
-    }
-
-    let num_pages = DYLD_SHARED_CACHE_SIZE / PAGE_SIZE;
-    let pages =
-        ContiguousPages::new(num_pages).ok_or("Failed to allocate dyld shared cache region")?;
-    let paddr = pages.as_paddr();
-
-    let mmap = VirtualMemoryMap::new(
-        MemoryArea::new(paddr, paddr + DYLD_SHARED_CACHE_SIZE - 1),
-        MemoryArea::new(
-            DYLD_SHARED_CACHE_BASE,
-            DYLD_SHARED_CACHE_BASE + DYLD_SHARED_CACHE_SIZE - 1,
-        ),
-        VirtualMemoryPermission::Read as usize
-            | VirtualMemoryPermission::Write as usize
-            | VirtualMemoryPermission::Execute as usize
-            | VirtualMemoryPermission::User as usize,
-        false,
-        None,
-    );
-    task.vm_manager.add_memory_map(mmap)?;
-    task.page_allocations.write().push(pages);
-
-    let shared_cache_kva = task
-        .vm_manager
-        .translate_to_kva(DYLD_SHARED_CACHE_BASE)
-        .ok_or("Failed to translate dyld shared cache region")?;
-
-    unsafe {
-        ptr::write_bytes(shared_cache_kva as *mut u8, 0, DYLD_SHARED_CACHE_SIZE);
-    }
-
     Ok(())
 }
 

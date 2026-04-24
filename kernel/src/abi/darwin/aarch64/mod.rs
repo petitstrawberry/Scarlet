@@ -306,6 +306,7 @@ impl DarwinAarch64Abi {
             SYS_dup2 => Ok(bsd_syscalls::sys_dup2(self, trapframe)),
             SYS_wait4 => Ok(bsd_syscalls::sys_wait4(self, trapframe)),
             SYS_sigaction => Ok(bsd_syscalls::sys_sigaction(self, trapframe)),
+            SYS_sigprocmask => Ok(bsd_syscalls::sys_sigprocmask(self, trapframe)),
             SYS_sigreturn => Ok(bsd_syscalls::sys_sigreturn(self, trapframe)),
             SYS_fcntl => Ok(bsd_syscalls::sys_fcntl(self, trapframe)),
             SYS_ioctl => Ok(bsd_syscalls::sys_ioctl(self, trapframe)),
@@ -751,6 +752,10 @@ impl AbiModule for DarwinAarch64Abi {
                     syscall_num,
                 );
 
+                if syscall_num_signed >= 0 {
+                    trapframe.spsr &= !(1 << 29);
+                }
+
                 let result = if syscall_num_signed < 0 {
                     self.dispatch_mach_syscall(syscall_num_signed, trapframe)
                 } else {
@@ -775,10 +780,12 @@ impl AbiModule for DarwinAarch64Abi {
                 if bsd_num == syscall_table::SYS_getentropy && lock_after == 0x307 {
                     crate::arch::aarch64::trap::exception::enable_lock_page_watch(0x400a9150);
                 }
-                if result.is_ok() {
-                    trapframe.spsr &= !(1 << 29);
-                } else {
-                    trapframe.spsr |= 1 << 29;
+                if syscall_num_signed < 0 {
+                    if result.is_ok() {
+                        trapframe.spsr &= !(1 << 29);
+                    } else {
+                        trapframe.spsr |= 1 << 29;
+                    }
                 }
                 result
             }

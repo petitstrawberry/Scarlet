@@ -633,6 +633,23 @@ pub fn sys_sigaction(abi: &mut DarwinAarch64Abi, trapframe: &mut Trapframe) -> u
     0
 }
 
+pub fn sys_sigprocmask(_abi: &mut DarwinAarch64Abi, trapframe: &mut Trapframe) -> usize {
+    let task = mytask().unwrap();
+    trapframe.increment_pc_next(task);
+
+    let _how = trapframe.get_arg(0) as usize;
+    let _set_ptr = trapframe.get_arg(1);
+    let oset_ptr = trapframe.get_arg(2);
+
+    if oset_ptr != 0 {
+        let empty_mask: [u8; 8] = 0u64.to_le_bytes();
+        write_user_bytes(task, oset_ptr, &empty_mask);
+    }
+
+    trapframe.set_return_value(0);
+    0
+}
+
 pub fn sys_sigreturn(_abi: &mut DarwinAarch64Abi, trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
 
@@ -1728,9 +1745,21 @@ pub fn sys_shared_region_check_np(_abi: &mut DarwinAarch64Abi, trapframe: &mut T
     let task = mytask().unwrap();
     trapframe.increment_pc_next(task);
 
-    // No shared region available — return EINVAL per XNU convention
-    trapframe.set_return_value(EINVAL);
-    usize::MAX
+    let addr_ptr = trapframe.get_arg(0);
+    let cache_base = macho_loader::shared_cache_base() as u64;
+    let bytes = cache_base.to_le_bytes();
+
+    match crate::library::std::usercopy::copy_to_user(&task, addr_ptr, &bytes) {
+        Ok(()) => {
+            trapframe.set_return_value(0);
+            0
+        }
+        Err(_) => {
+            trapframe.spsr |= 1 << 29;
+            trapframe.set_return_value(EINVAL);
+            usize::MAX
+        }
+    }
 }
 
 pub fn sys_stat(abi: &mut DarwinAarch64Abi, trapframe: &mut Trapframe) -> usize {
