@@ -155,13 +155,17 @@ pub fn initialize_process_environment(
     );
 
     // PEB heap config — ntdll reads these via RtlCreateHeap
-    write_u64(&mut peb_buf, 0xC8, 0x100000);  // HeapSegmentReserve
-    write_u64(&mut peb_buf, 0xD0, 0x2000);    // HeapSegmentCommit
-    write_u64(&mut peb_buf, 0xD8, 0x10000);   // HeapDeCommitTotalFreeThreshold
-    write_u64(&mut peb_buf, 0xE0, 0x1000);    // HeapDeCommitFreeBlockThreshold
-    write_u32(&mut peb_buf, 0xE8, 0);          // NumberOfHeaps
-    write_u32(&mut peb_buf, 0xEC, 0x100);     // MaximumNumberOfHeaps
-    write_u64(&mut peb_buf, 0xF0, peb_addr as u64 + layout::PEB_SIZE as u64); // ProcessHeaps
+    write_u64(&mut peb_buf, 0xC8, 0x100000); // HeapSegmentReserve
+    write_u64(&mut peb_buf, 0xD0, 0x2000); // HeapSegmentCommit
+    write_u64(&mut peb_buf, 0xD8, 0x10000); // HeapDeCommitTotalFreeThreshold
+    write_u64(&mut peb_buf, 0xE0, 0x1000); // HeapDeCommitFreeBlockThreshold
+    write_u32(&mut peb_buf, 0xE8, 0); // NumberOfHeaps
+    write_u32(&mut peb_buf, 0xEC, 0x100); // MaximumNumberOfHeaps
+    write_u64(
+        &mut peb_buf,
+        0xF0,
+        peb_addr as u64 + layout::PEB_SIZE as u64,
+    ); // ProcessHeaps
 
     // Mutant handle at PEB+0x08 — must be non-NULL for loader lock
     write_u64(&mut peb_buf, 0x08, 0xFFFFFFFFFFFFFFFF);
