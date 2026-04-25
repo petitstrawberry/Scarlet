@@ -676,13 +676,24 @@ impl MemoryMappingOps for Ext2FileObject {
         crate::object::capability::memory_mapping::ResolveFaultResult,
         crate::object::capability::memory_mapping::ResolveFaultError,
     > {
-        let range = self
-            .mmap_ranges
-            .read()
-            .get(&vm_start)
-            .copied()
-            .ok_or(crate::object::capability::memory_mapping::ResolveFaultError::Invalid)?;
+        let range = match self.mmap_ranges.read().get(&vm_start).copied() {
+            Some(r) => r,
+            None => {
+                crate::early_println!(
+                    "[ext2] resolve_fault: no mmap_range for vm_start={:#x} vaddr={:#x}",
+                    vm_start,
+                    access.vaddr
+                );
+                return Err(crate::object::capability::memory_mapping::ResolveFaultError::Invalid);
+            }
+        };
         if access.vaddr < range.vaddr_start || access.vaddr > range.vaddr_end {
+            crate::early_println!(
+                "[ext2] resolve_fault: vaddr={:#x} outside range={:#x}-{:#x}",
+                access.vaddr,
+                range.vaddr_start,
+                range.vaddr_end
+            );
             return Err(crate::object::capability::memory_mapping::ResolveFaultError::Invalid);
         }
 
@@ -704,18 +715,49 @@ impl MemoryMappingOps for Ext2FileObject {
         let file_offset = range
             .offset
             .saturating_add(access.vaddr.saturating_sub(range.vaddr_start));
-        if file_size == 0 || file_offset >= file_size {
-            return Err(crate::object::capability::memory_mapping::ResolveFaultError::Invalid);
-        }
 
         let page_index = (file_offset / PAGE_SIZE) as u64;
-        let pinned = PageCacheManager::global()
-            .pin_or_load(self.cache_id(), page_index, |paddr| {
-                ext2_fs
-                    .read_page_content(self.inode_number, page_index, paddr)
-                    .map_err(|_| "ext2: read_page_content failed")
-            })
-            .map_err(|_| crate::object::capability::memory_mapping::ResolveFaultError::Invalid)?;
+
+        // BSS/zero-fill: pages beyond file content return zeroed pages (POSIX mmap behavior).
+        let pinned = if file_size == 0 || file_offset >= file_size {
+            PageCacheManager::global()
+                .pin_or_load(self.cache_id(), page_index, |paddr| {
+                    // SAFETY: paddr is a freshly-allocated page from the page cache.
+                    unsafe {
+                        core::ptr::write_bytes(phys_to_virt(paddr) as *mut u8, 0, PAGE_SIZE);
+                    }
+                    Ok(())
+                })
+                .map_err(|_| {
+                    crate::object::capability::memory_mapping::ResolveFaultError::Invalid
+                })?
+        } else {
+            let pinned = PageCacheManager::global()
+                .pin_or_load(self.cache_id(), page_index, |paddr| {
+                    ext2_fs
+                        .read_page_content(self.inode_number, page_index, paddr)
+                        .map_err(|_| "ext2: read_page_content failed")
+                })
+                .map_err(|_| {
+                    crate::object::capability::memory_mapping::ResolveFaultError::Invalid
+                })?;
+
+            // Zero-fill the tail of the last page if the page extends beyond file_size.
+            let page_start = (file_offset / PAGE_SIZE) * PAGE_SIZE;
+            let page_end = page_start + PAGE_SIZE;
+            if page_end > file_size {
+                let zero_start = file_size - page_start;
+                // SAFETY: paddr is a valid page-cache page; zero_start < PAGE_SIZE.
+                unsafe {
+                    core::ptr::write_bytes(
+                        (phys_to_virt(pinned.paddr()) as *mut u8).add(zero_start),
+                        0,
+                        PAGE_SIZE - zero_start,
+                    );
+                }
+            }
+            pinned
+        };
 
         if matches!(
             access.op,

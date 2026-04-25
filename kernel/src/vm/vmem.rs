@@ -1,5 +1,6 @@
 use crate::object::capability::memory_mapping::MemoryMappingOps;
-use alloc::sync::Weak;
+use alloc::sync::Arc;
+use core::fmt;
 
 /// Represents a mapping between physical and virtual memory areas.
 ///
@@ -15,15 +16,29 @@ use alloc::sync::Weak;
 ///   compute correct page indices even after partial unmapping.
 /// * `permissions` - The access permissions for this mapping
 /// * `is_shared` - Whether this mapping is shared between processes
-/// * `owner` - Optional weak reference to the object that created this mapping (None for anonymous mappings)
-#[derive(Debug, Clone)]
+/// * `owner` - Optional strong reference to the object that provides page fault resolution.
+///   The mapping owns this reference, so the owner stays alive as long as the mapping exists.
+#[derive(Clone)]
 pub struct VirtualMemoryMap {
     pub pmarea: MemoryArea,
     pub vmarea: MemoryArea,
     pub vm_start: usize,
     pub permissions: usize,
     pub is_shared: bool,
-    pub owner: Option<Weak<dyn MemoryMappingOps>>,
+    pub owner: Option<Arc<dyn MemoryMappingOps>>,
+}
+
+impl fmt::Debug for VirtualMemoryMap {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("VirtualMemoryMap")
+            .field("pmarea", &self.pmarea)
+            .field("vmarea", &self.vmarea)
+            .field("vm_start", &self.vm_start)
+            .field("permissions", &self.permissions)
+            .field("is_shared", &self.is_shared)
+            .field("has_owner", &self.owner.is_some())
+            .finish()
+    }
 }
 
 impl Default for VirtualMemoryMap {
@@ -56,7 +71,7 @@ impl VirtualMemoryMap {
         vmarea: MemoryArea,
         permissions: usize,
         is_shared: bool,
-        owner: Option<Weak<dyn MemoryMappingOps>>,
+        owner: Option<Arc<dyn MemoryMappingOps>>,
     ) -> Self {
         VirtualMemoryMap {
             pmarea,

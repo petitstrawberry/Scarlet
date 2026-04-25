@@ -1328,19 +1328,34 @@ impl MemoryMappingOps for TmpFileObject {
         let file_offset = range
             .offset
             .saturating_add(access.vaddr.saturating_sub(range.vaddr_start));
-        if file_size == 0 || file_offset >= file_size {
-            return Err(crate::object::capability::memory_mapping::ResolveFaultError::Invalid);
-        }
 
         let page_index = (file_offset / PAGE_SIZE) as u64;
+
         let pinned = PageCacheManager::global()
             .pin_or_load(self.cache_id(), page_index, |paddr| {
+                // SAFETY: paddr is a freshly-allocated page from the page cache.
                 unsafe {
                     core::ptr::write_bytes(paddr as *mut u8, 0, PAGE_SIZE);
                 }
                 Ok(())
             })
             .map_err(|_| crate::object::capability::memory_mapping::ResolveFaultError::Invalid)?;
+
+        if file_offset < file_size {
+            let page_start = (file_offset / PAGE_SIZE) * PAGE_SIZE;
+            let page_end = page_start + PAGE_SIZE;
+            if page_end > file_size {
+                let zero_start = file_size - page_start;
+                // SAFETY: paddr is a valid page-cache page; zero_start < PAGE_SIZE.
+                unsafe {
+                    core::ptr::write_bytes(
+                        (pinned.paddr() as *mut u8).add(zero_start),
+                        0,
+                        PAGE_SIZE - zero_start,
+                    );
+                }
+            }
+        }
 
         if matches!(
             access.op,

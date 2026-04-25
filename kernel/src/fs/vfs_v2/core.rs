@@ -423,6 +423,15 @@ impl MemoryMappingOps for VfsFileObject {
         self.inner.get_mapping_info(offset, length)
     }
 
+    fn get_mapping_info_with(
+        &self,
+        offset: usize,
+        length: usize,
+        is_shared: bool,
+    ) -> Result<(usize, usize, bool), &'static str> {
+        self.inner.get_mapping_info_with(offset, length, is_shared)
+    }
+
     fn on_mapped(&self, vaddr: usize, paddr: usize, length: usize, offset: usize) {
         self.inner.on_mapped(vaddr, paddr, length, offset);
     }
@@ -437,6 +446,18 @@ impl MemoryMappingOps for VfsFileObject {
 
     fn mmap_owner_name(&self) -> alloc::string::String {
         alloc::format!("vfs:{}", self.get_original_path())
+    }
+
+    fn resolve_fault(
+        &self,
+        access: &crate::object::capability::memory_mapping::AccessKind,
+        page_idx: usize,
+        vm_start: usize,
+    ) -> core::result::Result<
+        crate::object::capability::memory_mapping::ResolveFaultResult,
+        crate::object::capability::memory_mapping::ResolveFaultError,
+    > {
+        self.inner.resolve_fault(access, page_idx, vm_start)
     }
 }
 

@@ -3,6 +3,7 @@
 //! This module provides the MemoryMappingOps trait for objects that support
 //! memory mapping operations like mmap and munmap.
 
+pub mod anon_owner;
 pub mod syscall;
 
 pub use syscall::{sys_memory_map, sys_memory_unmap};
@@ -101,6 +102,10 @@ pub trait MemoryMappingOps: Send + Sync {
     }
 
     fn release_pages(&self, _start_page_idx: usize, _page_count: usize) {}
+
+    fn fork_clone(&self) -> Option<alloc::sync::Arc<dyn MemoryMappingOps>> {
+        None
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
