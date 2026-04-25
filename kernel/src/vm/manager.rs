@@ -560,7 +560,20 @@ impl VirtualMemoryManager {
                                 is_shared: false,
                                 owner: None,
                             };
-                            let _ = self.add_memory_map_fixed(cow_map);
+                            if let Ok(removed) = self.add_memory_map_fixed(cow_map) {
+                                for rm in &removed {
+                                    if rm.pmarea.start != 0 && rm.owner.is_none() {
+                                        // SAFETY: pmarea points to a page allocated by allocate_raw_pages.
+                                        unsafe {
+                                            crate::mem::page::free_raw_pages(
+                                                crate::vm::addr::phys_to_virt(rm.pmarea.start)
+                                                    as *mut _,
+                                                1,
+                                            );
+                                        }
+                                    }
+                                }
+                            }
                             let cow_paddr = new_paddr;
                             if let Some(root_pagetable) = self.get_root_page_table() {
                                 root_pagetable.map(

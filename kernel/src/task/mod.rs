@@ -1291,39 +1291,57 @@ impl Task {
                                 .add_memory_map(new_mmap)
                                 .map_err(|_| "Failed to add owner-based map to child task")?;
                         } else {
-                            let permissions = mmap.permissions;
-                            let page_alloc = ContiguousPages::new(num_pages)
-                                .ok_or("Failed to allocate pages for clone")?;
-                            let size = num_pages * PAGE_SIZE;
-                            let paddr = virt_to_phys(page_alloc.as_ptr() as usize);
-                            let new_mmap = VirtualMemoryMap {
-                                pmarea: MemoryArea {
-                                    start: paddr,
-                                    end: paddr + (size - 1),
-                                },
-                                vmarea: MemoryArea {
-                                    start: vaddr,
-                                    end: vaddr + (size - 1),
-                                },
-                                vm_start: vaddr,
-                                permissions,
-                                is_shared: false,
-                                owner: None,
-                            };
-                            unsafe {
-                                let src_start = phys_to_virt(mmap.pmarea.start);
-                                let dst_start = phys_to_virt(paddr);
-                                core::ptr::copy_nonoverlapping(
-                                    src_start as *const u8,
-                                    dst_start as *mut u8,
-                                    size,
-                                );
+                            if mmap.pmarea.start == 0 {
+                                // Lazy: clone Arc, child COWs independently on fault
+                                let new_mmap = VirtualMemoryMap {
+                                    pmarea: MemoryArea { start: 0, end: 0 },
+                                    vmarea: mmap.vmarea,
+                                    vm_start: mmap.vm_start,
+                                    permissions: mmap.permissions,
+                                    is_shared: false,
+                                    owner: Some(Arc::clone(owner)),
+                                };
+                                child
+                                    .vm_manager
+                                    .add_memory_map(new_mmap)
+                                    .map_err(|_| "Failed to add owner-based map to child task")?;
+                            } else {
+                                // Eager: copy physical pages
+                                let permissions = mmap.permissions;
+                                let page_alloc = ContiguousPages::new(num_pages)
+                                    .ok_or("Failed to allocate pages for clone")?;
+                                let size = num_pages * PAGE_SIZE;
+                                let paddr = virt_to_phys(page_alloc.as_ptr() as usize);
+                                let new_mmap = VirtualMemoryMap {
+                                    pmarea: MemoryArea {
+                                        start: paddr,
+                                        end: paddr + (size - 1),
+                                    },
+                                    vmarea: MemoryArea {
+                                        start: vaddr,
+                                        end: vaddr + (size - 1),
+                                    },
+                                    vm_start: vaddr,
+                                    permissions,
+                                    is_shared: false,
+                                    owner: None,
+                                };
+                                // SAFETY: src/dst are valid page-aligned ranges of `size` bytes.
+                                unsafe {
+                                    let src_start = phys_to_virt(mmap.pmarea.start);
+                                    let dst_start = phys_to_virt(paddr);
+                                    core::ptr::copy_nonoverlapping(
+                                        src_start as *const u8,
+                                        dst_start as *mut u8,
+                                        size,
+                                    );
+                                }
+                                child.page_allocations.write().push(page_alloc);
+                                child
+                                    .vm_manager
+                                    .add_memory_map(new_mmap)
+                                    .map_err(|_| "Failed to add memory map to child task")?;
                             }
-                            child.page_allocations.write().push(page_alloc);
-                            child
-                                .vm_manager
-                                .add_memory_map(new_mmap)
-                                .map_err(|_| "Failed to add memory map to child task")?;
                         }
                     } else {
                         // Private memory regions: allocate new pages and copy contents
