@@ -2113,17 +2113,15 @@ impl MemoryMappingOps for DarwinSharedCache {
     fn resolve_fault(
         &self,
         access: &AccessKind,
-        map: &VirtualMemoryMap,
+        page_idx: usize,
+        vm_start: usize,
     ) -> Result<ResolveFaultResult, ResolveFaultError> {
         let page_vaddr = access.vaddr & !(PAGE_SIZE - 1);
         crate::println!(
-            "[darwin] resolve_fault: vaddr={:#x} cache_start={:#x} vma={:#x}-{:#x}",
-            page_vaddr, self.cache_start, map.vmarea.start, map.vmarea.end
+            "[darwin] resolve_fault: vaddr={:#x} cache_start={:#x} vm_start={:#x}",
+            page_vaddr, self.cache_start, vm_start
         );
-        if page_vaddr < self.cache_start
-            || page_vaddr < map.vmarea.start
-            || page_vaddr > map.vmarea.end
-        {
+        if page_vaddr < self.cache_start {
             crate::println!("[darwin] resolve_fault: OUT OF RANGE");
             return Err(ResolveFaultError::Invalid);
         }
@@ -2463,7 +2461,7 @@ pub fn setup_shared_cache_region(task: &Task) -> Result<(), &'static str> {
             | VirtualMemoryPermission::Execute as usize
             | VirtualMemoryPermission::User as usize,
         true,
-        Some(Arc::downgrade(cache) as alloc::sync::Weak<dyn MemoryMappingOps>),
+        Some(Arc::clone(cache) as alloc::sync::Arc<dyn MemoryMappingOps>),
     );
     task.vm_manager.add_memory_map(mmap)?;
 

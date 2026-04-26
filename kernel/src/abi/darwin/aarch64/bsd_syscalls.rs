@@ -1272,22 +1272,72 @@ pub fn sys_mmap(abi: &mut DarwinAarch64Abi, trapframe: &mut Trapframe) -> usize 
         return usize::MAX;
     }
 
-    let mut scarlet_prot = 0usize;
-    if prot & DARWIN_PROT_READ != 0 {
-        scarlet_prot |= 0x01;
-    }
-    if prot & DARWIN_PROT_WRITE != 0 {
-        scarlet_prot |= 0x02;
-    }
-    if prot & DARWIN_PROT_EXEC != 0 {
-        scarlet_prot |= 0x04;
-    }
-    scarlet_prot |= 0x08;
-
     let aligned_len =
         (len + crate::environment::PAGE_SIZE - 1) & !(crate::environment::PAGE_SIZE - 1);
 
-    let vaddr = if flags & DARWIN_MAP_FIXED != 0 {
+    // Convert Darwin protection flags to Scarlet kernel permissions
+    let mut prot_mask = 0usize;
+    if prot & DARWIN_PROT_READ != 0 {
+        prot_mask |= 0x01;
+    }
+    if prot & DARWIN_PROT_WRITE != 0 {
+        prot_mask |= 0x02;
+    }
+    if prot & DARWIN_PROT_EXEC != 0 {
+        prot_mask |= 0x04;
+    }
+
+    let is_shared = flags & DARWIN_MAP_SHARED != 0;
+    let is_fixed = flags & DARWIN_MAP_FIXED != 0;
+    let is_private = flags & DARWIN_MAP_PRIVATE != 0;
+
+    // Handle ANONYMOUS mappings (MAP_ANON or fd == -1 without file backing)
+    if flags & DARWIN_MAP_ANON != 0 || fd == -1 {
+        return handle_darwin_anonymous_mapping(
+            abi, task, trapframe, addr, aligned_len, prot_mask, prot, flags,
+        );
+    }
+
+    // File-backed mappings
+    use crate::object::capability::memory_mapping::MemoryMappingOps;
+    use crate::vm::addr::{is_direct_mapped, virt_to_phys};
+    use crate::object::capability::memory_mapping::syscall::reclaim_private_removed_mapping;
+
+    let handle = match abi.get_handle(fd as usize) {
+        Some(h) => h,
+        None => {
+            trapframe.spsr |= 1 << 29;
+            trapframe.set_return_value(EBADF);
+            return usize::MAX;
+        }
+    };
+
+    let kernel_obj = match task.handle_table.get(handle) {
+        Some(obj) => obj,
+        None => {
+            trapframe.spsr |= 1 << 29;
+            trapframe.set_return_value(EBADF);
+            return usize::MAX;
+        }
+    };
+
+    let memory_mappable: &dyn MemoryMappingOps = match kernel_obj.as_memory_mappable() {
+        Some(mappable) => mappable,
+        None => {
+            trapframe.spsr |= 1 << 29;
+            trapframe.set_return_value(ENODEV);
+            return usize::MAX;
+        }
+    };
+
+    if !memory_mappable.supports_mmap() {
+        trapframe.spsr |= 1 << 29;
+        trapframe.set_return_value(ENODEV);
+        return usize::MAX;
+    }
+
+    // Determine final virtual address
+    let final_vaddr = if is_fixed {
         addr
     } else {
         match task
@@ -1303,473 +1353,239 @@ pub fn sys_mmap(abi: &mut DarwinAarch64Abi, trapframe: &mut Trapframe) -> usize 
         }
     };
 
-    if flags & DARWIN_MAP_ANON != 0 {
-        let num_pages = aligned_len / crate::environment::PAGE_SIZE;
-        let pages = match crate::mem::page::ContiguousPages::new(num_pages) {
-            Some(p) => p,
+    let mut final_permissions = prot_mask;
+    if prot != DARWIN_PROT_NONE {
+        final_permissions |= 0x08;
+    }
+
+    // MAP_PRIVATE (lazy paging): install a mapping with Arc owner, no eager copy
+    if is_private && !is_shared {
+        let owner = match kernel_obj.as_memory_mappable_arc() {
+            Some(owner) => owner,
+            None => {
+                trapframe.spsr |= 1 << 29;
+                trapframe.set_return_value(ENODEV);
+                return usize::MAX;
+            }
+        };
+        let vm_map = crate::vm::vmem::VirtualMemoryMap {
+            pmarea: crate::vm::vmem::MemoryArea { start: 0, end: 0 },
+            vmarea: crate::vm::vmem::MemoryArea::new(final_vaddr, final_vaddr + aligned_len - 1),
+            vm_start: final_vaddr,
+            permissions: final_permissions,
+            is_shared: false,
+            owner: Some(owner),
+        };
+
+        let removed_mappings = if is_fixed {
+            task.vm_manager.add_memory_map_fixed(vm_map)
+        } else {
+            task.vm_manager.add_memory_map(vm_map).map(|_| alloc::vec::Vec::new())
+        };
+
+        let removed_mappings = match removed_mappings {
+            Ok(rm) => rm,
+            Err(_) => {
+                trapframe.spsr |= 1 << 29;
+                trapframe.set_return_value(ENOMEM);
+                return usize::MAX;
+            }
+        };
+
+        for removed_map in &removed_mappings {
+            if let Some(owner) = &removed_map.owner {
+                owner.on_unmapped(removed_map.vmarea.start, removed_map.vmarea.size());
+            }
+        }
+        for removed_map in removed_mappings {
+            reclaim_private_removed_mapping(task, &removed_map);
+        }
+
+        memory_mappable.on_mapped(final_vaddr, 0, aligned_len, offset);
+        trapframe.set_return_value(final_vaddr);
+        return final_vaddr;
+    }
+
+    // Shared path: need get_mapping_info_with for pmarea and permissions
+    let mut ok_len = aligned_len;
+    let (mapping_base, obj_permissions, _obj_is_shared) = loop {
+        match memory_mappable.get_mapping_info_with(offset, ok_len, is_shared) {
+            Ok(info) => break info,
+            Err(_) => {
+                if ok_len >= crate::environment::PAGE_SIZE {
+                    ok_len -= crate::environment::PAGE_SIZE;
+                } else {
+                    ok_len = 0;
+                }
+                if ok_len == 0 {
+                    break (0, 0, false);
+                }
+            }
+        }
+    };
+
+    let paddr = if mapping_base != 0 && is_direct_mapped(mapping_base) {
+        virt_to_phys(mapping_base)
+    } else {
+        mapping_base
+    };
+
+    final_permissions = obj_permissions & prot_mask;
+    if prot != DARWIN_PROT_NONE {
+        final_permissions |= 0x08;
+    }
+
+    if paddr == 0 && ok_len == 0 {
+        trapframe.spsr |= 1 << 29;
+        trapframe.set_return_value(EINVAL);
+        return usize::MAX;
+    }
+
+    let ok_len_aligned =
+        (ok_len / crate::environment::PAGE_SIZE) * crate::environment::PAGE_SIZE;
+    if ok_len_aligned == 0 {
+        trapframe.spsr |= 1 << 29;
+        trapframe.set_return_value(EINVAL);
+        return usize::MAX;
+    }
+
+    let owner = kernel_obj.as_memory_mappable_arc();
+    let vm_map = crate::vm::vmem::VirtualMemoryMap::new(
+        crate::vm::vmem::MemoryArea::new(paddr, paddr + ok_len_aligned - 1),
+        crate::vm::vmem::MemoryArea::new(final_vaddr, final_vaddr + ok_len_aligned - 1),
+        final_permissions,
+        is_shared,
+        owner,
+    );
+
+    let map_result = if is_fixed {
+        task.vm_manager.add_memory_map_fixed(vm_map).map(Some)
+    } else {
+        task.vm_manager.add_memory_map(vm_map).map(|_| None)
+    };
+
+    match map_result {
+        Ok(removed_mappings_opt) => {
+            memory_mappable.on_mapped(final_vaddr, paddr, ok_len_aligned, offset);
+
+            if let Some(removed_mappings) = &removed_mappings_opt {
+                for removed_map in removed_mappings {
+                    if let Some(owner) = &removed_map.owner {
+                        owner.on_unmapped(removed_map.vmarea.start, removed_map.vmarea.size());
+                    }
+                }
+            }
+
+            if let Some(removed_mappings) = removed_mappings_opt {
+                for removed_map in removed_mappings {
+                    reclaim_private_removed_mapping(task, &removed_map);
+                }
+            }
+
+            trapframe.set_return_value(final_vaddr);
+            final_vaddr
+        }
+        Err(_) => {
+            trapframe.spsr |= 1 << 29;
+            trapframe.set_return_value(ENOMEM);
+            usize::MAX
+        }
+    }
+}
+
+/// Handle anonymous memory mapping for Darwin (MAP_ANON or fd == -1)
+fn handle_darwin_anonymous_mapping(
+    _abi: &mut DarwinAarch64Abi,
+    task: &crate::task::Task,
+    trapframe: &mut Trapframe,
+    vaddr_hint: usize,
+    aligned_len: usize,
+    prot_mask: usize,
+    prot: i32,
+    flags: i32,
+) -> usize {
+    use crate::object::capability::memory_mapping::anon_owner::AnonymousPageOwner;
+    use crate::object::capability::memory_mapping::syscall::reclaim_private_removed_mapping;
+
+    let is_shared = flags & DARWIN_MAP_SHARED != 0;
+    let is_fixed = flags & DARWIN_MAP_FIXED != 0;
+
+    // Determine final virtual address
+    let final_vaddr = if is_fixed {
+        vaddr_hint
+    } else if vaddr_hint == 0 {
+        match task
+            .vm_manager
+            .find_unmapped_area(aligned_len, crate::environment::PAGE_SIZE)
+        {
+            Some(addr) => addr,
             None => {
                 trapframe.spsr |= 1 << 29;
                 trapframe.set_return_value(ENOMEM);
                 return usize::MAX;
             }
-        };
-        let paddr = pages.as_paddr();
-        let mmap = crate::vm::vmem::VirtualMemoryMap::new(
-            crate::vm::vmem::MemoryArea::new(paddr, paddr + aligned_len - 1),
-            crate::vm::vmem::MemoryArea::new(vaddr, vaddr + aligned_len - 1),
-            scarlet_prot,
-            flags & DARWIN_MAP_SHARED != 0,
-            None,
-        );
-        let result = if flags & DARWIN_MAP_FIXED != 0 {
-            task.vm_manager.add_memory_map_fixed(mmap).map(|_| ())
-        } else {
-            task.vm_manager.add_memory_map(mmap)
-        };
-        match result {
-            Ok(()) => {
-                task.page_allocations.write().push(pages);
-                if let Some(kva) = task.vm_manager.translate_to_kva(vaddr) {
-                    unsafe {
-                        core::ptr::write_bytes(kva as *mut u8, 0, aligned_len);
-                    }
-                }
-                trapframe.set_return_value(vaddr);
-                vaddr
-            }
-            Err(_) => {
-                trapframe.spsr |= 1 << 29;
-                trapframe.set_return_value(ENOMEM);
-                usize::MAX
-            }
         }
     } else {
-        if fd == -1 {
-            let num_pages = aligned_len / crate::environment::PAGE_SIZE;
-            let pages = match crate::mem::page::ContiguousPages::new(num_pages) {
-                Some(p) => p,
+        // Treat as hint; pick fresh area if overlaps
+        let vaddr_end = vaddr_hint + aligned_len - 1;
+        let has_overlap = task.vm_manager.with_memmaps(|mm| {
+            mm.values()
+                .any(|map| !(vaddr_end < map.vmarea.start || vaddr_hint > map.vmarea.end))
+        });
+        if has_overlap {
+            match task
+                .vm_manager
+                .find_unmapped_area(aligned_len, crate::environment::PAGE_SIZE)
+            {
+                Some(addr) => addr,
                 None => {
                     trapframe.spsr |= 1 << 29;
                     trapframe.set_return_value(ENOMEM);
                     return usize::MAX;
-                }
-            };
-            let paddr = pages.as_paddr();
-            let mmap = crate::vm::vmem::VirtualMemoryMap::new(
-                crate::vm::vmem::MemoryArea::new(paddr, paddr + aligned_len - 1),
-                crate::vm::vmem::MemoryArea::new(vaddr, vaddr + aligned_len - 1),
-                scarlet_prot,
-                flags & DARWIN_MAP_SHARED != 0,
-                None,
-            );
-            let result = if flags & DARWIN_MAP_FIXED != 0 {
-                task.vm_manager.add_memory_map_fixed(mmap).map(|_| ())
-            } else {
-                task.vm_manager.add_memory_map(mmap)
-            };
-            match result {
-                Ok(()) => {
-                    task.page_allocations.write().push(pages);
-                    trapframe.set_return_value(vaddr);
-                    vaddr
-                }
-                Err(_) => {
-                    trapframe.spsr |= 1 << 29;
-                    trapframe.set_return_value(ENOMEM);
-                    usize::MAX
                 }
             }
         } else {
-            use crate::object::capability::memory_mapping::MemoryMappingOps;
-            use crate::vm::addr::{is_direct_mapped, virt_to_phys};
+            vaddr_hint
+        }
+    };
 
-            let handle = match abi.get_handle(fd as usize) {
-                Some(h) => h,
-                None => {
-                    trapframe.spsr |= 1 << 29;
-                    trapframe.set_return_value(EBADF);
-                    return usize::MAX;
-                }
-            };
+    let mut permissions = 0x08;
+    permissions |= prot_mask;
 
-            let kernel_obj = match task.handle_table.get(handle) {
-                Some(obj) => obj,
-                None => {
-                    trapframe.spsr |= 1 << 29;
-                    trapframe.set_return_value(EBADF);
-                    return usize::MAX;
-                }
-            };
-            let file_obj = kernel_obj.as_file();
+    // Use AnonymousPageOwner for lazy paging (matching the new Linux ABI pattern)
+    let owner: alloc::sync::Arc<dyn crate::object::capability::memory_mapping::MemoryMappingOps> =
+        alloc::sync::Arc::new(AnonymousPageOwner::new());
 
-            let memory_mappable: &dyn MemoryMappingOps = match kernel_obj.as_memory_mappable() {
-                Some(mappable) => mappable,
-                None => {
-                    trapframe.spsr |= 1 << 29;
-                    trapframe.set_return_value(ENODEV);
-                    return usize::MAX;
-                }
-            };
+    let vmarea = crate::vm::vmem::MemoryArea::new(final_vaddr, final_vaddr + aligned_len - 1);
+    let vm_map = crate::vm::vmem::VirtualMemoryMap {
+        pmarea: crate::vm::vmem::MemoryArea { start: 0, end: 0 },
+        vmarea,
+        vm_start: final_vaddr,
+        permissions,
+        is_shared,
+        owner: Some(owner),
+    };
 
-            if !memory_mappable.supports_mmap() {
-                trapframe.spsr |= 1 << 29;
-                trapframe.set_return_value(ENODEV);
-                return usize::MAX;
-            }
+    let removed_mappings = match task.vm_manager.add_memory_map_fixed(vm_map) {
+        Ok(removed) => removed,
+        Err(_) => {
+            trapframe.spsr |= 1 << 29;
+            trapframe.set_return_value(ENOMEM);
+            return usize::MAX;
+        }
+    };
 
-            let is_shared = flags & DARWIN_MAP_SHARED != 0;
-            let mut ok_len = aligned_len;
-            let (mapping_base, obj_permissions, _obj_is_shared) = loop {
-                match memory_mappable.get_mapping_info_with(offset, ok_len, is_shared) {
-                    Ok(info) => break info,
-                    Err(_) => {
-                        if ok_len >= crate::environment::PAGE_SIZE {
-                            ok_len -= crate::environment::PAGE_SIZE;
-                        } else {
-                            ok_len = 0;
-                        }
-                        if ok_len == 0 {
-                            break (0, 0, false);
-                        }
-                    }
-                }
-            };
-
-            let paddr = if mapping_base != 0 && is_direct_mapped(mapping_base) {
-                virt_to_phys(mapping_base)
-            } else {
-                mapping_base
-            };
-
-            let mut prot_mask = 0usize;
-            if prot & DARWIN_PROT_READ != 0 {
-                prot_mask |= 0x01;
-            }
-            if prot & DARWIN_PROT_WRITE != 0 {
-                prot_mask |= 0x02;
-            }
-            if prot & DARWIN_PROT_EXEC != 0 {
-                prot_mask |= 0x04;
-            }
-
-            let is_private = flags & DARWIN_MAP_PRIVATE != 0;
-            let mut final_permissions = if is_private {
-                prot_mask
-            } else {
-                obj_permissions & prot_mask
-            };
-            if prot != DARWIN_PROT_NONE {
-                final_permissions |= 0x08;
-            }
-
-            if is_private && !is_shared {
-                const PAGES_PER_ALLOC: usize = 16;
-
-                let num_pages = aligned_len / crate::environment::PAGE_SIZE;
-                let num_allocs = num_pages.div_ceil(PAGES_PER_ALLOC);
-                let mut page_allocs: alloc::vec::Vec<crate::mem::page::TaskPages> =
-                    alloc::vec::Vec::with_capacity(num_allocs);
-                let mut vm_maps: alloc::vec::Vec<crate::vm::vmem::VirtualMemoryMap> =
-                    alloc::vec::Vec::with_capacity(num_pages);
-
-                for alloc_idx in 0..num_allocs {
-                    let pages_in_this_alloc = if alloc_idx == num_allocs - 1 {
-                        num_pages - alloc_idx * PAGES_PER_ALLOC
-                    } else {
-                        PAGES_PER_ALLOC
-                    };
-
-                    let alloc = match crate::mem::page::TaskPages::new(pages_in_this_alloc) {
-                        Some(a) => a,
-                        None => {
-                            trapframe.spsr |= 1 << 29;
-                            trapframe.set_return_value(ENOMEM);
-                            return usize::MAX;
-                        }
-                    };
-
-                    let chunk_vaddr =
-                        vaddr + alloc_idx * PAGES_PER_ALLOC * crate::environment::PAGE_SIZE;
-                    page_allocs.push(alloc);
-
-                    for page_idx_in_alloc in 0..pages_in_this_alloc {
-                        let page_vaddr =
-                            chunk_vaddr + page_idx_in_alloc * crate::environment::PAGE_SIZE;
-                        let page_vmarea = crate::vm::vmem::MemoryArea::new(
-                            page_vaddr,
-                            page_vaddr + crate::environment::PAGE_SIZE - 1,
-                        );
-                        let page_paddr = page_allocs[alloc_idx]
-                            .page_paddr(page_idx_in_alloc)
-                            .unwrap();
-                        let page_pmarea = crate::vm::vmem::MemoryArea::new(
-                            page_paddr,
-                            page_paddr + crate::environment::PAGE_SIZE - 1,
-                        );
-                        vm_maps.push(crate::vm::vmem::VirtualMemoryMap::new(
-                            page_pmarea,
-                            page_vmarea,
-                            final_permissions,
-                            false,
-                            None,
-                        ));
-                    }
-                }
-
-                let mut removed_mappings_opt: Option<
-                    alloc::vec::Vec<crate::vm::vmem::VirtualMemoryMap>,
-                > = None;
-
-                for vm_map in &vm_maps {
-                    let result = if flags & DARWIN_MAP_FIXED != 0 {
-                        task.vm_manager
-                            .add_memory_map_fixed(vm_map.clone())
-                            .map(Some)
-                    } else {
-                        task.vm_manager.add_memory_map(vm_map.clone()).map(|_| None)
-                    };
-
-                    match result {
-                        Ok(removed) => {
-                            if let Some(rm) = removed {
-                                if removed_mappings_opt.is_none() {
-                                    removed_mappings_opt = Some(alloc::vec::Vec::new());
-                                }
-                                removed_mappings_opt.as_mut().unwrap().extend(rm);
-                            }
-                        }
-                        Err(_) => {
-                            trapframe.spsr |= 1 << 29;
-                            trapframe.set_return_value(ENOMEM);
-                            return usize::MAX;
-                        }
-                    }
-                }
-
-                if let Some(ref removed_mappings) = removed_mappings_opt {
-                    for removed_map in removed_mappings {
-                        if removed_map.is_shared {
-                            if let Some(owner_weak) = &removed_map.owner {
-                                if let Some(owner) = owner_weak.upgrade() {
-                                    owner.on_unmapped(
-                                        removed_map.vmarea.start,
-                                        removed_map.vmarea.size(),
-                                    );
-                                }
-                            }
-                        }
-                    }
-
-                    pub fn sys_thread_selfid(
-                        _abi: &mut DarwinAarch64Abi,
-                        trapframe: &mut Trapframe,
-                    ) -> usize {
-                        let task = mytask().unwrap();
-                        trapframe.increment_pc_next(task);
-                        let tid = task.get_id() as u64;
-                        crate::println!("[darwin] thread_selfid: tid={:#x}", tid);
-                        trapframe.set_return_value(tid as usize);
-                        tid as usize
-                    }
-
-                    pub fn sys_proc_info(
-                        _abi: &mut DarwinAarch64Abi,
-                        trapframe: &mut Trapframe,
-                    ) -> usize {
-                        let task = mytask().unwrap();
-                        trapframe.increment_pc_next(task);
-                        trapframe.set_return_value(0);
-                        0
-                    }
-
-                    pub fn sys_getentropy(
-                        _abi: &mut DarwinAarch64Abi,
-                        trapframe: &mut Trapframe,
-                    ) -> usize {
-                        let task = mytask().unwrap();
-                        let buf = trapframe.get_arg(0);
-                        let size = trapframe.get_arg(1);
-                        trapframe.increment_pc_next(task);
-
-                        if size > 256 {
-                            trapframe.set_return_value(EINVAL);
-                            return EINVAL;
-                        }
-
-                        if let Some(kva) = task.vm_manager.translate_to_kva(buf) {
-                            let bytes =
-                                unsafe { core::slice::from_raw_parts_mut(kva as *mut u8, size) };
-                            for b in bytes.iter_mut() {
-                                *b = 0x42;
-                            }
-                            trapframe.set_return_value(0);
-                            0
-                        } else {
-                            trapframe.set_return_value(EFAULT);
-                            EFAULT
-                        }
-                    }
-
-                    pub fn sys_getlogin(
-                        _abi: &mut DarwinAarch64Abi,
-                        trapframe: &mut Trapframe,
-                    ) -> usize {
-                        let task = mytask().unwrap();
-                        let namebuf = trapframe.get_arg(0);
-                        let _namelen = trapframe.get_arg(1);
-                        trapframe.increment_pc_next(task);
-
-                        let login = b"root\0";
-                        if let Some(kva) = task.vm_manager.translate_to_kva(namebuf) {
-                            let dst = unsafe {
-                                core::slice::from_raw_parts_mut(kva as *mut u8, login.len())
-                            };
-                            dst.copy_from_slice(login);
-                            trapframe.set_return_value(0);
-                            0
-                        } else {
-                            trapframe.set_return_value(EFAULT);
-                            EFAULT
-                        }
-                    }
-                }
-
-                if let Some(removed_mappings) = removed_mappings_opt {
-                    for removed_map in removed_mappings {
-                        crate::object::capability::memory_mapping::syscall::reclaim_private_removed_mapping(task, &removed_map);
-                    }
-                }
-
-                let mut page_idx = 0;
-                for alloc in &page_allocs {
-                    for local_idx in 0..alloc.len() {
-                        let dst_paddr = alloc.page_paddr(local_idx).unwrap();
-                        let dst_vaddr = crate::vm::addr::phys_to_virt(dst_paddr);
-                        unsafe {
-                            core::ptr::write_bytes(
-                                dst_vaddr as *mut u8,
-                                0,
-                                crate::environment::PAGE_SIZE,
-                            );
-                        }
-
-                        if ok_len > 0 {
-                            let copy_start = page_idx * crate::environment::PAGE_SIZE;
-                            if copy_start < ok_len {
-                                let to_copy = core::cmp::min(
-                                    ok_len - copy_start,
-                                    crate::environment::PAGE_SIZE,
-                                );
-                                if let Some(file_obj) = file_obj {
-                                    let read_offset = match offset.checked_add(copy_start) {
-                                        Some(read_offset) => read_offset as u64,
-                                        None => {
-                                            trapframe.spsr |= 1 << 29;
-                                            trapframe.set_return_value(EINVAL);
-                                            return usize::MAX;
-                                        }
-                                    };
-                                    let dst_slice = unsafe {
-                                        core::slice::from_raw_parts_mut(
-                                            dst_vaddr as *mut u8,
-                                            to_copy,
-                                        )
-                                    };
-                                    if file_obj.read_at(read_offset, dst_slice).is_err() {
-                                        trapframe.spsr |= 1 << 29;
-                                        trapframe.set_return_value(EIO);
-                                        return usize::MAX;
-                                    }
-                                } else if paddr != 0 {
-                                    unsafe {
-                                        core::ptr::copy_nonoverlapping(
-                                            crate::vm::addr::phys_to_virt(paddr + copy_start)
-                                                as *const u8,
-                                            dst_vaddr as *mut u8,
-                                            to_copy,
-                                        );
-                                    }
-                                } else {
-                                    trapframe.spsr |= 1 << 29;
-                                    trapframe.set_return_value(EINVAL);
-                                    return usize::MAX;
-                                }
-                            }
-                        }
-
-                        page_idx += 1;
-                    }
-                }
-
-                task.task_pages.write().extend(page_allocs);
-                trapframe.set_return_value(vaddr);
-                vaddr
-            } else {
-                if paddr == 0 && ok_len == 0 {
-                    trapframe.spsr |= 1 << 29;
-                    trapframe.set_return_value(EINVAL);
-                    return usize::MAX;
-                }
-
-                let ok_len_aligned =
-                    (ok_len / crate::environment::PAGE_SIZE) * crate::environment::PAGE_SIZE;
-                if ok_len_aligned == 0 {
-                    trapframe.spsr |= 1 << 29;
-                    trapframe.set_return_value(EINVAL);
-                    return usize::MAX;
-                }
-
-                let vm_map = crate::vm::vmem::VirtualMemoryMap::new(
-                    crate::vm::vmem::MemoryArea::new(paddr, paddr + ok_len_aligned - 1),
-                    crate::vm::vmem::MemoryArea::new(vaddr, vaddr + ok_len_aligned - 1),
-                    final_permissions,
-                    is_shared,
-                    kernel_obj.as_memory_mappable_weak(),
-                );
-
-                let map_result = if flags & DARWIN_MAP_FIXED != 0 {
-                    task.vm_manager.add_memory_map_fixed(vm_map).map(Some)
-                } else {
-                    task.vm_manager.add_memory_map(vm_map).map(|_| None)
-                };
-
-                match map_result {
-                    Ok(removed_mappings_opt) => {
-                        memory_mappable.on_mapped(vaddr, paddr, ok_len_aligned, offset);
-
-                        if let Some(removed_mappings) = &removed_mappings_opt {
-                            for removed_map in removed_mappings {
-                                if removed_map.is_shared {
-                                    if let Some(owner_weak) = &removed_map.owner {
-                                        if let Some(owner) = owner_weak.upgrade() {
-                                            owner.on_unmapped(
-                                                removed_map.vmarea.start,
-                                                removed_map.vmarea.size(),
-                                            );
-                                        }
-                                    }
-                                }
-                            }
-                        }
-
-                        if let Some(removed_mappings) = removed_mappings_opt {
-                            for removed_map in removed_mappings {
-                                crate::object::capability::memory_mapping::syscall::reclaim_private_removed_mapping(task, &removed_map);
-                            }
-                        }
-
-                        trapframe.set_return_value(vaddr);
-                        vaddr
-                    }
-                    Err(_) => {
-                        trapframe.spsr |= 1 << 29;
-                        trapframe.set_return_value(ENOMEM);
-                        usize::MAX
-                    }
-                }
-            }
+    for removed_map in &removed_mappings {
+        if let Some(owner) = &removed_map.owner {
+            owner.on_unmapped(removed_map.vmarea.start, removed_map.vmarea.size());
         }
     }
+    for removed_map in removed_mappings {
+        reclaim_private_removed_mapping(task, &removed_map);
+    }
+
+    trapframe.set_return_value(final_vaddr);
+    final_vaddr
 }
 
 pub fn sys_munmap(_abi: &mut DarwinAarch64Abi, trapframe: &mut Trapframe) -> usize {
@@ -1789,8 +1605,20 @@ pub fn sys_munmap(_abi: &mut DarwinAarch64Abi, trapframe: &mut Trapframe) -> usi
     let aligned_addr = addr & !(page_size - 1);
     let aligned_len = (len + page_size - 1) & !(page_size - 1);
 
-    task.vm_manager
+    let removed_maps = task
+        .vm_manager
         .remove_memory_map_range(aligned_addr, aligned_len);
+
+    for removed_map in &removed_maps {
+        if let Some(owner) = &removed_map.owner {
+            owner.on_unmapped(removed_map.vmarea.start, removed_map.vmarea.size());
+        }
+
+        crate::object::capability::memory_mapping::syscall::reclaim_private_removed_mapping(
+            task, removed_map,
+        );
+    }
+
     trapframe.set_return_value(0);
     0
 }
