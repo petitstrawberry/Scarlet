@@ -324,7 +324,7 @@ impl DarwinAarch64Abi {
                 Ok(bsd_syscalls::sys_terminate_with_payload(self, trapframe))
             }
             SYS_abort_with_payload => Ok(bsd_syscalls::sys_abort_with_payload(self, trapframe)),
-            SYS_crossarch_trap => Ok(bsd_syscalls::sys_crossarch_trap(self, trapframe)),
+            SYS_stat_old => Ok(bsd_syscalls::sys_stat(self, trapframe)),
             SYS_csrctl => Ok(bsd_syscalls::sys_csrctl(self, trapframe)),
             SYS_ulock_wait => Ok(bsd_syscalls::sys_ulock_wait(self, trapframe)),
             SYS_ulock_wake => Ok(bsd_syscalls::sys_ulock_wake(self, trapframe)),
@@ -332,6 +332,9 @@ impl DarwinAarch64Abi {
             SYS_stat => Ok(bsd_syscalls::sys_stat(self, trapframe)),
             SYS_lstat => Ok(bsd_syscalls::sys_lstat(self, trapframe)),
             SYS_fstat => Ok(bsd_syscalls::sys_fstat(self, trapframe)),
+            SYS_sysctl => Ok(bsd_syscalls::sys_sysctl(self, trapframe)),
+            SYS___mac_syscall => Ok(bsd_syscalls::sys_mac_syscall(self, trapframe)),
+            SYS_openat => Ok(bsd_syscalls::sys_openat(self, trapframe)),
             _ => {
                 crate::println!("[darwin] Unimplemented BSD syscall: {} (0x{:x})", num, num);
                 let task = mytask().unwrap();
@@ -952,6 +955,11 @@ impl AbiModule for DarwinAarch64Abi {
                 e
             })?;
 
+            macho_loader::setup_comm_page(task).map_err(|e| {
+                crate::println!("[darwin] setup_comm_page FAILED: {}", e);
+                e
+            })?;
+
             task.set_entry_point(dyld_entry);
             {
                 let mut vcpu = task.vcpu.lock();
@@ -1209,6 +1217,19 @@ impl AbiModule for DarwinAarch64Abi {
             }
             _ => Ok(()),
         }
+    }
+
+    fn initialize_from_existing_handles(
+        &mut self,
+        _task: &crate::task::Task,
+    ) -> Result<(), &'static str> {
+        for fd in 0..3 {
+            if let Some(pos) = self.free_fds.iter().position(|&x| x == fd) {
+                self.free_fds.remove(pos);
+            }
+            self.fd_to_handle[fd] = Some(fd as u32);
+        }
+        Ok(())
     }
 
     fn as_any(&self) -> &dyn core::any::Any {

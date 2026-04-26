@@ -99,6 +99,7 @@ pub type MachResult = Result<i64, i64>;
 pub fn from_kernel_error(err: &str) -> usize {
     match err {
         "No such file or directory" => ENOENT,
+        "File not found" => ENOENT,
         "Permission denied" => EPERM,
         "Invalid argument" => EINVAL,
         "Out of memory" => ENOMEM,

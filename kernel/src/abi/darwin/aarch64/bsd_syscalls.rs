@@ -1,4 +1,5 @@
 use alloc::string::String;
+use core::ptr;
 
 use crate::abi::darwin::aarch64::DarwinAarch64Abi;
 use crate::abi::darwin::aarch64::{
@@ -266,6 +267,70 @@ pub fn sys_open(abi: &mut DarwinAarch64Abi, trapframe: &mut Trapframe) -> usize 
     }
 }
 
+pub fn sys_openat(abi: &mut DarwinAarch64Abi, trapframe: &mut Trapframe) -> usize {
+    let task = mytask().unwrap();
+    trapframe.increment_pc_next(task);
+
+    let _dirfd = trapframe.get_arg(0) as i32;
+    let path_ptr = trapframe.get_arg(1);
+    let flags = trapframe.get_arg(2) as i32;
+    let _mode = trapframe.get_arg(3) as u16;
+
+    let darwin_path = match read_user_cstring(task, path_ptr) {
+        Ok(p) => p,
+        Err(_) => {
+            trapframe.spsr |= 1 << 29;
+            trapframe.set_return_value(EFAULT);
+            return usize::MAX;
+        }
+    };
+
+    crate::println!("[darwin] openat: dirfd={} path=\"{}\" flags={:#x}", _dirfd, darwin_path, flags);
+
+    let scarlet_path = path::translate_to_scarlet(&darwin_path);
+
+    let vfs = match task.get_vfs() {
+        Some(v) => v,
+        None => {
+            trapframe.spsr |= 1 << 29;
+            trapframe.set_return_value(ENOENT);
+            return usize::MAX;
+        }
+    };
+
+    let open_flags = convert_open_flags(flags);
+    let ko = match vfs.open(&scarlet_path, open_flags) {
+        Ok(obj) => obj,
+        Err(e) => {
+            crate::println!("[darwin] openat: vfs.open(\"{}\") failed: {}", scarlet_path, e.message);
+            trapframe.spsr |= 1 << 29;
+            trapframe.set_return_value(from_kernel_error(&e.message));
+            return usize::MAX;
+        }
+    };
+
+    let handle = match task.handle_table.insert(ko) {
+        Ok(h) => h,
+        Err(_) => {
+            trapframe.spsr |= 1 << 29;
+            trapframe.set_return_value(EMFILE);
+            return usize::MAX;
+        }
+    };
+
+    match abi.allocate_fd(handle) {
+        Ok(fd) => {
+            trapframe.set_return_value(fd);
+            fd
+        }
+        Err(_) => {
+            trapframe.spsr |= 1 << 29;
+            trapframe.set_return_value(EMFILE);
+            usize::MAX
+        }
+    }
+}
+
 pub fn sys_close(abi: &mut DarwinAarch64Abi, trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
     trapframe.increment_pc_next(task);
@@ -466,13 +531,14 @@ pub fn sys_dup2(abi: &mut DarwinAarch64Abi, trapframe: &mut Trapframe) -> usize 
             trapframe.set_return_value(new_fd);
             new_fd
         }
-        Err(_) => {
+            Err(_) => {
             trapframe.spsr |= 1 << 29;
-            trapframe.set_return_value(EBADF);
+            trapframe.set_return_value(EMFILE);
             usize::MAX
         }
     }
 }
+
 
 pub fn sys_wait4(_abi: &mut DarwinAarch64Abi, trapframe: &mut Trapframe) -> usize {
     use crate::task::{WaitError, get_parent_waitpid_waker, get_waitpid_waker};
@@ -2509,4 +2575,96 @@ pub fn sys_ulock_wait(_abi: &mut DarwinAarch64Abi, trapframe: &mut Trapframe) ->
 // but the core wait logic is identical. Defer to sys_ulock_wait.
 pub fn sys_ulock_wait2(abi: &mut DarwinAarch64Abi, trapframe: &mut Trapframe) -> usize {
     sys_ulock_wait(abi, trapframe)
+}
+
+pub fn sys_sysctl(abi: &mut DarwinAarch64Abi, trapframe: &mut Trapframe) -> usize {
+    let task = mytask().unwrap();
+    let name_ptr = trapframe.regs.reg[0];
+    let namelen = trapframe.regs.reg[1] as usize;
+    let oldp = trapframe.regs.reg[2];
+    let oldlenp = trapframe.regs.reg[3];
+
+    if namelen == 0 || namelen > 16 {
+        trapframe.increment_pc_next(task);
+        trapframe.spsr |= 1 << 29;
+        trapframe.set_return_value(EINVAL);
+        return EINVAL;
+    }
+
+    let mut name = [0i32; 16];
+    let name_bytes = namelen * 4;
+    if let Some(kva) = task.vm_manager.translate_to_kva(name_ptr) {
+        let src = unsafe { core::slice::from_raw_parts(kva as *const u8, name_bytes) };
+        for i in 0..namelen {
+            let off = i * 4;
+            if off + 4 <= src.len() {
+                name[i] = i32::from_ne_bytes([src[off], src[off + 1], src[off + 2], src[off + 3]]);
+            }
+        }
+    }
+
+    if namelen >= 2 {
+        crate::println!(
+            "[darwin] sysctl: name=[{},{}] namelen={}",
+            name[0], name[1], namelen
+        );
+    }
+
+    // kern.procargs2: CTL_KERN(1), KERN_PROCARGS2(49), pid
+    if namelen >= 3 && name[0] == 1 && name[1] == 49 {
+        let task_name = task.name.read();
+        let exe_path = task_name.as_bytes();
+        let total_size = 4 + exe_path.len() + 1;
+
+        if oldlenp != 0 {
+            let oldlen = if let Some(kva) = task.vm_manager.translate_to_kva(oldlenp) {
+                unsafe { ptr::read(kva as *const usize) }
+            } else {
+                0
+            };
+
+            if oldp != 0 && oldlen >= total_size {
+                if let Some(kva) = task.vm_manager.translate_to_kva(oldp) {
+                    unsafe { ptr::write(kva as *mut u32, 1u32); }
+                    let write_len = exe_path.len().min(oldlen.saturating_sub(4));
+                    let dst = unsafe {
+                        core::slice::from_raw_parts_mut((kva + 4) as *mut u8, write_len)
+                    };
+                    dst.copy_from_slice(&exe_path[..write_len]);
+                    if let Some(kva) = task.vm_manager.translate_to_kva(oldlenp) {
+                        unsafe { ptr::write(kva as *mut usize, total_size); }
+                    }
+                }
+                trapframe.increment_pc_next(task);
+                trapframe.spsr &= !(1 << 29);
+                trapframe.set_return_value(0);
+                return 0;
+            }
+            if let Some(kva) = task.vm_manager.translate_to_kva(oldlenp) {
+                unsafe { ptr::write(kva as *mut usize, total_size); }
+            }
+        }
+        trapframe.increment_pc_next(task);
+        trapframe.spsr |= 1 << 29;
+        trapframe.set_return_value(ENOMEM);
+        return ENOMEM;
+    }
+
+    if oldlenp != 0 {
+        if let Some(kva) = task.vm_manager.translate_to_kva(oldlenp) {
+            unsafe { ptr::write(kva as *mut usize, 0); }
+        }
+    }
+    trapframe.increment_pc_next(task);
+    trapframe.spsr &= !(1 << 29);
+    trapframe.set_return_value(0);
+    0
+}
+
+pub fn sys_mac_syscall(abi: &mut DarwinAarch64Abi, trapframe: &mut Trapframe) -> usize {
+    let task = mytask().unwrap();
+    trapframe.increment_pc_next(task);
+    trapframe.spsr &= !(1 << 29);
+    trapframe.set_return_value(0);
+    0
 }

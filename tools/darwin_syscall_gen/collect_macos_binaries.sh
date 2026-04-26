@@ -58,6 +58,18 @@ if [ -n "$CACHE" ]; then
     cp "$CACHE" "$OUTDIR/System/Library/dyld/dyld_shared_cache_arm64e"
     CACHE_SIZE=$(du -sh "$CACHE" | cut -f1)
     echo "  ✓ $CACHE ($CACHE_SIZE)"
+
+    # Copy sub-cache files (e.g. dyld_shared_cache_arm64e.01, .02, etc.)
+    CACHE_DIR=$(dirname "$CACHE")
+    CACHE_BASE=$(basename "$CACHE")
+    for subcache in "$CACHE_DIR/${CACHE_BASE}."*; do
+        if [ -f "$subcache" ]; then
+            SUB_BASE=$(basename "$subcache")
+            cp "$subcache" "$OUTDIR/System/Library/dyld/$SUB_BASE"
+            SUB_SIZE=$(du -sh "$subcache" | cut -f1)
+            echo "  ✓ $SUB_BASE ($SUB_SIZE)"
+        fi
+    done
 else
     echo "  ✗ dyld shared cache not found!"
     echo "  Try: find /System -name 'dyld_shared_cache_arm64e' 2>/dev/null"

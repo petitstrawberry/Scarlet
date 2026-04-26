@@ -377,44 +377,69 @@ fn handle_brk(trapframe: &mut Trapframe, esr: u64) {
     let x1 = trapframe.regs.reg[1];
     let lr = trapframe.regs.reg[30];
     let x8 = trapframe.regs.reg[8];
+    let x19 = trapframe.regs.reg[19];
     crate::println!("[darwin] dyld BRK #{:#x} at ELR={:#x}", imm, trapframe.elr);
     crate::println!(
-        "[darwin]   x0={:#x} x1={:#x} LR={:#x} x8={:#x}",
-        x0,
-        x1,
-        lr,
-        x8
+        "[darwin]   x0={:#x} x1={:#x} LR={:#x} x8={:#x} x19={:#x}",
+        x0, x1, lr, x8, x19
     );
 
     let task = mytask().unwrap();
 
-    crate::println!(
-        "[darwin]   TPIDRRO_EL0={:#x} tpidr_el0={:#x}",
-        trapframe.tpidrro_el0,
-        trapframe.tpidr_el0
-    );
-    let tpidrro = trapframe.tpidrro_el0 as usize;
-    if tpidrro > 0x1000 {
-        if let Some(kva) = task.vm_manager.translate_to_kva(tpidrro) {
-            let slot0 = unsafe { core::ptr::read(kva as *const u64) };
-            let slot3 = unsafe { core::ptr::read((kva as *const u64).add(3)) };
-            crate::println!("[darwin]   TLS[0]={:#x} TLS[3]={:#x}", slot0, slot3);
+    // Read stack frame to find caller of _dyld_halt
+    // _dyld_halt does: PACIBSP; SUB sp,sp,#0x40; STP x20,x19,[sp]; STP x29,x30,[sp,#0x10]
+    // So at BRK time: [sp+0x10] = saved x29, [sp+0x18] = saved LR (caller of _dyld_halt)
+    let sp = trapframe.sp as usize;
+    if sp > 0x1000 {
+        if let Some(kva) = task.vm_manager.translate_to_kva(sp + 0x10) {
+            let saved_fp = unsafe { core::ptr::read(kva as *const u64) };
+            let saved_lr = unsafe { core::ptr::read((kva as *const u64).add(1)) };
+            crate::println!("[darwin]   stack: saved_fp={:#x} saved_lr={:#x} (caller of _dyld_halt)", saved_fp, saved_lr);
         }
     }
 
-    let str_ptr = x1;
-    if str_ptr > 0x1000 {
-        if let Some(kva) = task.vm_manager.translate_to_kva(str_ptr) {
-            let bytes = unsafe { core::slice::from_raw_parts(kva as *const u8, 200) };
-            crate::print!("[darwin]   msg=\"");
+    // BRK #0x1 = _dyld_halt: x19 = halt message string pointer
+    // Also stored at sProcessInfo+0x300 (x8 page + 0x300)
+    let halt_msg = x19;
+    if halt_msg > 0x1000 {
+        if let Some(kva) = task.vm_manager.translate_to_kva(halt_msg as usize) {
+            let bytes = unsafe { core::slice::from_raw_parts(kva as *const u8, 512) };
+            crate::print!("[darwin]   halt_msg=\"");
             for &b in bytes.iter() {
                 if b >= 0x20 && b < 0x7f {
                     crate::print!("{}", b as char);
-                } else {
+                } else if b == 0 {
                     break;
+                } else {
+                    crate::print!("\\x{:02x}", b);
                 }
             }
             crate::println!("\"");
+        }
+    }
+
+    // Also try reading from sProcessInfo+0x300 (dyld stores halt msg there)
+    // x8 = adrp page for sProcessInfo, stored at x8+0x300
+    let sinfo_base = (x8 as usize & !0xFFF);
+    let halt_msg_ptr_addr = sinfo_base + 0x300;
+    if let Some(kva) = task.vm_manager.translate_to_kva(halt_msg_ptr_addr) {
+        let msg_ptr = unsafe { core::ptr::read(kva as *const u64) };
+        crate::println!("[darwin]   sProcessInfo+0x300={:#x} -> ptr={:#x}", halt_msg_ptr_addr, msg_ptr);
+        if msg_ptr > 0x1000 && msg_ptr as usize != halt_msg as usize {
+            if let Some(kva2) = task.vm_manager.translate_to_kva(msg_ptr as usize) {
+                let bytes = unsafe { core::slice::from_raw_parts(kva2 as *const u8, 512) };
+                crate::print!("[darwin]   stored_msg=\"");
+                for &b in bytes.iter() {
+                    if b >= 0x20 && b < 0x7f {
+                        crate::print!("{}", b as char);
+                    } else if b == 0 {
+                        break;
+                    } else {
+                        crate::print!("\\x{:02x}", b);
+                    }
+                }
+                crate::println!("\"");
+            }
         }
     }
 
@@ -449,6 +474,12 @@ fn handle_instruction_fault(trapframe: &mut Trapframe, vaddr: usize) {
 fn handle_data_fault(trapframe: &mut Trapframe, vaddr: usize, is_write: bool) {
     let esr = get_esr_el1();
     let dfsc = esr & 0x3f;
+    if vaddr >= 0x100000000 {
+        crate::println!(
+            "[darwin] data_fault: vaddr={:#x} write={} PC={:#x} DFSC={:#x}",
+            vaddr, is_write, trapframe.get_current_pc(), dfsc
+        );
+    }
     if is_write && (dfsc >= 0x0d && dfsc <= 0x0f) {
         if handle_lock_watch_fault(trapframe, vaddr) {
             return;
@@ -495,6 +526,44 @@ fn handle_data_fault(trapframe: &mut Trapframe, vaddr: usize, is_write: bool) {
             );
         } else {
             early_println!("[PF] No mapping for vaddr={:#x}", vaddr);
+        }
+    }
+
+    let mmap_result = task.vm_manager.search_memory_map(vaddr);
+    if let Some(map) = mmap_result {
+        if map.permissions == 0 {
+            crate::println!(
+                "[darwin] SIGSEGV: NULL access vaddr={:#x} PC={:#x} LR={:#x} task={}",
+                vaddr,
+                trapframe.get_current_pc(),
+                trapframe.regs.reg[30],
+                task.name.read(),
+            );
+            crate::println!(
+                "[darwin]   x0={:#x} x1={:#x} x2={:#x} x3={:#x}",
+                trapframe.regs.reg[0],
+                trapframe.regs.reg[1],
+                trapframe.regs.reg[2],
+                trapframe.regs.reg[3],
+            );
+            crate::println!(
+                "[darwin]   x4={:#x} x5={:#x} x6={:#x} x7={:#x}",
+                trapframe.regs.reg[4],
+                trapframe.regs.reg[5],
+                trapframe.regs.reg[6],
+                trapframe.regs.reg[7],
+            );
+            crate::println!(
+                "[darwin]   x8={:#x} x9={:#x} x16={:#x} x17={:#x} sp={:#x}",
+                trapframe.regs.reg[8],
+                trapframe.regs.reg[9],
+                trapframe.regs.reg[16],
+                trapframe.regs.reg[17],
+                trapframe.sp,
+            );
+            task.exit(128);
+            get_scheduler().schedule(trapframe);
+            return;
         }
     }
 

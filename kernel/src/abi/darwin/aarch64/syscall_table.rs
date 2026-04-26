@@ -50,7 +50,7 @@ pub const SYS_chflags: u32 = 34;
 pub const SYS_fchflags: u32 = 35;
 pub const SYS_sync: u32 = 36;
 pub const SYS_kill: u32 = 37;
-pub const SYS_crossarch_trap: u32 = 38;
+pub const SYS_stat_old: u32 = 38; // macOS: stat (legacy 32-bit inode), used by dyld
 pub const SYS_getppid: u32 = 39;
 pub const SYS_dup: u32 = 41;
 pub const SYS_pipe: u32 = 42;
@@ -821,7 +821,7 @@ pub const BSD_SYSCALL_TABLE: &[BsdSyscallEntry] = &[
     },
     BsdSyscallEntry {
         number: 38,
-        name: "sys_crossarch_trap",
+        name: "sys_stat",
         nargs: 1,
         implemented: false,
     },
