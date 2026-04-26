@@ -192,12 +192,13 @@ impl VirtualMemoryManager {
     ///
     pub fn add_memory_map(&self, map: VirtualMemoryMap) -> Result<(), &'static str> {
         // Check if the address and size is aligned
-        if map.vmarea.start % PAGE_SIZE != 0
-            || map.pmarea.start % PAGE_SIZE != 0
-            || map.vmarea.size() % PAGE_SIZE != 0
-            || map.pmarea.size() % PAGE_SIZE != 0
-        {
+        if map.vmarea.start % PAGE_SIZE != 0 || map.vmarea.size() % PAGE_SIZE != 0 {
             return Err("Address or size is not aligned to PAGE_SIZE");
+        }
+        if map.pmarea.start != 0
+            && (map.pmarea.start % PAGE_SIZE != 0 || map.pmarea.size() % PAGE_SIZE != 0)
+        {
+            return Err("pmarea is not aligned to PAGE_SIZE");
         }
 
         let mut g = self.inner.write();
@@ -305,6 +306,7 @@ impl VirtualMemoryManager {
                                 + pm_offset
                                 + (overlap_end - overlap_start),
                         },
+                        vm_start: existing_map.vm_start,
                         permissions: existing_map.permissions,
                         is_shared: existing_map.is_shared,
                         owner: existing_map.owner.clone(),
@@ -329,6 +331,7 @@ impl VirtualMemoryManager {
                             start: existing_map.pmarea.start,
                             end: existing_map.pmarea.start + (remove_start - existing_start) - 1,
                         },
+                        vm_start: existing_map.vm_start,
                         permissions: existing_map.permissions,
                         is_shared: existing_map.is_shared,
                         owner: existing_map.owner.clone(),
@@ -348,6 +351,7 @@ impl VirtualMemoryManager {
                             start: existing_map.pmarea.start + after_offset,
                             end: existing_map.pmarea.end,
                         },
+                        vm_start: existing_map.vm_start,
                         permissions: existing_map.permissions,
                         is_shared: existing_map.is_shared,
                         owner: existing_map.owner.clone(),
@@ -515,44 +519,105 @@ impl VirtualMemoryManager {
         access: crate::object::capability::memory_mapping::AccessKind,
     ) -> Result<(), &'static str> {
         let vaddr = access.vaddr;
-        // Find the memory mapping for this virtual address
         let memory_map = match self.search_memory_map(vaddr) {
             Some(map) => map,
             None => {
-                // Try to find a mapping that contains an address just before this one
-                // which might have an owner that supports dynamic extension
                 return self.try_extend_mapping_for_access(&access);
             }
         };
 
-        // Calculate the page-aligned virtual and physical addresses
         let page_vaddr = vaddr & !(PAGE_SIZE - 1);
-        let offset_in_mapping = page_vaddr - memory_map.vmarea.start;
-        let mut page_paddr = memory_map.pmarea.start + offset_in_mapping;
+        let page_idx = (page_vaddr - memory_map.vm_start) / PAGE_SIZE;
         let mut perms = memory_map.permissions;
 
-        // If there is an owner, allow it to adjust mapping and tell if this is a tail page
-        if let Some(owner_weak) = &memory_map.owner {
-            if let Some(owner) = owner_weak.upgrade() {
-                let owner_name = owner.mmap_owner_name();
-                let _should_log = owner_name.contains("xkb");
-                match owner.resolve_fault(&access, &memory_map) {
-                    Ok(res) => {
-                        page_paddr = res.paddr_page_base;
-                        if res.is_tail {
-                            // Drop Read and Write for tail page
-                            perms &= !0x1; // Read
-                            perms &= !0x2; // Write
+        let page_paddr = if let Some(owner) = &memory_map.owner {
+            match owner.resolve_fault(&access, page_idx, memory_map.vm_start) {
+                Ok(res) => {
+                    if res.is_tail {
+                        perms &= !0x1;
+                        perms &= !0x2;
+                    }
+
+                    // COW: for private owner-based mappings, allocate a private page
+                    // and copy the owner's content. This ensures writes never mutate
+                    // the owner's backing store (e.g. file page cache, shared memory).
+                    if !memory_map.is_shared {
+                        let new_ptr = crate::mem::page::allocate_raw_pages(1);
+                        if !new_ptr.is_null() {
+                            let new_paddr = crate::vm::addr::virt_to_phys(new_ptr as usize);
+                            unsafe {
+                                core::ptr::copy_nonoverlapping(
+                                    crate::vm::addr::phys_to_virt(res.paddr_page_base) as *const u8,
+                                    crate::vm::addr::phys_to_virt(new_paddr) as *mut u8,
+                                    PAGE_SIZE,
+                                );
+                            }
+                            let cow_map = VirtualMemoryMap {
+                                pmarea: MemoryArea::new(new_paddr, new_paddr + PAGE_SIZE - 1),
+                                vmarea: MemoryArea::new(page_vaddr, page_vaddr + PAGE_SIZE - 1),
+                                vm_start: memory_map.vm_start,
+                                permissions: perms,
+                                is_shared: false,
+                                owner: None,
+                            };
+                            match self.add_memory_map_fixed(cow_map) {
+                                Ok(removed) => {
+                                    for rm in &removed {
+                                        if rm.pmarea.start != 0 && rm.owner.is_none() {
+                                            // SAFETY: pmarea points to a page allocated by allocate_raw_pages.
+                                            unsafe {
+                                                crate::mem::page::free_raw_pages(
+                                                    crate::vm::addr::phys_to_virt(rm.pmarea.start)
+                                                        as *mut _,
+                                                    1,
+                                                );
+                                            }
+                                        }
+                                    }
+                                }
+                                Err(_) => {
+                                    // SAFETY: new_paddr was just allocated by allocate_raw_pages.
+                                    unsafe {
+                                        crate::mem::page::free_raw_pages(
+                                            crate::vm::addr::phys_to_virt(new_paddr) as *mut _,
+                                            1,
+                                        );
+                                    }
+                                    return Err("Failed to add COW mapping to VM manager");
+                                }
+                            }
+                            if let Some(root_pagetable) = self.get_root_page_table() {
+                                root_pagetable.map(
+                                    self.get_asid(),
+                                    page_vaddr,
+                                    new_paddr,
+                                    perms,
+                                    true,
+                                    access.op == AccessOp::Store,
+                                );
+                                return Ok(());
+                            } else {
+                                return Err("No root page table available for COW mapping");
+                            }
+                        } else {
+                            return Err("Failed to allocate page for private mapping COW");
                         }
                     }
-                    Err(_e) => {
+
+                    res.paddr_page_base
+                }
+                Err(_) => {
+                    if memory_map.pmarea.start != 0 {
+                        memory_map.pmarea.start + (page_vaddr - memory_map.vmarea.start)
+                    } else {
                         return Err("Owner failed to resolve fault");
                     }
                 }
             }
-        }
+        } else {
+            memory_map.pmarea.start + (page_vaddr - memory_map.vmarea.start)
+        };
 
-        // Map this single page to the MMU (not device memory)
         if let Some(root_pagetable) = self.get_root_page_table() {
             root_pagetable.map(
                 self.get_asid(),
@@ -592,40 +657,32 @@ impl VirtualMemoryManager {
                 // Check if vaddr is just past this mapping's end
                 if map.vmarea.end < vaddr {
                     // Check if there's an owner that might support extended access
-                    if let Some(owner_weak) = &map.owner {
-                        if let Some(owner) = owner_weak.upgrade() {
-                            // Try resolve_fault to see if owner supports this offset
-                            let test_access =
-                                crate::object::capability::memory_mapping::AccessKind {
-                                    vaddr: page_vaddr,
-                                    op: access.op,
-                                    size: access.size,
-                                };
+                    if let Some(owner) = &map.owner {
+                        // Try resolve_fault to see if owner supports this offset
+                        let test_access = crate::object::capability::memory_mapping::AccessKind {
+                            vaddr: page_vaddr,
+                            op: access.op,
+                            size: access.size,
+                        };
 
-                            match owner.resolve_fault(&test_access, map) {
-                                Ok(res) => {
-                                    // Owner says this offset is valid - extend vmarea.end
-                                    let new_end = page_vaddr + PAGE_SIZE - 1;
-                                    crate::println!(
-                                        "[VmManager] Extending mapping vmarea.end from {:#x} to {:#x} for owner={}",
-                                        map.vmarea.end,
-                                        new_end,
-                                        owner.mmap_owner_name()
-                                    );
-                                    map.vmarea.end = new_end;
+                        let page_idx = (page_vaddr - map.vm_start) / PAGE_SIZE;
+                        match owner.resolve_fault(&test_access, page_idx, map.vm_start) {
+                            Ok(res) => {
+                                // Owner says this offset is valid - extend vmarea.end
+                                let new_end = page_vaddr + PAGE_SIZE - 1;
+                                crate::println!(
+                                    "[VmManager] Extending mapping vmarea.end from {:#x} to {:#x} for owner={}",
+                                    map.vmarea.end,
+                                    new_end,
+                                    owner.mmap_owner_name()
+                                );
+                                map.vmarea.end = new_end;
 
-                                    // Also extend pmarea proportionally
-                                    let pmarea_growth = new_end
-                                        - map.vmarea.start
-                                        - (map.pmarea.end - map.pmarea.start);
-                                    map.pmarea.end += pmarea_growth;
-
-                                    found = Some((res.paddr_page_base, map.permissions));
-                                    break;
-                                }
-                                Err(_) => {
-                                    // Owner doesn't support this offset, continue searching
-                                }
+                                found = Some((res.paddr_page_base, map.permissions));
+                                break;
+                            }
+                            Err(_) => {
+                                // Owner doesn't support this offset, continue searching
                             }
                         }
                     }
@@ -680,14 +737,27 @@ impl VirtualMemoryManager {
     }
 
     pub fn translate_to_phys(&self, vaddr: usize) -> Option<usize> {
-        if let Some(map) = self.search_memory_map(vaddr) {
-            if map.pmarea.start == 0 {
-                return None;
+        let map = self.search_memory_map(vaddr)?;
+
+        if let Some(owner) = &map.owner {
+            let page_vaddr = vaddr & !(PAGE_SIZE - 1);
+            let page_idx = (page_vaddr - map.vm_start) / PAGE_SIZE;
+            let access = crate::object::capability::memory_mapping::AccessKind {
+                op: crate::object::capability::memory_mapping::AccessOp::Load,
+                vaddr,
+                size: Some(1),
+            };
+            if let Ok(res) = owner.resolve_fault(&access, page_idx, map.vm_start) {
+                return Some(res.paddr_page_base + (vaddr & (PAGE_SIZE - 1)));
             }
-            // Calculate offset within the memory area
-            let offset = vaddr - map.vmarea.start;
-            // Calculate and return physical address
-            Some(map.pmarea.start + offset)
+            if map.pmarea.start != 0 {
+                return Some(map.pmarea.start + (vaddr - map.vmarea.start));
+            }
+            return None;
+        }
+
+        if map.pmarea.start != 0 {
+            Some(map.pmarea.start + (vaddr - map.vmarea.start))
         } else {
             None
         }
@@ -792,12 +862,13 @@ impl VirtualMemoryManager {
         map: VirtualMemoryMap,
     ) -> Result<Vec<VirtualMemoryMap>, &'static str> {
         // Validate alignment like the regular add_memory_map
-        if map.vmarea.start % PAGE_SIZE != 0
-            || map.pmarea.start % PAGE_SIZE != 0
-            || map.vmarea.size() % PAGE_SIZE != 0
-            || map.pmarea.size() % PAGE_SIZE != 0
-        {
+        if map.vmarea.start % PAGE_SIZE != 0 || map.vmarea.size() % PAGE_SIZE != 0 {
             return Err("Address or size is not aligned to PAGE_SIZE");
+        }
+        if map.pmarea.start != 0
+            && (map.pmarea.start % PAGE_SIZE != 0 || map.pmarea.size() % PAGE_SIZE != 0)
+        {
+            return Err("pmarea is not aligned to PAGE_SIZE");
         }
 
         let new_start = map.vmarea.start;
@@ -842,6 +913,7 @@ impl VirtualMemoryManager {
                                 + pm_offset
                                 + (overlap_end - overlap_start),
                         },
+                        vm_start: existing_map.vm_start,
                         permissions: existing_map.permissions,
                         is_shared: existing_map.is_shared,
                         owner: existing_map.owner.clone(),
@@ -867,6 +939,7 @@ impl VirtualMemoryManager {
                             start: existing_map.pmarea.start,
                             end: existing_map.pmarea.start + (new_start - existing_start) - 1,
                         },
+                        vm_start: existing_map.vm_start,
                         permissions: existing_map.permissions,
                         is_shared: existing_map.is_shared,
                         owner: existing_map.owner.clone(),
@@ -886,6 +959,7 @@ impl VirtualMemoryManager {
                             start: existing_map.pmarea.start + after_offset,
                             end: existing_map.pmarea.end,
                         },
+                        vm_start: existing_map.vm_start,
                         permissions: existing_map.permissions,
                         is_shared: existing_map.is_shared,
                         owner: existing_map.owner.clone(),
@@ -970,6 +1044,7 @@ impl VirtualMemoryManager {
                             start: prev_memory_map.pmarea.start,
                             end: memory_map.pmarea.end,
                         },
+                        vm_start: prev_memory_map.vm_start,
                         permissions: prev_memory_map.permissions, // Use permissions from first map
                         is_shared: prev_memory_map.is_shared,
                         owner: prev_memory_map.owner.clone(),
@@ -1083,6 +1158,7 @@ mod tests {
         let map = VirtualMemoryMap {
             vmarea: vma,
             pmarea: vma,
+            vm_start: vma.start,
             permissions: 0,
             is_shared: false,
             owner: None,
@@ -1112,6 +1188,7 @@ mod tests {
         let map = VirtualMemoryMap {
             vmarea: vma,
             pmarea: vma,
+            vm_start: vma.start,
             permissions: 0,
             is_shared: false,
             owner: None,
@@ -1138,6 +1215,7 @@ mod tests {
         let map1 = VirtualMemoryMap {
             vmarea: vma1,
             pmarea: vma1,
+            vm_start: vma1.start,
             permissions: 0,
             is_shared: false,
             owner: None,
@@ -1149,6 +1227,7 @@ mod tests {
         let map2 = VirtualMemoryMap {
             vmarea: vma2,
             pmarea: vma2,
+            vm_start: vma2.start,
             permissions: 0,
             is_shared: false,
             owner: None,
@@ -1932,6 +2011,7 @@ mod tests {
         let map = VirtualMemoryMap {
             vmarea: vma,
             pmarea: pma,
+            vm_start: vma.start,
             permissions: 0o644,
             is_shared: false,
             owner: None,
@@ -1970,6 +2050,7 @@ mod tests {
                 start: 0,
                 end: PAGE_SIZE - 1,
             },
+            vm_start: 0x2000,
             permissions: 0,
             is_shared: false,
             owner: None,

@@ -266,7 +266,7 @@ pub fn arch_exception_handler(trapframe: &mut Trapframe, cause: usize) {
                 };
                 match task.vm_manager.lazy_map_page_with(access) {
                     Ok(_) => (),
-                    Err(_) => {
+                    Err(e) => {
                         print_traplog(trapframe);
                         log_fatal_page_fault_context(
                             trapframe,
@@ -276,10 +276,7 @@ pub fn arch_exception_handler(trapframe: &mut Trapframe, cause: usize) {
                             &task.name.read(),
                             task.vm_manager.get_asid(),
                         );
-                        panic!(
-                            "Failed to map page for load/store page fault at vaddr: {:#x}",
-                            vaddr
-                        );
+                        panic!("lazy_map_page_with failed for vaddr={:#x}: {}", vaddr, e);
                     }
                 }
 

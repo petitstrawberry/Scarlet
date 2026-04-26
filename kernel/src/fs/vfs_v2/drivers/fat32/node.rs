@@ -695,7 +695,8 @@ impl MemoryMappingOps for Fat32FileObject {
     fn resolve_fault(
         &self,
         access: &crate::object::capability::memory_mapping::AccessKind,
-        map: &crate::vm::vmem::VirtualMemoryMap,
+        _page_idx: usize,
+        vm_start: usize,
     ) -> core::result::Result<
         crate::object::capability::memory_mapping::ResolveFaultResult,
         crate::object::capability::memory_mapping::ResolveFaultError,
@@ -703,7 +704,7 @@ impl MemoryMappingOps for Fat32FileObject {
         let range = self
             .mmap_ranges
             .read()
-            .get(&map.vmarea.start)
+            .get(&vm_start)
             .copied()
             .ok_or(crate::object::capability::memory_mapping::ResolveFaultError::Invalid)?;
         if access.vaddr < range.vaddr_start || access.vaddr > range.vaddr_end {
@@ -714,30 +715,59 @@ impl MemoryMappingOps for Fat32FileObject {
         let file_offset = range
             .offset
             .saturating_add(access.vaddr.saturating_sub(range.vaddr_start));
-        if file_size == 0 || file_offset >= file_size {
-            return Err(crate::object::capability::memory_mapping::ResolveFaultError::Invalid);
-        }
-
-        let fs = self
-            .node
-            .filesystem
-            .read()
-            .as_ref()
-            .and_then(|weak| weak.upgrade())
-            .ok_or(crate::object::capability::memory_mapping::ResolveFaultError::Invalid)?;
-        let fat32_fs = fs
-            .as_any()
-            .downcast_ref::<crate::fs::vfs_v2::drivers::fat32::Fat32FileSystem>()
-            .ok_or(crate::object::capability::memory_mapping::ResolveFaultError::Invalid)?;
 
         let page_index = (file_offset / PAGE_SIZE) as u64;
-        let pinned = PageCacheManager::global()
-            .pin_or_load(self.cache_id(), page_index, |paddr| {
-                fat32_fs
-                    .read_page_content(self.node.cluster(), page_index, paddr)
-                    .map_err(|_| "fat32: read_page_content failed")
-            })
-            .map_err(|_| crate::object::capability::memory_mapping::ResolveFaultError::Invalid)?;
+
+        let pinned = if file_size == 0 || file_offset >= file_size {
+            PageCacheManager::global()
+                .pin_or_load(self.cache_id(), page_index, |paddr| {
+                    // SAFETY: paddr is a freshly-allocated page from the page cache.
+                    unsafe {
+                        core::ptr::write_bytes(phys_to_virt(paddr) as *mut u8, 0, PAGE_SIZE);
+                    }
+                    Ok(())
+                })
+                .map_err(|_| {
+                    crate::object::capability::memory_mapping::ResolveFaultError::Invalid
+                })?
+        } else {
+            let fs = self
+                .node
+                .filesystem
+                .read()
+                .as_ref()
+                .and_then(|weak| weak.upgrade())
+                .ok_or(crate::object::capability::memory_mapping::ResolveFaultError::Invalid)?;
+            let fat32_fs = fs
+                .as_any()
+                .downcast_ref::<crate::fs::vfs_v2::drivers::fat32::Fat32FileSystem>()
+                .ok_or(crate::object::capability::memory_mapping::ResolveFaultError::Invalid)?;
+
+            let pinned = PageCacheManager::global()
+                .pin_or_load(self.cache_id(), page_index, |paddr| {
+                    fat32_fs
+                        .read_page_content(self.node.cluster(), page_index, paddr)
+                        .map_err(|_| "fat32: read_page_content failed")
+                })
+                .map_err(|_| {
+                    crate::object::capability::memory_mapping::ResolveFaultError::Invalid
+                })?;
+
+            let page_start = (file_offset / PAGE_SIZE) * PAGE_SIZE;
+            let page_end = page_start + PAGE_SIZE;
+            if page_end > file_size {
+                let zero_start = file_size - page_start;
+                // SAFETY: paddr is a valid page-cache page; zero_start < PAGE_SIZE.
+                unsafe {
+                    core::ptr::write_bytes(
+                        (phys_to_virt(pinned.paddr()) as *mut u8).add(zero_start),
+                        0,
+                        PAGE_SIZE - zero_start,
+                    );
+                }
+            }
+            pinned
+        };
 
         if matches!(
             access.op,

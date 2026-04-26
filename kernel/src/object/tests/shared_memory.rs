@@ -59,7 +59,7 @@ fn test_shared_memory_memory_mapping_ops() {
 }
 
 #[test_case]
-fn test_shared_memory_weak_reference() {
+fn test_shared_memory_arc_reference() {
     let paddr = 0x80000000;
     let size = 4096;
     let permissions = 0x3;
@@ -67,13 +67,12 @@ fn test_shared_memory_weak_reference() {
     let shmem = unsafe { SharedMemory::from_paddr(paddr, size, permissions) };
     let kernel_obj = KernelObject::from_shared_memory_object(Arc::new(shmem));
 
-    // Test as_memory_mappable_weak
-    let weak_ref = kernel_obj.as_memory_mappable_weak();
-    assert!(weak_ref.is_some());
+    // Test as_memory_mappable_arc
+    let arc_ref = kernel_obj.as_memory_mappable_arc();
+    assert!(arc_ref.is_some());
 
-    // The weak reference should be upgradeable
-    if let Some(weak) = weak_ref {
-        assert!(weak.upgrade().is_some());
+    if let Some(owner) = arc_ref {
+        assert!(owner.supports_mmap());
     }
 }
 

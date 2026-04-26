@@ -439,6 +439,28 @@ impl KernelObject {
         }
     }
 
+    /// Try to get strong reference to MemoryMappingOps capability
+    pub fn as_memory_mappable_arc(&self) -> Option<Arc<dyn MemoryMappingOps>> {
+        match self {
+            KernelObject::File(file_object) => {
+                Some(Arc::clone(file_object) as Arc<dyn MemoryMappingOps>)
+            }
+            KernelObject::Pipe(_) => None,
+            KernelObject::Counter(_) => None,
+            #[cfg(feature = "network")]
+            KernelObject::Socket(_) => None,
+            KernelObject::EventChannel(_) => None,
+            KernelObject::EventSubscription(_) => None,
+            KernelObject::SharedMemory(shared_memory) => {
+                Some(Arc::clone(shared_memory) as Arc<dyn MemoryMappingOps>)
+            }
+            #[cfg(feature = "hypervisor")]
+            KernelObject::HypervisorVm(_) => None,
+            #[cfg(feature = "hypervisor")]
+            KernelObject::HypervisorVcpu(_) => None,
+        }
+    }
+
     /// Try to get EventChannelObject
     pub fn as_event_channel(&self) -> Option<&EventChannelObject> {
         match self {
