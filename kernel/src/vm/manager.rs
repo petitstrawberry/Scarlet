@@ -560,32 +560,45 @@ impl VirtualMemoryManager {
                                 is_shared: false,
                                 owner: None,
                             };
-                            if let Ok(removed) = self.add_memory_map_fixed(cow_map) {
-                                for rm in &removed {
-                                    if rm.pmarea.start != 0 && rm.owner.is_none() {
-                                        // SAFETY: pmarea points to a page allocated by allocate_raw_pages.
-                                        unsafe {
-                                            crate::mem::page::free_raw_pages(
-                                                crate::vm::addr::phys_to_virt(rm.pmarea.start)
-                                                    as *mut _,
-                                                1,
-                                            );
+                            match self.add_memory_map_fixed(cow_map) {
+                                Ok(removed) => {
+                                    for rm in &removed {
+                                        if rm.pmarea.start != 0 && rm.owner.is_none() {
+                                            // SAFETY: pmarea points to a page allocated by allocate_raw_pages.
+                                            unsafe {
+                                                crate::mem::page::free_raw_pages(
+                                                    crate::vm::addr::phys_to_virt(rm.pmarea.start)
+                                                        as *mut _,
+                                                    1,
+                                                );
+                                            }
                                         }
                                     }
                                 }
+                                Err(_) => {
+                                    // SAFETY: new_paddr was just allocated by allocate_raw_pages.
+                                    unsafe {
+                                        crate::mem::page::free_raw_pages(
+                                            crate::vm::addr::phys_to_virt(new_paddr) as *mut _,
+                                            1,
+                                        );
+                                    }
+                                    return Err("Failed to add COW mapping to VM manager");
+                                }
                             }
-                            let cow_paddr = new_paddr;
                             if let Some(root_pagetable) = self.get_root_page_table() {
                                 root_pagetable.map(
                                     self.get_asid(),
                                     page_vaddr,
-                                    cow_paddr,
+                                    new_paddr,
                                     perms,
                                     true,
                                     access.op == AccessOp::Store,
                                 );
+                                return Ok(());
+                            } else {
+                                return Err("No root page table available for COW mapping");
                             }
-                            return Ok(());
                         } else {
                             return Err("Failed to allocate page for private mapping COW");
                         }
@@ -743,7 +756,11 @@ impl VirtualMemoryManager {
             return None;
         }
 
-        Some(map.pmarea.start + (vaddr - map.vmarea.start))
+        if map.pmarea.start != 0 {
+            Some(map.pmarea.start + (vaddr - map.vmarea.start))
+        } else {
+            None
+        }
     }
 
     pub fn translate_vaddr(&self, vaddr: usize) -> Option<usize> {

@@ -194,7 +194,6 @@ pub fn sys_mmap(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
     }
 
     // Shared path: need get_mapping_info_with for pmarea and permissions
-    let file_obj = kernel_obj.as_file();
     let mut ok_len = aligned_length;
     let (mapping_base, obj_permissions, _obj_is_shared) = loop {
         match memory_mappable.get_mapping_info_with(offset, ok_len, is_shared) {
