@@ -1285,6 +1285,7 @@ fn map_elf_segment(
     let map = VirtualMemoryMap {
         vmarea,
         pmarea,
+        vm_start: vmarea.start,
         permissions,
         is_shared: false,
         owner: None,

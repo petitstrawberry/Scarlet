@@ -307,7 +307,8 @@ impl MemoryMappingOps for SharedMemory {
     fn resolve_fault(
         &self,
         access: &AccessKind,
-        map: &VirtualMemoryMap,
+        _page_idx: usize,
+        vm_start: usize,
     ) -> Result<ResolveFaultResult, ResolveFaultError> {
         let state = self.state.read();
 
@@ -321,11 +322,11 @@ impl MemoryMappingOps for SharedMemory {
         // vmarea範囲チェック（マッピング時のサイズ）
         // NOTE: ftruncateでリサイズされた場合、vmarea.endは古いままなので、
         //       SharedMemoryの現在のsizeも確認する必要がある
-        if page_vaddr < map.vmarea.start {
+        if page_vaddr < vm_start {
             return Err(ResolveFaultError::Unmapped);
         }
 
-        let offset_in_mapping = page_vaddr - map.vmarea.start;
+        let offset_in_mapping = page_vaddr - vm_start;
 
         // 現在のSharedMemoryサイズを確認（動的に拡張された可能性がある）
         if offset_in_mapping >= state.size {

@@ -138,7 +138,7 @@ fn arch_kernel_exception_handler(trapframe: &mut Trapframe, cause: usize) {
             match manager.search_memory_map(vaddr) {
                 Some(mmap) => match manager.get_root_page_table() {
                     Some(root_page_table) => {
-                        let paddr = mmap.get_paddr(vaddr).unwrap();
+                        let paddr = mmap.pmarea.start + (vaddr - mmap.vmarea.start);
                         root_page_table.map(
                             manager.get_asid(),
                             vaddr,

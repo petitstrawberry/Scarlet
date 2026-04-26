@@ -24,6 +24,7 @@ pub enum LsmError {
     InitFailed(&'static str),
     BuildInfoMismatch,
     MissingDependency(String),
+    ArchMismatch,
     NotFound,
     PermissionDenied,
 }
@@ -43,6 +44,8 @@ unsafe impl Send for LoadedModule {}
 unsafe impl Sync for LoadedModule {}
 
 use crate::arch::lsm::MODULE_VA_START;
+
+use crate::arch::lsm::MODULE_ELF_MACHINE;
 
 const MODULE_VA_SIZE: usize = 256 * 1024 * 1024;
 
@@ -337,6 +340,10 @@ pub fn list_modules() -> Vec<(u64, String)> {
 pub fn load_module(data: &[u8]) -> Result<u64, LsmError> {
     let object = elf::parse_reloc_object(data).map_err(LsmError::InvalidElf)?;
 
+    if object.e_machine != MODULE_ELF_MACHINE {
+        return Err(LsmError::ArchMismatch);
+    }
+
     let kernel_vm = get_kernel_vm_manager();
     let kernel_asid = kernel_vm.get_asid();
 
@@ -391,6 +398,7 @@ pub fn load_module(data: &[u8]) -> Result<u64, LsmError> {
                 start: base_vaddr,
                 end: base_vaddr + mapped_size - 1,
             },
+            vm_start: base_vaddr,
             permissions,
             is_shared: true,
             owner: None,

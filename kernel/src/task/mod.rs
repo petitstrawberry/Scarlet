@@ -822,6 +822,7 @@ impl Task {
                 start: vaddr,
                 end: vaddr + size - 1,
             },
+            vm_start: vaddr,
             permissions,
             is_shared: false,
             owner: None,
@@ -859,6 +860,7 @@ impl Task {
                                 start: mmap.vmarea.start,
                                 end: vaddr - 1,
                             },
+                            vm_start: mmap.vm_start,
                             permissions: mmap.permissions,
                             is_shared: mmap.is_shared,
                             owner: mmap.owner.clone(),
@@ -883,6 +885,7 @@ impl Task {
                                 start: vaddr + PAGE_SIZE,
                                 end: mmap.vmarea.end,
                             },
+                            vm_start: mmap.vm_start,
                             permissions: mmap.permissions,
                             is_shared: mmap.is_shared,
                             owner: mmap.owner.clone(),
@@ -1045,6 +1048,7 @@ impl Task {
                 start: vaddr,
                 end: vaddr + num_of_pages * PAGE_SIZE - 1,
             },
+            vm_start: vaddr,
             permissions,
             is_shared: VirtualMemoryRegion::Guard.is_shareable(), // Guard pages can be shared
             owner: None,
@@ -1249,6 +1253,7 @@ impl Task {
                         let shared_mmap = VirtualMemoryMap {
                             pmarea: mmap.pmarea,
                             vmarea: mmap.vmarea,
+                            vm_start: mmap.vm_start,
                             permissions: mmap.permissions,
                             is_shared: true,
                             owner: mmap.owner.clone(),
@@ -1271,6 +1276,73 @@ impl Task {
                                     .map_err(|_| "Failed to map trampoline page")?;
                             }
                         }
+                    } else if let Some(owner) = &mmap.owner {
+                        if let Some(cloned_owner) = owner.fork_clone() {
+                            let new_mmap = VirtualMemoryMap {
+                                pmarea: MemoryArea { start: 0, end: 0 },
+                                vmarea: mmap.vmarea,
+                                vm_start: mmap.vm_start,
+                                permissions: mmap.permissions,
+                                is_shared: false,
+                                owner: Some(cloned_owner),
+                            };
+                            child
+                                .vm_manager
+                                .add_memory_map(new_mmap)
+                                .map_err(|_| "Failed to add owner-based map to child task")?;
+                        } else {
+                            if mmap.pmarea.start == 0 {
+                                // Lazy: clone Arc, child COWs independently on fault
+                                let new_mmap = VirtualMemoryMap {
+                                    pmarea: MemoryArea { start: 0, end: 0 },
+                                    vmarea: mmap.vmarea,
+                                    vm_start: mmap.vm_start,
+                                    permissions: mmap.permissions,
+                                    is_shared: false,
+                                    owner: Some(Arc::clone(owner)),
+                                };
+                                child
+                                    .vm_manager
+                                    .add_memory_map(new_mmap)
+                                    .map_err(|_| "Failed to add owner-based map to child task")?;
+                            } else {
+                                // Eager: copy physical pages
+                                let permissions = mmap.permissions;
+                                let page_alloc = ContiguousPages::new(num_pages)
+                                    .ok_or("Failed to allocate pages for clone")?;
+                                let size = num_pages * PAGE_SIZE;
+                                let paddr = virt_to_phys(page_alloc.as_ptr() as usize);
+                                let new_mmap = VirtualMemoryMap {
+                                    pmarea: MemoryArea {
+                                        start: paddr,
+                                        end: paddr + (size - 1),
+                                    },
+                                    vmarea: MemoryArea {
+                                        start: vaddr,
+                                        end: vaddr + (size - 1),
+                                    },
+                                    vm_start: vaddr,
+                                    permissions,
+                                    is_shared: false,
+                                    owner: None,
+                                };
+                                // SAFETY: src/dst are valid page-aligned ranges of `size` bytes.
+                                unsafe {
+                                    let src_start = phys_to_virt(mmap.pmarea.start);
+                                    let dst_start = phys_to_virt(paddr);
+                                    core::ptr::copy_nonoverlapping(
+                                        src_start as *const u8,
+                                        dst_start as *mut u8,
+                                        size,
+                                    );
+                                }
+                                child.page_allocations.write().push(page_alloc);
+                                child
+                                    .vm_manager
+                                    .add_memory_map(new_mmap)
+                                    .map_err(|_| "Failed to add memory map to child task")?;
+                            }
+                        }
                     } else {
                         // Private memory regions: allocate new pages and copy contents
                         let permissions = mmap.permissions;
@@ -1287,9 +1359,10 @@ impl Task {
                                 start: vaddr,
                                 end: vaddr + (size - 1),
                             },
+                            vm_start: vaddr,
                             permissions,
                             is_shared: false,
-                            owner: mmap.owner.clone(),
+                            owner: None,
                         };
 
                         // Copy original contents
@@ -2357,6 +2430,7 @@ mod tests {
                 start: shared_vaddr,
                 end: shared_vaddr + PAGE_SIZE - 1,
             },
+            vm_start: shared_vaddr,
             permissions: VirtualMemoryPermission::Read as usize
                 | VirtualMemoryPermission::Write as usize,
             is_shared: true, // This should be shared between parent and child

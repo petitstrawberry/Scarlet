@@ -224,6 +224,7 @@ fn setup_trampoline_at_end(manager: &VirtualMemoryManager, trampoline_vaddr_end:
             start: trampoline_start,
             end: trampoline_end,
         },
+        vm_start: trampoline_vaddr_start,
         permissions: VirtualMemoryPermission::Read as usize
             | VirtualMemoryPermission::Write as usize
             | VirtualMemoryPermission::Execute as usize,
