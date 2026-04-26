@@ -247,7 +247,7 @@ pub fn sys_mmap(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
 
     match map_result {
         Ok(removed_mappings_opt) => {
-            memory_mappable.on_mapped(final_vaddr, paddr, aligned_length, offset);
+            memory_mappable.on_mapped(final_vaddr, paddr, ok_len_aligned, offset);
 
             if let Some(removed_mappings) = &removed_mappings_opt {
                 for removed_map in removed_mappings {
