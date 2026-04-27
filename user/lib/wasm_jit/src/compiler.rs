@@ -1330,6 +1330,83 @@ impl<'ctx, B: ArchBackend> FunctionCompiler<'ctx, B> {
         Ok(())
     }
 
+    /// i32 comparison with proper 32-bit extension.
+    /// Signed comparisons need sign-extension (shl 32 + sra 32) so negative i32
+    /// values are correctly interpreted. Unsigned comparisons need zero-extension
+    /// (shl 32 + srl 32) so upper garbage bits don't inflate the value.
+    fn visit_i32_cmp_impl(
+        &mut self,
+        op: fn(&mut B, &mut CodeBuffer, B::Reg, B::Reg, B::Reg),
+        swap: bool,
+        invert: bool,
+        signed: bool,
+    ) -> Result<(), CompileError> {
+        let rhs = self.value_stack.pop();
+        let lhs = self.value_stack.pop();
+        self.backend
+            .emit_load_slot(&mut self.code, self.backend.tmp0(), lhs);
+        self.backend
+            .emit_load_slot(&mut self.code, self.backend.tmp1(), rhs);
+        self.backend
+            .emit_li(&mut self.code, self.backend.tmp2(), 32);
+        self.backend.emit_shl(
+            &mut self.code,
+            self.backend.tmp0(),
+            self.backend.tmp0(),
+            self.backend.tmp2(),
+        );
+        if signed {
+            self.backend.emit_shr_s(
+                &mut self.code,
+                self.backend.tmp0(),
+                self.backend.tmp0(),
+                self.backend.tmp2(),
+            );
+        } else {
+            self.backend.emit_shr_u(
+                &mut self.code,
+                self.backend.tmp0(),
+                self.backend.tmp0(),
+                self.backend.tmp2(),
+            );
+        }
+        self.backend.emit_shl(
+            &mut self.code,
+            self.backend.tmp1(),
+            self.backend.tmp1(),
+            self.backend.tmp2(),
+        );
+        if signed {
+            self.backend.emit_shr_s(
+                &mut self.code,
+                self.backend.tmp1(),
+                self.backend.tmp1(),
+                self.backend.tmp2(),
+            );
+        } else {
+            self.backend.emit_shr_u(
+                &mut self.code,
+                self.backend.tmp1(),
+                self.backend.tmp1(),
+                self.backend.tmp2(),
+            );
+        }
+        let (a, b) = if swap {
+            (self.backend.tmp1(), self.backend.tmp0())
+        } else {
+            (self.backend.tmp0(), self.backend.tmp1())
+        };
+        op(self.backend, &mut self.code, self.backend.tmp0(), a, b);
+        if invert {
+            self.backend
+                .emit_eqz(&mut self.code, self.backend.tmp0(), self.backend.tmp0());
+        }
+        let result = self.value_stack.push();
+        self.backend
+            .emit_store_slot(&mut self.code, result, self.backend.tmp0());
+        Ok(())
+    }
+
     fn visit_i32_eq_impl(&mut self) -> Result<(), CompileError> {
         let rhs = self.value_stack.pop();
         let lhs = self.value_stack.pop();
@@ -1425,28 +1502,28 @@ impl<'ctx, B: ArchBackend> FunctionCompiler<'ctx, B> {
     }
 
     fn visit_i32_lt_s_impl(&mut self) -> Result<(), CompileError> {
-        self.visit_cmp_impl(B::emit_slt, false, false)
+        self.visit_i32_cmp_impl(B::emit_slt, false, false, true)
     }
     fn visit_i32_lt_u_impl(&mut self) -> Result<(), CompileError> {
-        self.visit_cmp_impl(B::emit_sltu, false, false)
+        self.visit_i32_cmp_impl(B::emit_sltu, false, false, false)
     }
     fn visit_i32_gt_s_impl(&mut self) -> Result<(), CompileError> {
-        self.visit_cmp_impl(B::emit_slt, true, false)
+        self.visit_i32_cmp_impl(B::emit_slt, true, false, true)
     }
     fn visit_i32_gt_u_impl(&mut self) -> Result<(), CompileError> {
-        self.visit_cmp_impl(B::emit_sltu, true, false)
+        self.visit_i32_cmp_impl(B::emit_sltu, true, false, false)
     }
     fn visit_i32_le_s_impl(&mut self) -> Result<(), CompileError> {
-        self.visit_cmp_impl(B::emit_slt, true, true)
+        self.visit_i32_cmp_impl(B::emit_slt, true, true, true)
     }
     fn visit_i32_le_u_impl(&mut self) -> Result<(), CompileError> {
-        self.visit_cmp_impl(B::emit_sltu, true, true)
+        self.visit_i32_cmp_impl(B::emit_sltu, true, true, false)
     }
     fn visit_i32_ge_s_impl(&mut self) -> Result<(), CompileError> {
-        self.visit_cmp_impl(B::emit_slt, false, true)
+        self.visit_i32_cmp_impl(B::emit_slt, false, true, true)
     }
     fn visit_i32_ge_u_impl(&mut self) -> Result<(), CompileError> {
-        self.visit_cmp_impl(B::emit_sltu, false, true)
+        self.visit_i32_cmp_impl(B::emit_sltu, false, true, false)
     }
 
     fn visit_i64_eqz_impl(&mut self) -> Result<(), CompileError> {

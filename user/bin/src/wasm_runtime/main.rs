@@ -507,38 +507,6 @@ fn execute_wasm(wasm_bytes: &[u8]) -> Result<i32, std::string::String> {
         let module =
             engine::compile_module(wasm_bytes).map_err(|e| format!("compile error: {:?}", e))?;
 
-        #[allow(clippy::redundant_closure)]
-        let max_params = module
-            .functions
-            .iter()
-            .map(|f| f.param_count as usize)
-            .max()
-            .unwrap_or(0);
-        println!(
-            "[diag] functions: {} imports: {} max_params: {} globals: {} table: {}",
-            module.functions.len(),
-            module.imported_funcs.len(),
-            max_params,
-            module.globals.len(),
-            module.table.len()
-        );
-
-        for (i, seg) in module.data_segments.iter().enumerate() {
-            println!(
-                "[diag] data_seg[{}]: offset={} len={}",
-                i,
-                seg.offset,
-                seg.data.len()
-            );
-        }
-
-        for (i, g) in module.globals.iter().enumerate() {
-            println!(
-                "[diag] global[{}]: value={} mutable={}",
-                i, g.value, g.mutable
-            );
-        }
-
         let data_pages = module
             .data_segments
             .iter()
@@ -547,27 +515,8 @@ fn execute_wasm(wasm_bytes: &[u8]) -> Result<i32, std::string::String> {
             .unwrap_or(1);
         let memory_pages = data_pages.max(module.min_memory_pages as usize);
         let cap_pages = memory_pages.max(256);
-        println!(
-            "[diag] data_pages={} min_memory_pages={} memory_pages={} cap_pages={}",
-            data_pages, module.min_memory_pages, memory_pages, cap_pages
-        );
         let mut memory = alloc::vec![0u8; cap_pages * 65536];
         module.init_memory(&mut memory);
-
-        let sp_offset = 1048576usize;
-        if sp_offset + 16 <= memory.len() {
-            let sp_val = u64::from_le_bytes(
-                memory[sp_offset..sp_offset + 8]
-                    .try_into()
-                    .unwrap_or([0u8; 8]),
-            );
-            println!("[diag] mem[stack_ptr={}] = 0x{:x}", sp_offset, sp_val);
-        }
-        if memory.len() > 32 {
-            let first_32: Vec<u8> = memory[..32].to_vec();
-            let nonzero = first_32.iter().filter(|&&b| b != 0).count();
-            println!("[diag] mem[0..32] nonzero_bytes={}", nonzero);
-        }
 
         let mut ctx = wasm_jit::runtime::VmContext::new(
             memory.as_mut_ptr(),

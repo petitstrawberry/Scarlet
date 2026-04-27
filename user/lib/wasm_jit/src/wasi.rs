@@ -569,29 +569,43 @@ unsafe fn wasi_poll_oneoff(ctx: &mut VmContext, args: *const RawValue) -> RawVal
         return u32::MAX as RawValue;
     }
 
+    let mut has_fd_ready = false;
+    for i in 0..nsubscriptions {
+        let sub_base = in_ptr + i * SUBSCRIPTION_SIZE;
+        let sub_type = *ctx.memory_base.add(sub_base as usize + 8);
+        if sub_type == 2 {
+            has_fd_ready = true;
+            break;
+        }
+    }
+
     let mut nevents: u32 = 0;
     for i in 0..nsubscriptions {
         let sub_base = in_ptr + i * SUBSCRIPTION_SIZE;
-        let evt_base = out_ptr + i * EVENT_SIZE;
+        let sub_type = *ctx.memory_base.add(sub_base as usize + 8);
 
-        // Copy userdata (8 bytes) from subscription to event
+        if has_fd_ready && sub_type != 2 {
+            continue;
+        }
+
+        let evt_base = out_ptr + nevents * EVENT_SIZE;
+
         let src = ctx.memory_base.add(sub_base as usize);
         let dst = ctx.memory_base.add(evt_base as usize);
         core::ptr::copy_nonoverlapping(src, dst, 8);
-
-        // Event: bytes 0..7 = userdata, byte 8..9 = error (0=none), byte 10 = type
-        // Set error = 0 (no error)
         core::ptr::write_bytes(dst.add(8), 0, 2);
 
-        // Copy subscription type (byte 8 of subscription) to event type (byte 10)
-        let sub_type = *ctx.memory_base.add(sub_base as usize + 8);
         *dst.add(10) = sub_type;
-
-        // Zero out rest of event
         core::ptr::write_bytes(dst.add(11), 0, EVENT_SIZE as usize - 11);
 
-        // For clock type (0): write result (u16) at offset 12 = 0 (no error)
-        // For fd type: set to 0 (no error)
+        match sub_type {
+            1 | 2 => {
+                let nbytes: u64 = if sub_type == 2 { u64::MAX } else { 1 };
+                core::ptr::copy_nonoverlapping(&nbytes as *const u64 as *const u8, dst.add(16), 8);
+            }
+            _ => {}
+        }
+
         nevents += 1;
     }
 
