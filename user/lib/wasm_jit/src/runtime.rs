@@ -2,13 +2,49 @@ use crate::{CompiledFn, TrapCode};
 
 const MAX_CALL_DEPTH: usize = 256;
 
-pub type HostWriteFn = unsafe extern "C" fn(*const u8, usize);
-
 pub struct ImportedFuncName {
     pub module: *const u8,
     pub module_len: usize,
     pub name: *const u8,
     pub name_len: usize,
+}
+
+/// Host operation callbacks for WASI implementation.
+/// All function pointers must be valid for the lifetime of the VmContext.
+#[repr(C)]
+pub struct HostOps {
+    /// Write bytes to fd. Returns bytes written (>=0) or negative errno.
+    pub fd_write: unsafe extern "C" fn(fd: u32, data: *const u8, data_len: usize) -> i64,
+    /// Read bytes from fd into buf. Returns bytes read (>=0) or negative errno.
+    pub fd_read: unsafe extern "C" fn(fd: u32, buf: *mut u8, buf_len: usize) -> i64,
+    /// Get clock time. Writes nanoseconds to `time`.
+    pub clock_time_get: unsafe extern "C" fn(clock_id: u32, time: *mut u64),
+    /// Fill buffer with random bytes.
+    pub random_get: unsafe extern "C" fn(buf: *mut u8, buf_len: usize),
+    /// Open a file relative to dirfd. path is UTF-8 bytes, NOT null-terminated.
+    /// Returns new fd (>=3) or negative errno.
+    pub path_open: unsafe extern "C" fn(
+        dirfd: u32,
+        path: *const u8,
+        path_len: u32,
+        oflags: u32,
+        fdflags: u32,
+    ) -> i32,
+    /// Close fd. Returns 0 or negative errno.
+    pub fd_close: unsafe extern "C" fn(fd: u32) -> i32,
+    /// Seek in fd. Writes new offset to new_offset. Returns 0 or negative errno.
+    pub fd_seek:
+        unsafe extern "C" fn(fd: u32, offset: i64, whence: u32, new_offset: *mut i64) -> i32,
+    /// Get current offset. Writes offset. Returns 0 or negative errno.
+    pub fd_tell: unsafe extern "C" fn(fd: u32, offset: *mut i64) -> i32,
+    /// Get fdstat. Writes 24-byte fdstat struct to buf. Returns 0 or negative errno.
+    pub fd_fdstat_get: unsafe extern "C" fn(fd: u32, buf: *mut u8) -> i32,
+    /// Get prestat for pre-opened dir. Writes 8-byte prestat to buf. Returns 0 or negative errno.
+    pub fd_prestat_get: unsafe extern "C" fn(fd: u32, buf: *mut u8) -> i32,
+    /// Get name of pre-opened dir. Writes up to buf_len bytes. Returns 0 or negative errno.
+    pub fd_prestat_dir_name: unsafe extern "C" fn(fd: u32, buf: *mut u8, buf_len: u32) -> i32,
+    /// Get filestat. Writes 64-byte filestat struct to buf. Returns 0 or negative errno.
+    pub fd_filestat_get: unsafe extern "C" fn(fd: u32, buf: *mut u8) -> i32,
 }
 
 pub struct VmContext {
@@ -20,7 +56,7 @@ pub struct VmContext {
     pub exit_code: u32,
     pub exited: bool,
     pub call_depth: usize,
-    pub host_write: Option<HostWriteFn>,
+    pub host_ops: *const HostOps,
     pub imported_names: *const ImportedFuncName,
     pub imported_count: usize,
 }
@@ -41,7 +77,7 @@ impl VmContext {
             exit_code: 0,
             exited: false,
             call_depth: 0,
-            host_write: None,
+            host_ops: core::ptr::null(),
             imported_names: core::ptr::null(),
             imported_count: 0,
         }

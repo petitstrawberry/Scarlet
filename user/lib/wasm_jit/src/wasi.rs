@@ -7,20 +7,14 @@ const ESUCCESS: u32 = 0;
 const EBADF: u32 = 8;
 const ENOSYS: u32 = 52;
 
-#[allow(dead_code)]
-const FILETYPE_UNKNOWN: u8 = 0;
-#[allow(dead_code)]
-const FILETYPE_BLOCK_DEVICE: u8 = 1;
-const FILETYPE_CHARACTER_DEVICE: u8 = 2;
-#[allow(dead_code)]
-const FILETYPE_DIRECTORY: u8 = 3;
-#[allow(dead_code)]
-const FILETYPE_REGULAR_FILE: u8 = 4;
-
-#[allow(dead_code)]
-const CLOCK_REALTIME: u32 = 0;
-#[allow(dead_code)]
-const CLOCK_MONOTONIC: u32 = 1;
+macro_rules! get_ops {
+    ($ctx:expr) => {
+        match $ctx.host_ops.as_ref() {
+            Some(ops) => ops,
+            None => return ENOSYS as RawValue,
+        }
+    };
+}
 
 pub unsafe fn dispatch_imported(
     ctx: *mut VmContext,
@@ -110,10 +104,21 @@ unsafe fn wasi_clock_res_get(ctx: &mut VmContext, args: *const RawValue) -> RawV
 }
 
 unsafe fn wasi_clock_time_get(ctx: &mut VmContext, args: *const RawValue) -> RawValue {
-    let _clock_id = *args.add(0) as u32;
+    let clock_id = *args.add(0) as u32;
     let _precision = *args.add(1) as u64;
     let time_ptr = *args.add(2) as u32;
-    write_u64_le(ctx, time_ptr, 0);
+
+    let ops = match ctx.host_ops.as_ref() {
+        Some(ops) => ops,
+        None => {
+            write_u64_le(ctx, time_ptr, 0);
+            return ESUCCESS as RawValue;
+        }
+    };
+
+    let mut time: u64 = 0;
+    (ops.clock_time_get)(clock_id, &mut time);
+    write_u64_le(ctx, time_ptr, time);
     ESUCCESS as RawValue
 }
 
@@ -144,9 +149,14 @@ unsafe fn wasi_fd_allocate(_ctx: &mut VmContext, args: *const RawValue) -> RawVa
     ENOSYS as RawValue
 }
 
-unsafe fn wasi_fd_close(_ctx: &mut VmContext, args: *const RawValue) -> RawValue {
-    let _fd = *args.add(0) as u32;
-    ESUCCESS as RawValue
+unsafe fn wasi_fd_close(ctx: &mut VmContext, args: *const RawValue) -> RawValue {
+    let fd = *args.add(0) as u32;
+    let ops = match ctx.host_ops.as_ref() {
+        Some(ops) => ops,
+        None => return EBADF as RawValue,
+    };
+    let result = (ops.fd_close)(fd);
+    errno_or_success_i32(result)
 }
 
 unsafe fn wasi_fd_datasync(_ctx: &mut VmContext, args: *const RawValue) -> RawValue {
@@ -158,13 +168,22 @@ unsafe fn wasi_fd_fdstat_get(ctx: &mut VmContext, args: *const RawValue) -> RawV
     let fd = *args.add(0) as u32;
     let buf_ptr = *args.add(1) as u32;
 
-    if fd > 2 {
+    if !ctx.check_memory(buf_ptr as u64, 24) {
         return EBADF as RawValue;
     }
 
-    write_u32_le(ctx, buf_ptr, FILETYPE_CHARACTER_DEVICE as u32);
-    write_u64_le(ctx, buf_ptr + 8, u64::MAX);
-    write_u64_le(ctx, buf_ptr + 16, u64::MAX);
+    let ops = match ctx.host_ops.as_ref() {
+        Some(ops) => ops,
+        None => return EBADF as RawValue,
+    };
+
+    let mut buf = [0u8; 24];
+    let result = (ops.fd_fdstat_get)(fd, buf.as_mut_ptr());
+    if result < 0 {
+        return (-result) as RawValue;
+    }
+
+    core::ptr::copy_nonoverlapping(buf.as_ptr(), ctx.memory_base.add(buf_ptr as usize), 24);
     ESUCCESS as RawValue
 }
 
@@ -181,10 +200,27 @@ unsafe fn wasi_fd_fdstat_set_rights(_ctx: &mut VmContext, args: *const RawValue)
     ESUCCESS as RawValue
 }
 
-unsafe fn wasi_fd_filestat_get(_ctx: &mut VmContext, args: *const RawValue) -> RawValue {
-    let _fd = *args.add(0) as u32;
-    let _buf_ptr = *args.add(1) as u32;
-    ENOSYS as RawValue
+unsafe fn wasi_fd_filestat_get(ctx: &mut VmContext, args: *const RawValue) -> RawValue {
+    let fd = *args.add(0) as u32;
+    let buf_ptr = *args.add(1) as u32;
+
+    if !ctx.check_memory(buf_ptr as u64, 64) {
+        return EBADF as RawValue;
+    }
+
+    let ops = match ctx.host_ops.as_ref() {
+        Some(ops) => ops,
+        None => return EBADF as RawValue,
+    };
+
+    let mut buf = [0u8; 64];
+    let result = (ops.fd_filestat_get)(fd, buf.as_mut_ptr());
+    if result < 0 {
+        return (-result) as RawValue;
+    }
+
+    core::ptr::copy_nonoverlapping(buf.as_ptr(), ctx.memory_base.add(buf_ptr as usize), 64);
+    ESUCCESS as RawValue
 }
 
 unsafe fn wasi_fd_filestat_set_size(_ctx: &mut VmContext, args: *const RawValue) -> RawValue {
@@ -210,17 +246,50 @@ unsafe fn wasi_fd_pread(_ctx: &mut VmContext, args: *const RawValue) -> RawValue
     ENOSYS as RawValue
 }
 
-unsafe fn wasi_fd_prestat_get(_ctx: &mut VmContext, args: *const RawValue) -> RawValue {
-    let _fd = *args.add(0) as u32;
-    let _buf_ptr = *args.add(1) as u32;
-    EBADF as RawValue
+unsafe fn wasi_fd_prestat_get(ctx: &mut VmContext, args: *const RawValue) -> RawValue {
+    let fd = *args.add(0) as u32;
+    let buf_ptr = *args.add(1) as u32;
+
+    if !ctx.check_memory(buf_ptr as u64, 8) {
+        return EBADF as RawValue;
+    }
+
+    let ops = match ctx.host_ops.as_ref() {
+        Some(ops) => ops,
+        None => return EBADF as RawValue,
+    };
+
+    let mut buf = [0u8; 8];
+    let result = (ops.fd_prestat_get)(fd, buf.as_mut_ptr());
+    if result < 0 {
+        return (-result) as RawValue;
+    }
+
+    core::ptr::copy_nonoverlapping(buf.as_ptr(), ctx.memory_base.add(buf_ptr as usize), 8);
+    ESUCCESS as RawValue
 }
 
-unsafe fn wasi_fd_prestat_dir_name(_ctx: &mut VmContext, args: *const RawValue) -> RawValue {
-    let _fd = *args.add(0) as u32;
-    let _name_ptr = *args.add(1) as u32;
-    let _name_len = *args.add(2) as u32;
-    EBADF as RawValue
+unsafe fn wasi_fd_prestat_dir_name(ctx: &mut VmContext, args: *const RawValue) -> RawValue {
+    let fd = *args.add(0) as u32;
+    let name_ptr = *args.add(1) as u32;
+    let name_len = *args.add(2) as u32;
+
+    if !ctx.check_memory(name_ptr as u64, name_len as u64) {
+        return EBADF as RawValue;
+    }
+
+    let ops = match ctx.host_ops.as_ref() {
+        Some(ops) => ops,
+        None => return EBADF as RawValue,
+    };
+
+    let dst = ctx.memory_base.add(name_ptr as usize);
+    let result = (ops.fd_prestat_dir_name)(fd, dst, name_len);
+    if result < 0 {
+        return (-result) as RawValue;
+    }
+
+    ESUCCESS as RawValue
 }
 
 unsafe fn wasi_fd_pwrite(_ctx: &mut VmContext, args: *const RawValue) -> RawValue {
@@ -238,46 +307,73 @@ unsafe fn wasi_fd_write(ctx: &mut VmContext, args: *const RawValue) -> RawValue 
     let iovs_len = *args.add(2) as u32;
     let nwritten_ptr = *args.add(3) as u32;
 
-    if fd != 1 && fd != 2 {
-        return EBADF as RawValue;
-    }
+    let ops = match ctx.host_ops.as_ref() {
+        Some(ops) => ops,
+        None => return EBADF as RawValue,
+    };
 
-    let mut total_written: u32 = 0;
+    let mut total: u32 = 0;
     for i in 0..iovs_len {
         let iov_offset = iovs_ptr + i * 8;
+        if !ctx.check_memory(iov_offset as u64, 8) {
+            ctx.set_trap(crate::TrapCode::MemoryOutOfBounds);
+            return u32::MAX as RawValue;
+        }
+
         let buf_ptr = read_u32_le(ctx, iov_offset);
         let buf_len = read_u32_le(ctx, iov_offset + 4);
-
         if !ctx.check_memory(buf_ptr as u64, buf_len as u64) {
             ctx.set_trap(crate::TrapCode::MemoryOutOfBounds);
             return u32::MAX as RawValue;
         }
 
-        let src = ctx.memory_base.add(buf_ptr as usize);
-        let bytes = core::slice::from_raw_parts(src, buf_len as usize);
-
-        if let Some(host_write) = ctx.host_write {
-            host_write(bytes.as_ptr(), bytes.len());
+        let data_ptr = ctx.memory_base.add(buf_ptr as usize);
+        let result = (ops.fd_write)(fd, data_ptr, buf_len as usize);
+        if result < 0 {
+            return (-result) as RawValue;
         }
-
-        total_written += buf_len;
+        total = total.saturating_add(result as u32);
     }
 
-    write_u32_le(ctx, nwritten_ptr, total_written);
+    write_u32_le(ctx, nwritten_ptr, total);
     ESUCCESS as RawValue
 }
 
 unsafe fn wasi_fd_read(ctx: &mut VmContext, args: *const RawValue) -> RawValue {
     let fd = *args.add(0) as u32;
-    let _iovs_ptr = *args.add(1) as u32;
-    let _iovs_len = *args.add(2) as u32;
+    let iovs_ptr = *args.add(1) as u32;
+    let iovs_len = *args.add(2) as u32;
     let nread_ptr = *args.add(3) as u32;
 
-    if fd != 0 {
-        return EBADF as RawValue;
+    let ops = match ctx.host_ops.as_ref() {
+        Some(ops) => ops,
+        None => return EBADF as RawValue,
+    };
+
+    let mut total: u32 = 0;
+    for i in 0..iovs_len {
+        let iov_offset = iovs_ptr + i * 8;
+        if !ctx.check_memory(iov_offset as u64, 8) {
+            ctx.set_trap(crate::TrapCode::MemoryOutOfBounds);
+            return u32::MAX as RawValue;
+        }
+
+        let buf_ptr = read_u32_le(ctx, iov_offset);
+        let buf_len = read_u32_le(ctx, iov_offset + 4);
+        if !ctx.check_memory(buf_ptr as u64, buf_len as u64) {
+            ctx.set_trap(crate::TrapCode::MemoryOutOfBounds);
+            return u32::MAX as RawValue;
+        }
+
+        let data_ptr = ctx.memory_base.add(buf_ptr as usize);
+        let result = (ops.fd_read)(fd, data_ptr, buf_len as usize);
+        if result < 0 {
+            return (-result) as RawValue;
+        }
+        total = total.saturating_add(result as u32);
     }
 
-    write_u32_le(ctx, nread_ptr, 0);
+    write_u32_le(ctx, nread_ptr, total);
     ESUCCESS as RawValue
 }
 
@@ -296,12 +392,21 @@ unsafe fn wasi_fd_renumber(_ctx: &mut VmContext, args: *const RawValue) -> RawVa
     ENOSYS as RawValue
 }
 
-unsafe fn wasi_fd_seek(_ctx: &mut VmContext, args: *const RawValue) -> RawValue {
-    let _fd = *args.add(0) as u32;
-    let _offset = *args.add(1) as u64;
-    let _whence = *args.add(2) as u32;
-    let _newoffset_ptr = *args.add(3) as u32;
-    ENOSYS as RawValue
+unsafe fn wasi_fd_seek(ctx: &mut VmContext, args: *const RawValue) -> RawValue {
+    let fd = *args.add(0) as u32;
+    let offset = *args.add(1) as i64;
+    let whence = *args.add(2) as u32;
+    let newoffset_ptr = *args.add(3) as u32;
+    let ops = get_ops!(ctx);
+
+    let mut new_offset: i64 = 0;
+    let result = (ops.fd_seek)(fd, offset, whence, &mut new_offset);
+    if result < 0 {
+        return (-result) as RawValue;
+    }
+
+    write_u64_le(ctx, newoffset_ptr, new_offset as u64);
+    ESUCCESS as RawValue
 }
 
 unsafe fn wasi_fd_sync(_ctx: &mut VmContext, args: *const RawValue) -> RawValue {
@@ -309,10 +414,19 @@ unsafe fn wasi_fd_sync(_ctx: &mut VmContext, args: *const RawValue) -> RawValue 
     ESUCCESS as RawValue
 }
 
-unsafe fn wasi_fd_tell(_ctx: &mut VmContext, args: *const RawValue) -> RawValue {
-    let _fd = *args.add(0) as u32;
-    let _newoffset_ptr = *args.add(1) as u32;
-    ENOSYS as RawValue
+unsafe fn wasi_fd_tell(ctx: &mut VmContext, args: *const RawValue) -> RawValue {
+    let fd = *args.add(0) as u32;
+    let offset_ptr = *args.add(1) as u32;
+    let ops = get_ops!(ctx);
+
+    let mut offset: i64 = 0;
+    let result = (ops.fd_tell)(fd, &mut offset);
+    if result < 0 {
+        return (-result) as RawValue;
+    }
+
+    write_u64_le(ctx, offset_ptr, offset as u64);
+    ESUCCESS as RawValue
 }
 
 unsafe fn wasi_path_create_directory(_ctx: &mut VmContext, args: *const RawValue) -> RawValue {
@@ -354,17 +468,37 @@ unsafe fn wasi_path_link(_ctx: &mut VmContext, args: *const RawValue) -> RawValu
 }
 
 unsafe fn wasi_path_open(ctx: &mut VmContext, args: *const RawValue) -> RawValue {
-    let _fd = *args.add(0) as u32;
+    let dirfd = *args.add(0) as u32;
     let _dirflags = *args.add(1) as u32;
-    let _path_ptr = *args.add(2) as u32;
-    let _path_len = *args.add(3) as u32;
-    let _oflags = *args.add(4) as u32;
+    let path_ptr = *args.add(2) as u32;
+    let path_len = *args.add(3) as u32;
+    let oflags = *args.add(4) as u32;
     let _fs_rights_base = *args.add(5) as u64;
     let _fs_rights_inheriting = *args.add(6) as u64;
-    let _fdflags = *args.add(7) as u32;
+    let fdflags = *args.add(7) as u32;
     let fd_out_ptr = *args.add(8) as u32;
-    write_u32_le(ctx, fd_out_ptr, u32::MAX);
-    ENOSYS as RawValue
+
+    if !ctx.check_memory(path_ptr as u64, path_len as u64) {
+        return EBADF as RawValue;
+    }
+
+    let ops = match ctx.host_ops.as_ref() {
+        Some(ops) => ops,
+        None => {
+            write_u32_le(ctx, fd_out_ptr, u32::MAX);
+            return ENOSYS as RawValue;
+        }
+    };
+
+    let path_ptr_host = ctx.memory_base.add(path_ptr as usize);
+    let result = (ops.path_open)(dirfd, path_ptr_host, path_len, oflags, fdflags);
+    if result < 0 {
+        write_u32_le(ctx, fd_out_ptr, u32::MAX);
+        return (-result) as RawValue;
+    }
+
+    write_u32_le(ctx, fd_out_ptr, result as u32);
+    ESUCCESS as RawValue
 }
 
 unsafe fn wasi_path_readlink(_ctx: &mut VmContext, args: *const RawValue) -> RawValue {
@@ -441,7 +575,15 @@ unsafe fn wasi_random_get(ctx: &mut VmContext, args: *const RawValue) -> RawValu
         return u32::MAX as RawValue;
     }
 
-    core::ptr::write_bytes(ctx.memory_base.add(buf_ptr as usize), 0, buf_len as usize);
+    let ops = match ctx.host_ops.as_ref() {
+        Some(ops) => ops,
+        None => {
+            core::ptr::write_bytes(ctx.memory_base.add(buf_ptr as usize), 0, buf_len as usize);
+            return ESUCCESS as RawValue;
+        }
+    };
+
+    (ops.random_get)(ctx.memory_base.add(buf_ptr as usize), buf_len as usize);
     ESUCCESS as RawValue
 }
 
@@ -482,41 +624,41 @@ unsafe fn wasi_sock_shutdown(_ctx: &mut VmContext, args: *const RawValue) -> Raw
     ENOSYS as RawValue
 }
 
-unsafe fn read_u32_le(ctx: &VmContext, addr: u32) -> u32 {
-    unsafe {
-        if !ctx.check_memory(addr as u64, 4) {
-            return 0;
-        }
-        let ptr = ctx.memory_base.add(addr as usize);
-        u32::from_le(core::ptr::read_unaligned(ptr as *const u32))
+unsafe fn errno_or_success_i32(result: i32) -> RawValue {
+    if result < 0 {
+        (-result) as RawValue
+    } else {
+        ESUCCESS as RawValue
     }
 }
 
+unsafe fn read_u32_le(ctx: &VmContext, addr: u32) -> u32 {
+    if !ctx.check_memory(addr as u64, 4) {
+        return 0;
+    }
+    let ptr = ctx.memory_base.add(addr as usize);
+    u32::from_le(core::ptr::read_unaligned(ptr as *const u32))
+}
+
 unsafe fn write_u32_le(ctx: &mut VmContext, addr: u32, value: u32) {
-    unsafe {
-        if ctx.check_memory(addr as u64, 4) {
-            let ptr = ctx.memory_base.add(addr as usize);
-            core::ptr::write_unaligned(ptr as *mut u32, value.to_le());
-        }
+    if ctx.check_memory(addr as u64, 4) {
+        let ptr = ctx.memory_base.add(addr as usize);
+        core::ptr::write_unaligned(ptr as *mut u32, value.to_le());
     }
 }
 
 #[allow(dead_code)]
 unsafe fn read_u64_le(ctx: &VmContext, addr: u32) -> u64 {
-    unsafe {
-        if !ctx.check_memory(addr as u64, 8) {
-            return 0;
-        }
-        let ptr = ctx.memory_base.add(addr as usize);
-        u64::from_le(core::ptr::read_unaligned(ptr as *const u64))
+    if !ctx.check_memory(addr as u64, 8) {
+        return 0;
     }
+    let ptr = ctx.memory_base.add(addr as usize);
+    u64::from_le(core::ptr::read_unaligned(ptr as *const u64))
 }
 
 unsafe fn write_u64_le(ctx: &mut VmContext, addr: u32, value: u64) {
-    unsafe {
-        if ctx.check_memory(addr as u64, 8) {
-            let ptr = ctx.memory_base.add(addr as usize);
-            core::ptr::write_unaligned(ptr as *mut u64, value.to_le());
-        }
+    if ctx.check_memory(addr as u64, 8) {
+        let ptr = ctx.memory_base.add(addr as usize);
+        core::ptr::write_unaligned(ptr as *mut u64, value.to_le());
     }
 }
