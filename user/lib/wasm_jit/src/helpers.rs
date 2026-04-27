@@ -209,6 +209,19 @@ pub unsafe extern "C" fn helper_i64_store16(ctx: *mut VmContext, addr: u32, valu
     }
 }
 
+pub unsafe extern "C" fn helper_i64_store32(ctx: *mut VmContext, addr: u32, value: u64) {
+    unsafe {
+        let ctx = &mut *ctx;
+        let offset = addr as u64;
+        if !ctx.check_memory(offset, 4) {
+            ctx.set_trap(TrapCode::MemoryOutOfBounds);
+            return;
+        }
+        let ptr = ctx.memory_base.add(addr as usize) as *mut u32;
+        core::ptr::write_unaligned(ptr, value as u32);
+    }
+}
+
 pub unsafe extern "C" fn helper_memory_copy(ctx: *mut VmContext, dst: u32, src: u32, len: u32) {
     unsafe {
         let ctx = &mut *ctx;
@@ -243,15 +256,15 @@ pub unsafe extern "C" fn helper_memory_grow(ctx: *mut VmContext, delta: u32) -> 
         let delta_bytes = delta as usize * 65536;
         let new_len = match ctx.memory_len.checked_add(delta_bytes) {
             Some(n) => n,
-            None => return u32::MAX as RawValue,
+            None => return (-1i32) as RawValue,
         };
         if new_len > ctx.memory_cap {
-            return u32::MAX as RawValue;
+            return (-1i32) as RawValue;
         }
         let old_end = ctx.memory_len;
         ctx.memory_len = new_len;
         core::ptr::write_bytes(ctx.memory_base.add(old_end), 0, delta_bytes);
-        prev_pages as RawValue
+        (prev_pages as i32) as RawValue
     }
 }
 
@@ -305,7 +318,7 @@ pub unsafe extern "C" fn helper_call(
 
         let mut frame = alloc::vec![0u64; entry.frame_slots as usize];
         let param_count = entry.param_count as usize;
-        for i in 0..param_count.min(core::cmp::min(entry.frame_slots as usize, 16)) {
+        for i in 0..param_count.min(entry.frame_slots as usize) {
             frame[i] = *args_ptr.add(i);
         }
 

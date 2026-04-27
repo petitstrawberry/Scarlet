@@ -14,8 +14,8 @@ use crate::helpers::{
     helper_i32_load8_s, helper_i32_load8_u, helper_i32_load16_s, helper_i32_load16_u,
     helper_i32_store, helper_i32_store8, helper_i32_store16, helper_i64_load8_s,
     helper_i64_load8_u, helper_i64_load16_s, helper_i64_load16_u, helper_i64_load32_s,
-    helper_i64_load32_u, helper_i64_store8, helper_i64_store16, helper_memory_copy,
-    helper_memory_fill, helper_memory_grow, helper_memory_size, helper_trap,
+    helper_i64_load32_u, helper_i64_store8, helper_i64_store16, helper_i64_store32,
+    helper_memory_copy, helper_memory_fill, helper_memory_grow, helper_memory_size, helper_trap,
 };
 use crate::module::{FuncType, MemoryInfo, ValType};
 use crate::runtime::VmContext;
@@ -159,6 +159,41 @@ impl<B: ArchBackend> ModuleCompiler<B> {
             global_init_values: Vec::new(),
             imported_global_count: 0,
             table: Vec::new(),
+        }
+    }
+
+    fn resolve_data_offset(
+        &self,
+        offset_expr: wasmparser::ConstExpr<'_>,
+    ) -> Result<u32, CompileError> {
+        let mut reader = offset_expr.get_binary_reader();
+        let offset_op = reader
+            .read_operator()
+            .map_err(|_| CompileError::InvalidWasm("data offset"))?;
+        match offset_op {
+            wasmparser::Operator::I32Const { value } => Ok(value as u32),
+            wasmparser::Operator::I64Const { value } => Ok(value as u32),
+            wasmparser::Operator::GlobalGet { global_index } => {
+                let idx = global_index as usize;
+                if idx < self.imported_global_count {
+                    return Err(CompileError::UnsupportedFeature(
+                        "imported global in data offset",
+                    ));
+                }
+                let local_idx = idx - self.imported_global_count;
+                let init = self
+                    .global_init_values
+                    .get(local_idx)
+                    .ok_or(CompileError::InvalidWasm("data offset global index"))?;
+                match init {
+                    GlobalInitValue::I32(v) => Ok(*v),
+                    GlobalInitValue::I64(v) => Ok(*v as u32),
+                    GlobalInitValue::Global(_) => Err(CompileError::UnsupportedFeature(
+                        "nested global in data offset",
+                    )),
+                }
+            }
+            _ => Err(CompileError::UnsupportedFeature("data offset expression")),
         }
     }
 
@@ -311,26 +346,19 @@ impl<B: ArchBackend> ModuleCompiler<B> {
                     for data_entry in reader {
                         let data_entry =
                             data_entry.map_err(|_| CompileError::InvalidWasm("data section"))?;
-                        let (offset, data) = match data_entry.kind {
+                        match data_entry.kind {
                             wasmparser::DataKind::Active { offset_expr, .. } => {
-                                let mut offset_reader = offset_expr.get_binary_reader();
-                                let offset_op = offset_reader
-                                    .read_operator()
-                                    .map_err(|_| CompileError::InvalidWasm("data offset"))?;
-                                let offset = match offset_op {
-                                    wasmparser::Operator::I32Const { value } => value as u32,
-                                    wasmparser::Operator::I64Const { value } => value as u32,
-                                    wasmparser::Operator::GlobalGet { .. } => 0,
-                                    _ => 0,
-                                };
-                                (offset, data_entry.data)
+                                let offset = self.resolve_data_offset(offset_expr)?;
+                                self.data_segments.push(crate::DataSegment {
+                                    offset,
+                                    data: data_entry.data.to_vec(),
+                                });
                             }
-                            wasmparser::DataKind::Passive => (0, data_entry.data),
-                        };
-                        self.data_segments.push(crate::DataSegment {
-                            offset,
-                            data: data.to_vec(),
-                        });
+                            wasmparser::DataKind::Passive => {
+                                // Passive segments are loaded via memory.init at runtime.
+                                // Skip them here; they require bulk-memory opcode support.
+                            }
+                        }
                     }
                 }
                 Payload::ElementSection(reader) => {
@@ -1253,6 +1281,20 @@ impl<'ctx, B: ArchBackend> FunctionCompiler<'ctx, B> {
         self.backend
             .emit_load_slot(&mut self.code, self.backend.tmp0(), input);
         self.backend
+            .emit_li(&mut self.code, self.backend.tmp2(), 32);
+        self.backend.emit_shl(
+            &mut self.code,
+            self.backend.tmp0(),
+            self.backend.tmp0(),
+            self.backend.tmp2(),
+        );
+        self.backend.emit_shr_u(
+            &mut self.code,
+            self.backend.tmp0(),
+            self.backend.tmp0(),
+            self.backend.tmp2(),
+        );
+        self.backend
             .emit_eqz(&mut self.code, self.backend.tmp0(), self.backend.tmp0());
         let result = self.value_stack.push();
         self.backend
@@ -1295,6 +1337,32 @@ impl<'ctx, B: ArchBackend> FunctionCompiler<'ctx, B> {
             .emit_load_slot(&mut self.code, self.backend.tmp0(), lhs);
         self.backend
             .emit_load_slot(&mut self.code, self.backend.tmp1(), rhs);
+        self.backend
+            .emit_li(&mut self.code, self.backend.tmp2(), 32);
+        self.backend.emit_shl(
+            &mut self.code,
+            self.backend.tmp0(),
+            self.backend.tmp0(),
+            self.backend.tmp2(),
+        );
+        self.backend.emit_shr_u(
+            &mut self.code,
+            self.backend.tmp0(),
+            self.backend.tmp0(),
+            self.backend.tmp2(),
+        );
+        self.backend.emit_shl(
+            &mut self.code,
+            self.backend.tmp1(),
+            self.backend.tmp1(),
+            self.backend.tmp2(),
+        );
+        self.backend.emit_shr_u(
+            &mut self.code,
+            self.backend.tmp1(),
+            self.backend.tmp1(),
+            self.backend.tmp2(),
+        );
         self.backend.emit_xor(
             &mut self.code,
             self.backend.tmp0(),
@@ -1316,6 +1384,32 @@ impl<'ctx, B: ArchBackend> FunctionCompiler<'ctx, B> {
             .emit_load_slot(&mut self.code, self.backend.tmp0(), lhs);
         self.backend
             .emit_load_slot(&mut self.code, self.backend.tmp1(), rhs);
+        self.backend
+            .emit_li(&mut self.code, self.backend.tmp2(), 32);
+        self.backend.emit_shl(
+            &mut self.code,
+            self.backend.tmp0(),
+            self.backend.tmp0(),
+            self.backend.tmp2(),
+        );
+        self.backend.emit_shr_u(
+            &mut self.code,
+            self.backend.tmp0(),
+            self.backend.tmp0(),
+            self.backend.tmp2(),
+        );
+        self.backend.emit_shl(
+            &mut self.code,
+            self.backend.tmp1(),
+            self.backend.tmp1(),
+            self.backend.tmp2(),
+        );
+        self.backend.emit_shr_u(
+            &mut self.code,
+            self.backend.tmp1(),
+            self.backend.tmp1(),
+            self.backend.tmp2(),
+        );
         self.backend.emit_xor(
             &mut self.code,
             self.backend.tmp0(),
@@ -2020,8 +2114,10 @@ impl<'ctx, B: ArchBackend> FunctionCompiler<'ctx, B> {
             .emit_store_slot(&mut self.code, helper_arg0, tmp0);
         self.backend
             .emit_store_slot(&mut self.code, helper_arg1, tmp1);
-        self.backend
-            .emit_call_host(&mut self.code, host_i64_store_wrapper as *const () as usize);
+        self.backend.emit_call_host(
+            &mut self.code,
+            host_i64_store32_wrapper as *const () as usize,
+        );
         Ok(())
     }
 
@@ -2426,6 +2522,20 @@ impl<'ctx, B: ArchBackend> FunctionCompiler<'ctx, B> {
             &mut self.code,
             host_call_indirect_wrapper as *const () as usize,
         );
+
+        self.backend.emit_call_host(
+            &mut self.code,
+            host_check_trap_wrapper as *const () as usize,
+        );
+        let trap_check_slot = self.helper_slot(HELPER_ARG1_SLOT);
+        self.backend
+            .emit_load_slot(&mut self.code, self.backend.tmp0(), trap_check_slot);
+        self.backend.emit_branch_not_zero(
+            &mut self.code,
+            self.backend.tmp0(),
+            self.function_epilogue_label,
+        );
+
         if func_type.results.len() == 1 {
             let result = self.value_stack.push();
             self.emit_call_wrapper_result(result);
@@ -3185,11 +3295,13 @@ fn convert_val_type(value: wasmparser::ValType) -> Result<ValType, CompileError>
 
 fn parse_const_expr_u32(expr: ConstExpr<'_>) -> Result<u32, CompileError> {
     let value = parse_global_init_expr(expr)?;
-    Ok(match value {
-        GlobalInitValue::I32(v) => v,
-        GlobalInitValue::I64(v) => v as u32,
-        GlobalInitValue::Global(_) => 0,
-    })
+    match value {
+        GlobalInitValue::I32(v) => Ok(v),
+        GlobalInitValue::I64(v) => Ok(v as u32),
+        GlobalInitValue::Global(_) => {
+            Err(CompileError::UnsupportedFeature("global.get in const expr"))
+        }
+    }
 }
 
 fn parse_global_init_expr(expr: ConstExpr<'_>) -> Result<GlobalInitValue, CompileError> {
@@ -3448,6 +3560,18 @@ unsafe extern "C" fn host_i64_store16_wrapper(
         let addr = *frame.add(HELPER_ARG0_SLOT as usize) as u32;
         let value = *frame.add(HELPER_ARG1_SLOT as usize);
         helper_i64_store16(ctx, addr, value);
+    }
+    0
+}
+
+unsafe extern "C" fn host_i64_store32_wrapper(
+    ctx: *mut VmContext,
+    frame: *mut RawValue,
+) -> RawValue {
+    unsafe {
+        let addr = *frame.add(HELPER_ARG0_SLOT as usize) as u32;
+        let value = *frame.add(HELPER_ARG1_SLOT as usize);
+        helper_i64_store32(ctx, addr, value);
     }
     0
 }
