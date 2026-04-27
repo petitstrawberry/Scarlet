@@ -27,6 +27,11 @@ pub struct CompiledModule {
     pub exports: Box<[ExportEntry]>,
     pub imported_funcs: Box<[ImportedFuncEntry]>,
     pub data_segments: Box<[DataSegment]>,
+    pub globals: Box<[GlobalEntry]>,
+    pub imported_global_count: u32,
+    pub table: Box<[u32]>,
+    /// Minimum memory pages declared by the wasm memory section.
+    pub min_memory_pages: u32,
 }
 
 pub struct ImportedFuncEntry {
@@ -38,6 +43,20 @@ pub struct ImportedFuncEntry {
 pub struct DataSegment {
     pub offset: u32,
     pub data: Vec<u8>,
+}
+
+pub struct GlobalEntry {
+    pub value: u64,
+    pub mutable: bool,
+}
+
+impl Clone for GlobalEntry {
+    fn clone(&self) -> Self {
+        Self {
+            value: self.value,
+            mutable: self.mutable,
+        }
+    }
 }
 
 impl Clone for DataSegment {
@@ -90,4 +109,8 @@ pub enum CompileError {
     InvalidWasm(&'static str),
     UnsupportedFeature(&'static str),
     CodeGen(&'static str),
+    FuncCompileError {
+        func_index: u32,
+        inner: &'static str,
+    },
 }

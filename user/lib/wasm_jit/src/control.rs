@@ -41,6 +41,7 @@ pub struct ControlFrame {
     pub branch_target: LabelId,
     pub end_label: LabelId,
     pub else_label: Option<LabelId>,
+    pub has_incoming_end: bool,
 }
 
 pub struct ControlStack {

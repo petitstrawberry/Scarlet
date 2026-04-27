@@ -4519,6 +4519,7 @@ name = "wasm_jit"
 version = "0.1.0"
 dependencies = [
  "jit-assembler",
+ "libm",
  "wasmparser",
 ]
 

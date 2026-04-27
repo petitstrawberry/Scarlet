@@ -93,6 +93,7 @@ impl WasiRuntime {
 
 static mut WASI_RUNTIME: *mut WasiRuntime = core::ptr::null_mut();
 static mut RANDOM_STATE: u64 = 0x1234_5678_9ABC_DEF0;
+static mut FAKE_TIME_NS: u64 = 1_700_000_000_000_000_000;
 
 unsafe extern "C" fn host_fd_write(fd: u32, data: *const u8, data_len: usize) -> i64 {
     let rt = wasi_runtime();
@@ -147,7 +148,8 @@ unsafe extern "C" fn host_fd_read(fd: u32, buf: *mut u8, buf_len: usize) -> i64 
 }
 
 unsafe extern "C" fn host_clock_time_get(_clock_id: u32, time: *mut u64) {
-    *time = 0;
+    *time = FAKE_TIME_NS;
+    FAKE_TIME_NS = FAKE_TIME_NS.saturating_add(1_000_000);
 }
 
 unsafe extern "C" fn host_random_get(buf: *mut u8, buf_len: usize) {
@@ -505,18 +507,20 @@ fn execute_wasm(wasm_bytes: &[u8]) -> Result<i32, std::string::String> {
         let module =
             engine::compile_module(wasm_bytes).map_err(|e| format!("compile error: {:?}", e))?;
 
-        let memory_pages = module
+        let data_pages = module
             .data_segments
             .iter()
             .map(|s| (s.offset as usize + s.data.len() + 65535) / 65536)
             .max()
-            .unwrap_or(1)
-            .max(1);
-        let mut memory = alloc::vec![0u8; memory_pages * 65536];
+            .unwrap_or(1);
+        let memory_pages = data_pages.max(module.min_memory_pages as usize);
+        let cap_pages = memory_pages.max(256);
+        let mut memory = alloc::vec![0u8; cap_pages * 65536];
         module.init_memory(&mut memory);
 
         let mut ctx = wasm_jit::runtime::VmContext::new(
             memory.as_mut_ptr(),
+            memory_pages * 65536,
             memory.len(),
             core::ptr::null(),
             0,
@@ -536,9 +540,33 @@ fn execute_wasm(wasm_bytes: &[u8]) -> Result<i32, std::string::String> {
         let imported_names_box = imported_names.into_boxed_slice();
         ctx.imported_names = imported_names_box.as_ptr();
         ctx.imported_count = imported_names_box.len();
+        core::mem::forget(imported_names_box);
+
+        let globals_box = module.globals.clone();
+        let table_box = module.table.clone();
+        wasm_jit::runtime::register_module_defaults(
+            core::ptr::null(),
+            0,
+            globals_box.as_ptr() as *mut _,
+            globals_box.len(),
+            module.imported_global_count as usize,
+            table_box.as_ptr(),
+            table_box.len(),
+        );
+        core::mem::forget(globals_box);
+        core::mem::forget(table_box);
 
         unsafe {
+            #[cfg(target_arch = "riscv64")]
             core::arch::asm!("fence.i");
+            #[cfg(target_arch = "aarch64")]
+            core::arch::asm!(
+                "dc cvau, {0}",
+                "ic ivau, {0}",
+                "dsb ish",
+                "isb",
+                in(reg) &&module as *const _ as u64,
+            );
             match engine::invoke_export(&module, &mut ctx, "_start", &[]) {
                 Ok(_) => Ok(0),
                 Err(trap) => {

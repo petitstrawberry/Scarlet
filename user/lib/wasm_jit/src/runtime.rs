@@ -1,6 +1,14 @@
-use crate::{CompiledFn, TrapCode};
+use crate::TrapCode;
 
 const MAX_CALL_DEPTH: usize = 256;
+
+static mut DEFAULT_FUNCTIONS: *const crate::FunctionEntry = core::ptr::null();
+static mut DEFAULT_FUNCTION_COUNT: usize = 0;
+static mut DEFAULT_GLOBALS: *mut crate::GlobalEntry = core::ptr::null_mut();
+static mut DEFAULT_GLOBAL_COUNT: usize = 0;
+static mut DEFAULT_IMPORTED_GLOBAL_COUNT: usize = 0;
+static mut DEFAULT_TABLE: *const u32 = core::ptr::null();
+static mut DEFAULT_TABLE_COUNT: usize = 0;
 
 pub struct ImportedFuncName {
     pub module: *const u8,
@@ -50,8 +58,14 @@ pub struct HostOps {
 pub struct VmContext {
     pub memory_base: *mut u8,
     pub memory_len: usize,
+    pub memory_cap: usize,
     pub functions: *const crate::FunctionEntry,
     pub function_count: usize,
+    pub globals: *mut crate::GlobalEntry,
+    pub global_count: usize,
+    pub imported_global_count: usize,
+    pub table: *const u32,
+    pub table_count: usize,
     pub trap: TrapCode,
     pub exit_code: u32,
     pub exited: bool,
@@ -65,14 +79,37 @@ impl VmContext {
     pub fn new(
         memory_base: *mut u8,
         memory_len: usize,
+        memory_cap: usize,
         functions: *const crate::FunctionEntry,
         function_count: usize,
     ) -> Self {
+        let functions = if functions.is_null() {
+            unsafe { DEFAULT_FUNCTIONS }
+        } else {
+            functions
+        };
+        let function_count = if function_count == 0 {
+            unsafe { DEFAULT_FUNCTION_COUNT }
+        } else {
+            function_count
+        };
+        let globals = unsafe { DEFAULT_GLOBALS };
+        let global_count = unsafe { DEFAULT_GLOBAL_COUNT };
+        let imported_global_count = unsafe { DEFAULT_IMPORTED_GLOBAL_COUNT };
+        let table = unsafe { DEFAULT_TABLE };
+        let table_count = unsafe { DEFAULT_TABLE_COUNT };
+
         Self {
             memory_base,
             memory_len,
+            memory_cap,
             functions,
             function_count,
+            globals,
+            global_count,
+            imported_global_count,
+            table,
+            table_count,
             trap: TrapCode::None,
             exit_code: 0,
             exited: false,
@@ -126,5 +163,25 @@ impl VmContext {
         if self.call_depth > 0 {
             self.call_depth -= 1;
         }
+    }
+}
+
+pub fn register_module_defaults(
+    functions: *const crate::FunctionEntry,
+    function_count: usize,
+    globals: *mut crate::GlobalEntry,
+    global_count: usize,
+    imported_global_count: usize,
+    table: *const u32,
+    table_count: usize,
+) {
+    unsafe {
+        DEFAULT_FUNCTIONS = functions;
+        DEFAULT_FUNCTION_COUNT = function_count;
+        DEFAULT_GLOBALS = globals;
+        DEFAULT_GLOBAL_COUNT = global_count;
+        DEFAULT_IMPORTED_GLOBAL_COUNT = imported_global_count;
+        DEFAULT_TABLE = table;
+        DEFAULT_TABLE_COUNT = table_count;
     }
 }

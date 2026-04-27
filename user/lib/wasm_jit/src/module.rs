@@ -1,4 +1,4 @@
-use alloc::{boxed::Box, string::String, vec::Vec};
+use alloc::{string::String, vec::Vec};
 
 pub struct ModuleInfo {
     pub type_section: Vec<FuncType>,

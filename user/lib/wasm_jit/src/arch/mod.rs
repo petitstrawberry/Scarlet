@@ -36,6 +36,41 @@ pub trait ArchBackend {
     fn emit_shr_s(&mut self, code: &mut CodeBuffer, dst: Self::Reg, lhs: Self::Reg, rhs: Self::Reg);
     fn emit_eqz(&mut self, code: &mut CodeBuffer, dst: Self::Reg, src: Self::Reg);
 
+    // Comparisons (result is 0 or 1)
+    fn emit_slt(&mut self, code: &mut CodeBuffer, dst: Self::Reg, lhs: Self::Reg, rhs: Self::Reg);
+    fn emit_sltu(&mut self, code: &mut CodeBuffer, dst: Self::Reg, lhs: Self::Reg, rhs: Self::Reg);
+    fn emit_snez(&mut self, code: &mut CodeBuffer, dst: Self::Reg, src: Self::Reg);
+
+    // Bit ops
+    fn emit_clz(&mut self, code: &mut CodeBuffer, dst: Self::Reg, src: Self::Reg);
+    fn emit_ctz(&mut self, code: &mut CodeBuffer, dst: Self::Reg, src: Self::Reg);
+    fn emit_rotl(&mut self, code: &mut CodeBuffer, dst: Self::Reg, lhs: Self::Reg, rhs: Self::Reg);
+
+    // Narrow loads from base+offset (sign/zero extended to register width)
+    fn emit_load8_u(&mut self, code: &mut CodeBuffer, dst: Self::Reg, base: Self::Reg, offset: i32);
+    fn emit_load8_s(&mut self, code: &mut CodeBuffer, dst: Self::Reg, base: Self::Reg, offset: i32);
+    fn emit_load16_u(
+        &mut self,
+        code: &mut CodeBuffer,
+        dst: Self::Reg,
+        base: Self::Reg,
+        offset: i32,
+    );
+
+    // Narrow stores
+    fn emit_store8(&mut self, code: &mut CodeBuffer, base: Self::Reg, offset: i32, src: Self::Reg);
+    fn emit_store16(&mut self, code: &mut CodeBuffer, base: Self::Reg, offset: i32, src: Self::Reg);
+
+    // Select: dst = (cond != 0) ? val_a : val_b
+    fn emit_select(
+        &mut self,
+        code: &mut CodeBuffer,
+        dst: Self::Reg,
+        val_a: Self::Reg,
+        val_b: Self::Reg,
+        cond: Self::Reg,
+    );
+
     fn emit_jump(&mut self, code: &mut CodeBuffer, label: LabelId);
     fn emit_branch_zero(&mut self, code: &mut CodeBuffer, reg: Self::Reg, label: LabelId);
     fn emit_branch_not_zero(&mut self, code: &mut CodeBuffer, reg: Self::Reg, label: LabelId);

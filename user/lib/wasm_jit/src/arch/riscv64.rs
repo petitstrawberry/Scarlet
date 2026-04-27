@@ -74,6 +74,85 @@ impl Riscv64Backend {
         self.tmp2()
     }
 
+    fn scratch_excluding3(&self, reg_a: Register, reg_b: Register, reg_c: Register) -> Register {
+        for reg in [self.tmp2(), self.tmp1(), self.tmp0()] {
+            if reg != reg_a && reg != reg_b && reg != reg_c {
+                return reg;
+            }
+        }
+        self.tmp2()
+    }
+
+    fn emit_raw(&self, code: &mut CodeBuffer, word: u32) {
+        code.emit_u32(word);
+    }
+
+    fn encode_i_type(opcode: u32, funct3: u32, rd: Register, rs1: Register, imm12: u32) -> u32 {
+        ((imm12 & 0xfff) << 20)
+            | (u32::from(rs1.value()) << 15)
+            | (funct3 << 12)
+            | (u32::from(rd.value()) << 7)
+            | opcode
+    }
+
+    fn encode_r_type(
+        opcode: u32,
+        funct3: u32,
+        funct7: u32,
+        rd: Register,
+        rs1: Register,
+        rs2: Register,
+    ) -> u32 {
+        (funct7 << 25)
+            | (u32::from(rs2.value()) << 20)
+            | (u32::from(rs1.value()) << 15)
+            | (funct3 << 12)
+            | (u32::from(rd.value()) << 7)
+            | opcode
+    }
+
+    fn emit_load_narrow(
+        &mut self,
+        code: &mut CodeBuffer,
+        base: Register,
+        offset: i32,
+        emit_small: impl FnOnce(&mut Riscv64InstructionBuilder, Register, Register, i16),
+        dst: Register,
+    ) {
+        if (-2048..=2047).contains(&offset) {
+            Self::emit_with_builder(code, |b| emit_small(b, dst, base, offset as i16));
+            return;
+        }
+
+        let scratch = self.scratch_excluding(dst, base);
+        self.emit_li(code, scratch, offset as i64);
+        Self::emit_with_builder(code, |b| {
+            b.add(scratch, base, scratch);
+            emit_small(b, dst, scratch, 0);
+        });
+    }
+
+    fn emit_store_narrow(
+        &mut self,
+        code: &mut CodeBuffer,
+        base: Register,
+        offset: i32,
+        src: Register,
+        emit_small: impl FnOnce(&mut Riscv64InstructionBuilder, Register, Register, i16),
+    ) {
+        if (-2048..=2047).contains(&offset) {
+            Self::emit_with_builder(code, |b| emit_small(b, base, src, offset as i16));
+            return;
+        }
+
+        let scratch = self.scratch_excluding(base, src);
+        self.emit_li(code, scratch, offset as i64);
+        Self::emit_with_builder(code, |b| {
+            b.add(scratch, base, scratch);
+            emit_small(b, scratch, src, 0);
+        });
+    }
+
     fn emit_addi_large(&mut self, code: &mut CodeBuffer, dst: Register, src: Register, imm: i32) {
         if let Ok(imm12) = i16::try_from(imm) {
             if (-2048..=2047).contains(&imm) {
@@ -334,6 +413,129 @@ impl ArchBackend for Riscv64Backend {
         });
     }
 
+    fn emit_slt(&mut self, code: &mut CodeBuffer, dst: Self::Reg, lhs: Self::Reg, rhs: Self::Reg) {
+        Self::emit_with_builder(code, |b| {
+            b.slt(dst, lhs, rhs);
+        });
+    }
+
+    fn emit_sltu(&mut self, code: &mut CodeBuffer, dst: Self::Reg, lhs: Self::Reg, rhs: Self::Reg) {
+        Self::emit_with_builder(code, |b| {
+            b.sltu(dst, lhs, rhs);
+        });
+    }
+
+    fn emit_snez(&mut self, code: &mut CodeBuffer, dst: Self::Reg, src: Self::Reg) {
+        Self::emit_with_builder(code, |b| {
+            b.sltu(dst, reg::ZERO, src);
+        });
+    }
+
+    fn emit_clz(&mut self, code: &mut CodeBuffer, dst: Self::Reg, src: Self::Reg) {
+        self.emit_raw(code, Self::encode_i_type(0x1b, 0b001, dst, src, 0x600));
+    }
+
+    fn emit_ctz(&mut self, code: &mut CodeBuffer, dst: Self::Reg, src: Self::Reg) {
+        self.emit_raw(code, Self::encode_i_type(0x1b, 0b001, dst, src, 0x601));
+    }
+
+    fn emit_rotl(&mut self, code: &mut CodeBuffer, dst: Self::Reg, lhs: Self::Reg, rhs: Self::Reg) {
+        self.emit_raw(
+            code,
+            Self::encode_r_type(0x3b, 0b001, 0b0110000, dst, lhs, rhs),
+        );
+    }
+
+    fn emit_load8_u(
+        &mut self,
+        code: &mut CodeBuffer,
+        dst: Self::Reg,
+        base: Self::Reg,
+        offset: i32,
+    ) {
+        self.emit_load_narrow(
+            code,
+            base,
+            offset,
+            |b, rd, rs1, imm| {
+                b.lbu(rd, rs1, imm);
+            },
+            dst,
+        );
+    }
+
+    fn emit_load8_s(
+        &mut self,
+        code: &mut CodeBuffer,
+        dst: Self::Reg,
+        base: Self::Reg,
+        offset: i32,
+    ) {
+        self.emit_load_narrow(
+            code,
+            base,
+            offset,
+            |b, rd, rs1, imm| {
+                b.lb(rd, rs1, imm);
+            },
+            dst,
+        );
+    }
+
+    fn emit_load16_u(
+        &mut self,
+        code: &mut CodeBuffer,
+        dst: Self::Reg,
+        base: Self::Reg,
+        offset: i32,
+    ) {
+        self.emit_load_narrow(
+            code,
+            base,
+            offset,
+            |b, rd, rs1, imm| {
+                b.lhu(rd, rs1, imm);
+            },
+            dst,
+        );
+    }
+
+    fn emit_store8(&mut self, code: &mut CodeBuffer, base: Self::Reg, offset: i32, src: Self::Reg) {
+        self.emit_store_narrow(code, base, offset, src, |b, rs1, rs2, imm| {
+            b.sb(rs1, rs2, imm);
+        });
+    }
+
+    fn emit_store16(
+        &mut self,
+        code: &mut CodeBuffer,
+        base: Self::Reg,
+        offset: i32,
+        src: Self::Reg,
+    ) {
+        self.emit_store_narrow(code, base, offset, src, |b, rs1, rs2, imm| {
+            b.sh(rs1, rs2, imm);
+        });
+    }
+
+    fn emit_select(
+        &mut self,
+        code: &mut CodeBuffer,
+        dst: Self::Reg,
+        val_a: Self::Reg,
+        val_b: Self::Reg,
+        cond: Self::Reg,
+    ) {
+        let mask = self.scratch_excluding3(dst, val_a, val_b);
+        Self::emit_with_builder(code, |b| {
+            b.xor(dst, val_a, val_b);
+            b.sltu(mask, reg::ZERO, cond);
+            b.sub(mask, reg::ZERO, mask);
+            b.and(dst, dst, mask);
+            b.xor(dst, dst, val_b);
+        });
+    }
+
     fn emit_jump(&mut self, code: &mut CodeBuffer, label: LabelId) {
         let at_offset = code.offset();
         Self::emit_with_builder(code, |b| {
@@ -349,11 +551,14 @@ impl ArchBackend for Riscv64Backend {
     fn emit_branch_zero(&mut self, code: &mut CodeBuffer, reg_to_test: Self::Reg, label: LabelId) {
         let at_offset = code.offset();
         Self::emit_with_builder(code, |b| {
-            b.beq(reg_to_test, reg::ZERO, 0);
+            b.bne(reg_to_test, reg::ZERO, 8);
+        });
+        Self::emit_with_builder(code, |b| {
+            b.jal(reg::ZERO, 0);
         });
         code.add_fixup(Fixup {
-            at_offset,
-            kind: BranchKind::ConditionalZero,
+            at_offset: at_offset + 4,
+            kind: BranchKind::Unconditional,
             target: label,
         });
     }
@@ -366,11 +571,14 @@ impl ArchBackend for Riscv64Backend {
     ) {
         let at_offset = code.offset();
         Self::emit_with_builder(code, |b| {
-            b.bne(reg_to_test, reg::ZERO, 0);
+            b.beq(reg_to_test, reg::ZERO, 8);
+        });
+        Self::emit_with_builder(code, |b| {
+            b.jal(reg::ZERO, 0);
         });
         code.add_fixup(Fixup {
-            at_offset,
-            kind: BranchKind::ConditionalNotZero,
+            at_offset: at_offset + 4,
+            kind: BranchKind::Unconditional,
             target: label,
         });
     }

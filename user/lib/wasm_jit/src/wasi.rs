@@ -545,11 +545,57 @@ unsafe fn wasi_path_unlink_file(_ctx: &mut VmContext, args: *const RawValue) -> 
 }
 
 unsafe fn wasi_poll_oneoff(ctx: &mut VmContext, args: *const RawValue) -> RawValue {
-    let _in_ptr = *args.add(0) as u32;
-    let _out_ptr = *args.add(1) as u32;
-    let _nsubscriptions = *args.add(2) as u32;
+    let in_ptr = *args.add(0) as u32;
+    let out_ptr = *args.add(1) as u32;
+    let nsubscriptions = *args.add(2) as u32;
     let nevents_ptr = *args.add(3) as u32;
-    write_u32_le(ctx, nevents_ptr, 0);
+
+    const SUBSCRIPTION_SIZE: u32 = 48;
+    const EVENT_SIZE: u32 = 32;
+
+    let in_bytes = nsubscriptions as u64 * SUBSCRIPTION_SIZE as u64;
+    let out_bytes = nsubscriptions as u64 * EVENT_SIZE as u64;
+
+    if !ctx.check_memory(in_ptr as u64, in_bytes) {
+        ctx.set_trap(crate::TrapCode::MemoryOutOfBounds);
+        return u32::MAX as RawValue;
+    }
+    if !ctx.check_memory(out_ptr as u64, out_bytes) {
+        ctx.set_trap(crate::TrapCode::MemoryOutOfBounds);
+        return u32::MAX as RawValue;
+    }
+    if !ctx.check_memory(nevents_ptr as u64, 4) {
+        ctx.set_trap(crate::TrapCode::MemoryOutOfBounds);
+        return u32::MAX as RawValue;
+    }
+
+    let mut nevents: u32 = 0;
+    for i in 0..nsubscriptions {
+        let sub_base = in_ptr + i * SUBSCRIPTION_SIZE;
+        let evt_base = out_ptr + i * EVENT_SIZE;
+
+        // Copy userdata (8 bytes) from subscription to event
+        let src = ctx.memory_base.add(sub_base as usize);
+        let dst = ctx.memory_base.add(evt_base as usize);
+        core::ptr::copy_nonoverlapping(src, dst, 8);
+
+        // Event: bytes 0..7 = userdata, byte 8..9 = error (0=none), byte 10 = type
+        // Set error = 0 (no error)
+        core::ptr::write_bytes(dst.add(8), 0, 2);
+
+        // Copy subscription type (byte 8 of subscription) to event type (byte 10)
+        let sub_type = *ctx.memory_base.add(sub_base as usize + 8);
+        *dst.add(10) = sub_type;
+
+        // Zero out rest of event
+        core::ptr::write_bytes(dst.add(11), 0, EVENT_SIZE as usize - 11);
+
+        // For clock type (0): write result (u16) at offset 12 = 0 (no error)
+        // For fd type: set to 0 (no error)
+        nevents += 1;
+    }
+
+    write_u32_le(ctx, nevents_ptr, nevents);
     ESUCCESS as RawValue
 }
 

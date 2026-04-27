@@ -5,4 +5,5 @@ edition = "2024"
 
 [dependencies]
 jit-assembler = { version = "0.3", default-features = false, features = ["riscv64", "aarch64"] }
+libm = "0.2"
 wasmparser = { version = "0.225", default-features = false }

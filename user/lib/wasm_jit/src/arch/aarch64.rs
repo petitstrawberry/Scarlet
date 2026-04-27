@@ -54,6 +54,108 @@ impl Aarch64Backend {
         code.emit_u32(word);
     }
 
+    fn scratch_excluding(&self, regs: &[Register]) -> Register {
+        for reg in [self.tmp2(), self.tmp1(), self.tmp0()] {
+            if !regs.contains(&reg) {
+                return reg;
+            }
+        }
+        self.tmp2()
+    }
+
+    fn encode_cmp_reg(rn: Register, rm: Register) -> u32 {
+        0xEB00001F | (u32::from(rm.value()) << 16) | (u32::from(rn.value()) << 5)
+    }
+
+    fn encode_cset(rd: Register, cond: u8) -> u32 {
+        0x9A9F07E0 | (u32::from(cond ^ 1) << 12) | u32::from(rd.value())
+    }
+
+    fn encode_csel(rd: Register, rn: Register, rm: Register, cond: u8) -> u32 {
+        0x9A800000
+            | (u32::from(rm.value()) << 16)
+            | (u32::from(cond) << 12)
+            | (u32::from(rn.value()) << 5)
+            | u32::from(rd.value())
+    }
+
+    fn encode_clz(rd: Register, rn: Register) -> u32 {
+        0xDAC01000 | (u32::from(rn.value()) << 5) | u32::from(rd.value())
+    }
+
+    fn encode_rbit(rd: Register, rn: Register) -> u32 {
+        0xDAC00000 | (u32::from(rn.value()) << 5) | u32::from(rd.value())
+    }
+
+    fn encode_rorv(rd: Register, rn: Register, rm: Register) -> u32 {
+        0x9AC02C00
+            | (u32::from(rm.value()) << 16)
+            | (u32::from(rn.value()) << 5)
+            | u32::from(rd.value())
+    }
+
+    fn encode_ldrb(rt: Register, rn: Register, imm12: u16) -> u32 {
+        0x39400000 | (u32::from(imm12) << 10) | (u32::from(rn.value()) << 5) | u32::from(rt.value())
+    }
+
+    fn encode_ldrsb(rt: Register, rn: Register, imm12: u16) -> u32 {
+        0x39800000 | (u32::from(imm12) << 10) | (u32::from(rn.value()) << 5) | u32::from(rt.value())
+    }
+
+    fn encode_ldrh(rt: Register, rn: Register, imm12: u16) -> u32 {
+        0x79400000 | (u32::from(imm12) << 10) | (u32::from(rn.value()) << 5) | u32::from(rt.value())
+    }
+
+    fn encode_strb(rt: Register, rn: Register, imm12: u16) -> u32 {
+        0x39000000 | (u32::from(imm12) << 10) | (u32::from(rn.value()) << 5) | u32::from(rt.value())
+    }
+
+    fn encode_strh(rt: Register, rn: Register, imm12: u16) -> u32 {
+        0x79000000 | (u32::from(imm12) << 10) | (u32::from(rn.value()) << 5) | u32::from(rt.value())
+    }
+
+    fn emit_load_narrow(
+        &self,
+        code: &mut CodeBuffer,
+        dst: Register,
+        base: Register,
+        offset: i32,
+        encode: impl FnOnce(Register, Register, u16) -> u32,
+    ) {
+        if offset >= 0 && offset < 4096 {
+            self.emit_raw(code, encode(dst, base, offset as u16));
+            return;
+        }
+
+        let scratch = self.scratch_excluding(&[dst, base]);
+        self.emit_mov_imm(code, scratch, offset as u64);
+        self.emit_builder(code, |builder| {
+            builder.add(scratch, base, scratch);
+        });
+        self.emit_raw(code, encode(dst, scratch, 0));
+    }
+
+    fn emit_store_narrow(
+        &self,
+        code: &mut CodeBuffer,
+        base: Register,
+        offset: i32,
+        src: Register,
+        encode: impl FnOnce(Register, Register, u16) -> u32,
+    ) {
+        if offset >= 0 && offset < 4096 {
+            self.emit_raw(code, encode(src, base, offset as u16));
+            return;
+        }
+
+        let scratch = self.scratch_excluding(&[base, src]);
+        self.emit_mov_imm(code, scratch, offset as u64);
+        self.emit_builder(code, |builder| {
+            builder.add(scratch, base, scratch);
+        });
+        self.emit_raw(code, encode(src, scratch, 0));
+    }
+
     fn emit_mov_imm(&self, code: &mut CodeBuffer, dst: Register, imm: u64) {
         self.emit_builder(code, |builder| {
             builder.mov_imm(dst, imm);
@@ -418,6 +520,95 @@ impl ArchBackend for Aarch64Backend {
         self.emit_builder(code, |builder| {
             builder.xor(dst, dst, shift_reg);
         });
+    }
+
+    fn emit_slt(&mut self, code: &mut CodeBuffer, dst: Self::Reg, lhs: Self::Reg, rhs: Self::Reg) {
+        self.emit_raw(code, Self::encode_cmp_reg(lhs, rhs));
+        self.emit_raw(code, Self::encode_cset(dst, 0b1011));
+    }
+
+    fn emit_sltu(&mut self, code: &mut CodeBuffer, dst: Self::Reg, lhs: Self::Reg, rhs: Self::Reg) {
+        self.emit_raw(code, Self::encode_cmp_reg(lhs, rhs));
+        self.emit_raw(code, Self::encode_cset(dst, 0b0011));
+    }
+
+    fn emit_snez(&mut self, code: &mut CodeBuffer, dst: Self::Reg, src: Self::Reg) {
+        self.emit_raw(code, Self::encode_cmp_reg(src, reg::XZR));
+        self.emit_raw(code, Self::encode_cset(dst, 0b0001));
+    }
+
+    fn emit_clz(&mut self, code: &mut CodeBuffer, dst: Self::Reg, src: Self::Reg) {
+        self.emit_raw(code, Self::encode_clz(dst, src));
+    }
+
+    fn emit_ctz(&mut self, code: &mut CodeBuffer, dst: Self::Reg, src: Self::Reg) {
+        self.emit_raw(code, Self::encode_rbit(dst, src));
+        self.emit_raw(code, Self::encode_clz(dst, dst));
+    }
+
+    fn emit_rotl(&mut self, code: &mut CodeBuffer, dst: Self::Reg, lhs: Self::Reg, rhs: Self::Reg) {
+        let tmp = self.scratch_excluding(&[dst, lhs, rhs]);
+        self.emit_mov_imm(code, tmp, 32);
+        self.emit_builder(code, |builder| {
+            builder.sub(tmp, tmp, rhs);
+        });
+        self.emit_raw(code, Self::encode_rorv(dst, lhs, tmp));
+    }
+
+    fn emit_load8_u(
+        &mut self,
+        code: &mut CodeBuffer,
+        dst: Self::Reg,
+        base: Self::Reg,
+        offset: i32,
+    ) {
+        self.emit_load_narrow(code, dst, base, offset, Self::encode_ldrb);
+    }
+
+    fn emit_load8_s(
+        &mut self,
+        code: &mut CodeBuffer,
+        dst: Self::Reg,
+        base: Self::Reg,
+        offset: i32,
+    ) {
+        self.emit_load_narrow(code, dst, base, offset, Self::encode_ldrsb);
+    }
+
+    fn emit_load16_u(
+        &mut self,
+        code: &mut CodeBuffer,
+        dst: Self::Reg,
+        base: Self::Reg,
+        offset: i32,
+    ) {
+        self.emit_load_narrow(code, dst, base, offset, Self::encode_ldrh);
+    }
+
+    fn emit_store8(&mut self, code: &mut CodeBuffer, base: Self::Reg, offset: i32, src: Self::Reg) {
+        self.emit_store_narrow(code, base, offset, src, Self::encode_strb);
+    }
+
+    fn emit_store16(
+        &mut self,
+        code: &mut CodeBuffer,
+        base: Self::Reg,
+        offset: i32,
+        src: Self::Reg,
+    ) {
+        self.emit_store_narrow(code, base, offset, src, Self::encode_strh);
+    }
+
+    fn emit_select(
+        &mut self,
+        code: &mut CodeBuffer,
+        dst: Self::Reg,
+        val_a: Self::Reg,
+        val_b: Self::Reg,
+        cond: Self::Reg,
+    ) {
+        self.emit_raw(code, Self::encode_cmp_reg(cond, reg::XZR));
+        self.emit_raw(code, Self::encode_csel(dst, val_a, val_b, 0b0001));
     }
 
     fn emit_jump(&mut self, code: &mut CodeBuffer, label: LabelId) {

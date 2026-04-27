@@ -15,10 +15,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "563f1984653575362f2665a4b1803164a9183f0dff27ddea1dba2fcae2ee3890"
 
 [[package]]
+name = "libm"
+version = "0.2.16"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b6d2cec3eae94f9f509c767b45932f1ada8350c4bdb85af2fcab4a3c14807981"
+
+[[package]]
 name = "wasm_jit"
 version = "0.1.0"
 dependencies = [
  "jit-assembler",
+ "libm",
  "wasmparser",
 ]
 
