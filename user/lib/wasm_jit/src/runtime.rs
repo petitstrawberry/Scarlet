@@ -4,14 +4,25 @@ const MAX_CALL_DEPTH: usize = 256;
 
 pub type HostWriteFn = unsafe extern "C" fn(*const u8, usize);
 
+pub struct ImportedFuncName {
+    pub module: *const u8,
+    pub module_len: usize,
+    pub name: *const u8,
+    pub name_len: usize,
+}
+
 pub struct VmContext {
     pub memory_base: *mut u8,
     pub memory_len: usize,
     pub functions: *const crate::FunctionEntry,
     pub function_count: usize,
     pub trap: TrapCode,
+    pub exit_code: u32,
+    pub exited: bool,
     pub call_depth: usize,
     pub host_write: Option<HostWriteFn>,
+    pub imported_names: *const ImportedFuncName,
+    pub imported_count: usize,
 }
 
 impl VmContext {
@@ -27,8 +38,30 @@ impl VmContext {
             functions,
             function_count,
             trap: TrapCode::None,
+            exit_code: 0,
+            exited: false,
             call_depth: 0,
             host_write: None,
+            imported_names: core::ptr::null(),
+            imported_count: 0,
+        }
+    }
+
+    pub fn imported_func_name(&self, index: u32) -> Option<(&str, &str)> {
+        if index as usize >= self.imported_count {
+            return None;
+        }
+        unsafe {
+            let entry = &*self.imported_names.add(index as usize);
+            let module = core::str::from_utf8_unchecked(core::slice::from_raw_parts(
+                entry.module,
+                entry.module_len,
+            ));
+            let name = core::str::from_utf8_unchecked(core::slice::from_raw_parts(
+                entry.name,
+                entry.name_len,
+            ));
+            Some((module, name))
         }
     }
 

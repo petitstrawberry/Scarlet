@@ -82,6 +82,7 @@ pub enum TrapCode {
     Unreachable,
     BadCall,
     StackOverflow,
+    ProcExit,
 }
 
 #[derive(Debug)]

@@ -1001,6 +1001,11 @@ impl<'ctx, B: ArchBackend> FunctionCompiler<'ctx, B> {
         Ok(())
     }
 
+    fn visit_drop_impl(&mut self) -> Result<(), CompileError> {
+        self.value_stack.pop();
+        Ok(())
+    }
+
     fn visit_call_impl(&mut self, function_index: u32) -> Result<(), CompileError> {
         let type_index = *self
             .all_func_type_indices
@@ -1239,6 +1244,11 @@ macro_rules! function_compiler_visit_one {
     (@$proposal:ident $op:ident { function_index: $argty:ty } => visit_call ($($ann:tt)*)) => {
         fn visit_call(&mut self, function_index: $argty) -> Self::Output {
             self.visit_call_impl(function_index)
+        }
+    };
+    (@$proposal:ident Drop => visit_drop ($($ann:tt)*)) => {
+        fn visit_drop(&mut self) -> Self::Output {
+            self.visit_drop_impl()
         }
     };
     (@$proposal:ident $op:ident { $($arg:ident: $argty:ty),* } => $visit:ident ($($ann:tt)*)) => {

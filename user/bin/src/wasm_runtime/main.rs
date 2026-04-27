@@ -4,7 +4,7 @@
 extern crate alloc;
 extern crate scarlet_std as std;
 
-use std::{format, print, println, vec::Vec};
+use std::{format, println, vec::Vec};
 
 const WASM_MAGIC: [u8; 4] = [0x00, 0x61, 0x73, 0x6D];
 
@@ -84,23 +84,8 @@ fn execute_wasm(wasm_bytes: &[u8]) -> Result<i32, std::string::String> {
     }
     engine::set_exec_allocator(scarlet_exec_alloc);
 
-    println!("wasm-runtime: compiling {} bytes...", wasm_bytes.len());
     let module =
         engine::compile_module(wasm_bytes).map_err(|e| format!("compile error: {:?}", e))?;
-    println!(
-        "wasm-runtime: compile done, exports={}",
-        module.exports.len()
-    );
-    println!(
-        "wasm-runtime: code slab {} bytes at {:p}",
-        module.code.len, module.code.ptr
-    );
-    for i in 0..core::cmp::min(module.code.len, 64) {
-        unsafe {
-            print!("{:02x} ", *module.code.ptr.add(i));
-        }
-    }
-    println!();
 
     let memory_pages = module
         .data_segments
@@ -111,24 +96,37 @@ fn execute_wasm(wasm_bytes: &[u8]) -> Result<i32, std::string::String> {
         .max(1);
     let mut memory = alloc::vec![0u8; memory_pages * 65536];
     module.init_memory(&mut memory);
-    println!(
-        "wasm-runtime: memory {} pages, {} data segments",
-        memory_pages,
-        module.data_segments.len()
-    );
+
     let mut ctx =
         wasm_jit::runtime::VmContext::new(memory.as_mut_ptr(), memory.len(), core::ptr::null(), 0);
     ctx.host_write = Some(host_write_fn);
 
-    println!("wasm-runtime: invoking _start...");
+    let imported_names: alloc::vec::Vec<wasm_jit::runtime::ImportedFuncName> = module
+        .imported_funcs
+        .iter()
+        .map(|f| wasm_jit::runtime::ImportedFuncName {
+            module: f.module.as_ptr(),
+            module_len: f.module.len(),
+            name: f.name.as_ptr(),
+            name_len: f.name.len(),
+        })
+        .collect();
+    let imported_names_box = imported_names.into_boxed_slice();
+    ctx.imported_names = imported_names_box.as_ptr();
+    ctx.imported_count = imported_names_box.len();
+    core::mem::forget(imported_names_box);
+
     unsafe {
         core::arch::asm!("fence.i");
         match engine::invoke_export(&module, &mut ctx, "_start", &[]) {
-            Ok(_) => {
-                println!("wasm-runtime: _start returned");
-                Ok(0)
+            Ok(_) => Ok(0),
+            Err(trap) => {
+                if ctx.exited {
+                    Ok(ctx.exit_code as i32)
+                } else {
+                    Err(format!("trap: {:?}", trap))
+                }
             }
-            Err(trap) => Err(format!("trap: {:?}", trap)),
         }
     }
 }
