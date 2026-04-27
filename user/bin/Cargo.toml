@@ -182,6 +182,10 @@ path = "src/lsm_unload.rs"
 name = "lsm_list"
 path = "src/lsm_list.rs"
 
+[[bin]]
+name = "wasm-runtime"
+path = "src/wasm_runtime/main.rs"
+
 [dependencies]
 scarlet_std = { path = "../lib/std", features = ["alloc_debug"] }
 scpm = { path = "../lib/scpm" }
@@ -203,6 +207,7 @@ slint = { version = "1.14", default-features = false, features = [
     "libm",
     "compat-1-2"
 ] }
+wasm_jit = { path = "../lib/wasm_jit" }
 
 [build-dependencies]
 slint-build = "1.14"

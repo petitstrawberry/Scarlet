@@ -7,11 +7,11 @@ skip_core_tasks = true
 
 [tasks.fmt]
 description = "Format all user library code"
-dependencies = ["fmt-std", "fmt-framebuffer", "fmt-sws-protocol", "fmt-scarlet-desktop-config", "fmt-scpm"]
+dependencies = ["fmt-std", "fmt-framebuffer", "fmt-sws-protocol", "fmt-scarlet-desktop-config", "fmt-scpm", "fmt-wasm-jit"]
 
 [tasks.fmt-check]
 description = "Check formatting for all user library code"
-dependencies = ["fmt-std-check", "fmt-framebuffer-check", "fmt-sws-protocol-check", "fmt-scpm-check"]
+dependencies = ["fmt-std-check", "fmt-framebuffer-check", "fmt-sws-protocol-check", "fmt-scpm-check", "fmt-wasm-jit-check"]
 
 [tasks.fmt-std-check]
 description = "Check formatting for user library std code"
@@ -67,6 +67,18 @@ cwd = "scpm"
 command = "cargo"
 args = ["fmt", "--", "--check"]
 
+[tasks.fmt-wasm-jit]
+description = "Format user library wasm_jit code"
+cwd = "wasm_jit"
+command = "cargo"
+args = ["fmt"]
+
+[tasks.fmt-wasm-jit-check]
+description = "Check formatting for user library wasm_jit code"
+cwd = "wasm_jit"
+command = "cargo"
+args = ["fmt", "--", "--check"]
+
 [tasks.build-userlib]
 description = "Build all user libraries (default: debug)"
 dependencies = ["build-userlib-debug"]
@@ -78,7 +90,8 @@ script = [
     "cd ../framebuffer && cargo build --target ../../targets/riscv64gc-unknown-scarlet-elf.json",
     "cd ../sws_protocol && cargo build --target ../../targets/riscv64gc-unknown-scarlet-elf.json",
     "cd ../scarlet-desktop-config && cargo build --target ../../targets/riscv64gc-unknown-scarlet-elf.json",
-    "cd ../scpm && cargo build --target ../../targets/riscv64gc-unknown-scarlet-elf.json"
+    "cd ../scpm && cargo build --target ../../targets/riscv64gc-unknown-scarlet-elf.json",
+    "cd ../wasm_jit && cargo build --target ../../targets/riscv64gc-unknown-scarlet-elf.json"
 ]
 
 [tasks.build-userlib-release]
@@ -88,7 +101,8 @@ script = [
     "cd ../framebuffer && cargo build --release --target ../../targets/riscv64gc-unknown-scarlet-elf.json",
     "cd ../sws_protocol && cargo build --release --target ../../targets/riscv64gc-unknown-scarlet-elf.json",
     "cd ../scarlet-desktop-config && cargo build --release --target ../../targets/riscv64gc-unknown-scarlet-elf.json",
-    "cd ../scpm && cargo build --release --target ../../targets/riscv64gc-unknown-scarlet-elf.json"
+    "cd ../scpm && cargo build --release --target ../../targets/riscv64gc-unknown-scarlet-elf.json",
+    "cd ../wasm_jit && cargo build --release --target ../../targets/riscv64gc-unknown-scarlet-elf.json"
 ]
 
 [tasks.build-userlib-debug-aarch64]
@@ -98,7 +112,8 @@ script = [
     "cd ../framebuffer && cargo build --target ../../targets/aarch64-unknown-scarlet-elf.json",
     "cd ../sws_protocol && cargo build --target ../../targets/aarch64-unknown-scarlet-elf.json",
     "cd ../scarlet-desktop-config && cargo build --target ../../targets/aarch64-unknown-scarlet-elf.json",
-    "cd ../scpm && cargo build --target ../../targets/aarch64-unknown-scarlet-elf.json"
+    "cd ../scpm && cargo build --target ../../targets/aarch64-unknown-scarlet-elf.json",
+    "cd ../wasm_jit && cargo build --target ../../targets/aarch64-unknown-scarlet-elf.json"
 ]
 
 [tasks.build-userlib-release-aarch64]
@@ -108,7 +123,8 @@ script = [
     "cd ../framebuffer && cargo build --release --target ../../targets/aarch64-unknown-scarlet-elf.json",
     "cd ../sws_protocol && cargo build --release --target ../../targets/aarch64-unknown-scarlet-elf.json",
     "cd ../scarlet-desktop-config && cargo build --release --target ../../targets/aarch64-unknown-scarlet-elf.json",
-    "cd ../scpm && cargo build --release --target ../../targets/aarch64-unknown-scarlet-elf.json"
+    "cd ../scpm && cargo build --release --target ../../targets/aarch64-unknown-scarlet-elf.json",
+    "cd ../wasm_jit && cargo build --release --target ../../targets/aarch64-unknown-scarlet-elf.json"
 ]
 
 [tasks.clean]
@@ -118,7 +134,8 @@ script = [
     "cd ../framebuffer && cargo clean",
     "cd ../sws_protocol && cargo clean",
     "cd ../scarlet-desktop-config && cargo clean",
-    "cd ../scpm && cargo clean"
+    "cd ../scpm && cargo clean",
+    "cd ../wasm_jit && cargo clean"
 ]
 
 [tasks.test]

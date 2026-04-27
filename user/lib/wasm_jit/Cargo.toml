@@ -1,0 +1,8 @@
+[package]
+name = "wasm_jit"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+jit-assembler = { version = "0.3", default-features = false, features = ["riscv64", "aarch64"] }
+wasmparser = { version = "0.225", default-features = false }

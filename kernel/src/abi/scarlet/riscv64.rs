@@ -700,51 +700,10 @@ impl AbiModule for ScarletAbi {
 
     fn get_runtime_config(
         &self,
-        file_object: &crate::object::KernelObject,
-        file_path: &str,
+        _file_object: &crate::object::KernelObject,
+        _file_path: &str,
     ) -> Option<crate::abi::RuntimeConfig> {
-        // Example: Delegate WebAssembly binaries to a Scarlet-native Wasm runtime
-        // This demonstrates how to configure runtime delegation
-
-        // Check for Wasm magic bytes (0x00 0x61 0x73 0x6D) or .wasm extension
-        let is_wasm = if let Some(file_obj) = file_object.as_file() {
-            let mut magic_buffer = [0u8; 4];
-            // Save current position to restore later
-            let original_pos = file_obj.seek(SeekFrom::Current(0)).ok();
-
-            // Check magic bytes
-            let has_wasm_magic = if file_obj.seek(SeekFrom::Start(0)).is_ok() {
-                match file_obj.read(&mut magic_buffer) {
-                    Ok(bytes_read) if bytes_read >= 4 => {
-                        magic_buffer == [0x00, 0x61, 0x73, 0x6D] // Wasm magic "\0asm"
-                    }
-                    _ => false,
-                }
-            } else {
-                false
-            };
-
-            // Restore original file position
-            if let Some(pos) = original_pos {
-                let _ = file_obj.seek(SeekFrom::Start(pos));
-            }
-
-            has_wasm_magic
-        } else {
-            false
-        } || file_path.ends_with(".wasm");
-
-        if is_wasm {
-            // Delegate to Scarlet-native Wasm runtime
-            Some(crate::abi::RuntimeConfig {
-                runtime_path: "/system/scarlet/bin/wasm-runtime".to_string(),
-                runtime_abi: None, // Auto-detect (will be Scarlet native)
-                runtime_args: alloc::vec!["--wasm".to_string()],
-            })
-        } else {
-            // Not a Wasm binary, execute directly (or return None for unknown formats)
-            None
-        }
+        None
     }
 
     fn execute_binary(
