@@ -955,7 +955,8 @@ fn parse_dylib_dependencies(
             if cmdsize < size_of::<DylibCommand>() {
                 return Err("Truncated LC_LOAD_DYLIB command");
             }
-            let dylib_cmd = read_struct::<DylibCommand>(&command_bytes[..size_of::<DylibCommand>()])?;
+            let dylib_cmd =
+                read_struct::<DylibCommand>(&command_bytes[..size_of::<DylibCommand>()])?;
             let name_offset = dylib_cmd.name_offset as usize;
             if name_offset >= cmdsize {
                 return Err("LC_LOAD_DYLIB name offset out of bounds");
@@ -989,7 +990,7 @@ fn resolve_imports(
                 .get(ord as usize)
                 .ok_or("Chained import dylib ordinal out of range")?,
             BIND_SPECIAL_DYLIB_MAIN_EXECUTABLE => {
-                return Err("Main executable imports are not supported in chained fixups")
+                return Err("Main executable imports are not supported in chained fixups");
             }
             BIND_SPECIAL_DYLIB_FLAT_LOOKUP | BIND_SPECIAL_DYLIB_WEAK_LOOKUP => {
                 if import.weak_import {
@@ -1119,18 +1120,17 @@ fn disable_chained_starts(fixup_data: &mut [u8]) {
     if fixup_data.len() < size_of::<DyldChainedFixupsHeader>() {
         return;
     }
-    let header = read_struct::<DyldChainedFixupsHeader>(
-        &fixup_data[..size_of::<DyldChainedFixupsHeader>()],
-    )
-    .unwrap_or_else(|_| DyldChainedFixupsHeader {
-        fixups_version: 0,
-        starts_offset: 0,
-        imports_offset: 0,
-        symbols_offset: 0,
-        imports_count: 0,
-        imports_format: 0,
-        symbols_format: 0,
-    });
+    let header =
+        read_struct::<DyldChainedFixupsHeader>(&fixup_data[..size_of::<DyldChainedFixupsHeader>()])
+            .unwrap_or_else(|_| DyldChainedFixupsHeader {
+                fixups_version: 0,
+                starts_offset: 0,
+                imports_offset: 0,
+                symbols_offset: 0,
+                imports_count: 0,
+                imports_format: 0,
+                symbols_format: 0,
+            });
     let starts_base = header.starts_offset as usize;
     if starts_base + 4 > fixup_data.len() {
         return;
@@ -1157,7 +1157,8 @@ fn disable_chained_starts(fixup_data: &mut [u8]) {
         if abs_offset + 22 > fixup_data.len() {
             break;
         }
-        let page_count = u16::from_le_bytes([fixup_data[abs_offset + 20], fixup_data[abs_offset + 21]]) as usize;
+        let page_count =
+            u16::from_le_bytes([fixup_data[abs_offset + 20], fixup_data[abs_offset + 21]]) as usize;
         for page_idx in 0..page_count {
             let ps_pos = abs_offset + 22 + page_idx * 2;
             if ps_pos + 2 > fixup_data.len() {
@@ -1437,7 +1438,10 @@ fn parse_v5_slide_infos(
         let mut header_read = 0usize;
         while header_read < slide_header.len() {
             let n = file
-                .read_at((si_off + header_read) as u64, &mut slide_header[header_read..])
+                .read_at(
+                    (si_off + header_read) as u64,
+                    &mut slide_header[header_read..],
+                )
                 .unwrap_or(0);
             if n == 0 {
                 break;
@@ -1512,9 +1516,15 @@ fn parse_v5_slide_infos(
     Ok(infos)
 }
 
-fn parse_slide_mappings_from_header(header: &[u8]) -> Result<Vec<CacheMappingSlideInfo>, &'static str> {
-    let mapping_slide_offset = read_u32(&header[CACHE_HEADER_MAPPING_WITH_SLIDE_OFFSET..CACHE_HEADER_MAPPING_WITH_SLIDE_OFFSET + 4]) as usize;
-    let mapping_slide_count = read_u32(&header[CACHE_HEADER_MAPPING_WITH_SLIDE_COUNT..CACHE_HEADER_MAPPING_WITH_SLIDE_COUNT + 4]) as usize;
+fn parse_slide_mappings_from_header(
+    header: &[u8],
+) -> Result<Vec<CacheMappingSlideInfo>, &'static str> {
+    let mapping_slide_offset = read_u32(
+        &header[CACHE_HEADER_MAPPING_WITH_SLIDE_OFFSET..CACHE_HEADER_MAPPING_WITH_SLIDE_OFFSET + 4],
+    ) as usize;
+    let mapping_slide_count = read_u32(
+        &header[CACHE_HEADER_MAPPING_WITH_SLIDE_COUNT..CACHE_HEADER_MAPPING_WITH_SLIDE_COUNT + 4],
+    ) as usize;
     let count = mapping_slide_count.min(32);
     if count == 0 {
         return Ok(Vec::new());
@@ -1620,7 +1630,10 @@ impl DarwinSharedCache {
         Ok(read_null_terminated_bytes(&buf[..read_len])?.to_string())
     }
 
-    fn find_dylib_image(&self, install_name: &str) -> Result<Option<CacheImageLocation>, &'static str> {
+    fn find_dylib_image(
+        &self,
+        install_name: &str,
+    ) -> Result<Option<CacheImageLocation>, &'static str> {
         for image in self.cache_image_infos()? {
             let path = self.read_path_at(image.path_file_offset)?;
             if path != install_name {
@@ -1657,7 +1670,9 @@ impl DarwinSharedCache {
             .mappings
             .iter()
             .take(self.mapping_count)
-            .any(|mapping| vmaddr >= mapping.address && vmaddr < mapping.address.saturating_add(mapping.size))
+            .any(|mapping| {
+                vmaddr >= mapping.address && vmaddr < mapping.address.saturating_add(mapping.size)
+            })
         {
             return Some(self.file.clone());
         }
@@ -1674,7 +1689,9 @@ impl DarwinSharedCache {
 
         for sub_cache in &self.sub_caches {
             for mapping in &sub_cache.mappings {
-                if vmaddr >= mapping.address && vmaddr < mapping.address.saturating_add(mapping.size) {
+                if vmaddr >= mapping.address
+                    && vmaddr < mapping.address.saturating_add(mapping.size)
+                {
                     return Some(mapping.file_offset + (vmaddr - mapping.address));
                 }
             }
@@ -1730,18 +1747,22 @@ impl DarwinSharedCache {
                     if cmdsize < size_of::<LinkEditDataCommand>() {
                         return Err("Truncated LC_DYLD_EXPORTS_TRIE command");
                     }
-                    let trie_cmd =
-                        read_struct::<LinkEditDataCommand>(&command_bytes[..size_of::<LinkEditDataCommand>()])?;
+                    let trie_cmd = read_struct::<LinkEditDataCommand>(
+                        &command_bytes[..size_of::<LinkEditDataCommand>()],
+                    )?;
                     export_trie = Some((trie_cmd.dataoff as u64, trie_cmd.datasize as u64));
                 }
                 LC_ID_DYLIB => {
                     if cmdsize < size_of::<DylibCommand>() {
                         return Err("Truncated LC_ID_DYLIB command");
                     }
-                    let dylib_cmd = read_struct::<DylibCommand>(&command_bytes[..size_of::<DylibCommand>()])?;
+                    let dylib_cmd =
+                        read_struct::<DylibCommand>(&command_bytes[..size_of::<DylibCommand>()])?;
                     let name_offset = dylib_cmd.name_offset as usize;
                     if name_offset < cmdsize {
-                        id_name = Some(read_null_terminated_bytes(&command_bytes[name_offset..])?.to_string());
+                        id_name = Some(
+                            read_null_terminated_bytes(&command_bytes[name_offset..])?.to_string(),
+                        );
                     }
                 }
                 _ => {}
@@ -1760,7 +1781,11 @@ impl DarwinSharedCache {
         };
         let trie_size = usize::try_from(trie_size).map_err(|_| "Export trie size out of range")?;
         let mut trie_data = vec![0u8; trie_size];
-        read_exact_at(image.file.as_ref(), image.mach_offset + trie_off, &mut trie_data)?;
+        read_exact_at(
+            image.file.as_ref(),
+            image.mach_offset + trie_off,
+            &mut trie_data,
+        )?;
 
         let export = match walk_export_trie(&trie_data, symbol) {
             Some(export) => export,
@@ -1813,7 +1838,8 @@ impl DarwinSharedCache {
 
         crate::println!(
             "[darwin] DynamicRegion written at cache+{:#x} (page {})",
-            offset, page_index
+            offset,
+            page_index
         );
     }
 
@@ -1881,16 +1907,10 @@ impl DarwinSharedCache {
         None
     }
 
-    fn apply_slide_fixups_for_page(
-        &self,
-        slide_base_vaddr: usize,
-        kva: usize,
-        buf_size: usize,
-    ) {
+    fn apply_slide_fixups_for_page(&self, slide_base_vaddr: usize, kva: usize, buf_size: usize) {
         for si in &self.slide_infos {
             let sps = si.page_size as usize;
-            let mapping_start_slide =
-                (si.mapping_address as usize - self.cache_start) / sps;
+            let mapping_start_slide = (si.mapping_address as usize - self.cache_start) / sps;
             let mapping_slide_count = si.mapping_size / sps;
 
             let slide_idx = (slide_base_vaddr - self.cache_start) / sps;
@@ -1913,7 +1933,11 @@ impl DarwinSharedCache {
 
             crate::println!(
                 "[darwin] slide fixup: slide_vaddr={:#x} page_start={:#x} mapping={:#x} value_add={:#x} sps={:#x}",
-                slide_base_vaddr, page_start, si.mapping_address, si.value_add, sps
+                slide_base_vaddr,
+                page_start,
+                si.mapping_address,
+                si.value_add,
+                sps
             );
 
             let page_data_offset_in_mapping = local_slide_idx * sps;
@@ -1992,14 +2016,17 @@ impl DarwinSharedCache {
             .iter()
             .filter(|sc| page_offset_from_base >= sc.vm_offset)
             .find_map(|sc| {
-                sc.mappings.iter().find(|m| {
-                    let maddr = m.address as usize;
-                    let mend = maddr.saturating_add(m.size as usize);
-                    page_vaddr >= maddr && page_vaddr < mend
-                }).map(|m| {
-                    let off_in_map = page_vaddr - m.address as usize;
-                    (sc.file.clone(), m.file_offset as usize + off_in_map)
-                })
+                sc.mappings
+                    .iter()
+                    .find(|m| {
+                        let maddr = m.address as usize;
+                        let mend = maddr.saturating_add(m.size as usize);
+                        page_vaddr >= maddr && page_vaddr < mend
+                    })
+                    .map(|m| {
+                        let off_in_map = page_vaddr - m.address as usize;
+                        (sc.file.clone(), m.file_offset as usize + off_in_map)
+                    })
             })
             .or_else(|| {
                 self.find_mapping_for_page(page_vaddr)
@@ -2044,11 +2071,7 @@ impl DarwinSharedCache {
             total_read += n;
         }
 
-        self.apply_slide_fixups_for_page(
-            slide_base_vaddr,
-            buf.as_ptr() as usize,
-            slide_page_size,
-        );
+        self.apply_slide_fixups_for_page(slide_base_vaddr, buf.as_ptr() as usize, slide_page_size);
 
         let mut pages = self.pages.lock();
         if let Some(&existing) = pages.get(&slide_base_index) {
@@ -2119,7 +2142,9 @@ impl MemoryMappingOps for DarwinSharedCache {
         let page_vaddr = access.vaddr & !(PAGE_SIZE - 1);
         crate::println!(
             "[darwin] resolve_fault: vaddr={:#x} cache_start={:#x} vm_start={:#x}",
-            page_vaddr, self.cache_start, vm_start
+            page_vaddr,
+            self.cache_start,
+            vm_start
         );
         if page_vaddr < self.cache_start {
             crate::println!("[darwin] resolve_fault: OUT OF RANGE");
@@ -2317,17 +2342,14 @@ fn init_shared_cache(vfs: &VfsManager) -> Result<Arc<DarwinSharedCache>, &'stati
         cache_start
     );
 
-    let main_mappings_slice: Vec<CacheMappingSlideInfo> = mappings
-        .iter()
-        .take(mapping_count)
-        .cloned()
-        .collect();
-    let mut slide_infos = parse_v5_slide_infos(&file, &main_mappings_slice)
-        .map_err(|e| e)?;
+    let main_mappings_slice: Vec<CacheMappingSlideInfo> =
+        mappings.iter().take(mapping_count).cloned().collect();
+    let mut slide_infos = parse_v5_slide_infos(&file, &main_mappings_slice).map_err(|e| e)?;
 
     let dynamic_data_offset = if CACHE_HEADER_DYNAMIC_DATA_OFFSET + 8 <= header_buf.len() {
-        read_u64(&header_buf[CACHE_HEADER_DYNAMIC_DATA_OFFSET..CACHE_HEADER_DYNAMIC_DATA_OFFSET + 8])
-            as usize
+        read_u64(
+            &header_buf[CACHE_HEADER_DYNAMIC_DATA_OFFSET..CACHE_HEADER_DYNAMIC_DATA_OFFSET + 8],
+        ) as usize
     } else {
         0
     };
@@ -2343,7 +2365,8 @@ fn init_shared_cache(vfs: &VfsManager) -> Result<Arc<DarwinSharedCache>, &'stati
         ) as usize;
         crate::println!(
             "[darwin] sub-cache: array_offset={:#x} count={}",
-            sc_array_offset, sc_array_count
+            sc_array_offset,
+            sc_array_count
         );
         has_sub_cache_entries = sc_array_count > 0;
 
@@ -2359,11 +2382,7 @@ fn init_shared_cache(vfs: &VfsManager) -> Result<Arc<DarwinSharedCache>, &'stati
             let suffix_end = suffix_raw.iter().position(|&b| b == 0).unwrap_or(32);
             let suffix = core::str::from_utf8(&suffix_raw[..suffix_end]).unwrap_or(".?");
 
-            let sub_path = alloc::format!(
-                "{}{}",
-                cache_file_path,
-                suffix
-            );
+            let sub_path = alloc::format!("{}{}", cache_file_path, suffix);
 
             match vfs.open(&sub_path, 0) {
                 Ok(file_obj) => {
@@ -2371,31 +2390,37 @@ fn init_shared_cache(vfs: &VfsManager) -> Result<Arc<DarwinSharedCache>, &'stati
                         let file_size = sub_file.metadata().map(|m| m.size).unwrap_or(0);
                         crate::println!(
                             "[darwin] sub-cache[{}]: {} at VM offset {:#x} ({}MB)",
-                            i, suffix, vm_offset, file_size / 1024 / 1024
+                            i,
+                            suffix,
+                            vm_offset,
+                            file_size / 1024 / 1024
                         );
 
                         let mut sub_hdr_buf = alloc::vec![0u8; 0x800];
                         let _ = sub_file.read_at(0, &mut sub_hdr_buf);
 
-                        let sub_slide_mappings = parse_slide_mappings_from_header(&sub_hdr_buf)
-                            .unwrap_or_default();
+                        let sub_slide_mappings =
+                            parse_slide_mappings_from_header(&sub_hdr_buf).unwrap_or_default();
                         crate::println!(
                             "[darwin] sub-cache[{}]: parsed {} slide mappings",
-                            i, sub_slide_mappings.len()
+                            i,
+                            sub_slide_mappings.len()
                         );
 
                         match parse_v5_slide_infos(&sub_file, &sub_slide_mappings) {
                             Ok(sub_slide_infos) => {
                                 crate::println!(
                                     "[darwin] sub-cache[{}]: parsed {} slide info entries",
-                                    i, sub_slide_infos.len()
+                                    i,
+                                    sub_slide_infos.len()
                                 );
                                 slide_infos.extend(sub_slide_infos);
                             }
                             Err(e) => {
                                 crate::println!(
                                     "[darwin] sub-cache[{}]: slide info parse error: {}",
-                                    i, e
+                                    i,
+                                    e
                                 );
                             }
                         }
@@ -2410,7 +2435,9 @@ fn init_shared_cache(vfs: &VfsManager) -> Result<Arc<DarwinSharedCache>, &'stati
                 Err(_) => {
                     crate::println!(
                         "[darwin] sub-cache[{}]: {} not found ({}), sub-cache data unavailable",
-                        i, suffix, sub_path
+                        i,
+                        suffix,
+                        sub_path
                     );
                 }
             }
@@ -2693,7 +2720,10 @@ pub fn setup_comm_page(task: &Task) -> Result<(), &'static str> {
 
     task.page_allocations.write().push(comm_pages);
 
-    crate::println!("[darwin] comm page mapped at {:#x} (skipIgnition=1)", COMM_PAGE_BASE);
+    crate::println!(
+        "[darwin] comm page mapped at {:#x} (skipIgnition=1)",
+        COMM_PAGE_BASE
+    );
     Ok(())
 }
 
@@ -2750,7 +2780,11 @@ fn read_exact(file_obj: &dyn FileObject, buffer: &mut [u8]) -> Result<(), &'stat
     Ok(())
 }
 
-fn read_exact_at(file_obj: &dyn FileObject, offset: u64, buffer: &mut [u8]) -> Result<(), &'static str> {
+fn read_exact_at(
+    file_obj: &dyn FileObject,
+    offset: u64,
+    buffer: &mut [u8],
+) -> Result<(), &'static str> {
     let mut total_read = 0usize;
     while total_read < buffer.len() {
         let read_len = file_obj

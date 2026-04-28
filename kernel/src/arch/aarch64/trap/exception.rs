@@ -381,7 +381,11 @@ fn handle_brk(trapframe: &mut Trapframe, esr: u64) {
     crate::println!("[darwin] dyld BRK #{:#x} at ELR={:#x}", imm, trapframe.elr);
     crate::println!(
         "[darwin]   x0={:#x} x1={:#x} LR={:#x} x8={:#x} x19={:#x}",
-        x0, x1, lr, x8, x19
+        x0,
+        x1,
+        lr,
+        x8,
+        x19
     );
 
     let task = mytask().unwrap();
@@ -394,7 +398,11 @@ fn handle_brk(trapframe: &mut Trapframe, esr: u64) {
         if let Some(kva) = task.vm_manager.translate_to_kva(sp + 0x10) {
             let saved_fp = unsafe { core::ptr::read(kva as *const u64) };
             let saved_lr = unsafe { core::ptr::read((kva as *const u64).add(1)) };
-            crate::println!("[darwin]   stack: saved_fp={:#x} saved_lr={:#x} (caller of _dyld_halt)", saved_fp, saved_lr);
+            crate::println!(
+                "[darwin]   stack: saved_fp={:#x} saved_lr={:#x} (caller of _dyld_halt)",
+                saved_fp,
+                saved_lr
+            );
         }
     }
 
@@ -424,7 +432,11 @@ fn handle_brk(trapframe: &mut Trapframe, esr: u64) {
     let halt_msg_ptr_addr = sinfo_base + 0x300;
     if let Some(kva) = task.vm_manager.translate_to_kva(halt_msg_ptr_addr) {
         let msg_ptr = unsafe { core::ptr::read(kva as *const u64) };
-        crate::println!("[darwin]   sProcessInfo+0x300={:#x} -> ptr={:#x}", halt_msg_ptr_addr, msg_ptr);
+        crate::println!(
+            "[darwin]   sProcessInfo+0x300={:#x} -> ptr={:#x}",
+            halt_msg_ptr_addr,
+            msg_ptr
+        );
         if msg_ptr > 0x1000 && msg_ptr as usize != halt_msg as usize {
             if let Some(kva2) = task.vm_manager.translate_to_kva(msg_ptr as usize) {
                 let bytes = unsafe { core::slice::from_raw_parts(kva2 as *const u8, 512) };
@@ -477,7 +489,10 @@ fn handle_data_fault(trapframe: &mut Trapframe, vaddr: usize, is_write: bool) {
     if vaddr >= 0x100000000 {
         crate::println!(
             "[darwin] data_fault: vaddr={:#x} write={} PC={:#x} DFSC={:#x}",
-            vaddr, is_write, trapframe.get_current_pc(), dfsc
+            vaddr,
+            is_write,
+            trapframe.get_current_pc(),
+            dfsc
         );
     }
     if is_write && (dfsc >= 0x0d && dfsc <= 0x0f) {

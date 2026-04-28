@@ -285,7 +285,12 @@ pub fn sys_openat(abi: &mut DarwinAarch64Abi, trapframe: &mut Trapframe) -> usiz
         }
     };
 
-    crate::println!("[darwin] openat: dirfd={} path=\"{}\" flags={:#x}", _dirfd, darwin_path, flags);
+    crate::println!(
+        "[darwin] openat: dirfd={} path=\"{}\" flags={:#x}",
+        _dirfd,
+        darwin_path,
+        flags
+    );
 
     let scarlet_path = path::translate_to_scarlet(&darwin_path);
 
@@ -302,7 +307,11 @@ pub fn sys_openat(abi: &mut DarwinAarch64Abi, trapframe: &mut Trapframe) -> usiz
     let ko = match vfs.open(&scarlet_path, open_flags) {
         Ok(obj) => obj,
         Err(e) => {
-            crate::println!("[darwin] openat: vfs.open(\"{}\") failed: {}", scarlet_path, e.message);
+            crate::println!(
+                "[darwin] openat: vfs.open(\"{}\") failed: {}",
+                scarlet_path,
+                e.message
+            );
             trapframe.spsr |= 1 << 29;
             trapframe.set_return_value(from_kernel_error(&e.message));
             return usize::MAX;
@@ -531,14 +540,13 @@ pub fn sys_dup2(abi: &mut DarwinAarch64Abi, trapframe: &mut Trapframe) -> usize 
             trapframe.set_return_value(new_fd);
             new_fd
         }
-            Err(_) => {
+        Err(_) => {
             trapframe.spsr |= 1 << 29;
             trapframe.set_return_value(EMFILE);
             usize::MAX
         }
     }
 }
-
 
 pub fn sys_wait4(_abi: &mut DarwinAarch64Abi, trapframe: &mut Trapframe) -> usize {
     use crate::task::{WaitError, get_parent_waitpid_waker, get_waitpid_waker};
@@ -1294,14 +1302,21 @@ pub fn sys_mmap(abi: &mut DarwinAarch64Abi, trapframe: &mut Trapframe) -> usize 
     // Handle ANONYMOUS mappings (MAP_ANON or fd == -1 without file backing)
     if flags & DARWIN_MAP_ANON != 0 || fd == -1 {
         return handle_darwin_anonymous_mapping(
-            abi, task, trapframe, addr, aligned_len, prot_mask, prot, flags,
+            abi,
+            task,
+            trapframe,
+            addr,
+            aligned_len,
+            prot_mask,
+            prot,
+            flags,
         );
     }
 
     // File-backed mappings
     use crate::object::capability::memory_mapping::MemoryMappingOps;
-    use crate::vm::addr::{is_direct_mapped, virt_to_phys};
     use crate::object::capability::memory_mapping::syscall::reclaim_private_removed_mapping;
+    use crate::vm::addr::{is_direct_mapped, virt_to_phys};
 
     let handle = match abi.get_handle(fd as usize) {
         Some(h) => h,
@@ -1380,7 +1395,9 @@ pub fn sys_mmap(abi: &mut DarwinAarch64Abi, trapframe: &mut Trapframe) -> usize 
         let removed_mappings = if is_fixed {
             task.vm_manager.add_memory_map_fixed(vm_map)
         } else {
-            task.vm_manager.add_memory_map(vm_map).map(|_| alloc::vec::Vec::new())
+            task.vm_manager
+                .add_memory_map(vm_map)
+                .map(|_| alloc::vec::Vec::new())
         };
 
         let removed_mappings = match removed_mappings {
@@ -1441,8 +1458,7 @@ pub fn sys_mmap(abi: &mut DarwinAarch64Abi, trapframe: &mut Trapframe) -> usize 
         return usize::MAX;
     }
 
-    let ok_len_aligned =
-        (ok_len / crate::environment::PAGE_SIZE) * crate::environment::PAGE_SIZE;
+    let ok_len_aligned = (ok_len / crate::environment::PAGE_SIZE) * crate::environment::PAGE_SIZE;
     if ok_len_aligned == 0 {
         trapframe.spsr |= 1 << 29;
         trapframe.set_return_value(EINVAL);
@@ -1615,7 +1631,8 @@ pub fn sys_munmap(_abi: &mut DarwinAarch64Abi, trapframe: &mut Trapframe) -> usi
         }
 
         crate::object::capability::memory_mapping::syscall::reclaim_private_removed_mapping(
-            task, removed_map,
+            task,
+            removed_map,
         );
     }
 
@@ -2434,7 +2451,9 @@ pub fn sys_sysctl(abi: &mut DarwinAarch64Abi, trapframe: &mut Trapframe) -> usiz
     if namelen >= 2 {
         crate::println!(
             "[darwin] sysctl: name=[{},{}] namelen={}",
-            name[0], name[1], namelen
+            name[0],
+            name[1],
+            namelen
         );
     }
 
@@ -2453,14 +2472,17 @@ pub fn sys_sysctl(abi: &mut DarwinAarch64Abi, trapframe: &mut Trapframe) -> usiz
 
             if oldp != 0 && oldlen >= total_size {
                 if let Some(kva) = task.vm_manager.translate_to_kva(oldp) {
-                    unsafe { ptr::write(kva as *mut u32, 1u32); }
+                    unsafe {
+                        ptr::write(kva as *mut u32, 1u32);
+                    }
                     let write_len = exe_path.len().min(oldlen.saturating_sub(4));
-                    let dst = unsafe {
-                        core::slice::from_raw_parts_mut((kva + 4) as *mut u8, write_len)
-                    };
+                    let dst =
+                        unsafe { core::slice::from_raw_parts_mut((kva + 4) as *mut u8, write_len) };
                     dst.copy_from_slice(&exe_path[..write_len]);
                     if let Some(kva) = task.vm_manager.translate_to_kva(oldlenp) {
-                        unsafe { ptr::write(kva as *mut usize, total_size); }
+                        unsafe {
+                            ptr::write(kva as *mut usize, total_size);
+                        }
                     }
                 }
                 trapframe.increment_pc_next(task);
@@ -2469,7 +2491,9 @@ pub fn sys_sysctl(abi: &mut DarwinAarch64Abi, trapframe: &mut Trapframe) -> usiz
                 return 0;
             }
             if let Some(kva) = task.vm_manager.translate_to_kva(oldlenp) {
-                unsafe { ptr::write(kva as *mut usize, total_size); }
+                unsafe {
+                    ptr::write(kva as *mut usize, total_size);
+                }
             }
         }
         trapframe.increment_pc_next(task);
@@ -2480,7 +2504,9 @@ pub fn sys_sysctl(abi: &mut DarwinAarch64Abi, trapframe: &mut Trapframe) -> usiz
 
     if oldlenp != 0 {
         if let Some(kva) = task.vm_manager.translate_to_kva(oldlenp) {
-            unsafe { ptr::write(kva as *mut usize, 0); }
+            unsafe {
+                ptr::write(kva as *mut usize, 0);
+            }
         }
     }
     trapframe.increment_pc_next(task);
