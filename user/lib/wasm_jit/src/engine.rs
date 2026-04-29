@@ -46,6 +46,7 @@ pub(crate) fn alloc_exec_memory(size: usize) -> *mut u8 {
     unsafe { EXEC_ALLOCATOR(size) }
 }
 
+#[inline(never)]
 pub unsafe fn invoke_export(
     module: &CompiledModule,
     ctx: *mut VmContext,
@@ -64,8 +65,10 @@ pub unsafe fn invoke_export(
             }
             unsafe {
                 let result = (func.code)(ctx, frame.as_mut_ptr());
-                if (*ctx).trap != TrapCode::None {
-                    Err((*ctx).trap)
+                core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
+                let trap = core::ptr::read_volatile(&(*ctx).trap);
+                if trap != TrapCode::None {
+                    Err(trap)
                 } else {
                     Ok(result)
                 }

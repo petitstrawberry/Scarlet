@@ -1,14 +1,18 @@
-#![no_std]
-#![no_main]
+#![cfg_attr(not(test), no_std)]
+#![cfg_attr(not(test), no_main)]
+#![allow(unsafe_op_in_unsafe_fn, dead_code)]
 
 extern crate alloc;
+#[cfg(not(test))]
 extern crate scarlet_std as std;
+#[cfg(test)]
+extern crate std;
 
 use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
 use alloc::string::{String, ToString};
 use core::cell::UnsafeCell;
-use std::fs::{File, OpenOptions};
+use std::fs::{File, OpenOptions, create_directory};
 use std::io::SeekFrom;
 use std::{format, println, vec::Vec};
 use wasm_jit::runtime::HostOps;
@@ -94,6 +98,30 @@ impl WasiRuntime {
 static mut WASI_RUNTIME: *mut WasiRuntime = core::ptr::null_mut();
 static mut RANDOM_STATE: u64 = 0x1234_5678_9ABC_DEF0;
 static mut FAKE_TIME_NS: u64 = 1_700_000_000_000_000_000;
+static mut WASM_MEMORY_BASE: *mut u8 = core::ptr::null_mut();
+static mut WASM_MEMORY_CAP: usize = 0;
+
+unsafe extern "C" fn wasm_memory_realloc(
+    _old_base: *mut u8,
+    _old_cap: usize,
+    new_cap: usize,
+) -> *mut u8 {
+    use std::handle::capability::memory_mapping::{flags, mmap_anonymous, prot};
+    let new_base = match mmap_anonymous(0, new_cap, prot::READ | prot::WRITE, flags::PRIVATE) {
+        Ok(addr) => addr as *mut u8,
+        Err(_) => return core::ptr::null_mut(),
+    };
+    let old_base = unsafe { core::ptr::addr_of!(WASM_MEMORY_BASE).read() };
+    let old_cap = unsafe { core::ptr::addr_of!(WASM_MEMORY_CAP).read() };
+    if !old_base.is_null() && old_cap > 0 {
+        core::ptr::copy_nonoverlapping(old_base, new_base, old_cap);
+    }
+    unsafe {
+        core::ptr::addr_of_mut!(WASM_MEMORY_BASE).write(new_base);
+        core::ptr::addr_of_mut!(WASM_MEMORY_CAP).write(new_cap);
+    }
+    new_base
+}
 
 unsafe extern "C" fn host_fd_write(fd: u32, data: *const u8, data_len: usize) -> i64 {
     let rt = wasi_runtime();
@@ -206,13 +234,36 @@ unsafe extern "C" fn host_path_open(
     };
 
     let fd = rt.alloc_fd();
-    rt.fds.insert(
-        fd,
-        FdEntry {
-            kind: FdKind::File(UnsafeCell::new(file)),
-        },
-    );
+    let kind = if path_is_directory(full_path.as_str()) {
+        FdKind::PreopenDir { path: full_path }
+    } else {
+        FdKind::File(UnsafeCell::new(file))
+    };
+    rt.fds.insert(fd, FdEntry { kind });
     fd as i32
+}
+
+unsafe extern "C" fn host_path_create_directory(dirfd: u32, path: *const u8, path_len: u32) -> i32 {
+    let rt = wasi_runtime();
+    let base = match rt.fds.get(&dirfd) {
+        Some(FdEntry {
+            kind: FdKind::PreopenDir { path },
+        }) => path.as_str(),
+        Some(_) => return -(EBADF as i32),
+        None => return -(EBADF as i32),
+    };
+
+    let path_bytes = core::slice::from_raw_parts(path, path_len as usize);
+    let path_str = match core::str::from_utf8(path_bytes) {
+        Ok(path) => path,
+        Err(_) => return -(EINVAL as i32),
+    };
+
+    let full_path = resolve_path(base, path_str);
+    match create_directory(full_path.as_str()) {
+        Ok(()) => ESUCCESS as i32,
+        Err(_) => -(ENOENT as i32),
+    }
 }
 
 unsafe extern "C" fn host_fd_close(fd: u32) -> i32 {
@@ -391,6 +442,14 @@ fn resolve_path(base: &str, path: &str) -> String {
     format!("{}/{}", base.trim_end_matches('/'), path)
 }
 
+fn path_is_directory(path: &str) -> bool {
+    if path == "/" || path.ends_with('/') {
+        return true;
+    }
+
+    std::fs::list_directory(path).is_ok()
+}
+
 unsafe fn wasi_runtime<'a>() -> &'a mut WasiRuntime {
     &mut *WASI_RUNTIME
 }
@@ -488,6 +547,7 @@ fn execute_wasm(wasm_bytes: &[u8]) -> Result<i32, std::string::String> {
         clock_time_get: host_clock_time_get,
         random_get: host_random_get,
         path_open: host_path_open,
+        path_create_directory: host_path_create_directory,
         fd_close: host_fd_close,
         fd_seek: host_fd_seek,
         fd_tell: host_fd_tell,
@@ -514,18 +574,37 @@ fn execute_wasm(wasm_bytes: &[u8]) -> Result<i32, std::string::String> {
             .max()
             .unwrap_or(1);
         let memory_pages = data_pages.max(module.min_memory_pages as usize);
-        let cap_pages = memory_pages.max(256);
-        let mut memory = alloc::vec![0u8; cap_pages * 65536];
-        module.init_memory(&mut memory);
+        let memory_pages_initial = memory_pages;
+        println!(
+            "DBG: initial_pages={} min_mem_pages={} data_pages={}",
+            memory_pages_initial, module.min_memory_pages, data_pages
+        );
+        let memory_pages_max: usize = 65536; // wasm32 max: 4GB
+        let cap_bytes = memory_pages_max * 65536;
+        use std::handle::capability::memory_mapping::{flags, mmap_anonymous, prot};
+        let memory_base =
+            match mmap_anonymous(0, cap_bytes, prot::READ | prot::WRITE, flags::PRIVATE) {
+                Ok(addr) => addr as *mut u8,
+                Err(_) => {
+                    return Err(format!(
+                        "failed to mmap {} bytes for wasm memory",
+                        cap_bytes
+                    ));
+                }
+            };
+        let memory_slice =
+            unsafe { core::slice::from_raw_parts_mut(memory_base, memory_pages_initial * 65536) };
+        module.init_memory(memory_slice);
 
-        let mut ctx = wasm_jit::runtime::VmContext::new(
-            memory.as_mut_ptr(),
-            memory_pages * 65536,
-            memory.len(),
+        let mut ctx_box = alloc::boxed::Box::new(wasm_jit::runtime::VmContext::new(
+            memory_base,
+            memory_pages_initial * 65536,
+            cap_bytes,
             core::ptr::null(),
             0,
-        );
-        ctx.host_ops = &host_ops;
+        ));
+        ctx_box.memory_realloc = None;
+        ctx_box.host_ops = &host_ops;
 
         let imported_names: alloc::vec::Vec<wasm_jit::runtime::ImportedFuncName> = module
             .imported_funcs
@@ -538,8 +617,8 @@ fn execute_wasm(wasm_bytes: &[u8]) -> Result<i32, std::string::String> {
             })
             .collect();
         let imported_names_box = imported_names.into_boxed_slice();
-        ctx.imported_names = imported_names_box.as_ptr();
-        ctx.imported_count = imported_names_box.len();
+        ctx_box.imported_names = imported_names_box.as_ptr();
+        ctx_box.imported_count = imported_names_box.len();
         core::mem::forget(imported_names_box);
 
         let globals_box = module.globals.clone();
@@ -567,11 +646,20 @@ fn execute_wasm(wasm_bytes: &[u8]) -> Result<i32, std::string::String> {
                 "isb",
                 in(reg) &&module as *const _ as u64,
             );
-            match engine::invoke_export(&module, &mut ctx, "_start", &[]) {
-                Ok(_) => Ok(0),
+            match engine::invoke_export(&module, &mut *ctx_box, "_start", &[]) {
+                Ok(r) => {
+                    println!("ok val={} trap={}", r, ctx_box.trap as u32);
+                    Ok(0)
+                }
                 Err(trap) => {
-                    if ctx.exited {
-                        Ok(ctx.exit_code as i32)
+                    println!(
+                        "trap:{:?} mem_len={} mem_pages={}",
+                        trap,
+                        ctx_box.memory_len,
+                        ctx_box.memory_len / 65536
+                    );
+                    if ctx_box.exited {
+                        Ok(ctx_box.exit_code as i32)
                     } else {
                         Err(format!("trap: {:?}", trap))
                     }
@@ -582,6 +670,8 @@ fn execute_wasm(wasm_bytes: &[u8]) -> Result<i32, std::string::String> {
 
     unsafe {
         WASI_RUNTIME = core::ptr::null_mut();
+        WASM_MEMORY_BASE = core::ptr::null_mut();
+        WASM_MEMORY_CAP = 0;
     }
 
     result

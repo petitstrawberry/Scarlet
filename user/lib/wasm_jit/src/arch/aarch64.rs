@@ -245,8 +245,64 @@ impl Aarch64Backend {
     }
 
     fn encode_data_proc_2src(opcode: u8, rd: Register, rn: Register, rm: Register) -> u32 {
-        (1u32 << 31)
+        Self::encode_data_proc_2src_sf(1, opcode, rd, rn, rm)
+    }
+
+    fn encode_data_proc_2src_sf(
+        sf: u8,
+        opcode: u8,
+        rd: Register,
+        rn: Register,
+        rm: Register,
+    ) -> u32 {
+        (u32::from(sf) << 31)
             | (0b11010110u32 << 21)
+            | (u32::from(rm.value()) << 16)
+            | (u32::from(opcode) << 10)
+            | (u32::from(rn.value()) << 5)
+            | u32::from(rd.value())
+    }
+
+    fn encode_add_sub_reg(sf: u8, op: u8, rm: Register, rn: Register, rd: Register) -> u32 {
+        (u32::from(sf) << 31)
+            | (u32::from(op) << 30)
+            | (0b01011 << 24)
+            | (u32::from(rm.value()) << 16)
+            | (u32::from(rn.value()) << 5)
+            | u32::from(rd.value())
+    }
+
+    fn encode_logical_reg(sf: u8, opc: u8, rm: Register, rn: Register, rd: Register) -> u32 {
+        (u32::from(sf) << 31)
+            | (u32::from(opc) << 29)
+            | (0b01010 << 24)
+            | (u32::from(rm.value()) << 16)
+            | (u32::from(rn.value()) << 5)
+            | u32::from(rd.value())
+    }
+
+    fn encode_multiply(
+        sf: u8,
+        op31: u8,
+        rm: Register,
+        o0: u8,
+        ra: Register,
+        rn: Register,
+        rd: Register,
+    ) -> u32 {
+        (u32::from(sf) << 31)
+            | (0b11011 << 24)
+            | (u32::from(op31) << 21)
+            | (u32::from(rm.value()) << 16)
+            | (u32::from(o0) << 15)
+            | (u32::from(ra.value()) << 10)
+            | (u32::from(rn.value()) << 5)
+            | u32::from(rd.value())
+    }
+
+    fn encode_divide(sf: u8, opcode: u8, rm: Register, rn: Register, rd: Register) -> u32 {
+        (u32::from(sf) << 31)
+            | (0b11010110 << 21)
             | (u32::from(rm.value()) << 16)
             | (u32::from(opcode) << 10)
             | (u32::from(rn.value()) << 5)
@@ -365,16 +421,31 @@ impl ArchBackend for Aarch64Backend {
         });
     }
 
+    fn emit_addw(&mut self, code: &mut CodeBuffer, dst: Self::Reg, lhs: Self::Reg, rhs: Self::Reg) {
+        self.emit_raw(code, Self::encode_add_sub_reg(0, 0, rhs, lhs, dst));
+    }
+
     fn emit_sub(&mut self, code: &mut CodeBuffer, dst: Self::Reg, lhs: Self::Reg, rhs: Self::Reg) {
         self.emit_builder(code, |builder| {
             builder.sub(dst, lhs, rhs);
         });
     }
 
+    fn emit_subw(&mut self, code: &mut CodeBuffer, dst: Self::Reg, lhs: Self::Reg, rhs: Self::Reg) {
+        self.emit_raw(code, Self::encode_add_sub_reg(0, 1, rhs, lhs, dst));
+    }
+
     fn emit_mul(&mut self, code: &mut CodeBuffer, dst: Self::Reg, lhs: Self::Reg, rhs: Self::Reg) {
         self.emit_builder(code, |builder| {
             builder.mul(dst, lhs, rhs);
         });
+    }
+
+    fn emit_mulw(&mut self, code: &mut CodeBuffer, dst: Self::Reg, lhs: Self::Reg, rhs: Self::Reg) {
+        self.emit_raw(
+            code,
+            Self::encode_multiply(0, 0b000, rhs, 0, reg::WZR, lhs, dst),
+        );
     }
 
     fn emit_div_s(
@@ -389,6 +460,10 @@ impl ArchBackend for Aarch64Backend {
         });
     }
 
+    fn emit_divw(&mut self, code: &mut CodeBuffer, dst: Self::Reg, lhs: Self::Reg, rhs: Self::Reg) {
+        self.emit_raw(code, Self::encode_divide(0, 0b000011, rhs, lhs, dst));
+    }
+
     fn emit_div_u(
         &mut self,
         code: &mut CodeBuffer,
@@ -399,6 +474,16 @@ impl ArchBackend for Aarch64Backend {
         self.emit_builder(code, |builder| {
             builder.udiv(dst, lhs, rhs);
         });
+    }
+
+    fn emit_divuw(
+        &mut self,
+        code: &mut CodeBuffer,
+        dst: Self::Reg,
+        lhs: Self::Reg,
+        rhs: Self::Reg,
+    ) {
+        self.emit_raw(code, Self::encode_divide(0, 0b000010, rhs, lhs, dst));
     }
 
     fn emit_rem_s(
@@ -421,6 +506,21 @@ impl ArchBackend for Aarch64Backend {
         });
     }
 
+    fn emit_remw(&mut self, code: &mut CodeBuffer, dst: Self::Reg, lhs: Self::Reg, rhs: Self::Reg) {
+        let scratch = if dst != self.tmp0() && lhs != self.tmp0() && rhs != self.tmp0() {
+            self.tmp0()
+        } else if dst != self.tmp1() && lhs != self.tmp1() && rhs != self.tmp1() {
+            self.tmp1()
+        } else {
+            self.tmp2()
+        };
+        self.emit_raw(code, Self::encode_divide(0, 0b000011, rhs, lhs, scratch));
+        self.emit_raw(
+            code,
+            Self::encode_multiply(0, 0b000, rhs, 1, lhs, scratch, dst),
+        );
+    }
+
     fn emit_rem_u(
         &mut self,
         code: &mut CodeBuffer,
@@ -439,6 +539,27 @@ impl ArchBackend for Aarch64Backend {
             builder.udiv(scratch, lhs, rhs);
             builder.msub(dst, scratch, rhs, lhs);
         });
+    }
+
+    fn emit_remuw(
+        &mut self,
+        code: &mut CodeBuffer,
+        dst: Self::Reg,
+        lhs: Self::Reg,
+        rhs: Self::Reg,
+    ) {
+        let scratch = if dst != self.tmp0() && lhs != self.tmp0() && rhs != self.tmp0() {
+            self.tmp0()
+        } else if dst != self.tmp1() && lhs != self.tmp1() && rhs != self.tmp1() {
+            self.tmp1()
+        } else {
+            self.tmp2()
+        };
+        self.emit_raw(code, Self::encode_divide(0, 0b000010, rhs, lhs, scratch));
+        self.emit_raw(
+            code,
+            Self::encode_multiply(0, 0b000, rhs, 1, lhs, scratch, dst),
+        );
     }
 
     fn emit_and(&mut self, code: &mut CodeBuffer, dst: Self::Reg, lhs: Self::Reg, rhs: Self::Reg) {
@@ -466,6 +587,13 @@ impl ArchBackend for Aarch64Backend {
         );
     }
 
+    fn emit_sllw(&mut self, code: &mut CodeBuffer, dst: Self::Reg, lhs: Self::Reg, rhs: Self::Reg) {
+        self.emit_raw(
+            code,
+            Self::encode_data_proc_2src_sf(0, LSLV_OPCODE, dst, lhs, rhs),
+        );
+    }
+
     fn emit_shr_u(
         &mut self,
         code: &mut CodeBuffer,
@@ -479,6 +607,13 @@ impl ArchBackend for Aarch64Backend {
         );
     }
 
+    fn emit_srlw(&mut self, code: &mut CodeBuffer, dst: Self::Reg, lhs: Self::Reg, rhs: Self::Reg) {
+        self.emit_raw(
+            code,
+            Self::encode_data_proc_2src_sf(0, LSRV_OPCODE, dst, lhs, rhs),
+        );
+    }
+
     fn emit_shr_s(
         &mut self,
         code: &mut CodeBuffer,
@@ -489,6 +624,13 @@ impl ArchBackend for Aarch64Backend {
         self.emit_raw(
             code,
             Self::encode_data_proc_2src(ASRV_OPCODE, dst, lhs, rhs),
+        );
+    }
+
+    fn emit_sraw(&mut self, code: &mut CodeBuffer, dst: Self::Reg, lhs: Self::Reg, rhs: Self::Reg) {
+        self.emit_raw(
+            code,
+            Self::encode_data_proc_2src_sf(0, ASRV_OPCODE, dst, lhs, rhs),
         );
     }
 

@@ -38,6 +38,9 @@ pub struct HostOps {
         oflags: u32,
         fdflags: u32,
     ) -> i32,
+    /// Create a directory relative to dirfd. Returns 0 or negative errno.
+    pub path_create_directory:
+        unsafe extern "C" fn(dirfd: u32, path: *const u8, path_len: u32) -> i32,
     /// Close fd. Returns 0 or negative errno.
     pub fd_close: unsafe extern "C" fn(fd: u32) -> i32,
     /// Seek in fd. Writes new offset to new_offset. Returns 0 or negative errno.
@@ -55,10 +58,12 @@ pub struct HostOps {
     pub fd_filestat_get: unsafe extern "C" fn(fd: u32, buf: *mut u8) -> i32,
 }
 
+#[repr(C)]
 pub struct VmContext {
     pub memory_base: *mut u8,
     pub memory_len: usize,
     pub memory_cap: usize,
+    pub memory_realloc: Option<unsafe extern "C" fn(*mut u8, usize, usize) -> *mut u8>,
     pub functions: *const crate::FunctionEntry,
     pub function_count: usize,
     pub globals: *mut crate::GlobalEntry,
@@ -73,6 +78,22 @@ pub struct VmContext {
     pub host_ops: *const HostOps,
     pub imported_names: *const ImportedFuncName,
     pub imported_count: usize,
+    pub debug_last_func: u32,
+    pub debug_call_count: u32,
+    pub debug_store_count: u32,
+    pub debug_global_set_count: u32,
+    pub debug_import_call_count: u32,
+    pub debug_last_store_addr: u32,
+    pub debug_last_store_value: u64,
+    pub debug_last_global_idx: u32,
+    pub debug_last_global_val: u64,
+    pub debug_last_trap_seen: u32,
+    pub debug_check_count: u32,
+    pub debug_trace: [u32; 64],
+    pub debug_trace_idx: usize,
+    pub debug_mgrow_delta: [u32; 8],
+    pub debug_mgrow_result: [i32; 8],
+    pub debug_mgrow_count: usize,
 }
 
 impl VmContext {
@@ -103,6 +124,7 @@ impl VmContext {
             memory_base,
             memory_len,
             memory_cap,
+            memory_realloc: None,
             functions,
             function_count,
             globals,
@@ -117,6 +139,22 @@ impl VmContext {
             host_ops: core::ptr::null(),
             imported_names: core::ptr::null(),
             imported_count: 0,
+            debug_last_func: 0,
+            debug_call_count: 0,
+            debug_store_count: 0,
+            debug_global_set_count: 0,
+            debug_import_call_count: 0,
+            debug_last_store_addr: 0,
+            debug_last_store_value: 0,
+            debug_last_global_idx: 0,
+            debug_last_global_val: 0,
+            debug_last_trap_seen: 0,
+            debug_check_count: 0,
+            debug_trace: [0u32; 64],
+            debug_trace_idx: 0,
+            debug_mgrow_delta: [0u32; 8],
+            debug_mgrow_result: [0i32; 8],
+            debug_mgrow_count: 0,
         }
     }
 

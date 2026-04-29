@@ -18,6 +18,9 @@ pub unsafe extern "C" fn helper_i32_load(ctx: *mut VmContext, addr: u32) -> RawV
 pub unsafe extern "C" fn helper_i32_store(ctx: *mut VmContext, addr: u32, value: u32) {
     unsafe {
         let ctx = &mut *ctx;
+        ctx.debug_store_count = ctx.debug_store_count.wrapping_add(1);
+        ctx.debug_last_store_addr = addr;
+        ctx.debug_last_store_value = value as u64;
         let offset = addr as u64;
         if !ctx.check_memory(offset, 4) {
             ctx.set_trap(TrapCode::MemoryOutOfBounds);
@@ -49,7 +52,7 @@ pub unsafe extern "C" fn helper_i32_load8_s(ctx: *mut VmContext, addr: u32) -> R
             return 0;
         }
         let value = *(ctx.memory_base.add(addr as usize) as *const i8);
-        value as i64 as u64
+        (value as i32) as u32 as RawValue
     }
 }
 
@@ -76,7 +79,7 @@ pub unsafe extern "C" fn helper_i32_load16_s(ctx: *mut VmContext, addr: u32) -> 
         }
         let ptr = ctx.memory_base.add(addr as usize) as *const i16;
         let value = core::ptr::read_unaligned(ptr);
-        value as i64 as u64
+        (value as i32) as u32 as RawValue
     }
 }
 
@@ -254,22 +257,25 @@ pub unsafe extern "C" fn helper_memory_grow(ctx: *mut VmContext, delta: u32) -> 
         let ctx = &mut *ctx;
         let prev_pages = ctx.memory_len / 65536;
         let delta_bytes = delta as usize * 65536;
-        let new_len = match ctx.memory_len.checked_add(delta_bytes) {
-            Some(n) => n,
-            None => return (-1i32) as RawValue,
+        let result = if delta_bytes == 0 {
+            (prev_pages as u32) as RawValue
+        } else {
+            let new_len = match ctx.memory_len.checked_add(delta_bytes) {
+                Some(n) => n,
+                None => return u32::MAX as RawValue,
+            };
+            if new_len > ctx.memory_cap {
+                return u32::MAX as RawValue;
+            }
+            ctx.memory_len = new_len;
+            (prev_pages as u32) as RawValue
         };
-        if new_len > ctx.memory_cap {
-            return (-1i32) as RawValue;
-        }
-        let old_end = ctx.memory_len;
-        ctx.memory_len = new_len;
-        core::ptr::write_bytes(ctx.memory_base.add(old_end), 0, delta_bytes);
-        (prev_pages as i32) as RawValue
+        result
     }
 }
 
 pub unsafe extern "C" fn helper_memory_size(ctx: *mut VmContext) -> RawValue {
-    unsafe { ((*ctx).memory_len / 65536) as RawValue }
+    unsafe { ((*ctx).memory_len / 65536) as u32 as RawValue }
 }
 
 pub unsafe extern "C" fn helper_global_get(ctx: *mut VmContext, index: u32) -> RawValue {
@@ -286,6 +292,9 @@ pub unsafe extern "C" fn helper_global_get(ctx: *mut VmContext, index: u32) -> R
 pub unsafe extern "C" fn helper_global_set(ctx: *mut VmContext, index: u32, value: RawValue) {
     unsafe {
         let ctx = &mut *ctx;
+        ctx.debug_global_set_count = ctx.debug_global_set_count.wrapping_add(1);
+        ctx.debug_last_global_idx = index;
+        ctx.debug_last_global_val = value;
         if index as usize >= ctx.global_count {
             ctx.set_trap(TrapCode::BadCall);
             return;
@@ -306,6 +315,13 @@ pub unsafe extern "C" fn helper_call(
 ) -> RawValue {
     unsafe {
         let ctx = &mut *ctx;
+        ctx.debug_last_func = func_index;
+        ctx.debug_call_count = ctx.debug_call_count.wrapping_add(1);
+        let ti = ctx.debug_trace_idx;
+        if ti < 64 {
+            ctx.debug_trace[ti] = func_index;
+            ctx.debug_trace_idx = ti + 1;
+        }
         if func_index as usize >= ctx.function_count {
             ctx.set_trap(TrapCode::BadCall);
             return 0;

@@ -90,7 +90,7 @@ impl ValueStack {
         self.slots.last().copied()
     }
 
-    pub fn truncate_keep(&mut self, entry_depth: u16, keep: u8) {
+    pub fn truncate_keep(&mut self, entry_depth: u16, keep: u8) -> Vec<(u16, u16)> {
         let keep_len = keep as usize;
         let mut kept = if keep_len == 0 {
             Vec::new()
@@ -99,12 +99,24 @@ impl ValueStack {
                 .split_off(self.slots.len().saturating_sub(keep_len))
         };
         self.slots.truncate(entry_depth as usize);
-        self.height = self.slots.len() as u16;
+
+        let mut moves = Vec::new();
+        let base = self.temp_base + entry_depth;
+        for (index, slot) in kept.iter_mut().enumerate() {
+            let new_slot = base + index as u16;
+            if *slot != new_slot {
+                moves.push((*slot, new_slot));
+            }
+            *slot = new_slot;
+        }
+
         self.slots.append(&mut kept);
         self.height = self.slots.len() as u16;
         if self.height > self.max_height {
             self.max_height = self.height;
         }
+
+        moves
     }
 
     pub fn max_height(&self) -> u16 {
@@ -673,6 +685,33 @@ impl<'ctx, B: ArchBackend> FunctionCompiler<'ctx, B> {
         }
     }
 
+    fn branch_slot_moves(&self, entry_stack_height: u16, keep: u8) -> Vec<(u16, u16)> {
+        let keep_len = keep as usize;
+        if keep_len == 0 {
+            return Vec::new();
+        }
+
+        let kept = &self.value_stack.slots[self.value_stack.slots.len().saturating_sub(keep_len)..];
+        let base = self.value_stack.temp_base + entry_stack_height;
+        let mut moves = Vec::new();
+        for (index, &old_slot) in kept.iter().enumerate() {
+            let new_slot = base + index as u16;
+            if old_slot != new_slot {
+                moves.push((old_slot, new_slot));
+            }
+        }
+
+        moves
+    }
+
+    fn emit_slot_moves(&mut self, moves: &[(u16, u16)]) {
+        let tmp0 = self.backend.tmp0();
+        for &(old_slot, new_slot) in moves {
+            self.backend.emit_load_slot(&mut self.code, tmp0, old_slot);
+            self.backend.emit_store_slot(&mut self.code, new_slot, tmp0);
+        }
+    }
+
     fn runtime_param_slot(&self, index: u32) -> u16 {
         HELPER_SLOT_COUNT + index as u16
     }
@@ -801,6 +840,106 @@ impl<'ctx, B: ArchBackend> FunctionCompiler<'ctx, B> {
             self.backend.tmp0(),
             self.backend.tmp1(),
         );
+        let result = self.value_stack.push();
+        self.backend
+            .emit_store_slot(&mut self.code, result, self.backend.tmp0());
+        Ok(())
+    }
+
+    fn emit_i32_zero_extend_tmp0(&mut self) {
+        self.backend
+            .emit_li(&mut self.code, self.backend.tmp2(), 32);
+        self.backend.emit_shl(
+            &mut self.code,
+            self.backend.tmp0(),
+            self.backend.tmp0(),
+            self.backend.tmp2(),
+        );
+        self.backend.emit_shr_u(
+            &mut self.code,
+            self.backend.tmp0(),
+            self.backend.tmp0(),
+            self.backend.tmp2(),
+        );
+    }
+
+    fn emit_i32_binary_op(
+        &mut self,
+        op: fn(&mut B, &mut CodeBuffer, B::Reg, B::Reg, B::Reg),
+    ) -> Result<(), CompileError> {
+        let rhs = self.value_stack.pop();
+        let lhs = self.value_stack.pop();
+        self.backend
+            .emit_load_slot(&mut self.code, self.backend.tmp0(), lhs);
+        self.backend
+            .emit_load_slot(&mut self.code, self.backend.tmp1(), rhs);
+        op(
+            self.backend,
+            &mut self.code,
+            self.backend.tmp0(),
+            self.backend.tmp0(),
+            self.backend.tmp1(),
+        );
+        self.emit_i32_zero_extend_tmp0();
+        let result = self.value_stack.push();
+        self.backend
+            .emit_store_slot(&mut self.code, result, self.backend.tmp0());
+        Ok(())
+    }
+
+    fn emit_i32_binary_op_zero_ext(
+        &mut self,
+        op: fn(&mut B, &mut CodeBuffer, B::Reg, B::Reg, B::Reg),
+    ) -> Result<(), CompileError> {
+        let rhs = self.value_stack.pop();
+        let lhs = self.value_stack.pop();
+        self.backend
+            .emit_load_slot(&mut self.code, self.backend.tmp0(), lhs);
+        self.backend
+            .emit_load_slot(&mut self.code, self.backend.tmp1(), rhs);
+        op(
+            self.backend,
+            &mut self.code,
+            self.backend.tmp0(),
+            self.backend.tmp0(),
+            self.backend.tmp1(),
+        );
+        self.emit_i32_zero_extend_tmp0();
+        let result = self.value_stack.push();
+        self.backend
+            .emit_store_slot(&mut self.code, result, self.backend.tmp0());
+        Ok(())
+    }
+
+    fn emit_i32_shift_op(
+        &mut self,
+        op: fn(&mut B, &mut CodeBuffer, B::Reg, B::Reg, B::Reg),
+        zero_extend: bool,
+    ) -> Result<(), CompileError> {
+        let rhs = self.value_stack.pop();
+        let lhs = self.value_stack.pop();
+        self.backend
+            .emit_load_slot(&mut self.code, self.backend.tmp0(), lhs);
+        self.backend
+            .emit_load_slot(&mut self.code, self.backend.tmp1(), rhs);
+        self.backend
+            .emit_li(&mut self.code, self.backend.tmp2(), 31);
+        self.backend.emit_and(
+            &mut self.code,
+            self.backend.tmp1(),
+            self.backend.tmp1(),
+            self.backend.tmp2(),
+        );
+        op(
+            self.backend,
+            &mut self.code,
+            self.backend.tmp0(),
+            self.backend.tmp0(),
+            self.backend.tmp1(),
+        );
+        if zero_extend {
+            self.emit_i32_zero_extend_tmp0();
+        }
         let result = self.value_stack.push();
         self.backend
             .emit_store_slot(&mut self.code, result, self.backend.tmp0());
@@ -980,8 +1119,10 @@ impl<'ctx, B: ArchBackend> FunctionCompiler<'ctx, B> {
     fn visit_end_impl(&mut self) -> Result<(), CompileError> {
         if let Some(frame) = self.pop_control_frame() {
             if self.current_path_reachable {
-                self.value_stack
+                let moves = self
+                    .value_stack
                     .truncate_keep(frame.entry_stack_height, frame.result_arity);
+                self.emit_slot_moves(&moves);
             } else if frame.has_incoming_end {
                 self.value_stack.truncate_keep(frame.entry_stack_height, 0);
                 for _ in 0..frame.result_arity {
@@ -1014,24 +1155,42 @@ impl<'ctx, B: ArchBackend> FunctionCompiler<'ctx, B> {
         if !is_loop {
             self.branch_frame_mut(relative_depth)?.has_incoming_end = true;
         }
-        self.backend.emit_jump(&mut self.code, branch_target);
         let keep = if is_loop { 0 } else { result_arity };
-        self.value_stack.truncate_keep(entry_stack_height, keep);
+        let moves = self.value_stack.truncate_keep(entry_stack_height, keep);
+        self.emit_slot_moves(&moves);
+        self.backend.emit_jump(&mut self.code, branch_target);
         self.current_path_reachable = false;
         Ok(())
     }
 
     fn visit_br_if_impl(&mut self, relative_depth: u32) -> Result<(), CompileError> {
         let cond_slot = self.value_stack.pop();
-        let frame = self.branch_frame(relative_depth)?;
-        let branch_target = frame.branch_target;
-        if !matches!(frame.kind, ControlKind::Loop) {
+        let (branch_target, entry_stack_height, result_arity, is_loop) = {
+            let frame = self.branch_frame(relative_depth)?;
+            (
+                frame.branch_target,
+                frame.entry_stack_height,
+                frame.result_arity,
+                matches!(frame.kind, ControlKind::Loop),
+            )
+        };
+        if !is_loop {
             self.branch_frame_mut(relative_depth)?.has_incoming_end = true;
         }
+        let keep = if is_loop { 0 } else { result_arity };
+        let moves = self.branch_slot_moves(entry_stack_height, keep);
         let tmp0 = self.backend.tmp0();
         self.backend.emit_load_slot(&mut self.code, tmp0, cond_slot);
-        self.backend
-            .emit_branch_not_zero(&mut self.code, tmp0, branch_target);
+        if moves.is_empty() {
+            self.backend
+                .emit_branch_not_zero(&mut self.code, tmp0, branch_target);
+        } else {
+            let skip = self.new_label();
+            self.backend.emit_branch_zero(&mut self.code, tmp0, skip);
+            self.emit_slot_moves(&moves);
+            self.backend.emit_jump(&mut self.code, branch_target);
+            self.bind_label(skip);
+        }
         Ok(())
     }
 
@@ -1047,8 +1206,28 @@ impl<'ctx, B: ArchBackend> FunctionCompiler<'ctx, B> {
             .collect::<Result<_, _>>()
             .map_err(|_| CompileError::InvalidWasm("br_table targets"))?;
 
+        let mut branch_stubs = Vec::new();
         for target_depth in &targets {
-            let label = self.branch_frame(*target_depth)?.branch_target;
+            let (branch_target, entry_stack_height, result_arity, is_loop) = {
+                let frame = self.branch_frame(*target_depth)?;
+                (
+                    frame.branch_target,
+                    frame.entry_stack_height,
+                    frame.result_arity,
+                    matches!(frame.kind, ControlKind::Loop),
+                )
+            };
+            let label = if is_loop || result_arity == 0 {
+                branch_target
+            } else {
+                let stub = self.new_label();
+                branch_stubs.push((
+                    stub,
+                    branch_target,
+                    self.branch_slot_moves(entry_stack_height, result_arity),
+                ));
+                stub
+            };
             self.backend.emit_branch_zero(&mut self.code, tmp0, label);
             self.backend.emit_li(&mut self.code, tmp1, 1);
             self.backend.emit_sub(&mut self.code, tmp0, tmp0, tmp1);
@@ -1071,10 +1250,22 @@ impl<'ctx, B: ArchBackend> FunctionCompiler<'ctx, B> {
         if !default_is_loop {
             self.branch_frame_mut(table.default())?.has_incoming_end = true;
         }
-        self.backend.emit_jump(&mut self.code, default_target);
-
         let keep = if default_is_loop { 0 } else { default_arity };
-        self.value_stack.truncate_keep(default_entry, keep);
+        let default_moves = self.value_stack.truncate_keep(default_entry, keep);
+        if default_moves.is_empty() {
+            self.backend.emit_jump(&mut self.code, default_target);
+        } else {
+            let default_stub = self.new_label();
+            self.backend.emit_jump(&mut self.code, default_stub);
+            branch_stubs.push((default_stub, default_target, default_moves));
+        }
+
+        for (stub_label, target_label, moves) in branch_stubs {
+            self.bind_label(stub_label);
+            self.emit_slot_moves(&moves);
+            self.backend.emit_jump(&mut self.code, target_label);
+        }
+
         self.current_path_reachable = false;
 
         Ok(())
@@ -1139,7 +1330,7 @@ impl<'ctx, B: ArchBackend> FunctionCompiler<'ctx, B> {
     fn visit_i32_const_impl(&mut self, value: i32) -> Result<(), CompileError> {
         let slot = self.value_stack.push();
         self.backend
-            .emit_li(&mut self.code, self.backend.tmp0(), value as i64);
+            .emit_li(&mut self.code, self.backend.tmp0(), (value as u32) as i64);
         self.backend
             .emit_store_slot(&mut self.code, slot, self.backend.tmp0());
         Ok(())
@@ -1173,55 +1364,55 @@ impl<'ctx, B: ArchBackend> FunctionCompiler<'ctx, B> {
     }
 
     fn visit_i32_add_impl(&mut self) -> Result<(), CompileError> {
-        self.emit_binary_op(B::emit_add)
+        self.emit_i32_binary_op(B::emit_addw)
     }
 
     fn visit_i32_sub_impl(&mut self) -> Result<(), CompileError> {
-        self.emit_binary_op(B::emit_sub)
+        self.emit_i32_binary_op(B::emit_subw)
     }
 
     fn visit_i32_mul_impl(&mut self) -> Result<(), CompileError> {
-        self.emit_binary_op(B::emit_mul)
+        self.emit_i32_binary_op(B::emit_mulw)
     }
 
     fn visit_i32_div_s_impl(&mut self) -> Result<(), CompileError> {
-        self.emit_binary_op(B::emit_div_s)
+        self.emit_i32_binary_op(B::emit_divw)
     }
 
     fn visit_i32_div_u_impl(&mut self) -> Result<(), CompileError> {
-        self.emit_binary_op(B::emit_div_u)
+        self.emit_i32_binary_op(B::emit_divuw)
     }
 
     fn visit_i32_rem_s_impl(&mut self) -> Result<(), CompileError> {
-        self.emit_binary_op(B::emit_rem_s)
+        self.emit_i32_binary_op(B::emit_remw)
     }
 
     fn visit_i32_rem_u_impl(&mut self) -> Result<(), CompileError> {
-        self.emit_binary_op(B::emit_rem_u)
+        self.emit_i32_binary_op(B::emit_remuw)
     }
 
     fn visit_i32_and_impl(&mut self) -> Result<(), CompileError> {
-        self.emit_binary_op(B::emit_and)
+        self.emit_i32_binary_op_zero_ext(B::emit_and)
     }
 
     fn visit_i32_or_impl(&mut self) -> Result<(), CompileError> {
-        self.emit_binary_op(B::emit_or)
+        self.emit_i32_binary_op_zero_ext(B::emit_or)
     }
 
     fn visit_i32_xor_impl(&mut self) -> Result<(), CompileError> {
-        self.emit_binary_op(B::emit_xor)
+        self.emit_i32_binary_op_zero_ext(B::emit_xor)
     }
 
     fn visit_i32_shl_impl(&mut self) -> Result<(), CompileError> {
-        self.emit_binary_op(B::emit_shl)
+        self.emit_i32_shift_op(B::emit_sllw, true)
     }
 
     fn visit_i32_shr_u_impl(&mut self) -> Result<(), CompileError> {
-        self.emit_binary_op(B::emit_shr_u)
+        self.emit_i32_shift_op(B::emit_srlw, true)
     }
 
     fn visit_i32_shr_s_impl(&mut self) -> Result<(), CompileError> {
-        self.emit_binary_op(B::emit_shr_s)
+        self.emit_i32_shift_op(B::emit_sraw, true)
     }
 
     fn visit_i64_add_impl(&mut self) -> Result<(), CompileError> {
@@ -1527,13 +1718,55 @@ impl<'ctx, B: ArchBackend> FunctionCompiler<'ctx, B> {
     }
 
     fn visit_i64_eqz_impl(&mut self) -> Result<(), CompileError> {
-        self.visit_i32_eqz_impl()
+        let input = self.value_stack.pop();
+        self.backend
+            .emit_load_slot(&mut self.code, self.backend.tmp0(), input);
+        self.backend
+            .emit_eqz(&mut self.code, self.backend.tmp0(), self.backend.tmp0());
+        let result = self.value_stack.push();
+        self.backend
+            .emit_store_slot(&mut self.code, result, self.backend.tmp0());
+        Ok(())
     }
     fn visit_i64_eq_impl(&mut self) -> Result<(), CompileError> {
-        self.visit_i32_eq_impl()
+        let rhs = self.value_stack.pop();
+        let lhs = self.value_stack.pop();
+        self.backend
+            .emit_load_slot(&mut self.code, self.backend.tmp0(), lhs);
+        self.backend
+            .emit_load_slot(&mut self.code, self.backend.tmp1(), rhs);
+        self.backend.emit_xor(
+            &mut self.code,
+            self.backend.tmp0(),
+            self.backend.tmp0(),
+            self.backend.tmp1(),
+        );
+        self.backend
+            .emit_eqz(&mut self.code, self.backend.tmp0(), self.backend.tmp0());
+        let result = self.value_stack.push();
+        self.backend
+            .emit_store_slot(&mut self.code, result, self.backend.tmp0());
+        Ok(())
     }
     fn visit_i64_ne_impl(&mut self) -> Result<(), CompileError> {
-        self.visit_i32_ne_impl()
+        let rhs = self.value_stack.pop();
+        let lhs = self.value_stack.pop();
+        self.backend
+            .emit_load_slot(&mut self.code, self.backend.tmp0(), lhs);
+        self.backend
+            .emit_load_slot(&mut self.code, self.backend.tmp1(), rhs);
+        self.backend.emit_xor(
+            &mut self.code,
+            self.backend.tmp0(),
+            self.backend.tmp0(),
+            self.backend.tmp1(),
+        );
+        self.backend
+            .emit_snez(&mut self.code, self.backend.tmp0(), self.backend.tmp0());
+        let result = self.value_stack.push();
+        self.backend
+            .emit_store_slot(&mut self.code, result, self.backend.tmp0());
+        Ok(())
     }
     fn visit_f64_eq_impl(&mut self) -> Result<(), CompileError> {
         self.emit_binary_host_cmp(host_f64_eq_wrapper as *const () as usize)
@@ -1772,30 +2005,91 @@ impl<'ctx, B: ArchBackend> FunctionCompiler<'ctx, B> {
 
     fn visit_i32_clz_impl(&mut self) -> Result<(), CompileError> {
         let src = self.value_stack.pop();
+        let helper_arg0 = self.helper_slot(HELPER_ARG0_SLOT);
         self.backend
             .emit_load_slot(&mut self.code, self.backend.tmp0(), src);
         self.backend
-            .emit_clz(&mut self.code, self.backend.tmp0(), self.backend.tmp0());
-        let result = self.value_stack.push();
+            .emit_store_slot(&mut self.code, helper_arg0, self.backend.tmp0());
         self.backend
-            .emit_store_slot(&mut self.code, result, self.backend.tmp0());
+            .emit_call_host(&mut self.code, host_i32_clz_wrapper as *const () as usize);
+        let result = self.value_stack.push();
+        self.emit_call_wrapper_result(result);
         Ok(())
     }
 
     fn visit_i32_ctz_impl(&mut self) -> Result<(), CompileError> {
         let src = self.value_stack.pop();
+        let helper_arg0 = self.helper_slot(HELPER_ARG0_SLOT);
         self.backend
             .emit_load_slot(&mut self.code, self.backend.tmp0(), src);
         self.backend
-            .emit_ctz(&mut self.code, self.backend.tmp0(), self.backend.tmp0());
-        let result = self.value_stack.push();
+            .emit_store_slot(&mut self.code, helper_arg0, self.backend.tmp0());
         self.backend
-            .emit_store_slot(&mut self.code, result, self.backend.tmp0());
+            .emit_call_host(&mut self.code, host_i32_ctz_wrapper as *const () as usize);
+        let result = self.value_stack.push();
+        self.emit_call_wrapper_result(result);
         Ok(())
     }
 
     fn visit_i32_rotl_impl(&mut self) -> Result<(), CompileError> {
-        self.emit_binary_op(B::emit_rotl)
+        let lhs_temp = self.helper_slot(2);
+        let shl_temp = self.helper_slot(3);
+        let rhs = self.value_stack.pop();
+        let lhs = self.value_stack.pop();
+        self.backend
+            .emit_load_slot(&mut self.code, self.backend.tmp0(), lhs);
+        self.backend
+            .emit_load_slot(&mut self.code, self.backend.tmp1(), rhs);
+        self.emit_i32_zero_extend_tmp0();
+        self.backend
+            .emit_store_slot(&mut self.code, lhs_temp, self.backend.tmp0());
+        self.backend
+            .emit_li(&mut self.code, self.backend.tmp2(), 31);
+        self.backend.emit_and(
+            &mut self.code,
+            self.backend.tmp1(),
+            self.backend.tmp1(),
+            self.backend.tmp2(),
+        );
+        self.backend
+            .emit_load_slot(&mut self.code, self.backend.tmp0(), lhs_temp);
+        self.backend.emit_shl(
+            &mut self.code,
+            self.backend.tmp0(),
+            self.backend.tmp0(),
+            self.backend.tmp1(),
+        );
+        self.backend
+            .emit_store_slot(&mut self.code, shl_temp, self.backend.tmp0());
+        self.backend
+            .emit_li(&mut self.code, self.backend.tmp2(), 32);
+        self.backend.emit_sub(
+            &mut self.code,
+            self.backend.tmp2(),
+            self.backend.tmp2(),
+            self.backend.tmp1(),
+        );
+        self.backend
+            .emit_load_slot(&mut self.code, self.backend.tmp0(), lhs_temp);
+        self.backend.emit_shr_u(
+            &mut self.code,
+            self.backend.tmp0(),
+            self.backend.tmp0(),
+            self.backend.tmp2(),
+        );
+        self.backend
+            .emit_load_slot(&mut self.code, self.backend.tmp1(), shl_temp);
+        self.backend.emit_or(
+            &mut self.code,
+            self.backend.tmp0(),
+            self.backend.tmp0(),
+            self.backend.tmp1(),
+        );
+        self.emit_i32_zero_extend_tmp0();
+        let result = self.value_stack.push();
+        self.backend
+            .emit_store_slot(&mut self.code, result, self.backend.tmp0());
+        Ok(())
     }
 
     fn visit_i32_rotr_impl(&mut self) -> Result<(), CompileError> {
@@ -1807,31 +2101,12 @@ impl<'ctx, B: ArchBackend> FunctionCompiler<'ctx, B> {
             .emit_load_slot(&mut self.code, self.backend.tmp0(), lhs);
         self.backend
             .emit_load_slot(&mut self.code, self.backend.tmp1(), rhs);
-        self.backend
-            .emit_li(&mut self.code, self.backend.tmp2(), 32);
-        self.backend.emit_shl(
-            &mut self.code,
-            self.backend.tmp0(),
-            self.backend.tmp0(),
-            self.backend.tmp2(),
-        );
-        self.backend.emit_shr_u(
-            &mut self.code,
-            self.backend.tmp0(),
-            self.backend.tmp0(),
-            self.backend.tmp2(),
-        );
+        self.emit_i32_zero_extend_tmp0();
         self.backend
             .emit_store_slot(&mut self.code, lhs_temp, self.backend.tmp0());
         self.backend
-            .emit_li(&mut self.code, self.backend.tmp2(), 59);
-        self.backend.emit_shl(
-            &mut self.code,
-            self.backend.tmp1(),
-            self.backend.tmp1(),
-            self.backend.tmp2(),
-        );
-        self.backend.emit_shr_u(
+            .emit_li(&mut self.code, self.backend.tmp2(), 31);
+        self.backend.emit_and(
             &mut self.code,
             self.backend.tmp1(),
             self.backend.tmp1(),
@@ -1909,6 +2184,7 @@ impl<'ctx, B: ArchBackend> FunctionCompiler<'ctx, B> {
             self.backend.tmp0(),
             self.backend.tmp1(),
         );
+        self.emit_i32_zero_extend_tmp0();
         let result = self.value_stack.push();
         self.backend
             .emit_store_slot(&mut self.code, result, self.backend.tmp0());
@@ -1933,6 +2209,7 @@ impl<'ctx, B: ArchBackend> FunctionCompiler<'ctx, B> {
             self.backend.tmp0(),
             self.backend.tmp1(),
         );
+        self.emit_i32_zero_extend_tmp0();
         let result = self.value_stack.push();
         self.backend
             .emit_store_slot(&mut self.code, result, self.backend.tmp0());
@@ -2269,7 +2546,7 @@ impl<'ctx, B: ArchBackend> FunctionCompiler<'ctx, B> {
         let src = self.value_stack.pop();
         self.backend
             .emit_load_slot(&mut self.code, self.backend.tmp0(), src);
-        // Zero-extend: shift left 32 then right 32 to clear upper bits
+        // Zero-extend lower 32 bits: shift left 32 then logical right 32
         self.backend
             .emit_li(&mut self.code, self.backend.tmp1(), 32);
         self.backend.emit_shl(
@@ -2379,7 +2656,7 @@ impl<'ctx, B: ArchBackend> FunctionCompiler<'ctx, B> {
     }
 
     fn visit_i64_rotl_impl(&mut self) -> Result<(), CompileError> {
-        self.visit_i32_rotl_impl()
+        self.emit_binary_op(B::emit_rotl)
     }
 
     fn visit_i64_rotr_impl(&mut self) -> Result<(), CompileError> {
@@ -3759,6 +4036,24 @@ unsafe extern "C" fn host_memory_size_wrapper(
     0
 }
 
+unsafe extern "C" fn host_i32_clz_wrapper(_ctx: *mut VmContext, frame: *mut RawValue) -> RawValue {
+    let val = unsafe { *frame.add(HELPER_ARG0_SLOT as usize) as u32 };
+    let count = val.leading_zeros();
+    unsafe {
+        *frame.add(HELPER_RET_SLOT as usize) = count as RawValue;
+    }
+    0
+}
+
+unsafe extern "C" fn host_i32_ctz_wrapper(_ctx: *mut VmContext, frame: *mut RawValue) -> RawValue {
+    let val = unsafe { *frame.add(HELPER_ARG0_SLOT as usize) as u32 };
+    let count = val.trailing_zeros();
+    unsafe {
+        *frame.add(HELPER_RET_SLOT as usize) = count as RawValue;
+    }
+    0
+}
+
 unsafe extern "C" fn host_i32_popcnt_wrapper(
     _ctx: *mut VmContext,
     frame: *mut RawValue,
@@ -4058,8 +4353,11 @@ unsafe extern "C" fn host_check_trap_wrapper(
     ctx: *mut VmContext,
     frame: *mut RawValue,
 ) -> RawValue {
-    let trapped = unsafe { (*ctx).trap != TrapCode::None };
+    let trap_val = unsafe { (*ctx).trap as u32 };
+    let trapped = trap_val != 0;
     unsafe {
+        (*ctx).debug_last_trap_seen = trap_val;
+        (*ctx).debug_check_count = (*ctx).debug_check_count.wrapping_add(1);
         *frame.add(HELPER_ARG1_SLOT as usize) = if trapped { 1 } else { 0 };
     }
     0

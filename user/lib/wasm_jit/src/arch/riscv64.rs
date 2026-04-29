@@ -20,6 +20,8 @@ pub struct Riscv64Backend {
     frame_size: u32,
     saved_ra_offset: u32,
     saved_s0_offset: u32,
+    ctx_spill_offset: u32,
+    fp_spill_offset: u32,
 }
 
 impl Riscv64Backend {
@@ -28,6 +30,8 @@ impl Riscv64Backend {
             frame_size: 0,
             saved_ra_offset: 0,
             saved_s0_offset: 0,
+            ctx_spill_offset: 0,
+            fp_spill_offset: 0,
         }
     }
 
@@ -232,6 +236,9 @@ impl ArchBackend for Riscv64Backend {
         self.frame_size = Self::total_stack_bytes(frame_slots);
         self.saved_ra_offset = Self::saved_reg_offset(frame_slots, RA_SAVE_OFFSET);
         self.saved_s0_offset = Self::saved_reg_offset(frame_slots, S0_SAVE_OFFSET);
+        // CTX/FP spills must be after RA/S0 saves (frame_bytes + 16/24) to avoid overlap
+        self.ctx_spill_offset = Self::saved_reg_offset(frame_slots, CTX_SPILL_OFFSET);
+        self.fp_spill_offset = Self::saved_reg_offset(frame_slots, FP_SPILL_OFFSET);
 
         self.emit_addi_large(code, reg::SP, reg::SP, -(self.frame_size as i32));
         self.emit_store_base_offset(code, reg::SP, self.saved_ra_offset, reg::RA);
@@ -299,16 +306,37 @@ impl ArchBackend for Riscv64Backend {
         });
     }
 
+    fn emit_addw(&mut self, code: &mut CodeBuffer, dst: Self::Reg, lhs: Self::Reg, rhs: Self::Reg) {
+        self.emit_raw(
+            code,
+            Self::encode_r_type(0x3b, 0b000, 0b0000000, dst, lhs, rhs),
+        );
+    }
+
     fn emit_sub(&mut self, code: &mut CodeBuffer, dst: Self::Reg, lhs: Self::Reg, rhs: Self::Reg) {
         Self::emit_with_builder(code, |b| {
             b.sub(dst, lhs, rhs);
         });
     }
 
+    fn emit_subw(&mut self, code: &mut CodeBuffer, dst: Self::Reg, lhs: Self::Reg, rhs: Self::Reg) {
+        self.emit_raw(
+            code,
+            Self::encode_r_type(0x3b, 0b000, 0b0100000, dst, lhs, rhs),
+        );
+    }
+
     fn emit_mul(&mut self, code: &mut CodeBuffer, dst: Self::Reg, lhs: Self::Reg, rhs: Self::Reg) {
         Self::emit_with_builder(code, |b| {
             b.mul(dst, lhs, rhs);
         });
+    }
+
+    fn emit_mulw(&mut self, code: &mut CodeBuffer, dst: Self::Reg, lhs: Self::Reg, rhs: Self::Reg) {
+        self.emit_raw(
+            code,
+            Self::encode_r_type(0x3b, 0b000, 0b0000001, dst, lhs, rhs),
+        );
     }
 
     fn emit_div_s(
@@ -323,6 +351,13 @@ impl ArchBackend for Riscv64Backend {
         });
     }
 
+    fn emit_divw(&mut self, code: &mut CodeBuffer, dst: Self::Reg, lhs: Self::Reg, rhs: Self::Reg) {
+        self.emit_raw(
+            code,
+            Self::encode_r_type(0x3b, 0b100, 0b0000001, dst, lhs, rhs),
+        );
+    }
+
     fn emit_div_u(
         &mut self,
         code: &mut CodeBuffer,
@@ -333,6 +368,19 @@ impl ArchBackend for Riscv64Backend {
         Self::emit_with_builder(code, |b| {
             b.divu(dst, lhs, rhs);
         });
+    }
+
+    fn emit_divuw(
+        &mut self,
+        code: &mut CodeBuffer,
+        dst: Self::Reg,
+        lhs: Self::Reg,
+        rhs: Self::Reg,
+    ) {
+        self.emit_raw(
+            code,
+            Self::encode_r_type(0x3b, 0b101, 0b0000001, dst, lhs, rhs),
+        );
     }
 
     fn emit_rem_s(
@@ -347,6 +395,13 @@ impl ArchBackend for Riscv64Backend {
         });
     }
 
+    fn emit_remw(&mut self, code: &mut CodeBuffer, dst: Self::Reg, lhs: Self::Reg, rhs: Self::Reg) {
+        self.emit_raw(
+            code,
+            Self::encode_r_type(0x3b, 0b110, 0b0000001, dst, lhs, rhs),
+        );
+    }
+
     fn emit_rem_u(
         &mut self,
         code: &mut CodeBuffer,
@@ -357,6 +412,19 @@ impl ArchBackend for Riscv64Backend {
         Self::emit_with_builder(code, |b| {
             b.remu(dst, lhs, rhs);
         });
+    }
+
+    fn emit_remuw(
+        &mut self,
+        code: &mut CodeBuffer,
+        dst: Self::Reg,
+        lhs: Self::Reg,
+        rhs: Self::Reg,
+    ) {
+        self.emit_raw(
+            code,
+            Self::encode_r_type(0x3b, 0b111, 0b0000001, dst, lhs, rhs),
+        );
     }
 
     fn emit_and(&mut self, code: &mut CodeBuffer, dst: Self::Reg, lhs: Self::Reg, rhs: Self::Reg) {
@@ -383,6 +451,13 @@ impl ArchBackend for Riscv64Backend {
         });
     }
 
+    fn emit_sllw(&mut self, code: &mut CodeBuffer, dst: Self::Reg, lhs: Self::Reg, rhs: Self::Reg) {
+        self.emit_raw(
+            code,
+            Self::encode_r_type(0x3b, 0b001, 0b0000000, dst, lhs, rhs),
+        );
+    }
+
     fn emit_shr_u(
         &mut self,
         code: &mut CodeBuffer,
@@ -395,6 +470,13 @@ impl ArchBackend for Riscv64Backend {
         });
     }
 
+    fn emit_srlw(&mut self, code: &mut CodeBuffer, dst: Self::Reg, lhs: Self::Reg, rhs: Self::Reg) {
+        self.emit_raw(
+            code,
+            Self::encode_r_type(0x3b, 0b101, 0b0000000, dst, lhs, rhs),
+        );
+    }
+
     fn emit_shr_s(
         &mut self,
         code: &mut CodeBuffer,
@@ -405,6 +487,13 @@ impl ArchBackend for Riscv64Backend {
         Self::emit_with_builder(code, |b| {
             b.sra(dst, lhs, rhs);
         });
+    }
+
+    fn emit_sraw(&mut self, code: &mut CodeBuffer, dst: Self::Reg, lhs: Self::Reg, rhs: Self::Reg) {
+        self.emit_raw(
+            code,
+            Self::encode_r_type(0x3b, 0b101, 0b0100000, dst, lhs, rhs),
+        );
     }
 
     fn emit_eqz(&mut self, code: &mut CodeBuffer, dst: Self::Reg, src: Self::Reg) {
@@ -584,8 +673,8 @@ impl ArchBackend for Riscv64Backend {
     }
 
     fn emit_call_host(&mut self, code: &mut CodeBuffer, addr: usize) {
-        let ctx_spill = Self::saved_reg_offset_from_base(CTX_SPILL_OFFSET);
-        let fp_spill = Self::saved_reg_offset_from_base(FP_SPILL_OFFSET);
+        let ctx_spill = self.ctx_spill_offset;
+        let fp_spill = self.fp_spill_offset;
         self.emit_store_base_offset(code, reg::SP, ctx_spill, self.ctx_reg());
         self.emit_store_base_offset(code, reg::SP, fp_spill, self.fp_reg());
         self.emit_li(code, self.tmp2(), addr as i64);

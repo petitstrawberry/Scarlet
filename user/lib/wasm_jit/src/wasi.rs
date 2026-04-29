@@ -23,6 +23,7 @@ pub unsafe fn dispatch_imported(
 ) -> RawValue {
     unsafe {
         let ctx_ref = &mut *ctx;
+        ctx_ref.debug_import_call_count = ctx_ref.debug_import_call_count.wrapping_add(1);
         let (module, name) = match ctx_ref.imported_func_name(import_index) {
             Some(pair) => pair,
             None => return u32::MAX as RawValue,
@@ -84,15 +85,28 @@ pub unsafe fn dispatch_imported(
     }
 }
 
-unsafe fn wasi_args_get(_ctx: &mut VmContext, args: *const RawValue) -> RawValue {
-    let _argv_ptr = *args.add(0) as u32;
-    let _argv_buf_ptr = *args.add(1) as u32;
+const WASI_ARGS: &[&[u8]] = &[b"\0", b"/\0"];
+const WASI_ARGS_COUNT: u32 = 2;
+const WASI_ARGS_BUF_SIZE: u32 = 3;
+
+unsafe fn wasi_args_get(ctx: &mut VmContext, args: *const RawValue) -> RawValue {
+    let argv_ptr = *args.add(0) as u32;
+    let argv_buf_ptr = *args.add(1) as u32;
+
+    let mut buf_offset: u32 = 0;
+    for (i, arg_bytes) in WASI_ARGS.iter().enumerate() {
+        write_u32_le(ctx, argv_ptr + (i as u32) * 4, argv_buf_ptr + buf_offset);
+        for &b in *arg_bytes {
+            write_u8(ctx, argv_buf_ptr + buf_offset, b);
+            buf_offset += 1;
+        }
+    }
     ESUCCESS as RawValue
 }
 
 unsafe fn wasi_args_sizes_get(ctx: &mut VmContext, args: *const RawValue) -> RawValue {
-    write_u32_le(ctx, *args.add(0) as u32, 0);
-    write_u32_le(ctx, *args.add(1) as u32, 0);
+    write_u32_le(ctx, *args.add(0) as u32, WASI_ARGS_COUNT);
+    write_u32_le(ctx, *args.add(1) as u32, WASI_ARGS_BUF_SIZE);
     ESUCCESS as RawValue
 }
 
@@ -429,11 +443,22 @@ unsafe fn wasi_fd_tell(ctx: &mut VmContext, args: *const RawValue) -> RawValue {
     ESUCCESS as RawValue
 }
 
-unsafe fn wasi_path_create_directory(_ctx: &mut VmContext, args: *const RawValue) -> RawValue {
-    let _fd = *args.add(0) as u32;
-    let _path_ptr = *args.add(1) as u32;
-    let _path_len = *args.add(2) as u32;
-    ENOSYS as RawValue
+unsafe fn wasi_path_create_directory(ctx: &mut VmContext, args: *const RawValue) -> RawValue {
+    let fd = *args.add(0) as u32;
+    let path_ptr = *args.add(1) as u32;
+    let path_len = *args.add(2) as u32;
+
+    if !ctx.check_memory(path_ptr as u64, path_len as u64) {
+        return EBADF as RawValue;
+    }
+
+    let ops = get_ops!(ctx);
+    let result = (ops.path_create_directory)(fd, ctx.memory_base.add(path_ptr as usize), path_len);
+    if result < 0 {
+        return (-result) as RawValue;
+    }
+
+    ESUCCESS as RawValue
 }
 
 unsafe fn wasi_path_filestat_get(_ctx: &mut VmContext, args: *const RawValue) -> RawValue {
@@ -704,6 +729,12 @@ unsafe fn write_u32_le(ctx: &mut VmContext, addr: u32, value: u32) {
     if ctx.check_memory(addr as u64, 4) {
         let ptr = ctx.memory_base.add(addr as usize);
         core::ptr::write_unaligned(ptr as *mut u32, value.to_le());
+    }
+}
+
+unsafe fn write_u8(ctx: &mut VmContext, addr: u32, value: u8) {
+    if ctx.check_memory(addr as u64, 1) {
+        *ctx.memory_base.add(addr as usize) = value;
     }
 }
 
