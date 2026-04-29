@@ -68,6 +68,58 @@ pub struct HostOps {
     pub path_unlink_file: unsafe extern "C" fn(dirfd: u32, path: *const u8, path_len: u32) -> i32,
     pub path_remove_directory:
         unsafe extern "C" fn(dirfd: u32, path: *const u8, path_len: u32) -> i32,
+    /// Get filestat by path with lookup flags. Writes 64-byte filestat to buf. Returns 0 or negative errno.
+    pub path_filestat_get_flags:
+        unsafe extern "C" fn(dirfd: u32, flags: u32, path: *const u8, path_len: u32, buf: *mut u8) -> i32,
+    /// Set file size. Returns 0 or negative errno.
+    pub fd_filestat_set_size: unsafe extern "C" fn(fd: u32, size: u64) -> i32,
+    /// Read from fd at offset without moving position. Returns 0 or negative errno.
+    pub fd_pread:
+        unsafe extern "C" fn(fd: u32, buf: *mut u8, buf_len: usize, offset: u64, nread: *mut u32) -> i32,
+    /// Write to fd at offset without moving position. Returns 0 or negative errno.
+    pub fd_pwrite: unsafe extern "C" fn(
+        fd: u32,
+        data: *const u8,
+        data_len: usize,
+        offset: u64,
+        nwritten: *mut u32,
+    ) -> i32,
+    /// Read directory entries. Returns 0 or negative errno.
+    pub fd_readdir:
+        unsafe extern "C" fn(fd: u32, buf: *mut u8, buf_len: u32, cookie: u64, bufused: *mut u32) -> i32,
+    /// Create a symbolic link. Returns 0 or negative errno.
+    pub path_symlink: unsafe extern "C" fn(
+        old_path: *const u8,
+        old_path_len: u32,
+        dirfd: u32,
+        new_path: *const u8,
+        new_path_len: u32,
+    ) -> i32,
+    /// Read symbolic link target. Returns 0 or negative errno.
+    pub path_readlink: unsafe extern "C" fn(
+        fd: u32,
+        path: *const u8,
+        path_len: u32,
+        buf: *mut u8,
+        buf_len: u32,
+        nread: *mut u32,
+    ) -> i32,
+    /// Rename a file. Returns 0 or negative errno.
+    pub path_rename: unsafe extern "C" fn(
+        old_fd: u32,
+        old_path: *const u8,
+        old_path_len: u32,
+        new_fd: u32,
+        new_path: *const u8,
+        new_path_len: u32,
+    ) -> i32,
+    /// Renumber fd to to. Returns 0 or negative errno.
+    pub fd_renumber: unsafe extern "C" fn(fd: u32, to: u32) -> i32,
+    /// Get environ count and total buffer size (including NUL terminators).
+    pub environ_sizes_get: unsafe extern "C" fn(count_out: *mut u32, buf_size_out: *mut u32),
+    /// Get env var at index. Writes "KEY=VALUE\0" to dst.
+    /// Returns number of bytes written (including NUL).
+    pub environ_get_env: unsafe extern "C" fn(index: u32, dst: *mut u8, dst_cap: usize) -> usize,
 }
 
 #[repr(C)]

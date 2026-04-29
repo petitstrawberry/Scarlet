@@ -4,15 +4,16 @@
 
 extern crate alloc;
 #[cfg(not(test))]
-extern crate scarlet_std as std;
-#[cfg(test)]
-extern crate std;
+use scarlet_std as std;
 
 use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
 use alloc::string::{String, ToString};
 use core::cell::UnsafeCell;
-use std::fs::{File, OpenOptions, create_directory, remove_directory, remove_file};
+use std::fs::{
+    File, OpenOptions, create_directory, create_symlink, list_directory, read_link,
+    remove_directory, remove_file,
+};
 use std::io::SeekFrom;
 use std::{format, println, vec::Vec};
 use wasm_jit::runtime::HostOps;
@@ -21,13 +22,18 @@ const WASM_MAGIC: [u8; 4] = [0x00, 0x61, 0x73, 0x6D];
 
 const ESUCCESS: u32 = 0;
 const EBADF: u32 = 8;
+const EEXIST: u32 = 20;
 const EINVAL: u32 = 28;
+const EISDIR: u32 = 31;
 const ENOENT: u32 = 44;
 const ENOSYS: u32 = 52;
+const ENOTDIR: u32 = 54;
+const ENOTEMPTY: u32 = 55;
 
 const FILETYPE_CHARACTER_DEVICE: u8 = 2;
 const FILETYPE_DIRECTORY: u8 = 3;
 const FILETYPE_REGULAR_FILE: u8 = 4;
+const FILETYPE_SYMBOLIC_LINK: u8 = 7;
 
 const PREOPEN_FD: u32 = 3;
 
@@ -50,7 +56,7 @@ struct WasiRuntime {
 }
 
 impl WasiRuntime {
-    fn new() -> Self {
+    fn new(preopen_dirs: &[String]) -> Self {
         let mut fds = BTreeMap::new();
         fds.insert(
             0,
@@ -70,26 +76,21 @@ impl WasiRuntime {
                 kind: FdKind::Stderr,
             },
         );
-        fds.insert(
-            PREOPEN_FD,
-            FdEntry {
-                kind: FdKind::PreopenDir {
-                    path: "/".to_string(),
+        let mut next_fd = PREOPEN_FD;
+        for dir in preopen_dirs {
+            fds.insert(
+                next_fd,
+                FdEntry {
+                    kind: FdKind::PreopenDir { path: dir.clone() },
                 },
-            },
-        );
-        fds.insert(
-            PREOPEN_FD + 1,
-            FdEntry {
-                kind: FdKind::PreopenDir {
-                    path: "/tmp".to_string(),
-                },
-            },
-        );
+            );
+            next_fd += 1;
+        }
+        let preopen_path = preopen_dirs.first().cloned().unwrap_or_default();
         Self {
             fds,
-            next_fd: PREOPEN_FD + 2,
-            preopen_path: "/".to_string(),
+            next_fd,
+            preopen_path,
         }
     }
 
@@ -109,6 +110,7 @@ static mut FAKE_TIME_NS: u64 = 1_700_000_000_000_000_000;
 static mut WASM_MEMORY_BASE: *mut u8 = core::ptr::null_mut();
 static mut WASM_MEMORY_CAP: usize = 0;
 static mut WASI_ARGS_STORE: *const Vec<Vec<u8>> = core::ptr::null();
+static mut WASI_ENV_STORE: *const Vec<Vec<u8>> = core::ptr::null();
 
 unsafe extern "C" fn wasm_memory_realloc(
     _old_base: *mut u8,
@@ -210,8 +212,8 @@ unsafe extern "C" fn host_path_open(
         Some(FdEntry {
             kind: FdKind::PreopenDir { path },
         }) => path.as_str(),
-        Some(_) => return -(EBADF as i32),
-        None => return -(EBADF as i32),
+        Some(_) => return -(ENOTDIR as i32),
+        None => return -(ENOTDIR as i32),
     };
 
     let path_bytes = core::slice::from_raw_parts(path, path_len as usize);
@@ -221,6 +223,17 @@ unsafe extern "C" fn host_path_open(
     };
 
     let full_path = resolve_path(base, path_str);
+    let is_dir = (oflags & 0x2) != 0;
+
+    if is_dir {
+        if list_directory(full_path.as_str()).is_err() {
+            return -(ENOENT as i32);
+        }
+        let fd = rt.alloc_fd();
+        rt.fds.insert(fd, FdEntry { kind: FdKind::PreopenDir { path: full_path } });
+        return fd as i32;
+    }
+
     let mut options = OpenOptions::new();
     let wants_write = (oflags & 0x1) != 0 || (oflags & 0x8) != 0 || (fdflags & 0x1) != 0;
     options.read(true);
@@ -247,13 +260,7 @@ unsafe extern "C" fn host_path_open(
     }
 
     let fd = rt.alloc_fd();
-    let is_dir = (oflags & 0x2) != 0;
-    let kind = if is_dir {
-        FdKind::PreopenDir { path: full_path }
-    } else {
-        FdKind::File(UnsafeCell::new(file))
-    };
-    rt.fds.insert(fd, FdEntry { kind });
+    rt.fds.insert(fd, FdEntry { kind: FdKind::File(UnsafeCell::new(file)) });
     fd as i32
 }
 
@@ -279,6 +286,36 @@ unsafe extern "C" fn host_args_get_arg(index: u32, dst: *mut u8, dst_cap: usize)
     copy_len + 1
 }
 
+unsafe extern "C" fn host_environ_sizes_get(count_out: *mut u32, buf_size_out: *mut u32) {
+    if WASI_ENV_STORE.is_null() {
+        *count_out = 0;
+        *buf_size_out = 0;
+        return;
+    }
+    let store = &*WASI_ENV_STORE;
+    *count_out = store.len() as u32;
+    let mut total: u32 = 0;
+    for env in store.iter() {
+        total += env.len() as u32 + 1;
+    }
+    *buf_size_out = total;
+}
+
+unsafe extern "C" fn host_environ_get_env(index: u32, dst: *mut u8, dst_cap: usize) -> usize {
+    if WASI_ENV_STORE.is_null() {
+        return 0;
+    }
+    let store = &*WASI_ENV_STORE;
+    if (index as usize) >= store.len() || dst_cap == 0 {
+        return 0;
+    }
+    let env = &store[index as usize];
+    let copy_len = core::cmp::min(env.len(), dst_cap - 1);
+    core::ptr::copy_nonoverlapping(env.as_ptr(), dst, copy_len);
+    *dst.add(copy_len) = 0;
+    copy_len + 1
+}
+
 unsafe extern "C" fn host_path_unlink_file(dirfd: u32, path: *const u8, path_len: u32) -> i32 {
     let rt = wasi_runtime();
     let base = match rt.fds.get(&dirfd) {
@@ -293,6 +330,15 @@ unsafe extern "C" fn host_path_unlink_file(dirfd: u32, path: *const u8, path_len
         Err(_) => return -(EINVAL as i32),
     };
     let full_path = resolve_path(base, path_str);
+    if path_str.ends_with('/') {
+        if path_is_directory(full_path.as_str()) {
+            return -(EISDIR as i32);
+        }
+        return -(ENOTDIR as i32);
+    }
+    if path_is_directory(full_path.as_str()) {
+        return -(EISDIR as i32);
+    }
     match remove_file(full_path.as_str()) {
         Ok(()) => ESUCCESS as i32,
         Err(_) => -(ENOENT as i32),
@@ -313,6 +359,15 @@ unsafe extern "C" fn host_path_remove_dir(dirfd: u32, path: *const u8, path_len:
         Err(_) => return -(EINVAL as i32),
     };
     let full_path = resolve_path(base, path_str);
+    if !path_is_directory(full_path.as_str()) {
+        return -(ENOTDIR as i32);
+    }
+    if let Ok(entries) = list_directory(full_path.as_str()) {
+        let real_entries: usize = entries.iter().filter(|e| e.name != "." && e.name != "..").count();
+        if real_entries > 0 {
+            return -(ENOTEMPTY as i32);
+        }
+    }
     match remove_directory(full_path.as_str()) {
         Ok(()) => ESUCCESS as i32,
         Err(_) => -(ENOENT as i32),
@@ -320,11 +375,9 @@ unsafe extern "C" fn host_path_remove_dir(dirfd: u32, path: *const u8, path_len:
 }
 
 unsafe extern "C" fn host_debug_print(msg: *const u8, msg_len: usize) {
-    let s = match core::str::from_utf8(unsafe { core::slice::from_raw_parts(msg, msg_len) }) {
-        Ok(s) => s,
-        Err(_) => return,
-    };
-    println!("DBG wasi: {}", s);
+    let s = core::str::from_utf8(core::slice::from_raw_parts(msg, msg_len)).unwrap_or("");
+    use std::print;
+    print!("{}", s);
 }
 
 unsafe extern "C" fn host_path_filestat_get(
@@ -352,7 +405,8 @@ unsafe extern "C" fn host_path_filestat_get(
     let out = core::slice::from_raw_parts_mut(buf, 64);
     out.fill(0);
 
-    if path_is_directory(full_path.as_str()) {
+    let is_dir = path_is_directory(full_path.as_str());
+    if is_dir {
         out[16] = FILETYPE_DIRECTORY;
         write_le64(&mut out[24..32], 1);
         write_le64(&mut out[32..40], 0);
@@ -374,6 +428,76 @@ unsafe extern "C" fn host_path_filestat_get(
     }
 }
 
+unsafe extern "C" fn host_path_filestat_get_flags(
+    dirfd: u32,
+    flags: u32,
+    path: *const u8,
+    path_len: u32,
+    buf: *mut u8,
+) -> i32 {
+    let rt = wasi_runtime();
+    let base = match rt.fds.get(&dirfd) {
+        Some(FdEntry {
+            kind: FdKind::PreopenDir { path },
+        }) => path.as_str(),
+        _ => return -(EBADF as i32),
+    };
+    let path_bytes = core::slice::from_raw_parts(path, path_len as usize);
+    let path_str = match core::str::from_utf8(path_bytes) {
+        Ok(p) => p,
+        Err(_) => return -(EINVAL as i32),
+    };
+    let full_path = resolve_path(base, path_str);
+    let out = core::slice::from_raw_parts_mut(buf, 64);
+    out.fill(0);
+
+    let symlink_follow = (flags & 0x1) != 0;
+
+    match path_entry_file_type(full_path.as_str()) {
+        Some(1) => {
+            out[16] = FILETYPE_DIRECTORY;
+            write_le64(&mut out[24..32], 1);
+            write_le64(&mut out[32..40], 0);
+            ESUCCESS as i32
+        }
+        Some(2) if !symlink_follow => {
+            out[16] = FILETYPE_SYMBOLIC_LINK;
+            write_le64(&mut out[24..32], 1);
+            write_le64(&mut out[32..40], 0);
+            ESUCCESS as i32
+        }
+        Some(0) | Some(_) => {
+            out[16] = FILETYPE_REGULAR_FILE;
+            write_le64(&mut out[24..32], 1);
+            if let Ok(mut file) = File::open(full_path.as_str()) {
+                if let Ok(pos) = file.seek(SeekFrom::End(0)) {
+                    write_le64(&mut out[32..40], pos);
+                }
+            }
+            ESUCCESS as i32
+        }
+        None => {
+            if is_open_path_directory(full_path.as_str()) {
+                out[16] = FILETYPE_DIRECTORY;
+                write_le64(&mut out[24..32], 1);
+                write_le64(&mut out[32..40], 0);
+                return ESUCCESS as i32;
+            }
+            match File::open(full_path.as_str()) {
+                Ok(mut file) => {
+                    out[16] = FILETYPE_REGULAR_FILE;
+                    write_le64(&mut out[24..32], 1);
+                    if let Ok(pos) = file.seek(SeekFrom::End(0)) {
+                        write_le64(&mut out[32..40], pos);
+                    }
+                    ESUCCESS as i32
+                }
+                Err(_) => -(ENOENT as i32),
+            }
+        }
+    }
+}
+
 unsafe extern "C" fn host_path_create_directory(dirfd: u32, path: *const u8, path_len: u32) -> i32 {
     let rt = wasi_runtime();
     let base = match rt.fds.get(&dirfd) {
@@ -391,11 +515,269 @@ unsafe extern "C" fn host_path_create_directory(dirfd: u32, path: *const u8, pat
     };
 
     let full_path = resolve_path(base, path_str);
-    let result = match create_directory(full_path.as_str()) {
+    if path_is_directory(full_path.as_str()) {
+        return ESUCCESS as i32;
+    }
+    match create_directory(full_path.as_str()) {
         Ok(()) => ESUCCESS as i32,
-        Err(e) => -(ENOENT as i32),
+        Err(_) => -(EEXIST as i32),
+    }
+}
+
+unsafe extern "C" fn host_fd_filestat_set_size(fd: u32, size: u64) -> i32 {
+    let rt = wasi_runtime();
+    let entry = match rt.fds.get(&fd) {
+        Some(entry) => entry,
+        None => return -(EBADF as i32),
     };
-    result
+
+    match &entry.kind {
+        FdKind::File(cell) => {
+            let file = &mut *cell.get();
+            let current_size = match file.seek(SeekFrom::End(0)) {
+                Ok(pos) => pos,
+                Err(_) => return -(EBADF as i32),
+            };
+            if size > current_size {
+                let pos = file.seek(SeekFrom::Start(size - 1)).unwrap_or(0);
+                let zero: [u8; 1] = [0];
+                let _ = file.write(&zero);
+            }
+            match file.set_len(size) {
+                Ok(()) => ESUCCESS as i32,
+                Err(_) => -(EBADF as i32),
+            }
+        }
+        _ => -(EBADF as i32),
+    }
+}
+
+unsafe extern "C" fn host_fd_pread(
+    fd: u32,
+    buf: *mut u8,
+    buf_len: usize,
+    offset: u64,
+    nread: *mut u32,
+) -> i32 {
+    let rt = wasi_runtime();
+    let entry = match rt.fds.get(&fd) {
+        Some(entry) => entry,
+        None => return -(EBADF as i32),
+    };
+
+    match &entry.kind {
+        FdKind::File(cell) => {
+            let file = &mut *cell.get();
+            let current = match file.stream_position() {
+                Ok(pos) => pos,
+                Err(_) => return -(EBADF as i32),
+            };
+            if file.seek(SeekFrom::Start(offset)).is_err() {
+                return -(EBADF as i32);
+            }
+
+            let result = file.read(core::slice::from_raw_parts_mut(buf, buf_len));
+            let restore = file.seek(SeekFrom::Start(current));
+            match (result, restore) {
+                (Ok(bytes), Ok(_)) => {
+                    *nread = bytes as u32;
+                    ESUCCESS as i32
+                }
+                _ => -(EBADF as i32),
+            }
+        }
+        _ => -(EBADF as i32),
+    }
+}
+
+unsafe extern "C" fn host_fd_pwrite(
+    fd: u32,
+    data: *const u8,
+    data_len: usize,
+    offset: u64,
+    nwritten: *mut u32,
+) -> i32 {
+    let rt = wasi_runtime();
+    let entry = match rt.fds.get(&fd) {
+        Some(entry) => entry,
+        None => return -(EBADF as i32),
+    };
+
+    match &entry.kind {
+        FdKind::File(cell) => {
+            let file = &mut *cell.get();
+            let current = match file.stream_position() {
+                Ok(pos) => pos,
+                Err(_) => return -(EBADF as i32),
+            };
+            if file.seek(SeekFrom::Start(offset)).is_err() {
+                return -(EBADF as i32);
+            }
+
+            let result = file.write(core::slice::from_raw_parts(data, data_len));
+            let restore = file.seek(SeekFrom::Start(current));
+            match (result, restore) {
+                (Ok(bytes), Ok(_)) => {
+                    *nwritten = bytes as u32;
+                    ESUCCESS as i32
+                }
+                _ => -(EBADF as i32),
+            }
+        }
+        _ => -(EBADF as i32),
+    }
+}
+
+unsafe extern "C" fn host_fd_readdir(
+    fd: u32,
+    buf: *mut u8,
+    buf_len: u32,
+    cookie: u64,
+    bufused: *mut u32,
+) -> i32 {
+    let rt = wasi_runtime();
+    let base = match rt.fds.get(&fd) {
+        Some(FdEntry {
+            kind: FdKind::PreopenDir { path },
+        }) => path.as_str(),
+        Some(_) => return -(ENOTDIR as i32),
+        None => return -(EBADF as i32),
+    };
+
+    let entries = match list_directory(base) {
+        Ok(entries) => entries,
+        Err(_) => return -(ENOENT as i32),
+    };
+
+    let out = core::slice::from_raw_parts_mut(buf, buf_len as usize);
+    let mut used = 0usize;
+
+    for (index, entry) in entries.iter().enumerate().skip(cookie as usize) {
+        let name = entry.name.as_bytes();
+        let mut header = [0u8; 24];
+        write_le64(&mut header[0..8], (index + 1) as u64);
+        write_le64(&mut header[8..16], entry.file_id);
+        write_le32(&mut header[16..20], name.len() as u32);
+        header[20] = match entry.file_type {
+            0 => FILETYPE_REGULAR_FILE,
+            1 => FILETYPE_DIRECTORY,
+            2 => FILETYPE_SYMBOLIC_LINK,
+            _ => FILETYPE_REGULAR_FILE,
+        };
+
+        let record_len = 24 + name.len();
+        let remaining = out.len().saturating_sub(used);
+        if remaining == 0 {
+            break;
+        }
+
+        let copied = remaining.min(record_len);
+        let header_copy = copied.min(24);
+        out[used..used + header_copy].copy_from_slice(&header[..header_copy]);
+        if copied > 24 {
+            let name_copy = copied - 24;
+            out[used + 24..used + 24 + name_copy].copy_from_slice(&name[..name_copy]);
+        }
+        used += copied;
+
+        if copied < record_len {
+            break;
+        }
+    }
+
+    *bufused = used as u32;
+    ESUCCESS as i32
+}
+
+unsafe extern "C" fn host_path_symlink(
+    old_path: *const u8,
+    old_path_len: u32,
+    dirfd: u32,
+    new_path: *const u8,
+    new_path_len: u32,
+) -> i32 {
+    let rt = wasi_runtime();
+    let base = match rt.fds.get(&dirfd) {
+        Some(FdEntry {
+            kind: FdKind::PreopenDir { path },
+        }) => path.as_str(),
+        Some(_) => return -(ENOTDIR as i32),
+        None => return -(EBADF as i32),
+    };
+
+    let old_bytes = core::slice::from_raw_parts(old_path, old_path_len as usize);
+    let old_str = match core::str::from_utf8(old_bytes) {
+        Ok(path) => path,
+        Err(_) => return -(EINVAL as i32),
+    };
+    let new_bytes = core::slice::from_raw_parts(new_path, new_path_len as usize);
+    let new_str = match core::str::from_utf8(new_bytes) {
+        Ok(path) => path,
+        Err(_) => return -(EINVAL as i32),
+    };
+
+    let full_new_path = resolve_path(base, new_str);
+    match create_symlink(full_new_path.as_str(), old_str) {
+        Ok(()) => ESUCCESS as i32,
+        Err(_) => -(ENOENT as i32),
+    }
+}
+
+unsafe extern "C" fn host_path_readlink(
+    fd: u32,
+    path: *const u8,
+    path_len: u32,
+    buf: *mut u8,
+    buf_len: u32,
+    nread: *mut u32,
+) -> i32 {
+    let rt = wasi_runtime();
+    let base = match rt.fds.get(&fd) {
+        Some(FdEntry {
+            kind: FdKind::PreopenDir { path },
+        }) => path.as_str(),
+        Some(_) => return -(ENOTDIR as i32),
+        None => return -(EBADF as i32),
+    };
+
+    let path_bytes = core::slice::from_raw_parts(path, path_len as usize);
+    let path_str = match core::str::from_utf8(path_bytes) {
+        Ok(path) => path,
+        Err(_) => return -(EINVAL as i32),
+    };
+
+    let full_path = resolve_path(base, path_str);
+    let target = match read_link(full_path.as_str()) {
+        Ok(target) => target,
+        Err(_) => return -(ENOENT as i32),
+    };
+
+    let bytes = target.as_bytes();
+    let copy_len = bytes.len().min(buf_len as usize);
+    core::ptr::copy_nonoverlapping(bytes.as_ptr(), buf, copy_len);
+    *nread = copy_len as u32;
+    ESUCCESS as i32
+}
+
+unsafe extern "C" fn host_path_rename(
+    _old_fd: u32,
+    _old_path: *const u8,
+    _old_path_len: u32,
+    _new_fd: u32,
+    _new_path: *const u8,
+    _new_path_len: u32,
+) -> i32 {
+    -(ENOSYS as i32)
+}
+
+unsafe extern "C" fn host_fd_renumber(fd: u32, to: u32) -> i32 {
+    let rt = wasi_runtime();
+    let entry = match rt.fds.remove(&fd) {
+        Some(e) => e,
+        None => return -(EBADF as i32),
+    };
+    rt.fds.insert(to, entry);
+    ESUCCESS as i32
 }
 
 unsafe extern "C" fn host_fd_close(fd: u32) -> i32 {
@@ -413,27 +795,51 @@ unsafe extern "C" fn host_fd_seek(fd: u32, offset: i64, whence: u32, new_offset:
         None => return -(EBADF as i32),
     };
 
-    let seek_from = match whence {
-        0 => {
-            if offset < 0 {
-                return -(EINVAL as i32);
-            }
-            SeekFrom::Start(offset as u64)
-        }
-        1 => SeekFrom::Current(offset),
-        2 => SeekFrom::End(offset),
-        _ => return -(EINVAL as i32),
-    };
-
     match &entry.kind {
         FdKind::File(cell) => {
             let file = &mut *cell.get();
-            match file.seek(seek_from) {
-                Ok(pos) => {
-                    *new_offset = pos as i64;
-                    ESUCCESS as i32
+            match whence {
+                0 => {
+                    if offset < 0 {
+                        return -(EINVAL as i32);
+                    }
+                    match file.seek(SeekFrom::Start(offset as u64)) {
+                        Ok(pos) => {
+                            *new_offset = pos as i64;
+                            ESUCCESS as i32
+                        }
+                        Err(_) => -(EBADF as i32),
+                    }
                 }
-                Err(_) => -(EBADF as i32),
+                1 => {
+                    // SEEK_CUR: validate resulting position
+                    let cur = match file.stream_position() {
+                        Ok(p) => p as i64,
+                        Err(_) => return -(EBADF as i32),
+                    };
+                    let result_pos = cur.wrapping_add(offset);
+                    if result_pos < 0 {
+                        return -(EINVAL as i32);
+                    }
+                    match file.seek(SeekFrom::Current(offset)) {
+                        Ok(pos) => {
+                            *new_offset = pos as i64;
+                            ESUCCESS as i32
+                        }
+                        Err(_) => -(EBADF as i32),
+                    }
+                }
+                2 => {
+                    // SEEK_END: allow negative offsets (relative to end)
+                    match file.seek(SeekFrom::End(offset)) {
+                        Ok(pos) => {
+                            *new_offset = pos as i64;
+                            ESUCCESS as i32
+                        }
+                        Err(_) => -(EINVAL as i32),
+                    }
+                }
+                _ => -(EINVAL as i32),
             }
         }
         _ => -(EBADF as i32),
@@ -566,9 +972,14 @@ unsafe extern "C" fn host_fd_filestat_get(fd: u32, buf: *mut u8) -> i32 {
 
 fn resolve_path(base: &str, path: &str) -> String {
     if path.starts_with('/') {
-        return path.to_string();
+        let p = path.trim_end_matches('/');
+        if p.is_empty() {
+            return "/".to_string();
+        }
+        return p.to_string();
     }
-    if path == "." {
+    let path = path.trim_end_matches('/');
+    if path == "." || path.is_empty() {
         return base.trim_end_matches('/').to_string();
     }
     if base == "/" {
@@ -577,12 +988,46 @@ fn resolve_path(base: &str, path: &str) -> String {
     format!("{}/{}", base.trim_end_matches('/'), path)
 }
 
-fn path_is_directory(path: &str) -> bool {
-    if path == "/" || path.ends_with('/') {
-        return true;
+fn path_entry_file_type(path: &str) -> Option<u8> {
+    if path == "/" {
+        return Some(1);
     }
+    let (parent, name) = match path.rfind('/') {
+        Some(0) => (alloc::string::String::from("/"), &path[1..]),
+        Some(pos) => (path[..pos].to_string(), &path[pos + 1..]),
+        None => return None,
+    };
+    if name.is_empty() {
+        return Some(1);
+    }
+    if let Ok(entries) = list_directory(parent.as_str()) {
+        for entry in &entries {
+            if entry.name == name {
+                return Some(entry.file_type);
+            }
+        }
+    }
+    None
+}
 
-    std::fs::list_directory(path).is_ok()
+fn path_is_directory(path: &str) -> bool {
+    match path_entry_file_type(path) {
+        Some(1) => true,
+        Some(2) => is_open_path_directory(path),
+        _ => false,
+    }
+}
+
+fn is_open_path_directory(path: &str) -> bool {
+    if let Ok(mut file) = File::open(path) {
+        let mut buf = [0u8; 1];
+        match file.read(&mut buf) {
+            Ok(0) | Err(_) => true,
+            Ok(_) => false,
+        }
+    } else {
+        false
+    }
 }
 
 unsafe fn wasi_runtime<'a>() -> &'a mut WasiRuntime {
@@ -611,14 +1056,34 @@ fn main() -> i32 {
 
     if args.len() < 2 {
         println!("wasm-runtime: missing wasm file operand");
-        println!("usage: wasm-runtime <file.wasm> [args...]");
+        println!("usage: wasm-runtime [--dir <path>]... <file.wasm> [args...]");
         return 1;
     }
 
-    let wasm_path = &args[1];
-    let wasm_args = &args[1..];
+    let mut preopen_dirs: Vec<String> = Vec::new();
+    let mut env_vars: Vec<String> = Vec::new();
+    let mut i = 1;
+    while i < args.len() {
+        if args[i] == "--dir" && i + 1 < args.len() {
+            preopen_dirs.push(args[i + 1].clone());
+            i += 2;
+        } else if args[i] == "--env" && i + 1 < args.len() {
+            env_vars.push(args[i + 1].clone());
+            i += 2;
+        } else {
+            break;
+        }
+    }
 
-    match run_wasm(wasm_path, wasm_args) {
+    if i >= args.len() {
+        println!("wasm-runtime: missing wasm file operand");
+        return 1;
+    }
+
+    let wasm_path = &args[i];
+    let wasm_args = &args[i..];
+
+    match run_wasm(wasm_path, wasm_args, &preopen_dirs, &env_vars) {
         Ok(code) => {
             println!("wasm-runtime: exited with code {}", code);
             code
@@ -630,12 +1095,24 @@ fn main() -> i32 {
     }
 }
 
-fn run_wasm(wasm_path: &str, args: &[std::string::String]) -> Result<i32, std::string::String> {
+fn run_wasm(
+    wasm_path: &str,
+    args: &[std::string::String],
+    preopen_dirs: &[String],
+    env_vars: &[String],
+) -> Result<i32, std::string::String> {
     let args_bytes: Vec<Vec<u8>> = args.iter().map(|s| s.as_bytes().to_vec()).collect();
     let args_box = Box::new(args_bytes);
     let args_ref: &'static Vec<Vec<u8>> = Box::leak(args_box);
     unsafe {
         WASI_ARGS_STORE = args_ref;
+    }
+
+    let env_bytes: Vec<Vec<u8>> = env_vars.iter().map(|s| s.as_bytes().to_vec()).collect();
+    let env_box = Box::new(env_bytes);
+    let env_ref: &'static Vec<Vec<u8>> = Box::leak(env_box);
+    unsafe {
+        WASI_ENV_STORE = env_ref;
     }
 
     let mut file = std::fs::File::open(wasm_path).map_err(|_| format!("cannot open file"))?;
@@ -661,10 +1138,10 @@ fn run_wasm(wasm_path: &str, args: &[std::string::String]) -> Result<i32, std::s
         }
     }
 
-    execute_wasm(&wasm_bytes)
+    execute_wasm(&wasm_bytes, preopen_dirs)
 }
 
-fn execute_wasm(wasm_bytes: &[u8]) -> Result<i32, std::string::String> {
+fn execute_wasm(wasm_bytes: &[u8], preopen_dirs: &[String]) -> Result<i32, std::string::String> {
     use std::handle::capability::memory_mapping::{flags, mmap_anonymous, prot};
     use wasm_jit::engine;
 
@@ -682,7 +1159,7 @@ fn execute_wasm(wasm_bytes: &[u8]) -> Result<i32, std::string::String> {
         }
     }
 
-    let mut wasi_rt = Box::new(WasiRuntime::new());
+    let mut wasi_rt = Box::new(WasiRuntime::new(preopen_dirs));
     let host_ops = HostOps {
         fd_write: host_fd_write,
         fd_read: host_fd_read,
@@ -703,6 +1180,17 @@ fn execute_wasm(wasm_bytes: &[u8]) -> Result<i32, std::string::String> {
         debug_print: host_debug_print,
         path_unlink_file: host_path_unlink_file,
         path_remove_directory: host_path_remove_dir,
+        path_filestat_get_flags: host_path_filestat_get_flags,
+        fd_filestat_set_size: host_fd_filestat_set_size,
+        fd_pread: host_fd_pread,
+        fd_pwrite: host_fd_pwrite,
+        fd_readdir: host_fd_readdir,
+        path_symlink: host_path_symlink,
+        path_readlink: host_path_readlink,
+        path_rename: host_path_rename,
+        fd_renumber: host_fd_renumber,
+        environ_sizes_get: host_environ_sizes_get,
+        environ_get_env: host_environ_get_env,
     };
 
     unsafe {
@@ -723,10 +1211,6 @@ fn execute_wasm(wasm_bytes: &[u8]) -> Result<i32, std::string::String> {
             .unwrap_or(1);
         let memory_pages = data_pages.max(module.min_memory_pages as usize);
         let memory_pages_initial = memory_pages;
-        println!(
-            "DBG: initial_pages={} min_mem_pages={} data_pages={}",
-            memory_pages_initial, module.min_memory_pages, data_pages
-        );
         let memory_pages_max: usize = 65536; // wasm32 max: 4GB
         let cap_bytes = memory_pages_max * 65536;
         use std::handle::capability::memory_mapping::{flags, mmap_anonymous, prot};
@@ -824,6 +1308,7 @@ fn execute_wasm(wasm_bytes: &[u8]) -> Result<i32, std::string::String> {
         WASI_RUNTIME = core::ptr::null_mut();
         WASM_MEMORY_BASE = core::ptr::null_mut();
         WASM_MEMORY_CAP = 0;
+        WASI_ENV_STORE = core::ptr::null();
     }
 
     result
