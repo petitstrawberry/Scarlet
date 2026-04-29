@@ -186,6 +186,10 @@ path = "src/lsm_list.rs"
 name = "wasm-runtime"
 path = "src/wasm_runtime/main.rs"
 
+[[bin]]
+name = "wasi-test-runner"
+path = "src/wasi_test_runner.rs"
+
 [dependencies]
 scarlet_std = { path = "../lib/std", features = ["alloc_debug"] }
 scpm = { path = "../lib/scpm" }

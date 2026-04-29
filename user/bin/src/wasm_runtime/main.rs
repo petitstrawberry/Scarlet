@@ -12,7 +12,7 @@ use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
 use alloc::string::{String, ToString};
 use core::cell::UnsafeCell;
-use std::fs::{File, OpenOptions, create_directory};
+use std::fs::{File, OpenOptions, create_directory, remove_directory, remove_file};
 use std::io::SeekFrom;
 use std::{format, println, vec::Vec};
 use wasm_jit::runtime::HostOps;
@@ -78,9 +78,17 @@ impl WasiRuntime {
                 },
             },
         );
+        fds.insert(
+            PREOPEN_FD + 1,
+            FdEntry {
+                kind: FdKind::PreopenDir {
+                    path: "/tmp".to_string(),
+                },
+            },
+        );
         Self {
             fds,
-            next_fd: PREOPEN_FD + 1,
+            next_fd: PREOPEN_FD + 2,
             preopen_path: "/".to_string(),
         }
     }
@@ -100,6 +108,7 @@ static mut RANDOM_STATE: u64 = 0x1234_5678_9ABC_DEF0;
 static mut FAKE_TIME_NS: u64 = 1_700_000_000_000_000_000;
 static mut WASM_MEMORY_BASE: *mut u8 = core::ptr::null_mut();
 static mut WASM_MEMORY_CAP: usize = 0;
+static mut WASI_ARGS_STORE: *const Vec<Vec<u8>> = core::ptr::null();
 
 unsafe extern "C" fn wasm_memory_realloc(
     _old_base: *mut u8,
@@ -213,7 +222,7 @@ unsafe extern "C" fn host_path_open(
 
     let full_path = resolve_path(base, path_str);
     let mut options = OpenOptions::new();
-    let wants_write = (oflags & 0x1) != 0 || (fdflags & 0x1) != 0 || (fdflags & 0x10) != 0;
+    let wants_write = (oflags & 0x1) != 0 || (oflags & 0x8) != 0 || (fdflags & 0x1) != 0;
     options.read(true);
     if wants_write {
         options.write(true);
@@ -221,26 +230,148 @@ unsafe extern "C" fn host_path_open(
     if (fdflags & 0x1) != 0 {
         options.append(true);
     }
-    if (fdflags & 0x10) != 0 {
+    if (oflags & 0x8) != 0 {
         options.truncate(true);
     }
     if (oflags & 0x1) != 0 {
         options.create(true);
     }
 
-    let file = match options.open(full_path.as_str()) {
+    let mut file = match options.open(full_path.as_str()) {
         Ok(file) => file,
         Err(_) => return -(ENOENT as i32),
     };
 
+    if (oflags & 0x8) != 0 {
+        let _ = file.set_len(0);
+    }
+
     let fd = rt.alloc_fd();
-    let kind = if path_is_directory(full_path.as_str()) {
+    let is_dir = (oflags & 0x2) != 0;
+    let kind = if is_dir {
         FdKind::PreopenDir { path: full_path }
     } else {
         FdKind::File(UnsafeCell::new(file))
     };
     rt.fds.insert(fd, FdEntry { kind });
     fd as i32
+}
+
+unsafe extern "C" fn host_args_sizes_get(argc_out: *mut u32, buf_size_out: *mut u32) {
+    let store = &*WASI_ARGS_STORE;
+    *argc_out = store.len() as u32;
+    let mut total: u32 = 0;
+    for arg in store.iter() {
+        total += arg.len() as u32 + 1;
+    }
+    *buf_size_out = total;
+}
+
+unsafe extern "C" fn host_args_get_arg(index: u32, dst: *mut u8, dst_cap: usize) -> usize {
+    let store = &*WASI_ARGS_STORE;
+    if (index as usize) >= store.len() || dst_cap == 0 {
+        return 0;
+    }
+    let arg = &store[index as usize];
+    let copy_len = arg.len().min(dst_cap.saturating_sub(1));
+    core::ptr::copy_nonoverlapping(arg.as_ptr(), dst, copy_len);
+    *dst.add(copy_len) = 0;
+    copy_len + 1
+}
+
+unsafe extern "C" fn host_path_unlink_file(dirfd: u32, path: *const u8, path_len: u32) -> i32 {
+    let rt = wasi_runtime();
+    let base = match rt.fds.get(&dirfd) {
+        Some(FdEntry {
+            kind: FdKind::PreopenDir { path },
+        }) => path.as_str(),
+        _ => return -(EBADF as i32),
+    };
+    let path_bytes = core::slice::from_raw_parts(path, path_len as usize);
+    let path_str = match core::str::from_utf8(path_bytes) {
+        Ok(p) => p,
+        Err(_) => return -(EINVAL as i32),
+    };
+    let full_path = resolve_path(base, path_str);
+    match remove_file(full_path.as_str()) {
+        Ok(()) => ESUCCESS as i32,
+        Err(_) => -(ENOENT as i32),
+    }
+}
+
+unsafe extern "C" fn host_path_remove_dir(dirfd: u32, path: *const u8, path_len: u32) -> i32 {
+    let rt = wasi_runtime();
+    let base = match rt.fds.get(&dirfd) {
+        Some(FdEntry {
+            kind: FdKind::PreopenDir { path },
+        }) => path.as_str(),
+        _ => return -(EBADF as i32),
+    };
+    let path_bytes = core::slice::from_raw_parts(path, path_len as usize);
+    let path_str = match core::str::from_utf8(path_bytes) {
+        Ok(p) => p,
+        Err(_) => return -(EINVAL as i32),
+    };
+    let full_path = resolve_path(base, path_str);
+    match remove_directory(full_path.as_str()) {
+        Ok(()) => ESUCCESS as i32,
+        Err(_) => -(ENOENT as i32),
+    }
+}
+
+unsafe extern "C" fn host_debug_print(msg: *const u8, msg_len: usize) {
+    let s = match core::str::from_utf8(unsafe { core::slice::from_raw_parts(msg, msg_len) }) {
+        Ok(s) => s,
+        Err(_) => return,
+    };
+    println!("DBG wasi: {}", s);
+}
+
+unsafe extern "C" fn host_path_filestat_get(
+    dirfd: u32,
+    path: *const u8,
+    path_len: u32,
+    buf: *mut u8,
+) -> i32 {
+    let rt = wasi_runtime();
+    let base = match rt.fds.get(&dirfd) {
+        Some(FdEntry {
+            kind: FdKind::PreopenDir { path },
+        }) => path.as_str(),
+        _ => return -(EBADF as i32),
+    };
+
+    let path_bytes = core::slice::from_raw_parts(path, path_len as usize);
+    let path_str = match core::str::from_utf8(path_bytes) {
+        Ok(p) => p,
+        Err(_) => return -(EINVAL as i32),
+    };
+
+    let full_path = resolve_path(base, path_str);
+
+    let out = core::slice::from_raw_parts_mut(buf, 64);
+    out.fill(0);
+
+    if path_is_directory(full_path.as_str()) {
+        out[16] = FILETYPE_DIRECTORY;
+        write_le64(&mut out[24..32], 1);
+        write_le64(&mut out[32..40], 0);
+        return ESUCCESS as i32;
+    }
+
+    match File::open(full_path.as_str()) {
+        Ok(mut file) => {
+            out[16] = FILETYPE_REGULAR_FILE;
+            write_le64(&mut out[24..32], 1);
+            let size = match file.seek(SeekFrom::End(0)) {
+                Ok(pos) => pos,
+                Err(_) => 0,
+            };
+            write_le64(&mut out[32..40], size);
+            ESUCCESS as i32
+        }
+        Err(_) => -(ENOENT as i32),
+    }
 }
 
 unsafe extern "C" fn host_path_create_directory(dirfd: u32, path: *const u8, path_len: u32) -> i32 {
@@ -260,10 +391,11 @@ unsafe extern "C" fn host_path_create_directory(dirfd: u32, path: *const u8, pat
     };
 
     let full_path = resolve_path(base, path_str);
-    match create_directory(full_path.as_str()) {
+    let result = match create_directory(full_path.as_str()) {
         Ok(()) => ESUCCESS as i32,
-        Err(_) => -(ENOENT as i32),
-    }
+        Err(e) => -(ENOENT as i32),
+    };
+    result
 }
 
 unsafe extern "C" fn host_fd_close(fd: u32) -> i32 {
@@ -436,6 +568,9 @@ fn resolve_path(base: &str, path: &str) -> String {
     if path.starts_with('/') {
         return path.to_string();
     }
+    if path == "." {
+        return base.trim_end_matches('/').to_string();
+    }
     if base == "/" {
         return format!("/{}", path);
     }
@@ -481,7 +616,7 @@ fn main() -> i32 {
     }
 
     let wasm_path = &args[1];
-    let wasm_args = if args.len() > 2 { &args[2..] } else { &[] };
+    let wasm_args = &args[1..];
 
     match run_wasm(wasm_path, wasm_args) {
         Ok(code) => {
@@ -495,7 +630,14 @@ fn main() -> i32 {
     }
 }
 
-fn run_wasm(wasm_path: &str, _args: &[std::string::String]) -> Result<i32, std::string::String> {
+fn run_wasm(wasm_path: &str, args: &[std::string::String]) -> Result<i32, std::string::String> {
+    let args_bytes: Vec<Vec<u8>> = args.iter().map(|s| s.as_bytes().to_vec()).collect();
+    let args_box = Box::new(args_bytes);
+    let args_ref: &'static Vec<Vec<u8>> = Box::leak(args_box);
+    unsafe {
+        WASI_ARGS_STORE = args_ref;
+    }
+
     let mut file = std::fs::File::open(wasm_path).map_err(|_| format!("cannot open file"))?;
 
     let mut header = [0u8; 8];
@@ -555,6 +697,12 @@ fn execute_wasm(wasm_bytes: &[u8]) -> Result<i32, std::string::String> {
         fd_prestat_get: host_fd_prestat_get,
         fd_prestat_dir_name: host_fd_prestat_dir_name,
         fd_filestat_get: host_fd_filestat_get,
+        args_sizes_get: host_args_sizes_get,
+        args_get_arg: host_args_get_arg,
+        path_filestat_get: host_path_filestat_get,
+        debug_print: host_debug_print,
+        path_unlink_file: host_path_unlink_file,
+        path_remove_directory: host_path_remove_dir,
     };
 
     unsafe {
@@ -649,7 +797,11 @@ fn execute_wasm(wasm_bytes: &[u8]) -> Result<i32, std::string::String> {
             match engine::invoke_export(&module, &mut *ctx_box, "_start", &[]) {
                 Ok(r) => {
                     println!("ok val={} trap={}", r, ctx_box.trap as u32);
-                    Ok(0)
+                    if ctx_box.exited {
+                        Ok(ctx_box.exit_code as i32)
+                    } else {
+                        Ok(0)
+                    }
                 }
                 Err(trap) => {
                     println!(

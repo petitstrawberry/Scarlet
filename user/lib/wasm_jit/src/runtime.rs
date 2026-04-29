@@ -56,6 +56,18 @@ pub struct HostOps {
     pub fd_prestat_dir_name: unsafe extern "C" fn(fd: u32, buf: *mut u8, buf_len: u32) -> i32,
     /// Get filestat. Writes 64-byte filestat struct to buf. Returns 0 or negative errno.
     pub fd_filestat_get: unsafe extern "C" fn(fd: u32, buf: *mut u8) -> i32,
+    /// Get args count and total buffer size (including NUL terminators).
+    pub args_sizes_get: unsafe extern "C" fn(argc_out: *mut u32, buf_size_out: *mut u32),
+    /// Get arg at index. Writes arg bytes (including NUL terminator) to dst.
+    /// Returns number of bytes written (including NUL).
+    pub args_get_arg: unsafe extern "C" fn(index: u32, dst: *mut u8, dst_cap: usize) -> usize,
+    /// Get filestat by path. Writes 64-byte filestat struct to buf. Returns 0 or negative errno.
+    pub path_filestat_get:
+        unsafe extern "C" fn(dirfd: u32, path: *const u8, path_len: u32, buf: *mut u8) -> i32,
+    pub debug_print: unsafe extern "C" fn(msg: *const u8, msg_len: usize),
+    pub path_unlink_file: unsafe extern "C" fn(dirfd: u32, path: *const u8, path_len: u32) -> i32,
+    pub path_remove_directory:
+        unsafe extern "C" fn(dirfd: u32, path: *const u8, path_len: u32) -> i32,
 }
 
 #[repr(C)]
