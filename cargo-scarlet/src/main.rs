@@ -776,33 +776,31 @@ fn build_loadable_module(
         Some(object_files.remove(0))
     } else {
         let normalized = cargo_key_to_rust_identifier(&module_name);
-        let candidates: Vec<_> = object_files
-            .into_iter()
+        let mut candidates: Vec<_> = object_files
+            .iter()
             .filter(|path| {
                 path.file_stem()
                     .and_then(|s| s.to_str())
-                    .map(|stem| stem.starts_with(&normalized))
+                    .map(|stem| stem.starts_with(&normalized) || stem.contains(&normalized))
                     .unwrap_or(false)
             })
+            .cloned()
             .collect();
 
-        match candidates.len() {
-            0 => {
-                return Err(format!(
-                    "multiple .o files in {}, but none match module name '{}'",
-                    deps_dir.display(),
-                    module_name
-                ));
-            }
-            1 => Some(candidates.into_iter().next().unwrap()),
-            _ => {
-                return Err(format!(
-                    "multiple .o files in {} match module name '{}'; cannot determine which to use",
-                    deps_dir.display(),
-                    module_name
-                ));
-            }
+        if candidates.is_empty() {
+            return Err(format!(
+                "multiple .o files in {}, but none match module name '{}'",
+                deps_dir.display(),
+                module_name
+            ));
         }
+
+        candidates.sort_by_key(|path| {
+            fs::metadata(path)
+                .and_then(|metadata| metadata.modified())
+                .ok()
+        });
+        candidates.pop()
     };
 
     let mut built = false;

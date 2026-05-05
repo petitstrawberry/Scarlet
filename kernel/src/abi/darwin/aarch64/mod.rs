@@ -293,7 +293,9 @@ impl DarwinAarch64Abi {
             SYS_getpid => Ok(bsd_syscalls::sys_getpid(self, trapframe)),
             SYS_getppid => Ok(bsd_syscalls::sys_getppid(self, trapframe)),
             SYS_getuid => Ok(bsd_syscalls::sys_getuid(self, trapframe)),
+            SYS_geteuid => Ok(bsd_syscalls::sys_geteuid(self, trapframe)),
             SYS_getgid => Ok(bsd_syscalls::sys_getgid(self, trapframe)),
+            SYS_getegid => Ok(bsd_syscalls::sys_getegid(self, trapframe)),
             SYS_socket => Ok(bsd_syscalls::sys_socket(self, trapframe)),
             SYS_bind => Ok(bsd_syscalls::sys_bind(self, trapframe)),
             SYS_connect => Ok(bsd_syscalls::sys_connect(self, trapframe)),
@@ -311,8 +313,15 @@ impl DarwinAarch64Abi {
             SYS_fcntl => Ok(bsd_syscalls::sys_fcntl(self, trapframe)),
             SYS_ioctl => Ok(bsd_syscalls::sys_ioctl(self, trapframe)),
             SYS_lseek => Ok(bsd_syscalls::sys_lseek(self, trapframe)),
+            SYS_pread => Ok(bsd_syscalls::sys_pread(self, trapframe)),
+            SYS_getrlimit => Ok(bsd_syscalls::sys_getrlimit(self, trapframe)),
+            SYS_setrlimit => Ok(bsd_syscalls::sys_setrlimit(self, trapframe)),
+            SYS_fsgetpath => Ok(bsd_syscalls::sys_fsgetpath(self, trapframe)),
+            SYS_mmap => Ok(bsd_syscalls::sys_mmap(self, trapframe)),
             SYS_mprotect => Ok(bsd_syscalls::sys_mprotect(self, trapframe)),
+            SYS_munmap => Ok(bsd_syscalls::sys_munmap(self, trapframe)),
             SYS_thread_selfid => Ok(bsd_syscalls::sys_thread_selfid(self, trapframe)),
+            SYS_access => Ok(bsd_syscalls::sys_access(self, trapframe)),
             SYS_proc_info => Ok(bsd_syscalls::sys_proc_info(self, trapframe)),
             SYS_execve => Ok(bsd_syscalls::sys_execve(self, trapframe)),
             SYS_shared_region_check_np => {
@@ -330,11 +339,22 @@ impl DarwinAarch64Abi {
             SYS_ulock_wake => Ok(bsd_syscalls::sys_ulock_wake(self, trapframe)),
             SYS_ulock_wait2 => Ok(bsd_syscalls::sys_ulock_wait2(self, trapframe)),
             SYS_stat => Ok(bsd_syscalls::sys_stat(self, trapframe)),
+            SYS_stat64 => Ok(bsd_syscalls::sys_stat(self, trapframe)),
             SYS_lstat => Ok(bsd_syscalls::sys_lstat(self, trapframe)),
             SYS_fstat => Ok(bsd_syscalls::sys_fstat(self, trapframe)),
+            SYS_map_with_linking_np => {
+                Ok(bsd_syscalls::sys_map_with_linking_np(self, trapframe))
+            }
+            SYS_fsgetpath_ext => Ok(bsd_syscalls::sys_fsgetpath(self, trapframe)),
             SYS_sysctl => Ok(bsd_syscalls::sys_sysctl(self, trapframe)),
             SYS___mac_syscall => Ok(bsd_syscalls::sys_mac_syscall(self, trapframe)),
             SYS_openat => Ok(bsd_syscalls::sys_openat(self, trapframe)),
+            SYS_bsdthread_register => Ok(bsd_syscalls::sys_bsdthread_register(self, trapframe)),
+            SYS___pthread_sigmask => Ok(bsd_syscalls::sys_pthread_sigmask(self, trapframe)),
+            SYS___pthread_kill => Ok(bsd_syscalls::sys_pthread_kill(self, trapframe)),
+            SYS___semwait_signal_nocancel => {
+                Ok(bsd_syscalls::sys_semwait_signal_nocancel(self, trapframe))
+            }
             _ => {
                 crate::println!("[darwin] Unimplemented BSD syscall: {} (0x{:x})", num, num);
                 let task = mytask().unwrap();
@@ -428,6 +448,35 @@ impl DarwinAarch64Abi {
                 Ok(port)
             }
             MACH__kernelrpc_mach_vm_map_trap => Ok(mach_syscalls::sys_vm_map(self, trapframe)),
+            MACH__kernelrpc_mach_port_mod_refs_trap => {
+                let task = mytask().unwrap();
+                trapframe.increment_pc_next(task);
+                trapframe.set_return_value(super::error::KERN_SUCCESS as usize);
+                Ok(0)
+            }
+            MACH_host_self_trap => {
+                let task = mytask().unwrap();
+                trapframe.increment_pc_next(task);
+                let port = self.next_mach_port;
+                self.next_mach_port += 1;
+                trapframe.set_return_value(port as usize);
+                Ok(port as usize)
+            }
+            MACH__kernelrpc_mach_port_construct_trap => {
+                let task = mytask().unwrap();
+                trapframe.increment_pc_next(task);
+                let name_ptr = trapframe.regs.reg[0];
+                let port = self.next_mach_port;
+                self.next_mach_port += 1;
+                if name_ptr != 0 {
+                    if let Some(kva) = task.vm_manager.translate_to_kva(name_ptr) {
+                        unsafe { (kva as *mut u32).write(port as u32) };
+                    }
+                }
+                trapframe.set_return_value(super::error::KERN_SUCCESS as usize);
+                Ok(0)
+            }
+            MACH_mach_msg2_trap => Ok(mach_syscalls::sys_mach_msg2_trap(self, trapframe)),
             MACH_thread_set_tsd_base => self.handle_thread_set_tsd_base(trapframe),
             // ARM64 fast traps (not in mach_trap_table, small negative numbers)
             FAST_MACH_absolute_time => {
@@ -456,14 +505,17 @@ impl DarwinAarch64Abi {
 
     /// Setup argc, argv, and envp on the user stack following Unix conventions
     ///
-    /// Standard Unix stack layout (from high to low addresses):
+    /// Darwin dyld stack layout (from high to low addresses):
     /// ```
     /// [high addresses]
+    /// apple strings (null-terminated)
     /// envp strings (null-terminated)
     /// argv strings (null-terminated)
+    /// apple[] array (null-terminated pointer array)
     /// envp[] array (null-terminated pointer array)
     /// argv[] array (null-terminated pointer array)
     /// argc (integer)
+    /// mach_header pointer
     /// [low addresses - returned stack pointer]
     /// ```
     ///
@@ -482,6 +534,7 @@ impl DarwinAarch64Abi {
         envp: &[&str],
         initial_sp: usize,
         mach_header_addr: usize,
+        executable_path: &str,
     ) -> Result<(usize, usize), &'static str> {
         let argc = argv.len();
         let envc = envp.len();
@@ -493,15 +546,10 @@ impl DarwinAarch64Abi {
         let envp_array_size = (envc + 1) * core::mem::size_of::<usize>();
         let argc_size = core::mem::size_of::<usize>();
 
-        // Apple vector: executable_path=argv[0]
-        let apple_strings_size: usize = argv
-            .first()
-            .map_or(0, |s| "executable_path=".len() + s.len() + 1);
-        let apple_array_size = if apple_strings_size > 0 {
-            2 * core::mem::size_of::<usize>() // pointer + NULL
-        } else {
-            core::mem::size_of::<usize>() // just NULL
-        };
+        let exe_apple_str = alloc::format!("executable_path={}", executable_path);
+        let dyld_file_str = "dyld_file=0x1,0x1";
+        let apple_strings_size = exe_apple_str.len() + 1 + dyld_file_str.len() + 1;
+        let apple_array_size = 3 * core::mem::size_of::<usize>(); // 2 pointers + NULL
 
         let total_size = core::mem::size_of::<usize>() // mach_header* at SP+0
             + argc_size + argv_array_size + envp_array_size
@@ -513,11 +561,13 @@ impl DarwinAarch64Abi {
 
         let mut current_addr = new_sp;
 
-        // 0. Write mach_header pointer at SP+0 (macOS arm64 convention)
+        // 0. Write mach_header pointer at SP+0. dyld's KernelArgs helpers
+        // pre-increment by one word before reading argc, so the stack must
+        // start with the main executable mach_header followed by argc.
         self.write_to_stack_memory(task, current_addr, &mach_header_addr.to_le_bytes())?;
         current_addr += core::mem::size_of::<usize>();
 
-        // 1. Write argc
+        // 1. Write argc.
         self.write_to_stack_memory(task, current_addr, &argc.to_le_bytes())?;
         current_addr += argc_size;
 
@@ -552,10 +602,11 @@ impl DarwinAarch64Abi {
         current_addr += core::mem::size_of::<usize>();
 
         // 6. Write apple[] array
-        if let Some(exe_path) = argv.first() {
-            self.write_to_stack_memory(task, current_addr, &apple_strings_start.to_le_bytes())?;
-            current_addr += core::mem::size_of::<usize>();
-        }
+        self.write_to_stack_memory(task, current_addr, &apple_strings_start.to_le_bytes())?;
+        current_addr += core::mem::size_of::<usize>();
+        let dyld_file_ptr = apple_strings_start + exe_apple_str.len() + 1;
+        self.write_to_stack_memory(task, current_addr, &dyld_file_ptr.to_le_bytes())?;
+        current_addr += core::mem::size_of::<usize>();
         self.write_to_stack_memory(task, current_addr, &null_ptr.to_le_bytes())?;
         current_addr += core::mem::size_of::<usize>();
 
@@ -572,11 +623,10 @@ impl DarwinAarch64Abi {
         }
 
         // 9. Write apple strings
-        if let Some(exe_path) = argv.first() {
-            let apple_str = alloc::format!("executable_path={}", exe_path);
-            self.write_string_to_stack(task, current_addr, &apple_str)?;
-            current_addr += apple_str.len() + 1;
-        }
+        self.write_string_to_stack(task, current_addr, &exe_apple_str)?;
+        current_addr += exe_apple_str.len() + 1;
+        self.write_string_to_stack(task, current_addr, dyld_file_str)?;
+        current_addr += dyld_file_str.len() + 1;
 
         Ok((new_sp, argv_ptr))
     }
@@ -626,6 +676,288 @@ impl DarwinAarch64Abi {
         self.write_to_stack_memory(task, vaddr, string.as_bytes())?;
         // Write null terminator
         self.write_to_stack_memory(task, vaddr + string.len(), &[0u8])?;
+        Ok(())
+    }
+
+    /// Read a usize value from stack memory (for verification)
+    fn read_usize_from_stack(
+        &self,
+        task: &crate::task::Task,
+        vaddr: usize,
+    ) -> Option<usize> {
+        match task.vm_manager.translate_to_kva(vaddr) {
+            Some(kva) => {
+                let ptr = kva as *const u8;
+                let mut buf = [0u8; 8];
+                // SAFETY: translate_to_kva returned a valid kernel virtual address
+                unsafe {
+                    core::ptr::copy_nonoverlapping(ptr, buf.as_mut_ptr(), 8);
+                }
+                Some(usize::from_le_bytes(buf))
+            }
+            None => None,
+        }
+    }
+
+    /// Read a null-terminated string from stack memory (for verification)
+    fn read_string_from_stack(
+        &self,
+        task: &crate::task::Task,
+        vaddr: usize,
+        max_len: usize,
+    ) -> Option<alloc::string::String> {
+        let mut s = alloc::string::String::new();
+        let mut addr = vaddr;
+        for _ in 0..max_len {
+            match task.vm_manager.translate_to_kva(addr) {
+                Some(kva) => {
+                    // SAFETY: translate_to_kva returned a valid kernel virtual address
+                    let byte = unsafe { *(kva as *const u8) };
+                    if byte == 0 {
+                        return Some(s);
+                    }
+                    s.push(byte as char);
+                    addr += 1;
+                }
+                None => return None,
+            }
+        }
+        Some(s)
+    }
+
+    /// Verify the stack layout by walking it exactly like dyld's KernelArgs does
+    fn verify_stack_layout(
+        &self,
+        task: &crate::task::Task,
+        sp: usize,
+    ) {
+        crate::println!("[darwin] === STACK VERIFY at SP={:#x} ===", sp);
+
+        // Read mach_header at SP+0
+        let mh = self.read_usize_from_stack(task, sp);
+        crate::println!("[darwin]   SP+0 mach_header = {:#x}", mh.unwrap_or(0xDEAD));
+
+        // Read argc at SP+8
+        let argc = self.read_usize_from_stack(task, sp + 8);
+        crate::println!("[darwin]   SP+8 argc = {:?}", argc);
+
+        let mut offset = 16; // past mach_header + argc
+        let ac = argc.unwrap_or(0);
+
+        // Walk argv[]
+        crate::println!("[darwin]   --- argv ---");
+        for i in 0..ac {
+            let ptr = self.read_usize_from_stack(task, sp + offset);
+            crate::println!("[darwin]     argv[{}] ptr={:#x}", i, ptr.unwrap_or(0));
+            if let Some(p) = ptr {
+                if p != 0 {
+                    if let Some(s) = self.read_string_from_stack(task, p, 256) {
+                        crate::println!("[darwin]     argv[{}] = \"{}\"", i, s);
+                    }
+                }
+            }
+            offset += 8;
+        }
+        let argv_null = self.read_usize_from_stack(task, sp + offset);
+        crate::println!("[darwin]     argv NULL = {:#x}", argv_null.unwrap_or(0xBAD));
+        offset += 8;
+
+        // Walk envp[]
+        crate::println!("[darwin]   --- envp ---");
+        let mut env_idx = 0;
+        loop {
+            let ptr = self.read_usize_from_stack(task, sp + offset);
+            if ptr.unwrap_or(0xBAD) == 0 {
+                crate::println!("[darwin]     envp NULL terminator at offset +{}", offset);
+                offset += 8;
+                break;
+            }
+            crate::println!("[darwin]     envp[{}] ptr={:#x}", env_idx, ptr.unwrap_or(0));
+            if let Some(p) = ptr {
+                if let Some(s) = self.read_string_from_stack(task, p, 256) {
+                    crate::println!("[darwin]     envp[{}] = \"{}\"", env_idx, s);
+                }
+            }
+            offset += 8;
+            env_idx += 1;
+            if env_idx > 20 {
+                crate::println!("[darwin]     envp: too many entries, stopping");
+                break;
+            }
+        }
+
+        // Walk apple[]
+        crate::println!("[darwin]   --- apple ---");
+        let mut apple_idx = 0;
+        loop {
+            let ptr = self.read_usize_from_stack(task, sp + offset);
+            if ptr.unwrap_or(0xBAD) == 0 {
+                crate::println!("[darwin]     apple NULL terminator at offset +{}", offset);
+                offset += 8;
+                break;
+            }
+            crate::println!("[darwin]     apple[{}] ptr={:#x}", apple_idx, ptr.unwrap_or(0));
+            if let Some(p) = ptr {
+                if let Some(s) = self.read_string_from_stack(task, p, 256) {
+                    crate::println!("[darwin]     apple[{}] = \"{}\"", apple_idx, s);
+                }
+            }
+            offset += 8;
+            apple_idx += 1;
+            if apple_idx > 10 {
+                crate::println!("[darwin]     apple: too many entries, stopping");
+                break;
+            }
+        }
+
+        crate::println!("[darwin] === END STACK VERIFY ===");
+    }
+
+    fn execute_binary_with_path(
+        &self,
+        file_object: &crate::object::KernelObject,
+        argv: &[&str],
+        envp: &[&str],
+        task: &crate::task::Task,
+        trapframe: &mut Trapframe,
+        executable_path: &str,
+    ) -> Result<(), &'static str> {
+        let file_obj = file_object.as_file().ok_or("Invalid file object type")?;
+
+        task.text_size.store(0, Ordering::SeqCst);
+        task.data_size.store(0, Ordering::SeqCst);
+        task.stack_size.store(0, Ordering::SeqCst);
+        task.brk.store(usize::MAX, Ordering::SeqCst);
+
+        crate::println!("[darwin] execute_binary: loading Mach-O...");
+        let (entry_point, dyld_path, mach_header_addr) =
+            macho_loader::load_macho_binary(file_obj, task).map_err(|e| {
+                crate::println!("[darwin] load_macho_binary FAILED: {}", e);
+                e
+            })?;
+        crate::println!(
+            "[darwin] macho OK: entry={:#x} dyld={:?} mh={:#x}",
+            entry_point,
+            dyld_path,
+            mach_header_addr
+        );
+
+        if let Some(dyld) = dyld_path {
+            let vfs = task.get_vfs().ok_or("No VFS")?;
+            macho_loader::ensure_shared_cache(&vfs)?;
+
+            crate::println!("[darwin] loading dyld from '{}'...", dyld);
+            let (dyld_entry, _base_delta) = macho_loader::load_dyld(&dyld, task).map_err(|e| {
+                crate::println!("[darwin] load_dyld FAILED: {}", e);
+                e
+            })?;
+            crate::println!(
+                "[darwin] dyld OK: entry={:#x} delta={:#x}",
+                dyld_entry,
+                _base_delta
+            );
+
+            macho_loader::setup_shared_cache_region(task).map_err(|e| {
+                crate::println!("[darwin] setup_shared_cache_region FAILED: {}", e);
+                e
+            })?;
+
+            macho_loader::setup_commpage(task).map_err(|e| {
+                crate::println!("[darwin] setup_commpage FAILED: {}", e);
+                e
+            })?;
+
+            *task.name.write() = argv
+                .first()
+                .map_or("Unnamed Darwin Task".to_string(), |s| s.to_string());
+
+            let root_page_table =
+                crate::arch::vm::get_root_pagetable(task.vm_manager.get_asid()).unwrap();
+            root_page_table.unmap_all();
+
+            crate::arch::vm::setup_trampoline_for_user(&task.vm_manager);
+            let stack_pointer = crate::vm::setup_user_stack(task).1;
+
+            task.vcpu.lock().reset_iregs();
+            task.vcpu.lock().set_sp(stack_pointer);
+
+            let (adjusted_sp, _argv_ptr) = self.setup_arguments_on_stack(
+                task,
+                argv,
+                envp,
+                stack_pointer,
+                mach_header_addr,
+                executable_path,
+            )?;
+
+            self.verify_stack_layout(task, adjusted_sp);
+
+            // dyld arm64 convention:
+            //   __dyld_start copies SP into x0 and passes that KernelArgs* to
+            //   dyld::start().  The stack starts with [mach_header, argc,
+            //   argv..., NULL, envp..., NULL, apple..., NULL, strings].
+
+            // Pre-allocate TLS page with TSD slot 3 (__TSD_MACH_THREAD_SELF) set to
+            // mach_thread_port. On real macOS, the kernel populates this before the
+            // first user instruction so that os_unfair_lock ownership checks work
+            // from the very start. Without this, TPIDR_EL0=0 causes os_unfair_lock_lock
+            // to read [0+0x18] as the "owner", producing a garbage value that later
+            // mismatches the correct TSD[3]=0x307 set by thread_set_tsd_base.
+            let tls_vaddr = macho_loader::setup_tls(task, self.mach_thread_port).map_err(|e| {
+                crate::println!("[darwin] setup_tls FAILED: {}", e);
+                e
+            })?;
+
+            macho_loader::setup_comm_page(task).map_err(|e| {
+                crate::println!("[darwin] setup_comm_page FAILED: {}", e);
+                e
+            })?;
+
+            task.set_entry_point(dyld_entry);
+            {
+                let mut vcpu = task.vcpu.lock();
+                vcpu.set_sp(adjusted_sp);
+                vcpu.set_pc(dyld_entry as u64);
+                // Set TPIDR_EL0/TPIDRRO_EL0 to the pre-allocated TLS page so that
+                // TSD slot access (TPIDRRO_EL0 + offset) works from instruction one.
+                vcpu.set_tpidr_el0(tls_vaddr as u64);
+                vcpu.set_tpidrro_el0(tls_vaddr as u64);
+                vcpu.switch(trapframe);
+            }
+
+            return Ok(());
+        }
+
+        *task.name.write() = argv
+            .first()
+            .map_or("Unnamed Darwin Task".to_string(), |s| s.to_string());
+
+        let root_page_table =
+            crate::arch::vm::get_root_pagetable(task.vm_manager.get_asid()).unwrap();
+        root_page_table.unmap_all();
+
+        crate::arch::vm::setup_trampoline_for_user(&task.vm_manager);
+        let stack_pointer = crate::vm::setup_user_stack(task).1;
+
+        task.set_entry_point(entry_point);
+
+        task.vcpu.lock().reset_iregs();
+        task.vcpu.lock().set_sp(stack_pointer);
+
+        let (adjusted_sp, argv_ptr) = self.setup_arguments_on_stack(
+            task,
+            argv,
+            envp,
+            stack_pointer,
+            mach_header_addr,
+            executable_path,
+        )?;
+        task.vcpu.lock().set_sp(adjusted_sp);
+
+        task.vcpu.lock().iregs.reg[0] = argv.len();
+        task.vcpu.lock().iregs.reg[1] = argv_ptr;
+
+        task.vcpu.lock().switch(trapframe);
         Ok(())
     }
 }
@@ -881,126 +1213,14 @@ impl AbiModule for DarwinAarch64Abi {
         task: &crate::task::Task,
         trapframe: &mut Trapframe,
     ) -> Result<(), &'static str> {
-        let file_obj = file_object.as_file().ok_or("Invalid file object type")?;
-
-        task.text_size.store(0, Ordering::SeqCst);
-        task.data_size.store(0, Ordering::SeqCst);
-        task.stack_size.store(0, Ordering::SeqCst);
-        task.brk.store(usize::MAX, Ordering::SeqCst);
-
-        crate::println!("[darwin] execute_binary: loading Mach-O...");
-        let (entry_point, dyld_path, mach_header_addr) =
-            macho_loader::load_macho_binary(file_obj, task).map_err(|e| {
-                crate::println!("[darwin] load_macho_binary FAILED: {}", e);
-                e
-            })?;
-        crate::println!(
-            "[darwin] macho OK: entry={:#x} dyld={:?} mh={:#x}",
-            entry_point,
-            dyld_path,
-            mach_header_addr
-        );
-
-        if let Some(dyld) = dyld_path {
-            crate::println!("[darwin] loading dyld from '{}'...", dyld);
-            let (dyld_entry, _base_delta) = macho_loader::load_dyld(&dyld, task).map_err(|e| {
-                crate::println!("[darwin] load_dyld FAILED: {}", e);
-                e
-            })?;
-            crate::println!(
-                "[darwin] dyld OK: entry={:#x} delta={:#x}",
-                dyld_entry,
-                _base_delta
-            );
-
-            macho_loader::setup_shared_cache_region(task).map_err(|e| {
-                crate::println!("[darwin] setup_shared_cache_region FAILED: {}", e);
-                e
-            })?;
-
-            macho_loader::setup_commpage(task).map_err(|e| {
-                crate::println!("[darwin] setup_commpage FAILED: {}", e);
-                e
-            })?;
-
-            *task.name.write() = argv
-                .first()
-                .map_or("Unnamed Darwin Task".to_string(), |s| s.to_string());
-
-            let root_page_table =
-                crate::arch::vm::get_root_pagetable(task.vm_manager.get_asid()).unwrap();
-            root_page_table.unmap_all();
-
-            crate::arch::vm::setup_trampoline_for_user(&task.vm_manager);
-            let stack_pointer = crate::vm::setup_user_stack(task).1;
-
-            task.vcpu.lock().reset_iregs();
-            task.vcpu.lock().set_sp(stack_pointer);
-
-            let (adjusted_sp, _argv_ptr) =
-                self.setup_arguments_on_stack(task, argv, envp, stack_pointer, mach_header_addr)?;
-
-            // macOS arm64 convention:
-            //   x0 = mach_header* (register, NOT on stack)
-            //   SP = [argc, argv..., NULL, envp..., NULL, apple..., NULL, strings]
-
-            // Pre-allocate TLS page with TSD slot 3 (__TSD_MACH_THREAD_SELF) set to
-            // mach_thread_port. On real macOS, the kernel populates this before the
-            // first user instruction so that os_unfair_lock ownership checks work
-            // from the very start. Without this, TPIDR_EL0=0 causes os_unfair_lock_lock
-            // to read [0+0x18] as the "owner", producing a garbage value that later
-            // mismatches the correct TSD[3]=0x307 set by thread_set_tsd_base.
-            let tls_vaddr = macho_loader::setup_tls(task, self.mach_thread_port).map_err(|e| {
-                crate::println!("[darwin] setup_tls FAILED: {}", e);
-                e
-            })?;
-
-            macho_loader::setup_comm_page(task).map_err(|e| {
-                crate::println!("[darwin] setup_comm_page FAILED: {}", e);
-                e
-            })?;
-
-            task.set_entry_point(dyld_entry);
-            {
-                let mut vcpu = task.vcpu.lock();
-                vcpu.set_sp(adjusted_sp);
-                vcpu.set_pc(dyld_entry as u64);
-                vcpu.iregs.reg[0] = mach_header_addr;
-                // Set TPIDR_EL0/TPIDRRO_EL0 to the pre-allocated TLS page so that
-                // TSD slot access (TPIDRRO_EL0 + offset) works from instruction one.
-                vcpu.set_tpidr_el0(tls_vaddr as u64);
-                vcpu.set_tpidrro_el0(tls_vaddr as u64);
-                vcpu.switch(trapframe);
-            }
-
-            return Ok(());
-        }
-
-        *task.name.write() = argv
-            .first()
-            .map_or("Unnamed Darwin Task".to_string(), |s| s.to_string());
-
-        let root_page_table =
-            crate::arch::vm::get_root_pagetable(task.vm_manager.get_asid()).unwrap();
-        root_page_table.unmap_all();
-
-        crate::arch::vm::setup_trampoline_for_user(&task.vm_manager);
-        let stack_pointer = crate::vm::setup_user_stack(task).1;
-
-        task.set_entry_point(entry_point);
-
-        task.vcpu.lock().reset_iregs();
-        task.vcpu.lock().set_sp(stack_pointer);
-
-        let (adjusted_sp, argv_ptr) =
-            self.setup_arguments_on_stack(task, argv, envp, stack_pointer, mach_header_addr)?;
-        task.vcpu.lock().set_sp(adjusted_sp);
-
-        task.vcpu.lock().iregs.reg[0] = argv.len();
-        task.vcpu.lock().iregs.reg[1] = argv_ptr;
-
-        task.vcpu.lock().switch(trapframe);
-        Ok(())
+        self.execute_binary_with_path(
+            file_object,
+            argv,
+            envp,
+            task,
+            trapframe,
+            argv.first().copied().unwrap_or(""),
+        )
     }
 
     fn get_default_cwd(&self) -> &str {

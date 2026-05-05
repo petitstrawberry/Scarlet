@@ -18,9 +18,10 @@ const MACH_RCV_LARGE: u32 = 0x40;
 const MACH_MSG_SUCCESS: u32 = 0;
 const MACH_SEND_INVALID_DEST: u32 = 0x10000003;
 const MACH_SEND_TIMED_OUT: u32 = 0x10000004;
-const MACH_RCV_TIMED_OUT: u32 = 0x10000005;
-const MACH_RCV_TOO_LARGE: u32 = 0x10000006;
-const MACH_RCV_INVALID_NAME: u32 = 0x1000000c;
+const MACH_SEND_INVALID_VOUCHER: u32 = 0x10000005;
+const MACH_RCV_TIMED_OUT: u32 = 0x10004001;
+const MACH_RCV_TOO_LARGE: u32 = 0x10004004;
+const MACH_RCV_INVALID_NAME: u32 = 0x1000400c;
 
 // Mach port right types
 const MACH_PORT_RIGHT_SEND: u32 = 0;
@@ -43,6 +44,155 @@ pub fn sys_mach_task_self(abi: &mut DarwinAarch64Abi, trapframe: &mut Trapframe)
     trapframe.increment_pc_next(task);
     trapframe.set_return_value(abi.mach_task_self());
     abi.mach_task_self()
+}
+
+pub fn sys_mach_msg2_trap(abi: &mut DarwinAarch64Abi, trapframe: &mut Trapframe) -> usize {
+    let task = mytask().unwrap();
+    trapframe.increment_pc_next(task);
+
+    let x0 = trapframe.regs.reg[0];
+    let option = trapframe.regs.reg[1] as u32;
+    let send_size = (trapframe.regs.reg[2] & 0xFFFFFFFF) as usize;
+
+    let do_send = (option & MACH_SEND_MSG) != 0;
+    let do_receive = (option & MACH_RCV_MSG) != 0;
+
+    // Read the message header
+    if !do_send || send_size == 0 {
+        trapframe.set_return_value(MACH_RCV_TIMED_OUT as usize);
+        return MACH_RCV_TIMED_OUT as usize;
+    }
+
+    let msg_bytes = read_user_bytes(task, x0, send_size.min(256));
+    if msg_bytes.len() < core::mem::size_of::<MachMsgHeader>() {
+        trapframe.set_return_value(MACH_SEND_INVALID_DEST as usize);
+        return MACH_SEND_INVALID_DEST as usize;
+    }
+
+    let header = mach_msg_header_from_bytes(&msg_bytes);
+    crate::println!(
+        "[darwin] mach_msg2: id={} dest={:#x} local={:#x} size={} buf={:#x}",
+        header.msgh_id, header.msgh_remote_port, header.msgh_local_port, header.msgh_size, x0
+    );
+
+    // Handle known MIG routines
+    match header.msgh_id {
+        200..=215 => {
+            // host_info and related (subsystem mach_host, routines 0-15)
+            // 200=host_info, 201=host_kernel_version, 202=_host_page_size,
+            // 206=host_statistics, 207=host_request_notification, etc.
+            let reply = handle_host_info(&header, &msg_bytes);
+            if do_receive {
+                write_user_bytes(task, x0, &reply);
+            }
+            trapframe.set_return_value(MACH_MSG_SUCCESS as usize);
+            MACH_MSG_SUCCESS as usize
+        }
+        _ => {
+            crate::println!(
+                "[darwin] mach_msg2: unhandled MIG routine id={}",
+                header.msgh_id
+            );
+            trapframe.set_return_value(MACH_RCV_TIMED_OUT as usize);
+            MACH_RCV_TIMED_OUT as usize
+        }
+    }
+}
+
+/// MIG host_info (routine 200, reply 300) handler.
+/// Wire format: Header(24) + NDR(8) + RetCode(4) + count(4) + data(count*4)
+fn handle_host_info(request: &MachMsgHeader, msg_bytes: &[u8]) -> alloc::vec::Vec<u8> {
+    let flavor = if msg_bytes.len() >= 36 {
+        u32::from_le_bytes([msg_bytes[32], msg_bytes[33], msg_bytes[34], msg_bytes[35]])
+    } else {
+        0
+    };
+    let req_count = if msg_bytes.len() >= 40 {
+        u32::from_le_bytes([msg_bytes[36], msg_bytes[37], msg_bytes[38], msg_bytes[39]])
+    } else {
+        0
+    };
+
+    crate::println!("[darwin] host_info: flavor={} count={}", flavor, req_count);
+
+    let (ret_count, data) = match flavor {
+        1 => build_host_basic_info(),
+        5 => build_host_priority_info(),
+        _ => {
+            crate::println!("[darwin] host_info: unknown flavor {}", flavor);
+            return build_mig_error_reply(request, 300, 4);
+        }
+    };
+
+    let reply_size = 24 + 8 + 4 + 4 + data.len();
+    let mut reply = alloc::vec![0u8; reply_size];
+
+    write_u32_le(&mut reply, 0, 0x15);
+    write_u32_le(&mut reply, 4, reply_size as u32);
+    write_u32_le(&mut reply, 8, request.msgh_local_port);
+    write_u32_le(&mut reply, 12, 0);
+    write_u32_le(&mut reply, 16, 0);
+    write_u32_le(&mut reply, 20, 300);
+    reply[24] = 0; reply[25] = 0; reply[26] = 0; reply[27] = 0;
+    reply[28] = 1; reply[29] = 0; reply[30] = 0; reply[31] = 0;
+    write_u32_le(&mut reply, 32, 0);
+    write_u32_le(&mut reply, 36, ret_count);
+    reply[40..40 + data.len()].copy_from_slice(&data);
+
+    reply
+}
+
+fn build_host_basic_info() -> (u32, alloc::vec::Vec<u8>) {
+    let count = 12u32;
+    let mut d = alloc::vec![0u8; count as usize * 4];
+    write_u32_le(&mut d, 0, 1);
+    write_u32_le(&mut d, 4, 1);
+    write_u32_le(&mut d, 8, 0x80000000);
+    write_u32_le(&mut d, 12, 0x0100000c);
+    write_u32_le(&mut d, 16, 0);
+    write_u32_le(&mut d, 20, 0);
+    write_u32_le(&mut d, 24, 1);
+    write_u32_le(&mut d, 28, 1);
+    write_u32_le(&mut d, 32, 1);
+    write_u32_le(&mut d, 36, 1);
+    write_u64_le(&mut d, 40, 0x200000000);
+    (count, d)
+}
+
+fn build_host_priority_info() -> (u32, alloc::vec::Vec<u8>) {
+    let count = 8u32;
+    let mut d = alloc::vec![0u8; count as usize * 4];
+    write_u32_le(&mut d, 0, 80);
+    write_u32_le(&mut d, 4, 80);
+    write_u32_le(&mut d, 8, 64);
+    write_u32_le(&mut d, 12, 31);
+    write_u32_le(&mut d, 16, 0);
+    write_u32_le(&mut d, 20, 0);
+    write_u32_le(&mut d, 24, 0);
+    write_u32_le(&mut d, 28, 79);
+    (count, d)
+}
+
+fn build_mig_error_reply(request: &MachMsgHeader, reply_id: u32, ret_code: u32) -> alloc::vec::Vec<u8> {
+    let mut reply = alloc::vec![0u8; 36];
+    write_u32_le(&mut reply, 0, 0x15);
+    write_u32_le(&mut reply, 4, 36);
+    write_u32_le(&mut reply, 8, request.msgh_local_port);
+    write_u32_le(&mut reply, 12, 0);
+    write_u32_le(&mut reply, 16, 0);
+    write_u32_le(&mut reply, 20, reply_id);
+    reply[24] = 0; reply[25] = 0; reply[26] = 0; reply[27] = 0;
+    reply[28] = 1; reply[29] = 0; reply[30] = 0; reply[31] = 0;
+    write_u32_le(&mut reply, 32, ret_code);
+    reply
+}
+
+fn write_u32_le(buf: &mut [u8], offset: usize, val: u32) {
+    buf[offset..offset + 4].copy_from_slice(&val.to_le_bytes());
+}
+
+fn write_u64_le(buf: &mut [u8], offset: usize, val: u64) {
+    buf[offset..offset + 8].copy_from_slice(&val.to_le_bytes());
 }
 
 pub fn sys_mach_msg_trap(abi: &mut DarwinAarch64Abi, trapframe: &mut Trapframe) -> usize {
@@ -131,35 +281,12 @@ pub fn sys_mach_msg_trap(abi: &mut DarwinAarch64Abi, trapframe: &mut Trapframe) 
     MACH_MSG_SUCCESS as usize
 }
 
-fn is_valid_send_port(abi: &DarwinAarch64Abi, port_name: u32) -> bool {
-    if port_name == 0 {
-        return false;
-    }
-
-    abi.mach_ports.get(&port_name).is_some_and(|port| {
-        matches!(
-            port.right,
-            super::MachPortRight::Send
-                | super::MachPortRight::SendReceive
-                | super::MachPortRight::SendOnce
-                | super::MachPortRight::Receive
-        ) || matches!(port.right, super::MachPortRight::Send if MACH_PORT_RIGHT_SEND == 0)
-            || matches!(port.right, super::MachPortRight::Receive if MACH_PORT_RIGHT_RECEIVE == 1)
-            || matches!(port.right, super::MachPortRight::SendOnce if MACH_PORT_RIGHT_SEND_ONCE == 2)
-    })
+fn is_valid_send_port(_abi: &DarwinAarch64Abi, port_name: u32) -> bool {
+    port_name != 0
 }
 
-fn is_valid_receive_port(abi: &DarwinAarch64Abi, port_name: u32) -> bool {
-    if port_name == 0 {
-        return false;
-    }
-
-    abi.mach_ports.get(&port_name).is_some_and(|port| {
-        matches!(
-            port.right,
-            super::MachPortRight::Receive | super::MachPortRight::SendReceive
-        )
-    })
+fn is_valid_receive_port(_abi: &DarwinAarch64Abi, port_name: u32) -> bool {
+    port_name != 0
 }
 
 fn mach_msg_header_from_message(data: &[u8]) -> MachMsgHeader {
@@ -379,6 +506,7 @@ pub fn sys_vm_allocate(abi: &mut DarwinAarch64Abi, trapframe: &mut Trapframe) ->
                 }
             }
             trapframe.set_return_value(KERN_SUCCESS as usize);
+            core::mem::forget(pages);
             0
         }
         Err(e) => {
@@ -516,6 +644,7 @@ pub fn sys_vm_map(abi: &mut DarwinAarch64Abi, trapframe: &mut Trapframe) -> usiz
 
     match result {
         Ok(_vec) => {
+            core::mem::forget(pages);
             if let Some(kva) = task.vm_manager.translate_to_kva(vaddr) {
                 unsafe {
                     core::ptr::write_bytes(kva as *mut u8, 0, aligned_size);

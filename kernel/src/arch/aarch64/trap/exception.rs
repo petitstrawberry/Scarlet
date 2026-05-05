@@ -295,68 +295,100 @@ fn handle_brk(trapframe: &mut Trapframe, esr: u64) {
     if imm == 0xb001 {
         let x0 = trapframe.regs.reg[0];
         let x1 = trapframe.regs.reg[1];
+        let x2 = trapframe.regs.reg[2];
         let lr = trapframe.regs.reg[30];
-        let tpidr = trapframe.tpidr_el0;
-        let tpidrro = trapframe.tpidrro_el0;
-        crate::println!("[darwin] dyld halt: x0={:#x} x1={:#x} LR={:#x}", x0, x1, lr);
+        let sp = trapframe.sp as usize;
+        let fp = trapframe.regs.reg[29]; // x29 = frame pointer
+        crate::println!("[darwin] dyld halt (BRK #0xb001): LR={:#x} SP={:#x} FP={:#x}", lr, sp, fp);
+
+        // Dump all general-purpose registers
         crate::println!(
-            "[darwin]   x19={:#x} (lock ptr) x2={:#x} (actual_owner)",
-            trapframe.regs.reg[19],
-            trapframe.regs.reg[2]
+            "[darwin]   x0={:#x} x1={:#x} x2={:#x} x3={:#x}",
+            x0, x1, x2, trapframe.regs.reg[3]
         );
         crate::println!(
-            "[darwin]   TPIDR_EL0={:#x} TPIDRRO_EL0={:#x}",
-            tpidr,
-            tpidrro
+            "[darwin]   x4={:#x} x5={:#x} x6={:#x} x7={:#x}",
+            trapframe.regs.reg[4], trapframe.regs.reg[5],
+            trapframe.regs.reg[6], trapframe.regs.reg[7]
+        );
+        crate::println!(
+            "[darwin]   x8={:#x} x9={:#x} x10={:#x} x11={:#x}",
+            trapframe.regs.reg[8], trapframe.regs.reg[9],
+            trapframe.regs.reg[10], trapframe.regs.reg[11]
+        );
+        crate::println!(
+            "[darwin]   x16={:#x} x17={:#x} x18={:#x} x19={:#x}",
+            trapframe.regs.reg[16], trapframe.regs.reg[17],
+            trapframe.regs.reg[18], trapframe.regs.reg[19]
+        );
+        crate::println!(
+            "[darwin]   x20={:#x} x21={:#x} x22={:#x} x23={:#x}",
+            trapframe.regs.reg[20], trapframe.regs.reg[21],
+            trapframe.regs.reg[22], trapframe.regs.reg[23]
         );
 
-        // Read expected lock owner from [TPIDRRO_EL0 + 0x18]
-        if tpidrro > 0x1000 {
-            if let Some(kva) = task.vm_manager.translate_to_kva(tpidrro as usize + 0x18) {
-                let owner_val = unsafe { *(kva as *const u32) };
+        // Try to read halt message from sProcessInfo+0x300 (dyld stores halt msg there)
+        // x8 often holds the adrp page for sProcessInfo in dyld
+        let x8 = trapframe.regs.reg[8];
+        if x8 > 0x1000 {
+            let sinfo_base = (x8 as usize & !0xFFF);
+            let halt_msg_ptr_addr = sinfo_base + 0x300;
+            if let Some(kva) = task.vm_manager.translate_to_kva(halt_msg_ptr_addr) {
+                let msg_ptr = unsafe { core::ptr::read(kva as *const u64) };
                 crate::println!(
-                    "[darwin]   [TPIDRRO+0x18]={:#x} (expected lock owner)",
-                    owner_val
+                    "[darwin]   sProcessInfo+0x300: base={:#x} ptr={:#x}",
+                    sinfo_base, msg_ptr
                 );
-            }
-        }
-
-        // Dump 16 bytes of TLS context for lock owner analysis
-        if tpidrro > 0x1000 {
-            if let Some(kva) = task.vm_manager.translate_to_kva(tpidrro as usize) {
-                let tls_bytes = unsafe { core::slice::from_raw_parts(kva as *const u8, 64) };
-                crate::print!("[darwin]   TLS[0..64]=");
-                for (i, b) in tls_bytes.iter().enumerate() {
-                    if i % 8 == 0 {
-                        crate::print!(" ");
+                if msg_ptr > 0x1000 {
+                    if let Some(msg_kva) = task.vm_manager.translate_to_kva(msg_ptr as usize) {
+                        let bytes = unsafe { core::slice::from_raw_parts(msg_kva as *const u8, 512) };
+                        crate::print!("[darwin]   halt_msg=\"");
+                        for &b in bytes.iter() {
+                            if b >= 0x20 && b < 0x7f {
+                                crate::print!("{}", b as char);
+                            } else if b == 0 {
+                                break;
+                            } else {
+                                crate::print!("\\x{:02x}", b);
+                            }
+                        }
+                        crate::println!("\"");
                     }
-                    crate::print!("{:02x}", b);
                 }
-                crate::println!("");
             }
         }
 
+        // Walk the stack frame chain (x29-based) to trace the call chain
+        // ARM64 frame layout: [fp] = saved x29, [fp+8] = saved LR
+        crate::println!("[darwin]   --- stack frame walk ---");
+        let mut cur_fp = fp as usize;
+        for depth in 0..8 {
+            if cur_fp < 0x1000 {
+                break;
+            }
+            if let Some(kva) = task.vm_manager.translate_to_kva(cur_fp) {
+                let saved_fp = unsafe { core::ptr::read(kva as *const u64) };
+                let saved_lr = unsafe { core::ptr::read((kva as *const u64).add(1)) };
+                crate::println!(
+                    "[darwin]   [{}]: FP={:#x} LR={:#x}",
+                    depth, saved_fp, saved_lr
+                );
+                // Stop if frame pointer goes backwards or is invalid
+                if saved_fp == 0 || (saved_fp as usize) <= cur_fp {
+                    break;
+                }
+                cur_fp = saved_fp as usize;
+            } else {
+                crate::println!("[darwin]   [{}]: FP={:#x} (unmapped)", depth, cur_fp);
+                break;
+            }
+        }
+
+        // Also read x1 as string (may contain env data or StructuredError)
         if x1 > 0x1000 {
             if let Some(kva) = task.vm_manager.translate_to_kva(x1) {
                 let bytes = unsafe { core::slice::from_raw_parts(kva as *const u8, 256) };
-                crate::print!("[darwin] halt msg=\"");
-                for &b in bytes.iter() {
-                    if b >= 0x20 && b < 0x7f {
-                        crate::print!("{}", b as char);
-                    } else {
-                        break;
-                    }
-                }
-                crate::println!("\"");
-            } else {
-                crate::println!("[darwin] halt msg: could not translate x1={:#x}", x1);
-            }
-        }
-
-        if x0 > 0x1000 && x0 != x1 {
-            if let Some(kva) = task.vm_manager.translate_to_kva(x0) {
-                let bytes = unsafe { core::slice::from_raw_parts(kva as *const u8, 256) };
-                crate::print!("[darwin] halt x0-str=\"");
+                crate::print!("[darwin]   x1-str=\"");
                 for &b in bytes.iter() {
                     if b >= 0x20 && b < 0x7f {
                         crate::print!("{}", b as char);
@@ -456,6 +488,7 @@ fn handle_brk(trapframe: &mut Trapframe, esr: u64) {
     }
 
     trapframe.increment_pc_next(task);
+    task.exit(128 + 5);
 }
 
 /// Handle instruction page fault (like RISC-V cause 12)
@@ -486,15 +519,7 @@ fn handle_instruction_fault(trapframe: &mut Trapframe, vaddr: usize) {
 fn handle_data_fault(trapframe: &mut Trapframe, vaddr: usize, is_write: bool) {
     let esr = get_esr_el1();
     let dfsc = esr & 0x3f;
-    if vaddr >= 0x100000000 {
-        crate::println!(
-            "[darwin] data_fault: vaddr={:#x} write={} PC={:#x} DFSC={:#x}",
-            vaddr,
-            is_write,
-            trapframe.get_current_pc(),
-            dfsc
-        );
-    }
+
     if is_write && (dfsc >= 0x0d && dfsc <= 0x0f) {
         if handle_lock_watch_fault(trapframe, vaddr) {
             return;
@@ -576,6 +601,52 @@ fn handle_data_fault(trapframe: &mut Trapframe, vaddr: usize, is_write: bool) {
                 trapframe.regs.reg[17],
                 trapframe.sp,
             );
+            crate::println!(
+                "[darwin]   x19={:#x} x20={:#x} x21={:#x} x22={:#x}",
+                trapframe.regs.reg[19],
+                trapframe.regs.reg[20],
+                trapframe.regs.reg[21],
+                trapframe.regs.reg[22],
+            );
+            let x21 = trapframe.regs.reg[21];
+            if x21 != 0 {
+                if let Some(rs_kva) = task.vm_manager.translate_to_kva(x21) {
+                    let rs_ptr = rs_kva as *const u64;
+                    let runtime_state_ptr = unsafe { core::ptr::read_volatile(rs_ptr.add(1)) } as usize;
+                    crate::println!("[darwin]   RuntimeState* = {:#x}", runtime_state_ptr);
+                    if runtime_state_ptr != 0 {
+                        if let Some(pc_kva) = task.vm_manager.translate_to_kva(runtime_state_ptr) {
+                            let pc_ptr = pc_kva as *const u64;
+                            let config_ptr = unsafe { core::ptr::read_volatile(pc_ptr.add(1)) } as usize;
+                            crate::println!("[darwin]   ProcessConfig* = {:#x}", config_ptr);
+                            if config_ptr != 0 {
+                                if let Some(cfg_kva) = task.vm_manager.translate_to_kva(config_ptr) {
+                                    let cfg_ptr = cfg_kva as *const u64;
+                                    crate::println!(
+                                        "[darwin]   PCFG+0x00={:#x} +0x08={:#x}",
+                                        unsafe { core::ptr::read_volatile(cfg_ptr) },
+                                        unsafe { core::ptr::read_volatile(cfg_ptr.add(1)) },
+                                    );
+                                    crate::println!(
+                                        "[darwin]   PCFG+0x10={:#x} +0x18={:#x} +0x20={:#x} +0x28={:#x}",
+                                        unsafe { core::ptr::read_volatile(cfg_ptr.add(0x10 / 8)) },
+                                        unsafe { core::ptr::read_volatile(cfg_ptr.add(0x18 / 8)) },
+                                        unsafe { core::ptr::read_volatile(cfg_ptr.add(0x20 / 8)) },
+                                        unsafe { core::ptr::read_volatile(cfg_ptr.add(0x28 / 8)) },
+                                    );
+                                    crate::println!(
+                                        "[darwin]   PCFG+0x70={:#x} +0x78={:#x} +0x80={:#x} +0x88={:#x}",
+                                        unsafe { core::ptr::read_volatile(cfg_ptr.add(0x70 / 8)) },
+                                        unsafe { core::ptr::read_volatile(cfg_ptr.add(0x78 / 8)) },
+                                        unsafe { core::ptr::read_volatile(cfg_ptr.add(0x80 / 8)) },
+                                        unsafe { core::ptr::read_volatile(cfg_ptr.add(0x88 / 8)) },
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+            }
             task.exit(128);
             get_scheduler().schedule(trapframe);
             return;
@@ -586,6 +657,116 @@ fn handle_data_fault(trapframe: &mut Trapframe, vaddr: usize, is_write: bool) {
         Ok(_) => (),
         Err(e) => {
             print_trap_info(trapframe, get_esr_el1());
+            crate::println!("[darwin] NULL_FAULT vaddr={:#x}", vaddr);
+            let evs_global_addr: usize = 0x400a9138;
+            match task.vm_manager.translate_to_kva(evs_global_addr) {
+                Some(kva) => {
+                    let p = kva as *const u64;
+                    let evs_ptr = unsafe { core::ptr::read_volatile(p) } as usize;
+                    crate::println!("[darwin] sExternallyViewableState = {:#x}", evs_ptr);
+                    if evs_ptr != 0 {
+                        match task.vm_manager.translate_to_kva(evs_ptr) {
+                            Some(kva2) => {
+                                let p2 = kva2 as *const u64;
+                                let rs_ptr = unsafe { core::ptr::read_volatile(p2.add(1)) } as usize;
+                                crate::println!("[darwin]   [EVS+0x8] RuntimeState* = {:#x}", rs_ptr);
+                                if rs_ptr != 0 {
+                                    match task.vm_manager.translate_to_kva(rs_ptr) {
+                                        Some(kva3) => {
+                                            let p3 = kva3 as *const u64;
+                                            let cfg_ptr = unsafe { core::ptr::read_volatile(p3.add(1)) } as usize;
+                                            crate::println!("[darwin]   [RS+0x8] ProcessConfig* = {:#x}", cfg_ptr);
+                                            if cfg_ptr != 0 {
+                                                match task.vm_manager.translate_to_kva(cfg_ptr) {
+                                                    Some(kva4) => {
+                                                        let p4 = kva4 as *const u64;
+                                                        crate::println!(
+                                                            "[darwin]   PCFG+0x70={:#x} +0x78={:#x} +0x80={:#x} +0x88={:#x}",
+                                                            unsafe { core::ptr::read_volatile(p4.add(0x70 / 8)) },
+                                                            unsafe { core::ptr::read_volatile(p4.add(0x78 / 8)) },
+                                                            unsafe { core::ptr::read_volatile(p4.add(0x80 / 8)) },
+                                                            unsafe { core::ptr::read_volatile(p4.add(0x88 / 8)) },
+                                                        );
+                                                        crate::println!(
+                                                            "[darwin]   PCFG+0x00={:#x} +0x08={:#x} +0x10={:#x} +0x18={:#x}",
+                                                            unsafe { core::ptr::read_volatile(p4) },
+                                                            unsafe { core::ptr::read_volatile(p4.add(1)) },
+                                                            unsafe { core::ptr::read_volatile(p4.add(2)) },
+                                                            unsafe { core::ptr::read_volatile(p4.add(3)) },
+                                                        );
+                                                    }
+                                                    None => crate::println!("[darwin]   translate cfg FAILED"),
+                                                }
+                                            }
+                                        }
+                                        None => crate::println!("[darwin]   translate rs FAILED"),
+                                    }
+                                }
+                            }
+                            None => crate::println!("[darwin]   translate evs_ptr FAILED"),
+                        }
+                    }
+                }
+                None => crate::println!("[darwin] translate evs_global FAILED"),
+            }
+            if vaddr < 0x1000 {
+                // addObjectForKey saves x21 at [sp+0x28] in its prologue (stp x22, x21, [sp, #0x20])
+                // strlen is a leaf (no sp change), so trapframe.sp = addObjectForKey's sp
+                // [trapframe.sp + 0x28] = generateAtlas's x21 = EVS*
+                let sp_val = trapframe.sp;
+                let saved_x21_addr = sp_val as usize + 0x28;
+                crate::println!("[darwin] trap_sp={:#x} reading saved x21 from [{:#x}]", sp_val, saved_x21_addr);
+                // Dump raw bytes around the saved registers area
+                let dump_base = sp_val as usize;
+                if let Some(kva_dump) = task.vm_manager.translate_to_kva(dump_base) {
+                    let dp = kva_dump as *const u64;
+                    crate::println!(
+                        "[darwin] sp+0x00={:#x} +0x08={:#x} +0x10={:#x} +0x18={:#x}",
+                        unsafe { core::ptr::read_volatile(dp) },
+                        unsafe { core::ptr::read_volatile(dp.add(1)) },
+                        unsafe { core::ptr::read_volatile(dp.add(2)) },
+                        unsafe { core::ptr::read_volatile(dp.add(3)) },
+                    );
+                    crate::println!(
+                        "[darwin] sp+0x20={:#x} +0x28={:#x} +0x30={:#x} +0x38={:#x}",
+                        unsafe { core::ptr::read_volatile(dp.add(4)) },
+                        unsafe { core::ptr::read_volatile(dp.add(5)) },
+                        unsafe { core::ptr::read_volatile(dp.add(6)) },
+                        unsafe { core::ptr::read_volatile(dp.add(7)) },
+                    );
+                    crate::println!(
+                        "[darwin] sp+0x40={:#x} +0x48={:#x}",
+                        unsafe { core::ptr::read_volatile(dp.add(8)) },
+                        unsafe { core::ptr::read_volatile(dp.add(9)) },
+                    );
+                }
+                if let Some(kva) = task.vm_manager.translate_to_kva(saved_x21_addr) {
+                    let evs_ptr = unsafe { core::ptr::read_volatile(kva as *const u64) } as usize;
+                    crate::println!("[darwin] generateAtlas x21(EVS*)={:#x}", evs_ptr);
+                    if evs_ptr != 0 {
+                        if let Some(kva2) = task.vm_manager.translate_to_kva(evs_ptr) {
+                            let ep = kva2 as *const u64;
+                            crate::println!(
+                                "[darwin] EVS +0x00={:#x} +0x08={:#x} +0x10={:#x} +0x18={:#x}",
+                                unsafe { core::ptr::read_volatile(ep) },
+                                unsafe { core::ptr::read_volatile(ep.add(1)) },
+                                unsafe { core::ptr::read_volatile(ep.add(2)) },
+                                unsafe { core::ptr::read_volatile(ep.add(3)) },
+                            );
+                            crate::println!(
+                                "[darwin] EVS +0x20={:#x} +0x28={:#x} +0x30={:#x} +0x38={:#x}",
+                                unsafe { core::ptr::read_volatile(ep.add(4)) },
+                                unsafe { core::ptr::read_volatile(ep.add(5)) },
+                                unsafe { core::ptr::read_volatile(ep.add(6)) },
+                                unsafe { core::ptr::read_volatile(ep.add(7)) },
+                            );
+                        }
+                    }
+                }
+                task.exit(128);
+                get_scheduler().schedule(trapframe);
+                return;
+            }
             if let Some(task) = get_scheduler().get_current_task(get_cpu().get_cpuid()) {
                 early_println!(
                     "Task {} (PID {}) data fault at vaddr: {:#x} (write={}) from PC: {:#x}",
@@ -632,10 +813,20 @@ fn print_trap_info(trapframe: &Trapframe, esr: u64) {
     );
     crate::println!("TPIDR_EL0={:#x}", trapframe.tpidr_el0);
     crate::println!(
-        "x8={:#x} x9={:#x}",
+        "x8={:#x} x9={:#x} x16={:#x} x17={:#x}",
         trapframe.regs.reg[8],
-        trapframe.regs.reg[9]
+        trapframe.regs.reg[9],
+        trapframe.regs.reg[16],
+        trapframe.regs.reg[17]
     );
+    crate::println!(
+        "x19={:#x} x20={:#x} x21={:#x} x22={:#x}",
+        trapframe.regs.reg[19],
+        trapframe.regs.reg[20],
+        trapframe.regs.reg[21],
+        trapframe.regs.reg[22]
+    );
+    crate::println!("lr={:#x} sp={:#x}", trapframe.regs.reg[30], trapframe.sp);
 }
 
 /// Set a hardware write watchpoint on a 4-byte user-space address.

@@ -18,8 +18,12 @@ use crate::vm::vmem::VirtualMemoryPermission;
 
 const SCARLET_MAIR_EL1: u64 = 0x44ff00;
 const SCARLET_TCR_EL1: u64 = 0x21_B510_3510;
+// Bits 30 (EnIB) and 31 (EnIA) intentionally excluded: these enable PAuth
+// on ARMv8.3+ CPUs. In our virtualized environment, PAC authentication causes
+// modifier mismatches between kernel fixup signing and dyld BLRAA, resulting
+// in corrupted pointers. With EnIA/EnIB=0, PACIA/PACDA/BLRAA are NOP.
 const SCTLR_EL1_ENABLE_MASK: u64 =
-    1 | (1 << 2) | (1 << 12) | (1 << 31) | (1 << 30) | (1 << 27) | (1 << 13);
+    1 | (1 << 2) | (1 << 12) | (1 << 27) | (1 << 13);
 const DEBUG_DEVICE_FAULT_VA: usize = 0xffff_0008_3afd_b000;
 
 /// Maximum paging levels for AArch64 4KB granule (4 levels: 0-3)

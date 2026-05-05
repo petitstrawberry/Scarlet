@@ -400,14 +400,14 @@ pub fn load_macho_binary(
                     if name_offset < cmdsize {
                         let path_bytes = &command_bytes[name_offset..cmdsize];
                         if let Some(null_pos) = path_bytes.iter().position(|&b| b == 0) {
-                            if let Ok(path) = core::str::from_utf8(&path_bytes[..null_pos]) {
-                                crate::println!("[darwin] dylinker path: '{}'", path);
-                                dylinker_path = Some(path.to_string());
-                            }
-                        }
-                    }
-                }
-            }
+                             if let Ok(path) = core::str::from_utf8(&path_bytes[..null_pos]) {
+                                 crate::println!("[darwin] dylinker path: '{}'", path);
+                                 dylinker_path = Some(path.to_string());
+                             }
+                         }
+                     }
+                 }
+             }
             LC_DYSYMTAB => {}
             _ => {}
         }
@@ -452,9 +452,6 @@ fn map_segment(
     }
 
     let permissions = macho_prot_to_scarlet(segment.initprot);
-    if permissions == VirtualMemoryPermission::User as usize && segment.filesize == 0 {
-        return Ok(());
-    }
 
     let segment_vaddr =
         usize::try_from(segment.vmaddr).map_err(|_| "Mach-O vmaddr out of range")?;
@@ -463,6 +460,10 @@ fn map_segment(
     let segment_filesize =
         usize::try_from(segment.filesize).map_err(|_| "Mach-O filesize out of range")?;
     let segment_fileoff = segment.fileoff;
+
+    if segment_filesize == 0 {
+        return Ok(());
+    }
 
     if segment_filesize > segment_vmsize {
         return Err("Mach-O segment filesize exceeds vmsize");
@@ -544,9 +545,6 @@ pub fn map_segment_with_base(
     }
 
     let permissions = macho_prot_to_scarlet(segment.initprot);
-    if permissions == VirtualMemoryPermission::User as usize && segment.filesize == 0 {
-        return Ok(());
-    }
 
     let original_vaddr = usize::try_from(segment.vmaddr).map_err(|_| "vmaddr out of range")?;
     let segment_vaddr = if base_delta >= 0 {
@@ -561,6 +559,11 @@ pub fn map_segment_with_base(
     let segment_vmsize = usize::try_from(segment.vmsize).map_err(|_| "vmsize out of range")?;
     let segment_filesize =
         usize::try_from(segment.filesize).map_err(|_| "filesize out of range")?;
+
+    if segment_filesize == 0 {
+        return Ok(());
+    }
+
     let segment_fileoff = segment.fileoff;
 
     if segment_filesize > segment_vmsize {
@@ -781,7 +784,17 @@ fn apply_chained_fixups(
                 let new_value = if bind_bit == 0 {
                     if pointer_format == DYLD_CHAINED_PTR_ARM64E && auth_bit != 0 {
                         let target = *current_value & 0xFFFF_FFFF;
-                        (base_addr.wrapping_add(target)) & 0x0000_FFFF_FFFF_FFFF
+                        let diversity = (*current_value >> 32) & 0xFFFF;
+                        let addr_div = (*current_value >> 48) & 1;
+                        let key = (*current_value >> 49) & 0x3;
+                        let result = (base_addr.wrapping_add(target)) & 0x0000_FFFF_FFFF_FFFF;
+                        if *entry_addr >= 0x400adc00 && *entry_addr <= 0x400add00 {
+                            crate::println!(
+                                "[darwin] AUTH_REBASE @ {:#x}: raw={:#x} target={:#x} diversity={:#x} addrDiv={} key={} => {:#x} (base_addr={:#x})",
+                                entry_addr, current_value, target, diversity, addr_div, key, result, base_addr
+                            );
+                        }
+                        result
                     } else {
                         let target43 = *current_value & ((1u64 << 43) - 1);
                         let high8 = (*current_value >> 43) & 0xFF;
@@ -1338,27 +1351,11 @@ pub fn load_dyld(dyld_path: &str, task: &Task) -> Result<(usize, i64), &'static 
         map_segment_with_base(raw_file, task, segment, base_delta, slice_offset)?;
     }
 
-    if let Some((dataoff, datasize)) = chained_fixups {
-        let fixup_offset = dataoff as u64 + slice_offset;
-        let fixup_size = datasize as usize;
-        let mut fixup_buf = vec![0u8; fixup_size];
-        read_exact_at(raw_file, fixup_offset, &mut fixup_buf)?;
-
-        match apply_chained_fixups(
-            task,
-            target_base as u64,
-            base_delta,
-            &fixup_buf,
-            raw_file,
-            slice_offset,
-        ) {
-            Ok(()) => crate::println!(
-                "[darwin] dyld chained fixups applied ({} bytes)",
-                fixup_size
-            ),
-            Err(e) => crate::println!("[darwin] dyld chained fixups FAILED: {}", e),
-        }
-    }
+    // dyld owns rebasing of its on-disk image.  XNU maps dyld at the
+    // selected slide and jumps to __dyld_start with the original chained
+    // fixup words intact; dyld's early bootstrap then walks its own
+    // LC_DYLD_CHAINED_FIXUPS.  Applying them here would make dyld interpret
+    // already-rebased pointers as chain entries and slide them a second time.
 
     let dyld_entry = if let Some(off) = entryoff {
         let original_vaddr =
@@ -1511,6 +1508,7 @@ fn parse_v5_slide_infos(
             page_size,
             value_add,
             page_starts,
+            is_auth: (mapping.flags & CACHE_MAPPING_AUTH_DATA) != 0,
         });
     }
     Ok(infos)
@@ -1561,6 +1559,7 @@ struct SlideInfoMeta {
     page_size: u32,
     value_add: u64,
     page_starts: Vec<u16>,
+    is_auth: bool,
 }
 
 struct SubCache {
@@ -1589,28 +1588,24 @@ impl DarwinSharedCache {
         let mut header_buf = vec![0u8; 0x200];
         read_exact_at(self.file.as_ref(), 0, &mut header_buf)?;
 
-        if 0x100 + 8 > header_buf.len() || 0x108 + 8 > header_buf.len() {
-            return Err("Shared cache header missing image array fields");
+        const IMAGES_OFFSET: usize = 0x1C0;
+        const IMAGES_COUNT: usize = 0x1C4;
+        if IMAGES_COUNT + 4 > header_buf.len() {
+            return Err("Shared cache header missing imagesCount field");
         }
 
-        let image_array_addr = read_u64(&header_buf[0xF8..0x100]);
-        let image_array_size = read_u64(&header_buf[0x100..0x108]) as usize;
-        if image_array_addr == 0 || image_array_size == 0 {
+        let images_offset = read_u32(&header_buf[IMAGES_OFFSET..IMAGES_OFFSET + 4]) as u64;
+        let images_count = read_u32(&header_buf[IMAGES_COUNT..IMAGES_COUNT + 4]) as usize;
+        if images_offset == 0 || images_count == 0 {
             return Err("Shared cache image array unavailable");
         }
-        if image_array_size % size_of::<DyldCacheImageInfo>() != 0 {
-            return Err("Shared cache image array size invalid");
-        }
 
-        let image_count = image_array_size / size_of::<DyldCacheImageInfo>();
-        let file_offset = image_array_addr
-            .checked_sub(self.cache_start as u64)
-            .ok_or("Shared cache image array before base")?;
+        let image_array_size = images_count * size_of::<DyldCacheImageInfo>();
         let mut raw = vec![0u8; image_array_size];
-        read_exact_at(self.file.as_ref(), file_offset, &mut raw)?;
+        read_exact_at(self.file.as_ref(), images_offset, &mut raw)?;
 
-        let mut infos = Vec::with_capacity(image_count);
-        for i in 0..image_count {
+        let mut infos = Vec::with_capacity(images_count);
+        for i in 0..images_count {
             let start = i * size_of::<DyldCacheImageInfo>();
             let end = start + size_of::<DyldCacheImageInfo>();
             infos.push(read_struct::<DyldCacheImageInfo>(&raw[start..end])?);
@@ -1825,12 +1820,18 @@ impl DarwinSharedCache {
         // _magic = "dyld_data    v3" (16 bytes)
         // _dyldCache = FileIdTuple { fsid_t, fsobj_id_t } — must be non-zero for operator bool()
         let dr_magic: &[u8; 16] = b"dyld_data    v3\0";
+        let cache_path = b"/System/Library/dyld/dyld_shared_cache_arm64e\0";
+        let cache_path_offset: u32 = 0x40;
         unsafe {
             ptr::copy_nonoverlapping(dr_magic.as_ptr(), kva as *mut u8, 16);
-            // FileIdTuple: fsid_t (2 x int32 = 8 bytes) + fsobj_id_t (2 x uint32 = 8 bytes)
-            // Set to non-zero so operator bool() returns true
             ptr::write((kva + 16) as *mut u64, 1);
             ptr::write((kva + 24) as *mut u64, 1);
+            ptr::write((kva + 0x24) as *mut u32, cache_path_offset);
+            ptr::copy_nonoverlapping(
+                cache_path.as_ptr(),
+                (kva + cache_path_offset as usize) as *mut u8,
+                cache_path.len(),
+            );
         }
 
         core::mem::forget(page);
@@ -1908,6 +1909,7 @@ impl DarwinSharedCache {
     }
 
     fn apply_slide_fixups_for_page(&self, slide_base_vaddr: usize, kva: usize, buf_size: usize) {
+        // Phase 1: Apply chained fixups (rebase/bind entries from fixup chains)
         for si in &self.slide_infos {
             let sps = si.page_size as usize;
             let mapping_start_slide = (si.mapping_address as usize - self.cache_start) / sps;
@@ -1931,29 +1933,20 @@ impl DarwinSharedCache {
                 continue;
             }
 
-            crate::println!(
-                "[darwin] slide fixup: slide_vaddr={:#x} page_start={:#x} mapping={:#x} value_add={:#x} sps={:#x}",
-                slide_base_vaddr,
-                page_start,
-                si.mapping_address,
-                si.value_add,
-                sps
-            );
-
             let page_data_offset_in_mapping = local_slide_idx * sps;
-            let mut delta = (page_start / 8) as usize;
-            let mut loc = kva as *mut u64;
+            let mut delta_bytes = page_start as usize;
+            let mut loc = kva as usize;
 
             loop {
-                // SAFETY: `loc` always points within the freshly allocated and loaded buffer.
-                loc = unsafe { loc.add(delta) };
-                if loc as usize >= kva + buf_size {
+                loc += delta_bytes;
+                if loc >= kva + buf_size {
                     break;
                 }
 
-                // SAFETY: `loc` has been bounds-checked against the buffer extent.
-                let raw = unsafe { ptr::read(loc) };
+                let loc_ptr = loc as *mut u64;
+                let raw = unsafe { ptr::read(loc_ptr) };
                 let auth_bit = (raw >> 63) & 1;
+                let _slot_offset = (loc - kva) / 8;
                 let next;
 
                 if auth_bit == 1 {
@@ -1966,7 +1959,7 @@ impl DarwinSharedCache {
                     let target = si.value_add + runtime_offset;
                     let fixup_vaddr = si.mapping_address
                         + page_data_offset_in_mapping as u64
-                        + (loc as usize - kva) as u64;
+                        + (loc - kva) as u64;
                     let modifier = if addr_div != 0 {
                         diversity ^ (fixup_vaddr >> 3)
                     } else {
@@ -1978,21 +1971,79 @@ impl DarwinSharedCache {
                     } else {
                         pac_sign_ia(target, modifier)
                     };
-                    // SAFETY: `loc` points to an in-buffer u64 slot being fixed up in place.
-                    unsafe { ptr::write(loc, signed_ptr) };
+                    unsafe { ptr::write(loc_ptr, signed_ptr) };
                 } else {
                     let runtime_offset = raw & 0x3FFFFFFFF;
                     let high8 = (raw >> 34) & 0xFF;
-                    next = ((raw >> 44) & 0x7FF) as usize;
+                    next = ((raw >> 52) & 0x7FF) as usize;
                     let target = si.value_add + runtime_offset;
-                    // SAFETY: `loc` points to an in-buffer u64 slot being fixed up in place.
-                    unsafe { ptr::write(loc, target | (high8 << 56)) };
+                    unsafe { ptr::write(loc_ptr, target | (high8 << 56)) };
                 }
 
                 if next == 0 {
                     break;
                 }
-                delta = next;
+                delta_bytes = next * 8;
+            }
+        }
+
+        // Phase 2: Re-sign auth pointers not covered by fixup chains.
+        // Auth data pages contain PAC-signed pointers that are pre-signed with
+        // Apple's build-time keys. The fixup chains only cover entries needing
+        // rebasing; auth-only pointers (correct address, wrong PAC signature)
+        // are not in the chains. This pass re-signs them with our runtime keys.
+        for si in &self.slide_infos {
+            if !si.is_auth {
+                continue;
+            }
+
+            let mapping_start = si.mapping_address as usize;
+            let mapping_end = mapping_start + si.mapping_size;
+            if slide_base_vaddr < mapping_start || slide_base_vaddr >= mapping_end {
+                continue;
+            }
+
+            let page_data_offset_in_mapping = slide_base_vaddr - mapping_start;
+
+            for offset in (0..buf_size).step_by(8) {
+                let loc_ptr = (kva + offset) as *mut u64;
+                let raw = unsafe { ptr::read(loc_ptr) };
+
+                if (raw >> 63) & 1 == 0 {
+                    continue;
+                }
+
+                let runtime_offset = raw & 0x3FFFFFFFF;
+                let diversity = (raw >> 34) & 0xFFFF;
+                let addr_div = (raw >> 50) & 1;
+                let key_is_data = (raw >> 51) & 1;
+                let next_field = (raw >> 52) & 0x7FF;
+
+                if next_field != 0 {
+                    continue;
+                }
+
+                let target = si.value_add + runtime_offset;
+                let cache_end = self.cache_start as u64 + self.total_size as u64;
+                if target < self.cache_start as u64 || target >= cache_end || runtime_offset == 0 {
+                    continue;
+                }
+
+                let fixup_vaddr = si.mapping_address
+                    + page_data_offset_in_mapping as u64
+                    + offset as u64;
+                let modifier = if addr_div != 0 {
+                    diversity ^ (fixup_vaddr >> 3)
+                } else {
+                    diversity
+                };
+
+                let signed_ptr = if key_is_data != 0 {
+                    pac_sign_da(target, modifier)
+                } else {
+                    pac_sign_ia(target, modifier)
+                };
+                unsafe { ptr::write(loc_ptr, signed_ptr) };
             }
         }
     }
@@ -2073,6 +2124,19 @@ impl DarwinSharedCache {
 
         self.apply_slide_fixups_for_page(slide_base_vaddr, buf.as_ptr() as usize, slide_page_size);
 
+        // Debug: show values at crash-relevant offsets after fixup
+        if slide_base_vaddr <= 0x1ef37c000 && slide_base_vaddr + slide_page_size > 0x1ef37afc8 {
+            let off = 0x1ef37afc8 - slide_base_vaddr;
+            let buf_ptr = buf.as_ptr() as *const u64;
+            crate::println!("[darwin] SLIDE fixup base={:#x} sps={:#x} read={}", slide_base_vaddr, slide_page_size, total_read);
+            for i in (off / 8).saturating_sub(2)..=(off / 8) + 2 {
+                if i < slide_page_size / 8 {
+                    let val = unsafe { ptr::read(buf_ptr.add(i)) };
+                    crate::println!("[darwin]   [{}] @{:#x} = {:#x}", i, slide_base_vaddr + i * 8, val);
+                }
+            }
+        }
+
         let mut pages = self.pages.lock();
         if let Some(&existing) = pages.get(&slide_base_index) {
             let sub_idx = (page_vaddr - slide_base_vaddr) / PAGE_SIZE;
@@ -2140,14 +2204,7 @@ impl MemoryMappingOps for DarwinSharedCache {
         vm_start: usize,
     ) -> Result<ResolveFaultResult, ResolveFaultError> {
         let page_vaddr = access.vaddr & !(PAGE_SIZE - 1);
-        crate::println!(
-            "[darwin] resolve_fault: vaddr={:#x} cache_start={:#x} vm_start={:#x}",
-            page_vaddr,
-            self.cache_start,
-            vm_start
-        );
         if page_vaddr < self.cache_start {
-            crate::println!("[darwin] resolve_fault: OUT OF RANGE");
             return Err(ResolveFaultError::Invalid);
         }
 
@@ -2213,7 +2270,27 @@ impl MemoryMappingOps for DarwinSharedCache {
             self.patch_cache_header(kva);
         }
 
+        // Debug: show first 8 u64 values at specific offsets before fixups
+        if page_vaddr == 0x1ef378000 || page_vaddr == 0x1ef37a000 || page_vaddr == 0x1ef37c000 {
+            let base_ptr = kva as *const u64;
+            crate::println!("[darwin] BEFORE fixup page={:#x} read={}/{} file_off={:#x}", page_vaddr, total_read, readable, read_offset);
+            for i in 0..8 {
+                let val = unsafe { ptr::read(base_ptr.add(i)) };
+                crate::println!("[darwin]   [{}] @{:#x} = {:#x}", i, page_vaddr + i * 8, val);
+            }
+        }
+
         self.apply_slide_fixups_for_page(page_vaddr, kva, PAGE_SIZE);
+
+        // Debug: show values after fixups for the crash page
+        if page_vaddr == 0x1ef378000 || page_vaddr == 0x1ef37a000 || page_vaddr == 0x1ef37c000 {
+            let base_ptr = kva as *const u64;
+            crate::println!("[darwin] AFTER fixup page={:#x}", page_vaddr);
+            for i in 0..8 {
+                let val = unsafe { ptr::read(base_ptr.add(i)) };
+                crate::println!("[darwin]   [{}] @{:#x} = {:#x}", i, page_vaddr + i * 8, val);
+            }
+        }
 
         let mut pages = self.pages.lock();
         if let Some(&existing) = pages.get(&page_index) {
@@ -2458,10 +2535,9 @@ fn init_shared_cache(vfs: &VfsManager) -> Result<Arc<DarwinSharedCache>, &'stati
     }))
 }
 
-pub fn setup_shared_cache_region(task: &Task) -> Result<(), &'static str> {
-    let cache = SHARED_CACHE.call_once(|| {
-        let vfs = task.get_vfs().expect("No VFS");
-        Mutex::new(match init_shared_cache(&vfs) {
+pub fn ensure_shared_cache(vfs: &VfsManager) -> Result<(), &'static str> {
+    SHARED_CACHE.call_once(|| {
+        Mutex::new(match init_shared_cache(vfs) {
             Ok(cache) => {
                 crate::println!(
                     "[darwin] shared cache ready: {}MB at {:#x}",
@@ -2476,9 +2552,17 @@ pub fn setup_shared_cache_region(task: &Task) -> Result<(), &'static str> {
             }
         })
     });
+    let guard = SHARED_CACHE.get().unwrap().lock();
+    guard.as_ref().ok_or("Shared cache not available")?;
+    Ok(())
+}
 
-    let guard = cache.lock();
-    let cache = guard.as_ref().ok_or("Shared cache not available")?;
+pub fn setup_shared_cache_region(task: &Task) -> Result<(), &'static str> {
+    let vfs = task.get_vfs().ok_or("No VFS")?;
+    ensure_shared_cache(&vfs)?;
+
+    let cache = SHARED_CACHE.get().unwrap().lock();
+    let cache = cache.as_ref().ok_or("Shared cache not available")?;
 
     let mmap = VirtualMemoryMap::new(
         MemoryArea::new(0, PAGE_SIZE - 1),
@@ -2502,11 +2586,9 @@ fn pac_sign_ia(ptr: u64, modifier: u64) -> u64 {
     let result;
     unsafe {
         core::arch::asm!(
-            ".arch armv8.3-a",
-            "pacia {0}, {1}",
-            ".arch armv8-a",
-            inout(reg) ptr => result,
-            in(reg) modifier,
+            "pacia {ptr}, {mod}",
+            ptr = inout(reg) ptr => result,
+            mod = in(reg) modifier,
             options(nostack)
         )
     };
@@ -2518,11 +2600,9 @@ fn pac_sign_da(ptr: u64, modifier: u64) -> u64 {
     let result;
     unsafe {
         core::arch::asm!(
-            ".arch armv8.3-a",
-            "pacda {0}, {1}",
-            ".arch armv8-a",
-            inout(reg) ptr => result,
-            in(reg) modifier,
+            "pacda {ptr}, {mod}",
+            ptr = inout(reg) ptr => result,
+            mod = in(reg) modifier,
             options(nostack)
         )
     };

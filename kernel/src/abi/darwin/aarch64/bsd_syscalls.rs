@@ -158,6 +158,59 @@ pub fn sys_read(abi: &mut DarwinAarch64Abi, trapframe: &mut Trapframe) -> usize 
     }
 }
 
+pub fn sys_pread(abi: &mut DarwinAarch64Abi, trapframe: &mut Trapframe) -> usize {
+    let task = mytask().unwrap();
+    trapframe.increment_pc_next(task);
+
+    let fd = trapframe.get_arg(0) as usize;
+    let buf = trapframe.get_arg(1);
+    let count = trapframe.get_arg(2);
+    let offset = trapframe.get_arg(3) as u64;
+
+    let handle = match abi.get_handle(fd) {
+        Some(h) => h,
+        None => {
+            trapframe.spsr |= 1 << 29;
+            trapframe.set_return_value(EBADF);
+            return usize::MAX;
+        }
+    };
+
+    let ko = match task.handle_table.get(handle) {
+        Some(ko) => ko,
+        None => {
+            trapframe.spsr |= 1 << 29;
+            trapframe.set_return_value(EBADF);
+            return usize::MAX;
+        }
+    };
+
+    let file = match ko.as_file() {
+        Some(f) => f,
+        None => {
+            trapframe.spsr |= 1 << 29;
+            trapframe.set_return_value(EINVAL);
+            return usize::MAX;
+        }
+    };
+
+    let mut buffer = alloc::vec![0u8; count];
+    match file.read_at(offset, &mut buffer) {
+        Ok(n) => {
+            if n > 0 && buf != 0 {
+                write_user_bytes(task, buf, &buffer[..n]);
+            }
+            trapframe.set_return_value(n);
+            n
+        }
+        Err(_) => {
+            trapframe.spsr |= 1 << 29;
+            trapframe.set_return_value(EIO);
+            usize::MAX
+        }
+    }
+}
+
 pub fn sys_write(abi: &mut DarwinAarch64Abi, trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
     trapframe.increment_pc_next(task);
@@ -383,7 +436,21 @@ pub fn sys_getuid(_abi: &mut DarwinAarch64Abi, trapframe: &mut Trapframe) -> usi
     0
 }
 
+pub fn sys_geteuid(_abi: &mut DarwinAarch64Abi, trapframe: &mut Trapframe) -> usize {
+    let task = mytask().unwrap();
+    trapframe.increment_pc_next(task);
+    trapframe.set_return_value(0);
+    0
+}
+
 pub fn sys_getgid(_abi: &mut DarwinAarch64Abi, trapframe: &mut Trapframe) -> usize {
+    let task = mytask().unwrap();
+    trapframe.increment_pc_next(task);
+    trapframe.set_return_value(0);
+    0
+}
+
+pub fn sys_getegid(_abi: &mut DarwinAarch64Abi, trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
     trapframe.increment_pc_next(task);
     trapframe.set_return_value(0);
@@ -720,6 +787,71 @@ pub fn sys_sigprocmask(_abi: &mut DarwinAarch64Abi, trapframe: &mut Trapframe) -
         write_user_bytes(task, oset_ptr, &empty_mask);
     }
 
+    trapframe.set_return_value(0);
+    0
+}
+
+pub fn sys_getrlimit(_abi: &mut DarwinAarch64Abi, trapframe: &mut Trapframe) -> usize {
+    let task = mytask().unwrap();
+    trapframe.increment_pc_next(task);
+    trapframe.spsr |= 1 << 29;
+    trapframe.set_return_value(EINVAL);
+    usize::MAX
+}
+
+pub fn sys_setrlimit(_abi: &mut DarwinAarch64Abi, trapframe: &mut Trapframe) -> usize {
+    let task = mytask().unwrap();
+    trapframe.increment_pc_next(task);
+    trapframe.spsr |= 1 << 29;
+    trapframe.set_return_value(EINVAL);
+    usize::MAX
+}
+
+pub fn sys_pthread_kill(_abi: &mut DarwinAarch64Abi, trapframe: &mut Trapframe) -> usize {
+    let task = mytask().unwrap();
+    trapframe.increment_pc_next(task);
+    trapframe.spsr &= !(1 << 29);
+    trapframe.set_return_value(0);
+    0
+}
+
+pub fn sys_pthread_sigmask(abi: &mut DarwinAarch64Abi, trapframe: &mut Trapframe) -> usize {
+    let task = mytask().unwrap();
+    trapframe.increment_pc_next(task);
+
+    let _how = trapframe.get_arg(0);
+    let _set = trapframe.get_arg(1);
+    let _oset = trapframe.get_arg(2);
+    let _ = abi;
+
+    trapframe.spsr &= !(1 << 29);
+    trapframe.set_return_value(0);
+    0
+}
+
+pub fn sys_bsdthread_register(
+    _abi: &mut DarwinAarch64Abi,
+    trapframe: &mut Trapframe,
+) -> usize {
+    let task = mytask().unwrap();
+    trapframe.increment_pc_next(task);
+    trapframe.spsr &= !(1 << 29);
+    // PTHREAD_FEATURE_SUPPORTED from libpthread kern_internal.h
+    // DISPATCHFUNC(0x01)|FINEPRIO(0x02)|BSDTHREADCTL(0x04)|SETSELF(0x08)|
+    // QOS_MAINTENANCE(0x10)|KEVENT(0x40)|WORKLOOP(0x80)|COOPERATIVE_WORKQ(0x100)|
+    // QOS_DEFAULT(0x40000000)
+    let features: usize = 0x4000_01df;
+    trapframe.set_return_value(features);
+    features
+}
+
+pub fn sys_semwait_signal_nocancel(
+    _abi: &mut DarwinAarch64Abi,
+    trapframe: &mut Trapframe,
+) -> usize {
+    let task = mytask().unwrap();
+    trapframe.increment_pc_next(task);
+    trapframe.spsr &= !(1 << 29);
     trapframe.set_return_value(0);
     0
 }
@@ -2155,13 +2287,13 @@ pub fn sys_execve(abi: &mut DarwinAarch64Abi, trapframe: &mut Trapframe) -> usiz
     let argv_refs: alloc::vec::Vec<&str> = argv_strings.iter().map(|s| s.as_str()).collect();
     let envp_refs: alloc::vec::Vec<&str> = envp_strings.iter().map(|s| s.as_str()).collect();
 
-    match crate::abi::AbiModule::execute_binary(
-        abi,
+    match abi.execute_binary_with_path(
         &file_object,
         &argv_refs,
         &envp_refs,
         task,
         trapframe,
+        &abs_path,
     ) {
         Ok(()) => trapframe.get_return_value(),
         Err(_) => {
@@ -2170,6 +2302,16 @@ pub fn sys_execve(abi: &mut DarwinAarch64Abi, trapframe: &mut Trapframe) -> usiz
             usize::MAX
         }
     }
+}
+
+pub fn sys_fsgetpath(_abi: &mut DarwinAarch64Abi, trapframe: &mut Trapframe) -> usize {
+    let task = mytask().unwrap();
+    trapframe.increment_pc_next(task);
+    // fsgetpath(fsid, objid) -> path. We don't have real fsid/inode tracking.
+    // Return ENOENT so dyld falls back to default paths.
+    trapframe.spsr |= 1 << 29;
+    trapframe.set_return_value(ENOENT);
+    usize::MAX
 }
 
 pub fn sys_thread_selfid(_abi: &mut DarwinAarch64Abi, trapframe: &mut Trapframe) -> usize {
@@ -2521,4 +2663,20 @@ pub fn sys_mac_syscall(abi: &mut DarwinAarch64Abi, trapframe: &mut Trapframe) ->
     trapframe.spsr &= !(1 << 29);
     trapframe.set_return_value(0);
     0
+}
+
+pub fn sys_access(_abi: &mut DarwinAarch64Abi, trapframe: &mut Trapframe) -> usize {
+    let task = mytask().unwrap();
+    trapframe.increment_pc_next(task);
+    trapframe.spsr &= !(1 << 29);
+    trapframe.set_return_value(0);
+    0
+}
+
+pub fn sys_map_with_linking_np(_abi: &mut DarwinAarch64Abi, trapframe: &mut Trapframe) -> usize {
+    let task = mytask().unwrap();
+    trapframe.increment_pc_next(task);
+    trapframe.spsr |= 1 << 29;
+    trapframe.set_return_value(ENOTSUP);
+    usize::MAX
 }
