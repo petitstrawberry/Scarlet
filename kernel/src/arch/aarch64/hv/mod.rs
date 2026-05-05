@@ -13,8 +13,9 @@ pub use trap::{arch_guest_trap_handler, clear_guest_mode, is_from_guest};
 pub use vm::Vm;
 
 use crate::hypervisor::vm::VmId;
+use crate::vm::manager::VirtualMemoryManager;
 
-pub fn create_vm(id: VmId) -> Result<Arc<Vm>, &'static str> {
+pub fn create_vm(id: VmId, _owner_mm: VirtualMemoryManager) -> Result<Arc<Vm>, &'static str> {
     Ok(Arc::new(vm::Vm::new(id)))
 }
 

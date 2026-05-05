@@ -9,13 +9,16 @@ extern crate alloc;
 
 use alloc::string::String;
 use alloc::sync::Arc;
+use alloc::vec::Vec;
 use core::any::Any;
+use spin::{Once, RwLock};
 
 #[cfg(target_arch = "riscv64")]
 use crate::abi::linux::riscv64::LinuxRiscv64Abi;
 use crate::device::manager::DeviceManager;
 use crate::device::{Device, DeviceType};
 use crate::hypervisor::memory::MemorySlotFlags;
+use crate::hypervisor::types::InterruptType;
 use crate::hypervisor::{VcpuRef, VmObject, VmRef};
 use crate::object::KernelObject;
 use crate::object::capability::selectable::{SelectWaitOutcome, Selectable};
@@ -51,19 +54,43 @@ const fn io_none(ty: u32, nr: u32) -> u32 {
     (ty << 8) | nr
 }
 
+const fn io_write(ty: u32, nr: u32, size: u32) -> u32 {
+    (1 << 30) | (size << 16) | (ty << 8) | nr
+}
+
+const fn io_read(ty: u32, nr: u32, size: u32) -> u32 {
+    (2 << 30) | (size << 16) | (ty << 8) | nr
+}
+
+const fn io_read_write(ty: u32, nr: u32, size: u32) -> u32 {
+    (3 << 30) | (size << 16) | (ty << 8) | nr
+}
+
+// _IO(KVMIO, nr) — no direction, no size
 pub const KVM_GET_API_VERSION: u32 = io_none(KVMIO, 0x00);
 pub const KVM_CREATE_VM: u32 = io_none(KVMIO, 0x01);
 pub const KVM_CHECK_EXTENSION: u32 = io_none(KVMIO, 0x03);
 pub const KVM_GET_VCPU_MMAP_SIZE: u32 = io_none(KVMIO, 0x04);
-
-pub const KVM_SET_USER_MEMORY_REGION: u32 = io_none(KVMIO, 0x46);
 pub const KVM_CREATE_VCPU: u32 = io_none(KVMIO, 0x41);
-
 pub const KVM_RUN: u32 = io_none(KVMIO, 0x80);
-pub const KVM_GET_REGS: u32 = io_none(KVMIO, 0x81);
-pub const KVM_SET_REGS: u32 = io_none(KVMIO, 0x82);
-pub const KVM_GET_ONE_REG: u32 = io_none(KVMIO, 0xAB);
-pub const KVM_SET_ONE_REG: u32 = io_none(KVMIO, 0xAC);
+pub const KVM_CREATE_IRQCHIP: u32 = io_none(KVMIO, 0x60);
+
+// _IOW(KVMIO, nr, struct) — host→kernel
+pub const KVM_SET_USER_MEMORY_REGION: u32 = io_write(KVMIO, 0x46, 32);
+pub const KVM_IRQ_LINE: u32 = io_write(KVMIO, 0x61, 8);
+pub const KVM_SET_MP_STATE: u32 = io_write(KVMIO, 0x99, 4);
+pub const KVM_SET_REGS: u32 = io_write(KVMIO, 0x82, 256);
+pub const KVM_SET_ONE_REG: u32 = io_write(KVMIO, 0xAC, 16);
+
+// _IOR(KVMIO, nr, struct) — kernel→host
+pub const KVM_GET_MP_STATE: u32 = io_read(KVMIO, 0x98, 4);
+pub const KVM_GET_REGS: u32 = io_read(KVMIO, 0x81, 256);
+
+// _IOW(KVMIO, nr, struct) — both GET/SET_ONE_REG use _IOW in Linux
+pub const KVM_GET_ONE_REG: u32 = io_write(KVMIO, 0xAB, 16);
+
+pub const KVM_MP_STATE_RUNNABLE: u32 = 0;
+pub const KVM_MP_STATE_STOPPED: u32 = 1;
 
 const KVM_API_VERSION: usize = 12;
 
@@ -102,6 +129,19 @@ pub struct KvmUserspaceMemoryRegion {
 }
 
 #[repr(C)]
+#[derive(Clone, Copy)]
+pub struct KvmIrqLevel {
+    pub irq: u32,
+    pub level: u32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct KvmMpState {
+    pub mp_state: u32,
+}
+
+#[repr(C)]
 pub struct KvmRun {
     pub request_interrupt_window: u8,
     pub immediate_exit: u8,
@@ -121,7 +161,17 @@ pub union KvmRunExitData {
     pub mmio: KvmRunMmio,
     pub system_event: KvmRunSystemEvent,
     pub fail_entry: KvmRunFailEntry,
+    pub riscv_sbi: KvmRunRiscvSbi,
     pub _padding: [u8; 256],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct KvmRunRiscvSbi {
+    pub extension_id: u64,
+    pub function_id: u64,
+    pub args: [u64; 6],
+    pub ret: [u64; 2],
 }
 
 #[repr(C)]
@@ -148,6 +198,96 @@ pub struct KvmRunFailEntry {
 }
 
 // ---------------------------------------------------------------------------
+// Per-vCPU shared kvm_run page management
+// ---------------------------------------------------------------------------
+// When kvmtool creates a vCPU via KVM_CREATE_VCPU, we allocate a page-aligned
+// KvmRun struct. Userspace mmaps the vcpu fd to get a shared view of this
+// structure. After each KVM_RUN, the kernel writes exit information into the
+// shared page and userspace reads it from the mmap'd address.
+
+struct KvmRunPage {
+    /// Kernel virtual address of the kvm_run page (for kernel writes)
+    vaddr: usize,
+    /// Physical address of the kvm_run page (for userspace mmap)
+    paddr: usize,
+}
+
+struct KvmRunPageEntry {
+    vcpu: VcpuRef,
+    page: KvmRunPage,
+}
+
+static KVM_RUN_PAGES: Once<RwLock<Vec<KvmRunPageEntry>>> = Once::new();
+
+fn get_run_pages() -> &'static RwLock<Vec<KvmRunPageEntry>> {
+    KVM_RUN_PAGES.call_once(|| RwLock::new(Vec::new()))
+}
+
+/// Allocate a shared kvm_run page for the given vCPU and register it.
+pub fn register_vcpu_run_page(vcpu: &VcpuRef) -> Result<(), ()> {
+    use crate::mem::page::allocate_raw_pages;
+    use crate::vm::addr::virt_to_phys;
+
+    let page = allocate_raw_pages(1);
+    if page.is_null() {
+        return Err(());
+    }
+    let vaddr = page as usize;
+    let paddr = virt_to_phys(vaddr);
+
+    get_run_pages().write().push(KvmRunPageEntry {
+        vcpu: Arc::clone(vcpu),
+        page: KvmRunPage { vaddr, paddr },
+    });
+    Ok(())
+}
+
+/// Look up the physical address of a vCPU's shared kvm_run page.
+/// Returns `None` if the vCPU was not created through the KVM compat layer
+/// (e.g., U-SHV vcpus created via sys_shv_vcpu_create).
+pub fn get_vcpu_run_paddr(vcpu: &VcpuRef) -> Option<usize> {
+    let pages = get_run_pages().read();
+    for entry in pages.iter() {
+        if Arc::ptr_eq(&entry.vcpu, vcpu) {
+            return Some(entry.page.paddr);
+        }
+    }
+    None
+}
+
+/// Write VmExit information into a vCPU's shared kvm_run page.
+/// Does nothing if the vCPU has no registered run page (backward compat
+/// with the old pointer-based KVM_RUN path).
+pub fn write_vcpu_run_exit(vcpu: &VcpuRef, exit: &crate::hypervisor::VmExit) -> bool {
+    let pages = get_run_pages().read();
+    for entry in pages.iter() {
+        if Arc::ptr_eq(&entry.vcpu, vcpu) {
+            // SAFETY: vaddr points to a page-aligned, zero-initialized allocation
+            // that is exclusively owned by this kvm_run page management code.
+            let kvm_run = unsafe { &mut *(entry.page.vaddr as *mut KvmRun) };
+            kvm_run.exit_data = KvmRunExitData {
+                _padding: [0u8; 256],
+            };
+            write_vm_exit(kvm_run, exit, vcpu);
+            return true;
+        }
+    }
+    false
+}
+
+/// Free a vCPU's shared kvm_run page. Called when the vCPU kernel object
+/// is dropped.
+pub fn free_vcpu_run_page(vcpu: &VcpuRef) {
+    let mut pages = get_run_pages().write();
+    let idx = pages.iter().position(|e| Arc::ptr_eq(&e.vcpu, vcpu));
+    if let Some(i) = idx {
+        use crate::mem::page::free_raw_pages;
+        let entry = pages.remove(i);
+        free_raw_pages(entry.page.vaddr as *mut crate::mem::page::Page, 1);
+    }
+}
+
+// ---------------------------------------------------------------------------
 // System-level (/dev/kvm) ioctl dispatcher
 // ---------------------------------------------------------------------------
 
@@ -157,13 +297,15 @@ pub fn handle_system_ioctl(
     _arg: usize,
     abi: &mut LinuxRiscv64Abi,
 ) -> Result<Option<usize>, ()> {
+    // crate::println!("[KVM] handle_system_ioctl: request={:#x} arg={}", request, _arg);
     match request {
         KVM_GET_API_VERSION => Ok(Some(KVM_API_VERSION)),
 
         KVM_CREATE_VM => {
             let task = mytask().ok_or(())?;
+            let owner_mm = task.vm_manager.clone();
             let vm = crate::hypervisor::vm::GLOBAL_VM_MANAGER
-                .create_vm()
+                .create_vm(owner_mm)
                 .map_err(|_| ())?;
             let kernel_obj = KernelObject::HypervisorVm(vm);
             let handle = task.handle_table.insert(kernel_obj).map_err(|_| ())?;
@@ -171,7 +313,19 @@ pub fn handle_system_ioctl(
             Ok(Some(fd))
         }
 
-        KVM_CHECK_EXTENSION => Ok(Some(0)),
+        KVM_CHECK_EXTENSION => {
+            // Linux KVM capability IDs (from include/uapi/linux/kvm.h)
+            const KVM_CAP_NR_VCPUS: usize = 9;
+            const KVM_CAP_COALESCED_MMIO: usize = 15;
+            const KVM_CAP_ONE_REG: usize = 70;
+            const KVM_CAP_MAX_VCPUS: usize = 66;
+            match _arg {
+                KVM_CAP_ONE_REG => Ok(Some(1)),
+                KVM_CAP_NR_VCPUS => Ok(Some(1)),
+                KVM_CAP_MAX_VCPUS => Ok(Some(1)),
+                _ => Ok(Some(0)),
+            }
+        }
 
         KVM_GET_VCPU_MMAP_SIZE => Ok(Some(core::mem::size_of::<KvmRun>())),
 
@@ -190,11 +344,13 @@ pub fn handle_vm_ioctl(
     vm: &VmRef,
     abi: &mut LinuxRiscv64Abi,
 ) -> Result<Option<usize>, ()> {
+    // crate::println!("[KVM] handle_vm_ioctl: request={:#x} arg={:#x}", request, arg);
     match request {
         KVM_CREATE_VCPU => {
             let vcpu_id = arg as u32;
             let task = mytask().ok_or(())?;
             let vcpu = vm.create_vcpu(vcpu_id).map_err(|_| ())?;
+            register_vcpu_run_page(&vcpu).map_err(|_| ())?;
             let kernel_obj = KernelObject::HypervisorVcpu(vcpu);
             let handle = task.handle_table.insert(kernel_obj).map_err(|_| ())?;
             let fd = abi.allocate_fd(handle).map_err(|_| ())?;
@@ -202,28 +358,63 @@ pub fn handle_vm_ioctl(
         }
 
         KVM_SET_USER_MEMORY_REGION => {
-            let task = mytask().ok_or(())?;
-            let paddr = task.vm_manager.translate_to_phys(arg).ok_or(())?;
+            let task = match mytask() {
+                Some(t) => t,
+                None => {
+                    crate::println!("[KVM] SET_MEM: no task");
+                    return Err(());
+                }
+            };
+            let kva = match task.vm_manager.translate_to_kva(arg) {
+                Some(k) => k,
+                None => {
+                    crate::println!("[KVM] SET_MEM: translate_to_kva({:#x}) failed", arg);
+                    return Err(());
+                }
+            };
             // SAFETY: caller guarantees arg points to a valid KvmUserspaceMemoryRegion
-            let region = unsafe { &*(paddr as *const KvmUserspaceMemoryRegion) };
+            let region = unsafe { &*(kva as *const KvmUserspaceMemoryRegion) };
+            // crate::println!("[KVM] SET_MEM: slot={} gpa={:#x} size={:#x} ua={:#x} flags={}",
+            //     region.slot, region.guest_phys_addr, region.memory_size, region.userspace_addr, region.flags);
 
             let flags = MemorySlotFlags {
                 readonly: (region.flags & KVM_MEM_READONLY) != 0,
             };
 
-            let host_phys = task
-                .vm_manager
-                .translate_to_phys(region.userspace_addr as usize)
-                .ok_or(())? as u64;
-
-            vm.set_memory_region(
+            // The hypervisor's set_memory_region_impl expects a userspace virtual address
+            // (it calls translate_to_kva internally). Pass userspace_addr directly.
+            match vm.set_memory_region(
                 region.slot,
                 region.guest_phys_addr,
                 region.memory_size,
-                host_phys,
+                region.userspace_addr,
                 flags,
-            )
-            .map_err(|_| ())?;
+            ) {
+                Ok(()) => Ok(Some(0)),
+                Err(e) => {
+                    crate::println!("[KVM] SET_MEM: set_memory_region err: {}", e);
+                    Err(())
+                }
+            }
+        }
+
+        KVM_IRQ_LINE => {
+            if arg == 0 {
+                return Err(());
+            }
+
+            let task = mytask().ok_or(())?;
+            let kva = task.vm_manager.translate_to_kva(arg).ok_or(())?;
+            // SAFETY: caller guarantees arg points to a valid KvmIrqLevel
+            let irq_level = unsafe { &*(kva as *const KvmIrqLevel) };
+
+            if let Some(vcpu) = vm.get_vcpu(0) {
+                if irq_level.level != 0 {
+                    vcpu.inject_interrupt(InterruptType::External);
+                } else {
+                    vcpu.clear_interrupt(InterruptType::External);
+                }
+            }
 
             Ok(Some(0))
         }
@@ -240,13 +431,16 @@ pub fn handle_vcpu_ioctl(request: u32, arg: usize, vcpu: &VcpuRef) -> Result<Opt
     match request {
         KVM_RUN => {
             let exit = vcpu.run().map_err(|_| ())?;
+            // crate::println!("[KVM] KVM_RUN exit: {:?}", exit);
 
-            if arg != 0 {
+            // Prefer the shared kvm_run page (mmap'd by kvmtool).
+            // Fall back to the legacy pointer-based path for U-SHV compatibility.
+            if !write_vcpu_run_exit(vcpu, &exit) && arg != 0 {
                 let task = mytask().ok_or(())?;
-                let paddr = task.vm_manager.translate_to_phys(arg).ok_or(())?;
+                let kva = task.vm_manager.translate_to_kva(arg).ok_or(())?;
                 // SAFETY: caller guarantees arg points to a valid KvmRun
-                let kvm_run = unsafe { &mut *(paddr as *mut KvmRun) };
-                write_vm_exit(kvm_run, &exit);
+                let kvm_run = unsafe { &mut *(kva as *mut KvmRun) };
+                write_vm_exit(kvm_run, &exit, vcpu);
             }
 
             Ok(Some(0))
@@ -257,8 +451,9 @@ pub fn handle_vcpu_ioctl(request: u32, arg: usize, vcpu: &VcpuRef) -> Result<Opt
                 return Err(());
             }
             let task = mytask().ok_or(())?;
-            let paddr = task.vm_manager.translate_to_phys(arg).ok_or(())?;
-            let kvm_regs = unsafe { &mut *(paddr as *mut KvmRegs) };
+            let kva = task.vm_manager.translate_to_kva(arg).ok_or(())?;
+            // SAFETY: caller guarantees arg points to a valid KvmRegs
+            let kvm_regs = unsafe { &mut *(kva as *mut KvmRegs) };
             *kvm_regs = arch::read_regs_to_kvm(vcpu);
             Ok(Some(0))
         }
@@ -268,9 +463,75 @@ pub fn handle_vcpu_ioctl(request: u32, arg: usize, vcpu: &VcpuRef) -> Result<Opt
                 return Err(());
             }
             let task = mytask().ok_or(())?;
-            let paddr = task.vm_manager.translate_to_phys(arg).ok_or(())?;
-            let kvm_regs = unsafe { &*(paddr as *const KvmRegs) };
+            let kva = task.vm_manager.translate_to_kva(arg).ok_or(())?;
+            // SAFETY: caller guarantees arg points to a valid KvmRegs
+            let kvm_regs = unsafe { &*(kva as *const KvmRegs) };
             arch::write_kvm_to_regs(vcpu, kvm_regs);
+            Ok(Some(0))
+        }
+
+        KVM_GET_ONE_REG => {
+            if arg == 0 {
+                return Err(());
+            }
+
+            let task = mytask().ok_or(())?;
+            let one_reg_kva = task.vm_manager.translate_to_kva(arg).ok_or(())?;
+            // SAFETY: caller guarantees arg points to a valid KvmOneReg
+            let one_reg = unsafe { *(one_reg_kva as *const arch::KvmOneReg) };
+            let value = arch::get_one_reg(vcpu, one_reg.id)?;
+            let value_kva = task
+                .vm_manager
+                .translate_to_kva(one_reg.addr as usize)
+                .ok_or(())?;
+            // SAFETY: caller guarantees one_reg.addr points to a valid u64
+            unsafe { *(value_kva as *mut u64) = value };
+            Ok(Some(0))
+        }
+
+        KVM_SET_ONE_REG => {
+            if arg == 0 {
+                return Err(());
+            }
+
+            let task = mytask().ok_or(())?;
+            let one_reg_kva = task.vm_manager.translate_to_kva(arg).ok_or(())?;
+            // SAFETY: caller guarantees arg points to a valid KvmOneReg
+            let one_reg = unsafe { *(one_reg_kva as *const arch::KvmOneReg) };
+            let value_kva = task
+                .vm_manager
+                .translate_to_kva(one_reg.addr as usize)
+                .ok_or(())?;
+            // SAFETY: caller guarantees one_reg.addr points to a valid u64
+            let value = unsafe { *(value_kva as *const u64) };
+            arch::set_one_reg(vcpu, one_reg.id, value)?;
+            Ok(Some(0))
+        }
+
+        KVM_GET_MP_STATE => {
+            if arg == 0 {
+                return Err(());
+            }
+
+            let task = mytask().ok_or(())?;
+            let kva = task.vm_manager.translate_to_kva(arg).ok_or(())?;
+            // SAFETY: caller guarantees arg points to a valid KvmMpState
+            let mp_state = unsafe { &mut *(kva as *mut KvmMpState) };
+            *mp_state = KvmMpState {
+                mp_state: KVM_MP_STATE_RUNNABLE,
+            };
+            Ok(Some(0))
+        }
+
+        KVM_SET_MP_STATE => {
+            if arg == 0 {
+                return Err(());
+            }
+
+            let task = mytask().ok_or(())?;
+            let kva = task.vm_manager.translate_to_kva(arg).ok_or(())?;
+            // SAFETY: caller guarantees arg points to a valid KvmMpState
+            let _mp_state = unsafe { &*(kva as *const KvmMpState) };
             Ok(Some(0))
         }
 
@@ -282,7 +543,7 @@ pub fn handle_vcpu_ioctl(request: u32, arg: usize, vcpu: &VcpuRef) -> Result<Opt
 // VmExit → kvm_run conversion
 // ---------------------------------------------------------------------------
 
-fn write_vm_exit(kvm_run: &mut KvmRun, exit: &crate::hypervisor::VmExit) {
+fn write_vm_exit(kvm_run: &mut KvmRun, exit: &crate::hypervisor::VmExit, vcpu: &VcpuRef) {
     use crate::hypervisor::VmExit;
 
     kvm_run.exit_data = KvmRunExitData {
@@ -320,7 +581,27 @@ fn write_vm_exit(kvm_run: &mut KvmRun, exit: &crate::hypervisor::VmExit) {
             kvm_run.exit_reason = KVM_EXIT_HLT;
         }
         VmExit::FirmwareCall { epc: _ } => {
-            kvm_run.exit_reason = KVM_EXIT_RISCV_SBI;
+            use crate::arch::hv::reg_index::reg;
+            const SBI_EXT_SRST: u64 = 0x53525354;
+
+            let extension_id = vcpu.get_reg(reg::A7).unwrap_or(0);
+            if extension_id == SBI_EXT_SRST {
+                kvm_run.exit_reason = KVM_EXIT_SHUTDOWN;
+            } else {
+                kvm_run.exit_reason = KVM_EXIT_RISCV_SBI;
+                let sbi = unsafe { &mut kvm_run.exit_data.riscv_sbi };
+                sbi.args = [
+                    vcpu.get_reg(reg::A0).unwrap_or(0),
+                    vcpu.get_reg(reg::A1).unwrap_or(0),
+                    vcpu.get_reg(reg::A2).unwrap_or(0),
+                    vcpu.get_reg(reg::A3).unwrap_or(0),
+                    vcpu.get_reg(reg::A4).unwrap_or(0),
+                    vcpu.get_reg(reg::A5).unwrap_or(0),
+                ];
+                sbi.ret = [0u64; 2];
+                sbi.extension_id = extension_id;
+                sbi.function_id = vcpu.get_reg(reg::A6).unwrap_or(0);
+            }
         }
         VmExit::Shutdown => {
             kvm_run.exit_reason = KVM_EXIT_SHUTDOWN;

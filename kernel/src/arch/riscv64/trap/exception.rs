@@ -62,6 +62,15 @@ pub fn arch_exception_handler(trapframe: &mut Trapframe, cause: usize) {
     match cause {
         /* Illegal instruction (used for lazy FP/Vector enable) */
         ILLEGAL_INSTRUCTION => {
+            #[cfg(all(feature = "hypervisor", target_arch = "riscv64"))]
+            if crate::arch::hv::trap::is_from_guest() {
+                use crate::arch::hv::switch::arch_guest_trap_exit;
+                unsafe {
+                    arch_guest_trap_exit();
+                }
+                unreachable!();
+            }
+
             let task = get_scheduler()
                 .get_current_task(get_cpu().get_cpuid())
                 .unwrap();
@@ -188,6 +197,19 @@ pub fn arch_exception_handler(trapframe: &mut Trapframe, cause: usize) {
                 "Unhandled illegal instruction: inst={:#x} epc={:#x}",
                 raw32, trapframe.epc
             );
+        }
+        BREAKPOINT => {
+            #[cfg(all(feature = "hypervisor", target_arch = "riscv64"))]
+            if crate::arch::hv::trap::is_from_guest() {
+                use crate::arch::hv::switch::arch_guest_trap_exit;
+                unsafe {
+                    arch_guest_trap_exit();
+                }
+                unreachable!();
+            }
+
+            print_traplog(trapframe);
+            panic!("Unhandled breakpoint: epc={:#x}", trapframe.epc);
         }
         /* Environment call from U-mode */
         ECALL_FROM_U_MODE => {

@@ -12,7 +12,7 @@ pub struct MemorySlot {
     pub slot_id: u32,
     pub guest_phys_addr: u64,
     pub memory_size: u64,
-    pub host_phys_addr: u64,
+    pub userspace_addr: u64,
     pub flags: MemorySlotFlags,
 }
 
@@ -21,8 +21,9 @@ impl MemorySlot {
         gpa >= self.guest_phys_addr && gpa < self.guest_phys_addr + self.memory_size
     }
 
-    pub fn gpa_to_hpa(&self, gpa: u64) -> u64 {
-        self.host_phys_addr + (gpa - self.guest_phys_addr)
+    #[inline]
+    pub fn gpa_to_userspace_addr(&self, gpa: u64) -> u64 {
+        self.userspace_addr + (gpa - self.guest_phys_addr)
     }
 }
 

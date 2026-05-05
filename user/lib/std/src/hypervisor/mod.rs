@@ -64,7 +64,7 @@ pub struct VmMemoryRegion {
     pub flags: u32,
     pub guest_phys_addr: u64,
     pub memory_size: u64,
-    pub host_phys_addr: u64,
+    pub userspace_addr: u64,
 }
 
 #[repr(C)]
@@ -132,7 +132,7 @@ impl Vm {
             flags: 0,
             guest_phys_addr,
             memory_size: size,
-            host_phys_addr: host_addr,
+            userspace_addr: host_addr,
         };
         vm_control(
             self.handle,

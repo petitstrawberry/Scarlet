@@ -8,6 +8,7 @@ use crate::hypervisor::memory::MemorySlotFlags;
 use crate::hypervisor::vcpu::{VcpuId, VcpuObject};
 use crate::hypervisor::vm::{VmId, VmObject, vm_ctl};
 use crate::object::capability::ControlOps;
+use crate::vm::manager::VirtualMemoryManager;
 
 struct VmInternalState {
     vcpus: Vec<Arc<dyn VcpuObject>>,
@@ -50,10 +51,14 @@ impl VmObject for Aarch64VmObject {
         _slot_id: u32,
         _guest_phys_addr: u64,
         _memory_size: u64,
-        _host_phys_addr: u64,
+        _host_userspace_addr: u64,
         _flags: MemorySlotFlags,
     ) -> Result<(), &'static str> {
         todo!("set_memory_region not implemented for aarch64")
+    }
+
+    fn owner_mm(&self) -> &VirtualMemoryManager {
+        todo!("owner_mm not implemented for aarch64")
     }
 }
 

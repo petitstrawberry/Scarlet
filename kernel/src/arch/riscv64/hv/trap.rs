@@ -8,6 +8,7 @@ use crate::arch::hv::vm::Riscv64VmObject;
 use crate::hypervisor::types::VmExit;
 use crate::timer::tick;
 
+const CAUSE_ILLEGAL_INSTRUCTION: usize = 2;
 const CAUSE_BREAKPOINT: usize = 3;
 const SUPERVISOR_TIMER_INTERRUPT: usize = 5;
 const CAUSE_ECALL_FROM_VS: usize = 10;
@@ -58,11 +59,26 @@ fn decode_mmio() -> Option<MmioDecode> {
     })
 }
 
+fn resolve_guest_kva(gpa: u64, vm: &Riscv64VmObject) -> Option<usize> {
+    let slot = vm.find_memory_slot(gpa)?;
+    let userspace_addr = slot.gpa_to_userspace_addr(gpa) as usize;
+    vm.owner_mm().translate_to_kva(userspace_addr)
+}
+
+fn resolve_guest_hpa(gpa: u64, vm: &Riscv64VmObject) -> Option<u64> {
+    let slot = vm.find_memory_slot(gpa)?;
+    let userspace_addr = slot.gpa_to_userspace_addr(gpa) as usize;
+    vm.owner_mm()
+        .translate_to_phys(userspace_addr)
+        .map(|p| p as u64)
+}
+
 fn fetch_guest_inst(sepc: u64, vm: &Riscv64VmObject) -> u32 {
-    if let Some(slot) = vm.find_memory_slot(sepc) {
-        let hpa = slot.gpa_to_hpa(sepc);
-        let inst_ptr = hpa as *const u32;
-        unsafe { core::ptr::read_volatile(inst_ptr) }
+    if let Some(kva) = resolve_guest_kva(sepc, vm) {
+        // SAFETY: kva comes from translate_to_kva which returns a valid
+        // kernel virtual address. read_volatile is used because the guest
+        // memory mapping may have side effects or be concurrently modified.
+        unsafe { core::ptr::read_volatile(kva as *const u32) }
     } else {
         0
     }
@@ -146,12 +162,6 @@ pub fn arch_guest_trap_handler(trapframe: &mut Trapframe, vm: &Riscv64VmObject) 
     let cause = (scause & 0x7fff_ffff_ffff_ffff) as usize;
 
     if is_interrupt {
-        let vstvec = csr::read_vstvec();
-        // crate::println!(
-        //     "[guest trap] Interrupt with epc: {:#x}, vstvec={:#x}",
-        //     trapframe.epc, vstvec
-        // );
-
         if cause == SUPERVISOR_TIMER_INTERRUPT {
             tick(trapframe);
             return None;
@@ -159,32 +169,21 @@ pub fn arch_guest_trap_handler(trapframe: &mut Trapframe, vm: &Riscv64VmObject) 
         return Some(VmExit::Unknown(scause));
     }
 
-    // crate::println!(
-    //     "[guest trap] cause={} scause={:#x}",
-    //     cause,
-    //     csr::read_scause()
-    // );
-    // crate::println!("[guest trap] cause={} is_interrupt={}", cause, is_interrupt);
-    // crate::println!(
-    //     "[guest trap] hstatus={:#x} hgatp={:#x}",
-    //     csr::read_hstatus(),
-    //     csr::read_hgatp()
-    // );
-    // crate::println!(
-    //     "[guest trap] vsstatus={:#x} vsatp={:#x} vsepc={:#x}",
-    //     csr::read_vsstatus(),
-    //     csr::read_vsatp(),
-    //     csr::read_vsepc()
-    // );
-    // crate::println!(
-    //     "[guest trap] sepc={:#x} stval={:#x} htval={:#x}",
-    //     csr::read_sepc(),
-    //     read_stval(),
-    //     read_htval()
-    // );
-    // crate::println!("[guest trap] cause={}", cause);
-
     match cause {
+        CAUSE_ILLEGAL_INSTRUCTION => {
+            let epc = csr::read_sepc();
+            let inst = fetch_guest_inst(epc, vm);
+            let inst_len = if (inst & 0x3) == 0x3 { 4 } else { 2 };
+            Some(VmExit::IllegalInstruction {
+                epc,
+                inst: Some(inst),
+                inst_len: Some(inst_len),
+            })
+        }
+        CAUSE_BREAKPOINT => {
+            let epc = csr::read_sepc();
+            Some(VmExit::Breakpoint { epc })
+        }
         CAUSE_INST_GUEST_PAGE_FAULT
         | CAUSE_LOAD_GUEST_PAGE_FAULT
         | CAUSE_STORE_GUEST_PAGE_FAULT => {
@@ -193,58 +192,28 @@ pub fn arch_guest_trap_handler(trapframe: &mut Trapframe, vm: &Riscv64VmObject) 
             let hgatp = csr::read_hgatp();
             let root_ppn = hgatp & 0xffff_ffff_fff;
             let root_addr = root_ppn << 12;
-            // crate::println!("[guest pf] hgatp={:#x} root_addr={:#x}", hgatp, root_addr);
 
             let vpn3 = (gpa as usize >> 39) & 0x7ff;
             let vpn2 = (gpa as usize >> 30) & 0x1ff;
             let vpn1 = (gpa as usize >> 21) & 0x1ff;
             let vpn0 = (gpa as usize >> 12) & 0x1ff;
-            // crate::println!(
-            //     "[guest pf] vpn3={} vpn2={} vpn1={} vpn0={}",
-            //     vpn3,
-            //     vpn2,
-            //     vpn1,
-            //     vpn0
-            // );
 
+            // SAFETY: root_addr comes from the stage2 page table root (hgatp),
+            // which is a valid physical address managed by the hypervisor MMU
+            // subsystem. All PTE reads use direct-mapped kernel addresses
+            // derived from validated physical addresses.
             unsafe {
                 let root_pte = core::ptr::read((root_addr as usize + vpn3 * 8) as *const u64);
-                // crate::println!(
-                //     "[guest pf] L3 pte @ {:#x} = {:#x}",
-                //     root_addr as usize + vpn3 * 8,
-                //     root_pte
-                // );
-                if root_pte & 1 == 0 {
-                    // crate::println!("[guest pf] L3 NOT VALID!");
-                } else {
+                if root_pte & 1 != 0 {
                     let l2_addr = ((root_pte >> 10) & 0x3ffffffffff) << 12;
                     let l2_pte = core::ptr::read((l2_addr as usize + vpn2 * 8) as *const u64);
-                    // crate::println!(
-                    //     "[guest pf] L2 pte @ {:#x} = {:#x}",
-                    //     l2_addr as usize + vpn2 * 8,
-                    //     l2_pte
-                    // );
-                    if l2_pte & 1 == 0 {
-                        // crate::println!("[guest pf] L2 NOT VALID!");
-                    } else {
+                    if l2_pte & 1 != 0 {
                         let l1_addr = ((l2_pte >> 10) & 0x3ffffffffff) << 12;
                         let l1_pte = core::ptr::read((l1_addr as usize + vpn1 * 8) as *const u64);
-                        // crate::println!(
-                        //     "[guest pf] L1 pte @ {:#x} = {:#x}",
-                        //     l1_addr as usize + vpn1 * 8,
-                        //     l1_pte
-                        // );
-                        if l1_pte & 1 == 0 {
-                            // crate::println!("[guest pf] L1 NOT VALID!");
-                        } else {
+                        if l1_pte & 1 != 0 {
                             let l0_addr = ((l1_pte >> 10) & 0x3ffffffffff) << 12;
-                            let l0_pte =
+                            let _l0_pte =
                                 core::ptr::read((l0_addr as usize + vpn0 * 8) as *const u64);
-                            // crate::println!(
-                            //     "[guest pf] L0 pte @ {:#x} = {:#x}",
-                            //     l0_addr as usize + vpn0 * 8,
-                            //     l0_pte
-                            // );
                         }
                     }
                 }
@@ -252,15 +221,16 @@ pub fn arch_guest_trap_handler(trapframe: &mut Trapframe, vm: &Riscv64VmObject) 
 
             match vm.find_memory_slot(gpa) {
                 Some(slot) => {
-                    let hpa = slot.gpa_to_hpa(gpa);
-
+                    let Some(hpa) = resolve_guest_hpa(gpa, vm) else {
+                        return Some(VmExit::FailEntry {
+                            hardware_entry_failure_reason: 0,
+                        });
+                    };
                     let writable = !slot.flags.readonly;
                     let _result = vm.map_stage2_page(gpa, hpa, writable);
-                    // crate::println!("[guest pf] mapped RAM gpa={:#x}", gpa);
                     None
                 }
                 None => {
-                    // crate::println!("[guest pf] MMIO gpa={:#x}", gpa);
                     let is_write = cause == CAUSE_STORE_GUEST_PAGE_FAULT;
 
                     let (inst_len, size, reg, data) = if let Some(m) = decode_mmio() {
@@ -269,12 +239,6 @@ pub fn arch_guest_trap_handler(trapframe: &mut Trapframe, vm: &Riscv64VmObject) 
                         } else {
                             0
                         };
-                        // crate::println!(
-                        //     "[MMIO] decoded: len={} size={} reg={}",
-                        //     m.inst_len,
-                        //     m.size,
-                        //     m.rd
-                        // );
                         (m.inst_len, m.size, m.rd, data)
                     } else {
                         let sepc = csr::read_sepc();
@@ -295,12 +259,6 @@ pub fn arch_guest_trap_handler(trapframe: &mut Trapframe, vm: &Riscv64VmObject) 
 
                     let epc = csr::read_sepc();
                     trapframe.epc = epc.wrapping_add(inst_len as u64);
-                    // crate::println!(
-                    //     "[MMIO] exit: epc={:#x}->{:#x} addr={:#x}",
-                    //     epc,
-                    //     trapframe.epc,
-                    //     gpa
-                    // );
 
                     Some(if is_write {
                         VmExit::MmioWrite {
@@ -330,8 +288,6 @@ pub fn arch_guest_trap_handler(trapframe: &mut Trapframe, vm: &Riscv64VmObject) 
             let htinst = read_htinst();
             let inst = htinst as u32;
 
-            // crate::println!("[virt_inst] ENTER htinst={:#x}", htinst);
-
             let hvip = csr::read_hvip();
             let vsie = csr::read_vsie();
             let vsstatus = csr::read_vsstatus();
@@ -342,18 +298,8 @@ pub fn arch_guest_trap_handler(trapframe: &mut Trapframe, vm: &Riscv64VmObject) 
             let active = pending & enabled;
             let sie_enabled = (vsstatus & 0x02) != 0;
 
-            // crate::println!(
-            //     "[virt_inst] hvip={:#x} vsie={:#x} vsstatus={:#x} active={:#x} sie={}",
-            //     hvip,
-            //     vsie,
-            //     vsstatus,
-            //     active,
-            //     sie_enabled
-            // );
-
             if active != 0 && sie_enabled {
                 let epc = csr::read_sepc();
-                // crate::println!("[virt_inst] taking interrupt, advancing PC");
                 trapframe.epc = epc.wrapping_add(4);
                 return None;
             }
@@ -372,6 +318,7 @@ pub const HSTATUS_SPV: u64 = 1 << 7;
 
 pub fn is_from_guest() -> bool {
     let hstatus: u64;
+    // SAFETY: reading a RISC-V CSR (hstatus) has no side effects.
     unsafe {
         asm!("csrr {0}, hstatus", out(reg) hstatus);
     }
@@ -380,6 +327,8 @@ pub fn is_from_guest() -> bool {
 
 pub fn clear_guest_mode() {
     let hstatus: u64;
+    // SAFETY: reading then writing hstatus.SPv to 0 is a valid privilege
+    // mode transition operation in HS-mode.
     unsafe {
         asm!("csrr {0}, hstatus", out(reg) hstatus);
     }

@@ -145,6 +145,8 @@ impl GuestVcpu {
             reg::STVEC => Ok(self.csrs.stvec),
             reg::SATP => Ok(self.csrs.satp),
             reg::SSCRATCH => Ok(self.csrs.sscratch),
+            reg::SIE => Ok(self.csrs.sie),
+            reg::SIP => Ok(self.csrs.sip),
             i if reg::IS_FREG(i) => {
                 let fidx = (i - reg::FREG_BASE) as usize;
                 if fidx < 32 {
@@ -201,6 +203,14 @@ impl GuestVcpu {
             }
             reg::SSCRATCH => {
                 self.csrs.sscratch = value;
+                Ok(())
+            }
+            reg::SIE => {
+                self.csrs.sie = value;
+                Ok(())
+            }
+            reg::SIP => {
+                self.csrs.sip = value;
                 Ok(())
             }
             i if reg::IS_FREG(i) => {

@@ -7,7 +7,7 @@ use spin::{Once, RwLock};
 
 use crate::arch::vm::mmu::{PageTable, PageTableEntry};
 use crate::mem::page::{allocate_raw_pages, allocate_raw_pages_aligned, free_raw_pages};
-use crate::vm::addr::virt_to_phys;
+use crate::vm::addr::{phys_to_virt, virt_to_phys};
 
 const PAGE_SIZE: usize = 4096;
 const STAGE2_ROOT_SIZE: usize = 16384;
@@ -160,7 +160,7 @@ pub fn walk_stage2(
         pte.set_ppn(virt_to_phys(new_table as usize) >> 12);
         pte.validate();
     }
-    current_table = (pte.get_ppn() << 12) as *mut PageTableEntry;
+    current_table = phys_to_virt(pte.get_ppn() << 12) as *mut PageTableEntry;
 
     for level in (1..=2).rev() {
         let vpn = (gpa >> (12 + 9 * level)) & 0x1ff;
@@ -182,7 +182,7 @@ pub fn walk_stage2(
             pte.set_ppn(virt_to_phys(new_table as usize) >> 12);
             pte.validate();
         }
-        current_table = (pte.get_ppn() << 12) as *mut PageTableEntry;
+        current_table = phys_to_virt(pte.get_ppn() << 12) as *mut PageTableEntry;
     }
 
     let vpn = (gpa >> 12) & 0x1ff;

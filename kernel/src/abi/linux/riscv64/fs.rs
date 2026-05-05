@@ -2015,14 +2015,20 @@ pub fn sys_ioctl(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize 
     #[cfg(feature = "hypervisor")]
     match &kernel_object {
         crate::object::KernelObject::HypervisorVm(vm) => {
-            return match crate::abi::linux::device::kvm::handle_vm_ioctl(request, arg, vm, abi) {
+            // crate::println!("[KVM-DBG] vm_ioctl: request={:#x} arg={:#x}", request, arg);
+            let result = crate::abi::linux::device::kvm::handle_vm_ioctl(request, arg, vm, abi);
+            // crate::println!("[KVM-DBG] vm_ioctl result: {:?}", result.as_ref().map(|opt| opt.map(|v| v)));
+            return match result {
                 Ok(Some(ret)) => ret,
                 Ok(None) => errno::to_result(errno::ENOTTY),
                 Err(_) => errno::to_result(errno::EINVAL),
             };
         }
         crate::object::KernelObject::HypervisorVcpu(vcpu) => {
-            return match crate::abi::linux::device::kvm::handle_vcpu_ioctl(request, arg, vcpu) {
+            // crate::println!("[KVM-DBG] vcpu_ioctl: request={:#x} arg={:#x}", request, arg);
+            let result = crate::abi::linux::device::kvm::handle_vcpu_ioctl(request, arg, vcpu);
+            // crate::println!("[KVM-DBG] vcpu_ioctl result: {:?}", result.as_ref().map(|opt| opt.map(|v| v)));
+            return match result {
                 Ok(Some(ret)) => ret,
                 Ok(None) => errno::to_result(errno::ENOTTY),
                 Err(_) => errno::to_result(errno::EINVAL),
@@ -2039,9 +2045,11 @@ pub fn sys_ioctl(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize 
                 if let Some(dev) = DeviceManager::get_manager().get_device(info.device_id) {
                     #[cfg(feature = "hypervisor")]
                     if dev.name() == crate::abi::linux::device::kvm::KVM_DEVICE_NAME {
-                        return match crate::abi::linux::device::kvm::handle_system_ioctl(
-                            request, arg, abi,
-                        ) {
+                        // crate::println!("[KVM-DBG] sys_ioctl: request={:#x} arg={:#x}", request, arg);
+                        let result =
+                            crate::abi::linux::device::kvm::handle_system_ioctl(request, arg, abi);
+                        // crate::println!("[KVM-DBG] sys_ioctl result: {:?}", result.as_ref().map(|opt| opt.map(|v| v)));
+                        return match result {
                             Ok(Some(ret)) => ret,
                             Ok(None) => errno::to_result(errno::ENOTTY),
                             Err(_) => errno::to_result(errno::EINVAL),
