@@ -479,7 +479,7 @@ impl Scheduler {
                                     core::sync::atomic::Ordering::SeqCst,
                                 );
                                 // Task is ready to run
-                                t.time_slice.store(1, core::sync::atomic::Ordering::SeqCst); // Reset time slice on dispatch
+                                t.time_slice.store(t.default_time_slice, core::sync::atomic::Ordering::SeqCst);
                                 let next_task_id = t.get_id();
                                 self.current_task_id[cpu_id] = Some(next_task_id);
                                 self.ready_queue[cpu_id].push_back(task_id);
@@ -528,7 +528,7 @@ impl Scheduler {
                                 continue;
                             }
                             TaskState::Ready | TaskState::Running => {
-                                t.time_slice.store(1, core::sync::atomic::Ordering::SeqCst); // Reset time slice on dispatch
+                                t.time_slice.store(t.default_time_slice, core::sync::atomic::Ordering::SeqCst);
                                 let next_task_id = t.get_id();
                                 self.current_task_id[cpu_id] = Some(next_task_id);
                                 self.ready_queue[cpu_id].push_back(task_id);

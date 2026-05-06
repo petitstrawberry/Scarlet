@@ -26,7 +26,7 @@ use crate::{
     },
     environment::{
         DEAFAULT_MAX_TASK_DATA_SIZE, DEAFAULT_MAX_TASK_STACK_SIZE, DEAFAULT_MAX_TASK_TEXT_SIZE,
-        KERNEL_VM_STACK_END, PAGE_SIZE, USER_STACK_END,
+        DEFAULT_TIME_SLICE, KERNEL_VM_STACK_END, PAGE_SIZE, USER_STACK_END,
     },
     fs::VfsManager,
     ipc::{EventContent, event::ProcessControlType},
@@ -372,6 +372,7 @@ pub struct Task {
     pub priority: AtomicU32,
     /// Time slice for scheduling
     pub time_slice: AtomicU32,
+    pub default_time_slice: u32,
     /// Stack size in bytes
     pub stack_size: AtomicUsize,
     /// Data segment size in bytes
@@ -537,7 +538,8 @@ impl Task {
             // Atomic fields
             state: AtomicTaskState::new(TaskState::NotInitialized),
             priority: AtomicU32::new(priority),
-            time_slice: AtomicU32::new(10),
+            time_slice: AtomicU32::new(DEFAULT_TIME_SLICE),
+            default_time_slice: DEFAULT_TIME_SLICE,
             stack_size: AtomicUsize::new(0),
             data_size: AtomicUsize::new(0),
             text_size: AtomicUsize::new(0),
@@ -591,7 +593,7 @@ impl Task {
 
         /* Set the task state to Ready */
         self.state.store(TaskState::Ready, Ordering::SeqCst);
-        self.time_slice.store(1, Ordering::SeqCst);
+        self.time_slice.store(self.default_time_slice, Ordering::SeqCst);
     }
 
     pub fn get_id(&self) -> usize {
@@ -1442,6 +1444,7 @@ impl Task {
         child
             .time_slice
             .store(self.time_slice.load(Ordering::SeqCst), Ordering::SeqCst);
+        child.default_time_slice = self.default_time_slice;
         // Note: software_timers_handlers, sleep_waker, event_queue are NOT copied
         // as they are task-specific runtime state that should start fresh
 
