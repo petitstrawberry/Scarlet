@@ -556,16 +556,16 @@ impl AbiModule for LinuxRiscv64Abi {
                         *task.name.write() =
                             argv.get(0).map_or("linux".to_string(), |s| s.to_string());
                         // Do not resolve pthread/TLS or arm futex-based watches in kernel.
-                        crate::println!("Program segments:");
-                        task.vm_manager.with_memmaps(|mm| {
-                            for map in mm.values() {
-                                crate::println!("  VA: {:#x}-{:#x} -> PA: {:#x}-{:#x} (perm: {:#x}, shared: {})",
-                                    map.vmarea.start, map.vmarea.end,
-                                    map.pmarea.start, map.pmarea.end,
-                                    map.permissions, map.is_shared);
-                            }
-                        });
-                        crate::println!("=================================");
+                        // crate::println!("Program segments:");
+                        // task.vm_manager.with_memmaps(|mm| {
+                        //     for map in mm.values() {
+                        //         crate::println!("  VA: {:#x}-{:#x} -> PA: {:#x}-{:#x} (perm: {:#x}, shared: {})",
+                        //             map.vmarea.start, map.vmarea.end,
+                        //             map.pmarea.start, map.pmarea.end,
+                        //             map.permissions, map.is_shared);
+                        //     }
+                        // });
+                        // crate::println!("=================================");
 
                         // Clear page table entries
                         let idx =

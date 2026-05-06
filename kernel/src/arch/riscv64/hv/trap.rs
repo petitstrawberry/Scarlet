@@ -8,6 +8,38 @@ use crate::arch::hv::vm::Riscv64VmObject;
 use crate::hypervisor::types::VmExit;
 use crate::timer::tick;
 
+const VSTIP_BIT: u64 = 1 << 6;
+
+static SBI_TIMER_NEXT_EVENT: AtomicU64 = AtomicU64::new(u64::MAX);
+
+pub fn set_sbi_timer_next_event(next_event: u64) {
+    SBI_TIMER_NEXT_EVENT.store(next_event, Ordering::Release);
+    let hvip = csr::read_hvip();
+    csr::write_hvip(hvip & !VSTIP_BIT);
+}
+
+fn read_rdtime() -> u64 {
+    let t: u64;
+    unsafe { asm!("rdtime {}", out(reg) t, options(nostack)) };
+    t
+}
+
+fn guest_time_now() -> u64 {
+    read_rdtime().wrapping_add(csr::read_htimedelta())
+}
+
+fn check_sbi_timer_expired() {
+    let next = SBI_TIMER_NEXT_EVENT.load(Ordering::Acquire);
+    if next == u64::MAX {
+        return;
+    }
+    if guest_time_now() >= next {
+        SBI_TIMER_NEXT_EVENT.store(u64::MAX, Ordering::Release);
+        let hvip = csr::read_hvip();
+        csr::write_hvip(hvip | VSTIP_BIT);
+    }
+}
+
 const CAUSE_ILLEGAL_INSTRUCTION: usize = 2;
 const CAUSE_BREAKPOINT: usize = 3;
 const SUPERVISOR_TIMER_INTERRUPT: usize = 5;
@@ -156,7 +188,13 @@ fn decode_load_store_inst(inst: u32) -> Option<(u8, u8, bool, u8, u32)> {
     }
 }
 
-pub fn arch_guest_trap_handler(trapframe: &mut Trapframe, vm: &Riscv64VmObject) -> Option<VmExit> {
+use core::sync::atomic::{AtomicU64, Ordering};
+
+static PF_COUNT: AtomicU64 = AtomicU64::new(0);
+static WFI_NONE_COUNT: AtomicU64 = AtomicU64::new(0);
+static TIMER_NONE_COUNT: AtomicU64 = AtomicU64::new(0);
+
+fn arch_guest_trap_handler_inner(trapframe: &mut Trapframe, vm: &Riscv64VmObject) -> Option<VmExit> {
     let scause = csr::read_scause();
     let is_interrupt = (scause & 0x8000_0000_0000_0000) != 0;
     let cause = (scause & 0x7fff_ffff_ffff_ffff) as usize;
@@ -164,6 +202,13 @@ pub fn arch_guest_trap_handler(trapframe: &mut Trapframe, vm: &Riscv64VmObject) 
     if is_interrupt {
         if cause == SUPERVISOR_TIMER_INTERRUPT {
             tick(trapframe);
+            check_sbi_timer_expired();
+            let c = TIMER_NONE_COUNT.fetch_add(1, Ordering::Relaxed);
+            if c < 5 {
+                let sepc = csr::read_sepc();
+                let vsatp = csr::read_vsatp();
+                crate::println!("[TIMER] #{} sepc={:#x} vsatp={:#x}", c, sepc, vsatp);
+            }
             return None;
         }
         return Some(VmExit::Unknown(scause));
@@ -228,6 +273,11 @@ pub fn arch_guest_trap_handler(trapframe: &mut Trapframe, vm: &Riscv64VmObject) 
                     };
                     let writable = !slot.flags.readonly;
                     let _result = vm.map_stage2_page(gpa, hpa, writable);
+                    let c = PF_COUNT.fetch_add(1, Ordering::Relaxed);
+                    if c % 10000 == 0 {
+                        let sepc = csr::read_sepc();
+                        crate::println!("[PF] #{} gpa={:#x} sepc={:#x}", c, gpa, sepc);
+                    }
                     None
                 }
                 None => {
@@ -301,6 +351,10 @@ pub fn arch_guest_trap_handler(trapframe: &mut Trapframe, vm: &Riscv64VmObject) 
             if active != 0 && sie_enabled {
                 let epc = csr::read_sepc();
                 trapframe.epc = epc.wrapping_add(4);
+                let c = WFI_NONE_COUNT.fetch_add(1, Ordering::Relaxed);
+                if c % 10000 == 0 {
+                    crate::println!("[WFI-NONE] #{} active={:#x} hvip={:#x} vsie={:#x}", c, active, hvip, vsie);
+                }
                 return None;
             }
 
@@ -312,6 +366,10 @@ pub fn arch_guest_trap_handler(trapframe: &mut Trapframe, vm: &Riscv64VmObject) 
         }
         _ => Some(VmExit::Unknown(cause as u64)),
     }
+}
+
+pub fn arch_guest_trap_handler(trapframe: &mut Trapframe, vm: &Riscv64VmObject) -> Option<VmExit> {
+    arch_guest_trap_handler_inner(trapframe, vm)
 }
 
 pub const HSTATUS_SPV: u64 = 1 << 7;

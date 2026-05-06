@@ -75,6 +75,12 @@ pub const KVM_CREATE_VCPU: u32 = io_none(KVMIO, 0x41);
 pub const KVM_RUN: u32 = io_none(KVMIO, 0x80);
 pub const KVM_CREATE_IRQCHIP: u32 = io_none(KVMIO, 0x60);
 
+// _IOW(KVMIO, 0x86, struct kvm_interrupt) — VCPU-level interrupt injection
+pub const KVM_INTERRUPT: u32 = io_write(KVMIO, 0x86, 4);
+
+const KVM_INTERRUPT_SET: u32 = u32::MAX;
+const KVM_INTERRUPT_UNSET: u32 = u32::MAX - 1;
+
 // _IOW(KVMIO, nr, struct) — host→kernel
 pub const KVM_SET_USER_MEMORY_REGION: u32 = io_write(KVMIO, 0x46, 32);
 pub const KVM_IRQ_LINE: u32 = io_write(KVMIO, 0x61, 8);
@@ -153,6 +159,9 @@ pub struct KvmRun {
     pub cr8: u64,
     pub apic_base: u64,
     pub exit_data: KvmRunExitData,
+    pub kvm_valid_regs: u64,
+    pub kvm_dirty_regs: u64,
+    pub sync_regs: [u8; 2048],
 }
 
 #[repr(C)]
@@ -250,6 +259,38 @@ pub fn get_vcpu_run_paddr(vcpu: &VcpuRef) -> Option<usize> {
     for entry in pages.iter() {
         if Arc::ptr_eq(&entry.vcpu, vcpu) {
             return Some(entry.page.paddr);
+        }
+    }
+    None
+}
+
+fn read_vcpu_run_mmio_data(vcpu: &VcpuRef) -> Option<u64> {
+    let pages = get_run_pages().read();
+    for entry in pages.iter() {
+        if Arc::ptr_eq(&entry.vcpu, vcpu) {
+            let kvm_run = unsafe { &*(entry.page.vaddr as *const KvmRun) };
+            if kvm_run.exit_reason == KVM_EXIT_MMIO {
+                let mmio = unsafe { &kvm_run.exit_data.mmio };
+                if mmio.is_write == 0 {
+                    let len = mmio.len as usize;
+                    return Some(match len {
+                        1 => mmio.data[0] as u64,
+                        2 => u16::from_le_bytes([mmio.data[0], mmio.data[1]]) as u64,
+                        4 => u32::from_le_bytes([
+                            mmio.data[0], mmio.data[1],
+                            mmio.data[2], mmio.data[3],
+                        ]) as u64,
+                        8 => u64::from_le_bytes([
+                            mmio.data[0], mmio.data[1],
+                            mmio.data[2], mmio.data[3],
+                            mmio.data[4], mmio.data[5],
+                            mmio.data[6], mmio.data[7],
+                        ]),
+                        _ => return None,
+                    });
+                }
+            }
+            return None;
         }
     }
     None
@@ -374,8 +415,8 @@ pub fn handle_vm_ioctl(
             };
             // SAFETY: caller guarantees arg points to a valid KvmUserspaceMemoryRegion
             let region = unsafe { &*(kva as *const KvmUserspaceMemoryRegion) };
-            // crate::println!("[KVM] SET_MEM: slot={} gpa={:#x} size={:#x} ua={:#x} flags={}",
-            //     region.slot, region.guest_phys_addr, region.memory_size, region.userspace_addr, region.flags);
+            crate::println!("[KVM] SET_MEM: slot={} gpa={:#x} size={:#x} ua={:#x} flags={}",
+                region.slot, region.guest_phys_addr, region.memory_size, region.userspace_addr, region.flags);
 
             let flags = MemorySlotFlags {
                 readonly: (region.flags & KVM_MEM_READONLY) != 0,
@@ -427,22 +468,101 @@ pub fn handle_vm_ioctl(
 // VCPU-level ioctl dispatcher
 // ---------------------------------------------------------------------------
 
+use core::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+
+static MMIO_PENDING_READ_REG: AtomicU8 = AtomicU8::new(0xFF);
+static MMIO_PENDING_VALID: AtomicBool = AtomicBool::new(false);
+
 pub fn handle_vcpu_ioctl(request: u32, arg: usize, vcpu: &VcpuRef) -> Result<Option<usize>, ()> {
     match request {
         KVM_RUN => {
-            let exit = vcpu.run().map_err(|_| ())?;
-            // crate::println!("[KVM] KVM_RUN exit: {:?}", exit);
-
-            // Prefer the shared kvm_run page (mmap'd by kvmtool).
-            // Fall back to the legacy pointer-based path for U-SHV compatibility.
-            if !write_vcpu_run_exit(vcpu, &exit) && arg != 0 {
-                let task = mytask().ok_or(())?;
-                let kva = task.vm_manager.translate_to_kva(arg).ok_or(())?;
-                // SAFETY: caller guarantees arg points to a valid KvmRun
-                let kvm_run = unsafe { &mut *(kva as *mut KvmRun) };
-                write_vm_exit(kvm_run, &exit, vcpu);
+            if MMIO_PENDING_VALID.load(Ordering::Acquire) {
+                let reg = MMIO_PENDING_READ_REG.load(Ordering::Acquire);
+                if reg < 32 {
+                    let val = if arg != 0 {
+                        let task = mytask().ok_or(())?;
+                        let kva = task.vm_manager.translate_to_kva(arg).ok_or(())?;
+                        // SAFETY: caller guarantees arg points to a valid KvmRun
+                        let kvm_run = unsafe { &*(kva as *const KvmRun) };
+                        if kvm_run.exit_reason == KVM_EXIT_MMIO {
+                            let mmio = unsafe { &kvm_run.exit_data.mmio };
+                            if mmio.is_write == 0 {
+                                let len = mmio.len as usize;
+                                Some(match len {
+                                    1 => mmio.data[0] as u64,
+                                    2 => u16::from_le_bytes([mmio.data[0], mmio.data[1]]) as u64,
+                                    4 => u32::from_le_bytes([
+                                        mmio.data[0], mmio.data[1],
+                                        mmio.data[2], mmio.data[3],
+                                    ]) as u64,
+                                    8 => u64::from_le_bytes([
+                                        mmio.data[0], mmio.data[1],
+                                        mmio.data[2], mmio.data[3],
+                                        mmio.data[4], mmio.data[5],
+                                        mmio.data[6], mmio.data[7],
+                                    ]),
+                                    _ => 0,
+                                })
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        }
+                    } else {
+                        read_vcpu_run_mmio_data(vcpu)
+                    };
+                    if let Some(val) = val {
+                        use crate::arch::hv::reg_index::reg;
+                        let _ = vcpu.set_reg(reg as u32, val);
+                    }
+                }
+                MMIO_PENDING_VALID.store(false, Ordering::Release);
             }
 
+            let mut sbi_count = 0u32;
+            loop {
+                let exit = vcpu.run().map_err(|_| ())?;
+
+                if let crate::hypervisor::VmExit::FirmwareCall { .. } = &exit {
+                    if handle_sbi_in_kernel(vcpu) {
+                        sbi_count += 1;
+                        continue;
+                    }
+                }
+
+                if let crate::hypervisor::VmExit::MmioRead { reg, .. } = &exit {
+                    MMIO_PENDING_READ_REG.store(*reg, Ordering::Release);
+                    MMIO_PENDING_VALID.store(true, Ordering::Release);
+                }
+
+                if !write_vcpu_run_exit(vcpu, &exit) && arg != 0 {
+                    let task = mytask().ok_or(())?;
+                    let kva = task.vm_manager.translate_to_kva(arg).ok_or(())?;
+                    // SAFETY: caller guarantees arg points to a valid KvmRun
+                    let kvm_run = unsafe { &mut *(kva as *mut KvmRun) };
+                    write_vm_exit(kvm_run, &exit, vcpu);
+                }
+
+                break;
+            }
+
+            Ok(Some(0))
+        }
+
+        KVM_INTERRUPT => {
+            if arg == 0 {
+                return Err(());
+            }
+            let task = mytask().ok_or(())?;
+            let kva = task.vm_manager.translate_to_kva(arg).ok_or(())?;
+            // SAFETY: caller guarantees arg points to a u32 (kvm_interrupt.irq)
+            let irq = unsafe { *(kva as *const u32) };
+            if irq == KVM_INTERRUPT_SET {
+                vcpu.inject_interrupt(InterruptType::External);
+            } else {
+                vcpu.clear_interrupt(InterruptType::External);
+            }
             Ok(Some(0))
         }
 
@@ -536,6 +656,221 @@ pub fn handle_vcpu_ioctl(request: u32, arg: usize, vcpu: &VcpuRef) -> Result<Opt
         }
 
         _ => Ok(None),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// In-kernel SBI firmware emulation
+// ---------------------------------------------------------------------------
+
+mod sbi_ext {
+    pub const BASE: u64 = 0x10;
+    pub const _PUTCHAR: u64 = 0x01;
+    pub const SRST: u64 = 0x5352_5354;
+    pub const DBCN: u64 = 0x4442_434E;
+    pub const SUSP: u64 = 0x5355_5350;
+    pub const TIME: u64 = 0x5449_4D45;
+    pub const IPI: u64 = 0x0073_5049;
+    pub const RFNC: u64 = 0x5246_4E43;
+    pub const HSM: u64 = 0x0048_534D;
+}
+
+/// SBI error codes.
+mod sbi_err {
+    pub const SUCCESS: u64 = 0;
+    pub const ERR_DENIED: u64 = u64::MAX - 2; // -3
+    pub const NOT_SUPPORTED: u64 = u64::MAX - 1; // -2
+    pub const INVALID_PARAM: u64 = u64::MAX - 3; // -4
+    pub const ALREADY_STARTED: u64 = u64::MAX - 4; // -5
+    pub const ALREADY_STOPPED: u64 = u64::MAX - 5; // -6
+}
+
+mod hsm_state {
+    pub const STARTED: u64 = 0;
+    pub const STOPPED: u64 = 1;
+    pub const START_PENDING: u64 = 2;
+    pub const STOP_PENDING: u64 = 3;
+    pub const SUSPENDED: u64 = 4;
+}
+
+/// Handle an SBI firmware call entirely inside the kernel.
+///
+/// Returns `true` if the call was handled (guest registers updated,
+/// caller should re-enter the guest) or `false` if the call should
+/// be forwarded to userspace via `KVM_EXIT_RISCV_SBI`.
+fn handle_sbi_in_kernel(vcpu: &VcpuRef) -> bool {
+    use crate::arch::hv::reg_index::reg;
+
+    let extension_id = vcpu.get_reg(reg::A7).unwrap_or(0);
+    let function_id = vcpu.get_reg(reg::A6).unwrap_or(0);
+    let arg0 = vcpu.get_reg(reg::A0).unwrap_or(0);
+    // crate::println!("[SBI] ext={:#x} fid={:#x} a0={:#x}", extension_id, function_id, arg0);
+
+    match extension_id {
+        sbi_ext::BASE => {
+            // SBI_EXT_BASE function IDs per SBI spec v2.0 §12.
+            let ret1 = match function_id {
+                0 => (sbi_err::SUCCESS, 2),  // sbi_get_sbi_spec_version → 2.0
+                1 => (sbi_err::SUCCESS, 1),  // sbi_get_sbi_impl_id → 1 (KVM)
+                2 => (sbi_err::SUCCESS, 0),  // sbi_get_sbi_impl_version
+                3 => {
+                    let queried = vcpu.get_reg(reg::A0).unwrap_or(0);
+                    let available = matches!(
+                        queried,
+                        sbi_ext::BASE | sbi_ext::_PUTCHAR | sbi_ext::SRST | sbi_ext::DBCN | sbi_ext::SUSP | sbi_ext::TIME | sbi_ext::IPI | sbi_ext::RFNC | sbi_ext::HSM
+                    );
+                    (sbi_err::SUCCESS, if available { 1 } else { 0 })
+                }
+                4 => (sbi_err::SUCCESS, 0),  // sbi_get_marchid
+                5 => (sbi_err::SUCCESS, 0),  // sbi_get_mimpid
+                6 => (sbi_err::SUCCESS, 0),  // sbi_get_mvendorid
+                _ => (sbi_err::NOT_SUPPORTED, 0),
+            };
+            let _ = vcpu.set_reg(reg::A0, ret1.0);
+            let _ = vcpu.set_reg(reg::A1, ret1.1);
+            true
+        }
+        sbi_ext::TIME => {
+            match function_id {
+                0 => {
+                    crate::arch::hv::trap::set_sbi_timer_next_event(arg0);
+                    let _ = vcpu.set_reg(reg::A0, sbi_err::SUCCESS);
+                    true
+                }
+                _ => {
+                    let _ = vcpu.set_reg(reg::A0, sbi_err::NOT_SUPPORTED);
+                    let _ = vcpu.set_reg(reg::A1, 0);
+                    true
+                }
+            }
+        }
+        sbi_ext::IPI => match function_id {
+            0 => {
+                // sbi_send_ipi: single-hart guest, no-op
+                let _ = vcpu.set_reg(reg::A0, sbi_err::SUCCESS);
+                true
+            }
+            _ => {
+                let _ = vcpu.set_reg(reg::A0, sbi_err::NOT_SUPPORTED);
+                let _ = vcpu.set_reg(reg::A1, 0);
+                true
+            }
+        },
+        sbi_ext::RFNC => match function_id {
+            0..=6 => {
+                // Remote fence functions: single-hart guest, no-op
+                let _ = vcpu.set_reg(reg::A0, sbi_err::SUCCESS);
+                true
+            }
+            _ => {
+                let _ = vcpu.set_reg(reg::A0, sbi_err::NOT_SUPPORTED);
+                let _ = vcpu.set_reg(reg::A1, 0);
+                true
+            }
+        },
+        sbi_ext::HSM => match function_id {
+            0 => {
+                // sbi_hart_start(hartid, start_addr, opaque)
+                let hartid = arg0;
+                if hartid == 0 {
+                    let _ = vcpu.set_reg(reg::A0, sbi_err::ALREADY_STARTED);
+                } else {
+                    let _ = vcpu.set_reg(reg::A0, sbi_err::INVALID_PARAM);
+                }
+                let _ = vcpu.set_reg(reg::A1, 0);
+                true
+            }
+            1 => {
+                // sbi_hart_stop: refuse for the only hart
+                let _ = vcpu.set_reg(reg::A0, sbi_err::ERR_DENIED);
+                let _ = vcpu.set_reg(reg::A1, 0);
+                true
+            }
+            2 => {
+                // sbi_hart_get_status(hartid)
+                let hartid = arg0;
+                let status = if hartid == 0 {
+                    hsm_state::STARTED
+                } else {
+                    hsm_state::STOPPED
+                };
+                let _ = vcpu.set_reg(reg::A0, sbi_err::SUCCESS);
+                let _ = vcpu.set_reg(reg::A1, status);
+                true
+            }
+            _ => {
+                let _ = vcpu.set_reg(reg::A0, sbi_err::NOT_SUPPORTED);
+                let _ = vcpu.set_reg(reg::A1, 0);
+                true
+            }
+        },
+        sbi_ext::IPI => {
+            match function_id {
+                0 => {
+                    let _ = vcpu.set_reg(reg::A0, sbi_err::SUCCESS);
+                    true
+                }
+                _ => {
+                    let _ = vcpu.set_reg(reg::A0, sbi_err::NOT_SUPPORTED);
+                    let _ = vcpu.set_reg(reg::A1, 0);
+                    true
+                }
+            }
+        }
+        sbi_ext::RFNC => {
+            match function_id {
+                0..=6 => {
+                    let _ = vcpu.set_reg(reg::A0, sbi_err::SUCCESS);
+                    true
+                }
+                _ => {
+                    let _ = vcpu.set_reg(reg::A0, sbi_err::NOT_SUPPORTED);
+                    let _ = vcpu.set_reg(reg::A1, 0);
+                    true
+                }
+            }
+        }
+        sbi_ext::HSM => {
+            let arg1 = vcpu.get_reg(reg::A1).unwrap_or(0);
+            let ret = match function_id {
+                0 => {
+                    if arg0 == 0 {
+                        (sbi_err::ALREADY_STARTED, 0)
+                    } else {
+                        (sbi_err::INVALID_PARAM, 0)
+                    }
+                }
+                1 => (sbi_err::ERR_DENIED, 0),
+                2 => {
+                    if arg0 == 0 {
+                        (sbi_err::SUCCESS, hsm_state::STARTED)
+                    } else {
+                        (sbi_err::INVALID_PARAM, 0)
+                    }
+                }
+                3 => (sbi_err::NOT_SUPPORTED, 0),
+                _ => (sbi_err::NOT_SUPPORTED, 0),
+            };
+            let _ = vcpu.set_reg(reg::A0, ret.0);
+            let _ = vcpu.set_reg(reg::A1, ret.1);
+            true
+        }
+        // Extensions that kvmtool handles — forward to userspace.
+        sbi_ext::_PUTCHAR | sbi_ext::DBCN | sbi_ext::SUSP => {
+            // crate::println!("[SBI] -> userspace: ext={:#x} fid={:#x}", extension_id, function_id);
+            false
+        }
+        // System reset — already mapped to KVM_EXIT_SHUTDOWN by write_vm_exit.
+        sbi_ext::SRST => {
+            // crate::println!("[SBI] -> userspace (SRST): ext={:#x} fid={:#x}", extension_id, function_id);
+            false
+        }
+        _ => {
+            crate::println!("[SBI] NOT_SUPPORTED: ext={:#x} fid={:#x} a0={:#x}", extension_id, function_id, vcpu.get_reg(reg::A0).unwrap_or(0));
+            let _ = vcpu.set_reg(reg::A0, sbi_err::NOT_SUPPORTED);
+            let _ = vcpu.set_reg(reg::A1, 0);
+            true
+        }
     }
 }
 
