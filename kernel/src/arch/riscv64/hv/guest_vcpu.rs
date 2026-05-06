@@ -71,6 +71,12 @@ impl GuestVcpu {
         self.iregs = trapframe.regs;
         self.pc = trapframe.epc;
         self.csrs = GuestCsrState::save();
+        // TODO: Refactor SPP handling to avoid this hack. We need to determine the guest mode based on the SPP bit in sstatus, but we can't read sstatus until we've saved the guest CSRs. For now, we'll just set the mode based on the previous mode before trap entry, which should be correct for most cases. (Issue #383)
+        self.mode = match crate::arch::riscv64::trap::prev_mode() {
+            crate::arch::riscv64::trap::PRIV_U_MODE => Mode::GuestUser,
+            crate::arch::riscv64::trap::PRIV_S_MODE => Mode::GuestKernel,
+            _ => Mode::GuestKernel,
+        };
     }
 
     pub fn get_mmio_data(&self, reg: u8, size: u8) -> u64 {
