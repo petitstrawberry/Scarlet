@@ -254,6 +254,7 @@ impl Selectable for EventDevice {
         interest: ReadyInterest,
         trapframe: &mut Trapframe,
         timeout_ticks: Option<u64>,
+        _min_wait_ticks: u64,
     ) -> SelectWaitOutcome {
         // Only support read interest
         if !interest.read {

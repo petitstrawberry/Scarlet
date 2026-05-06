@@ -1108,6 +1108,7 @@ impl crate::object::capability::selectable::Selectable for Ext2FileObject {
         _interest: crate::object::capability::selectable::ReadyInterest,
         _trapframe: &mut crate::arch::Trapframe,
         _timeout_ticks: Option<u64>,
+        _min_wait_ticks: u64,
     ) -> crate::object::capability::selectable::SelectWaitOutcome {
         crate::object::capability::selectable::SelectWaitOutcome::Ready
     }
@@ -1432,6 +1433,7 @@ impl crate::object::capability::selectable::Selectable for Ext2DirectoryObject {
         _interest: crate::object::capability::selectable::ReadyInterest,
         _trapframe: &mut crate::arch::Trapframe,
         _timeout_ticks: Option<u64>,
+        _min_wait_ticks: u64,
     ) -> crate::object::capability::selectable::SelectWaitOutcome {
         crate::object::capability::selectable::SelectWaitOutcome::Ready
     }
@@ -1653,9 +1655,10 @@ impl Selectable for Ext2CharDeviceFileObject {
         interest: ReadyInterest,
         trapframe: &mut crate::arch::Trapframe,
         timeout_ticks: Option<u64>,
+        min_wait_ticks: u64,
     ) -> SelectWaitOutcome {
         if let Some(device) = DeviceManager::get_manager().get_device(self.device_info.device_id) {
-            return device.wait_until_ready(interest, trapframe, timeout_ticks);
+            return device.wait_until_ready(interest, trapframe, timeout_ticks, min_wait_ticks);
         }
         // No device found: do not block
         SelectWaitOutcome::Ready

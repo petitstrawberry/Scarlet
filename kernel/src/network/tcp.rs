@@ -1783,6 +1783,7 @@ impl crate::object::capability::Selectable for TcpSocket {
         interest: crate::object::capability::selectable::ReadyInterest,
         trapframe: &mut crate::arch::Trapframe,
         timeout_ticks: Option<u64>,
+        _min_wait_ticks: u64,
     ) -> crate::object::capability::selectable::SelectWaitOutcome {
         let current = self.current_ready(interest);
         if (interest.read && current.read) || (interest.write && current.write) {

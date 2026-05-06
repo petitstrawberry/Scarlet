@@ -194,7 +194,10 @@ static PF_COUNT: AtomicU64 = AtomicU64::new(0);
 static WFI_NONE_COUNT: AtomicU64 = AtomicU64::new(0);
 static TIMER_NONE_COUNT: AtomicU64 = AtomicU64::new(0);
 
-fn arch_guest_trap_handler_inner(trapframe: &mut Trapframe, vm: &Riscv64VmObject) -> Option<VmExit> {
+fn arch_guest_trap_handler_inner(
+    trapframe: &mut Trapframe,
+    vm: &Riscv64VmObject,
+) -> Option<VmExit> {
     let scause = csr::read_scause();
     let is_interrupt = (scause & 0x8000_0000_0000_0000) != 0;
     let cause = (scause & 0x7fff_ffff_ffff_ffff) as usize;
@@ -353,7 +356,13 @@ fn arch_guest_trap_handler_inner(trapframe: &mut Trapframe, vm: &Riscv64VmObject
                 trapframe.epc = epc.wrapping_add(4);
                 let c = WFI_NONE_COUNT.fetch_add(1, Ordering::Relaxed);
                 if c % 10000 == 0 {
-                    crate::println!("[WFI-NONE] #{} active={:#x} hvip={:#x} vsie={:#x}", c, active, hvip, vsie);
+                    crate::println!(
+                        "[WFI-NONE] #{} active={:#x} hvip={:#x} vsie={:#x}",
+                        c,
+                        active,
+                        hvip,
+                        vsie
+                    );
                 }
                 return None;
             }

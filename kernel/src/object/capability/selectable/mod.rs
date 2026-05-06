@@ -10,6 +10,8 @@
 //! unit representation at the ABI layer. See `crate::timer` for conversion
 //! helpers (e.g., `ns_to_ticks`).
 
+pub mod syscall;
+
 use crate::arch::Trapframe;
 
 /// Interest mask for readiness queries and waits.
@@ -90,6 +92,10 @@ pub trait Selectable {
     /// Block the current task using the provided trapframe until the interest
     /// becomes ready or the optional timeout (in ticks) expires.
     ///
+    /// If `min_wait_ticks > 0`, the task will remain blocked for at least that
+    /// many ticks even if the interest becomes ready earlier. After the minimum
+    /// wait elapses, normal readiness-check + timeout semantics apply.
+    ///
     /// Return `SelectWaitOutcome::TimedOut` if the timeout elapsed before
     /// readiness, otherwise `SelectWaitOutcome::Ready`.
     fn wait_until_ready(
@@ -97,6 +103,7 @@ pub trait Selectable {
         interest: ReadyInterest,
         trapframe: &mut Trapframe,
         timeout_ticks: Option<u64>,
+        min_wait_ticks: u64,
     ) -> SelectWaitOutcome;
 
     /// Enable or disable non-blocking I/O semantics on this object.

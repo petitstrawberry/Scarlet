@@ -220,7 +220,7 @@ pub fn arch_exception_handler(trapframe: &mut Trapframe, cause: usize) {
                 }
                 Err(msg) => {
                     // panic!("Syscall error: {}", msg);
-                    println!("Syscall error: {}", msg);
+                    // println!("Syscall error: {}", msg);
                     trapframe.set_return_value(usize::MAX); // Set error code: -1
                     trapframe.increment_pc_next(mytask().unwrap());
                 }

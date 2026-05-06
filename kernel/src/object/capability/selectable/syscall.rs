@@ -1,0 +1,212 @@
+use crate::arch::Trapframe;
+use crate::object::capability::selectable::{ReadyInterest, Selectable};
+use crate::task::mytask;
+
+pub const POLLIN: u16 = 0x0001;
+pub const POLLPRI: u16 = 0x0002;
+pub const POLLOUT: u16 = 0x0004;
+pub const POLLERR: u16 = 0x0008;
+pub const POLLHUP: u16 = 0x0010;
+pub const POLLNVAL: u16 = 0x0020;
+
+#[repr(C)]
+pub struct PollHandle {
+    pub handle: u32,
+    pub events: u16,
+    pub revents: u16,
+}
+
+#[repr(C)]
+pub struct PollOptions {
+    pub timeout_ns: i64,
+    pub min_timeout_ns: u64,
+}
+
+fn eval_poll_handle(pfd: &mut PollHandle, task: &crate::task::Task) -> (bool, bool) {
+    pfd.revents = 0;
+
+    let Some(kobj) = task.handle_table.get(pfd.handle) else {
+        pfd.revents |= POLLNVAL;
+        return (true, false);
+    };
+
+    let want_read = (pfd.events & POLLIN) != 0;
+    let want_write = (pfd.events & POLLOUT) != 0;
+    let want_except = (pfd.events & POLLPRI) != 0;
+
+    let mut selectable = false;
+
+    if let Some(sel) = kobj.as_selectable() {
+        selectable = true;
+        let rs = sel.current_ready(ReadyInterest {
+            read: want_read,
+            write: want_write,
+            except: want_except,
+        });
+        if rs.read && want_read {
+            pfd.revents |= POLLIN;
+        }
+        if rs.write && want_write {
+            pfd.revents |= POLLOUT;
+        }
+        if rs.except && want_except {
+            pfd.revents |= POLLPRI;
+        }
+    } else {
+        if want_read {
+            pfd.revents |= POLLIN;
+        }
+        if want_write {
+            pfd.revents |= POLLOUT;
+        }
+    }
+
+    if let Some(pipe) = kobj.as_pipe() {
+        if pipe.is_readable() && !pipe.has_writers() {
+            pfd.revents |= POLLHUP;
+            if want_read && (pfd.revents & POLLIN) == 0 {
+                pfd.revents |= POLLIN;
+            }
+        }
+        if pipe.is_writable() && !pipe.has_readers() {
+            pfd.revents |= POLLERR | POLLHUP;
+        }
+    }
+
+    (pfd.revents != 0, selectable)
+}
+
+pub fn sys_poll(trapframe: &mut Trapframe) -> usize {
+    let task = match mytask() {
+        Some(t) => t,
+        None => return usize::MAX,
+    };
+
+    let fds_ptr = trapframe.get_arg(0);
+    let nfds = trapframe.get_arg(1) as usize;
+    let options_ptr = trapframe.get_arg(2);
+
+    trapframe.increment_pc_next(task);
+
+    if nfds == 0 {
+        return 0;
+    }
+
+    let kptr = match task.vm_manager.translate_to_kva(fds_ptr) {
+        Some(p) => p as *mut PollHandle,
+        None => return usize::MAX,
+    };
+
+    let fds: &mut [PollHandle] = unsafe { core::slice::from_raw_parts_mut(kptr, nfds) };
+
+    let options: PollOptions = if options_ptr != 0 {
+        let opts_kptr = match task.vm_manager.translate_to_kva(options_ptr) {
+            Some(p) => p as *const PollOptions,
+            None => return usize::MAX,
+        };
+        unsafe { core::ptr::read(opts_kptr) }
+    } else {
+        PollOptions {
+            timeout_ns: 0,
+            min_timeout_ns: 0,
+        }
+    };
+
+    let timeout_ticks: Option<u64> = if options.timeout_ns < 0 {
+        None
+    } else if options.timeout_ns == 0 && options.min_timeout_ns == 0 {
+        Some(0)
+    } else {
+        Some(crate::timer::ns_to_ticks(options.timeout_ns as u64))
+    };
+
+    let min_wait_ticks = if options.min_timeout_ns > 0 {
+        crate::timer::ns_to_ticks(options.min_timeout_ns)
+    } else {
+        0
+    };
+
+    if min_wait_ticks > 0 && timeout_ticks.is_some() && min_wait_ticks > timeout_ticks.unwrap() {
+        return usize::MAX;
+    }
+
+    let mut any_ready = false;
+    let mut first_selectable_idx: Option<usize> = None;
+    let mut selectable_count = 0usize;
+
+    for (idx, pfd) in fds.iter_mut().enumerate() {
+        let (ready, selectable) = eval_poll_handle(pfd, task);
+        if ready {
+            any_ready = true;
+        }
+        if selectable {
+            selectable_count += 1;
+        }
+        if first_selectable_idx.is_none() && selectable {
+            first_selectable_idx = Some(idx);
+        }
+    }
+
+    if !any_ready {
+        let zero_poll = matches!(timeout_ticks, Some(t) if t == 0);
+        if !zero_poll {
+            if selectable_count > 1 {
+                use crate::timer::get_tick;
+
+                let deadline = timeout_ticks.map(|ticks| get_tick().saturating_add(ticks));
+                loop {
+                    if let Some(deadline) = deadline {
+                        if get_tick() >= deadline {
+                            break;
+                        }
+                    }
+
+                    task.sleep(trapframe, 1);
+
+                    any_ready = false;
+                    for pfd in fds.iter_mut() {
+                        let (ready, _) = eval_poll_handle(pfd, task);
+                        if ready {
+                            any_ready = true;
+                        }
+                    }
+
+                    if any_ready {
+                        break;
+                    }
+                }
+            } else if let Some(wait_idx) = first_selectable_idx {
+                let pfd = &fds[wait_idx];
+                if let Some(kobj) = task.handle_table.get(pfd.handle) {
+                    if let Some(sel) = kobj.as_selectable() {
+                        let want_read = (pfd.events & POLLIN) != 0;
+                        let want_write = (pfd.events & POLLOUT) != 0;
+                        let want_except = (pfd.events & POLLPRI) != 0;
+                        let _ = sel.wait_until_ready(
+                            ReadyInterest {
+                                read: want_read,
+                                write: want_write,
+                                except: want_except,
+                            },
+                            trapframe,
+                            timeout_ticks,
+                            min_wait_ticks,
+                        );
+                    }
+                }
+
+                for pfd in fds.iter_mut() {
+                    let _ = eval_poll_handle(pfd, task);
+                }
+            }
+        }
+    }
+
+    let mut count = 0usize;
+    for pfd in fds.iter() {
+        if pfd.revents != 0 {
+            count += 1;
+        }
+    }
+    count
+}

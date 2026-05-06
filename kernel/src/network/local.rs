@@ -1022,8 +1022,8 @@ impl Selectable for LocalSocket {
         interest: ReadyInterest,
         trapframe: &mut crate::arch::Trapframe,
         timeout_ticks: Option<u64>,
+        min_wait_ticks: u64,
     ) -> SelectWaitOutcome {
-        // Check if already ready
         let current = self.current_ready(interest);
         if (interest.read && current.read) || (interest.write && current.write) {
             return SelectWaitOutcome::Ready;
@@ -1031,7 +1031,6 @@ impl Selectable for LocalSocket {
 
         let state = *self.state.read();
 
-        // Get current task ID
         let task_id = {
             use crate::arch::get_cpu;
             use crate::sched::scheduler::get_scheduler;
@@ -1039,28 +1038,35 @@ impl Selectable for LocalSocket {
             get_scheduler().get_current_task_id(cpu_id).unwrap_or(0)
         };
 
-        // Wait based on state and interest
-        // Note: timeout is not yet implemented - always blocks until ready
         let woke = match state {
             SocketState::Listening if interest.read => {
-                // Wait for incoming connections
-                self.accept_waker
-                    .wait_with_timeout(task_id, trapframe, timeout_ticks)
+                if min_wait_ticks > 0 {
+                    self.accept_waker.wait_with_min_timeout(
+                        task_id,
+                        trapframe,
+                        timeout_ticks,
+                        min_wait_ticks,
+                    )
+                } else {
+                    self.accept_waker
+                        .wait_with_timeout(task_id, trapframe, timeout_ticks)
+                }
             }
             SocketState::Connected if interest.read => {
-                // Wait for data to arrive
-                self.read_waker
-                    .wait_with_timeout(task_id, trapframe, timeout_ticks)
+                if min_wait_ticks > 0 {
+                    self.read_waker.wait_with_min_timeout(
+                        task_id,
+                        trapframe,
+                        timeout_ticks,
+                        min_wait_ticks,
+                    )
+                } else {
+                    self.read_waker
+                        .wait_with_timeout(task_id, trapframe, timeout_ticks)
+                }
             }
-            SocketState::Connected if interest.write => {
-                // For write readiness, treat as immediately ready (optimistic)
-                // Most sockets are writable most of the time
-                true
-            }
-            _ => {
-                // Other states: immediately return as not ready
-                true
-            }
+            SocketState::Connected if interest.write => true,
+            _ => true,
         };
 
         if timeout_ticks.is_some() && !woke {
@@ -1070,8 +1076,6 @@ impl Selectable for LocalSocket {
             }
         }
 
-        // After waking, consider it ready
-        // TODO: properly check timeout and return TimedOut if needed
         SelectWaitOutcome::Ready
     }
 

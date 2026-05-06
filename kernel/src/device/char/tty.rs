@@ -837,6 +837,7 @@ impl Selectable for TtyDevice {
         interest: ReadyInterest,
         trapframe: &mut crate::arch::Trapframe,
         timeout_ticks: Option<u64>,
+        _min_wait_ticks: u64,
     ) -> SelectWaitOutcome {
         // Only read interest requires actual waiting; write/except treated as always-ready
         if interest.read {

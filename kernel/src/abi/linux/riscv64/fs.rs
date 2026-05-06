@@ -41,15 +41,13 @@ fn copy_to_user_pagewise(
         let page_off = cur_user & (crate::environment::PAGE_SIZE - 1);
         let chunk = core::cmp::min(crate::environment::PAGE_SIZE - page_off, src_len - copied);
         match vm_manager.translate_to_kva(cur_user) {
-            Some(kva) => {
-                unsafe {
-                    core::ptr::copy_nonoverlapping(
-                        src.as_ptr().wrapping_add(copied),
-                        kva as *mut u8,
-                        chunk,
-                    );
-                }
-            }
+            Some(kva) => unsafe {
+                core::ptr::copy_nonoverlapping(
+                    src.as_ptr().wrapping_add(copied),
+                    kva as *mut u8,
+                    chunk,
+                );
+            },
             None => break,
         }
         copied += chunk;
@@ -77,15 +75,13 @@ fn copy_from_user_pagewise(
         let page_off = cur_user & (crate::environment::PAGE_SIZE - 1);
         let chunk = core::cmp::min(crate::environment::PAGE_SIZE - page_off, dst_len - copied);
         match vm_manager.translate_to_kva(cur_user) {
-            Some(kva) => {
-                unsafe {
-                    core::ptr::copy_nonoverlapping(
-                        kva as *const u8,
-                        dst.as_mut_ptr().wrapping_add(copied),
-                        chunk,
-                    );
-                }
-            }
+            Some(kva) => unsafe {
+                core::ptr::copy_nonoverlapping(
+                    kva as *const u8,
+                    dst.as_mut_ptr().wrapping_add(copied),
+                    chunk,
+                );
+            },
             None => break,
         }
         copied += chunk;
@@ -986,11 +982,7 @@ pub fn sys_read(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
                 break;
             }
 
-            let copied = copy_to_user_pagewise(
-                cur_user,
-                &page_buf[..n],
-                &task.vm_manager,
-            );
+            let copied = copy_to_user_pagewise(cur_user, &page_buf[..n], &task.vm_manager);
             if copied != n {
                 break;
             }
@@ -1064,11 +1056,8 @@ pub fn sys_write(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize 
             let page_off = cur_user & (crate::environment::PAGE_SIZE - 1);
             let chunk_size = core::cmp::min(crate::environment::PAGE_SIZE - page_off, remaining);
 
-            let copied = copy_from_user_pagewise(
-                &mut page_buf[..chunk_size],
-                cur_user,
-                &task.vm_manager,
-            );
+            let copied =
+                copy_from_user_pagewise(&mut page_buf[..chunk_size], cur_user, &task.vm_manager);
             if copied != chunk_size {
                 break;
             }
@@ -3682,6 +3671,7 @@ pub fn sys_pselect6(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usi
                                 },
                                 trapframe,
                                 timeout_ticks,
+                                0,
                             );
                             // After wake or timeout, recompute readiness for all fds properly
                             out_read = 0;
@@ -4064,6 +4054,7 @@ pub fn sys_ppoll(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize 
                                     },
                                     trapframe,
                                     timeout_ticks,
+                                    0,
                                 );
                             }
                         }

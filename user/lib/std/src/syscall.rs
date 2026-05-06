@@ -46,6 +46,7 @@ pub enum Syscall {
     // StreamOps Capability - read/write operations
     StreamRead = 200,
     StreamWrite = 201,
+    Poll = 202,
 
     // FileObject Capability - file-specific operations (extends StreamOps)
     FileSeek = 300,

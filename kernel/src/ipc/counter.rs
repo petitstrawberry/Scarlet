@@ -254,6 +254,7 @@ impl Selectable for Counter {
         interest: ReadyInterest,
         trapframe: &mut crate::arch::Trapframe,
         timeout_ticks: Option<u64>,
+        min_wait_ticks: u64,
     ) -> SelectWaitOutcome {
         let current = self.current_ready(interest);
         if (interest.read && current.read) || (interest.write && current.write) {
@@ -268,13 +269,31 @@ impl Selectable for Counter {
         };
 
         let woke = if interest.read {
-            self.data
-                .read_waker
-                .wait_with_timeout(task_id, trapframe, timeout_ticks)
+            if min_wait_ticks > 0 {
+                self.data.read_waker.wait_with_min_timeout(
+                    task_id,
+                    trapframe,
+                    timeout_ticks,
+                    min_wait_ticks,
+                )
+            } else {
+                self.data
+                    .read_waker
+                    .wait_with_timeout(task_id, trapframe, timeout_ticks)
+            }
         } else if interest.write {
-            self.data
-                .write_waker
-                .wait_with_timeout(task_id, trapframe, timeout_ticks)
+            if min_wait_ticks > 0 {
+                self.data.write_waker.wait_with_min_timeout(
+                    task_id,
+                    trapframe,
+                    timeout_ticks,
+                    min_wait_ticks,
+                )
+            } else {
+                self.data
+                    .write_waker
+                    .wait_with_timeout(task_id, trapframe, timeout_ticks)
+            }
         } else {
             false
         };

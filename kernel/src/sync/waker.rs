@@ -188,6 +188,66 @@ impl Waker {
         }
     }
 
+    /// Block the task until woken, but wait at least `min_wait_ticks` before
+    /// returning even if woken early by the selectable waker. After the minimum
+    /// wait elapses, continues blocking until woken or `timeout_ticks` expires.
+    ///
+    /// Returns `true` if woken by an event, `false` if the overall timeout elapsed.
+    pub fn wait_with_min_timeout(
+        &self,
+        task_id: usize,
+        trapframe: &mut Trapframe,
+        timeout_ticks: Option<u64>,
+        min_wait_ticks: u64,
+    ) -> bool {
+        use crate::timer::{TimerHandler, add_timer, cancel_timer, get_tick};
+        use alloc::sync::Arc;
+        use core::sync::atomic::{AtomicBool, Ordering};
+
+        struct MinTimeoutWake {
+            task_id: usize,
+            fired: AtomicBool,
+        }
+
+        impl TimerHandler for MinTimeoutWake {
+            fn on_timer_expired(self: Arc<Self>, _context: usize) {
+                self.fired.store(true, Ordering::SeqCst);
+                let scheduler = get_scheduler();
+                let _ = scheduler.wake_task(self.task_id);
+            }
+        }
+
+        let min_handler: Arc<MinTimeoutWake> = Arc::new(MinTimeoutWake {
+            task_id,
+            fired: AtomicBool::new(false),
+        });
+        let min_handler_ref: Arc<dyn TimerHandler> = min_handler.clone();
+        let min_timer_id = add_timer(
+            get_tick().saturating_add(min_wait_ticks),
+            &min_handler_ref,
+            0,
+        );
+
+        self.wait(task_id, trapframe);
+
+        while !min_handler.fired.load(Ordering::SeqCst) {
+            self.wait(task_id, trapframe);
+        }
+
+        cancel_timer(min_timer_id);
+
+        if let Some(ticks) = timeout_ticks {
+            if ticks > min_wait_ticks {
+                let remaining = ticks - min_wait_ticks;
+                self.wait_with_timeout(task_id, trapframe, Some(remaining))
+            } else {
+                true
+            }
+        } else {
+            self.wait_with_timeout(task_id, trapframe, None)
+        }
+    }
+
     // /// Block any task (not limited to the current task) and add it to the wait queue
     // ///
     // /// This method is intended for blocking tasks other than the current one.

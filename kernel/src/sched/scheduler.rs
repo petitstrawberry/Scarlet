@@ -479,7 +479,11 @@ impl Scheduler {
                                     core::sync::atomic::Ordering::SeqCst,
                                 );
                                 // Task is ready to run
-                                t.time_slice.store(t.default_time_slice.load(core::sync::atomic::Ordering::SeqCst), core::sync::atomic::Ordering::SeqCst);
+                                t.time_slice.store(
+                                    t.default_time_slice
+                                        .load(core::sync::atomic::Ordering::SeqCst),
+                                    core::sync::atomic::Ordering::SeqCst,
+                                );
                                 let next_task_id = t.get_id();
                                 self.current_task_id[cpu_id] = Some(next_task_id);
                                 self.ready_queue[cpu_id].push_back(task_id);
@@ -528,7 +532,11 @@ impl Scheduler {
                                 continue;
                             }
                             TaskState::Ready | TaskState::Running => {
-                                t.time_slice.store(t.default_time_slice.load(core::sync::atomic::Ordering::SeqCst), core::sync::atomic::Ordering::SeqCst);
+                                t.time_slice.store(
+                                    t.default_time_slice
+                                        .load(core::sync::atomic::Ordering::SeqCst),
+                                    core::sync::atomic::Ordering::SeqCst,
+                                );
                                 let next_task_id = t.get_id();
                                 self.current_task_id[cpu_id] = Some(next_task_id);
                                 self.ready_queue[cpu_id].push_back(task_id);
@@ -548,21 +556,41 @@ impl Scheduler {
         static DEBUG_TICK: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
         let tick = DEBUG_TICK.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
         if tick % 1000 == 0 {
-            let ids: alloc::vec::Vec<usize> = self.ready_queue[cpu_id].iter().copied().collect();
-            let bq_len = self.blocked_queue[cpu_id].len();
-            let mut names = alloc::vec::Vec::new();
-            for &id in &ids {
-                if let Some(t) = self.get_task_by_id(id) {
-                    names.push(t.name.read().clone());
+            fn state_str(s: TaskState) -> &'static str {
+                match s {
+                    TaskState::NotInitialized => "Init",
+                    TaskState::Ready => "Rdy",
+                    TaskState::Running => "Run",
+                    TaskState::Blocked(_) => "Blk",
+                    TaskState::Zombie => "Zom",
+                    TaskState::Terminated => "Trm",
                 }
             }
-            crate::println!(
-                "[SCHED] tick={} ready={} blocked={} ready={:?}",
+
+            let mut dump_queue = |queue: &VecDeque<usize>, label: &str| {
+                for &id in queue {
+                    if let Some(t) = TaskPool::get_task(id) {
+                        let st = state_str(t.state.load(core::sync::atomic::Ordering::SeqCst));
+                        crate::print!("[{}]:{}({}) ", label, t.name.read(), st);
+                    }
+                }
+            };
+
+            let rq_len = self.ready_queue[cpu_id].len();
+            let bq_len = self.blocked_queue[cpu_id].len();
+            let zq_len = self.zombie_queue[cpu_id].len();
+
+            crate::print!(
+                "[SCHED] tick={} R={}/B={}/Z={}: ",
                 tick,
-                ids.len(),
+                rq_len,
                 bq_len,
-                names,
+                zq_len
             );
+            dump_queue(&self.ready_queue[cpu_id], "R");
+            dump_queue(&self.blocked_queue[cpu_id], "B");
+            dump_queue(&self.zombie_queue[cpu_id], "Z");
+            crate::print!("\n");
         }
 
         if let Some(task_id) = self.get_current_task_id(cpu_id) {

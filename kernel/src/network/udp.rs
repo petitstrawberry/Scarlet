@@ -245,7 +245,7 @@ impl SocketObject for UdpSocket {
             let task = crate::task::mytask();
             if let Some(t) = task {
                 let trapframe = t.get_trapframe();
-                Selectable::wait_until_ready(self, interest, trapframe, None);
+                Selectable::wait_until_ready(self, interest, trapframe, None, 0);
             }
         }
 
@@ -370,7 +370,7 @@ impl crate::object::capability::StreamOps for UdpSocket {
                     write: false,
                     except: false,
                 };
-                Selectable::wait_until_ready(self, interest, trapframe, None);
+                Selectable::wait_until_ready(self, interest, trapframe, None, 0);
             }
         }
 
@@ -424,6 +424,7 @@ impl crate::object::capability::Selectable for UdpSocket {
         interest: crate::object::capability::selectable::ReadyInterest,
         trapframe: &mut crate::arch::Trapframe,
         timeout_ticks: Option<u64>,
+        _min_wait_ticks: u64,
     ) -> crate::object::capability::selectable::SelectWaitOutcome {
         let current = self.current_ready(interest);
         if (interest.read && current.read) || (interest.write && current.write) {

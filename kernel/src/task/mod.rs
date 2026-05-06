@@ -593,7 +593,10 @@ impl Task {
 
         /* Set the task state to Ready */
         self.state.store(TaskState::Ready, Ordering::SeqCst);
-        self.time_slice.store(self.default_time_slice.load(Ordering::SeqCst), Ordering::SeqCst);
+        self.time_slice.store(
+            self.default_time_slice.load(Ordering::SeqCst),
+            Ordering::SeqCst,
+        );
     }
 
     pub fn get_id(&self) -> usize {
@@ -1444,7 +1447,10 @@ impl Task {
         child
             .time_slice
             .store(self.time_slice.load(Ordering::SeqCst), Ordering::SeqCst);
-        child.default_time_slice.store(self.default_time_slice.load(Ordering::SeqCst), Ordering::SeqCst);
+        child.default_time_slice.store(
+            self.default_time_slice.load(Ordering::SeqCst),
+            Ordering::SeqCst,
+        );
         // Note: software_timers_handlers, sleep_waker, event_queue are NOT copied
         // as they are task-specific runtime state that should start fresh
 
