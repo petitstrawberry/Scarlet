@@ -476,6 +476,12 @@ static MMIO_PENDING_VALID: AtomicBool = AtomicBool::new(false);
 pub fn handle_vcpu_ioctl(request: u32, arg: usize, vcpu: &VcpuRef) -> Result<Option<usize>, ()> {
     match request {
         KVM_RUN => {
+            // Extend time slice for vCPU tasks to reduce timer-induced
+            // world switch overhead. 10 ticks = 100ms.
+            if let Some(task) = mytask() {
+                task.default_time_slice.store(10, Ordering::SeqCst);
+            }
+
             if MMIO_PENDING_VALID.load(Ordering::Acquire) {
                 let reg = MMIO_PENDING_READ_REG.load(Ordering::Acquire);
                 if reg < 32 {

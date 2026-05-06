@@ -479,7 +479,7 @@ impl Scheduler {
                                     core::sync::atomic::Ordering::SeqCst,
                                 );
                                 // Task is ready to run
-                                t.time_slice.store(t.default_time_slice, core::sync::atomic::Ordering::SeqCst);
+                                t.time_slice.store(t.default_time_slice.load(core::sync::atomic::Ordering::SeqCst), core::sync::atomic::Ordering::SeqCst);
                                 let next_task_id = t.get_id();
                                 self.current_task_id[cpu_id] = Some(next_task_id);
                                 self.ready_queue[cpu_id].push_back(task_id);
@@ -528,7 +528,7 @@ impl Scheduler {
                                 continue;
                             }
                             TaskState::Ready | TaskState::Running => {
-                                t.time_slice.store(t.default_time_slice, core::sync::atomic::Ordering::SeqCst);
+                                t.time_slice.store(t.default_time_slice.load(core::sync::atomic::Ordering::SeqCst), core::sync::atomic::Ordering::SeqCst);
                                 let next_task_id = t.get_id();
                                 self.current_task_id[cpu_id] = Some(next_task_id);
                                 self.ready_queue[cpu_id].push_back(task_id);
@@ -545,7 +545,26 @@ impl Scheduler {
     /// Called every timer tick. Decrements the current task's time_slice.
     /// If time_slice reaches 0, triggers a reschedule.
     pub fn on_tick(&mut self, cpu_id: usize, trapframe: &mut Trapframe) {
-        // crate::println!("[SCHED] CPU{}: on_tick called", cpu_id);
+        static DEBUG_TICK: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+        let tick = DEBUG_TICK.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        if tick % 1000 == 0 {
+            let ids: alloc::vec::Vec<usize> = self.ready_queue[cpu_id].iter().copied().collect();
+            let bq_len = self.blocked_queue[cpu_id].len();
+            let mut names = alloc::vec::Vec::new();
+            for &id in &ids {
+                if let Some(t) = self.get_task_by_id(id) {
+                    names.push(t.name.read().clone());
+                }
+            }
+            crate::println!(
+                "[SCHED] tick={} ready={} blocked={} ready={:?}",
+                tick,
+                ids.len(),
+                bq_len,
+                names,
+            );
+        }
+
         if let Some(task_id) = self.get_current_task_id(cpu_id) {
             if let Some(task) = TaskPool::get_task_mut(task_id) {
                 let current_slice = task.time_slice.load(core::sync::atomic::Ordering::SeqCst);
