@@ -1,4 +1,5 @@
 use crate::arch::Trapframe;
+use crate::library::std::usercopy::copy_from_user;
 use crate::object::capability::selectable::{ReadyInterest, Selectable};
 use crate::task::mytask;
 
@@ -88,29 +89,33 @@ pub fn sys_poll(trapframe: &mut Trapframe) -> usize {
 
     trapframe.increment_pc_next(task);
 
-    if nfds == 0 {
-        return 0;
-    }
-
-    let kptr = match task.vm_manager.translate_to_kva(fds_ptr) {
-        Some(p) => p as *mut PollHandle,
-        None => return usize::MAX,
-    };
-
-    let fds: &mut [PollHandle] = unsafe { core::slice::from_raw_parts_mut(kptr, nfds) };
-
-    let options: PollOptions = if options_ptr != 0 {
-        let opts_kptr = match task.vm_manager.translate_to_kva(options_ptr) {
-            Some(p) => p as *const PollOptions,
-            None => return usize::MAX,
-        };
-        unsafe { core::ptr::read(opts_kptr) }
+    let mut options: PollOptions = if options_ptr != 0 {
+        let mut opts_bytes = [0u8; core::mem::size_of::<PollOptions>()];
+        if copy_from_user(task, options_ptr, &mut opts_bytes).is_err() {
+            return usize::MAX;
+        }
+        unsafe { core::ptr::read(opts_bytes.as_ptr() as *const PollOptions) }
     } else {
         PollOptions {
             timeout_ns: 0,
             min_timeout_ns: 0,
         }
     };
+
+    if nfds == 0 {
+        if options.min_timeout_ns > 0 {
+            return usize::MAX;
+        }
+        return 0;
+    }
+
+    let fds_size = nfds * core::mem::size_of::<PollHandle>();
+    let mut fds_buf = alloc::vec![0u8; fds_size];
+    if copy_from_user(task, fds_ptr, &mut fds_buf).is_err() {
+        return usize::MAX;
+    }
+    let fds: &mut [PollHandle] =
+        unsafe { core::slice::from_raw_parts_mut(fds_buf.as_mut_ptr() as *mut PollHandle, nfds) };
 
     let timeout_ticks: Option<u64> = if options.timeout_ns < 0 {
         None

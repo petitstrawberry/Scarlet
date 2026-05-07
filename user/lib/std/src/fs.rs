@@ -455,6 +455,20 @@ impl File {
     pub fn as_raw(&self) -> i32 {
         self.handle.as_raw()
     }
+
+    pub fn set_nonblocking(&self, enabled: bool) -> Result<()> {
+        const HCTL_SET_NONBLOCKING: u32 = 0x5353_0007;
+        let result = crate::syscall::syscall3(
+            crate::syscall::Syscall::HandleControl,
+            self.handle.as_raw() as usize,
+            HCTL_SET_NONBLOCKING as usize,
+            if enabled { 1 } else { 0 },
+        );
+        if result == usize::MAX {
+            return Err(Error::new(ErrorKind::Other, "set_nonblocking failed"));
+        }
+        Ok(())
+    }
 }
 
 // Implement Rust standard library-like methods
