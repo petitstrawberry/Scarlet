@@ -9,6 +9,7 @@ use crate::vm::vmem::VirtualMemoryPermission;
 
 const MAX_PAGING_LEVEL: usize = 3;
 
+/// Attributes applied to a leaf page-table entry.
 #[derive(Clone, Copy)]
 struct MapAttrs {
     permissions: usize,
@@ -16,6 +17,10 @@ struct MapAttrs {
     dirty: bool,
 }
 
+/// Returns whether a virtual address is canonical for Sv48.
+///
+/// Sv48 requires bits 63:48 to be copies of bit 47: all zero for the lower
+/// canonical range and all one for the upper canonical range.
 fn is_canonical_sv48(vaddr: usize) -> bool {
     let canonical_check = (vaddr >> 47) & 1;
     let upper_bits = (vaddr >> 48) & 0xffff;
@@ -28,10 +33,18 @@ fn assert_canonical_sv48(vaddr: usize) {
     }
 }
 
+/// Returns the page size represented by a page-table level.
+///
+/// Level 0 is 4 KiB, level 1 is 2 MiB, level 2 is 1 GiB, and level 3 is
+/// 512 GiB.
 fn page_size_for_level(level: usize) -> usize {
     1usize << (12 + 9 * level)
 }
 
+/// Chooses the largest page-table level usable for a mapping chunk.
+///
+/// The selected level must fit in the remaining size and both virtual and
+/// physical addresses must be aligned to that level's page size.
 fn best_page_level(vaddr: usize, paddr: usize, size: usize) -> usize {
     for level in (1..=MAX_PAGING_LEVEL).rev() {
         let page_size = page_size_for_level(level);
@@ -76,6 +89,10 @@ impl PageTableEntry {
         r_bit == 1 || x_bit == 1
     }
 
+    /// Returns whether this PTE's PPN satisfies leaf alignment for a level.
+    ///
+    /// Huge-page leaves must have zero lower PPN fields for all lower page-table
+    /// levels.
     pub fn is_aligned_for_level(&self, level: usize) -> bool {
         let mask = (1usize << (9 * level)) - 1;
         self.get_ppn() & mask == 0
@@ -273,6 +290,10 @@ impl PageTable {
             .expect("map: walk() couldn't allocate a needed page-table page");
     }
 
+    /// Attempts to install a leaf mapping at the specified page-table level.
+    ///
+    /// The mapping must be aligned to the target level's page size and cannot
+    /// replace an existing non-leaf page-table entry.
     fn try_map_at_level(
         &mut self,
         asid: u16,
@@ -343,6 +364,11 @@ impl PageTable {
         self.walk_to_level(vaddr, 0, alloc, asid)
     }
 
+    /// Walks to the PTE at `target_level` for `vaddr`.
+    ///
+    /// Intermediate page tables are allocated when `alloc` is true. Existing
+    /// leaf entries above `target_level` stop the walk to avoid splitting or
+    /// overwriting a huge-page mapping implicitly.
     fn walk_to_level(
         &mut self,
         vaddr: usize,
@@ -389,6 +415,9 @@ impl PageTable {
         }
     }
 
+    /// Finds the leaf PTE that translates `vaddr`.
+    ///
+    /// The returned level is used to calculate the offset within a huge page.
     fn walk_leaf(&mut self, vaddr: usize) -> Option<(&mut PageTableEntry, usize)> {
         let mut pagetable = self as *mut PageTable;
 

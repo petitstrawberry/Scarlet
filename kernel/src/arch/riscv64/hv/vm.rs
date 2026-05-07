@@ -29,10 +29,18 @@ use crate::{hypervisor, print};
 
 pub type RiscvVmState = HypervisorCsrState;
 
+/// Returns the RISC-V Stage-2 page size represented by a page-table level.
+///
+/// Level 0 is 4 KiB, level 1 is 2 MiB, level 2 is 1 GiB, and level 3 is
+/// 512 GiB.
 fn stage2_page_size(level: usize) -> u64 {
     1u64 << (12 + 9 * level)
 }
 
+/// Chooses the largest Stage-2 page level usable for a GPA-to-HPA mapping.
+///
+/// GPA and HPA must have matching offsets within the selected page size, and
+/// the resulting page must be fully contained in the memory slot.
 fn best_stage2_page_level(slot: &MemorySlot, gpa: u64, hpa: u64) -> usize {
     for level in (1..=STAGE2_MAX_PAGE_LEVEL).rev() {
         let page_size = stage2_page_size(level);

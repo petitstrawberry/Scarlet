@@ -151,6 +151,10 @@ pub fn walk_stage2(
     walk_stage2_to_level(pagetable, gpa, 0, vmid)
 }
 
+/// Walks the Stage-2 page-table hierarchy to `target_level`.
+///
+/// Intermediate tables are allocated when missing. This allows callers to
+/// request either a base-page PTE or a higher-level huge-page PTE.
 fn walk_stage2_to_level(
     pagetable: &mut Stage2PageTable,
     gpa: usize,
@@ -234,6 +238,10 @@ pub fn map_stage2_page_new(
     map_stage2_page_at_level(pagetable, gpa, hpa, writable, vmid, 0)
 }
 
+/// Maps a Stage-2 guest physical address to a host physical address at `level`.
+///
+/// Higher levels create huge-page mappings while level 0 preserves the existing
+/// 4 KiB mapping behavior. Intermediate tables are allocated as needed.
 pub fn map_stage2_page_at_level(
     pagetable: &mut Stage2PageTable,
     gpa: u64,
