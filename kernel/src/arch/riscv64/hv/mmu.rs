@@ -11,6 +11,8 @@ use crate::vm::addr::virt_to_phys;
 
 const PAGE_SIZE: usize = 4096;
 const STAGE2_ROOT_SIZE: usize = 16384;
+const STAGE2_PPN_MASK: u64 = 0x0fff_ffff_ffff;
+pub const STAGE2_MAX_PAGE_LEVEL: usize = 3;
 
 static STAGE2_ROOTS: Once<RwLock<HashMap<u16, usize>>> = Once::new();
 static STAGE2_TABLES: Once<RwLock<HashMap<u16, Vec<usize>>>> = Once::new();
@@ -73,6 +75,12 @@ impl Stage2PageTable {
     }
 }
 
+impl Default for Stage2PageTable {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 fn allocate_stage2_root() -> *mut Stage2PageTable {
     let ptr = allocate_raw_pages_aligned(STAGE2_ROOT_SIZE / PAGE_SIZE, STAGE2_ROOT_SIZE);
     if ptr.is_null() {
@@ -109,7 +117,7 @@ pub fn read_hgatp() -> u64 {
 pub fn verify_hgatp_stage2(expected_pagetable: &Stage2PageTable, vmid: u16) {
     let hgatp = read_hgatp();
     let expected_ppn = virt_to_phys(expected_pagetable as *const _ as usize) >> 12;
-    let actual_ppn = hgatp & 0xffff_ffff_fff;
+    let actual_ppn = hgatp & STAGE2_PPN_MASK;
     let actual_vmid = (hgatp >> 44) & 0xffff;
 
     crate::println!(
@@ -140,6 +148,19 @@ pub fn walk_stage2(
     gpa: usize,
     vmid: u16,
 ) -> Option<*mut PageTableEntry> {
+    walk_stage2_to_level(pagetable, gpa, 0, vmid)
+}
+
+/// Walks the Stage-2 page-table hierarchy to `target_level`.
+///
+/// Intermediate tables are allocated when missing. This allows callers to
+/// request either a base-page PTE or a higher-level huge-page PTE.
+fn walk_stage2_to_level(
+    pagetable: &mut Stage2PageTable,
+    gpa: usize,
+    target_level: usize,
+    vmid: u16,
+) -> Option<*mut PageTableEntry> {
     let mut current_table = pagetable.entries.as_mut_ptr();
 
     let vpn3 = (gpa >> 39) & 0x7ff;
@@ -152,7 +173,15 @@ pub fn walk_stage2(
     //     pte.is_valid()
     // );
 
-    if !pte.is_valid() {
+    if target_level == 3 {
+        return Some(pte as *mut PageTableEntry);
+    }
+
+    if pte.is_valid() {
+        if pte.is_leaf() {
+            return None;
+        }
+    } else {
         let new_table = allocate_stage2_table(vmid);
         if new_table.is_null() {
             return None;
@@ -162,7 +191,7 @@ pub fn walk_stage2(
     }
     current_table = (pte.get_ppn() << 12) as *mut PageTableEntry;
 
-    for level in (1..=2).rev() {
+    for level in ((target_level + 1)..=2).rev() {
         let vpn = (gpa >> (12 + 9 * level)) & 0x1ff;
         let pte = unsafe { &mut *current_table.add(vpn) };
 
@@ -174,7 +203,11 @@ pub fn walk_stage2(
         //     pte.is_valid()
         // );
 
-        if !pte.is_valid() {
+        if pte.is_valid() {
+            if pte.is_leaf() {
+                return None;
+            }
+        } else {
             let new_table = allocate_stage2_table(vmid);
             if new_table.is_null() {
                 return None;
@@ -185,7 +218,7 @@ pub fn walk_stage2(
         current_table = (pte.get_ppn() << 12) as *mut PageTableEntry;
     }
 
-    let vpn = (gpa >> 12) & 0x1ff;
+    let vpn = (gpa >> (12 + 9 * target_level)) & 0x1ff;
     let final_pte = unsafe { current_table.add(vpn) };
     // crate::println!(
     //     "[walk_stage2] L0 vpn={} pte={:#x}",
@@ -202,15 +235,38 @@ pub fn map_stage2_page_new(
     writable: bool,
     vmid: u16,
 ) -> Result<(), &'static str> {
-    let gpa = gpa as usize & !0xfff;
-    let hpa = hpa as usize & !0xfff;
+    map_stage2_page_at_level(pagetable, gpa, hpa, writable, vmid, 0)
+}
+
+/// Maps a Stage-2 guest physical address to a host physical address at `level`.
+///
+/// Higher levels create huge-page mappings while level 0 preserves the existing
+/// 4 KiB mapping behavior. Intermediate tables are allocated as needed.
+pub fn map_stage2_page_at_level(
+    pagetable: &mut Stage2PageTable,
+    gpa: u64,
+    hpa: u64,
+    writable: bool,
+    vmid: u16,
+    level: usize,
+) -> Result<(), &'static str> {
+    if level > STAGE2_MAX_PAGE_LEVEL {
+        return Err("invalid stage2 page level");
+    }
+    let page_size = 1usize << (12 + 9 * level);
+    let gpa = gpa as usize & !(page_size - 1);
+    let hpa = hpa as usize & !(page_size - 1);
 
     // crate::println!("[map_stage2_new] gpa={:#x} hpa={:#x}", gpa, hpa);
 
-    let pte = walk_stage2(pagetable, gpa, vmid).ok_or("walk failed")?;
+    let pte = walk_stage2_to_level(pagetable, gpa, level, vmid).ok_or("walk failed")?;
 
-    let ppn = (hpa >> 12) & 0xffff_ffff_fff;
+    // Keep only the 44-bit PPN field accepted by Sv48x4 Stage-2 PTEs.
+    let ppn = ((hpa >> 12) as u64) & STAGE2_PPN_MASK;
     unsafe {
+        if (*pte).is_valid() && !(*pte).is_leaf() {
+            return Err("Cannot replace existing stage2 page table with a leaf");
+        }
         (*pte).entry = 0;
         (*pte).entry |= 1;
         (*pte).entry |= 2;
@@ -220,7 +276,7 @@ pub fn map_stage2_page_new(
         (*pte).entry |= 8;
         (*pte).entry |= 0x10;
         (*pte).entry |= 0x40;
-        (*pte).entry |= (ppn as u64) << 10;
+        (*pte).entry |= ppn << 10;
     }
 
     // crate::println!("[map_stage2_new] pte={:#x}", unsafe { *pte }.entry);

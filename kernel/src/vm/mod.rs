@@ -519,11 +519,7 @@ pub fn teardown_trampoline_for_task_kstack_window(task: &mut Task) {
         let kman = get_kernel_vm_manager();
         let asid = kman.get_asid();
         if let Some(root) = kman.get_root_page_table() {
-            let mut v = vstart;
-            while v <= vend {
-                root.unmap(asid, v);
-                v += PAGE_SIZE;
-            }
+            root.unmap_range(asid, vstart, vend);
         }
         // Best-effort remove VMA entries
         let mut v = vstart;
