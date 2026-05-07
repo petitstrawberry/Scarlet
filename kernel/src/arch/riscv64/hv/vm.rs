@@ -47,10 +47,16 @@ fn best_stage2_page_level(slot: &MemorySlot, gpa: u64, hpa: u64) -> usize {
         debug_assert!(page_size.is_power_of_two());
         let page_mask = page_size - 1;
         let gpa_base = gpa & !(page_size - 1);
+        let hpa_base = hpa & !(page_size - 1);
+        // The faulting address may be inside a huge page. The aligned mapping
+        // bases are valid only when GPA and HPA have the same in-page offset.
         if (gpa & page_mask) != (hpa & page_mask) {
             continue;
         }
         if gpa_base < slot.guest_phys_addr {
+            continue;
+        }
+        if hpa_base < slot.host_phys_addr {
             continue;
         }
         let Some(page_end) = gpa_base.checked_add(page_size) else {
@@ -59,7 +65,13 @@ fn best_stage2_page_level(slot: &MemorySlot, gpa: u64, hpa: u64) -> usize {
         let Some(slot_end) = slot.guest_phys_addr.checked_add(slot.memory_size) else {
             continue;
         };
-        if page_end <= slot_end {
+        let Some(host_page_end) = hpa_base.checked_add(page_size) else {
+            continue;
+        };
+        let Some(host_slot_end) = slot.host_phys_addr.checked_add(slot.memory_size) else {
+            continue;
+        };
+        if page_end <= slot_end && host_page_end <= host_slot_end {
             return level;
         }
     }
@@ -468,6 +480,10 @@ mod tests {
         };
 
         assert_eq!(best_stage2_page_level(&slot, 0, stage2_page_size(2)), 2);
+        assert_eq!(
+            best_stage2_page_level(&slot, 0x1000, stage2_page_size(2) + 0x1000),
+            2
+        );
         let partial_slot = MemorySlot {
             slot_id: 1,
             guest_phys_addr: stage2_page_size(1),

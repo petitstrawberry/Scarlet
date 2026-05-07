@@ -239,6 +239,8 @@ impl PageTable {
         let mut vaddr = mmap.vmarea.start;
         let mut paddr = mmap.pmarea.start;
         while vaddr <= mmap.vmarea.end {
+            // MemoryArea uses an inclusive end. Overflow here means the range
+            // would require more than usize::MAX bytes and cannot be mapped.
             let remaining = mmap
                 .vmarea
                 .end
