@@ -904,9 +904,10 @@ impl Task {
         /* Unmap pages */
         let asid = self.vm_manager.get_asid();
         let root_pagetable = self.vm_manager.get_root_page_table().unwrap();
-        for p in 0..num_of_pages {
-            let vaddr = (page + p) * PAGE_SIZE;
-            root_pagetable.unmap(asid, vaddr);
+        if num_of_pages > 0 {
+            let vaddr_start = page * PAGE_SIZE;
+            let vaddr_end = vaddr_start + num_of_pages * PAGE_SIZE - 1;
+            root_pagetable.unmap_range(asid, vaddr_start, vaddr_end);
         }
     }
 
