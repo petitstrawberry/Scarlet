@@ -57,7 +57,7 @@ fn best_stage2_page_level(slot: &MemorySlot, gpa: u64, hpa: u64) -> usize {
         if gpa_base < slot.guest_phys_addr {
             continue;
         }
-        if hpa_base < slot.host_phys_addr {
+        if hpa_base < slot.userspace_addr {
             continue;
         }
         let Some(page_end) = gpa_base.checked_add(page_size) else {
@@ -69,7 +69,7 @@ fn best_stage2_page_level(slot: &MemorySlot, gpa: u64, hpa: u64) -> usize {
         let Some(host_page_end) = hpa_base.checked_add(page_size) else {
             continue;
         };
-        let Some(host_slot_end) = slot.host_phys_addr.checked_add(slot.memory_size) else {
+        let Some(host_slot_end) = slot.userspace_addr.checked_add(slot.memory_size) else {
             continue;
         };
         if page_end <= slot_end && host_page_end <= host_slot_end {
