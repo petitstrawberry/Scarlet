@@ -11,6 +11,7 @@ use crate::vm::addr::virt_to_phys;
 
 const PAGE_SIZE: usize = 4096;
 const STAGE2_ROOT_SIZE: usize = 16384;
+pub const STAGE2_MAX_PAGE_LEVEL: usize = 3;
 
 static STAGE2_ROOTS: Once<RwLock<HashMap<u16, usize>>> = Once::new();
 static STAGE2_TABLES: Once<RwLock<HashMap<u16, Vec<usize>>>> = Once::new();
@@ -140,6 +141,15 @@ pub fn walk_stage2(
     gpa: usize,
     vmid: u16,
 ) -> Option<*mut PageTableEntry> {
+    walk_stage2_to_level(pagetable, gpa, 0, vmid)
+}
+
+fn walk_stage2_to_level(
+    pagetable: &mut Stage2PageTable,
+    gpa: usize,
+    target_level: usize,
+    vmid: u16,
+) -> Option<*mut PageTableEntry> {
     let mut current_table = pagetable.entries.as_mut_ptr();
 
     let vpn3 = (gpa >> 39) & 0x7ff;
@@ -152,7 +162,15 @@ pub fn walk_stage2(
     //     pte.is_valid()
     // );
 
-    if !pte.is_valid() {
+    if target_level == 3 {
+        return Some(pte as *mut PageTableEntry);
+    }
+
+    if pte.is_valid() {
+        if pte.is_leaf() {
+            return None;
+        }
+    } else {
         let new_table = allocate_stage2_table(vmid);
         if new_table.is_null() {
             return None;
@@ -162,7 +180,7 @@ pub fn walk_stage2(
     }
     current_table = (pte.get_ppn() << 12) as *mut PageTableEntry;
 
-    for level in (1..=2).rev() {
+    for level in ((target_level + 1)..=2).rev() {
         let vpn = (gpa >> (12 + 9 * level)) & 0x1ff;
         let pte = unsafe { &mut *current_table.add(vpn) };
 
@@ -174,7 +192,11 @@ pub fn walk_stage2(
         //     pte.is_valid()
         // );
 
-        if !pte.is_valid() {
+        if pte.is_valid() {
+            if pte.is_leaf() {
+                return None;
+            }
+        } else {
             let new_table = allocate_stage2_table(vmid);
             if new_table.is_null() {
                 return None;
@@ -185,7 +207,7 @@ pub fn walk_stage2(
         current_table = (pte.get_ppn() << 12) as *mut PageTableEntry;
     }
 
-    let vpn = (gpa >> 12) & 0x1ff;
+    let vpn = (gpa >> (12 + 9 * target_level)) & 0x1ff;
     let final_pte = unsafe { current_table.add(vpn) };
     // crate::println!(
     //     "[walk_stage2] L0 vpn={} pte={:#x}",
@@ -202,15 +224,33 @@ pub fn map_stage2_page_new(
     writable: bool,
     vmid: u16,
 ) -> Result<(), &'static str> {
-    let gpa = gpa as usize & !0xfff;
-    let hpa = hpa as usize & !0xfff;
+    map_stage2_page_at_level(pagetable, gpa, hpa, writable, vmid, 0)
+}
+
+pub fn map_stage2_page_at_level(
+    pagetable: &mut Stage2PageTable,
+    gpa: u64,
+    hpa: u64,
+    writable: bool,
+    vmid: u16,
+    level: usize,
+) -> Result<(), &'static str> {
+    if level > STAGE2_MAX_PAGE_LEVEL {
+        return Err("invalid stage2 page level");
+    }
+    let page_size = 1usize << (12 + 9 * level);
+    let gpa = gpa as usize & !(page_size - 1);
+    let hpa = hpa as usize & !(page_size - 1);
 
     // crate::println!("[map_stage2_new] gpa={:#x} hpa={:#x}", gpa, hpa);
 
-    let pte = walk_stage2(pagetable, gpa, vmid).ok_or("walk failed")?;
+    let pte = walk_stage2_to_level(pagetable, gpa, level, vmid).ok_or("walk failed")?;
 
     let ppn = (hpa >> 12) & 0xffff_ffff_fff;
     unsafe {
+        if (*pte).is_valid() && !(*pte).is_leaf() {
+            return Err("Cannot replace existing stage2 page table with a leaf");
+        }
         (*pte).entry = 0;
         (*pte).entry |= 1;
         (*pte).entry |= 2;

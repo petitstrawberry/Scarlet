@@ -10,8 +10,8 @@ use super::csr::{
 };
 use super::guest_vcpu::GuestVcpu;
 use super::mmu::{
-    alloc_vmid, free_stage2, get_stage2_root, init_stage2, map_stage2_page_new,
-    set_guest_root_stage2, verify_hgatp_stage2,
+    STAGE2_MAX_PAGE_LEVEL, alloc_vmid, free_stage2, get_stage2_root, init_stage2,
+    map_stage2_page_at_level, set_guest_root_stage2, verify_hgatp_stage2,
 };
 use super::switch::arch_run_guest_loop;
 use super::trap::arch_guest_trap_handler;
@@ -28,6 +28,33 @@ use crate::vm::{get_guest_trapvector_trampoline, get_trampoline_trap_vector};
 use crate::{hypervisor, print};
 
 pub type RiscvVmState = HypervisorCsrState;
+
+fn stage2_page_size(level: usize) -> u64 {
+    1u64 << (12 + 9 * level)
+}
+
+fn best_stage2_page_level(slot: &MemorySlot, gpa: u64, hpa: u64) -> usize {
+    for level in (1..=STAGE2_MAX_PAGE_LEVEL).rev() {
+        let page_size = stage2_page_size(level);
+        let gpa_base = gpa & !(page_size - 1);
+        let hpa_base = hpa & !(page_size - 1);
+        if gpa - gpa_base != hpa - hpa_base {
+            continue;
+        }
+        if gpa_base < slot.guest_phys_addr {
+            continue;
+        }
+        if let (Some(page_end), Some(slot_end)) = (
+            gpa_base.checked_add(page_size),
+            slot.guest_phys_addr.checked_add(slot.memory_size),
+        ) {
+            if page_end <= slot_end {
+                return level;
+            }
+        }
+    }
+    0
+}
 
 pub struct Riscv64VcpuObject {
     id: VcpuId,
@@ -276,7 +303,20 @@ impl Riscv64VmObject {
         let state = self.state.lock();
         let root = get_stage2_root(state.vmid).ok_or("No Stage2 root")?;
         let root = unsafe { &mut *root };
-        map_stage2_page_new(root, gpa, hpa, writable, state.vmid)
+        let level = state
+            .memory_slots
+            .find_slot(gpa)
+            .map(|slot| best_stage2_page_level(slot, gpa, hpa))
+            .unwrap_or(0);
+        let page_size = stage2_page_size(level);
+        map_stage2_page_at_level(
+            root,
+            gpa & !(page_size - 1),
+            hpa & !(page_size - 1),
+            writable,
+            state.vmid,
+            level,
+        )
     }
 
     pub fn set_guest_root_pagetable(&self) {
@@ -399,6 +439,43 @@ impl ControlOps for Riscv64VmObject {
             (vm_ctl::GET_VCPU_COUNT, "Get vCPU count"),
             (vm_ctl::SET_FAST_PATH, "Set fast path flags"),
         ]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test_case]
+    fn test_best_stage2_page_level_uses_largest_aligned_slot_range() {
+        let slot = MemorySlot {
+            slot_id: 0,
+            guest_phys_addr: 0,
+            memory_size: stage2_page_size(2),
+            host_phys_addr: stage2_page_size(2),
+            flags: MemorySlotFlags::default(),
+        };
+
+        assert_eq!(best_stage2_page_level(&slot, 0, stage2_page_size(2)), 2);
+        let partial_slot = MemorySlot {
+            slot_id: 1,
+            guest_phys_addr: stage2_page_size(1),
+            memory_size: stage2_page_size(1),
+            host_phys_addr: stage2_page_size(2) + stage2_page_size(1),
+            flags: MemorySlotFlags::default(),
+        };
+        assert_eq!(
+            best_stage2_page_level(
+                &partial_slot,
+                stage2_page_size(1),
+                stage2_page_size(2) + stage2_page_size(1)
+            ),
+            1
+        );
+        assert_eq!(
+            best_stage2_page_level(&slot, 0x1000, stage2_page_size(2) + 0x2000),
+            0
+        );
     }
 }
 
