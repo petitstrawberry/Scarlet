@@ -36,9 +36,9 @@ fn stage2_page_size(level: usize) -> u64 {
 fn best_stage2_page_level(slot: &MemorySlot, gpa: u64, hpa: u64) -> usize {
     for level in (1..=STAGE2_MAX_PAGE_LEVEL).rev() {
         let page_size = stage2_page_size(level);
+        let page_mask = page_size - 1;
         let gpa_base = gpa & !(page_size - 1);
-        let hpa_base = hpa & !(page_size - 1);
-        if gpa - gpa_base != hpa - hpa_base {
+        if (gpa & page_mask) != (hpa & page_mask) {
             continue;
         }
         if gpa_base < slot.guest_phys_addr {
@@ -310,10 +310,11 @@ impl Riscv64VmObject {
             .map(|slot| best_stage2_page_level(slot, gpa, hpa))
             .unwrap_or(0);
         let page_size = stage2_page_size(level);
+        let page_mask = page_size - 1;
         map_stage2_page_at_level(
             root,
-            gpa & !(page_size - 1),
-            hpa & !(page_size - 1),
+            gpa & !page_mask,
+            hpa & !page_mask,
             writable,
             state.vmid,
             level,

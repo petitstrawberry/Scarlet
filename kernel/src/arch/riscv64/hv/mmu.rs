@@ -11,6 +11,7 @@ use crate::vm::addr::virt_to_phys;
 
 const PAGE_SIZE: usize = 4096;
 const STAGE2_ROOT_SIZE: usize = 16384;
+const STAGE2_PPN_MASK: u64 = 0x0fff_ffff_ffff;
 pub const STAGE2_MAX_PAGE_LEVEL: usize = 3;
 
 static STAGE2_ROOTS: Once<RwLock<HashMap<u16, usize>>> = Once::new();
@@ -116,7 +117,7 @@ pub fn read_hgatp() -> u64 {
 pub fn verify_hgatp_stage2(expected_pagetable: &Stage2PageTable, vmid: u16) {
     let hgatp = read_hgatp();
     let expected_ppn = virt_to_phys(expected_pagetable as *const _ as usize) >> 12;
-    let actual_ppn = hgatp & 0x0fff_ffff_ffff;
+    let actual_ppn = hgatp & STAGE2_PPN_MASK;
     let actual_vmid = (hgatp >> 44) & 0xffff;
 
     crate::println!(
@@ -252,7 +253,7 @@ pub fn map_stage2_page_at_level(
 
     let pte = walk_stage2_to_level(pagetable, gpa, level, vmid).ok_or("walk failed")?;
 
-    let ppn = (hpa >> 12) & 0x0fff_ffff_ffff;
+    let ppn = ((hpa >> 12) as u64) & STAGE2_PPN_MASK;
     unsafe {
         if (*pte).is_valid() && !(*pte).is_leaf() {
             return Err("Cannot replace existing stage2 page table with a leaf");
@@ -266,7 +267,7 @@ pub fn map_stage2_page_at_level(
         (*pte).entry |= 8;
         (*pte).entry |= 0x10;
         (*pte).entry |= 0x40;
-        (*pte).entry |= (ppn as u64) << 10;
+        (*pte).entry |= ppn << 10;
     }
 
     // crate::println!("[map_stage2_new] pte={:#x}", unsafe { *pte }.entry);
