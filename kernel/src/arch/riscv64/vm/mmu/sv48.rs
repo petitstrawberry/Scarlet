@@ -494,4 +494,44 @@ mod tests {
 
         free_virtual_address_space(asid);
     }
+
+    #[test_case]
+    fn test_map_memory_area_uses_huge_page_with_4k_tail() {
+        let asid = alloc_virtual_address_space();
+        let root = crate::arch::vm::get_root_pagetable(asid).expect("root page table not found");
+        let huge_page_size = page_size_for_level(1);
+        let map_size = huge_page_size + PAGE_SIZE;
+        let vaddr = 0x4020_0000;
+        let paddr = 0x8020_0000;
+        let mmap = VirtualMemoryMap::new(
+            MemoryArea::new(paddr, paddr + map_size - 1),
+            MemoryArea::new(vaddr, vaddr + map_size - 1),
+            VirtualMemoryPermission::Read as usize | VirtualMemoryPermission::Write as usize,
+            false,
+            None,
+        );
+
+        root.map_memory_area(asid, mmap, true, true)
+            .expect("mixed huge-page mapping failed");
+
+        let huge_pte = root
+            .walk_to_level(vaddr, 1, false, asid)
+            .expect("huge-page PTE not found");
+        assert!(huge_pte.is_leaf());
+        assert!(huge_pte.is_aligned_for_level(1));
+
+        let tail_vaddr = vaddr + huge_page_size;
+        let tail_pte = root
+            .walk_to_level(tail_vaddr, 0, false, asid)
+            .expect("tail 4 KiB PTE not found");
+        assert!(tail_pte.is_leaf());
+
+        assert_eq!(root.translate(vaddr + 0x1234), Some(paddr + 0x1234));
+        assert_eq!(
+            root.translate(tail_vaddr + 0x123),
+            Some(paddr + huge_page_size + 0x123)
+        );
+
+        free_virtual_address_space(asid);
+    }
 }
