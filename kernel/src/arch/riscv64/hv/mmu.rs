@@ -261,6 +261,7 @@ pub fn map_stage2_page_at_level(
 
     let pte = walk_stage2_to_level(pagetable, gpa, level, vmid).ok_or("walk failed")?;
 
+    // Keep only the 44-bit PPN field accepted by Sv48x4 Stage-2 PTEs.
     let ppn = ((hpa >> 12) as u64) & STAGE2_PPN_MASK;
     unsafe {
         if (*pte).is_valid() && !(*pte).is_leaf() {

@@ -44,6 +44,7 @@ fn stage2_page_size(level: usize) -> u64 {
 fn best_stage2_page_level(slot: &MemorySlot, gpa: u64, hpa: u64) -> usize {
     for level in (1..=STAGE2_MAX_PAGE_LEVEL).rev() {
         let page_size = stage2_page_size(level);
+        debug_assert!(page_size.is_power_of_two());
         let page_mask = page_size - 1;
         let gpa_base = gpa & !(page_size - 1);
         if (gpa & page_mask) != (hpa & page_mask) {

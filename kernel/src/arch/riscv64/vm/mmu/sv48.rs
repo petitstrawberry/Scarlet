@@ -238,8 +238,13 @@ impl PageTable {
         };
         let mut vaddr = mmap.vmarea.start;
         let mut paddr = mmap.pmarea.start;
-        while vaddr <= mmap.vmarea.end.saturating_sub(PAGE_SIZE - 1) {
-            let remaining = mmap.vmarea.end - vaddr + 1;
+        while vaddr <= mmap.vmarea.end {
+            let remaining = mmap
+                .vmarea
+                .end
+                .checked_sub(vaddr)
+                .and_then(|remaining| remaining.checked_add(1))
+                .ok_or("Address range overflow")?;
             let mut level = best_page_level(vaddr, paddr, remaining);
             while self
                 .try_map_at_level(asid, vaddr, paddr, attrs, level)
@@ -303,6 +308,8 @@ impl PageTable {
         level: usize,
     ) -> Result<(), &'static str> {
         let page_size = page_size_for_level(level);
+        // This also protects direct callers such as map(), not only the
+        // map_memory_area() path that preselects a compatible level.
         if !vaddr.is_multiple_of(page_size) || !paddr.is_multiple_of(page_size) {
             return Err("Address is not aligned to page size");
         }
