@@ -493,6 +493,8 @@ impl PageTable {
             }
 
             for (idx, child_pte) in (*child_table).entries.iter_mut().enumerate() {
+                // Preserve the parent's flags, including A/D bits, because the
+                // child entries represent the same already-established mapping.
                 child_pte.entry = leaf_entry;
                 child_pte.set_ppn(leaf_ppn + idx * child_ppn_step);
             }
@@ -506,7 +508,7 @@ impl PageTable {
         Ok(())
     }
 
-    fn unmap(&mut self, _asid: u16, vaddr: usize) {
+    fn unmap(&mut self, vaddr: usize) {
         // Check if the virtual address is properly canonicalized for Sv48
         assert_canonical_sv48(vaddr);
 
@@ -546,19 +548,20 @@ impl PageTable {
             let leaf_end = leaf_start + leaf_size - 1;
 
             if vaddr_start <= leaf_start && leaf_end <= vaddr_end {
-                self.unmap(asid, leaf_start);
+                self.unmap(leaf_start);
                 match leaf_end.checked_add(1) {
                     Some(next) => vaddr = next,
                     None => break,
                 }
             } else if level == 0 {
-                self.unmap(asid, vaddr);
+                self.unmap(vaddr);
                 match vaddr.checked_add(PAGE_SIZE) {
                     Some(next) => vaddr = next,
                     None => break,
                 }
-            } else if self.split_leaf(asid, vaddr, level).is_err() {
-                break;
+            } else {
+                self.split_leaf(asid, vaddr, level)
+                    .expect("unmap_range: failed to split huge-page leaf");
             }
         }
     }
@@ -687,6 +690,47 @@ mod tests {
         assert!(
             root.walk_to_level(vaddr, 0, false, asid)
                 .expect("split 4 KiB PTE not found")
+                .is_leaf()
+        );
+
+        free_virtual_address_space(asid);
+    }
+
+    #[test_case]
+    fn test_unmap_range_preserves_partial_1g_huge_page() {
+        let asid = alloc_virtual_address_space();
+        let root = crate::arch::vm::get_root_pagetable(asid).expect("root page table not found");
+        let huge_page_size = page_size_for_level(2);
+        let vaddr = 0x8000_0000;
+        let paddr = 0x1_0000_0000;
+        let mmap = VirtualMemoryMap::new(
+            MemoryArea::new(paddr, paddr + huge_page_size - 1),
+            MemoryArea::new(vaddr, vaddr + huge_page_size - 1),
+            VirtualMemoryPermission::Read as usize | VirtualMemoryPermission::Write as usize,
+            false,
+            None,
+        );
+
+        root.map_memory_area(asid, mmap, true, true)
+            .expect("1 GiB huge-page mapping failed");
+        assert!(
+            root.walk_to_level(vaddr, 2, false, asid)
+                .expect("1 GiB huge-page PTE not found")
+                .is_leaf()
+        );
+
+        let removed_vaddr = vaddr + page_size_for_level(1);
+        root.unmap_range(asid, removed_vaddr, removed_vaddr + PAGE_SIZE - 1);
+
+        assert_eq!(root.translate(vaddr), Some(paddr));
+        assert_eq!(root.translate(removed_vaddr), None);
+        assert_eq!(
+            root.translate(removed_vaddr + PAGE_SIZE),
+            Some(paddr + page_size_for_level(1) + PAGE_SIZE)
+        );
+        assert!(
+            root.walk_to_level(vaddr, 1, false, asid)
+                .expect("split 2 MiB PTE not found")
                 .is_leaf()
         );
 
