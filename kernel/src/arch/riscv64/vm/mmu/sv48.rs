@@ -9,6 +9,25 @@ use crate::vm::vmem::VirtualMemoryPermission;
 
 const MAX_PAGING_LEVEL: usize = 3;
 
+#[derive(Clone, Copy)]
+struct MapAttrs {
+    permissions: usize,
+    accessed: bool,
+    dirty: bool,
+}
+
+fn is_canonical_sv48(vaddr: usize) -> bool {
+    let canonical_check = (vaddr >> 47) & 1;
+    let upper_bits = (vaddr >> 48) & 0xffff;
+    (canonical_check == 1 && upper_bits == 0xffff) || (canonical_check == 0 && upper_bits == 0)
+}
+
+fn assert_canonical_sv48(vaddr: usize) {
+    if !is_canonical_sv48(vaddr) {
+        panic!("Non-canonical virtual address: {:#x}", vaddr);
+    }
+}
+
 fn page_size_for_level(level: usize) -> usize {
     1usize << (12 + 9 * level)
 }
@@ -16,7 +35,7 @@ fn page_size_for_level(level: usize) -> usize {
 fn best_page_level(vaddr: usize, paddr: usize, size: usize) -> usize {
     for level in (1..=MAX_PAGING_LEVEL).rev() {
         let page_size = page_size_for_level(level);
-        if size >= page_size && vaddr % page_size == 0 && paddr % page_size == 0 {
+        if size >= page_size && vaddr.is_multiple_of(page_size) && paddr.is_multiple_of(page_size) {
             return level;
         }
     }
@@ -127,6 +146,12 @@ impl PageTableEntry {
     }
 }
 
+impl Default for PageTableEntry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[repr(align(4096))]
 #[derive(Debug)]
 pub struct PageTable {
@@ -181,21 +206,26 @@ impl PageTable {
         dirty: bool,
     ) -> Result<(), &'static str> {
         // Check if the address and size is aligned to PAGE_SIZE
-        if mmap.vmarea.start % PAGE_SIZE != 0
-            || mmap.pmarea.start % PAGE_SIZE != 0
-            || mmap.vmarea.size() % PAGE_SIZE != 0
-            || mmap.pmarea.size() % PAGE_SIZE != 0
+        if !mmap.vmarea.start.is_multiple_of(PAGE_SIZE)
+            || !mmap.pmarea.start.is_multiple_of(PAGE_SIZE)
+            || !mmap.vmarea.size().is_multiple_of(PAGE_SIZE)
+            || !mmap.pmarea.size().is_multiple_of(PAGE_SIZE)
         {
             return Err("Address is not aligned to PAGE_SIZE");
         }
 
+        let attrs = MapAttrs {
+            permissions: mmap.permissions,
+            accessed,
+            dirty,
+        };
         let mut vaddr = mmap.vmarea.start;
         let mut paddr = mmap.pmarea.start;
         while vaddr <= mmap.vmarea.end.saturating_sub(PAGE_SIZE - 1) {
             let remaining = mmap.vmarea.end - vaddr + 1;
             let mut level = best_page_level(vaddr, paddr, remaining);
             while self
-                .try_map_at_level(asid, vaddr, paddr, mmap.permissions, accessed, dirty, level)
+                .try_map_at_level(asid, vaddr, paddr, attrs, level)
                 .is_err()
             {
                 if level == 0 {
@@ -229,18 +259,17 @@ impl PageTable {
         dirty: bool,
     ) {
         // Check if the virtual address is properly canonicalized for Sv48
-        let canonical_check = (vaddr >> 47) & 1;
-        let upper_bits = (vaddr >> 48) & 0xffff;
-        if canonical_check == 1 && upper_bits != 0xffff {
-            panic!("Non-canonical virtual address: {:#x}", vaddr);
-        } else if canonical_check == 0 && upper_bits != 0 {
-            panic!("Non-canonical virtual address: {:#x}", vaddr);
-        }
+        assert_canonical_sv48(vaddr);
 
         let vaddr = vaddr & 0xffff_ffff_ffff_f000; // Page align
         let paddr = paddr & 0xffff_ffff_ffff_f000;
 
-        self.try_map_at_level(asid, vaddr, paddr, permissions, accessed, dirty, 0)
+        let attrs = MapAttrs {
+            permissions,
+            accessed,
+            dirty,
+        };
+        self.try_map_at_level(asid, vaddr, paddr, attrs, 0)
             .expect("map: walk() couldn't allocate a needed page-table page");
     }
 
@@ -249,13 +278,11 @@ impl PageTable {
         asid: u16,
         vaddr: usize,
         paddr: usize,
-        permissions: usize,
-        accessed: bool,
-        dirty: bool,
+        attrs: MapAttrs,
         level: usize,
     ) -> Result<(), &'static str> {
         let page_size = page_size_for_level(level);
-        if vaddr % page_size != 0 || paddr % page_size != 0 {
+        if !vaddr.is_multiple_of(page_size) || !paddr.is_multiple_of(page_size) {
             return Err("Address is not aligned to page size");
         }
 
@@ -271,25 +298,25 @@ impl PageTable {
         // Clear existing flags before setting new ones
         pte.clear_all();
 
-        if VirtualMemoryPermission::Read.contained_in(permissions) {
+        if VirtualMemoryPermission::Read.contained_in(attrs.permissions) {
             pte.readable();
         }
-        if VirtualMemoryPermission::Write.contained_in(permissions) {
+        if VirtualMemoryPermission::Write.contained_in(attrs.permissions) {
             // RISC-V: W=1 requires R=1 (reserved encoding otherwise).
             // Ensure readable so the leaf PTE is well-formed.
             pte.readable();
             pte.writable();
         }
-        if VirtualMemoryPermission::Execute.contained_in(permissions) {
+        if VirtualMemoryPermission::Execute.contained_in(attrs.permissions) {
             pte.executable();
         }
-        if VirtualMemoryPermission::User.contained_in(permissions) {
+        if VirtualMemoryPermission::User.contained_in(attrs.permissions) {
             pte.accesible_from_user();
         }
-        if accessed {
+        if attrs.accessed {
             pte.accessed();
         }
-        if dirty {
+        if attrs.dirty {
             pte.dirty();
         }
 
@@ -326,11 +353,7 @@ impl PageTable {
         let mut pagetable = self as *mut PageTable;
 
         // Check if virtual address is within valid canonical range for Sv48
-        let canonical_check = (vaddr >> 47) & 1;
-        let upper_bits = (vaddr >> 48) & 0xffff;
-        if canonical_check == 1 && upper_bits != 0xffff {
-            return None;
-        } else if canonical_check == 0 && upper_bits != 0 {
+        if !is_canonical_sv48(vaddr) {
             return None;
         }
 
@@ -369,11 +392,7 @@ impl PageTable {
     fn walk_leaf(&mut self, vaddr: usize) -> Option<(&mut PageTableEntry, usize)> {
         let mut pagetable = self as *mut PageTable;
 
-        let canonical_check = (vaddr >> 47) & 1;
-        let upper_bits = (vaddr >> 48) & 0xffff;
-        if canonical_check == 1 && upper_bits != 0xffff {
-            return None;
-        } else if canonical_check == 0 && upper_bits != 0 {
+        if !is_canonical_sv48(vaddr) {
             return None;
         }
 
@@ -416,13 +435,7 @@ impl PageTable {
 
     pub fn unmap(&mut self, _asid: u16, vaddr: usize) {
         // Check if the virtual address is properly canonicalized for Sv48
-        let canonical_check = (vaddr >> 47) & 1;
-        let upper_bits = (vaddr >> 48) & 0xffff;
-        if canonical_check == 1 && upper_bits != 0xffff {
-            panic!("Non-canonical virtual address: {:#x}", vaddr);
-        } else if canonical_check == 0 && upper_bits != 0 {
-            panic!("Non-canonical virtual address: {:#x}", vaddr);
-        }
+        assert_canonical_sv48(vaddr);
 
         let vaddr = vaddr & 0xffff_ffff_ffff_f000; // Page align
 
@@ -439,6 +452,12 @@ impl PageTable {
         }
         // Ensure the TLB flush instruction is not optimized away.
         unsafe { asm!("sfence.vma zero,zero") };
+    }
+}
+
+impl Default for PageTable {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

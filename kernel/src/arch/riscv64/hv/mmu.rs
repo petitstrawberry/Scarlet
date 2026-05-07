@@ -74,6 +74,12 @@ impl Stage2PageTable {
     }
 }
 
+impl Default for Stage2PageTable {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 fn allocate_stage2_root() -> *mut Stage2PageTable {
     let ptr = allocate_raw_pages_aligned(STAGE2_ROOT_SIZE / PAGE_SIZE, STAGE2_ROOT_SIZE);
     if ptr.is_null() {
@@ -110,7 +116,7 @@ pub fn read_hgatp() -> u64 {
 pub fn verify_hgatp_stage2(expected_pagetable: &Stage2PageTable, vmid: u16) {
     let hgatp = read_hgatp();
     let expected_ppn = virt_to_phys(expected_pagetable as *const _ as usize) >> 12;
-    let actual_ppn = hgatp & 0xffff_ffff_fff;
+    let actual_ppn = hgatp & 0x0fff_ffff_ffff;
     let actual_vmid = (hgatp >> 44) & 0xffff;
 
     crate::println!(
@@ -246,7 +252,7 @@ pub fn map_stage2_page_at_level(
 
     let pte = walk_stage2_to_level(pagetable, gpa, level, vmid).ok_or("walk failed")?;
 
-    let ppn = (hpa >> 12) & 0xffff_ffff_fff;
+    let ppn = (hpa >> 12) & 0x0fff_ffff_ffff;
     unsafe {
         if (*pte).is_valid() && !(*pte).is_leaf() {
             return Err("Cannot replace existing stage2 page table with a leaf");

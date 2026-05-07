@@ -44,13 +44,14 @@ fn best_stage2_page_level(slot: &MemorySlot, gpa: u64, hpa: u64) -> usize {
         if gpa_base < slot.guest_phys_addr {
             continue;
         }
-        if let (Some(page_end), Some(slot_end)) = (
-            gpa_base.checked_add(page_size),
-            slot.guest_phys_addr.checked_add(slot.memory_size),
-        ) {
-            if page_end <= slot_end {
-                return level;
-            }
+        let Some(page_end) = gpa_base.checked_add(page_size) else {
+            continue;
+        };
+        let Some(slot_end) = slot.guest_phys_addr.checked_add(slot.memory_size) else {
+            continue;
+        };
+        if page_end <= slot_end {
+            return level;
         }
     }
     0
