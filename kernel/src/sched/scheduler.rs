@@ -555,43 +555,43 @@ impl Scheduler {
     pub fn on_tick(&mut self, cpu_id: usize, trapframe: &mut Trapframe) {
         static DEBUG_TICK: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
         let tick = DEBUG_TICK.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-        if tick % 1000 == 0 {
-            fn state_str(s: TaskState) -> &'static str {
-                match s {
-                    TaskState::NotInitialized => "Init",
-                    TaskState::Ready => "Rdy",
-                    TaskState::Running => "Run",
-                    TaskState::Blocked(_) => "Blk",
-                    TaskState::Zombie => "Zom",
-                    TaskState::Terminated => "Trm",
-                }
-            }
+        // if tick % 1000 == 0 {
+        //     fn state_str(s: TaskState) -> &'static str {
+        //         match s {
+        //             TaskState::NotInitialized => "Init",
+        //             TaskState::Ready => "Rdy",
+        //             TaskState::Running => "Run",
+        //             TaskState::Blocked(_) => "Blk",
+        //             TaskState::Zombie => "Zom",
+        //             TaskState::Terminated => "Trm",
+        //         }
+        //     }
 
-            let mut dump_queue = |queue: &VecDeque<usize>, label: &str| {
-                for &id in queue {
-                    if let Some(t) = TaskPool::get_task(id) {
-                        let st = state_str(t.state.load(core::sync::atomic::Ordering::SeqCst));
-                        crate::print!("[{}]:{}({}) ", label, t.name.read(), st);
-                    }
-                }
-            };
+        //     let mut dump_queue = |queue: &VecDeque<usize>, label: &str| {
+        //         for &id in queue {
+        //             if let Some(t) = TaskPool::get_task(id) {
+        //                 let st = state_str(t.state.load(core::sync::atomic::Ordering::SeqCst));
+        //                 crate::print!("[{}]:{}({}) ", label, t.name.read(), st);
+        //             }
+        //         }
+        //     };
 
-            let rq_len = self.ready_queue[cpu_id].len();
-            let bq_len = self.blocked_queue[cpu_id].len();
-            let zq_len = self.zombie_queue[cpu_id].len();
+        //     let rq_len = self.ready_queue[cpu_id].len();
+        //     let bq_len = self.blocked_queue[cpu_id].len();
+        //     let zq_len = self.zombie_queue[cpu_id].len();
 
-            crate::print!(
-                "[SCHED] tick={} R={}/B={}/Z={}: ",
-                tick,
-                rq_len,
-                bq_len,
-                zq_len
-            );
-            dump_queue(&self.ready_queue[cpu_id], "R");
-            dump_queue(&self.blocked_queue[cpu_id], "B");
-            dump_queue(&self.zombie_queue[cpu_id], "Z");
-            crate::print!("\n");
-        }
+        //     crate::print!(
+        //         "[SCHED] tick={} R={}/B={}/Z={}: ",
+        //         tick,
+        //         rq_len,
+        //         bq_len,
+        //         zq_len
+        //     );
+        //     dump_queue(&self.ready_queue[cpu_id], "R");
+        //     dump_queue(&self.blocked_queue[cpu_id], "B");
+        //     dump_queue(&self.zombie_queue[cpu_id], "Z");
+        //     crate::print!("\n");
+        // }
 
         if let Some(task_id) = self.get_current_task_id(cpu_id) {
             if let Some(task) = TaskPool::get_task_mut(task_id) {
