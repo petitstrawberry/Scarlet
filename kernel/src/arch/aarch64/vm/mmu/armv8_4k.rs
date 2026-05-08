@@ -550,7 +550,7 @@ impl PageTable {
     }
 
     /// Unmap a single page (like RISC-V's unmap())
-    pub fn unmap(&mut self, _asid: u16, vaddr: usize) {
+    fn unmap(&mut self, vaddr: usize) {
         if !Self::is_canonical_48(vaddr) {
             panic!(
                 "Virtual address {:#x} is not canonical for 48-bit VA",
@@ -568,6 +568,25 @@ impl PageTable {
                     core::mem::size_of::<PageTableEntry>(),
                 );
                 unsafe { asm!("dsb ish", "tlbi vmalle1is", "dsb ish", "isb") };
+            }
+        }
+    }
+
+    /// Unmap a virtual address range.
+    ///
+    /// AArch64 currently installs only 4 KiB mappings, so range unmapping can
+    /// clear one page at a time without huge-page splitting.
+    pub fn unmap_range(&mut self, _asid: u16, vaddr_start: usize, vaddr_end: usize) {
+        if vaddr_start > vaddr_end {
+            return;
+        }
+
+        let mut vaddr = vaddr_start & !(PAGE_SIZE - 1);
+        while vaddr <= vaddr_end {
+            self.unmap(vaddr);
+            match vaddr.checked_add(PAGE_SIZE) {
+                Some(next) => vaddr = next,
+                None => break,
             }
         }
     }

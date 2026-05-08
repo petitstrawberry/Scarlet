@@ -721,14 +721,7 @@ impl VirtualMemoryManager {
     /// * `vaddr_end` - End of virtual address range (inclusive)
     pub fn unmap_range_from_mmu(&self, vaddr_start: usize, vaddr_end: usize) {
         if let Some(root_pagetable) = self.get_root_page_table() {
-            let num_pages = (vaddr_end - vaddr_start + 1 + PAGE_SIZE - 1) / PAGE_SIZE;
-
-            for i in 0..num_pages {
-                let page_vaddr = (vaddr_start & !(PAGE_SIZE - 1)) + i * PAGE_SIZE;
-                if page_vaddr <= vaddr_end {
-                    root_pagetable.unmap(self.get_asid(), page_vaddr);
-                }
-            }
+            root_pagetable.unmap_range(self.get_asid(), vaddr_start, vaddr_end);
         }
     }
 

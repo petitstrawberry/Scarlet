@@ -9,6 +9,52 @@ use crate::vm::vmem::VirtualMemoryPermission;
 
 const MAX_PAGING_LEVEL: usize = 3;
 
+/// Attributes applied to a leaf page-table entry.
+#[derive(Clone, Copy)]
+struct MapAttrs {
+    permissions: usize,
+    accessed: bool,
+    dirty: bool,
+}
+
+/// Returns whether a virtual address is canonical for Sv48.
+///
+/// Sv48 requires bits 63:48 to be copies of bit 47: all zero for the lower
+/// canonical range and all one for the upper canonical range.
+fn is_canonical_sv48(vaddr: usize) -> bool {
+    let canonical_check = (vaddr >> 47) & 1;
+    let upper_bits = (vaddr >> 48) & 0xffff;
+    (canonical_check == 1 && upper_bits == 0xffff) || (canonical_check == 0 && upper_bits == 0)
+}
+
+fn assert_canonical_sv48(vaddr: usize) {
+    if !is_canonical_sv48(vaddr) {
+        panic!("Non-canonical virtual address: {:#x}", vaddr);
+    }
+}
+
+/// Returns the page size represented by a page-table level.
+///
+/// Level 0 is 4 KiB, level 1 is 2 MiB, level 2 is 1 GiB, and level 3 is
+/// 512 GiB.
+fn page_size_for_level(level: usize) -> usize {
+    1usize << (12 + 9 * level)
+}
+
+/// Chooses the largest page-table level usable for a mapping chunk.
+///
+/// The selected level must fit in the remaining size and both virtual and
+/// physical addresses must be aligned to that level's page size.
+fn best_page_level(vaddr: usize, paddr: usize, size: usize) -> usize {
+    for level in (1..=MAX_PAGING_LEVEL).rev() {
+        let page_size = page_size_for_level(level);
+        if size >= page_size && vaddr.is_multiple_of(page_size) && paddr.is_multiple_of(page_size) {
+            return level;
+        }
+    }
+    0
+}
+
 #[repr(align(8))]
 #[derive(Clone, Copy, Debug)]
 pub struct PageTableEntry {
@@ -41,6 +87,15 @@ impl PageTableEntry {
         let r_bit = (self.entry >> 1) & 1; // Read bit
         let x_bit = (self.entry >> 3) & 1; // Execute bit
         r_bit == 1 || x_bit == 1
+    }
+
+    /// Returns whether this PTE's PPN satisfies leaf alignment for a level.
+    ///
+    /// Huge-page leaves must have zero lower PPN fields for all lower page-table
+    /// levels.
+    pub fn is_aligned_for_level(&self, level: usize) -> bool {
+        let mask = (1usize << (9 * level)) - 1;
+        self.get_ppn() & mask == 0
     }
 
     pub fn validate(&mut self) {
@@ -108,6 +163,12 @@ impl PageTableEntry {
     }
 }
 
+impl Default for PageTableEntry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[repr(align(4096))]
 #[derive(Debug)]
 pub struct PageTable {
@@ -162,23 +223,47 @@ impl PageTable {
         dirty: bool,
     ) -> Result<(), &'static str> {
         // Check if the address and size is aligned to PAGE_SIZE
-        if mmap.vmarea.start % PAGE_SIZE != 0
-            || mmap.pmarea.start % PAGE_SIZE != 0
-            || mmap.vmarea.size() % PAGE_SIZE != 0
-            || mmap.pmarea.size() % PAGE_SIZE != 0
+        if !mmap.vmarea.start.is_multiple_of(PAGE_SIZE)
+            || !mmap.pmarea.start.is_multiple_of(PAGE_SIZE)
+            || !mmap.vmarea.size().is_multiple_of(PAGE_SIZE)
+            || !mmap.pmarea.size().is_multiple_of(PAGE_SIZE)
         {
             return Err("Address is not aligned to PAGE_SIZE");
         }
 
+        let attrs = MapAttrs {
+            permissions: mmap.permissions,
+            accessed,
+            dirty,
+        };
         let mut vaddr = mmap.vmarea.start;
         let mut paddr = mmap.pmarea.start;
-        while vaddr + (PAGE_SIZE - 1) <= mmap.vmarea.end {
-            self.map(asid, vaddr, paddr, mmap.permissions, accessed, dirty);
-            match vaddr.checked_add(PAGE_SIZE) {
+        while vaddr <= mmap.vmarea.end {
+            // MemoryArea uses an inclusive end. Overflow here means the range
+            // would require more than usize::MAX bytes and cannot be mapped.
+            let remaining = mmap
+                .vmarea
+                .end
+                .checked_sub(vaddr)
+                .and_then(|remaining| remaining.checked_add(1))
+                .ok_or("Address range overflow")?;
+            let mut level = best_page_level(vaddr, paddr, remaining);
+            while self
+                .try_map_at_level(asid, vaddr, paddr, attrs, level)
+                .is_err()
+            {
+                if level == 0 {
+                    return Err("Failed to map memory area");
+                }
+                level -= 1;
+            }
+
+            let page_size = page_size_for_level(level);
+            match vaddr.checked_add(page_size) {
                 Some(addr) => vaddr = addr,
                 None => break,
             }
-            match paddr.checked_add(PAGE_SIZE) {
+            match paddr.checked_add(page_size) {
                 Some(addr) => paddr = addr,
                 None => break,
             }
@@ -198,53 +283,77 @@ impl PageTable {
         dirty: bool,
     ) {
         // Check if the virtual address is properly canonicalized for Sv48
-        let canonical_check = (vaddr >> 47) & 1;
-        let upper_bits = (vaddr >> 48) & 0xffff;
-        if canonical_check == 1 && upper_bits != 0xffff {
-            panic!("Non-canonical virtual address: {:#x}", vaddr);
-        } else if canonical_check == 0 && upper_bits != 0 {
-            panic!("Non-canonical virtual address: {:#x}", vaddr);
-        }
+        assert_canonical_sv48(vaddr);
 
         let vaddr = vaddr & 0xffff_ffff_ffff_f000; // Page align
         let paddr = paddr & 0xffff_ffff_ffff_f000;
 
-        let pte = match self.walk(vaddr, true, asid) {
-            Some(pte) => pte,
-            None => panic!("map: walk() couldn't allocate a needed page-table page"),
+        let attrs = MapAttrs {
+            permissions,
+            accessed,
+            dirty,
         };
+        self.try_map_at_level(asid, vaddr, paddr, attrs, 0)
+            .expect("map: couldn't install a 4 KiB leaf mapping");
+    }
 
+    /// Attempts to install a leaf mapping at the specified page-table level.
+    ///
+    /// The mapping must be aligned to the target level's page size and cannot
+    /// replace an existing non-leaf page-table entry.
+    fn try_map_at_level(
+        &mut self,
+        asid: u16,
+        vaddr: usize,
+        paddr: usize,
+        attrs: MapAttrs,
+        level: usize,
+    ) -> Result<(), &'static str> {
+        let page_size = page_size_for_level(level);
+        // This also protects direct callers such as map(), not only the
+        // map_memory_area() path that preselects a compatible level.
+        if !vaddr.is_multiple_of(page_size) || !paddr.is_multiple_of(page_size) {
+            return Err("Address is not aligned to page size");
+        }
+
+        let pte = self
+            .walk_to_level(vaddr, level, true, asid)
+            .ok_or("walk failed")?;
+        if pte.is_valid() && !pte.is_leaf() {
+            return Err("Cannot replace existing page table with a leaf");
+        }
         // Allow remapping - just update the existing entry
         let ppn = (paddr >> 12) & 0xfffffffffff;
 
         // Clear existing flags before setting new ones
         pte.clear_all();
 
-        if VirtualMemoryPermission::Read.contained_in(permissions) {
+        if VirtualMemoryPermission::Read.contained_in(attrs.permissions) {
             pte.readable();
         }
-        if VirtualMemoryPermission::Write.contained_in(permissions) {
+        if VirtualMemoryPermission::Write.contained_in(attrs.permissions) {
             // RISC-V: W=1 requires R=1 (reserved encoding otherwise).
             // Ensure readable so the leaf PTE is well-formed.
             pte.readable();
             pte.writable();
         }
-        if VirtualMemoryPermission::Execute.contained_in(permissions) {
+        if VirtualMemoryPermission::Execute.contained_in(attrs.permissions) {
             pte.executable();
         }
-        if VirtualMemoryPermission::User.contained_in(permissions) {
+        if VirtualMemoryPermission::User.contained_in(attrs.permissions) {
             pte.accesible_from_user();
         }
-        if accessed {
+        if attrs.accessed {
             pte.accessed();
         }
-        if dirty {
+        if attrs.dirty {
             pte.dirty();
         }
 
         pte.set_ppn(ppn);
         pte.validate();
         unsafe { asm!("sfence.vma zero,zero") };
+        Ok(())
     }
 
     // Find the address of the PTE in page table that corresponds to virtual address vaddr.
@@ -261,27 +370,36 @@ impl PageTable {
     //   12..20 -- 9 bits of level-0 index.
     //    0..11 -- 12 bits of byte offset within the page.
     pub fn walk(&mut self, vaddr: usize, alloc: bool, asid: u16) -> Option<&mut PageTableEntry> {
+        self.walk_to_level(vaddr, 0, alloc, asid)
+    }
+
+    /// Walks to the PTE at `target_level` for `vaddr`.
+    ///
+    /// Intermediate page tables are allocated when `alloc` is true. Existing
+    /// leaf entries above `target_level` stop the walk to avoid splitting or
+    /// overwriting a huge-page mapping implicitly.
+    fn walk_to_level(
+        &mut self,
+        vaddr: usize,
+        target_level: usize,
+        alloc: bool,
+        asid: u16,
+    ) -> Option<&mut PageTableEntry> {
         let mut pagetable = self as *mut PageTable;
 
         // Check if virtual address is within valid canonical range for Sv48
-        let canonical_check = (vaddr >> 47) & 1;
-        let upper_bits = (vaddr >> 48) & 0xffff;
-        if canonical_check == 1 && upper_bits != 0xffff {
-            return None;
-        } else if canonical_check == 0 && upper_bits != 0 {
+        if !is_canonical_sv48(vaddr) {
             return None;
         }
 
         unsafe {
-            // Walk through levels 3, 2, 1
-            for level in (1..=MAX_PAGING_LEVEL).rev() {
+            for level in ((target_level + 1)..=MAX_PAGING_LEVEL).rev() {
                 let vpn = (vaddr >> (12 + 9 * level)) & 0x1ff;
                 let pte = &mut (*pagetable).entries[vpn];
 
                 if pte.is_valid() {
-                    // At an intermediate level, a PTE must not be a leaf (no huge page support).
                     if pte.is_leaf() {
-                        return None; // Fail because it's an invalid state.
+                        return None;
                     }
                     // If not a leaf, it's a pointer to the next level table.
                     pagetable = phys_to_virt(pte.get_ppn() << 12) as *mut PageTable;
@@ -301,10 +419,41 @@ impl PageTable {
                 }
             }
 
-            // Return the PTE at level 0
-            let vpn = (vaddr >> 12) & 0x1ff;
+            let vpn = (vaddr >> (12 + 9 * target_level)) & 0x1ff;
             Some(&mut (*pagetable).entries[vpn])
         }
+    }
+
+    /// Finds the leaf PTE that translates `vaddr`.
+    ///
+    /// The returned level is used to calculate the offset within a huge page.
+    fn walk_leaf(&mut self, vaddr: usize) -> Option<(&mut PageTableEntry, usize)> {
+        let mut pagetable = self as *mut PageTable;
+
+        if !is_canonical_sv48(vaddr) {
+            return None;
+        }
+
+        unsafe {
+            for level in (0..=MAX_PAGING_LEVEL).rev() {
+                let vpn = (vaddr >> (12 + 9 * level)) & 0x1ff;
+                let pte = &mut (*pagetable).entries[vpn];
+                if !pte.is_valid() {
+                    return None;
+                }
+                if pte.is_leaf() {
+                    if !pte.is_aligned_for_level(level) {
+                        return None;
+                    }
+                    return Some((pte, level));
+                }
+                if level == 0 {
+                    return None;
+                }
+                pagetable = phys_to_virt(pte.get_ppn() << 12) as *mut PageTable;
+            }
+        }
+        None
     }
 
     /// Translate a virtual address to a physical address by walking the page table.
@@ -317,37 +466,102 @@ impl PageTable {
     ///
     /// The physical address if the mapping exists, or `None` if unmapped.
     pub fn translate(&mut self, vaddr: usize) -> Option<usize> {
-        let pte = self.walk(vaddr, false, 0)?;
-        if pte.is_valid() && pte.is_leaf() {
-            let ppn = pte.get_ppn();
-            let page_offset = vaddr & 0xfff;
-            Some((ppn << 12) | page_offset)
-        } else {
-            None
-        }
+        let (pte, level) = self.walk_leaf(vaddr)?;
+        let page_offset = vaddr & (page_size_for_level(level) - 1);
+        Some((pte.get_ppn() << 12) | page_offset)
     }
 
-    pub fn unmap(&mut self, _asid: u16, vaddr: usize) {
-        // Check if the virtual address is properly canonicalized for Sv48
-        let canonical_check = (vaddr >> 47) & 1;
-        let upper_bits = (vaddr >> 48) & 0xffff;
-        if canonical_check == 1 && upper_bits != 0xffff {
-            panic!("Non-canonical virtual address: {:#x}", vaddr);
-        } else if canonical_check == 0 && upper_bits != 0 {
-            panic!("Non-canonical virtual address: {:#x}", vaddr);
+    fn split_leaf(&mut self, asid: u16, vaddr: usize, level: usize) -> Result<(), &'static str> {
+        if level == 0 {
+            return Err("Cannot split a 4 KiB leaf");
         }
+
+        let (pte, leaf_level) = self.walk_leaf(vaddr).ok_or("No leaf mapping found")?;
+        if leaf_level != level {
+            return Err("Unexpected leaf level");
+        }
+
+        let leaf_entry = pte.entry;
+        let leaf_ppn = pte.get_ppn();
+        let child_level = level - 1;
+        let child_ppn_step = page_size_for_level(child_level) >> 12;
+
+        unsafe {
+            let child_table = new_raw_pagetable(asid);
+            if child_table.is_null() {
+                return Err("Failed to allocate split page table");
+            }
+
+            for (idx, child_pte) in (*child_table).entries.iter_mut().enumerate() {
+                // Preserve the parent's flags, including A/D bits, because the
+                // child entries represent the same already-established mapping.
+                child_pte.entry = leaf_entry;
+                child_pte.set_ppn(leaf_ppn + idx * child_ppn_step);
+            }
+
+            pte.clear_all();
+            pte.set_ppn(kernel_virt_to_phys(child_table as usize) >> 12);
+            pte.validate();
+            asm!("sfence.vma zero,zero");
+        }
+
+        Ok(())
+    }
+
+    fn unmap(&mut self, vaddr: usize) {
+        // Check if the virtual address is properly canonicalized for Sv48
+        assert_canonical_sv48(vaddr);
 
         let vaddr = vaddr & 0xffff_ffff_ffff_f000; // Page align
 
-        match self.walk(vaddr, false, 0) {
-            Some(pte) => {
-                if pte.is_valid() {
-                    pte.clear_all();
-                    unsafe { asm!("sfence.vma zero,zero") };
+        if let Some((pte, _)) = self.walk_leaf(vaddr) {
+            pte.clear_all();
+            unsafe { asm!("sfence.vma zero,zero") };
+        }
+    }
+
+    /// Unmap a virtual address range.
+    ///
+    /// Whole huge-page leaves are cleared directly. If the range only covers
+    /// part of a huge-page leaf, the leaf is split into the next lower level so
+    /// mappings outside the requested range are preserved.
+    pub fn unmap_range(&mut self, asid: u16, vaddr_start: usize, vaddr_end: usize) {
+        if vaddr_start > vaddr_end {
+            return;
+        }
+
+        assert_canonical_sv48(vaddr_start);
+        assert_canonical_sv48(vaddr_end);
+
+        let mut vaddr = vaddr_start & !(PAGE_SIZE - 1);
+        while vaddr <= vaddr_end {
+            let Some((_, level)) = self.walk_leaf(vaddr) else {
+                match vaddr.checked_add(PAGE_SIZE) {
+                    Some(next) => vaddr = next,
+                    None => break,
                 }
-            }
-            None => {
-                // Mapping doesn't exist, nothing to unmap
+                continue;
+            };
+
+            let leaf_size = page_size_for_level(level);
+            let leaf_start = vaddr & !(leaf_size - 1);
+            let leaf_end = leaf_start + leaf_size - 1;
+
+            if vaddr_start <= leaf_start && leaf_end <= vaddr_end {
+                self.unmap(leaf_start);
+                match leaf_end.checked_add(1) {
+                    Some(next) => vaddr = next,
+                    None => break,
+                }
+            } else if level == 0 {
+                self.unmap(vaddr);
+                match vaddr.checked_add(PAGE_SIZE) {
+                    Some(next) => vaddr = next,
+                    None => break,
+                }
+            } else {
+                self.split_leaf(asid, vaddr, level)
+                    .expect("unmap_range: failed to split huge-page leaf");
             }
         }
     }
@@ -359,5 +573,167 @@ impl PageTable {
         }
         // Ensure the TLB flush instruction is not optimized away.
         unsafe { asm!("sfence.vma zero,zero") };
+    }
+}
+
+impl Default for PageTable {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::arch::vm::{alloc_virtual_address_space, free_virtual_address_space};
+    use crate::vm::vmem::MemoryArea;
+
+    #[test_case]
+    fn test_map_memory_area_uses_2m_huge_page() {
+        let asid = alloc_virtual_address_space();
+        let root = crate::arch::vm::get_root_pagetable(asid).expect("root page table not found");
+        let page_size = page_size_for_level(1);
+        let vaddr = 0x4000_0000;
+        let paddr = 0x8000_0000;
+        let mmap = VirtualMemoryMap::new(
+            MemoryArea::new(paddr, paddr + page_size - 1),
+            MemoryArea::new(vaddr, vaddr + page_size - 1),
+            VirtualMemoryPermission::Read as usize | VirtualMemoryPermission::Write as usize,
+            false,
+            None,
+        );
+
+        root.map_memory_area(asid, mmap, true, true)
+            .expect("huge-page mapping failed");
+
+        let pte = root
+            .walk_to_level(vaddr, 1, false, asid)
+            .expect("huge-page PTE not found");
+        assert!(pte.is_leaf());
+        assert!(pte.is_aligned_for_level(1));
+        assert_eq!(root.translate(vaddr + 0x1234), Some(paddr + 0x1234));
+
+        free_virtual_address_space(asid);
+    }
+
+    #[test_case]
+    fn test_map_memory_area_uses_huge_page_with_4k_tail() {
+        let asid = alloc_virtual_address_space();
+        let root = crate::arch::vm::get_root_pagetable(asid).expect("root page table not found");
+        let huge_page_size = page_size_for_level(1);
+        let map_size = huge_page_size + PAGE_SIZE;
+        let vaddr = 0x4020_0000;
+        let paddr = 0x8020_0000;
+        let mmap = VirtualMemoryMap::new(
+            MemoryArea::new(paddr, paddr + map_size - 1),
+            MemoryArea::new(vaddr, vaddr + map_size - 1),
+            VirtualMemoryPermission::Read as usize | VirtualMemoryPermission::Write as usize,
+            false,
+            None,
+        );
+
+        root.map_memory_area(asid, mmap, true, true)
+            .expect("mixed huge-page mapping failed");
+
+        let huge_pte = root
+            .walk_to_level(vaddr, 1, false, asid)
+            .expect("huge-page PTE not found");
+        assert!(huge_pte.is_leaf());
+        assert!(huge_pte.is_aligned_for_level(1));
+
+        let tail_vaddr = vaddr + huge_page_size;
+        let tail_pte = root
+            .walk_to_level(tail_vaddr, 0, false, asid)
+            .expect("tail 4 KiB PTE not found");
+        assert!(tail_pte.is_leaf());
+
+        assert_eq!(root.translate(vaddr + 0x1234), Some(paddr + 0x1234));
+        assert_eq!(
+            root.translate(tail_vaddr + 0x123),
+            Some(paddr + huge_page_size + 0x123)
+        );
+
+        free_virtual_address_space(asid);
+    }
+
+    #[test_case]
+    fn test_unmap_range_preserves_partial_huge_page() {
+        let asid = alloc_virtual_address_space();
+        let root = crate::arch::vm::get_root_pagetable(asid).expect("root page table not found");
+        let huge_page_size = page_size_for_level(1);
+        let vaddr = 0x4040_0000;
+        let paddr = 0x8040_0000;
+        let mmap = VirtualMemoryMap::new(
+            MemoryArea::new(paddr, paddr + huge_page_size - 1),
+            MemoryArea::new(vaddr, vaddr + huge_page_size - 1),
+            VirtualMemoryPermission::Read as usize | VirtualMemoryPermission::Write as usize,
+            false,
+            None,
+        );
+
+        root.map_memory_area(asid, mmap, true, true)
+            .expect("huge-page mapping failed");
+        assert!(
+            root.walk_to_level(vaddr, 1, false, asid)
+                .expect("huge-page PTE not found")
+                .is_leaf()
+        );
+
+        root.unmap_range(asid, vaddr + PAGE_SIZE, vaddr + 2 * PAGE_SIZE - 1);
+
+        assert_eq!(root.translate(vaddr), Some(paddr));
+        assert_eq!(root.translate(vaddr + PAGE_SIZE), None);
+        assert_eq!(
+            root.translate(vaddr + 2 * PAGE_SIZE),
+            Some(paddr + 2 * PAGE_SIZE)
+        );
+        assert!(
+            root.walk_to_level(vaddr, 0, false, asid)
+                .expect("split 4 KiB PTE not found")
+                .is_leaf()
+        );
+
+        free_virtual_address_space(asid);
+    }
+
+    #[test_case]
+    fn test_unmap_range_preserves_partial_1g_huge_page() {
+        let asid = alloc_virtual_address_space();
+        let root = crate::arch::vm::get_root_pagetable(asid).expect("root page table not found");
+        let huge_page_size = page_size_for_level(2);
+        let vaddr = 0x8000_0000;
+        let paddr = 0x1_0000_0000;
+        let mmap = VirtualMemoryMap::new(
+            MemoryArea::new(paddr, paddr + huge_page_size - 1),
+            MemoryArea::new(vaddr, vaddr + huge_page_size - 1),
+            VirtualMemoryPermission::Read as usize | VirtualMemoryPermission::Write as usize,
+            false,
+            None,
+        );
+
+        root.map_memory_area(asid, mmap, true, true)
+            .expect("1 GiB huge-page mapping failed");
+        assert!(
+            root.walk_to_level(vaddr, 2, false, asid)
+                .expect("1 GiB huge-page PTE not found")
+                .is_leaf()
+        );
+
+        let removed_vaddr = vaddr + page_size_for_level(1);
+        root.unmap_range(asid, removed_vaddr, removed_vaddr + PAGE_SIZE - 1);
+
+        assert_eq!(root.translate(vaddr), Some(paddr));
+        assert_eq!(root.translate(removed_vaddr), None);
+        assert_eq!(
+            root.translate(removed_vaddr + PAGE_SIZE),
+            Some(paddr + page_size_for_level(1) + PAGE_SIZE)
+        );
+        assert!(
+            root.walk_to_level(vaddr, 1, false, asid)
+                .expect("split 2 MiB PTE not found")
+                .is_leaf()
+        );
+
+        free_virtual_address_space(asid);
     }
 }
