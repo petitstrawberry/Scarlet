@@ -7,6 +7,12 @@ use scarlet_modules::scarlet::{environment::STACK_SIZE, start_ap};
 
 extern crate scarlet_modules;
 
+// Placeholder to force the linker to emit the .scarlet_ksyms section with enough
+// room for the post-link tool to inject the real symbol table via objcopy --update-section.
+#[unsafe(link_section = ".scarlet_ksyms")]
+#[used]
+static _KSYM_PLACEHOLDER: [u64; 32768] = [0u64; 32768];
+
 #[unsafe(link_section = ".init")]
 #[unsafe(no_mangle)]
 pub extern "C" fn arch_start_kernel() -> ! {

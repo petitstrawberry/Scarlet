@@ -163,7 +163,8 @@ fn run() -> Result<(), String> {
             } else {
                 let project = project.ok_or("--project is required when not using --module")?;
                 let config = generate(&project)?;
-                cargo_command(&project, &config, "build", target, release, &[])
+                cargo_command(&project, &config, "build", target.clone(), release, &[])?;
+                inject_ksym_section(&project, &config, target.as_deref(), release)
             }
         }
         Commands::Clippy {
@@ -1082,118 +1083,8 @@ unstable-options = true
     Ok(())
 }
 
-fn render_bsp_build_rs(kernel_symbols_relative: &str) -> String {
-    let const_line = format!(
-        "const KERNEL_SYMBOLS_RELATIVE: &str = \"{}\";",
-        kernel_symbols_relative
-    );
-
-    format!(
-        r##"use std::path::Path;
-use std::process::Command;
-
-{const_line}
-
-fn main() {{
-    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap();
-    let target = std::env::var("TARGET").unwrap();
-    let profile = std::env::var("PROFILE").unwrap();
-    let target_dir = std::env::var("CARGO_TARGET_DIR")
-        .unwrap_or_else(|_| format!("{{manifest_dir}}/target"));
-
-    let binary_path = format!("{{target_dir}}/{{target}}/{{profile}}/scarlet");
-    let kernel_symbols_path = format!("{{manifest_dir}}/{{KERNEL_SYMBOLS_RELATIVE}}");
-
-    if Path::new(&binary_path).exists() {{
-        extract_symbols(&binary_path, &kernel_symbols_path);
-    }} else {{
-        generate_empty_symbols(&kernel_symbols_path);
-    }}
-}}
-
-fn extract_symbols(binary_path: &str, output_path: &str) {{
-    let output = Command::new("nm")
-        .args(["--defined-only", "--extern-only", "-g", "--no-sort", binary_path])
-        .output()
-        .expect("failed to run nm");
-
-    if !output.status.success() {{
-        eprintln!("cargo-scarlet [build.rs]: nm failed, generating empty symbols");
-        generate_empty_symbols(output_path);
-        return;
-    }}
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let mut symbols: Vec<(String, String)> = Vec::new();
-
-    for line in stdout.lines() {{
-        let parts: Vec<&str> = line.split_whitespace().collect();
-        if parts.len() < 3 {{
-            continue;
-        }}
-        let addr = parts[0];
-        let name = parts[2];
-
-        if name.is_empty() {{
-            continue;
-        }}
-
-        let skip = match name {{
-            "_GLOBAL_OFFSET_TABLE_" | "_DYNAMIC" => true,
-            _ if name.starts_with("__") && name.ends_with("_START") => true,
-            _ if name.starts_with("__") && name.ends_with("_END") => true,
-            _ => false,
-        }};
-
-        if !skip {{
-            symbols.push((name.to_string(), addr.to_string()));
-        }}
-    }}
-
-    let count = symbols.len();
-    let mut content = String::new();
-    content.push_str("#[allow(dead_code)]\n\n");
-    content.push_str("#[unsafe(link_section = \".lsm_symbols\")]\n");
-    content.push_str("#[used]\n");
-    content.push_str("static _FORCE_SECTION: usize = 0;\n\n");
-    content.push_str("#[allow(dead_code)]\n");
-    content.push_str(&format!(
-        "static KERNEL_SYMBOLS: [(&'static str, usize); {{count}}] = [\n"
-    ));
-    for (name, addr) in &symbols {{
-        content.push_str(&format!("    (\"{{name}}\", 0x{{addr}}),\n"));
-    }}
-    content.push_str("];\n\n");
-    content.push_str("pub fn get_kernel_symbols() -> &'static [(&'static str, usize)] {{ &KERNEL_SYMBOLS }}\n");
-
-    write_if_changed(output_path, &content);
-    eprintln!(
-        "cargo-scarlet [build.rs]: extracted {{count}} kernel symbols from {{}}",
-        binary_path
-    );
-}}
-
-fn generate_empty_symbols(output_path: &str) {{
-    let content = "#[allow(dead_code)]\n\n\
-        #[unsafe(link_section = \".lsm_symbols\")]\n\
-        #[used]\n\
-        static _FORCE_SECTION: usize = 0;\n\n\
-        #[allow(dead_code)]\n\
-        static KERNEL_SYMBOLS: [(&'static str, usize); 0] = [];\n\n\
-        pub fn get_kernel_symbols() -> &'static [(&'static str, usize)] {{ &KERNEL_SYMBOLS }}\n";
-    write_if_changed(output_path, content);
-}}
-
-fn write_if_changed(path: &str, contents: &str) {{
-    if let Ok(existing) = std::fs::read_to_string(path) {{
-        if existing == contents {{
-            return;
-        }}
-    }}
-    std::fs::write(path, contents).expect("failed to write generated_symbols.rs");
-}}
-"##
-    )
+fn render_bsp_build_rs() -> String {
+    "fn main() {}\n".to_string()
 }
 
 fn scaffold_bsp(
@@ -1219,18 +1110,6 @@ fn scaffold_bsp(
     let cargo_dir = bsp_dir.join(".cargo");
     let scarlet_modules_dir = bsp_dir.join(".scarlet/scarlet-modules/src");
 
-    let kernel_symbols_relative = match kernel_path {
-        Some(p) => {
-            let abs_kernel = fs::canonicalize(p).map_err(|e| format!("{e}: {}", p.display()))?;
-            let abs_symbols = abs_kernel.join("src/lsm/generated_symbols.rs");
-            let abs_bsp = std::env::current_dir()
-                .map_err(|e| format!("failed to get cwd: {e}"))?
-                .join(&bsp_dir);
-            pathdiff(&abs_symbols, &abs_bsp)?.display().to_string()
-        }
-        None => String::new(),
-    };
-
     fs::create_dir_all(&src_dir)
         .map_err(|e| format!("failed to create {}: {e}", src_dir.display()))?;
     fs::create_dir_all(&lds_dir)
@@ -1242,7 +1121,7 @@ fn scaffold_bsp(
 
     let crate_name = cargo_key_to_rust_identifier(name);
 
-    let build_rs = render_bsp_build_rs(&kernel_symbols_relative);
+    let build_rs = render_bsp_build_rs();
     write_if_changed(&bsp_dir.join("build.rs"), &build_rs)?;
     let main_rs = r#"#![no_std]
 #![no_main]
@@ -1359,4 +1238,162 @@ pub fn force_link() {}
     eprintln!("cargo-scarlet: REQUIRED: implement boot entry in src/main.rs (arch_start_kernel)");
 
     Ok(())
+}
+
+fn inject_ksym_section(
+    project: &Path,
+    config: &ScarletConfig,
+    target: Option<&str>,
+    release: bool,
+) -> Result<(), String> {
+    let resolved_target = match target {
+        Some(t) => t.to_string(),
+        None => config.board.target_json.clone(),
+    };
+    let target_path = if Path::new(&resolved_target).is_absolute() {
+        PathBuf::from(&resolved_target)
+    } else {
+        project.join(&resolved_target)
+    };
+    let target_triple = target_path
+        .file_stem()
+        .ok_or("target path has no file stem")?
+        .to_string_lossy()
+        .to_string();
+
+    let profile = if release { "release" } else { "debug" };
+    let binary_path = project
+        .join("target")
+        .join(&target_triple)
+        .join(profile)
+        .join("scarlet");
+
+    if !binary_path.exists() {
+        eprintln!(
+            "cargo-scarlet: ksym: binary not found at {}, skipping",
+            binary_path.display()
+        );
+        return Ok(());
+    }
+
+    let (nm_cmd, objcopy_cmd) = cross_tools_for_target(&target_triple);
+
+    let nm_output = Command::new(&nm_cmd)
+        .args([
+            "--defined-only",
+            "--extern-only",
+            "-g",
+            "--no-sort",
+            binary_path.to_str().unwrap_or(""),
+        ])
+        .output()
+        .map_err(|e| format!("failed to run nm: {e}"))?;
+
+    if !nm_output.status.success() {
+        eprintln!("cargo-scarlet: ksym: nm failed, skipping section injection");
+        return Ok(());
+    }
+
+    let stdout = String::from_utf8_lossy(&nm_output.stdout);
+    let mut symbols: Vec<(u64, String)> = Vec::new();
+
+    for line in stdout.lines() {
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if parts.len() < 3 {
+            continue;
+        }
+        let addr_str = parts[0];
+        let name = parts[2];
+
+        if name.is_empty() {
+            continue;
+        }
+
+        let skip = match name {
+            "_GLOBAL_OFFSET_TABLE_" | "_DYNAMIC" => true,
+            n if n.starts_with("__") && n.ends_with("_START") => true,
+            n if n.starts_with("__") && n.ends_with("_END") => true,
+            _ => false,
+        };
+
+        if skip {
+            continue;
+        }
+
+        let addr = u64::from_str_radix(addr_str, 16).unwrap_or(0);
+        symbols.push((addr, name.to_string()));
+    }
+
+    let count = symbols.len() as u64;
+    let mut blob = Vec::new();
+    blob.extend_from_slice(&count.to_le_bytes());
+
+    for (addr, name) in &symbols {
+        blob.extend_from_slice(&addr.to_le_bytes());
+        let name_len = name.len() as u64;
+        blob.extend_from_slice(&name_len.to_le_bytes());
+        blob.extend_from_slice(name.as_bytes());
+    }
+
+    let tmp_dir = std::env::temp_dir().join("scarlet-ksym");
+    fs::create_dir_all(&tmp_dir).map_err(|e| format!("failed to create temp dir: {e}"))?;
+    let blob_path = tmp_dir.join("ksym_blob.bin");
+    fs::write(&blob_path, &blob).map_err(|e| format!("failed to write ksym blob: {e}"))?;
+
+    let update_status = Command::new(&objcopy_cmd)
+        .args([
+            "--update-section",
+            &format!(".scarlet_ksyms={}", blob_path.display()),
+            binary_path.to_str().unwrap_or(""),
+        ])
+        .status()
+        .map_err(|e| format!("failed to run objcopy: {e}"))?;
+
+    if !update_status.success() {
+        return Err("objcopy failed to update .scarlet_ksyms section".to_string());
+    }
+
+    eprintln!(
+        "cargo-scarlet: ksym: injected {} symbols into .scarlet_ksyms",
+        count
+    );
+
+    let _ = fs::remove_file(&blob_path);
+    Ok(())
+}
+
+fn cross_tools_for_target(target_triple: &str) -> (String, String) {
+    let candidates = [
+        ("riscv64", "riscv64-linux-gnu"),
+        ("aarch64", "aarch64-linux-gnu"),
+        ("x86_64", "x86_64-linux-gnu"),
+    ];
+
+    let prefix = candidates
+        .iter()
+        .find(|(arch, _)| target_triple.starts_with(arch))
+        .map(|(_, prefix)| *prefix);
+
+    match prefix {
+        Some(p) => {
+            let nm = format!("{p}-nm");
+            let objcopy = format!("{p}-objcopy");
+            if which(&nm) && which(&objcopy) {
+                return (nm, objcopy);
+            }
+        }
+        None => {}
+    }
+
+    ("nm".to_string(), "objcopy".to_string())
+}
+
+fn which(cmd: &str) -> bool {
+    Command::new("which")
+        .arg(cmd)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
 }

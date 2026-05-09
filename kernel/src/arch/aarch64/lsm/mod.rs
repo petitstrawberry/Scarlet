@@ -1,3 +1,6 @@
+use alloc::string::ToString;
+
+use crate::lsm::RelocateError;
 use crate::lsm::elf::{
     ParsedSymbol, RelocObject, RelocationEntry, RelocationSection, SHF_ALLOC, SHN_UNDEF,
     STB_GLOBAL, STB_LOCAL, STB_WEAK, STT_SECTION,
@@ -26,7 +29,8 @@ pub fn apply_relocations(
     object: &RelocObject,
     section_bases: &[(usize, usize)],
     symbol_resolver: &dyn Fn(&str) -> Option<usize>,
-) -> Result<(), &'static str> {
+) -> Result<(), RelocateError> {
+    let rerr = RelocateError::Relocation;
     for reloc_section in &object.relocation_sections {
         let target_section_index = reloc_section.target_section_index as usize;
         let target_section = match object.sections.get(target_section_index) {
@@ -37,176 +41,194 @@ pub fn apply_relocations(
             continue;
         }
         let target_base = section_base(section_bases, target_section_index)
-            .ok_or("Missing base address for relocation target section")?;
+            .ok_or_else(|| rerr("Missing base address for relocation target section"))?;
         let target_size =
-            usize::try_from(target_section.sh_size).map_err(|_| "Section size too large")?;
+            usize::try_from(target_section.sh_size).map_err(|_| rerr("Section size too large"))?;
 
         for relocation in &reloc_section.entries {
             let location_addr =
-                relocation_location(target_base, target_size, relocation.r_offset, 0)?;
+                relocation_location(target_base, target_size, relocation.r_offset, 0)
+                    .map_err(rerr)?;
             let place = location_addr as *mut u8;
 
             match relocation.r_type {
                 R_AARCH64_NONE => {}
 
                 R_AARCH64_ABS64 => {
-                    section_write_ok(target_base, target_size, relocation.r_offset, 8)?;
+                    section_write_ok(target_base, target_size, relocation.r_offset, 8)
+                        .map_err(rerr)?;
                     let s = resolve_symbol_value(
                         object,
                         relocation.r_sym,
                         section_bases,
                         symbol_resolver,
                     )?;
-                    let value = to_u64(s_plus_a(s, relocation.r_addend)?);
+                    let value = to_u64(s_plus_a(s, relocation.r_addend).map_err(rerr)?);
                     write_u64_le(place, value);
                 }
 
                 R_AARCH64_ABS32 => {
-                    section_write_ok(target_base, target_size, relocation.r_offset, 4)?;
+                    section_write_ok(target_base, target_size, relocation.r_offset, 4)
+                        .map_err(rerr)?;
                     let s = resolve_symbol_value(
                         object,
                         relocation.r_sym,
                         section_bases,
                         symbol_resolver,
                     )?;
-                    let value = (s_plus_a(s, relocation.r_addend)? & 0xFFFF_FFFF) as u32;
+                    let value =
+                        (s_plus_a(s, relocation.r_addend).map_err(rerr)? & 0xFFFF_FFFF) as u32;
                     write_u32_le(place, value);
                 }
 
                 R_AARCH64_PREL32 => {
-                    section_write_ok(target_base, target_size, relocation.r_offset, 4)?;
+                    section_write_ok(target_base, target_size, relocation.r_offset, 4)
+                        .map_err(rerr)?;
                     let s = resolve_symbol_value(
                         object,
                         relocation.r_sym,
                         section_bases,
                         symbol_resolver,
                     )?;
-                    let value = s_plus_a_minus_p(s, relocation.r_addend, location_addr)? as u32;
+                    let value = s_plus_a_minus_p(s, relocation.r_addend, location_addr)
+                        .map_err(rerr)? as u32;
                     write_u32_le(place, value);
                 }
 
                 R_AARCH64_ADR_PREL_PG_HI21 => {
-                    section_write_ok(target_base, target_size, relocation.r_offset, 4)?;
+                    section_write_ok(target_base, target_size, relocation.r_offset, 4)
+                        .map_err(rerr)?;
                     let s = resolve_symbol_value(
                         object,
                         relocation.r_sym,
                         section_bases,
                         symbol_resolver,
                     )?;
-                    let result = s_plus_a(s, relocation.r_addend)?
+                    let result = s_plus_a(s, relocation.r_addend).map_err(rerr)?
                         - (location_addr as i64 & !(0xFFF as i64));
-                    patch_adrp(place, result)?;
+                    patch_adrp(place, result).map_err(rerr)?;
                 }
 
                 R_AARCH64_ADR_PREL_LO21 => {
-                    section_write_ok(target_base, target_size, relocation.r_offset, 4)?;
+                    section_write_ok(target_base, target_size, relocation.r_offset, 4)
+                        .map_err(rerr)?;
                     let s = resolve_symbol_value(
                         object,
                         relocation.r_sym,
                         section_bases,
                         symbol_resolver,
                     )?;
-                    let result = s_plus_a_minus_p(s, relocation.r_addend, location_addr)?;
-                    patch_adr(place, result)?;
+                    let result =
+                        s_plus_a_minus_p(s, relocation.r_addend, location_addr).map_err(rerr)?;
+                    patch_adr(place, result).map_err(rerr)?;
                 }
 
                 R_AARCH64_ADD_ABS_LO12_NC => {
-                    section_write_ok(target_base, target_size, relocation.r_offset, 4)?;
+                    section_write_ok(target_base, target_size, relocation.r_offset, 4)
+                        .map_err(rerr)?;
                     let s = resolve_symbol_value(
                         object,
                         relocation.r_sym,
                         section_bases,
                         symbol_resolver,
                     )?;
-                    let value = s_plus_a(s, relocation.r_addend)? & 0xFFF;
+                    let value = s_plus_a(s, relocation.r_addend).map_err(rerr)? & 0xFFF;
                     patch_ldst_add_imm12(place, value);
                 }
 
                 R_AARCH64_LDST8_ABS_LO12_NC => {
-                    section_write_ok(target_base, target_size, relocation.r_offset, 4)?;
+                    section_write_ok(target_base, target_size, relocation.r_offset, 4)
+                        .map_err(rerr)?;
                     let s = resolve_symbol_value(
                         object,
                         relocation.r_sym,
                         section_bases,
                         symbol_resolver,
                     )?;
-                    let value = s_plus_a(s, relocation.r_addend)? & 0xFFF;
+                    let value = s_plus_a(s, relocation.r_addend).map_err(rerr)? & 0xFFF;
                     patch_ldst_add_imm12(place, value);
                 }
 
                 R_AARCH64_JUMP26 | R_AARCH64_CALL26 => {
-                    section_write_ok(target_base, target_size, relocation.r_offset, 4)?;
+                    section_write_ok(target_base, target_size, relocation.r_offset, 4)
+                        .map_err(rerr)?;
                     let s = resolve_symbol_value(
                         object,
                         relocation.r_sym,
                         section_bases,
                         symbol_resolver,
                     )?;
-                    let offset = s_plus_a_minus_p(s, relocation.r_addend, location_addr)?;
-                    patch_b26(place, offset)?;
+                    let offset =
+                        s_plus_a_minus_p(s, relocation.r_addend, location_addr).map_err(rerr)?;
+                    patch_b26(place, offset).map_err(rerr)?;
                 }
 
                 R_AARCH64_MOVW_UABS_G3 => {
-                    section_write_ok(target_base, target_size, relocation.r_offset, 4)?;
+                    section_write_ok(target_base, target_size, relocation.r_offset, 4)
+                        .map_err(rerr)?;
                     let s = resolve_symbol_value(
                         object,
                         relocation.r_sym,
                         section_bases,
                         symbol_resolver,
                     )?;
-                    let value = to_u64(s_plus_a(s, relocation.r_addend)?);
+                    let value = to_u64(s_plus_a(s, relocation.r_addend).map_err(rerr)?);
                     patch_movz_movk(place, ((value >> 48) & 0xFFFF) as u32);
                 }
 
                 R_AARCH64_MOVW_UABS_G2_NC => {
-                    section_write_ok(target_base, target_size, relocation.r_offset, 4)?;
+                    section_write_ok(target_base, target_size, relocation.r_offset, 4)
+                        .map_err(rerr)?;
                     let s = resolve_symbol_value(
                         object,
                         relocation.r_sym,
                         section_bases,
                         symbol_resolver,
                     )?;
-                    let value = to_u64(s_plus_a(s, relocation.r_addend)?);
+                    let value = to_u64(s_plus_a(s, relocation.r_addend).map_err(rerr)?);
                     patch_movz_movk(place, ((value >> 32) & 0xFFFF) as u32);
                 }
 
                 R_AARCH64_MOVW_UABS_G1_NC => {
-                    section_write_ok(target_base, target_size, relocation.r_offset, 4)?;
+                    section_write_ok(target_base, target_size, relocation.r_offset, 4)
+                        .map_err(rerr)?;
                     let s = resolve_symbol_value(
                         object,
                         relocation.r_sym,
                         section_bases,
                         symbol_resolver,
                     )?;
-                    let value = to_u64(s_plus_a(s, relocation.r_addend)?);
+                    let value = to_u64(s_plus_a(s, relocation.r_addend).map_err(rerr)?);
                     patch_movz_movk(place, ((value >> 16) & 0xFFFF) as u32);
                 }
 
                 R_AARCH64_MOVW_UABS_G0_NC => {
-                    section_write_ok(target_base, target_size, relocation.r_offset, 4)?;
+                    section_write_ok(target_base, target_size, relocation.r_offset, 4)
+                        .map_err(rerr)?;
                     let s = resolve_symbol_value(
                         object,
                         relocation.r_sym,
                         section_bases,
                         symbol_resolver,
                     )?;
-                    let value = to_u64(s_plus_a(s, relocation.r_addend)?);
+                    let value = to_u64(s_plus_a(s, relocation.r_addend).map_err(rerr)?);
                     patch_movz_movk(place, ((value >> 0) & 0xFFFF) as u32);
                 }
 
                 R_AARCH64_MOVW_UABS_G0 => {
-                    section_write_ok(target_base, target_size, relocation.r_offset, 4)?;
+                    section_write_ok(target_base, target_size, relocation.r_offset, 4)
+                        .map_err(rerr)?;
                     let s = resolve_symbol_value(
                         object,
                         relocation.r_sym,
                         section_bases,
                         symbol_resolver,
                     )?;
-                    let value = to_u64(s_plus_a(s, relocation.r_addend)?);
+                    let value = to_u64(s_plus_a(s, relocation.r_addend).map_err(rerr)?);
                     patch_movz_movk(place, ((value >> 0) & 0xFFFF) as u32);
                 }
 
-                _ => return Err("Unsupported AArch64 relocation type"),
+                _ => return Err(rerr("Unsupported AArch64 relocation type")),
             }
         }
     }
@@ -219,29 +241,36 @@ fn resolve_symbol_value(
     symbol_index: u32,
     section_bases: &[(usize, usize)],
     symbol_resolver: &dyn Fn(&str) -> Option<usize>,
-) -> Result<usize, &'static str> {
+) -> Result<usize, RelocateError> {
     let symbol = object
         .symbols
         .get(symbol_index as usize)
-        .ok_or("Relocation symbol index out of bounds")?;
+        .ok_or_else(|| RelocateError::Relocation("Relocation symbol index out of bounds"))?;
 
     if symbol.typ == STT_SECTION {
-        return resolve_section_symbol_base(symbol, section_bases);
+        return resolve_section_symbol_base(symbol, section_bases)
+            .map_err(|e| RelocateError::Relocation(e));
     }
 
     if symbol.shndx != SHN_UNDEF {
-        return resolve_defined_symbol(symbol, section_bases);
+        return resolve_defined_symbol(symbol, section_bases)
+            .map_err(|e| RelocateError::Relocation(e));
     }
 
     if symbol.bind == STB_GLOBAL || symbol.bind == STB_WEAK {
-        return symbol_resolver(&symbol.name).ok_or("Undefined external symbol in relocation");
+        return symbol_resolver(&symbol.name)
+            .ok_or_else(|| RelocateError::UnresolvedSymbol(symbol.name.to_string()));
     }
 
     if symbol.bind == STB_LOCAL {
-        return Err("Undefined local symbol in relocation");
+        return Err(RelocateError::Relocation(
+            "Undefined local symbol in relocation",
+        ));
     }
 
-    Err("Unsupported symbol binding in relocation")
+    Err(RelocateError::Relocation(
+        "Unsupported symbol binding in relocation",
+    ))
 }
 
 fn resolve_section_symbol_base(

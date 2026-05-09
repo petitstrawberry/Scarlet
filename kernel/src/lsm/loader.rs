@@ -5,6 +5,7 @@ use core::mem;
 use spin::Mutex;
 
 use crate::environment::PAGE_SIZE;
+use crate::lsm::RelocateError;
 use crate::lsm::elf::{
     self, SHF_ALLOC, SHF_EXECINSTR, SHF_WRITE, SHN_UNDEF, SHT_NOBITS, SHT_PROGBITS, STB_GLOBAL,
     STB_WEAK,
@@ -20,6 +21,7 @@ pub enum LsmError {
     InvalidElf(&'static str),
     NoMemory,
     Relocation(&'static str),
+    UnresolvedSymbol(String),
     NoInitSymbol,
     InitFailed(&'static str),
     BuildInfoMismatch,
@@ -483,7 +485,10 @@ pub fn load_module(data: &[u8]) -> Result<u64, LsmError> {
     crate::arch::lsm::apply_relocations(&object, &section_bases, &symbol_resolver).map_err(
         |e| {
             rollback_mappings_and_pages(&mapped_ranges, &pages_ptrs, &pages_counts);
-            LsmError::Relocation(e)
+            match e {
+                RelocateError::UnresolvedSymbol(name) => LsmError::UnresolvedSymbol(name),
+                RelocateError::Relocation(msg) => LsmError::Relocation(msg),
+            }
         },
     )?;
 

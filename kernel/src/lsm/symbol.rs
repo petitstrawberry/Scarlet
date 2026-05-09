@@ -1,13 +1,13 @@
-#![allow(clippy::all)]
-#![allow(dead_code)]
-
-include!("generated_symbols.rs");
-
 use alloc::string::String;
 use alloc::vec::Vec;
 use spin::Mutex;
 
 use crate::early_println;
+
+unsafe extern "C" {
+    static __SCARLET_KSYMS_START: u8;
+    static __SCARLET_KSYMS_END: u8;
+}
 
 struct RegistryEntry {
     name: String,
@@ -31,19 +31,17 @@ impl SymbolRegistry {
     }
 
     pub fn lookup_module(&self, name: &str) -> Option<(usize, Option<u64>)> {
-        let normalized = strip_crate_hash(name);
         self.entries
             .iter()
             .rev()
-            .find(|entry| entry.name == normalized)
+            .find(|entry| entry.name == name)
             .map(|entry| (entry.addr, entry.module_id))
     }
 
     pub fn register_module_symbols(&mut self, module_id: u64, symbols: &[(String, usize)]) {
         for (name, addr) in symbols {
-            let normalized = strip_crate_hash(name);
             self.entries.push(RegistryEntry {
-                name: normalized.into_owned(),
+                name: name.clone(),
                 addr: *addr,
                 module_id: Some(module_id),
             });
@@ -70,53 +68,83 @@ pub fn get_symbol_registry() -> &'static Mutex<SymbolRegistry> {
     &SYMBOL_REGISTRY
 }
 
-fn strip_crate_hash(name: &str) -> alloc::borrow::Cow<'_, str> {
-    if !name.contains("NtC") {
-        return alloc::borrow::Cow::Borrowed(name);
-    }
-    let mut result = alloc::string::String::with_capacity(name.len());
-    let bytes = name.as_bytes();
-    let mut i = 0;
-    while i < bytes.len() {
-        if i + 3 < bytes.len()
-            && bytes[i] == b'N'
-            && bytes[i + 1] == b't'
-            && bytes[i + 2] == b'C'
-            && i + 15 <= bytes.len()
-            && bytes[i + 3] != b'_'
-        {
-            let hash_end = i + 15;
-            if bytes[i + 3..hash_end]
-                .iter()
-                .all(|b| b.is_ascii_alphanumeric())
-                && (hash_end >= bytes.len() || bytes[hash_end] == b'_')
-            {
-                result.push_str("NtC");
-                i = hash_end;
-                continue;
-            }
-        }
-        result.push(bytes[i] as char);
-        i += 1;
-    }
-    alloc::borrow::Cow::Owned(result)
-}
-
+/// Parse the `.scarlet_ksyms` section (post-link binary blob).
+///
+/// Binary format (all little-endian u64):
+/// ```text
+/// u64  entry_count
+/// [entry_count times]:
+///   u64  addr
+///   u64  name_len   (byte length, NOT including null terminator)
+///   [name_len bytes] name (UTF-8, NOT null-terminated)
+/// ```
 pub fn init_kernel_symbols() {
-    let syms = get_kernel_symbols();
+    // SAFETY: __SCARLET_KSYMS_START/END are linker-defined symbols bounding
+    // the .scarlet_ksyms section. The section is in read-only memory and was
+    // populated by the post-link tool. If no post-link step ran, START == END
+    // (or both are zero from the PROVIDE defaults) and the loop body is skipped.
+    let start = unsafe { core::ptr::addr_of!(__SCARLET_KSYMS_START) as usize };
+    let end = unsafe { core::ptr::addr_of!(__SCARLET_KSYMS_END) as usize };
+
+    if start == 0 || end == 0 || start >= end {
+        early_println!("[lsm] symbol table: no ksym section found, skipping");
+        return;
+    }
+
+    let data = unsafe { core::slice::from_raw_parts(start as *const u8, end - start) };
     let mut registry = SYMBOL_REGISTRY.lock();
 
-    for &(name, addr) in syms {
-        registry.entries.push(RegistryEntry {
-            name: strip_crate_hash(name).into_owned(),
-            addr,
-            module_id: None,
-        });
+    let mut offset = 0usize;
+
+    if data.len() < 8 {
+        early_println!("[lsm] symbol table: ksym section too small, skipping");
+        return;
+    }
+
+    let count = u64::from_le_bytes(data[0..8].try_into().unwrap_or([0u8; 8])) as usize;
+    offset = 8;
+
+    let mut loaded = 0usize;
+    let mut errors = 0usize;
+
+    for _ in 0..count {
+        if offset + 16 > data.len() {
+            errors += 1;
+            break;
+        }
+        let addr = u64::from_le_bytes(data[offset..offset + 8].try_into().unwrap_or([0; 8]));
+        let name_len =
+            u64::from_le_bytes(data[offset + 8..offset + 16].try_into().unwrap_or([0; 8]));
+        offset += 16;
+
+        let name_len = name_len as usize;
+        if offset + name_len > data.len() {
+            errors += 1;
+            break;
+        }
+
+        let name_bytes = &data[offset..offset + name_len];
+        offset += name_len;
+
+        match core::str::from_utf8(name_bytes) {
+            Ok(name) => {
+                registry.entries.push(RegistryEntry {
+                    name: String::from(name),
+                    addr: addr as usize,
+                    module_id: None,
+                });
+                loaded += 1;
+            }
+            Err(_) => {
+                errors += 1;
+            }
+        }
     }
 
     early_println!(
-        "[lsm] symbol table: {} symbol(s) registered",
-        registry.entries.len()
+        "[lsm] symbol table: {} symbol(s) registered ({} errors)",
+        loaded,
+        errors
     );
 }
 
