@@ -266,8 +266,11 @@ dependencies = ["build-kernel-debug-riscv64"]
 script_runner = "@shell"
 script = '''
 mkdir -p mkfs/dist/modules/riscv64gc-unknown-none-elf
-cp modules/loadable/lsm-test/target/riscv64gc-unknown-none-elf/debug/*.lsm mkfs/dist/modules/riscv64gc-unknown-none-elf/ 2>/dev/null || true
-cp modules/loadable/lsm-dep-test/target/riscv64gc-unknown-none-elf/debug/*.lsm mkfs/dist/modules/riscv64gc-unknown-none-elf/ 2>/dev/null || true
+for dir in modules/loadable/*/; do
+  name=$(basename "$dir")
+  src="${dir}target/riscv64gc-unknown-none-elf/debug/${name}.lsm"
+  [ -f "$src" ] && cp "$src" mkfs/dist/modules/riscv64gc-unknown-none-elf/
+done
 '''
 
 [tasks.build-modules-debug-aarch64]
@@ -276,8 +279,11 @@ dependencies = ["build-kernel-debug-aarch64"]
 script_runner = "@shell"
 script = '''
 mkdir -p mkfs/dist/modules/aarch64-unknown-none-elf
-cp modules/loadable/lsm-test/target/aarch64-unknown-none-elf/debug/*.lsm mkfs/dist/modules/aarch64-unknown-none-elf/ 2>/dev/null || true
-cp modules/loadable/lsm-dep-test/target/aarch64-unknown-none-elf/debug/*.lsm mkfs/dist/modules/aarch64-unknown-none-elf/ 2>/dev/null || true
+for dir in modules/loadable/*/; do
+  name=$(basename "$dir")
+  src="${dir}target/aarch64-unknown-none-elf/debug/${name}.lsm"
+  [ -f "$src" ] && cp "$src" mkfs/dist/modules/aarch64-unknown-none-elf/
+done
 '''
 
 [tasks.build-modules-release-riscv64]
@@ -286,8 +292,11 @@ dependencies = ["build-kernel-release-riscv64"]
 script_runner = "@shell"
 script = '''
 mkdir -p mkfs/dist/modules/riscv64gc-unknown-none-elf
-cp modules/loadable/lsm-test/target/riscv64gc-unknown-none-elf/release/*.lsm mkfs/dist/modules/riscv64gc-unknown-none-elf/ 2>/dev/null || true
-cp modules/loadable/lsm-dep-test/target/riscv64gc-unknown-none-elf/release/*.lsm mkfs/dist/modules/riscv64gc-unknown-none-elf/ 2>/dev/null || true
+for dir in modules/loadable/*/; do
+  name=$(basename "$dir")
+  src="${dir}target/riscv64gc-unknown-none-elf/release/${name}.lsm"
+  [ -f "$src" ] && cp "$src" mkfs/dist/modules/riscv64gc-unknown-none-elf/
+done
 '''
 
 [tasks.build-modules-release-aarch64]
@@ -296,8 +305,11 @@ dependencies = ["build-kernel-release-aarch64"]
 script_runner = "@shell"
 script = '''
 mkdir -p mkfs/dist/modules/aarch64-unknown-none-elf
-cp modules/loadable/lsm-test/target/aarch64-unknown-none-elf/release/*.lsm mkfs/dist/modules/aarch64-unknown-none-elf/ 2>/dev/null || true
-cp modules/loadable/lsm-dep-test/target/aarch64-unknown-none-elf/release/*.lsm mkfs/dist/modules/aarch64-unknown-none-elf/ 2>/dev/null || true
+for dir in modules/loadable/*/; do
+  name=$(basename "$dir")
+  src="${dir}target/aarch64-unknown-none-elf/release/${name}.lsm"
+  [ -f "$src" ] && cp "$src" mkfs/dist/modules/aarch64-unknown-none-elf/
+done
 '''
 
 [tasks.build-userbin-debug-riscv64]
@@ -338,7 +350,7 @@ dependencies = ["build-userbin-debug-aarch64"]
 
 [tasks.clean]
 description = "Clean all build artifacts"
-dependencies = ["clean-kernel", "clean-bsp-riscv64", "clean-bsp-aarch64", "clean-userlib", "clean-userbin", "clean-initramfs", "clean-rootfs", "clean-boot-image-riscv64", "clean-boot-image-aarch64"]
+dependencies = ["clean-kernel", "clean-bsp-riscv64", "clean-bsp-aarch64", "clean-userlib", "clean-userbin", "clean-modules", "clean-initramfs", "clean-rootfs", "clean-boot-image-riscv64", "clean-boot-image-aarch64"]
 
 [tasks.clean-kernel]
 description = "Clean kernel build artifacts"
@@ -369,6 +381,16 @@ description = "Clean user program build artifacts"
 cwd = "user/bin"
 command = "cargo"
 args = ["clean"]
+
+[tasks.clean-modules]
+description = "Clean loadable module build artifacts and dist"
+script_runner = "@shell"
+script = '''
+for dir in modules/loadable/*/; do
+  [ -d "$dir" ] && cargo clean --manifest-path "${dir}Cargo.toml" 2>/dev/null
+done
+rm -rf mkfs/dist/modules
+'''
 
 [tasks.test-riscv64]
 description = "Run tests (RISC-V)"

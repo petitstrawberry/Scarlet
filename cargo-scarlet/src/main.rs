@@ -717,12 +717,8 @@ fn build_loadable_modules(
         return Ok(());
     }
 
-    let project_dir = fs::canonicalize(project).map_err(|e| {
-        format!(
-            "failed to resolve project path {}: {e}",
-            project.display()
-        )
-    })?;
+    let project_dir = fs::canonicalize(project)
+        .map_err(|e| format!("failed to resolve project path {}: {e}", project.display()))?;
 
     let target_json = &config.board.target_json;
 
@@ -737,12 +733,7 @@ fn build_loadable_modules(
         let output_path = module.output.as_deref().map(Path::new);
 
         eprintln!("cargo-scarlet: building loadable module '{name}'");
-        build_loadable_module(
-            &module_path,
-            target_path.to_str(),
-            output_path,
-            release,
-        )?;
+        build_loadable_module(&module_path, target_path.to_str(), output_path, release)?;
     }
 
     Ok(())
