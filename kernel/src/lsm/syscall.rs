@@ -15,6 +15,7 @@ fn map_lsm_error_to_code(err: &LsmError) -> LsmErrorCode {
         LsmError::InvalidElf(_) => LsmErrorCode::InvalidElf,
         LsmError::NoMemory => LsmErrorCode::NoMemory,
         LsmError::Relocation(_) => LsmErrorCode::RelocationError,
+        LsmError::UnresolvedSymbol(_) => LsmErrorCode::UnresolvedSymbol,
         LsmError::NoInitSymbol => LsmErrorCode::NoInit,
         LsmError::InitFailed(_) => LsmErrorCode::InitFailed,
         LsmError::BuildInfoMismatch => LsmErrorCode::BuildInfoMismatch,
@@ -111,6 +112,9 @@ pub fn sys_lsm_load(trapframe: &mut Trapframe) -> usize {
         Err(e) => {
             if let LsmError::MissingDependency(dep) = &e {
                 crate::println!("[LSM] missing dependency: {}", dep);
+            }
+            if let LsmError::UnresolvedSymbol(sym) = &e {
+                crate::println!("[LSM] unresolved symbol: {}", sym);
             }
             map_lsm_error_to_code(&e) as usize
         }

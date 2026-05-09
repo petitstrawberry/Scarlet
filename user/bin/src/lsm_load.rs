@@ -19,10 +19,27 @@ const ELF64_EHDR_SIZE: usize = 64;
 const ELF64_SHDR_SIZE: usize = 64;
 const ELF64_SYM_SIZE: usize = 24;
 
-const LSM_ERROR_MISSING_DEPENDENCY: usize = 10;
-const LSM_ERROR_ARCH_MISMATCH: usize = 11;
 const LSM_LIST_ENTRY_SIZE: usize = 264;
 const LSM_LIST_MAX_MODULES: usize = 128;
+
+fn lsm_error_name(code: usize) -> &'static str {
+    match code {
+        0 => "success",
+        1 => "invalid path",
+        2 => "invalid ELF",
+        3 => "out of memory",
+        4 => "relocation error",
+        5 => "no init symbol",
+        6 => "init failed",
+        7 => "build info mismatch",
+        8 => "not found",
+        9 => "permission denied",
+        10 => "missing dependency",
+        11 => "architecture mismatch",
+        12 => "unresolved symbol",
+        _ => "unknown error",
+    }
+}
 
 const DEFAULT_MODULES_DIR: &str = "/scarlet/system/scarlet/modules";
 
@@ -384,21 +401,12 @@ fn load_module_recursive(
         return Ok(());
     }
 
-    if ret == LSM_ERROR_MISSING_DEPENDENCY {
-        return Err(format!(
-            "failed to load {}: missing dependency (error {})",
-            module_path, ret
-        ));
-    }
-
-    if ret == LSM_ERROR_ARCH_MISMATCH {
-        return Err(format!(
-            "failed to load {}: architecture mismatch",
-            module_path
-        ));
-    }
-
-    Err(format!("failed to load {} (error: {})", module_path, ret))
+    Err(format!(
+        "failed to load {}: {} ({})",
+        module_path,
+        lsm_error_name(ret),
+        ret
+    ))
 }
 
 #[unsafe(no_mangle)]
