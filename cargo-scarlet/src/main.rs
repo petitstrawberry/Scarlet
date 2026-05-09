@@ -80,6 +80,8 @@ struct ScarletConfig {
     kernel: KernelConfig,
     #[serde(rename = "modules", default)]
     modules: BTreeMap<String, ModuleConfig>,
+    #[serde(rename = "loadable_modules", default)]
+    loadable_modules: BTreeMap<String, LoadableModuleConfig>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -129,6 +131,18 @@ struct ModuleConfig {
     default_features: Option<bool>,
 }
 
+#[derive(Debug, Deserialize)]
+struct LoadableModuleConfig {
+    path: String,
+    #[serde(default = "default_true")]
+    enabled: bool,
+    output: Option<String>,
+}
+
+fn default_true() -> bool {
+    true
+}
+
 fn main() -> ExitCode {
     match run() {
         Ok(()) => ExitCode::SUCCESS,
@@ -164,7 +178,8 @@ fn run() -> Result<(), String> {
                 let project = project.ok_or("--project is required when not using --module")?;
                 let config = generate(&project)?;
                 cargo_command(&project, &config, "build", target.clone(), release, &[])?;
-                inject_ksym_section(&project, &config, target.as_deref(), release)
+                inject_ksym_section(&project, &config, target.as_deref(), release)?;
+                build_loadable_modules(&project, &config, release)
             }
         }
         Commands::Clippy {
@@ -691,6 +706,45 @@ fn pathdiff(path: &Path, base: &Path) -> Result<PathBuf, String> {
     }
 
     Ok(result)
+}
+
+fn build_loadable_modules(
+    project: &Path,
+    config: &ScarletConfig,
+    release: bool,
+) -> Result<(), String> {
+    if config.loadable_modules.is_empty() {
+        return Ok(());
+    }
+
+    let project_dir = fs::canonicalize(project).map_err(|e| {
+        format!(
+            "failed to resolve project path {}: {e}",
+            project.display()
+        )
+    })?;
+
+    let target_json = &config.board.target_json;
+
+    for (name, module) in &config.loadable_modules {
+        if !module.enabled {
+            eprintln!("cargo-scarlet: skipping disabled loadable module '{name}'");
+            continue;
+        }
+
+        let module_path = project_dir.join(&module.path);
+        let output_path = module.output.as_deref().map(Path::new);
+
+        eprintln!("cargo-scarlet: building loadable module '{name}'");
+        build_loadable_module(
+            &module_path,
+            Some(target_json),
+            output_path,
+            release,
+        )?;
+    }
+
+    Ok(())
 }
 
 fn build_loadable_module(

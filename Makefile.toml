@@ -191,38 +191,30 @@ description = "Build the kernel (AArch64, debug)"
 dependencies = ["build-kernel-debug-aarch64"]
 
 [tasks.build-kernel-debug-riscv64]
-description = "Build the kernel in debug mode (RISC-V) with LSM symbol table"
+description = "Build the kernel in debug mode (RISC-V) with post-link ksym injection"
 script_runner = "@shell"
 script = '''
-cargo run --manifest-path cargo-scarlet/Cargo.toml -- build --project bsp/riscv64-limine
-touch bsp/riscv64-limine/build.rs
 cargo run --manifest-path cargo-scarlet/Cargo.toml -- build --project bsp/riscv64-limine
 '''
 
 [tasks.build-kernel-debug-aarch64]
-description = "Build the kernel in debug mode (AArch64) with LSM symbol table"
+description = "Build the kernel in debug mode (AArch64) with post-link ksym injection"
 script_runner = "@shell"
 script = '''
-cargo run --manifest-path cargo-scarlet/Cargo.toml -- build --project bsp/aarch64-limine
-touch bsp/aarch64-limine/build.rs
 cargo run --manifest-path cargo-scarlet/Cargo.toml -- build --project bsp/aarch64-limine
 '''
 
 [tasks.build-kernel-release-riscv64]
-description = "Build the kernel in release mode (RISC-V) with LSM symbol table"
+description = "Build the kernel in release mode (RISC-V) with post-link ksym injection"
 script_runner = "@shell"
 script = '''
-cargo run --manifest-path cargo-scarlet/Cargo.toml -- build --project bsp/riscv64-limine --release
-touch bsp/riscv64-limine/build.rs
 cargo run --manifest-path cargo-scarlet/Cargo.toml -- build --project bsp/riscv64-limine --release
 '''
 
 [tasks.build-kernel-release-aarch64]
-description = "Build the kernel in release mode (AArch64) with LSM symbol table"
+description = "Build the kernel in release mode (AArch64) with post-link ksym injection"
 script_runner = "@shell"
 script = '''
-cargo run --manifest-path cargo-scarlet/Cargo.toml -- build --project bsp/aarch64-limine --release
-touch bsp/aarch64-limine/build.rs
 cargo run --manifest-path cargo-scarlet/Cargo.toml -- build --project bsp/aarch64-limine --release
 '''
 
@@ -269,35 +261,43 @@ description = "Build user libraries (AArch64, debug)"
 dependencies = ["build-userlib-debug-aarch64"]
 
 [tasks.build-modules-debug-riscv64]
-description = "Build loadable modules (.lsm) for RISC-V in debug mode"
+description = "Copy loadable modules (.lsm) for RISC-V (built by BSP)"
+dependencies = ["build-kernel-debug-riscv64"]
 script_runner = "@shell"
 script = '''
-cargo run --manifest-path cargo-scarlet/Cargo.toml -- build --module modules/loadable/lsm-test --target kernel/targets/riscv64gc-unknown-none-elf.json --output mkfs/dist/modules/riscv64gc-unknown-none-elf
-cargo run --manifest-path cargo-scarlet/Cargo.toml -- build --module modules/loadable/lsm-dep-test --target kernel/targets/riscv64gc-unknown-none-elf.json --output mkfs/dist/modules/riscv64gc-unknown-none-elf
+mkdir -p mkfs/dist/modules/riscv64gc-unknown-none-elf
+cp modules/loadable/lsm-test/target/riscv64gc-unknown-none-elf/debug/*.lsm mkfs/dist/modules/riscv64gc-unknown-none-elf/ 2>/dev/null || true
+cp modules/loadable/lsm-dep-test/target/riscv64gc-unknown-none-elf/debug/*.lsm mkfs/dist/modules/riscv64gc-unknown-none-elf/ 2>/dev/null || true
 '''
 
 [tasks.build-modules-debug-aarch64]
-description = "Build loadable modules (.lsm) for AArch64 in debug mode"
+description = "Copy loadable modules (.lsm) for AArch64 (built by BSP)"
+dependencies = ["build-kernel-debug-aarch64"]
 script_runner = "@shell"
 script = '''
-cargo run --manifest-path cargo-scarlet/Cargo.toml -- build --module modules/loadable/lsm-test --target kernel/targets/aarch64-unknown-none-elf.json --output mkfs/dist/modules/aarch64-unknown-none-elf
-cargo run --manifest-path cargo-scarlet/Cargo.toml -- build --module modules/loadable/lsm-dep-test --target kernel/targets/aarch64-unknown-none-elf.json --output mkfs/dist/modules/aarch64-unknown-none-elf
+mkdir -p mkfs/dist/modules/aarch64-unknown-none-elf
+cp modules/loadable/lsm-test/target/aarch64-unknown-none-elf/debug/*.lsm mkfs/dist/modules/aarch64-unknown-none-elf/ 2>/dev/null || true
+cp modules/loadable/lsm-dep-test/target/aarch64-unknown-none-elf/debug/*.lsm mkfs/dist/modules/aarch64-unknown-none-elf/ 2>/dev/null || true
 '''
 
 [tasks.build-modules-release-riscv64]
-description = "Build loadable modules (.lsm) for RISC-V in release mode"
+description = "Copy loadable modules (.lsm) for RISC-V (built by BSP)"
+dependencies = ["build-kernel-release-riscv64"]
 script_runner = "@shell"
 script = '''
-cargo run --manifest-path cargo-scarlet/Cargo.toml -- build --release --module modules/loadable/lsm-test --target kernel/targets/riscv64gc-unknown-none-elf.json --output mkfs/dist/modules/riscv64gc-unknown-none-elf
-cargo run --manifest-path cargo-scarlet/Cargo.toml -- build --release --module modules/loadable/lsm-dep-test --target kernel/targets/riscv64gc-unknown-none-elf.json --output mkfs/dist/modules/riscv64gc-unknown-none-elf
+mkdir -p mkfs/dist/modules/riscv64gc-unknown-none-elf
+cp modules/loadable/lsm-test/target/riscv64gc-unknown-none-elf/release/*.lsm mkfs/dist/modules/riscv64gc-unknown-none-elf/ 2>/dev/null || true
+cp modules/loadable/lsm-dep-test/target/riscv64gc-unknown-none-elf/release/*.lsm mkfs/dist/modules/riscv64gc-unknown-none-elf/ 2>/dev/null || true
 '''
 
 [tasks.build-modules-release-aarch64]
-description = "Build loadable modules (.lsm) for AArch64 in release mode"
+description = "Copy loadable modules (.lsm) for AArch64 (built by BSP)"
+dependencies = ["build-kernel-release-aarch64"]
 script_runner = "@shell"
 script = '''
-cargo run --manifest-path cargo-scarlet/Cargo.toml -- build --release --module modules/loadable/lsm-test --target kernel/targets/aarch64-unknown-none-elf.json --output mkfs/dist/modules/aarch64-unknown-none-elf
-cargo run --manifest-path cargo-scarlet/Cargo.toml -- build --release --module modules/loadable/lsm-dep-test --target kernel/targets/aarch64-unknown-none-elf.json --output mkfs/dist/modules/aarch64-unknown-none-elf
+mkdir -p mkfs/dist/modules/aarch64-unknown-none-elf
+cp modules/loadable/lsm-test/target/aarch64-unknown-none-elf/release/*.lsm mkfs/dist/modules/aarch64-unknown-none-elf/ 2>/dev/null || true
+cp modules/loadable/lsm-dep-test/target/aarch64-unknown-none-elf/release/*.lsm mkfs/dist/modules/aarch64-unknown-none-elf/ 2>/dev/null || true
 '''
 
 [tasks.build-userbin-debug-riscv64]
