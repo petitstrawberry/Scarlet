@@ -733,12 +733,13 @@ fn build_loadable_modules(
         }
 
         let module_path = project_dir.join(&module.path);
+        let target_path = project_dir.join(target_json);
         let output_path = module.output.as_deref().map(Path::new);
 
         eprintln!("cargo-scarlet: building loadable module '{name}'");
         build_loadable_module(
             &module_path,
-            Some(target_json),
+            target_path.to_str(),
             output_path,
             release,
         )?;
