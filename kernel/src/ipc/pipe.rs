@@ -562,25 +562,36 @@ impl Selectable for UnidirectionalPipe {
         &self,
         interest: ReadyInterest,
         trapframe: &mut crate::arch::Trapframe,
-        _timeout_ticks: Option<u64>,
+        timeout_ticks: Option<u64>,
+        min_wait_ticks: u64,
     ) -> SelectWaitOutcome {
         use crate::task::mytask;
-        // Prefer read wait if requested; otherwise write wait; except is ignored.
+
         if interest.read && self.endpoint.can_read {
             let should_block = {
                 let st = self.endpoint.data.state.lock();
                 st.buffer.is_empty() && st.writer_count > 0
-            }; // Lock released here
+            };
 
             if should_block {
                 if let Some(task) = mytask() {
-                    // Memory barrier BEFORE wait() to ensure wait() sees correct state
                     core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
 
-                    // CRITICAL: Call wait() without holding any locks
-                    self.endpoint.data.read_waker.wait(task.get_id(), trapframe);
+                    if min_wait_ticks > 0 {
+                        self.endpoint.data.read_waker.wait_with_min_timeout(
+                            task.get_id(),
+                            trapframe,
+                            timeout_ticks,
+                            min_wait_ticks,
+                        );
+                    } else {
+                        self.endpoint.data.read_waker.wait_with_timeout(
+                            task.get_id(),
+                            trapframe,
+                            timeout_ticks,
+                        );
+                    }
 
-                    // Memory barrier AFTER wait() to ensure subsequent operations are visible
                     core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
                 }
             }
@@ -589,20 +600,27 @@ impl Selectable for UnidirectionalPipe {
                 let st = self.endpoint.data.state.lock();
                 let space = st.max_size.saturating_sub(st.buffer.len());
                 space == 0 && st.reader_count > 0
-            }; // Lock released here
+            };
 
             if should_block {
                 if let Some(task) = mytask() {
-                    // Memory barrier BEFORE wait() to ensure wait() sees correct state
                     core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
 
-                    // CRITICAL: Call wait() without holding any locks
-                    self.endpoint
-                        .data
-                        .write_waker
-                        .wait(task.get_id(), trapframe);
+                    if min_wait_ticks > 0 {
+                        self.endpoint.data.write_waker.wait_with_min_timeout(
+                            task.get_id(),
+                            trapframe,
+                            timeout_ticks,
+                            min_wait_ticks,
+                        );
+                    } else {
+                        self.endpoint.data.write_waker.wait_with_timeout(
+                            task.get_id(),
+                            trapframe,
+                            timeout_ticks,
+                        );
+                    }
 
-                    // Memory barrier AFTER wait() to ensure subsequent operations are visible
                     core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
                 }
             }

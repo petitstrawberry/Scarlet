@@ -1,6 +1,6 @@
 # Linux Userspace Artifacts
 
-This document explains how to rebuild the Buildroot-generated root filesystem and optional Linux user-space binaries (`green`, `fbdoom`) that power Scarlet's partial Linux ABI support inside the development container.
+This document explains how to rebuild the Buildroot-generated root filesystem and optional Linux user-space binaries (`green`, `fbdoom`, `kvmtool`) that power Scarlet's partial Linux ABI support inside the development container.
 
 ## Prerequisites
 
@@ -34,11 +34,29 @@ bash tools/linux/build_user_programs.sh
 This script:
 
 - Verifies the presence of the Buildroot cross toolchain (`output/host/bin/riscv64-buildroot-linux-musl-gcc`).
-- Clones or updates the required repositories (`green`, `fbdoom`).
+- Clones or updates the required repositories (`green`, `fbdoom`, `kvmtool` + `dtc`).
 - Builds each project using the Buildroot toolchain.
 - Installs the resulting binaries and any required libraries into `/opt/prebuilt/bin` and `/opt/prebuilt/lib`.
 
 If the toolchain is missing, run `tools/linux/build_buildroot.sh` first.
+
+Note: `kvmtool` (lkvm) is only built for `riscv64`. It is skipped for `aarch64`.
+
+## Building the KVM Guest Image
+
+To create a bootable guest image for nested virtualization via Scarlet's built-in hypervisor:
+
+```bash
+bash tools/linux/build_guest_image.sh
+```
+
+This script:
+
+- Cross-compiles a minimal Linux guest kernel with KVM guest support enabled.
+- Creates a compressed cpio initramfs from the Buildroot rootfs.
+- Places both artifacts in `/opt/prebuilt/bin/` (`guest-Image`, `guest-initramfs.cpio.gz`).
+
+The guest image is deployed alongside other prebuilt binaries by `deploy_rootfs.sh`.
 
 ## Customisation Tips
 
@@ -50,6 +68,7 @@ If the toolchain is missing, run `tools/linux/build_buildroot.sh` first.
 
 1. `bash tools/linux/build_buildroot.sh`
 2. `bash tools/linux/build_user_programs.sh`
+3. (Optional) `bash tools/linux/build_guest_image.sh`
 
 This matches the behaviour previously baked into the Docker image while keeping the image slim.
 

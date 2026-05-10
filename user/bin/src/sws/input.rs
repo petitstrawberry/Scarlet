@@ -119,7 +119,7 @@ impl InputManager {
         })
     }
 
-    /// Read a single input event
+    /// Read a single input event (blocking)
     pub fn read_event(&mut self) -> Result<Option<InputEvent>, &'static str> {
         let mut buffer = [0u8; InputEvent::SIZE];
 
@@ -129,13 +129,29 @@ impl InputManager {
         })?;
 
         if bytes_read != InputEvent::SIZE {
-            return Ok(None); // No complete event available
+            return Ok(None);
         }
 
-        // Parse event
         let event = unsafe { core::ptr::read(buffer.as_ptr() as *const InputEvent) };
-
         Ok(Some(event))
+    }
+
+    /// Try to read a single input event without blocking.
+    /// Returns Ok(Some(event)) if available, Ok(None) if no event pending.
+    pub fn try_read_event(&mut self) -> Result<Option<InputEvent>, &'static str> {
+        let mut buffer = [0u8; InputEvent::SIZE];
+
+        self.mouse_file.set_nonblocking(true);
+        let result = self.mouse_file.read(&mut buffer);
+        self.mouse_file.set_nonblocking(false);
+
+        match result {
+            Ok(bytes_read) if bytes_read == InputEvent::SIZE => {
+                let event = unsafe { core::ptr::read(buffer.as_ptr() as *const InputEvent) };
+                Ok(Some(event))
+            }
+            _ => Ok(None),
+        }
     }
 
     /// Scale tablet coordinates to screen coordinates
@@ -175,69 +191,18 @@ fn input_thread_main(screen_width: u32, screen_height: u32) {
         }
     };
 
-    let mut idle_backoff_ms = 1u64;
-
     loop {
         match input_manager.read_event() {
             Ok(Some(event)) => {
-                idle_backoff_ms = 1;
-                // Convert raw event to compositor event
-                match event.type_ {
-                    event_types::EV_REL => match event.code {
-                        rel_codes::REL_X => {
-                            push_input_event(CompositorInputEvent::MouseMove {
-                                dx: event.value,
-                                dy: 0,
-                            });
-                        }
-                        rel_codes::REL_Y => {
-                            push_input_event(CompositorInputEvent::MouseMove {
-                                dx: 0,
-                                dy: event.value,
-                            });
-                        }
-                        _ => {}
-                    },
-                    event_types::EV_ABS => match event.code {
-                        abs_codes::ABS_X => {
-                            input_manager.abs_x = Some(event.value);
-                            if let (Some(x), Some(y)) = (input_manager.abs_x, input_manager.abs_y) {
-                                let screen_x = input_manager.scale_tablet_coord(x, screen_width);
-                                let screen_y = input_manager.scale_tablet_coord(y, screen_height);
-                                push_input_event(CompositorInputEvent::MouseAbsolute {
-                                    x: screen_x,
-                                    y: screen_y,
-                                });
-                            }
-                        }
-                        abs_codes::ABS_Y => {
-                            input_manager.abs_y = Some(event.value);
-                            if let (Some(x), Some(y)) = (input_manager.abs_x, input_manager.abs_y) {
-                                let screen_x = input_manager.scale_tablet_coord(x, screen_width);
-                                let screen_y = input_manager.scale_tablet_coord(y, screen_height);
-                                push_input_event(CompositorInputEvent::MouseAbsolute {
-                                    x: screen_x,
-                                    y: screen_y,
-                                });
-                            }
-                        }
-                        _ => {}
-                    },
-                    event_types::EV_KEY => {
-                        let pressed = event.value == 1;
-                        push_input_event(CompositorInputEvent::MouseButton {
-                            button: event.code,
-                            pressed,
-                        });
-                    }
-                    _ => {}
+                process_mouse_event(&mut input_manager, event, screen_width, screen_height);
+
+                while let Ok(Some(event)) = input_manager.try_read_event() {
+                    process_mouse_event(&mut input_manager, event, screen_width, screen_height);
                 }
+
+                thread::sleep(core::time::Duration::from_millis(16));
             }
-            Ok(None) => {
-                // No event, back off to avoid a tight busy loop
-                thread::sleep(core::time::Duration::from_millis(idle_backoff_ms));
-                idle_backoff_ms = (idle_backoff_ms * 2).min(8);
-            }
+            Ok(None) => {}
             Err(e) => {
                 println!("[InputThread] Error reading event: {}", e);
                 break;
@@ -246,6 +211,64 @@ fn input_thread_main(screen_width: u32, screen_height: u32) {
     }
 
     println!("[InputThread] Exited");
+}
+
+fn process_mouse_event(
+    input_manager: &mut InputManager,
+    event: InputEvent,
+    screen_width: u32,
+    screen_height: u32,
+) {
+    match event.type_ {
+        event_types::EV_REL => match event.code {
+            rel_codes::REL_X => {
+                push_input_event(CompositorInputEvent::MouseMove {
+                    dx: event.value,
+                    dy: 0,
+                });
+            }
+            rel_codes::REL_Y => {
+                push_input_event(CompositorInputEvent::MouseMove {
+                    dx: 0,
+                    dy: event.value,
+                });
+            }
+            _ => {}
+        },
+        event_types::EV_ABS => match event.code {
+            abs_codes::ABS_X => {
+                input_manager.abs_x = Some(event.value);
+                if let (Some(x), Some(y)) = (input_manager.abs_x, input_manager.abs_y) {
+                    let screen_x = input_manager.scale_tablet_coord(x, screen_width);
+                    let screen_y = input_manager.scale_tablet_coord(y, screen_height);
+                    push_input_event(CompositorInputEvent::MouseAbsolute {
+                        x: screen_x,
+                        y: screen_y,
+                    });
+                }
+            }
+            abs_codes::ABS_Y => {
+                input_manager.abs_y = Some(event.value);
+                if let (Some(x), Some(y)) = (input_manager.abs_x, input_manager.abs_y) {
+                    let screen_x = input_manager.scale_tablet_coord(x, screen_width);
+                    let screen_y = input_manager.scale_tablet_coord(y, screen_height);
+                    push_input_event(CompositorInputEvent::MouseAbsolute {
+                        x: screen_x,
+                        y: screen_y,
+                    });
+                }
+            }
+            _ => {}
+        },
+        event_types::EV_KEY => {
+            let pressed = event.value == 1;
+            push_input_event(CompositorInputEvent::MouseButton {
+                button: event.code,
+                pressed,
+            });
+        }
+        _ => {}
+    }
 }
 
 /// Keyboard thread main function
@@ -266,16 +289,14 @@ fn keyboard_thread_main() {
         match keyboard_file.read(&mut buffer) {
             Ok(bytes_read) => {
                 if bytes_read != InputEvent::SIZE {
-                    continue; // No complete event available
+                    continue;
                 }
 
-                // Parse event
                 let event = unsafe { core::ptr::read(buffer.as_ptr() as *const InputEvent) };
 
-                // Process keyboard events
                 match event.type_ {
                     event_types::EV_KEY => {
-                        let pressed = event.value == 1 || event.value == 2; // 2 = key repeat
+                        let pressed = event.value == 1 || event.value == 2;
                         push_input_event(CompositorInputEvent::Keyboard {
                             code: event.code,
                             pressed,
@@ -283,6 +304,27 @@ fn keyboard_thread_main() {
                     }
                     _ => {}
                 }
+
+                keyboard_file.set_nonblocking(true);
+                loop {
+                    let mut buf = [0u8; InputEvent::SIZE];
+                    match keyboard_file.read(&mut buf) {
+                        Ok(n) if n == InputEvent::SIZE => {
+                            let ev = unsafe { core::ptr::read(buf.as_ptr() as *const InputEvent) };
+                            if ev.type_ == event_types::EV_KEY {
+                                let pressed = ev.value == 1 || ev.value == 2;
+                                push_input_event(CompositorInputEvent::Keyboard {
+                                    code: ev.code,
+                                    pressed,
+                                });
+                            }
+                        }
+                        _ => break,
+                    }
+                }
+                keyboard_file.set_nonblocking(false);
+
+                thread::sleep(core::time::Duration::from_millis(16));
             }
             Err(e) => {
                 println!("[KeyboardThread] Error reading event: {:?}", e);

@@ -254,6 +254,7 @@ impl Selectable for EventDevice {
         interest: ReadyInterest,
         trapframe: &mut Trapframe,
         timeout_ticks: Option<u64>,
+        _min_wait_ticks: u64,
     ) -> SelectWaitOutcome {
         // Only support read interest
         if !interest.read {
@@ -297,7 +298,18 @@ impl Selectable for EventDevice {
 }
 
 // Implement required trait bounds for Device
-impl ControlOps for EventDevice {}
+impl ControlOps for EventDevice {
+    fn control(&self, command: u32, arg: usize) -> Result<i32, &'static str> {
+        const SCTL_SET_NONBLOCKING: u32 = 0x5353_0007;
+        match command {
+            SCTL_SET_NONBLOCKING => {
+                self.set_nonblocking(arg != 0);
+                Ok(0)
+            }
+            _ => Err("Control operation not supported"),
+        }
+    }
+}
 impl MemoryMappingOps for EventDevice {
     fn get_mapping_info(
         &self,

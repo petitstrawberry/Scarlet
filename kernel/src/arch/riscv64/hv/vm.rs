@@ -24,6 +24,7 @@ use crate::hypervisor::vm::{ScarletVmMemoryRegion, VmId, VmObject, vm_ctl};
 use crate::library::std::print;
 use crate::object::capability::ControlOps;
 use crate::task::mytask;
+use crate::vm::manager::VirtualMemoryManager;
 use crate::vm::{get_guest_trapvector_trampoline, get_trampoline_trap_vector};
 use crate::{hypervisor, print};
 
@@ -56,7 +57,7 @@ fn best_stage2_page_level(slot: &MemorySlot, gpa: u64, hpa: u64) -> usize {
         if gpa_base < slot.guest_phys_addr {
             continue;
         }
-        if hpa_base < slot.host_phys_addr {
+        if hpa_base < slot.userspace_addr {
             continue;
         }
         let Some(page_end) = gpa_base.checked_add(page_size) else {
@@ -68,7 +69,7 @@ fn best_stage2_page_level(slot: &MemorySlot, gpa: u64, hpa: u64) -> usize {
         let Some(host_page_end) = hpa_base.checked_add(page_size) else {
             continue;
         };
-        let Some(host_slot_end) = slot.host_phys_addr.checked_add(slot.memory_size) else {
+        let Some(host_slot_end) = slot.userspace_addr.checked_add(slot.memory_size) else {
             continue;
         };
         if page_end <= slot_end && host_page_end <= host_slot_end {
@@ -246,6 +247,9 @@ impl VcpuObject for Riscv64VcpuObject {
         self.inject_pending_interrupts();
 
         self.setup_for_guest(task, &mut vcpu.guest, &vm);
+        // SAFETY: arch_run_guest_loop switches to guest mode and back;
+        // it restores host state before returning. guest_tf is a stack-
+        // allocated Trapframe that survives the guest entry/exit cycle.
         unsafe { arch_run_guest_loop(&mut guest_tf, &vcpu.guest, arch) };
 
         loop {
@@ -263,6 +267,7 @@ impl VcpuObject for Riscv64VcpuObject {
                 None => {
                     vcpu.guest.save(&guest_tf);
                     self.setup_for_guest(task, &mut vcpu.guest, &vm);
+                    // SAFETY: same as the initial arch_run_guest_loop call above.
                     unsafe { arch_run_guest_loop(&mut guest_tf, &vcpu.guest, arch) };
                 }
             }
@@ -282,6 +287,10 @@ pub type Vm = Riscv64VmObject;
 
 pub struct Riscv64VmObject {
     id: VmId,
+    /// Owner address space captured from the creating task. Immutable after
+    /// construction — stored outside the mutex so `owner_mm()` can return
+    /// a reference without locking.
+    owner_mm: VirtualMemoryManager,
     state: Mutex<VmInternalState>,
 }
 
@@ -293,12 +302,13 @@ impl Drop for Riscv64VmObject {
 }
 
 impl Riscv64VmObject {
-    pub fn new(id: VmId) -> Result<Self, &'static str> {
+    pub fn new(id: VmId, owner_mm: VirtualMemoryManager) -> Result<Self, &'static str> {
         let vmid = alloc_vmid();
         init_stage2(vmid)?;
 
         Ok(Self {
             id,
+            owner_mm,
             state: Mutex::new(VmInternalState {
                 vcpus: Vec::new(),
                 memory_slots: MemorySlotManager::new(),
@@ -307,6 +317,10 @@ impl Riscv64VmObject {
                 riscv_state: RiscvVmState::new(),
             }),
         })
+    }
+
+    pub fn owner_mm(&self) -> &VirtualMemoryManager {
+        &self.owner_mm
     }
 
     pub fn id(&self) -> VmId {
@@ -324,6 +338,8 @@ impl Riscv64VmObject {
     pub fn map_stage2_page(&self, gpa: u64, hpa: u64, writable: bool) -> Result<(), &'static str> {
         let state = self.state.lock();
         let root = get_stage2_root(state.vmid).ok_or("No Stage2 root")?;
+        // SAFETY: get_stage2_root returns a valid raw pointer to a page table
+        // root owned by the hypervisor MMU subsystem for this vmid.
         let root = unsafe { &mut *root };
         let level = state
             .memory_slots
@@ -345,6 +361,7 @@ impl Riscv64VmObject {
     pub fn set_guest_root_pagetable(&self) {
         let state = self.state.lock();
         if let Some(root) = get_stage2_root(state.vmid) {
+            // SAFETY: same as map_stage2_page — root is a valid stage2 page table pointer.
             let root = unsafe { &*root };
             set_guest_root_stage2(root, state.vmid);
         }
@@ -353,6 +370,7 @@ impl Riscv64VmObject {
     pub fn verify_guest_root_pagetable(&self) {
         let state = self.state.lock();
         if let Some(root) = get_stage2_root(state.vmid) {
+            // SAFETY: same as map_stage2_page — root is a valid stage2 page table pointer.
             let root = unsafe { &*root };
             verify_hgatp_stage2(root, state.vmid);
         }
@@ -379,16 +397,11 @@ impl Riscv64VmObject {
         host_vaddr: u64,
         flags: MemorySlotFlags,
     ) -> Result<(), &'static str> {
-        let task = mytask().ok_or("No current task")?;
-        let host_paddr = task
-            .vm_manager
-            .translate_to_kva(host_vaddr as usize)
-            .ok_or("Failed to translate host_vaddr")? as u64;
         self.state.lock().memory_slots.set_slot(MemorySlot {
             slot_id,
             guest_phys_addr,
             memory_size,
-            host_phys_addr: host_paddr,
+            userspace_addr: host_vaddr,
             flags,
         })
     }
@@ -397,6 +410,10 @@ impl Riscv64VmObject {
 impl VmObject for Riscv64VmObject {
     fn id(&self) -> VmId {
         self.id
+    }
+
+    fn owner_mm(&self) -> &VirtualMemoryManager {
+        &self.owner_mm
     }
 
     fn create_vcpu(self: &Arc<Self>, vcpu_id: VcpuId) -> Result<Arc<dyn VcpuObject>, &'static str> {
@@ -418,10 +435,16 @@ impl VmObject for Riscv64VmObject {
         slot_id: u32,
         guest_phys_addr: u64,
         memory_size: u64,
-        host_phys_addr: u64,
+        host_userspace_addr: u64,
         flags: MemorySlotFlags,
     ) -> Result<(), &'static str> {
-        self.set_memory_region_impl(slot_id, guest_phys_addr, memory_size, host_phys_addr, flags)
+        self.set_memory_region_impl(
+            slot_id,
+            guest_phys_addr,
+            memory_size,
+            host_userspace_addr,
+            flags,
+        )
     }
 }
 
@@ -429,11 +452,12 @@ impl ControlOps for Riscv64VmObject {
     fn control(&self, command: u32, arg: usize) -> Result<i32, &'static str> {
         match command {
             vm_ctl::SET_MEMORY_REGION => {
-                let task = mytask().ok_or("No current task")?;
-                let target_ptr = task
-                    .vm_manager
+                let target_ptr = self
+                    .owner_mm
                     .translate_to_kva(arg)
                     .ok_or("Invalid user pointer")?;
+                // SAFETY: caller guarantees arg points to a valid ScarletVmMemoryRegion
+                // in the VM's owner address space.
                 let region = unsafe { core::ptr::read(target_ptr as *const ScarletVmMemoryRegion) };
                 let flags = MemorySlotFlags {
                     readonly: (region.flags & 1) != 0,
@@ -529,6 +553,8 @@ impl ControlOps for Riscv64VcpuObject {
             }
             vcpu_ctl::SET_ONE_REG => {
                 let target_ptr = translate_user_ptr(arg)?;
+                // SAFETY: translate_user_ptr validated the address; caller
+                // guarantees it points to a valid VcpuOneReg.
                 let one_reg = unsafe { core::ptr::read(target_ptr as *const VcpuOneReg) };
                 self.set_reg(one_reg.index, one_reg.value)?;
                 Ok(0)

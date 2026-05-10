@@ -8,6 +8,15 @@ use crate::vm::vmem::MemoryArea;
 
 const MAX_ORDER: usize = 22;
 const MAX_REGIONS: usize = 16;
+const MAX_TRACKED_ALIGNED_ALLOCATIONS: usize = 64;
+
+#[derive(Clone, Copy)]
+struct TrackedAlignedAllocation {
+    returned_paddr: usize,
+    base_paddr: usize,
+    backing_pages: usize,
+    requested_pages: usize,
+}
 
 struct ListHead {
     next: *mut ListHead,
@@ -447,6 +456,8 @@ fn adjust_metadata_ptr(
 
 struct PmmInner {
     regions: [BuddyRegion; MAX_REGIONS],
+    tracked_aligned_allocations:
+        [Option<TrackedAlignedAllocation>; MAX_TRACKED_ALIGNED_ALLOCATIONS],
 }
 
 impl PmmInner {
@@ -470,7 +481,44 @@ impl PmmInner {
                 BuddyRegion::new(),
                 BuddyRegion::new(),
             ],
+            tracked_aligned_allocations: [None; MAX_TRACKED_ALIGNED_ALLOCATIONS],
         }
+    }
+
+    fn track_aligned_allocation(
+        &mut self,
+        returned_paddr: usize,
+        base_paddr: usize,
+        backing_pages: usize,
+        requested_pages: usize,
+    ) -> Result<(), &'static str> {
+        for slot in &mut self.tracked_aligned_allocations {
+            if slot.is_none() {
+                *slot = Some(TrackedAlignedAllocation {
+                    returned_paddr,
+                    base_paddr,
+                    backing_pages,
+                    requested_pages,
+                });
+                return Ok(());
+            }
+        }
+        Err("Too many tracked aligned PMM allocations")
+    }
+
+    fn take_tracked_aligned_allocation(
+        &mut self,
+        returned_paddr: usize,
+    ) -> Option<TrackedAlignedAllocation> {
+        for slot in &mut self.tracked_aligned_allocations {
+            if slot
+                .as_ref()
+                .is_some_and(|allocation| allocation.returned_paddr == returned_paddr)
+            {
+                return slot.take();
+            }
+        }
+        None
     }
 
     fn add_region(&mut self, start: usize, size: usize) -> Result<(), &'static str> {
@@ -508,6 +556,17 @@ impl PmmInner {
     }
 
     fn free(&mut self, paddr: usize, pages: usize) {
+        if let Some(allocation) = self.take_tracked_aligned_allocation(paddr) {
+            debug_assert_eq!(allocation.requested_pages, pages);
+            for region in &mut self.regions {
+                if region.contains(allocation.base_paddr) {
+                    region.free(allocation.base_paddr, allocation.backing_pages);
+                    return;
+                }
+            }
+            return;
+        }
+
         for region in &mut self.regions {
             if region.contains(paddr) {
                 region.free(paddr, pages);
@@ -583,15 +642,46 @@ pub fn alloc_contiguous_pages_aligned(pages: usize, align_pages: usize) -> Optio
         return alloc_contiguous_pages(pages);
     }
 
-    let order = if align_pages.is_power_of_two() {
-        align_pages.trailing_zeros() as usize
+    let effective_align_pages = if align_pages.is_power_of_two() {
+        align_pages
     } else {
-        align_pages.next_power_of_two().trailing_zeros() as usize
+        align_pages.next_power_of_two()
     };
+
+    let order = effective_align_pages.trailing_zeros() as usize;
 
     let needed_order = order.max(pages.next_power_of_two().trailing_zeros() as usize);
 
-    PMM.lock().alloc_from_order(needed_order)
+    let align_bytes = effective_align_pages * PAGE_SIZE;
+    let backing_order = if needed_order < MAX_ORDER {
+        needed_order + 1
+    } else {
+        needed_order
+    };
+
+    let backing_pages = 1usize << backing_order;
+    let base_paddr = PMM.lock().alloc_from_order(backing_order)?;
+    let returned_paddr = align_up(base_paddr, align_bytes);
+
+    if returned_paddr + pages * PAGE_SIZE > base_paddr + backing_pages * PAGE_SIZE {
+        PMM.lock().free(base_paddr, backing_pages);
+        return None;
+    }
+
+    if returned_paddr == base_paddr && backing_order == needed_order {
+        return Some(returned_paddr);
+    }
+
+    let mut pmm = PMM.lock();
+    if pmm
+        .track_aligned_allocation(returned_paddr, base_paddr, backing_pages, pages)
+        .is_err()
+    {
+        pmm.free(base_paddr, backing_pages);
+        return None;
+    }
+
+    Some(returned_paddr)
 }
 
 /// Allocate individual pages (may be non-contiguous).
@@ -683,5 +773,18 @@ mod tests {
         // Free allocations
         free_frame(frame);
         free_contiguous_pages(addr, 4);
+    }
+
+    #[test_case]
+    fn test_alloc_free_aligned_pages() {
+        let (_, free_before) = stats();
+
+        let addr = alloc_contiguous_pages_aligned(4, 4).expect("aligned allocation failed");
+        assert_eq!(addr % (4 * PAGE_SIZE), 0);
+
+        free_contiguous_pages(addr, 4);
+
+        let (_, free_after) = stats();
+        assert_eq!(free_after, free_before);
     }
 }

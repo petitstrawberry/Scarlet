@@ -283,6 +283,7 @@ impl Selectable for GenericCharDevice {
         _interest: ReadyInterest,
         _trapframe: &mut crate::arch::Trapframe,
         _timeout_ticks: Option<u64>,
+        _min_wait_ticks: u64,
     ) -> SelectWaitOutcome {
         SelectWaitOutcome::Ready
     }

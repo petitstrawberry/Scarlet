@@ -821,13 +821,17 @@ impl crate::object::capability::selectable::Selectable for DevFileObject {
         interest: crate::object::capability::selectable::ReadyInterest,
         trapframe: &mut crate::arch::Trapframe,
         timeout_ticks: Option<u64>,
+        min_wait_ticks: u64,
     ) -> crate::object::capability::selectable::SelectWaitOutcome {
         if let Some(ref device_guard) = self.device_guard {
-            return device_guard
-                .as_ref()
-                .wait_until_ready(interest, trapframe, timeout_ticks);
+            return device_guard.as_ref().wait_until_ready(
+                interest,
+                trapframe,
+                timeout_ticks,
+                min_wait_ticks,
+            );
         }
-        let _ = (interest, trapframe, timeout_ticks);
+        let _ = (interest, trapframe, timeout_ticks, min_wait_ticks);
         crate::object::capability::selectable::SelectWaitOutcome::Ready
     }
 
@@ -1013,6 +1017,7 @@ impl crate::object::capability::selectable::Selectable for DevDirectoryObject {
         _interest: crate::object::capability::selectable::ReadyInterest,
         _trapframe: &mut crate::arch::Trapframe,
         _timeout_ticks: Option<u64>,
+        _min_wait_ticks: u64,
     ) -> crate::object::capability::selectable::SelectWaitOutcome {
         crate::object::capability::selectable::SelectWaitOutcome::Ready
     }

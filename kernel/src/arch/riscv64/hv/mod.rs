@@ -23,10 +23,11 @@ use crate::{
         write_vsscratch, write_vstval, write_vstvec,
     },
     hypervisor::vm::VmId,
+    vm::manager::VirtualMemoryManager,
 };
 
-pub fn create_vm(id: VmId) -> Result<Arc<Vm>, &'static str> {
-    Ok(Arc::new(Riscv64VmObject::new(id)?))
+pub fn create_vm(id: VmId, owner_mm: VirtualMemoryManager) -> Result<Arc<Vm>, &'static str> {
+    Ok(Arc::new(Riscv64VmObject::new(id, owner_mm)?))
 }
 
 pub fn arch_init_hv() {

@@ -83,6 +83,8 @@ pub mod reg {
     pub const STVEC: u32 = 37;
     pub const SATP: u32 = 38;
     pub const SSCRATCH: u32 = 39;
+    pub const SIE: u32 = 40;
+    pub const SIP: u32 = 41;
 
     // FPU registers (f0-f31)
     pub const F0: u32 = 64;

@@ -22,6 +22,74 @@ use super::errno;
 
 static XORSHIFT_STATE: AtomicU64 = AtomicU64::new(0);
 
+/// Copy bytes from a kernel buffer into a userspace virtual address range,
+/// resolving each page independently via `translate_to_kva`.
+///
+/// Returns the number of bytes actually copied.
+fn copy_to_user_pagewise(
+    dst_user_vaddr: usize,
+    src: &[u8],
+    vm_manager: &crate::vm::manager::VirtualMemoryManager,
+) -> usize {
+    let src_len = src.len();
+    if src_len == 0 {
+        return 0;
+    }
+    let mut copied = 0usize;
+    let mut cur_user = dst_user_vaddr;
+    while copied < src_len {
+        let page_off = cur_user & (crate::environment::PAGE_SIZE - 1);
+        let chunk = core::cmp::min(crate::environment::PAGE_SIZE - page_off, src_len - copied);
+        match vm_manager.translate_to_kva(cur_user) {
+            Some(kva) => unsafe {
+                core::ptr::copy_nonoverlapping(
+                    src.as_ptr().wrapping_add(copied),
+                    kva as *mut u8,
+                    chunk,
+                );
+            },
+            None => break,
+        }
+        copied += chunk;
+        cur_user += chunk;
+    }
+    copied
+}
+
+/// Copy bytes from a userspace virtual address range into a kernel buffer,
+/// resolving each page independently via `translate_to_kva`.
+///
+/// Returns the number of bytes actually copied.
+fn copy_from_user_pagewise(
+    dst: &mut [u8],
+    src_user_vaddr: usize,
+    vm_manager: &crate::vm::manager::VirtualMemoryManager,
+) -> usize {
+    let dst_len = dst.len();
+    if dst_len == 0 {
+        return 0;
+    }
+    let mut copied = 0usize;
+    let mut cur_user = src_user_vaddr;
+    while copied < dst_len {
+        let page_off = cur_user & (crate::environment::PAGE_SIZE - 1);
+        let chunk = core::cmp::min(crate::environment::PAGE_SIZE - page_off, dst_len - copied);
+        match vm_manager.translate_to_kva(cur_user) {
+            Some(kva) => unsafe {
+                core::ptr::copy_nonoverlapping(
+                    kva as *const u8,
+                    dst.as_mut_ptr().wrapping_add(copied),
+                    chunk,
+                );
+            },
+            None => break,
+        }
+        copied += chunk;
+        cur_user += chunk;
+    }
+    copied
+}
+
 fn remap_shm_path(path: &str) -> String {
     if let Some(rest) = path.strip_prefix("/dev/shm/") {
         alloc::format!("/tmp/{}", rest)
@@ -793,10 +861,7 @@ pub fn sys_close(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize 
 pub fn sys_read(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
     let fd = trapframe.get_arg(0) as usize;
-    let buf_ptr = task
-        .vm_manager
-        .translate_to_kva(trapframe.get_arg(1))
-        .unwrap() as *mut u8;
+    let user_buf = trapframe.get_arg(1);
     let count = trapframe.get_arg(2) as usize;
 
     // Get handle from Linux fd
@@ -804,7 +869,7 @@ pub fn sys_read(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
         Some(h) => h,
         None => {
             trapframe.increment_pc_next(task);
-            return usize::MAX; // Invalid file descriptor
+            return usize::MAX;
         }
     };
 
@@ -812,7 +877,7 @@ pub fn sys_read(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
         Some(obj) => obj,
         None => {
             trapframe.increment_pc_next(task);
-            return usize::MAX; // Invalid file descriptor
+            return usize::MAX;
         }
     };
 
@@ -837,130 +902,188 @@ pub fn sys_read(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
         Some(stream) => stream,
         None => {
             trapframe.increment_pc_next(task);
-            return usize::MAX; // Not a stream object
+            return usize::MAX;
         }
     };
 
     if is_directory {
-        // // For directories, we need a larger buffer to read DirectoryEntry, then convert to Dirent
-        // let directory_entry_size = core::mem::size_of::<DirectoryEntry>();
-        // let mut temp_buffer = vec![0u8; directory_entry_size];
-
-        // match stream.read(&mut temp_buffer) {
-        //     Ok(n) => {
-        //         trapframe.increment_pc_next(task); // Increment PC to avoid infinite loop
-        //         if n > 0 && n >= directory_entry_size {
-        //             // Convert DirectoryEntry to Linux Dirent
-        //             let converted_bytes = read_directory_as_Linux_dirent(buf_ptr, count, &temp_buffer[..n]);
-        //             if converted_bytes > 0 {
-        //                 return converted_bytes; // Return converted Linux dirent size
-        //             }
-        //         }
-        //         0 // EOF or no valid directory entry
-        //     },
-        //     Err(e) => {
-        //         match e {
-        //             StreamError::EndOfStream => {
-        //                 trapframe.increment_pc_next(task); // Increment PC to avoid infinite loop
-        //                 0 // EOF
-        //             },
-        //             StreamError::WouldBlock => {
-        //                 // If the stream would block, we need to set the trapframe's EPC
-        //                 // trapframe.epc = epc;
-        //                 // task.vcpu.store(trapframe); // Store the trapframe in the task's vcpu
-        //                 get_scheduler().schedule(trapframe); // Yield to the scheduler
-        //             },
-        //             _ => {
-        //                 trapframe.increment_pc_next(task);
-        //                 usize::MAX // Other errors
-        //             }
-        //         }
-        //     }
-        // }
         trapframe.increment_pc_next(task);
-        return usize::MAX; // Directory reading not implemented yet
-    } else {
-        // For regular files, use the user-provided buffer directly
-        let mut buffer = unsafe { core::slice::from_raw_parts_mut(buf_ptr, count) };
+        return usize::MAX;
+    }
 
+    // Fast path: buffer fits within a single page
+    let page_offset = user_buf & (crate::environment::PAGE_SIZE - 1);
+    if page_offset + count <= crate::environment::PAGE_SIZE {
+        let buf_ptr = match task.vm_manager.translate_to_kva(user_buf) {
+            Some(kva) => kva as *mut u8,
+            None => {
+                trapframe.increment_pc_next(task);
+                return usize::MAX;
+            }
+        };
+        let mut buffer = unsafe { core::slice::from_raw_parts_mut(buf_ptr, count) };
         match stream.read(&mut buffer) {
             Ok(n) => {
-                trapframe.increment_pc_next(task); // Increment PC to avoid infinite loop
+                trapframe.increment_pc_next(task);
                 n
-            } // Return original read size for regular files
+            }
             Err(e) => {
+                trapframe.increment_pc_next(task);
                 match e {
-                    StreamError::EndOfStream => {
-                        trapframe.increment_pc_next(task); // Increment PC to avoid infinite loop
-                        0 // EOF
-                    }
+                    StreamError::EndOfStream => 0,
                     StreamError::WouldBlock => {
                         if nonblocking {
-                            trapframe.increment_pc_next(task);
                             return errno::to_result(errno::EAGAIN);
                         } else {
-                            get_scheduler().schedule(trapframe); // Yield to the scheduler
-                            usize::MAX // Unreachable, but needed to satisfy return type
+                            get_scheduler().schedule(trapframe);
+                            usize::MAX
                         }
                     }
-                    _ => {
-                        // Other errors, return -1
-                        trapframe.increment_pc_next(task); // Increment PC to avoid infinite loop
-                        usize::MAX
-                    }
+                    _ => usize::MAX,
                 }
             }
         }
+    } else {
+        // Multi-page path: read in PAGE_SIZE chunks via kernel stack buffer
+        let mut page_buf = [0u8; crate::environment::PAGE_SIZE];
+        let mut total_read = 0usize;
+        let mut remaining = count;
+        let mut cur_user = user_buf;
+
+        while remaining > 0 {
+            let page_off = cur_user & (crate::environment::PAGE_SIZE - 1);
+            let chunk_size = core::cmp::min(crate::environment::PAGE_SIZE - page_off, remaining);
+            let mut chunk_buf = &mut page_buf[..chunk_size];
+
+            let n = match stream.read(&mut chunk_buf) {
+                Ok(n) => n,
+                Err(StreamError::EndOfStream) => break,
+                Err(StreamError::WouldBlock) => {
+                    if nonblocking {
+                        if total_read > 0 {
+                            break;
+                        }
+                        trapframe.increment_pc_next(task);
+                        return errno::to_result(errno::EAGAIN);
+                    } else {
+                        break;
+                    }
+                }
+                Err(_) => {
+                    if total_read == 0 {
+                        trapframe.increment_pc_next(task);
+                        return usize::MAX;
+                    }
+                    break;
+                }
+            };
+
+            if n == 0 {
+                break;
+            }
+
+            let copied = copy_to_user_pagewise(cur_user, &page_buf[..n], &task.vm_manager);
+            if copied != n {
+                break;
+            }
+
+            total_read += n;
+            remaining -= n;
+            cur_user += n;
+        }
+
+        trapframe.increment_pc_next(task);
+        total_read
     }
 }
 
 pub fn sys_write(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
     let fd = trapframe.get_arg(0) as usize;
-    let buf_ptr = task
-        .vm_manager
-        .translate_to_kva(trapframe.get_arg(1))
-        .unwrap() as *const u8;
+    let user_buf = trapframe.get_arg(1);
     let count = trapframe.get_arg(2) as usize;
 
-    // Increment PC to avoid infinite loop if write fails
     trapframe.increment_pc_next(task);
 
-    // Get handle from Linux fd
     let handle = match abi.get_handle(fd) {
         Some(h) => h,
-        None => return usize::MAX, // Invalid file descriptor
+        None => return usize::MAX,
     };
 
     let kernel_obj = match task.handle_table.get(handle) {
         Some(obj) => obj,
-        None => return usize::MAX, // Invalid file descriptor
+        None => return usize::MAX,
     };
 
     let stream = match kernel_obj.as_stream() {
         Some(stream) => stream,
-        None => return usize::MAX, // Not a stream object
+        None => return usize::MAX,
     };
 
-    // Determine non-blocking mode
     let nonblocking = abi
         .get_file_status_flags(fd)
         .map(|f| ((f as i32) & O_NONBLOCK) != 0)
         .unwrap_or(false);
 
-    let buffer = unsafe { core::slice::from_raw_parts(buf_ptr, count) };
-
-    match stream.write(buffer) {
-        Ok(n) => n,
-        Err(StreamError::WouldBlock) => {
-            if nonblocking {
-                return errno::to_result(errno::EAGAIN);
-            } else {
-                get_scheduler().schedule(trapframe);
-                usize::MAX
+    // Fast path: buffer fits within a single page
+    let page_offset = user_buf & (crate::environment::PAGE_SIZE - 1);
+    if page_offset + count <= crate::environment::PAGE_SIZE {
+        let buf_ptr = match task.vm_manager.translate_to_kva(user_buf) {
+            Some(kva) => kva as *const u8,
+            None => return usize::MAX,
+        };
+        let buffer = unsafe { core::slice::from_raw_parts(buf_ptr, count) };
+        match stream.write(buffer) {
+            Ok(n) => n,
+            Err(StreamError::WouldBlock) => {
+                if nonblocking {
+                    return errno::to_result(errno::EAGAIN);
+                } else {
+                    get_scheduler().schedule(trapframe);
+                    usize::MAX
+                }
             }
+            Err(_) => usize::MAX,
         }
-        Err(_) => usize::MAX, // Write error
+    } else {
+        // Multi-page path: copy from userspace page-by-page into kernel buffer
+        let mut page_buf = [0u8; crate::environment::PAGE_SIZE];
+        let mut total_written = 0usize;
+        let mut remaining = count;
+        let mut cur_user = user_buf;
+
+        while remaining > 0 {
+            let page_off = cur_user & (crate::environment::PAGE_SIZE - 1);
+            let chunk_size = core::cmp::min(crate::environment::PAGE_SIZE - page_off, remaining);
+
+            let copied =
+                copy_from_user_pagewise(&mut page_buf[..chunk_size], cur_user, &task.vm_manager);
+            if copied != chunk_size {
+                break;
+            }
+
+            let n = match stream.write(&page_buf[..chunk_size]) {
+                Ok(n) => n,
+                Err(StreamError::WouldBlock) => {
+                    if nonblocking && total_written == 0 {
+                        return errno::to_result(errno::EAGAIN);
+                    }
+                    break;
+                }
+                Err(_) => {
+                    if total_written == 0 {
+                        return usize::MAX;
+                    }
+                    break;
+                }
+            };
+
+            total_written += n;
+            remaining -= n;
+            cur_user += n;
+        }
+
+        total_written
     }
 }
 
@@ -2015,14 +2138,16 @@ pub fn sys_ioctl(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize 
     #[cfg(feature = "hypervisor")]
     match &kernel_object {
         crate::object::KernelObject::HypervisorVm(vm) => {
-            return match crate::abi::linux::device::kvm::handle_vm_ioctl(request, arg, vm, abi) {
+            let result = crate::abi::linux::device::kvm::handle_vm_ioctl(request, arg, vm, abi);
+            return match result {
                 Ok(Some(ret)) => ret,
                 Ok(None) => errno::to_result(errno::ENOTTY),
                 Err(_) => errno::to_result(errno::EINVAL),
             };
         }
         crate::object::KernelObject::HypervisorVcpu(vcpu) => {
-            return match crate::abi::linux::device::kvm::handle_vcpu_ioctl(request, arg, vcpu) {
+            let result = crate::abi::linux::device::kvm::handle_vcpu_ioctl(request, arg, vcpu);
+            return match result {
                 Ok(Some(ret)) => ret,
                 Ok(None) => errno::to_result(errno::ENOTTY),
                 Err(_) => errno::to_result(errno::EINVAL),
@@ -2039,9 +2164,9 @@ pub fn sys_ioctl(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize 
                 if let Some(dev) = DeviceManager::get_manager().get_device(info.device_id) {
                     #[cfg(feature = "hypervisor")]
                     if dev.name() == crate::abi::linux::device::kvm::KVM_DEVICE_NAME {
-                        return match crate::abi::linux::device::kvm::handle_system_ioctl(
-                            request, arg, abi,
-                        ) {
+                        let result =
+                            crate::abi::linux::device::kvm::handle_system_ioctl(request, arg, abi);
+                        return match result {
                             Ok(Some(ret)) => ret,
                             Ok(None) => errno::to_result(errno::ENOTTY),
                             Err(_) => errno::to_result(errno::EINVAL),
@@ -3546,6 +3671,7 @@ pub fn sys_pselect6(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usi
                                 },
                                 trapframe,
                                 timeout_ticks,
+                                0,
                             );
                             // After wake or timeout, recompute readiness for all fds properly
                             out_read = 0;
@@ -3928,6 +4054,7 @@ pub fn sys_ppoll(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize 
                                     },
                                     trapframe,
                                     timeout_ticks,
+                                    0,
                                 );
                             }
                         }

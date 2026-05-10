@@ -64,9 +64,14 @@ bash tools/linux/build_buildroot.sh
 bash tools/linux/build_user_programs.sh
 bash tools/linux/deploy_rootfs.sh
 cargo make run-riscv64
+
+# (Optional) Build KVM guest image for nested virtualization
+bash tools/linux/build_guest_image.sh
+bash tools/linux/deploy_rootfs.sh
+cargo make run-riscv64
 ```
 
-These commands rebuild the Buildroot-based Linux rootfs (providing standard utilities via BusyBox) and optional demo binaries, showcasing the initial Linux ABI support alongside Scarlet and xv6.
+These commands rebuild the Buildroot-based Linux rootfs (providing standard utilities via BusyBox) and optional demo binaries, showcasing the initial Linux ABI support alongside Scarlet and xv6. The optional guest image enables running a nested Linux guest via kvmtool.
 
 ### Cross-ABI Execution Showcase
 

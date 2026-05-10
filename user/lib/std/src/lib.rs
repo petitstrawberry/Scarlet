@@ -104,6 +104,7 @@ pub mod hypervisor;
 pub mod io;
 pub mod ipc;
 pub mod network;
+pub mod poll;
 pub mod socket;
 pub mod sync;
 pub mod syscall;

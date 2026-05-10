@@ -100,6 +100,7 @@ use crate::network::syscall::{
 };
 use crate::object::capability::file::{sys_file_seek, sys_file_truncate};
 use crate::object::capability::memory_mapping::{sys_memory_map, sys_memory_unmap};
+use crate::object::capability::selectable::syscall::sys_poll;
 use crate::object::capability::stream::{sys_stream_read, sys_stream_write};
 use crate::object::handle::syscall::{
     sys_handle_close, sys_handle_control, sys_handle_duplicate, sys_handle_query,
@@ -206,6 +207,7 @@ syscall_table! {
     // Stream operations for any KernelObject with StreamOps capability
     StreamRead = 200 => sys_stream_read,   // StreamOps::read
     StreamWrite = 201 => sys_stream_write, // StreamOps::write
+    Poll = 202 => sys_poll,               // Poll handles for readiness
 
     // === FileObject Capability ===
     // File operations for any KernelObject with FileObject capability

@@ -74,6 +74,16 @@ pub fn sys_mmap(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
         None => return to_result(errno::EBADF),
     };
 
+    // Special case: KVM vCPU mmap (shared kvm_run page).
+    // kvmtool calls mmap(vcpu_fd, ...) to map the per-vCPU kvm_run structure.
+    // This bypasses the generic MemoryMappingOps path because HypervisorVcpu
+    // doesn't implement that trait — the kvm_run page is managed by the KVM
+    // compat layer instead.
+    #[cfg(feature = "hypervisor")]
+    if let crate::object::KernelObject::HypervisorVcpu(vcpu) = &kernel_obj {
+        return handle_kvm_vcpu_mmap(task, &vcpu, addr, aligned_length, prot, flags);
+    }
+
     // Check if object supports MemoryMappingOps
     let memory_mappable = match kernel_obj.as_memory_mappable() {
         Some(mappable) => mappable,
@@ -491,6 +501,81 @@ pub fn sys_munmap(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usiz
     }
 
     0
+}
+
+/// Handle mmap for a KVM vCPU fd — maps the shared kvm_run page.
+#[cfg(feature = "hypervisor")]
+fn handle_kvm_vcpu_mmap(
+    task: &crate::task::Task,
+    vcpu: &crate::hypervisor::VcpuRef,
+    addr: usize,
+    aligned_length: usize,
+    prot: usize,
+    flags: usize,
+) -> usize {
+    crate::println!(
+        "[KVM-VCPU-MMAP] addr={:#x} len={:#x} prot={:#x} flags={:#x}",
+        addr,
+        aligned_length,
+        prot,
+        flags
+    );
+    const PROT_READ: usize = 0x1;
+    const PROT_WRITE: usize = 0x2;
+    const MAP_SHARED: usize = 0x01;
+    const MAP_FIXED: usize = 0x10;
+
+    let paddr = match crate::abi::linux::device::kvm::get_vcpu_run_paddr(vcpu) {
+        Some(p) => p,
+        None => return to_result(errno::ENODEV),
+    };
+
+    // The kvm_run backing is exactly one page. Clamp the mapping length to
+    // PAGE_SIZE regardless of what the caller requested to avoid mapping
+    // beyond the allocated page.
+    let map_length = PAGE_SIZE;
+
+    let is_fixed = (flags & MAP_FIXED) != 0;
+    let is_shared = (flags & MAP_SHARED) != 0;
+
+    let final_vaddr = if addr == 0 {
+        match task.vm_manager.find_unmapped_area(map_length, PAGE_SIZE) {
+            Some(vaddr) => vaddr,
+            None => return to_result(errno::ENOMEM),
+        }
+    } else if is_fixed {
+        addr
+    } else {
+        addr
+    };
+
+    let mut prot_mask = 0;
+    if (prot & PROT_READ) != 0 {
+        prot_mask |= 0x1;
+    }
+    if (prot & PROT_WRITE) != 0 {
+        prot_mask |= 0x2;
+    }
+    if prot != 0 {
+        prot_mask |= 0x08;
+    }
+
+    let pmarea = MemoryArea::new(paddr, paddr + map_length - 1);
+    let vmarea = MemoryArea::new(final_vaddr, final_vaddr + map_length - 1);
+    let vm_map = VirtualMemoryMap::new(pmarea, vmarea, prot_mask, is_shared, None);
+
+    let map_result = if is_fixed {
+        task.vm_manager
+            .add_memory_map_fixed(vm_map)
+            .map(|removed| Some(removed))
+    } else {
+        task.vm_manager.add_memory_map(vm_map).map(|_| None)
+    };
+
+    match map_result {
+        Ok(_removed_mappings_opt) => final_vaddr,
+        Err(_) => to_result(errno::ENOMEM),
+    }
 }
 
 // TODO: Migrate object-backed MAP_PRIVATE mappings to delayed Copy-On-Write (COW).

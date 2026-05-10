@@ -497,9 +497,10 @@ impl Selectable for VfsFileObject {
         interest: ReadyInterest,
         trapframe: &mut crate::arch::Trapframe,
         timeout_ticks: Option<u64>,
+        min_wait_ticks: u64,
     ) -> SelectWaitOutcome {
         self.inner
-            .wait_until_ready(interest, trapframe, timeout_ticks)
+            .wait_until_ready(interest, trapframe, timeout_ticks, min_wait_ticks)
     }
 
     fn set_nonblocking(&self, enabled: bool) {

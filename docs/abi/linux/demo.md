@@ -22,13 +22,23 @@ If you haven't already built the Linux userspace artifacts (rootfs and demo bina
 # Build the Buildroot rootfs
 bash tools/linux/build_buildroot.sh
 
-# Build demo programs (green, fbdoom)
+# Build demo programs (green, fbdoom, kvmtool)
 bash tools/linux/build_user_programs.sh
 ```
 
 These scripts will place the necessary files in `/opt/prebuilt`.
 
-### 2. Deploy Artifacts to Scarlet Rootfs
+### 2. (Optional) Build KVM Guest Image
+
+To run a Linux guest inside Scarlet using the built-in hypervisor, build the guest kernel and initramfs:
+
+```bash
+bash tools/linux/build_guest_image.sh
+```
+
+This produces `guest-Image` and `guest-initramfs.cpio.gz` in `/opt/prebuilt/bin`.
+
+### 3. Deploy Artifacts to Scarlet Rootfs
 
 The build scripts create artifacts, but they need to be deployed into Scarlet's root filesystem structure before building the disk image.
 For detailed deployment options, see [Linux Rootfs Deployment](deployment.md).
@@ -38,7 +48,7 @@ For detailed deployment options, see [Linux Rootfs Deployment](deployment.md).
 bash tools/linux/deploy_rootfs.sh
 ```
 
-### 3. Build and Run Scarlet
+### 4. Build and Run Scarlet
 
 Build the kernel and the root filesystem image, then run Scarlet:
 
@@ -47,7 +57,7 @@ cargo make build-riscv64
 cargo make run-riscv64
 ```
 
-### 4. Execute Linux Binaries
+### 5. Execute Linux Binaries
 
 Once dropped into the Scarlet shell, you can execute the Linux binaries. The Linux root filesystem is located at `/system/linux-riscv64`.
 
@@ -78,6 +88,19 @@ Other demo binaries are available but require specific arguments or setup:
 /system/linux-riscv64/usr/bin/fbdoom -iwad /system/linux-riscv64/usr/share/games/doom/doom1.wad
 ```
 
+**KVM Guest (Nested Virtualization):**
+
+If you built the guest image, lkvm (kvmtool) is available. The `.shrc` will auto-start a Linux guest on boot. To run it manually:
+
+```bash
+lkvm run -k /scarlet/system/linux-riscv64/usr/bin/guest-Image \
+    -i /scarlet/system/linux-riscv64/usr/bin/guest-initramfs.cpio.gz \
+    -p "console=ttyS0 rdinit=/sbin/init" \
+    --console serial -n mode=none -m 512
+```
+
+This runs a nested Linux guest inside Scarlet using the KVM hypervisor.
+
 ## Environment Configuration
 
 The Scarlet shell environment (`.shrc`) automatically sets `LD_LIBRARY_PATH` to ensure dynamic linking works for Linux binaries:
@@ -94,3 +117,8 @@ If binaries fail to run:
 - Check [`docs/abi/linux/status.md`](status.md) to see if required syscalls are supported.
 - Ensure the rootfs is correctly mounted.
 - Verify that the binaries were built for RISC-V 64-bit (riscv64).
+
+If the KVM guest fails to start:
+- Ensure the host kernel has RISC-V H-extension support.
+- Verify that `guest-Image` and `guest-initramfs.cpio.gz` exist in the rootfs.
+- Check that the `lkvm` binary was built and deployed (run `build_user_programs.sh`).

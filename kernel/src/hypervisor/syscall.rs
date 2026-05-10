@@ -25,8 +25,13 @@ pub fn sys_shv_vm_create(trapframe: &mut Trapframe) -> usize {
     // Increment PC to avoid infinite loop
     trapframe.increment_pc_next(task);
 
+    // Capture the owner address space at VM creation time.
+    // VirtualMemoryManager is Arc-backed so clone() is cheap and shares
+    // the same address space as the creating task.
+    let owner_mm = task.vm_manager.clone();
+
     // Create a new VM via the global VM manager
-    let vm = match GLOBAL_VM_MANAGER.create_vm() {
+    let vm = match GLOBAL_VM_MANAGER.create_vm(owner_mm) {
         Ok(vm) => vm,
         Err(_) => return usize::MAX,
     };

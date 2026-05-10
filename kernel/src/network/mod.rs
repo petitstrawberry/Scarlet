@@ -374,11 +374,11 @@ impl NetworkManager {
         }
 
         let eth_type = u16::from_be_bytes([packet.data[12], packet.data[13]]);
-        early_println!(
-            "[net] recv frame len={} eth_type=0x{:04X}",
-            packet.len,
-            eth_type
-        );
+        // early_println!(
+        //     "[net] recv frame len={} eth_type=0x{:04X}",
+        //     packet.len,
+        //     eth_type
+        // );
         match eth_type {
             0x0806 => self.handle_arp_packet(packet),
             0x0800 => self.handle_ipv4_packet(packet),

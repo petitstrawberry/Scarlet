@@ -1,7 +1,7 @@
 #!/bin/bash
 set -euo pipefail
 
-# Builds optional user-space programs (green, fbdoom) using the preconfigured toolchain.
+# Builds optional user-space programs (green, fbdoom, kvmtool) using the preconfigured toolchain.
 # Environment variables:
 #  ARCH - target architecture (riscv64 or aarch64), defaults to riscv64
 
@@ -12,9 +12,13 @@ set -euo pipefail
 
 : "${GREEN_REPO:=https://github.com/petitstrawberry/green.git}"
 : "${FBDOOM_REPO:=https://github.com/petitstrawberry/fbdoom.git}"
+: "${KVMTOOL_REPO:=https://github.com/kvmtool/kvmtool.git}"
+: "${DTC_REPO:=https://git.kernel.org/pub/scm/utils/dtc/dtc.git}"
 
 : "${GREEN_DIR:=${WORKDIR}/green-${ARCH}}"
 : "${FBDOOM_DIR:=${WORKDIR}/fbdoom-${ARCH}}"
+: "${KVMTOOL_DIR:=${WORKDIR}/kvmtool-${ARCH}}"
+: "${DTC_DIR:=${WORKDIR}/dtc-kvmtool-${ARCH}}"
 
 if [[ ! -d "${BUILDROOT_DIR}" ]]; then
     echo "Expected buildroot directory at ${BUILDROOT_DIR} not found." >&2
@@ -60,6 +64,11 @@ clone_or_update() {
 clone_or_update "${GREEN_REPO}" "${GREEN_DIR}"
 clone_or_update "${FBDOOM_REPO}" "${FBDOOM_DIR}"
 
+if [[ "${ARCH}" == "riscv64" ]]; then
+    clone_or_update "${KVMTOOL_REPO}" "${KVMTOOL_DIR}"
+    clone_or_update "${DTC_REPO}" "${DTC_DIR}"
+fi
+
 echo "Building user programs for ${ARCH}..."
 
 pushd "${GREEN_DIR}" >/dev/null
@@ -78,5 +87,22 @@ if [[ -f "${FBDOOM_DIR}/fbdoom/fbdoom" ]]; then
     install -m 755 "${FBDOOM_DIR}/fbdoom/fbdoom" "${PREBUILT_DIR}/bin/fbdoom"
 fi
 popd >/dev/null
+
+if [[ "${ARCH}" == "riscv64" ]]; then
+    echo "Building libfdt for kvmtool..."
+    pushd "${DTC_DIR}" >/dev/null
+    make clean 2>/dev/null || true
+    make libfdt CC="${TOOLCHAIN_PREFIX}-gcc" AR="${TOOLCHAIN_PREFIX}-ar" CFLAGS="-fPIC -O2"
+    popd >/dev/null
+
+    echo "Building kvmtool (lkvm-static)..."
+    pushd "${KVMTOOL_DIR}" >/dev/null
+    make clean 2>/dev/null || true
+    make lkvm-static ARCH=riscv CROSS_COMPILE="${TOOLCHAIN_PREFIX}-" LIBFDT_DIR="${DTC_DIR}/libfdt" V=1
+    if [[ -f "lkvm-static" ]]; then
+        "${TOOLCHAIN_PREFIX}-strip" -o "${PREBUILT_DIR}/bin/lkvm" lkvm-static
+    fi
+    popd >/dev/null
+fi
 
 echo "User programs for ${ARCH} built and placed in ${PREBUILT_DIR}."

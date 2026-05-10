@@ -109,22 +109,14 @@ fn main() -> i32 {
 }
 
 fn handle_client(client_id: usize, socket: Arc<Mutex<Socket>>) {
-    println!("[Client {}] Handler started", client_id);
-
-    // Set non-blocking mode
-    {
-        let sock = socket.lock();
-        if let Err(e) = sock.set_nonblocking(true) {
-            println!("[Client {}] Failed to set non-blocking: {:?}", client_id, e);
-            return;
-        }
-    }
+    // Socket stays in blocking mode: we read a complete message, handle it
+    // (possibly writing a reply), then block on the next read.
+    println!("[Client {}] Handler started (blocking mode)", client_id);
 
     let mut buffer = [0u8; 4096];
     let mut read_buffer = Vec::new();
 
     loop {
-        // Try to read data
         let read_result = {
             let mut sock = socket.lock();
             sock.read(&mut buffer)
@@ -136,26 +128,20 @@ fn handle_client(client_id: usize, socket: Arc<Mutex<Socket>>) {
                 break;
             }
             Ok(n) => {
-                println!("[Client {}] Read {} bytes", client_id, n);
                 read_buffer.extend_from_slice(&buffer[..n]);
 
-                // Try to parse complete messages
                 while read_buffer.len() >= 16 {
-                    // Check if we have a complete message
                     let mut header_bytes = [0u8; 16];
                     header_bytes.copy_from_slice(&read_buffer[0..16]);
                     let header = sbus::MessageHeader::from_le_bytes(header_bytes);
 
                     let total_len = 16 + header.payload_length as usize;
                     if read_buffer.len() < total_len {
-                        // Need more data
                         break;
                     }
 
-                    // Extract complete message
                     let msg_bytes = read_buffer.drain(..total_len).collect::<Vec<_>>();
 
-                    // Parse and handle message
                     match sbus::from_bytes(msg_bytes) {
                         Ok(msg) => {
                             if let Err(e) = handle_message(client_id, &socket, &msg) {
@@ -168,9 +154,9 @@ fn handle_client(client_id: usize, socket: Arc<Mutex<Socket>>) {
                     }
                 }
             }
-            Err(_) => {
-                // WouldBlock - no data available
-                let _ = std::thread::sleep(core::time::Duration::from_millis(10));
+            Err(e) => {
+                println!("[Client {}] Read error: {:?}", client_id, e);
+                break;
             }
         }
     }
