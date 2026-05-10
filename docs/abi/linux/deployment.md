@@ -39,6 +39,9 @@ docker run -it --rm -v "$(pwd)":/workspaces/Scarlet scarlet-dev
 # Build rootfs and user programs
 bash tools/linux/build_buildroot.sh
 bash tools/linux/build_user_programs.sh
+
+# (Optional) Build KVM guest image for nested virtualization
+bash tools/linux/build_guest_image.sh
 ```
 
 #### For AArch64:
