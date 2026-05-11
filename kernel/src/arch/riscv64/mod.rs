@@ -395,6 +395,10 @@ impl Trapframe {
         self.epc
     }
 
+    pub fn set_pc(&mut self, pc: u64) {
+        self.epc = pc;
+    }
+
     /// Increment the program counter (epc) to the next instruction
     /// This is typically used after handling a trap or syscall to continue execution.
     ///

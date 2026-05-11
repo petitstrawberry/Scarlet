@@ -16,30 +16,30 @@ use crate::{
 };
 
 #[derive(Clone)]
-pub struct LinuxRiscv64Abi(pub generic::LinuxAbi);
+pub struct LinuxAarch64Abi(pub generic::LinuxAbi);
 
-impl Default for LinuxRiscv64Abi {
+impl Default for LinuxAarch64Abi {
     fn default() -> Self {
         Self(generic::LinuxAbi::default())
     }
 }
 
-impl core::ops::Deref for LinuxRiscv64Abi {
+impl core::ops::Deref for LinuxAarch64Abi {
     type Target = generic::LinuxAbi;
     fn deref(&self) -> &Self::Target {
         &self.0
     }
 }
 
-impl core::ops::DerefMut for LinuxRiscv64Abi {
+impl core::ops::DerefMut for LinuxAarch64Abi {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.0
     }
 }
 
-impl AbiModule for LinuxRiscv64Abi {
+impl AbiModule for LinuxAarch64Abi {
     fn name() -> &'static str {
-        "linux-riscv64"
+        "linux-aarch64"
     }
 
     fn get_name(&self) -> alloc::string::String {
@@ -88,6 +88,7 @@ impl AbiModule for LinuxRiscv64Abi {
             match action {
                 generic::signal::SignalAction::Custom(handler_addr) => {
                     let trapframe = target_task.get_trapframe();
+                    // TODO: aarch64-specific setup_signal_handler
                     generic::signal::setup_signal_handler(trapframe, handler_addr, signal);
                 }
                 generic::signal::SignalAction::Ignore => {}
@@ -244,7 +245,7 @@ impl AbiModule for LinuxRiscv64Abi {
                         resolve_interpreter: |requested| {
                             requested.map(|path| {
                                 if path.starts_with("/lib/ld-") || path.starts_with("/lib64/ld-") {
-                                    format!("/scarlet/system/linux-riscv64{}", path)
+                                    format!("/scarlet/system/linux-aarch64{}", path)
                                 } else {
                                     path.to_string()
                                 }
@@ -515,7 +516,7 @@ fn create_dir_if_not_exists(vfs: &Arc<VfsManager>, path: &str) -> Result<(), Fil
 }
 
 fn register_linux_abi() {
-    register_abi!(LinuxRiscv64Abi);
+    register_abi!(LinuxAarch64Abi);
 }
 
 late_initcall!(register_linux_abi);
