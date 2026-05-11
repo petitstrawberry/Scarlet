@@ -11,6 +11,12 @@ pub mod syscall;
 
 pub use loader::{LoadedModule, LsmError, list_modules, load_module, unload_module};
 
+#[derive(Debug)]
+pub enum RelocateError {
+    UnresolvedSymbol(alloc::string::String),
+    Relocation(&'static str),
+}
+
 #[repr(usize)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LsmErrorCode {
@@ -26,6 +32,7 @@ pub enum LsmErrorCode {
     PermissionDenied = 9,
     MissingDependency = 10,
     ArchMismatch = 11,
+    UnresolvedSymbol = 12,
 }
 
 #[unsafe(no_mangle)]
