@@ -359,11 +359,11 @@ pub fn write_vmcr(val: u64) {
     }
 }
 
-pub fn restore_host_vgic(hcr: u64, vmcr: u64) {
+pub fn restore_host_vgic(num_lrs: usize, hcr: u64, vmcr: u64) {
     write_hcr(hcr);
     write_vmcr(vmcr);
-    for i in 0..16 {
-        // SAFETY: LR indices are bounded to the architected 16-register maximum.
+    for i in 0..num_lrs.min(16) {
+        // SAFETY: LR indices are bounded by the hardware-reported ListRegs count.
         unsafe {
             write_ich_lr(i, 0);
         }

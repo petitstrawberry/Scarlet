@@ -169,6 +169,8 @@ qemu-system-aarch64 \
     -global virtio-mmio.force-legacy=false \
     -drive id=boot,file="$BOOT_IMAGE",format=raw,if=none \
     -device virtio-blk-pci,drive=boot,bus=pcie.0 \
+    -drive id=rootfs,file="$ROOTFS_IMAGE",format=raw,if=none \
+    -device virtio-blk-device,drive=rootfs,bus=virtio-mmio-bus.1 \
     -display vnc=:0 \
     -device virtio-gpu-device,bus=virtio-mmio-bus.2 \
     -netdev user,id=net0 \

@@ -3,7 +3,7 @@ extern crate alloc;
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
 use core::arch::asm;
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicU64, Ordering, fence};
 use spin::Mutex;
 
 use super::guest_vcpu::GuestVcpu;
@@ -71,8 +71,7 @@ impl Aarch64VcpuObject {
         vgic: &mut VgicState,
         vm: &Aarch64VmObject,
     ) {
-        vcpu.sysregs.restore();
-
+        // Step 1: Save host EL2 state
         let hcr: u64;
         let vbar: u64;
         let ich_hcr: u64;
@@ -96,6 +95,7 @@ impl Aarch64VcpuObject {
             HOST_HV_CTX.ich_vmcr_el2 = ich_vmcr;
         }
 
+        // Step 2: Set VBAR_EL2 to guest exit vector
         // SAFETY: VBAR_EL2 is retargeted to the guest exit vector before guest entry.
         unsafe {
             asm!(
@@ -106,13 +106,22 @@ impl Aarch64VcpuObject {
             );
         }
 
+        // Step 3: Set VTTBR_EL2 to guest stage-2 page table
         vm.set_guest_root_pagetable();
 
+        // Ensure all the above setup is visible before guest entry.
+        fence(Ordering::SeqCst);
+
+        // Step 4: Switch HCR_EL2 to guest config (clears TGE, enables VM)
         // SAFETY: switching HCR_EL2 to the guest configuration is required for guest execution.
         unsafe {
             asm!("msr hcr_el2, {0}", "isb", in(reg) HCR_EL2_GUEST, options(nostack));
         }
 
+        // Step 5: Restore guest _EL12 system registers (now safe: TGE=0)
+        vcpu.sysregs.restore();
+
+        // Step 6: Restore guest VGIC state
         if vgic.hcr == 0 && vgic.vmcr == 0 {
             super::vgic::vgic_guest_entry_init(self.vgic_num_lrs);
             vgic.hcr = super::vgic::read_hcr();
@@ -131,7 +140,7 @@ impl Aarch64VcpuObject {
 
     fn restore_host_vgic_state(&self) {
         let (ich_hcr, ich_vmcr) = unsafe { (HOST_HV_CTX.ich_hcr_el2, HOST_HV_CTX.ich_vmcr_el2) };
-        super::vgic::restore_host_vgic(ich_hcr, ich_vmcr);
+        super::vgic::restore_host_vgic(self.vgic_num_lrs, ich_hcr, ich_vmcr);
     }
 
     fn sync_interrupts(&self, _guest: &GuestVcpu) {

@@ -4,7 +4,7 @@ use core::arch::naked_asm;
 use crate::arch::{Arch, Trapframe};
 
 use super::guest_vcpu::GuestVcpu;
-use super::sysreg::{GuestSystemRegs, HypervisorSystemRegs};
+use super::sysreg::{GuestSystemRegs, HypervisorSystemRegs, capture_guest_sysregs};
 
 /// When TGE=1 (host VHE mode), _EL12 registers like ESR_EL12 and FAR_EL12
 /// are UNDEF. Only save/restore guest state when actually in guest context
@@ -230,6 +230,15 @@ pub unsafe extern "C" fn arch_run_guest_loop(
 #[unsafe(no_mangle)]
 pub extern "C" fn arch_guest_trap_exit() {
     naked_asm!(
+        // Capture guest EL1 sysreg snapshot while HCR_EL2.VM is still set.
+        // _EL12 registers become UNDEF once TGE=1 is restored, so this call
+        // must happen before the host HCR_EL2 write below.
+        // Save x30 (link register) so the bl does not clobber it; x0-x18 are
+        // caller-saved and are not needed after this point in the exit path.
+        "str x30, [sp, #-16]!",
+        "bl {capture_snapshot}",
+        "ldr x30, [sp], #16",
+        // Restore host hypervisor context registers.
         "adrp x0, {host_ctx}",
         "add x0, x0, #:lo12:{host_ctx}",
         "ldr x1, [x0, #0]",
@@ -252,5 +261,6 @@ pub extern "C" fn arch_guest_trap_exit() {
         "add sp, sp, #96",
         "ret",
         host_ctx = sym HOST_HV_CTX,
+        capture_snapshot = sym capture_guest_sysregs,
     );
 }

@@ -135,6 +135,14 @@ pub fn arch_guest_trap_handler(trapframe: &mut Trapframe, vm: &Vm) -> Option<VmE
     let ec = ((esr >> ESR_EC_SHIFT) & ESR_EC_MASK) as u32;
     let iss = (esr & ESR_ISS_MASK) as u32;
 
+    crate::println!(
+        "[vmexit] ESR={:#x} EC={:#x} ISS={:#x} ELR={:#x}",
+        esr,
+        ec,
+        iss,
+        trapframe.elr
+    );
+
     match ec {
         ESR_EC_WFX => {
             trapframe.elr = trapframe.elr.wrapping_add(4);
@@ -184,7 +192,13 @@ pub fn arch_guest_trap_handler(trapframe: &mut Trapframe, vm: &Vm) -> Option<VmE
                 }
             })
         }
-        ESR_EC_IABT_LOW => handle_guest_stage2_fault(vm, guest_fault_ipa(), false),
+        ESR_EC_IABT_LOW => {
+            let ipa = guest_fault_ipa();
+            crate::println!("[vmexit] IABT_LOW ipa={:#x}", ipa);
+            let result = handle_guest_stage2_fault(vm, ipa, false);
+            crate::println!("[vmexit] IABT_LOW result={:?}", result.is_some());
+            result
+        }
         ESR_EC_DABT_LOW => {
             let ipa = guest_fault_ipa();
             if (ipa >= GIC_DIST_BASE && ipa < GIC_DIST_BASE + GIC_DIST_SIZE)

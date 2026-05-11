@@ -5,7 +5,7 @@ use hashbrown::HashMap;
 use spin::{Once, RwLock};
 
 use crate::arch::vm::mmu::{PageTable, PageTableEntry};
-use crate::mem::page::{allocate_raw_pages, free_raw_pages};
+use crate::mem::page::{allocate_raw_pages, allocate_raw_pages_aligned, free_raw_pages};
 use crate::vm::addr::{phys_to_virt, virt_to_phys};
 
 const PAGE_SIZE: usize = 4096;
@@ -100,7 +100,8 @@ impl Default for Stage2PageTable {
 }
 
 fn allocate_stage2_root() -> *mut Stage2PageTable {
-    allocate_raw_pages(STAGE2_ROOT_SIZE / PAGE_SIZE) as *mut Stage2PageTable
+    allocate_raw_pages_aligned(STAGE2_ROOT_SIZE / PAGE_SIZE, STAGE2_ROOT_SIZE)
+        as *mut Stage2PageTable
 }
 
 fn allocate_stage2_table(vmid: u16) -> *mut PageTable {

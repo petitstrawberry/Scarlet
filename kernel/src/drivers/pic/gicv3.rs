@@ -78,6 +78,13 @@ fn write_icc_sre_el1(v: u64) {
 }
 
 #[inline]
+fn write_icc_sre_el2(v: u64) {
+    unsafe {
+        asm!("msr ICC_SRE_EL2, {0}", "isb", in(reg) v, options(nostack));
+    }
+}
+
+#[inline]
 fn write_icc_pmr_el1(v: u64) {
     unsafe {
         asm!("msr ICC_PMR_EL1, {0}", "isb", in(reg) v, options(nostack));
@@ -239,6 +246,10 @@ impl GicV3 {
     fn init_cpu_interface_sysregs(&self) {
         // Enable system register interface and unmask Group 1 interrupts.
         // ICC_SRE_EL1.SRE (bit 0) must be 1.
+        // ICC_SRE_EL2.SRE must also be 1 to allow ICH_*_EL2 register access
+        // from the hypervisor (VGIC save/restore). Without this, any MRS/MSR
+        // on ICH_HCR_EL2, ICH_VMCR_EL2, etc. traps with EC=0x18.
+        write_icc_sre_el2(1);
         write_icc_sre_el1(1);
         write_icc_pmr_el1(0xFF);
         write_icc_bpr1_el1(0);
