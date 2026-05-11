@@ -70,7 +70,34 @@ static mut CPUS: [Aarch64; MAX_NUM_CPUS] = [const { Aarch64::new(0) }; MAX_NUM_C
 
 pub fn init_arch(cpu_id: usize) {
     early_println!("[aarch64] CPU {}: Initializing core....", cpu_id);
-    // Get raw Aarch64 struct
+    {
+        let isar1: u64;
+        let sctlr: u64;
+        unsafe {
+            core::arch::asm!("mrs {}, id_aa64isar1_el1", out(reg) isar1);
+            core::arch::asm!("mrs {}, sctlr_el1", out(reg) sctlr);
+        }
+        let pauth_apa = (isar1 >> 4) & 0xF;
+        let pauth_api = (isar1 >> 8) & 0xF;
+        let pauth_gpa = (isar1 >> 24) & 0xF;
+        let pauth_gpi = (isar1 >> 28) & 0xF;
+        early_println!(
+            "[aarch64] ID_AA64ISAR1_EL1={:#x} (APA={} API={} GPA={} GPI={})",
+            isar1,
+            pauth_apa,
+            pauth_api,
+            pauth_gpa,
+            pauth_gpi
+        );
+        early_println!(
+            "[aarch64] SCTLR_EL1={:#x} (EnIA={} EnIB={} EnDA={} EnDB={})",
+            sctlr,
+            (sctlr >> 31) & 1,
+            (sctlr >> 30) & 1,
+            (sctlr >> 27) & 1,
+            (sctlr >> 26) & 1
+        );
+    }
     let aarch64: &mut Aarch64 = unsafe { transmute(&CPUS[cpu_id] as *const _ as usize) };
     aarch64.cpuid = cpu_id as u64;
     trap_init(aarch64);
@@ -366,6 +393,22 @@ fn trap_init(aarch64: &mut Aarch64) {
         asm!(
             "msr tpidr_el1, {0}",
             in(reg) scratch_addr,
+        );
+    }
+
+    unsafe {
+        asm!(
+            "msr S3_0_C2_C1_0, xzr", // apiakeylo_el1
+            "msr S3_0_C2_C1_1, xzr", // apiakeyhi_el1
+            "msr S3_0_C2_C1_2, xzr", // apibkeylo_el1
+            "msr S3_0_C2_C1_3, xzr", // apibkeyhi_el1
+            "msr S3_0_C2_C2_0, xzr", // apdakeylo_el1
+            "msr S3_0_C2_C2_1, xzr", // apdakeyhi_el1
+            "msr S3_0_C2_C2_2, xzr", // apdbkeylo_el1
+            "msr S3_0_C2_C2_3, xzr", // apdbkeyhi_el1
+            "msr S3_0_C2_C3_0, xzr", // apgakeylo_el1
+            "msr S3_0_C2_C3_1, xzr", // apgakeyhi_el1
+            options(nostack),
         );
     }
 

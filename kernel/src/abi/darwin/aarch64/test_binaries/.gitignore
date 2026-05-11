@@ -1,0 +1,18 @@
+# Ignore actual macOS binaries (copyrighted by Apple)
+*
+!*.md
+!*.txt
+!*.s
+!*.c
+!Makefile
+!/.gitignore
+
+# Allow source files for test binaries
+!static/
+!dynamic/
+
+# But ignore compiled binaries within those directories
+static/*
+dynamic/*
+!static/.gitkeep
+!dynamic/.gitkeep

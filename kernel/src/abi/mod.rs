@@ -20,6 +20,7 @@ use alloc::{
 use hashbrown::HashMap;
 use spin::Mutex;
 
+pub mod darwin;
 pub mod linux;
 pub mod scarlet;
 pub mod xv6;

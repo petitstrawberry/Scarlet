@@ -13,32 +13,7 @@ use crate::sched::scheduler::get_scheduler;
 use crate::task::mytask;
 use crate::{early_println, println};
 
-/// Get CurrentEL value
-fn get_current_el() -> u64 {
-    let val: u64;
-    unsafe { asm!("mrs {}, CurrentEL", out(reg) val) };
-    val
-}
-
-fn current_el_number() -> u64 {
-    // CurrentEL encodes the exception level in bits [3:2] as EL<<2.
-    // Return the EL number (0-3).
-    (get_current_el() >> 2) & 0x3
-}
-
-/// Get DAIF value
-fn get_daif() -> u64 {
-    let val: u64;
-    unsafe { asm!("mrs {}, daif", out(reg) val) };
-    val
-}
-
-/// Get ISR_EL1 (pending interrupt status)
-fn get_isr_el1() -> u64 {
-    let val: u64;
-    unsafe { asm!("mrs {}, isr_el1", out(reg) val) };
-    val
-}
+use super::emulator;
 
 /// Get ESR_EL1 value
 fn get_esr_el1() -> u64 {
@@ -66,13 +41,15 @@ fn get_sctlr_el1() -> u64 {
 #[repr(u8)]
 pub enum ExceptionClass {
     Unknown = 0x00,
-    /// Trapped FP/SIMD access (typically because CPACR_EL1.FPEN traps EL0).
+    TrappedSystemReg = 0x08,
     FpSimdAccess = 0x07,
     SvcAarch64 = 0x15,
     InstructionAbortLowerEl = 0x20,
     InstructionAbortSameEl = 0x21,
     DataAbortLowerEl = 0x24,
     DataAbortSameEl = 0x25,
+    WatchpointLowerEl = 0x34,
+    SoftwareStep = 0x32,
     Other = 0xFF,
 }
 
@@ -82,11 +59,14 @@ impl From<u64> for ExceptionClass {
         match ec {
             0x00 => ExceptionClass::Unknown,
             0x07 => ExceptionClass::FpSimdAccess,
+            0x08 => ExceptionClass::TrappedSystemReg,
             0x15 => ExceptionClass::SvcAarch64,
             0x20 => ExceptionClass::InstructionAbortLowerEl,
             0x21 => ExceptionClass::InstructionAbortSameEl,
             0x24 => ExceptionClass::DataAbortLowerEl,
             0x25 => ExceptionClass::DataAbortSameEl,
+            0x32 => ExceptionClass::SoftwareStep,
+            0x34 => ExceptionClass::WatchpointLowerEl,
             _ => ExceptionClass::Other,
         }
     }
@@ -94,52 +74,21 @@ impl From<u64> for ExceptionClass {
 
 /// Main exception handler
 pub fn arch_exception_handler(trapframe: &mut Trapframe, trap_kind: usize) {
+    // Disable single-step while handling exceptions to prevent re-entrancy
+    unsafe {
+        let mut mdscr: u64;
+        core::arch::asm!("mrs {}, mdscr_el1", out(reg) mdscr);
+        if mdscr & 1 != 0 {
+            mdscr &= !1u64;
+            core::arch::asm!("msr mdscr_el1, {}", in(reg) mdscr);
+            core::arch::asm!("isb");
+        }
+    }
+
     let ec = ExceptionClass::from(trapframe.esr_el1);
     let esr = trapframe.esr_el1;
 
-    // Decode useful fields for Data/Instruction aborts.
-    // ISS layout differs by EC, but WnR(bit 6) and DFSC/IFSC(bits 5:0) are consistent
-    // for abort classes.
-    let iss = esr & 0x01ff_ffff;
-    let fsc = (iss & 0x3f) as u8;
-    let wnr = ((iss >> 6) & 0x1) as u8;
-
-    // Debug: log every trap using early_println
-    let sctlr = get_sctlr_el1();
-
-    let kind_str = match trap_kind {
-        0 => "Sync",
-        1 => "IRQ",
-        2 => "FIQ",
-        3 => "SError",
-        _ => "UnknownKind",
-    };
-
-    // crate::println!(
-    //     "[trap] kind={}({}) ESR={:#x} EC={:?} ISS={:#x} FSC={:#x} WnR={} FAR={:#x} ELR={:#x} SCTLR={:#x} M={} DAIF={:#x} CurrentEL={:#x}(EL{}) SPSR={:#x} SP_EL0={:#x} KernelSP={:#x} ISR_EL1={:#x}",
-    //     trap_kind,
-    //     kind_str,
-    //     esr,
-    //     ec,
-    //     iss,
-    //     fsc,
-    //     wnr,
-    //     get_far_el1(),
-    //     trapframe.elr,
-    //     sctlr,
-    //     (sctlr & 1) as u8,
-    //     get_daif(),
-    //     get_current_el(),
-    //     current_el_number(),
-    //     trapframe.spsr,
-    //     trapframe.sp,
-    //     trapframe.tpidrro_el0,
-    //     get_isr_el1(),
-    // );
-
     match ec {
-        // User tried to execute FP/SIMD while EL0 access is trapped.
-        // Enable access for this task and restore its context, then retry.
         ExceptionClass::FpSimdAccess => {
             if crate::arch::user_fpu_enabled() {
                 let cpu_id = get_cpu().get_cpuid();
@@ -156,7 +105,6 @@ pub fn arch_exception_handler(trapframe: &mut Trapframe, trap_kind: usize) {
             panic!("FP/SIMD is disabled by build config or DTB");
         }
 
-        // SVC from AArch64 user mode (syscall)
         ExceptionClass::SvcAarch64 => match syscall_dispatcher(trapframe) {
             Ok(ret) => {
                 trapframe.set_return_value(ret);
@@ -168,20 +116,17 @@ pub fn arch_exception_handler(trapframe: &mut Trapframe, trap_kind: usize) {
             }
         },
 
-        // Instruction abort from lower EL
         ExceptionClass::InstructionAbortLowerEl => {
             let vaddr = trapframe.elr as usize;
             handle_instruction_fault(trapframe, vaddr);
         }
 
-        // Data abort from lower EL
         ExceptionClass::DataAbortLowerEl => {
             let far = get_far_el1() as usize;
-            let is_write = (esr >> 6) & 1 == 1; // WnR bit
+            let is_write = (esr >> 6) & 1 == 1;
             handle_data_fault(trapframe, far, is_write);
         }
 
-        // Instruction abort from same EL (kernel bug)
         ExceptionClass::InstructionAbortSameEl => {
             let far = get_far_el1();
             print_trap_info(trapframe, esr);
@@ -191,7 +136,6 @@ pub fn arch_exception_handler(trapframe: &mut Trapframe, trap_kind: usize) {
             }
         }
 
-        // Data abort from same EL (kernel bug)
         ExceptionClass::DataAbortSameEl => {
             let far = get_far_el1();
             print_trap_info(trapframe, esr);
@@ -201,26 +145,350 @@ pub fn arch_exception_handler(trapframe: &mut Trapframe, trap_kind: usize) {
             }
         }
 
-        // Unknown or unhandled exception.
-        // We must stop here: this indicates a real bring-up bug (e.g. unexpected
-        // asynchronous exception path) and masking would hide the root cause.
-        _ => {
-            print_trap_info(trapframe, esr);
-
+        ExceptionClass::WatchpointLowerEl => {
+            let far = get_far_el1();
+            let wp = (esr >> 5) & 0xF;
             crate::println!(
-                "[trap] unhandled exception: kind={}({}) ESR={:#x} FAR={:#x} ELR={:#x}",
+                "[watchpoint] EL0 write to {:#x} at PC={:#x} WP={} x0={:#x} x1={:#x} x2={:#x} x8={:#x} x19={:#x} x20={:#x} LR={:#x}",
+                far,
+                trapframe.elr,
+                wp,
+                trapframe.regs.reg[0],
+                trapframe.regs.reg[1],
+                trapframe.regs.reg[2],
+                trapframe.regs.reg[8],
+                trapframe.regs.reg[19],
+                trapframe.regs.reg[20],
+                trapframe.regs.reg[30],
+            );
+            disable_user_watchpoint();
+        }
+
+        ExceptionClass::SoftwareStep => {
+            let lock_kva = unsafe { SINGLESTEP_LOCK_KVA };
+            if lock_kva == 0 {
+                return;
+            }
+            let lock_val = unsafe { *(lock_kva as *const u32) };
+
+            static STEP_COUNT: spin::Mutex<usize> = spin::Mutex::new(0);
+            let mut sc = STEP_COUNT.lock();
+            *sc += 1;
+
+            let step_num = *sc;
+            drop(sc);
+
+            if step_num % 1000 == 0 {
+                crate::println!(
+                    "[step #{}] tick LOCK={:#x} PC={:#x}",
+                    step_num,
+                    lock_val,
+                    trapframe.elr,
+                );
+            }
+
+            if lock_val != 0x307 && lock_val != 0 {
+                crate::println!(
+                    "[step #{}] *** LOCK={:#x} PC={:#x} x0={:#x} x1={:#x} x2={:#x} x3={:#x} x19={:#x} x20={:#x} LR={:#x}",
+                    step_num,
+                    lock_val,
+                    trapframe.elr,
+                    trapframe.regs.reg[0],
+                    trapframe.regs.reg[1],
+                    trapframe.regs.reg[2],
+                    trapframe.regs.reg[3],
+                    trapframe.regs.reg[19],
+                    trapframe.regs.reg[20],
+                    trapframe.regs.reg[30],
+                );
+                trapframe.spsr &= !(1 << 21);
+                unsafe {
+                    let mut mdscr: u64;
+                    core::arch::asm!("mrs {}, mdscr_el1", out(reg) mdscr);
+                    mdscr &= !1;
+                    core::arch::asm!("msr mdscr_el1, {}", in(reg) mdscr);
+                    SINGLESTEP_LOCK_KVA = 0;
+                }
+                return;
+            }
+
+            if step_num >= 30000 {
+                crate::println!(
+                    "[step] safety limit ({}), disabling SS (KVA kept for trap check)",
+                    step_num
+                );
+                trapframe.spsr &= !(1 << 21);
+                unsafe {
+                    let mut mdscr: u64;
+                    core::arch::asm!("mrs {}, mdscr_el1", out(reg) mdscr);
+                    mdscr &= !1;
+                    core::arch::asm!("msr mdscr_el1, {}", in(reg) mdscr);
+                }
+                return;
+            }
+
+            // Re-enable MDSCR.SS so the next user instruction also steps.
+            // It was cleared at exception entry to prevent re-entrancy in
+            // other exception handlers; here we restore it for continued tracing.
+            unsafe {
+                let mut mdscr: u64;
+                core::arch::asm!("mrs {}, mdscr_el1", out(reg) mdscr);
+                mdscr |= 1;
+                core::arch::asm!("msr mdscr_el1, {}", in(reg) mdscr);
+            }
+        }
+
+        // Unknown (EC=0) or Trapped system register (EC=8):
+        // cortex-a57 traps PAC/LSE/RCpc instructions here.
+        ExceptionClass::Unknown | ExceptionClass::TrappedSystemReg => {
+            if emulator::try_emulate_instruction(trapframe) {
+                return;
+            }
+            print_trap_info(trapframe, esr);
+            crate::println!(
+                "[trap] unhandled: ESR={:#x} EC={:?} FAR={:#x} ELR={:#x}",
+                esr,
+                ec,
+                get_far_el1(),
+                trapframe.elr,
+            );
+            loop {
+                unsafe { asm!("wfi") }
+            }
+        }
+
+        _ => {
+            let ec_raw = ((esr >> 26) & 0x3f) as u8;
+
+            // EC=0 or EC=8 in the catch-all (shouldn't normally happen, but handle defensively)
+            if ec_raw == 0x00 || ec_raw == 0x08 {
+                if emulator::try_emulate_instruction(trapframe) {
+                    return;
+                }
+            }
+
+            // BRK from userspace (EC=0x30 or EC=0x3C)
+            if ec_raw == 0x30 || ec_raw == 0x3c {
+                handle_brk(trapframe, esr);
+                return;
+            }
+
+            print_trap_info(trapframe, esr);
+            crate::println!(
+                "[trap] unhandled: kind={} ESR={:#x} FAR={:#x} ELR={:#x}",
                 trap_kind,
-                kind_str,
                 esr,
                 get_far_el1(),
                 trapframe.elr,
             );
-
             loop {
                 unsafe { asm!("wfi") }
             }
         }
     }
+}
+
+fn handle_brk(trapframe: &mut Trapframe, esr: u64) {
+    let imm = (esr & 0xFFFF) as u32;
+    let task = mytask().unwrap();
+
+    if imm == 0xb001 {
+        let x0 = trapframe.regs.reg[0];
+        let x1 = trapframe.regs.reg[1];
+        let x2 = trapframe.regs.reg[2];
+        let lr = trapframe.regs.reg[30];
+        let sp = trapframe.sp as usize;
+        let fp = trapframe.regs.reg[29]; // x29 = frame pointer
+        crate::println!("[darwin] dyld halt (BRK #0xb001): LR={:#x} SP={:#x} FP={:#x}", lr, sp, fp);
+
+        // Dump all general-purpose registers
+        crate::println!(
+            "[darwin]   x0={:#x} x1={:#x} x2={:#x} x3={:#x}",
+            x0, x1, x2, trapframe.regs.reg[3]
+        );
+        crate::println!(
+            "[darwin]   x4={:#x} x5={:#x} x6={:#x} x7={:#x}",
+            trapframe.regs.reg[4], trapframe.regs.reg[5],
+            trapframe.regs.reg[6], trapframe.regs.reg[7]
+        );
+        crate::println!(
+            "[darwin]   x8={:#x} x9={:#x} x10={:#x} x11={:#x}",
+            trapframe.regs.reg[8], trapframe.regs.reg[9],
+            trapframe.regs.reg[10], trapframe.regs.reg[11]
+        );
+        crate::println!(
+            "[darwin]   x16={:#x} x17={:#x} x18={:#x} x19={:#x}",
+            trapframe.regs.reg[16], trapframe.regs.reg[17],
+            trapframe.regs.reg[18], trapframe.regs.reg[19]
+        );
+        crate::println!(
+            "[darwin]   x20={:#x} x21={:#x} x22={:#x} x23={:#x}",
+            trapframe.regs.reg[20], trapframe.regs.reg[21],
+            trapframe.regs.reg[22], trapframe.regs.reg[23]
+        );
+
+        // Try to read halt message from sProcessInfo+0x300 (dyld stores halt msg there)
+        // x8 often holds the adrp page for sProcessInfo in dyld
+        let x8 = trapframe.regs.reg[8];
+        if x8 > 0x1000 {
+            let sinfo_base = (x8 as usize & !0xFFF);
+            let halt_msg_ptr_addr = sinfo_base + 0x300;
+            if let Some(kva) = task.vm_manager.translate_to_kva(halt_msg_ptr_addr) {
+                let msg_ptr = unsafe { core::ptr::read(kva as *const u64) };
+                crate::println!(
+                    "[darwin]   sProcessInfo+0x300: base={:#x} ptr={:#x}",
+                    sinfo_base, msg_ptr
+                );
+                if msg_ptr > 0x1000 {
+                    if let Some(msg_kva) = task.vm_manager.translate_to_kva(msg_ptr as usize) {
+                        let bytes = unsafe { core::slice::from_raw_parts(msg_kva as *const u8, 512) };
+                        crate::print!("[darwin]   halt_msg=\"");
+                        for &b in bytes.iter() {
+                            if b >= 0x20 && b < 0x7f {
+                                crate::print!("{}", b as char);
+                            } else if b == 0 {
+                                break;
+                            } else {
+                                crate::print!("\\x{:02x}", b);
+                            }
+                        }
+                        crate::println!("\"");
+                    }
+                }
+            }
+        }
+
+        // Walk the stack frame chain (x29-based) to trace the call chain
+        // ARM64 frame layout: [fp] = saved x29, [fp+8] = saved LR
+        crate::println!("[darwin]   --- stack frame walk ---");
+        let mut cur_fp = fp as usize;
+        for depth in 0..8 {
+            if cur_fp < 0x1000 {
+                break;
+            }
+            if let Some(kva) = task.vm_manager.translate_to_kva(cur_fp) {
+                let saved_fp = unsafe { core::ptr::read(kva as *const u64) };
+                let saved_lr = unsafe { core::ptr::read((kva as *const u64).add(1)) };
+                crate::println!(
+                    "[darwin]   [{}]: FP={:#x} LR={:#x}",
+                    depth, saved_fp, saved_lr
+                );
+                // Stop if frame pointer goes backwards or is invalid
+                if saved_fp == 0 || (saved_fp as usize) <= cur_fp {
+                    break;
+                }
+                cur_fp = saved_fp as usize;
+            } else {
+                crate::println!("[darwin]   [{}]: FP={:#x} (unmapped)", depth, cur_fp);
+                break;
+            }
+        }
+
+        // Also read x1 as string (may contain env data or StructuredError)
+        if x1 > 0x1000 {
+            if let Some(kva) = task.vm_manager.translate_to_kva(x1) {
+                let bytes = unsafe { core::slice::from_raw_parts(kva as *const u8, 256) };
+                crate::print!("[darwin]   x1-str=\"");
+                for &b in bytes.iter() {
+                    if b >= 0x20 && b < 0x7f {
+                        crate::print!("{}", b as char);
+                    } else {
+                        break;
+                    }
+                }
+                crate::println!("\"");
+            }
+        }
+
+        trapframe.increment_pc_next(task);
+        task.exit(128 + 6);
+        return;
+    }
+
+    let x0 = trapframe.regs.reg[0];
+    let x1 = trapframe.regs.reg[1];
+    let lr = trapframe.regs.reg[30];
+    let x8 = trapframe.regs.reg[8];
+    let x19 = trapframe.regs.reg[19];
+    crate::println!("[darwin] dyld BRK #{:#x} at ELR={:#x}", imm, trapframe.elr);
+    crate::println!(
+        "[darwin]   x0={:#x} x1={:#x} LR={:#x} x8={:#x} x19={:#x}",
+        x0,
+        x1,
+        lr,
+        x8,
+        x19
+    );
+
+    let task = mytask().unwrap();
+
+    // Read stack frame to find caller of _dyld_halt
+    // _dyld_halt does: PACIBSP; SUB sp,sp,#0x40; STP x20,x19,[sp]; STP x29,x30,[sp,#0x10]
+    // So at BRK time: [sp+0x10] = saved x29, [sp+0x18] = saved LR (caller of _dyld_halt)
+    let sp = trapframe.sp as usize;
+    if sp > 0x1000 {
+        if let Some(kva) = task.vm_manager.translate_to_kva(sp + 0x10) {
+            let saved_fp = unsafe { core::ptr::read(kva as *const u64) };
+            let saved_lr = unsafe { core::ptr::read((kva as *const u64).add(1)) };
+            crate::println!(
+                "[darwin]   stack: saved_fp={:#x} saved_lr={:#x} (caller of _dyld_halt)",
+                saved_fp,
+                saved_lr
+            );
+        }
+    }
+
+    // BRK #0x1 = _dyld_halt: x19 = halt message string pointer
+    // Also stored at sProcessInfo+0x300 (x8 page + 0x300)
+    let halt_msg = x19;
+    if halt_msg > 0x1000 {
+        if let Some(kva) = task.vm_manager.translate_to_kva(halt_msg as usize) {
+            let bytes = unsafe { core::slice::from_raw_parts(kva as *const u8, 512) };
+            crate::print!("[darwin]   halt_msg=\"");
+            for &b in bytes.iter() {
+                if b >= 0x20 && b < 0x7f {
+                    crate::print!("{}", b as char);
+                } else if b == 0 {
+                    break;
+                } else {
+                    crate::print!("\\x{:02x}", b);
+                }
+            }
+            crate::println!("\"");
+        }
+    }
+
+    // Also try reading from sProcessInfo+0x300 (dyld stores halt msg there)
+    // x8 = adrp page for sProcessInfo, stored at x8+0x300
+    let sinfo_base = (x8 as usize & !0xFFF);
+    let halt_msg_ptr_addr = sinfo_base + 0x300;
+    if let Some(kva) = task.vm_manager.translate_to_kva(halt_msg_ptr_addr) {
+        let msg_ptr = unsafe { core::ptr::read(kva as *const u64) };
+        crate::println!(
+            "[darwin]   sProcessInfo+0x300={:#x} -> ptr={:#x}",
+            halt_msg_ptr_addr,
+            msg_ptr
+        );
+        if msg_ptr > 0x1000 && msg_ptr as usize != halt_msg as usize {
+            if let Some(kva2) = task.vm_manager.translate_to_kva(msg_ptr as usize) {
+                let bytes = unsafe { core::slice::from_raw_parts(kva2 as *const u8, 512) };
+                crate::print!("[darwin]   stored_msg=\"");
+                for &b in bytes.iter() {
+                    if b >= 0x20 && b < 0x7f {
+                        crate::print!("{}", b as char);
+                    } else if b == 0 {
+                        break;
+                    } else {
+                        crate::print!("\\x{:02x}", b);
+                    }
+                }
+                crate::println!("\"");
+            }
+        }
+    }
+
+    trapframe.increment_pc_next(task);
+    task.exit(128 + 5);
 }
 
 /// Handle instruction page fault (like RISC-V cause 12)
@@ -249,6 +517,15 @@ fn handle_instruction_fault(trapframe: &mut Trapframe, vaddr: usize) {
 
 /// Handle data page fault (like RISC-V cause 13/15)
 fn handle_data_fault(trapframe: &mut Trapframe, vaddr: usize, is_write: bool) {
+    let esr = get_esr_el1();
+    let dfsc = esr & 0x3f;
+
+    if is_write && (dfsc >= 0x0d && dfsc <= 0x0f) {
+        if handle_lock_watch_fault(trapframe, vaddr) {
+            return;
+        }
+    }
+
     let task = get_scheduler()
         .get_current_task(get_cpu().get_cpuid())
         .unwrap();
@@ -265,11 +542,9 @@ fn handle_data_fault(trapframe: &mut Trapframe, vaddr: usize, is_write: bool) {
         size: None,
     };
 
-    // Get ESR to determine fault type
     let esr = get_esr_el1();
-    let dfsc = esr & 0x3f; // Data Fault Status Code (bits 5:0)
+    let dfsc = esr & 0x3f;
 
-    // Debug permission faults
     if dfsc >= 0x0d && dfsc <= 0x0f {
         early_println!(
             "[PF] PERMISSION FAULT: vaddr={:#x} write={} PC={:#x} DFSC={:#x}",
@@ -278,10 +553,9 @@ fn handle_data_fault(trapframe: &mut Trapframe, vaddr: usize, is_write: bool) {
             trapframe.get_current_pc(),
             dfsc
         );
-        // Print current memory mapping for this address
         if let Some(map) = task.vm_manager.search_memory_map(vaddr) {
             early_println!(
-                "[PF] Mapping found: vmarea=[{:#x}..{:#x}] perms={:#x} (R={} W={} X={} U={})",
+                "[PF] vmarea=[{:#x}..{:#x}] perms={:#x} (R={} W={} X={} U={})",
                 map.vmarea.start,
                 map.vmarea.end,
                 map.permissions,
@@ -291,30 +565,211 @@ fn handle_data_fault(trapframe: &mut Trapframe, vaddr: usize, is_write: bool) {
                 map.permissions & 0x8 != 0,
             );
         } else {
-            early_println!("[PF] No mapping found for vaddr={:#x}", vaddr);
+            early_println!("[PF] No mapping for vaddr={:#x}", vaddr);
         }
-        // Print instruction that caused the fault
-        early_println!(
-            "[PF] Registers: x0={:#x} x1={:#x} x2={:#x} x3={:#x}",
-            trapframe.regs.reg[0],
-            trapframe.regs.reg[1],
-            trapframe.regs.reg[2],
-            trapframe.regs.reg[3],
-        );
+    }
 
-        // Check if this is actually a TLB issue by reading back TTBR0
-        let current_ttbr0: u64;
-        unsafe { asm!("mrs {}, ttbr0_el1", out(reg) current_ttbr0) };
-        early_println!("[PF] Current TTBR0_EL1={:#x}", current_ttbr0);
+    let mmap_result = task.vm_manager.search_memory_map(vaddr);
+    if let Some(map) = mmap_result {
+        if map.permissions == 0 {
+            crate::println!(
+                "[darwin] SIGSEGV: NULL access vaddr={:#x} PC={:#x} LR={:#x} task={}",
+                vaddr,
+                trapframe.get_current_pc(),
+                trapframe.regs.reg[30],
+                task.name.read(),
+            );
+            crate::println!(
+                "[darwin]   x0={:#x} x1={:#x} x2={:#x} x3={:#x}",
+                trapframe.regs.reg[0],
+                trapframe.regs.reg[1],
+                trapframe.regs.reg[2],
+                trapframe.regs.reg[3],
+            );
+            crate::println!(
+                "[darwin]   x4={:#x} x5={:#x} x6={:#x} x7={:#x}",
+                trapframe.regs.reg[4],
+                trapframe.regs.reg[5],
+                trapframe.regs.reg[6],
+                trapframe.regs.reg[7],
+            );
+            crate::println!(
+                "[darwin]   x8={:#x} x9={:#x} x16={:#x} x17={:#x} sp={:#x}",
+                trapframe.regs.reg[8],
+                trapframe.regs.reg[9],
+                trapframe.regs.reg[16],
+                trapframe.regs.reg[17],
+                trapframe.sp,
+            );
+            crate::println!(
+                "[darwin]   x19={:#x} x20={:#x} x21={:#x} x22={:#x}",
+                trapframe.regs.reg[19],
+                trapframe.regs.reg[20],
+                trapframe.regs.reg[21],
+                trapframe.regs.reg[22],
+            );
+            let x21 = trapframe.regs.reg[21];
+            if x21 != 0 {
+                if let Some(rs_kva) = task.vm_manager.translate_to_kva(x21) {
+                    let rs_ptr = rs_kva as *const u64;
+                    let runtime_state_ptr = unsafe { core::ptr::read_volatile(rs_ptr.add(1)) } as usize;
+                    crate::println!("[darwin]   RuntimeState* = {:#x}", runtime_state_ptr);
+                    if runtime_state_ptr != 0 {
+                        if let Some(pc_kva) = task.vm_manager.translate_to_kva(runtime_state_ptr) {
+                            let pc_ptr = pc_kva as *const u64;
+                            let config_ptr = unsafe { core::ptr::read_volatile(pc_ptr.add(1)) } as usize;
+                            crate::println!("[darwin]   ProcessConfig* = {:#x}", config_ptr);
+                            if config_ptr != 0 {
+                                if let Some(cfg_kva) = task.vm_manager.translate_to_kva(config_ptr) {
+                                    let cfg_ptr = cfg_kva as *const u64;
+                                    crate::println!(
+                                        "[darwin]   PCFG+0x00={:#x} +0x08={:#x}",
+                                        unsafe { core::ptr::read_volatile(cfg_ptr) },
+                                        unsafe { core::ptr::read_volatile(cfg_ptr.add(1)) },
+                                    );
+                                    crate::println!(
+                                        "[darwin]   PCFG+0x10={:#x} +0x18={:#x} +0x20={:#x} +0x28={:#x}",
+                                        unsafe { core::ptr::read_volatile(cfg_ptr.add(0x10 / 8)) },
+                                        unsafe { core::ptr::read_volatile(cfg_ptr.add(0x18 / 8)) },
+                                        unsafe { core::ptr::read_volatile(cfg_ptr.add(0x20 / 8)) },
+                                        unsafe { core::ptr::read_volatile(cfg_ptr.add(0x28 / 8)) },
+                                    );
+                                    crate::println!(
+                                        "[darwin]   PCFG+0x70={:#x} +0x78={:#x} +0x80={:#x} +0x88={:#x}",
+                                        unsafe { core::ptr::read_volatile(cfg_ptr.add(0x70 / 8)) },
+                                        unsafe { core::ptr::read_volatile(cfg_ptr.add(0x78 / 8)) },
+                                        unsafe { core::ptr::read_volatile(cfg_ptr.add(0x80 / 8)) },
+                                        unsafe { core::ptr::read_volatile(cfg_ptr.add(0x88 / 8)) },
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            task.exit(128);
+            get_scheduler().schedule(trapframe);
+            return;
+        }
     }
 
     match task.vm_manager.lazy_map_page_with(access) {
         Ok(_) => (),
         Err(e) => {
             print_trap_info(trapframe, get_esr_el1());
+            crate::println!("[darwin] NULL_FAULT vaddr={:#x}", vaddr);
+            let evs_global_addr: usize = 0x400a9138;
+            match task.vm_manager.translate_to_kva(evs_global_addr) {
+                Some(kva) => {
+                    let p = kva as *const u64;
+                    let evs_ptr = unsafe { core::ptr::read_volatile(p) } as usize;
+                    crate::println!("[darwin] sExternallyViewableState = {:#x}", evs_ptr);
+                    if evs_ptr != 0 {
+                        match task.vm_manager.translate_to_kva(evs_ptr) {
+                            Some(kva2) => {
+                                let p2 = kva2 as *const u64;
+                                let rs_ptr = unsafe { core::ptr::read_volatile(p2.add(1)) } as usize;
+                                crate::println!("[darwin]   [EVS+0x8] RuntimeState* = {:#x}", rs_ptr);
+                                if rs_ptr != 0 {
+                                    match task.vm_manager.translate_to_kva(rs_ptr) {
+                                        Some(kva3) => {
+                                            let p3 = kva3 as *const u64;
+                                            let cfg_ptr = unsafe { core::ptr::read_volatile(p3.add(1)) } as usize;
+                                            crate::println!("[darwin]   [RS+0x8] ProcessConfig* = {:#x}", cfg_ptr);
+                                            if cfg_ptr != 0 {
+                                                match task.vm_manager.translate_to_kva(cfg_ptr) {
+                                                    Some(kva4) => {
+                                                        let p4 = kva4 as *const u64;
+                                                        crate::println!(
+                                                            "[darwin]   PCFG+0x70={:#x} +0x78={:#x} +0x80={:#x} +0x88={:#x}",
+                                                            unsafe { core::ptr::read_volatile(p4.add(0x70 / 8)) },
+                                                            unsafe { core::ptr::read_volatile(p4.add(0x78 / 8)) },
+                                                            unsafe { core::ptr::read_volatile(p4.add(0x80 / 8)) },
+                                                            unsafe { core::ptr::read_volatile(p4.add(0x88 / 8)) },
+                                                        );
+                                                        crate::println!(
+                                                            "[darwin]   PCFG+0x00={:#x} +0x08={:#x} +0x10={:#x} +0x18={:#x}",
+                                                            unsafe { core::ptr::read_volatile(p4) },
+                                                            unsafe { core::ptr::read_volatile(p4.add(1)) },
+                                                            unsafe { core::ptr::read_volatile(p4.add(2)) },
+                                                            unsafe { core::ptr::read_volatile(p4.add(3)) },
+                                                        );
+                                                    }
+                                                    None => crate::println!("[darwin]   translate cfg FAILED"),
+                                                }
+                                            }
+                                        }
+                                        None => crate::println!("[darwin]   translate rs FAILED"),
+                                    }
+                                }
+                            }
+                            None => crate::println!("[darwin]   translate evs_ptr FAILED"),
+                        }
+                    }
+                }
+                None => crate::println!("[darwin] translate evs_global FAILED"),
+            }
+            if vaddr < 0x1000 {
+                // addObjectForKey saves x21 at [sp+0x28] in its prologue (stp x22, x21, [sp, #0x20])
+                // strlen is a leaf (no sp change), so trapframe.sp = addObjectForKey's sp
+                // [trapframe.sp + 0x28] = generateAtlas's x21 = EVS*
+                let sp_val = trapframe.sp;
+                let saved_x21_addr = sp_val as usize + 0x28;
+                crate::println!("[darwin] trap_sp={:#x} reading saved x21 from [{:#x}]", sp_val, saved_x21_addr);
+                // Dump raw bytes around the saved registers area
+                let dump_base = sp_val as usize;
+                if let Some(kva_dump) = task.vm_manager.translate_to_kva(dump_base) {
+                    let dp = kva_dump as *const u64;
+                    crate::println!(
+                        "[darwin] sp+0x00={:#x} +0x08={:#x} +0x10={:#x} +0x18={:#x}",
+                        unsafe { core::ptr::read_volatile(dp) },
+                        unsafe { core::ptr::read_volatile(dp.add(1)) },
+                        unsafe { core::ptr::read_volatile(dp.add(2)) },
+                        unsafe { core::ptr::read_volatile(dp.add(3)) },
+                    );
+                    crate::println!(
+                        "[darwin] sp+0x20={:#x} +0x28={:#x} +0x30={:#x} +0x38={:#x}",
+                        unsafe { core::ptr::read_volatile(dp.add(4)) },
+                        unsafe { core::ptr::read_volatile(dp.add(5)) },
+                        unsafe { core::ptr::read_volatile(dp.add(6)) },
+                        unsafe { core::ptr::read_volatile(dp.add(7)) },
+                    );
+                    crate::println!(
+                        "[darwin] sp+0x40={:#x} +0x48={:#x}",
+                        unsafe { core::ptr::read_volatile(dp.add(8)) },
+                        unsafe { core::ptr::read_volatile(dp.add(9)) },
+                    );
+                }
+                if let Some(kva) = task.vm_manager.translate_to_kva(saved_x21_addr) {
+                    let evs_ptr = unsafe { core::ptr::read_volatile(kva as *const u64) } as usize;
+                    crate::println!("[darwin] generateAtlas x21(EVS*)={:#x}", evs_ptr);
+                    if evs_ptr != 0 {
+                        if let Some(kva2) = task.vm_manager.translate_to_kva(evs_ptr) {
+                            let ep = kva2 as *const u64;
+                            crate::println!(
+                                "[darwin] EVS +0x00={:#x} +0x08={:#x} +0x10={:#x} +0x18={:#x}",
+                                unsafe { core::ptr::read_volatile(ep) },
+                                unsafe { core::ptr::read_volatile(ep.add(1)) },
+                                unsafe { core::ptr::read_volatile(ep.add(2)) },
+                                unsafe { core::ptr::read_volatile(ep.add(3)) },
+                            );
+                            crate::println!(
+                                "[darwin] EVS +0x20={:#x} +0x28={:#x} +0x30={:#x} +0x38={:#x}",
+                                unsafe { core::ptr::read_volatile(ep.add(4)) },
+                                unsafe { core::ptr::read_volatile(ep.add(5)) },
+                                unsafe { core::ptr::read_volatile(ep.add(6)) },
+                                unsafe { core::ptr::read_volatile(ep.add(7)) },
+                            );
+                        }
+                    }
+                }
+                task.exit(128);
+                get_scheduler().schedule(trapframe);
+                return;
+            }
             if let Some(task) = get_scheduler().get_current_task(get_cpu().get_cpuid()) {
                 early_println!(
-                    "Task {} (PID {}) caused data fault at vaddr: {:#x} (write={}) from PC: {:#x}",
+                    "Task {} (PID {}) data fault at vaddr: {:#x} (write={}) from PC: {:#x}",
                     task.name.read(),
                     task.get_id(),
                     vaddr,
@@ -336,16 +791,12 @@ fn handle_data_fault(trapframe: &mut Trapframe, vaddr: usize, is_write: bool) {
 fn print_trap_info(trapframe: &Trapframe, esr: u64) {
     let far = get_far_el1();
     let ec = (esr >> 26) & 0x3f;
-    let iss = esr & 0x1ffffff;
-    let fsc = iss & 0x3f;
+    let fsc = esr & 0x3f;
 
-    // NOTE: Use early_println to avoid depending on heap/locking during faults.
     crate::println!("=== Trap Info ===");
     crate::println!("ESR_EL1: {:#018x} (EC={:#x}, FSC={:#x})", esr, ec, fsc);
     crate::println!("FAR_EL1: {:#018x}", far);
     crate::println!("ELR_EL1: {:#018x}", trapframe.elr);
-
-    // Print first 8 general registers
     crate::println!(
         "x0={:#x} x1={:#x} x2={:#x} x3={:#x}",
         trapframe.regs.reg[0],
@@ -360,4 +811,248 @@ fn print_trap_info(trapframe: &Trapframe, esr: u64) {
         trapframe.regs.reg[6],
         trapframe.regs.reg[7]
     );
+    crate::println!("TPIDR_EL0={:#x}", trapframe.tpidr_el0);
+    crate::println!(
+        "x8={:#x} x9={:#x} x16={:#x} x17={:#x}",
+        trapframe.regs.reg[8],
+        trapframe.regs.reg[9],
+        trapframe.regs.reg[16],
+        trapframe.regs.reg[17]
+    );
+    crate::println!(
+        "x19={:#x} x20={:#x} x21={:#x} x22={:#x}",
+        trapframe.regs.reg[19],
+        trapframe.regs.reg[20],
+        trapframe.regs.reg[21],
+        trapframe.regs.reg[22]
+    );
+    crate::println!("lr={:#x} sp={:#x}", trapframe.regs.reg[30], trapframe.sp);
+}
+
+/// Set a hardware write watchpoint on a 4-byte user-space address.
+/// EC=0x34 exception fires when EL0 writes to `addr`.
+pub fn enable_user_write_watchpoint(addr: u64) {
+    unsafe {
+        let dfr0: u64;
+        asm!("mrs {}, id_aa64dfr0_el1", out(reg) dfr0);
+        let wrps = (dfr0 >> 20) & 0xF;
+        let brps = (dfr0 >> 12) & 0xF;
+        println!(
+            "[watchpoint] ID_AA64DFR0={:#x} WRPs={} BRPs={}",
+            dfr0, wrps, brps
+        );
+
+        asm!("msr oslar_el1, xzr");
+        asm!("msr dbgwcr0_el1, xzr");
+        asm!("isb");
+        asm!("msr dbgwvr0_el1, {}", in(reg) addr);
+        // E=1, PAC=00 (any EL), LSC=11 (any access), BAS=00001111 (4 bytes at bits[12:5])
+        let wcr: u64 = (0xFu64 << 5) | (0b11 << 3) | (0b00 << 1) | 1; // = 0x1F9
+        asm!("msr dbgwcr0_el1, {}", in(reg) wcr);
+        let mut mdscr: u64;
+        asm!("mrs {}, mdscr_el1", out(reg) mdscr);
+        mdscr |= 1 << 15; // MDE=1
+        mdscr |= 1 << 13; // KDE=1
+        asm!("msr mdscr_el1, {}", in(reg) mdscr);
+        asm!("isb");
+
+        let verify_wvr: u64;
+        let verify_wcr: u64;
+        let verify_mdscr: u64;
+        asm!("mrs {}, dbgwvr0_el1", out(reg) verify_wvr);
+        asm!("mrs {}, dbgwcr0_el1", out(reg) verify_wcr);
+        asm!("mrs {}, mdscr_el1", out(reg) verify_mdscr);
+        println!(
+            "[watchpoint] set addr={:#x} WVR={:#x} WCR={:#x} MDSCR={:#x}",
+            addr, verify_wvr, verify_wcr, verify_mdscr
+        );
+    }
+}
+
+/// Disable the user watchpoint (clear DBGWCR0_EL1).
+pub fn disable_user_watchpoint() {
+    unsafe {
+        asm!("msr dbgwcr0_el1, xzr");
+        asm!("isb");
+    }
+}
+
+/// Cached kernel virtual address of the lock being traced.
+/// Non-zero means tracing is active. Checked in arch_user_trap_handler
+/// on every exception/IRQ entry to catch lock corruption.
+static mut SINGLESTEP_LOCK_KVA: usize = 0;
+
+/// Check the traced lock value on every trap entry. Called from
+/// arch_user_trap_handler BEFORE the specific handler dispatch.
+pub fn check_traced_lock(trapframe: &Trapframe, trap_kind: usize) {
+    let kva = unsafe { SINGLESTEP_LOCK_KVA };
+    if kva == 0 {
+        return;
+    }
+    let lock_val = unsafe { *(kva as *const u32) };
+    if lock_val == 0x307 || lock_val == 0 {
+        return;
+    }
+
+    let lock_user_va = trapframe.regs.reg[19];
+    let current_kva =
+        crate::task::mytask().and_then(|t| t.vm_manager.translate_to_kva(lock_user_va));
+    let current_phys =
+        crate::task::mytask().and_then(|t| t.vm_manager.translate_to_phys(lock_user_va));
+    let (cached_val, current_val) = {
+        let cv = unsafe { *(kva as *const u32) };
+        let curv = current_kva.map(|ck| unsafe { *(ck as *const u32) });
+        (cv, curv)
+    };
+
+    crate::println!(
+        "[lock_trace] LOCK={:#x} kind={} PC={:#x} x0={:#x} x2={:#x} x19={:#x} LR={:#x}",
+        lock_val,
+        trap_kind,
+        trapframe.elr,
+        trapframe.regs.reg[0],
+        trapframe.regs.reg[2],
+        trapframe.regs.reg[19],
+        trapframe.regs.reg[30],
+    );
+    crate::println!(
+        "[lock_trace] cached_kva={:#x} current_kva={:?} current_phys={:?}",
+        kva,
+        current_kva,
+        current_phys,
+    );
+    crate::println!(
+        "[lock_trace] cached_read={:#x} current_read={:?} same_page={}",
+        cached_val,
+        current_val,
+        current_kva == Some(kva),
+    );
+    unsafe {
+        SINGLESTEP_LOCK_KVA = 0;
+    }
+}
+
+static mut LOCK_WATCH_PAGE_VA: usize = 0;
+
+pub fn enable_lock_page_watch(lock_user_va: usize) {
+    let task = crate::task::mytask().unwrap();
+    let page_va = lock_user_va & !0xfff;
+    let kva = match task.vm_manager.translate_to_kva(lock_user_va) {
+        Some(k) => k,
+        None => return,
+    };
+    unsafe {
+        if SINGLESTEP_LOCK_KVA != 0 {
+            return;
+        }
+        SINGLESTEP_LOCK_KVA = kva;
+    }
+    let root_pt = match task.vm_manager.get_root_page_table() {
+        Some(pt) => pt,
+        None => return,
+    };
+    let pte = match root_pt.walk(page_va, false, task.vm_manager.get_asid()) {
+        Some(pte) => pte,
+        None => return,
+    };
+    if !pte.is_valid() {
+        return;
+    }
+    let old = pte.entry;
+    pte.entry = old & !(1u64 << 6);
+    crate::arch::aarch64::clean_dcache_to_poc_range(
+        &pte.entry as *const u64 as usize,
+        core::mem::size_of::<u64>(),
+    );
+    unsafe {
+        core::arch::asm!("tlbi vmalle1is", "dsb ish", "isb");
+    }
+    unsafe {
+        LOCK_WATCH_PAGE_VA = page_va;
+    }
+    crate::println!(
+        "[lock_watch] PTE {:#x} → RO (was {:#x}, now {:#x}) kva={:#x}",
+        page_va,
+        old,
+        pte.entry,
+        kva
+    );
+}
+
+fn handle_lock_watch_fault(trapframe: &mut Trapframe, far: usize) -> bool {
+    let page_va = unsafe { LOCK_WATCH_PAGE_VA };
+    if page_va == 0 {
+        return false;
+    }
+    if (far & !0xfff) != page_va {
+        return false;
+    }
+
+    let lock_offset = 0x150; // lock is at page_base + 0x150
+    let is_lock = (far & 0xfff) == lock_offset;
+
+    crate::println!(
+        "[lock_watch] WRITE FAULT: FAR={:#x} PC={:#x} lock_write={} x0={:#x} x2={:#x} x19={:#x}",
+        far,
+        trapframe.elr,
+        is_lock,
+        trapframe.regs.reg[0],
+        trapframe.regs.reg[2],
+        trapframe.regs.reg[19],
+    );
+
+    let task = crate::task::mytask().unwrap();
+    let root_pt = match task.vm_manager.get_root_page_table() {
+        Some(pt) => pt,
+        None => return false,
+    };
+    let pte = match root_pt.walk(page_va, false, task.vm_manager.get_asid()) {
+        Some(pte) => pte,
+        None => return false,
+    };
+    let before = pte.entry;
+    pte.entry |= 1u64 << 6;
+    let after = pte.entry;
+    crate::arch::aarch64::clean_dcache_to_poc_range(
+        &pte.entry as *const u64 as usize,
+        core::mem::size_of::<u64>(),
+    );
+    unsafe {
+        core::arch::asm!("tlbi vmalle1is", "dsb ish", "isb");
+    }
+    crate::println!(
+        "[lock_watch] restore RW: PTE before={:#x} after={:#x} ptr={:#x}",
+        before,
+        after,
+        &pte.entry as *const u64 as usize
+    );
+
+    if is_lock {
+        crate::println!(
+            "[lock_watch] *** SMOKING GUN: write to lock from PC={:#x} ***",
+            trapframe.elr
+        );
+        unsafe {
+            LOCK_WATCH_PAGE_VA = 0;
+        }
+    }
+    true
+}
+
+/// Enable software single-step and cache the lock's KVA for cheap per-step checking.
+/// After each user instruction, the SoftwareStep handler reads the lock via the
+/// cached pointer (no task lookup / page-table walk) and logs when the value changes.
+pub fn enable_singlestep_lock_trace(lock_user_va: usize) {
+    let task = crate::task::mytask().unwrap();
+    let kva = match task.vm_manager.translate_to_kva(lock_user_va) {
+        Some(k) => k,
+        None => return,
+    };
+    unsafe {
+        if SINGLESTEP_LOCK_KVA != 0 {
+            return;
+        } // already tracing
+        SINGLESTEP_LOCK_KVA = kva;
+    }
+    crate::println!("[sstep] enabled, lock_kva={:#x}", kva);
 }

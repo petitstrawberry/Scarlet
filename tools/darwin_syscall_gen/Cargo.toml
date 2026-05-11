@@ -1,0 +1,11 @@
+[package]
+name = "darwin-syscall-gen"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+clap = { version = "4.0", features = ["derive"] }
+
+[profile.release]
+opt-level = 3
+lto = true
