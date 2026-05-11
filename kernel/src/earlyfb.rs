@@ -1,5 +1,5 @@
 use font8x8::{BASIC_FONTS, UnicodeFonts};
-use limine::framebuffer::{Framebuffer, MemoryModel};
+use limine::framebuffer::{FRAMEBUFFER_RGB, Framebuffer};
 use spin::Mutex;
 
 const FONT_WIDTH: usize = 8;
@@ -46,27 +46,27 @@ impl FramebufferConsole {
         }
     }
 
-    fn init(&mut self, framebuffer: &Framebuffer<'_>) {
-        if framebuffer.memory_model() != MemoryModel::RGB {
+    fn init(&mut self, framebuffer: &Framebuffer) {
+        if framebuffer.memory_model != FRAMEBUFFER_RGB {
             return;
         }
 
-        let bytes_per_pixel = (framebuffer.bpp() as usize).div_ceil(8);
+        let bytes_per_pixel = (framebuffer.bpp as usize).div_ceil(8);
         if bytes_per_pixel != 3 && bytes_per_pixel != 4 {
             return;
         }
 
-        self.addr = framebuffer.addr() as usize;
-        self.width = framebuffer.width() as usize;
-        self.height = framebuffer.height() as usize;
-        self.pitch = framebuffer.pitch() as usize;
+        self.addr = framebuffer.address() as usize;
+        self.width = framebuffer.width as usize;
+        self.height = framebuffer.height as usize;
+        self.pitch = framebuffer.pitch as usize;
         self.bytes_per_pixel = bytes_per_pixel;
-        self.red_mask_size = framebuffer.red_mask_size();
-        self.red_mask_shift = framebuffer.red_mask_shift();
-        self.green_mask_size = framebuffer.green_mask_size();
-        self.green_mask_shift = framebuffer.green_mask_shift();
-        self.blue_mask_size = framebuffer.blue_mask_size();
-        self.blue_mask_shift = framebuffer.blue_mask_shift();
+        self.red_mask_size = framebuffer.red_mask_size;
+        self.red_mask_shift = framebuffer.red_mask_shift;
+        self.green_mask_size = framebuffer.green_mask_size;
+        self.green_mask_shift = framebuffer.green_mask_shift;
+        self.blue_mask_size = framebuffer.blue_mask_size;
+        self.blue_mask_shift = framebuffer.blue_mask_shift;
         self.cursor_x = 0;
         self.cursor_y = 0;
         self.initialized = true;
@@ -186,7 +186,7 @@ pub fn console_lock_addr() -> usize {
     &EARLY_CONSOLE as *const _ as usize
 }
 
-pub fn init(framebuffer: &Framebuffer<'_>) {
+pub fn init(framebuffer: &Framebuffer) {
     let mut console = EARLY_CONSOLE.lock();
     if console.initialized {
         return;

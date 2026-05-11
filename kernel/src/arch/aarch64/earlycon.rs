@@ -9,14 +9,14 @@ pub fn early_console_init() {
 
     #[cfg(feature = "limine")]
     {
-        let Some(response) = crate::boot::limine::FRAMEBUFFER_REQUEST.get_response() else {
+        let Some(response) = crate::boot::limine::FRAMEBUFFER_REQUEST.response() else {
             return;
         };
-        let Some(framebuffer) = response.framebuffers().next() else {
+        let Some(framebuffer) = response.framebuffers().iter().next() else {
             return;
         };
 
-        crate::earlyfb::init(&framebuffer);
+        crate::earlyfb::init(framebuffer);
     }
 }
 

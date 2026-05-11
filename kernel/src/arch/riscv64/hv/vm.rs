@@ -499,7 +499,7 @@ mod tests {
             slot_id: 0,
             guest_phys_addr: 0,
             memory_size: stage2_page_size(2),
-            host_phys_addr: stage2_page_size(2),
+            userspace_addr: stage2_page_size(2),
             flags: MemorySlotFlags::default(),
         };
 
@@ -512,7 +512,7 @@ mod tests {
             slot_id: 1,
             guest_phys_addr: stage2_page_size(1),
             memory_size: stage2_page_size(1),
-            host_phys_addr: stage2_page_size(2) + stage2_page_size(1),
+            userspace_addr: stage2_page_size(2) + stage2_page_size(1),
             flags: MemorySlotFlags::default(),
         };
         assert_eq!(

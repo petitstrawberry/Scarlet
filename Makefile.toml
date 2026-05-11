@@ -269,7 +269,7 @@ mkdir -p mkfs/dist/modules/riscv64gc-unknown-none-elf
 for dir in modules/loadable/*/; do
   name=$(basename "$dir")
   src="${dir}target/riscv64gc-unknown-none-elf/debug/${name}.lsm"
-  [ -f "$src" ] && cp "$src" mkfs/dist/modules/riscv64gc-unknown-none-elf/
+  if [ -f "$src" ]; then cp "$src" mkfs/dist/modules/riscv64gc-unknown-none-elf/; fi
 done
 '''
 
@@ -282,7 +282,7 @@ mkdir -p mkfs/dist/modules/aarch64-unknown-none-elf
 for dir in modules/loadable/*/; do
   name=$(basename "$dir")
   src="${dir}target/aarch64-unknown-none-elf/debug/${name}.lsm"
-  [ -f "$src" ] && cp "$src" mkfs/dist/modules/aarch64-unknown-none-elf/
+  if [ -f "$src" ]; then cp "$src" mkfs/dist/modules/aarch64-unknown-none-elf/; fi
 done
 '''
 
@@ -295,7 +295,7 @@ mkdir -p mkfs/dist/modules/riscv64gc-unknown-none-elf
 for dir in modules/loadable/*/; do
   name=$(basename "$dir")
   src="${dir}target/riscv64gc-unknown-none-elf/release/${name}.lsm"
-  [ -f "$src" ] && cp "$src" mkfs/dist/modules/riscv64gc-unknown-none-elf/
+  if [ -f "$src" ]; then cp "$src" mkfs/dist/modules/riscv64gc-unknown-none-elf/; fi
 done
 '''
 
@@ -308,7 +308,7 @@ mkdir -p mkfs/dist/modules/aarch64-unknown-none-elf
 for dir in modules/loadable/*/; do
   name=$(basename "$dir")
   src="${dir}target/aarch64-unknown-none-elf/release/${name}.lsm"
-  [ -f "$src" ] && cp "$src" mkfs/dist/modules/aarch64-unknown-none-elf/
+  if [ -f "$src" ]; then cp "$src" mkfs/dist/modules/aarch64-unknown-none-elf/; fi
 done
 '''
 

@@ -16,20 +16,64 @@ use core::sync::atomic::compiler_fence;
 
 static mut EARLY_BOOTINFO: MaybeUninit<BootInfo> = MaybeUninit::uninit();
 
+// VHE/hypervisor availability flags set during early boot
+static mut VHE_ENABLED: bool = false;
+static mut HV_AVAILABLE: bool = false;
+
+pub fn is_vhe_enabled() -> bool {
+    unsafe { VHE_ENABLED }
+}
+
+pub fn is_hv_available() -> bool {
+    unsafe { HV_AVAILABLE }
+}
+
+#[inline(always)]
+fn current_el() -> u64 {
+    let el: u64;
+    unsafe {
+        asm!("mrs {}, CurrentEL", out(reg) el, options(nostack));
+    }
+    (el >> 2) & 0x3
+}
+
+/// With Limine Base Revision 6, the bootloader may enter the kernel at EL2.
+/// We check CurrentEL and verify VHE by reading HCR_EL2.E2H.
+/// _EL12 register aliases are only valid when VHE is active (E2H=1).
+fn detect_el() -> (u64, bool) {
+    let el = current_el();
+    let vhe = if el == 2 {
+        // SAFETY: Reading HCR_EL2 at EL2 is a safe system register access.
+        let hcr_el2: u64;
+        unsafe {
+            asm!("mrs {}, HCR_EL2", out(reg) hcr_el2, options(nostack));
+        }
+        // E2H bit (bit 34) indicates VHE is active
+        (hcr_el2 & (1u64 << 34)) != 0
+    } else {
+        false
+    };
+    (el, vhe)
+}
+
 #[unsafe(link_section = ".init")]
 #[unsafe(no_mangle)]
 pub extern "C" fn limine_entry() -> ! {
     init_bss();
     mask_exceptions();
+
+    let (el, vhe) = detect_el();
+    unsafe {
+        VHE_ENABLED = vhe;
+        HV_AVAILABLE = vhe;
+    }
+
     prepare_el1_runtime();
 
-    let hhdm = response(HHDM_REQUEST.get_response(), "hhdm");
-    let executable = response(
-        EXECUTABLE_ADDRESS_REQUEST.get_response(),
-        "executable-address",
-    );
-    let memmap = response(MEMMAP_REQUEST.get_response(), "memmap");
-    let dtb = response(DTB_REQUEST.get_response(), "dtb");
+    let hhdm = response(HHDM_REQUEST.response(), "hhdm");
+    let executable = response(EXECUTABLE_ADDRESS_REQUEST.response(), "executable-address");
+    let memmap = response(MEMMAP_REQUEST.response(), "memmap");
+    let dtb = response(DTB_REQUEST.response(), "dtb");
 
     ensure_base_revision_supported();
 
@@ -41,43 +85,42 @@ pub extern "C" fn limine_entry() -> ! {
     let kernel_start = unsafe { &__KERNEL_SPACE_START as *const usize as usize };
     let kernel_end = unsafe { &__KERNEL_SPACE_END as *const usize as usize };
     init_limine_addressing(
-        hhdm.offset() as usize,
-        executable.physical_base() as usize,
-        executable.virtual_base() as usize,
+        hhdm.offset as usize,
+        executable.physical_base as usize,
+        executable.virtual_base as usize,
         kernel_end - kernel_start,
     );
     crate::arch::aarch64::early_console_init();
 
     compiler_fence(core::sync::atomic::Ordering::SeqCst);
 
-    if executable.virtual_base() as usize != kernel_start {
+    if executable.virtual_base as usize != kernel_start {
         panic!(
             "kernel virtual base mismatch: limine={:#x} linker={:#x}",
-            executable.virtual_base(),
-            kernel_start
+            executable.virtual_base, kernel_start
         );
     }
 
-    let dtb_ptr = dtb.dtb_ptr() as usize;
+    let dtb_ptr = dtb.dtb_ptr as usize;
     init_fdt(dtb_ptr);
 
     let usable_region = select_usable_region(memmap.entries());
     let hhdm_phys_span = hhdm_physical_span(memmap.entries());
     init_boot_direct_map_range(hhdm_phys_span.start, hhdm_phys_span.end);
-    let hhdm_offset = hhdm.offset() as usize;
+    let hhdm_offset = hhdm.offset as usize;
     let relocated_fdt = relocate_fdt(phys_to_virt(usable_region.start) as *mut u8);
     let relocated_fdt_paddr = usable_region.start;
     let reserved_bytes = relocated_fdt.size();
     let usable_memory_paddr = reserve_front(usable_region, reserved_bytes);
     let direct_map_paddr = hhdm_phys_span;
-    let initramfs_paddr = module_area(MODULE_REQUEST.get_response());
+    let initramfs_paddr = module_area(MODULE_REQUEST.response());
     let fdt_manager = FdtManager::get_manager();
     let cpu_count = fdt_manager.get_cpu_count().unwrap_or(1);
     let cmdline = fdt_manager
         .get_fdt()
         .and_then(|fdt| fdt.chosen().bootargs());
     let cpu_id = current_cpu_id();
-    let framebuffer_paddr = framebuffer_area(FRAMEBUFFER_REQUEST.get_response());
+    let framebuffer_paddr = framebuffer_area(FRAMEBUFFER_REQUEST.response());
 
     let bootinfo = BootInfo::new(
         cpu_id,
@@ -99,7 +142,11 @@ pub extern "C" fn limine_entry() -> ! {
         asm!("mrs {0}, CurrentEL", out(reg) el, options(nostack));
         el >> 2
     };
-    early_println!("Current EL: EL{}", current_el);
+    if vhe {
+        early_println!("Current EL: EL{} (VHE enabled)", current_el);
+    } else {
+        early_println!("Current EL: EL{}", current_el);
+    }
 
     unsafe {
         let stack_top = (&raw const KERNEL_STACK) as *const _ as usize + STACK_SIZE * (cpu_id + 1);

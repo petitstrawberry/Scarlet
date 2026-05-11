@@ -5,13 +5,26 @@ use alloc::boxed::Box;
 use super::reg_index::reg;
 use super::sysreg::GuestSystemRegs;
 
+const PSR_MODE_EL0T: u64 = 0x0;
+const PSR_MODE_EL1T: u64 = 0x4;
+const PSR_MODE_EL1H: u64 = 0x5;
+const PSR_MODE_MASK: u64 = 0xf;
+
+fn mode_from_pstate(spsr: u64) -> Mode {
+    match spsr & PSR_MODE_MASK {
+        PSR_MODE_EL0T => Mode::GuestUser,
+        PSR_MODE_EL1T | PSR_MODE_EL1H => Mode::GuestKernel,
+        _ => Mode::GuestKernel,
+    }
+}
+
 #[repr(C)]
 #[derive(Debug, Clone)]
 pub struct GuestVcpu {
     iregs: [u64; 31],
     pc: u64,
     spsr: u64,
-    sysregs: GuestSystemRegs,
+    pub(crate) sysregs: GuestSystemRegs,
     fpu_used: bool,
     vector_used: bool,
     vector: Option<Box<[u8; 4096]>>,
@@ -25,7 +38,7 @@ impl GuestVcpu {
         Self {
             iregs: [0; 31],
             pc: 0,
-            spsr: 0,
+            spsr: PSR_MODE_EL1H,
             sysregs: GuestSystemRegs::default(),
             fpu_used: false,
             vector_used: false,
@@ -57,6 +70,7 @@ impl GuestVcpu {
         }
         self.pc = trapframe.elr;
         self.spsr = trapframe.spsr;
+        self.mode = mode_from_pstate(self.spsr);
     }
 
     pub fn get_mmio_data(&self, reg_idx: u8, size: u8) -> u64 {
@@ -90,7 +104,9 @@ impl GuestVcpu {
     pub fn get_reg(&self, index: u32) -> Result<u64, &'static str> {
         match index {
             reg::X0..=reg::X30 => Ok(self.iregs[index as usize]),
+            reg::SP => Ok(self.sysregs.sp_el1),
             reg::PC => Ok(self.pc),
+            reg::PSTATE => Ok(self.spsr),
             _ => Err("Invalid register index"),
         }
     }
@@ -101,8 +117,17 @@ impl GuestVcpu {
                 self.iregs[index as usize] = value;
                 Ok(())
             }
+            reg::SP => {
+                self.sysregs.sp_el1 = value;
+                Ok(())
+            }
             reg::PC => {
                 self.pc = value;
+                Ok(())
+            }
+            reg::PSTATE => {
+                self.spsr = value;
+                self.mode = mode_from_pstate(value);
                 Ok(())
             }
             _ => Err("Invalid register index"),

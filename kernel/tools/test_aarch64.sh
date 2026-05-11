@@ -129,7 +129,7 @@ trap 'rm -f "$EFI_VARS_RUNTIME" "$TEMP_OUTPUT"' EXIT
 
 qemu-system-aarch64 \
     -machine virt,gic-version=3,acpi=off \
-    -cpu cortex-a57 \
+    -cpu max \
     -m 2G \
     -nographic \
     -serial mon:stdio \

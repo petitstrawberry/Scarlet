@@ -13,8 +13,9 @@ pub use dtb::DtbGenerator;
 
 pub struct CpuInfo {
     pub compatible: String,
-    pub isa: String,
-    pub mmu_type: String,
+    pub isa: Option<String>,
+    pub mmu_type: Option<String>,
+    pub enable_method: Option<String>,
 }
 
 pub struct MachineConfig {
@@ -34,6 +35,7 @@ pub struct MachineConfig {
 }
 
 impl MachineConfig {
+    #[cfg(target_arch = "riscv64")]
     pub fn qemu_virt() -> Self {
         Self {
             compatible: String::from("riscv-virtio"),
@@ -48,8 +50,37 @@ impl MachineConfig {
             num_vcpus: 1,
             cpus: vec![CpuInfo {
                 compatible: String::from("riscv"),
-                isa: String::from("rv64imafdc"),
-                mmu_type: String::from("riscv,sv48"),
+                isa: Some(String::from("rv64imafdc")),
+                mmu_type: Some(String::from("riscv,sv48")),
+                enable_method: None,
+            }],
+            initrd_base: None,
+            initrd_size: None,
+        }
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    pub fn qemu_virt() -> Self {
+        Self::qemu_virt_aarch64()
+    }
+
+    pub fn qemu_virt_aarch64() -> Self {
+        Self {
+            compatible: String::from("arm,virt"),
+            model: String::from("Scarlet QEMU Virtual Machine"),
+            address_cells: 2,
+            size_cells: 2,
+            memory_base: 0x4000_0000,
+            memory_size: 256 * 1024 * 1024,
+            timebase_frequency: 10_000_000,
+            bootargs: String::from("console=ttyAMA0"),
+            stdout_path: Some(String::from("/soc/serial@9000000")),
+            num_vcpus: 1,
+            cpus: vec![CpuInfo {
+                compatible: String::from("arm,arm-v8"),
+                isa: None,
+                mmu_type: None,
+                enable_method: Some(String::from("psci")),
             }],
             initrd_base: None,
             initrd_size: None,
