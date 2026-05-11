@@ -436,50 +436,38 @@ pub fn get_next_pending_signal(abi: &LinuxAbi) -> Option<LinuxSignal> {
     signal_state.next_deliverable_signal()
 }
 
-/// Process pending signals for a task with explicit signal state
-/// Returns true if a signal was handled and execution should be interrupted
+/// Process pending signals and dispatch to arch-specific handler.
+/// Returns true if execution should be interrupted.
+/// Arch modules must provide `arch_setup_signal_handler`.
 pub fn process_pending_signals_with_state(
     signal_state: &mut SignalState,
     trapframe: &mut Trapframe,
 ) -> bool {
     if let Some(signal) = signal_state.next_deliverable_signal() {
         let action = signal_state.get_handler(signal);
-
-        // Remove signal from pending
         signal_state.remove_pending(signal);
 
         match action {
             SignalAction::Terminate | SignalAction::ForceTerminate => {
-                // TODO: Implement actual task termination
-                // This should call task.set_state(TaskState::Terminated)
-                // and set exit code based on signal
                 crate::early_println!("Signal {}: Terminating task", signal as u32);
                 true
             }
-            SignalAction::Ignore => {
-                // Signal ignored, continue execution
-                false
-            }
+            SignalAction::Ignore => false,
             SignalAction::Stop => {
-                // TODO: Implement actual task stopping
-                // This should call task.set_state(TaskState::Stopped)
                 crate::early_println!("Signal {}: Stopping task", signal as u32);
                 true
             }
             SignalAction::Continue => {
-                // TODO: Implement actual task continuation
-                // This should call task.set_state(TaskState::Ready) if stopped
                 crate::early_println!("Signal {}: Continuing task", signal as u32);
                 false
             }
             SignalAction::Custom(handler_addr) => {
-                // Set up user-space signal handler execution
                 crate::early_println!(
                     "Signal {}: Calling custom handler at {:#x}",
                     signal as u32,
                     handler_addr
                 );
-                setup_signal_handler(trapframe, handler_addr, signal);
+                arch_setup_signal_handler(trapframe, handler_addr, signal);
                 true
             }
         }
@@ -488,74 +476,26 @@ pub fn process_pending_signals_with_state(
     }
 }
 
-/// Set up user-space signal handler execution with context save/restore.
-///
-/// Signal frame layout on user stack (simplified rt_sigframe):
-/// ```text
-///   [frame_base + 0]:   trampoline (li a7, 139; ecall) — rt_sigreturn
-///   [frame_base + 8]:   signal number
-///   [frame_base + 16]:  saved regs[0..31] (256 bytes)
-///   [frame_base + 272]: saved epc (8 bytes)
-/// ```
-pub fn setup_signal_handler(trapframe: &mut Trapframe, handler_addr: usize, signal: LinuxSignal) {
-    let mut sp = trapframe.regs.reg[2];
-
-    // trampoline(8) + signo(8) + regs(32×8) + epc(8) = 280
-    const SIGNAL_FRAME_SIZE: usize = 8 + 8 + (32 * 8) + 8;
-    sp -= SIGNAL_FRAME_SIZE;
-    sp &= !0xF;
-
-    let frame_base = sp;
-
-    let task = match mytask() {
-        Some(t) => t,
-        None => return,
-    };
-
-    unsafe {
-        // Trampoline: addi a7, x0, 139 (0x08b00893) + ecall (0x00000073)
-        let paddr = match task.vm_manager.translate_to_kva(frame_base) {
-            Some(p) => p,
-            None => return,
-        };
-        *(paddr as *mut u32) = 0x08b00893; // addi a7, x0, 139
-        *((paddr as *mut u32).add(1)) = 0x00000073; // ecall
-
-        let paddr = match task.vm_manager.translate_to_kva(frame_base + 8) {
-            Some(p) => p,
-            None => return,
-        };
-        *(paddr as *mut usize) = signal as usize;
-
-        for i in 0..32 {
-            let paddr = match task.vm_manager.translate_to_kva(frame_base + 16 + i * 8) {
-                Some(p) => p,
-                None => return,
-            };
-            *(paddr as *mut usize) = trapframe.regs.reg[i];
-        }
-
-        let paddr = match task.vm_manager.translate_to_kva(frame_base + 272) {
-            Some(p) => p,
-            None => return,
-        };
-        *(paddr as *mut u64) = trapframe.epc;
-    }
-
-    trapframe.epc = handler_addr as u64;
-    trapframe.regs.reg[2] = sp;
-    trapframe.regs.reg[10] = signal as usize; // a0 = signal number
-    trapframe.regs.reg[1] = frame_base; // ra = trampoline (rt_sigreturn)
+/// Arch-specific signal handler setup. Must be implemented by each arch module.
+pub fn arch_setup_signal_handler(
+    _trapframe: &mut Trapframe,
+    _handler_addr: usize,
+    _signal: LinuxSignal,
+) {
+    // Default: no-op. Arch modules should override via cfg.
+    #[cfg(target_arch = "riscv64")]
+    crate::abi::linux::riscv64::signal::setup_signal_handler(_trapframe, _handler_addr, _signal);
+    #[cfg(target_arch = "aarch64")]
+    crate::abi::linux::aarch64::signal::setup_signal_handler(_trapframe, _handler_addr, _signal);
 }
 
 /// Handle fatal signals that should terminate immediately
-/// This is a simplified implementation for basic signal handling
 pub fn handle_fatal_signal_immediately(signal: LinuxSignal) -> Result<(), &'static str> {
     if let Some(task) = crate::task::mytask() {
         let exit_code = match signal {
-            LinuxSignal::SIGKILL => 128 + 9,  // Standard SIGKILL exit code
-            LinuxSignal::SIGTERM => 128 + 15, // Standard SIGTERM exit code
-            LinuxSignal::SIGINT => 128 + 2,   // Standard SIGINT exit code
+            LinuxSignal::SIGKILL => 128 + 9,
+            LinuxSignal::SIGTERM => 128 + 15,
+            LinuxSignal::SIGINT => 128 + 2,
             _ => return Err("Not a fatal signal"),
         };
 
@@ -566,7 +506,6 @@ pub fn handle_fatal_signal_immediately(signal: LinuxSignal) -> Result<(), &'stat
             exit_code
         );
 
-        // Set task state to terminated and exit
         task.exit(exit_code);
         Ok(())
     } else {
@@ -574,57 +513,11 @@ pub fn handle_fatal_signal_immediately(signal: LinuxSignal) -> Result<(), &'stat
     }
 }
 
-/// Check if a signal should be handled immediately (cannot be blocked/ignored)
 pub fn is_fatal_signal(signal: LinuxSignal) -> bool {
     matches!(
         signal,
         LinuxSignal::SIGKILL | LinuxSignal::SIGTERM | LinuxSignal::SIGINT
     )
-}
-
-/// Linux sys_rt_sigreturn — Restore context saved by `setup_signal_handler`.
-///
-/// Reads the signal frame from the current user stack pointer and restores
-/// all 32 general-purpose registers plus `epc`.  The frame layout matches
-/// what `setup_signal_handler` wrote:
-///
-/// ```text
-///   [sp + 0]:   trampoline (8 bytes, ignored here)
-///   [sp + 8]:   signal number (8 bytes, ignored here)
-///   [sp + 16]:  saved regs[0..31] (256 bytes)
-///   [sp + 272]: saved epc (8 bytes)
-/// ```
-///
-/// After restoration the task resumes at the instruction that was
-/// interrupted by the signal.
-pub fn sys_rt_sigreturn(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
-    let task = match mytask() {
-        Some(t) => t,
-        None => return usize::MAX,
-    };
-
-    let frame_base = trapframe.regs.reg[2]; // SP points to signal frame
-
-    unsafe {
-        // Restore all 32 general-purpose registers
-        for i in 0..32 {
-            let paddr = match task.vm_manager.translate_to_kva(frame_base + 16 + i * 8) {
-                Some(p) => p,
-                None => return usize::MAX,
-            };
-            trapframe.regs.reg[i] = *(paddr as *const usize);
-        }
-
-        // Restore epc (program counter at time of signal)
-        let paddr = match task.vm_manager.translate_to_kva(frame_base + 272) {
-            Some(p) => p,
-            None => return usize::MAX,
-        };
-        trapframe.epc = *(paddr as *const u64);
-    }
-
-    // Return value is irrelevant — a0 was already restored from the frame.
-    0
 }
 
 /// Linux sys_tkill - Send a signal to a specific thread

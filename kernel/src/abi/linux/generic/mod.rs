@@ -302,7 +302,6 @@ syscall_table! {
     ClockGetres = 114 => time::sys_clock_getres,
     RtSigaction = 134 => signal::sys_rt_sigaction,
     RtSigprocmask = 135 => signal::sys_rt_sigprocmask,
-    RtSigreturn = 139 => signal::sys_rt_sigreturn,
     SetGid = 144 => proc::sys_setgid,
     SetUid = 146 => proc::sys_setuid,
     SetPgid = 154 => proc::sys_setpgid,

@@ -15,6 +15,8 @@ use crate::{
     vm::setup_user_stack,
 };
 
+pub mod signal;
+
 #[derive(Clone)]
 pub struct LinuxAarch64Abi(pub generic::LinuxAbi);
 
@@ -65,6 +67,10 @@ impl AbiModule for LinuxAarch64Abi {
             return Ok(result);
         }
 
+        if let Some(result) = signal::dispatch_arch_syscall(self, trapframe, syscall_number) {
+            return Ok(result);
+        }
+
         crate::println!("Invalid Syscall number: {}", syscall_number);
         Err("Invalid syscall number")
     }
@@ -88,8 +94,7 @@ impl AbiModule for LinuxAarch64Abi {
             match action {
                 generic::signal::SignalAction::Custom(handler_addr) => {
                     let trapframe = target_task.get_trapframe();
-                    // TODO: aarch64-specific setup_signal_handler
-                    generic::signal::setup_signal_handler(trapframe, handler_addr, signal);
+                    signal::setup_signal_handler(trapframe, handler_addr, signal);
                 }
                 generic::signal::SignalAction::Ignore => {}
                 generic::signal::SignalAction::ForceTerminate => {
