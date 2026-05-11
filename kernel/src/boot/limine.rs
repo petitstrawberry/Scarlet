@@ -1,9 +1,10 @@
 use limine::BaseRevision;
-use limine::memory_map::{Entry, EntryType};
+use limine::memmap;
 use limine::request::{
-    DeviceTreeBlobRequest, ExecutableAddressRequest, FramebufferRequest, HhdmRequest,
-    MemoryMapRequest, ModuleRequest, RequestsEndMarker, RequestsStartMarker,
+    DtbRequest, ExecutableAddressRequest, FramebufferRequest, FramebufferResponse, HhdmRequest,
+    MemmapRequest, MemmapResponse, ModulesRequest, ModulesResponse,
 };
+use limine::{RequestsEndMarker, RequestsStartMarker};
 
 use crate::vm::addr::boot_virt_to_phys;
 use crate::vm::vmem::MemoryArea;
@@ -26,11 +27,11 @@ pub static EXECUTABLE_ADDRESS_REQUEST: ExecutableAddressRequest = ExecutableAddr
 
 #[unsafe(link_section = ".limine_requests")]
 #[used]
-pub static MEMMAP_REQUEST: MemoryMapRequest = MemoryMapRequest::new();
+pub static MEMMAP_REQUEST: MemmapRequest = MemmapRequest::new();
 
 #[unsafe(link_section = ".limine_requests")]
 #[used]
-pub static DTB_REQUEST: DeviceTreeBlobRequest = DeviceTreeBlobRequest::new();
+pub static DTB_REQUEST: DtbRequest = DtbRequest::new();
 
 #[unsafe(link_section = ".limine_requests")]
 #[used]
@@ -38,7 +39,7 @@ pub static FRAMEBUFFER_REQUEST: FramebufferRequest = FramebufferRequest::new();
 
 #[unsafe(link_section = ".limine_requests")]
 #[used]
-pub static MODULE_REQUEST: ModuleRequest = ModuleRequest::new();
+pub static MODULE_REQUEST: ModulesRequest = ModulesRequest::new();
 
 #[unsafe(link_section = ".limine_requests_end")]
 #[used]
@@ -48,7 +49,7 @@ pub fn ensure_base_revision_supported() {
     if !BASE_REVISION.is_supported() {
         panic!(
             "unsupported Limine base revision: {:?}",
-            BASE_REVISION.loaded_revision()
+            BASE_REVISION.actual_revision()
         );
     }
 }
@@ -57,11 +58,11 @@ pub fn response<T>(response: Option<&'static T>, name: &str) -> &'static T {
     response.unwrap_or_else(|| panic!("missing Limine response: {}", name))
 }
 
-pub fn select_usable_region(memmap: &[&Entry]) -> MemoryArea {
+pub fn select_usable_region(memmap: &[&memmap::Entry]) -> MemoryArea {
     let mut best: Option<MemoryArea> = None;
 
     for entry in memmap {
-        if entry.entry_type != EntryType::USABLE {
+        if entry.type_ != memmap::MEMMAP_USABLE {
             continue;
         }
 
@@ -78,7 +79,7 @@ pub fn select_usable_region(memmap: &[&Entry]) -> MemoryArea {
     best.expect("no usable Limine memmap region")
 }
 
-pub fn hhdm_physical_span(memmap: &[&Entry]) -> MemoryArea {
+pub fn hhdm_physical_span(memmap: &[&memmap::Entry]) -> MemoryArea {
     let mut start = usize::MAX;
     let mut end = 0usize;
 
@@ -100,12 +101,10 @@ pub fn hhdm_physical_span(memmap: &[&Entry]) -> MemoryArea {
     MemoryArea::new(start, end)
 }
 
-pub fn module_area(
-    module_response: Option<&'static limine::response::ModuleResponse>,
-) -> Option<MemoryArea> {
+pub fn module_area(module_response: Option<&'static ModulesResponse>) -> Option<MemoryArea> {
     let file = module_response?.modules().first()?;
-    let start = boot_virt_to_phys(file.addr() as usize);
-    let end = start + file.size() as usize - 1;
+    let start = boot_virt_to_phys(file.data().as_ptr() as usize);
+    let end = start + file.data().len() - 1;
     Some(MemoryArea::new(start, end))
 }
 
@@ -131,13 +130,11 @@ pub fn reserve_front(area: MemoryArea, reserved_bytes: usize) -> MemoryArea {
 ///
 /// Returns the framebuffer's physical address range for use in early console
 /// after page table transition.
-pub fn framebuffer_area(
-    fb_response: Option<&'static limine::response::FramebufferResponse>,
-) -> Option<MemoryArea> {
-    let fb = fb_response?.framebuffers().next()?;
-    let addr = fb.addr() as usize;
+pub fn framebuffer_area(fb_response: Option<&'static FramebufferResponse>) -> Option<MemoryArea> {
+    let fb = fb_response?.framebuffers().first()?;
+    let addr = fb.address() as usize;
     // Calculate size: pitch * height (pitch is bytes per row)
-    let size = fb.pitch() as usize * fb.height() as usize;
+    let size = fb.pitch as usize * fb.height as usize;
     let start = boot_virt_to_phys(addr);
     let end = start + size - 1;
     Some(MemoryArea::new(start, end))

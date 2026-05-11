@@ -2,7 +2,7 @@
 # Scarlet Shell Initialization Script
 
 # Set environment variables
-export PATH=/scarlet/system/scarlet/bin
+export PATH=/scarlet/system/scarlet/bin:/scarlet/system/linux-riscv64/usr/bin
 export LD_LIBRARY_PATH=/scarlet/system/linux-riscv64/usr/lib:/scarlet/system/linux-riscv64/lib
 
 echo "Welcome to Scarlet Shell!"
@@ -11,3 +11,6 @@ echo "PATH is set to: $PATH"
 # Other initializations can go here
 
 echo "Shell initialized successfully"
+
+# # Auto-start Linux guest via KVM
+# /scarlet/system/linux-riscv64/usr/bin/lkvm run -k /scarlet/system/linux-riscv64/usr/bin/guest-Image -i /scarlet/system/linux-riscv64/usr/bin/guest-initramfs.cpio.gz -p "console=ttyS0 rdinit=/sbin/init" --console serial -n mode=none -m 512

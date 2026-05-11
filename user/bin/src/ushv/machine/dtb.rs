@@ -62,6 +62,8 @@ impl<'a> DtbGenerator<'a> {
         let cpus = fdt.begin_node("cpus")?;
         fdt.property_u32("#address-cells", 1)?;
         fdt.property_u32("#size-cells", 0)?;
+
+        #[cfg(target_arch = "riscv64")]
         fdt.property_u32("timebase-frequency", self.config.timebase_frequency)?;
 
         for (i, cpu_info) in self.config.cpus.iter().enumerate() {
@@ -70,14 +72,29 @@ impl<'a> DtbGenerator<'a> {
             fdt.property_string("device_type", "cpu")?;
             fdt.property_string("compatible", &cpu_info.compatible)?;
             fdt.property_u32("reg", i as u32)?;
-            fdt.property_string("riscv,isa", &cpu_info.isa)?;
-            fdt.property_string("mmu-type", &cpu_info.mmu_type)?;
 
-            let intc = fdt.begin_node("interrupt-controller")?;
-            fdt.property_string("compatible", "riscv,cpu-intc")?;
-            fdt.property_u32("#interrupt-cells", 1)?;
-            fdt.property_null("interrupt-controller")?;
-            fdt.end_node(intc)?;
+            #[cfg(target_arch = "riscv64")]
+            {
+                if let Some(ref isa) = cpu_info.isa {
+                    fdt.property_string("riscv,isa", isa)?;
+                }
+                if let Some(ref mmu_type) = cpu_info.mmu_type {
+                    fdt.property_string("mmu-type", mmu_type)?;
+                }
+
+                let intc = fdt.begin_node("interrupt-controller")?;
+                fdt.property_string("compatible", "riscv,cpu-intc")?;
+                fdt.property_u32("#interrupt-cells", 1)?;
+                fdt.property_null("interrupt-controller")?;
+                fdt.end_node(intc)?;
+            }
+
+            #[cfg(target_arch = "aarch64")]
+            {
+                if let Some(ref enable_method) = cpu_info.enable_method {
+                    fdt.property_string("enable-method", enable_method)?;
+                }
+            }
 
             fdt.end_node(cpu)?;
         }
@@ -93,6 +110,9 @@ impl<'a> DtbGenerator<'a> {
         fdt.property_string("compatible", "simple-bus")?;
         fdt.property_array_u32("ranges", &[])?;
 
+        #[cfg(target_arch = "aarch64")]
+        self.add_psci_node(fdt)?;
+
         for device in self.devices {
             if let Some(any_ref) = device
                 .as_any()
@@ -103,7 +123,10 @@ impl<'a> DtbGenerator<'a> {
                 {
                     self.add_device_node(fdt, &node_info)?;
                 }
-            } else if let Some(any_ref) = device
+            }
+
+            #[cfg(target_arch = "riscv64")]
+            if let Some(any_ref) = device
                 .as_any()
                 .downcast_ref::<crate::devices::plic::PlicDevice>()
                 && let Some(node_info) =
@@ -111,9 +134,28 @@ impl<'a> DtbGenerator<'a> {
             {
                 self.add_device_node(fdt, &node_info)?;
             }
+
+            #[cfg(target_arch = "aarch64")]
+            if let Some(any_ref) = device
+                .as_any()
+                .downcast_ref::<crate::devices::gic::GicDevice>()
+                && let Some(node_info) =
+                    <crate::devices::gic::GicDevice as DeviceFdt>::fdt_node(any_ref)
+            {
+                self.add_device_node(fdt, &node_info)?;
+            }
         }
 
         fdt.end_node(soc)?;
+        Ok(())
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    fn add_psci_node(&self, fdt: &mut FdtWriter) -> Result<(), Error> {
+        let psci = fdt.begin_node("psci")?;
+        fdt.property_string("compatible", "arm,psci-1.0")?;
+        fdt.property_string("method", "hvc")?;
+        fdt.end_node(psci)?;
         Ok(())
     }
 

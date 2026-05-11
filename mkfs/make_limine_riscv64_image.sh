@@ -5,7 +5,7 @@ set -eu
 cd "$(dirname "$0")" || exit 1
 
 DIST_DIR="dist"
-LIMINE_VERSION="${LIMINE_VERSION:-10.8.2}"
+LIMINE_VERSION="${LIMINE_VERSION:-11.0.0}"
 LIMINE_SRC_DIR="$DIST_DIR/limine-${LIMINE_VERSION}"
 BOOT_IMAGE="$DIST_DIR/limine-riscv64-boot.img"
 KERNEL_ELF="${KERNEL_ELF:-../bsp/riscv64-limine/target/riscv64gc-unknown-none-elf/debug/scarlet}"

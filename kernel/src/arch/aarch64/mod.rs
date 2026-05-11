@@ -9,6 +9,7 @@ use crate::mem::KERNEL_STACK;
 use crate::task::Task;
 
 pub mod boot;
+pub use boot::limine::{is_hv_available, is_vhe_enabled};
 pub mod context;
 pub mod earlycon;
 pub mod fpu;
@@ -334,7 +335,13 @@ pub fn get_user_trapvector_paddr() -> usize {
 }
 
 pub fn get_guest_trapvector_paddr() -> usize {
-    todo!("get_guest_trapvector_paddr not implemented for aarch64")
+    #[cfg(feature = "hypervisor")]
+    {
+        return hv::el2_guest_exit_vector as usize;
+    }
+
+    #[allow(unreachable_code)]
+    0
 }
 
 pub fn get_kernel_trapvector_paddr() -> usize {

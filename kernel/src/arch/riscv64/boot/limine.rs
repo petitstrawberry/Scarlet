@@ -21,23 +21,21 @@ static RISCV_BSP_HARTID_REQUEST: BspHartidRequest = BspHartidRequest::new();
 
 #[unsafe(link_section = ".limine_requests")]
 #[used]
-static PAGING_MODE_REQUEST: PagingModeRequest = PagingModeRequest::new()
-    .with_mode(paging::Mode::SV48)
-    .with_max_mode(paging::Mode::SV48)
-    .with_min_mode(paging::Mode::SV48);
+static PAGING_MODE_REQUEST: PagingModeRequest = PagingModeRequest::new(
+    paging::PagingMode::RISCV_SV48,
+    paging::PagingMode::RISCV_SV48,
+    paging::PagingMode::RISCV_SV48,
+);
 
 #[unsafe(no_mangle)]
 pub fn limine_entry() -> ! {
     init_bss();
 
-    let hhdm = response(HHDM_REQUEST.get_response(), "hhdm");
-    let executable = response(
-        EXECUTABLE_ADDRESS_REQUEST.get_response(),
-        "executable-address",
-    );
-    let memmap = response(MEMMAP_REQUEST.get_response(), "memmap");
-    let dtb = response(DTB_REQUEST.get_response(), "dtb");
-    let bsp = response(RISCV_BSP_HARTID_REQUEST.get_response(), "riscv-bsp-hartid");
+    let hhdm = response(HHDM_REQUEST.response(), "hhdm");
+    let executable = response(EXECUTABLE_ADDRESS_REQUEST.response(), "executable-address");
+    let memmap = response(MEMMAP_REQUEST.response(), "memmap");
+    let dtb = response(DTB_REQUEST.response(), "dtb");
+    let bsp = response(RISCV_BSP_HARTID_REQUEST.response(), "riscv-bsp-hartid");
 
     ensure_base_revision_supported();
 
@@ -49,39 +47,38 @@ pub fn limine_entry() -> ! {
     let kernel_start = unsafe { &__KERNEL_SPACE_START as *const usize as usize };
     let kernel_end = unsafe { &__KERNEL_SPACE_END as *const usize as usize };
     init_limine_addressing(
-        hhdm.offset() as usize,
-        executable.physical_base() as usize,
-        executable.virtual_base() as usize,
+        hhdm.offset as usize,
+        executable.physical_base as usize,
+        executable.virtual_base as usize,
         kernel_end - kernel_start,
     );
 
-    if executable.virtual_base() as usize != kernel_start {
+    if executable.virtual_base as usize != kernel_start {
         panic!(
             "kernel virtual base mismatch: limine={:#x} linker={:#x}",
-            executable.virtual_base(),
-            kernel_start
+            executable.virtual_base, kernel_start
         );
     }
 
-    init_fdt(dtb.dtb_ptr() as usize);
+    init_fdt(dtb.dtb_ptr as usize);
 
     let usable_region = select_usable_region(memmap.entries());
     let hhdm_phys_span = hhdm_physical_span(memmap.entries());
     init_boot_direct_map_range(hhdm_phys_span.start, hhdm_phys_span.end);
-    let hhdm_offset = hhdm.offset() as usize;
+    let hhdm_offset = hhdm.offset as usize;
     let relocated_fdt = relocate_fdt(phys_to_virt(usable_region.start) as *mut u8);
     let relocated_fdt_paddr = usable_region.start;
     let reserved_bytes = relocated_fdt.size();
     let usable_memory_paddr = reserve_front(usable_region, reserved_bytes);
     let direct_map_paddr = hhdm_phys_span;
-    let initramfs_paddr = module_area(MODULE_REQUEST.get_response());
+    let initramfs_paddr = module_area(MODULE_REQUEST.response());
     let fdt_manager = FdtManager::get_manager();
     let cpu_count = fdt_manager.get_cpu_count().unwrap_or(1);
     let cmdline = fdt_manager
         .get_fdt()
         .and_then(|fdt| fdt.chosen().bootargs());
     let bootinfo = BootInfo::new(
-        bsp.bsp_hartid() as usize,
+        bsp.bsp_hartid as usize,
         cpu_count,
         usable_memory_paddr,
         direct_map_paddr,
