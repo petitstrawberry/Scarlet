@@ -712,6 +712,7 @@ fn build_loadable_module(
             module_dir.display()
         )
     })?;
+    let package_name = read_cargo_package_name(&module_dir);
 
     let target_path = if Path::new(target).is_absolute() {
         PathBuf::from(target)
@@ -775,13 +776,19 @@ fn build_loadable_module(
     } else if object_files.len() == 1 {
         Some(object_files.remove(0))
     } else {
-        let normalized = cargo_key_to_rust_identifier(&module_name);
+        let mut normalized_names = vec![cargo_key_to_rust_identifier(&module_name)];
+        if let Some(package_name) = package_name.as_deref() {
+            let normalized_package_name = cargo_key_to_rust_identifier(package_name);
+            if !normalized_names.contains(&normalized_package_name) {
+                normalized_names.push(normalized_package_name);
+            }
+        }
         let candidates: Vec<_> = object_files
             .into_iter()
             .filter(|path| {
                 path.file_stem()
                     .and_then(|s| s.to_str())
-                    .map(|stem| stem.starts_with(&normalized))
+                    .map(|stem| normalized_names.iter().any(|name| stem.starts_with(name)))
                     .unwrap_or(false)
             })
             .collect();
@@ -863,6 +870,32 @@ fn read_module_toml_name(module_dir: &Path) -> Option<String> {
             return Some(value[1..value.len() - 1].to_string());
         }
     }
+    None
+}
+
+fn read_cargo_package_name(module_dir: &Path) -> Option<String> {
+    let content = fs::read_to_string(module_dir.join("Cargo.toml")).ok()?;
+    let mut in_package_section = false;
+
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('[') {
+            in_package_section = trimmed == "[package]";
+            continue;
+        }
+
+        if in_package_section
+            && trimmed.starts_with("name")
+            && let Some(eq_pos) = trimmed.find('=')
+            && let Some(value) = trimmed.get(eq_pos + 1..).map(str::trim)
+            && value.starts_with('"')
+            && value.ends_with('"')
+            && value.len() >= 2
+        {
+            return Some(value[1..value.len() - 1].to_string());
+        }
+    }
+
     None
 }
 
