@@ -71,6 +71,15 @@ fn write_icc_eoir1_el1(v: u32) {
 }
 
 #[inline]
+fn current_el() -> u64 {
+    let el: u64;
+    unsafe {
+        asm!("mrs {}, CurrentEL", out(reg) el, options(nostack));
+    }
+    (el >> 2) & 0x3
+}
+
+#[inline]
 fn write_icc_sre_el1(v: u64) {
     unsafe {
         asm!("msr ICC_SRE_EL1, {0}", "isb", in(reg) v, options(nostack));
@@ -249,7 +258,11 @@ impl GicV3 {
         // ICC_SRE_EL2.SRE must also be 1 to allow ICH_*_EL2 register access
         // from the hypervisor (VGIC save/restore). Without this, any MRS/MSR
         // on ICH_HCR_EL2, ICH_VMCR_EL2, etc. traps with EC=0x18.
-        write_icc_sre_el2(1);
+        // Only write ICC_SRE_EL2 when running at EL2; accessing EL2 registers
+        // from EL1 causes an Undefined Instruction exception.
+        if current_el() >= 2 {
+            write_icc_sre_el2(1);
+        }
         write_icc_sre_el1(1);
         write_icc_pmr_el1(0xFF);
         write_icc_bpr1_el1(0);
