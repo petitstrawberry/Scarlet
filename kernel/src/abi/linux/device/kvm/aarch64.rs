@@ -491,7 +491,7 @@ pub fn write_firmware_exit(kvm_run: &mut KvmRun, exit: &VmExit, vcpu: &VcpuRef) 
 /// Returns `Some(value)` if recognized, `None` if not an AArch64 cap.
 pub fn check_extension(cap: usize) -> Option<usize> {
     const KVM_CAP_ARM_VM_IPA_SIZE: usize = 165;
-    const KVM_CAP_ARM_PSCI: usize = 182;
+    const KVM_CAP_ARM_PSCI: usize = 87;
     const KVM_CAP_ARM_SET_DEVICE_ADDR: usize = 177;
     const KVM_CAP_ARM_PSCI_0_2: usize = 102;
 
