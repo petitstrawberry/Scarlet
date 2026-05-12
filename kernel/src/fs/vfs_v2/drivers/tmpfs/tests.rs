@@ -849,4 +849,146 @@ mod tests {
 
         crate::println!("[Test] Socket VFS integration test passed!");
     }
+
+    // ===== RENAME / MOVE TESTS =====
+
+    /// Rename a regular file within the same directory
+    #[test_case]
+    fn test_rename_file_same_dir() {
+        let tmpfs = TmpFS::new(0);
+        let vfs = VfsManager::new_with_root(tmpfs);
+
+        vfs.create_file("/hello.txt", FileType::RegularFile)
+            .unwrap();
+        vfs.rename("/hello.txt", "/world.txt").unwrap();
+
+        // Old path must no longer exist
+        assert!(vfs.resolve_path("/hello.txt").is_err());
+
+        // New path must exist and be a regular file
+        let meta = vfs.metadata("/world.txt").unwrap();
+        assert_eq!(meta.file_type, FileType::RegularFile);
+    }
+
+    /// Move a file to a different directory
+    #[test_case]
+    fn test_rename_file_different_dir() {
+        let tmpfs = TmpFS::new(0);
+        let vfs = VfsManager::new_with_root(tmpfs);
+
+        vfs.create_dir("/src").unwrap();
+        vfs.create_dir("/dst").unwrap();
+        vfs.create_file("/src/file.txt", FileType::RegularFile)
+            .unwrap();
+
+        vfs.rename("/src/file.txt", "/dst/file.txt").unwrap();
+
+        assert!(vfs.resolve_path("/src/file.txt").is_err());
+        let meta = vfs.metadata("/dst/file.txt").unwrap();
+        assert_eq!(meta.file_type, FileType::RegularFile);
+    }
+
+    /// Rename a directory
+    #[test_case]
+    fn test_rename_directory() {
+        let tmpfs = TmpFS::new(0);
+        let vfs = VfsManager::new_with_root(tmpfs);
+
+        vfs.create_dir("/olddir").unwrap();
+        vfs.create_file("/olddir/child.txt", FileType::RegularFile)
+            .unwrap();
+
+        vfs.rename("/olddir", "/newdir").unwrap();
+
+        assert!(vfs.resolve_path("/olddir").is_err());
+        // The directory and its contents must be reachable via the new path
+        let meta = vfs.metadata("/newdir").unwrap();
+        assert_eq!(meta.file_type, FileType::Directory);
+        let meta_child = vfs.metadata("/newdir/child.txt").unwrap();
+        assert_eq!(meta_child.file_type, FileType::RegularFile);
+    }
+
+    /// Renaming to the same path is a no-op
+    #[test_case]
+    fn test_rename_same_path() {
+        let tmpfs = TmpFS::new(0);
+        let vfs = VfsManager::new_with_root(tmpfs);
+
+        vfs.create_file("/same.txt", FileType::RegularFile).unwrap();
+        vfs.rename("/same.txt", "/same.txt").unwrap();
+
+        let meta = vfs.metadata("/same.txt").unwrap();
+        assert_eq!(meta.file_type, FileType::RegularFile);
+    }
+
+    /// Rename replaces an existing file at the destination
+    #[test_case]
+    fn test_rename_replaces_existing_file() {
+        let tmpfs = TmpFS::new(0);
+        let vfs = VfsManager::new_with_root(tmpfs);
+
+        vfs.create_file("/a.txt", FileType::RegularFile).unwrap();
+        vfs.create_file("/b.txt", FileType::RegularFile).unwrap();
+
+        vfs.rename("/a.txt", "/b.txt").unwrap();
+
+        assert!(vfs.resolve_path("/a.txt").is_err());
+        let meta = vfs.metadata("/b.txt").unwrap();
+        assert_eq!(meta.file_type, FileType::RegularFile);
+    }
+
+    /// Rename fails when destination is a non-empty directory
+    #[test_case]
+    fn test_rename_fails_nonempty_dst_dir() {
+        use crate::fs::FileSystemErrorKind;
+
+        let tmpfs = TmpFS::new(0);
+        let vfs = VfsManager::new_with_root(tmpfs);
+
+        vfs.create_dir("/src_dir").unwrap();
+        vfs.create_dir("/dst_dir").unwrap();
+        vfs.create_file("/dst_dir/occupied.txt", FileType::RegularFile)
+            .unwrap();
+
+        let err = vfs.rename("/src_dir", "/dst_dir").unwrap_err();
+        assert_eq!(err.kind, FileSystemErrorKind::DirectoryNotEmpty);
+    }
+
+    /// Rename fails when source does not exist
+    #[test_case]
+    fn test_rename_fails_source_not_found() {
+        use crate::fs::FileSystemErrorKind;
+
+        let tmpfs = TmpFS::new(0);
+        let vfs = VfsManager::new_with_root(tmpfs);
+
+        let err = vfs.rename("/nonexistent.txt", "/new.txt").unwrap_err();
+        assert_eq!(err.kind, FileSystemErrorKind::NotFound);
+    }
+
+    /// Rename preserves file content
+    #[test_case]
+    fn test_rename_preserves_content() {
+        let tmpfs = TmpFS::new(0);
+        let vfs = VfsManager::new_with_root(tmpfs);
+
+        vfs.create_file("/original.txt", FileType::RegularFile)
+            .unwrap();
+
+        // Write some content
+        let file = vfs.open("/original.txt", 0x02).unwrap();
+        if let crate::object::KernelObject::File(f) = file {
+            f.write(b"rename test content").unwrap();
+        }
+
+        vfs.rename("/original.txt", "/renamed.txt").unwrap();
+
+        // Read back via the new path
+        let file = vfs.open("/renamed.txt", 0x01).unwrap();
+        if let crate::object::KernelObject::File(f) = file {
+            let mut buf = [0u8; 64];
+            let len = f.read(&mut buf).unwrap();
+            assert_eq!(&buf[..len], b"rename test content");
+        }
+    }
 }

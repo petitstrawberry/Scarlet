@@ -4590,14 +4590,13 @@ pub fn sys_renameat2(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
             }
         }
 
-        // Implement rename as a combination of copy and remove (simplified approach)
-        // This is not ideal for atomic operations but works with current VFS API
-        // TODO: Implement proper atomic rename operation in VfsManager
-
-        // For now, return not implemented for most cases
-        // In practice, this would need proper filesystem-level rename support
-        crate::println!("sys_renameat2: Full rename operation not yet implemented");
-        0 // Return success for basic compatibility (temporary)
+        match vfs.rename(&old_absolute_path, &new_absolute_path) {
+            Ok(()) => 0,
+            Err(e) => {
+                crate::println!("sys_renameat2: rename failed: {:?}", e);
+                usize::MAX
+            }
+        }
     }
 }
 

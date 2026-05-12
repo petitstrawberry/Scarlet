@@ -1207,6 +1207,96 @@ impl VfsManager {
         Ok(())
     }
 
+    /// Rename or move a file or directory
+    ///
+    /// Moves the entry at `old_path` to `new_path`.  If an entry already exists at
+    /// `new_path` it is atomically replaced according to POSIX rename(2) semantics:
+    /// - A file may replace another file.
+    /// - A directory may replace another **empty** directory.
+    /// - A file may not replace a directory (and vice-versa).
+    ///
+    /// Both paths must reside on the same mounted filesystem; cross-device renames are
+    /// not supported and will return a `CrossDevice` error.
+    ///
+    /// # Arguments
+    /// * `old_path` - Path of the existing entry to rename/move
+    /// * `new_path` - Destination path
+    ///
+    /// # Returns
+    /// `Ok(())` on success.
+    ///
+    /// # Errors
+    /// * `CrossDevice`      - Source and destination are on different filesystems
+    /// * `NotFound`         - `old_path` does not exist
+    /// * `IsADirectory`     - Source is a non-directory but destination is a directory
+    /// * `NotADirectory`    - Source is a directory but destination is a non-directory
+    /// * `DirectoryNotEmpty`- Destination is a non-empty directory
+    /// * `NotSupported`     - Underlying filesystem does not support rename
+    pub fn rename(&self, old_path: &str, new_path: &str) -> Result<(), FileSystemError> {
+        // Resolve old path (do not follow the final symlink, like POSIX rename)
+        let options = PathResolutionOptions::no_follow();
+        let (old_entry, _old_mount) = self.resolve_path_with_options(old_path, &options)?;
+
+        // Split both paths into (parent, name)
+        let (old_parent_path, old_name) = self.split_parent_child(old_path)?;
+        let (new_parent_path, new_name) = self.split_parent_child(new_path)?;
+
+        // Resolve parent directories (follow symlinks in intermediate components)
+        let (old_parent_entry, _old_parent_mount) = self.resolve_path(&old_parent_path)?;
+        let (new_parent_entry, _new_parent_mount) = self.resolve_path(&new_parent_path)?;
+
+        let old_parent_node = old_parent_entry.node();
+        let new_parent_node = new_parent_entry.node();
+
+        // Both parents must be on the same filesystem
+        let old_fs = old_parent_node
+            .filesystem()
+            .and_then(|w| w.upgrade())
+            .ok_or_else(|| {
+                FileSystemError::new(
+                    FileSystemErrorKind::NotSupported,
+                    "No filesystem reference for source parent",
+                )
+            })?;
+
+        let new_fs = new_parent_node
+            .filesystem()
+            .and_then(|w| w.upgrade())
+            .ok_or_else(|| {
+                FileSystemError::new(
+                    FileSystemErrorKind::NotSupported,
+                    "No filesystem reference for destination parent",
+                )
+            })?;
+
+        if !Arc::ptr_eq(&old_fs, &new_fs) {
+            return Err(vfs_error(
+                FileSystemErrorKind::CrossDevice,
+                "Rename cannot cross filesystem boundaries",
+            ));
+        }
+
+        // Delegate to the filesystem driver
+        old_fs.rename(&old_parent_node, &old_name, &new_parent_node, &new_name)?;
+
+        // Update VfsEntry caches:
+        // 1. Remove the old entry from its parent cache
+        old_parent_entry.remove_child(&old_name);
+
+        // 2. If a destination entry existed in the cache, evict it
+        new_parent_entry.remove_child(&new_name);
+
+        // 3. Re-attach the (now renamed) entry under the new name in the new parent cache
+        let new_entry = VfsEntry::new(
+            Some(Arc::downgrade(&new_parent_entry)),
+            new_name.clone(),
+            old_entry.node(),
+        );
+        new_parent_entry.add_child(new_name, new_entry);
+
+        Ok(())
+    }
+
     // Helper methods
 
     /// Split a path into parent directory and filename
