@@ -4598,7 +4598,7 @@ pub fn sys_renameat2(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> u
             Ok(()) => 0,
             Err(e) => {
                 crate::println!("sys_renameat2: rename failed: {:?}", e);
-                usize::MAX
+                errno::to_result(errno::from_fs_error(&e))
             }
         }
     }

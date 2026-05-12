@@ -428,7 +428,7 @@ impl FileSystemOperations for TmpFS {
             ));
         }
 
-        let same_parent = core::ptr::eq(tmp_old_parent as *const _, tmp_new_parent as *const _);
+        let same_parent = Arc::ptr_eq(old_parent, new_parent);
 
         // No-op: same parent and same name
         if same_parent && old_name == new_name {
@@ -472,7 +472,10 @@ impl FileSystemOperations for TmpFS {
                     ));
                 }
                 if dst_is_dir {
-                    let existing_tmp = existing.as_any().downcast_ref::<TmpNode>().unwrap();
+                    let existing_tmp = existing
+                        .as_any()
+                        .downcast_ref::<TmpNode>()
+                        .expect("Destination node should be TmpNode");
                     if !existing_tmp.children.read().is_empty() {
                         children.insert(old_name.clone(), node);
                         return Err(FileSystemError::new(
@@ -528,7 +531,10 @@ impl FileSystemOperations for TmpFS {
                         ));
                     }
                     if dst_is_dir {
-                        let existing_tmp = existing.as_any().downcast_ref::<TmpNode>().unwrap();
+                        let existing_tmp = existing
+                            .as_any()
+                            .downcast_ref::<TmpNode>()
+                            .expect("Destination node should be TmpNode");
                         if !existing_tmp.children.read().is_empty() {
                             return Err(FileSystemError::new(
                                 FileSystemErrorKind::DirectoryNotEmpty,
