@@ -275,6 +275,12 @@ Additional features in user libraries:
 5. Write/update documentation
 6. Commit frequently with descriptive messages
 
+### Architecture-Specific Code Separation
+
+- **No `#[cfg(target_arch)]` in common code**: Architecture-specific logic must live in `kernel/src/arch/{riscv64,aarch64}/`. The common `kernel/src/` must not contain `#[cfg(target_arch = "...")]` blocks.
+- **Expose arch-specific functions via `crate::arch::*`**: Each arch module (`riscv64`, `aarch64`) exports a unified public API. Common code calls `crate::arch::function_name()` without conditional compilation.
+- **Both arches must implement the same public API**: If `riscv64` exports `fn start_secondary_cpus()`, `aarch64` must export the same function signature (even if it's a no-op).
+
 ### Key Principles
 
 - **Safety First**: Leverage Rust's safety guarantees
