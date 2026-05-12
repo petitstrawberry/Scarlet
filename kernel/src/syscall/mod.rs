@@ -40,7 +40,7 @@
 //! - FileSeek (300), FileTruncate (301), FileMetadata (302)
 //!
 //! ### VFS Operations (400-499)
-//! - VfsOpen (400), VfsRemove (401), VfsCreateFile (402), VfsCreateDirectory (403), VfsChangeDirectory (404), VfsTruncate (405), VfsCreateSymlink (406), VfsReadlink (407), VfsGetCwdPath (408)
+//! - VfsOpen (400), VfsRemove (401), VfsCreateFile (402), VfsCreateDirectory (403), VfsChangeDirectory (404), VfsTruncate (405), VfsCreateSymlink (406), VfsReadlink (407), VfsGetCwdPath (408), VfsRename (409)
 //!
 //! ### Filesystem Operations (500-599)
 //! - FsMount (500), FsUmount (501), FsPivotRoot (502)
@@ -80,7 +80,7 @@ use crate::arch::Trapframe;
 use crate::fs::vfs_v2::syscall::{
     sys_fs_mount, sys_fs_pivot_root, sys_fs_umount, sys_vfs_change_directory,
     sys_vfs_create_directory, sys_vfs_create_file, sys_vfs_create_symlink, sys_vfs_get_cwd_path,
-    sys_vfs_open, sys_vfs_readlink, sys_vfs_remove, sys_vfs_truncate,
+    sys_vfs_open, sys_vfs_readlink, sys_vfs_remove, sys_vfs_rename, sys_vfs_truncate,
 };
 use crate::ipc::syscall::{
     sys_event_channel_create, sys_event_handler_register, sys_event_handler_register_native,
@@ -225,6 +225,7 @@ syscall_table! {
     VfsCreateSymlink = 406 => sys_vfs_create_symlink, // Create symbolic links through VFS
     VfsReadlink = 407 => sys_vfs_readlink,     // Read symbolic link target through VFS
     VfsGetCwdPath = 408 => sys_vfs_get_cwd_path, // Get current working directory path
+    VfsRename = 409 => sys_vfs_rename,         // Rename or move files/directories through VFS
 
     // === Filesystem Operations ===
     FsMount = 500 => sys_fs_mount,         // Mount filesystem

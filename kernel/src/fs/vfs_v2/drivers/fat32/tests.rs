@@ -2509,3 +2509,188 @@ fn test_fat32_case_insensitive_behavior() {
     early_println!("[Test] ✓ All case insensitive lookups successful");
     early_println!("[Test] FAT32 case insensitive behavior test completed successfully");
 }
+
+// ========== FAT32 Rename Tests ==========
+
+#[test_case]
+fn test_fat32_rename_file_same_dir() {
+    early_println!("[Test] Testing FAT32 rename file within same directory...");
+
+    let mock_device = create_test_fat32_device();
+    let fat32_fs =
+        Fat32FileSystem::new(Arc::new(mock_device)).expect("Failed to create FAT32 filesystem");
+
+    let root_node = fat32_fs.root_node();
+    let src_name = alloc::string::String::from("ren_src.txt");
+    let dst_name = alloc::string::String::from("ren_dst.txt");
+
+    fat32_fs
+        .create(
+            &root_node,
+            &src_name,
+            crate::fs::FileType::RegularFile,
+            0o644,
+        )
+        .expect("[Test] Failed to create source file");
+
+    fat32_fs
+        .rename(&root_node, &src_name, &root_node, &dst_name)
+        .expect("[Test] rename failed");
+
+    assert!(
+        fat32_fs.lookup(&root_node, &src_name).is_err(),
+        "[Test] Source file should not exist after rename"
+    );
+    fat32_fs
+        .lookup(&root_node, &dst_name)
+        .expect("[Test] Destination file not found after rename");
+
+    early_println!("[Test] ✓ FAT32 rename file same dir passed");
+}
+
+#[test_case]
+fn test_fat32_rename_file_cross_dir() {
+    early_println!("[Test] Testing FAT32 rename file across directories...");
+
+    let mock_device = create_test_fat32_device();
+    let fat32_fs =
+        Fat32FileSystem::new(Arc::new(mock_device)).expect("Failed to create FAT32 filesystem");
+
+    let root_node = fat32_fs.root_node();
+
+    let src_dir = fat32_fs
+        .create(
+            &root_node,
+            &alloc::string::String::from("ren_srcdir"),
+            crate::fs::FileType::Directory,
+            0o755,
+        )
+        .expect("[Test] Failed to create source directory");
+
+    let dst_dir = fat32_fs
+        .create(
+            &root_node,
+            &alloc::string::String::from("ren_dstdir"),
+            crate::fs::FileType::Directory,
+            0o755,
+        )
+        .expect("[Test] Failed to create destination directory");
+
+    let file_name = alloc::string::String::from("moveme.txt");
+    fat32_fs
+        .create(
+            &src_dir,
+            &file_name,
+            crate::fs::FileType::RegularFile,
+            0o644,
+        )
+        .expect("[Test] Failed to create file in source dir");
+
+    fat32_fs
+        .rename(&src_dir, &file_name, &dst_dir, &file_name)
+        .expect("[Test] cross-dir rename failed");
+
+    assert!(
+        fat32_fs.lookup(&src_dir, &file_name).is_err(),
+        "[Test] File should not exist in source dir after move"
+    );
+    fat32_fs
+        .lookup(&dst_dir, &file_name)
+        .expect("[Test] File not found in destination dir after move");
+
+    early_println!("[Test] ✓ FAT32 rename file cross dir passed");
+}
+
+#[test_case]
+fn test_fat32_rename_same_path() {
+    early_println!("[Test] Testing FAT32 rename with same source and destination...");
+
+    let mock_device = create_test_fat32_device();
+    let fat32_fs =
+        Fat32FileSystem::new(Arc::new(mock_device)).expect("Failed to create FAT32 filesystem");
+
+    let root_node = fat32_fs.root_node();
+    let name = alloc::string::String::from("noop_rename.txt");
+
+    fat32_fs
+        .create(&root_node, &name, crate::fs::FileType::RegularFile, 0o644)
+        .expect("[Test] Failed to create file");
+
+    fat32_fs
+        .rename(&root_node, &name, &root_node, &name)
+        .expect("[Test] same-path rename failed");
+
+    fat32_fs
+        .lookup(&root_node, &name)
+        .expect("[Test] File should still exist after same-path rename");
+
+    early_println!("[Test] ✓ FAT32 rename same path passed");
+}
+
+#[test_case]
+fn test_fat32_rename_replace_existing_file() {
+    early_println!("[Test] Testing FAT32 rename replacing an existing destination file...");
+
+    let mock_device = create_test_fat32_device();
+    let fat32_fs =
+        Fat32FileSystem::new(Arc::new(mock_device)).expect("Failed to create FAT32 filesystem");
+
+    let root_node = fat32_fs.root_node();
+    let src_name = alloc::string::String::from("rep_src.txt");
+    let dst_name = alloc::string::String::from("rep_dst.txt");
+
+    fat32_fs
+        .create(
+            &root_node,
+            &src_name,
+            crate::fs::FileType::RegularFile,
+            0o644,
+        )
+        .expect("[Test] Failed to create source file");
+    fat32_fs
+        .create(
+            &root_node,
+            &dst_name,
+            crate::fs::FileType::RegularFile,
+            0o644,
+        )
+        .expect("[Test] Failed to create destination file");
+
+    fat32_fs
+        .rename(&root_node, &src_name, &root_node, &dst_name)
+        .expect("[Test] rename over existing file failed");
+
+    assert!(
+        fat32_fs.lookup(&root_node, &src_name).is_err(),
+        "[Test] Source file should not exist after rename"
+    );
+    fat32_fs
+        .lookup(&root_node, &dst_name)
+        .expect("[Test] Destination file not found after rename");
+
+    early_println!("[Test] ✓ FAT32 rename replace existing file passed");
+}
+
+#[test_case]
+fn test_fat32_rename_missing_source() {
+    early_println!("[Test] Testing FAT32 rename of non-existent source...");
+
+    let mock_device = create_test_fat32_device();
+    let fat32_fs =
+        Fat32FileSystem::new(Arc::new(mock_device)).expect("Failed to create FAT32 filesystem");
+
+    let root_node = fat32_fs.root_node();
+
+    let result = fat32_fs.rename(
+        &root_node,
+        &alloc::string::String::from("does_not_exist.txt"),
+        &root_node,
+        &alloc::string::String::from("anywhere.txt"),
+    );
+    assert!(
+        result.is_err(),
+        "[Test] Rename of missing source should fail"
+    );
+
+    early_println!("[Test] ✓ FAT32 rename missing source passed");
+}
