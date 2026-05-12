@@ -2045,3 +2045,148 @@ fn test_ext2_device_file_creation() {
         }
     }
 }
+
+// ========== ext2 Rename Tests ==========
+
+/// Test renaming a file within the same directory (virtio-blk backed)
+#[test_case]
+#[cfg(target_arch = "riscv64")]
+fn test_ext2_rename_file_same_dir() {
+    use crate::drivers::block::virtio_blk::VirtioBlockDevice;
+
+    let fs_driver_manager = get_fs_driver_manager();
+    let base_addr = map_ext2_blk();
+    let virtio_device = VirtioBlockDevice::new(base_addr);
+    let block_device_arc = Arc::new(virtio_device);
+
+    match fs_driver_manager.create_from_block("ext2", block_device_arc, 512) {
+        Ok(fs) => {
+            let root_node = fs.root_node();
+
+            let src_name = alloc::string::String::from("rename_src.txt");
+            let dst_name = alloc::string::String::from("rename_dst.txt");
+
+            fs.create(
+                &root_node,
+                &src_name,
+                crate::fs::FileType::RegularFile,
+                0o644,
+            )
+            .expect("[Test] Failed to create source file for rename");
+
+            fs.rename(&root_node, &src_name, &root_node, &dst_name)
+                .expect("[Test] rename failed");
+
+            assert!(
+                fs.lookup(&root_node, &src_name).is_err(),
+                "[Test] Source file should not exist after rename"
+            );
+            fs.lookup(&root_node, &dst_name)
+                .expect("[Test] Destination file not found after rename");
+
+            early_println!("[Test] ✓ ext2 rename file same dir passed");
+        }
+        Err(_) => {
+            early_println!(
+                "[Test] ext2 filesystem creation failed (mock device), skipping rename test"
+            );
+        }
+    }
+}
+
+/// Test moving a file to a different directory (virtio-blk backed)
+#[test_case]
+#[cfg(target_arch = "riscv64")]
+fn test_ext2_rename_file_cross_dir() {
+    use crate::drivers::block::virtio_blk::VirtioBlockDevice;
+
+    let fs_driver_manager = get_fs_driver_manager();
+    let base_addr = map_ext2_blk();
+    let virtio_device = VirtioBlockDevice::new(base_addr);
+    let block_device_arc = Arc::new(virtio_device);
+
+    match fs_driver_manager.create_from_block("ext2", block_device_arc, 512) {
+        Ok(fs) => {
+            let root_node = fs.root_node();
+
+            let src_dir = fs
+                .create(
+                    &root_node,
+                    &alloc::string::String::from("rename_srcdir"),
+                    crate::fs::FileType::Directory,
+                    0o755,
+                )
+                .expect("[Test] Failed to create source directory");
+
+            let dst_dir = fs
+                .create(
+                    &root_node,
+                    &alloc::string::String::from("rename_dstdir"),
+                    crate::fs::FileType::Directory,
+                    0o755,
+                )
+                .expect("[Test] Failed to create destination directory");
+
+            let file_name = alloc::string::String::from("moveme.txt");
+            fs.create(
+                &src_dir,
+                &file_name,
+                crate::fs::FileType::RegularFile,
+                0o644,
+            )
+            .expect("[Test] Failed to create source file");
+
+            fs.rename(&src_dir, &file_name, &dst_dir, &file_name)
+                .expect("[Test] cross-dir rename failed");
+
+            assert!(
+                fs.lookup(&src_dir, &file_name).is_err(),
+                "[Test] File should not exist in source dir after move"
+            );
+            fs.lookup(&dst_dir, &file_name)
+                .expect("[Test] File not found in destination dir after move");
+
+            early_println!("[Test] ✓ ext2 rename file cross dir passed");
+        }
+        Err(_) => {
+            early_println!(
+                "[Test] ext2 filesystem creation failed (mock device), skipping rename cross-dir test"
+            );
+        }
+    }
+}
+
+/// Test that renaming to the same path is a no-op (virtio-blk backed)
+#[test_case]
+#[cfg(target_arch = "riscv64")]
+fn test_ext2_rename_same_path() {
+    use crate::drivers::block::virtio_blk::VirtioBlockDevice;
+
+    let fs_driver_manager = get_fs_driver_manager();
+    let base_addr = map_ext2_blk();
+    let virtio_device = VirtioBlockDevice::new(base_addr);
+    let block_device_arc = Arc::new(virtio_device);
+
+    match fs_driver_manager.create_from_block("ext2", block_device_arc, 512) {
+        Ok(fs) => {
+            let root_node = fs.root_node();
+
+            let name = alloc::string::String::from("rename_noop.txt");
+            fs.create(&root_node, &name, crate::fs::FileType::RegularFile, 0o644)
+                .expect("[Test] Failed to create file");
+
+            fs.rename(&root_node, &name, &root_node, &name)
+                .expect("[Test] same-path rename failed");
+
+            fs.lookup(&root_node, &name)
+                .expect("[Test] File should still exist after same-path rename");
+
+            early_println!("[Test] ✓ ext2 rename same path passed");
+        }
+        Err(_) => {
+            early_println!(
+                "[Test] ext2 filesystem creation failed (mock device), skipping rename same-path test"
+            );
+        }
+    }
+}

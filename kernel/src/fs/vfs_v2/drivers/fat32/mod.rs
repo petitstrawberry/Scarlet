@@ -3089,6 +3089,177 @@ impl FileSystemOperations for Fat32FileSystem {
         Ok(entries)
     }
 
+    fn rename(
+        &self,
+        old_parent: &Arc<dyn VfsNode>,
+        old_name: &String,
+        new_parent: &Arc<dyn VfsNode>,
+        new_name: &String,
+    ) -> Result<(), FileSystemError> {
+        let fat32_old_parent =
+            old_parent
+                .as_any()
+                .downcast_ref::<Fat32Node>()
+                .ok_or_else(|| {
+                    FileSystemError::new(
+                        FileSystemErrorKind::NotSupported,
+                        "Invalid old parent node type for FAT32",
+                    )
+                })?;
+
+        let fat32_new_parent =
+            new_parent
+                .as_any()
+                .downcast_ref::<Fat32Node>()
+                .ok_or_else(|| {
+                    FileSystemError::new(
+                        FileSystemErrorKind::NotSupported,
+                        "Invalid new parent node type for FAT32",
+                    )
+                })?;
+
+        // Both parents must be directories
+        match fat32_old_parent.file_type() {
+            Ok(FileType::Directory) => {}
+            Ok(_) => {
+                return Err(FileSystemError::new(
+                    FileSystemErrorKind::NotADirectory,
+                    "Source parent is not a directory",
+                ));
+            }
+            Err(e) => return Err(e),
+        }
+        match fat32_new_parent.file_type() {
+            Ok(FileType::Directory) => {}
+            Ok(_) => {
+                return Err(FileSystemError::new(
+                    FileSystemErrorKind::NotADirectory,
+                    "Destination parent is not a directory",
+                ));
+            }
+            Err(e) => return Err(e),
+        }
+
+        let same_parent = Arc::ptr_eq(old_parent, new_parent);
+
+        // No-op when both parent and name are identical
+        if same_parent && old_name == new_name {
+            return Ok(());
+        }
+
+        // Look up the source entry
+        let src_node = self.lookup(old_parent, old_name)?;
+        let src_fat32 = src_node
+            .as_any()
+            .downcast_ref::<Fat32Node>()
+            .ok_or_else(|| {
+                FileSystemError::new(
+                    FileSystemErrorKind::NotSupported,
+                    "Source node is not a Fat32Node",
+                )
+            })?;
+        let src_cluster = src_fat32.cluster();
+        let src_size = src_fat32.metadata.read().size as u32;
+        let src_is_dir = src_fat32.file_type()? == FileType::Directory;
+
+        // Validate against an existing destination entry (if present)
+        if let Ok(dst_node) = self.lookup(new_parent, new_name) {
+            let dst_fat32 = dst_node
+                .as_any()
+                .downcast_ref::<Fat32Node>()
+                .ok_or_else(|| {
+                    FileSystemError::new(
+                        FileSystemErrorKind::NotSupported,
+                        "Destination node is not a Fat32Node",
+                    )
+                })?;
+            let dst_is_dir = dst_fat32.file_type()? == FileType::Directory;
+
+            if src_is_dir && !dst_is_dir {
+                return Err(FileSystemError::new(
+                    FileSystemErrorKind::NotADirectory,
+                    "Destination exists and is not a directory",
+                ));
+            }
+            if !src_is_dir && dst_is_dir {
+                return Err(FileSystemError::new(
+                    FileSystemErrorKind::IsADirectory,
+                    "Destination is a directory",
+                ));
+            }
+            if dst_is_dir {
+                // Destination directory must be empty before we overwrite it
+                let dst_cluster = dst_fat32.cluster();
+                let actual_dst_cluster = if dst_cluster == 0 {
+                    self.root_cluster
+                } else {
+                    dst_cluster
+                };
+                let mut dst_entries = Vec::new();
+                self.read_directory_entries(actual_dst_cluster, &mut dst_entries)?;
+                let non_dot = dst_entries
+                    .iter()
+                    .filter(|e| {
+                        let n = e.name();
+                        n != "." && n != ".."
+                    })
+                    .count();
+                if non_dot > 0 {
+                    return Err(FileSystemError::new(
+                        FileSystemErrorKind::DirectoryNotEmpty,
+                        "Destination directory is not empty",
+                    ));
+                }
+            }
+            // Remove the destination entry (disk + memory)
+            self.remove(new_parent, new_name)?;
+        }
+
+        // Resolve actual cluster numbers for old and new parent directories
+        let old_parent_cluster = *fat32_old_parent.cluster.read();
+        let actual_old_cluster = if old_parent_cluster == 0 {
+            self.root_cluster
+        } else {
+            old_parent_cluster
+        };
+
+        let new_parent_cluster = *fat32_new_parent.cluster.read();
+        let actual_new_cluster = if new_parent_cluster == 0 {
+            self.root_cluster
+        } else {
+            new_parent_cluster
+        };
+
+        // Write a new directory entry in the destination parent
+        self.write_directory_entry_with_name(
+            actual_new_cluster,
+            new_name,
+            src_cluster,
+            src_size,
+            src_is_dir,
+        )?;
+
+        // Remove the old directory entry from the source parent (disk only)
+        self.remove_directory_entry(actual_old_cluster, old_name)?;
+
+        // Update the in-memory children caches
+        let node_arc = {
+            let mut old_children = fat32_old_parent.children.write();
+            old_children.remove(old_name)
+        };
+
+        if let Some(node) = node_arc {
+            // Update the internal name stored in the node
+            if let Some(fat32_node) = node.as_any().downcast_ref::<Fat32Node>() {
+                *fat32_node.name.write() = new_name.clone();
+            }
+            let mut new_children = fat32_new_parent.children.write();
+            new_children.insert(new_name.clone(), node);
+        }
+
+        Ok(())
+    }
+
     fn root_node(&self) -> Arc<dyn VfsNode> {
         Arc::clone(&*self.root.read()) as Arc<dyn VfsNode>
     }

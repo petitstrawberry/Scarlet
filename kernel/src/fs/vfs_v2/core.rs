@@ -335,6 +335,44 @@ pub trait FileSystemOperations: Send + Sync {
             "Hard links not supported by this filesystem",
         ))
     }
+
+    /// Rename or move a file or directory within the same filesystem
+    ///
+    /// Moves the entry named `old_name` in `old_parent` to be named `new_name` in
+    /// `new_parent`. If an entry already exists at the destination it is atomically
+    /// replaced, subject to the following POSIX-compatible rules:
+    /// - A file may replace another file.
+    /// - A directory may replace another **empty** directory.
+    /// - A file may not replace a directory, and vice-versa.
+    ///
+    /// # Arguments
+    /// * `old_parent` - Parent directory containing the source entry
+    /// * `old_name`   - Name of the source entry in `old_parent`
+    /// * `new_parent` - Parent directory where the entry should be placed
+    /// * `new_name`   - Name for the entry in `new_parent`
+    ///
+    /// # Returns
+    /// `Ok(())` on success.
+    ///
+    /// # Errors
+    /// * `NotSupported`     - This filesystem does not support rename
+    /// * `NotFound`         - `old_name` does not exist in `old_parent`
+    /// * `IsADirectory`     - Source is a non-directory but destination is a directory
+    /// * `NotADirectory`    - Source is a directory but destination is a non-directory
+    /// * `DirectoryNotEmpty`- Destination is a non-empty directory
+    fn rename(
+        &self,
+        old_parent: &Arc<dyn VfsNode>,
+        old_name: &String,
+        new_parent: &Arc<dyn VfsNode>,
+        new_name: &String,
+    ) -> Result<(), FileSystemError> {
+        let _ = (old_parent, old_name, new_parent, new_name);
+        Err(FileSystemError::new(
+            FileSystemErrorKind::NotSupported,
+            "Rename not supported by this filesystem",
+        ))
+    }
 }
 
 impl fmt::Debug for dyn FileSystemOperations {

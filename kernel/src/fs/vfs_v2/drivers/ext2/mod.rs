@@ -5152,6 +5152,153 @@ impl FileSystemOperations for Ext2FileSystem {
         Ok(())
     }
 
+    fn rename(
+        &self,
+        old_parent: &Arc<dyn VfsNode>,
+        old_name: &String,
+        new_parent: &Arc<dyn VfsNode>,
+        new_name: &String,
+    ) -> Result<(), FileSystemError> {
+        let ext2_old_parent = old_parent
+            .as_any()
+            .downcast_ref::<Ext2Node>()
+            .ok_or_else(|| {
+                FileSystemError::new(
+                    FileSystemErrorKind::NotSupported,
+                    "Invalid old parent node type for ext2",
+                )
+            })?;
+
+        let ext2_new_parent = new_parent
+            .as_any()
+            .downcast_ref::<Ext2Node>()
+            .ok_or_else(|| {
+                FileSystemError::new(
+                    FileSystemErrorKind::NotSupported,
+                    "Invalid new parent node type for ext2",
+                )
+            })?;
+
+        // Both parents must be directories
+        match ext2_old_parent.file_type() {
+            Ok(FileType::Directory) => {}
+            Ok(_) => {
+                return Err(FileSystemError::new(
+                    FileSystemErrorKind::NotADirectory,
+                    "Source parent is not a directory",
+                ));
+            }
+            Err(e) => return Err(e),
+        }
+        match ext2_new_parent.file_type() {
+            Ok(FileType::Directory) => {}
+            Ok(_) => {
+                return Err(FileSystemError::new(
+                    FileSystemErrorKind::NotADirectory,
+                    "Destination parent is not a directory",
+                ));
+            }
+            Err(e) => return Err(e),
+        }
+
+        let old_parent_ino = ext2_old_parent.inode_number();
+        let new_parent_ino = ext2_new_parent.inode_number();
+        let same_parent = old_parent_ino == new_parent_ino;
+
+        // No-op when both parent and name are identical
+        if same_parent && old_name == new_name {
+            return Ok(());
+        }
+
+        // Look up the source entry
+        let src_node = self.lookup(old_parent, old_name)?;
+        let src_ext2 = src_node
+            .as_any()
+            .downcast_ref::<Ext2Node>()
+            .ok_or_else(|| {
+                FileSystemError::new(
+                    FileSystemErrorKind::NotSupported,
+                    "Source node is not an Ext2Node",
+                )
+            })?;
+        let src_inode_num = src_ext2.inode_number();
+        let src_file_type = src_ext2.file_type()?;
+        let src_is_dir = src_file_type == FileType::Directory;
+
+        // Validate against an existing destination entry (if present)
+        if let Ok(dst_node) = self.lookup(new_parent, new_name) {
+            let dst_ext2 = dst_node
+                .as_any()
+                .downcast_ref::<Ext2Node>()
+                .ok_or_else(|| {
+                    FileSystemError::new(
+                        FileSystemErrorKind::NotSupported,
+                        "Destination node is not an Ext2Node",
+                    )
+                })?;
+            let dst_is_dir = dst_ext2.file_type()? == FileType::Directory;
+
+            if src_is_dir && !dst_is_dir {
+                return Err(FileSystemError::new(
+                    FileSystemErrorKind::NotADirectory,
+                    "Destination exists and is not a directory",
+                ));
+            }
+            if !src_is_dir && dst_is_dir {
+                return Err(FileSystemError::new(
+                    FileSystemErrorKind::IsADirectory,
+                    "Destination is a directory",
+                ));
+            }
+            if dst_is_dir {
+                // Destination directory must be empty
+                let dst_entries =
+                    self.read_directory_entries(&self.read_inode(dst_ext2.inode_number())?)?;
+                let non_dot = dst_entries
+                    .iter()
+                    .filter(|e| e.name_str().map(|n| n != "." && n != "..").unwrap_or(false))
+                    .count();
+                if non_dot > 0 {
+                    return Err(FileSystemError::new(
+                        FileSystemErrorKind::DirectoryNotEmpty,
+                        "Destination directory is not empty",
+                    ));
+                }
+                // Remove the destination entry first
+                self.remove(new_parent, new_name)?;
+            } else {
+                // Remove the destination file entry
+                self.remove(new_parent, new_name)?;
+            }
+        }
+
+        // Add new directory entry in new_parent pointing to the source inode
+        self.add_directory_entry(new_parent_ino, new_name, src_inode_num, src_file_type)?;
+
+        // Remove old directory entry from old_parent (without freeing the inode)
+        self.remove_directory_entry(old_parent_ino, old_name)?;
+
+        // If source is a directory and parents differ, update link counts:
+        // The ".." entry inside src_inode now points to new_parent instead of old_parent.
+        if src_is_dir && !same_parent {
+            // Decrement old_parent link count (losing one ".." back-reference)
+            let mut old_parent_inode = self.read_inode(old_parent_ino)?;
+            let links = u16::from_le(old_parent_inode.links_count);
+            if links > 0 {
+                old_parent_inode.links_count = (links - 1).to_le();
+                self.write_inode(old_parent_ino, &old_parent_inode)?;
+            }
+
+            // Increment new_parent link count (gaining one ".." back-reference)
+            let mut new_parent_inode = self.read_inode(new_parent_ino)?;
+            let links = u16::from_le(new_parent_inode.links_count);
+            new_parent_inode.links_count = (links + 1).to_le();
+            self.write_inode(new_parent_ino, &new_parent_inode)?;
+        }
+
+        Ok(())
+    }
+
     fn root_node(&self) -> Arc<dyn VfsNode> {
         self.root.read().clone()
     }

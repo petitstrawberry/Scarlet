@@ -1335,6 +1335,57 @@ pub fn read_link(symlink_path: &str) -> Result<String> {
     }
 }
 
+/// Rename or move a file or directory
+///
+/// This function renames a file or directory, moving it to a new path if the
+/// paths reside in the same filesystem.
+///
+/// # Arguments
+/// * `old_path` - Current path of the file or directory
+/// * `new_path` - New path after the rename/move
+///
+/// # Examples
+///
+/// ```
+/// use scarlet::fs::rename;
+///
+/// rename("old_name.txt", "new_name.txt")?;
+/// rename("src/file.txt", "dst/file.txt")?;
+/// ```
+///
+/// # Errors
+///
+/// Returns `Err` if the rename operation fails, such as:
+/// - Source path not found
+/// - Destination directory not found
+/// - Cross-filesystem move (not supported)
+/// - Destination is a non-empty directory
+/// - Permission denied
+pub fn rename<P: AsRef<str>>(old_path: P, new_path: P) -> Result<()> {
+    use crate::ffi::str_to_cstr_bytes;
+    use crate::syscall::{Syscall, syscall2};
+
+    let old_path_c = str_to_cstr_bytes(old_path.as_ref())
+        .map_err(|_| Error::new(ErrorKind::InvalidInput, "old_path contains null byte"))?;
+    let new_path_c = str_to_cstr_bytes(new_path.as_ref())
+        .map_err(|_| Error::new(ErrorKind::InvalidInput, "new_path contains null byte"))?;
+
+    let result = syscall2(
+        Syscall::VfsRename,
+        old_path_c.as_ptr() as usize,
+        new_path_c.as_ptr() as usize,
+    );
+
+    if result == usize::MAX {
+        Err(Error::new(
+            ErrorKind::Other,
+            "rename failed: source not found, cross-filesystem move, or permission denied",
+        ))
+    } else {
+        Ok(())
+    }
+}
+
 /// Get current working directory as a path string
 ///
 /// # Returns

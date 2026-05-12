@@ -63,6 +63,7 @@ pub enum Syscall {
     VfsCreateSymlink = 406,   // Create symbolic links through VFS
     VfsReadlink = 407,        // Read symbolic link target through VFS
     VfsGetCwdPath = 408,      // Get current working directory path
+    VfsRename = 409,          // Rename or move files/directories through VFS
 
     // === Filesystem Operations (mount management) ===
     FsMount = 500,

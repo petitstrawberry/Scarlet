@@ -387,6 +387,185 @@ impl FileSystemOperations for TmpFS {
         Ok(Arc::clone(target_node))
     }
 
+    fn rename(
+        &self,
+        old_parent: &Arc<dyn VfsNode>,
+        old_name: &String,
+        new_parent: &Arc<dyn VfsNode>,
+        new_name: &String,
+    ) -> Result<(), FileSystemError> {
+        let tmp_old_parent = old_parent
+            .as_any()
+            .downcast_ref::<TmpNode>()
+            .ok_or_else(|| {
+                FileSystemError::new(
+                    FileSystemErrorKind::NotSupported,
+                    "Invalid old parent node type for TmpFS",
+                )
+            })?;
+
+        let tmp_new_parent = new_parent
+            .as_any()
+            .downcast_ref::<TmpNode>()
+            .ok_or_else(|| {
+                FileSystemError::new(
+                    FileSystemErrorKind::NotSupported,
+                    "Invalid new parent node type for TmpFS",
+                )
+            })?;
+
+        // Both parents must be directories
+        if tmp_old_parent.file_type() != FileType::Directory {
+            return Err(FileSystemError::new(
+                FileSystemErrorKind::NotADirectory,
+                "Source parent is not a directory",
+            ));
+        }
+        if tmp_new_parent.file_type() != FileType::Directory {
+            return Err(FileSystemError::new(
+                FileSystemErrorKind::NotADirectory,
+                "Destination parent is not a directory",
+            ));
+        }
+
+        let same_parent = Arc::ptr_eq(old_parent, new_parent);
+
+        // No-op: same parent and same name
+        if same_parent && old_name == new_name {
+            return Ok(());
+        }
+
+        if same_parent {
+            // Rename within the same directory — one lock covers everything
+            let mut children = tmp_old_parent.children.write();
+
+            let node = children.remove(old_name).ok_or_else(|| {
+                FileSystemError::new(FileSystemErrorKind::NotFound, "Source not found")
+            })?;
+
+            // Validate compatibility with an existing destination entry
+            if let Some(existing) = children.get(new_name) {
+                let src_is_dir = node
+                    .as_any()
+                    .downcast_ref::<TmpNode>()
+                    .map(|n| n.file_type() == FileType::Directory)
+                    .unwrap_or(false);
+                let dst_is_dir = existing
+                    .as_any()
+                    .downcast_ref::<TmpNode>()
+                    .map(|n| n.file_type() == FileType::Directory)
+                    .unwrap_or(false);
+
+                if src_is_dir && !dst_is_dir {
+                    // Restore and fail
+                    children.insert(old_name.clone(), node);
+                    return Err(FileSystemError::new(
+                        FileSystemErrorKind::NotADirectory,
+                        "Destination exists and is not a directory",
+                    ));
+                }
+                if !src_is_dir && dst_is_dir {
+                    children.insert(old_name.clone(), node);
+                    return Err(FileSystemError::new(
+                        FileSystemErrorKind::IsADirectory,
+                        "Destination is a directory",
+                    ));
+                }
+                if dst_is_dir {
+                    let existing_tmp = existing
+                        .as_any()
+                        .downcast_ref::<TmpNode>()
+                        .expect("Destination node should be TmpNode");
+                    if !existing_tmp.children.read().is_empty() {
+                        children.insert(old_name.clone(), node);
+                        return Err(FileSystemError::new(
+                            FileSystemErrorKind::DirectoryNotEmpty,
+                            "Destination directory is not empty",
+                        ));
+                    }
+                }
+            }
+
+            // Update internal name stored in the node
+            if let Some(tmp_node) = node.as_any().downcast_ref::<TmpNode>() {
+                *tmp_node.name.write() = new_name.clone();
+            }
+
+            // Insert under the new name (atomically replaces any existing entry)
+            children.insert(new_name.clone(), node);
+        } else {
+            // Moving to a different directory
+            // Read the source node first (no locks held yet)
+            let node = {
+                let old_children = tmp_old_parent.children.read();
+                old_children.get(old_name).cloned().ok_or_else(|| {
+                    FileSystemError::new(FileSystemErrorKind::NotFound, "Source not found")
+                })?
+            };
+
+            // Validate destination compatibility
+            {
+                let new_children = tmp_new_parent.children.read();
+                if let Some(existing) = new_children.get(new_name) {
+                    let src_is_dir = node
+                        .as_any()
+                        .downcast_ref::<TmpNode>()
+                        .map(|n| n.file_type() == FileType::Directory)
+                        .unwrap_or(false);
+                    let dst_is_dir = existing
+                        .as_any()
+                        .downcast_ref::<TmpNode>()
+                        .map(|n| n.file_type() == FileType::Directory)
+                        .unwrap_or(false);
+
+                    if src_is_dir && !dst_is_dir {
+                        return Err(FileSystemError::new(
+                            FileSystemErrorKind::NotADirectory,
+                            "Destination exists and is not a directory",
+                        ));
+                    }
+                    if !src_is_dir && dst_is_dir {
+                        return Err(FileSystemError::new(
+                            FileSystemErrorKind::IsADirectory,
+                            "Destination is a directory",
+                        ));
+                    }
+                    if dst_is_dir {
+                        let existing_tmp = existing
+                            .as_any()
+                            .downcast_ref::<TmpNode>()
+                            .expect("Destination node should be TmpNode");
+                        if !existing_tmp.children.read().is_empty() {
+                            return Err(FileSystemError::new(
+                                FileSystemErrorKind::DirectoryNotEmpty,
+                                "Destination directory is not empty",
+                            ));
+                        }
+                    }
+                }
+            }
+
+            // Update internal node name
+            if let Some(tmp_node) = node.as_any().downcast_ref::<TmpNode>() {
+                *tmp_node.name.write() = new_name.clone();
+            }
+
+            // Remove from old parent
+            {
+                let mut old_children = tmp_old_parent.children.write();
+                old_children.remove(old_name);
+            }
+
+            // Insert into new parent (replaces any existing destination entry)
+            {
+                let mut new_children = tmp_new_parent.children.write();
+                new_children.insert(new_name.clone(), node);
+            }
+        }
+
+        Ok(())
+    }
+
     fn remove(&self, parent_node: &Arc<dyn VfsNode>, name: &String) -> Result<(), FileSystemError> {
         let tmp_parent = parent_node
             .as_any()

@@ -976,3 +976,57 @@ fn to_absolute_path_v2(task: &crate::task::Task, path: &str) -> Result<String, (
         Ok(vfs.resolve_path_to_absolute(path))
     }
 }
+
+/// Rename or move a file or directory (VfsRename)
+///
+/// This system call renames or moves the file at `old_path` to `new_path`.
+///
+/// # Arguments
+///
+/// * `trapframe.get_arg(0)` - Pointer to the null-terminated old path string
+/// * `trapframe.get_arg(1)` - Pointer to the null-terminated new path string
+///
+/// # Returns
+///
+/// * `0` on success
+/// * `usize::MAX` on error
+pub fn sys_vfs_rename(trapframe: &mut Trapframe) -> usize {
+    let task = mytask().unwrap();
+    let old_path_ptr = task
+        .vm_manager
+        .translate_to_kva(trapframe.get_arg(0))
+        .unwrap() as *const u8;
+    let new_path_ptr = task
+        .vm_manager
+        .translate_to_kva(trapframe.get_arg(1))
+        .unwrap() as *const u8;
+
+    trapframe.increment_pc_next(task);
+
+    let old_path = match cstring_to_string(old_path_ptr, MAX_PATH_LENGTH) {
+        Ok((s, _)) => match to_absolute_path_v2(&task, &s) {
+            Ok(abs) => abs,
+            Err(_) => return usize::MAX,
+        },
+        Err(_) => return usize::MAX,
+    };
+
+    let new_path = match cstring_to_string(new_path_ptr, MAX_PATH_LENGTH) {
+        Ok((s, _)) => match to_absolute_path_v2(&task, &s) {
+            Ok(abs) => abs,
+            Err(_) => return usize::MAX,
+        },
+        Err(_) => return usize::MAX,
+    };
+
+    let vfs_guard = task.vfs.read();
+    let vfs = match vfs_guard.as_ref() {
+        Some(vfs) => vfs,
+        None => return usize::MAX,
+    };
+
+    match vfs.rename(&old_path, &new_path) {
+        Ok(()) => 0,
+        Err(_) => usize::MAX,
+    }
+}
