@@ -3,8 +3,8 @@
 //! Provides `setup_signal_handler` and `sys_rt_sigreturn` stubs for AArch64.
 //! Signal types and generic logic live in `generic::signal`.
 
-use crate::abi::linux::generic::signal::LinuxSignal;
 use crate::abi::linux::aarch64::LinuxAarch64Abi;
+use crate::abi::linux::generic::signal::LinuxSignal;
 use crate::arch::Trapframe;
 
 /// Set up user-space signal handler execution with context save/restore.
