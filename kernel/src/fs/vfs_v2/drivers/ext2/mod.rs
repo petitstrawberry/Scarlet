@@ -5273,12 +5273,7 @@ impl FileSystemOperations for Ext2FileSystem {
         }
 
         // Add new directory entry in new_parent pointing to the source inode
-        self.add_directory_entry(
-            new_parent_ino,
-            new_name,
-            src_inode_num,
-            src_file_type.clone(),
-        )?;
+        self.add_directory_entry(new_parent_ino, new_name, src_inode_num, src_file_type)?;
 
         // Remove old directory entry from old_parent (without freeing the inode)
         self.remove_directory_entry(old_parent_ino, old_name)?;

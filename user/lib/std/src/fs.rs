@@ -1377,7 +1377,10 @@ pub fn rename<P: AsRef<str>>(old_path: P, new_path: P) -> Result<()> {
     );
 
     if result == usize::MAX {
-        Err(Error::new(ErrorKind::Other, "rename failed"))
+        Err(Error::new(
+            ErrorKind::Other,
+            "rename failed: source not found, cross-filesystem move, or permission denied",
+        ))
     } else {
         Ok(())
     }
