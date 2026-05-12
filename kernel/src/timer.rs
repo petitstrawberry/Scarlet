@@ -7,7 +7,7 @@
 use crate::arch::Trapframe;
 use crate::arch::timer::ArchTimer;
 use crate::environment::MAX_NUM_CPUS;
-use crate::sched::scheduler::get_scheduler;
+use crate::sched::scheduler::sched_on_tick;
 use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicU64, Ordering};
 extern crate alloc;
@@ -90,9 +90,8 @@ pub fn tick(trapframe: &mut Trapframe) {
     let now = TICK_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
     check_software_timers(now);
     // Call scheduler tick handler to manage time slices
-    let scheduler = get_scheduler();
     // crate::println!("[timer] Tick: {}, CPU: {}", now, cpu_id);
-    scheduler.on_tick(cpu_id, trapframe);
+    sched_on_tick(cpu_id, trapframe);
 }
 
 /// Get the current tick count (monotonic, since boot)

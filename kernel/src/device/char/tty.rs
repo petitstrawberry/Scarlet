@@ -252,16 +252,16 @@ impl TtyDevice {
 
     fn send_interrupt_to_foreground(&self) {
         use crate::ipc::event::{Event, EventPriority, ProcessControlType};
+        use crate::sched::scheduler::{get_all_task_ids, get_task_by_id, wake_task};
         use crate::task::{BlockedType, TaskState};
 
         if let Some(task_group_id) = self.get_foreground_task_group_id() {
-            let scheduler = crate::sched::scheduler::get_scheduler();
-            let task_ids = scheduler.get_all_task_ids();
+            let task_ids = get_all_task_ids();
 
             let mut tasks_to_wake = alloc::vec::Vec::new();
 
             for task_id in task_ids {
-                if let Some(task) = scheduler.get_task_by_id(task_id) {
+                if let Some(task) = get_task_by_id(task_id) {
                     if task.get_task_group_id() == task_group_id {
                         let event = Event::direct_process_control(
                             task_id as u32,
@@ -279,7 +279,7 @@ impl TtyDevice {
             }
 
             for task_id in tasks_to_wake {
-                scheduler.wake_task(task_id);
+                wake_task(task_id);
             }
         }
     }

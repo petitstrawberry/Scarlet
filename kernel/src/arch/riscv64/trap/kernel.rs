@@ -5,7 +5,7 @@ use crate::arch::trap::print_traplog;
 use crate::arch::{Trapframe, get_cpu};
 use crate::environment::PAGE_SIZE;
 use crate::object::capability::memory_mapping::{AccessKind, AccessOp};
-use crate::sched::scheduler::get_scheduler;
+use crate::sched::scheduler::current_task;
 use crate::vm::{get_kernel_vm_manager, vmem::VirtualMemoryPermission};
 
 #[unsafe(export_name = "_kernel_trap_entry")]
@@ -162,7 +162,7 @@ fn arch_kernel_exception_handler(trapframe: &mut Trapframe, cause: usize) {
 
             // Detect kernel stack overflow via guard-page hit
             // Also handle kstack window accesses that might not have VMA
-            if let Some(task) = get_scheduler().get_current_task(get_cpu().get_cpuid()) {
+            if let Some(task) = current_task(get_cpu().get_cpuid()) {
                 crate::println!(
                     "[kpf] task found, checking kstack window for vaddr={:#x}",
                     vaddr

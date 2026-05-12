@@ -34,6 +34,7 @@
 extern crate alloc;
 
 use core::panic;
+use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use alloc::{boxed::Box, collections::vec_deque::VecDeque, string::ToString};
 
@@ -50,6 +51,7 @@ use crate::{
         trap::user::arch_switch_to_user,
     },
     environment::MAX_NUM_CPUS,
+    sync::{CpuLocal, IrqGuard},
     task::{TaskState, new_kernel_task, wake_parent_waiters, wake_task_waiters},
     timer::get_kernel_timer,
 };
@@ -97,7 +99,7 @@ pub fn get_task_pool() -> &'static TaskPool {
 /// **IMPORTANT**: Do NOT directly access the `tasks` array. Always use:
 /// - `TaskPool::get_task()` for immutable references
 /// - `TaskPool::get_task_mut()` for mutable references
-/// - `Scheduler::get_task_by_id()` which is the preferred public API
+/// - `get_task_by_id()` which is the preferred public API
 ///
 /// Direct array access could violate safety assumptions and cause undefined behavior.
 ///
@@ -353,705 +355,400 @@ impl TaskPool {
     }
 }
 
-static mut SCHEDULER: Option<Scheduler> = None;
+static CURRENT_TASK_IDS: [AtomicUsize; MAX_NUM_CPUS] =
+    [const { AtomicUsize::new(0) }; MAX_NUM_CPUS];
+static READY_QUEUES: [spin::Mutex<VecDeque<usize>>; MAX_NUM_CPUS] =
+    [const { spin::Mutex::new(VecDeque::new()) }; MAX_NUM_CPUS];
+static ZOMBIE_QUEUE: spin::Mutex<VecDeque<usize>> = spin::Mutex::new(VecDeque::new());
+static DEBUG_TICK: AtomicU64 = AtomicU64::new(0);
 
-pub fn get_scheduler() -> &'static mut Scheduler {
-    unsafe {
-        match SCHEDULER {
-            Some(ref mut s) => s,
-            None => {
-                SCHEDULER = Some(Scheduler::new());
-                get_scheduler()
+#[inline]
+fn assert_valid_cpu_id(cpu_id: usize) {
+    debug_assert!(cpu_id < CpuLocal::<usize>::cpu_count());
+}
+
+#[inline]
+fn encode_task_id(task_id: Option<usize>) -> usize {
+    task_id.unwrap_or(0)
+}
+
+#[inline]
+fn decode_task_id(task_id: usize) -> Option<usize> {
+    if task_id == 0 { None } else { Some(task_id) }
+}
+
+#[inline]
+fn ready_queue(cpu_id: usize) -> &'static spin::Mutex<VecDeque<usize>> {
+    assert_valid_cpu_id(cpu_id);
+    &READY_QUEUES[cpu_id]
+}
+
+#[inline]
+fn set_current_task_id(cpu_id: usize, task_id: Option<usize>) {
+    assert_valid_cpu_id(cpu_id);
+    CURRENT_TASK_IDS[cpu_id].store(encode_task_id(task_id), Ordering::SeqCst);
+}
+
+#[inline]
+fn push_ready_task(cpu_id: usize, task_id: usize) {
+    let mut queue = ready_queue(cpu_id).lock();
+    if !queue.contains(&task_id) {
+        queue.push_back(task_id);
+    }
+}
+
+fn ready_queue_contains(task_id: usize) -> bool {
+    for cpu_id in 0..MAX_NUM_CPUS {
+        if ready_queue(cpu_id).lock().contains(&task_id) {
+            return true;
+        }
+    }
+    false
+}
+
+fn finalize_zombie(task_id: usize, parent_id: Option<usize>) {
+    {
+        let mut zombie_queue = ZOMBIE_QUEUE.lock();
+        if !zombie_queue.contains(&task_id) {
+            zombie_queue.push_back(task_id);
+        }
+    }
+    wake_task_waiters(task_id);
+    if let Some(parent_id) = parent_id {
+        wake_parent_waiters(parent_id);
+    }
+}
+
+fn pick_next(cpu: &Arch) -> (Option<usize>, Option<usize>) {
+    let _irq_guard = IrqGuard::new();
+    let cpu_id = cpu.get_cpuid();
+    let old_current_task_id = current_task_id(cpu_id);
+
+    if let Some(current_id) = old_current_task_id {
+        if let Some(task) = TaskPool::get_task_mut(current_id) {
+            match task.state.load(Ordering::SeqCst) {
+                TaskState::Ready => push_ready_task(cpu_id, current_id),
+                TaskState::Running => {
+                    task.state.store(TaskState::Ready, Ordering::SeqCst);
+                    push_ready_task(cpu_id, current_id);
+                }
+                TaskState::Zombie => finalize_zombie(current_id, task.get_parent_id()),
+                TaskState::Terminated | TaskState::Blocked(_) | TaskState::NotInitialized => {}
             }
         }
     }
-}
 
-pub struct Scheduler {
-    /// Queue for ready-to-run task IDs
-    ready_queue: [VecDeque<usize>; MAX_NUM_CPUS],
-    /// Queue for blocked task IDs (waiting for I/O, etc.)
-    blocked_queue: [VecDeque<usize>; MAX_NUM_CPUS],
-    /// Queue for zombie task IDs (finished but not yet cleaned up)
-    zombie_queue: [VecDeque<usize>; MAX_NUM_CPUS],
-    current_task_id: [Option<usize>; MAX_NUM_CPUS],
-}
+    loop {
+        let task_id = { ready_queue(cpu_id).lock().pop_front() };
 
-impl Scheduler {
-    pub fn new() -> Self {
-        Scheduler {
-            ready_queue: [const { VecDeque::new() }; MAX_NUM_CPUS],
-            blocked_queue: [const { VecDeque::new() }; MAX_NUM_CPUS],
-            zombie_queue: [const { VecDeque::new() }; MAX_NUM_CPUS],
-            current_task_id: [const { None }; MAX_NUM_CPUS],
-        }
-    }
-
-    pub fn add_task(&mut self, task: Task, cpu_id: usize) -> usize {
-        // Add task to the global task pool and get the allocated ID
-        let task_id = match get_task_pool().add_task(task) {
-            Ok(id) => id,
-            Err(e) => panic!("Failed to add task: {}", e),
+        let Some(task_id) = task_id else {
+            set_current_task_id(cpu_id, None);
+            return (old_current_task_id, None);
         };
-        // Add task state info to ready queue
-        self.ready_queue[cpu_id].push_back(task_id);
-        task_id
-    }
 
-    /// Determines the next task to run and returns current and next task IDs
-    ///
-    /// This method performs the core scheduling algorithm and task state management
-    /// without performing actual context switches or hardware setup.
-    ///
-    /// # Arguments
-    /// * `cpu` - The CPU architecture state (for CPU ID)
-    ///
-    /// # Returns
-    /// * `(old_task_id, new_task_id)` - Tuple of old and new task IDs
-    fn run(&mut self, cpu: &Arch) -> (Option<usize>, Option<usize>) {
-        let cpu_id = cpu.get_cpuid();
-        let old_current_task_id = self.current_task_id[cpu_id];
+        let Some(task) = TaskPool::get_task_mut(task_id) else {
+            continue;
+        };
 
-        // IMPORTANT: If there's a current running task, re-queue it BEFORE scheduling
-        // This ensures it's available as a fallback if no other tasks are ready
-        if let Some(current_id) = old_current_task_id {
-            // Check if current task is still in ready_queue (it shouldn't be if it's running)
-            if !self.ready_queue[cpu_id].iter().any(|&id| id == current_id) {
-                // Current task is not in ready_queue (it's running), add it back
-                // Only add if the task is in a valid state to be scheduled
-                if let Some(task) = self.get_task_by_id(current_id) {
-                    match task.state.load(core::sync::atomic::Ordering::SeqCst) {
-                        TaskState::Ready | TaskState::Running => {
-                            self.ready_queue[cpu_id].push_back(current_id);
-                        }
-                        _ => {
-                            // Task is in Zombie, Terminated, Blocked, or NotInitialized state
-                            // Don't re-queue it
-                        }
-                    }
-                }
+        match task.state.load(Ordering::SeqCst) {
+            TaskState::NotInitialized => panic!("Task must be initialized before scheduling"),
+            TaskState::Zombie => {
+                finalize_zombie(task.get_id(), task.get_parent_id());
+                continue;
             }
-        }
-
-        // Continue trying to find a suitable task to run
-        loop {
-            let task_id = self.ready_queue[cpu_id].pop_front();
-
-            /* If there are no subsequent tasks */
-            if self.ready_queue[cpu_id].is_empty() {
-                match task_id {
-                    Some(task_id) => {
-                        let t = self
-                            .get_task_by_id(task_id)
-                            .expect("Task must exist in task pool");
-                        match t.state.load(core::sync::atomic::Ordering::SeqCst) {
-                            TaskState::NotInitialized => {
-                                panic!("Task must be initialized before scheduling");
-                            }
-                            TaskState::Zombie => {
-                                let task_id = t.get_id();
-                                let parent_id = t.get_parent_id();
-                                self.zombie_queue[cpu_id].push_back(task_id);
-                                self.current_task_id[cpu_id] = None;
-                                // Wake up any processes waiting for this specific task
-                                wake_task_waiters(task_id);
-                                // Also wake up parent process for waitpid(-1)
-                                if let Some(parent_id) = parent_id {
-                                    wake_parent_waiters(parent_id);
-                                }
-                                continue;
-                            }
-                            TaskState::Terminated => {
-                                panic!("At least one task must be scheduled");
-                            }
-                            TaskState::Blocked(_) => {
-                                // Reset current_task_id since this task is no longer current
-                                if self.current_task_id[cpu_id] == Some(task_id) {
-                                    self.current_task_id[cpu_id] = None;
-                                }
-                                // Put blocked task to blocked queue without running it
-                                self.blocked_queue[cpu_id].push_back(task_id);
-                                continue;
-                            }
-                            TaskState::Ready | TaskState::Running => {
-                                t.state.store(
-                                    TaskState::Running,
-                                    core::sync::atomic::Ordering::SeqCst,
-                                );
-                                // Task is ready to run
-                                t.time_slice.store(
-                                    t.default_time_slice
-                                        .load(core::sync::atomic::Ordering::SeqCst),
-                                    core::sync::atomic::Ordering::SeqCst,
-                                );
-                                let next_task_id = t.get_id();
-                                self.current_task_id[cpu_id] = Some(next_task_id);
-                                self.ready_queue[cpu_id].push_back(task_id);
-                                return (old_current_task_id, Some(next_task_id));
-                            }
-                        }
-                    }
-                    // If no tasks are ready, create an idle task
-                    None => {
-                        panic!("At least one task must be scheduled");
-                    }
-                }
-            } else {
-                match task_id {
-                    Some(task_id) => {
-                        let t = self
-                            .get_task_by_id(task_id)
-                            .expect("Task must exist in task pool");
-                        match t.state.load(core::sync::atomic::Ordering::SeqCst) {
-                            TaskState::NotInitialized => {
-                                panic!("Task must be initialized before scheduling");
-                            }
-                            TaskState::Zombie => {
-                                let task_id = t.get_id();
-                                let parent_id = t.get_parent_id();
-                                self.zombie_queue[cpu_id].push_back(task_id);
-                                // Wake up any processes waiting for this specific task
-                                wake_task_waiters(task_id);
-                                // Also wake up parent process for waitpid(-1)
-                                if let Some(parent_id) = parent_id {
-                                    wake_parent_waiters(parent_id);
-                                }
-                                continue;
-                            }
-                            TaskState::Terminated => {
-                                get_task_pool().remove_task(task_id);
-                                continue;
-                            }
-                            TaskState::Blocked(_) => {
-                                // Reset current_task_id since this task is no longer current
-                                if self.current_task_id[cpu_id] == Some(task_id) {
-                                    self.current_task_id[cpu_id] = None;
-                                }
-                                // Put blocked task back to the end of queue without running it
-                                self.blocked_queue[cpu_id].push_back(task_id);
-                                continue;
-                            }
-                            TaskState::Ready | TaskState::Running => {
-                                t.time_slice.store(
-                                    t.default_time_slice
-                                        .load(core::sync::atomic::Ordering::SeqCst),
-                                    core::sync::atomic::Ordering::SeqCst,
-                                );
-                                let next_task_id = t.get_id();
-                                self.current_task_id[cpu_id] = Some(next_task_id);
-                                self.ready_queue[cpu_id].push_back(task_id);
-                                return (old_current_task_id, Some(next_task_id));
-                            }
-                        }
-                    }
-                    None => return (old_current_task_id, self.current_task_id[cpu_id]),
-                }
+            TaskState::Terminated => {
+                let _ = get_task_pool().remove_task(task_id);
+                continue;
+            }
+            TaskState::Blocked(_) => continue,
+            TaskState::Ready | TaskState::Running => {
+                task.state.store(TaskState::Running, Ordering::SeqCst);
+                task.time_slice.store(
+                    task.default_time_slice.load(Ordering::SeqCst),
+                    Ordering::SeqCst,
+                );
+                let next_task_id = task.get_id();
+                set_current_task_id(cpu_id, Some(next_task_id));
+                push_ready_task(cpu_id, next_task_id);
+                return (old_current_task_id, Some(next_task_id));
             }
         }
     }
+}
 
-    /// Called every timer tick. Decrements the current task's time_slice.
-    /// If time_slice reaches 0, triggers a reschedule.
-    pub fn on_tick(&mut self, cpu_id: usize, trapframe: &mut Trapframe) {
-        static DEBUG_TICK: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
-        let tick = DEBUG_TICK.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-        // if tick % 1000 == 0 {
-        //     fn state_str(s: TaskState) -> &'static str {
-        //         match s {
-        //             TaskState::NotInitialized => "Init",
-        //             TaskState::Ready => "Rdy",
-        //             TaskState::Running => "Run",
-        //             TaskState::Blocked(_) => "Blk",
-        //             TaskState::Zombie => "Zom",
-        //             TaskState::Terminated => "Trm",
-        //         }
-        //     }
+pub fn add_task(task: Task, cpu_id: usize) -> usize {
+    let _irq_guard = IrqGuard::new();
+    let task_id = match get_task_pool().add_task(task) {
+        Ok(id) => id,
+        Err(e) => panic!("Failed to add task: {}", e),
+    };
+    push_ready_task(cpu_id, task_id);
+    task_id
+}
 
-        //     let mut dump_queue = |queue: &VecDeque<usize>, label: &str| {
-        //         for &id in queue {
-        //             if let Some(t) = TaskPool::get_task(id) {
-        //                 let st = state_str(t.state.load(core::sync::atomic::Ordering::SeqCst));
-        //                 crate::print!("[{}]:{}({}) ", label, t.name.read(), st);
-        //             }
-        //         }
-        //     };
+/// Called every timer tick. Decrements the current task's time_slice.
+/// If time_slice reaches 0, triggers a reschedule.
+pub fn sched_on_tick(cpu_id: usize, trapframe: &mut Trapframe) {
+    let _tick = DEBUG_TICK.fetch_add(1, Ordering::Relaxed);
 
-        //     let rq_len = self.ready_queue[cpu_id].len();
-        //     let bq_len = self.blocked_queue[cpu_id].len();
-        //     let zq_len = self.zombie_queue[cpu_id].len();
-
-        //     crate::print!(
-        //         "[SCHED] tick={} R={}/B={}/Z={}: ",
-        //         tick,
-        //         rq_len,
-        //         bq_len,
-        //         zq_len
-        //     );
-        //     dump_queue(&self.ready_queue[cpu_id], "R");
-        //     dump_queue(&self.blocked_queue[cpu_id], "B");
-        //     dump_queue(&self.zombie_queue[cpu_id], "Z");
-        //     crate::print!("\n");
-        // }
-
-        if let Some(task_id) = self.get_current_task_id(cpu_id) {
-            if let Some(task) = TaskPool::get_task_mut(task_id) {
-                let current_slice = task.time_slice.load(core::sync::atomic::Ordering::SeqCst);
-                if current_slice > 0 {
-                    task.time_slice
-                        .store(current_slice - 1, core::sync::atomic::Ordering::SeqCst);
-                }
-                let new_slice = task.time_slice.load(core::sync::atomic::Ordering::SeqCst);
-                if new_slice == 0 {
-                    // crate::println!(
-                    //     "[SCHED] CPU{}: Time slice expired for Task {}",
-                    //     cpu_id,
-                    //     task_id
-                    // );
-                    // Time slice expired, trigger reschedule
-                    self.schedule(trapframe);
-                }
+    if let Some(task_id) = current_task_id(cpu_id) {
+        if let Some(task) = TaskPool::get_task_mut(task_id) {
+            let current_slice = task.time_slice.load(Ordering::SeqCst);
+            if current_slice > 0 {
+                task.time_slice.store(current_slice - 1, Ordering::SeqCst);
             }
-        } else {
-            self.schedule(trapframe);
+            if task.time_slice.load(Ordering::SeqCst) == 0 {
+                schedule(trapframe);
+            }
         }
+    } else {
+        schedule(trapframe);
     }
+}
 
-    /// Schedule tasks on the CPU with kernel context switching
-    ///
-    /// This function performs cooperative scheduling by switching between task
-    /// kernel contexts. It returns to the caller, allowing the trap handler
-    /// to handle user space return.
-    ///
-    /// # Arguments
-    /// * `cpu` - The CPU architecture state
-    pub fn schedule(&mut self, trapframe: &mut Trapframe) {
-        let cpu = get_cpu();
-        let cpu_id = cpu.get_cpuid();
+/// Schedule tasks on the CPU with kernel context switching.
+pub fn schedule(trapframe: &mut Trapframe) {
+    let cpu = get_cpu();
+    let cpu_id = cpu.get_cpuid();
+    let (current_task_id, next_task_id) = pick_next(cpu);
 
-        // Step 1: Run scheduling algorithm to get current and next task IDs
-        let (current_task_id, next_task_id) = self.run(cpu);
-
-        // Debug output for monitoring scheduler behavior
-        // if let Some(current_id) = current_task_id {
-        //     if let Some(next_id) = next_task_id {
-        //         if current_id != next_id {
-        //             crate::println!("[SCHED] CPU{}: Task {} -> Task {}", cpu_id, current_id, next_id);
-        //         }
-        //     } else {
-        //         crate::println!("[SCHED] CPU{}: Task {} -> idle", cpu_id, current_id);
-        //     }
-        // } else if let Some(next_id) = next_task_id {
-        //     crate::println!("[SCHED] CPU{}: idle -> Task {}", cpu_id, next_id);
-        // }
-
-        // Step 2: Check if a context switch is needed
-        if next_task_id.is_some() && current_task_id != next_task_id {
-            let next_task_id = next_task_id.expect("Next task ID should be valid");
-
-            // Store current task's user state to VCPU
+    if let Some(next_task_id) = next_task_id {
+        if current_task_id != Some(next_task_id) {
             if let Some(current_task_id) = current_task_id {
-                let current_task = self.get_task_by_id(current_task_id).unwrap();
+                let current_task = get_task_by_id(current_task_id).unwrap();
                 current_task.vcpu.lock().store(trapframe);
 
                 #[cfg(all(feature = "hypervisor", target_arch = "riscv64"))]
                 {
-                    // let (guest_vcpu_switch_data, hypervisor_switch_data) =
-                    //     match current_task.vcpu.lock().get_mode() {
-                    //         crate::arch::Mode::GuestKernel | crate::arch::Mode::GuestUser => {
-                    //             use crate::arch::hv::switch::HypervisorSwitchData;
-                    //             use crate::arch::hv::switch::VcpuSwitchData;
-
-                    //             (
-                    //                 Some(VcpuSwitchData::save()),
-                    //                 Some(HypervisorSwitchData::save()),
-                    //             )
-                    //         }
-                    //         _ => (None, None),
-                    //     };
-
                     use crate::arch::hv::switch::{HypervisorSwitchData, VcpuSwitchData};
 
-                    // Perform kernel context switch
-                    self.kernel_context_switch(cpu_id, current_task_id, next_task_id);
-                    // NOTE: After this point, the current task will not execute until it is scheduled again
-
-                    // if let Some(guest_vcpu_switch_data) = guest_vcpu_switch_data.as_ref() {
-                    //     guest_vcpu_switch_data.restore();
-                    // }
-                    // if let Some(hypervisor_switch_data) = hypervisor_switch_data.as_ref() {
-                    //     hypervisor_switch_data.restore();
-                    // }
+                    kernel_context_switch(cpu_id, current_task_id, next_task_id);
                 }
                 #[cfg(not(all(feature = "hypervisor", target_arch = "riscv64")))]
                 {
-                    // Perform kernel context switch
-                    self.kernel_context_switch(cpu_id, current_task_id, next_task_id);
-                    // NOTE: After this point, the current task will not execute until it is scheduled again
+                    kernel_context_switch(cpu_id, current_task_id, next_task_id);
                 }
 
-                // Restore vcpu state and set mode
-                let current_task = self.get_task_by_id(current_task_id).unwrap();
-                // let trapframe = current_task.get_trapframe();
+                let current_task = get_task_by_id(current_task_id).unwrap();
                 current_task.vcpu.lock().switch(trapframe);
                 set_next_mode(current_task.vcpu.lock().get_mode());
             } else {
-                // No current task (e.g., first scheduling), just switch to next task
-                let next_task = self.get_task_by_id(next_task_id).unwrap();
-                // crate::println!("[SCHED] Setting up task {} for execution", next_task_id);
-                Self::setup_task_execution(get_cpu(), next_task);
-                arch_switch_to_user(next_task.get_trapframe()); // Force switch to user / guest space
+                let next_task = get_task_by_id(next_task_id).unwrap();
+                setup_task_execution(get_cpu(), next_task);
+                arch_switch_to_user(next_task.get_trapframe());
+            }
+        }
+    }
+
+    if let Some(current_task) = current_task(cpu_id) {
+        let _ = current_task.process_pending_events();
+    }
+}
+
+/// Start the scheduler and return the first runnable task ID (if any).
+pub fn start_scheduler() -> Option<usize> {
+    let cpu = get_cpu();
+    let cpu_id = cpu.get_cpuid();
+    let timer = get_kernel_timer();
+    timer.stop(cpu_id);
+    timer.set_interval_us(cpu_id, crate::timer::TICK_INTERVAL_US);
+    timer.start(cpu_id);
+
+    let (_current_task_id, next_task_id) = pick_next(cpu);
+    next_task_id
+}
+
+pub fn current_task(cpu_id: usize) -> Option<&'static Task> {
+    current_task_id(cpu_id).and_then(TaskPool::get_task)
+}
+
+pub fn current_task_mut(cpu_id: usize) -> Option<&'static mut Task> {
+    current_task_id(cpu_id).and_then(TaskPool::get_task_mut)
+}
+
+pub fn current_task_id(cpu_id: usize) -> Option<usize> {
+    assert_valid_cpu_id(cpu_id);
+    decode_task_id(CURRENT_TASK_IDS[cpu_id].load(Ordering::SeqCst))
+}
+
+pub fn get_task_by_id(task_id: usize) -> Option<&'static mut Task> {
+    TaskPool::get_task_mut(task_id)
+}
+
+pub fn wake_task(task_id: usize) -> bool {
+    let _irq_guard = IrqGuard::new();
+    let Some(task) = TaskPool::get_task_mut(task_id) else {
+        return false;
+    };
+
+    if !matches!(task.state.load(Ordering::SeqCst), TaskState::Blocked(_)) {
+        return false;
+    }
+
+    task.state.store(TaskState::Running, Ordering::SeqCst);
+    core::sync::atomic::fence(Ordering::SeqCst);
+
+    if !ready_queue_contains(task_id) {
+        push_ready_task(get_cpu().get_cpuid(), task_id);
+    }
+
+    true
+}
+
+pub fn cleanup_zombie(task_id: usize) {
+    {
+        let mut zombie_queue = ZOMBIE_QUEUE.lock();
+        if let Some(pos) = zombie_queue.iter().position(|&id| id == task_id) {
+            zombie_queue.remove(pos);
+            crate::println!("[Scheduler] Removed task {} from zombie_queue", task_id);
+        }
+    }
+
+    if let Some(_task) = get_task_pool().remove_task(task_id) {
+        crate::println!("[Scheduler] Cleaned up zombie task {}", task_id);
+    }
+}
+
+pub fn remove_task_from_queues(task_id: usize) {
+    let _irq_guard = IrqGuard::new();
+
+    for cpu_id in 0..MAX_NUM_CPUS {
+        let mut queue = ready_queue(cpu_id).lock();
+        while let Some(pos) = queue.iter().position(|&id| id == task_id) {
+            queue.remove(pos);
+        }
+
+        if current_task_id(cpu_id) == Some(task_id) {
+            set_current_task_id(cpu_id, None);
+        }
+    }
+
+    let mut zombie_queue = ZOMBIE_QUEUE.lock();
+    while let Some(pos) = zombie_queue.iter().position(|&id| id == task_id) {
+        zombie_queue.remove(pos);
+    }
+}
+
+/// Get IDs of all tasks across scheduler-visible queues/state.
+pub fn get_all_task_ids() -> alloc::vec::Vec<usize> {
+    let mut ids = alloc::vec::Vec::new();
+
+    for cpu_id in 0..MAX_NUM_CPUS {
+        if let Some(task_id) = current_task_id(cpu_id) {
+            if !ids.contains(&task_id) {
+                ids.push(task_id);
             }
         }
 
-        // Step 3: Setup task execution and process events (after context switch)
-        if let Some(current_task) = self.get_current_task(cpu_id) {
-            // Process pending events before dispatching task
-            let _ = current_task.process_pending_events();
-        }
-        // Schedule returns - trap handler will call arch_switch_to_user()
-    }
-
-    /// Start the scheduler and return the first runnable task ID (if any).
-    ///
-    /// This function intentionally avoids performing the initial user-mode transition.
-    /// The very first switch is architecture-specific and should be performed by
-    /// `crate::arch::first_switch_to_user()` from the boot path.
-    pub fn start_scheduler(&mut self) -> Option<usize> {
-        let cpu = get_cpu();
-        let cpu_id = cpu.get_cpuid();
-        let timer = get_kernel_timer();
-        timer.stop(cpu_id);
-
-        // Program the periodic timer, but do not force/require the first switch via IRQ.
-        timer.set_interval_us(cpu_id, crate::timer::TICK_INTERVAL_US);
-        timer.start(cpu_id);
-
-        let (_current_task_id, next_task_id) = self.run(cpu);
-        next_task_id
-    }
-
-    pub fn get_current_task(&mut self, cpu_id: usize) -> Option<&Task> {
-        match self.current_task_id[cpu_id] {
-            Some(task_id) => TaskPool::get_task(task_id),
-            None => None,
+        let queue = ready_queue(cpu_id).lock();
+        for &task_id in queue.iter() {
+            if !ids.contains(&task_id) {
+                ids.push(task_id);
+            }
         }
     }
 
-    /// Get a mutable reference to the current task on the specified CPU
-    ///
-    /// # Safety
-    /// This function returns a mutable reference to the current task,
-    /// which can lead to undefined behavior if misused. The caller must ensure:
-    /// - No other references (mutable or immutable) to the same task exist
-    /// - The task is not concurrently accessed from other contexts
-    /// - The scheduler's invariants are maintained
-    ///
-    pub unsafe fn get_current_task_mut(&mut self, cpu_id: usize) -> Option<&mut Task> {
-        match self.current_task_id[cpu_id] {
-            Some(task_id) => TaskPool::get_task_mut(task_id),
-            None => None,
+    let zombie_queue = ZOMBIE_QUEUE.lock();
+    for &task_id in zombie_queue.iter() {
+        if !ids.contains(&task_id) {
+            ids.push(task_id);
         }
     }
 
-    pub fn get_current_task_id(&self, cpu_id: usize) -> Option<usize> {
-        self.current_task_id[cpu_id]
-    }
+    ids
+}
 
-    /// Returns a mutable reference to the task with the specified ID, if found.
-    ///
-    /// This method searches the TaskPool to find the task with the specified ID.
-    /// This is needed for Waker integration.
-    ///
-    /// # Arguments
-    /// * `task_id` - The ID of the task to search for.
-    ///
-    /// # Returns
-    /// A mutable reference to the task if found, or None otherwise.
-    pub fn get_task_by_id(&mut self, task_id: usize) -> Option<&mut Task> {
-        TaskPool::get_task_mut(task_id)
-    }
+/// Perform kernel context switch between tasks.
+fn kernel_context_switch(cpu_id: usize, from_task_id: usize, to_task_id: usize) {
+    if from_task_id != to_task_id {
+        let mut from_ctx_ptr: *mut crate::arch::context::KernelContext = core::ptr::null_mut();
+        let mut to_ctx_ptr: *const crate::arch::context::KernelContext = core::ptr::null();
 
-    /// Move a task from blocked queue to ready queue when it's woken up
-    ///
-    /// This method is called by Waker when a blocked task needs to be woken up.
-    ///
-    /// # Arguments
-    /// * `task_id` - The ID of the task to move to ready queue
-    ///
-    /// # Returns
-    /// true if the task was found and moved, false otherwise
-    pub fn wake_task(&mut self, task_id: usize) -> bool {
-        // Search for the task in blocked queues
-        for cpu_id in 0..self.blocked_queue.len() {
-            if let Some(pos) = self.blocked_queue[cpu_id]
-                .iter()
-                .position(|&id| id == task_id)
+        {
+            if let Some(from_task) = TaskPool::get_task_mut(from_task_id) {
+                from_ctx_ptr = &mut *from_task.kernel_context.lock();
+
+                #[cfg(feature = "user-fpu")]
+                crate::arch::fpu::kernel_switch_out_user_fpu(&mut *from_task.vcpu.lock());
+
+                #[cfg(feature = "user-vector")]
+                crate::arch::fpu::kernel_switch_out_user_vector(
+                    cpu_id,
+                    from_task_id,
+                    &mut *from_task.vcpu.lock(),
+                );
+            }
+            if let Some(to_task) = TaskPool::get_task_mut(to_task_id) {
+                to_ctx_ptr = &*to_task.kernel_context.lock();
+            }
+        }
+
+        if !from_ctx_ptr.is_null() && !to_ctx_ptr.is_null() {
+            let cpu = get_cpu();
+            let saved_arch_cpu_state = ArchCpuState::save(cpu);
+            let saved_trapvector = get_trapvector();
+
+            #[cfg(feature = "hypervisor")]
+            let guest_vcpu_switch_data = crate::arch::hv::switch::VcpuSwitchData::save();
+            #[cfg(feature = "hypervisor")]
+            let hypervisor_switch_data = crate::arch::hv::switch::HypervisorSwitchData::save();
+
+            unsafe {
+                crate::arch::switch::switch_to(from_ctx_ptr, to_ctx_ptr);
+            }
+
+            #[cfg(feature = "hypervisor")]
             {
-                // Remove from blocked queue
-                self.blocked_queue[cpu_id].remove(pos);
-
-                // Get task from TaskPool and set state to Running
-                if let Some(task) = TaskPool::get_task_mut(task_id) {
-                    task.state
-                        .store(TaskState::Running, core::sync::atomic::Ordering::SeqCst);
-                    // Memory barrier to ensure state change is visible
-                    core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
-                    // Move to ready queue
-                    self.ready_queue[cpu_id].push_back(task_id);
-                    return true;
-                }
+                guest_vcpu_switch_data.restore();
+                hypervisor_switch_data.restore();
             }
-        }
-        // Not found in blocked queues. This can happen if a wake occurs between
-        // a task marking itself Blocked and the scheduler moving it to the
-        // blocked_queue. In that case, ensure the task state is set back to
-        // Running so that the scheduler does not park it.
-        if let Some(task) = TaskPool::get_task_mut(task_id) {
-            let task_state = task.state.load(core::sync::atomic::Ordering::SeqCst);
-            if let TaskState::Blocked(_) = task_state {
-                task.state
-                    .store(TaskState::Running, core::sync::atomic::Ordering::SeqCst);
-                // Memory barrier to ensure state change is visible
-                core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
-                // CRITICAL FIX: Check if task is in ready_queue, add if not
-                // This prevents tasks from being permanently unscheduled
-                let cpu_id = if let Some(current_id) = self.current_task_id[0] {
-                    if current_id == task_id {
-                        0 // Current task, no need to enqueue
-                    } else {
-                        // Find which CPU's ready_queue should contain this task
-                        // For simplicity, use CPU 0 (can be improved for multi-CPU)
-                        0
-                    }
-                } else {
-                    0 // Default to CPU 0
-                };
 
-                // Only add if not already in ready_queue to avoid duplicates
-                if !self.ready_queue[cpu_id].contains(&task_id) {
-                    self.ready_queue[cpu_id].push_back(task_id);
-                }
-                return true;
-            }
-        }
-        false
-    }
-
-    /// Clean up a zombie task after it has been waited on
-    ///
-    /// This removes the task from zombie_queue and task_pool, freeing all resources.
-    /// Should only be called from Task::wait() after confirming the task is a zombie.
-    ///
-    /// # Arguments
-    /// * `task_id` - The ID of the zombie task to clean up
-    pub fn cleanup_zombie_task(&mut self, task_id: usize) {
-        // Remove from zombie queue
-        for cpu_id in 0..MAX_NUM_CPUS {
-            if let Some(pos) = self.zombie_queue[cpu_id]
-                .iter()
-                .position(|&id| id == task_id)
-            {
-                self.zombie_queue[cpu_id].remove(pos);
-                crate::println!("[Scheduler] Removed task {} from zombie_queue", task_id);
-                break;
-            }
-        }
-
-        // Remove from task pool (this frees all task resources)
-        if let Some(_task) = get_task_pool().remove_task(task_id) {
-            crate::println!("[Scheduler] Cleaned up zombie task {}", task_id);
-        }
-    }
-
-    pub fn remove_task_from_queues(&mut self, task_id: usize) {
-        for cpu_id in 0..MAX_NUM_CPUS {
-            if let Some(pos) = self.ready_queue[cpu_id]
-                .iter()
-                .position(|&id| id == task_id)
-            {
-                self.ready_queue[cpu_id].remove(pos);
-            }
-            if let Some(pos) = self.blocked_queue[cpu_id]
-                .iter()
-                .position(|&id| id == task_id)
-            {
-                self.blocked_queue[cpu_id].remove(pos);
-            }
-            if let Some(pos) = self.zombie_queue[cpu_id]
-                .iter()
-                .position(|&id| id == task_id)
-            {
-                self.zombie_queue[cpu_id].remove(pos);
+            let cpu = get_cpu();
+            saved_arch_cpu_state.restore(cpu);
+            set_trapvector(saved_trapvector);
+            if let Some(from_task) = TaskPool::get_task_mut(from_task_id) {
+                #[cfg(feature = "user-fpu")]
+                crate::arch::fpu::kernel_switch_in_user_fpu(&mut *from_task.vcpu.lock());
             }
         }
     }
+}
 
-    /// Get IDs of all tasks across ready, blocked, and zombie queues
-    ///
-    /// This helper is used by subsystems (e.g., event broadcast) that need
-    /// to target every task in the system without holding a mutable
-    /// reference to the scheduler during delivery.
-    pub fn get_all_task_ids(&self) -> alloc::vec::Vec<usize> {
-        let mut ids = alloc::vec::Vec::new();
-        // Ready tasks
-        for q in &self.ready_queue {
-            for t in q.iter() {
-                ids.push(*t);
-            }
-        }
-        // Blocked tasks
-        for q in &self.blocked_queue {
-            for t in q.iter() {
-                ids.push(*t);
-            }
-        }
-        // Zombie tasks
-        for q in &self.zombie_queue {
-            for t in q.iter() {
-                ids.push(*t);
-            }
-        }
-        ids
+/// Setup task execution by configuring hardware and user context.
+pub fn setup_task_execution(cpu: &mut Arch, task: &mut Task) {
+    let sp = if let Some((_slot, base)) = task.get_kernel_stack_window_base() {
+        (base + crate::environment::PAGE_SIZE + crate::environment::TASK_KERNEL_STACK_SIZE) as u64
+    } else {
+        task.get_kernel_stack_bottom_paddr()
+    };
+
+    cpu.set_kernel_stack(sp);
+
+    let task_ptr = task as *mut Task;
+    unsafe {
+        let trapframe = (*task_ptr).get_trapframe();
+        (*task_ptr).vcpu.lock().switch(trapframe);
     }
 
-    /// Perform kernel context switch between tasks
-    ///
-    /// This function handles the low-level kernel context switching between
-    /// the current task and the next selected task. It also saves/restores
-    /// FPU/SIMD/Vector context for user-space tasks.
-    ///
-    /// # Arguments
-    /// * `cpu_id` - The CPU ID
-    /// * `from_task_id` - Current task ID
-    /// * `to_task_id` - Next task ID
-    fn kernel_context_switch(&mut self, cpu_id: usize, from_task_id: usize, to_task_id: usize) {
-        // crate::println!("[SCHED] CPU{}: Switching kernel context from Task {} to Task {}", cpu_id, from_task_id, to_task_id);
-        if from_task_id != to_task_id {
-            // Find tasks in all queues (ready, blocked, zombie)
-            let mut from_ctx_ptr: *mut crate::arch::context::KernelContext = core::ptr::null_mut();
-            let mut to_ctx_ptr: *const crate::arch::context::KernelContext = core::ptr::null();
+    cpu.set_trap_handler(get_user_trap_handler());
+    cpu.set_next_address_space(task.vm_manager.get_asid());
+    set_next_mode(task.vcpu.lock().get_mode());
+    set_trapvector(get_trampoline_trap_vector());
+}
 
-            {
-                if let Some(from_task) = TaskPool::get_task_mut(from_task_id) {
-                    from_ctx_ptr = &mut *from_task.kernel_context.lock();
-
-                    #[cfg(feature = "user-fpu")]
-                    crate::arch::fpu::kernel_switch_out_user_fpu(&mut *from_task.vcpu.lock());
-
-                    #[cfg(feature = "user-vector")]
-                    crate::arch::fpu::kernel_switch_out_user_vector(
-                        cpu_id,
-                        from_task_id,
-                        &mut *from_task.vcpu.lock(),
-                    );
-                }
-                if let Some(to_task) = TaskPool::get_task_mut(to_task_id) {
-                    to_ctx_ptr = &*to_task.kernel_context.lock();
-                }
-            }
-
-            if !from_ctx_ptr.is_null() && !to_ctx_ptr.is_null() {
-                let cpu = get_cpu();
-                let saved_arch_cpu_state = ArchCpuState::save(cpu);
-                let saved_trapvector = get_trapvector();
-
-                #[cfg(feature = "hypervisor")]
-                let guest_vcpu_switch_data = crate::arch::hv::switch::VcpuSwitchData::save();
-                #[cfg(feature = "hypervisor")]
-                let hypervisor_switch_data = crate::arch::hv::switch::HypervisorSwitchData::save();
-
-                unsafe {
-                    crate::arch::switch::switch_to(from_ctx_ptr, to_ctx_ptr);
-                }
-
-                #[cfg(feature = "hypervisor")]
-                {
-                    guest_vcpu_switch_data.restore();
-                    hypervisor_switch_data.restore();
-                }
-
-                let cpu = get_cpu();
-                saved_arch_cpu_state.restore(cpu);
-                set_trapvector(saved_trapvector);
-                // Execution resumes here when this task is rescheduled
-                if let Some(from_task) = TaskPool::get_task_mut(from_task_id) {
-                    #[cfg(feature = "user-fpu")]
-                    crate::arch::fpu::kernel_switch_in_user_fpu(&mut *from_task.vcpu.lock());
-                }
-            } else {
-                // crate::println!("[SCHED] ERROR: Context pointers not found - from: {:p}, to: {:p}", from_ctx_ptr, to_ctx_ptr);
-            }
-        }
+/// Reset the scheduler to initial state (test-only).
+#[cfg(test)]
+pub fn reset() {
+    for cpu_id in 0..MAX_NUM_CPUS {
+        ready_queue(cpu_id).lock().clear();
+        set_current_task_id(cpu_id, None);
     }
-
-    /// Setup task execution by configuring hardware and user context
-    ///
-    /// This replaces the old dispatcher functionality with a more direct approach.
-    ///
-    /// # Arguments
-    /// * `cpu` - The CPU architecture state
-    /// * `task` - The task to setup for execution
-    pub fn setup_task_execution(cpu: &mut Arch, task: &mut Task) {
-        // crate::println!("[SCHED] Setting up Task {} for execution", task.get_id());
-        // crate::println!("[SCHED]   before CPU {:#x?}", cpu);
-        // let trapframe = cpu.get_trapframe();
-        // crate::println!("[SCHED]   before Trapframe {:#x?}", trapframe);
-
-        // Prefer the high-VA kernel stack window if available
-        let sp = if let Some((_slot, base)) = task.get_kernel_stack_window_base() {
-            // top = base + guard + TASK_KERNEL_STACK_SIZE
-            (base + crate::environment::PAGE_SIZE + crate::environment::TASK_KERNEL_STACK_SIZE)
-                as u64
-        } else {
-            task.get_kernel_stack_bottom_paddr()
-        };
-
-        // crate::println!("[SCHED]   Setting kernel stack to {:#x}", sp);
-        cpu.set_kernel_stack(sp);
-
-        // Handle trapframe and vcpu switching - use raw pointer to avoid borrow checker issues
-        // This is safe because we're accessing different fields of the same struct
-        let task_ptr = task as *mut Task;
-        unsafe {
-            let trapframe = (*task_ptr).get_trapframe();
-            (*task_ptr).vcpu.lock().switch(trapframe);
-        }
-
-        cpu.set_trap_handler(get_user_trap_handler());
-        cpu.set_next_address_space(task.vm_manager.get_asid());
-        let next_mode = task.vcpu.lock().get_mode();
-        set_next_mode(next_mode);
-
-        set_trapvector(get_trampoline_trap_vector());
-
-        // crate::println!("[SCHED]   after  CPU {:#x?}", cpu);
-        // crate::println!("[SCHED]   after  Trapframe {:#x?}", cpu.get_trapframe());
-
-        // Note: User context (VCPU) will be restored in schedule() after run() returns
-    }
-
-    /// Reset the scheduler to initial state (test-only)
-    ///
-    /// Clears all queues, resets current task IDs, and resets the task pool.
-    /// This should ONLY be called in tests to clean up state between test cases.
-    #[cfg(test)]
-    pub fn reset(&mut self) {
-        // Clear all queues
-        for cpu_id in 0..MAX_NUM_CPUS {
-            self.ready_queue[cpu_id].clear();
-            self.blocked_queue[cpu_id].clear();
-            self.zombie_queue[cpu_id].clear();
-            self.current_task_id[cpu_id] = None;
-        }
-
-        // Reset the task pool
-        get_task_pool().reset();
-    }
+    ZOMBIE_QUEUE.lock().clear();
+    get_task_pool().reset();
 }
 
 pub fn make_test_tasks() {
     println!("Making test tasks...");
-    let sched = get_scheduler();
     let mut task0 = new_kernel_task("Task0".to_string(), 0, || {
         println!("Task0");
         let mut counter: usize = 0;
@@ -1072,7 +769,7 @@ pub fn make_test_tasks() {
         idle();
     });
     task0.init();
-    sched.add_task(task0, 0);
+    add_task(task0, 0);
 
     let mut task1 = new_kernel_task("Task1".to_string(), 0, || {
         println!("Task1");
@@ -1091,7 +788,7 @@ pub fn make_test_tasks() {
         idle();
     });
     task1.init();
-    sched.add_task(task1, 0);
+    add_task(task1, 0);
 
     let mut task2 = new_kernel_task("Task2".to_string(), 0, || {
         println!("Task2");
@@ -1115,7 +812,7 @@ pub fn make_test_tasks() {
         idle();
     });
     task2.init();
-    sched.add_task(task2, 0);
+    add_task(task2, 0);
 }
 
 // late_initcall!(make_test_tasks);
@@ -1128,9 +825,9 @@ mod tests {
 
     #[test_case]
     fn test_add_task() {
-        let mut scheduler = Scheduler::new();
+        reset();
         let task = Task::new("TestTask".to_string(), 1, TaskType::Kernel);
-        scheduler.add_task(task, 0);
-        assert_eq!(scheduler.ready_queue[0].len(), 1);
+        add_task(task, 0);
+        assert_eq!(READY_QUEUES[0].lock().len(), 1);
     }
 }

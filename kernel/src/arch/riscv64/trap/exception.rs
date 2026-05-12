@@ -5,7 +5,7 @@ use crate::abi::syscall_dispatcher;
 use crate::arch::trap::print_traplog;
 use crate::arch::{Trapframe, get_cpu};
 use crate::println;
-use crate::sched::scheduler::get_scheduler;
+use crate::sched::scheduler::current_task;
 use crate::task::mytask;
 
 fn log_fatal_page_fault_context(
@@ -71,9 +71,7 @@ pub fn arch_exception_handler(trapframe: &mut Trapframe, cause: usize) {
                 unreachable!();
             }
 
-            let task = get_scheduler()
-                .get_current_task(get_cpu().get_cpuid())
-                .unwrap();
+            let task = current_task(get_cpu().get_cpuid()).unwrap();
 
             let user_fpu_allowed = crate::arch::user_fpu_enabled();
             let user_vec_allowed = crate::arch::user_vector_enabled();
@@ -229,9 +227,7 @@ pub fn arch_exception_handler(trapframe: &mut Trapframe, cause: usize) {
         /* Instruction page fault */
         INSTRUCTION_PAGE_FAULT => {
             let mut vaddr = trapframe.epc as usize;
-            let task = get_scheduler()
-                .get_current_task(get_cpu().get_cpuid())
-                .unwrap();
+            let task = current_task(get_cpu().get_cpuid()).unwrap();
             use crate::object::capability::memory_mapping::{AccessKind, AccessOp};
             loop {
                 let access = AccessKind {
@@ -271,9 +267,7 @@ pub fn arch_exception_handler(trapframe: &mut Trapframe, cause: usize) {
             unsafe {
                 asm!("csrr {}, stval", out(reg) vaddr);
             }
-            let task = get_scheduler()
-                .get_current_task(get_cpu().get_cpuid())
-                .unwrap();
+            let task = current_task(get_cpu().get_cpuid()).unwrap();
             use crate::object::capability::memory_mapping::{AccessKind, AccessOp};
             loop {
                 let op = if cause == LOAD_PAGE_FAULT {

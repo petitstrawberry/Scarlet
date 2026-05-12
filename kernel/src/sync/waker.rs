@@ -7,7 +7,7 @@
 extern crate alloc;
 
 use crate::arch::Trapframe;
-use crate::sched::scheduler::get_scheduler;
+use crate::sched::scheduler::{get_task_by_id, schedule, wake_task};
 use crate::task::{BlockedType, TaskState};
 use alloc::collections::VecDeque;
 use core::fmt;
@@ -116,7 +116,7 @@ impl Waker {
         // CRITICAL: Set task state to Blocked FIRST, before adding to queue
         // This prevents race condition where wake_one() is called after queue.push_back()
         // but before set_state(), which would leave the task in Running state but not in queue
-        if let Some(task) = get_scheduler().get_task_by_id(task_id) {
+        if let Some(task) = get_task_by_id(task_id) {
             task.set_state(TaskState::Blocked(self.block_type));
         } else {
             panic!("[WAKER] Task ID {} not found in scheduler", task_id);
@@ -136,7 +136,7 @@ impl Waker {
         core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
 
         // Yield CPU to scheduler - returns when woken
-        get_scheduler().schedule(trapframe);
+        schedule(trapframe);
     }
 
     /// Block the task until woken or the timeout elapses.
@@ -165,8 +165,7 @@ impl Waker {
             impl TimerHandler for TimeoutWake {
                 fn on_timer_expired(self: Arc<Self>, _context: usize) {
                     self.timed_out.store(true, Ordering::SeqCst);
-                    let scheduler = get_scheduler();
-                    let _ = scheduler.wake_task(self.task_id);
+                    let _ = wake_task(self.task_id);
                 }
             }
 
@@ -212,8 +211,7 @@ impl Waker {
         impl TimerHandler for MinTimeoutWake {
             fn on_timer_expired(self: Arc<Self>, _context: usize) {
                 self.fired.store(true, Ordering::SeqCst);
-                let scheduler = get_scheduler();
-                let _ = scheduler.wake_task(self.task_id);
+                let _ = wake_task(self.task_id);
             }
         }
 
@@ -302,7 +300,7 @@ impl Waker {
 
         if let Some(task_id) = task_id {
             // Use the scheduler's wake_task method to move from blocked to ready queue
-            get_scheduler().wake_task(task_id)
+            wake_task(task_id)
         } else {
             false
         }
@@ -334,7 +332,7 @@ impl Waker {
         let mut woken_count = 0;
         for task_id in task_ids {
             // Use the scheduler's wake_task method to move from blocked to ready queue
-            if get_scheduler().wake_task(task_id) {
+            if wake_task(task_id) {
                 woken_count += 1;
             }
         }

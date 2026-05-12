@@ -9,7 +9,7 @@ use core::panic;
 use crate::abi::syscall_dispatcher;
 use crate::arch::{Trapframe, get_cpu};
 use crate::object::capability::memory_mapping::{AccessKind, AccessOp};
-use crate::sched::scheduler::get_scheduler;
+use crate::sched::scheduler::current_task;
 use crate::task::mytask;
 use crate::{early_println, println};
 
@@ -143,7 +143,7 @@ pub fn arch_exception_handler(trapframe: &mut Trapframe, trap_kind: usize) {
         ExceptionClass::FpSimdAccess => {
             if crate::arch::user_fpu_enabled() {
                 let cpu_id = get_cpu().get_cpuid();
-                let task = get_scheduler().get_current_task(cpu_id).unwrap();
+                let task = current_task(cpu_id).unwrap();
                 task.vcpu.lock().fpu_used = true;
                 crate::arch::fpu::set_user_fpu_enabled(true);
                 unsafe {
@@ -225,9 +225,7 @@ pub fn arch_exception_handler(trapframe: &mut Trapframe, trap_kind: usize) {
 
 /// Handle instruction page fault (like RISC-V cause 12)
 fn handle_instruction_fault(trapframe: &mut Trapframe, vaddr: usize) {
-    let task = get_scheduler()
-        .get_current_task(get_cpu().get_cpuid())
-        .unwrap();
+    let task = current_task(get_cpu().get_cpuid()).unwrap();
 
     let access = AccessKind {
         op: AccessOp::Instruction,
@@ -249,9 +247,7 @@ fn handle_instruction_fault(trapframe: &mut Trapframe, vaddr: usize) {
 
 /// Handle data page fault (like RISC-V cause 13/15)
 fn handle_data_fault(trapframe: &mut Trapframe, vaddr: usize, is_write: bool) {
-    let task = get_scheduler()
-        .get_current_task(get_cpu().get_cpuid())
-        .unwrap();
+    let task = current_task(get_cpu().get_cpuid()).unwrap();
 
     let op = if is_write {
         AccessOp::Store
@@ -312,7 +308,7 @@ fn handle_data_fault(trapframe: &mut Trapframe, vaddr: usize, is_write: bool) {
         Ok(_) => (),
         Err(e) => {
             print_trap_info(trapframe, get_esr_el1());
-            if let Some(task) = get_scheduler().get_current_task(get_cpu().get_cpuid()) {
+            if let Some(task) = current_task(get_cpu().get_cpuid()) {
                 early_println!(
                     "Task {} (PID {}) caused data fault at vaddr: {:#x} (write={}) from PC: {:#x}",
                     task.name.read(),

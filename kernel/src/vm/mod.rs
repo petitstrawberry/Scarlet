@@ -37,7 +37,7 @@ use crate::environment::{
     KERNEL_HEAP_SIZE, KERNEL_KSTACK_REGION_END, KERNEL_KSTACK_REGION_START,
     KERNEL_KSTACK_SLOT_SIZE, KERNEL_KSTACK_SLOTS, TASK_KERNEL_STACK_SIZE,
 };
-use crate::sched::scheduler::get_scheduler;
+use crate::sched::scheduler::current_task;
 use crate::task::Task;
 use core::sync::atomic::Ordering;
 use spin::{Mutex, Once};
@@ -623,9 +623,7 @@ pub fn switch_to_kernel_vm() {
 
 pub fn switch_to_user_vm(cpu: &mut Arch) {
     let cpu_id = cpu.get_cpuid();
-    let task = get_scheduler()
-        .get_current_task(cpu_id)
-        .expect("No current task found");
+    let task = current_task(cpu_id).expect("No current task found");
     let manager = &task.vm_manager;
     let root_page_table = manager
         .get_root_page_table()

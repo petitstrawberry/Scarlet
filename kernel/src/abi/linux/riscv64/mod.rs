@@ -81,9 +81,7 @@ impl AbiModule for LinuxRiscv64Abi {
         target_task_id: u32,
     ) -> Result<(), &'static str> {
         if let Some(signal) = generic::signal::handle_event_to_signal(&event) {
-            let scheduler = crate::sched::scheduler::get_scheduler();
-            let target_task = scheduler
-                .get_task_by_id(target_task_id as usize)
+            let target_task = crate::sched::scheduler::get_task_by_id(target_task_id as usize)
                 .ok_or("Target task not found")?;
 
             let action = {

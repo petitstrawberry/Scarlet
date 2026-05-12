@@ -437,7 +437,7 @@ pub fn configure_user_entry(trapframe: &mut Trapframe, options: crate::arch::Use
     // DTB-driven runtime gating complements the build-time feature.
     if crate::arch::user_fpu_enabled() {
         let cpu_id = get_cpu().get_cpuid();
-        if let Some(task) = crate::sched::scheduler::get_scheduler().get_current_task(cpu_id) {
+        if let Some(task) = crate::sched::scheduler::current_task(cpu_id) {
             crate::arch::fpu::set_user_fpu_enabled(task.vcpu.lock().fpu_used);
         } else {
             crate::arch::fpu::set_user_fpu_enabled(false);

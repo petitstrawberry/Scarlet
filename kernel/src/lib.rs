@@ -305,7 +305,7 @@ use crate::{
 use arch::get_cpu;
 use core::sync::atomic::{Ordering, compiler_fence, fence};
 use mem::allocator::init_heap;
-use sched::scheduler::get_scheduler;
+use sched::scheduler::{add_task, get_task_by_id, start_scheduler};
 use task::new_user_task;
 use timer::get_kernel_timer;
 use vm::{
@@ -772,7 +772,6 @@ pub extern "C" fn start_kernel(boot_info: &BootInfo) -> ! {
 
     /* Initialize scheduler */
     println!("[boot] Initializing scheduler...");
-    let scheduler = get_scheduler();
     fence(Ordering::SeqCst); // Ensure scheduler is initialized before proceeding
 
     /* Initialize global VFS */
@@ -852,7 +851,7 @@ pub extern "C" fn start_kernel(boot_info: &BootInfo) -> ! {
             println!("[Scarlet Kernel] Adding init task to scheduler...");
             let cpu_id = get_cpu().get_cpuid();
             println!("[Scarlet Kernel] cpu_id for init task: {}", cpu_id);
-            get_scheduler().add_task(task, cpu_id);
+            add_task(task, cpu_id);
             println!("[Scarlet Kernel] Init task added to scheduler");
         }
         Err(e) => println!("[Scarlet Kernel] Error loading ELF into task: {:?}", e),
@@ -866,11 +865,9 @@ pub extern "C" fn start_kernel(boot_info: &BootInfo) -> ! {
     println!("[Scarlet Kernel] Scheduler will start...");
     println!("[Scarlet Kernel] Calling start_scheduler()...");
 
-    let next_task_id = scheduler.start_scheduler();
+    let next_task_id = start_scheduler();
     if let Some(next_task_id) = next_task_id {
-        let next_task = scheduler
-            .get_task_by_id(next_task_id)
-            .expect("First runnable task must exist");
+        let next_task = get_task_by_id(next_task_id).expect("First runnable task must exist");
         crate::arch::first_switch_to_user(next_task);
     }
 

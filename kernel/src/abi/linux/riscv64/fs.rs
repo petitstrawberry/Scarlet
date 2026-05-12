@@ -935,7 +935,7 @@ pub fn sys_read(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
                         if nonblocking {
                             return errno::to_result(errno::EAGAIN);
                         } else {
-                            get_scheduler().schedule(trapframe);
+                            schedule(trapframe);
                             usize::MAX
                         }
                     }
@@ -1039,7 +1039,7 @@ pub fn sys_write(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize 
                 if nonblocking {
                     return errno::to_result(errno::EAGAIN);
                 } else {
-                    get_scheduler().schedule(trapframe);
+                    schedule(trapframe);
                     usize::MAX
                 }
             }
@@ -1165,7 +1165,7 @@ pub fn sys_pread64(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usiz
                 trapframe.increment_pc_next(task);
                 errno::to_result(errno::EAGAIN)
             } else {
-                get_scheduler().schedule(trapframe);
+                schedule(trapframe);
                 usize::MAX
             }
         }
@@ -1250,7 +1250,7 @@ pub fn sys_pwrite64(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usi
                 trapframe.increment_pc_next(task);
                 errno::to_result(errno::EAGAIN)
             } else {
-                get_scheduler().schedule(trapframe);
+                schedule(trapframe);
                 usize::MAX
             }
         }
@@ -1388,7 +1388,7 @@ pub fn sys_writev(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize
                         break;
                     }
                 } else {
-                    get_scheduler().schedule(trapframe);
+                    schedule(trapframe);
                     return usize::MAX;
                 }
             }
@@ -2781,7 +2781,7 @@ pub fn sys_getdents64(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> u
             Ok(_) => break, // partial read, treat as error/EOF
             Err(StreamError::EndOfStream) => break,
             Err(StreamError::WouldBlock) => {
-                get_scheduler().schedule(trapframe);
+                schedule(trapframe);
                 return usize::MAX;
             }
             Err(_) => break,
@@ -2872,7 +2872,7 @@ pub fn sys_readv(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize 
                         break;
                     }
                 } else {
-                    get_scheduler().schedule(trapframe);
+                    schedule(trapframe);
                     return usize::MAX;
                 }
             }

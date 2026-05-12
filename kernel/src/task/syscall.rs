@@ -25,7 +25,7 @@ use crate::library::std::string::{
 };
 
 use crate::arch::{Trapframe, get_cpu};
-use crate::sched::scheduler::get_scheduler;
+use crate::sched::scheduler::{add_task, get_task_by_id, remove_task_from_queues, schedule};
 use crate::task::{
     CloneFlags, CloneFlagsDef, WaitError, get_parent_waitpid_waker, get_waitpid_waker,
 };
@@ -141,7 +141,6 @@ pub fn sys_clone(trapframe: &mut Trapframe) -> usize {
                 child_task.vcpu.lock().iregs.set_arg(0, child_arg);
             }
 
-            let scheduler = get_scheduler();
             let cpu_id = get_cpu().get_cpuid();
             let parent_id = parent_task.get_id();
 
@@ -160,20 +159,19 @@ pub fn sys_clone(trapframe: &mut Trapframe) -> usize {
             }
 
             // Add child to scheduler and get the allocated ID
-            let child_id = scheduler.add_task(child_task, cpu_id);
+            let child_id = add_task(child_task, cpu_id);
             // crate::println!("[CLONE] Child task {} added to scheduler", child_id);
 
             // Establish parent-child relationship now that both have valid IDs
-            if let Some(child) = scheduler.get_task_by_id(child_id) {
+            if let Some(child) = get_task_by_id(child_id) {
                 child.set_parent_id(parent_id);
             }
-            if let Some(parent) = scheduler.get_task_by_id(parent_id) {
+            if let Some(parent) = get_task_by_id(parent_id) {
                 parent.add_child(child_id);
             }
 
             // Get the child's namespace-local PID (after add_task has set the IDs)
-            let child_ns_pid = scheduler
-                .get_task_by_id(child_id)
+            let child_ns_pid = get_task_by_id(child_id)
                 .map(|t| t.get_namespace_id())
                 .unwrap_or(0);
 
@@ -572,7 +570,7 @@ pub fn sys_yield(trapframe: &mut Trapframe) -> usize {
     trapframe.increment_pc_next(task);
 
     // Yield CPU to scheduler - returns when this task is scheduled again
-    get_scheduler().schedule(trapframe);
+    schedule(trapframe);
 
     0
 }
@@ -810,7 +808,6 @@ pub fn sys_create_namespace(trapframe: &mut Trapframe) -> usize {
 /// Returns error code on failure
 pub fn sys_shutdown(trapframe: &mut Trapframe) -> usize {
     use crate::arch::shutdown;
-    use crate::sched::scheduler::get_scheduler;
     use crate::task::TaskState;
 
     let task = mytask().unwrap();
@@ -845,7 +842,6 @@ pub fn sys_shutdown(trapframe: &mut Trapframe) -> usize {
     // We iterate through all possible task IDs and terminate those that are running
     crate::println!("[SHUTDOWN] Step 1: Terminating all tasks...");
 
-    let scheduler = get_scheduler();
     let current_task_id = task.get_id();
 
     crate::println!("[SHUTDOWN] Dropping all tasks...");
@@ -853,7 +849,7 @@ pub fn sys_shutdown(trapframe: &mut Trapframe) -> usize {
         if task_id == current_task_id {
             continue;
         }
-        scheduler.remove_task_from_queues(task_id);
+        remove_task_from_queues(task_id);
         if let Some(task) = crate::sched::scheduler::get_task_pool().remove_task(task_id) {
             drop(task);
         }

@@ -161,6 +161,7 @@ qemu-system-aarch64 \
     -machine virt,virtualization=on,gic-version=3,acpi=off \
     -cpu max \
     -m 8G \
+    -smp 2 \
     -nographic \
     -serial mon:stdio \
     --no-reboot \

@@ -17,6 +17,7 @@ use crate::network::socket::SocketError;
 use crate::network::socket::{
     Inet4SocketAddress, SocketAddress, SocketControl, SocketObject, SocketState,
 };
+use crate::sched::scheduler::current_task_id;
 
 /// TCP connection states
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1792,9 +1793,8 @@ impl crate::object::capability::Selectable for TcpSocket {
 
         let task_id = {
             use crate::arch::get_cpu;
-            use crate::sched::scheduler::get_scheduler;
             let cpu_id = get_cpu().get_cpuid();
-            get_scheduler().get_current_task_id(cpu_id).unwrap_or(0)
+            current_task_id(cpu_id).unwrap_or(0)
         };
 
         let woke = if interest.read {
