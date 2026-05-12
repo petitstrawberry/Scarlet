@@ -25,15 +25,27 @@ const DEBUG_DEVICE_FAULT_VA: usize = 0xffff_0008_3afd_b000;
 const MAX_PAGING_LEVEL: usize = 3;
 const MAX_BLOCK_LEVEL: usize = 2;
 
+/// Attributes carried while installing a mapping.
+///
+/// Currently this only stores Scarlet virtual-memory permissions, but keeping
+/// the attributes bundled makes the level-specific mapping path explicit.
 #[derive(Clone, Copy)]
 struct MapAttrs {
     permissions: usize,
 }
 
+/// Returns the page size represented by a logical page-table level.
+///
+/// Level 0 is a 4 KiB page, level 1 is a 2 MiB block, and level 2 is a
+/// 1 GiB block for the AArch64 4 KiB granule translation regime.
 fn page_size_for_level(level: usize) -> usize {
     1usize << (12 + 9 * level)
 }
 
+/// Chooses the largest supported page level for a mapping chunk.
+///
+/// A block level is selected only when the remaining size is large enough and
+/// both virtual and physical addresses are aligned to that level's size.
 fn best_page_level(vaddr: usize, paddr: usize, size: usize) -> usize {
     for level in (1..=MAX_BLOCK_LEVEL).rev() {
         let page_size = page_size_for_level(level);
@@ -152,6 +164,10 @@ impl PageTableEntry {
         self.is_valid() && (self.entry & 0x3) == 0x1
     }
 
+    /// Returns whether this PTE is a leaf descriptor for `level`.
+    ///
+    /// AArch64 uses page descriptors (`0b11`) at level 0 and block descriptors
+    /// (`0b01`) at levels 1 and 2.
     fn is_leaf_for_level(&self, level: usize) -> bool {
         if level == 0 {
             self.is_valid() && (self.entry & 0x3) == 0x3
@@ -160,6 +176,10 @@ impl PageTableEntry {
         }
     }
 
+    /// Returns whether this PTE's output address is aligned for `level`.
+    ///
+    /// Huge-page block descriptors must have zero lower output-address fields
+    /// for all lower page-table levels.
     pub fn is_aligned_for_level(&self, level: usize) -> bool {
         let mask = (1usize << (9 * level)) - 1;
         self.get_ppn() & mask == 0
@@ -454,6 +474,10 @@ impl PageTable {
             .expect("map: couldn't install a 4 KiB leaf mapping");
     }
 
+    /// Attempts to install a leaf mapping at the specified logical level.
+    ///
+    /// The addresses must be aligned to the selected level's page size. Existing
+    /// lower-level page tables are not replaced by block leaves implicitly.
     fn try_map_at_level(
         &mut self,
         asid: u16,
@@ -491,6 +515,11 @@ impl PageTable {
         Ok(())
     }
 
+    /// Builds an AArch64 page or block descriptor for a leaf mapping.
+    ///
+    /// Level 0 uses a page descriptor (`0b11`); levels 1 and 2 use block
+    /// descriptors (`0b01`). Permission, memory type, shareability, and execute
+    /// attributes are encoded from the mapping request.
     fn make_leaf_entry(vaddr: usize, paddr: usize, permissions: usize, level: usize) -> u64 {
         let is_user = VirtualMemoryPermission::User.contained_in(permissions);
         let is_device = !is_user && (IOREMAP_START..=IOREMAP_END).contains(&vaddr);
@@ -559,6 +588,10 @@ impl PageTable {
         self.walk_to_level(vaddr, 0, alloc, asid)
     }
 
+    /// Walks to the PTE for `vaddr` at `target_level`.
+    ///
+    /// Intermediate tables are allocated when `alloc` is true. Valid target
+    /// levels are 0 through 3, where 0 is the final 4 KiB page level.
     fn walk_to_level(
         &mut self,
         vaddr: usize,
@@ -614,6 +647,11 @@ impl PageTable {
         }
     }
 
+    /// Finds the leaf descriptor that translates `vaddr`.
+    ///
+    /// Returns the PTE and its logical level so callers can calculate offsets
+    /// inside either page or block mappings. Invalid descriptors or misaligned
+    /// block outputs are treated as absent mappings.
     fn walk_leaf(&mut self, vaddr: usize) -> Option<(&mut PageTableEntry, usize)> {
         if !Self::is_canonical_48(vaddr) {
             return None;
@@ -722,6 +760,11 @@ impl PageTable {
         }
     }
 
+    /// Splits a huge-page block leaf into next-lower-level entries.
+    ///
+    /// The child table preserves the original mapping attributes while changing
+    /// descriptor type as needed. Allocation and cache maintenance are required
+    /// because the hardware page-table walker observes the produced table.
     fn split_leaf(&mut self, asid: u16, vaddr: usize, level: usize) -> Result<(), &'static str> {
         if level == 0 {
             return Err("Cannot split a 4 KiB leaf");
