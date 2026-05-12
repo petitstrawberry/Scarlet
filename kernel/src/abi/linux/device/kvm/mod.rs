@@ -65,7 +65,7 @@ const fn io_read_write(ty: u32, nr: u32, size: u32) -> u32 {
     (3 << 30) | (size << 16) | (ty << 8) | nr
 }
 
-// _IO(KVMIO, nr) — no direction, no size
+// _IO(KVMIO, nr)
 pub const KVM_GET_API_VERSION: u32 = io_none(KVMIO, 0x00);
 pub const KVM_CREATE_VM: u32 = io_none(KVMIO, 0x01);
 pub const KVM_CHECK_EXTENSION: u32 = io_none(KVMIO, 0x03);
@@ -74,20 +74,20 @@ pub const KVM_CREATE_VCPU: u32 = io_none(KVMIO, 0x41);
 pub const KVM_RUN: u32 = io_none(KVMIO, 0x80);
 pub const KVM_CREATE_IRQCHIP: u32 = io_none(KVMIO, 0x60);
 
-// _IOW(KVMIO, 0x86, struct kvm_interrupt) — VCPU-level interrupt injection
+// _IOW(KVMIO, 0x86, struct kvm_interrupt)
 pub const KVM_INTERRUPT: u32 = io_write(KVMIO, 0x86, 4);
 
 const KVM_INTERRUPT_SET: u32 = u32::MAX;
 const KVM_INTERRUPT_UNSET: u32 = u32::MAX - 1;
 
-// _IOW(KVMIO, nr, struct) — host→kernel
+// _IOW(KVMIO, nr, struct)
 pub const KVM_SET_USER_MEMORY_REGION: u32 = io_write(KVMIO, 0x46, 32);
 pub const KVM_IRQ_LINE: u32 = io_write(KVMIO, 0x61, 8);
 pub const KVM_SET_MP_STATE: u32 = io_write(KVMIO, 0x99, 4);
 pub const KVM_SET_REGS: u32 = io_write(KVMIO, 0x82, 256);
 pub const KVM_SET_ONE_REG: u32 = io_write(KVMIO, 0xAC, 16);
 
-// _IOR(KVMIO, nr, struct) — kernel→host
+// _IOR(KVMIO, nr, struct)
 pub const KVM_GET_MP_STATE: u32 = io_read(KVMIO, 0x98, 4);
 pub const KVM_GET_REGS: u32 = io_read(KVMIO, 0x81, 256);
 
@@ -208,15 +208,9 @@ pub struct KvmRunFailEntry {
 // ---------------------------------------------------------------------------
 // Per-vCPU shared kvm_run page management
 // ---------------------------------------------------------------------------
-// When kvmtool creates a vCPU via KVM_CREATE_VCPU, we allocate a page-aligned
-// KvmRun struct. Userspace mmaps the vcpu fd to get a shared view of this
-// structure. After each KVM_RUN, the kernel writes exit information into the
-// shared page and userspace reads it from the mmap'd address.
 
 struct KvmRunPage {
-    /// Kernel virtual address of the kvm_run page (for kernel writes)
     vaddr: usize,
-    /// Physical address of the kvm_run page (for userspace mmap)
     paddr: usize,
 }
 
@@ -342,7 +336,6 @@ pub fn handle_system_ioctl(
     _arg: usize,
     abi: &mut LinuxAbi,
 ) -> Result<Option<usize>, ()> {
-    // crate::println!("[KVM] handle_system_ioctl: request={:#x} arg={}", request, _arg);
     match request {
         KVM_GET_API_VERSION => Ok(Some(KVM_API_VERSION)),
 
@@ -359,16 +352,20 @@ pub fn handle_system_ioctl(
         }
 
         KVM_CHECK_EXTENSION => {
-            // Linux KVM capability IDs (from include/uapi/linux/kvm.h)
+            const KVM_CAP_IRQCHIP: usize = 0;
             const KVM_CAP_NR_VCPUS: usize = 9;
             const KVM_CAP_COALESCED_MMIO: usize = 15;
             const KVM_CAP_ONE_REG: usize = 70;
             const KVM_CAP_MAX_VCPUS: usize = 66;
             match _arg {
+                KVM_CAP_IRQCHIP => Ok(Some(1)),
                 KVM_CAP_ONE_REG => Ok(Some(1)),
                 KVM_CAP_NR_VCPUS => Ok(Some(1)),
                 KVM_CAP_MAX_VCPUS => Ok(Some(1)),
-                _ => Ok(Some(0)),
+                _ => match arch::check_extension(_arg) {
+                    Some(val) => Ok(Some(val)),
+                    None => Ok(Some(0)),
+                },
             }
         }
 
@@ -388,7 +385,6 @@ pub fn handle_vm_ioctl(
     vm: &VmRef,
     abi: &mut LinuxAbi,
 ) -> Result<Option<usize>, ()> {
-    // crate::println!("[KVM] handle_vm_ioctl: request={:#x} arg={:#x}", request, arg);
     match request {
         KVM_CREATE_VCPU => {
             let vcpu_id = arg as u32;
@@ -431,8 +427,6 @@ pub fn handle_vm_ioctl(
                 readonly: (region.flags & KVM_MEM_READONLY) != 0,
             };
 
-            // The hypervisor's set_memory_region_impl expects a userspace virtual address
-            // (it calls translate_to_kva internally). Pass userspace_addr directly.
             match vm.set_memory_region(
                 region.slot,
                 region.guest_phys_addr,
@@ -469,7 +463,9 @@ pub fn handle_vm_ioctl(
             Ok(Some(0))
         }
 
-        _ => Ok(None),
+        KVM_CREATE_IRQCHIP => Ok(Some(0)),
+
+        _ => arch::handle_vm_ioctl(request, arg, vm, abi),
     }
 }
 
@@ -485,8 +481,6 @@ static MMIO_PENDING_VALID: AtomicBool = AtomicBool::new(false);
 pub fn handle_vcpu_ioctl(request: u32, arg: usize, vcpu: &VcpuRef) -> Result<Option<usize>, ()> {
     match request {
         KVM_RUN => {
-            // Extend time slice for vCPU tasks to reduce timer-induced
-            // world switch overhead. 10 ticks = 100ms.
             if let Some(task) = mytask() {
                 task.default_time_slice.store(10, Ordering::SeqCst);
             }
@@ -546,9 +540,14 @@ pub fn handle_vcpu_ioctl(request: u32, arg: usize, vcpu: &VcpuRef) -> Result<Opt
                 let exit = vcpu.run().map_err(|_| ())?;
 
                 if let crate::hypervisor::VmExit::FirmwareCall { .. } = &exit {
-                    if handle_sbi_in_kernel(vcpu) {
-                        sbi_count += 1;
-                        continue;
+                    match arch::handle_firmware_call_in_kernel(vcpu) {
+                        arch::FirmwareCallResult::Handled => {
+                            sbi_count += 1;
+                            continue;
+                        }
+                        arch::FirmwareCallResult::SystemOff
+                        | arch::FirmwareCallResult::SystemReset => break,
+                        arch::FirmwareCallResult::ForwardToUserspace => break,
                     }
                 }
 
@@ -676,229 +675,7 @@ pub fn handle_vcpu_ioctl(request: u32, arg: usize, vcpu: &VcpuRef) -> Result<Opt
             Ok(Some(0))
         }
 
-        _ => Ok(None),
-    }
-}
-
-// ---------------------------------------------------------------------------
-// In-kernel SBI firmware emulation
-// ---------------------------------------------------------------------------
-
-mod sbi_ext {
-    pub const BASE: u64 = 0x10;
-    pub const _PUTCHAR: u64 = 0x01;
-    pub const SRST: u64 = 0x5352_5354;
-    pub const DBCN: u64 = 0x4442_434E;
-    pub const SUSP: u64 = 0x5355_5350;
-    pub const TIME: u64 = 0x5449_4D45;
-    pub const IPI: u64 = 0x0073_5049;
-    pub const RFNC: u64 = 0x5246_4E43;
-    pub const HSM: u64 = 0x0048_534D;
-}
-
-/// SBI error codes.
-mod sbi_err {
-    pub const SUCCESS: u64 = 0;
-    pub const ERR_DENIED: u64 = u64::MAX - 2; // -3
-    pub const NOT_SUPPORTED: u64 = u64::MAX - 1; // -2
-    pub const INVALID_PARAM: u64 = u64::MAX - 3; // -4
-    pub const ALREADY_STARTED: u64 = u64::MAX - 4; // -5
-    pub const ALREADY_STOPPED: u64 = u64::MAX - 5; // -6
-}
-
-mod hsm_state {
-    pub const STARTED: u64 = 0;
-    pub const STOPPED: u64 = 1;
-    pub const START_PENDING: u64 = 2;
-    pub const STOP_PENDING: u64 = 3;
-    pub const SUSPENDED: u64 = 4;
-}
-
-/// Handle an SBI firmware call entirely inside the kernel.
-///
-/// Returns `true` if the call was handled (guest registers updated,
-/// caller should re-enter the guest) or `false` if the call should
-/// be forwarded to userspace via `KVM_EXIT_RISCV_SBI`.
-fn handle_sbi_in_kernel(vcpu: &VcpuRef) -> bool {
-    use crate::arch::hv::reg_index::reg;
-
-    let extension_id = vcpu.get_reg(reg::A7).unwrap_or(0);
-    let function_id = vcpu.get_reg(reg::A6).unwrap_or(0);
-    let arg0 = vcpu.get_reg(reg::A0).unwrap_or(0);
-    // crate::println!("[SBI] ext={:#x} fid={:#x} a0={:#x}", extension_id, function_id, arg0);
-
-    match extension_id {
-        sbi_ext::BASE => {
-            // SBI_EXT_BASE function IDs per SBI spec v2.0 §12.
-            let ret1 = match function_id {
-                0 => (sbi_err::SUCCESS, 2), // sbi_get_sbi_spec_version → 2.0
-                1 => (sbi_err::SUCCESS, 1), // sbi_get_sbi_impl_id → 1 (KVM)
-                2 => (sbi_err::SUCCESS, 0), // sbi_get_sbi_impl_version
-                3 => {
-                    let queried = vcpu.get_reg(reg::A0).unwrap_or(0);
-                    let available = matches!(
-                        queried,
-                        sbi_ext::BASE
-                            | sbi_ext::_PUTCHAR
-                            | sbi_ext::SRST
-                            | sbi_ext::DBCN
-                            | sbi_ext::SUSP
-                            | sbi_ext::TIME
-                            | sbi_ext::IPI
-                            | sbi_ext::RFNC
-                            | sbi_ext::HSM
-                    );
-                    (sbi_err::SUCCESS, if available { 1 } else { 0 })
-                }
-                4 => (sbi_err::SUCCESS, 0), // sbi_get_marchid
-                5 => (sbi_err::SUCCESS, 0), // sbi_get_mimpid
-                6 => (sbi_err::SUCCESS, 0), // sbi_get_mvendorid
-                _ => (sbi_err::NOT_SUPPORTED, 0),
-            };
-            let _ = vcpu.set_reg(reg::A0, ret1.0);
-            let _ = vcpu.set_reg(reg::A1, ret1.1);
-            true
-        }
-        sbi_ext::TIME => match function_id {
-            0 => {
-                crate::arch::hv::trap::set_sbi_timer_next_event(arg0);
-                let _ = vcpu.set_reg(reg::A0, sbi_err::SUCCESS);
-                true
-            }
-            _ => {
-                let _ = vcpu.set_reg(reg::A0, sbi_err::NOT_SUPPORTED);
-                let _ = vcpu.set_reg(reg::A1, 0);
-                true
-            }
-        },
-        sbi_ext::IPI => match function_id {
-            0 => {
-                // sbi_send_ipi: single-hart guest, no-op
-                let _ = vcpu.set_reg(reg::A0, sbi_err::SUCCESS);
-                true
-            }
-            _ => {
-                let _ = vcpu.set_reg(reg::A0, sbi_err::NOT_SUPPORTED);
-                let _ = vcpu.set_reg(reg::A1, 0);
-                true
-            }
-        },
-        sbi_ext::RFNC => match function_id {
-            0..=6 => {
-                // Remote fence functions: single-hart guest, no-op
-                let _ = vcpu.set_reg(reg::A0, sbi_err::SUCCESS);
-                true
-            }
-            _ => {
-                let _ = vcpu.set_reg(reg::A0, sbi_err::NOT_SUPPORTED);
-                let _ = vcpu.set_reg(reg::A1, 0);
-                true
-            }
-        },
-        sbi_ext::HSM => match function_id {
-            0 => {
-                // sbi_hart_start(hartid, start_addr, opaque)
-                let hartid = arg0;
-                if hartid == 0 {
-                    let _ = vcpu.set_reg(reg::A0, sbi_err::ALREADY_STARTED);
-                } else {
-                    let _ = vcpu.set_reg(reg::A0, sbi_err::INVALID_PARAM);
-                }
-                let _ = vcpu.set_reg(reg::A1, 0);
-                true
-            }
-            1 => {
-                // sbi_hart_stop: refuse for the only hart
-                let _ = vcpu.set_reg(reg::A0, sbi_err::ERR_DENIED);
-                let _ = vcpu.set_reg(reg::A1, 0);
-                true
-            }
-            2 => {
-                // sbi_hart_get_status(hartid)
-                let hartid = arg0;
-                let status = if hartid == 0 {
-                    hsm_state::STARTED
-                } else {
-                    hsm_state::STOPPED
-                };
-                let _ = vcpu.set_reg(reg::A0, sbi_err::SUCCESS);
-                let _ = vcpu.set_reg(reg::A1, status);
-                true
-            }
-            _ => {
-                let _ = vcpu.set_reg(reg::A0, sbi_err::NOT_SUPPORTED);
-                let _ = vcpu.set_reg(reg::A1, 0);
-                true
-            }
-        },
-        sbi_ext::IPI => match function_id {
-            0 => {
-                let _ = vcpu.set_reg(reg::A0, sbi_err::SUCCESS);
-                true
-            }
-            _ => {
-                let _ = vcpu.set_reg(reg::A0, sbi_err::NOT_SUPPORTED);
-                let _ = vcpu.set_reg(reg::A1, 0);
-                true
-            }
-        },
-        sbi_ext::RFNC => match function_id {
-            0..=6 => {
-                let _ = vcpu.set_reg(reg::A0, sbi_err::SUCCESS);
-                true
-            }
-            _ => {
-                let _ = vcpu.set_reg(reg::A0, sbi_err::NOT_SUPPORTED);
-                let _ = vcpu.set_reg(reg::A1, 0);
-                true
-            }
-        },
-        sbi_ext::HSM => {
-            let arg1 = vcpu.get_reg(reg::A1).unwrap_or(0);
-            let ret = match function_id {
-                0 => {
-                    if arg0 == 0 {
-                        (sbi_err::ALREADY_STARTED, 0)
-                    } else {
-                        (sbi_err::INVALID_PARAM, 0)
-                    }
-                }
-                1 => (sbi_err::ERR_DENIED, 0),
-                2 => {
-                    if arg0 == 0 {
-                        (sbi_err::SUCCESS, hsm_state::STARTED)
-                    } else {
-                        (sbi_err::INVALID_PARAM, 0)
-                    }
-                }
-                3 => (sbi_err::NOT_SUPPORTED, 0),
-                _ => (sbi_err::NOT_SUPPORTED, 0),
-            };
-            let _ = vcpu.set_reg(reg::A0, ret.0);
-            let _ = vcpu.set_reg(reg::A1, ret.1);
-            true
-        }
-        // Extensions that kvmtool handles — forward to userspace.
-        sbi_ext::_PUTCHAR | sbi_ext::DBCN | sbi_ext::SUSP => {
-            // crate::println!("[SBI] -> userspace: ext={:#x} fid={:#x}", extension_id, function_id);
-            false
-        }
-        // System reset — already mapped to KVM_EXIT_SHUTDOWN by write_vm_exit.
-        sbi_ext::SRST => {
-            // crate::println!("[SBI] -> userspace (SRST): ext={:#x} fid={:#x}", extension_id, function_id);
-            false
-        }
-        _ => {
-            crate::println!(
-                "[SBI] NOT_SUPPORTED: ext={:#x} fid={:#x} a0={:#x}",
-                extension_id,
-                function_id,
-                vcpu.get_reg(reg::A0).unwrap_or(0)
-            );
-            let _ = vcpu.set_reg(reg::A0, sbi_err::NOT_SUPPORTED);
-            let _ = vcpu.set_reg(reg::A1, 0);
-            true
-        }
+        _ => arch::handle_vcpu_ioctl(request, arg, vcpu),
     }
 }
 
@@ -944,27 +721,7 @@ fn write_vm_exit(kvm_run: &mut KvmRun, exit: &crate::hypervisor::VmExit, vcpu: &
             kvm_run.exit_reason = KVM_EXIT_HLT;
         }
         VmExit::FirmwareCall { epc: _ } => {
-            use crate::arch::hv::reg_index::reg;
-            const SBI_EXT_SRST: u64 = 0x53525354;
-
-            let extension_id = vcpu.get_reg(reg::A7).unwrap_or(0);
-            if extension_id == SBI_EXT_SRST {
-                kvm_run.exit_reason = KVM_EXIT_SHUTDOWN;
-            } else {
-                kvm_run.exit_reason = KVM_EXIT_RISCV_SBI;
-                let sbi = unsafe { &mut kvm_run.exit_data.riscv_sbi };
-                sbi.args = [
-                    vcpu.get_reg(reg::A0).unwrap_or(0),
-                    vcpu.get_reg(reg::A1).unwrap_or(0),
-                    vcpu.get_reg(reg::A2).unwrap_or(0),
-                    vcpu.get_reg(reg::A3).unwrap_or(0),
-                    vcpu.get_reg(reg::A4).unwrap_or(0),
-                    vcpu.get_reg(reg::A5).unwrap_or(0),
-                ];
-                sbi.ret = [0u64; 2];
-                sbi.extension_id = extension_id;
-                sbi.function_id = vcpu.get_reg(reg::A6).unwrap_or(0);
-            }
+            arch::write_firmware_exit(kvm_run, exit, vcpu);
         }
         VmExit::Shutdown => {
             kvm_run.exit_reason = KVM_EXIT_SHUTDOWN;
@@ -1006,7 +763,6 @@ fn write_vm_exit(kvm_run: &mut KvmRun, exit: &crate::hypervisor::VmExit, vcpu: &
 // /dev/kvm device (registered via driver_initcall)
 // ---------------------------------------------------------------------------
 
-/// Name used to identify the KVM system device in DeviceManager / DevFS.
 pub const KVM_DEVICE_NAME: &str = "kvm";
 
 struct KvmSystemDevice;

@@ -6,8 +6,9 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use spin::{Once, RwLock};
 
+use crate::abi::linux::generic::LinuxAbi;
 use crate::arch::hv::reg_index::reg;
-use crate::hypervisor::VcpuRef;
+use crate::hypervisor::{VcpuRef, VmRef};
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -571,4 +572,209 @@ pub fn write_kvm_to_regs(vcpu: &VcpuRef, kvm_regs: &KvmRegs) {
     for (&idx, &val) in PTRACE_REG_INDEX.iter().zip(buf.iter()) {
         let _ = vcpu.set_reg(idx, val);
     }
+}
+
+// ---------------------------------------------------------------------------
+// Arch hook types (matching aarch64.rs interface)
+// ---------------------------------------------------------------------------
+
+pub enum FirmwareCallResult {
+    Handled,
+    SystemOff,
+    SystemReset,
+    ForwardToUserspace,
+}
+
+pub fn handle_firmware_call_in_kernel(vcpu: &VcpuRef) -> FirmwareCallResult {
+    use crate::arch::hv::reg_index::reg;
+    handle_sbi_in_kernel_impl(vcpu)
+}
+
+fn handle_sbi_in_kernel_impl(vcpu: &VcpuRef) -> FirmwareCallResult {
+    use crate::arch::hv::reg_index::reg;
+
+    let extension_id = vcpu.get_reg(reg::A7).unwrap_or(0);
+    let function_id = vcpu.get_reg(reg::A6).unwrap_or(0);
+    let arg0 = vcpu.get_reg(reg::A0).unwrap_or(0);
+
+    match extension_id {
+        sbi_ext::BASE => {
+            let ret1 = match function_id {
+                0 => (sbi_err::SUCCESS, 2),
+                1 => (sbi_err::SUCCESS, 1),
+                2 => (sbi_err::SUCCESS, 0),
+                3 => {
+                    let queried = vcpu.get_reg(reg::A0).unwrap_or(0);
+                    let available = matches!(
+                        queried,
+                        sbi_ext::BASE
+                            | sbi_ext::_PUTCHAR
+                            | sbi_ext::SRST
+                            | sbi_ext::DBCN
+                            | sbi_ext::SUSP
+                            | sbi_ext::TIME
+                            | sbi_ext::IPI
+                            | sbi_ext::RFNC
+                            | sbi_ext::HSM
+                    );
+                    (sbi_err::SUCCESS, if available { 1 } else { 0 })
+                }
+                4 => (sbi_err::SUCCESS, 0),
+                5 => (sbi_err::SUCCESS, 0),
+                6 => (sbi_err::SUCCESS, 0),
+                _ => (sbi_err::NOT_SUPPORTED, 0),
+            };
+            let _ = vcpu.set_reg(reg::A0, ret1.0);
+            let _ = vcpu.set_reg(reg::A1, ret1.1);
+            FirmwareCallResult::Handled
+        }
+        sbi_ext::TIME => match function_id {
+            0 => {
+                crate::arch::hv::trap::set_sbi_timer_next_event(arg0);
+                let _ = vcpu.set_reg(reg::A0, sbi_err::SUCCESS);
+                FirmwareCallResult::Handled
+            }
+            _ => {
+                let _ = vcpu.set_reg(reg::A0, sbi_err::NOT_SUPPORTED);
+                let _ = vcpu.set_reg(reg::A1, 0);
+                FirmwareCallResult::Handled
+            }
+        },
+        sbi_ext::IPI => match function_id {
+            0 => {
+                let _ = vcpu.set_reg(reg::A0, sbi_err::SUCCESS);
+                FirmwareCallResult::Handled
+            }
+            _ => {
+                let _ = vcpu.set_reg(reg::A0, sbi_err::NOT_SUPPORTED);
+                let _ = vcpu.set_reg(reg::A1, 0);
+                FirmwareCallResult::Handled
+            }
+        },
+        sbi_ext::RFNC => match function_id {
+            0..=6 => {
+                let _ = vcpu.set_reg(reg::A0, sbi_err::SUCCESS);
+                FirmwareCallResult::Handled
+            }
+            _ => {
+                let _ = vcpu.set_reg(reg::A0, sbi_err::NOT_SUPPORTED);
+                let _ = vcpu.set_reg(reg::A1, 0);
+                FirmwareCallResult::Handled
+            }
+        },
+        sbi_ext::HSM => {
+            let arg1 = vcpu.get_reg(reg::A1).unwrap_or(0);
+            let ret = match function_id {
+                0 => {
+                    if arg0 == 0 {
+                        (sbi_err::ALREADY_STARTED, 0)
+                    } else {
+                        (sbi_err::INVALID_PARAM, 0)
+                    }
+                }
+                1 => (sbi_err::ERR_DENIED, 0),
+                2 => {
+                    if arg0 == 0 {
+                        (sbi_err::SUCCESS, hsm_state::STARTED)
+                    } else {
+                        (sbi_err::INVALID_PARAM, 0)
+                    }
+                }
+                3 => (sbi_err::NOT_SUPPORTED, 0),
+                _ => (sbi_err::NOT_SUPPORTED, 0),
+            };
+            let _ = vcpu.set_reg(reg::A0, ret.0);
+            let _ = vcpu.set_reg(reg::A1, ret.1);
+            FirmwareCallResult::Handled
+        }
+        sbi_ext::_PUTCHAR | sbi_ext::DBCN | sbi_ext::SUSP => FirmwareCallResult::ForwardToUserspace,
+        sbi_ext::SRST => FirmwareCallResult::ForwardToUserspace,
+        _ => {
+            let _ = vcpu.set_reg(reg::A0, sbi_err::NOT_SUPPORTED);
+            let _ = vcpu.set_reg(reg::A1, 0);
+            FirmwareCallResult::Handled
+        }
+    }
+}
+
+pub fn write_firmware_exit(
+    kvm_run: &mut super::KvmRun,
+    _exit: &crate::hypervisor::types::VmExit,
+    vcpu: &VcpuRef,
+) {
+    use super::{KVM_EXIT_RISCV_SBI, KVM_EXIT_SHUTDOWN};
+    use crate::arch::hv::reg_index::reg;
+
+    let extension_id = vcpu.get_reg(reg::A7).unwrap_or(0);
+    if extension_id == sbi_ext::SRST {
+        kvm_run.exit_reason = KVM_EXIT_SHUTDOWN;
+    } else {
+        kvm_run.exit_reason = KVM_EXIT_RISCV_SBI;
+        let sbi = unsafe { &mut kvm_run.exit_data.riscv_sbi };
+        sbi.args = [
+            vcpu.get_reg(reg::A0).unwrap_or(0),
+            vcpu.get_reg(reg::A1).unwrap_or(0),
+            vcpu.get_reg(reg::A2).unwrap_or(0),
+            vcpu.get_reg(reg::A3).unwrap_or(0),
+            vcpu.get_reg(reg::A4).unwrap_or(0),
+            vcpu.get_reg(reg::A5).unwrap_or(0),
+        ];
+        sbi.ret = [0u64; 2];
+        sbi.extension_id = extension_id;
+        sbi.function_id = vcpu.get_reg(reg::A6).unwrap_or(0);
+    }
+}
+
+pub fn check_extension(_cap: usize) -> Option<usize> {
+    None
+}
+
+mod sbi_ext {
+    pub const BASE: u64 = 0x10;
+    pub const _PUTCHAR: u64 = 0x01;
+    pub const SRST: u64 = 0x5352_5354;
+    pub const DBCN: u64 = 0x4442_434E;
+    pub const SUSP: u64 = 0x5355_5350;
+    pub const TIME: u64 = 0x5449_4D45;
+    pub const IPI: u64 = 0x0073_5049;
+    pub const RFNC: u64 = 0x5246_4E43;
+    pub const HSM: u64 = 0x0048_534D;
+}
+
+mod sbi_err {
+    pub const SUCCESS: u64 = 0;
+    pub const ERR_DENIED: u64 = u64::MAX - 2;
+    pub const NOT_SUPPORTED: u64 = u64::MAX - 1;
+    pub const INVALID_PARAM: u64 = u64::MAX - 3;
+    pub const ALREADY_STARTED: u64 = u64::MAX - 4;
+    pub const ALREADY_STOPPED: u64 = u64::MAX - 5;
+}
+
+mod hsm_state {
+    pub const STARTED: u64 = 0;
+    pub const STOPPED: u64 = 1;
+    pub const START_PENDING: u64 = 2;
+    pub const STOP_PENDING: u64 = 3;
+    pub const SUSPENDED: u64 = 4;
+}
+
+// ---------------------------------------------------------------------------
+// Arch hook: VM-level ioctl dispatch (RISC-V stub)
+// ---------------------------------------------------------------------------
+
+pub fn handle_vm_ioctl(
+    _request: u32,
+    _arg: usize,
+    _vm: &VmRef,
+    _abi: &mut LinuxAbi,
+) -> Result<Option<usize>, ()> {
+    Ok(None)
+}
+
+// ---------------------------------------------------------------------------
+// Arch hook: vCPU-level ioctl dispatch (RISC-V stub)
+// ---------------------------------------------------------------------------
+
+pub fn handle_vcpu_ioctl(_request: u32, _arg: usize, _vcpu: &VcpuRef) -> Result<Option<usize>, ()> {
+    Ok(None)
 }
