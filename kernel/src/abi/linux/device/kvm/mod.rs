@@ -13,8 +13,7 @@ use alloc::vec::Vec;
 use core::any::Any;
 use spin::{Once, RwLock};
 
-#[cfg(target_arch = "riscv64")]
-use crate::abi::linux::riscv64::LinuxRiscv64Abi;
+use crate::abi::linux::generic::LinuxAbi;
 use crate::device::manager::DeviceManager;
 use crate::device::{Device, DeviceType};
 use crate::hypervisor::memory::MemorySlotFlags;
@@ -338,11 +337,10 @@ pub fn free_vcpu_run_page(vcpu: &VcpuRef) {
 // System-level (/dev/kvm) ioctl dispatcher
 // ---------------------------------------------------------------------------
 
-#[cfg(target_arch = "riscv64")]
 pub fn handle_system_ioctl(
     request: u32,
     _arg: usize,
-    abi: &mut LinuxRiscv64Abi,
+    abi: &mut LinuxAbi,
 ) -> Result<Option<usize>, ()> {
     // crate::println!("[KVM] handle_system_ioctl: request={:#x} arg={}", request, _arg);
     match request {
@@ -384,12 +382,11 @@ pub fn handle_system_ioctl(
 // VM-level ioctl dispatcher
 // ---------------------------------------------------------------------------
 
-#[cfg(target_arch = "riscv64")]
 pub fn handle_vm_ioctl(
     request: u32,
     arg: usize,
     vm: &VmRef,
-    abi: &mut LinuxRiscv64Abi,
+    abi: &mut LinuxAbi,
 ) -> Result<Option<usize>, ()> {
     // crate::println!("[KVM] handle_vm_ioctl: request={:#x} arg={:#x}", request, arg);
     match request {
