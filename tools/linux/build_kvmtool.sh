@@ -1,25 +1,26 @@
 #!/bin/bash
 set -euo pipefail
 
-# Cross-compile kvmtool (lkvm-static) for RISC-V 64-bit.
+# Cross-compile kvmtool (lkvm-static) for RISC-V 64-bit or AArch64.
 #
 # Prerequisites:
-#   - Buildroot toolchain built (run tools/linux/build_buildroot.sh first)
+#   - Buildroot toolchain built (run tools/linux/build_buildroot.sh or
+#     tools/linux/build_buildroot_aarch64.sh first)
 #   - git
 #
 # Produces:
 #   ${PREBUILT_DIR}/bin/lkvm  (statically linked)
 #
 # Environment variables:
-#  ARCH          - target architecture (riscv64 only), defaults to riscv64
-#  BUILDROOT_DIR - Buildroot installation, defaults to /opt/buildroot
+#  ARCH          - target architecture (riscv64 or aarch64), defaults to riscv64
+#  BUILDROOT_DIR - Buildroot installation, defaults to /opt/buildroot (riscv64)
+#                  or /opt/buildroot-aarch64 (aarch64)
 #  PREBUILT_DIR  - output staging directory, defaults to /opt/prebuilt
 #  WORKDIR       - working directory for clones, defaults to /opt
 #  KVMTOOL_REPO  - git URL for kvmtool, defaults to upstream
 #  DTC_REPO      - git URL for dtc (libfdt), defaults to upstream
 
 : "${ARCH:=riscv64}"
-: "${BUILDROOT_DIR:=/opt/buildroot}"
 : "${PREBUILT_DIR:=/opt/prebuilt}"
 : "${WORKDIR:=/opt}"
 
@@ -29,28 +30,41 @@ set -euo pipefail
 : "${KVMTOOL_DIR:=${WORKDIR}/kvmtool-${ARCH}}"
 : "${DTC_DIR:=${WORKDIR}/dtc-kvmtool-${ARCH}}"
 
-# Only riscv64 is supported by this script
-if [[ "${ARCH}" != "riscv64" ]]; then
-    echo "kvmtool build script only supports riscv64 for now." >&2
-    exit 1
-fi
+case "${ARCH}" in
+    riscv64)
+        : "${BUILDROOT_DIR:=/opt/buildroot}"
+        TOOLCHAIN_PREFIX="riscv64-buildroot-linux-musl"
+        TC_BINDIR="${BUILDROOT_DIR}/output/host/bin"
+        KVMTOOL_ARCH=riscv
+        ;;
+    aarch64)
+        : "${BUILDROOT_DIR:=/opt/buildroot-aarch64}"
+        TOOLCHAIN_PREFIX="aarch64-buildroot-linux-musl"
+        TC_BINDIR="${BUILDROOT_DIR}/output/host/bin"
+        KVMTOOL_ARCH=arm64
+        ;;
+    *)
+        echo "Unsupported ARCH=${ARCH}. Use riscv64 or aarch64." >&2
+        exit 1
+        ;;
+esac
 
 if [[ ! -d "${BUILDROOT_DIR}" ]]; then
     echo "Expected buildroot directory at ${BUILDROOT_DIR} not found." >&2
-    echo "Run tools/linux/build_buildroot.sh first." >&2
+    echo "Run tools/linux/build_buildroot.sh or build_buildroot_aarch64.sh first." >&2
     exit 1
 fi
 
-TOOLCHAIN_PREFIX="riscv64-buildroot-linux-musl"
 toolchain_gcc="${BUILDROOT_DIR}/output/host/bin/${TOOLCHAIN_PREFIX}-gcc"
 
 if [[ ! -x "${toolchain_gcc}" ]]; then
     echo "Buildroot toolchain missing at ${toolchain_gcc}." >&2
-    echo "Run tools/linux/build_buildroot.sh first." >&2
+    echo "Run tools/linux/build_buildroot.sh or build_buildroot_aarch64.sh first." >&2
     exit 1
 fi
 
-mkdir -p "${PREBUILT_DIR}/bin"
+mkdir -p "${PREBUILT_DIR}/${ARCH}/bin"
+export PATH="${TC_BINDIR}:${PATH}"
 
 clone_or_update() {
     local repo_url="$1"
@@ -75,8 +89,8 @@ echo "==> Building libfdt for ${ARCH}..."
 pushd "${DTC_DIR}" >/dev/null
 make clean 2>/dev/null || true
 make libfdt \
-    CC="${TOOLCHAIN_PREFIX}-gcc" \
-    AR="${TOOLCHAIN_PREFIX}-ar" \
+    CC="${TC_BINDIR}/${TOOLCHAIN_PREFIX}-gcc" \
+    AR="${TC_BINDIR}/${TOOLCHAIN_PREFIX}-ar" \
     CFLAGS="-fPIC -O2"
 popd >/dev/null
 
@@ -91,10 +105,9 @@ echo "==> Building kvmtool (lkvm-static) for ${ARCH}..."
 pushd "${KVMTOOL_DIR}" >/dev/null
 make clean 2>/dev/null || true
 
-# ARCH=riscv: kvmtool uses 'riscv', not 'riscv64'
 make lkvm-static \
-    ARCH=riscv \
-    CROSS_COMPILE="${TOOLCHAIN_PREFIX}-" \
+    ARCH="${KVMTOOL_ARCH}" \
+    CROSS_COMPILE="${TC_BINDIR}/${TOOLCHAIN_PREFIX}-" \
     LIBFDT_DIR="${DTC_DIR}/libfdt" \
     V=1
 
@@ -103,12 +116,12 @@ if [[ ! -f "lkvm-static" ]]; then
     exit 1
 fi
 
-"${TOOLCHAIN_PREFIX}-strip" -o "${PREBUILT_DIR}/bin/lkvm" lkvm-static
+"${TC_BINDIR}/${TOOLCHAIN_PREFIX}-strip" -o "${PREBUILT_DIR}/${ARCH}/bin/lkvm" lkvm-static
 popd >/dev/null
 
 echo ""
 echo "==> kvmtool built successfully!"
-echo "    Binary: ${PREBUILT_DIR}/bin/lkvm"
+echo "    Binary: ${PREBUILT_DIR}/${ARCH}/bin/lkvm"
 echo "    Architecture: ${ARCH} (static)"
 echo ""
 echo "    Deploy with: bash tools/linux/deploy_rootfs.sh"

@@ -46,7 +46,7 @@ if [[ ! -x "${toolchain_gcc}" ]]; then
     exit 1
 fi
 
-mkdir -p "${PREBUILT_DIR}/bin" "${PREBUILT_DIR}/lib"
+mkdir -p "${PREBUILT_DIR}/${ARCH}/bin" "${PREBUILT_DIR}/${ARCH}/lib"
 
 clone_or_update() {
     local repo_url="$1"
@@ -74,17 +74,17 @@ echo "Building user programs for ${ARCH}..."
 pushd "${GREEN_DIR}" >/dev/null
 make DEBUG=1 BUILDROOT="${BUILDROOT_DIR}"
 if [[ -f "${GREEN_DIR}/green" ]]; then
-    install -m 755 "${GREEN_DIR}/green" "${PREBUILT_DIR}/bin/green"
+    install -m 755 "${GREEN_DIR}/green" "${PREBUILT_DIR}/${ARCH}/bin/green"
 fi
 if [[ -d "${GREEN_DIR}/usr/lib" ]]; then
-    cp -a "${GREEN_DIR}/usr/lib/." "${PREBUILT_DIR}/lib/"
+    cp -a "${GREEN_DIR}/usr/lib/." "${PREBUILT_DIR}/${ARCH}/lib/"
 fi
 popd >/dev/null
 
 pushd "${FBDOOM_DIR}/fbdoom" >/dev/null
 make CROSS_COMPILE=${TOOLCHAIN_PREFIX}- V=1
 if [[ -f "${FBDOOM_DIR}/fbdoom/fbdoom" ]]; then
-    install -m 755 "${FBDOOM_DIR}/fbdoom/fbdoom" "${PREBUILT_DIR}/bin/fbdoom"
+    install -m 755 "${FBDOOM_DIR}/fbdoom/fbdoom" "${PREBUILT_DIR}/${ARCH}/bin/fbdoom"
 fi
 popd >/dev/null
 
@@ -100,7 +100,7 @@ if [[ "${ARCH}" == "riscv64" ]]; then
     make clean 2>/dev/null || true
     make lkvm-static ARCH=riscv CROSS_COMPILE="${TOOLCHAIN_PREFIX}-" LIBFDT_DIR="${DTC_DIR}/libfdt" V=1
     if [[ -f "lkvm-static" ]]; then
-        "${TOOLCHAIN_PREFIX}-strip" -o "${PREBUILT_DIR}/bin/lkvm" lkvm-static
+        "${TOOLCHAIN_PREFIX}-strip" -o "${PREBUILT_DIR}/${ARCH}/bin/lkvm" lkvm-static
     fi
     popd >/dev/null
 fi

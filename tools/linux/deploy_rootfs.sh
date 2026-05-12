@@ -8,13 +8,16 @@ set -euo pipefail
 #  TARGET_GID - if set, chown the deployed files to this GID
 
 ARCH="${ARCH:-riscv64}"
-TAR_SRC="/opt/prebuilt/linux-${ARCH}.tar"
-DEST_DIR="/workspaces/Scarlet/mkfs/rootfs/system/linux-${ARCH}"
+TAR_SRC="/opt/prebuilt/${ARCH}/rootfs.tar"
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+DEST_DIR="${PROJECT_ROOT}/mkfs/rootfs/system/linux-${ARCH}"
 
 if [ ! -f "$TAR_SRC" ]; then
   echo "Error: prebuilt tar not found at $TAR_SRC"
   echo "Available architectures:"
-  ls -1 /opt/prebuilt/*.tar 2>/dev/null || echo "  (none found)"
+  ls -1 /opt/prebuilt/${ARCH}/*.tar 2>/dev/null || echo "  (none found)"
   exit 1
 fi
 
@@ -35,8 +38,8 @@ if [ -n "${TARGET_UID:-}" ] || [ -n "${TARGET_GID:-}" ]; then
   echo "Applying ownership: $UID:$GID -> $DEST_DIR"
   chown -R "$UID":"$GID" "$DEST_DIR"
 fi
-# Deploy any prebuilt binaries from /opt/prebuilt/bin -> rootfs usr/local/bin
-PREBUILT_BIN_DIR="/opt/prebuilt/bin"
+# Deploy any prebuilt binaries from /opt/prebuilt/${ARCH}/bin -> rootfs /usr/bin
+PREBUILT_BIN_DIR="/opt/prebuilt/${ARCH}/bin"
 TARGET_BIN_DIR="$DEST_DIR/usr/bin"
 if [ -d "$PREBUILT_BIN_DIR" ]; then
   mkdir -p "$TARGET_BIN_DIR"
@@ -56,7 +59,7 @@ else
 fi
 
 # Deploy any prebuilt library fragments under /opt/prebuilt/lib into the rootfs's /usr/lib
-PREBUILT_LIB_DIR="/opt/prebuilt/lib"
+PREBUILT_LIB_DIR="/opt/prebuilt/${ARCH}/lib"
 if [ -d "$PREBUILT_LIB_DIR" ]; then
   echo "Deploying prebuilt lib tree: $PREBUILT_LIB_DIR -> $DEST_DIR/usr/lib/"
   mkdir -p "$DEST_DIR/usr/lib"
