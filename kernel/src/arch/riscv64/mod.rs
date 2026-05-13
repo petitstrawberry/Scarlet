@@ -44,6 +44,13 @@ use crate::vm::vmem::MemoryArea;
 
 pub type Arch = Riscv64;
 
+/// Per-CPU initialization for secondary CPUs.
+///
+/// Configures trap vectors, FPU, and vector extension for the given hart.
+pub fn init_ap_cpu(cpu_id: usize) {
+    boot::init_boot_cpu(cpu_id);
+}
+
 /// Per-hart ownership of the live Vector register file.
 ///
 /// When a task that used the V extension is rescheduled on the same hart, we can

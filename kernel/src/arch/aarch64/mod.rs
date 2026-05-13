@@ -31,6 +31,8 @@ pub use context::KernelContext;
 pub use earlycon::*;
 pub use registers::IntRegisters;
 
+pub use init_arch as init_ap_cpu;
+
 use crate::arch::vm::get_root_pagetable;
 use crate::vm::vmem::MemoryArea;
 

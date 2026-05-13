@@ -545,6 +545,7 @@ pub fn create_bootinfo_from_fdt(cpu_id: usize, relocated_fdt_addr: usize) -> Boo
         cmdline,
         DeviceSource::Fdt(relocated_fdt_addr),
         None,
+        None,
     )
 }
 

@@ -229,6 +229,7 @@ pub fn kernel_vm_init(
     #[cfg(any(debug_assertions, test))]
     early_println!("[vm] kernel_vm_init: switch (ttbr0/arch-dependent)...");
     root_page_table.switch(manager.get_asid());
+    crate::arch::vm::save_kernel_page_table();
 
     // Initialize the ioremap subsystem now that the kernel VM manager and heap
     // are ready.  Device drivers call ioremap() to map their MMIO regions

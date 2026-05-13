@@ -319,7 +319,7 @@ use vm::{
 fn panic(info: &core::panic::PanicInfo) -> ! {
     use arch::instruction::idle;
 
-    crate::early_println!("[Scarlet Kernel] panic: {}", info);
+    crate::println!("[Scarlet Kernel] panic: {}", info);
 
     // if let Some(task) = get_scheduler().get_current_task(get_cpu().get_cpuid()) {
     //     task.exit(1); // Exit the task with error code 1
@@ -403,6 +403,13 @@ pub struct BootInfo {
     /// Optional framebuffer physical memory area
     /// Used for early console output before graphics subsystem initialization
     pub framebuffer_paddr: Option<MemoryArea>,
+    /// Optional BSP hook to start secondary CPUs.
+    ///
+    /// Called by `start_kernel()` after all global one-time init is complete.
+    /// The BSP implementation wakes each secondary CPU and makes it call
+    /// `start_ap()` with the appropriate CPU ID. `None` for single-CPU or
+    /// test configurations.
+    pub start_secondary_cpus_hook: Option<fn()>,
 }
 
 impl BootInfo {
@@ -432,6 +439,7 @@ impl BootInfo {
         cmdline: Option<&'static str>,
         device_source: DeviceSource,
         framebuffer_paddr: Option<MemoryArea>,
+        start_secondary_cpus_hook: Option<fn()>,
     ) -> Self {
         Self {
             cpu_id,
@@ -443,6 +451,7 @@ impl BootInfo {
             cmdline,
             device_source,
             framebuffer_paddr,
+            start_secondary_cpus_hook,
         }
     }
 
@@ -861,6 +870,11 @@ pub extern "C" fn start_kernel(boot_info: &BootInfo) -> ! {
     fence(Ordering::SeqCst); // Ensure task is added to scheduler before proceeding
     println!("[Scarlet Kernel] Fence complete; about to print scheduler start...");
 
+    if let Some(hook) = boot_info.start_secondary_cpus_hook {
+        hook();
+        fence(Ordering::SeqCst);
+    }
+
     // Use println here to avoid any potential console lock issues.
     println!("[Scarlet Kernel] Scheduler will start...");
     println!("[Scarlet Kernel] Calling start_scheduler()...");
@@ -877,14 +891,40 @@ pub extern "C" fn start_kernel(boot_info: &BootInfo) -> ! {
     }
 }
 
+use core::sync::atomic::AtomicBool;
+static AP_BARRIER: AtomicBool = AtomicBool::new(false);
+
+pub fn release_aps() {
+    AP_BARRIER.store(true, core::sync::atomic::Ordering::Release);
+}
+
+pub fn wait_for_ap_release() {
+    while !AP_BARRIER.load(core::sync::atomic::Ordering::Acquire) {
+        core::hint::spin_loop();
+    }
+}
+
 #[unsafe(no_mangle)]
-pub extern "C" fn start_ap(cpu_id: usize) {
-    println!("[Scarlet Kernel] CPU {} is up and running", cpu_id);
+pub extern "C" fn start_ap(cpu_id: usize) -> ! {
+    use core::sync::atomic::Ordering;
+
+    crate::arch::vm::switch_to_kernel_page_table();
+
+    println!("[Scarlet Kernel] AP {}: initializing...", cpu_id);
+
+    crate::arch::init_ap_cpu(cpu_id);
+
+    crate::interrupt::InterruptManager::get_manager().enable_cpu_interrupts();
+    fence(Ordering::SeqCst);
 
     #[cfg(feature = "hypervisor")]
     {
         crate::hypervisor::init_hv_per_cpu(cpu_id);
     }
 
-    loop {}
+    println!("[Scarlet Kernel] AP {}: entering idle", cpu_id);
+
+    loop {
+        crate::arch::instruction::idle();
+    }
 }

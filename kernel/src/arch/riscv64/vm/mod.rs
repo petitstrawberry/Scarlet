@@ -16,6 +16,8 @@ use mmu::PageTable;
 use spin::Once;
 use spin::RwLock;
 
+use core::sync::atomic::{AtomicU64, Ordering};
+
 use crate::mem::page::{Page, allocate_raw_pages, allocate_raw_pages_aligned, free_raw_pages};
 
 use crate::arch::Arch;
@@ -26,6 +28,28 @@ use crate::environment::{KERNEL_KSTACK_REGION_END, KERNEL_KSTACK_REGION_START, T
 use crate::vm::addr::kernel_virt_to_phys;
 use crate::vm::manager::VirtualMemoryManager;
 use crate::vm::vmem::{MemoryArea, VirtualMemoryMap, VirtualMemoryPermission};
+
+static KERNEL_SATP: AtomicU64 = AtomicU64::new(0);
+
+pub fn save_kernel_page_table() {
+    let satp: u64;
+    unsafe {
+        core::arch::asm!("csrr {}, satp", out(reg) satp);
+    }
+    KERNEL_SATP.store(satp, Ordering::Release);
+}
+
+pub fn switch_to_kernel_page_table() {
+    let satp = KERNEL_SATP.load(Ordering::Acquire);
+    assert!(satp != 0, "kernel page table not initialized");
+    unsafe {
+        core::arch::asm!(
+            "csrw satp, {}",
+            "sfence.vma",
+            in(reg) satp,
+        );
+    }
+}
 
 unsafe extern "C" {
     static __TRAMPOLINE_START: usize;

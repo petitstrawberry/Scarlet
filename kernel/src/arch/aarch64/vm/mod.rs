@@ -8,6 +8,7 @@ extern crate alloc;
 
 use alloc::vec::Vec;
 use alloc::{boxed::Box, vec};
+use core::sync::atomic::{AtomicU64, Ordering};
 use hashbrown::HashMap;
 use mmu::PageTable;
 use spin::Once;
@@ -23,6 +24,42 @@ use crate::environment::{KERNEL_KSTACK_REGION_END, KERNEL_KSTACK_REGION_START, T
 use crate::vm::addr::kernel_virt_to_phys;
 use crate::vm::manager::VirtualMemoryManager;
 use crate::vm::vmem::{MemoryArea, VirtualMemoryMap, VirtualMemoryPermission};
+
+static KERNEL_TTBR0: AtomicU64 = AtomicU64::new(0);
+static KERNEL_TTBR1: AtomicU64 = AtomicU64::new(0);
+
+pub fn save_kernel_page_table() {
+    let ttbr0: u64;
+    let ttbr1: u64;
+    unsafe {
+        core::arch::asm!(
+            "mrs {}, ttbr0_el1",
+            "mrs {}, ttbr1_el1",
+            out(reg) ttbr0,
+            out(reg) ttbr1,
+        );
+    }
+    KERNEL_TTBR0.store(ttbr0, Ordering::Release);
+    KERNEL_TTBR1.store(ttbr1, Ordering::Release);
+}
+
+pub fn switch_to_kernel_page_table() {
+    let ttbr0 = KERNEL_TTBR0.load(Ordering::Acquire);
+    let ttbr1 = KERNEL_TTBR1.load(Ordering::Acquire);
+    assert!(ttbr0 != 0, "kernel page table not initialized");
+    assert!(ttbr1 != 0, "kernel TTBR1 not initialized");
+    unsafe {
+        core::arch::asm!(
+            "msr ttbr0_el1, {}",
+            "msr ttbr1_el1, {}",
+            "tlbi vmalle1",
+            "dsb nsh",
+            "isb",
+            in(reg) ttbr0,
+            in(reg) ttbr1,
+        );
+    }
+}
 
 unsafe extern "C" {
     static __TRAMPOLINE_START: usize;
