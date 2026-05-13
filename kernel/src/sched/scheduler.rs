@@ -576,6 +576,10 @@ pub fn get_task_by_id(task_id: usize) -> Option<&'static mut Task> {
 }
 
 pub fn wake_task(task_id: usize) -> bool {
+    wake_task_on(task_id, get_cpu().get_cpuid())
+}
+
+pub fn wake_task_on(task_id: usize, target_cpu: usize) -> bool {
     let _irq_guard = IrqGuard::new();
     let Some(task) = TaskPool::get_task_mut(task_id) else {
         return false;
@@ -589,7 +593,11 @@ pub fn wake_task(task_id: usize) -> bool {
     core::sync::atomic::fence(Ordering::SeqCst);
 
     if !ready_queue_contains(task_id) {
-        push_ready_task(get_cpu().get_cpuid(), task_id);
+        push_ready_task(target_cpu, task_id);
+    }
+
+    if target_cpu != get_cpu().get_cpuid() {
+        crate::arch::send_reschedule_ipi(target_cpu);
     }
 
     true
