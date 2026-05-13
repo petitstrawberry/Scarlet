@@ -2279,7 +2279,7 @@ mod tests {
         for i in 0..2 {
             let task =
                 crate::task::Task::new(format!("g_sess_{}", i), 1, crate::task::TaskType::Kernel);
-            crate::sched::scheduler::add_task(task, 0);
+            crate::sched::scheduler::add_task(task, crate::sched::scheduler::select_cpu());
         }
 
         // For tests, get_current_task_id() returns Some(1), so join operations will add task 1

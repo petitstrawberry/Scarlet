@@ -922,8 +922,14 @@ pub extern "C" fn start_ap(cpu_id: usize) -> ! {
         crate::hypervisor::init_hv_per_cpu(cpu_id);
     }
 
-    println!("[Scarlet Kernel] AP {}: entering idle", cpu_id);
+    let next_task_id = crate::sched::scheduler::start_scheduler();
+    if let Some(next_task_id) = next_task_id {
+        let next_task = crate::sched::scheduler::get_task_by_id(next_task_id)
+            .expect("AP: first runnable task must exist");
+        crate::arch::first_switch_to_user(next_task);
+    }
 
+    println!("[Scarlet Kernel] AP {}: idle", cpu_id);
     loop {
         crate::arch::instruction::idle();
     }

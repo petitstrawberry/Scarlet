@@ -362,6 +362,11 @@ static READY_QUEUES: [spin::Mutex<VecDeque<usize>>; MAX_NUM_CPUS] =
 static ZOMBIE_QUEUE: spin::Mutex<VecDeque<usize>> = spin::Mutex::new(VecDeque::new());
 static BLOCKED_QUEUE: spin::Mutex<VecDeque<usize>> = spin::Mutex::new(VecDeque::new());
 static DEBUG_TICK: AtomicU64 = AtomicU64::new(0);
+static NEXT_CPU: AtomicUsize = AtomicUsize::new(0);
+
+pub fn select_cpu() -> usize {
+    NEXT_CPU.fetch_add(1, Ordering::Relaxed) % MAX_NUM_CPUS
+}
 
 #[inline]
 fn assert_valid_cpu_id(cpu_id: usize) {
@@ -456,9 +461,29 @@ fn pick_next(cpu: &Arch) -> (Option<usize>, Option<usize>) {
     loop {
         let task_id = { ready_queue(cpu_id).lock().pop_front() };
 
-        let Some(task_id) = task_id else {
-            set_current_task_id(cpu_id, None);
-            return (old_current_task_id, None);
+        let task_id = match task_id {
+            Some(id) => id,
+            None => {
+                // Work stealing: try to take a task from another CPU's queue
+                let mut stolen = None;
+                for remote_cpu in 0..MAX_NUM_CPUS {
+                    if remote_cpu == cpu_id {
+                        continue;
+                    }
+                    let mut remote_q = ready_queue(remote_cpu).lock();
+                    if let Some(remote_id) = remote_q.pop_front() {
+                        stolen = Some(remote_id);
+                        break;
+                    }
+                }
+                match stolen {
+                    Some(id) => id,
+                    None => {
+                        set_current_task_id(cpu_id, None);
+                        return (old_current_task_id, None);
+                    }
+                }
+            }
         };
 
         let Some(task) = TaskPool::get_task_mut(task_id) else {
