@@ -86,7 +86,7 @@ pub fn sys_exit_group(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> 
     let task = mytask().unwrap();
     task.vcpu.lock().store(trapframe);
     let exit_code = trapframe.get_arg(0) as i32;
-    task.exit(exit_code);
+    task.exit_group(exit_code);
     schedule(trapframe);
     usize::MAX
 }
