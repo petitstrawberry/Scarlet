@@ -391,7 +391,7 @@ fn set_current_task_id(cpu_id: usize, task_id: Option<usize>) {
 }
 
 #[inline]
-fn push_ready_task(cpu_id: usize, task_id: usize) {
+pub fn push_ready_task(cpu_id: usize, task_id: usize) {
     let mut queue = ready_queue(cpu_id).lock();
     if !queue.contains(&task_id) {
         queue.push_back(task_id);
