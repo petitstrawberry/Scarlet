@@ -497,6 +497,18 @@ impl InterruptManager {
     pub fn has_external_controller(&self) -> bool {
         self.controllers.has_external_controller()
     }
+
+    pub fn send_ipi(
+        &mut self,
+        target_cpu_id: CpuId,
+        ipi_type: controllers::LocalInterruptType,
+    ) -> InterruptResult<()> {
+        if let Some(ref mut controller) = self.controllers.external_controller_mut() {
+            controller.send_ipi(target_cpu_id, ipi_type)
+        } else {
+            Err(InterruptError::ControllerNotFound)
+        }
+    }
 }
 
 /// Handler function type for external interrupts

@@ -499,6 +499,10 @@ pub fn disable_interrupt() {
     }
 }
 
+pub fn send_reschedule_ipi(target_cpu: usize) {
+    instruction::sbi::sbi_send_ipi(1 << target_cpu, 0);
+}
+
 /// Full memory barrier for normal memory (RAM).
 ///
 /// This orders previous reads/writes before subsequent reads/writes.

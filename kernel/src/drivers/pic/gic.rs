@@ -440,6 +440,14 @@ impl ExternalInterruptController for Gic {
     fn max_cpus(&self) -> CpuId {
         self.max_cpus
     }
+
+    fn send_ipi(
+        &mut self,
+        target_cpu_id: CpuId,
+        ipi_type: LocalInterruptType,
+    ) -> InterruptResult<()> {
+        self.send_ipi(target_cpu_id, ipi_type)
+    }
 }
 
 unsafe impl Send for Gic {}

@@ -478,6 +478,13 @@ pub fn disable_interrupt() {
     }
 }
 
+pub fn send_reschedule_ipi(target_cpu: usize) {
+    crate::interrupt::InterruptManager::with_manager(|manager| {
+        use crate::interrupt::controllers::LocalInterruptType;
+        let _ = manager.send_ipi(target_cpu as u32, LocalInterruptType::Software);
+    });
+}
+
 pub fn get_cpu() -> &'static mut Aarch64 {
     // Prefer the EL1 thread pointer (kept at the kernel-mapped Arch address).
     let tpidr_el1: usize;

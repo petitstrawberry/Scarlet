@@ -108,6 +108,15 @@ pub trait ExternalInterruptController: Send + Sync {
 
     /// Get the number of CPUs supported
     fn max_cpus(&self) -> CpuId;
+
+    fn send_ipi(
+        &mut self,
+        target_cpu_id: CpuId,
+        ipi_type: LocalInterruptType,
+    ) -> InterruptResult<()> {
+        let _ = (target_cpu_id, ipi_type);
+        Err(InterruptError::NotSupported)
+    }
 }
 
 /// Types of local interrupts
