@@ -360,6 +360,7 @@ static CURRENT_TASK_IDS: [AtomicUsize; MAX_NUM_CPUS] =
 static READY_QUEUES: [spin::Mutex<VecDeque<usize>>; MAX_NUM_CPUS] =
     [const { spin::Mutex::new(VecDeque::new()) }; MAX_NUM_CPUS];
 static ZOMBIE_QUEUE: spin::Mutex<VecDeque<usize>> = spin::Mutex::new(VecDeque::new());
+static BLOCKED_QUEUE: spin::Mutex<VecDeque<usize>> = spin::Mutex::new(VecDeque::new());
 static DEBUG_TICK: AtomicU64 = AtomicU64::new(0);
 
 #[inline]
@@ -406,7 +407,21 @@ fn ready_queue_contains(task_id: usize) -> bool {
     false
 }
 
-fn finalize_zombie(task_id: usize, parent_id: Option<usize>) {
+pub fn mark_blocked(task_id: usize) {
+    let mut queue = BLOCKED_QUEUE.lock();
+    if !queue.contains(&task_id) {
+        queue.push_back(task_id);
+    }
+}
+
+pub fn unmark_blocked(task_id: usize) {
+    let mut queue = BLOCKED_QUEUE.lock();
+    if let Some(pos) = queue.iter().position(|&id| id == task_id) {
+        queue.remove(pos);
+    }
+}
+
+pub fn finalize_zombie(task_id: usize, parent_id: Option<usize>) {
     {
         let mut zombie_queue = ZOMBIE_QUEUE.lock();
         if !zombie_queue.contains(&task_id) {
@@ -591,6 +606,7 @@ pub fn wake_task_on(task_id: usize, target_cpu: usize) -> bool {
 
     task.state.store(TaskState::Running, Ordering::SeqCst);
     core::sync::atomic::fence(Ordering::SeqCst);
+    unmark_blocked(task_id);
 
     if !ready_queue_contains(task_id) {
         push_ready_task(target_cpu, task_id);
@@ -617,7 +633,7 @@ pub fn cleanup_zombie(task_id: usize) {
     }
 }
 
-pub fn remove_task_from_queues(task_id: usize) {
+pub fn remove_from_ready_queues(task_id: usize) {
     let _irq_guard = IrqGuard::new();
 
     for cpu_id in 0..MAX_NUM_CPUS {
@@ -630,11 +646,19 @@ pub fn remove_task_from_queues(task_id: usize) {
             set_current_task_id(cpu_id, None);
         }
     }
+}
 
+pub fn remove_from_zombie_queue(task_id: usize) {
     let mut zombie_queue = ZOMBIE_QUEUE.lock();
     while let Some(pos) = zombie_queue.iter().position(|&id| id == task_id) {
         zombie_queue.remove(pos);
     }
+}
+
+pub fn remove_task_from_queues(task_id: usize) {
+    remove_from_ready_queues(task_id);
+    remove_from_zombie_queue(task_id);
+    unmark_blocked(task_id);
 }
 
 /// Get IDs of all tasks across scheduler-visible queues/state.
@@ -658,6 +682,13 @@ pub fn get_all_task_ids() -> alloc::vec::Vec<usize> {
 
     let zombie_queue = ZOMBIE_QUEUE.lock();
     for &task_id in zombie_queue.iter() {
+        if !ids.contains(&task_id) {
+            ids.push(task_id);
+        }
+    }
+
+    let blocked_queue = BLOCKED_QUEUE.lock();
+    for &task_id in blocked_queue.iter() {
         if !ids.contains(&task_id) {
             ids.push(task_id);
         }
@@ -752,6 +783,7 @@ pub fn reset() {
         set_current_task_id(cpu_id, None);
     }
     ZOMBIE_QUEUE.lock().clear();
+    BLOCKED_QUEUE.lock().clear();
     get_task_pool().reset();
 }
 

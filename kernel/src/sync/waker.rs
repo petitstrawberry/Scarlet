@@ -122,6 +122,8 @@ impl Waker {
             panic!("[WAKER] Task ID {} not found in scheduler", task_id);
         }
 
+        crate::sched::scheduler::mark_blocked(task_id);
+
         // Memory barrier to ensure state change is visible before queue operation
         core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
 

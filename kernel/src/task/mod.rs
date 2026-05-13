@@ -33,8 +33,9 @@ use crate::{
     mem::page::ContiguousPages,
     object::handle::HandleTable,
     sched::scheduler::{
-        current_task, current_task_mut, get_all_task_ids, get_task_by_id, schedule,
-        setup_task_execution,
+        current_task, current_task_mut, finalize_zombie, get_all_task_ids, get_task_by_id,
+        remove_from_ready_queues, remove_task_from_queues, schedule, setup_task_execution,
+        unmark_blocked,
     },
     timer::{TimerHandler, add_timer, get_tick},
     vm::{
@@ -1550,7 +1551,12 @@ impl Task {
         // Task cleanup completed - ABI module handles event cleanup
 
         if mytask().is_none() || mytask().unwrap().get_id() != self.id {
-            // Not the current task, nothing more to do
+            // Non-current task: finalize zombie state manually
+            // (current task path goes through schedule() -> pick_next -> finalize_zombie)
+            if matches!(self.state.load(Ordering::SeqCst), TaskState::Zombie) {
+                unmark_blocked(self.id);
+                finalize_zombie(self.id, self.parent_id);
+            }
             return;
         }
 
@@ -1606,6 +1612,8 @@ impl Task {
                         // Close handles to prevent resource leaks
                         (*task_ptr).handle_table.close_all();
                     }
+                    remove_from_ready_queues(task_id);
+                    unmark_blocked(task_id);
                 }
             }
         }
@@ -2028,7 +2036,7 @@ mod tests {
     use alloc::sync::Arc;
     use core::sync::atomic::Ordering;
 
-    use crate::sched::scheduler::{add_task, get_task_by_id, reset};
+    use crate::sched::scheduler::{add_task, get_task_by_id, remove_task_from_queues, reset};
     use crate::task::CloneFlags;
     use crate::vm::addr::{phys_to_virt, virt_to_phys};
 
