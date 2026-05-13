@@ -338,6 +338,22 @@ pub fn setup_trampoline_for_user(manager: &VirtualMemoryManager) {
     setup_trampoline_at_end(manager, TRAMPOLINE_VA_END);
 }
 
+pub fn register_trampoline_for_ap() {
+    let trampoline_start =
+        kernel_virt_to_phys(unsafe { &__TRAMPOLINE_START as *const usize as usize });
+    let trampoline_end =
+        kernel_virt_to_phys(unsafe { &__TRAMPOLINE_END as *const usize as usize }) - 1;
+    let trampoline_size = trampoline_end - trampoline_start;
+
+    let arch = get_cpu().as_paddr_cpu();
+    let trampoline_vaddr_start = TRAMPOLINE_VA_END - trampoline_size;
+    let arch_paddr = kernel_virt_to_phys(arch as *const Arch as usize);
+    let arch_offset = arch_paddr - trampoline_start;
+    let arch_vaddr = trampoline_vaddr_start + arch_offset;
+
+    crate::vm::set_trampoline_arch(arch.get_cpuid(), arch_vaddr);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

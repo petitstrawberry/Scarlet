@@ -464,7 +464,8 @@ fn pick_next(cpu: &Arch) -> (Option<usize>, Option<usize>) {
         let task_id = match task_id {
             Some(id) => id,
             None => {
-                // Work stealing: try to take a task from another CPU's queue
+                // Work stealing: try to take a task from another CPU's queue,
+                // but skip tasks currently running on that CPU.
                 let mut stolen = None;
                 for remote_cpu in 0..MAX_NUM_CPUS {
                     if remote_cpu == cpu_id {
@@ -472,6 +473,10 @@ fn pick_next(cpu: &Arch) -> (Option<usize>, Option<usize>) {
                     }
                     let mut remote_q = ready_queue(remote_cpu).lock();
                     if let Some(remote_id) = remote_q.pop_front() {
+                        if current_task_id(remote_cpu) == Some(remote_id) {
+                            remote_q.push_back(remote_id);
+                            continue;
+                        }
                         stolen = Some(remote_id);
                         break;
                     }

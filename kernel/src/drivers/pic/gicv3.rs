@@ -449,6 +449,12 @@ impl ExternalInterruptController for GicV3 {
     fn max_cpus(&self) -> CpuId {
         self.max_cpus
     }
+
+    fn init_for_cpu(&mut self, cpu_id: CpuId) -> InterruptResult<()> {
+        self.init_redistributor(cpu_id);
+        self.init_cpu_interface_sysregs();
+        Ok(())
+    }
 }
 
 unsafe impl Send for GicV3 {}
@@ -502,8 +508,7 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
     })?;
 
     let max_interrupts = gicd_max_interrupt_id(dist_base_addr);
-    // PlatformDeviceInfo doesn't expose CPU topology here; current bring-up is single-core.
-    let max_cpus = 1;
+    let max_cpus = crate::environment::MAX_NUM_CPUS as u32;
 
     crate::early_println!(
         "[interrupt] GICv3 selected: dist={:#x} redist={:#x} max_intid={} max_cpus={}",

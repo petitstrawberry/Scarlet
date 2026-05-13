@@ -448,6 +448,11 @@ impl ExternalInterruptController for Gic {
     ) -> InterruptResult<()> {
         self.send_ipi(target_cpu_id, ipi_type)
     }
+
+    fn init_for_cpu(&mut self, cpu_id: CpuId) -> InterruptResult<()> {
+        self.init_cpu_interface(cpu_id);
+        Ok(())
+    }
 }
 
 unsafe impl Send for Gic {}

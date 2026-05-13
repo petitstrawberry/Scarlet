@@ -177,7 +177,6 @@ pub fn disable_timer_source_interrupt() {
 pub fn enable_arch_timer_interrupt() -> Result<(), &'static str> {
     let cpu_id = get_cpu().get_cpuid() as u32;
 
-    // Enable at local controller level (CNTV_CTL_EL0)
     InterruptManager::with_manager(|mgr| {
         mgr.enable_local_interrupt(cpu_id, LocalInterruptType::Timer)
     })

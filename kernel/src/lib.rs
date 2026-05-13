@@ -914,6 +914,7 @@ pub extern "C" fn start_ap(cpu_id: usize) -> ! {
 
     crate::arch::init_ap_cpu(cpu_id);
 
+    crate::interrupt::InterruptManager::get_manager().init_controllers_for_cpu(cpu_id as u32);
     crate::interrupt::InterruptManager::get_manager().enable_cpu_interrupts();
     fence(Ordering::SeqCst);
 
@@ -921,6 +922,8 @@ pub extern "C" fn start_ap(cpu_id: usize) -> ! {
     {
         crate::hypervisor::init_hv_per_cpu(cpu_id);
     }
+
+    crate::arch::vm::register_trampoline_for_ap();
 
     let next_task_id = crate::sched::scheduler::start_scheduler();
     if let Some(next_task_id) = next_task_id {

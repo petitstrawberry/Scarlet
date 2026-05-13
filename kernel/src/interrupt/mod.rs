@@ -237,6 +237,30 @@ impl InterruptManager {
         crate::early_println!("[interrupt] init: external controller done");
     }
 
+    pub fn init_controllers_for_cpu(&mut self, cpu_id: CpuId) {
+        disable_interrupts();
+
+        if let Some(controller) = self.controllers.local_controller_mut_for_cpu(cpu_id) {
+            if let Err(e) = controller.init(cpu_id) {
+                crate::early_println!(
+                    "[interrupt] AP {}: failed to init local controller: {}",
+                    cpu_id,
+                    e
+                );
+            }
+        }
+
+        if let Some(controller) = self.controllers.external_controller_mut() {
+            if let Err(e) = controller.init_for_cpu(cpu_id) {
+                crate::early_println!(
+                    "[interrupt] AP {}: failed to init external controller: {}",
+                    cpu_id,
+                    e
+                );
+            }
+        }
+    }
+
     /// Enable CPU interrupt reception (stage 2).
     ///
     /// This should run after device drivers have registered their handlers and

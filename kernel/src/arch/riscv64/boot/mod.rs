@@ -16,9 +16,10 @@ use crate::{
     mem::KERNEL_STACK,
 };
 
-pub fn init_boot_cpu(cpu_id: usize) {
+pub fn init_cpu(cpu_id: usize) {
     early_println!("[riscv64] init_boot_cpu: cpu_id={}", cpu_id);
     let riscv = unsafe { &mut *(&raw mut CPUS[cpu_id]) };
+    riscv.hartid = cpu_id as u64;
     early_println!(
         "[riscv64] init_boot_cpu: cpu struct={:#x}",
         riscv as *mut _ as usize

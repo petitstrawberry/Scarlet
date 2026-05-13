@@ -117,6 +117,10 @@ pub trait ExternalInterruptController: Send + Sync {
         let _ = (target_cpu_id, ipi_type);
         Err(InterruptError::NotSupported)
     }
+
+    fn init_for_cpu(&mut self, _cpu_id: CpuId) -> InterruptResult<()> {
+        Ok(())
+    }
 }
 
 /// Types of local interrupts

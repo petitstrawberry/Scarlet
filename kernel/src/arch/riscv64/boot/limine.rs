@@ -126,7 +126,7 @@ pub fn limine_entry() -> ! {
 
     crate::arch::init_user_context_from_fdt();
     bootstrap_aps();
-    crate::arch::riscv64::boot::init_boot_cpu(bootinfo.cpu_id);
+    crate::arch::riscv64::boot::init_cpu(bootinfo.cpu_id);
 
     unsafe {
         let stack_top = (&raw const KERNEL_STACK) as *const _ as usize + STACK_SIZE;
