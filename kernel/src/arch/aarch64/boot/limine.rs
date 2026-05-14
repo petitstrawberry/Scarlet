@@ -13,9 +13,7 @@ use crate::environment::STACK_SIZE;
 use crate::mem::{KERNEL_STACK, init_bss};
 use crate::vm::addr::{init_boot_direct_map_range, init_limine_addressing, phys_to_virt};
 use crate::vm::vmem::MemoryArea;
-use crate::{
-    BootInfo, DeviceSource, early_println, println, start_ap, start_kernel, wait_for_ap_release,
-};
+use crate::{BootInfo, DeviceSource, early_println, start_ap, start_kernel, wait_for_ap_release};
 use core::sync::atomic::compiler_fence;
 
 static mut EARLY_BOOTINFO: MaybeUninit<BootInfo> = MaybeUninit::uninit();

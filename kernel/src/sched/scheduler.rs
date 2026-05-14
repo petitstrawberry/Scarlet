@@ -535,7 +535,7 @@ fn pick_next(cpu: &Arch) -> (Option<usize>, Option<usize>) {
                         if old_current_runnable {
                             if let Some(current_id) = old_current_task_id {
                                 if let Some(task) = TaskPool::get_task_mut(current_id) {
-                                    task.state.store(TaskState::Running, Ordering::SeqCst);
+                                    task.state.store(TaskState::Ready, Ordering::SeqCst);
                                     task.time_slice.store(
                                         task.default_time_slice.load(Ordering::SeqCst),
                                         Ordering::SeqCst,
