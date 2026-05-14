@@ -22,10 +22,18 @@ const CNTV_CTL_ENABLE: u64 = 1 << 0;
 const CNTV_CTL_IMASK: u64 = 1 << 1;
 const CNTV_CTL_ISTATUS: u64 = 1 << 2;
 
-/// QEMU virt / ARM Generic Timer: Virtual Timer PPI is 27.
+/// QEMU virt / ARM Generic Timer: Virtual Timer PPI.
 ///
-/// We keep this as a constant so the IRQ handler can cheaply sanity-check timer pending state.
-pub const CNTV_PPI_IRQ: u32 = 27;
+/// At EL1: PPI 27 (virtual timer).
+/// At EL2 with VHE: PPI 28 (CNTHV virtual timer), because `cntv_ctl_el0` is
+/// redirected to `CNTHV_CTL_EL2` which fires on the EL2 virtual timer IRQ.
+pub fn timer_ppi_irq() -> u32 {
+    if crate::arch::aarch64::is_vhe_enabled() {
+        28
+    } else {
+        27
+    }
+}
 
 #[inline]
 fn read_cntfrq_el0() -> u64 {

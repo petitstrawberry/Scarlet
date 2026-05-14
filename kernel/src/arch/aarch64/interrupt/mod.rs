@@ -171,8 +171,8 @@ pub fn disable_timer_source_interrupt() {
 /// 1. Enables the timer at the local controller level (CNTV_CTL_EL0)
 /// 2. Attempts to enable the timer PPI at the external controller level
 ///
-/// On GIC-based systems, the timer uses PPI 27 which must be enabled in the
-/// distributor. On Apple Silicon (AIC), the timer bypasses the AIC entirely
+/// On GIC-based systems, the timer uses PPI 27 (EL1) or PPI 28 (EL2 VHE).
+/// On Apple Silicon (AIC), the timer bypasses the AIC entirely
 /// (it's wired to FIQ), so the external enable gracefully fails and is ignored.
 pub fn enable_arch_timer_interrupt() -> Result<(), &'static str> {
     let cpu_id = get_cpu().get_cpuid() as u32;

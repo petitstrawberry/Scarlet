@@ -525,9 +525,7 @@ fn target_spsr_for_mode(mode: crate::arch::Mode) -> u64 {
     const SPSR_EL2H: u64 = 0x9;
 
     match mode {
-        crate::arch::Mode::Kernel | crate::arch::Mode::GuestKernel if is_vhe_enabled() => {
-            SPSR_EL2H
-        }
+        crate::arch::Mode::Kernel | crate::arch::Mode::GuestKernel if is_vhe_enabled() => SPSR_EL2H,
         crate::arch::Mode::Kernel | crate::arch::Mode::GuestKernel => SPSR_EL1H,
         _ => SPSR_EL0T,
     }

@@ -244,7 +244,7 @@ impl GicV3 {
             mmio::write32(self.redist_sgi_reg_addr(cpu_id, GICR_IGROUPR0), 0xFFFF_FFFF);
 
             // Set virtual timer PPI priority to 0x80.
-            let timer_ppi = crate::drivers::pic::arm_generic_timer::CNTV_PPI_IRQ;
+            let timer_ppi = crate::drivers::pic::arm_generic_timer::timer_ppi_irq();
             mmio::write8(
                 self.redist_sgi_reg_addr(cpu_id, GICR_IPRIORITYR) + timer_ppi as usize,
                 0x80,
@@ -534,7 +534,7 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
 
     crate::arch::interrupt::configure_timer_interrupt_route(
         crate::arch::interrupt::TimerInterruptRoute::ExternalControllerIrq,
-        Some(crate::drivers::pic::arm_generic_timer::CNTV_PPI_IRQ),
+        Some(crate::drivers::pic::arm_generic_timer::timer_ppi_irq()),
     );
 
     Ok(())

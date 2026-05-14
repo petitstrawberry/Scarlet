@@ -21,7 +21,7 @@ pub fn arch_irq_handler(trapframe: &mut Trapframe, trap_kind: usize) {
 
     match claimed {
         Ok(Some(interrupt_id)) => {
-            if interrupt_id == crate::drivers::pic::arm_generic_timer::CNTV_PPI_IRQ {
+            if interrupt_id == crate::drivers::pic::arm_generic_timer::timer_ppi_irq() {
                 crate::timer::tick(trapframe);
             }
         }

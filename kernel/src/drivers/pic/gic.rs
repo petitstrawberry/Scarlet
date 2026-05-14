@@ -192,7 +192,7 @@ impl Gic {
             }
 
             // Pre-enable the virtual timer PPI (ID 27).
-            let timer_ppi = crate::drivers::pic::arm_generic_timer::CNTV_PPI_IRQ;
+            let timer_ppi = crate::drivers::pic::arm_generic_timer::timer_ppi_irq();
             let timer_ppi_bit = 1u32 << timer_ppi;
             mmio::write32(self.dist_reg_addr(GICD_ISENABLER), timer_ppi_bit);
 
@@ -239,7 +239,7 @@ impl Gic {
         // [14:0] INTID
         let cpu_target_list = 1u32 << (target_cpu_id + 16);
         let int_id = match ipi_type {
-            LocalInterruptType::Timer => crate::drivers::pic::arm_generic_timer::CNTV_PPI_IRQ,
+            LocalInterruptType::Timer => crate::drivers::pic::arm_generic_timer::timer_ppi_irq(),
             LocalInterruptType::Software => 0, // Software Generated Interrupt
             LocalInterruptType::External => 1, // Software Generated Interrupt
         };
@@ -538,7 +538,7 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
 
     crate::arch::interrupt::configure_timer_interrupt_route(
         crate::arch::interrupt::TimerInterruptRoute::ExternalControllerIrq,
-        Some(crate::drivers::pic::arm_generic_timer::CNTV_PPI_IRQ),
+        Some(crate::drivers::pic::arm_generic_timer::timer_ppi_irq()),
     );
 
     Ok(())
