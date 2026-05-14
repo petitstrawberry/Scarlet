@@ -669,6 +669,8 @@ pub extern "C" fn start_kernel(boot_info: &BootInfo) -> ! {
     /* Initialize interrupt controllers (stage 1) */
     early_println!("[Scarlet Kernel] Initializing interrupt controllers...");
     crate::interrupt::InterruptManager::global().init_controllers();
+    crate::interrupt::InterruptManager::global()
+        .init_controllers_for_cpu(get_cpu().get_cpuid() as u32);
 
     fence(Ordering::SeqCst); // Ensure interrupt controllers are initialized before proceeding
 

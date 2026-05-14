@@ -174,41 +174,37 @@ impl ExternalInterruptController for Plic {
             self.s_mode_contexts
         );
 
-        // Establish a known baseline:
-        // - Disable all interrupts for all contexts first.
-        //   This prevents any firmware/previous-stage configuration from leaking into the kernel.
-        //   Device drivers will later enable only what they need.
-        let word_count = ((self.max_interrupts as usize) + 31) / 32;
-        for cpu_id in 0..self.max_cpus {
-            let context_id = self.context_id_for_cpu(cpu_id);
-            let context_offset = context_id * PLIC_ENABLE_CONTEXT_STRIDE;
-            for word in 0..word_count {
-                let addr = self.base_addr + PLIC_ENABLE_BASE + context_offset + (word * 4);
-                let verify = Self::mmio_write32_with_readback(addr, 0);
-                if verify != 0 {
-                    crate::early_println!(
-                        "PLIC init: clear enable verify failed: cpu={}, context={}, addr={:#x}, read={}",
-                        cpu_id,
-                        context_id,
-                        addr,
-                        verify
-                    );
-                    return Err(InterruptError::HardwareError);
-                }
-            }
-        }
-
-        // Set threshold to 0 for all CPUs (allow all priorities)
-        for cpu_id in 0..self.max_cpus {
-            self.set_threshold(cpu_id, 0)?;
-        }
-
         // Set all interrupt priorities to 1 (lowest non-zero priority)
         for interrupt_id in 1..=self.max_interrupts {
             self.set_priority(interrupt_id, 1)?;
         }
 
         Ok(())
+    }
+
+    fn init_for_cpu(&mut self, cpu_id: CpuId) -> InterruptResult<()> {
+        self.validate_cpu_id(cpu_id)?;
+
+        let word_count = ((self.max_interrupts as usize) + 31) / 32;
+        let context_id = self.context_id_for_cpu(cpu_id);
+        let context_offset = context_id * PLIC_ENABLE_CONTEXT_STRIDE;
+
+        for word in 0..word_count {
+            let addr = self.base_addr + PLIC_ENABLE_BASE + context_offset + (word * 4);
+            let verify = Self::mmio_write32_with_readback(addr, 0);
+            if verify != 0 {
+                crate::early_println!(
+                    "PLIC init_for_cpu: clear enable verify failed: cpu={}, context={}, addr={:#x}, read={}",
+                    cpu_id,
+                    context_id,
+                    addr,
+                    verify
+                );
+                return Err(InterruptError::HardwareError);
+            }
+        }
+
+        self.set_threshold(cpu_id, 0)
     }
 
     /// Enable a specific interrupt for a CPU

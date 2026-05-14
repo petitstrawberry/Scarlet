@@ -270,11 +270,7 @@ impl Gic {
 
 impl ExternalInterruptController for Gic {
     fn init(&mut self) -> InterruptResult<()> {
-        // Initialize distributor
         self.init_distributor();
-
-        // Ensure the CPU interface is enabled for the boot CPU so PPIs/IRQs can be delivered.
-        self.init_cpu_interface(0);
         Ok(())
     }
 
@@ -504,7 +500,7 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
 
     // TODO: Parse actual interrupt count and CPU count from device tree
     let max_interrupts = 256; // Typical value
-    let max_cpus = 4; // Typical value
+    let max_cpus = crate::environment::MAX_NUM_CPUS as u32;
 
     let gic = Box::new(Gic::new(
         dist_base_addr,

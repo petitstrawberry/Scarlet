@@ -292,18 +292,7 @@ impl ExternalInterruptController for GicV3 {
             self.dist_base_addr,
             self.redist_base_addr
         );
-        // Configure distributor + redistributor for CPU0.
-
-        crate::early_println!("[interrupt] GICv3 init: distributor...");
         self.init_distributor();
-
-        crate::early_println!("[interrupt] GICv3 init: redistributor...");
-        self.init_redistributor(0);
-
-        crate::early_println!("[interrupt] GICv3 init: sysregs...");
-        self.init_cpu_interface_sysregs();
-
-        crate::early_println!("[interrupt] GICv3 init: done");
         Ok(())
     }
 

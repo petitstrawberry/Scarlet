@@ -181,7 +181,7 @@ fn register_driver() {
 
     // Create the SBI timer controller
     let mut controller = Box::new(SbiClint {
-        max_cpus: 4,
+        max_cpus: crate::environment::MAX_NUM_CPUS as usize,
         timebase_frequency_hz,
     });
 
@@ -194,9 +194,10 @@ fn register_driver() {
     }
 
     // Register with InterruptManager instead of DeviceManager
-    match crate::interrupt::InterruptManager::global()
-        .register_local_controller_for_range(controller, 0..4)
-    {
+    match crate::interrupt::InterruptManager::global().register_local_controller_for_range(
+        controller,
+        0..(crate::environment::MAX_NUM_CPUS as CpuId),
+    ) {
         Ok(_) => {}
         Err(e) => {
             crate::early_println!("[interrupt] Failed to register CLINT: {}", e);

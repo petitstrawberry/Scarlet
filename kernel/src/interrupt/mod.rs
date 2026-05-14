@@ -56,20 +56,9 @@ impl InterruptManager {
     }
 
     pub fn init_controllers(&self) {
-        disable_interrupts();
-        crate::early_println!("[interrupt] init: local controllers...");
-
-        let mut controllers = self.controllers().lock();
-        match controllers.init_local_controllers() {
-            Ok(()) => {}
-            Err(e) => {
-                crate::early_println!("Failed to initialize local controllers: {}", e);
-            }
-        }
-
-        crate::early_println!("[interrupt] init: local controllers done");
         crate::early_println!("[interrupt] init: external controller...");
 
+        let mut controllers = self.controllers().lock();
         match controllers.init_external_controller() {
             Ok(()) => {}
             Err(e) => {
