@@ -138,29 +138,42 @@ pub fn disable_external_interrupt_line(interrupt_id: u32) -> Result<(), &'static
 
 /// Unmask the architectural timer interrupt at the timer source.
 ///
-/// This is the closest equivalent to RISC-V's per-source enable bit like STIE,
-/// but on AArch64 we use CNTV_CTL_EL0 (virtual timer).
+/// This is the closest equivalent to RISC-V's per-source enable bit like STIE.
+/// Uses CNTP_CTL_EL0 (physical) in VHE mode, CNTV_CTL_EL0 (virtual) otherwise.
 pub fn enable_timer_source_interrupt() {
+    let mut ctl: u64;
     unsafe {
-        let mut ctl: u64;
-        asm!("mrs {0}, cntv_ctl_el0", out(reg) ctl, options(nostack));
-        // IMASK bit (1): 0 = unmask timer interrupt.
-        ctl &= !(1 << 1);
-        // ENABLE bit (0): 1 = enable timer.
-        ctl |= 1;
-        asm!("msr cntv_ctl_el0, {0}", in(reg) ctl, options(nostack));
+        if crate::arch::aarch64::is_vhe_enabled() {
+            asm!("mrs {0}, cntp_ctl_el0", out(reg) ctl, options(nostack));
+        } else {
+            asm!("mrs {0}, cntv_ctl_el0", out(reg) ctl, options(nostack));
+        }
+        ctl &= !(1 << 1); // IMASK=0: unmask
+        ctl |= 1; // ENABLE=1
+        if crate::arch::aarch64::is_vhe_enabled() {
+            asm!("msr cntp_ctl_el0, {0}", in(reg) ctl, options(nostack));
+        } else {
+            asm!("msr cntv_ctl_el0, {0}", in(reg) ctl, options(nostack));
+        }
         asm!("isb", options(nostack));
     }
 }
 
 /// Mask the architectural timer interrupt at the timer source.
 pub fn disable_timer_source_interrupt() {
+    let mut ctl: u64;
     unsafe {
-        let mut ctl: u64;
-        asm!("mrs {0}, cntv_ctl_el0", out(reg) ctl, options(nostack));
-        // IMASK bit (1): 1 = mask timer interrupt.
-        ctl |= 1 << 1;
-        asm!("msr cntv_ctl_el0, {0}", in(reg) ctl, options(nostack));
+        if crate::arch::aarch64::is_vhe_enabled() {
+            asm!("mrs {0}, cntp_ctl_el0", out(reg) ctl, options(nostack));
+        } else {
+            asm!("mrs {0}, cntv_ctl_el0", out(reg) ctl, options(nostack));
+        }
+        ctl |= 1 << 1; // IMASK=1: mask
+        if crate::arch::aarch64::is_vhe_enabled() {
+            asm!("msr cntp_ctl_el0, {0}", in(reg) ctl, options(nostack));
+        } else {
+            asm!("msr cntv_ctl_el0, {0}", in(reg) ctl, options(nostack));
+        }
         asm!("isb", options(nostack));
     }
 }
@@ -171,7 +184,7 @@ pub fn disable_timer_source_interrupt() {
 /// 1. Enables the timer at the local controller level (CNTV_CTL_EL0)
 /// 2. Attempts to enable the timer PPI at the external controller level
 ///
-/// On GIC-based systems, the timer uses PPI 27 (EL1) or PPI 28 (EL2 VHE).
+/// On GIC-based systems, the timer uses PPI 27 (EL1 virtual) or PPI 26 (EL2 physical/VHE).
 /// On Apple Silicon (AIC), the timer bypasses the AIC entirely
 /// (it's wired to FIQ), so the external enable gracefully fails and is ignored.
 pub fn enable_arch_timer_interrupt() -> Result<(), &'static str> {
