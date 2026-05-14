@@ -67,15 +67,7 @@ impl<T> CpuLocal<T> {
     where
         T: Copy,
     {
-        // Initialize array with copies of the value
-        let mut data: [UnsafeCell<T>; MAX_NUM_CPUS] = unsafe {
-            // SAFETY: We're creating an uninitialized array, but we immediately
-            // initialize every element in the loop below.
-            core::mem::MaybeUninit::uninit().assume_init()
-        };
-        for i in 0..MAX_NUM_CPUS {
-            data[i] = UnsafeCell::new(value);
-        }
+        let data = core::array::from_fn(|_| UnsafeCell::new(value));
         Self { data }
     }
 

@@ -1,6 +1,5 @@
 use crate::arch::{Trapframe, get_cpu};
 
-/// RISC-V S-mode interrupt causes
 const SUPERVISOR_SOFTWARE_INTERRUPT: usize = 1;
 const SUPERVISOR_TIMER_INTERRUPT: usize = 5;
 const SUPERVISOR_EXTERNAL_INTERRUPT: usize = 9;
@@ -14,12 +13,17 @@ pub fn arch_interrupt_handler(trapframe: &mut Trapframe, cause: usize) {
     }
 }
 
-/// Handle software interrupt (IPI)
-/// TODO: Implement inter-processor interrupt handling
 fn handle_software_interrupt() {
-    crate::println!("[interrupt] Software interrupt received - TODO: implement IPI");
-    // TODO: CLINT software interrupt handling
-    // TODO: Inter-processor interrupt (IPI) support
+    // Clear SSIP (Supervisor Software Interrupt Pending) to prevent
+    // re-triggering. SBI send_ipi sets MSIP via M-mode, which fires
+    // SSIP in S-mode. We must clear it here.
+    unsafe {
+        core::arch::asm!(
+            "csrc sip, {0}",
+            in(reg) 1 << 1,
+            options(nostack)
+        );
+    }
 }
 
 /// Handle timer interrupt from CLINT
