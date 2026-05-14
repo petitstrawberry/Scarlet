@@ -19,7 +19,7 @@ use crate::{
         },
     },
     driver_initcall,
-    interrupt::{InterruptId, InterruptManager},
+    interrupt::InterruptId,
     object::capability::{ControlOps, MemoryMappingOps, Selectable},
     traits::serial::Serial,
 };
@@ -97,10 +97,9 @@ impl Uart {
         self.reg_write(IER_OFFSET, IER_RDA);
 
         // Register interrupt with interrupt manager
-        InterruptManager::with_manager(|mgr| {
-            mgr.enable_external_interrupt(interrupt_id, 0) // Enable for CPU 0
-        })
-        .map_err(|_| "Failed to enable interrupt")?;
+        crate::interrupt::InterruptManager::global()
+            .enable_external_interrupt(interrupt_id, 0)
+            .map_err(|_| "Failed to enable interrupt")?;
 
         Ok(())
     }
@@ -379,9 +378,9 @@ fn uart_probe(device_info: &PlatformDeviceInfo) -> Result<(), &'static str> {
             crate::early_println!("UART interrupts enabled (ID: {})", uart_interrupt_id);
 
             // Register interrupt handler
-            if let Err(e) = InterruptManager::with_manager(|mgr| {
-                mgr.register_interrupt_device(uart_interrupt_id, uart.clone())
-            }) {
+            if let Err(e) = crate::interrupt::InterruptManager::global()
+                .register_interrupt_device(uart_interrupt_id, uart.clone())
+            {
                 crate::early_println!("Failed to register UART interrupt device: {}", e);
             } else {
                 crate::early_println!("UART interrupt device registered");

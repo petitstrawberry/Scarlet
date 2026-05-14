@@ -15,7 +15,7 @@ use core::arch::asm;
 
 use crate::environment::MAX_NUM_CPUS;
 use crate::interrupt::controllers::{LocalInterruptController, LocalInterruptType};
-use crate::interrupt::{CpuId, InterruptError, InterruptManager, InterruptResult};
+use crate::interrupt::{CpuId, InterruptError, InterruptResult};
 
 /// CNTV_CTL_EL0 bit definitions
 const CNTV_CTL_ENABLE: u64 = 1 << 0;
@@ -131,7 +131,7 @@ impl LocalInterruptController for ArmGenericTimer {
     }
 
     fn enable_interrupt(
-        &mut self,
+        &self,
         _cpu_id: CpuId,
         interrupt_type: LocalInterruptType,
     ) -> InterruptResult<()> {
@@ -145,7 +145,7 @@ impl LocalInterruptController for ArmGenericTimer {
     }
 
     fn disable_interrupt(
-        &mut self,
+        &self,
         _cpu_id: CpuId,
         interrupt_type: LocalInterruptType,
     ) -> InterruptResult<()> {
@@ -178,7 +178,7 @@ impl LocalInterruptController for ArmGenericTimer {
         }
     }
 
-    fn send_software_interrupt(&mut self, _target_cpu: CpuId) -> InterruptResult<()> {
+    fn send_software_interrupt(&self, _target_cpu: CpuId) -> InterruptResult<()> {
         Err(InterruptError::NotSupported)
     }
 
@@ -186,7 +186,7 @@ impl LocalInterruptController for ArmGenericTimer {
         Err(InterruptError::NotSupported)
     }
 
-    fn set_timer(&mut self, _cpu_id: CpuId, time: u64) -> InterruptResult<()> {
+    fn set_timer(&self, _cpu_id: CpuId, time: u64) -> InterruptResult<()> {
         // Program absolute compare value.
         write_timer_cval(time);
         Ok(())
@@ -207,9 +207,8 @@ unsafe impl Sync for ArmGenericTimer {}
 fn register_local_timer_controller() {
     // Register for all CPUs that Scarlet is configured to support.
     let controller = alloc::boxed::Box::new(ArmGenericTimer::new());
-    let _ = InterruptManager::with_manager(|mgr| {
-        mgr.register_local_controller_for_range(controller, 0..(MAX_NUM_CPUS as CpuId))
-    });
+    let _ = crate::interrupt::InterruptManager::global()
+        .register_local_controller_for_range(controller, 0..(MAX_NUM_CPUS as CpuId));
 }
 
 crate::early_initcall!(register_local_timer_controller);

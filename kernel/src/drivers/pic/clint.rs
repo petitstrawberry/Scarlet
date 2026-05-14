@@ -13,7 +13,7 @@ use crate::{
     driver_initcall,
     interrupt::{
         controllers::{LocalInterruptController, LocalInterruptType},
-        CpuId, InterruptError, InterruptManager, InterruptResult,
+        CpuId, InterruptError, InterruptResult,
     },
 };
 use alloc::{boxed::Box, vec};
@@ -100,11 +100,7 @@ impl LocalInterruptController for Clint {
     }
 
     /// Enable a specific local interrupt type for a CPU
-    fn enable_interrupt(
-        &mut self,
-        cpu_id: CpuId,
-        interrupt_type: LocalInterruptType,
-    ) -> InterruptResult<()> {
+    fn enable_interrupt(&self, cpu_id: CpuId, interrupt_type: LocalInterruptType) -> InterruptResult<()> {
         self.validate_cpu_id(cpu_id)?;
 
         match interrupt_type {
@@ -126,11 +122,7 @@ impl LocalInterruptController for Clint {
     }
 
     /// Disable a specific local interrupt type for a CPU
-    fn disable_interrupt(
-        &mut self,
-        cpu_id: CpuId,
-        interrupt_type: LocalInterruptType,
-    ) -> InterruptResult<()> {
+    fn disable_interrupt(&self, cpu_id: CpuId, interrupt_type: LocalInterruptType) -> InterruptResult<()> {
         self.validate_cpu_id(cpu_id)?;
 
         match interrupt_type {
@@ -139,8 +131,12 @@ impl LocalInterruptController for Clint {
                 self.set_timer(cpu_id, u64::MAX)
             }
             LocalInterruptType::Software => {
-                // Disable software interrupt by clearing MSIP
-                self.clear_software_interrupt(cpu_id)
+                let addr = self.msip_addr(cpu_id);
+                unsafe {
+                    write_volatile(addr as *mut u32, 0);
+                }
+
+                Ok(())
             }
             LocalInterruptType::External => {
                 // External interrupts are not managed by CLINT
@@ -190,7 +186,7 @@ impl LocalInterruptController for Clint {
     }
 
     /// Send a software interrupt to a specific CPU
-    fn send_software_interrupt(&mut self, target_cpu: CpuId) -> InterruptResult<()> {
+    fn send_software_interrupt(&self, target_cpu: CpuId) -> InterruptResult<()> {
         self.validate_cpu_id(target_cpu)?;
 
         let addr = self.msip_addr(target_cpu);
@@ -217,7 +213,7 @@ impl LocalInterruptController for Clint {
     }
 
     /// Set timer interrupt for a specific CPU
-    fn set_timer(&mut self, cpu_id: CpuId, time: u64) -> InterruptResult<()> {
+    fn set_timer(&self, cpu_id: CpuId, time: u64) -> InterruptResult<()> {
         self.validate_cpu_id(cpu_id)?;
 
         // Set the timer compare register to the specified time using SBI
@@ -285,8 +281,7 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
     }
 
     // Register with InterruptManager instead of DeviceManager
-    match InterruptManager::global()
-        .lock()
+    match crate::interrupt::InterruptManager::global()
         .register_local_controller_for_range(controller, 0..4)
     {
         Ok(_) => {

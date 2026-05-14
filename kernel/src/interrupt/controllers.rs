@@ -17,14 +17,14 @@ pub trait LocalInterruptController: Send + Sync {
 
     /// Enable a specific local interrupt type for a CPU
     fn enable_interrupt(
-        &mut self,
+        &self,
         cpu_id: CpuId,
         interrupt_type: LocalInterruptType,
     ) -> InterruptResult<()>;
 
     /// Disable a specific local interrupt type for a CPU
     fn disable_interrupt(
-        &mut self,
+        &self,
         cpu_id: CpuId,
         interrupt_type: LocalInterruptType,
     ) -> InterruptResult<()>;
@@ -40,13 +40,13 @@ pub trait LocalInterruptController: Send + Sync {
     ) -> InterruptResult<()>;
 
     /// Send a software interrupt to a specific CPU
-    fn send_software_interrupt(&mut self, target_cpu: CpuId) -> InterruptResult<()>;
+    fn send_software_interrupt(&self, target_cpu: CpuId) -> InterruptResult<()>;
 
     /// Clear a software interrupt for a specific CPU
     fn clear_software_interrupt(&mut self, cpu_id: CpuId) -> InterruptResult<()>;
 
     /// Set timer interrupt for a specific CPU
-    fn set_timer(&mut self, cpu_id: CpuId, time: u64) -> InterruptResult<()>;
+    fn set_timer(&self, cpu_id: CpuId, time: u64) -> InterruptResult<()>;
 
     /// Get current timer value
     fn get_time(&self) -> u64;
@@ -64,15 +64,10 @@ pub trait ExternalInterruptController: Send + Sync {
     fn init(&mut self) -> InterruptResult<()>;
 
     /// Enable a specific interrupt for a CPU
-    fn enable_interrupt(&mut self, interrupt_id: InterruptId, cpu_id: CpuId)
-    -> InterruptResult<()>;
+    fn enable_interrupt(&self, interrupt_id: InterruptId, cpu_id: CpuId) -> InterruptResult<()>;
 
     /// Disable a specific interrupt for a CPU
-    fn disable_interrupt(
-        &mut self,
-        interrupt_id: InterruptId,
-        cpu_id: CpuId,
-    ) -> InterruptResult<()>;
+    fn disable_interrupt(&self, interrupt_id: InterruptId, cpu_id: CpuId) -> InterruptResult<()>;
 
     /// Set priority for a specific interrupt
     fn set_priority(
@@ -91,14 +86,10 @@ pub trait ExternalInterruptController: Send + Sync {
     fn get_threshold(&self, cpu_id: CpuId) -> InterruptResult<Priority>;
 
     /// Claim an interrupt (acknowledge and get the interrupt ID)
-    fn claim_interrupt(&mut self, cpu_id: CpuId) -> InterruptResult<Option<InterruptId>>;
+    fn claim_interrupt(&self, cpu_id: CpuId) -> InterruptResult<Option<InterruptId>>;
 
     /// Complete an interrupt (signal that handling is finished)
-    fn complete_interrupt(
-        &mut self,
-        cpu_id: CpuId,
-        interrupt_id: InterruptId,
-    ) -> InterruptResult<()>;
+    fn complete_interrupt(&self, cpu_id: CpuId, interrupt_id: InterruptId) -> InterruptResult<()>;
 
     /// Check if a specific interrupt is pending
     fn is_pending(&self, interrupt_id: InterruptId) -> bool;
@@ -109,11 +100,7 @@ pub trait ExternalInterruptController: Send + Sync {
     /// Get the number of CPUs supported
     fn max_cpus(&self) -> CpuId;
 
-    fn send_ipi(
-        &mut self,
-        target_cpu_id: CpuId,
-        ipi_type: LocalInterruptType,
-    ) -> InterruptResult<()> {
+    fn send_ipi(&self, target_cpu_id: CpuId, ipi_type: LocalInterruptType) -> InterruptResult<()> {
         let _ = (target_cpu_id, ipi_type);
         Err(InterruptError::NotSupported)
     }
@@ -207,17 +194,16 @@ impl InterruptControllers {
     }
 
     /// Get a reference to the local interrupt controller for a specific CPU
-    pub fn local_controller_for_cpu(
-        &self,
-        cpu_id: CpuId,
-    ) -> Option<&Box<dyn LocalInterruptController>> {
+    pub fn local_controller_for_cpu(&self, cpu_id: CpuId) -> Option<&dyn LocalInterruptController> {
         let controller_index = self.cpu_to_local_controller.get(&cpu_id)?;
-        self.local_controllers.get(*controller_index)
+        self.local_controllers
+            .get(*controller_index)
+            .map(Box::as_ref)
     }
 
     /// Get a reference to a specific local interrupt controller by index
-    pub fn local_controller(&self, index: usize) -> Option<&Box<dyn LocalInterruptController>> {
-        self.local_controllers.get(index)
+    pub fn local_controller(&self, index: usize) -> Option<&dyn LocalInterruptController> {
+        self.local_controllers.get(index).map(Box::as_ref)
     }
 
     /// Get a mutable reference to the local interrupt controller for a specific CPU
@@ -240,6 +226,11 @@ impl InterruptControllers {
     /// Get a mutable reference to the external interrupt controller
     pub fn external_controller_mut(&mut self) -> Option<&mut Box<dyn ExternalInterruptController>> {
         self.external_controller.as_mut()
+    }
+
+    /// Get a shared reference to the external interrupt controller
+    pub fn external_controller(&self) -> Option<&dyn ExternalInterruptController> {
+        self.external_controller.as_deref()
     }
 
     /// Initialize all local controllers for their respective CPUs

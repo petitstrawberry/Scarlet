@@ -6,7 +6,7 @@ use core::arch::asm;
 use core::sync::atomic::{AtomicU8, AtomicU32, Ordering};
 
 use crate::arch::get_cpu;
-use crate::interrupt::{InterruptError, InterruptManager, controllers::LocalInterruptType};
+use crate::interrupt::{InterruptError, controllers::LocalInterruptType};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TimerInterruptRoute {
@@ -102,38 +102,34 @@ pub fn disable_external_interrupts() {
 ///
 /// This corresponds to "core-local" enables such as the architectural timer.
 pub fn enable_core_local_interrupt(source: LocalInterruptType) -> Result<(), &'static str> {
-    InterruptManager::with_manager(|mgr| {
-        let cpu_id = get_cpu().get_cpuid() as u32;
-        mgr.enable_local_interrupt(cpu_id, source)
-    })
-    .map_err(|_| "failed to enable core-local interrupt")
+    let cpu_id = get_cpu().get_cpuid() as u32;
+    crate::interrupt::InterruptManager::global()
+        .enable_local_interrupt(cpu_id, source)
+        .map_err(|_| "failed to enable core-local interrupt")
 }
 
 /// Disable a core-local interrupt source via the InterruptManager.
 pub fn disable_core_local_interrupt(source: LocalInterruptType) -> Result<(), &'static str> {
-    InterruptManager::with_manager(|mgr| {
-        let cpu_id = get_cpu().get_cpuid() as u32;
-        mgr.disable_local_interrupt(cpu_id, source)
-    })
-    .map_err(|_| "failed to disable core-local interrupt")
+    let cpu_id = get_cpu().get_cpuid() as u32;
+    crate::interrupt::InterruptManager::global()
+        .disable_local_interrupt(cpu_id, source)
+        .map_err(|_| "failed to disable core-local interrupt")
 }
 
 /// Enable an external interrupt line (GIC-backed) for the current CPU.
 pub fn enable_external_interrupt_line(interrupt_id: u32) -> Result<(), &'static str> {
-    InterruptManager::with_manager(|mgr| {
-        let cpu_id = get_cpu().get_cpuid() as u32;
-        mgr.enable_external_interrupt(interrupt_id, cpu_id)
-    })
-    .map_err(|_| "failed to enable external interrupt line")
+    let cpu_id = get_cpu().get_cpuid() as u32;
+    crate::interrupt::InterruptManager::global()
+        .enable_external_interrupt(interrupt_id, cpu_id)
+        .map_err(|_| "failed to enable external interrupt line")
 }
 
 /// Disable an external interrupt line (GIC-backed) for the current CPU.
 pub fn disable_external_interrupt_line(interrupt_id: u32) -> Result<(), &'static str> {
-    InterruptManager::with_manager(|mgr| {
-        let cpu_id = get_cpu().get_cpuid() as u32;
-        mgr.disable_external_interrupt(interrupt_id, cpu_id)
-    })
-    .map_err(|_| "failed to disable external interrupt line")
+    let cpu_id = get_cpu().get_cpuid() as u32;
+    crate::interrupt::InterruptManager::global()
+        .disable_external_interrupt(interrupt_id, cpu_id)
+        .map_err(|_| "failed to disable external interrupt line")
 }
 
 /// Unmask the architectural timer interrupt at the timer source.
@@ -190,26 +186,24 @@ pub fn disable_timer_source_interrupt() {
 pub fn enable_arch_timer_interrupt() -> Result<(), &'static str> {
     let cpu_id = get_cpu().get_cpuid() as u32;
 
-    InterruptManager::with_manager(|mgr| {
-        mgr.enable_local_interrupt(cpu_id, LocalInterruptType::Timer)
-    })
-    .map_err(|_| "failed to enable local timer interrupt")?;
+    crate::interrupt::InterruptManager::global()
+        .enable_local_interrupt(cpu_id, LocalInterruptType::Timer)
+        .map_err(|_| "failed to enable local timer interrupt")?;
 
     match timer_interrupt_route() {
         TimerInterruptRoute::FastInterrupt => {}
         TimerInterruptRoute::ExternalControllerIrq => {
             let interrupt_id = timer_external_interrupt_id()
                 .ok_or("external timer interrupt route is not configured")?;
-            InterruptManager::with_manager(|mgr| {
-                mgr.enable_external_interrupt(interrupt_id, cpu_id)
-            })
-            .or_else(|e| {
-                if matches!(e, InterruptError::InvalidInterruptId) {
-                    Ok(())
-                } else {
-                    Err("failed to enable timer PPI in external controller")
-                }
-            })?;
+            crate::interrupt::InterruptManager::global()
+                .enable_external_interrupt(interrupt_id, cpu_id)
+                .or_else(|e| {
+                    if matches!(e, InterruptError::InvalidInterruptId) {
+                        Ok(())
+                    } else {
+                        Err("failed to enable timer PPI in external controller")
+                    }
+                })?;
         }
         TimerInterruptRoute::Unknown => return Err("timer interrupt route is not configured"),
     }
@@ -221,26 +215,24 @@ pub fn enable_arch_timer_interrupt() -> Result<(), &'static str> {
 pub fn disable_arch_timer_interrupt() -> Result<(), &'static str> {
     let cpu_id = get_cpu().get_cpuid() as u32;
 
-    InterruptManager::with_manager(|mgr| {
-        mgr.disable_local_interrupt(cpu_id, LocalInterruptType::Timer)
-    })
-    .map_err(|_| "failed to disable local timer interrupt")?;
+    crate::interrupt::InterruptManager::global()
+        .disable_local_interrupt(cpu_id, LocalInterruptType::Timer)
+        .map_err(|_| "failed to disable local timer interrupt")?;
 
     match timer_interrupt_route() {
         TimerInterruptRoute::FastInterrupt => {}
         TimerInterruptRoute::ExternalControllerIrq => {
             let interrupt_id = timer_external_interrupt_id()
                 .ok_or("external timer interrupt route is not configured")?;
-            InterruptManager::with_manager(|mgr| {
-                mgr.disable_external_interrupt(interrupt_id, cpu_id)
-            })
-            .or_else(|e| {
-                if matches!(e, InterruptError::InvalidInterruptId) {
-                    Ok(())
-                } else {
-                    Err("failed to disable timer PPI in external controller")
-                }
-            })?;
+            crate::interrupt::InterruptManager::global()
+                .disable_external_interrupt(interrupt_id, cpu_id)
+                .or_else(|e| {
+                    if matches!(e, InterruptError::InvalidInterruptId) {
+                        Ok(())
+                    } else {
+                        Err("failed to disable timer PPI in external controller")
+                    }
+                })?;
         }
         TimerInterruptRoute::Unknown => return Err("timer interrupt route is not configured"),
     }
@@ -249,10 +241,9 @@ pub fn disable_arch_timer_interrupt() -> Result<(), &'static str> {
 }
 
 pub fn is_arch_timer_pending() -> bool {
-    InterruptManager::with_manager(|mgr| {
-        let cpu_id = get_cpu().get_cpuid() as u32;
-        mgr.is_local_interrupt_pending(cpu_id, LocalInterruptType::Timer)
-    })
+    let cpu_id = get_cpu().get_cpuid() as u32;
+    crate::interrupt::InterruptManager::global()
+        .is_local_interrupt_pending(cpu_id, LocalInterruptType::Timer)
 }
 
 pub fn with_interrupts_disabled<F, R>(f: F) -> R

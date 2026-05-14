@@ -16,7 +16,7 @@ use crate::{
     },
     early_initcall,
     interrupt::{
-        CpuId, InterruptError, InterruptId, InterruptManager, InterruptResult, Priority,
+        CpuId, InterruptError, InterruptId, InterruptResult, Priority,
         controllers::ExternalInterruptController,
     },
 };
@@ -307,11 +307,7 @@ impl ExternalInterruptController for GicV3 {
         Ok(())
     }
 
-    fn enable_interrupt(
-        &mut self,
-        interrupt_id: InterruptId,
-        cpu_id: CpuId,
-    ) -> InterruptResult<()> {
+    fn enable_interrupt(&self, interrupt_id: InterruptId, cpu_id: CpuId) -> InterruptResult<()> {
         self.validate_interrupt_id(interrupt_id)?;
         self.validate_cpu_id(cpu_id)?;
 
@@ -329,11 +325,7 @@ impl ExternalInterruptController for GicV3 {
         Ok(())
     }
 
-    fn disable_interrupt(
-        &mut self,
-        interrupt_id: InterruptId,
-        cpu_id: CpuId,
-    ) -> InterruptResult<()> {
+    fn disable_interrupt(&self, interrupt_id: InterruptId, cpu_id: CpuId) -> InterruptResult<()> {
         self.validate_interrupt_id(interrupt_id)?;
         self.validate_cpu_id(cpu_id)?;
 
@@ -396,7 +388,7 @@ impl ExternalInterruptController for GicV3 {
         Ok(0)
     }
 
-    fn claim_interrupt(&mut self, cpu_id: CpuId) -> InterruptResult<Option<InterruptId>> {
+    fn claim_interrupt(&self, cpu_id: CpuId) -> InterruptResult<Option<InterruptId>> {
         self.validate_cpu_id(cpu_id)?;
 
         let iar = read_icc_iar1_el1();
@@ -410,11 +402,7 @@ impl ExternalInterruptController for GicV3 {
         }
     }
 
-    fn complete_interrupt(
-        &mut self,
-        cpu_id: CpuId,
-        interrupt_id: InterruptId,
-    ) -> InterruptResult<()> {
+    fn complete_interrupt(&self, cpu_id: CpuId, interrupt_id: InterruptId) -> InterruptResult<()> {
         self.validate_interrupt_id(interrupt_id)?;
         self.validate_cpu_id(cpu_id)?;
 
@@ -525,12 +513,9 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
         max_cpus,
     ));
 
-    InterruptManager::with_manager(|manager| {
-        manager
-            .register_external_controller(gic)
-            .map_err(|_| "Failed to register GICv3")?;
-        Ok(())
-    })?;
+    crate::interrupt::InterruptManager::global()
+        .register_external_controller(gic)
+        .map_err(|_| "Failed to register GICv3")?;
 
     crate::arch::interrupt::configure_timer_interrupt_route(
         crate::arch::interrupt::TimerInterruptRoute::ExternalControllerIrq,

@@ -1,7 +1,6 @@
 //! AArch64 interrupt trap handling
 
 use crate::arch::{Trapframe, get_cpu};
-use crate::interrupt::InterruptManager;
 
 /// Handle an IRQ taken at EL1.
 ///
@@ -17,7 +16,7 @@ pub fn arch_irq_handler(trapframe: &mut Trapframe, trap_kind: usize) {
     }
 
     let claimed =
-        InterruptManager::with_manager(|mgr| mgr.claim_and_handle_external_interrupt(cpu_id));
+        crate::interrupt::InterruptManager::global().claim_and_handle_external_interrupt(cpu_id);
 
     match claimed {
         Ok(Some(interrupt_id)) => {

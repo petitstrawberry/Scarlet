@@ -300,7 +300,6 @@ use crate::{
     device::graphics::manager::GraphicsManager,
     executor::executor::TransparentExecutor,
     fs::{drivers::initramfs::init_initramfs, vfs_v2::manager::init_global_vfs_manager},
-    interrupt::InterruptManager,
 };
 use arch::get_cpu;
 use core::sync::atomic::{Ordering, compiler_fence, fence};
@@ -669,7 +668,7 @@ pub extern "C" fn start_kernel(boot_info: &BootInfo) -> ! {
 
     /* Initialize interrupt controllers (stage 1) */
     early_println!("[Scarlet Kernel] Initializing interrupt controllers...");
-    InterruptManager::get_manager().init_controllers();
+    crate::interrupt::InterruptManager::global().init_controllers();
 
     fence(Ordering::SeqCst); // Ensure interrupt controllers are initialized before proceeding
 
@@ -768,7 +767,7 @@ pub extern "C" fn start_kernel(boot_info: &BootInfo) -> ! {
 
     /* Enable CPU interrupt reception (stage 2) */
     println!("[Scarlet Kernel] Enabling CPU interrupts...");
-    InterruptManager::get_manager().enable_cpu_interrupts();
+    crate::interrupt::enable_cpu_interrupts();
 
     fence(Ordering::SeqCst); // Ensure interrupt manager is initialized before proceeding
 
@@ -916,8 +915,8 @@ pub extern "C" fn start_ap(cpu_id: usize) -> ! {
 
     crate::arch::init_ap_cpu(cpu_id);
 
-    crate::interrupt::InterruptManager::get_manager().init_controllers_for_cpu(cpu_id as u32);
-    crate::interrupt::InterruptManager::get_manager().enable_cpu_interrupts();
+    crate::interrupt::InterruptManager::global().init_controllers_for_cpu(cpu_id as u32);
+    crate::interrupt::enable_cpu_interrupts();
     fence(Ordering::SeqCst);
 
     #[cfg(feature = "hypervisor")]

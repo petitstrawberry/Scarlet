@@ -14,7 +14,7 @@ use crate::{
     },
     early_initcall,
     interrupt::{
-        CpuId, InterruptError, InterruptId, InterruptManager, InterruptResult, Priority,
+        CpuId, InterruptError, InterruptId, InterruptResult, Priority,
         controllers::ExternalInterruptController,
     },
 };
@@ -212,11 +212,7 @@ impl ExternalInterruptController for Plic {
     }
 
     /// Enable a specific interrupt for a CPU
-    fn enable_interrupt(
-        &mut self,
-        interrupt_id: InterruptId,
-        cpu_id: CpuId,
-    ) -> InterruptResult<()> {
+    fn enable_interrupt(&self, interrupt_id: InterruptId, cpu_id: CpuId) -> InterruptResult<()> {
         self.validate_interrupt_id(interrupt_id)?;
         self.validate_cpu_id(cpu_id)?;
 
@@ -247,11 +243,7 @@ impl ExternalInterruptController for Plic {
     }
 
     /// Disable a specific interrupt for a CPU
-    fn disable_interrupt(
-        &mut self,
-        interrupt_id: InterruptId,
-        cpu_id: CpuId,
-    ) -> InterruptResult<()> {
+    fn disable_interrupt(&self, interrupt_id: InterruptId, cpu_id: CpuId) -> InterruptResult<()> {
         self.validate_interrupt_id(interrupt_id)?;
         self.validate_cpu_id(cpu_id)?;
 
@@ -345,7 +337,7 @@ impl ExternalInterruptController for Plic {
     }
 
     /// Claim an interrupt (acknowledge and get the interrupt ID)
-    fn claim_interrupt(&mut self, cpu_id: CpuId) -> InterruptResult<Option<InterruptId>> {
+    fn claim_interrupt(&self, cpu_id: CpuId) -> InterruptResult<Option<InterruptId>> {
         self.validate_cpu_id(cpu_id)?;
 
         let addr = self.claim_addr(cpu_id);
@@ -359,11 +351,7 @@ impl ExternalInterruptController for Plic {
     }
 
     /// Complete an interrupt (signal that handling is finished)
-    fn complete_interrupt(
-        &mut self,
-        cpu_id: CpuId,
-        interrupt_id: InterruptId,
-    ) -> InterruptResult<()> {
+    fn complete_interrupt(&self, cpu_id: CpuId, interrupt_id: InterruptId) -> InterruptResult<()> {
         self.validate_cpu_id(cpu_id)?;
         self.validate_interrupt_id(interrupt_id)?;
 
@@ -452,10 +440,7 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
             Box::new(Plic::new(base_addr, 1023, 4))
         };
 
-    match InterruptManager::global()
-        .lock()
-        .register_external_controller(controller)
-    {
+    match crate::interrupt::InterruptManager::global().register_external_controller(controller) {
         Ok(_) => {
             crate::early_println!(
                 "[interrupt] PLIC registered at base address: {:#x}",
