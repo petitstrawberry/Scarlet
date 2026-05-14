@@ -268,7 +268,7 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
         crate::arch::riscv64::fdt::timebase_frequency_hz_from_fdt().unwrap_or(10_000_000);
 
     // Create CLINT controller
-    let mut controller = Box::new(Clint::new(base_addr, 4, timebase_frequency_hz)); // Example: 4 CPUs for QEMU virt
+    let mut controller = Box::new(Clint::new(base_addr, crate::environment::MAX_NUM_CPUS as CpuId, timebase_frequency_hz));
 
     // Initialize CLINT (Currently only initializes for CPU 0)
     if let Err(e) = controller.init(0) {
@@ -282,7 +282,7 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
 
     // Register with InterruptManager instead of DeviceManager
     match crate::interrupt::InterruptManager::global()
-        .register_local_controller_for_range(controller, 0..4)
+        .register_local_controller_for_range(controller, 0..(crate::environment::MAX_NUM_CPUS as CpuId))
     {
         Ok(_) => {
             crate::early_println!(

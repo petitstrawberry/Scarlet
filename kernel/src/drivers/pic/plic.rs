@@ -435,9 +435,13 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
         } else {
             // Fallback to hardcoded values (TCG-style: M+S per hart)
             crate::early_println!(
-                "[interrupt] PLIC: Using default config (1023 interrupts, 4 contexts)"
+                "[interrupt] PLIC: Using default config (1023 interrupts, MAX_NUM_CPUS contexts)"
             );
-            Box::new(Plic::new(base_addr, 1023, 4))
+            Box::new(Plic::new(
+                base_addr,
+                1023,
+                crate::environment::MAX_NUM_CPUS as CpuId,
+            ))
         };
 
     match crate::interrupt::InterruptManager::global().register_external_controller(controller) {
