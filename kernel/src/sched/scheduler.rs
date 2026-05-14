@@ -504,8 +504,7 @@ fn pick_next(cpu: &Arch) -> (Option<usize>, Option<usize>) {
     }
 
     let old_current_runnable = old_current_task_id.is_some_and(|id| {
-        TaskPool::get_task(id)
-            .is_some_and(|t| t.state.load(Ordering::SeqCst) == TaskState::Ready)
+        TaskPool::get_task(id).is_some_and(|t| t.state.load(Ordering::SeqCst) == TaskState::Ready)
     });
 
     loop {
