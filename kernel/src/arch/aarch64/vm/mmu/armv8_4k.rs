@@ -322,8 +322,8 @@ impl PageTable {
                     "isb",
                     "msr ttbr0_el1, {ttbr}",
                     "isb",
-                    "tlbi vmalle1is",
-                    "dsb ish",
+                    "tlbi vmalle1",
+                    "dsb nsh",
                     "isb",
                     "mrs {tmp}, sctlr_el1",
                     "orr {tmp}, {tmp}, {sctlr_flags}",
@@ -341,8 +341,8 @@ impl PageTable {
                 asm!(
                     "msr ttbr0_el1, {ttbr}",
                     "isb",
-                    "tlbi vmalle1is",
-                    "dsb ish",
+                    "tlbi vmalle1",
+                    "dsb nsh",
                     "isb",
                     ttbr = in(reg) ttbr_val,
                     options(nostack),
@@ -358,8 +358,8 @@ impl PageTable {
             asm!(
                 "msr ttbr1_el1, {ttbr}",
                 "isb",
-                "tlbi vmalle1is",
-                "dsb ish",
+                "tlbi vmalle1",
+                "dsb nsh",
                 "isb",
                 ttbr = in(reg) ttbr_val,
                 options(nostack),
@@ -379,8 +379,8 @@ impl PageTable {
                 "msr ttbr1_el1, {ttbr}",
                 "msr ttbr0_el1, {ttbr}",
                 "isb",
-                "tlbi vmalle1is",
-                "dsb ish",
+                "tlbi vmalle1",
+                "dsb nsh",
                 "isb",
                 mair = in(reg) SCARLET_MAIR_EL1,
                 tcr = in(reg) SCARLET_TCR_EL1,
@@ -447,6 +447,9 @@ impl PageTable {
             }
         }
 
+        // Batched local TLB invalidation for all new mappings.
+        unsafe { asm!("dsb nsh", "tlbi vmalle1", "dsb nsh", "isb") };
+
         Ok(())
     }
 
@@ -472,6 +475,9 @@ impl PageTable {
 
         self.try_map_at_level(asid, vaddr, paddr, MapAttrs { permissions }, 0)
             .expect("map: couldn't install a 4 KiB leaf mapping");
+
+        // Local TLB invalidation for new mapping (no stale entries on other CPUs).
+        unsafe { asm!("dsb nsh", "tlbi vmalle1", "dsb nsh", "isb") };
     }
 
     /// Attempts to install a leaf mapping at the specified logical level.
@@ -510,8 +516,7 @@ impl PageTable {
             core::mem::size_of::<PageTableEntry>(),
         );
 
-        // TLB invalidate (like RISC-V's sfence.vma)
-        unsafe { asm!("dsb ish", "tlbi vmalle1is", "dsb ish", "isb") };
+        // TLB invalidation is deferred to the caller for batching.
         Ok(())
     }
 
@@ -866,8 +871,8 @@ pub fn sync_el1_translation_registers_if_needed() {
             "msr mair_el1, {mair}",
             "msr tcr_el1, {tcr}",
             "isb",
-            "tlbi vmalle1is",
-            "dsb ish",
+            "tlbi vmalle1",
+            "dsb nsh",
             "isb",
             mair = in(reg) SCARLET_MAIR_EL1,
             tcr = in(reg) SCARLET_TCR_EL1,
